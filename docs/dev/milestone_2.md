@@ -1,12 +1,26 @@
 # Milestone 2
 
-Milestone 2 establishes the repository and development environment.
+Milestone 2 establishes the repository, development environment, and CI
+substrate for MARL-BattleGrounds.
 
-Current scope:
+Completed:
 
-- package skeleton
-- dependency management
-- lockfile generation
-- quality gates
-- minimal import test
-- reference GPU sanity check
+- src-layout Python package skeleton
+- uv dependency management
+- Python 3.14 lockfile
+- local quality gates
+- GitHub-hosted CPU CI
+- self-hosted RTX 5090 GPU CI
+- persistent GitHub Actions GPU runner
+- JAX CUDA smoke validation
+- minimal development documentation
+
+Deferred until real consumers exist:
+
+- configuration files and config resolution
+- run manifest writer
+- task registry
+
+These deferred items remain required project capabilities, but they should be
+introduced alongside the first code paths that consume them instead of as
+placeholder abstractions.
