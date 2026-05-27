@@ -8,4 +8,3 @@ Reference development environment:
 - NVIDIA RTX 5090
 - NVIDIA driver 595.71.05
 - JAX 0.10.1 with CUDA 13 support
-

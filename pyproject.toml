@@ -41,6 +41,7 @@ dev = [
   "pytest",
   "ruff",
   "pyright",
+  "pre-commit",
 ]
 
 [build-system]
