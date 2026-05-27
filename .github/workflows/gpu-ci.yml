@@ -1,0 +1,61 @@
+name: GPU CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: gpu-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gpu-sanity:
+    name: GPU sanity
+    runs-on: [self-hosted, Linux, X64, gpu, rtx5090]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Add local bin to PATH
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Check uv
+        run: uv --version
+
+      - name: Sync environment
+        run: uv sync --locked --extra cuda13 --extra training --extra interop --extra viz --extra dev
+
+      - name: Run tests
+        run: uv run pytest
+
+      - name: Check formatting
+        run: uv run ruff format --check .
+
+      - name: Run linter
+        run: uv run ruff check .
+
+      - name: Run type checker
+        run: uv run pyright
+
+      - name: Check NVIDIA driver
+        run: nvidia-smi
+
+      - name: Check JAX GPU backend
+        run: |
+          uv run python - <<'PY'
+          import jax
+          import jax.numpy as jnp
+
+          print("jax", jax.__version__)
+          print("backend", jax.default_backend())
+          print("devices", jax.devices())
+
+          if jax.default_backend() != "gpu":
+              raise RuntimeError("Expected JAX GPU backend")
+
+          x = jnp.ones((2048, 2048), dtype=jnp.float32)
+          y = (x @ x).block_until_ready()
+
+          print("result", y.shape, y.device)
+          PY
