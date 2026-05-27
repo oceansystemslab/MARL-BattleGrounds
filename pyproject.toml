@@ -1,0 +1,98 @@
+[project]
+name = "marl-battlegrounds"
+version = "0.0.0"
+description = "A JAX-native environment suite and benchmark for heterogeneous adversarial multi-agent reinforcement learning."
+readme = "README.md"
+requires-python = ">=3.14,<3.15"
+license = "Apache-2.0"
+authors = [
+  { name = "Ulixes Tariq Hawili" }
+]
+dependencies = [
+  "jax==0.10.1",
+  "numpy",
+  "chex",
+  "omegaconf",
+  "hydra-core",
+  "pydantic",
+]
+
+[project.optional-dependencies]
+cuda13 = [
+  "jax[cuda13]==0.10.1",
+]
+
+training = [
+  "optax",
+  "flax",
+  "orbax-checkpoint",
+]
+
+interop = [
+  "gymnasium",
+  "pettingzoo",
+]
+
+viz = [
+  "matplotlib",
+]
+
+dev = [
+  "pytest",
+  "ruff",
+  "pyright",
+]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/marl_battlegrounds"]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 88
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+  "E",
+  "F",
+  "I",
+  "B",
+  "UP",
+  "N",
+  "ANN",
+  "SIM",
+  "RUF",
+]
+ignore = []
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+
+[tool.pyright]
+include = ["src", "tests"]
+exclude = [
+  "**/__pycache__",
+  ".venv",
+  "artifacts",
+  "runs",
+  "outputs",
+  "checkpoints",
+]
+pythonVersion = "3.14"
+typeCheckingMode = "strict"
+venvPath = "."
+venv = ".venv"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = [
+  "-ra",
+  "--strict-markers",
+  "--strict-config",
+]

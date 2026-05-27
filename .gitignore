@@ -1,0 +1,65 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python packaging/build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.coverage
+coverage.xml
+htmlcov/
+
+# Jupyter/IPython
+.ipynb_checkpoints/
+
+# Local environment/secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+logs/
+
+# Experiment artifacts
+artifacts/
+runs/
+outputs/
+checkpoints/
+wandb/
+tensorboard/
+mlruns/
+
+# Large generated media/data artifacts
+*.mp4
+*.gif
+*.webm
+*.npz
+*.npy
+*.pkl
+*.pickle
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*~
+*.swp
+*.swo
+
+# Local IDE settings
+.vscode/
+.idea/
