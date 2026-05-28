@@ -7,6 +7,6 @@ uv run ruff format --check .
 uv run ruff check .
 uv run pyright
 
-All gates must pass before changes are committed.
+Pre-commit hooks run fast local hygiene checks before each commit.
 
-GitHub Actions also runs quality gates on branch pushes and pull requests.
+GitHub Actions runs CPU and GPU CI on branch pushes and pull requests.

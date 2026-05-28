@@ -13,6 +13,8 @@ Completed:
 - self-hosted RTX 5090 GPU CI
 - persistent GitHub Actions GPU runner
 - JAX CUDA smoke validation
+- pre-commit hooks
+- VSCode development environment
 - minimal development documentation
 
 Deferred until real consumers exist:
