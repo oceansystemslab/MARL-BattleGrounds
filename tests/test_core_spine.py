@@ -5,7 +5,7 @@ import jax.random
 import pytest
 from jax import Array
 
-from marl_battlegrounds.core.env import reset
+from marl_battlegrounds.core.env import reset, step
 from marl_battlegrounds.core.types import (
     ENVIRONMENT_DIMENSIONS,
     MAX_AGENT_SLOTS,
@@ -34,6 +34,14 @@ def _bool_vector(values: tuple[int, ...]) -> Array:
 
 def _int_vector(values: tuple[int, ...]) -> Array:
     return jnp.array(values, dtype=jnp.int32)
+
+
+def _zero_action() -> Action:
+    return Action(
+        move=jnp.zeros(shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        target=jnp.zeros(shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        use_ultimate=jnp.zeros(shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32),
+    )
 
 
 def _assert_all_action_heads_gate_padded_rows(
@@ -273,3 +281,130 @@ def test_reward_stores_one_scalar_per_agent_slot() -> None:
 
     assert rewards.shape == (MAX_AGENT_SLOTS,)
     assert rewards.dtype == jnp.float32
+
+
+def test_step_increments_step_count() -> None:
+    config = EnvConfig(team_size=3, max_steps=1000)
+    key = jax.random.key(42)
+    state, _, _, _ = reset(config, key)
+
+    next_state, _, _, _, _, _ = step(config, state, _zero_action(), key)
+
+    assert jnp.array_equal(next_state.step_count, jnp.array(1, dtype=jnp.int32))
+
+
+def test_step_preserves_slot_aligned_state_arrays() -> None:
+    config = EnvConfig(team_size=3, max_steps=1000)
+    key = jax.random.key(42)
+    state, _, _, _ = reset(config, key)
+
+    next_state, _, _, _, _, _ = step(config, state, _zero_action(), key)
+
+    assert jnp.array_equal(next_state.agent_positions, state.agent_positions)
+    assert jnp.array_equal(next_state.team_ids, state.team_ids)
+    assert jnp.array_equal(next_state.active_mask, state.active_mask)
+    assert jnp.array_equal(next_state.alive_mask, state.alive_mask)
+
+
+def test_step_returns_fixed_shape_core_outputs() -> None:
+    config = EnvConfig(team_size=3, max_steps=1000)
+    key = jax.random.key(42)
+    state, _, _, _ = reset(config, key)
+
+    next_state, observation, reward, done_flags, action_mask, info = step(
+        config, state, _zero_action(), key
+    )
+
+    assert next_state.step_count.shape == ()
+    assert next_state.step_count.dtype == jnp.int32
+
+    assert next_state.agent_positions.shape == (
+        MAX_AGENT_SLOTS,
+        ENVIRONMENT_DIMENSIONS,
+    )
+    assert next_state.agent_positions.dtype == jnp.float32
+
+    assert next_state.team_ids.shape == (MAX_AGENT_SLOTS,)
+    assert next_state.team_ids.dtype == jnp.int32
+
+    assert next_state.active_mask.shape == (MAX_AGENT_SLOTS,)
+    assert next_state.active_mask.dtype == bool
+
+    assert next_state.alive_mask.shape == (MAX_AGENT_SLOTS,)
+    assert next_state.alive_mask.dtype == bool
+
+    assert observation.observation_vectors.shape == (
+        MAX_AGENT_SLOTS,
+        NUM_OBSERVATION_FEATURES,
+    )
+    assert observation.observation_vectors.dtype == jnp.float32
+
+    assert reward.rewards.shape == (MAX_AGENT_SLOTS,)
+    assert reward.rewards.dtype == jnp.float32
+
+    assert done_flags.terminated.shape == ()
+    assert done_flags.terminated.dtype == bool
+
+    assert done_flags.truncated.shape == ()
+    assert done_flags.truncated.dtype == bool
+
+    assert action_mask.move.shape == (MAX_AGENT_SLOTS, NUM_MOVE_ACTIONS)
+    assert action_mask.move.dtype == bool
+
+    assert action_mask.target.shape == (MAX_AGENT_SLOTS, NUM_TARGET_ACTIONS)
+    assert action_mask.target.dtype == bool
+
+    assert action_mask.use_ultimate.shape == (MAX_AGENT_SLOTS, NUM_ULTIMATE_ACTIONS)
+    assert action_mask.use_ultimate.dtype == bool
+
+    assert isinstance(info, Info)
+
+
+def test_step_returns_zero_rewards_for_all_agent_slots() -> None:
+    config = EnvConfig(team_size=3, max_steps=1000)
+    key = jax.random.key(42)
+    state, _, _, _ = reset(config, key)
+
+    _, _, reward, _, _, _ = step(config, state, _zero_action(), key)
+
+    assert jnp.array_equal(
+        reward.rewards, jnp.zeros(shape=(MAX_AGENT_SLOTS,), dtype=jnp.float32)
+    )
+
+
+def test_step_action_masks_are_gated_by_active_slots() -> None:
+    config = EnvConfig(team_size=3, max_steps=1000)
+    key = jax.random.key(42)
+    state, _, _, _ = reset(config, key)
+
+    _, _, _, _, action_mask, _ = step(config, state, _zero_action(), key)
+
+    _assert_all_action_heads_gate_padded_rows(
+        action_mask=action_mask,
+        active_indices=_int_vector((0, 1, 2, 5, 6, 7)),
+        inactive_indices=_int_vector((3, 4, 8, 9)),
+    )
+
+
+def test_step_does_not_truncate_before_horizon() -> None:
+    config = EnvConfig(team_size=3, max_steps=2)
+    key = jax.random.key(42)
+    state, _, _, _ = reset(config, key)
+
+    _, _, _, done_flags, _, _ = step(config, state, _zero_action(), key)
+
+    assert jnp.array_equal(done_flags.terminated, jnp.array(False))
+    assert jnp.array_equal(done_flags.truncated, jnp.array(False))
+    assert jnp.array_equal(done_flags.done, jnp.array(False))
+
+
+def test_step_truncates_when_incremented_step_reaches_horizon() -> None:
+    config = EnvConfig(team_size=3, max_steps=1)
+    key = jax.random.key(42)
+    state, _, _, _ = reset(config, key)
+
+    _, _, _, done_flags, _, _ = step(config, state, _zero_action(), key)
+
+    assert jnp.array_equal(done_flags.terminated, jnp.array(False))
+    assert jnp.array_equal(done_flags.truncated, jnp.array(True))
+    assert jnp.array_equal(done_flags.done, jnp.array(True))

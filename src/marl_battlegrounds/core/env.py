@@ -11,11 +11,14 @@ from marl_battlegrounds.core.types import (
     NUM_OBSERVATION_FEATURES,
     NUM_TARGET_ACTIONS,
     NUM_ULTIMATE_ACTIONS,
+    Action,
     ActionMask,
+    DoneFlags,
     EnvConfig,
     EnvState,
     Info,
     Observation,
+    Reward,
 )
 
 
@@ -85,3 +88,57 @@ def reset(
     info = Info()
 
     return (state, obs, action_mask, info)
+
+
+def step(
+    config: EnvConfig, state: EnvState, joint_action: Action, key: Array
+) -> tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info]:
+    """Advance the placeholder core transition by one timestep."""
+
+    # Next state
+    next_state_step_count = state.step_count + 1
+    next_agent_positions = state.agent_positions
+    next_active_mask = state.active_mask
+    next_alive_mask = state.alive_mask
+
+    next_state = EnvState(
+        next_state_step_count,
+        next_agent_positions,
+        team_ids=state.team_ids,
+        active_mask=next_active_mask,
+        alive_mask=next_alive_mask,
+    )
+
+    observations = Observation(
+        observation_vectors=jnp.zeros(
+            (MAX_AGENT_SLOTS, NUM_OBSERVATION_FEATURES), dtype=jnp.float32
+        )
+    )
+
+    rewards = Reward(rewards=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32))
+
+    done_flags = DoneFlags(
+        terminated=jnp.array(False),
+        truncated=jnp.array(next_state.step_count >= config.max_steps),
+    )
+
+    next_active_mask_bc = next_state.active_mask.reshape(-1, 1)
+
+    action_mask = ActionMask(
+        move=jnp.logical_and(
+            jnp.ones((MAX_AGENT_SLOTS, NUM_MOVE_ACTIONS), dtype=bool),
+            next_active_mask_bc,
+        ),
+        target=jnp.logical_and(
+            jnp.ones((MAX_AGENT_SLOTS, NUM_TARGET_ACTIONS), dtype=bool),
+            next_active_mask_bc,
+        ),
+        use_ultimate=jnp.logical_and(
+            jnp.ones((MAX_AGENT_SLOTS, NUM_ULTIMATE_ACTIONS), dtype=bool),
+            next_active_mask_bc,
+        ),
+    )
+
+    info = Info()
+
+    return (next_state, observations, rewards, done_flags, action_mask, info)
