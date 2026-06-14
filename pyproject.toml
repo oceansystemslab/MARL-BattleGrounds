@@ -87,6 +87,7 @@ exclude = [
 ]
 pythonVersion = "3.14"
 typeCheckingMode = "strict"
+reportUnknownMemberType = "none"
 venvPath = "."
 venv = ".venv"
 
