@@ -54,6 +54,12 @@ class Observation(NamedTuple):
     observation_vectors: Array
 
 
+class Reward(NamedTuple):
+    """Slot-aligned scalar rewards emitted by the core simulator."""
+
+    rewards: Array
+
+
 class DoneFlags(NamedTuple):
     """Episode termination and truncation signals from the core simulator."""
 

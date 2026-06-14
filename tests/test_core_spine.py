@@ -22,6 +22,7 @@ from marl_battlegrounds.core.types import (
     EnvState,
     Info,
     Observation,
+    Reward,
 )
 
 VALID_TEAM_SIZES = (1, 2, 3, 4, 5)
@@ -264,3 +265,11 @@ def test_reset_preserves_stable_team_id_blocks_for_padded_slots() -> None:
     expected_team_ids = _int_vector((0, 0, 0, 0, 0, 1, 1, 1, 1, 1))
 
     assert jnp.array_equal(state.team_ids, expected_team_ids)
+
+
+def test_reward_stores_one_scalar_per_agent_slot() -> None:
+    reward_obj = Reward(rewards=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32))
+    rewards = reward_obj.rewards
+
+    assert rewards.shape == (MAX_AGENT_SLOTS,)
+    assert rewards.dtype == jnp.float32
