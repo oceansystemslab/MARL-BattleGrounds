@@ -1,5 +1,7 @@
 """Core simulator spine contract tests."""
 
+from typing import cast
+
 import jax.numpy as jnp
 import jax.random
 import pytest
@@ -408,3 +410,60 @@ def test_step_truncates_when_incremented_step_reaches_horizon() -> None:
     assert jnp.array_equal(done_flags.terminated, jnp.array(False))
     assert jnp.array_equal(done_flags.truncated, jnp.array(True))
     assert jnp.array_equal(done_flags.done, jnp.array(True))
+
+
+def test_that_step_can_be_jit_compiled() -> None:
+    step_jitted = jax.jit(step)
+
+    config = EnvConfig(team_size=3, max_steps=1)
+    key = jax.random.key(42)
+    state, _, _, _ = reset(config, key)
+
+    next_state, observation, reward, done_flags, action_mask, info = cast(
+        tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info],
+        step_jitted(config, state, _zero_action(), key),
+    )
+
+    assert next_state.step_count.shape == ()
+    assert next_state.step_count.dtype == jnp.int32
+
+    assert next_state.agent_positions.shape == (
+        MAX_AGENT_SLOTS,
+        ENVIRONMENT_DIMENSIONS,
+    )
+    assert next_state.agent_positions.dtype == jnp.float32
+
+    assert next_state.team_ids.shape == (MAX_AGENT_SLOTS,)
+    assert next_state.team_ids.dtype == jnp.int32
+
+    assert next_state.active_mask.shape == (MAX_AGENT_SLOTS,)
+    assert next_state.active_mask.dtype == bool
+
+    assert next_state.alive_mask.shape == (MAX_AGENT_SLOTS,)
+    assert next_state.alive_mask.dtype == bool
+
+    assert observation.observation_vectors.shape == (
+        MAX_AGENT_SLOTS,
+        NUM_OBSERVATION_FEATURES,
+    )
+    assert observation.observation_vectors.dtype == jnp.float32
+
+    assert reward.rewards.shape == (MAX_AGENT_SLOTS,)
+    assert reward.rewards.dtype == jnp.float32
+
+    assert done_flags.terminated.shape == ()
+    assert done_flags.terminated.dtype == bool
+
+    assert done_flags.truncated.shape == ()
+    assert done_flags.truncated.dtype == bool
+
+    assert action_mask.move.shape == (MAX_AGENT_SLOTS, NUM_MOVE_ACTIONS)
+    assert action_mask.move.dtype == bool
+
+    assert action_mask.target.shape == (MAX_AGENT_SLOTS, NUM_TARGET_ACTIONS)
+    assert action_mask.target.dtype == bool
+
+    assert action_mask.use_ultimate.shape == (MAX_AGENT_SLOTS, NUM_ULTIMATE_ACTIONS)
+    assert action_mask.use_ultimate.dtype == bool
+
+    assert isinstance(info, Info)
