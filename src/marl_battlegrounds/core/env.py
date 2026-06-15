@@ -93,9 +93,10 @@ def reset(
 def step(
     config: EnvConfig, state: EnvState, joint_action: Action, key: Array
 ) -> tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info]:
-    """Advance the placeholder core transition by one timestep."""
+    """Advance the Milestone 3 placeholder transition by one timestep."""
 
-    # Next state
+    # Milestone 3 locks the transition surface only. The action and key are
+    # accepted for API stability, but mechanics and randomness arrive later.
     next_state_step_count = state.step_count + 1
     next_agent_positions = state.agent_positions
     next_active_mask = state.active_mask
