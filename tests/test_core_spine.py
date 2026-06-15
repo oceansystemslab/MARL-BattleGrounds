@@ -467,3 +467,33 @@ def test_that_step_can_be_jit_compiled() -> None:
     assert action_mask.use_ultimate.dtype == bool
 
     assert isinstance(info, Info)
+
+
+def test_step_can_run_in_scanned_rollout() -> None:
+    horizon = 3
+    config = EnvConfig(5, 1000)
+    key = jax.random.key(42)
+    state, _, _, _ = reset(config, key)
+    joint_action = _zero_action()
+
+    def step_wrapper(
+        state: EnvState,
+        key: Array,
+        config: EnvConfig = config,
+        joint_action: Action = joint_action,
+    ) -> tuple[EnvState, Array]:
+
+        new_state, _, _, _, _, _ = step(config, state, joint_action, key)
+        return new_state, new_state.step_count
+
+    keys = jax.random.split(key, horizon)
+    assert keys.shape == (horizon,)
+
+    (new_state, history) = jax.lax.scan(
+        f=step_wrapper, init=state, xs=keys, length=horizon
+    )
+
+    assert new_state.step_count == horizon
+    assert new_state.step_count.dtype == jnp.int32
+    assert history.shape == (horizon,)
+    assert history.dtype == jnp.int32
