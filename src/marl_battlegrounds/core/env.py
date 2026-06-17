@@ -1,16 +1,21 @@
-"""Functional environment entry points for the core JAX simulator spine."""
+"""Functional reset and step entry points for the core JAX simulator."""
 
+import jax
 import jax.numpy as jnp
 from jax import Array
 
 from marl_battlegrounds.core.types import (
+    CONTEXT_FEATURES,
     ENVIRONMENT_DIMENSIONS,
     MAX_AGENT_SLOTS,
     MAX_AGENTS_PER_TEAM,
+    MAX_OBJECTIVE_SLOTS,
+    MAX_OBSTACLE_SLOTS,
     NUM_MOVE_ACTIONS,
-    NUM_OBSERVATION_FEATURES,
-    NUM_TARGET_ACTIONS,
-    NUM_ULTIMATE_ACTIONS,
+    OBJECTIVE_FEATURES,
+    OBSTACLE_FEATURES,
+    SELF_FEATURES,
+    UNIT_FEATURES,
     Action,
     ActionMask,
     DoneFlags,
@@ -25,7 +30,7 @@ from marl_battlegrounds.core.types import (
 def reset(
     config: EnvConfig, key: Array
 ) -> tuple[EnvState, Observation, ActionMask, Info]:
-    """Create the initial core state, observations, masks, and info."""
+    """Create the initial Milestone 4 contract state and placeholders."""
 
     # Reset keeps all arrays at MAX_AGENT_SLOTS length. Smaller tasks use
     # active_mask to distinguish real agents from padded slots.
@@ -50,38 +55,95 @@ def reset(
 
     initial_mask = jnp.logical_or(team_0_active, team_1_active)
 
+    deterministic_key = jax.random.key(42)
+    max_val = jnp.min(jnp.array([config.map_width, config.map_height]))
+    default_agent_positions = jax.random.uniform(
+        deterministic_key,
+        shape=(MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS),
+        dtype=jnp.float32,
+        minval=0,
+        maxval=max_val,
+    )
+
     state = EnvState(
         step_count=jnp.array(0, dtype=jnp.int32),
-        agent_positions=jnp.zeros(
-            shape=(MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS), dtype=jnp.float32
+        agent_positions=default_agent_positions,
+        agent_radii=jnp.full(
+            shape=(MAX_AGENT_SLOTS,),
+            fill_value=config.default_agent_radius,
+            dtype=jnp.float32,
         ),
         team_ids=jnp.concat([team_0_ids, team_1_ids]),
         active_mask=initial_mask,
         alive_mask=initial_mask,
     )
 
-    obs = Observation(
-        observation_vectors=jnp.zeros(
-            shape=(MAX_AGENT_SLOTS, NUM_OBSERVATION_FEATURES), dtype=jnp.float32
-        )
+    base_self_visibility = jnp.identity(MAX_AGENTS_PER_TEAM, dtype=bool)
+    alive_active_mask_bc = jnp.logical_and(state.active_mask, state.alive_mask)[:, None]
+
+    map_obstacle_features = jnp.broadcast_to(
+        config.obstacles[None, :, :],
+        (MAX_AGENT_SLOTS, MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES),
     )
 
-    # Reshape to broadcast across rows.
-    mask = state.active_mask[:, None]
+    obs = Observation(
+        self_features=jnp.zeros(
+            shape=(MAX_AGENT_SLOTS, SELF_FEATURES), dtype=jnp.float32
+        ),
+        ally_unit_features=jnp.zeros(
+            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM, UNIT_FEATURES),
+            dtype=jnp.float32,
+        ),
+        enemy_unit_features=jnp.zeros(
+            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM, UNIT_FEATURES),
+            dtype=jnp.float32,
+        ),
+        map_obstacle_features=map_obstacle_features,
+        objective_features=jnp.zeros(
+            shape=(MAX_AGENT_SLOTS, MAX_OBJECTIVE_SLOTS, OBJECTIVE_FEATURES),
+            dtype=jnp.float32,
+        ),
+        context_features=jnp.zeros(
+            shape=(MAX_AGENT_SLOTS, CONTEXT_FEATURES), dtype=jnp.float32
+        ),
+        ally_visibility_mask=jnp.logical_and(
+            jnp.vstack((base_self_visibility, base_self_visibility)),
+            alive_active_mask_bc,
+        ),
+        enemy_visibility_mask=jnp.zeros(
+            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM), dtype=bool
+        ),
+        ally_targetability_mask=jnp.zeros(
+            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM), dtype=bool
+        ),
+        enemy_targetability_mask=jnp.zeros(
+            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM), dtype=bool
+        ),
+    )
+
+    ones_column_vector = jnp.ones((MAX_AGENT_SLOTS, 1), dtype=bool)
+    zeros_column_vector = jnp.zeros((MAX_AGENT_SLOTS, 1), dtype=bool)
+
+    target_mask = jnp.concat(
+        (
+            ones_column_vector,
+            obs.ally_targetability_mask,
+            obs.enemy_targetability_mask,
+        ),
+        axis=1,
+    )
+
+    ult_mask = jnp.concat((ones_column_vector, zeros_column_vector), axis=1)
 
     action_mask = ActionMask(
         move=jnp.logical_and(
-            jnp.ones(shape=(MAX_AGENT_SLOTS, NUM_MOVE_ACTIONS), dtype=bool), mask
+            jnp.ones(shape=(MAX_AGENT_SLOTS, NUM_MOVE_ACTIONS), dtype=bool),
+            alive_active_mask_bc,
         ),
-        target=jnp.logical_and(
-            jnp.ones(shape=(MAX_AGENT_SLOTS, NUM_TARGET_ACTIONS), dtype=bool), mask
-        ),
+        target=jnp.logical_and(target_mask, alive_active_mask_bc),
         use_ultimate=jnp.logical_and(
-            jnp.ones(
-                shape=(MAX_AGENT_SLOTS, NUM_ULTIMATE_ACTIONS),
-                dtype=bool,
-            ),
-            mask,
+            ult_mask,
+            alive_active_mask_bc,
         ),
     )
 
@@ -93,27 +155,60 @@ def reset(
 def step(
     config: EnvConfig, state: EnvState, joint_action: Action, key: Array
 ) -> tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info]:
-    """Advance the Milestone 3 placeholder transition by one timestep."""
-
-    # Milestone 3 locks the transition surface only. The action and key are
-    # accepted for API stability, but mechanics and randomness arrive later.
-    next_state_step_count = state.step_count + 1
-    next_agent_positions = state.agent_positions
-    next_active_mask = state.active_mask
-    next_alive_mask = state.alive_mask
+    """Advance the placeholder transition while preserving M4 contracts."""
 
     next_state = EnvState(
-        next_state_step_count,
-        next_agent_positions,
+        step_count=state.step_count + 1,
+        agent_positions=state.agent_positions,
+        agent_radii=state.agent_radii,
         team_ids=state.team_ids,
-        active_mask=next_active_mask,
-        alive_mask=next_alive_mask,
+        active_mask=state.active_mask,
+        alive_mask=state.alive_mask,
     )
 
-    observations = Observation(
-        observation_vectors=jnp.zeros(
-            (MAX_AGENT_SLOTS, NUM_OBSERVATION_FEATURES), dtype=jnp.float32
-        )
+    base_self_visibility = jnp.identity(MAX_AGENTS_PER_TEAM, dtype=bool)
+    alive_active_mask_bc = jnp.logical_and(
+        next_state.active_mask, next_state.alive_mask
+    )[:, None]
+
+    map_obstacle_features = jnp.broadcast_to(
+        config.obstacles[None, :, :],
+        (MAX_AGENT_SLOTS, MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES),
+    )
+
+    obs = Observation(
+        self_features=jnp.zeros(
+            shape=(MAX_AGENT_SLOTS, SELF_FEATURES), dtype=jnp.float32
+        ),
+        ally_unit_features=jnp.zeros(
+            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM, UNIT_FEATURES),
+            dtype=jnp.float32,
+        ),
+        enemy_unit_features=jnp.zeros(
+            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM, UNIT_FEATURES),
+            dtype=jnp.float32,
+        ),
+        map_obstacle_features=map_obstacle_features,
+        objective_features=jnp.zeros(
+            shape=(MAX_AGENT_SLOTS, MAX_OBJECTIVE_SLOTS, OBJECTIVE_FEATURES),
+            dtype=jnp.float32,
+        ),
+        context_features=jnp.zeros(
+            shape=(MAX_AGENT_SLOTS, CONTEXT_FEATURES), dtype=jnp.float32
+        ),
+        ally_visibility_mask=jnp.logical_and(
+            jnp.vstack((base_self_visibility, base_self_visibility)),
+            alive_active_mask_bc,
+        ),
+        enemy_visibility_mask=jnp.zeros(
+            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM), dtype=bool
+        ),
+        ally_targetability_mask=jnp.zeros(
+            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM), dtype=bool
+        ),
+        enemy_targetability_mask=jnp.zeros(
+            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM), dtype=bool
+        ),
     )
 
     rewards = Reward(rewards=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32))
@@ -123,23 +218,28 @@ def step(
         truncated=jnp.array(next_state.step_count >= config.max_steps),
     )
 
-    next_active_mask_bc = next_state.active_mask.reshape(-1, 1)
+    ones_column_vector = jnp.ones(shape=(MAX_AGENT_SLOTS, 1), dtype=bool)
+    zeros_column_vector = jnp.zeros(shape=(MAX_AGENT_SLOTS, 1), dtype=bool)
+
+    target_mask = jnp.concat(
+        (ones_column_vector, obs.ally_targetability_mask, obs.enemy_targetability_mask),
+        axis=1,
+    )
+
+    ult_mask = jnp.concat((ones_column_vector, zeros_column_vector), axis=1)
 
     action_mask = ActionMask(
         move=jnp.logical_and(
-            jnp.ones((MAX_AGENT_SLOTS, NUM_MOVE_ACTIONS), dtype=bool),
-            next_active_mask_bc,
+            jnp.ones(shape=(MAX_AGENT_SLOTS, NUM_MOVE_ACTIONS), dtype=bool),
+            alive_active_mask_bc,
         ),
-        target=jnp.logical_and(
-            jnp.ones((MAX_AGENT_SLOTS, NUM_TARGET_ACTIONS), dtype=bool),
-            next_active_mask_bc,
-        ),
+        target=jnp.logical_and(target_mask, alive_active_mask_bc),
         use_ultimate=jnp.logical_and(
-            jnp.ones((MAX_AGENT_SLOTS, NUM_ULTIMATE_ACTIONS), dtype=bool),
-            next_active_mask_bc,
+            ult_mask,
+            alive_active_mask_bc,
         ),
     )
 
     info = Info()
 
-    return (next_state, observations, rewards, done_flags, action_mask, info)
+    return (next_state, obs, rewards, done_flags, action_mask, info)
