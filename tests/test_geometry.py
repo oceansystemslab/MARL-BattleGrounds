@@ -1,5 +1,8 @@
 """Tests for shared simulator geometry helpers."""
 
+from typing import cast
+
+import jax
 import jax.numpy as jnp
 import pytest
 from jax import Array
@@ -7,6 +10,7 @@ from jax import Array
 from marl_battlegrounds.core.geometry import (
     GEOMETRY_TOLERANCE,
     project_disc_out_of_pillar,
+    project_disc_out_of_wall,
     project_disc_to_bounds,
 )
 from marl_battlegrounds.core.types import (
@@ -79,7 +83,14 @@ def _assert_center_close(result: Array, expected: Array) -> None:
     """Assert that a geometry helper returned the expected float32 center."""
     assert result.shape == (2,)
     assert result.dtype == jnp.float32
-    assert bool(jnp.allclose(result, expected, atol=GEOMETRY_TOLERANCE))
+    assert bool(
+        jnp.allclose(
+            result,
+            expected,
+            atol=GEOMETRY_TOLERANCE,
+            rtol=0.0,
+        )
+    )
 
 
 # Tests ---
@@ -294,3 +305,264 @@ def test_project_disc_out_of_pillar(
     result = project_disc_out_of_pillar(agent_center, agent_radius, obstacle)
 
     _assert_center_close(result, expected)
+
+
+@pytest.mark.parametrize(
+    ("agent_center", "agent_radius", "obstacle", "expected"),
+    [
+        pytest.param(
+            jnp.array([1.5, 0.0], dtype=jnp.float32),
+            1.0,
+            _wall_obstacle(
+                jnp.array([0.0, 0.0], dtype=jnp.float32),
+                width=2.0,
+                height=2.0,
+                theta=0.0,
+            ),
+            jnp.array([2.0, 0.0], dtype=jnp.float32),
+            id="axis-aligned-wall-overlap-projects-right",
+        ),
+        pytest.param(
+            jnp.array([-1.5, 0.0], dtype=jnp.float32),
+            1.0,
+            _wall_obstacle(
+                jnp.array([0.0, 0.0], dtype=jnp.float32),
+                width=2.0,
+                height=2.0,
+                theta=0.0,
+            ),
+            jnp.array([-2.0, 0.0], dtype=jnp.float32),
+            id="axis-aligned-wall-overlap-projects-left",
+        ),
+        pytest.param(
+            jnp.array([0.0, 1.5], dtype=jnp.float32),
+            1.0,
+            _wall_obstacle(
+                jnp.array([0.0, 0.0], dtype=jnp.float32),
+                width=2.0,
+                height=2.0,
+                theta=0.0,
+            ),
+            jnp.array([0.0, 2.0], dtype=jnp.float32),
+            id="axis-aligned-wall-overlap-projects-top",
+        ),
+        pytest.param(
+            jnp.array([0.0, -1.5], dtype=jnp.float32),
+            1.0,
+            _wall_obstacle(
+                jnp.array([0.0, 0.0], dtype=jnp.float32),
+                width=2.0,
+                height=2.0,
+                theta=0.0,
+            ),
+            jnp.array([0.0, -2.0], dtype=jnp.float32),
+            id="axis-aligned-wall-overlap-projects-bottom",
+        ),
+        pytest.param(
+            jnp.array([2.5, 0.0], dtype=jnp.float32),
+            1.0,
+            _wall_obstacle(
+                jnp.array([0.0, 0.0], dtype=jnp.float32),
+                width=2.0,
+                height=2.0,
+                theta=0.0,
+            ),
+            jnp.array([2.5, 0.0], dtype=jnp.float32),
+            id="axis-aligned-wall-separated-unchanged",
+        ),
+        pytest.param(
+            jnp.array([2.0, 0.0], dtype=jnp.float32),
+            1.0,
+            _wall_obstacle(
+                jnp.array([0.0, 0.0], dtype=jnp.float32),
+                width=2.0,
+                height=2.0,
+                theta=0.0,
+            ),
+            jnp.array([2.0, 0.0], dtype=jnp.float32),
+            id="axis-aligned-wall-tangent-unchanged",
+        ),
+        pytest.param(
+            jnp.array([1.6, 1.8], dtype=jnp.float32),
+            1.5,
+            _wall_obstacle(
+                jnp.array([0.0, 0.0], dtype=jnp.float32),
+                width=2.0,
+                height=2.0,
+                theta=0.0,
+            ),
+            jnp.array([1.9, 2.2], dtype=jnp.float32),
+            id="axis-aligned-wall-corner-overlap-projects-diagonal",
+        ),
+        pytest.param(
+            jnp.array([-0.75, 0.25], dtype=jnp.float32),
+            0.5,
+            _wall_obstacle(
+                jnp.array([0.0, 0.0], dtype=jnp.float32),
+                width=2.0,
+                height=2.0,
+                theta=0.0,
+            ),
+            jnp.array([-1.5, 0.25], dtype=jnp.float32),
+            id="inside-wall-projects-through-left-face",
+        ),
+        pytest.param(
+            jnp.array([0.75, 0.25], dtype=jnp.float32),
+            0.5,
+            _wall_obstacle(
+                jnp.array([0.0, 0.0], dtype=jnp.float32),
+                width=2.0,
+                height=2.0,
+                theta=0.0,
+            ),
+            jnp.array([1.5, 0.25], dtype=jnp.float32),
+            id="inside-wall-projects-through-right-face",
+        ),
+        pytest.param(
+            jnp.array([0.2, -0.8], dtype=jnp.float32),
+            0.25,
+            _wall_obstacle(
+                jnp.array([0.0, 0.0], dtype=jnp.float32),
+                width=2.0,
+                height=2.0,
+                theta=0.0,
+            ),
+            jnp.array([0.2, -1.25], dtype=jnp.float32),
+            id="inside-wall-projects-through-bottom-face",
+        ),
+        pytest.param(
+            jnp.array([0.2, 0.8], dtype=jnp.float32),
+            0.25,
+            _wall_obstacle(
+                jnp.array([0.0, 0.0], dtype=jnp.float32),
+                width=2.0,
+                height=2.0,
+                theta=0.0,
+            ),
+            jnp.array([0.2, 1.25], dtype=jnp.float32),
+            id="inside-wall-projects-through-top-face",
+        ),
+        pytest.param(
+            jnp.array([1.0, 0.0], dtype=jnp.float32),
+            0.5,
+            _wall_obstacle(
+                jnp.array([0.0, 0.0], dtype=jnp.float32),
+                width=2.0,
+                height=2.0,
+                theta=0.0,
+            ),
+            jnp.array([1.5, 0.0], dtype=jnp.float32),
+            id="boundary-center-projects-through-nearest-face",
+        ),
+        pytest.param(
+            jnp.array([0.0, 2.5], dtype=jnp.float32),
+            1.0,
+            _wall_obstacle(
+                jnp.array([0.0, 0.0], dtype=jnp.float32),
+                width=4.0,
+                height=2.0,
+                theta=jnp.pi / 2.0,
+            ),
+            jnp.array([0.0, 3.0], dtype=jnp.float32),
+            id="rotated-wall-overlap-projects-in-world-frame",
+        ),
+        pytest.param(
+            jnp.array([1.0606601, 1.0606601], dtype=jnp.float32),
+            1.0,
+            _wall_obstacle(
+                jnp.array([0.0, 0.0], dtype=jnp.float32),
+                width=2.0,
+                height=2.0,
+                theta=jnp.pi / 4.0,
+            ),
+            jnp.array([1.4142135, 1.4142135], dtype=jnp.float32),
+            id="non-right-angle-wall-projects-along-local-normal",
+        ),
+        pytest.param(
+            jnp.array([1.5, 0.0], dtype=jnp.float32),
+            1.0,
+            _wall_obstacle(
+                jnp.array([0.0, 0.0], dtype=jnp.float32),
+                width=2.0,
+                height=2.0,
+                theta=0.0,
+                active=False,
+            ),
+            jnp.array([1.5, 0.0], dtype=jnp.float32),
+            id="inactive-wall-unchanged",
+        ),
+        pytest.param(
+            jnp.array([1.5, 0.0], dtype=jnp.float32),
+            1.0,
+            _pillar_obstacle(
+                jnp.array([0.0, 0.0], dtype=jnp.float32),
+                2.0,
+            ),
+            jnp.array([1.5, 0.0], dtype=jnp.float32),
+            id="active-non-wall-pillar-unchanged",
+        ),
+        pytest.param(
+            jnp.array([1.5, 0.0], dtype=jnp.float32),
+            1.0,
+            _empty_obstacle(),
+            jnp.array([1.5, 0.0], dtype=jnp.float32),
+            id="empty-obstacle-row-unchanged",
+        ),
+    ],
+)
+def test_project_disc_out_of_wall(
+    agent_center: Array,
+    agent_radius: Array | float,
+    obstacle: Array,
+    expected: Array,
+) -> None:
+    result = project_disc_out_of_wall(agent_center, agent_radius, obstacle)
+
+    _assert_center_close(result, expected)
+
+
+def test_projection_helpers_can_be_jit_compiled() -> None:
+    """Geometry projection helpers should remain usable inside JIT transitions."""
+    pillar = _pillar_obstacle(
+        jnp.array([0.0, 0.0], dtype=jnp.float32),
+        1.0,
+    )
+    wall = _wall_obstacle(
+        jnp.array([0.0, 0.0], dtype=jnp.float32),
+        width=2.0,
+        height=2.0,
+        theta=jnp.pi / 4.0,
+    )
+
+    bounds_result = cast(
+        Array,
+        jax.jit(project_disc_to_bounds)(
+            jnp.array([-1.0, 5.0], dtype=jnp.float32),
+            0.5,
+            4.0,
+            4.0,
+        ),
+    )
+    pillar_result = cast(
+        Array,
+        jax.jit(project_disc_out_of_pillar)(
+            jnp.array([1.25, 0.0], dtype=jnp.float32),
+            1.0,
+            pillar,
+        ),
+    )
+    wall_result = cast(
+        Array,
+        jax.jit(project_disc_out_of_wall)(
+            jnp.array([1.0606601, 1.0606601], dtype=jnp.float32),
+            1.0,
+            wall,
+        ),
+    )
+
+    _assert_center_close(bounds_result, jnp.array([0.5, 3.5], dtype=jnp.float32))
+    _assert_center_close(pillar_result, jnp.array([2.0, 0.0], dtype=jnp.float32))
+    _assert_center_close(
+        wall_result,
+        jnp.array([1.4142135, 1.4142135], dtype=jnp.float32),
+    )
