@@ -7,6 +7,7 @@ import jax.numpy as jnp
 from jax import Array
 
 from marl_battlegrounds.core.types import (
+    MAX_OBSTACLE_SLOTS,
     OBSTACLE_FEATURE_ACTIVE,
     OBSTACLE_FEATURE_HEIGHT,
     OBSTACLE_FEATURE_RADIUS,
@@ -369,14 +370,11 @@ def _project_disc_out_of_active_wall(
         )
     )
 
-    center_is_inside_or_near_wall = jnp.allclose(
-        nearest_point_to_agent_center,
-        agent_center_wall_local,
-        atol=GEOMETRY_TOLERANCE,
-        rtol=0.0,
+    center_is_inside_or_on_wall = jnp.array_equal(
+        nearest_point_to_agent_center, agent_center_wall_local
     )
 
-    center_is_outside_wall = jnp.logical_not(center_is_inside_or_near_wall)
+    center_is_outside_wall = jnp.logical_not(center_is_inside_or_on_wall)
 
     new_center_wall_local = cast(
         Array,
@@ -512,22 +510,56 @@ def project_disc_out_of_wall(
     )
 
 
-def project_disc_out_of_obstacle() -> Array:
-    """Resolve one agent against one obstacle row.
+def project_disc_out_of_obstacle(
+    center: Array,
+    radius: Array | float,
+    obstacle: Array,
+) -> Array:
+    """Resolve one agent against one padded obstacle row.
 
-    This will dispatch between pillar projection, wall projection, and no-op
-    padding behavior using JAX-compatible control flow.
+    Obstacle rows encode their type as data, so dispatch must stay inside JAX
+    control flow. Active pillar rows use pillar projection, active wall rows use
+    wall projection, and inactive or ``none`` rows leave the center unchanged.
     """
-    raise NotImplementedError
+    # Obstacle type values are part of the fixed obstacle-row schema:
+    # 0 = none, 1 = pillar, 2 = wall.
+    idx = obstacle[OBSTACLE_FEATURE_TYPE].astype(jnp.int32)
+
+    branches = [
+        _keep_obstacle_projection_center,
+        project_disc_out_of_pillar,
+        project_disc_out_of_wall,
+    ]
+    return cast(Array, jax.lax.switch(idx, branches, center, radius, obstacle))
 
 
-def project_disc_out_of_obstacles() -> Array:
+def project_disc_out_of_obstacles(
+    center: Array,
+    radius: Array | float,
+    obstacles: Array,  # (MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES)
+) -> Array:
     """Resolve one agent against every static obstacle slot in the map config.
 
-    This will apply obstacle projection through a fixed iteration pattern so the
-    helper remains usable inside JIT-compiled transition code.
+    The helper visits every padded obstacle row in fixed slot order. This keeps
+    the loop shape static for JIT and makes projection deterministic even when a
+    map uses only a small subset of the available obstacle slots.
     """
-    raise NotImplementedError
+
+    def _project_disc_out_of_obstacle_wrapper(
+        i: int,
+        current_center: Array,
+    ) -> Array:
+        """Project the carried center against obstacle slot i."""
+        return project_disc_out_of_obstacle(current_center, radius, obstacles[i])
+
+    # Projection is sequential: each obstacle sees the center produced by the
+    # preceding obstacle slot.
+    return cast(
+        Array,
+        jax.lax.fori_loop(
+            0, MAX_OBSTACLE_SLOTS, _project_disc_out_of_obstacle_wrapper, center
+        ),
+    )
 
 
 def resolve_agent_agent_overlaps() -> Array:
