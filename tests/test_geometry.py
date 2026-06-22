@@ -9,11 +9,14 @@ from jax import Array
 
 from marl_battlegrounds.core.geometry import (
     GEOMETRY_TOLERANCE,
+    project_disc_out_of_obstacle,
+    project_disc_out_of_obstacles,
     project_disc_out_of_pillar,
     project_disc_out_of_wall,
     project_disc_to_bounds,
 )
 from marl_battlegrounds.core.types import (
+    MAX_OBSTACLE_SLOTS,
     OBSTACLE_FEATURE_ACTIVE,
     OBSTACLE_FEATURE_HEIGHT,
     OBSTACLE_FEATURE_RADIUS,
@@ -28,6 +31,77 @@ from marl_battlegrounds.core.types import (
 )
 
 # Test helpers ---
+
+
+def _obstacle_array_with_rows(*rows: tuple[int, Array]) -> Array:
+    """Create a padded obstacle array with selected slots populated."""
+    obstacles = jnp.zeros(
+        (MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES),
+        dtype=jnp.float32,
+    )
+
+    for slot, obstacle in rows:
+        assert 0 <= slot < MAX_OBSTACLE_SLOTS
+        obstacles = obstacles.at[slot].set(obstacle)
+
+    return obstacles
+
+
+def _create_obstacle_array() -> Array:
+    """Create a mixed fixed-size obstacle array for projection tests."""
+    late_pillar_slot = MAX_OBSTACLE_SLOTS - 1
+    axis_wall_slot = MAX_OBSTACLE_SLOTS - 3
+    inactive_pillar_slot = MAX_OBSTACLE_SLOTS - 6
+    inactive_rotated_wall_slot = MAX_OBSTACLE_SLOTS - 7
+    rotated_wall_slot = MAX_OBSTACLE_SLOTS - 10
+
+    assert rotated_wall_slot >= 0
+
+    return _obstacle_array_with_rows(
+        (
+            late_pillar_slot,
+            _pillar_obstacle(
+                jnp.array([0.0, 0.0], dtype=jnp.float32),
+                1.0,
+            ),
+        ),
+        (
+            axis_wall_slot,
+            _wall_obstacle(
+                jnp.array([4.0, 0.0], dtype=jnp.float32),
+                width=2.0,
+                height=2.0,
+                theta=0.0,
+            ),
+        ),
+        (
+            inactive_pillar_slot,
+            _pillar_obstacle(
+                jnp.array([0.0, 4.0], dtype=jnp.float32),
+                1.0,
+                active=False,
+            ),
+        ),
+        (
+            inactive_rotated_wall_slot,
+            _wall_obstacle(
+                jnp.array([4.0, 4.0], dtype=jnp.float32),
+                width=2.0,
+                height=1.0,
+                theta=jnp.pi / 4.0,
+                active=False,
+            ),
+        ),
+        (
+            rotated_wall_slot,
+            _wall_obstacle(
+                jnp.array([-4.0, 0.0], dtype=jnp.float32),
+                width=1.0,
+                height=3.0,
+                theta=jnp.pi / 6.0,
+            ),
+        ),
+    )
 
 
 def _empty_obstacle() -> Array:
@@ -566,3 +640,192 @@ def test_projection_helpers_can_be_jit_compiled() -> None:
         wall_result,
         jnp.array([1.4142135, 1.4142135], dtype=jnp.float32),
     )
+
+
+@pytest.mark.parametrize(
+    ("agent_center", "agent_radius", "obstacle", "expected"),
+    [
+        pytest.param(
+            jnp.array([1.5, 0.0], dtype=jnp.float32),
+            1.0,
+            _wall_obstacle(
+                jnp.array([0.0, 0.0], dtype=jnp.float32),
+                width=2.0,
+                height=2.0,
+                theta=0.0,
+            ),
+            jnp.array([2.0, 0.0], dtype=jnp.float32),
+            id="active-wall-row-dispatches-to-wall-projection",
+        ),
+        pytest.param(
+            jnp.array([1.5, 0.0], dtype=jnp.float32),
+            1.0,
+            _pillar_obstacle(
+                jnp.array([0.0, 0.0], dtype=jnp.float32),
+                1.0,
+            ),
+            jnp.array([2.0, 0.0], dtype=jnp.float32),
+            id="active-pillar-row-dispatches-to-pillar-projection",
+        ),
+        pytest.param(
+            jnp.array([1.5, 0.0], dtype=jnp.float32),
+            1.0,
+            _empty_obstacle(),
+            jnp.array([1.5, 0.0], dtype=jnp.float32),
+            id="none-row-leaves-center-unchanged",
+        ),
+        pytest.param(
+            jnp.array([1.5, 0.0], dtype=jnp.float32),
+            1.0,
+            _wall_obstacle(
+                jnp.array([0.0, 0.0], dtype=jnp.float32),
+                width=2.0,
+                height=2.0,
+                theta=0.0,
+                active=False,
+            ),
+            jnp.array([1.5, 0.0], dtype=jnp.float32),
+            id="inactive-wall-row-leaves-center-unchanged",
+        ),
+        pytest.param(
+            jnp.array([1.5, 0.0], dtype=jnp.float32),
+            1.0,
+            _pillar_obstacle(
+                jnp.array([0.0, 0.0], dtype=jnp.float32),
+                1.0,
+                active=False,
+            ),
+            jnp.array([1.5, 0.0], dtype=jnp.float32),
+            id="inactive-pillar-row-leaves-center-unchanged",
+        ),
+    ],
+)
+def test_project_disc_out_of_obstacle(
+    agent_center: Array,
+    agent_radius: Array | float,
+    obstacle: Array,
+    expected: Array,
+) -> None:
+    center = project_disc_out_of_obstacle(agent_center, agent_radius, obstacle)
+    _assert_center_close(center, expected)
+
+
+_OBSTACLE_ARRAY_PROJECTION_CASES = [
+    pytest.param(
+        jnp.array([2.5, 2.5], dtype=jnp.float32),
+        0.5,
+        jnp.zeros(
+            (MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES),
+            dtype=jnp.float32,
+        ),
+        jnp.array([2.5, 2.5], dtype=jnp.float32),
+        id="empty-obstacle-array-unchanged",
+    ),
+    pytest.param(
+        jnp.array([1.5, 0.0], dtype=jnp.float32),
+        1.0,
+        _create_obstacle_array(),
+        jnp.array([2.0, 0.0], dtype=jnp.float32),
+        id="mixed-sparse-array-late-pillar-projects",
+    ),
+    pytest.param(
+        jnp.array([5.5, 0.0], dtype=jnp.float32),
+        1.0,
+        _create_obstacle_array(),
+        jnp.array([6.0, 0.0], dtype=jnp.float32),
+        id="mixed-sparse-array-axis-wall-projects",
+    ),
+    pytest.param(
+        jnp.array([0.0, 4.5], dtype=jnp.float32),
+        1.0,
+        _create_obstacle_array(),
+        jnp.array([0.0, 4.5], dtype=jnp.float32),
+        id="mixed-sparse-array-inactive-pillar-ignored",
+    ),
+    pytest.param(
+        jnp.array([4.0, 4.0], dtype=jnp.float32),
+        0.5,
+        _create_obstacle_array(),
+        jnp.array([4.0, 4.0], dtype=jnp.float32),
+        id="mixed-sparse-array-inactive-rotated-wall-ignored",
+    ),
+    pytest.param(
+        jnp.array([-4.4, 0.0], dtype=jnp.float32),
+        1.0,
+        _create_obstacle_array(),
+        project_disc_out_of_wall(
+            jnp.array([-4.4, 0.0], dtype=jnp.float32),
+            1.0,
+            _wall_obstacle(
+                jnp.array([-4.0, 0.0], dtype=jnp.float32),
+                width=1.0,
+                height=3.0,
+                theta=jnp.pi / 6.0,
+            ),
+        ),
+        id="mixed-sparse-array-active-rotated-wall-projects",
+    ),
+    pytest.param(
+        jnp.array([1.5, 0.0], dtype=jnp.float32),
+        1.0,
+        _obstacle_array_with_rows(
+            (
+                0,
+                _pillar_obstacle(
+                    jnp.array([0.0, 0.0], dtype=jnp.float32),
+                    1.0,
+                ),
+            ),
+            (
+                1,
+                _pillar_obstacle(
+                    jnp.array([3.0, 0.0], dtype=jnp.float32),
+                    1.0,
+                ),
+            ),
+        ),
+        jnp.array([1.0, 0.0], dtype=jnp.float32),
+        id="active-obstacles-project-in-fixed-slot-order",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("agent_center", "agent_radius", "obstacles", "expected"),
+    _OBSTACLE_ARRAY_PROJECTION_CASES,
+)
+def test_project_disc_out_of_obstacles(
+    agent_center: Array,
+    agent_radius: Array | float,
+    obstacles: Array,
+    expected: Array,
+) -> None:
+    center = project_disc_out_of_obstacles(
+        agent_center,
+        agent_radius,
+        obstacles,
+    )
+
+    _assert_center_close(center, expected)
+
+
+@pytest.mark.parametrize(
+    ("agent_center", "agent_radius", "obstacles", "expected"),
+    _OBSTACLE_ARRAY_PROJECTION_CASES,
+)
+def test_project_disc_out_of_obstacles_jit_compiles(
+    agent_center: Array,
+    agent_radius: Array | float,
+    obstacles: Array,
+    expected: Array,
+) -> None:
+    center = cast(
+        Array,
+        jax.jit(project_disc_out_of_obstacles)(
+            agent_center,
+            agent_radius,
+            obstacles,
+        ),
+    )
+
+    _assert_center_close(center, expected)
