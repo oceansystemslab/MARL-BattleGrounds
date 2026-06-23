@@ -14,6 +14,7 @@ from marl_battlegrounds.core.geometry import (
     project_disc_out_of_pillar,
     project_disc_out_of_wall,
     project_disc_to_bounds,
+    segment_intersects_circle,
 )
 from marl_battlegrounds.core.types import (
     MAX_OBSTACLE_SLOTS,
@@ -165,6 +166,13 @@ def _assert_center_close(result: Array, expected: Array) -> None:
             rtol=0.0,
         )
     )
+
+
+def _assert_scalar_bool(result: Array, expected: bool) -> None:
+    """Assert that a geometry predicate returned the expected scalar bool."""
+    assert result.shape == ()
+    assert result.dtype == bool
+    assert bool(result) is expected
 
 
 # Tests ---
@@ -829,3 +837,128 @@ def test_project_disc_out_of_obstacles_jit_compiles(
     )
 
     _assert_center_close(center, expected)
+
+
+@pytest.mark.parametrize(
+    ("segment_start", "segment_end", "circle_center", "circle_radius", "expected"),
+    [
+        pytest.param(
+            jnp.array([-2.0, 0.0], dtype=jnp.float32),
+            jnp.array([2.0, 0.0], dtype=jnp.float32),
+            jnp.array([0.0, 0.0], dtype=jnp.float32),
+            1.0,
+            True,
+            id="segment-crosses-circle",
+        ),
+        pytest.param(
+            jnp.array([-2.0, 2.0], dtype=jnp.float32),
+            jnp.array([2.0, 2.0], dtype=jnp.float32),
+            jnp.array([0.0, 0.0], dtype=jnp.float32),
+            1.0,
+            False,
+            id="segment-clear-above-circle",
+        ),
+        pytest.param(
+            jnp.array([-2.0, 1.0], dtype=jnp.float32),
+            jnp.array([2.0, 1.0], dtype=jnp.float32),
+            jnp.array([0.0, 0.0], dtype=jnp.float32),
+            1.0,
+            True,
+            id="segment-tangent-to-circle",
+        ),
+        pytest.param(
+            jnp.array([-2.0, 1.0 + GEOMETRY_TOLERANCE / 2.0], dtype=jnp.float32),
+            jnp.array([2.0, 1.0 + GEOMETRY_TOLERANCE / 2.0], dtype=jnp.float32),
+            jnp.array([0.0, 0.0], dtype=jnp.float32),
+            1.0,
+            True,
+            id="near-tangent-segment-counts-as-blocked",
+        ),
+        pytest.param(
+            jnp.array([0.5, 0.0], dtype=jnp.float32),
+            jnp.array([2.0, 0.0], dtype=jnp.float32),
+            jnp.array([0.0, 0.0], dtype=jnp.float32),
+            1.0,
+            True,
+            id="start-endpoint-inside-circle",
+        ),
+        pytest.param(
+            jnp.array([1.0, 0.0], dtype=jnp.float32),
+            jnp.array([2.0, 0.0], dtype=jnp.float32),
+            jnp.array([0.0, 0.0], dtype=jnp.float32),
+            1.0,
+            True,
+            id="start-endpoint-tangent-to-circle",
+        ),
+        pytest.param(
+            jnp.array([2.0, 0.0], dtype=jnp.float32),
+            jnp.array([4.0, 0.0], dtype=jnp.float32),
+            jnp.array([0.0, 0.0], dtype=jnp.float32),
+            1.0,
+            False,
+            id="projection-before-segment-and-endpoint-clear",
+        ),
+        pytest.param(
+            jnp.array([-4.0, 0.0], dtype=jnp.float32),
+            jnp.array([-2.0, 0.0], dtype=jnp.float32),
+            jnp.array([0.0, 0.0], dtype=jnp.float32),
+            1.0,
+            False,
+            id="projection-after-segment-and-endpoint-clear",
+        ),
+        pytest.param(
+            jnp.array([0.5, 0.0], dtype=jnp.float32),
+            jnp.array([0.5, 0.0], dtype=jnp.float32),
+            jnp.array([0.0, 0.0], dtype=jnp.float32),
+            1.0,
+            True,
+            id="zero-length-segment-inside-circle",
+        ),
+        pytest.param(
+            jnp.array([2.0, 0.0], dtype=jnp.float32),
+            jnp.array([2.0, 0.0], dtype=jnp.float32),
+            jnp.array([0.0, 0.0], dtype=jnp.float32),
+            1.0,
+            False,
+            id="zero-length-segment-outside-circle",
+        ),
+        pytest.param(
+            jnp.array([-2.0, -2.0], dtype=jnp.float32),
+            jnp.array([2.0, 2.0], dtype=jnp.float32),
+            jnp.array([0.0, 0.0], dtype=jnp.float32),
+            0.5,
+            True,
+            id="diagonal-segment-crosses-circle",
+        ),
+    ],
+)
+def test_segment_intersects_circle(
+    segment_start: Array,
+    segment_end: Array,
+    circle_center: Array,
+    circle_radius: Array | float,
+    expected: bool,
+) -> None:
+    result = segment_intersects_circle(
+        segment_start,
+        segment_end,
+        circle_center,
+        circle_radius,
+    )
+
+    _assert_scalar_bool(result, expected)
+
+
+def test_segment_intersects_circle_jit_compiles() -> None:
+    """Segment-circle LOS should remain usable inside future JIT transitions."""
+    result = cast(
+        Array,
+        jax.jit(segment_intersects_circle)(
+            jnp.array([-2.0, 0.0], dtype=jnp.float32),
+            jnp.array([2.0, 0.0], dtype=jnp.float32),
+            jnp.array([0.0, 0.0], dtype=jnp.float32),
+            1.0,
+        ),
+    )
+
+    _assert_scalar_bool(result, True)
