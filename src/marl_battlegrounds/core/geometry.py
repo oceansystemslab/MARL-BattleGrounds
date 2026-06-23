@@ -582,13 +582,42 @@ def project_movement_with_geometry() -> Array:
     raise NotImplementedError
 
 
-def segment_intersects_circle() -> Array:
+def segment_intersects_circle(
+    segment_start: Array,
+    segment_end: Array,
+    circle_center: Array,
+    circle_radius: Array | float,
+) -> Array:
     """Return whether a line-of-sight segment intersects a circular pillar.
 
-    Tangent and near-tangent contact should count as blocked LOS for the
-    simulator's visibility and targetability rules.
+    This helper tests the finite closed segment from ``segment_start`` to
+    ``segment_end``, not the infinite line through those points. Endpoints count
+    as part of the segment. Tangent and near-tangent contact count as blocked
+    LOS for the simulator's visibility and targetability rules. Degenerate
+    zero-length segments are treated as point-vs-circle queries.
+
+    Args:
+        segment_start: Segment start point with shape ``(2,)``.
+        segment_end: Segment end point with shape ``(2,)``.
+        circle_center: Circle center with shape ``(2,)``.
+        circle_radius: Circle radius in world units.
+
+    Returns:
+        Scalar boolean JAX array indicating whether the segment touches or
+        crosses the circle within the geometry tolerance.
     """
-    raise NotImplementedError
+    v = segment_end - segment_start
+    u = circle_center - segment_start
+
+    alpha = jnp.dot(u, v) / jnp.maximum(jnp.dot(v, v), GEOMETRY_EPSILON)
+    alpha_clipped = jnp.clip(alpha, 0.0, 1.0)
+
+    closest_point = segment_start + alpha_clipped * v
+
+    diff = closest_point - circle_center
+    distance_sq = jnp.dot(diff, diff)
+
+    return distance_sq <= (circle_radius + GEOMETRY_TOLERANCE) ** 2
 
 
 def segment_intersects_rotated_rect() -> Array:
