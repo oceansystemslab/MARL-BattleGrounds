@@ -406,6 +406,103 @@ def _keep_obstacle_projection_center(
     return center
 
 
+def _obstacle_blocks_line_of_sight(
+    agent_center_a: Array,
+    agent_center_b: Array,
+    obstacle: Array,
+) -> Array:
+    """Return whether one padded obstacle row blocks a LOS segment."""
+    is_active = jnp.equal(obstacle[OBSTACLE_FEATURE_ACTIVE], 1.0)
+
+    return cast(
+        Array,
+        jax.lax.cond(
+            is_active,
+            _active_obstacle_blocks_line_of_sight,
+            _inactive_or_none_obstacle,
+            agent_center_a,
+            agent_center_b,
+            obstacle,
+        ),
+    )
+
+
+def _active_obstacle_blocks_line_of_sight(
+    agent_center_a: Array,
+    agent_center_b: Array,
+    obstacle: Array,
+) -> Array:
+    """Dispatch active obstacle LOS blocking by obstacle type."""
+    idx = obstacle[OBSTACLE_FEATURE_TYPE].astype(jnp.int32)
+    branches = [_inactive_or_none_obstacle, _pillar_dispatcher, _wall_dispatcher]
+
+    return cast(
+        Array,
+        jax.lax.switch(
+            idx,
+            branches,
+            agent_center_a,
+            agent_center_b,
+            obstacle,
+        ),
+    )
+
+
+def _pillar_dispatcher(
+    agent_center_a: Array,
+    agent_center_b: Array,
+    obstacle: Array,
+) -> Array:
+    """Evaluate LOS blocking for one active circular pillar row."""
+    pillar_center = jnp.stack(
+        (obstacle[OBSTACLE_FEATURE_X], obstacle[OBSTACLE_FEATURE_Y]),
+        dtype=jnp.float32,
+    )
+    pillar_radius = obstacle[OBSTACLE_FEATURE_RADIUS]
+
+    return segment_intersects_circle(
+        agent_center_a,
+        agent_center_b,
+        pillar_center,
+        pillar_radius,
+    )
+
+
+def _wall_dispatcher(
+    agent_center_a: Array,
+    agent_center_b: Array,
+    obstacle: Array,
+) -> Array:
+    """Evaluate LOS blocking for one active rotated wall row."""
+    wall_center = jnp.stack(
+        (obstacle[OBSTACLE_FEATURE_X], obstacle[OBSTACLE_FEATURE_Y]),
+        dtype=jnp.float32,
+    )
+    wall_width = obstacle[OBSTACLE_FEATURE_WIDTH]
+    wall_height = obstacle[OBSTACLE_FEATURE_HEIGHT]
+    wall_theta = obstacle[OBSTACLE_FEATURE_THETA]
+
+    return segment_intersects_rotated_rect(
+        agent_center_a,
+        agent_center_b,
+        wall_center,
+        wall_width,
+        wall_height,
+        wall_theta,
+    )
+
+
+def _inactive_or_none_obstacle(
+    agent_center_a: Array,
+    agent_center_b: Array,
+    obstacle: Array,
+) -> Array:
+    """Return no LOS blocking for inactive, none, or padding obstacle rows."""
+    del agent_center_a, agent_center_b, obstacle
+
+    return jnp.array(False)
+
+
 # Public geometry kernels ---
 
 
@@ -711,12 +808,38 @@ def segment_intersects_rotated_rect(
     )
 
 
-def has_clear_line_of_sight() -> Array:
+def has_clear_line_of_sight(
+    agent_center_a: Array,
+    agent_center_b: Array,
+    obstacles: Array,
+) -> Array:
     """Return whether static map geometry leaves a clear line of sight.
 
     Active pillars and active walls block LOS. Agents are deliberately not inputs
     because MARL-BattleGrounds v1 agents block movement but not line of sight.
     Observation construction and targetability should consume this shared helper
     so visibility, masks, and future debug tooling cannot drift apart.
+
+    Args:
+        agent_center_a: LOS segment start point with shape ``(2,)``.
+        agent_center_b: LOS segment end point with shape ``(2,)``.
+        obstacles: Fixed obstacle table with shape
+            ``(MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES)``.
+
+    Returns:
+        Scalar boolean JAX array. ``True`` means no active static obstacle blocks
+        the segment; ``False`` means at least one active pillar or wall blocks it.
     """
-    raise NotImplementedError
+    obstacle_blocks_line_of_sight_vmap = jax.vmap(
+        _obstacle_blocks_line_of_sight,
+        in_axes=(None, None, 0),
+        out_axes=0,
+    )
+
+    blocked_by_obstacle = obstacle_blocks_line_of_sight_vmap(
+        agent_center_a,
+        agent_center_b,
+        obstacles,
+    )
+
+    return jnp.logical_not(jnp.any(blocked_by_obstacle))
