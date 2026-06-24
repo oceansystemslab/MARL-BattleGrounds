@@ -9,6 +9,7 @@ from jax import Array
 
 from marl_battlegrounds.core.geometry import (
     GEOMETRY_TOLERANCE,
+    has_clear_line_of_sight,
     project_disc_out_of_obstacle,
     project_disc_out_of_obstacles,
     project_disc_out_of_pillar,
@@ -28,6 +29,7 @@ from marl_battlegrounds.core.types import (
     OBSTACLE_FEATURE_X,
     OBSTACLE_FEATURE_Y,
     OBSTACLE_FEATURES,
+    OBSTACLE_TYPE_NONE,
     OBSTACLE_TYPE_PILLAR,
     OBSTACLE_TYPE_WALL,
 )
@@ -47,6 +49,21 @@ def _obstacle_array_with_rows(*rows: tuple[int, Array]) -> Array:
         obstacles = obstacles.at[slot].set(obstacle)
 
     return obstacles
+
+
+def _active_none_obstacle_with_geometry() -> Array:
+    """Create an active none row with geometry fields that should be ignored."""
+    obstacle = _empty_obstacle()
+
+    obstacle = obstacle.at[OBSTACLE_FEATURE_ACTIVE].set(1.0)
+    obstacle = obstacle.at[OBSTACLE_FEATURE_TYPE].set(OBSTACLE_TYPE_NONE)
+    obstacle = obstacle.at[OBSTACLE_FEATURE_X].set(0.0)
+    obstacle = obstacle.at[OBSTACLE_FEATURE_Y].set(0.0)
+    obstacle = obstacle.at[OBSTACLE_FEATURE_RADIUS].set(10.0)
+    obstacle = obstacle.at[OBSTACLE_FEATURE_WIDTH].set(10.0)
+    obstacle = obstacle.at[OBSTACLE_FEATURE_HEIGHT].set(10.0)
+
+    return obstacle
 
 
 def _create_obstacle_array() -> Array:
@@ -605,7 +622,6 @@ def test_project_disc_out_of_wall(
 
 
 def test_projection_helpers_can_be_jit_compiled() -> None:
-    """Geometry projection helpers should remain usable inside JIT transitions."""
     pillar = _pillar_obstacle(
         jnp.array([0.0, 0.0], dtype=jnp.float32),
         1.0,
@@ -951,7 +967,6 @@ def test_segment_intersects_circle(
 
 
 def test_segment_intersects_circle_jit_compiles() -> None:
-    """Segment-circle LOS should remain usable inside future JIT transitions."""
     result = cast(
         Array,
         jax.jit(segment_intersects_circle)(
@@ -1120,7 +1135,6 @@ def test_segment_intersects_rotated_rect(
 
 
 def test_segment_intersects_rotated_rect_jit_compiles() -> None:
-    """Segment-rectangle LOS should remain usable inside future JIT transitions."""
     result = cast(
         Array,
         jax.jit(segment_intersects_rotated_rect)(
@@ -1134,3 +1148,260 @@ def test_segment_intersects_rotated_rect_jit_compiles() -> None:
     )
 
     _assert_scalar_bool(result, True)
+
+
+@pytest.mark.parametrize(
+    ("agent_center_a", "agent_center_b", "obstacles", "expected"),
+    [
+        pytest.param(
+            jnp.array([-2.0, 0.0], dtype=jnp.float32),
+            jnp.array([2.0, 0.0], dtype=jnp.float32),
+            _obstacle_array_with_rows(),
+            True,
+            id="empty_obstacle_array_clear",
+        ),
+        pytest.param(
+            jnp.array([-2.0, 0.0], dtype=jnp.float32),
+            jnp.array([2.0, 0.0], dtype=jnp.float32),
+            _obstacle_array_with_rows(
+                (
+                    0,
+                    _pillar_obstacle(
+                        jnp.array([0.0, 0.0], dtype=jnp.float32),
+                        1.0,
+                        active=False,
+                    ),
+                ),
+            ),
+            True,
+            id="inactive_pillar_on_los_ignored",
+        ),
+        pytest.param(
+            jnp.array([-2.0, 0.0], dtype=jnp.float32),
+            jnp.array([2.0, 0.0], dtype=jnp.float32),
+            _obstacle_array_with_rows(
+                (
+                    0,
+                    _wall_obstacle(
+                        jnp.array([0.0, 0.0], dtype=jnp.float32),
+                        width=2.0,
+                        height=2.0,
+                        theta=0.0,
+                        active=False,
+                    ),
+                ),
+            ),
+            True,
+            id="inactive_wall_on_los_ignored",
+        ),
+        pytest.param(
+            jnp.array([-2.0, 0.0], dtype=jnp.float32),
+            jnp.array([2.0, 0.0], dtype=jnp.float32),
+            _obstacle_array_with_rows(
+                (0, _active_none_obstacle_with_geometry()),
+            ),
+            True,
+            id="active_none_obstacle_with_geometry_ignored",
+        ),
+        pytest.param(
+            jnp.array([-2.0, 0.0], dtype=jnp.float32),
+            jnp.array([2.0, 0.0], dtype=jnp.float32),
+            _obstacle_array_with_rows(
+                (
+                    0,
+                    _pillar_obstacle(
+                        jnp.array([0.0, 0.0], dtype=jnp.float32),
+                        0.5,
+                    ),
+                ),
+            ),
+            False,
+            id="active_pillar_blocks",
+        ),
+        pytest.param(
+            jnp.array([-2.0, 1.0], dtype=jnp.float32),
+            jnp.array([2.0, 1.0], dtype=jnp.float32),
+            _obstacle_array_with_rows(
+                (
+                    0,
+                    _pillar_obstacle(
+                        jnp.array([0.0, 0.0], dtype=jnp.float32),
+                        1.0,
+                    ),
+                ),
+            ),
+            False,
+            id="active_pillar_tangent_blocks",
+        ),
+        pytest.param(
+            jnp.array([0.0, 0.0], dtype=jnp.float32),
+            jnp.array([0.0, 0.0], dtype=jnp.float32),
+            _obstacle_array_with_rows(
+                (
+                    0,
+                    _pillar_obstacle(
+                        jnp.array([0.0, 0.0], dtype=jnp.float32),
+                        0.5,
+                    ),
+                ),
+            ),
+            False,
+            id="zero_length_segment_inside_active_pillar_blocks",
+        ),
+        pytest.param(
+            jnp.array([-2.0, 0.0], dtype=jnp.float32),
+            jnp.array([2.0, 0.0], dtype=jnp.float32),
+            _obstacle_array_with_rows(
+                (
+                    0,
+                    _wall_obstacle(
+                        jnp.array([0.0, 0.0], dtype=jnp.float32),
+                        width=1.0,
+                        height=1.0,
+                        theta=0.0,
+                    ),
+                ),
+            ),
+            False,
+            id="active_axis_aligned_wall_blocks",
+        ),
+        pytest.param(
+            jnp.array([-2.0, 0.5], dtype=jnp.float32),
+            jnp.array([2.0, 0.5], dtype=jnp.float32),
+            _obstacle_array_with_rows(
+                (
+                    0,
+                    _wall_obstacle(
+                        jnp.array([0.0, 0.0], dtype=jnp.float32),
+                        width=1.0,
+                        height=1.0,
+                        theta=0.0,
+                    ),
+                ),
+            ),
+            False,
+            id="active_wall_edge_touch_blocks",
+        ),
+        pytest.param(
+            jnp.array([3.0, 3.0], dtype=jnp.float32),
+            jnp.array([3.0, 3.0], dtype=jnp.float32),
+            _obstacle_array_with_rows(
+                (
+                    0,
+                    _wall_obstacle(
+                        jnp.array([0.0, 0.0], dtype=jnp.float32),
+                        width=1.0,
+                        height=1.0,
+                        theta=0.0,
+                    ),
+                ),
+            ),
+            True,
+            id="zero_length_segment_outside_active_wall_clear",
+        ),
+        pytest.param(
+            jnp.array([-2.0, 0.0], dtype=jnp.float32),
+            jnp.array([2.0, 0.0], dtype=jnp.float32),
+            _obstacle_array_with_rows(
+                (
+                    0,
+                    _wall_obstacle(
+                        jnp.array([0.0, 0.0], dtype=jnp.float32),
+                        width=2.0,
+                        height=1.0,
+                        theta=jnp.pi / 4.0,
+                    ),
+                ),
+            ),
+            False,
+            id="active_rotated_wall_blocks",
+        ),
+        pytest.param(
+            jnp.array([-2.0, 0.0], dtype=jnp.float32),
+            jnp.array([2.0, 0.0], dtype=jnp.float32),
+            _obstacle_array_with_rows(
+                (
+                    0,
+                    _pillar_obstacle(
+                        jnp.array([0.0, 3.0], dtype=jnp.float32),
+                        0.5,
+                    ),
+                ),
+                (
+                    1,
+                    _wall_obstacle(
+                        jnp.array([0.0, -3.0], dtype=jnp.float32),
+                        width=1.0,
+                        height=1.0,
+                        theta=0.0,
+                    ),
+                ),
+            ),
+            True,
+            id="active_obstacles_clear_miss",
+        ),
+        pytest.param(
+            jnp.array([-2.0, 0.0], dtype=jnp.float32),
+            jnp.array([2.0, 0.0], dtype=jnp.float32),
+            _obstacle_array_with_rows(
+                (
+                    MAX_OBSTACLE_SLOTS - 1,
+                    _pillar_obstacle(
+                        jnp.array([0.0, 0.0], dtype=jnp.float32),
+                        0.5,
+                    ),
+                ),
+            ),
+            False,
+            id="late_active_slot_blocks",
+        ),
+    ],
+)
+def test_has_clear_line_of_sight(
+    agent_center_a: Array,
+    agent_center_b: Array,
+    obstacles: Array,
+    expected: bool,
+) -> None:
+    result = has_clear_line_of_sight(
+        agent_center_a,
+        agent_center_b,
+        obstacles,
+    )
+
+    _assert_scalar_bool(result, expected)
+
+
+def test_has_clear_line_of_sight_jit_compiles() -> None:
+    agent_center_a = jnp.array([-2.0, 0.0], dtype=jnp.float32)
+    agent_center_b = jnp.array([2.0, 0.0], dtype=jnp.float32)
+    obstacles = _obstacle_array_with_rows(
+        (
+            0,
+            _pillar_obstacle(
+                jnp.array([0.0, 3.0], dtype=jnp.float32),
+                0.5,
+            ),
+        ),
+        (
+            1,
+            _wall_obstacle(
+                jnp.array([0.0, 0.0], dtype=jnp.float32),
+                width=1.0,
+                height=1.0,
+                theta=0.0,
+            ),
+        ),
+    )
+    expected = False
+
+    result = cast(
+        Array,
+        jax.jit(has_clear_line_of_sight)(
+            agent_center_a,
+            agent_center_b,
+            obstacles,
+        ),
+    )
+
+    _assert_scalar_bool(result, expected)
