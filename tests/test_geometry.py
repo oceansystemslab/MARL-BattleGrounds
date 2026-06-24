@@ -15,6 +15,7 @@ from marl_battlegrounds.core.geometry import (
     project_disc_out_of_wall,
     project_disc_to_bounds,
     segment_intersects_circle,
+    segment_intersects_rotated_rect,
 )
 from marl_battlegrounds.core.types import (
     MAX_OBSTACLE_SLOTS,
@@ -958,6 +959,177 @@ def test_segment_intersects_circle_jit_compiles() -> None:
             jnp.array([2.0, 0.0], dtype=jnp.float32),
             jnp.array([0.0, 0.0], dtype=jnp.float32),
             1.0,
+        ),
+    )
+
+    _assert_scalar_bool(result, True)
+
+
+@pytest.mark.parametrize(
+    (
+        "segment_start",
+        "segment_end",
+        "rectangle_center",
+        "width",
+        "height",
+        "theta",
+        "expected",
+    ),
+    [
+        pytest.param(
+            jnp.array([-2.0, 0.0]),
+            jnp.array([2.0, 0.0]),
+            jnp.array([0.0, 0.0]),
+            2.0,
+            2.0,
+            0.0,
+            True,
+            id="axis_aligned_horizontal_crosses_rectangle",
+        ),
+        pytest.param(
+            jnp.array([-2.0, 2.0]),
+            jnp.array([2.0, 2.0]),
+            jnp.array([0.0, 0.0]),
+            2.0,
+            2.0,
+            0.0,
+            False,
+            id="axis_aligned_horizontal_clear_miss",
+        ),
+        pytest.param(
+            jnp.array([-2.0, 1.0]),
+            jnp.array([2.0, 1.0]),
+            jnp.array([0.0, 0.0]),
+            2.0,
+            2.0,
+            0.0,
+            True,
+            id="axis_aligned_horizontal_touches_top_edge",
+        ),
+        pytest.param(
+            jnp.array([1.0, -2.0]),
+            jnp.array([1.0, 2.0]),
+            jnp.array([0.0, 0.0]),
+            2.0,
+            2.0,
+            0.0,
+            True,
+            id="axis_aligned_vertical_touches_right_edge",
+        ),
+        pytest.param(
+            jnp.array([1.0, 1.0]),
+            jnp.array([2.0, 2.0]),
+            jnp.array([0.0, 0.0]),
+            2.0,
+            2.0,
+            0.0,
+            True,
+            id="axis_aligned_segment_touches_corner",
+        ),
+        pytest.param(
+            jnp.array([2.0, -2.0]),
+            jnp.array([2.0, 2.0]),
+            jnp.array([0.0, 0.0]),
+            2.0,
+            2.0,
+            0.0,
+            False,
+            id="axis_aligned_vertical_clear_miss",
+        ),
+        pytest.param(
+            jnp.array([0.0, 0.0]),
+            jnp.array([2.0, 2.0]),
+            jnp.array([0.0, 0.0]),
+            2.0,
+            2.0,
+            0.0,
+            True,
+            id="segment_start_inside_rectangle",
+        ),
+        pytest.param(
+            jnp.array([-2.0, -2.0]),
+            jnp.array([0.0, 0.0]),
+            jnp.array([0.0, 0.0]),
+            2.0,
+            2.0,
+            0.0,
+            True,
+            id="segment_end_inside_rectangle",
+        ),
+        pytest.param(
+            jnp.array([0.5, 0.5]),
+            jnp.array([0.5, 0.5]),
+            jnp.array([0.0, 0.0]),
+            2.0,
+            2.0,
+            0.0,
+            True,
+            id="zero_length_segment_inside_rectangle",
+        ),
+        pytest.param(
+            jnp.array([2.0, 2.0]),
+            jnp.array([2.0, 2.0]),
+            jnp.array([0.0, 0.0]),
+            2.0,
+            2.0,
+            0.0,
+            False,
+            id="zero_length_segment_outside_rectangle",
+        ),
+        pytest.param(
+            jnp.array([-2.0, 0.0]),
+            jnp.array([2.0, 0.0]),
+            jnp.array([0.0, 0.0]),
+            2.0,
+            1.0,
+            jnp.pi / 4.0,
+            True,
+            id="rotated_rectangle_crosses_center",
+        ),
+        pytest.param(
+            jnp.array([-2.1213202, -0.70710677]),
+            jnp.array([0.70710677, 2.1213202]),
+            jnp.array([0.0, 0.0]),
+            2.0,
+            1.0,
+            jnp.pi / 4.0,
+            False,
+            id="rotated_rectangle_clear_miss",
+        ),
+    ],
+)
+def test_segment_intersects_rotated_rect(
+    segment_start: Array,
+    segment_end: Array,
+    rectangle_center: Array,
+    width: Array | float,
+    height: Array | float,
+    theta: Array | float,
+    expected: bool,
+) -> None:
+    result = segment_intersects_rotated_rect(
+        segment_start,
+        segment_end,
+        rectangle_center,
+        width,
+        height,
+        theta,
+    )
+
+    _assert_scalar_bool(result, expected)
+
+
+def test_segment_intersects_rotated_rect_jit_compiles() -> None:
+    """Segment-rectangle LOS should remain usable inside future JIT transitions."""
+    result = cast(
+        Array,
+        jax.jit(segment_intersects_rotated_rect)(
+            jnp.array([-2.0, 1.0]),
+            jnp.array([2.0, 1.0]),
+            jnp.array([0.0, 0.0]),
+            2.0,
+            2.0,
+            0.0,
         ),
     )
 
