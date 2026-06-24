@@ -620,13 +620,95 @@ def segment_intersects_circle(
     return distance_sq <= (circle_radius + GEOMETRY_TOLERANCE) ** 2
 
 
-def segment_intersects_rotated_rect() -> Array:
+def segment_intersects_rotated_rect(
+    segment_start: Array,
+    segment_end: Array,
+    rectangle_center: Array,
+    width: Array | float,
+    height: Array | float,
+    theta: Array | float,
+) -> Array:
     """Return whether a line-of-sight segment intersects a rotated wall.
 
-    The segment should be evaluated in the wall's local frame so rotated and
-    axis-aligned walls share the same blocking semantics.
+    This is a pure finite-segment-vs-rotated-rectangle primitive. It does not
+    inspect obstacle-row type or active fields; obstacle dispatch belongs in
+    ``has_clear_line_of_sight``. Endpoints count as part of the segment, and
+    edge contact counts as intersection.
+
+    Args:
+        segment_start: Segment start point with shape ``(2,)``.
+        segment_end: Segment end point with shape ``(2,)``.
+        rectangle_center: Rectangle center point with shape ``(2,)``.
+        width: Rectangle width in its local x-axis.
+        height: Rectangle height in its local y-axis.
+        theta: Rectangle rotation angle in radians.
+
+    Returns:
+        Scalar boolean JAX array indicating whether the segment touches or
+        crosses the rotated rectangle.
     """
-    raise NotImplementedError
+    world_to_local = _create_2d_rotation_matrix(-theta)
+    segment_start_local = world_to_local @ (segment_start - rectangle_center)
+    segment_end_local = world_to_local @ (segment_end - rectangle_center)
+
+    max_y, min_y, max_x, min_x = (height / 2, -height / 2, width / 2, -width / 2)
+
+    v_x = segment_end_local[0] - segment_start_local[0]
+    v_y = segment_end_local[1] - segment_start_local[1]
+
+    vertical_line_segment = jnp.abs(v_x) <= GEOMETRY_EPSILON
+    horizontal_line_segment = jnp.abs(v_y) <= GEOMETRY_EPSILON
+
+    x_inside_rectangle_bounds = jnp.logical_and(
+        min_x <= segment_start_local[0],
+        segment_start_local[0] <= max_x,
+    )
+    y_inside_rectangle_bounds = jnp.logical_and(
+        min_y <= segment_start_local[1],
+        segment_start_local[1] <= max_y,
+    )
+
+    safe_v_x = jnp.where(vertical_line_segment, 1.0, v_x)
+    safe_v_y = jnp.where(horizontal_line_segment, 1.0, v_y)
+
+    alpha_x_1 = (min_x - segment_start_local[0]) / safe_v_x
+    alpha_x_2 = (max_x - segment_start_local[0]) / safe_v_x
+    alpha_y_1 = (min_y - segment_start_local[1]) / safe_v_y
+    alpha_y_2 = (max_y - segment_start_local[1]) / safe_v_y
+
+    alpha_entry_x = jnp.minimum(alpha_x_1, alpha_x_2)
+    alpha_exit_x = jnp.maximum(alpha_x_1, alpha_x_2)
+    alpha_entry_y = jnp.minimum(alpha_y_1, alpha_y_2)
+    alpha_exit_y = jnp.maximum(alpha_y_1, alpha_y_2)
+
+    alpha_entry_x = jnp.where(
+        vertical_line_segment,
+        jnp.where(x_inside_rectangle_bounds, -jnp.inf, jnp.inf),
+        alpha_entry_x,
+    )
+    alpha_exit_x = jnp.where(
+        vertical_line_segment,
+        jnp.where(x_inside_rectangle_bounds, jnp.inf, -jnp.inf),
+        alpha_exit_x,
+    )
+    alpha_entry_y = jnp.where(
+        horizontal_line_segment,
+        jnp.where(y_inside_rectangle_bounds, -jnp.inf, jnp.inf),
+        alpha_entry_y,
+    )
+    alpha_exit_y = jnp.where(
+        horizontal_line_segment,
+        jnp.where(y_inside_rectangle_bounds, jnp.inf, -jnp.inf),
+        alpha_exit_y,
+    )
+
+    entry_points = jnp.array((alpha_entry_x, alpha_entry_y))
+    exit_points = jnp.array((alpha_exit_x, alpha_exit_y))
+
+    return jnp.maximum(0.0, jnp.max(entry_points)) <= jnp.minimum(
+        1.0,
+        jnp.min(exit_points),
+    )
 
 
 def has_clear_line_of_sight() -> Array:
