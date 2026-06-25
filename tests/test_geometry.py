@@ -1,5 +1,7 @@
 """Tests for shared simulator geometry helpers."""
 
+# pyright: reportPrivateUsage=false
+
 from typing import cast
 
 import jax
@@ -7,18 +9,23 @@ import jax.numpy as jnp
 import pytest
 from jax import Array
 
+# Step 2 tests private kernels directly because the design requires low-level
+# geometry coverage; production modules should call the public composed API.
 from marl_battlegrounds.core.geometry import (
     GEOMETRY_TOLERANCE,
+    _project_disc_out_of_obstacle,
+    _project_disc_out_of_obstacles,
+    _project_disc_out_of_pillar,
+    _project_disc_out_of_wall,
+    _project_disc_to_bounds,
+    _resolve_agent_agent_overlaps,
+    _segment_intersects_circle,
+    _segment_intersects_rotated_rect,
     has_clear_line_of_sight,
-    project_disc_out_of_obstacle,
-    project_disc_out_of_obstacles,
-    project_disc_out_of_pillar,
-    project_disc_out_of_wall,
-    project_disc_to_bounds,
-    segment_intersects_circle,
-    segment_intersects_rotated_rect,
 )
 from marl_battlegrounds.core.types import (
+    ENVIRONMENT_DIMENSIONS,
+    MAX_AGENT_SLOTS,
     MAX_OBSTACLE_SLOTS,
     OBSTACLE_FEATURE_ACTIVE,
     OBSTACLE_FEATURE_HEIGHT,
@@ -172,6 +179,42 @@ def _wall_obstacle(
     return wall
 
 
+def _agent_positions_array_with_rows(*rows: tuple[int, Array]) -> Array:
+    """Create a padded agent-position array with selected slots populated."""
+    agent_positions = jnp.zeros(
+        (MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS),
+        dtype=jnp.float32,
+    )
+
+    for slot, agent_position in rows:
+        assert 0 <= slot < MAX_AGENT_SLOTS
+        agent_positions = agent_positions.at[slot].set(agent_position)
+
+    return agent_positions
+
+
+def _agent_radii_array_with_rows(*rows: tuple[int, Array | float]) -> Array:
+    """Create a padded agent-radius vector with selected slots populated."""
+    radii = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32)
+
+    for slot, radius in rows:
+        assert 0 <= slot < MAX_AGENT_SLOTS
+        radii = radii.at[slot].set(radius)
+
+    return radii
+
+
+def _mask_with_true_slots(*slots: int) -> Array:
+    """Create a slot mask with only the provided slots marked true."""
+    mask = jnp.zeros((MAX_AGENT_SLOTS,), dtype=bool)
+
+    for slot in slots:
+        assert 0 <= slot < MAX_AGENT_SLOTS
+        mask = mask.at[slot].set(True)
+
+    return mask
+
+
 def _assert_center_close(result: Array, expected: Array) -> None:
     """Assert that a geometry helper returned the expected float32 center."""
     assert result.shape == (2,)
@@ -191,6 +234,20 @@ def _assert_scalar_bool(result: Array, expected: bool) -> None:
     assert result.shape == ()
     assert result.dtype == bool
     assert bool(result) is expected
+
+
+def _assert_agent_positions_close(result: Array, expected: Array) -> None:
+    """Assert that slot-aligned agent positions match the expected values."""
+    assert result.shape == (MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS)
+    assert result.dtype == jnp.float32
+    assert bool(
+        jnp.allclose(
+            result,
+            expected,
+            atol=GEOMETRY_TOLERANCE,
+            rtol=0.0,
+        )
+    )
 
 
 # Tests ---
@@ -256,7 +313,7 @@ def test_project_disc_to_bounds(
     map_height: Array | float,
     expected: Array,
 ) -> None:
-    result = project_disc_to_bounds(agent_center, agent_radius, map_width, map_height)
+    result = _project_disc_to_bounds(agent_center, agent_radius, map_width, map_height)
 
     _assert_center_close(result, expected)
 
@@ -402,7 +459,7 @@ def test_project_disc_out_of_pillar(
     obstacle: Array,
     expected: Array,
 ) -> None:
-    result = project_disc_out_of_pillar(agent_center, agent_radius, obstacle)
+    result = _project_disc_out_of_pillar(agent_center, agent_radius, obstacle)
 
     _assert_center_close(result, expected)
 
@@ -616,7 +673,7 @@ def test_project_disc_out_of_wall(
     obstacle: Array,
     expected: Array,
 ) -> None:
-    result = project_disc_out_of_wall(agent_center, agent_radius, obstacle)
+    result = _project_disc_out_of_wall(agent_center, agent_radius, obstacle)
 
     _assert_center_close(result, expected)
 
@@ -635,7 +692,7 @@ def test_projection_helpers_can_be_jit_compiled() -> None:
 
     bounds_result = cast(
         Array,
-        jax.jit(project_disc_to_bounds)(
+        jax.jit(_project_disc_to_bounds)(
             jnp.array([-1.0, 5.0], dtype=jnp.float32),
             0.5,
             4.0,
@@ -644,7 +701,7 @@ def test_projection_helpers_can_be_jit_compiled() -> None:
     )
     pillar_result = cast(
         Array,
-        jax.jit(project_disc_out_of_pillar)(
+        jax.jit(_project_disc_out_of_pillar)(
             jnp.array([1.25, 0.0], dtype=jnp.float32),
             1.0,
             pillar,
@@ -652,7 +709,7 @@ def test_projection_helpers_can_be_jit_compiled() -> None:
     )
     wall_result = cast(
         Array,
-        jax.jit(project_disc_out_of_wall)(
+        jax.jit(_project_disc_out_of_wall)(
             jnp.array([1.0606601, 1.0606601], dtype=jnp.float32),
             1.0,
             wall,
@@ -731,7 +788,7 @@ def test_project_disc_out_of_obstacle(
     obstacle: Array,
     expected: Array,
 ) -> None:
-    center = project_disc_out_of_obstacle(agent_center, agent_radius, obstacle)
+    center = _project_disc_out_of_obstacle(agent_center, agent_radius, obstacle)
     _assert_center_close(center, expected)
 
 
@@ -778,7 +835,7 @@ _OBSTACLE_ARRAY_PROJECTION_CASES = [
         jnp.array([-4.4, 0.0], dtype=jnp.float32),
         1.0,
         _create_obstacle_array(),
-        project_disc_out_of_wall(
+        _project_disc_out_of_wall(
             jnp.array([-4.4, 0.0], dtype=jnp.float32),
             1.0,
             _wall_obstacle(
@@ -825,7 +882,7 @@ def test_project_disc_out_of_obstacles(
     obstacles: Array,
     expected: Array,
 ) -> None:
-    center = project_disc_out_of_obstacles(
+    center = _project_disc_out_of_obstacles(
         agent_center,
         agent_radius,
         obstacles,
@@ -846,7 +903,7 @@ def test_project_disc_out_of_obstacles_jit_compiles(
 ) -> None:
     center = cast(
         Array,
-        jax.jit(project_disc_out_of_obstacles)(
+        jax.jit(_project_disc_out_of_obstacles)(
             agent_center,
             agent_radius,
             obstacles,
@@ -956,7 +1013,7 @@ def test_segment_intersects_circle(
     circle_radius: Array | float,
     expected: bool,
 ) -> None:
-    result = segment_intersects_circle(
+    result = _segment_intersects_circle(
         segment_start,
         segment_end,
         circle_center,
@@ -969,7 +1026,7 @@ def test_segment_intersects_circle(
 def test_segment_intersects_circle_jit_compiles() -> None:
     result = cast(
         Array,
-        jax.jit(segment_intersects_circle)(
+        jax.jit(_segment_intersects_circle)(
             jnp.array([-2.0, 0.0], dtype=jnp.float32),
             jnp.array([2.0, 0.0], dtype=jnp.float32),
             jnp.array([0.0, 0.0], dtype=jnp.float32),
@@ -1122,7 +1179,7 @@ def test_segment_intersects_rotated_rect(
     theta: Array | float,
     expected: bool,
 ) -> None:
-    result = segment_intersects_rotated_rect(
+    result = _segment_intersects_rotated_rect(
         segment_start,
         segment_end,
         rectangle_center,
@@ -1137,7 +1194,7 @@ def test_segment_intersects_rotated_rect(
 def test_segment_intersects_rotated_rect_jit_compiles() -> None:
     result = cast(
         Array,
-        jax.jit(segment_intersects_rotated_rect)(
+        jax.jit(_segment_intersects_rotated_rect)(
             jnp.array([-2.0, 1.0]),
             jnp.array([2.0, 1.0]),
             jnp.array([0.0, 0.0]),
@@ -1405,3 +1462,175 @@ def test_has_clear_line_of_sight_jit_compiles() -> None:
     )
 
     _assert_scalar_bool(result, expected)
+
+
+@pytest.mark.parametrize(
+    (
+        "agent_positions",
+        "agent_radii",
+        "active_mask",
+        "alive_mask",
+        "projection_passes",
+        "expected",
+    ),
+    [
+        pytest.param(
+            _agent_positions_array_with_rows(),
+            _agent_radii_array_with_rows(),
+            _mask_with_true_slots(),
+            _mask_with_true_slots(),
+            1,
+            _agent_positions_array_with_rows(),
+            id="empty_agent_slots_unchanged",
+        ),
+        pytest.param(
+            _agent_positions_array_with_rows(
+                (0, jnp.array([-1.0, 0.0], dtype=jnp.float32)),
+                (1, jnp.array([1.0, 0.0], dtype=jnp.float32)),
+            ),
+            _agent_radii_array_with_rows((0, 0.5), (1, 0.5)),
+            _mask_with_true_slots(0, 1),
+            _mask_with_true_slots(0, 1),
+            1,
+            _agent_positions_array_with_rows(
+                (0, jnp.array([-1.0, 0.0], dtype=jnp.float32)),
+                (1, jnp.array([1.0, 0.0], dtype=jnp.float32)),
+            ),
+            id="active_alive_non_overlapping_agents_unchanged",
+        ),
+        pytest.param(
+            _agent_positions_array_with_rows(
+                (0, jnp.array([-0.25, 0.0], dtype=jnp.float32)),
+                (1, jnp.array([0.25, 0.0], dtype=jnp.float32)),
+            ),
+            _agent_radii_array_with_rows((0, 0.5), (1, 0.5)),
+            _mask_with_true_slots(0, 1),
+            _mask_with_true_slots(0, 1),
+            1,
+            _agent_positions_array_with_rows(
+                (0, jnp.array([-0.5, 0.0], dtype=jnp.float32)),
+                (1, jnp.array([0.5, 0.0], dtype=jnp.float32)),
+            ),
+            id="active_alive_overlapping_agents_separated",
+        ),
+        pytest.param(
+            _agent_positions_array_with_rows(
+                (0, jnp.array([-0.25, 0.0], dtype=jnp.float32)),
+                (1, jnp.array([0.25, 0.0], dtype=jnp.float32)),
+            ),
+            _agent_radii_array_with_rows((0, 0.5), (1, 0.5)),
+            _mask_with_true_slots(0),
+            _mask_with_true_slots(0, 1),
+            1,
+            _agent_positions_array_with_rows(
+                (0, jnp.array([-0.25, 0.0], dtype=jnp.float32)),
+                (1, jnp.array([0.25, 0.0], dtype=jnp.float32)),
+            ),
+            id="inactive_agent_does_not_push_or_get_pushed",
+        ),
+        pytest.param(
+            _agent_positions_array_with_rows(
+                (0, jnp.array([-0.25, 0.0], dtype=jnp.float32)),
+                (1, jnp.array([0.25, 0.0], dtype=jnp.float32)),
+            ),
+            _agent_radii_array_with_rows((0, 0.5), (1, 0.5)),
+            _mask_with_true_slots(0, 1),
+            _mask_with_true_slots(0),
+            1,
+            _agent_positions_array_with_rows(
+                (0, jnp.array([-0.25, 0.0], dtype=jnp.float32)),
+                (1, jnp.array([0.25, 0.0], dtype=jnp.float32)),
+            ),
+            id="dead_agent_does_not_push_or_get_pushed",
+        ),
+        pytest.param(
+            _agent_positions_array_with_rows(
+                (0, jnp.array([0.0, 0.0], dtype=jnp.float32)),
+                (1, jnp.array([0.0, 0.0], dtype=jnp.float32)),
+            ),
+            _agent_radii_array_with_rows((0, 0.5), (1, 0.5)),
+            _mask_with_true_slots(0, 1),
+            _mask_with_true_slots(0, 1),
+            1,
+            _agent_positions_array_with_rows(
+                (0, jnp.array([0.5, 0.0], dtype=jnp.float32)),
+                (1, jnp.array([-0.5, 0.0], dtype=jnp.float32)),
+            ),
+            id="coincident_centers_use_deterministic_fallback",
+        ),
+    ],
+)
+def test_resolve_agent_agent_overlaps(
+    agent_positions: Array,
+    agent_radii: Array,
+    active_mask: Array,
+    alive_mask: Array,
+    projection_passes: int,
+    expected: Array,
+) -> None:
+    result = _resolve_agent_agent_overlaps(
+        agent_positions,
+        agent_radii,
+        active_mask,
+        alive_mask,
+        projection_passes,
+    )
+
+    _assert_agent_positions_close(result, expected)
+
+
+def test_resolve_agent_agent_overlaps_multi_agent_chain_improves() -> None:
+    agent_positions = _agent_positions_array_with_rows(
+        (0, jnp.array([-0.4, 0.0], dtype=jnp.float32)),
+        (1, jnp.array([0.0, 0.0], dtype=jnp.float32)),
+        (2, jnp.array([0.4, 0.0], dtype=jnp.float32)),
+    )
+    agent_radii = _agent_radii_array_with_rows((0, 0.3), (1, 0.3), (2, 0.3))
+    active_mask = _mask_with_true_slots(0, 1, 2)
+    alive_mask = _mask_with_true_slots(0, 1, 2)
+
+    result = _resolve_agent_agent_overlaps(
+        agent_positions,
+        agent_radii,
+        active_mask,
+        alive_mask,
+        projection_passes=8,
+    )
+
+    assert result.shape == (MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS)
+    assert result.dtype == jnp.float32
+    assert bool(jnp.all(jnp.isfinite(result)))
+
+    distance_01 = cast(Array, jnp.linalg.norm(result[0] - result[1]))
+    distance_12 = cast(Array, jnp.linalg.norm(result[1] - result[2]))
+
+    assert bool(distance_01 >= 0.6 - GEOMETRY_TOLERANCE)
+    assert bool(distance_12 >= 0.6 - GEOMETRY_TOLERANCE)
+
+
+def test_resolve_agent_agent_overlaps_jit_compiles() -> None:
+    agent_positions = _agent_positions_array_with_rows(
+        (0, jnp.array([-0.25, 0.0], dtype=jnp.float32)),
+        (1, jnp.array([0.25, 0.0], dtype=jnp.float32)),
+    )
+    agent_radii = _agent_radii_array_with_rows((0, 0.5), (1, 0.5))
+    active_mask = _mask_with_true_slots(0, 1)
+    alive_mask = _mask_with_true_slots(0, 1)
+
+    result = cast(
+        Array,
+        jax.jit(_resolve_agent_agent_overlaps, static_argnames=("projection_passes",))(
+            agent_positions,
+            agent_radii,
+            active_mask,
+            alive_mask,
+            projection_passes=1,
+        ),
+    )
+
+    expected = _agent_positions_array_with_rows(
+        (0, jnp.array([-0.5, 0.0], dtype=jnp.float32)),
+        (1, jnp.array([0.5, 0.0], dtype=jnp.float32)),
+    )
+
+    _assert_agent_positions_close(result, expected)

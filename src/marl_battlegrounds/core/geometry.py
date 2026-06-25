@@ -7,6 +7,7 @@ import jax.numpy as jnp
 from jax import Array
 
 from marl_battlegrounds.core.types import (
+    MAX_AGENT_SLOTS,
     MAX_OBSTACLE_SLOTS,
     OBSTACLE_FEATURE_ACTIVE,
     OBSTACLE_FEATURE_HEIGHT,
@@ -24,6 +25,11 @@ GEOMETRY_EPSILON = 1e-6
 GEOMETRY_TOLERANCE = 1e-5
 DEFAULT_MOVEMENT_SUBSTEPS = 4
 DEFAULT_AGENT_PROJECTION_PASSES = 4
+
+__all__ = (
+    "has_clear_line_of_sight",
+    "project_movement_with_geometry",
+)
 
 # Private geometry helpers ---
 
@@ -460,7 +466,7 @@ def _pillar_dispatcher(
     )
     pillar_radius = obstacle[OBSTACLE_FEATURE_RADIUS]
 
-    return segment_intersects_circle(
+    return _segment_intersects_circle(
         agent_center_a,
         agent_center_b,
         pillar_center,
@@ -482,7 +488,7 @@ def _wall_dispatcher(
     wall_height = obstacle[OBSTACLE_FEATURE_HEIGHT]
     wall_theta = obstacle[OBSTACLE_FEATURE_THETA]
 
-    return segment_intersects_rotated_rect(
+    return _segment_intersects_rotated_rect(
         agent_center_a,
         agent_center_b,
         wall_center,
@@ -503,10 +509,73 @@ def _inactive_or_none_obstacle(
     return jnp.array(False)
 
 
-# Public geometry kernels ---
+def _return_original_positions(
+    agent_positions: Array,
+    distance_between_agents: Array | float,
+    agent_a_index: int,
+    agent_b_index: int,
+    agent_radii: Array,
+) -> Array:
+    """Keep positions unchanged when an agent pair does not need projection."""
+    del distance_between_agents, agent_a_index, agent_b_index, agent_radii
+    return agent_positions
 
 
-def project_disc_to_bounds(
+def _resolve_agent_agent_overlap(
+    agent_positions: Array,
+    distance_between_agents: Array | float,
+    agent_a_index: int,
+    agent_b_index: int,
+    agent_radii: Array,
+) -> Array:
+    """Symmetrically separate one overlapping active-alive agent pair."""
+    agent_center_a = agent_positions[agent_a_index]
+    agent_center_b = agent_positions[agent_b_index]
+
+    displacement_a_from_b = agent_center_a - agent_center_b
+    centers_are_coincident = distance_between_agents <= GEOMETRY_EPSILON
+
+    safe_distance = jnp.where(
+        centers_are_coincident,
+        1.0,
+        distance_between_agents,
+    )
+
+    fallback_direction_a = jnp.array(
+        (1.0, 0.0),
+        dtype=agent_positions.dtype,
+    )
+
+    direction_vector_a = jnp.where(
+        centers_are_coincident,
+        fallback_direction_a,
+        displacement_a_from_b / safe_distance,
+    )
+    direction_vector_b = -direction_vector_a
+
+    sum_of_radii = agent_radii[agent_a_index] + agent_radii[agent_b_index]
+
+    degree_of_violation = jnp.where(
+        centers_are_coincident, sum_of_radii, sum_of_radii - distance_between_agents
+    )
+
+    updated_agent_a_center = agent_center_a + direction_vector_a * (
+        degree_of_violation / 2.0
+    )
+    updated_agent_b_center = agent_center_b + direction_vector_b * (
+        degree_of_violation / 2.0
+    )
+
+    agent_positions = agent_positions.at[agent_a_index].set(updated_agent_a_center)
+    agent_positions = agent_positions.at[agent_b_index].set(updated_agent_b_center)
+
+    return agent_positions
+
+
+# Private projection kernels ---
+
+
+def _project_disc_to_bounds(  # pyright: ignore[reportUnusedFunction]
     center: Array,
     radius: Array | float,
     map_width: Array | float,
@@ -530,7 +599,7 @@ def project_disc_to_bounds(
     return jnp.stack((center_x, center_y))
 
 
-def project_disc_out_of_pillar(
+def _project_disc_out_of_pillar(
     center: Array,
     radius: Array | float,
     obstacle: Array,
@@ -569,7 +638,7 @@ def project_disc_out_of_pillar(
     )
 
 
-def project_disc_out_of_wall(
+def _project_disc_out_of_wall(
     center: Array,
     radius: Array | float,
     obstacle: Array,
@@ -607,7 +676,7 @@ def project_disc_out_of_wall(
     )
 
 
-def project_disc_out_of_obstacle(
+def _project_disc_out_of_obstacle(
     center: Array,
     radius: Array | float,
     obstacle: Array,
@@ -624,13 +693,13 @@ def project_disc_out_of_obstacle(
 
     branches = [
         _keep_obstacle_projection_center,
-        project_disc_out_of_pillar,
-        project_disc_out_of_wall,
+        _project_disc_out_of_pillar,
+        _project_disc_out_of_wall,
     ]
     return cast(Array, jax.lax.switch(idx, branches, center, radius, obstacle))
 
 
-def project_disc_out_of_obstacles(
+def _project_disc_out_of_obstacles(  # pyright: ignore[reportUnusedFunction]
     center: Array,
     radius: Array | float,
     obstacles: Array,  # (MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES)
@@ -647,7 +716,7 @@ def project_disc_out_of_obstacles(
         current_center: Array,
     ) -> Array:
         """Project the carried center against obstacle slot i."""
-        return project_disc_out_of_obstacle(current_center, radius, obstacles[i])
+        return _project_disc_out_of_obstacle(current_center, radius, obstacles[i])
 
     # Projection is sequential: each obstacle sees the center produced by the
     # preceding obstacle slot.
@@ -659,27 +728,117 @@ def project_disc_out_of_obstacles(
     )
 
 
-def resolve_agent_agent_overlaps() -> Array:
+def _resolve_agent_agent_overlaps(  # pyright: ignore[reportUnusedFunction]
+    agent_positions: Array,
+    agent_radii: Array,
+    active_mask: Array,
+    alive_mask: Array,
+    projection_passes: int = DEFAULT_AGENT_PROJECTION_PASSES,
+) -> Array:
     """Resolve body blocking between active alive agents.
 
-    Allied and enemy agents both occupy physical space. This helper will enforce
-    hard non-overlap for active alive slots while leaving padded, inactive, and
-    dead slots fixed.
+    Allied and enemy agents both occupy physical space. This helper enforces
+    non-overlap for active alive slots while leaving padded, inactive, and dead
+    slots fixed. It is pure agent-agent geometry: map bounds and static
+    obstacles are restored by ``project_movement_with_geometry`` when these
+    primitives are composed.
+
+    Args:
+        agent_positions: Slot-aligned agent centers with shape
+            ``(MAX_AGENT_SLOTS, 2)``.
+        agent_radii: Slot-aligned body radii with shape ``(MAX_AGENT_SLOTS,)``.
+        active_mask: Boolean mask for real, non-padding slots.
+        alive_mask: Boolean mask for currently alive slots.
+        projection_passes: Fixed number of pairwise projection passes.
+
+    Returns:
+        Slot-aligned positions after fixed-pass active-alive body projection.
     """
-    raise NotImplementedError
+    participates = jnp.logical_and(active_mask, alive_mask)
+
+    def _projection_pass(
+        pass_index: int,
+        current_agent_positions: Array,
+    ) -> Array:
+        del pass_index
+
+        def _resolve_pairs_for_agent(
+            agent_a_index: int,
+            current_positions: Array,
+        ) -> Array:
+
+            def _resolve_pair(
+                agent_b_index: int,
+                pair_positions: Array,
+            ) -> Array:
+                pair_participates = jnp.logical_and(
+                    participates[agent_a_index],
+                    participates[agent_b_index],
+                )
+
+                distance_between_agents = cast(
+                    Array,
+                    jnp.linalg.norm(
+                        pair_positions[agent_a_index] - pair_positions[agent_b_index]
+                    ),
+                )
+
+                sum_of_radii = agent_radii[agent_a_index] + agent_radii[agent_b_index]
+                pair_overlaps = sum_of_radii > distance_between_agents
+                should_resolve_pair = jnp.logical_and(
+                    pair_participates,
+                    pair_overlaps,
+                )
+
+                return cast(
+                    Array,
+                    jax.lax.cond(
+                        should_resolve_pair,
+                        _resolve_agent_agent_overlap,
+                        _return_original_positions,
+                        pair_positions,
+                        distance_between_agents,
+                        agent_a_index,
+                        agent_b_index,
+                        agent_radii,
+                    ),
+                )
+
+            return cast(
+                Array,
+                jax.lax.fori_loop(
+                    lower=agent_a_index + 1,
+                    upper=MAX_AGENT_SLOTS,
+                    body_fun=_resolve_pair,
+                    init_val=current_positions,
+                ),
+            )
+
+        return cast(
+            Array,
+            jax.lax.fori_loop(
+                lower=0,
+                upper=MAX_AGENT_SLOTS,
+                body_fun=_resolve_pairs_for_agent,
+                init_val=current_agent_positions,
+            ),
+        )
+
+    return cast(
+        Array,
+        jax.lax.fori_loop(
+            lower=0,
+            upper=projection_passes,
+            body_fun=_projection_pass,
+            init_val=agent_positions,
+        ),
+    )
 
 
-def project_movement_with_geometry() -> Array:
-    """Apply intended movement while preserving map and body-blocking constraints.
-
-    This will split movement into fixed substeps, project active alive agents
-    against bounds and obstacles, and run fixed-pass agent-agent overlap
-    resolution. Inactive or dead slots must preserve their original positions.
-    """
-    raise NotImplementedError
+# Private LOS kernels ---
 
 
-def segment_intersects_circle(
+def _segment_intersects_circle(
     segment_start: Array,
     segment_end: Array,
     circle_center: Array,
@@ -717,7 +876,7 @@ def segment_intersects_circle(
     return distance_sq <= (circle_radius + GEOMETRY_TOLERANCE) ** 2
 
 
-def segment_intersects_rotated_rect(
+def _segment_intersects_rotated_rect(
     segment_start: Array,
     segment_end: Array,
     rectangle_center: Array,
@@ -806,6 +965,20 @@ def segment_intersects_rotated_rect(
         1.0,
         jnp.min(exit_points),
     )
+
+
+# Public geometry API ---
+
+
+def project_movement_with_geometry() -> Array:
+    """Apply intended movement while preserving map and body-blocking constraints.
+
+    This is the public movement-geometry composition point for transition code.
+    It will split movement into fixed substeps, project active alive agents
+    against bounds and obstacles, and run fixed-pass agent-agent overlap
+    resolution. Inactive or dead slots must preserve their original positions.
+    """
+    raise NotImplementedError
 
 
 def has_clear_line_of_sight(
