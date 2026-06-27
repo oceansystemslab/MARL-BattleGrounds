@@ -23,6 +23,13 @@ from marl_battlegrounds.core.types import (
 
 GEOMETRY_EPSILON = 1e-6
 GEOMETRY_TOLERANCE = 1e-5
+# Milestone 4 defaults are implementation-local, not public schema. With the
+# Step 1 placeholder movement speed of 1.0 and default agent radius of 0.5, four
+# movement substeps advance 0.25 world units at a time, which is small enough for
+# the early deterministic maps without doubling projection cost. Four projection
+# passes meaningfully reduce ordinary body-blocking residuals while keeping JAX
+# control flow fixed and cheap. Revisit these after Step 3 movement integration
+# profiling, especially if class mechanics introduce faster movement.
 DEFAULT_MOVEMENT_SUBSTEPS = 4
 DEFAULT_AGENT_PROJECTION_PASSES = 4
 
@@ -160,6 +167,8 @@ def _project_inside_disc_out_of_active_wall(
     """Push an agent center that is inside wall geometry through the nearest face."""
     del nearest_point_to_agent_center
 
+    # Inside-wall projection is ambiguous at corners and at the rectangle center;
+    # choose the nearest local face so the result is deterministic.
     distance_to_left_face = jnp.abs(agent_center_wall_local[0] - wall_x_bounds[0])
     distance_to_right_face = jnp.abs(agent_center_wall_local[0] - wall_x_bounds[1])
     distance_to_bottom_face = jnp.abs(agent_center_wall_local[1] - wall_y_bounds[0])
@@ -275,12 +284,7 @@ def _project_outside_disc_out_of_active_wall(
     wall_y_bounds: Array,
     radius: Array | float,
 ) -> Array:
-    """Resolve collision for an agent center outside a wall rectangle.
-
-    The center is already outside the wall in wall-local coordinates. If the
-    agent radius still overlaps the wall's solid area, move the center outward
-    along the closest-point normal until the disc is tangent to the wall.
-    """
+    """Resolve outside-wall overlap in wall-local coordinates."""
     del wall_x_bounds, wall_y_bounds
 
     wall_to_agent_center_vector = (
@@ -347,6 +351,8 @@ def _project_disc_out_of_active_wall(
     wall_height = obstacle[OBSTACLE_FEATURE_HEIGHT]
     wall_theta = obstacle[OBSTACLE_FEATURE_THETA]
 
+    # Work in the wall's local frame so rotated walls reduce to axis-aligned
+    # rectangle projection.
     world_to_wall = _create_2d_rotation_matrix(-wall_theta)
     agent_center_wall_local = world_to_wall @ (center - wall_center)
 
@@ -376,6 +382,7 @@ def _project_disc_out_of_active_wall(
         )
     )
 
+    # If clamping did not move the point, the center is inside or on the wall.
     center_is_inside_or_on_wall = jnp.array_equal(
         nearest_point_to_agent_center, agent_center_wall_local
     )
@@ -535,6 +542,8 @@ def _resolve_agent_agent_overlap(
     displacement_a_from_b = agent_center_a - agent_center_b
     centers_are_coincident = distance_between_agents <= GEOMETRY_EPSILON
 
+    # Coincident centers have no geometric normal; use a fixed axis to keep the
+    # projection finite and deterministic.
     safe_distance = jnp.where(
         centers_are_coincident,
         1.0,
@@ -575,24 +584,13 @@ def _resolve_agent_agent_overlap(
 # Private projection kernels ---
 
 
-def _project_disc_to_bounds(  # pyright: ignore[reportUnusedFunction]
+def _project_disc_to_bounds(
     center: Array,
     radius: Array | float,
     map_width: Array | float,
     map_height: Array | float,
 ) -> Array:
-    """Keep an agent disc fully inside the rectangular map.
-
-    Args:
-        center: Agent center with shape ``(2,)`` in world coordinates.
-        radius: Agent body radius.
-        map_width: Width of the rectangular battleground.
-        map_height: Height of the rectangular battleground.
-
-    Returns:
-        Agent center clipped to the valid region where the full body remains
-        inside the map.
-    """
+    """Keep an agent disc fully inside the rectangular map."""
     center_x = jnp.clip(center[0], min=radius, max=map_width - radius)
     center_y = jnp.clip(center[1], min=radius, max=map_height - radius)
 
@@ -604,22 +602,7 @@ def _project_disc_out_of_pillar(
     radius: Array | float,
     obstacle: Array,
 ) -> Array:
-    """Resolve one agent's collision against one circular pillar obstacle.
-
-    Inactive rows and non-pillar rows are padding or different geometry types, so
-    they leave the agent center unchanged. Active pillars are solid circular map
-    blockers. When the agent body overlaps the pillar, the center is moved to the
-    nearest tangent position along the pillar-to-agent direction. If both centers
-    coincide exactly, a deterministic fallback direction avoids NaNs.
-
-    Args:
-        center: Agent center with shape ``(2,)`` in world coordinates.
-        radius: Agent body radius.
-        obstacle: One obstacle row using the shared obstacle feature layout.
-
-    Returns:
-        Agent center with shape ``(2,)`` after pillar collision projection.
-    """
+    """Resolve one agent against one circular pillar obstacle row."""
     is_active_pillar = jnp.logical_and(
         obstacle[OBSTACLE_FEATURE_TYPE] == OBSTACLE_TYPE_PILLAR,
         obstacle[OBSTACLE_FEATURE_ACTIVE] == 1.0,
@@ -643,21 +626,7 @@ def _project_disc_out_of_wall(
     radius: Array | float,
     obstacle: Array,
 ) -> Array:
-    """Resolve one agent's collision against one rotated wall obstacle.
-
-    Inactive rows and non-wall rows leave the agent center unchanged. Active
-    walls are solid rotated rectangles. The helper transforms the agent center
-    into the wall's local frame, resolves overlap against the axis-aligned local
-    rectangle, and transforms the projected center back into world coordinates.
-
-    Args:
-        center: Agent center with shape ``(2,)`` in world coordinates.
-        radius: Agent body radius.
-        obstacle: One obstacle row using the shared obstacle feature layout.
-
-    Returns:
-        Agent center with shape ``(2,)`` after wall collision projection.
-    """
+    """Resolve one agent against one rotated wall obstacle row."""
     is_active_wall = jnp.logical_and(
         obstacle[OBSTACLE_FEATURE_TYPE] == OBSTACLE_TYPE_WALL,
         obstacle[OBSTACLE_FEATURE_ACTIVE] == 1.0,
@@ -681,12 +650,7 @@ def _project_disc_out_of_obstacle(
     radius: Array | float,
     obstacle: Array,
 ) -> Array:
-    """Resolve one agent against one padded obstacle row.
-
-    Obstacle rows encode their type as data, so dispatch must stay inside JAX
-    control flow. Active pillar rows use pillar projection, active wall rows use
-    wall projection, and inactive or ``none`` rows leave the center unchanged.
-    """
+    """Resolve one agent against one padded obstacle row."""
     # Obstacle type values are part of the fixed obstacle-row schema:
     # 0 = none, 1 = pillar, 2 = wall.
     idx = obstacle[OBSTACLE_FEATURE_TYPE].astype(jnp.int32)
@@ -699,17 +663,12 @@ def _project_disc_out_of_obstacle(
     return cast(Array, jax.lax.switch(idx, branches, center, radius, obstacle))
 
 
-def _project_disc_out_of_obstacles(  # pyright: ignore[reportUnusedFunction]
+def _project_disc_out_of_obstacles(
     center: Array,
     radius: Array | float,
     obstacles: Array,  # (MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES)
 ) -> Array:
-    """Resolve one agent against every static obstacle slot in the map config.
-
-    The helper visits every padded obstacle row in fixed slot order. This keeps
-    the loop shape static for JIT and makes projection deterministic even when a
-    map uses only a small subset of the available obstacle slots.
-    """
+    """Resolve one agent against every static obstacle slot."""
 
     def _project_disc_out_of_obstacle_wrapper(
         i: int,
@@ -728,52 +687,39 @@ def _project_disc_out_of_obstacles(  # pyright: ignore[reportUnusedFunction]
     )
 
 
-def _resolve_agent_agent_overlaps(  # pyright: ignore[reportUnusedFunction]
+def _resolve_agent_agent_overlaps(
     agent_positions: Array,
     agent_radii: Array,
     active_mask: Array,
     alive_mask: Array,
     projection_passes: int = DEFAULT_AGENT_PROJECTION_PASSES,
 ) -> Array:
-    """Resolve body blocking between active alive agents.
-
-    Allied and enemy agents both occupy physical space. This helper enforces
-    non-overlap for active alive slots while leaving padded, inactive, and dead
-    slots fixed. It is pure agent-agent geometry: map bounds and static
-    obstacles are restored by ``project_movement_with_geometry`` when these
-    primitives are composed.
-
-    Args:
-        agent_positions: Slot-aligned agent centers with shape
-            ``(MAX_AGENT_SLOTS, 2)``.
-        agent_radii: Slot-aligned body radii with shape ``(MAX_AGENT_SLOTS,)``.
-        active_mask: Boolean mask for real, non-padding slots.
-        alive_mask: Boolean mask for currently alive slots.
-        projection_passes: Fixed number of pairwise projection passes.
-
-    Returns:
-        Slot-aligned positions after fixed-pass active-alive body projection.
-    """
-    participates = jnp.logical_and(active_mask, alive_mask)
+    """Reduce active-alive body overlap with fixed pairwise passes."""
+    participants = jnp.logical_and(active_mask, alive_mask)
 
     def _projection_pass(
         pass_index: int,
         current_agent_positions: Array,
     ) -> Array:
+        """Run one fixed sweep over all agent pairs."""
         del pass_index
 
         def _resolve_pairs_for_agent(
             agent_a_index: int,
             current_positions: Array,
         ) -> Array:
+            """Resolve pairs anchored at one agent slot."""
 
             def _resolve_pair(
                 agent_b_index: int,
                 pair_positions: Array,
             ) -> Array:
-                pair_participates = jnp.logical_and(
-                    participates[agent_a_index],
-                    participates[agent_b_index],
+                """Resolve one ordered agent pair when both slots participate."""
+                # The triangular sweep visits each pair once without constructing
+                # a dynamic pair list, which keeps JAX shapes static.
+                pair_participants = jnp.logical_and(
+                    participants[agent_a_index],
+                    participants[agent_b_index],
                 )
 
                 distance_between_agents = cast(
@@ -786,7 +732,7 @@ def _resolve_agent_agent_overlaps(  # pyright: ignore[reportUnusedFunction]
                 sum_of_radii = agent_radii[agent_a_index] + agent_radii[agent_b_index]
                 pair_overlaps = sum_of_radii > distance_between_agents
                 should_resolve_pair = jnp.logical_and(
-                    pair_participates,
+                    pair_participants,
                     pair_overlaps,
                 )
 
@@ -844,27 +790,12 @@ def _segment_intersects_circle(
     circle_center: Array,
     circle_radius: Array | float,
 ) -> Array:
-    """Return whether a line-of-sight segment intersects a circular pillar.
-
-    This helper tests the finite closed segment from ``segment_start`` to
-    ``segment_end``, not the infinite line through those points. Endpoints count
-    as part of the segment. Tangent and near-tangent contact count as blocked
-    LOS for the simulator's visibility and targetability rules. Degenerate
-    zero-length segments are treated as point-vs-circle queries.
-
-    Args:
-        segment_start: Segment start point with shape ``(2,)``.
-        segment_end: Segment end point with shape ``(2,)``.
-        circle_center: Circle center with shape ``(2,)``.
-        circle_radius: Circle radius in world units.
-
-    Returns:
-        Scalar boolean JAX array indicating whether the segment touches or
-        crosses the circle within the geometry tolerance.
-    """
+    """Return whether a finite segment intersects a circle."""
     v = segment_end - segment_start
     u = circle_center - segment_start
 
+    # Project the circle center onto the finite segment; the denominator is
+    # guarded so zero-length segments become point-vs-circle checks.
     alpha = jnp.dot(u, v) / jnp.maximum(jnp.dot(v, v), GEOMETRY_EPSILON)
     alpha_clipped = jnp.clip(alpha, 0.0, 1.0)
 
@@ -884,25 +815,9 @@ def _segment_intersects_rotated_rect(
     height: Array | float,
     theta: Array | float,
 ) -> Array:
-    """Return whether a line-of-sight segment intersects a rotated wall.
-
-    This is a pure finite-segment-vs-rotated-rectangle primitive. It does not
-    inspect obstacle-row type or active fields; obstacle dispatch belongs in
-    ``has_clear_line_of_sight``. Endpoints count as part of the segment, and
-    edge contact counts as intersection.
-
-    Args:
-        segment_start: Segment start point with shape ``(2,)``.
-        segment_end: Segment end point with shape ``(2,)``.
-        rectangle_center: Rectangle center point with shape ``(2,)``.
-        width: Rectangle width in its local x-axis.
-        height: Rectangle height in its local y-axis.
-        theta: Rectangle rotation angle in radians.
-
-    Returns:
-        Scalar boolean JAX array indicating whether the segment touches or
-        crosses the rotated rectangle.
-    """
+    """Return whether a finite segment intersects a rotated rectangle."""
+    # Rotate the query segment into rectangle-local space, then use a slab test
+    # against the axis-aligned local bounds.
     world_to_local = _create_2d_rotation_matrix(-theta)
     segment_start_local = world_to_local @ (segment_start - rectangle_center)
     segment_end_local = world_to_local @ (segment_end - rectangle_center)
@@ -937,6 +852,8 @@ def _segment_intersects_rotated_rect(
     alpha_entry_y = jnp.minimum(alpha_y_1, alpha_y_2)
     alpha_exit_y = jnp.maximum(alpha_y_1, alpha_y_2)
 
+    # Parallel segments either span the entire slab when already inside that axis
+    # or miss it entirely; infinities encode those two cases without branching.
     alpha_entry_x = jnp.where(
         vertical_line_segment,
         jnp.where(x_inside_rectangle_bounds, -jnp.inf, jnp.inf),
@@ -970,15 +887,148 @@ def _segment_intersects_rotated_rect(
 # Public geometry API ---
 
 
-def project_movement_with_geometry() -> Array:
-    """Apply intended movement while preserving map and body-blocking constraints.
+def project_movement_with_geometry(
+    agent_positions: Array,
+    agent_radii: Array,
+    intended_movement_deltas: Array,
+    active_mask: Array,
+    alive_mask: Array,
+    map_width: Array | float,
+    map_height: Array | float,
+    obstacles: Array,
+    agent_agent_overlap_projection_passes: int = 1,
+    collision_projection_passes: int = DEFAULT_AGENT_PROJECTION_PASSES,
+    movement_substeps: int = DEFAULT_MOVEMENT_SUBSTEPS,
+) -> Array:
+    """Project intended per-slot movement through shared geometry constraints.
 
-    This is the public movement-geometry composition point for transition code.
-    It will split movement into fixed substeps, project active alive agents
-    against bounds and obstacles, and run fixed-pass agent-agent overlap
-    resolution. Inactive or dead slots must preserve their original positions.
+    This helper is the public array-level geometry primitive that ``env.step``
+    will call in the next milestone step. It accepts already-computed movement
+    deltas; action-id semantics belong outside this module. Final committed
+    positions prioritize static world validity. Agent-agent body blocking uses a
+    deterministic fixed-pass projection, which fully separates ordinary feasible
+    cases and may leave bounded residual overlap in pinned or crowded cases.
+
+    Args:
+        agent_positions: Current slot-aligned centers with shape
+            ``(MAX_AGENT_SLOTS, 2)``.
+        agent_radii: Slot-aligned body radii with shape ``(MAX_AGENT_SLOTS,)``.
+        intended_movement_deltas: Slot-aligned movement deltas with shape
+            ``(MAX_AGENT_SLOTS, 2)``.
+        active_mask: Boolean mask for real, non-padding agent slots.
+        alive_mask: Boolean mask for currently alive agent slots.
+        map_width: Width of the rectangular battleground.
+        map_height: Height of the rectangular battleground.
+        obstacles: Fixed obstacle table with shape
+            ``(MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES)``.
+        agent_agent_overlap_projection_passes: Fixed pairwise overlap sweeps
+            inside each collision projection pass.
+        collision_projection_passes: Fixed passes that compose boundary,
+            obstacle, and agent-agent projection during each movement substep.
+        movement_substeps: Fixed number of movement increments used to apply
+            the provided deltas.
+
+    Returns:
+        Slot-aligned projected positions. Inactive and dead slots preserve their
+        original positions.
     """
-    raise NotImplementedError
+    original_agent_positions = agent_positions
+
+    participant_mask = jnp.logical_and(active_mask, alive_mask)[:, None]
+
+    substep_deltas = intended_movement_deltas / movement_substeps
+    masked_substep_deltas = jnp.where(
+        participant_mask,
+        substep_deltas,
+        jnp.zeros_like(substep_deltas),
+    )
+
+    project_disc_to_bounds_vmap = jax.vmap(
+        _project_disc_to_bounds,
+        in_axes=(0, 0, None, None),
+        out_axes=0,
+    )
+
+    project_disc_out_of_obstacles_vmap = jax.vmap(
+        _project_disc_out_of_obstacles,
+        in_axes=(0, 0, None),
+        out_axes=0,
+    )
+
+    def _project_to_bounds(candidate_positions: Array) -> Array:
+        """Project all slots into map bounds."""
+        return project_disc_to_bounds_vmap(
+            candidate_positions,
+            agent_radii,
+            map_width,
+            map_height,
+        )
+
+    def _project_out_of_obstacles(candidate_positions: Array) -> Array:
+        """Project all slots out of static obstacles."""
+        return project_disc_out_of_obstacles_vmap(
+            candidate_positions,
+            agent_radii,
+            obstacles,
+        )
+
+    def _project_collision_pass(
+        pass_index: int,
+        current_positions: Array,
+    ) -> Array:
+        """Run one fixed collision-composition pass."""
+        del pass_index
+
+        current_positions = _project_to_bounds(current_positions)
+        current_positions = _project_out_of_obstacles(current_positions)
+
+        return _resolve_agent_agent_overlaps(
+            current_positions,
+            agent_radii,
+            active_mask,
+            alive_mask,
+            agent_agent_overlap_projection_passes,
+        )
+
+    def _project_movement_substep(
+        substep_index: int,
+        current_positions: Array,
+    ) -> Array:
+        """Apply and project one fixed movement substep."""
+        del substep_index
+
+        current_positions = current_positions + masked_substep_deltas
+
+        current_positions = cast(
+            Array,
+            jax.lax.fori_loop(
+                0,
+                collision_projection_passes,
+                _project_collision_pass,
+                current_positions,
+            ),
+        )
+
+        # Agent-agent projection can push a slot back into static geometry. The
+        # final cleanup makes map bounds and obstacles the hard committed state.
+        current_positions = _project_out_of_obstacles(current_positions)
+        current_positions = _project_to_bounds(current_positions)
+
+        return jnp.where(
+            participant_mask,
+            current_positions,
+            original_agent_positions,
+        )
+
+    return cast(
+        Array,
+        jax.lax.fori_loop(
+            0,
+            movement_substeps,
+            _project_movement_substep,
+            original_agent_positions,
+        ),
+    )
 
 
 def has_clear_line_of_sight(
