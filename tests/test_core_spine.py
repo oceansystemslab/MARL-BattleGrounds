@@ -89,6 +89,7 @@ def _config(
     max_steps: int = 1000,
     obstacles: Array | None = None,
 ) -> EnvConfig:
+    """Return a deterministic test config."""
     return EnvConfig(
         team_size=team_size,
         max_steps=max_steps,
@@ -103,6 +104,7 @@ def _config(
 
 
 def _zero_action() -> Action:
+    """Return a no-op action for every agent slot."""
     return Action(
         move=jnp.zeros(shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32),
         target=jnp.zeros(shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32),
@@ -111,6 +113,7 @@ def _zero_action() -> Action:
 
 
 def _zero_observation() -> Observation:
+    """Return a zero-filled observation."""
     return Observation(
         self_features=jnp.zeros(
             shape=(MAX_AGENT_SLOTS, SELF_FEATURES), dtype=jnp.float32
@@ -150,24 +153,28 @@ def _zero_observation() -> Observation:
 
 
 def _expected_self_visibility(active_alive_mask: Array) -> Array:
+    """Return the Step 1 self-visibility mask."""
     team_self_visibility = jnp.identity(MAX_AGENTS_PER_TEAM, dtype=bool)
     all_slots_self_visibility = jnp.vstack((team_self_visibility, team_self_visibility))
     return jnp.logical_and(all_slots_self_visibility, active_alive_mask.reshape(-1, 1))
 
 
 def _expected_step1_target_rows(num_rows: int) -> Array:
+    """Return Step 1 target-mask rows."""
     none_column = jnp.ones(shape=(num_rows, 1), dtype=bool)
     unit_columns = jnp.zeros(shape=(num_rows, NUM_TARGET_ACTIONS - 1), dtype=bool)
     return jnp.concat((none_column, unit_columns), axis=1)
 
 
 def _expected_step1_ultimate_rows(num_rows: int) -> Array:
+    """Return Step 1 ultimate-mask rows."""
     noop_column = jnp.ones(shape=(num_rows, 1), dtype=bool)
     use_column = jnp.zeros(shape=(num_rows, NUM_ULTIMATE_ACTIONS - 1), dtype=bool)
     return jnp.concat((noop_column, use_column), axis=1)
 
 
 def _assert_state_contract(state: EnvState) -> None:
+    """Assert the EnvState shape and dtype contract."""
     assert state.step_count.shape == ()
     assert state.step_count.dtype == jnp.int32
 
@@ -191,6 +198,7 @@ def _assert_state_contract(state: EnvState) -> None:
 
 
 def _assert_observation_contract(observation: Observation) -> None:
+    """Assert the Observation shape and dtype contract."""
     assert observation.self_features.shape == (MAX_AGENT_SLOTS, SELF_FEATURES)
     assert observation.self_features.dtype == jnp.float32
 
@@ -251,6 +259,7 @@ def _assert_observation_contract(observation: Observation) -> None:
 
 
 def _assert_action_mask_contract(action_mask: ActionMask) -> None:
+    """Assert the ActionMask shape and dtype contract."""
     assert action_mask.move.shape == (MAX_AGENT_SLOTS, NUM_MOVE_ACTIONS)
     assert action_mask.move.dtype == bool
 
@@ -269,6 +278,7 @@ def _assert_step1_action_mask_values(
     active_indices: Array,
     inactive_indices: Array,
 ) -> None:
+    """Assert Step 1 action-mask values."""
     active_count = int(active_indices.shape[0])
 
     assert jnp.all(action_mask.move[active_indices, :])
@@ -292,6 +302,7 @@ def _assert_step1_observation_values(
     config: EnvConfig,
     active_alive_mask: Array,
 ) -> None:
+    """Assert Step 1 observation values."""
     expected_map_features = jnp.broadcast_to(
         config.obstacles[None, :, :],
         (MAX_AGENT_SLOTS, MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES),
@@ -672,12 +683,13 @@ def test_step_can_run_in_scanned_rollout() -> None:
     state, _, _, _ = reset(config, key)
     joint_action = _zero_action()
 
-    def step_wrapper(
+    def _step_wrapper(
         state: EnvState,
         key: Array,
         config: EnvConfig = config,
         joint_action: Action = joint_action,
     ) -> tuple[EnvState, Array]:
+        """Run one rollout step for scan."""
         new_state, _, _, _, _, _ = step(config, state, joint_action, key)
         return new_state, new_state.step_count
 
@@ -685,7 +697,7 @@ def test_step_can_run_in_scanned_rollout() -> None:
     assert keys.shape == (horizon,)
 
     new_state, history = jax.lax.scan(
-        f=step_wrapper, init=state, xs=keys, length=horizon
+        f=_step_wrapper, init=state, xs=keys, length=horizon
     )
 
     assert new_state.step_count == horizon

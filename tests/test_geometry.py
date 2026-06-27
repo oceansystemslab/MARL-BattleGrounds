@@ -22,6 +22,7 @@ from marl_battlegrounds.core.geometry import (
     _segment_intersects_circle,
     _segment_intersects_rotated_rect,
     has_clear_line_of_sight,
+    project_movement_with_geometry,
 )
 from marl_battlegrounds.core.types import (
     ENVIRONMENT_DIMENSIONS,
@@ -215,6 +216,20 @@ def _mask_with_true_slots(*slots: int) -> Array:
     return mask
 
 
+def _movement_deltas_array_with_rows(*rows: tuple[int, Array]) -> Array:
+    """Create a padded movement-delta array with selected slots populated."""
+    intended_movement_deltas = jnp.zeros(
+        (MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS),
+        dtype=jnp.float32,
+    )
+
+    for slot, movement_delta in rows:
+        assert 0 <= slot < MAX_AGENT_SLOTS
+        intended_movement_deltas = intended_movement_deltas.at[slot].set(movement_delta)
+
+    return intended_movement_deltas
+
+
 def _assert_center_close(result: Array, expected: Array) -> None:
     """Assert that a geometry helper returned the expected float32 center."""
     assert result.shape == (2,)
@@ -248,6 +263,76 @@ def _assert_agent_positions_close(result: Array, expected: Array) -> None:
             rtol=0.0,
         )
     )
+
+
+def _assert_agent_positions_are_finite(agent_positions: Array) -> None:
+    """Assert that projected positions contain no NaNs or infinities."""
+    assert bool(jnp.all(jnp.isfinite(agent_positions)))
+
+
+def _assert_active_alive_agents_inside_bounds(
+    agent_positions: Array,
+    agent_radii: Array,
+    active_mask: Array,
+    alive_mask: Array,
+    map_width: Array | float,
+    map_height: Array | float,
+) -> None:
+    """Assert the hard map-boundary invariant for active alive agents."""
+    width = float(map_width)
+    height = float(map_height)
+
+    for slot in range(MAX_AGENT_SLOTS):
+        participates = bool(active_mask[slot]) and bool(alive_mask[slot])
+        if not participates:
+            continue
+
+        radius = float(agent_radii[slot])
+        x_position = float(agent_positions[slot, 0])
+        y_position = float(agent_positions[slot, 1])
+
+        assert x_position >= radius - GEOMETRY_TOLERANCE
+        assert x_position <= width - radius + GEOMETRY_TOLERANCE
+        assert y_position >= radius - GEOMETRY_TOLERANCE
+        assert y_position <= height - radius + GEOMETRY_TOLERANCE
+
+
+def _max_active_alive_agent_overlap_residual(
+    agent_positions: Array,
+    agent_radii: Array,
+    active_mask: Array,
+    alive_mask: Array,
+) -> float:
+    """Return the largest fixed-pass residual overlap among active alive agents."""
+    max_residual = 0.0
+
+    for first_slot in range(MAX_AGENT_SLOTS):
+        first_participates = bool(active_mask[first_slot]) and bool(
+            alive_mask[first_slot]
+        )
+        if not first_participates:
+            continue
+
+        for second_slot in range(first_slot + 1, MAX_AGENT_SLOTS):
+            second_participates = bool(active_mask[second_slot]) and bool(
+                alive_mask[second_slot]
+            )
+            if not second_participates:
+                continue
+
+            center_distance = cast(
+                Array,
+                jnp.linalg.norm(
+                    agent_positions[first_slot] - agent_positions[second_slot]
+                ),
+            )
+            minimum_distance = agent_radii[first_slot] + agent_radii[second_slot]
+            residual = float(
+                jnp.maximum(0.0, minimum_distance - center_distance),
+            )
+            max_residual = max(max_residual, residual)
+
+    return max_residual
 
 
 # Tests ---
@@ -1631,6 +1716,451 @@ def test_resolve_agent_agent_overlaps_jit_compiles() -> None:
     expected = _agent_positions_array_with_rows(
         (0, jnp.array([-0.5, 0.0], dtype=jnp.float32)),
         (1, jnp.array([0.5, 0.0], dtype=jnp.float32)),
+    )
+
+    _assert_agent_positions_close(result, expected)
+
+
+@pytest.mark.parametrize(
+    (
+        "intended_movement_deltas",
+        "agent_positions",
+        "agent_radii",
+        "active_mask",
+        "alive_mask",
+        "map_width",
+        "map_height",
+        "obstacles",
+        "expected",
+        "agent_agent_overlap_projection_passes",
+        "collision_projection_passes",
+        "movement_substeps",
+    ),
+    [
+        pytest.param(
+            _movement_deltas_array_with_rows(),
+            _agent_positions_array_with_rows(
+                (0, jnp.array([5.0, 5.0], dtype=jnp.float32)),
+            ),
+            _agent_radii_array_with_rows((0, 0.5)),
+            _mask_with_true_slots(0),
+            _mask_with_true_slots(0),
+            20.0,
+            20.0,
+            _obstacle_array_with_rows(),
+            _agent_positions_array_with_rows(
+                (0, jnp.array([5.0, 5.0], dtype=jnp.float32)),
+            ),
+            1,
+            1,
+            1,
+            id="zero_movement_preserves_valid_active_alive_position",
+        ),
+        pytest.param(
+            _movement_deltas_array_with_rows(
+                (0, jnp.array([4.0, -1.0], dtype=jnp.float32)),
+            ),
+            _agent_positions_array_with_rows(
+                (0, jnp.array([5.0, 5.0], dtype=jnp.float32)),
+            ),
+            _agent_radii_array_with_rows((0, 0.5)),
+            _mask_with_true_slots(0),
+            _mask_with_true_slots(0),
+            20.0,
+            20.0,
+            _obstacle_array_with_rows(),
+            _agent_positions_array_with_rows(
+                (0, jnp.array([9.0, 4.0], dtype=jnp.float32)),
+            ),
+            1,
+            1,
+            4,
+            id="active_alive_agent_moves_by_full_delta_across_substeps",
+        ),
+        pytest.param(
+            _movement_deltas_array_with_rows(
+                (0, jnp.array([10.0, 0.0], dtype=jnp.float32)),
+                (1, jnp.array([0.0, 10.0], dtype=jnp.float32)),
+            ),
+            _agent_positions_array_with_rows(
+                (0, jnp.array([5.0, 5.0], dtype=jnp.float32)),
+                (1, jnp.array([6.0, 6.0], dtype=jnp.float32)),
+            ),
+            _agent_radii_array_with_rows((0, 0.5), (1, 0.5)),
+            _mask_with_true_slots(1),
+            _mask_with_true_slots(0),
+            20.0,
+            20.0,
+            _obstacle_array_with_rows(),
+            _agent_positions_array_with_rows(
+                (0, jnp.array([5.0, 5.0], dtype=jnp.float32)),
+                (1, jnp.array([6.0, 6.0], dtype=jnp.float32)),
+            ),
+            1,
+            1,
+            4,
+            id="inactive_and_dead_slots_preserve_original_positions",
+        ),
+        pytest.param(
+            _movement_deltas_array_with_rows(
+                (0, jnp.array([5.0, 0.0], dtype=jnp.float32)),
+            ),
+            _agent_positions_array_with_rows(
+                (0, jnp.array([19.0, 10.0], dtype=jnp.float32)),
+            ),
+            _agent_radii_array_with_rows((0, 0.5)),
+            _mask_with_true_slots(0),
+            _mask_with_true_slots(0),
+            20.0,
+            20.0,
+            _obstacle_array_with_rows(),
+            _agent_positions_array_with_rows(
+                (0, jnp.array([19.5, 10.0], dtype=jnp.float32)),
+            ),
+            1,
+            1,
+            1,
+            id="movement_past_right_boundary_is_projected_inside",
+        ),
+        pytest.param(
+            _movement_deltas_array_with_rows(
+                (0, jnp.array([1.0, 0.0], dtype=jnp.float32)),
+            ),
+            _agent_positions_array_with_rows(
+                (0, jnp.array([8.0, 10.0], dtype=jnp.float32)),
+            ),
+            _agent_radii_array_with_rows((0, 0.5)),
+            _mask_with_true_slots(0),
+            _mask_with_true_slots(0),
+            20.0,
+            20.0,
+            _obstacle_array_with_rows(
+                (
+                    0,
+                    _pillar_obstacle(
+                        jnp.array([10.0, 10.0], dtype=jnp.float32),
+                        1.0,
+                    ),
+                ),
+            ),
+            _agent_positions_array_with_rows(
+                (0, jnp.array([8.5, 10.0], dtype=jnp.float32)),
+            ),
+            1,
+            1,
+            1,
+            id="movement_into_pillar_is_projected_out",
+        ),
+        pytest.param(
+            _movement_deltas_array_with_rows(
+                (1, jnp.array([-1.5, 0.0], dtype=jnp.float32)),
+            ),
+            _agent_positions_array_with_rows(
+                (0, jnp.array([5.0, 5.0], dtype=jnp.float32)),
+                (1, jnp.array([7.0, 5.0], dtype=jnp.float32)),
+            ),
+            _agent_radii_array_with_rows((0, 0.5), (1, 0.5)),
+            _mask_with_true_slots(0, 1),
+            _mask_with_true_slots(0, 1),
+            20.0,
+            20.0,
+            _obstacle_array_with_rows(),
+            _agent_positions_array_with_rows(
+                (0, jnp.array([4.75, 5.0], dtype=jnp.float32)),
+                (1, jnp.array([5.75, 5.0], dtype=jnp.float32)),
+            ),
+            1,
+            1,
+            1,
+            id="movement_into_active_alive_agent_resolves_overlap",
+        ),
+    ],
+)
+def test_project_movement_with_geometry(
+    intended_movement_deltas: Array,
+    agent_positions: Array,
+    agent_radii: Array,
+    active_mask: Array,
+    alive_mask: Array,
+    map_width: Array | float,
+    map_height: Array | float,
+    obstacles: Array,
+    expected: Array,
+    agent_agent_overlap_projection_passes: int,
+    collision_projection_passes: int,
+    movement_substeps: int,
+) -> None:
+    result = project_movement_with_geometry(
+        agent_positions,
+        agent_radii,
+        intended_movement_deltas,
+        active_mask,
+        alive_mask,
+        map_width,
+        map_height,
+        obstacles,
+        agent_agent_overlap_projection_passes,
+        collision_projection_passes,
+        movement_substeps,
+    )
+
+    _assert_agent_positions_close(result, expected)
+
+
+def test_project_movement_with_geometry_projects_agent_out_of_wall() -> None:
+    wall = _wall_obstacle(
+        jnp.array([10.0, 10.0], dtype=jnp.float32),
+        width=2.0,
+        height=2.0,
+        theta=0.0,
+    )
+
+    intended_movement_deltas = _movement_deltas_array_with_rows(
+        (0, jnp.array([2.25, 0.0], dtype=jnp.float32)),
+    )
+    agent_positions = _agent_positions_array_with_rows(
+        (0, jnp.array([7.0, 10.0], dtype=jnp.float32)),
+    )
+    agent_radii = _agent_radii_array_with_rows((0, 0.5))
+    active_mask = _mask_with_true_slots(0)
+    alive_mask = _mask_with_true_slots(0)
+
+    result = project_movement_with_geometry(
+        agent_positions,
+        agent_radii,
+        intended_movement_deltas,
+        active_mask,
+        alive_mask,
+        20.0,
+        20.0,
+        _obstacle_array_with_rows((0, wall)),
+        1,
+        1,
+        1,
+    )
+
+    expected = _agent_positions_array_with_rows(
+        (0, jnp.array([8.5, 10.0], dtype=jnp.float32)),
+    )
+
+    _assert_agent_positions_close(result, expected)
+
+
+def test_project_movement_keeps_static_validity_with_bounded_agent_residual() -> None:
+    intended_movement_deltas = _movement_deltas_array_with_rows(
+        (1, jnp.array([-1.0, 0.0], dtype=jnp.float32)),
+    )
+    agent_positions = _agent_positions_array_with_rows(
+        (0, jnp.array([0.5, 10.0], dtype=jnp.float32)),
+        (1, jnp.array([2.0, 10.0], dtype=jnp.float32)),
+    )
+    agent_radii = _agent_radii_array_with_rows((0, 0.5), (1, 0.5))
+    active_mask = _mask_with_true_slots(0, 1)
+    alive_mask = _mask_with_true_slots(0, 1)
+
+    result = project_movement_with_geometry(
+        agent_positions,
+        agent_radii,
+        intended_movement_deltas,
+        active_mask,
+        alive_mask,
+        20.0,
+        20.0,
+        _obstacle_array_with_rows(),
+        1,
+        1,
+        1,
+    )
+
+    _assert_agent_positions_are_finite(result)
+    _assert_active_alive_agents_inside_bounds(
+        result,
+        agent_radii,
+        active_mask,
+        alive_mask,
+        20.0,
+        20.0,
+    )
+
+    residual = _max_active_alive_agent_overlap_residual(
+        result,
+        agent_radii,
+        active_mask,
+        alive_mask,
+    )
+
+    # This is the boundary-pinned ordering hazard: final bounds cleanup keeps the
+    # agents static-valid, but it can reintroduce a small body-blocking residual.
+    assert residual > 0.0
+    assert residual <= 0.25 + GEOMETRY_TOLERANCE
+
+
+def test_project_movement_more_collision_passes_reduce_boundary_residual() -> None:
+    intended_movement_deltas = _movement_deltas_array_with_rows(
+        (1, jnp.array([-1.0, 0.0], dtype=jnp.float32)),
+    )
+    agent_positions = _agent_positions_array_with_rows(
+        (0, jnp.array([0.5, 10.0], dtype=jnp.float32)),
+        (1, jnp.array([2.0, 10.0], dtype=jnp.float32)),
+    )
+    agent_radii = _agent_radii_array_with_rows((0, 0.5), (1, 0.5))
+    active_mask = _mask_with_true_slots(0, 1)
+    alive_mask = _mask_with_true_slots(0, 1)
+    obstacles = _obstacle_array_with_rows()
+
+    one_pass_result = project_movement_with_geometry(
+        agent_positions,
+        agent_radii,
+        intended_movement_deltas,
+        active_mask,
+        alive_mask,
+        20.0,
+        20.0,
+        obstacles,
+        1,
+        1,
+        1,
+    )
+    four_pass_result = project_movement_with_geometry(
+        agent_positions,
+        agent_radii,
+        intended_movement_deltas,
+        active_mask,
+        alive_mask,
+        20.0,
+        20.0,
+        obstacles,
+        1,
+        4,
+        1,
+    )
+
+    _assert_agent_positions_are_finite(one_pass_result)
+    _assert_agent_positions_are_finite(four_pass_result)
+    _assert_active_alive_agents_inside_bounds(
+        one_pass_result,
+        agent_radii,
+        active_mask,
+        alive_mask,
+        20.0,
+        20.0,
+    )
+    _assert_active_alive_agents_inside_bounds(
+        four_pass_result,
+        agent_radii,
+        active_mask,
+        alive_mask,
+        20.0,
+        20.0,
+    )
+
+    one_pass_residual = _max_active_alive_agent_overlap_residual(
+        one_pass_result,
+        agent_radii,
+        active_mask,
+        alive_mask,
+    )
+    four_pass_residual = _max_active_alive_agent_overlap_residual(
+        four_pass_result,
+        agent_radii,
+        active_mask,
+        alive_mask,
+    )
+
+    # Extra fixed passes should improve the residual in this pressure case even
+    # though exact separation is not the hard final invariant.
+    assert one_pass_residual > 0.0
+    assert four_pass_residual < one_pass_residual
+
+
+def test_project_movement_overconstrained_crowd_stays_finite_and_static_valid() -> None:
+    intended_movement_deltas = _movement_deltas_array_with_rows()
+    agent_positions = _agent_positions_array_with_rows(
+        (0, jnp.array([0.5, 0.5], dtype=jnp.float32)),
+        (1, jnp.array([0.5, 0.5], dtype=jnp.float32)),
+        (2, jnp.array([0.5, 0.5], dtype=jnp.float32)),
+    )
+    agent_radii = _agent_radii_array_with_rows((0, 0.5), (1, 0.5), (2, 0.5))
+    active_mask = _mask_with_true_slots(0, 1, 2)
+    alive_mask = _mask_with_true_slots(0, 1, 2)
+
+    result = project_movement_with_geometry(
+        agent_positions,
+        agent_radii,
+        intended_movement_deltas,
+        active_mask,
+        alive_mask,
+        1.0,
+        1.0,
+        _obstacle_array_with_rows(),
+        1,
+        4,
+        1,
+    )
+
+    _assert_agent_positions_are_finite(result)
+    _assert_active_alive_agents_inside_bounds(
+        result,
+        agent_radii,
+        active_mask,
+        alive_mask,
+        1.0,
+        1.0,
+    )
+
+    residual = _max_active_alive_agent_overlap_residual(
+        result,
+        agent_radii,
+        active_mask,
+        alive_mask,
+    )
+
+    # The solver must stay finite and static-valid even when the map cannot fit
+    # every active body without overlap.
+    assert residual > 0.0
+    assert residual <= 1.0 + GEOMETRY_TOLERANCE
+
+
+def test_project_movement_with_geometry_jit_compiles_with_static_args() -> None:
+    intended_movement_deltas = _movement_deltas_array_with_rows(
+        (0, jnp.array([4.0, -1.0], dtype=jnp.float32)),
+    )
+    agent_positions = _agent_positions_array_with_rows(
+        (0, jnp.array([5.0, 5.0], dtype=jnp.float32)),
+    )
+    agent_radii = _agent_radii_array_with_rows((0, 0.5))
+    active_mask = _mask_with_true_slots(0)
+    alive_mask = _mask_with_true_slots(0)
+    obstacles = _obstacle_array_with_rows()
+
+    compiled_project_movement = jax.jit(
+        project_movement_with_geometry,
+        static_argnames=(
+            "agent_agent_overlap_projection_passes",
+            "collision_projection_passes",
+            "movement_substeps",
+        ),
+    )
+
+    result = cast(
+        Array,
+        compiled_project_movement(
+            agent_positions,
+            agent_radii,
+            intended_movement_deltas,
+            active_mask,
+            alive_mask,
+            20.0,
+            20.0,
+            obstacles,
+            agent_agent_overlap_projection_passes=1,
+            collision_projection_passes=1,
+            movement_substeps=4,
+        ),
+    )
+
+    expected = _agent_positions_array_with_rows(
+        (0, jnp.array([9.0, 4.0], dtype=jnp.float32)),
     )
 
     _assert_agent_positions_close(result, expected)
