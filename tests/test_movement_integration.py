@@ -213,6 +213,40 @@ def _state_with_single_active_alive_agent(
     )
 
 
+def _state_with_two_agents(
+    agent_a_position: Array,
+    agent_b_position: Array,
+    agent_a_active_flag: bool = True,
+    agent_a_alive_flag: bool = True,
+    agent_b_active_flag: bool = True,
+    agent_b_alive_flag: bool = True,
+    *,
+    radius: float = 0.5,
+    step_count: int = 0,
+) -> EnvState:
+    """Create a valid state with two agents and configurable participation flags."""
+    active_mask = jnp.zeros((MAX_AGENT_SLOTS,), dtype=bool)
+    alive_mask = jnp.zeros((MAX_AGENT_SLOTS,), dtype=bool)
+
+    active_mask = active_mask.at[0].set(agent_a_active_flag)
+    alive_mask = alive_mask.at[0].set(agent_a_alive_flag)
+
+    active_mask = active_mask.at[1].set(agent_b_active_flag)
+    alive_mask = alive_mask.at[1].set(agent_b_alive_flag)
+
+    return EnvState(
+        step_count=jnp.array(step_count, dtype=jnp.int32),
+        agent_positions=_agent_positions_array_with_rows(
+            (0, agent_a_position),
+            (1, agent_b_position),
+        ),
+        agent_radii=_agent_radii_array_with_rows((0, radius), (1, radius)),
+        team_ids=_team_ids(),
+        active_mask=active_mask,
+        alive_mask=alive_mask,
+    )
+
+
 def _joint_action_with_moves(*rows: tuple[int, int]) -> Action:
     """Create a slot-aligned joint action with selected movement overrides."""
     joint_action_moves = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32)
@@ -242,6 +276,29 @@ def _assert_center_close(result: Array, expected: Array) -> None:
             rtol=0.0,
         )
     )
+
+
+def _assert_agents_do_not_overlap(
+    agent_positions: Array,
+    *,
+    slot_a: int,
+    slot_b: int,
+    radius_a: float,
+    radius_b: float,
+) -> None:
+    """Assert that two agent discs are separated."""
+    center_a = agent_positions[slot_a]
+    center_b = agent_positions[slot_b]
+
+    distance = cast(Array, jnp.linalg.norm(center_a - center_b))
+    minimum_valid_distance = radius_a + radius_b
+
+    assert bool(distance >= minimum_valid_distance - GEOMETRY_TOLERANCE)
+
+
+def _assert_agent_positions_are_finite(agent_positions: Array) -> None:
+    """Assert that all slot-aligned positions are finite."""
+    assert bool(jnp.all(jnp.isfinite(agent_positions)))
 
 
 def _assert_state_contract(state: EnvState) -> None:
@@ -842,4 +899,148 @@ def test_step_projects_active_alive_agent_outside_rotated_wall() -> None:
         wall_width=wall_width,
         wall_height=wall_height,
         theta=float(theta),
+    )
+
+
+def test_inactive_slots_with_nonstay_action_preserve_original_positions() -> None:
+    config = _deterministic_config()
+    key = jax.random.key(42)
+
+    agent_a_position = jnp.array([10.0, 10.0], dtype=jnp.float32)
+    agent_b_position = jnp.array([12.0, 10.0], dtype=jnp.float32)
+
+    state = _state_with_two_agents(
+        agent_a_position,
+        agent_b_position,
+        agent_a_active_flag=False,
+        agent_a_alive_flag=True,
+        agent_b_active_flag=False,
+        agent_b_alive_flag=True,
+    )
+
+    joint_action = _joint_action_with_moves(
+        (0, MOVE_EAST),
+        (1, MOVE_WEST),
+    )
+
+    next_state, *_ = step(config, state, joint_action, key)
+
+    _assert_center_close(next_state.agent_positions[0], agent_a_position)
+    _assert_center_close(next_state.agent_positions[1], agent_b_position)
+
+
+def test_dead_slots_with_nonstay_action_preserve_original_positions() -> None:
+    config = _deterministic_config()
+    key = jax.random.key(42)
+
+    agent_a_position = jnp.array([10.0, 10.0], dtype=jnp.float32)
+    agent_b_position = jnp.array([12.0, 10.0], dtype=jnp.float32)
+
+    state = _state_with_two_agents(
+        agent_a_position,
+        agent_b_position,
+        agent_a_active_flag=True,
+        agent_a_alive_flag=False,
+        agent_b_active_flag=True,
+        agent_b_alive_flag=False,
+    )
+
+    joint_action = _joint_action_with_moves(
+        (0, MOVE_EAST),
+        (1, MOVE_WEST),
+    )
+
+    next_state, *_ = step(config, state, joint_action, key)
+
+    _assert_center_close(next_state.agent_positions[0], agent_a_position)
+    _assert_center_close(next_state.agent_positions[1], agent_b_position)
+
+
+@pytest.mark.parametrize(
+    ("agent_b_active_flag", "agent_b_alive_flag"),
+    [
+        pytest.param(False, True, id="inactive_alive_neighbor"),
+        pytest.param(True, False, id="active_dead_neighbor"),
+        pytest.param(False, False, id="inactive_dead_neighbor"),
+    ],
+)
+def test_active_alive_slot_moves_while_nonparticipant_neighbor_is_preserved(
+    agent_b_active_flag: bool,
+    agent_b_alive_flag: bool,
+) -> None:
+    config = _deterministic_config()
+    key = jax.random.key(42)
+
+    agent_a_position = jnp.array([10.0, 10.0], dtype=jnp.float32)
+    agent_b_position = jnp.array([11.0, 10.0], dtype=jnp.float32)
+
+    state = _state_with_two_agents(
+        agent_a_position,
+        agent_b_position,
+        agent_a_active_flag=True,
+        agent_a_alive_flag=True,
+        agent_b_active_flag=agent_b_active_flag,
+        agent_b_alive_flag=agent_b_alive_flag,
+    )
+
+    joint_action = _joint_action_with_moves(
+        (0, MOVE_EAST),
+        (1, MOVE_WEST),
+    )
+
+    next_state, *_ = step(config, state, joint_action, key)
+
+    _assert_center_close(
+        next_state.agent_positions[0],
+        jnp.array([11.0, 10.0], dtype=jnp.float32),
+    )
+    _assert_center_close(next_state.agent_positions[1], agent_b_position)
+
+
+@pytest.mark.parametrize(
+    "blocker_slot",
+    [
+        pytest.param(1, id="same_team_blocker"),
+        pytest.param(MAX_AGENTS_PER_TEAM, id="enemy_team_blocker"),
+    ],
+)
+def test_active_alive_overlapping_agents_separate_in_free_space(
+    blocker_slot: int,
+) -> None:
+    config = _deterministic_config()
+    key = jax.random.key(42)
+
+    radius = 0.5
+    agent_a_position = jnp.array([10.0, 10.0], dtype=jnp.float32)
+    blocker_position = jnp.array([11.25, 10.0], dtype=jnp.float32)
+
+    state = EnvState(
+        step_count=jnp.array(0, dtype=jnp.int32),
+        agent_positions=_agent_positions_array_with_rows(
+            (0, agent_a_position),
+            (blocker_slot, blocker_position),
+        ),
+        agent_radii=_agent_radii_array_with_rows(
+            (0, radius),
+            (blocker_slot, radius),
+        ),
+        team_ids=_team_ids(),
+        active_mask=_mask_with_true_slots(0, blocker_slot),
+        alive_mask=_mask_with_true_slots(0, blocker_slot),
+    )
+
+    joint_action = _joint_action_with_moves(
+        (0, MOVE_EAST),
+        (blocker_slot, MOVE_STAY),
+    )
+
+    next_state, *_ = step(config, state, joint_action, key)
+
+    _assert_agent_positions_are_finite(next_state.agent_positions)
+    _assert_agents_do_not_overlap(
+        next_state.agent_positions,
+        slot_a=0,
+        slot_b=blocker_slot,
+        radius_a=radius,
+        radius_b=radius,
     )
