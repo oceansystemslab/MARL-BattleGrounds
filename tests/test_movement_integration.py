@@ -301,6 +301,16 @@ def _assert_agent_positions_are_finite(agent_positions: Array) -> None:
     assert bool(jnp.all(jnp.isfinite(agent_positions)))
 
 
+def _assert_position_history_contract(position_history: Array, *, horizon: int) -> None:
+    """Assert the scan-emitted position history shape and dtype."""
+    assert position_history.shape == (
+        horizon,
+        MAX_AGENT_SLOTS,
+        ENVIRONMENT_DIMENSIONS,
+    )
+    assert position_history.dtype == jnp.float32
+
+
 def _assert_state_contract(state: EnvState) -> None:
     """Assert the EnvState shape and dtype contract."""
     assert state.step_count.shape == ()
@@ -1044,3 +1054,137 @@ def test_active_alive_overlapping_agents_separate_in_free_space(
         radius_a=radius,
         radius_b=radius,
     )
+
+
+def test_step_can_be_jit_compiled_with_non_stay_movement() -> None:
+    jitted_step = jax.jit(step)
+
+    config = _deterministic_config(team_size=3, max_steps=10)
+    key = jax.random.key(42)
+
+    agent_a_start = jnp.array([5.0, 5.0], dtype=jnp.float32)
+    agent_b_start = jnp.array([15.0, 5.0], dtype=jnp.float32)
+
+    state = _state_with_two_agents(
+        agent_a_start,
+        agent_b_start,
+        agent_a_active_flag=True,
+        agent_a_alive_flag=True,
+        agent_b_active_flag=True,
+        agent_b_alive_flag=True,
+    )
+    joint_action = _joint_action_with_moves(
+        (0, MOVE_EAST),
+        (1, MOVE_STAY),
+    )
+
+    next_state, observation, reward, done_flags, action_mask, info = cast(
+        tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info],
+        jitted_step(config, state, joint_action, key),
+    )
+
+    _assert_center_close(
+        next_state.agent_positions[0],
+        jnp.array([6.0, 5.0], dtype=jnp.float32),
+    )
+    _assert_center_close(next_state.agent_positions[1], agent_b_start)
+
+    _assert_state_contract(next_state)
+    _assert_observation_contract(observation)
+    _assert_reward_contract(reward)
+    _assert_done_flags_contract(done_flags, expected_truncated=False)
+    _assert_action_mask_contract(action_mask)
+
+    assert isinstance(info, Info)
+
+
+def test_step_can_run_non_stay_movement_in_jitted_scanned_rollout() -> None:
+    horizon = 3
+    config = _deterministic_config(team_size=5, max_steps=1000)
+    key = jax.random.key(42)
+
+    agent_a_start = jnp.array([5.0, 5.0], dtype=jnp.float32)
+    agent_b_start = jnp.array([15.0, 5.0], dtype=jnp.float32)
+
+    state = _state_with_two_agents(
+        agent_a_start,
+        agent_b_start,
+        agent_a_active_flag=True,
+        agent_a_alive_flag=True,
+        agent_b_active_flag=True,
+        agent_b_alive_flag=True,
+    )
+
+    joint_action = _joint_action_with_moves(
+        (0, MOVE_EAST),
+        (1, MOVE_STAY),
+    )
+
+    def _rollout(
+        initial_state: EnvState,
+        step_keys: Array,
+    ) -> tuple[EnvState, tuple[Array, Array]]:
+        """Run a compiled fixed-horizon rollout with stable scan outputs."""
+
+        def _step_wrapper(
+            carry: EnvState,
+            step_key: Array,
+        ) -> tuple[EnvState, tuple[Array, Array]]:
+            new_state, _, _, _, _, _ = step(config, carry, joint_action, step_key)
+            return new_state, (new_state.step_count, new_state.agent_positions)
+
+        return jax.lax.scan(
+            f=_step_wrapper,
+            init=initial_state,
+            xs=step_keys,
+            length=horizon,
+        )
+
+    keys = jax.random.split(key, horizon)
+    assert keys.shape == (horizon,)
+
+    final_state, history = cast(
+        tuple[EnvState, tuple[Array, Array]],
+        jax.jit(_rollout)(state, keys),
+    )
+    step_count_history, position_history = history
+
+    expected_agent_a_position = jnp.array([8.0, 5.0], dtype=jnp.float32)
+    expected_agent_a_history = jnp.array(
+        [
+            [6.0, 5.0],
+            [7.0, 5.0],
+            [8.0, 5.0],
+        ],
+        dtype=jnp.float32,
+    )
+
+    _assert_center_close(final_state.agent_positions[0], expected_agent_a_position)
+    _assert_center_close(final_state.agent_positions[1], agent_b_start)
+
+    assert final_state.step_count == horizon
+    assert final_state.step_count.dtype == jnp.int32
+
+    assert step_count_history.shape == (horizon,)
+    assert step_count_history.dtype == jnp.int32
+    assert bool(jnp.all(step_count_history == jnp.array([1, 2, 3], dtype=jnp.int32)))
+
+    _assert_position_history_contract(position_history, horizon=horizon)
+    assert bool(
+        jnp.allclose(
+            position_history[:, 0, :],
+            expected_agent_a_history,
+            atol=GEOMETRY_TOLERANCE,
+            rtol=0.0,
+        )
+    )
+    assert bool(
+        jnp.allclose(
+            position_history[:, 1, :],
+            jnp.broadcast_to(agent_b_start, (horizon, ENVIRONMENT_DIMENSIONS)),
+            atol=GEOMETRY_TOLERANCE,
+            rtol=0.0,
+        )
+    )
+
+    _assert_state_contract(final_state)
