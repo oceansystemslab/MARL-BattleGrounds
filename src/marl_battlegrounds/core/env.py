@@ -4,6 +4,7 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
+from marl_battlegrounds.core.geometry import project_movement_with_geometry
 from marl_battlegrounds.core.types import (
     CONTEXT_FEATURES,
     ENVIRONMENT_DIMENSIONS,
@@ -24,6 +25,24 @@ from marl_battlegrounds.core.types import (
     Info,
     Observation,
     Reward,
+)
+
+# Direction rows are unit-length and ordered to match the MOVE_* constants.
+_INV_SQRT_2 = 1 / jnp.sqrt(2.0)
+_JOINT_ACTION_MOVE_TO_DISPLACEMENT_LOOKUP_TABLE = jnp.array(
+    [
+        jnp.array((0, 0), dtype=jnp.float32),  # MOVE_STAY = 0
+        jnp.array((0, 1), dtype=jnp.float32),  # MOVE_NORTH = 1
+        jnp.array((0, -1), dtype=jnp.float32),  # MOVE_SOUTH = 2
+        jnp.array((1, 0), dtype=jnp.float32),  # MOVE_EAST = 3
+        jnp.array((-1, 0), dtype=jnp.float32),  # MOVE_WEST = 4
+        jnp.array((_INV_SQRT_2, _INV_SQRT_2), dtype=jnp.float32),  # MOVE_NORTHEAST = 5
+        jnp.array((-_INV_SQRT_2, _INV_SQRT_2), dtype=jnp.float32),  # MOVE_NORTHWEST = 6
+        jnp.array((_INV_SQRT_2, -_INV_SQRT_2), dtype=jnp.float32),  # MOVE_SOUTHEAST = 7
+        jnp.array(
+            (-_INV_SQRT_2, -_INV_SQRT_2), dtype=jnp.float32
+        ),  # MOVE_SOUTHWEST = 8
+    ]
 )
 
 
@@ -57,12 +76,14 @@ def reset(
 
     deterministic_key = jax.random.key(42)
     max_val = jnp.min(jnp.array([config.map_width, config.map_height]))
+    # Reset emits geometry-valid placeholder centers so MOVE_STAY does not
+    # trigger corrective projection before scenario loading exists.
     default_agent_positions = jax.random.uniform(
         deterministic_key,
         shape=(MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS),
         dtype=jnp.float32,
-        minval=0,
-        maxval=max_val,
+        minval=0 + config.default_agent_radius,
+        maxval=max_val - config.default_agent_radius,
     )
 
     state = EnvState(
@@ -155,11 +176,34 @@ def reset(
 def step(
     config: EnvConfig, state: EnvState, joint_action: Action, key: Array
 ) -> tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info]:
-    """Advance the placeholder transition while preserving M4 contracts."""
+    """Advance movement while preserving current Milestone 4 placeholders."""
+
+    intended_movement_deltas_unscaled = _JOINT_ACTION_MOVE_TO_DISPLACEMENT_LOOKUP_TABLE[
+        joint_action.move
+    ]
+
+    movement_speed_scaling_factor = jnp.asarray(
+        config.movement_speed, dtype=jnp.float32
+    )
+
+    intended_movement_deltas = (
+        movement_speed_scaling_factor * intended_movement_deltas_unscaled
+    )
+
+    next_agent_positions = project_movement_with_geometry(
+        state.agent_positions,
+        state.agent_radii,
+        intended_movement_deltas,
+        state.active_mask,
+        state.alive_mask,
+        config.map_width,
+        config.map_height,
+        config.obstacles,
+    )
 
     next_state = EnvState(
         step_count=state.step_count + 1,
-        agent_positions=state.agent_positions,
+        agent_positions=next_agent_positions,
         agent_radii=state.agent_radii,
         team_ids=state.team_ids,
         active_mask=state.active_mask,
