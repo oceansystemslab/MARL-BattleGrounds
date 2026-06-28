@@ -29,7 +29,17 @@ from marl_battlegrounds.core.types import (
     NUM_TARGET_ACTIONS,
     NUM_ULTIMATE_ACTIONS,
     OBJECTIVE_FEATURES,
+    OBSTACLE_FEATURE_ACTIVE,
+    OBSTACLE_FEATURE_HEIGHT,
+    OBSTACLE_FEATURE_RADIUS,
+    OBSTACLE_FEATURE_THETA,
+    OBSTACLE_FEATURE_TYPE,
+    OBSTACLE_FEATURE_WIDTH,
+    OBSTACLE_FEATURE_X,
+    OBSTACLE_FEATURE_Y,
     OBSTACLE_FEATURES,
+    OBSTACLE_TYPE_PILLAR,
+    OBSTACLE_TYPE_WALL,
     SELF_FEATURES,
     UNIT_FEATURES,
     Action,
@@ -42,6 +52,22 @@ from marl_battlegrounds.core.types import (
     Reward,
 )
 
+# Test Helpers ---
+
+
+def _obstacle_array_with_rows(*rows: tuple[int, Array]) -> Array:
+    """Create a padded obstacle array with selected slots populated."""
+    obstacles = jnp.zeros(
+        (MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES),
+        dtype=jnp.float32,
+    )
+
+    for slot, obstacle in rows:
+        assert 0 <= slot < MAX_OBSTACLE_SLOTS
+        obstacles = obstacles.at[slot].set(obstacle)
+
+    return obstacles
+
 
 def _empty_obstacles() -> Array:
     """Create a padded all-inactive obstacle table."""
@@ -51,19 +77,70 @@ def _empty_obstacles() -> Array:
     )
 
 
+def _empty_obstacle() -> Array:
+    """Create an inactive padding obstacle row."""
+    return jnp.zeros((OBSTACLE_FEATURES,), dtype=jnp.float32)
+
+
+def _pillar_obstacle(
+    pillar_center: Array,
+    pillar_radius: Array | float,
+    *,
+    active: bool = True,
+) -> Array:
+    """Create a pillar obstacle row."""
+    pillar = _empty_obstacle()
+
+    pillar = pillar.at[OBSTACLE_FEATURE_TYPE].set(OBSTACLE_TYPE_PILLAR)
+    pillar = pillar.at[OBSTACLE_FEATURE_ACTIVE].set(float(active))
+
+    x_coordinate, y_coordinate = pillar_center
+    pillar = pillar.at[OBSTACLE_FEATURE_X].set(x_coordinate)
+    pillar = pillar.at[OBSTACLE_FEATURE_Y].set(y_coordinate)
+    pillar = pillar.at[OBSTACLE_FEATURE_RADIUS].set(pillar_radius)
+
+    return pillar
+
+
+def _wall_obstacle(
+    wall_center: Array,
+    width: Array | float,
+    height: Array | float,
+    theta: Array | float = 0.0,
+    *,
+    active: bool = True,
+) -> Array:
+    """Create a wall obstacle row parameterized by center, size, and rotation."""
+    wall = _empty_obstacle()
+
+    wall = wall.at[OBSTACLE_FEATURE_TYPE].set(OBSTACLE_TYPE_WALL)
+    wall = wall.at[OBSTACLE_FEATURE_ACTIVE].set(float(active))
+
+    x_coordinate, y_coordinate = wall_center
+    wall = wall.at[OBSTACLE_FEATURE_X].set(x_coordinate)
+    wall = wall.at[OBSTACLE_FEATURE_Y].set(y_coordinate)
+    wall = wall.at[OBSTACLE_FEATURE_WIDTH].set(width)
+    wall = wall.at[OBSTACLE_FEATURE_HEIGHT].set(height)
+    wall = wall.at[OBSTACLE_FEATURE_THETA].set(theta)
+
+    return wall
+
+
 def _deterministic_config(
     *,
     team_size: int = 3,
     max_steps: int = 1000,
     movement_speed: float = 1.0,
+    map_width: float = 20.0,
+    map_height: float = 12.0,
     obstacles: Array | None = None,
 ) -> EnvConfig:
     """Create a deterministic config for movement integration tests."""
     return EnvConfig(
         team_size=team_size,
         max_steps=max_steps,
-        map_width=20.0,
-        map_height=12.0,
+        map_width=map_width,
+        map_height=map_height,
         movement_speed=movement_speed,
         observation_radius=8.0,
         target_range=6.0,
@@ -303,6 +380,84 @@ def _assert_placeholder_action_mask_semantics(action_mask: ActionMask) -> None:
     assert bool(jnp.all(~action_mask.use_ultimate[1:]))
 
 
+def _assert_center_inside_bounds(
+    center: Array,
+    *,
+    radius: float,
+    config: EnvConfig,
+) -> None:
+    """Assert that an agent center satisfies the map-boundary invariant."""
+    assert float(center[0]) >= radius - GEOMETRY_TOLERANCE
+    assert float(center[0]) <= config.map_width - radius + GEOMETRY_TOLERANCE
+    assert float(center[1]) >= radius - GEOMETRY_TOLERANCE
+    assert float(center[1]) <= config.map_height - radius + GEOMETRY_TOLERANCE
+
+
+def _assert_center_outside_pillar(
+    center: Array,
+    *,
+    agent_radius: float,
+    pillar_center: Array,
+    pillar_radius: float,
+) -> None:
+    """Assert that an agent disc does not overlap a circular pillar."""
+    distance = cast(Array, jnp.linalg.norm(center - pillar_center))
+    minimum_valid_distance = agent_radius + pillar_radius
+
+    assert bool(distance >= minimum_valid_distance - GEOMETRY_TOLERANCE)
+
+
+def _assert_center_outside_axis_aligned_wall(
+    center: Array,
+    *,
+    agent_radius: float,
+    wall_center: Array,
+    wall_width: float,
+    wall_height: float,
+) -> None:
+    """Assert that an agent disc does not overlap an axis-aligned wall."""
+    half_width = wall_width / 2.0
+    half_height = wall_height / 2.0
+
+    dx = jnp.abs(center[0] - wall_center[0])
+    dy = jnp.abs(center[1] - wall_center[1])
+
+    outside_x = dx >= half_width + agent_radius - GEOMETRY_TOLERANCE
+    outside_y = dy >= half_height + agent_radius - GEOMETRY_TOLERANCE
+
+    assert bool(jnp.logical_or(outside_x, outside_y))
+
+
+def _assert_center_outside_rotated_wall(
+    center: Array,
+    *,
+    agent_radius: float,
+    wall_center: Array,
+    wall_width: float,
+    wall_height: float,
+    theta: float,
+) -> None:
+    """Assert that an agent disc does not overlap a rotated rectangular wall."""
+    relative = center - wall_center
+
+    cos_theta = jnp.cos(-theta)
+    sin_theta = jnp.sin(-theta)
+
+    local_x = cos_theta * relative[0] - sin_theta * relative[1]
+    local_y = sin_theta * relative[0] + cos_theta * relative[1]
+
+    half_width = wall_width / 2.0
+    half_height = wall_height / 2.0
+
+    outside_x = jnp.abs(local_x) >= half_width + agent_radius - GEOMETRY_TOLERANCE
+    outside_y = jnp.abs(local_y) >= half_height + agent_radius - GEOMETRY_TOLERANCE
+
+    assert bool(jnp.logical_or(outside_x, outside_y))
+
+
+# Tests ---
+
+
 def test_move_stay_preserves_valid_position_in_free_space() -> None:
     config = _deterministic_config()
     key = jax.random.key(42)
@@ -352,6 +507,29 @@ def test_cardinal_moves_update_position_in_free_space(
     _assert_action_mask_contract(action_mask)
     _assert_placeholder_action_mask_semantics(action_mask)
     assert isinstance(info, Info)
+
+
+@pytest.mark.parametrize(
+    ("move_action", "expected_position"),
+    [
+        pytest.param(MOVE_NORTH, jnp.array([10.0, 8.5], dtype=jnp.float32), id="north"),
+        pytest.param(MOVE_EAST, jnp.array([12.5, 6.0], dtype=jnp.float32), id="east"),
+    ],
+)
+def test_cardinal_moves_scale_by_configured_movement_speed(
+    move_action: int,
+    expected_position: Array,
+) -> None:
+    config = _deterministic_config(movement_speed=2.5)
+    key = jax.random.key(42)
+    state = _state_with_single_active_alive_agent(
+        jnp.array([10.0, 6.0], dtype=jnp.float32)
+    )
+    joint_action = _joint_action_with_moves((0, move_action))
+
+    next_state, *_ = step(config, state, joint_action, key)
+
+    _assert_center_close(next_state.agent_positions[0], expected_position)
 
 
 @pytest.mark.parametrize(
@@ -405,6 +583,30 @@ def test_diagonal_moves_are_normalized_in_free_space(
     )
 
 
+def test_diagonal_moves_scale_by_configured_movement_speed() -> None:
+    movement_speed = 2.0
+    config = _deterministic_config(movement_speed=movement_speed)
+    key = jax.random.key(42)
+    start = jnp.array([10.0, 10.0], dtype=jnp.float32)
+    state = _state_with_single_active_alive_agent(start)
+    joint_action = _joint_action_with_moves((0, MOVE_NORTHEAST))
+
+    next_state, *_ = step(config, state, joint_action, key)
+
+    displacement = next_state.agent_positions[0] - start
+
+    assert bool(
+        jnp.isclose(
+            cast(Array, jnp.linalg.norm(displacement)),
+            jnp.asarray(movement_speed, dtype=jnp.float32),
+            atol=GEOMETRY_TOLERANCE,
+            rtol=0.0,
+        )
+    )
+    assert bool(displacement[0] > 0.0)
+    assert bool(displacement[1] > 0.0)
+
+
 def test_step_preserves_placeholder_contracts_after_non_stay_movement() -> None:
     config = _deterministic_config(max_steps=10)
     key = jax.random.key(42)
@@ -421,6 +623,10 @@ def test_step_preserves_placeholder_contracts_after_non_stay_movement() -> None:
     )
 
     assert next_state.step_count == state.step_count + 1
+    assert jnp.array_equal(next_state.agent_radii, state.agent_radii)
+    assert jnp.array_equal(next_state.team_ids, state.team_ids)
+    assert jnp.array_equal(next_state.active_mask, state.active_mask)
+    assert jnp.array_equal(next_state.alive_mask, state.alive_mask)
     _assert_state_contract(next_state)
     _assert_observation_contract(obs)
     _assert_reward_contract(reward)
@@ -442,3 +648,198 @@ def test_step_truncates_after_incremented_step_count() -> None:
     _, _, _, done_flags, _, _ = step(config, state, joint_action, key)
 
     _assert_done_flags_contract(done_flags, expected_truncated=True)
+
+
+@pytest.mark.parametrize(
+    ("start", "move_action"),
+    [
+        pytest.param(jnp.array([0.6, 6.0], dtype=jnp.float32), MOVE_WEST, id="west"),
+        pytest.param(jnp.array([19.4, 6.0], dtype=jnp.float32), MOVE_EAST, id="east"),
+        pytest.param(jnp.array([10.0, 0.6], dtype=jnp.float32), MOVE_SOUTH, id="south"),
+        pytest.param(
+            jnp.array([10.0, 11.4], dtype=jnp.float32), MOVE_NORTH, id="north"
+        ),
+    ],
+)
+def test_step_projects_active_alive_agent_inside_bounds(
+    start: Array,
+    move_action: int,
+) -> None:
+    config = _deterministic_config(map_width=20.0, map_height=12.0)
+    key = jax.random.key(42)
+
+    agent_radius = 0.5
+    state = _state_with_single_active_alive_agent(
+        start,
+        radius=agent_radius,
+    )
+    joint_action = _joint_action_with_moves((0, move_action))
+
+    next_state, *_ = step(config, state, joint_action, key)
+
+    _assert_center_inside_bounds(
+        next_state.agent_positions[0],
+        radius=agent_radius,
+        config=config,
+    )
+
+
+def test_step_projects_active_alive_agent_outside_active_pillar() -> None:
+    pillar_center = jnp.array([11.0, 10.0], dtype=jnp.float32)
+    pillar_radius = 0.5
+
+    obstacles = _obstacle_array_with_rows(
+        (0, _pillar_obstacle(pillar_center, pillar_radius, active=True))
+    )
+    config = _deterministic_config(obstacles=obstacles)
+    key = jax.random.key(42)
+
+    agent_radius = 0.5
+    state = _state_with_single_active_alive_agent(
+        jnp.array([10.0, 10.0], dtype=jnp.float32),
+        radius=agent_radius,
+    )
+    joint_action = _joint_action_with_moves((0, MOVE_EAST))
+
+    next_state, *_ = step(config, state, joint_action, key)
+
+    _assert_center_outside_pillar(
+        next_state.agent_positions[0],
+        agent_radius=agent_radius,
+        pillar_center=pillar_center,
+        pillar_radius=pillar_radius,
+    )
+
+
+def test_step_projects_active_alive_agent_outside_active_wall() -> None:
+    wall_center = jnp.array([11.0, 10.0], dtype=jnp.float32)
+    wall_width = 1.0
+    wall_height = 2.0
+
+    obstacles = _obstacle_array_with_rows(
+        (0, _wall_obstacle(wall_center, wall_width, wall_height, active=True))
+    )
+    config = _deterministic_config(obstacles=obstacles)
+    key = jax.random.key(42)
+
+    agent_radius = 0.5
+    state = _state_with_single_active_alive_agent(
+        jnp.array([10.0, 10.0], dtype=jnp.float32),
+        radius=agent_radius,
+    )
+    joint_action = _joint_action_with_moves((0, MOVE_EAST))
+
+    next_state, *_ = step(config, state, joint_action, key)
+
+    _assert_center_outside_axis_aligned_wall(
+        next_state.agent_positions[0],
+        agent_radius=agent_radius,
+        wall_center=wall_center,
+        wall_width=wall_width,
+        wall_height=wall_height,
+    )
+
+
+def test_step_ignores_inactive_obstacle_rows() -> None:
+    pillar_center = jnp.array([11.0, 10.0], dtype=jnp.float32)
+
+    obstacles = _obstacle_array_with_rows(
+        (0, _pillar_obstacle(pillar_center, 0.5, active=False))
+    )
+    config = _deterministic_config(obstacles=obstacles)
+    key = jax.random.key(42)
+
+    state = _state_with_single_active_alive_agent(
+        jnp.array([10.0, 10.0], dtype=jnp.float32)
+    )
+    joint_action = _joint_action_with_moves((0, MOVE_EAST))
+
+    next_state, *_ = step(config, state, joint_action, key)
+
+    _assert_center_close(
+        next_state.agent_positions[0],
+        jnp.array([11.0, 10.0], dtype=jnp.float32),
+    )
+
+
+def test_step_ignores_inactive_wall_rows() -> None:
+    wall_center = jnp.array([11.0, 10.0], dtype=jnp.float32)
+    wall_width = 1.0
+    wall_height = 2.0
+
+    obstacles = _obstacle_array_with_rows(
+        (0, _wall_obstacle(wall_center, wall_width, wall_height, active=False))
+    )
+    config = _deterministic_config(obstacles=obstacles)
+    key = jax.random.key(42)
+
+    state = _state_with_single_active_alive_agent(
+        jnp.array([10.0, 10.0], dtype=jnp.float32)
+    )
+    joint_action = _joint_action_with_moves((0, MOVE_EAST))
+
+    next_state, *_ = step(config, state, joint_action, key)
+
+    _assert_center_close(
+        next_state.agent_positions[0],
+        jnp.array([11.0, 10.0], dtype=jnp.float32),
+    )
+
+
+def test_step_uses_active_obstacles_in_late_padded_slots() -> None:
+    pillar_center = jnp.array([11.0, 10.0], dtype=jnp.float32)
+    pillar_radius = 0.5
+    late_slot = MAX_OBSTACLE_SLOTS - 1
+
+    obstacles = _obstacle_array_with_rows(
+        (late_slot, _pillar_obstacle(pillar_center, pillar_radius, active=True))
+    )
+    config = _deterministic_config(obstacles=obstacles)
+    key = jax.random.key(42)
+
+    agent_radius = 0.5
+    state = _state_with_single_active_alive_agent(
+        jnp.array([10.0, 10.0], dtype=jnp.float32),
+        radius=agent_radius,
+    )
+    joint_action = _joint_action_with_moves((0, MOVE_EAST))
+
+    next_state, *_ = step(config, state, joint_action, key)
+
+    _assert_center_outside_pillar(
+        next_state.agent_positions[0],
+        agent_radius=agent_radius,
+        pillar_center=pillar_center,
+        pillar_radius=pillar_radius,
+    )
+
+
+def test_step_projects_active_alive_agent_outside_rotated_wall() -> None:
+    wall_center = jnp.array([11.0, 10.0], dtype=jnp.float32)
+    wall_width = 1.0
+    wall_height = 3.0
+    theta = jnp.pi / 4.0
+
+    obstacles = _obstacle_array_with_rows(
+        (0, _wall_obstacle(wall_center, wall_width, wall_height, theta, active=True))
+    )
+    config = _deterministic_config(obstacles=obstacles)
+    key = jax.random.key(42)
+
+    agent_radius = 0.5
+    state = _state_with_single_active_alive_agent(
+        jnp.array([10.0, 10.0], dtype=jnp.float32),
+        radius=agent_radius,
+    )
+    joint_action = _joint_action_with_moves((0, MOVE_EAST))
+
+    next_state, *_ = step(config, state, joint_action, key)
+
+    _assert_center_outside_rotated_wall(
+        next_state.agent_positions[0],
+        agent_radius=agent_radius,
+        wall_center=wall_center,
+        wall_width=wall_width,
+        wall_height=wall_height,
+        theta=float(theta),
+    )
