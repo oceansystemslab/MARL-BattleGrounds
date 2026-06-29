@@ -34,11 +34,20 @@ MOVE_NORTHEAST = 5
 MOVE_NORTHWEST = 6
 MOVE_SOUTHEAST = 7
 MOVE_SOUTHWEST = 8
-SELF_FEATURES = 12
+SELF_FEATURES = 16
 UNIT_FEATURES = 16
 MAX_OBJECTIVE_SLOTS = 8
 OBJECTIVE_FEATURES = 12
 CONTEXT_FEATURES = 8
+
+# Shared base agent fields keep identical indices across self rows and
+# unit-candidate rows. Family-specific extensions should append after these.
+AGENT_FEATURE_X = 0
+AGENT_FEATURE_Y = 1
+AGENT_FEATURE_RADIUS = 2
+AGENT_FEATURE_TEAM_ID = 3
+AGENT_FEATURE_ACTIVE = 4
+AGENT_FEATURE_ALIVE = 5
 
 
 class EnvConfig(NamedTuple):

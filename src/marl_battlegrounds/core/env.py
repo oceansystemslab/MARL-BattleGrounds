@@ -6,6 +6,12 @@ from jax import Array
 
 from marl_battlegrounds.core.geometry import project_movement_with_geometry
 from marl_battlegrounds.core.types import (
+    AGENT_FEATURE_ACTIVE,
+    AGENT_FEATURE_ALIVE,
+    AGENT_FEATURE_RADIUS,
+    AGENT_FEATURE_TEAM_ID,
+    AGENT_FEATURE_X,
+    AGENT_FEATURE_Y,
     CONTEXT_FEATURES,
     ENVIRONMENT_DIMENSIONS,
     MAX_AGENT_SLOTS,
@@ -27,6 +33,8 @@ from marl_battlegrounds.core.types import (
     Reward,
 )
 
+# Private Helpers ---
+
 # Direction rows are unit-length and ordered to match the MOVE_* constants.
 _INV_SQRT_2 = 1 / jnp.sqrt(2.0)
 _JOINT_ACTION_MOVE_TO_DISPLACEMENT_LOOKUP_TABLE = jnp.array(
@@ -44,6 +52,45 @@ _JOINT_ACTION_MOVE_TO_DISPLACEMENT_LOOKUP_TABLE = jnp.array(
         ),  # MOVE_SOUTHWEST = 8
     ]
 )
+
+
+def _build_self_features(state: EnvState) -> Array:
+    """Build slot-aligned self rows from the shared base agent schema."""
+    self_features = jnp.zeros(shape=(MAX_AGENT_SLOTS, SELF_FEATURES), dtype=jnp.float32)
+    self_features = self_features.at[:, AGENT_FEATURE_X : AGENT_FEATURE_Y + 1].set(
+        state.agent_positions
+    )
+    self_features = self_features.at[:, AGENT_FEATURE_RADIUS].set(state.agent_radii)
+    self_features = self_features.at[:, AGENT_FEATURE_TEAM_ID].set(
+        state.team_ids.astype(jnp.float32)
+    )
+    self_features = self_features.at[:, AGENT_FEATURE_ACTIVE].set(
+        state.active_mask.astype(jnp.float32)
+    )
+    self_features = self_features.at[:, AGENT_FEATURE_ALIVE].set(
+        state.alive_mask.astype(jnp.float32)
+    )
+
+    return self_features
+
+
+def _build_ally_features(self_features: Array) -> Array:
+    """Return Checkpoint 2 placeholder ally candidate rows."""
+    del self_features
+    return jnp.zeros(
+        (MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM, UNIT_FEATURES), dtype=jnp.float32
+    )
+
+
+def _build_enemy_features(self_features: Array) -> Array:
+    """Return Checkpoint 2 placeholder enemy candidate rows."""
+    del self_features
+    return jnp.zeros(
+        (MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM, UNIT_FEATURES), dtype=jnp.float32
+    )
+
+
+# Public ---
 
 
 def reset(
@@ -107,18 +154,14 @@ def reset(
         (MAX_AGENT_SLOTS, MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES),
     )
 
+    self_features = _build_self_features(state)
+    ally_features = _build_ally_features(self_features)
+    enemy_features = _build_enemy_features(self_features)
+
     obs = Observation(
-        self_features=jnp.zeros(
-            shape=(MAX_AGENT_SLOTS, SELF_FEATURES), dtype=jnp.float32
-        ),
-        ally_unit_features=jnp.zeros(
-            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM, UNIT_FEATURES),
-            dtype=jnp.float32,
-        ),
-        enemy_unit_features=jnp.zeros(
-            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM, UNIT_FEATURES),
-            dtype=jnp.float32,
-        ),
+        self_features=self_features,
+        ally_unit_features=ally_features,
+        enemy_unit_features=enemy_features,
         map_obstacle_features=map_obstacle_features,
         objective_features=jnp.zeros(
             shape=(MAX_AGENT_SLOTS, MAX_OBJECTIVE_SLOTS, OBJECTIVE_FEATURES),
@@ -220,18 +263,14 @@ def step(
         (MAX_AGENT_SLOTS, MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES),
     )
 
+    self_features = _build_self_features(next_state)
+    ally_features = _build_ally_features(self_features)
+    enemy_features = _build_enemy_features(self_features)
+
     obs = Observation(
-        self_features=jnp.zeros(
-            shape=(MAX_AGENT_SLOTS, SELF_FEATURES), dtype=jnp.float32
-        ),
-        ally_unit_features=jnp.zeros(
-            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM, UNIT_FEATURES),
-            dtype=jnp.float32,
-        ),
-        enemy_unit_features=jnp.zeros(
-            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM, UNIT_FEATURES),
-            dtype=jnp.float32,
-        ),
+        self_features=self_features,
+        ally_unit_features=ally_features,
+        enemy_unit_features=enemy_features,
         map_obstacle_features=map_obstacle_features,
         objective_features=jnp.zeros(
             shape=(MAX_AGENT_SLOTS, MAX_OBJECTIVE_SLOTS, OBJECTIVE_FEATURES),
