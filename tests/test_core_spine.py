@@ -9,6 +9,12 @@ from jax import Array
 
 from marl_battlegrounds.core.env import reset, step
 from marl_battlegrounds.core.types import (
+    AGENT_FEATURE_ACTIVE,
+    AGENT_FEATURE_ALIVE,
+    AGENT_FEATURE_RADIUS,
+    AGENT_FEATURE_TEAM_ID,
+    AGENT_FEATURE_X,
+    AGENT_FEATURE_Y,
     CONTEXT_FEATURES,
     ENVIRONMENT_DIMENSIONS,
     MAX_AGENT_SLOTS,
@@ -354,8 +360,19 @@ def test_static_shape_constants_are_consistent() -> None:
         MOVE_SOUTHWEST,
     )
 
-    assert SELF_FEATURES == 12
+    assert SELF_FEATURES == 16
     assert UNIT_FEATURES == 16
+    base_agent_feature_indices = (
+        AGENT_FEATURE_X,
+        AGENT_FEATURE_Y,
+        AGENT_FEATURE_RADIUS,
+        AGENT_FEATURE_TEAM_ID,
+        AGENT_FEATURE_ACTIVE,
+        AGENT_FEATURE_ALIVE,
+    )
+    assert base_agent_feature_indices == tuple(range(6))
+    assert AGENT_FEATURE_ALIVE < SELF_FEATURES
+    assert AGENT_FEATURE_ALIVE < UNIT_FEATURES
     assert MAX_OBJECTIVE_SLOTS == 8
     assert OBJECTIVE_FEATURES == 12
     assert CONTEXT_FEATURES == 8
