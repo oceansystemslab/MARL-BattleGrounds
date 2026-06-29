@@ -54,6 +54,96 @@ _JOINT_ACTION_MOVE_TO_DISPLACEMENT_LOOKUP_TABLE = jnp.array(
 )
 
 
+def _build_observation(state: EnvState, config: EnvConfig) -> Observation:
+    """Build the current observation contract from one slot-aligned state."""
+    self_features = _build_self_features(state)
+    ally_features = _build_ally_features(self_features)
+    enemy_features = _build_enemy_features(self_features)
+
+    base_self_visibility = jnp.identity(MAX_AGENTS_PER_TEAM, dtype=bool)
+    alive_active_mask_bc = jnp.logical_and(state.active_mask, state.alive_mask)[:, None]
+
+    map_obstacle_features = jnp.broadcast_to(
+        config.obstacles[None, :, :],
+        (MAX_AGENT_SLOTS, MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES),
+    )
+
+    return Observation(
+        self_features=self_features,
+        ally_unit_features=ally_features,
+        enemy_unit_features=enemy_features,
+        map_obstacle_features=map_obstacle_features,
+        objective_features=jnp.zeros(
+            shape=(MAX_AGENT_SLOTS, MAX_OBJECTIVE_SLOTS, OBJECTIVE_FEATURES),
+            dtype=jnp.float32,
+        ),
+        context_features=jnp.zeros(
+            shape=(MAX_AGENT_SLOTS, CONTEXT_FEATURES), dtype=jnp.float32
+        ),
+        ally_visibility_mask=jnp.logical_and(
+            jnp.vstack((base_self_visibility, base_self_visibility)),
+            alive_active_mask_bc,
+        ),
+        enemy_visibility_mask=jnp.zeros(
+            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM), dtype=bool
+        ),
+        ally_targetability_mask=jnp.zeros(
+            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM), dtype=bool
+        ),
+        enemy_targetability_mask=jnp.zeros(
+            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM), dtype=bool
+        ),
+    )
+
+
+def _build_action_mask(state: EnvState, observation: Observation) -> ActionMask:
+    """Build action masks from observer liveness and observation targetability."""
+    ones_column_vector = jnp.ones(shape=(MAX_AGENT_SLOTS, 1), dtype=bool)
+    zeros_column_vector = jnp.zeros(shape=(MAX_AGENT_SLOTS, 1), dtype=bool)
+
+    target_mask = jnp.concat(
+        (
+            ones_column_vector,
+            observation.ally_targetability_mask,
+            observation.enemy_targetability_mask,
+        ),
+        axis=1,
+    )
+
+    ult_mask = jnp.concat((ones_column_vector, zeros_column_vector), axis=1)
+
+    alive_active_mask_bc = jnp.logical_and(state.active_mask, state.alive_mask)[:, None]
+
+    return ActionMask(
+        move=jnp.logical_and(
+            jnp.ones(shape=(MAX_AGENT_SLOTS, NUM_MOVE_ACTIONS), dtype=bool),
+            alive_active_mask_bc,
+        ),
+        target=jnp.logical_and(target_mask, alive_active_mask_bc),
+        use_ultimate=jnp.logical_and(
+            ult_mask,
+            alive_active_mask_bc,
+        ),
+    )
+
+
+def _build_intended_movement_deltas(joint_action: Action, config: EnvConfig) -> Array:
+    """Convert per-slot movement action IDs into scaled displacement vectors."""
+    intended_movement_deltas_unscaled = _JOINT_ACTION_MOVE_TO_DISPLACEMENT_LOOKUP_TABLE[
+        joint_action.move
+    ]
+
+    movement_speed_scaling_factor = jnp.asarray(
+        config.movement_speed, dtype=jnp.float32
+    )
+
+    intended_movement_deltas = (
+        movement_speed_scaling_factor * intended_movement_deltas_unscaled
+    )
+
+    return intended_movement_deltas
+
+
 def _build_self_features(state: EnvState) -> Array:
     """Build slot-aligned self rows from the shared base agent schema."""
     self_features = jnp.zeros(shape=(MAX_AGENT_SLOTS, SELF_FEATURES), dtype=jnp.float32)
@@ -146,70 +236,9 @@ def reset(
         alive_mask=initial_mask,
     )
 
-    base_self_visibility = jnp.identity(MAX_AGENTS_PER_TEAM, dtype=bool)
-    alive_active_mask_bc = jnp.logical_and(state.active_mask, state.alive_mask)[:, None]
+    obs = _build_observation(state, config)
 
-    map_obstacle_features = jnp.broadcast_to(
-        config.obstacles[None, :, :],
-        (MAX_AGENT_SLOTS, MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES),
-    )
-
-    self_features = _build_self_features(state)
-    ally_features = _build_ally_features(self_features)
-    enemy_features = _build_enemy_features(self_features)
-
-    obs = Observation(
-        self_features=self_features,
-        ally_unit_features=ally_features,
-        enemy_unit_features=enemy_features,
-        map_obstacle_features=map_obstacle_features,
-        objective_features=jnp.zeros(
-            shape=(MAX_AGENT_SLOTS, MAX_OBJECTIVE_SLOTS, OBJECTIVE_FEATURES),
-            dtype=jnp.float32,
-        ),
-        context_features=jnp.zeros(
-            shape=(MAX_AGENT_SLOTS, CONTEXT_FEATURES), dtype=jnp.float32
-        ),
-        ally_visibility_mask=jnp.logical_and(
-            jnp.vstack((base_self_visibility, base_self_visibility)),
-            alive_active_mask_bc,
-        ),
-        enemy_visibility_mask=jnp.zeros(
-            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM), dtype=bool
-        ),
-        ally_targetability_mask=jnp.zeros(
-            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM), dtype=bool
-        ),
-        enemy_targetability_mask=jnp.zeros(
-            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM), dtype=bool
-        ),
-    )
-
-    ones_column_vector = jnp.ones((MAX_AGENT_SLOTS, 1), dtype=bool)
-    zeros_column_vector = jnp.zeros((MAX_AGENT_SLOTS, 1), dtype=bool)
-
-    target_mask = jnp.concat(
-        (
-            ones_column_vector,
-            obs.ally_targetability_mask,
-            obs.enemy_targetability_mask,
-        ),
-        axis=1,
-    )
-
-    ult_mask = jnp.concat((ones_column_vector, zeros_column_vector), axis=1)
-
-    action_mask = ActionMask(
-        move=jnp.logical_and(
-            jnp.ones(shape=(MAX_AGENT_SLOTS, NUM_MOVE_ACTIONS), dtype=bool),
-            alive_active_mask_bc,
-        ),
-        target=jnp.logical_and(target_mask, alive_active_mask_bc),
-        use_ultimate=jnp.logical_and(
-            ult_mask,
-            alive_active_mask_bc,
-        ),
-    )
+    action_mask = _build_action_mask(state, obs)
 
     info = Info()
 
@@ -221,17 +250,7 @@ def step(
 ) -> tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info]:
     """Advance movement while preserving current Milestone 4 placeholders."""
 
-    intended_movement_deltas_unscaled = _JOINT_ACTION_MOVE_TO_DISPLACEMENT_LOOKUP_TABLE[
-        joint_action.move
-    ]
-
-    movement_speed_scaling_factor = jnp.asarray(
-        config.movement_speed, dtype=jnp.float32
-    )
-
-    intended_movement_deltas = (
-        movement_speed_scaling_factor * intended_movement_deltas_unscaled
-    )
+    intended_movement_deltas = _build_intended_movement_deltas(joint_action, config)
 
     next_agent_positions = project_movement_with_geometry(
         state.agent_positions,
@@ -253,46 +272,7 @@ def step(
         alive_mask=state.alive_mask,
     )
 
-    base_self_visibility = jnp.identity(MAX_AGENTS_PER_TEAM, dtype=bool)
-    alive_active_mask_bc = jnp.logical_and(
-        next_state.active_mask, next_state.alive_mask
-    )[:, None]
-
-    map_obstacle_features = jnp.broadcast_to(
-        config.obstacles[None, :, :],
-        (MAX_AGENT_SLOTS, MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES),
-    )
-
-    self_features = _build_self_features(next_state)
-    ally_features = _build_ally_features(self_features)
-    enemy_features = _build_enemy_features(self_features)
-
-    obs = Observation(
-        self_features=self_features,
-        ally_unit_features=ally_features,
-        enemy_unit_features=enemy_features,
-        map_obstacle_features=map_obstacle_features,
-        objective_features=jnp.zeros(
-            shape=(MAX_AGENT_SLOTS, MAX_OBJECTIVE_SLOTS, OBJECTIVE_FEATURES),
-            dtype=jnp.float32,
-        ),
-        context_features=jnp.zeros(
-            shape=(MAX_AGENT_SLOTS, CONTEXT_FEATURES), dtype=jnp.float32
-        ),
-        ally_visibility_mask=jnp.logical_and(
-            jnp.vstack((base_self_visibility, base_self_visibility)),
-            alive_active_mask_bc,
-        ),
-        enemy_visibility_mask=jnp.zeros(
-            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM), dtype=bool
-        ),
-        ally_targetability_mask=jnp.zeros(
-            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM), dtype=bool
-        ),
-        enemy_targetability_mask=jnp.zeros(
-            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM), dtype=bool
-        ),
-    )
+    obs = _build_observation(next_state, config)
 
     rewards = Reward(rewards=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32))
 
@@ -301,27 +281,7 @@ def step(
         truncated=jnp.array(next_state.step_count >= config.max_steps),
     )
 
-    ones_column_vector = jnp.ones(shape=(MAX_AGENT_SLOTS, 1), dtype=bool)
-    zeros_column_vector = jnp.zeros(shape=(MAX_AGENT_SLOTS, 1), dtype=bool)
-
-    target_mask = jnp.concat(
-        (ones_column_vector, obs.ally_targetability_mask, obs.enemy_targetability_mask),
-        axis=1,
-    )
-
-    ult_mask = jnp.concat((ones_column_vector, zeros_column_vector), axis=1)
-
-    action_mask = ActionMask(
-        move=jnp.logical_and(
-            jnp.ones(shape=(MAX_AGENT_SLOTS, NUM_MOVE_ACTIONS), dtype=bool),
-            alive_active_mask_bc,
-        ),
-        target=jnp.logical_and(target_mask, alive_active_mask_bc),
-        use_ultimate=jnp.logical_and(
-            ult_mask,
-            alive_active_mask_bc,
-        ),
-    )
+    action_mask = _build_action_mask(next_state, obs)
 
     info = Info()
 
