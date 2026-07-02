@@ -1,20 +1,25 @@
 """Functional reset and step entry points for the core JAX simulator."""
 
+from typing import cast
+
 import jax
 import jax.numpy as jnp
 from jax import Array
 
-from marl_battlegrounds.core.geometry import project_movement_with_geometry
+from marl_battlegrounds.core.geometry import (
+    has_clear_line_of_sight,
+    project_movement_with_geometry,
+)
 from marl_battlegrounds.core.types import (
     AGENT_FEATURE_ACTIVE,
     AGENT_FEATURE_ALIVE,
-    AGENT_FEATURE_BASIC_INTERACTION_RANGE,
+    AGENT_FEATURE_BASIC_INTERACTION_RADIUS,
     AGENT_FEATURE_CLASS_ID,
     AGENT_FEATURE_MOVEMENT_SPEED,
     AGENT_FEATURE_OBSERVATION_RADIUS,
     AGENT_FEATURE_RADIUS,
     AGENT_FEATURE_TEAM_ID,
-    AGENT_FEATURE_ULTIMATE_INTERACTION_RANGE,
+    AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS,
     AGENT_FEATURE_X,
     AGENT_FEATURE_Y,
     CLASS_NEUTRAL,
@@ -60,14 +65,130 @@ _JOINT_ACTION_MOVE_TO_DISPLACEMENT_LOOKUP_TABLE = jnp.array(
 )
 
 
+def _build_global_visibility_mask(state: EnvState, config: EnvConfig) -> Array:
+    """Build LOS-gated dynamic-unit visibility between all global slots.
+
+    Entry ``[i, j]`` is true when observer slot ``i`` can currently observe
+    candidate slot ``j``. The mask is directed because each observer owns its
+    own effective observation radius.
+
+    Visibility requires:
+    1. observer is active and alive;
+    2. candidate is active and alive;
+    3. candidate center is within observer i's observation radius;
+    4. static line of sight from observer to candidate is clear.
+
+    Self-visibility falls out naturally from the same predicate.
+    """
+    # Pairwise observer-candidate validity from active/alive state.
+    alive_active_mask = jnp.logical_and(state.active_mask, state.alive_mask)
+    global_pairwise_validity_mask = jnp.logical_and(
+        alive_active_mask[:, None],
+        alive_active_mask[None, :],
+    )
+
+    # Pairwise center-to-center distances.
+    observer_positions_bc = state.agent_positions[:, None, :]
+    candidate_positions_bc = state.agent_positions[None, :, :]
+    pairwise_displacement_vectors = observer_positions_bc - candidate_positions_bc
+    global_pairwise_distances = cast(
+        Array,
+        jnp.linalg.norm(pairwise_displacement_vectors, axis=-1),
+    )
+
+    # Observer-specific observation-radius check.
+    observer_radii_bc = state.observation_radii[:, None]
+    observation_radii_mask = global_pairwise_distances <= observer_radii_bc
+
+    def _build_los_row(
+        observer_center: Array,
+        candidate_centers: Array,
+        obstacles: Array,
+    ) -> Array:
+        """Build one observer's LOS row against all candidate centers."""
+        candidate_los_vmap = jax.vmap(
+            has_clear_line_of_sight,
+            in_axes=(None, 0, None),
+            out_axes=0,
+        )
+        return candidate_los_vmap(observer_center, candidate_centers, obstacles)
+
+    observer_los_vmap = jax.vmap(
+        _build_los_row,
+        in_axes=(0, None, None),
+        out_axes=0,
+    )
+    los_mask = observer_los_vmap(
+        state.agent_positions,
+        state.agent_positions,
+        config.obstacles,
+    )
+
+    return jnp.logical_and(
+        global_pairwise_validity_mask,
+        jnp.logical_and(observation_radii_mask, los_mask),
+    )
+
+
+def _build_ally_enemy_visibility_masks(global_mask: Array) -> tuple[Array, Array]:
+    """Project a global visibility matrix into fixed ally/enemy relation slots.
+
+    ``global_mask[i, j]`` means observer global slot ``i`` can see candidate
+    global slot ``j``. The returned masks keep candidate slots relation-local so
+    they align with the future unit-feature and target-selection heads.
+
+    Slot layout is fixed:
+    - team 0 occupies global slots ``0..MAX_AGENTS_PER_TEAM - 1``;
+    - team 1 occupies global slots ``MAX_AGENTS_PER_TEAM..MAX_AGENT_SLOTS - 1``.
+    """
+    team_0_start = 0
+    team_0_end = MAX_AGENTS_PER_TEAM
+    team_1_start = MAX_AGENTS_PER_TEAM
+    team_1_end = MAX_AGENT_SLOTS
+
+    ally_visibility_mask_team_0 = global_mask[
+        team_0_start:team_0_end,
+        team_0_start:team_0_end,
+    ]
+    enemy_visibility_mask_team_0 = global_mask[
+        team_0_start:team_0_end,
+        team_1_start:team_1_end,
+    ]
+
+    ally_visibility_mask_team_1 = global_mask[
+        team_1_start:team_1_end,
+        team_1_start:team_1_end,
+    ]
+    enemy_visibility_mask_team_1 = global_mask[
+        team_1_start:team_1_end,
+        team_0_start:team_0_end,
+    ]
+
+    ally_visibility_mask = jnp.vstack(
+        (ally_visibility_mask_team_0, ally_visibility_mask_team_1)
+    )
+    enemy_visibility_mask = jnp.vstack(
+        (enemy_visibility_mask_team_0, enemy_visibility_mask_team_1)
+    )
+
+    return (ally_visibility_mask, enemy_visibility_mask)
+
+
 def _build_observation(state: EnvState, config: EnvConfig) -> Observation:
-    """Build the current observation contract from one slot-aligned state."""
+    """Build the current observation contract from one slot-aligned state.
+
+    Checkpoint 4 owns boolean dynamic visibility only. Candidate feature rows
+    and targetability remain placeholders until the next checkpoints consume
+    these visibility masks.
+    """
     self_features = _build_self_features(state)
     ally_features = _build_ally_features(self_features)
     enemy_features = _build_enemy_features(self_features)
 
-    base_self_visibility = jnp.identity(MAX_AGENTS_PER_TEAM, dtype=bool)
-    alive_active_mask_bc = jnp.logical_and(state.active_mask, state.alive_mask)[:, None]
+    global_visibility_mask = _build_global_visibility_mask(state, config)
+    ally_visibility_mask, enemy_visibility_mask = _build_ally_enemy_visibility_masks(
+        global_visibility_mask
+    )
 
     map_obstacle_features = jnp.broadcast_to(
         config.obstacles[None, :, :],
@@ -86,13 +207,8 @@ def _build_observation(state: EnvState, config: EnvConfig) -> Observation:
         context_features=jnp.zeros(
             shape=(MAX_AGENT_SLOTS, CONTEXT_FEATURES), dtype=jnp.float32
         ),
-        ally_visibility_mask=jnp.logical_and(
-            jnp.vstack((base_self_visibility, base_self_visibility)),
-            alive_active_mask_bc,
-        ),
-        enemy_visibility_mask=jnp.zeros(
-            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM), dtype=bool
-        ),
+        ally_visibility_mask=ally_visibility_mask,
+        enemy_visibility_mask=enemy_visibility_mask,
         ally_targetability_mask=jnp.zeros(
             shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM), dtype=bool
         ),
@@ -103,7 +219,7 @@ def _build_observation(state: EnvState, config: EnvConfig) -> Observation:
 
 
 def _build_action_mask(state: EnvState, observation: Observation) -> ActionMask:
-    """Build action masks from observer liveness and observation targetability."""
+    """Build action masks from observer liveness and targetability placeholders."""
     ones_column_vector = jnp.ones(shape=(MAX_AGENT_SLOTS, 1), dtype=bool)
     zeros_column_vector = jnp.zeros(shape=(MAX_AGENT_SLOTS, 1), dtype=bool)
 
@@ -147,7 +263,7 @@ def _build_intended_movement_deltas(joint_action: Action, state: EnvState) -> Ar
 
 
 def _build_self_features(state: EnvState) -> Array:
-    """Build slot-aligned self rows from the shared base agent schema."""
+    """Build slot-aligned self rows from the shared agent-feature schema."""
     self_features = jnp.zeros(shape=(MAX_AGENT_SLOTS, SELF_FEATURES), dtype=jnp.float32)
     self_features = self_features.at[:, AGENT_FEATURE_X : AGENT_FEATURE_Y + 1].set(
         state.agent_positions
@@ -171,18 +287,18 @@ def _build_self_features(state: EnvState) -> Array:
     self_features = self_features.at[:, AGENT_FEATURE_OBSERVATION_RADIUS].set(
         state.observation_radii
     )
-    self_features = self_features.at[:, AGENT_FEATURE_BASIC_INTERACTION_RANGE].set(
-        state.basic_interaction_ranges
+    self_features = self_features.at[:, AGENT_FEATURE_BASIC_INTERACTION_RADIUS].set(
+        state.basic_interaction_radii
     )
-    self_features = self_features.at[:, AGENT_FEATURE_ULTIMATE_INTERACTION_RANGE].set(
-        state.ultimate_interaction_ranges
+    self_features = self_features.at[:, AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS].set(
+        state.ultimate_interaction_radii
     )
 
     return self_features
 
 
 def _build_ally_features(self_features: Array) -> Array:
-    """Return Checkpoint 2 placeholder ally candidate rows."""
+    """Return zero ally rows until Checkpoint 5 populates visible candidates."""
     del self_features
     return jnp.zeros(
         (MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM, UNIT_FEATURES), dtype=jnp.float32
@@ -190,7 +306,7 @@ def _build_ally_features(self_features: Array) -> Array:
 
 
 def _build_enemy_features(self_features: Array) -> Array:
-    """Return Checkpoint 2 placeholder enemy candidate rows."""
+    """Return zero enemy rows until Checkpoint 5 populates visible candidates."""
     del self_features
     return jnp.zeros(
         (MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM, UNIT_FEATURES), dtype=jnp.float32
@@ -262,14 +378,14 @@ def reset(
             fill_value=config.default_observation_radius,
             dtype=jnp.float32,
         ),
-        basic_interaction_ranges=jnp.full(
+        basic_interaction_radii=jnp.full(
             shape=(MAX_AGENT_SLOTS,),
-            fill_value=config.default_basic_interaction_range,
+            fill_value=config.default_basic_interaction_radius,
             dtype=jnp.float32,
         ),
-        ultimate_interaction_ranges=jnp.full(
+        ultimate_interaction_radii=jnp.full(
             shape=(MAX_AGENT_SLOTS,),
-            fill_value=config.default_ultimate_interaction_range,
+            fill_value=config.default_ultimate_interaction_radius,
             dtype=jnp.float32,
         ),
         active_mask=initial_mask,
@@ -311,8 +427,8 @@ def step(
         class_ids=state.class_ids,
         movement_speeds=state.movement_speeds,
         observation_radii=state.observation_radii,
-        basic_interaction_ranges=state.basic_interaction_ranges,
-        ultimate_interaction_ranges=state.ultimate_interaction_ranges,
+        basic_interaction_radii=state.basic_interaction_radii,
+        ultimate_interaction_radii=state.ultimate_interaction_radii,
         active_mask=state.active_mask,
         alive_mask=state.alive_mask,
     )

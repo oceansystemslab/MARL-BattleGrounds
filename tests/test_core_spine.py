@@ -11,13 +11,13 @@ from marl_battlegrounds.core.env import reset, step
 from marl_battlegrounds.core.types import (
     AGENT_FEATURE_ACTIVE,
     AGENT_FEATURE_ALIVE,
-    AGENT_FEATURE_BASIC_INTERACTION_RANGE,
+    AGENT_FEATURE_BASIC_INTERACTION_RADIUS,
     AGENT_FEATURE_CLASS_ID,
     AGENT_FEATURE_MOVEMENT_SPEED,
     AGENT_FEATURE_OBSERVATION_RADIUS,
     AGENT_FEATURE_RADIUS,
     AGENT_FEATURE_TEAM_ID,
-    AGENT_FEATURE_ULTIMATE_INTERACTION_RANGE,
+    AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS,
     AGENT_FEATURE_X,
     AGENT_FEATURE_Y,
     CLASS_NEUTRAL,
@@ -110,8 +110,8 @@ def _config(
         default_agent_radius=0.5,
         default_movement_speed=1.0,
         default_observation_radius=8.0,
-        default_basic_interaction_range=6.0,
-        default_ultimate_interaction_range=9.0,
+        default_basic_interaction_radius=6.0,
+        default_ultimate_interaction_radius=9.0,
         obstacles=_empty_obstacles() if obstacles is None else obstacles,
     )
 
@@ -165,13 +165,6 @@ def _zero_observation() -> Observation:
     )
 
 
-def _expected_self_visibility(active_alive_mask: Array) -> Array:
-    """Return the Step 1 self-visibility mask."""
-    team_self_visibility = jnp.identity(MAX_AGENTS_PER_TEAM, dtype=bool)
-    all_slots_self_visibility = jnp.vstack((team_self_visibility, team_self_visibility))
-    return jnp.logical_and(all_slots_self_visibility, active_alive_mask.reshape(-1, 1))
-
-
 def _expected_step1_target_rows(num_rows: int) -> Array:
     """Return Step 1 target-mask rows."""
     none_column = jnp.ones(shape=(num_rows, 1), dtype=bool)
@@ -212,11 +205,11 @@ def _assert_state_contract(state: EnvState) -> None:
     assert state.observation_radii.shape == (MAX_AGENT_SLOTS,)
     assert state.observation_radii.dtype == jnp.float32
 
-    assert state.basic_interaction_ranges.shape == (MAX_AGENT_SLOTS,)
-    assert state.basic_interaction_ranges.dtype == jnp.float32
+    assert state.basic_interaction_radii.shape == (MAX_AGENT_SLOTS,)
+    assert state.basic_interaction_radii.dtype == jnp.float32
 
-    assert state.ultimate_interaction_ranges.shape == (MAX_AGENT_SLOTS,)
-    assert state.ultimate_interaction_ranges.dtype == jnp.float32
+    assert state.ultimate_interaction_radii.shape == (MAX_AGENT_SLOTS,)
+    assert state.ultimate_interaction_radii.dtype == jnp.float32
 
     assert state.active_mask.shape == (MAX_AGENT_SLOTS,)
     assert state.active_mask.dtype == bool
@@ -325,23 +318,17 @@ def _assert_step1_action_mask_values(
     assert not jnp.any(action_mask.use_ultimate[inactive_indices, :])
 
 
-def _assert_step1_observation_values(
+def _assert_common_observation_values(
     observation: Observation,
     config: EnvConfig,
-    active_alive_mask: Array,
 ) -> None:
-    """Assert Step 1 observation values."""
+    """Assert observation values that remain common after visibility becomes real."""
     expected_map_features = jnp.broadcast_to(
         config.obstacles[None, :, :],
         (MAX_AGENT_SLOTS, MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES),
     )
 
     assert jnp.array_equal(observation.map_obstacle_features, expected_map_features)
-    assert jnp.array_equal(
-        observation.ally_visibility_mask,
-        _expected_self_visibility(active_alive_mask),
-    )
-    assert not jnp.any(observation.enemy_visibility_mask)
     assert not jnp.any(observation.ally_targetability_mask)
     assert not jnp.any(observation.enemy_targetability_mask)
 
@@ -384,26 +371,24 @@ def test_static_shape_constants_are_consistent() -> None:
 
     assert SELF_FEATURES == 16
     assert UNIT_FEATURES == 16
+    assert SELF_FEATURES == UNIT_FEATURES
     assert CLASS_NEUTRAL == 0
-    base_agent_feature_indices = (
+    shared_agent_feature_indices = (
         AGENT_FEATURE_X,
         AGENT_FEATURE_Y,
         AGENT_FEATURE_RADIUS,
         AGENT_FEATURE_TEAM_ID,
         AGENT_FEATURE_ACTIVE,
         AGENT_FEATURE_ALIVE,
-    )
-    assert base_agent_feature_indices == tuple(range(6))
-    self_only_agent_feature_indices = (
         AGENT_FEATURE_CLASS_ID,
         AGENT_FEATURE_MOVEMENT_SPEED,
         AGENT_FEATURE_OBSERVATION_RADIUS,
-        AGENT_FEATURE_BASIC_INTERACTION_RANGE,
-        AGENT_FEATURE_ULTIMATE_INTERACTION_RANGE,
+        AGENT_FEATURE_BASIC_INTERACTION_RADIUS,
+        AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS,
     )
-    assert self_only_agent_feature_indices == tuple(range(6, 11))
-    assert AGENT_FEATURE_ULTIMATE_INTERACTION_RANGE < SELF_FEATURES
-    assert AGENT_FEATURE_ALIVE < UNIT_FEATURES
+    assert shared_agent_feature_indices == tuple(range(11))
+    assert AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS < SELF_FEATURES
+    assert AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS < UNIT_FEATURES
     assert MAX_OBJECTIVE_SLOTS == 8
     assert OBJECTIVE_FEATURES == 12
     assert CONTEXT_FEATURES == 8
@@ -420,14 +405,14 @@ def test_env_config_stores_static_episode_settings() -> None:
     assert env_config.default_agent_radius == 0.5
     assert env_config.default_movement_speed == 1.0
     assert env_config.default_observation_radius == 8.0
-    assert env_config.default_basic_interaction_range == 6.0
-    assert env_config.default_ultimate_interaction_range == 9.0
+    assert env_config.default_basic_interaction_radius == 6.0
+    assert env_config.default_ultimate_interaction_radius == 9.0
 
     config_fields = set(EnvConfig._fields)
     assert "movement_speed" not in config_fields
     assert "observation_radius" not in config_fields
-    assert "target_range" not in config_fields
-    assert "target_ranges" not in config_fields
+    assert "target_radius" not in config_fields
+    assert "target_radii" not in config_fields
 
     assert env_config.obstacles.shape == (MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES)
     assert env_config.obstacles.dtype == jnp.float32
@@ -445,8 +430,8 @@ def test_env_state_stores_slot_aligned_arrays() -> None:
         class_ids=jnp.zeros(shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32),
         movement_speeds=jnp.ones(shape=(MAX_AGENT_SLOTS,), dtype=jnp.float32),
         observation_radii=jnp.ones(shape=(MAX_AGENT_SLOTS,), dtype=jnp.float32),
-        basic_interaction_ranges=jnp.ones(shape=(MAX_AGENT_SLOTS,), dtype=jnp.float32),
-        ultimate_interaction_ranges=jnp.ones(
+        basic_interaction_radii=jnp.ones(shape=(MAX_AGENT_SLOTS,), dtype=jnp.float32),
+        ultimate_interaction_radii=jnp.ones(
             shape=(MAX_AGENT_SLOTS,), dtype=jnp.float32
         ),
         active_mask=jnp.ones(shape=(MAX_AGENT_SLOTS,), dtype=bool),
@@ -457,8 +442,8 @@ def test_env_state_stores_slot_aligned_arrays() -> None:
     state_fields = set(EnvState._fields)
     assert "movement_speed" not in state_fields
     assert "observation_radius" not in state_fields
-    assert "target_range" not in state_fields
-    assert "target_ranges" not in state_fields
+    assert "target_radius" not in state_fields
+    assert "target_radii" not in state_fields
 
 
 def test_action_stores_one_discrete_choice_per_agent_slot() -> None:
@@ -531,17 +516,16 @@ def test_reset_returns_fixed_shape_core_outputs(team_size: int) -> None:
     assert jnp.all(state.movement_speeds == config.default_movement_speed)
     assert jnp.all(state.observation_radii == config.default_observation_radius)
     assert jnp.all(
-        state.basic_interaction_ranges == config.default_basic_interaction_range
+        state.basic_interaction_radii == config.default_basic_interaction_radius
     )
     assert jnp.all(
-        state.ultimate_interaction_ranges == config.default_ultimate_interaction_range
+        state.ultimate_interaction_radii == config.default_ultimate_interaction_radius
     )
 
     _assert_observation_contract(observation)
-    _assert_step1_observation_values(
+    _assert_common_observation_values(
         observation=observation,
         config=config,
-        active_alive_mask=jnp.logical_and(state.active_mask, state.alive_mask),
     )
 
     _assert_action_mask_contract(action_mask)
@@ -585,10 +569,9 @@ def test_reset_marks_only_active_team_slots_as_alive_and_actionable(
 
     assert jnp.array_equal(state.active_mask, expected_active_mask)
     assert jnp.array_equal(state.alive_mask, expected_active_mask)
-    assert jnp.array_equal(
-        observation.ally_visibility_mask,
-        _expected_self_visibility(expected_active_mask),
-    )
+    if inactive_indices.shape[0] > 0:
+        assert not jnp.any(observation.ally_visibility_mask[inactive_indices, :])
+        assert not jnp.any(observation.enemy_visibility_mask[inactive_indices, :])
 
     _assert_step1_action_mask_values(
         action_mask=action_mask,
@@ -640,10 +623,10 @@ def test_step_preserves_slot_aligned_state_arrays() -> None:
     assert jnp.array_equal(next_state.movement_speeds, state.movement_speeds)
     assert jnp.array_equal(next_state.observation_radii, state.observation_radii)
     assert jnp.array_equal(
-        next_state.basic_interaction_ranges, state.basic_interaction_ranges
+        next_state.basic_interaction_radii, state.basic_interaction_radii
     )
     assert jnp.array_equal(
-        next_state.ultimate_interaction_ranges, state.ultimate_interaction_ranges
+        next_state.ultimate_interaction_radii, state.ultimate_interaction_radii
     )
     assert jnp.array_equal(next_state.active_mask, state.active_mask)
     assert jnp.array_equal(next_state.alive_mask, state.alive_mask)
@@ -660,12 +643,9 @@ def test_step_returns_fixed_shape_core_outputs() -> None:
 
     _assert_state_contract(next_state)
     _assert_observation_contract(observation)
-    _assert_step1_observation_values(
+    _assert_common_observation_values(
         observation=observation,
         config=config,
-        active_alive_mask=jnp.logical_and(
-            next_state.active_mask, next_state.alive_mask
-        ),
     )
 
     assert reward.rewards.shape == (MAX_AGENT_SLOTS,)
