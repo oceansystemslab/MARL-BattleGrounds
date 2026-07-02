@@ -145,8 +145,8 @@ def _deterministic_config(
         default_agent_radius=0.5,
         default_movement_speed=default_movement_speed,
         default_observation_radius=8.0,
-        default_basic_interaction_range=6.0,
-        default_ultimate_interaction_range=9.0,
+        default_basic_interaction_radius=6.0,
+        default_ultimate_interaction_radius=9.0,
         obstacles=_empty_obstacles() if obstacles is None else obstacles,
     )
 
@@ -223,8 +223,8 @@ def _state_with_single_active_alive_agent(
     radius: float = 0.5,
     effective_movement_speed: float = 1.0,
     effective_observation_radius: float = 8.0,
-    effective_basic_interaction_range: float = 6.0,
-    effective_ultimate_interaction_range: float = 9.0,
+    effective_basic_interaction_radius: float = 6.0,
+    effective_ultimate_interaction_radius: float = 9.0,
     step_count: int = 0,
 ) -> EnvState:
     """Create a valid state with slot 0 active and alive."""
@@ -236,11 +236,11 @@ def _state_with_single_active_alive_agent(
         class_ids=_neutral_class_ids(),
         movement_speeds=_slot_float_vector(1.0, (0, effective_movement_speed)),
         observation_radii=_slot_float_vector(8.0, (0, effective_observation_radius)),
-        basic_interaction_ranges=_slot_float_vector(
-            6.0, (0, effective_basic_interaction_range)
+        basic_interaction_radii=_slot_float_vector(
+            6.0, (0, effective_basic_interaction_radius)
         ),
-        ultimate_interaction_ranges=_slot_float_vector(
-            9.0, (0, effective_ultimate_interaction_range)
+        ultimate_interaction_radii=_slot_float_vector(
+            9.0, (0, effective_ultimate_interaction_radius)
         ),
         active_mask=_mask_with_true_slots(0),
         alive_mask=_mask_with_true_slots(0),
@@ -259,8 +259,8 @@ def _state_with_two_agents(
     agent_a_effective_movement_speed: float = 1.0,
     agent_b_effective_movement_speed: float = 1.0,
     effective_observation_radius: float = 8.0,
-    effective_basic_interaction_range: float = 6.0,
-    effective_ultimate_interaction_range: float = 9.0,
+    effective_basic_interaction_radius: float = 6.0,
+    effective_ultimate_interaction_radius: float = 9.0,
     step_count: int = 0,
 ) -> EnvState:
     """Create a valid state with two agents and configurable participation flags."""
@@ -292,15 +292,15 @@ def _state_with_two_agents(
             (0, effective_observation_radius),
             (1, effective_observation_radius),
         ),
-        basic_interaction_ranges=_slot_float_vector(
+        basic_interaction_radii=_slot_float_vector(
             6.0,
-            (0, effective_basic_interaction_range),
-            (1, effective_basic_interaction_range),
+            (0, effective_basic_interaction_radius),
+            (1, effective_basic_interaction_radius),
         ),
-        ultimate_interaction_ranges=_slot_float_vector(
+        ultimate_interaction_radii=_slot_float_vector(
             9.0,
-            (0, effective_ultimate_interaction_range),
-            (1, effective_ultimate_interaction_range),
+            (0, effective_ultimate_interaction_radius),
+            (1, effective_ultimate_interaction_radius),
         ),
         active_mask=active_mask,
         alive_mask=alive_mask,
@@ -397,11 +397,11 @@ def _assert_state_contract(state: EnvState) -> None:
     assert state.observation_radii.shape == (MAX_AGENT_SLOTS,)
     assert state.observation_radii.dtype == jnp.float32
 
-    assert state.basic_interaction_ranges.shape == (MAX_AGENT_SLOTS,)
-    assert state.basic_interaction_ranges.dtype == jnp.float32
+    assert state.basic_interaction_radii.shape == (MAX_AGENT_SLOTS,)
+    assert state.basic_interaction_radii.dtype == jnp.float32
 
-    assert state.ultimate_interaction_ranges.shape == (MAX_AGENT_SLOTS,)
-    assert state.ultimate_interaction_ranges.dtype == jnp.float32
+    assert state.ultimate_interaction_radii.shape == (MAX_AGENT_SLOTS,)
+    assert state.ultimate_interaction_radii.dtype == jnp.float32
 
     assert state.active_mask.shape == (MAX_AGENT_SLOTS,)
     assert state.active_mask.dtype == bool
@@ -814,10 +814,10 @@ def test_step_preserves_placeholder_contracts_after_non_stay_movement() -> None:
     assert jnp.array_equal(next_state.movement_speeds, state.movement_speeds)
     assert jnp.array_equal(next_state.observation_radii, state.observation_radii)
     assert jnp.array_equal(
-        next_state.basic_interaction_ranges, state.basic_interaction_ranges
+        next_state.basic_interaction_radii, state.basic_interaction_radii
     )
     assert jnp.array_equal(
-        next_state.ultimate_interaction_ranges, state.ultimate_interaction_ranges
+        next_state.ultimate_interaction_radii, state.ultimate_interaction_radii
     )
     assert jnp.array_equal(next_state.active_mask, state.active_mask)
     assert jnp.array_equal(next_state.alive_mask, state.alive_mask)
@@ -1165,8 +1165,8 @@ def test_active_alive_overlapping_agents_separate_in_free_space(
         class_ids=_neutral_class_ids(),
         movement_speeds=_slot_float_vector(1.0),
         observation_radii=_slot_float_vector(8.0),
-        basic_interaction_ranges=_slot_float_vector(6.0),
-        ultimate_interaction_ranges=_slot_float_vector(9.0),
+        basic_interaction_radii=_slot_float_vector(6.0),
+        ultimate_interaction_radii=_slot_float_vector(9.0),
         active_mask=_mask_with_true_slots(0, blocker_slot),
         alive_mask=_mask_with_true_slots(0, blocker_slot),
     )

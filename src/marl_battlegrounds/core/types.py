@@ -41,8 +41,11 @@ MAX_OBJECTIVE_SLOTS = 8
 OBJECTIVE_FEATURES = 12
 CONTEXT_FEATURES = 8
 
-# Shared base agent fields keep identical indices across self rows and
-# unit-candidate rows. Family-specific extensions should append after these.
+# Self rows and unit-candidate rows use one shared agent-feature schema.
+# self_features exists only for convenient actor conditioning; ally/enemy unit
+# rows are relation-indexed candidate uses of the same AGENT_FEATURE_* contract.
+# Keep SELF_FEATURES == UNIT_FEATURES unless a future schema decision explicitly
+# splits these families.
 AGENT_FEATURE_X = 0
 AGENT_FEATURE_Y = 1
 AGENT_FEATURE_RADIUS = 2
@@ -52,8 +55,8 @@ AGENT_FEATURE_ALIVE = 5
 AGENT_FEATURE_CLASS_ID = 6
 AGENT_FEATURE_MOVEMENT_SPEED = 7
 AGENT_FEATURE_OBSERVATION_RADIUS = 8
-AGENT_FEATURE_BASIC_INTERACTION_RANGE = 9
-AGENT_FEATURE_ULTIMATE_INTERACTION_RANGE = 10
+AGENT_FEATURE_BASIC_INTERACTION_RADIUS = 9
+AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS = 10
 
 
 class EnvConfig(NamedTuple):
@@ -72,8 +75,8 @@ class EnvConfig(NamedTuple):
     default_agent_radius: float
     default_movement_speed: float
     default_observation_radius: float
-    default_basic_interaction_range: float
-    default_ultimate_interaction_range: float
+    default_basic_interaction_radius: float
+    default_ultimate_interaction_radius: float
     obstacles: Array
 
 
@@ -93,8 +96,8 @@ class EnvState(NamedTuple):
     class_ids: Array
     movement_speeds: Array
     observation_radii: Array
-    basic_interaction_ranges: Array
-    ultimate_interaction_ranges: Array
+    basic_interaction_radii: Array
+    ultimate_interaction_radii: Array
     active_mask: Array
     alive_mask: Array
 
