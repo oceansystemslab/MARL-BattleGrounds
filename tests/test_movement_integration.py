@@ -10,6 +10,7 @@ from jax import Array
 from marl_battlegrounds.core.env import step
 from marl_battlegrounds.core.geometry import GEOMETRY_TOLERANCE
 from marl_battlegrounds.core.types import (
+    CLASS_NEUTRAL,
     CONTEXT_FEATURES,
     ENVIRONMENT_DIMENSIONS,
     MAX_AGENT_SLOTS,
@@ -130,7 +131,7 @@ def _deterministic_config(
     *,
     team_size: int = 3,
     max_steps: int = 1000,
-    movement_speed: float = 1.0,
+    default_movement_speed: float = 1.0,
     map_width: float = 20.0,
     map_height: float = 12.0,
     obstacles: Array | None = None,
@@ -141,10 +142,11 @@ def _deterministic_config(
         max_steps=max_steps,
         map_width=map_width,
         map_height=map_height,
-        movement_speed=movement_speed,
-        observation_radius=8.0,
-        target_range=6.0,
         default_agent_radius=0.5,
+        default_movement_speed=default_movement_speed,
+        default_observation_radius=8.0,
+        default_basic_interaction_range=6.0,
+        default_ultimate_interaction_range=9.0,
         obstacles=_empty_obstacles() if obstacles is None else obstacles,
     )
 
@@ -185,6 +187,25 @@ def _agent_radii_array_with_rows(*rows: tuple[int, Array | float]) -> Array:
     return radii
 
 
+def _slot_float_vector(
+    default_value: float,
+    *rows: tuple[int, Array | float],
+) -> Array:
+    """Create a float32 slot vector with selected overrides."""
+    values = jnp.full((MAX_AGENT_SLOTS,), default_value, dtype=jnp.float32)
+
+    for slot, value in rows:
+        assert 0 <= slot < MAX_AGENT_SLOTS
+        values = values.at[slot].set(value)
+
+    return values
+
+
+def _neutral_class_ids() -> Array:
+    """Create the placeholder neutral class-id vector."""
+    return jnp.full((MAX_AGENT_SLOTS,), CLASS_NEUTRAL, dtype=jnp.int32)
+
+
 def _mask_with_true_slots(*slots: int) -> Array:
     """Create a slot mask with only selected slots marked true."""
     mask = jnp.zeros((MAX_AGENT_SLOTS,), dtype=bool)
@@ -200,6 +221,10 @@ def _state_with_single_active_alive_agent(
     position: Array,
     *,
     radius: float = 0.5,
+    effective_movement_speed: float = 1.0,
+    effective_observation_radius: float = 8.0,
+    effective_basic_interaction_range: float = 6.0,
+    effective_ultimate_interaction_range: float = 9.0,
     step_count: int = 0,
 ) -> EnvState:
     """Create a valid state with slot 0 active and alive."""
@@ -208,6 +233,15 @@ def _state_with_single_active_alive_agent(
         agent_positions=_agent_positions_array_with_rows((0, position)),
         agent_radii=_agent_radii_array_with_rows((0, radius)),
         team_ids=_team_ids(),
+        class_ids=_neutral_class_ids(),
+        movement_speeds=_slot_float_vector(1.0, (0, effective_movement_speed)),
+        observation_radii=_slot_float_vector(8.0, (0, effective_observation_radius)),
+        basic_interaction_ranges=_slot_float_vector(
+            6.0, (0, effective_basic_interaction_range)
+        ),
+        ultimate_interaction_ranges=_slot_float_vector(
+            9.0, (0, effective_ultimate_interaction_range)
+        ),
         active_mask=_mask_with_true_slots(0),
         alive_mask=_mask_with_true_slots(0),
     )
@@ -222,6 +256,11 @@ def _state_with_two_agents(
     agent_b_alive_flag: bool = True,
     *,
     radius: float = 0.5,
+    agent_a_effective_movement_speed: float = 1.0,
+    agent_b_effective_movement_speed: float = 1.0,
+    effective_observation_radius: float = 8.0,
+    effective_basic_interaction_range: float = 6.0,
+    effective_ultimate_interaction_range: float = 9.0,
     step_count: int = 0,
 ) -> EnvState:
     """Create a valid state with two agents and configurable participation flags."""
@@ -242,6 +281,27 @@ def _state_with_two_agents(
         ),
         agent_radii=_agent_radii_array_with_rows((0, radius), (1, radius)),
         team_ids=_team_ids(),
+        class_ids=_neutral_class_ids(),
+        movement_speeds=_slot_float_vector(
+            1.0,
+            (0, agent_a_effective_movement_speed),
+            (1, agent_b_effective_movement_speed),
+        ),
+        observation_radii=_slot_float_vector(
+            8.0,
+            (0, effective_observation_radius),
+            (1, effective_observation_radius),
+        ),
+        basic_interaction_ranges=_slot_float_vector(
+            6.0,
+            (0, effective_basic_interaction_range),
+            (1, effective_basic_interaction_range),
+        ),
+        ultimate_interaction_ranges=_slot_float_vector(
+            9.0,
+            (0, effective_ultimate_interaction_range),
+            (1, effective_ultimate_interaction_range),
+        ),
         active_mask=active_mask,
         alive_mask=alive_mask,
     )
@@ -327,6 +387,21 @@ def _assert_state_contract(state: EnvState) -> None:
 
     assert state.team_ids.shape == (MAX_AGENT_SLOTS,)
     assert state.team_ids.dtype == jnp.int32
+
+    assert state.class_ids.shape == (MAX_AGENT_SLOTS,)
+    assert state.class_ids.dtype == jnp.int32
+
+    assert state.movement_speeds.shape == (MAX_AGENT_SLOTS,)
+    assert state.movement_speeds.dtype == jnp.float32
+
+    assert state.observation_radii.shape == (MAX_AGENT_SLOTS,)
+    assert state.observation_radii.dtype == jnp.float32
+
+    assert state.basic_interaction_ranges.shape == (MAX_AGENT_SLOTS,)
+    assert state.basic_interaction_ranges.dtype == jnp.float32
+
+    assert state.ultimate_interaction_ranges.shape == (MAX_AGENT_SLOTS,)
+    assert state.ultimate_interaction_ranges.dtype == jnp.float32
 
     assert state.active_mask.shape == (MAX_AGENT_SLOTS,)
     assert state.active_mask.dtype == bool
@@ -583,14 +658,15 @@ def test_cardinal_moves_update_position_in_free_space(
         pytest.param(MOVE_EAST, jnp.array([12.5, 6.0], dtype=jnp.float32), id="east"),
     ],
 )
-def test_cardinal_moves_scale_by_configured_movement_speed(
+def test_cardinal_moves_scale_by_effective_state_movement_speed(
     move_action: int,
     expected_position: Array,
 ) -> None:
-    config = _deterministic_config(movement_speed=2.5)
+    config = _deterministic_config()
     key = jax.random.key(42)
     state = _state_with_single_active_alive_agent(
-        jnp.array([10.0, 6.0], dtype=jnp.float32)
+        jnp.array([10.0, 6.0], dtype=jnp.float32),
+        effective_movement_speed=2.5,
     )
     joint_action = _joint_action_with_moves((0, move_action))
 
@@ -643,19 +719,21 @@ def test_diagonal_moves_are_normalized_in_free_space(
     assert bool(
         jnp.isclose(
             cast(Array, jnp.linalg.norm(displacement)),
-            jnp.asarray(config.movement_speed, dtype=jnp.float32),
+            state.movement_speeds[0],
             atol=GEOMETRY_TOLERANCE,
             rtol=0.0,
         )
     )
 
 
-def test_diagonal_moves_scale_by_configured_movement_speed() -> None:
-    movement_speed = 2.0
-    config = _deterministic_config(movement_speed=movement_speed)
+def test_diagonal_moves_scale_by_effective_state_movement_speed() -> None:
+    effective_movement_speed = 2.0
+    config = _deterministic_config()
     key = jax.random.key(42)
     start = jnp.array([10.0, 10.0], dtype=jnp.float32)
-    state = _state_with_single_active_alive_agent(start)
+    state = _state_with_single_active_alive_agent(
+        start, effective_movement_speed=effective_movement_speed
+    )
     joint_action = _joint_action_with_moves((0, MOVE_NORTHEAST))
 
     next_state, *_ = step(config, state, joint_action, key)
@@ -665,13 +743,53 @@ def test_diagonal_moves_scale_by_configured_movement_speed() -> None:
     assert bool(
         jnp.isclose(
             cast(Array, jnp.linalg.norm(displacement)),
-            jnp.asarray(movement_speed, dtype=jnp.float32),
+            jnp.asarray(effective_movement_speed, dtype=jnp.float32),
             atol=GEOMETRY_TOLERANCE,
             rtol=0.0,
         )
     )
     assert bool(displacement[0] > 0.0)
     assert bool(displacement[1] > 0.0)
+
+
+def test_same_move_action_uses_per_slot_movement_speeds() -> None:
+    config = _deterministic_config()
+    key = jax.random.key(42)
+    agent_a_start = jnp.array([5.0, 5.0], dtype=jnp.float32)
+    agent_b_start = jnp.array([12.0, 5.0], dtype=jnp.float32)
+    state = _state_with_two_agents(
+        agent_a_start,
+        agent_b_start,
+        agent_a_effective_movement_speed=1.0,
+        agent_b_effective_movement_speed=2.5,
+    )
+    joint_action = _joint_action_with_moves((0, MOVE_EAST), (1, MOVE_EAST))
+
+    next_state, *_ = step(config, state, joint_action, key)
+
+    _assert_center_close(
+        next_state.agent_positions[0],
+        jnp.array([6.0, 5.0], dtype=jnp.float32),
+    )
+    _assert_center_close(
+        next_state.agent_positions[1],
+        jnp.array([14.5, 5.0], dtype=jnp.float32),
+    )
+
+
+def test_step_ignores_config_default_movement_speed_after_state_exists() -> None:
+    config = _deterministic_config(default_movement_speed=9.0)
+    key = jax.random.key(42)
+    start = jnp.array([5.0, 5.0], dtype=jnp.float32)
+    state = _state_with_single_active_alive_agent(start, effective_movement_speed=1.25)
+    joint_action = _joint_action_with_moves((0, MOVE_EAST))
+
+    next_state, *_ = step(config, state, joint_action, key)
+
+    _assert_center_close(
+        next_state.agent_positions[0],
+        jnp.array([6.25, 5.0], dtype=jnp.float32),
+    )
 
 
 def test_step_preserves_placeholder_contracts_after_non_stay_movement() -> None:
@@ -692,6 +810,15 @@ def test_step_preserves_placeholder_contracts_after_non_stay_movement() -> None:
     assert next_state.step_count == state.step_count + 1
     assert jnp.array_equal(next_state.agent_radii, state.agent_radii)
     assert jnp.array_equal(next_state.team_ids, state.team_ids)
+    assert jnp.array_equal(next_state.class_ids, state.class_ids)
+    assert jnp.array_equal(next_state.movement_speeds, state.movement_speeds)
+    assert jnp.array_equal(next_state.observation_radii, state.observation_radii)
+    assert jnp.array_equal(
+        next_state.basic_interaction_ranges, state.basic_interaction_ranges
+    )
+    assert jnp.array_equal(
+        next_state.ultimate_interaction_ranges, state.ultimate_interaction_ranges
+    )
     assert jnp.array_equal(next_state.active_mask, state.active_mask)
     assert jnp.array_equal(next_state.alive_mask, state.alive_mask)
     _assert_state_contract(next_state)
@@ -1035,6 +1162,11 @@ def test_active_alive_overlapping_agents_separate_in_free_space(
             (blocker_slot, radius),
         ),
         team_ids=_team_ids(),
+        class_ids=_neutral_class_ids(),
+        movement_speeds=_slot_float_vector(1.0),
+        observation_radii=_slot_float_vector(8.0),
+        basic_interaction_ranges=_slot_float_vector(6.0),
+        ultimate_interaction_ranges=_slot_float_vector(9.0),
         active_mask=_mask_with_true_slots(0, blocker_slot),
         alive_mask=_mask_with_true_slots(0, blocker_slot),
     )

@@ -8,10 +8,16 @@ from marl_battlegrounds.core.geometry import project_movement_with_geometry
 from marl_battlegrounds.core.types import (
     AGENT_FEATURE_ACTIVE,
     AGENT_FEATURE_ALIVE,
+    AGENT_FEATURE_BASIC_INTERACTION_RANGE,
+    AGENT_FEATURE_CLASS_ID,
+    AGENT_FEATURE_MOVEMENT_SPEED,
+    AGENT_FEATURE_OBSERVATION_RADIUS,
     AGENT_FEATURE_RADIUS,
     AGENT_FEATURE_TEAM_ID,
+    AGENT_FEATURE_ULTIMATE_INTERACTION_RANGE,
     AGENT_FEATURE_X,
     AGENT_FEATURE_Y,
+    CLASS_NEUTRAL,
     CONTEXT_FEATURES,
     ENVIRONMENT_DIMENSIONS,
     MAX_AGENT_SLOTS,
@@ -127,18 +133,14 @@ def _build_action_mask(state: EnvState, observation: Observation) -> ActionMask:
     )
 
 
-def _build_intended_movement_deltas(joint_action: Action, config: EnvConfig) -> Array:
+def _build_intended_movement_deltas(joint_action: Action, state: EnvState) -> Array:
     """Convert per-slot movement action IDs into scaled displacement vectors."""
     intended_movement_deltas_unscaled = _JOINT_ACTION_MOVE_TO_DISPLACEMENT_LOOKUP_TABLE[
         joint_action.move
     ]
 
-    movement_speed_scaling_factor = jnp.asarray(
-        config.movement_speed, dtype=jnp.float32
-    )
-
     intended_movement_deltas = (
-        movement_speed_scaling_factor * intended_movement_deltas_unscaled
+        state.movement_speeds[:, None] * intended_movement_deltas_unscaled
     )
 
     return intended_movement_deltas
@@ -159,6 +161,21 @@ def _build_self_features(state: EnvState) -> Array:
     )
     self_features = self_features.at[:, AGENT_FEATURE_ALIVE].set(
         state.alive_mask.astype(jnp.float32)
+    )
+    self_features = self_features.at[:, AGENT_FEATURE_CLASS_ID].set(
+        state.class_ids.astype(jnp.float32)
+    )
+    self_features = self_features.at[:, AGENT_FEATURE_MOVEMENT_SPEED].set(
+        state.movement_speeds
+    )
+    self_features = self_features.at[:, AGENT_FEATURE_OBSERVATION_RADIUS].set(
+        state.observation_radii
+    )
+    self_features = self_features.at[:, AGENT_FEATURE_BASIC_INTERACTION_RANGE].set(
+        state.basic_interaction_ranges
+    )
+    self_features = self_features.at[:, AGENT_FEATURE_ULTIMATE_INTERACTION_RANGE].set(
+        state.ultimate_interaction_ranges
     )
 
     return self_features
@@ -232,6 +249,29 @@ def reset(
             dtype=jnp.float32,
         ),
         team_ids=jnp.concat([team_0_ids, team_1_ids]),
+        class_ids=jnp.full(
+            shape=(MAX_AGENT_SLOTS,), fill_value=CLASS_NEUTRAL, dtype=jnp.int32
+        ),
+        movement_speeds=jnp.full(
+            shape=(MAX_AGENT_SLOTS,),
+            fill_value=config.default_movement_speed,
+            dtype=jnp.float32,
+        ),
+        observation_radii=jnp.full(
+            shape=(MAX_AGENT_SLOTS,),
+            fill_value=config.default_observation_radius,
+            dtype=jnp.float32,
+        ),
+        basic_interaction_ranges=jnp.full(
+            shape=(MAX_AGENT_SLOTS,),
+            fill_value=config.default_basic_interaction_range,
+            dtype=jnp.float32,
+        ),
+        ultimate_interaction_ranges=jnp.full(
+            shape=(MAX_AGENT_SLOTS,),
+            fill_value=config.default_ultimate_interaction_range,
+            dtype=jnp.float32,
+        ),
         active_mask=initial_mask,
         alive_mask=initial_mask,
     )
@@ -250,7 +290,7 @@ def step(
 ) -> tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info]:
     """Advance movement while preserving current Milestone 4 placeholders."""
 
-    intended_movement_deltas = _build_intended_movement_deltas(joint_action, config)
+    intended_movement_deltas = _build_intended_movement_deltas(joint_action, state)
 
     next_agent_positions = project_movement_with_geometry(
         state.agent_positions,
@@ -268,6 +308,11 @@ def step(
         agent_positions=next_agent_positions,
         agent_radii=state.agent_radii,
         team_ids=state.team_ids,
+        class_ids=state.class_ids,
+        movement_speeds=state.movement_speeds,
+        observation_radii=state.observation_radii,
+        basic_interaction_ranges=state.basic_interaction_ranges,
+        ultimate_interaction_ranges=state.ultimate_interaction_ranges,
         active_mask=state.active_mask,
         alive_mask=state.alive_mask,
     )
