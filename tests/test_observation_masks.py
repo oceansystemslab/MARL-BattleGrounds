@@ -8,10 +8,16 @@ from marl_battlegrounds.core.env import reset, step
 from marl_battlegrounds.core.types import (
     AGENT_FEATURE_ACTIVE,
     AGENT_FEATURE_ALIVE,
+    AGENT_FEATURE_BASIC_INTERACTION_RANGE,
+    AGENT_FEATURE_CLASS_ID,
+    AGENT_FEATURE_MOVEMENT_SPEED,
+    AGENT_FEATURE_OBSERVATION_RADIUS,
     AGENT_FEATURE_RADIUS,
     AGENT_FEATURE_TEAM_ID,
+    AGENT_FEATURE_ULTIMATE_INTERACTION_RANGE,
     AGENT_FEATURE_X,
     AGENT_FEATURE_Y,
+    CLASS_NEUTRAL,
     ENVIRONMENT_DIMENSIONS,
     MAX_AGENT_SLOTS,
     MAX_AGENTS_PER_TEAM,
@@ -39,7 +45,7 @@ def _deterministic_config(
     *,
     team_size: int = 3,
     max_steps: int = 1000,
-    movement_speed: float = 1.0,
+    default_movement_speed: float = 1.0,
     map_width: float = 20.0,
     map_height: float = 12.0,
     obstacles: Array | None = None,
@@ -50,10 +56,11 @@ def _deterministic_config(
         max_steps=max_steps,
         map_width=map_width,
         map_height=map_height,
-        movement_speed=movement_speed,
-        observation_radius=8.0,
-        target_range=6.0,
         default_agent_radius=0.5,
+        default_movement_speed=default_movement_speed,
+        default_observation_radius=8.0,
+        default_basic_interaction_range=6.0,
+        default_ultimate_interaction_range=9.0,
         obstacles=_empty_obstacles() if obstacles is None else obstacles,
     )
 
@@ -111,6 +118,25 @@ def _agent_radii_array_with_rows(*rows: tuple[int, float]) -> Array:
     return radii
 
 
+def _slot_float_vector(
+    default_value: float,
+    *rows: tuple[int, Array | float],
+) -> Array:
+    """Create a float32 slot vector with selected overrides."""
+    values = jnp.full((MAX_AGENT_SLOTS,), default_value, dtype=jnp.float32)
+
+    for slot, value in rows:
+        assert 0 <= slot < MAX_AGENT_SLOTS
+        values = values.at[slot].set(value)
+
+    return values
+
+
+def _neutral_class_ids() -> Array:
+    """Create the placeholder neutral class-id vector."""
+    return jnp.full((MAX_AGENT_SLOTS,), CLASS_NEUTRAL, dtype=jnp.int32)
+
+
 def _state_two_versus_two_game(
     *,
     agent_a_position: Array,
@@ -126,6 +152,10 @@ def _state_two_versus_two_game(
     agent_d_active_flag: bool = True,
     agent_d_alive_flag: bool = True,
     radius: float = 0.5,
+    effective_movement_speed: float = 1.0,
+    effective_observation_radius: float = 8.0,
+    effective_basic_interaction_range: float = 6.0,
+    effective_ultimate_interaction_range: float = 9.0,
     step_count: int = 0,
 ) -> EnvState:
     """Create a fixed two-versus-two state in slots 0, 1, 5, and 6."""
@@ -164,6 +194,35 @@ def _state_two_versus_two_game(
             (agent_d_index, radius),
         ),
         team_ids=_team_ids(),
+        class_ids=_neutral_class_ids(),
+        movement_speeds=_slot_float_vector(
+            1.0,
+            (agent_a_index, effective_movement_speed),
+            (agent_b_index, effective_movement_speed),
+            (agent_c_index, effective_movement_speed),
+            (agent_d_index, effective_movement_speed),
+        ),
+        observation_radii=_slot_float_vector(
+            8.0,
+            (agent_a_index, effective_observation_radius),
+            (agent_b_index, effective_observation_radius),
+            (agent_c_index, effective_observation_radius),
+            (agent_d_index, effective_observation_radius),
+        ),
+        basic_interaction_ranges=_slot_float_vector(
+            6.0,
+            (agent_a_index, effective_basic_interaction_range),
+            (agent_b_index, effective_basic_interaction_range),
+            (agent_c_index, effective_basic_interaction_range),
+            (agent_d_index, effective_basic_interaction_range),
+        ),
+        ultimate_interaction_ranges=_slot_float_vector(
+            9.0,
+            (agent_a_index, effective_ultimate_interaction_range),
+            (agent_b_index, effective_ultimate_interaction_range),
+            (agent_c_index, effective_ultimate_interaction_range),
+            (agent_d_index, effective_ultimate_interaction_range),
+        ),
         active_mask=active_mask,
         alive_mask=alive_mask,
     )
@@ -219,9 +278,56 @@ def _assert_self_features_match_state_base_fields(
     )
 
 
+def _assert_self_features_match_state_effective_fields(
+    observation: Observation,
+    state: EnvState,
+) -> None:
+    """Assert that self features expose current per-slot class/stat values."""
+    assert bool(
+        jnp.allclose(
+            observation.self_features[:, AGENT_FEATURE_CLASS_ID],
+            state.class_ids.astype(jnp.float32),
+            atol=0.0,
+            rtol=0.0,
+        )
+    )
+    assert bool(
+        jnp.allclose(
+            observation.self_features[:, AGENT_FEATURE_MOVEMENT_SPEED],
+            state.movement_speeds,
+            atol=0.0,
+            rtol=0.0,
+        )
+    )
+    assert bool(
+        jnp.allclose(
+            observation.self_features[:, AGENT_FEATURE_OBSERVATION_RADIUS],
+            state.observation_radii,
+            atol=0.0,
+            rtol=0.0,
+        )
+    )
+    assert bool(
+        jnp.allclose(
+            observation.self_features[:, AGENT_FEATURE_BASIC_INTERACTION_RANGE],
+            state.basic_interaction_ranges,
+            atol=0.0,
+            rtol=0.0,
+        )
+    )
+    assert bool(
+        jnp.allclose(
+            observation.self_features[:, AGENT_FEATURE_ULTIMATE_INTERACTION_RANGE],
+            state.ultimate_interaction_ranges,
+            atol=0.0,
+            rtol=0.0,
+        )
+    )
+
+
 def _assert_unused_self_feature_columns_are_zero(observation: Observation) -> None:
     """Assert that currently unused self-feature columns remain zero."""
-    unused_start = AGENT_FEATURE_ALIVE + 1
+    unused_start = AGENT_FEATURE_ULTIMATE_INTERACTION_RANGE + 1
 
     assert bool(
         jnp.allclose(
@@ -265,6 +371,7 @@ def test_reset_self_features_match_reset_state_base_fields() -> None:
     initial_state, observation, *_ = reset(config, key)
 
     _assert_self_features_match_state_base_fields(observation, initial_state)
+    _assert_self_features_match_state_effective_fields(observation, initial_state)
     _assert_unused_self_feature_columns_are_zero(observation)
     _assert_unit_features_remain_checkpoint_2_placeholders(observation)
 
@@ -293,5 +400,6 @@ def test_step_self_features_match_next_state_base_fields() -> None:
     next_state, observation, *_ = step(config, state, joint_action, key)
 
     _assert_self_features_match_state_base_fields(observation, next_state)
+    _assert_self_features_match_state_effective_fields(observation, next_state)
     _assert_unused_self_feature_columns_are_zero(observation)
     _assert_unit_features_remain_checkpoint_2_placeholders(observation)

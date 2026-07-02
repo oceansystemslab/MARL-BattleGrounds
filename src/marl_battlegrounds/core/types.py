@@ -34,6 +34,7 @@ MOVE_NORTHEAST = 5
 MOVE_NORTHWEST = 6
 MOVE_SOUTHEAST = 7
 MOVE_SOUTHWEST = 8
+CLASS_NEUTRAL = 0
 SELF_FEATURES = 16
 UNIT_FEATURES = 16
 MAX_OBJECTIVE_SLOTS = 8
@@ -48,33 +49,52 @@ AGENT_FEATURE_RADIUS = 2
 AGENT_FEATURE_TEAM_ID = 3
 AGENT_FEATURE_ACTIVE = 4
 AGENT_FEATURE_ALIVE = 5
+AGENT_FEATURE_CLASS_ID = 6
+AGENT_FEATURE_MOVEMENT_SPEED = 7
+AGENT_FEATURE_OBSERVATION_RADIUS = 8
+AGENT_FEATURE_BASIC_INTERACTION_RANGE = 9
+AGENT_FEATURE_ULTIMATE_INTERACTION_RANGE = 10
 
 
 class EnvConfig(NamedTuple):
-    """Static episode settings consumed by reset and step functions.
+    """Static episode settings and reset defaults.
 
     Static map geometry belongs here because Milestone 4 obstacles do not change
-    during an episode. Dynamic per-agent quantities belong in ``EnvState``.
+    during an episode. ``default_*`` stat values are construction defaults for
+    reset and scenario loading only; after ``EnvState`` exists, per-slot state
+    arrays are the simulator truth for transition, observation, and masks.
     """
 
     team_size: int
     max_steps: int
     map_width: float
     map_height: float
-    movement_speed: float
-    observation_radius: float
-    target_range: float
     default_agent_radius: float
+    default_movement_speed: float
+    default_observation_radius: float
+    default_basic_interaction_range: float
+    default_ultimate_interaction_range: float
     obstacles: Array
 
 
 class EnvState(NamedTuple):
-    """Dynamic slot-aligned simulator state carried through transitions."""
+    """Dynamic slot-aligned simulator state carried through transitions.
+
+    Current stat arrays are authoritative per-slot effective values. Future
+    class catalogs and status systems may derive or update these values, but
+    step, observation, and masks consume the arrays here rather than config
+    defaults.
+    """
 
     step_count: Array
     agent_positions: Array
     agent_radii: Array
     team_ids: Array
+    class_ids: Array
+    movement_speeds: Array
+    observation_radii: Array
+    basic_interaction_ranges: Array
+    ultimate_interaction_ranges: Array
     active_mask: Array
     alive_mask: Array
 

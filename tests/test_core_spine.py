@@ -11,10 +11,16 @@ from marl_battlegrounds.core.env import reset, step
 from marl_battlegrounds.core.types import (
     AGENT_FEATURE_ACTIVE,
     AGENT_FEATURE_ALIVE,
+    AGENT_FEATURE_BASIC_INTERACTION_RANGE,
+    AGENT_FEATURE_CLASS_ID,
+    AGENT_FEATURE_MOVEMENT_SPEED,
+    AGENT_FEATURE_OBSERVATION_RADIUS,
     AGENT_FEATURE_RADIUS,
     AGENT_FEATURE_TEAM_ID,
+    AGENT_FEATURE_ULTIMATE_INTERACTION_RANGE,
     AGENT_FEATURE_X,
     AGENT_FEATURE_Y,
+    CLASS_NEUTRAL,
     CONTEXT_FEATURES,
     ENVIRONMENT_DIMENSIONS,
     MAX_AGENT_SLOTS,
@@ -101,10 +107,11 @@ def _config(
         max_steps=max_steps,
         map_width=20.0,
         map_height=12.0,
-        movement_speed=1.0,
-        observation_radius=8.0,
-        target_range=6.0,
         default_agent_radius=0.5,
+        default_movement_speed=1.0,
+        default_observation_radius=8.0,
+        default_basic_interaction_range=6.0,
+        default_ultimate_interaction_range=9.0,
         obstacles=_empty_obstacles() if obstacles is None else obstacles,
     )
 
@@ -195,6 +202,21 @@ def _assert_state_contract(state: EnvState) -> None:
 
     assert state.team_ids.shape == (MAX_AGENT_SLOTS,)
     assert state.team_ids.dtype == jnp.int32
+
+    assert state.class_ids.shape == (MAX_AGENT_SLOTS,)
+    assert state.class_ids.dtype == jnp.int32
+
+    assert state.movement_speeds.shape == (MAX_AGENT_SLOTS,)
+    assert state.movement_speeds.dtype == jnp.float32
+
+    assert state.observation_radii.shape == (MAX_AGENT_SLOTS,)
+    assert state.observation_radii.dtype == jnp.float32
+
+    assert state.basic_interaction_ranges.shape == (MAX_AGENT_SLOTS,)
+    assert state.basic_interaction_ranges.dtype == jnp.float32
+
+    assert state.ultimate_interaction_ranges.shape == (MAX_AGENT_SLOTS,)
+    assert state.ultimate_interaction_ranges.dtype == jnp.float32
 
     assert state.active_mask.shape == (MAX_AGENT_SLOTS,)
     assert state.active_mask.dtype == bool
@@ -362,6 +384,7 @@ def test_static_shape_constants_are_consistent() -> None:
 
     assert SELF_FEATURES == 16
     assert UNIT_FEATURES == 16
+    assert CLASS_NEUTRAL == 0
     base_agent_feature_indices = (
         AGENT_FEATURE_X,
         AGENT_FEATURE_Y,
@@ -371,7 +394,15 @@ def test_static_shape_constants_are_consistent() -> None:
         AGENT_FEATURE_ALIVE,
     )
     assert base_agent_feature_indices == tuple(range(6))
-    assert AGENT_FEATURE_ALIVE < SELF_FEATURES
+    self_only_agent_feature_indices = (
+        AGENT_FEATURE_CLASS_ID,
+        AGENT_FEATURE_MOVEMENT_SPEED,
+        AGENT_FEATURE_OBSERVATION_RADIUS,
+        AGENT_FEATURE_BASIC_INTERACTION_RANGE,
+        AGENT_FEATURE_ULTIMATE_INTERACTION_RANGE,
+    )
+    assert self_only_agent_feature_indices == tuple(range(6, 11))
+    assert AGENT_FEATURE_ULTIMATE_INTERACTION_RANGE < SELF_FEATURES
     assert AGENT_FEATURE_ALIVE < UNIT_FEATURES
     assert MAX_OBJECTIVE_SLOTS == 8
     assert OBJECTIVE_FEATURES == 12
@@ -386,10 +417,17 @@ def test_env_config_stores_static_episode_settings() -> None:
     assert env_config.max_steps == 10000
     assert env_config.map_width == 20.0
     assert env_config.map_height == 12.0
-    assert env_config.movement_speed == 1.0
-    assert env_config.observation_radius == 8.0
-    assert env_config.target_range == 6.0
     assert env_config.default_agent_radius == 0.5
+    assert env_config.default_movement_speed == 1.0
+    assert env_config.default_observation_radius == 8.0
+    assert env_config.default_basic_interaction_range == 6.0
+    assert env_config.default_ultimate_interaction_range == 9.0
+
+    config_fields = set(EnvConfig._fields)
+    assert "movement_speed" not in config_fields
+    assert "observation_radius" not in config_fields
+    assert "target_range" not in config_fields
+    assert "target_ranges" not in config_fields
 
     assert env_config.obstacles.shape == (MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES)
     assert env_config.obstacles.dtype == jnp.float32
@@ -404,11 +442,23 @@ def test_env_state_stores_slot_aligned_arrays() -> None:
         ),
         agent_radii=jnp.ones(shape=(MAX_AGENT_SLOTS,), dtype=jnp.float32),
         team_ids=jnp.ones(shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        class_ids=jnp.zeros(shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        movement_speeds=jnp.ones(shape=(MAX_AGENT_SLOTS,), dtype=jnp.float32),
+        observation_radii=jnp.ones(shape=(MAX_AGENT_SLOTS,), dtype=jnp.float32),
+        basic_interaction_ranges=jnp.ones(shape=(MAX_AGENT_SLOTS,), dtype=jnp.float32),
+        ultimate_interaction_ranges=jnp.ones(
+            shape=(MAX_AGENT_SLOTS,), dtype=jnp.float32
+        ),
         active_mask=jnp.ones(shape=(MAX_AGENT_SLOTS,), dtype=bool),
         alive_mask=jnp.ones(shape=(MAX_AGENT_SLOTS,), dtype=bool),
     )
 
     _assert_state_contract(env_state)
+    state_fields = set(EnvState._fields)
+    assert "movement_speed" not in state_fields
+    assert "observation_radius" not in state_fields
+    assert "target_range" not in state_fields
+    assert "target_ranges" not in state_fields
 
 
 def test_action_stores_one_discrete_choice_per_agent_slot() -> None:
@@ -477,6 +527,15 @@ def test_reset_returns_fixed_shape_core_outputs(team_size: int) -> None:
     _assert_state_contract(state)
     assert jnp.array_equal(state.step_count, jnp.array(0, dtype=jnp.int32))
     assert jnp.all(state.agent_radii == config.default_agent_radius)
+    assert jnp.all(state.class_ids == CLASS_NEUTRAL)
+    assert jnp.all(state.movement_speeds == config.default_movement_speed)
+    assert jnp.all(state.observation_radii == config.default_observation_radius)
+    assert jnp.all(
+        state.basic_interaction_ranges == config.default_basic_interaction_range
+    )
+    assert jnp.all(
+        state.ultimate_interaction_ranges == config.default_ultimate_interaction_range
+    )
 
     _assert_observation_contract(observation)
     _assert_step1_observation_values(
@@ -577,6 +636,15 @@ def test_step_preserves_slot_aligned_state_arrays() -> None:
     assert jnp.array_equal(next_state.agent_positions, state.agent_positions)
     assert jnp.array_equal(next_state.agent_radii, state.agent_radii)
     assert jnp.array_equal(next_state.team_ids, state.team_ids)
+    assert jnp.array_equal(next_state.class_ids, state.class_ids)
+    assert jnp.array_equal(next_state.movement_speeds, state.movement_speeds)
+    assert jnp.array_equal(next_state.observation_radii, state.observation_radii)
+    assert jnp.array_equal(
+        next_state.basic_interaction_ranges, state.basic_interaction_ranges
+    )
+    assert jnp.array_equal(
+        next_state.ultimate_interaction_ranges, state.ultimate_interaction_ranges
+    )
     assert jnp.array_equal(next_state.active_mask, state.active_mask)
     assert jnp.array_equal(next_state.alive_mask, state.alive_mask)
 
