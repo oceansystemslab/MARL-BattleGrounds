@@ -177,11 +177,13 @@ def _build_ally_enemy_visibility_masks(global_mask: Array) -> tuple[Array, Array
 def _build_observation(state: EnvState, config: EnvConfig) -> Observation:
     """Build the current observation contract from one slot-aligned state.
 
-    Checkpoint 4 owns boolean dynamic visibility only. Candidate feature rows
-    and targetability remain placeholders until the next checkpoints consume
-    these visibility masks.
+    Self rows are canonical fixed-slot agent rows. Ally and enemy unit rows use
+    the same agent-feature schema in relation-local candidate order, with
+    nonvisible candidate rows zeroed by the visibility masks.
     """
+
     self_features = _build_self_features(state)
+
     ally_features = _build_ally_features(self_features)
     enemy_features = _build_enemy_features(self_features)
 
@@ -189,6 +191,9 @@ def _build_observation(state: EnvState, config: EnvConfig) -> Observation:
     ally_visibility_mask, enemy_visibility_mask = _build_ally_enemy_visibility_masks(
         global_visibility_mask
     )
+
+    ally_features = _mask_unit_features(ally_features, ally_visibility_mask)
+    enemy_features = _mask_unit_features(enemy_features, enemy_visibility_mask)
 
     map_obstacle_features = jnp.broadcast_to(
         config.obstacles[None, :, :],
@@ -298,19 +303,54 @@ def _build_self_features(state: EnvState) -> Array:
 
 
 def _build_ally_features(self_features: Array) -> Array:
-    """Return zero ally rows until Checkpoint 5 populates visible candidates."""
-    del self_features
-    return jnp.zeros(
+    """Project global self rows into relation-local ally candidate rows."""
+    ally_features = jnp.zeros(
         (MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM, UNIT_FEATURES), dtype=jnp.float32
     )
+
+    team_0_start = 0
+    team_0_end = MAX_AGENTS_PER_TEAM
+    team_1_start = MAX_AGENTS_PER_TEAM
+    team_1_end = MAX_AGENT_SLOTS
+
+    ally_features = ally_features.at[team_0_start:team_0_end, :, :].set(
+        self_features[team_0_start:team_0_end, :]
+    )
+    ally_features = ally_features.at[team_1_start:team_1_end, :, :].set(
+        self_features[team_1_start:team_1_end, :]
+    )
+
+    return ally_features
 
 
 def _build_enemy_features(self_features: Array) -> Array:
-    """Return zero enemy rows until Checkpoint 5 populates visible candidates."""
-    del self_features
-    return jnp.zeros(
+    """Project global self rows into relation-local enemy candidate rows."""
+    enemy_features = jnp.zeros(
         (MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM, UNIT_FEATURES), dtype=jnp.float32
     )
+
+    team_0_start = 0
+    team_0_end = MAX_AGENTS_PER_TEAM
+    team_1_start = MAX_AGENTS_PER_TEAM
+    team_1_end = MAX_AGENT_SLOTS
+
+    enemy_features = enemy_features.at[team_0_start:team_0_end, :, :].set(
+        self_features[team_1_start:team_1_end, :]
+    )
+    enemy_features = enemy_features.at[team_1_start:team_1_end, :, :].set(
+        self_features[team_0_start:team_0_end, :]
+    )
+
+    return enemy_features
+
+
+def _mask_unit_features(unit_features: Array, visibility_mask: Array) -> Array:
+    """Zero relation-local candidate rows that are hidden from each observer."""
+    return jnp.where(
+        visibility_mask[:, :, None],
+        unit_features,
+        jnp.zeros_like(unit_features),
+    ).astype(jnp.float32)
 
 
 # Public ---

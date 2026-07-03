@@ -393,6 +393,43 @@ def _assert_self_features_match_state_base_fields(
     )
 
 
+def _assert_unit_feature_row_matches_self_row(
+    observation: Observation,
+    *,
+    expected_global_slot: int,
+    result_row: Array,
+) -> None:
+    """Assert a visible relation-local candidate row matches its global self row."""
+    assert result_row.shape == (UNIT_FEATURES,)
+    assert observation.self_features[expected_global_slot].shape == (SELF_FEATURES,)
+    assert bool(
+        jnp.allclose(
+            result_row,
+            observation.self_features[expected_global_slot],
+            atol=0.0,
+            rtol=0.0,
+        )
+    )
+
+
+def _assert_unit_feature_row_is_zero(row: Array) -> None:
+    """Assert a hidden relation-local candidate row leaks no feature values."""
+    assert row.shape == (UNIT_FEATURES,)
+    assert bool(
+        jnp.allclose(
+            row,
+            jnp.zeros((UNIT_FEATURES,), dtype=jnp.float32),
+            atol=0.0,
+            rtol=0.0,
+        )
+    )
+
+
+def _assert_action_mask_row_is_false(row: Array) -> None:
+    """Assert one action-mask row contains no valid actions."""
+    assert bool(jnp.all(jnp.logical_not(row)))
+
+
 def _assert_self_features_match_state_effective_fields(
     observation: Observation,
     state: EnvState,
@@ -457,28 +494,6 @@ def _assert_unused_self_feature_columns_are_zero(observation: Observation) -> No
     )
 
 
-def _assert_unit_features_remain_unpopulated_until_checkpoint_5(
-    observation: Observation,
-) -> None:
-    """Assert candidate rows stay zero until visibility is consumed later."""
-    assert observation.ally_unit_features.shape == (
-        MAX_AGENT_SLOTS,
-        MAX_AGENTS_PER_TEAM,
-        UNIT_FEATURES,
-    )
-    assert observation.enemy_unit_features.shape == (
-        MAX_AGENT_SLOTS,
-        MAX_AGENTS_PER_TEAM,
-        UNIT_FEATURES,
-    )
-
-    assert observation.ally_unit_features.dtype == jnp.float32
-    assert observation.enemy_unit_features.dtype == jnp.float32
-
-    assert bool(jnp.all(observation.ally_unit_features == 0.0))
-    assert bool(jnp.all(observation.enemy_unit_features == 0.0))
-
-
 def test_reset_self_features_match_reset_state_base_fields() -> None:
     config = _deterministic_config()
     key = jax.random.key(42)
@@ -488,7 +503,6 @@ def test_reset_self_features_match_reset_state_base_fields() -> None:
     _assert_self_features_match_state_base_fields(observation, initial_state)
     _assert_self_features_match_state_effective_fields(observation, initial_state)
     _assert_unused_self_feature_columns_are_zero(observation)
-    _assert_unit_features_remain_unpopulated_until_checkpoint_5(observation)
 
 
 def test_step_self_features_match_next_state_base_fields() -> None:
@@ -517,7 +531,71 @@ def test_step_self_features_match_next_state_base_fields() -> None:
     _assert_self_features_match_state_base_fields(observation, next_state)
     _assert_self_features_match_state_effective_fields(observation, next_state)
     _assert_unused_self_feature_columns_are_zero(observation)
-    _assert_unit_features_remain_unpopulated_until_checkpoint_5(observation)
+
+
+def test_reset_padded_self_rows_are_deterministic_inactive_dummy_rows() -> None:
+    config = _deterministic_config(team_size=3)
+    first_state, first_observation, first_action_mask, _ = reset(
+        config, jax.random.key(1)
+    )
+    second_state, second_observation, second_action_mask, _ = reset(
+        config, jax.random.key(2)
+    )
+    inactive_mask = jnp.logical_not(first_state.active_mask)
+
+    assert bool(
+        jnp.all(
+            first_observation.self_features[:, AGENT_FEATURE_ACTIVE]
+            == first_state.active_mask.astype(jnp.float32)
+        )
+    )
+    assert bool(
+        jnp.all(
+            first_observation.self_features[:, AGENT_FEATURE_ALIVE]
+            == first_state.alive_mask.astype(jnp.float32)
+        )
+    )
+    assert bool(jnp.all(first_observation.self_features[inactive_mask] >= 0.0))
+    assert bool(
+        jnp.array_equal(
+            first_observation.self_features[inactive_mask],
+            second_observation.self_features[inactive_mask],
+        )
+    )
+    assert bool(jnp.array_equal(first_state.active_mask, second_state.active_mask))
+    assert bool(jnp.array_equal(first_state.alive_mask, second_state.alive_mask))
+    assert not bool(jnp.any(first_action_mask.move[inactive_mask, :]))
+    assert not bool(jnp.any(first_action_mask.target[inactive_mask, :]))
+    assert not bool(jnp.any(first_action_mask.use_ultimate[inactive_mask, :]))
+    assert not bool(jnp.any(second_action_mask.move[inactive_mask, :]))
+    assert not bool(jnp.any(second_action_mask.target[inactive_mask, :]))
+    assert not bool(jnp.any(second_action_mask.use_ultimate[inactive_mask, :]))
+
+
+def test_active_dead_self_rows_remain_active_but_not_actionable() -> None:
+    config = _deterministic_config()
+    key = jax.random.key(42)
+    state = _state_two_versus_two_game(
+        agent_a_position=jnp.array([5.0, 5.0], dtype=jnp.float32),
+        agent_b_position=jnp.array([8.0, 5.0], dtype=jnp.float32),
+        agent_c_position=jnp.array([5.0, 8.0], dtype=jnp.float32),
+        agent_d_position=jnp.array([8.0, 8.0], dtype=jnp.float32),
+        agent_a_active_flag=True,
+        agent_a_alive_flag=False,
+        agent_b_active_flag=False,
+        agent_c_active_flag=False,
+        agent_d_active_flag=False,
+    )
+
+    _, observation, _, _, action_mask, _ = step(
+        config, state, _joint_action_with_moves(), key
+    )
+
+    assert observation.self_features[0, AGENT_FEATURE_ACTIVE] == 1.0
+    assert observation.self_features[0, AGENT_FEATURE_ALIVE] == 0.0
+    assert not bool(jnp.any(action_mask.move[0, :]))
+    assert not bool(jnp.any(action_mask.target[0, :]))
+    assert not bool(jnp.any(action_mask.use_ultimate[0, :]))
 
 
 def test_visibility_uses_state_observation_radii_not_config_default() -> None:
@@ -909,3 +987,407 @@ def test_visibility_masks(
     _, observation, *_ = step(config, state, joint_action, key)
 
     _assert_visibility_masks_match(observation, expected_ally, expected_enemy)
+
+
+def test_visible_candidate_rows_match_shared_self_feature_schema() -> None:
+    """Visible relation-local rows expose the candidate's shared agent schema."""
+    config = _deterministic_config(obstacles=_empty_obstacles())
+    key = jax.random.key(42)
+    state = _state_two_versus_two_game(
+        agent_a_position=jnp.array([2.0, 2.0], dtype=jnp.float32),
+        agent_b_position=jnp.array([4.0, 2.0], dtype=jnp.float32),
+        agent_c_position=jnp.array([2.0, 5.0], dtype=jnp.float32),
+        agent_d_position=jnp.array([4.0, 5.0], dtype=jnp.float32),
+        effective_observation_radius=8.0,
+    )._replace(
+        agent_radii=_slot_float_vector(
+            0.5,
+            (0, 0.35),
+            (1, 0.45),
+            (MAX_AGENTS_PER_TEAM, 0.55),
+            (MAX_AGENTS_PER_TEAM + 1, 0.65),
+        ),
+        class_ids=_neutral_class_ids()
+        .at[0]
+        .set(10)
+        .at[1]
+        .set(11)
+        .at[MAX_AGENTS_PER_TEAM]
+        .set(20)
+        .at[MAX_AGENTS_PER_TEAM + 1]
+        .set(21),
+        movement_speeds=_slot_float_vector(
+            1.0,
+            (0, 1.25),
+            (1, 1.50),
+            (MAX_AGENTS_PER_TEAM, 1.75),
+            (MAX_AGENTS_PER_TEAM + 1, 2.00),
+        ),
+        observation_radii=_slot_float_vector(
+            8.0,
+            (0, 8.0),
+            (1, 8.5),
+            (MAX_AGENTS_PER_TEAM, 9.0),
+            (MAX_AGENTS_PER_TEAM + 1, 9.5),
+        ),
+        basic_interaction_radii=_slot_float_vector(
+            6.0,
+            (0, 3.25),
+            (1, 3.50),
+            (MAX_AGENTS_PER_TEAM, 3.75),
+            (MAX_AGENTS_PER_TEAM + 1, 4.00),
+        ),
+        ultimate_interaction_radii=_slot_float_vector(
+            9.0,
+            (0, 5.25),
+            (1, 5.50),
+            (MAX_AGENTS_PER_TEAM, 5.75),
+            (MAX_AGENTS_PER_TEAM + 1, 6.00),
+        ),
+    )
+
+    _, observation, *_ = step(config, state, _joint_action_with_moves(), key)
+
+    _assert_unit_feature_row_matches_self_row(
+        observation,
+        expected_global_slot=0,
+        result_row=observation.ally_unit_features[0, 0],
+    )
+    _assert_unit_feature_row_matches_self_row(
+        observation,
+        expected_global_slot=1,
+        result_row=observation.ally_unit_features[0, 1],
+    )
+    _assert_unit_feature_row_matches_self_row(
+        observation,
+        expected_global_slot=MAX_AGENTS_PER_TEAM,
+        result_row=observation.enemy_unit_features[0, 0],
+    )
+    _assert_unit_feature_row_matches_self_row(
+        observation,
+        expected_global_slot=MAX_AGENTS_PER_TEAM + 1,
+        result_row=observation.enemy_unit_features[0, 1],
+    )
+
+    _assert_unit_feature_row_matches_self_row(
+        observation,
+        expected_global_slot=MAX_AGENTS_PER_TEAM,
+        result_row=observation.ally_unit_features[MAX_AGENTS_PER_TEAM, 0],
+    )
+    _assert_unit_feature_row_matches_self_row(
+        observation,
+        expected_global_slot=MAX_AGENTS_PER_TEAM + 1,
+        result_row=observation.ally_unit_features[MAX_AGENTS_PER_TEAM, 1],
+    )
+    _assert_unit_feature_row_matches_self_row(
+        observation,
+        expected_global_slot=0,
+        result_row=observation.enemy_unit_features[MAX_AGENTS_PER_TEAM, 0],
+    )
+    _assert_unit_feature_row_matches_self_row(
+        observation,
+        expected_global_slot=1,
+        result_row=observation.enemy_unit_features[MAX_AGENTS_PER_TEAM, 1],
+    )
+
+
+def test_visible_candidate_rows_preserve_non_boolean_numeric_values() -> None:
+    """Feature masking must preserve float values rather than booleanizing rows."""
+    config = _deterministic_config(obstacles=_empty_obstacles())
+    key = jax.random.key(42)
+    state = _state_two_versus_two_game(
+        agent_a_position=jnp.array([1.25, 1.75], dtype=jnp.float32),
+        agent_b_position=jnp.array([2.50, 1.25], dtype=jnp.float32),
+        agent_c_position=jnp.array([7.50, 1.50], dtype=jnp.float32),
+        agent_d_position=jnp.array([8.25, 1.75], dtype=jnp.float32),
+        effective_observation_radius=20.0,
+        effective_movement_speed=1.75,
+        effective_basic_interaction_radius=4.25,
+        effective_ultimate_interaction_radius=6.75,
+    )
+
+    next_state, observation, *_ = step(config, state, _joint_action_with_moves(), key)
+
+    candidate_slot = MAX_AGENTS_PER_TEAM
+    candidate_row = observation.enemy_unit_features[0, 0]
+    assert bool(observation.enemy_visibility_mask[0, 0])
+    assert bool(
+        jnp.isclose(
+            candidate_row[AGENT_FEATURE_X],
+            next_state.agent_positions[candidate_slot, 0],
+        )
+    )
+    assert bool(
+        jnp.isclose(
+            candidate_row[AGENT_FEATURE_Y],
+            next_state.agent_positions[candidate_slot, 1],
+        )
+    )
+    assert bool(
+        jnp.isclose(
+            candidate_row[AGENT_FEATURE_MOVEMENT_SPEED],
+            next_state.movement_speeds[candidate_slot],
+        )
+    )
+    assert bool(
+        jnp.isclose(
+            candidate_row[AGENT_FEATURE_BASIC_INTERACTION_RADIUS],
+            next_state.basic_interaction_radii[candidate_slot],
+        )
+    )
+    assert bool(
+        jnp.isclose(
+            candidate_row[AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS],
+            next_state.ultimate_interaction_radii[candidate_slot],
+        )
+    )
+    _assert_unit_feature_row_matches_self_row(
+        observation,
+        expected_global_slot=candidate_slot,
+        result_row=candidate_row,
+    )
+
+
+def test_los_blocked_candidate_rows_are_fully_zero() -> None:
+    """LOS-blocked candidates must not leak any dynamic unit feature values."""
+    obstacles = _obstacle_array_with_rows(
+        (
+            0,
+            _wall_obstacle(
+                x=5.0,
+                y=2.0,
+                width=0.5,
+                height=4.0,
+                theta=0.0,
+                active=True,
+            ),
+        )
+    )
+    config = _deterministic_config(obstacles=obstacles)
+    key = jax.random.key(42)
+    state = _state_two_versus_two_game(
+        agent_a_position=jnp.array([2.0, 2.0], dtype=jnp.float32),
+        agent_b_position=jnp.array([4.0, 5.0], dtype=jnp.float32),
+        agent_c_position=jnp.array([8.0, 2.0], dtype=jnp.float32),
+        agent_d_position=jnp.array([8.0, 5.0], dtype=jnp.float32),
+        agent_b_active_flag=False,
+        agent_d_active_flag=False,
+        effective_observation_radius=10.0,
+    )
+
+    _, observation, *_ = step(config, state, _joint_action_with_moves(), key)
+
+    assert not bool(observation.enemy_visibility_mask[0, 0])
+    assert not bool(observation.enemy_visibility_mask[MAX_AGENTS_PER_TEAM, 0])
+    _assert_unit_feature_row_is_zero(observation.enemy_unit_features[0, 0])
+    _assert_unit_feature_row_is_zero(
+        observation.enemy_unit_features[MAX_AGENTS_PER_TEAM, 0]
+    )
+
+
+def test_out_of_radius_candidate_rows_are_fully_zero() -> None:
+    """Out-of-radius candidates must not leak any dynamic unit feature values."""
+    config = _deterministic_config(obstacles=_empty_obstacles())
+    key = jax.random.key(42)
+    state = _state_two_versus_two_game(
+        agent_a_position=jnp.array([2.0, 2.0], dtype=jnp.float32),
+        agent_b_position=jnp.array([4.0, 2.0], dtype=jnp.float32),
+        agent_c_position=jnp.array([15.0, 10.0], dtype=jnp.float32),
+        agent_d_position=jnp.array([16.0, 10.0], dtype=jnp.float32),
+        effective_observation_radius=3.0,
+    )
+
+    _, observation, *_ = step(config, state, _joint_action_with_moves(), key)
+
+    assert not bool(observation.enemy_visibility_mask[0, 0])
+    assert not bool(observation.enemy_visibility_mask[0, 1])
+    _assert_unit_feature_row_is_zero(observation.enemy_unit_features[0, 0])
+    _assert_unit_feature_row_is_zero(observation.enemy_unit_features[0, 1])
+
+
+def test_inactive_dead_and_padded_candidate_rows_are_fully_zero() -> None:
+    """Inactive, dead, and padded candidates must have zero candidate rows."""
+    config = _deterministic_config(obstacles=_empty_obstacles())
+    key = jax.random.key(42)
+    state = _state_two_versus_two_game(
+        agent_a_position=jnp.array([2.0, 2.0], dtype=jnp.float32),
+        agent_b_position=jnp.array([4.0, 2.0], dtype=jnp.float32),
+        agent_c_position=jnp.array([2.0, 5.0], dtype=jnp.float32),
+        agent_d_position=jnp.array([4.0, 5.0], dtype=jnp.float32),
+        agent_b_active_flag=False,
+        agent_c_alive_flag=False,
+        effective_observation_radius=8.0,
+    )
+
+    _, observation, *_ = step(config, state, _joint_action_with_moves(), key)
+
+    assert not bool(observation.ally_visibility_mask[0, 1])
+    _assert_unit_feature_row_is_zero(observation.ally_unit_features[0, 1])
+
+    assert not bool(observation.enemy_visibility_mask[0, 0])
+    _assert_unit_feature_row_is_zero(observation.enemy_unit_features[0, 0])
+
+    assert not bool(observation.ally_visibility_mask[0, 2])
+    _assert_unit_feature_row_is_zero(observation.ally_unit_features[0, 2])
+
+    assert not bool(observation.enemy_visibility_mask[0, 2])
+    _assert_unit_feature_row_is_zero(observation.enemy_unit_features[0, 2])
+
+
+def test_candidate_visibility_masking_does_not_alter_self_features() -> None:
+    """Candidate visibility masking must not mutate canonical self rows."""
+    obstacles = _obstacle_array_with_rows(
+        (
+            0,
+            _wall_obstacle(
+                x=5.0,
+                y=2.0,
+                width=0.5,
+                height=4.0,
+                theta=0.0,
+                active=True,
+            ),
+        )
+    )
+    config = _deterministic_config(obstacles=obstacles)
+    key = jax.random.key(42)
+    state = _state_two_versus_two_game(
+        agent_a_position=jnp.array([2.0, 2.0], dtype=jnp.float32),
+        agent_b_position=jnp.array([4.0, 5.0], dtype=jnp.float32),
+        agent_c_position=jnp.array([8.0, 2.0], dtype=jnp.float32),
+        agent_d_position=jnp.array([8.0, 5.0], dtype=jnp.float32),
+        agent_b_active_flag=False,
+        agent_d_active_flag=False,
+        effective_observation_radius=10.0,
+    )
+
+    next_state, observation, *_ = step(config, state, _joint_action_with_moves(), key)
+
+    _assert_self_features_match_state_base_fields(observation, next_state)
+    _assert_self_features_match_state_effective_fields(observation, next_state)
+    _assert_unused_self_feature_columns_are_zero(observation)
+
+
+def test_active_dead_rows_remain_active_but_candidate_rows_actions_are_masked() -> None:
+    """Dead active slots keep self state but cannot act or appear as candidates."""
+    config = _deterministic_config(obstacles=_empty_obstacles())
+    key = jax.random.key(42)
+    state = _state_two_versus_two_game(
+        agent_a_position=jnp.array([2.0, 2.0], dtype=jnp.float32),
+        agent_b_position=jnp.array([4.0, 2.0], dtype=jnp.float32),
+        agent_c_position=jnp.array([2.0, 5.0], dtype=jnp.float32),
+        agent_d_position=jnp.array([4.0, 5.0], dtype=jnp.float32),
+        agent_a_active_flag=True,
+        agent_a_alive_flag=False,
+        effective_observation_radius=8.0,
+    )
+
+    _, observation, _, _, action_mask, _ = step(
+        config,
+        state,
+        _joint_action_with_moves(),
+        key,
+    )
+
+    assert observation.self_features[0, AGENT_FEATURE_ACTIVE] == 1.0
+    assert observation.self_features[0, AGENT_FEATURE_ALIVE] == 0.0
+
+    _assert_action_mask_row_is_false(action_mask.move[0])
+    _assert_action_mask_row_is_false(action_mask.target[0])
+    _assert_action_mask_row_is_false(action_mask.use_ultimate[0])
+
+    assert not bool(observation.enemy_visibility_mask[MAX_AGENTS_PER_TEAM, 0])
+    _assert_unit_feature_row_is_zero(
+        observation.enemy_unit_features[MAX_AGENTS_PER_TEAM, 0]
+    )
+
+
+def test_unused_unit_feature_columns_remain_zero_after_candidate_population() -> None:
+    """Currently unused unit-feature columns must remain deterministic zeros."""
+    config = _deterministic_config(obstacles=_empty_obstacles())
+    key = jax.random.key(42)
+    state = _state_two_versus_two_game(
+        agent_a_position=jnp.array([2.0, 2.0], dtype=jnp.float32),
+        agent_b_position=jnp.array([4.0, 2.0], dtype=jnp.float32),
+        agent_c_position=jnp.array([2.0, 5.0], dtype=jnp.float32),
+        agent_d_position=jnp.array([4.0, 5.0], dtype=jnp.float32),
+        effective_observation_radius=8.0,
+    )
+
+    _, observation, *_ = step(config, state, _joint_action_with_moves(), key)
+
+    unused_start = AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS + 1
+
+    assert bool(
+        jnp.allclose(
+            observation.ally_unit_features[:, :, unused_start:],
+            jnp.zeros(
+                (
+                    MAX_AGENT_SLOTS,
+                    MAX_AGENTS_PER_TEAM,
+                    UNIT_FEATURES - unused_start,
+                ),
+                dtype=jnp.float32,
+            ),
+            atol=0.0,
+            rtol=0.0,
+        )
+    )
+    assert bool(
+        jnp.allclose(
+            observation.enemy_unit_features[:, :, unused_start:],
+            jnp.zeros(
+                (
+                    MAX_AGENT_SLOTS,
+                    MAX_AGENTS_PER_TEAM,
+                    UNIT_FEATURES - unused_start,
+                ),
+                dtype=jnp.float32,
+            ),
+            atol=0.0,
+            rtol=0.0,
+        )
+    )
+
+
+def test_map_obstacle_features_remain_globally_observed_after_candidate_masking() -> (
+    None
+):
+    """Static map geometry remains globally observed despite dynamic-unit masking."""
+    obstacles = _obstacle_array_with_rows(
+        (0, _pillar_obstacle(x=2.0, y=2.0, radius=0.5, active=True)),
+        (
+            1,
+            _wall_obstacle(
+                x=5.0,
+                y=5.0,
+                width=1.0,
+                height=3.0,
+                theta=0.25,
+                active=True,
+            ),
+        ),
+    )
+    config = _deterministic_config(obstacles=obstacles)
+    key = jax.random.key(42)
+    state = _state_two_versus_two_game(
+        agent_a_position=jnp.array([2.0, 2.0], dtype=jnp.float32),
+        agent_b_position=jnp.array([4.0, 2.0], dtype=jnp.float32),
+        agent_c_position=jnp.array([15.0, 10.0], dtype=jnp.float32),
+        agent_d_position=jnp.array([16.0, 10.0], dtype=jnp.float32),
+        effective_observation_radius=3.0,
+    )
+
+    _, observation, *_ = step(config, state, _joint_action_with_moves(), key)
+
+    assert bool(
+        jnp.allclose(
+            observation.map_obstacle_features,
+            jnp.broadcast_to(
+                obstacles[None, :, :],
+                observation.map_obstacle_features.shape,
+            ),
+            atol=0.0,
+            rtol=0.0,
+        )
+    )
