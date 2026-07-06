@@ -165,18 +165,11 @@ def _zero_observation() -> Observation:
     )
 
 
-def _expected_step1_target_rows(num_rows: int) -> Array:
-    """Return Step 1 target-mask rows."""
-    none_column = jnp.ones(shape=(num_rows, 1), dtype=bool)
-    unit_columns = jnp.zeros(shape=(num_rows, NUM_TARGET_ACTIONS - 1), dtype=bool)
-    return jnp.concat((none_column, unit_columns), axis=1)
-
-
 def _expected_step1_ultimate_rows(num_rows: int) -> Array:
     """Return Step 1 ultimate-mask rows."""
     noop_column = jnp.ones(shape=(num_rows, 1), dtype=bool)
     use_column = jnp.zeros(shape=(num_rows, NUM_ULTIMATE_ACTIONS - 1), dtype=bool)
-    return jnp.concat((noop_column, use_column), axis=1)
+    return jnp.concatenate((noop_column, use_column), axis=1)
 
 
 def _assert_state_contract(state: EnvState) -> None:
@@ -299,16 +292,13 @@ def _assert_step1_action_mask_values(
     active_indices: Array,
     inactive_indices: Array,
 ) -> None:
-    """Assert Step 1 action-mask values."""
+    """Assert action-mask values that are stable across M4 checkpoints."""
     active_count = int(active_indices.shape[0])
 
     assert jnp.all(action_mask.move[active_indices, :])
     assert not jnp.any(action_mask.move[inactive_indices, :])
 
-    assert jnp.array_equal(
-        action_mask.target[active_indices, :],
-        _expected_step1_target_rows(active_count),
-    )
+    assert jnp.all(action_mask.target[active_indices, 0])
     assert not jnp.any(action_mask.target[inactive_indices, :])
 
     assert jnp.array_equal(
@@ -322,15 +312,24 @@ def _assert_common_observation_values(
     observation: Observation,
     config: EnvConfig,
 ) -> None:
-    """Assert observation values that remain common after visibility becomes real."""
+    """Assert observation values shared by reset and step."""
     expected_map_features = jnp.broadcast_to(
         config.obstacles[None, :, :],
         (MAX_AGENT_SLOTS, MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES),
     )
 
+    illegal_ally_targetability = jnp.logical_and(
+        observation.ally_targetability_mask,
+        jnp.logical_not(observation.ally_visibility_mask),
+    )
+    illegal_enemy_targetability = jnp.logical_and(
+        observation.enemy_targetability_mask,
+        jnp.logical_not(observation.enemy_visibility_mask),
+    )
+
     assert jnp.array_equal(observation.map_obstacle_features, expected_map_features)
-    assert not jnp.any(observation.ally_targetability_mask)
-    assert not jnp.any(observation.enemy_targetability_mask)
+    assert not jnp.any(illegal_ally_targetability)
+    assert not jnp.any(illegal_enemy_targetability)
 
 
 def test_static_shape_constants_are_consistent() -> None:

@@ -3,6 +3,7 @@
 This file owns env-level proof that Step 4 consumes geometry LOS correctly.
 Low-level segment/obstacle geometry remains covered in ``test_geometry.py``.
 """
+# pyright: reportPrivateUsage=false
 
 import jax
 import jax.numpy as jnp
@@ -28,6 +29,7 @@ from marl_battlegrounds.core.types import (
     MAX_AGENTS_PER_TEAM,
     MAX_OBSTACLE_SLOTS,
     MOVE_EAST,
+    NUM_TARGET_ACTIONS,
     OBSTACLE_FEATURE_ACTIVE,
     OBSTACLE_FEATURE_HEIGHT,
     OBSTACLE_FEATURE_RADIUS,
@@ -42,10 +44,13 @@ from marl_battlegrounds.core.types import (
     SELF_FEATURES,
     UNIT_FEATURES,
     Action,
+    ActionMask,
     EnvConfig,
     EnvState,
     Observation,
 )
+
+# Test Helpers ---
 
 
 def _empty_obstacles() -> Array:
@@ -343,6 +348,91 @@ def _state_two_versus_two_game(
     )
 
 
+def _assert_targetability_masks_match(
+    observation: Observation,
+    expected_ally: Array,
+    expected_enemy: Array,
+) -> None:
+    """Assert relation-local targetability masks have exact expected values."""
+    assert observation.ally_targetability_mask.shape == (
+        MAX_AGENT_SLOTS,
+        MAX_AGENTS_PER_TEAM,
+    )
+    assert observation.enemy_targetability_mask.shape == (
+        MAX_AGENT_SLOTS,
+        MAX_AGENTS_PER_TEAM,
+    )
+    assert observation.ally_targetability_mask.dtype == bool
+    assert observation.enemy_targetability_mask.dtype == bool
+
+    assert bool(jnp.array_equal(observation.ally_targetability_mask, expected_ally))
+    assert bool(jnp.array_equal(observation.enemy_targetability_mask, expected_enemy))
+
+
+def _assert_targetability_never_exceeds_visibility(
+    observation: Observation,
+) -> None:
+    """Assert targetability is always a subset of visibility."""
+    illegal_ally_targetability = jnp.logical_and(
+        observation.ally_targetability_mask,
+        jnp.logical_not(observation.ally_visibility_mask),
+    )
+    illegal_enemy_targetability = jnp.logical_and(
+        observation.enemy_targetability_mask,
+        jnp.logical_not(observation.enemy_visibility_mask),
+    )
+
+    assert not bool(jnp.any(illegal_ally_targetability))
+    assert not bool(jnp.any(illegal_enemy_targetability))
+
+
+def _assert_flat_target_mask_matches_relation_targetability(
+    *,
+    action_mask: ActionMask,
+    state: EnvState,
+    expected_ally: Array,
+    expected_enemy: Array,
+) -> None:
+    """Assert flat target mask derives from none + ally/enemy targetability."""
+    active_alive_mask_bc = jnp.logical_and(state.active_mask, state.alive_mask)[:, None]
+
+    expected_target_mask = jnp.concatenate(
+        (
+            jnp.ones((MAX_AGENT_SLOTS, 1), dtype=bool),
+            expected_ally,
+            expected_enemy,
+        ),
+        axis=1,
+    )
+    expected_target_mask = jnp.logical_and(
+        expected_target_mask,
+        active_alive_mask_bc,
+    )
+
+    assert action_mask.target.shape == (MAX_AGENT_SLOTS, NUM_TARGET_ACTIONS)
+    assert action_mask.target.dtype == bool
+    assert bool(jnp.array_equal(action_mask.target, expected_target_mask))
+
+    assert bool(
+        jnp.array_equal(
+            action_mask.target[:, 0],
+            jnp.logical_and(state.active_mask, state.alive_mask),
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            action_mask.target[:, 1 : 1 + MAX_AGENTS_PER_TEAM],
+            jnp.logical_and(expected_ally, active_alive_mask_bc),
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            action_mask.target[:, 1 + MAX_AGENTS_PER_TEAM :],
+            jnp.logical_and(expected_enemy, active_alive_mask_bc),
+        )
+    )
+
+
 def _assert_self_features_match_state_base_fields(
     observation: Observation,
     state: EnvState,
@@ -492,6 +582,9 @@ def _assert_unused_self_feature_columns_are_zero(observation: Observation) -> No
             rtol=0.0,
         )
     )
+
+
+# Tests ---
 
 
 def test_reset_self_features_match_reset_state_base_fields() -> None:
@@ -1391,3 +1484,320 @@ def test_map_obstacle_features_remain_globally_observed_after_candidate_masking(
             rtol=0.0,
         )
     )
+
+
+@pytest.mark.parametrize(
+    ("config", "state", "expected_ally", "expected_enemy"),
+    [
+        pytest.param(
+            _deterministic_config(),
+            _state_two_versus_two_game(
+                agent_a_position=jnp.array([2.0, 2.0], dtype=jnp.float32),
+                agent_b_position=jnp.array([3.0, 2.0], dtype=jnp.float32),
+                agent_c_position=jnp.array([2.0, 4.0], dtype=jnp.float32),
+                agent_d_position=jnp.array([4.0, 4.0], dtype=jnp.float32),
+                effective_observation_radius=10.0,
+                effective_basic_interaction_radius=5.0,
+                effective_ultimate_interaction_radius=9.0,
+            ),
+            *_relation_visibility_masks_with_rows(
+                ally_rows=(
+                    (0, jnp.array([True, True, False, False, False])),
+                    (1, jnp.array([True, True, False, False, False])),
+                    (5, jnp.array([True, True, False, False, False])),
+                    (6, jnp.array([True, True, False, False, False])),
+                ),
+                enemy_rows=(
+                    (0, jnp.array([True, True, False, False, False])),
+                    (1, jnp.array([True, True, False, False, False])),
+                    (5, jnp.array([True, True, False, False, False])),
+                    (6, jnp.array([True, True, False, False, False])),
+                ),
+            ),
+            id="visible_inside_basic_radius_candidates_are_targetable",
+        ),
+        pytest.param(
+            _deterministic_config(),
+            _state_two_versus_two_game(
+                agent_a_position=jnp.array([2.0, 2.0], dtype=jnp.float32),
+                agent_b_position=jnp.array([3.0, 2.0], dtype=jnp.float32),
+                agent_c_position=jnp.array([7.0, 2.0], dtype=jnp.float32),
+                agent_d_position=jnp.array([8.0, 5.0], dtype=jnp.float32),
+                agent_d_active_flag=False,
+                effective_observation_radius=10.0,
+                effective_basic_interaction_radius=2.5,
+                effective_ultimate_interaction_radius=9.0,
+            ),
+            *_relation_visibility_masks_with_rows(
+                ally_rows=(
+                    (0, jnp.array([True, True, False, False, False])),
+                    (1, jnp.array([True, True, False, False, False])),
+                    (5, jnp.array([True, False, False, False, False])),
+                ),
+                enemy_rows=(),
+            ),
+            id="visible_outside_basic_radius_candidates_are_not_targetable",
+        ),
+        pytest.param(
+            _deterministic_config(
+                obstacles=_obstacle_array_with_rows(
+                    (
+                        0,
+                        _wall_obstacle(
+                            x=5.0,
+                            y=2.0,
+                            width=0.5,
+                            height=4.0,
+                            theta=0.0,
+                            active=True,
+                        ),
+                    )
+                )
+            ),
+            _state_two_versus_two_game(
+                agent_a_position=jnp.array([2.0, 2.0], dtype=jnp.float32),
+                agent_b_position=jnp.array([4.0, 5.0], dtype=jnp.float32),
+                agent_c_position=jnp.array([8.0, 2.0], dtype=jnp.float32),
+                agent_d_position=jnp.array([8.0, 5.0], dtype=jnp.float32),
+                agent_b_active_flag=False,
+                agent_d_active_flag=False,
+                effective_observation_radius=10.0,
+                effective_basic_interaction_radius=10.0,
+                effective_ultimate_interaction_radius=10.0,
+            ),
+            *_relation_visibility_masks_with_rows(
+                ally_rows=(
+                    (0, jnp.array([True, False, False, False, False])),
+                    (5, jnp.array([True, False, False, False, False])),
+                ),
+                enemy_rows=(),
+            ),
+            id="los_blocked_candidates_are_not_targetable",
+        ),
+        pytest.param(
+            _deterministic_config(),
+            _state_two_versus_two_game(
+                agent_a_position=jnp.array([2.0, 2.0], dtype=jnp.float32),
+                agent_b_position=jnp.array([3.0, 2.0], dtype=jnp.float32),
+                agent_c_position=jnp.array([2.0, 4.0], dtype=jnp.float32),
+                agent_d_position=jnp.array([3.0, 4.0], dtype=jnp.float32),
+                agent_b_active_flag=False,
+                agent_c_alive_flag=False,
+                effective_observation_radius=8.0,
+                effective_basic_interaction_radius=5.0,
+                effective_ultimate_interaction_radius=9.0,
+            ),
+            *_relation_visibility_masks_with_rows(
+                ally_rows=(
+                    (0, jnp.array([True, False, False, False, False])),
+                    (6, jnp.array([False, True, False, False, False])),
+                ),
+                enemy_rows=(
+                    (0, jnp.array([False, True, False, False, False])),
+                    (6, jnp.array([True, False, False, False, False])),
+                ),
+            ),
+            id="inactive_dead_and_padded_candidates_are_not_targetable",
+        ),
+    ],
+)
+def test_basic_targetability_masks(
+    config: EnvConfig,
+    state: EnvState,
+    expected_ally: Array,
+    expected_enemy: Array,
+) -> None:
+    """Assert CP6 basic targetability masks across representative scenarios."""
+    next_state, observation, _, _, action_mask, _ = step(
+        config,
+        state,
+        _joint_action_with_moves(),
+        jax.random.key(42),
+    )
+
+    _assert_targetability_masks_match(observation, expected_ally, expected_enemy)
+    _assert_targetability_never_exceeds_visibility(observation)
+    _assert_flat_target_mask_matches_relation_targetability(
+        action_mask=action_mask,
+        state=next_state,
+        expected_ally=expected_ally,
+        expected_enemy=expected_enemy,
+    )
+
+
+def test_basic_targetability_uses_observer_specific_basic_interaction_radius() -> None:
+    """Assert each observer uses its own current basic interaction radius."""
+    state = _state_two_versus_two_game(
+        agent_a_position=jnp.array([2.0, 2.0], dtype=jnp.float32),
+        agent_b_position=jnp.array([6.0, 2.0], dtype=jnp.float32),
+        agent_c_position=jnp.array([4.0, 2.0], dtype=jnp.float32),
+        agent_d_position=jnp.array([9.0, 2.0], dtype=jnp.float32),
+        agent_d_active_flag=False,
+        effective_observation_radius=10.0,
+        effective_basic_interaction_radius=6.0,
+    )._replace(
+        basic_interaction_radii=_slot_float_vector(
+            6.0,
+            (0, 1.5),
+            (1, 3.0),
+            (MAX_AGENTS_PER_TEAM, 1.0),
+        )
+    )
+
+    expected_ally, expected_enemy = _relation_visibility_masks_with_rows(
+        ally_rows=(
+            (0, jnp.array([True, False, False, False, False])),
+            (1, jnp.array([False, True, False, False, False])),
+            (MAX_AGENTS_PER_TEAM, jnp.array([True, False, False, False, False])),
+        ),
+        enemy_rows=((1, jnp.array([True, False, False, False, False])),),
+    )
+
+    next_state, observation, _, _, action_mask, _ = step(
+        _deterministic_config(),
+        state,
+        _joint_action_with_moves(),
+        jax.random.key(42),
+    )
+
+    _assert_targetability_masks_match(observation, expected_ally, expected_enemy)
+    _assert_flat_target_mask_matches_relation_targetability(
+        action_mask=action_mask,
+        state=next_state,
+        expected_ally=expected_ally,
+        expected_enemy=expected_enemy,
+    )
+
+
+def test_observation_radius_does_not_substitute_for_basic_interaction_radius() -> None:
+    """Assert visible units outside basic range are not targetable."""
+    state = _state_two_versus_two_game(
+        agent_a_position=jnp.array([2.0, 2.0], dtype=jnp.float32),
+        agent_b_position=jnp.array([3.0, 2.0], dtype=jnp.float32),
+        agent_c_position=jnp.array([7.0, 2.0], dtype=jnp.float32),
+        agent_d_position=jnp.array([8.0, 5.0], dtype=jnp.float32),
+        agent_b_active_flag=False,
+        agent_d_active_flag=False,
+        effective_observation_radius=10.0,
+        effective_basic_interaction_radius=2.0,
+        effective_ultimate_interaction_radius=9.0,
+    )
+
+    _, observation, _, _, action_mask, _ = step(
+        _deterministic_config(),
+        state,
+        _joint_action_with_moves(),
+        jax.random.key(42),
+    )
+
+    assert bool(observation.enemy_visibility_mask[0, 0])
+    assert not bool(observation.enemy_targetability_mask[0, 0])
+    assert not bool(action_mask.target[0, 1 + MAX_AGENTS_PER_TEAM])
+
+
+def test_ultimate_interaction_radius_does_not_affect_basic_targetability() -> None:
+    """Assert M4 basic targetability ignores ultimate interaction radius."""
+    state = _state_two_versus_two_game(
+        agent_a_position=jnp.array([2.0, 2.0], dtype=jnp.float32),
+        agent_b_position=jnp.array([3.0, 2.0], dtype=jnp.float32),
+        agent_c_position=jnp.array([7.0, 2.0], dtype=jnp.float32),
+        agent_d_position=jnp.array([8.0, 5.0], dtype=jnp.float32),
+        agent_b_active_flag=False,
+        agent_d_active_flag=False,
+        effective_observation_radius=10.0,
+        effective_basic_interaction_radius=2.0,
+        effective_ultimate_interaction_radius=10.0,
+    )
+
+    _, observation, _, _, action_mask, _ = step(
+        _deterministic_config(),
+        state,
+        _joint_action_with_moves(),
+        jax.random.key(42),
+    )
+
+    assert bool(observation.enemy_visibility_mask[0, 0])
+    assert not bool(observation.enemy_targetability_mask[0, 0])
+    assert not bool(action_mask.target[0, 1 + MAX_AGENTS_PER_TEAM])
+
+
+def test_inactive_and_dead_observers_have_no_target_choices() -> None:
+    """Assert inactive/dead observers cannot select none or unit targets."""
+    state = _state_two_versus_two_game(
+        agent_a_position=jnp.array([2.0, 2.0], dtype=jnp.float32),
+        agent_b_position=jnp.array([3.0, 2.0], dtype=jnp.float32),
+        agent_c_position=jnp.array([2.0, 4.0], dtype=jnp.float32),
+        agent_d_position=jnp.array([3.0, 4.0], dtype=jnp.float32),
+        agent_a_alive_flag=False,
+        agent_b_active_flag=False,
+        effective_observation_radius=8.0,
+        effective_basic_interaction_radius=5.0,
+    )
+
+    _, observation, _, _, action_mask, _ = step(
+        _deterministic_config(),
+        state,
+        _joint_action_with_moves(),
+        jax.random.key(42),
+    )
+
+    _assert_action_mask_row_is_false(action_mask.target[0])
+    _assert_action_mask_row_is_false(action_mask.target[1])
+
+    assert not bool(jnp.any(observation.ally_targetability_mask[0]))
+    assert not bool(jnp.any(observation.enemy_targetability_mask[0]))
+    assert not bool(jnp.any(observation.ally_targetability_mask[1]))
+    assert not bool(jnp.any(observation.enemy_targetability_mask[1]))
+
+
+def test_none_target_selection_is_valid_only_for_active_alive_observers() -> None:
+    """Assert target column zero is valid exactly for active alive observers."""
+    state = _state_two_versus_two_game(
+        agent_a_position=jnp.array([2.0, 2.0], dtype=jnp.float32),
+        agent_b_position=jnp.array([3.0, 2.0], dtype=jnp.float32),
+        agent_c_position=jnp.array([2.0, 4.0], dtype=jnp.float32),
+        agent_d_position=jnp.array([3.0, 4.0], dtype=jnp.float32),
+        agent_a_alive_flag=False,
+        agent_b_active_flag=False,
+        effective_observation_radius=8.0,
+        effective_basic_interaction_radius=5.0,
+    )
+
+    next_state, _, _, _, action_mask, _ = step(
+        _deterministic_config(),
+        state,
+        _joint_action_with_moves(),
+        jax.random.key(42),
+    )
+
+    expected_none_column = jnp.logical_and(
+        next_state.active_mask,
+        next_state.alive_mask,
+    )
+
+    assert bool(jnp.array_equal(action_mask.target[:, 0], expected_none_column))
+
+
+def test_ultimate_use_remains_unavailable_in_checkpoint_6() -> None:
+    """Assert CP6 does not introduce ultimate availability."""
+    state = _state_two_versus_two_game(
+        agent_a_position=jnp.array([2.0, 2.0], dtype=jnp.float32),
+        agent_b_position=jnp.array([3.0, 2.0], dtype=jnp.float32),
+        agent_c_position=jnp.array([2.0, 4.0], dtype=jnp.float32),
+        agent_d_position=jnp.array([3.0, 4.0], dtype=jnp.float32),
+        effective_observation_radius=8.0,
+        effective_basic_interaction_radius=5.0,
+        effective_ultimate_interaction_radius=10.0,
+    )
+
+    next_state, _, _, _, action_mask, _ = step(
+        _deterministic_config(),
+        state,
+        _joint_action_with_moves(),
+        jax.random.key(42),
+    )
+
+    active_alive = jnp.logical_and(next_state.active_mask, next_state.alive_mask)
+
+    assert bool(jnp.array_equal(action_mask.use_ultimate[:, 0], active_alive))
+    assert not bool(jnp.any(action_mask.use_ultimate[:, 1]))
