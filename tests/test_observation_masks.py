@@ -5,6 +5,8 @@ Low-level segment/obstacle geometry remains covered in ``test_geometry.py``.
 """
 # pyright: reportPrivateUsage=false
 
+from typing import cast
+
 import jax
 import jax.numpy as jnp
 import pytest
@@ -30,6 +32,7 @@ from marl_battlegrounds.core.types import (
     MAX_OBSTACLE_SLOTS,
     MOVE_EAST,
     NUM_TARGET_ACTIONS,
+    NUM_ULTIMATE_ACTIONS,
     OBSTACLE_FEATURE_ACTIVE,
     OBSTACLE_FEATURE_HEIGHT,
     OBSTACLE_FEATURE_RADIUS,
@@ -1801,3 +1804,216 @@ def test_ultimate_use_remains_unavailable_in_checkpoint_6() -> None:
 
     assert bool(jnp.array_equal(action_mask.use_ultimate[:, 0], active_alive))
     assert not bool(jnp.any(action_mask.use_ultimate[:, 1]))
+
+
+def test_jitted_nonstay_step_preserves_observation_mask_contracts() -> None:
+    """Assert compiled non-stay step matches eager observation-mask behavior."""
+    config = _deterministic_config(
+        obstacles=_obstacle_array_with_rows(
+            (
+                0,
+                _pillar_obstacle(
+                    x=5.0,
+                    y=2.0,
+                    radius=0.75,
+                    active=True,
+                ),
+            )
+        )
+    )
+    state = _state_two_versus_two_game(
+        agent_a_position=jnp.array([2.0, 2.0], dtype=jnp.float32),
+        agent_b_position=jnp.array([2.0, 5.0], dtype=jnp.float32),
+        agent_c_position=jnp.array([7.0, 2.0], dtype=jnp.float32),
+        agent_d_position=jnp.array([7.0, 5.0], dtype=jnp.float32),
+        effective_observation_radius=10.0,
+        effective_basic_interaction_radius=6.0,
+    )
+    joint_action = _joint_action_with_moves(
+        (0, MOVE_EAST),
+        (MAX_AGENTS_PER_TEAM, MOVE_EAST),
+    )
+    key = jax.random.key(42)
+
+    eager_state, eager_observation, _, _, eager_action_mask, _ = step(
+        config,
+        state,
+        joint_action,
+        key,
+    )
+    compiled_state, compiled_observation, _, _, compiled_action_mask, _ = cast(
+        tuple[EnvState, Observation, object, object, ActionMask, object],
+        jax.jit(step)(
+            config,
+            state,
+            joint_action,
+            key,
+        ),
+    )
+
+    assert bool(
+        jnp.allclose(
+            compiled_state.agent_positions,
+            eager_state.agent_positions,
+            atol=0.0,
+            rtol=0.0,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            compiled_observation.ally_visibility_mask,
+            eager_observation.ally_visibility_mask,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            compiled_observation.enemy_visibility_mask,
+            eager_observation.enemy_visibility_mask,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            compiled_observation.ally_targetability_mask,
+            eager_observation.ally_targetability_mask,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            compiled_observation.enemy_targetability_mask,
+            eager_observation.enemy_targetability_mask,
+        )
+    )
+    assert bool(jnp.array_equal(compiled_action_mask.target, eager_action_mask.target))
+
+    _assert_targetability_never_exceeds_visibility(compiled_observation)
+    _assert_flat_target_mask_matches_relation_targetability(
+        action_mask=compiled_action_mask,
+        state=compiled_state,
+        expected_ally=compiled_observation.ally_targetability_mask,
+        expected_enemy=compiled_observation.enemy_targetability_mask,
+    )
+
+
+def test_scanned_rollout_emits_stable_observation_mask_history() -> None:
+    """Assert scan keeps observation and action-mask structures stable."""
+    horizon = 4
+    config = _deterministic_config(max_steps=1000)
+    state = _state_two_versus_two_game(
+        agent_a_position=jnp.array([2.0, 2.0], dtype=jnp.float32),
+        agent_b_position=jnp.array([2.0, 5.0], dtype=jnp.float32),
+        agent_c_position=jnp.array([7.0, 2.0], dtype=jnp.float32),
+        agent_d_position=jnp.array([7.0, 5.0], dtype=jnp.float32),
+        effective_observation_radius=10.0,
+        effective_basic_interaction_radius=6.0,
+    )
+    joint_action = _joint_action_with_moves(
+        (0, MOVE_EAST),
+        (1, MOVE_EAST),
+    )
+    key = jax.random.key(123)
+    keys = jax.random.split(key, horizon)
+
+    def _rollout_step(
+        carry: EnvState,
+        step_key: Array,
+    ) -> tuple[EnvState, tuple[Array, Array, Array, Array, Array, Array]]:
+        next_state, observation, _, _, action_mask, _ = step(
+            config,
+            carry,
+            joint_action,
+            step_key,
+        )
+        return next_state, (
+            observation.ally_visibility_mask,
+            observation.enemy_visibility_mask,
+            observation.ally_targetability_mask,
+            observation.enemy_targetability_mask,
+            action_mask.target,
+            action_mask.use_ultimate,
+        )
+
+    def _rollout(
+        initial_state: EnvState,
+        step_keys: Array,
+    ) -> tuple[EnvState, tuple[Array, Array, Array, Array, Array, Array]]:
+        """Run a compiled fixed-horizon rollout with mask history."""
+        return jax.lax.scan(
+            _rollout_step,
+            initial_state,
+            step_keys,
+            length=horizon,
+        )
+
+    final_state, history = cast(
+        tuple[EnvState, tuple[Array, Array, Array, Array, Array, Array]],
+        jax.jit(_rollout)(state, keys),
+    )
+    (
+        ally_visibility_history,
+        enemy_visibility_history,
+        ally_targetability_history,
+        enemy_targetability_history,
+        target_mask_history,
+        ultimate_mask_history,
+    ) = history
+
+    assert final_state.step_count == horizon
+    assert ally_visibility_history.shape == (
+        horizon,
+        MAX_AGENT_SLOTS,
+        MAX_AGENTS_PER_TEAM,
+    )
+    assert enemy_visibility_history.shape == (
+        horizon,
+        MAX_AGENT_SLOTS,
+        MAX_AGENTS_PER_TEAM,
+    )
+    assert ally_targetability_history.shape == ally_visibility_history.shape
+    assert enemy_targetability_history.shape == enemy_visibility_history.shape
+    assert target_mask_history.shape == (horizon, MAX_AGENT_SLOTS, NUM_TARGET_ACTIONS)
+    assert ultimate_mask_history.shape == (
+        horizon,
+        MAX_AGENT_SLOTS,
+        NUM_ULTIMATE_ACTIONS,
+    )
+
+    assert ally_visibility_history.dtype == bool
+    assert enemy_visibility_history.dtype == bool
+    assert ally_targetability_history.dtype == bool
+    assert enemy_targetability_history.dtype == bool
+    assert target_mask_history.dtype == bool
+    assert ultimate_mask_history.dtype == bool
+
+    assert not bool(
+        jnp.any(
+            jnp.logical_and(
+                ally_targetability_history,
+                jnp.logical_not(ally_visibility_history),
+            )
+        )
+    )
+    assert not bool(
+        jnp.any(
+            jnp.logical_and(
+                enemy_targetability_history,
+                jnp.logical_not(enemy_visibility_history),
+            )
+        )
+    )
+
+    expected_target_history = jnp.concatenate(
+        (
+            jnp.ones((horizon, MAX_AGENT_SLOTS, 1), dtype=bool),
+            ally_targetability_history,
+            enemy_targetability_history,
+        ),
+        axis=2,
+    )
+    active_alive = jnp.logical_and(final_state.active_mask, final_state.alive_mask)
+    expected_target_history = jnp.logical_and(
+        expected_target_history,
+        active_alive[None, :, None],
+    )
+
+    assert bool(jnp.array_equal(target_mask_history, expected_target_history))
+    assert not bool(jnp.any(ultimate_mask_history[:, :, 1]))
