@@ -65,12 +65,15 @@ _JOINT_ACTION_MOVE_TO_DISPLACEMENT_LOOKUP_TABLE = jnp.array(
 )
 
 
-def _build_global_visibility_mask(state: EnvState, config: EnvConfig) -> Array:
-    """Build LOS-gated dynamic-unit visibility between all global slots.
+def _build_global_visibility_mask_and_distances(
+    state: EnvState, config: EnvConfig
+) -> tuple[Array, Array]:
+    """Build LOS-gated visibility and distances between all global slots.
 
     Entry ``[i, j]`` is true when observer slot ``i`` can currently observe
     candidate slot ``j``. The mask is directed because each observer owns its
-    own effective observation radius.
+    own effective observation radius. Pairwise distances are returned alongside
+    the mask so targetability can reuse the same observer-candidate geometry.
 
     Visibility requires:
     1. observer is active and alive;
@@ -124,18 +127,22 @@ def _build_global_visibility_mask(state: EnvState, config: EnvConfig) -> Array:
         config.obstacles,
     )
 
-    return jnp.logical_and(
-        global_pairwise_validity_mask,
-        jnp.logical_and(observation_radii_mask, los_mask),
+    return (
+        jnp.logical_and(
+            global_pairwise_validity_mask,
+            jnp.logical_and(observation_radii_mask, los_mask),
+        ),
+        global_pairwise_distances,
     )
 
 
-def _build_ally_enemy_visibility_masks(global_mask: Array) -> tuple[Array, Array]:
-    """Project a global visibility matrix into fixed ally/enemy relation slots.
+def _build_ally_enemy_masks(global_mask: Array) -> tuple[Array, Array]:
+    """Project a global observer-candidate matrix into relation slots.
 
-    ``global_mask[i, j]`` means observer global slot ``i`` can see candidate
-    global slot ``j``. The returned masks keep candidate slots relation-local so
-    they align with the future unit-feature and target-selection heads.
+    ``global_mask[i, j]`` stores a directed boolean relation from observer
+    global slot ``i`` to candidate global slot ``j``. The returned masks keep
+    candidate slots relation-local so they align with unit-feature and
+    target-selection heads.
 
     Slot layout is fixed:
     - team 0 occupies global slots ``0..MAX_AGENTS_PER_TEAM - 1``;
@@ -146,32 +153,51 @@ def _build_ally_enemy_visibility_masks(global_mask: Array) -> tuple[Array, Array
     team_1_start = MAX_AGENTS_PER_TEAM
     team_1_end = MAX_AGENT_SLOTS
 
-    ally_visibility_mask_team_0 = global_mask[
+    ally_mask_team_0 = global_mask[
         team_0_start:team_0_end,
         team_0_start:team_0_end,
     ]
-    enemy_visibility_mask_team_0 = global_mask[
+    enemy_mask_team_0 = global_mask[
         team_0_start:team_0_end,
         team_1_start:team_1_end,
     ]
 
-    ally_visibility_mask_team_1 = global_mask[
+    ally_mask_team_1 = global_mask[
         team_1_start:team_1_end,
         team_1_start:team_1_end,
     ]
-    enemy_visibility_mask_team_1 = global_mask[
+    enemy_mask_team_1 = global_mask[
         team_1_start:team_1_end,
         team_0_start:team_0_end,
     ]
 
-    ally_visibility_mask = jnp.vstack(
-        (ally_visibility_mask_team_0, ally_visibility_mask_team_1)
+    ally_mask = jnp.vstack((ally_mask_team_0, ally_mask_team_1))
+    enemy_mask = jnp.vstack((enemy_mask_team_0, enemy_mask_team_1))
+
+    return (ally_mask, enemy_mask)
+
+
+def _build_global_targetability_mask(
+    state: EnvState, global_visibility_mask: Array, global_pairwise_distances: Array
+) -> Array:
+    """Build Milestone 4 basic-interaction targetability between global slots.
+
+    Milestone 4 targetability is deliberately basic-only: visible, active/alive
+    candidates within the observer's current basic interaction radius are valid
+    under neutral placeholder class legality. Ultimate-specific targetability
+    starts in Milestone 5.
+    """
+    basic_interaction_radii = state.basic_interaction_radii[:, None]
+    basic_range_mask = global_pairwise_distances <= basic_interaction_radii
+
+    # Neutral placeholder legality: any visible in-range unit candidate is legal
+    # until Milestone 5 replaces this with class-specific ally/enemy rules.
+    class_legality_mask = jnp.ones_like(global_visibility_mask, dtype=bool)
+
+    return jnp.logical_and(
+        global_visibility_mask,
+        jnp.logical_and(basic_range_mask, class_legality_mask),
     )
-    enemy_visibility_mask = jnp.vstack(
-        (enemy_visibility_mask_team_0, enemy_visibility_mask_team_1)
-    )
-
-    return (ally_visibility_mask, enemy_visibility_mask)
 
 
 def _build_observation(state: EnvState, config: EnvConfig) -> Observation:
@@ -187,8 +213,10 @@ def _build_observation(state: EnvState, config: EnvConfig) -> Observation:
     ally_features = _build_ally_features(self_features)
     enemy_features = _build_enemy_features(self_features)
 
-    global_visibility_mask = _build_global_visibility_mask(state, config)
-    ally_visibility_mask, enemy_visibility_mask = _build_ally_enemy_visibility_masks(
+    global_visibility_mask, global_pairwise_distances = (
+        _build_global_visibility_mask_and_distances(state, config)
+    )
+    ally_visibility_mask, enemy_visibility_mask = _build_ally_enemy_masks(
         global_visibility_mask
     )
 
@@ -198,6 +226,12 @@ def _build_observation(state: EnvState, config: EnvConfig) -> Observation:
     map_obstacle_features = jnp.broadcast_to(
         config.obstacles[None, :, :],
         (MAX_AGENT_SLOTS, MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES),
+    )
+
+    ally_targetability_mask, enemy_targetability_mask = _build_ally_enemy_masks(
+        _build_global_targetability_mask(
+            state, global_visibility_mask, global_pairwise_distances
+        )
     )
 
     return Observation(
@@ -214,21 +248,17 @@ def _build_observation(state: EnvState, config: EnvConfig) -> Observation:
         ),
         ally_visibility_mask=ally_visibility_mask,
         enemy_visibility_mask=enemy_visibility_mask,
-        ally_targetability_mask=jnp.zeros(
-            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM), dtype=bool
-        ),
-        enemy_targetability_mask=jnp.zeros(
-            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM), dtype=bool
-        ),
+        ally_targetability_mask=ally_targetability_mask,
+        enemy_targetability_mask=enemy_targetability_mask,
     )
 
 
 def _build_action_mask(state: EnvState, observation: Observation) -> ActionMask:
-    """Build action masks from observer liveness and targetability placeholders."""
+    """Build action masks from observer liveness and observation masks."""
     ones_column_vector = jnp.ones(shape=(MAX_AGENT_SLOTS, 1), dtype=bool)
     zeros_column_vector = jnp.zeros(shape=(MAX_AGENT_SLOTS, 1), dtype=bool)
 
-    target_mask = jnp.concat(
+    target_mask = jnp.concatenate(
         (
             ones_column_vector,
             observation.ally_targetability_mask,
@@ -237,7 +267,7 @@ def _build_action_mask(state: EnvState, observation: Observation) -> ActionMask:
         axis=1,
     )
 
-    ult_mask = jnp.concat((ones_column_vector, zeros_column_vector), axis=1)
+    ult_mask = jnp.concatenate((ones_column_vector, zeros_column_vector), axis=1)
 
     alive_active_mask_bc = jnp.logical_and(state.active_mask, state.alive_mask)[:, None]
 
