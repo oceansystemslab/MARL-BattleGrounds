@@ -1,5 +1,6 @@
 """Smoke tests for optional geometry rendering helpers."""
 
+import sys
 from collections.abc import Callable
 from importlib import import_module
 from importlib.util import find_spec
@@ -38,7 +39,13 @@ from marl_battlegrounds.rendering.geometry import (
 
 def _skip_if_matplotlib_unavailable() -> None:
     """Skip optional rendering checks when Matplotlib is unavailable."""
-    if find_spec("matplotlib.pyplot") is None:
+    try:
+        has_matplotlib = find_spec("matplotlib") is not None
+        has_pyplot = has_matplotlib and find_spec("matplotlib.pyplot") is not None
+    except ModuleNotFoundError:
+        has_pyplot = False
+
+    if not has_pyplot:
         pytest.skip("matplotlib is not installed")
 
 
@@ -158,6 +165,21 @@ def test_rendering_package_imports_without_visualization_dependency() -> None:
 
     assert rendering_package.__name__ == "marl_battlegrounds.rendering"
     assert geometry_module.__name__ == "marl_battlegrounds.rendering.geometry"
+
+
+def test_matplotlib_skip_helper_handles_missing_parent_package(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Renderer smoke tests should skip cleanly when Matplotlib is absent."""
+
+    def fake_find_spec(name: str) -> object | None:
+        assert name == "matplotlib"
+        return None
+
+    monkeypatch.setattr(sys.modules[__name__], "find_spec", fake_find_spec)
+
+    with pytest.raises(pytest.skip.Exception):
+        _skip_if_matplotlib_unavailable()
 
 
 def test_render_geometry_constructs_figure_when_matplotlib_is_available() -> None:
