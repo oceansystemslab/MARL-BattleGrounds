@@ -2,6 +2,7 @@
 
 import subprocess
 import sys
+from collections.abc import Callable
 from importlib import import_module
 from typing import cast
 
@@ -51,6 +52,19 @@ _CLASS_CATALOG_NAMES: tuple[str, ...] = (
     *_INTEGER_CLASS_CATALOG_NAMES,
 )
 
+_CLASS_CATALOG_HELPER_NAMES: tuple[tuple[str, str], ...] = (
+    ("MAX_HEALTH_BY_CLASS", "get_max_health_by_class_ids"),
+    ("MOVEMENT_SPEED_BY_CLASS", "get_movement_speed_by_class_ids"),
+    ("BODY_RADIUS_BY_CLASS", "get_body_radius_by_class_ids"),
+    ("BASIC_RANGE_BY_CLASS", "get_basic_range_by_class_ids"),
+    ("BASIC_DAMAGE_BY_CLASS", "get_basic_damage_by_class_ids"),
+    ("BASIC_HEALING_BY_CLASS", "get_basic_healing_by_class_ids"),
+    ("ULTIMATE_RANGE_BY_CLASS", "get_ultimate_range_by_class_ids"),
+    ("ULTIMATE_COOLDOWN_BY_CLASS", "get_ultimate_cooldown_by_class_ids"),
+)
+
+_CatalogHelper = Callable[[int | Array], Array]
+
 # Test helpers ---
 
 
@@ -90,6 +104,11 @@ def _canonical_class_ids() -> tuple[int, ...]:
 def _catalog_array(name: str) -> Array:
     """Return a named class catalog as a typed JAX array."""
     return cast(Array, getattr(combat_catalog, name))
+
+
+def _catalog_helper(name: str) -> _CatalogHelper:
+    """Return a named class catalog lookup helper."""
+    return cast(_CatalogHelper, getattr(combat_catalog, name))
 
 
 # Tests ---
@@ -266,3 +285,43 @@ def test_passive_and_support_defaults_are_scalar_parameters() -> None:
     assert 0.0 < combat_catalog.PRIEST_HEAL_SPEED_FLOOR <= 1.0
     assert isinstance(combat_catalog.PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS, int)
     assert combat_catalog.PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS > 0
+
+
+def test_class_catalog_helpers_preserve_vector_shape_dtype_and_row_alignment() -> None:
+    class_ids = jnp.asarray(_canonical_class_ids(), dtype=jnp.int32)
+
+    for catalog_name, helper_name in _CLASS_CATALOG_HELPER_NAMES:
+        catalog = _catalog_array(catalog_name)
+        selected_values = _catalog_helper(helper_name)(class_ids)
+
+        assert selected_values.shape == class_ids.shape
+        assert selected_values.dtype == catalog.dtype
+        assert jnp.array_equal(selected_values, catalog[class_ids])
+
+
+def test_class_catalog_helpers_preserve_batched_class_id_shape() -> None:
+    class_ids = jnp.asarray(
+        (
+            (NEUTRAL_CLASS_ID, MAGE_CLASS_ID, WARRIOR_CLASS_ID),
+            (HUNTER_CLASS_ID, ROGUE_CLASS_ID, PRIEST_CLASS_ID),
+        ),
+        dtype=jnp.int32,
+    )
+
+    for catalog_name, helper_name in _CLASS_CATALOG_HELPER_NAMES:
+        catalog = _catalog_array(catalog_name)
+        selected_values = _catalog_helper(helper_name)(class_ids)
+
+        assert selected_values.shape == class_ids.shape
+        assert selected_values.dtype == catalog.dtype
+        assert jnp.array_equal(selected_values, catalog[class_ids])
+
+
+def test_class_catalog_helpers_accept_scalar_class_ids() -> None:
+    for catalog_name, helper_name in _CLASS_CATALOG_HELPER_NAMES:
+        catalog = _catalog_array(catalog_name)
+        selected_value = _catalog_helper(helper_name)(MAGE_CLASS_ID)
+
+        assert selected_value.shape == ()
+        assert selected_value.dtype == catalog.dtype
+        assert bool(selected_value == catalog[MAGE_CLASS_ID])

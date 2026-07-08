@@ -1,6 +1,7 @@
 """Pure combat catalog support for the JAX-native simulator."""
 
 import jax.numpy as jnp
+from jax import Array
 
 # Class catalog row order: neutral, Mage, Warrior, Hunter, Rogue, Priest.
 
@@ -164,3 +165,45 @@ PRIEST_ULT_HEAL_AMOUNT = 75.0
 # While active, slows cannot reduce the target below this fraction of base speed.
 PRIEST_HEAL_SPEED_FLOOR = 0.85
 PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS = 1
+
+# Catalog access helpers.
+
+
+def get_max_health_by_class_ids(class_ids: int | Array) -> Array:
+    """Return max health values for one or more class IDs."""
+    return MAX_HEALTH_BY_CLASS[class_ids]
+
+
+def get_movement_speed_by_class_ids(class_ids: int | Array) -> Array:
+    """Return movement speed values for one or more class IDs."""
+    return MOVEMENT_SPEED_BY_CLASS[class_ids]
+
+
+def get_body_radius_by_class_ids(class_ids: int | Array) -> Array:
+    """Return body radius values for one or more class IDs."""
+    return BODY_RADIUS_BY_CLASS[class_ids]
+
+
+def get_basic_range_by_class_ids(class_ids: int | Array) -> Array:
+    """Return basic interaction range values for one or more class IDs."""
+    return BASIC_RANGE_BY_CLASS[class_ids]
+
+
+def get_basic_damage_by_class_ids(class_ids: int | Array) -> Array:
+    """Return basic damage values for one or more class IDs."""
+    return BASIC_DAMAGE_BY_CLASS[class_ids]
+
+
+def get_basic_healing_by_class_ids(class_ids: int | Array) -> Array:
+    """Return basic healing values for one or more class IDs."""
+    return BASIC_HEALING_BY_CLASS[class_ids]
+
+
+def get_ultimate_range_by_class_ids(class_ids: int | Array) -> Array:
+    """Return ultimate interaction range values for one or more class IDs."""
+    return ULTIMATE_RANGE_BY_CLASS[class_ids]
+
+
+def get_ultimate_cooldown_by_class_ids(class_ids: int | Array) -> Array:
+    """Return ultimate cooldown values for one or more class IDs."""
+    return ULTIMATE_COOLDOWN_BY_CLASS[class_ids]
