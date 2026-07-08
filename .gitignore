@@ -63,3 +63,6 @@ Thumbs.db
 # Local IDE settings
 .vscode/
 .idea/
+
+# Local Codex milestone planning docs
+docs/dev/milestone*.md
