@@ -12,6 +12,7 @@ from jax import Array
 import marl_battlegrounds.rendering.manual_control as manual_control_module
 from marl_battlegrounds.core.env import reset, step
 from marl_battlegrounds.core.types import (
+    CLASS_NEUTRAL,
     MAX_AGENT_SLOTS,
     MAX_OBSTACLE_SLOTS,
     MOVE_EAST,
@@ -179,12 +180,8 @@ def _sample_config() -> EnvConfig:
         max_steps=10,
         map_width=12.0,
         map_height=8.0,
-        default_agent_radius=0.5,
-        default_movement_speed=1.0,
-        default_observation_radius=8.0,
-        default_basic_interaction_radius=6.0,
-        default_ultimate_interaction_radius=9.0,
         obstacles=_empty_obstacles(),
+        initial_class_ids=jnp.full((MAX_AGENT_SLOTS,), CLASS_NEUTRAL, dtype=jnp.int32),
     )
 
 

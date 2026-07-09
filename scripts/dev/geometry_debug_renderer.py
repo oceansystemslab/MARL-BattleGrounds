@@ -18,6 +18,8 @@ from marl_battlegrounds.core.types import (
     MAX_AGENT_SLOTS,
     MAX_AGENTS_PER_TEAM,
     MAX_OBSTACLE_SLOTS,
+    NUM_SLOW_CHANNELS,
+    NUM_STUN_CHANNELS,
     OBSTACLE_FEATURE_ACTIVE,
     OBSTACLE_FEATURE_HEIGHT,
     OBSTACLE_FEATURE_RADIUS,
@@ -146,12 +148,8 @@ def _debug_config() -> EnvConfig:
         max_steps=_EFFECTIVELY_UNBOUNDED_MAX_STEPS,
         map_width=12.0,
         map_height=8.0,
-        default_agent_radius=0.5,
-        default_movement_speed=0.35,
-        default_observation_radius=8.0,
-        default_basic_interaction_radius=6.0,
-        default_ultimate_interaction_radius=9.0,
         obstacles=obstacles,
+        initial_class_ids=jnp.full((MAX_AGENT_SLOTS,), CLASS_NEUTRAL, dtype=jnp.int32),
     )
 
 
@@ -193,6 +191,21 @@ def _debug_state() -> EnvState:
         ultimate_interaction_radii=jnp.full((MAX_AGENT_SLOTS,), 9.0, dtype=jnp.float32),
         active_mask=active_mask,
         alive_mask=active_mask,
+        current_health=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32),
+        max_health=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32),
+        ultimate_cooldowns=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        slow_multipliers=jnp.ones(
+            (MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.float32
+        ),
+        slow_durations=jnp.zeros((MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.int32),
+        stun_durations=jnp.zeros((MAX_AGENT_SLOTS, NUM_STUN_CHANNELS), dtype=jnp.int32),
+        anti_heal_multipliers=jnp.ones((MAX_AGENT_SLOTS,), dtype=jnp.float32),
+        anti_heal_durations=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        damage_amplification_multipliers=jnp.ones(
+            (MAX_AGENT_SLOTS,), dtype=jnp.float32
+        ),
+        damage_amplification_durations=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        blessing_of_freedom_durations=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
     )
 
 

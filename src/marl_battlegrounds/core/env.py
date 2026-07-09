@@ -6,6 +6,14 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
+from marl_battlegrounds.core.combat import (
+    get_basic_interaction_radius_by_class_ids,
+    get_body_radius_by_class_ids,
+    get_max_health_by_class_ids,
+    get_movement_speed_by_class_ids,
+    get_observation_radius_by_class_ids,
+    get_ultimate_interaction_radius_by_class_ids,
+)
 from marl_battlegrounds.core.geometry import (
     has_clear_line_of_sight,
     project_movement_with_geometry,
@@ -22,14 +30,16 @@ from marl_battlegrounds.core.types import (
     AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS,
     AGENT_FEATURE_X,
     AGENT_FEATURE_Y,
-    CLASS_NEUTRAL,
     CONTEXT_FEATURES,
     ENVIRONMENT_DIMENSIONS,
     MAX_AGENT_SLOTS,
     MAX_AGENTS_PER_TEAM,
     MAX_OBJECTIVE_SLOTS,
     MAX_OBSTACLE_SLOTS,
+    NEUTRAL_CLASS_ID,
     NUM_MOVE_ACTIONS,
+    NUM_SLOW_CHANNELS,
+    NUM_STUN_CHANNELS,
     OBJECTIVE_FEATURES,
     OBSTACLE_FEATURES,
     SELF_FEATURES,
@@ -188,7 +198,7 @@ def _build_global_targetability_mask(
     starts in Milestone 5.
     """
     basic_interaction_radii = state.basic_interaction_radii[:, None]
-    basic_range_mask = global_pairwise_distances <= basic_interaction_radii
+    basic_interaction_radius_mask = global_pairwise_distances <= basic_interaction_radii
 
     # Neutral placeholder legality: any visible in-range unit candidate is legal
     # until Milestone 5 replaces this with class-specific ally/enemy rules.
@@ -196,7 +206,7 @@ def _build_global_targetability_mask(
 
     return jnp.logical_and(
         global_visibility_mask,
-        jnp.logical_and(basic_range_mask, class_legality_mask),
+        jnp.logical_and(basic_interaction_radius_mask, class_legality_mask),
     )
 
 
@@ -389,7 +399,7 @@ def _mask_unit_features(unit_features: Array, visibility_mask: Array) -> Array:
 def reset(
     config: EnvConfig, key: Array
 ) -> tuple[EnvState, Observation, ActionMask, Info]:
-    """Create the initial Milestone 4 contract state and placeholders."""
+    """Create the initial fixed-slot simulator state and placeholders."""
 
     # Reset keeps all arrays at MAX_AGENT_SLOTS length. Smaller tasks use
     # active_mask to distinguish real agents from padded slots.
@@ -400,19 +410,24 @@ def reset(
     # TODO(Scenario): Keep curated scenario starts out of ordinary reset. A future
     # scenario loader should validate and return EnvState values that reuse the
     # same transition, observation, and mask machinery.
+    # TODO(Config Validation): Eventually implement a non-JAX validator in pipeline.
 
     team_0_ids = jnp.zeros((MAX_AGENTS_PER_TEAM,), dtype=jnp.int32)
     team_1_ids = jnp.ones((MAX_AGENTS_PER_TEAM,), dtype=jnp.int32)
 
     indices = jnp.arange(MAX_AGENT_SLOTS)
 
-    team_0_active = indices < config.team_size
+    team_0_active_mask = indices < config.team_size
 
-    team_1_active = (indices >= MAX_AGENTS_PER_TEAM) & (
+    team_1_active_mask = (indices >= MAX_AGENTS_PER_TEAM) & (
         indices < MAX_AGENTS_PER_TEAM + config.team_size
     )
 
-    initial_mask = jnp.logical_or(team_0_active, team_1_active)
+    active_mask = jnp.logical_or(team_0_active_mask, team_1_active_mask)
+
+    initial_class_ids = jnp.where(
+        active_mask, config.initial_class_ids, NEUTRAL_CLASS_ID
+    )
 
     deterministic_key = jax.random.key(42)
     max_val = jnp.min(jnp.array([config.map_width, config.map_height]))
@@ -422,44 +437,45 @@ def reset(
         deterministic_key,
         shape=(MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS),
         dtype=jnp.float32,
-        minval=0 + config.default_agent_radius,
-        maxval=max_val - config.default_agent_radius,
+        minval=0 + 0.5,
+        maxval=max_val - 0.5,  # Placeholder default agent positions
     )
+
+    max_health = get_max_health_by_class_ids(initial_class_ids)
 
     state = EnvState(
         step_count=jnp.array(0, dtype=jnp.int32),
-        agent_positions=default_agent_positions,
-        agent_radii=jnp.full(
-            shape=(MAX_AGENT_SLOTS,),
-            fill_value=config.default_agent_radius,
-            dtype=jnp.float32,
-        ),
+        agent_positions=default_agent_positions,  # Placeholder
+        agent_radii=get_body_radius_by_class_ids(initial_class_ids),
         team_ids=jnp.concat([team_0_ids, team_1_ids]),
-        class_ids=jnp.full(
-            shape=(MAX_AGENT_SLOTS,), fill_value=CLASS_NEUTRAL, dtype=jnp.int32
+        class_ids=initial_class_ids,  # (MAX_AGENT_SLOTS,), int32
+        movement_speeds=get_movement_speed_by_class_ids(initial_class_ids),
+        observation_radii=get_observation_radius_by_class_ids(initial_class_ids),
+        basic_interaction_radii=get_basic_interaction_radius_by_class_ids(
+            initial_class_ids
         ),
-        movement_speeds=jnp.full(
-            shape=(MAX_AGENT_SLOTS,),
-            fill_value=config.default_movement_speed,
-            dtype=jnp.float32,
+        ultimate_interaction_radii=get_ultimate_interaction_radius_by_class_ids(
+            initial_class_ids
         ),
-        observation_radii=jnp.full(
-            shape=(MAX_AGENT_SLOTS,),
-            fill_value=config.default_observation_radius,
-            dtype=jnp.float32,
+        active_mask=active_mask,
+        alive_mask=active_mask,  # Placeholder
+        current_health=max_health,
+        # At restart, current health should be max health.
+        max_health=max_health,
+        ultimate_cooldowns=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        # Everything below is a placeholder
+        slow_durations=jnp.zeros((MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.int32),
+        slow_multipliers=jnp.ones(
+            (MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.float32
         ),
-        basic_interaction_radii=jnp.full(
-            shape=(MAX_AGENT_SLOTS,),
-            fill_value=config.default_basic_interaction_radius,
-            dtype=jnp.float32,
+        stun_durations=jnp.zeros((MAX_AGENT_SLOTS, NUM_STUN_CHANNELS), dtype=jnp.int32),
+        anti_heal_durations=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        anti_heal_multipliers=jnp.ones((MAX_AGENT_SLOTS,), dtype=jnp.float32),
+        damage_amplification_durations=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        damage_amplification_multipliers=jnp.ones(
+            (MAX_AGENT_SLOTS,), dtype=jnp.float32
         ),
-        ultimate_interaction_radii=jnp.full(
-            shape=(MAX_AGENT_SLOTS,),
-            fill_value=config.default_ultimate_interaction_radius,
-            dtype=jnp.float32,
-        ),
-        active_mask=initial_mask,
-        alive_mask=initial_mask,
+        blessing_of_freedom_durations=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
     )
 
     obs = _build_observation(state, config)
@@ -501,6 +517,17 @@ def step(
         ultimate_interaction_radii=state.ultimate_interaction_radii,
         active_mask=state.active_mask,
         alive_mask=state.alive_mask,
+        current_health=state.current_health,
+        max_health=state.max_health,
+        ultimate_cooldowns=state.ultimate_cooldowns,
+        slow_multipliers=state.slow_multipliers,
+        slow_durations=state.slow_durations,
+        stun_durations=state.stun_durations,
+        anti_heal_multipliers=state.anti_heal_multipliers,
+        anti_heal_durations=state.anti_heal_durations,
+        damage_amplification_multipliers=state.damage_amplification_multipliers,
+        damage_amplification_durations=state.damage_amplification_durations,
+        blessing_of_freedom_durations=state.blessing_of_freedom_durations,
     )
 
     obs = _build_observation(next_state, config)

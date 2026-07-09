@@ -4,7 +4,7 @@ import sys
 from collections.abc import Callable
 from importlib import import_module
 from importlib.util import find_spec
-from typing import cast
+from typing import TypedDict, cast
 
 import jax.numpy as jnp
 import pytest
@@ -16,6 +16,8 @@ from marl_battlegrounds.core.types import (
     MAX_AGENT_SLOTS,
     MAX_AGENTS_PER_TEAM,
     MAX_OBSTACLE_SLOTS,
+    NUM_SLOW_CHANNELS,
+    NUM_STUN_CHANNELS,
     OBSTACLE_FEATURE_ACTIVE,
     OBSTACLE_FEATURE_HEIGHT,
     OBSTACLE_FEATURE_RADIUS,
@@ -35,6 +37,49 @@ from marl_battlegrounds.rendering.geometry import (
     redraw_geometry,
     render_geometry,
 )
+
+
+class _CombatStateFields(TypedDict):
+    """Keyword fields for inert combat state in test EnvState constructors."""
+
+    current_health: Array
+    max_health: Array
+    ultimate_cooldowns: Array
+    slow_multipliers: Array
+    slow_durations: Array
+    stun_durations: Array
+    anti_heal_multipliers: Array
+    anti_heal_durations: Array
+    damage_amplification_multipliers: Array
+    damage_amplification_durations: Array
+    blessing_of_freedom_durations: Array
+
+
+def _inert_combat_state_fields() -> _CombatStateFields:
+    """Return neutral combat fields for direct EnvState constructors."""
+    return {
+        "current_health": jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32),
+        "max_health": jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32),
+        "ultimate_cooldowns": jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        "slow_multipliers": jnp.ones(
+            (MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.float32
+        ),
+        "slow_durations": jnp.zeros(
+            (MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.int32
+        ),
+        "stun_durations": jnp.zeros(
+            (MAX_AGENT_SLOTS, NUM_STUN_CHANNELS), dtype=jnp.int32
+        ),
+        "anti_heal_multipliers": jnp.ones((MAX_AGENT_SLOTS,), dtype=jnp.float32),
+        "anti_heal_durations": jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        "damage_amplification_multipliers": jnp.ones(
+            (MAX_AGENT_SLOTS,), dtype=jnp.float32
+        ),
+        "damage_amplification_durations": jnp.zeros(
+            (MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
+        "blessing_of_freedom_durations": jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+    }
 
 
 def _skip_if_matplotlib_unavailable() -> None:
@@ -96,12 +141,8 @@ def _sample_config() -> EnvConfig:
         max_steps=100,
         map_width=12.0,
         map_height=8.0,
-        default_agent_radius=0.5,
-        default_movement_speed=1.0,
-        default_observation_radius=8.0,
-        default_basic_interaction_radius=6.0,
-        default_ultimate_interaction_radius=9.0,
         obstacles=obstacles,
+        initial_class_ids=jnp.full((MAX_AGENT_SLOTS,), CLASS_NEUTRAL, dtype=jnp.int32),
     )
 
 
@@ -145,6 +186,7 @@ def _sample_state() -> EnvState:
         ultimate_interaction_radii=jnp.full((MAX_AGENT_SLOTS,), 9.0, dtype=jnp.float32),
         active_mask=active_mask,
         alive_mask=alive_mask,
+        **_inert_combat_state_fields(),
     )
 
 

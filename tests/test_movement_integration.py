@@ -1,6 +1,6 @@
 """Movement integration tests for Milestone 4 Step 3."""
 
-from typing import cast
+from typing import TypedDict, cast
 
 import jax
 import jax.numpy as jnp
@@ -27,6 +27,8 @@ from marl_battlegrounds.core.types import (
     MOVE_STAY,
     MOVE_WEST,
     NUM_MOVE_ACTIONS,
+    NUM_SLOW_CHANNELS,
+    NUM_STUN_CHANNELS,
     NUM_TARGET_ACTIONS,
     NUM_ULTIMATE_ACTIONS,
     OBJECTIVE_FEATURES,
@@ -54,6 +56,49 @@ from marl_battlegrounds.core.types import (
 )
 
 # Test Helpers ---
+
+
+class _CombatStateFields(TypedDict):
+    """Keyword fields for inert combat state in test EnvState constructors."""
+
+    current_health: Array
+    max_health: Array
+    ultimate_cooldowns: Array
+    slow_multipliers: Array
+    slow_durations: Array
+    stun_durations: Array
+    anti_heal_multipliers: Array
+    anti_heal_durations: Array
+    damage_amplification_multipliers: Array
+    damage_amplification_durations: Array
+    blessing_of_freedom_durations: Array
+
+
+def _inert_combat_state_fields() -> _CombatStateFields:
+    """Return neutral combat fields for direct EnvState constructors."""
+    return {
+        "current_health": jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32),
+        "max_health": jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32),
+        "ultimate_cooldowns": jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        "slow_multipliers": jnp.ones(
+            (MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.float32
+        ),
+        "slow_durations": jnp.zeros(
+            (MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.int32
+        ),
+        "stun_durations": jnp.zeros(
+            (MAX_AGENT_SLOTS, NUM_STUN_CHANNELS), dtype=jnp.int32
+        ),
+        "anti_heal_multipliers": jnp.ones((MAX_AGENT_SLOTS,), dtype=jnp.float32),
+        "anti_heal_durations": jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        "damage_amplification_multipliers": jnp.ones(
+            (MAX_AGENT_SLOTS,), dtype=jnp.float32
+        ),
+        "damage_amplification_durations": jnp.zeros(
+            (MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
+        "blessing_of_freedom_durations": jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+    }
 
 
 def _obstacle_array_with_rows(*rows: tuple[int, Array]) -> Array:
@@ -131,7 +176,6 @@ def _deterministic_config(
     *,
     team_size: int = 3,
     max_steps: int = 1000,
-    default_movement_speed: float = 1.0,
     map_width: float = 20.0,
     map_height: float = 12.0,
     obstacles: Array | None = None,
@@ -142,12 +186,8 @@ def _deterministic_config(
         max_steps=max_steps,
         map_width=map_width,
         map_height=map_height,
-        default_agent_radius=0.5,
-        default_movement_speed=default_movement_speed,
-        default_observation_radius=8.0,
-        default_basic_interaction_radius=6.0,
-        default_ultimate_interaction_radius=9.0,
         obstacles=_empty_obstacles() if obstacles is None else obstacles,
+        initial_class_ids=jnp.full((MAX_AGENT_SLOTS,), CLASS_NEUTRAL, dtype=jnp.int32),
     )
 
 
@@ -244,6 +284,7 @@ def _state_with_single_active_alive_agent(
         ),
         active_mask=_mask_with_true_slots(0),
         alive_mask=_mask_with_true_slots(0),
+        **_inert_combat_state_fields(),
     )
 
 
@@ -304,6 +345,7 @@ def _state_with_two_agents(
         ),
         active_mask=active_mask,
         alive_mask=alive_mask,
+        **_inert_combat_state_fields(),
     )
 
 
@@ -778,8 +820,8 @@ def test_same_move_action_uses_per_slot_movement_speeds() -> None:
     )
 
 
-def test_step_ignores_config_default_movement_speed_after_state_exists() -> None:
-    config = _deterministic_config(default_movement_speed=9.0)
+def test_step_uses_state_movement_speed_after_state_exists() -> None:
+    config = _deterministic_config()
     key = jax.random.key(42)
     start = jnp.array([5.0, 5.0], dtype=jnp.float32)
     state = _state_with_single_active_alive_agent(start, effective_movement_speed=1.25)
@@ -1170,6 +1212,7 @@ def test_active_alive_overlapping_agents_separate_in_free_space(
         ultimate_interaction_radii=_slot_float_vector(9.0),
         active_mask=_mask_with_true_slots(0, blocker_slot),
         alive_mask=_mask_with_true_slots(0, blocker_slot),
+        **_inert_combat_state_fields(),
     )
 
     joint_action = _joint_action_with_moves(

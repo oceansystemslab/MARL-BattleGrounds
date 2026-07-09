@@ -44,7 +44,7 @@ BODY_RADIUS_BY_CLASS = jnp.asarray(
 )
 
 
-BASIC_RANGE_BY_CLASS = jnp.asarray(
+BASIC_INTERACTION_RADIUS_BY_CLASS = jnp.asarray(
     [
         0.0,  # neutral
         5.0,  # mage
@@ -83,8 +83,8 @@ BASIC_HEALING_BY_CLASS = jnp.asarray(
 )
 
 
-# Mage Burst is a no-target self-buff, so its range is zero.
-ULTIMATE_RANGE_BY_CLASS = jnp.asarray(
+# Mage Burst is a no-target self-buff, so its interaction radius is zero.
+ULTIMATE_INTERACTION_RADIUS_BY_CLASS = jnp.asarray(
     [
         0.0,  # neutral
         0.0,  # mage
@@ -109,6 +109,17 @@ ULTIMATE_COOLDOWN_BY_CLASS = jnp.asarray(
     dtype=jnp.int32,
 )
 
+OBSERVATION_RADIUS_BY_CLASS = jnp.asarray(
+    [
+        0,  # neutral
+        6,  # mage
+        6,  # warrior
+        6,  # hunter
+        6,  # rogue
+        6,  # priest
+    ],
+    dtype=jnp.float32,
+)
 
 # Global status rules.
 
@@ -184,9 +195,9 @@ def get_body_radius_by_class_ids(class_ids: int | Array) -> Array:
     return BODY_RADIUS_BY_CLASS[class_ids]
 
 
-def get_basic_range_by_class_ids(class_ids: int | Array) -> Array:
-    """Return basic interaction range values for one or more class IDs."""
-    return BASIC_RANGE_BY_CLASS[class_ids]
+def get_basic_interaction_radius_by_class_ids(class_ids: int | Array) -> Array:
+    """Return basic interaction radii for one or more class IDs."""
+    return BASIC_INTERACTION_RADIUS_BY_CLASS[class_ids]
 
 
 def get_basic_damage_by_class_ids(class_ids: int | Array) -> Array:
@@ -199,11 +210,16 @@ def get_basic_healing_by_class_ids(class_ids: int | Array) -> Array:
     return BASIC_HEALING_BY_CLASS[class_ids]
 
 
-def get_ultimate_range_by_class_ids(class_ids: int | Array) -> Array:
-    """Return ultimate interaction range values for one or more class IDs."""
-    return ULTIMATE_RANGE_BY_CLASS[class_ids]
+def get_ultimate_interaction_radius_by_class_ids(class_ids: int | Array) -> Array:
+    """Return ultimate interaction radii for one or more class IDs."""
+    return ULTIMATE_INTERACTION_RADIUS_BY_CLASS[class_ids]
 
 
 def get_ultimate_cooldown_by_class_ids(class_ids: int | Array) -> Array:
     """Return ultimate cooldown values for one or more class IDs."""
     return ULTIMATE_COOLDOWN_BY_CLASS[class_ids]
+
+
+def get_observation_radius_by_class_ids(class_ids: int | Array) -> Array:
+    """Return observation radii for one or more class IDs."""
+    return OBSERVATION_RADIUS_BY_CLASS[class_ids]

@@ -1,12 +1,13 @@
 """Core simulator spine contract tests."""
 
-from typing import cast
+from typing import TypedDict, cast
 
 import jax
 import jax.numpy as jnp
 import pytest
 from jax import Array
 
+import marl_battlegrounds.core.combat as combat
 from marl_battlegrounds.core.env import reset, step
 from marl_battlegrounds.core.types import (
     AGENT_FEATURE_ACTIVE,
@@ -23,6 +24,8 @@ from marl_battlegrounds.core.types import (
     CLASS_NEUTRAL,
     CONTEXT_FEATURES,
     ENVIRONMENT_DIMENSIONS,
+    HUNTER_CLASS_ID,
+    MAGE_CLASS_ID,
     MAX_AGENT_SLOTS,
     MAX_AGENTS_PER_TEAM,
     MAX_OBJECTIVE_SLOTS,
@@ -37,6 +40,8 @@ from marl_battlegrounds.core.types import (
     MOVE_STAY,
     MOVE_WEST,
     NUM_MOVE_ACTIONS,
+    NUM_SLOW_CHANNELS,
+    NUM_STUN_CHANNELS,
     NUM_TARGET_ACTIONS,
     NUM_TEAMS,
     NUM_ULTIMATE_ACTIONS,
@@ -53,8 +58,17 @@ from marl_battlegrounds.core.types import (
     OBSTACLE_TYPE_NONE,
     OBSTACLE_TYPE_PILLAR,
     OBSTACLE_TYPE_WALL,
+    PRIEST_CLASS_ID,
+    ROGUE_CLASS_ID,
     SELF_FEATURES,
+    SLOW_CHANNEL_HUNTER_BASIC,
+    SLOW_CHANNEL_ROGUE_POISON,
+    SLOW_CHANNEL_WARRIOR_CHARGE,
+    STUN_CHANNEL_HUNTER_TRAP,
+    STUN_CHANNEL_ROGUE_POISON,
+    STUN_CHANNEL_WARRIOR_CHARGE,
     UNIT_FEATURES,
+    WARRIOR_CLASS_ID,
     Action,
     ActionMask,
     DoneFlags,
@@ -67,7 +81,68 @@ from marl_battlegrounds.core.types import (
 
 VALID_TEAM_SIZES = (1, 2, 3, 4, 5)
 
+_CANONICAL_INITIAL_CLASS_IDS: Array = jnp.asarray(
+    (
+        MAGE_CLASS_ID,
+        WARRIOR_CLASS_ID,
+        HUNTER_CLASS_ID,
+        ROGUE_CLASS_ID,
+        PRIEST_CLASS_ID,
+        MAGE_CLASS_ID,
+        WARRIOR_CLASS_ID,
+        HUNTER_CLASS_ID,
+        ROGUE_CLASS_ID,
+        PRIEST_CLASS_ID,
+    ),
+    dtype=jnp.int32,
+)
+
 # Test helpers ---
+
+
+class _CombatStateFields(TypedDict):
+    """Keyword fields for inert combat state in test EnvState constructors."""
+
+    current_health: Array
+    max_health: Array
+    ultimate_cooldowns: Array
+    slow_multipliers: Array
+    slow_durations: Array
+    stun_durations: Array
+    anti_heal_multipliers: Array
+    anti_heal_durations: Array
+    damage_amplification_multipliers: Array
+    damage_amplification_durations: Array
+    blessing_of_freedom_durations: Array
+
+
+def _inert_combat_state_fields() -> _CombatStateFields:
+    """Return neutral combat state fields for direct EnvState constructors."""
+    return {
+        "current_health": jnp.zeros(shape=(MAX_AGENT_SLOTS,), dtype=jnp.float32),
+        "max_health": jnp.zeros(shape=(MAX_AGENT_SLOTS,), dtype=jnp.float32),
+        "ultimate_cooldowns": jnp.zeros(shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        "slow_multipliers": jnp.ones(
+            shape=(MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.float32
+        ),
+        "slow_durations": jnp.zeros(
+            shape=(MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.int32
+        ),
+        "stun_durations": jnp.zeros(
+            shape=(MAX_AGENT_SLOTS, NUM_STUN_CHANNELS), dtype=jnp.int32
+        ),
+        "anti_heal_multipliers": jnp.ones(shape=(MAX_AGENT_SLOTS,), dtype=jnp.float32),
+        "anti_heal_durations": jnp.zeros(shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        "damage_amplification_multipliers": jnp.ones(
+            shape=(MAX_AGENT_SLOTS,), dtype=jnp.float32
+        ),
+        "damage_amplification_durations": jnp.zeros(
+            shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
+        "blessing_of_freedom_durations": jnp.zeros(
+            shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
+    }
 
 
 def _bool_vector(values: tuple[int, ...]) -> Array:
@@ -107,13 +182,28 @@ def _config(
         max_steps=max_steps,
         map_width=20.0,
         map_height=12.0,
-        default_agent_radius=0.5,
-        default_movement_speed=1.0,
-        default_observation_radius=8.0,
-        default_basic_interaction_radius=6.0,
-        default_ultimate_interaction_radius=9.0,
         obstacles=_empty_obstacles() if obstacles is None else obstacles,
+        initial_class_ids=_CANONICAL_INITIAL_CLASS_IDS,
     )
+
+
+def _expected_active_mask(team_size: int) -> Array:
+    """Return the fixed-slot active mask for a symmetric two-team task."""
+    indices = jnp.arange(MAX_AGENT_SLOTS)
+    team_0_active = indices < team_size
+    team_1_active = (indices >= MAX_AGENTS_PER_TEAM) & (
+        indices < MAX_AGENTS_PER_TEAM + team_size
+    )
+    return jnp.logical_or(team_0_active, team_1_active)
+
+
+def _expected_resolved_class_ids(config: EnvConfig) -> Array:
+    """Return reset class IDs after inactive slots are neutralized."""
+    return jnp.where(
+        _expected_active_mask(config.team_size),
+        config.initial_class_ids,
+        CLASS_NEUTRAL,
+    ).astype(jnp.int32)
 
 
 def _zero_action() -> Action:
@@ -209,6 +299,52 @@ def _assert_state_contract(state: EnvState) -> None:
 
     assert state.alive_mask.shape == (MAX_AGENT_SLOTS,)
     assert state.alive_mask.dtype == bool
+
+    assert state.current_health.shape == (MAX_AGENT_SLOTS,)
+    assert state.current_health.dtype == jnp.float32
+
+    assert state.max_health.shape == (MAX_AGENT_SLOTS,)
+    assert state.max_health.dtype == jnp.float32
+
+    assert state.ultimate_cooldowns.shape == (MAX_AGENT_SLOTS,)
+    assert state.ultimate_cooldowns.dtype == jnp.int32
+
+    assert state.slow_multipliers.shape == (MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS)
+    assert state.slow_multipliers.dtype == jnp.float32
+
+    assert state.slow_durations.shape == (MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS)
+    assert state.slow_durations.dtype == jnp.int32
+
+    assert state.stun_durations.shape == (MAX_AGENT_SLOTS, NUM_STUN_CHANNELS)
+    assert state.stun_durations.dtype == jnp.int32
+
+    assert state.anti_heal_multipliers.shape == (MAX_AGENT_SLOTS,)
+    assert state.anti_heal_multipliers.dtype == jnp.float32
+
+    assert state.anti_heal_durations.shape == (MAX_AGENT_SLOTS,)
+    assert state.anti_heal_durations.dtype == jnp.int32
+
+    assert state.damage_amplification_multipliers.shape == (MAX_AGENT_SLOTS,)
+    assert state.damage_amplification_multipliers.dtype == jnp.float32
+
+    assert state.damage_amplification_durations.shape == (MAX_AGENT_SLOTS,)
+    assert state.damage_amplification_durations.dtype == jnp.int32
+
+    assert state.blessing_of_freedom_durations.shape == (MAX_AGENT_SLOTS,)
+    assert state.blessing_of_freedom_durations.dtype == jnp.int32
+
+
+def _assert_effect_state_is_inert(state: EnvState) -> None:
+    """Assert reset starts cooldown and status effect state inert."""
+    assert jnp.all(state.ultimate_cooldowns == 0)
+    assert jnp.all(state.slow_multipliers == 1.0)
+    assert jnp.all(state.slow_durations == 0)
+    assert jnp.all(state.stun_durations == 0)
+    assert jnp.all(state.anti_heal_multipliers == 1.0)
+    assert jnp.all(state.anti_heal_durations == 0)
+    assert jnp.all(state.damage_amplification_multipliers == 1.0)
+    assert jnp.all(state.damage_amplification_durations == 0)
+    assert jnp.all(state.blessing_of_freedom_durations == 0)
 
 
 def _assert_observation_contract(observation: Observation) -> None:
@@ -372,6 +508,18 @@ def test_static_shape_constants_are_consistent() -> None:
     assert UNIT_FEATURES == 16
     assert SELF_FEATURES == UNIT_FEATURES
     assert CLASS_NEUTRAL == 0
+    assert NUM_SLOW_CHANNELS == 3
+    assert tuple(range(NUM_SLOW_CHANNELS)) == (
+        SLOW_CHANNEL_HUNTER_BASIC,
+        SLOW_CHANNEL_WARRIOR_CHARGE,
+        SLOW_CHANNEL_ROGUE_POISON,
+    )
+    assert NUM_STUN_CHANNELS == 3
+    assert tuple(range(NUM_STUN_CHANNELS)) == (
+        STUN_CHANNEL_WARRIOR_CHARGE,
+        STUN_CHANNEL_HUNTER_TRAP,
+        STUN_CHANNEL_ROGUE_POISON,
+    )
     shared_agent_feature_indices = (
         AGENT_FEATURE_X,
         AGENT_FEATURE_Y,
@@ -401,13 +549,13 @@ def test_env_config_stores_static_episode_settings() -> None:
     assert env_config.max_steps == 10000
     assert env_config.map_width == 20.0
     assert env_config.map_height == 12.0
-    assert env_config.default_agent_radius == 0.5
-    assert env_config.default_movement_speed == 1.0
-    assert env_config.default_observation_radius == 8.0
-    assert env_config.default_basic_interaction_radius == 6.0
-    assert env_config.default_ultimate_interaction_radius == 9.0
 
     config_fields = set(EnvConfig._fields)
+    assert "default_agent_radius" not in config_fields
+    assert "default_movement_speed" not in config_fields
+    assert "default_observation_radius" not in config_fields
+    assert "default_basic_interaction_radius" not in config_fields
+    assert "default_ultimate_interaction_radius" not in config_fields
     assert "movement_speed" not in config_fields
     assert "observation_radius" not in config_fields
     assert "target_radius" not in config_fields
@@ -416,6 +564,9 @@ def test_env_config_stores_static_episode_settings() -> None:
     assert env_config.obstacles.shape == (MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES)
     assert env_config.obstacles.dtype == jnp.float32
     assert jnp.array_equal(env_config.obstacles, obstacles)
+    assert env_config.initial_class_ids.shape == (MAX_AGENT_SLOTS,)
+    assert env_config.initial_class_ids.dtype == jnp.int32
+    assert jnp.array_equal(env_config.initial_class_ids, _CANONICAL_INITIAL_CLASS_IDS)
 
 
 def test_env_state_stores_slot_aligned_arrays() -> None:
@@ -435,9 +586,13 @@ def test_env_state_stores_slot_aligned_arrays() -> None:
         ),
         active_mask=jnp.ones(shape=(MAX_AGENT_SLOTS,), dtype=bool),
         alive_mask=jnp.ones(shape=(MAX_AGENT_SLOTS,), dtype=bool),
+        **_inert_combat_state_fields(),
     )
 
     _assert_state_contract(env_state)
+    assert jnp.all(env_state.current_health == 0.0)
+    assert jnp.all(env_state.max_health == 0.0)
+    _assert_effect_state_is_inert(env_state)
     state_fields = set(EnvState._fields)
     assert "movement_speed" not in state_fields
     assert "observation_radius" not in state_fields
@@ -509,17 +664,33 @@ def test_reset_returns_fixed_shape_core_outputs(team_size: int) -> None:
     state, observation, action_mask, info = reset(config, key)
 
     _assert_state_contract(state)
+    _assert_effect_state_is_inert(state)
     assert jnp.array_equal(state.step_count, jnp.array(0, dtype=jnp.int32))
-    assert jnp.all(state.agent_radii == config.default_agent_radius)
-    assert jnp.all(state.class_ids == CLASS_NEUTRAL)
-    assert jnp.all(state.movement_speeds == config.default_movement_speed)
-    assert jnp.all(state.observation_radii == config.default_observation_radius)
-    assert jnp.all(
-        state.basic_interaction_radii == config.default_basic_interaction_radius
+    expected_class_ids = _expected_resolved_class_ids(config)
+    assert jnp.array_equal(state.class_ids, expected_class_ids)
+    assert jnp.array_equal(
+        state.agent_radii, combat.BODY_RADIUS_BY_CLASS[expected_class_ids]
     )
-    assert jnp.all(
-        state.ultimate_interaction_radii == config.default_ultimate_interaction_radius
+    assert jnp.array_equal(
+        state.movement_speeds,
+        combat.MOVEMENT_SPEED_BY_CLASS[expected_class_ids],
     )
+    assert jnp.array_equal(
+        state.observation_radii,
+        combat.OBSERVATION_RADIUS_BY_CLASS[expected_class_ids],
+    )
+    assert jnp.array_equal(
+        state.basic_interaction_radii,
+        combat.BASIC_INTERACTION_RADIUS_BY_CLASS[expected_class_ids],
+    )
+    assert jnp.array_equal(
+        state.ultimate_interaction_radii,
+        combat.ULTIMATE_INTERACTION_RADIUS_BY_CLASS[expected_class_ids],
+    )
+    assert jnp.array_equal(
+        state.max_health, combat.MAX_HEALTH_BY_CLASS[expected_class_ids]
+    )
+    assert jnp.array_equal(state.current_health, state.max_health)
 
     _assert_observation_contract(observation)
     _assert_common_observation_values(
@@ -629,6 +800,29 @@ def test_step_preserves_slot_aligned_state_arrays() -> None:
     )
     assert jnp.array_equal(next_state.active_mask, state.active_mask)
     assert jnp.array_equal(next_state.alive_mask, state.alive_mask)
+    assert jnp.array_equal(next_state.current_health, state.current_health)
+    assert jnp.array_equal(next_state.max_health, state.max_health)
+    assert jnp.array_equal(next_state.ultimate_cooldowns, state.ultimate_cooldowns)
+    assert jnp.array_equal(next_state.slow_multipliers, state.slow_multipliers)
+    assert jnp.array_equal(next_state.slow_durations, state.slow_durations)
+    assert jnp.array_equal(next_state.stun_durations, state.stun_durations)
+    assert jnp.array_equal(
+        next_state.anti_heal_multipliers,
+        state.anti_heal_multipliers,
+    )
+    assert jnp.array_equal(next_state.anti_heal_durations, state.anti_heal_durations)
+    assert jnp.array_equal(
+        next_state.damage_amplification_multipliers,
+        state.damage_amplification_multipliers,
+    )
+    assert jnp.array_equal(
+        next_state.damage_amplification_durations,
+        state.damage_amplification_durations,
+    )
+    assert jnp.array_equal(
+        next_state.blessing_of_freedom_durations,
+        state.blessing_of_freedom_durations,
+    )
 
 
 def test_step_returns_fixed_shape_core_outputs() -> None:

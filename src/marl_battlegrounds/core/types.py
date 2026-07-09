@@ -65,26 +65,33 @@ AGENT_FEATURE_OBSERVATION_RADIUS = 8
 AGENT_FEATURE_BASIC_INTERACTION_RADIUS = 9
 AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS = 10
 
+NUM_SLOW_CHANNELS = 3
+SLOW_CHANNEL_HUNTER_BASIC = 0
+SLOW_CHANNEL_WARRIOR_CHARGE = 1
+SLOW_CHANNEL_ROGUE_POISON = 2
+
+NUM_STUN_CHANNELS = 3
+STUN_CHANNEL_WARRIOR_CHARGE = 0
+STUN_CHANNEL_HUNTER_TRAP = 1
+STUN_CHANNEL_ROGUE_POISON = 2
+
 
 class EnvConfig(NamedTuple):
-    """Static episode settings and reset defaults.
+    """Static episode settings and reset inputs.
 
     Static map geometry belongs here because Milestone 4 obstacles do not change
-    during an episode. ``default_*`` stat values are construction defaults for
-    reset and scenario loading only; after ``EnvState`` exists, per-slot state
-    arrays are the simulator truth for transition, observation, and masks.
+    during an episode. Initial roster data belongs here until scenario/training
+    configuration grows a dedicated reset-input layer. After ``EnvState``
+    exists, per-slot state arrays are the simulator truth for transition,
+    observation, and masks.
     """
 
     team_size: int
     max_steps: int
     map_width: float
     map_height: float
-    default_agent_radius: float
-    default_movement_speed: float
-    default_observation_radius: float
-    default_basic_interaction_radius: float
-    default_ultimate_interaction_radius: float
     obstacles: Array
+    initial_class_ids: Array
 
 
 class EnvState(NamedTuple):
@@ -107,6 +114,17 @@ class EnvState(NamedTuple):
     ultimate_interaction_radii: Array
     active_mask: Array
     alive_mask: Array
+    current_health: Array
+    max_health: Array
+    ultimate_cooldowns: Array
+    slow_multipliers: Array
+    slow_durations: Array
+    stun_durations: Array
+    anti_heal_multipliers: Array
+    anti_heal_durations: Array
+    damage_amplification_multipliers: Array
+    damage_amplification_durations: Array
+    blessing_of_freedom_durations: Array
 
 
 class Action(NamedTuple):
