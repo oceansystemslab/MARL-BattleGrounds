@@ -39,6 +39,9 @@ from marl_battlegrounds.core.types import (
     PRIEST_CLASS_ID,
     ROGUE_CLASS_ID,
     SELF_FEATURES,
+    SLOW_CHANNEL_HUNTER_BASIC,
+    SLOW_CHANNEL_ROGUE_POISON,
+    SLOW_CHANNEL_WARRIOR_CHARGE,
     UNIT_FEATURES,
     WARRIOR_CLASS_ID,
     EnvConfig,
@@ -440,6 +443,131 @@ def test_status_mechanic_defaults_are_scalar_parameters() -> None:
 
         assert isinstance(value, int), name
         assert value > 0, name
+
+
+def test_derive_status_magnitudes_returns_neutral_fixed_shape_contract() -> None:
+    slow_multipliers, anti_heal_multipliers, floor_fractions = (
+        combat.derive_status_magnitudes(
+            jnp.zeros((MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.int32),
+            jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+            jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        )
+    )
+
+    assert slow_multipliers.shape == (MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS)
+    assert slow_multipliers.dtype == jnp.float32
+    assert bool(jnp.all(slow_multipliers == 1.0))
+
+    assert anti_heal_multipliers.shape == (MAX_AGENT_SLOTS,)
+    assert anti_heal_multipliers.dtype == jnp.float32
+    assert bool(jnp.all(anti_heal_multipliers == 1.0))
+
+    assert floor_fractions.shape == (MAX_AGENT_SLOTS,)
+    assert floor_fractions.dtype == jnp.float32
+    assert bool(jnp.all(floor_fractions == 0.0))
+
+
+@pytest.mark.parametrize(
+    ("channel", "expected_multiplier"),
+    (
+        (SLOW_CHANNEL_WARRIOR_CHARGE, combat.WARRIOR_CHARGE_SLOW_MULTIPLIER),
+        (SLOW_CHANNEL_HUNTER_BASIC, combat.HUNTER_BASIC_SLOW_MULTIPLIER),
+        (SLOW_CHANNEL_ROGUE_POISON, combat.ROGUE_POISON_SLOW_MULTIPLIER),
+    ),
+)
+def test_derive_status_magnitudes_activates_each_slow_source_independently(
+    channel: int,
+    expected_multiplier: float,
+) -> None:
+    active_slot = 3
+    slow_durations = (
+        jnp.zeros((MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.int32)
+        .at[active_slot, channel]
+        .set(2)
+    )
+
+    slow_multipliers, _, _ = combat.derive_status_magnitudes(
+        slow_durations,
+        jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+    )
+    expected = (
+        jnp.ones((MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.float32)
+        .at[active_slot, channel]
+        .set(expected_multiplier)
+    )
+
+    assert bool(jnp.array_equal(slow_multipliers, expected))
+
+
+@pytest.mark.parametrize(
+    ("duration_input", "output_index", "active_value", "inactive_value"),
+    (
+        (
+            "rogue",
+            1,
+            combat.ROGUE_POISON_ANTI_HEAL_MULTIPLIER,
+            1.0,
+        ),
+        (
+            "priest",
+            2,
+            combat.PRIEST_HEAL_SPEED_FLOOR,
+            0.0,
+        ),
+    ),
+)
+def test_derive_status_magnitudes_activates_each_scalar_source_independently(
+    duration_input: str,
+    output_index: int,
+    active_value: float,
+    inactive_value: float,
+) -> None:
+    active_slot = 6
+    durations = {
+        name: jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32)
+        for name in ("rogue", "priest")
+    }
+    durations[duration_input] = durations[duration_input].at[active_slot].set(1)
+
+    derived = combat.derive_status_magnitudes(
+        jnp.zeros((MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.int32),
+        durations["rogue"],
+        durations["priest"],
+    )
+    expected = (
+        jnp.full((MAX_AGENT_SLOTS,), inactive_value, dtype=jnp.float32)
+        .at[active_slot]
+        .set(active_value)
+    )
+
+    assert bool(jnp.array_equal(derived[output_index], expected))
+
+
+def test_derive_status_magnitudes_matches_jit_for_mixed_active_durations() -> None:
+    slow_durations = jnp.zeros((MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.int32)
+    slow_durations = slow_durations.at[0, SLOW_CHANNEL_WARRIOR_CHARGE].set(5)
+    slow_durations = slow_durations.at[2, SLOW_CHANNEL_HUNTER_BASIC].set(1)
+    slow_durations = slow_durations.at[7, SLOW_CHANNEL_ROGUE_POISON].set(3)
+    rogue_durations = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32).at[7].set(4)
+    priest_durations = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32).at[9].set(1)
+
+    eager = combat.derive_status_magnitudes(
+        slow_durations,
+        rogue_durations,
+        priest_durations,
+    )
+    jitted = cast(
+        tuple[Array, Array, Array],
+        jax.jit(combat.derive_status_magnitudes)(
+            slow_durations,
+            rogue_durations,
+            priest_durations,
+        ),
+    )
+
+    for eager_output, jitted_output in zip(eager, jitted, strict=True):
+        assert bool(jnp.array_equal(eager_output, jitted_output))
 
 
 def test_passive_and_support_defaults_are_scalar_parameters() -> None:

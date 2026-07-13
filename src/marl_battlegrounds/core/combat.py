@@ -223,3 +223,83 @@ def get_ultimate_cooldown_by_class_ids(class_ids: int | Array) -> Array:
 def get_observation_radius_by_class_ids(class_ids: int | Array) -> Array:
     """Return observation radii for one or more class IDs."""
     return OBSERVATION_RADIUS_BY_CLASS[class_ids]
+
+
+def _build_slow_multipliers(slow_durations: Array) -> Array:
+    # if a duration is > 0, then the multiplier is active.
+    class_slow_multipliers = jnp.asarray(
+        [
+            WARRIOR_CHARGE_SLOW_MULTIPLIER,
+            HUNTER_BASIC_SLOW_MULTIPLIER,
+            ROGUE_POISON_SLOW_MULTIPLIER,
+        ]
+    )[None, :]
+
+    slow_multipliers = jnp.where(slow_durations > 0, class_slow_multipliers, 1.0)
+
+    return slow_multipliers
+
+
+def _build_priest_blessing_of_freedom_slow_floor_fractions(
+    priest_blessing_of_freedom_slow_floor_durations: Array,
+) -> Array:
+    return jnp.where(
+        priest_blessing_of_freedom_slow_floor_durations > 0,
+        PRIEST_HEAL_SPEED_FLOOR,
+        0.0,
+    ).astype(jnp.float32)
+
+
+def derive_status_magnitudes(
+    slow_durations: Array,
+    rogue_poison_anti_heal_durations: Array,
+    priest_blessing_of_freedom_slow_floor_durations: Array,
+) -> tuple[Array, Array, Array]:
+    """Derive the fixed-strength status payloads consumed by current mechanics.
+
+    Multiplicative effects use ``1.0`` while inactive. The Priest movement-floor
+    fraction uses ``0.0`` while inactive because absence is not a multiplier.
+    The return order is slow multipliers, Rogue anti-heal multipliers, then
+    Priest slow-floor fractions. Inputs and outputs retain the simulator's fixed
+    slot and source-channel shapes so this helper remains safe under eager, JIT,
+    and scanned execution. Add other derived payloads only when a production
+    mechanic consumes them.
+    """
+
+    # if a duration is > 0, then the multiplier is active.
+    slow_multipliers = _build_slow_multipliers(slow_durations)
+
+    # Rogue anti-heal
+    rogue_poison_anti_heal_multipliers = jnp.where(
+        rogue_poison_anti_heal_durations > 0, ROGUE_POISON_ANTI_HEAL_MULTIPLIER, 1.0
+    ).astype(jnp.float32)
+
+    priest_blessing_of_freedom_slow_floor_fractions = (
+        _build_priest_blessing_of_freedom_slow_floor_fractions(
+            priest_blessing_of_freedom_slow_floor_durations
+        )
+    )
+
+    return (
+        slow_multipliers,
+        rogue_poison_anti_heal_multipliers,
+        priest_blessing_of_freedom_slow_floor_fractions,
+    )
+
+
+def derive_effective_movement_speeds_from_durations(
+    base_movement_speeds: Array,
+    slow_durations: Array,
+    priest_blessing_of_freedom_slow_floor_durations: Array,
+) -> Array:
+
+    effective_movement_multipliers = jnp.maximum(
+        jnp.prod(_build_slow_multipliers(slow_durations), axis=-1),
+        _build_priest_blessing_of_freedom_slow_floor_fractions(
+            priest_blessing_of_freedom_slow_floor_durations
+        ),
+    )
+
+    return base_movement_speeds * jnp.maximum(
+        effective_movement_multipliers, GLOBAL_SLOW_FLOOR
+    )
