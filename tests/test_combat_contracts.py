@@ -12,13 +12,14 @@ import pytest
 from jax import Array
 
 import marl_battlegrounds.core.combat as combat
+from marl_battlegrounds.core.config import resolve_agent_profile
 from marl_battlegrounds.core.env import reset
 from marl_battlegrounds.core.types import (
     AGENT_FEATURE_ACTIVE,
     AGENT_FEATURE_ALIVE,
+    AGENT_FEATURE_BASE_MOVEMENT_SPEED,
     AGENT_FEATURE_BASIC_INTERACTION_RADIUS,
     AGENT_FEATURE_CLASS_ID,
-    AGENT_FEATURE_MOVEMENT_SPEED,
     AGENT_FEATURE_OBSERVATION_RADIUS,
     AGENT_FEATURE_RADIUS,
     AGENT_FEATURE_TEAM_ID,
@@ -66,6 +67,7 @@ _CONFIG_DEFAULT_5_CLASS_MIRROR: Array = jnp.asarray(
 )
 
 _FORBIDDEN_COMBAT_IMPORT_MODULES: tuple[str, ...] = (
+    "marl_battlegrounds.core.config",
     "marl_battlegrounds.core.env",
     "marl_battlegrounds.core.geometry",
     "marl_battlegrounds.rendering",
@@ -75,7 +77,7 @@ _FORBIDDEN_COMBAT_IMPORT_MODULES: tuple[str, ...] = (
 
 _FLOAT_CLASS_CATALOG_NAMES: tuple[str, ...] = (
     "MAX_HEALTH_BY_CLASS",
-    "MOVEMENT_SPEED_BY_CLASS",
+    "BASE_MOVEMENT_SPEED_BY_CLASS",
     "BODY_RADIUS_BY_CLASS",
     "BASIC_INTERACTION_RADIUS_BY_CLASS",
     "BASIC_DAMAGE_BY_CLASS",
@@ -93,7 +95,7 @@ _CLASS_CATALOG_NAMES: tuple[str, ...] = (
 
 _CLASS_CATALOG_HELPER_NAMES: tuple[tuple[str, str], ...] = (
     ("MAX_HEALTH_BY_CLASS", "get_max_health_by_class_ids"),
-    ("MOVEMENT_SPEED_BY_CLASS", "get_movement_speed_by_class_ids"),
+    ("BASE_MOVEMENT_SPEED_BY_CLASS", "get_base_movement_speed_by_class_ids"),
     ("BODY_RADIUS_BY_CLASS", "get_body_radius_by_class_ids"),
     (
         "BASIC_INTERACTION_RADIUS_BY_CLASS",
@@ -129,7 +131,9 @@ def _config(
         map_width=20.0,
         map_height=12.0,
         obstacles=_empty_obstacles(),
-        initial_class_ids=class_ids,
+        agent_profile=resolve_agent_profile(
+            class_ids, jnp.asarray((team_size, team_size), dtype=jnp.int32)
+        ),
     )
 
 
@@ -197,45 +201,33 @@ def _assert_reset_combat_state_is_inert(state: EnvState) -> None:
         jnp.zeros((MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.int32),
         "slow_durations",
     )
-    _assert_float_array_close(
-        state.slow_multipliers,
-        jnp.ones((MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.float32),
-        "slow_multipliers",
-    )
     _assert_array_equal(
         state.stun_durations,
         jnp.zeros((MAX_AGENT_SLOTS, NUM_STUN_CHANNELS), dtype=jnp.int32),
         "stun_durations",
     )
     _assert_array_equal(
-        state.anti_heal_durations,
+        state.rogue_poison_anti_heal_durations,
         jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
         "anti_heal_durations",
     )
-    _assert_float_array_close(
-        state.anti_heal_multipliers,
-        jnp.ones((MAX_AGENT_SLOTS,), dtype=jnp.float32),
-        "anti_heal_multipliers",
-    )
     _assert_array_equal(
-        state.damage_amplification_durations,
+        state.mage_burst_damage_amplification_durations,
         jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
         "damage_amplification_durations",
     )
-    _assert_float_array_close(
-        state.damage_amplification_multipliers,
-        jnp.ones((MAX_AGENT_SLOTS,), dtype=jnp.float32),
-        "damage_amplification_multipliers",
-    )
     _assert_array_equal(
-        state.blessing_of_freedom_durations,
+        state.priest_blessing_of_freedom_slow_floor_durations,
         jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
         "blessing_of_freedom_durations",
     )
 
 
-def _assert_self_features_project_state(obs: Observation, state: EnvState) -> None:
-    """Assert self observation rows expose current state feature columns."""
+def _assert_self_features_project_state(
+    obs: Observation, state: EnvState, config: EnvConfig
+) -> None:
+    """Assert self rows project dynamic state and the resolved profile."""
+    profile = config.agent_profile
     assert obs.self_features.shape == (MAX_AGENT_SLOTS, SELF_FEATURES)
 
     _assert_float_array_close(
@@ -245,17 +237,17 @@ def _assert_self_features_project_state(obs: Observation, state: EnvState) -> No
     )
     _assert_float_array_close(
         obs.self_features[:, AGENT_FEATURE_RADIUS],
-        state.agent_radii,
+        profile.agent_radii,
         "obs.self_features.radius",
     )
     _assert_float_array_close(
         obs.self_features[:, AGENT_FEATURE_TEAM_ID],
-        state.team_ids.astype(jnp.float32),
+        profile.team_ids.astype(jnp.float32),
         "obs.self_features.team_id",
     )
     _assert_float_array_close(
         obs.self_features[:, AGENT_FEATURE_ACTIVE],
-        state.active_mask.astype(jnp.float32),
+        profile.active_mask.astype(jnp.float32),
         "obs.self_features.active",
     )
     _assert_float_array_close(
@@ -265,27 +257,27 @@ def _assert_self_features_project_state(obs: Observation, state: EnvState) -> No
     )
     _assert_float_array_close(
         obs.self_features[:, AGENT_FEATURE_CLASS_ID],
-        state.class_ids.astype(jnp.float32),
+        profile.class_ids.astype(jnp.float32),
         "obs.self_features.class_id",
     )
     _assert_float_array_close(
-        obs.self_features[:, AGENT_FEATURE_MOVEMENT_SPEED],
-        state.movement_speeds,
+        obs.self_features[:, AGENT_FEATURE_BASE_MOVEMENT_SPEED],
+        profile.base_movement_speeds,
         "obs.self_features.movement_speed",
     )
     _assert_float_array_close(
         obs.self_features[:, AGENT_FEATURE_OBSERVATION_RADIUS],
-        state.observation_radii,
+        profile.observation_radii,
         "obs.self_features.observation_radius",
     )
     _assert_float_array_close(
         obs.self_features[:, AGENT_FEATURE_BASIC_INTERACTION_RADIUS],
-        state.basic_interaction_radii,
+        profile.basic_interaction_radii,
         "obs.self_features.basic_interaction_radius",
     )
     _assert_float_array_close(
         obs.self_features[:, AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS],
-        state.ultimate_interaction_radii,
+        profile.ultimate_interaction_radii,
         "obs.self_features.ultimate_interaction_radius",
     )
 
@@ -394,8 +386,8 @@ def test_rogue_movement_speed_role_distinction_is_represented() -> None:
 
     assert bool(
         jnp.all(
-            combat.MOVEMENT_SPEED_BY_CLASS[ROGUE_CLASS_ID]
-            > combat.MOVEMENT_SPEED_BY_CLASS[non_rogue_class_ids]
+            combat.BASE_MOVEMENT_SPEED_BY_CLASS[ROGUE_CLASS_ID]
+            > combat.BASE_MOVEMENT_SPEED_BY_CLASS[non_rogue_class_ids]
         )
     )
 
@@ -574,8 +566,8 @@ def test_passive_and_support_defaults_are_scalar_parameters() -> None:
     assert combat.MAGE_DAMAGE_AURA_RADIUS > 0.0
     assert combat.MAGE_DAMAGE_AURA_MULTIPLIER > 1.0
 
-    assert combat.WARRIOR_MITIGATION_AURA_RADIUS > 0.0
-    assert 0.0 < combat.WARRIOR_MITIGATION_AURA_MULTIPLIER < 1.0
+    assert combat.WARRIOR_DAMAGE_MITIGATION_AURA_RADIUS > 0.0
+    assert 0.0 < combat.WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER < 1.0
 
     assert combat.PRIEST_ULT_HEAL_AMOUNT > 0.0
     assert 0.0 < combat.PRIEST_HEAL_SPEED_FLOOR <= 1.0
@@ -719,48 +711,49 @@ def test_reset_produces_correct_active_class_ids_and_class_stats(
     expected_active_mask = _expected_active_mask(team_size)
     expected_class_ids = _expected_resolved_class_ids(class_ids, team_size)
 
-    _assert_array_equal(state.active_mask, expected_active_mask, "active_mask")
+    profile = config.agent_profile
+    _assert_array_equal(profile.active_mask, expected_active_mask, "active_mask")
     _assert_array_equal(state.alive_mask, expected_active_mask, "alive_mask")
-    _assert_array_equal(state.class_ids, expected_class_ids, "class_ids")
+    _assert_array_equal(profile.class_ids, expected_class_ids, "class_ids")
 
     _assert_float_array_close(
-        state.agent_radii,
+        profile.agent_radii,
         combat.BODY_RADIUS_BY_CLASS[expected_class_ids],
         "agent_radii",
     )
     _assert_float_array_close(
-        state.movement_speeds,
-        combat.MOVEMENT_SPEED_BY_CLASS[expected_class_ids],
+        profile.base_movement_speeds,
+        combat.BASE_MOVEMENT_SPEED_BY_CLASS[expected_class_ids],
         "movement_speeds",
     )
     _assert_float_array_close(
-        state.observation_radii,
+        profile.observation_radii,
         combat.OBSERVATION_RADIUS_BY_CLASS[expected_class_ids],
         "observation_radii",
     )
     _assert_float_array_close(
-        state.basic_interaction_radii,
+        profile.basic_interaction_radii,
         combat.BASIC_INTERACTION_RADIUS_BY_CLASS[expected_class_ids],
         "basic_interaction_radii",
     )
     _assert_float_array_close(
-        state.ultimate_interaction_radii,
+        profile.ultimate_interaction_radii,
         combat.ULTIMATE_INTERACTION_RADIUS_BY_CLASS[expected_class_ids],
         "ultimate_interaction_radii",
     )
     _assert_float_array_close(
-        state.max_health,
+        profile.max_health,
         combat.MAX_HEALTH_BY_CLASS[expected_class_ids],
         "max_health",
     )
     _assert_float_array_close(
         state.current_health,
-        state.max_health,
+        profile.max_health,
         "current_health",
     )
 
     _assert_reset_combat_state_is_inert(state)
-    _assert_self_features_project_state(obs, state)
+    _assert_self_features_project_state(obs, state, config)
 
     assert not bool(jnp.any(action_mask.move[~expected_active_mask]))
     assert not bool(jnp.any(action_mask.target[~expected_active_mask]))
@@ -787,38 +780,38 @@ def test_reset_neutralizes_inactive_slots_even_when_supplied_classes_non_neutral
     )
     team_size = 1
 
-    state, obs, _, _ = reset(
-        _config(team_size=team_size, class_ids=class_ids),
-        jax.random.key(42),
-    )
+    config = _config(team_size=team_size, class_ids=class_ids)
+    state, obs, _, _ = reset(config, jax.random.key(42))
 
     expected_active_mask = _expected_active_mask(team_size)
     expected_class_ids = _expected_resolved_class_ids(class_ids, team_size)
     inactive_mask = jnp.logical_not(expected_active_mask)
 
-    _assert_array_equal(state.class_ids, expected_class_ids, "class_ids")
+    profile = config.agent_profile
+    _assert_array_equal(profile.class_ids, expected_class_ids, "class_ids")
 
-    assert bool(jnp.all(state.class_ids[inactive_mask] == NEUTRAL_CLASS_ID))
-    assert bool(jnp.all(state.agent_radii[inactive_mask] == 0.0))
-    assert bool(jnp.all(state.movement_speeds[inactive_mask] == 0.0))
-    assert bool(jnp.all(state.observation_radii[inactive_mask] == 0.0))
-    assert bool(jnp.all(state.basic_interaction_radii[inactive_mask] == 0.0))
-    assert bool(jnp.all(state.ultimate_interaction_radii[inactive_mask] == 0.0))
-    assert bool(jnp.all(state.max_health[inactive_mask] == 0.0))
+    assert bool(jnp.all(profile.class_ids[inactive_mask] == NEUTRAL_CLASS_ID))
+    assert bool(jnp.all(profile.agent_radii[inactive_mask] == 0.0))
+    assert bool(jnp.all(profile.base_movement_speeds[inactive_mask] == 0.0))
+    assert bool(jnp.all(profile.observation_radii[inactive_mask] == 0.0))
+    assert bool(jnp.all(profile.basic_interaction_radii[inactive_mask] == 0.0))
+    assert bool(jnp.all(profile.ultimate_interaction_radii[inactive_mask] == 0.0))
+    assert bool(jnp.all(profile.max_health[inactive_mask] == 0.0))
     assert bool(jnp.all(state.current_health[inactive_mask] == 0.0))
 
-    _assert_self_features_project_state(obs, state)
+    _assert_self_features_project_state(obs, state, config)
 
 
 def test_reset_starts_ultimate_remaining_cooldowns_at_zero_not_catalog_durations() -> (
     None
 ):
-    state, _, _, _ = reset(_config(team_size=5), jax.random.key(42))
+    config = _config(team_size=5)
+    state, _, _, _ = reset(config, jax.random.key(42))
 
     assert bool(jnp.all(state.ultimate_cooldowns == 0))
 
     active_mask = _expected_active_mask(team_size=5)
-    active_class_ids = state.class_ids[active_mask]
+    active_class_ids = config.agent_profile.class_ids[active_mask]
     catalog_cooldowns = combat.ULTIMATE_COOLDOWN_BY_CLASS[active_class_ids]
 
     assert bool(jnp.any(catalog_cooldowns > 0))
@@ -841,17 +834,15 @@ def test_reset_observation_radius_is_class_catalog_derived() -> None:
         dtype=jnp.int32,
     )
 
-    state, obs, _, _ = reset(
-        _config(team_size=5, class_ids=class_ids),
-        jax.random.key(42),
-    )
+    config = _config(team_size=5, class_ids=class_ids)
+    _, obs, _, _ = reset(config, jax.random.key(42))
 
     expected_observation_radii = combat.OBSERVATION_RADIUS_BY_CLASS[class_ids]
 
     _assert_float_array_close(
-        state.observation_radii,
+        config.agent_profile.observation_radii,
         expected_observation_radii,
-        "state.observation_radii",
+        "profile.observation_radii",
     )
     _assert_float_array_close(
         obs.self_features[:, AGENT_FEATURE_OBSERVATION_RADIUS],
@@ -861,7 +852,8 @@ def test_reset_observation_radius_is_class_catalog_derived() -> None:
 
 
 def test_observation_relation_unit_feature_tables_keep_agent_schema_width() -> None:
-    state, obs, _, _ = reset(_config(team_size=3), jax.random.key(42))
+    config = _config(team_size=3)
+    state, obs, _, _ = reset(config, jax.random.key(42))
 
     assert obs.ally_unit_features.shape == (
         MAX_AGENT_SLOTS,
@@ -875,4 +867,4 @@ def test_observation_relation_unit_feature_tables_keep_agent_schema_width() -> N
     )
     assert UNIT_FEATURES == SELF_FEATURES
 
-    _assert_self_features_project_state(obs, state)
+    _assert_self_features_project_state(obs, state, config)

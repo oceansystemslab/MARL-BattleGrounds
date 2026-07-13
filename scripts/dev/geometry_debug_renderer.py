@@ -12,9 +12,10 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
+from marl_battlegrounds.core.config import resolve_agent_profile
 from marl_battlegrounds.core.types import (
-    CLASS_NEUTRAL,
     ENVIRONMENT_DIMENSIONS,
+    MAGE_CLASS_ID,
     MAX_AGENT_SLOTS,
     MAX_AGENTS_PER_TEAM,
     MAX_OBSTACLE_SLOTS,
@@ -149,7 +150,10 @@ def _debug_config() -> EnvConfig:
         map_width=12.0,
         map_height=8.0,
         obstacles=obstacles,
-        initial_class_ids=jnp.full((MAX_AGENT_SLOTS,), CLASS_NEUTRAL, dtype=jnp.int32),
+        agent_profile=resolve_agent_profile(
+            jnp.full((MAX_AGENT_SLOTS,), MAGE_CLASS_ID, dtype=jnp.int32),
+            jnp.asarray((2, 2), dtype=jnp.int32),
+        ),
     )
 
 
@@ -171,41 +175,21 @@ def _debug_state() -> EnvState:
     active_mask = active_mask.at[MAX_AGENTS_PER_TEAM].set(True)
     active_mask = active_mask.at[MAX_AGENTS_PER_TEAM + 1].set(True)
 
-    team_ids = jnp.concatenate(
-        (
-            jnp.zeros((MAX_AGENTS_PER_TEAM,), dtype=jnp.int32),
-            jnp.ones((MAX_AGENTS_PER_TEAM,), dtype=jnp.int32),
-        ),
-        axis=0,
-    )
-
     return EnvState(
         step_count=jnp.array(0, dtype=jnp.int32),
         agent_positions=positions,
-        agent_radii=jnp.full((MAX_AGENT_SLOTS,), 0.5, dtype=jnp.float32),
-        team_ids=team_ids,
-        class_ids=jnp.full((MAX_AGENT_SLOTS,), CLASS_NEUTRAL, dtype=jnp.int32),
-        movement_speeds=jnp.full((MAX_AGENT_SLOTS,), 0.35, dtype=jnp.float32),
-        observation_radii=jnp.full((MAX_AGENT_SLOTS,), 8.0, dtype=jnp.float32),
-        basic_interaction_radii=jnp.full((MAX_AGENT_SLOTS,), 6.0, dtype=jnp.float32),
-        ultimate_interaction_radii=jnp.full((MAX_AGENT_SLOTS,), 9.0, dtype=jnp.float32),
-        active_mask=active_mask,
         alive_mask=active_mask,
         current_health=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32),
-        max_health=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32),
         ultimate_cooldowns=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
-        slow_multipliers=jnp.ones(
-            (MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.float32
-        ),
         slow_durations=jnp.zeros((MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.int32),
         stun_durations=jnp.zeros((MAX_AGENT_SLOTS, NUM_STUN_CHANNELS), dtype=jnp.int32),
-        anti_heal_multipliers=jnp.ones((MAX_AGENT_SLOTS,), dtype=jnp.float32),
-        anti_heal_durations=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
-        damage_amplification_multipliers=jnp.ones(
-            (MAX_AGENT_SLOTS,), dtype=jnp.float32
+        rogue_poison_anti_heal_durations=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        mage_burst_damage_amplification_durations=jnp.zeros(
+            (MAX_AGENT_SLOTS,), dtype=jnp.int32
         ),
-        damage_amplification_durations=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
-        blessing_of_freedom_durations=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        priest_blessing_of_freedom_slow_floor_durations=jnp.zeros(
+            (MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
     )
 
 

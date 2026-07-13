@@ -10,6 +10,7 @@ import pytest
 from jax import Array
 
 import marl_battlegrounds.rendering.manual_control as manual_control_module
+from marl_battlegrounds.core.config import resolve_agent_profile
 from marl_battlegrounds.core.env import reset, step
 from marl_battlegrounds.core.types import (
     CLASS_NEUTRAL,
@@ -181,7 +182,10 @@ def _sample_config() -> EnvConfig:
         map_width=12.0,
         map_height=8.0,
         obstacles=_empty_obstacles(),
-        initial_class_ids=jnp.full((MAX_AGENT_SLOTS,), CLASS_NEUTRAL, dtype=jnp.int32),
+        agent_profile=resolve_agent_profile(
+            jnp.full((MAX_AGENT_SLOTS,), CLASS_NEUTRAL, dtype=jnp.int32),
+            jnp.asarray((1, 1), dtype=jnp.int32),
+        ),
     )
 
 

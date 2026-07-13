@@ -21,6 +21,7 @@ from marl_battlegrounds.core.types import (
     OBSTACLE_FEATURE_Y,
     OBSTACLE_TYPE_PILLAR,
     OBSTACLE_TYPE_WALL,
+    TEAM_A_ID,
     EnvConfig,
     EnvState,
 )
@@ -163,7 +164,13 @@ def _draw_geometry(
     axes.clear()
     _draw_map_boundary(axes, polygon_factory, config)
     _draw_obstacles(axes, circle_factory, polygon_factory, config)
-    _draw_agents(axes, circle_factory, state, show_agent_indices=show_agent_indices)
+    _draw_agents(
+        axes,
+        circle_factory,
+        config,
+        state,
+        show_agent_indices=show_agent_indices,
+    )
     _style_axes(axes, config)
 
 
@@ -312,15 +319,16 @@ def _draw_wall(
 def _draw_agents(
     axes: _AxesLike,
     circle_factory: _PatchFactory,
+    config: EnvConfig,
     state: EnvState,
     *,
     show_agent_indices: bool,
 ) -> None:
-    """Draw active agent slots from ``EnvState``."""
+    """Draw profile-static and state-dynamic facts for active agent slots."""
     positions = np.asarray(state.agent_positions)
-    radii = np.asarray(state.agent_radii)
-    team_ids = np.asarray(state.team_ids)
-    active_mask = np.asarray(state.active_mask)
+    radii = np.asarray(config.agent_profile.agent_radii)
+    team_ids = np.asarray(config.agent_profile.team_ids)
+    active_mask = np.asarray(config.agent_profile.active_mask)
     alive_mask = np.asarray(state.alive_mask)
 
     for agent_slot in range(MAX_AGENT_SLOTS):
@@ -334,7 +342,7 @@ def _draw_agents(
         radius = float(radii[agent_slot])
         team_id = int(team_ids[agent_slot])
         is_alive = bool(alive_mask[agent_slot])
-        edgecolor = "tab:blue" if team_id == 0 else "tab:red"
+        edgecolor = "tab:blue" if team_id == TEAM_A_ID else "tab:red"
         linestyle = "-" if is_alive else "--"
         alpha = 1.0 if is_alive else 0.45
 

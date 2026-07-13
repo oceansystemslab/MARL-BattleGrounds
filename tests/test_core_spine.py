@@ -8,13 +8,16 @@ import pytest
 from jax import Array
 
 import marl_battlegrounds.core.combat as combat
+import marl_battlegrounds.core.types as core_types
+from marl_battlegrounds.core.config import resolve_agent_profile
 from marl_battlegrounds.core.env import reset, step
 from marl_battlegrounds.core.types import (
     AGENT_FEATURE_ACTIVE,
     AGENT_FEATURE_ALIVE,
+    AGENT_FEATURE_BASE_MOVEMENT_SPEED,
     AGENT_FEATURE_BASIC_INTERACTION_RADIUS,
     AGENT_FEATURE_CLASS_ID,
-    AGENT_FEATURE_MOVEMENT_SPEED,
+    AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED,
     AGENT_FEATURE_OBSERVATION_RADIUS,
     AGENT_FEATURE_RADIUS,
     AGENT_FEATURE_TEAM_ID,
@@ -104,43 +107,55 @@ class _CombatStateFields(TypedDict):
     """Keyword fields for inert combat state in test EnvState constructors."""
 
     current_health: Array
-    max_health: Array
     ultimate_cooldowns: Array
-    slow_multipliers: Array
     slow_durations: Array
     stun_durations: Array
-    anti_heal_multipliers: Array
-    anti_heal_durations: Array
-    damage_amplification_multipliers: Array
-    damage_amplification_durations: Array
-    blessing_of_freedom_durations: Array
+    rogue_poison_anti_heal_durations: Array
+    mage_burst_damage_amplification_durations: Array
+    priest_blessing_of_freedom_slow_floor_durations: Array
 
 
 def _inert_combat_state_fields() -> _CombatStateFields:
     """Return neutral combat state fields for direct EnvState constructors."""
     return {
         "current_health": jnp.zeros(shape=(MAX_AGENT_SLOTS,), dtype=jnp.float32),
-        "max_health": jnp.zeros(shape=(MAX_AGENT_SLOTS,), dtype=jnp.float32),
         "ultimate_cooldowns": jnp.zeros(shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32),
-        "slow_multipliers": jnp.ones(
-            shape=(MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.float32
-        ),
         "slow_durations": jnp.zeros(
             shape=(MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.int32
         ),
         "stun_durations": jnp.zeros(
             shape=(MAX_AGENT_SLOTS, NUM_STUN_CHANNELS), dtype=jnp.int32
         ),
-        "anti_heal_multipliers": jnp.ones(shape=(MAX_AGENT_SLOTS,), dtype=jnp.float32),
-        "anti_heal_durations": jnp.zeros(shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32),
-        "damage_amplification_multipliers": jnp.ones(
-            shape=(MAX_AGENT_SLOTS,), dtype=jnp.float32
-        ),
-        "damage_amplification_durations": jnp.zeros(
+        "rogue_poison_anti_heal_durations": jnp.zeros(
             shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32
         ),
-        "blessing_of_freedom_durations": jnp.zeros(
+        "mage_burst_damage_amplification_durations": jnp.zeros(
             shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
+        "priest_blessing_of_freedom_slow_floor_durations": jnp.zeros(
+            shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
+    }
+
+
+def _non_inert_combat_state_fields(state: EnvState) -> _CombatStateFields:
+    """Return deliberately non-default combat fields for preservation tests."""
+    return {
+        "current_health": state.current_health.at[0].set(12.5),
+        "ultimate_cooldowns": state.ultimate_cooldowns.at[0].set(7).at[5].set(3),
+        "slow_durations": state.slow_durations.at[0, SLOW_CHANNEL_HUNTER_BASIC]
+        .set(1)
+        .at[5, SLOW_CHANNEL_ROGUE_POISON]
+        .set(5),
+        "stun_durations": state.stun_durations.at[1, STUN_CHANNEL_HUNTER_TRAP].set(4),
+        "rogue_poison_anti_heal_durations": (
+            state.rogue_poison_anti_heal_durations.at[5].set(4)
+        ),
+        "mage_burst_damage_amplification_durations": (
+            state.mage_burst_damage_amplification_durations.at[0].set(5)
+        ),
+        "priest_blessing_of_freedom_slow_floor_durations": (
+            state.priest_blessing_of_freedom_slow_floor_durations.at[6].set(1)
         ),
     }
 
@@ -183,27 +198,16 @@ def _config(
         map_width=20.0,
         map_height=12.0,
         obstacles=_empty_obstacles() if obstacles is None else obstacles,
-        initial_class_ids=_CANONICAL_INITIAL_CLASS_IDS,
+        agent_profile=resolve_agent_profile(
+            _CANONICAL_INITIAL_CLASS_IDS,
+            jnp.asarray((team_size, team_size), dtype=jnp.int32),
+        ),
     )
-
-
-def _expected_active_mask(team_size: int) -> Array:
-    """Return the fixed-slot active mask for a symmetric two-team task."""
-    indices = jnp.arange(MAX_AGENT_SLOTS)
-    team_0_active = indices < team_size
-    team_1_active = (indices >= MAX_AGENTS_PER_TEAM) & (
-        indices < MAX_AGENTS_PER_TEAM + team_size
-    )
-    return jnp.logical_or(team_0_active, team_1_active)
 
 
 def _expected_resolved_class_ids(config: EnvConfig) -> Array:
     """Return reset class IDs after inactive slots are neutralized."""
-    return jnp.where(
-        _expected_active_mask(config.team_size),
-        config.initial_class_ids,
-        CLASS_NEUTRAL,
-    ).astype(jnp.int32)
+    return config.agent_profile.class_ids
 
 
 def _zero_action() -> Action:
@@ -273,44 +277,14 @@ def _assert_state_contract(state: EnvState) -> None:
     )
     assert state.agent_positions.dtype == jnp.float32
 
-    assert state.agent_radii.shape == (MAX_AGENT_SLOTS,)
-    assert state.agent_radii.dtype == jnp.float32
-
-    assert state.team_ids.shape == (MAX_AGENT_SLOTS,)
-    assert state.team_ids.dtype == jnp.int32
-
-    assert state.class_ids.shape == (MAX_AGENT_SLOTS,)
-    assert state.class_ids.dtype == jnp.int32
-
-    assert state.movement_speeds.shape == (MAX_AGENT_SLOTS,)
-    assert state.movement_speeds.dtype == jnp.float32
-
-    assert state.observation_radii.shape == (MAX_AGENT_SLOTS,)
-    assert state.observation_radii.dtype == jnp.float32
-
-    assert state.basic_interaction_radii.shape == (MAX_AGENT_SLOTS,)
-    assert state.basic_interaction_radii.dtype == jnp.float32
-
-    assert state.ultimate_interaction_radii.shape == (MAX_AGENT_SLOTS,)
-    assert state.ultimate_interaction_radii.dtype == jnp.float32
-
-    assert state.active_mask.shape == (MAX_AGENT_SLOTS,)
-    assert state.active_mask.dtype == bool
-
     assert state.alive_mask.shape == (MAX_AGENT_SLOTS,)
     assert state.alive_mask.dtype == bool
 
     assert state.current_health.shape == (MAX_AGENT_SLOTS,)
     assert state.current_health.dtype == jnp.float32
 
-    assert state.max_health.shape == (MAX_AGENT_SLOTS,)
-    assert state.max_health.dtype == jnp.float32
-
     assert state.ultimate_cooldowns.shape == (MAX_AGENT_SLOTS,)
     assert state.ultimate_cooldowns.dtype == jnp.int32
-
-    assert state.slow_multipliers.shape == (MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS)
-    assert state.slow_multipliers.dtype == jnp.float32
 
     assert state.slow_durations.shape == (MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS)
     assert state.slow_durations.dtype == jnp.int32
@@ -318,33 +292,26 @@ def _assert_state_contract(state: EnvState) -> None:
     assert state.stun_durations.shape == (MAX_AGENT_SLOTS, NUM_STUN_CHANNELS)
     assert state.stun_durations.dtype == jnp.int32
 
-    assert state.anti_heal_multipliers.shape == (MAX_AGENT_SLOTS,)
-    assert state.anti_heal_multipliers.dtype == jnp.float32
+    assert state.rogue_poison_anti_heal_durations.shape == (MAX_AGENT_SLOTS,)
+    assert state.rogue_poison_anti_heal_durations.dtype == jnp.int32
 
-    assert state.anti_heal_durations.shape == (MAX_AGENT_SLOTS,)
-    assert state.anti_heal_durations.dtype == jnp.int32
+    assert state.mage_burst_damage_amplification_durations.shape == (MAX_AGENT_SLOTS,)
+    assert state.mage_burst_damage_amplification_durations.dtype == jnp.int32
 
-    assert state.damage_amplification_multipliers.shape == (MAX_AGENT_SLOTS,)
-    assert state.damage_amplification_multipliers.dtype == jnp.float32
-
-    assert state.damage_amplification_durations.shape == (MAX_AGENT_SLOTS,)
-    assert state.damage_amplification_durations.dtype == jnp.int32
-
-    assert state.blessing_of_freedom_durations.shape == (MAX_AGENT_SLOTS,)
-    assert state.blessing_of_freedom_durations.dtype == jnp.int32
+    assert state.priest_blessing_of_freedom_slow_floor_durations.shape == (
+        MAX_AGENT_SLOTS,
+    )
+    assert state.priest_blessing_of_freedom_slow_floor_durations.dtype == jnp.int32
 
 
 def _assert_effect_state_is_inert(state: EnvState) -> None:
     """Assert reset starts cooldown and status effect state inert."""
     assert jnp.all(state.ultimate_cooldowns == 0)
-    assert jnp.all(state.slow_multipliers == 1.0)
     assert jnp.all(state.slow_durations == 0)
     assert jnp.all(state.stun_durations == 0)
-    assert jnp.all(state.anti_heal_multipliers == 1.0)
-    assert jnp.all(state.anti_heal_durations == 0)
-    assert jnp.all(state.damage_amplification_multipliers == 1.0)
-    assert jnp.all(state.damage_amplification_durations == 0)
-    assert jnp.all(state.blessing_of_freedom_durations == 0)
+    assert jnp.all(state.rogue_poison_anti_heal_durations == 0)
+    assert jnp.all(state.mage_burst_damage_amplification_durations == 0)
+    assert jnp.all(state.priest_blessing_of_freedom_slow_floor_durations == 0)
 
 
 def _assert_observation_contract(observation: Observation) -> None:
@@ -504,14 +471,14 @@ def test_static_shape_constants_are_consistent() -> None:
         MOVE_SOUTHWEST,
     )
 
-    assert SELF_FEATURES == 16
-    assert UNIT_FEATURES == 16
+    assert SELF_FEATURES == 54
+    assert UNIT_FEATURES == 54
     assert SELF_FEATURES == UNIT_FEATURES
     assert CLASS_NEUTRAL == 0
     assert NUM_SLOW_CHANNELS == 3
     assert tuple(range(NUM_SLOW_CHANNELS)) == (
-        SLOW_CHANNEL_HUNTER_BASIC,
         SLOW_CHANNEL_WARRIOR_CHARGE,
+        SLOW_CHANNEL_HUNTER_BASIC,
         SLOW_CHANNEL_ROGUE_POISON,
     )
     assert NUM_STUN_CHANNELS == 3
@@ -528,12 +495,19 @@ def test_static_shape_constants_are_consistent() -> None:
         AGENT_FEATURE_ACTIVE,
         AGENT_FEATURE_ALIVE,
         AGENT_FEATURE_CLASS_ID,
-        AGENT_FEATURE_MOVEMENT_SPEED,
+        AGENT_FEATURE_BASE_MOVEMENT_SPEED,
+        AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED,
         AGENT_FEATURE_OBSERVATION_RADIUS,
         AGENT_FEATURE_BASIC_INTERACTION_RADIUS,
         AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS,
     )
-    assert shared_agent_feature_indices == tuple(range(11))
+    assert shared_agent_feature_indices == tuple(range(12))
+    all_agent_feature_indices = sorted(
+        value
+        for name, value in vars(core_types).items()
+        if name.startswith("AGENT_FEATURE_") and isinstance(value, int)
+    )
+    assert all_agent_feature_indices == list(range(SELF_FEATURES))
     assert AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS < SELF_FEATURES
     assert AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS < UNIT_FEATURES
     assert MAX_OBJECTIVE_SLOTS == 8
@@ -564,9 +538,11 @@ def test_env_config_stores_static_episode_settings() -> None:
     assert env_config.obstacles.shape == (MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES)
     assert env_config.obstacles.dtype == jnp.float32
     assert jnp.array_equal(env_config.obstacles, obstacles)
-    assert env_config.initial_class_ids.shape == (MAX_AGENT_SLOTS,)
-    assert env_config.initial_class_ids.dtype == jnp.int32
-    assert jnp.array_equal(env_config.initial_class_ids, _CANONICAL_INITIAL_CLASS_IDS)
+    assert env_config.agent_profile.class_ids.shape == (MAX_AGENT_SLOTS,)
+    assert env_config.agent_profile.class_ids.dtype == jnp.int32
+    assert jnp.array_equal(
+        env_config.agent_profile.class_ids, _CANONICAL_INITIAL_CLASS_IDS
+    )
 
 
 def test_env_state_stores_slot_aligned_arrays() -> None:
@@ -575,23 +551,12 @@ def test_env_state_stores_slot_aligned_arrays() -> None:
         agent_positions=jnp.zeros(
             shape=(MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS), dtype=jnp.float32
         ),
-        agent_radii=jnp.ones(shape=(MAX_AGENT_SLOTS,), dtype=jnp.float32),
-        team_ids=jnp.ones(shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32),
-        class_ids=jnp.zeros(shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32),
-        movement_speeds=jnp.ones(shape=(MAX_AGENT_SLOTS,), dtype=jnp.float32),
-        observation_radii=jnp.ones(shape=(MAX_AGENT_SLOTS,), dtype=jnp.float32),
-        basic_interaction_radii=jnp.ones(shape=(MAX_AGENT_SLOTS,), dtype=jnp.float32),
-        ultimate_interaction_radii=jnp.ones(
-            shape=(MAX_AGENT_SLOTS,), dtype=jnp.float32
-        ),
-        active_mask=jnp.ones(shape=(MAX_AGENT_SLOTS,), dtype=bool),
         alive_mask=jnp.ones(shape=(MAX_AGENT_SLOTS,), dtype=bool),
         **_inert_combat_state_fields(),
     )
 
     _assert_state_contract(env_state)
     assert jnp.all(env_state.current_health == 0.0)
-    assert jnp.all(env_state.max_health == 0.0)
     _assert_effect_state_is_inert(env_state)
     state_fields = set(EnvState._fields)
     assert "movement_speed" not in state_fields
@@ -662,35 +627,36 @@ def test_reset_returns_fixed_shape_core_outputs(team_size: int) -> None:
     key = jax.random.key(42)
 
     state, observation, action_mask, info = reset(config, key)
+    profile = config.agent_profile
 
     _assert_state_contract(state)
     _assert_effect_state_is_inert(state)
     assert jnp.array_equal(state.step_count, jnp.array(0, dtype=jnp.int32))
     expected_class_ids = _expected_resolved_class_ids(config)
-    assert jnp.array_equal(state.class_ids, expected_class_ids)
+    assert jnp.array_equal(profile.class_ids, expected_class_ids)
     assert jnp.array_equal(
-        state.agent_radii, combat.BODY_RADIUS_BY_CLASS[expected_class_ids]
+        profile.agent_radii, combat.BODY_RADIUS_BY_CLASS[expected_class_ids]
     )
     assert jnp.array_equal(
-        state.movement_speeds,
-        combat.MOVEMENT_SPEED_BY_CLASS[expected_class_ids],
+        profile.base_movement_speeds,
+        combat.BASE_MOVEMENT_SPEED_BY_CLASS[expected_class_ids],
     )
     assert jnp.array_equal(
-        state.observation_radii,
+        profile.observation_radii,
         combat.OBSERVATION_RADIUS_BY_CLASS[expected_class_ids],
     )
     assert jnp.array_equal(
-        state.basic_interaction_radii,
+        profile.basic_interaction_radii,
         combat.BASIC_INTERACTION_RADIUS_BY_CLASS[expected_class_ids],
     )
     assert jnp.array_equal(
-        state.ultimate_interaction_radii,
+        profile.ultimate_interaction_radii,
         combat.ULTIMATE_INTERACTION_RADIUS_BY_CLASS[expected_class_ids],
     )
     assert jnp.array_equal(
-        state.max_health, combat.MAX_HEALTH_BY_CLASS[expected_class_ids]
+        profile.max_health, combat.MAX_HEALTH_BY_CLASS[expected_class_ids]
     )
-    assert jnp.array_equal(state.current_health, state.max_health)
+    assert jnp.array_equal(state.current_health, profile.max_health)
 
     _assert_observation_contract(observation)
     _assert_common_observation_values(
@@ -737,7 +703,7 @@ def test_reset_marks_only_active_team_slots_as_alive_and_actionable(
 
     state, observation, action_mask, _ = reset(config, key)
 
-    assert jnp.array_equal(state.active_mask, expected_active_mask)
+    assert jnp.array_equal(config.agent_profile.active_mask, expected_active_mask)
     assert jnp.array_equal(state.alive_mask, expected_active_mask)
     if inactive_indices.shape[0] > 0:
         assert not jnp.any(observation.ally_visibility_mask[inactive_indices, :])
@@ -752,13 +718,10 @@ def test_reset_marks_only_active_team_slots_as_alive_and_actionable(
 
 def test_reset_preserves_stable_team_id_blocks_for_padded_slots() -> None:
     config = _config(team_size=3, max_steps=10000)
-    key = jax.random.key(42)
 
-    state, _, _, _ = reset(config, key)
+    expected_team_ids = _int_vector((1, 1, 1, 0, 0, 2, 2, 2, 0, 0))
 
-    expected_team_ids = _int_vector((0, 0, 0, 0, 0, 1, 1, 1, 1, 1))
-
-    assert jnp.array_equal(state.team_ids, expected_team_ids)
+    assert jnp.array_equal(config.agent_profile.team_ids, expected_team_ids)
 
 
 def test_reward_stores_one_scalar_per_agent_slot() -> None:
@@ -783,46 +746,50 @@ def test_step_preserves_slot_aligned_state_arrays() -> None:
     config = _config(team_size=3, max_steps=1000)
     key = jax.random.key(42)
     state, _, _, _ = reset(config, key)
+    state = state._replace(**_non_inert_combat_state_fields(state))
 
     next_state, _, _, _, _, _ = step(config, state, _zero_action(), key)
 
     assert jnp.array_equal(next_state.agent_positions, state.agent_positions)
-    assert jnp.array_equal(next_state.agent_radii, state.agent_radii)
-    assert jnp.array_equal(next_state.team_ids, state.team_ids)
-    assert jnp.array_equal(next_state.class_ids, state.class_ids)
-    assert jnp.array_equal(next_state.movement_speeds, state.movement_speeds)
-    assert jnp.array_equal(next_state.observation_radii, state.observation_radii)
-    assert jnp.array_equal(
-        next_state.basic_interaction_radii, state.basic_interaction_radii
-    )
-    assert jnp.array_equal(
-        next_state.ultimate_interaction_radii, state.ultimate_interaction_radii
-    )
-    assert jnp.array_equal(next_state.active_mask, state.active_mask)
     assert jnp.array_equal(next_state.alive_mask, state.alive_mask)
     assert jnp.array_equal(next_state.current_health, state.current_health)
-    assert jnp.array_equal(next_state.max_health, state.max_health)
     assert jnp.array_equal(next_state.ultimate_cooldowns, state.ultimate_cooldowns)
-    assert jnp.array_equal(next_state.slow_multipliers, state.slow_multipliers)
     assert jnp.array_equal(next_state.slow_durations, state.slow_durations)
     assert jnp.array_equal(next_state.stun_durations, state.stun_durations)
     assert jnp.array_equal(
-        next_state.anti_heal_multipliers,
-        state.anti_heal_multipliers,
-    )
-    assert jnp.array_equal(next_state.anti_heal_durations, state.anti_heal_durations)
-    assert jnp.array_equal(
-        next_state.damage_amplification_multipliers,
-        state.damage_amplification_multipliers,
+        next_state.rogue_poison_anti_heal_durations,
+        state.rogue_poison_anti_heal_durations,
     )
     assert jnp.array_equal(
-        next_state.damage_amplification_durations,
-        state.damage_amplification_durations,
+        next_state.mage_burst_damage_amplification_durations,
+        state.mage_burst_damage_amplification_durations,
     )
     assert jnp.array_equal(
-        next_state.blessing_of_freedom_durations,
-        state.blessing_of_freedom_durations,
+        next_state.priest_blessing_of_freedom_slow_floor_durations,
+        state.priest_blessing_of_freedom_slow_floor_durations,
     )
+
+
+def test_zero_health_does_not_trigger_death_rewards_done_or_info() -> None:
+    config = _config(team_size=3, max_steps=1000)
+    key = jax.random.key(42)
+    state, _, _, _ = reset(config, key)
+    state = state._replace(current_health=state.current_health.at[0].set(0.0))
+
+    next_state, _, reward, done_flags, _, info = step(
+        config, state, _zero_action(), key
+    )
+
+    assert jnp.array_equal(next_state.current_health, state.current_health)
+    assert jnp.array_equal(next_state.alive_mask, state.alive_mask)
+    assert jnp.array_equal(
+        reward.rewards, jnp.zeros(shape=(MAX_AGENT_SLOTS,), dtype=jnp.float32)
+    )
+    assert jnp.array_equal(done_flags.terminated, jnp.array(False))
+    assert jnp.array_equal(done_flags.truncated, jnp.array(False))
+    assert jnp.array_equal(done_flags.done, jnp.array(False))
+    assert isinstance(info, Info)
+    assert len(info) == 0
 
 
 def test_step_returns_fixed_shape_core_outputs() -> None:
@@ -939,6 +906,7 @@ def test_step_can_run_in_scanned_rollout() -> None:
     config = _config(team_size=5, max_steps=1000)
     key = jax.random.key(42)
     state, _, _, _ = reset(config, key)
+    state = state._replace(**_non_inert_combat_state_fields(state))
     joint_action = _zero_action()
 
     def _step_wrapper(
@@ -962,3 +930,17 @@ def test_step_can_run_in_scanned_rollout() -> None:
     assert new_state.step_count.dtype == jnp.int32
     assert history.shape == (horizon,)
     assert history.dtype == jnp.int32
+    assert jnp.array_equal(new_state.slow_durations, state.slow_durations)
+    assert jnp.array_equal(new_state.stun_durations, state.stun_durations)
+    assert jnp.array_equal(
+        new_state.rogue_poison_anti_heal_durations,
+        state.rogue_poison_anti_heal_durations,
+    )
+    assert jnp.array_equal(
+        new_state.mage_burst_damage_amplification_durations,
+        state.mage_burst_damage_amplification_durations,
+    )
+    assert jnp.array_equal(
+        new_state.priest_blessing_of_freedom_slow_floor_durations,
+        state.priest_blessing_of_freedom_slow_floor_durations,
+    )

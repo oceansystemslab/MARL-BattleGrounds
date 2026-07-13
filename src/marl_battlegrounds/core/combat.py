@@ -18,7 +18,7 @@ MAX_HEALTH_BY_CLASS = jnp.asarray(
 )
 
 
-MOVEMENT_SPEED_BY_CLASS = jnp.asarray(
+BASE_MOVEMENT_SPEED_BY_CLASS = jnp.asarray(
     [
         0.0,  # neutral
         1.0,  # mage
@@ -143,8 +143,8 @@ WARRIOR_CHARGE_SLOW_DURATION_TICKS = 5
 WARRIOR_CHARGE_STUN_DURATION_TICKS = 1
 
 # Warrior mitigation is the defensive counterpart to Mage amplification.
-WARRIOR_MITIGATION_AURA_RADIUS = 2.0
-WARRIOR_MITIGATION_AURA_MULTIPLIER = 0.85
+WARRIOR_DAMAGE_MITIGATION_AURA_RADIUS = 2.0
+WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER = 0.85
 
 
 # Rogue mechanics.
@@ -185,9 +185,9 @@ def get_max_health_by_class_ids(class_ids: int | Array) -> Array:
     return MAX_HEALTH_BY_CLASS[class_ids]
 
 
-def get_movement_speed_by_class_ids(class_ids: int | Array) -> Array:
+def get_base_movement_speed_by_class_ids(class_ids: int | Array) -> Array:
     """Return movement speed values for one or more class IDs."""
-    return MOVEMENT_SPEED_BY_CLASS[class_ids]
+    return BASE_MOVEMENT_SPEED_BY_CLASS[class_ids]
 
 
 def get_body_radius_by_class_ids(class_ids: int | Array) -> Array:

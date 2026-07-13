@@ -7,6 +7,7 @@ import jax.numpy as jnp
 import pytest
 from jax import Array
 
+from marl_battlegrounds.core.config import resolve_agent_profile
 from marl_battlegrounds.core.env import step
 from marl_battlegrounds.core.geometry import GEOMETRY_TOLERANCE
 from marl_battlegrounds.core.types import (
@@ -62,42 +63,34 @@ class _CombatStateFields(TypedDict):
     """Keyword fields for inert combat state in test EnvState constructors."""
 
     current_health: Array
-    max_health: Array
     ultimate_cooldowns: Array
-    slow_multipliers: Array
     slow_durations: Array
     stun_durations: Array
-    anti_heal_multipliers: Array
-    anti_heal_durations: Array
-    damage_amplification_multipliers: Array
-    damage_amplification_durations: Array
-    blessing_of_freedom_durations: Array
+    rogue_poison_anti_heal_durations: Array
+    mage_burst_damage_amplification_durations: Array
+    priest_blessing_of_freedom_slow_floor_durations: Array
 
 
 def _inert_combat_state_fields() -> _CombatStateFields:
     """Return neutral combat fields for direct EnvState constructors."""
     return {
         "current_health": jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32),
-        "max_health": jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32),
         "ultimate_cooldowns": jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
-        "slow_multipliers": jnp.ones(
-            (MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.float32
-        ),
         "slow_durations": jnp.zeros(
             (MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.int32
         ),
         "stun_durations": jnp.zeros(
             (MAX_AGENT_SLOTS, NUM_STUN_CHANNELS), dtype=jnp.int32
         ),
-        "anti_heal_multipliers": jnp.ones((MAX_AGENT_SLOTS,), dtype=jnp.float32),
-        "anti_heal_durations": jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
-        "damage_amplification_multipliers": jnp.ones(
-            (MAX_AGENT_SLOTS,), dtype=jnp.float32
-        ),
-        "damage_amplification_durations": jnp.zeros(
+        "rogue_poison_anti_heal_durations": jnp.zeros(
             (MAX_AGENT_SLOTS,), dtype=jnp.int32
         ),
-        "blessing_of_freedom_durations": jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        "mage_burst_damage_amplification_durations": jnp.zeros(
+            (MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
+        "priest_blessing_of_freedom_slow_floor_durations": jnp.zeros(
+            (MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
     }
 
 
@@ -187,18 +180,10 @@ def _deterministic_config(
         map_width=map_width,
         map_height=map_height,
         obstacles=_empty_obstacles() if obstacles is None else obstacles,
-        initial_class_ids=jnp.full((MAX_AGENT_SLOTS,), CLASS_NEUTRAL, dtype=jnp.int32),
-    )
-
-
-def _team_ids() -> Array:
-    """Create the canonical fixed-slot team-id vector."""
-    return jnp.concatenate(
-        (
-            jnp.zeros((MAX_AGENTS_PER_TEAM,), dtype=jnp.int32),
-            jnp.ones((MAX_AGENTS_PER_TEAM,), dtype=jnp.int32),
+        agent_profile=resolve_agent_profile(
+            jnp.full((MAX_AGENT_SLOTS,), CLASS_NEUTRAL, dtype=jnp.int32),
+            jnp.asarray((team_size, team_size), dtype=jnp.int32),
         ),
-        axis=0,
     )
 
 
@@ -241,11 +226,6 @@ def _slot_float_vector(
     return values
 
 
-def _neutral_class_ids() -> Array:
-    """Create the placeholder neutral class-id vector."""
-    return jnp.full((MAX_AGENT_SLOTS,), CLASS_NEUTRAL, dtype=jnp.int32)
-
-
 def _mask_with_true_slots(*slots: int) -> Array:
     """Create a slot mask with only selected slots marked true."""
     mask = jnp.zeros((MAX_AGENT_SLOTS,), dtype=bool)
@@ -258,6 +238,7 @@ def _mask_with_true_slots(*slots: int) -> Array:
 
 
 def _state_with_single_active_alive_agent(
+    config: EnvConfig,
     position: Array,
     *,
     radius: float = 0.5,
@@ -266,29 +247,33 @@ def _state_with_single_active_alive_agent(
     effective_basic_interaction_radius: float = 6.0,
     effective_ultimate_interaction_radius: float = 9.0,
     step_count: int = 0,
-) -> EnvState:
-    """Create a valid state with slot 0 active and alive."""
-    return EnvState(
-        step_count=jnp.array(step_count, dtype=jnp.int32),
-        agent_positions=_agent_positions_array_with_rows((0, position)),
+) -> tuple[EnvConfig, EnvState]:
+    """Create an exact config/state pair with only slot 0 participating."""
+    active_mask = _mask_with_true_slots(0)
+    profile = config.agent_profile._replace(
+        active_mask=active_mask,
         agent_radii=_agent_radii_array_with_rows((0, radius)),
-        team_ids=_team_ids(),
-        class_ids=_neutral_class_ids(),
-        movement_speeds=_slot_float_vector(1.0, (0, effective_movement_speed)),
-        observation_radii=_slot_float_vector(8.0, (0, effective_observation_radius)),
+        base_movement_speeds=_slot_float_vector(0.0, (0, effective_movement_speed)),
+        observation_radii=_slot_float_vector(0.0, (0, effective_observation_radius)),
         basic_interaction_radii=_slot_float_vector(
-            6.0, (0, effective_basic_interaction_radius)
+            0.0, (0, effective_basic_interaction_radius)
         ),
         ultimate_interaction_radii=_slot_float_vector(
-            9.0, (0, effective_ultimate_interaction_radius)
+            0.0, (0, effective_ultimate_interaction_radius)
         ),
-        active_mask=_mask_with_true_slots(0),
-        alive_mask=_mask_with_true_slots(0),
+    )
+    config = config._replace(agent_profile=profile)
+    state = EnvState(
+        step_count=jnp.array(step_count, dtype=jnp.int32),
+        agent_positions=_agent_positions_array_with_rows((0, position)),
+        alive_mask=active_mask,
         **_inert_combat_state_fields(),
     )
+    return config, state
 
 
 def _state_with_two_agents(
+    config: EnvConfig,
     agent_a_position: Array,
     agent_b_position: Array,
     agent_a_active_flag: bool = True,
@@ -303,8 +288,8 @@ def _state_with_two_agents(
     effective_basic_interaction_radius: float = 6.0,
     effective_ultimate_interaction_radius: float = 9.0,
     step_count: int = 0,
-) -> EnvState:
-    """Create a valid state with two agents and configurable participation flags."""
+) -> tuple[EnvConfig, EnvState]:
+    """Create an exact config/state pair with two configurable participants."""
     active_mask = jnp.zeros((MAX_AGENT_SLOTS,), dtype=bool)
     alive_mask = jnp.zeros((MAX_AGENT_SLOTS,), dtype=bool)
 
@@ -314,39 +299,41 @@ def _state_with_two_agents(
     active_mask = active_mask.at[1].set(agent_b_active_flag)
     alive_mask = alive_mask.at[1].set(agent_b_alive_flag)
 
-    return EnvState(
+    profile = config.agent_profile._replace(
+        active_mask=active_mask,
+        agent_radii=_agent_radii_array_with_rows((0, radius), (1, radius)),
+        base_movement_speeds=_slot_float_vector(
+            0.0,
+            (0, agent_a_effective_movement_speed),
+            (1, agent_b_effective_movement_speed),
+        ),
+        observation_radii=_slot_float_vector(
+            0.0,
+            (0, effective_observation_radius),
+            (1, effective_observation_radius),
+        ),
+        basic_interaction_radii=_slot_float_vector(
+            0.0,
+            (0, effective_basic_interaction_radius),
+            (1, effective_basic_interaction_radius),
+        ),
+        ultimate_interaction_radii=_slot_float_vector(
+            0.0,
+            (0, effective_ultimate_interaction_radius),
+            (1, effective_ultimate_interaction_radius),
+        ),
+    )
+    config = config._replace(agent_profile=profile)
+    state = EnvState(
         step_count=jnp.array(step_count, dtype=jnp.int32),
         agent_positions=_agent_positions_array_with_rows(
             (0, agent_a_position),
             (1, agent_b_position),
         ),
-        agent_radii=_agent_radii_array_with_rows((0, radius), (1, radius)),
-        team_ids=_team_ids(),
-        class_ids=_neutral_class_ids(),
-        movement_speeds=_slot_float_vector(
-            1.0,
-            (0, agent_a_effective_movement_speed),
-            (1, agent_b_effective_movement_speed),
-        ),
-        observation_radii=_slot_float_vector(
-            8.0,
-            (0, effective_observation_radius),
-            (1, effective_observation_radius),
-        ),
-        basic_interaction_radii=_slot_float_vector(
-            6.0,
-            (0, effective_basic_interaction_radius),
-            (1, effective_basic_interaction_radius),
-        ),
-        ultimate_interaction_radii=_slot_float_vector(
-            9.0,
-            (0, effective_ultimate_interaction_radius),
-            (1, effective_ultimate_interaction_radius),
-        ),
-        active_mask=active_mask,
         alive_mask=alive_mask,
         **_inert_combat_state_fields(),
     )
+    return config, state
 
 
 def _joint_action_with_moves(*rows: tuple[int, int]) -> Action:
@@ -423,30 +410,6 @@ def _assert_state_contract(state: EnvState) -> None:
         ENVIRONMENT_DIMENSIONS,
     )
     assert state.agent_positions.dtype == jnp.float32
-
-    assert state.agent_radii.shape == (MAX_AGENT_SLOTS,)
-    assert state.agent_radii.dtype == jnp.float32
-
-    assert state.team_ids.shape == (MAX_AGENT_SLOTS,)
-    assert state.team_ids.dtype == jnp.int32
-
-    assert state.class_ids.shape == (MAX_AGENT_SLOTS,)
-    assert state.class_ids.dtype == jnp.int32
-
-    assert state.movement_speeds.shape == (MAX_AGENT_SLOTS,)
-    assert state.movement_speeds.dtype == jnp.float32
-
-    assert state.observation_radii.shape == (MAX_AGENT_SLOTS,)
-    assert state.observation_radii.dtype == jnp.float32
-
-    assert state.basic_interaction_radii.shape == (MAX_AGENT_SLOTS,)
-    assert state.basic_interaction_radii.dtype == jnp.float32
-
-    assert state.ultimate_interaction_radii.shape == (MAX_AGENT_SLOTS,)
-    assert state.ultimate_interaction_radii.dtype == jnp.float32
-
-    assert state.active_mask.shape == (MAX_AGENT_SLOTS,)
-    assert state.active_mask.dtype == bool
 
     assert state.alive_mask.shape == (MAX_AGENT_SLOTS,)
     assert state.alive_mask.dtype == bool
@@ -647,7 +610,7 @@ def test_move_stay_preserves_valid_position_in_free_space() -> None:
     config = _deterministic_config()
     key = jax.random.key(42)
     start = jnp.array([10.0, 10.0], dtype=jnp.float32)
-    state = _state_with_single_active_alive_agent(start)
+    config, state = _state_with_single_active_alive_agent(config, start)
     joint_action = _joint_action_with_moves((0, MOVE_STAY))
 
     next_state, *_ = step(config, state, joint_action, key)
@@ -672,8 +635,8 @@ def test_cardinal_moves_update_position_in_free_space(
 ) -> None:
     config = _deterministic_config()
     key = jax.random.key(42)
-    state = _state_with_single_active_alive_agent(
-        jnp.array([10.0, 10.0], dtype=jnp.float32)
+    config, state = _state_with_single_active_alive_agent(
+        config, jnp.array([10.0, 10.0], dtype=jnp.float32)
     )
     joint_action = _joint_action_with_moves((0, move_action))
 
@@ -707,7 +670,8 @@ def test_cardinal_moves_scale_by_effective_state_movement_speed(
 ) -> None:
     config = _deterministic_config()
     key = jax.random.key(42)
-    state = _state_with_single_active_alive_agent(
+    config, state = _state_with_single_active_alive_agent(
+        config,
         jnp.array([10.0, 6.0], dtype=jnp.float32),
         effective_movement_speed=2.5,
     )
@@ -750,7 +714,7 @@ def test_diagonal_moves_are_normalized_in_free_space(
     config = _deterministic_config()
     key = jax.random.key(42)
     start = jnp.array([10.0, 10.0], dtype=jnp.float32)
-    state = _state_with_single_active_alive_agent(start)
+    config, state = _state_with_single_active_alive_agent(config, start)
     joint_action = _joint_action_with_moves((0, move_action))
 
     next_state, *_ = step(config, state, joint_action, key)
@@ -762,7 +726,7 @@ def test_diagonal_moves_are_normalized_in_free_space(
     assert bool(
         jnp.isclose(
             cast(Array, jnp.linalg.norm(displacement)),
-            state.movement_speeds[0],
+            config.agent_profile.base_movement_speeds[0],
             atol=GEOMETRY_TOLERANCE,
             rtol=0.0,
         )
@@ -774,8 +738,8 @@ def test_diagonal_moves_scale_by_effective_state_movement_speed() -> None:
     config = _deterministic_config()
     key = jax.random.key(42)
     start = jnp.array([10.0, 10.0], dtype=jnp.float32)
-    state = _state_with_single_active_alive_agent(
-        start, effective_movement_speed=effective_movement_speed
+    config, state = _state_with_single_active_alive_agent(
+        config, start, effective_movement_speed=effective_movement_speed
     )
     joint_action = _joint_action_with_moves((0, MOVE_NORTHEAST))
 
@@ -800,7 +764,8 @@ def test_same_move_action_uses_per_slot_movement_speeds() -> None:
     key = jax.random.key(42)
     agent_a_start = jnp.array([5.0, 5.0], dtype=jnp.float32)
     agent_b_start = jnp.array([12.0, 5.0], dtype=jnp.float32)
-    state = _state_with_two_agents(
+    config, state = _state_with_two_agents(
+        config,
         agent_a_start,
         agent_b_start,
         agent_a_effective_movement_speed=1.0,
@@ -824,7 +789,9 @@ def test_step_uses_state_movement_speed_after_state_exists() -> None:
     config = _deterministic_config()
     key = jax.random.key(42)
     start = jnp.array([5.0, 5.0], dtype=jnp.float32)
-    state = _state_with_single_active_alive_agent(start, effective_movement_speed=1.25)
+    config, state = _state_with_single_active_alive_agent(
+        config, start, effective_movement_speed=1.25
+    )
     joint_action = _joint_action_with_moves((0, MOVE_EAST))
 
     next_state, *_ = step(config, state, joint_action, key)
@@ -838,8 +805,8 @@ def test_step_uses_state_movement_speed_after_state_exists() -> None:
 def test_step_preserves_placeholder_contracts_after_non_stay_movement() -> None:
     config = _deterministic_config(max_steps=10)
     key = jax.random.key(42)
-    state = _state_with_single_active_alive_agent(
-        jnp.array([10.0, 10.0], dtype=jnp.float32)
+    config, state = _state_with_single_active_alive_agent(
+        config, jnp.array([10.0, 10.0], dtype=jnp.float32)
     )
     joint_action = _joint_action_with_moves((0, MOVE_EAST))
 
@@ -851,18 +818,6 @@ def test_step_preserves_placeholder_contracts_after_non_stay_movement() -> None:
     )
 
     assert next_state.step_count == state.step_count + 1
-    assert jnp.array_equal(next_state.agent_radii, state.agent_radii)
-    assert jnp.array_equal(next_state.team_ids, state.team_ids)
-    assert jnp.array_equal(next_state.class_ids, state.class_ids)
-    assert jnp.array_equal(next_state.movement_speeds, state.movement_speeds)
-    assert jnp.array_equal(next_state.observation_radii, state.observation_radii)
-    assert jnp.array_equal(
-        next_state.basic_interaction_radii, state.basic_interaction_radii
-    )
-    assert jnp.array_equal(
-        next_state.ultimate_interaction_radii, state.ultimate_interaction_radii
-    )
-    assert jnp.array_equal(next_state.active_mask, state.active_mask)
     assert jnp.array_equal(next_state.alive_mask, state.alive_mask)
     _assert_state_contract(next_state)
     _assert_observation_contract(obs)
@@ -876,7 +831,8 @@ def test_step_preserves_placeholder_contracts_after_non_stay_movement() -> None:
 def test_step_truncates_after_incremented_step_count() -> None:
     config = _deterministic_config(max_steps=1)
     key = jax.random.key(42)
-    state = _state_with_single_active_alive_agent(
+    config, state = _state_with_single_active_alive_agent(
+        config,
         jnp.array([10.0, 10.0], dtype=jnp.float32),
         step_count=0,
     )
@@ -906,7 +862,8 @@ def test_step_projects_active_alive_agent_inside_bounds(
     key = jax.random.key(42)
 
     agent_radius = 0.5
-    state = _state_with_single_active_alive_agent(
+    config, state = _state_with_single_active_alive_agent(
+        config,
         start,
         radius=agent_radius,
     )
@@ -932,7 +889,8 @@ def test_step_projects_active_alive_agent_outside_active_pillar() -> None:
     key = jax.random.key(42)
 
     agent_radius = 0.5
-    state = _state_with_single_active_alive_agent(
+    config, state = _state_with_single_active_alive_agent(
+        config,
         jnp.array([10.0, 10.0], dtype=jnp.float32),
         radius=agent_radius,
     )
@@ -960,7 +918,8 @@ def test_step_projects_active_alive_agent_outside_active_wall() -> None:
     key = jax.random.key(42)
 
     agent_radius = 0.5
-    state = _state_with_single_active_alive_agent(
+    config, state = _state_with_single_active_alive_agent(
+        config,
         jnp.array([10.0, 10.0], dtype=jnp.float32),
         radius=agent_radius,
     )
@@ -986,8 +945,8 @@ def test_step_ignores_inactive_obstacle_rows() -> None:
     config = _deterministic_config(obstacles=obstacles)
     key = jax.random.key(42)
 
-    state = _state_with_single_active_alive_agent(
-        jnp.array([10.0, 10.0], dtype=jnp.float32)
+    config, state = _state_with_single_active_alive_agent(
+        config, jnp.array([10.0, 10.0], dtype=jnp.float32)
     )
     joint_action = _joint_action_with_moves((0, MOVE_EAST))
 
@@ -1010,8 +969,8 @@ def test_step_ignores_inactive_wall_rows() -> None:
     config = _deterministic_config(obstacles=obstacles)
     key = jax.random.key(42)
 
-    state = _state_with_single_active_alive_agent(
-        jnp.array([10.0, 10.0], dtype=jnp.float32)
+    config, state = _state_with_single_active_alive_agent(
+        config, jnp.array([10.0, 10.0], dtype=jnp.float32)
     )
     joint_action = _joint_action_with_moves((0, MOVE_EAST))
 
@@ -1035,7 +994,8 @@ def test_step_uses_active_obstacles_in_late_padded_slots() -> None:
     key = jax.random.key(42)
 
     agent_radius = 0.5
-    state = _state_with_single_active_alive_agent(
+    config, state = _state_with_single_active_alive_agent(
+        config,
         jnp.array([10.0, 10.0], dtype=jnp.float32),
         radius=agent_radius,
     )
@@ -1064,7 +1024,8 @@ def test_step_projects_active_alive_agent_outside_rotated_wall() -> None:
     key = jax.random.key(42)
 
     agent_radius = 0.5
-    state = _state_with_single_active_alive_agent(
+    config, state = _state_with_single_active_alive_agent(
+        config,
         jnp.array([10.0, 10.0], dtype=jnp.float32),
         radius=agent_radius,
     )
@@ -1089,7 +1050,8 @@ def test_inactive_slots_with_nonstay_action_preserve_original_positions() -> Non
     agent_a_position = jnp.array([10.0, 10.0], dtype=jnp.float32)
     agent_b_position = jnp.array([12.0, 10.0], dtype=jnp.float32)
 
-    state = _state_with_two_agents(
+    config, state = _state_with_two_agents(
+        config,
         agent_a_position,
         agent_b_position,
         agent_a_active_flag=False,
@@ -1116,7 +1078,8 @@ def test_dead_slots_with_nonstay_action_preserve_original_positions() -> None:
     agent_a_position = jnp.array([10.0, 10.0], dtype=jnp.float32)
     agent_b_position = jnp.array([12.0, 10.0], dtype=jnp.float32)
 
-    state = _state_with_two_agents(
+    config, state = _state_with_two_agents(
+        config,
         agent_a_position,
         agent_b_position,
         agent_a_active_flag=True,
@@ -1154,7 +1117,8 @@ def test_active_alive_slot_moves_while_nonparticipant_neighbor_is_preserved(
     agent_a_position = jnp.array([10.0, 10.0], dtype=jnp.float32)
     agent_b_position = jnp.array([11.0, 10.0], dtype=jnp.float32)
 
-    state = _state_with_two_agents(
+    config, state = _state_with_two_agents(
+        config,
         agent_a_position,
         agent_b_position,
         agent_a_active_flag=True,
@@ -1193,6 +1157,24 @@ def test_active_alive_overlapping_agents_separate_in_free_space(
     radius = 0.5
     agent_a_position = jnp.array([10.0, 10.0], dtype=jnp.float32)
     blocker_position = jnp.array([11.25, 10.0], dtype=jnp.float32)
+    active_mask = _mask_with_true_slots(0, blocker_slot)
+    config = config._replace(
+        agent_profile=config.agent_profile._replace(
+            active_mask=active_mask,
+            agent_radii=_agent_radii_array_with_rows(
+                (0, radius),
+                (blocker_slot, radius),
+            ),
+            base_movement_speeds=_slot_float_vector(
+                0.0,
+                (0, 1.0),
+                (blocker_slot, 1.0),
+            ),
+            observation_radii=_slot_float_vector(0.0),
+            basic_interaction_radii=_slot_float_vector(0.0),
+            ultimate_interaction_radii=_slot_float_vector(0.0),
+        )
+    )
 
     state = EnvState(
         step_count=jnp.array(0, dtype=jnp.int32),
@@ -1200,18 +1182,7 @@ def test_active_alive_overlapping_agents_separate_in_free_space(
             (0, agent_a_position),
             (blocker_slot, blocker_position),
         ),
-        agent_radii=_agent_radii_array_with_rows(
-            (0, radius),
-            (blocker_slot, radius),
-        ),
-        team_ids=_team_ids(),
-        class_ids=_neutral_class_ids(),
-        movement_speeds=_slot_float_vector(1.0),
-        observation_radii=_slot_float_vector(8.0),
-        basic_interaction_radii=_slot_float_vector(6.0),
-        ultimate_interaction_radii=_slot_float_vector(9.0),
-        active_mask=_mask_with_true_slots(0, blocker_slot),
-        alive_mask=_mask_with_true_slots(0, blocker_slot),
+        alive_mask=active_mask,
         **_inert_combat_state_fields(),
     )
 
@@ -1241,7 +1212,8 @@ def test_step_can_be_jit_compiled_with_non_stay_movement() -> None:
     agent_a_start = jnp.array([5.0, 5.0], dtype=jnp.float32)
     agent_b_start = jnp.array([15.0, 5.0], dtype=jnp.float32)
 
-    state = _state_with_two_agents(
+    config, state = _state_with_two_agents(
+        config,
         agent_a_start,
         agent_b_start,
         agent_a_active_flag=True,
@@ -1282,7 +1254,8 @@ def test_step_can_run_non_stay_movement_in_jitted_scanned_rollout() -> None:
     agent_a_start = jnp.array([5.0, 5.0], dtype=jnp.float32)
     agent_b_start = jnp.array([15.0, 5.0], dtype=jnp.float32)
 
-    state = _state_with_two_agents(
+    config, state = _state_with_two_agents(
+        config,
         agent_a_start,
         agent_b_start,
         agent_a_active_flag=True,

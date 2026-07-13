@@ -5,6 +5,10 @@ from typing import NamedTuple
 import jax.numpy as jnp
 from jax import Array
 
+# Prevents association between “Team A” and padding.
+NO_TEAM_ID = 0
+TEAM_A_ID = 1
+TEAM_B_ID = 2
 NUM_MOVE_ACTIONS = 9
 NUM_ULTIMATE_ACTIONS = 2
 NUM_TEAMS = 2
@@ -42,8 +46,8 @@ HUNTER_CLASS_ID = 3
 ROGUE_CLASS_ID = 4
 PRIEST_CLASS_ID = 5
 NUM_CLASSES = 6
-SELF_FEATURES = 16
-UNIT_FEATURES = 16
+SELF_FEATURES = 54
+UNIT_FEATURES = 54
 MAX_OBJECTIVE_SLOTS = 8
 OBJECTIVE_FEATURES = 12
 CONTEXT_FEATURES = 8
@@ -60,14 +64,86 @@ AGENT_FEATURE_TEAM_ID = 3
 AGENT_FEATURE_ACTIVE = 4
 AGENT_FEATURE_ALIVE = 5
 AGENT_FEATURE_CLASS_ID = 6
-AGENT_FEATURE_MOVEMENT_SPEED = 7
-AGENT_FEATURE_OBSERVATION_RADIUS = 8
-AGENT_FEATURE_BASIC_INTERACTION_RADIUS = 9
-AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS = 10
+AGENT_FEATURE_BASE_MOVEMENT_SPEED = 7
+AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED = 8
+AGENT_FEATURE_OBSERVATION_RADIUS = 9
+AGENT_FEATURE_BASIC_INTERACTION_RADIUS = 10
+AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS = 11
+AGENT_FEATURE_CURRENT_HEALTH = 12
+AGENT_FEATURE_MAX_HEALTH = 13
+AGENT_FEATURE_ULTIMATE_COOLDOWN_REMAINING = 14
+
+# Effect features use EFFECT_CLASS_ABILITY_TYPE so adjacent columns group by
+# tactical meaning while keeping the source explicit for researchers.
+
+# Agent is under these slows. Durations use 0 while inactive; multipliers use
+# the multiplicative identity 1.0 while inactive.
+AGENT_FEATURE_SLOW_WARRIOR_CHARGE_DURATION = 15
+AGENT_FEATURE_SLOW_HUNTER_BASIC_DURATION = 16
+AGENT_FEATURE_SLOW_ROGUE_POISON_DURATION = 17
+AGENT_FEATURE_SLOW_WARRIOR_CHARGE_MULTIPLIER = 18
+AGENT_FEATURE_SLOW_HUNTER_BASIC_MULTIPLIER = 19
+AGENT_FEATURE_SLOW_ROGUE_POISON_MULTIPLIER = 20
+
+# Agent is under these stuns: 0 when not active.
+# Stuns do not stack, they run concurrently.
+AGENT_FEATURE_STUN_WARRIOR_CHARGE_DURATION = 21
+AGENT_FEATURE_STUN_HUNTER_TRAP_DURATION = 22
+AGENT_FEATURE_STUN_ROGUE_POISON_DURATION = 23
+
+# Agent is under this debuff. Duration uses 0 and multiplier uses 1.0 while
+# inactive.
+AGENT_FEATURE_ANTI_HEAL_ROGUE_POISON_DURATION = 24
+AGENT_FEATURE_ANTI_HEAL_ROGUE_POISON_MULTIPLIER = 25
+
+# Agent is under this buff. 0 when burst not active.
+AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_BURST_DURATION = 26
+
+# Agent is under this buff.
+AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_DURATION = 27
+AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_FRACTION = 28
+
+# Everything below is no longer part of state.
+# Agent is under these aura modifiers.
+AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_AURA_MULTIPLIER = 29
+AGENT_FEATURE_DAMAGE_MITIGATION_WARRIOR_AURA_MULTIPLIER = 30
+
+# Describe row-local capabilities of the agent. Capability multipliers use
+# 0.0 for absence; they are payload descriptors, not active effective values.
+AGENT_FEATURE_CAPABILITY_BASIC_DAMAGE = 31
+AGENT_FEATURE_CAPABILITY_BASIC_HEALING = 32
+AGENT_FEATURE_CAPABILITY_ULTIMATE_COOLDOWN_DURATION = 33
+
+AGENT_FEATURE_CAPABILITY_SLOW_WARRIOR_CHARGE_DURATION = 34
+AGENT_FEATURE_CAPABILITY_SLOW_HUNTER_BASIC_DURATION = 35
+AGENT_FEATURE_CAPABILITY_SLOW_ROGUE_POISON_DURATION = 36
+AGENT_FEATURE_CAPABILITY_SLOW_WARRIOR_CHARGE_MULTIPLIER = 37
+AGENT_FEATURE_CAPABILITY_SLOW_HUNTER_BASIC_MULTIPLIER = 38
+AGENT_FEATURE_CAPABILITY_SLOW_ROGUE_POISON_MULTIPLIER = 39
+
+AGENT_FEATURE_CAPABILITY_STUN_WARRIOR_CHARGE_DURATION = 40
+AGENT_FEATURE_CAPABILITY_STUN_HUNTER_TRAP_DURATION = 41
+AGENT_FEATURE_CAPABILITY_STUN_ROGUE_POISON_DURATION = 42
+
+AGENT_FEATURE_CAPABILITY_ANTI_HEAL_ROGUE_POISON_DURATION = 43
+AGENT_FEATURE_CAPABILITY_ANTI_HEAL_ROGUE_POISON_MULTIPLIER = 44
+
+AGENT_FEATURE_CAPABILITY_DAMAGE_AMPLIFICATION_MAGE_BURST_DURATION = 45
+AGENT_FEATURE_CAPABILITY_DAMAGE_AMPLIFICATION_MAGE_BURST_MULTIPLIER = 46
+
+AGENT_FEATURE_CAPABILITY_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_DURATION = 47
+AGENT_FEATURE_CAPABILITY_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_FRACTION = 48
+
+AGENT_FEATURE_CAPABILITY_DAMAGE_AMPLIFICATION_MAGE_AURA_RADIUS = 49
+AGENT_FEATURE_CAPABILITY_DAMAGE_AMPLIFICATION_MAGE_AURA_MULTIPLIER = 50
+AGENT_FEATURE_CAPABILITY_DAMAGE_MITIGATION_WARRIOR_AURA_RADIUS = 51
+AGENT_FEATURE_CAPABILITY_DAMAGE_MITIGATION_WARRIOR_AURA_MULTIPLIER = 52
+
+AGENT_FEATURE_CAPABILITY_HEALING_PRIEST_ULTIMATE_AMOUNT = 53
 
 NUM_SLOW_CHANNELS = 3
-SLOW_CHANNEL_HUNTER_BASIC = 0
-SLOW_CHANNEL_WARRIOR_CHARGE = 1
+SLOW_CHANNEL_WARRIOR_CHARGE = 0
+SLOW_CHANNEL_HUNTER_BASIC = 1
 SLOW_CHANNEL_ROGUE_POISON = 2
 
 NUM_STUN_CHANNELS = 3
@@ -76,14 +152,26 @@ STUN_CHANNEL_HUNTER_TRAP = 1
 STUN_CHANNEL_ROGUE_POISON = 2
 
 
+class ResolvedAgentProfile(NamedTuple):
+    """Immutable fixed-slot facts resolved before ordinary reset."""
+
+    class_ids: Array
+    team_ids: Array
+    active_mask: Array
+    agent_radii: Array
+    base_movement_speeds: Array
+    observation_radii: Array
+    basic_interaction_radii: Array
+    ultimate_interaction_radii: Array
+    max_health: Array
+
+
 class EnvConfig(NamedTuple):
     """Static episode settings and reset inputs.
 
     Static map geometry belongs here because Milestone 4 obstacles do not change
-    during an episode. Initial roster data belongs here until scenario/training
-    configuration grows a dedicated reset-input layer. After ``EnvState``
-    exists, per-slot state arrays are the simulator truth for transition,
-    observation, and masks.
+    during an episode. ``agent_profile`` contains the complete immutable
+    fixed-slot profile resolved before ordinary reset.
     """
 
     team_size: int
@@ -91,40 +179,27 @@ class EnvConfig(NamedTuple):
     map_width: float
     map_height: float
     obstacles: Array
-    initial_class_ids: Array
+    agent_profile: ResolvedAgentProfile
 
 
 class EnvState(NamedTuple):
     """Dynamic slot-aligned simulator state carried through transitions.
 
-    Current stat arrays are authoritative per-slot effective values. Future
-    class catalogs and status systems may derive or update these values, but
-    step, observation, and masks consume the arrays here rather than config
-    defaults.
+    Episode-static facts live in ``EnvConfig.agent_profile``. Status state keeps
+    only source-specific remaining durations; fixed magnitudes are derived by
+    ``core.combat.derive_status_magnitudes``.
     """
 
     step_count: Array
     agent_positions: Array
-    agent_radii: Array
-    team_ids: Array
-    class_ids: Array
-    movement_speeds: Array
-    observation_radii: Array
-    basic_interaction_radii: Array
-    ultimate_interaction_radii: Array
-    active_mask: Array
     alive_mask: Array
     current_health: Array
-    max_health: Array
     ultimate_cooldowns: Array
-    slow_multipliers: Array
     slow_durations: Array
     stun_durations: Array
-    anti_heal_multipliers: Array
-    anti_heal_durations: Array
-    damage_amplification_multipliers: Array
-    damage_amplification_durations: Array
-    blessing_of_freedom_durations: Array
+    rogue_poison_anti_heal_durations: Array
+    mage_burst_damage_amplification_durations: Array
+    priest_blessing_of_freedom_slow_floor_durations: Array
 
 
 class Action(NamedTuple):

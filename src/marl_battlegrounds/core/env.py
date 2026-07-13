@@ -7,43 +7,55 @@ import jax.numpy as jnp
 from jax import Array
 
 from marl_battlegrounds.core.combat import (
-    get_basic_interaction_radius_by_class_ids,
-    get_body_radius_by_class_ids,
-    get_max_health_by_class_ids,
-    get_movement_speed_by_class_ids,
-    get_observation_radius_by_class_ids,
-    get_ultimate_interaction_radius_by_class_ids,
+    BASIC_DAMAGE_BY_CLASS,
+    BASIC_HEALING_BY_CLASS,
+    GLOBAL_SLOW_FLOOR,
+    HUNTER_BASIC_SLOW_DURATION_TICKS,
+    HUNTER_BASIC_SLOW_MULTIPLIER,
+    HUNTER_TRAP_STUN_DURATION_TICKS,
+    MAGE_DAMAGE_AURA_MULTIPLIER,
+    MAGE_DAMAGE_AURA_RADIUS,
+    MAGE_ULT_DAMAGE_DURATION_TICKS,
+    MAGE_ULT_DAMAGE_MULTIPLIER,
+    PRIEST_HEAL_SPEED_FLOOR,
+    PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS,
+    PRIEST_ULT_HEAL_AMOUNT,
+    ROGUE_POISON_ANTI_HEAL_DURATION_TICKS,
+    ROGUE_POISON_ANTI_HEAL_MULTIPLIER,
+    ROGUE_POISON_SLOW_DURATION_TICKS,
+    ROGUE_POISON_SLOW_MULTIPLIER,
+    ROGUE_POISON_STUN_DURATION_TICKS,
+    ULTIMATE_COOLDOWN_BY_CLASS,
+    WARRIOR_CHARGE_SLOW_DURATION_TICKS,
+    WARRIOR_CHARGE_SLOW_MULTIPLIER,
+    WARRIOR_CHARGE_STUN_DURATION_TICKS,
+    WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER,
+    WARRIOR_DAMAGE_MITIGATION_AURA_RADIUS,
+    derive_effective_movement_speeds_from_durations,
+    derive_status_magnitudes,
 )
 from marl_battlegrounds.core.geometry import (
     has_clear_line_of_sight,
     project_movement_with_geometry,
 )
 from marl_battlegrounds.core.types import (
-    AGENT_FEATURE_ACTIVE,
-    AGENT_FEATURE_ALIVE,
-    AGENT_FEATURE_BASIC_INTERACTION_RADIUS,
-    AGENT_FEATURE_CLASS_ID,
-    AGENT_FEATURE_MOVEMENT_SPEED,
-    AGENT_FEATURE_OBSERVATION_RADIUS,
-    AGENT_FEATURE_RADIUS,
-    AGENT_FEATURE_TEAM_ID,
-    AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS,
-    AGENT_FEATURE_X,
-    AGENT_FEATURE_Y,
     CONTEXT_FEATURES,
     ENVIRONMENT_DIMENSIONS,
+    HUNTER_CLASS_ID,
+    MAGE_CLASS_ID,
     MAX_AGENT_SLOTS,
     MAX_AGENTS_PER_TEAM,
     MAX_OBJECTIVE_SLOTS,
     MAX_OBSTACLE_SLOTS,
-    NEUTRAL_CLASS_ID,
     NUM_MOVE_ACTIONS,
     NUM_SLOW_CHANNELS,
     NUM_STUN_CHANNELS,
     OBJECTIVE_FEATURES,
     OBSTACLE_FEATURES,
-    SELF_FEATURES,
+    PRIEST_CLASS_ID,
+    ROGUE_CLASS_ID,
     UNIT_FEATURES,
+    WARRIOR_CLASS_ID,
     Action,
     ActionMask,
     DoneFlags,
@@ -94,7 +106,9 @@ def _build_global_visibility_mask_and_distances(
     Self-visibility falls out naturally from the same predicate.
     """
     # Pairwise observer-candidate validity from active/alive state.
-    alive_active_mask = jnp.logical_and(state.active_mask, state.alive_mask)
+    alive_active_mask = jnp.logical_and(
+        config.agent_profile.active_mask, state.alive_mask
+    )
     global_pairwise_validity_mask = jnp.logical_and(
         alive_active_mask[:, None],
         alive_active_mask[None, :],
@@ -110,7 +124,7 @@ def _build_global_visibility_mask_and_distances(
     )
 
     # Observer-specific observation-radius check.
-    observer_radii_bc = state.observation_radii[:, None]
+    observer_radii_bc = config.agent_profile.observation_radii[:, None]
     observation_radii_mask = global_pairwise_distances <= observer_radii_bc
 
     def _build_los_row(
@@ -188,7 +202,7 @@ def _build_ally_enemy_masks(global_mask: Array) -> tuple[Array, Array]:
 
 
 def _build_global_targetability_mask(
-    state: EnvState, global_visibility_mask: Array, global_pairwise_distances: Array
+    config: EnvConfig, global_visibility_mask: Array, global_pairwise_distances: Array
 ) -> Array:
     """Build Milestone 4 basic-interaction targetability between global slots.
 
@@ -197,7 +211,7 @@ def _build_global_targetability_mask(
     under neutral placeholder class legality. Ultimate-specific targetability
     starts in Milestone 5.
     """
-    basic_interaction_radii = state.basic_interaction_radii[:, None]
+    basic_interaction_radii = config.agent_profile.basic_interaction_radii[:, None]
     basic_interaction_radius_mask = global_pairwise_distances <= basic_interaction_radii
 
     # Neutral placeholder legality: any visible in-range unit candidate is legal
@@ -218,7 +232,7 @@ def _build_observation(state: EnvState, config: EnvConfig) -> Observation:
     nonvisible candidate rows zeroed by the visibility masks.
     """
 
-    self_features = _build_self_features(state)
+    self_features = _build_self_features(state, config)
 
     ally_features = _build_ally_features(self_features)
     enemy_features = _build_enemy_features(self_features)
@@ -240,7 +254,7 @@ def _build_observation(state: EnvState, config: EnvConfig) -> Observation:
 
     ally_targetability_mask, enemy_targetability_mask = _build_ally_enemy_masks(
         _build_global_targetability_mask(
-            state, global_visibility_mask, global_pairwise_distances
+            config, global_visibility_mask, global_pairwise_distances
         )
     )
 
@@ -263,7 +277,9 @@ def _build_observation(state: EnvState, config: EnvConfig) -> Observation:
     )
 
 
-def _build_action_mask(state: EnvState, observation: Observation) -> ActionMask:
+def _build_action_mask(
+    state: EnvState, config: EnvConfig, observation: Observation
+) -> ActionMask:
     """Build action masks from observer liveness and observation masks."""
     ones_column_vector = jnp.ones(shape=(MAX_AGENT_SLOTS, 1), dtype=bool)
     zeros_column_vector = jnp.zeros(shape=(MAX_AGENT_SLOTS, 1), dtype=bool)
@@ -279,7 +295,9 @@ def _build_action_mask(state: EnvState, observation: Observation) -> ActionMask:
 
     ult_mask = jnp.concatenate((ones_column_vector, zeros_column_vector), axis=1)
 
-    alive_active_mask_bc = jnp.logical_and(state.active_mask, state.alive_mask)[:, None]
+    alive_active_mask_bc = jnp.logical_and(
+        config.agent_profile.active_mask, state.alive_mask
+    )[:, None]
 
     return ActionMask(
         move=jnp.logical_and(
@@ -294,52 +312,255 @@ def _build_action_mask(state: EnvState, observation: Observation) -> ActionMask:
     )
 
 
-def _build_intended_movement_deltas(joint_action: Action, state: EnvState) -> Array:
+def _build_intended_movement_deltas(
+    joint_action: Action, state: EnvState, config: EnvConfig
+) -> Array:
     """Convert per-slot movement action IDs into scaled displacement vectors."""
     intended_movement_deltas_unscaled = _JOINT_ACTION_MOVE_TO_DISPLACEMENT_LOOKUP_TABLE[
         joint_action.move
     ]
+    # Status-adjusted speed is shared with the observation contract.
+    effective_movement_speeds = derive_effective_movement_speeds_from_durations(
+        config.agent_profile.base_movement_speeds,
+        state.slow_durations,
+        state.priest_blessing_of_freedom_slow_floor_durations,
+    )
 
     intended_movement_deltas = (
-        state.movement_speeds[:, None] * intended_movement_deltas_unscaled
+        effective_movement_speeds[:, None] * intended_movement_deltas_unscaled
     )
 
     return intended_movement_deltas
 
 
-def _build_self_features(state: EnvState) -> Array:
-    """Build slot-aligned self rows from the shared agent-feature schema."""
-    self_features = jnp.zeros(shape=(MAX_AGENT_SLOTS, SELF_FEATURES), dtype=jnp.float32)
-    self_features = self_features.at[:, AGENT_FEATURE_X : AGENT_FEATURE_Y + 1].set(
-        state.agent_positions
-    )
-    self_features = self_features.at[:, AGENT_FEATURE_RADIUS].set(state.agent_radii)
-    self_features = self_features.at[:, AGENT_FEATURE_TEAM_ID].set(
-        state.team_ids.astype(jnp.float32)
-    )
-    self_features = self_features.at[:, AGENT_FEATURE_ACTIVE].set(
-        state.active_mask.astype(jnp.float32)
-    )
-    self_features = self_features.at[:, AGENT_FEATURE_ALIVE].set(
-        state.alive_mask.astype(jnp.float32)
-    )
-    self_features = self_features.at[:, AGENT_FEATURE_CLASS_ID].set(
-        state.class_ids.astype(jnp.float32)
-    )
-    self_features = self_features.at[:, AGENT_FEATURE_MOVEMENT_SPEED].set(
-        state.movement_speeds
-    )
-    self_features = self_features.at[:, AGENT_FEATURE_OBSERVATION_RADIUS].set(
-        state.observation_radii
-    )
-    self_features = self_features.at[:, AGENT_FEATURE_BASIC_INTERACTION_RADIUS].set(
-        state.basic_interaction_radii
-    )
-    self_features = self_features.at[:, AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS].set(
-        state.ultimate_interaction_radii
+def _active_mage_class_mask(config: EnvConfig) -> Array:
+    return jnp.logical_and(
+        config.agent_profile.class_ids == MAGE_CLASS_ID,
+        config.agent_profile.active_mask,
     )
 
-    return self_features
+
+def _active_warrior_class_mask(config: EnvConfig) -> Array:
+    return jnp.logical_and(
+        config.agent_profile.class_ids == WARRIOR_CLASS_ID,
+        config.agent_profile.active_mask,
+    )
+
+
+def _active_hunter_class_mask(config: EnvConfig) -> Array:
+    return jnp.logical_and(
+        config.agent_profile.class_ids == HUNTER_CLASS_ID,
+        config.agent_profile.active_mask,
+    )
+
+
+def _active_rogue_class_mask(config: EnvConfig) -> Array:
+    return jnp.logical_and(
+        config.agent_profile.class_ids == ROGUE_CLASS_ID,
+        config.agent_profile.active_mask,
+    )
+
+
+def _active_priest_class_mask(config: EnvConfig) -> Array:
+    return jnp.logical_and(
+        config.agent_profile.class_ids == PRIEST_CLASS_ID,
+        config.agent_profile.active_mask,
+    )
+
+
+def _derive_effective_movement_speeds_from_multipliers(
+    base_movement_speeds: Array,
+    slow_multipliers: Array,
+    priest_blessing_of_freedom_slow_floor_fraction: Array,
+) -> Array:
+
+    effective_movement_multipliers = jnp.maximum(
+        jnp.prod(slow_multipliers, axis=-1),
+        priest_blessing_of_freedom_slow_floor_fraction,
+    )
+
+    return base_movement_speeds * jnp.maximum(
+        effective_movement_multipliers, GLOBAL_SLOW_FLOOR
+    )
+
+
+def _build_self_features(state: EnvState, config: EnvConfig) -> Array:
+    """Build slot-aligned self rows from the shared agent-feature schema."""
+
+    (
+        slow_multipliers,
+        rogue_poison_anti_heal_multipliers,
+        priest_blessing_of_freedom_slow_floor_fraction,
+    ) = derive_status_magnitudes(
+        state.slow_durations,
+        state.rogue_poison_anti_heal_durations,
+        state.priest_blessing_of_freedom_slow_floor_durations,
+    )
+
+    effective_movement_speeds = _derive_effective_movement_speeds_from_multipliers(
+        config.agent_profile.base_movement_speeds,
+        slow_multipliers,
+        priest_blessing_of_freedom_slow_floor_fraction,
+    )
+
+    features_0_to_14 = jnp.concatenate(
+        (
+            state.agent_positions,
+            config.agent_profile.agent_radii[:, None],
+            config.agent_profile.team_ids[:, None],
+            config.agent_profile.active_mask[:, None],
+            state.alive_mask[:, None],
+            config.agent_profile.class_ids[:, None],
+            config.agent_profile.base_movement_speeds[:, None],
+            effective_movement_speeds[:, None],
+            config.agent_profile.observation_radii[:, None],
+            config.agent_profile.basic_interaction_radii[:, None],
+            config.agent_profile.ultimate_interaction_radii[:, None],
+            state.current_health[:, None],
+            config.agent_profile.max_health[:, None],
+            state.ultimate_cooldowns[:, None],
+        ),
+        axis=-1,
+        dtype=jnp.float32,
+    )
+
+    # TODO: Inert placeholders
+    mage_damage_amplification_aura_multipliers = jnp.ones((MAX_AGENT_SLOTS,))
+    warrior_damage_mitigation_aura_multipliers = jnp.ones((MAX_AGENT_SLOTS,))
+
+    features_15_to_30 = jnp.concatenate(
+        (
+            state.slow_durations,
+            slow_multipliers,
+            state.stun_durations,
+            state.rogue_poison_anti_heal_durations[:, None],
+            rogue_poison_anti_heal_multipliers[:, None],
+            state.mage_burst_damage_amplification_durations[:, None],
+            state.priest_blessing_of_freedom_slow_floor_durations[:, None],
+            priest_blessing_of_freedom_slow_floor_fraction[:, None],
+            mage_damage_amplification_aura_multipliers[:, None],
+            warrior_damage_mitigation_aura_multipliers[:, None],
+        ),
+        axis=-1,
+        dtype=jnp.float32,
+    )
+
+    warrior_mask = _active_warrior_class_mask(config)
+    mage_mask = _active_mage_class_mask(config)
+    hunter_mask = _active_hunter_class_mask(config)
+    rogue_mask = _active_rogue_class_mask(config)
+    priest_mask = _active_priest_class_mask(config)
+    active_mask_bc = config.agent_profile.active_mask[:, None]
+    # Non-state derived payload descriptors.
+    # These tell us about an agent's inherent properties, not what's happening to it.
+
+    basic_dmg_heal_ult_cds = jnp.where(
+        active_mask_bc,
+        jnp.concatenate(
+            (
+                BASIC_DAMAGE_BY_CLASS[config.agent_profile.class_ids][:, None],
+                BASIC_HEALING_BY_CLASS[config.agent_profile.class_ids][:, None],
+                ULTIMATE_COOLDOWN_BY_CLASS[config.agent_profile.class_ids][:, None],
+            ),
+            axis=-1,
+        ),
+        0.0,
+    ).astype(jnp.float32)
+
+    warrior_hunter_rogue_mask = jnp.tile(
+        jnp.concatenate(
+            (warrior_mask[:, None], hunter_mask[:, None], rogue_mask[:, None]), axis=-1
+        ),
+        3,
+    )
+
+    slow_stun_durations_multipliers = jnp.where(
+        warrior_hunter_rogue_mask,
+        jnp.asarray(
+            [
+                WARRIOR_CHARGE_SLOW_DURATION_TICKS,
+                HUNTER_BASIC_SLOW_DURATION_TICKS,
+                ROGUE_POISON_SLOW_DURATION_TICKS,
+                WARRIOR_CHARGE_SLOW_MULTIPLIER,
+                HUNTER_BASIC_SLOW_MULTIPLIER,
+                ROGUE_POISON_SLOW_MULTIPLIER,
+                WARRIOR_CHARGE_STUN_DURATION_TICKS,
+                HUNTER_TRAP_STUN_DURATION_TICKS,
+                ROGUE_POISON_STUN_DURATION_TICKS,
+            ]
+        )[None, :],
+        0.0,
+    ).astype(jnp.float32)
+
+    rogue_anti_heal_capability_features = jnp.where(
+        rogue_mask[:, None],
+        jnp.asarray(
+            [ROGUE_POISON_ANTI_HEAL_DURATION_TICKS, ROGUE_POISON_ANTI_HEAL_MULTIPLIER]
+        )[None, :],
+        0.0,
+    ).astype(jnp.float32)
+
+    mage_burst_capability_features = jnp.where(
+        mage_mask[:, None],
+        jnp.asarray([MAGE_ULT_DAMAGE_DURATION_TICKS, MAGE_ULT_DAMAGE_MULTIPLIER])[
+            None, :
+        ],
+        0.0,
+    ).astype(jnp.float32)
+
+    priest_blessing_of_freedom_capability_features = jnp.where(
+        priest_mask[:, None],
+        jnp.asarray([PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS, PRIEST_HEAL_SPEED_FLOOR])[
+            None, :
+        ],
+        0.0,
+    ).astype(jnp.float32)
+
+    mage_warrior_priest_mask = jnp.concatenate(
+        (
+            jnp.tile(mage_mask[:, None], 2),
+            jnp.tile(warrior_mask[:, None], 2),
+            priest_mask[:, None],
+        ),
+        axis=-1,
+    )
+
+    mage_war_aura_priest_ult_features = jnp.where(
+        mage_warrior_priest_mask,
+        jnp.asarray(
+            [
+                MAGE_DAMAGE_AURA_RADIUS,
+                MAGE_DAMAGE_AURA_MULTIPLIER,
+                WARRIOR_DAMAGE_MITIGATION_AURA_RADIUS,
+                WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER,
+                PRIEST_ULT_HEAL_AMOUNT,
+            ]
+        )[None, :],
+        0.0,
+    ).astype(jnp.float32)
+
+    feature_31_to_53 = jnp.concatenate(
+        (
+            basic_dmg_heal_ult_cds,
+            slow_stun_durations_multipliers,
+            rogue_anti_heal_capability_features,
+            mage_burst_capability_features,
+            priest_blessing_of_freedom_capability_features,
+            mage_war_aura_priest_ult_features,
+        ),
+        axis=-1,
+        dtype=jnp.float32,
+    )
+
+    return jnp.concatenate(
+        (
+            features_0_to_14,
+            features_15_to_30,
+            feature_31_to_53,
+        ),
+        axis=-1,
+        dtype=jnp.float32,
+    )
 
 
 def _build_ally_features(self_features: Array) -> Array:
@@ -401,8 +622,8 @@ def reset(
 ) -> tuple[EnvState, Observation, ActionMask, Info]:
     """Create the initial fixed-slot simulator state and placeholders."""
 
-    # Reset keeps all arrays at MAX_AGENT_SLOTS length. Smaller tasks use
-    # active_mask to distinguish real agents from padded slots.
+    # Reset keeps all arrays at MAX_AGENT_SLOTS length. Smaller tasks use the
+    # resolved profile's active mask to distinguish agents from padded slots.
     # Ordinary reset starts all active agents alive. Scenario loaders may later
     # create active-but-dead agents from curated states.
     # TODO(M4+): Use key when reset begins sampling spawn positions or randomized
@@ -411,23 +632,6 @@ def reset(
     # scenario loader should validate and return EnvState values that reuse the
     # same transition, observation, and mask machinery.
     # TODO(Config Validation): Eventually implement a non-JAX validator in pipeline.
-
-    team_0_ids = jnp.zeros((MAX_AGENTS_PER_TEAM,), dtype=jnp.int32)
-    team_1_ids = jnp.ones((MAX_AGENTS_PER_TEAM,), dtype=jnp.int32)
-
-    indices = jnp.arange(MAX_AGENT_SLOTS)
-
-    team_0_active_mask = indices < config.team_size
-
-    team_1_active_mask = (indices >= MAX_AGENTS_PER_TEAM) & (
-        indices < MAX_AGENTS_PER_TEAM + config.team_size
-    )
-
-    active_mask = jnp.logical_or(team_0_active_mask, team_1_active_mask)
-
-    initial_class_ids = jnp.where(
-        active_mask, config.initial_class_ids, NEUTRAL_CLASS_ID
-    )
 
     deterministic_key = jax.random.key(42)
     max_val = jnp.min(jnp.array([config.map_width, config.map_height]))
@@ -441,46 +645,28 @@ def reset(
         maxval=max_val - 0.5,  # Placeholder default agent positions
     )
 
-    max_health = get_max_health_by_class_ids(initial_class_ids)
-
     state = EnvState(
         step_count=jnp.array(0, dtype=jnp.int32),
         agent_positions=default_agent_positions,  # Placeholder
-        agent_radii=get_body_radius_by_class_ids(initial_class_ids),
-        team_ids=jnp.concat([team_0_ids, team_1_ids]),
-        class_ids=initial_class_ids,  # (MAX_AGENT_SLOTS,), int32
-        movement_speeds=get_movement_speed_by_class_ids(initial_class_ids),
-        observation_radii=get_observation_radius_by_class_ids(initial_class_ids),
-        basic_interaction_radii=get_basic_interaction_radius_by_class_ids(
-            initial_class_ids
-        ),
-        ultimate_interaction_radii=get_ultimate_interaction_radius_by_class_ids(
-            initial_class_ids
-        ),
-        active_mask=active_mask,
-        alive_mask=active_mask,  # Placeholder
-        current_health=max_health,
+        alive_mask=config.agent_profile.active_mask,
+        current_health=config.agent_profile.max_health,
         # At restart, current health should be max health.
-        max_health=max_health,
         ultimate_cooldowns=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
         # Everything below is a placeholder
         slow_durations=jnp.zeros((MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.int32),
-        slow_multipliers=jnp.ones(
-            (MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.float32
-        ),
         stun_durations=jnp.zeros((MAX_AGENT_SLOTS, NUM_STUN_CHANNELS), dtype=jnp.int32),
-        anti_heal_durations=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
-        anti_heal_multipliers=jnp.ones((MAX_AGENT_SLOTS,), dtype=jnp.float32),
-        damage_amplification_durations=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
-        damage_amplification_multipliers=jnp.ones(
-            (MAX_AGENT_SLOTS,), dtype=jnp.float32
+        rogue_poison_anti_heal_durations=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        mage_burst_damage_amplification_durations=jnp.zeros(
+            (MAX_AGENT_SLOTS,), dtype=jnp.int32
         ),
-        blessing_of_freedom_durations=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        priest_blessing_of_freedom_slow_floor_durations=jnp.zeros(
+            (MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
     )
 
     obs = _build_observation(state, config)
 
-    action_mask = _build_action_mask(state, obs)
+    action_mask = _build_action_mask(state, config, obs)
 
     info = Info()
 
@@ -492,42 +678,34 @@ def step(
 ) -> tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info]:
     """Advance movement while preserving current Milestone 4 placeholders."""
 
-    intended_movement_deltas = _build_intended_movement_deltas(joint_action, state)
+    intended_movement_deltas = _build_intended_movement_deltas(
+        joint_action, state, config
+    )
 
     next_agent_positions = project_movement_with_geometry(
         state.agent_positions,
-        state.agent_radii,
+        config.agent_profile.agent_radii,
         intended_movement_deltas,
-        state.active_mask,
+        config.agent_profile.active_mask,
         state.alive_mask,
         config.map_width,
         config.map_height,
         config.obstacles,
     )
 
+    # TODO: mutation of health, cooldowns, statuses, etc.
+
     next_state = EnvState(
         step_count=state.step_count + 1,
         agent_positions=next_agent_positions,
-        agent_radii=state.agent_radii,
-        team_ids=state.team_ids,
-        class_ids=state.class_ids,
-        movement_speeds=state.movement_speeds,
-        observation_radii=state.observation_radii,
-        basic_interaction_radii=state.basic_interaction_radii,
-        ultimate_interaction_radii=state.ultimate_interaction_radii,
-        active_mask=state.active_mask,
         alive_mask=state.alive_mask,
         current_health=state.current_health,
-        max_health=state.max_health,
         ultimate_cooldowns=state.ultimate_cooldowns,
-        slow_multipliers=state.slow_multipliers,
         slow_durations=state.slow_durations,
         stun_durations=state.stun_durations,
-        anti_heal_multipliers=state.anti_heal_multipliers,
-        anti_heal_durations=state.anti_heal_durations,
-        damage_amplification_multipliers=state.damage_amplification_multipliers,
-        damage_amplification_durations=state.damage_amplification_durations,
-        blessing_of_freedom_durations=state.blessing_of_freedom_durations,
+        rogue_poison_anti_heal_durations=state.rogue_poison_anti_heal_durations,
+        mage_burst_damage_amplification_durations=state.mage_burst_damage_amplification_durations,
+        priest_blessing_of_freedom_slow_floor_durations=state.priest_blessing_of_freedom_slow_floor_durations,
     )
 
     obs = _build_observation(next_state, config)
@@ -539,7 +717,7 @@ def step(
         truncated=jnp.array(next_state.step_count >= config.max_steps),
     )
 
-    action_mask = _build_action_mask(next_state, obs)
+    action_mask = _build_action_mask(next_state, config, obs)
 
     info = Info()
 
