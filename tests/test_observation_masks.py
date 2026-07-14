@@ -50,6 +50,7 @@ from marl_battlegrounds.core.types import (
     OBSTACLE_FEATURES,
     OBSTACLE_TYPE_PILLAR,
     OBSTACLE_TYPE_WALL,
+    PRIEST_CLASS_ID,
     ROGUE_CLASS_ID,
     SELF_FEATURES,
     TEAM_A_ID,
@@ -283,7 +284,7 @@ def _slot_float_vector(
 
 
 def _neutral_class_ids() -> Array:
-    """Create the placeholder neutral class-id vector."""
+    """Create a fixed neutral class-ID vector."""
     return jnp.full((MAX_AGENT_SLOTS,), CLASS_NEUTRAL, dtype=jnp.int32)
 
 
@@ -302,6 +303,10 @@ def _state_two_versus_two_game(
     agent_c_alive_flag: bool = True,
     agent_d_active_flag: bool = True,
     agent_d_alive_flag: bool = True,
+    agent_a_class_id: int = CLASS_NEUTRAL,
+    agent_b_class_id: int = CLASS_NEUTRAL,
+    agent_c_class_id: int = CLASS_NEUTRAL,
+    agent_d_class_id: int = CLASS_NEUTRAL,
     radius: float = 0.5,
     effective_movement_speed: float = 1.0,
     effective_observation_radius: float = 8.0,
@@ -311,9 +316,9 @@ def _state_two_versus_two_game(
 ) -> tuple[EnvConfig, EnvState]:
     """Create an exact fixed two-versus-two config/state pair.
 
-    Team 0 occupies global slots 0 and 1 in these scenarios. Team 1 occupies
+    Team A occupies global slots 0 and 1 in these scenarios. Team B occupies
     global slots 5 and 6, which become relation-local enemy slots 0 and 1 for
-    team-0 observers.
+    Team A observers.
     """
     agent_a_index = 0
     agent_b_index = 1
@@ -343,13 +348,31 @@ def _state_two_versus_two_game(
         agent_d_active_flag and agent_d_alive_flag
     )
 
+    requested_class_ids = jnp.full((MAX_AGENT_SLOTS,), CLASS_NEUTRAL, dtype=jnp.int32)
+    requested_class_ids = requested_class_ids.at[agent_a_index].set(
+        agent_a_class_id if agent_a_active_flag else CLASS_NEUTRAL
+    )
+    requested_class_ids = requested_class_ids.at[agent_b_index].set(
+        agent_b_class_id if agent_b_active_flag else CLASS_NEUTRAL
+    )
+    requested_class_ids = requested_class_ids.at[agent_c_index].set(
+        agent_c_class_id if agent_c_active_flag else CLASS_NEUTRAL
+    )
+    requested_class_ids = requested_class_ids.at[agent_d_index].set(
+        agent_d_class_id if agent_d_active_flag else CLASS_NEUTRAL
+    )
+    resolved_profile = resolve_agent_profile(
+        requested_class_ids,
+        jnp.asarray((2, 2), dtype=jnp.int32),
+    )
+
     slot_team_ids = jnp.concatenate(
         (
             jnp.full((MAX_AGENTS_PER_TEAM,), TEAM_A_ID, dtype=jnp.int32),
             jnp.full((MAX_AGENTS_PER_TEAM,), TEAM_B_ID, dtype=jnp.int32),
         )
     )
-    profile = config.agent_profile._replace(
+    profile = resolved_profile._replace(
         team_ids=jnp.where(active_mask, slot_team_ids, NO_TEAM_ID),
         active_mask=active_mask,
         agent_radii=_agent_radii_array_with_rows(
@@ -1547,22 +1570,22 @@ def test_map_obstacle_features_remain_globally_observed_after_candidate_masking(
                 agent_b_position=jnp.array([3.0, 2.0], dtype=jnp.float32),
                 agent_c_position=jnp.array([2.0, 4.0], dtype=jnp.float32),
                 agent_d_position=jnp.array([4.0, 4.0], dtype=jnp.float32),
+                agent_a_class_id=MAGE_CLASS_ID,
+                agent_b_class_id=PRIEST_CLASS_ID,
+                agent_c_class_id=MAGE_CLASS_ID,
+                agent_d_class_id=PRIEST_CLASS_ID,
                 effective_observation_radius=10.0,
                 effective_basic_interaction_radius=5.0,
                 effective_ultimate_interaction_radius=9.0,
             ),
             *_relation_visibility_masks_with_rows(
                 ally_rows=(
-                    (0, jnp.array([True, True, False, False, False])),
                     (1, jnp.array([True, True, False, False, False])),
-                    (5, jnp.array([True, True, False, False, False])),
                     (6, jnp.array([True, True, False, False, False])),
                 ),
                 enemy_rows=(
                     (0, jnp.array([True, True, False, False, False])),
-                    (1, jnp.array([True, True, False, False, False])),
                     (5, jnp.array([True, True, False, False, False])),
-                    (6, jnp.array([True, True, False, False, False])),
                 ),
             ),
             id="visible_inside_basic_radius_candidates_are_targetable",
@@ -1576,16 +1599,15 @@ def test_map_obstacle_features_remain_globally_observed_after_candidate_masking(
                 agent_c_position=jnp.array([7.0, 2.0], dtype=jnp.float32),
                 agent_d_position=jnp.array([8.0, 5.0], dtype=jnp.float32),
                 agent_d_active_flag=False,
+                agent_a_class_id=MAGE_CLASS_ID,
+                agent_b_class_id=PRIEST_CLASS_ID,
+                agent_c_class_id=MAGE_CLASS_ID,
                 effective_observation_radius=10.0,
                 effective_basic_interaction_radius=2.5,
                 effective_ultimate_interaction_radius=9.0,
             ),
             *_relation_visibility_masks_with_rows(
-                ally_rows=(
-                    (0, jnp.array([True, True, False, False, False])),
-                    (1, jnp.array([True, True, False, False, False])),
-                    (5, jnp.array([True, False, False, False, False])),
-                ),
+                ally_rows=((1, jnp.array([True, True, False, False, False])),),
                 enemy_rows=(),
             ),
             id="visible_outside_basic_radius_candidates_are_not_targetable",
@@ -1614,15 +1636,14 @@ def test_map_obstacle_features_remain_globally_observed_after_candidate_masking(
                 agent_d_position=jnp.array([8.0, 5.0], dtype=jnp.float32),
                 agent_b_active_flag=False,
                 agent_d_active_flag=False,
+                agent_a_class_id=MAGE_CLASS_ID,
+                agent_c_class_id=MAGE_CLASS_ID,
                 effective_observation_radius=10.0,
                 effective_basic_interaction_radius=10.0,
                 effective_ultimate_interaction_radius=10.0,
             ),
             *_relation_visibility_masks_with_rows(
-                ally_rows=(
-                    (0, jnp.array([True, False, False, False, False])),
-                    (5, jnp.array([True, False, False, False, False])),
-                ),
+                ally_rows=(),
                 enemy_rows=(),
             ),
             id="los_blocked_candidates_are_not_targetable",
@@ -1637,19 +1658,16 @@ def test_map_obstacle_features_remain_globally_observed_after_candidate_masking(
                 agent_d_position=jnp.array([3.0, 4.0], dtype=jnp.float32),
                 agent_b_active_flag=False,
                 agent_c_alive_flag=False,
+                agent_a_class_id=MAGE_CLASS_ID,
+                agent_c_class_id=MAGE_CLASS_ID,
+                agent_d_class_id=PRIEST_CLASS_ID,
                 effective_observation_radius=8.0,
                 effective_basic_interaction_radius=5.0,
                 effective_ultimate_interaction_radius=9.0,
             ),
             *_relation_visibility_masks_with_rows(
-                ally_rows=(
-                    (0, jnp.array([True, False, False, False, False])),
-                    (6, jnp.array([False, True, False, False, False])),
-                ),
-                enemy_rows=(
-                    (0, jnp.array([False, True, False, False, False])),
-                    (6, jnp.array([True, False, False, False, False])),
-                ),
+                ally_rows=((6, jnp.array([False, True, False, False, False])),),
+                enemy_rows=((0, jnp.array([False, True, False, False, False])),),
             ),
             id="inactive_dead_and_padded_candidates_are_not_targetable",
         ),
@@ -1661,7 +1679,7 @@ def test_basic_targetability_masks(
     expected_ally: Array,
     expected_enemy: Array,
 ) -> None:
-    """Assert CP6 basic targetability masks across representative scenarios."""
+    """Assert class-aware basic targetability across spatial scenarios."""
     scenario_config, state = scenario
     config = scenario_config._replace(obstacles=config.obstacles)
     next_state, observation, _, _, action_mask, _ = step(
@@ -1692,6 +1710,9 @@ def test_basic_targetability_uses_observer_specific_basic_interaction_radius() -
         agent_c_position=jnp.array([4.0, 2.0], dtype=jnp.float32),
         agent_d_position=jnp.array([9.0, 2.0], dtype=jnp.float32),
         agent_d_active_flag=False,
+        agent_a_class_id=MAGE_CLASS_ID,
+        agent_b_class_id=MAGE_CLASS_ID,
+        agent_c_class_id=PRIEST_CLASS_ID,
         effective_observation_radius=10.0,
         effective_basic_interaction_radius=6.0,
     )
@@ -1708,8 +1729,6 @@ def test_basic_targetability_uses_observer_specific_basic_interaction_radius() -
 
     expected_ally, expected_enemy = _relation_visibility_masks_with_rows(
         ally_rows=(
-            (0, jnp.array([True, False, False, False, False])),
-            (1, jnp.array([False, True, False, False, False])),
             (MAX_AGENTS_PER_TEAM, jnp.array([True, False, False, False, False])),
         ),
         enemy_rows=((1, jnp.array([True, False, False, False, False])),),
@@ -1743,6 +1762,8 @@ def test_observation_radius_does_not_substitute_for_basic_interaction_radius() -
         agent_d_position=jnp.array([8.0, 5.0], dtype=jnp.float32),
         agent_b_active_flag=False,
         agent_d_active_flag=False,
+        agent_a_class_id=MAGE_CLASS_ID,
+        agent_c_class_id=MAGE_CLASS_ID,
         effective_observation_radius=10.0,
         effective_basic_interaction_radius=2.0,
         effective_ultimate_interaction_radius=9.0,
@@ -1771,6 +1792,8 @@ def test_ultimate_interaction_radius_does_not_affect_basic_targetability() -> No
         agent_d_position=jnp.array([8.0, 5.0], dtype=jnp.float32),
         agent_b_active_flag=False,
         agent_d_active_flag=False,
+        agent_a_class_id=MAGE_CLASS_ID,
+        agent_c_class_id=MAGE_CLASS_ID,
         effective_observation_radius=10.0,
         effective_basic_interaction_radius=2.0,
         effective_ultimate_interaction_radius=10.0,
@@ -1799,6 +1822,9 @@ def test_inactive_and_dead_observers_have_no_target_choices() -> None:
         agent_d_position=jnp.array([3.0, 4.0], dtype=jnp.float32),
         agent_a_alive_flag=False,
         agent_b_active_flag=False,
+        agent_a_class_id=MAGE_CLASS_ID,
+        agent_c_class_id=MAGE_CLASS_ID,
+        agent_d_class_id=PRIEST_CLASS_ID,
         effective_observation_radius=8.0,
         effective_basic_interaction_radius=5.0,
     )
@@ -1849,8 +1875,8 @@ def test_none_target_selection_is_valid_only_for_active_alive_observers() -> Non
     assert bool(jnp.array_equal(action_mask.target[:, 0], expected_none_column))
 
 
-def test_ultimate_use_remains_unavailable_in_checkpoint_6() -> None:
-    """Assert CP6 does not introduce ultimate availability."""
+def test_ultimate_use_remains_unavailable_in_milestone_5_step_3() -> None:
+    """Assert Step 3 does not introduce ultimate availability."""
     config = _deterministic_config()
     config, state = _state_two_versus_two_game(
         config,
@@ -1858,6 +1884,10 @@ def test_ultimate_use_remains_unavailable_in_checkpoint_6() -> None:
         agent_b_position=jnp.array([3.0, 2.0], dtype=jnp.float32),
         agent_c_position=jnp.array([2.0, 4.0], dtype=jnp.float32),
         agent_d_position=jnp.array([3.0, 4.0], dtype=jnp.float32),
+        agent_a_class_id=MAGE_CLASS_ID,
+        agent_b_class_id=PRIEST_CLASS_ID,
+        agent_c_class_id=MAGE_CLASS_ID,
+        agent_d_class_id=PRIEST_CLASS_ID,
         effective_observation_radius=8.0,
         effective_basic_interaction_radius=5.0,
         effective_ultimate_interaction_radius=10.0,
@@ -1899,6 +1929,10 @@ def test_jitted_nonstay_step_preserves_observation_mask_contracts() -> None:
         agent_b_position=jnp.array([2.0, 5.0], dtype=jnp.float32),
         agent_c_position=jnp.array([7.0, 2.0], dtype=jnp.float32),
         agent_d_position=jnp.array([7.0, 5.0], dtype=jnp.float32),
+        agent_a_class_id=MAGE_CLASS_ID,
+        agent_b_class_id=MAGE_CLASS_ID,
+        agent_c_class_id=MAGE_CLASS_ID,
+        agent_d_class_id=MAGE_CLASS_ID,
         effective_observation_radius=10.0,
         effective_basic_interaction_radius=6.0,
     )
@@ -1957,6 +1991,7 @@ def test_jitted_nonstay_step_preserves_observation_mask_contracts() -> None:
         )
     )
     assert bool(jnp.array_equal(compiled_action_mask.target, eager_action_mask.target))
+    assert bool(jnp.any(compiled_observation.enemy_targetability_mask))
 
     _assert_targetability_never_exceeds_visibility(compiled_observation)
     _assert_flat_target_mask_matches_relation_targetability(
@@ -1978,6 +2013,10 @@ def test_scanned_rollout_emits_stable_observation_mask_history() -> None:
         agent_b_position=jnp.array([2.0, 5.0], dtype=jnp.float32),
         agent_c_position=jnp.array([7.0, 2.0], dtype=jnp.float32),
         agent_d_position=jnp.array([7.0, 5.0], dtype=jnp.float32),
+        agent_a_class_id=MAGE_CLASS_ID,
+        agent_b_class_id=PRIEST_CLASS_ID,
+        agent_c_class_id=MAGE_CLASS_ID,
+        agent_d_class_id=PRIEST_CLASS_ID,
         effective_observation_radius=10.0,
         effective_basic_interaction_radius=6.0,
     )
@@ -2075,6 +2114,8 @@ def test_scanned_rollout_emits_stable_observation_mask_history() -> None:
             )
         )
     )
+    assert bool(jnp.any(ally_targetability_history))
+    assert bool(jnp.any(enemy_targetability_history))
 
     expected_target_history = jnp.concatenate(
         (

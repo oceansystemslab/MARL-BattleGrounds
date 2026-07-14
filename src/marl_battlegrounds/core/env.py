@@ -33,6 +33,8 @@ from marl_battlegrounds.core.combat import (
     WARRIOR_DAMAGE_MITIGATION_AURA_RADIUS,
     derive_effective_movement_speeds_from_durations,
     derive_status_magnitudes,
+    get_basic_damage_by_class_ids,
+    get_basic_healing_by_class_ids,
 )
 from marl_battlegrounds.core.geometry import (
     has_clear_line_of_sight,
@@ -47,6 +49,7 @@ from marl_battlegrounds.core.types import (
     MAX_AGENTS_PER_TEAM,
     MAX_OBJECTIVE_SLOTS,
     MAX_OBSTACLE_SLOTS,
+    NO_TEAM_ID,
     NUM_MOVE_ACTIONS,
     NUM_SLOW_CHANNELS,
     NUM_STUN_CHANNELS,
@@ -65,6 +68,11 @@ from marl_battlegrounds.core.types import (
     Observation,
     Reward,
 )
+
+TEAM_A_START = 0
+TEAM_A_END = MAX_AGENTS_PER_TEAM
+TEAM_B_START = MAX_AGENTS_PER_TEAM
+TEAM_B_END = MAX_AGENT_SLOTS
 
 # Private Helpers ---
 
@@ -169,58 +177,95 @@ def _build_ally_enemy_masks(global_mask: Array) -> tuple[Array, Array]:
     target-selection heads.
 
     Slot layout is fixed:
-    - team 0 occupies global slots ``0..MAX_AGENTS_PER_TEAM - 1``;
-    - team 1 occupies global slots ``MAX_AGENTS_PER_TEAM..MAX_AGENT_SLOTS - 1``.
+    - Team A occupies global slots ``0..MAX_AGENTS_PER_TEAM - 1``;
+    - Team B occupies global slots ``MAX_AGENTS_PER_TEAM..MAX_AGENT_SLOTS - 1``.
     """
-    team_0_start = 0
-    team_0_end = MAX_AGENTS_PER_TEAM
-    team_1_start = MAX_AGENTS_PER_TEAM
-    team_1_end = MAX_AGENT_SLOTS
 
-    ally_mask_team_0 = global_mask[
-        team_0_start:team_0_end,
-        team_0_start:team_0_end,
+    ally_mask_team_a = global_mask[
+        TEAM_A_START:TEAM_A_END,
+        TEAM_A_START:TEAM_A_END,
     ]
-    enemy_mask_team_0 = global_mask[
-        team_0_start:team_0_end,
-        team_1_start:team_1_end,
+    enemy_mask_team_a = global_mask[
+        TEAM_A_START:TEAM_A_END,
+        TEAM_B_START:TEAM_B_END,
     ]
 
-    ally_mask_team_1 = global_mask[
-        team_1_start:team_1_end,
-        team_1_start:team_1_end,
+    ally_mask_team_b = global_mask[
+        TEAM_B_START:TEAM_B_END,
+        TEAM_B_START:TEAM_B_END,
     ]
-    enemy_mask_team_1 = global_mask[
-        team_1_start:team_1_end,
-        team_0_start:team_0_end,
+    enemy_mask_team_b = global_mask[
+        TEAM_B_START:TEAM_B_END,
+        TEAM_A_START:TEAM_A_END,
     ]
 
-    ally_mask = jnp.vstack((ally_mask_team_0, ally_mask_team_1))
-    enemy_mask = jnp.vstack((enemy_mask_team_0, enemy_mask_team_1))
+    ally_mask = jnp.vstack((ally_mask_team_a, ally_mask_team_b))
+    enemy_mask = jnp.vstack((enemy_mask_team_a, enemy_mask_team_b))
 
     return (ally_mask, enemy_mask)
 
 
 def _build_global_targetability_mask(
-    config: EnvConfig, global_visibility_mask: Array, global_pairwise_distances: Array
+    state: EnvState,
+    config: EnvConfig,
+    global_visibility_mask: Array,
+    global_pairwise_distances: Array,
 ) -> Array:
-    """Build Milestone 4 basic-interaction targetability between global slots.
+    """Build class-aware basic targetability between global agent slots.
 
-    Milestone 4 targetability is deliberately basic-only: visible, active/alive
-    candidates within the observer's current basic interaction radius are valid
-    under neutral placeholder class legality. Ultimate-specific targetability
-    starts in Milestone 5.
+    Entry ``[i, j]`` is true when the supplied visibility relation and actor
+    ``i``'s basic range permit candidate ``j``, both slots have real team
+    identities, the actor's catalog capability permits that team relation, and
+    no stun channel removes the actor's target control. Candidate health and
+    stun state do not affect this legality. Ultimate-specific legality and
+    combat-effect resolution are owned by later Milestone 5 steps.
     """
     basic_interaction_radii = config.agent_profile.basic_interaction_radii[:, None]
     basic_interaction_radius_mask = global_pairwise_distances <= basic_interaction_radii
 
-    # Neutral placeholder legality: any visible in-range unit candidate is legal
-    # until Milestone 5 replaces this with class-specific ally/enemy rules.
-    class_legality_mask = jnp.ones_like(global_visibility_mask, dtype=bool)
+    # Stun is actor-side control: any active channel removes non-empty targets.
+    is_not_stunned = jnp.all(state.stun_durations == 0, axis=-1)
 
+    # Fixed catalog payloads describe whether each actor owns the interaction.
+    does_basic_damage = (
+        get_basic_damage_by_class_ids(config.agent_profile.class_ids) > 0
+    )
+    does_basic_healing = (
+        get_basic_healing_by_class_ids(config.agent_profile.class_ids) > 0
+    )
+
+    # Actor-owned facts broadcast across candidate columns.
+    actor_can_damage = jnp.logical_and(is_not_stunned, does_basic_damage)[:, None]
+    actor_can_heal = jnp.logical_and(is_not_stunned, does_basic_healing)[:, None]
+
+    # Equal padding sentinels never constitute a real ally relation.
+    team_ids = config.agent_profile.team_ids
+    has_real_team = team_ids != NO_TEAM_ID
+    both_slots_have_real_teams = jnp.logical_and(
+        has_real_team[:, None], has_real_team[None, :]
+    )
+
+    global_pairwise_ally_mask = jnp.logical_and(
+        team_ids[None, :] == team_ids[:, None],
+        both_slots_have_real_teams,
+    )
+
+    global_pairwise_enemy_mask = jnp.logical_and(
+        team_ids[None, :] != team_ids[:, None],
+        both_slots_have_real_teams,
+    )
+
+    global_stun_and_team_and_class_legality_mask = jnp.logical_or(
+        jnp.logical_and(actor_can_heal, global_pairwise_ally_mask),
+        jnp.logical_and(actor_can_damage, global_pairwise_enemy_mask),
+    )
+
+    # Class/control legality only narrows the established spatial relation.
     return jnp.logical_and(
         global_visibility_mask,
-        jnp.logical_and(basic_interaction_radius_mask, class_legality_mask),
+        jnp.logical_and(
+            basic_interaction_radius_mask, global_stun_and_team_and_class_legality_mask
+        ),
     )
 
 
@@ -254,7 +299,7 @@ def _build_observation(state: EnvState, config: EnvConfig) -> Observation:
 
     ally_targetability_mask, enemy_targetability_mask = _build_ally_enemy_masks(
         _build_global_targetability_mask(
-            config, global_visibility_mask, global_pairwise_distances
+            state, config, global_visibility_mask, global_pairwise_distances
         )
     )
 
@@ -569,16 +614,11 @@ def _build_ally_features(self_features: Array) -> Array:
         (MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM, UNIT_FEATURES), dtype=jnp.float32
     )
 
-    team_0_start = 0
-    team_0_end = MAX_AGENTS_PER_TEAM
-    team_1_start = MAX_AGENTS_PER_TEAM
-    team_1_end = MAX_AGENT_SLOTS
-
-    ally_features = ally_features.at[team_0_start:team_0_end, :, :].set(
-        self_features[team_0_start:team_0_end, :]
+    ally_features = ally_features.at[TEAM_A_START:TEAM_A_END, :, :].set(
+        self_features[TEAM_A_START:TEAM_A_END, :]
     )
-    ally_features = ally_features.at[team_1_start:team_1_end, :, :].set(
-        self_features[team_1_start:team_1_end, :]
+    ally_features = ally_features.at[TEAM_B_START:TEAM_B_END, :, :].set(
+        self_features[TEAM_B_START:TEAM_B_END, :]
     )
 
     return ally_features
@@ -590,16 +630,11 @@ def _build_enemy_features(self_features: Array) -> Array:
         (MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM, UNIT_FEATURES), dtype=jnp.float32
     )
 
-    team_0_start = 0
-    team_0_end = MAX_AGENTS_PER_TEAM
-    team_1_start = MAX_AGENTS_PER_TEAM
-    team_1_end = MAX_AGENT_SLOTS
-
-    enemy_features = enemy_features.at[team_0_start:team_0_end, :, :].set(
-        self_features[team_1_start:team_1_end, :]
+    enemy_features = enemy_features.at[TEAM_A_START:TEAM_A_END, :, :].set(
+        self_features[TEAM_B_START:TEAM_B_END, :]
     )
-    enemy_features = enemy_features.at[team_1_start:team_1_end, :, :].set(
-        self_features[team_0_start:team_0_end, :]
+    enemy_features = enemy_features.at[TEAM_B_START:TEAM_B_END, :, :].set(
+        self_features[TEAM_A_START:TEAM_A_END, :]
     )
 
     return enemy_features
@@ -676,7 +711,7 @@ def reset(
 def step(
     config: EnvConfig, state: EnvState, joint_action: Action, key: Array
 ) -> tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info]:
-    """Advance movement while preserving current Milestone 4 placeholders."""
+    """Advance movement and rebuild current fixed-shape observations and masks."""
 
     intended_movement_deltas = _build_intended_movement_deltas(
         joint_action, state, config

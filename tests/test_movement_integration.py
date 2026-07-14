@@ -514,13 +514,12 @@ def _assert_done_flags_contract(
 
 
 def _assert_single_agent_action_mask_semantics(action_mask: ActionMask) -> None:
-    """Assert current action-mask semantics for one active alive slot."""
+    """Assert a lone neutral actor can move and explicitly select target-none."""
     assert bool(jnp.all(action_mask.move[0]))
     assert bool(jnp.all(~action_mask.move[1:]))
 
     assert bool(action_mask.target[0, 0])
-    assert bool(action_mask.target[0, 1])
-    assert bool(jnp.all(~action_mask.target[0, 2:]))
+    assert bool(jnp.all(~action_mask.target[0, 1:]))
     assert bool(jnp.all(~action_mask.target[1:]))
 
     assert bool(action_mask.use_ultimate[0, 0])
@@ -802,7 +801,7 @@ def test_step_uses_state_movement_speed_after_state_exists() -> None:
     )
 
 
-def test_step_preserves_placeholder_contracts_after_non_stay_movement() -> None:
+def test_step_preserves_current_contracts_after_non_stay_movement() -> None:
     config = _deterministic_config(max_steps=10)
     key = jax.random.key(42)
     config, state = _state_with_single_active_alive_agent(

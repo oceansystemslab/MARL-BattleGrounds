@@ -1,0 +1,536 @@
+"""Focused semantic proofs for Milestone 5 basic target legality."""
+
+from typing import Literal, cast
+
+import jax
+import jax.numpy as jnp
+import pytest
+from jax import Array
+
+from marl_battlegrounds.core.config import resolve_agent_profile
+from marl_battlegrounds.core.env import reset, step
+from marl_battlegrounds.core.types import (
+    AGENT_FEATURE_STUN_ROGUE_POISON_DURATION,
+    AGENT_FEATURE_STUN_WARRIOR_CHARGE_DURATION,
+    ENVIRONMENT_DIMENSIONS,
+    HUNTER_CLASS_ID,
+    MAGE_CLASS_ID,
+    MAX_AGENT_SLOTS,
+    MAX_AGENTS_PER_TEAM,
+    MAX_OBSTACLE_SLOTS,
+    MOVE_STAY,
+    NEUTRAL_CLASS_ID,
+    NO_TEAM_ID,
+    NUM_TARGET_ACTIONS,
+    OBSTACLE_FEATURES,
+    PRIEST_CLASS_ID,
+    ROGUE_CLASS_ID,
+    STUN_CHANNEL_HUNTER_TRAP,
+    STUN_CHANNEL_ROGUE_POISON,
+    STUN_CHANNEL_WARRIOR_CHARGE,
+    WARRIOR_CLASS_ID,
+    Action,
+    ActionMask,
+    EnvConfig,
+    EnvState,
+    Observation,
+)
+
+_ACTOR_SLOT = 0
+_ALLY_SLOT = 1
+_ENEMY_SLOT = MAX_AGENTS_PER_TEAM
+_ALLY_TARGET_START = 1
+_ENEMY_TARGET_START = 1 + MAX_AGENTS_PER_TEAM
+
+
+def _requested_roster(actor_class_id: int) -> Array:
+    """Return a fixed roster with one actor, ally, and enemy candidate."""
+    roster = jnp.full((MAX_AGENT_SLOTS,), NEUTRAL_CLASS_ID, dtype=jnp.int32)
+    roster = roster.at[_ACTOR_SLOT].set(actor_class_id)
+    roster = roster.at[_ALLY_SLOT].set(MAGE_CLASS_ID)
+    roster = roster.at[_ENEMY_SLOT].set(MAGE_CLASS_ID)
+    return roster
+
+
+def _stay_action() -> Action:
+    """Return a slot-aligned joint action that preserves scenario geometry."""
+    return Action(
+        move=jnp.full((MAX_AGENT_SLOTS,), MOVE_STAY, dtype=jnp.int32),
+        target=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        use_ultimate=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+    )
+
+
+def _target_scenario(actor_class_id: int = MAGE_CLASS_ID) -> tuple[EnvConfig, EnvState]:
+    """Build a clear-LOS 2v1 scenario with every candidate inside basic range."""
+    profile = resolve_agent_profile(
+        _requested_roster(actor_class_id),
+        jnp.asarray((2, 1), dtype=jnp.int32),
+    )
+    # Neutral has zero catalog radii, so explicit test radii keep the spatial
+    # preconditions identical while capability is varied independently.
+    profile = profile._replace(
+        agent_radii=jnp.where(profile.active_mask, 0.5, 0.0).astype(jnp.float32),
+        base_movement_speeds=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32),
+        observation_radii=jnp.where(profile.active_mask, 10.0, 0.0).astype(jnp.float32),
+        basic_interaction_radii=jnp.where(profile.active_mask, 10.0, 0.0).astype(
+            jnp.float32
+        ),
+        ultimate_interaction_radii=jnp.where(profile.active_mask, 10.0, 0.0).astype(
+            jnp.float32
+        ),
+    )
+    config = EnvConfig(
+        team_size=2,
+        max_steps=100,
+        map_width=20.0,
+        map_height=12.0,
+        obstacles=jnp.zeros((MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES), dtype=jnp.float32),
+        agent_profile=profile,
+    )
+    state, *_ = reset(config, jax.random.key(1))
+    positions = jnp.zeros((MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS), dtype=jnp.float32)
+    positions = positions.at[_ACTOR_SLOT].set(
+        jnp.asarray((2.0, 2.0), dtype=jnp.float32)
+    )
+    positions = positions.at[_ALLY_SLOT].set(jnp.asarray((4.0, 2.0), dtype=jnp.float32))
+    positions = positions.at[_ENEMY_SLOT].set(
+        jnp.asarray((6.0, 2.0), dtype=jnp.float32)
+    )
+    return config, state._replace(agent_positions=positions)
+
+
+def _step_scenario(
+    config: EnvConfig, state: EnvState
+) -> tuple[EnvState, Observation, ActionMask]:
+    """Advance one inert tick and return the public target-mask surfaces."""
+    next_state, observation, _, _, action_mask, _ = step(
+        config,
+        state,
+        _stay_action(),
+        jax.random.key(2),
+    )
+    return next_state, observation, action_mask
+
+
+def _assert_public_target_contract(
+    observation: Observation,
+    action_mask: ActionMask,
+) -> None:
+    """Assert observation relation masks align exactly with the target head."""
+    expected_relation_shape = (MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM)
+    assert observation.ally_targetability_mask.shape == expected_relation_shape
+    assert observation.enemy_targetability_mask.shape == expected_relation_shape
+    assert observation.ally_targetability_mask.dtype == jnp.bool_
+    assert observation.enemy_targetability_mask.dtype == jnp.bool_
+    assert action_mask.target.shape == (MAX_AGENT_SLOTS, NUM_TARGET_ACTIONS)
+    assert action_mask.target.dtype == jnp.bool_
+    assert bool(
+        jnp.array_equal(
+            action_mask.target[
+                :, _ALLY_TARGET_START : _ALLY_TARGET_START + MAX_AGENTS_PER_TEAM
+            ],
+            observation.ally_targetability_mask,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            action_mask.target[:, _ENEMY_TARGET_START:],
+            observation.enemy_targetability_mask,
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    (
+        "actor_class_id",
+        "expects_ally_targets",
+        "expects_enemy_targets",
+    ),
+    [
+        pytest.param(MAGE_CLASS_ID, False, True, id="mage"),
+        pytest.param(WARRIOR_CLASS_ID, False, True, id="warrior"),
+        pytest.param(HUNTER_CLASS_ID, False, True, id="hunter"),
+        pytest.param(ROGUE_CLASS_ID, False, True, id="rogue"),
+        pytest.param(PRIEST_CLASS_ID, True, False, id="priest"),
+        pytest.param(NEUTRAL_CLASS_ID, False, False, id="neutral"),
+    ],
+)
+def test_basic_targetability_matches_actor_capability(
+    actor_class_id: int,
+    expects_ally_targets: bool,
+    expects_enemy_targets: bool,
+) -> None:
+    """Prove the complete ally/enemy relation contract for each actor class."""
+    config, state = _target_scenario(actor_class_id)
+    _, observation, action_mask = _step_scenario(config, state)
+
+    expected_ally = jnp.asarray(
+        (expects_ally_targets, expects_ally_targets, False, False, False)
+    )
+    expected_enemy = jnp.asarray((expects_enemy_targets, False, False, False, False))
+
+    _assert_public_target_contract(observation, action_mask)
+    assert bool(
+        jnp.array_equal(observation.ally_targetability_mask[_ACTOR_SLOT], expected_ally)
+    )
+    assert bool(
+        jnp.array_equal(
+            observation.enemy_targetability_mask[_ACTOR_SLOT], expected_enemy
+        )
+    )
+    assert bool(action_mask.target[_ACTOR_SLOT, 0])
+
+
+@pytest.mark.parametrize(
+    "active_stun_channels",
+    [
+        pytest.param(
+            (STUN_CHANNEL_WARRIOR_CHARGE,),
+            id="warrior-charge",
+        ),
+        pytest.param(
+            (STUN_CHANNEL_HUNTER_TRAP,),
+            id="hunter-trap",
+        ),
+        pytest.param(
+            (STUN_CHANNEL_ROGUE_POISON,),
+            id="rogue-poison",
+        ),
+        pytest.param(
+            (
+                STUN_CHANNEL_WARRIOR_CHARGE,
+                STUN_CHANNEL_HUNTER_TRAP,
+                STUN_CHANNEL_ROGUE_POISON,
+            ),
+            id="simultaneous-stuns",
+        ),
+    ],
+)
+def test_actor_stun_disables_nonempty_targets_but_preserves_none(
+    active_stun_channels: tuple[int, ...],
+) -> None:
+    """Prove every stun source removes actor control but preserves target-none."""
+    config, state = _target_scenario()
+    for channel in active_stun_channels:
+        state = state._replace(
+            stun_durations=state.stun_durations.at[_ACTOR_SLOT, channel].set(2)
+        )
+
+    _, observation, action_mask = _step_scenario(config, state)
+
+    _assert_public_target_contract(observation, action_mask)
+    assert not bool(jnp.any(observation.ally_targetability_mask[_ACTOR_SLOT]))
+    assert not bool(jnp.any(observation.enemy_targetability_mask[_ACTOR_SLOT]))
+    assert bool(action_mask.target[_ACTOR_SLOT, 0])
+    assert not bool(jnp.any(action_mask.target[_ACTOR_SLOT, 1:]))
+
+
+@pytest.mark.parametrize(
+    "candidate_stun_channel",
+    [
+        pytest.param(
+            STUN_CHANNEL_WARRIOR_CHARGE,
+            id="warrior-charge",
+        ),
+        pytest.param(
+            STUN_CHANNEL_HUNTER_TRAP,
+            id="hunter-trap",
+        ),
+        pytest.param(
+            STUN_CHANNEL_ROGUE_POISON,
+            id="rogue-poison",
+        ),
+    ],
+)
+def test_candidate_stun_does_not_change_targetability(
+    candidate_stun_channel: int,
+) -> None:
+    """Prove stun is an actor-control predicate, not a candidate predicate."""
+    config, state = _target_scenario()
+    _, control_observation, control_action_mask = _step_scenario(config, state)
+    stunned_state = state._replace(
+        stun_durations=state.stun_durations.at[_ENEMY_SLOT, candidate_stun_channel].set(
+            2
+        )
+    )
+    _, stunned_observation, stunned_action_mask = _step_scenario(config, stunned_state)
+
+    assert bool(control_observation.enemy_targetability_mask[_ACTOR_SLOT, 0])
+    assert bool(stunned_observation.enemy_targetability_mask[_ACTOR_SLOT, 0])
+    assert bool(
+        jnp.array_equal(
+            stunned_observation.ally_targetability_mask[_ACTOR_SLOT],
+            control_observation.ally_targetability_mask[_ACTOR_SLOT],
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            stunned_observation.enemy_targetability_mask[_ACTOR_SLOT],
+            control_observation.enemy_targetability_mask[_ACTOR_SLOT],
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            stunned_action_mask.target[_ACTOR_SLOT],
+            control_action_mask.target[_ACTOR_SLOT],
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "actor_class_id",
+    [
+        pytest.param(MAGE_CLASS_ID, id="damage-actor"),
+        pytest.param(PRIEST_CLASS_ID, id="healing-actor"),
+    ],
+)
+def test_actor_stun_changes_only_control_and_exposed_stun_features(
+    actor_class_id: int,
+) -> None:
+    """Prove stun preserves perception while its public status columns update."""
+    config, state = _target_scenario(actor_class_id)
+    _, control_observation, control_action_mask = _step_scenario(config, state)
+    stunned_state = state._replace(
+        stun_durations=state.stun_durations.at[
+            _ACTOR_SLOT, STUN_CHANNEL_HUNTER_TRAP
+        ].set(2)
+    )
+    _, stunned_observation, stunned_action_mask = _step_scenario(config, stunned_state)
+
+    assert bool(
+        jnp.array_equal(
+            stunned_observation.ally_visibility_mask,
+            control_observation.ally_visibility_mask,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            stunned_observation.enemy_visibility_mask,
+            control_observation.enemy_visibility_mask,
+        )
+    )
+
+    stun_start = AGENT_FEATURE_STUN_WARRIOR_CHARGE_DURATION
+    stun_end = AGENT_FEATURE_STUN_ROGUE_POISON_DURATION + 1
+    for stunned_features, control_features in (
+        (stunned_observation.self_features, control_observation.self_features),
+        (
+            stunned_observation.ally_unit_features,
+            control_observation.ally_unit_features,
+        ),
+        (
+            stunned_observation.enemy_unit_features,
+            control_observation.enemy_unit_features,
+        ),
+    ):
+        assert bool(
+            jnp.array_equal(
+                stunned_features[..., :stun_start],
+                control_features[..., :stun_start],
+            )
+        )
+        assert bool(
+            jnp.array_equal(
+                stunned_features[..., stun_end:],
+                control_features[..., stun_end:],
+            )
+        )
+
+    assert bool(
+        stunned_observation.self_features[
+            _ACTOR_SLOT, AGENT_FEATURE_STUN_WARRIOR_CHARGE_DURATION + 1
+        ]
+        == 2.0
+    )
+    assert bool(jnp.any(control_action_mask.target[_ACTOR_SLOT, 1:]))
+    assert not bool(jnp.any(stunned_action_mask.target[_ACTOR_SLOT, 1:]))
+
+
+@pytest.mark.parametrize(
+    "candidate_health_fraction",
+    [
+        pytest.param(1.0, id="full-health"),
+        pytest.param(0.0, id="zero-health-alive"),
+    ],
+)
+def test_priest_targetability_is_independent_of_ally_health(
+    candidate_health_fraction: float,
+) -> None:
+    """Prove health magnitude does not determine basic target legality."""
+    config, state = _target_scenario(PRIEST_CLASS_ID)
+    candidate_health = (
+        config.agent_profile.max_health[_ALLY_SLOT] * candidate_health_fraction
+    )
+    state = state._replace(
+        current_health=state.current_health.at[_ALLY_SLOT].set(candidate_health)
+    )
+
+    _, observation, action_mask = _step_scenario(config, state)
+
+    assert bool(observation.ally_targetability_mask[_ACTOR_SLOT, _ALLY_SLOT])
+    assert bool(action_mask.target[_ACTOR_SLOT, _ALLY_TARGET_START + _ALLY_SLOT])
+
+
+UnrelatedStateCase = Literal[
+    "ultimate-cooldown",
+    "slow-duration",
+    "anti-heal-duration",
+    "mage-burst-duration",
+    "priest-slow-floor-duration",
+]
+
+
+@pytest.mark.parametrize(
+    "unrelated_state_case",
+    [
+        pytest.param("ultimate-cooldown", id="ultimate-cooldown"),
+        pytest.param("slow-duration", id="slow-duration"),
+        pytest.param("anti-heal-duration", id="anti-heal-duration"),
+        pytest.param("mage-burst-duration", id="mage-burst-duration"),
+        pytest.param(
+            "priest-slow-floor-duration",
+            id="priest-slow-floor-duration",
+        ),
+    ],
+)
+def test_unrelated_combat_state_does_not_change_basic_targetability(
+    unrelated_state_case: UnrelatedStateCase,
+) -> None:
+    """Prove unrelated cooldown and status fields do not enter basic legality."""
+    config, state = _target_scenario()
+    _, control_observation, control_action_mask = _step_scenario(config, state)
+
+    if unrelated_state_case == "ultimate-cooldown":
+        changed_state = state._replace(
+            ultimate_cooldowns=state.ultimate_cooldowns.at[_ACTOR_SLOT].set(7)
+        )
+    elif unrelated_state_case == "slow-duration":
+        changed_state = state._replace(
+            slow_durations=state.slow_durations.at[_ACTOR_SLOT, 0].set(3)
+        )
+    elif unrelated_state_case == "anti-heal-duration":
+        changed_state = state._replace(
+            rogue_poison_anti_heal_durations=(
+                state.rogue_poison_anti_heal_durations.at[_ACTOR_SLOT].set(3)
+            )
+        )
+    elif unrelated_state_case == "mage-burst-duration":
+        changed_state = state._replace(
+            mage_burst_damage_amplification_durations=(
+                state.mage_burst_damage_amplification_durations.at[_ACTOR_SLOT].set(3)
+            )
+        )
+    else:
+        changed_state = state._replace(
+            priest_blessing_of_freedom_slow_floor_durations=(
+                state.priest_blessing_of_freedom_slow_floor_durations.at[
+                    _ACTOR_SLOT
+                ].set(3)
+            )
+        )
+
+    _, changed_observation, changed_action_mask = _step_scenario(config, changed_state)
+
+    assert bool(
+        jnp.array_equal(
+            changed_observation.ally_targetability_mask[_ACTOR_SLOT],
+            control_observation.ally_targetability_mask[_ACTOR_SLOT],
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            changed_observation.enemy_targetability_mask[_ACTOR_SLOT],
+            control_observation.enemy_targetability_mask[_ACTOR_SLOT],
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            changed_action_mask.target[_ACTOR_SLOT],
+            control_action_mask.target[_ACTOR_SLOT],
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("actor_active", "actor_alive"),
+    [
+        pytest.param(False, True, id="inactive"),
+        pytest.param(True, False, id="dead"),
+        pytest.param(False, False, id="inactive-and-dead"),
+    ],
+)
+def test_inactive_or_dead_actor_has_no_target_actions(
+    actor_active: bool,
+    actor_alive: bool,
+) -> None:
+    """Prove nonparticipating actors have an entirely false target row."""
+    config, state = _target_scenario()
+    profile = config.agent_profile._replace(
+        active_mask=config.agent_profile.active_mask.at[_ACTOR_SLOT].set(actor_active),
+        team_ids=config.agent_profile.team_ids.at[_ACTOR_SLOT].set(
+            config.agent_profile.team_ids[_ACTOR_SLOT] if actor_active else NO_TEAM_ID
+        ),
+    )
+    config = config._replace(agent_profile=profile)
+    state = state._replace(alive_mask=state.alive_mask.at[_ACTOR_SLOT].set(actor_alive))
+
+    _, observation, action_mask = _step_scenario(config, state)
+
+    assert not bool(jnp.any(observation.ally_targetability_mask[_ACTOR_SLOT]))
+    assert not bool(jnp.any(observation.enemy_targetability_mask[_ACTOR_SLOT]))
+    assert not bool(jnp.any(action_mask.target[_ACTOR_SLOT]))
+
+
+def test_no_team_slots_never_form_basic_target_relations() -> None:
+    """Prove matching NO_TEAM_ID values do not constitute an ally relation."""
+    config, state = _target_scenario(PRIEST_CLASS_ID)
+    no_team_ids = config.agent_profile.team_ids.at[_ACTOR_SLOT].set(NO_TEAM_ID)
+    no_team_ids = no_team_ids.at[_ALLY_SLOT].set(NO_TEAM_ID)
+    config = config._replace(
+        agent_profile=config.agent_profile._replace(team_ids=no_team_ids)
+    )
+
+    _, observation, action_mask = _step_scenario(config, state)
+
+    assert bool(observation.ally_visibility_mask[_ACTOR_SLOT, _ACTOR_SLOT])
+    assert bool(observation.ally_visibility_mask[_ACTOR_SLOT, _ALLY_SLOT])
+    assert not bool(jnp.any(observation.ally_targetability_mask[_ACTOR_SLOT]))
+    assert not bool(jnp.any(observation.enemy_targetability_mask[_ACTOR_SLOT]))
+    assert bool(action_mask.target[_ACTOR_SLOT, 0])
+    assert not bool(jnp.any(action_mask.target[_ACTOR_SLOT, 1:]))
+
+
+def test_jitted_step_matches_eager_class_and_stun_targetability() -> None:
+    """Prove compiled target masks match eager class and actor-stun semantics."""
+    config, state = _target_scenario()
+    state = state._replace(
+        stun_durations=state.stun_durations.at[
+            _ALLY_SLOT, STUN_CHANNEL_ROGUE_POISON
+        ].set(2)
+    )
+
+    eager = _step_scenario(config, state)
+    compiled_step = jax.jit(step)
+    compiled_state, compiled_observation, _, _, compiled_action_mask, _ = cast(
+        tuple[EnvState, Observation, object, object, ActionMask, object],
+        compiled_step(config, state, _stay_action(), jax.random.key(2)),
+    )
+
+    assert jax.tree_util.tree_structure(compiled_state) == jax.tree_util.tree_structure(
+        eager[0]
+    )
+    assert bool(
+        jnp.array_equal(
+            compiled_observation.ally_targetability_mask,
+            eager[1].ally_targetability_mask,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            compiled_observation.enemy_targetability_mask,
+            eager[1].enemy_targetability_mask,
+        )
+    )
+    assert bool(jnp.array_equal(compiled_action_mask.target, eager[2].target))
+    assert bool(compiled_observation.enemy_targetability_mask[_ACTOR_SLOT, 0])
