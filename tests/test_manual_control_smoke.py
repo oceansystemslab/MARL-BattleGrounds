@@ -204,7 +204,7 @@ def _assert_int_action_head_contract(action_head: Array) -> None:
 def _assert_manual_joint_action_contract(action: Action) -> None:
     """Assert manual action construction preserves the core action contract."""
     _assert_int_action_head_contract(action.move)
-    _assert_int_action_head_contract(action.target)
+    _assert_int_action_head_contract(action.select_target)
     _assert_int_action_head_contract(action.use_ultimate)
 
 
@@ -233,12 +233,16 @@ def _assert_manual_step_output_matches_expected(
     assert bool(jnp.array_equal(reward.rewards, expected_reward.rewards))
     assert bool(jnp.array_equal(done_flags.terminated, expected_done_flags.terminated))
     assert bool(jnp.array_equal(done_flags.truncated, expected_done_flags.truncated))
-    assert bool(jnp.array_equal(action_mask.move, expected_action_mask.move))
-    assert bool(jnp.array_equal(action_mask.target, expected_action_mask.target))
+    assert bool(jnp.array_equal(action_mask.move_mask, expected_action_mask.move_mask))
     assert bool(
         jnp.array_equal(
-            action_mask.use_ultimate,
-            expected_action_mask.use_ultimate,
+            action_mask.select_target_mask, expected_action_mask.select_target_mask
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            action_mask.use_ultimate_mask,
+            expected_action_mask.use_ultimate_mask,
         )
     )
     assert isinstance(info, Info)
@@ -293,7 +297,9 @@ def test_build_manual_joint_action_controls_only_selected_slot(
             _expected_manual_move_choices(controlled_slot, move_action),
         )
     )
-    assert bool(jnp.array_equal(action.target, jnp.zeros_like(action.target)))
+    assert bool(
+        jnp.array_equal(action.select_target, jnp.zeros_like(action.select_target))
+    )
     assert bool(
         jnp.array_equal(action.use_ultimate, jnp.zeros_like(action.use_ultimate))
     )
@@ -340,7 +346,7 @@ def test_step_manual_control_returns_next_key_and_step_outputs() -> None:
     assert reward.rewards.shape == (MAX_AGENT_SLOTS,)
     assert done_flags.terminated.shape == ()
     assert done_flags.truncated.shape == ()
-    assert action_mask.move.shape == (MAX_AGENT_SLOTS, NUM_MOVE_ACTIONS)
+    assert action_mask.move_mask.shape == (MAX_AGENT_SLOTS, NUM_MOVE_ACTIONS)
     assert isinstance(info, Info)
 
 

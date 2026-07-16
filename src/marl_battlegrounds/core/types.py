@@ -206,16 +206,22 @@ class Action(NamedTuple):
     """Factored joint action supplied by policies for every agent slot."""
 
     move: Array
-    target: Array
+    select_target: Array
     use_ultimate: Array
 
 
 class ActionMask(NamedTuple):
-    """Slot-aligned validity masks for each factored action head."""
+    """Slot-aligned legality for the factored action interface.
 
-    move: Array
-    target: Array
-    use_ultimate: Array
+    The joint target/ultimate mask is authoritative for exact combat pairs.
+    The flat target and ultimate masks are its existential marginals and support
+    per-head policy masking without independently defining legality.
+    """
+
+    move_mask: Array
+    select_target_mask: Array
+    use_ultimate_mask: Array
+    select_target_use_ultimate_joint_mask: Array
 
 
 class Observation(NamedTuple):
@@ -229,8 +235,6 @@ class Observation(NamedTuple):
     context_features: Array
     ally_visibility_mask: Array
     enemy_visibility_mask: Array
-    ally_targetability_mask: Array
-    enemy_targetability_mask: Array
 
 
 class Reward(NamedTuple):

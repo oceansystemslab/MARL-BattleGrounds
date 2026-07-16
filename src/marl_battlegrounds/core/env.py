@@ -17,6 +17,9 @@ from marl_battlegrounds.core.combat import (
     MAGE_DAMAGE_AURA_RADIUS,
     MAGE_ULT_DAMAGE_DURATION_TICKS,
     MAGE_ULT_DAMAGE_MULTIPLIER,
+    ONLY_ALLY_TARGET_ULTIMATE_MODE,
+    ONLY_ENEMY_TARGET_ULTIMATE_MODE,
+    ONLY_NONE_TARGET_ULTIMATE_MODE,
     PRIEST_HEAL_SPEED_FLOOR,
     PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS,
     PRIEST_ULT_HEAL_AMOUNT,
@@ -35,6 +38,7 @@ from marl_battlegrounds.core.combat import (
     derive_status_magnitudes,
     get_basic_damage_by_class_ids,
     get_basic_healing_by_class_ids,
+    get_ultimate_target_mode_by_class_ids,
 )
 from marl_battlegrounds.core.geometry import (
     has_clear_line_of_sight,
@@ -205,21 +209,26 @@ def _build_ally_enemy_masks(global_mask: Array) -> tuple[Array, Array]:
     return (ally_mask, enemy_mask)
 
 
-def _build_global_targetability_mask(
+def _build_select_target_use_ultimate_joint_mask(
     state: EnvState,
     config: EnvConfig,
     global_visibility_mask: Array,
     global_pairwise_distances: Array,
 ) -> Array:
-    """Build class-aware basic targetability between global agent slots.
+    """Build authoritative legality for every target/ultimate action pair.
 
-    Entry ``[i, j]`` is true when the supplied visibility relation and actor
-    ``i``'s basic range permit candidate ``j``, both slots have real team
-    identities, the actor's catalog capability permits that team relation, and
-    no stun channel removes the actor's target control. Candidate health and
-    stun state do not affect this legality. Ultimate-specific legality and
-    combat-effect resolution are owned by later Milestone 5 steps.
+    The returned axes are actor slot, actor-relative target action, and
+    ultimate-use choice. Lane zero preserves class-aware basic legality; lane
+    one applies class-specific ultimate relation, range, cooldown, and control
+    gates. Both lanes reuse the supplied visibility and distance truth, so this
+    helper performs no geometry or LOS work itself.
     """
+    class_ids = config.agent_profile.class_ids
+    team_ids = config.agent_profile.team_ids
+    active_and_alive_mask = jnp.logical_and(
+        config.agent_profile.active_mask, state.alive_mask
+    )
+
     basic_interaction_radii = config.agent_profile.basic_interaction_radii[:, None]
     basic_interaction_radius_mask = global_pairwise_distances <= basic_interaction_radii
 
@@ -227,19 +236,14 @@ def _build_global_targetability_mask(
     is_not_stunned = jnp.all(state.stun_durations == 0, axis=-1)
 
     # Fixed catalog payloads describe whether each actor owns the interaction.
-    does_basic_damage = (
-        get_basic_damage_by_class_ids(config.agent_profile.class_ids) > 0
-    )
-    does_basic_healing = (
-        get_basic_healing_by_class_ids(config.agent_profile.class_ids) > 0
-    )
+    does_basic_damage = get_basic_damage_by_class_ids(class_ids) > 0
+    does_basic_healing = get_basic_healing_by_class_ids(class_ids) > 0
 
     # Actor-owned facts broadcast across candidate columns.
     actor_can_damage = jnp.logical_and(is_not_stunned, does_basic_damage)[:, None]
     actor_can_heal = jnp.logical_and(is_not_stunned, does_basic_healing)[:, None]
 
     # Equal padding sentinels never constitute a real ally relation.
-    team_ids = config.agent_profile.team_ids
     has_real_team = team_ids != NO_TEAM_ID
     both_slots_have_real_teams = jnp.logical_and(
         has_real_team[:, None], has_real_team[None, :]
@@ -255,21 +259,112 @@ def _build_global_targetability_mask(
         both_slots_have_real_teams,
     )
 
-    global_stun_and_team_and_class_legality_mask = jnp.logical_or(
+    global_basic_relation_mask = jnp.logical_or(
         jnp.logical_and(actor_can_heal, global_pairwise_ally_mask),
         jnp.logical_and(actor_can_damage, global_pairwise_enemy_mask),
     )
 
     # Class/control legality only narrows the established spatial relation.
-    return jnp.logical_and(
+    global_basic_unit_mask = jnp.logical_and(
         global_visibility_mask,
+        jnp.logical_and(basic_interaction_radius_mask, global_basic_relation_mask),
+    )
+
+    ally_basic_select_target_mask, enemy_basic_select_target_mask = (
+        _build_ally_enemy_masks(global_basic_unit_mask)
+    )
+
+    relative_basic_mask = jnp.concatenate(
+        (ally_basic_select_target_mask, enemy_basic_select_target_mask), axis=-1
+    )
+
+    basic_target_action_mask = jnp.concatenate(
+        (active_and_alive_mask[:, None], relative_basic_mask), axis=-1
+    )
+
+    # Build the ultimate conditioned mask.
+    ultimate_interaction_radii = config.agent_profile.ultimate_interaction_radii[
+        :, None
+    ]
+    ultimate_interaction_radius_mask = (
+        global_pairwise_distances <= ultimate_interaction_radii
+    )
+
+    ultimate_is_off_cooldown = state.ultimate_cooldowns == 0
+
+    ultimate_target_modes = get_ultimate_target_mode_by_class_ids(class_ids)
+
+    has_available_enemy_targeted_ultimate = jnp.logical_and(
+        ultimate_target_modes == ONLY_ENEMY_TARGET_ULTIMATE_MODE,
+        ultimate_is_off_cooldown,
+    )
+    has_available_ally_targeted_ultimate = jnp.logical_and(
+        ultimate_target_modes == ONLY_ALLY_TARGET_ULTIMATE_MODE,
+        ultimate_is_off_cooldown,
+    )
+    has_available_no_target_ultimate = jnp.logical_and(
+        ultimate_target_modes == ONLY_NONE_TARGET_ULTIMATE_MODE,
+        ultimate_is_off_cooldown,
+    )
+
+    actor_can_use_enemy_targeted_ultimate = jnp.logical_and(
+        is_not_stunned, has_available_enemy_targeted_ultimate
+    )[:, None]
+    actor_can_use_ally_targeted_ultimate = jnp.logical_and(
+        is_not_stunned, has_available_ally_targeted_ultimate
+    )[:, None]
+    actor_can_use_no_target_ultimate = jnp.logical_and(
+        is_not_stunned, has_available_no_target_ultimate
+    )
+    actor_can_use_no_target_ultimate = jnp.logical_and(
+        active_and_alive_mask, actor_can_use_no_target_ultimate
+    )
+
+    global_targeted_ultimate_relation_mask = jnp.logical_or(
         jnp.logical_and(
-            basic_interaction_radius_mask, global_stun_and_team_and_class_legality_mask
+            actor_can_use_ally_targeted_ultimate, global_pairwise_ally_mask
+        ),
+        jnp.logical_and(
+            actor_can_use_enemy_targeted_ultimate, global_pairwise_enemy_mask
         ),
     )
 
+    global_targeted_ultimate_mask = jnp.logical_and(
+        global_visibility_mask,
+        jnp.logical_and(
+            ultimate_interaction_radius_mask,
+            global_targeted_ultimate_relation_mask,
+        ),
+    )
 
-def _build_observation(state: EnvState, config: EnvConfig) -> Observation:
+    ally_ultimate_select_target_mask, enemy_ultimate_select_target_mask = (
+        _build_ally_enemy_masks(global_targeted_ultimate_mask)
+    )
+
+    relative_ultimate_mask = jnp.concatenate(
+        (ally_ultimate_select_target_mask, enemy_ultimate_select_target_mask), axis=-1
+    )
+
+    ultimate_target_action_mask = jnp.concatenate(
+        (actor_can_use_no_target_ultimate[:, None], relative_ultimate_mask), axis=-1
+    )
+
+    return jnp.stack((basic_target_action_mask, ultimate_target_action_mask), axis=-1)
+
+
+def _build_marginal_action_masks(
+    select_target_use_ultimate_joint_mask: Array,
+) -> tuple[Array, Array]:
+    """Derive per-head masks from authoritative target/ultimate pair legality."""
+    select_target_mask = jnp.any(select_target_use_ultimate_joint_mask, axis=-1)
+    use_ultimate_mask = jnp.any(select_target_use_ultimate_joint_mask, axis=1)
+
+    return select_target_mask, use_ultimate_mask
+
+
+def _build_observation_and_action_mask(
+    state: EnvState, config: EnvConfig
+) -> tuple[Observation, ActionMask]:
     """Build the current observation contract from one slot-aligned state.
 
     Self rows are canonical fixed-slot agent rows. Ally and enemy unit rows use
@@ -278,32 +373,46 @@ def _build_observation(state: EnvState, config: EnvConfig) -> Observation:
     """
 
     self_features = _build_self_features(state, config)
-
     ally_features = _build_ally_features(self_features)
     enemy_features = _build_enemy_features(self_features)
-
     global_visibility_mask, global_pairwise_distances = (
         _build_global_visibility_mask_and_distances(state, config)
     )
     ally_visibility_mask, enemy_visibility_mask = _build_ally_enemy_masks(
         global_visibility_mask
     )
-
     ally_features = _mask_unit_features(ally_features, ally_visibility_mask)
     enemy_features = _mask_unit_features(enemy_features, enemy_visibility_mask)
+
+    select_target_use_ultimate_joint_mask = (
+        _build_select_target_use_ultimate_joint_mask(
+            state, config, global_visibility_mask, global_pairwise_distances
+        )
+    )
+    select_target_mask, use_ultimate_mask = _build_marginal_action_masks(
+        select_target_use_ultimate_joint_mask
+    )
 
     map_obstacle_features = jnp.broadcast_to(
         config.obstacles[None, :, :],
         (MAX_AGENT_SLOTS, MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES),
     )
 
-    ally_targetability_mask, enemy_targetability_mask = _build_ally_enemy_masks(
-        _build_global_targetability_mask(
-            state, config, global_visibility_mask, global_pairwise_distances
-        )
+    alive_active_mask_bc = jnp.logical_and(
+        config.agent_profile.active_mask, state.alive_mask
+    )[:, None]
+
+    action_mask = ActionMask(
+        move_mask=jnp.logical_and(
+            jnp.ones(shape=(MAX_AGENT_SLOTS, NUM_MOVE_ACTIONS), dtype=bool),
+            alive_active_mask_bc,
+        ),
+        select_target_mask=select_target_mask,
+        use_ultimate_mask=use_ultimate_mask,
+        select_target_use_ultimate_joint_mask=select_target_use_ultimate_joint_mask,
     )
 
-    return Observation(
+    obs = Observation(
         self_features=self_features,
         ally_unit_features=ally_features,
         enemy_unit_features=enemy_features,
@@ -317,44 +426,9 @@ def _build_observation(state: EnvState, config: EnvConfig) -> Observation:
         ),
         ally_visibility_mask=ally_visibility_mask,
         enemy_visibility_mask=enemy_visibility_mask,
-        ally_targetability_mask=ally_targetability_mask,
-        enemy_targetability_mask=enemy_targetability_mask,
     )
 
-
-def _build_action_mask(
-    state: EnvState, config: EnvConfig, observation: Observation
-) -> ActionMask:
-    """Build action masks from observer liveness and observation masks."""
-    ones_column_vector = jnp.ones(shape=(MAX_AGENT_SLOTS, 1), dtype=bool)
-    zeros_column_vector = jnp.zeros(shape=(MAX_AGENT_SLOTS, 1), dtype=bool)
-
-    target_mask = jnp.concatenate(
-        (
-            ones_column_vector,
-            observation.ally_targetability_mask,
-            observation.enemy_targetability_mask,
-        ),
-        axis=1,
-    )
-
-    ult_mask = jnp.concatenate((ones_column_vector, zeros_column_vector), axis=1)
-
-    alive_active_mask_bc = jnp.logical_and(
-        config.agent_profile.active_mask, state.alive_mask
-    )[:, None]
-
-    return ActionMask(
-        move=jnp.logical_and(
-            jnp.ones(shape=(MAX_AGENT_SLOTS, NUM_MOVE_ACTIONS), dtype=bool),
-            alive_active_mask_bc,
-        ),
-        target=jnp.logical_and(target_mask, alive_active_mask_bc),
-        use_ultimate=jnp.logical_and(
-            ult_mask,
-            alive_active_mask_bc,
-        ),
-    )
+    return obs, action_mask
 
 
 def _build_intended_movement_deltas(
@@ -379,6 +453,7 @@ def _build_intended_movement_deltas(
 
 
 def _active_mage_class_mask(config: EnvConfig) -> Array:
+    """Return the fixed-slot mask of active Mage agents."""
     return jnp.logical_and(
         config.agent_profile.class_ids == MAGE_CLASS_ID,
         config.agent_profile.active_mask,
@@ -386,6 +461,7 @@ def _active_mage_class_mask(config: EnvConfig) -> Array:
 
 
 def _active_warrior_class_mask(config: EnvConfig) -> Array:
+    """Return the fixed-slot mask of active Warrior agents."""
     return jnp.logical_and(
         config.agent_profile.class_ids == WARRIOR_CLASS_ID,
         config.agent_profile.active_mask,
@@ -393,6 +469,7 @@ def _active_warrior_class_mask(config: EnvConfig) -> Array:
 
 
 def _active_hunter_class_mask(config: EnvConfig) -> Array:
+    """Return the fixed-slot mask of active Hunter agents."""
     return jnp.logical_and(
         config.agent_profile.class_ids == HUNTER_CLASS_ID,
         config.agent_profile.active_mask,
@@ -400,6 +477,7 @@ def _active_hunter_class_mask(config: EnvConfig) -> Array:
 
 
 def _active_rogue_class_mask(config: EnvConfig) -> Array:
+    """Return the fixed-slot mask of active Rogue agents."""
     return jnp.logical_and(
         config.agent_profile.class_ids == ROGUE_CLASS_ID,
         config.agent_profile.active_mask,
@@ -407,6 +485,7 @@ def _active_rogue_class_mask(config: EnvConfig) -> Array:
 
 
 def _active_priest_class_mask(config: EnvConfig) -> Array:
+    """Return the fixed-slot mask of active Priest agents."""
     return jnp.logical_and(
         config.agent_profile.class_ids == PRIEST_CLASS_ID,
         config.agent_profile.active_mask,
@@ -418,6 +497,7 @@ def _derive_effective_movement_speeds_from_multipliers(
     slow_multipliers: Array,
     priest_blessing_of_freedom_slow_floor_fraction: Array,
 ) -> Array:
+    """Apply stacked slows, the Priest floor, and the global floor to speeds."""
 
     effective_movement_multipliers = jnp.maximum(
         jnp.prod(slow_multipliers, axis=-1),
@@ -699,9 +779,7 @@ def reset(
         ),
     )
 
-    obs = _build_observation(state, config)
-
-    action_mask = _build_action_mask(state, config, obs)
+    obs, action_mask = _build_observation_and_action_mask(state, config)
 
     info = Info()
 
@@ -743,7 +821,7 @@ def step(
         priest_blessing_of_freedom_slow_floor_durations=state.priest_blessing_of_freedom_slow_floor_durations,
     )
 
-    obs = _build_observation(next_state, config)
+    obs, action_mask = _build_observation_and_action_mask(next_state, config)
 
     rewards = Reward(rewards=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32))
 
@@ -751,8 +829,6 @@ def step(
         terminated=jnp.array(False),
         truncated=jnp.array(next_state.step_count >= config.max_steps),
     )
-
-    action_mask = _build_action_mask(next_state, config, obs)
 
     info = Info()
 

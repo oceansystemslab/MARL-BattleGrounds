@@ -5,6 +5,13 @@ from jax import Array
 
 # Class catalog row order: neutral, Mage, Warrior, Hunter, Rogue, Priest.
 
+# Ultimate target-relation modes. Zero remains the inert neutral catalog value;
+# no-target is distinct because Mage Burst is a real self-buff action.
+NO_ULTIMATE_MODE = 0
+ONLY_NONE_TARGET_ULTIMATE_MODE = 1
+ONLY_ALLY_TARGET_ULTIMATE_MODE = 2
+ONLY_ENEMY_TARGET_ULTIMATE_MODE = 3
+
 MAX_HEALTH_BY_CLASS = jnp.asarray(
     [
         0.0,  # neutral
@@ -121,6 +128,18 @@ OBSERVATION_RADIUS_BY_CLASS = jnp.asarray(
     dtype=jnp.float32,
 )
 
+ULTIMATE_TARGET_MODE_BY_CLASS = jnp.asarray(
+    [
+        NO_ULTIMATE_MODE,  # neutral
+        ONLY_NONE_TARGET_ULTIMATE_MODE,  # mage
+        ONLY_ENEMY_TARGET_ULTIMATE_MODE,  # warrior
+        ONLY_ENEMY_TARGET_ULTIMATE_MODE,  # hunter
+        ONLY_ENEMY_TARGET_ULTIMATE_MODE,  # rogue
+        ONLY_ALLY_TARGET_ULTIMATE_MODE,  # priest
+    ],
+    dtype=jnp.int32,
+)
+
 # Global status rules.
 
 # The floor keeps stacked slows from becoming a hard stun.
@@ -225,8 +244,13 @@ def get_observation_radius_by_class_ids(class_ids: int | Array) -> Array:
     return OBSERVATION_RADIUS_BY_CLASS[class_ids]
 
 
+def get_ultimate_target_mode_by_class_ids(class_ids: int | Array) -> Array:
+    """Return ultimate target-relation modes for one or more class IDs."""
+    return ULTIMATE_TARGET_MODE_BY_CLASS[class_ids]
+
+
 def _build_slow_multipliers(slow_durations: Array) -> Array:
-    # if a duration is > 0, then the multiplier is active.
+    """Return per-source slow multipliers selected by active durations."""
     class_slow_multipliers = jnp.asarray(
         [
             WARRIOR_CHARGE_SLOW_MULTIPLIER,
@@ -243,6 +267,7 @@ def _build_slow_multipliers(slow_durations: Array) -> Array:
 def _build_priest_blessing_of_freedom_slow_floor_fractions(
     priest_blessing_of_freedom_slow_floor_durations: Array,
 ) -> Array:
+    """Return the active Priest movement-speed floor for each agent slot."""
     return jnp.where(
         priest_blessing_of_freedom_slow_floor_durations > 0,
         PRIEST_HEAL_SPEED_FLOOR,
@@ -266,10 +291,8 @@ def derive_status_magnitudes(
     mechanic consumes them.
     """
 
-    # if a duration is > 0, then the multiplier is active.
     slow_multipliers = _build_slow_multipliers(slow_durations)
 
-    # Rogue anti-heal
     rogue_poison_anti_heal_multipliers = jnp.where(
         rogue_poison_anti_heal_durations > 0, ROGUE_POISON_ANTI_HEAL_MULTIPLIER, 1.0
     ).astype(jnp.float32)
@@ -292,6 +315,7 @@ def derive_effective_movement_speeds_from_durations(
     slow_durations: Array,
     priest_blessing_of_freedom_slow_floor_durations: Array,
 ) -> Array:
+    """Derive effective speeds from base values and duration-only status state."""
 
     effective_movement_multipliers = jnp.maximum(
         jnp.prod(_build_slow_multipliers(slow_durations), axis=-1),

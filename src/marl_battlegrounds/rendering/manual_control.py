@@ -138,7 +138,7 @@ def build_manual_joint_action(
 
     return Action(
         move=move,
-        target=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        select_target=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
         use_ultimate=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
     )
 

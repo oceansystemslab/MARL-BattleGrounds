@@ -21,6 +21,7 @@ from marl_battlegrounds.core.types import (
     ENVIRONMENT_DIMENSIONS,
     MAGE_CLASS_ID,
     MAX_AGENT_SLOTS,
+    MAX_AGENTS_PER_TEAM,
     MAX_OBSTACLE_SLOTS,
     MOVE_EAST,
     MOVE_STAY,
@@ -89,7 +90,7 @@ def _config(team_sizes: tuple[int, int] = (1, 1)) -> EnvConfig:
 def _zero_action() -> Action:
     return Action(
         move=jnp.full((MAX_AGENT_SLOTS,), MOVE_STAY, dtype=jnp.int32),
-        target=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        select_target=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
         use_ultimate=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
     )
 
@@ -116,7 +117,7 @@ def test_reset_initializes_dynamic_state_from_resolved_profile() -> None:
     assert state.alive_mask.dtype == jnp.bool_
     assert bool(jnp.array_equal(state.alive_mask, profile.active_mask))
     assert bool(jnp.array_equal(state.current_health, profile.max_health))
-    assert bool(jnp.all(action_mask.move[~profile.active_mask] == 0))
+    assert bool(jnp.all(action_mask.move_mask[~profile.active_mask] == 0))
 
     static_columns = (
         (AGENT_FEATURE_RADIUS, profile.agent_radii),
@@ -209,19 +210,19 @@ def test_profile_radii_control_visibility_and_targetability() -> None:
         )
     )
 
-    _, short_observation, *_ = step(
+    _, short_observation, _, _, short_action_mask, _ = step(
         config._replace(agent_profile=short_profile),
         state,
         _zero_action(),
         jax.random.key(12),
     )
-    _, visible_observation, *_ = step(
+    _, visible_observation, _, _, visible_action_mask, _ = step(
         config._replace(agent_profile=long_observation_profile),
         state,
         _zero_action(),
         jax.random.key(12),
     )
-    _, targetable_observation, *_ = step(
+    _, _, _, _, targetable_action_mask, _ = step(
         config._replace(agent_profile=long_interaction_profile),
         state,
         _zero_action(),
@@ -230,8 +231,16 @@ def test_profile_radii_control_visibility_and_targetability() -> None:
 
     assert not bool(short_observation.enemy_visibility_mask[0, 0])
     assert bool(visible_observation.enemy_visibility_mask[0, 0])
-    assert not bool(visible_observation.enemy_targetability_mask[0, 0])
-    assert bool(targetable_observation.enemy_targetability_mask[0, 0])
+    enemy_target = 1 + MAX_AGENTS_PER_TEAM
+    assert not bool(
+        short_action_mask.select_target_use_ultimate_joint_mask[0, enemy_target, 0]
+    )
+    assert not bool(
+        visible_action_mask.select_target_use_ultimate_joint_mask[0, enemy_target, 0]
+    )
+    assert bool(
+        targetable_action_mask.select_target_use_ultimate_joint_mask[0, enemy_target, 0]
+    )
 
 
 def test_step_preserves_non_inert_dynamic_memory() -> None:
@@ -313,7 +322,7 @@ def test_step_matches_jit_and_keeps_scan_carry_structure_stable() -> None:
 def test_action_shapes_remain_independent_of_profile_storage() -> None:
     action = _zero_action()
     assert action.move.shape == (MAX_AGENT_SLOTS,)
-    assert action.target.shape == (MAX_AGENT_SLOTS,)
+    assert action.select_target.shape == (MAX_AGENT_SLOTS,)
     assert action.use_ultimate.shape == (MAX_AGENT_SLOTS,)
     assert NUM_TARGET_ACTIONS == MAX_AGENT_SLOTS + 1
     assert NUM_ULTIMATE_ACTIONS == 2

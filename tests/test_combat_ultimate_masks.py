@@ -1,0 +1,677 @@
+"""Semantic and transformation proofs for target-conditioned ultimate masks."""
+
+from typing import cast
+
+import jax
+import jax.numpy as jnp
+import pytest
+from jax import Array
+
+from marl_battlegrounds.core.config import resolve_agent_profile
+from marl_battlegrounds.core.env import step
+from marl_battlegrounds.core.types import (
+    ENVIRONMENT_DIMENSIONS,
+    HUNTER_CLASS_ID,
+    MAGE_CLASS_ID,
+    MAX_AGENT_SLOTS,
+    MAX_AGENTS_PER_TEAM,
+    MAX_OBSTACLE_SLOTS,
+    MOVE_STAY,
+    NEUTRAL_CLASS_ID,
+    NO_TEAM_ID,
+    NUM_SLOW_CHANNELS,
+    NUM_STUN_CHANNELS,
+    NUM_TARGET_ACTIONS,
+    NUM_ULTIMATE_ACTIONS,
+    OBSTACLE_FEATURE_ACTIVE,
+    OBSTACLE_FEATURE_RADIUS,
+    OBSTACLE_FEATURE_TYPE,
+    OBSTACLE_FEATURE_X,
+    OBSTACLE_FEATURE_Y,
+    OBSTACLE_FEATURES,
+    OBSTACLE_TYPE_PILLAR,
+    PRIEST_CLASS_ID,
+    ROGUE_CLASS_ID,
+    STUN_CHANNEL_HUNTER_TRAP,
+    STUN_CHANNEL_ROGUE_POISON,
+    STUN_CHANNEL_WARRIOR_CHARGE,
+    WARRIOR_CLASS_ID,
+    Action,
+    ActionMask,
+    EnvConfig,
+    EnvState,
+    Observation,
+)
+
+_ACTOR_SLOT = 0
+_ALLY_SLOT = 1
+_ENEMY_SLOT = MAX_AGENTS_PER_TEAM
+_NONE_TARGET = 0
+_SELF_TARGET = 1
+_ALLY_TARGET = 2
+_ENEMY_TARGET = 1 + MAX_AGENTS_PER_TEAM
+
+
+def _requested_roster(actor_class_id: int) -> Array:
+    """Return a fixed roster with one actor, one ally, and one enemy."""
+    roster = jnp.full((MAX_AGENT_SLOTS,), NEUTRAL_CLASS_ID, dtype=jnp.int32)
+    roster = roster.at[_ACTOR_SLOT].set(actor_class_id)
+    roster = roster.at[_ALLY_SLOT].set(MAGE_CLASS_ID)
+    roster = roster.at[_ENEMY_SLOT].set(MAGE_CLASS_ID)
+    return roster
+
+
+def _empty_obstacles() -> Array:
+    """Return an inactive fixed-size obstacle table."""
+    return jnp.zeros((MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES), dtype=jnp.float32)
+
+
+def _blocking_pillar() -> Array:
+    """Return one pillar crossing the actor-to-enemy line segment."""
+    obstacles = _empty_obstacles()
+    obstacles = obstacles.at[0, OBSTACLE_FEATURE_TYPE].set(OBSTACLE_TYPE_PILLAR)
+    obstacles = obstacles.at[0, OBSTACLE_FEATURE_X].set(4.0)
+    obstacles = obstacles.at[0, OBSTACLE_FEATURE_Y].set(2.0)
+    obstacles = obstacles.at[0, OBSTACLE_FEATURE_RADIUS].set(0.75)
+    return obstacles.at[0, OBSTACLE_FEATURE_ACTIVE].set(1.0)
+
+
+def _stay_action(*, target: int = 0, use_ultimate: int = 0) -> Action:
+    """Return a joint action with an optional combat choice for the actor."""
+    return Action(
+        move=jnp.full((MAX_AGENT_SLOTS,), MOVE_STAY, dtype=jnp.int32),
+        select_target=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32)
+        .at[_ACTOR_SLOT]
+        .set(target),
+        use_ultimate=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32)
+        .at[_ACTOR_SLOT]
+        .set(use_ultimate),
+    )
+
+
+def _scenario(
+    actor_class_id: int,
+    *,
+    enemy_x: float = 6.0,
+    observation_radius: float = 10.0,
+    basic_radius: float = 10.0,
+    ultimate_radius: float = 10.0,
+    obstacles: Array | None = None,
+) -> tuple[EnvConfig, EnvState]:
+    """Build a deterministic 2v1 scenario with stable relation-local rows."""
+    profile = resolve_agent_profile(
+        _requested_roster(actor_class_id),
+        jnp.asarray((2, 1), dtype=jnp.int32),
+    )
+    profile = profile._replace(
+        base_movement_speeds=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32),
+        observation_radii=profile.observation_radii.at[_ACTOR_SLOT].set(
+            observation_radius
+        ),
+        basic_interaction_radii=profile.basic_interaction_radii.at[_ACTOR_SLOT].set(
+            basic_radius
+        ),
+        ultimate_interaction_radii=profile.ultimate_interaction_radii.at[
+            _ACTOR_SLOT
+        ].set(ultimate_radius),
+    )
+    config = EnvConfig(
+        team_size=2,
+        max_steps=100,
+        map_width=20.0,
+        map_height=12.0,
+        obstacles=_empty_obstacles() if obstacles is None else obstacles,
+        agent_profile=profile,
+    )
+
+    state = EnvState(
+        step_count=jnp.array(0, dtype=jnp.int32),
+        agent_positions=jnp.zeros(
+            (MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS), dtype=jnp.float32
+        )
+        .at[_ACTOR_SLOT]
+        .set(jnp.asarray((2.0, 2.0), dtype=jnp.float32))
+        .at[_ALLY_SLOT]
+        .set(jnp.asarray((3.0, 2.0), dtype=jnp.float32))
+        .at[_ENEMY_SLOT]
+        .set(jnp.asarray((enemy_x, 2.0), dtype=jnp.float32)),
+        alive_mask=profile.active_mask,
+        current_health=profile.max_health,
+        ultimate_cooldowns=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        slow_durations=jnp.zeros((MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.int32),
+        stun_durations=jnp.zeros((MAX_AGENT_SLOTS, NUM_STUN_CHANNELS), dtype=jnp.int32),
+        rogue_poison_anti_heal_durations=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        mage_burst_damage_amplification_durations=jnp.zeros(
+            (MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
+        priest_blessing_of_freedom_slow_floor_durations=jnp.zeros(
+            (MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
+    )
+    return config, state
+
+
+def _outputs(
+    config: EnvConfig,
+    state: EnvState,
+    action: Action | None = None,
+) -> tuple[EnvState, Observation, ActionMask]:
+    """Advance one inert tick and return the Step 4 public surfaces."""
+    next_state, observation, _, _, action_mask, _ = step(
+        config,
+        state,
+        _stay_action() if action is None else action,
+        jax.random.key(7),
+    )
+    return next_state, observation, action_mask
+
+
+def _assert_exact_marginals(action_mask: ActionMask) -> None:
+    """Assert both flat masks are exact views of the authoritative pair mask."""
+    joint_mask = action_mask.select_target_use_ultimate_joint_mask
+    assert joint_mask.shape == (
+        MAX_AGENT_SLOTS,
+        NUM_TARGET_ACTIONS,
+        NUM_ULTIMATE_ACTIONS,
+    )
+    assert joint_mask.dtype == jnp.bool_
+    assert bool(
+        jnp.array_equal(action_mask.select_target_mask, jnp.any(joint_mask, axis=-1))
+    )
+    assert bool(
+        jnp.array_equal(action_mask.use_ultimate_mask, jnp.any(joint_mask, axis=1))
+    )
+
+
+@pytest.mark.parametrize(
+    ("actor_class_id", "legal_ultimate_targets"),
+    [
+        pytest.param(MAGE_CLASS_ID, (_NONE_TARGET,), id="mage-no-target"),
+        pytest.param(WARRIOR_CLASS_ID, (_ENEMY_TARGET,), id="warrior-enemy"),
+        pytest.param(HUNTER_CLASS_ID, (_ENEMY_TARGET,), id="hunter-enemy"),
+        pytest.param(ROGUE_CLASS_ID, (_ENEMY_TARGET,), id="rogue-enemy"),
+        pytest.param(
+            PRIEST_CLASS_ID,
+            (_SELF_TARGET, _ALLY_TARGET),
+            id="priest-allies-including-self",
+        ),
+        pytest.param(NEUTRAL_CLASS_ID, (), id="neutral-unavailable"),
+    ],
+)
+def test_canonical_ultimate_target_relations(
+    actor_class_id: int,
+    legal_ultimate_targets: tuple[int, ...],
+) -> None:
+    """Prove every class exposes only its canonical ultimate target relation."""
+    config, state = _scenario(actor_class_id)
+    _, observation, action_mask = _outputs(config, state)
+
+    expected_ultimate_lane = jnp.zeros((NUM_TARGET_ACTIONS,), dtype=bool)
+    if legal_ultimate_targets:
+        expected_ultimate_lane = expected_ultimate_lane.at[
+            jnp.asarray(legal_ultimate_targets)
+        ].set(True)
+
+    assert bool(
+        jnp.array_equal(
+            action_mask.select_target_use_ultimate_joint_mask[_ACTOR_SLOT, :, 1],
+            expected_ultimate_lane,
+        )
+    )
+    assert "ally_targetability_mask" not in Observation._fields
+    assert "enemy_targetability_mask" not in Observation._fields
+    assert observation.ally_visibility_mask.dtype == jnp.bool_
+    assert observation.enemy_visibility_mask.dtype == jnp.bool_
+    _assert_exact_marginals(action_mask)
+
+
+@pytest.mark.parametrize(
+    ("actor_class_id", "enemy_x", "expects_basic", "expects_ultimate"),
+    [
+        pytest.param(
+            WARRIOR_CLASS_ID,
+            6.0,
+            False,
+            True,
+            id="warrior-ultimate-only",
+        ),
+        pytest.param(
+            HUNTER_CLASS_ID,
+            7.0,
+            True,
+            False,
+            id="hunter-basic-only",
+        ),
+    ],
+)
+def test_basic_and_ultimate_ranges_are_independent(
+    actor_class_id: int,
+    enemy_x: float,
+    expects_basic: bool,
+    expects_ultimate: bool,
+) -> None:
+    """Prove canonical radius asymmetry survives the shared target head."""
+    config, state = _scenario(
+        actor_class_id,
+        enemy_x=enemy_x,
+        basic_radius=0.5 if actor_class_id == WARRIOR_CLASS_ID else 5.5,
+        ultimate_radius=6.0 if actor_class_id == WARRIOR_CLASS_ID else 4.0,
+    )
+    _, _, action_mask = _outputs(config, state)
+    pair = action_mask.select_target_use_ultimate_joint_mask[_ACTOR_SLOT, _ENEMY_TARGET]
+
+    assert bool(pair[0]) is expects_basic
+    assert bool(pair[1]) is expects_ultimate
+    assert bool(action_mask.select_target_mask[_ACTOR_SLOT, _ENEMY_TARGET])
+    _assert_exact_marginals(action_mask)
+
+
+def test_positive_cooldown_disables_only_the_ultimate_lane() -> None:
+    """Prove remaining cooldown gates ultimate use without narrowing basics."""
+    config, state = _scenario(WARRIOR_CLASS_ID, enemy_x=2.25)
+    _, _, available_mask = _outputs(config, state)
+    cooled_down_state = state._replace(
+        ultimate_cooldowns=state.ultimate_cooldowns.at[_ACTOR_SLOT].set(3)
+    )
+    _, _, unavailable_mask = _outputs(config, cooled_down_state)
+
+    assert bool(jnp.any(available_mask.select_target_use_ultimate_joint_mask[0, :, 1]))
+    assert not bool(
+        jnp.any(unavailable_mask.select_target_use_ultimate_joint_mask[0, :, 1])
+    )
+    assert bool(
+        jnp.array_equal(
+            available_mask.select_target_use_ultimate_joint_mask[0, :, 0],
+            unavailable_mask.select_target_use_ultimate_joint_mask[0, :, 0],
+        )
+    )
+    _assert_exact_marginals(unavailable_mask)
+
+
+@pytest.mark.parametrize(
+    "stun_channels",
+    [
+        pytest.param((STUN_CHANNEL_WARRIOR_CHARGE,), id="warrior-charge"),
+        pytest.param((STUN_CHANNEL_HUNTER_TRAP,), id="hunter-trap"),
+        pytest.param((STUN_CHANNEL_ROGUE_POISON,), id="rogue-poison"),
+        pytest.param(
+            (
+                STUN_CHANNEL_WARRIOR_CHARGE,
+                STUN_CHANNEL_HUNTER_TRAP,
+                STUN_CHANNEL_ROGUE_POISON,
+            ),
+            id="simultaneous",
+        ),
+    ],
+)
+def test_actor_stun_removes_nonempty_combat_control(
+    stun_channels: tuple[int, ...],
+) -> None:
+    """Prove every actor stun source preserves only target-none/no-ultimate."""
+    config, state = _scenario(WARRIOR_CLASS_ID, enemy_x=2.25)
+    for channel in stun_channels:
+        state = state._replace(
+            stun_durations=state.stun_durations.at[_ACTOR_SLOT, channel].set(2)
+        )
+
+    _, _, action_mask = _outputs(config, state)
+    actor_pair = action_mask.select_target_use_ultimate_joint_mask[_ACTOR_SLOT]
+
+    assert bool(actor_pair[_NONE_TARGET, 0])
+    assert not bool(jnp.any(actor_pair[1:, 0]))
+    assert not bool(jnp.any(actor_pair[:, 1]))
+    _assert_exact_marginals(action_mask)
+
+
+def test_candidate_stun_changes_its_own_row_but_not_actor_legality() -> None:
+    """Prove stun is actor-side control and rows remain actor-local."""
+    config, state = _scenario(WARRIOR_CLASS_ID, enemy_x=2.25)
+    _, _, control_mask = _outputs(config, state)
+    candidate_stunned = state._replace(
+        stun_durations=state.stun_durations.at[
+            _ENEMY_SLOT, STUN_CHANNEL_HUNTER_TRAP
+        ].set(2)
+    )
+    _, _, changed_mask = _outputs(config, candidate_stunned)
+
+    assert bool(
+        jnp.array_equal(
+            changed_mask.select_target_use_ultimate_joint_mask[_ACTOR_SLOT],
+            control_mask.select_target_use_ultimate_joint_mask[_ACTOR_SLOT],
+        )
+    )
+    assert not bool(
+        jnp.array_equal(
+            changed_mask.select_target_use_ultimate_joint_mask[_ENEMY_SLOT],
+            control_mask.select_target_use_ultimate_joint_mask[_ENEMY_SLOT],
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("actor_active", "actor_alive"),
+    [
+        pytest.param(False, True, id="inactive"),
+        pytest.param(True, False, id="dead"),
+        pytest.param(False, False, id="inactive-and-dead"),
+    ],
+)
+def test_inactive_or_dead_actor_has_no_actionable_pair(
+    actor_active: bool,
+    actor_alive: bool,
+) -> None:
+    """Prove nonparticipating actors have all-false pair and marginal rows."""
+    config, state = _scenario(MAGE_CLASS_ID)
+    profile = config.agent_profile._replace(
+        active_mask=config.agent_profile.active_mask.at[_ACTOR_SLOT].set(actor_active),
+        team_ids=config.agent_profile.team_ids.at[_ACTOR_SLOT].set(
+            config.agent_profile.team_ids[_ACTOR_SLOT] if actor_active else NO_TEAM_ID
+        ),
+    )
+    config = config._replace(agent_profile=profile)
+    state = state._replace(alive_mask=state.alive_mask.at[_ACTOR_SLOT].set(actor_alive))
+
+    _, _, action_mask = _outputs(config, state)
+
+    assert not bool(
+        jnp.any(action_mask.select_target_use_ultimate_joint_mask[_ACTOR_SLOT])
+    )
+    assert not bool(jnp.any(action_mask.select_target_mask[_ACTOR_SLOT]))
+    assert not bool(jnp.any(action_mask.use_ultimate_mask[_ACTOR_SLOT]))
+
+
+@pytest.mark.parametrize(
+    ("candidate_active", "candidate_alive"),
+    [
+        pytest.param(False, True, id="inactive"),
+        pytest.param(True, False, id="dead"),
+        pytest.param(False, False, id="padded"),
+    ],
+)
+def test_inactive_dead_or_padded_candidate_cannot_be_targeted(
+    candidate_active: bool,
+    candidate_alive: bool,
+) -> None:
+    """Prove candidate participation gates both basic and ultimate lanes."""
+    config, state = _scenario(WARRIOR_CLASS_ID, enemy_x=2.25)
+    profile = config.agent_profile._replace(
+        active_mask=config.agent_profile.active_mask.at[_ENEMY_SLOT].set(
+            candidate_active
+        ),
+        team_ids=config.agent_profile.team_ids.at[_ENEMY_SLOT].set(
+            config.agent_profile.team_ids[_ENEMY_SLOT]
+            if candidate_active
+            else NO_TEAM_ID
+        ),
+    )
+    config = config._replace(agent_profile=profile)
+    state = state._replace(
+        alive_mask=state.alive_mask.at[_ENEMY_SLOT].set(candidate_alive)
+    )
+
+    _, _, action_mask = _outputs(config, state)
+
+    assert not bool(
+        jnp.any(
+            action_mask.select_target_use_ultimate_joint_mask[
+                _ACTOR_SLOT, _ENEMY_TARGET
+            ]
+        )
+    )
+
+
+def test_no_team_sentinels_never_form_combat_relations() -> None:
+    """Prove equal padding sentinels are neither allies nor enemies."""
+    config, state = _scenario(PRIEST_CLASS_ID)
+    no_team_ids = config.agent_profile.team_ids.at[_ACTOR_SLOT].set(NO_TEAM_ID)
+    no_team_ids = no_team_ids.at[_ALLY_SLOT].set(NO_TEAM_ID)
+    config = config._replace(
+        agent_profile=config.agent_profile._replace(team_ids=no_team_ids)
+    )
+
+    _, _, action_mask = _outputs(config, state)
+    actor_pair = action_mask.select_target_use_ultimate_joint_mask[_ACTOR_SLOT]
+
+    assert bool(actor_pair[_NONE_TARGET, 0])
+    assert not bool(jnp.any(actor_pair[1:]))
+
+
+@pytest.mark.parametrize("health_fraction", [0.0, 1.0], ids=["zero", "full"])
+def test_priest_ultimate_legality_is_independent_of_ally_health(
+    health_fraction: float,
+) -> None:
+    """Prove health magnitude does not replace the liveness contract."""
+    config, state = _scenario(PRIEST_CLASS_ID)
+    state = state._replace(
+        current_health=state.current_health.at[_ALLY_SLOT].set(
+            config.agent_profile.max_health[_ALLY_SLOT] * health_fraction
+        )
+    )
+
+    _, _, action_mask = _outputs(config, state)
+
+    assert bool(
+        action_mask.select_target_use_ultimate_joint_mask[_ACTOR_SLOT, _ALLY_TARGET, 1]
+    )
+
+
+def test_unrelated_statuses_do_not_gate_ultimate_legality() -> None:
+    """Prove only stun and cooldown affect actor-side ultimate availability."""
+    config, state = _scenario(WARRIOR_CLASS_ID, enemy_x=2.25)
+    _, _, control_mask = _outputs(config, state)
+    changed_state = state._replace(
+        slow_durations=state.slow_durations.at[_ACTOR_SLOT, 0].set(4),
+        rogue_poison_anti_heal_durations=(
+            state.rogue_poison_anti_heal_durations.at[_ACTOR_SLOT].set(4)
+        ),
+        mage_burst_damage_amplification_durations=(
+            state.mage_burst_damage_amplification_durations.at[_ACTOR_SLOT].set(4)
+        ),
+        priest_blessing_of_freedom_slow_floor_durations=(
+            state.priest_blessing_of_freedom_slow_floor_durations.at[_ACTOR_SLOT].set(4)
+        ),
+    )
+    _, _, changed_mask = _outputs(config, changed_state)
+
+    assert bool(
+        jnp.array_equal(
+            changed_mask.select_target_use_ultimate_joint_mask[_ACTOR_SLOT],
+            control_mask.select_target_use_ultimate_joint_mask[_ACTOR_SLOT],
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("enemy_x", "expects_ultimate"),
+    [
+        pytest.param(6.0, True, id="inclusive-boundary"),
+        pytest.param(6.001, False, id="outside-boundary"),
+    ],
+)
+def test_ultimate_range_boundary_is_inclusive(
+    enemy_x: float,
+    expects_ultimate: bool,
+) -> None:
+    """Prove targeted-ultimate range uses the documented inclusive boundary."""
+    config, state = _scenario(
+        WARRIOR_CLASS_ID,
+        enemy_x=enemy_x,
+        basic_radius=0.5,
+        ultimate_radius=4.0,
+    )
+    _, _, action_mask = _outputs(config, state)
+
+    assert (
+        bool(
+            action_mask.select_target_use_ultimate_joint_mask[
+                _ACTOR_SLOT, _ENEMY_TARGET, 1
+            ]
+        )
+        is expects_ultimate
+    )
+
+
+def test_blocked_los_disables_targeted_ultimate() -> None:
+    """Prove targeted ultimates consume the established LOS visibility truth."""
+    config, state = _scenario(
+        WARRIOR_CLASS_ID,
+        obstacles=_blocking_pillar(),
+    )
+    _, observation, action_mask = _outputs(config, state)
+
+    assert not bool(observation.enemy_visibility_mask[_ACTOR_SLOT, 0])
+    assert not bool(
+        jnp.any(
+            action_mask.select_target_use_ultimate_joint_mask[
+                _ACTOR_SLOT, _ENEMY_TARGET
+            ]
+        )
+    )
+
+
+def test_hidden_candidate_changes_do_not_leak_through_actor_outputs() -> None:
+    """Prove hidden state and hidden-preserving movement are observationally equal."""
+    config, state = _scenario(
+        WARRIOR_CLASS_ID,
+        enemy_x=8.0,
+        observation_radius=3.0,
+    )
+    _, control_observation, control_mask = _outputs(config, state)
+    hidden_changed_state = state._replace(
+        agent_positions=state.agent_positions.at[_ENEMY_SLOT].set(
+            jnp.asarray((10.0, 2.0), dtype=jnp.float32)
+        ),
+        current_health=state.current_health.at[_ENEMY_SLOT].set(1.0),
+        ultimate_cooldowns=state.ultimate_cooldowns.at[_ENEMY_SLOT].set(9),
+        slow_durations=state.slow_durations.at[_ENEMY_SLOT, 1].set(5),
+        stun_durations=state.stun_durations.at[_ENEMY_SLOT, 2].set(5),
+    )
+    _, changed_observation, changed_mask = _outputs(config, hidden_changed_state)
+
+    assert not bool(control_observation.enemy_visibility_mask[_ACTOR_SLOT, 0])
+    assert not bool(changed_observation.enemy_visibility_mask[_ACTOR_SLOT, 0])
+    assert bool(
+        jnp.array_equal(
+            control_observation.enemy_unit_features[_ACTOR_SLOT],
+            changed_observation.enemy_unit_features[_ACTOR_SLOT],
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            control_mask.select_target_use_ultimate_joint_mask[_ACTOR_SLOT],
+            changed_mask.select_target_use_ultimate_joint_mask[_ACTOR_SLOT],
+        )
+    )
+
+
+def test_submitted_combat_heads_remain_effect_inert() -> None:
+    """Prove Step 4 does not pull pair acceptance or combat effects forward."""
+    config, state = _scenario(WARRIOR_CLASS_ID, enemy_x=2.25)
+    neutral_outputs = step(
+        config,
+        state,
+        _stay_action(),
+        jax.random.key(8),
+    )
+    submitted_outputs = step(
+        config,
+        state,
+        _stay_action(target=_ENEMY_TARGET, use_ultimate=1),
+        jax.random.key(8),
+    )
+
+    for neutral_leaf, submitted_leaf in zip(
+        jax.tree_util.tree_leaves(neutral_outputs),
+        jax.tree_util.tree_leaves(submitted_outputs),
+        strict=True,
+    ):
+        assert bool(jnp.array_equal(neutral_leaf, submitted_leaf))
+
+
+def test_jitted_step_matches_eager_pair_semantics() -> None:
+    """Prove compiled outputs preserve meaningful pair and marginal values."""
+    config, state = _scenario(WARRIOR_CLASS_ID, enemy_x=6.0, basic_radius=0.5)
+    eager = _outputs(config, state)
+    compiled_state, compiled_observation, _, _, compiled_mask, _ = cast(
+        tuple[EnvState, Observation, object, object, ActionMask, object],
+        jax.jit(step)(config, state, _stay_action(), jax.random.key(7)),
+    )
+
+    assert bool(jnp.array_equal(compiled_state.step_count, eager[0].step_count))
+    assert bool(
+        jnp.array_equal(
+            compiled_observation.enemy_visibility_mask,
+            eager[1].enemy_visibility_mask,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            compiled_mask.select_target_use_ultimate_joint_mask,
+            eager[2].select_target_use_ultimate_joint_mask,
+        )
+    )
+    assert not bool(
+        compiled_mask.select_target_use_ultimate_joint_mask[
+            _ACTOR_SLOT, _ENEMY_TARGET, 0
+        ]
+    )
+    assert bool(
+        compiled_mask.select_target_use_ultimate_joint_mask[
+            _ACTOR_SLOT, _ENEMY_TARGET, 1
+        ]
+    )
+    _assert_exact_marginals(compiled_mask)
+
+
+def test_scanned_rollout_preserves_meaningful_pair_history() -> None:
+    """Prove a compiled scan retains fixed shapes and ultimate-only semantics."""
+    horizon = 3
+    config, state = _scenario(WARRIOR_CLASS_ID, enemy_x=6.0, basic_radius=0.5)
+    keys = jax.random.split(jax.random.key(10), horizon)
+
+    def _scan_step(
+        carry: EnvState,
+        step_key: Array,
+    ) -> tuple[EnvState, tuple[Array, Array, Array]]:
+        next_state, _, _, _, action_mask, _ = step(
+            config,
+            carry,
+            _stay_action(),
+            step_key,
+        )
+        return next_state, (
+            action_mask.select_target_use_ultimate_joint_mask,
+            action_mask.select_target_mask,
+            action_mask.use_ultimate_mask,
+        )
+
+    def _rollout(
+        initial_state: EnvState,
+        scan_keys: Array,
+    ) -> tuple[EnvState, tuple[Array, Array, Array]]:
+        """Run the fixed-horizon transition under one compiled scan."""
+        return jax.lax.scan(_scan_step, initial_state, scan_keys)
+
+    final_state, (joint_history, target_history, ultimate_history) = cast(
+        tuple[EnvState, tuple[Array, Array, Array]],
+        jax.jit(_rollout)(state, keys),
+    )
+
+    assert final_state.step_count == horizon
+    assert joint_history.shape == (
+        horizon,
+        MAX_AGENT_SLOTS,
+        NUM_TARGET_ACTIONS,
+        NUM_ULTIMATE_ACTIONS,
+    )
+    assert joint_history.dtype == jnp.bool_
+    assert target_history.shape == (horizon, MAX_AGENT_SLOTS, NUM_TARGET_ACTIONS)
+    assert ultimate_history.shape == (
+        horizon,
+        MAX_AGENT_SLOTS,
+        NUM_ULTIMATE_ACTIONS,
+    )
+    assert not bool(jnp.any(joint_history[:, _ACTOR_SLOT, _ENEMY_TARGET, 0]))
+    assert bool(jnp.all(joint_history[:, _ACTOR_SLOT, _ENEMY_TARGET, 1]))
+    assert bool(jnp.array_equal(target_history, jnp.any(joint_history, axis=-1)))
+    assert bool(jnp.array_equal(ultimate_history, jnp.any(joint_history, axis=2)))

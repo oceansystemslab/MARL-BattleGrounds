@@ -239,7 +239,7 @@ def _joint_action_with_moves(*rows: tuple[int, int]) -> Action:
 
     return Action(
         move=joint_action_moves,
-        target=joint_action_targets,
+        select_target=joint_action_targets,
         use_ultimate=joint_action_ults,
     )
 
@@ -427,36 +427,41 @@ def _state_two_versus_two_game(
 
 
 def _assert_targetability_masks_match(
-    observation: Observation,
+    action_mask: ActionMask,
     expected_ally: Array,
     expected_enemy: Array,
 ) -> None:
-    """Assert relation-local targetability masks have exact expected values."""
-    assert observation.ally_targetability_mask.shape == (
-        MAX_AGENT_SLOTS,
-        MAX_AGENTS_PER_TEAM,
-    )
-    assert observation.enemy_targetability_mask.shape == (
-        MAX_AGENT_SLOTS,
-        MAX_AGENTS_PER_TEAM,
-    )
-    assert observation.ally_targetability_mask.dtype == bool
-    assert observation.enemy_targetability_mask.dtype == bool
+    """Assert relation-local basic legality in the joint mask's lane zero."""
+    basic_lane = action_mask.select_target_use_ultimate_joint_mask[..., 0]
+    ally_basic = basic_lane[:, 1 : 1 + MAX_AGENTS_PER_TEAM]
+    enemy_basic = basic_lane[:, 1 + MAX_AGENTS_PER_TEAM :]
 
-    assert bool(jnp.array_equal(observation.ally_targetability_mask, expected_ally))
-    assert bool(jnp.array_equal(observation.enemy_targetability_mask, expected_enemy))
+    assert ally_basic.shape == (
+        MAX_AGENT_SLOTS,
+        MAX_AGENTS_PER_TEAM,
+    )
+    assert enemy_basic.shape == (MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM)
+    assert ally_basic.dtype == bool
+    assert enemy_basic.dtype == bool
+
+    assert bool(jnp.array_equal(ally_basic, expected_ally))
+    assert bool(jnp.array_equal(enemy_basic, expected_enemy))
 
 
 def _assert_targetability_never_exceeds_visibility(
     observation: Observation,
+    action_mask: ActionMask,
 ) -> None:
-    """Assert targetability is always a subset of visibility."""
+    """Assert unit-target legality is always a subset of visibility."""
+    joint_mask = action_mask.select_target_use_ultimate_joint_mask
+    ally_targetability = jnp.any(joint_mask[:, 1 : 1 + MAX_AGENTS_PER_TEAM, :], axis=-1)
+    enemy_targetability = jnp.any(joint_mask[:, 1 + MAX_AGENTS_PER_TEAM :, :], axis=-1)
     illegal_ally_targetability = jnp.logical_and(
-        observation.ally_targetability_mask,
+        ally_targetability,
         jnp.logical_not(observation.ally_visibility_mask),
     )
     illegal_enemy_targetability = jnp.logical_and(
-        observation.enemy_targetability_mask,
+        enemy_targetability,
         jnp.logical_not(observation.enemy_visibility_mask),
     )
 
@@ -464,7 +469,7 @@ def _assert_targetability_never_exceeds_visibility(
     assert not bool(jnp.any(illegal_enemy_targetability))
 
 
-def _assert_flat_target_mask_matches_relation_targetability(
+def _assert_basic_lane_matches_relation_targetability(
     *,
     action_mask: ActionMask,
     state: EnvState,
@@ -472,7 +477,7 @@ def _assert_flat_target_mask_matches_relation_targetability(
     expected_ally: Array,
     expected_enemy: Array,
 ) -> None:
-    """Assert flat target mask derives from none + ally/enemy targetability."""
+    """Assert joint-mask lane zero preserves accepted basic legality."""
     active_alive_mask_bc = jnp.logical_and(
         config.agent_profile.active_mask, state.alive_mask
     )[:, None]
@@ -490,25 +495,26 @@ def _assert_flat_target_mask_matches_relation_targetability(
         active_alive_mask_bc,
     )
 
-    assert action_mask.target.shape == (MAX_AGENT_SLOTS, NUM_TARGET_ACTIONS)
-    assert action_mask.target.dtype == bool
-    assert bool(jnp.array_equal(action_mask.target, expected_target_mask))
+    basic_lane = action_mask.select_target_use_ultimate_joint_mask[..., 0]
+    assert basic_lane.shape == (MAX_AGENT_SLOTS, NUM_TARGET_ACTIONS)
+    assert basic_lane.dtype == bool
+    assert bool(jnp.array_equal(basic_lane, expected_target_mask))
 
     assert bool(
         jnp.array_equal(
-            action_mask.target[:, 0],
+            basic_lane[:, 0],
             jnp.logical_and(config.agent_profile.active_mask, state.alive_mask),
         )
     )
     assert bool(
         jnp.array_equal(
-            action_mask.target[:, 1 : 1 + MAX_AGENTS_PER_TEAM],
+            basic_lane[:, 1 : 1 + MAX_AGENTS_PER_TEAM],
             jnp.logical_and(expected_ally, active_alive_mask_bc),
         )
     )
     assert bool(
         jnp.array_equal(
-            action_mask.target[:, 1 + MAX_AGENTS_PER_TEAM :],
+            basic_lane[:, 1 + MAX_AGENTS_PER_TEAM :],
             jnp.logical_and(expected_enemy, active_alive_mask_bc),
         )
     )
@@ -720,12 +726,12 @@ def test_reset_padded_self_rows_are_deterministic_inactive_dummy_rows() -> None:
         )
     )
     assert bool(jnp.array_equal(first_state.alive_mask, second_state.alive_mask))
-    assert not bool(jnp.any(first_action_mask.move[inactive_mask, :]))
-    assert not bool(jnp.any(first_action_mask.target[inactive_mask, :]))
-    assert not bool(jnp.any(first_action_mask.use_ultimate[inactive_mask, :]))
-    assert not bool(jnp.any(second_action_mask.move[inactive_mask, :]))
-    assert not bool(jnp.any(second_action_mask.target[inactive_mask, :]))
-    assert not bool(jnp.any(second_action_mask.use_ultimate[inactive_mask, :]))
+    assert not bool(jnp.any(first_action_mask.move_mask[inactive_mask, :]))
+    assert not bool(jnp.any(first_action_mask.select_target_mask[inactive_mask, :]))
+    assert not bool(jnp.any(first_action_mask.use_ultimate_mask[inactive_mask, :]))
+    assert not bool(jnp.any(second_action_mask.move_mask[inactive_mask, :]))
+    assert not bool(jnp.any(second_action_mask.select_target_mask[inactive_mask, :]))
+    assert not bool(jnp.any(second_action_mask.use_ultimate_mask[inactive_mask, :]))
 
 
 def test_active_dead_self_rows_remain_active_but_not_actionable() -> None:
@@ -750,9 +756,9 @@ def test_active_dead_self_rows_remain_active_but_not_actionable() -> None:
 
     assert observation.self_features[0, AGENT_FEATURE_ACTIVE] == 1.0
     assert observation.self_features[0, AGENT_FEATURE_ALIVE] == 0.0
-    assert not bool(jnp.any(action_mask.move[0, :]))
-    assert not bool(jnp.any(action_mask.target[0, :]))
-    assert not bool(jnp.any(action_mask.use_ultimate[0, :]))
+    assert not bool(jnp.any(action_mask.move_mask[0, :]))
+    assert not bool(jnp.any(action_mask.select_target_mask[0, :]))
+    assert not bool(jnp.any(action_mask.use_ultimate_mask[0, :]))
 
 
 def test_visibility_uses_state_observation_radii_not_config_default() -> None:
@@ -1474,9 +1480,9 @@ def test_active_dead_rows_remain_active_but_candidate_rows_actions_are_masked() 
     assert observation.self_features[0, AGENT_FEATURE_ACTIVE] == 1.0
     assert observation.self_features[0, AGENT_FEATURE_ALIVE] == 0.0
 
-    _assert_action_mask_row_is_false(action_mask.move[0])
-    _assert_action_mask_row_is_false(action_mask.target[0])
-    _assert_action_mask_row_is_false(action_mask.use_ultimate[0])
+    _assert_action_mask_row_is_false(action_mask.move_mask[0])
+    _assert_action_mask_row_is_false(action_mask.select_target_mask[0])
+    _assert_action_mask_row_is_false(action_mask.use_ultimate_mask[0])
 
     assert not bool(observation.enemy_visibility_mask[MAX_AGENTS_PER_TEAM, 0])
     _assert_unit_feature_row_is_zero(
@@ -1689,9 +1695,9 @@ def test_basic_targetability_masks(
         jax.random.key(42),
     )
 
-    _assert_targetability_masks_match(observation, expected_ally, expected_enemy)
-    _assert_targetability_never_exceeds_visibility(observation)
-    _assert_flat_target_mask_matches_relation_targetability(
+    _assert_targetability_masks_match(action_mask, expected_ally, expected_enemy)
+    _assert_targetability_never_exceeds_visibility(observation, action_mask)
+    _assert_basic_lane_matches_relation_targetability(
         action_mask=action_mask,
         state=next_state,
         config=config,
@@ -1734,15 +1740,15 @@ def test_basic_targetability_uses_observer_specific_basic_interaction_radius() -
         enemy_rows=((1, jnp.array([True, False, False, False, False])),),
     )
 
-    next_state, observation, _, _, action_mask, _ = step(
+    next_state, _, _, _, action_mask, _ = step(
         config,
         state,
         _joint_action_with_moves(),
         jax.random.key(42),
     )
 
-    _assert_targetability_masks_match(observation, expected_ally, expected_enemy)
-    _assert_flat_target_mask_matches_relation_targetability(
+    _assert_targetability_masks_match(action_mask, expected_ally, expected_enemy)
+    _assert_basic_lane_matches_relation_targetability(
         action_mask=action_mask,
         state=next_state,
         config=config,
@@ -1777,8 +1783,9 @@ def test_observation_radius_does_not_substitute_for_basic_interaction_radius() -
     )
 
     assert bool(observation.enemy_visibility_mask[0, 0])
-    assert not bool(observation.enemy_targetability_mask[0, 0])
-    assert not bool(action_mask.target[0, 1 + MAX_AGENTS_PER_TEAM])
+    assert not bool(
+        action_mask.select_target_use_ultimate_joint_mask[0, 1 + MAX_AGENTS_PER_TEAM, 0]
+    )
 
 
 def test_ultimate_interaction_radius_does_not_affect_basic_targetability() -> None:
@@ -1807,8 +1814,9 @@ def test_ultimate_interaction_radius_does_not_affect_basic_targetability() -> No
     )
 
     assert bool(observation.enemy_visibility_mask[0, 0])
-    assert not bool(observation.enemy_targetability_mask[0, 0])
-    assert not bool(action_mask.target[0, 1 + MAX_AGENTS_PER_TEAM])
+    assert not bool(
+        action_mask.select_target_use_ultimate_joint_mask[0, 1 + MAX_AGENTS_PER_TEAM, 0]
+    )
 
 
 def test_inactive_and_dead_observers_have_no_target_choices() -> None:
@@ -1829,20 +1837,21 @@ def test_inactive_and_dead_observers_have_no_target_choices() -> None:
         effective_basic_interaction_radius=5.0,
     )
 
-    _, observation, _, _, action_mask, _ = step(
+    _, _, _, _, action_mask, _ = step(
         config,
         state,
         _joint_action_with_moves(),
         jax.random.key(42),
     )
 
-    _assert_action_mask_row_is_false(action_mask.target[0])
-    _assert_action_mask_row_is_false(action_mask.target[1])
-
-    assert not bool(jnp.any(observation.ally_targetability_mask[0]))
-    assert not bool(jnp.any(observation.enemy_targetability_mask[0]))
-    assert not bool(jnp.any(observation.ally_targetability_mask[1]))
-    assert not bool(jnp.any(observation.enemy_targetability_mask[1]))
+    _assert_action_mask_row_is_false(action_mask.select_target_mask[0])
+    _assert_action_mask_row_is_false(action_mask.select_target_mask[1])
+    _assert_action_mask_row_is_false(
+        action_mask.select_target_use_ultimate_joint_mask[0]
+    )
+    _assert_action_mask_row_is_false(
+        action_mask.select_target_use_ultimate_joint_mask[1]
+    )
 
 
 def test_none_target_selection_is_valid_only_for_active_alive_observers() -> None:
@@ -1872,11 +1881,13 @@ def test_none_target_selection_is_valid_only_for_active_alive_observers() -> Non
         next_state.alive_mask,
     )
 
-    assert bool(jnp.array_equal(action_mask.target[:, 0], expected_none_column))
+    assert bool(
+        jnp.array_equal(action_mask.select_target_mask[:, 0], expected_none_column)
+    )
 
 
-def test_ultimate_use_remains_unavailable_in_milestone_5_step_3() -> None:
-    """Assert Step 3 does not introduce ultimate availability."""
+def test_step_4_exposes_class_specific_ultimate_availability() -> None:
+    """Assert eligible canonical classes expose an ultimate-use marginal."""
     config = _deterministic_config()
     config, state = _state_two_versus_two_game(
         config,
@@ -1904,8 +1915,14 @@ def test_ultimate_use_remains_unavailable_in_milestone_5_step_3() -> None:
         config.agent_profile.active_mask, next_state.alive_mask
     )
 
-    assert bool(jnp.array_equal(action_mask.use_ultimate[:, 0], active_alive))
-    assert not bool(jnp.any(action_mask.use_ultimate[:, 1]))
+    assert bool(jnp.array_equal(action_mask.use_ultimate_mask[:, 0], active_alive))
+    assert bool(jnp.array_equal(action_mask.use_ultimate_mask[:, 1], active_alive))
+    assert bool(
+        jnp.array_equal(
+            action_mask.select_target_mask,
+            jnp.any(action_mask.select_target_use_ultimate_joint_mask, axis=-1),
+        )
+    )
 
 
 def test_jitted_nonstay_step_preserves_observation_mask_contracts() -> None:
@@ -1980,26 +1997,38 @@ def test_jitted_nonstay_step_preserves_observation_mask_contracts() -> None:
     )
     assert bool(
         jnp.array_equal(
-            compiled_observation.ally_targetability_mask,
-            eager_observation.ally_targetability_mask,
+            compiled_action_mask.select_target_mask,
+            eager_action_mask.select_target_mask,
         )
     )
     assert bool(
         jnp.array_equal(
-            compiled_observation.enemy_targetability_mask,
-            eager_observation.enemy_targetability_mask,
+            compiled_action_mask.use_ultimate_mask,
+            eager_action_mask.use_ultimate_mask,
         )
     )
-    assert bool(jnp.array_equal(compiled_action_mask.target, eager_action_mask.target))
-    assert bool(jnp.any(compiled_observation.enemy_targetability_mask))
+    assert bool(
+        jnp.array_equal(
+            compiled_action_mask.select_target_use_ultimate_joint_mask,
+            eager_action_mask.select_target_use_ultimate_joint_mask,
+        )
+    )
+    assert bool(
+        jnp.any(compiled_action_mask.select_target_use_ultimate_joint_mask[..., 0])
+    )
 
-    _assert_targetability_never_exceeds_visibility(compiled_observation)
-    _assert_flat_target_mask_matches_relation_targetability(
+    _assert_targetability_never_exceeds_visibility(
+        compiled_observation, compiled_action_mask
+    )
+    compiled_basic_lane = compiled_action_mask.select_target_use_ultimate_joint_mask[
+        ..., 0
+    ]
+    _assert_basic_lane_matches_relation_targetability(
         action_mask=compiled_action_mask,
         state=compiled_state,
         config=config,
-        expected_ally=compiled_observation.ally_targetability_mask,
-        expected_enemy=compiled_observation.enemy_targetability_mask,
+        expected_ally=compiled_basic_lane[:, 1 : 1 + MAX_AGENTS_PER_TEAM],
+        expected_enemy=compiled_basic_lane[:, 1 + MAX_AGENTS_PER_TEAM :],
     )
 
 
@@ -2030,7 +2059,7 @@ def test_scanned_rollout_emits_stable_observation_mask_history() -> None:
     def _rollout_step(
         carry: EnvState,
         step_key: Array,
-    ) -> tuple[EnvState, tuple[Array, Array, Array, Array, Array, Array]]:
+    ) -> tuple[EnvState, tuple[Array, Array, Array, Array, Array]]:
         next_state, observation, _, _, action_mask, _ = step(
             config,
             carry,
@@ -2040,16 +2069,15 @@ def test_scanned_rollout_emits_stable_observation_mask_history() -> None:
         return next_state, (
             observation.ally_visibility_mask,
             observation.enemy_visibility_mask,
-            observation.ally_targetability_mask,
-            observation.enemy_targetability_mask,
-            action_mask.target,
-            action_mask.use_ultimate,
+            action_mask.select_target_use_ultimate_joint_mask,
+            action_mask.select_target_mask,
+            action_mask.use_ultimate_mask,
         )
 
     def _rollout(
         initial_state: EnvState,
         step_keys: Array,
-    ) -> tuple[EnvState, tuple[Array, Array, Array, Array, Array, Array]]:
+    ) -> tuple[EnvState, tuple[Array, Array, Array, Array, Array]]:
         """Run a compiled fixed-horizon rollout with mask history."""
         return jax.lax.scan(
             _rollout_step,
@@ -2059,14 +2087,13 @@ def test_scanned_rollout_emits_stable_observation_mask_history() -> None:
         )
 
     final_state, history = cast(
-        tuple[EnvState, tuple[Array, Array, Array, Array, Array, Array]],
+        tuple[EnvState, tuple[Array, Array, Array, Array, Array]],
         jax.jit(_rollout)(state, keys),
     )
     (
         ally_visibility_history,
         enemy_visibility_history,
-        ally_targetability_history,
-        enemy_targetability_history,
+        joint_mask_history,
         target_mask_history,
         ultimate_mask_history,
     ) = history
@@ -2082,8 +2109,12 @@ def test_scanned_rollout_emits_stable_observation_mask_history() -> None:
         MAX_AGENT_SLOTS,
         MAX_AGENTS_PER_TEAM,
     )
-    assert ally_targetability_history.shape == ally_visibility_history.shape
-    assert enemy_targetability_history.shape == enemy_visibility_history.shape
+    assert joint_mask_history.shape == (
+        horizon,
+        MAX_AGENT_SLOTS,
+        NUM_TARGET_ACTIONS,
+        NUM_ULTIMATE_ACTIONS,
+    )
     assert target_mask_history.shape == (horizon, MAX_AGENT_SLOTS, NUM_TARGET_ACTIONS)
     assert ultimate_mask_history.shape == (
         horizon,
@@ -2093,15 +2124,20 @@ def test_scanned_rollout_emits_stable_observation_mask_history() -> None:
 
     assert ally_visibility_history.dtype == bool
     assert enemy_visibility_history.dtype == bool
-    assert ally_targetability_history.dtype == bool
-    assert enemy_targetability_history.dtype == bool
+    assert joint_mask_history.dtype == bool
     assert target_mask_history.dtype == bool
     assert ultimate_mask_history.dtype == bool
 
+    ally_unit_legality = jnp.any(
+        joint_mask_history[:, :, 1 : 1 + MAX_AGENTS_PER_TEAM, :], axis=-1
+    )
+    enemy_unit_legality = jnp.any(
+        joint_mask_history[:, :, 1 + MAX_AGENTS_PER_TEAM :, :], axis=-1
+    )
     assert not bool(
         jnp.any(
             jnp.logical_and(
-                ally_targetability_history,
+                ally_unit_legality,
                 jnp.logical_not(ally_visibility_history),
             )
         )
@@ -2109,29 +2145,14 @@ def test_scanned_rollout_emits_stable_observation_mask_history() -> None:
     assert not bool(
         jnp.any(
             jnp.logical_and(
-                enemy_targetability_history,
+                enemy_unit_legality,
                 jnp.logical_not(enemy_visibility_history),
             )
         )
     )
-    assert bool(jnp.any(ally_targetability_history))
-    assert bool(jnp.any(enemy_targetability_history))
-
-    expected_target_history = jnp.concatenate(
-        (
-            jnp.ones((horizon, MAX_AGENT_SLOTS, 1), dtype=bool),
-            ally_targetability_history,
-            enemy_targetability_history,
-        ),
-        axis=2,
+    assert bool(jnp.any(joint_mask_history[..., 0]))
+    assert bool(jnp.any(joint_mask_history[..., 1]))
+    assert bool(jnp.array_equal(target_mask_history, jnp.any(joint_mask_history, -1)))
+    assert bool(
+        jnp.array_equal(ultimate_mask_history, jnp.any(joint_mask_history, axis=2))
     )
-    active_alive = jnp.logical_and(
-        config.agent_profile.active_mask, final_state.alive_mask
-    )
-    expected_target_history = jnp.logical_and(
-        expected_target_history,
-        active_alive[None, :, None],
-    )
-
-    assert bool(jnp.array_equal(target_mask_history, expected_target_history))
-    assert not bool(jnp.any(ultimate_mask_history[:, :, 1]))

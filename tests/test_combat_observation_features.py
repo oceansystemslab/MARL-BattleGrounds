@@ -168,7 +168,7 @@ def _action(*, east_slots: Sequence[int] = ()) -> Action:
         move = move.at[slot].set(MOVE_EAST)
     return Action(
         move=move,
-        target=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        select_target=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
         use_ultimate=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
     )
 

@@ -86,7 +86,10 @@ _FLOAT_CLASS_CATALOG_NAMES: tuple[str, ...] = (
     "OBSERVATION_RADIUS_BY_CLASS",
 )
 
-_INTEGER_CLASS_CATALOG_NAMES: tuple[str, ...] = ("ULTIMATE_COOLDOWN_BY_CLASS",)
+_INTEGER_CLASS_CATALOG_NAMES: tuple[str, ...] = (
+    "ULTIMATE_COOLDOWN_BY_CLASS",
+    "ULTIMATE_TARGET_MODE_BY_CLASS",
+)
 
 _CLASS_CATALOG_NAMES: tuple[str, ...] = (
     *_FLOAT_CLASS_CATALOG_NAMES,
@@ -109,6 +112,7 @@ _CLASS_CATALOG_HELPER_NAMES: tuple[tuple[str, str], ...] = (
     ),
     ("ULTIMATE_COOLDOWN_BY_CLASS", "get_ultimate_cooldown_by_class_ids"),
     ("OBSERVATION_RADIUS_BY_CLASS", "get_observation_radius_by_class_ids"),
+    ("ULTIMATE_TARGET_MODE_BY_CLASS", "get_ultimate_target_mode_by_class_ids"),
 )
 
 _CatalogHelper = Callable[[int | Array], Array]
@@ -403,6 +407,30 @@ def test_mage_burst_is_representable_as_no_target_self_buff() -> None:
     assert bool(combat.ULTIMATE_INTERACTION_RADIUS_BY_CLASS[MAGE_CLASS_ID] == 0)
     assert combat.MAGE_ULT_DAMAGE_DURATION_TICKS > 0
     assert combat.MAGE_ULT_DAMAGE_MULTIPLIER > 1.0
+
+
+def test_ultimate_target_modes_are_distinct_and_class_aligned() -> None:
+    """Prove neutral, no-target, ally, and enemy semantics cannot collapse."""
+    modes = (
+        combat.NO_ULTIMATE_MODE,
+        combat.ONLY_NONE_TARGET_ULTIMATE_MODE,
+        combat.ONLY_ALLY_TARGET_ULTIMATE_MODE,
+        combat.ONLY_ENEMY_TARGET_ULTIMATE_MODE,
+    )
+    expected_catalog = jnp.asarray(
+        (
+            combat.NO_ULTIMATE_MODE,
+            combat.ONLY_NONE_TARGET_ULTIMATE_MODE,
+            combat.ONLY_ENEMY_TARGET_ULTIMATE_MODE,
+            combat.ONLY_ENEMY_TARGET_ULTIMATE_MODE,
+            combat.ONLY_ENEMY_TARGET_ULTIMATE_MODE,
+            combat.ONLY_ALLY_TARGET_ULTIMATE_MODE,
+        ),
+        dtype=jnp.int32,
+    )
+
+    assert len(set(modes)) == len(modes)
+    assert bool(jnp.array_equal(combat.ULTIMATE_TARGET_MODE_BY_CLASS, expected_catalog))
 
 
 def test_status_mechanic_defaults_are_scalar_parameters() -> None:
@@ -755,9 +783,9 @@ def test_reset_produces_correct_active_class_ids_and_class_stats(
     _assert_reset_combat_state_is_inert(state)
     _assert_self_features_project_state(obs, state, config)
 
-    assert not bool(jnp.any(action_mask.move[~expected_active_mask]))
-    assert not bool(jnp.any(action_mask.target[~expected_active_mask]))
-    assert not bool(jnp.any(action_mask.use_ultimate[~expected_active_mask]))
+    assert not bool(jnp.any(action_mask.move_mask[~expected_active_mask]))
+    assert not bool(jnp.any(action_mask.select_target_mask[~expected_active_mask]))
+    assert not bool(jnp.any(action_mask.use_ultimate_mask[~expected_active_mask]))
 
 
 def test_reset_neutralizes_inactive_slots_even_when_supplied_classes_non_neutral() -> (

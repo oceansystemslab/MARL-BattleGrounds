@@ -348,7 +348,7 @@ def _joint_action_with_moves(*rows: tuple[int, int]) -> Action:
 
     return Action(
         move=joint_action_moves,
-        target=joint_action_targets,
+        select_target=joint_action_targets,
         use_ultimate=joint_action_ults,
     )
 
@@ -463,32 +463,39 @@ def _assert_observation_contract(observation: Observation) -> None:
     )
     assert observation.enemy_visibility_mask.dtype == bool
 
-    assert observation.ally_targetability_mask.shape == (
-        MAX_AGENT_SLOTS,
-        MAX_AGENTS_PER_TEAM,
-    )
-    assert observation.ally_targetability_mask.dtype == bool
-
-    assert observation.enemy_targetability_mask.shape == (
-        MAX_AGENT_SLOTS,
-        MAX_AGENTS_PER_TEAM,
-    )
-    assert observation.enemy_targetability_mask.dtype == bool
+    assert "ally_targetability_mask" not in Observation._fields
+    assert "enemy_targetability_mask" not in Observation._fields
 
 
 def _assert_action_mask_contract(action_mask: ActionMask) -> None:
     """Assert the ActionMask shape and dtype contract."""
-    assert action_mask.move.shape == (MAX_AGENT_SLOTS, NUM_MOVE_ACTIONS)
-    assert action_mask.move.dtype == bool
+    assert action_mask.move_mask.shape == (MAX_AGENT_SLOTS, NUM_MOVE_ACTIONS)
+    assert action_mask.move_mask.dtype == bool
 
-    assert action_mask.target.shape == (MAX_AGENT_SLOTS, NUM_TARGET_ACTIONS)
-    assert action_mask.target.dtype == bool
+    assert action_mask.select_target_mask.shape == (MAX_AGENT_SLOTS, NUM_TARGET_ACTIONS)
+    assert action_mask.select_target_mask.dtype == bool
 
-    assert action_mask.use_ultimate.shape == (
+    assert action_mask.use_ultimate_mask.shape == (
         MAX_AGENT_SLOTS,
         NUM_ULTIMATE_ACTIONS,
     )
-    assert action_mask.use_ultimate.dtype == bool
+    assert action_mask.use_ultimate_mask.dtype == bool
+
+    assert action_mask.select_target_use_ultimate_joint_mask.shape == (
+        MAX_AGENT_SLOTS,
+        NUM_TARGET_ACTIONS,
+        NUM_ULTIMATE_ACTIONS,
+    )
+    assert action_mask.select_target_use_ultimate_joint_mask.dtype == bool
+
+    assert jnp.array_equal(
+        action_mask.select_target_mask,
+        jnp.any(action_mask.select_target_use_ultimate_joint_mask, axis=-1),
+    )
+    assert jnp.array_equal(
+        action_mask.use_ultimate_mask,
+        jnp.any(action_mask.select_target_use_ultimate_joint_mask, axis=1),
+    )
 
 
 def _assert_reward_contract(reward: Reward) -> None:
@@ -515,16 +522,16 @@ def _assert_done_flags_contract(
 
 def _assert_single_agent_action_mask_semantics(action_mask: ActionMask) -> None:
     """Assert a lone neutral actor can move and explicitly select target-none."""
-    assert bool(jnp.all(action_mask.move[0]))
-    assert bool(jnp.all(~action_mask.move[1:]))
+    assert bool(jnp.all(action_mask.move_mask[0]))
+    assert bool(jnp.all(~action_mask.move_mask[1:]))
 
-    assert bool(action_mask.target[0, 0])
-    assert bool(jnp.all(~action_mask.target[0, 1:]))
-    assert bool(jnp.all(~action_mask.target[1:]))
+    assert bool(action_mask.select_target_mask[0, 0])
+    assert bool(jnp.all(~action_mask.select_target_mask[0, 1:]))
+    assert bool(jnp.all(~action_mask.select_target_mask[1:]))
 
-    assert bool(action_mask.use_ultimate[0, 0])
-    assert bool(~action_mask.use_ultimate[0, 1])
-    assert bool(jnp.all(~action_mask.use_ultimate[1:]))
+    assert bool(action_mask.use_ultimate_mask[0, 0])
+    assert bool(~action_mask.use_ultimate_mask[0, 1])
+    assert bool(jnp.all(~action_mask.use_ultimate_mask[1:]))
 
 
 def _assert_center_inside_bounds(

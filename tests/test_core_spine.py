@@ -214,7 +214,7 @@ def _zero_action() -> Action:
     """Return a no-op action for every agent slot."""
     return Action(
         move=jnp.zeros(shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32),
-        target=jnp.zeros(shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        select_target=jnp.zeros(shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32),
         use_ultimate=jnp.zeros(shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32),
     )
 
@@ -250,20 +250,7 @@ def _zero_observation() -> Observation:
         enemy_visibility_mask=jnp.zeros(
             shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM), dtype=bool
         ),
-        ally_targetability_mask=jnp.zeros(
-            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM), dtype=bool
-        ),
-        enemy_targetability_mask=jnp.zeros(
-            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM), dtype=bool
-        ),
     )
-
-
-def _expected_step1_ultimate_rows(num_rows: int) -> Array:
-    """Return Step 1 ultimate-mask rows."""
-    noop_column = jnp.ones(shape=(num_rows, 1), dtype=bool)
-    use_column = jnp.zeros(shape=(num_rows, NUM_ULTIMATE_ACTIONS - 1), dtype=bool)
-    return jnp.concatenate((noop_column, use_column), axis=1)
 
 
 def _assert_state_contract(state: EnvState) -> None:
@@ -362,32 +349,39 @@ def _assert_observation_contract(observation: Observation) -> None:
     )
     assert observation.enemy_visibility_mask.dtype == bool
 
-    assert observation.ally_targetability_mask.shape == (
-        MAX_AGENT_SLOTS,
-        MAX_AGENTS_PER_TEAM,
-    )
-    assert observation.ally_targetability_mask.dtype == bool
-
-    assert observation.enemy_targetability_mask.shape == (
-        MAX_AGENT_SLOTS,
-        MAX_AGENTS_PER_TEAM,
-    )
-    assert observation.enemy_targetability_mask.dtype == bool
+    assert "ally_targetability_mask" not in Observation._fields
+    assert "enemy_targetability_mask" not in Observation._fields
 
 
 def _assert_action_mask_contract(action_mask: ActionMask) -> None:
     """Assert the ActionMask shape and dtype contract."""
-    assert action_mask.move.shape == (MAX_AGENT_SLOTS, NUM_MOVE_ACTIONS)
-    assert action_mask.move.dtype == bool
+    assert action_mask.move_mask.shape == (MAX_AGENT_SLOTS, NUM_MOVE_ACTIONS)
+    assert action_mask.move_mask.dtype == bool
 
-    assert action_mask.target.shape == (MAX_AGENT_SLOTS, NUM_TARGET_ACTIONS)
-    assert action_mask.target.dtype == bool
+    assert action_mask.select_target_mask.shape == (MAX_AGENT_SLOTS, NUM_TARGET_ACTIONS)
+    assert action_mask.select_target_mask.dtype == bool
 
-    assert action_mask.use_ultimate.shape == (
+    assert action_mask.use_ultimate_mask.shape == (
         MAX_AGENT_SLOTS,
         NUM_ULTIMATE_ACTIONS,
     )
-    assert action_mask.use_ultimate.dtype == bool
+    assert action_mask.use_ultimate_mask.dtype == bool
+
+    assert action_mask.select_target_use_ultimate_joint_mask.shape == (
+        MAX_AGENT_SLOTS,
+        NUM_TARGET_ACTIONS,
+        NUM_ULTIMATE_ACTIONS,
+    )
+    assert action_mask.select_target_use_ultimate_joint_mask.dtype == bool
+
+    assert jnp.array_equal(
+        action_mask.select_target_mask,
+        jnp.any(action_mask.select_target_use_ultimate_joint_mask, axis=-1),
+    )
+    assert jnp.array_equal(
+        action_mask.use_ultimate_mask,
+        jnp.any(action_mask.select_target_use_ultimate_joint_mask, axis=1),
+    )
 
 
 def _assert_step1_action_mask_values(
@@ -396,19 +390,15 @@ def _assert_step1_action_mask_values(
     inactive_indices: Array,
 ) -> None:
     """Assert action-mask values that are stable across M4 checkpoints."""
-    active_count = int(active_indices.shape[0])
+    assert jnp.all(action_mask.move_mask[active_indices, :])
+    assert not jnp.any(action_mask.move_mask[inactive_indices, :])
 
-    assert jnp.all(action_mask.move[active_indices, :])
-    assert not jnp.any(action_mask.move[inactive_indices, :])
-
-    assert jnp.all(action_mask.target[active_indices, 0])
-    assert not jnp.any(action_mask.target[inactive_indices, :])
-
-    assert jnp.array_equal(
-        action_mask.use_ultimate[active_indices, :],
-        _expected_step1_ultimate_rows(active_count),
+    assert jnp.all(action_mask.select_target_mask[active_indices, 0])
+    assert not jnp.any(action_mask.select_target_mask[inactive_indices, :])
+    assert not jnp.any(action_mask.use_ultimate_mask[inactive_indices, :])
+    assert not jnp.any(
+        action_mask.select_target_use_ultimate_joint_mask[inactive_indices, :, :]
     )
-    assert not jnp.any(action_mask.use_ultimate[inactive_indices, :])
 
 
 def _assert_common_observation_values(
@@ -421,18 +411,7 @@ def _assert_common_observation_values(
         (MAX_AGENT_SLOTS, MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES),
     )
 
-    illegal_ally_targetability = jnp.logical_and(
-        observation.ally_targetability_mask,
-        jnp.logical_not(observation.ally_visibility_mask),
-    )
-    illegal_enemy_targetability = jnp.logical_and(
-        observation.enemy_targetability_mask,
-        jnp.logical_not(observation.enemy_visibility_mask),
-    )
-
     assert jnp.array_equal(observation.map_obstacle_features, expected_map_features)
-    assert not jnp.any(illegal_ally_targetability)
-    assert not jnp.any(illegal_enemy_targetability)
 
 
 def test_static_shape_constants_are_consistent() -> None:
@@ -568,15 +547,15 @@ def test_env_state_stores_slot_aligned_arrays() -> None:
 def test_action_stores_one_discrete_choice_per_agent_slot() -> None:
     joint_action = Action(
         move=jnp.ones(shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32),
-        target=jnp.ones(shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        select_target=jnp.ones(shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32),
         use_ultimate=jnp.ones(shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32),
     )
 
     assert joint_action.move.shape == (MAX_AGENT_SLOTS,)
     assert joint_action.move.dtype == jnp.int32
 
-    assert joint_action.target.shape == (MAX_AGENT_SLOTS,)
-    assert joint_action.target.dtype == jnp.int32
+    assert joint_action.select_target.shape == (MAX_AGENT_SLOTS,)
+    assert joint_action.select_target.dtype == jnp.int32
 
     assert joint_action.use_ultimate.shape == (MAX_AGENT_SLOTS,)
     assert joint_action.use_ultimate.dtype == jnp.int32
@@ -584,10 +563,20 @@ def test_action_stores_one_discrete_choice_per_agent_slot() -> None:
 
 def test_action_mask_stores_validity_for_each_action_head() -> None:
     action_mask = ActionMask(
-        move=jnp.ones(shape=(MAX_AGENT_SLOTS, NUM_MOVE_ACTIONS), dtype=bool),
-        target=jnp.ones(shape=(MAX_AGENT_SLOTS, NUM_TARGET_ACTIONS), dtype=bool),
-        use_ultimate=jnp.ones(
+        move_mask=jnp.ones(shape=(MAX_AGENT_SLOTS, NUM_MOVE_ACTIONS), dtype=bool),
+        select_target_mask=jnp.ones(
+            shape=(MAX_AGENT_SLOTS, NUM_TARGET_ACTIONS), dtype=bool
+        ),
+        use_ultimate_mask=jnp.ones(
             shape=(MAX_AGENT_SLOTS, NUM_ULTIMATE_ACTIONS), dtype=bool
+        ),
+        select_target_use_ultimate_joint_mask=jnp.ones(
+            shape=(
+                MAX_AGENT_SLOTS,
+                NUM_TARGET_ACTIONS,
+                NUM_ULTIMATE_ACTIONS,
+            ),
+            dtype=bool,
         ),
     )
 

@@ -56,7 +56,7 @@ def _stay_action() -> Action:
     """Return a slot-aligned joint action that preserves scenario geometry."""
     return Action(
         move=jnp.full((MAX_AGENT_SLOTS,), MOVE_STAY, dtype=jnp.int32),
-        target=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        select_target=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
         use_ultimate=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
     )
 
@@ -117,27 +117,45 @@ def _assert_public_target_contract(
     observation: Observation,
     action_mask: ActionMask,
 ) -> None:
-    """Assert observation relation masks align exactly with the target head."""
-    expected_relation_shape = (MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM)
-    assert observation.ally_targetability_mask.shape == expected_relation_shape
-    assert observation.enemy_targetability_mask.shape == expected_relation_shape
-    assert observation.ally_targetability_mask.dtype == jnp.bool_
-    assert observation.enemy_targetability_mask.dtype == jnp.bool_
-    assert action_mask.target.shape == (MAX_AGENT_SLOTS, NUM_TARGET_ACTIONS)
-    assert action_mask.target.dtype == jnp.bool_
+    """Assert perception and basic-legality surfaces remain separately owned."""
+    assert "ally_targetability_mask" not in Observation._fields
+    assert "enemy_targetability_mask" not in Observation._fields
+    assert observation.ally_visibility_mask.shape == (
+        MAX_AGENT_SLOTS,
+        MAX_AGENTS_PER_TEAM,
+    )
+    assert observation.enemy_visibility_mask.shape == (
+        MAX_AGENT_SLOTS,
+        MAX_AGENTS_PER_TEAM,
+    )
+    assert action_mask.select_target_mask.shape == (MAX_AGENT_SLOTS, NUM_TARGET_ACTIONS)
+    assert action_mask.select_target_mask.dtype == jnp.bool_
+    assert action_mask.select_target_use_ultimate_joint_mask.shape == (
+        MAX_AGENT_SLOTS,
+        NUM_TARGET_ACTIONS,
+        2,
+    )
+    assert action_mask.select_target_use_ultimate_joint_mask.dtype == jnp.bool_
     assert bool(
         jnp.array_equal(
-            action_mask.target[
-                :, _ALLY_TARGET_START : _ALLY_TARGET_START + MAX_AGENTS_PER_TEAM
-            ],
-            observation.ally_targetability_mask,
+            action_mask.select_target_mask,
+            jnp.any(action_mask.select_target_use_ultimate_joint_mask, axis=-1),
         )
     )
     assert bool(
         jnp.array_equal(
-            action_mask.target[:, _ENEMY_TARGET_START:],
-            observation.enemy_targetability_mask,
+            action_mask.use_ultimate_mask,
+            jnp.any(action_mask.select_target_use_ultimate_joint_mask, axis=1),
         )
+    )
+
+
+def _basic_relation_masks(action_mask: ActionMask) -> tuple[Array, Array]:
+    """Return ally/enemy slices from the authoritative no-ultimate lane."""
+    basic_lane = action_mask.select_target_use_ultimate_joint_mask[..., 0]
+    return (
+        basic_lane[:, _ALLY_TARGET_START : _ALLY_TARGET_START + MAX_AGENTS_PER_TEAM],
+        basic_lane[:, _ENEMY_TARGET_START:],
     )
 
 
@@ -171,15 +189,10 @@ def test_basic_targetability_matches_actor_capability(
     expected_enemy = jnp.asarray((expects_enemy_targets, False, False, False, False))
 
     _assert_public_target_contract(observation, action_mask)
-    assert bool(
-        jnp.array_equal(observation.ally_targetability_mask[_ACTOR_SLOT], expected_ally)
-    )
-    assert bool(
-        jnp.array_equal(
-            observation.enemy_targetability_mask[_ACTOR_SLOT], expected_enemy
-        )
-    )
-    assert bool(action_mask.target[_ACTOR_SLOT, 0])
+    basic_ally, basic_enemy = _basic_relation_masks(action_mask)
+    assert bool(jnp.array_equal(basic_ally[_ACTOR_SLOT], expected_ally))
+    assert bool(jnp.array_equal(basic_enemy[_ACTOR_SLOT], expected_enemy))
+    assert bool(action_mask.select_target_use_ultimate_joint_mask[_ACTOR_SLOT, 0, 0])
 
 
 @pytest.mark.parametrize(
@@ -220,10 +233,13 @@ def test_actor_stun_disables_nonempty_targets_but_preserves_none(
     _, observation, action_mask = _step_scenario(config, state)
 
     _assert_public_target_contract(observation, action_mask)
-    assert not bool(jnp.any(observation.ally_targetability_mask[_ACTOR_SLOT]))
-    assert not bool(jnp.any(observation.enemy_targetability_mask[_ACTOR_SLOT]))
-    assert bool(action_mask.target[_ACTOR_SLOT, 0])
-    assert not bool(jnp.any(action_mask.target[_ACTOR_SLOT, 1:]))
+    basic_ally, basic_enemy = _basic_relation_masks(action_mask)
+    assert not bool(jnp.any(basic_ally[_ACTOR_SLOT]))
+    assert not bool(jnp.any(basic_enemy[_ACTOR_SLOT]))
+    assert bool(action_mask.select_target_use_ultimate_joint_mask[_ACTOR_SLOT, 0, 0])
+    assert not bool(
+        jnp.any(action_mask.select_target_use_ultimate_joint_mask[_ACTOR_SLOT, 1:, 0])
+    )
 
 
 @pytest.mark.parametrize(
@@ -248,32 +264,34 @@ def test_candidate_stun_does_not_change_targetability(
 ) -> None:
     """Prove stun is an actor-control predicate, not a candidate predicate."""
     config, state = _target_scenario()
-    _, control_observation, control_action_mask = _step_scenario(config, state)
+    _, _, control_action_mask = _step_scenario(config, state)
     stunned_state = state._replace(
         stun_durations=state.stun_durations.at[_ENEMY_SLOT, candidate_stun_channel].set(
             2
         )
     )
-    _, stunned_observation, stunned_action_mask = _step_scenario(config, stunned_state)
+    _, _, stunned_action_mask = _step_scenario(config, stunned_state)
 
-    assert bool(control_observation.enemy_targetability_mask[_ACTOR_SLOT, 0])
-    assert bool(stunned_observation.enemy_targetability_mask[_ACTOR_SLOT, 0])
+    control_ally, control_enemy = _basic_relation_masks(control_action_mask)
+    stunned_ally, stunned_enemy = _basic_relation_masks(stunned_action_mask)
+    assert bool(control_enemy[_ACTOR_SLOT, 0])
+    assert bool(stunned_enemy[_ACTOR_SLOT, 0])
     assert bool(
         jnp.array_equal(
-            stunned_observation.ally_targetability_mask[_ACTOR_SLOT],
-            control_observation.ally_targetability_mask[_ACTOR_SLOT],
+            stunned_ally[_ACTOR_SLOT],
+            control_ally[_ACTOR_SLOT],
         )
     )
     assert bool(
         jnp.array_equal(
-            stunned_observation.enemy_targetability_mask[_ACTOR_SLOT],
-            control_observation.enemy_targetability_mask[_ACTOR_SLOT],
+            stunned_enemy[_ACTOR_SLOT],
+            control_enemy[_ACTOR_SLOT],
         )
     )
     assert bool(
         jnp.array_equal(
-            stunned_action_mask.target[_ACTOR_SLOT],
-            control_action_mask.target[_ACTOR_SLOT],
+            stunned_action_mask.select_target_mask[_ACTOR_SLOT],
+            control_action_mask.select_target_mask[_ACTOR_SLOT],
         )
     )
 
@@ -343,8 +361,8 @@ def test_actor_stun_changes_only_control_and_exposed_stun_features(
         ]
         == 2.0
     )
-    assert bool(jnp.any(control_action_mask.target[_ACTOR_SLOT, 1:]))
-    assert not bool(jnp.any(stunned_action_mask.target[_ACTOR_SLOT, 1:]))
+    assert bool(jnp.any(control_action_mask.select_target_mask[_ACTOR_SLOT, 1:]))
+    assert not bool(jnp.any(stunned_action_mask.select_target_mask[_ACTOR_SLOT, 1:]))
 
 
 @pytest.mark.parametrize(
@@ -366,10 +384,15 @@ def test_priest_targetability_is_independent_of_ally_health(
         current_health=state.current_health.at[_ALLY_SLOT].set(candidate_health)
     )
 
-    _, observation, action_mask = _step_scenario(config, state)
+    _, _, action_mask = _step_scenario(config, state)
 
-    assert bool(observation.ally_targetability_mask[_ACTOR_SLOT, _ALLY_SLOT])
-    assert bool(action_mask.target[_ACTOR_SLOT, _ALLY_TARGET_START + _ALLY_SLOT])
+    basic_ally, _ = _basic_relation_masks(action_mask)
+    assert bool(basic_ally[_ACTOR_SLOT, _ALLY_SLOT])
+    assert bool(
+        action_mask.select_target_use_ultimate_joint_mask[
+            _ACTOR_SLOT, _ALLY_TARGET_START + _ALLY_SLOT, 0
+        ]
+    )
 
 
 UnrelatedStateCase = Literal[
@@ -399,7 +422,7 @@ def test_unrelated_combat_state_does_not_change_basic_targetability(
 ) -> None:
     """Prove unrelated cooldown and status fields do not enter basic legality."""
     config, state = _target_scenario()
-    _, control_observation, control_action_mask = _step_scenario(config, state)
+    _, _, control_action_mask = _step_scenario(config, state)
 
     if unrelated_state_case == "ultimate-cooldown":
         changed_state = state._replace(
@@ -430,24 +453,30 @@ def test_unrelated_combat_state_does_not_change_basic_targetability(
             )
         )
 
-    _, changed_observation, changed_action_mask = _step_scenario(config, changed_state)
+    _, _, changed_action_mask = _step_scenario(config, changed_state)
 
+    control_ally, control_enemy = _basic_relation_masks(control_action_mask)
+    changed_ally, changed_enemy = _basic_relation_masks(changed_action_mask)
     assert bool(
         jnp.array_equal(
-            changed_observation.ally_targetability_mask[_ACTOR_SLOT],
-            control_observation.ally_targetability_mask[_ACTOR_SLOT],
+            changed_ally[_ACTOR_SLOT],
+            control_ally[_ACTOR_SLOT],
         )
     )
     assert bool(
         jnp.array_equal(
-            changed_observation.enemy_targetability_mask[_ACTOR_SLOT],
-            control_observation.enemy_targetability_mask[_ACTOR_SLOT],
+            changed_enemy[_ACTOR_SLOT],
+            control_enemy[_ACTOR_SLOT],
         )
     )
     assert bool(
         jnp.array_equal(
-            changed_action_mask.target[_ACTOR_SLOT],
-            control_action_mask.target[_ACTOR_SLOT],
+            changed_action_mask.select_target_use_ultimate_joint_mask[
+                _ACTOR_SLOT, :, 0
+            ],
+            control_action_mask.select_target_use_ultimate_joint_mask[
+                _ACTOR_SLOT, :, 0
+            ],
         )
     )
 
@@ -475,11 +504,12 @@ def test_inactive_or_dead_actor_has_no_target_actions(
     config = config._replace(agent_profile=profile)
     state = state._replace(alive_mask=state.alive_mask.at[_ACTOR_SLOT].set(actor_alive))
 
-    _, observation, action_mask = _step_scenario(config, state)
+    _, _, action_mask = _step_scenario(config, state)
 
-    assert not bool(jnp.any(observation.ally_targetability_mask[_ACTOR_SLOT]))
-    assert not bool(jnp.any(observation.enemy_targetability_mask[_ACTOR_SLOT]))
-    assert not bool(jnp.any(action_mask.target[_ACTOR_SLOT]))
+    basic_ally, basic_enemy = _basic_relation_masks(action_mask)
+    assert not bool(jnp.any(basic_ally[_ACTOR_SLOT]))
+    assert not bool(jnp.any(basic_enemy[_ACTOR_SLOT]))
+    assert not bool(jnp.any(action_mask.select_target_mask[_ACTOR_SLOT]))
 
 
 def test_no_team_slots_never_form_basic_target_relations() -> None:
@@ -495,10 +525,13 @@ def test_no_team_slots_never_form_basic_target_relations() -> None:
 
     assert bool(observation.ally_visibility_mask[_ACTOR_SLOT, _ACTOR_SLOT])
     assert bool(observation.ally_visibility_mask[_ACTOR_SLOT, _ALLY_SLOT])
-    assert not bool(jnp.any(observation.ally_targetability_mask[_ACTOR_SLOT]))
-    assert not bool(jnp.any(observation.enemy_targetability_mask[_ACTOR_SLOT]))
-    assert bool(action_mask.target[_ACTOR_SLOT, 0])
-    assert not bool(jnp.any(action_mask.target[_ACTOR_SLOT, 1:]))
+    basic_ally, basic_enemy = _basic_relation_masks(action_mask)
+    assert not bool(jnp.any(basic_ally[_ACTOR_SLOT]))
+    assert not bool(jnp.any(basic_enemy[_ACTOR_SLOT]))
+    assert bool(action_mask.select_target_use_ultimate_joint_mask[_ACTOR_SLOT, 0, 0])
+    assert not bool(
+        jnp.any(action_mask.select_target_use_ultimate_joint_mask[_ACTOR_SLOT, 1:, 0])
+    )
 
 
 def test_jitted_step_matches_eager_class_and_stun_targetability() -> None:
@@ -522,15 +555,23 @@ def test_jitted_step_matches_eager_class_and_stun_targetability() -> None:
     )
     assert bool(
         jnp.array_equal(
-            compiled_observation.ally_targetability_mask,
-            eager[1].ally_targetability_mask,
+            compiled_observation.ally_visibility_mask,
+            eager[1].ally_visibility_mask,
         )
     )
     assert bool(
         jnp.array_equal(
-            compiled_observation.enemy_targetability_mask,
-            eager[1].enemy_targetability_mask,
+            compiled_observation.enemy_visibility_mask,
+            eager[1].enemy_visibility_mask,
         )
     )
-    assert bool(jnp.array_equal(compiled_action_mask.target, eager[2].target))
-    assert bool(compiled_observation.enemy_targetability_mask[_ACTOR_SLOT, 0])
+    assert bool(
+        jnp.array_equal(
+            compiled_action_mask.select_target_mask, eager[2].select_target_mask
+        )
+    )
+    assert bool(
+        compiled_action_mask.select_target_use_ultimate_joint_mask[
+            _ACTOR_SLOT, _ENEMY_TARGET_START, 0
+        ]
+    )
