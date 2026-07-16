@@ -1,4 +1,5 @@
 """Movement integration tests for Milestone 4 Step 3."""
+# pyright: reportPrivateUsage=false
 
 from typing import TypedDict, cast
 
@@ -8,7 +9,7 @@ import pytest
 from jax import Array
 
 from marl_battlegrounds.core.config import resolve_agent_profile
-from marl_battlegrounds.core.env import step
+from marl_battlegrounds.core.env import _build_observation_and_action_mask, step
 from marl_battlegrounds.core.geometry import GEOMETRY_TOLERANCE
 from marl_battlegrounds.core.types import (
     CLASS_NEUTRAL,
@@ -92,6 +93,12 @@ def _inert_combat_state_fields() -> _CombatStateFields:
             (MAX_AGENT_SLOTS,), dtype=jnp.int32
         ),
     }
+
+
+def _current_action_mask(config: EnvConfig, state: EnvState) -> ActionMask:
+    """Return the action mask paired with an explicitly built test state."""
+    _, action_mask = _build_observation_and_action_mask(state, config)
+    return action_mask
 
 
 def _obstacle_array_with_rows(*rows: tuple[int, Array]) -> Array:
@@ -637,7 +644,9 @@ def test_move_stay_preserves_valid_position_in_free_space() -> None:
     config, state = _state_with_single_active_alive_agent(config, start)
     joint_action = _joint_action_with_moves((0, MOVE_STAY))
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_center_close(next_state.agent_positions[0], start)
 
@@ -667,6 +676,7 @@ def test_cardinal_moves_update_position_in_free_space(
     next_state, obs, reward, done_flags, action_mask, info = step(
         config,
         state,
+        _current_action_mask(config, state),
         joint_action,
         key,
     )
@@ -701,7 +711,9 @@ def test_cardinal_moves_scale_by_effective_state_movement_speed(
     )
     joint_action = _joint_action_with_moves((0, move_action))
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_center_close(next_state.agent_positions[0], expected_position)
 
@@ -741,7 +753,9 @@ def test_diagonal_moves_are_normalized_in_free_space(
     config, state = _state_with_single_active_alive_agent(config, start)
     joint_action = _joint_action_with_moves((0, move_action))
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     displacement = next_state.agent_positions[0] - start
     expected_position = start + expected_delta
@@ -767,7 +781,9 @@ def test_diagonal_moves_scale_by_effective_state_movement_speed() -> None:
     )
     joint_action = _joint_action_with_moves((0, MOVE_NORTHEAST))
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     displacement = next_state.agent_positions[0] - start
 
@@ -797,7 +813,9 @@ def test_same_move_action_uses_per_slot_movement_speeds() -> None:
     )
     joint_action = _joint_action_with_moves((0, MOVE_EAST), (1, MOVE_EAST))
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_center_close(
         next_state.agent_positions[0],
@@ -818,7 +836,9 @@ def test_step_uses_state_movement_speed_after_state_exists() -> None:
     )
     joint_action = _joint_action_with_moves((0, MOVE_EAST))
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_center_close(
         next_state.agent_positions[0],
@@ -837,6 +857,7 @@ def test_step_preserves_current_contracts_after_non_stay_movement() -> None:
     next_state, obs, reward, done_flags, action_mask, info = step(
         config,
         state,
+        _current_action_mask(config, state),
         joint_action,
         key,
     )
@@ -862,7 +883,9 @@ def test_step_truncates_after_incremented_step_count() -> None:
     )
     joint_action = _joint_action_with_moves((0, MOVE_EAST))
 
-    _, _, _, done_flags, _, _ = step(config, state, joint_action, key)
+    _, _, _, done_flags, _, _ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_done_flags_contract(done_flags, expected_truncated=True)
 
@@ -893,7 +916,9 @@ def test_step_projects_active_alive_agent_inside_bounds(
     )
     joint_action = _joint_action_with_moves((0, move_action))
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_center_inside_bounds(
         next_state.agent_positions[0],
@@ -920,7 +945,9 @@ def test_step_projects_active_alive_agent_outside_active_pillar() -> None:
     )
     joint_action = _joint_action_with_moves((0, MOVE_EAST))
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_center_outside_pillar(
         next_state.agent_positions[0],
@@ -949,7 +976,9 @@ def test_step_projects_active_alive_agent_outside_active_wall() -> None:
     )
     joint_action = _joint_action_with_moves((0, MOVE_EAST))
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_center_outside_axis_aligned_wall(
         next_state.agent_positions[0],
@@ -974,7 +1003,9 @@ def test_step_ignores_inactive_obstacle_rows() -> None:
     )
     joint_action = _joint_action_with_moves((0, MOVE_EAST))
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_center_close(
         next_state.agent_positions[0],
@@ -998,7 +1029,9 @@ def test_step_ignores_inactive_wall_rows() -> None:
     )
     joint_action = _joint_action_with_moves((0, MOVE_EAST))
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_center_close(
         next_state.agent_positions[0],
@@ -1025,7 +1058,9 @@ def test_step_uses_active_obstacles_in_late_padded_slots() -> None:
     )
     joint_action = _joint_action_with_moves((0, MOVE_EAST))
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_center_outside_pillar(
         next_state.agent_positions[0],
@@ -1055,7 +1090,9 @@ def test_step_projects_active_alive_agent_outside_rotated_wall() -> None:
     )
     joint_action = _joint_action_with_moves((0, MOVE_EAST))
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_center_outside_rotated_wall(
         next_state.agent_positions[0],
@@ -1089,7 +1126,9 @@ def test_inactive_slots_with_nonstay_action_preserve_original_positions() -> Non
         (1, MOVE_WEST),
     )
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_center_close(next_state.agent_positions[0], agent_a_position)
     _assert_center_close(next_state.agent_positions[1], agent_b_position)
@@ -1117,7 +1156,9 @@ def test_dead_slots_with_nonstay_action_preserve_original_positions() -> None:
         (1, MOVE_WEST),
     )
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_center_close(next_state.agent_positions[0], agent_a_position)
     _assert_center_close(next_state.agent_positions[1], agent_b_position)
@@ -1156,7 +1197,9 @@ def test_active_alive_slot_moves_while_nonparticipant_neighbor_is_preserved(
         (1, MOVE_WEST),
     )
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_center_close(
         next_state.agent_positions[0],
@@ -1215,7 +1258,9 @@ def test_active_alive_overlapping_agents_separate_in_free_space(
         (blocker_slot, MOVE_STAY),
     )
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_agent_positions_are_finite(next_state.agent_positions)
     _assert_agents_do_not_overlap(
@@ -1252,7 +1297,13 @@ def test_step_can_be_jit_compiled_with_non_stay_movement() -> None:
 
     next_state, observation, reward, done_flags, action_mask, info = cast(
         tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info],
-        jitted_step(config, state, joint_action, key),
+        jitted_step(
+            config,
+            state,
+            _current_action_mask(config, state),
+            joint_action,
+            key,
+        ),
     )
 
     _assert_center_close(
@@ -1292,23 +1343,35 @@ def test_step_can_run_non_stay_movement_in_jitted_scanned_rollout() -> None:
         (0, MOVE_EAST),
         (1, MOVE_STAY),
     )
+    initial_action_mask = _current_action_mask(config, state)
 
     def _rollout(
         initial_state: EnvState,
+        initial_mask: ActionMask,
         step_keys: Array,
-    ) -> tuple[EnvState, tuple[Array, Array]]:
+    ) -> tuple[tuple[EnvState, ActionMask], tuple[Array, Array]]:
         """Run a compiled fixed-horizon rollout with stable scan outputs."""
 
         def _step_wrapper(
-            carry: EnvState,
+            carry: tuple[EnvState, ActionMask],
             step_key: Array,
-        ) -> tuple[EnvState, tuple[Array, Array]]:
-            new_state, _, _, _, _, _ = step(config, carry, joint_action, step_key)
-            return new_state, (new_state.step_count, new_state.agent_positions)
+        ) -> tuple[tuple[EnvState, ActionMask], tuple[Array, Array]]:
+            current_state, current_action_mask = carry
+            new_state, _, _, _, next_action_mask, _ = step(
+                config,
+                current_state,
+                current_action_mask,
+                joint_action,
+                step_key,
+            )
+            return (new_state, next_action_mask), (
+                new_state.step_count,
+                new_state.agent_positions,
+            )
 
         return jax.lax.scan(
             f=_step_wrapper,
-            init=initial_state,
+            init=(initial_state, initial_mask),
             xs=step_keys,
             length=horizon,
         )
@@ -1316,9 +1379,9 @@ def test_step_can_run_non_stay_movement_in_jitted_scanned_rollout() -> None:
     keys = jax.random.split(key, horizon)
     assert keys.shape == (horizon,)
 
-    final_state, history = cast(
-        tuple[EnvState, tuple[Array, Array]],
-        jax.jit(_rollout)(state, keys),
+    (final_state, final_action_mask), history = cast(
+        tuple[tuple[EnvState, ActionMask], tuple[Array, Array]],
+        jax.jit(_rollout)(state, initial_action_mask, keys),
     )
     step_count_history, position_history = history
 
@@ -1337,6 +1400,9 @@ def test_step_can_run_non_stay_movement_in_jitted_scanned_rollout() -> None:
 
     assert final_state.step_count == horizon
     assert final_state.step_count.dtype == jnp.int32
+    assert jax.tree_util.tree_structure(
+        final_action_mask
+    ) == jax.tree_util.tree_structure(initial_action_mask)
 
     assert step_count_history.shape == (horizon,)
     assert step_count_history.dtype == jnp.int32

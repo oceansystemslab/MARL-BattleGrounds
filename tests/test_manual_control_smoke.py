@@ -326,12 +326,13 @@ def test_build_manual_joint_action_rejects_invalid_move_actions(
 def test_step_manual_control_returns_next_key_and_step_outputs() -> None:
     """The single-step helper should drive the real simulator transition."""
     config = _sample_config()
-    state, _obs, _action_mask, _info = reset(config, jax.random.key(0))
+    state, _obs, current_action_mask, _info = reset(config, jax.random.key(0))
     key = jax.random.key(123)
 
     result = step_manual_control(
         config,
         state,
+        current_action_mask,
         key,
         controlled_slot=0,
         input_key="d",
@@ -353,15 +354,22 @@ def test_step_manual_control_returns_next_key_and_step_outputs() -> None:
 def test_step_manual_control_matches_direct_core_step_outputs() -> None:
     """Manual stepping should be a thin wrapper around the core step."""
     config = _sample_config()
-    state, _obs, _action_mask, _info = reset(config, jax.random.key(0))
+    state, _obs, current_action_mask, _info = reset(config, jax.random.key(0))
     key = jax.random.key(123)
     next_key, step_key = jax.random.split(key)
     expected_action = build_manual_joint_action(config, 0, MOVE_EAST)
-    expected_step_output = step(config, state, expected_action, step_key)
+    expected_step_output = step(
+        config,
+        state,
+        current_action_mask,
+        expected_action,
+        step_key,
+    )
 
     actual = step_manual_control(
         config,
         state,
+        current_action_mask,
         key,
         controlled_slot=0,
         input_key="d",
@@ -410,12 +418,14 @@ def test_run_manual_control_consumes_pending_key_and_redraws_without_gui(
     def fake_step_manual_control(
         config_arg: EnvConfig,
         state_arg: EnvState,
+        action_mask_arg: ActionMask,
         key_arg: Array,
         *,
         controlled_slot: int = 0,
         input_key: str | None = None,
     ) -> manual_control_module.ManualStepOutput:
         assert config_arg is config
+        assert action_mask_arg is action_mask
         assert controlled_slot == 3
         step_input_keys.append(input_key)
         next_key, _step_key = jax.random.split(key_arg)
@@ -455,6 +465,7 @@ def test_run_manual_control_consumes_pending_key_and_redraws_without_gui(
     final_state = manual_control_module.run_manual_control(
         config,
         initial_state,
+        action_mask,
         jax.random.key(99),
         controlled_slot=3,
         step_interval_ms=123,

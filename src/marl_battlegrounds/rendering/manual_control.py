@@ -103,6 +103,7 @@ class _ManualLoopState:
 
     key: Array
     state: EnvState
+    action_mask: ActionMask
     pending_input_key: str | None = None
 
 
@@ -145,7 +146,8 @@ def build_manual_joint_action(
 
 def step_manual_control(
     config: EnvConfig,
-    state: EnvState,
+    current_state: EnvState,
+    current_action_mask: ActionMask,
     key: Array,
     *,
     controlled_slot: int = 0,
@@ -154,14 +156,16 @@ def step_manual_control(
     """Advance one manual-control timestep through the real simulator step.
 
     The returned key is the next key for the manual-control loop; the remaining
-    outputs are exactly the current core ``step`` outputs.
+    outputs are exactly the current core ``step`` outputs. The supplied mask
+    must be the one paired with ``current_state``.
     """
     move_action = movement_from_key(input_key)
     action = build_manual_joint_action(config, controlled_slot, move_action)
     next_key, step_key = jax.random.split(key)
     next_state, obs, reward, done_flags, action_mask, info = step(
         config,
-        state,
+        current_state,
+        current_action_mask,
         action,
         step_key,
     )
@@ -172,6 +176,7 @@ def step_manual_control(
 def run_manual_control(
     config: EnvConfig,
     initial_state: EnvState,
+    initial_action_mask: ActionMask,
     key: Array,
     *,
     controlled_slot: int = 0,
@@ -195,7 +200,11 @@ def run_manual_control(
             show_agent_indices=show_agent_indices,
         )
         figure = cast(_FigureLike, result.figure)
-        loop_state = _ManualLoopState(key=key, state=initial_state)
+        loop_state = _ManualLoopState(
+            key=key,
+            state=initial_state,
+            action_mask=initial_action_mask,
+        )
 
         def _on_key_press(event: _KeyEventLike) -> None:
             loop_state.pending_input_key = event.key
@@ -207,11 +216,12 @@ def run_manual_control(
                 _observation,
                 _reward,
                 done_flags,
-                _action_mask,
+                loop_state.action_mask,
                 _info,
             ) = step_manual_control(
                 config,
                 loop_state.state,
+                loop_state.action_mask,
                 loop_state.key,
                 controlled_slot=controlled_slot,
                 input_key=loop_state.pending_input_key,

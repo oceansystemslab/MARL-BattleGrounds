@@ -399,12 +399,14 @@ def _build_observation_and_action_mask(
     self_features = _build_self_features(state, config)
     ally_features = _build_ally_features(self_features)
     enemy_features = _build_enemy_features(self_features)
+
     global_visibility_mask, global_pairwise_distances = (
         _build_global_visibility_mask_and_distances(state, config)
     )
     ally_visibility_mask, enemy_visibility_mask = _build_ally_enemy_masks(
         global_visibility_mask
     )
+
     ally_features = _mask_unit_features(ally_features, ally_visibility_mask)
     enemy_features = _mask_unit_features(enemy_features, enemy_visibility_mask)
 
@@ -416,7 +418,6 @@ def _build_observation_and_action_mask(
     select_target_mask, use_ultimate_mask = _build_marginal_action_masks(
         select_target_use_ultimate_joint_mask
     )
-
     move_mask = _build_move_mask(state, config)
 
     map_obstacle_features = jnp.broadcast_to(
@@ -431,7 +432,7 @@ def _build_observation_and_action_mask(
         select_target_use_ultimate_joint_mask=select_target_use_ultimate_joint_mask,
     )
 
-    obs = Observation(
+    observation = Observation(
         self_features=self_features,
         ally_unit_features=ally_features,
         enemy_unit_features=enemy_features,
@@ -447,7 +448,7 @@ def _build_observation_and_action_mask(
         enemy_visibility_mask=enemy_visibility_mask,
     )
 
-    return obs, action_mask
+    return observation, action_mask
 
 
 def _build_intended_movement_deltas(
@@ -779,7 +780,7 @@ def reset(
         maxval=max_val - 0.5,  # Placeholder default agent positions
     )
 
-    state = EnvState(
+    initial_state = EnvState(
         step_count=jnp.array(0, dtype=jnp.int32),
         agent_positions=default_agent_positions,  # Placeholder
         alive_mask=config.agent_profile.active_mask,
@@ -798,28 +799,39 @@ def reset(
         ),
     )
 
-    obs, action_mask = _build_observation_and_action_mask(state, config)
+    initial_observation, initial_action_mask = _build_observation_and_action_mask(
+        initial_state, config
+    )
 
     info = Info()
 
-    return (state, obs, action_mask, info)
+    return (initial_state, initial_observation, initial_action_mask, info)
 
 
 def step(
-    config: EnvConfig, state: EnvState, joint_action: Action, key: Array
+    config: EnvConfig,
+    current_state: EnvState,
+    current_action_mask: ActionMask,
+    joint_action: Action,
+    key: Array,
 ) -> tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info]:
-    """Advance movement and rebuild current fixed-shape observations and masks."""
+    """Advance from one paired state/mask snapshot and build the next snapshot.
+
+    ``current_action_mask`` is the mask produced with ``current_state`` by
+    reset or the preceding step. Step 5 will consume it for accepted-action
+    semantics; until then, movement behavior remains unchanged.
+    """
 
     intended_movement_deltas = _build_intended_movement_deltas(
-        joint_action, state, config
+        joint_action, current_state, config
     )
 
     next_agent_positions = project_movement_with_geometry(
-        state.agent_positions,
+        current_state.agent_positions,
         config.agent_profile.agent_radii,
         intended_movement_deltas,
         config.agent_profile.active_mask,
-        state.alive_mask,
+        current_state.alive_mask,
         config.map_width,
         config.map_height,
         config.obstacles,
@@ -828,19 +840,21 @@ def step(
     # TODO: mutation of health, cooldowns, statuses, etc.
 
     next_state = EnvState(
-        step_count=state.step_count + 1,
+        step_count=current_state.step_count + 1,
         agent_positions=next_agent_positions,
-        alive_mask=state.alive_mask,
-        current_health=state.current_health,
-        ultimate_cooldowns=state.ultimate_cooldowns,
-        slow_durations=state.slow_durations,
-        stun_durations=state.stun_durations,
-        rogue_poison_anti_heal_durations=state.rogue_poison_anti_heal_durations,
-        mage_burst_damage_amplification_durations=state.mage_burst_damage_amplification_durations,
-        priest_blessing_of_freedom_slow_floor_durations=state.priest_blessing_of_freedom_slow_floor_durations,
+        alive_mask=current_state.alive_mask,
+        current_health=current_state.current_health,
+        ultimate_cooldowns=current_state.ultimate_cooldowns,
+        slow_durations=current_state.slow_durations,
+        stun_durations=current_state.stun_durations,
+        rogue_poison_anti_heal_durations=current_state.rogue_poison_anti_heal_durations,
+        mage_burst_damage_amplification_durations=current_state.mage_burst_damage_amplification_durations,
+        priest_blessing_of_freedom_slow_floor_durations=current_state.priest_blessing_of_freedom_slow_floor_durations,
     )
 
-    obs, action_mask = _build_observation_and_action_mask(next_state, config)
+    next_observation, next_action_mask = _build_observation_and_action_mask(
+        next_state, config
+    )
 
     rewards = Reward(rewards=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32))
 
@@ -851,4 +865,4 @@ def step(
 
     info = Info()
 
-    return (next_state, obs, rewards, done_flags, action_mask, info)
+    return (next_state, next_observation, rewards, done_flags, next_action_mask, info)

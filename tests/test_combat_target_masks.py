@@ -1,4 +1,5 @@
 """Focused semantic proofs for Milestone 5 basic target legality."""
+# pyright: reportPrivateUsage=false
 
 from typing import Literal, cast
 
@@ -8,7 +9,11 @@ import pytest
 from jax import Array
 
 from marl_battlegrounds.core.config import resolve_agent_profile
-from marl_battlegrounds.core.env import reset, step
+from marl_battlegrounds.core.env import (
+    _build_observation_and_action_mask,
+    reset,
+    step,
+)
 from marl_battlegrounds.core.types import (
     AGENT_FEATURE_STUN_ROGUE_POISON_DURATION,
     AGENT_FEATURE_STUN_WARRIOR_CHARGE_DURATION,
@@ -61,6 +66,12 @@ def _stay_action() -> Action:
     )
 
 
+def _current_action_mask(config: EnvConfig, state: EnvState) -> ActionMask:
+    """Return the action mask paired with an explicitly built test state."""
+    _, action_mask = _build_observation_and_action_mask(state, config)
+    return action_mask
+
+
 def _target_scenario(actor_class_id: int = MAGE_CLASS_ID) -> tuple[EnvConfig, EnvState]:
     """Build a clear-LOS 2v1 scenario with every candidate inside basic range."""
     profile = resolve_agent_profile(
@@ -107,6 +118,7 @@ def _step_scenario(
     next_state, observation, _, _, action_mask, _ = step(
         config,
         state,
+        _current_action_mask(config, state),
         _stay_action(),
         jax.random.key(2),
     )
@@ -553,7 +565,13 @@ def test_jitted_step_matches_eager_class_and_stun_targetability() -> None:
     compiled_step = jax.jit(step)
     compiled_state, compiled_observation, _, _, compiled_action_mask, _ = cast(
         tuple[EnvState, Observation, object, object, ActionMask, object],
-        compiled_step(config, state, _stay_action(), jax.random.key(2)),
+        compiled_step(
+            config,
+            state,
+            _current_action_mask(config, state),
+            _stay_action(),
+            jax.random.key(2),
+        ),
     )
 
     assert jax.tree_util.tree_structure(compiled_state) == jax.tree_util.tree_structure(

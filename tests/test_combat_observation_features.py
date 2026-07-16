@@ -1,4 +1,5 @@
 """Milestone 5 Step 2 CP4 combat-observation contract tests."""
+# pyright: reportPrivateUsage=false
 
 from collections.abc import Sequence
 from typing import cast
@@ -10,7 +11,11 @@ from jax import Array
 import marl_battlegrounds.core.combat as combat
 import marl_battlegrounds.core.types as core_types
 from marl_battlegrounds.core.config import resolve_agent_profile
-from marl_battlegrounds.core.env import reset, step
+from marl_battlegrounds.core.env import (
+    _build_observation_and_action_mask,
+    reset,
+    step,
+)
 from marl_battlegrounds.core.types import (
     AGENT_FEATURE_ANTI_HEAL_ROGUE_POISON_DURATION,
     AGENT_FEATURE_ANTI_HEAL_ROGUE_POISON_MULTIPLIER,
@@ -70,6 +75,7 @@ from marl_battlegrounds.core.types import (
     UNIT_FEATURES,
     WARRIOR_CLASS_ID,
     Action,
+    ActionMask,
     EnvConfig,
     EnvState,
     Observation,
@@ -184,9 +190,19 @@ def _expected_owned_payload(
 
 
 def _observation_after_step(
-    config: EnvConfig, state: EnvState, action: Action, key: Array
+    config: EnvConfig,
+    state: EnvState,
+    action_mask: ActionMask,
+    action: Action,
+    key: Array,
 ) -> Observation:
-    return step(config, state, action, key)[1]
+    return step(config, state, action_mask, action, key)[1]
+
+
+def _current_action_mask(config: EnvConfig, state: EnvState) -> ActionMask:
+    """Return the action mask paired with an explicitly built test state."""
+    _, action_mask = _build_observation_and_action_mask(state, config)
+    return action_mask
 
 
 def test_shared_agent_feature_schema_is_contiguous_and_duration_first() -> None:
@@ -255,7 +271,13 @@ def test_capabilities_are_class_owned_payloads_not_cooldown_availability() -> No
     state = state._replace(
         ultimate_cooldowns=jnp.arange(MAX_AGENT_SLOTS, dtype=jnp.int32) + 3
     )
-    _, second_observation, *_ = step(config, state, _action(), jax.random.key(3))
+    _, second_observation, *_ = step(
+        config,
+        state,
+        _current_action_mask(config, state),
+        _action(),
+        jax.random.key(3),
+    )
 
     expected_catalog_columns = (
         (AGENT_FEATURE_CAPABILITY_BASIC_DAMAGE, combat.BASIC_DAMAGE_BY_CLASS),
@@ -428,7 +450,11 @@ def test_attached_statuses_and_effective_speed_follow_duration_state() -> None:
     )
 
     next_state, observation, *_ = step(
-        config, state, _action(east_slots=(0, 1, 2)), jax.random.key(5)
+        config,
+        state,
+        _current_action_mask(config, state),
+        _action(east_slots=(0, 1, 2)),
+        jax.random.key(5),
     )
     rows = observation.self_features
 
@@ -488,7 +514,13 @@ def test_visible_candidates_match_shared_rows_and_hidden_rows_are_fully_zero() -
     )
     state = state._replace(agent_positions=positions)
 
-    _, observation, *_ = step(config, state, _action(), jax.random.key(7))
+    _, observation, *_ = step(
+        config,
+        state,
+        _current_action_mask(config, state),
+        _action(),
+        jax.random.key(7),
+    )
 
     assert bool(observation.enemy_visibility_mask[0, 0])
     assert not bool(observation.enemy_visibility_mask[0, 1])
@@ -517,10 +549,23 @@ def test_capabilities_remain_zero_for_inactive_non_neutral_padding() -> None:
 def test_cp4_observation_contract_is_jit_stable() -> None:
     config = _config((2, 2))
     state, *_ = reset(config, jax.random.key(9))
-    eager = _observation_after_step(config, state, _action(), jax.random.key(10))
+    current_action_mask = _current_action_mask(config, state)
+    eager = _observation_after_step(
+        config,
+        state,
+        current_action_mask,
+        _action(),
+        jax.random.key(10),
+    )
     compiled = cast(
         Observation,
-        jax.jit(_observation_after_step)(config, state, _action(), jax.random.key(10)),
+        jax.jit(_observation_after_step)(
+            config,
+            state,
+            current_action_mask,
+            _action(),
+            jax.random.key(10),
+        ),
     )
 
     assert jax.tree_util.tree_structure(eager) == jax.tree_util.tree_structure(compiled)

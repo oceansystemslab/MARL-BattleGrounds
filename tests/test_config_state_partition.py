@@ -1,4 +1,5 @@
 """Focused config/state ownership proofs for Milestone 5 Step 2 CP3C."""
+# pyright: reportPrivateUsage=false
 
 from typing import cast
 
@@ -7,7 +8,11 @@ import jax.numpy as jnp
 from jax import Array
 
 from marl_battlegrounds.core.config import resolve_agent_profile
-from marl_battlegrounds.core.env import reset, step
+from marl_battlegrounds.core.env import (
+    _build_observation_and_action_mask,
+    reset,
+    step,
+)
 from marl_battlegrounds.core.types import (
     AGENT_FEATURE_ACTIVE,
     AGENT_FEATURE_BASE_MOVEMENT_SPEED,
@@ -95,6 +100,12 @@ def _zero_action() -> Action:
     )
 
 
+def _current_action_mask(config: EnvConfig, state: EnvState) -> ActionMask:
+    """Return the action mask paired with an explicitly built test state."""
+    _, action_mask = _build_observation_and_action_mask(state, config)
+    return action_mask
+
+
 def _assert_tree_equal(left: EnvState, right: EnvState) -> None:
     assert jax.tree_util.tree_structure(left) == jax.tree_util.tree_structure(right)
     for left_leaf, right_leaf in zip(
@@ -162,8 +173,20 @@ def test_profile_base_speed_changes_movement_without_replacing_state() -> None:
     )
     faster_config = config._replace(agent_profile=faster_profile)
 
-    ordinary_state, *_ = step(config, state, action, jax.random.key(2))
-    faster_state, *_ = step(faster_config, state, action, jax.random.key(2))
+    ordinary_state, *_ = step(
+        config,
+        state,
+        _current_action_mask(config, state),
+        action,
+        jax.random.key(2),
+    )
+    faster_state, *_ = step(
+        faster_config,
+        state,
+        _current_action_mask(faster_config, state),
+        action,
+        jax.random.key(2),
+    )
 
     assert bool(
         faster_state.agent_positions[0, 0] > ordinary_state.agent_positions[0, 0]
@@ -191,8 +214,20 @@ def test_profile_radius_changes_geometry_projection_without_replacing_state() ->
         )
     )
 
-    small_state, *_ = step(small_config, state, action, jax.random.key(4))
-    large_state, *_ = step(large_config, state, action, jax.random.key(4))
+    small_state, *_ = step(
+        small_config,
+        state,
+        _current_action_mask(small_config, state),
+        action,
+        jax.random.key(4),
+    )
+    large_state, *_ = step(
+        large_config,
+        state,
+        _current_action_mask(large_config, state),
+        action,
+        jax.random.key(4),
+    )
 
     assert bool(small_state.agent_positions[0, 0] < large_state.agent_positions[0, 0])
 
@@ -220,21 +255,28 @@ def test_profile_radii_control_visibility_and_targetability() -> None:
         )
     )
 
+    short_config = config._replace(agent_profile=short_profile)
+    visible_config = config._replace(agent_profile=long_observation_profile)
+    targetable_config = config._replace(agent_profile=long_interaction_profile)
+
     _, short_observation, _, _, short_action_mask, _ = step(
-        config._replace(agent_profile=short_profile),
+        short_config,
         state,
+        _current_action_mask(short_config, state),
         _zero_action(),
         jax.random.key(12),
     )
     _, visible_observation, _, _, visible_action_mask, _ = step(
-        config._replace(agent_profile=long_observation_profile),
+        visible_config,
         state,
+        _current_action_mask(visible_config, state),
         _zero_action(),
         jax.random.key(12),
     )
     _, _, _, _, targetable_action_mask, _ = step(
-        config._replace(agent_profile=long_interaction_profile),
+        targetable_config,
         state,
+        _current_action_mask(targetable_config, state),
         _zero_action(),
         jax.random.key(12),
     )
@@ -272,7 +314,13 @@ def test_step_preserves_non_inert_dynamic_memory() -> None:
         ),
     )
 
-    next_state, *_ = step(config, state, _zero_action(), jax.random.key(6))
+    next_state, *_ = step(
+        config,
+        state,
+        _current_action_mask(config, state),
+        _zero_action(),
+        jax.random.key(6),
+    )
 
     assert next_state.step_count == state.step_count + 1
     assert bool(jnp.array_equal(next_state.current_health, state.current_health))
@@ -305,21 +353,35 @@ def test_step_matches_jit_and_keeps_scan_carry_structure_stable() -> None:
     config = _config()
     state, *_ = reset(config, jax.random.key(8))
     action = _zero_action()
-    eager_state, *_ = step(config, state, action, jax.random.key(9))
+    current_action_mask = _current_action_mask(config, state)
+    eager_state, *_ = step(
+        config, state, current_action_mask, action, jax.random.key(9)
+    )
     jitted_output = cast(
         tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info],
-        jax.jit(step)(config, state, action, jax.random.key(9)),
+        jax.jit(step)(
+            config,
+            state,
+            current_action_mask,
+            action,
+            jax.random.key(9),
+        ),
     )
     jitted_state = jitted_output[0]
     _assert_tree_equal(eager_state, jitted_state)
 
-    def _scan_step(carry: EnvState, key: Array) -> tuple[EnvState, Array]:
-        next_state, *_ = step(config, carry, action, key)
-        return next_state, next_state.step_count
+    def _scan_step(
+        carry: tuple[EnvState, ActionMask], key: Array
+    ) -> tuple[tuple[EnvState, ActionMask], Array]:
+        current_state, action_mask = carry
+        next_state, _, _, _, next_action_mask, _ = step(
+            config, current_state, action_mask, action, key
+        )
+        return (next_state, next_action_mask), next_state.step_count
 
-    scanned_state, history = jax.lax.scan(
+    (scanned_state, scanned_action_mask), history = jax.lax.scan(
         _scan_step,
-        state,
+        (state, current_action_mask),
         jax.random.split(jax.random.key(10), 3),
     )
     assert jax.tree_util.tree_structure(scanned_state) == jax.tree_util.tree_structure(
@@ -327,6 +389,9 @@ def test_step_matches_jit_and_keeps_scan_carry_structure_stable() -> None:
     )
     assert history.shape == (3,)
     assert scanned_state.step_count == 3
+    assert jax.tree_util.tree_structure(
+        scanned_action_mask
+    ) == jax.tree_util.tree_structure(current_action_mask)
 
 
 def test_action_shapes_remain_independent_of_profile_storage() -> None:

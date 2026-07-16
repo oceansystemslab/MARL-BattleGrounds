@@ -14,7 +14,11 @@ import pytest
 from jax import Array
 
 from marl_battlegrounds.core.config import resolve_agent_profile
-from marl_battlegrounds.core.env import reset, step
+from marl_battlegrounds.core.env import (
+    _build_observation_and_action_mask,
+    reset,
+    step,
+)
 from marl_battlegrounds.core.types import (
     AGENT_FEATURE_ACTIVE,
     AGENT_FEATURE_ALIVE,
@@ -103,6 +107,12 @@ def _inert_combat_state_fields() -> _CombatStateFields:
             (MAX_AGENT_SLOTS,), dtype=jnp.int32
         ),
     }
+
+
+def _current_action_mask(config: EnvConfig, state: EnvState) -> ActionMask:
+    """Return the action mask paired with an explicitly built test state."""
+    _, action_mask = _build_observation_and_action_mask(state, config)
+    return action_mask
 
 
 def _empty_obstacles() -> Array:
@@ -689,7 +699,9 @@ def test_step_self_features_match_next_state_base_fields() -> None:
 
     joint_action = _joint_action_with_moves((0, MOVE_EAST))
 
-    next_state, observation, *_ = step(config, state, joint_action, key)
+    next_state, observation, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_self_features_match_state_base_fields(observation, next_state, config)
     _assert_self_features_match_state_effective_fields(observation, config)
@@ -753,7 +765,11 @@ def test_active_dead_self_rows_retain_state_and_expose_canonical_no_op() -> None
     )
 
     _, observation, _, _, action_mask, _ = step(
-        config, state, _joint_action_with_moves(), key
+        config,
+        state,
+        _current_action_mask(config, state),
+        _joint_action_with_moves(),
+        key,
     )
 
     assert observation.self_features[0, AGENT_FEATURE_ACTIVE] == 1.0
@@ -782,7 +798,9 @@ def test_visibility_uses_state_observation_radii_not_config_default() -> None:
         effective_observation_radius=3.0,
     )
 
-    _, observation, *_ = step(config, state, joint_action, key)
+    _, observation, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     expected_ally, expected_enemy = _relation_visibility_masks_with_rows(
         ally_rows=(
@@ -818,7 +836,9 @@ def test_visibility_is_directed_by_each_observer_radius() -> None:
         )
     )
 
-    _, observation, *_ = step(config, state, joint_action, key)
+    _, observation, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     expected_ally, expected_enemy = _relation_visibility_masks_with_rows(
         ally_rows=(
@@ -849,7 +869,9 @@ def test_visibility_ignores_basic_and_ultimate_interaction_radii() -> None:
         effective_ultimate_interaction_radius=0.25,
     )
 
-    _, observation, *_ = step(config, state, joint_action, key)
+    _, observation, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     expected_ally, expected_enemy = _relation_visibility_masks_with_rows(
         ally_rows=(
@@ -1169,7 +1191,9 @@ def test_visibility_masks(
     key = jax.random.key(42)
     joint_action = _joint_action_with_moves()
 
-    _, observation, *_ = step(config, state, joint_action, key)
+    _, observation, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_visibility_masks_match(observation, expected_ally, expected_enemy)
 
@@ -1234,7 +1258,13 @@ def test_visible_candidate_rows_match_shared_self_feature_schema() -> None:
     )
     config = config._replace(agent_profile=profile)
 
-    _, observation, *_ = step(config, state, _joint_action_with_moves(), key)
+    _, observation, *_ = step(
+        config,
+        state,
+        _current_action_mask(config, state),
+        _joint_action_with_moves(),
+        key,
+    )
 
     _assert_unit_feature_row_matches_self_row(
         observation,
@@ -1295,7 +1325,13 @@ def test_visible_candidate_rows_preserve_non_boolean_numeric_values() -> None:
         effective_ultimate_interaction_radius=6.75,
     )
 
-    next_state, observation, *_ = step(config, state, _joint_action_with_moves(), key)
+    next_state, observation, *_ = step(
+        config,
+        state,
+        _current_action_mask(config, state),
+        _joint_action_with_moves(),
+        key,
+    )
 
     candidate_slot = MAX_AGENTS_PER_TEAM
     candidate_row = observation.enemy_unit_features[0, 0]
@@ -1365,7 +1401,13 @@ def test_los_blocked_candidate_rows_are_fully_zero() -> None:
         effective_observation_radius=10.0,
     )
 
-    _, observation, *_ = step(config, state, _joint_action_with_moves(), key)
+    _, observation, *_ = step(
+        config,
+        state,
+        _current_action_mask(config, state),
+        _joint_action_with_moves(),
+        key,
+    )
 
     assert not bool(observation.enemy_visibility_mask[0, 0])
     assert not bool(observation.enemy_visibility_mask[MAX_AGENTS_PER_TEAM, 0])
@@ -1388,7 +1430,13 @@ def test_out_of_radius_candidate_rows_are_fully_zero() -> None:
         effective_observation_radius=3.0,
     )
 
-    _, observation, *_ = step(config, state, _joint_action_with_moves(), key)
+    _, observation, *_ = step(
+        config,
+        state,
+        _current_action_mask(config, state),
+        _joint_action_with_moves(),
+        key,
+    )
 
     assert not bool(observation.enemy_visibility_mask[0, 0])
     assert not bool(observation.enemy_visibility_mask[0, 1])
@@ -1411,7 +1459,13 @@ def test_inactive_dead_and_padded_candidate_rows_are_fully_zero() -> None:
         effective_observation_radius=8.0,
     )
 
-    _, observation, *_ = step(config, state, _joint_action_with_moves(), key)
+    _, observation, *_ = step(
+        config,
+        state,
+        _current_action_mask(config, state),
+        _joint_action_with_moves(),
+        key,
+    )
 
     assert not bool(observation.ally_visibility_mask[0, 1])
     _assert_unit_feature_row_is_zero(observation.ally_unit_features[0, 1])
@@ -1454,7 +1508,13 @@ def test_candidate_visibility_masking_does_not_alter_self_features() -> None:
         effective_observation_radius=10.0,
     )
 
-    next_state, observation, *_ = step(config, state, _joint_action_with_moves(), key)
+    next_state, observation, *_ = step(
+        config,
+        state,
+        _current_action_mask(config, state),
+        _joint_action_with_moves(),
+        key,
+    )
 
     _assert_self_features_match_state_base_fields(observation, next_state, config)
     _assert_self_features_match_state_effective_fields(observation, config)
@@ -1478,6 +1538,7 @@ def test_active_dead_rows_keep_state_and_remain_invalid_as_candidates() -> None:
     _, observation, _, _, action_mask, _ = step(
         config,
         state,
+        _current_action_mask(config, state),
         _joint_action_with_moves(),
         key,
     )
@@ -1511,7 +1572,13 @@ def test_expanded_unit_feature_columns_obey_full_row_visibility_masking() -> Non
         effective_observation_radius=8.0,
     )
 
-    _, observation, *_ = step(config, state, _joint_action_with_moves(), key)
+    _, observation, *_ = step(
+        config,
+        state,
+        _current_action_mask(config, state),
+        _joint_action_with_moves(),
+        key,
+    )
 
     expanded_start = AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS + 1
     relation_families = (
@@ -1558,7 +1625,13 @@ def test_map_obstacle_features_remain_globally_observed_after_candidate_masking(
         effective_observation_radius=3.0,
     )
 
-    _, observation, *_ = step(config, state, _joint_action_with_moves(), key)
+    _, observation, *_ = step(
+        config,
+        state,
+        _current_action_mask(config, state),
+        _joint_action_with_moves(),
+        key,
+    )
 
     assert bool(
         jnp.allclose(
@@ -1699,6 +1772,7 @@ def test_basic_targetability_masks(
     next_state, observation, _, _, action_mask, _ = step(
         config,
         state,
+        _current_action_mask(config, state),
         _joint_action_with_moves(),
         jax.random.key(42),
     )
@@ -1751,6 +1825,7 @@ def test_basic_targetability_uses_observer_specific_basic_interaction_radius() -
     next_state, _, _, _, action_mask, _ = step(
         config,
         state,
+        _current_action_mask(config, state),
         _joint_action_with_moves(),
         jax.random.key(42),
     )
@@ -1786,6 +1861,7 @@ def test_observation_radius_does_not_substitute_for_basic_interaction_radius() -
     _, observation, _, _, action_mask, _ = step(
         config,
         state,
+        _current_action_mask(config, state),
         _joint_action_with_moves(),
         jax.random.key(42),
     )
@@ -1817,6 +1893,7 @@ def test_ultimate_interaction_radius_does_not_affect_basic_targetability() -> No
     _, observation, _, _, action_mask, _ = step(
         config,
         state,
+        _current_action_mask(config, state),
         _joint_action_with_moves(),
         jax.random.key(42),
     )
@@ -1848,6 +1925,7 @@ def test_inactive_and_dead_observers_expose_only_canonical_combat_pair() -> None
     _, _, _, _, action_mask, _ = step(
         config,
         state,
+        _current_action_mask(config, state),
         _joint_action_with_moves(),
         jax.random.key(42),
     )
@@ -1878,6 +1956,7 @@ def test_none_target_selection_is_valid_for_every_fixed_slot() -> None:
     _, _, _, _, action_mask, _ = step(
         config,
         state,
+        _current_action_mask(config, state),
         _joint_action_with_moves(),
         jax.random.key(42),
     )
@@ -1906,6 +1985,7 @@ def test_ultimate_marginal_combines_class_availability_and_nonacting_no_op() -> 
     next_state, _, _, _, action_mask, _ = step(
         config,
         state,
+        _current_action_mask(config, state),
         _joint_action_with_moves(),
         jax.random.key(42),
     )
@@ -1957,10 +2037,12 @@ def test_jitted_nonstay_step_preserves_observation_mask_contracts() -> None:
         (MAX_AGENTS_PER_TEAM, MOVE_EAST),
     )
     key = jax.random.key(42)
+    current_action_mask = _current_action_mask(config, state)
 
     eager_state, eager_observation, _, _, eager_action_mask, _ = step(
         config,
         state,
+        current_action_mask,
         joint_action,
         key,
     )
@@ -1969,6 +2051,7 @@ def test_jitted_nonstay_step_preserves_observation_mask_contracts() -> None:
         jax.jit(step)(
             config,
             state,
+            current_action_mask,
             joint_action,
             key,
         ),
@@ -2054,18 +2137,24 @@ def test_scanned_rollout_emits_stable_observation_mask_history() -> None:
     )
     key = jax.random.key(123)
     keys = jax.random.split(key, horizon)
+    initial_action_mask = _current_action_mask(config, state)
 
     def _rollout_step(
-        carry: EnvState,
+        carry: tuple[EnvState, ActionMask],
         step_key: Array,
-    ) -> tuple[EnvState, tuple[Array, Array, Array, Array, Array, Array]]:
+    ) -> tuple[
+        tuple[EnvState, ActionMask],
+        tuple[Array, Array, Array, Array, Array, Array],
+    ]:
+        current_state, current_action_mask = carry
         next_state, observation, _, _, action_mask, _ = step(
             config,
-            carry,
+            current_state,
+            current_action_mask,
             joint_action,
             step_key,
         )
-        return next_state, (
+        return (next_state, action_mask), (
             observation.ally_visibility_mask,
             observation.enemy_visibility_mask,
             action_mask.move_mask,
@@ -2076,19 +2165,26 @@ def test_scanned_rollout_emits_stable_observation_mask_history() -> None:
 
     def _rollout(
         initial_state: EnvState,
+        initial_mask: ActionMask,
         step_keys: Array,
-    ) -> tuple[EnvState, tuple[Array, Array, Array, Array, Array, Array]]:
+    ) -> tuple[
+        tuple[EnvState, ActionMask],
+        tuple[Array, Array, Array, Array, Array, Array],
+    ]:
         """Run a compiled fixed-horizon rollout with mask history."""
         return jax.lax.scan(
             _rollout_step,
-            initial_state,
+            (initial_state, initial_mask),
             step_keys,
             length=horizon,
         )
 
-    final_state, history = cast(
-        tuple[EnvState, tuple[Array, Array, Array, Array, Array, Array]],
-        jax.jit(_rollout)(state, keys),
+    (final_state, final_action_mask), history = cast(
+        tuple[
+            tuple[EnvState, ActionMask],
+            tuple[Array, Array, Array, Array, Array, Array],
+        ],
+        jax.jit(_rollout)(state, initial_action_mask, keys),
     )
     (
         ally_visibility_history,
@@ -2098,6 +2194,10 @@ def test_scanned_rollout_emits_stable_observation_mask_history() -> None:
         target_mask_history,
         ultimate_mask_history,
     ) = history
+
+    assert jax.tree_util.tree_structure(
+        final_action_mask
+    ) == jax.tree_util.tree_structure(initial_action_mask)
 
     assert final_state.step_count == horizon
     assert ally_visibility_history.shape == (

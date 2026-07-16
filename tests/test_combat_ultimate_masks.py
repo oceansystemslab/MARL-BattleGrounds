@@ -1,4 +1,5 @@
 """Semantic and transformation proofs for target-conditioned ultimate masks."""
+# pyright: reportPrivateUsage=false
 
 from typing import cast
 
@@ -8,7 +9,7 @@ import pytest
 from jax import Array
 
 from marl_battlegrounds.core.config import resolve_agent_profile
-from marl_battlegrounds.core.env import step
+from marl_battlegrounds.core.env import _build_observation_and_action_mask, step
 from marl_battlegrounds.core.types import (
     ENVIRONMENT_DIMENSIONS,
     HUNTER_CLASS_ID,
@@ -91,6 +92,12 @@ def _stay_action(*, target: int = 0, use_ultimate: int = 0) -> Action:
     )
 
 
+def _current_action_mask(config: EnvConfig, state: EnvState) -> ActionMask:
+    """Return the action mask paired with an explicitly built test state."""
+    _, action_mask = _build_observation_and_action_mask(state, config)
+    return action_mask
+
+
 def _scenario(
     actor_class_id: int,
     *,
@@ -162,6 +169,7 @@ def _outputs(
     next_state, observation, _, _, action_mask, _ = step(
         config,
         state,
+        _current_action_mask(config, state),
         _stay_action() if action is None else action,
         jax.random.key(7),
     )
@@ -627,15 +635,18 @@ def test_hidden_candidate_changes_do_not_leak_through_actor_outputs() -> None:
 def test_submitted_combat_heads_remain_effect_inert() -> None:
     """Prove Step 4 does not pull pair acceptance or combat effects forward."""
     config, state = _scenario(WARRIOR_CLASS_ID, enemy_x=2.25)
+    current_action_mask = _current_action_mask(config, state)
     neutral_outputs = step(
         config,
         state,
+        current_action_mask,
         _stay_action(),
         jax.random.key(8),
     )
     submitted_outputs = step(
         config,
         state,
+        current_action_mask,
         _stay_action(target=_ENEMY_TARGET, use_ultimate=1),
         jax.random.key(8),
     )
@@ -654,7 +665,13 @@ def test_jitted_step_matches_eager_pair_semantics() -> None:
     eager = _outputs(config, state)
     compiled_state, compiled_observation, _, _, compiled_mask, _ = cast(
         tuple[EnvState, Observation, object, object, ActionMask, object],
-        jax.jit(step)(config, state, _stay_action(), jax.random.key(7)),
+        jax.jit(step)(
+            config,
+            state,
+            _current_action_mask(config, state),
+            _stay_action(),
+            jax.random.key(7),
+        ),
     )
 
     assert bool(jnp.array_equal(compiled_state.step_count, eager[0].step_count))
@@ -694,18 +711,21 @@ def test_scanned_rollout_preserves_meaningful_pair_history() -> None:
     horizon = 3
     config, state = _scenario(WARRIOR_CLASS_ID, enemy_x=6.0, basic_radius=0.5)
     keys = jax.random.split(jax.random.key(10), horizon)
+    initial_action_mask = _current_action_mask(config, state)
 
     def _scan_step(
-        carry: EnvState,
+        carry: tuple[EnvState, ActionMask],
         step_key: Array,
-    ) -> tuple[EnvState, tuple[Array, Array, Array, Array]]:
+    ) -> tuple[tuple[EnvState, ActionMask], tuple[Array, Array, Array, Array]]:
+        current_state, current_action_mask = carry
         next_state, _, _, _, action_mask, _ = step(
             config,
-            carry,
+            current_state,
+            current_action_mask,
             _stay_action(),
             step_key,
         )
-        return next_state, (
+        return (next_state, action_mask), (
             action_mask.move_mask,
             action_mask.select_target_use_ultimate_joint_mask,
             action_mask.select_target_mask,
@@ -714,14 +734,23 @@ def test_scanned_rollout_preserves_meaningful_pair_history() -> None:
 
     def _rollout(
         initial_state: EnvState,
+        initial_mask: ActionMask,
         scan_keys: Array,
-    ) -> tuple[EnvState, tuple[Array, Array, Array, Array]]:
+    ) -> tuple[tuple[EnvState, ActionMask], tuple[Array, Array, Array, Array]]:
         """Run the fixed-horizon transition under one compiled scan."""
-        return jax.lax.scan(_scan_step, initial_state, scan_keys)
+        return jax.lax.scan(_scan_step, (initial_state, initial_mask), scan_keys)
 
-    final_state, (move_history, joint_history, target_history, ultimate_history) = cast(
-        tuple[EnvState, tuple[Array, Array, Array, Array]],
-        jax.jit(_rollout)(state, keys),
+    (
+        (final_state, _),
+        (
+            move_history,
+            joint_history,
+            target_history,
+            ultimate_history,
+        ),
+    ) = cast(
+        tuple[tuple[EnvState, ActionMask], tuple[Array, Array, Array, Array]],
+        jax.jit(_rollout)(state, initial_action_mask, keys),
     )
 
     assert final_state.step_count == horizon

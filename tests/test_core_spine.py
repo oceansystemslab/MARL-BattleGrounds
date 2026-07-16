@@ -1,4 +1,5 @@
 """Core simulator spine contract tests."""
+# pyright: reportPrivateUsage=false
 
 from typing import TypedDict, cast
 
@@ -10,7 +11,11 @@ from jax import Array
 import marl_battlegrounds.core.combat as combat
 import marl_battlegrounds.core.types as core_types
 from marl_battlegrounds.core.config import resolve_agent_profile
-from marl_battlegrounds.core.env import reset, step
+from marl_battlegrounds.core.env import (
+    _build_observation_and_action_mask,
+    reset,
+    step,
+)
 from marl_battlegrounds.core.types import (
     AGENT_FEATURE_ACTIVE,
     AGENT_FEATURE_ALIVE,
@@ -217,6 +222,12 @@ def _zero_action() -> Action:
         select_target=jnp.zeros(shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32),
         use_ultimate=jnp.zeros(shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32),
     )
+
+
+def _current_action_mask(config: EnvConfig, state: EnvState) -> ActionMask:
+    """Return the action mask paired with an explicitly built test state."""
+    _, action_mask = _build_observation_and_action_mask(state, config)
+    return action_mask
 
 
 def _zero_observation() -> Observation:
@@ -744,9 +755,11 @@ def test_reward_stores_one_scalar_per_agent_slot() -> None:
 def test_step_increments_step_count() -> None:
     config = _config(team_size=3, max_steps=1000)
     key = jax.random.key(42)
-    state, _, _, _ = reset(config, key)
+    state, _, current_action_mask, _ = reset(config, key)
 
-    next_state, _, _, _, _, _ = step(config, state, _zero_action(), key)
+    next_state, _, _, _, _, _ = step(
+        config, state, current_action_mask, _zero_action(), key
+    )
 
     assert jnp.array_equal(next_state.step_count, jnp.array(1, dtype=jnp.int32))
 
@@ -757,7 +770,13 @@ def test_step_preserves_slot_aligned_state_arrays() -> None:
     state, _, _, _ = reset(config, key)
     state = state._replace(**_non_inert_combat_state_fields(state))
 
-    next_state, _, _, _, _, _ = step(config, state, _zero_action(), key)
+    next_state, _, _, _, _, _ = step(
+        config,
+        state,
+        _current_action_mask(config, state),
+        _zero_action(),
+        key,
+    )
 
     assert jnp.array_equal(next_state.agent_positions, state.agent_positions)
     assert jnp.array_equal(next_state.alive_mask, state.alive_mask)
@@ -786,7 +805,11 @@ def test_zero_health_does_not_trigger_death_rewards_done_or_info() -> None:
     state = state._replace(current_health=state.current_health.at[0].set(0.0))
 
     next_state, _, reward, done_flags, _, info = step(
-        config, state, _zero_action(), key
+        config,
+        state,
+        _current_action_mask(config, state),
+        _zero_action(),
+        key,
     )
 
     assert jnp.array_equal(next_state.current_health, state.current_health)
@@ -804,10 +827,10 @@ def test_zero_health_does_not_trigger_death_rewards_done_or_info() -> None:
 def test_step_returns_fixed_shape_core_outputs() -> None:
     config = _config(team_size=3, max_steps=1000)
     key = jax.random.key(42)
-    state, _, _, _ = reset(config, key)
+    state, _, current_action_mask, _ = reset(config, key)
 
     next_state, observation, reward, done_flags, action_mask, info = step(
-        config, state, _zero_action(), key
+        config, state, current_action_mask, _zero_action(), key
     )
 
     _assert_state_contract(next_state)
@@ -834,9 +857,11 @@ def test_step_returns_fixed_shape_core_outputs() -> None:
 def test_step_returns_zero_rewards_for_all_agent_slots() -> None:
     config = _config(team_size=3, max_steps=1000)
     key = jax.random.key(42)
-    state, _, _, _ = reset(config, key)
+    state, _, current_action_mask, _ = reset(config, key)
 
-    _, _, reward, _, _, _ = step(config, state, _zero_action(), key)
+    _, _, reward, _, _, _ = step(
+        config, state, current_action_mask, _zero_action(), key
+    )
 
     assert jnp.array_equal(
         reward.rewards, jnp.zeros(shape=(MAX_AGENT_SLOTS,), dtype=jnp.float32)
@@ -846,9 +871,11 @@ def test_step_returns_zero_rewards_for_all_agent_slots() -> None:
 def test_step_action_masks_preserve_active_choices_and_canonical_padding() -> None:
     config = _config(team_size=3, max_steps=1000)
     key = jax.random.key(42)
-    state, _, _, _ = reset(config, key)
+    state, _, current_action_mask, _ = reset(config, key)
 
-    _, _, _, _, action_mask, _ = step(config, state, _zero_action(), key)
+    _, _, _, _, action_mask, _ = step(
+        config, state, current_action_mask, _zero_action(), key
+    )
 
     _assert_fixed_slot_action_mask_values(
         action_mask=action_mask,
@@ -860,9 +887,11 @@ def test_step_action_masks_preserve_active_choices_and_canonical_padding() -> No
 def test_step_does_not_truncate_before_horizon() -> None:
     config = _config(team_size=3, max_steps=2)
     key = jax.random.key(42)
-    state, _, _, _ = reset(config, key)
+    state, _, current_action_mask, _ = reset(config, key)
 
-    _, _, _, done_flags, _, _ = step(config, state, _zero_action(), key)
+    _, _, _, done_flags, _, _ = step(
+        config, state, current_action_mask, _zero_action(), key
+    )
 
     assert jnp.array_equal(done_flags.terminated, jnp.array(False))
     assert jnp.array_equal(done_flags.truncated, jnp.array(False))
@@ -872,9 +901,11 @@ def test_step_does_not_truncate_before_horizon() -> None:
 def test_step_truncates_when_incremented_step_reaches_horizon() -> None:
     config = _config(team_size=3, max_steps=1)
     key = jax.random.key(42)
-    state, _, _, _ = reset(config, key)
+    state, _, current_action_mask, _ = reset(config, key)
 
-    _, _, _, done_flags, _, _ = step(config, state, _zero_action(), key)
+    _, _, _, done_flags, _, _ = step(
+        config, state, current_action_mask, _zero_action(), key
+    )
 
     assert jnp.array_equal(done_flags.terminated, jnp.array(False))
     assert jnp.array_equal(done_flags.truncated, jnp.array(True))
@@ -886,11 +917,11 @@ def test_that_step_can_be_jit_compiled() -> None:
 
     config = _config(team_size=3, max_steps=1)
     key = jax.random.key(42)
-    state, _, _, _ = reset(config, key)
+    state, _, current_action_mask, _ = reset(config, key)
 
     next_state, observation, reward, done_flags, action_mask, info = cast(
         tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info],
-        step_jitted(config, state, _zero_action(), key),
+        step_jitted(config, state, current_action_mask, _zero_action(), key),
     )
 
     _assert_state_contract(next_state)
@@ -916,29 +947,43 @@ def test_step_can_run_in_scanned_rollout() -> None:
     key = jax.random.key(42)
     state, _, _, _ = reset(config, key)
     state = state._replace(**_non_inert_combat_state_fields(state))
+    initial_action_mask = _current_action_mask(config, state)
     joint_action = _zero_action()
 
     def _step_wrapper(
-        state: EnvState,
+        carry: tuple[EnvState, ActionMask],
         key: Array,
         config: EnvConfig = config,
         joint_action: Action = joint_action,
-    ) -> tuple[EnvState, Array]:
+    ) -> tuple[tuple[EnvState, ActionMask], Array]:
         """Run one rollout step for scan."""
-        new_state, _, _, _, _, _ = step(config, state, joint_action, key)
-        return new_state, new_state.step_count
+        current_state, current_action_mask = carry
+        new_state, _, _, _, next_action_mask, _ = step(
+            config,
+            current_state,
+            current_action_mask,
+            joint_action,
+            key,
+        )
+        return (new_state, next_action_mask), new_state.step_count
 
     keys = jax.random.split(key, horizon)
     assert keys.shape == (horizon,)
 
-    new_state, history = jax.lax.scan(
-        f=_step_wrapper, init=state, xs=keys, length=horizon
+    (new_state, final_action_mask), history = jax.lax.scan(
+        f=_step_wrapper,
+        init=(state, initial_action_mask),
+        xs=keys,
+        length=horizon,
     )
 
     assert new_state.step_count == horizon
     assert new_state.step_count.dtype == jnp.int32
     assert history.shape == (horizon,)
     assert history.dtype == jnp.int32
+    assert jax.tree_util.tree_structure(
+        final_action_mask
+    ) == jax.tree_util.tree_structure(initial_action_mask)
     assert jnp.array_equal(new_state.slow_durations, state.slow_durations)
     assert jnp.array_equal(new_state.stun_durations, state.stun_durations)
     assert jnp.array_equal(
