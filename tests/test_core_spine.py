@@ -382,23 +382,43 @@ def _assert_action_mask_contract(action_mask: ActionMask) -> None:
         action_mask.use_ultimate_mask,
         jnp.any(action_mask.select_target_use_ultimate_joint_mask, axis=1),
     )
+    assert bool(jnp.all(jnp.any(action_mask.move_mask, axis=-1)))
+    assert bool(jnp.all(jnp.any(action_mask.select_target_mask, axis=-1)))
+    assert bool(jnp.all(jnp.any(action_mask.use_ultimate_mask, axis=-1)))
+    assert bool(
+        jnp.all(
+            jnp.any(
+                action_mask.select_target_use_ultimate_joint_mask,
+                axis=(-2, -1),
+            )
+        )
+    )
 
 
-def _assert_step1_action_mask_values(
+def _assert_fixed_slot_action_mask_values(
     action_mask: ActionMask,
     active_indices: Array,
     inactive_indices: Array,
 ) -> None:
-    """Assert action-mask values that are stable across M4 checkpoints."""
+    """Assert active choices and canonical padded-slot submissions."""
     assert jnp.all(action_mask.move_mask[active_indices, :])
-    assert not jnp.any(action_mask.move_mask[inactive_indices, :])
-
     assert jnp.all(action_mask.select_target_mask[active_indices, 0])
-    assert not jnp.any(action_mask.select_target_mask[inactive_indices, :])
-    assert not jnp.any(action_mask.use_ultimate_mask[inactive_indices, :])
-    assert not jnp.any(
-        action_mask.select_target_use_ultimate_joint_mask[inactive_indices, :, :]
-    )
+
+    inactive_move_mask = action_mask.move_mask[inactive_indices]
+    inactive_target_mask = action_mask.select_target_mask[inactive_indices]
+    inactive_ultimate_mask = action_mask.use_ultimate_mask[inactive_indices]
+    inactive_joint_mask = action_mask.select_target_use_ultimate_joint_mask[
+        inactive_indices
+    ]
+
+    assert jnp.all(inactive_move_mask[:, MOVE_STAY])
+    assert jnp.all(jnp.sum(inactive_move_mask, axis=-1) == 1)
+    assert jnp.all(inactive_target_mask[:, 0])
+    assert jnp.all(jnp.sum(inactive_target_mask, axis=-1) == 1)
+    assert jnp.all(inactive_ultimate_mask[:, 0])
+    assert jnp.all(jnp.sum(inactive_ultimate_mask, axis=-1) == 1)
+    assert jnp.all(inactive_joint_mask[:, 0, 0])
+    assert jnp.all(jnp.sum(inactive_joint_mask, axis=(-2, -1)) == 1)
 
 
 def _assert_common_observation_values(
@@ -681,7 +701,7 @@ def test_reset_returns_fixed_shape_core_outputs(team_size: int) -> None:
         ),
     ],
 )
-def test_reset_marks_only_active_team_slots_as_alive_and_actionable(
+def test_reset_marks_active_slots_alive_and_padding_canonically_sampleable(
     team_size: int,
     expected_active_mask: Array,
     active_indices: Array,
@@ -698,7 +718,7 @@ def test_reset_marks_only_active_team_slots_as_alive_and_actionable(
         assert not jnp.any(observation.ally_visibility_mask[inactive_indices, :])
         assert not jnp.any(observation.enemy_visibility_mask[inactive_indices, :])
 
-    _assert_step1_action_mask_values(
+    _assert_fixed_slot_action_mask_values(
         action_mask=action_mask,
         active_indices=active_indices,
         inactive_indices=inactive_indices,
@@ -823,14 +843,14 @@ def test_step_returns_zero_rewards_for_all_agent_slots() -> None:
     )
 
 
-def test_step_action_masks_are_gated_by_active_alive_slots() -> None:
+def test_step_action_masks_preserve_active_choices_and_canonical_padding() -> None:
     config = _config(team_size=3, max_steps=1000)
     key = jax.random.key(42)
     state, _, _, _ = reset(config, key)
 
     _, _, _, _, action_mask, _ = step(config, state, _zero_action(), key)
 
-    _assert_step1_action_mask_values(
+    _assert_fixed_slot_action_mask_values(
         action_mask=action_mask,
         active_indices=_int_vector((0, 1, 2, 5, 6, 7)),
         inactive_indices=_int_vector((3, 4, 8, 9)),

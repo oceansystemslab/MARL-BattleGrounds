@@ -783,9 +783,29 @@ def test_reset_produces_correct_active_class_ids_and_class_stats(
     _assert_reset_combat_state_is_inert(state)
     _assert_self_features_project_state(obs, state, config)
 
-    assert not bool(jnp.any(action_mask.move_mask[~expected_active_mask]))
-    assert not bool(jnp.any(action_mask.select_target_mask[~expected_active_mask]))
-    assert not bool(jnp.any(action_mask.use_ultimate_mask[~expected_active_mask]))
+    inactive_mask = jnp.logical_not(expected_active_mask)
+    assert bool(jnp.all(action_mask.move_mask[inactive_mask, 0]))
+    assert bool(jnp.all(jnp.sum(action_mask.move_mask[inactive_mask], axis=-1) == 1))
+    assert bool(jnp.all(action_mask.select_target_mask[inactive_mask, 0]))
+    assert bool(
+        jnp.all(jnp.sum(action_mask.select_target_mask[inactive_mask], axis=-1) == 1)
+    )
+    assert bool(jnp.all(action_mask.use_ultimate_mask[inactive_mask, 0]))
+    assert bool(
+        jnp.all(jnp.sum(action_mask.use_ultimate_mask[inactive_mask], axis=-1) == 1)
+    )
+    assert bool(
+        jnp.all(action_mask.select_target_use_ultimate_joint_mask[inactive_mask, 0, 0])
+    )
+    assert bool(
+        jnp.all(
+            jnp.sum(
+                action_mask.select_target_use_ultimate_joint_mask[inactive_mask],
+                axis=(-2, -1),
+            )
+            == 1
+        )
+    )
 
 
 def test_reset_neutralizes_inactive_slots_even_when_supplied_classes_non_neutral() -> (

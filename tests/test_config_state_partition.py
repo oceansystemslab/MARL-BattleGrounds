@@ -117,7 +117,17 @@ def test_reset_initializes_dynamic_state_from_resolved_profile() -> None:
     assert state.alive_mask.dtype == jnp.bool_
     assert bool(jnp.array_equal(state.alive_mask, profile.active_mask))
     assert bool(jnp.array_equal(state.current_health, profile.max_health))
-    assert bool(jnp.all(action_mask.move_mask[~profile.active_mask] == 0))
+    inactive_mask = jnp.logical_not(profile.active_mask)
+    assert bool(jnp.all(action_mask.move_mask[inactive_mask, MOVE_STAY]))
+    assert bool(jnp.all(jnp.sum(action_mask.move_mask[inactive_mask], axis=-1) == 1))
+    assert bool(jnp.all(action_mask.select_target_mask[inactive_mask, 0]))
+    assert bool(
+        jnp.all(jnp.sum(action_mask.select_target_mask[inactive_mask], axis=-1) == 1)
+    )
+    assert bool(jnp.all(action_mask.use_ultimate_mask[inactive_mask, 0]))
+    assert bool(
+        jnp.all(jnp.sum(action_mask.use_ultimate_mask[inactive_mask], axis=-1) == 1)
+    )
 
     static_columns = (
         (AGENT_FEATURE_RADIUS, profile.agent_radii),

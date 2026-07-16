@@ -489,11 +489,11 @@ def test_unrelated_combat_state_does_not_change_basic_targetability(
         pytest.param(False, False, id="inactive-and-dead"),
     ],
 )
-def test_inactive_or_dead_actor_has_no_target_actions(
+def test_inactive_or_dead_actor_exposes_only_target_none(
     actor_active: bool,
     actor_alive: bool,
 ) -> None:
-    """Prove nonparticipating actors have an entirely false target row."""
+    """Prove nonacting actors expose target-none without enabling unit targets."""
     config, state = _target_scenario()
     profile = config.agent_profile._replace(
         active_mask=config.agent_profile.active_mask.at[_ACTOR_SLOT].set(actor_active),
@@ -509,7 +509,13 @@ def test_inactive_or_dead_actor_has_no_target_actions(
     basic_ally, basic_enemy = _basic_relation_masks(action_mask)
     assert not bool(jnp.any(basic_ally[_ACTOR_SLOT]))
     assert not bool(jnp.any(basic_enemy[_ACTOR_SLOT]))
-    assert not bool(jnp.any(action_mask.select_target_mask[_ACTOR_SLOT]))
+    assert bool(action_mask.select_target_mask[_ACTOR_SLOT, 0])
+    assert not bool(jnp.any(action_mask.select_target_mask[_ACTOR_SLOT, 1:]))
+    assert bool(action_mask.select_target_use_ultimate_joint_mask[_ACTOR_SLOT, 0, 0])
+    assert (
+        int(jnp.sum(action_mask.select_target_use_ultimate_joint_mask[_ACTOR_SLOT]))
+        == 1
+    )
 
 
 def test_no_team_slots_never_form_basic_target_relations() -> None:

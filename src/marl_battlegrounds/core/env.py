@@ -53,10 +53,12 @@ from marl_battlegrounds.core.types import (
     MAX_AGENTS_PER_TEAM,
     MAX_OBJECTIVE_SLOTS,
     MAX_OBSTACLE_SLOTS,
+    MOVE_STAY,
     NO_TEAM_ID,
     NUM_MOVE_ACTIONS,
     NUM_SLOW_CHANNELS,
     NUM_STUN_CHANNELS,
+    NUM_TARGET_ACTIONS,
     OBJECTIVE_FEATURES,
     OBSTACLE_FEATURES,
     PRIEST_CLASS_ID,
@@ -349,6 +351,14 @@ def _build_select_target_use_ultimate_joint_mask(
         (actor_can_use_no_target_ultimate[:, None], relative_ultimate_mask), axis=-1
     )
 
+    canonical_nonacting_target_mask = jnp.arange(NUM_TARGET_ACTIONS)[None, :] == 0
+
+    basic_target_action_mask = jnp.where(
+        active_and_alive_mask[:, None],
+        basic_target_action_mask,
+        canonical_nonacting_target_mask,
+    )
+
     return jnp.stack((basic_target_action_mask, ultimate_target_action_mask), axis=-1)
 
 
@@ -360,6 +370,20 @@ def _build_marginal_action_masks(
     use_ultimate_mask = jnp.any(select_target_use_ultimate_joint_mask, axis=1)
 
     return select_target_mask, use_ultimate_mask
+
+
+def _build_move_mask(state: EnvState, config: EnvConfig) -> Array:
+    """Build protocol-admissible movement choices for every fixed slot.
+
+    Active, living actors may submit every movement category. Dead or inactive
+    slots expose only ``MOVE_STAY``, the effect-inert canonical submission.
+    """
+    active_and_alive_mask = jnp.logical_and(
+        config.agent_profile.active_mask, state.alive_mask
+    )
+    canonical_stay_mask = jnp.arange(NUM_MOVE_ACTIONS)[None, :] == MOVE_STAY
+
+    return jnp.logical_or(active_and_alive_mask[:, None], canonical_stay_mask)
 
 
 def _build_observation_and_action_mask(
@@ -393,20 +417,15 @@ def _build_observation_and_action_mask(
         select_target_use_ultimate_joint_mask
     )
 
+    move_mask = _build_move_mask(state, config)
+
     map_obstacle_features = jnp.broadcast_to(
         config.obstacles[None, :, :],
         (MAX_AGENT_SLOTS, MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES),
     )
 
-    alive_active_mask_bc = jnp.logical_and(
-        config.agent_profile.active_mask, state.alive_mask
-    )[:, None]
-
     action_mask = ActionMask(
-        move_mask=jnp.logical_and(
-            jnp.ones(shape=(MAX_AGENT_SLOTS, NUM_MOVE_ACTIONS), dtype=bool),
-            alive_active_mask_bc,
-        ),
+        move_mask=move_mask,
         select_target_mask=select_target_mask,
         use_ultimate_mask=use_ultimate_mask,
         select_target_use_ultimate_joint_mask=select_target_use_ultimate_joint_mask,

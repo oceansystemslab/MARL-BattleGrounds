@@ -19,6 +19,7 @@ from marl_battlegrounds.core.types import (
     MOVE_STAY,
     NEUTRAL_CLASS_ID,
     NO_TEAM_ID,
+    NUM_MOVE_ACTIONS,
     NUM_SLOW_CHANNELS,
     NUM_STUN_CHANNELS,
     NUM_TARGET_ACTIONS,
@@ -50,6 +51,7 @@ _NONE_TARGET = 0
 _SELF_TARGET = 1
 _ALLY_TARGET = 2
 _ENEMY_TARGET = 1 + MAX_AGENTS_PER_TEAM
+_PADDED_SLOT = 2
 
 
 def _requested_roster(actor_class_id: int) -> Array:
@@ -181,6 +183,27 @@ def _assert_exact_marginals(action_mask: ActionMask) -> None:
     assert bool(
         jnp.array_equal(action_mask.use_ultimate_mask, jnp.any(joint_mask, axis=1))
     )
+
+
+def _assert_only_first_category_is_valid(mask_row: Array) -> None:
+    """Assert one categorical row exposes exactly its canonical first entry."""
+    flattened_row = mask_row.reshape(-1)
+
+    assert flattened_row.dtype == jnp.bool_
+    assert bool(flattened_row[0])
+    assert not bool(jnp.any(flattened_row[1:]))
+    assert int(jnp.sum(flattened_row)) == 1
+
+
+def _masked_categorical_statistics(mask: Array) -> tuple[Array, Array, Array]:
+    """Return probabilities, log-probabilities, and entropy for finite logits."""
+    logits = jnp.linspace(-2.5, 3.5, mask.shape[-1], dtype=jnp.float32)
+    masked_logits = jnp.where(mask, logits[None, :], -jnp.inf)
+    probabilities = jax.nn.softmax(masked_logits, axis=-1)
+    log_probabilities = jax.nn.log_softmax(masked_logits, axis=-1)
+    safe_log_probabilities = jnp.where(mask, log_probabilities, 0.0)
+    entropy = -jnp.sum(probabilities * safe_log_probabilities, axis=-1)
+    return probabilities, log_probabilities, entropy
 
 
 @pytest.mark.parametrize(
@@ -356,11 +379,11 @@ def test_candidate_stun_changes_its_own_row_but_not_actor_legality() -> None:
         pytest.param(False, False, id="inactive-and-dead"),
     ],
 )
-def test_inactive_or_dead_actor_has_no_actionable_pair(
+def test_inactive_or_dead_actor_exposes_only_canonical_no_op(
     actor_active: bool,
     actor_alive: bool,
 ) -> None:
-    """Prove nonparticipating actors have all-false pair and marginal rows."""
+    """Prove every nonacting actor mask has exact singleton no-op support."""
     config, state = _scenario(MAGE_CLASS_ID)
     profile = config.agent_profile._replace(
         active_mask=config.agent_profile.active_mask.at[_ACTOR_SLOT].set(actor_active),
@@ -373,11 +396,48 @@ def test_inactive_or_dead_actor_has_no_actionable_pair(
 
     _, _, action_mask = _outputs(config, state)
 
-    assert not bool(
-        jnp.any(action_mask.select_target_use_ultimate_joint_mask[_ACTOR_SLOT])
+    _assert_only_first_category_is_valid(action_mask.move_mask[_ACTOR_SLOT])
+    _assert_only_first_category_is_valid(
+        action_mask.select_target_use_ultimate_joint_mask[_ACTOR_SLOT]
     )
-    assert not bool(jnp.any(action_mask.select_target_mask[_ACTOR_SLOT]))
-    assert not bool(jnp.any(action_mask.use_ultimate_mask[_ACTOR_SLOT]))
+    _assert_only_first_category_is_valid(action_mask.select_target_mask[_ACTOR_SLOT])
+    _assert_only_first_category_is_valid(action_mask.use_ultimate_mask[_ACTOR_SLOT])
+    _assert_exact_marginals(action_mask)
+
+
+def test_every_categorical_mask_row_is_numerically_sampleable() -> None:
+    """Prove ordinary hard masking is normalized and NaN-free for every slot."""
+    config, state = _scenario(WARRIOR_CLASS_ID, enemy_x=2.25)
+    _, _, action_mask = _outputs(config, state)
+    active_and_alive = jnp.logical_and(
+        config.agent_profile.active_mask,
+        state.alive_mask,
+    )
+    nonacting = jnp.logical_not(active_and_alive)
+
+    categorical_masks = (
+        action_mask.move_mask,
+        action_mask.select_target_mask,
+        action_mask.use_ultimate_mask,
+        action_mask.select_target_use_ultimate_joint_mask.reshape(
+            MAX_AGENT_SLOTS,
+            NUM_TARGET_ACTIONS * NUM_ULTIMATE_ACTIONS,
+        ),
+    )
+
+    for mask in categorical_masks:
+        probabilities, log_probabilities, entropy = _masked_categorical_statistics(mask)
+
+        assert bool(jnp.all(jnp.any(mask, axis=-1)))
+        assert not bool(jnp.any(jnp.isnan(probabilities)))
+        assert not bool(jnp.any(jnp.isnan(log_probabilities)))
+        assert bool(jnp.allclose(jnp.sum(probabilities, axis=-1), 1.0))
+        assert bool(jnp.all(probabilities[jnp.logical_not(mask)] == 0.0))
+        assert bool(jnp.all(jnp.isfinite(log_probabilities[mask])))
+        assert bool(jnp.all(jnp.isneginf(log_probabilities[jnp.logical_not(mask)])))
+        assert bool(jnp.all(jnp.isfinite(entropy)))
+        assert bool(jnp.all(probabilities[nonacting, 0] == 1.0))
+        assert bool(jnp.all(entropy[nonacting] == 0.0))
 
 
 @pytest.mark.parametrize(
@@ -620,6 +680,12 @@ def test_jitted_step_matches_eager_pair_semantics() -> None:
             _ACTOR_SLOT, _ENEMY_TARGET, 1
         ]
     )
+    _assert_only_first_category_is_valid(compiled_mask.move_mask[_PADDED_SLOT])
+    _assert_only_first_category_is_valid(
+        compiled_mask.select_target_use_ultimate_joint_mask[_PADDED_SLOT]
+    )
+    _assert_only_first_category_is_valid(compiled_mask.select_target_mask[_PADDED_SLOT])
+    _assert_only_first_category_is_valid(compiled_mask.use_ultimate_mask[_PADDED_SLOT])
     _assert_exact_marginals(compiled_mask)
 
 
@@ -632,7 +698,7 @@ def test_scanned_rollout_preserves_meaningful_pair_history() -> None:
     def _scan_step(
         carry: EnvState,
         step_key: Array,
-    ) -> tuple[EnvState, tuple[Array, Array, Array]]:
+    ) -> tuple[EnvState, tuple[Array, Array, Array, Array]]:
         next_state, _, _, _, action_mask, _ = step(
             config,
             carry,
@@ -640,6 +706,7 @@ def test_scanned_rollout_preserves_meaningful_pair_history() -> None:
             step_key,
         )
         return next_state, (
+            action_mask.move_mask,
             action_mask.select_target_use_ultimate_joint_mask,
             action_mask.select_target_mask,
             action_mask.use_ultimate_mask,
@@ -648,16 +715,18 @@ def test_scanned_rollout_preserves_meaningful_pair_history() -> None:
     def _rollout(
         initial_state: EnvState,
         scan_keys: Array,
-    ) -> tuple[EnvState, tuple[Array, Array, Array]]:
+    ) -> tuple[EnvState, tuple[Array, Array, Array, Array]]:
         """Run the fixed-horizon transition under one compiled scan."""
         return jax.lax.scan(_scan_step, initial_state, scan_keys)
 
-    final_state, (joint_history, target_history, ultimate_history) = cast(
-        tuple[EnvState, tuple[Array, Array, Array]],
+    final_state, (move_history, joint_history, target_history, ultimate_history) = cast(
+        tuple[EnvState, tuple[Array, Array, Array, Array]],
         jax.jit(_rollout)(state, keys),
     )
 
     assert final_state.step_count == horizon
+    assert move_history.shape == (horizon, MAX_AGENT_SLOTS, NUM_MOVE_ACTIONS)
+    assert move_history.dtype == jnp.bool_
     assert joint_history.shape == (
         horizon,
         MAX_AGENT_SLOTS,
@@ -673,5 +742,13 @@ def test_scanned_rollout_preserves_meaningful_pair_history() -> None:
     )
     assert not bool(jnp.any(joint_history[:, _ACTOR_SLOT, _ENEMY_TARGET, 0]))
     assert bool(jnp.all(joint_history[:, _ACTOR_SLOT, _ENEMY_TARGET, 1]))
+    assert bool(jnp.all(move_history[:, _PADDED_SLOT, MOVE_STAY]))
+    assert bool(jnp.all(jnp.sum(move_history[:, _PADDED_SLOT], axis=-1) == 1))
+    assert bool(jnp.all(joint_history[:, _PADDED_SLOT, _NONE_TARGET, 0]))
+    assert bool(jnp.all(jnp.sum(joint_history[:, _PADDED_SLOT], axis=(-2, -1)) == 1))
+    assert bool(jnp.all(target_history[:, _PADDED_SLOT, _NONE_TARGET]))
+    assert bool(jnp.all(jnp.sum(target_history[:, _PADDED_SLOT], axis=-1) == 1))
+    assert bool(jnp.all(ultimate_history[:, _PADDED_SLOT, 0]))
+    assert bool(jnp.all(jnp.sum(ultimate_history[:, _PADDED_SLOT], axis=-1) == 1))
     assert bool(jnp.array_equal(target_history, jnp.any(joint_history, axis=-1)))
     assert bool(jnp.array_equal(ultimate_history, jnp.any(joint_history, axis=2)))

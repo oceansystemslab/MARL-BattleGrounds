@@ -496,6 +496,17 @@ def _assert_action_mask_contract(action_mask: ActionMask) -> None:
         action_mask.use_ultimate_mask,
         jnp.any(action_mask.select_target_use_ultimate_joint_mask, axis=1),
     )
+    assert bool(jnp.all(jnp.any(action_mask.move_mask, axis=-1)))
+    assert bool(jnp.all(jnp.any(action_mask.select_target_mask, axis=-1)))
+    assert bool(jnp.all(jnp.any(action_mask.use_ultimate_mask, axis=-1)))
+    assert bool(
+        jnp.all(
+            jnp.any(
+                action_mask.select_target_use_ultimate_joint_mask,
+                axis=(-2, -1),
+            )
+        )
+    )
 
 
 def _assert_reward_contract(reward: Reward) -> None:
@@ -521,17 +532,24 @@ def _assert_done_flags_contract(
 
 
 def _assert_single_agent_action_mask_semantics(action_mask: ActionMask) -> None:
-    """Assert a lone neutral actor can move and explicitly select target-none."""
+    """Assert one living actor plus canonical no-op rows for padded slots."""
     assert bool(jnp.all(action_mask.move_mask[0]))
-    assert bool(jnp.all(~action_mask.move_mask[1:]))
+    assert bool(jnp.all(action_mask.move_mask[1:, MOVE_STAY]))
+    assert bool(jnp.all(jnp.sum(action_mask.move_mask[1:], axis=-1) == 1))
 
     assert bool(action_mask.select_target_mask[0, 0])
     assert bool(jnp.all(~action_mask.select_target_mask[0, 1:]))
-    assert bool(jnp.all(~action_mask.select_target_mask[1:]))
+    assert bool(jnp.all(action_mask.select_target_mask[1:, 0]))
+    assert bool(jnp.all(jnp.sum(action_mask.select_target_mask[1:], axis=-1) == 1))
 
     assert bool(action_mask.use_ultimate_mask[0, 0])
     assert bool(~action_mask.use_ultimate_mask[0, 1])
-    assert bool(jnp.all(~action_mask.use_ultimate_mask[1:]))
+    assert bool(jnp.all(action_mask.use_ultimate_mask[1:, 0]))
+    assert bool(jnp.all(jnp.sum(action_mask.use_ultimate_mask[1:], axis=-1) == 1))
+
+    joint_mask = action_mask.select_target_use_ultimate_joint_mask
+    assert bool(jnp.all(joint_mask[1:, 0, 0]))
+    assert bool(jnp.all(jnp.sum(joint_mask[1:], axis=(-2, -1)) == 1))
 
 
 def _assert_center_inside_bounds(

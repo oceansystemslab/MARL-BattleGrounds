@@ -211,11 +211,13 @@ class Action(NamedTuple):
 
 
 class ActionMask(NamedTuple):
-    """Slot-aligned legality for the factored action interface.
+    """Protocol-admissible choices for the slot-aligned action interface.
 
     The joint target/ultimate mask is authoritative for exact combat pairs.
     The flat target and ultimate masks are its existential marginals and support
-    per-head policy masking without independently defining legality.
+    per-head policy masking without independently defining legality. Dead and
+    inactive slots expose only the canonical effect-inert submission; mask
+    membership does not by itself imply physical agency or participation.
     """
 
     move_mask: Array
