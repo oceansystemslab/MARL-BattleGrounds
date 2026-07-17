@@ -183,8 +183,8 @@ MAGE_DAMAGE_AURA_RADIUS = 2.0
 MAGE_DAMAGE_AURA_MULTIPLIER = 1.15
 
 # Mage Burst duration keeps the buff interruptible by hard control.
-MAGE_ULT_DAMAGE_DURATION_TICKS = 5
-MAGE_ULT_DAMAGE_MULTIPLIER = 1.50
+MAGE_BURST_DAMAGE_DURATION_TICKS = 5
+MAGE_BURST_DAMAGE_MULTIPLIER = 1.50
 
 
 # Priest mechanics.
@@ -275,6 +275,15 @@ def _build_priest_blessing_of_freedom_slow_floor_fractions(
     ).astype(jnp.float32)
 
 
+def build_rogue_poison_anti_heal_multipliers(
+    rogue_poison_anti_heal_durations: Array,
+) -> Array:
+    """Return per-slot Rogue Poison healing multipliers from durations."""
+    return jnp.where(
+        rogue_poison_anti_heal_durations > 0, ROGUE_POISON_ANTI_HEAL_MULTIPLIER, 1.0
+    ).astype(jnp.float32)
+
+
 def derive_status_magnitudes(
     slow_durations: Array,
     rogue_poison_anti_heal_durations: Array,
@@ -293,9 +302,9 @@ def derive_status_magnitudes(
 
     slow_multipliers = _build_slow_multipliers(slow_durations)
 
-    rogue_poison_anti_heal_multipliers = jnp.where(
-        rogue_poison_anti_heal_durations > 0, ROGUE_POISON_ANTI_HEAL_MULTIPLIER, 1.0
-    ).astype(jnp.float32)
+    rogue_poison_anti_heal_multipliers = build_rogue_poison_anti_heal_multipliers(
+        rogue_poison_anti_heal_durations
+    )
 
     priest_blessing_of_freedom_slow_floor_fractions = (
         _build_priest_blessing_of_freedom_slow_floor_fractions(

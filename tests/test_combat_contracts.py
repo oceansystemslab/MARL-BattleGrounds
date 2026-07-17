@@ -405,8 +405,8 @@ def test_warrior_basic_and_ultimate_interaction_radii_are_separate() -> None:
 
 def test_mage_burst_is_representable_as_no_target_self_buff() -> None:
     assert bool(combat.ULTIMATE_INTERACTION_RADIUS_BY_CLASS[MAGE_CLASS_ID] == 0)
-    assert combat.MAGE_ULT_DAMAGE_DURATION_TICKS > 0
-    assert combat.MAGE_ULT_DAMAGE_MULTIPLIER > 1.0
+    assert combat.MAGE_BURST_DAMAGE_DURATION_TICKS > 0
+    assert combat.MAGE_BURST_DAMAGE_MULTIPLIER > 1.0
 
 
 def test_ultimate_target_modes_are_distinct_and_class_aligned() -> None:

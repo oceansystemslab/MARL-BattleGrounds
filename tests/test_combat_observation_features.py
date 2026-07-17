@@ -1,4 +1,4 @@
-"""Milestone 5 Step 2 CP4 combat-observation contract tests."""
+"""Combat observation contracts through Milestone 5 Step 5 Checkpoint 2."""
 # pyright: reportPrivateUsage=false
 
 from collections.abc import Sequence
@@ -6,6 +6,7 @@ from typing import cast
 
 import jax
 import jax.numpy as jnp
+import pytest
 from jax import Array
 
 import marl_battlegrounds.core.combat as combat
@@ -65,6 +66,7 @@ from marl_battlegrounds.core.types import (
     MAX_OBSTACLE_SLOTS,
     MOVE_EAST,
     MOVE_STAY,
+    MOVE_WEST,
     OBSTACLE_FEATURES,
     PRIEST_CLASS_ID,
     ROGUE_CLASS_ID,
@@ -168,10 +170,15 @@ def _config(team_sizes: tuple[int, int] = (5, 5)) -> EnvConfig:
     )
 
 
-def _action(*, east_slots: Sequence[int] = ()) -> Action:
+def _action(
+    *, east_slots: Sequence[int] = (), west_slots: Sequence[int] = ()
+) -> Action:
+    """Return a no-combat joint action with selected horizontal movement."""
     move = jnp.full((MAX_AGENT_SLOTS,), MOVE_STAY, dtype=jnp.int32)
     for slot in east_slots:
         move = move.at[slot].set(MOVE_EAST)
+    for slot in west_slots:
+        move = move.at[slot].set(MOVE_WEST)
     return Action(
         move=move,
         select_target=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
@@ -254,14 +261,99 @@ def test_reset_rows_expose_profile_state_and_neutral_attached_values() -> None:
         AGENT_FEATURE_SLOW_HUNTER_BASIC_MULTIPLIER,
         AGENT_FEATURE_SLOW_ROGUE_POISON_MULTIPLIER,
         AGENT_FEATURE_ANTI_HEAL_ROGUE_POISON_MULTIPLIER,
-        AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_AURA_MULTIPLIER,
-        AGENT_FEATURE_DAMAGE_MITIGATION_WARRIOR_AURA_MULTIPLIER,
     )
     assert bool(jnp.all(rows[:, jnp.asarray(multiplicative_columns)] == 1.0))
     assert bool(
         jnp.all(
             rows[:, AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_FRACTION] == 0.0
         )
+    )
+
+
+def test_attached_aura_features_follow_slot_aligned_team_geometry() -> None:
+    """Prove self rows expose the modifiers attached to each produced slot."""
+    config = _config((2, 2))
+    state, *_ = reset(config, jax.random.key(11))
+    positions = state.agent_positions
+    positions = positions.at[0].set(jnp.asarray((2.0, 2.0), dtype=jnp.float32))
+    positions = positions.at[1].set(jnp.asarray((3.0, 2.0), dtype=jnp.float32))
+    positions = positions.at[MAX_AGENTS_PER_TEAM].set(
+        jnp.asarray((12.0, 8.0), dtype=jnp.float32)
+    )
+    positions = positions.at[MAX_AGENTS_PER_TEAM + 1].set(
+        jnp.asarray((13.0, 8.0), dtype=jnp.float32)
+    )
+    state = state._replace(agent_positions=positions)
+
+    observation, _ = _build_observation_and_action_mask(state, config)
+    mage_attached = observation.self_features[
+        :, AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_AURA_MULTIPLIER
+    ]
+    warrior_attached = observation.self_features[
+        :, AGENT_FEATURE_DAMAGE_MITIGATION_WARRIOR_AURA_MULTIPLIER
+    ]
+
+    active_slots = jnp.asarray((0, 1, MAX_AGENTS_PER_TEAM, MAX_AGENTS_PER_TEAM + 1))
+    inactive_slots = jnp.asarray((2, 3, 4, 7, 8, 9))
+    assert bool(
+        jnp.all(mage_attached[active_slots] == combat.MAGE_DAMAGE_AURA_MULTIPLIER)
+    )
+    assert bool(
+        jnp.all(
+            warrior_attached[active_slots]
+            == combat.WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER
+        )
+    )
+    assert bool(jnp.all(mage_attached[inactive_slots] == 1.0))
+    assert bool(jnp.all(warrior_attached[inactive_slots] == 1.0))
+
+
+@pytest.mark.parametrize(
+    ("start_distance", "move_west", "expected_multiplier"),
+    (
+        pytest.param(2.25, True, combat.MAGE_DAMAGE_AURA_MULTIPLIER, id="enters"),
+        pytest.param(1.75, False, 1.0, id="leaves"),
+    ),
+)
+def test_returned_aura_features_use_post_movement_positions(
+    start_distance: float,
+    move_west: bool,
+    expected_multiplier: float,
+) -> None:
+    """Prove returned attached modifiers describe the produced next state."""
+    config = _config((2, 1))
+    state, *_ = reset(config, jax.random.key(12))
+    positions = state.agent_positions
+    positions = positions.at[0].set(jnp.asarray((4.0, 4.0), dtype=jnp.float32))
+    positions = positions.at[1].set(
+        jnp.asarray((4.0 + start_distance, 4.0), dtype=jnp.float32)
+    )
+    positions = positions.at[MAX_AGENTS_PER_TEAM].set(
+        jnp.asarray((14.0, 8.0), dtype=jnp.float32)
+    )
+    state = state._replace(agent_positions=positions)
+    action = _action(west_slots=(1,)) if move_west else _action(east_slots=(1,))
+
+    next_state, observation, *_ = step(
+        config,
+        state,
+        _current_action_mask(config, state),
+        action,
+        jax.random.key(13),
+    )
+
+    next_distance = cast(
+        Array,
+        jnp.linalg.norm(next_state.agent_positions[1] - next_state.agent_positions[0]),
+    )
+    assert bool(next_distance <= combat.MAGE_DAMAGE_AURA_RADIUS) is (
+        expected_multiplier == combat.MAGE_DAMAGE_AURA_MULTIPLIER
+    )
+    assert (
+        observation.self_features[
+            1, AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_AURA_MULTIPLIER
+        ]
+        == expected_multiplier
     )
 
 
@@ -358,12 +450,12 @@ def test_capabilities_are_class_owned_payloads_not_cooldown_availability() -> No
         (
             AGENT_FEATURE_CAPABILITY_DAMAGE_AMPLIFICATION_MAGE_BURST_DURATION,
             MAGE_CLASS_ID,
-            combat.MAGE_ULT_DAMAGE_DURATION_TICKS,
+            combat.MAGE_BURST_DAMAGE_DURATION_TICKS,
         ),
         (
             AGENT_FEATURE_CAPABILITY_DAMAGE_AMPLIFICATION_MAGE_BURST_MULTIPLIER,
             MAGE_CLASS_ID,
-            combat.MAGE_ULT_DAMAGE_MULTIPLIER,
+            combat.MAGE_BURST_DAMAGE_MULTIPLIER,
         ),
         (
             AGENT_FEATURE_CAPABILITY_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_DURATION,

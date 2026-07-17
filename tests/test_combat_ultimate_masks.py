@@ -632,8 +632,8 @@ def test_hidden_candidate_changes_do_not_leak_through_actor_outputs() -> None:
     )
 
 
-def test_submitted_combat_heads_remain_effect_inert() -> None:
-    """Prove Step 4 does not pull pair acceptance or combat effects forward."""
+def test_accepted_ultimate_lane_remains_effect_inert_before_step_6() -> None:
+    """Prove Step 5 does not resolve an accepted ultimate as a basic effect."""
     config, state = _scenario(WARRIOR_CLASS_ID, enemy_x=2.25)
     current_action_mask = _current_action_mask(config, state)
     neutral_outputs = step(

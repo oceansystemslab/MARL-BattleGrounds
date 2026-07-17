@@ -13,10 +13,10 @@ from marl_battlegrounds.core.combat import (
     HUNTER_BASIC_SLOW_DURATION_TICKS,
     HUNTER_BASIC_SLOW_MULTIPLIER,
     HUNTER_TRAP_STUN_DURATION_TICKS,
+    MAGE_BURST_DAMAGE_DURATION_TICKS,
+    MAGE_BURST_DAMAGE_MULTIPLIER,
     MAGE_DAMAGE_AURA_MULTIPLIER,
     MAGE_DAMAGE_AURA_RADIUS,
-    MAGE_ULT_DAMAGE_DURATION_TICKS,
-    MAGE_ULT_DAMAGE_MULTIPLIER,
     ONLY_ALLY_TARGET_ULTIMATE_MODE,
     ONLY_ENEMY_TARGET_ULTIMATE_MODE,
     ONLY_NONE_TARGET_ULTIMATE_MODE,
@@ -34,6 +34,7 @@ from marl_battlegrounds.core.combat import (
     WARRIOR_CHARGE_STUN_DURATION_TICKS,
     WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER,
     WARRIOR_DAMAGE_MITIGATION_AURA_RADIUS,
+    build_rogue_poison_anti_heal_multipliers,
     derive_effective_movement_speeds_from_durations,
     derive_status_magnitudes,
     get_basic_damage_by_class_ids,
@@ -54,6 +55,7 @@ from marl_battlegrounds.core.types import (
     MAX_OBJECTIVE_SLOTS,
     MAX_OBSTACLE_SLOTS,
     MOVE_STAY,
+    NEUTRAL_CLASS_ID,
     NO_TEAM_ID,
     NUM_MOVE_ACTIONS,
     NUM_SLOW_CHANNELS,
@@ -75,15 +77,18 @@ from marl_battlegrounds.core.types import (
     Reward,
 )
 
+# Private Helpers ---
+
 TEAM_A_START = 0
 TEAM_A_END = MAX_AGENTS_PER_TEAM
 TEAM_B_START = MAX_AGENTS_PER_TEAM
 TEAM_B_END = MAX_AGENT_SLOTS
 
-# Private Helpers ---
-
 # Direction rows are unit-length and ordered to match the MOVE_* constants.
 _INV_SQRT_2 = 1 / jnp.sqrt(2.0)
+
+_GLOBAL_AGENT_SLOT_INDICES = jnp.arange(MAX_AGENT_SLOTS, dtype=jnp.int32)
+
 _JOINT_ACTION_MOVE_TO_DISPLACEMENT_LOOKUP_TABLE = jnp.array(
     [
         jnp.array((0, 0), dtype=jnp.float32),  # MOVE_STAY = 0
@@ -99,6 +104,37 @@ _JOINT_ACTION_MOVE_TO_DISPLACEMENT_LOOKUP_TABLE = jnp.array(
         ),  # MOVE_SOUTHWEST = 8
     ]
 )
+
+
+# Each fixed team block shares one actor-relative candidate order. Mapping
+# target-none to -1 makes that category an all-zero row under ``jax.nn.one_hot``.
+_ACTOR_RELATIVE_SELECT_TARGET_ACTION_TO_GLOBAL_AGENT_SLOT_LOOKUP_TABLE = jnp.asarray(
+    [
+        [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9],  # agent 0
+        [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9],  # agent 1
+        [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9],  # agent 2
+        [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9],  # agent 3
+        [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9],  # agent 4
+        [-1, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4],  # agent 5
+        [-1, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4],  # agent 6
+        [-1, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4],  # agent 7
+        [-1, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4],  # agent 8
+        [-1, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4],  # agent 9
+    ],
+    dtype=jnp.int32,
+)
+
+
+def _compute_global_pairwise_distances_from_agent_positions(
+    agent_positions: Array,
+) -> Array:
+    """Return the dense Euclidean distance matrix for fixed-slot positions."""
+    return cast(
+        Array,
+        jnp.linalg.norm(
+            (agent_positions[None, :, :] - agent_positions[:, None, :]), axis=-1
+        ),
+    )
 
 
 def _build_global_visibility_mask_and_distances(
@@ -128,13 +164,8 @@ def _build_global_visibility_mask_and_distances(
         alive_active_mask[None, :],
     )
 
-    # Pairwise center-to-center distances.
-    observer_positions_bc = state.agent_positions[:, None, :]
-    candidate_positions_bc = state.agent_positions[None, :, :]
-    pairwise_displacement_vectors = observer_positions_bc - candidate_positions_bc
-    global_pairwise_distances = cast(
-        Array,
-        jnp.linalg.norm(pairwise_displacement_vectors, axis=-1),
+    global_pairwise_distances = _compute_global_pairwise_distances_from_agent_positions(
+        state.agent_positions
     )
 
     # Observer-specific observation-radius check.
@@ -211,6 +242,27 @@ def _build_ally_enemy_masks(global_mask: Array) -> tuple[Array, Array]:
     return (ally_mask, enemy_mask)
 
 
+def _build_global_pairwise_team_masks(team_ids: Array) -> tuple[Array, Array]:
+    """Return dense same-team and opposing-team masks for real team IDs."""
+
+    has_real_team = team_ids != NO_TEAM_ID
+    both_slots_have_real_teams = jnp.logical_and(
+        has_real_team[:, None], has_real_team[None, :]
+    )
+
+    global_pairwise_ally_mask = jnp.logical_and(
+        team_ids[None, :] == team_ids[:, None],
+        both_slots_have_real_teams,
+    )
+
+    global_pairwise_enemy_mask = jnp.logical_and(
+        team_ids[None, :] != team_ids[:, None],
+        both_slots_have_real_teams,
+    )
+
+    return global_pairwise_ally_mask, global_pairwise_enemy_mask
+
+
 def _build_select_target_use_ultimate_joint_mask(
     state: EnvState,
     config: EnvConfig,
@@ -226,7 +278,6 @@ def _build_select_target_use_ultimate_joint_mask(
     helper performs no geometry or LOS work itself.
     """
     class_ids = config.agent_profile.class_ids
-    team_ids = config.agent_profile.team_ids
     active_and_alive_mask = jnp.logical_and(
         config.agent_profile.active_mask, state.alive_mask
     )
@@ -245,20 +296,8 @@ def _build_select_target_use_ultimate_joint_mask(
     actor_can_damage = jnp.logical_and(is_not_stunned, does_basic_damage)[:, None]
     actor_can_heal = jnp.logical_and(is_not_stunned, does_basic_healing)[:, None]
 
-    # Equal padding sentinels never constitute a real ally relation.
-    has_real_team = team_ids != NO_TEAM_ID
-    both_slots_have_real_teams = jnp.logical_and(
-        has_real_team[:, None], has_real_team[None, :]
-    )
-
-    global_pairwise_ally_mask = jnp.logical_and(
-        team_ids[None, :] == team_ids[:, None],
-        both_slots_have_real_teams,
-    )
-
-    global_pairwise_enemy_mask = jnp.logical_and(
-        team_ids[None, :] != team_ids[:, None],
-        both_slots_have_real_teams,
+    global_pairwise_ally_mask, global_pairwise_enemy_mask = (
+        _build_global_pairwise_team_masks(config.agent_profile.team_ids)
     )
 
     global_basic_relation_mask = jnp.logical_or(
@@ -395,14 +434,26 @@ def _build_observation_and_action_mask(
     the same agent-feature schema in relation-local candidate order, with
     nonvisible candidate rows zeroed by the visibility masks.
     """
-
-    self_features = _build_self_features(state, config)
-    ally_features = _build_ally_features(self_features)
-    enemy_features = _build_enemy_features(self_features)
-
     global_visibility_mask, global_pairwise_distances = (
         _build_global_visibility_mask_and_distances(state, config)
     )
+
+    (
+        mage_damage_amplification_aura_multipliers,
+        warrior_damage_mitigation_aura_multipliers,
+    ) = _derive_aura_damage_multipliers(
+        config, global_pairwise_distances, state.alive_mask
+    )
+
+    self_features = _build_self_features(
+        state,
+        config,
+        mage_damage_amplification_aura_multipliers,
+        warrior_damage_mitigation_aura_multipliers,
+    )
+    ally_features = _build_ally_features(self_features)
+    enemy_features = _build_enemy_features(self_features)
+
     ally_visibility_mask, enemy_visibility_mask = _build_ally_enemy_masks(
         global_visibility_mask
     )
@@ -425,14 +476,14 @@ def _build_observation_and_action_mask(
         (MAX_AGENT_SLOTS, MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES),
     )
 
-    action_mask = ActionMask(
+    current_action_mask = ActionMask(
         move_mask=move_mask,
         select_target_mask=select_target_mask,
         use_ultimate_mask=use_ultimate_mask,
         select_target_use_ultimate_joint_mask=select_target_use_ultimate_joint_mask,
     )
 
-    observation = Observation(
+    current_observation = Observation(
         self_features=self_features,
         ally_unit_features=ally_features,
         enemy_unit_features=enemy_features,
@@ -448,7 +499,7 @@ def _build_observation_and_action_mask(
         enemy_visibility_mask=enemy_visibility_mask,
     )
 
-    return observation, action_mask
+    return current_observation, current_action_mask
 
 
 def _build_intended_movement_deltas(
@@ -529,7 +580,12 @@ def _derive_effective_movement_speeds_from_multipliers(
     )
 
 
-def _build_self_features(state: EnvState, config: EnvConfig) -> Array:
+def _build_self_features(
+    state: EnvState,
+    config: EnvConfig,
+    mage_damage_amplification_aura_multipliers: Array,
+    warrior_damage_mitigation_aura_multipliers: Array,
+) -> Array:
     """Build slot-aligned self rows from the shared agent-feature schema."""
 
     (
@@ -568,10 +624,6 @@ def _build_self_features(state: EnvState, config: EnvConfig) -> Array:
         axis=-1,
         dtype=jnp.float32,
     )
-
-    # TODO: Inert placeholders
-    mage_damage_amplification_aura_multipliers = jnp.ones((MAX_AGENT_SLOTS,))
-    warrior_damage_mitigation_aura_multipliers = jnp.ones((MAX_AGENT_SLOTS,))
 
     features_15_to_30 = jnp.concatenate(
         (
@@ -647,7 +699,7 @@ def _build_self_features(state: EnvState, config: EnvConfig) -> Array:
 
     mage_burst_capability_features = jnp.where(
         mage_mask[:, None],
-        jnp.asarray([MAGE_ULT_DAMAGE_DURATION_TICKS, MAGE_ULT_DAMAGE_MULTIPLIER])[
+        jnp.asarray([MAGE_BURST_DAMAGE_DURATION_TICKS, MAGE_BURST_DAMAGE_MULTIPLIER])[
             None, :
         ],
         0.0,
@@ -749,6 +801,229 @@ def _mask_unit_features(unit_features: Array, visibility_mask: Array) -> Array:
     ).astype(jnp.float32)
 
 
+def _build_accepted_joint_action_from_submitted_joint_action(
+    current_action_mask: ActionMask, submitted_joint_action: Action
+) -> Action:
+    """Canonicalize one submitted action from authoritative pre-state masks.
+
+    Movement acceptance is independent of combat acceptance. The target and
+    ultimate-use heads are accepted together from the authoritative joint mask
+    so an invalid ultimate attempt cannot fall back to a valid basic action.
+    """
+    submitted_move_action_is_valid_by_actor_slot = current_action_mask.move_mask[
+        _GLOBAL_AGENT_SLOT_INDICES, submitted_joint_action.move
+    ]
+    accepted_move_joint_action = jnp.where(
+        submitted_move_action_is_valid_by_actor_slot,
+        submitted_joint_action.move,
+        MOVE_STAY,
+    )
+
+    submitted_select_target_and_use_ultimate_pair_is_valid_by_actor_slot = (
+        current_action_mask.select_target_use_ultimate_joint_mask[
+            _GLOBAL_AGENT_SLOT_INDICES,
+            submitted_joint_action.select_target,
+            submitted_joint_action.use_ultimate,
+        ]
+    )
+
+    accepted_select_target_joint_action = jnp.where(
+        submitted_select_target_and_use_ultimate_pair_is_valid_by_actor_slot,
+        submitted_joint_action.select_target,
+        0,  # Target-none action
+    )
+    accepted_use_ultimate_joint_action = jnp.where(
+        submitted_select_target_and_use_ultimate_pair_is_valid_by_actor_slot,
+        submitted_joint_action.use_ultimate,
+        0,  # No-ultimate action
+    )
+
+    return Action(
+        move=accepted_move_joint_action,
+        select_target=accepted_select_target_joint_action,
+        use_ultimate=accepted_use_ultimate_joint_action,
+    )
+
+
+def _compute_basic_damage_and_basic_healing_received_per_global_slot(
+    current_state: EnvState,
+    config: EnvConfig,
+    accepted_joint_action: Action,
+    mage_damage_amplification_aura_multipliers: Array,
+    warrior_damage_mitigation_aura_multipliers: Array,
+) -> tuple[Array, Array]:
+    """Aggregate accepted base damage and healing by fixed global recipient.
+
+    The accepted target categories are actor-relative. After fixed-slot
+    translation, dense one-hot rows route every actor's catalog payload to its
+    recipient. Reducing the complete matrices before health mutation preserves
+    simultaneous, actor-order-independent resolution.
+    """
+
+    mage_burst_basic_damage_amplification_multipliers = jnp.where(
+        current_state.mage_burst_damage_amplification_durations > 0,
+        MAGE_BURST_DAMAGE_MULTIPLIER,
+        1.0,
+    )
+
+    rogue_poison_anti_heal_multipliers_by_global_recipient_slot = (
+        build_rogue_poison_anti_heal_multipliers(
+            current_state.rogue_poison_anti_heal_durations
+        )
+    )
+
+    accepted_global_target_slot_by_actor_slot = (
+        _ACTOR_RELATIVE_SELECT_TARGET_ACTION_TO_GLOBAL_AGENT_SLOT_LOOKUP_TABLE[
+            _GLOBAL_AGENT_SLOT_INDICES, accepted_joint_action.select_target
+        ]
+    )
+
+    actor_applies_accepted_basic_effect = jnp.logical_and(
+        accepted_joint_action.use_ultimate == 0,
+        accepted_joint_action.select_target > 0,
+    )
+    basic_effect_source_class_ids_by_actor_slot = jnp.where(
+        actor_applies_accepted_basic_effect,
+        config.agent_profile.class_ids,
+        NEUTRAL_CLASS_ID,
+    )
+
+    raw_basic_damage_by_actor_slot = BASIC_DAMAGE_BY_CLASS[
+        basic_effect_source_class_ids_by_actor_slot
+    ]
+    raw_basic_healing_by_actor_slot = BASIC_HEALING_BY_CLASS[
+        basic_effect_source_class_ids_by_actor_slot
+    ]
+
+    amplified_basic_damage_by_actor_slot = (
+        raw_basic_damage_by_actor_slot
+        * mage_burst_basic_damage_amplification_multipliers
+        * mage_damage_amplification_aura_multipliers
+    )
+
+    basic_effect_recipient_one_hot_by_actor_and_global_recipient_slot = jax.nn.one_hot(
+        accepted_global_target_slot_by_actor_slot,
+        num_classes=MAX_AGENT_SLOTS,
+        dtype=jnp.float32,
+    )
+
+    basic_damage_contribution_by_actor_and_global_recipient_slot = (
+        basic_effect_recipient_one_hot_by_actor_and_global_recipient_slot
+        * amplified_basic_damage_by_actor_slot[:, None]
+    )
+
+    basic_healing_contribution_by_actor_and_global_recipient_slot = (
+        basic_effect_recipient_one_hot_by_actor_and_global_recipient_slot
+        * raw_basic_healing_by_actor_slot[:, None]
+    )
+
+    total_damage_received_by_global_recipient_slot = (
+        jnp.sum(
+            basic_damage_contribution_by_actor_and_global_recipient_slot,
+            axis=0,
+        )
+        * warrior_damage_mitigation_aura_multipliers
+    )
+
+    total_healing_received_by_global_recipient_slot = (
+        jnp.sum(
+            basic_healing_contribution_by_actor_and_global_recipient_slot,
+            axis=0,
+        )
+        * rogue_poison_anti_heal_multipliers_by_global_recipient_slot
+    )
+
+    return (
+        total_damage_received_by_global_recipient_slot,
+        total_healing_received_by_global_recipient_slot,
+    )
+
+
+def _compute_health_after_simultaneous_basic_damage_and_healing(
+    total_damage_received_by_global_slot: Array,
+    total_healing_received_by_global_slot: Array,
+    current_state: EnvState,
+    config: EnvConfig,
+) -> Array:
+    """Apply simultaneous basic effects and clamp each fixed-slot health value."""
+    health_after_simultaneous_basic_damage_and_healing = (
+        current_state.current_health
+        - total_damage_received_by_global_slot
+        + total_healing_received_by_global_slot
+    )
+    return jnp.clip(
+        health_after_simultaneous_basic_damage_and_healing,
+        min=0,
+        max=config.agent_profile.max_health,
+    )
+
+
+def _derive_aura_damage_multipliers(
+    config: EnvConfig,
+    global_pairwise_distances: Array,
+    alive_mask: Array,
+) -> tuple[Array, Array]:
+    """Derive stacked Mage outgoing and Warrior incoming damage modifiers.
+
+    Rows represent aura emitters and columns represent beneficiary slots.
+    Only active, living allies with real team IDs participate. Auras include
+    their emitter, use inclusive radius boundaries, and stack multiplicatively.
+    """
+
+    global_pairwise_ally_mask, _ = _build_global_pairwise_team_masks(
+        config.agent_profile.team_ids
+    )
+
+    active_and_alive = jnp.logical_and(alive_mask, config.agent_profile.active_mask)
+    active_and_alive_pairs = jnp.logical_and(
+        active_and_alive[None, :], active_and_alive[:, None]
+    )
+    global_pairwise_active_and_alive_ally_mask = jnp.logical_and(
+        active_and_alive_pairs, global_pairwise_ally_mask
+    )
+    mage_masked_global_pairwise_distances = jnp.where(
+        jnp.logical_and(
+            _active_mage_class_mask(config)[:, None],
+            global_pairwise_active_and_alive_ally_mask,
+        ),
+        global_pairwise_distances,
+        jnp.inf,
+    )
+
+    warrior_masked_global_pairwise_distances = jnp.where(
+        jnp.logical_and(
+            _active_warrior_class_mask(config)[:, None],
+            global_pairwise_active_and_alive_ally_mask,
+        ),
+        global_pairwise_distances,
+        jnp.inf,
+    )
+
+    mage_actor_benefits_recipient_with_aura = jnp.where(
+        mage_masked_global_pairwise_distances <= MAGE_DAMAGE_AURA_RADIUS,
+        MAGE_DAMAGE_AURA_MULTIPLIER,
+        1.0,
+    )
+    warrior_actor_benefits_recipient_with_aura = jnp.where(
+        warrior_masked_global_pairwise_distances
+        <= WARRIOR_DAMAGE_MITIGATION_AURA_RADIUS,
+        WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER,
+        1.0,
+    )
+
+    mage_aura_outgoing_basic_damage_multiplier_by_actor = jnp.prod(
+        mage_actor_benefits_recipient_with_aura, axis=0
+    )
+    warrior_aura_incoming_basic_damage_multiplier_by_global_recipient_slot = jnp.prod(
+        warrior_actor_benefits_recipient_with_aura, axis=0
+    )
+
+    return (
+        mage_aura_outgoing_basic_damage_multiplier_by_actor,
+        warrior_aura_incoming_basic_damage_multiplier_by_global_recipient_slot,
+    )
+
+
 # Public ---
 
 
@@ -818,12 +1093,50 @@ def step(
     """Advance from one paired state/mask snapshot and build the next snapshot.
 
     ``current_action_mask`` is the mask produced with ``current_state`` by
-    reset or the preceding step. Step 5 will consume it for accepted-action
-    semantics; until then, movement behavior remains unchanged.
+    reset or the preceding step. It is the sole source of submitted-action
+    acceptance; the returned observation and mask describe ``next_state``.
     """
 
+    accepted_joint_action = _build_accepted_joint_action_from_submitted_joint_action(
+        current_action_mask=current_action_mask, submitted_joint_action=joint_action
+    )
+
+    # Later checkpoints extend this aggregation with ultimate damage and healing.
+
+    current_global_pairwise_distances = (
+        _compute_global_pairwise_distances_from_agent_positions(
+            current_state.agent_positions
+        )
+    )
+    (
+        current_mage_damage_amplification_aura_multipliers,
+        current_warrior_damage_mitigation_aura_multipliers,
+    ) = _derive_aura_damage_multipliers(
+        config, current_global_pairwise_distances, current_state.alive_mask
+    )
+
+    (
+        total_basic_damage_received_by_global_slot,
+        total_basic_healing_received_by_global_slot,
+    ) = _compute_basic_damage_and_basic_healing_received_per_global_slot(
+        current_state,
+        config,
+        accepted_joint_action,
+        current_mage_damage_amplification_aura_multipliers,
+        current_warrior_damage_mitigation_aura_multipliers,
+    )
+
+    next_health_after_basic_damage_and_healing = (
+        _compute_health_after_simultaneous_basic_damage_and_healing(
+            total_basic_damage_received_by_global_slot,
+            total_basic_healing_received_by_global_slot,
+            current_state,
+            config,
+        )
+    )
+
     intended_movement_deltas = _build_intended_movement_deltas(
-        joint_action, current_state, config
+        accepted_joint_action, current_state, config
     )
 
     next_agent_positions = project_movement_with_geometry(
@@ -837,13 +1150,13 @@ def step(
         config.obstacles,
     )
 
-    # TODO: mutation of health, cooldowns, statuses, etc.
+    # Later M5 checkpoints own ultimates, remaining statuses, and cooldowns.
 
     next_state = EnvState(
         step_count=current_state.step_count + 1,
         agent_positions=next_agent_positions,
         alive_mask=current_state.alive_mask,
-        current_health=current_state.current_health,
+        current_health=next_health_after_basic_damage_and_healing,
         ultimate_cooldowns=current_state.ultimate_cooldowns,
         slow_durations=current_state.slow_durations,
         stun_durations=current_state.stun_durations,
