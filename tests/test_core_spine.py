@@ -144,7 +144,7 @@ def _inert_combat_state_fields() -> _CombatStateFields:
 
 
 def _non_inert_combat_state_fields(state: EnvState) -> _CombatStateFields:
-    """Return deliberately non-default combat fields for preservation tests."""
+    """Return non-default combat fields for lifecycle and preservation tests."""
     return {
         "current_health": state.current_health.at[0].set(12.5),
         "ultimate_cooldowns": state.ultimate_cooldowns.at[0].set(7).at[5].set(3),
@@ -782,7 +782,10 @@ def test_step_preserves_slot_aligned_state_arrays() -> None:
     assert jnp.array_equal(next_state.alive_mask, state.alive_mask)
     assert jnp.array_equal(next_state.current_health, state.current_health)
     assert jnp.array_equal(next_state.ultimate_cooldowns, state.ultimate_cooldowns)
-    assert jnp.array_equal(next_state.slow_durations, state.slow_durations)
+    expected_slow_durations = state.slow_durations.at[0, SLOW_CHANNEL_HUNTER_BASIC].set(
+        0
+    )
+    assert jnp.array_equal(next_state.slow_durations, expected_slow_durations)
     assert jnp.array_equal(next_state.stun_durations, state.stun_durations)
     assert jnp.array_equal(
         next_state.rogue_poison_anti_heal_durations,
@@ -792,9 +795,12 @@ def test_step_preserves_slot_aligned_state_arrays() -> None:
         next_state.mage_burst_damage_amplification_durations,
         state.mage_burst_damage_amplification_durations,
     )
+    expected_freedom_durations = (
+        state.priest_blessing_of_freedom_slow_floor_durations.at[6].set(0)
+    )
     assert jnp.array_equal(
         next_state.priest_blessing_of_freedom_slow_floor_durations,
-        state.priest_blessing_of_freedom_slow_floor_durations,
+        expected_freedom_durations,
     )
 
 
@@ -984,7 +990,10 @@ def test_step_can_run_in_scanned_rollout() -> None:
     assert jax.tree_util.tree_structure(
         final_action_mask
     ) == jax.tree_util.tree_structure(initial_action_mask)
-    assert jnp.array_equal(new_state.slow_durations, state.slow_durations)
+    expected_slow_durations = state.slow_durations.at[0, SLOW_CHANNEL_HUNTER_BASIC].set(
+        0
+    )
+    assert jnp.array_equal(new_state.slow_durations, expected_slow_durations)
     assert jnp.array_equal(new_state.stun_durations, state.stun_durations)
     assert jnp.array_equal(
         new_state.rogue_poison_anti_heal_durations,
@@ -994,7 +1003,10 @@ def test_step_can_run_in_scanned_rollout() -> None:
         new_state.mage_burst_damage_amplification_durations,
         state.mage_burst_damage_amplification_durations,
     )
+    expected_freedom_durations = (
+        state.priest_blessing_of_freedom_slow_floor_durations.at[6].set(0)
+    )
     assert jnp.array_equal(
         new_state.priest_blessing_of_freedom_slow_floor_durations,
-        state.priest_blessing_of_freedom_slow_floor_durations,
+        expected_freedom_durations,
     )

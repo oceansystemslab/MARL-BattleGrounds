@@ -37,6 +37,7 @@ from marl_battlegrounds.core.types import (
     NUM_ULTIMATE_ACTIONS,
     OBSTACLE_FEATURES,
     PRIEST_CLASS_ID,
+    SLOW_CHANNEL_HUNTER_BASIC,
     Action,
     ActionMask,
     DoneFlags,
@@ -327,7 +328,10 @@ def test_step_preserves_non_inert_dynamic_memory() -> None:
     assert bool(
         jnp.array_equal(next_state.ultimate_cooldowns, state.ultimate_cooldowns)
     )
-    assert bool(jnp.array_equal(next_state.slow_durations, state.slow_durations))
+    expected_slow_durations = state.slow_durations.at[0, SLOW_CHANNEL_HUNTER_BASIC].set(
+        2
+    )
+    assert bool(jnp.array_equal(next_state.slow_durations, expected_slow_durations))
     assert bool(jnp.array_equal(next_state.stun_durations, state.stun_durations))
     assert bool(
         jnp.array_equal(
@@ -341,10 +345,13 @@ def test_step_preserves_non_inert_dynamic_memory() -> None:
             state.mage_burst_damage_amplification_durations,
         )
     )
+    expected_freedom_durations = (
+        state.priest_blessing_of_freedom_slow_floor_durations.at[5].set(0)
+    )
     assert bool(
         jnp.array_equal(
             next_state.priest_blessing_of_freedom_slow_floor_durations,
-            state.priest_blessing_of_freedom_slow_floor_durations,
+            expected_freedom_durations,
         )
     )
 

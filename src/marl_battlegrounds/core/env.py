@@ -65,6 +65,7 @@ from marl_battlegrounds.core.types import (
     OBSTACLE_FEATURES,
     PRIEST_CLASS_ID,
     ROGUE_CLASS_ID,
+    SLOW_CHANNEL_HUNTER_BASIC,
     UNIT_FEATURES,
     WARRIOR_CLASS_ID,
     Action,
@@ -503,17 +504,20 @@ def _build_observation_and_action_mask(
 
 
 def _build_intended_movement_deltas(
-    joint_action: Action, state: EnvState, config: EnvConfig
+    accepted_joint_action: Action,
+    refreshed_slow_durations: Array,
+    refreshed_priest_blessing_of_freedom_slow_floor_durations: Array,
+    config: EnvConfig,
 ) -> Array:
-    """Convert per-slot movement action IDs into scaled displacement vectors."""
+    """Scale accepted movement using post-refresh, pre-tick status durations."""
     intended_movement_deltas_unscaled = _JOINT_ACTION_MOVE_TO_DISPLACEMENT_LOOKUP_TABLE[
-        joint_action.move
+        accepted_joint_action.move
     ]
     # Status-adjusted speed is shared with the observation contract.
     effective_movement_speeds = derive_effective_movement_speeds_from_durations(
         config.agent_profile.base_movement_speeds,
-        state.slow_durations,
-        state.priest_blessing_of_freedom_slow_floor_durations,
+        refreshed_slow_durations,
+        refreshed_priest_blessing_of_freedom_slow_floor_durations,
     )
 
     intended_movement_deltas = (
@@ -845,19 +849,21 @@ def _build_accepted_joint_action_from_submitted_joint_action(
     )
 
 
-def _compute_basic_damage_and_basic_healing_received_per_global_slot(
+def _compute_basic_damage_and_basic_healing_effects_received_per_global_slot(
     current_state: EnvState,
     config: EnvConfig,
     accepted_joint_action: Action,
     mage_damage_amplification_aura_multipliers: Array,
     warrior_damage_mitigation_aura_multipliers: Array,
-) -> tuple[Array, Array]:
-    """Aggregate accepted base damage and healing by fixed global recipient.
+) -> tuple[Array, Array, Array, Array]:
+    """Aggregate accepted basic health effects and passive applications.
 
     The accepted target categories are actor-relative. After fixed-slot
     translation, dense one-hot rows route every actor's catalog payload to its
     recipient. Reducing the complete matrices before health mutation preserves
-    simultaneous, actor-order-independent resolution.
+    simultaneous, actor-order-independent resolution. The returned boolean
+    vectors identify recipients of accepted Hunter and Priest basics without
+    inferring passive triggers from their effective health changes.
     """
 
     mage_burst_basic_damage_amplification_multipliers = jnp.where(
@@ -888,6 +894,37 @@ def _compute_basic_damage_and_basic_healing_received_per_global_slot(
         NEUTRAL_CLASS_ID,
     )
 
+    basic_effect_recipient_one_hot_by_actor_and_global_recipient_slot = jax.nn.one_hot(
+        accepted_global_target_slot_by_actor_slot,
+        num_classes=MAX_AGENT_SLOTS,
+        dtype=jnp.float32,
+    )
+
+    # Reuse accepted recipient routing for source-specific basic passives.
+    hunter_basic_slow_applied_by_global_recipient_slot_mask = jnp.logical_and(
+        basic_effect_recipient_one_hot_by_actor_and_global_recipient_slot,
+        jnp.logical_and(
+            _active_hunter_class_mask(config)[:, None],
+            actor_applies_accepted_basic_effect[:, None],
+        ),
+    )
+
+    hunter_basic_slow_applied_by_global_recipient_slot = jnp.any(
+        hunter_basic_slow_applied_by_global_recipient_slot_mask, axis=0
+    )
+
+    priest_freedom_applied_by_global_recipient_slot_mask = jnp.logical_and(
+        basic_effect_recipient_one_hot_by_actor_and_global_recipient_slot,
+        jnp.logical_and(
+            _active_priest_class_mask(config)[:, None],
+            actor_applies_accepted_basic_effect[:, None],
+        ),
+    )
+
+    priest_freedom_applied_by_global_recipient_slot = jnp.any(
+        priest_freedom_applied_by_global_recipient_slot_mask, axis=0
+    )
+
     raw_basic_damage_by_actor_slot = BASIC_DAMAGE_BY_CLASS[
         basic_effect_source_class_ids_by_actor_slot
     ]
@@ -899,12 +936,6 @@ def _compute_basic_damage_and_basic_healing_received_per_global_slot(
         raw_basic_damage_by_actor_slot
         * mage_burst_basic_damage_amplification_multipliers
         * mage_damage_amplification_aura_multipliers
-    )
-
-    basic_effect_recipient_one_hot_by_actor_and_global_recipient_slot = jax.nn.one_hot(
-        accepted_global_target_slot_by_actor_slot,
-        num_classes=MAX_AGENT_SLOTS,
-        dtype=jnp.float32,
     )
 
     basic_damage_contribution_by_actor_and_global_recipient_slot = (
@@ -936,6 +967,8 @@ def _compute_basic_damage_and_basic_healing_received_per_global_slot(
     return (
         total_damage_received_by_global_recipient_slot,
         total_healing_received_by_global_recipient_slot,
+        hunter_basic_slow_applied_by_global_recipient_slot,
+        priest_freedom_applied_by_global_recipient_slot,
     )
 
 
@@ -1118,12 +1151,49 @@ def step(
     (
         total_basic_damage_received_by_global_slot,
         total_basic_healing_received_by_global_slot,
-    ) = _compute_basic_damage_and_basic_healing_received_per_global_slot(
+        hunter_basic_slow_applied_by_global_recipient_slot,
+        priest_freedom_applied_by_global_recipient_slot,
+    ) = _compute_basic_damage_and_basic_healing_effects_received_per_global_slot(
         current_state,
         config,
         accepted_joint_action,
         current_mage_damage_amplification_aura_multipliers,
         current_warrior_damage_mitigation_aura_multipliers,
+    )
+
+    # Refresh the two Step 5-owned channels before movement, then package their
+    # once-ticked values while preserving every later-checkpoint duration.
+    current_hunter_slow_duration = current_state.slow_durations[
+        :, SLOW_CHANNEL_HUNTER_BASIC
+    ]
+    refreshed_hunter_slow_durations = jnp.where(
+        hunter_basic_slow_applied_by_global_recipient_slot,
+        jnp.maximum(HUNTER_BASIC_SLOW_DURATION_TICKS, current_hunter_slow_duration),
+        current_hunter_slow_duration,
+    ).astype(jnp.int32)
+
+    refreshed_slow_durations = current_state.slow_durations.at[
+        :, SLOW_CHANNEL_HUNTER_BASIC
+    ].set(refreshed_hunter_slow_durations)
+
+    next_slow_durations = current_state.slow_durations.at[
+        :, SLOW_CHANNEL_HUNTER_BASIC
+    ].set(jnp.maximum(refreshed_hunter_slow_durations - 1, 0))
+    current_priest_blessing_of_freedom_slow_floor_durations = (
+        current_state.priest_blessing_of_freedom_slow_floor_durations
+    )
+
+    refreshed_priest_blessing_of_freedom_slow_floor_durations = jnp.where(
+        priest_freedom_applied_by_global_recipient_slot,
+        jnp.maximum(
+            PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS,
+            current_priest_blessing_of_freedom_slow_floor_durations,
+        ),
+        current_priest_blessing_of_freedom_slow_floor_durations,
+    ).astype(jnp.int32)
+
+    next_priest_blessing_of_freedom_slow_floor_durations = jnp.maximum(
+        refreshed_priest_blessing_of_freedom_slow_floor_durations - 1, 0
     )
 
     next_health_after_basic_damage_and_healing = (
@@ -1136,7 +1206,10 @@ def step(
     )
 
     intended_movement_deltas = _build_intended_movement_deltas(
-        accepted_joint_action, current_state, config
+        accepted_joint_action,
+        refreshed_slow_durations,
+        refreshed_priest_blessing_of_freedom_slow_floor_durations,
+        config,
     )
 
     next_agent_positions = project_movement_with_geometry(
@@ -1158,11 +1231,11 @@ def step(
         alive_mask=current_state.alive_mask,
         current_health=next_health_after_basic_damage_and_healing,
         ultimate_cooldowns=current_state.ultimate_cooldowns,
-        slow_durations=current_state.slow_durations,
+        slow_durations=next_slow_durations,
         stun_durations=current_state.stun_durations,
         rogue_poison_anti_heal_durations=current_state.rogue_poison_anti_heal_durations,
         mage_burst_damage_amplification_durations=current_state.mage_burst_damage_amplification_durations,
-        priest_blessing_of_freedom_slow_floor_durations=current_state.priest_blessing_of_freedom_slow_floor_durations,
+        priest_blessing_of_freedom_slow_floor_durations=next_priest_blessing_of_freedom_slow_floor_durations,
     )
 
     next_observation, next_action_mask = _build_observation_and_action_mask(

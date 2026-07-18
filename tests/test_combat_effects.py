@@ -12,10 +12,15 @@ from jax import Array
 from marl_battlegrounds.core.combat import (
     BASIC_DAMAGE_BY_CLASS,
     BASIC_HEALING_BY_CLASS,
+    HUNTER_BASIC_SLOW_DURATION_TICKS,
+    HUNTER_BASIC_SLOW_MULTIPLIER,
     MAGE_BURST_DAMAGE_MULTIPLIER,
     MAGE_DAMAGE_AURA_MULTIPLIER,
     MAGE_DAMAGE_AURA_RADIUS,
+    PRIEST_HEAL_SPEED_FLOOR,
+    PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS,
     ROGUE_POISON_ANTI_HEAL_MULTIPLIER,
+    ROGUE_POISON_SLOW_MULTIPLIER,
     WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER,
 )
 from marl_battlegrounds.core.config import resolve_agent_profile
@@ -27,6 +32,10 @@ from marl_battlegrounds.core.env import (
 )
 from marl_battlegrounds.core.types import (
     AGENT_FEATURE_CURRENT_HEALTH,
+    AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_DURATION,
+    AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_FRACTION,
+    AGENT_FEATURE_SLOW_HUNTER_BASIC_DURATION,
+    AGENT_FEATURE_SLOW_HUNTER_BASIC_MULTIPLIER,
     ENVIRONMENT_DIMENSIONS,
     HUNTER_CLASS_ID,
     MAGE_CLASS_ID,
@@ -48,6 +57,9 @@ from marl_battlegrounds.core.types import (
     OBSTACLE_TYPE_PILLAR,
     PRIEST_CLASS_ID,
     ROGUE_CLASS_ID,
+    SLOW_CHANNEL_HUNTER_BASIC,
+    SLOW_CHANNEL_ROGUE_POISON,
+    SLOW_CHANNEL_WARRIOR_CHARGE,
     STUN_CHANNEL_WARRIOR_CHARGE,
     WARRIOR_CLASS_ID,
     Action,
@@ -533,6 +545,457 @@ def test_outgoing_amplification_and_incoming_mitigation_compose() -> None:
         * WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER
     )
     _assert_only_health_changed(state, next_state, expected_health)
+
+
+def test_hunter_basic_slow_affects_same_tick_movement_then_expires() -> None:
+    """Prove a duration-one Hunter slow acts before its end-of-step tick."""
+    config, state = _scenario(
+        (_TEAM_A_ACTOR, HUNTER_CLASS_ID),
+        (_TEAM_B_ACTOR, HUNTER_CLASS_ID),
+    )
+    state = state._replace(
+        current_health=state.current_health.at[_TEAM_B_ACTOR].set(0.0)
+    )
+    action = _joint_action(
+        (_TEAM_A_ACTOR, MOVE_STAY, _FIRST_ENEMY_TARGET, 0),
+        (_TEAM_B_ACTOR, MOVE_EAST, 0, 0),
+    )
+
+    next_state, observation, _ = _step(config, state, action)
+
+    displacement = (
+        next_state.agent_positions[_TEAM_B_ACTOR] - state.agent_positions[_TEAM_B_ACTOR]
+    )
+    expected_displacement = (
+        config.agent_profile.base_movement_speeds[_TEAM_B_ACTOR]
+        * HUNTER_BASIC_SLOW_MULTIPLIER
+    )
+    assert bool(jnp.isclose(displacement[0], expected_displacement))
+    assert displacement[1] == 0.0
+    assert next_state.current_health[_TEAM_B_ACTOR] == 0.0
+    assert (
+        next_state.slow_durations[_TEAM_B_ACTOR, SLOW_CHANNEL_HUNTER_BASIC]
+        == HUNTER_BASIC_SLOW_DURATION_TICKS - 1
+    )
+    assert (
+        observation.self_features[
+            _TEAM_B_ACTOR, AGENT_FEATURE_SLOW_HUNTER_BASIC_DURATION
+        ]
+        == 0.0
+    )
+    assert (
+        observation.self_features[
+            _TEAM_B_ACTOR, AGENT_FEATURE_SLOW_HUNTER_BASIC_MULTIPLIER
+        ]
+        == 1.0
+    )
+
+
+@pytest.mark.parametrize(
+    ("has_existing_slows", "expected_speed_multiplier"),
+    (
+        pytest.param(True, PRIEST_HEAL_SPEED_FLOOR, id="raises-slowed-ally-to-floor"),
+        pytest.param(False, 1.0, id="does-not-accelerate-unslowed-ally"),
+    ),
+)
+def test_priest_freedom_affects_same_tick_movement_at_full_health(
+    has_existing_slows: bool,
+    expected_speed_multiplier: float,
+) -> None:
+    """Prove accepted full-health healing grants a floor without cleansing."""
+    config, state = _scenario(
+        (0, PRIEST_CLASS_ID),
+        (1, HUNTER_CLASS_ID),
+        (_TEAM_B_ACTOR, HUNTER_CLASS_ID),
+        team_sizes=(2, 1),
+    )
+    if has_existing_slows:
+        state = state._replace(
+            slow_durations=(
+                state.slow_durations.at[1, SLOW_CHANNEL_WARRIOR_CHARGE]
+                .set(3)
+                .at[1, SLOW_CHANNEL_ROGUE_POISON]
+                .set(4)
+            )
+        )
+    action = _joint_action(
+        (0, MOVE_STAY, _FIRST_ALLY_TARGET + 1, 0),
+        (1, MOVE_EAST, 0, 0),
+    )
+
+    next_state, observation, _ = _step(config, state, action)
+
+    displacement = next_state.agent_positions[1] - state.agent_positions[1]
+    expected_displacement = (
+        config.agent_profile.base_movement_speeds[1] * expected_speed_multiplier
+    )
+    assert bool(jnp.isclose(displacement[0], expected_displacement))
+    assert bool(jnp.array_equal(next_state.slow_durations, state.slow_durations))
+    assert (
+        next_state.priest_blessing_of_freedom_slow_floor_durations[1]
+        == PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS - 1
+    )
+    assert (
+        observation.self_features[
+            1, AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_DURATION
+        ]
+        == 0.0
+    )
+    assert (
+        observation.self_features[
+            1, AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_FRACTION
+        ]
+        == 0.0
+    )
+
+
+def test_passive_refresh_never_shortens_and_only_owned_channels_tick() -> None:
+    """Prove source-local max refresh and the narrow Step 5 lifecycle boundary."""
+    recipient = _TEAM_B_ACTOR + 1
+    config, state = _scenario(
+        (_TEAM_A_ACTOR, HUNTER_CLASS_ID),
+        (_TEAM_B_ACTOR, PRIEST_CLASS_ID),
+        (recipient, HUNTER_CLASS_ID),
+        team_sizes=(1, 2),
+    )
+    slow_durations = state.slow_durations
+    slow_durations = slow_durations.at[recipient, SLOW_CHANNEL_WARRIOR_CHARGE].set(5)
+    slow_durations = slow_durations.at[recipient, SLOW_CHANNEL_HUNTER_BASIC].set(4)
+    slow_durations = slow_durations.at[recipient, SLOW_CHANNEL_ROGUE_POISON].set(3)
+    state = state._replace(
+        slow_durations=slow_durations,
+        ultimate_cooldowns=state.ultimate_cooldowns.at[recipient].set(7),
+        stun_durations=state.stun_durations.at[recipient, 0].set(2),
+        rogue_poison_anti_heal_durations=(
+            state.rogue_poison_anti_heal_durations.at[recipient].set(5)
+        ),
+        mage_burst_damage_amplification_durations=(
+            state.mage_burst_damage_amplification_durations.at[recipient].set(6)
+        ),
+        priest_blessing_of_freedom_slow_floor_durations=(
+            state.priest_blessing_of_freedom_slow_floor_durations.at[recipient].set(4)
+        ),
+    )
+    action = _joint_action(
+        (_TEAM_A_ACTOR, MOVE_STAY, _FIRST_ENEMY_TARGET + 1, 0),
+        (_TEAM_B_ACTOR, MOVE_STAY, _FIRST_ALLY_TARGET + 1, 0),
+    )
+
+    next_state, _, _ = _step(config, state, action)
+
+    assert next_state.slow_durations[recipient, SLOW_CHANNEL_HUNTER_BASIC] == 3
+    assert next_state.slow_durations[recipient, SLOW_CHANNEL_WARRIOR_CHARGE] == 5
+    assert next_state.slow_durations[recipient, SLOW_CHANNEL_ROGUE_POISON] == 3
+    assert next_state.priest_blessing_of_freedom_slow_floor_durations[recipient] == 3
+    assert bool(
+        jnp.array_equal(next_state.ultimate_cooldowns, state.ultimate_cooldowns)
+    )
+    assert bool(jnp.array_equal(next_state.stun_durations, state.stun_durations))
+    assert bool(
+        jnp.array_equal(
+            next_state.rogue_poison_anti_heal_durations,
+            state.rogue_poison_anti_heal_durations,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            next_state.mage_burst_damage_amplification_durations,
+            state.mage_burst_damage_amplification_durations,
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "invalidity",
+    (
+        pytest.param("target-none", id="target-none"),
+        pytest.param("wrong-relation", id="wrong-relation"),
+        pytest.param("blocked-los", id="blocked-los"),
+        pytest.param("stunned", id="stunned"),
+        pytest.param("ultimate-lane", id="ultimate-lane"),
+    ),
+)
+def test_invalid_hunter_basic_does_not_slow_independent_movement(
+    invalidity: str,
+) -> None:
+    """Prove rejected or ultimate-lane interactions cannot trigger the passive."""
+    team_sizes = (2, 1) if invalidity == "wrong-relation" else (1, 1)
+    obstacles = _blocking_pillar(x=4.5, y=2.0) if invalidity == "blocked-los" else None
+    config, state = _scenario(
+        (_TEAM_A_ACTOR, HUNTER_CLASS_ID),
+        (_TEAM_A_ALLY, HUNTER_CLASS_ID),
+        (_TEAM_B_ACTOR, HUNTER_CLASS_ID),
+        team_sizes=team_sizes,
+        obstacles=obstacles,
+    )
+    target_action = _FIRST_ENEMY_TARGET
+    use_ultimate = 0
+    if invalidity == "target-none":
+        target_action = 0
+    elif invalidity == "wrong-relation":
+        target_action = _FIRST_ALLY_TARGET + 1
+    elif invalidity == "stunned":
+        state = state._replace(stun_durations=state.stun_durations.at[0, 0].set(1))
+    elif invalidity == "ultimate-lane":
+        use_ultimate = 1
+    action = _joint_action(
+        (_TEAM_A_ACTOR, MOVE_STAY, target_action, use_ultimate),
+        (_TEAM_B_ACTOR, MOVE_EAST, 0, 0),
+    )
+
+    next_state, _, _ = _step(config, state, action)
+
+    displacement = (
+        next_state.agent_positions[_TEAM_B_ACTOR] - state.agent_positions[_TEAM_B_ACTOR]
+    )
+    assert bool(
+        jnp.isclose(
+            displacement[0],
+            config.agent_profile.base_movement_speeds[_TEAM_B_ACTOR],
+        )
+    )
+    assert next_state.slow_durations[_TEAM_B_ACTOR, SLOW_CHANNEL_HUNTER_BASIC] == 0
+
+
+@pytest.mark.parametrize(
+    "invalidity",
+    (
+        pytest.param("target-none", id="target-none"),
+        pytest.param("wrong-relation", id="wrong-relation"),
+        pytest.param("out-of-range", id="out-of-range"),
+        pytest.param("stunned", id="stunned"),
+        pytest.param("ultimate-lane", id="ultimate-lane"),
+    ),
+)
+def test_invalid_priest_basic_does_not_grant_freedom(
+    invalidity: str,
+) -> None:
+    """Prove Priest Freedom requires an accepted no-ultimate healing basic."""
+    basic_radius = 0.5 if invalidity == "out-of-range" else 10.0
+    config, state = _scenario(
+        (0, PRIEST_CLASS_ID),
+        (1, HUNTER_CLASS_ID),
+        (_TEAM_B_ACTOR, HUNTER_CLASS_ID),
+        team_sizes=(2, 1),
+        basic_radius=basic_radius,
+    )
+    state = state._replace(
+        slow_durations=state.slow_durations.at[1, SLOW_CHANNEL_ROGUE_POISON].set(3)
+    )
+    target_action = _FIRST_ALLY_TARGET + 1
+    use_ultimate = 0
+    if invalidity == "target-none":
+        target_action = 0
+    elif invalidity == "wrong-relation":
+        target_action = _FIRST_ENEMY_TARGET
+    elif invalidity == "stunned":
+        state = state._replace(stun_durations=state.stun_durations.at[0, 0].set(1))
+    elif invalidity == "ultimate-lane":
+        use_ultimate = 1
+    action = _joint_action(
+        (0, MOVE_STAY, target_action, use_ultimate),
+        (1, MOVE_EAST, 0, 0),
+    )
+
+    next_state, _, _ = _step(config, state, action)
+
+    displacement = next_state.agent_positions[1] - state.agent_positions[1]
+    expected_displacement = (
+        config.agent_profile.base_movement_speeds[1] * ROGUE_POISON_SLOW_MULTIPLIER
+    )
+    assert bool(jnp.isclose(displacement[0], expected_displacement))
+    assert next_state.priest_blessing_of_freedom_slow_floor_durations[1] == 0
+
+
+def test_hunter_same_tick_slow_is_scaled_before_boundary_projection() -> None:
+    """Prove geometry receives the already slowed intended displacement."""
+    positions = _default_positions((1, 1))
+    positions = positions.at[_TEAM_A_ACTOR].set(
+        jnp.asarray((13.2, 2.0), dtype=jnp.float32)
+    )
+    positions = positions.at[_TEAM_B_ACTOR].set(
+        jnp.asarray((18.6, 2.0), dtype=jnp.float32)
+    )
+    config, state = _scenario(
+        (_TEAM_A_ACTOR, HUNTER_CLASS_ID),
+        (_TEAM_B_ACTOR, HUNTER_CLASS_ID),
+        positions=positions,
+    )
+    action = _joint_action(
+        (_TEAM_A_ACTOR, MOVE_STAY, _FIRST_ENEMY_TARGET, 0),
+        (_TEAM_B_ACTOR, MOVE_EAST, 0, 0),
+    )
+
+    next_state, _, _ = _step(config, state, action)
+
+    expected_x = (
+        state.agent_positions[_TEAM_B_ACTOR, 0]
+        + config.agent_profile.base_movement_speeds[_TEAM_B_ACTOR]
+        * HUNTER_BASIC_SLOW_MULTIPLIER
+    )
+    assert bool(jnp.isclose(next_state.agent_positions[_TEAM_B_ACTOR, 0], expected_x))
+    assert next_state.agent_positions[_TEAM_B_ACTOR, 0] < 19.5
+
+
+def test_duplicate_hunter_applications_refresh_once_without_stacking_strength() -> None:
+    """Prove simultaneous same-source applications remain order-independent."""
+    config, state = _scenario(
+        (0, HUNTER_CLASS_ID),
+        (1, HUNTER_CLASS_ID),
+        (_TEAM_B_ACTOR, HUNTER_CLASS_ID),
+        team_sizes=(2, 1),
+    )
+    action = _joint_action(
+        (0, MOVE_STAY, _FIRST_ENEMY_TARGET, 0),
+        (1, MOVE_STAY, _FIRST_ENEMY_TARGET, 0),
+        (_TEAM_B_ACTOR, MOVE_EAST, 0, 0),
+    )
+
+    next_state, _, _ = _step(config, state, action)
+
+    displacement = (
+        next_state.agent_positions[_TEAM_B_ACTOR] - state.agent_positions[_TEAM_B_ACTOR]
+    )
+    assert bool(jnp.isclose(displacement[0], HUNTER_BASIC_SLOW_MULTIPLIER))
+    assert next_state.current_health[_TEAM_B_ACTOR] == (
+        state.current_health[_TEAM_B_ACTOR] - 2 * BASIC_DAMAGE_BY_CLASS[HUNTER_CLASS_ID]
+    )
+
+
+def test_duplicate_priest_applications_refresh_one_freedom_floor() -> None:
+    """Prove simultaneous Priest basics grant one non-stacking movement floor."""
+    config, state = _scenario(
+        (0, PRIEST_CLASS_ID),
+        (1, PRIEST_CLASS_ID),
+        (2, HUNTER_CLASS_ID),
+        (_TEAM_B_ACTOR, HUNTER_CLASS_ID),
+        team_sizes=(3, 1),
+    )
+    state = state._replace(
+        slow_durations=(
+            state.slow_durations.at[2, SLOW_CHANNEL_WARRIOR_CHARGE]
+            .set(3)
+            .at[2, SLOW_CHANNEL_ROGUE_POISON]
+            .set(3)
+        )
+    )
+    action = _joint_action(
+        (0, MOVE_STAY, _FIRST_ALLY_TARGET + 2, 0),
+        (1, MOVE_STAY, _FIRST_ALLY_TARGET + 2, 0),
+        (2, MOVE_EAST, 0, 0),
+    )
+
+    next_state, _, _ = _step(config, state, action)
+
+    displacement = next_state.agent_positions[2] - state.agent_positions[2]
+    assert bool(jnp.isclose(displacement[0], PRIEST_HEAL_SPEED_FLOOR))
+    assert bool(jnp.array_equal(next_state.slow_durations, state.slow_durations))
+
+
+def test_jitted_step_matches_eager_same_tick_passive_semantics() -> None:
+    """Prove passive routing, movement timing, and ticking are JIT-stable."""
+    config, state = _scenario(
+        (0, HUNTER_CLASS_ID),
+        (_TEAM_B_ACTOR, PRIEST_CLASS_ID),
+        (_TEAM_B_ACTOR + 1, HUNTER_CLASS_ID),
+        team_sizes=(1, 2),
+    )
+    recipient = _TEAM_B_ACTOR + 1
+    state = state._replace(
+        slow_durations=state.slow_durations.at[
+            recipient, SLOW_CHANNEL_ROGUE_POISON
+        ].set(3)
+    )
+    action = _joint_action(
+        (0, MOVE_STAY, _FIRST_ENEMY_TARGET + 1, 0),
+        (_TEAM_B_ACTOR, MOVE_STAY, _FIRST_ALLY_TARGET + 1, 0),
+        (recipient, MOVE_EAST, 0, 0),
+    )
+    current_mask = _current_action_mask(config, state)
+
+    eager_outputs = step(config, state, current_mask, action, jax.random.key(31))
+    compiled_outputs = cast(
+        tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info],
+        jax.jit(step)(config, state, current_mask, action, jax.random.key(31)),
+    )
+
+    for eager_leaf, compiled_leaf in zip(
+        jax.tree_util.tree_leaves(eager_outputs),
+        jax.tree_util.tree_leaves(compiled_outputs),
+        strict=True,
+    ):
+        assert bool(jnp.array_equal(eager_leaf, compiled_leaf))
+
+
+def test_scanned_repeated_hunter_hits_refresh_before_each_movement() -> None:
+    """Prove repeated duration-one applications remain meaningful in scan carry."""
+    horizon = 3
+    config, state = _scenario(
+        (_TEAM_A_ACTOR, HUNTER_CLASS_ID),
+        (_TEAM_B_ACTOR, HUNTER_CLASS_ID),
+    )
+    action = _joint_action(
+        (_TEAM_A_ACTOR, MOVE_STAY, _FIRST_ENEMY_TARGET, 0),
+        (_TEAM_B_ACTOR, MOVE_EAST, 0, 0),
+    )
+    keys = jax.random.split(jax.random.key(37), horizon)
+
+    def _scan_step(
+        carry: tuple[EnvState, ActionMask],
+        step_key: Array,
+    ) -> tuple[tuple[EnvState, ActionMask], tuple[Array, Array, Array]]:
+        current_state, current_mask = carry
+        next_state, _, _, _, next_mask, _ = step(
+            config,
+            current_state,
+            current_mask,
+            action,
+            step_key,
+        )
+        return (next_state, next_mask), (
+            next_state.current_health,
+            next_state.agent_positions,
+            next_state.slow_durations[:, SLOW_CHANNEL_HUNTER_BASIC],
+        )
+
+    def _rollout(
+        initial_state: EnvState,
+        initial_mask: ActionMask,
+        scan_keys: Array,
+    ) -> tuple[tuple[EnvState, ActionMask], tuple[Array, Array, Array]]:
+        """Run the repeated-passive scenario in one fixed-shape scan."""
+        return jax.lax.scan(
+            _scan_step,
+            (initial_state, initial_mask),
+            scan_keys,
+        )
+
+    (_, _), (health_history, position_history, hunter_duration_history) = cast(
+        tuple[tuple[EnvState, ActionMask], tuple[Array, Array, Array]],
+        jax.jit(_rollout)(state, _current_action_mask(config, state), keys),
+    )
+
+    expected_health = state.current_health[_TEAM_B_ACTOR] - (
+        BASIC_DAMAGE_BY_CLASS[HUNTER_CLASS_ID]
+        * jnp.arange(1, horizon + 1, dtype=jnp.float32)
+    )
+    expected_x = state.agent_positions[_TEAM_B_ACTOR, 0] + (
+        HUNTER_BASIC_SLOW_MULTIPLIER * jnp.arange(1, horizon + 1, dtype=jnp.float32)
+    )
+    assert health_history.shape == (horizon, MAX_AGENT_SLOTS)
+    assert position_history.shape == (
+        horizon,
+        MAX_AGENT_SLOTS,
+        ENVIRONMENT_DIMENSIONS,
+    )
+    assert hunter_duration_history.dtype == jnp.int32
+    assert bool(
+        jnp.allclose(health_history[:, _TEAM_B_ACTOR], expected_health, atol=1e-5)
+    )
+    assert bool(
+        jnp.allclose(position_history[:, _TEAM_B_ACTOR, 0], expected_x, atol=1e-5)
+    )
+    assert bool(jnp.all(hunter_duration_history == 0))
 
 
 @pytest.mark.parametrize(

@@ -551,7 +551,7 @@ def test_attached_statuses_and_effective_speed_follow_duration_state() -> None:
     rows = observation.self_features
 
     assert rows[0, AGENT_FEATURE_SLOW_WARRIOR_CHARGE_DURATION] == 2.0
-    assert rows[1, AGENT_FEATURE_SLOW_HUNTER_BASIC_DURATION] == 3.0
+    assert rows[1, AGENT_FEATURE_SLOW_HUNTER_BASIC_DURATION] == 2.0
     assert rows[2, AGENT_FEATURE_SLOW_ROGUE_POISON_DURATION] == 4.0
     assert (
         rows[0, AGENT_FEATURE_SLOW_WARRIOR_CHARGE_MULTIPLIER]
@@ -571,7 +571,7 @@ def test_attached_statuses_and_effective_speed_follow_duration_state() -> None:
         == combat.ROGUE_POISON_ANTI_HEAL_MULTIPLIER
     )
     assert rows[4, AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_BURST_DURATION] == 6.0
-    assert rows[0, AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_DURATION] == 7.0
+    assert rows[0, AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_DURATION] == 6.0
     assert (
         rows[0, AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_FRACTION]
         == combat.PRIEST_HEAL_SPEED_FLOOR
