@@ -16,29 +16,35 @@ from marl_battlegrounds.core.combat import (
     MAGE_BURST_DAMAGE_DURATION_TICKS,
     MAGE_BURST_DAMAGE_MULTIPLIER,
     MAGE_DAMAGE_AURA_MULTIPLIER,
+    MAGE_DAMAGE_AURA_MULTIPLIER_CEILING,
     MAGE_DAMAGE_AURA_RADIUS,
     ONLY_ALLY_TARGET_ULTIMATE_MODE,
     ONLY_ENEMY_TARGET_ULTIMATE_MODE,
     ONLY_NONE_TARGET_ULTIMATE_MODE,
     PRIEST_HEAL_SPEED_FLOOR,
     PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS,
-    PRIEST_ULT_HEAL_AMOUNT,
     ROGUE_POISON_ANTI_HEAL_DURATION_TICKS,
     ROGUE_POISON_ANTI_HEAL_MULTIPLIER,
     ROGUE_POISON_SLOW_DURATION_TICKS,
     ROGUE_POISON_SLOW_MULTIPLIER,
     ROGUE_POISON_STUN_DURATION_TICKS,
     ULTIMATE_COOLDOWN_BY_CLASS,
+    ULTIMATE_DAMAGE_BY_CLASS,
+    ULTIMATE_HEALING_BY_CLASS,
     WARRIOR_CHARGE_SLOW_DURATION_TICKS,
     WARRIOR_CHARGE_SLOW_MULTIPLIER,
     WARRIOR_CHARGE_STUN_DURATION_TICKS,
     WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER,
+    WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER_FLOOR,
     WARRIOR_DAMAGE_MITIGATION_AURA_RADIUS,
     build_rogue_poison_anti_heal_multipliers,
     derive_effective_movement_speeds_from_durations,
     derive_status_magnitudes,
     get_basic_damage_by_class_ids,
     get_basic_healing_by_class_ids,
+    get_ultimate_cooldown_by_class_ids,
+    get_ultimate_damage_by_class_ids,
+    get_ultimate_healing_by_class_ids,
     get_ultimate_target_mode_by_class_ids,
 )
 from marl_battlegrounds.core.geometry import (
@@ -592,6 +598,8 @@ def _build_self_features(
 ) -> Array:
     """Build slot-aligned self rows from the shared agent-feature schema."""
 
+    class_ids = config.agent_profile.class_ids
+
     (
         slow_multipliers,
         rogue_poison_anti_heal_multipliers,
@@ -615,7 +623,7 @@ def _build_self_features(
             config.agent_profile.team_ids[:, None],
             config.agent_profile.active_mask[:, None],
             state.alive_mask[:, None],
-            config.agent_profile.class_ids[:, None],
+            class_ids[:, None],
             config.agent_profile.base_movement_speeds[:, None],
             effective_movement_speeds[:, None],
             config.agent_profile.observation_radii[:, None],
@@ -655,13 +663,13 @@ def _build_self_features(
     # Non-state derived payload descriptors.
     # These tell us about an agent's inherent properties, not what's happening to it.
 
-    basic_dmg_heal_ult_cds = jnp.where(
+    basic_health_and_ultimate_cooldown_capability_features = jnp.where(
         active_mask_bc,
         jnp.concatenate(
             (
-                BASIC_DAMAGE_BY_CLASS[config.agent_profile.class_ids][:, None],
-                BASIC_HEALING_BY_CLASS[config.agent_profile.class_ids][:, None],
-                ULTIMATE_COOLDOWN_BY_CLASS[config.agent_profile.class_ids][:, None],
+                BASIC_DAMAGE_BY_CLASS[class_ids][:, None],
+                BASIC_HEALING_BY_CLASS[class_ids][:, None],
+                ULTIMATE_COOLDOWN_BY_CLASS[class_ids][:, None],
             ),
             axis=-1,
         ),
@@ -717,37 +725,51 @@ def _build_self_features(
         0.0,
     ).astype(jnp.float32)
 
-    mage_warrior_priest_mask = jnp.concatenate(
+    mage_warrior_aura_mask = jnp.concatenate(
         (
             jnp.tile(mage_mask[:, None], 2),
             jnp.tile(warrior_mask[:, None], 2),
-            priest_mask[:, None],
         ),
         axis=-1,
     )
 
-    mage_war_aura_priest_ult_features = jnp.where(
-        mage_warrior_priest_mask,
+    mage_and_warrior_aura_capability_features = jnp.where(
+        mage_warrior_aura_mask,
         jnp.asarray(
             [
                 MAGE_DAMAGE_AURA_RADIUS,
                 MAGE_DAMAGE_AURA_MULTIPLIER,
                 WARRIOR_DAMAGE_MITIGATION_AURA_RADIUS,
                 WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER,
-                PRIEST_ULT_HEAL_AMOUNT,
             ]
         )[None, :],
         0.0,
     ).astype(jnp.float32)
 
-    feature_31_to_53 = jnp.concatenate(
+    # Capability payloads remain zero for inactive rows even if a malformed
+    # profile assigns those rows non-neutral class IDs.
+    ultimate_healing_capability_features = jnp.where(
+        config.agent_profile.active_mask,
+        get_ultimate_healing_by_class_ids(class_ids),
+        0.0,
+    )[:, None]
+
+    ultimate_damage_capability_features = jnp.where(
+        config.agent_profile.active_mask,
+        get_ultimate_damage_by_class_ids(class_ids),
+        0.0,
+    )[:, None]
+
+    feature_31_to_54 = jnp.concatenate(
         (
-            basic_dmg_heal_ult_cds,
+            basic_health_and_ultimate_cooldown_capability_features,
             slow_stun_durations_multipliers,
             rogue_anti_heal_capability_features,
             mage_burst_capability_features,
             priest_blessing_of_freedom_capability_features,
-            mage_war_aura_priest_ult_features,
+            mage_and_warrior_aura_capability_features,
+            ultimate_healing_capability_features,
+            ultimate_damage_capability_features,
         ),
         axis=-1,
         dtype=jnp.float32,
@@ -757,7 +779,7 @@ def _build_self_features(
         (
             features_0_to_14,
             features_15_to_30,
-            feature_31_to_53,
+            feature_31_to_54,
         ),
         axis=-1,
         dtype=jnp.float32,
@@ -849,24 +871,26 @@ def _build_accepted_joint_action_from_submitted_joint_action(
     )
 
 
-def _compute_basic_damage_and_basic_healing_effects_received_per_global_slot(
+def _aggregate_health_effects_and_basic_passives_by_global_slot(
     current_state: EnvState,
     config: EnvConfig,
     accepted_joint_action: Action,
     mage_damage_amplification_aura_multipliers: Array,
     warrior_damage_mitigation_aura_multipliers: Array,
 ) -> tuple[Array, Array, Array, Array]:
-    """Aggregate accepted basic health effects and passive applications.
+    """Aggregate accepted health effects and basic-passive applications.
 
     The accepted target categories are actor-relative. After fixed-slot
     translation, dense one-hot rows route every actor's catalog payload to its
-    recipient. Reducing the complete matrices before health mutation preserves
-    simultaneous, actor-order-independent resolution. The returned boolean
-    vectors identify recipients of accepted Hunter and Priest basics without
-    inferring passive triggers from their effective health changes.
+    recipient. Basic and ultimate contributions share this routing boundary.
+    Reducing the complete matrices before health mutation preserves simultaneous,
+    actor-order-independent resolution. The returned boolean vectors identify
+    recipients of accepted Hunter and Priest basics without inferring passive
+    triggers from their effective health changes.
     """
 
-    mage_burst_basic_damage_amplification_multipliers = jnp.where(
+    # Pre-state source and recipient modifiers affect this transition's payloads.
+    mage_burst_damage_amplification_multipliers = jnp.where(
         current_state.mage_burst_damage_amplification_durations > 0,
         MAGE_BURST_DAMAGE_MULTIPLIER,
         1.0,
@@ -878,31 +902,91 @@ def _compute_basic_damage_and_basic_healing_effects_received_per_global_slot(
         )
     )
 
+    # Translate actor-relative selections once for every accepted effect lane.
     accepted_global_target_slot_by_actor_slot = (
         _ACTOR_RELATIVE_SELECT_TARGET_ACTION_TO_GLOBAL_AGENT_SLOT_LOOKUP_TABLE[
             _GLOBAL_AGENT_SLOT_INDICES, accepted_joint_action.select_target
         ]
     )
 
+    accepted_effect_recipient_one_hot_by_actor_and_global_recipient_slot = (
+        jax.nn.one_hot(
+            accepted_global_target_slot_by_actor_slot,
+            num_classes=MAX_AGENT_SLOTS,
+            dtype=jnp.float32,
+        )
+    )
+
+    # Basic and ultimate lanes are mutually exclusive after action acceptance.
     actor_applies_accepted_basic_effect = jnp.logical_and(
         accepted_joint_action.use_ultimate == 0,
         accepted_joint_action.select_target > 0,
     )
+
     basic_effect_source_class_ids_by_actor_slot = jnp.where(
         actor_applies_accepted_basic_effect,
         config.agent_profile.class_ids,
         NEUTRAL_CLASS_ID,
     )
+    raw_basic_damage_by_actor_slot = BASIC_DAMAGE_BY_CLASS[
+        basic_effect_source_class_ids_by_actor_slot
+    ]
+    raw_basic_healing_by_actor_slot = BASIC_HEALING_BY_CLASS[
+        basic_effect_source_class_ids_by_actor_slot
+    ]
 
-    basic_effect_recipient_one_hot_by_actor_and_global_recipient_slot = jax.nn.one_hot(
-        accepted_global_target_slot_by_actor_slot,
-        num_classes=MAX_AGENT_SLOTS,
-        dtype=jnp.float32,
+    amplified_basic_damage_by_actor_slot = (
+        raw_basic_damage_by_actor_slot
+        * mage_burst_damage_amplification_multipliers
+        * mage_damage_amplification_aura_multipliers
+    )
+
+    basic_damage_contribution_by_actor_and_global_recipient_slot = (
+        accepted_effect_recipient_one_hot_by_actor_and_global_recipient_slot
+        * amplified_basic_damage_by_actor_slot[:, None]
+    )
+
+    basic_healing_contribution_by_actor_and_global_recipient_slot = (
+        accepted_effect_recipient_one_hot_by_actor_and_global_recipient_slot
+        * raw_basic_healing_by_actor_slot[:, None]
+    )
+
+    # No-target ultimates are accepted actions but have no routed health payload.
+    actor_applies_accepted_targeted_ultimate_effect = jnp.logical_and(
+        accepted_joint_action.use_ultimate == 1,
+        accepted_joint_action.select_target > 0,
+    )
+    targeted_ultimate_source_class_ids_by_actor_slot = jnp.where(
+        actor_applies_accepted_targeted_ultimate_effect,
+        config.agent_profile.class_ids,
+        NEUTRAL_CLASS_ID,
+    )
+    raw_ultimate_damage_by_actor_slot = ULTIMATE_DAMAGE_BY_CLASS[
+        targeted_ultimate_source_class_ids_by_actor_slot
+    ]
+    raw_ultimate_healing_by_actor_slot = ULTIMATE_HEALING_BY_CLASS[
+        targeted_ultimate_source_class_ids_by_actor_slot
+    ]
+
+    amplified_ultimate_damage_by_actor_slot = (
+        raw_ultimate_damage_by_actor_slot
+        * mage_damage_amplification_aura_multipliers
+        * mage_burst_damage_amplification_multipliers
+    )
+
+    ultimate_damage_contribution_by_actor_and_global_recipient_slot = (
+        accepted_effect_recipient_one_hot_by_actor_and_global_recipient_slot
+        * amplified_ultimate_damage_by_actor_slot[:, None]
+    )
+
+    ultimate_healing_contribution_by_actor_and_global_recipient_slot = (
+        accepted_effect_recipient_one_hot_by_actor_and_global_recipient_slot
+        * raw_ultimate_healing_by_actor_slot[:, None]
     )
 
     # Reuse accepted recipient routing for source-specific basic passives.
     hunter_basic_slow_applied_by_global_recipient_slot_mask = jnp.logical_and(
-        basic_effect_recipient_one_hot_by_actor_and_global_recipient_slot,
+        accepted_effect_recipient_one_hot_by_actor_and_global_recipient_slot,
         jnp.logical_and(
             _active_hunter_class_mask(config)[:, None],
             actor_applies_accepted_basic_effect[:, None],
@@ -914,7 +998,7 @@ def _compute_basic_damage_and_basic_healing_effects_received_per_global_slot(
     )
 
     priest_freedom_applied_by_global_recipient_slot_mask = jnp.logical_and(
-        basic_effect_recipient_one_hot_by_actor_and_global_recipient_slot,
+        accepted_effect_recipient_one_hot_by_actor_and_global_recipient_slot,
         jnp.logical_and(
             _active_priest_class_mask(config)[:, None],
             actor_applies_accepted_basic_effect[:, None],
@@ -925,32 +1009,11 @@ def _compute_basic_damage_and_basic_healing_effects_received_per_global_slot(
         priest_freedom_applied_by_global_recipient_slot_mask, axis=0
     )
 
-    raw_basic_damage_by_actor_slot = BASIC_DAMAGE_BY_CLASS[
-        basic_effect_source_class_ids_by_actor_slot
-    ]
-    raw_basic_healing_by_actor_slot = BASIC_HEALING_BY_CLASS[
-        basic_effect_source_class_ids_by_actor_slot
-    ]
-
-    amplified_basic_damage_by_actor_slot = (
-        raw_basic_damage_by_actor_slot
-        * mage_burst_basic_damage_amplification_multipliers
-        * mage_damage_amplification_aura_multipliers
-    )
-
-    basic_damage_contribution_by_actor_and_global_recipient_slot = (
-        basic_effect_recipient_one_hot_by_actor_and_global_recipient_slot
-        * amplified_basic_damage_by_actor_slot[:, None]
-    )
-
-    basic_healing_contribution_by_actor_and_global_recipient_slot = (
-        basic_effect_recipient_one_hot_by_actor_and_global_recipient_slot
-        * raw_basic_healing_by_actor_slot[:, None]
-    )
-
+    # Recipient modifiers apply after source contributions aggregate.
     total_damage_received_by_global_recipient_slot = (
         jnp.sum(
-            basic_damage_contribution_by_actor_and_global_recipient_slot,
+            basic_damage_contribution_by_actor_and_global_recipient_slot
+            + ultimate_damage_contribution_by_actor_and_global_recipient_slot,
             axis=0,
         )
         * warrior_damage_mitigation_aura_multipliers
@@ -958,7 +1021,8 @@ def _compute_basic_damage_and_basic_healing_effects_received_per_global_slot(
 
     total_healing_received_by_global_recipient_slot = (
         jnp.sum(
-            basic_healing_contribution_by_actor_and_global_recipient_slot,
+            basic_healing_contribution_by_actor_and_global_recipient_slot
+            + ultimate_healing_contribution_by_actor_and_global_recipient_slot,
             axis=0,
         )
         * rogue_poison_anti_heal_multipliers_by_global_recipient_slot
@@ -972,20 +1036,20 @@ def _compute_basic_damage_and_basic_healing_effects_received_per_global_slot(
     )
 
 
-def _compute_health_after_simultaneous_basic_damage_and_healing(
+def _compute_health_after_simultaneous_damage_and_healing(
     total_damage_received_by_global_slot: Array,
     total_healing_received_by_global_slot: Array,
     current_state: EnvState,
     config: EnvConfig,
 ) -> Array:
-    """Apply simultaneous basic effects and clamp each fixed-slot health value."""
-    health_after_simultaneous_basic_damage_and_healing = (
-        current_state.current_health
-        - total_damage_received_by_global_slot
-        + total_healing_received_by_global_slot
+    """Net simultaneous health effects and clamp each fixed-slot health value."""
+    health_delta_by_slot = (
+        total_healing_received_by_global_slot - total_damage_received_by_global_slot
     )
+
+    net_health_by_slot = current_state.current_health + health_delta_by_slot
     return jnp.clip(
-        health_after_simultaneous_basic_damage_and_healing,
+        net_health_by_slot,
         min=0,
         max=config.agent_profile.max_health,
     )
@@ -996,11 +1060,12 @@ def _derive_aura_damage_multipliers(
     global_pairwise_distances: Array,
     alive_mask: Array,
 ) -> tuple[Array, Array]:
-    """Derive stacked Mage outgoing and Warrior incoming damage modifiers.
+    """Derive bounded Mage outgoing and Warrior incoming aura modifiers.
 
     Rows represent aura emitters and columns represent beneficiary slots.
     Only active, living allies with real team IDs participate. Auras include
-    their emitter, use inclusive radius boundaries, and stack multiplicatively.
+    their emitter, use inclusive radius boundaries, and stack multiplicatively
+    before the completed vectors are bounded.
     """
 
     global_pairwise_ally_mask, _ = _build_global_pairwise_team_masks(
@@ -1044,16 +1109,77 @@ def _derive_aura_damage_multipliers(
         1.0,
     )
 
-    mage_aura_outgoing_basic_damage_multiplier_by_actor = jnp.prod(
+    mage_aura_outgoing_damage_multiplier_by_actor_slot = jnp.prod(
         mage_actor_benefits_recipient_with_aura, axis=0
     )
-    warrior_aura_incoming_basic_damage_multiplier_by_global_recipient_slot = jnp.prod(
+    warrior_aura_incoming_damage_multiplier_by_global_recipient_slot = jnp.prod(
         warrior_actor_benefits_recipient_with_aura, axis=0
     )
 
     return (
-        mage_aura_outgoing_basic_damage_multiplier_by_actor,
-        warrior_aura_incoming_basic_damage_multiplier_by_global_recipient_slot,
+        jnp.clip(
+            mage_aura_outgoing_damage_multiplier_by_actor_slot,
+            min=1.0,
+            max=MAGE_DAMAGE_AURA_MULTIPLIER_CEILING,
+        ),
+        jnp.clip(
+            warrior_aura_incoming_damage_multiplier_by_global_recipient_slot,
+            min=WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER_FLOOR,
+            max=1.0,
+        ),
+    )
+
+
+def _refresh_and_tick_basic_passive_durations(
+    current_state: EnvState,
+    hunter_basic_slow_applied_by_global_recipient_slot: Array,
+    priest_freedom_applied_by_global_recipient_slot: Array,
+) -> tuple[Array, Array, Array, Array]:
+    """Refresh and tick the two duration channels owned by Step 5.
+
+    Refreshed durations are returned for same-tick movement, while decremented
+    durations are returned for next-state packaging. Later Step 6 checkpoints
+    retain ownership of every other duration channel.
+    """
+    # Refresh the two Step 5-owned channels before movement, then package their
+    # once-ticked values while preserving every later-checkpoint duration.
+    current_hunter_slow_duration = current_state.slow_durations[
+        :, SLOW_CHANNEL_HUNTER_BASIC
+    ]
+    refreshed_hunter_slow_durations = jnp.where(
+        hunter_basic_slow_applied_by_global_recipient_slot,
+        jnp.maximum(HUNTER_BASIC_SLOW_DURATION_TICKS, current_hunter_slow_duration),
+        current_hunter_slow_duration,
+    ).astype(jnp.int32)
+
+    refreshed_slow_durations = current_state.slow_durations.at[
+        :, SLOW_CHANNEL_HUNTER_BASIC
+    ].set(refreshed_hunter_slow_durations)
+
+    next_slow_durations = current_state.slow_durations.at[
+        :, SLOW_CHANNEL_HUNTER_BASIC
+    ].set(jnp.maximum(refreshed_hunter_slow_durations - 1, 0))
+    current_priest_blessing_of_freedom_slow_floor_durations = (
+        current_state.priest_blessing_of_freedom_slow_floor_durations
+    )
+
+    refreshed_priest_blessing_of_freedom_slow_floor_durations = jnp.where(
+        priest_freedom_applied_by_global_recipient_slot,
+        jnp.maximum(
+            PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS,
+            current_priest_blessing_of_freedom_slow_floor_durations,
+        ),
+        current_priest_blessing_of_freedom_slow_floor_durations,
+    ).astype(jnp.int32)
+
+    next_priest_blessing_of_freedom_slow_floor_durations = jnp.maximum(
+        refreshed_priest_blessing_of_freedom_slow_floor_durations - 1, 0
+    )
+    return (
+        refreshed_slow_durations,
+        refreshed_priest_blessing_of_freedom_slow_floor_durations,
+        next_slow_durations,
+        next_priest_blessing_of_freedom_slow_floor_durations,
     )
 
 
@@ -1134,8 +1260,6 @@ def step(
         current_action_mask=current_action_mask, submitted_joint_action=joint_action
     )
 
-    # Later checkpoints extend this aggregation with ultimate damage and healing.
-
     current_global_pairwise_distances = (
         _compute_global_pairwise_distances_from_agent_positions(
             current_state.agent_positions
@@ -1149,11 +1273,11 @@ def step(
     )
 
     (
-        total_basic_damage_received_by_global_slot,
-        total_basic_healing_received_by_global_slot,
+        total_effective_damage_received_by_global_slot,
+        total_effective_healing_received_by_global_slot,
         hunter_basic_slow_applied_by_global_recipient_slot,
         priest_freedom_applied_by_global_recipient_slot,
-    ) = _compute_basic_damage_and_basic_healing_effects_received_per_global_slot(
+    ) = _aggregate_health_effects_and_basic_passives_by_global_slot(
         current_state,
         config,
         accepted_joint_action,
@@ -1161,48 +1285,31 @@ def step(
         current_warrior_damage_mitigation_aura_multipliers,
     )
 
-    # Refresh the two Step 5-owned channels before movement, then package their
-    # once-ticked values while preserving every later-checkpoint duration.
-    current_hunter_slow_duration = current_state.slow_durations[
-        :, SLOW_CHANNEL_HUNTER_BASIC
-    ]
-    refreshed_hunter_slow_durations = jnp.where(
+    (
+        refreshed_slow_durations,
+        refreshed_priest_blessing_of_freedom_slow_floor_durations,
+        next_slow_durations,
+        next_priest_blessing_of_freedom_slow_floor_durations,
+    ) = _refresh_and_tick_basic_passive_durations(
+        current_state,
         hunter_basic_slow_applied_by_global_recipient_slot,
-        jnp.maximum(HUNTER_BASIC_SLOW_DURATION_TICKS, current_hunter_slow_duration),
-        current_hunter_slow_duration,
-    ).astype(jnp.int32)
-
-    refreshed_slow_durations = current_state.slow_durations.at[
-        :, SLOW_CHANNEL_HUNTER_BASIC
-    ].set(refreshed_hunter_slow_durations)
-
-    next_slow_durations = current_state.slow_durations.at[
-        :, SLOW_CHANNEL_HUNTER_BASIC
-    ].set(jnp.maximum(refreshed_hunter_slow_durations - 1, 0))
-    current_priest_blessing_of_freedom_slow_floor_durations = (
-        current_state.priest_blessing_of_freedom_slow_floor_durations
-    )
-
-    refreshed_priest_blessing_of_freedom_slow_floor_durations = jnp.where(
         priest_freedom_applied_by_global_recipient_slot,
-        jnp.maximum(
-            PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS,
-            current_priest_blessing_of_freedom_slow_floor_durations,
-        ),
-        current_priest_blessing_of_freedom_slow_floor_durations,
-    ).astype(jnp.int32)
-
-    next_priest_blessing_of_freedom_slow_floor_durations = jnp.maximum(
-        refreshed_priest_blessing_of_freedom_slow_floor_durations - 1, 0
     )
 
-    next_health_after_basic_damage_and_healing = (
-        _compute_health_after_simultaneous_basic_damage_and_healing(
-            total_basic_damage_received_by_global_slot,
-            total_basic_healing_received_by_global_slot,
+    next_health_after_effective_damage_and_healing = (
+        _compute_health_after_simultaneous_damage_and_healing(
+            total_effective_damage_received_by_global_slot,
+            total_effective_healing_received_by_global_slot,
             current_state,
             config,
         )
+    )
+
+    # Accepted use starts a full cooldown; every unreplaced cooldown ticks once.
+    next_ultimate_cooldowns = jnp.where(
+        accepted_joint_action.use_ultimate == 1,
+        get_ultimate_cooldown_by_class_ids(config.agent_profile.class_ids),
+        jnp.maximum(0, current_state.ultimate_cooldowns - 1),
     )
 
     intended_movement_deltas = _build_intended_movement_deltas(
@@ -1223,14 +1330,14 @@ def step(
         config.obstacles,
     )
 
-    # Later M5 checkpoints own ultimates, remaining statuses, and cooldowns.
+    # Later Step 6 checkpoints own ultimate statuses and movement control.
 
     next_state = EnvState(
         step_count=current_state.step_count + 1,
         agent_positions=next_agent_positions,
         alive_mask=current_state.alive_mask,
-        current_health=next_health_after_basic_damage_and_healing,
-        ultimate_cooldowns=current_state.ultimate_cooldowns,
+        current_health=next_health_after_effective_damage_and_healing,
+        ultimate_cooldowns=next_ultimate_cooldowns,
         slow_durations=next_slow_durations,
         stun_durations=current_state.stun_durations,
         rogue_poison_anti_heal_durations=current_state.rogue_poison_anti_heal_durations,

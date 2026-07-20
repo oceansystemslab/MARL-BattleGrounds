@@ -21,6 +21,8 @@ from marl_battlegrounds.core.combat import (
     PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS,
     ROGUE_POISON_ANTI_HEAL_MULTIPLIER,
     ROGUE_POISON_SLOW_MULTIPLIER,
+    ULTIMATE_COOLDOWN_BY_CLASS,
+    ULTIMATE_DAMAGE_BY_CLASS,
     WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER,
 )
 from marl_battlegrounds.core.config import resolve_agent_profile
@@ -688,7 +690,10 @@ def test_passive_refresh_never_shortens_and_only_owned_channels_tick() -> None:
     assert next_state.slow_durations[recipient, SLOW_CHANNEL_ROGUE_POISON] == 3
     assert next_state.priest_blessing_of_freedom_slow_floor_durations[recipient] == 3
     assert bool(
-        jnp.array_equal(next_state.ultimate_cooldowns, state.ultimate_cooldowns)
+        jnp.array_equal(
+            next_state.ultimate_cooldowns,
+            jnp.maximum(state.ultimate_cooldowns - 1, 0),
+        )
     )
     assert bool(jnp.array_equal(next_state.stun_durations, state.stun_durations))
     assert bool(
@@ -1275,7 +1280,7 @@ def test_invalid_ultimate_pair_cannot_fall_back_to_a_valid_basic() -> None:
 
 
 def test_accepted_ultimate_lane_does_not_also_apply_a_basic() -> None:
-    """Prove a valid ultimate-lane interaction remains basic-effect inert."""
+    """Prove an ultimate applies its own payload without also applying a basic."""
     config, state = _scenario(
         (_TEAM_A_ACTOR, WARRIOR_CLASS_ID),
         (_TEAM_B_ACTOR, MAGE_CLASS_ID),
@@ -1293,7 +1298,14 @@ def test_accepted_ultimate_lane_does_not_also_apply_a_basic() -> None:
         _joint_action((_TEAM_A_ACTOR, MOVE_STAY, _FIRST_ENEMY_TARGET, 1)),
     )
 
-    _assert_only_health_changed(state, next_state, state.current_health)
+    expected_health = state.current_health.at[_TEAM_B_ACTOR].add(
+        -ULTIMATE_DAMAGE_BY_CLASS[WARRIOR_CLASS_ID]
+    )
+    assert bool(jnp.array_equal(next_state.current_health, expected_health))
+    assert (
+        next_state.ultimate_cooldowns[_TEAM_A_ACTOR]
+        == ULTIMATE_COOLDOWN_BY_CLASS[WARRIOR_CLASS_ID]
+    )
 
 
 def test_target_none_no_ultimate_is_effect_inert() -> None:

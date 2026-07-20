@@ -481,8 +481,8 @@ def test_static_shape_constants_are_consistent() -> None:
         MOVE_SOUTHWEST,
     )
 
-    assert SELF_FEATURES == 54
-    assert UNIT_FEATURES == 54
+    assert SELF_FEATURES == 55
+    assert UNIT_FEATURES == 55
     assert SELF_FEATURES == UNIT_FEATURES
     assert CLASS_NEUTRAL == 0
     assert NUM_SLOW_CHANNELS == 3
@@ -781,7 +781,10 @@ def test_step_preserves_slot_aligned_state_arrays() -> None:
     assert jnp.array_equal(next_state.agent_positions, state.agent_positions)
     assert jnp.array_equal(next_state.alive_mask, state.alive_mask)
     assert jnp.array_equal(next_state.current_health, state.current_health)
-    assert jnp.array_equal(next_state.ultimate_cooldowns, state.ultimate_cooldowns)
+    assert jnp.array_equal(
+        next_state.ultimate_cooldowns,
+        jnp.maximum(state.ultimate_cooldowns - 1, 0),
+    )
     expected_slow_durations = state.slow_durations.at[0, SLOW_CHANNEL_HUNTER_BASIC].set(
         0
     )

@@ -326,7 +326,10 @@ def test_step_preserves_non_inert_dynamic_memory() -> None:
     assert next_state.step_count == state.step_count + 1
     assert bool(jnp.array_equal(next_state.current_health, state.current_health))
     assert bool(
-        jnp.array_equal(next_state.ultimate_cooldowns, state.ultimate_cooldowns)
+        jnp.array_equal(
+            next_state.ultimate_cooldowns,
+            jnp.maximum(state.ultimate_cooldowns - 1, 0),
+        )
     )
     expected_slow_durations = state.slow_durations.at[0, SLOW_CHANNEL_HUNTER_BASIC].set(
         2

@@ -12,6 +12,69 @@ ONLY_NONE_TARGET_ULTIMATE_MODE = 1
 ONLY_ALLY_TARGET_ULTIMATE_MODE = 2
 ONLY_ENEMY_TARGET_ULTIMATE_MODE = 3
 
+# Global status rules.
+
+# The floor keeps stacked slows from becoming a hard stun.
+GLOBAL_SLOW_FLOOR = 0.20
+
+# Hunter mechanics.
+
+HUNTER_BASIC_SLOW_MULTIPLIER = 0.85
+HUNTER_BASIC_SLOW_DURATION_TICKS = 1
+
+# Hunter trap has a longer stun duration because the trap can be broken.
+HUNTER_TRAP_STUN_DURATION_TICKS = 4
+
+
+# Warrior mechanics.
+
+WARRIOR_CHARGE_SLOW_DURATION_TICKS = 5
+WARRIOR_CHARGE_STUN_DURATION_TICKS = 1
+
+# Warrior mitigation is the defensive counterpart to Mage amplification.
+WARRIOR_DAMAGE_MITIGATION_AURA_RADIUS = 2.0
+WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER = 0.85
+# Duplicate emitters multiply before the effective aura value reaches this floor.
+WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER_FLOOR = (
+    WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER
+    * WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER
+)
+WARRIOR_CHARGE_SLOW_MULTIPLIER = 0.50
+
+
+# Rogue mechanics.
+
+ROGUE_POISON_SLOW_MULTIPLIER = 0.50
+ROGUE_POISON_SLOW_DURATION_TICKS = 5
+
+ROGUE_POISON_STUN_DURATION_TICKS = 1
+
+ROGUE_POISON_ANTI_HEAL_MULTIPLIER = 0.50
+ROGUE_POISON_ANTI_HEAL_DURATION_TICKS = 4
+
+
+# Mage mechanics.
+
+MAGE_DAMAGE_AURA_RADIUS = 2.0
+MAGE_DAMAGE_AURA_MULTIPLIER = 1.15
+# Duplicate emitters multiply before the effective aura value reaches this ceiling.
+MAGE_DAMAGE_AURA_MULTIPLIER_CEILING = (
+    MAGE_DAMAGE_AURA_MULTIPLIER * MAGE_DAMAGE_AURA_MULTIPLIER
+)
+
+# Mage Burst duration keeps the buff interruptible by hard control.
+MAGE_BURST_DAMAGE_DURATION_TICKS = 5
+MAGE_BURST_DAMAGE_MULTIPLIER = 1.50
+
+
+# Priest mechanics.
+
+# Priest healing grants temporary slow protection.
+# While active, slows cannot reduce the target below this fraction of base speed.
+PRIEST_HEAL_SPEED_FLOOR = 0.85
+PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS = 1
+
+
 MAX_HEALTH_BY_CLASS = jnp.asarray(
     [
         0.0,  # neutral
@@ -116,6 +179,31 @@ ULTIMATE_COOLDOWN_BY_CLASS = jnp.asarray(
     dtype=jnp.int32,
 )
 
+ULTIMATE_DAMAGE_BY_CLASS = jnp.asarray(
+    [
+        0.0,  # neutral
+        0.0,  # mage
+        16.0,  # warrior
+        0.0,  # hunter
+        0.0,  # rogue
+        0.0,  # priest
+    ],
+    dtype=jnp.float32,
+)
+
+
+ULTIMATE_HEALING_BY_CLASS = jnp.asarray(
+    [
+        0.0,  # neutral
+        0.0,  # mage
+        0.0,  # warrior
+        0.0,  # hunter
+        0.0,  # rogue
+        75.0,  # priest
+    ],
+    dtype=jnp.float32,
+)
+
 OBSERVATION_RADIUS_BY_CLASS = jnp.asarray(
     [
         0,  # neutral
@@ -140,61 +228,6 @@ ULTIMATE_TARGET_MODE_BY_CLASS = jnp.asarray(
     dtype=jnp.int32,
 )
 
-# Global status rules.
-
-# The floor keeps stacked slows from becoming a hard stun.
-GLOBAL_SLOW_FLOOR = 0.20
-
-
-# Hunter mechanics.
-
-HUNTER_BASIC_SLOW_MULTIPLIER = 0.85
-HUNTER_BASIC_SLOW_DURATION_TICKS = 1
-
-# Hunter trap has a longer stun duration because the trap can be broken.
-HUNTER_TRAP_STUN_DURATION_TICKS = 4
-
-
-# Warrior mechanics.
-
-WARRIOR_CHARGE_SLOW_MULTIPLIER = 0.50
-WARRIOR_CHARGE_SLOW_DURATION_TICKS = 5
-WARRIOR_CHARGE_STUN_DURATION_TICKS = 1
-
-# Warrior mitigation is the defensive counterpart to Mage amplification.
-WARRIOR_DAMAGE_MITIGATION_AURA_RADIUS = 2.0
-WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER = 0.85
-
-
-# Rogue mechanics.
-
-ROGUE_POISON_SLOW_MULTIPLIER = 0.50
-ROGUE_POISON_SLOW_DURATION_TICKS = 5
-
-ROGUE_POISON_STUN_DURATION_TICKS = 1
-
-ROGUE_POISON_ANTI_HEAL_MULTIPLIER = 0.50
-ROGUE_POISON_ANTI_HEAL_DURATION_TICKS = 4
-
-
-# Mage mechanics.
-
-MAGE_DAMAGE_AURA_RADIUS = 2.0
-MAGE_DAMAGE_AURA_MULTIPLIER = 1.15
-
-# Mage Burst duration keeps the buff interruptible by hard control.
-MAGE_BURST_DAMAGE_DURATION_TICKS = 5
-MAGE_BURST_DAMAGE_MULTIPLIER = 1.50
-
-
-# Priest mechanics.
-
-PRIEST_ULT_HEAL_AMOUNT = 75.0
-
-# Priest healing grants temporary slow protection.
-# While active, slows cannot reduce the target below this fraction of base speed.
-PRIEST_HEAL_SPEED_FLOOR = 0.85
-PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS = 1
 
 # Catalog access helpers.
 
@@ -247,6 +280,16 @@ def get_observation_radius_by_class_ids(class_ids: int | Array) -> Array:
 def get_ultimate_target_mode_by_class_ids(class_ids: int | Array) -> Array:
     """Return ultimate target-relation modes for one or more class IDs."""
     return ULTIMATE_TARGET_MODE_BY_CLASS[class_ids]
+
+
+def get_ultimate_damage_by_class_ids(class_ids: int | Array) -> Array:
+    """Return ultimate damage values for one or more class IDs."""
+    return ULTIMATE_DAMAGE_BY_CLASS[class_ids]
+
+
+def get_ultimate_healing_by_class_ids(class_ids: int | Array) -> Array:
+    """Return ultimate healing values for one or more class IDs."""
+    return ULTIMATE_HEALING_BY_CLASS[class_ids]
 
 
 def _build_slow_multipliers(slow_durations: Array) -> Array:

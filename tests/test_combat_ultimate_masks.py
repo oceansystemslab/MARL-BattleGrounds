@@ -8,6 +8,11 @@ import jax.numpy as jnp
 import pytest
 from jax import Array
 
+from marl_battlegrounds.core.combat import (
+    MAGE_DAMAGE_AURA_MULTIPLIER,
+    ULTIMATE_COOLDOWN_BY_CLASS,
+    ULTIMATE_DAMAGE_BY_CLASS,
+)
 from marl_battlegrounds.core.config import resolve_agent_profile
 from marl_battlegrounds.core.env import _build_observation_and_action_mask, step
 from marl_battlegrounds.core.types import (
@@ -632,18 +637,11 @@ def test_hidden_candidate_changes_do_not_leak_through_actor_outputs() -> None:
     )
 
 
-def test_accepted_ultimate_lane_remains_effect_inert_before_step_6() -> None:
-    """Prove Step 5 does not resolve an accepted ultimate as a basic effect."""
+def test_accepted_ultimate_updates_health_cooldown_and_returned_mask() -> None:
+    """Prove accepted use updates state before the returned mask is built."""
     config, state = _scenario(WARRIOR_CLASS_ID, enemy_x=2.25)
     current_action_mask = _current_action_mask(config, state)
-    neutral_outputs = step(
-        config,
-        state,
-        current_action_mask,
-        _stay_action(),
-        jax.random.key(8),
-    )
-    submitted_outputs = step(
+    next_state, _, _, _, next_action_mask, _ = step(
         config,
         state,
         current_action_mask,
@@ -651,12 +649,20 @@ def test_accepted_ultimate_lane_remains_effect_inert_before_step_6() -> None:
         jax.random.key(8),
     )
 
-    for neutral_leaf, submitted_leaf in zip(
-        jax.tree_util.tree_leaves(neutral_outputs),
-        jax.tree_util.tree_leaves(submitted_outputs),
-        strict=True,
-    ):
-        assert bool(jnp.array_equal(neutral_leaf, submitted_leaf))
+    assert (
+        next_state.current_health[_ENEMY_SLOT]
+        == state.current_health[_ENEMY_SLOT]
+        - ULTIMATE_DAMAGE_BY_CLASS[WARRIOR_CLASS_ID] * MAGE_DAMAGE_AURA_MULTIPLIER
+    )
+    assert (
+        next_state.ultimate_cooldowns[_ACTOR_SLOT]
+        == ULTIMATE_COOLDOWN_BY_CLASS[WARRIOR_CLASS_ID]
+    )
+    assert not bool(
+        next_action_mask.select_target_use_ultimate_joint_mask[
+            _ACTOR_SLOT, _ENEMY_TARGET, 1
+        ]
+    )
 
 
 def test_jitted_step_matches_eager_pair_semantics() -> None:

@@ -83,6 +83,8 @@ _FLOAT_CLASS_CATALOG_NAMES: tuple[str, ...] = (
     "BASIC_DAMAGE_BY_CLASS",
     "BASIC_HEALING_BY_CLASS",
     "ULTIMATE_INTERACTION_RADIUS_BY_CLASS",
+    "ULTIMATE_DAMAGE_BY_CLASS",
+    "ULTIMATE_HEALING_BY_CLASS",
     "OBSERVATION_RADIUS_BY_CLASS",
 )
 
@@ -111,6 +113,8 @@ _CLASS_CATALOG_HELPER_NAMES: tuple[tuple[str, str], ...] = (
         "get_ultimate_interaction_radius_by_class_ids",
     ),
     ("ULTIMATE_COOLDOWN_BY_CLASS", "get_ultimate_cooldown_by_class_ids"),
+    ("ULTIMATE_DAMAGE_BY_CLASS", "get_ultimate_damage_by_class_ids"),
+    ("ULTIMATE_HEALING_BY_CLASS", "get_ultimate_healing_by_class_ids"),
     ("OBSERVATION_RADIUS_BY_CLASS", "get_observation_radius_by_class_ids"),
     ("ULTIMATE_TARGET_MODE_BY_CLASS", "get_ultimate_target_mode_by_class_ids"),
 )
@@ -597,7 +601,6 @@ def test_passive_and_support_defaults_are_scalar_parameters() -> None:
     assert combat.WARRIOR_DAMAGE_MITIGATION_AURA_RADIUS > 0.0
     assert 0.0 < combat.WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER < 1.0
 
-    assert combat.PRIEST_ULT_HEAL_AMOUNT > 0.0
     assert 0.0 < combat.PRIEST_HEAL_SPEED_FLOOR <= 1.0
     assert isinstance(combat.PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS, int)
     assert combat.PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS > 0

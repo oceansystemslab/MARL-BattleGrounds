@@ -1,4 +1,4 @@
-"""Combat observation contracts through Milestone 5 Step 5 Checkpoint 2."""
+"""Combat observation contracts through Milestone 5 Step 6 Checkpoint 1."""
 # pyright: reportPrivateUsage=false
 
 from collections.abc import Sequence
@@ -31,7 +31,6 @@ from marl_battlegrounds.core.types import (
     AGENT_FEATURE_CAPABILITY_DAMAGE_AMPLIFICATION_MAGE_BURST_MULTIPLIER,
     AGENT_FEATURE_CAPABILITY_DAMAGE_MITIGATION_WARRIOR_AURA_MULTIPLIER,
     AGENT_FEATURE_CAPABILITY_DAMAGE_MITIGATION_WARRIOR_AURA_RADIUS,
-    AGENT_FEATURE_CAPABILITY_HEALING_PRIEST_ULTIMATE_AMOUNT,
     AGENT_FEATURE_CAPABILITY_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_DURATION,
     AGENT_FEATURE_CAPABILITY_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_FRACTION,
     AGENT_FEATURE_CAPABILITY_SLOW_HUNTER_BASIC_DURATION,
@@ -44,6 +43,8 @@ from marl_battlegrounds.core.types import (
     AGENT_FEATURE_CAPABILITY_STUN_ROGUE_POISON_DURATION,
     AGENT_FEATURE_CAPABILITY_STUN_WARRIOR_CHARGE_DURATION,
     AGENT_FEATURE_CAPABILITY_ULTIMATE_COOLDOWN_DURATION,
+    AGENT_FEATURE_CAPABILITY_ULTIMATE_DAMAGE,
+    AGENT_FEATURE_CAPABILITY_ULTIMATE_HEALING,
     AGENT_FEATURE_CURRENT_HEALTH,
     AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_AURA_MULTIPLIER,
     AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_BURST_DURATION,
@@ -153,7 +154,8 @@ _FEATURE_NAMES_IN_ORDER: tuple[str, ...] = (
     "AGENT_FEATURE_CAPABILITY_DAMAGE_AMPLIFICATION_MAGE_AURA_MULTIPLIER",
     "AGENT_FEATURE_CAPABILITY_DAMAGE_MITIGATION_WARRIOR_AURA_RADIUS",
     "AGENT_FEATURE_CAPABILITY_DAMAGE_MITIGATION_WARRIOR_AURA_MULTIPLIER",
-    "AGENT_FEATURE_CAPABILITY_HEALING_PRIEST_ULTIMATE_AMOUNT",
+    "AGENT_FEATURE_CAPABILITY_ULTIMATE_HEALING",
+    "AGENT_FEATURE_CAPABILITY_ULTIMATE_DAMAGE",
 )
 
 
@@ -187,7 +189,7 @@ def _action(
 
 
 def _expected_owned_payload(
-    config: EnvConfig, class_id: int, payload: float | int
+    config: EnvConfig, class_id: int, payload: float | int | Array
 ) -> Array:
     owns_payload = jnp.logical_and(
         config.agent_profile.active_mask,
@@ -215,8 +217,8 @@ def _current_action_mask(config: EnvConfig, state: EnvState) -> ActionMask:
 def test_shared_agent_feature_schema_is_contiguous_and_duration_first() -> None:
     indices = tuple(getattr(core_types, name) for name in _FEATURE_NAMES_IN_ORDER)
 
-    assert SELF_FEATURES == UNIT_FEATURES == len(_FEATURE_NAMES_IN_ORDER) == 54
-    assert indices == tuple(range(54))
+    assert SELF_FEATURES == UNIT_FEATURES == len(_FEATURE_NAMES_IN_ORDER) == 55
+    assert indices == tuple(range(55))
     assert not hasattr(
         core_types, "AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_BURST_MULTIPLIER"
     )
@@ -488,9 +490,14 @@ def test_capabilities_are_class_owned_payloads_not_cooldown_availability() -> No
             combat.WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER,
         ),
         (
-            AGENT_FEATURE_CAPABILITY_HEALING_PRIEST_ULTIMATE_AMOUNT,
+            AGENT_FEATURE_CAPABILITY_ULTIMATE_HEALING,
             PRIEST_CLASS_ID,
-            combat.PRIEST_ULT_HEAL_AMOUNT,
+            combat.ULTIMATE_HEALING_BY_CLASS[PRIEST_CLASS_ID],
+        ),
+        (
+            AGENT_FEATURE_CAPABILITY_ULTIMATE_DAMAGE,
+            WARRIOR_CLASS_ID,
+            combat.ULTIMATE_DAMAGE_BY_CLASS[WARRIOR_CLASS_ID],
         ),
     )
     for column, class_id, payload in owned_payloads:
@@ -626,11 +633,22 @@ def test_visible_candidates_match_shared_rows_and_hidden_rows_are_fully_zero() -
     assert observation.enemy_unit_features[0, 1].shape == (UNIT_FEATURES,)
 
 
-def test_capabilities_remain_zero_for_inactive_non_neutral_padding() -> None:
+@pytest.mark.parametrize(
+    "inactive_class_id",
+    (
+        pytest.param(MAGE_CLASS_ID, id="mage"),
+        pytest.param(WARRIOR_CLASS_ID, id="warrior"),
+        pytest.param(PRIEST_CLASS_ID, id="priest"),
+    ),
+)
+def test_capabilities_remain_zero_for_inactive_non_neutral_padding(
+    inactive_class_id: int,
+) -> None:
+    """Prove every capability column honors activity, even for malformed padding."""
     config = _config((1, 1))
     padded_slot = 1
     profile = config.agent_profile._replace(
-        class_ids=config.agent_profile.class_ids.at[padded_slot].set(MAGE_CLASS_ID)
+        class_ids=config.agent_profile.class_ids.at[padded_slot].set(inactive_class_id)
     )
     config = config._replace(agent_profile=profile)
     _, observation, *_ = reset(config, jax.random.key(8))
