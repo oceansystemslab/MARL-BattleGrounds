@@ -255,7 +255,6 @@ class DoneFlags(NamedTuple):
     @property
     def done(self) -> Array:
         """Whether rollout control should stop for this episode."""
-
         return jnp.logical_or(self.terminated, self.truncated)
 
 

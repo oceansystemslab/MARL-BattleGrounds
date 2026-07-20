@@ -1,4 +1,4 @@
-"""Semantic proofs for Milestone 5 Step 6 Checkpoint 1 ultimate effects."""
+"""Semantic proofs for Milestone 5 Step 6 ultimate effects and lifecycles."""
 # pyright: reportPrivateUsage=false
 
 from typing import cast
@@ -11,14 +11,20 @@ from jax import Array
 import marl_battlegrounds.core.combat as combat
 from marl_battlegrounds.core.config import resolve_agent_profile
 from marl_battlegrounds.core.env import (
+    _build_global_pairwise_actor_and_recipient_target_one_hot_matrix,
     _build_observation_and_action_mask,
     _compute_global_pairwise_distances_from_agent_positions,
     _derive_aura_damage_multipliers,
+    _resolve_status_duration_lifecycle,
     step,
 )
 from marl_battlegrounds.core.types import (
+    AGENT_FEATURE_ANTI_HEAL_ROGUE_POISON_DURATION,
     AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_AURA_MULTIPLIER,
+    AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_BURST_DURATION,
     AGENT_FEATURE_DAMAGE_MITIGATION_WARRIOR_AURA_MULTIPLIER,
+    AGENT_FEATURE_SLOW_ROGUE_POISON_DURATION,
+    AGENT_FEATURE_STUN_HUNTER_TRAP_DURATION,
     ENVIRONMENT_DIMENSIONS,
     HUNTER_CLASS_ID,
     MAGE_CLASS_ID,
@@ -33,6 +39,12 @@ from marl_battlegrounds.core.types import (
     OBSTACLE_FEATURES,
     PRIEST_CLASS_ID,
     ROGUE_CLASS_ID,
+    SLOW_CHANNEL_HUNTER_BASIC,
+    SLOW_CHANNEL_ROGUE_POISON,
+    SLOW_CHANNEL_WARRIOR_CHARGE,
+    STUN_CHANNEL_HUNTER_TRAP,
+    STUN_CHANNEL_ROGUE_POISON,
+    STUN_CHANNEL_WARRIOR_CHARGE,
     WARRIOR_CLASS_ID,
     Action,
     ActionMask,
@@ -601,3 +613,489 @@ def test_scanned_repeated_submission_applies_once_then_ticks_cooldown() -> None:
             jnp.asarray((30, 29, 28), dtype=jnp.int32),
         )
     )
+
+
+def _refreshed_stun_durations_for_accepted_action(
+    config: EnvConfig,
+    state: EnvState,
+    accepted_action: Action,
+) -> Array:
+    """Return the pre-tick stun snapshot produced by lifecycle resolution."""
+    recipient_routes = _build_global_pairwise_actor_and_recipient_target_one_hot_matrix(
+        accepted_action.select_target
+    )
+    no_basic_passive_applications = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.bool_)
+    no_raw_damage_recipients = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.bool_)
+    lifecycle_outputs = _resolve_status_duration_lifecycle(
+        state,
+        config,
+        accepted_action.use_ultimate,
+        recipient_routes,
+        no_basic_passive_applications,
+        no_basic_passive_applications,
+        no_raw_damage_recipients,
+    )
+    return lifecycle_outputs[1]
+
+
+def test_every_status_ultimate_updates_only_its_owned_source_or_recipient() -> None:
+    """Prove all four status ultimates use one source-local recipient route."""
+    config, state = _scenario(
+        (0, MAGE_CLASS_ID),
+        (1, WARRIOR_CLASS_ID),
+        (2, HUNTER_CLASS_ID),
+        (3, ROGUE_CLASS_ID),
+        (5, HUNTER_CLASS_ID),
+        (6, HUNTER_CLASS_ID),
+        (7, HUNTER_CLASS_ID),
+        (8, HUNTER_CLASS_ID),
+        team_sizes=(4, 4),
+    )
+    action = _joint_action(
+        (0, 0, 1),
+        (1, _FIRST_ENEMY_TARGET, 1),
+        (2, _SECOND_ENEMY_TARGET, 1),
+        (3, _FIRST_ENEMY_TARGET + 2, 1),
+    )
+
+    refreshed_stuns = _refreshed_stun_durations_for_accepted_action(
+        config, state, action
+    )
+    next_state, _, _ = _step(config, state, action)
+
+    assert next_state.mage_burst_damage_amplification_durations[0] == (
+        combat.MAGE_BURST_DAMAGE_DURATION_TICKS - 1
+    )
+    assert next_state.slow_durations[5, SLOW_CHANNEL_WARRIOR_CHARGE] == (
+        combat.WARRIOR_CHARGE_SLOW_DURATION_TICKS - 1
+    )
+    assert (
+        refreshed_stuns[5, STUN_CHANNEL_WARRIOR_CHARGE]
+        == combat.WARRIOR_CHARGE_STUN_DURATION_TICKS
+    )
+    assert next_state.stun_durations[5, STUN_CHANNEL_WARRIOR_CHARGE] == 0
+    assert (
+        refreshed_stuns[6, STUN_CHANNEL_HUNTER_TRAP]
+        == combat.HUNTER_TRAP_STUN_DURATION_TICKS
+    )
+    assert next_state.stun_durations[6, STUN_CHANNEL_HUNTER_TRAP] == (
+        combat.HUNTER_TRAP_STUN_DURATION_TICKS - 1
+    )
+    assert next_state.slow_durations[7, SLOW_CHANNEL_ROGUE_POISON] == (
+        combat.ROGUE_POISON_SLOW_DURATION_TICKS - 1
+    )
+    assert (
+        refreshed_stuns[7, STUN_CHANNEL_ROGUE_POISON]
+        == combat.ROGUE_POISON_STUN_DURATION_TICKS
+    )
+    assert next_state.stun_durations[7, STUN_CHANNEL_ROGUE_POISON] == 0
+    assert next_state.rogue_poison_anti_heal_durations[7] == (
+        combat.ROGUE_POISON_ANTI_HEAL_DURATION_TICKS - 1
+    )
+    assert bool(jnp.all(next_state.slow_durations[8] == 0))
+    assert bool(jnp.all(next_state.stun_durations[8] == 0))
+    assert bool(jnp.all(next_state.ultimate_cooldowns[:4] == 30))
+
+
+def test_status_ultimates_route_symmetrically_from_team_b() -> None:
+    """Prove team-B relation-local targets map into the stable team-A block."""
+    config, state = _scenario(
+        (0, HUNTER_CLASS_ID),
+        (1, HUNTER_CLASS_ID),
+        (5, HUNTER_CLASS_ID),
+        (6, ROGUE_CLASS_ID),
+        team_sizes=(2, 2),
+    )
+    action = _joint_action(
+        (5, _FIRST_ENEMY_TARGET, 1),
+        (6, _SECOND_ENEMY_TARGET, 1),
+    )
+
+    next_state, _, _ = _step(config, state, action)
+
+    assert next_state.stun_durations[0, STUN_CHANNEL_HUNTER_TRAP] == (
+        combat.HUNTER_TRAP_STUN_DURATION_TICKS - 1
+    )
+    assert next_state.slow_durations[1, SLOW_CHANNEL_ROGUE_POISON] == (
+        combat.ROGUE_POISON_SLOW_DURATION_TICKS - 1
+    )
+    assert next_state.rogue_poison_anti_heal_durations[1] == (
+        combat.ROGUE_POISON_ANTI_HEAL_DURATION_TICKS - 1
+    )
+    assert bool(jnp.all(next_state.slow_durations[0] == 0))
+    assert bool(jnp.all(next_state.stun_durations[1] == 0))
+
+
+def test_holy_word_applies_no_status_channels() -> None:
+    """Prove Priest ultimate healing has no hidden status side effect."""
+    config, state = _scenario(
+        (0, PRIEST_CLASS_ID),
+        (1, HUNTER_CLASS_ID),
+        (5, ROGUE_CLASS_ID),
+        team_sizes=(2, 1),
+    )
+    state = state._replace(current_health=state.current_health.at[1].set(10.0))
+
+    next_state, _, _ = _step(
+        config,
+        state,
+        _joint_action((0, _SECOND_ALLY_TARGET, 1)),
+    )
+
+    assert bool(jnp.all(next_state.slow_durations == 0))
+    assert bool(jnp.all(next_state.stun_durations == 0))
+    assert bool(jnp.all(next_state.rogue_poison_anti_heal_durations == 0))
+    assert bool(jnp.all(next_state.mage_burst_damage_amplification_durations == 0))
+    assert bool(
+        jnp.all(next_state.priest_blessing_of_freedom_slow_floor_durations == 0)
+    )
+
+
+def test_duplicate_status_sources_refresh_once_without_duration_stacking() -> None:
+    """Prove duplicate accepted sources reduce to one fixed-duration refresh."""
+    config, state = _scenario(
+        (0, ROGUE_CLASS_ID),
+        (1, ROGUE_CLASS_ID),
+        (5, HUNTER_CLASS_ID),
+        team_sizes=(2, 1),
+    )
+    action = _joint_action(
+        (0, _FIRST_ENEMY_TARGET, 1),
+        (1, _FIRST_ENEMY_TARGET, 1),
+    )
+
+    next_state, _, _ = _step(config, state, action)
+
+    assert next_state.slow_durations[5, SLOW_CHANNEL_ROGUE_POISON] == (
+        combat.ROGUE_POISON_SLOW_DURATION_TICKS - 1
+    )
+    assert next_state.rogue_poison_anti_heal_durations[5] == (
+        combat.ROGUE_POISON_ANTI_HEAL_DURATION_TICKS - 1
+    )
+    assert next_state.stun_durations[5, STUN_CHANNEL_ROGUE_POISON] == 0
+
+
+def test_refresh_never_shortens_and_preserves_concurrent_channels() -> None:
+    """Prove each application refreshes only its owned irreducible duration."""
+    config, state = _scenario(
+        (0, MAGE_CLASS_ID),
+        (1, WARRIOR_CLASS_ID),
+        (2, HUNTER_CLASS_ID),
+        (3, ROGUE_CLASS_ID),
+        (5, HUNTER_CLASS_ID),
+        (6, HUNTER_CLASS_ID),
+        (7, HUNTER_CLASS_ID),
+        (8, HUNTER_CLASS_ID),
+        team_sizes=(4, 4),
+    )
+    state = state._replace(
+        mage_burst_damage_amplification_durations=(
+            state.mage_burst_damage_amplification_durations.at[0].set(8)
+        ),
+        slow_durations=(
+            state.slow_durations.at[5, SLOW_CHANNEL_WARRIOR_CHARGE]
+            .set(9)
+            .at[5, SLOW_CHANNEL_HUNTER_BASIC]
+            .set(6)
+            .at[7, SLOW_CHANNEL_ROGUE_POISON]
+            .set(8)
+        ),
+        stun_durations=(
+            state.stun_durations.at[5, STUN_CHANNEL_WARRIOR_CHARGE]
+            .set(3)
+            .at[6, STUN_CHANNEL_HUNTER_TRAP]
+            .set(7)
+            .at[7, STUN_CHANNEL_ROGUE_POISON]
+            .set(4)
+        ),
+        rogue_poison_anti_heal_durations=(
+            state.rogue_poison_anti_heal_durations.at[7].set(9)
+        ),
+        priest_blessing_of_freedom_slow_floor_durations=(
+            state.priest_blessing_of_freedom_slow_floor_durations.at[8].set(4)
+        ),
+    )
+    action = _joint_action(
+        (0, 0, 1),
+        (1, _FIRST_ENEMY_TARGET, 1),
+        (2, _SECOND_ENEMY_TARGET, 1),
+        (3, _FIRST_ENEMY_TARGET + 2, 1),
+    )
+
+    next_state, _, _ = _step(config, state, action)
+
+    assert next_state.mage_burst_damage_amplification_durations[0] == 7
+    assert next_state.slow_durations[5, SLOW_CHANNEL_WARRIOR_CHARGE] == 8
+    assert next_state.slow_durations[5, SLOW_CHANNEL_HUNTER_BASIC] == 5
+    assert next_state.stun_durations[5, STUN_CHANNEL_WARRIOR_CHARGE] == 2
+    assert next_state.stun_durations[6, STUN_CHANNEL_HUNTER_TRAP] == 6
+    assert next_state.slow_durations[7, SLOW_CHANNEL_ROGUE_POISON] == 7
+    assert next_state.stun_durations[7, STUN_CHANNEL_ROGUE_POISON] == 3
+    assert next_state.rogue_poison_anti_heal_durations[7] == 8
+    assert next_state.priest_blessing_of_freedom_slow_floor_durations[8] == 3
+
+
+@pytest.mark.parametrize(
+    ("damage_actor_class_id", "uses_ultimate"),
+    (
+        pytest.param(MAGE_CLASS_ID, 0, id="damaging-basic"),
+        pytest.param(WARRIOR_CLASS_ID, 1, id="charge-damage"),
+    ),
+)
+def test_accepted_raw_damage_breaks_only_pre_existing_hunter_trap(
+    damage_actor_class_id: int,
+    uses_ultimate: int,
+) -> None:
+    """Prove accepted raw damage clears Trap without erasing other stuns."""
+    config, state = _scenario(
+        (0, damage_actor_class_id),
+        (5, HUNTER_CLASS_ID),
+        team_sizes=(1, 1),
+    )
+    state = state._replace(
+        stun_durations=(
+            state.stun_durations.at[5, STUN_CHANNEL_WARRIOR_CHARGE]
+            .set(3)
+            .at[5, STUN_CHANNEL_HUNTER_TRAP]
+            .set(4)
+            .at[5, STUN_CHANNEL_ROGUE_POISON]
+            .set(3)
+        )
+    )
+
+    next_state, _, _ = _step(
+        config,
+        state,
+        _joint_action((0, _FIRST_ENEMY_TARGET, uses_ultimate)),
+    )
+
+    assert next_state.stun_durations[5, STUN_CHANNEL_HUNTER_TRAP] == 0
+    assert next_state.stun_durations[5, STUN_CHANNEL_WARRIOR_CHARGE] == 2
+    assert next_state.stun_durations[5, STUN_CHANNEL_ROGUE_POISON] == 2
+
+
+def test_accepted_damage_breaks_trap_at_zero_health_without_effective_loss() -> None:
+    """Prove Trap break follows accepted raw damage, not final health delta."""
+    config, state = _scenario(
+        (0, MAGE_CLASS_ID),
+        (5, HUNTER_CLASS_ID),
+        team_sizes=(1, 1),
+    )
+    state = state._replace(
+        current_health=state.current_health.at[5].set(0.0),
+        stun_durations=state.stun_durations.at[5, STUN_CHANNEL_HUNTER_TRAP].set(4),
+    )
+
+    next_state, _, _ = _step(
+        config,
+        state,
+        _joint_action((0, _FIRST_ENEMY_TARGET, 0)),
+    )
+
+    assert next_state.current_health[5] == 0.0
+    assert next_state.stun_durations[5, STUN_CHANNEL_HUNTER_TRAP] == 0
+
+
+def test_non_damage_effects_do_not_break_pre_existing_hunter_trap() -> None:
+    """Prove accepted healing and zero-damage Poison only tick existing Trap."""
+    config, state = _scenario(
+        (0, PRIEST_CLASS_ID),
+        (1, HUNTER_CLASS_ID),
+        (5, ROGUE_CLASS_ID),
+        team_sizes=(2, 1),
+    )
+    state = state._replace(
+        current_health=state.current_health.at[1].set(10.0),
+        stun_durations=(
+            state.stun_durations.at[1, STUN_CHANNEL_HUNTER_TRAP]
+            .set(4)
+            .at[5, STUN_CHANNEL_HUNTER_TRAP]
+            .set(4)
+        ),
+    )
+    action = _joint_action(
+        (0, _SECOND_ALLY_TARGET, 1),
+        (5, _FIRST_ENEMY_TARGET, 1),
+    )
+
+    next_state, _, _ = _step(config, state, action)
+
+    assert next_state.stun_durations[1, STUN_CHANNEL_HUNTER_TRAP] == 3
+    assert next_state.stun_durations[5, STUN_CHANNEL_HUNTER_TRAP] == 3
+
+
+def test_new_trap_survives_damage_that_breaks_the_pre_existing_trap() -> None:
+    """Prove break precedes same-transition Trap refresh deterministically."""
+    config, state = _scenario(
+        (0, MAGE_CLASS_ID),
+        (1, HUNTER_CLASS_ID),
+        (5, ROGUE_CLASS_ID),
+        team_sizes=(2, 1),
+    )
+    state = state._replace(
+        stun_durations=state.stun_durations.at[5, STUN_CHANNEL_HUNTER_TRAP].set(7)
+    )
+    action = _joint_action(
+        (0, _FIRST_ENEMY_TARGET, 0),
+        (1, _FIRST_ENEMY_TARGET, 1),
+    )
+
+    next_state, _, _ = _step(config, state, action)
+
+    assert next_state.stun_durations[5, STUN_CHANNEL_HUNTER_TRAP] == (
+        combat.HUNTER_TRAP_STUN_DURATION_TICKS - 1
+    )
+
+
+def test_rejected_ultimate_applies_no_status_and_existing_durations_tick() -> None:
+    """Prove cooldown rejection reaches the common accepted no-op lifecycle."""
+    config, state = _scenario(
+        (0, ROGUE_CLASS_ID),
+        (5, HUNTER_CLASS_ID),
+        team_sizes=(1, 1),
+    )
+    state = state._replace(
+        ultimate_cooldowns=state.ultimate_cooldowns.at[0].set(1),
+        slow_durations=state.slow_durations.at[5, SLOW_CHANNEL_HUNTER_BASIC].set(3),
+    )
+
+    next_state, _, _ = _step(
+        config,
+        state,
+        _joint_action((0, _FIRST_ENEMY_TARGET, 1)),
+    )
+
+    assert bool(jnp.all(next_state.slow_durations[5, [0, 2]] == 0))
+    assert next_state.slow_durations[5, SLOW_CHANNEL_HUNTER_BASIC] == 2
+    assert bool(jnp.all(next_state.stun_durations[5] == 0))
+    assert next_state.rogue_poison_anti_heal_durations[5] == 0
+    assert next_state.ultimate_cooldowns[0] == 0
+
+
+def test_complete_lifecycle_ticks_nonnegative_and_observation_uses_next_state() -> None:
+    """Prove zero, one, and multi-tick durations update every public surface."""
+    config, state = _scenario(
+        (0, MAGE_CLASS_ID),
+        (1, HUNTER_CLASS_ID),
+        (5, ROGUE_CLASS_ID),
+        team_sizes=(2, 1),
+    )
+    state = state._replace(
+        slow_durations=(
+            state.slow_durations.at[0, SLOW_CHANNEL_WARRIOR_CHARGE]
+            .set(1)
+            .at[1, SLOW_CHANNEL_ROGUE_POISON]
+            .set(3)
+        ),
+        stun_durations=state.stun_durations.at[0, STUN_CHANNEL_HUNTER_TRAP].set(2),
+        rogue_poison_anti_heal_durations=(
+            state.rogue_poison_anti_heal_durations.at[5].set(3)
+        ),
+        mage_burst_damage_amplification_durations=(
+            state.mage_burst_damage_amplification_durations.at[0].set(1)
+        ),
+        priest_blessing_of_freedom_slow_floor_durations=(
+            state.priest_blessing_of_freedom_slow_floor_durations.at[1].set(1)
+        ),
+    )
+
+    next_state, observation, next_mask = _step(config, state, _joint_action())
+
+    assert bool(jnp.all(next_state.slow_durations >= 0))
+    assert next_state.slow_durations[0, SLOW_CHANNEL_WARRIOR_CHARGE] == 0
+    assert next_state.slow_durations[1, SLOW_CHANNEL_ROGUE_POISON] == 2
+    assert next_state.stun_durations[0, STUN_CHANNEL_HUNTER_TRAP] == 1
+    assert next_state.rogue_poison_anti_heal_durations[5] == 2
+    assert next_state.mage_burst_damage_amplification_durations[0] == 0
+    assert next_state.priest_blessing_of_freedom_slow_floor_durations[1] == 0
+    assert observation.self_features[1, AGENT_FEATURE_SLOW_ROGUE_POISON_DURATION] == 2.0
+    assert observation.self_features[0, AGENT_FEATURE_STUN_HUNTER_TRAP_DURATION] == 1.0
+    assert (
+        observation.self_features[5, AGENT_FEATURE_ANTI_HEAL_ROGUE_POISON_DURATION]
+        == 2.0
+    )
+    assert (
+        observation.self_features[
+            0, AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_BURST_DURATION
+        ]
+        == 0.0
+    )
+    assert not bool(jnp.any(next_mask.select_target_mask[0, 1:]))
+
+
+def test_jitted_step_matches_eager_status_application_and_trap_break() -> None:
+    """Prove compiled execution preserves mixed lifecycle ordering."""
+    config, state = _scenario(
+        (0, MAGE_CLASS_ID),
+        (1, HUNTER_CLASS_ID),
+        (5, ROGUE_CLASS_ID),
+        team_sizes=(2, 1),
+    )
+    state = state._replace(
+        stun_durations=state.stun_durations.at[5, STUN_CHANNEL_HUNTER_TRAP].set(6)
+    )
+    action = _joint_action(
+        (0, _FIRST_ENEMY_TARGET, 0),
+        (1, _FIRST_ENEMY_TARGET, 1),
+    )
+    current_mask = _current_action_mask(config, state)
+
+    eager = step(config, state, current_mask, action, jax.random.key(41))
+    compiled = cast(
+        tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info],
+        jax.jit(step)(config, state, current_mask, action, jax.random.key(41)),
+    )
+
+    for eager_leaf, compiled_leaf in zip(
+        jax.tree_util.tree_leaves(eager),
+        jax.tree_util.tree_leaves(compiled),
+        strict=True,
+    ):
+        assert bool(jnp.array_equal(eager_leaf, compiled_leaf))
+
+
+def test_scanned_status_application_occurs_once_then_every_duration_ticks() -> None:
+    """Prove mask reuse and complete lifecycle remain stable under scan."""
+    config, initial_state = _scenario(
+        (0, HUNTER_CLASS_ID),
+        (5, ROGUE_CLASS_ID),
+        team_sizes=(1, 1),
+    )
+    initial_mask = _current_action_mask(config, initial_state)
+    action = _joint_action((0, _FIRST_ENEMY_TARGET, 1))
+
+    def scan_body(
+        carry: tuple[EnvState, ActionMask], _: None
+    ) -> tuple[tuple[EnvState, ActionMask], Array]:
+        current_state, current_mask = carry
+        (
+            next_state,
+            _observation,
+            _reward,
+            _done_flags,
+            next_mask,
+            _info,
+        ) = step(
+            config,
+            current_state,
+            current_mask,
+            action,
+            jax.random.key(43),
+        )
+        trap_duration = next_state.stun_durations[5, STUN_CHANNEL_HUNTER_TRAP]
+        return (next_state, next_mask), trap_duration
+
+    (final_state, _), duration_history = jax.lax.scan(
+        scan_body,
+        (initial_state, initial_mask),
+        xs=None,
+        length=4,
+    )
+
+    assert bool(
+        jnp.array_equal(
+            duration_history,
+            jnp.asarray((3, 2, 1, 0), dtype=jnp.int32),
+        )
+    )
+    assert final_state.ultimate_cooldowns[0] == 27

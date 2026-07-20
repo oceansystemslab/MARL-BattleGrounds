@@ -785,18 +785,21 @@ def test_step_preserves_slot_aligned_state_arrays() -> None:
         next_state.ultimate_cooldowns,
         jnp.maximum(state.ultimate_cooldowns - 1, 0),
     )
-    expected_slow_durations = state.slow_durations.at[0, SLOW_CHANNEL_HUNTER_BASIC].set(
-        0
+    assert jnp.array_equal(
+        next_state.slow_durations,
+        jnp.maximum(state.slow_durations - 1, 0),
     )
-    assert jnp.array_equal(next_state.slow_durations, expected_slow_durations)
-    assert jnp.array_equal(next_state.stun_durations, state.stun_durations)
+    assert jnp.array_equal(
+        next_state.stun_durations,
+        jnp.maximum(state.stun_durations - 1, 0),
+    )
     assert jnp.array_equal(
         next_state.rogue_poison_anti_heal_durations,
-        state.rogue_poison_anti_heal_durations,
+        jnp.maximum(state.rogue_poison_anti_heal_durations - 1, 0),
     )
     assert jnp.array_equal(
         next_state.mage_burst_damage_amplification_durations,
-        state.mage_burst_damage_amplification_durations,
+        jnp.maximum(state.mage_burst_damage_amplification_durations - 1, 0),
     )
     expected_freedom_durations = (
         state.priest_blessing_of_freedom_slow_floor_durations.at[6].set(0)
@@ -993,18 +996,21 @@ def test_step_can_run_in_scanned_rollout() -> None:
     assert jax.tree_util.tree_structure(
         final_action_mask
     ) == jax.tree_util.tree_structure(initial_action_mask)
-    expected_slow_durations = state.slow_durations.at[0, SLOW_CHANNEL_HUNTER_BASIC].set(
-        0
+    assert jnp.array_equal(
+        new_state.slow_durations,
+        jnp.maximum(state.slow_durations - horizon, 0),
     )
-    assert jnp.array_equal(new_state.slow_durations, expected_slow_durations)
-    assert jnp.array_equal(new_state.stun_durations, state.stun_durations)
+    assert jnp.array_equal(
+        new_state.stun_durations,
+        jnp.maximum(state.stun_durations - horizon, 0),
+    )
     assert jnp.array_equal(
         new_state.rogue_poison_anti_heal_durations,
-        state.rogue_poison_anti_heal_durations,
+        jnp.maximum(state.rogue_poison_anti_heal_durations - horizon, 0),
     )
     assert jnp.array_equal(
         new_state.mage_burst_damage_amplification_durations,
-        state.mage_burst_damage_amplification_durations,
+        jnp.maximum(state.mage_burst_damage_amplification_durations - horizon, 0),
     )
     expected_freedom_durations = (
         state.priest_blessing_of_freedom_slow_floor_durations.at[6].set(0)

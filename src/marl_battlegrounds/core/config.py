@@ -31,7 +31,6 @@ def resolve_agent_profile(
     ``NO_TEAM_ID``; active team blocks receive their explicit public team IDs.
     Host-side input validation remains future scope.
     """
-
     # Derive active mask
     team_local_indices = jnp.arange(MAX_AGENTS_PER_TEAM)
 

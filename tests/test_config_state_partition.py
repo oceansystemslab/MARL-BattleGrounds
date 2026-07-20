@@ -37,7 +37,6 @@ from marl_battlegrounds.core.types import (
     NUM_ULTIMATE_ACTIONS,
     OBSTACLE_FEATURES,
     PRIEST_CLASS_ID,
-    SLOW_CHANNEL_HUNTER_BASIC,
     Action,
     ActionMask,
     DoneFlags,
@@ -331,21 +330,28 @@ def test_step_preserves_non_inert_dynamic_memory() -> None:
             jnp.maximum(state.ultimate_cooldowns - 1, 0),
         )
     )
-    expected_slow_durations = state.slow_durations.at[0, SLOW_CHANNEL_HUNTER_BASIC].set(
-        2
+    assert bool(
+        jnp.array_equal(
+            next_state.slow_durations,
+            jnp.maximum(state.slow_durations - 1, 0),
+        )
     )
-    assert bool(jnp.array_equal(next_state.slow_durations, expected_slow_durations))
-    assert bool(jnp.array_equal(next_state.stun_durations, state.stun_durations))
+    assert bool(
+        jnp.array_equal(
+            next_state.stun_durations,
+            jnp.maximum(state.stun_durations - 1, 0),
+        )
+    )
     assert bool(
         jnp.array_equal(
             next_state.rogue_poison_anti_heal_durations,
-            state.rogue_poison_anti_heal_durations,
+            jnp.maximum(state.rogue_poison_anti_heal_durations - 1, 0),
         )
     )
     assert bool(
         jnp.array_equal(
             next_state.mage_burst_damage_amplification_durations,
-            state.mage_burst_damage_amplification_durations,
+            jnp.maximum(state.mage_burst_damage_amplification_durations - 1, 0),
         )
     )
     expected_freedom_durations = (

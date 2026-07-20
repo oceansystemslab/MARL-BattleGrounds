@@ -557,9 +557,9 @@ def test_attached_statuses_and_effective_speed_follow_duration_state() -> None:
     )
     rows = observation.self_features
 
-    assert rows[0, AGENT_FEATURE_SLOW_WARRIOR_CHARGE_DURATION] == 2.0
+    assert rows[0, AGENT_FEATURE_SLOW_WARRIOR_CHARGE_DURATION] == 1.0
     assert rows[1, AGENT_FEATURE_SLOW_HUNTER_BASIC_DURATION] == 2.0
-    assert rows[2, AGENT_FEATURE_SLOW_ROGUE_POISON_DURATION] == 4.0
+    assert rows[2, AGENT_FEATURE_SLOW_ROGUE_POISON_DURATION] == 3.0
     assert (
         rows[0, AGENT_FEATURE_SLOW_WARRIOR_CHARGE_MULTIPLIER]
         == combat.WARRIOR_CHARGE_SLOW_MULTIPLIER
@@ -572,27 +572,35 @@ def test_attached_statuses_and_effective_speed_follow_duration_state() -> None:
         rows[2, AGENT_FEATURE_SLOW_ROGUE_POISON_MULTIPLIER]
         == combat.ROGUE_POISON_SLOW_MULTIPLIER
     )
-    assert rows[3, AGENT_FEATURE_ANTI_HEAL_ROGUE_POISON_DURATION] == 5.0
+    assert rows[3, AGENT_FEATURE_ANTI_HEAL_ROGUE_POISON_DURATION] == 4.0
     assert (
         rows[3, AGENT_FEATURE_ANTI_HEAL_ROGUE_POISON_MULTIPLIER]
         == combat.ROGUE_POISON_ANTI_HEAL_MULTIPLIER
     )
-    assert rows[4, AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_BURST_DURATION] == 6.0
+    assert rows[4, AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_BURST_DURATION] == 5.0
     assert rows[0, AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_DURATION] == 6.0
     assert (
         rows[0, AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_FRACTION]
         == combat.PRIEST_HEAL_SPEED_FLOOR
     )
 
+    expected_observed_effective = (
+        combat.derive_effective_movement_speeds_from_durations(
+            config.agent_profile.base_movement_speeds,
+            next_state.slow_durations,
+            next_state.priest_blessing_of_freedom_slow_floor_durations,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            rows[:, AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED],
+            expected_observed_effective,
+        )
+    )
     expected_effective = combat.derive_effective_movement_speeds_from_durations(
         config.agent_profile.base_movement_speeds,
         state.slow_durations,
         state.priest_blessing_of_freedom_slow_floor_durations,
-    )
-    assert bool(
-        jnp.array_equal(
-            rows[:, AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED], expected_effective
-        )
     )
     displacement = next_state.agent_positions - state.agent_positions
     assert bool(jnp.isclose(displacement[0, 0], expected_effective[0]))

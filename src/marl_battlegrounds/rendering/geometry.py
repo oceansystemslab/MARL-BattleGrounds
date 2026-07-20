@@ -95,6 +95,7 @@ def render_geometry(
     Raises:
         ImportError: If Matplotlib is not installed. Install the ``viz`` extra
         to use this renderer.
+
     """
     pyplot, circle_factory, polygon_factory = _load_matplotlib()
     figure, axes = pyplot.subplots()
@@ -137,6 +138,7 @@ def redraw_geometry(
     Raises:
         ImportError: If Matplotlib is not installed. Install the ``viz`` extra
         to use rendering helpers.
+
     """
     _, circle_factory, polygon_factory = _load_matplotlib()
     _draw_geometry(

@@ -931,6 +931,7 @@ def project_movement_with_geometry(
     Returns:
         Slot-aligned projected positions. Inactive and dead slots preserve their
         original positions.
+
     """
     original_agent_positions = agent_positions
 
@@ -1052,6 +1053,7 @@ def has_clear_line_of_sight(
     Returns:
         Scalar boolean JAX array. ``True`` means no active static obstacle blocks
         the segment; ``False`` means at least one active pillar or wall blocks it.
+
     """
     obstacle_blocks_line_of_sight_vmap = jax.vmap(
         _obstacle_blocks_line_of_sight,

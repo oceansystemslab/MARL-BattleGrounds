@@ -224,30 +224,37 @@ def _assert_only_health_changed(
     after: EnvState,
     expected_health: Array,
 ) -> None:
-    """Assert Checkpoint 1 mutates only health and the ordinary step counter."""
+    """Assert health resolution while every pre-existing duration ticks once."""
     assert bool(jnp.array_equal(after.current_health, expected_health))
     assert int(after.step_count) == int(before.step_count) + 1
     assert bool(jnp.array_equal(after.agent_positions, before.agent_positions))
     assert bool(jnp.array_equal(after.alive_mask, before.alive_mask))
     assert bool(jnp.array_equal(after.ultimate_cooldowns, before.ultimate_cooldowns))
-    assert bool(jnp.array_equal(after.slow_durations, before.slow_durations))
-    assert bool(jnp.array_equal(after.stun_durations, before.stun_durations))
+    assert bool(
+        jnp.array_equal(after.slow_durations, jnp.maximum(before.slow_durations - 1, 0))
+    )
+    assert bool(
+        jnp.array_equal(after.stun_durations, jnp.maximum(before.stun_durations - 1, 0))
+    )
     assert bool(
         jnp.array_equal(
             after.rogue_poison_anti_heal_durations,
-            before.rogue_poison_anti_heal_durations,
+            jnp.maximum(before.rogue_poison_anti_heal_durations - 1, 0),
         )
     )
     assert bool(
         jnp.array_equal(
             after.mage_burst_damage_amplification_durations,
-            before.mage_burst_damage_amplification_durations,
+            jnp.maximum(before.mage_burst_damage_amplification_durations - 1, 0),
         )
     )
     assert bool(
         jnp.array_equal(
             after.priest_blessing_of_freedom_slow_floor_durations,
-            before.priest_blessing_of_freedom_slow_floor_durations,
+            jnp.maximum(
+                before.priest_blessing_of_freedom_slow_floor_durations - 1,
+                0,
+            ),
         )
     )
 
@@ -632,7 +639,12 @@ def test_priest_freedom_affects_same_tick_movement_at_full_health(
         config.agent_profile.base_movement_speeds[1] * expected_speed_multiplier
     )
     assert bool(jnp.isclose(displacement[0], expected_displacement))
-    assert bool(jnp.array_equal(next_state.slow_durations, state.slow_durations))
+    assert bool(
+        jnp.array_equal(
+            next_state.slow_durations,
+            jnp.maximum(state.slow_durations - 1, 0),
+        )
+    )
     assert (
         next_state.priest_blessing_of_freedom_slow_floor_durations[1]
         == PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS - 1
@@ -652,7 +664,7 @@ def test_priest_freedom_affects_same_tick_movement_at_full_health(
 
 
 def test_passive_refresh_never_shortens_and_only_owned_channels_tick() -> None:
-    """Prove source-local max refresh and the narrow Step 5 lifecycle boundary."""
+    """Prove source-local max refresh within the complete duration lifecycle."""
     recipient = _TEAM_B_ACTOR + 1
     config, state = _scenario(
         (_TEAM_A_ACTOR, HUNTER_CLASS_ID),
@@ -686,8 +698,8 @@ def test_passive_refresh_never_shortens_and_only_owned_channels_tick() -> None:
     next_state, _, _ = _step(config, state, action)
 
     assert next_state.slow_durations[recipient, SLOW_CHANNEL_HUNTER_BASIC] == 3
-    assert next_state.slow_durations[recipient, SLOW_CHANNEL_WARRIOR_CHARGE] == 5
-    assert next_state.slow_durations[recipient, SLOW_CHANNEL_ROGUE_POISON] == 3
+    assert next_state.slow_durations[recipient, SLOW_CHANNEL_WARRIOR_CHARGE] == 4
+    assert next_state.slow_durations[recipient, SLOW_CHANNEL_ROGUE_POISON] == 2
     assert next_state.priest_blessing_of_freedom_slow_floor_durations[recipient] == 3
     assert bool(
         jnp.array_equal(
@@ -695,17 +707,22 @@ def test_passive_refresh_never_shortens_and_only_owned_channels_tick() -> None:
             jnp.maximum(state.ultimate_cooldowns - 1, 0),
         )
     )
-    assert bool(jnp.array_equal(next_state.stun_durations, state.stun_durations))
+    assert bool(
+        jnp.array_equal(
+            next_state.stun_durations,
+            jnp.maximum(state.stun_durations - 1, 0),
+        )
+    )
     assert bool(
         jnp.array_equal(
             next_state.rogue_poison_anti_heal_durations,
-            state.rogue_poison_anti_heal_durations,
+            jnp.maximum(state.rogue_poison_anti_heal_durations - 1, 0),
         )
     )
     assert bool(
         jnp.array_equal(
             next_state.mage_burst_damage_amplification_durations,
-            state.mage_burst_damage_amplification_durations,
+            jnp.maximum(state.mage_burst_damage_amplification_durations - 1, 0),
         )
     )
 
@@ -894,7 +911,12 @@ def test_duplicate_priest_applications_refresh_one_freedom_floor() -> None:
 
     displacement = next_state.agent_positions[2] - state.agent_positions[2]
     assert bool(jnp.isclose(displacement[0], PRIEST_HEAL_SPEED_FLOOR))
-    assert bool(jnp.array_equal(next_state.slow_durations, state.slow_durations))
+    assert bool(
+        jnp.array_equal(
+            next_state.slow_durations,
+            jnp.maximum(state.slow_durations - 1, 0),
+        )
+    )
 
 
 def test_jitted_step_matches_eager_same_tick_passive_semantics() -> None:

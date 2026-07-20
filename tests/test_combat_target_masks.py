@@ -371,7 +371,7 @@ def test_actor_stun_changes_only_control_and_exposed_stun_features(
         stunned_observation.self_features[
             _ACTOR_SLOT, AGENT_FEATURE_STUN_WARRIOR_CHARGE_DURATION + 1
         ]
-        == 2.0
+        == 1.0
     )
     assert bool(jnp.any(control_action_mask.select_target_mask[_ACTOR_SLOT, 1:]))
     assert not bool(jnp.any(stunned_action_mask.select_target_mask[_ACTOR_SLOT, 1:]))

@@ -72,6 +72,11 @@ from marl_battlegrounds.core.types import (
     PRIEST_CLASS_ID,
     ROGUE_CLASS_ID,
     SLOW_CHANNEL_HUNTER_BASIC,
+    SLOW_CHANNEL_ROGUE_POISON,
+    SLOW_CHANNEL_WARRIOR_CHARGE,
+    STUN_CHANNEL_HUNTER_TRAP,
+    STUN_CHANNEL_ROGUE_POISON,
+    STUN_CHANNEL_WARRIOR_CHARGE,
     UNIT_FEATURES,
     WARRIOR_CLASS_ID,
     Action,
@@ -224,7 +229,6 @@ def _build_ally_enemy_masks(global_mask: Array) -> tuple[Array, Array]:
     - Team A occupies global slots ``0..MAX_AGENTS_PER_TEAM - 1``;
     - Team B occupies global slots ``MAX_AGENTS_PER_TEAM..MAX_AGENT_SLOTS - 1``.
     """
-
     ally_mask_team_a = global_mask[
         TEAM_A_START:TEAM_A_END,
         TEAM_A_START:TEAM_A_END,
@@ -251,7 +255,6 @@ def _build_ally_enemy_masks(global_mask: Array) -> tuple[Array, Array]:
 
 def _build_global_pairwise_team_masks(team_ids: Array) -> tuple[Array, Array]:
     """Return dense same-team and opposing-team masks for real team IDs."""
-
     has_real_team = team_ids != NO_TEAM_ID
     both_slots_have_real_teams = jnp.logical_and(
         has_real_team[:, None], has_real_team[None, :]
@@ -512,7 +515,7 @@ def _build_observation_and_action_mask(
 def _build_intended_movement_deltas(
     accepted_joint_action: Action,
     refreshed_slow_durations: Array,
-    refreshed_priest_blessing_of_freedom_slow_floor_durations: Array,
+    refreshed_priest_freedom_slow_floor_durations: Array,
     config: EnvConfig,
 ) -> Array:
     """Scale accepted movement using post-refresh, pre-tick status durations."""
@@ -523,7 +526,7 @@ def _build_intended_movement_deltas(
     effective_movement_speeds = derive_effective_movement_speeds_from_durations(
         config.agent_profile.base_movement_speeds,
         refreshed_slow_durations,
-        refreshed_priest_blessing_of_freedom_slow_floor_durations,
+        refreshed_priest_freedom_slow_floor_durations,
     )
 
     intended_movement_deltas = (
@@ -579,7 +582,6 @@ def _derive_effective_movement_speeds_from_multipliers(
     priest_blessing_of_freedom_slow_floor_fraction: Array,
 ) -> Array:
     """Apply stacked slows, the Priest floor, and the global floor to speeds."""
-
     effective_movement_multipliers = jnp.maximum(
         jnp.prod(slow_multipliers, axis=-1),
         priest_blessing_of_freedom_slow_floor_fraction,
@@ -597,7 +599,6 @@ def _build_self_features(
     warrior_damage_mitigation_aura_multipliers: Array,
 ) -> Array:
     """Build slot-aligned self rows from the shared agent-feature schema."""
-
     class_ids = config.agent_profile.class_ids
 
     (
@@ -871,24 +872,43 @@ def _build_accepted_joint_action_from_submitted_joint_action(
     )
 
 
+def _build_global_pairwise_actor_and_recipient_target_one_hot_matrix(
+    accepted_select_target_joint_action: Array,
+) -> Array:
+    """Map actor-relative accepted targets to dense global recipient rows."""
+    # Translate actor-relative selections once for every accepted effect lane.
+    accepted_global_target_slot_by_actor_slot = (
+        _ACTOR_RELATIVE_SELECT_TARGET_ACTION_TO_GLOBAL_AGENT_SLOT_LOOKUP_TABLE[
+            _GLOBAL_AGENT_SLOT_INDICES, accepted_select_target_joint_action
+        ]
+    )
+
+    return jax.nn.one_hot(
+        accepted_global_target_slot_by_actor_slot,
+        num_classes=MAX_AGENT_SLOTS,
+        dtype=jnp.float32,
+    )
+
+
 def _aggregate_health_effects_and_basic_passives_by_global_slot(
     current_state: EnvState,
     config: EnvConfig,
     accepted_joint_action: Action,
+    accepted_recipient_one_hot_by_actor_and_global_slot: Array,
     mage_damage_amplification_aura_multipliers: Array,
     warrior_damage_mitigation_aura_multipliers: Array,
-) -> tuple[Array, Array, Array, Array]:
+) -> tuple[Array, Array, Array, Array, Array]:
     """Aggregate accepted health effects and basic-passive applications.
 
     The accepted target categories are actor-relative. After fixed-slot
     translation, dense one-hot rows route every actor's catalog payload to its
     recipient. Basic and ultimate contributions share this routing boundary.
     Reducing the complete matrices before health mutation preserves simultaneous,
-    actor-order-independent resolution. The returned boolean vectors identify
+    actor-order-independent resolution. Returned boolean vectors identify
     recipients of accepted Hunter and Priest basics without inferring passive
-    triggers from their effective health changes.
+    triggers from effective health changes, plus recipients of accepted positive
+    raw damage for Hunter Trap breaking.
     """
-
     # Pre-state source and recipient modifiers affect this transition's payloads.
     mage_burst_damage_amplification_multipliers = jnp.where(
         current_state.mage_burst_damage_amplification_durations > 0,
@@ -899,21 +919,6 @@ def _aggregate_health_effects_and_basic_passives_by_global_slot(
     rogue_poison_anti_heal_multipliers_by_global_recipient_slot = (
         build_rogue_poison_anti_heal_multipliers(
             current_state.rogue_poison_anti_heal_durations
-        )
-    )
-
-    # Translate actor-relative selections once for every accepted effect lane.
-    accepted_global_target_slot_by_actor_slot = (
-        _ACTOR_RELATIVE_SELECT_TARGET_ACTION_TO_GLOBAL_AGENT_SLOT_LOOKUP_TABLE[
-            _GLOBAL_AGENT_SLOT_INDICES, accepted_joint_action.select_target
-        ]
-    )
-
-    accepted_effect_recipient_one_hot_by_actor_and_global_recipient_slot = (
-        jax.nn.one_hot(
-            accepted_global_target_slot_by_actor_slot,
-            num_classes=MAX_AGENT_SLOTS,
-            dtype=jnp.float32,
         )
     )
 
@@ -942,12 +947,12 @@ def _aggregate_health_effects_and_basic_passives_by_global_slot(
     )
 
     basic_damage_contribution_by_actor_and_global_recipient_slot = (
-        accepted_effect_recipient_one_hot_by_actor_and_global_recipient_slot
+        accepted_recipient_one_hot_by_actor_and_global_slot
         * amplified_basic_damage_by_actor_slot[:, None]
     )
 
     basic_healing_contribution_by_actor_and_global_recipient_slot = (
-        accepted_effect_recipient_one_hot_by_actor_and_global_recipient_slot
+        accepted_recipient_one_hot_by_actor_and_global_slot
         * raw_basic_healing_by_actor_slot[:, None]
     )
 
@@ -975,38 +980,65 @@ def _aggregate_health_effects_and_basic_passives_by_global_slot(
     )
 
     ultimate_damage_contribution_by_actor_and_global_recipient_slot = (
-        accepted_effect_recipient_one_hot_by_actor_and_global_recipient_slot
+        accepted_recipient_one_hot_by_actor_and_global_slot
         * amplified_ultimate_damage_by_actor_slot[:, None]
     )
 
     ultimate_healing_contribution_by_actor_and_global_recipient_slot = (
-        accepted_effect_recipient_one_hot_by_actor_and_global_recipient_slot
+        accepted_recipient_one_hot_by_actor_and_global_slot
         * raw_ultimate_healing_by_actor_slot[:, None]
     )
 
+    # Trap break follows accepted positive raw damage, not effective health loss.
+    accepted_positive_raw_basic_damage_received_this_tick = (
+        jnp.sum(
+            accepted_recipient_one_hot_by_actor_and_global_slot
+            * raw_basic_damage_by_actor_slot[:, None],
+            axis=0,
+        )
+        > 0
+    )
+
+    accepted_positive_raw_ultimate_damage_received_this_tick = (
+        jnp.sum(
+            accepted_recipient_one_hot_by_actor_and_global_slot
+            * raw_ultimate_damage_by_actor_slot[:, None],
+            axis=0,
+        )
+        > 0
+    )
+
+    # Both damage lanes share one recipient-level Trap-break predicate.
+    accepted_positive_raw_damage_received_this_tick_by_global_recipient_slot = (
+        jnp.logical_or(
+            accepted_positive_raw_basic_damage_received_this_tick,
+            accepted_positive_raw_ultimate_damage_received_this_tick,
+        )
+    )
+
     # Reuse accepted recipient routing for source-specific basic passives.
-    hunter_basic_slow_applied_by_global_recipient_slot_mask = jnp.logical_and(
-        accepted_effect_recipient_one_hot_by_actor_and_global_recipient_slot,
+    hunter_basic_slow_applied_this_tick_by_global_recipient_slot_mask = jnp.logical_and(
+        accepted_recipient_one_hot_by_actor_and_global_slot,
         jnp.logical_and(
             _active_hunter_class_mask(config)[:, None],
             actor_applies_accepted_basic_effect[:, None],
         ),
     )
 
-    hunter_basic_slow_applied_by_global_recipient_slot = jnp.any(
-        hunter_basic_slow_applied_by_global_recipient_slot_mask, axis=0
+    hunter_basic_slow_applied_this_tick_by_global_recipient_slot = jnp.any(
+        hunter_basic_slow_applied_this_tick_by_global_recipient_slot_mask, axis=0
     )
 
-    priest_freedom_applied_by_global_recipient_slot_mask = jnp.logical_and(
-        accepted_effect_recipient_one_hot_by_actor_and_global_recipient_slot,
+    priest_freedom_applied_this_tick_by_global_recipient_slot_mask = jnp.logical_and(
+        accepted_recipient_one_hot_by_actor_and_global_slot,
         jnp.logical_and(
             _active_priest_class_mask(config)[:, None],
             actor_applies_accepted_basic_effect[:, None],
         ),
     )
 
-    priest_freedom_applied_by_global_recipient_slot = jnp.any(
-        priest_freedom_applied_by_global_recipient_slot_mask, axis=0
+    priest_freedom_applied_this_tick_by_global_recipient_slot = jnp.any(
+        priest_freedom_applied_this_tick_by_global_recipient_slot_mask, axis=0
     )
 
     # Recipient modifiers apply after source contributions aggregate.
@@ -1031,8 +1063,9 @@ def _aggregate_health_effects_and_basic_passives_by_global_slot(
     return (
         total_damage_received_by_global_recipient_slot,
         total_healing_received_by_global_recipient_slot,
-        hunter_basic_slow_applied_by_global_recipient_slot,
-        priest_freedom_applied_by_global_recipient_slot,
+        hunter_basic_slow_applied_this_tick_by_global_recipient_slot,
+        priest_freedom_applied_this_tick_by_global_recipient_slot,
+        accepted_positive_raw_damage_received_this_tick_by_global_recipient_slot,
     )
 
 
@@ -1067,7 +1100,6 @@ def _derive_aura_damage_multipliers(
     their emitter, use inclusive radius boundaries, and stack multiplicatively
     before the completed vectors are bounded.
     """
-
     global_pairwise_ally_mask, _ = _build_global_pairwise_team_masks(
         config.agent_profile.team_ids
     )
@@ -1130,56 +1162,269 @@ def _derive_aura_damage_multipliers(
     )
 
 
-def _refresh_and_tick_basic_passive_durations(
+def _resolve_status_duration_lifecycle(
     current_state: EnvState,
-    hunter_basic_slow_applied_by_global_recipient_slot: Array,
-    priest_freedom_applied_by_global_recipient_slot: Array,
-) -> tuple[Array, Array, Array, Array]:
-    """Refresh and tick the two duration channels owned by Step 5.
+    config: EnvConfig,
+    accepted_use_ultimate_by_actor_slot: Array,
+    accepted_recipient_one_hot_by_actor_and_global_slot: Array,
+    hunter_basic_slow_applied_this_tick_by_global_recipient_slot: Array,
+    priest_freedom_applied_this_tick_by_global_recipient_slot: Array,
+    accepted_positive_raw_damage_received_this_tick_by_global_recipient_slot: Array,
+) -> tuple[Array, Array, Array, Array, Array, Array, Array, Array]:
+    """Apply the complete M5 status lifecycle and return timing snapshots.
 
-    Refreshed durations are returned for same-tick movement, while decremented
-    durations are returned for next-state packaging. Later Step 6 checkpoints
-    retain ownership of every other duration channel.
+    Accepted effects refresh only their source-local duration and never shorten
+    longer values. Accepted positive raw damage first clears a pre-existing
+    Hunter Trap channel, after which a new Trap may be applied. Refreshed slow,
+    stun, and Priest Freedom values form the same-tick control snapshot; every
+    duration then decrements once for next-state packaging.
     """
-    # Refresh the two Step 5-owned channels before movement, then package their
-    # once-ticked values while preserving every later-checkpoint duration.
-    current_hunter_slow_duration = current_state.slow_durations[
+    # Break only the pre-state Trap channel before applying current-tick statuses.
+    stun_durations_after_pre_existing_trap_break = current_state.stun_durations.at[
+        :, STUN_CHANNEL_HUNTER_TRAP
+    ].set(
+        jnp.where(
+            accepted_positive_raw_damage_received_this_tick_by_global_recipient_slot,
+            0,
+            current_state.stun_durations[:, STUN_CHANNEL_HUNTER_TRAP],
+        )
+    )
+
+    (
+        mage_burst_activated_this_tick_by_actor_slot,
+        warrior_charge_applied_this_tick_by_recipient_slot,
+        hunter_trap_applied_this_tick_by_recipient_slot,
+        rogue_poison_applied_this_tick_by_recipient_slot,
+    ) = _derive_accepted_ultimate_status_applications(
+        config,
+        accepted_use_ultimate_by_actor_slot,
+        accepted_recipient_one_hot_by_actor_and_global_slot,
+    )
+
+    # Mage Burst is source-local rather than recipient-routed.
+    refreshed_mage_burst_durations = jnp.where(
+        mage_burst_activated_this_tick_by_actor_slot,
+        jnp.maximum(
+            MAGE_BURST_DAMAGE_DURATION_TICKS,
+            current_state.mage_burst_damage_amplification_durations,
+        ),
+        current_state.mage_burst_damage_amplification_durations,
+    )
+    next_mage_burst_durations = jnp.maximum(refreshed_mage_burst_durations - 1, 0)
+
+    # Rogue anti-heal shares Poison's accepted recipient.
+    refreshed_rogue_anti_heal_durations = jnp.where(
+        rogue_poison_applied_this_tick_by_recipient_slot,
+        jnp.maximum(
+            ROGUE_POISON_ANTI_HEAL_DURATION_TICKS,
+            current_state.rogue_poison_anti_heal_durations,
+        ),
+        current_state.rogue_poison_anti_heal_durations,
+    )
+    next_rogue_anti_heal_durations = jnp.maximum(
+        refreshed_rogue_anti_heal_durations - 1, 0
+    )
+
+    # Preserve source identity by refreshing each stun channel independently.
+    current_warrior_charge_stun_durations = (
+        stun_durations_after_pre_existing_trap_break[:, STUN_CHANNEL_WARRIOR_CHARGE]
+    )
+    current_hunter_trap_stun_durations = stun_durations_after_pre_existing_trap_break[
+        :, STUN_CHANNEL_HUNTER_TRAP
+    ]
+    current_rogue_poison_stun_durations = stun_durations_after_pre_existing_trap_break[
+        :, STUN_CHANNEL_ROGUE_POISON
+    ]
+
+    refreshed_warrior_charge_stun_durations = jnp.where(
+        warrior_charge_applied_this_tick_by_recipient_slot,
+        jnp.maximum(
+            WARRIOR_CHARGE_STUN_DURATION_TICKS, current_warrior_charge_stun_durations
+        ),
+        current_warrior_charge_stun_durations,
+    )
+    refreshed_stun_durations = stun_durations_after_pre_existing_trap_break.at[
+        :, STUN_CHANNEL_WARRIOR_CHARGE
+    ].set(refreshed_warrior_charge_stun_durations)
+
+    next_warrior_charge_stun_durations = jnp.maximum(
+        refreshed_warrior_charge_stun_durations - 1, 0
+    )
+    next_stun_durations = stun_durations_after_pre_existing_trap_break.at[
+        :, STUN_CHANNEL_WARRIOR_CHARGE
+    ].set(next_warrior_charge_stun_durations)
+
+    refreshed_hunter_trap_stun_durations = jnp.where(
+        hunter_trap_applied_this_tick_by_recipient_slot,
+        jnp.maximum(
+            HUNTER_TRAP_STUN_DURATION_TICKS, current_hunter_trap_stun_durations
+        ),
+        current_hunter_trap_stun_durations,
+    )
+    refreshed_stun_durations = refreshed_stun_durations.at[
+        :, STUN_CHANNEL_HUNTER_TRAP
+    ].set(refreshed_hunter_trap_stun_durations)
+
+    next_hunter_trap_stun_durations = jnp.maximum(
+        refreshed_hunter_trap_stun_durations - 1, 0
+    )
+    next_stun_durations = next_stun_durations.at[:, STUN_CHANNEL_HUNTER_TRAP].set(
+        next_hunter_trap_stun_durations
+    )
+
+    refreshed_rogue_poison_stun_durations = jnp.where(
+        rogue_poison_applied_this_tick_by_recipient_slot,
+        jnp.maximum(
+            ROGUE_POISON_STUN_DURATION_TICKS, current_rogue_poison_stun_durations
+        ),
+        current_rogue_poison_stun_durations,
+    )
+    refreshed_stun_durations = refreshed_stun_durations.at[
+        :, STUN_CHANNEL_ROGUE_POISON
+    ].set(refreshed_rogue_poison_stun_durations)
+
+    next_rogue_poison_stun_durations = jnp.maximum(
+        refreshed_rogue_poison_stun_durations - 1, 0
+    )
+    next_stun_durations = next_stun_durations.at[:, STUN_CHANNEL_ROGUE_POISON].set(
+        next_rogue_poison_stun_durations
+    )
+
+    # Refresh all slow sources independently before the shared end-of-step tick.
+    current_warrior_charge_slow_durations = current_state.slow_durations[
+        :, SLOW_CHANNEL_WARRIOR_CHARGE
+    ]
+    current_hunter_basic_slow_durations = current_state.slow_durations[
         :, SLOW_CHANNEL_HUNTER_BASIC
     ]
-    refreshed_hunter_slow_durations = jnp.where(
-        hunter_basic_slow_applied_by_global_recipient_slot,
-        jnp.maximum(HUNTER_BASIC_SLOW_DURATION_TICKS, current_hunter_slow_duration),
-        current_hunter_slow_duration,
-    ).astype(jnp.int32)
+    current_rogue_poison_slow_durations = current_state.slow_durations[
+        :, SLOW_CHANNEL_ROGUE_POISON
+    ]
+    current_slow_durations = current_state.slow_durations
 
-    refreshed_slow_durations = current_state.slow_durations.at[
-        :, SLOW_CHANNEL_HUNTER_BASIC
-    ].set(refreshed_hunter_slow_durations)
+    refreshed_warrior_charge_slow_durations = jnp.where(
+        warrior_charge_applied_this_tick_by_recipient_slot,
+        jnp.maximum(
+            WARRIOR_CHARGE_SLOW_DURATION_TICKS, current_warrior_charge_slow_durations
+        ),
+        current_warrior_charge_slow_durations,
+    )
+    refreshed_slow_durations = current_slow_durations.at[
+        :, SLOW_CHANNEL_WARRIOR_CHARGE
+    ].set(refreshed_warrior_charge_slow_durations)
+    next_slow_durations = refreshed_slow_durations.at[
+        :, SLOW_CHANNEL_WARRIOR_CHARGE
+    ].set(jnp.maximum(0, refreshed_warrior_charge_slow_durations - 1))
 
-    next_slow_durations = current_state.slow_durations.at[
+    refreshed_hunter_basic_slow_durations = jnp.where(
+        hunter_basic_slow_applied_this_tick_by_global_recipient_slot,
+        jnp.maximum(
+            HUNTER_BASIC_SLOW_DURATION_TICKS, current_hunter_basic_slow_durations
+        ),
+        current_hunter_basic_slow_durations,
+    )
+    refreshed_slow_durations = refreshed_slow_durations.at[
         :, SLOW_CHANNEL_HUNTER_BASIC
-    ].set(jnp.maximum(refreshed_hunter_slow_durations - 1, 0))
-    current_priest_blessing_of_freedom_slow_floor_durations = (
+    ].set(refreshed_hunter_basic_slow_durations)
+    next_slow_durations = next_slow_durations.at[:, SLOW_CHANNEL_HUNTER_BASIC].set(
+        jnp.maximum(0, refreshed_hunter_basic_slow_durations - 1)
+    )
+
+    refreshed_rogue_poison_slow_durations = jnp.where(
+        rogue_poison_applied_this_tick_by_recipient_slot,
+        jnp.maximum(
+            ROGUE_POISON_SLOW_DURATION_TICKS, current_rogue_poison_slow_durations
+        ),
+        current_rogue_poison_slow_durations,
+    )
+    refreshed_slow_durations = refreshed_slow_durations.at[
+        :, SLOW_CHANNEL_ROGUE_POISON
+    ].set(refreshed_rogue_poison_slow_durations)
+    next_slow_durations = next_slow_durations.at[:, SLOW_CHANNEL_ROGUE_POISON].set(
+        jnp.maximum(0, refreshed_rogue_poison_slow_durations - 1)
+    )
+
+    # Freedom raises the movement floor without clearing any slow channel.
+    current_priest_freedom_slow_floor_durations = (
         current_state.priest_blessing_of_freedom_slow_floor_durations
     )
 
-    refreshed_priest_blessing_of_freedom_slow_floor_durations = jnp.where(
-        priest_freedom_applied_by_global_recipient_slot,
+    refreshed_priest_freedom_slow_floor_durations = jnp.where(
+        priest_freedom_applied_this_tick_by_global_recipient_slot,
         jnp.maximum(
             PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS,
-            current_priest_blessing_of_freedom_slow_floor_durations,
+            current_priest_freedom_slow_floor_durations,
         ),
-        current_priest_blessing_of_freedom_slow_floor_durations,
+        current_priest_freedom_slow_floor_durations,
     ).astype(jnp.int32)
 
-    next_priest_blessing_of_freedom_slow_floor_durations = jnp.maximum(
-        refreshed_priest_blessing_of_freedom_slow_floor_durations - 1, 0
+    next_priest_freedom_slow_floor_durations = jnp.maximum(
+        refreshed_priest_freedom_slow_floor_durations - 1, 0
     )
+
     return (
         refreshed_slow_durations,
-        refreshed_priest_blessing_of_freedom_slow_floor_durations,
+        refreshed_stun_durations,
+        refreshed_priest_freedom_slow_floor_durations,
         next_slow_durations,
-        next_priest_blessing_of_freedom_slow_floor_durations,
+        next_stun_durations,
+        next_rogue_anti_heal_durations,
+        next_mage_burst_durations,
+        next_priest_freedom_slow_floor_durations,
+    )
+
+
+def _derive_accepted_ultimate_status_applications(
+    config: EnvConfig,
+    accepted_use_ultimate_by_actor_slot: Array,
+    accepted_recipient_one_hot_by_actor_and_global_slot: Array,
+) -> tuple[Array, Array, Array, Array]:
+    """Derive source-local and recipient-routed accepted ultimate statuses."""
+    uses_ultimate_this_tick = accepted_use_ultimate_by_actor_slot == 1
+
+    # Mage Burst applies to its source; targeted ultimates reduce by recipient.
+    mage_burst_activated_this_tick_by_actor_slot = jnp.logical_and(
+        _active_mage_class_mask(config), uses_ultimate_this_tick
+    )
+
+    warrior_uses_accepted_ultimate_this_tick_by_actor_slot = jnp.logical_and(
+        _active_warrior_class_mask(config), uses_ultimate_this_tick
+    )
+    warrior_charge_applied_this_tick_by_recipient_slot = jnp.any(
+        jnp.logical_and(
+            warrior_uses_accepted_ultimate_this_tick_by_actor_slot[:, None],
+            accepted_recipient_one_hot_by_actor_and_global_slot,
+        ),
+        axis=0,
+    )
+
+    hunter_uses_accepted_ultimate_this_tick_by_actor_slot = jnp.logical_and(
+        _active_hunter_class_mask(config), uses_ultimate_this_tick
+    )
+    hunter_trap_applied_this_tick_by_recipient_slot = jnp.any(
+        jnp.logical_and(
+            hunter_uses_accepted_ultimate_this_tick_by_actor_slot[:, None],
+            accepted_recipient_one_hot_by_actor_and_global_slot,
+        ),
+        axis=0,
+    )
+
+    rogue_uses_accepted_ultimate_this_tick_by_actor_slot = jnp.logical_and(
+        _active_rogue_class_mask(config), uses_ultimate_this_tick
+    )
+    rogue_poison_applied_this_tick_by_recipient_slot = jnp.any(
+        jnp.logical_and(
+            rogue_uses_accepted_ultimate_this_tick_by_actor_slot[:, None],
+            accepted_recipient_one_hot_by_actor_and_global_slot,
+        ),
+        axis=0,
+    )
+
+    return (
+        mage_burst_activated_this_tick_by_actor_slot,
+        warrior_charge_applied_this_tick_by_recipient_slot,
+        hunter_trap_applied_this_tick_by_recipient_slot,
+        rogue_poison_applied_this_tick_by_recipient_slot,
     )
 
 
@@ -1190,7 +1435,6 @@ def reset(
     config: EnvConfig, key: Array
 ) -> tuple[EnvState, Observation, ActionMask, Info]:
     """Create the initial fixed-slot simulator state and placeholders."""
-
     # Reset keeps all arrays at MAX_AGENT_SLOTS length. Smaller tasks use the
     # resolved profile's active mask to distinguish agents from padded slots.
     # Ordinary reset starts all active agents alive. Scenario loaders may later
@@ -1255,9 +1499,14 @@ def step(
     reset or the preceding step. It is the sole source of submitted-action
     acceptance; the returned observation and mask describe ``next_state``.
     """
-
     accepted_joint_action = _build_accepted_joint_action_from_submitted_joint_action(
         current_action_mask=current_action_mask, submitted_joint_action=joint_action
+    )
+
+    accepted_recipient_one_hot_by_actor_and_global_slot = (
+        _build_global_pairwise_actor_and_recipient_target_one_hot_matrix(
+            accepted_joint_action.select_target
+        )
     )
 
     current_global_pairwise_distances = (
@@ -1265,6 +1514,7 @@ def step(
             current_state.agent_positions
         )
     )
+
     (
         current_mage_damage_amplification_aura_multipliers,
         current_warrior_damage_mitigation_aura_multipliers,
@@ -1275,25 +1525,35 @@ def step(
     (
         total_effective_damage_received_by_global_slot,
         total_effective_healing_received_by_global_slot,
-        hunter_basic_slow_applied_by_global_recipient_slot,
-        priest_freedom_applied_by_global_recipient_slot,
+        hunter_basic_slow_applied_this_tick_by_global_recipient_slot,
+        priest_freedom_applied_this_tick_by_global_recipient_slot,
+        accepted_positive_raw_damage_received_this_tick_by_global_recipient_slot,
     ) = _aggregate_health_effects_and_basic_passives_by_global_slot(
         current_state,
         config,
         accepted_joint_action,
+        accepted_recipient_one_hot_by_actor_and_global_slot,
         current_mage_damage_amplification_aura_multipliers,
         current_warrior_damage_mitigation_aura_multipliers,
     )
 
     (
         refreshed_slow_durations,
-        refreshed_priest_blessing_of_freedom_slow_floor_durations,
+        _,  # Refreshed stun truth is first consumed by Checkpoint 3.
+        refreshed_priest_freedom_slow_floor_durations,
         next_slow_durations,
-        next_priest_blessing_of_freedom_slow_floor_durations,
-    ) = _refresh_and_tick_basic_passive_durations(
+        next_stun_durations,
+        next_rogue_anti_heal_durations,
+        next_mage_burst_durations,
+        next_priest_freedom_slow_floor_durations,
+    ) = _resolve_status_duration_lifecycle(
         current_state,
-        hunter_basic_slow_applied_by_global_recipient_slot,
-        priest_freedom_applied_by_global_recipient_slot,
+        config,
+        accepted_joint_action.use_ultimate,
+        accepted_recipient_one_hot_by_actor_and_global_slot,
+        hunter_basic_slow_applied_this_tick_by_global_recipient_slot,
+        priest_freedom_applied_this_tick_by_global_recipient_slot,
+        accepted_positive_raw_damage_received_this_tick_by_global_recipient_slot,
     )
 
     next_health_after_effective_damage_and_healing = (
@@ -1315,7 +1575,7 @@ def step(
     intended_movement_deltas = _build_intended_movement_deltas(
         accepted_joint_action,
         refreshed_slow_durations,
-        refreshed_priest_blessing_of_freedom_slow_floor_durations,
+        refreshed_priest_freedom_slow_floor_durations,
         config,
     )
 
@@ -1330,7 +1590,7 @@ def step(
         config.obstacles,
     )
 
-    # Later Step 6 checkpoints own ultimate statuses and movement control.
+    # Checkpoint 3 will consume refreshed stun truth for same-tick movement control.
 
     next_state = EnvState(
         step_count=current_state.step_count + 1,
@@ -1339,10 +1599,10 @@ def step(
         current_health=next_health_after_effective_damage_and_healing,
         ultimate_cooldowns=next_ultimate_cooldowns,
         slow_durations=next_slow_durations,
-        stun_durations=current_state.stun_durations,
-        rogue_poison_anti_heal_durations=current_state.rogue_poison_anti_heal_durations,
-        mage_burst_damage_amplification_durations=current_state.mage_burst_damage_amplification_durations,
-        priest_blessing_of_freedom_slow_floor_durations=next_priest_blessing_of_freedom_slow_floor_durations,
+        stun_durations=next_stun_durations,
+        rogue_poison_anti_heal_durations=next_rogue_anti_heal_durations,
+        mage_burst_damage_amplification_durations=next_mage_burst_durations,
+        priest_blessing_of_freedom_slow_floor_durations=next_priest_freedom_slow_floor_durations,
     )
 
     next_observation, next_action_mask = _build_observation_and_action_mask(

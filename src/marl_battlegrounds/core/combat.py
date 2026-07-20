@@ -342,7 +342,6 @@ def derive_status_magnitudes(
     and scanned execution. Add other derived payloads only when a production
     mechanic consumes them.
     """
-
     slow_multipliers = _build_slow_multipliers(slow_durations)
 
     rogue_poison_anti_heal_multipliers = build_rogue_poison_anti_heal_multipliers(
@@ -368,7 +367,6 @@ def derive_effective_movement_speeds_from_durations(
     priest_blessing_of_freedom_slow_floor_durations: Array,
 ) -> Array:
     """Derive effective speeds from base values and duration-only status state."""
-
     effective_movement_multipliers = jnp.maximum(
         jnp.prod(_build_slow_multipliers(slow_durations), axis=-1),
         _build_priest_blessing_of_freedom_slow_floor_fractions(
