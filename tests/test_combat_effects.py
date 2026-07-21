@@ -23,6 +23,7 @@ from marl_battlegrounds.core.combat import (
     ROGUE_POISON_SLOW_MULTIPLIER,
     ULTIMATE_COOLDOWN_BY_CLASS,
     ULTIMATE_DAMAGE_BY_CLASS,
+    WARRIOR_CHARGE_SLOW_MULTIPLIER,
     WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER,
 )
 from marl_battlegrounds.core.config import resolve_agent_profile
@@ -38,6 +39,7 @@ from marl_battlegrounds.core.types import (
     AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_FRACTION,
     AGENT_FEATURE_SLOW_HUNTER_BASIC_DURATION,
     AGENT_FEATURE_SLOW_HUNTER_BASIC_MULTIPLIER,
+    AGENT_FEATURE_STUN_WARRIOR_CHARGE_DURATION,
     ENVIRONMENT_DIMENSIONS,
     HUNTER_CLASS_ID,
     MAGE_CLASS_ID,
@@ -224,15 +226,12 @@ def _assert_only_health_changed(
     after: EnvState,
     expected_health: Array,
 ) -> None:
-    """Assert health resolution while every pre-existing duration ticks once."""
+    """Assert health resolution and fields outside basic-passive ownership."""
     assert bool(jnp.array_equal(after.current_health, expected_health))
     assert int(after.step_count) == int(before.step_count) + 1
     assert bool(jnp.array_equal(after.agent_positions, before.agent_positions))
     assert bool(jnp.array_equal(after.alive_mask, before.alive_mask))
     assert bool(jnp.array_equal(after.ultimate_cooldowns, before.ultimate_cooldowns))
-    assert bool(
-        jnp.array_equal(after.slow_durations, jnp.maximum(before.slow_durations - 1, 0))
-    )
     assert bool(
         jnp.array_equal(after.stun_durations, jnp.maximum(before.stun_durations - 1, 0))
     )
@@ -246,15 +245,6 @@ def _assert_only_health_changed(
         jnp.array_equal(
             after.mage_burst_damage_amplification_durations,
             jnp.maximum(before.mage_burst_damage_amplification_durations - 1, 0),
-        )
-    )
-    assert bool(
-        jnp.array_equal(
-            after.priest_blessing_of_freedom_slow_floor_durations,
-            jnp.maximum(
-                before.priest_blessing_of_freedom_slow_floor_durations - 1,
-                0,
-            ),
         )
     )
 
@@ -556,8 +546,8 @@ def test_outgoing_amplification_and_incoming_mitigation_compose() -> None:
     _assert_only_health_changed(state, next_state, expected_health)
 
 
-def test_hunter_basic_slow_affects_same_tick_movement_then_expires() -> None:
-    """Prove a duration-one Hunter slow acts before its end-of-step tick."""
+def test_hunter_basic_slow_is_observed_before_its_affected_decision() -> None:
+    """Prove a duration-one Hunter slow governs one later decision window."""
     config, state = _scenario(
         (_TEAM_A_ACTOR, HUNTER_CLASS_ID),
         (_TEAM_B_ACTOR, HUNTER_CLASS_ID),
@@ -570,34 +560,117 @@ def test_hunter_basic_slow_affects_same_tick_movement_then_expires() -> None:
         (_TEAM_B_ACTOR, MOVE_EAST, 0, 0),
     )
 
-    next_state, observation, _ = _step(config, state, action)
+    applied_state, applied_observation, _ = _step(config, state, action)
 
-    displacement = (
-        next_state.agent_positions[_TEAM_B_ACTOR] - state.agent_positions[_TEAM_B_ACTOR]
+    application_displacement = (
+        applied_state.agent_positions[_TEAM_B_ACTOR]
+        - state.agent_positions[_TEAM_B_ACTOR]
     )
-    expected_displacement = (
-        config.agent_profile.base_movement_speeds[_TEAM_B_ACTOR]
-        * HUNTER_BASIC_SLOW_MULTIPLIER
+    assert bool(
+        jnp.isclose(
+            application_displacement[0],
+            config.agent_profile.base_movement_speeds[_TEAM_B_ACTOR],
+        )
     )
-    assert bool(jnp.isclose(displacement[0], expected_displacement))
-    assert displacement[1] == 0.0
-    assert next_state.current_health[_TEAM_B_ACTOR] == 0.0
+    assert application_displacement[1] == 0.0
+    assert applied_state.current_health[_TEAM_B_ACTOR] == 0.0
     assert (
-        next_state.slow_durations[_TEAM_B_ACTOR, SLOW_CHANNEL_HUNTER_BASIC]
-        == HUNTER_BASIC_SLOW_DURATION_TICKS - 1
+        applied_state.slow_durations[_TEAM_B_ACTOR, SLOW_CHANNEL_HUNTER_BASIC]
+        == HUNTER_BASIC_SLOW_DURATION_TICKS
     )
     assert (
-        observation.self_features[
+        applied_observation.self_features[
+            _TEAM_B_ACTOR, AGENT_FEATURE_SLOW_HUNTER_BASIC_DURATION
+        ]
+        == HUNTER_BASIC_SLOW_DURATION_TICKS
+    )
+    assert (
+        applied_observation.self_features[
+            _TEAM_B_ACTOR, AGENT_FEATURE_SLOW_HUNTER_BASIC_MULTIPLIER
+        ]
+        == HUNTER_BASIC_SLOW_MULTIPLIER
+    )
+
+    expired_state, expired_observation, _ = _step(
+        config,
+        applied_state,
+        _joint_action((_TEAM_B_ACTOR, MOVE_EAST, 0, 0)),
+    )
+
+    governed_displacement = (
+        expired_state.agent_positions[_TEAM_B_ACTOR]
+        - applied_state.agent_positions[_TEAM_B_ACTOR]
+    )
+    assert bool(
+        jnp.isclose(
+            governed_displacement[0],
+            config.agent_profile.base_movement_speeds[_TEAM_B_ACTOR]
+            * HUNTER_BASIC_SLOW_MULTIPLIER,
+        )
+    )
+    assert expired_state.slow_durations[_TEAM_B_ACTOR, SLOW_CHANNEL_HUNTER_BASIC] == 0
+    assert (
+        expired_observation.self_features[
             _TEAM_B_ACTOR, AGENT_FEATURE_SLOW_HUNTER_BASIC_DURATION
         ]
         == 0.0
     )
+
+
+def test_fresh_charge_stun_preserves_precommitted_movement_then_becomes_public() -> (
+    None
+):
+    """Prove fresh control cannot cancel an action chosen before it was visible."""
+    config, state = _scenario(
+        (_TEAM_A_ACTOR, WARRIOR_CLASS_ID),
+        (_TEAM_B_ACTOR, HUNTER_CLASS_ID),
+    )
+    action = _joint_action(
+        (_TEAM_A_ACTOR, MOVE_STAY, _FIRST_ENEMY_TARGET, 1),
+        (_TEAM_B_ACTOR, MOVE_EAST, 0, 0),
+    )
+
+    applied_state, applied_observation, applied_mask = _step(config, state, action)
+
+    application_displacement = (
+        applied_state.agent_positions[_TEAM_B_ACTOR]
+        - state.agent_positions[_TEAM_B_ACTOR]
+    )
+    assert bool(
+        jnp.isclose(
+            application_displacement[0],
+            config.agent_profile.base_movement_speeds[_TEAM_B_ACTOR],
+        )
+    )
+    assert applied_state.stun_durations[_TEAM_B_ACTOR, STUN_CHANNEL_WARRIOR_CHARGE] == 1
     assert (
-        observation.self_features[
-            _TEAM_B_ACTOR, AGENT_FEATURE_SLOW_HUNTER_BASIC_MULTIPLIER
+        applied_observation.self_features[
+            _TEAM_B_ACTOR, AGENT_FEATURE_STUN_WARRIOR_CHARGE_DURATION
         ]
         == 1.0
     )
+    assert (
+        applied_observation.enemy_unit_features[
+            _TEAM_A_ACTOR, 0, AGENT_FEATURE_STUN_WARRIOR_CHARGE_DURATION
+        ]
+        == 1.0
+    )
+    assert not bool(jnp.any(applied_mask.select_target_mask[_TEAM_B_ACTOR, 1:]))
+
+    expired_state, expired_observation, expired_mask = _step(
+        config,
+        applied_state,
+        _joint_action(),
+    )
+
+    assert expired_state.stun_durations[_TEAM_B_ACTOR, STUN_CHANNEL_WARRIOR_CHARGE] == 0
+    assert (
+        expired_observation.self_features[
+            _TEAM_B_ACTOR, AGENT_FEATURE_STUN_WARRIOR_CHARGE_DURATION
+        ]
+        == 0.0
+    )
+    assert bool(jnp.any(expired_mask.select_target_mask[_TEAM_B_ACTOR, 1:]))
 
 
 @pytest.mark.parametrize(
@@ -607,11 +680,11 @@ def test_hunter_basic_slow_affects_same_tick_movement_then_expires() -> None:
         pytest.param(False, 1.0, id="does-not-accelerate-unslowed-ally"),
     ),
 )
-def test_priest_freedom_affects_same_tick_movement_at_full_health(
+def test_priest_freedom_is_observed_before_its_affected_decision(
     has_existing_slows: bool,
     expected_speed_multiplier: float,
 ) -> None:
-    """Prove accepted full-health healing grants a floor without cleansing."""
+    """Prove full-health healing grants a floor for one later decision."""
     config, state = _scenario(
         (0, PRIEST_CLASS_ID),
         (1, HUNTER_CLASS_ID),
@@ -632,32 +705,64 @@ def test_priest_freedom_affects_same_tick_movement_at_full_health(
         (1, MOVE_EAST, 0, 0),
     )
 
-    next_state, observation, _ = _step(config, state, action)
+    applied_state, applied_observation, _ = _step(config, state, action)
 
-    displacement = next_state.agent_positions[1] - state.agent_positions[1]
-    expected_displacement = (
-        config.agent_profile.base_movement_speeds[1] * expected_speed_multiplier
+    application_displacement = (
+        applied_state.agent_positions[1] - state.agent_positions[1]
     )
-    assert bool(jnp.isclose(displacement[0], expected_displacement))
+    application_speed_multiplier = (
+        WARRIOR_CHARGE_SLOW_MULTIPLIER * ROGUE_POISON_SLOW_MULTIPLIER
+        if has_existing_slows
+        else 1.0
+    )
+    assert bool(
+        jnp.isclose(
+            application_displacement[0],
+            config.agent_profile.base_movement_speeds[1] * application_speed_multiplier,
+        )
+    )
     assert bool(
         jnp.array_equal(
-            next_state.slow_durations,
+            applied_state.slow_durations,
             jnp.maximum(state.slow_durations - 1, 0),
         )
     )
     assert (
-        next_state.priest_blessing_of_freedom_slow_floor_durations[1]
-        == PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS - 1
+        applied_state.priest_blessing_of_freedom_slow_floor_durations[1]
+        == PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS
     )
     assert (
-        observation.self_features[
+        applied_observation.self_features[
             1, AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_DURATION
         ]
-        == 0.0
+        == PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS
     )
     assert (
-        observation.self_features[
+        applied_observation.self_features[
             1, AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_FRACTION
+        ]
+        == PRIEST_HEAL_SPEED_FLOOR
+    )
+
+    expired_state, expired_observation, _ = _step(
+        config,
+        applied_state,
+        _joint_action((1, MOVE_EAST, 0, 0)),
+    )
+
+    governed_displacement = (
+        expired_state.agent_positions[1] - applied_state.agent_positions[1]
+    )
+    assert bool(
+        jnp.isclose(
+            governed_displacement[0],
+            config.agent_profile.base_movement_speeds[1] * expected_speed_multiplier,
+        )
+    )
+    assert expired_state.priest_blessing_of_freedom_slow_floor_durations[1] == 0
+    assert (
+        expired_observation.self_features[
+            1, AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_DURATION
         ]
         == 0.0
     )
@@ -829,8 +934,8 @@ def test_invalid_priest_basic_does_not_grant_freedom(
     assert next_state.priest_blessing_of_freedom_slow_floor_durations[1] == 0
 
 
-def test_hunter_same_tick_slow_is_scaled_before_boundary_projection() -> None:
-    """Prove geometry receives the already slowed intended displacement."""
+def test_fresh_hunter_slow_does_not_retroactively_change_boundary_projection() -> None:
+    """Prove geometry consumes current rather than newly applied slow truth."""
     positions = _default_positions((1, 1))
     positions = positions.at[_TEAM_A_ACTOR].set(
         jnp.asarray((13.2, 2.0), dtype=jnp.float32)
@@ -850,13 +955,11 @@ def test_hunter_same_tick_slow_is_scaled_before_boundary_projection() -> None:
 
     next_state, _, _ = _step(config, state, action)
 
-    expected_x = (
-        state.agent_positions[_TEAM_B_ACTOR, 0]
-        + config.agent_profile.base_movement_speeds[_TEAM_B_ACTOR]
-        * HUNTER_BASIC_SLOW_MULTIPLIER
+    assert next_state.agent_positions[_TEAM_B_ACTOR, 0] == 19.5
+    assert (
+        next_state.slow_durations[_TEAM_B_ACTOR, SLOW_CHANNEL_HUNTER_BASIC]
+        == HUNTER_BASIC_SLOW_DURATION_TICKS
     )
-    assert bool(jnp.isclose(next_state.agent_positions[_TEAM_B_ACTOR, 0], expected_x))
-    assert next_state.agent_positions[_TEAM_B_ACTOR, 0] < 19.5
 
 
 def test_duplicate_hunter_applications_refresh_once_without_stacking_strength() -> None:
@@ -878,9 +981,13 @@ def test_duplicate_hunter_applications_refresh_once_without_stacking_strength() 
     displacement = (
         next_state.agent_positions[_TEAM_B_ACTOR] - state.agent_positions[_TEAM_B_ACTOR]
     )
-    assert bool(jnp.isclose(displacement[0], HUNTER_BASIC_SLOW_MULTIPLIER))
+    assert bool(jnp.isclose(displacement[0], 1.0))
     assert next_state.current_health[_TEAM_B_ACTOR] == (
         state.current_health[_TEAM_B_ACTOR] - 2 * BASIC_DAMAGE_BY_CLASS[HUNTER_CLASS_ID]
+    )
+    assert (
+        next_state.slow_durations[_TEAM_B_ACTOR, SLOW_CHANNEL_HUNTER_BASIC]
+        == HUNTER_BASIC_SLOW_DURATION_TICKS
     )
 
 
@@ -910,17 +1017,26 @@ def test_duplicate_priest_applications_refresh_one_freedom_floor() -> None:
     next_state, _, _ = _step(config, state, action)
 
     displacement = next_state.agent_positions[2] - state.agent_positions[2]
-    assert bool(jnp.isclose(displacement[0], PRIEST_HEAL_SPEED_FLOOR))
+    assert bool(
+        jnp.isclose(
+            displacement[0],
+            WARRIOR_CHARGE_SLOW_MULTIPLIER * ROGUE_POISON_SLOW_MULTIPLIER,
+        )
+    )
     assert bool(
         jnp.array_equal(
             next_state.slow_durations,
             jnp.maximum(state.slow_durations - 1, 0),
         )
     )
+    assert (
+        next_state.priest_blessing_of_freedom_slow_floor_durations[2]
+        == PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS
+    )
 
 
-def test_jitted_step_matches_eager_same_tick_passive_semantics() -> None:
-    """Prove passive routing, movement timing, and ticking are JIT-stable."""
+def test_jitted_step_matches_eager_decision_epoch_passive_semantics() -> None:
+    """Prove decision-epoch passive timing remains JIT-stable."""
     config, state = _scenario(
         (0, HUNTER_CLASS_ID),
         (_TEAM_B_ACTOR, PRIEST_CLASS_ID),
@@ -954,8 +1070,8 @@ def test_jitted_step_matches_eager_same_tick_passive_semantics() -> None:
         assert bool(jnp.array_equal(eager_leaf, compiled_leaf))
 
 
-def test_scanned_repeated_hunter_hits_refresh_before_each_movement() -> None:
-    """Prove repeated duration-one applications remain meaningful in scan carry."""
+def test_scanned_repeated_hunter_hits_refresh_for_each_next_movement() -> None:
+    """Prove repeated duration-one applications govern each later scan step."""
     horizon = 3
     config, state = _scenario(
         (_TEAM_A_ACTOR, HUNTER_CLASS_ID),
@@ -1006,8 +1122,13 @@ def test_scanned_repeated_hunter_hits_refresh_before_each_movement() -> None:
         BASIC_DAMAGE_BY_CLASS[HUNTER_CLASS_ID]
         * jnp.arange(1, horizon + 1, dtype=jnp.float32)
     )
-    expected_x = state.agent_positions[_TEAM_B_ACTOR, 0] + (
-        HUNTER_BASIC_SLOW_MULTIPLIER * jnp.arange(1, horizon + 1, dtype=jnp.float32)
+    expected_x = state.agent_positions[_TEAM_B_ACTOR, 0] + jnp.asarray(
+        (
+            1.0,
+            1.0 + HUNTER_BASIC_SLOW_MULTIPLIER,
+            1.0 + 2 * HUNTER_BASIC_SLOW_MULTIPLIER,
+        ),
+        dtype=jnp.float32,
     )
     assert health_history.shape == (horizon, MAX_AGENT_SLOTS)
     assert position_history.shape == (
@@ -1022,7 +1143,13 @@ def test_scanned_repeated_hunter_hits_refresh_before_each_movement() -> None:
     assert bool(
         jnp.allclose(position_history[:, _TEAM_B_ACTOR, 0], expected_x, atol=1e-5)
     )
-    assert bool(jnp.all(hunter_duration_history == 0))
+    assert bool(
+        jnp.all(
+            hunter_duration_history[:, _TEAM_B_ACTOR]
+            == HUNTER_BASIC_SLOW_DURATION_TICKS
+        )
+    )
+    assert bool(jnp.all(hunter_duration_history.at[:, _TEAM_B_ACTOR].set(0) == 0))
 
 
 @pytest.mark.parametrize(

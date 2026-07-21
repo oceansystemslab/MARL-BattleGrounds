@@ -11,11 +11,9 @@ from jax import Array
 import marl_battlegrounds.core.combat as combat
 from marl_battlegrounds.core.config import resolve_agent_profile
 from marl_battlegrounds.core.env import (
-    _build_global_pairwise_actor_and_recipient_target_one_hot_matrix,
     _build_observation_and_action_mask,
     _compute_global_pairwise_distances_from_agent_positions,
     _derive_aura_damage_multipliers,
-    _resolve_status_duration_lifecycle,
     step,
 )
 from marl_battlegrounds.core.types import (
@@ -378,6 +376,68 @@ def test_zero_health_payload_ultimates_change_no_health_but_start_cooldown(
     assert not bool(next_mask.use_ultimate_mask[0, 1])
 
 
+def test_fresh_mage_burst_first_amplifies_next_transition_damage() -> None:
+    """Prove Burst is observed before its first damage-modifying decision."""
+    config, state = _scenario(
+        (0, MAGE_CLASS_ID),
+        (5, HUNTER_CLASS_ID),
+        team_sizes=(1, 1),
+    )
+    config = config._replace(
+        agent_profile=config.agent_profile._replace(
+            observation_radii=config.agent_profile.observation_radii.at[5].set(0.5)
+        )
+    )
+
+    applied_state, applied_observation, _ = _step(
+        config,
+        state,
+        _joint_action((0, 0, 1)),
+    )
+
+    assert bool(jnp.array_equal(applied_state.current_health, state.current_health))
+    assert applied_state.mage_burst_damage_amplification_durations[0] == (
+        combat.MAGE_BURST_DAMAGE_DURATION_TICKS
+    )
+    assert (
+        applied_observation.self_features[
+            0, AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_BURST_DURATION
+        ]
+        == combat.MAGE_BURST_DAMAGE_DURATION_TICKS
+    )
+    assert not bool(applied_observation.enemy_visibility_mask[5, 0])
+    assert (
+        applied_observation.enemy_unit_features[
+            5, 0, AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_BURST_DURATION
+        ]
+        == 0.0
+    )
+
+    governed_state, governed_observation, _ = _step(
+        config,
+        applied_state,
+        _joint_action((0, _FIRST_ENEMY_TARGET, 0)),
+    )
+
+    expected_damage = (
+        combat.BASIC_DAMAGE_BY_CLASS[MAGE_CLASS_ID]
+        * combat.MAGE_BURST_DAMAGE_MULTIPLIER
+        * combat.MAGE_DAMAGE_AURA_MULTIPLIER
+    )
+    assert governed_state.current_health[5] == (
+        applied_state.current_health[5] - expected_damage
+    )
+    assert governed_state.mage_burst_damage_amplification_durations[0] == (
+        combat.MAGE_BURST_DAMAGE_DURATION_TICKS - 1
+    )
+    assert (
+        governed_observation.self_features[
+            0, AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_BURST_DURATION
+        ]
+        == combat.MAGE_BURST_DAMAGE_DURATION_TICKS - 1
+    )
+
+
 def test_charge_damage_uses_burst_mage_aura_and_warrior_mitigation() -> None:
     """Prove outgoing and incoming modifiers compose around ultimate damage."""
     positions = _default_positions((2, 2))
@@ -441,6 +501,55 @@ def test_holy_word_uses_pre_state_anti_heal_and_still_starts_cooldown() -> None:
     assert (
         next_state.ultimate_cooldowns[0]
         == combat.ULTIMATE_COOLDOWN_BY_CLASS[PRIEST_CLASS_ID]
+    )
+
+
+def test_fresh_rogue_anti_heal_first_modifies_next_transition_healing() -> None:
+    """Prove Poison is public before it reduces a later incoming heal."""
+    config, state = _scenario(
+        (0, ROGUE_CLASS_ID),
+        (5, PRIEST_CLASS_ID),
+        (6, HUNTER_CLASS_ID),
+        team_sizes=(1, 2),
+    )
+    state = state._replace(current_health=state.current_health.at[6].set(50.0))
+    application_action = _joint_action(
+        (0, _SECOND_ENEMY_TARGET, 1),
+        (5, _SECOND_ALLY_TARGET, 0),
+    )
+
+    applied_state, applied_observation, _ = _step(
+        config,
+        state,
+        application_action,
+    )
+
+    assert applied_state.current_health[6] == (
+        50.0 + combat.BASIC_HEALING_BY_CLASS[PRIEST_CLASS_ID]
+    )
+    assert applied_state.rogue_poison_anti_heal_durations[6] == (
+        combat.ROGUE_POISON_ANTI_HEAL_DURATION_TICKS
+    )
+    assert (
+        applied_observation.self_features[
+            6, AGENT_FEATURE_ANTI_HEAL_ROGUE_POISON_DURATION
+        ]
+        == combat.ROGUE_POISON_ANTI_HEAL_DURATION_TICKS
+    )
+
+    governed_state, _, _ = _step(
+        config,
+        applied_state,
+        _joint_action((5, _SECOND_ALLY_TARGET, 0)),
+    )
+
+    assert governed_state.current_health[6] == (
+        applied_state.current_health[6]
+        + combat.BASIC_HEALING_BY_CLASS[PRIEST_CLASS_ID]
+        * combat.ROGUE_POISON_ANTI_HEAL_MULTIPLIER
+    )
+    assert governed_state.rogue_poison_anti_heal_durations[6] == (
+        combat.ROGUE_POISON_ANTI_HEAL_DURATION_TICKS - 1
     )
 
 
@@ -615,29 +724,6 @@ def test_scanned_repeated_submission_applies_once_then_ticks_cooldown() -> None:
     )
 
 
-def _refreshed_stun_durations_for_accepted_action(
-    config: EnvConfig,
-    state: EnvState,
-    accepted_action: Action,
-) -> Array:
-    """Return the pre-tick stun snapshot produced by lifecycle resolution."""
-    recipient_routes = _build_global_pairwise_actor_and_recipient_target_one_hot_matrix(
-        accepted_action.select_target
-    )
-    no_basic_passive_applications = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.bool_)
-    no_raw_damage_recipients = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.bool_)
-    lifecycle_outputs = _resolve_status_duration_lifecycle(
-        state,
-        config,
-        accepted_action.use_ultimate,
-        recipient_routes,
-        no_basic_passive_applications,
-        no_basic_passive_applications,
-        no_raw_damage_recipients,
-    )
-    return lifecycle_outputs[1]
-
-
 def test_every_status_ultimate_updates_only_its_owned_source_or_recipient() -> None:
     """Prove all four status ultimates use one source-local recipient route."""
     config, state = _scenario(
@@ -658,39 +744,30 @@ def test_every_status_ultimate_updates_only_its_owned_source_or_recipient() -> N
         (3, _FIRST_ENEMY_TARGET + 2, 1),
     )
 
-    refreshed_stuns = _refreshed_stun_durations_for_accepted_action(
-        config, state, action
-    )
     next_state, _, _ = _step(config, state, action)
 
     assert next_state.mage_burst_damage_amplification_durations[0] == (
-        combat.MAGE_BURST_DAMAGE_DURATION_TICKS - 1
+        combat.MAGE_BURST_DAMAGE_DURATION_TICKS
     )
     assert next_state.slow_durations[5, SLOW_CHANNEL_WARRIOR_CHARGE] == (
-        combat.WARRIOR_CHARGE_SLOW_DURATION_TICKS - 1
+        combat.WARRIOR_CHARGE_SLOW_DURATION_TICKS
     )
     assert (
-        refreshed_stuns[5, STUN_CHANNEL_WARRIOR_CHARGE]
+        next_state.stun_durations[5, STUN_CHANNEL_WARRIOR_CHARGE]
         == combat.WARRIOR_CHARGE_STUN_DURATION_TICKS
     )
-    assert next_state.stun_durations[5, STUN_CHANNEL_WARRIOR_CHARGE] == 0
-    assert (
-        refreshed_stuns[6, STUN_CHANNEL_HUNTER_TRAP]
-        == combat.HUNTER_TRAP_STUN_DURATION_TICKS
-    )
     assert next_state.stun_durations[6, STUN_CHANNEL_HUNTER_TRAP] == (
-        combat.HUNTER_TRAP_STUN_DURATION_TICKS - 1
+        combat.HUNTER_TRAP_STUN_DURATION_TICKS
     )
     assert next_state.slow_durations[7, SLOW_CHANNEL_ROGUE_POISON] == (
-        combat.ROGUE_POISON_SLOW_DURATION_TICKS - 1
+        combat.ROGUE_POISON_SLOW_DURATION_TICKS
     )
     assert (
-        refreshed_stuns[7, STUN_CHANNEL_ROGUE_POISON]
+        next_state.stun_durations[7, STUN_CHANNEL_ROGUE_POISON]
         == combat.ROGUE_POISON_STUN_DURATION_TICKS
     )
-    assert next_state.stun_durations[7, STUN_CHANNEL_ROGUE_POISON] == 0
     assert next_state.rogue_poison_anti_heal_durations[7] == (
-        combat.ROGUE_POISON_ANTI_HEAL_DURATION_TICKS - 1
+        combat.ROGUE_POISON_ANTI_HEAL_DURATION_TICKS
     )
     assert bool(jnp.all(next_state.slow_durations[8] == 0))
     assert bool(jnp.all(next_state.stun_durations[8] == 0))
@@ -714,16 +791,20 @@ def test_status_ultimates_route_symmetrically_from_team_b() -> None:
     next_state, _, _ = _step(config, state, action)
 
     assert next_state.stun_durations[0, STUN_CHANNEL_HUNTER_TRAP] == (
-        combat.HUNTER_TRAP_STUN_DURATION_TICKS - 1
+        combat.HUNTER_TRAP_STUN_DURATION_TICKS
     )
     assert next_state.slow_durations[1, SLOW_CHANNEL_ROGUE_POISON] == (
-        combat.ROGUE_POISON_SLOW_DURATION_TICKS - 1
+        combat.ROGUE_POISON_SLOW_DURATION_TICKS
     )
     assert next_state.rogue_poison_anti_heal_durations[1] == (
-        combat.ROGUE_POISON_ANTI_HEAL_DURATION_TICKS - 1
+        combat.ROGUE_POISON_ANTI_HEAL_DURATION_TICKS
     )
     assert bool(jnp.all(next_state.slow_durations[0] == 0))
-    assert bool(jnp.all(next_state.stun_durations[1] == 0))
+    assert (
+        next_state.stun_durations[1, STUN_CHANNEL_ROGUE_POISON]
+        == combat.ROGUE_POISON_STUN_DURATION_TICKS
+    )
+    assert bool(jnp.all(next_state.stun_durations[1, :2] == 0))
 
 
 def test_holy_word_applies_no_status_channels() -> None:
@@ -767,12 +848,15 @@ def test_duplicate_status_sources_refresh_once_without_duration_stacking() -> No
     next_state, _, _ = _step(config, state, action)
 
     assert next_state.slow_durations[5, SLOW_CHANNEL_ROGUE_POISON] == (
-        combat.ROGUE_POISON_SLOW_DURATION_TICKS - 1
+        combat.ROGUE_POISON_SLOW_DURATION_TICKS
     )
     assert next_state.rogue_poison_anti_heal_durations[5] == (
-        combat.ROGUE_POISON_ANTI_HEAL_DURATION_TICKS - 1
+        combat.ROGUE_POISON_ANTI_HEAL_DURATION_TICKS
     )
-    assert next_state.stun_durations[5, STUN_CHANNEL_ROGUE_POISON] == 0
+    assert (
+        next_state.stun_durations[5, STUN_CHANNEL_ROGUE_POISON]
+        == combat.ROGUE_POISON_STUN_DURATION_TICKS
+    )
 
 
 def test_refresh_never_shortens_and_preserves_concurrent_channels() -> None:
@@ -886,7 +970,10 @@ def test_accepted_damage_breaks_trap_at_zero_health_without_effective_loss() -> 
         stun_durations=state.stun_durations.at[5, STUN_CHANNEL_HUNTER_TRAP].set(4),
     )
 
-    next_state, _, _ = _step(
+    current_mask = _current_action_mask(config, state)
+    assert not bool(jnp.any(current_mask.select_target_mask[5, 1:]))
+
+    next_state, _, next_mask = _step(
         config,
         state,
         _joint_action((0, _FIRST_ENEMY_TARGET, 0)),
@@ -894,6 +981,7 @@ def test_accepted_damage_breaks_trap_at_zero_health_without_effective_loss() -> 
 
     assert next_state.current_health[5] == 0.0
     assert next_state.stun_durations[5, STUN_CHANNEL_HUNTER_TRAP] == 0
+    assert bool(jnp.any(next_mask.select_target_mask[5, 1:]))
 
 
 def test_non_damage_effects_do_not_break_pre_existing_hunter_trap() -> None:
@@ -943,7 +1031,7 @@ def test_new_trap_survives_damage_that_breaks_the_pre_existing_trap() -> None:
     next_state, _, _ = _step(config, state, action)
 
     assert next_state.stun_durations[5, STUN_CHANNEL_HUNTER_TRAP] == (
-        combat.HUNTER_TRAP_STUN_DURATION_TICKS - 1
+        combat.HUNTER_TRAP_STUN_DURATION_TICKS
     )
 
 
@@ -1066,11 +1154,11 @@ def test_scanned_status_application_occurs_once_then_every_duration_ticks() -> N
 
     def scan_body(
         carry: tuple[EnvState, ActionMask], _: None
-    ) -> tuple[tuple[EnvState, ActionMask], Array]:
+    ) -> tuple[tuple[EnvState, ActionMask], tuple[Array, Array, Array]]:
         current_state, current_mask = carry
         (
             next_state,
-            _observation,
+            observation,
             _reward,
             _done_flags,
             next_mask,
@@ -1083,19 +1171,65 @@ def test_scanned_status_application_occurs_once_then_every_duration_ticks() -> N
             jax.random.key(43),
         )
         trap_duration = next_state.stun_durations[5, STUN_CHANNEL_HUNTER_TRAP]
-        return (next_state, next_mask), trap_duration
+        observed_trap_duration = observation.self_features[
+            5, AGENT_FEATURE_STUN_HUNTER_TRAP_DURATION
+        ]
+        has_nonempty_combat_target = jnp.any(next_mask.select_target_mask[5, 1:])
+        return (next_state, next_mask), (
+            trap_duration,
+            observed_trap_duration,
+            has_nonempty_combat_target,
+        )
 
-    (final_state, _), duration_history = jax.lax.scan(
-        scan_body,
-        (initial_state, initial_mask),
-        xs=None,
-        length=4,
+    def rollout(
+        state: EnvState,
+        action_mask: ActionMask,
+    ) -> tuple[tuple[EnvState, ActionMask], tuple[Array, Array, Array]]:
+        """Carry paired state and mask through the fixed Trap trajectory."""
+        return jax.lax.scan(
+            scan_body,
+            (state, action_mask),
+            xs=None,
+            length=5,
+        )
+
+    eager_rollout = rollout(initial_state, initial_mask)
+    compiled_rollout = cast(
+        tuple[tuple[EnvState, ActionMask], tuple[Array, Array, Array]],
+        jax.jit(rollout)(initial_state, initial_mask),
     )
+    for eager_leaf, compiled_leaf in zip(
+        jax.tree_util.tree_leaves(eager_rollout),
+        jax.tree_util.tree_leaves(compiled_rollout),
+        strict=True,
+    ):
+        assert bool(jnp.array_equal(eager_leaf, compiled_leaf))
+
+    (
+        (final_state, _),
+        (
+            duration_history,
+            observed_duration_history,
+            has_nonempty_target_history,
+        ),
+    ) = compiled_rollout
 
     assert bool(
         jnp.array_equal(
             duration_history,
-            jnp.asarray((3, 2, 1, 0), dtype=jnp.int32),
+            jnp.asarray((4, 3, 2, 1, 0), dtype=jnp.int32),
         )
     )
-    assert final_state.ultimate_cooldowns[0] == 27
+    assert bool(
+        jnp.array_equal(
+            observed_duration_history,
+            jnp.asarray((4, 3, 2, 1, 0), dtype=jnp.float32),
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            has_nonempty_target_history,
+            jnp.asarray((False, False, False, False, True)),
+        )
+    )
+    assert final_state.ultimate_cooldowns[0] == 26

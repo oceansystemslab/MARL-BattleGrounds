@@ -514,19 +514,24 @@ def _build_observation_and_action_mask(
 
 def _build_intended_movement_deltas(
     accepted_joint_action: Action,
-    refreshed_slow_durations: Array,
-    refreshed_priest_freedom_slow_floor_durations: Array,
+    current_slow_durations: Array,
+    current_priest_freedom_slow_floor_durations: Array,
     config: EnvConfig,
 ) -> Array:
-    """Scale accepted movement using post-refresh, pre-tick status durations."""
+    """Scale accepted movement using status truth from the current state.
+
+    The duration inputs must be the values visible at the current decision
+    epoch. Statuses accepted during this transition are packaged for the next
+    decision and must not retroactively change this movement intent.
+    """
     intended_movement_deltas_unscaled = _JOINT_ACTION_MOVE_TO_DISPLACEMENT_LOOKUP_TABLE[
         accepted_joint_action.move
     ]
     # Status-adjusted speed is shared with the observation contract.
     effective_movement_speeds = derive_effective_movement_speeds_from_durations(
         config.agent_profile.base_movement_speeds,
-        refreshed_slow_durations,
-        refreshed_priest_freedom_slow_floor_durations,
+        current_slow_durations,
+        current_priest_freedom_slow_floor_durations,
     )
 
     intended_movement_deltas = (
@@ -1170,26 +1175,17 @@ def _resolve_status_duration_lifecycle(
     hunter_basic_slow_applied_this_tick_by_global_recipient_slot: Array,
     priest_freedom_applied_this_tick_by_global_recipient_slot: Array,
     accepted_positive_raw_damage_received_this_tick_by_global_recipient_slot: Array,
-) -> tuple[Array, Array, Array, Array, Array, Array, Array, Array]:
-    """Apply the complete M5 status lifecycle and return timing snapshots.
+) -> tuple[Array, Array, Array, Array, Array]:
+    """Return the five successor-state status-duration arrays.
 
-    Accepted effects refresh only their source-local duration and never shorten
-    longer values. Accepted positive raw damage first clears a pre-existing
-    Hunter Trap channel, after which a new Trap may be applied. Refreshed slow,
-    stun, and Priest Freedom values form the same-tick control snapshot; every
-    duration then decrements once for next-state packaging.
+    Current durations age once toward zero. Accepted positive raw damage then
+    clears only the aged successor of a pre-existing Hunter Trap, after which
+    fresh source-local applications merge at full configured duration. A fresh
+    application never shortens a longer aged remainder and first governs the
+    next observable decision epoch.
     """
-    # Break only the pre-state Trap channel before applying current-tick statuses.
-    stun_durations_after_pre_existing_trap_break = current_state.stun_durations.at[
-        :, STUN_CHANNEL_HUNTER_TRAP
-    ].set(
-        jnp.where(
-            accepted_positive_raw_damage_received_this_tick_by_global_recipient_slot,
-            0,
-            current_state.stun_durations[:, STUN_CHANNEL_HUNTER_TRAP],
-        )
-    )
 
+    # Derive fresh applications once from the accepted action at this epoch.
     (
         mage_burst_activated_this_tick_by_actor_slot,
         warrior_charge_applied_this_tick_by_recipient_slot,
@@ -1201,171 +1197,152 @@ def _resolve_status_duration_lifecycle(
         accepted_recipient_one_hot_by_actor_and_global_slot,
     )
 
+    # Age every current duration exactly once for successor-state memory.
+    decremented_slow_durations = jnp.maximum(0, current_state.slow_durations - 1)
+    decremented_stun_durations = jnp.maximum(0, current_state.stun_durations - 1)
+    decremented_rogue_anti_heal_durations = jnp.maximum(
+        0, current_state.rogue_poison_anti_heal_durations - 1
+    )
+    decremented_mage_burst_durations = jnp.maximum(
+        0, current_state.mage_burst_damage_amplification_durations - 1
+    )
+    decremented_priest_freedom_slow_floor_durations = jnp.maximum(
+        0, current_state.priest_blessing_of_freedom_slow_floor_durations - 1
+    )
+
+    # Raw damage breaks only the pre-existing Trap successor. A fresh Trap is
+    # merged later, so damage cannot retroactively break the new application.
+    decremented_stun_durations_after_trap_break = decremented_stun_durations.at[
+        :, STUN_CHANNEL_HUNTER_TRAP
+    ].set(
+        jnp.where(
+            accepted_positive_raw_damage_received_this_tick_by_global_recipient_slot,
+            0,
+            decremented_stun_durations[:, STUN_CHANNEL_HUNTER_TRAP],
+        )
+    )
+
     # Mage Burst is source-local rather than recipient-routed.
-    refreshed_mage_burst_durations = jnp.where(
+    next_mage_burst_durations = jnp.where(
         mage_burst_activated_this_tick_by_actor_slot,
         jnp.maximum(
             MAGE_BURST_DAMAGE_DURATION_TICKS,
-            current_state.mage_burst_damage_amplification_durations,
+            decremented_mage_burst_durations,
         ),
-        current_state.mage_burst_damage_amplification_durations,
+        decremented_mage_burst_durations,
     )
-    next_mage_burst_durations = jnp.maximum(refreshed_mage_burst_durations - 1, 0)
 
     # Rogue anti-heal shares Poison's accepted recipient.
-    refreshed_rogue_anti_heal_durations = jnp.where(
+    next_rogue_anti_heal_durations = jnp.where(
         rogue_poison_applied_this_tick_by_recipient_slot,
         jnp.maximum(
             ROGUE_POISON_ANTI_HEAL_DURATION_TICKS,
-            current_state.rogue_poison_anti_heal_durations,
+            decremented_rogue_anti_heal_durations,
         ),
-        current_state.rogue_poison_anti_heal_durations,
-    )
-    next_rogue_anti_heal_durations = jnp.maximum(
-        refreshed_rogue_anti_heal_durations - 1, 0
+        decremented_rogue_anti_heal_durations,
     )
 
     # Preserve source identity by refreshing each stun channel independently.
-    current_warrior_charge_stun_durations = (
-        stun_durations_after_pre_existing_trap_break[:, STUN_CHANNEL_WARRIOR_CHARGE]
+    decremented_warrior_charge_stun_durations = (
+        decremented_stun_durations_after_trap_break[:, STUN_CHANNEL_WARRIOR_CHARGE]
     )
-    current_hunter_trap_stun_durations = stun_durations_after_pre_existing_trap_break[
-        :, STUN_CHANNEL_HUNTER_TRAP
-    ]
-    current_rogue_poison_stun_durations = stun_durations_after_pre_existing_trap_break[
-        :, STUN_CHANNEL_ROGUE_POISON
-    ]
+    decremented_hunter_trap_stun_durations = (
+        decremented_stun_durations_after_trap_break[:, STUN_CHANNEL_HUNTER_TRAP]
+    )
+    decremented_rogue_poison_stun_durations = (
+        decremented_stun_durations_after_trap_break[:, STUN_CHANNEL_ROGUE_POISON]
+    )
 
-    refreshed_warrior_charge_stun_durations = jnp.where(
+    next_warrior_charge_stun_durations = jnp.where(
         warrior_charge_applied_this_tick_by_recipient_slot,
         jnp.maximum(
-            WARRIOR_CHARGE_STUN_DURATION_TICKS, current_warrior_charge_stun_durations
+            WARRIOR_CHARGE_STUN_DURATION_TICKS,
+            decremented_warrior_charge_stun_durations,
         ),
-        current_warrior_charge_stun_durations,
+        decremented_warrior_charge_stun_durations,
     )
-    refreshed_stun_durations = stun_durations_after_pre_existing_trap_break.at[
-        :, STUN_CHANNEL_WARRIOR_CHARGE
-    ].set(refreshed_warrior_charge_stun_durations)
-
-    next_warrior_charge_stun_durations = jnp.maximum(
-        refreshed_warrior_charge_stun_durations - 1, 0
-    )
-    next_stun_durations = stun_durations_after_pre_existing_trap_break.at[
+    next_stun_durations = decremented_stun_durations_after_trap_break.at[
         :, STUN_CHANNEL_WARRIOR_CHARGE
     ].set(next_warrior_charge_stun_durations)
 
-    refreshed_hunter_trap_stun_durations = jnp.where(
+    next_hunter_trap_stun_durations = jnp.where(
         hunter_trap_applied_this_tick_by_recipient_slot,
         jnp.maximum(
-            HUNTER_TRAP_STUN_DURATION_TICKS, current_hunter_trap_stun_durations
+            HUNTER_TRAP_STUN_DURATION_TICKS, decremented_hunter_trap_stun_durations
         ),
-        current_hunter_trap_stun_durations,
-    )
-    refreshed_stun_durations = refreshed_stun_durations.at[
-        :, STUN_CHANNEL_HUNTER_TRAP
-    ].set(refreshed_hunter_trap_stun_durations)
-
-    next_hunter_trap_stun_durations = jnp.maximum(
-        refreshed_hunter_trap_stun_durations - 1, 0
+        decremented_hunter_trap_stun_durations,
     )
     next_stun_durations = next_stun_durations.at[:, STUN_CHANNEL_HUNTER_TRAP].set(
         next_hunter_trap_stun_durations
     )
 
-    refreshed_rogue_poison_stun_durations = jnp.where(
+    next_rogue_poison_stun_durations = jnp.where(
         rogue_poison_applied_this_tick_by_recipient_slot,
         jnp.maximum(
-            ROGUE_POISON_STUN_DURATION_TICKS, current_rogue_poison_stun_durations
+            ROGUE_POISON_STUN_DURATION_TICKS, decremented_rogue_poison_stun_durations
         ),
-        current_rogue_poison_stun_durations,
-    )
-    refreshed_stun_durations = refreshed_stun_durations.at[
-        :, STUN_CHANNEL_ROGUE_POISON
-    ].set(refreshed_rogue_poison_stun_durations)
-
-    next_rogue_poison_stun_durations = jnp.maximum(
-        refreshed_rogue_poison_stun_durations - 1, 0
+        decremented_rogue_poison_stun_durations,
     )
     next_stun_durations = next_stun_durations.at[:, STUN_CHANNEL_ROGUE_POISON].set(
         next_rogue_poison_stun_durations
     )
 
-    # Refresh all slow sources independently before the shared end-of-step tick.
-    current_warrior_charge_slow_durations = current_state.slow_durations[
+    # Refresh each slow source independently without disturbing other channels.
+    decremented_warrior_charge_slow_durations = decremented_slow_durations[
         :, SLOW_CHANNEL_WARRIOR_CHARGE
     ]
-    current_hunter_basic_slow_durations = current_state.slow_durations[
+    decremented_hunter_basic_slow_durations = decremented_slow_durations[
         :, SLOW_CHANNEL_HUNTER_BASIC
     ]
-    current_rogue_poison_slow_durations = current_state.slow_durations[
+    decremented_rogue_poison_slow_durations = decremented_slow_durations[
         :, SLOW_CHANNEL_ROGUE_POISON
     ]
-    current_slow_durations = current_state.slow_durations
 
-    refreshed_warrior_charge_slow_durations = jnp.where(
+    next_warrior_charge_slow_durations = jnp.where(
         warrior_charge_applied_this_tick_by_recipient_slot,
         jnp.maximum(
-            WARRIOR_CHARGE_SLOW_DURATION_TICKS, current_warrior_charge_slow_durations
+            WARRIOR_CHARGE_SLOW_DURATION_TICKS,
+            decremented_warrior_charge_slow_durations,
         ),
-        current_warrior_charge_slow_durations,
+        decremented_warrior_charge_slow_durations,
     )
-    refreshed_slow_durations = current_slow_durations.at[
+    next_slow_durations = decremented_slow_durations.at[
         :, SLOW_CHANNEL_WARRIOR_CHARGE
-    ].set(refreshed_warrior_charge_slow_durations)
-    next_slow_durations = refreshed_slow_durations.at[
-        :, SLOW_CHANNEL_WARRIOR_CHARGE
-    ].set(jnp.maximum(0, refreshed_warrior_charge_slow_durations - 1))
+    ].set(next_warrior_charge_slow_durations)
 
-    refreshed_hunter_basic_slow_durations = jnp.where(
+    next_hunter_basic_slow_durations = jnp.where(
         hunter_basic_slow_applied_this_tick_by_global_recipient_slot,
         jnp.maximum(
-            HUNTER_BASIC_SLOW_DURATION_TICKS, current_hunter_basic_slow_durations
+            HUNTER_BASIC_SLOW_DURATION_TICKS, decremented_hunter_basic_slow_durations
         ),
-        current_hunter_basic_slow_durations,
+        decremented_hunter_basic_slow_durations,
     )
-    refreshed_slow_durations = refreshed_slow_durations.at[
-        :, SLOW_CHANNEL_HUNTER_BASIC
-    ].set(refreshed_hunter_basic_slow_durations)
     next_slow_durations = next_slow_durations.at[:, SLOW_CHANNEL_HUNTER_BASIC].set(
-        jnp.maximum(0, refreshed_hunter_basic_slow_durations - 1)
+        next_hunter_basic_slow_durations
     )
 
-    refreshed_rogue_poison_slow_durations = jnp.where(
+    next_rogue_poison_slow_durations = jnp.where(
         rogue_poison_applied_this_tick_by_recipient_slot,
         jnp.maximum(
-            ROGUE_POISON_SLOW_DURATION_TICKS, current_rogue_poison_slow_durations
+            ROGUE_POISON_SLOW_DURATION_TICKS, decremented_rogue_poison_slow_durations
         ),
-        current_rogue_poison_slow_durations,
+        decremented_rogue_poison_slow_durations,
     )
-    refreshed_slow_durations = refreshed_slow_durations.at[
-        :, SLOW_CHANNEL_ROGUE_POISON
-    ].set(refreshed_rogue_poison_slow_durations)
     next_slow_durations = next_slow_durations.at[:, SLOW_CHANNEL_ROGUE_POISON].set(
-        jnp.maximum(0, refreshed_rogue_poison_slow_durations - 1)
+        next_rogue_poison_slow_durations
     )
 
     # Freedom raises the movement floor without clearing any slow channel.
-    current_priest_freedom_slow_floor_durations = (
-        current_state.priest_blessing_of_freedom_slow_floor_durations
-    )
-
-    refreshed_priest_freedom_slow_floor_durations = jnp.where(
+    next_priest_freedom_slow_floor_durations = jnp.where(
         priest_freedom_applied_this_tick_by_global_recipient_slot,
         jnp.maximum(
             PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS,
-            current_priest_freedom_slow_floor_durations,
+            decremented_priest_freedom_slow_floor_durations,
         ),
-        current_priest_freedom_slow_floor_durations,
+        decremented_priest_freedom_slow_floor_durations,
     ).astype(jnp.int32)
 
-    next_priest_freedom_slow_floor_durations = jnp.maximum(
-        refreshed_priest_freedom_slow_floor_durations - 1, 0
-    )
-
     return (
-        refreshed_slow_durations,
-        refreshed_stun_durations,
-        refreshed_priest_freedom_slow_floor_durations,
         next_slow_durations,
         next_stun_durations,
         next_rogue_anti_heal_durations,
@@ -1537,25 +1514,6 @@ def step(
         current_warrior_damage_mitigation_aura_multipliers,
     )
 
-    (
-        refreshed_slow_durations,
-        _,  # Refreshed stun truth is first consumed by Checkpoint 3.
-        refreshed_priest_freedom_slow_floor_durations,
-        next_slow_durations,
-        next_stun_durations,
-        next_rogue_anti_heal_durations,
-        next_mage_burst_durations,
-        next_priest_freedom_slow_floor_durations,
-    ) = _resolve_status_duration_lifecycle(
-        current_state,
-        config,
-        accepted_joint_action.use_ultimate,
-        accepted_recipient_one_hot_by_actor_and_global_slot,
-        hunter_basic_slow_applied_this_tick_by_global_recipient_slot,
-        priest_freedom_applied_this_tick_by_global_recipient_slot,
-        accepted_positive_raw_damage_received_this_tick_by_global_recipient_slot,
-    )
-
     next_health_after_effective_damage_and_healing = (
         _compute_health_after_simultaneous_damage_and_healing(
             total_effective_damage_received_by_global_slot,
@@ -1572,10 +1530,11 @@ def step(
         jnp.maximum(0, current_state.ultimate_cooldowns - 1),
     )
 
+    # Current public status truth governs the current movement decision.
     intended_movement_deltas = _build_intended_movement_deltas(
         accepted_joint_action,
-        refreshed_slow_durations,
-        refreshed_priest_freedom_slow_floor_durations,
+        current_state.slow_durations,
+        current_state.priest_blessing_of_freedom_slow_floor_durations,
         config,
     )
 
@@ -1590,7 +1549,21 @@ def step(
         config.obstacles,
     )
 
-    # Checkpoint 3 will consume refreshed stun truth for same-tick movement control.
+    (
+        next_slow_durations,
+        next_stun_durations,
+        next_rogue_anti_heal_durations,
+        next_mage_burst_durations,
+        next_priest_freedom_slow_floor_durations,
+    ) = _resolve_status_duration_lifecycle(
+        current_state,
+        config,
+        accepted_joint_action.use_ultimate,
+        accepted_recipient_one_hot_by_actor_and_global_slot,
+        hunter_basic_slow_applied_this_tick_by_global_recipient_slot,
+        priest_freedom_applied_this_tick_by_global_recipient_slot,
+        accepted_positive_raw_damage_received_this_tick_by_global_recipient_slot,
+    )
 
     next_state = EnvState(
         step_count=current_state.step_count + 1,
