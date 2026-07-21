@@ -34,15 +34,32 @@ def _config(
     map_height: float = 16.0,
 ) -> EnvConfig:
     """Build a deterministic config with an explicitly asymmetric roster."""
+    profile = resolve_agent_profile(
+        jnp.full((MAX_AGENT_SLOTS,), CLASS_NEUTRAL, dtype=jnp.int32),
+        jnp.asarray(team_sizes, dtype=jnp.int32),
+    )
+    positions = jnp.asarray(
+        (
+            (0.5, 0.5),
+            (2.5, 0.5),
+            (4.5, 0.5),
+            (6.5, 0.5),
+            (8.5, 0.5),
+            (0.5, 7.5),
+            (2.5, 7.5),
+            (4.5, 7.5),
+            (6.5, 7.5),
+            (8.5, 7.5),
+        ),
+        dtype=jnp.float32,
+    )
     return EnvConfig(
         max_steps=max_steps,
         map_width=map_width,
         map_height=map_height,
         obstacles=jnp.zeros((MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES), dtype=jnp.float32),
-        agent_profile=resolve_agent_profile(
-            jnp.full((MAX_AGENT_SLOTS,), CLASS_NEUTRAL, dtype=jnp.int32),
-            jnp.asarray(team_sizes, dtype=jnp.int32),
-        ),
+        agent_profile=profile,
+        initial_agent_positions=jnp.where(profile.active_mask[:, None], positions, 0.0),
     )
 
 

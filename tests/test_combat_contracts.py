@@ -133,14 +133,31 @@ def _config(
     team_size: int = 3, class_ids: Array = _CONFIG_DEFAULT_5_CLASS_MIRROR
 ) -> EnvConfig:
     """Return a deterministic combat-contract test config."""
+    profile = resolve_agent_profile(
+        class_ids, jnp.asarray((team_size, team_size), dtype=jnp.int32)
+    )
+    positions = jnp.asarray(
+        (
+            (0.5, 0.5),
+            (2.5, 0.5),
+            (4.5, 0.5),
+            (6.5, 0.5),
+            (8.5, 0.5),
+            (0.5, 7.5),
+            (2.5, 7.5),
+            (4.5, 7.5),
+            (6.5, 7.5),
+            (8.5, 7.5),
+        ),
+        dtype=jnp.float32,
+    )
     return EnvConfig(
         max_steps=1000,
         map_width=20.0,
         map_height=12.0,
         obstacles=_empty_obstacles(),
-        agent_profile=resolve_agent_profile(
-            class_ids, jnp.asarray((team_size, team_size), dtype=jnp.int32)
-        ),
+        agent_profile=profile,
+        initial_agent_positions=jnp.where(profile.active_mask[:, None], positions, 0.0),
     )
 
 

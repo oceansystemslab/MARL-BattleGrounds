@@ -57,7 +57,6 @@ from marl_battlegrounds.core.types import (
     CONTEXT_FEATURE_ENEMY_TEAM_SIZE,
     CONTEXT_FEATURE_MAP_HEIGHT,
     CONTEXT_FEATURES,
-    ENVIRONMENT_DIMENSIONS,
     HUNTER_CLASS_ID,
     MAGE_CLASS_ID,
     MAX_AGENT_SLOTS,
@@ -1482,33 +1481,20 @@ def _derive_accepted_ultimate_status_applications(
 def reset(
     config: EnvConfig, key: Array
 ) -> tuple[EnvState, Observation, ActionMask, Info]:
-    """Create the initial fixed-slot simulator state and placeholders."""
+    """Create initial fixed-slot state from a host-validated configuration."""
     # Reset keeps all arrays at MAX_AGENT_SLOTS length. Smaller tasks use the
     # resolved profile's active mask to distinguish agents from padded slots.
     # Ordinary reset starts all active agents alive. Scenario loaders may later
     # create active-but-dead agents from curated states.
-    # TODO(M4+): Use key when reset begins sampling spawn positions or randomized
-    # layouts. Deterministic dummy reset may accept the key without consuming it.
+    # Randomized task builders consume keys while constructing resolved episode
+    # configurations. Ordinary reset intentionally does not resample starts.
     # TODO(Scenario): Keep curated scenario starts out of ordinary reset. A future
     # scenario loader should validate and return EnvState values that reuse the
     # same transition, observation, and mask machinery.
-    # TODO(Config Validation): Eventually implement a non-JAX validator in pipeline.
-
-    deterministic_key = jax.random.key(42)
-    max_val = jnp.min(jnp.array([config.map_width, config.map_height]))
-    # Reset emits geometry-valid placeholder centers so MOVE_STAY does not
-    # trigger corrective projection before scenario loading exists.
-    default_agent_positions = jax.random.uniform(
-        deterministic_key,
-        shape=(MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS),
-        dtype=jnp.float32,
-        minval=0 + 0.5,
-        maxval=max_val - 0.5,  # Placeholder default agent positions
-    )
-
+    del key
     initial_state = EnvState(
         step_count=jnp.array(0, dtype=jnp.int32),
-        agent_positions=default_agent_positions,  # Placeholder
+        agent_positions=config.initial_agent_positions,
         alive_mask=config.agent_profile.active_mask,
         current_health=config.agent_profile.max_health,
         # At restart, current health should be max health.

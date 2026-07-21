@@ -227,15 +227,32 @@ def _deterministic_config(
     obstacles: Array | None = None,
 ) -> EnvConfig:
     """Create a deterministic config for observation-mask tests."""
+    profile = resolve_agent_profile(
+        jnp.full((MAX_AGENT_SLOTS,), CLASS_NEUTRAL, dtype=jnp.int32),
+        jnp.asarray((team_size, team_size), dtype=jnp.int32),
+    )
+    positions = jnp.asarray(
+        (
+            (0.5, 0.5),
+            (2.5, 0.5),
+            (4.5, 0.5),
+            (6.5, 0.5),
+            (8.5, 0.5),
+            (0.5, 7.5),
+            (2.5, 7.5),
+            (4.5, 7.5),
+            (6.5, 7.5),
+            (8.5, 7.5),
+        ),
+        dtype=jnp.float32,
+    )
     return EnvConfig(
         max_steps=max_steps,
         map_width=map_width,
         map_height=map_height,
         obstacles=_empty_obstacles() if obstacles is None else obstacles,
-        agent_profile=resolve_agent_profile(
-            jnp.full((MAX_AGENT_SLOTS,), CLASS_NEUTRAL, dtype=jnp.int32),
-            jnp.asarray((team_size, team_size), dtype=jnp.int32),
-        ),
+        agent_profile=profile,
+        initial_agent_positions=jnp.where(profile.active_mask[:, None], positions, 0.0),
     )
 
 

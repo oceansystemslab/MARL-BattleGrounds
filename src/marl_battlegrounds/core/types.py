@@ -204,6 +204,7 @@ class EnvConfig(NamedTuple):
     map_height: float
     obstacles: Array
     agent_profile: ResolvedAgentProfile
+    initial_agent_positions: Array
 
 
 class EnvState(NamedTuple):

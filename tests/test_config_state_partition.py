@@ -80,14 +80,31 @@ def _requested_roster() -> Array:
 
 
 def _config(team_sizes: tuple[int, int] = (1, 1)) -> EnvConfig:
+    profile = resolve_agent_profile(
+        _requested_roster(), jnp.asarray(team_sizes, dtype=jnp.int32)
+    )
+    positions = jnp.asarray(
+        (
+            (0.5, 0.5),
+            (2.5, 0.5),
+            (4.5, 0.5),
+            (6.5, 0.5),
+            (8.5, 0.5),
+            (0.5, 7.5),
+            (2.5, 7.5),
+            (4.5, 7.5),
+            (6.5, 7.5),
+            (8.5, 7.5),
+        ),
+        dtype=jnp.float32,
+    )
     return EnvConfig(
         max_steps=1000,
         map_width=20.0,
         map_height=12.0,
         obstacles=jnp.zeros((MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES), dtype=jnp.float32),
-        agent_profile=resolve_agent_profile(
-            _requested_roster(), jnp.asarray(team_sizes, dtype=jnp.int32)
-        ),
+        agent_profile=profile,
+        initial_agent_positions=jnp.where(profile.active_mask[:, None], positions, 0.0),
     )
 
 

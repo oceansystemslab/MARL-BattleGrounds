@@ -15,6 +15,7 @@ from marl_battlegrounds.core.env import reset, step
 from marl_battlegrounds.core.types import (
     CLASS_NEUTRAL,
     MAX_AGENT_SLOTS,
+    MAX_AGENTS_PER_TEAM,
     MAX_OBSTACLE_SLOTS,
     MOVE_EAST,
     MOVE_NORTH,
@@ -176,15 +177,22 @@ def _empty_obstacles() -> Array:
 
 def _sample_config() -> EnvConfig:
     """Create a small deterministic manual-control smoke-test config."""
+    profile = resolve_agent_profile(
+        jnp.full((MAX_AGENT_SLOTS,), CLASS_NEUTRAL, dtype=jnp.int32),
+        jnp.asarray((1, 1), dtype=jnp.int32),
+    )
+    positions = jnp.zeros((MAX_AGENT_SLOTS, 2), dtype=jnp.float32)
+    positions = positions.at[0].set(jnp.asarray((2.0, 2.0), dtype=jnp.float32))
+    positions = positions.at[MAX_AGENTS_PER_TEAM].set(
+        jnp.asarray((10.0, 6.0), dtype=jnp.float32)
+    )
     return EnvConfig(
         max_steps=10,
         map_width=12.0,
         map_height=8.0,
         obstacles=_empty_obstacles(),
-        agent_profile=resolve_agent_profile(
-            jnp.full((MAX_AGENT_SLOTS,), CLASS_NEUTRAL, dtype=jnp.int32),
-            jnp.asarray((1, 1), dtype=jnp.int32),
-        ),
+        agent_profile=profile,
+        initial_agent_positions=positions,
     )
 
 

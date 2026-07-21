@@ -151,6 +151,9 @@ def _scenario(
         map_height=12.0,
         obstacles=_empty_obstacles() if obstacles is None else obstacles,
         agent_profile=profile,
+        initial_agent_positions=(
+            _default_positions(team_sizes) if positions is None else positions
+        ),
     )
     state = EnvState(
         step_count=jnp.array(0, dtype=jnp.int32),

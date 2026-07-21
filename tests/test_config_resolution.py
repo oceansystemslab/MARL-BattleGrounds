@@ -198,6 +198,21 @@ def test_env_config_packages_only_the_resolved_profile_for_roster_facts() -> Non
         map_height=12.0,
         obstacles=jnp.zeros((MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES), dtype=jnp.float32),
         agent_profile=profile,
+        initial_agent_positions=jnp.asarray(
+            (
+                (0.5, 0.5),
+                (2.5, 0.5),
+                (4.5, 0.5),
+                (0.0, 0.0),
+                (0.0, 0.0),
+                (0.5, 7.5),
+                (2.5, 7.5),
+                (4.5, 7.5),
+                (0.0, 0.0),
+                (0.0, 0.0),
+            ),
+            dtype=jnp.float32,
+        ),
     )
 
     assert "agent_profile" in EnvConfig._fields

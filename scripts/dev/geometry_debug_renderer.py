@@ -12,7 +12,7 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
-from marl_battlegrounds.core.config import resolve_agent_profile
+from marl_battlegrounds.core.config import resolve_agent_profile, validate_env_config
 from marl_battlegrounds.core.types import (
     ENVIRONMENT_DIMENSIONS,
     MAGE_CLASS_ID,
@@ -144,16 +144,29 @@ def _debug_config() -> EnvConfig:
     obstacles = obstacles.at[0].set(_pillar_obstacle())
     obstacles = obstacles.at[1].set(_wall_obstacle())
 
-    return EnvConfig(
+    profile = resolve_agent_profile(
+        jnp.full((MAX_AGENT_SLOTS,), MAGE_CLASS_ID, dtype=jnp.int32),
+        jnp.asarray((2, 2), dtype=jnp.int32),
+    )
+    positions = jnp.zeros((MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS), dtype=jnp.float32)
+    positions = positions.at[0].set(jnp.asarray((2.0, 2.0), dtype=jnp.float32))
+    positions = positions.at[1].set(jnp.asarray((3.0, 2.7), dtype=jnp.float32))
+    positions = positions.at[MAX_AGENTS_PER_TEAM].set(
+        jnp.asarray((10.0, 6.0), dtype=jnp.float32)
+    )
+    positions = positions.at[MAX_AGENTS_PER_TEAM + 1].set(
+        jnp.asarray((8.8, 5.3), dtype=jnp.float32)
+    )
+    config = EnvConfig(
         max_steps=_EFFECTIVELY_UNBOUNDED_MAX_STEPS,
         map_width=12.0,
         map_height=8.0,
         obstacles=obstacles,
-        agent_profile=resolve_agent_profile(
-            jnp.full((MAX_AGENT_SLOTS,), MAGE_CLASS_ID, dtype=jnp.int32),
-            jnp.asarray((2, 2), dtype=jnp.int32),
-        ),
+        agent_profile=profile,
+        initial_agent_positions=positions,
     )
+    validate_env_config(config)
+    return config
 
 
 def _debug_state() -> EnvState:

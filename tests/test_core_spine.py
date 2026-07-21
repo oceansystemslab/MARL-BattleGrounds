@@ -197,15 +197,32 @@ def _config(
     obstacles: Array | None = None,
 ) -> EnvConfig:
     """Return a deterministic test config."""
+    profile = resolve_agent_profile(
+        _CANONICAL_INITIAL_CLASS_IDS,
+        jnp.asarray((team_size, team_size), dtype=jnp.int32),
+    )
+    positions = jnp.asarray(
+        (
+            (0.5, 0.5),
+            (2.5, 0.5),
+            (4.5, 0.5),
+            (6.5, 0.5),
+            (8.5, 0.5),
+            (0.5, 7.5),
+            (2.5, 7.5),
+            (4.5, 7.5),
+            (6.5, 7.5),
+            (8.5, 7.5),
+        ),
+        dtype=jnp.float32,
+    )
     return EnvConfig(
         max_steps=max_steps,
         map_width=20.0,
         map_height=12.0,
         obstacles=_empty_obstacles() if obstacles is None else obstacles,
-        agent_profile=resolve_agent_profile(
-            _CANONICAL_INITIAL_CLASS_IDS,
-            jnp.asarray((team_size, team_size), dtype=jnp.int32),
-        ),
+        agent_profile=profile,
+        initial_agent_positions=jnp.where(profile.active_mask[:, None], positions, 0.0),
     )
 
 

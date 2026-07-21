@@ -129,25 +129,27 @@ def _scenario(
             _ACTOR_SLOT
         ].set(ultimate_radius),
     )
+    initial_positions = (
+        jnp.zeros((MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS), dtype=jnp.float32)
+        .at[_ACTOR_SLOT]
+        .set(jnp.asarray((2.0, 2.0), dtype=jnp.float32))
+        .at[_ALLY_SLOT]
+        .set(jnp.asarray((3.0, 2.0), dtype=jnp.float32))
+        .at[_ENEMY_SLOT]
+        .set(jnp.asarray((enemy_x, 2.0), dtype=jnp.float32))
+    )
     config = EnvConfig(
         max_steps=100,
         map_width=20.0,
         map_height=12.0,
         obstacles=_empty_obstacles() if obstacles is None else obstacles,
         agent_profile=profile,
+        initial_agent_positions=initial_positions,
     )
 
     state = EnvState(
         step_count=jnp.array(0, dtype=jnp.int32),
-        agent_positions=jnp.zeros(
-            (MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS), dtype=jnp.float32
-        )
-        .at[_ACTOR_SLOT]
-        .set(jnp.asarray((2.0, 2.0), dtype=jnp.float32))
-        .at[_ALLY_SLOT]
-        .set(jnp.asarray((3.0, 2.0), dtype=jnp.float32))
-        .at[_ENEMY_SLOT]
-        .set(jnp.asarray((enemy_x, 2.0), dtype=jnp.float32)),
+        agent_positions=initial_positions,
         alive_mask=profile.active_mask,
         current_health=profile.max_health,
         ultimate_cooldowns=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),

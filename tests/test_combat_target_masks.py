@@ -91,14 +91,6 @@ def _target_scenario(actor_class_id: int = MAGE_CLASS_ID) -> tuple[EnvConfig, En
             jnp.float32
         ),
     )
-    config = EnvConfig(
-        max_steps=100,
-        map_width=20.0,
-        map_height=12.0,
-        obstacles=jnp.zeros((MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES), dtype=jnp.float32),
-        agent_profile=profile,
-    )
-    state, *_ = reset(config, jax.random.key(1))
     positions = jnp.zeros((MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS), dtype=jnp.float32)
     positions = positions.at[_ACTOR_SLOT].set(
         jnp.asarray((2.0, 2.0), dtype=jnp.float32)
@@ -107,7 +99,16 @@ def _target_scenario(actor_class_id: int = MAGE_CLASS_ID) -> tuple[EnvConfig, En
     positions = positions.at[_ENEMY_SLOT].set(
         jnp.asarray((6.0, 2.0), dtype=jnp.float32)
     )
-    return config, state._replace(agent_positions=positions)
+    config = EnvConfig(
+        max_steps=100,
+        map_width=20.0,
+        map_height=12.0,
+        obstacles=jnp.zeros((MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES), dtype=jnp.float32),
+        agent_profile=profile,
+        initial_agent_positions=positions,
+    )
+    state, *_ = reset(config, jax.random.key(1))
+    return config, state
 
 
 def _step_scenario(
