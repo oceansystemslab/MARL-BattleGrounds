@@ -193,7 +193,6 @@ def test_env_config_packages_only_the_resolved_profile_for_roster_facts() -> Non
         jnp.asarray((3, 3), dtype=jnp.int32),
     )
     config = EnvConfig(
-        team_size=3,
         max_steps=1000,
         map_width=20.0,
         map_height=12.0,
@@ -202,6 +201,7 @@ def test_env_config_packages_only_the_resolved_profile_for_roster_facts() -> Non
     )
 
     assert "agent_profile" in EnvConfig._fields
+    assert "team_size" not in EnvConfig._fields
     assert "initial_class_ids" not in EnvConfig._fields
     assert config.agent_profile is profile
 

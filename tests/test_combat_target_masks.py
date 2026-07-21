@@ -92,7 +92,6 @@ def _target_scenario(actor_class_id: int = MAGE_CLASS_ID) -> tuple[EnvConfig, En
         ),
     )
     config = EnvConfig(
-        team_size=2,
         max_steps=100,
         map_width=20.0,
         map_height=12.0,

@@ -177,7 +177,6 @@ def _empty_obstacles() -> Array:
 def _sample_config() -> EnvConfig:
     """Create a small deterministic manual-control smoke-test config."""
     return EnvConfig(
-        team_size=1,
         max_steps=10,
         map_width=12.0,
         map_height=8.0,

@@ -130,7 +130,6 @@ def _sample_config() -> EnvConfig:
     obstacles = obstacles.at[1].set(_wall_obstacle())
 
     return EnvConfig(
-        team_size=2,
         max_steps=100,
         map_width=12.0,
         map_height=8.0,

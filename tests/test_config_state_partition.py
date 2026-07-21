@@ -81,7 +81,6 @@ def _requested_roster() -> Array:
 
 def _config(team_sizes: tuple[int, int] = (1, 1)) -> EnvConfig:
     return EnvConfig(
-        team_size=max(team_sizes),
         max_steps=1000,
         map_width=20.0,
         map_height=12.0,

@@ -146,7 +146,6 @@ def _scenario(
         ).astype(jnp.float32),
     )
     config = EnvConfig(
-        team_size=max(team_sizes),
         max_steps=100,
         map_width=20.0,
         map_height=12.0,

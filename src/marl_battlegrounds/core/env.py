@@ -52,6 +52,10 @@ from marl_battlegrounds.core.geometry import (
     project_movement_with_geometry,
 )
 from marl_battlegrounds.core.types import (
+    CONTEXT_FEATURE_ALLY_TEAM_SIZE,
+    CONTEXT_FEATURE_CURRENT_TIMESTEP,
+    CONTEXT_FEATURE_ENEMY_TEAM_SIZE,
+    CONTEXT_FEATURE_MAP_HEIGHT,
     CONTEXT_FEATURES,
     ENVIRONMENT_DIMENSIONS,
     HUNTER_CLASS_ID,
@@ -77,6 +81,8 @@ from marl_battlegrounds.core.types import (
     STUN_CHANNEL_HUNTER_TRAP,
     STUN_CHANNEL_ROGUE_POISON,
     STUN_CHANNEL_WARRIOR_CHARGE,
+    TEAM_A_ID,
+    TEAM_B_ID,
     UNIT_FEATURES,
     WARRIOR_CLASS_ID,
     Action,
@@ -435,6 +441,71 @@ def _build_move_mask(state: EnvState, config: EnvConfig) -> Array:
     return jnp.logical_or(active_and_alive_mask[:, None], canonical_stay_mask)
 
 
+def _build_context_features(state: EnvState, config: EnvConfig) -> Array:
+    """Build raw actor-relative episode context for configured policy slots.
+
+    The simulator exposes semantic facts without learner-specific scaling.
+    Mode-owned columns remain zero until their battleground contracts exist,
+    and configured-but-dead actors retain context while padded rows stay zero.
+    """
+
+    team_a_ally_team_size = jnp.sum(
+        jnp.logical_and(
+            config.agent_profile.team_ids[TEAM_A_START:TEAM_A_END] == TEAM_A_ID,
+            config.agent_profile.active_mask[TEAM_A_START:TEAM_A_END],
+        )
+    )
+
+    team_b_ally_team_size = jnp.sum(
+        jnp.logical_and(
+            config.agent_profile.team_ids[TEAM_B_START:TEAM_B_END] == TEAM_B_ID,
+            config.agent_profile.active_mask[TEAM_B_START:TEAM_B_END],
+        )
+    )
+
+    team_a_enemy_team_size = team_b_ally_team_size
+    team_b_enemy_team_size = team_a_ally_team_size
+
+    # Reserved mode, objective, score, and threshold columns start neutral.
+    context_features = jnp.zeros(
+        shape=(MAX_AGENT_SLOTS, CONTEXT_FEATURES), dtype=jnp.float32
+    )
+
+    context_features = context_features.at[
+        :, CONTEXT_FEATURE_CURRENT_TIMESTEP : CONTEXT_FEATURE_MAP_HEIGHT + 1
+    ].set(
+        jnp.asarray(
+            [
+                state.step_count,
+                config.max_steps,
+                config.map_width,
+                config.map_height,
+            ]
+        )
+    )
+
+    # Team A rows see Team A as allies and Team B as enemies.
+    context_features = context_features.at[
+        TEAM_A_START:TEAM_A_END,
+        CONTEXT_FEATURE_ALLY_TEAM_SIZE : CONTEXT_FEATURE_ENEMY_TEAM_SIZE + 1,
+    ].set(jnp.asarray([team_a_ally_team_size, team_a_enemy_team_size]))
+
+    # Team B rows receive the actor-relative inverse of those counts.
+    context_features = context_features.at[
+        TEAM_B_START:TEAM_B_END,
+        CONTEXT_FEATURE_ALLY_TEAM_SIZE : CONTEXT_FEATURE_ENEMY_TEAM_SIZE + 1,
+    ].set(jnp.asarray([team_b_ally_team_size, team_b_enemy_team_size]))
+
+    # Global episode facts are policy inputs only for configured actor slots.
+    context_features = jnp.where(
+        config.agent_profile.active_mask[:, None],
+        context_features,
+        jnp.zeros_like(context_features),
+    )
+
+    return context_features.astype(jnp.float32)
+
+
 def _build_observation_and_action_mask(
     state: EnvState, config: EnvConfig
 ) -> tuple[Observation, ActionMask]:
@@ -481,6 +552,8 @@ def _build_observation_and_action_mask(
     )
     move_mask = _build_move_mask(state, config)
 
+    context_features = _build_context_features(state, config)
+
     map_obstacle_features = jnp.broadcast_to(
         config.obstacles[None, :, :],
         (MAX_AGENT_SLOTS, MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES),
@@ -502,9 +575,7 @@ def _build_observation_and_action_mask(
             shape=(MAX_AGENT_SLOTS, MAX_OBJECTIVE_SLOTS, OBJECTIVE_FEATURES),
             dtype=jnp.float32,
         ),
-        context_features=jnp.zeros(
-            shape=(MAX_AGENT_SLOTS, CONTEXT_FEATURES), dtype=jnp.float32
-        ),
+        context_features=context_features,
         ally_visibility_mask=ally_visibility_mask,
         enemy_visibility_mask=enemy_visibility_mask,
     )

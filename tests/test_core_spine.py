@@ -198,7 +198,6 @@ def _config(
 ) -> EnvConfig:
     """Return a deterministic test config."""
     return EnvConfig(
-        team_size=team_size,
         max_steps=max_steps,
         map_width=20.0,
         map_height=12.0,
@@ -522,19 +521,25 @@ def test_static_shape_constants_are_consistent() -> None:
     assert AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS < UNIT_FEATURES
     assert MAX_OBJECTIVE_SLOTS == 8
     assert OBJECTIVE_FEATURES == 12
-    assert CONTEXT_FEATURES == 8
+    assert CONTEXT_FEATURES == 19
+    context_feature_indices = sorted(
+        value
+        for name, value in vars(core_types).items()
+        if name.startswith("CONTEXT_FEATURE_") and isinstance(value, int)
+    )
+    assert context_feature_indices == list(range(CONTEXT_FEATURES))
 
 
 def test_env_config_stores_static_episode_settings() -> None:
     obstacles = _sample_obstacles()
     env_config = _config(team_size=5, max_steps=10000, obstacles=obstacles)
 
-    assert env_config.team_size == 5
     assert env_config.max_steps == 10000
     assert env_config.map_width == 20.0
     assert env_config.map_height == 12.0
 
     config_fields = set(EnvConfig._fields)
+    assert "team_size" not in config_fields
     assert "default_agent_radius" not in config_fields
     assert "default_movement_speed" not in config_fields
     assert "default_observation_radius" not in config_fields

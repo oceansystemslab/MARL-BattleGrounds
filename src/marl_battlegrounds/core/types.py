@@ -50,7 +50,31 @@ SELF_FEATURES = 55
 UNIT_FEATURES = 55
 MAX_OBJECTIVE_SLOTS = 8
 OBJECTIVE_FEATURES = 12
-CONTEXT_FEATURES = 8
+CONTEXT_FEATURES = 19
+
+# Context exposes raw simulator and task facts. Canonical learner-facing
+# normalization belongs to the later versioned observation-preprocessing layer.
+# Mode-specific score and threshold fields are temporary schema reservations;
+# their final semantics remain owned by the corresponding battleground modes.
+CONTEXT_FEATURE_CURRENT_TIMESTEP = 0
+CONTEXT_FEATURE_EPISODE_HORIZON = 1
+CONTEXT_FEATURE_MAP_WIDTH = 2
+CONTEXT_FEATURE_MAP_HEIGHT = 3
+CONTEXT_FEATURE_ALLY_TEAM_SIZE = 4
+CONTEXT_FEATURE_ENEMY_TEAM_SIZE = 5
+CONTEXT_FEATURE_IS_TEAM_DEATHMATCH = 6
+CONTEXT_FEATURE_IS_KING_OF_THE_HILL = 7
+CONTEXT_FEATURE_IS_CAPTURE_THE_FLAG = 8
+CONTEXT_FEATURE_ACTIVE_OBJECTIVE_COUNT = 9
+CONTEXT_FEATURE_TEAM_DEATHMATCH_ALLY_SCORE = 10
+CONTEXT_FEATURE_TEAM_DEATHMATCH_ENEMY_SCORE = 11
+CONTEXT_FEATURE_KING_OF_THE_HILL_ALLY_SCORE = 12
+CONTEXT_FEATURE_KING_OF_THE_HILL_ENEMY_SCORE = 13
+CONTEXT_FEATURE_CAPTURE_THE_FLAG_ALLY_CAPTURE_COUNT = 14
+CONTEXT_FEATURE_CAPTURE_THE_FLAG_ENEMY_CAPTURE_COUNT = 15
+CONTEXT_FEATURE_TEAM_DEATHMATCH_SCORE_THRESHOLD = 16
+CONTEXT_FEATURE_KING_OF_THE_HILL_SCORE_THRESHOLD = 17
+CONTEXT_FEATURE_CAPTURE_THE_FLAG_CAPTURE_THRESHOLD = 18
 
 # Self rows and unit-candidate rows use one shared agent-feature schema.
 # self_features exists only for convenient actor conditioning; ally/enemy unit
@@ -171,11 +195,10 @@ class EnvConfig(NamedTuple):
     """Static episode settings and reset inputs.
 
     Static map geometry belongs here because Milestone 4 obstacles do not change
-    during an episode. ``agent_profile`` contains the complete immutable
-    fixed-slot profile resolved before ordinary reset.
+    during an episode. ``agent_profile`` is the sole authority for immutable
+    fixed-slot roster topology and capabilities resolved before ordinary reset.
     """
 
-    team_size: int
     max_steps: int
     map_width: float
     map_height: float

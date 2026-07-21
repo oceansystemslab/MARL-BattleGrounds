@@ -182,7 +182,6 @@ def _deterministic_config(
 ) -> EnvConfig:
     """Create a deterministic config for movement integration tests."""
     return EnvConfig(
-        team_size=team_size,
         max_steps=max_steps,
         map_width=map_width,
         map_height=map_height,

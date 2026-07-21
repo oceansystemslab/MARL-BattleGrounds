@@ -134,7 +134,6 @@ def _config(
 ) -> EnvConfig:
     """Return a deterministic combat-contract test config."""
     return EnvConfig(
-        team_size=team_size,
         max_steps=1000,
         map_width=20.0,
         map_height=12.0,

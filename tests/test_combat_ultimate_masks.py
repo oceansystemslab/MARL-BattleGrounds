@@ -130,7 +130,6 @@ def _scenario(
         ].set(ultimate_radius),
     )
     config = EnvConfig(
-        team_size=2,
         max_steps=100,
         map_width=20.0,
         map_height=12.0,

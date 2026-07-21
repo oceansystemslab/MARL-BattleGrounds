@@ -145,7 +145,6 @@ def _debug_config() -> EnvConfig:
     obstacles = obstacles.at[1].set(_wall_obstacle())
 
     return EnvConfig(
-        team_size=2,
         max_steps=_EFFECTIVELY_UNBOUNDED_MAX_STEPS,
         map_width=12.0,
         map_height=8.0,

@@ -161,7 +161,6 @@ _FEATURE_NAMES_IN_ORDER: tuple[str, ...] = (
 
 def _config(team_sizes: tuple[int, int] = (5, 5)) -> EnvConfig:
     return EnvConfig(
-        team_size=max(team_sizes),
         max_steps=1000,
         map_width=20.0,
         map_height=12.0,
