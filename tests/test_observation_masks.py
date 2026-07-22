@@ -25,6 +25,7 @@ from marl_battlegrounds.core.types import (
     AGENT_FEATURE_BASE_MOVEMENT_SPEED,
     AGENT_FEATURE_BASIC_INTERACTION_RADIUS,
     AGENT_FEATURE_CLASS_ID,
+    AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED,
     AGENT_FEATURE_OBSERVATION_RADIUS,
     AGENT_FEATURE_RADIUS,
     AGENT_FEATURE_TEAM_ID,
@@ -790,6 +791,8 @@ def test_active_dead_self_rows_retain_state_and_expose_canonical_no_op() -> None
 
     assert observation.self_features[0, AGENT_FEATURE_ACTIVE] == 1.0
     assert observation.self_features[0, AGENT_FEATURE_ALIVE] == 0.0
+    assert observation.self_features[0, AGENT_FEATURE_BASE_MOVEMENT_SPEED] > 0.0
+    assert observation.self_features[0, AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED] == 0.0
     _assert_only_first_action_is_valid(action_mask.move_mask[0])
     _assert_only_first_action_is_valid(action_mask.select_target_mask[0])
     _assert_only_first_action_is_valid(action_mask.use_ultimate_mask[0])

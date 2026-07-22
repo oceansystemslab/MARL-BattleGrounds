@@ -59,6 +59,7 @@ from marl_battlegrounds.core.types import (
     AGENT_FEATURE_SLOW_ROGUE_POISON_MULTIPLIER,
     AGENT_FEATURE_SLOW_WARRIOR_CHARGE_DURATION,
     AGENT_FEATURE_SLOW_WARRIOR_CHARGE_MULTIPLIER,
+    AGENT_FEATURE_STUN_HUNTER_TRAP_DURATION,
     AGENT_FEATURE_ULTIMATE_COOLDOWN_REMAINING,
     HUNTER_CLASS_ID,
     MAGE_CLASS_ID,
@@ -75,6 +76,7 @@ from marl_battlegrounds.core.types import (
     SLOW_CHANNEL_HUNTER_BASIC,
     SLOW_CHANNEL_ROGUE_POISON,
     SLOW_CHANNEL_WARRIOR_CHARGE,
+    STUN_CHANNEL_HUNTER_TRAP,
     UNIT_FEATURES,
     WARRIOR_CLASS_ID,
     Action,
@@ -598,12 +600,12 @@ def test_attached_statuses_and_effective_speed_follow_duration_state() -> None:
         == combat.PRIEST_HEAL_SPEED_FLOOR
     )
 
-    expected_observed_effective = (
-        combat.derive_effective_movement_speeds_from_durations(
-            config.agent_profile.base_movement_speeds,
-            next_state.slow_durations,
-            next_state.priest_blessing_of_freedom_slow_floor_durations,
-        )
+    expected_observed_effective = combat.derive_effective_movement_speeds(
+        next_state.slow_durations,
+        next_state.priest_blessing_of_freedom_slow_floor_durations,
+        next_state.stun_durations,
+        config.agent_profile.base_movement_speeds,
+        jnp.logical_and(config.agent_profile.active_mask, next_state.alive_mask),
     )
     assert bool(
         jnp.array_equal(
@@ -611,15 +613,66 @@ def test_attached_statuses_and_effective_speed_follow_duration_state() -> None:
             expected_observed_effective,
         )
     )
-    expected_effective = combat.derive_effective_movement_speeds_from_durations(
-        config.agent_profile.base_movement_speeds,
+    expected_effective = combat.derive_effective_movement_speeds(
         state.slow_durations,
         state.priest_blessing_of_freedom_slow_floor_durations,
+        state.stun_durations,
+        config.agent_profile.base_movement_speeds,
+        jnp.logical_and(config.agent_profile.active_mask, state.alive_mask),
     )
     displacement = next_state.agent_positions - state.agent_positions
     assert bool(jnp.isclose(displacement[0, 0], expected_effective[0]))
     assert bool(jnp.isclose(displacement[1, 0], expected_effective[1]))
     assert bool(jnp.isclose(displacement[2, 0], expected_effective[2]))
+
+
+def test_stun_zeroes_effective_speed_in_self_and_visible_unit_rows() -> None:
+    """Prove public effective speed agrees with current stun and visibility."""
+    config = _config((1, 2))
+    state, *_ = reset(config, jax.random.key(14))
+    visible_enemy_slot = MAX_AGENTS_PER_TEAM
+    hidden_enemy_slot = MAX_AGENTS_PER_TEAM + 1
+    positions = state.agent_positions
+    positions = positions.at[0].set(jnp.asarray((2.0, 2.0), dtype=jnp.float32))
+    positions = positions.at[visible_enemy_slot].set(
+        jnp.asarray((3.0, 2.0), dtype=jnp.float32)
+    )
+    positions = positions.at[hidden_enemy_slot].set(
+        jnp.asarray((19.0, 11.0), dtype=jnp.float32)
+    )
+    state = state._replace(
+        agent_positions=positions,
+        stun_durations=state.stun_durations.at[
+            visible_enemy_slot, STUN_CHANNEL_HUNTER_TRAP
+        ].set(2),
+    )
+
+    observation, _ = _build_observation_and_action_mask(state, config)
+
+    assert config.agent_profile.base_movement_speeds[visible_enemy_slot] > 0.0
+    assert (
+        observation.self_features[
+            visible_enemy_slot, AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED
+        ]
+        == 0.0
+    )
+    assert (
+        observation.self_features[
+            visible_enemy_slot, AGENT_FEATURE_STUN_HUNTER_TRAP_DURATION
+        ]
+        == 2.0
+    )
+    assert bool(observation.enemy_visibility_mask[0, 0])
+    assert (
+        observation.enemy_unit_features[0, 0, AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED]
+        == 0.0
+    )
+    assert (
+        observation.enemy_unit_features[0, 0, AGENT_FEATURE_STUN_HUNTER_TRAP_DURATION]
+        == 2.0
+    )
+    assert not bool(observation.enemy_visibility_mask[0, 1])
+    assert bool(jnp.all(observation.enemy_unit_features[0, 1] == 0.0))
 
 
 def test_visible_candidates_match_shared_rows_and_hidden_rows_are_fully_zero() -> None:

@@ -12,6 +12,7 @@ from marl_battlegrounds.core.config import resolve_agent_profile
 from marl_battlegrounds.core.env import _build_observation_and_action_mask, step
 from marl_battlegrounds.core.geometry import GEOMETRY_TOLERANCE
 from marl_battlegrounds.core.types import (
+    AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED,
     CLASS_NEUTRAL,
     CONTEXT_FEATURES,
     ENVIRONMENT_DIMENSIONS,
@@ -46,6 +47,9 @@ from marl_battlegrounds.core.types import (
     OBSTACLE_TYPE_PILLAR,
     OBSTACLE_TYPE_WALL,
     SELF_FEATURES,
+    STUN_CHANNEL_HUNTER_TRAP,
+    STUN_CHANNEL_ROGUE_POISON,
+    STUN_CHANNEL_WARRIOR_CHARGE,
     UNIT_FEATURES,
     Action,
     ActionMask,
@@ -1286,6 +1290,188 @@ def test_active_alive_overlapping_agents_separate_in_free_space(
         radius_a=radius,
         radius_b=radius,
     )
+
+
+@pytest.mark.parametrize(
+    "active_stun_channels",
+    (
+        pytest.param((STUN_CHANNEL_WARRIOR_CHARGE,), id="warrior-charge"),
+        pytest.param((STUN_CHANNEL_HUNTER_TRAP,), id="hunter-trap"),
+        pytest.param((STUN_CHANNEL_ROGUE_POISON,), id="rogue-poison"),
+        pytest.param(
+            (
+                STUN_CHANNEL_WARRIOR_CHARGE,
+                STUN_CHANNEL_HUNTER_TRAP,
+                STUN_CHANNEL_ROGUE_POISON,
+            ),
+            id="concurrent-stuns",
+        ),
+    ),
+)
+def test_current_stun_exposes_stay_only_and_suppresses_voluntary_movement(
+    active_stun_channels: tuple[int, ...],
+) -> None:
+    """Prove every current stun source aligns speed, mask, and movement intent."""
+    config = _deterministic_config(team_size=1)
+    start = jnp.asarray((10.0, 6.0), dtype=jnp.float32)
+    config, state = _state_with_single_active_alive_agent(config, start)
+    for channel in active_stun_channels:
+        state = state._replace(
+            stun_durations=state.stun_durations.at[0, channel].set(1)
+        )
+
+    observation, current_action_mask = _build_observation_and_action_mask(state, config)
+
+    assert observation.self_features[0, AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED] == 0.0
+    assert bool(current_action_mask.move_mask[0, MOVE_STAY])
+    assert int(jnp.sum(current_action_mask.move_mask[0])) == 1
+
+    next_state, next_observation, _, _, next_action_mask, _ = step(
+        config,
+        state,
+        current_action_mask,
+        _joint_action_with_moves((0, MOVE_EAST)),
+        jax.random.key(50),
+    )
+
+    _assert_center_close(next_state.agent_positions[0], start)
+    assert bool(jnp.all(next_state.stun_durations[0] == 0))
+    assert (
+        next_observation.self_features[0, AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED]
+        == config.agent_profile.base_movement_speeds[0]
+    )
+    assert bool(jnp.all(next_action_mask.move_mask[0]))
+
+
+def test_forged_movement_mask_cannot_restore_stunned_voluntary_movement() -> None:
+    """Prove direct transition enforcement survives a stale or forged mask."""
+    config = _deterministic_config(team_size=1)
+    start = jnp.asarray((10.0, 6.0), dtype=jnp.float32)
+    config, state = _state_with_single_active_alive_agent(config, start)
+    state = state._replace(
+        stun_durations=state.stun_durations.at[0, STUN_CHANNEL_HUNTER_TRAP].set(2)
+    )
+    current_action_mask = _current_action_mask(config, state)
+    forged_action_mask = current_action_mask._replace(
+        move_mask=current_action_mask.move_mask.at[0].set(True)
+    )
+
+    next_state, next_observation, _, _, next_action_mask, _ = step(
+        config,
+        state,
+        forged_action_mask,
+        _joint_action_with_moves((0, MOVE_EAST)),
+        jax.random.key(51),
+    )
+
+    _assert_center_close(next_state.agent_positions[0], start)
+    assert next_state.stun_durations[0, STUN_CHANNEL_HUNTER_TRAP] == 1
+    assert (
+        next_observation.self_features[0, AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED] == 0.0
+    )
+    assert bool(next_action_mask.move_mask[0, MOVE_STAY])
+    assert int(jnp.sum(next_action_mask.move_mask[0])) == 1
+
+
+def test_collision_projection_may_displace_a_stunned_zero_intent_body() -> None:
+    """Prove stun removes voluntary agency without freezing physical geometry."""
+    config = _deterministic_config(team_size=1)
+    stunned_start = jnp.asarray((5.0, 5.0), dtype=jnp.float32)
+    neighbor_start = jnp.asarray((5.5, 5.0), dtype=jnp.float32)
+    config, state = _state_with_two_agents(
+        config,
+        stunned_start,
+        neighbor_start,
+        radius=0.5,
+    )
+    state = state._replace(
+        stun_durations=state.stun_durations.at[0, STUN_CHANNEL_HUNTER_TRAP].set(2)
+    )
+
+    next_state, next_observation, *_ = step(
+        config,
+        state,
+        _current_action_mask(config, state),
+        _joint_action_with_moves(),
+        jax.random.key(52),
+    )
+
+    assert not bool(jnp.array_equal(next_state.agent_positions[0], stunned_start))
+    assert (
+        next_observation.self_features[0, AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED] == 0.0
+    )
+    _assert_agents_do_not_overlap(
+        next_state.agent_positions,
+        slot_a=0,
+        slot_b=1,
+        radius_a=0.5,
+        radius_b=0.5,
+    )
+
+
+def test_stun_control_trajectory_matches_jit_and_scan() -> None:
+    """Prove paired masks preserve D=2 stun control across compiled rollout."""
+    horizon = 3
+    config = _deterministic_config(team_size=1)
+    start = jnp.asarray((5.0, 5.0), dtype=jnp.float32)
+    config, initial_state = _state_with_single_active_alive_agent(config, start)
+    initial_state = initial_state._replace(
+        stun_durations=initial_state.stun_durations.at[0, STUN_CHANNEL_HUNTER_TRAP].set(
+            2
+        )
+    )
+    initial_action_mask = _current_action_mask(config, initial_state)
+    action = _joint_action_with_moves((0, MOVE_EAST))
+    keys = jax.random.split(jax.random.key(53), horizon)
+
+    def _rollout(
+        state: EnvState, action_mask: ActionMask, step_keys: Array
+    ) -> tuple[Array, Array, Array, Array]:
+        def _scan_step(
+            carry: tuple[EnvState, ActionMask], key: Array
+        ) -> tuple[tuple[EnvState, ActionMask], tuple[Array, Array, Array, Array]]:
+            current_state, current_mask = carry
+            next_state, observation, _, _, next_mask, _ = step(
+                config, current_state, current_mask, action, key
+            )
+            outputs = (
+                next_state.agent_positions[0],
+                next_state.stun_durations[0, STUN_CHANNEL_HUNTER_TRAP],
+                observation.self_features[0, AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED],
+                next_mask.move_mask[0],
+            )
+            return (next_state, next_mask), outputs
+
+        _, outputs = jax.lax.scan(_scan_step, (state, action_mask), step_keys)
+        return outputs
+
+    eager_outputs = _rollout(initial_state, initial_action_mask, keys)
+    compiled_outputs = cast(
+        tuple[Array, Array, Array, Array],
+        jax.jit(_rollout)(initial_state, initial_action_mask, keys),
+    )
+
+    for eager_output, compiled_output in zip(
+        eager_outputs, compiled_outputs, strict=True
+    ):
+        assert bool(jnp.array_equal(eager_output, compiled_output))
+
+    position_history, duration_history, speed_history, move_mask_history = eager_outputs
+    assert bool(
+        jnp.array_equal(
+            position_history[:, 0],
+            jnp.asarray((5.0, 5.0, 6.0), dtype=jnp.float32),
+        )
+    )
+    assert bool(jnp.array_equal(duration_history, jnp.asarray((1, 0, 0))))
+    assert bool(
+        jnp.array_equal(
+            speed_history,
+            jnp.asarray((0.0, 1.0, 1.0), dtype=jnp.float32),
+        )
+    )
+    assert int(jnp.sum(move_mask_history[0])) == 1
+    assert bool(jnp.all(move_mask_history[1:]))
 
 
 def test_step_can_be_jit_compiled_with_non_stay_movement() -> None:

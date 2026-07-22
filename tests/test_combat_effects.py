@@ -35,6 +35,7 @@ from marl_battlegrounds.core.env import (
 )
 from marl_battlegrounds.core.types import (
     AGENT_FEATURE_CURRENT_HEALTH,
+    AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED,
     AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_DURATION,
     AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_FRACTION,
     AGENT_FEATURE_SLOW_HUNTER_BASIC_DURATION,
@@ -658,13 +659,27 @@ def test_fresh_charge_stun_preserves_precommitted_movement_then_becomes_public()
         == 1.0
     )
     assert not bool(jnp.any(applied_mask.select_target_mask[_TEAM_B_ACTOR, 1:]))
+    assert (
+        applied_observation.self_features[
+            _TEAM_B_ACTOR, AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED
+        ]
+        == 0.0
+    )
+    assert bool(applied_mask.move_mask[_TEAM_B_ACTOR, MOVE_STAY])
+    assert int(jnp.sum(applied_mask.move_mask[_TEAM_B_ACTOR])) == 1
 
     expired_state, expired_observation, expired_mask = _step(
         config,
         applied_state,
-        _joint_action(),
+        _joint_action((_TEAM_B_ACTOR, MOVE_EAST, 0, 0)),
     )
 
+    assert bool(
+        jnp.array_equal(
+            expired_state.agent_positions[_TEAM_B_ACTOR],
+            applied_state.agent_positions[_TEAM_B_ACTOR],
+        )
+    )
     assert expired_state.stun_durations[_TEAM_B_ACTOR, STUN_CHANNEL_WARRIOR_CHARGE] == 0
     assert (
         expired_observation.self_features[
@@ -673,6 +688,13 @@ def test_fresh_charge_stun_preserves_precommitted_movement_then_becomes_public()
         == 0.0
     )
     assert bool(jnp.any(expired_mask.select_target_mask[_TEAM_B_ACTOR, 1:]))
+    assert (
+        expired_observation.self_features[
+            _TEAM_B_ACTOR, AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED
+        ]
+        > 0.0
+    )
+    assert bool(jnp.all(expired_mask.move_mask[_TEAM_B_ACTOR]))
 
 
 @pytest.mark.parametrize(

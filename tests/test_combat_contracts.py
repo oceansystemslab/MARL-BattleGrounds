@@ -43,6 +43,7 @@ from marl_battlegrounds.core.types import (
     SLOW_CHANNEL_HUNTER_BASIC,
     SLOW_CHANNEL_ROGUE_POISON,
     SLOW_CHANNEL_WARRIOR_CHARGE,
+    STUN_CHANNEL_HUNTER_TRAP,
     UNIT_FEATURES,
     WARRIOR_CLASS_ID,
     EnvConfig,
@@ -608,6 +609,63 @@ def test_derive_status_magnitudes_matches_jit_for_mixed_active_durations() -> No
 
     for eager_output, jitted_output in zip(eager, jitted, strict=True):
         assert bool(jnp.array_equal(eager_output, jitted_output))
+
+
+def test_effective_movement_speed_aligns_status_and_participation_control() -> None:
+    """Prove one derived speed represents every current voluntary-speed gate."""
+    base_movement_speeds = jnp.full((MAX_AGENT_SLOTS,), 2.0, dtype=jnp.float32)
+    active_and_alive_mask = jnp.arange(MAX_AGENT_SLOTS) < 5
+    slow_durations = jnp.zeros((MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.int32)
+    slow_durations = slow_durations.at[1, SLOW_CHANNEL_HUNTER_BASIC].set(1)
+    slow_durations = slow_durations.at[2:5, :].set(1)
+    freedom_durations = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32)
+    freedom_durations = freedom_durations.at[2].set(1).at[4].set(1)
+    stun_durations = (
+        jnp.zeros((MAX_AGENT_SLOTS, NUM_STUN_CHANNELS), dtype=jnp.int32)
+        .at[4, STUN_CHANNEL_HUNTER_TRAP]
+        .set(1)
+    )
+
+    effective_speeds = combat.derive_effective_movement_speeds(
+        slow_durations,
+        freedom_durations,
+        stun_durations,
+        base_movement_speeds,
+        active_and_alive_mask,
+    )
+    compiled_speeds = cast(
+        Array,
+        jax.jit(combat.derive_effective_movement_speeds)(
+            slow_durations,
+            freedom_durations,
+            stun_durations,
+            base_movement_speeds,
+            active_and_alive_mask,
+        ),
+    )
+    expected = jnp.asarray(
+        (
+            2.0,
+            2.0 * combat.HUNTER_BASIC_SLOW_MULTIPLIER,
+            2.0 * combat.PRIEST_HEAL_SPEED_FLOOR,
+            2.0
+            * combat.WARRIOR_CHARGE_SLOW_MULTIPLIER
+            * combat.HUNTER_BASIC_SLOW_MULTIPLIER
+            * combat.ROGUE_POISON_SLOW_MULTIPLIER,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ),
+        dtype=jnp.float32,
+    )
+
+    assert effective_speeds.shape == (MAX_AGENT_SLOTS,)
+    assert effective_speeds.dtype == jnp.float32
+    assert bool(jnp.allclose(effective_speeds, expected))
+    assert bool(jnp.array_equal(compiled_speeds, effective_speeds))
 
 
 def test_passive_and_support_defaults_are_scalar_parameters() -> None:

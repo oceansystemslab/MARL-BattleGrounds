@@ -9,7 +9,6 @@ from jax import Array
 from marl_battlegrounds.core.combat import (
     BASIC_DAMAGE_BY_CLASS,
     BASIC_HEALING_BY_CLASS,
-    GLOBAL_SLOW_FLOOR,
     HUNTER_BASIC_SLOW_DURATION_TICKS,
     HUNTER_BASIC_SLOW_MULTIPLIER,
     HUNTER_TRAP_STUN_DURATION_TICKS,
@@ -38,7 +37,7 @@ from marl_battlegrounds.core.combat import (
     WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER_FLOOR,
     WARRIOR_DAMAGE_MITIGATION_AURA_RADIUS,
     build_rogue_poison_anti_heal_multipliers,
-    derive_effective_movement_speeds_from_durations,
+    derive_effective_movement_speeds,
     derive_status_magnitudes,
     get_basic_damage_by_class_ids,
     get_basic_healing_by_class_ids,
@@ -429,15 +428,23 @@ def _build_marginal_action_masks(
 def _build_move_mask(state: EnvState, config: EnvConfig) -> Array:
     """Build protocol-admissible movement choices for every fixed slot.
 
-    Active, living actors may submit every movement category. Dead or inactive
-    slots expose only ``MOVE_STAY``, the effect-inert canonical submission.
+    Active, living, unstunned actors may submit every movement category.
+    Currently stunned, dead, or inactive slots expose only ``MOVE_STAY``, the
+    effect-inert canonical submission required for direct categorical sampling.
     """
     active_and_alive_mask = jnp.logical_and(
         config.agent_profile.active_mask, state.alive_mask
     )
-    canonical_stay_mask = jnp.arange(NUM_MOVE_ACTIONS)[None, :] == MOVE_STAY
+    active_alive_not_stunned_mask = jnp.logical_and(
+        active_and_alive_mask,
+        jnp.all(state.stun_durations == 0, axis=-1),
+    )
 
-    return jnp.logical_or(active_and_alive_mask[:, None], canonical_stay_mask)
+    canonical_stay_mask = jnp.arange(NUM_MOVE_ACTIONS) == MOVE_STAY
+
+    return jnp.logical_or(
+        active_alive_not_stunned_mask[:, None], canonical_stay_mask[None, :]
+    )
 
 
 def _build_context_features(state: EnvState, config: EnvConfig) -> Array:
@@ -583,25 +590,29 @@ def _build_observation_and_action_mask(
 
 
 def _build_intended_movement_deltas(
-    accepted_joint_action: Action,
-    current_slow_durations: Array,
-    current_priest_freedom_slow_floor_durations: Array,
+    current_state: EnvState,
     config: EnvConfig,
+    accepted_joint_action: Action,
 ) -> Array:
-    """Scale accepted movement using status truth from the current state.
+    """Build voluntary movement intent from current public control truth.
 
-    The duration inputs must be the values visible at the current decision
-    epoch. Statuses accepted during this transition are packaged for the next
-    decision and must not retroactively change this movement intent.
+    Status durations in ``current_state`` must be the values visible at the
+    current decision epoch. Statuses accepted during this transition are
+    packaged for the next decision and must not retroactively change this
+    movement intent. Current stun, death, or inactivity yields zero intent here
+    as defense in depth; geometry remains free to displace a zero-intent body
+    during collision resolution.
     """
     intended_movement_deltas_unscaled = _JOINT_ACTION_MOVE_TO_DISPLACEMENT_LOOKUP_TABLE[
         accepted_joint_action.move
     ]
-    # Status-adjusted speed is shared with the observation contract.
-    effective_movement_speeds = derive_effective_movement_speeds_from_durations(
+    # Control-adjusted speed is shared with the observation contract.
+    effective_movement_speeds = derive_effective_movement_speeds(
+        current_state.slow_durations,
+        current_state.priest_blessing_of_freedom_slow_floor_durations,
+        current_state.stun_durations,
         config.agent_profile.base_movement_speeds,
-        current_slow_durations,
-        current_priest_freedom_slow_floor_durations,
+        jnp.logical_and(config.agent_profile.active_mask, current_state.alive_mask),
     )
 
     intended_movement_deltas = (
@@ -651,22 +662,6 @@ def _active_priest_class_mask(config: EnvConfig) -> Array:
     )
 
 
-def _derive_effective_movement_speeds_from_multipliers(
-    base_movement_speeds: Array,
-    slow_multipliers: Array,
-    priest_blessing_of_freedom_slow_floor_fraction: Array,
-) -> Array:
-    """Apply stacked slows, the Priest floor, and the global floor to speeds."""
-    effective_movement_multipliers = jnp.maximum(
-        jnp.prod(slow_multipliers, axis=-1),
-        priest_blessing_of_freedom_slow_floor_fraction,
-    )
-
-    return base_movement_speeds * jnp.maximum(
-        effective_movement_multipliers, GLOBAL_SLOW_FLOOR
-    )
-
-
 def _build_self_features(
     state: EnvState,
     config: EnvConfig,
@@ -686,10 +681,12 @@ def _build_self_features(
         state.priest_blessing_of_freedom_slow_floor_durations,
     )
 
-    effective_movement_speeds = _derive_effective_movement_speeds_from_multipliers(
+    effective_movement_speeds = derive_effective_movement_speeds(
+        state.slow_durations,
+        state.priest_blessing_of_freedom_slow_floor_durations,
+        state.stun_durations,
         config.agent_profile.base_movement_speeds,
-        slow_multipliers,
-        priest_blessing_of_freedom_slow_floor_fraction,
+        jnp.logical_and(config.agent_profile.active_mask, state.alive_mask),
     )
 
     features_0_to_14 = jnp.concatenate(
@@ -1589,10 +1586,9 @@ def step(
 
     # Current public status truth governs the current movement decision.
     intended_movement_deltas = _build_intended_movement_deltas(
-        accepted_joint_action,
-        current_state.slow_durations,
-        current_state.priest_blessing_of_freedom_slow_floor_durations,
+        current_state,
         config,
+        accepted_joint_action,
     )
 
     next_agent_positions = project_movement_with_geometry(

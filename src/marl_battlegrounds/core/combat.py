@@ -361,19 +361,39 @@ def derive_status_magnitudes(
     )
 
 
-def derive_effective_movement_speeds_from_durations(
-    base_movement_speeds: Array,
+def derive_effective_movement_speeds(
     slow_durations: Array,
-    priest_blessing_of_freedom_slow_floor_durations: Array,
+    priest_freedom_slow_floor_durations: Array,
+    stun_durations: Array,
+    base_movement_speeds: Array,
+    active_and_alive_mask: Array,
 ) -> Array:
-    """Derive effective speeds from base values and duration-only status state."""
+    """Derive the currently actuated voluntary speed for every fixed slot.
+
+    Slow sources compose multiplicatively before the global and Blessing of
+    Freedom floors apply. Inactive, dead, or currently stunned actors then
+    expose exactly zero effective speed. The returned ``float32`` vector has
+    shape ``(MAX_AGENT_SLOTS,)`` and is shared by movement actuation and the
+    policy-facing observation contract.
+    """
     effective_movement_multipliers = jnp.maximum(
         jnp.prod(_build_slow_multipliers(slow_durations), axis=-1),
         _build_priest_blessing_of_freedom_slow_floor_fractions(
-            priest_blessing_of_freedom_slow_floor_durations
+            priest_freedom_slow_floor_durations
         ),
     )
 
-    return base_movement_speeds * jnp.maximum(
+    active_alive_not_stunned_mask = jnp.logical_and(
+        active_and_alive_mask,
+        jnp.all(stun_durations == 0, axis=-1),
+    )
+
+    adjusted_movement_speeds = base_movement_speeds * jnp.maximum(
         effective_movement_multipliers, GLOBAL_SLOW_FLOOR
     )
+
+    return jnp.where(
+        active_alive_not_stunned_mask,
+        adjusted_movement_speeds,
+        jnp.zeros_like(adjusted_movement_speeds),
+    ).astype(jnp.float32)
