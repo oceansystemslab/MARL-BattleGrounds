@@ -254,6 +254,7 @@ def _deterministic_config(
         obstacles=_empty_obstacles() if obstacles is None else obstacles,
         agent_profile=profile,
         initial_agent_positions=jnp.where(profile.active_mask[:, None], positions, 0.0),
+        ordinary_movement_distance_scale=1.0,
     )
 
 

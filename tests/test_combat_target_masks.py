@@ -106,6 +106,7 @@ def _target_scenario(actor_class_id: int = MAGE_CLASS_ID) -> tuple[EnvConfig, En
         obstacles=jnp.zeros((MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES), dtype=jnp.float32),
         agent_profile=profile,
         initial_agent_positions=positions,
+        ordinary_movement_distance_scale=1.0,
     )
     state, *_ = reset(config, jax.random.key(1))
     return config, state

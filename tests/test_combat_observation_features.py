@@ -161,7 +161,11 @@ _FEATURE_NAMES_IN_ORDER: tuple[str, ...] = (
 )
 
 
-def _config(team_sizes: tuple[int, int] = (5, 5)) -> EnvConfig:
+def _config(
+    team_sizes: tuple[int, int] = (5, 5),
+    *,
+    ordinary_movement_distance_scale: float = 1.0,
+) -> EnvConfig:
     profile = resolve_agent_profile(_ROSTER, jnp.asarray(team_sizes, dtype=jnp.int32))
     positions = jnp.asarray(
         (
@@ -185,6 +189,7 @@ def _config(team_sizes: tuple[int, int] = (5, 5)) -> EnvConfig:
         obstacles=jnp.zeros((MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES), dtype=jnp.float32),
         agent_profile=profile,
         initial_agent_positions=jnp.where(profile.active_mask[:, None], positions, 0.0),
+        ordinary_movement_distance_scale=ordinary_movement_distance_scale,
     )
 
 
@@ -285,6 +290,43 @@ def test_reset_rows_expose_profile_state_and_neutral_attached_values() -> None:
         jnp.all(
             rows[:, AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_FRACTION] == 0.0
         )
+    )
+
+
+def test_movement_calibration_is_public_without_changing_catalog_base_speed() -> None:
+    """Prove reset exposes calibrated authority through effective speed only."""
+    movement_scale = 0.1
+    config = _config(
+        (2, 1),
+        ordinary_movement_distance_scale=movement_scale,
+    )
+    visible_enemy_slot = MAX_AGENTS_PER_TEAM
+    visible_positions = config.initial_agent_positions.at[visible_enemy_slot].set(
+        jnp.asarray((1.5, 0.5), dtype=jnp.float32)
+    )
+    config = config._replace(initial_agent_positions=visible_positions)
+    _, observation, *_ = reset(config, jax.random.key(20))
+    expected_effective_speed = (
+        config.agent_profile.base_movement_speeds * movement_scale
+    )
+
+    assert bool(
+        jnp.array_equal(
+            observation.self_features[:, AGENT_FEATURE_BASE_MOVEMENT_SPEED],
+            config.agent_profile.base_movement_speeds,
+        )
+    )
+    assert bool(
+        jnp.allclose(
+            observation.self_features[:, AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED],
+            expected_effective_speed,
+        )
+    )
+
+    assert bool(observation.enemy_visibility_mask[0, 0])
+    assert (
+        observation.enemy_unit_features[0, 0, AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED]
+        == expected_effective_speed[visible_enemy_slot]
     )
 
 
@@ -606,6 +648,7 @@ def test_attached_statuses_and_effective_speed_follow_duration_state() -> None:
         next_state.stun_durations,
         config.agent_profile.base_movement_speeds,
         jnp.logical_and(config.agent_profile.active_mask, next_state.alive_mask),
+        config.ordinary_movement_distance_scale,
     )
     assert bool(
         jnp.array_equal(
@@ -619,6 +662,7 @@ def test_attached_statuses_and_effective_speed_follow_duration_state() -> None:
         state.stun_durations,
         config.agent_profile.base_movement_speeds,
         jnp.logical_and(config.agent_profile.active_mask, state.alive_mask),
+        config.ordinary_movement_distance_scale,
     )
     displacement = next_state.agent_positions - state.agent_positions
     assert bool(jnp.isclose(displacement[0, 0], expected_effective[0]))

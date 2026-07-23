@@ -367,14 +367,16 @@ def derive_effective_movement_speeds(
     stun_durations: Array,
     base_movement_speeds: Array,
     active_and_alive_mask: Array,
+    ordinary_movement_distance_scale: float,
 ) -> Array:
     """Derive the currently actuated voluntary speed for every fixed slot.
 
     Slow sources compose multiplicatively before the global and Blessing of
-    Freedom floors apply. Inactive, dead, or currently stunned actors then
-    expose exactly zero effective speed. The returned ``float32`` vector has
-    shape ``(MAX_AGENT_SLOTS,)`` and is shared by movement actuation and the
-    policy-facing observation contract.
+    Freedom floors apply. The episode's ordinary-movement distance scale then
+    converts catalog speed into per-decision voluntary displacement. Inactive,
+    dead, or currently stunned actors expose exactly zero effective speed. The
+    returned ``float32`` vector has shape ``(MAX_AGENT_SLOTS,)`` and is shared
+    by movement actuation and the policy-facing observation contract.
     """
     effective_movement_multipliers = jnp.maximum(
         jnp.prod(_build_slow_multipliers(slow_durations), axis=-1),
@@ -388,8 +390,10 @@ def derive_effective_movement_speeds(
         jnp.all(stun_durations == 0, axis=-1),
     )
 
-    adjusted_movement_speeds = base_movement_speeds * jnp.maximum(
-        effective_movement_multipliers, GLOBAL_SLOW_FLOOR
+    adjusted_movement_speeds = (
+        base_movement_speeds
+        * jnp.maximum(effective_movement_multipliers, GLOBAL_SLOW_FLOOR)
+        * ordinary_movement_distance_scale
     )
 
     return jnp.where(

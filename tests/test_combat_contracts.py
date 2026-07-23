@@ -159,6 +159,7 @@ def _config(
         obstacles=_empty_obstacles(),
         agent_profile=profile,
         initial_agent_positions=jnp.where(profile.active_mask[:, None], positions, 0.0),
+        ordinary_movement_distance_scale=1.0,
     )
 
 
@@ -611,7 +612,16 @@ def test_derive_status_magnitudes_matches_jit_for_mixed_active_durations() -> No
         assert bool(jnp.array_equal(eager_output, jitted_output))
 
 
-def test_effective_movement_speed_aligns_status_and_participation_control() -> None:
+@pytest.mark.parametrize(
+    "movement_scale",
+    (
+        pytest.param(1.0, id="legacy-compatible"),
+        pytest.param(0.1, id="calibrated"),
+    ),
+)
+def test_effective_movement_speed_aligns_status_and_participation_control(
+    movement_scale: float,
+) -> None:
     """Prove one derived speed represents every current voluntary-speed gate."""
     base_movement_speeds = jnp.full((MAX_AGENT_SLOTS,), 2.0, dtype=jnp.float32)
     active_and_alive_mask = jnp.arange(MAX_AGENT_SLOTS) < 5
@@ -632,6 +642,7 @@ def test_effective_movement_speed_aligns_status_and_participation_control() -> N
         stun_durations,
         base_movement_speeds,
         active_and_alive_mask,
+        movement_scale,
     )
     compiled_speeds = cast(
         Array,
@@ -641,9 +652,10 @@ def test_effective_movement_speed_aligns_status_and_participation_control() -> N
             stun_durations,
             base_movement_speeds,
             active_and_alive_mask,
+            movement_scale,
         ),
     )
-    expected = jnp.asarray(
+    expected_without_calibration = jnp.asarray(
         (
             2.0,
             2.0 * combat.HUNTER_BASIC_SLOW_MULTIPLIER,
@@ -661,6 +673,7 @@ def test_effective_movement_speed_aligns_status_and_participation_control() -> N
         ),
         dtype=jnp.float32,
     )
+    expected = expected_without_calibration * movement_scale
 
     assert effective_speeds.shape == (MAX_AGENT_SLOTS,)
     assert effective_speeds.dtype == jnp.float32

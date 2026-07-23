@@ -145,6 +145,7 @@ def _scenario(
         obstacles=_empty_obstacles() if obstacles is None else obstacles,
         agent_profile=profile,
         initial_agent_positions=initial_positions,
+        ordinary_movement_distance_scale=1.0,
     )
 
     state = EnvState(

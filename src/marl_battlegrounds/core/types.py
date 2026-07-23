@@ -197,6 +197,8 @@ class EnvConfig(NamedTuple):
     Static map geometry belongs here because Milestone 4 obstacles do not change
     during an episode. ``agent_profile`` is the sole authority for immutable
     fixed-slot roster topology and capabilities resolved before ordinary reset.
+    ``ordinary_movement_distance_scale`` converts catalog movement speeds into
+    per-decision voluntary displacement without scaling forced relocation.
     """
 
     max_steps: int
@@ -205,6 +207,7 @@ class EnvConfig(NamedTuple):
     obstacles: Array
     agent_profile: ResolvedAgentProfile
     initial_agent_positions: Array
+    ordinary_movement_distance_scale: float
 
 
 class EnvState(NamedTuple):

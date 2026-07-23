@@ -155,6 +155,7 @@ def _scenario(
         initial_agent_positions=(
             _default_positions(team_sizes) if positions is None else positions
         ),
+        ordinary_movement_distance_scale=1.0,
     )
     state = EnvState(
         step_count=jnp.array(0, dtype=jnp.int32),

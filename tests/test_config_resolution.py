@@ -213,6 +213,7 @@ def test_env_config_packages_only_the_resolved_profile_for_roster_facts() -> Non
             ),
             dtype=jnp.float32,
         ),
+        ordinary_movement_distance_scale=1.0,
     )
 
     assert "agent_profile" in EnvConfig._fields

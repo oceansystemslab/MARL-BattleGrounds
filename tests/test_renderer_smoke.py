@@ -149,6 +149,7 @@ def _sample_config() -> EnvConfig:
         obstacles=obstacles,
         agent_profile=profile,
         initial_agent_positions=positions,
+        ordinary_movement_distance_scale=1.0,
     )
 
 

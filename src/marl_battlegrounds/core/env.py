@@ -47,6 +47,7 @@ from marl_battlegrounds.core.combat import (
     get_ultimate_target_mode_by_class_ids,
 )
 from marl_battlegrounds.core.geometry import (
+    DEFAULT_AGENT_PROJECTION_PASSES,
     has_clear_line_of_sight,
     project_movement_with_geometry,
 )
@@ -613,6 +614,7 @@ def _build_intended_movement_deltas(
         current_state.stun_durations,
         config.agent_profile.base_movement_speeds,
         jnp.logical_and(config.agent_profile.active_mask, current_state.alive_mask),
+        config.ordinary_movement_distance_scale,
     )
 
     intended_movement_deltas = (
@@ -687,6 +689,7 @@ def _build_self_features(
         state.stun_durations,
         config.agent_profile.base_movement_speeds,
         jnp.logical_and(config.agent_profile.active_mask, state.alive_mask),
+        config.ordinary_movement_distance_scale,
     )
 
     features_0_to_14 = jnp.concatenate(
@@ -966,7 +969,7 @@ def _aggregate_health_effects_and_basic_passives_by_global_slot(
     current_state: EnvState,
     config: EnvConfig,
     accepted_joint_action: Action,
-    accepted_recipient_one_hot_by_actor_and_global_slot: Array,
+    accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix: Array,
     mage_damage_amplification_aura_multipliers: Array,
     warrior_damage_mitigation_aura_multipliers: Array,
 ) -> tuple[Array, Array, Array, Array, Array]:
@@ -1019,12 +1022,12 @@ def _aggregate_health_effects_and_basic_passives_by_global_slot(
     )
 
     basic_damage_contribution_by_actor_and_global_recipient_slot = (
-        accepted_recipient_one_hot_by_actor_and_global_slot
+        accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix
         * amplified_basic_damage_by_actor_slot[:, None]
     )
 
     basic_healing_contribution_by_actor_and_global_recipient_slot = (
-        accepted_recipient_one_hot_by_actor_and_global_slot
+        accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix
         * raw_basic_healing_by_actor_slot[:, None]
     )
 
@@ -1052,19 +1055,19 @@ def _aggregate_health_effects_and_basic_passives_by_global_slot(
     )
 
     ultimate_damage_contribution_by_actor_and_global_recipient_slot = (
-        accepted_recipient_one_hot_by_actor_and_global_slot
+        accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix
         * amplified_ultimate_damage_by_actor_slot[:, None]
     )
 
     ultimate_healing_contribution_by_actor_and_global_recipient_slot = (
-        accepted_recipient_one_hot_by_actor_and_global_slot
+        accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix
         * raw_ultimate_healing_by_actor_slot[:, None]
     )
 
     # Trap break follows accepted positive raw damage, not effective health loss.
     accepted_positive_raw_basic_damage_received_this_tick = (
         jnp.sum(
-            accepted_recipient_one_hot_by_actor_and_global_slot
+            accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix
             * raw_basic_damage_by_actor_slot[:, None],
             axis=0,
         )
@@ -1073,7 +1076,7 @@ def _aggregate_health_effects_and_basic_passives_by_global_slot(
 
     accepted_positive_raw_ultimate_damage_received_this_tick = (
         jnp.sum(
-            accepted_recipient_one_hot_by_actor_and_global_slot
+            accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix
             * raw_ultimate_damage_by_actor_slot[:, None],
             axis=0,
         )
@@ -1090,7 +1093,7 @@ def _aggregate_health_effects_and_basic_passives_by_global_slot(
 
     # Reuse accepted recipient routing for source-specific basic passives.
     hunter_basic_slow_applied_this_tick_by_global_recipient_slot_mask = jnp.logical_and(
-        accepted_recipient_one_hot_by_actor_and_global_slot,
+        accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix,
         jnp.logical_and(
             _active_hunter_class_mask(config)[:, None],
             actor_applies_accepted_basic_effect[:, None],
@@ -1102,7 +1105,7 @@ def _aggregate_health_effects_and_basic_passives_by_global_slot(
     )
 
     priest_freedom_applied_this_tick_by_global_recipient_slot_mask = jnp.logical_and(
-        accepted_recipient_one_hot_by_actor_and_global_slot,
+        accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix,
         jnp.logical_and(
             _active_priest_class_mask(config)[:, None],
             actor_applies_accepted_basic_effect[:, None],
@@ -1238,7 +1241,7 @@ def _resolve_status_duration_lifecycle(
     current_state: EnvState,
     config: EnvConfig,
     accepted_use_ultimate_by_actor_slot: Array,
-    accepted_recipient_one_hot_by_actor_and_global_slot: Array,
+    accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix: Array,
     hunter_basic_slow_applied_this_tick_by_global_recipient_slot: Array,
     priest_freedom_applied_this_tick_by_global_recipient_slot: Array,
     accepted_positive_raw_damage_received_this_tick_by_global_recipient_slot: Array,
@@ -1261,7 +1264,7 @@ def _resolve_status_duration_lifecycle(
     ) = _derive_accepted_ultimate_status_applications(
         config,
         accepted_use_ultimate_by_actor_slot,
-        accepted_recipient_one_hot_by_actor_and_global_slot,
+        accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix,
     )
 
     # Age every current duration exactly once for successor-state memory.
@@ -1421,7 +1424,7 @@ def _resolve_status_duration_lifecycle(
 def _derive_accepted_ultimate_status_applications(
     config: EnvConfig,
     accepted_use_ultimate_by_actor_slot: Array,
-    accepted_recipient_one_hot_by_actor_and_global_slot: Array,
+    accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix: Array,
 ) -> tuple[Array, Array, Array, Array]:
     """Derive source-local and recipient-routed accepted ultimate statuses."""
     uses_ultimate_this_tick = accepted_use_ultimate_by_actor_slot == 1
@@ -1437,7 +1440,7 @@ def _derive_accepted_ultimate_status_applications(
     warrior_charge_applied_this_tick_by_recipient_slot = jnp.any(
         jnp.logical_and(
             warrior_uses_accepted_ultimate_this_tick_by_actor_slot[:, None],
-            accepted_recipient_one_hot_by_actor_and_global_slot,
+            accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix,
         ),
         axis=0,
     )
@@ -1448,7 +1451,7 @@ def _derive_accepted_ultimate_status_applications(
     hunter_trap_applied_this_tick_by_recipient_slot = jnp.any(
         jnp.logical_and(
             hunter_uses_accepted_ultimate_this_tick_by_actor_slot[:, None],
-            accepted_recipient_one_hot_by_actor_and_global_slot,
+            accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix,
         ),
         axis=0,
     )
@@ -1459,7 +1462,7 @@ def _derive_accepted_ultimate_status_applications(
     rogue_poison_applied_this_tick_by_recipient_slot = jnp.any(
         jnp.logical_and(
             rogue_uses_accepted_ultimate_this_tick_by_actor_slot[:, None],
-            accepted_recipient_one_hot_by_actor_and_global_slot,
+            accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix,
         ),
         axis=0,
     )
@@ -1469,6 +1472,125 @@ def _derive_accepted_ultimate_status_applications(
         warrior_charge_applied_this_tick_by_recipient_slot,
         hunter_trap_applied_this_tick_by_recipient_slot,
         rogue_poison_applied_this_tick_by_recipient_slot,
+    )
+
+
+def _return_unchanged_agent_positions(
+    agent_positions: Array,
+    agent_radii: Array,
+    intended_movement_deltas: Array,
+    active_mask: Array,
+    alive_mask: Array,
+    map_width: Array | float,
+    map_height: Array | float,
+    obstacles: Array,
+    agent_agent_overlap_projection_passes: int,
+    collision_projection_passes: int,
+    movement_substeps: int,
+) -> Array:
+    """Return unchanged positions when the conditional Charge phase is inactive."""
+    del (
+        agent_radii,
+        intended_movement_deltas,
+        active_mask,
+        alive_mask,
+        map_width,
+        map_height,
+        obstacles,
+        agent_agent_overlap_projection_passes,
+        collision_projection_passes,
+        movement_substeps,
+    )
+
+    return agent_positions
+
+
+def _resolve_post_charge_agent_positions(
+    current_state: EnvState,
+    config: EnvConfig,
+    accepted_joint_action: Action,
+    accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix: Array,
+) -> Array:
+    """Resolve all accepted Warrior Charge relocations from one pre-state.
+
+    Every desired endpoint is the source-facing tangent point around the
+    accepted recipient. The fixed-shape batch then receives one endpoint
+    placement pass through the shared geometry boundary. Ordinary voluntary
+    movement is deliberately excluded and resolves afterward.
+    """
+
+    # Accepted ultimate use is already validated against the current mask.
+    accepted_warrior_charge_by_actor = jnp.logical_and(
+        accepted_joint_action.use_ultimate == 1, _active_warrior_class_mask(config)
+    )
+
+    # Retain only accepted Warrior source-recipient pairs.
+    charge_actor_and_recipient_pairs = jnp.logical_and(
+        accepted_warrior_charge_by_actor[:, None],
+        accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix,
+    )
+
+    pairwise_displacement_vectors_to_recipient_from_actor = (
+        current_state.agent_positions[None, :, :]
+        - current_state.agent_positions[:, None, :]
+    )
+
+    norm = cast(
+        Array,
+        jnp.linalg.norm(pairwise_displacement_vectors_to_recipient_from_actor, axis=-1)[
+            :, :, None
+        ],
+    )
+    safe_norm = jnp.where(norm > 0, norm, jnp.ones_like(norm))
+    pairwise_direction_vectors_to_recipient_from_actor = (
+        pairwise_displacement_vectors_to_recipient_from_actor / safe_norm
+    )
+
+    radii_scaled_pairwise_direction_vectors_to_recipient_from_actor = (
+        config.agent_profile.agent_radii[:, None, None]
+        + config.agent_profile.agent_radii[None, :, None]
+    ) * pairwise_direction_vectors_to_recipient_from_actor
+
+    adjusted_agent_position_deltas = (
+        pairwise_displacement_vectors_to_recipient_from_actor
+        - radii_scaled_pairwise_direction_vectors_to_recipient_from_actor
+    )
+
+    post_charge_current_agent_position_deltas = jnp.where(
+        charge_actor_and_recipient_pairs[:, :, None],
+        adjusted_agent_position_deltas,
+        jnp.zeros_like(adjusted_agent_position_deltas),
+    )
+
+    # Each actor has at most one accepted recipient, so reduce recipient rows
+    # into one slot-aligned forced displacement.
+    intended_movement_deltas = jnp.sum(
+        post_charge_current_agent_position_deltas, axis=1
+    )
+
+    agent_agent_overlap_projection_passes = 1
+    collision_projection_passes = DEFAULT_AGENT_PROJECTION_PASSES
+    movement_substeps = 1
+    there_is_a_charging_warrior = jnp.any(accepted_warrior_charge_by_actor)
+
+    return cast(
+        Array,
+        jax.lax.cond(
+            there_is_a_charging_warrior,
+            project_movement_with_geometry,
+            _return_unchanged_agent_positions,
+            current_state.agent_positions,
+            config.agent_profile.agent_radii,
+            intended_movement_deltas,
+            config.agent_profile.active_mask,
+            current_state.alive_mask,
+            config.map_width,
+            config.map_height,
+            config.obstacles,
+            agent_agent_overlap_projection_passes,
+            collision_projection_passes,
+            movement_substeps,
+        ),
     )
 
 
@@ -1494,9 +1616,7 @@ def reset(
         agent_positions=config.initial_agent_positions,
         alive_mask=config.agent_profile.active_mask,
         current_health=config.agent_profile.max_health,
-        # At restart, current health should be max health.
         ultimate_cooldowns=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
-        # Everything below is a placeholder
         slow_durations=jnp.zeros((MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.int32),
         stun_durations=jnp.zeros((MAX_AGENT_SLOTS, NUM_STUN_CHANNELS), dtype=jnp.int32),
         rogue_poison_anti_heal_durations=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
@@ -1534,7 +1654,7 @@ def step(
         current_action_mask=current_action_mask, submitted_joint_action=joint_action
     )
 
-    accepted_recipient_one_hot_by_actor_and_global_slot = (
+    accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix = (
         _build_global_pairwise_actor_and_recipient_target_one_hot_matrix(
             accepted_joint_action.select_target
         )
@@ -1563,7 +1683,7 @@ def step(
         current_state,
         config,
         accepted_joint_action,
-        accepted_recipient_one_hot_by_actor_and_global_slot,
+        accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix,
         current_mage_damage_amplification_aura_multipliers,
         current_warrior_damage_mitigation_aura_multipliers,
     )
@@ -1591,8 +1711,16 @@ def step(
         accepted_joint_action,
     )
 
+    post_charge_current_agent_positions = _resolve_post_charge_agent_positions(
+        current_state,
+        config,
+        accepted_joint_action,
+        accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix,
+    )
+
+    # Resolve every precommitted voluntary move from the realized Charge phase.
     next_agent_positions = project_movement_with_geometry(
-        current_state.agent_positions,
+        post_charge_current_agent_positions,
         config.agent_profile.agent_radii,
         intended_movement_deltas,
         config.agent_profile.active_mask,
@@ -1612,7 +1740,7 @@ def step(
         current_state,
         config,
         accepted_joint_action.use_ultimate,
-        accepted_recipient_one_hot_by_actor_and_global_slot,
+        accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix,
         hunter_basic_slow_applied_this_tick_by_global_recipient_slot,
         priest_freedom_applied_this_tick_by_global_recipient_slot,
         accepted_positive_raw_damage_received_this_tick_by_global_recipient_slot,

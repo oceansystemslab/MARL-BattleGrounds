@@ -119,6 +119,7 @@ def _valid_config(
         initial_agent_positions=(
             _positions_for_profile(profile) if positions is None else positions
         ),
+        ordinary_movement_distance_scale=1.0,
     )
 
 
@@ -174,6 +175,7 @@ def test_validation_inventory_covers_current_public_schemas() -> None:
         "obstacles",
         "agent_profile",
         "initial_agent_positions",
+        "ordinary_movement_distance_scale",
     )
     assert ResolvedAgentProfile._fields == (
         "class_ids",
@@ -240,6 +242,66 @@ def test_invalid_scalar_fields_fail_early(
 ) -> None:
     config = _replace_config(_valid_config(), **{field_name: invalid_value})
     with pytest.raises(error_type, match=message):
+        validate_env_config(config)
+
+
+@pytest.mark.parametrize(
+    "movement_scale",
+    (
+        pytest.param(1.0, id="compatibility"),
+        pytest.param(0.1, id="provisional-canonical"),
+        pytest.param(0.375, id="additional-valid-scale"),
+        pytest.param(
+            float(np.nextafter(np.float32(0.0), np.float32(1.0))), id="subnormal"
+        ),
+    ),
+)
+def test_movement_scale_accepts_positive_finite_float32_execution_values(
+    movement_scale: float,
+) -> None:
+    """Prove validation accepts the complete documented execution domain."""
+    config = _replace_config(
+        _valid_config(),
+        ordinary_movement_distance_scale=movement_scale,
+    )
+    before = config
+
+    assert validate_env_config(config) is None
+    _assert_pytrees_equal(config, before)
+
+
+@pytest.mark.parametrize(
+    ("invalid_scale", "error_type"),
+    (
+        pytest.param(True, TypeError, id="bool"),
+        pytest.param(1, TypeError, id="integer"),
+        pytest.param(np.float32(0.1), TypeError, id="numpy-float32"),
+        pytest.param(np.float64(0.1), TypeError, id="numpy-float64"),
+        pytest.param(0.0, ValueError, id="zero"),
+        pytest.param(-0.1, ValueError, id="negative"),
+        pytest.param(1.0001, ValueError, id="above-one"),
+        pytest.param(float("nan"), ValueError, id="nan"),
+        pytest.param(float("inf"), ValueError, id="positive-infinity"),
+        pytest.param(float("-inf"), ValueError, id="negative-infinity"),
+        pytest.param(1e100, ValueError, id="float32-overflow"),
+        pytest.param(
+            float(np.nextafter(np.float32(0.0), np.float32(1.0))) / 2.0,
+            ValueError,
+            id="float32-underflow-to-zero",
+        ),
+    ),
+)
+def test_movement_scale_rejects_wrong_types_and_invalid_float32_values(
+    invalid_scale: object,
+    error_type: type[Exception],
+) -> None:
+    """Prove the host boundary rejects scales that cannot authorize movement."""
+    config = _replace_config(
+        _valid_config(),
+        ordinary_movement_distance_scale=invalid_scale,
+    )
+
+    with pytest.raises(error_type, match="ordinary_movement_distance_scale"):
         validate_env_config(config)
 
 
@@ -591,6 +653,7 @@ def test_bounds_pillar_wall_and_agent_tangency_are_legal() -> None:
         obstacles=obstacles,
         agent_profile=profile,
         initial_agent_positions=positions,
+        ordinary_movement_distance_scale=1.0,
     )
     assert validate_env_config(config) is None
 

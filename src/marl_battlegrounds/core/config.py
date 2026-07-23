@@ -450,6 +450,24 @@ def validate_env_config(config: EnvConfig) -> None:
                 f"{field_name} must be at most {_FLOAT32_MAX}, not {dimension}."
             )
 
+    if type(config.ordinary_movement_distance_scale) is not float:
+        raise TypeError(
+            "ordinary_movement_distance_scale must be a float, not "
+            f"{type(config.ordinary_movement_distance_scale).__name__}."
+        )
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        execution_movement_scale = np.float32(config.ordinary_movement_distance_scale)
+    if not bool(np.isfinite(execution_movement_scale)):
+        raise ValueError(
+            "ordinary_movement_distance_scale must remain finite after "
+            "conversion to float32."
+        )
+    if not 0.0 < execution_movement_scale <= 1.0:
+        raise ValueError(
+            "ordinary_movement_distance_scale must remain in (0.0, 1.0] "
+            "after conversion to float32."
+        )
+
     obstacles = _validate_obstacles(config.obstacles)
     profile = _validate_agent_profile(config.agent_profile)
     _validate_initial_agent_positions(

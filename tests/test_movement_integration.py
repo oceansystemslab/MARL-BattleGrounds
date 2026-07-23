@@ -183,6 +183,7 @@ def _deterministic_config(
     map_width: float = 20.0,
     map_height: float = 12.0,
     obstacles: Array | None = None,
+    ordinary_movement_distance_scale: float = 1.0,
 ) -> EnvConfig:
     """Create a deterministic config for movement integration tests."""
     profile = resolve_agent_profile(
@@ -211,6 +212,7 @@ def _deterministic_config(
         obstacles=_empty_obstacles() if obstacles is None else obstacles,
         agent_profile=profile,
         initial_agent_positions=jnp.where(profile.active_mask[:, None], positions, 0.0),
+        ordinary_movement_distance_scale=ordinary_movement_distance_scale,
     )
 
 
@@ -736,6 +738,129 @@ def test_cardinal_moves_scale_by_effective_state_movement_speed(
     )
 
     _assert_center_close(next_state.agent_positions[0], expected_position)
+
+
+@pytest.mark.parametrize(
+    ("move_action", "expected_direction"),
+    (
+        pytest.param(MOVE_NORTH, (0.0, 1.0), id="north"),
+        pytest.param(MOVE_SOUTH, (0.0, -1.0), id="south"),
+        pytest.param(MOVE_EAST, (1.0, 0.0), id="east"),
+        pytest.param(MOVE_WEST, (-1.0, 0.0), id="west"),
+        pytest.param(MOVE_NORTHEAST, (1.0, 1.0), id="northeast"),
+        pytest.param(MOVE_NORTHWEST, (-1.0, 1.0), id="northwest"),
+        pytest.param(MOVE_SOUTHEAST, (1.0, -1.0), id="southeast"),
+        pytest.param(MOVE_SOUTHWEST, (-1.0, -1.0), id="southwest"),
+    ),
+)
+def test_movement_calibration_scales_every_nonstay_direction(
+    move_action: int,
+    expected_direction: tuple[float, float],
+) -> None:
+    """Prove calibrated displacement preserves direction and unit normalization."""
+    movement_scale = 0.1
+    config = _deterministic_config(ordinary_movement_distance_scale=movement_scale)
+    start = jnp.asarray((10.0, 6.0), dtype=jnp.float32)
+    config, state = _state_with_single_active_alive_agent(config, start)
+
+    next_state, observation, *_ = step(
+        config,
+        state,
+        _current_action_mask(config, state),
+        _joint_action_with_moves((0, move_action)),
+        jax.random.key(60),
+    )
+
+    direction = jnp.asarray(expected_direction, dtype=jnp.float32)
+    normalized_direction = direction / cast(Array, jnp.linalg.norm(direction))
+    displacement = next_state.agent_positions[0] - start
+    expected_displacement = normalized_direction * movement_scale
+
+    assert bool(jnp.allclose(displacement, expected_displacement, atol=1e-6))
+    assert bool(
+        jnp.isclose(
+            cast(Array, jnp.linalg.norm(displacement)),
+            movement_scale,
+            atol=2e-6,
+        )
+    )
+    assert (
+        observation.self_features[0, AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED]
+        == movement_scale
+    )
+
+
+def test_movement_calibration_matches_representative_lane_budget_under_scan() -> None:
+    """Prove exact float32 engagement and seven-unit traversal cadence."""
+    movement_scale = 0.1
+    horizon = 70
+    config = _deterministic_config(ordinary_movement_distance_scale=movement_scale)
+    start = jnp.asarray((0.5, 6.0), dtype=jnp.float32)
+    stationary_target_x = jnp.float32(7.5)
+    config, initial_state = _state_with_single_active_alive_agent(config, start)
+    initial_mask = _current_action_mask(config, initial_state)
+    action = _joint_action_with_moves((0, MOVE_EAST))
+    keys = jax.random.split(jax.random.key(61), horizon)
+
+    def _rollout(
+        state: EnvState,
+        action_mask: ActionMask,
+        rollout_keys: Array,
+    ) -> tuple[Array, Array]:
+        def _scan_step(
+            carry: tuple[EnvState, ActionMask],
+            key: Array,
+        ) -> tuple[tuple[EnvState, ActionMask], tuple[Array, Array]]:
+            current_state, current_mask = carry
+            next_state, observation, _, _, next_mask, _ = step(
+                config,
+                current_state,
+                current_mask,
+                action,
+                key,
+            )
+            return (
+                (next_state, next_mask),
+                (
+                    next_state.agent_positions[0],
+                    observation.self_features[
+                        0, AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED
+                    ],
+                ),
+            )
+
+        _, history = jax.lax.scan(
+            _scan_step,
+            (state, action_mask),
+            rollout_keys,
+        )
+        return history
+
+    position_history, speed_history = _rollout(initial_state, initial_mask, keys)
+    compiled_positions, compiled_speeds = cast(
+        tuple[Array, Array],
+        jax.jit(_rollout)(initial_state, initial_mask, keys),
+    )
+    distance_history = stationary_target_x - position_history[:, 0]
+
+    # Four float32 geometry substeps leave the nominal 10- and 15-step
+    # boundaries just outside range; the following decision crosses them.
+    assert bool(distance_history[9] > 6.0)
+    assert bool(distance_history[10] <= 6.0)
+    assert bool(distance_history[14] > 5.5)
+    assert bool(distance_history[15] <= 5.5)
+    assert bool(distance_history[18] > 5.0)
+    assert bool(distance_history[19] <= 5.0)
+    assert bool(
+        jnp.isclose(
+            position_history[-1, 0] - start[0],
+            7.0,
+            atol=1e-5,
+        )
+    )
+    assert bool(jnp.all(speed_history == movement_scale))
+    assert bool(jnp.array_equal(position_history, compiled_positions))
+    assert bool(jnp.array_equal(speed_history, compiled_speeds))
 
 
 @pytest.mark.parametrize(

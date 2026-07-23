@@ -16,6 +16,7 @@ from marl_battlegrounds.core.env import (
     _derive_aura_damage_multipliers,
     step,
 )
+from marl_battlegrounds.core.geometry import disc_overlaps_obstacle
 from marl_battlegrounds.core.types import (
     AGENT_FEATURE_ANTI_HEAL_ROGUE_POISON_DURATION,
     AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_AURA_MULTIPLIER,
@@ -23,18 +24,33 @@ from marl_battlegrounds.core.types import (
     AGENT_FEATURE_DAMAGE_MITIGATION_WARRIOR_AURA_MULTIPLIER,
     AGENT_FEATURE_SLOW_ROGUE_POISON_DURATION,
     AGENT_FEATURE_STUN_HUNTER_TRAP_DURATION,
+    AGENT_FEATURE_STUN_WARRIOR_CHARGE_DURATION,
     ENVIRONMENT_DIMENSIONS,
     HUNTER_CLASS_ID,
     MAGE_CLASS_ID,
     MAX_AGENT_SLOTS,
     MAX_AGENTS_PER_TEAM,
     MAX_OBSTACLE_SLOTS,
+    MOVE_EAST,
+    MOVE_NORTH,
+    MOVE_NORTHEAST,
+    MOVE_NORTHWEST,
+    MOVE_SOUTH,
+    MOVE_SOUTHEAST,
+    MOVE_SOUTHWEST,
     MOVE_STAY,
+    MOVE_WEST,
     NEUTRAL_CLASS_ID,
     NUM_CLASSES,
     NUM_SLOW_CHANNELS,
     NUM_STUN_CHANNELS,
+    OBSTACLE_FEATURE_ACTIVE,
+    OBSTACLE_FEATURE_RADIUS,
+    OBSTACLE_FEATURE_TYPE,
+    OBSTACLE_FEATURE_X,
+    OBSTACLE_FEATURE_Y,
     OBSTACLE_FEATURES,
+    OBSTACLE_TYPE_PILLAR,
     PRIEST_CLASS_ID,
     ROGUE_CLASS_ID,
     SLOW_CHANNEL_HUNTER_BASIC,
@@ -69,6 +85,20 @@ def _empty_obstacles() -> Array:
     return jnp.zeros((MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES), dtype=jnp.float32)
 
 
+def _pillar_obstacles(
+    center: tuple[float, float],
+    *,
+    radius: float,
+) -> Array:
+    """Return a padded table containing one active circular pillar."""
+    obstacles = _empty_obstacles()
+    obstacles = obstacles.at[0, OBSTACLE_FEATURE_TYPE].set(OBSTACLE_TYPE_PILLAR)
+    obstacles = obstacles.at[0, OBSTACLE_FEATURE_ACTIVE].set(1.0)
+    obstacles = obstacles.at[0, OBSTACLE_FEATURE_X].set(center[0])
+    obstacles = obstacles.at[0, OBSTACLE_FEATURE_Y].set(center[1])
+    return obstacles.at[0, OBSTACLE_FEATURE_RADIUS].set(radius)
+
+
 def _requested_roster(*class_rows: tuple[int, int]) -> Array:
     """Return a padded roster with explicit class assignments by global slot."""
     roster = jnp.full((MAX_AGENT_SLOTS,), NEUTRAL_CLASS_ID, dtype=jnp.int32)
@@ -95,6 +125,9 @@ def _scenario(
     *class_rows: tuple[int, int],
     team_sizes: tuple[int, int],
     positions: Array | None = None,
+    obstacles: Array | None = None,
+    ordinary_movement_distance_scale: float = 1.0,
+    preserve_catalog_movement_speeds: bool = False,
 ) -> tuple[EnvConfig, EnvState]:
     """Build a deterministic combat scenario with permissive interaction radii."""
     profile = resolve_agent_profile(
@@ -102,7 +135,11 @@ def _scenario(
         jnp.asarray(team_sizes, dtype=jnp.int32),
     )
     profile = profile._replace(
-        base_movement_speeds=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32),
+        base_movement_speeds=(
+            profile.base_movement_speeds
+            if preserve_catalog_movement_speeds
+            else jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32)
+        ),
         observation_radii=jnp.where(profile.active_mask, 20.0, 0.0).astype(jnp.float32),
         basic_interaction_radii=jnp.where(profile.active_mask, 20.0, 0.0).astype(
             jnp.float32
@@ -115,11 +152,12 @@ def _scenario(
         max_steps=100,
         map_width=20.0,
         map_height=12.0,
-        obstacles=_empty_obstacles(),
+        obstacles=_empty_obstacles() if obstacles is None else obstacles,
         agent_profile=profile,
         initial_agent_positions=(
             _default_positions(team_sizes) if positions is None else positions
         ),
+        ordinary_movement_distance_scale=ordinary_movement_distance_scale,
     )
     state = EnvState(
         step_count=jnp.array(0, dtype=jnp.int32),
@@ -142,18 +180,24 @@ def _scenario(
     return config, state
 
 
-def _joint_action(*rows: tuple[int, int, int]) -> Action:
+def _joint_action(
+    *rows: tuple[int, int, int],
+    movement_rows: tuple[tuple[int, int], ...] = (),
+) -> Action:
     """Return a no-movement joint action with selected combat overrides.
 
     Each override is ``(actor_slot, target_action, use_ultimate)``.
     """
     targets = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32)
     ultimate_uses = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32)
+    moves = jnp.full((MAX_AGENT_SLOTS,), MOVE_STAY, dtype=jnp.int32)
     for actor_slot, target_action, use_ultimate in rows:
         targets = targets.at[actor_slot].set(target_action)
         ultimate_uses = ultimate_uses.at[actor_slot].set(use_ultimate)
+    for actor_slot, move_action in movement_rows:
+        moves = moves.at[actor_slot].set(move_action)
     return Action(
-        move=jnp.full((MAX_AGENT_SLOTS,), MOVE_STAY, dtype=jnp.int32),
+        move=moves,
         select_target=targets,
         use_ultimate=ultimate_uses,
     )
@@ -186,6 +230,28 @@ def _aura_multipliers(config: EnvConfig, state: EnvState) -> tuple[Array, Array]
         state.agent_positions
     )
     return _derive_aura_damage_multipliers(config, distances, state.alive_mask)
+
+
+def _open_space_charge_scenario(
+    *,
+    movement_scale: float = 0.1,
+) -> tuple[EnvConfig, EnvState]:
+    """Return one Warrior and one target aligned for an unconstrained Charge."""
+    positions = _default_positions((1, 1))
+    positions = positions.at[_TEAM_A_FIRST_SLOT].set(
+        jnp.asarray((2.0, 6.0), dtype=jnp.float32)
+    )
+    positions = positions.at[_TEAM_B_FIRST_SLOT].set(
+        jnp.asarray((7.0, 6.0), dtype=jnp.float32)
+    )
+    return _scenario(
+        (_TEAM_A_FIRST_SLOT, WARRIOR_CLASS_ID),
+        (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
+        team_sizes=(1, 1),
+        positions=positions,
+        ordinary_movement_distance_scale=movement_scale,
+        preserve_catalog_movement_speeds=True,
+    )
 
 
 def test_ultimate_health_catalogs_are_exact_class_aligned_and_jit_stable() -> None:
@@ -476,6 +542,747 @@ def test_charge_damage_uses_burst_mage_aura_and_warrior_mitigation() -> None:
             expected_damage,
         )
     )
+
+
+def test_charge_then_precommitted_movement_has_one_public_causal_trajectory() -> None:
+    """Prove Charge, both movement heads, health, and fresh control share epochs."""
+    movement_scale = 0.1
+    config, state = _open_space_charge_scenario(movement_scale=movement_scale)
+    current_observation, current_mask = _build_observation_and_action_mask(
+        state, config
+    )
+    action = _joint_action(
+        (_TEAM_A_FIRST_SLOT, _FIRST_ENEMY_TARGET, 1),
+        movement_rows=(
+            (_TEAM_A_FIRST_SLOT, MOVE_NORTH),
+            (_TEAM_B_FIRST_SLOT, MOVE_EAST),
+        ),
+    )
+
+    next_state, next_observation, _, _, next_mask, _ = step(
+        config,
+        state,
+        current_mask,
+        action,
+        jax.random.key(51),
+    )
+
+    assert (
+        current_observation.self_features[
+            _TEAM_B_FIRST_SLOT, AGENT_FEATURE_STUN_WARRIOR_CHARGE_DURATION
+        ]
+        == 0.0
+    )
+    assert bool(
+        jnp.allclose(
+            next_state.agent_positions[_TEAM_A_FIRST_SLOT],
+            jnp.asarray((6.0, 6.0 + movement_scale), dtype=jnp.float32),
+            atol=1e-6,
+        )
+    )
+    assert bool(
+        jnp.allclose(
+            next_state.agent_positions[_TEAM_B_FIRST_SLOT],
+            jnp.asarray((7.0 + movement_scale, 6.0), dtype=jnp.float32),
+            atol=1e-6,
+        )
+    )
+    assert (
+        next_state.current_health[_TEAM_B_FIRST_SLOT]
+        == state.current_health[_TEAM_B_FIRST_SLOT]
+        - combat.ULTIMATE_DAMAGE_BY_CLASS[WARRIOR_CLASS_ID]
+    )
+    assert (
+        next_state.ultimate_cooldowns[_TEAM_A_FIRST_SLOT]
+        == combat.ULTIMATE_COOLDOWN_BY_CLASS[WARRIOR_CLASS_ID]
+    )
+    assert (
+        next_state.slow_durations[_TEAM_B_FIRST_SLOT, SLOW_CHANNEL_WARRIOR_CHARGE]
+        == combat.WARRIOR_CHARGE_SLOW_DURATION_TICKS
+    )
+    assert (
+        next_state.stun_durations[_TEAM_B_FIRST_SLOT, STUN_CHANNEL_WARRIOR_CHARGE]
+        == combat.WARRIOR_CHARGE_STUN_DURATION_TICKS
+    )
+    assert bool(next_mask.move_mask[_TEAM_B_FIRST_SLOT, MOVE_STAY])
+    assert int(jnp.sum(next_mask.move_mask[_TEAM_B_FIRST_SLOT])) == 1
+    assert (
+        next_observation.self_features[
+            _TEAM_B_FIRST_SLOT, AGENT_FEATURE_STUN_WARRIOR_CHARGE_DURATION
+        ]
+        == combat.WARRIOR_CHARGE_STUN_DURATION_TICKS
+    )
+
+
+def test_every_charge_movement_category_expresses_distinct_reachable_intent() -> None:
+    """Prove the movement head remains compositional for every legal category."""
+    config, state = _open_space_charge_scenario()
+    move_actions = (
+        MOVE_STAY,
+        MOVE_NORTH,
+        MOVE_SOUTH,
+        MOVE_EAST,
+        MOVE_WEST,
+        MOVE_NORTHEAST,
+        MOVE_NORTHWEST,
+        MOVE_SOUTHEAST,
+        MOVE_SOUTHWEST,
+    )
+    final_charger_positions: list[Array] = []
+    for move_action in move_actions:
+        next_state, _, _ = _step(
+            config,
+            state,
+            _joint_action(
+                (_TEAM_A_FIRST_SLOT, _FIRST_ENEMY_TARGET, 1),
+                movement_rows=((_TEAM_A_FIRST_SLOT, move_action),),
+            ),
+        )
+        final_charger_positions.append(next_state.agent_positions[_TEAM_A_FIRST_SLOT])
+
+    positions = jnp.stack(final_charger_positions)
+    pairwise_distances = cast(
+        Array,
+        jnp.linalg.norm(
+            positions[:, None, :] - positions[None, :, :],
+            axis=-1,
+        ),
+    )
+    off_diagonal_distances = pairwise_distances + jnp.eye(len(move_actions))
+
+    assert bool(jnp.all(off_diagonal_distances > 1e-5))
+
+
+def test_charge_and_stay_reaches_source_facing_tangency_in_open_space() -> None:
+    """Prove the isolated forced endpoint preserves exact body tangency."""
+    config, state = _open_space_charge_scenario()
+
+    next_state, _, _ = _step(
+        config,
+        state,
+        _joint_action((_TEAM_A_FIRST_SLOT, _FIRST_ENEMY_TARGET, 1)),
+    )
+
+    source_to_target = (
+        state.agent_positions[_TEAM_B_FIRST_SLOT]
+        - state.agent_positions[_TEAM_A_FIRST_SLOT]
+    )
+    source_to_target_norm = cast(Array, jnp.linalg.norm(source_to_target))
+    source_to_target_direction = source_to_target / source_to_target_norm
+    expected_endpoint = (
+        state.agent_positions[_TEAM_B_FIRST_SLOT]
+        - (
+            config.agent_profile.agent_radii[_TEAM_A_FIRST_SLOT]
+            + config.agent_profile.agent_radii[_TEAM_B_FIRST_SLOT]
+        )
+        * source_to_target_direction
+    )
+
+    assert bool(
+        jnp.allclose(
+            next_state.agent_positions[_TEAM_A_FIRST_SLOT],
+            expected_endpoint,
+            atol=1e-6,
+        )
+    )
+    assert bool(
+        jnp.isclose(
+            cast(
+                Array,
+                jnp.linalg.norm(
+                    next_state.agent_positions[_TEAM_A_FIRST_SLOT]
+                    - next_state.agent_positions[_TEAM_B_FIRST_SLOT]
+                ),
+            ),
+            1.0,
+            atol=1e-6,
+        )
+    )
+
+
+def test_post_charge_movement_toward_target_respects_body_collision() -> None:
+    """Prove ordinary movement cannot pass through the tangent recipient."""
+    config, state = _open_space_charge_scenario()
+
+    next_state, _, _ = _step(
+        config,
+        state,
+        _joint_action(
+            (_TEAM_A_FIRST_SLOT, _FIRST_ENEMY_TARGET, 1),
+            movement_rows=((_TEAM_A_FIRST_SLOT, MOVE_EAST),),
+        ),
+    )
+
+    final_separation = cast(
+        Array,
+        jnp.linalg.norm(
+            next_state.agent_positions[_TEAM_A_FIRST_SLOT]
+            - next_state.agent_positions[_TEAM_B_FIRST_SLOT]
+        ),
+    )
+    unconstrained_charger_endpoint = jnp.asarray((6.1, 6.0), dtype=jnp.float32)
+
+    assert bool(final_separation >= 1.0 - 1e-5)
+    assert not bool(
+        jnp.allclose(
+            next_state.agent_positions[_TEAM_A_FIRST_SLOT],
+            unconstrained_charger_endpoint,
+            atol=1e-6,
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("slow_channels", "freedom_duration", "expected_ordinary_distance"),
+    (
+        pytest.param((), 0, 0.1, id="uncontrolled"),
+        pytest.param(
+            (SLOW_CHANNEL_HUNTER_BASIC, SLOW_CHANNEL_ROGUE_POISON),
+            0,
+            0.0425,
+            id="stacked-slow",
+        ),
+        pytest.param(
+            (SLOW_CHANNEL_HUNTER_BASIC, SLOW_CHANNEL_ROGUE_POISON),
+            1,
+            0.085,
+            id="freedom-floor",
+        ),
+    ),
+)
+def test_current_status_scales_only_post_charge_ordinary_movement(
+    slow_channels: tuple[int, ...],
+    freedom_duration: int,
+    expected_ordinary_distance: float,
+) -> None:
+    """Prove status affects voluntary movement without scaling forced Charge."""
+    config, state = _open_space_charge_scenario()
+    for channel in slow_channels:
+        state = state._replace(
+            slow_durations=state.slow_durations.at[_TEAM_A_FIRST_SLOT, channel].set(1)
+        )
+    state = state._replace(
+        priest_blessing_of_freedom_slow_floor_durations=(
+            state.priest_blessing_of_freedom_slow_floor_durations.at[
+                _TEAM_A_FIRST_SLOT
+            ].set(freedom_duration)
+        )
+    )
+
+    next_state, _, _ = _step(
+        config,
+        state,
+        _joint_action(
+            (_TEAM_A_FIRST_SLOT, _FIRST_ENEMY_TARGET, 1),
+            movement_rows=((_TEAM_A_FIRST_SLOT, MOVE_NORTH),),
+        ),
+    )
+
+    assert bool(
+        jnp.isclose(
+            next_state.agent_positions[_TEAM_A_FIRST_SLOT, 0],
+            6.0,
+            atol=1e-6,
+        )
+    )
+    assert bool(
+        jnp.isclose(
+            next_state.agent_positions[_TEAM_A_FIRST_SLOT, 1],
+            6.0 + expected_ordinary_distance,
+            atol=1e-6,
+        )
+    )
+
+
+def test_current_stun_rejects_charge_and_movement_before_expiring() -> None:
+    """Prove current control truth blocks both voluntary action heads."""
+    config, state = _open_space_charge_scenario()
+    state = state._replace(
+        stun_durations=state.stun_durations.at[
+            _TEAM_A_FIRST_SLOT, STUN_CHANNEL_HUNTER_TRAP
+        ].set(1)
+    )
+    current_observation, current_mask = _build_observation_and_action_mask(
+        state, config
+    )
+    submitted_action = _joint_action(
+        (_TEAM_A_FIRST_SLOT, _FIRST_ENEMY_TARGET, 1),
+        movement_rows=((_TEAM_A_FIRST_SLOT, MOVE_NORTH),),
+    )
+
+    next_state, next_observation, _, _, next_mask, _ = step(
+        config,
+        state,
+        current_mask,
+        submitted_action,
+        jax.random.key(54),
+    )
+
+    assert (
+        current_observation.self_features[
+            _TEAM_A_FIRST_SLOT, AGENT_FEATURE_STUN_HUNTER_TRAP_DURATION
+        ]
+        == 1.0
+    )
+    assert bool(jnp.array_equal(next_state.agent_positions, state.agent_positions))
+    assert bool(jnp.array_equal(next_state.current_health, state.current_health))
+    assert next_state.ultimate_cooldowns[_TEAM_A_FIRST_SLOT] == 0
+    assert bool(jnp.all(next_state.stun_durations[_TEAM_A_FIRST_SLOT] == 0))
+    assert (
+        next_observation.self_features[
+            _TEAM_A_FIRST_SLOT, AGENT_FEATURE_STUN_HUNTER_TRAP_DURATION
+        ]
+        == 0.0
+    )
+    assert bool(jnp.all(next_mask.move_mask[_TEAM_A_FIRST_SLOT]))
+
+
+def test_charge_leaps_over_midpath_body_but_respects_endpoint_body_blocking() -> None:
+    """Prove Charge uses endpoint placement rather than swept-path movement."""
+    positions = _default_positions((1, 2))
+    positions = positions.at[0].set(jnp.asarray((2.0, 6.0), dtype=jnp.float32))
+    positions = positions.at[5].set(jnp.asarray((7.0, 6.0), dtype=jnp.float32))
+    positions = positions.at[6].set(jnp.asarray((4.0, 6.0), dtype=jnp.float32))
+    midpath_config, midpath_state = _scenario(
+        (0, WARRIOR_CLASS_ID),
+        (5, HUNTER_CLASS_ID),
+        (6, HUNTER_CLASS_ID),
+        team_sizes=(1, 2),
+        positions=positions,
+    )
+    charge = _joint_action((0, _FIRST_ENEMY_TARGET, 1))
+
+    midpath_result, _, _ = _step(midpath_config, midpath_state, charge)
+
+    assert bool(
+        jnp.allclose(
+            midpath_result.agent_positions[0],
+            jnp.asarray((6.0, 6.0), dtype=jnp.float32),
+            atol=1e-6,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            midpath_result.agent_positions[6],
+            midpath_state.agent_positions[6],
+        )
+    )
+
+    endpoint_positions = positions.at[6].set(jnp.asarray((6.0, 6.0), dtype=jnp.float32))
+    endpoint_config, endpoint_state = _scenario(
+        (0, WARRIOR_CLASS_ID),
+        (5, HUNTER_CLASS_ID),
+        (6, HUNTER_CLASS_ID),
+        team_sizes=(1, 2),
+        positions=endpoint_positions,
+    )
+    endpoint_result, _, _ = _step(endpoint_config, endpoint_state, charge)
+    charger_to_blocker_distance = cast(
+        Array,
+        jnp.linalg.norm(
+            endpoint_result.agent_positions[0] - endpoint_result.agent_positions[6]
+        ),
+    )
+
+    assert bool(jnp.all(jnp.isfinite(endpoint_result.agent_positions)))
+    assert bool(charger_to_blocker_distance >= 1.0 - 1e-5)
+    assert not bool(
+        jnp.array_equal(
+            endpoint_result.agent_positions[0],
+            jnp.asarray((6.0, 6.0), dtype=jnp.float32),
+        )
+    )
+
+
+def test_charge_leaps_over_midpath_pillar_but_respects_endpoint_overlap() -> None:
+    """Prove the forced phase checks placement, not a swept body path."""
+    positions = _default_positions((1, 1))
+    positions = positions.at[0].set(jnp.asarray((2.0, 6.0), dtype=jnp.float32))
+    positions = positions.at[5].set(jnp.asarray((7.0, 6.0), dtype=jnp.float32))
+    charge = _joint_action((0, _FIRST_ENEMY_TARGET, 1))
+
+    midpath_obstacles = _pillar_obstacles((4.0, 6.6), radius=0.25)
+    midpath_config, midpath_state = _scenario(
+        (0, WARRIOR_CLASS_ID),
+        (5, HUNTER_CLASS_ID),
+        team_sizes=(1, 1),
+        positions=positions,
+        obstacles=midpath_obstacles,
+    )
+    midpath_result, _, _ = _step(midpath_config, midpath_state, charge)
+
+    assert bool(
+        jnp.allclose(
+            midpath_result.agent_positions[0],
+            jnp.asarray((6.0, 6.0), dtype=jnp.float32),
+            atol=1e-6,
+        )
+    )
+
+    endpoint_obstacles = _pillar_obstacles((6.0, 6.6), radius=0.25)
+    endpoint_config, endpoint_state = _scenario(
+        (0, WARRIOR_CLASS_ID),
+        (5, HUNTER_CLASS_ID),
+        team_sizes=(1, 1),
+        positions=positions,
+        obstacles=endpoint_obstacles,
+    )
+    endpoint_result, _, _ = _step(endpoint_config, endpoint_state, charge)
+
+    assert not bool(
+        jnp.allclose(
+            endpoint_result.agent_positions[0],
+            jnp.asarray((6.0, 6.0), dtype=jnp.float32),
+            atol=1e-6,
+        )
+    )
+    assert not bool(
+        disc_overlaps_obstacle(
+            endpoint_result.agent_positions[0],
+            endpoint_config.agent_profile.agent_radii[0],
+            endpoint_obstacles[0],
+        )
+    )
+
+
+def test_los_blocked_charge_matches_noncombat_movement() -> None:
+    """Prove pre-state LOS rejection prevents forced relocation and payloads."""
+    positions = _default_positions((1, 1))
+    positions = positions.at[0].set(jnp.asarray((2.0, 6.0), dtype=jnp.float32))
+    positions = positions.at[5].set(jnp.asarray((7.0, 6.0), dtype=jnp.float32))
+    config, state = _scenario(
+        (0, WARRIOR_CLASS_ID),
+        (5, HUNTER_CLASS_ID),
+        team_sizes=(1, 1),
+        positions=positions,
+        obstacles=_pillar_obstacles((4.5, 6.0), radius=0.25),
+        ordinary_movement_distance_scale=0.1,
+        preserve_catalog_movement_speeds=True,
+    )
+    submitted_charge = _joint_action(
+        (0, _FIRST_ENEMY_TARGET, 1),
+        movement_rows=((0, MOVE_NORTH),),
+    )
+    movement_only = _joint_action(
+        movement_rows=((0, MOVE_NORTH),),
+    )
+
+    submitted_charge_state, _, _ = _step(config, state, submitted_charge)
+    movement_only_state, _, _ = _step(config, state, movement_only)
+
+    assert bool(
+        jnp.array_equal(
+            submitted_charge_state.agent_positions,
+            movement_only_state.agent_positions,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            submitted_charge_state.current_health,
+            movement_only_state.current_health,
+        )
+    )
+    assert submitted_charge_state.ultimate_cooldowns[0] == 0
+    assert bool(jnp.all(submitted_charge_state.stun_durations == 0))
+
+
+def test_opposing_charges_use_one_prestate_snapshot_and_match_jit() -> None:
+    """Prove simultaneous opposing endpoints cannot observe each other landing."""
+    positions = _default_positions((1, 1))
+    positions = positions.at[0].set(jnp.asarray((2.0, 6.0), dtype=jnp.float32))
+    positions = positions.at[5].set(jnp.asarray((7.0, 6.0), dtype=jnp.float32))
+    config, state = _scenario(
+        (0, WARRIOR_CLASS_ID),
+        (5, WARRIOR_CLASS_ID),
+        team_sizes=(1, 1),
+        positions=positions,
+    )
+    action = _joint_action(
+        (0, _FIRST_ENEMY_TARGET, 1),
+        (5, _FIRST_ENEMY_TARGET, 1),
+    )
+    current_mask = _current_action_mask(config, state)
+
+    eager = step(config, state, current_mask, action, jax.random.key(52))
+    compiled = cast(
+        tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info],
+        jax.jit(step)(config, state, current_mask, action, jax.random.key(52)),
+    )
+
+    assert bool(
+        jnp.allclose(
+            eager[0].agent_positions[0],
+            jnp.asarray((6.0, 6.0), dtype=jnp.float32),
+            atol=1e-6,
+        )
+    )
+    assert bool(
+        jnp.allclose(
+            eager[0].agent_positions[5],
+            jnp.asarray((3.0, 6.0), dtype=jnp.float32),
+            atol=1e-6,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            eager[0].stun_durations[jnp.asarray((0, 5)), STUN_CHANNEL_WARRIOR_CHARGE],
+            jnp.asarray((1, 1), dtype=jnp.int32),
+        )
+    )
+    for eager_leaf, compiled_leaf in zip(
+        jax.tree_util.tree_leaves(eager),
+        jax.tree_util.tree_leaves(compiled),
+        strict=True,
+    ):
+        assert bool(jnp.array_equal(eager_leaf, compiled_leaf))
+
+
+def test_same_target_charges_resolve_as_one_finite_deterministic_batch() -> None:
+    """Prove crowded multi-source placement is simultaneous and repeatable."""
+    positions = _default_positions((2, 1))
+    positions = positions.at[0].set(jnp.asarray((2.0, 5.5), dtype=jnp.float32))
+    positions = positions.at[1].set(jnp.asarray((2.0, 6.5), dtype=jnp.float32))
+    positions = positions.at[5].set(jnp.asarray((7.0, 6.0), dtype=jnp.float32))
+    config, state = _scenario(
+        (0, WARRIOR_CLASS_ID),
+        (1, WARRIOR_CLASS_ID),
+        (5, HUNTER_CLASS_ID),
+        team_sizes=(2, 1),
+        positions=positions,
+    )
+    action = _joint_action(
+        (0, _FIRST_ENEMY_TARGET, 1),
+        (1, _FIRST_ENEMY_TARGET, 1),
+    )
+
+    first_result, _, _ = _step(config, state, action)
+    second_result, _, _ = _step(config, state, action)
+
+    assert bool(jnp.all(jnp.isfinite(first_result.agent_positions)))
+    assert bool(
+        jnp.array_equal(
+            first_result.agent_positions,
+            second_result.agent_positions,
+        )
+    )
+    assert (
+        state.current_health[5] - first_result.current_health[5]
+        == 2.0 * combat.ULTIMATE_DAMAGE_BY_CLASS[WARRIOR_CLASS_ID]
+    )
+    assert bool(
+        jnp.array_equal(
+            first_result.ultimate_cooldowns[:2],
+            combat.ULTIMATE_COOLDOWN_BY_CLASS[
+                jnp.asarray((WARRIOR_CLASS_ID, WARRIOR_CLASS_ID))
+            ],
+        )
+    )
+
+
+def test_charge_from_coincident_malformed_state_remains_finite() -> None:
+    """Prove the direction fallback avoids NaN propagation in bad input state."""
+    config, state = _open_space_charge_scenario()
+    coincident_position = state.agent_positions[_TEAM_B_FIRST_SLOT]
+    state = state._replace(
+        agent_positions=state.agent_positions.at[_TEAM_A_FIRST_SLOT].set(
+            coincident_position
+        )
+    )
+
+    next_state, _, _ = _step(
+        config,
+        state,
+        _joint_action((_TEAM_A_FIRST_SLOT, _FIRST_ENEMY_TARGET, 1)),
+    )
+
+    assert bool(jnp.all(jnp.isfinite(next_state.agent_positions)))
+    assert bool(jnp.all(jnp.isfinite(next_state.current_health)))
+    assert (
+        next_state.ultimate_cooldowns[_TEAM_A_FIRST_SLOT]
+        == combat.ULTIMATE_COOLDOWN_BY_CLASS[WARRIOR_CLASS_ID]
+    )
+
+
+def test_rejected_charge_is_physically_identical_to_ordinary_movement() -> None:
+    """Prove an unavailable ultimate cannot cancel independent movement."""
+    config, state = _open_space_charge_scenario()
+    state = state._replace(
+        ultimate_cooldowns=state.ultimate_cooldowns.at[_TEAM_A_FIRST_SLOT].set(1)
+    )
+    submitted_charge = _joint_action(
+        (_TEAM_A_FIRST_SLOT, _FIRST_ENEMY_TARGET, 1),
+        movement_rows=((_TEAM_A_FIRST_SLOT, MOVE_NORTH),),
+    )
+    ordinary_action = _joint_action(
+        (_TEAM_A_FIRST_SLOT, 0, 0),
+        movement_rows=((_TEAM_A_FIRST_SLOT, MOVE_NORTH),),
+    )
+
+    submitted_charge_state, _, _ = _step(config, state, submitted_charge)
+    ordinary_state, _, _ = _step(config, state, ordinary_action)
+
+    assert bool(
+        jnp.array_equal(
+            submitted_charge_state.agent_positions,
+            ordinary_state.agent_positions,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            submitted_charge_state.current_health,
+            ordinary_state.current_health,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            submitted_charge_state.ultimate_cooldowns,
+            ordinary_state.ultimate_cooldowns,
+        )
+    )
+
+
+def test_prestate_warrior_aura_governs_health_before_charge_breaks_formation() -> None:
+    """Prove movement changes successor aura truth without retroactive health."""
+    positions = _default_positions((2, 2))
+    positions = positions.at[0].set(jnp.asarray((2.0, 2.0), dtype=jnp.float32))
+    positions = positions.at[1].set(jnp.asarray((2.0, 3.0), dtype=jnp.float32))
+    positions = positions.at[5].set(jnp.asarray((8.0, 3.0), dtype=jnp.float32))
+    positions = positions.at[6].set(jnp.asarray((8.0, 2.0), dtype=jnp.float32))
+    config, state = _scenario(
+        (0, WARRIOR_CLASS_ID),
+        (1, HUNTER_CLASS_ID),
+        (5, MAGE_CLASS_ID),
+        (6, HUNTER_CLASS_ID),
+        team_sizes=(2, 2),
+        positions=positions,
+    )
+    action = _joint_action(
+        (0, _SECOND_ENEMY_TARGET, 1),
+        (5, _SECOND_ENEMY_TARGET, 0),
+    )
+
+    next_state, next_observation, _ = _step(config, state, action)
+
+    expected_damage = (
+        combat.BASIC_DAMAGE_BY_CLASS[MAGE_CLASS_ID]
+        * combat.MAGE_DAMAGE_AURA_MULTIPLIER
+        * combat.WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER
+    )
+    assert bool(
+        jnp.isclose(
+            state.current_health[1] - next_state.current_health[1],
+            expected_damage,
+        )
+    )
+    assert (
+        next_observation.self_features[
+            1, AGENT_FEATURE_DAMAGE_MITIGATION_WARRIOR_AURA_MULTIPLIER
+        ]
+        == 1.0
+    )
+
+
+def test_charge_and_movement_trajectory_matches_eager_jit_and_scan() -> None:
+    """Prove compiled rollout preserves the complete two-phase public trajectory."""
+    config, initial_state = _open_space_charge_scenario()
+    initial_mask = _current_action_mask(config, initial_state)
+    first_action = _joint_action(
+        (0, _FIRST_ENEMY_TARGET, 1),
+        movement_rows=((0, MOVE_NORTH), (5, MOVE_EAST)),
+    )
+    second_action = _joint_action(
+        movement_rows=((0, MOVE_WEST), (5, MOVE_EAST)),
+    )
+    actions = jax.tree.map(
+        lambda *leaves: jnp.stack(leaves),
+        first_action,
+        second_action,
+    )
+    keys = jax.random.split(jax.random.key(53), 2)
+
+    def _outputs(
+        state: EnvState,
+        observation: Observation,
+        action_mask: ActionMask,
+    ) -> tuple[Array, Array, Array, Array, Array, Array, Array]:
+        return (
+            state.agent_positions,
+            state.current_health,
+            state.ultimate_cooldowns,
+            state.slow_durations,
+            state.stun_durations,
+            observation.self_features,
+            action_mask.move_mask,
+        )
+
+    eager_state = initial_state
+    eager_mask = initial_mask
+    eager_history_lists: list[list[Array]] = [[] for _ in range(7)]
+    for action_index, key in enumerate(keys):
+        current_action = Action(
+            move=actions.move[action_index],
+            select_target=actions.select_target[action_index],
+            use_ultimate=actions.use_ultimate[action_index],
+        )
+        eager_state, observation, _, _, eager_mask, _ = step(
+            config,
+            eager_state,
+            eager_mask,
+            current_action,
+            key,
+        )
+        for history, value in zip(
+            eager_history_lists,
+            _outputs(eager_state, observation, eager_mask),
+            strict=True,
+        ):
+            history.append(value)
+    eager_history = tuple(jnp.stack(history) for history in eager_history_lists)
+
+    def _rollout(
+        state: EnvState,
+        action_mask: ActionMask,
+        rollout_actions: Action,
+        rollout_keys: Array,
+    ) -> tuple[tuple[EnvState, ActionMask], tuple[Array, ...]]:
+        def _scan_step(
+            carry: tuple[EnvState, ActionMask],
+            inputs: tuple[Action, Array],
+        ) -> tuple[tuple[EnvState, ActionMask], tuple[Array, ...]]:
+            current_state, current_mask = carry
+            current_action, key = inputs
+            next_state, observation, _, _, next_mask, _ = step(
+                config,
+                current_state,
+                current_mask,
+                current_action,
+                key,
+            )
+            return (
+                (next_state, next_mask),
+                _outputs(next_state, observation, next_mask),
+            )
+
+        return jax.lax.scan(
+            _scan_step,
+            (state, action_mask),
+            (rollout_actions, rollout_keys),
+        )
+
+    scanned = _rollout(initial_state, initial_mask, actions, keys)
+    compiled = cast(
+        tuple[tuple[EnvState, ActionMask], tuple[Array, ...]],
+        jax.jit(_rollout)(initial_state, initial_mask, actions, keys),
+    )
+
+    for expected, scanned_value, compiled_value in zip(
+        eager_history,
+        scanned[1],
+        compiled[1],
+        strict=True,
+    ):
+        assert bool(jnp.array_equal(expected, scanned_value))
+        assert bool(jnp.array_equal(expected, compiled_value))
 
 
 def test_holy_word_uses_pre_state_anti_heal_and_still_starts_cooldown() -> None:
