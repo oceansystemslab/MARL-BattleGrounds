@@ -438,6 +438,10 @@ def test_capabilities_are_class_owned_payloads_not_cooldown_availability() -> No
             AGENT_FEATURE_CAPABILITY_ULTIMATE_COOLDOWN_DURATION,
             combat.ULTIMATE_COOLDOWN_BY_CLASS,
         ),
+        (
+            AGENT_FEATURE_CAPABILITY_ULTIMATE_DAMAGE,
+            combat.ULTIMATE_DAMAGE_BY_CLASS,
+        ),
     )
     for column, catalog in expected_catalog_columns:
         expected = catalog[config.agent_profile.class_ids].astype(jnp.float32)
@@ -551,11 +555,6 @@ def test_capabilities_are_class_owned_payloads_not_cooldown_availability() -> No
             AGENT_FEATURE_CAPABILITY_ULTIMATE_HEALING,
             PRIEST_CLASS_ID,
             combat.ULTIMATE_HEALING_BY_CLASS[PRIEST_CLASS_ID],
-        ),
-        (
-            AGENT_FEATURE_CAPABILITY_ULTIMATE_DAMAGE,
-            WARRIOR_CLASS_ID,
-            combat.ULTIMATE_DAMAGE_BY_CLASS[WARRIOR_CLASS_ID],
         ),
     )
     for column, class_id, payload in owned_payloads:

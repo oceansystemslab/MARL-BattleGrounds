@@ -264,7 +264,10 @@ def _open_space_charge_scenario(
 
 def test_ultimate_health_catalogs_are_exact_class_aligned_and_jit_stable() -> None:
     """Prove both ultimate health catalogs are complete authoritative tables."""
-    expected_damage = jnp.asarray((0.0, 0.0, 16.0, 0.0, 0.0, 0.0), dtype=jnp.float32)
+    expected_damage = jnp.asarray(
+        (0.0, 0.0, 16.0, 0.0, 10.0, 0.0),
+        dtype=jnp.float32,
+    )
     expected_healing = jnp.asarray((0.0, 0.0, 0.0, 0.0, 0.0, 75.0), dtype=jnp.float32)
     class_ids = jnp.arange(NUM_CLASSES, dtype=jnp.int32)
 
@@ -284,6 +287,7 @@ def test_ultimate_health_catalogs_are_exact_class_aligned_and_jit_stable() -> No
             combat.get_ultimate_healing_by_class_ids(class_ids), expected_healing
         )
     )
+    assert combat.ULTIMATE_INTERACTION_RADIUS_BY_CLASS[ROGUE_CLASS_ID] == 1.5
     assert bool(
         jnp.array_equal(
             cast(
@@ -426,7 +430,6 @@ def test_priest_ultimates_route_to_self_and_allies_for_both_teams() -> None:
     (
         pytest.param(MAGE_CLASS_ID, 0, id="mage-burst"),
         pytest.param(HUNTER_CLASS_ID, _FIRST_ENEMY_TARGET, id="hunter-trap"),
-        pytest.param(ROGUE_CLASS_ID, _FIRST_ENEMY_TARGET, id="rogue-poison"),
     ),
 )
 def test_zero_health_payload_ultimates_change_no_health_but_start_cooldown(
@@ -1321,8 +1324,8 @@ def test_holy_word_uses_pre_state_anti_heal_and_still_starts_cooldown() -> None:
     )
 
 
-def test_fresh_rogue_anti_heal_first_modifies_next_transition_healing() -> None:
-    """Prove Poison is public before it reduces a later incoming heal."""
+def test_rogue_poison_damages_with_current_healing_then_governs_next_heal() -> None:
+    """Prove Poison damage is simultaneous and fresh anti-heal starts next epoch."""
     config, state = _scenario(
         (0, ROGUE_CLASS_ID),
         (5, PRIEST_CLASS_ID),
@@ -1342,7 +1345,9 @@ def test_fresh_rogue_anti_heal_first_modifies_next_transition_healing() -> None:
     )
 
     assert applied_state.current_health[6] == (
-        50.0 + combat.BASIC_HEALING_BY_CLASS[PRIEST_CLASS_ID]
+        50.0
+        + combat.BASIC_HEALING_BY_CLASS[PRIEST_CLASS_ID]
+        - combat.ULTIMATE_DAMAGE_BY_CLASS[ROGUE_CLASS_ID]
     )
     assert applied_state.rogue_poison_anti_heal_durations[6] == (
         combat.ROGUE_POISON_ANTI_HEAL_DURATION_TICKS
@@ -1801,8 +1806,8 @@ def test_accepted_damage_breaks_trap_at_zero_health_without_effective_loss() -> 
     assert bool(jnp.any(next_mask.select_target_mask[5, 1:]))
 
 
-def test_non_damage_effects_do_not_break_pre_existing_hunter_trap() -> None:
-    """Prove accepted healing and zero-damage Poison only tick existing Trap."""
+def test_non_recipient_traps_tick_when_other_agents_receive_effects() -> None:
+    """Prove effects elsewhere do not break unrelated pre-existing Traps."""
     config, state = _scenario(
         (0, PRIEST_CLASS_ID),
         (1, HUNTER_CLASS_ID),

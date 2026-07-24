@@ -184,10 +184,10 @@ def _catalog_helper(name: str) -> _CatalogHelper:
     return cast(_CatalogHelper, getattr(combat, name))
 
 
-def test_warrior_and_rogue_basic_radii_are_debugger_calibrated() -> None:
-    """The two separately approved melee Basic radii stay exact."""
+def test_basic_interaction_radii_match_the_approved_combat_catalog() -> None:
+    """The approved class-specific Basic ranges stay exact."""
     expected = jnp.asarray(
-        (0.0, 5.0, 1.5, 5.5, 1.5, 5.0),
+        (0.0, 3.0, 1.5, 3.5, 1.5, 3.0),
         dtype=jnp.float32,
     )
 

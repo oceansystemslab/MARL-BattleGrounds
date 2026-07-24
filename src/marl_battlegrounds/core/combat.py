@@ -117,11 +117,11 @@ BODY_RADIUS_BY_CLASS = jnp.asarray(
 BASIC_INTERACTION_RADIUS_BY_CLASS = jnp.asarray(
     [
         0.0,  # neutral
-        5.0,  # mage
+        3.0,  # mage
         1.5,  # warrior
-        5.5,  # hunter
+        3.5,  # hunter
         1.5,  # rogue
-        5.0,  # priest
+        3.0,  # priest
     ],
     dtype=jnp.float32,
 )
@@ -160,7 +160,7 @@ ULTIMATE_INTERACTION_RADIUS_BY_CLASS = jnp.asarray(
         0.0,  # mage
         6.0,  # warrior
         4.0,  # hunter
-        1.0,  # rogue
+        1.5,  # rogue
         6.0,  # priest
     ],
     dtype=jnp.float32,
@@ -185,7 +185,7 @@ ULTIMATE_DAMAGE_BY_CLASS = jnp.asarray(
         0.0,  # mage
         16.0,  # warrior
         0.0,  # hunter
-        0.0,  # rogue
+        10.0,  # rogue
         0.0,  # priest
     ],
     dtype=jnp.float32,

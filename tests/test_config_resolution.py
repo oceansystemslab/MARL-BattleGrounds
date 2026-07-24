@@ -165,14 +165,14 @@ def test_resolved_agent_profile_stats_match_combat_catalogs(
     assert bool(jnp.array_equal(actual, expected))
 
 
-def test_resolved_profile_uses_tuned_melee_basic_radii() -> None:
+def test_resolved_profile_uses_approved_basic_radii() -> None:
     resolved = resolve_agent_profile(
         _CANONICAL_ROSTER,
         jnp.asarray((5, 5), dtype=jnp.int32),
     )
 
     expected = jnp.asarray(
-        (5.0, 1.5, 5.5, 1.5, 5.0, 5.0, 1.5, 5.5, 1.5, 5.0),
+        (3.0, 1.5, 3.5, 1.5, 3.0, 3.0, 1.5, 3.5, 1.5, 3.0),
         dtype=jnp.float32,
     )
 
