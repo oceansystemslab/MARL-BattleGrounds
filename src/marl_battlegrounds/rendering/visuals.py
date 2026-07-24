@@ -16,9 +16,6 @@ from marl_battlegrounds.core.types import (
     HUNTER_CLASS_ID,
     MAGE_CLASS_ID,
     MAX_AGENT_SLOTS,
-    NUM_MOVE_ACTIONS,
-    NUM_TARGET_ACTIONS,
-    NUM_ULTIMATE_ACTIONS,
     PRIEST_CLASS_ID,
     ROGUE_CLASS_ID,
     TEAM_A_ID,
@@ -61,7 +58,6 @@ UNAVAILABLE_COLOR = "#707070"
 TARGET_COLOR = "#E040FB"
 DAMAGE_COLOR = "#D32F2F"
 HEALING_COLOR = "#00A86B"
-HISTORY_COLOR = "#37474F"
 
 # Auditable normalized radial allocation for persistent body-local presentation.
 PERSISTENT_BODY_LOCAL_RADIAL_BOUNDS: tuple[tuple[str, float, float], ...] = (
@@ -69,8 +65,7 @@ PERSISTENT_BODY_LOCAL_RADIAL_BOUNDS: tuple[tuple[str, float, float], ...] = (
     ("health", 0.73, 0.86),
     ("aura", 0.61, 0.69),
     ("lane", 0.52, 0.58),
-    ("controlled", 0.44, 0.50),
-    ("class_status_unique_history", 0.00, 0.48),
+    ("class_identity", 0.00, 0.48),
 )
 
 _CLASS_COLORS = {
@@ -364,26 +359,6 @@ class RejectedActionVisual:
 
 
 @dataclass(frozen=True, slots=True)
-class PreviousAcceptedActionVisual:
-    actor_global_slot: int
-    move_action: int
-    target_action: int
-    use_ultimate: int
-
-    def __post_init__(self) -> None:
-        _validate_global_slot(self.actor_global_slot)
-        if not 0 <= self.move_action < NUM_MOVE_ACTIONS:
-            msg = f"invalid previous move action: {self.move_action}."
-            raise ValueError(msg)
-        if not 0 <= self.target_action < NUM_TARGET_ACTIONS:
-            msg = f"invalid previous target action: {self.target_action}."
-            raise ValueError(msg)
-        if not 0 <= self.use_ultimate < NUM_ULTIMATE_ACTIONS:
-            msg = f"invalid previous Ultimate action: {self.use_ultimate}."
-            raise ValueError(msg)
-
-
-@dataclass(frozen=True, slots=True)
 class BattlefieldOverlays:
     selections: tuple[SelectionVisual, ...] = ()
     observer_visibility: tuple[ObserverVisibilityVisual, ...] = ()
@@ -397,7 +372,6 @@ class BattlefieldOverlays:
     activations: tuple[ActivationVisual, ...] = ()
     charge_trails: tuple[ChargeTrailVisual, ...] = ()
     rejections: tuple[RejectedActionVisual, ...] = ()
-    previous_actions: tuple[PreviousAcceptedActionVisual, ...] = ()
 
 
 def class_color(class_id: int) -> str:
@@ -449,7 +423,6 @@ def describe_snapshot_overlays(
     statuses: list[StatusCueVisual] = []
     auras: list[AuraCueVisual] = []
     persistent_effects: list[PersistentEffectVisual] = []
-    previous_actions: list[PreviousAcceptedActionVisual] = []
 
     for global_slot in range(MAX_AGENT_SLOTS):
         if not active_mask[global_slot]:
@@ -537,25 +510,10 @@ def describe_snapshot_overlays(
                 )
             )
 
-        if bool(state.has_previous_timestep_joint_action):
-            previous_actions.append(
-                PreviousAcceptedActionVisual(
-                    actor_global_slot=global_slot,
-                    move_action=int(state.previous_timestep_move_actions[global_slot]),
-                    target_action=int(
-                        state.previous_timestep_select_target_actions[global_slot]
-                    ),
-                    use_ultimate=int(
-                        state.previous_timestep_use_ultimate_actions[global_slot]
-                    ),
-                )
-            )
-
     return BattlefieldOverlays(
         statuses=tuple(statuses),
         auras=tuple(auras),
         persistent_effects=tuple(persistent_effects),
-        previous_actions=tuple(previous_actions),
     )
 
 

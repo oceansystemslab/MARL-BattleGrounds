@@ -94,37 +94,34 @@ def test_debugger_overlays_describe_visibility_for_every_active_candidate() -> N
 
 
 def test_lane_markers_cover_both_lanes_for_every_active_candidate() -> None:
-    session = _session("acceptance_lane_lab")
+    session = _session("basic_support")
     overlay = build_debugger_overlays(session)
 
-    assert len(overlay.lane_markers) == 4
+    assert len(overlay.lane_markers) == 12
     assert {
         (value.candidate_global_slot, value.lane) for value in overlay.lane_markers
-    } == {(0, 0), (0, 1), (5, 0), (5, 1)}
+    } == {(slot, lane) for slot in (0, 1, 2, 5, 6, 7) for lane in (0, 1)}
     target_markers = [
         value for value in overlay.lane_markers if value.candidate_global_slot == 5
     ]
-    assert not any(value.available for value in target_markers)
+    assert any(value.available for value in target_markers)
     assert not any(value.selected for value in target_markers)
 
 
 def test_target_selection_and_link_reflect_pending_exact_legality() -> None:
-    session = select_clicked_target(_session("acceptance_lane_lab"), 5)
+    session = select_clicked_target(_session("arena_5v5", 2), 7)
     assert build_debugger_overlays(session).target_links == ()
     session = arm_ultimate(session)
     overlay = build_debugger_overlays(session)
 
     assert {
         (selection.global_slot, selection.role) for selection in overlay.selections
-    } == {
-        (0, "controlled"),
-        (5, "target"),
-    }
+    } == {(7, "target")}
     assert len(overlay.target_links) == 1
     link = overlay.target_links[0]
     assert (link.source_global_slot, link.target_global_slot, link.lane) == (
-        0,
-        5,
+        2,
+        7,
         1,
     )
     assert not link.legal
@@ -230,15 +227,13 @@ def test_hud_contains_complete_actor_pending_status_and_last_transition_summary(
     )
 
 
-def test_snapshot_previous_accepted_actions_are_merged_into_debugger_overlays() -> None:
+def test_snapshot_previous_actions_are_not_drawn_on_the_battlefield() -> None:
     session = submit_next_script_frame(_session("basic_support"))
     overlay = build_debugger_overlays(session)
 
-    assert len(overlay.previous_actions) == 6
-    g0 = next(
-        value for value in overlay.previous_actions if value.actor_global_slot == 0
-    )
-    assert (g0.move_action, g0.target_action, g0.use_ultimate) == (0, 6, 0)
+    assert bool(session.state.has_previous_timestep_joint_action)
+    assert not hasattr(overlay, "previous_actions")
+    assert all(selection.role != "controlled" for selection in overlay.selections)
 
 
 def test_hud_handles_out_of_domain_submitted_movement_without_index_aliasing() -> None:

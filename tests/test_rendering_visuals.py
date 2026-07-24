@@ -32,7 +32,6 @@ from marl_battlegrounds.rendering.visuals import (
     BASIC_COLOR,
     DAMAGE_COLOR,
     HEALING_COLOR,
-    HISTORY_COLOR,
     HUNTER_COLOR,
     MAGE_COLOR,
     PERSISTENT_BODY_LOCAL_RADIAL_BOUNDS,
@@ -52,7 +51,6 @@ from marl_battlegrounds.rendering.visuals import (
     LaneMarkerVisual,
     ObserverVisibilityVisual,
     PersistentEffectVisual,
-    PreviousAcceptedActionVisual,
     RangeVisual,
     RejectedActionVisual,
     SelectionVisual,
@@ -119,7 +117,6 @@ def test_class_and_team_palette_is_exact() -> None:
     assert TARGET_COLOR == "#E040FB"
     assert DAMAGE_COLOR == "#D32F2F"
     assert HEALING_COLOR == "#00A86B"
-    assert HISTORY_COLOR == "#37474F"
 
     assert class_color(MAGE_CLASS_ID) == MAGE_COLOR
     assert class_color(WARRIOR_CLASS_ID) == WARRIOR_COLOR
@@ -140,7 +137,7 @@ def test_palette_helpers_reject_unknown_ids(
 
 
 def test_all_visual_descriptions_are_frozen_and_slotted() -> None:
-    visual = SelectionVisual(global_slot=0, role="controlled")
+    visual = SelectionVisual(global_slot=0, role="target")
 
     assert hasattr(SelectionVisual, "__slots__")
     with pytest.raises(FrozenInstanceError):
@@ -203,12 +200,6 @@ def test_every_rendering_description_has_the_exact_audited_field_schema() -> Non
             "target_global_slot",
             "lane",
         ),
-        PreviousAcceptedActionVisual: (
-            "actor_global_slot",
-            "move_action",
-            "target_action",
-            "use_ultimate",
-        ),
         BattlefieldOverlays: (
             "selections",
             "observer_visibility",
@@ -222,7 +213,6 @@ def test_every_rendering_description_has_the_exact_audited_field_schema() -> Non
             "activations",
             "charge_trails",
             "rejections",
-            "previous_actions",
         ),
     }
 
@@ -342,7 +332,7 @@ def test_charge_trail_rejects_invalid_opacity(opacity: float) -> None:
 
 def test_overlay_merge_concatenates_every_field_in_argument_order() -> None:
     first = BattlefieldOverlays(
-        selections=(SelectionVisual(0, "controlled"),),
+        selections=(SelectionVisual(0, "target"),),
         health_deltas=(HealthDeltaVisual(5, -2.0),),
     )
     second = BattlefieldOverlays(
@@ -415,11 +405,9 @@ def test_snapshot_description_preserves_all_status_channels_and_effects() -> Non
     assert {cue.family for cue in overlay.statuses} == {"slow", "stun"}
     assert len(overlay.auras) == MAX_AGENT_SLOTS * 2
     assert len(overlay.persistent_effects) == MAX_AGENT_SLOTS * 3
-    assert len(overlay.previous_actions) == MAX_AGENT_SLOTS
     assert PersistentEffectVisual(0, "rogue_anti_heal", 1, 0.5) in (
         overlay.persistent_effects
     )
-    assert PreviousAcceptedActionVisual(9, 0, 9, 1) in overlay.previous_actions
 
 
 def test_snapshot_description_omits_identity_auras_and_zero_durations() -> None:
@@ -429,7 +417,6 @@ def test_snapshot_description_omits_identity_auras_and_zero_durations() -> None:
 
     assert overlay.statuses == ()
     assert overlay.persistent_effects == ()
-    assert overlay.previous_actions == ()
     assert all(aura.multiplier != 1.0 for aura in overlay.auras)
 
 
@@ -451,8 +438,7 @@ def test_body_local_radial_bounds_do_not_exceed_radius() -> None:
         "health": (0.73, 0.86),
         "aura": (0.61, 0.69),
         "lane": (0.52, 0.58),
-        "controlled": (0.44, 0.50),
-        "class_status_unique_history": (0.00, 0.48),
+        "class_identity": (0.00, 0.48),
     }
     for _, lower, upper in PERSISTENT_BODY_LOCAL_RADIAL_BOUNDS:
         assert 0.0 <= lower <= upper <= 1.0

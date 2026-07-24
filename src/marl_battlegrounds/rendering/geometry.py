@@ -10,17 +10,10 @@ import numpy as np
 import numpy.typing as npt
 
 from marl_battlegrounds.core.types import (
+    HUNTER_CLASS_ID,
+    MAGE_CLASS_ID,
     MAX_AGENT_SLOTS,
     MAX_OBSTACLE_SLOTS,
-    MOVE_EAST,
-    MOVE_NORTH,
-    MOVE_NORTHEAST,
-    MOVE_NORTHWEST,
-    MOVE_SOUTH,
-    MOVE_SOUTHEAST,
-    MOVE_SOUTHWEST,
-    MOVE_STAY,
-    MOVE_WEST,
     OBSTACLE_FEATURE_ACTIVE,
     OBSTACLE_FEATURE_HEIGHT,
     OBSTACLE_FEATURE_RADIUS,
@@ -31,6 +24,9 @@ from marl_battlegrounds.core.types import (
     OBSTACLE_FEATURE_Y,
     OBSTACLE_TYPE_PILLAR,
     OBSTACLE_TYPE_WALL,
+    PRIEST_CLASS_ID,
+    ROGUE_CLASS_ID,
+    WARRIOR_CLASS_ID,
     EnvConfig,
     EnvState,
 )
@@ -38,7 +34,6 @@ from marl_battlegrounds.rendering.visuals import (
     BASIC_COLOR,
     DAMAGE_COLOR,
     HEALING_COLOR,
-    HISTORY_COLOR,
     HUNTER_COLOR,
     MAGE_COLOR,
     PRIEST_COLOR,
@@ -54,7 +49,6 @@ from marl_battlegrounds.rendering.visuals import (
     LaneMarkerVisual,
     ObserverVisibilityVisual,
     PersistentEffectVisual,
-    PreviousAcceptedActionVisual,
     RejectedActionVisual,
     SelectionVisual,
     StatusCueVisual,
@@ -459,10 +453,6 @@ def _draw_agents(
         overlays.observer_visibility,
         "candidate_global_slot",
     )
-    previous_actions = _group_by_slot(
-        overlays.previous_actions,
-        "actor_global_slot",
-    )
     health_deltas = _group_by_slot(overlays.health_deltas, "global_slot")
     activations = _group_by_slot(overlays.activations, "target_global_slot")
     source_activations = _group_by_slot(overlays.activations, "source_global_slot")
@@ -489,47 +479,8 @@ def _draw_agents(
                 edgecolor="none",
                 alpha=0.58 * alpha,
                 zorder=40,
+                gid=f"agent:{global_slot}:class-fill",
             )
-        )
-        _draw_health(
-            axes,
-            parts,
-            center,
-            radius,
-            float(current_health[global_slot]),
-            float(max_health[global_slot]),
-            alpha,
-        )
-        _draw_auras(axes, parts, center, radius, auras[global_slot])
-        _draw_statuses(axes, center, radius, statuses[global_slot])
-        _draw_persistent_effects(
-            axes,
-            parts,
-            center,
-            radius,
-            persistent[global_slot],
-        )
-
-        axes.add_patch(
-            parts.circle(
-                center,
-                radius,
-                fill=False,
-                edgecolor=team_color(int(team_ids[global_slot])),
-                linewidth=2.2,
-                linestyle="-" if is_alive else "--",
-                alpha=alpha,
-                zorder=42,
-            )
-        )
-
-        _draw_lane_markers(axes, parts, center, radius, lanes[global_slot])
-        _draw_selections(axes, parts, center, radius, selections[global_slot])
-        _draw_previous_action(
-            axes,
-            center,
-            radius,
-            previous_actions[global_slot],
         )
 
         if (
@@ -545,8 +496,9 @@ def _draw_agents(
                     radius * 0.96,
                     facecolor="#6B7280",
                     edgecolor="none",
-                    alpha=0.32,
-                    zorder=42.5,
+                    alpha=0.30,
+                    zorder=40.2,
+                    gid=f"agent:{global_slot}:visibility-dim-fill",
                 )
             )
             axes.add_patch(
@@ -558,11 +510,62 @@ def _draw_agents(
                     width=radius * 0.46,
                     facecolor="#6B7280",
                     edgecolor="none",
-                    alpha=0.28,
+                    alpha=0.22,
                     hatch="....",
-                    zorder=44,
+                    zorder=40.25,
+                    gid=f"agent:{global_slot}:visibility-dim-hatch",
                 )
             )
+
+        _draw_health(
+            axes,
+            parts,
+            global_slot,
+            center,
+            radius,
+            float(current_health[global_slot]),
+            float(max_health[global_slot]),
+            alpha,
+        )
+        _draw_auras(
+            axes,
+            parts,
+            global_slot,
+            center,
+            radius,
+            auras[global_slot],
+        )
+
+        axes.add_patch(
+            parts.circle(
+                center,
+                radius,
+                fill=False,
+                edgecolor=team_color(int(team_ids[global_slot])),
+                linewidth=2.2,
+                linestyle="-" if is_alive else "--",
+                alpha=alpha,
+                zorder=42,
+                gid=f"agent:{global_slot}:team-outline",
+            )
+        )
+
+        _draw_lane_markers(
+            axes,
+            parts,
+            global_slot,
+            center,
+            radius,
+            lanes[global_slot],
+        )
+        _draw_selections(
+            axes,
+            parts,
+            global_slot,
+            center,
+            radius,
+            selections[global_slot],
+        )
 
         _draw_transients(
             axes,
@@ -573,6 +576,12 @@ def _draw_agents(
             activations[global_slot],
             source_activations[global_slot],
             rejections[global_slot],
+        )
+        _draw_status_chips(
+            axes,
+            global_slot,
+            center,
+            (*statuses[global_slot], *persistent[global_slot]),
         )
 
         class_letter = {
@@ -593,12 +602,13 @@ def _draw_agents(
             fontweight="bold",
             alpha=alpha,
             zorder=45,
+            gid=f"agent:{global_slot}:class-label",
         )
         if show_agent_indices:
             axes.text(
                 center[0],
                 center[1] - radius * 0.34,
-                f"g{global_slot}",
+                f"id_{global_slot}",
                 color="#111111",
                 ha="center",
                 va="center",
@@ -606,6 +616,7 @@ def _draw_agents(
                 fontweight="bold",
                 alpha=alpha,
                 zorder=45,
+                gid=f"agent:{global_slot}:id-label",
             )
 
 
@@ -624,6 +635,7 @@ def _group_by_slot(
 def _draw_health(
     axes: _AxesLike,
     parts: _MatplotlibParts,
+    global_slot: int,
     center: tuple[float, float],
     radius: float,
     current: float,
@@ -642,6 +654,7 @@ def _draw_health(
             edgecolor="none",
             alpha=0.55 * alpha,
             zorder=41,
+            gid=f"agent:{global_slot}:health-background",
         )
     )
     health_color = (
@@ -659,6 +672,7 @@ def _draw_health(
                 edgecolor="none",
                 alpha=alpha,
                 zorder=41,
+                gid=f"agent:{global_slot}:health-value",
             )
         )
 
@@ -666,6 +680,7 @@ def _draw_health(
 def _draw_auras(
     axes: _AxesLike,
     parts: _MatplotlibParts,
+    global_slot: int,
     center: tuple[float, float],
     radius: float,
     values: list[object],
@@ -673,9 +688,21 @@ def _draw_auras(
     for value in values:
         visual = cast(AuraCueVisual, value)
         if visual.kind == "mage_amplification":
-            theta1, theta2, color, hatch = 0, 180, MAGE_COLOR, "..."
+            theta1, theta2 = 0, 180
+            color, under_color, hatch, linestyle = (
+                MAGE_COLOR,
+                "#173B4A",
+                "...",
+                ":",
+            )
         else:
-            theta1, theta2, color, hatch = 180, 360, WARRIOR_COLOR, "///"
+            theta1, theta2 = 180, 360
+            color, under_color, hatch, linestyle = (
+                WARRIOR_COLOR,
+                "#4A2F1C",
+                "///",
+                "--",
+            )
         axes.add_patch(
             parts.wedge(
                 center,
@@ -684,105 +711,110 @@ def _draw_auras(
                 theta2,
                 width=radius * 0.08,
                 facecolor="none",
+                edgecolor=under_color,
+                linewidth=3.6,
+                zorder=41.2,
+                gid=f"agent:{global_slot}:aura:{visual.kind}:understroke",
+            )
+        )
+        axes.add_patch(
+            parts.wedge(
+                center,
+                radius * 0.69,
+                theta1,
+                theta2,
+                width=radius * 0.08,
+                facecolor=color,
                 edgecolor=color,
-                linewidth=1.5,
+                linewidth=2.1,
+                linestyle=linestyle,
+                alpha=0.88,
                 hatch=hatch,
-                zorder=41,
+                zorder=41.3,
+                gid=f"agent:{global_slot}:aura:{visual.kind}",
             )
         )
 
 
-def _draw_statuses(
-    axes: _AxesLike,
-    center: tuple[float, float],
-    radius: float,
-    values: list[object],
-) -> None:
-    x_offsets = (-0.28, 0.0, 0.28)
-    for value in values:
-        visual = cast(StatusCueVisual, value)
-        x = center[0] + radius * x_offsets[visual.channel_index]
-        y_sign = 1.0 if visual.family == "stun" else -1.0
-        y = center[1] + y_sign * radius * 0.38
-        color = source_effect_color(visual.source_class_id)
-        if visual.family == "stun":
-            axes.text(
-                x,
-                y,
-                "◆",
-                color=color,
-                ha="center",
-                va="center",
-                fontsize=7,
-                fontweight="bold",
-                zorder=41,
-            )
-        else:
-            for y_offset in (0.035, -0.035):
-                axes.text(
-                    x,
-                    y + radius * y_offset,
-                    "▼",
-                    color=color,
-                    ha="center",
-                    va="center",
-                    fontsize=5,
-                    fontweight="bold",
-                    zorder=41,
-                )
+def _status_chip_details(
+    value: object,
+) -> tuple[int, str, int, str, str]:
+    if isinstance(value, StatusCueVisual):
+        status = {
+            ("stun", WARRIOR_CLASS_ID): (0, "CHARGE-STUN", "charge-stun"),
+            ("stun", HUNTER_CLASS_ID): (1, "TRAP", "trap"),
+            ("stun", ROGUE_CLASS_ID): (2, "POISON-STUN", "poison-stun"),
+            ("slow", WARRIOR_CLASS_ID): (3, "CHARGE-SLOW", "charge-slow"),
+            ("slow", HUNTER_CLASS_ID): (4, "HUNTER-SLOW", "hunter-slow"),
+            ("slow", ROGUE_CLASS_ID): (5, "POISON-SLOW", "poison-slow"),
+        }[(value.family, value.source_class_id)]
+        order, label, semantic_kind = status
+        return (
+            order,
+            label,
+            value.duration,
+            source_effect_color(value.source_class_id),
+            semantic_kind,
+        )
+
+    effect = cast(PersistentEffectVisual, value)
+    order, label, source_class_id, semantic_kind = {
+        "rogue_anti_heal": (6, "ANTI-HEAL", ROGUE_CLASS_ID, "anti-heal"),
+        "priest_freedom": (7, "FREEDOM", PRIEST_CLASS_ID, "freedom"),
+        "mage_burst": (8, "BURST", MAGE_CLASS_ID, "burst"),
+    }[effect.kind]
+    return (
+        order,
+        label,
+        effect.duration,
+        source_effect_color(source_class_id),
+        semantic_kind,
+    )
 
 
-def _draw_persistent_effects(
+def _draw_status_chips(
     axes: _AxesLike,
-    parts: _MatplotlibParts,
+    global_slot: int,
     center: tuple[float, float],
-    radius: float,
-    values: list[object],
+    values: tuple[object, ...],
 ) -> None:
-    for value in values:
-        visual = cast(PersistentEffectVisual, value)
-        if visual.kind == "rogue_anti_heal":
-            axes.text(
-                center[0] - radius * 0.43,
-                center[1],
-                "✚̸",
-                color=ROGUE_COLOR,
-                ha="center",
-                va="center",
-                fontsize=7,
-                zorder=41,
-            )
-        elif visual.kind == "priest_freedom":
-            axes.add_patch(
-                parts.regular_polygon(
-                    (center[0] + radius * 0.38, center[1]),
-                    numVertices=5,
-                    radius=radius * 0.10,
-                    orientation=np.pi,
-                    facecolor="white",
-                    edgecolor=PRIEST_COLOR,
-                    linewidth=1.4,
-                    zorder=41,
-                )
-            )
-        else:
-            axes.add_patch(
-                parts.regular_polygon(
-                    center,
-                    numVertices=8,
-                    radius=radius * 0.38,
-                    orientation=np.pi / 8,
-                    fill=False,
-                    edgecolor=MAGE_COLOR,
-                    linewidth=1.3,
-                    zorder=41,
-                )
-            )
+    details = sorted(_status_chip_details(value) for value in values)
+    if len(details) > 2:
+        x_offsets = (-160.0, -70.0) if global_slot % 2 == 0 else (70.0, 160.0)
+    elif len(details) == 2:
+        x_offsets = (-45.0, 45.0)
+    else:
+        x_offsets = (0.0, 0.0)
+    for index, (_, label, duration, accent, semantic_kind) in enumerate(details):
+        column = index % 2
+        row = index // 2
+        axes.annotate(
+            f"{label} {duration}",
+            xy=center,
+            xytext=(x_offsets[column], 18.0 + row * 13.0),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            color="#111827",
+            fontsize=6.2,
+            fontweight="bold",
+            annotation_clip=False,
+            bbox={
+                "boxstyle": "round,pad=0.22",
+                "facecolor": "#F9FAFB",
+                "edgecolor": accent,
+                "linewidth": 1.3,
+                "alpha": 0.96,
+            },
+            zorder=55,
+            gid=f"agent:{global_slot}:status-chip:{semantic_kind}",
+        )
 
 
 def _draw_lane_markers(
     axes: _AxesLike,
     parts: _MatplotlibParts,
+    global_slot: int,
     center: tuple[float, float],
     radius: float,
     values: list[object],
@@ -806,101 +838,63 @@ def _draw_lane_markers(
                 linewidth=3.0 if visual.selected else 1.4,
                 alpha=1.0 if visual.available else 0.6,
                 zorder=43,
+                gid=f"agent:{global_slot}:lane:{visual.lane}:arc",
             )
+        )
+        label_angle = np.deg2rad(230 if visual.lane == 0 else 310)
+        axes.text(
+            center[0] + radius * 0.72 * float(np.cos(label_angle)),
+            center[1] + radius * 0.72 * float(np.sin(label_angle)),
+            str(visual.lane),
+            color=color,
+            ha="center",
+            va="center",
+            fontsize=5.5,
+            fontweight="bold",
+            zorder=43.1,
+            gid=f"agent:{global_slot}:lane:{visual.lane}:label",
         )
 
 
 def _draw_selections(
     axes: _AxesLike,
     parts: _MatplotlibParts,
+    global_slot: int,
     center: tuple[float, float],
     radius: float,
     values: list[object],
 ) -> None:
     for value in values:
         visual = cast(SelectionVisual, value)
-        if visual.role == "target":
-            axes.plot(
-                (center[0] - radius * 0.28, center[0] + radius * 0.28),
-                (center[1], center[1]),
-                color=TARGET_COLOR,
-                linewidth=1.8,
-                zorder=43,
+        if visual.role != "target":
+            continue
+        axes.plot(
+            (center[0] - radius * 0.28, center[0] + radius * 0.28),
+            (center[1], center[1]),
+            color=TARGET_COLOR,
+            linewidth=1.8,
+            zorder=43.2,
+            gid=f"agent:{global_slot}:target-reticle-horizontal",
+        )
+        axes.plot(
+            (center[0], center[0]),
+            (center[1] - radius * 0.28, center[1] + radius * 0.28),
+            color=TARGET_COLOR,
+            linewidth=1.8,
+            zorder=43.2,
+            gid=f"agent:{global_slot}:target-reticle-vertical",
+        )
+        axes.add_patch(
+            parts.circle(
+                center,
+                radius * 0.24,
+                fill=False,
+                edgecolor=TARGET_COLOR,
+                linewidth=1.5,
+                zorder=43.2,
+                gid=f"agent:{global_slot}:target-reticle-ring",
             )
-            axes.plot(
-                (center[0], center[0]),
-                (center[1] - radius * 0.28, center[1] + radius * 0.28),
-                color=TARGET_COLOR,
-                linewidth=1.8,
-                zorder=43,
-            )
-            axes.add_patch(
-                parts.circle(
-                    center,
-                    radius * 0.24,
-                    fill=False,
-                    edgecolor=TARGET_COLOR,
-                    linewidth=1.5,
-                    zorder=43,
-                )
-            )
-        else:
-            for x_sign, y_sign in ((-1, -1), (-1, 1), (1, -1), (1, 1)):
-                x_values = (
-                    center[0] + x_sign * radius * 0.50,
-                    center[0] + x_sign * radius * 0.44,
-                )
-                y_values = (
-                    center[1] + y_sign * radius * 0.50,
-                    center[1] + y_sign * radius * 0.44,
-                )
-                for color, linewidth, zorder in (
-                    ("#111111", 4.0, 42.9),
-                    ("white", 2.2, 43),
-                ):
-                    axes.plot(
-                        x_values,
-                        y_values,
-                        color=color,
-                        linewidth=linewidth,
-                        solid_capstyle="round",
-                        zorder=zorder,
-                    )
-
-
-def _draw_previous_action(
-    axes: _AxesLike,
-    center: tuple[float, float],
-    radius: float,
-    values: list[object],
-) -> None:
-    if not values:
-        return
-    visual = cast(PreviousAcceptedActionVisual, values[-1])
-    movement = {
-        MOVE_STAY: "·",
-        MOVE_NORTH: "↑",
-        MOVE_SOUTH: "↓",
-        MOVE_EAST: "→",
-        MOVE_WEST: "←",
-        MOVE_NORTHEAST: "↗",
-        MOVE_NORTHWEST: "↖",
-        MOVE_SOUTHEAST: "↘",
-        MOVE_SOUTHWEST: "↙",
-    }.get(visual.move_action, "?")
-    badge = (
-        "U" if visual.use_ultimate == 1 else "B" if visual.target_action != 0 else "·"
-    )
-    axes.text(
-        center[0],
-        center[1] + radius * 0.25,
-        f"{movement}{badge}",
-        color=HISTORY_COLOR,
-        ha="center",
-        va="center",
-        fontsize=5,
-        zorder=43,
-    )
+        )
 
 
 def _draw_transients(
@@ -946,7 +940,17 @@ def _draw_transients(
                     linewidth=3.0,
                     alpha=0.9,
                     zorder=50,
+                    gid=f"transient:composite:{kind}",
                 )
+            )
+        for label_row, kind in enumerate(ordered_kinds):
+            _draw_single_activation(
+                axes,
+                parts,
+                center,
+                radius,
+                kind,
+                label_row=label_row,
             )
     elif recipient_kinds:
         _draw_single_activation(
@@ -962,18 +966,12 @@ def _draw_transients(
         and cast(ActivationVisual, value).target_global_slot is None
         for value in source_activations
     ):
-        axes.add_patch(
-            parts.regular_polygon(
-                center,
-                numVertices=8,
-                radius=radius * 1.25,
-                orientation=np.pi / 8,
-                fill=False,
-                edgecolor=MAGE_COLOR,
-                linewidth=2.5,
-                alpha=0.9,
-                zorder=50,
-            )
+        _draw_single_activation(
+            axes,
+            parts,
+            center,
+            radius,
+            "mage_burst",
         )
 
     if rejection_values:
@@ -1025,59 +1023,38 @@ def _draw_single_activation(
     center: tuple[float, float],
     radius: float,
     kind: str,
+    *,
+    label_row: int = 0,
 ) -> None:
-    if kind == "holy_word":
-        for scale, color in ((1.10, HEALING_COLOR), (1.20, PRIEST_COLOR)):
-            axes.add_patch(
-                parts.circle(
-                    center,
-                    radius * scale,
-                    fill=False,
-                    edgecolor=color,
-                    linewidth=2.2,
-                    alpha=0.88,
-                    zorder=50,
-                )
-            )
-    elif kind == "hunter_trap":
-        axes.add_patch(
-            parts.regular_polygon(
-                center,
-                numVertices=4,
-                radius=radius * 1.15,
-                orientation=np.pi / 4,
-                fill=False,
-                edgecolor=HUNTER_COLOR,
-                linewidth=2.6,
-                zorder=50,
-            )
-        )
-    elif kind == "rogue_poison":
-        for x_offset in (-0.18, 0.0, 0.18):
-            axes.add_patch(
-                parts.regular_polygon(
-                    (center[0] + radius * x_offset, center[1]),
-                    numVertices=3,
-                    radius=radius * 0.16,
-                    orientation=np.pi,
-                    facecolor=ROGUE_COLOR,
-                    edgecolor=ROGUE_COLOR,
-                    alpha=0.9,
-                    zorder=50,
-                )
-            )
-    elif kind == "warrior_charge":
-        axes.add_patch(
-            parts.regular_polygon(
-                center,
-                numVertices=3,
-                radius=radius * 1.15,
-                orientation=-np.pi / 2,
-                fill=False,
-                edgecolor=WARRIOR_COLOR,
-                linewidth=2.8,
-                zorder=50,
-            )
+    activation_labels = {
+        "mage_burst": "BURST!",
+        "warrior_charge": "CHARGE!",
+        "hunter_trap": "TRAP!",
+        "rogue_poison": "POISON!",
+        "holy_word": "HOLY WORD!",
+    }
+    if kind in activation_labels:
+        color = _activation_color(kind)
+        axes.annotate(
+            activation_labels[kind],
+            xy=center,
+            xytext=(0.0, 13.0 + label_row * 12.0),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            color="#111827",
+            fontsize=7.0,
+            fontweight="bold",
+            annotation_clip=False,
+            bbox={
+                "boxstyle": "round,pad=0.22",
+                "facecolor": "#FFFFFF",
+                "edgecolor": color,
+                "linewidth": 1.6,
+                "alpha": 0.94,
+            },
+            zorder=50,
+            gid=f"transient:activation:{kind}",
         )
     elif kind == "basic_damage":
         axes.text(
@@ -1090,6 +1067,7 @@ def _draw_single_activation(
             fontsize=13,
             fontweight="bold",
             zorder=50,
+            gid="transient:activation:basic-damage",
         )
     else:
         axes.add_patch(
@@ -1101,6 +1079,7 @@ def _draw_single_activation(
                 linewidth=2.4,
                 alpha=0.88,
                 zorder=50,
+                gid="transient:activation:basic-heal",
             )
         )
 

@@ -70,7 +70,7 @@ def build_debugger_overlays(session: DebuggerSession) -> BattlefieldOverlays:
     )
     controlled = session.controlled_global_slot
     target = session.pending_action.selected_global_target_slot
-    selections = [SelectionVisual(controlled, "controlled")]
+    selections: list[SelectionVisual] = []
     if target is not None:
         selections.append(SelectionVisual(target, "target"))
 

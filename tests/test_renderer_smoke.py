@@ -48,12 +48,13 @@ from marl_battlegrounds.rendering.visuals import (
     HealthDeltaVisual,
     LaneMarkerVisual,
     ObserverVisibilityVisual,
+    PersistentEffectKind,
     PersistentEffectVisual,
-    PreviousAcceptedActionVisual,
     RangeVisual,
     RejectedActionVisual,
     SelectionVisual,
     StatusCueVisual,
+    StatusFamily,
     TargetLinkVisual,
 )
 
@@ -74,12 +75,32 @@ class _CombatStateFields(TypedDict):
     has_previous_timestep_joint_action: Array
 
 
+class _BboxLike(Protocol):
+    def overlaps(self, other: object) -> bool: ...
+
+
 class _TextLike(Protocol):
     def get_text(self) -> str: ...
+
+    def get_gid(self) -> str | None: ...
+
+    def get_zorder(self) -> float: ...
+
+    def get_window_extent(self) -> _BboxLike: ...
+
+
+class _CanvasDrawLike(Protocol):
+    def draw(self) -> object: ...
+
+
+class _FigureWithCanvas(Protocol):
+    canvas: _CanvasDrawLike
 
 
 class _ArtistLike(Protocol):
     def get_zorder(self) -> float: ...
+
+    def get_gid(self) -> str | None: ...
 
 
 class _LineLike(_ArtistLike, Protocol):
@@ -377,7 +398,6 @@ def _all_overlay_families() -> BattlefieldOverlays:
             RejectedActionVisual(0, "movement", None, None),
             RejectedActionVisual(1, "combat", MAX_AGENTS_PER_TEAM + 1, 1),
         ),
-        previous_actions=(PreviousAcceptedActionVisual(0, 3, 6, 0),),
     )
 
 
@@ -403,8 +423,23 @@ def test_draw_geometry_draws_every_overlay_family() -> None:
         assert len(axes.patches) > baseline_patch_count
         assert len(axes.lines) > baseline_line_count
         assert len(axes.texts) > baseline_text_count
-        assert sum(text.get_text() == "▼" for text in axes.texts) == 6
-        assert any(line.get_zorder() == 42.9 for line in axes.lines)
+        assert {
+            text.get_text()
+            for text in axes.texts
+            if text.get_gid() and ":status-chip:" in cast(str, text.get_gid())
+        } == {
+            "CHARGE-STUN 1",
+            "TRAP 2",
+            "POISON-STUN 3",
+            "CHARGE-SLOW 4",
+            "HUNTER-SLOW 5",
+            "POISON-SLOW 6",
+            "ANTI-HEAL 4",
+            "FREEDOM 1",
+            "BURST 5",
+        }
+        assert not any(line.get_zorder() == 42.9 for line in axes.lines)
+        assert {"0", "1"} <= {text.get_text() for text in axes.texts}
         assert any(
             line.get_color() == DAMAGE_COLOR and line.get_linestyle() == "--"
             for line in axes.lines
@@ -455,7 +490,153 @@ def test_observer_visibility_dims_only_supplied_nonvisible_bodies() -> None:
         redraw_geometry(config, state, result, overlays=hidden_overlays)
 
         assert len(axes.patches) == visible_patch_count + 2
-        assert any(text.get_text() == f"g{MAX_AGENTS_PER_TEAM}" for text in axes.texts)
+        assert any(
+            text.get_text() == f"id_{MAX_AGENTS_PER_TEAM}" for text in axes.texts
+        )
+    finally:
+        _close_render_result(result)
+
+
+def test_visibility_dimming_stays_below_every_protected_semantic_artist() -> None:
+    _skip_if_matplotlib_unavailable()
+    config = _sample_config()
+    state = _sample_state()
+    target = MAX_AGENTS_PER_TEAM
+    overlays = BattlefieldOverlays(
+        selections=(SelectionVisual(target, "target"),),
+        observer_visibility=(ObserverVisibilityVisual(0, target, False),),
+        lane_markers=(
+            LaneMarkerVisual(target, 0, True, True),
+            LaneMarkerVisual(target, 1, False, False),
+        ),
+        statuses=(StatusCueVisual(target, "stun", 3, 1, 4),),
+        auras=(AuraCueVisual(target, "mage_amplification", 1.15),),
+        activations=(ActivationVisual("hunter_trap", 0, target, 3),),
+    )
+    result = render_geometry(config, state, overlays=overlays)
+
+    try:
+        axes = cast(_AxesIntrospection, result.axes)
+        artists = [*axes.patches, *axes.lines, *axes.texts]
+        by_gid = {
+            gid: artist for artist in artists if (gid := artist.get_gid()) is not None
+        }
+        dim_zorders = [
+            artist.get_zorder()
+            for gid, artist in by_gid.items()
+            if gid.startswith(f"agent:{target}:visibility-dim")
+        ]
+        protected_fragments = (
+            ":health-",
+            ":aura:",
+            ":team-outline",
+            ":lane:",
+            ":target-reticle",
+            ":id-label",
+            ":status-chip:",
+        )
+        protected_zorders = [
+            artist.get_zorder()
+            for gid, artist in by_gid.items()
+            if gid.startswith(f"agent:{target}")
+            and any(fragment in gid for fragment in protected_fragments)
+        ]
+        protected_zorders.extend(
+            artist.get_zorder()
+            for gid, artist in by_gid.items()
+            if gid.startswith("transient:")
+        )
+
+        assert dim_zorders
+        assert protected_zorders
+        assert max(dim_zorders) < min(protected_zorders)
+    finally:
+        _close_render_result(result)
+
+
+def test_dense_nearby_status_stacks_use_readable_nonoverlapping_chips() -> None:
+    _skip_if_matplotlib_unavailable()
+    config = _sample_config()
+    state = _sample_state()
+    status_values = tuple(
+        StatusCueVisual(
+            slot,
+            cast(StatusFamily, family),
+            source_class,
+            channel,
+            duration,
+        )
+        for slot in (0, 1)
+        for family, source_class, channel, duration in (
+            ("stun", 2, 0, 1),
+            ("stun", 3, 1, 4),
+            ("stun", 4, 2, 1),
+            ("slow", 2, 0, 5),
+            ("slow", 3, 1, 1),
+            ("slow", 4, 2, 5),
+        )
+    )
+    persistent_values = tuple(
+        PersistentEffectVisual(
+            slot,
+            cast(PersistentEffectKind, kind),
+            duration,
+            magnitude,
+        )
+        for slot in (0, 1)
+        for kind, duration, magnitude in (
+            ("rogue_anti_heal", 4, 0.5),
+            ("priest_freedom", 1, 0.85),
+            ("mage_burst", 5, 1.5),
+        )
+    )
+    overlays = BattlefieldOverlays(
+        statuses=status_values,
+        persistent_effects=persistent_values,
+    )
+    result = render_geometry(config, state, overlays=overlays)
+
+    try:
+        canvas = cast(_FigureWithCanvas, result.figure).canvas
+        canvas.draw()
+        axes = cast(_AxesIntrospection, result.axes)
+        chips_by_slot = {
+            slot: [
+                text
+                for text in axes.texts
+                if (text.get_gid() or "").startswith(f"agent:{slot}:status-chip:")
+            ]
+            for slot in (0, 1)
+        }
+
+        assert all(len(chips) == 9 for chips in chips_by_slot.values())
+        assert {text.get_text() for text in chips_by_slot[0]} == {
+            "CHARGE-STUN 1",
+            "TRAP 4",
+            "POISON-STUN 1",
+            "CHARGE-SLOW 5",
+            "HUNTER-SLOW 1",
+            "POISON-SLOW 5",
+            "ANTI-HEAL 4",
+            "FREEDOM 1",
+            "BURST 5",
+        }
+        assert not any(
+            left.get_window_extent().overlaps(right.get_window_extent())
+            for left in chips_by_slot[0]
+            for right in chips_by_slot[1]
+        )
+
+        redraw_geometry(config, state, result, overlays=overlays)
+        redrawn_axes = cast(_AxesIntrospection, result.axes)
+        assert (
+            sum(
+                text.get_gid() is not None
+                and ":status-chip:" in cast(str, text.get_gid())
+                for text in redrawn_axes.texts
+            )
+            == 18
+        )
     finally:
         _close_render_result(result)
 
@@ -477,33 +658,33 @@ def test_observer_visibility_dims_only_supplied_nonvisible_bodies() -> None:
         ),
         (
             ActivationVisual("holy_word", 1, 0, 5),
-            2,
+            0,
             1,
-            None,
+            "HOLY WORD!",
         ),
         (
             ActivationVisual("mage_burst", 0, None, 1),
-            1,
             0,
-            None,
+            0,
+            "BURST!",
         ),
         (
             ActivationVisual("warrior_charge", 0, MAX_AGENTS_PER_TEAM, 2),
-            1,
             0,
-            None,
+            0,
+            "CHARGE!",
         ),
         (
             ActivationVisual("hunter_trap", 0, MAX_AGENTS_PER_TEAM, 3),
-            1,
             0,
-            None,
+            0,
+            "TRAP!",
         ),
         (
             ActivationVisual("rogue_poison", 0, MAX_AGENTS_PER_TEAM, 4),
-            3,
             0,
-            None,
+            0,
+            "POISON!",
         ),
     ),
 )
@@ -536,7 +717,7 @@ def test_each_activation_kind_has_a_distinct_drawable_primitive(
         _close_render_result(result)
 
 
-def test_multiple_recipient_effects_compose_as_segmented_marker() -> None:
+def test_multiple_recipient_effects_keep_labels_and_segmented_composition() -> None:
     _skip_if_matplotlib_unavailable()
     config = _sample_config()
     state = _sample_state()
@@ -556,7 +737,8 @@ def test_multiple_recipient_effects_compose_as_segmented_marker() -> None:
         draw_geometry(axes, config, state, overlays=overlays)
 
         assert len(axes.patches) == baseline_patch_count + 3
-        assert not any(text.get_text() == "✦" for text in axes.texts)
+        labels = {text.get_text() for text in axes.texts}
+        assert {"✦", "TRAP!", "POISON!"} <= labels
     finally:
         _close_render_result(result)
 
