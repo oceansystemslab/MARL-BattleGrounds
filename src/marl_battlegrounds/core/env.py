@@ -70,6 +70,7 @@ from marl_battlegrounds.core.types import (
     NUM_SLOW_CHANNELS,
     NUM_STUN_CHANNELS,
     NUM_TARGET_ACTIONS,
+    NUM_ULTIMATE_ACTIONS,
     OBJECTIVE_FEATURES,
     OBSTACLE_FEATURES,
     PRIEST_CLASS_ID,
@@ -91,6 +92,7 @@ from marl_battlegrounds.core.types import (
     EnvState,
     Info,
     Observation,
+    PreviousTimestepActionObservation,
     Reward,
 )
 
@@ -513,6 +515,208 @@ def _build_context_features(state: EnvState, config: EnvConfig) -> Array:
     return context_features.astype(jnp.float32)
 
 
+def _build_ally_enemy_one_hot_action_tensors(
+    previous_joint_action_head_one_hot: Array, num_actions: int
+) -> tuple[Array, Array]:
+    """Project global actor rows into fixed ally and enemy relation blocks.
+
+    ``previous_joint_action_head_one_hot`` has one row per global actor slot.
+    The returned tensors add the observer axis while preserving the same stable
+    relation-row convention used by ally and enemy unit features. Visibility is
+    applied later by the complete previous-action observation builder.
+    """
+    ally_actions_one_hot_team_a = jnp.broadcast_to(
+        previous_joint_action_head_one_hot[TEAM_A_START:TEAM_A_END, :],
+        (MAX_AGENTS_PER_TEAM, MAX_AGENTS_PER_TEAM, num_actions),
+    )
+    ally_actions_one_hot_team_b = jnp.broadcast_to(
+        previous_joint_action_head_one_hot[TEAM_B_START:TEAM_B_END, :],
+        (MAX_AGENTS_PER_TEAM, MAX_AGENTS_PER_TEAM, num_actions),
+    )
+    ally_actions_one_hot = jnp.concatenate(
+        (ally_actions_one_hot_team_a, ally_actions_one_hot_team_b), axis=0
+    )
+
+    enemy_actions_one_hot_team_a = jnp.broadcast_to(
+        previous_joint_action_head_one_hot[TEAM_B_START:TEAM_B_END, :],
+        (MAX_AGENTS_PER_TEAM, MAX_AGENTS_PER_TEAM, num_actions),
+    )
+    enemy_actions_one_hot_team_b = jnp.broadcast_to(
+        previous_joint_action_head_one_hot[TEAM_A_START:TEAM_A_END, :],
+        (MAX_AGENTS_PER_TEAM, MAX_AGENTS_PER_TEAM, num_actions),
+    )
+    enemy_actions_one_hot = jnp.concatenate(
+        (enemy_actions_one_hot_team_a, enemy_actions_one_hot_team_b), axis=0
+    )
+
+    return ally_actions_one_hot, enemy_actions_one_hot
+
+
+def _build_visibility_masked_previous_timestep_action_observation(
+    state: EnvState, ally_visibility_mask: Array, enemy_visibility_mask: Array
+) -> PreviousTimestepActionObservation:
+    """Build policy-facing history using current actor visibility.
+
+    State stores compact accepted categories in each actor's own action
+    convention. Movement and ultimate-use categories need only relation-row
+    projection. Target categories additionally swap ally/enemy category blocks
+    when actor and observer belong to opposing teams so every observer decodes
+    the same stable target identity.
+
+    History validity and visibility of the observed actor gate complete rows.
+    Target visibility does not gate the accepted target identity.
+    """
+    previous_joint_move_actions = state.previous_timestep_move_actions
+    previous_joint_use_ultimate_actions = state.previous_timestep_use_ultimate_actions
+
+    previous_joint_move_actions_one_hot = jax.nn.one_hot(
+        previous_joint_move_actions, NUM_MOVE_ACTIONS, dtype=jnp.float32
+    )
+
+    # Target categories are actor-relative. Opposing observers preserve target
+    # identity by exchanging the ally and enemy category blocks.
+    previous_joint_select_target_actions = state.previous_timestep_select_target_actions
+
+    actor_relative_select_target_matrix = jax.nn.one_hot(
+        previous_joint_select_target_actions, NUM_TARGET_ACTIONS, dtype=jnp.float32
+    )
+
+    team_a_none_target_column = actor_relative_select_target_matrix[
+        TEAM_A_START:TEAM_A_END, 0:1
+    ]
+    team_b_none_target_column = actor_relative_select_target_matrix[
+        TEAM_B_START:TEAM_B_END, 0:1
+    ]
+
+    team_a_actor_relative_select_target_matrix = actor_relative_select_target_matrix[
+        TEAM_A_START:TEAM_A_END, 1:
+    ]
+    team_b_actor_relative_select_target_matrix = actor_relative_select_target_matrix[
+        TEAM_B_START:TEAM_B_END, 1:
+    ]
+
+    team_a_block_for_team_b_observer = jnp.concatenate(
+        (
+            team_a_none_target_column,
+            team_a_actor_relative_select_target_matrix[:, TEAM_B_START:TEAM_B_END],
+            team_a_actor_relative_select_target_matrix[:, TEAM_A_START:TEAM_A_END],
+        ),
+        axis=-1,
+        dtype=jnp.float32,
+    )
+
+    team_a_block_for_team_a_observer = actor_relative_select_target_matrix[
+        TEAM_A_START:TEAM_A_END, :
+    ]
+
+    team_b_block_for_team_a_observer = jnp.concatenate(
+        (
+            team_b_none_target_column,
+            team_b_actor_relative_select_target_matrix[:, TEAM_B_START:TEAM_B_END],
+            team_b_actor_relative_select_target_matrix[:, TEAM_A_START:TEAM_A_END],
+        ),
+        axis=-1,
+        dtype=jnp.float32,
+    )
+
+    team_b_block_for_team_b_observer = actor_relative_select_target_matrix[
+        TEAM_B_START:TEAM_B_END, :
+    ]
+
+    unmasked_ally_previous_timestep_select_target_actions_one_hot = jnp.concatenate(
+        (
+            jnp.broadcast_to(
+                team_a_block_for_team_a_observer,
+                (MAX_AGENTS_PER_TEAM, MAX_AGENTS_PER_TEAM, NUM_TARGET_ACTIONS),
+            ),
+            jnp.broadcast_to(
+                team_b_block_for_team_b_observer,
+                (MAX_AGENTS_PER_TEAM, MAX_AGENTS_PER_TEAM, NUM_TARGET_ACTIONS),
+            ),
+        ),
+        axis=0,
+        dtype=jnp.float32,
+    )
+
+    unmasked_enemy_previous_timestep_select_target_actions_one_hot = jnp.concatenate(
+        (
+            jnp.broadcast_to(
+                team_b_block_for_team_a_observer,
+                (MAX_AGENTS_PER_TEAM, MAX_AGENTS_PER_TEAM, NUM_TARGET_ACTIONS),
+            ),
+            jnp.broadcast_to(
+                team_a_block_for_team_b_observer,
+                (MAX_AGENTS_PER_TEAM, MAX_AGENTS_PER_TEAM, NUM_TARGET_ACTIONS),
+            ),
+        ),
+        axis=0,
+        dtype=jnp.float32,
+    )
+
+    ally_previous_timestep_select_target_actions_one_hot = (
+        ally_visibility_mask[:, :, None]
+        * state.has_previous_timestep_joint_action
+        * unmasked_ally_previous_timestep_select_target_actions_one_hot
+    )
+
+    enemy_previous_timestep_select_target_actions_one_hot = (
+        enemy_visibility_mask[:, :, None]
+        * state.has_previous_timestep_joint_action
+        * unmasked_enemy_previous_timestep_select_target_actions_one_hot
+    )
+
+    previous_joint_use_ultimate_actions_one_hot = jax.nn.one_hot(
+        previous_joint_use_ultimate_actions, NUM_ULTIMATE_ACTIONS, dtype=jnp.float32
+    )
+
+    (
+        unmasked_ally_previous_timestep_move_actions_one_hot,
+        unmasked_enemy_previous_timestep_move_actions_one_hot,
+    ) = _build_ally_enemy_one_hot_action_tensors(
+        previous_joint_move_actions_one_hot, NUM_MOVE_ACTIONS
+    )
+
+    (
+        unmasked_ally_previous_timestep_use_ultimate_actions_one_hot,
+        unmasked_enemy_previous_timestep_use_ultimate_actions_one_hot,
+    ) = _build_ally_enemy_one_hot_action_tensors(
+        previous_joint_use_ultimate_actions_one_hot, NUM_ULTIMATE_ACTIONS
+    )
+
+    ally_previous_timestep_move_actions_one_hot = (
+        ally_visibility_mask[:, :, None]
+        * state.has_previous_timestep_joint_action
+        * unmasked_ally_previous_timestep_move_actions_one_hot
+    )
+
+    enemy_previous_timestep_move_actions_one_hot = (
+        enemy_visibility_mask[:, :, None]
+        * state.has_previous_timestep_joint_action
+        * unmasked_enemy_previous_timestep_move_actions_one_hot
+    )
+
+    ally_previous_timestep_use_ultimate_actions_one_hot = (
+        ally_visibility_mask[:, :, None]
+        * state.has_previous_timestep_joint_action
+        * unmasked_ally_previous_timestep_use_ultimate_actions_one_hot
+    )
+
+    enemy_previous_timestep_use_ultimate_actions_one_hot = (
+        enemy_visibility_mask[:, :, None]
+        * state.has_previous_timestep_joint_action
+        * unmasked_enemy_previous_timestep_use_ultimate_actions_one_hot
+    )
+
+    return PreviousTimestepActionObservation(
+        ally_previous_timestep_move_actions_one_hot,
+        enemy_previous_timestep_move_actions_one_hot,
+        ally_previous_timestep_select_target_actions_one_hot,
+        enemy_previous_timestep_select_target_actions_one_hot,
+        ally_previous_timestep_use_ultimate_actions_one_hot,
+        enemy_previous_timestep_use_ultimate_actions_one_hot,
+    )
+
+
 def _build_observation_and_action_mask(
     state: EnvState, config: EnvConfig
 ) -> tuple[Observation, ActionMask]:
@@ -573,6 +777,12 @@ def _build_observation_and_action_mask(
         select_target_use_ultimate_joint_mask=select_target_use_ultimate_joint_mask,
     )
 
+    visibility_masked_previous_timestep_action_observation = (
+        _build_visibility_masked_previous_timestep_action_observation(
+            state, ally_visibility_mask, enemy_visibility_mask
+        )
+    )
+
     current_observation = Observation(
         self_features=self_features,
         ally_unit_features=ally_features,
@@ -585,6 +795,7 @@ def _build_observation_and_action_mask(
         context_features=context_features,
         ally_visibility_mask=ally_visibility_mask,
         enemy_visibility_mask=enemy_visibility_mask,
+        previous_timestep_actions=visibility_masked_previous_timestep_action_observation,
     )
 
     return current_observation, current_action_mask
@@ -908,35 +1119,79 @@ def _build_accepted_joint_action_from_submitted_joint_action(
 ) -> Action:
     """Canonicalize one submitted action from authoritative pre-state masks.
 
-    Movement acceptance is independent of combat acceptance. The target and
-    ultimate-use heads are accepted together from the authoritative joint mask
-    so an invalid ultimate attempt cannot fall back to a valid basic action.
+    Each submitted category is replaced with a safe neutral gather index before
+    any mask access. If any head is outside its categorical domain, that actor's
+    complete tuple becomes the canonical no-op without affecting other actors.
+    Out-of-domain IDs indicate an upstream policy or sampler defect; categorical
+    domain validation is the first debugging step.
+
+    For wholly in-domain tuples, movement acceptance is independent of combat
+    acceptance. Target and ultimate-use heads are accepted together from the
+    authoritative joint mask so an invalid ultimate attempt cannot fall back to
+    a valid basic action.
     """
+    # Domain containment must precede every indexed mask access because negative
+    # and upper-out-of-domain JAX indices are not semantic rejection.
+    invalid_move_actions = jnp.logical_not(
+        jnp.logical_and(
+            submitted_joint_action.move < NUM_MOVE_ACTIONS,
+            submitted_joint_action.move >= 0,
+        )
+    )
+    invalid_select_target_actions = jnp.logical_not(
+        jnp.logical_and(
+            submitted_joint_action.select_target < NUM_TARGET_ACTIONS,
+            submitted_joint_action.select_target >= 0,
+        )
+    )
+    invalid_use_ultimate_actions = jnp.logical_not(
+        jnp.logical_and(
+            submitted_joint_action.use_ultimate < NUM_ULTIMATE_ACTIONS,
+            submitted_joint_action.use_ultimate >= 0,
+        )
+    )
+    submitted_action_tuple_is_out_of_domain = jnp.logical_or(
+        invalid_use_ultimate_actions,
+        jnp.logical_or(invalid_move_actions, invalid_select_target_actions),
+    )
+
+    domain_safe_move_action = jnp.where(
+        submitted_action_tuple_is_out_of_domain, MOVE_STAY, submitted_joint_action.move
+    )
+
+    domain_safe_select_target_action = jnp.where(
+        submitted_action_tuple_is_out_of_domain, 0, submitted_joint_action.select_target
+    )
+
+    domain_safe_use_ultimate_action = jnp.where(
+        submitted_action_tuple_is_out_of_domain, 0, submitted_joint_action.use_ultimate
+    )
+
     submitted_move_action_is_valid_by_actor_slot = current_action_mask.move_mask[
-        _GLOBAL_AGENT_SLOT_INDICES, submitted_joint_action.move
+        _GLOBAL_AGENT_SLOT_INDICES, domain_safe_move_action
     ]
     accepted_move_joint_action = jnp.where(
         submitted_move_action_is_valid_by_actor_slot,
-        submitted_joint_action.move,
+        domain_safe_move_action,
         MOVE_STAY,
     )
 
     submitted_select_target_and_use_ultimate_pair_is_valid_by_actor_slot = (
         current_action_mask.select_target_use_ultimate_joint_mask[
             _GLOBAL_AGENT_SLOT_INDICES,
-            submitted_joint_action.select_target,
-            submitted_joint_action.use_ultimate,
+            domain_safe_select_target_action,
+            domain_safe_use_ultimate_action,
         ]
     )
 
     accepted_select_target_joint_action = jnp.where(
         submitted_select_target_and_use_ultimate_pair_is_valid_by_actor_slot,
-        submitted_joint_action.select_target,
+        domain_safe_select_target_action,
         0,  # Target-none action
     )
     accepted_use_ultimate_joint_action = jnp.where(
         submitted_select_target_and_use_ultimate_pair_is_valid_by_actor_slot,
-        submitted_joint_action.use_ultimate,
+        domain_safe_use_ultimate_action,
         0,  # No-ultimate action
     )
 
@@ -1626,6 +1881,14 @@ def reset(
         priest_blessing_of_freedom_slow_floor_durations=jnp.zeros(
             (MAX_AGENT_SLOTS,), dtype=jnp.int32
         ),
+        previous_timestep_move_actions=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        previous_timestep_select_target_actions=jnp.zeros(
+            (MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
+        previous_timestep_use_ultimate_actions=jnp.zeros(
+            (MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
+        has_previous_timestep_joint_action=jnp.asarray(0, dtype=bool),
     )
 
     initial_observation, initial_action_mask = _build_observation_and_action_mask(
@@ -1757,6 +2020,10 @@ def step(
         rogue_poison_anti_heal_durations=next_rogue_anti_heal_durations,
         mage_burst_damage_amplification_durations=next_mage_burst_durations,
         priest_blessing_of_freedom_slow_floor_durations=next_priest_freedom_slow_floor_durations,
+        previous_timestep_move_actions=accepted_joint_action.move,
+        previous_timestep_select_target_actions=accepted_joint_action.select_target,
+        previous_timestep_use_ultimate_actions=accepted_joint_action.use_ultimate,
+        has_previous_timestep_joint_action=jnp.asarray(1, dtype=bool),
     )
 
     next_observation, next_action_mask = _build_observation_and_action_mask(

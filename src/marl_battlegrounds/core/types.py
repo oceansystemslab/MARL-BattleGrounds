@@ -215,7 +215,9 @@ class EnvState(NamedTuple):
 
     Episode-static facts live in ``EnvConfig.agent_profile``. Status state keeps
     only source-specific remaining durations; fixed magnitudes are derived by
-    ``core.combat.derive_status_magnitudes``.
+    ``core.combat.derive_status_magnitudes``. Previous-action fields retain the
+    one accepted category per actor from the immediately preceding transition.
+    The scalar validity leaf distinguishes reset from a real neutral action.
     """
 
     step_count: Array
@@ -228,6 +230,10 @@ class EnvState(NamedTuple):
     rogue_poison_anti_heal_durations: Array
     mage_burst_damage_amplification_durations: Array
     priest_blessing_of_freedom_slow_floor_durations: Array
+    previous_timestep_move_actions: Array
+    previous_timestep_select_target_actions: Array
+    previous_timestep_use_ultimate_actions: Array
+    has_previous_timestep_joint_action: Array
 
 
 class Action(NamedTuple):
@@ -254,8 +260,30 @@ class ActionMask(NamedTuple):
     select_target_use_ultimate_joint_mask: Array
 
 
+class PreviousTimestepActionObservation(NamedTuple):
+    """Observer-relative one-hot history for actors visible in the current state.
+
+    Every leaf has axes ``(observer, observed-actor relation row, category)``.
+    Ally and enemy relation rows match the corresponding unit-feature tensors.
+    Reset and hidden-actor rows are all zero; visible rows from a real
+    transition contain one accepted category per action head.
+    """
+
+    ally_previous_timestep_move_actions_one_hot: Array
+    enemy_previous_timestep_move_actions_one_hot: Array
+    ally_previous_timestep_select_target_actions_one_hot: Array
+    enemy_previous_timestep_select_target_actions_one_hot: Array
+    ally_previous_timestep_use_ultimate_actions_one_hot: Array
+    enemy_previous_timestep_use_ultimate_actions_one_hot: Array
+
+
 class Observation(NamedTuple):
-    """Structured per-slot observations emitted by reset and step."""
+    """Structured per-slot observations emitted by reset and step.
+
+    Unit features and visibility use stable observer-relative rows. Previous
+    actions are a separate categorical family and do not extend the shared
+    agent-feature columns.
+    """
 
     self_features: Array
     ally_unit_features: Array
@@ -265,6 +293,7 @@ class Observation(NamedTuple):
     context_features: Array
     ally_visibility_mask: Array
     enemy_visibility_mask: Array
+    previous_timestep_actions: PreviousTimestepActionObservation
 
 
 class Reward(NamedTuple):

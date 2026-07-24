@@ -84,6 +84,7 @@ from marl_battlegrounds.core.types import (
     EnvState,
     Info,
     Observation,
+    PreviousTimestepActionObservation,
     Reward,
 )
 
@@ -109,7 +110,7 @@ _CANONICAL_INITIAL_CLASS_IDS: Array = jnp.asarray(
 
 
 class _CombatStateFields(TypedDict):
-    """Keyword fields for inert combat state in test EnvState constructors."""
+    """Keyword fields for inert combat and action-history test state."""
 
     current_health: Array
     ultimate_cooldowns: Array
@@ -118,6 +119,10 @@ class _CombatStateFields(TypedDict):
     rogue_poison_anti_heal_durations: Array
     mage_burst_damage_amplification_durations: Array
     priest_blessing_of_freedom_slow_floor_durations: Array
+    previous_timestep_move_actions: Array
+    previous_timestep_select_target_actions: Array
+    previous_timestep_use_ultimate_actions: Array
+    has_previous_timestep_joint_action: Array
 
 
 def _inert_combat_state_fields() -> _CombatStateFields:
@@ -140,6 +145,16 @@ def _inert_combat_state_fields() -> _CombatStateFields:
         "priest_blessing_of_freedom_slow_floor_durations": jnp.zeros(
             shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32
         ),
+        "previous_timestep_move_actions": jnp.zeros(
+            shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
+        "previous_timestep_select_target_actions": jnp.zeros(
+            shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
+        "previous_timestep_use_ultimate_actions": jnp.zeros(
+            shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
+        "has_previous_timestep_joint_action": jnp.asarray(False),
     }
 
 
@@ -161,6 +176,16 @@ def _non_inert_combat_state_fields(state: EnvState) -> _CombatStateFields:
         ),
         "priest_blessing_of_freedom_slow_floor_durations": (
             state.priest_blessing_of_freedom_slow_floor_durations.at[6].set(1)
+        ),
+        "previous_timestep_move_actions": state.previous_timestep_move_actions,
+        "previous_timestep_select_target_actions": (
+            state.previous_timestep_select_target_actions
+        ),
+        "previous_timestep_use_ultimate_actions": (
+            state.previous_timestep_use_ultimate_actions
+        ),
+        "has_previous_timestep_joint_action": (
+            state.has_previous_timestep_joint_action
         ),
     }
 
@@ -249,6 +274,32 @@ def _current_action_mask(config: EnvConfig, state: EnvState) -> ActionMask:
 
 def _zero_observation() -> Observation:
     """Return a zero-filled observation."""
+    previous_timestep_actions = PreviousTimestepActionObservation(
+        ally_previous_timestep_move_actions_one_hot=jnp.zeros(
+            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM, NUM_MOVE_ACTIONS),
+            dtype=jnp.float32,
+        ),
+        enemy_previous_timestep_move_actions_one_hot=jnp.zeros(
+            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM, NUM_MOVE_ACTIONS),
+            dtype=jnp.float32,
+        ),
+        ally_previous_timestep_select_target_actions_one_hot=jnp.zeros(
+            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM, NUM_TARGET_ACTIONS),
+            dtype=jnp.float32,
+        ),
+        enemy_previous_timestep_select_target_actions_one_hot=jnp.zeros(
+            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM, NUM_TARGET_ACTIONS),
+            dtype=jnp.float32,
+        ),
+        ally_previous_timestep_use_ultimate_actions_one_hot=jnp.zeros(
+            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM, NUM_ULTIMATE_ACTIONS),
+            dtype=jnp.float32,
+        ),
+        enemy_previous_timestep_use_ultimate_actions_one_hot=jnp.zeros(
+            shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM, NUM_ULTIMATE_ACTIONS),
+            dtype=jnp.float32,
+        ),
+    )
     return Observation(
         self_features=jnp.zeros(
             shape=(MAX_AGENT_SLOTS, SELF_FEATURES), dtype=jnp.float32
@@ -278,6 +329,7 @@ def _zero_observation() -> Observation:
         enemy_visibility_mask=jnp.zeros(
             shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM), dtype=bool
         ),
+        previous_timestep_actions=previous_timestep_actions,
     )
 
 
@@ -317,6 +369,18 @@ def _assert_state_contract(state: EnvState) -> None:
         MAX_AGENT_SLOTS,
     )
     assert state.priest_blessing_of_freedom_slow_floor_durations.dtype == jnp.int32
+
+    assert state.previous_timestep_move_actions.shape == (MAX_AGENT_SLOTS,)
+    assert state.previous_timestep_move_actions.dtype == jnp.int32
+
+    assert state.previous_timestep_select_target_actions.shape == (MAX_AGENT_SLOTS,)
+    assert state.previous_timestep_select_target_actions.dtype == jnp.int32
+
+    assert state.previous_timestep_use_ultimate_actions.shape == (MAX_AGENT_SLOTS,)
+    assert state.previous_timestep_use_ultimate_actions.dtype == jnp.int32
+
+    assert state.has_previous_timestep_joint_action.shape == ()
+    assert state.has_previous_timestep_joint_action.dtype == jnp.bool_
 
 
 def _assert_effect_state_is_inert(state: EnvState) -> None:

@@ -76,7 +76,7 @@ from marl_battlegrounds.core.types import (
 
 
 class _CombatStateFields(TypedDict):
-    """Keyword fields for inert combat state in test EnvState constructors."""
+    """Keyword fields for inert combat and action-history test state."""
 
     current_health: Array
     ultimate_cooldowns: Array
@@ -85,6 +85,10 @@ class _CombatStateFields(TypedDict):
     rogue_poison_anti_heal_durations: Array
     mage_burst_damage_amplification_durations: Array
     priest_blessing_of_freedom_slow_floor_durations: Array
+    previous_timestep_move_actions: Array
+    previous_timestep_select_target_actions: Array
+    previous_timestep_use_ultimate_actions: Array
+    has_previous_timestep_joint_action: Array
 
 
 def _inert_combat_state_fields() -> _CombatStateFields:
@@ -107,6 +111,16 @@ def _inert_combat_state_fields() -> _CombatStateFields:
         "priest_blessing_of_freedom_slow_floor_durations": jnp.zeros(
             (MAX_AGENT_SLOTS,), dtype=jnp.int32
         ),
+        "previous_timestep_move_actions": jnp.zeros(
+            (MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
+        "previous_timestep_select_target_actions": jnp.zeros(
+            (MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
+        "previous_timestep_use_ultimate_actions": jnp.zeros(
+            (MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
+        "has_previous_timestep_joint_action": jnp.asarray(False),
     }
 
 

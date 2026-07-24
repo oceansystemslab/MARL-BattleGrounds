@@ -58,6 +58,10 @@ _FINAL_STATE_FIELDS = (
     "rogue_poison_anti_heal_durations",
     "mage_burst_damage_amplification_durations",
     "priest_blessing_of_freedom_slow_floor_durations",
+    "previous_timestep_move_actions",
+    "previous_timestep_select_target_actions",
+    "previous_timestep_use_ultimate_actions",
+    "has_previous_timestep_joint_action",
 )
 
 
