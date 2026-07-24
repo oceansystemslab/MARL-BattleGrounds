@@ -1,27 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
+PYPROJECT_PATH="${REPO_ROOT}/pyproject.toml"
+ENTRYPOINT_PATH="${REPO_ROOT}/scripts/dev/geometry_debug_renderer.py"
 
-if [[ "${1:-}" == "--help" ]]; then
-  cat <<'EOF'
-Usage: scripts/dev/run_geometry_renderer.sh [--manual|--static] [options]
+if [[ ! -f "${PYPROJECT_PATH}" ]]; then
+  echo "error: repository root does not contain pyproject.toml: ${REPO_ROOT}" >&2
+  exit 2
+fi
 
-Options:
-  --controlled-slot N     Global agent slot controlled in manual mode.
-  --step-interval-ms N    Manual-control timestep interval.
+if [[ ! -f "${ENTRYPOINT_PATH}" ]]; then
+  echo "error: visual debugger entry point is missing: ${ENTRYPOINT_PATH}" >&2
+  exit 2
+fi
 
-Environment:
-  MODE=manual|static       Renderer mode. Defaults to manual.
-  CONTROLLED_SLOT=0        Global agent slot controlled in manual mode.
-  STEP_INTERVAL_MS=50     Manual-control timestep interval.
-
-Controls:
-  WASD move cardinally, QEZC move diagonally, no input means stay.
-EOF
-  exit 0
+if ! command -v uv >/dev/null 2>&1; then
+  echo "error: uv is required; install uv and run 'uv sync --extra viz --extra dev'." >&2
+  exit 127
 fi
 
 cd "${REPO_ROOT}"
-exec uv run --extra viz python scripts/dev/geometry_debug_renderer.py "$@"
+exec uv run --project "${REPO_ROOT}" --extra viz python "${ENTRYPOINT_PATH}" "$@"

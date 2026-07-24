@@ -4,7 +4,7 @@ import sys
 from collections.abc import Callable
 from importlib import import_module
 from importlib.util import find_spec
-from typing import TypedDict, cast
+from typing import Protocol, TypedDict, cast
 
 import jax.numpy as jnp
 import pytest
@@ -35,8 +35,26 @@ from marl_battlegrounds.core.types import (
 )
 from marl_battlegrounds.rendering.geometry import (
     RenderResult,
+    draw_geometry,
     redraw_geometry,
     render_geometry,
+)
+from marl_battlegrounds.rendering.visuals import (
+    DAMAGE_COLOR,
+    ActivationVisual,
+    AuraCueVisual,
+    BattlefieldOverlays,
+    ChargeTrailVisual,
+    HealthDeltaVisual,
+    LaneMarkerVisual,
+    ObserverVisibilityVisual,
+    PersistentEffectVisual,
+    PreviousAcceptedActionVisual,
+    RangeVisual,
+    RejectedActionVisual,
+    SelectionVisual,
+    StatusCueVisual,
+    TargetLinkVisual,
 )
 
 
@@ -54,6 +72,26 @@ class _CombatStateFields(TypedDict):
     previous_timestep_select_target_actions: Array
     previous_timestep_use_ultimate_actions: Array
     has_previous_timestep_joint_action: Array
+
+
+class _TextLike(Protocol):
+    def get_text(self) -> str: ...
+
+
+class _ArtistLike(Protocol):
+    def get_zorder(self) -> float: ...
+
+
+class _LineLike(_ArtistLike, Protocol):
+    def get_color(self) -> str: ...
+
+    def get_linestyle(self) -> str: ...
+
+
+class _AxesIntrospection(Protocol):
+    patches: list[_ArtistLike]
+    lines: list[_LineLike]
+    texts: list[_TextLike]
 
 
 def _inert_combat_state_fields() -> _CombatStateFields:
@@ -239,6 +277,9 @@ def test_render_geometry_constructs_figure_when_matplotlib_is_available() -> Non
         assert isinstance(result, RenderResult)
         assert hasattr(result.figure, "savefig")
         assert hasattr(result.axes, "clear")
+        axes = cast(_AxesIntrospection, result.axes)
+        assert axes.patches[0].get_zorder() == 0
+        assert axes.patches[1].get_zorder() == 10
     finally:
         _close_render_result(result)
 
@@ -260,5 +301,288 @@ def test_redraw_geometry_reuses_existing_render_result() -> None:
         assert redrawn is result
         assert redrawn.figure is result.figure
         assert redrawn.axes is result.axes
+    finally:
+        _close_render_result(result)
+
+
+def _all_overlay_families() -> BattlefieldOverlays:
+    return BattlefieldOverlays(
+        selections=(
+            SelectionVisual(global_slot=0, role="controlled"),
+            SelectionVisual(global_slot=MAX_AGENTS_PER_TEAM, role="target"),
+        ),
+        observer_visibility=(
+            ObserverVisibilityVisual(
+                observer_global_slot=0,
+                candidate_global_slot=0,
+                observer_visible=True,
+            ),
+            ObserverVisibilityVisual(
+                observer_global_slot=0,
+                candidate_global_slot=MAX_AGENTS_PER_TEAM,
+                observer_visible=False,
+            ),
+        ),
+        ranges=(
+            RangeVisual(0, (2.0, 2.0), 6.0, "observation"),
+            RangeVisual(0, (2.0, 2.0), 5.0, "basic"),
+            RangeVisual(0, (2.0, 2.0), 3.0, "ultimate"),
+        ),
+        target_links=(
+            TargetLinkVisual(0, MAX_AGENTS_PER_TEAM, 0, True),
+            TargetLinkVisual(1, MAX_AGENTS_PER_TEAM + 1, 1, False),
+        ),
+        lane_markers=(
+            LaneMarkerVisual(MAX_AGENTS_PER_TEAM, 0, True, True),
+            LaneMarkerVisual(MAX_AGENTS_PER_TEAM, 1, False, False),
+        ),
+        statuses=(
+            StatusCueVisual(0, "stun", 2, 0, 1),
+            StatusCueVisual(0, "stun", 3, 1, 2),
+            StatusCueVisual(0, "stun", 4, 2, 3),
+            StatusCueVisual(0, "slow", 2, 0, 4),
+            StatusCueVisual(0, "slow", 3, 1, 5),
+            StatusCueVisual(0, "slow", 4, 2, 6),
+        ),
+        auras=(
+            AuraCueVisual(0, "mage_amplification", 1.15),
+            AuraCueVisual(0, "warrior_mitigation", 0.85),
+        ),
+        persistent_effects=(
+            PersistentEffectVisual(0, "rogue_anti_heal", 4, 0.5),
+            PersistentEffectVisual(0, "priest_freedom", 1, 0.85),
+            PersistentEffectVisual(0, "mage_burst", 5, 1.5),
+        ),
+        health_deltas=(HealthDeltaVisual(MAX_AGENTS_PER_TEAM, -8.0),),
+        activations=(
+            ActivationVisual("basic_damage", 0, MAX_AGENTS_PER_TEAM, 1),
+            ActivationVisual("mage_burst", 0, None, 1),
+            ActivationVisual("warrior_charge", 1, MAX_AGENTS_PER_TEAM + 1, 2),
+            ActivationVisual("hunter_trap", 0, MAX_AGENTS_PER_TEAM, 3),
+            ActivationVisual("rogue_poison", 0, MAX_AGENTS_PER_TEAM, 4),
+            ActivationVisual("basic_heal", 0, 0, 5),
+            ActivationVisual("holy_word", 0, 0, 5),
+        ),
+        charge_trails=(
+            ChargeTrailVisual(
+                1,
+                (3.0, 2.5),
+                (8.0, 5.0),
+                MAX_AGENTS_PER_TEAM + 1,
+                "combined_charge_and_movement",
+                0.65,
+            ),
+        ),
+        rejections=(
+            RejectedActionVisual(0, "movement", None, None),
+            RejectedActionVisual(1, "combat", MAX_AGENTS_PER_TEAM + 1, 1),
+        ),
+        previous_actions=(PreviousAcceptedActionVisual(0, 3, 6, 0),),
+    )
+
+
+def test_draw_geometry_draws_every_overlay_family() -> None:
+    _skip_if_matplotlib_unavailable()
+    config = _sample_config()
+    state = _sample_state()
+    result = render_geometry(config, state)
+
+    try:
+        axes = cast(_AxesIntrospection, result.axes)
+        baseline_patch_count = len(axes.patches)
+        baseline_line_count = len(axes.lines)
+        baseline_text_count = len(axes.texts)
+
+        draw_geometry(
+            axes,
+            config,
+            state,
+            overlays=_all_overlay_families(),
+        )
+
+        assert len(axes.patches) > baseline_patch_count
+        assert len(axes.lines) > baseline_line_count
+        assert len(axes.texts) > baseline_text_count
+        assert sum(text.get_text() == "▼" for text in axes.texts) == 6
+        assert any(line.get_zorder() == 42.9 for line in axes.lines)
+        assert any(
+            line.get_color() == DAMAGE_COLOR and line.get_linestyle() == "--"
+            for line in axes.lines
+        )
+    finally:
+        _close_render_result(result)
+
+
+def test_identical_snapshot_and_overlays_redraw_equivalently() -> None:
+    _skip_if_matplotlib_unavailable()
+    config = _sample_config()
+    state = _sample_state()
+    overlays = _all_overlay_families()
+    result = render_geometry(config, state, overlays=overlays)
+
+    try:
+        axes = cast(_AxesIntrospection, result.axes)
+        first_counts = (len(axes.patches), len(axes.lines), len(axes.texts))
+
+        redrawn = redraw_geometry(config, state, result, overlays=overlays)
+        redrawn_axes = cast(_AxesIntrospection, redrawn.axes)
+        second_counts = (
+            len(redrawn_axes.patches),
+            len(redrawn_axes.lines),
+            len(redrawn_axes.texts),
+        )
+
+        assert second_counts == first_counts
+    finally:
+        _close_render_result(result)
+
+
+def test_observer_visibility_dims_only_supplied_nonvisible_bodies() -> None:
+    _skip_if_matplotlib_unavailable()
+    config = _sample_config()
+    state = _sample_state()
+    visible_overlays = BattlefieldOverlays(
+        observer_visibility=(ObserverVisibilityVisual(0, MAX_AGENTS_PER_TEAM, True),),
+    )
+    hidden_overlays = BattlefieldOverlays(
+        observer_visibility=(ObserverVisibilityVisual(0, MAX_AGENTS_PER_TEAM, False),),
+    )
+    result = render_geometry(config, state, overlays=visible_overlays)
+
+    try:
+        axes = cast(_AxesIntrospection, result.axes)
+        visible_patch_count = len(axes.patches)
+        redraw_geometry(config, state, result, overlays=hidden_overlays)
+
+        assert len(axes.patches) == visible_patch_count + 2
+        assert any(text.get_text() == f"g{MAX_AGENTS_PER_TEAM}" for text in axes.texts)
+    finally:
+        _close_render_result(result)
+
+
+@pytest.mark.parametrize(
+    ("visual", "minimum_patch_delta", "minimum_line_delta", "required_text"),
+    (
+        (
+            ActivationVisual("basic_damage", 0, MAX_AGENTS_PER_TEAM, 1),
+            0,
+            1,
+            "✦",
+        ),
+        (
+            ActivationVisual("basic_heal", 1, 0, 5),
+            1,
+            1,
+            None,
+        ),
+        (
+            ActivationVisual("holy_word", 1, 0, 5),
+            2,
+            1,
+            None,
+        ),
+        (
+            ActivationVisual("mage_burst", 0, None, 1),
+            1,
+            0,
+            None,
+        ),
+        (
+            ActivationVisual("warrior_charge", 0, MAX_AGENTS_PER_TEAM, 2),
+            1,
+            0,
+            None,
+        ),
+        (
+            ActivationVisual("hunter_trap", 0, MAX_AGENTS_PER_TEAM, 3),
+            1,
+            0,
+            None,
+        ),
+        (
+            ActivationVisual("rogue_poison", 0, MAX_AGENTS_PER_TEAM, 4),
+            3,
+            0,
+            None,
+        ),
+    ),
+)
+def test_each_activation_kind_has_a_distinct_drawable_primitive(
+    visual: ActivationVisual,
+    minimum_patch_delta: int,
+    minimum_line_delta: int,
+    required_text: str | None,
+) -> None:
+    _skip_if_matplotlib_unavailable()
+    config = _sample_config()
+    state = _sample_state()
+    result = render_geometry(config, state)
+
+    try:
+        axes = cast(_AxesIntrospection, result.axes)
+        baseline = (len(axes.patches), len(axes.lines))
+        draw_geometry(
+            axes,
+            config,
+            state,
+            overlays=BattlefieldOverlays(activations=(visual,)),
+        )
+
+        assert len(axes.patches) >= baseline[0] + minimum_patch_delta
+        assert len(axes.lines) >= baseline[1] + minimum_line_delta
+        if required_text is not None:
+            assert any(text.get_text() == required_text for text in axes.texts)
+    finally:
+        _close_render_result(result)
+
+
+def test_multiple_recipient_effects_compose_as_segmented_marker() -> None:
+    _skip_if_matplotlib_unavailable()
+    config = _sample_config()
+    state = _sample_state()
+    result = render_geometry(config, state)
+    target = MAX_AGENTS_PER_TEAM
+    overlays = BattlefieldOverlays(
+        activations=(
+            ActivationVisual("basic_damage", 0, target, 1),
+            ActivationVisual("hunter_trap", 1, target, 3),
+            ActivationVisual("rogue_poison", 0, target, 4),
+        )
+    )
+
+    try:
+        axes = cast(_AxesIntrospection, result.axes)
+        baseline_patch_count = len(axes.patches)
+        draw_geometry(axes, config, state, overlays=overlays)
+
+        assert len(axes.patches) == baseline_patch_count + 3
+        assert not any(text.get_text() == "✦" for text in axes.texts)
+    finally:
+        _close_render_result(result)
+
+
+def test_simultaneous_movement_and_combat_rejections_share_one_label() -> None:
+    _skip_if_matplotlib_unavailable()
+    config = _sample_config()
+    state = _sample_state()
+    overlays = BattlefieldOverlays(
+        rejections=(
+            RejectedActionVisual(0, "movement", None, None),
+            RejectedActionVisual(0, "combat", MAX_AGENTS_PER_TEAM, 1),
+        )
+    )
+    result = render_geometry(config, state, overlays=overlays)
+
+    try:
+        axes = cast(_AxesIntrospection, result.axes)
+        labels = [text.get_text() for text in axes.texts]
+        assert labels.count("M\u00d7 C\u00d7") == 1
+        assert (
+            sum(
+                line.get_color() == DAMAGE_COLOR and line.get_linestyle() == "--"
+                for line in axes.lines
+            )
+            == 1
+        )
     finally:
         _close_render_result(result)
