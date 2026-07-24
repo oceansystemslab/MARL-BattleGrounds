@@ -343,7 +343,6 @@ def run_visual_debugger(
     show_ranges: bool,
 ) -> int:
     """Create, optionally connect, display, and cleanly close the debugger."""
-    pyplot = _load_pyplot()
     scenario = get_scenario(scenario_name)
     if controlled_global_slot is not None:
         config = scenario.build_config()
@@ -356,6 +355,7 @@ def run_visual_debugger(
                 f"scenario {scenario_name!r}."
             )
             raise ValueError(msg)
+    pyplot = _load_pyplot()
     session = create_session(
         scenario,
         seed=seed,

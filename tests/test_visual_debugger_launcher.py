@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from scripts.dev.geometry_debug_renderer import build_parser, main
+from scripts.dev.visual_debugger import app
 from scripts.dev.visual_debugger.scenarios import SCENARIOS
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -163,6 +164,28 @@ def test_missing_matplotlib_is_actionable_and_returns_two(tmp_path: Path) -> Non
 def test_invalid_cli_inputs_use_argparse_exit_two(argv: tuple[str, ...]) -> None:
     with pytest.raises(SystemExit) as exc_info:
         main(argv)
+    assert exc_info.value.code == 2
+
+
+@pytest.mark.parametrize(
+    "argv",
+    (
+        ("--scenario", "missing"),
+        ("--scenario", "acceptance_lane_lab", "--controlled-slot", "1"),
+    ),
+)
+def test_semantic_cli_validation_precedes_matplotlib_loading(
+    monkeypatch: pytest.MonkeyPatch,
+    argv: tuple[str, ...],
+) -> None:
+    def fail_if_loaded() -> object:
+        raise AssertionError("Matplotlib must not load before CLI validation")
+
+    monkeypatch.setattr(app, "_load_pyplot", fail_if_loaded)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(argv)
+
     assert exc_info.value.code == 2
 
 
