@@ -185,6 +185,20 @@ def _catalog_helper(name: str) -> _CatalogHelper:
     return cast(_CatalogHelper, getattr(combat, name))
 
 
+def test_warrior_and_rogue_basic_radii_are_debugger_calibrated() -> None:
+    """The two separately approved melee Basic radii stay exact."""
+    expected = jnp.asarray(
+        (0.0, 5.0, 1.5, 5.5, 1.5, 5.0),
+        dtype=jnp.float32,
+    )
+
+    _assert_array_equal(
+        combat.BASIC_INTERACTION_RADIUS_BY_CLASS,
+        expected,
+        "BASIC_INTERACTION_RADIUS_BY_CLASS",
+    )
+
+
 def _expected_active_mask(team_size: int) -> Array:
     """Return the fixed-slot active mask for a symmetric two-team task."""
     indices = jnp.arange(MAX_AGENT_SLOTS)

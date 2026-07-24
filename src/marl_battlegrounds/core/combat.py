@@ -118,9 +118,9 @@ BASIC_INTERACTION_RADIUS_BY_CLASS = jnp.asarray(
     [
         0.0,  # neutral
         5.0,  # mage
-        0.5,  # warrior
+        1.5,  # warrior
         5.5,  # hunter
-        0.5,  # rogue
+        1.5,  # rogue
         5.0,  # priest
     ],
     dtype=jnp.float32,

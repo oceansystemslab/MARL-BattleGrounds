@@ -165,6 +165,20 @@ def test_resolved_agent_profile_stats_match_combat_catalogs(
     assert bool(jnp.array_equal(actual, expected))
 
 
+def test_resolved_profile_uses_tuned_melee_basic_radii() -> None:
+    resolved = resolve_agent_profile(
+        _CANONICAL_ROSTER,
+        jnp.asarray((5, 5), dtype=jnp.int32),
+    )
+
+    expected = jnp.asarray(
+        (5.0, 1.5, 5.5, 1.5, 5.0, 5.0, 1.5, 5.5, 1.5, 5.0),
+        dtype=jnp.float32,
+    )
+
+    assert bool(jnp.array_equal(resolved.basic_interaction_radii, expected))
+
+
 def test_resolved_agent_profile_names_base_speed_without_competing_alias() -> None:
     assert "base_movement_speeds" in ResolvedAgentProfile._fields
     assert "movement_speeds" not in ResolvedAgentProfile._fields
