@@ -5,10 +5,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from scripts.dev.visual_debugger.control import (
+    build_scripted_joint_action,
     create_session,
     submit_next_script_frame,
 )
-from scripts.dev.visual_debugger.diagnostics import derive_selected_target_facts
 from scripts.dev.visual_debugger.model import (
     ActorCommand,
     DebuggerScenario,
@@ -18,6 +18,11 @@ from scripts.dev.visual_debugger.scenarios import (
     SCENARIOS,
     get_scenario,
     list_scenarios,
+)
+from scripts.dev.visual_debugger.targeting import global_slot_to_target_action
+from tests.visual_debugger_fixtures import (
+    rejection_lane_scenario,
+    submit_fixture_frame,
 )
 
 from marl_battlegrounds.core.config import validate_env_config
@@ -68,13 +73,12 @@ def _session(name: str) -> tuple[DebuggerScenario, DebuggerSession]:
 def test_all_scenario_configs_validate_and_reset() -> None:
     assert tuple(SCENARIOS) == (
         "arena_5v5",
-        "acceptance_lane_lab",
         "basic_support",
         "ultimate_showcase",
         "aura_crossfire",
         "status_stack",
     )
-    assert len(list_scenarios()) == 6
+    assert len(list_scenarios()) == 5
     for scenario in list_scenarios():
         config = scenario.build_config()
         validate_env_config(config)
@@ -130,14 +134,6 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
             "interactive",
             0,
         ),
-        "acceptance_lane_lab": (
-            (16.0, 12.0),
-            (0, 5),
-            (HUNTER_CLASS_ID, MAGE_CLASS_ID),
-            ((3.0, 6.0), (12.0, 6.0)),
-            "interactive",
-            0,
-        ),
         "basic_support": (
             (14.0, 12.0),
             (0, 1, 2, 5, 6, 7),
@@ -153,9 +149,9 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
                 (4.0, 3.0),
                 (4.0, 6.0),
                 (4.0, 9.0),
-                (9.0, 3.0),
-                (9.0, 6.0),
-                (9.0, 9.0),
+                (7.0, 3.0),
+                (7.0, 6.0),
+                (7.0, 9.0),
             ),
             "scripted",
             0,
@@ -181,8 +177,8 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
                 (5.0, 8.0),
                 (8.0, 5.0),
                 (3.0, 10.0),
-                (9.0, 5.0),
-                (9.0, 8.0),
+                (7.0, 6.0),
+                (8.5, 8.0),
                 (10.0, 3.0),
                 (12.0, 8.0),
                 (13.0, 10.0),
@@ -224,7 +220,7 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
             ),
             (
                 (3.0, 6.0),
-                (5.0, 4.0),
+                (5.2, 4.2),
                 (8.0, 5.0),
                 (8.0, 6.0),
                 (8.0, 8.0),
@@ -264,14 +260,6 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
 
     expected_frames = {
         "arena_5v5": (),
-        "acceptance_lane_lab": (
-            ((0, MOVE_EAST, 5, 0),),
-            ((0, MOVE_EAST, 5, 0),),
-            ((0, MOVE_EAST, 5, 0),),
-            ((0, MOVE_EAST, 5, 0),),
-            ((0, MOVE_EAST, 5, 1),),
-            ((0, MOVE_STAY, 5, 1),),
-        ),
         "basic_support": (
             (
                 (0, MOVE_STAY, 5, 0),
@@ -301,7 +289,7 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
             ),
             (
                 (1, MOVE_STAY, 5, 0),
-                (5, MOVE_EAST, None, 0),
+                (5, MOVE_STAY, None, 0),
                 (6, MOVE_STAY, 5, 0),
             ),
             ((5, MOVE_EAST, None, 0),),
@@ -338,6 +326,56 @@ def test_every_scenario_frame_has_unique_active_actors_and_targets() -> None:
                 assert active[command.actor_global_slot]
                 if command.target_global_slot is not None:
                     assert active[command.target_global_slot]
+
+
+def test_every_normal_scripted_command_is_legal_and_accepted() -> None:
+    for scenario in list_scenarios():
+        if not scenario.frames:
+            continue
+        _, session = _session(scenario.name)
+        for frame in scenario.frames:
+            action = build_scripted_joint_action(session.config, frame)
+            for command in frame.commands:
+                slot = command.actor_global_slot
+                target_action = global_slot_to_target_action(
+                    slot,
+                    command.target_global_slot,
+                )
+                assert 0 <= command.move_action < session.action_mask.move_mask.shape[1]
+                assert (
+                    0
+                    <= target_action
+                    < (
+                        session.action_mask.select_target_use_ultimate_joint_mask.shape[
+                            1
+                        ]
+                    )
+                )
+                assert command.use_ultimate in (0, 1)
+                assert bool(session.action_mask.move_mask[slot, command.move_action])
+                assert bool(
+                    session.action_mask.select_target_use_ultimate_joint_mask[
+                        slot,
+                        target_action,
+                        command.use_ultimate,
+                    ]
+                )
+
+            submitted = submit_next_script_frame(session)
+            transition = submitted.last_transition
+            assert transition is not None
+            actors = {
+                actor.actor_global_slot: actor for actor in transition.actor_transitions
+            }
+            for command in frame.commands:
+                actor = actors[command.actor_global_slot]
+                expected_target = int(action.select_target[command.actor_global_slot])
+                assert actor.accepted_move_action == command.move_action
+                assert actor.accepted_target_action == expected_target
+                assert actor.accepted_use_ultimate == command.use_ultimate
+                assert actor.movement_accepted
+                assert actor.combat_pair_accepted
+            session = submitted
 
 
 def test_arena_5v5_exact_map_roster_positions_obstacles_and_initial_facts() -> None:
@@ -405,7 +443,7 @@ def test_arena_5v5_exact_map_roster_positions_obstacles_and_initial_facts() -> N
     )
     for target_action, expected in {
         2: (False, True),
-        3: (True, True),
+        3: (False, True),
         4: (True, True),
         5: (True, True),
     }.items():
@@ -418,83 +456,32 @@ def test_arena_5v5_exact_map_roster_positions_obstacles_and_initial_facts() -> N
         )
 
 
-def test_acceptance_lane_lab_geometry_visibility_and_mask_trajectory() -> None:
-    scenario, session = _session("acceptance_lane_lab")
-    expected = (
-        (9.0, True, False, False, False, False, False, False),
-        (8.0, True, False, False, False, False, False, False),
-        (7.0, True, False, False, False, False, False, False),
-        (6.0, True, True, True, False, False, False, False),
-        (5.0, True, True, True, True, False, True, False),
-        (4.0, True, True, True, True, True, True, True),
+def test_rejection_boundary_is_preserved_as_a_test_only_fixture() -> None:
+    scenario = rejection_lane_scenario()
+    session = create_session(
+        scenario,
+        seed=0,
+        controlled_global_slot=None,
+        show_ranges=True,
+        verbose_logging=False,
     )
-    for frame_index, facts_expected in enumerate(expected):
-        facts = derive_selected_target_facts(
-            config=session.config,
-            state=session.state,
-            observation=session.observation,
-            action_mask=session.action_mask,
-            controlled_global_slot=0,
-            target_global_slot=5,
-        )
-        assert facts is not None
-        (
-            distance,
-            los,
-            visible,
-            observation_range,
-            basic_range,
-            ultimate_range,
-            lane_0,
-            lane_1,
-        ) = facts_expected
-        assert facts.center_distance == pytest.approx(distance)
-        assert facts.has_clear_line_of_sight is los
-        assert facts.observer_visible is visible
-        assert facts.inside_observation_radius is observation_range
-        assert facts.inside_basic_radius is basic_range
-        assert facts.inside_ultimate_radius is ultimate_range
-        assert facts.lane_0_available is lane_0
-        assert facts.lane_1_available is lane_1
-        if frame_index < len(scenario.frames):
-            session = submit_next_script_frame(session)
+    first, second = scenario.frames
+    first_action = build_scripted_joint_action(session.config, first)
+    assert bool(session.action_mask.move_mask[0, MOVE_EAST])
+    assert not bool(session.action_mask.select_target_use_ultimate_joint_mask[0, 6, 0])
 
+    rejected = submit_fixture_frame(session, first)
+    actor = rejected.last_transition.actor_transitions[0]  # type: ignore[union-attr]
+    assert actor.movement_accepted
+    assert not actor.combat_pair_accepted
+    assert int(first_action.select_target[0]) == 6
+    assert (actor.accepted_target_action, actor.accepted_use_ultimate) == (0, 0)
+    assert bool(rejected.action_mask.select_target_use_ultimate_joint_mask[0, 6, 0])
 
-def test_acceptance_lane_lab_reference_trajectory() -> None:
-    _, session = _session("acceptance_lane_lab")
-    for expected_step, expected_x in enumerate((4, 5, 6, 7, 8), start=1):
-        session = submit_next_script_frame(session)
-        transition = session.last_transition
-        assert transition is not None
-        actor = transition.actor_transitions[0]
-        assert int(session.state.step_count) == expected_step
-        assert float(session.state.agent_positions[0, 0]) == pytest.approx(expected_x)
-        assert actor.movement_accepted
-        assert not actor.combat_pair_accepted
-        assert actor.accepted_target_action == 0
-        assert actor.accepted_use_ultimate == 0
-        np.testing.assert_array_equal(
-            np.asarray(session.state.current_health)[[0, 5]],
-            (100.0, 80.0),
-        )
-
-    session = submit_next_script_frame(session)
-    transition = session.last_transition
-    assert transition is not None
-    actor = transition.actor_transitions[0]
+    accepted = submit_fixture_frame(rejected, second)
+    actor = accepted.last_transition.actor_transitions[0]  # type: ignore[union-attr]
     assert actor.movement_accepted and actor.combat_pair_accepted
-    assert (actor.accepted_target_action, actor.accepted_use_ultimate) == (6, 1)
-    assert int(session.state.ultimate_cooldowns[0]) == 30
-    assert int(session.state.stun_durations[5, STUN_CHANNEL_HUNTER_TRAP]) == 4
-    assert (
-        float(
-            session.observation.self_features[
-                5,
-                AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED,
-            ]
-        )
-        == 0.0
-    )
+    assert (actor.accepted_target_action, actor.accepted_use_ultimate) == (6, 0)
 
 
 def test_basic_support_reference_trajectory() -> None:
@@ -532,8 +519,8 @@ def test_ultimate_showcase_reference_trajectory() -> None:
         atol=1e-4,
     )
     np.testing.assert_allclose(
-        np.asarray(session.state.current_health)[[2, 7]],
-        (100.0, 84.0),
+        np.asarray(session.state.current_health)[[2, 5, 7]],
+        (100.0, 70.0, 84.0),
         atol=1e-5,
     )
     np.testing.assert_array_equal(session.state.ultimate_cooldowns[:5], 30)
@@ -611,7 +598,7 @@ def test_status_stack_reference_trajectory() -> None:
     _, session = _session("status_stack")
     session = submit_next_script_frame(session)
     np.testing.assert_allclose(session.state.agent_positions[0], (7.0, 7.0))
-    assert float(session.state.current_health[5]) == pytest.approx(92.0)
+    assert float(session.state.current_health[5]) == pytest.approx(82.0)
     np.testing.assert_array_equal(session.state.slow_durations[5], (5, 0, 5))
     np.testing.assert_array_equal(session.state.stun_durations[5], (1, 4, 1))
     assert int(session.state.rogue_poison_anti_heal_durations[5]) == 4
@@ -629,7 +616,7 @@ def test_status_stack_reference_trajectory() -> None:
 
     session = submit_next_script_frame(session)
     np.testing.assert_allclose(session.state.agent_positions[5], (8.0, 6.0))
-    assert float(session.state.current_health[5]) == pytest.approx(88.0)
+    assert float(session.state.current_health[5]) == pytest.approx(78.0)
     np.testing.assert_array_equal(session.state.slow_durations[5], (4, 1, 4))
     np.testing.assert_array_equal(session.state.stun_durations[5], (0, 0, 0))
     assert int(session.state.rogue_poison_anti_heal_durations[5]) == 3

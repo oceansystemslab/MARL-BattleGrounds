@@ -36,6 +36,7 @@ class _FakeCanvas:
         self.draw_idle_calls = 0
         self.disconnected: list[int] = []
         self.timer_requested = False
+        self.set_focus_calls = 0
 
     def mpl_connect(self, event_name: str, callback: Callable[..., None]) -> int:
         connection_id = self.next_id
@@ -52,6 +53,9 @@ class _FakeCanvas:
     def new_timer(self, *_args: object, **_kwargs: object) -> object:
         self.timer_requested = True
         raise AssertionError("the explicit-submit debugger must not create a timer")
+
+    def setFocus(self) -> None:  # noqa: N802 - Qt canvas compatibility surface.
+        self.set_focus_calls += 1
 
 
 class _FailingConnectCanvas(_FakeCanvas):
@@ -123,13 +127,13 @@ def _app(
 
 
 def test_hit_testing_uses_true_active_discs_and_ignores_padding() -> None:
-    session = _session("acceptance_lane_lab")
+    session = _session("basic_support")
     assert (
         hit_test_active_agent(
             session.config,
             session.state,
+            4.0,
             3.0,
-            6.0,
         )
         == 0
     )
@@ -137,8 +141,8 @@ def test_hit_testing_uses_true_active_discs_and_ignores_padding() -> None:
         hit_test_active_agent(
             session.config,
             session.state,
-            12.0,
-            6.0,
+            7.0,
+            3.0,
         )
         == 5
     )
@@ -152,24 +156,24 @@ def test_hit_testing_uses_true_active_discs_and_ignores_padding() -> None:
         is None
     )
     # Padded slot positions are zero but cannot be clicked.
-    assert not bool(session.config.agent_profile.active_mask[1])
+    assert not bool(session.config.agent_profile.active_mask[3])
 
 
 def test_hit_testing_uses_normalized_distance_then_lowest_slot_tie_break() -> None:
-    session = _session("acceptance_lane_lab")
+    session = _session("basic_support")
     overlapping = session.state._replace(
         agent_positions=session.state.agent_positions.at[5].set(
             session.state.agent_positions[0]
         )
     )
-    assert hit_test_active_agent(session.config, overlapping, 3.0, 6.0) == 0
+    assert hit_test_active_agent(session.config, overlapping, 4.0, 3.0) == 0
 
     nearer_to_five = overlapping._replace(
         agent_positions=overlapping.agent_positions.at[5].set(
-            jnp.asarray((3.1, 6.0), dtype=jnp.float32)
+            jnp.asarray((4.1, 3.0), dtype=jnp.float32)
         )
     )
-    assert hit_test_active_agent(session.config, nearer_to_five, 3.09, 6.0) == 5
+    assert hit_test_active_agent(session.config, nearer_to_five, 4.09, 3.0) == 5
 
 
 def test_app_registers_expected_callbacks_without_timer(
@@ -227,10 +231,10 @@ def test_movement_key_normalization_changes_pending_without_step(
 def test_keyboard_callbacks_cover_cycle_arm_clear_toggles_and_scenarios(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app, _, _, _ = _app(monkeypatch, scenario_name="acceptance_lane_lab")
+    app, _, _, _ = _app(monkeypatch, scenario_name="basic_support")
 
     app.on_key_press(SimpleNamespace(key="tab"))
-    assert app.session.controlled_global_slot == 5
+    assert app.session.controlled_global_slot == 1
     app.on_key_press(SimpleNamespace(key="shift+tab"))
     assert app.session.controlled_global_slot == 0
     app.on_key_press(SimpleNamespace(key="2"))
@@ -242,9 +246,49 @@ def test_keyboard_callbacks_cover_cycle_arm_clear_toggles_and_scenarios(
     app.on_key_press(SimpleNamespace(key="v"))
     assert app.session.verbose_logging
     app.on_key_press(SimpleNamespace(key="]"))
-    assert app.session.scenario_name == "basic_support"
+    assert app.session.scenario_name == "ultimate_showcase"
     app.on_key_press(SimpleNamespace(key="["))
-    assert app.session.scenario_name == "acceptance_lane_lab"
+    assert app.session.scenario_name == "basic_support"
+
+
+@pytest.mark.parametrize(
+    "key",
+    ("shift+tab", "backtab", "iso_left_tab", "shift+iso_left_tab"),
+)
+def test_backward_tab_variants_cycle_and_schedule_tk_focus_restoration(
+    monkeypatch: pytest.MonkeyPatch,
+    key: str,
+) -> None:
+    app, canvas, _, _ = _app(monkeypatch, scenario_name="basic_support")
+    callbacks: list[Callable[[], None]] = []
+
+    class _Widget:
+        def after_idle(self, callback: Callable[[], None]) -> None:
+            callbacks.append(callback)
+
+        def focus_set(self) -> None:
+            canvas.set_focus_calls += 1
+
+    widget = _Widget()
+    event = SimpleNamespace(
+        key=key,
+        guiEvent=SimpleNamespace(widget=widget),
+    )
+    app.on_key_press(event)
+
+    assert app.session.controlled_global_slot == 7
+    assert callbacks == [widget.focus_set]
+    assert canvas.set_focus_calls == 0
+    callbacks[0]()
+    assert canvas.set_focus_calls == 1
+
+
+def test_tab_focus_restoration_falls_back_to_canvas_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, canvas, _, _ = _app(monkeypatch, scenario_name="basic_support")
+    app.on_key_press(SimpleNamespace(key="tab"))
+    assert canvas.set_focus_calls == 1
 
 
 @pytest.mark.parametrize("submit_key", (" ", "space", "enter", "return"))
@@ -252,15 +296,15 @@ def test_submit_key_variants_advance_exactly_one_step(
     monkeypatch: pytest.MonkeyPatch,
     submit_key: str,
 ) -> None:
-    app, _, _, _ = _app(monkeypatch, scenario_name="acceptance_lane_lab")
+    app, _, _, _ = _app(monkeypatch, scenario_name="arena_5v5")
     app.on_key_press(SimpleNamespace(key=submit_key))
     assert int(app.session.state.step_count) == 1
 
 
-def test_n_submits_reference_frame_even_in_interactive_mode(
+def test_n_submits_reference_frame(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app, _, _, _ = _app(monkeypatch, scenario_name="acceptance_lane_lab")
+    app, _, _, _ = _app(monkeypatch, scenario_name="basic_support")
     app.on_key_press(SimpleNamespace(key="n"))
     assert int(app.session.state.step_count) == 1
     assert app.session.next_script_frame_index == 1
@@ -280,7 +324,7 @@ def test_scripted_space_submits_multi_actor_frame(
 def test_terminal_mode_keys_do_not_mutate_pending_but_inspection_still_works(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app, _, _, _ = _app(monkeypatch, scenario_name="acceptance_lane_lab")
+    app, _, _, _ = _app(monkeypatch, scenario_name="basic_support")
     app.session = replace(
         app.session,
         done_flags=DoneFlags(
@@ -293,7 +337,7 @@ def test_terminal_mode_keys_do_not_mutate_pending_but_inspection_still_works(
     app.on_key_press(SimpleNamespace(key="2"))
     assert app.session.pending_action == original_pending
     app.on_key_press(SimpleNamespace(key="tab"))
-    assert app.session.controlled_global_slot == 5
+    assert app.session.controlled_global_slot == 1
 
 
 def test_mouse_callbacks_select_clear_and_ignore_empty_or_other_axes(
@@ -301,14 +345,15 @@ def test_mouse_callbacks_select_clear_and_ignore_empty_or_other_axes(
 ) -> None:
     app, _, battlefield_axes, _ = _app(
         monkeypatch,
-        scenario_name="acceptance_lane_lab",
+        scenario_name="arena_5v5",
     )
     app.on_mouse_press(
         SimpleNamespace(
             inaxes=battlefield_axes,
-            xdata=12.0,
-            ydata=6.0,
+            xdata=15.0,
+            ydata=10.0,
             button=1,
+            modifiers=frozenset(),
         )
     )
     assert app.session.pending_action.selected_global_target_slot == 5
@@ -319,22 +364,129 @@ def test_mouse_callbacks_select_clear_and_ignore_empty_or_other_axes(
             xdata=8.0,
             ydata=1.0,
             button=1,
+            modifiers=frozenset(),
         )
     )
     assert app.session is selected
     app.on_mouse_press(
-        SimpleNamespace(inaxes=object(), xdata=12.0, ydata=6.0, button=1)
+        SimpleNamespace(
+            inaxes=object(),
+            xdata=7.0,
+            ydata=3.0,
+            button=1,
+            modifiers=frozenset(),
+        )
     )
     assert app.session is selected
     app.on_mouse_press(
         SimpleNamespace(
             inaxes=battlefield_axes,
-            xdata=12.0,
-            ydata=6.0,
+            xdata=7.0,
+            ydata=3.0,
             button=3,
+            modifiers=frozenset(),
         )
     )
     assert app.session.pending_action.selected_global_target_slot is None
+
+
+def test_shift_click_selects_actor_while_stale_mouse_key_does_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, _, battlefield_axes, _ = _app(
+        monkeypatch,
+        scenario_name="basic_support",
+    )
+    initial_state = app.session.state
+    initial_key = app.session.key
+
+    app.on_mouse_press(
+        SimpleNamespace(
+            inaxes=battlefield_axes,
+            xdata=7.0,
+            ydata=3.0,
+            button=1,
+            modifiers=frozenset(),
+            key="shift+d",
+        )
+    )
+    assert app.session.controlled_global_slot == 0
+    assert app.session.pending_action.selected_global_target_slot == 5
+
+    app.on_mouse_press(
+        SimpleNamespace(
+            inaxes=battlefield_axes,
+            xdata=4.0,
+            ydata=6.0,
+            button=1,
+            modifiers=frozenset({"shift"}),
+            key="d",
+        )
+    )
+    assert app.session.controlled_global_slot == 1
+    assert app.session.pending_action.selected_global_target_slot == 5
+    assert app.session.state is initial_state
+    assert bool(jnp.array_equal(app.session.key, initial_key))
+
+
+def test_target_actor_movement_target_arm_submit_sequence_needs_no_dummy_click(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, _, battlefield_axes, _ = _app(
+        monkeypatch,
+        scenario_name="arena_5v5",
+    )
+    app.on_mouse_press(
+        SimpleNamespace(
+            inaxes=battlefield_axes,
+            xdata=15.0,
+            ydata=10.0,
+            button=1,
+            modifiers=frozenset(),
+        )
+    )
+    app.on_mouse_press(
+        SimpleNamespace(
+            inaxes=battlefield_axes,
+            xdata=3.0,
+            ydata=6.0,
+            button=1,
+            modifiers=frozenset({"shift"}),
+        )
+    )
+    app.on_key_press(SimpleNamespace(key="d"))
+    app.on_mouse_press(
+        SimpleNamespace(
+            inaxes=battlefield_axes,
+            xdata=15.0,
+            ydata=6.0,
+            button=1,
+            modifiers=frozenset(),
+        )
+    )
+    app.on_key_press(SimpleNamespace(key="2"))
+    app.on_key_press(SimpleNamespace(key="enter"))
+
+    assert int(app.session.state.step_count) == 1
+    transition = app.session.last_transition
+    assert transition is not None
+    assert transition.report_actor_slots == (2,)
+
+
+def test_shift_r_is_inert_and_lowercase_r_resets(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    app, _, _, _ = _app(monkeypatch, scenario_name="basic_support")
+    app.on_key_press(SimpleNamespace(key="space"))
+    advanced = app.session
+    app.on_key_press(SimpleNamespace(key="R"))
+
+    assert app.session is advanced
+    assert "no public coherent snapshot-rebuild API exists" in capsys.readouterr().out
+
+    app.on_key_press(SimpleNamespace(key="r"))
+    assert int(app.session.state.step_count) == 0
 
 
 def test_redraw_never_steps_and_only_requests_canvas_draw(
@@ -409,9 +561,9 @@ def test_run_rejects_inactive_controlled_slot_before_figure_creation(
     monkeypatch.setattr(app_module, "_load_pyplot", lambda: pyplot)
     with pytest.raises(ValueError, match="not active"):
         run_visual_debugger(
-            scenario_name="acceptance_lane_lab",
+            scenario_name="basic_support",
             seed=0,
-            controlled_global_slot=1,
+            controlled_global_slot=3,
             static=True,
             verbose=False,
             show_ranges=True,

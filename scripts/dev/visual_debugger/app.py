@@ -28,6 +28,7 @@ from scripts.dev.visual_debugger.control import (
     cycle_controlled_actor,
     reset_session,
     select_clicked_target,
+    select_controlled_actor,
     set_pending_movement,
     submit_interactive,
     submit_next_script_frame,
@@ -58,6 +59,7 @@ _RESERVED_KEYS = frozenset(
         *_MOVEMENT_KEYS,
         "tab",
         "shift+tab",
+        "shift+r",
         "1",
         "2",
         "space",
@@ -95,6 +97,7 @@ class _PyplotLike(Protocol):
 
 class _KeyEventLike(Protocol):
     key: str | None
+    guiEvent: object | None  # noqa: N815 - Matplotlib event API name.
 
 
 class _MouseEventLike(Protocol):
@@ -102,6 +105,7 @@ class _MouseEventLike(Protocol):
     xdata: float | None
     ydata: float | None
     button: object
+    modifiers: frozenset[str] | None
 
 
 def hit_test_active_agent(
@@ -143,12 +147,37 @@ def _load_pyplot() -> _PyplotLike:
 def _normalize_key(key: str | None) -> str | None:
     if key is None:
         return None
+    if key == "R":
+        return "shift+r"
     normalized = key.lower()
+    if normalized in ("shift+r",):
+        return "shift+r"
+    if normalized in (
+        "shift+tab",
+        "backtab",
+        "iso_left_tab",
+        "shift+iso_left_tab",
+    ):
+        return "shift+tab"
     if normalized == " ":
         return "space"
     if normalized in ("return",):
         return "enter"
     return normalized
+
+
+def _schedule_canvas_focus(event: object, canvas: object) -> None:
+    """Restore canvas focus after native traversal has completed."""
+    gui_event = getattr(event, "guiEvent", None)
+    widget = getattr(gui_event, "widget", None)
+    after_idle = getattr(widget, "after_idle", None)
+    focus_set = getattr(widget, "focus_set", None)
+    if callable(after_idle) and callable(focus_set):
+        after_idle(focus_set)
+        return
+    set_focus = getattr(canvas, "setFocus", None)
+    if callable(set_focus):
+        set_focus()
 
 
 def _reserve_keymaps(pyplot: _PyplotLike) -> dict[str, object]:
@@ -232,8 +261,16 @@ class VisualDebuggerApp:
 
         if key == "tab":
             self.session = cycle_controlled_actor(self.session, 1)
+            _schedule_canvas_focus(
+                event,
+                cast(_FigureLike, self.figure).canvas,
+            )
         elif key == "shift+tab":
             self.session = cycle_controlled_actor(self.session, -1)
+            _schedule_canvas_focus(
+                event,
+                cast(_FigureLike, self.figure).canvas,
+            )
         elif key == "escape":
             self.session = clear_pending_target(self.session)
         elif key in _MOVEMENT_KEYS and not terminal:
@@ -255,6 +292,12 @@ class VisualDebuggerApp:
             self.session = submit_next_script_frame(self.session)
         elif key == "r":
             self.session = reset_session(self.session)
+        elif key == "shift+r":
+            print(
+                "Shift+R cooldown clearing is unavailable because no public "
+                "coherent snapshot-rebuild API exists; use R for a full reset."
+            )
+            return
         elif key == "g":
             self.session = replace(
                 self.session,
@@ -302,7 +345,12 @@ class VisualDebuggerApp:
             )
             if target is None:
                 return
-            self.session = select_clicked_target(self.session, target)
+            modifiers = getattr(mouse_event, "modifiers", None) or ()
+            self.session = (
+                select_controlled_actor(self.session, target)
+                if "shift" in modifiers
+                else select_clicked_target(self.session, target)
+            )
         else:
             return
         self.redraw()

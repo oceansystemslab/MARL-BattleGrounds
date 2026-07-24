@@ -152,28 +152,6 @@ def _arena_5v5_config() -> EnvConfig:
     )
 
 
-def _acceptance_lane_lab_config() -> EnvConfig:
-    roster = (
-        HUNTER_CLASS_ID,
-        NEUTRAL_CLASS_ID,
-        NEUTRAL_CLASS_ID,
-        NEUTRAL_CLASS_ID,
-        NEUTRAL_CLASS_ID,
-        MAGE_CLASS_ID,
-        NEUTRAL_CLASS_ID,
-        NEUTRAL_CLASS_ID,
-        NEUTRAL_CLASS_ID,
-        NEUTRAL_CLASS_ID,
-    )
-    return _config(
-        map_width=16.0,
-        map_height=12.0,
-        team_sizes=(1, 1),
-        class_ids=roster,
-        active_positions={0: (3.0, 6.0), 5: (12.0, 6.0)},
-    )
-
-
 def _basic_support_config() -> EnvConfig:
     roster = (
         MAGE_CLASS_ID,
@@ -196,9 +174,9 @@ def _basic_support_config() -> EnvConfig:
             0: (4.0, 3.0),
             1: (4.0, 6.0),
             2: (4.0, 9.0),
-            5: (9.0, 3.0),
-            6: (9.0, 6.0),
-            7: (9.0, 9.0),
+            5: (7.0, 3.0),
+            6: (7.0, 6.0),
+            7: (7.0, 9.0),
         },
     )
 
@@ -227,8 +205,8 @@ def _ultimate_showcase_config() -> EnvConfig:
             2: (5.0, 8.0),
             3: (8.0, 5.0),
             4: (3.0, 10.0),
-            5: (9.0, 5.0),
-            6: (9.0, 8.0),
+            5: (7.0, 6.0),
+            6: (8.5, 8.0),
             7: (10.0, 3.0),
             8: (12.0, 8.0),
             9: (13.0, 10.0),
@@ -285,46 +263,13 @@ def _status_stack_config() -> EnvConfig:
         class_ids=roster,
         active_positions={
             0: (3.0, 6.0),
-            1: (5.0, 4.0),
+            1: (5.2, 4.2),
             2: (8.0, 5.0),
             5: (8.0, 6.0),
             6: (8.0, 8.0),
         },
     )
 
-
-_LANE_LAB_FRAMES = (
-    ScenarioFrame(
-        "approach-1",
-        "Hunter moves East while an out-of-range Basic is rejected.",
-        (ActorCommand(0, MOVE_EAST, 5, 0),),
-    ),
-    ScenarioFrame(
-        "approach-2",
-        "Hunter continues toward the target with rejected Basic.",
-        (ActorCommand(0, MOVE_EAST, 5, 0),),
-    ),
-    ScenarioFrame(
-        "approach-3",
-        "Hunter reaches the observation boundary after this move.",
-        (ActorCommand(0, MOVE_EAST, 5, 0),),
-    ),
-    ScenarioFrame(
-        "approach-4",
-        "Hunter reaches the Basic boundary after this move.",
-        (ActorCommand(0, MOVE_EAST, 5, 0),),
-    ),
-    ScenarioFrame(
-        "ultimate-rejected-while-moving",
-        "Ultimate is rejected at distance five while East remains accepted.",
-        (ActorCommand(0, MOVE_EAST, 5, 1),),
-    ),
-    ScenarioFrame(
-        "trap-accepted",
-        "Hunter Trap is accepted at distance four.",
-        (ActorCommand(0, MOVE_STAY, 5, 1),),
-    ),
-)
 
 _BASIC_SUPPORT_FRAMES = (
     ScenarioFrame(
@@ -394,10 +339,10 @@ _STATUS_STACK_FRAMES = (
     ),
     ScenarioFrame(
         "break-and-refresh",
-        "Hunter Basic breaks Trap while stunned movement is rejected.",
+        "Hunter Basic breaks Trap while the stunned recipient stays still.",
         (
             ActorCommand(1, MOVE_STAY, 5, 0),
-            ActorCommand(5, MOVE_EAST, None, 0),
+            ActorCommand(5, MOVE_STAY, None, 0),
             ActorCommand(6, MOVE_STAY, 5, 0),
         ),
     ),
@@ -423,15 +368,6 @@ SCENARIOS: dict[str, DebuggerScenario] = {
         mode="interactive",
         build_config=_arena_5v5_config,
         frames=(),
-        default_controlled_slot=0,
-    ),
-    "acceptance_lane_lab": DebuggerScenario(
-        name="acceptance_lane_lab",
-        title="Movement/combat acceptance boundary",
-        description="Interactive inspection with six deterministic reference frames.",
-        mode="interactive",
-        build_config=_acceptance_lane_lab_config,
-        frames=_LANE_LAB_FRAMES,
         default_controlled_slot=0,
     ),
     "basic_support": DebuggerScenario(

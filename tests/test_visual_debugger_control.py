@@ -18,6 +18,7 @@ from scripts.dev.visual_debugger.control import (
     make_neutral_joint_action,
     reset_session,
     select_clicked_target,
+    select_controlled_actor,
     set_pending_movement,
     submit_interactive,
     submit_joint_action,
@@ -274,12 +275,12 @@ def test_create_session_has_exact_initial_pending_and_epoch_contract() -> None:
 
 
 def test_create_session_falls_back_to_scenario_default_for_inactive_slot() -> None:
-    session = _session("acceptance_lane_lab", controlled_slot=4)
+    session = _session("basic_support", controlled_slot=4)
     assert session.controlled_global_slot == 0
 
 
 def test_lane_availability_reads_exact_joint_pair_and_disarmed_is_never_legal() -> None:
-    session = _session("acceptance_lane_lab")
+    session = _session("arena_5v5")
     unavailable = lane_availability(session.action_mask, 0, 6, None)
 
     assert unavailable.target_action == 6
@@ -287,7 +288,7 @@ def test_lane_availability_reads_exact_joint_pair_and_disarmed_is_never_legal() 
     assert not unavailable.lane_1_available
     assert not unavailable.armed_pair_legal
 
-    target_none = lane_availability(session.action_mask, 0, 0, 0)
+    target_none = lane_availability(session.action_mask, 2, 0, 0)
     assert target_none.lane_0_available
     assert not target_none.lane_1_available
     assert target_none.armed_pair_legal
@@ -318,7 +319,7 @@ def test_interactive_action_changes_only_controlled_slot() -> None:
 
 
 def test_disarmed_action_retains_target_for_inspection_but_submits_noop() -> None:
-    session = _session("acceptance_lane_lab")
+    session = _session("basic_support")
     pending = PendingAction(
         move_action=MOVE_EAST,
         selected_global_target_slot=5,
@@ -331,9 +332,9 @@ def test_disarmed_action_retains_target_for_inspection_but_submits_noop() -> Non
 
 
 def test_interactive_builder_rejects_inactive_pending_target() -> None:
-    session = _session("acceptance_lane_lab")
+    session = _session("basic_support")
     pending = PendingAction(
-        selected_global_target_slot=1,
+        selected_global_target_slot=3,
         armed_lane=0,
         arm_origin="explicit",
     )
@@ -361,12 +362,12 @@ def test_scripted_action_supports_multiple_actor_commands() -> None:
 
 
 def test_scripted_builder_rejects_inactive_actor_and_target() -> None:
-    session = _session("acceptance_lane_lab")
-    inactive_actor = ScenarioFrame("bad", "bad", (ActorCommand(1),))
+    session = _session("basic_support")
+    inactive_actor = ScenarioFrame("bad", "bad", (ActorCommand(3),))
     inactive_target = ScenarioFrame(
         "bad-target",
         "bad-target",
-        (ActorCommand(0, target_global_slot=1),),
+        (ActorCommand(0, target_global_slot=3),),
     )
 
     with pytest.raises(ValueError):
@@ -376,38 +377,48 @@ def test_scripted_builder_rejects_inactive_actor_and_target() -> None:
 
 
 def test_click_auto_arms_basic_only_when_exact_lane_zero_is_legal() -> None:
-    session = _session("acceptance_lane_lab")
+    session = _session("arena_5v5")
     illegal = select_clicked_target(session, 5)
     assert illegal.pending_action.selected_global_target_slot == 5
     assert illegal.pending_action.armed_lane is None
     assert illegal.pending_action.arm_origin is None
 
-    approached = session
-    for _ in range(4):
-        approached = submit_next_script_frame(approached)
-    legal = select_clicked_target(approached, 5)
+    target_action = 6
+    legal_joint_mask = session.action_mask.select_target_use_ultimate_joint_mask.at[
+        0, target_action, 0
+    ].set(True)
+    exact_legal = replace(
+        session,
+        action_mask=session.action_mask._replace(
+            select_target_use_ultimate_joint_mask=legal_joint_mask
+        ),
+    )
+    legal = select_clicked_target(exact_legal, 5)
     assert legal.pending_action.selected_global_target_slot == 5
     assert legal.pending_action.armed_lane == 0
     assert legal.pending_action.arm_origin == "automatic"
 
 
 def test_click_rejects_inactive_and_out_of_domain_slots() -> None:
-    session = _session("acceptance_lane_lab")
+    session = _session("basic_support")
     with pytest.raises(ValueError):
-        select_clicked_target(session, 1)
+        select_clicked_target(session, 3)
     with pytest.raises(ValueError):
         select_clicked_target(session, MAX_AGENT_SLOTS)
 
 
 def test_number_keys_arm_illegal_in_domain_pairs() -> None:
-    session = select_clicked_target(_session("acceptance_lane_lab"), 5)
+    session = select_clicked_target(
+        _session("arena_5v5", controlled_slot=2),
+        7,
+    )
     basic = arm_basic(session)
     ultimate = arm_ultimate(session)
 
     assert basic.pending_action.armed_lane == 0
     assert basic.pending_action.arm_origin == "explicit"
     assert ultimate.pending_action.armed_lane == 1
-    assert ultimate.pending_action.selected_global_target_slot == 5
+    assert ultimate.pending_action.selected_global_target_slot == 7
 
 
 def test_arm_ultimate_for_mage_clears_target() -> None:
@@ -435,16 +446,16 @@ def test_clear_target_applies_class_specific_lane_rule() -> None:
 
 
 def test_cycle_controlled_actor_wraps_both_teams_and_skips_padding() -> None:
-    session = _session("acceptance_lane_lab")
-    assert cycle_controlled_actor(session, 1).controlled_global_slot == 5
-    assert cycle_controlled_actor(session, -1).controlled_global_slot == 5
-    team_b = cycle_controlled_actor(session, 1)
-    assert cycle_controlled_actor(team_b, 1).controlled_global_slot == 0
+    session = _session("basic_support")
+    assert cycle_controlled_actor(session, 1).controlled_global_slot == 1
+    assert cycle_controlled_actor(session, -1).controlled_global_slot == 7
+    last = select_controlled_actor(session, 7)
+    assert cycle_controlled_actor(last, 1).controlled_global_slot == 0
     with pytest.raises(ValueError):
         cycle_controlled_actor(session, 0)
 
 
-def test_actor_switch_preserves_target_resets_move_and_never_carries_ultimate() -> None:
+def test_direct_actor_selection_preserves_target_and_simulator_tuple() -> None:
     session = _session("arena_5v5", controlled_slot=0)
     session = select_clicked_target(session, 6)
     session = set_pending_movement(session, MOVE_EAST)
@@ -456,13 +467,29 @@ def test_actor_switch_preserves_target_resets_move_and_never_carries_ultimate() 
         pending_action=PendingAction(MOVE_EAST, 6, 1, "explicit"),
     )
 
-    switched = cycle_controlled_actor(session, 1)
+    switched = select_controlled_actor(session, 1)
 
     assert switched.controlled_global_slot == 1
     assert switched.pending_action.selected_global_target_slot == 6
     assert switched.pending_action.move_action == MOVE_STAY
     assert switched.pending_action.armed_lane in (0, None)
     assert switched.pending_action.arm_origin in ("automatic", None)
+    assert switched.state is session.state
+    assert switched.observation is session.observation
+    assert switched.action_mask is session.action_mask
+    assert switched.key is session.key
+
+
+def test_direct_actor_selection_retains_self_target_and_recomputes_exact_lane() -> None:
+    session = _session("basic_support", controlled_slot=0)
+    session = select_clicked_target(session, 1)
+    selected = select_controlled_actor(session, 1)
+    expected = bool(selected.action_mask.select_target_use_ultimate_joint_mask[1, 1, 0])
+
+    assert selected.controlled_global_slot == 1
+    assert selected.pending_action.selected_global_target_slot == 1
+    assert selected.pending_action.armed_lane == (0 if expected else None)
+    assert selected.pending_action.arm_origin == ("automatic" if expected else None)
 
 
 def test_pending_edits_do_not_split_key_or_change_simulator_epoch() -> None:
@@ -485,7 +512,7 @@ def test_pending_edits_do_not_split_key_or_change_simulator_epoch() -> None:
 def test_submit_joint_action_calls_step_once_and_updates_paired_epoch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    session = _session("acceptance_lane_lab")
+    session = _session("arena_5v5")
     action = make_neutral_joint_action()
     real_step = control.step
     calls: list[tuple[object, ...]] = []
@@ -516,7 +543,7 @@ def test_submit_joint_action_calls_step_once_and_updates_paired_epoch(
 def test_manual_and_scripted_submission_delegate_to_shared_boundary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    manual = _session("acceptance_lane_lab")
+    manual = _session("arena_5v5")
     scripted = _session("basic_support")
     calls: list[tuple[str, tuple[int, ...]]] = []
 
@@ -541,18 +568,16 @@ def test_manual_and_scripted_submission_delegate_to_shared_boundary(
 
 def test_post_submit_resets_move_disarms_ultimate_and_preserves_target() -> None:
     scenario, session = (
-        get_scenario("acceptance_lane_lab"),
-        _session("acceptance_lane_lab"),
+        get_scenario("basic_support"),
+        _session("basic_support", controlled_slot=1),
     )
-    for _ in range(5):
-        session = submit_next_script_frame(session)
-    session = select_clicked_target(session, 5)
+    session = select_clicked_target(session, 6)
     session = set_pending_movement(session, MOVE_EAST)
     session = arm_ultimate(session)
     submitted = submit_interactive(session)
 
     assert submitted.pending_action.move_action == MOVE_STAY
-    assert submitted.pending_action.selected_global_target_slot == 5
+    assert submitted.pending_action.selected_global_target_slot == 6
     assert submitted.pending_action.armed_lane == 0
     assert submitted.pending_action.arm_origin == "automatic"
     assert scenario.name == submitted.scenario_name
@@ -583,9 +608,7 @@ def test_mage_burst_can_be_explicitly_rearmed_on_cooldown_for_rejection() -> Non
 
 
 def test_successor_illegal_basic_disarms_but_preserves_target() -> None:
-    session = _session("acceptance_lane_lab", controlled_slot=0)
-    for _ in range(4):
-        session = submit_next_script_frame(session)
+    session = _session("basic_support", controlled_slot=0)
     session = select_clicked_target(session, 5)
     assert session.pending_action.armed_lane == 0
     session = set_pending_movement(session, MOVE_WEST)
@@ -613,7 +636,7 @@ def test_done_session_rejects_submit_without_key_or_state_change(
     truncated: bool,
     reason: str,
 ) -> None:
-    session = _session("acceptance_lane_lab")
+    session = _session("arena_5v5")
     terminal = replace(
         session,
         done_flags=DoneFlags(
@@ -694,7 +717,7 @@ def test_switch_scenario_preserves_seed_and_toggles_but_clears_live_state() -> N
 def test_submission_rejects_bad_shape_or_dtype_before_stepping(
     bad_action: object,
 ) -> None:
-    session = _session("acceptance_lane_lab")
+    session = _session("arena_5v5")
     with pytest.raises(ValueError):
         submit_joint_action(
             session,

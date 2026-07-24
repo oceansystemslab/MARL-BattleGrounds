@@ -332,7 +332,7 @@ def cycle_controlled_actor(
     session: DebuggerSession,
     direction: int,
 ) -> DebuggerSession:
-    """Cycle active fixed slots and recompute target-relative Basic arming."""
+    """Cycle active fixed slots through direct controlled-actor selection."""
     if direction not in (-1, 1):
         msg = f"direction must be -1 or 1; got {direction}."
         raise ValueError(msg)
@@ -344,11 +344,20 @@ def cycle_controlled_actor(
     )
     current_index = active_slots.index(session.controlled_global_slot)
     controlled_slot = active_slots[(current_index + direction) % len(active_slots)]
+    return select_controlled_actor(session, controlled_slot)
+
+
+def select_controlled_actor(
+    session: DebuggerSession,
+    global_slot: int,
+) -> DebuggerSession:
+    """Select an active actor without advancing the simulator decision epoch."""
+    _validate_active_slot(session.config, global_slot, name="controlled actor")
     target_slot = session.pending_action.selected_global_target_slot
-    target_action = global_slot_to_target_action(controlled_slot, target_slot)
+    target_action = global_slot_to_target_action(global_slot, target_slot)
     availability = lane_availability(
         session.action_mask,
-        controlled_slot,
+        global_slot,
         target_action,
         0,
     )
@@ -360,7 +369,7 @@ def cycle_controlled_actor(
     )
     return replace(
         session,
-        controlled_global_slot=controlled_slot,
+        controlled_global_slot=global_slot,
         pending_action=pending,
     )
 
