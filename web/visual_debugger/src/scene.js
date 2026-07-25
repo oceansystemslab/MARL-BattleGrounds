@@ -15,8 +15,8 @@ const STATUS_DOCK_DIMENSIONS = Object.freeze({
   cellGap: 2,
 });
 const MODIFIER_DOCK_DIMENSIONS = Object.freeze({
-  cellWidth: 38,
-  cellHeight: 18,
+  cellWidth: 42,
+  cellHeight: 16,
   cellGap: 2,
 });
 const LEGALITY_DOCK_DIMENSIONS = Object.freeze({
@@ -49,6 +49,7 @@ export const BATTLEFIELD_LAYER_ORDER = Object.freeze([
  *   title: SVGElement,
  *   body: SVGElement,
  *   teamRing: SVGElement,
+ *   teamMarker: SVGElement,
  *   healthTrack: SVGElement,
  *   health: SVGElement,
  *   classIcon: SVGSVGElement,
@@ -241,8 +242,16 @@ function targetReticlePath(centerX, centerY, outerRadius) {
  * @param {string} className
  * @param {"kind" | "token_id"} tokenAttribute
  * @param {ViewportTransform} transform
+ * @param {ReadonlyMap<number, string>} [classByGlobalSlot]
  */
-function renderCircleLayer(layer, records, className, tokenAttribute, transform) {
+function renderCircleLayer(
+  layer,
+  records,
+  className,
+  tokenAttribute,
+  transform,
+  classByGlobalSlot = new Map(),
+) {
   const circles = [];
   for (const record of records) {
     if (!isRecord(record)) {
@@ -268,6 +277,10 @@ function renderCircleLayer(layer, records, className, tokenAttribute, transform)
     }
     if (Number.isInteger(record.global_slot)) {
       circle.dataset.slot = String(record.global_slot);
+      const classKey = classByGlobalSlot.get(record.global_slot);
+      if (classKey) {
+        circle.dataset.class = classKey;
+      }
     }
     if (Number.isInteger(record.source_global_slot)) {
       circle.dataset.sourceSlot = String(record.source_global_slot);
@@ -362,6 +375,9 @@ export class BattlefieldRenderer {
       durableStatusModifier,
       accessibleLabels,
     );
+    void battlefield.ownerDocument.fonts.ready.then(() => {
+      this.#resolveNumericDockCellContent();
+    });
   }
 
   /**
@@ -433,6 +449,14 @@ export class BattlefieldRenderer {
     this.empty.hidden = true;
 
     this.#renderMap(transform.mapBounds);
+    const classByGlobalSlot = new Map(
+      asArray(scene.agents)
+        .filter((agent) => isRecord(agent) && Number.isInteger(agent.global_slot))
+        .map((agent) => [
+          Number(agent.global_slot),
+          classTokenFromId(agent.class_id).cssKey,
+        ]),
+    );
     renderCircleLayer(
       this.layers.aura,
       preset === "presentation" ? [] : asArray(scene.aura_fields),
@@ -446,6 +470,7 @@ export class BattlefieldRenderer {
       "range-ring",
       "kind",
       transform,
+      classByGlobalSlot,
     );
     this.#renderPendingRoute(scene, transform);
     this.#renderObstacles(map, transform);
@@ -987,6 +1012,7 @@ export class BattlefieldRenderer {
       );
     }
     this.layers.durableStatusModifier.replaceChildren(...modifierNodes, ...statusNodes);
+    this.#resolveNumericDockCellContent();
     this.choreographyProtectedRects = Object.freeze(
       [
         ...statusLayout.protectedBodies.map(({ bounds }) => bounds),
@@ -996,6 +1022,47 @@ export class BattlefieldRenderer {
         ...modifierLayout.docks.map(({ bounds }) => bounds),
       ].map((bounds) => Object.freeze({ ...bounds })),
     );
+  }
+
+  /**
+   * Keep exact dock numbers and glyphs in disjoint measured regions.
+   *
+   * Ordinary values retain both. If future authoritative values exceed the
+   * compact pill budget, the decorative glyph yields to the exact number; an
+   * extreme number is width-fitted without changing its text or accessible
+   * label.
+   */
+  #resolveNumericDockCellContent() {
+    for (const cell of this.layers.durableStatusModifier.querySelectorAll(
+      ".status-cell, .modifier-cell",
+    )) {
+      const kind = cell.classList.contains("status-cell") ? "status" : "modifier";
+      const box = cell.querySelector(`.${kind}-cell__box`);
+      const icon = cell.querySelector(`.${kind}-cell__icon`);
+      const value = cell.querySelector(`.${kind}-cell__value`);
+      if (
+        !(box instanceof SVGGraphicsElement) ||
+        !(icon instanceof SVGGraphicsElement) ||
+        !(value instanceof SVGGraphicsElement)
+      ) {
+        continue;
+      }
+      const boxBounds = box.getBBox();
+      const iconScreenBounds = icon.getBoundingClientRect();
+      const valueScreenBounds = value.getBoundingClientRect();
+      let valueBounds = value.getBBox();
+      if (iconScreenBounds.right + 2 > valueScreenBounds.left) {
+        cell.setAttribute("data-icon-suppressed", "true");
+        icon.setAttribute("hidden", "");
+        value.setAttribute("x", String(boxBounds.x + boxBounds.width / 2));
+        valueBounds = value.getBBox();
+      }
+      const availableWidth = Math.max(boxBounds.width - 6, 1);
+      if (valueBounds.width > availableWidth) {
+        value.setAttribute("textLength", String(availableWidth));
+        value.setAttribute("lengthAdjust", "spacingAndGlyphs");
+      }
+    }
   }
 
   /**
@@ -1118,15 +1185,16 @@ export class BattlefieldRenderer {
       const icon = createSvgIcon(this.battlefield.ownerDocument, token.glyphKey, {
         className: `${kind}-cell__icon`,
       });
+      const iconSize = kind === "modifier" ? 9 : 12;
       setAttributes(icon, {
-        x: x + 2,
-        y: y + 3,
-        width: 12,
-        height: 12,
+        x: x + (kind === "modifier" ? 3 : 2),
+        y: y + (dimensions.cellHeight - iconSize) / 2,
+        width: iconSize,
+        height: iconSize,
       });
       const text = svgElement("text", {
         class: `${kind}-cell__value`,
-        x: x + dimensions.cellWidth - 4,
+        x: x + dimensions.cellWidth - (kind === "modifier" ? 3 : 4),
         y: y + dimensions.cellHeight / 2,
       });
       text.textContent = value;
@@ -1201,6 +1269,11 @@ export class BattlefieldRenderer {
       class: "agent-team-ring",
       "data-zone": "team",
     });
+    const teamMarker = svgElement("path", {
+      class: "agent-team-marker",
+      "data-zone": "team",
+      "aria-hidden": "true",
+    });
     const healthTrack = svgElement("circle", {
       class: "agent-health-track",
       "data-zone": "health",
@@ -1233,6 +1306,7 @@ export class BattlefieldRenderer {
       title,
       body,
       teamRing,
+      teamMarker,
       healthTrack,
       health,
       classIcon,
@@ -1259,6 +1333,7 @@ export class BattlefieldRenderer {
       title,
       body,
       teamRing,
+      teamMarker,
       healthTrack,
       health,
       classIcon,
@@ -1333,6 +1408,13 @@ export class BattlefieldRenderer {
       cx: center.x,
       cy: center.y,
       r: radius,
+    });
+    setAttributes(nodes.teamMarker, {
+      d: [
+        `M ${center.x + radius - 7} ${center.y - 4}`,
+        `L ${center.x + radius - 3} ${center.y}`,
+        `L ${center.x + radius - 7} ${center.y + 4}`,
+      ].join(" "),
     });
     setAttributes(nodes.healthTrack, {
       cx: center.x,

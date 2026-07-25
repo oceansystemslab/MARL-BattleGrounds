@@ -80,7 +80,6 @@ const ICONS = Object.freeze({
   "team-b": icon("team-b", [
     primitive("path", {
       d: "M12 2.8 20 6v5.3c0 4.8-3.1 8-8 9.9-4.9-1.9-8-5.1-8-9.9V6Z",
-      "stroke-dasharray": "3 2",
     }),
     primitive("path", { d: "M8 12h8" }),
   ]),

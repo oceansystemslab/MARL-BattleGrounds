@@ -35,11 +35,14 @@ test.afterAll(async () => {
 test("test-only fixture interception installs an explicitly synthetic scene", async ({
   page,
 }) => {
+  const layoutStressFrame = structuredClone(syntheticFrame);
+  layoutStressFrame.scene.agents[4].modifiers[0].multiplier = 123456.789;
+  layoutStressFrame.scene.agents[0].statuses[0].duration = 123456789;
   let commandRequests = 0;
   await page.route("**/api/frame", async (route) => {
     await route.fulfill({
       contentType: "application/json",
-      json: syntheticFrame,
+      json: layoutStressFrame,
       status: 200,
     });
   });
@@ -292,7 +295,101 @@ test("test-only fixture interception installs an explicitly synthetic scene", as
     };
   });
   expect(teamStrokePatterns.teamA).toBe("none");
-  expect(teamStrokePatterns.teamB).not.toBe("none");
+  expect(teamStrokePatterns.teamB).toBe("none");
+  await expect(
+    page.locator('#battlefield .agent[data-team="team-b"] .agent-team-marker:visible'),
+  ).toHaveCount(5);
+  await expect(
+    page.locator('#battlefield .agent[data-team="team-a"] .agent-team-marker:visible'),
+  ).toHaveCount(0);
+  expect(
+    await page
+      .locator("#battlefield .aura-field")
+      .evaluateAll((auras) =>
+        auras.every((aura) => getComputedStyle(aura).stroke === "none"),
+      ),
+  ).toBe(true);
+  const rangeStrokePatterns = await page
+    .locator("#battlefield .range-ring")
+    .evaluateAll((ranges) =>
+      Object.fromEntries(
+        ranges.map((range) => [
+          range.getAttribute("data-kind"),
+          {
+            classKey: range.getAttribute("data-class"),
+            dash: Array.from(
+              getComputedStyle(range).strokeDasharray.matchAll(/\d+(?:\.\d+)?/g),
+              (match) => Number(match[0]),
+            ),
+            stroke: getComputedStyle(range).stroke,
+          },
+        ]),
+      ),
+    );
+  expect(rangeStrokePatterns.observation.stroke).toBe("rgb(244, 247, 251)");
+  expect(rangeStrokePatterns.observation.dash).toEqual([1, 5]);
+  expect(rangeStrokePatterns.basic.classKey).toBe("mage");
+  expect(rangeStrokePatterns.basic.stroke).toBe("rgb(34, 211, 238)");
+  expect(rangeStrokePatterns.basic.dash).toEqual([8, 5]);
+  expect(rangeStrokePatterns.ultimate.stroke).toBe("rgb(167, 139, 250)");
+  expect(rangeStrokePatterns.ultimate.dash).toEqual([10, 4, 2, 4]);
+  await page.evaluate(async () => {
+    await document.fonts.ready;
+    await new Promise((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(resolve));
+    });
+  });
+  const numericDockInternalOverlaps = await page
+    .locator("#battlefield .status-cell, #battlefield .modifier-cell")
+    .evaluateAll((cells) =>
+      cells.flatMap((cell) => {
+        const kind = cell.classList.contains("status-cell") ? "status" : "modifier";
+        const box = cell.querySelector(`.${kind}-cell__box`);
+        const icon = cell.querySelector(`.${kind}-cell__icon`);
+        const value = cell.querySelector(`.${kind}-cell__value`);
+        if (
+          !(box instanceof SVGGraphicsElement) ||
+          !(icon instanceof SVGGraphicsElement) ||
+          !(value instanceof SVGGraphicsElement)
+        ) {
+          return ["missing measurable modifier cue"];
+        }
+        const boxBounds = box.getBoundingClientRect();
+        const iconBounds = icon.getBoundingClientRect();
+        const valueBounds = value.getBoundingClientRect();
+        const violations = [];
+        if (iconBounds.width > 0 && iconBounds.right > valueBounds.left) {
+          violations.push("icon/value overlap");
+        }
+        if (
+          valueBounds.left < boxBounds.left - 0.5 ||
+          valueBounds.right > boxBounds.right + 0.5
+        ) {
+          violations.push("value escapes numeric dock pill");
+        }
+        return violations;
+      }),
+    );
+  expect(numericDockInternalOverlaps).toEqual([]);
+  await expect(
+    page.locator(
+      '#battlefield .modifier-cell[data-slot="4"][data-index="0"][data-icon-suppressed="true"]',
+    ),
+  ).toHaveCount(1);
+  const stressedModifier = page.locator(
+    '#battlefield .modifier-cell[data-slot="4"][data-index="0"]',
+  );
+  await expect(stressedModifier.locator(".modifier-cell__value")).toHaveText(
+    "×123456.79",
+  );
+  await expect(stressedModifier).toHaveAttribute("aria-label", /multiplier 123456\.79/);
+  await expect(stressedModifier.locator("title")).toHaveText(/multiplier 123456\.79/);
+  const stressedStatus = page.locator(
+    '#battlefield .status-cell[data-slot="0"][data-index="0"]',
+  );
+  await expect(stressedStatus).toHaveAttribute("data-icon-suppressed", "true");
+  await expect(stressedStatus.locator(".status-cell__value")).toHaveText("123456789");
+  await expect(stressedStatus).toHaveAttribute("aria-label", /duration 123456789/);
   const visibleIdentityTags = await page
     .locator("#battlefield .agent-id-tag")
     .evaluateAll(
@@ -301,7 +398,6 @@ test("test-only fixture interception installs an explicitly synthetic scene", as
           .length,
     );
   expect(visibleIdentityTags).toBeLessThanOrEqual(1);
-  await page.evaluate(() => document.fonts.ready);
   expect(
     await page.evaluate(() => document.fonts.check('16px "Atkinson Hyperlegible"')),
   ).toBe(true);

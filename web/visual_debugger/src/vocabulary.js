@@ -106,7 +106,7 @@ const TEAM_TOKENS = Object.freeze({
     tokenId: "team_b",
     label: "Team B",
     shortLabel: "B",
-    accessibleName: "Team B, dashed outline",
+    accessibleName: "Team B, solid outline",
     glyphKey: "team-b",
     cssKey: "team-b",
     fallback: "B",

@@ -175,15 +175,15 @@ renderer does not derive it.
 | Meaning | Presentation |
 |---|---|
 | Mage / Warrior / Hunter / Rogue / Priest | Class-filled body and `M/W/H/R/P` label using aqua, brown, green, mustard, and pink. |
-| Team A / Team B | Blue/red circumference at the true physical body radius. |
+| Team A / Team B | Solid blue/red circumference at the true physical body radius; Team B also carries a small right-edge chevron so team identity is not color-only. |
 | Health | Inset green/amber/red annulus; it never changes the collision outline. |
 | Controlled actor | Observation/Basic/Ultimate ranges and the controlled-agent HUD section; no extra body chevrons. |
 | Selected target | Magenta crosshair and bullseye. |
 | Lane 0 / lane 1 | Labelled lower-left green `0` and lower-right violet `1` arcs; unavailable lanes are gray and the armed lane is thicker. |
-| Observation / Basic / Ultimate range | Gray dashed, green solid, and violet dotted world-space circles. |
+| Observation / Basic / Ultimate range | White dotted, source-class-colored dashed, and purple dash-dot world-space circles. |
 | Persistent status | Detached neutral rounded chips above the body, in stable two-column semantic order, with source-class border accents. |
-| Mage aura | Inset upper cyan dotted band with a strong edge and under-stroke. |
-| Warrior aura | Inset lower bronze hatched/dashed band. |
+| Mage / Warrior aura | Low-alpha cyan/bronze world tint with no perimeter, so aura influence cannot be mistaken for a tactical range. |
+| Numeric dock pill | Human-facing multipliers use at most two decimal places. Measured status-duration or multiplier text takes priority and the decorative glyph yields when both cannot fit without overlap. |
 | Identity | Class letter plus `id_N`; raw `gN`/`tN` values are technical diagnostics only. |
 
 Detached status chips use point offsets, so they do not change world geometry,

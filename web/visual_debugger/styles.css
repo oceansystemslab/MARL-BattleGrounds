@@ -456,35 +456,56 @@ select {
 
 .aura-field {
   fill: rgb(34 211 238 / 5%);
-  stroke: rgb(34 211 238 / 32%);
-  stroke-width: 1.5;
-  stroke-dasharray: 7 5;
-  vector-effect: non-scaling-stroke;
+  stroke: none;
 }
 
 .aura-field[data-token*="warrior"] {
   fill: rgb(209 139 71 / 5%);
-  stroke: rgb(209 139 71 / 36%);
 }
 
 .range-ring {
   fill: none;
   stroke-width: 1.5;
-  stroke-dasharray: 6 5;
+  stroke-linecap: round;
   vector-effect: non-scaling-stroke;
   pointer-events: none;
 }
 
 .range-ring[data-kind="observation"] {
-  stroke: #64748b;
+  stroke: var(--text);
+  stroke-dasharray: 1 5;
 }
 
 .range-ring[data-kind="basic"] {
   stroke: var(--basic);
+  stroke-width: 2;
+  stroke-dasharray: 8 5;
+}
+
+.range-ring[data-kind="basic"][data-class="mage"] {
+  stroke: var(--class-mage);
+}
+
+.range-ring[data-kind="basic"][data-class="warrior"] {
+  stroke: var(--class-warrior);
+}
+
+.range-ring[data-kind="basic"][data-class="hunter"] {
+  stroke: var(--class-hunter);
+}
+
+.range-ring[data-kind="basic"][data-class="rogue"] {
+  stroke: var(--class-rogue);
+}
+
+.range-ring[data-kind="basic"][data-class="priest"] {
+  stroke: var(--class-priest);
 }
 
 .range-ring[data-kind="ultimate"] {
   stroke: var(--ultimate);
+  stroke-width: 2;
+  stroke-dasharray: 10 4 2 4;
 }
 
 .pending-route {
@@ -858,7 +879,22 @@ select {
 
 .agent[data-team="team-b"] .agent-team-ring {
   stroke: var(--team-b);
-  stroke-dasharray: 8 5;
+  stroke-dasharray: none;
+}
+
+.agent-team-marker {
+  display: none;
+  fill: none;
+  stroke: var(--team-b);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+
+.agent[data-team="team-b"] .agent-team-marker {
+  display: initial;
 }
 
 .agent[data-team="unknown"] .agent-team-ring {
@@ -1124,10 +1160,20 @@ select {
   pointer-events: none;
 }
 
-.status-cell__value,
-.modifier-cell__value {
+.status-cell__value {
   font-size: 10px;
   text-anchor: end;
+}
+
+.modifier-cell__value {
+  font-size: 9px;
+  letter-spacing: -0.02em;
+  text-anchor: end;
+}
+
+.status-cell[data-icon-suppressed="true"] .status-cell__value,
+.modifier-cell[data-icon-suppressed="true"] .modifier-cell__value {
+  text-anchor: middle;
 }
 
 .status-overflow__label,
@@ -1233,8 +1279,6 @@ select {
 
 .roster-team[data-team="team-b"] .roster-team__heading h3 {
   color: var(--team-b);
-  text-decoration: underline dashed;
-  text-underline-offset: 0.2rem;
 }
 
 .roster-team__rows {
@@ -1264,7 +1308,6 @@ select {
 
 .roster-row[data-team="team-b"] {
   border-left-color: var(--team-b);
-  border-left-style: dashed;
 }
 
 .roster-row[data-controlled="true"] {
@@ -1742,7 +1785,6 @@ select {
 
 .key-swatch--team-b {
   color: var(--team-b);
-  border-style: dashed;
 }
 
 .key-swatch--controlled {
@@ -1766,6 +1808,41 @@ select {
 .key-swatch--net {
   color: var(--success);
   border-radius: 0.15rem;
+}
+
+.key-range {
+  display: inline-block;
+  width: 1.5rem;
+  height: 0.18rem;
+  background: currentColor;
+}
+
+.key-range--observation {
+  color: var(--text);
+  mask: repeating-linear-gradient(to right, #000 0 2px, transparent 2px 6px);
+}
+
+.key-range--basic {
+  background: linear-gradient(
+    to right,
+    var(--class-mage),
+    var(--class-warrior),
+    var(--class-hunter),
+    var(--class-rogue),
+    var(--class-priest)
+  );
+  mask: repeating-linear-gradient(to right, #000 0 7px, transparent 7px 11px);
+}
+
+.key-range--ultimate {
+  color: var(--ultimate);
+  mask: repeating-linear-gradient(
+    to right,
+    #000 0 8px,
+    transparent 8px 12px,
+    #000 12px 14px,
+    transparent 14px 18px
+  );
 }
 
 .empty-copy {
