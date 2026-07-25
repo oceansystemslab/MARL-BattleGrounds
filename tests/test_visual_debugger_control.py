@@ -131,6 +131,7 @@ def test_every_debugger_structure_has_the_exact_audited_field_schema() -> None:
             "build_config",
             "frames",
             "default_controlled_slot",
+            "audience",
         ),
         ActorTransition: (
             "actor_global_slot",
@@ -738,4 +739,16 @@ def test_debugger_scenario_validates_default_fixed_slot() -> None:
             get_scenario("arena_5v5").build_config,
             (),
             MAX_AGENT_SLOTS,
+        )
+
+    with pytest.raises(ValueError, match="audience"):
+        DebuggerScenario(
+            "bad-audience",
+            "bad",
+            "bad",
+            "interactive",
+            get_scenario("arena_5v5").build_config,
+            (),
+            0,
+            "public",  # type: ignore[arg-type]
         )

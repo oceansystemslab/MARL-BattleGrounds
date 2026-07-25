@@ -32,6 +32,7 @@ type Lane = Literal[0, 1]
 type ArmOrigin = Literal["automatic", "explicit"]
 type Relation = Literal["self", "ally", "enemy"]
 type ScenarioMode = Literal["interactive", "scripted"]
+type ScenarioAudience = Literal["researcher", "stress"]
 type SubmissionKind = Literal["interactive", "scripted"]
 type StatusKind = StatusTokenId
 type StatusChange = StatusLifecycleKind | Literal["unchanged"]
@@ -193,11 +194,15 @@ class DebuggerScenario:
     build_config: Callable[[], EnvConfig]
     frames: tuple[ScenarioFrame, ...]
     default_controlled_slot: int
+    audience: ScenarioAudience = "researcher"
 
     def __post_init__(self) -> None:
         _validate_slot(self.default_controlled_slot, name="default_controlled_slot")
         if self.mode not in ("interactive", "scripted"):
             msg = f"unknown scenario mode: {self.mode!r}."
+            raise ValueError(msg)
+        if self.audience not in ("researcher", "stress"):
+            msg = f"unknown scenario audience: {self.audience!r}."
             raise ValueError(msg)
 
 

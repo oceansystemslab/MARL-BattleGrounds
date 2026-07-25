@@ -45,6 +45,8 @@ scenarios:
   ultimate_showcase     scripted five-Ultimate sequence
   aura_crossfire        scripted amplification/mitigation crossfire
   status_stack          scripted status composition and lifecycle sequence
+  team_focus_crossfire  scripted focus fire and coordinated healing
+  mirrored_ultimates    scripted reciprocal five-class Ultimate sequence
 """
 
 

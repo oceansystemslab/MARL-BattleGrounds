@@ -9,7 +9,10 @@ from pathlib import Path
 import pytest
 from scripts.dev.debug_renderer import build_parser, main
 from scripts.dev.visual_debugger import app
-from scripts.dev.visual_debugger.scenarios import SCENARIOS
+from scripts.dev.visual_debugger.scenarios import (
+    RESEARCHER_SCENARIOS,
+    STRESS_SCENARIOS,
+)
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _PYTHON_ENTRYPOINT = _REPOSITORY_ROOT / "scripts" / "dev" / "debug_renderer.py"
@@ -77,8 +80,10 @@ def test_help_contains_every_option_control_inspector_and_scenario() -> None:
         assert control in result.stdout
     for inspector in ("SELECTED TARGET", "PENDING ACTION", "TECHNICAL DETAILS"):
         assert inspector in result.stdout
-    for scenario_name in SCENARIOS:
+    for scenario_name in RESEARCHER_SCENARIOS:
         assert scenario_name in result.stdout
+    for scenario_name in STRESS_SCENARIOS:
+        assert scenario_name not in result.stdout
     assert "acceptance_lane_lab" not in result.stdout
     assert "geometry_debug_renderer" not in result.stdout
 
@@ -103,8 +108,10 @@ def test_list_scenarios_is_stable_and_does_not_import_matplotlib() -> None:
     assert result.returncode == 0
     assert "STATUS 0" in result.stdout
     assert "MATPLOTLIB False" in result.stdout
-    positions = [result.stdout.index(name) for name in SCENARIOS]
+    positions = [result.stdout.index(name) for name in RESEARCHER_SCENARIOS]
     assert positions == sorted(positions)
+    for scenario_name in STRESS_SCENARIOS:
+        assert scenario_name not in result.stdout
     assert "interactive" in result.stdout
     assert "scripted" in result.stdout
 

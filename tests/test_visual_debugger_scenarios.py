@@ -13,10 +13,16 @@ from scripts.dev.visual_debugger.model import (
     ActorCommand,
     DebuggerScenario,
     DebuggerSession,
+    StatusChange,
+    StatusKind,
 )
 from scripts.dev.visual_debugger.scenarios import (
+    RESEARCHER_SCENARIOS,
     SCENARIOS,
+    STRESS_SCENARIOS,
+    cycle_scenario_name,
     get_scenario,
+    iter_scenario_summaries,
     list_scenarios,
 )
 from scripts.dev.visual_debugger.targeting import global_slot_to_target_action
@@ -70,16 +76,78 @@ def _session(name: str) -> tuple[DebuggerScenario, DebuggerSession]:
     )
 
 
+def _accepted_activation_signatures(
+    session: DebuggerSession,
+) -> tuple[tuple[str, int, int | None], ...]:
+    transition = session.last_transition
+    assert transition is not None
+    return tuple(
+        (
+            activation.kind,
+            activation.source_global_slot,
+            activation.target_global_slot,
+        )
+        for activation in transition.accepted_activations
+    )
+
+
+def _status_change(
+    session: DebuggerSession,
+    *,
+    global_slot: int,
+    status_kind: StatusKind,
+) -> StatusChange:
+    transition = session.last_transition
+    assert transition is not None
+    return next(
+        status.change
+        for status in transition.status_transitions
+        if status.global_slot == global_slot and status.status_kind == status_kind
+    )
+
+
 def test_all_scenario_configs_validate_and_reset() -> None:
-    assert tuple(SCENARIOS) == (
+    researcher_names = (
         "arena_5v5",
         "basic_support",
         "ultimate_showcase",
         "aura_crossfire",
         "status_stack",
+        "team_focus_crossfire",
+        "mirrored_ultimates",
     )
-    assert len(list_scenarios()) == 5
-    for scenario in list_scenarios():
+    stress_names = (
+        "charge_convergence",
+        "trap_lifecycle",
+        "max_status_stack",
+    )
+    assert tuple(RESEARCHER_SCENARIOS) == researcher_names
+    assert tuple(STRESS_SCENARIOS) == stress_names
+    assert set(RESEARCHER_SCENARIOS).isdisjoint(STRESS_SCENARIOS)
+    assert tuple(SCENARIOS) == researcher_names + stress_names
+    assert tuple(scenario.name for scenario in list_scenarios()) == researcher_names
+    assert (
+        tuple(scenario.name for scenario in list_scenarios(include_stress=True))
+        == researcher_names + stress_names
+    )
+    assert all(scenario.audience == "researcher" for scenario in list_scenarios())
+    assert all(scenario.audience == "stress" for scenario in STRESS_SCENARIOS.values())
+    assert tuple(iter_scenario_summaries()) == tuple(
+        f"{scenario.name:<22} {scenario.mode:<11} {scenario.description}"
+        for scenario in RESEARCHER_SCENARIOS.values()
+    )
+    assert tuple(iter_scenario_summaries(include_stress=True))[-3:] == tuple(
+        f"{scenario.name:<22} {scenario.mode:<11} {scenario.description}"
+        for scenario in STRESS_SCENARIOS.values()
+    )
+    assert cycle_scenario_name("mirrored_ultimates", 1) == "arena_5v5"
+    assert cycle_scenario_name("charge_convergence", 1) == "trap_lifecycle"
+    assert (
+        cycle_scenario_name("charge_convergence", 1, include_stress=True)
+        == "trap_lifecycle"
+    )
+
+    for scenario in list_scenarios(include_stress=True):
         config = scenario.build_config()
         validate_env_config(config)
         state, observation, action_mask, _ = reset(config, jax.random.key(17))
@@ -228,6 +296,122 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
             "scripted",
             5,
         ),
+        "team_focus_crossfire": (
+            (16.0, 12.0),
+            (0, 1, 2, 3, 5, 6, 7, 8),
+            (
+                MAGE_CLASS_ID,
+                WARRIOR_CLASS_ID,
+                HUNTER_CLASS_ID,
+                ROGUE_CLASS_ID,
+                WARRIOR_CLASS_ID,
+                PRIEST_CLASS_ID,
+                PRIEST_CLASS_ID,
+                PRIEST_CLASS_ID,
+            ),
+            (
+                (6.0, 6.0),
+                (7.0, 5.0),
+                (8.0, 3.0),
+                (8.0, 4.6),
+                (8.0, 6.0),
+                (10.5, 6.0),
+                (9.8, 8.0),
+                (6.2, 8.0),
+            ),
+            "scripted",
+            2,
+        ),
+        "mirrored_ultimates": (
+            (18.0, 14.0),
+            tuple(range(10)),
+            (
+                MAGE_CLASS_ID,
+                WARRIOR_CLASS_ID,
+                HUNTER_CLASS_ID,
+                ROGUE_CLASS_ID,
+                PRIEST_CLASS_ID,
+                MAGE_CLASS_ID,
+                WARRIOR_CLASS_ID,
+                HUNTER_CLASS_ID,
+                ROGUE_CLASS_ID,
+                PRIEST_CLASS_ID,
+            ),
+            (
+                (3.0, 2.0),
+                (6.0, 5.0),
+                (6.1, 9.0),
+                (7.3, 12.0),
+                (4.0, 11.5),
+                (15.0, 2.0),
+                (10.0, 5.0),
+                (9.9, 9.0),
+                (8.7, 12.0),
+                (12.0, 11.5),
+            ),
+            "scripted",
+            0,
+        ),
+        "charge_convergence": (
+            (14.0, 12.0),
+            (0, 1, 5),
+            (WARRIOR_CLASS_ID, WARRIOR_CLASS_ID, WARRIOR_CLASS_ID),
+            ((3.0, 4.0), (3.0, 8.0), (8.0, 6.0)),
+            "scripted",
+            0,
+        ),
+        "trap_lifecycle": (
+            (12.0, 12.0),
+            tuple(range(10)),
+            (
+                HUNTER_CLASS_ID,
+                HUNTER_CLASS_ID,
+                HUNTER_CLASS_ID,
+                HUNTER_CLASS_ID,
+                HUNTER_CLASS_ID,
+                WARRIOR_CLASS_ID,
+                WARRIOR_CLASS_ID,
+                WARRIOR_CLASS_ID,
+                WARRIOR_CLASS_ID,
+                WARRIOR_CLASS_ID,
+            ),
+            (
+                (3.0, 2.0),
+                (3.0, 4.0),
+                (3.0, 6.0),
+                (3.0, 8.0),
+                (4.5, 3.0),
+                (6.0, 2.0),
+                (6.0, 4.0),
+                (6.0, 6.0),
+                (6.0, 8.0),
+                (6.0, 10.0),
+            ),
+            "scripted",
+            0,
+        ),
+        "max_status_stack": (
+            (16.0, 12.0),
+            (0, 1, 5, 6, 7, 8),
+            (
+                MAGE_CLASS_ID,
+                PRIEST_CLASS_ID,
+                WARRIOR_CLASS_ID,
+                HUNTER_CLASS_ID,
+                HUNTER_CLASS_ID,
+                ROGUE_CLASS_ID,
+            ),
+            (
+                (8.0, 6.0),
+                (10.5, 7.0),
+                (3.0, 6.0),
+                (8.0, 2.5),
+                (11.0, 6.0),
+                (8.0, 7.4),
+            ),
+            "scripted",
+            0,
+        ),
     }
     for name, (
         map_size,
@@ -257,6 +441,9 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
         )
         assert scenario.mode == mode
         assert scenario.default_controlled_slot == controlled_slot
+        assert scenario.audience == (
+            "stress" if name in STRESS_SCENARIOS else "researcher"
+        )
 
     expected_frames = {
         "arena_5v5": (),
@@ -295,6 +482,71 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
             ((5, MOVE_EAST, None, 0),),
             ((5, MOVE_EAST, None, 0),),
         ),
+        "team_focus_crossfire": (
+            ((2, MOVE_STAY, 5, 0),),
+            ((2, MOVE_STAY, 5, 0),),
+            (
+                (0, MOVE_STAY, 5, 0),
+                (1, MOVE_STAY, 5, 0),
+                (2, MOVE_STAY, 5, 0),
+                (3, MOVE_STAY, 5, 0),
+                (6, MOVE_STAY, 5, 0),
+                (7, MOVE_STAY, 5, 0),
+                (8, MOVE_STAY, 5, 0),
+            ),
+            (
+                (3, MOVE_STAY, 5, 1),
+                (6, MOVE_STAY, 5, 0),
+                (7, MOVE_STAY, 5, 0),
+                (8, MOVE_STAY, 5, 0),
+            ),
+            (
+                (6, MOVE_STAY, 5, 0),
+                (7, MOVE_STAY, 5, 0),
+                (8, MOVE_STAY, 5, 0),
+            ),
+            (
+                (6, MOVE_STAY, 5, 1),
+                (7, MOVE_STAY, 5, 1),
+                (8, MOVE_STAY, 5, 1),
+            ),
+        ),
+        "mirrored_ultimates": (
+            ((0, MOVE_STAY, None, 1), (5, MOVE_STAY, None, 1)),
+            ((1, MOVE_STAY, 6, 1), (6, MOVE_STAY, 1, 1)),
+            ((2, MOVE_STAY, 7, 1), (7, MOVE_STAY, 2, 1)),
+            ((3, MOVE_STAY, 8, 1), (8, MOVE_STAY, 3, 1)),
+            ((4, MOVE_STAY, 3, 1), (9, MOVE_STAY, 8, 1)),
+        ),
+        "charge_convergence": (
+            (
+                (0, MOVE_STAY, 5, 1),
+                (1, MOVE_STAY, 5, 1),
+                (5, MOVE_STAY, 0, 1),
+            ),
+        ),
+        "trap_lifecycle": (
+            (
+                (0, MOVE_STAY, 5, 1),
+                (1, MOVE_STAY, 6, 1),
+                (2, MOVE_STAY, 7, 1),
+                (3, MOVE_STAY, 8, 1),
+            ),
+            ((0, MOVE_STAY, 5, 0),),
+            (),
+            ((4, MOVE_STAY, 6, 1),),
+            ((2, MOVE_STAY, 7, 0),),
+        ),
+        "max_status_stack": (
+            (
+                (0, MOVE_STAY, None, 1),
+                (1, MOVE_STAY, 0, 0),
+                (5, MOVE_STAY, 0, 1),
+                (6, MOVE_STAY, 0, 1),
+                (7, MOVE_STAY, 0, 0),
+                (8, MOVE_STAY, 0, 1),
+            ),
+        ),
     }
     for name, expected in expected_frames.items():
         observed = tuple(
@@ -316,7 +568,7 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
 
 
 def test_every_scenario_frame_has_unique_active_actors_and_targets() -> None:
-    for scenario in list_scenarios():
+    for scenario in list_scenarios(include_stress=True):
         config = scenario.build_config()
         active = np.asarray(config.agent_profile.active_mask, dtype=bool)
         for frame in scenario.frames:
@@ -328,12 +580,13 @@ def test_every_scenario_frame_has_unique_active_actors_and_targets() -> None:
                     assert active[command.target_global_slot]
 
 
-def test_every_normal_scripted_command_is_legal_and_accepted() -> None:
-    for scenario in list_scenarios():
+def test_every_registered_scripted_command_is_legal_and_accepted() -> None:
+    for scenario in list_scenarios(include_stress=True):
         if not scenario.frames:
             continue
         _, session = _session(scenario.name)
         for frame in scenario.frames:
+            step_before = int(session.state.step_count)
             action = build_scripted_joint_action(session.config, frame)
             for command in frame.commands:
                 slot = command.actor_global_slot
@@ -364,6 +617,22 @@ def test_every_normal_scripted_command_is_legal_and_accepted() -> None:
             submitted = submit_next_script_frame(session)
             transition = submitted.last_transition
             assert transition is not None
+            assert int(submitted.state.step_count) == step_before + 1
+            assert (
+                submitted.next_script_frame_index == session.next_script_frame_index + 1
+            )
+            for retained_head, expected_head in zip(
+                transition.submitted_action,
+                action,
+                strict=True,
+            ):
+                np.testing.assert_array_equal(retained_head, expected_head)
+            for accepted_head, expected_head in zip(
+                transition.accepted_action,
+                action,
+                strict=True,
+            ):
+                np.testing.assert_array_equal(accepted_head, expected_head)
             actors = {
                 actor.actor_global_slot: actor for actor in transition.actor_transitions
             }
@@ -655,3 +924,231 @@ def test_status_stack_reference_trajectory() -> None:
     np.testing.assert_array_equal(session.state.slow_durations[5], (2, 0, 2))
     assert int(session.state.rogue_poison_anti_heal_durations[5]) == 1
     np.testing.assert_array_equal(session.state.ultimate_cooldowns[:3], 27)
+
+
+def test_team_focus_crossfire_reference_trajectory() -> None:
+    _, session = _session("team_focus_crossfire")
+
+    session = submit_next_script_frame(session)
+    first_transition = session.last_transition
+    assert first_transition is not None
+    assert _accepted_activation_signatures(session) == (("basic_damage", 2, 5),)
+    first_net = next(
+        actor.net_health_delta
+        for actor in first_transition.actor_transitions
+        if actor.actor_global_slot == 5
+    )
+    assert first_net == pytest.approx(
+        float(
+            first_transition.after_state.current_health[5]
+            - first_transition.before_state.current_health[5]
+        )
+    )
+
+    session = submit_next_script_frame(session)
+    assert _accepted_activation_signatures(session) == (("basic_damage", 2, 5),)
+    second_transition = session.last_transition
+    assert second_transition is not None
+    assert int(second_transition.after_state.step_count) == (
+        int(first_transition.after_state.step_count) + 1
+    )
+
+    session = submit_next_script_frame(session)
+    assert _accepted_activation_signatures(session) == (
+        ("basic_damage", 0, 5),
+        ("basic_damage", 1, 5),
+        ("basic_damage", 2, 5),
+        ("basic_damage", 3, 5),
+        ("basic_heal", 6, 5),
+        ("basic_heal", 7, 5),
+        ("basic_heal", 8, 5),
+    )
+
+    session = submit_next_script_frame(session)
+    poison_transition = session.last_transition
+    assert poison_transition is not None
+    assert int(poison_transition.before_state.rogue_poison_anti_heal_durations[5]) == 0
+    assert int(poison_transition.after_state.rogue_poison_anti_heal_durations[5]) > 0
+    assert _accepted_activation_signatures(session) == (
+        ("rogue_poison", 3, 5),
+        ("basic_heal", 6, 5),
+        ("basic_heal", 7, 5),
+        ("basic_heal", 8, 5),
+    )
+
+    session = submit_next_script_frame(session)
+    anti_heal_transition = session.last_transition
+    assert anti_heal_transition is not None
+    assert (
+        int(anti_heal_transition.before_state.rogue_poison_anti_heal_durations[5]) > 0
+    )
+    assert _accepted_activation_signatures(session) == (
+        ("basic_heal", 6, 5),
+        ("basic_heal", 7, 5),
+        ("basic_heal", 8, 5),
+    )
+
+    assert float(session.state.current_health[5]) == pytest.approx(
+        float(session.config.agent_profile.max_health[5])
+    )
+    health_before_holy_words = float(session.state.current_health[5])
+    session = submit_next_script_frame(session)
+    assert _accepted_activation_signatures(session) == (
+        ("holy_word", 6, 5),
+        ("holy_word", 7, 5),
+        ("holy_word", 8, 5),
+    )
+    final_transition = session.last_transition
+    assert final_transition is not None
+    warrior = next(
+        actor
+        for actor in final_transition.actor_transitions
+        if actor.actor_global_slot == 5
+    )
+    assert warrior.health_before == pytest.approx(health_before_holy_words)
+    assert warrior.health_after == pytest.approx(health_before_holy_words)
+    assert warrior.net_health_delta == pytest.approx(0.0)
+
+
+def test_mirrored_ultimates_reference_trajectory() -> None:
+    _, session = _session("mirrored_ultimates")
+    expected = (
+        (("mage_burst", 0, None), ("mage_burst", 5, None)),
+        (("warrior_charge", 1, 6), ("warrior_charge", 6, 1)),
+        (("hunter_trap", 2, 7), ("hunter_trap", 7, 2)),
+        (("rogue_poison", 3, 8), ("rogue_poison", 8, 3)),
+        (("holy_word", 4, 3), ("holy_word", 9, 8)),
+    )
+
+    for frame_index, expected_signatures in enumerate(expected):
+        session = submit_next_script_frame(session)
+        assert _accepted_activation_signatures(session) == expected_signatures
+        assert int(session.state.step_count) == frame_index + 1
+
+    assert int(session.state.mage_burst_damage_amplification_durations[0]) > 0
+    assert int(session.state.mage_burst_damage_amplification_durations[5]) > 0
+    assert int(session.state.stun_durations[7, STUN_CHANNEL_HUNTER_TRAP]) > 0
+    assert int(session.state.stun_durations[2, STUN_CHANNEL_HUNTER_TRAP]) > 0
+    assert int(session.state.rogue_poison_anti_heal_durations[3]) > 0
+    assert int(session.state.rogue_poison_anti_heal_durations[8]) > 0
+
+
+def test_charge_convergence_reference_trajectory() -> None:
+    _, session = _session("charge_convergence")
+    before_positions = np.asarray(session.state.agent_positions).copy()
+    session = submit_next_script_frame(session)
+
+    assert _accepted_activation_signatures(session) == (
+        ("warrior_charge", 0, 5),
+        ("warrior_charge", 1, 5),
+        ("warrior_charge", 5, 0),
+    )
+    after_positions = np.asarray(session.state.agent_positions)
+    for source_slot in (0, 1, 5):
+        assert np.all(np.isfinite(after_positions[source_slot]))
+        assert not np.array_equal(
+            after_positions[source_slot],
+            before_positions[source_slot],
+        )
+
+
+def test_trap_lifecycle_reference_trajectory() -> None:
+    _, session = _session("trap_lifecycle")
+
+    session = submit_next_script_frame(session)
+    assert _accepted_activation_signatures(session) == (
+        ("hunter_trap", 0, 5),
+        ("hunter_trap", 1, 6),
+        ("hunter_trap", 2, 7),
+        ("hunter_trap", 3, 8),
+    )
+    for target_slot in (5, 6, 7, 8):
+        assert (
+            _status_change(
+                session,
+                global_slot=target_slot,
+                status_kind="stun_hunter_trap",
+            )
+            == "applied"
+        )
+
+    session = submit_next_script_frame(session)
+    assert (
+        _status_change(
+            session,
+            global_slot=5,
+            status_kind="stun_hunter_trap",
+        )
+        == "trap_broken"
+    )
+
+    session = submit_next_script_frame(session)
+    assert session.last_transition is not None
+    for accepted_head in session.last_transition.accepted_action:
+        np.testing.assert_array_equal(
+            accepted_head,
+            np.zeros((MAX_AGENT_SLOTS,), dtype=np.int32),
+        )
+
+    session = submit_next_script_frame(session)
+    assert _accepted_activation_signatures(session) == (("hunter_trap", 4, 6),)
+    assert (
+        _status_change(
+            session,
+            global_slot=6,
+            status_kind="stun_hunter_trap",
+        )
+        == "refreshed"
+    )
+
+    session = submit_next_script_frame(session)
+    transition = session.last_transition
+    assert transition is not None
+    assert (
+        _status_change(
+            session,
+            global_slot=7,
+            status_kind="stun_hunter_trap",
+        )
+        == "cleared_unclassified"
+    )
+    assert (
+        _status_change(
+            session,
+            global_slot=8,
+            status_kind="stun_hunter_trap",
+        )
+        == "expired"
+    )
+    assert not any(
+        status.global_slot == 7 and status.change == "trap_broken"
+        for status in transition.status_transitions
+    )
+
+
+def test_max_status_stack_reference_trajectory() -> None:
+    _, session = _session("max_status_stack")
+    session = submit_next_script_frame(session)
+
+    assert _accepted_activation_signatures(session) == (
+        ("mage_burst", 0, None),
+        ("basic_heal", 1, 0),
+        ("warrior_charge", 5, 0),
+        ("hunter_trap", 6, 0),
+        ("basic_damage", 7, 0),
+        ("rogue_poison", 8, 0),
+    )
+    assert tuple(int(value) for value in session.state.stun_durations[0]) == (
+        1,
+        4,
+        1,
+    )
+    assert tuple(int(value) for value in session.state.slow_durations[0]) == (
+        5,
+        1,
+        5,
+    )
+    assert int(session.state.rogue_poison_anti_heal_durations[0]) == 4
+    assert int(session.state.priest_blessing_of_freedom_slow_floor_durations[0]) == 1
+    assert int(session.state.mage_burst_damage_amplification_durations[0]) == 5
+    assert int(session.state.stun_durations[0, STUN_CHANNEL_HUNTER_TRAP]) > 0
