@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
 PYPROJECT_PATH="${REPO_ROOT}/pyproject.toml"
-ENTRYPOINT_PATH="${REPO_ROOT}/scripts/dev/geometry_debug_renderer.py"
+ENTRYPOINT_PATH="${REPO_ROOT}/scripts/dev/debug_renderer.py"
 
 if [[ ! -f "${PYPROJECT_PATH}" ]]; then
   echo "error: repository root does not contain pyproject.toml: ${REPO_ROOT}" >&2

@@ -12,10 +12,10 @@ Milestone 1–5 debugger:
 
 ```bash
 uv sync --extra viz --extra dev
-./scripts/dev/run_geometry_renderer.sh
+./scripts/dev/run_debug_renderer.sh
 ```
 
-See the [visual debugger guide](docs/visual_debugger.md) for controls,
+See the [visual debugger guide](docs/dev/visual_debugger.md) for controls,
 selected-target LOS/visibility/range diagnostics, scenarios, visual semantics,
 and terminal-log contracts.
 

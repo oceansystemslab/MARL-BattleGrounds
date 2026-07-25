@@ -7,13 +7,17 @@ import sys
 from pathlib import Path
 
 import pytest
-from scripts.dev.geometry_debug_renderer import build_parser, main
+from scripts.dev.debug_renderer import build_parser, main
 from scripts.dev.visual_debugger import app
 from scripts.dev.visual_debugger.scenarios import SCENARIOS
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-_PYTHON_ENTRYPOINT = _REPOSITORY_ROOT / "scripts" / "dev" / "geometry_debug_renderer.py"
-_SHELL_LAUNCHER = _REPOSITORY_ROOT / "scripts" / "dev" / "run_geometry_renderer.sh"
+_PYTHON_ENTRYPOINT = _REPOSITORY_ROOT / "scripts" / "dev" / "debug_renderer.py"
+_SHELL_LAUNCHER = _REPOSITORY_ROOT / "scripts" / "dev" / "run_debug_renderer.sh"
+_OLD_PYTHON_ENTRYPOINT = (
+    _REPOSITORY_ROOT / "scripts" / "dev" / "geometry_debug_renderer.py"
+)
+_OLD_SHELL_LAUNCHER = _REPOSITORY_ROOT / "scripts" / "dev" / "run_geometry_renderer.sh"
 
 
 def test_parser_exposes_complete_cli_contract() -> None:
@@ -64,21 +68,25 @@ def test_help_contains_every_option_control_inspector_and_scenario() -> None:
     for control in (
         "Tab / Shift+Tab",
         "left click",
+        "Shift+left click",
         "right click / Escape",
+        "Shift+R",
         "Space / Enter",
         "[ / ]",
     ):
         assert control in result.stdout
-    for inspector in ("TARGET", "GEOMETRY", "LEGALITY"):
+    for inspector in ("SELECTED TARGET", "PENDING ACTION", "TECHNICAL DETAILS"):
         assert inspector in result.stdout
     for scenario_name in SCENARIOS:
         assert scenario_name in result.stdout
+    assert "acceptance_lane_lab" not in result.stdout
+    assert "geometry_debug_renderer" not in result.stdout
 
 
 def test_list_scenarios_is_stable_and_does_not_import_matplotlib() -> None:
     code = (
         "import sys; "
-        "from scripts.dev.geometry_debug_renderer import main; "
+        "from scripts.dev.debug_renderer import main; "
         "status=main(['--list-scenarios']); "
         "print('STATUS', status); "
         "print('MATPLOTLIB', any(n == 'matplotlib' or n.startswith('matplotlib.') "
@@ -157,7 +165,7 @@ def test_missing_matplotlib_is_actionable_and_returns_two(tmp_path: Path) -> Non
     "argv",
     (
         ("--scenario", "missing"),
-        ("--scenario", "acceptance_lane_lab", "--controlled-slot", "1"),
+        ("--scenario", "arena_5v5", "--controlled-slot", "-1"),
         ("--seed", "not-an-int"),
     ),
 )
@@ -171,7 +179,7 @@ def test_invalid_cli_inputs_use_argparse_exit_two(argv: tuple[str, ...]) -> None
     "argv",
     (
         ("--scenario", "missing"),
-        ("--scenario", "acceptance_lane_lab", "--controlled-slot", "1"),
+        ("--scenario", "arena_5v5", "--controlled-slot", "-1"),
     ),
 )
 def test_semantic_cli_validation_precedes_matplotlib_loading(
@@ -285,3 +293,10 @@ def test_launcher_reports_missing_uv() -> None:
 
 def test_launcher_is_executable() -> None:
     assert _SHELL_LAUNCHER.stat().st_mode & stat.S_IXUSR
+
+
+def test_launcher_rename_has_no_compatibility_wrapper() -> None:
+    assert _PYTHON_ENTRYPOINT.is_file()
+    assert _SHELL_LAUNCHER.is_file()
+    assert not _OLD_PYTHON_ENTRYPOINT.exists()
+    assert not _OLD_SHELL_LAUNCHER.exists()

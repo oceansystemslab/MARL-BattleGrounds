@@ -80,7 +80,7 @@ include = [
   "src",
   "tests",
   "scripts/dev/visual_debugger",
-  "scripts/dev/geometry_debug_renderer.py",
+  "scripts/dev/debug_renderer.py",
 ]
 exclude = [
   "**/__pycache__",

@@ -20,7 +20,7 @@ uv sync --extra viz --extra dev
 Run the default 5v5 laboratory:
 
 ```bash
-./scripts/dev/run_geometry_renderer.sh
+./scripts/dev/run_debug_renderer.sh
 ```
 
 The shell launcher resolves the repository root from its own path, so the
@@ -29,12 +29,12 @@ command also works when invoked from another current working directory.
 Useful invocations:
 
 ```bash
-./scripts/dev/run_geometry_renderer.sh --help
-./scripts/dev/run_geometry_renderer.sh --list-scenarios
-./scripts/dev/run_geometry_renderer.sh --scenario acceptance_lane_lab
-./scripts/dev/run_geometry_renderer.sh --scenario status_stack --verbose
-./scripts/dev/run_geometry_renderer.sh --scenario ultimate_showcase --static
-./scripts/dev/run_geometry_renderer.sh --controlled-slot 5 --no-ranges
+./scripts/dev/run_debug_renderer.sh --help
+./scripts/dev/run_debug_renderer.sh --list-scenarios
+./scripts/dev/run_debug_renderer.sh --scenario basic_support
+./scripts/dev/run_debug_renderer.sh --scenario status_stack --verbose
+./scripts/dev/run_debug_renderer.sh --scenario ultimate_showcase --static
+./scripts/dev/run_debug_renderer.sh --controlled-slot 5 --no-ranges
 ```
 
 `--static` renders the deterministic reset snapshot without registering input
@@ -62,6 +62,7 @@ dependency exits with code `2` and prints the exact installation command.
 |---|---|
 | `Tab` / `Shift+Tab` | Cycle forward/backward through active global slots. |
 | Left click | Select an active global target for inspection. |
+| `Shift` + left click | Immediately control the clicked active actor while preserving the selected global target. |
 | Right click / `Escape` | Clear the target to target-none. |
 | `1` | Explicitly arm Basic lane 0, even when the pair is unavailable. |
 | `2` | Explicitly arm Ultimate lane 1, even when the pair is unavailable. |
@@ -70,14 +71,23 @@ dependency exits with code `2` and prints the exact installation command.
 | `Space` / `Enter` | Submit the manual action, or the next frame in a scripted scenario. |
 | `N` | Submit the next registered reference/script frame. |
 | `R` | Reset the current scenario deterministically. |
+| `Shift+R` | Leave the session unchanged and explain why cooldown-only clearing is unavailable. |
 | `G` | Toggle the controlled actor's range circles. |
 | `V` | Toggle concise/verbose transition logs. |
 | `[` / `]` | Switch to the previous/next scenario. |
 | Close window | Disconnect callbacks, restore Matplotlib key mappings, and exit. |
 
-There is no simulation timer. Selecting an actor, changing movement, arming a
-lane, cycling the controlled actor, toggling presentation, or redrawing never
-advances the simulator or consumes a PRNG key.
+There is no simulation timer. Selecting or directly controlling an actor,
+changing movement, arming a lane, cycling the controlled actor, toggling
+presentation, or redrawing never advances the simulator or consumes a PRNG
+key. After native Tab traversal, the application schedules canvas-focus
+restoration so the first following keyboard command is not lost to a toolbar
+button.
+
+`Shift+R` does not clear cooldowns. Reset and step are the only public
+state-to-observation/mask snapshot boundaries, and no public coherent
+snapshot-rebuild API exists for a cooldown-only edit. Use `R` for a full
+deterministic reset.
 
 ## Pending-action behavior
 
@@ -85,6 +95,13 @@ The reset pending action is Stay, target-none, and automatically armed Basic
 lane 0. A clicked target is retained even when no combat lane is available.
 Basic auto-arms only when the exact current lane-0 value for that actor-target
 pair is true. Ultimate never auto-arms.
+
+`Shift` + left click changes control without stepping or splitting the key. It
+preserves the selected global target, resets movement to Stay, discards
+explicit arming, converts the target to the new actor's relative category, and
+auto-arms Basic only when that exact lane-0 pair is currently available. If the
+clicked actor is also the selected target, the relation becomes `self` and the
+reticle remains visible.
 
 Keys `1` and `2` deliberately permit an unavailable in-domain pair to be
 submitted. This lets the authoritative simulator demonstrate canonical
@@ -109,38 +126,38 @@ At termination or truncation, submissions are blocked before key splitting.
 Inspection, actor cycling, presentation toggles, reset, and scenario switching
 remain available.
 
-## Selected-target inspector
+## HUD and selected-target inspector
 
-The HUD separates three different kinds of fact:
+The side panel reserves 42% of the 17×9 figure and has six stable sections:
 
-```text
-TARGET g6/t7 relation=enemy distance=4.25
-GEOMETRY los=1 visible=1 observation_range=1 basic_range=1 ultimate_range=0
-LEGALITY lane0=1 lane1=0 selected=Basic pending_legal=1
-```
+1. Play-by-play
+2. Controlled agent
+3. Selected target
+4. Pending action
+5. Latest accepted result
+6. Technical details and visual key
 
-`TARGET` reports the fixed global slot, actor-relative target category,
-relationship, and center distance.
+Human-facing sections use identities such as `TEAM A MAGE (id_0)` and the
+ability names `BASIC`, `BURST`, `CHARGE`, `TRAP`, `POISON`, and `HOLY WORD`.
+Raw `gN` and `tN` categories appear only in monospaced technical diagnostics.
 
-`GEOMETRY` reports independent facts:
+The selected-target section reports relationship, center distance, line of
+sight from the public geometry authority, observer-relative visibility from
+the current observation, observation-radius membership, and exact Basic and
+Ultimate availability. Target-none displays an explicit no-target state.
 
-- line of sight from the public geometry authority;
-- observer-relative visibility from the current observation mask;
-- inclusive membership in the controlled actor's observation radius;
-- inclusive membership in the controlled actor's Basic radius;
-- inclusive membership in a targeted Ultimate radius.
+The pending-action section reports the chosen movement, ability, global target,
+lane-0/lane-1 availability, and exact pair legality. Lane values come directly
+from
+`select_target_use_ultimate_joint_mask[actor, target, lane]`; the debugger
+never reconstructs them from geometry. Displayed distance, LOS, visibility,
+and range facts are not claimed as the cause of an unavailable pair.
 
-A target-none or non-targeted Ultimate displays `n/a` for target geometry.
-
-`LEGALITY` reports lane 0 and lane 1 directly from
-`select_target_use_ultimate_joint_mask[actor, target, lane]`. The debugger does
-not reconstruct those values from geometry. Displayed geometry and visibility
-facts are never claimed to be the cause of an unavailable lane.
-
-While a target is selected, non-visible active agents may be dimmed, but their
-team outline, global-slot label, and selection cues remain locatable. Clearing
-the target clears this visibility treatment. Visibility is supplied to the
-renderer as presentation data; the renderer does not derive it.
+While a target is selected, non-visible active agents are dimmed above their
+class fill but below protected health, aura, team, lane, reticle, identity,
+status, and transient artists. Clearing the target clears this visibility
+treatment. Visibility is supplied to the renderer as presentation data; the
+renderer does not derive it.
 
 ## Battlefield legend
 
@@ -151,22 +168,20 @@ renderer as presentation data; the renderer does not derive it.
 | Mage / Warrior / Hunter / Rogue / Priest | Class-filled body and `M/W/H/R/P` label using aqua, brown, green, mustard, and pink. |
 | Team A / Team B | Blue/red circumference at the true physical body radius. |
 | Health | Inset green/amber/red annulus; it never changes the collision outline. |
-| Controlled actor | Four inward white chevrons with a dark under-stroke. |
+| Controlled actor | Observation/Basic/Ultimate ranges and the controlled-agent HUD section; no extra body chevrons. |
 | Selected target | Magenta crosshair and bullseye. |
-| Lane 0 / lane 1 | Lower-left green and lower-right violet arcs; unavailable lanes are gray and the armed lane is thicker. |
+| Lane 0 / lane 1 | Labelled lower-left green `0` and lower-right violet `1` arcs; unavailable lanes are gray and the armed lane is thicker. |
 | Observation / Basic / Ultimate range | Gray dashed, green solid, and violet dotted world-space circles. |
-| Warrior/Hunter/Rogue stun | Three fixed top status anchors in source-class colors. |
-| Warrior/Hunter/Rogue slow | Three fixed bottom double-chevron anchors in source-class colors. |
-| Mage aura / Warrior aura | Aqua dotted upper and bronze hatched lower semicircular bands. |
-| Rogue anti-heal | Broken medical cross. |
-| Blessing of Freedom | Pink shield/wing cue. |
-| Mage Burst active | Aqua eight-ray inner starburst. |
-| Previous accepted action | Graphite movement arrow and compact Basic/Ultimate badge. |
+| Persistent status | Detached neutral rounded chips above the body, in stable two-column semantic order, with source-class border accents. |
+| Mage aura | Inset upper cyan dotted band with a strong edge and under-stroke. |
+| Warrior aura | Inset lower bronze hatched/dashed band. |
+| Identity | Class letter plus `id_N`; raw `gN`/`tN` values are technical diagnostics only. |
 
-All persistent body-local presentation stays within the true body radius. Fixed
-anchors allow all three stun channels, all three slow channels, two auras,
-anti-heal, Freedom, Burst, health, lanes, selection, and previous-action
-history to coexist without allocating additional collision-like rings.
+Detached status chips use point offsets, so they do not change world geometry,
+collision, or hit testing. Their labels and remaining submitted-step durations
+are `CHARGE-STUN`, `TRAP`, `POISON-STUN`, `CHARGE-SLOW`, `HUNTER-SLOW`,
+`POISON-SLOW`, `ANTI-HEAL`, `FREEDOM`, and `BURST`. They deliberately avoid
+circular outlines that could be mistaken for collision radii.
 
 ### Transient presentation
 
@@ -176,11 +191,11 @@ history to coexist without allocating additional collision-like rings.
 | Basic damage | Source-colored action link and red impact flash. |
 | Basic healing | Priest-colored link and one green recipient pulse. |
 | Holy Word | Strong link and two green/pink recipient pulses. |
-| Mage Burst activation | Target-none aqua expanding starburst. |
-| Warrior Charge | Bronze arrowed realized path and impact wedge. |
-| Hunter Trap | Green square-jaw/cage flash. |
-| Rogue Poison | Three mustard droplet/needle marks. |
-| Multiple recipient effects | One segmented source-colored composite marker; exact sources remain in the HUD/log. |
+| Mage Burst activation | Short labelled `BURST!` flash. |
+| Warrior Charge | Short labelled `CHARGE!` flash plus the public before/after trail. |
+| Hunter Trap | Short labelled `TRAP!` flash. |
+| Rogue Poison | Short labelled `POISON!` flash. |
+| Holy Word | Short labelled `HOLY WORD!` flash. |
 | Rejection | Red `M×`, `C×`, or `TUPLE×`; rejected combat also has a dashed target link, and simultaneous components share one label. |
 
 One-step visuals expire on the next submitted transition. Charge traces are
@@ -203,14 +218,6 @@ Interactive `18×12` laboratory with all five classes per team, a pillar at
 `(9,3)` with radius `0.9`, and a rotated `3×0.5` wall at `(9,7.8)` with angle
 `0.45`. Use it to inspect open/blocked LOS, observer visibility, relations,
 range boundaries, collision, and pair masks.
-
-### `acceptance_lane_lab`
-
-Interactive `16×12` Hunter-versus-Mage boundary. Six reference frames move the
-Hunter from distance `9` to `4`. Visibility becomes true at distance `6`,
-Basic becomes available at `5`, and Trap becomes available at `4`. Early
-frames demonstrate accepted East movement with rejected combat. The last frame
-applies Hunter Trap with cooldown `30` and stun duration `4`.
 
 ### `basic_support`
 
@@ -236,37 +243,56 @@ aura bands remain visible, and both Hunter slow channels apply.
 ### `status_stack`
 
 Four scripted frames that combine Charge plus precommitted movement, Trap,
-Poison, Priest healing/Freedom, rejected stunned movement, Trap break, Freedom
-speed floor, stacked slow movement, duration expiration, and cooldown
+Poison, Priest healing/Freedom, a stunned recipient holding Stay, Trap break,
+Freedom speed floor, stacked slow movement, duration expiration, and cooldown
 decrement. A Charge-plus-movement trail is labeled as combined realized
 displacement; it does not claim a private intermediate landing.
 
+The intentionally rejected movement/combat boundary remains covered by
+test-only fixtures. Every command in these five user-facing scenarios is
+preflighted at its actual decision epoch and must be in-domain, exact-mask
+legal, and accepted as submitted.
+
 ## Terminal diagnostics
 
-Concise mode prints:
+Concise and verbose modes both print readable play-by-play first and a stable
+technical block second:
 
 ```text
-STEP scenario=<name> <before>-><after> terminated=<0|1> truncated=<0|1>
-ACTOR g<slot> <team>/<class> target=<none|gN/tN> lanes=0:<0|1>,1:<0|1> submitted=<...> accepted=<...> movement=<...> combat=<...>
-POSITION gN (<before>)->(<after>) delta=(<dx>,<dy>)
-HEALTH gN <before>-><after> net=<signed delta>
-COOLDOWN gN <before>-><after> <started|decremented|expired>
-STATUS gN <kind> <before>-><after> <classification>
-EVENT <kind> source=gN recipient=<gN|none> [detail]
+PLAY-BY-PLAY
+  TEAM A PRIEST (id_2) had a net health change of 0.00 HP.
+  Accepted contributors included TEAM A PRIEST (id_2) BASIC and
+  TEAM B HUNTER (id_7) BASIC.
+  The public transition does not expose the gross damage/healing split.
+
+TECHNICAL DIAGNOSTICS
+  Transition   scenario=basic_support step=1 -> 2 terminated=0 truncated=0
+  Actor id_7 [g7] submitted move=Stay[0] target=t8 ultimate=0
+               accepted  move=Stay[0] target=t8 ultimate=0
+               mask move=1 lane0=1 lane1=0 pair=1 domain=1
+  Health id_2 92.00 -> 92.00 net=+0.00
 ```
 
-Verbose mode adds one `TARGET`, `GEOMETRY`, `MASK`, `SUBMITTED`, `ACCEPTED`,
-`AURA`, `SPEED`, and `EPISODE` record per report actor. It prints named channels
-and scalar facts, not raw tensor dumps.
+Verbose mode adds target relation/distance, geometry, visibility, position,
+aura, speed, and reward records per report actor. Both modes print named
+channels and scalar facts, not raw tensor dumps.
 
 Accepted actions come only from the successor state's previous-action fields.
 Movement and combat-pair acceptance are reported independently. Rejections show
 domain and current-mask facts, never guessed causal explanations.
 
+Health narration reports only the observed net loss, gain, or zero change.
+Accepted contributors and same-epoch public multipliers may be listed, but the
+debugger never fabricates gross per-source damage/healing when effects are
+simultaneous, clipped, cancelled, or mitigated. Newly applied Burst, Freedom,
+and other statuses are described as successor state, not as mechanics that
+governed the transition that applied them.
+
 Status changes are conservatively classified as application, refresh,
 decrement, expiration, unambiguous Trap break, or unclassified clear. A Trap
-transition from `1` to `0` alongside accepted damage remains ambiguous because
-natural expiration and break cannot be distinguished from public artifacts.
+transition from `1` to `0` alongside accepted damage remains unclassified
+because natural expiration and break cannot be distinguished from public
+artifacts.
 
 ## Reset and reproducibility
 

@@ -20,6 +20,7 @@ _EPILOG = """\
 controls:
   Tab / Shift+Tab       cycle active controlled actors
   left click            select an active global target
+  Shift+left click      control the clicked active actor
   right click / Escape  clear target to target-none
   1 / 2                 explicitly arm Basic lane 0 / Ultimate lane 1
   W A S D               cardinal movement
@@ -27,19 +28,19 @@ controls:
   Space / Enter         submit manual action or next scripted frame
   N                     submit the next registered reference/script frame
   R                     deterministic scenario reset
+  Shift+R               explain why cooldown clearing is unavailable
   G                     toggle selected-unit ranges
   V                     toggle concise/verbose logs
   [ / ]                 previous/next scenario
   close window          exit
 
 selected-target inspector:
-  TARGET                global/relative IDs, self/ally/enemy relation, distance
-  GEOMETRY              LOS, observer visibility, observation/Basic/Ultimate range
-  LEGALITY              exact joint-mask lane 0 and lane 1 values
+  SELECTED TARGET       identity, relation, distance, and public geometry
+  PENDING ACTION        movement, ability, target, and exact lane legality
+  TECHNICAL DETAILS     raw actor/target indices and same-epoch mask values
 
 scenarios:
   arena_5v5             interactive geometry/combat laboratory
-  acceptance_lane_lab   interactive movement/combat acceptance boundary
   basic_support         scripted Basic damage/healing sequence
   ultimate_showcase     scripted five-Ultimate sequence
   aura_crossfire        scripted amplification/mitigation crossfire
