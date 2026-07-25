@@ -25,25 +25,20 @@ from marl_battlegrounds.core.types import (
     EnvState,
     Observation,
 )
+from marl_battlegrounds.rendering.scene import (
+    ChargePathKind,
+    Lane,
+    RejectionComponent,
+)
+from marl_battlegrounds.rendering.vocabulary import ActivationTokenId
 
 type Point2D = tuple[float, float]
-type Lane = Literal[0, 1]
 type RangeKind = Literal["observation", "basic", "ultimate"]
 type SelectionRole = Literal["controlled", "target"]
 type StatusFamily = Literal["stun", "slow"]
 type AuraKind = Literal["mage_amplification", "warrior_mitigation"]
 type PersistentEffectKind = Literal["rogue_anti_heal", "priest_freedom", "mage_burst"]
-type ActivationKind = Literal[
-    "basic_damage",
-    "basic_heal",
-    "holy_word",
-    "mage_burst",
-    "warrior_charge",
-    "hunter_trap",
-    "rogue_poison",
-]
-type RejectionComponent = Literal["movement", "combat", "complete_tuple_domain"]
-type ChargePathKind = Literal["charge_only", "combined_charge_and_movement"]
+type ActivationKind = ActivationTokenId
 
 MAGE_COLOR = "#62D5D3"
 WARRIOR_COLOR = "#9A6B3F"

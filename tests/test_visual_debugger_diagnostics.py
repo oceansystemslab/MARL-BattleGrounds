@@ -11,6 +11,7 @@ from scripts.dev.visual_debugger.control import (
     create_session,
     cycle_controlled_actor,
     make_neutral_joint_action,
+    reset_session,
     select_clicked_target,
     select_controlled_actor,
     submit_interactive,
@@ -19,17 +20,14 @@ from scripts.dev.visual_debugger.control import (
 )
 from scripts.dev.visual_debugger.diagnostics import (
     accepted_action_from_successor,
-    age_transient_history,
     derive_selected_target_facts,
+    derive_visual_event_batch,
     extract_transition_view,
     format_concise_transition,
     format_verbose_transition,
+    latest_visual_event_batch,
 )
-from scripts.dev.visual_debugger.model import (
-    DebuggerSession,
-    SelectedTargetFacts,
-    TransientHistoryEntry,
-)
+from scripts.dev.visual_debugger.model import DebuggerSession, SelectedTargetFacts
 from scripts.dev.visual_debugger.scenarios import get_scenario
 from scripts.dev.visual_debugger.targeting import global_slot_to_target_action
 from tests.visual_debugger_fixtures import (
@@ -44,7 +42,13 @@ from marl_battlegrounds.core.types import (
     MOVE_STAY,
     NUM_TARGET_ACTIONS,
 )
-from marl_battlegrounds.rendering import ChargeTrailVisual, HealthDeltaVisual
+from marl_battlegrounds.rendering.scene import (
+    AcceptedActivationEventV1,
+    ChargeDisplacementEventV1,
+    NetHealthEventV1,
+    StatusLifecycleEventV1,
+    to_jsonable,
+)
 
 
 def _session(
@@ -348,9 +352,7 @@ def test_out_of_domain_tuple_is_classified_without_unsafe_mask_indexing() -> Non
     assert tuple(int(head[0]) for head in transition.accepted_action) == (0, 0, 0)
 
 
-def test_health_delta_is_exact_public_net_without_fabricating_zero_delta_visual() -> (
-    None
-):
+def test_health_outcome_preserves_exact_zero_net_for_accepted_health_intent() -> None:
     session = _session("basic_support")
     session = submit_next_script_frame(session)
     session = submit_next_script_frame(session)
@@ -360,12 +362,14 @@ def test_health_delta_is_exact_public_net_without_fabricating_zero_delta_visual(
         value for value in transition.actor_transitions if value.actor_global_slot == 2
     )
     assert actor.net_health_delta == actor.health_after - actor.health_before == 0.0
-    health_visuals = [
-        entry.visual
-        for entry in session.transient_history
-        if isinstance(entry.visual, HealthDeltaVisual)
-    ]
-    assert health_visuals == []
+    batch = derive_visual_event_batch(transition)
+    health_events = tuple(
+        event for event in batch.events if isinstance(event, NetHealthEventV1)
+    )
+    zero = next(event for event in health_events if event.recipient_global_slot == 2)
+    assert zero.net_delta == 0.0
+    assert zero.outcome == "unchanged"
+    assert not hasattr(zero, "source_global_slot")
 
 
 def test_non_health_activations_do_not_create_zero_health_delta_visuals() -> None:
@@ -373,15 +377,55 @@ def test_non_health_activations_do_not_create_zero_health_delta_visuals() -> Non
     session = submit_next_script_frame(session)
     session = submit_next_script_frame(session)
 
+    batch = latest_visual_event_batch(session)
+    assert batch is not None
     health_visual_slots = {
-        entry.visual.global_slot
-        for entry in session.transient_history
-        if isinstance(entry.visual, HealthDeltaVisual)
+        event.recipient_global_slot
+        for event in batch.events
+        if isinstance(event, NetHealthEventV1)
     }
 
     assert health_visual_slots == {2, 5, 7}
     assert 5 in health_visual_slots  # Rogue Poison carries approved direct damage.
     assert 6 not in health_visual_slots  # Hunter Trap carries no direct health delta.
+
+
+def test_activation_events_preserve_multiplicity_prestate_anchors_and_no_amount() -> (
+    None
+):
+    session = submit_next_script_frame(_session("basic_support"))
+    transition = session.last_transition
+    assert transition is not None
+    duplicated = replace(
+        transition,
+        accepted_activations=(
+            transition.accepted_activations[0],
+            transition.accepted_activations[0],
+        ),
+    )
+    batch = derive_visual_event_batch(duplicated)
+    activations = tuple(
+        event for event in batch.events if isinstance(event, AcceptedActivationEventV1)
+    )
+    assert len(activations) == 2
+    assert activations[0].token_id == activations[1].token_id
+    assert activations[0].event_id != activations[1].event_id
+    source = next(
+        actor
+        for actor in transition.actor_transitions
+        if actor.actor_global_slot == activations[0].source_global_slot
+    )
+    target = next(
+        actor
+        for actor in transition.actor_transitions
+        if actor.actor_global_slot == activations[0].target_global_slot
+    )
+    assert activations[0].source_anchor == source.position_before
+    assert activations[0].target_anchor == target.position_before
+    payload = to_jsonable(activations[0])
+    assert "amount" not in payload  # type: ignore[operator]
+    assert "damage" not in payload  # type: ignore[operator]
+    assert "healing" not in payload  # type: ignore[operator]
 
 
 def test_status_application_refresh_decrement_expiration_and_trap_break() -> None:
@@ -459,6 +503,15 @@ def test_trap_one_to_zero_with_accepted_damage_is_not_overclaimed() -> None:
     assert trap.duration_before == 1
     assert trap.duration_after == 0
     assert trap.change == "cleared_unclassified"
+    batch = derive_visual_event_batch(transition)
+    lifecycle = next(
+        event
+        for event in batch.events
+        if isinstance(event, StatusLifecycleEventV1)
+        and event.recipient_global_slot == 6
+        and event.token_id == "stun_hunter_trap"
+    )
+    assert lifecycle.change == "cleared_unclassified"
 
 
 def test_charge_trail_distinguishes_stay_and_movement_and_uses_realized_endpoints() -> (
@@ -467,109 +520,56 @@ def test_charge_trail_distinguishes_stay_and_movement_and_uses_realized_endpoint
     showcase = _session("ultimate_showcase")
     showcase = submit_next_script_frame(showcase)
     showcase = submit_next_script_frame(showcase)
+    batch = latest_visual_event_batch(showcase)
+    assert batch is not None
     charge = next(
-        entry.visual
-        for entry in showcase.transient_history
-        if isinstance(entry.visual, ChargeTrailVisual)
+        event for event in batch.events if isinstance(event, ChargeDisplacementEventV1)
     )
     assert charge.path_kind == "charge_only"
     assert charge.start == (5.0, 5.0)
     np.testing.assert_allclose(charge.end, (9.0715, 3.3714), atol=1e-4)
 
     stack = submit_next_script_frame(_session("status_stack"))
+    batch = latest_visual_event_batch(stack)
+    assert batch is not None
     combined = next(
-        entry.visual
-        for entry in stack.transient_history
-        if isinstance(entry.visual, ChargeTrailVisual)
+        event for event in batch.events if isinstance(event, ChargeDisplacementEventV1)
     )
     assert combined.path_kind == "combined_charge_and_movement"
     assert combined.start == (3.0, 6.0)
     assert combined.end == (7.0, 7.0)
 
 
-def test_transient_history_ages_only_on_steps_with_charge_opacity_schedule() -> None:
+def test_latest_transition_events_survive_ui_only_edits_and_replace_on_submit() -> None:
     session = _session("ultimate_showcase")
     session = submit_next_script_frame(session)
     session = submit_next_script_frame(session)
-    charge_entries = tuple(
-        entry
-        for entry in session.transient_history
-        if isinstance(entry.visual, ChargeTrailVisual)
-    )
-    assert len(charge_entries) == 1
-    assert charge_entries[0].age_submitted_steps == 0
-    initial_charge = charge_entries[0].visual
-    assert isinstance(initial_charge, ChargeTrailVisual)
-    assert initial_charge.opacity == 1.0
+    initial = latest_visual_event_batch(session)
+    assert initial is not None
+    initial_ids = tuple(event.event_id for event in initial.events)
+    assert any(isinstance(event, ChargeDisplacementEventV1) for event in initial.events)
 
-    same_entries = session.transient_history
-    # Pure inspection/redraw paths consume history but never age it.
-    assert session.transient_history is same_entries
+    inspected = select_controlled_actor(session, 3)
+    inspected = select_clicked_target(inspected, 5)
+    same = latest_visual_event_batch(inspected)
+    assert same is not None
+    assert tuple(event.event_id for event in same.events) == initial_ids
 
-    session = submit_next_script_frame(session)
-    charge = next(
-        entry
-        for entry in session.transient_history
-        if isinstance(entry.visual, ChargeTrailVisual)
-    )
-    assert charge.age_submitted_steps == 1
-    age_one_visual = charge.visual
-    assert isinstance(age_one_visual, ChargeTrailVisual)
-    assert age_one_visual.opacity == 0.65
-    session = submit_joint_action(
-        session,
-        make_neutral_joint_action(),
-        submission_kind="interactive",
-        report_actor_slots=(0,),
-    )
-    charge = next(
-        entry
-        for entry in session.transient_history
-        if isinstance(entry.visual, ChargeTrailVisual)
-    )
-    assert charge.age_submitted_steps == 2
-    age_two_visual = charge.visual
-    assert isinstance(age_two_visual, ChargeTrailVisual)
-    assert age_two_visual.opacity == 0.35
-    session = submit_joint_action(
-        session,
-        make_neutral_joint_action(),
-        submission_kind="interactive",
-        report_actor_slots=(0,),
-    )
+    advanced = submit_next_script_frame(inspected)
+    replacement = latest_visual_event_batch(advanced)
+    assert replacement is not None
+    assert replacement.transition_id == initial.transition_id + 1
     assert not any(
-        isinstance(entry.visual, ChargeTrailVisual)
-        for entry in session.transient_history
+        isinstance(event, ChargeDisplacementEventV1) for event in replacement.events
     )
 
-
-def test_age_transient_history_preserves_sequence_and_rejects_invalid_age() -> None:
-    entry = TransientHistoryEntry(
-        visual=ChargeTrailVisual(0, (0.0, 0.0), (1.0, 0.0), 5, "charge_only", 1.0),
-        created_after_step=1,
-        age_submitted_steps=0,
-        max_age_submitted_steps=3,
-        sequence_number=4,
-    )
-    aged = age_transient_history((entry,))
-    assert aged[0].sequence_number == 4
-    assert aged[0].age_submitted_steps == 1
-    with pytest.raises(ValueError):
-        TransientHistoryEntry(
-            visual=entry.visual,
-            created_after_step=1,
-            age_submitted_steps=3,
-            max_age_submitted_steps=3,
-            sequence_number=0,
-        )
-    with pytest.raises(ValueError):
-        TransientHistoryEntry(
-            visual=entry.visual,
-            created_after_step=-1,
-            age_submitted_steps=0,
-            max_age_submitted_steps=1,
-            sequence_number=0,
-        )
+    reset = reset_session(advanced)
+    assert latest_visual_event_batch(reset) is None
+    replayed = submit_next_script_frame(reset)
+    replayed = submit_next_script_frame(replayed)
+    replayed_batch = latest_visual_event_batch(replayed)
+    assert replayed_batch is not None
+    assert tuple(event.event_id for event in replayed_batch.events) != initial_ids
 
 
 def test_concise_log_schema_covers_accepted_basic_and_rejected_ultimate() -> None:

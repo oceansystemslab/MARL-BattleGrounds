@@ -13,7 +13,7 @@ from scripts.dev.visual_debugger.control import (
     submit_joint_action,
     submit_next_script_frame,
 )
-from scripts.dev.visual_debugger.model import DebuggerSession, TransientHistoryEntry
+from scripts.dev.visual_debugger.model import DebuggerSession
 from scripts.dev.visual_debugger.presentation import (
     build_debugger_overlays,
     build_hud_lines,
@@ -118,7 +118,7 @@ def test_target_selection_and_link_reflect_pending_exact_legality() -> None:
 
     assert {
         (selection.global_slot, selection.role) for selection in overlay.selections
-    } == {(7, "target")}
+    } == {(2, "controlled"), (7, "target")}
     assert len(overlay.target_links) == 1
     link = overlay.target_links[0]
     assert (link.source_global_slot, link.target_global_slot, link.lane) == (
@@ -129,14 +129,14 @@ def test_target_selection_and_link_reflect_pending_exact_legality() -> None:
     assert not link.legal
 
 
-def test_transient_history_is_forwarded_without_aging_or_inference() -> None:
+def test_latest_transition_is_converted_without_mutating_session_epoch() -> None:
     session = _session("ultimate_showcase")
     session = submit_next_script_frame(session)
     session = submit_next_script_frame(session)
-    history_before = session.transient_history
+    transition_before = session.last_transition
     overlay = build_debugger_overlays(session)
 
-    assert session.transient_history is history_before
+    assert session.last_transition is transition_before
     assert any(isinstance(value, HealthDeltaVisual) for value in overlay.health_deltas)
     assert any(isinstance(value, ActivationVisual) for value in overlay.activations)
     assert any(isinstance(value, ChargeTrailVisual) for value in overlay.charge_trails)
@@ -145,31 +145,16 @@ def test_transient_history_is_forwarded_without_aging_or_inference() -> None:
     )
 
 
-def test_multiple_charge_trails_preserve_oldest_to_newest_sequence_order() -> None:
+def test_legacy_overlay_contains_only_the_latest_transition_charge() -> None:
     session = _session("ultimate_showcase")
-    trails = tuple(
-        TransientHistoryEntry(
-            visual=ChargeTrailVisual(
-                source_global_slot=1,
-                start=(float(sequence), 0.0),
-                end=(float(sequence + 1), 0.0),
-                target_global_slot=7,
-                path_kind="charge_only",
-                opacity=opacity,
-            ),
-            created_after_step=sequence,
-            age_submitted_steps=age,
-            max_age_submitted_steps=3,
-            sequence_number=sequence,
-        )
-        for sequence, age, opacity in ((4, 2, 0.35), (5, 1, 0.65), (6, 0, 1.0))
-    )
-    overlaid = build_debugger_overlays(
-        replace(session, transient_history=trails)
-    ).charge_trails
+    session = submit_next_script_frame(session)
+    session = submit_next_script_frame(session)
+    overlaid = build_debugger_overlays(session).charge_trails
+    assert len(overlaid) == 1
+    assert overlaid[0].opacity == 1.0
 
-    assert tuple(trail.start[0] for trail in overlaid) == (4.0, 5.0, 6.0)
-    assert tuple(trail.opacity for trail in overlaid) == (0.35, 0.65, 1.0)
+    session = submit_next_script_frame(session)
+    assert build_debugger_overlays(session).charge_trails == ()
 
 
 def test_hud_separates_selected_target_facts_from_exact_pending_legality() -> None:
@@ -247,7 +232,9 @@ def test_snapshot_previous_actions_are_not_drawn_on_the_battlefield() -> None:
 
     assert bool(session.state.has_previous_timestep_joint_action)
     assert not hasattr(overlay, "previous_actions")
-    assert all(selection.role != "controlled" for selection in overlay.selections)
+    assert [
+        (selection.global_slot, selection.role) for selection in overlay.selections
+    ] == [(0, "controlled")]
 
 
 def test_hud_handles_out_of_domain_submitted_movement_without_index_aliasing() -> None:

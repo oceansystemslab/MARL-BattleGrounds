@@ -1,6 +1,5 @@
 """Conservative debugger diagnostics derived from public simulator artifacts."""
 
-from dataclasses import replace
 from typing import cast
 
 import numpy as np
@@ -66,13 +65,19 @@ from marl_battlegrounds.core.types import (
     ResolvedAgentProfile,
     Reward,
 )
-from marl_battlegrounds.rendering import (
-    ActivationVisual,
-    ChargeTrailVisual,
-    HealthDeltaVisual,
-    RejectedActionVisual,
+from marl_battlegrounds.rendering.scene import (
+    EVENT_SCHEMA_VERSION,
+    AcceptedActivationEventV1,
+    ChargeDisplacementEventV1,
+    NetHealthEventV1,
+    RejectedActionEventV1,
+    StatusLifecycleEventV1,
+    VisualEventBatchV1,
 )
-from marl_battlegrounds.rendering.visuals import ActivationKind
+from marl_battlegrounds.rendering.scene import (
+    Lane as SceneLane,
+)
+from marl_battlegrounds.rendering.vocabulary import ActivationTokenId
 from scripts.dev.visual_debugger.model import (
     AcceptedActivation,
     ActionRejection,
@@ -83,7 +88,6 @@ from scripts.dev.visual_debugger.model import (
     StatusKind,
     StatusTransition,
     SubmissionKind,
-    TransientHistoryEntry,
     TransitionView,
 )
 from scripts.dev.visual_debugger.targeting import (
@@ -122,7 +126,6 @@ _STATUS_NAMES: dict[StatusKind, str] = {
     "mage_burst": "BURST",
     "priest_freedom": "FREEDOM",
 }
-_CHARGE_TRAIL_OPACITY = (1.0, 0.65, 0.35)
 
 
 def _move_name(move_action: int) -> str:
@@ -340,7 +343,7 @@ def _accepted_activations(
         target_slot = target_action_to_global_slot(actor_slot, target_action)
         if use_ultimate == 1:
             kind = cast(
-                ActivationKind | None,
+                ActivationTokenId | None,
                 {
                     MAGE_CLASS_ID: "mage_burst",
                     WARRIOR_CLASS_ID: "warrior_charge",
@@ -816,30 +819,81 @@ def _status_applications_from_observation(
     return applications
 
 
-def derive_transient_entries(
+_DIRECT_HEALTH_ACTIVATIONS: tuple[ActivationTokenId, ...] = (
+    "basic_damage",
+    "basic_heal",
+    "holy_word",
+    "warrior_charge",
+    "rogue_poison",
+)
+
+
+def visual_event_id(
+    event_scope: str,
+    transition_id: int,
+    category: str,
+    ordinal: int,
+) -> str:
+    return f"{event_scope}:transition-{transition_id}:{category}-{ordinal}"
+
+
+def _status_application_event_ids(
+    transition: TransitionView,
+    activation_event_ids: tuple[str, ...],
+) -> dict[tuple[int, StatusKind], tuple[str, ...]]:
+    """Map exact accepted activations to the status channels they apply."""
+    mapped: dict[tuple[int, StatusKind], list[str]] = {}
+
+    def add(
+        global_slot: int,
+        status_kind: StatusKind,
+        event_id: str,
+    ) -> None:
+        mapped.setdefault((global_slot, status_kind), []).append(event_id)
+
+    for activation, event_id in zip(
+        transition.accepted_activations,
+        activation_event_ids,
+        strict=True,
+    ):
+        source_class = int(
+            transition.before_observation.self_features[
+                activation.source_global_slot,
+                AGENT_FEATURE_CLASS_ID,
+            ]
+        )
+        target = activation.target_global_slot
+        if activation.kind == "mage_burst":
+            add(activation.source_global_slot, "mage_burst", event_id)
+        elif activation.kind == "warrior_charge" and target is not None:
+            add(target, "slow_warrior_charge", event_id)
+            add(target, "stun_warrior_charge", event_id)
+        elif activation.kind == "hunter_trap" and target is not None:
+            add(target, "stun_hunter_trap", event_id)
+        elif activation.kind == "rogue_poison" and target is not None:
+            add(target, "slow_rogue_poison", event_id)
+            add(target, "stun_rogue_poison", event_id)
+            add(target, "anti_heal_rogue_poison", event_id)
+        elif (
+            activation.kind == "basic_damage"
+            and source_class == HUNTER_CLASS_ID
+            and target is not None
+        ):
+            add(target, "slow_hunter_basic", event_id)
+        elif activation.kind == "basic_heal" and target is not None:
+            add(target, "priest_freedom", event_id)
+    return {key: tuple(value) for key, value in mapped.items()}
+
+
+def derive_visual_event_batch(
     transition: TransitionView,
     *,
-    first_sequence_number: int,
-) -> tuple[TransientHistoryEntry, ...]:
-    """Describe latest public deltas, activations, rejections, and Charge trails."""
-    entries: list[TransientHistoryEntry] = []
-    sequence_number = first_sequence_number
-    for actor in transition.actor_transitions:
-        if actor.net_health_delta != 0.0:
-            entries.append(
-                TransientHistoryEntry(
-                    visual=HealthDeltaVisual(
-                        global_slot=actor.actor_global_slot,
-                        net_delta=actor.net_health_delta,
-                    ),
-                    created_after_step=int(transition.after_state.step_count),
-                    age_submitted_steps=0,
-                    max_age_submitted_steps=1,
-                    sequence_number=sequence_number,
-                )
-            )
-            sequence_number += 1
-
+    event_scope: str = "standalone",
+) -> VisualEventBatchV1:
+    """Describe the one latest transition without presentation-owned history."""
+    if type(event_scope) is not str or not event_scope.strip():
+        raise ValueError("event_scope must be a non-empty string.")
+    transition_id = int(transition.after_state.step_count)
     actor_by_slot = {
         actor.actor_global_slot: actor for actor in transition.actor_transitions
     }
@@ -847,105 +901,221 @@ def derive_transient_entries(
         transition.before_observation.self_features[:, AGENT_FEATURE_CLASS_ID],
         dtype=np.int32,
     )
-    for activation in transition.accepted_activations:
-        entries.append(
-            TransientHistoryEntry(
-                visual=ActivationVisual(
-                    kind=activation.kind,
-                    source_global_slot=activation.source_global_slot,
-                    target_global_slot=activation.target_global_slot,
-                    source_class_id=int(class_ids[activation.source_global_slot]),
+
+    events: list[
+        AcceptedActivationEventV1
+        | NetHealthEventV1
+        | ChargeDisplacementEventV1
+        | StatusLifecycleEventV1
+        | RejectedActionEventV1
+    ] = []
+    activation_event_ids: list[str] = []
+
+    for ordinal, activation in enumerate(transition.accepted_activations):
+        source_actor = actor_by_slot[activation.source_global_slot]
+        target_actor = (
+            actor_by_slot[activation.target_global_slot]
+            if activation.target_global_slot is not None
+            else None
+        )
+        event_id = visual_event_id(
+            event_scope,
+            transition_id,
+            "activation",
+            ordinal,
+        )
+        activation_event_ids.append(event_id)
+        events.append(
+            AcceptedActivationEventV1(
+                event_id=event_id,
+                transition_id=transition_id,
+                token_id=activation.kind,
+                source_global_slot=activation.source_global_slot,
+                target_global_slot=activation.target_global_slot,
+                source_anchor=source_actor.position_before,
+                target_anchor=(
+                    None if target_actor is None else target_actor.position_before
                 ),
-                created_after_step=int(transition.after_state.step_count),
-                age_submitted_steps=0,
-                max_age_submitted_steps=1,
-                sequence_number=sequence_number,
+                target_disclosure=(
+                    "target_none" if activation.target_global_slot is None else "public"
+                ),
+                lane=cast(SceneLane, activation.use_ultimate),
+                source_class_id=int(class_ids[activation.source_global_slot]),
             )
         )
-        sequence_number += 1
-        if (
-            activation.kind == "warrior_charge"
-            and activation.target_global_slot is not None
-        ):
-            actor = actor_by_slot[activation.source_global_slot]
-            path_kind = (
-                "charge_only"
-                if actor.accepted_move_action == MOVE_STAY
-                else "combined_charge_and_movement"
-            )
-            entries.append(
-                TransientHistoryEntry(
-                    visual=ChargeTrailVisual(
-                        source_global_slot=activation.source_global_slot,
-                        start=actor.position_before,
-                        end=actor.position_after,
-                        target_global_slot=activation.target_global_slot,
-                        path_kind=path_kind,
-                        opacity=1.0,
+        if activation.kind == "warrior_charge" and target_actor is not None:
+            events.append(
+                ChargeDisplacementEventV1(
+                    event_id=visual_event_id(
+                        event_scope,
+                        transition_id,
+                        "charge",
+                        ordinal,
                     ),
-                    created_after_step=int(transition.after_state.step_count),
-                    age_submitted_steps=0,
-                    max_age_submitted_steps=3,
-                    sequence_number=sequence_number,
+                    transition_id=transition_id,
+                    source_global_slot=activation.source_global_slot,
+                    target_global_slot=target_actor.actor_global_slot,
+                    start=source_actor.position_before,
+                    end=source_actor.position_after,
+                    path_kind=(
+                        "charge_only"
+                        if source_actor.accepted_move_action == MOVE_STAY
+                        else "combined_charge_and_movement"
+                    ),
                 )
             )
-            sequence_number += 1
 
-    for rejection in transition.rejections:
+    direct_health_targets = {
+        activation.target_global_slot
+        for activation in transition.accepted_activations
+        if activation.kind in _DIRECT_HEALTH_ACTIVATIONS
+        and activation.target_global_slot is not None
+    }
+    health_ordinal = 0
+    for actor in transition.actor_transitions:
+        if (
+            actor.net_health_delta == 0.0
+            and actor.actor_global_slot not in direct_health_targets
+        ):
+            continue
+        outcome = (
+            "damage"
+            if actor.net_health_delta < 0.0
+            else "healing"
+            if actor.net_health_delta > 0.0
+            else "unchanged"
+        )
+        events.append(
+            NetHealthEventV1(
+                event_id=visual_event_id(
+                    event_scope,
+                    transition_id,
+                    "net-health",
+                    health_ordinal,
+                ),
+                transition_id=transition_id,
+                recipient_global_slot=actor.actor_global_slot,
+                recipient_anchor=actor.position_after,
+                health_before=actor.health_before,
+                health_after=actor.health_after,
+                net_delta=actor.net_health_delta,
+                outcome=outcome,
+            )
+        )
+        health_ordinal += 1
+
+    application_event_ids = _status_application_event_ids(
+        transition,
+        tuple(activation_event_ids),
+    )
+    positive_damage_targets = _positive_damage_targets(transition.accepted_activations)
+    status_ordinal = 0
+    for status in transition.status_transitions:
+        if status.change == "unchanged":
+            continue
+        application_ids = application_event_ids.get(
+            (status.global_slot, status.status_kind),
+            (),
+        )
+        change = status.change
+        if (
+            status.status_kind == "stun_hunter_trap"
+            and application_ids
+            and status.duration_before > 1
+            and status.duration_after == _STATUS_CATALOG_DURATIONS["stun_hunter_trap"]
+            and status.global_slot in positive_damage_targets
+        ):
+            change = "trap_broken_and_reapplied"
+        events.append(
+            StatusLifecycleEventV1(
+                event_id=visual_event_id(
+                    event_scope,
+                    transition_id,
+                    "status",
+                    status_ordinal,
+                ),
+                transition_id=transition_id,
+                recipient_global_slot=status.global_slot,
+                recipient_anchor=actor_by_slot[status.global_slot].position_after,
+                token_id=status.status_kind,
+                change=change,
+                duration_before=status.duration_before,
+                duration_after=status.duration_after,
+                source_class_id=status.source_class_id,
+                application_event_ids=application_ids,
+            )
+        )
+        status_ordinal += 1
+
+    for ordinal, rejection in enumerate(transition.rejections):
+        target_action_in_domain = (
+            0 <= rejection.submitted_target_action < NUM_TARGET_ACTIONS
+        )
         target_slot = (
             target_action_to_global_slot(
                 rejection.actor_global_slot,
                 rejection.submitted_target_action,
             )
-            if 0 <= rejection.submitted_target_action < NUM_TARGET_ACTIONS
+            if target_action_in_domain
             else None
         )
+        target_is_public = target_slot is not None and target_slot in actor_by_slot
+        if not target_action_in_domain:
+            disclosure = "invalid"
+        elif target_slot is None:
+            disclosure = "target_none"
+        elif target_is_public:
+            disclosure = "public"
+        else:
+            disclosure = "invalid"
         lane = (
             rejection.submitted_use_ultimate
             if rejection.submitted_use_ultimate in (0, 1)
             else None
         )
-        entries.append(
-            TransientHistoryEntry(
-                visual=RejectedActionVisual(
-                    actor_global_slot=rejection.actor_global_slot,
-                    component=rejection.component,
-                    target_global_slot=target_slot,
-                    lane=lane,
+        events.append(
+            RejectedActionEventV1(
+                event_id=visual_event_id(
+                    event_scope,
+                    transition_id,
+                    "rejection",
+                    ordinal,
                 ),
-                created_after_step=int(transition.after_state.step_count),
-                age_submitted_steps=0,
-                max_age_submitted_steps=1,
-                sequence_number=sequence_number,
+                transition_id=transition_id,
+                actor_global_slot=rejection.actor_global_slot,
+                component=rejection.component,
+                actor_anchor=actor_by_slot[rejection.actor_global_slot].position_before,
+                target_global_slot=target_slot if target_is_public else None,
+                target_anchor=(
+                    actor_by_slot[target_slot].position_before
+                    if target_is_public and target_slot is not None
+                    else None
+                ),
+                target_disclosure=disclosure,
+                lane=lane,
+                movement_mask_value=rejection.movement_mask_value,
+                pair_mask_value=rejection.pair_mask_value,
             )
         )
-        sequence_number += 1
-    return tuple(entries)
+
+    return VisualEventBatchV1(
+        schema_version=EVENT_SCHEMA_VERSION,
+        transition_id=transition_id,
+        simulator_step=transition_id,
+        events=tuple(events),
+    )
 
 
-def age_transient_history(
-    entries: tuple[TransientHistoryEntry, ...],
-) -> tuple[TransientHistoryEntry, ...]:
-    """Age once for a submitted step, update Charge opacity, and expire entries."""
-    aged: list[TransientHistoryEntry] = []
-    for entry in entries:
-        next_age = entry.age_submitted_steps + 1
-        if next_age >= entry.max_age_submitted_steps:
-            continue
-        visual = entry.visual
-        if isinstance(visual, ChargeTrailVisual):
-            visual = replace(
-                visual,
-                opacity=_CHARGE_TRAIL_OPACITY[next_age],
-            )
-        aged.append(
-            replace(
-                entry,
-                visual=visual,
-                age_submitted_steps=next_age,
-            )
-        )
-    return tuple(sorted(aged, key=lambda entry: entry.sequence_number))
+def latest_visual_event_batch(
+    session: DebuggerSession,
+) -> VisualEventBatchV1 | None:
+    """Return a stable batch for the session's authoritative latest transition."""
+    if session.last_transition is None:
+        return None
+    return derive_visual_event_batch(
+        session.last_transition,
+        event_scope=f"run-{session.run_generation}",
+    )
 
 
 def _actor_transition(

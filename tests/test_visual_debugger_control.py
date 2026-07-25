@@ -38,7 +38,6 @@ from scripts.dev.visual_debugger.model import (
     ScenarioFrame,
     SelectedTargetFacts,
     StatusTransition,
-    TransientHistoryEntry,
     TransitionView,
 )
 from scripts.dev.visual_debugger.scenarios import get_scenario
@@ -207,16 +206,10 @@ def test_every_debugger_structure_has_the_exact_audited_field_schema() -> None:
             "accepted_activations",
             "rejections",
         ),
-        TransientHistoryEntry: (
-            "visual",
-            "created_after_step",
-            "age_submitted_steps",
-            "max_age_submitted_steps",
-            "sequence_number",
-        ),
         DebuggerSession: (
             "scenario_name",
             "seed",
+            "run_generation",
             "config",
             "key",
             "state",
@@ -229,8 +222,6 @@ def test_every_debugger_structure_has_the_exact_audited_field_schema() -> None:
             "pending_action",
             "next_script_frame_index",
             "last_transition",
-            "transient_history",
-            "next_transient_sequence_number",
             "show_ranges",
             "verbose_logging",
         ),
@@ -261,6 +252,7 @@ def test_pending_action_validates_head_and_arm_invariants() -> None:
 def test_create_session_has_exact_initial_pending_and_epoch_contract() -> None:
     session = _session()
 
+    assert session.run_generation == 0
     assert session.pending_action == PendingAction(
         move_action=MOVE_STAY,
         selected_global_target_slot=None,
@@ -269,8 +261,6 @@ def test_create_session_has_exact_initial_pending_and_epoch_contract() -> None:
     )
     assert session.last_reward is None
     assert session.last_transition is None
-    assert session.transient_history == ()
-    assert session.next_transient_sequence_number == 0
     assert session.next_script_frame_index == 0
     assert int(session.state.step_count) == 0
     assert not bool(session.done_flags.done)
@@ -684,8 +674,8 @@ def test_reset_replays_identical_initial_session_and_clears_history() -> None:
     assert reset_result.pending_action == PendingAction()
     assert reset_result.last_transition is None
     assert reset_result.last_reward is None
-    assert reset_result.transient_history == ()
     assert reset_result.next_script_frame_index == 0
+    assert reset_result.run_generation == initial.run_generation + 1
 
 
 def test_switch_scenario_preserves_seed_and_toggles_but_clears_live_state() -> None:
@@ -701,8 +691,8 @@ def test_switch_scenario_preserves_seed_and_toggles_but_clears_live_state() -> N
     assert switched.controlled_global_slot == 5
     assert int(switched.state.step_count) == 0
     assert switched.last_transition is None
-    assert switched.transient_history == ()
     assert switched.pending_action == PendingAction()
+    assert switched.run_generation == session.run_generation + 1
 
 
 @pytest.mark.parametrize(

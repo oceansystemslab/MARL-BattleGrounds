@@ -31,12 +31,19 @@ from marl_battlegrounds.rendering import (
     describe_snapshot_overlays,
     merge_battlefield_overlays,
 )
+from marl_battlegrounds.rendering.scene import (
+    AcceptedActivationEventV1,
+    ChargeDisplacementEventV1,
+    NetHealthEventV1,
+    RejectedActionEventV1,
+)
 from scripts.dev.visual_debugger.control import lane_availability
 from scripts.dev.visual_debugger.diagnostics import (
     build_play_by_play_lines,
     derive_selected_target_facts,
     format_ability_name,
     format_agent_identity,
+    latest_visual_event_batch,
     observer_relative_visibility,
 )
 from scripts.dev.visual_debugger.model import DebuggerSession, HudSection
@@ -85,7 +92,9 @@ def build_debugger_overlays(session: DebuggerSession) -> BattlefieldOverlays:
     )
     controlled = session.controlled_global_slot
     target = session.pending_action.selected_global_target_slot
-    selections: list[SelectionVisual] = []
+    selections: list[SelectionVisual] = [
+        SelectionVisual(controlled, "controlled"),
+    ]
     if target is not None:
         selections.append(SelectionVisual(target, "target"))
 
@@ -196,15 +205,46 @@ def build_debugger_overlays(session: DebuggerSession) -> BattlefieldOverlays:
     activations: list[ActivationVisual] = []
     charge_trails: list[ChargeTrailVisual] = []
     rejections: list[RejectedActionVisual] = []
-    for entry in session.transient_history:
-        if isinstance(entry.visual, HealthDeltaVisual):
-            health_deltas.append(entry.visual)
-        elif isinstance(entry.visual, ActivationVisual):
-            activations.append(entry.visual)
-        elif isinstance(entry.visual, ChargeTrailVisual):
-            charge_trails.append(entry.visual)
-        else:
-            rejections.append(entry.visual)
+    event_batch = latest_visual_event_batch(session)
+    if event_batch is not None:
+        for event in event_batch.events:
+            if isinstance(event, NetHealthEventV1):
+                if event.net_delta != 0.0:
+                    health_deltas.append(
+                        HealthDeltaVisual(
+                            global_slot=event.recipient_global_slot,
+                            net_delta=event.net_delta,
+                        )
+                    )
+            elif isinstance(event, AcceptedActivationEventV1):
+                activations.append(
+                    ActivationVisual(
+                        kind=event.token_id,
+                        source_global_slot=event.source_global_slot,
+                        target_global_slot=event.target_global_slot,
+                        source_class_id=event.source_class_id,
+                    )
+                )
+            elif isinstance(event, ChargeDisplacementEventV1):
+                charge_trails.append(
+                    ChargeTrailVisual(
+                        source_global_slot=event.source_global_slot,
+                        start=event.start,
+                        end=event.end,
+                        target_global_slot=event.target_global_slot,
+                        path_kind=event.path_kind,
+                        opacity=1.0,
+                    )
+                )
+            elif isinstance(event, RejectedActionEventV1):
+                rejections.append(
+                    RejectedActionVisual(
+                        actor_global_slot=event.actor_global_slot,
+                        component=event.component,
+                        target_global_slot=event.target_global_slot,
+                        lane=event.lane,
+                    )
+                )
 
     debugger = BattlefieldOverlays(
         selections=tuple(selections),

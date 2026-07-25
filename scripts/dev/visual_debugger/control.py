@@ -23,8 +23,6 @@ from marl_battlegrounds.core.types import (
     Observation,
 )
 from scripts.dev.visual_debugger.diagnostics import (
-    age_transient_history,
-    derive_transient_entries,
     extract_transition_view,
     format_concise_transition,
     format_reset,
@@ -214,6 +212,7 @@ def create_session(
     session = DebuggerSession(
         scenario_name=scenario.name,
         seed=seed,
+        run_generation=0,
         config=config,
         key=next_key,
         state=state,
@@ -229,8 +228,6 @@ def create_session(
         pending_action=PendingAction(),
         next_script_frame_index=0,
         last_transition=None,
-        transient_history=(),
-        next_transient_sequence_number=0,
         show_ranges=show_ranges,
         verbose_logging=verbose_logging,
     )
@@ -465,11 +462,6 @@ def submit_joint_action(
         done_flags=done_flags,
         info=info,
     )
-    aged_history = age_transient_history(session.transient_history)
-    new_entries = derive_transient_entries(
-        transition,
-        first_sequence_number=session.next_transient_sequence_number,
-    )
     next_session = replace(
         session,
         key=next_key,
@@ -481,10 +473,6 @@ def submit_joint_action(
         info=info,
         pending_action=_post_submit_pending(session, next_action_mask),
         last_transition=transition,
-        transient_history=(*aged_history, *new_entries),
-        next_transient_sequence_number=(
-            session.next_transient_sequence_number + len(new_entries)
-        ),
     )
     print(
         format_verbose_transition(transition)
@@ -551,6 +539,7 @@ def reset_session(
     reset_result = replace(
         session,
         scenario_name=scenario.name,
+        run_generation=session.run_generation + 1,
         config=config,
         key=next_key,
         state=state,
@@ -566,8 +555,6 @@ def reset_session(
         pending_action=PendingAction(),
         next_script_frame_index=0,
         last_transition=None,
-        transient_history=(),
-        next_transient_sequence_number=0,
     )
     print(format_reset(reset_result))
     return reset_result
@@ -585,6 +572,7 @@ def switch_scenario(
     switched = DebuggerSession(
         scenario_name=scenario.name,
         seed=session.seed,
+        run_generation=session.run_generation + 1,
         config=config,
         key=next_key,
         state=state,
@@ -600,8 +588,6 @@ def switch_scenario(
         pending_action=PendingAction(),
         next_script_frame_index=0,
         last_transition=None,
-        transient_history=(),
-        next_transient_sequence_number=0,
         show_ranges=session.show_ranges,
         verbose_logging=session.verbose_logging,
     )

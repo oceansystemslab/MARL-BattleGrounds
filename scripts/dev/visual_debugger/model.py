@@ -21,42 +21,20 @@ from marl_battlegrounds.core.types import (
     Observation,
     Reward,
 )
-from marl_battlegrounds.rendering import (
-    ActivationVisual,
-    ChargeTrailVisual,
-    HealthDeltaVisual,
-    RejectedActionVisual,
+from marl_battlegrounds.rendering.scene import RejectionComponent
+from marl_battlegrounds.rendering.vocabulary import (
+    ActivationTokenId,
+    StatusLifecycleKind,
+    StatusTokenId,
 )
-from marl_battlegrounds.rendering.visuals import ActivationKind, RejectionComponent
 
 type Lane = Literal[0, 1]
 type ArmOrigin = Literal["automatic", "explicit"]
 type Relation = Literal["self", "ally", "enemy"]
 type ScenarioMode = Literal["interactive", "scripted"]
 type SubmissionKind = Literal["interactive", "scripted"]
-type StatusKind = Literal[
-    "slow_warrior_charge",
-    "slow_hunter_basic",
-    "slow_rogue_poison",
-    "stun_warrior_charge",
-    "stun_hunter_trap",
-    "stun_rogue_poison",
-    "anti_heal_rogue_poison",
-    "mage_burst",
-    "priest_freedom",
-]
-type StatusChange = Literal[
-    "applied",
-    "refreshed",
-    "decremented",
-    "expired",
-    "trap_broken",
-    "cleared_unclassified",
-    "unchanged",
-]
-type TransientVisual = (
-    HealthDeltaVisual | ActivationVisual | ChargeTrailVisual | RejectedActionVisual
-)
+type StatusKind = StatusTokenId
+type StatusChange = StatusLifecycleKind | Literal["unchanged"]
 
 
 def _validate_slot(global_slot: int, *, name: str) -> None:
@@ -267,7 +245,7 @@ class StatusTransition:
 
 @dataclass(frozen=True, slots=True)
 class AcceptedActivation:
-    kind: ActivationKind
+    kind: ActivationTokenId
     source_global_slot: int
     target_global_slot: int | None
     target_action: int
@@ -308,36 +286,10 @@ class TransitionView:
 
 
 @dataclass(frozen=True, slots=True)
-class TransientHistoryEntry:
-    visual: TransientVisual
-    created_after_step: int
-    age_submitted_steps: int
-    max_age_submitted_steps: int
-    sequence_number: int
-
-    def __post_init__(self) -> None:
-        if self.created_after_step < 0:
-            msg = (
-                "created_after_step must be non-negative; "
-                f"got {self.created_after_step}."
-            )
-            raise ValueError(msg)
-        if not 0 <= self.age_submitted_steps < self.max_age_submitted_steps:
-            msg = (
-                "transient age must satisfy 0 <= age < max_age; "
-                f"got age={self.age_submitted_steps}, "
-                f"max_age={self.max_age_submitted_steps}."
-            )
-            raise ValueError(msg)
-        if self.sequence_number < 0:
-            msg = f"sequence_number must be non-negative; got {self.sequence_number}."
-            raise ValueError(msg)
-
-
-@dataclass(frozen=True, slots=True)
 class DebuggerSession:
     scenario_name: str
     seed: int
+    run_generation: int
     config: EnvConfig
     key: Array
     state: EnvState
@@ -350,12 +302,13 @@ class DebuggerSession:
     pending_action: PendingAction
     next_script_frame_index: int
     last_transition: TransitionView | None
-    transient_history: tuple[TransientHistoryEntry, ...]
-    next_transient_sequence_number: int
     show_ranges: bool
     verbose_logging: bool
 
     def __post_init__(self) -> None:
+        if type(self.run_generation) is not int or self.run_generation < 0:
+            msg = "run_generation must be a non-negative Python int."
+            raise ValueError(msg)
         _validate_slot(self.controlled_global_slot, name="controlled_global_slot")
         if not bool(self.config.agent_profile.active_mask[self.controlled_global_slot]):
             msg = f"controlled slot g{self.controlled_global_slot} is inactive."
@@ -368,7 +321,4 @@ class DebuggerSession:
             raise ValueError(msg)
         if self.next_script_frame_index < 0:
             msg = "next_script_frame_index must be non-negative."
-            raise ValueError(msg)
-        if self.next_transient_sequence_number < 0:
-            msg = "next_transient_sequence_number must be non-negative."
             raise ValueError(msg)
