@@ -1,6 +1,6 @@
 """Edge-heavy tests for target facts, transition inference, logs, and history."""
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 
 import jax.numpy as jnp
 import numpy as np
@@ -12,6 +12,7 @@ from scripts.dev.visual_debugger.control import (
     cycle_controlled_actor,
     make_neutral_joint_action,
     select_clicked_target,
+    select_controlled_actor,
     submit_interactive,
     submit_joint_action,
     submit_next_script_frame,
@@ -30,6 +31,11 @@ from scripts.dev.visual_debugger.model import (
     TransientHistoryEntry,
 )
 from scripts.dev.visual_debugger.scenarios import get_scenario
+from scripts.dev.visual_debugger.targeting import global_slot_to_target_action
+from tests.visual_debugger_fixtures import (
+    rejection_lane_scenario,
+    submit_fixture_frame,
+)
 
 from marl_battlegrounds.core.geometry import has_clear_line_of_sight
 from marl_battlegrounds.core.types import (
@@ -52,6 +58,34 @@ def _session(
         controlled_global_slot=controlled_slot,
         show_ranges=True,
         verbose_logging=False,
+    )
+
+
+def _rejection_session() -> DebuggerSession:
+    scenario = rejection_lane_scenario()
+    return create_session(
+        scenario,
+        seed=0,
+        controlled_global_slot=None,
+        show_ranges=True,
+        verbose_logging=False,
+    )
+
+
+def _rejected_ultimate_with_movement() -> DebuggerSession:
+    session = _session("arena_5v5", 2)
+    target_action = global_slot_to_target_action(2, 7)
+    neutral = make_neutral_joint_action()
+    action = neutral._replace(
+        move=neutral.move.at[2].set(MOVE_EAST),
+        select_target=neutral.select_target.at[2].set(target_action),
+        use_ultimate=neutral.use_ultimate.at[2].set(1),
+    )
+    return submit_joint_action(
+        session,
+        action,
+        submission_kind="interactive",
+        report_actor_slots=(2,),
     )
 
 
@@ -158,25 +192,22 @@ def test_selected_target_facts_read_relation_local_visibility_masks(
 
 
 def test_selected_target_facts_report_individual_inclusive_ranges() -> None:
-    scenario = get_scenario("acceptance_lane_lab")
-    session = _session("acceptance_lane_lab")
-    expected = (
-        (False, False, False),
-        (False, False, False),
-        (False, False, False),
-        (True, False, False),
-        (True, True, False),
-        (True, True, True),
+    session = _rejection_session()
+    profile = session.config.agent_profile
+    cases = (
+        (float(profile.observation_radii[0]), "inside_observation_radius"),
+        (float(profile.basic_interaction_radii[0]), "inside_basic_radius"),
+        (float(profile.ultimate_interaction_radii[0]), "inside_ultimate_radius"),
     )
-    for expected_membership in expected:
-        facts = _facts(session, 5)
-        assert (
-            facts.inside_observation_radius,
-            facts.inside_basic_radius,
-            facts.inside_ultimate_radius,
-        ) == expected_membership
-        if int(session.state.step_count) < len(scenario.frames):
-            session = submit_next_script_frame(session)
+    for distance, attribute in cases:
+        positions = session.state.agent_positions.at[5].set(
+            session.state.agent_positions[0] + jnp.asarray((distance, 0.0))
+        )
+        exact = replace(
+            session,
+            state=session.state._replace(agent_positions=positions),
+        )
+        assert getattr(_facts(exact, 5), attribute) is True
 
 
 def test_nontargeted_mage_ultimate_range_is_not_applicable() -> None:
@@ -186,10 +217,11 @@ def test_nontargeted_mage_ultimate_range_is_not_applicable() -> None:
 
 
 def test_selected_target_facts_do_not_derive_lanes_from_geometry() -> None:
-    session = _session("acceptance_lane_lab")
+    session = _rejection_session()
     facts = _facts(session, 5)
     assert facts.has_clear_line_of_sight
-    assert not facts.inside_observation_radius
+    assert facts.inside_observation_radius
+    assert not facts.inside_basic_radius
     joint = session.action_mask.select_target_use_ultimate_joint_mask.at[
         0,
         6,
@@ -208,11 +240,12 @@ def test_selected_target_facts_do_not_derive_lanes_from_geometry() -> None:
     assert overridden is not None
     assert overridden.lane_0_available
     assert overridden.lane_1_available
-    assert not overridden.inside_observation_radius
+    assert overridden.inside_observation_radius
+    assert not overridden.inside_basic_radius
 
 
 def test_selected_target_facts_reject_inactive_actor_and_target() -> None:
-    session = _session("acceptance_lane_lab")
+    session = _rejection_session()
     with pytest.raises(ValueError):
         derive_selected_target_facts(
             config=session.config,
@@ -236,11 +269,12 @@ def test_selected_target_facts_reject_inactive_actor_and_target() -> None:
 def test_selected_target_facts_recompute_after_actor_switch_and_successor_step() -> (
     None
 ):
-    session = select_clicked_target(_session("acceptance_lane_lab"), 5)
+    scenario = rejection_lane_scenario()
+    session = select_clicked_target(_rejection_session(), 5)
     before = _facts(session, 5)
     assert before.relation == "enemy"
     assert before.target_action == 6
-    assert before.center_distance == pytest.approx(9.0)
+    assert before.center_distance == pytest.approx(4.0)
 
     switched = cycle_controlled_actor(session, 1)
     assert switched.pending_action.selected_global_target_slot == 5
@@ -251,18 +285,19 @@ def test_selected_target_facts_recompute_after_actor_switch_and_successor_step()
     assert switched_facts.center_distance == pytest.approx(0.0)
     assert switched_facts.observer_visible
 
-    successor = submit_next_script_frame(session)
+    successor = submit_fixture_frame(session, scenario.frames[0])
     assert successor.pending_action.selected_global_target_slot == 5
     successor_facts = _facts(successor, 5)
-    assert successor_facts.center_distance == pytest.approx(8.0)
+    assert successor_facts.center_distance == pytest.approx(3.0)
     assert successor_facts.target_action == 6
 
 
 def test_accepted_action_comes_from_successor_history() -> None:
-    session = _session("acceptance_lane_lab")
+    scenario = rejection_lane_scenario()
+    session = _rejection_session()
     with pytest.raises(ValueError):
         accepted_action_from_successor(session.state)
-    submitted = submit_next_script_frame(session)
+    submitted = submit_fixture_frame(session, scenario.frames[0])
     accepted = accepted_action_from_successor(submitted.state)
     assert accepted.move is submitted.state.previous_timestep_move_actions
     assert accepted.select_target is (
@@ -274,7 +309,8 @@ def test_accepted_action_comes_from_successor_history() -> None:
 
 
 def test_diagnostics_report_accepted_move_and_rejected_combat() -> None:
-    session = submit_next_script_frame(_session("acceptance_lane_lab"))
+    scenario = rejection_lane_scenario()
+    session = submit_fixture_frame(_rejection_session(), scenario.frames[0])
     transition = session.last_transition
     assert transition is not None
     actor = transition.actor_transitions[0]
@@ -290,7 +326,7 @@ def test_diagnostics_report_accepted_move_and_rejected_combat() -> None:
 
 
 def test_out_of_domain_tuple_is_classified_without_unsafe_mask_indexing() -> None:
-    session = _session("acceptance_lane_lab")
+    session = _rejection_session()
     action = make_neutral_joint_action()._replace(
         select_target=make_neutral_joint_action()
         .select_target.at[0]
@@ -343,8 +379,8 @@ def test_non_health_activations_do_not_create_zero_health_delta_visuals() -> Non
         if isinstance(entry.visual, HealthDeltaVisual)
     }
 
-    assert health_visual_slots == {2, 7}
-    assert 5 not in health_visual_slots  # Rogue Poison carries no direct health delta.
+    assert health_visual_slots == {2, 5, 7}
+    assert 5 in health_visual_slots  # Rogue Poison carries approved direct damage.
     assert 6 not in health_visual_slots  # Hunter Trap carries no direct health delta.
 
 
@@ -397,11 +433,11 @@ def test_status_application_refresh_decrement_expiration_and_trap_break() -> Non
 
 
 def test_trap_one_to_zero_with_accepted_damage_is_not_overclaimed() -> None:
-    scenario = get_scenario("acceptance_lane_lab")
-    session = _session("acceptance_lane_lab")
-    for _ in scenario.frames:
-        session = submit_next_script_frame(session)
-    # Trap is now 4. Three canonical neutral steps expose durations 3, 2, 1.
+    session = _session("ultimate_showcase")
+    session = submit_next_script_frame(session)
+    session = submit_next_script_frame(session)
+    assert int(session.state.stun_durations[6, 1]) == 4
+    # Three canonical neutral steps expose durations 3, 2, 1.
     for _ in range(3):
         session = submit_joint_action(
             session,
@@ -409,15 +445,16 @@ def test_trap_one_to_zero_with_accepted_damage_is_not_overclaimed() -> None:
             submission_kind="interactive",
             report_actor_slots=(0,),
         )
-    assert int(session.state.stun_durations[5, 1]) == 1
-    session = select_clicked_target(session, 5)
+    assert int(session.state.stun_durations[6, 1]) == 1
+    session = select_controlled_actor(session, 2)
+    session = select_clicked_target(session, 6)
     damaged = submit_interactive(session)
     transition = damaged.last_transition
     assert transition is not None
     trap = next(
         status
         for status in transition.status_transitions
-        if status.global_slot == 5 and status.status_kind == "stun_hunter_trap"
+        if status.global_slot == 6 and status.status_kind == "stun_hunter_trap"
     )
     assert trap.duration_before == 1
     assert trap.duration_after == 0
@@ -540,23 +577,33 @@ def test_concise_log_schema_covers_accepted_basic_and_rejected_ultimate() -> Non
     transition = basic.last_transition
     assert transition is not None
     text = format_concise_transition(transition)
-    assert "STEP scenario=basic_support 0->1 terminated=0 truncated=0" in text
+    play, technical = text.split("\n\nTECHNICAL DIAGNOSTICS\n")
+    assert play.startswith("PLAY-BY-PLAY\n")
+    assert "TEAM A MAGE (id_0) attempted BASIC on TEAM B MAGE (id_5)." in play
+    assert "TEAM B MAGE (id_5) lost 13.80 HP." in play
+    assert "Accepted contributors included TEAM A MAGE (id_0) BASIC." in play
+    assert "Active public multipliers included" in play
+    assert " g0" not in play
     assert (
-        "ACTOR g0 A/Mage target=g5/t6 lanes=0:1,1:0 submitted=Stay[0],Basic[0]"
-    ) in text
-    assert "HEALTH g5 80.00->66.20 net=-13.80" in text
-    assert "EVENT basic_damage source=g0 recipient=g5" in text
+        "Transition   scenario=basic_support step=0 -> 1 terminated=0 truncated=0"
+        in technical
+    )
+    assert "Actor id_0 [g0] submitted move=Stay[0] target=t6 ultimate=0" in technical
+    assert "Health id_5 80.00 -> 66.20 net=-13.80" in technical
+    assert "Activation basic_damage g0->g5" in technical
 
-    lane = _session("acceptance_lane_lab")
-    for _ in range(5):
-        lane = submit_next_script_frame(lane)
-    transition = lane.last_transition
+    rejected = _rejected_ultimate_with_movement()
+    transition = rejected.last_transition
     assert transition is not None
     text = format_concise_transition(transition)
-    assert "submitted=East[3],Ultimate[1]" in text
-    assert "accepted=East[3],t0,u0" in text
-    assert "movement=ACCEPTED combat=REJECTED" in text
-    assert "EVENT rejection component=combat actor=g0 mask=0" in text
+    play, technical = text.split("\n\nTECHNICAL DIAGNOSTICS\n")
+    assert "TEAM A HUNTER (id_2) attempted TRAP on TEAM B HUNTER (id_7)." in play
+    assert "TRAP was rejected." in play
+    assert "East movement was accepted." in play
+    assert "Actor id_2 [g2] submitted move=East[3] target=t8 ultimate=1" in technical
+    assert "accepted  move=East[3] target=t0 ultimate=0" in technical
+    assert "mask move=1 lane0=0 lane1=0 pair=0 domain=1" in technical
+    assert "Rejection combat actor=g2 mask=0" in technical
 
 
 def test_concise_logs_cover_all_required_effect_and_lifecycle_examples() -> None:
@@ -567,13 +614,15 @@ def test_concise_logs_cover_all_required_effect_and_lifecycle_examples() -> None
     assert transition is not None
     text = format_concise_transition(transition)
     for expected in (
-        "EVENT mage_burst source=g0 recipient=none",
-        "EVENT warrior_charge source=g1 recipient=g7 path=charge_only",
-        "EVENT hunter_trap source=g2 recipient=g6",
-        "EVENT rogue_poison source=g3 recipient=g5",
-        "EVENT holy_word source=g4 recipient=g2",
-        "COOLDOWN g0 0->30 started",
-        "STATUS g6 stun_hunter_trap 0->4 applied",
+        "TEAM A MAGE (id_0) attempted BURST as a self activation.",
+        "TEAM A WARRIOR (id_1) attempted CHARGE on TEAM B HUNTER (id_7).",
+        "TEAM A HUNTER (id_2) attempted TRAP on TEAM B WARRIOR (id_6).",
+        "TEAM A ROGUE (id_3) attempted POISON on TEAM B MAGE (id_5).",
+        "TEAM A PRIEST (id_4) attempted HOLY WORD on TEAM A HUNTER (id_2).",
+        "TEAM B MAGE (id_5) lost 10.00 HP.",
+        "Successor state: TEAM A MAGE (id_0) Ultimate cooldown is 30.",
+        "Successor state: TEAM B WARRIOR (id_6) has TRAP 4 (applied).",
+        "Activation rogue_poison g3->g5",
     ):
         assert expected in text
 
@@ -581,9 +630,12 @@ def test_concise_logs_cover_all_required_effect_and_lifecycle_examples() -> None
     transition = showcase.last_transition
     assert transition is not None
     text = format_concise_transition(transition)
-    assert "STATUS g6 stun_hunter_trap 4->0 trap_broken" in text
-    assert "COOLDOWN g0 30->29 decremented" in text
-    assert "STATUS g5 stun_rogue_poison 1->0 expired" in text
+    assert (
+        "Successor state: TEAM B WARRIOR (id_6) has no TRAP "
+        "(broken after an accepted damage activation)."
+    ) in text
+    assert "Cooldown id_0 30->29" in text
+    assert "Successor state: TEAM B MAGE (id_5) has no POISON-STUN (expired)." in text
 
     support = _session("basic_support")
     support = submit_next_script_frame(support)
@@ -591,42 +643,46 @@ def test_concise_logs_cover_all_required_effect_and_lifecycle_examples() -> None
     transition = support.last_transition
     assert transition is not None
     text = format_concise_transition(transition)
-    assert "EVENT basic_heal source=g2 recipient=g2" in text
-    assert "EVENT basic_damage source=g7 recipient=g2" in text
-    assert "HEALTH g2 92.00->92.00 net=+0.00 gross contributions not exposed" in text
+    assert "TEAM A PRIEST (id_2) had a net health change of 0.00 HP." in text
+    assert (
+        "Accepted contributors included TEAM A PRIEST (id_2) BASIC "
+        "and TEAM B HUNTER (id_7) BASIC."
+    ) in text
+    assert (
+        "The public transition does not expose the gross damage/healing split." in text
+    )
+    assert "Health id_2 92.00 -> 92.00 net=+0.00" in text
 
 
 def test_verbose_log_adds_geometry_mask_aura_speed_and_episode_fields() -> None:
-    session = _session("acceptance_lane_lab")
-    for _ in range(6):
-        session = submit_next_script_frame(session)
+    session = _rejected_ultimate_with_movement()
     transition = session.last_transition
     assert transition is not None
     text = format_verbose_transition(transition)
 
-    assert "TARGET actor=g0 global=g5 relative=t6 relation=enemy distance=4.00" in text
-    assert (
-        "GEOMETRY actor=g0 target=g5 los=1 visible=1 observation_range=1 "
-        "basic_range=1 ultimate_range=1"
-    ) in text
-    assert "MASK actor=g0 move[0]=1 target=t6 lane0=1 lane1=1" in text
-    assert "SUBMITTED actor=g0 move=Stay[0] target=g5/t6 use_ultimate=1" in text
-    assert "ACCEPTED actor=g0 move=Stay[0] target=t6 use_ultimate=1" in text
-    assert "AURA actor=g0 mage=" in text
-    assert "SPEED actor=g0" in text
-    assert "EPISODE reward=+0.00 terminated=0 truncated=0" in text
+    assert "Target g2->g7 t8 relation=enemy distance=" in text
+    assert "Geometry g2->g7 los=" in text
+    assert "visible=" in text
+    assert "observation=" in text
+    assert "basic=" in text
+    assert "ultimate=" in text
+    assert "mask move=1 lane0=0 lane1=0 pair=0 domain=1" in text
+    assert "Position g2" in text
+    assert "Aura g2 mage=" in text
+    assert "Speed g2" in text
+    assert "Reward g2 +0.00" in text
     assert "Array(" not in text
     assert "[[" not in text
 
 
 def test_geometry_facts_are_not_logged_as_rejection_causes() -> None:
-    session = submit_next_script_frame(_session("acceptance_lane_lab"))
+    session = _rejected_ultimate_with_movement()
     transition = session.last_transition
     assert transition is not None
     text = format_verbose_transition(transition)
     assert "los=1" in text
     assert "visible=0" in text
-    assert "component=combat" in text
+    assert "Rejection combat actor=g2 mask=0" in text
     for forbidden in (
         "rejected because",
         "cause=los",
@@ -637,8 +693,9 @@ def test_geometry_facts_are_not_logged_as_rejection_causes() -> None:
 
 
 def test_extract_transition_retains_every_public_before_after_artifact() -> None:
-    before = _session("acceptance_lane_lab")
-    after = submit_next_script_frame(before)
+    scenario = rejection_lane_scenario()
+    before = _rejection_session()
+    after = submit_fixture_frame(before, scenario.frames[0])
     transition = after.last_transition
     assert transition is not None
     reconstructed = extract_transition_view(
@@ -671,14 +728,14 @@ def test_extract_transition_retains_every_public_before_after_artifact() -> None
 def test_interactive_builder_does_not_suppress_illegal_pair_before_diagnostics() -> (
     None
 ):
-    session = select_clicked_target(_session("acceptance_lane_lab"), 5)
+    session = select_clicked_target(_session("arena_5v5", 2), 7)
     session = arm_ultimate(session)
     action = build_interactive_joint_action(
         session.config,
         session.controlled_global_slot,
         session.pending_action,
     )
-    assert tuple(int(head[0]) for head in action) == (MOVE_STAY, 6, 1)
+    assert tuple(int(head[2]) for head in action) == (MOVE_STAY, 8, 1)
 
 
 @pytest.mark.parametrize(
@@ -689,7 +746,7 @@ def test_every_out_of_domain_head_canonicalizes_complete_tuple_in_diagnostics(
     head_name: str,
     value: int,
 ) -> None:
-    session = _session("acceptance_lane_lab")
+    session = _rejection_session()
     action = make_neutral_joint_action()
     replacement = getattr(action, head_name).at[0].set(value)
     action = action._replace(**{head_name: replacement})
@@ -709,7 +766,5 @@ def test_every_out_of_domain_head_canonicalizes_complete_tuple_in_diagnostics(
     }
     text = format_verbose_transition(transition)
     if head_name == "select_target":
-        assert (
-            "TARGET actor=g0 global=invalid relative=t-1 relation=n/a distance=n/a"
-        ) in text
-        assert "GEOMETRY actor=g0 target=invalid los=n/a" in text
+        assert "Target g0 invalid t-1; relation=n/a distance=n/a" in text
+        assert "Geometry g0->invalid los=n/a" in text

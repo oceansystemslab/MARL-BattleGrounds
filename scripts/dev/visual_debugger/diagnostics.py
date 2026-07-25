@@ -9,6 +9,7 @@ from marl_battlegrounds.core.combat import (
     HUNTER_BASIC_SLOW_DURATION_TICKS,
     HUNTER_TRAP_STUN_DURATION_TICKS,
     MAGE_BURST_DAMAGE_DURATION_TICKS,
+    MAGE_BURST_DAMAGE_MULTIPLIER,
     ONLY_NONE_TARGET_ULTIMATE_MODE,
     PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS,
     ROGUE_POISON_ANTI_HEAL_DURATION_TICKS,
@@ -21,10 +22,12 @@ from marl_battlegrounds.core.combat import (
 from marl_battlegrounds.core.geometry import has_clear_line_of_sight
 from marl_battlegrounds.core.types import (
     AGENT_FEATURE_ACTIVE,
+    AGENT_FEATURE_ANTI_HEAL_ROGUE_POISON_MULTIPLIER,
     AGENT_FEATURE_BASE_MOVEMENT_SPEED,
     AGENT_FEATURE_BASIC_INTERACTION_RADIUS,
     AGENT_FEATURE_CLASS_ID,
     AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_AURA_MULTIPLIER,
+    AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_BURST_DURATION,
     AGENT_FEATURE_DAMAGE_MITIGATION_WARRIOR_AURA_MULTIPLIER,
     AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED,
     AGENT_FEATURE_MAX_HEALTH,
@@ -101,6 +104,24 @@ _MOVE_NAMES = (
 )
 _CLASS_NAMES = ("Neutral", "Mage", "Warrior", "Hunter", "Rogue", "Priest")
 _TEAM_NAMES = {1: "A", 2: "B"}
+_ULTIMATE_NAMES = {
+    MAGE_CLASS_ID: "BURST",
+    WARRIOR_CLASS_ID: "CHARGE",
+    HUNTER_CLASS_ID: "TRAP",
+    ROGUE_CLASS_ID: "POISON",
+    PRIEST_CLASS_ID: "HOLY WORD",
+}
+_STATUS_NAMES: dict[StatusKind, str] = {
+    "slow_warrior_charge": "CHARGE-SLOW",
+    "slow_hunter_basic": "HUNTER-SLOW",
+    "slow_rogue_poison": "POISON-SLOW",
+    "stun_warrior_charge": "CHARGE-STUN",
+    "stun_hunter_trap": "TRAP",
+    "stun_rogue_poison": "POISON-STUN",
+    "anti_heal_rogue_poison": "ANTI-HEAL",
+    "mage_burst": "BURST",
+    "priest_freedom": "FREEDOM",
+}
 _CHARGE_TRAIL_OPACITY = (1.0, 0.65, 0.35)
 
 
@@ -108,6 +129,34 @@ def _move_name(move_action: int) -> str:
     if 0 <= move_action < len(_MOVE_NAMES):
         return _MOVE_NAMES[move_action]
     return "Invalid"
+
+
+def format_agent_identity(class_id: int, team_id: int, global_slot: int) -> str:
+    """Return one shared public identity without exposing relative target indices."""
+    class_name = (
+        _CLASS_NAMES[class_id].upper()
+        if 0 <= class_id < len(_CLASS_NAMES)
+        else "UNKNOWN"
+    )
+    team_name = _TEAM_NAMES.get(team_id, "?")
+    return f"TEAM {team_name} {class_name} (id_{global_slot})"
+
+
+def format_ability_name(class_id: int, use_ultimate: int) -> str:
+    """Return the public Basic/Ultimate name for one class and lane."""
+    if use_ultimate == 0:
+        return "BASIC"
+    if use_ultimate == 1:
+        return _ULTIMATE_NAMES.get(class_id, "ULTIMATE")
+    return "INVALID ABILITY"
+
+
+def _observation_identity(observation: Observation, global_slot: int) -> str:
+    return format_agent_identity(
+        int(observation.self_features[global_slot, AGENT_FEATURE_CLASS_ID]),
+        int(observation.self_features[global_slot, AGENT_FEATURE_TEAM_ID]),
+        global_slot,
+    )
 
 
 def _validate_active_slot(
@@ -331,7 +380,7 @@ def _positive_damage_targets(
         activation.target_global_slot
         for activation in activations
         if activation.target_global_slot is not None
-        and activation.kind in ("basic_damage", "warrior_charge")
+        and activation.kind in ("basic_damage", "warrior_charge", "rogue_poison")
     }
 
 
@@ -910,155 +959,398 @@ def _actor_transition(
     )
 
 
-def _target_label(actor_slot: int, target_action: int) -> str:
-    if not 0 <= target_action < NUM_TARGET_ACTIONS:
-        return f"invalid/t{target_action}"
-    target_slot = target_action_to_global_slot(actor_slot, target_action)
-    return (
-        f"none/t{target_action}"
-        if target_slot is None
-        else f"g{target_slot}/t{target_action}"
+def _activation_contributor(
+    transition: TransitionView,
+    activation: AcceptedActivation,
+) -> str:
+    class_id = int(
+        transition.before_observation.self_features[
+            activation.source_global_slot,
+            AGENT_FEATURE_CLASS_ID,
+        ]
     )
+    identity = _observation_identity(
+        transition.before_observation,
+        activation.source_global_slot,
+    )
+    return f"{identity} {format_ability_name(class_id, activation.use_ultimate)}"
 
 
-def format_concise_transition(transition: TransitionView) -> str:
-    """Format stable human-readable lines without raw tensor dumps."""
-    lines = [
-        (
-            f"STEP scenario={transition.scenario_name} "
-            f"{int(transition.before_state.step_count)}"
-            f"->{int(transition.after_state.step_count)} "
-            f"terminated={int(bool(transition.done_flags.terminated))} "
-            f"truncated={int(bool(transition.done_flags.truncated))}"
+def _public_multiplier_descriptions(
+    transition: TransitionView,
+    target_slot: int,
+    activations: tuple[AcceptedActivation, ...],
+) -> tuple[str, ...]:
+    """List same-epoch public multipliers without assigning gross contributions."""
+    actor_by_slot = {
+        actor.actor_global_slot: actor for actor in transition.actor_transitions
+    }
+    features = transition.before_observation.self_features
+    descriptions: list[str] = []
+    for activation in activations:
+        source_slot = activation.source_global_slot
+        source = actor_by_slot[source_slot]
+        source_identity = _observation_identity(
+            transition.before_observation,
+            source_slot,
         )
-    ]
-    class_ids = np.asarray(
-        transition.before_observation.self_features[:, AGENT_FEATURE_CLASS_ID],
-        dtype=np.int32,
-    )
-    team_ids = np.asarray(
-        transition.before_observation.self_features[:, AGENT_FEATURE_TEAM_ID],
-        dtype=np.int32,
-    )
+        if activation.kind in (
+            "basic_damage",
+            "warrior_charge",
+            "rogue_poison",
+        ):
+            burst_duration = int(
+                features[
+                    source_slot,
+                    AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_BURST_DURATION,
+                ]
+            )
+            if burst_duration > 0:
+                descriptions.append(
+                    f"{source_identity} BURST {MAGE_BURST_DAMAGE_MULTIPLIER:.2f}x"
+                )
+            if not np.isclose(source.mage_aura_before, 1.0):
+                descriptions.append(
+                    f"{source_identity} Mage aura {source.mage_aura_before:.2f}x"
+                )
+            target = actor_by_slot[target_slot]
+            if not np.isclose(target.warrior_aura_before, 1.0):
+                target_identity = _observation_identity(
+                    transition.before_observation,
+                    target_slot,
+                )
+                descriptions.append(
+                    f"{target_identity} Warrior mitigation "
+                    f"{target.warrior_aura_before:.2f}x"
+                )
+        elif activation.kind in ("basic_heal", "holy_word"):
+            anti_heal = float(
+                features[
+                    target_slot,
+                    AGENT_FEATURE_ANTI_HEAL_ROGUE_POISON_MULTIPLIER,
+                ]
+            )
+            if not np.isclose(anti_heal, 1.0):
+                target_identity = _observation_identity(
+                    transition.before_observation,
+                    target_slot,
+                )
+                descriptions.append(f"{target_identity} ANTI-HEAL {anti_heal:.2f}x")
+    return tuple(dict.fromkeys(descriptions))
+
+
+def _human_join(values: tuple[str, ...]) -> str:
+    if len(values) == 1:
+        return values[0]
+    if len(values) == 2:
+        return f"{values[0]} and {values[1]}"
+    return f"{', '.join(values[:-1])}, and {values[-1]}"
+
+
+def build_play_by_play_lines(transition: TransitionView) -> tuple[str, ...]:
+    """Describe only public attempts, accepted categories, and successor facts."""
+    lines: list[str] = []
+    observation = transition.before_observation
     for actor_slot in transition.report_actor_slots:
         actor = _actor_transition(transition, actor_slot)
-        submitted_kind = "Ultimate" if actor.submitted_use_ultimate == 1 else "Basic"
-        combat_label = (
-            "CANONICAL-NOOP"
-            if actor.submitted_target_action == 0
+        actor_identity = _observation_identity(observation, actor_slot)
+        class_id = int(observation.self_features[actor_slot, AGENT_FEATURE_CLASS_ID])
+        ability = format_ability_name(class_id, actor.submitted_use_ultimate)
+        target_in_domain = 0 <= actor.submitted_target_action < NUM_TARGET_ACTIONS
+        target_slot = (
+            target_action_to_global_slot(actor_slot, actor.submitted_target_action)
+            if target_in_domain
+            else None
+        )
+        canonical_noop = (
+            actor.submitted_target_action == 0
             and actor.submitted_use_ultimate == 0
             and actor.combat_pair_accepted
-            else "ACCEPTED"
-            if actor.combat_pair_accepted
-            else "REJECTED"
         )
-        lines.append(
-            f"ACTOR g{actor_slot} "
-            f"{_TEAM_NAMES[int(team_ids[actor_slot])]}/"
-            f"{_CLASS_NAMES[int(class_ids[actor_slot])]} "
-            f"target={_target_label(actor_slot, actor.submitted_target_action)} "
-            f"lanes=0:{int(actor.submitted_lane_0_value)},"
-            f"1:{int(actor.submitted_lane_1_value)} "
-            f"submitted={_move_name(actor.submitted_move_action)}"
-            f"[{actor.submitted_move_action}],"
-            f"{submitted_kind}[{actor.submitted_use_ultimate}] "
-            f"accepted={_move_name(actor.accepted_move_action)}"
-            f"[{actor.accepted_move_action}],"
-            f"t{actor.accepted_target_action},"
-            f"u{actor.accepted_use_ultimate} "
-            f"movement={'ACCEPTED' if actor.movement_accepted else 'REJECTED'} "
-            f"combat={combat_label}"
-        )
-        if actor.realized_displacement != (0.0, 0.0):
+        if canonical_noop:
+            lines.append(f"{actor_identity} submitted no combat action.")
+        elif (
+            target_slot is None
+            and actor.submitted_target_action == 0
+            and actor.submitted_use_ultimate == 1
+        ):
+            lines.append(f"{actor_identity} attempted {ability} as a self activation.")
+        elif target_slot is None:
             lines.append(
-                f"POSITION g{actor_slot} "
-                f"({actor.position_before[0]:.2f},{actor.position_before[1]:.2f})"
-                f"->({actor.position_after[0]:.2f},{actor.position_after[1]:.2f}) "
-                f"delta=({actor.realized_displacement[0]:+.2f},"
-                f"{actor.realized_displacement[1]:+.2f})"
+                f"{actor_identity} attempted {ability} with an invalid target."
+            )
+        else:
+            target_identity = _observation_identity(observation, target_slot)
+            lines.append(f"{actor_identity} attempted {ability} on {target_identity}.")
+        if not canonical_noop:
+            result = "accepted" if actor.combat_pair_accepted else "rejected"
+            lines.append(f"{ability} was {result}.")
+        if actor.submitted_move_action != MOVE_STAY or not actor.movement_accepted:
+            result = "accepted" if actor.movement_accepted else "rejected"
+            lines.append(
+                f"{_move_name(actor.submitted_move_action)} movement was {result}."
             )
 
-    activation_targets = {
-        activation.target_global_slot
-        for activation in transition.accepted_activations
-        if activation.target_global_slot is not None
-    }
     health_capable_kinds = {
         "basic_damage",
         "basic_heal",
         "holy_word",
         "warrior_charge",
+        "rogue_poison",
     }
-    contributions: dict[int, list[str]] = {}
+    contributions: dict[int, list[AcceptedActivation]] = {}
     for activation in transition.accepted_activations:
         if (
             activation.target_global_slot is not None
             and activation.kind in health_capable_kinds
         ):
             contributions.setdefault(activation.target_global_slot, []).append(
-                activation.kind
+                activation
+            )
+    for actor in transition.actor_transitions:
+        actor_contributions = tuple(contributions.get(actor.actor_global_slot, ()))
+        if actor.net_health_delta == 0.0 and not actor_contributions:
+            continue
+        identity = _observation_identity(observation, actor.actor_global_slot)
+        if actor.net_health_delta < 0.0:
+            lines.append(f"{identity} lost {abs(actor.net_health_delta):.2f} HP.")
+        elif actor.net_health_delta > 0.0:
+            lines.append(f"{identity} gained {actor.net_health_delta:.2f} HP.")
+        else:
+            lines.append(f"{identity} had a net health change of 0.00 HP.")
+        if actor_contributions:
+            contributor_labels = tuple(
+                _activation_contributor(transition, activation)
+                for activation in actor_contributions
+            )
+            lines.append(
+                f"Accepted contributors included {_human_join(contributor_labels)}."
+            )
+            multipliers = _public_multiplier_descriptions(
+                transition,
+                actor.actor_global_slot,
+                actor_contributions,
+            )
+            if multipliers:
+                lines.append(
+                    f"Active public multipliers included {_human_join(multipliers)}."
+                )
+            lines.append(
+                "The public transition does not expose the gross damage/healing split."
             )
 
     for actor in transition.actor_transitions:
-        if actor.net_health_delta != 0.0 or (
-            actor.actor_global_slot in activation_targets
-            and actor.actor_global_slot in contributions
-        ):
-            caveat = (
-                " gross contributions not exposed"
-                if len(contributions.get(actor.actor_global_slot, ())) > 1
-                or (
-                    actor.actor_global_slot in contributions
-                    and actor.net_health_delta == 0.0
-                )
-                else ""
-            )
+        if actor.cooldown_before == 0 and actor.cooldown_after > 0:
+            identity = _observation_identity(observation, actor.actor_global_slot)
             lines.append(
-                f"HEALTH g{actor.actor_global_slot} "
-                f"{actor.health_before:.2f}->{actor.health_after:.2f} "
-                f"net={actor.net_health_delta:+.2f}{caveat}"
+                f"Successor state: {identity} Ultimate cooldown is "
+                f"{actor.cooldown_after}."
             )
-
-        if actor.cooldown_before != actor.cooldown_after:
-            if actor.cooldown_before == 0 and actor.cooldown_after > 0:
-                change = "started"
-            elif actor.cooldown_after == 0:
-                change = "expired"
-            else:
-                change = "decremented"
-            lines.append(
-                f"COOLDOWN g{actor.actor_global_slot} "
-                f"{actor.cooldown_before}->{actor.cooldown_after} {change}"
-            )
+        elif actor.cooldown_before > 0 and actor.cooldown_after == 0:
+            identity = _observation_identity(observation, actor.actor_global_slot)
+            lines.append(f"Successor state: {identity} Ultimate cooldown is ready.")
 
     for status in transition.status_transitions:
         if status.change == "unchanged":
             continue
-        lines.append(
-            f"STATUS g{status.global_slot} {status.status_kind} "
-            f"{status.duration_before}->{status.duration_after} {status.change}"
-        )
+        identity = _observation_identity(observation, status.global_slot)
+        label = _STATUS_NAMES[status.status_kind]
+        if status.duration_after > 0:
+            result = f"has {label} {status.duration_after} ({status.change})"
+        elif status.change == "trap_broken":
+            result = "has no TRAP (broken after an accepted damage activation)"
+        elif status.change == "cleared_unclassified":
+            result = f"has no {label} (ending cause is not uniquely exposed)"
+        else:
+            result = f"has no {label} ({status.change})"
+        lines.append(f"Successor state: {identity} {result}.")
+    return tuple(lines or ("No reported actor changed public state.",))
 
+
+def _technical_transition_lines(
+    transition: TransitionView,
+    *,
+    verbose: bool,
+) -> tuple[str, ...]:
+    lines = [
+        (
+            f"Transition   scenario={transition.scenario_name} "
+            f"step={int(transition.before_state.step_count)}"
+            f" -> {int(transition.after_state.step_count)} "
+            f"terminated={int(bool(transition.done_flags.terminated))} "
+            f"truncated={int(bool(transition.done_flags.truncated))}"
+        )
+    ]
+    for actor_slot in transition.report_actor_slots:
+        actor = _actor_transition(transition, actor_slot)
+        lines.extend(
+            (
+                (
+                    f"Actor id_{actor_slot} [g{actor_slot}] submitted "
+                    f"move={_move_name(actor.submitted_move_action)}"
+                    f"[{actor.submitted_move_action}] "
+                    f"target=t{actor.submitted_target_action} "
+                    f"ultimate={actor.submitted_use_ultimate}"
+                ),
+                (
+                    "             accepted  "
+                    f"move={_move_name(actor.accepted_move_action)}"
+                    f"[{actor.accepted_move_action}] "
+                    f"target=t{actor.accepted_target_action} "
+                    f"ultimate={actor.accepted_use_ultimate}"
+                ),
+                (
+                    f"             mask move={int(actor.submitted_move_mask_value)} "
+                    f"lane0={int(actor.submitted_lane_0_value)} "
+                    f"lane1={int(actor.submitted_lane_1_value)} "
+                    f"pair={int(actor.submitted_pair_mask_value)} "
+                    f"domain={int(actor.submitted_tuple_in_domain)}"
+                ),
+            )
+        )
+        if verbose:
+            target_in_domain = 0 <= actor.submitted_target_action < NUM_TARGET_ACTIONS
+            target_slot = (
+                target_action_to_global_slot(
+                    actor_slot,
+                    actor.submitted_target_action,
+                )
+                if target_in_domain
+                else None
+            )
+            if not target_in_domain:
+                lines.extend(
+                    (
+                        (
+                            f"Target g{actor_slot} invalid "
+                            f"t{actor.submitted_target_action}; "
+                            "relation=n/a distance=n/a"
+                        ),
+                        (
+                            f"Geometry g{actor_slot}->invalid los=n/a visible=n/a "
+                            "observation=n/a basic=n/a ultimate=n/a"
+                        ),
+                    )
+                )
+            elif target_slot is None:
+                lines.extend(
+                    (
+                        (
+                            f"Target g{actor_slot} none "
+                            f"t{actor.submitted_target_action}; "
+                            "relation=n/a distance=n/a"
+                        ),
+                        (
+                            f"Geometry g{actor_slot}->none los=n/a visible=n/a "
+                            "observation=n/a basic=n/a ultimate=n/a"
+                        ),
+                    )
+                )
+            else:
+                facts = derive_selected_target_facts(
+                    config=_config_from_transition(transition),
+                    state=transition.before_state,
+                    observation=transition.before_observation,
+                    action_mask=transition.before_action_mask,
+                    controlled_global_slot=actor_slot,
+                    target_global_slot=target_slot,
+                )
+                if facts is None:
+                    raise AssertionError(
+                        "non-none target unexpectedly produced no facts"
+                    )
+                ultimate = (
+                    "n/a"
+                    if facts.inside_ultimate_radius is None
+                    else str(int(facts.inside_ultimate_radius))
+                )
+                lines.extend(
+                    (
+                        (
+                            f"Target g{actor_slot}->g{target_slot} "
+                            f"t{facts.target_action} relation={facts.relation} "
+                            f"distance={facts.center_distance:.2f}"
+                        ),
+                        (
+                            f"Geometry g{actor_slot}->g{target_slot} "
+                            f"los={int(facts.has_clear_line_of_sight)} "
+                            f"visible={int(facts.observer_visible)} "
+                            f"observation={int(facts.inside_observation_radius)} "
+                            f"basic={int(facts.inside_basic_radius)} "
+                            f"ultimate={ultimate}"
+                        ),
+                    )
+                )
+            lines.extend(
+                (
+                    (
+                        f"Position g{actor_slot} "
+                        f"({actor.position_before[0]:.2f},"
+                        f"{actor.position_before[1]:.2f})"
+                        f" -> ({actor.position_after[0]:.2f},"
+                        f"{actor.position_after[1]:.2f}) "
+                        f"delta=({actor.realized_displacement[0]:+.2f},"
+                        f"{actor.realized_displacement[1]:+.2f})"
+                    ),
+                    (
+                        f"Aura g{actor_slot} "
+                        f"mage={actor.mage_aura_before:.2f}"
+                        f"->{actor.mage_aura_after:.2f} "
+                        f"warrior={actor.warrior_aura_before:.2f}"
+                        f"->{actor.warrior_aura_after:.2f}"
+                    ),
+                    (
+                        f"Speed g{actor_slot} "
+                        f"{actor.effective_speed_before:.2f}"
+                        f"->{actor.effective_speed_after:.2f}"
+                    ),
+                    (
+                        f"Reward g{actor_slot} "
+                        f"{float(transition.reward.rewards[actor_slot]):+.2f}"
+                    ),
+                )
+            )
+
+    health_capable_kinds = {
+        "basic_damage",
+        "basic_heal",
+        "holy_word",
+        "warrior_charge",
+        "rogue_poison",
+    }
+    health_targets = {
+        activation.target_global_slot
+        for activation in transition.accepted_activations
+        if activation.target_global_slot is not None
+        and activation.kind in health_capable_kinds
+    }
+    for actor in transition.actor_transitions:
+        if actor.net_health_delta != 0.0 or actor.actor_global_slot in health_targets:
+            lines.append(
+                f"Health id_{actor.actor_global_slot} "
+                f"{actor.health_before:.2f} -> {actor.health_after:.2f} "
+                f"net={actor.net_health_delta:+.2f}"
+            )
+        if actor.cooldown_before != actor.cooldown_after:
+            lines.append(
+                f"Cooldown id_{actor.actor_global_slot} "
+                f"{actor.cooldown_before}->{actor.cooldown_after}"
+            )
+    for status in transition.status_transitions:
+        if status.change != "unchanged":
+            lines.append(
+                f"Status id_{status.global_slot} {_STATUS_NAMES[status.status_kind]} "
+                f"{status.duration_before}->{status.duration_after} {status.change}"
+            )
     for activation in transition.accepted_activations:
         recipient = (
             "none"
             if activation.target_global_slot is None
             else f"g{activation.target_global_slot}"
         )
-        detail = ""
-        if activation.kind == "warrior_charge":
-            actor = _actor_transition(transition, activation.source_global_slot)
-            path = (
-                "charge_only"
-                if actor.accepted_move_action == MOVE_STAY
-                else "combined_charge_and_movement"
-            )
-            detail = f" path={path}"
-            if path == "combined_charge_and_movement":
-                detail += f" submitted_move={_move_name(actor.submitted_move_action)}"
         lines.append(
-            f"EVENT {activation.kind} source=g{activation.source_global_slot} "
-            f"recipient={recipient}{detail}"
+            f"Activation {activation.kind} "
+            f"g{activation.source_global_slot}->{recipient}"
         )
     for rejection in transition.rejections:
         rejection_mask_value = (
@@ -1067,136 +1359,33 @@ def format_concise_transition(transition: TransitionView) -> str:
             else rejection.pair_mask_value
         )
         lines.append(
-            f"EVENT rejection component={rejection.component} "
+            f"Rejection {rejection.component} "
             f"actor=g{rejection.actor_global_slot} "
             f"mask={int(rejection_mask_value)}"
         )
-    return "\n".join(lines)
+    return tuple(lines)
+
+
+def format_concise_transition(transition: TransitionView) -> str:
+    """Format readable public facts before a stable technical section."""
+    play_by_play = "\n".join(
+        f"  {line}" for line in build_play_by_play_lines(transition)
+    )
+    technical = "\n".join(
+        f"  {line}" for line in _technical_transition_lines(transition, verbose=False)
+    )
+    return f"PLAY-BY-PLAY\n{play_by_play}\n\nTECHNICAL DIAGNOSTICS\n{technical}"
 
 
 def format_verbose_transition(transition: TransitionView) -> str:
-    """Add independent geometry, mask, aura, speed, and episode facts."""
-    lines = [format_concise_transition(transition)]
-    for actor_slot in transition.report_actor_slots:
-        actor = _actor_transition(transition, actor_slot)
-        target_in_domain = 0 <= actor.submitted_target_action < NUM_TARGET_ACTIONS
-        target_slot = (
-            target_action_to_global_slot(
-                actor_slot,
-                actor.submitted_target_action,
-            )
-            if target_in_domain
-            else None
-        )
-        if not target_in_domain:
-            lines.extend(
-                (
-                    (
-                        f"TARGET actor=g{actor_slot} global=invalid relative="
-                        f"t{actor.submitted_target_action} relation=n/a distance=n/a"
-                    ),
-                    (
-                        f"GEOMETRY actor=g{actor_slot} target=invalid los=n/a "
-                        "visible=n/a observation_range=n/a basic_range=n/a "
-                        "ultimate_range=n/a"
-                    ),
-                )
-            )
-        elif target_slot is None:
-            lines.extend(
-                (
-                    (
-                        f"TARGET actor=g{actor_slot} global=none relative="
-                        f"t{actor.submitted_target_action} relation=n/a distance=n/a"
-                    ),
-                    (
-                        f"GEOMETRY actor=g{actor_slot} target=none los=n/a "
-                        "visible=n/a observation_range=n/a basic_range=n/a "
-                        "ultimate_range=n/a"
-                    ),
-                )
-            )
-        else:
-            facts = derive_selected_target_facts(
-                config=_config_from_transition(transition),
-                state=transition.before_state,
-                observation=transition.before_observation,
-                action_mask=transition.before_action_mask,
-                controlled_global_slot=actor_slot,
-                target_global_slot=target_slot,
-            )
-            if facts is None:
-                raise AssertionError("non-none target unexpectedly produced no facts")
-            ultimate = (
-                "n/a"
-                if facts.inside_ultimate_radius is None
-                else str(int(facts.inside_ultimate_radius))
-            )
-            lines.extend(
-                (
-                    (
-                        f"TARGET actor=g{actor_slot} global=g{target_slot} "
-                        f"relative=t{facts.target_action} relation={facts.relation} "
-                        f"distance={facts.center_distance:.2f}"
-                    ),
-                    (
-                        f"GEOMETRY actor=g{actor_slot} target=g{target_slot} "
-                        f"los={int(facts.has_clear_line_of_sight)} "
-                        f"visible={int(facts.observer_visible)} "
-                        f"observation_range={int(facts.inside_observation_radius)} "
-                        f"basic_range={int(facts.inside_basic_radius)} "
-                        f"ultimate_range={ultimate}"
-                    ),
-                )
-            )
-        lines.extend(
-            (
-                (
-                    f"MASK actor=g{actor_slot} "
-                    f"move[{actor.submitted_move_action}]="
-                    f"{int(actor.submitted_move_mask_value)} "
-                    f"target=t{actor.submitted_target_action} "
-                    f"lane0={int(actor.submitted_lane_0_value)} "
-                    f"lane1={int(actor.submitted_lane_1_value)} "
-                    f"submitted_pair={int(actor.submitted_pair_mask_value)} "
-                    f"tuple_in_domain={int(actor.submitted_tuple_in_domain)}"
-                ),
-                (
-                    f"SUBMITTED actor=g{actor_slot} "
-                    f"move={_move_name(actor.submitted_move_action)}"
-                    f"[{actor.submitted_move_action}] "
-                    "target="
-                    f"{_target_label(actor_slot, actor.submitted_target_action)} "
-                    f"use_ultimate={actor.submitted_use_ultimate}"
-                ),
-                (
-                    f"ACCEPTED actor=g{actor_slot} "
-                    f"move={_move_name(actor.accepted_move_action)}"
-                    f"[{actor.accepted_move_action}] "
-                    f"target=t{actor.accepted_target_action} "
-                    f"use_ultimate={actor.accepted_use_ultimate}"
-                ),
-                (
-                    f"AURA actor=g{actor_slot} "
-                    f"mage={actor.mage_aura_before:.2f}"
-                    f"->{actor.mage_aura_after:.2f} "
-                    f"warrior={actor.warrior_aura_before:.2f}"
-                    f"->{actor.warrior_aura_after:.2f}"
-                ),
-                (
-                    f"SPEED actor=g{actor_slot} "
-                    f"{actor.effective_speed_before:.2f}"
-                    f"->{actor.effective_speed_after:.2f}"
-                ),
-                (
-                    f"EPISODE reward="
-                    f"{float(transition.reward.rewards[actor_slot]):+.2f} "
-                    f"terminated={int(bool(transition.done_flags.terminated))} "
-                    f"truncated={int(bool(transition.done_flags.truncated))}"
-                ),
-            )
-        )
-    return "\n".join(lines)
+    """Add geometry, visibility, aura, speed, reward, and episode details."""
+    play_by_play = "\n".join(
+        f"  {line}" for line in build_play_by_play_lines(transition)
+    )
+    technical = "\n".join(
+        f"  {line}" for line in _technical_transition_lines(transition, verbose=True)
+    )
+    return f"PLAY-BY-PLAY\n{play_by_play}\n\nTECHNICAL DIAGNOSTICS\n{technical}"
 
 
 def _config_from_transition(transition: TransitionView) -> EnvConfig:

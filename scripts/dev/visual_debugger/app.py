@@ -371,8 +371,8 @@ def _create_figure(pyplot: _PyplotLike) -> tuple[object, object, object]:
     figure, axes = pyplot.subplots(
         1,
         2,
-        figsize=(15, 8),
-        gridspec_kw={"width_ratios": (3, 2)},
+        figsize=(17, 9),
+        gridspec_kw={"width_ratios": (58, 42)},
     )
     axes_array = np.asarray(axes, dtype=object).reshape(-1)
     if axes_array.size != 2:

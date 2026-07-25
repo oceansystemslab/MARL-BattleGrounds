@@ -1,9 +1,10 @@
 """Pure tests for debugger overlay and HUD assembly."""
 
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
 
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from scripts.dev.visual_debugger.control import (
     arm_ultimate,
     clear_pending_target,
@@ -16,6 +17,7 @@ from scripts.dev.visual_debugger.model import DebuggerSession, TransientHistoryE
 from scripts.dev.visual_debugger.presentation import (
     build_debugger_overlays,
     build_hud_lines,
+    build_hud_sections,
 )
 from scripts.dev.visual_debugger.scenarios import get_scenario
 
@@ -170,61 +172,73 @@ def test_multiple_charge_trails_preserve_oldest_to_newest_sequence_order() -> No
     assert tuple(trail.opacity for trail in overlaid) == (0.35, 0.65, 1.0)
 
 
-def test_hud_separates_target_geometry_and_legality() -> None:
-    session = _session("acceptance_lane_lab")
-    for _ in range(5):
-        session = submit_next_script_frame(session)
-    session = select_clicked_target(session, 5)
-    lines = build_hud_lines(session)
+def test_hud_separates_selected_target_facts_from_exact_pending_legality() -> None:
+    session = select_clicked_target(_session("arena_5v5", 2), 7)
+    sections = {section.heading: section for section in build_hud_sections(session)}
 
-    target_line = next(line for line in lines if line.startswith("TARGET "))
-    geometry_line = next(line for line in lines if line.startswith("GEOMETRY "))
-    legality_line = next(line for line in lines if line.startswith("LEGALITY "))
-    assert target_line == "TARGET g5/t6 relation=enemy distance=4.00"
-    assert geometry_line == (
-        "GEOMETRY los=1 visible=1 observation_range=1 basic_range=1 ultimate_range=1"
-    )
-    assert legality_line == ("LEGALITY lane0=1 lane1=1 selected=Basic pending_legal=1")
+    selected = " ".join(sections["SELECTED TARGET"].lines)
+    pending = " ".join(sections["PENDING ACTION"].lines)
+    assert "TEAM B HUNTER (id_7) · enemy · distance" in selected
+    assert "LOS" in selected
+    assert "visible" in selected
+    assert "observation" in selected
+    assert "Basic no" in selected
+    assert "Ultimate no" in selected
+    assert "Lane 0 unavailable" in pending
+    assert "Lane 1 unavailable" in pending
+    assert "pair illegal" in pending
 
 
 def test_hud_target_none_mage_ultimate_is_unambiguous() -> None:
     session = arm_ultimate(_session("arena_5v5", 0))
-    lines = build_hud_lines(session)
+    sections = {section.heading: section for section in build_hud_sections(session)}
+    target = " ".join(sections["SELECTED TARGET"].lines)
+    pending = " ".join(sections["PENDING ACTION"].lines)
 
-    assert "TARGET none/t0 relation=n/a distance=n/a" in lines
-    assert (
-        "GEOMETRY los=n/a visible=n/a observation_range=n/a "
-        "basic_range=n/a ultimate_range=n/a"
-    ) in lines
-    assert "LEGALITY lane0=1 lane1=1 selected=Ultimate pending_legal=1" in lines
-    assert "ABILITY Mage Burst: target-none self activation" in lines
+    assert "No target selected." in target
+    assert "Stay + BURST → TEAM A MAGE (id_0) (self activation)" in pending
+    assert "Lane 0 available" in pending
+    assert "Lane 1 available" in pending
+    assert "pair legal" in pending
 
 
-def test_hud_contains_complete_actor_pending_status_and_last_transition_summary() -> (
-    None
-):
+def test_hud_has_six_frozen_wrapped_sections_and_complete_visual_key() -> None:
     session = submit_next_script_frame(_session("status_stack"))
-    lines = build_hud_lines(session)
+    sections = build_hud_sections(session)
 
-    assert any(line.startswith("SCENARIO status_stack step=1") for line in lines)
-    assert any(
-        line.startswith("ACTOR g5 team=B class=Hunter health=92.00/100.00")
-        for line in lines
+    assert tuple(section.heading for section in sections) == (
+        "PLAY-BY-PLAY",
+        "CONTROLLED AGENT",
+        "SELECTED TARGET",
+        "PENDING ACTION",
+        "LATEST ACCEPTED RESULT",
+        "TECHNICAL DETAILS AND VISUAL KEY",
     )
-    assert any(line.startswith("STATUS slow=(5, 0, 5)") for line in lines)
-    assert any(line.startswith("PENDING movement=Stay[0]") for line in lines)
-    assert any(line.startswith("LAST submitted=") for line in lines)
-    assert any(line.startswith("LAST DELTA health=") for line in lines)
-    assert any("g5:-8.00" in line for line in lines if line.startswith("HEALTH Δ"))
-    assert any("g0:0->30" in line for line in lines if line.startswith("COOLDOWN"))
-    assert any(
-        "g5:stun_hunter_trap:0->4:applied" in line
-        for line in lines
-        if line.startswith("STATUS Δ")
+    assert all(
+        len(line) <= (72 if section.technical else 58)
+        for section in sections
+        for line in section.lines
     )
-    assert any(
-        "warrior_charge:g0->g5" in line for line in lines if line.startswith("EVENTS")
-    )
+    with pytest.raises(FrozenInstanceError):
+        sections[0].heading = "changed"  # type: ignore[misc]
+
+    by_heading = {section.heading: section for section in sections}
+    controlled = " ".join(by_heading["CONTROLLED AGENT"].lines)
+    latest = " ".join(by_heading["LATEST ACCEPTED RESULT"].lines)
+    technical = " ".join(by_heading["TECHNICAL DETAILS AND VISUAL KEY"].lines)
+    assert "TEAM B HUNTER (id_5)" in controlled
+    assert "Health 82.00 / 100.00" in controlled
+    assert "CHARGE-STUN 1" in controlled
+    assert "TRAP 4" in controlled
+    assert "POISON-SLOW 5" in controlled
+    assert "ANTI-HEAL 4" in controlled
+    assert "FREEDOM 1" in controlled
+    assert "Submitted:" in latest
+    assert "Accepted:" in latest
+    assert "actor=g5" in technical
+    assert "Cyan dotted upper band = Mage damage amplification aura." in technical
+    assert "Bronze hatched lower band = Warrior damage mitigation aura." in technical
+    assert build_hud_lines(session)[0] == "PLAY-BY-PLAY"
 
 
 def test_snapshot_previous_actions_are_not_drawn_on_the_battlefield() -> None:
@@ -237,7 +251,7 @@ def test_snapshot_previous_actions_are_not_drawn_on_the_battlefield() -> None:
 
 
 def test_hud_handles_out_of_domain_submitted_movement_without_index_aliasing() -> None:
-    session = _session("acceptance_lane_lab")
+    session = _session("arena_5v5")
     submitted = Action(
         move=jnp.zeros_like(session.state.previous_timestep_move_actions).at[0].set(-1),
         select_target=jnp.zeros_like(
@@ -254,7 +268,8 @@ def test_hud_handles_out_of_domain_submitted_movement_without_index_aliasing() -
         report_actor_slots=(0,),
     )
 
-    assert any(
-        line.startswith("LAST submitted=(Invalid,t0,u0)")
-        for line in build_hud_lines(session)
-    )
+    sections = {section.heading: section for section in build_hud_sections(session)}
+    latest = " ".join(sections["LATEST ACCEPTED RESULT"].lines)
+    assert "Submitted: Invalid / no combat" in latest
+    assert "Accepted:  Stay / no combat" in latest
+    assert "Movement rejected · combat rejected" in latest

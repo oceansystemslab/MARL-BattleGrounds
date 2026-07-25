@@ -78,9 +78,18 @@ class _FakePyplot:
             "other": ["w"],
         }
         self.show_calls = 0
+        self.subplots_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
     def show(self) -> None:
         self.show_calls += 1
+
+    def subplots(
+        self,
+        *args: object,
+        **kwargs: object,
+    ) -> tuple[object, tuple[object, object]]:
+        self.subplots_calls.append((args, kwargs))
+        return object(), (object(), object())
 
 
 def _ignore_render(*_args: object, **_kwargs: object) -> None:
@@ -552,6 +561,25 @@ def test_static_mode_does_not_register_callbacks_or_step(
     assert canvas.callbacks == {}
     assert not canvas.timer_requested
     assert canvas.draw_idle_calls == 1
+
+
+def test_figure_reserves_forty_two_percent_for_the_hud() -> None:
+    pyplot = _FakePyplot()
+
+    _, battlefield_axes, hud_axes = app_module._create_figure(  # pyright: ignore[reportPrivateUsage]
+        pyplot  # pyright: ignore[reportArgumentType]
+    )
+
+    assert battlefield_axes is not hud_axes
+    assert pyplot.subplots_calls == [
+        (
+            (1, 2),
+            {
+                "figsize": (17, 9),
+                "gridspec_kw": {"width_ratios": (58, 42)},
+            },
+        )
+    ]
 
 
 def test_run_rejects_inactive_controlled_slot_before_figure_creation(
