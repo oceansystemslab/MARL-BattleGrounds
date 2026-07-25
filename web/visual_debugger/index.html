@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    >
+    <meta name="referrer" content="no-referrer">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>MARL-BattleGrounds Visual Debugger</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script type="module" src="/src/main.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#battlefield">Skip to battlefield</a>
+
+    <header class="app-header">
+      <div class="brand">
+        <p class="eyebrow">MARL-BattleGrounds</p>
+        <h1>Visual Debugger</h1>
+      </div>
+      <div class="header-status" aria-live="polite">
+        <span id="connection-status" class="status-pill" data-state="loading">
+          Connecting
+        </span>
+        <span id="audience-badge" class="status-pill status-pill--quiet">
+          View unavailable
+        </span>
+        <span id="terminal-badge" class="status-pill status-pill--warning" hidden>
+          Terminal
+        </span>
+      </div>
+    </header>
+
+    <section class="session-toolbar" aria-label="Debugger session">
+      <label>
+        <span>Scenario</span>
+        <select id="scenario-select" aria-label="Scenario" disabled>
+          <option>Loading…</option>
+        </select>
+      </label>
+      <label>
+        <span>View</span>
+        <select id="view-select" aria-label="View mode" disabled>
+          <option value="researcher">Researcher</option>
+          <option value="pov">Agent POV</option>
+        </select>
+      </label>
+      <label>
+        <span>Preset</span>
+        <select id="preset-select" aria-label="Presentation preset" disabled>
+          <option value="presentation">Presentation</option>
+          <option value="analysis">Analysis</option>
+          <option value="debug">Debug</option>
+        </select>
+      </label>
+      <fieldset class="session-facts" aria-label="Session facts">
+        <span>Revision <strong id="revision-value">—</strong></span>
+        <span>Step <strong id="step-value">—</strong></span>
+        <span>Transition <strong id="transition-value">—</strong></span>
+      </fieldset>
+      <div class="toolbar-actions">
+        <button id="reconnect-button" class="button button--quiet" type="button">
+          Reconnect
+        </button>
+        <button id="help-button" class="button button--quiet" type="button">
+          Help
+        </button>
+        <button id="exit-button" class="button button--danger" type="button" disabled>
+          Exit debugger
+        </button>
+      </div>
+    </section>
+
+    <div id="notice" class="notice" data-level="info" role="status" hidden></div>
+
+    <main class="workspace">
+      <section class="battlefield-panel" aria-labelledby="battlefield-heading">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Authoritative snapshot</p>
+            <h2 id="battlefield-heading">Battlefield</h2>
+          </div>
+          <p id="scenario-description" class="scenario-description">
+            Waiting for the Python debugger service.
+          </p>
+        </div>
+
+        <div id="battlefield-shell" class="battlefield-shell" aria-busy="true">
+          <svg
+            id="battlefield"
+            class="battlefield"
+            role="application"
+            tabindex="0"
+            aria-label="Interactive battlefield. Press Help for keyboard controls."
+            aria-describedby="battlefield-instructions"
+          ></svg>
+          <p id="battlefield-empty" class="battlefield-empty">
+            Connecting to the local debugger service…
+          </p>
+        </div>
+        <p id="battlefield-instructions" class="sr-only">
+          The battlefield owns debugger keyboard commands while it has focus.
+          Tab and Shift Tab cycle controlled actors here. Escape clears the
+          target and moves focus to the command deck, or to Help while commands
+          are unavailable. Tab behaves normally in the side panel.
+        </p>
+
+        <section class="command-deck" aria-label="Debugger commands">
+          <div class="command-group">
+            <h3>Movement</h3>
+            <div class="movement-grid">
+              <button type="button" data-key="q" aria-label="Move northwest">↖</button>
+              <button type="button" data-key="w" aria-label="Move north">↑</button>
+              <button type="button" data-key="e" aria-label="Move northeast">↗</button>
+              <button type="button" data-key="a" aria-label="Move west">←</button>
+              <button type="button" aria-label="Movement center" disabled>•</button>
+              <button type="button" data-key="d" aria-label="Move east">→</button>
+              <button type="button" data-key="z" aria-label="Move southwest">↙</button>
+              <button type="button" data-key="s" aria-label="Move south">↓</button>
+              <button type="button" data-key="c" aria-label="Move southeast">↘</button>
+            </div>
+          </div>
+          <div class="command-group">
+            <h3>Action</h3>
+            <div class="button-row">
+              <button type="button" data-key="1">Arm Basic</button>
+              <button type="button" data-key="2">Arm Ultimate</button>
+              <button type="button" data-key="Enter" class="button--primary">
+                Submit
+              </button>
+              <button type="button" data-key="n">Next frame</button>
+            </div>
+          </div>
+          <div class="command-group">
+            <h3>Inspect</h3>
+            <div class="button-row">
+              <button type="button" data-key="Tab">Next actor</button>
+              <button type="button" data-key="Tab" data-shift="true">
+                Previous actor
+              </button>
+              <button type="button" data-key="Escape">Clear target</button>
+              <button type="button" data-key="g">Ranges</button>
+              <button type="button" data-key="v">Verbosity</button>
+            </div>
+          </div>
+          <div class="command-group">
+            <h3>Session</h3>
+            <div class="button-row">
+              <button id="reset-button" type="button">Reset</button>
+              <button type="button" data-key="[">Previous scenario</button>
+              <button type="button" data-key="]">Next scenario</button>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <aside class="hud-panel" aria-label="Debugger inspector">
+        <section class="hud-section" aria-labelledby="roster-heading">
+          <div class="section-heading">
+            <h2 id="roster-heading">Roster</h2>
+            <span id="roster-count" class="count-badge">0 visible</span>
+          </div>
+          <div id="roster" class="roster">
+            <p class="empty-copy">No authorized agents received yet.</p>
+          </div>
+        </section>
+
+        <section class="hud-section" aria-labelledby="selection-heading">
+          <h2 id="selection-heading">Selection</h2>
+          <div id="selection-card" class="fact-card">
+            <p class="empty-copy">No selection facts received yet.</p>
+          </div>
+        </section>
+
+        <section class="hud-section" aria-labelledby="pending-heading">
+          <h2 id="pending-heading">Pending / will submit</h2>
+          <pre id="pending-card" class="record-card">No pending action.</pre>
+        </section>
+
+        <section class="hud-section" aria-labelledby="accepted-heading">
+          <h2 id="accepted-heading">Latest accepted result</h2>
+          <pre id="accepted-card" class="record-card">No transition yet.</pre>
+        </section>
+
+        <section class="hud-section" aria-labelledby="events-heading">
+          <div class="section-heading">
+            <h2 id="events-heading">Latest events</h2>
+            <span id="event-count" class="count-badge">0</span>
+          </div>
+          <ol id="event-feed" class="event-feed">
+            <li class="empty-copy">No transition events.</li>
+          </ol>
+        </section>
+
+        <details class="hud-section diagnostics">
+          <summary>Technical frame</summary>
+          <pre id="diagnostics-card" class="record-card">No frame received.</pre>
+        </details>
+      </aside>
+    </main>
+
+    <dialog id="help-dialog" class="help-dialog" aria-labelledby="help-heading">
+      <form method="dialog">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Browser controls</p>
+            <h2 id="help-heading">Debugger help</h2>
+          </div>
+          <button class="button button--quiet" type="submit" value="close">Close</button>
+        </div>
+        <p>
+          Click the battlefield once to give it command focus. Panel controls
+          keep ordinary browser keyboard and Tab behavior.
+        </p>
+        <dl class="help-grid">
+          <dt>Tab / Shift+Tab</dt><dd>Cycle the controlled actor</dd>
+          <dt>Shift+left click</dt><dd>Control the clicked visible actor</dd>
+          <dt>Left click</dt><dd>Select a visible target</dd>
+          <dt>Right click</dt><dd>Clear the target</dd>
+          <dt>Escape</dt>
+          <dd>Clear the target and leave battlefield focus</dd>
+          <dt>WASD / QEZC</dt><dd>Choose movement</dd>
+          <dt>Arrow keys</dt><dd>Cardinal movement aliases</dd>
+          <dt>1 / 2</dt><dd>Arm Basic / Ultimate</dd>
+          <dt>Space / Enter</dt><dd>Submit once</dd>
+          <dt>N</dt><dd>Submit the next scripted frame</dd>
+          <dt>R</dt><dd>Deterministically reset the scenario</dd>
+          <dt>Shift+R</dt><dd>Explain why cooldown clearing is unavailable</dd>
+          <dt>G / V</dt><dd>Toggle ranges / diagnostic verbosity</dd>
+          <dt>[ / ]</dt><dd>Previous / next scenario</dd>
+        </dl>
+        <p class="help-note">
+          Animation, layout, hover, help, and panel state are presentation-only.
+          Python remains authoritative for every simulator and legality decision.
+        </p>
+      </form>
+    </dialog>
+
+    <noscript>
+      <p class="noscript">
+        This local debugger needs JavaScript to display authoritative Python
+        frames. It does not simulate in the browser.
+      </p>
+    </noscript>
+  </body>
+</html>

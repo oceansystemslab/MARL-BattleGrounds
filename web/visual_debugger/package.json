@@ -1,0 +1,21 @@
+{
+  "name": "@marl-battlegrounds/visual-debugger",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "lint": "biome lint .",
+    "typecheck": "tsc --project tsconfig.json",
+    "test:unit": "node --test tests/*.test.js",
+    "install:browser": "playwright install chromium",
+    "test:e2e": "playwright test --config playwright.config.js"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.5",
+    "@playwright/test": "1.62.0",
+    "@types/node": "24.13.3",
+    "typescript": "7.0.2"
+  }
+}

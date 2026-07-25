@@ -1,62 +1,46 @@
 """Event-driven Matplotlib application for the comprehensive visual debugger."""
 
 from collections.abc import Callable, MutableMapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from importlib import import_module
 from typing import Protocol, cast
 
 import numpy as np
 
-from marl_battlegrounds.core.types import (
-    MOVE_EAST,
-    MOVE_NORTH,
-    MOVE_NORTHEAST,
-    MOVE_NORTHWEST,
-    MOVE_SOUTH,
-    MOVE_SOUTHEAST,
-    MOVE_SOUTHWEST,
-    MOVE_WEST,
-    EnvConfig,
-    EnvState,
-)
 from marl_battlegrounds.rendering import draw_geometry
-from scripts.dev.visual_debugger.control import (
-    arm_basic,
-    arm_ultimate,
-    clear_pending_target,
-    create_session,
-    cycle_controlled_actor,
-    reset_session,
-    select_clicked_target,
-    select_controlled_actor,
-    set_pending_movement,
-    submit_interactive,
-    submit_next_script_frame,
-    switch_scenario,
+from scripts.dev.visual_debugger.control import create_session
+from scripts.dev.visual_debugger.input import (
+    dispatch_command,
+    hit_test_active_agent,
+    normalize_key,
 )
 from scripts.dev.visual_debugger.model import DebuggerSession
 from scripts.dev.visual_debugger.presentation import (
     build_debugger_overlays,
     draw_hud,
 )
-from scripts.dev.visual_debugger.scenarios import (
-    cycle_scenario_name,
-    get_scenario,
+from scripts.dev.visual_debugger.protocol import (
+    BattlefieldPointerCommandV1,
+    KeyboardCommandV1,
 )
+from scripts.dev.visual_debugger.scenarios import get_scenario
 
-_MOVEMENT_KEYS = {
-    "w": MOVE_NORTH,
-    "s": MOVE_SOUTH,
-    "d": MOVE_EAST,
-    "a": MOVE_WEST,
-    "q": MOVE_NORTHWEST,
-    "e": MOVE_NORTHEAST,
-    "z": MOVE_SOUTHWEST,
-    "c": MOVE_SOUTHEAST,
-}
+__all__ = ["VisualDebuggerApp", "hit_test_active_agent", "run_visual_debugger"]
+
 _RESERVED_KEYS = frozenset(
     (
-        *_MOVEMENT_KEYS,
+        "w",
+        "s",
+        "d",
+        "a",
+        "q",
+        "e",
+        "z",
+        "c",
+        "up",
+        "down",
+        "left",
+        "right",
         "tab",
         "shift+tab",
         "shift+r",
@@ -108,31 +92,6 @@ class _MouseEventLike(Protocol):
     modifiers: frozenset[str] | None
 
 
-def hit_test_active_agent(
-    config: EnvConfig,
-    state: EnvState,
-    x: float,
-    y: float,
-) -> int | None:
-    """Return the closest normalized active body hit with stable slot tie-break."""
-    positions = np.asarray(state.agent_positions, dtype=np.float32)
-    radii = np.asarray(config.agent_profile.agent_radii, dtype=np.float32)
-    active_mask = np.asarray(config.agent_profile.active_mask, dtype=bool)
-    candidates: list[tuple[float, int]] = []
-    point = np.asarray((x, y), dtype=np.float32)
-    for global_slot in np.flatnonzero(active_mask):
-        slot = int(global_slot)
-        radius = float(radii[slot])
-        if radius <= 0:
-            continue
-        normalized_distance = float(np.linalg.norm(point - positions[slot]) / radius)
-        if normalized_distance <= 1.0:
-            candidates.append((normalized_distance, slot))
-    if not candidates:
-        return None
-    return min(candidates)[1]
-
-
 def _load_pyplot() -> _PyplotLike:
     try:
         return cast(_PyplotLike, import_module("matplotlib.pyplot"))
@@ -145,25 +104,8 @@ def _load_pyplot() -> _PyplotLike:
 
 
 def _normalize_key(key: str | None) -> str | None:
-    if key is None:
-        return None
-    if key == "R":
-        return "shift+r"
-    normalized = key.lower()
-    if normalized in ("shift+r",):
-        return "shift+r"
-    if normalized in (
-        "shift+tab",
-        "backtab",
-        "iso_left_tab",
-        "shift+iso_left_tab",
-    ):
-        return "shift+tab"
-    if normalized == " ":
-        return "space"
-    if normalized in ("return",):
-        return "enter"
-    return normalized
+    """Compatibility wrapper around the renderer-independent normalizer."""
+    return normalize_key(key)
 
 
 def _schedule_canvas_focus(event: object, canvas: object) -> None:
@@ -205,10 +147,6 @@ def _restore_keymaps(
         pyplot.rcParams[name] = value
 
 
-def _is_terminal(session: DebuggerSession) -> bool:
-    return bool(session.done_flags.terminated) or bool(session.done_flags.truncated)
-
-
 @dataclass(slots=True)
 class VisualDebuggerApp:
     """Thin mutable Matplotlib adapter around one immutable debugger session."""
@@ -219,6 +157,7 @@ class VisualDebuggerApp:
     hud_axes: object
     connection_ids: list[int]
     keymap_snapshot: dict[str, object]
+    include_stress: bool = False
     closed: bool = False
 
     def connect(self) -> None:
@@ -256,71 +195,28 @@ class VisualDebuggerApp:
         key = _normalize_key(cast(_KeyEventLike, event).key)
         if key is None or self.closed:
             return
-        scenario = get_scenario(self.session.scenario_name)
-        terminal = _is_terminal(self.session)
-
-        if key == "tab":
-            self.session = cycle_controlled_actor(self.session, 1)
+        result = dispatch_command(
+            self.session,
+            KeyboardCommandV1(
+                key=key,
+                shift_key=key in ("shift+tab", "shift+r"),
+            ),
+            view_mode="researcher",
+            preset="analysis",
+            include_stress=self.include_stress,
+        )
+        if result.notice is not None:
+            print(result.notice)
+        if not result.handled:
+            return
+        self.session = result.session
+        if key in ("tab", "shift+tab"):
             _schedule_canvas_focus(
                 event,
                 cast(_FigureLike, self.figure).canvas,
             )
-        elif key == "shift+tab":
-            self.session = cycle_controlled_actor(self.session, -1)
-            _schedule_canvas_focus(
-                event,
-                cast(_FigureLike, self.figure).canvas,
-            )
-        elif key == "escape":
-            self.session = clear_pending_target(self.session)
-        elif key in _MOVEMENT_KEYS and not terminal:
-            self.session = set_pending_movement(
-                self.session,
-                _MOVEMENT_KEYS[key],
-            )
-        elif key == "1" and not terminal:
-            self.session = arm_basic(self.session)
-        elif key == "2" and not terminal:
-            self.session = arm_ultimate(self.session)
-        elif key in ("space", "enter"):
-            self.session = (
-                submit_next_script_frame(self.session)
-                if scenario.mode == "scripted"
-                else submit_interactive(self.session)
-            )
-        elif key == "n":
-            self.session = submit_next_script_frame(self.session)
-        elif key == "r":
-            self.session = reset_session(self.session)
-        elif key == "shift+r":
-            print(
-                "Shift+R cooldown clearing is unavailable because no public "
-                "coherent snapshot-rebuild API exists; use R for a full reset."
-            )
-            return
-        elif key == "g":
-            self.session = replace(
-                self.session,
-                show_ranges=not self.session.show_ranges,
-            )
-        elif key == "v":
-            self.session = replace(
-                self.session,
-                verbose_logging=not self.session.verbose_logging,
-            )
-        elif key in ("[", "]"):
-            direction = -1 if key == "[" else 1
-            next_name = cycle_scenario_name(
-                self.session.scenario_name,
-                direction,
-            )
-            self.session = switch_scenario(
-                self.session,
-                get_scenario(next_name),
-            )
-        else:
-            return
-        self.redraw()
+        if result.changed:
+            self.redraw()
 
     def on_mouse_press(self, event: object) -> None:
         if self.closed:
@@ -334,26 +230,28 @@ class VisualDebuggerApp:
             button = int(mouse_event.button)  # type: ignore[arg-type]
         except TypeError, ValueError:
             return
-        if button == 3:
-            self.session = clear_pending_target(self.session)
-        elif button == 1:
-            target = hit_test_active_agent(
-                self.session.config,
-                self.session.state,
-                mouse_event.xdata,
-                mouse_event.ydata,
-            )
-            if target is None:
-                return
-            modifiers = getattr(mouse_event, "modifiers", None) or ()
-            self.session = (
-                select_controlled_actor(self.session, target)
-                if "shift" in modifiers
-                else select_clicked_target(self.session, target)
-            )
-        else:
+        if button not in (1, 3):
             return
-        self.redraw()
+        modifiers = getattr(mouse_event, "modifiers", None) or ()
+        result = dispatch_command(
+            self.session,
+            BattlefieldPointerCommandV1(
+                world_x=float(mouse_event.xdata),
+                world_y=float(mouse_event.ydata),
+                button="primary" if button == 1 else "secondary",
+                shift_key="shift" in modifiers,
+            ),
+            view_mode="researcher",
+            preset="analysis",
+            include_stress=self.include_stress,
+        )
+        if result.notice is not None:
+            print(result.notice)
+        if not result.handled:
+            return
+        self.session = result.session
+        if result.changed:
+            self.redraw()
 
     def close(self) -> None:
         if self.closed:
@@ -389,9 +287,13 @@ def run_visual_debugger(
     static: bool,
     verbose: bool,
     show_ranges: bool,
+    include_stress: bool = False,
 ) -> int:
     """Create, optionally connect, display, and cleanly close the debugger."""
     scenario = get_scenario(scenario_name)
+    if scenario.audience == "stress" and not include_stress:
+        msg = f"stress scenario {scenario_name!r} requires the --include-stress option."
+        raise ValueError(msg)
     if controlled_global_slot is not None:
         config = scenario.build_config()
         if not (
@@ -424,6 +326,7 @@ def run_visual_debugger(
         hud_axes=hud_axes,
         connection_ids=[],
         keymap_snapshot=keymap_snapshot,
+        include_stress=include_stress,
     )
     try:
         if not static:

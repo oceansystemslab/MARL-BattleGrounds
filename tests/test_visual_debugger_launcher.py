@@ -5,6 +5,7 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
+from typing import cast
 
 import pytest
 from scripts.dev.debug_renderer import build_parser, main
@@ -13,6 +14,7 @@ from scripts.dev.visual_debugger.scenarios import (
     RESEARCHER_SCENARIOS,
     STRESS_SCENARIOS,
 )
+from scripts.dev.visual_debugger.service import DebuggerService
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _PYTHON_ENTRYPOINT = _REPOSITORY_ROOT / "scripts" / "dev" / "debug_renderer.py"
@@ -34,6 +36,16 @@ def test_parser_exposes_complete_cli_contract() -> None:
             "--controlled-slot",
             "5",
             "--static",
+            "--ui",
+            "browser",
+            "--no-open",
+            "--port",
+            "8123",
+            "--include-stress",
+            "--view",
+            "pov",
+            "--preset",
+            "debug",
             "--verbose",
             "--no-ranges",
         )
@@ -43,6 +55,12 @@ def test_parser_exposes_complete_cli_contract() -> None:
     assert args.seed == 41
     assert args.controlled_slot == 5
     assert args.static
+    assert args.ui == "browser"
+    assert args.no_open
+    assert args.port == 8123
+    assert args.include_stress
+    assert args.view == "pov"
+    assert args.preset == "debug"
     assert args.verbose
     assert args.ranges is False
 
@@ -63,6 +81,12 @@ def test_help_contains_every_option_control_inspector_and_scenario() -> None:
         "--seed",
         "--controlled-slot",
         "--static",
+        "--ui",
+        "--no-open",
+        "--port",
+        "--include-stress",
+        "--view",
+        "--preset",
         "--verbose",
         "--ranges",
         "--no-ranges",
@@ -114,6 +138,24 @@ def test_list_scenarios_is_stable_and_does_not_import_matplotlib() -> None:
         assert scenario_name not in result.stdout
     assert "interactive" in result.stdout
     assert "scripted" in result.stdout
+
+
+def test_list_scenarios_includes_stress_only_when_explicitly_requested() -> None:
+    code = (
+        "from scripts.dev.debug_renderer import main; "
+        "raise SystemExit(main(['--list-scenarios', '--include-stress']))"
+    )
+    result = subprocess.run(
+        (sys.executable, "-c", code),
+        cwd=_REPOSITORY_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    for scenario_name in (*RESEARCHER_SCENARIOS, *STRESS_SCENARIOS):
+        assert scenario_name in result.stdout
 
 
 def test_lazy_rendering_and_debugger_models_import_without_matplotlib() -> None:
@@ -172,6 +214,7 @@ def test_missing_matplotlib_is_actionable_and_returns_two(tmp_path: Path) -> Non
     "argv",
     (
         ("--scenario", "missing"),
+        ("--scenario", "charge_convergence"),
         ("--scenario", "arena_5v5", "--controlled-slot", "-1"),
         ("--seed", "not-an-int"),
     ),
@@ -186,6 +229,7 @@ def test_invalid_cli_inputs_use_argparse_exit_two(argv: tuple[str, ...]) -> None
     "argv",
     (
         ("--scenario", "missing"),
+        ("--scenario", "charge_convergence"),
         ("--scenario", "arena_5v5", "--controlled-slot", "-1"),
     ),
 )
@@ -202,6 +246,93 @@ def test_semantic_cli_validation_precedes_matplotlib_loading(
         main(argv)
 
     assert exc_info.value.code == 2
+
+
+def test_browser_selection_builds_service_and_forwards_lifecycle_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.dev.visual_debugger.server as server_module
+
+    observed: dict[str, object] = {}
+
+    def fake_serve(
+        service: object,
+        *,
+        asset_root: Path,
+        port: int,
+        open_browser: bool,
+    ) -> int:
+        observed.update(
+            service=service,
+            asset_root=asset_root,
+            port=port,
+            open_browser=open_browser,
+        )
+        return 17
+
+    monkeypatch.setattr(server_module, "serve_browser_debugger", fake_serve)
+    result = main(
+        (
+            "--ui",
+            "browser",
+            "--no-open",
+            "--port",
+            "8123",
+            "--view",
+            "pov",
+            "--preset",
+            "debug",
+            "--no-ranges",
+        )
+    )
+
+    assert result == 17
+    assert observed["asset_root"] == _REPOSITORY_ROOT / "web" / "visual_debugger"
+    assert observed["port"] == 8123
+    assert observed["open_browser"] is False
+    frame = cast(DebuggerService, observed["service"]).current_frame()
+    assert frame.view_mode == "pov"
+    assert frame.preset == "debug"
+    assert frame.scene.ranges == ()
+
+
+def test_stress_browser_launch_requires_and_accepts_explicit_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.dev.visual_debugger.server as server_module
+
+    def ignore_browser_launch(
+        _service: object,
+        *,
+        asset_root: Path,
+        port: int,
+        open_browser: bool,
+    ) -> int:
+        del asset_root, port, open_browser
+        return 0
+
+    monkeypatch.setattr(
+        server_module,
+        "serve_browser_debugger",
+        ignore_browser_launch,
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        main(("--ui", "browser", "--scenario", "charge_convergence"))
+    assert exc_info.value.code == 2
+
+    assert (
+        main(
+            (
+                "--ui",
+                "browser",
+                "--scenario",
+                "charge_convergence",
+                "--include-stress",
+                "--no-open",
+            )
+        )
+        == 0
+    )
 
 
 def _write_fake_uv(
