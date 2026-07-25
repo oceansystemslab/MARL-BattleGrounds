@@ -20,6 +20,7 @@ from scripts.dev.visual_debugger.model import ActorTransition, DebuggerSession
 from scripts.dev.visual_debugger.protocol import (
     ActionTupleCardV1,
     ActorActionResultV1,
+    CandidateLegalityCardV1,
     DebuggerFrameV1,
     DiagnosticFactV1,
     HudFrameV1,
@@ -506,6 +507,43 @@ def _diagnostics(
     return tuple(facts)
 
 
+def _candidate_legalities(
+    session: DebuggerSession,
+    scene: BattlefieldSceneV1,
+) -> tuple[CandidateLegalityCardV1, ...]:
+    """Copy exact current-mask lanes for target-none and authorized scene slots."""
+    controlled = session.controlled_global_slot
+    exact_mask = session.action_mask.select_target_use_ultimate_joint_mask
+    rows = [
+        CandidateLegalityCardV1(
+            target_action=0,
+            target=TargetReferenceV1(
+                disclosure="target_none",
+                global_slot=None,
+            ),
+            lane_0_available=bool(exact_mask[controlled, 0, 0]),
+            lane_1_available=bool(exact_mask[controlled, 0, 1]),
+        )
+    ]
+    for agent in scene.agents:
+        target_action = global_slot_to_target_action(
+            controlled,
+            agent.global_slot,
+        )
+        rows.append(
+            CandidateLegalityCardV1(
+                target_action=target_action,
+                target=TargetReferenceV1(
+                    disclosure="public",
+                    global_slot=agent.global_slot,
+                ),
+                lane_0_available=bool(exact_mask[controlled, target_action, 0]),
+                lane_1_available=bool(exact_mask[controlled, target_action, 1]),
+            )
+        )
+    return tuple(rows)
+
+
 def _hud_frame(
     session: DebuggerSession,
     scene: BattlefieldSceneV1,
@@ -530,6 +568,7 @@ def _hud_frame(
             scene,
             view_mode=view_mode,
         ),
+        candidate_legalities=_candidate_legalities(session, scene),
         diagnostics=_diagnostics(session, scene, revision=revision),
     )
 

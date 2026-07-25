@@ -168,20 +168,30 @@
         </section>
 
         <section class="hud-section" aria-labelledby="selection-heading">
-          <h2 id="selection-heading">Selection</h2>
+          <h2 id="selection-heading">Controlled and selected</h2>
           <div id="selection-card" class="fact-card">
             <p class="empty-copy">No selection facts received yet.</p>
           </div>
         </section>
 
         <section class="hud-section" aria-labelledby="pending-heading">
-          <h2 id="pending-heading">Pending / will submit</h2>
-          <pre id="pending-card" class="record-card">No pending action.</pre>
+          <h2 id="pending-heading">Pending action</h2>
+          <article id="pending-card" class="action-card">
+            <p class="empty-copy">No pending action.</p>
+          </article>
         </section>
 
         <section class="hud-section" aria-labelledby="accepted-heading">
-          <h2 id="accepted-heading">Latest accepted result</h2>
-          <pre id="accepted-card" class="record-card">No transition yet.</pre>
+          <h2 id="accepted-heading">Latest transition</h2>
+          <article id="accepted-card" class="action-card">
+            <p class="empty-copy">No transition yet.</p>
+          </article>
+          <p
+            id="accepted-announcement"
+            class="sr-only"
+            aria-live="polite"
+            aria-atomic="true"
+          ></p>
         </section>
 
         <section class="hud-section" aria-labelledby="events-heading">
@@ -194,9 +204,34 @@
           </ol>
         </section>
 
+        <details id="visual-key" class="hud-section visual-key">
+          <summary>Visual key</summary>
+          <dl class="visual-key__list">
+            <dt><span class="key-swatch key-swatch--team-a"></span>Team A</dt>
+            <dd>Blue solid perimeter</dd>
+            <dt><span class="key-swatch key-swatch--team-b"></span>Team B</dt>
+            <dd>Red dashed perimeter</dd>
+            <dt><span class="key-swatch key-swatch--controlled"></span>Controlled</dt>
+            <dd>Bright outer halo</dd>
+            <dt><span class="key-swatch key-swatch--selected"></span>Selected</dt>
+            <dd>Magenta corner reticle</dd>
+            <dt><span class="key-swatch key-swatch--basic"></span>0/B</dt>
+            <dd>Exact Basic-lane availability</dd>
+            <dt><span class="key-swatch key-swatch--ultimate"></span>1/U</dt>
+            <dd>Exact Ultimate-lane availability</dd>
+            <dt><span class="key-swatch key-swatch--net"></span>NET</dt>
+            <dd>
+              One recipient-level before/after health outcome; never a
+              per-source amount
+            </dd>
+          </dl>
+        </details>
+
         <details class="hud-section diagnostics">
           <summary>Technical frame</summary>
-          <pre id="diagnostics-card" class="record-card">No frame received.</pre>
+          <div id="diagnostics-card" class="diagnostics-card">
+            <p class="empty-copy">No frame received.</p>
+          </div>
         </details>
       </aside>
     </main>

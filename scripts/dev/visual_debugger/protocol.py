@@ -11,13 +11,14 @@ from pydantic import (
     model_validator,
 )
 
-from marl_battlegrounds.core.types import MAX_AGENT_SLOTS
+from marl_battlegrounds.core.types import MAX_AGENT_SLOTS, NUM_TARGET_ACTIONS
 from marl_battlegrounds.rendering.scene import (
     BattlefieldSceneV1,
     TargetDisclosure,
     VisualEventBatchV1,
     to_jsonable,
 )
+from scripts.dev.visual_debugger.targeting import global_slot_to_target_action
 
 PROTOCOL_SCHEMA_VERSION = 1
 FRAME_SCHEMA_VERSION = 1
@@ -63,6 +64,7 @@ _ScenarioName = Annotated[
 ]
 _KeyName = Annotated[str, StringConstraints(min_length=1, max_length=64)]
 _GlobalSlot = Annotated[int, Field(ge=0, lt=MAX_AGENT_SLOTS)]
+_TargetAction = Annotated[int, Field(ge=0, lt=NUM_TARGET_ACTIONS)]
 _NonNegativeInt = Annotated[int, Field(ge=0)]
 _FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
 
@@ -254,12 +256,33 @@ class DiagnosticFactV1(_ProtocolModel):
     technical: bool = False
 
 
+class CandidateLegalityCardV1(_ProtocolModel):
+    """One exact controlled-actor target/lane row copied from the current mask."""
+
+    target_action: _TargetAction
+    target: TargetReferenceV1
+    lane_0_available: bool
+    lane_1_available: bool
+
+    @model_validator(mode="after")
+    def _validate_target(self) -> Self:
+        if self.target_action == 0:
+            if self.target.disclosure != "target_none":
+                raise ValueError("target action zero requires a target-none reference.")
+        elif self.target.disclosure != "public":
+            raise ValueError(
+                "positive candidate target actions require public references."
+            )
+        return self
+
+
 class HudFrameV1(_ProtocolModel):
     roster_global_slots: tuple[_GlobalSlot, ...]
     controlled_global_slot: _GlobalSlot
     selected_global_slot: _GlobalSlot | None
     pending_action: PendingActionCardV1
     latest_transition: LatestTransitionCardV1 | None
+    candidate_legalities: tuple[CandidateLegalityCardV1, ...] = ()
     diagnostics: tuple[DiagnosticFactV1, ...] = ()
 
     @model_validator(mode="after")
@@ -276,6 +299,43 @@ class HudFrameV1(_ProtocolModel):
             raise ValueError("selected_global_slot must occur in the roster.")
         if self.pending_action.actor_global_slot != self.controlled_global_slot:
             raise ValueError("pending action actor must be the controlled actor.")
+        if self.candidate_legalities:
+            target_actions = tuple(
+                candidate.target_action for candidate in self.candidate_legalities
+            )
+            if len(target_actions) != len(set(target_actions)):
+                raise ValueError("candidate target actions must be unique.")
+            target_none_count = sum(
+                candidate.target.disclosure == "target_none"
+                for candidate in self.candidate_legalities
+            )
+            if target_none_count != 1:
+                raise ValueError(
+                    "candidate legality rows require exactly one target-none row."
+                )
+            public_target_rows = tuple(
+                candidate.target.global_slot
+                for candidate in self.candidate_legalities
+                if candidate.target.disclosure == "public"
+            )
+            if len(public_target_rows) != len(set(public_target_rows)):
+                raise ValueError("candidate public target slots must be unique.")
+            if set(public_target_rows) != roster:
+                raise ValueError(
+                    "candidate legality public targets must exactly match the roster."
+                )
+            for candidate in self.candidate_legalities:
+                if candidate.target.global_slot is None:
+                    continue
+                expected_target_action = global_slot_to_target_action(
+                    self.controlled_global_slot,
+                    candidate.target.global_slot,
+                )
+                if candidate.target_action != expected_target_action:
+                    raise ValueError(
+                        "candidate target actions must match the controlled "
+                        "actor-relative target mapping."
+                    )
         for actor in (
             () if self.latest_transition is None else self.latest_transition.actors
         ):

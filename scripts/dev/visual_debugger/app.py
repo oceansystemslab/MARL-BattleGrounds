@@ -7,7 +7,7 @@ from typing import Protocol, cast
 
 import numpy as np
 
-from marl_battlegrounds.rendering import draw_geometry
+from marl_battlegrounds.rendering import draw_scene_geometry
 from scripts.dev.visual_debugger.control import create_session
 from scripts.dev.visual_debugger.input import (
     dispatch_command,
@@ -15,15 +15,16 @@ from scripts.dev.visual_debugger.input import (
     normalize_key,
 )
 from scripts.dev.visual_debugger.model import DebuggerSession
-from scripts.dev.visual_debugger.presentation import (
-    build_debugger_overlays,
-    draw_hud,
-)
+from scripts.dev.visual_debugger.presentation import draw_hud
 from scripts.dev.visual_debugger.protocol import (
     BattlefieldPointerCommandV1,
     KeyboardCommandV1,
 )
 from scripts.dev.visual_debugger.scenarios import get_scenario
+from scripts.dev.visual_debugger.scene_adapter import (
+    build_battlefield_scene,
+    build_visual_event_batch,
+)
 
 __all__ = ["VisualDebuggerApp", "hit_test_active_agent", "run_visual_debugger"]
 
@@ -182,11 +183,12 @@ class VisualDebuggerApp:
             raise
 
     def redraw(self) -> None:
-        draw_geometry(
+        scene = build_battlefield_scene(self.session, audience="researcher")
+        event_batch = build_visual_event_batch(self.session, audience="researcher")
+        draw_scene_geometry(
             self.battlefield_axes,
-            self.session.config,
-            self.session.state,
-            overlays=build_debugger_overlays(self.session),
+            scene,
+            event_batch=event_batch,
         )
         draw_hud(self.hud_axes, self.session)
         cast(_FigureLike, self.figure).canvas.draw_idle()

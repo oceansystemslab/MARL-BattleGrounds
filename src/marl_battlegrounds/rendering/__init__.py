@@ -29,6 +29,12 @@ from marl_battlegrounds.rendering.scene import (
     VisualEventBatchV1,
     to_jsonable,
 )
+from marl_battlegrounds.rendering.scene_geometry import (
+    SceneRenderOptions,
+    draw_scene_geometry,
+    redraw_scene_geometry,
+    render_scene_geometry,
+)
 from marl_battlegrounds.rendering.visuals import (
     ActivationVisual,
     AuraCueVisual,
@@ -103,6 +109,7 @@ __all__ = [
     "RejectedActionEventV1",
     "RejectedActionVisual",
     "RenderResult",
+    "SceneRenderOptions",
     "SelectedLegalitySceneV1",
     "SelectionSceneV1",
     "SelectionVisual",
@@ -116,6 +123,7 @@ __all__ = [
     "class_token_from_id",
     "describe_snapshot_overlays",
     "draw_geometry",
+    "draw_scene_geometry",
     "lookup_activation_token",
     "lookup_class_token",
     "lookup_lifecycle_token",
@@ -124,7 +132,9 @@ __all__ = [
     "lookup_team_token",
     "merge_battlefield_overlays",
     "redraw_geometry",
+    "redraw_scene_geometry",
     "render_geometry",
+    "render_scene_geometry",
     "source_effect_color",
     "status_sort_key",
     "team_color",

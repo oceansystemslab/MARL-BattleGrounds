@@ -8,6 +8,7 @@ from scripts.dev.visual_debugger.protocol import (
     ActionTupleCardV1,
     ActorActionResultV1,
     BattlefieldPointerCommandV1,
+    CandidateLegalityCardV1,
     CommandRequestV1,
     DebuggerCommandV1,
     ExitCommandV1,
@@ -169,6 +170,140 @@ def test_target_reference_disclosure_is_structural() -> None:
         TargetReferenceV1(disclosure="public", global_slot=None)
     with pytest.raises(ValidationError, match="must omit global_slot"):
         TargetReferenceV1(disclosure="redacted", global_slot=5)
+
+
+def test_hud_candidate_legality_requires_target_none_roster_and_actor_mapping() -> None:
+    no_target = TargetReferenceV1(
+        disclosure="target_none",
+        global_slot=None,
+    )
+    pending = PendingActionCardV1(
+        actor_global_slot=0,
+        move_action=0,
+        target_action=0,
+        armed_lane=0,
+        arm_origin="automatic",
+        target=no_target,
+        movement_mask_value=True,
+        pair_mask_value=True,
+        summary="pending",
+    )
+    target_none = CandidateLegalityCardV1(
+        target_action=0,
+        target=no_target,
+        lane_0_available=True,
+        lane_1_available=False,
+    )
+    public_actor = CandidateLegalityCardV1(
+        target_action=1,
+        target=TargetReferenceV1(
+            disclosure="public",
+            global_slot=0,
+        ),
+        lane_0_available=False,
+        lane_1_available=True,
+    )
+
+    hud = HudFrameV1(
+        roster_global_slots=(0,),
+        controlled_global_slot=0,
+        selected_global_slot=None,
+        pending_action=pending,
+        latest_transition=None,
+        candidate_legalities=(target_none, public_actor),
+    )
+    assert hud.candidate_legalities == (target_none, public_actor)
+
+    with pytest.raises(ValidationError, match="exactly one target-none"):
+        HudFrameV1(
+            roster_global_slots=(0,),
+            controlled_global_slot=0,
+            selected_global_slot=None,
+            pending_action=pending,
+            latest_transition=None,
+            candidate_legalities=(public_actor,),
+        )
+    with pytest.raises(ValidationError, match="exactly match the roster"):
+        HudFrameV1(
+            roster_global_slots=(0, 1),
+            controlled_global_slot=0,
+            selected_global_slot=None,
+            pending_action=pending,
+            latest_transition=None,
+            candidate_legalities=(target_none, public_actor),
+        )
+    with pytest.raises(ValidationError, match="target actions must be unique"):
+        HudFrameV1(
+            roster_global_slots=(0,),
+            controlled_global_slot=0,
+            selected_global_slot=None,
+            pending_action=pending,
+            latest_transition=None,
+            candidate_legalities=(target_none, public_actor, public_actor),
+        )
+    with pytest.raises(ValidationError, match="public target slots must be unique"):
+        HudFrameV1(
+            roster_global_slots=(0,),
+            controlled_global_slot=0,
+            selected_global_slot=None,
+            pending_action=pending,
+            latest_transition=None,
+            candidate_legalities=(
+                target_none,
+                public_actor,
+                CandidateLegalityCardV1(
+                    target_action=2,
+                    target=public_actor.target,
+                    lane_0_available=True,
+                    lane_1_available=True,
+                ),
+            ),
+        )
+
+    team_b_pending = pending.model_copy(
+        update={"actor_global_slot": 5},
+    )
+    team_b_self = CandidateLegalityCardV1(
+        target_action=1,
+        target=TargetReferenceV1(disclosure="public", global_slot=5),
+        lane_0_available=True,
+        lane_1_available=False,
+    )
+    team_b_team_a_target = CandidateLegalityCardV1(
+        target_action=6,
+        target=TargetReferenceV1(disclosure="public", global_slot=0),
+        lane_0_available=False,
+        lane_1_available=True,
+    )
+    team_b_hud = HudFrameV1(
+        roster_global_slots=(0, 5),
+        controlled_global_slot=5,
+        selected_global_slot=None,
+        pending_action=team_b_pending,
+        latest_transition=None,
+        candidate_legalities=(
+            target_none,
+            team_b_self,
+            team_b_team_a_target,
+        ),
+    )
+    assert tuple(
+        candidate.target_action for candidate in team_b_hud.candidate_legalities
+    ) == (0, 1, 6)
+
+    with pytest.raises(ValidationError, match="actor-relative target mapping"):
+        HudFrameV1(
+            roster_global_slots=(0, 5),
+            controlled_global_slot=5,
+            selected_global_slot=None,
+            pending_action=team_b_pending,
+            latest_transition=None,
+            candidate_legalities=(
+                target_none,
+                team_b_self,
+                team_b_team_a_target.model_copy(update={"target_action": 2}),
+            ),
+        )
 
 
 def test_hud_rejects_public_action_endpoints_absent_from_authorized_roster() -> None:

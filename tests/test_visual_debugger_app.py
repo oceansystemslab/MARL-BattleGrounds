@@ -122,7 +122,7 @@ def _app(
     hud_axes = object()
     pyplot = _FakePyplot()
     monkeypatch.setattr(app_module, "_load_pyplot", lambda: pyplot)
-    monkeypatch.setattr(app_module, "draw_geometry", _ignore_render)
+    monkeypatch.setattr(app_module, "draw_scene_geometry", _ignore_render)
     monkeypatch.setattr(app_module, "draw_hud", _ignore_render)
     app = VisualDebuggerApp(
         session=_session(scenario_name, controlled_slot),
@@ -512,6 +512,50 @@ def test_redraw_never_steps_and_only_requests_canvas_draw(
     assert canvas.draw_idle_calls == 2
 
 
+def test_redraw_paints_researcher_scene_and_latest_event_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, canvas, battlefield_axes, _ = _app(monkeypatch)
+    scene = object()
+    event_batch = object()
+    calls: list[tuple[object, object, object]] = []
+
+    def build_scene(
+        session: DebuggerSession,
+        *,
+        audience: object,
+    ) -> object:
+        assert session is app.session
+        assert audience == "researcher"
+        return scene
+
+    def build_events(
+        session: DebuggerSession,
+        *,
+        audience: object,
+    ) -> object:
+        assert session is app.session
+        assert audience == "researcher"
+        return event_batch
+
+    def draw_scene(
+        axes: object,
+        rendered_scene: object,
+        *,
+        event_batch: object,
+    ) -> None:
+        calls.append((axes, rendered_scene, event_batch))
+
+    monkeypatch.setattr(app_module, "build_battlefield_scene", build_scene)
+    monkeypatch.setattr(app_module, "build_visual_event_batch", build_events)
+    monkeypatch.setattr(app_module, "draw_scene_geometry", draw_scene)
+
+    app.redraw()
+
+    assert calls == [(battlefield_axes, scene, event_batch)]
+    assert canvas.draw_idle_calls == 1
+
+
 def test_close_disconnects_callbacks_restores_keymaps_and_is_idempotent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -544,7 +588,7 @@ def test_static_mode_does_not_register_callbacks_or_step(
         "_create_figure",
         fake_create_figure,
     )
-    monkeypatch.setattr(app_module, "draw_geometry", _ignore_render)
+    monkeypatch.setattr(app_module, "draw_scene_geometry", _ignore_render)
     monkeypatch.setattr(app_module, "draw_hud", _ignore_render)
 
     exit_code = run_visual_debugger(

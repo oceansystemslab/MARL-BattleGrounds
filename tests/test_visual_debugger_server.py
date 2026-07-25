@@ -136,6 +136,15 @@ def test_index_and_allowlisted_assets_use_security_headers(
         ("/", "text/html"),
         ("/styles.css", "text/css"),
         ("/src/main.js", "text/javascript"),
+        (
+            "/assets/fonts/AtkinsonHyperlegible-Regular.woff2",
+            "font/woff2",
+        ),
+        (
+            "/assets/fonts/AtkinsonHyperlegible-Bold.woff2",
+            "font/woff2",
+        ),
+        ("/assets/fonts/OFL.txt", "text/plain"),
     ):
         response, body = _exchange(server, "GET", path)
         assert response.status == 200

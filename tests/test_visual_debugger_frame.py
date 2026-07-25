@@ -23,13 +23,18 @@ from scripts.dev.visual_debugger.protocol import (
     DebuggerFrameV1,
 )
 from scripts.dev.visual_debugger.scenarios import get_scenario
+from scripts.dev.visual_debugger.targeting import global_slot_to_target_action
 
 
-def _session(name: str = "arena_5v5") -> DebuggerSession:
+def _session(
+    name: str = "arena_5v5",
+    *,
+    controlled_global_slot: int = 0,
+) -> DebuggerSession:
     return create_session(
         get_scenario(name),
         seed=0,
-        controlled_global_slot=0,
+        controlled_global_slot=controlled_global_slot,
         show_ranges=True,
         verbose_logging=False,
     )
@@ -99,6 +104,38 @@ def test_initial_researcher_frame_has_exact_metadata_and_filtered_menu() -> None
     assert frame.hud.roster_global_slots == tuple(
         agent.global_slot for agent in frame.scene.agents
     )
+
+
+@pytest.mark.parametrize("controlled_global_slot", (0, 5))
+def test_researcher_candidate_legality_copies_exact_current_mask_rows(
+    controlled_global_slot: int,
+) -> None:
+    session = _session(controlled_global_slot=controlled_global_slot)
+    frame = _frame(session)
+    candidates = frame.hud.candidate_legalities
+
+    assert len(candidates) == len(frame.scene.agents) + 1
+    assert candidates[0].target_action == 0
+    assert candidates[0].target.disclosure == "target_none"
+    assert candidates[0].target.global_slot is None
+    assert tuple(candidate.target.global_slot for candidate in candidates[1:]) == tuple(
+        agent.global_slot for agent in frame.scene.agents
+    )
+
+    controlled = session.controlled_global_slot
+    exact_mask = session.action_mask.select_target_use_ultimate_joint_mask
+    for candidate in candidates:
+        assert candidate.lane_0_available is bool(
+            exact_mask[controlled, candidate.target_action, 0]
+        )
+        assert candidate.lane_1_available is bool(
+            exact_mask[controlled, candidate.target_action, 1]
+        )
+        if candidate.target.global_slot is not None:
+            assert candidate.target_action == global_slot_to_target_action(
+                controlled,
+                candidate.target.global_slot,
+            )
 
 
 def test_stress_menu_is_explicitly_opt_in() -> None:
@@ -206,6 +243,24 @@ def test_pov_whole_frame_redacts_hidden_pending_target_and_raw_artifacts(
     assert frame.hud.pending_action.target_action is None
     assert frame.hud.pending_action.pair_mask_value is None
     assert all(agent["global_slot"] != 5 for agent in agents_payload)
+    assert {
+        candidate.target.global_slot
+        for candidate in frame.hud.candidate_legalities
+        if candidate.target.global_slot is not None
+    } == {agent.global_slot for agent in frame.scene.agents}
+    assert all(
+        candidate.target.global_slot != 5
+        for candidate in frame.hud.candidate_legalities
+    )
+    controlled = session.controlled_global_slot
+    exact_mask = session.action_mask.select_target_use_ultimate_joint_mask
+    assert all(
+        candidate.lane_0_available
+        is bool(exact_mask[controlled, candidate.target_action, 0])
+        and candidate.lane_1_available
+        is bool(exact_mask[controlled, candidate.target_action, 1])
+        for candidate in frame.hud.candidate_legalities
+    )
     assert "id_5" not in serialized
     assert _json_tree_is_scalar(payload)
 

@@ -1,103 +1,22 @@
-import { spawn } from "node:child_process";
-import { once } from "node:events";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-
 import { expect, test } from "@playwright/test";
 
-const HERE = dirname(fileURLToPath(import.meta.url));
-const REPOSITORY_ROOT = resolve(HERE, "../../..");
+import { startDebugger, stopDebugger } from "./support/live-debugger.js";
 
 /** @type {import("node:child_process").ChildProcess | null} */
 let serverProcess = null;
 let debuggerUrl = "";
 
-/**
- * @returns {Promise<string>}
- */
-function startDebugger() {
-  return new Promise((resolveUrl, reject) => {
-    const child = spawn(
-      "uv",
-      [
-        "run",
-        "python",
-        "-u",
-        "scripts/dev/debug_renderer.py",
-        "--ui",
-        "browser",
-        "--no-open",
-        "--port",
-        "0",
-        "--scenario",
-        "arena_5v5",
-      ],
-      {
-        cwd: REPOSITORY_ROOT,
-        env: process.env,
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
-    serverProcess = child;
-    let stdout = "";
-    let stderr = "";
-    const timeout = setTimeout(() => {
-      child.kill("SIGTERM");
-      reject(new Error(`Debugger startup timed out.\n${stderr}`));
-    }, 60_000);
-
-    child.once("error", (error) => {
-      clearTimeout(timeout);
-      reject(error);
-    });
-    child.stderr?.setEncoding("utf8");
-    child.stderr?.on("data", (chunk) => {
-      stderr += String(chunk);
-    });
-    child.stdout?.setEncoding("utf8");
-    child.stdout?.on("data", (chunk) => {
-      stdout += String(chunk);
-      const match = stdout.match(
-        /Visual debugger: (http:\/\/127\.0\.0\.1:\d+\/#token=[A-Za-z0-9_-]+)/,
-      );
-      if (match) {
-        clearTimeout(timeout);
-        resolveUrl(match[1]);
-      }
-    });
-    child.once("exit", (code) => {
-      clearTimeout(timeout);
-      if (!debuggerUrl) {
-        reject(
-          new Error(`Debugger exited before startup with code ${code}.\n${stderr}`),
-        );
-      }
-    });
-  });
-}
-
-async function stopDebugger() {
-  const child = serverProcess;
-  serverProcess = null;
-  if (!child || child.exitCode !== null) {
-    return;
-  }
-  child.kill("SIGINT");
-  await Promise.race([
-    once(child, "exit"),
-    new Promise((resolveDelay) => setTimeout(resolveDelay, 5_000)),
-  ]);
-  if (child.exitCode === null) {
-    child.kill("SIGKILL");
-    await once(child, "exit");
-  }
-}
-
 test.beforeAll(async () => {
-  debuggerUrl = await startDebugger();
+  const started = await startDebugger();
+  serverProcess = started.process;
+  debuggerUrl = started.url;
 });
 
-test.afterAll(stopDebugger);
+test.afterAll(async () => {
+  const child = serverProcess;
+  serverProcess = null;
+  await stopDebugger(child);
+});
 
 /**
  * @param {import("@playwright/test").Page} page
@@ -136,10 +55,29 @@ test("battlefield commands preserve UI and simulator revision boundaries", async
     page.getByRole("button", { name: "Move north", exact: true }),
   ).toBeFocused();
 
+  await battlefield.evaluate((element) => {
+    const agent = element.querySelector('.agent[data-slot="0"]');
+    const transientLayer = element.querySelector('[data-layer="transient-events"]');
+    if (!agent || !transientLayer) {
+      throw new Error("Retained battlefield layers were not installed.");
+    }
+    agent.setAttribute("data-retained-probe", "agent-0");
+    const probe = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    probe.setAttribute("data-retained-probe", "transient-event");
+    transientLayer.append(probe);
+  });
   await battlefield.focus();
   await page.keyboard.press("d");
   await expect(page.locator("#revision-value")).toHaveText("1");
   await expect(page.locator("#step-value")).toHaveText("0");
+  await expect(
+    page.locator('#battlefield .agent[data-retained-probe="agent-0"]'),
+  ).toHaveCount(1);
+  await expect(
+    page.locator(
+      '#battlefield [data-layer="transient-events"] [data-retained-probe="transient-event"]',
+    ),
+  ).toHaveCount(1);
 
   await battlefield.evaluate((element) => {
     element.dispatchEvent(
@@ -181,22 +119,97 @@ test("pointer, roster, toolbar, and command-deck controls use the live service",
 
   const targetButton = page.getByRole("button", { name: "Target id_6" });
   await expect(targetButton).toBeVisible();
+  await targetButton.evaluate((element) => {
+    element.setAttribute("data-retained-probe", "target-6");
+  });
   await targetButton.click();
   revision += 1;
   await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  await expect(targetButton).toHaveAttribute("data-retained-probe", "target-6");
+  await expect(targetButton).toBeFocused();
+  await expect(targetButton).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator('.roster-row[data-selected="true"]')).toHaveAttribute(
     "aria-label",
-    "Agent id_6",
+    /^Agent id_6,/,
+  );
+  await expect(page.locator("#battlefield .legality-pill")).toHaveCount(2);
+  await expect(page.locator('#battlefield .legality-dock[data-slot="6"]')).toHaveCount(
+    1,
+  );
+  await expect(
+    page.locator('#battlefield .agent[data-slot="6"] .agent-id-tag'),
+  ).toHaveCSS("opacity", "1");
+  await expect(page.locator(".candidate-legality-row")).toHaveCount(0);
+  await expect(page.locator("#diagnostics-card")).not.toContainText(
+    "candidate_legalities",
   );
 
-  await page.getByRole("button", { name: "Control id_1" }).click();
+  await page.locator("#preset-select").selectOption("debug");
   revision += 1;
   await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  await expect(page.locator("#preset-select")).toHaveValue("debug");
+  await expect(page.locator("html")).toHaveAttribute("data-preset", "debug");
+  await expect(page.locator("html")).toHaveAttribute("data-audience", "researcher");
+  await expect(page.locator(".candidate-legality-row")).toHaveCount(11);
+  await expect(page.locator("#battlefield .debug-visibility-cue")).toHaveCount(10);
+
+  await page.locator("#view-select").selectOption("pov");
+  revision += 1;
+  await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  await expect(page.locator("#view-select")).toHaveValue("pov");
+  await expect(page.locator("html")).toHaveAttribute("data-audience", "agent_pov");
+  await expect(page.locator("#battlefield .debug-visibility-cue")).toHaveCount(0);
+  const povRosterSlots = await page
+    .locator("#roster .roster-row")
+    .evaluateAll((rows) =>
+      rows.map((row) => Number(row.getAttribute("data-slot"))).sort((a, b) => a - b),
+    );
+  const povCandidateRows = await page
+    .locator(".candidate-legality-row")
+    .evaluateAll((rows) =>
+      rows.map((row) => ({
+        targetAction: Number(row.getAttribute("data-target-action")),
+        targetSlot: row.hasAttribute("data-target-slot")
+          ? Number(row.getAttribute("data-target-slot"))
+          : null,
+      })),
+    );
+  expect(povCandidateRows).toHaveLength(povRosterSlots.length + 1);
+  expect(
+    povCandidateRows
+      .map(({ targetSlot }) => targetSlot)
+      .filter((slot) => slot !== null)
+      .sort((a, b) => Number(a) - Number(b)),
+  ).toEqual(povRosterSlots);
+  expect(
+    povCandidateRows.filter(({ targetAction }) => targetAction === 0),
+  ).toHaveLength(1);
+  expect(povRosterSlots).not.toContain(5);
+  await expect(
+    page.locator('.candidate-legality-row[data-target-slot="5"]'),
+  ).toHaveCount(0);
+
+  await page.locator("#view-select").selectOption("researcher");
+  revision += 1;
+  await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  await expect(page.locator("#view-select")).toHaveValue("researcher");
+
+  const controlButton = page.getByRole("button", { name: "Control id_1" });
+  await controlButton.evaluate((element) => {
+    element.setAttribute("data-retained-probe", "control-1");
+  });
+  await controlButton.click();
+  revision += 1;
+  await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  await expect(controlButton).toHaveAttribute("data-retained-probe", "control-1");
+  await expect(controlButton).toBeFocused();
+  await expect(controlButton).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator('.roster-row[data-controlled="true"]')).toHaveAttribute(
     "aria-label",
-    "Agent id_1",
+    /^Agent id_1,/,
   );
 
+  await page.setViewportSize({ width: 960, height: 600 });
   await page
     .locator('#battlefield .agent[data-slot="2"] .agent-body')
     .click({ modifiers: ["Shift"] });
@@ -204,7 +217,7 @@ test("pointer, roster, toolbar, and command-deck controls use the live service",
   await expect(page.locator("#revision-value")).toHaveText(String(revision));
   await expect(page.locator('.roster-row[data-controlled="true"]')).toHaveAttribute(
     "aria-label",
-    "Agent id_2",
+    /^Agent id_2,/,
   );
 
   await page.locator('#battlefield .agent[data-slot="7"] .agent-body').click();
@@ -212,23 +225,12 @@ test("pointer, roster, toolbar, and command-deck controls use the live service",
   await expect(page.locator("#revision-value")).toHaveText(String(revision));
   await expect(page.locator('.roster-row[data-selected="true"]')).toHaveAttribute(
     "aria-label",
-    "Agent id_7",
+    /^Agent id_7,/,
   );
-
-  await page.locator("#preset-select").selectOption("debug");
-  revision += 1;
-  await expect(page.locator("#revision-value")).toHaveText(String(revision));
-  await expect(page.locator("#preset-select")).toHaveValue("debug");
-
-  await page.locator("#view-select").selectOption("pov");
-  revision += 1;
-  await expect(page.locator("#revision-value")).toHaveText(String(revision));
-  await expect(page.locator("#view-select")).toHaveValue("pov");
-
-  await page.locator("#view-select").selectOption("researcher");
-  revision += 1;
-  await expect(page.locator("#revision-value")).toHaveText(String(revision));
-  await expect(page.locator("#view-select")).toHaveValue("researcher");
+  await expect(page.locator("#battlefield .legality-pill")).toHaveCount(2);
+  await expect(page.locator('#battlefield .legality-dock[data-slot="7"]')).toHaveCount(
+    1,
+  );
 
   await page.locator("#scenario-select").selectOption("basic_support");
   revision += 1;
