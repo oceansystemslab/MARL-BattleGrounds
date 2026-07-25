@@ -1,0 +1,906 @@
+import { layoutRouteSet } from "./routes.js";
+import { resolveVisualToken } from "./vocabulary.js";
+
+export const CHOREOGRAPHY_PHASES = Object.freeze({
+  activationStart: 0,
+  travelStart: 80,
+  impactStart: 360,
+  outcomeStart: 420,
+  submissionRelease: 450,
+  settleStart: 760,
+  total: 900,
+  reducedTotal: 220,
+});
+
+const MAX_HEALTH_CUES_PER_RECIPIENT = 3;
+const MAX_EVENT_RECORDS = 128;
+const MAX_SPATIAL_EVENTS = 96;
+const STATUS_LIFECYCLE_KINDS = new Set([
+  "applied",
+  "refreshed",
+  "decremented",
+  "expired",
+  "trap_broken",
+  "cleared_unclassified",
+  "trap_broken_and_reapplied",
+]);
+const REJECTION_COMPONENTS = new Set(["movement", "combat", "complete_tuple_domain"]);
+
+/**
+ * @typedef {{
+ *   worldToScreen: (point: readonly [number, number] | {x: number, y: number}) =>
+ *     {x: number, y: number},
+ *   worldLengthToScreen: (length: number) => number,
+ *   viewportBounds?: {
+ *     left: number,
+ *     top: number,
+ *     right: number,
+ *     bottom: number,
+ *     width: number,
+ *     height: number,
+ *   },
+ *   protectedRects?: ReadonlyArray<{
+ *     left: number,
+ *     top: number,
+ *     right: number,
+ *     bottom: number,
+ *     width: number,
+ *     height: number,
+ *   }>,
+ * }} ProjectionSurface
+ * @typedef {{
+ *   eventId: string,
+ *   sourceGlobalSlot: number,
+ *   targetGlobalSlot: number,
+ *   source: {x: number, y: number},
+ *   target: {x: number, y: number},
+ *   sourceRadius: number,
+ *   targetRadius: number,
+ * }} RouteInput
+ * @typedef {Record<string, any> & {
+ *   events: ReadonlyArray<Record<string, any>>,
+ * }} ChoreographyPlan
+ */
+
+/**
+ * @param {unknown} value
+ * @returns {value is Record<string, any>}
+ */
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * @param {unknown} value
+ * @returns {Record<string, any> | null}
+ */
+function record(value) {
+  return isRecord(value) ? value : null;
+}
+
+/**
+ * @param {unknown} value
+ * @returns {any[]}
+ */
+function array(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+/**
+ * @param {unknown} value
+ * @returns {number | null}
+ */
+function integer(value) {
+  return Number.isInteger(value) ? Number(value) : null;
+}
+
+/**
+ * @param {unknown} value
+ * @returns {boolean | null}
+ */
+function boolean(value) {
+  return typeof value === "boolean" ? value : null;
+}
+
+/**
+ * @param {unknown} value
+ * @returns {number | null}
+ */
+function finiteNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * @param {unknown} value
+ * @returns {string | null}
+ */
+function identifier(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+/**
+ * @param {unknown} value
+ * @returns {readonly [number, number] | null}
+ */
+function point(value) {
+  if (
+    !Array.isArray(value) ||
+    value.length !== 2 ||
+    !Number.isFinite(value[0]) ||
+    !Number.isFinite(value[1])
+  ) {
+    return null;
+  }
+  return Object.freeze([Number(value[0]), Number(value[1])]);
+}
+
+/**
+ * @param {readonly [number, number] | null} world
+ * @param {ProjectionSurface | null} surface
+ * @returns {{x: number, y: number} | null}
+ */
+function project(world, surface) {
+  if (!world || !surface) {
+    return null;
+  }
+  const projected = surface.worldToScreen(world);
+  if (!Number.isFinite(projected.x) || !Number.isFinite(projected.y)) {
+    return null;
+  }
+  return Object.freeze({ x: Number(projected.x), y: Number(projected.y) });
+}
+
+/**
+ * Place recipient-level text and lifecycle cues in deterministic screen-space
+ * lanes outside durable protected rectangles. This is presentation geometry
+ * only; it never changes or derives an event fact.
+ *
+ * @param {ReadonlyArray<Record<string, any>>} events
+ * @param {ProjectionSurface | null} surface
+ */
+function layoutOutcomeCues(events, surface) {
+  const viewport = normalizedRectangle(surface?.viewportBounds);
+  if (!viewport) {
+    return events;
+  }
+  const occupied = array(surface?.protectedRects)
+    .map(normalizedRectangle)
+    .filter((bounds) => bounds !== null);
+
+  return events.map((event) => {
+    if (
+      !event.spatial ||
+      (event.kind !== "net_health" && event.kind !== "status_lifecycle") ||
+      !event.recipient
+    ) {
+      return event;
+    }
+    const dimensions =
+      event.kind === "net_health"
+        ? {
+            width: event.outcome === "unchanged" ? 102 : 88,
+            height: 24,
+          }
+        : { width: 38, height: 38 };
+    const candidates = cueCandidates(event, dimensions, viewport);
+    let selected = candidates[0] ?? null;
+    let selectedScore = Number.POSITIVE_INFINITY;
+    let collisionFree = false;
+    for (const candidate of candidates) {
+      const overlap = occupied.reduce(
+        (total, bounds) => total + rectangleIntersectionArea(candidate.bounds, bounds),
+        0,
+      );
+      const score = overlap * 10_000 + candidate.displacement;
+      if (score < selectedScore) {
+        selected = candidate;
+        selectedScore = score;
+        collisionFree = overlap === 0;
+      }
+      if (overlap === 0) {
+        break;
+      }
+    }
+    if (!selected) {
+      return event;
+    }
+    occupied.push(selected.bounds);
+    return Object.freeze({
+      ...event,
+      cue: selected.center,
+      cueBounds: selected.bounds,
+      cueCollisionFree: collisionFree,
+    });
+  });
+}
+
+/**
+ * @param {Record<string, any>} event
+ * @param {{width: number, height: number}} dimensions
+ * @param {Record<string, number>} viewport
+ */
+function cueCandidates(event, dimensions, viewport) {
+  const recipient = event.recipient;
+  const baseAngle =
+    event.kind === "status_lifecycle"
+      ? -Math.PI / 2 +
+        (Math.PI * 2 * Number(event.lane ?? 0)) /
+          Math.max(1, Number(event.laneCount ?? 1))
+      : -Math.PI / 2;
+  const angleOffsets =
+    event.kind === "net_health"
+      ? [0, -Math.PI / 4, Math.PI / 4, Math.PI, -Math.PI / 2, Math.PI / 2]
+      : [
+          0,
+          Math.PI / 6,
+          -Math.PI / 6,
+          Math.PI / 3,
+          -Math.PI / 3,
+          Math.PI / 2,
+          -Math.PI / 2,
+          (Math.PI * 2) / 3,
+          (-Math.PI * 2) / 3,
+          Math.PI,
+        ];
+  const radii =
+    event.kind === "net_health" ? [44, 64, 84, 108] : [42, 60, 78, 96, 118, 140];
+  const candidates = [];
+  for (const radius of radii) {
+    for (const offset of angleOffsets) {
+      const raw = {
+        x: recipient.x + Math.cos(baseAngle + offset) * radius,
+        y: recipient.y + Math.sin(baseAngle + offset) * radius,
+      };
+      const center = clampCueCenter(raw, dimensions, viewport);
+      candidates.push(
+        Object.freeze({
+          center,
+          bounds: Object.freeze({
+            left: center.x - dimensions.width / 2,
+            top: center.y - dimensions.height / 2,
+            right: center.x + dimensions.width / 2,
+            bottom: center.y + dimensions.height / 2,
+            width: dimensions.width,
+            height: dimensions.height,
+          }),
+          displacement: Math.hypot(center.x - recipient.x, center.y - recipient.y),
+        }),
+      );
+    }
+  }
+  return candidates;
+}
+
+/**
+ * @param {{x: number, y: number}} center
+ * @param {{width: number, height: number}} dimensions
+ * @param {Record<string, number>} viewport
+ */
+function clampCueCenter(center, dimensions, viewport) {
+  const horizontal = dimensions.width / 2 + 4;
+  const vertical = dimensions.height / 2 + 4;
+  return Object.freeze({
+    x: Math.max(
+      viewport.left + horizontal,
+      Math.min(viewport.right - horizontal, center.x),
+    ),
+    y: Math.max(
+      viewport.top + vertical,
+      Math.min(viewport.bottom - vertical, center.y),
+    ),
+  });
+}
+
+/**
+ * @param {unknown} value
+ * @returns {Record<string, number> | null}
+ */
+function normalizedRectangle(value) {
+  const bounds = record(value);
+  if (!bounds) {
+    return null;
+  }
+  const left = finiteNumber(bounds.left);
+  const top = finiteNumber(bounds.top);
+  const right = finiteNumber(bounds.right);
+  const bottom = finiteNumber(bounds.bottom);
+  if (
+    left === null ||
+    top === null ||
+    right === null ||
+    bottom === null ||
+    right < left ||
+    bottom < top
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    left,
+    top,
+    right,
+    bottom,
+    width: right - left,
+    height: bottom - top,
+  });
+}
+
+/**
+ * @param {Record<string, number>} first
+ * @param {Record<string, number>} second
+ */
+function rectangleIntersectionArea(first, second) {
+  return (
+    Math.max(
+      0,
+      Math.min(first.right, second.right) - Math.max(first.left, second.left),
+    ) *
+    Math.max(0, Math.min(first.bottom, second.bottom) - Math.max(first.top, second.top))
+  );
+}
+
+/**
+ * @param {unknown} frame
+ * @returns {Record<string, any> | null}
+ */
+function frameScene(frame) {
+  const candidate = record(frame);
+  if (!candidate) {
+    return null;
+  }
+  return record(candidate.scene) ?? record(candidate.battlefield_scene);
+}
+
+/**
+ * @param {unknown} frame
+ * @returns {Record<string, any> | null}
+ */
+export function frameEventBatch(frame) {
+  const candidate = record(frame);
+  if (!candidate) {
+    return null;
+  }
+  return record(candidate.event_batch) ?? record(candidate.visual_event_batch);
+}
+
+/**
+ * @param {unknown} frame
+ * @returns {string | null}
+ */
+export function transitionEpochKey(frame) {
+  const candidate = record(frame);
+  const batch = frameEventBatch(frame);
+  const sessionId = identifier(candidate?.session_id);
+  const runGeneration = integer(candidate?.run_generation);
+  const transitionId = integer(batch?.transition_id ?? candidate?.transition_id);
+  if (sessionId === null || runGeneration === null || transitionId === null) {
+    return null;
+  }
+  return JSON.stringify([sessionId, runGeneration, transitionId]);
+}
+
+/**
+ * @param {unknown} frame
+ * @returns {string | null}
+ */
+export function authorizationContextKey(frame) {
+  const candidate = record(frame);
+  const scene = frameScene(frame);
+  const sessionId = identifier(candidate?.session_id);
+  const runGeneration = integer(candidate?.run_generation);
+  const audience =
+    scene?.audience === "researcher" || scene?.audience === "agent_pov"
+      ? scene.audience
+      : null;
+  if (audience === null) {
+    return null;
+  }
+  const controlled =
+    audience === "agent_pov"
+      ? integer(record(scene?.selection)?.controlled_global_slot)
+      : null;
+  if (
+    sessionId === null ||
+    runGeneration === null ||
+    (audience === "agent_pov" && controlled === null)
+  ) {
+    return null;
+  }
+  return JSON.stringify([sessionId, runGeneration, audience, controlled]);
+}
+
+/**
+ * @param {unknown} frame
+ * @returns {string | null}
+ */
+export function eventFingerprint(frame) {
+  const batch = frameEventBatch(frame);
+  if (!batch) {
+    return null;
+  }
+  const events = array(batch.events);
+  const eventIds = events.map((event) => identifier(record(event)?.event_id));
+  if (eventIds.some((eventId) => eventId === null)) {
+    return null;
+  }
+  return `${events.length}:${hashText(JSON.stringify(events))}`;
+}
+
+/**
+ * Deterministic non-cryptographic content identity for an already-authorized
+ * event batch. The hash is presentation state, not a trust boundary.
+ *
+ * @param {string} value
+ */
+function hashText(value) {
+  let hash = 2166136261;
+  for (const character of value) {
+    hash ^= character.codePointAt(0) ?? 0;
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+/**
+ * Classify only the existing browser command envelope. This does not decide
+ * simulator legality or acceptance.
+ *
+ * @param {unknown} command
+ */
+export function isSubmissionCommand(command) {
+  const candidate = record(command);
+  if (candidate?.command_type !== "keyboard") {
+    return false;
+  }
+  if (typeof candidate.key !== "string") {
+    return false;
+  }
+  const normalized =
+    candidate.key === " " ? "space" : candidate.key.trim().toLowerCase();
+  return normalized === "space" || normalized === "enter" || normalized === "n";
+}
+
+/**
+ * @param {Record<string, any> | null} scene
+ * @param {ProjectionSurface | null} surface
+ */
+function radiusBySlot(scene, surface) {
+  /** @type {Map<number, number>} */
+  const radii = new Map();
+  if (!surface) {
+    return radii;
+  }
+  for (const rawAgent of array(scene?.agents)) {
+    const agent = record(rawAgent);
+    const slot = integer(agent?.global_slot);
+    const radius = finiteNumber(agent?.radius);
+    if (slot === null || radius === null || radius < 0) {
+      continue;
+    }
+    radii.set(slot, surface.worldLengthToScreen(radius));
+  }
+  return radii;
+}
+
+/**
+ * Build one immutable presentation plan from the already-authorized latest
+ * scene/event batch. No simulator fact is derived here.
+ *
+ * @param {unknown} frame
+ * @param {ProjectionSurface | null} surface
+ * @returns {Readonly<ChoreographyPlan> | null}
+ */
+export function buildChoreographyPlan(frame, surface = null) {
+  const candidate = record(frame);
+  const scene = frameScene(frame);
+  const batch = frameEventBatch(frame);
+  const epochKey = transitionEpochKey(frame);
+  const authorizationKey = authorizationContextKey(frame);
+  const fingerprint = eventFingerprint(frame);
+  if (
+    !candidate ||
+    !scene ||
+    !batch ||
+    epochKey === null ||
+    authorizationKey === null ||
+    fingerprint === null
+  ) {
+    return null;
+  }
+
+  const transitionId = integer(batch.transition_id);
+  const simulatorStep = integer(batch.simulator_step);
+  if (transitionId === null || simulatorStep === null) {
+    return null;
+  }
+
+  const radii = radiusBySlot(scene, surface);
+  const rawEvents = array(batch.events);
+  if (rawEvents.length > MAX_EVENT_RECORDS) {
+    throw new RangeError(
+      `visual event batch exceeds the ${MAX_EVENT_RECORDS}-event presentation limit.`,
+    );
+  }
+  /** @type {Array<Record<string, any>>} */
+  const planned = [];
+  /** @type {RouteInput[]} */
+  const acceptedRouteInputs = [];
+  /** @type {RouteInput[]} */
+  const rejectedRouteInputs = [];
+  /** @type {Map<number, number>} */
+  const healthLaneCounts = new Map();
+  /** @type {Map<number, number>} */
+  const lifecycleLaneCounts = new Map();
+  const lifecycleTotals = new Map();
+  const seenEventIds = new Set();
+
+  for (const rawEvent of rawEvents) {
+    const lifecycleEvent = record(rawEvent);
+    const recipientSlot = integer(lifecycleEvent?.recipient_global_slot);
+    if (
+      lifecycleEvent?.event_type === "status_lifecycle" &&
+      recipientSlot !== null &&
+      lifecycleEvent.change !== "decremented"
+    ) {
+      lifecycleTotals.set(recipientSlot, (lifecycleTotals.get(recipientSlot) ?? 0) + 1);
+    }
+  }
+
+  for (const rawEvent of rawEvents) {
+    const event = record(rawEvent);
+    const eventId = identifier(event?.event_id);
+    const eventType = identifier(event?.event_type);
+    if (!event || eventId === null || eventType === null || seenEventIds.has(eventId)) {
+      continue;
+    }
+    seenEventIds.add(eventId);
+    const common = {
+      eventId,
+      eventType,
+      transitionId,
+    };
+    if (integer(event.transition_id) !== transitionId) {
+      planned.push(Object.freeze({ ...common, kind: "unknown", spatial: false }));
+      continue;
+    }
+
+    if (eventType === "accepted_activation") {
+      const sourceSlot = integer(event.source_global_slot);
+      const targetSlot = integer(event.target_global_slot);
+      const disclosure = identifier(event.target_disclosure);
+      const lane = integer(event.lane);
+      if (
+        sourceSlot === null ||
+        (lane !== 0 && lane !== 1) ||
+        (disclosure !== "public" &&
+          disclosure !== "target_none" &&
+          disclosure !== "redacted")
+      ) {
+        planned.push(Object.freeze({ ...common, kind: "unknown", spatial: false }));
+        continue;
+      }
+      const token = resolveVisualToken("activation", event.token_id, event);
+      const source = project(point(event.source_anchor), surface);
+      const target =
+        disclosure === "public" ? project(point(event.target_anchor), surface) : null;
+      if (
+        (disclosure === "public" && (targetSlot === null || target === null)) ||
+        (disclosure !== "public" &&
+          (targetSlot !== null || point(event.target_anchor) !== null)) ||
+        (token.tokenId === "mage_burst" && disclosure !== "target_none") ||
+        (token.tokenId !== "mage_burst" && disclosure === "target_none")
+      ) {
+        planned.push(Object.freeze({ ...common, kind: "unknown", spatial: false }));
+        continue;
+      }
+      const hasPublicRoute =
+        disclosure === "public" &&
+        source !== null &&
+        target !== null &&
+        targetSlot !== null;
+      const presentationKind = hasPublicRoute
+        ? "routed"
+        : source !== null
+          ? "source_local"
+          : target !== null
+            ? "target_only_impact"
+            : "undisclosed";
+      if (hasPublicRoute) {
+        acceptedRouteInputs.push({
+          eventId,
+          sourceGlobalSlot: sourceSlot,
+          targetGlobalSlot: targetSlot,
+          source,
+          target,
+          sourceRadius: radii.get(sourceSlot) ?? 0,
+          targetRadius: radii.get(targetSlot) ?? 0,
+        });
+      }
+      planned.push(
+        Object.freeze({
+          ...common,
+          kind: "activation",
+          tokenId: token.tokenId,
+          token,
+          lane,
+          sourceSlot,
+          targetSlot: disclosure === "public" ? targetSlot : null,
+          targetDisclosure: disclosure,
+          source,
+          target,
+          route: null,
+          spatial: source !== null || target !== null,
+          presentationKind,
+          phaseStart:
+            presentationKind === "target_only_impact"
+              ? CHOREOGRAPHY_PHASES.impactStart
+              : CHOREOGRAPHY_PHASES.activationStart,
+          phaseImpact: CHOREOGRAPHY_PHASES.impactStart,
+          phaseEnd: CHOREOGRAPHY_PHASES.settleStart,
+        }),
+      );
+      continue;
+    }
+
+    if (eventType === "net_health") {
+      const recipientSlot = integer(event.recipient_global_slot);
+      const delta = finiteNumber(event.net_delta);
+      const healthBefore = finiteNumber(event.health_before);
+      const healthAfter = finiteNumber(event.health_after);
+      const outcome =
+        event.outcome === "damage" ||
+        event.outcome === "healing" ||
+        event.outcome === "unchanged"
+          ? event.outcome
+          : null;
+      if (
+        recipientSlot === null ||
+        delta === null ||
+        healthBefore === null ||
+        healthAfter === null ||
+        outcome === null ||
+        Math.abs(healthAfter - healthBefore - delta) > 1e-6 ||
+        (delta < 0 && outcome !== "damage") ||
+        (delta > 0 && outcome !== "healing") ||
+        (delta === 0 && outcome !== "unchanged")
+      ) {
+        planned.push(Object.freeze({ ...common, kind: "unknown", spatial: false }));
+        continue;
+      }
+      const lane = healthLaneCounts.get(recipientSlot) ?? 0;
+      healthLaneCounts.set(recipientSlot, lane + 1);
+      const recipient = project(point(event.recipient_anchor), surface);
+      planned.push(
+        Object.freeze({
+          ...common,
+          kind: "net_health",
+          recipientSlot,
+          recipient,
+          netDelta: delta,
+          healthBefore,
+          healthAfter,
+          outcome,
+          lane,
+          spatial: recipient !== null && lane < MAX_HEALTH_CUES_PER_RECIPIENT,
+          phaseStart: CHOREOGRAPHY_PHASES.outcomeStart,
+          phaseEnd: CHOREOGRAPHY_PHASES.total,
+        }),
+      );
+      continue;
+    }
+
+    if (eventType === "charge_displacement") {
+      const sourceSlot = integer(event.source_global_slot);
+      const targetSlot = integer(event.target_global_slot);
+      const start = project(point(event.start), surface);
+      const end = project(point(event.end), surface);
+      const pathKind =
+        event.path_kind === "charge_only" ||
+        event.path_kind === "combined_charge_and_movement"
+          ? event.path_kind
+          : null;
+      if (
+        sourceSlot === null ||
+        targetSlot === null ||
+        start === null ||
+        end === null ||
+        pathKind === null
+      ) {
+        planned.push(Object.freeze({ ...common, kind: "unknown", spatial: false }));
+        continue;
+      }
+      planned.push(
+        Object.freeze({
+          ...common,
+          kind: "charge_displacement",
+          sourceSlot,
+          targetSlot,
+          start,
+          end,
+          pathKind,
+          spatial: true,
+          persistent: true,
+          phaseStart: CHOREOGRAPHY_PHASES.impactStart,
+          phaseEnd: CHOREOGRAPHY_PHASES.total,
+        }),
+      );
+      continue;
+    }
+
+    if (eventType === "status_lifecycle") {
+      const recipientSlot = integer(event.recipient_global_slot);
+      const durationBefore = integer(event.duration_before);
+      const durationAfter = integer(event.duration_after);
+      const lifecycleKind = identifier(event.change);
+      if (
+        recipientSlot === null ||
+        durationBefore === null ||
+        durationBefore < 0 ||
+        durationAfter === null ||
+        durationAfter < 0 ||
+        lifecycleKind === null ||
+        !STATUS_LIFECYCLE_KINDS.has(lifecycleKind)
+      ) {
+        planned.push(Object.freeze({ ...common, kind: "unknown", spatial: false }));
+        continue;
+      }
+      const status = resolveVisualToken("status", event.token_id, event);
+      const lifecycle = resolveVisualToken("lifecycle", lifecycleKind, event);
+      const spatialLifecycle = lifecycleKind !== "decremented";
+      const lane = spatialLifecycle ? (lifecycleLaneCounts.get(recipientSlot) ?? 0) : 0;
+      if (spatialLifecycle) {
+        lifecycleLaneCounts.set(recipientSlot, lane + 1);
+      }
+      const recipient = project(point(event.recipient_anchor), surface);
+      planned.push(
+        Object.freeze({
+          ...common,
+          kind: "status_lifecycle",
+          tokenId: status.tokenId,
+          token: status,
+          lifecycle: lifecycle.tokenId,
+          lifecycleToken: lifecycle,
+          recipientSlot,
+          recipient,
+          durationBefore,
+          durationAfter,
+          lane,
+          laneCount: lifecycleTotals.get(recipientSlot) ?? 1,
+          applicationEventIds: Object.freeze(
+            array(event.application_event_ids)
+              .map(identifier)
+              .filter((value) => value !== null),
+          ),
+          spatial: lifecycleKind !== "decremented" && recipient !== null,
+          phaseStart: CHOREOGRAPHY_PHASES.outcomeStart,
+          phaseEnd: CHOREOGRAPHY_PHASES.total,
+        }),
+      );
+      continue;
+    }
+
+    if (eventType === "rejected_action") {
+      const actorSlot = integer(event.actor_global_slot);
+      const targetSlot = integer(event.target_global_slot);
+      const actor = project(point(event.actor_anchor), surface);
+      const component = identifier(event.component);
+      const disclosure = identifier(event.target_disclosure);
+      const movementMaskValue = boolean(event.movement_mask_value);
+      const pairMaskValue = boolean(event.pair_mask_value);
+      if (
+        actorSlot === null ||
+        component === null ||
+        !REJECTION_COMPONENTS.has(component) ||
+        (disclosure !== "public" &&
+          disclosure !== "target_none" &&
+          disclosure !== "redacted" &&
+          disclosure !== "invalid") ||
+        movementMaskValue === null ||
+        pairMaskValue === null
+      ) {
+        planned.push(Object.freeze({ ...common, kind: "unknown", spatial: false }));
+        continue;
+      }
+      const target =
+        disclosure === "public" ? project(point(event.target_anchor), surface) : null;
+      if (
+        (disclosure === "public" && (targetSlot === null || target === null)) ||
+        (disclosure !== "public" &&
+          (targetSlot !== null || point(event.target_anchor) !== null))
+      ) {
+        planned.push(Object.freeze({ ...common, kind: "unknown", spatial: false }));
+        continue;
+      }
+      const hasPublicRoute =
+        component === "combat" &&
+        actorSlot !== null &&
+        targetSlot !== null &&
+        actor !== null &&
+        target !== null;
+      if (hasPublicRoute) {
+        rejectedRouteInputs.push({
+          eventId,
+          sourceGlobalSlot: actorSlot,
+          targetGlobalSlot: targetSlot,
+          source: actor,
+          target,
+          sourceRadius: radii.get(actorSlot) ?? 0,
+          targetRadius: radii.get(targetSlot) ?? 0,
+        });
+      }
+      planned.push(
+        Object.freeze({
+          ...common,
+          kind: "rejected_action",
+          actorSlot,
+          targetSlot: disclosure === "public" ? targetSlot : null,
+          actor,
+          target,
+          component,
+          lane: integer(event.lane),
+          movementMaskValue,
+          pairMaskValue,
+          route: null,
+          spatial: actor !== null,
+          phaseStart: CHOREOGRAPHY_PHASES.activationStart,
+          phaseEnd: CHOREOGRAPHY_PHASES.settleStart,
+        }),
+      );
+      continue;
+    }
+
+    planned.push(
+      Object.freeze({
+        ...common,
+        kind: "unknown",
+        spatial: false,
+      }),
+    );
+  }
+
+  const acceptedRoutes = new Map(
+    layoutRouteSet(acceptedRouteInputs).map((route) => [route.eventId, route]),
+  );
+  const rejectedRoutes = new Map(
+    layoutRouteSet(rejectedRouteInputs, { spacing: 12 }).map((route) => [
+      route.eventId,
+      route,
+    ]),
+  );
+  const routedEvents = planned.map((event) => {
+    const route =
+      event.kind === "activation"
+        ? acceptedRoutes.get(event.eventId)
+        : event.kind === "rejected_action"
+          ? rejectedRoutes.get(event.eventId)
+          : undefined;
+    return route ? Object.freeze({ ...event, route }) : event;
+  });
+  /** @type {ReadonlyArray<Record<string, any>>} */
+  const events = Object.freeze(
+    layoutOutcomeCues(routedEvents, surface).map((event) =>
+      Object.isFrozen(event) ? event : Object.freeze(event),
+    ),
+  );
+  const spatialEventCount = events.filter((event) => event.spatial).length;
+  if (spatialEventCount > MAX_SPATIAL_EVENTS) {
+    throw new RangeError(
+      `visual event batch exceeds the ${MAX_SPATIAL_EVENTS}-event spatial limit.`,
+    );
+  }
+  const persistentEventCount = events.filter((event) => event.persistent).length;
+
+  return Object.freeze({
+    epochKey,
+    authorizationKey,
+    fingerprint,
+    transitionId,
+    simulatorStep,
+    phases: CHOREOGRAPHY_PHASES,
+    events,
+    bounds: Object.freeze({
+      nodes: Math.min(events.length * 28 + 2, 512),
+      animations: Math.min(spatialEventCount * 3 + 2, 512),
+      persistentNodes: Math.min(persistentEventCount * 6, 64),
+    }),
+  });
+}

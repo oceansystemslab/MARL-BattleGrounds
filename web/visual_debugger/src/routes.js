@@ -29,6 +29,7 @@ const EPSILON = 1e-6;
  *   sourcePortAngle: number,
  *   targetPortAngle: number,
  *   offset: number,
+ *   sweep: 0 | 1,
  *   path: string,
  * }} RouteGeometry
  */
@@ -303,6 +304,7 @@ function localArc(input) {
     sourcePortAngle: startAngle,
     targetPortAngle: endAngle,
     offset: input.offset,
+    sweep,
     path: `M ${number(start.x)} ${number(start.y)} A ${number(arcRadius)} ${number(arcRadius)} 0 0 ${sweep} ${number(end.x)} ${number(end.y)}`,
   });
 }

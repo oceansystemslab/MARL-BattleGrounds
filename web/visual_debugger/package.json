@@ -9,6 +9,7 @@
     "lint": "biome lint .",
     "typecheck": "tsc --project tsconfig.json",
     "test:unit": "node --test tests/*.test.js",
+    "test:effects": "node --test tests/effects.test.js tests/animation.test.js",
     "install:browser": "playwright install chromium",
     "test:e2e": "playwright test --config playwright.config.js"
   },

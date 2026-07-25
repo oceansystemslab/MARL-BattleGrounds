@@ -7,6 +7,9 @@ import {
   getCurrentFrame,
   postCommand,
 } from "./api.js";
+import { CombatChoreographer, ConsumedTransitionLedger } from "./choreography.js";
+import { SvgChoreographyPainter } from "./choreography-painter.js";
+import { isSubmissionCommand } from "./choreography-plan.js";
 import { bindBattlefieldControls, keyboardCommand } from "./controls.js";
 import { DebuggerPanels } from "./panels.js";
 import { BattlefieldRenderer } from "./scene.js";
@@ -37,6 +40,12 @@ const elements = {
   helpButton: requiredElement("help-button"),
   exitButton: requiredElement("exit-button"),
   resetButton: requiredElement("reset-button"),
+  motionPauseButton: requiredElement("motion-pause-button"),
+  motionSkipButton: requiredElement("motion-skip-button"),
+  motionStatus: requiredElement("motion-status"),
+  motionRateButtons: /** @type {NodeListOf<HTMLButtonElement>} */ (
+    document.querySelectorAll("[data-motion-rate]")
+  ),
   notice: requiredElement("notice"),
   scenarioDescription: requiredElement("scenario-description"),
   battlefieldShell: requiredElement("battlefield-shell"),
@@ -83,6 +92,25 @@ const state = {
 const battlefieldRenderer = new BattlefieldRenderer({
   battlefield: elements.battlefield,
   empty: elements.battlefieldEmpty,
+});
+
+const reducedMotionPreference = window.matchMedia("(prefers-reduced-motion: reduce)");
+/** @type {Storage | null} */
+let presentationStorage = null;
+try {
+  presentationStorage = window.sessionStorage;
+} catch {
+  // Storage is an optional presentation convenience, never an authority input.
+}
+
+const choreographer = new CombatChoreographer({
+  painter: new SvgChoreographyPainter(),
+  ledger: new ConsumedTransitionLedger({ storage: presentationStorage }),
+  motionMode: reducedMotionPreference.matches ? "reduced" : "normal",
+  onStateChange: () => {
+    renderMotionControls();
+    renderCommandAvailability();
+  },
 });
 
 const panels = new DebuggerPanels({
@@ -313,14 +341,86 @@ function renderSessionToolbar() {
   elements.reconnectButton.disabled = state.busy || state.shuttingDown;
   elements.exitButton.disabled = disabled;
   elements.resetButton.disabled = disabled;
+  renderCommandAvailability();
+}
+
+function renderCommandAvailability() {
+  const disabled =
+    state.busy ||
+    !state.frame ||
+    state.shuttingDown ||
+    state.resyncRequired ||
+    state.offline;
+  const presentation = choreographer.snapshot();
   if (elements.commandDeck) {
     const buttons = /** @type {NodeListOf<HTMLButtonElement>} */ (
       elements.commandDeck.querySelectorAll("button[data-key]")
     );
     for (const button of buttons) {
-      button.disabled = disabled;
+      const command = keyboardCommand(button.dataset.key ?? "", {
+        shiftKey: button.dataset.shift === "true",
+      });
+      button.disabled =
+        disabled || (presentation.submissionBlocked && isSubmissionCommand(command));
     }
   }
+}
+
+function togglePresentationPause() {
+  const presentation = choreographer.snapshot();
+  if (
+    state.shuttingDown ||
+    presentation.motionMode === "off" ||
+    presentation.animationCount === 0
+  ) {
+    return;
+  }
+  choreographer.togglePaused();
+}
+
+function renderMotionControls() {
+  const presentation = choreographer.snapshot();
+  const hasActiveClock = presentation.animationCount > 0;
+  const presentationDisabled = state.shuttingDown;
+
+  document.documentElement.dataset.motionMode = presentation.motionMode;
+  document.documentElement.dataset.motionPaused = String(presentation.paused);
+  document.documentElement.dataset.motionRate = String(presentation.playbackRate);
+  document.documentElement.dataset.submissionBlocked = String(
+    presentation.submissionBlocked,
+  );
+
+  elements.motionPauseButton.disabled =
+    presentationDisabled || presentation.motionMode === "off" || !hasActiveClock;
+  elements.motionPauseButton.setAttribute("aria-pressed", String(presentation.paused));
+  elements.motionPauseButton.textContent = presentation.paused ? "Resume" : "Pause";
+  elements.motionSkipButton.disabled =
+    presentationDisabled || (!hasActiveClock && !presentation.submissionBlocked);
+
+  for (const button of elements.motionRateButtons) {
+    const value = button.dataset.motionRate;
+    const selected =
+      value === "off"
+        ? presentation.motionMode === "off"
+        : presentation.motionMode !== "off" &&
+          Number(value) === presentation.playbackRate;
+    button.disabled = presentationDisabled;
+    button.setAttribute("aria-pressed", String(selected));
+  }
+
+  if (presentation.motionMode === "off") {
+    elements.motionStatus.textContent = "Motion off";
+    return;
+  }
+  const prefix =
+    presentation.motionMode === "reduced"
+      ? "Reduced motion"
+      : presentation.paused
+        ? "Paused"
+        : presentation.submissionBlocked
+          ? "Explaining"
+          : "Motion";
+  elements.motionStatus.textContent = `${prefix} ${presentation.playbackRate}×`;
 }
 
 /**
@@ -370,6 +470,18 @@ function render() {
   renderConnection();
   renderSessionToolbar();
   battlefieldRenderer.render(state.frame, { offline: state.offline });
+  try {
+    choreographer.presentFrame(state.frame, battlefieldRenderer.choreographySurface());
+  } catch (error) {
+    choreographer.clear("presentation_error");
+    setNotice(
+      error instanceof Error
+        ? `Combat presentation failed: ${error.message} The authoritative frame remains available.`
+        : "Combat presentation failed. The authoritative frame remains available.",
+      "error",
+    );
+    renderConnection();
+  }
   lastBattlefieldSizeKey = battlefieldSizeKey();
   panels.render(state.frame, {
     busy: state.busy,
@@ -395,6 +507,18 @@ function scheduleBattlefieldResize() {
     }
     lastBattlefieldSizeKey = sizeKey;
     battlefieldRenderer.render(state.frame, { offline: state.offline });
+    try {
+      choreographer.reproject(state.frame, battlefieldRenderer.choreographySurface());
+    } catch (error) {
+      choreographer.clear("resize_projection_error");
+      setNotice(
+        error instanceof Error
+          ? `Combat presentation resize failed: ${error.message}`
+          : "Combat presentation resize failed.",
+        "error",
+      );
+      renderConnection();
+    }
   });
 }
 
@@ -434,6 +558,15 @@ async function dispatchCommand(command) {
       "error",
     );
     renderConnection();
+    return;
+  }
+  if (choreographer.snapshot().submissionBlocked && isSubmissionCommand(command)) {
+    setNotice(
+      "The current transition is still being explained. Wait briefly or choose Skip; no submission was sent.",
+      "warning",
+    );
+    renderConnection();
+    renderSessionToolbar();
     return;
   }
 
@@ -535,6 +668,11 @@ bindBattlefieldControls({
   battlefield: elements.battlefield,
   toWorldPoint: (point) => battlefieldRenderer.toWorldPoint(point),
   onCommand: dispatchCommand,
+  onPresentationKey: (command) => {
+    if (command === "toggle-pause") {
+      togglePresentationPause();
+    }
+  },
   onHelp: () => elements.helpDialog.showModal(),
   onReleaseFocus: () => {
     const firstCommand = /** @type {HTMLButtonElement | null} */ (
@@ -582,6 +720,32 @@ elements.reconnectButton.addEventListener("click", loadCurrentFrame);
 elements.helpButton.addEventListener("click", () => {
   elements.helpDialog.showModal();
 });
+
+elements.motionPauseButton.addEventListener("click", () => {
+  togglePresentationPause();
+});
+
+elements.motionSkipButton.addEventListener("click", () => {
+  choreographer.skip();
+});
+
+for (const button of elements.motionRateButtons) {
+  button.addEventListener("click", () => {
+    const value = button.dataset.motionRate;
+    if (value === "off") {
+      choreographer.setMotionMode("off");
+      return;
+    }
+    const rate = Number(value);
+    if (!Number.isFinite(rate) || rate <= 0) {
+      return;
+    }
+    if (choreographer.snapshot().motionMode === "off") {
+      choreographer.setMotionMode("normal");
+    }
+    choreographer.setPlaybackRate(rate);
+  });
+}
 
 if (elements.commandDeck) {
   const buttons = /** @type {NodeListOf<HTMLButtonElement>} */ (

@@ -81,6 +81,19 @@ test("same-direction duplicates use stable symmetric offsets under shuffling", (
   assert.equal(new Set(forward.map(({ path }) => path)).size, 3);
 });
 
+test("near-zero routes expose deterministic arc sweep for tangent arrows", () => {
+  const route = createRouteGeometry({
+    eventId: "local-impact",
+    source: [10, 10],
+    target: [10, 10],
+    sourceRadius: 12,
+    targetRadius: 12,
+  });
+
+  assert.equal(route.kind, "local_arc");
+  assert.ok(route.sweep === 0 || route.sweep === 1);
+});
+
 test("crossing endpoint pairs retain independent deterministic groups", () => {
   const routes = layoutRouteSet([
     {

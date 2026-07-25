@@ -23,6 +23,7 @@ const GAME_KEYS = new Set([
   "r",
   "g",
   "v",
+  "p",
   "?",
 ]);
 
@@ -108,6 +109,16 @@ export function isDebuggerKey(event) {
 }
 
 /**
+ * Presentation pause is local and edge-triggered. Key repeat must never
+ * oscillate the controller or leave a future submission gate paused.
+ *
+ * @param {{key?: string, repeat?: boolean}} event
+ */
+export function isPresentationPauseEvent(event) {
+  return event.key?.toLowerCase() === "p" && !event.repeat;
+}
+
+/**
  * @param {SVGSVGElement} svg
  * @param {PointerEvent} event
  * @returns {{x: number, y: number} | null}
@@ -133,6 +144,7 @@ function pointInSvg(svg, event) {
  *     {world_x: number, world_y: number} | null,
  *   onCommand: (command: Record<string, unknown>) => void | Promise<void>,
  *   onHelp: () => void,
+ *   onPresentationKey?: (key: "toggle-pause") => void,
  *   onReleaseFocus: () => void,
  * }} bindings
  */
@@ -141,6 +153,7 @@ export function bindBattlefieldControls({
   toWorldPoint,
   onCommand,
   onHelp,
+  onPresentationKey = () => {},
   onReleaseFocus,
 }) {
   battlefield.addEventListener("keydown", async (event) => {
@@ -151,6 +164,12 @@ export function bindBattlefieldControls({
     event.stopPropagation();
     if (event.key === "?") {
       onHelp();
+      return;
+    }
+    if (event.key.toLowerCase() === "p") {
+      if (isPresentationPauseEvent(event)) {
+        onPresentationKey("toggle-pause");
+      }
       return;
     }
     if (event.key === "Escape") {

@@ -102,10 +102,18 @@ function humanize(value) {
 }
 
 /**
+ * Compact one payload value for human-facing UI. The unrounded value remains
+ * available in data attributes, authoritative event records, and technical
+ * diagnostics.
+ *
  * @param {unknown} value
+ * @param {number} [digits]
  */
-function exactNumber(value) {
-  return Number.isFinite(value) ? String(value) : "—";
+function displayNumber(value, digits = 2) {
+  if (!Number.isFinite(value)) {
+    return "—";
+  }
+  return String(Number(Number(value).toFixed(digits)));
 }
 
 /**
@@ -172,13 +180,13 @@ function renderFactTokens(container, items, kind, emptyText) {
     const value =
       kind === "status"
         ? `duration ${Number.isInteger(item.duration) ? item.duration : "unknown"}`
-        : `multiplier ${exactNumber(item.multiplier)}`;
+        : `multiplier ${displayNumber(item.multiplier)}`;
     const chip = htmlElement(
       "span",
       `roster-fact-token roster-fact-token--${kind}`,
       kind === "status"
         ? `${token.shortLabel} ${Number.isInteger(item.duration) ? item.duration : "?"}`
-        : `${token.shortLabel} ×${exactNumber(item.multiplier)}`,
+        : `${token.shortLabel} ×${displayNumber(item.multiplier)}`,
     );
     chip.dataset.tokenId = token.tokenId;
     if (kind === "status" && Number.isInteger(item.duration)) {
@@ -324,10 +332,10 @@ function addAgentComparison(container, agent, role) {
   addFact(
     card,
     "Health",
-    `${exactNumber(agent.current_health)} / ${exactNumber(agent.max_health)}`,
+    `${displayNumber(agent.current_health)} / ${displayNumber(agent.max_health)}`,
   );
   addFact(card, "Ultimate cooldown", agent.ultimate_cooldown ?? "—");
-  addFact(card, "Effective speed", exactNumber(agent.effective_speed));
+  addFact(card, "Effective speed", displayNumber(agent.effective_speed));
   const statuses = htmlElement("div", "comparison-agent__facts");
   statuses.append(htmlElement("h4", null, "Statuses"));
   const statusTokens = htmlElement("div", "roster-fact-list");
@@ -501,7 +509,7 @@ function pointLabel(value) {
   ) {
     return "undisclosed";
   }
-  return `(${value.map(exactNumber).join(", ")})`;
+  return `(${value.map((coordinate) => displayNumber(coordinate)).join(", ")})`;
 }
 
 /**
@@ -530,9 +538,9 @@ function eventSummary(event) {
         : "undisclosed recipient";
       const delta = Number(event.net_delta);
       const signed = Number.isFinite(delta)
-        ? `${delta >= 0 ? "+" : ""}${exactNumber(delta)}`
+        ? `${delta >= 0 ? "+" : ""}${displayNumber(delta)}`
         : "undisclosed";
-      return `${recipient} · NET ${signed} · HP ${exactNumber(event.health_before)} → ${exactNumber(event.health_after)} · ${humanize(event.outcome ?? "unknown")}`;
+      return `${recipient} · NET ${signed} · HP ${displayNumber(event.health_before)} → ${displayNumber(event.health_after)} · ${humanize(event.outcome ?? "unknown")}`;
     }
     case "charge_displacement":
       return `Charge displacement endpoints · id_${event.source_global_slot} toward id_${event.target_global_slot} · ${pointLabel(event.start)} → ${pointLabel(event.end)} · ${humanize(event.path_kind ?? "unknown")}`;
@@ -720,7 +728,7 @@ export class DebuggerPanels {
     row.identityId.textContent = `id_${globalSlot}`;
     row.identityClass.textContent = `${classToken.label} · ${teamToken.label}`;
     row.health.textContent =
-      `HP ${exactNumber(agent.current_health)} / ${exactNumber(agent.max_health)}` +
+      `HP ${displayNumber(agent.current_health)} / ${displayNumber(agent.max_health)}` +
       ` · cooldown ${agent.ultimate_cooldown ?? "—"}`;
 
     row.statuses.hidden = compact;

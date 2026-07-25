@@ -30,11 +30,12 @@ export const BATTLEFIELD_LAYER_ORDER = Object.freeze([
   "aura",
   "debug-range",
   "pending-route",
+  "transient-route",
   "obstacle",
   "body",
   "selection-legality",
-  "durable-status-modifier",
   "transient-events",
+  "durable-status-modifier",
   "accessible-labels",
 ]);
 
@@ -64,6 +65,18 @@ export const BATTLEFIELD_LAYER_ORDER = Object.freeze([
 
 /**
  * @typedef {ReturnType<typeof createViewportTransform>} ViewportTransform
+ * @typedef {{
+ *   layer: SVGElement,
+ *   routeLayer: SVGElement,
+ *   ownerDocument: Document,
+ *   viewportKey: string,
+ *   viewportBounds: Rectangle,
+ *   protectedRects: ReadonlyArray<Rectangle>,
+ *   worldToScreen: (
+ *     point: {x: number, y: number} | readonly [number, number],
+ *   ) => {x: number, y: number},
+ *   worldLengthToScreen: (length: number) => number,
+ * }} ChoreographySurface
  * @typedef {{
  *   agent: JsonRecord,
  *   globalSlot: number,
@@ -113,6 +126,14 @@ function finiteNumber(value, fallback = 0) {
  */
 function formatNumber(value, digits = 1) {
   return Number.isFinite(value) ? Number(value).toFixed(digits) : "—";
+}
+
+/**
+ * @param {unknown} value
+ * @param {number} digits
+ */
+function compactNumber(value, digits = 2) {
+  return Number.isFinite(value) ? String(Number(Number(value).toFixed(digits))) : "—";
 }
 
 /**
@@ -275,6 +296,8 @@ export class BattlefieldRenderer {
     this.empty = empty;
     /** @type {ViewportTransform | null} */
     this.transform = null;
+    /** @type {ReadonlyArray<Rectangle>} */
+    this.choreographyProtectedRects = Object.freeze([]);
 
     const map = createLayer("map", { "aria-hidden": "true" });
     const aura = createLayer("aura", { "aria-hidden": "true" });
@@ -288,6 +311,9 @@ export class BattlefieldRenderer {
     });
     debugRange.append(this.rangeCues, this.visibilityCues, this.protectedZoneCues);
     const pendingRoute = createLayer("pending-route", { "aria-hidden": "true" });
+    const transientRoute = createLayer("transient-route", {
+      "aria-hidden": "true",
+    });
     const obstacle = createLayer("obstacle", { "aria-label": "Map obstacles" });
     const body = createLayer("body", { "aria-label": "Authorized agents" });
     const selectionLegality = createLayer("selection-legality", {
@@ -311,6 +337,7 @@ export class BattlefieldRenderer {
       aura,
       debugRange,
       pendingRoute,
+      transientRoute,
       obstacle,
       body,
       selectionLegality,
@@ -327,11 +354,12 @@ export class BattlefieldRenderer {
       aura,
       debugRange,
       pendingRoute,
+      transientRoute,
       obstacle,
       body,
       selectionLegality,
-      durableStatusModifier,
       transientEvents,
+      durableStatusModifier,
       accessibleLabels,
     );
   }
@@ -356,7 +384,13 @@ export class BattlefieldRenderer {
     const width = finiteNumber(map?.width);
     const height = finiteNumber(map?.height);
 
-    if (!scene || !map || width <= 0 || height <= 0) {
+    if (
+      !scene ||
+      !map ||
+      (scene.audience !== "researcher" && scene.audience !== "agent_pov") ||
+      width <= 0 ||
+      height <= 0
+    ) {
       this.#clearDurableScene();
       this.battlefield.removeAttribute("viewBox");
       this.battlefield.removeAttribute("data-preset");
@@ -391,8 +425,7 @@ export class BattlefieldRenderer {
     this.transform = transform;
     this.battlefield.setAttribute("viewBox", `0 0 ${viewportWidth} ${viewportHeight}`);
     this.battlefield.dataset.preset = preset;
-    this.battlefield.dataset.audience =
-      scene.audience === "agent_pov" ? "agent_pov" : "researcher";
+    this.battlefield.dataset.audience = scene.audience;
     this.battlefield.setAttribute(
       "aria-label",
       `${scene.audience_badge ?? "Debugger"} battlefield, ${width} by ${height}.`,
@@ -446,6 +479,40 @@ export class BattlefieldRenderer {
   }
 
   /**
+   * Return the narrow presentation surface used by transient choreography.
+   *
+   * The durable renderer retains ownership of every other layer. Callers may
+   * append only an owned child beneath `layer` and must project authoritative
+   * event anchors through these functions rather than reading successor body
+   * coordinates.
+   *
+   * @returns {Readonly<ChoreographySurface> | null}
+   */
+  choreographySurface() {
+    const transform = this.transform;
+    if (!transform) {
+      return null;
+    }
+    /** @type {ChoreographySurface} */
+    const surface = {
+      layer: this.layers.transientEvents,
+      routeLayer: this.layers.transientRoute,
+      ownerDocument: this.battlefield.ownerDocument,
+      viewportKey: [
+        transform.worldWidth,
+        transform.worldHeight,
+        transform.viewportBounds.width,
+        transform.viewportBounds.height,
+      ].join(":"),
+      viewportBounds: Object.freeze({ ...transform.mapBounds }),
+      protectedRects: this.choreographyProtectedRects,
+      worldToScreen: (point) => transform.worldToScreen(point),
+      worldLengthToScreen: (length) => transform.worldLengthToScreen(length),
+    };
+    return Object.freeze(surface);
+  }
+
+  /**
    * Clear only durable presentation state. The transient layer is owned by
    * the animation lifecycle and must survive every durable redraw.
    */
@@ -463,6 +530,7 @@ export class BattlefieldRenderer {
     this.layers.durableStatusModifier.replaceChildren();
     this.layers.accessibleLabels.replaceChildren();
     this.agentNodes.clear();
+    this.choreographyProtectedRects = Object.freeze([]);
     this.transform = null;
   }
 
@@ -919,6 +987,15 @@ export class BattlefieldRenderer {
       );
     }
     this.layers.durableStatusModifier.replaceChildren(...modifierNodes, ...statusNodes);
+    this.choreographyProtectedRects = Object.freeze(
+      [
+        ...statusLayout.protectedBodies.map(({ bounds }) => bounds),
+        ...identityRects,
+        ...statusRects,
+        ...legalityRects,
+        ...modifierLayout.docks.map(({ bounds }) => bounds),
+      ].map((bounds) => Object.freeze({ ...bounds })),
+    );
   }
 
   /**
@@ -1007,12 +1084,14 @@ export class BattlefieldRenderer {
                 : "?",
             )
           : Number.isFinite(item.multiplier)
-            ? `×${Number(item.multiplier)}`
+            ? `×${compactNumber(item.multiplier)}`
             : "×?";
       const accessibleValue =
         kind === "status"
           ? `duration ${value}`
-          : `multiplier ${value.replace("×", "")}`;
+          : Number.isFinite(item.multiplier)
+            ? `multiplier ${compactNumber(item.multiplier)}`
+            : "multiplier unknown";
       const cell = svgElement("g", {
         class: `${kind}-cell`,
         role: "img",
@@ -1068,7 +1147,7 @@ export class BattlefieldRenderer {
         const token = resolveVisualToken(kind, item.token_id, item);
         return kind === "status"
           ? `${token.accessibleName}, duration ${item.duration ?? "unknown"}`
-          : `${token.accessibleName}, multiplier ${item.multiplier ?? "unknown"}`;
+          : `${token.accessibleName}, multiplier ${compactNumber(item.multiplier)}`;
       });
       const overflow = svgElement("g", {
         class: `${kind}-overflow`,

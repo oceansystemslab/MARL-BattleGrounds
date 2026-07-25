@@ -166,7 +166,9 @@ select {
 .toolbar-actions,
 .button-row,
 .section-heading,
-.session-facts {
+.session-facts,
+.motion-controls,
+.motion-rate-group {
   display: flex;
   align-items: center;
   gap: 0.55rem;
@@ -270,6 +272,48 @@ select {
   color: var(--text);
   font-size: 0.95rem;
   font-variant-numeric: tabular-nums;
+}
+
+.motion-controls {
+  min-width: max-content;
+  padding: 0;
+  border: 0;
+  margin: 0;
+}
+
+.motion-controls button {
+  min-height: 2rem;
+  padding: 0.35rem 0.55rem;
+  font-size: 0.78rem;
+}
+
+.motion-rate-group {
+  gap: 0.2rem;
+  min-inline-size: 0;
+  margin: 0;
+  padding: 0.18rem;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  background: rgb(8 13 24 / 55%);
+}
+
+.motion-rate-group button {
+  min-width: 2.75rem;
+  border-color: transparent;
+  background: transparent;
+}
+
+.motion-rate-group button[aria-pressed="true"] {
+  border-color: rgb(34 211 238 / 58%);
+  color: #a5f3fc;
+  background: rgb(34 211 238 / 12%);
+}
+
+.motion-status {
+  min-width: 5.6rem;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  text-align: center;
 }
 
 .button--primary {
@@ -459,6 +503,310 @@ select {
 
 .pending-route[data-legal="false"] {
   stroke: var(--danger);
+}
+
+.combat-choreography,
+.combat-choreography-routes,
+.combat-route-effect,
+.combat-effect {
+  pointer-events: none;
+}
+
+.combat-choreography,
+.combat-choreography-routes {
+  isolation: isolate;
+}
+
+.combat-effect,
+.combat-route-effect {
+  color: var(--ultimate);
+}
+
+.combat-effect[data-token-id="basic_damage"],
+.combat-route-effect[data-token-id="basic_damage"],
+.combat-effect[data-outcome="damage"] {
+  color: var(--danger);
+}
+
+.combat-effect[data-token-id="basic_heal"],
+.combat-route-effect[data-token-id="basic_heal"],
+.combat-effect[data-token-id="holy_word"],
+.combat-route-effect[data-token-id="holy_word"],
+.combat-effect[data-outcome="healing"] {
+  color: var(--success);
+}
+
+.combat-effect[data-token-id="mage_burst"],
+.combat-route-effect[data-token-id="mage_burst"] {
+  color: var(--class-mage);
+}
+
+.combat-effect[data-token-id="warrior_charge"],
+.combat-route-effect[data-token-id="warrior_charge"],
+.combat-effect[data-event-type="charge_displacement"],
+.combat-route-effect[data-event-type="charge_displacement"] {
+  color: var(--class-warrior);
+}
+
+.combat-effect[data-token-id="hunter_trap"],
+.combat-route-effect[data-token-id="hunter_trap"] {
+  color: var(--class-hunter);
+}
+
+.combat-effect[data-token-id="rogue_poison"],
+.combat-route-effect[data-token-id="rogue_poison"] {
+  color: var(--class-rogue);
+}
+
+.combat-effect[data-event-type="rejected_action"],
+.combat-route-effect[data-event-type="rejected_action"] {
+  color: var(--danger);
+}
+
+.combat-effect[data-token-id="stun_warrior_charge"],
+.combat-effect[data-token-id="slow_warrior_charge"] {
+  color: var(--class-warrior);
+}
+
+.combat-effect[data-token-id="stun_hunter_trap"],
+.combat-effect[data-token-id="slow_hunter_basic"] {
+  color: var(--class-hunter);
+}
+
+.combat-effect[data-token-id="stun_rogue_poison"],
+.combat-effect[data-token-id="slow_rogue_poison"],
+.combat-effect[data-token-id="anti_heal_rogue_poison"] {
+  color: var(--class-rogue);
+}
+
+.combat-effect[data-token-id="priest_freedom"] {
+  color: var(--class-priest);
+}
+
+.combat-route__path,
+.combat-charge__path,
+.combat-rejection__route {
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.combat-route__path {
+  stroke-width: 2.5;
+}
+
+.combat-route-effect[data-token-id="basic_heal"] .combat-route__path {
+  stroke-width: 3;
+  stroke-dasharray: 2 5;
+}
+
+.combat-route-effect[data-token-id="holy_word"] .combat-route__path {
+  stroke-width: 5;
+  filter: drop-shadow(0 0 5px currentColor);
+}
+
+.combat-route-effect[data-token-id="warrior_charge"] .combat-route__path {
+  stroke-width: 5;
+  stroke-dasharray: 12 4;
+}
+
+.combat-route-effect[data-token-id="hunter_trap"] .combat-route__path {
+  stroke-width: 3;
+  stroke-dasharray: 3 4;
+}
+
+.combat-route-effect[data-token-id="rogue_poison"] .combat-route__path {
+  stroke-width: 2;
+  stroke-dasharray: 10 5 2 5;
+}
+
+.combat-route__arrow {
+  fill: currentColor;
+  stroke: var(--battlefield);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.combat-route__particle {
+  fill: currentColor;
+  filter: drop-shadow(0 0 4px currentColor);
+}
+
+.combat-impact__ring,
+.combat-local__ring,
+.combat-lifecycle__ring,
+.combat-holy__pulse,
+.combat-burst__wave,
+.combat-lifecycle__reapply-ring,
+.combat-rejection__ring {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 3;
+  vector-effect: non-scaling-stroke;
+}
+
+.combat-impact__core,
+.combat-local__core {
+  fill: currentColor;
+  opacity: 0.28;
+}
+
+.combat-local__icon,
+.combat-impact__icon,
+.combat-lifecycle__status-icon,
+.combat-lifecycle__change-icon,
+.combat-lifecycle__reapply-icon {
+  overflow: visible;
+  color: currentColor;
+}
+
+.combat-burst__wave {
+  transform-box: fill-box;
+  transform-origin: center;
+  stroke-dasharray: 4 4;
+}
+
+.combat-burst__wave--inner {
+  opacity: 0.62;
+}
+
+.combat-holy__pulse {
+  stroke-width: 2;
+  opacity: 0.72;
+}
+
+.combat-holy__pulse--outer {
+  stroke-dasharray: 3 4;
+}
+
+.combat-trap__lattice,
+.combat-charge__impact {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.combat-trap__lattice {
+  opacity: 0.82;
+}
+
+.combat-poison__splash {
+  fill: currentColor;
+  opacity: 0.78;
+}
+
+.combat-net__label {
+  fill: currentColor;
+  stroke: rgb(8 13 24 / 90%);
+  stroke-width: 3;
+  paint-order: stroke fill;
+  font-size: 14px;
+  font-weight: 800;
+  text-anchor: middle;
+  dominant-baseline: central;
+}
+
+.combat-cue__leader {
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-dasharray: 2 4;
+  opacity: 0.46;
+  vector-effect: non-scaling-stroke;
+}
+
+.combat-effect[data-outcome="unchanged"] {
+  color: var(--text);
+}
+
+.combat-effect[data-outcome="unchanged"] .combat-net__label {
+  font-size: 12px;
+}
+
+.combat-charge__path {
+  stroke-width: 3;
+  stroke-dasharray: 9 6;
+  opacity: 0.72;
+}
+
+.combat-charge__endpoint {
+  fill: var(--battlefield);
+  stroke: currentColor;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.combat-charge__direction {
+  fill: currentColor;
+  stroke: var(--battlefield);
+  stroke-width: 1;
+  filter: drop-shadow(0 0 3px currentColor);
+  vector-effect: non-scaling-stroke;
+}
+
+.combat-effect[data-settled="true"] .combat-charge__path {
+  opacity: 0.42;
+}
+
+.combat-lifecycle__ring {
+  fill: rgb(8 13 24 / 88%);
+  stroke-dasharray: 4 3;
+}
+
+.combat-lifecycle__status-icon {
+  filter: drop-shadow(0 0 3px currentColor);
+}
+
+.combat-lifecycle__change-disc {
+  fill: var(--battlefield);
+  stroke: currentColor;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.combat-lifecycle__change-icon {
+  stroke-width: 2.2;
+}
+
+.combat-lifecycle__reapply-ring {
+  fill: rgb(8 13 24 / 72%);
+  stroke-width: 3;
+  stroke-dasharray: 2 3;
+}
+
+.combat-effect[data-lifecycle="trap_broken"] .combat-lifecycle__ring,
+.combat-effect[data-lifecycle="trap_broken_and_reapplied"] .combat-lifecycle__ring {
+  stroke-width: 4;
+  stroke-dasharray: 2 3;
+}
+
+.combat-lifecycle__shard {
+  stroke: currentColor;
+  stroke-width: 3;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.combat-effect[data-lifecycle="expired"] {
+  color: var(--text-muted);
+}
+
+.combat-effect[data-lifecycle="cleared_unclassified"] {
+  color: var(--unavailable);
+}
+
+.combat-rejection__route {
+  stroke-width: 2;
+  stroke-dasharray: 3 5;
+}
+
+.combat-rejection__ring {
+  stroke-width: 4;
+  stroke-dasharray: 2 3;
 }
 
 .agent {
@@ -1419,6 +1767,10 @@ select {
     justify-content: flex-start;
   }
 
+  .motion-controls {
+    order: 4;
+  }
+
   .toolbar-actions {
     margin-left: auto;
   }
@@ -1469,8 +1821,17 @@ select {
 
   .session-toolbar label,
   .session-toolbar select,
-  .toolbar-actions {
+  .toolbar-actions,
+  .motion-controls {
     width: 100%;
+  }
+
+  .motion-controls {
+    flex-wrap: wrap;
+  }
+
+  .motion-status {
+    margin-left: auto;
   }
 
   .toolbar-actions button {

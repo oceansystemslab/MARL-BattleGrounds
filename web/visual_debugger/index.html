@@ -60,6 +60,34 @@
         <span>Step <strong id="step-value">—</strong></span>
         <span>Transition <strong id="transition-value">—</strong></span>
       </fieldset>
+      <fieldset class="motion-controls" aria-label="Presentation motion">
+        <legend class="sr-only">Presentation motion</legend>
+        <button
+          id="motion-pause-button"
+          class="button button--quiet"
+          type="button"
+          aria-pressed="false"
+        >
+          Pause
+        </button>
+        <fieldset class="motion-rate-group" aria-label="Animation speed">
+          <button type="button" data-motion-rate="0.5" aria-pressed="false">0.5×</button>
+          <button type="button" data-motion-rate="1" aria-pressed="true">1×</button>
+          <button type="button" data-motion-rate="2" aria-pressed="false">2×</button>
+          <button type="button" data-motion-rate="off" aria-pressed="false">Off</button>
+        </fieldset>
+        <button
+          id="motion-skip-button"
+          class="button button--quiet"
+          type="button"
+          disabled
+        >
+          Skip
+        </button>
+        <output id="motion-status" class="motion-status" aria-live="polite">
+          Motion 1×
+        </output>
+      </fieldset>
       <div class="toolbar-actions">
         <button id="reconnect-button" class="button button--quiet" type="button">
           Reconnect
@@ -265,10 +293,15 @@
           <dt>Shift+R</dt><dd>Explain why cooldown clearing is unavailable</dd>
           <dt>G / V</dt><dd>Toggle ranges / diagnostic verbosity</dd>
           <dt>[ / ]</dt><dd>Previous / next scenario</dd>
+          <dt>P</dt><dd>Pause or resume presentation motion</dd>
+          <dt>Motion controls</dt>
+          <dd>Choose 0.5×, 1×, 2×, Off, or Skip the current explanation</dd>
         </dl>
         <p class="help-note">
           Animation, layout, hover, help, and panel state are presentation-only.
           Python remains authoritative for every simulator and legality decision.
+          Normal motion briefly holds only the next Submit/Next-frame input;
+          Skip, reduced motion, and Off release it immediately.
         </p>
       </form>
     </dialog>
