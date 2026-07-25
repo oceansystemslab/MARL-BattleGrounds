@@ -19,6 +19,7 @@ const GAME_KEYS = new Set([
   "e",
   "z",
   "c",
+  "x",
   "n",
   "r",
   "g",

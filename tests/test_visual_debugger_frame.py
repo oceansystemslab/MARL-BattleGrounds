@@ -12,6 +12,8 @@ from scripts.dev.visual_debugger.control import (
     create_session,
     reset_session,
     select_clicked_target,
+    select_controlled_actor,
+    set_pending_movement,
     submit_interactive,
     submit_next_script_frame,
 )
@@ -24,6 +26,8 @@ from scripts.dev.visual_debugger.protocol import (
 )
 from scripts.dev.visual_debugger.scenarios import get_scenario
 from scripts.dev.visual_debugger.targeting import global_slot_to_target_action
+
+from marl_battlegrounds.core.types import MOVE_EAST, MOVE_NORTH
 
 
 def _session(
@@ -104,6 +108,39 @@ def test_initial_researcher_frame_has_exact_metadata_and_filtered_menu() -> None
     assert frame.hud.roster_global_slots == tuple(
         agent.global_slot for agent in frame.scene.agents
     )
+    assert frame.hud.pending_submission_scope == "joint_turn"
+    assert (
+        tuple(pending.actor_global_slot for pending in frame.hud.pending_actions)
+        == frame.hud.roster_global_slots
+    )
+    assert frame.hud.pending_action == frame.hud.pending_actions[0]
+
+
+def test_researcher_pending_plan_preserves_each_actor_draft_and_public_target() -> None:
+    session = select_clicked_target(_session(), 5)
+    session = set_pending_movement(session, MOVE_EAST)
+    session = select_controlled_actor(session, 1)
+    session = select_clicked_target(session, 6)
+    session = set_pending_movement(session, MOVE_NORTH)
+    frame = _frame(session, revision=5)
+    pending_by_slot = {
+        pending.actor_global_slot: pending for pending in frame.hud.pending_actions
+    }
+
+    assert pending_by_slot[0].move_action == MOVE_EAST
+    assert pending_by_slot[0].target.global_slot == 5
+    assert pending_by_slot[1].move_action == MOVE_NORTH
+    assert pending_by_slot[1].target.global_slot == 6
+    assert frame.hud.pending_action == pending_by_slot[1]
+
+
+def test_scripted_frame_marks_controlled_pending_row_inspection_only() -> None:
+    frame = _frame(_session("basic_support"))
+
+    assert frame.hud.pending_submission_scope == "scripted_playback"
+    assert len(frame.hud.pending_actions) == 1
+    assert frame.hud.pending_actions == (frame.hud.pending_action,)
+    assert frame.hud.pending_action.label == "PLAYBACK / INSPECTION ONLY"
 
 
 @pytest.mark.parametrize("controlled_global_slot", (0, 5))
@@ -158,16 +195,20 @@ def test_researcher_latest_card_uses_successor_accepted_action() -> None:
     latest = frame.hud.latest_transition
     assert latest is not None
     assert latest.transition_id == int(session.state.step_count)
-    result = latest.actors[0]
-    actor = session.controlled_global_slot
-
-    assert result.accepted.move_action == int(transition.accepted_action.move[actor])
-    assert result.accepted.target_action == int(
-        transition.accepted_action.select_target[actor]
+    assert tuple(actor.actor_global_slot for actor in latest.actors) == (
+        transition.report_actor_slots
     )
-    assert result.accepted.use_ultimate_action == int(
-        transition.accepted_action.use_ultimate[actor]
-    )
+    for result in latest.actors:
+        actor = result.actor_global_slot
+        assert result.accepted.move_action == int(
+            transition.accepted_action.move[actor]
+        )
+        assert result.accepted.target_action == int(
+            transition.accepted_action.select_target[actor]
+        )
+        assert result.accepted.use_ultimate_action == int(
+            transition.accepted_action.use_ultimate[actor]
+        )
 
 
 def test_pov_latest_card_decodes_authorized_previous_action_observation() -> None:
@@ -175,6 +216,9 @@ def test_pov_latest_card_decodes_authorized_previous_action_observation() -> Non
     frame = _frame(session, revision=1, view_mode="pov")
     latest = frame.hud.latest_transition
     assert latest is not None
+    assert tuple(actor.actor_global_slot for actor in latest.actors) == (
+        session.controlled_global_slot,
+    )
     accepted = latest.actors[0].accepted
 
     previous = session.observation.previous_timestep_actions
@@ -220,6 +264,10 @@ def test_pov_whole_frame_redacts_hidden_pending_target_and_raw_artifacts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = select_clicked_target(_session(), 5)
+    session = select_controlled_actor(session, 1)
+    session = select_clicked_target(session, 6)
+    session = set_pending_movement(session, MOVE_NORTH)
+    session = select_controlled_actor(session, 0)
 
     def fail_legacy_hud(_: DebuggerSession) -> None:
         raise AssertionError("browser POV must not use the privileged legacy HUD")
@@ -242,6 +290,9 @@ def test_pov_whole_frame_redacts_hidden_pending_target_and_raw_artifacts(
     assert frame.hud.pending_action.target.global_slot is None
     assert frame.hud.pending_action.target_action is None
     assert frame.hud.pending_action.pair_mask_value is None
+    assert frame.hud.pending_submission_scope == "controlled_actor"
+    assert frame.hud.pending_actions == (frame.hud.pending_action,)
+    assert frame.hud.pending_action.actor_global_slot == 0
     assert all(agent["global_slot"] != 5 for agent in agents_payload)
     assert {
         candidate.target.global_slot
@@ -348,4 +399,18 @@ def test_frame_model_rejects_view_and_scene_audience_mismatch() -> None:
     values["view_mode"] = "pov"
 
     with pytest.raises(ValueError, match="view_mode and scene audience"):
+        frame.__class__(**values)
+
+
+def test_frame_model_rejects_pending_scope_incoherent_with_view_and_scenario() -> None:
+    frame = _frame(_session())
+    values = {name: getattr(frame, name) for name in frame.__class__.model_fields}
+    values["hud"] = frame.hud.model_copy(
+        update={
+            "pending_submission_scope": "controlled_actor",
+            "pending_actions": (frame.hud.pending_action,),
+        }
+    )
+
+    with pytest.raises(ValueError, match="pending submission scope"):
         frame.__class__(**values)

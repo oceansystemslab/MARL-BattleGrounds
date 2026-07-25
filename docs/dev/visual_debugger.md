@@ -60,16 +60,17 @@ dependency exits with code `2` and prints the exact installation command.
 
 | Input | Action |
 |---|---|
-| `Tab` / `Shift+Tab` | Cycle forward/backward through active global slots. |
+| `Tab` / `Shift+Tab` | Cycle forward/backward through active global slots without changing any staged draft. |
 | Left click | Select an active global target for inspection. |
-| `Shift` + left click | Immediately control the clicked active actor while preserving the selected global target. |
+| `Shift` + left click | Immediately control the clicked active actor and restore that actor's staged draft. |
 | Right click / `Escape` | Clear the target to target-none. |
 | `1` | Explicitly arm Basic lane 0, even when the pair is unavailable. |
 | `2` | Explicitly arm Ultimate lane 1, even when the pair is unavailable. |
 | `W A S D` | Select cardinal movement. |
 | `Q E Z C` | Select diagonal movement. |
-| `Space` / `Enter` | Submit the manual action, or the next frame in a scripted scenario. |
-| `N` | Submit the next registered reference/script frame. |
+| `X` | Select Stay movement for the controlled actor. |
+| `Space` / `Enter` | In an interactive researcher scenario, submit every active actor's staged action in one joint turn. |
+| `N` | Advance the next registered frame in a scripted scenario. |
 | `R` | Reset the current scenario deterministically. |
 | `Shift+R` | Leave the session unchanged and explain why cooldown-only clearing is unavailable. |
 | `G` | Toggle the controlled actor's range circles. |
@@ -91,17 +92,24 @@ deterministic reset.
 
 ## Pending-action behavior
 
-The reset pending action is Stay, target-none, and automatically armed Basic
-lane 0. A clicked target is retained even when no combat lane is available.
-Basic auto-arms only when the exact current lane-0 value for that actor-target
-pair is true. Ultimate never auto-arms.
+Every active actor owns an independent staged draft. On reset, each draft uses
+Stay and target-none, with Basic automatically armed only when that actor's
+exact same-epoch lane-0 pair is available. A clicked target is retained in the
+controlled actor's draft even when no combat lane is available. Ultimate never
+auto-arms.
 
-`Shift` + left click changes control without stepping or splitting the key. It
-preserves the selected global target, resets movement to Stay, discards
-explicit arming, converts the target to the new actor's relative category, and
-auto-arms Basic only when that exact lane-0 pair is currently available. If the
-clicked actor is also the selected target, the relation becomes `self` and the
-reticle remains visible.
+`Tab`, `Shift+Tab`, and `Shift` + left click change only which actor is being
+edited. They neither step nor split the key, and they do not copy, reset, or
+discard any actor's movement, target, or lane. Movement, target, and lane inputs
+replace only the controlled actor's fixed-slot draft. If an actor selects
+itself, the relation becomes `self` and the reticle remains visible.
+
+In an interactive researcher scenario, `Space` or `Enter` packages every active
+actor's staged draft into one joint action and sends it through the single
+authoritative transition seam. Agent-POV browser mode submits only the
+controlled actor and neutralizes every other row. Scripted scenarios are
+inspection-only for manual movement, lane, and submit inputs; press `N` to
+advance their registered trajectory.
 
 Keys `1` and `2` deliberately permit an unavailable in-domain pair to be
 submitted. This lets the authoritative simulator demonstrate canonical
@@ -112,12 +120,13 @@ clears a selected target and arms lane 1. It creates no target link or
 Ultimate-radius circle. It can still be armed during cooldown or stun so its
 rejection can be inspected.
 
-After every submitted transition:
+After every submitted interactive transition, each active actor's successor
+draft is rebuilt independently:
 
-- the selected global target persists;
+- that actor's selected global target persists;
 - movement resets to Stay;
 - Ultimate disarms;
-- Basic re-arms only if successor lane 0 is available for the retained target;
+- Basic re-arms only if successor lane 0 is available for that retained target;
 - otherwise the target remains selected with no lane armed;
 - distance, relation, line of sight, visibility, ranges, and lanes are derived
   again from the successor decision epoch.
@@ -301,9 +310,11 @@ reconstruct the same deterministic key order. Each successful submission splits
 the current key once and calls `step` once with the action mask paired to the
 current state. UI-only actions never split the key.
 
-Scripted frames can command multiple actors. Manual mode builds a joint action
-for only the controlled actor. Both paths meet at the same submission boundary;
-scripted frames do not pass through the single-actor pending-action builder.
+Scripted frames can command multiple actors. Interactive researcher mode builds
+one joint action from every active actor's independent draft; agent-POV mode
+authorizes only the controlled actor. All paths meet at the same submission
+boundary, while registered scripted frames remain separate from manual draft
+editing and advance only through `N`.
 
 ## Architectural boundary and non-goals
 

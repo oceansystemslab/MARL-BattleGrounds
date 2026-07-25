@@ -29,6 +29,8 @@ test("debugger key capture leaves modified browser shortcuts native", () => {
   assert.equal(isDebuggerKey({ key: "r" }), true);
   assert.equal(isDebuggerKey({ key: "p" }), true);
   assert.equal(isDebuggerKey({ key: "P", shiftKey: true }), true);
+  assert.equal(isDebuggerKey({ key: "x" }), true);
+  assert.equal(isDebuggerKey({ key: "X" }), true);
   assert.equal(isDebuggerKey({ key: "Tab", shiftKey: true }), true);
   assert.equal(isDebuggerKey({ key: "r", ctrlKey: true }), false);
   assert.equal(isDebuggerKey({ key: "p", ctrlKey: true }), false);

@@ -98,10 +98,13 @@ def test_help_contains_every_option_control_inspector_and_scenario() -> None:
         "Shift+left click",
         "right click / Escape",
         "Shift+R",
+        "X",
         "Space / Enter",
         "[ / ]",
     ):
         assert control in result.stdout
+    assert "every staged active-agent action as one joint turn" in result.stdout
+    assert "advance the next registered scripted frame" in result.stdout
     for inspector in ("SELECTED TARGET", "PENDING ACTION", "TECHNICAL DETAILS"):
         assert inspector in result.stdout
     for scenario_name in RESEARCHER_SCENARIOS:

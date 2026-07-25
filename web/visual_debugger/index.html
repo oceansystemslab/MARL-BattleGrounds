@@ -139,26 +139,26 @@
           <div class="command-group">
             <h3>Movement</h3>
             <div class="movement-grid">
-              <button type="button" data-key="q" aria-label="Move northwest">↖</button>
-              <button type="button" data-key="w" aria-label="Move north">↑</button>
-              <button type="button" data-key="e" aria-label="Move northeast">↗</button>
-              <button type="button" data-key="a" aria-label="Move west">←</button>
-              <button type="button" aria-label="Movement center" disabled>•</button>
-              <button type="button" data-key="d" aria-label="Move east">→</button>
-              <button type="button" data-key="z" aria-label="Move southwest">↙</button>
-              <button type="button" data-key="s" aria-label="Move south">↓</button>
-              <button type="button" data-key="c" aria-label="Move southeast">↘</button>
+              <button type="button" data-key="q" data-command-role="draft" aria-label="Move northwest">↖</button>
+              <button type="button" data-key="w" data-command-role="draft" aria-label="Move north">↑</button>
+              <button type="button" data-key="e" data-command-role="draft" aria-label="Move northeast">↗</button>
+              <button type="button" data-key="a" data-command-role="draft" aria-label="Move west">←</button>
+              <button id="stay-button" type="button" data-key="x" data-command-role="draft" aria-label="Stay">•</button>
+              <button type="button" data-key="d" data-command-role="draft" aria-label="Move east">→</button>
+              <button type="button" data-key="z" data-command-role="draft" aria-label="Move southwest">↙</button>
+              <button type="button" data-key="s" data-command-role="draft" aria-label="Move south">↓</button>
+              <button type="button" data-key="c" data-command-role="draft" aria-label="Move southeast">↘</button>
             </div>
           </div>
           <div class="command-group">
             <h3>Action</h3>
             <div class="button-row">
-              <button type="button" data-key="1">Arm Basic</button>
-              <button type="button" data-key="2">Arm Ultimate</button>
-              <button type="button" data-key="Enter" class="button--primary">
-                Submit
+              <button type="button" data-key="1" data-command-role="draft">Arm Basic</button>
+              <button type="button" data-key="2" data-command-role="draft">Arm Ultimate</button>
+              <button id="submit-turn-button" type="button" data-key="Enter" data-command-role="interactive-submit" class="button--primary">
+                Submit joint turn
               </button>
-              <button type="button" data-key="n">Next frame</button>
+              <button id="advance-script-button" type="button" data-key="n" data-command-role="script-advance">Advance scripted frame</button>
             </div>
           </div>
           <div class="command-group">
@@ -203,7 +203,13 @@
         </section>
 
         <section class="hud-section" aria-labelledby="pending-heading">
-          <h2 id="pending-heading">Pending action</h2>
+          <div class="section-heading">
+            <h2 id="pending-heading">Pending joint turn</h2>
+            <span id="pending-count" class="count-badge">0 actors</span>
+          </div>
+          <p id="pending-scope" class="section-note">
+            Waiting for authoritative submission scope.
+          </p>
           <article id="pending-card" class="action-card">
             <p class="empty-copy">No pending action.</p>
           </article>
@@ -284,11 +290,16 @@
           <dt>Right click</dt><dd>Clear the target</dd>
           <dt>Escape</dt>
           <dd>Clear the target and leave battlefield focus</dd>
-          <dt>WASD / QEZC</dt><dd>Choose movement</dd>
+          <dt>WASD / QEZC</dt><dd>Choose movement for the controlled actor</dd>
           <dt>Arrow keys</dt><dd>Cardinal movement aliases</dd>
+          <dt>X</dt><dd>Set the controlled actor to Stay</dd>
           <dt>1 / 2</dt><dd>Arm Basic / Ultimate</dd>
-          <dt>Space / Enter</dt><dd>Submit once</dd>
-          <dt>N</dt><dd>Submit the next scripted frame</dd>
+          <dt>Space / Enter</dt>
+          <dd>
+            Submit every staged actor in researcher view, or only the
+            controlled actor in agent POV
+          </dd>
+          <dt>N</dt><dd>Advance the next registered scripted frame only</dd>
           <dt>R</dt><dd>Deterministically reset the scenario</dd>
           <dt>Shift+R</dt><dd>Explain why cooldown clearing is unavailable</dd>
           <dt>G / V</dt><dd>Toggle ranges / diagnostic verbosity</dd>
@@ -297,6 +308,12 @@
           <dt>Motion controls</dt>
           <dd>Choose 0.5×, 1×, 2×, Off, or Skip the current explanation</dd>
         </dl>
+        <p class="help-note">
+          Actor drafts persist when you cycle or directly control another
+          actor. Scripted scenarios are inspection-only: manual draft and
+          Submit controls are unavailable, and N advances the registered
+          trajectory.
+        </p>
         <p class="help-note">
           Animation, layout, hover, help, and panel state are presentation-only.
           Python remains authoritative for every simulator and legality decision.

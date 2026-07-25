@@ -26,6 +26,11 @@ FRAME_SCHEMA_VERSION = 1
 type ViewMode = Literal["researcher", "pov"]
 type Preset = Literal["presentation", "analysis", "debug"]
 type PresentationPreset = Preset
+type PendingSubmissionScope = Literal[
+    "joint_turn",
+    "controlled_actor",
+    "scripted_playback",
+]
 type CommandResult = Literal[
     "applied",
     "duplicate",
@@ -194,7 +199,10 @@ class ActionTupleCardV1(_ProtocolModel):
 
 
 class PendingActionCardV1(_ProtocolModel):
-    label: Literal["PENDING / WILL SUBMIT"] = "PENDING / WILL SUBMIT"
+    label: Literal[
+        "PENDING / WILL SUBMIT",
+        "PLAYBACK / INSPECTION ONLY",
+    ] = "PENDING / WILL SUBMIT"
     actor_global_slot: _GlobalSlot
     move_action: _NonNegativeInt
     target_action: _NonNegativeInt | None
@@ -280,6 +288,8 @@ class HudFrameV1(_ProtocolModel):
     roster_global_slots: tuple[_GlobalSlot, ...]
     controlled_global_slot: _GlobalSlot
     selected_global_slot: _GlobalSlot | None
+    pending_submission_scope: PendingSubmissionScope
+    pending_actions: tuple[PendingActionCardV1, ...]
     pending_action: PendingActionCardV1
     latest_transition: LatestTransitionCardV1 | None
     candidate_legalities: tuple[CandidateLegalityCardV1, ...] = ()
@@ -299,6 +309,49 @@ class HudFrameV1(_ProtocolModel):
             raise ValueError("selected_global_slot must occur in the roster.")
         if self.pending_action.actor_global_slot != self.controlled_global_slot:
             raise ValueError("pending action actor must be the controlled actor.")
+        pending_slots = tuple(
+            pending.actor_global_slot for pending in self.pending_actions
+        )
+        if not pending_slots:
+            raise ValueError("pending_actions must contain an authorized actor row.")
+        if len(pending_slots) != len(set(pending_slots)):
+            raise ValueError("pending action actor slots must be unique.")
+        if not set(pending_slots).issubset(roster):
+            raise ValueError("pending action actors must occur in the roster.")
+        controlled_pending = next(
+            (
+                pending
+                for pending in self.pending_actions
+                if pending.actor_global_slot == self.controlled_global_slot
+            ),
+            None,
+        )
+        if controlled_pending is None or self.pending_action != controlled_pending:
+            raise ValueError(
+                "pending_action must equal the controlled pending_actions row."
+            )
+        expected_pending_slots = (
+            self.roster_global_slots
+            if self.pending_submission_scope == "joint_turn"
+            else (self.controlled_global_slot,)
+        )
+        if pending_slots != expected_pending_slots:
+            raise ValueError(
+                "pending action rows must exactly match their submission scope."
+            )
+        expected_pending_label = (
+            "PLAYBACK / INSPECTION ONLY"
+            if self.pending_submission_scope == "scripted_playback"
+            else "PENDING / WILL SUBMIT"
+        )
+        if any(
+            pending.label != expected_pending_label for pending in self.pending_actions
+        ):
+            raise ValueError("pending action labels must match their submission scope.")
+        for pending in self.pending_actions:
+            target = pending.target.global_slot
+            if target is not None and target not in roster:
+                raise ValueError("public pending targets must occur in the roster.")
         if self.candidate_legalities:
             target_actions = tuple(
                 candidate.target_action for candidate in self.candidate_legalities
@@ -336,9 +389,13 @@ class HudFrameV1(_ProtocolModel):
                         "candidate target actions must match the controlled "
                         "actor-relative target mapping."
                     )
-        for actor in (
+        latest_actors = (
             () if self.latest_transition is None else self.latest_transition.actors
-        ):
+        )
+        latest_actor_slots = tuple(actor.actor_global_slot for actor in latest_actors)
+        if len(latest_actor_slots) != len(set(latest_actor_slots)):
+            raise ValueError("latest-transition actor slots must be unique.")
+        for actor in latest_actors:
             if actor.actor_global_slot not in roster:
                 raise ValueError("latest-transition actors must occur in the roster.")
             for action in (actor.submitted, actor.accepted):
@@ -470,10 +527,32 @@ class DebuggerFrameV1(_ProtocolModel):
             or self.hud.selected_global_slot != selection.selected_global_slot
         ):
             raise ValueError("HUD and scene selection records must agree.")
+        expected_scope: PendingSubmissionScope = (
+            "scripted_playback"
+            if self.scenario.mode == "scripted"
+            else "joint_turn"
+            if self.view_mode == "researcher"
+            else "controlled_actor"
+        )
+        if self.hud.pending_submission_scope != expected_scope:
+            raise ValueError(
+                "scenario mode, view mode, and pending submission scope must agree."
+            )
         if self.hud.latest_transition is not None and (
             self.hud.latest_transition.transition_id != self.transition_id
         ):
             raise ValueError("latest-transition card must match transition_id.")
+        if (
+            self.view_mode == "pov"
+            and self.hud.latest_transition is not None
+            and any(
+                actor.actor_global_slot != self.hud.controlled_global_slot
+                for actor in self.hud.latest_transition.actors
+            )
+        ):
+            raise ValueError(
+                "POV latest-transition cards may contain only the controlled actor."
+            )
         return self
 
 

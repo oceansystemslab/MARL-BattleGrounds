@@ -14,6 +14,7 @@ from marl_battlegrounds.core.types import (
     MOVE_SOUTH,
     MOVE_SOUTHEAST,
     MOVE_SOUTHWEST,
+    MOVE_STAY,
     MOVE_WEST,
     EnvConfig,
     EnvState,
@@ -60,6 +61,7 @@ _MOVEMENT_KEYS = {
     "e": MOVE_NORTHEAST,
     "z": MOVE_SOUTHWEST,
     "c": MOVE_SOUTHEAST,
+    "x": MOVE_STAY,
     "arrowup": MOVE_NORTH,
     "arrowdown": MOVE_SOUTH,
     "arrowright": MOVE_EAST,
@@ -234,7 +236,7 @@ def _pending_edit_result(
 ) -> InputDispatchResult:
     changed = (
         before.controlled_global_slot != after.controlled_global_slot
-        or before.pending_action != after.pending_action
+        or before.pending_actions != after.pending_actions
     )
     return _result(
         after if changed else before,
@@ -317,7 +319,22 @@ def _dispatch_keyboard(
             preset=preset,
         )
 
+    scenario = get_scenario(session.scenario_name)
     terminal = _is_terminal(session)
+    if scenario.mode == "scripted" and (
+        key in _MOVEMENT_KEYS or key in ("1", "2", "space", "enter")
+    ):
+        return _result(
+            session,
+            view_mode=view_mode,
+            preset=preset,
+            handled=True,
+            changed=False,
+            notice=(
+                "Scripted playback is inspection-only; press N to advance "
+                "the registered frame."
+            ),
+        )
     if key in _MOVEMENT_KEYS:
         if terminal:
             return _result(
@@ -352,12 +369,39 @@ def _dispatch_keyboard(
             preset=preset,
         )
 
-    scenario = get_scenario(session.scenario_name)
-    if key in ("space", "enter", "n"):
-        edited = (
-            submit_next_script_frame(session)
-            if key == "n" or scenario.mode == "scripted"
-            else submit_interactive(session)
+    if key == "n":
+        if scenario.mode != "scripted":
+            return _result(
+                session,
+                view_mode=view_mode,
+                preset=preset,
+                handled=True,
+                changed=False,
+                notice="N advances scripted playback only.",
+            )
+        edited = submit_next_script_frame(session)
+        changed = edited is not session
+        notice = (
+            _terminal_notice(session)
+            if terminal
+            else "Script is already complete."
+            if edited is session
+            else None
+        )
+        return _result(
+            edited,
+            view_mode=view_mode,
+            preset=preset,
+            handled=True,
+            changed=changed,
+            notice=notice,
+        )
+    if key in ("space", "enter"):
+        edited = submit_interactive(
+            session,
+            actor_global_slots=(
+                (session.controlled_global_slot,) if view_mode == "pov" else None
+            ),
         )
         if view_mode == "pov":
             edited = sanitize_pov_pending_target(edited)

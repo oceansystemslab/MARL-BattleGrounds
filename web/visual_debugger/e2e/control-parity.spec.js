@@ -243,10 +243,173 @@ test("pointer, roster, toolbar, and command-deck controls use the live service",
   await expect(page.locator("#revision-value")).toHaveText(String(revision));
   await expect(page.locator("#step-value")).toHaveText("0");
 
-  await page.getByRole("button", { name: "Move east" }).click();
+  await expect(page.getByRole("button", { name: "Move east" })).toBeDisabled();
+  await expect(page.locator("#submit-turn-button")).toBeDisabled();
+  await expect(page.locator("#advance-script-button")).toBeEnabled();
+  await expect(page.locator("#step-value")).toHaveText("0");
+});
+
+test("joint turn drafts survive actor cycling and submit exactly once", async ({
+  page,
+}) => {
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  let revision = await currentRevision(page);
+  if ((await page.locator("#scenario-select").inputValue()) !== "arena_5v5") {
+    await page.locator("#scenario-select").selectOption("arena_5v5");
+    revision += 1;
+    await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  }
+  await page.locator("#reset-button").click();
   revision += 1;
   await expect(page.locator("#revision-value")).toHaveText(String(revision));
   await expect(page.locator("#step-value")).toHaveText("0");
+  await expect(page.locator("#pending-card")).toHaveAttribute(
+    "data-submission-scope",
+    "joint_turn",
+  );
+  await expect(page.locator(".pending-action-row")).toHaveCount(10);
+  await expect(page.locator('.pending-action-row[data-controlled="true"]')).toHaveCount(
+    1,
+  );
+
+  const battlefield = page.locator("#battlefield");
+  await battlefield.focus();
+  await page.keyboard.press("d");
+  revision += 1;
+  await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  await page.getByRole("button", { name: "Target id_6" }).click();
+  revision += 1;
+  await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  const actor0 = page.locator('.pending-action-row[data-actor-slot="0"]');
+  await actor0.evaluate((element) => {
+    element.setAttribute("data-retained-probe", "joint-g0");
+  });
+
+  await battlefield.focus();
+  await page.keyboard.press("Tab");
+  revision += 1;
+  await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  await page.keyboard.press("w");
+  revision += 1;
+  await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  await page.getByRole("button", { name: "Target id_5" }).click();
+  revision += 1;
+  await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  const actor1 = page.locator('.pending-action-row[data-actor-slot="1"]');
+  await actor1.evaluate((element) => {
+    element.setAttribute("data-retained-probe", "joint-g1");
+  });
+
+  await battlefield.focus();
+  await page.keyboard.press("Shift+Tab");
+  revision += 1;
+  await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  await expect(actor0).toHaveAttribute("data-retained-probe", "joint-g0");
+  await expect(actor1).toHaveAttribute("data-retained-probe", "joint-g1");
+  await expect(actor0).toHaveAttribute("data-controlled", "true");
+  await expect(actor0).toHaveAttribute("data-move-action", "3");
+  await expect(actor0).toHaveAttribute("data-target-slot", "6");
+  await expect(actor1).toHaveAttribute("data-controlled", "false");
+  await expect(actor1).toHaveAttribute("data-move-action", "1");
+  await expect(actor1).toHaveAttribute("data-target-slot", "5");
+
+  let enterCommands = 0;
+  await page.route("**/api/command", async (route) => {
+    const payload = route.request().postDataJSON();
+    if (
+      payload?.command?.command_type === "keyboard" &&
+      String(payload.command.key).toLowerCase() === "enter"
+    ) {
+      enterCommands += 1;
+    }
+    await route.continue();
+  });
+  const beforeSubmitRevision = await currentRevision(page);
+  const beforeSubmitStep = await currentStep(page);
+  await battlefield.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#revision-value")).toHaveText(
+    String(beforeSubmitRevision + 1),
+    { timeout: 120_000 },
+  );
+  await expect(page.locator("#step-value")).toHaveText(String(beforeSubmitStep + 1));
+  await expect(page.locator("#transition-value")).toHaveText(
+    String(beforeSubmitStep + 1),
+  );
+  await expect(page.locator("#accepted-card .action-result")).toHaveCount(10);
+  await expect.poll(() => enterCommands).toBe(1);
+
+  await page.reload();
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await expect(page.locator("#revision-value")).toHaveText(
+    String(beforeSubmitRevision + 1),
+  );
+  await expect(page.locator("#step-value")).toHaveText(String(beforeSubmitStep + 1));
+  await page.unroute("**/api/command");
+
+  await page.setViewportSize({ width: 960, height: 600 });
+  const horizontalOverflow = await page
+    .locator("#pending-card")
+    .evaluate((element) => element.scrollWidth - element.clientWidth);
+  expect(horizontalOverflow).toBeLessThanOrEqual(1);
+});
+
+test("scripted playback exposes only N and never sends manual submit", async ({
+  page,
+}) => {
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  let revision = await currentRevision(page);
+  if ((await page.locator("#scenario-select").inputValue()) !== "basic_support") {
+    await page.locator("#scenario-select").selectOption("basic_support");
+    revision += 1;
+    await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  }
+  await expect(page.locator("#step-value")).toHaveText("0");
+  await expect(page.locator("#pending-card")).toHaveAttribute(
+    "data-submission-scope",
+    "scripted_playback",
+  );
+  await expect(page.locator("#pending-card .action-card__label")).toHaveText(
+    "PLAYBACK / INSPECTION ONLY",
+  );
+  await expect(page.locator("#submit-turn-button")).toBeDisabled();
+  await expect(page.locator("#submit-turn-button")).toHaveText(
+    "Manual submit unavailable",
+  );
+  await expect(page.getByRole("button", { name: "Move east" })).toBeDisabled();
+  await expect(page.locator("#stay-button")).toBeDisabled();
+  await expect(page.locator("#advance-script-button")).toBeEnabled();
+
+  let manualSubmitCommands = 0;
+  await page.route("**/api/command", async (route) => {
+    const payload = route.request().postDataJSON();
+    if (
+      payload?.command?.command_type === "keyboard" &&
+      ["enter", " "].includes(String(payload.command.key).toLowerCase())
+    ) {
+      manualSubmitCommands += 1;
+    }
+    await route.continue();
+  });
+  const battlefield = page.locator("#battlefield");
+  await battlefield.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#notice")).toContainText(
+    "Scripted playback is inspection-only",
+  );
+  await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  await expect(page.locator("#step-value")).toHaveText("0");
+  expect(manualSubmitCommands).toBe(0);
+
+  await page.locator("#advance-script-button").click();
+  await expect(page.locator("#revision-value")).toHaveText(String(revision + 1), {
+    timeout: 120_000,
+  });
+  await expect(page.locator("#step-value")).toHaveText("1");
+  expect(manualSubmitCommands).toBe(0);
+  await page.unroute("**/api/command");
 });
 
 test("a stale tab adopts the latest frame without replaying its command", async ({

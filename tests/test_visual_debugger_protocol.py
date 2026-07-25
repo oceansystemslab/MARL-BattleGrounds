@@ -208,6 +208,8 @@ def test_hud_candidate_legality_requires_target_none_roster_and_actor_mapping() 
         roster_global_slots=(0,),
         controlled_global_slot=0,
         selected_global_slot=None,
+        pending_submission_scope="controlled_actor",
+        pending_actions=(pending,),
         pending_action=pending,
         latest_transition=None,
         candidate_legalities=(target_none, public_actor),
@@ -219,6 +221,8 @@ def test_hud_candidate_legality_requires_target_none_roster_and_actor_mapping() 
             roster_global_slots=(0,),
             controlled_global_slot=0,
             selected_global_slot=None,
+            pending_submission_scope="controlled_actor",
+            pending_actions=(pending,),
             pending_action=pending,
             latest_transition=None,
             candidate_legalities=(public_actor,),
@@ -228,6 +232,8 @@ def test_hud_candidate_legality_requires_target_none_roster_and_actor_mapping() 
             roster_global_slots=(0, 1),
             controlled_global_slot=0,
             selected_global_slot=None,
+            pending_submission_scope="controlled_actor",
+            pending_actions=(pending,),
             pending_action=pending,
             latest_transition=None,
             candidate_legalities=(target_none, public_actor),
@@ -237,6 +243,8 @@ def test_hud_candidate_legality_requires_target_none_roster_and_actor_mapping() 
             roster_global_slots=(0,),
             controlled_global_slot=0,
             selected_global_slot=None,
+            pending_submission_scope="controlled_actor",
+            pending_actions=(pending,),
             pending_action=pending,
             latest_transition=None,
             candidate_legalities=(target_none, public_actor, public_actor),
@@ -246,6 +254,8 @@ def test_hud_candidate_legality_requires_target_none_roster_and_actor_mapping() 
             roster_global_slots=(0,),
             controlled_global_slot=0,
             selected_global_slot=None,
+            pending_submission_scope="controlled_actor",
+            pending_actions=(pending,),
             pending_action=pending,
             latest_transition=None,
             candidate_legalities=(
@@ -279,6 +289,8 @@ def test_hud_candidate_legality_requires_target_none_roster_and_actor_mapping() 
         roster_global_slots=(0, 5),
         controlled_global_slot=5,
         selected_global_slot=None,
+        pending_submission_scope="controlled_actor",
+        pending_actions=(team_b_pending,),
         pending_action=team_b_pending,
         latest_transition=None,
         candidate_legalities=(
@@ -296,6 +308,8 @@ def test_hud_candidate_legality_requires_target_none_roster_and_actor_mapping() 
             roster_global_slots=(0, 5),
             controlled_global_slot=5,
             selected_global_slot=None,
+            pending_submission_scope="controlled_actor",
+            pending_actions=(team_b_pending,),
             pending_action=team_b_pending,
             latest_transition=None,
             candidate_legalities=(
@@ -304,6 +318,91 @@ def test_hud_candidate_legality_requires_target_none_roster_and_actor_mapping() 
                 team_b_team_a_target.model_copy(update={"target_action": 2}),
             ),
         )
+
+
+def test_hud_pending_scope_requires_exact_order_alias_and_playback_label() -> None:
+    no_target = TargetReferenceV1(disclosure="target_none", global_slot=None)
+    pending_0 = PendingActionCardV1(
+        actor_global_slot=0,
+        move_action=0,
+        target_action=0,
+        armed_lane=0,
+        arm_origin="automatic",
+        target=no_target,
+        movement_mask_value=True,
+        pair_mask_value=True,
+        summary="g0",
+    )
+    pending_1 = pending_0.model_copy(update={"actor_global_slot": 1, "summary": "g1"})
+
+    joint = HudFrameV1(
+        roster_global_slots=(0, 1),
+        controlled_global_slot=0,
+        selected_global_slot=None,
+        pending_submission_scope="joint_turn",
+        pending_actions=(pending_0, pending_1),
+        pending_action=pending_0,
+        latest_transition=None,
+    )
+    assert (
+        tuple(pending.actor_global_slot for pending in joint.pending_actions)
+        == joint.roster_global_slots
+    )
+
+    with pytest.raises(ValidationError, match="submission scope"):
+        HudFrameV1(
+            roster_global_slots=(0, 1),
+            controlled_global_slot=0,
+            selected_global_slot=None,
+            pending_submission_scope="joint_turn",
+            pending_actions=(pending_0,),
+            pending_action=pending_0,
+            latest_transition=None,
+        )
+    with pytest.raises(ValidationError, match="must be unique"):
+        HudFrameV1(
+            roster_global_slots=(0, 1),
+            controlled_global_slot=0,
+            selected_global_slot=None,
+            pending_submission_scope="joint_turn",
+            pending_actions=(pending_0, pending_0),
+            pending_action=pending_0,
+            latest_transition=None,
+        )
+    with pytest.raises(ValidationError, match="must equal"):
+        HudFrameV1(
+            roster_global_slots=(0, 1),
+            controlled_global_slot=0,
+            selected_global_slot=None,
+            pending_submission_scope="joint_turn",
+            pending_actions=(pending_0, pending_1),
+            pending_action=pending_0.model_copy(update={"summary": "stale"}),
+            latest_transition=None,
+        )
+    with pytest.raises(ValidationError, match="labels must match"):
+        HudFrameV1(
+            roster_global_slots=(0,),
+            controlled_global_slot=0,
+            selected_global_slot=None,
+            pending_submission_scope="scripted_playback",
+            pending_actions=(pending_0,),
+            pending_action=pending_0,
+            latest_transition=None,
+        )
+
+    playback = pending_0.model_copy(update={"label": "PLAYBACK / INSPECTION ONLY"})
+    assert (
+        HudFrameV1(
+            roster_global_slots=(0,),
+            controlled_global_slot=0,
+            selected_global_slot=None,
+            pending_submission_scope="scripted_playback",
+            pending_actions=(playback,),
+            pending_action=playback,
+            latest_transition=None,
+        ).pending_action.label
+        == "PLAYBACK / INSPECTION ONLY"
+    )
 
 
 def test_hud_rejects_public_action_endpoints_absent_from_authorized_roster() -> None:
@@ -361,6 +460,8 @@ def test_hud_rejects_public_action_endpoints_absent_from_authorized_roster() -> 
             roster_global_slots=(0,),
             controlled_global_slot=0,
             selected_global_slot=None,
+            pending_submission_scope="controlled_actor",
+            pending_actions=(pending,),
             pending_action=pending,
             latest_transition=latest,
         )

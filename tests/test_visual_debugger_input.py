@@ -7,6 +7,8 @@ import pytest
 from scripts.dev.visual_debugger.control import (
     create_session,
     select_clicked_target,
+    select_controlled_actor,
+    set_pending_movement,
 )
 from scripts.dev.visual_debugger.input import (
     dispatch_command,
@@ -28,9 +30,11 @@ from scripts.dev.visual_debugger.scenarios import get_scenario
 from scripts.dev.visual_debugger.scene_adapter import build_battlefield_scene
 
 from marl_battlegrounds.core.types import (
+    MAX_AGENT_SLOTS,
     MOVE_EAST,
     MOVE_NORTH,
     MOVE_SOUTH,
+    MOVE_STAY,
     MOVE_WEST,
     DoneFlags,
     EnvConfig,
@@ -71,6 +75,7 @@ def _session(
         ("ArrowDown", None, "arrowdown"),
         ("left", None, "arrowleft"),
         ("RIGHT", None, "arrowright"),
+        ("X", None, "x"),
     ),
 )
 def test_key_normalization_covers_browser_and_legacy_aliases(
@@ -115,6 +120,27 @@ def test_keyboard_movement_edits_only_pending_input(
     assert result.session.key is session.key
 
 
+def test_stay_key_resets_only_the_controlled_actor_draft() -> None:
+    session = set_pending_movement(_session(), MOVE_EAST)
+    session = select_controlled_actor(session, 1)
+    session = set_pending_movement(session, MOVE_NORTH)
+    session = select_controlled_actor(session, 0)
+
+    result = dispatch_command(
+        session,
+        KeyboardCommandV1(key="x"),
+        view_mode="researcher",
+        preset="analysis",
+        include_stress=False,
+    )
+
+    assert result.changed
+    assert result.session.pending_actions[0].move_action == MOVE_STAY
+    assert result.session.pending_actions[1].move_action == MOVE_NORTH
+    assert result.session.state is session.state
+    assert result.session.key is session.key
+
+
 @pytest.mark.parametrize("key", (" ", "Enter", "n"))
 def test_repeat_submission_keys_are_consumed_without_stepping(key: str) -> None:
     session = _session()
@@ -132,6 +158,97 @@ def test_repeat_submission_keys_are_consumed_without_stepping(key: str) -> None:
     assert result.notice == "Repeated submission input ignored."
     assert int(result.session.state.step_count) == 0
     assert result.session.key is session.key
+
+
+@pytest.mark.parametrize("key", ("w", "1", "2", "Enter", " "))
+def test_scripted_playback_rejects_manual_drafts_and_submit_keys(key: str) -> None:
+    session = _session("basic_support")
+    result = dispatch_command(
+        session,
+        KeyboardCommandV1(key=key),
+        view_mode="researcher",
+        preset="analysis",
+        include_stress=False,
+    )
+
+    assert result.handled
+    assert not result.changed
+    assert result.session is session
+    assert result.notice is not None
+    assert "press N" in result.notice
+    assert int(result.session.state.step_count) == 0
+    assert result.session.key is session.key
+
+
+def test_n_advances_only_scripted_playback() -> None:
+    interactive = _session()
+    interactive_result = dispatch_command(
+        interactive,
+        KeyboardCommandV1(key="n"),
+        view_mode="researcher",
+        preset="analysis",
+        include_stress=False,
+    )
+    scripted = _session("basic_support")
+    scripted_result = dispatch_command(
+        scripted,
+        KeyboardCommandV1(key="n"),
+        view_mode="researcher",
+        preset="analysis",
+        include_stress=False,
+    )
+
+    assert not interactive_result.changed
+    assert interactive_result.session is interactive
+    assert interactive_result.notice == "N advances scripted playback only."
+    assert scripted_result.changed
+    assert int(scripted_result.session.state.step_count) == 1
+    assert scripted_result.session.last_transition is not None
+    assert scripted_result.session.last_transition.submission_kind == "scripted"
+
+
+def test_researcher_and_pov_submit_scopes_are_explicit_and_single_step() -> None:
+    researcher = _session()
+    researcher_result = dispatch_command(
+        researcher,
+        KeyboardCommandV1(key="Enter"),
+        view_mode="researcher",
+        preset="analysis",
+        include_stress=False,
+    )
+    researcher_transition = researcher_result.session.last_transition
+
+    assert researcher_result.changed
+    assert researcher_transition is not None
+    assert researcher_transition.report_actor_slots == tuple(range(MAX_AGENT_SLOTS))
+    assert int(researcher_result.session.state.step_count) == 1
+
+    pov = set_pending_movement(_session(), MOVE_NORTH)
+    pov = select_controlled_actor(pov, 1)
+    pov = set_pending_movement(pov, MOVE_EAST)
+    pov = select_controlled_actor(pov, 0)
+    pov_result = dispatch_command(
+        pov,
+        KeyboardCommandV1(key="Enter"),
+        view_mode="pov",
+        preset="analysis",
+        include_stress=False,
+    )
+    pov_transition = pov_result.session.last_transition
+
+    assert pov_result.changed
+    assert pov_transition is not None
+    assert pov_transition.report_actor_slots == (0,)
+    assert tuple(int(head[0]) for head in pov_transition.submitted_action) == (
+        MOVE_NORTH,
+        0,
+        0,
+    )
+    for actor_slot in range(1, MAX_AGENT_SLOTS):
+        assert tuple(
+            int(head[actor_slot]) for head in pov_transition.submitted_action
+        ) == (MOVE_STAY, 0, 0)
+    assert int(pov_result.session.state.step_count) == 1
 
 
 def test_ctrl_alt_and_meta_modified_inputs_are_suppressed() -> None:
@@ -263,7 +380,8 @@ def test_pointer_selection_is_server_hit_tested_and_shift_controls_actor() -> No
 
     assert selected.session.pending_action.selected_global_target_slot == 5
     assert controlled.session.controlled_global_slot == 2
-    assert controlled.session.pending_action.selected_global_target_slot == 5
+    assert controlled.session.pending_action.selected_global_target_slot is None
+    assert controlled.session.pending_actions[0].selected_global_target_slot == 5
     assert cleared.session.pending_action.selected_global_target_slot is None
     assert cleared.session.state is session.state
     assert cleared.session.key is session.key

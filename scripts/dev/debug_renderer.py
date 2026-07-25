@@ -19,15 +19,16 @@ from scripts.dev.visual_debugger.scenarios import (  # noqa: E402 - script boots
 
 _EPILOG = """\
 controls:
-  Tab / Shift+Tab       cycle active controlled actors
+  Tab / Shift+Tab       cycle active actors without discarding their drafts
   left click            select an active global target
   Shift+left click      control the clicked active actor
   right click / Escape  clear target to target-none
   1 / 2                 explicitly arm Basic lane 0 / Ultimate lane 1
   W A S D               cardinal movement
   Q E Z C               diagonal movement
-  Space / Enter         submit manual action or next scripted frame
-  N                     submit the next registered reference/script frame
+  X                     select Stay movement
+  Space / Enter         submit every staged active-agent action as one joint turn
+  N                     advance the next registered scripted frame
   R                     deterministic scenario reset
   Shift+R               explain why cooldown clearing is unavailable
   G                     toggle selected-unit ranges

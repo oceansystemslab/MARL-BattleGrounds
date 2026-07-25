@@ -55,7 +55,13 @@ const elements = {
   roster: requiredElement("roster"),
   rosterCount: requiredElement("roster-count"),
   selectionCard: requiredElement("selection-card"),
+  pendingHeading: requiredElement("pending-heading"),
+  pendingCount: requiredElement("pending-count"),
+  pendingScope: requiredElement("pending-scope"),
   pendingCard: requiredElement("pending-card"),
+  stayButton: requiredElement("stay-button"),
+  submitTurnButton: requiredElement("submit-turn-button"),
+  advanceScriptButton: requiredElement("advance-script-button"),
   acceptedCard: requiredElement("accepted-card"),
   acceptedAnnouncement: requiredElement("accepted-announcement"),
   eventFeed: requiredElement("event-feed"),
@@ -117,6 +123,9 @@ const panels = new DebuggerPanels({
   roster: elements.roster,
   rosterCount: elements.rosterCount,
   selectionCard: elements.selectionCard,
+  pendingHeading: elements.pendingHeading,
+  pendingCount: elements.pendingCount,
+  pendingScope: elements.pendingScope,
   pendingCard: elements.pendingCard,
   acceptedCard: elements.acceptedCard,
   acceptedAnnouncement: elements.acceptedAnnouncement,
@@ -215,6 +224,84 @@ function isTerminal(frame) {
     return Boolean(record.terminal.terminated || record.terminal.truncated);
   }
   return Boolean(record.terminated || record.truncated);
+}
+
+const DRAFT_KEYS = new Set([
+  "w",
+  "a",
+  "s",
+  "d",
+  "q",
+  "e",
+  "z",
+  "c",
+  "x",
+  "arrowup",
+  "arrowdown",
+  "arrowleft",
+  "arrowright",
+  "1",
+  "2",
+]);
+
+/**
+ * @param {Record<string, unknown>} command
+ * @returns {"draft" | "interactive-submit" | "script-advance" | null}
+ */
+function commandRole(command) {
+  if (command.command_type !== "keyboard" || typeof command.key !== "string") {
+    return null;
+  }
+  const key = command.key.toLowerCase();
+  if (DRAFT_KEYS.has(key)) {
+    return "draft";
+  }
+  if (key === "enter" || key === "return" || key === " " || key === "spacebar") {
+    return "interactive-submit";
+  }
+  return key === "n" ? "script-advance" : null;
+}
+
+/**
+ * Browser-side mode filtering is advisory UX. Python repeats the same
+ * authorization decision before it can mutate the session.
+ *
+ * @param {Record<string, unknown>} command
+ * @param {Record<string, any> | null} frame
+ */
+function modeAvailability(command, frame) {
+  const role = commandRole(command);
+  if (!role) {
+    return { allowed: true, notice: null };
+  }
+  const scenario = scenarioRecord(frame);
+  const scripted = scenario.mode === "scripted";
+  if (isTerminal(frame)) {
+    return {
+      allowed: false,
+      notice: "The episode is terminal; reset or switch scenario to continue.",
+    };
+  }
+  if (scripted && role !== "script-advance") {
+    return {
+      allowed: false,
+      notice:
+        "Scripted playback is inspection-only. Press N to advance the registered frame.",
+    };
+  }
+  if (!scripted && role === "script-advance") {
+    return {
+      allowed: false,
+      notice: "N advances scripted playback only.",
+    };
+  }
+  if (scripted && role === "script-advance" && scenario.script_complete === true) {
+    return {
+      allowed: false,
+      notice: "The scripted trajectory is complete; reset or switch scenario.",
+    };
+  }
+  return { allowed: true, notice: null };
 }
 
 function currentRevision() {
@@ -352,6 +439,18 @@ function renderCommandAvailability() {
     state.resyncRequired ||
     state.offline;
   const presentation = choreographer.snapshot();
+  const scenario = scenarioRecord(state.frame);
+  const scripted = scenario.mode === "scripted";
+  const hud = isRecord(state.frame?.hud) ? state.frame.hud : {};
+  elements.submitTurnButton.textContent = scripted
+    ? "Manual submit unavailable"
+    : hud.pending_submission_scope === "controlled_actor"
+      ? "Submit controlled actor"
+      : "Submit joint turn";
+  elements.advanceScriptButton.textContent =
+    scripted && scenario.script_complete === true
+      ? "Script complete"
+      : "Advance scripted frame";
   if (elements.commandDeck) {
     const buttons = /** @type {NodeListOf<HTMLButtonElement>} */ (
       elements.commandDeck.querySelectorAll("button[data-key]")
@@ -360,8 +459,11 @@ function renderCommandAvailability() {
       const command = keyboardCommand(button.dataset.key ?? "", {
         shiftKey: button.dataset.shift === "true",
       });
+      const mode = modeAvailability(command, state.frame);
       button.disabled =
-        disabled || (presentation.submissionBlocked && isSubmissionCommand(command));
+        disabled ||
+        !mode.allowed ||
+        (presentation.submissionBlocked && isSubmissionCommand(command));
     }
   }
 }
@@ -558,6 +660,16 @@ async function dispatchCommand(command) {
       "error",
     );
     renderConnection();
+    return;
+  }
+  const mode = modeAvailability(command, state.frame);
+  if (!mode.allowed) {
+    setNotice(
+      mode.notice ?? "That command is unavailable in the current mode.",
+      "warning",
+    );
+    renderConnection();
+    renderCommandAvailability();
     return;
   }
   if (choreographer.snapshot().submissionBlocked && isSubmissionCommand(command)) {

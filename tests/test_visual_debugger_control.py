@@ -1,6 +1,7 @@
 """Exhaustive pure and integration tests for debugger session control."""
 
 from dataclasses import fields, replace
+from typing import cast
 
 import jax
 import jax.numpy as jnp
@@ -41,6 +42,7 @@ from scripts.dev.visual_debugger.model import (
     TransitionView,
 )
 from scripts.dev.visual_debugger.scenarios import get_scenario
+from scripts.dev.visual_debugger.targeting import global_slot_to_target_action
 
 from marl_battlegrounds.core.types import (
     MAGE_CLASS_ID,
@@ -49,6 +51,7 @@ from marl_battlegrounds.core.types import (
     MOVE_NORTH,
     MOVE_STAY,
     MOVE_WEST,
+    Action,
     DoneFlags,
 )
 
@@ -76,6 +79,16 @@ def _tree_equal(left: object, right: object) -> bool:
         bool(jnp.array_equal(a, b))
         for a, b in zip(left_leaves, right_leaves, strict=True)
     )
+
+
+def _replace_pending_row(
+    session: DebuggerSession,
+    actor_slot: int,
+    pending_action: PendingAction,
+) -> tuple[PendingAction, ...]:
+    pending_actions = list(session.pending_actions)
+    pending_actions[actor_slot] = pending_action
+    return tuple(pending_actions)
 
 
 def test_make_neutral_joint_action_contract() -> None:
@@ -220,7 +233,7 @@ def test_every_debugger_structure_has_the_exact_audited_field_schema() -> None:
             "done_flags",
             "info",
             "controlled_global_slot",
-            "pending_action",
+            "pending_actions",
             "next_script_frame_index",
             "last_transition",
             "show_ranges",
@@ -254,6 +267,9 @@ def test_create_session_has_exact_initial_pending_and_epoch_contract() -> None:
     session = _session()
 
     assert session.run_generation == 0
+    assert isinstance(session.pending_actions, tuple)
+    assert len(session.pending_actions) == MAX_AGENT_SLOTS
+    assert session.pending_action is session.pending_actions[0]
     assert session.pending_action == PendingAction(
         move_action=MOVE_STAY,
         selected_global_target_slot=None,
@@ -265,6 +281,34 @@ def test_create_session_has_exact_initial_pending_and_epoch_contract() -> None:
     assert session.next_script_frame_index == 0
     assert int(session.state.step_count) == 0
     assert not bool(session.done_flags.done)
+
+
+def test_session_rejects_invalid_fixed_slot_pending_rows() -> None:
+    session = _session("basic_support")
+    with pytest.raises(ValueError, match="10 fixed-slot rows"):
+        replace(session, pending_actions=session.pending_actions[:-1])
+    with pytest.raises(ValueError, match="inactive pending row g3"):
+        replace(
+            session,
+            pending_actions=_replace_pending_row(
+                session,
+                3,
+                PendingAction(move_action=MOVE_EAST),
+            ),
+        )
+    with pytest.raises(ValueError, match="pending target g3 is inactive"):
+        replace(
+            session,
+            pending_actions=_replace_pending_row(
+                session,
+                0,
+                PendingAction(selected_global_target_slot=3),
+            ),
+        )
+
+    inactive = PendingAction(armed_lane=None, arm_origin=None)
+    for slot in (3, 4, 8, 9):
+        assert session.pending_actions[slot] == inactive
 
 
 def test_create_session_falls_back_to_scenario_default_for_inactive_slot() -> None:
@@ -294,7 +338,7 @@ def test_lane_availability_reads_exact_joint_pair_and_disarmed_is_never_legal() 
         lane_availability(session.action_mask, 0, 0, 2)  # type: ignore[arg-type]
 
 
-def test_interactive_action_changes_only_controlled_slot() -> None:
+def test_interactive_action_populates_only_authorized_pending_rows() -> None:
     session = _session("ultimate_showcase", controlled_slot=1)
     pending = PendingAction(
         move_action=MOVE_NORTH,
@@ -302,7 +346,12 @@ def test_interactive_action_changes_only_controlled_slot() -> None:
         armed_lane=1,
         arm_origin="explicit",
     )
-    action = build_interactive_joint_action(session.config, 1, pending)
+    pending_actions = _replace_pending_row(session, 1, pending)
+    action = build_interactive_joint_action(
+        session.config,
+        pending_actions,
+        actor_global_slots=(1,),
+    )
 
     assert int(action.move[1]) == MOVE_NORTH
     assert int(action.select_target[1]) == 8
@@ -319,7 +368,11 @@ def test_disarmed_action_retains_target_for_inspection_but_submits_noop() -> Non
         armed_lane=None,
         arm_origin=None,
     )
-    action = build_interactive_joint_action(session.config, 0, pending)
+    action = build_interactive_joint_action(
+        session.config,
+        _replace_pending_row(session, 0, pending),
+        actor_global_slots=(0,),
+    )
 
     assert tuple(int(head[0]) for head in action) == (MOVE_EAST, 0, 0)
 
@@ -333,7 +386,52 @@ def test_interactive_builder_rejects_inactive_pending_target() -> None:
     )
 
     with pytest.raises(ValueError, match="inactive"):
-        build_interactive_joint_action(session.config, 0, pending)
+        build_interactive_joint_action(
+            session.config,
+            _replace_pending_row(session, 0, pending),
+            actor_global_slots=(0,),
+        )
+
+
+def test_interactive_builder_preserves_all_active_rows_and_neutral_padding() -> None:
+    session = _session("basic_support")
+    staged = session
+    expected_rows: dict[int, tuple[int, int, int]] = {}
+    active_slots = (0, 1, 2, 5, 6, 7)
+    for index, actor_slot in enumerate(active_slots):
+        staged = select_controlled_actor(staged, actor_slot)
+        movement = MOVE_EAST if index % 2 == 0 else MOVE_NORTH
+        target_slot = active_slots[(index + 1) % len(active_slots)]
+        staged = set_pending_movement(staged, movement)
+        staged = select_clicked_target(staged, target_slot)
+        staged = arm_ultimate(staged) if index % 2 else arm_basic(staged)
+        target_action = (
+            0
+            if staged.pending_action.armed_lane is None
+            else int(
+                build_interactive_joint_action(
+                    staged.config,
+                    staged.pending_actions,
+                    actor_global_slots=(actor_slot,),
+                ).select_target[actor_slot]
+            )
+        )
+        expected_rows[actor_slot] = (
+            movement,
+            target_action,
+            0 if staged.pending_action.armed_lane is None else index % 2,
+        )
+
+    action = build_interactive_joint_action(
+        staged.config,
+        staged.pending_actions,
+        actor_global_slots=active_slots,
+    )
+
+    for actor_slot, expected in expected_rows.items():
+        assert tuple(int(head[actor_slot]) for head in action) == expected
+    for actor_slot in (3, 4, 8, 9):
+        assert tuple(int(head[actor_slot]) for head in action) == (MOVE_STAY, 0, 0)
 
 
 def test_scripted_action_supports_multiple_actor_commands() -> None:
@@ -448,41 +546,29 @@ def test_cycle_controlled_actor_wraps_both_teams_and_skips_padding() -> None:
         cycle_controlled_actor(session, 0)
 
 
-def test_direct_actor_selection_preserves_target_and_simulator_tuple() -> None:
+def test_actor_selection_preserves_independent_drafts_and_simulator_epoch() -> None:
     session = _session("arena_5v5", controlled_slot=0)
     session = select_clicked_target(session, 6)
     session = set_pending_movement(session, MOVE_EAST)
     session = arm_ultimate(session)
-    # Mage arm clears target, so restore a target and explicit Ultimate to prove
-    # the switch rule independently.
-    session = replace(
-        session,
-        pending_action=PendingAction(MOVE_EAST, 6, 1, "explicit"),
-    )
+    actor_0_pending = session.pending_action
 
     switched = select_controlled_actor(session, 1)
+    assert switched.pending_action.selected_global_target_slot is None
+    switched = select_clicked_target(switched, 5)
+    switched = set_pending_movement(switched, MOVE_NORTH)
+    switched = arm_basic(switched)
+    actor_1_pending = switched.pending_action
 
-    assert switched.controlled_global_slot == 1
-    assert switched.pending_action.selected_global_target_slot == 6
-    assert switched.pending_action.move_action == MOVE_STAY
-    assert switched.pending_action.armed_lane in (0, None)
-    assert switched.pending_action.arm_origin in ("automatic", None)
-    assert switched.state is session.state
-    assert switched.observation is session.observation
-    assert switched.action_mask is session.action_mask
-    assert switched.key is session.key
+    returned = select_controlled_actor(switched, 0)
 
-
-def test_direct_actor_selection_retains_self_target_and_recomputes_exact_lane() -> None:
-    session = _session("basic_support", controlled_slot=0)
-    session = select_clicked_target(session, 1)
-    selected = select_controlled_actor(session, 1)
-    expected = bool(selected.action_mask.select_target_use_ultimate_joint_mask[1, 1, 0])
-
-    assert selected.controlled_global_slot == 1
-    assert selected.pending_action.selected_global_target_slot == 1
-    assert selected.pending_action.armed_lane == (0 if expected else None)
-    assert selected.pending_action.arm_origin == ("automatic" if expected else None)
+    assert returned.pending_action == actor_0_pending
+    assert returned.pending_actions[1] == actor_1_pending
+    assert returned.pending_actions[0] != returned.pending_actions[1]
+    assert returned.state is session.state
+    assert returned.observation is session.observation
+    assert returned.action_mask is session.action_mask
+    assert returned.key is session.key
 
 
 def test_pending_edits_do_not_split_key_or_change_simulator_epoch() -> None:
@@ -533,6 +619,51 @@ def test_submit_joint_action_calls_step_once_and_updates_paired_epoch(
     assert not bool(jnp.array_equal(submitted.key, session.key))
 
 
+def test_researcher_joint_submit_sends_all_ten_drafts_in_one_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _session("arena_5v5")
+    for actor_slot in range(MAX_AGENT_SLOTS):
+        session = select_controlled_actor(session, actor_slot)
+        session = set_pending_movement(
+            session,
+            MOVE_EAST if actor_slot % 2 == 0 else MOVE_NORTH,
+        )
+    expected_action = build_interactive_joint_action(
+        session.config,
+        session.pending_actions,
+        actor_global_slots=tuple(range(MAX_AGENT_SLOTS)),
+    )
+    real_step = control.step
+    calls: list[tuple[object, ...]] = []
+
+    def counting_step(*args: object) -> object:
+        calls.append(args)
+        return real_step(*args)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(control, "step", counting_step)
+    submitted = submit_interactive(session)
+
+    assert len(calls) == 1
+    captured_action = cast(Action, calls[0][3])
+    assert all(
+        bool(jnp.array_equal(actual, expected))
+        for actual, expected in zip(captured_action, expected_action, strict=True)
+    )
+    assert int(submitted.state.step_count) == int(session.state.step_count) + 1
+    assert not bool(jnp.array_equal(submitted.key, session.key))
+    assert submitted.last_transition is not None
+    assert submitted.last_transition.report_actor_slots == tuple(range(MAX_AGENT_SLOTS))
+    assert all(
+        bool(jnp.array_equal(actual, expected))
+        for actual, expected in zip(
+            submitted.last_transition.submitted_action,
+            expected_action,
+            strict=True,
+        )
+    )
+
+
 def test_manual_and_scripted_submission_delegate_to_shared_boundary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -554,12 +685,12 @@ def test_manual_and_scripted_submission_delegate_to_shared_boundary(
     assert submit_interactive(manual) is manual
     assert submit_next_script_frame(scripted) is scripted
     assert calls == [
-        ("interactive", (0,)),
+        ("interactive", tuple(range(MAX_AGENT_SLOTS))),
         ("scripted", (0, 1, 7)),
     ]
 
 
-def test_post_submit_resets_move_disarms_ultimate_and_preserves_target() -> None:
+def test_post_submit_rebuilds_every_draft_from_the_successor_mask() -> None:
     scenario, session = (
         get_scenario("basic_support"),
         _session("basic_support", controlled_slot=1),
@@ -567,12 +698,30 @@ def test_post_submit_resets_move_disarms_ultimate_and_preserves_target() -> None
     session = select_clicked_target(session, 6)
     session = set_pending_movement(session, MOVE_EAST)
     session = arm_ultimate(session)
+    session = select_controlled_actor(session, 0)
+    session = select_clicked_target(session, 5)
+    session = set_pending_movement(session, MOVE_WEST)
+    before_pending = session.pending_actions
     submitted = submit_interactive(session)
 
-    assert submitted.pending_action.move_action == MOVE_STAY
-    assert submitted.pending_action.selected_global_target_slot == 6
-    assert submitted.pending_action.armed_lane == 0
-    assert submitted.pending_action.arm_origin == "automatic"
+    for actor_slot in (0, 1, 2, 5, 6, 7):
+        pending = submitted.pending_actions[actor_slot]
+        target_slot = before_pending[actor_slot].selected_global_target_slot
+        target_action = global_slot_to_target_action(actor_slot, target_slot)
+        basic_available = bool(
+            submitted.action_mask.select_target_use_ultimate_joint_mask[
+                actor_slot,
+                target_action,
+                0,
+            ]
+        )
+        assert pending.move_action == MOVE_STAY
+        assert pending.selected_global_target_slot == target_slot
+        assert pending.armed_lane == (0 if basic_available else None)
+        assert pending.arm_origin == ("automatic" if basic_available else None)
+    inactive = PendingAction(armed_lane=None, arm_origin=None)
+    for actor_slot in (3, 4, 8, 9):
+        assert submitted.pending_actions[actor_slot] == inactive
     assert scenario.name == submitted.scenario_name
 
 
@@ -673,6 +822,7 @@ def test_reset_replays_identical_initial_session_and_clears_history() -> None:
     assert bool(jnp.array_equal(reset_result.key, initial.key))
     assert reset_result.controlled_global_slot == 2
     assert reset_result.pending_action == PendingAction()
+    assert reset_result.pending_actions == initial.pending_actions
     assert reset_result.last_transition is None
     assert reset_result.last_reward is None
     assert reset_result.next_script_frame_index == 0
@@ -693,6 +843,12 @@ def test_switch_scenario_preserves_seed_and_toggles_but_clears_live_state() -> N
     assert int(switched.state.step_count) == 0
     assert switched.last_transition is None
     assert switched.pending_action == PendingAction()
+    inactive = PendingAction(armed_lane=None, arm_origin=None)
+    assert len(switched.pending_actions) == MAX_AGENT_SLOTS
+    for actor_slot, active in enumerate(switched.config.agent_profile.active_mask):
+        assert switched.pending_actions[actor_slot] == (
+            PendingAction() if bool(active) else inactive
+        )
     assert switched.run_generation == session.run_generation + 1
 
 

@@ -26,6 +26,7 @@ from scripts.dev.visual_debugger.protocol import (
     HudFrameV1,
     LatestTransitionCardV1,
     PendingActionCardV1,
+    PendingSubmissionScope,
     Preset,
     ScenarioMetadataV1,
     ScenarioOptionV1,
@@ -215,21 +216,22 @@ def _pending_action_card(
     session: DebuggerSession,
     scene: BattlefieldSceneV1,
     *,
+    actor_global_slot: int,
     view_mode: ViewMode,
+    inspection_only: bool,
 ) -> PendingActionCardV1:
-    actor_slot = session.controlled_global_slot
+    actor_slot = actor_global_slot
     actor = _scene_agents(scene)[actor_slot]
-    raw_target = session.pending_action.selected_global_target_slot
-    authorized_target = (
-        scene.selection.selected_global_slot if scene.selection is not None else None
-    )
+    pending_action = session.pending_actions[actor_slot]
+    raw_target = pending_action.selected_global_target_slot
+    authorized_slots = {agent.global_slot for agent in scene.agents}
     if raw_target is None:
         target_action: int | None = 0
         target = TargetReferenceV1(
             disclosure="target_none",
             global_slot=None,
         )
-    elif authorized_target == raw_target:
+    elif raw_target in authorized_slots:
         target_action = global_slot_to_target_action(actor_slot, raw_target)
         target = TargetReferenceV1(
             disclosure="public",
@@ -242,9 +244,9 @@ def _pending_action_card(
             global_slot=None,
         )
 
-    move_action = session.pending_action.move_action
+    move_action = pending_action.move_action
     movement_mask_value = bool(session.action_mask.move_mask[actor_slot, move_action])
-    armed_lane = session.pending_action.armed_lane
+    armed_lane = pending_action.armed_lane
     pair_mask_value = (
         None
         if armed_lane is None or target_action is None
@@ -266,15 +268,46 @@ def _pending_action_card(
             use_ultimate_action=armed_lane,
         )
     return PendingActionCardV1(
+        label=(
+            "PLAYBACK / INSPECTION ONLY" if inspection_only else "PENDING / WILL SUBMIT"
+        ),
         actor_global_slot=actor_slot,
         move_action=move_action,
         target_action=target_action,
         armed_lane=armed_lane,
-        arm_origin=session.pending_action.arm_origin,
+        arm_origin=pending_action.arm_origin,
         target=target,
         movement_mask_value=movement_mask_value,
         pair_mask_value=pair_mask_value,
         summary=summary,
+    )
+
+
+def _pending_action_cards(
+    session: DebuggerSession,
+    scene: BattlefieldSceneV1,
+    *,
+    view_mode: ViewMode,
+) -> tuple[PendingSubmissionScope, tuple[PendingActionCardV1, ...]]:
+    scenario = get_scenario(session.scenario_name)
+    if scenario.mode == "scripted":
+        scope: PendingSubmissionScope = "scripted_playback"
+        actor_slots = (session.controlled_global_slot,)
+    elif view_mode == "pov":
+        scope = "controlled_actor"
+        actor_slots = (session.controlled_global_slot,)
+    else:
+        scope = "joint_turn"
+        actor_slots = tuple(agent.global_slot for agent in scene.agents)
+    return scope, tuple(
+        _pending_action_card(
+            session,
+            scene,
+            actor_global_slot=actor_slot,
+            view_mode=view_mode,
+            inspection_only=scope == "scripted_playback",
+        )
+        for actor_slot in actor_slots
     )
 
 
@@ -364,17 +397,13 @@ def _previous_action_row(
     return move_action, target_action, use_ultimate_action
 
 
-def _latest_transition_card(
+def _actor_action_result(
     session: DebuggerSession,
     scene: BattlefieldSceneV1,
     *,
+    actor_slot: int,
     view_mode: ViewMode,
-) -> LatestTransitionCardV1 | None:
-    transition = session.last_transition
-    if transition is None:
-        return None
-
-    actor_slot = session.controlled_global_slot
+) -> ActorActionResultV1 | None:
     actor = _scene_agents(scene)[actor_slot]
     actor_transition = _actor_transition(session, actor_slot)
     submitted_values = (
@@ -437,24 +466,59 @@ def _latest_transition_card(
         if combat_accepted
         else "rejected"
     )
+    return ActorActionResultV1(
+        actor_global_slot=actor_slot,
+        submitted=submitted,
+        accepted=accepted,
+        movement_mask_value=actor_transition.submitted_move_mask_value,
+        pair_mask_value=(
+            actor_transition.submitted_pair_mask_value if combat_is_disclosed else None
+        ),
+        movement_accepted=movement_accepted,
+        combat_result=combat_result,
+    )
+
+
+def _latest_transition_card(
+    session: DebuggerSession,
+    scene: BattlefieldSceneV1,
+    *,
+    view_mode: ViewMode,
+) -> LatestTransitionCardV1 | None:
+    transition = session.last_transition
+    if transition is None:
+        return None
+
+    report_slots = transition.report_actor_slots
+    actor_slots = (
+        tuple(
+            actor_slot
+            for actor_slot in report_slots
+            if actor_slot == session.controlled_global_slot
+        )
+        if view_mode == "pov"
+        else report_slots
+    )
+    scene_slots = set(_scene_agents(scene))
+    actor_results: list[ActorActionResultV1] = []
+    for actor_slot in actor_slots:
+        if actor_slot not in scene_slots:
+            continue
+        result = _actor_action_result(
+            session,
+            scene,
+            actor_slot=actor_slot,
+            view_mode=view_mode,
+        )
+        if result is not None:
+            actor_results.append(result)
+    actors = tuple(actor_results)
+    if not actors:
+        return None
     return LatestTransitionCardV1(
         transition_id=int(transition.after_state.step_count),
         submission_kind=transition.submission_kind,
-        actors=(
-            ActorActionResultV1(
-                actor_global_slot=actor_slot,
-                submitted=submitted,
-                accepted=accepted,
-                movement_mask_value=actor_transition.submitted_move_mask_value,
-                pair_mask_value=(
-                    actor_transition.submitted_pair_mask_value
-                    if combat_is_disclosed
-                    else None
-                ),
-                movement_accepted=movement_accepted,
-                combat_result=combat_result,
-            ),
-        ),
+        actors=actors,
     )
 
 
@@ -554,15 +618,23 @@ def _hud_frame(
     selection = scene.selection
     if selection is None:
         raise AssertionError("live debugger scenes require a selection record")
+    pending_submission_scope, pending_actions = _pending_action_cards(
+        session,
+        scene,
+        view_mode=view_mode,
+    )
+    pending_action = next(
+        pending
+        for pending in pending_actions
+        if pending.actor_global_slot == selection.controlled_global_slot
+    )
     return HudFrameV1(
         roster_global_slots=tuple(agent.global_slot for agent in scene.agents),
         controlled_global_slot=selection.controlled_global_slot,
         selected_global_slot=selection.selected_global_slot,
-        pending_action=_pending_action_card(
-            session,
-            scene,
-            view_mode=view_mode,
-        ),
+        pending_submission_scope=pending_submission_scope,
+        pending_actions=pending_actions,
+        pending_action=pending_action,
         latest_transition=_latest_transition_card(
             session,
             scene,

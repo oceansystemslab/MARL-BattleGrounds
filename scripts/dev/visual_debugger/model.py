@@ -3,7 +3,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 from math import isfinite
-from typing import Literal
+from typing import Literal, cast
 
 from jax import Array
 
@@ -304,7 +304,7 @@ class DebuggerSession:
     done_flags: DoneFlags
     info: Info
     controlled_global_slot: int
-    pending_action: PendingAction
+    pending_actions: tuple[PendingAction, ...]
     next_script_frame_index: int
     last_transition: TransitionView | None
     show_ranges: bool
@@ -318,12 +318,33 @@ class DebuggerSession:
         if not bool(self.config.agent_profile.active_mask[self.controlled_global_slot]):
             msg = f"controlled slot g{self.controlled_global_slot} is inactive."
             raise ValueError(msg)
-        target_slot = self.pending_action.selected_global_target_slot
-        if target_slot is not None and not bool(
-            self.config.agent_profile.active_mask[target_slot]
-        ):
-            msg = f"pending target g{target_slot} is inactive."
+        if len(self.pending_actions) != MAX_AGENT_SLOTS:
+            msg = (
+                f"pending_actions must contain {MAX_AGENT_SLOTS} fixed-slot rows; "
+                f"got {len(self.pending_actions)}."
+            )
             raise ValueError(msg)
+        inactive_pending = PendingAction(armed_lane=None, arm_origin=None)
+        runtime_pending_actions = cast(tuple[object, ...], self.pending_actions)
+        for actor_slot, pending in enumerate(runtime_pending_actions):
+            if not isinstance(pending, PendingAction):
+                msg = f"pending_actions[{actor_slot}] must be a PendingAction."
+                raise TypeError(msg)
+            actor_active = bool(self.config.agent_profile.active_mask[actor_slot])
+            if not actor_active and pending != inactive_pending:
+                msg = f"inactive pending row g{actor_slot} must remain neutral."
+                raise ValueError(msg)
+            target_slot = pending.selected_global_target_slot
+            if target_slot is not None and not bool(
+                self.config.agent_profile.active_mask[target_slot]
+            ):
+                msg = f"pending target g{target_slot} is inactive."
+                raise ValueError(msg)
         if self.next_script_frame_index < 0:
             msg = "next_script_frame_index must be non-negative."
             raise ValueError(msg)
+
+    @property
+    def pending_action(self) -> PendingAction:
+        """Return the currently controlled actor's authoritative draft row."""
+        return self.pending_actions[self.controlled_global_slot]

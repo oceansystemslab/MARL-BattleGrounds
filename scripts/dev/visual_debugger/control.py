@@ -64,6 +64,16 @@ def _validate_active_slot(
         raise ValueError(msg)
 
 
+def _active_global_slots(config: EnvConfig) -> tuple[int, ...]:
+    """Return active fixed slots in deterministic global-slot order."""
+    return tuple(
+        int(slot)
+        for slot in np.flatnonzero(
+            np.asarray(config.agent_profile.active_mask, dtype=bool)
+        )
+    )
+
+
 def lane_availability(
     action_mask: ActionMask,
     actor_global_slot: int,
@@ -102,22 +112,69 @@ def lane_availability(
     )
 
 
+def _default_pending_actions(
+    config: EnvConfig,
+    action_mask: ActionMask,
+) -> tuple[PendingAction, ...]:
+    """Build one exact fixed-slot draft tuple for a fresh decision epoch."""
+    pending_actions: list[PendingAction] = []
+    for actor_slot in range(MAX_AGENT_SLOTS):
+        if not bool(config.agent_profile.active_mask[actor_slot]):
+            pending_actions.append(PendingAction(armed_lane=None, arm_origin=None))
+            continue
+        basic_available = lane_availability(
+            action_mask,
+            actor_slot,
+            0,
+            0,
+        ).lane_0_available
+        pending_actions.append(
+            PendingAction(
+                armed_lane=0 if basic_available else None,
+                arm_origin="automatic" if basic_available else None,
+            )
+        )
+    return tuple(pending_actions)
+
+
+def _replace_controlled_pending_action(
+    session: DebuggerSession,
+    pending_action: PendingAction,
+) -> DebuggerSession:
+    """Replace only the controlled actor's row in the immutable draft tuple."""
+    pending_actions = list(session.pending_actions)
+    pending_actions[session.controlled_global_slot] = pending_action
+    return replace(session, pending_actions=tuple(pending_actions))
+
+
 def build_interactive_joint_action(
     config: EnvConfig,
-    controlled_global_slot: int,
-    pending_action: PendingAction,
+    pending_actions: tuple[PendingAction, ...],
+    *,
+    actor_global_slots: tuple[int, ...],
 ) -> Action:
-    """Build one controlled-actor request without pre-filtering it by the mask."""
-    _validate_active_slot(
-        config,
-        controlled_global_slot,
-        name="controlled_global_slot",
-    )
+    """Build one authorized joint request without pre-filtering it by the mask."""
+    if len(pending_actions) != MAX_AGENT_SLOTS:
+        msg = (
+            f"pending_actions must contain {MAX_AGENT_SLOTS} fixed-slot rows; "
+            f"got {len(pending_actions)}."
+        )
+        raise ValueError(msg)
+    if not actor_global_slots:
+        raise ValueError("actor_global_slots must contain at least one active actor.")
+    if len(actor_global_slots) != len(set(actor_global_slots)):
+        raise ValueError("actor_global_slots must not contain duplicates.")
+
     action = make_neutral_joint_action()
-    move = action.move.at[controlled_global_slot].set(pending_action.move_action)
+    move = action.move
     target = action.select_target
     ultimate = action.use_ultimate
-    if pending_action.armed_lane is not None:
+    for actor_slot in actor_global_slots:
+        _validate_active_slot(config, actor_slot, name="submission actor")
+        pending_action = pending_actions[actor_slot]
+        move = move.at[actor_slot].set(pending_action.move_action)
+        if pending_action.armed_lane is None:
+            continue
         if pending_action.selected_global_target_slot is not None:
             _validate_active_slot(
                 config,
@@ -125,11 +182,11 @@ def build_interactive_joint_action(
                 name="pending target",
             )
         target_action = global_slot_to_target_action(
-            controlled_global_slot,
+            actor_slot,
             pending_action.selected_global_target_slot,
         )
-        target = target.at[controlled_global_slot].set(target_action)
-        ultimate = ultimate.at[controlled_global_slot].set(pending_action.armed_lane)
+        target = target.at[actor_slot].set(target_action)
+        ultimate = ultimate.at[actor_slot].set(pending_action.armed_lane)
     return Action(move=move, select_target=target, use_ultimate=ultimate)
 
 
@@ -225,7 +282,7 @@ def create_session(
         ),
         info=info,
         controlled_global_slot=requested_slot,
-        pending_action=PendingAction(),
+        pending_actions=_default_pending_actions(config, action_mask),
         next_script_frame_index=0,
         last_transition=None,
         show_ranges=show_ranges,
@@ -257,7 +314,7 @@ def select_clicked_target(
         armed_lane=0 if availability.lane_0_available else None,
         arm_origin="automatic" if availability.lane_0_available else None,
     )
-    return replace(session, pending_action=pending)
+    return _replace_controlled_pending_action(session, pending)
 
 
 def clear_pending_target(session: DebuggerSession) -> DebuggerSession:
@@ -276,14 +333,14 @@ def clear_pending_target(session: DebuggerSession) -> DebuggerSession:
         armed_lane=1 if keep_mage_ultimate else 0,
         arm_origin="explicit" if keep_mage_ultimate else "automatic",
     )
-    return replace(session, pending_action=pending)
+    return _replace_controlled_pending_action(session, pending)
 
 
 def arm_basic(session: DebuggerSession) -> DebuggerSession:
     """Explicitly arm lane zero even when the current pair is unavailable."""
-    return replace(
+    return _replace_controlled_pending_action(
         session,
-        pending_action=replace(
+        replace(
             session.pending_action,
             armed_lane=0,
             arm_origin="explicit",
@@ -296,9 +353,9 @@ def arm_ultimate(session: DebuggerSession) -> DebuggerSession:
     class_id = int(
         session.config.agent_profile.class_ids[session.controlled_global_slot]
     )
-    return replace(
+    return _replace_controlled_pending_action(
         session,
-        pending_action=replace(
+        replace(
             session.pending_action,
             selected_global_target_slot=(
                 None
@@ -319,9 +376,9 @@ def set_pending_movement(
     if not 0 <= move_action < NUM_MOVE_ACTIONS:
         msg = f"move_action must be in [0, {NUM_MOVE_ACTIONS}); got {move_action}."
         raise ValueError(msg)
-    return replace(
+    return _replace_controlled_pending_action(
         session,
-        pending_action=replace(session.pending_action, move_action=move_action),
+        replace(session.pending_action, move_action=move_action),
     )
 
 
@@ -333,12 +390,7 @@ def cycle_controlled_actor(
     if direction not in (-1, 1):
         msg = f"direction must be -1 or 1; got {direction}."
         raise ValueError(msg)
-    active_slots = tuple(
-        int(slot)
-        for slot in np.flatnonzero(
-            np.asarray(session.config.agent_profile.active_mask, dtype=bool)
-        )
-    )
+    active_slots = _active_global_slots(session.config)
     current_index = active_slots.index(session.controlled_global_slot)
     controlled_slot = active_slots[(current_index + direction) % len(active_slots)]
     return select_controlled_actor(session, controlled_slot)
@@ -348,27 +400,9 @@ def select_controlled_actor(
     session: DebuggerSession,
     global_slot: int,
 ) -> DebuggerSession:
-    """Select an active actor without advancing the simulator decision epoch."""
+    """Select an active actor without changing any staged draft or simulator epoch."""
     _validate_active_slot(session.config, global_slot, name="controlled actor")
-    target_slot = session.pending_action.selected_global_target_slot
-    target_action = global_slot_to_target_action(global_slot, target_slot)
-    availability = lane_availability(
-        session.action_mask,
-        global_slot,
-        target_action,
-        0,
-    )
-    pending = PendingAction(
-        move_action=MOVE_STAY,
-        selected_global_target_slot=target_slot,
-        armed_lane=0 if availability.lane_0_available else None,
-        arm_origin="automatic" if availability.lane_0_available else None,
-    )
-    return replace(
-        session,
-        controlled_global_slot=global_slot,
-        pending_action=pending,
-    )
+    return replace(session, controlled_global_slot=global_slot)
 
 
 def _validate_joint_action(action: Action) -> None:
@@ -394,24 +428,29 @@ def _terminal_reason(done_flags: DoneFlags) -> str | None:
 def _post_submit_pending(
     session: DebuggerSession,
     action_mask: ActionMask,
-) -> PendingAction:
-    target_slot = session.pending_action.selected_global_target_slot
-    target_action = global_slot_to_target_action(
-        session.controlled_global_slot,
-        target_slot,
-    )
-    availability = lane_availability(
-        action_mask,
-        session.controlled_global_slot,
-        target_action,
-        0,
-    )
-    return PendingAction(
-        move_action=MOVE_STAY,
-        selected_global_target_slot=target_slot,
-        armed_lane=0 if availability.lane_0_available else None,
-        arm_origin="automatic" if availability.lane_0_available else None,
-    )
+) -> tuple[PendingAction, ...]:
+    pending_actions: list[PendingAction] = []
+    for actor_slot in range(MAX_AGENT_SLOTS):
+        if not bool(session.config.agent_profile.active_mask[actor_slot]):
+            pending_actions.append(PendingAction(armed_lane=None, arm_origin=None))
+            continue
+        target_slot = session.pending_actions[actor_slot].selected_global_target_slot
+        target_action = global_slot_to_target_action(actor_slot, target_slot)
+        availability = lane_availability(
+            action_mask,
+            actor_slot,
+            target_action,
+            0,
+        )
+        pending_actions.append(
+            PendingAction(
+                move_action=MOVE_STAY,
+                selected_global_target_slot=target_slot,
+                armed_lane=0 if availability.lane_0_available else None,
+                arm_origin="automatic" if availability.lane_0_available else None,
+            )
+        )
+    return tuple(pending_actions)
 
 
 def submit_joint_action(
@@ -429,6 +468,8 @@ def submit_joint_action(
         )
         return session
     _validate_joint_action(submitted_action)
+    if len(report_actor_slots) != len(set(report_actor_slots)):
+        raise ValueError("report_actor_slots must not contain duplicates.")
     for actor_slot in report_actor_slots:
         _validate_active_slot(session.config, actor_slot, name="report actor")
 
@@ -471,7 +512,7 @@ def submit_joint_action(
         last_reward=reward,
         done_flags=done_flags,
         info=info,
-        pending_action=_post_submit_pending(session, next_action_mask),
+        pending_actions=_post_submit_pending(session, next_action_mask),
         last_transition=transition,
     )
     print(
@@ -482,18 +523,27 @@ def submit_joint_action(
     return next_session
 
 
-def submit_interactive(session: DebuggerSession) -> DebuggerSession:
-    """Submit the one-controlled-actor pending request."""
+def submit_interactive(
+    session: DebuggerSession,
+    *,
+    actor_global_slots: tuple[int, ...] | None = None,
+) -> DebuggerSession:
+    """Submit one authorized collection of same-epoch pending actor rows."""
+    submission_slots = (
+        _active_global_slots(session.config)
+        if actor_global_slots is None
+        else actor_global_slots
+    )
     action = build_interactive_joint_action(
         session.config,
-        session.controlled_global_slot,
-        session.pending_action,
+        session.pending_actions,
+        actor_global_slots=submission_slots,
     )
     return submit_joint_action(
         session,
         action,
         submission_kind="interactive",
-        report_actor_slots=(session.controlled_global_slot,),
+        report_actor_slots=submission_slots,
     )
 
 
@@ -552,7 +602,7 @@ def reset_session(
         ),
         info=info,
         controlled_global_slot=controlled_slot,
-        pending_action=PendingAction(),
+        pending_actions=_default_pending_actions(config, action_mask),
         next_script_frame_index=0,
         last_transition=None,
     )
@@ -585,7 +635,7 @@ def switch_scenario(
         ),
         info=info,
         controlled_global_slot=scenario.default_controlled_slot,
-        pending_action=PendingAction(),
+        pending_actions=_default_pending_actions(config, action_mask),
         next_script_frame_index=0,
         last_transition=None,
         show_ranges=session.show_ranges,

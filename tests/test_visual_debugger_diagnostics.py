@@ -732,8 +732,8 @@ def test_interactive_builder_does_not_suppress_illegal_pair_before_diagnostics()
     session = arm_ultimate(session)
     action = build_interactive_joint_action(
         session.config,
-        session.controlled_global_slot,
-        session.pending_action,
+        session.pending_actions,
+        actor_global_slots=(session.controlled_global_slot,),
     )
     assert tuple(int(head[2]) for head in action) == (MOVE_STAY, 8, 1)
 

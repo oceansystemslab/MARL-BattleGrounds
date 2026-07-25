@@ -17,6 +17,7 @@ from scripts.dev.visual_debugger.model import DebuggerSession
 from scripts.dev.visual_debugger.scenarios import get_scenario
 
 from marl_battlegrounds.core.types import (
+    MAX_AGENT_SLOTS,
     MOVE_EAST,
     MOVE_NORTH,
     MOVE_NORTHEAST,
@@ -237,10 +238,10 @@ def test_movement_key_normalization_changes_pending_without_step(
     assert bool(jnp.array_equal(app.session.key, initial_key))
 
 
-def test_keyboard_callbacks_cover_cycle_arm_clear_toggles_and_scenarios(
+def test_interactive_keyboard_callbacks_cover_cycle_arm_clear_and_toggles(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app, _, _, _ = _app(monkeypatch, scenario_name="basic_support")
+    app, _, _, _ = _app(monkeypatch, scenario_name="arena_5v5")
 
     app.on_key_press(SimpleNamespace(key="tab"))
     assert app.session.controlled_global_slot == 1
@@ -255,9 +256,9 @@ def test_keyboard_callbacks_cover_cycle_arm_clear_toggles_and_scenarios(
     app.on_key_press(SimpleNamespace(key="v"))
     assert app.session.verbose_logging
     app.on_key_press(SimpleNamespace(key="]"))
-    assert app.session.scenario_name == "ultimate_showcase"
-    app.on_key_press(SimpleNamespace(key="["))
     assert app.session.scenario_name == "basic_support"
+    app.on_key_press(SimpleNamespace(key="["))
+    assert app.session.scenario_name == "arena_5v5"
 
 
 @pytest.mark.parametrize(
@@ -310,30 +311,35 @@ def test_submit_key_variants_advance_exactly_one_step(
     assert int(app.session.state.step_count) == 1
 
 
-def test_n_submits_reference_frame(
+def test_n_submits_scripted_multi_actor_frame(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app, _, _, _ = _app(monkeypatch, scenario_name="basic_support")
     app.on_key_press(SimpleNamespace(key="n"))
     assert int(app.session.state.step_count) == 1
     assert app.session.next_script_frame_index == 1
-
-
-def test_scripted_space_submits_multi_actor_frame(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    app, _, _, _ = _app(monkeypatch, scenario_name="basic_support")
-    app.on_key_press(SimpleNamespace(key="space"))
     transition = app.session.last_transition
     assert transition is not None
     assert transition.submission_kind == "scripted"
     assert transition.report_actor_slots == (0, 1, 7)
 
 
-def test_terminal_mode_keys_do_not_mutate_pending_but_inspection_still_works(
+def test_scripted_space_is_inspection_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app, _, _, _ = _app(monkeypatch, scenario_name="basic_support")
+    before = app.session
+    app.on_key_press(SimpleNamespace(key="space"))
+    assert app.session is before
+    assert int(app.session.state.step_count) == 0
+    assert app.session.next_script_frame_index == 0
+    assert app.session.last_transition is None
+
+
+def test_terminal_mode_keys_do_not_mutate_pending_but_inspection_still_works(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, _, _, _ = _app(monkeypatch, scenario_name="arena_5v5")
     app.session = replace(
         app.session,
         done_flags=DoneFlags(
@@ -399,7 +405,7 @@ def test_mouse_callbacks_select_clear_and_ignore_empty_or_other_axes(
     assert app.session.pending_action.selected_global_target_slot is None
 
 
-def test_shift_click_selects_actor_while_stale_mouse_key_does_not(
+def test_shift_click_uses_modifiers_and_preserves_independent_actor_drafts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app, _, battlefield_axes, _ = _app(
@@ -433,12 +439,14 @@ def test_shift_click_selects_actor_while_stale_mouse_key_does_not(
         )
     )
     assert app.session.controlled_global_slot == 1
-    assert app.session.pending_action.selected_global_target_slot == 5
+    assert app.session.pending_action.selected_global_target_slot is None
+    assert app.session.pending_actions[0].selected_global_target_slot == 5
+    assert app.session.pending_actions[1].selected_global_target_slot is None
     assert app.session.state is initial_state
     assert bool(jnp.array_equal(app.session.key, initial_key))
 
 
-def test_target_actor_movement_target_arm_submit_sequence_needs_no_dummy_click(
+def test_target_actor_edit_sequence_submits_joint_turn_without_dummy_click(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app, _, battlefield_axes, _ = _app(
@@ -479,7 +487,7 @@ def test_target_actor_movement_target_arm_submit_sequence_needs_no_dummy_click(
     assert int(app.session.state.step_count) == 1
     transition = app.session.last_transition
     assert transition is not None
-    assert transition.report_actor_slots == (2,)
+    assert transition.report_actor_slots == tuple(range(MAX_AGENT_SLOTS))
 
 
 def test_shift_r_is_inert_and_lowercase_r_resets(
@@ -487,7 +495,8 @@ def test_shift_r_is_inert_and_lowercase_r_resets(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     app, _, _, _ = _app(monkeypatch, scenario_name="basic_support")
-    app.on_key_press(SimpleNamespace(key="space"))
+    app.on_key_press(SimpleNamespace(key="n"))
+    assert int(app.session.state.step_count) == 1
     advanced = app.session
     app.on_key_press(SimpleNamespace(key="R"))
 

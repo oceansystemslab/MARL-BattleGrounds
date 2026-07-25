@@ -5,6 +5,9 @@ import { classTokenFromId, resolveVisualToken, teamTokenFromId } from "./vocabul
  *   roster: HTMLElement,
  *   rosterCount: HTMLElement,
  *   selectionCard: HTMLElement,
+ *   pendingHeading: HTMLElement,
+ *   pendingCount: HTMLElement,
+ *   pendingScope: HTMLElement,
  *   pendingCard: HTMLElement,
  *   acceptedCard: HTMLElement,
  *   acceptedAnnouncement: HTMLElement,
@@ -44,6 +47,12 @@ import { classTokenFromId, resolveVisualToken, teamTokenFromId } from "./vocabul
  *   rows: HTMLElement,
  *   empty: HTMLElement,
  * }} RosterTeamGroup
+ */
+
+/**
+ * @typedef {{
+ *   element: HTMLElement,
+ * }} PendingActionRow
  */
 
 /**
@@ -361,35 +370,71 @@ function addAgentComparison(container, agent, role) {
 }
 
 /**
- * @param {HTMLElement} container
- * @param {Record<string, any> | null} pending
+ * @param {PendingActionRow} row
+ * @param {Record<string, any>} pending
+ * @param {boolean} controlled
  */
-function renderPendingAction(container, pending) {
-  container.replaceChildren();
-  container.removeAttribute("data-actor-slot");
-  if (!pending) {
-    container.append(htmlElement("p", "empty-copy", "No pending action."));
-    return;
+function updatePendingActionRow(row, pending, controlled) {
+  const element = row.element;
+  for (const attribute of [
+    "data-target-slot",
+    "data-armed-lane",
+    "data-pair-mask-value",
+  ]) {
+    element.removeAttribute(attribute);
   }
-  container.dataset.actorSlot = String(pending.actor_global_slot);
-  const label = htmlElement(
-    "p",
-    "action-card__label",
-    String(pending.label ?? "PENDING / WILL SUBMIT"),
+  element.dataset.actorSlot = String(pending.actor_global_slot);
+  element.dataset.controlled = String(controlled);
+  element.dataset.moveAction = String(pending.move_action ?? "");
+  element.dataset.targetDisclosure = String(
+    isRecord(pending.target) ? (pending.target.disclosure ?? "redacted") : "redacted",
+  );
+  element.dataset.movementMaskValue = String(pending.movement_mask_value === true);
+  if (Number.isInteger(pending.target?.global_slot)) {
+    element.dataset.targetSlot = String(pending.target.global_slot);
+  }
+  if (pending.armed_lane === 0 || pending.armed_lane === 1) {
+    element.dataset.armedLane = String(pending.armed_lane);
+  }
+  if (typeof pending.pair_mask_value === "boolean") {
+    element.dataset.pairMaskValue = String(pending.pair_mask_value);
+  }
+  if (controlled) {
+    element.setAttribute("aria-current", "true");
+  } else {
+    element.removeAttribute("aria-current");
+  }
+
+  const heading = htmlElement("div", "pending-action-row__heading");
+  heading.append(
+    htmlElement("strong", null, `id_${pending.actor_global_slot}`),
+    htmlElement(
+      "span",
+      "pending-action-row__state",
+      controlled ? "Editing now" : "Staged",
+    ),
   );
   const summary = htmlElement(
     "p",
-    "action-card__summary",
+    "pending-action-row__summary",
     String(pending.summary ?? "Pending action"),
   );
-  const facts = htmlElement("div", "action-card__facts");
-  addFact(facts, "Actor", `id_${pending.actor_global_slot}`);
-  addFact(facts, "Target", targetLabel(pending.target));
-  addFact(facts, "Armed lane", laneLabel(pending.armed_lane));
-  addFact(facts, "Arm origin", humanize(pending.arm_origin ?? "none"));
-  addFact(facts, "Movement mask", availabilityLabel(pending.movement_mask_value));
-  addFact(facts, "Pair mask", pendingPairMaskLabel(pending));
-  container.append(label, summary, facts);
+  const facts = htmlElement("div", "pending-action-row__facts");
+  facts.append(
+    htmlElement(
+      "span",
+      "pending-action-chip",
+      `Move ${pending.move_action ?? "—"} · ${availabilityLabel(pending.movement_mask_value)}`,
+    ),
+    htmlElement("span", "pending-action-chip", `Target ${targetLabel(pending.target)}`),
+    htmlElement("span", "pending-action-chip", `Lane ${laneLabel(pending.armed_lane)}`),
+    htmlElement("span", "pending-action-chip", `Pair ${pendingPairMaskLabel(pending)}`),
+  );
+  element.replaceChildren(heading, summary, facts);
+  element.setAttribute(
+    "aria-label",
+    `Pending action for id_${pending.actor_global_slot}: ${String(pending.summary ?? "unavailable")}`,
+  );
 }
 
 /**
@@ -459,9 +504,7 @@ function renderLatestTransition(container, latest) {
     const actor = htmlElement("section", "action-result");
     actor.dataset.actorSlot = String(rawActor.actor_global_slot);
     actor.dataset.combatResult = String(rawActor.combat_result ?? "undisclosed");
-    actor.append(
-      htmlElement("h3", null, `Controlled actor id_${rawActor.actor_global_slot}`),
-    );
+    actor.append(htmlElement("h3", null, `Actor id_${rawActor.actor_global_slot}`));
     const comparison = htmlElement("div", "action-result__comparison");
     if (isRecord(rawActor.submitted)) {
       addActionTuple(comparison, "Submitted", rawActor.submitted);
@@ -574,6 +617,9 @@ export class DebuggerPanels {
     roster,
     rosterCount,
     selectionCard,
+    pendingHeading,
+    pendingCount,
+    pendingScope,
     pendingCard,
     acceptedCard,
     acceptedAnnouncement,
@@ -585,6 +631,9 @@ export class DebuggerPanels {
     this.roster = roster;
     this.rosterCount = rosterCount;
     this.selectionCard = selectionCard;
+    this.pendingHeading = pendingHeading;
+    this.pendingCount = pendingCount;
+    this.pendingScope = pendingScope;
     this.pendingCard = pendingCard;
     this.acceptedCard = acceptedCard;
     this.acceptedAnnouncement = acceptedAnnouncement;
@@ -600,6 +649,8 @@ export class DebuggerPanels {
     this.eventRows = new Map();
     /** @type {Map<string, HTMLElement>} */
     this.diagnosticRows = new Map();
+    /** @type {Map<number, PendingActionRow>} */
+    this.pendingActionRows = new Map();
     /** @type {{role: "target" | "control", slot: number} | null} */
     this.pendingRosterFocus = null;
     /** @type {string | null} */
@@ -608,6 +659,11 @@ export class DebuggerPanels {
     this.ensureRosterTeamGroup(1);
     this.ensureRosterTeamGroup(2);
     this.emptyEvents = htmlElement("li", "empty-copy", "No transition events.");
+    this.pendingLabel = htmlElement("p", "action-card__label", "PENDING / WILL SUBMIT");
+    this.pendingList = htmlElement("ol", "pending-action-list");
+    this.emptyPending = htmlElement("li", "empty-copy", "No pending action.");
+    this.pendingList.append(this.emptyPending);
+    this.pendingCard.replaceChildren(this.pendingLabel, this.pendingList);
   }
 
   /**
@@ -881,6 +937,82 @@ export class DebuggerPanels {
   }
 
   /**
+   * @param {Record<string, any>} hud
+   */
+  renderPendingPlan(hud) {
+    /** @type {"joint_turn" | "controlled_actor" | "scripted_playback"} */
+    const scope =
+      hud.pending_submission_scope === "joint_turn" ||
+      hud.pending_submission_scope === "controlled_actor" ||
+      hud.pending_submission_scope === "scripted_playback"
+        ? hud.pending_submission_scope
+        : "controlled_actor";
+    let pendingActions = asArray(hud.pending_actions).filter(
+      (pending) => isRecord(pending) && Number.isInteger(pending.actor_global_slot),
+    );
+    if (pendingActions.length === 0 && isRecord(hud.pending_action)) {
+      pendingActions = [hud.pending_action];
+    }
+    const controlledSlot = Number(hud.controlled_global_slot);
+    const scopeCopy = {
+      joint_turn:
+        "Every listed active actor will be packaged into one authoritative transition.",
+      controlled_actor:
+        "Only the controlled actor will be submitted from this agent-POV frame.",
+      scripted_playback:
+        "Inspection only. Press N to advance the registered scripted trajectory.",
+    };
+    const heading = {
+      joint_turn: "Pending joint turn",
+      controlled_actor: "Pending controlled actor",
+      scripted_playback: "Scripted playback",
+    };
+
+    this.pendingHeading.textContent = heading[scope];
+    this.pendingCount.textContent = `${pendingActions.length} ${
+      pendingActions.length === 1 ? "actor" : "actors"
+    }`;
+    this.pendingScope.textContent = scopeCopy[scope];
+    this.pendingCard.dataset.submissionScope = scope;
+    this.pendingCard.dataset.pendingCount = String(pendingActions.length);
+    const controlledPending =
+      pendingActions.find(
+        (pending) => Number(pending.actor_global_slot) === controlledSlot,
+      ) ?? pendingActions[0];
+    this.pendingLabel.textContent = String(
+      controlledPending?.label ??
+        (scope === "scripted_playback"
+          ? "PLAYBACK / INSPECTION ONLY"
+          : "PENDING / WILL SUBMIT"),
+    );
+
+    const activeSlots = new Set(
+      pendingActions.map((pending) => Number(pending.actor_global_slot)),
+    );
+    for (const [actorSlot, row] of this.pendingActionRows) {
+      if (!activeSlots.has(actorSlot)) {
+        row.element.remove();
+        this.pendingActionRows.delete(actorSlot);
+      }
+    }
+    const desired = [];
+    for (const pending of pendingActions) {
+      const actorSlot = Number(pending.actor_global_slot);
+      let row = this.pendingActionRows.get(actorSlot);
+      if (!row) {
+        row = { element: htmlElement("li", "pending-action-row") };
+        this.pendingActionRows.set(actorSlot, row);
+      }
+      updatePendingActionRow(row, pending, actorSlot === controlledSlot);
+      desired.push(row.element);
+    }
+    this.reconcileChildren(
+      this.pendingList,
+      desired.length > 0 ? desired : [this.emptyPending],
+    );
+  }
+
+  /**
    * @param {Record<string, any> | null} frame
    */
   renderInspector(frame) {
@@ -957,11 +1089,9 @@ export class DebuggerPanels {
     if (preset === "debug") {
       addCandidateLegality(this.selectionCard, hud);
     }
-    const pendingCandidate = hud.pending_action ?? null;
     const latestCandidate = hud.latest_transition ?? null;
-    const pending = isRecord(pendingCandidate) ? pendingCandidate : null;
     const latest = isRecord(latestCandidate) ? latestCandidate : null;
-    renderPendingAction(this.pendingCard, pending);
+    this.renderPendingPlan(hud);
     const announcement = renderLatestTransition(this.acceptedCard, latest);
     if (latest && announcement) {
       const transitionKey = `${frame?.run_generation ?? "unknown"}:${latest.transition_id}`;
