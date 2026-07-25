@@ -425,6 +425,44 @@ def test_command_record_cache_is_bounded() -> None:
     assert service.revision == 0
 
 
+def test_evicted_applied_submit_is_stale_and_cannot_restep() -> None:
+    service = _service()
+    submit = _request(
+        "submit-before-eviction",
+        base_revision=0,
+        command=KeyboardCommandV1(key="Enter"),
+    )
+
+    applied = service.apply_command(submit)
+    assert isinstance(applied.payload, CommandResponseV1)
+    assert applied.payload.result == "applied"
+    assert applied.payload.frame.revision == 1
+    assert applied.payload.frame.simulator_step == 1
+
+    for index in range(256):
+        no_op = service.apply_command(
+            _request(
+                f"post-submit-no-op-{index}",
+                base_revision=1,
+                command=KeyboardCommandV1(key="F13"),
+            )
+        )
+        assert isinstance(no_op.payload, CommandResponseV1)
+        assert no_op.payload.result == "no_op"
+
+    assert service.command_cache_size == 256
+    replayed = service.apply_command(submit)
+
+    assert replayed.outcome == "stale_revision"
+    assert isinstance(replayed.payload, ApiErrorV1)
+    assert replayed.payload.error_code == "stale_revision"
+    assert replayed.payload.latest_frame is not None
+    assert replayed.payload.latest_frame.revision == 1
+    assert replayed.payload.latest_frame.simulator_step == 1
+    assert service.revision == 1
+    assert int(service.session.state.step_count) == 1
+
+
 def test_stress_scenario_requires_explicit_service_authorization() -> None:
     session = create_session(
         get_scenario("charge_convergence"),

@@ -346,6 +346,173 @@ def test_pov_latest_card_omits_hidden_pair_legality_and_result() -> None:
     assert result.combat_result == "undisclosed"
 
 
+def test_post_transition_pov_response_is_a_positive_allowlisted_envelope() -> None:
+    session = _session()
+    initial_pov = _frame(session, view_mode="pov")
+    authorized_initial_slots = {agent.global_slot for agent in initial_pov.scene.agents}
+    hidden_target = next(
+        slot
+        for slot, active in enumerate(session.config.agent_profile.active_mask)
+        if bool(active) and slot not in authorized_initial_slots
+    )
+
+    session = select_controlled_actor(session, 1)
+    session = set_pending_movement(session, MOVE_NORTH)
+    session = arm_basic(select_clicked_target(session, hidden_target))
+    other_actor_draft = session.pending_action
+    session = select_controlled_actor(session, 0)
+    session = arm_basic(select_clicked_target(session, hidden_target))
+    submitted = submit_interactive(session)
+
+    assert submitted.last_transition is not None
+    assert submitted.last_transition.report_actor_slots == tuple(range(10))
+    assert submitted.pending_actions[1].selected_global_target_slot == (
+        other_actor_draft.selected_global_target_slot
+    )
+
+    frame = _frame(submitted, revision=1, view_mode="pov")
+    response = CommandResponseV1(result="applied", frame=frame)
+    payload = cast(dict[str, object], json.loads(response.model_dump_json()))
+    frame_payload = cast(dict[str, object], payload["frame"])
+    scene_payload = cast(dict[str, object], frame_payload["scene"])
+    hud_payload = cast(dict[str, object], frame_payload["hud"])
+    batch_payload = cast(dict[str, object], frame_payload["event_batch"])
+    events_payload = cast(list[dict[str, object]], batch_payload["events"])
+
+    assert set(payload) == {"schema_version", "result", "frame", "notice"}
+    assert set(frame_payload) == {
+        "schema_version",
+        "session_id",
+        "run_generation",
+        "revision",
+        "simulator_step",
+        "transition_id",
+        "view_mode",
+        "preset",
+        "scenario",
+        "available_scenarios",
+        "terminal",
+        "scene",
+        "event_batch",
+        "hud",
+    }
+    assert set(scene_payload) == {
+        "schema_version",
+        "audience",
+        "audience_badge",
+        "map",
+        "agents",
+        "aura_fields",
+        "ranges",
+        "selection",
+        "selected_legality",
+        "pending_route",
+        "observer_visibility",
+    }
+    assert set(hud_payload) == {
+        "roster_global_slots",
+        "controlled_global_slot",
+        "selected_global_slot",
+        "pending_submission_scope",
+        "pending_actions",
+        "pending_action",
+        "latest_transition",
+        "candidate_legalities",
+        "diagnostics",
+    }
+    assert set(batch_payload) == {
+        "schema_version",
+        "transition_id",
+        "simulator_step",
+        "events",
+    }
+
+    controlled = submitted.controlled_global_slot
+    authorized_slots = tuple(agent.global_slot for agent in frame.scene.agents)
+    assert frame.view_mode == "pov"
+    assert frame.scene.audience == "agent_pov"
+    assert hidden_target not in authorized_slots
+    assert frame.scene.observer_visibility == ()
+    assert frame.scene.pending_route is None
+    assert frame.scene.selection is not None
+    assert frame.scene.selection.selected_global_slot is None
+    assert frame.hud.roster_global_slots == authorized_slots
+    assert frame.hud.pending_submission_scope == "controlled_actor"
+    assert tuple(
+        pending.actor_global_slot for pending in frame.hud.pending_actions
+    ) == (controlled,)
+    assert frame.hud.pending_action == frame.hud.pending_actions[0]
+    assert frame.hud.pending_action.target.disclosure == "redacted"
+    assert frame.hud.pending_action.target.global_slot is None
+    assert frame.hud.pending_action.target_action is None
+    assert frame.hud.pending_action.pair_mask_value is None
+
+    latest = frame.hud.latest_transition
+    assert latest is not None
+    assert tuple(result.actor_global_slot for result in latest.actors) == (controlled,)
+    result = latest.actors[0]
+    assert result.submitted.target.disclosure == "redacted"
+    assert result.submitted.target.global_slot is None
+    assert result.submitted.target_action is None
+    assert result.pair_mask_value is None
+    assert result.combat_result == "undisclosed"
+
+    assert events_payload
+    for event in events_payload:
+        assert event["event_type"] == "rejected_action"
+        assert set(event) == {
+            "event_type",
+            "event_id",
+            "transition_id",
+            "actor_global_slot",
+            "component",
+            "actor_anchor",
+            "target_global_slot",
+            "target_anchor",
+            "target_disclosure",
+            "lane",
+            "movement_mask_value",
+            "pair_mask_value",
+        }
+        assert event["actor_global_slot"] == controlled
+        assert event["target_disclosure"] == "redacted"
+        assert event["target_global_slot"] is None
+        assert event["target_anchor"] is None
+
+    assert _json_tree_is_scalar(payload)
+    forbidden_keys = {
+        "accepted_action",
+        "accepted_activations",
+        "action_mask",
+        "actor_transitions",
+        "after_action_mask",
+        "after_observation",
+        "after_state",
+        "before_action_mask",
+        "before_observation",
+        "before_state",
+        "candidate_global_slot",
+        "config",
+        "done_flags",
+        "info",
+        "key",
+        "last_transition",
+        "observation",
+        "observer_global_slot",
+        "position_after",
+        "position_before",
+        "report_actor_slots",
+        "rejections",
+        "reward",
+        "state",
+        "status_transitions",
+        "submitted_action",
+        "transition",
+        "visible",
+    }
+    assert _recursive_keys(payload).isdisjoint(forbidden_keys)
+
+
 def test_frame_json_preserves_event_discriminators_without_source_amounts() -> None:
     frame = _frame(
         submit_next_script_frame(_session("basic_support")),

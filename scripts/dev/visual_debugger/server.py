@@ -52,6 +52,24 @@ _CONTENT_TYPES = {
     ".txt": "text/plain; charset=utf-8",
     ".woff2": "font/woff2",
 }
+_REQUIRED_RUNTIME_ASSET_PATHS = (
+    "index.html",
+    "styles.css",
+    "src/api.js",
+    "src/choreography-painter.js",
+    "src/choreography-plan.js",
+    "src/choreography.js",
+    "src/controls.js",
+    "src/icons.js",
+    "src/layout.js",
+    "src/main.js",
+    "src/panels.js",
+    "src/routes.js",
+    "src/scene.js",
+    "src/vocabulary.js",
+    "assets/fonts/AtkinsonHyperlegible-Regular.woff2",
+    "assets/fonts/AtkinsonHyperlegible-Bold.woff2",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +83,7 @@ class StaticAsset:
 def build_static_manifest(asset_root: Path) -> dict[str, StaticAsset]:
     """Validate and return the exact browser-runtime static asset allowlist."""
     root = asset_root.resolve(strict=True)
-    required = (root / "index.html", root / "styles.css")
+    required = tuple(root / relative for relative in _REQUIRED_RUNTIME_ASSET_PATHS)
     candidates = [*required]
     source_root = root / "src"
     if source_root.is_dir():
@@ -81,7 +99,7 @@ def build_static_manifest(asset_root: Path) -> dict[str, StaticAsset]:
         )
 
     manifest: dict[str, StaticAsset] = {}
-    for candidate in candidates:
+    for candidate in dict.fromkeys(candidates):
         if not candidate.is_file():
             raise ValueError(f"required browser asset is missing: {candidate}")
         relative = candidate.relative_to(root)

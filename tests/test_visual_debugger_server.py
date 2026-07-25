@@ -22,6 +22,7 @@ from scripts.dev.visual_debugger.server import (
     DebuggerRequestHandler,
     build_static_manifest,
     create_server,
+    serve_browser_debugger,
 )
 from scripts.dev.visual_debugger.service import DebuggerService
 
@@ -102,6 +103,18 @@ def _command_body(
         command=KeyboardCommandV1(key=key),
     )
     return request.model_dump_json().encode()
+
+
+def _complete_runtime_asset_root(tmp_path: Path) -> Path:
+    """Copy the validated runtime allowlist into one isolated test root."""
+    asset_root = tmp_path / "web"
+    for route, asset in build_static_manifest(_ASSET_ROOT).items():
+        if route == "/":
+            continue
+        destination = asset_root / route.removeprefix("/")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(asset.body)
+    return asset_root
 
 
 def _raw_exchange(server: DebuggerHTTPServer, request: bytes) -> bytes:
@@ -364,6 +377,43 @@ def test_incomplete_command_body_times_out_without_reaching_service(
     assert int(server.debugger_service.session.state.step_count) == 0
 
 
+def test_identical_http_submit_body_is_applied_then_returned_as_duplicate(
+    running_server: tuple[DebuggerHTTPServer, Thread],
+) -> None:
+    server, _ = running_server
+    body = _command_body("identical-submit", base_revision=0, key="Enter")
+    headers = _authorized_headers(**{"Content-Type": "application/json"})
+
+    applied, applied_body = _exchange(
+        server,
+        "POST",
+        "/api/command",
+        body=body,
+        headers=headers,
+    )
+    duplicate, duplicate_body = _exchange(
+        server,
+        "POST",
+        "/api/command",
+        body=body,
+        headers=headers,
+    )
+
+    applied_payload = json.loads(applied_body)
+    duplicate_payload = json.loads(duplicate_body)
+    assert applied.status == duplicate.status == 200
+    assert applied_payload["result"] == "applied"
+    assert duplicate_payload["result"] == "duplicate"
+    assert applied_payload["frame"]["revision"] == 1
+    assert duplicate_payload["frame"]["revision"] == 1
+    assert applied_payload["frame"]["simulator_step"] == 1
+    assert duplicate_payload["frame"]["simulator_step"] == 1
+    assert applied_payload["frame"]["transition_id"] == 1
+    assert duplicate_payload["frame"]["transition_id"] == 1
+    assert server.debugger_service.revision == 1
+    assert int(server.debugger_service.session.state.step_count) == 1
+
+
 def test_command_and_stale_service_results_map_to_http(
     running_server: tuple[DebuggerHTTPServer, Thread],
 ) -> None:
@@ -548,12 +598,71 @@ def test_unexpected_service_failure_returns_generic_internal_error(
     assert int(server.debugger_service.session.state.step_count) == 0
 
 
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        Path("src") / "main.js",
+        Path("assets") / "fonts" / "AtkinsonHyperlegible-Regular.woff2",
+    ),
+    ids=("module", "font"),
+)
+def test_missing_required_runtime_asset_fails_before_browser_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    relative_path: Path,
+) -> None:
+    asset_root = _complete_runtime_asset_root(tmp_path)
+    (asset_root / relative_path).unlink()
+    opened_urls: list[str] = []
+
+    def record_browser_open(url: str) -> bool:
+        opened_urls.append(url)
+        return True
+
+    monkeypatch.setattr(server_module.webbrowser, "open", record_browser_open)
+
+    with pytest.raises(ValueError, match="required browser asset is missing"):
+        serve_browser_debugger(
+            _service(),
+            asset_root=asset_root,
+            port=0,
+            open_browser=True,
+        )
+
+    assert opened_urls == []
+
+
+def test_occupied_port_fails_before_browser_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opened_urls: list[str] = []
+
+    def record_browser_open(url: str) -> bool:
+        opened_urls.append(url)
+        return True
+
+    monkeypatch.setattr(server_module.webbrowser, "open", record_browser_open)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupied:
+        occupied.bind(("127.0.0.1", 0))
+        occupied.listen()
+        port = int(occupied.getsockname()[1])
+
+        with pytest.raises(OSError):
+            serve_browser_debugger(
+                _service(),
+                asset_root=_ASSET_ROOT,
+                port=port,
+                open_browser=True,
+            )
+
+    assert opened_urls == []
+
+
 def test_static_manifest_rejects_symlinked_runtime_assets(tmp_path: Path) -> None:
     outside = tmp_path / "outside.html"
     outside.write_text("<html></html>", encoding="utf-8")
-    asset_root = tmp_path / "web"
-    asset_root.mkdir()
-    (asset_root / "styles.css").write_text("", encoding="utf-8")
+    asset_root = _complete_runtime_asset_root(tmp_path)
+    (asset_root / "index.html").unlink()
     (asset_root / "index.html").symlink_to(outside)
 
     with pytest.raises(ValueError, match="symlinks"):
@@ -561,11 +670,9 @@ def test_static_manifest_rejects_symlinked_runtime_assets(tmp_path: Path) -> Non
 
 
 def test_static_manifest_snapshots_asset_bytes_at_startup(tmp_path: Path) -> None:
-    asset_root = tmp_path / "web"
-    asset_root.mkdir()
+    asset_root = _complete_runtime_asset_root(tmp_path)
     index = asset_root / "index.html"
     index.write_text("<html>initial</html>", encoding="utf-8")
-    (asset_root / "styles.css").write_text("", encoding="utf-8")
 
     manifest = build_static_manifest(asset_root)
     index.write_text("<html>replaced</html>", encoding="utf-8")
