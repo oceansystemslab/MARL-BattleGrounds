@@ -60,13 +60,20 @@ export function syntheticDebuggerFrame(fixture) {
       ? fixture.description
       : "SYNTHETIC: renderer-only fixture.";
   const audience = scene.audience === "agent_pov" ? "agent_pov" : "researcher";
+  const eventBatch =
+    fixture.event_batch &&
+    typeof fixture.event_batch === "object" &&
+    !Array.isArray(fixture.event_batch)
+      ? fixture.event_batch
+      : null;
+  const transitionId = eventBatch?.transition_id ?? 0;
   return {
     schema_version: 1,
     session_id: `synthetic:${name}`,
     run_generation: 0,
     revision: 0,
-    simulator_step: 0,
-    transition_id: fixture.event_batch?.transition_id ?? 0,
+    simulator_step: eventBatch?.simulator_step ?? 0,
+    transition_id: transitionId,
     scenario: {
       name,
       title: `SYNTHETIC · ${name}`,
@@ -80,10 +87,21 @@ export function syntheticDebuggerFrame(fixture) {
     preset: "analysis",
     terminal: false,
     scene,
-    event_batch: fixture.event_batch ?? null,
+    event_batch: eventBatch,
     hud: {
+      controlled_global_slot: scene.selection?.controlled_global_slot ?? null,
+      pending_submission_scope: "scripted_playback",
+      pending_actions: [],
       pending_action: null,
-      latest_transition: null,
+      latest_transition:
+        eventBatch === null
+          ? null
+          : {
+              label: "SYNTHETIC EVENT BATCH",
+              transition_id: transitionId,
+              submission_kind: "renderer_fixture",
+              actors: [],
+            },
       diagnostics: [],
     },
   };
