@@ -14,6 +14,7 @@ from scripts.dev.visual_debugger.control import (
     reset_session,
     select_clicked_target,
     select_controlled_actor,
+    set_movement_scale,
     submit_interactive,
     submit_joint_action,
     submit_next_script_frame,
@@ -24,6 +25,7 @@ from scripts.dev.visual_debugger.diagnostics import (
     derive_visual_event_batch,
     extract_transition_view,
     format_concise_transition,
+    format_reset,
     format_verbose_transition,
     latest_visual_event_batch,
 )
@@ -74,6 +76,16 @@ def _rejection_session() -> DebuggerSession:
         show_ranges=True,
         verbose_logging=False,
     )
+
+
+def test_reset_diagnostic_formats_movement_scale_with_fixed_two_decimals() -> None:
+    initial = _session("arena_5v5")
+    tenth = set_movement_scale(initial, 0.1)
+    hundredth = set_movement_scale(initial, 0.01)
+
+    assert format_reset(initial).endswith("movement_scale=1.00")
+    assert format_reset(tenth).endswith("movement_scale=0.10")
+    assert format_reset(hundredth).endswith("movement_scale=0.01")
 
 
 def _rejected_ultimate_with_movement() -> DebuggerSession:

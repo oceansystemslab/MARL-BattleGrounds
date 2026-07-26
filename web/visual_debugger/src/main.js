@@ -11,6 +11,7 @@ import { CombatChoreographer, ConsumedTransitionLedger } from "./choreography.js
 import { SvgChoreographyPainter } from "./choreography-painter.js";
 import { isSubmissionCommand } from "./choreography-plan.js";
 import { bindBattlefieldControls, keyboardCommand } from "./controls.js";
+import { formatDisplayNumber } from "./display.js";
 import { DebuggerPanels } from "./panels.js";
 import { BattlefieldRenderer } from "./scene.js";
 
@@ -33,6 +34,10 @@ const elements = {
   scenarioSelect: requiredElement("scenario-select"),
   viewSelect: requiredElement("view-select"),
   presetSelect: requiredElement("preset-select"),
+  movementScaleInput: requiredElement("movement-scale-input"),
+  movementScaleValue: requiredElement("movement-scale-value"),
+  movementScaleTenthButton: requiredElement("movement-scale-tenth-button"),
+  movementScaleDefaultButton: requiredElement("movement-scale-default-button"),
   revisionValue: requiredElement("revision-value"),
   stepValue: requiredElement("step-value"),
   transitionValue: requiredElement("transition-value"),
@@ -427,6 +432,53 @@ function renderSessionToolbar() {
   if (typeof frame?.preset === "string") {
     elements.presetSelect.value = frame.preset;
   }
+  const scenario = scenarioRecord(frame);
+  const movementScale = Number(scenario.ordinary_movement_distance_scale);
+  const movementScaleMinimum = Number(scenario.movement_scale_minimum);
+  const movementScaleMaximum = Number(scenario.movement_scale_maximum);
+  const movementScaleStep = Number(scenario.movement_scale_step);
+  if (
+    Number.isFinite(movementScaleMinimum) &&
+    Number.isFinite(movementScaleMaximum) &&
+    movementScaleMinimum <= movementScaleMaximum
+  ) {
+    elements.movementScaleInput.min = formatDisplayNumber(movementScaleMinimum, {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
+    elements.movementScaleInput.max = formatDisplayNumber(movementScaleMaximum, {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
+  }
+  if (Number.isFinite(movementScaleStep) && movementScaleStep > 0) {
+    elements.movementScaleInput.step = formatDisplayNumber(movementScaleStep, {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
+  }
+  if (Number.isFinite(movementScale)) {
+    const displayedMovementScale = formatDisplayNumber(movementScale, {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
+    elements.movementScaleInput.value = displayedMovementScale;
+    elements.movementScaleValue.value = displayedMovementScale;
+    elements.movementScaleValue.textContent = displayedMovementScale;
+  }
+  const movementScaleDisabled =
+    disabled ||
+    frame?.view_mode !== "researcher" ||
+    !Number.isFinite(movementScale) ||
+    !Number.isFinite(movementScaleMinimum) ||
+    !Number.isFinite(movementScaleMaximum) ||
+    !Number.isFinite(movementScaleStep);
+  elements.movementScaleInput.disabled = movementScaleDisabled;
+  elements.movementScaleTenthButton.disabled =
+    movementScaleDisabled ||
+    (Number.isFinite(movementScale) && Math.abs(movementScale - 0.1) < 1e-9);
+  elements.movementScaleDefaultButton.disabled =
+    movementScaleDisabled || scenario.movement_scale_overridden !== true;
   elements.scenarioSelect.disabled = disabled;
   elements.viewSelect.disabled = disabled;
   elements.presetSelect.disabled = disabled;
@@ -965,6 +1017,44 @@ elements.presetSelect.addEventListener("change", () => {
 
 elements.resetButton.addEventListener("click", () => {
   dispatchCommand({ command_type: "reset" });
+});
+
+elements.movementScaleInput.addEventListener("input", () => {
+  const movementScale = Number(elements.movementScaleInput.value);
+  if (!Number.isFinite(movementScale)) {
+    return;
+  }
+  const displayedMovementScale = formatDisplayNumber(movementScale, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+  elements.movementScaleValue.value = displayedMovementScale;
+  elements.movementScaleValue.textContent = displayedMovementScale;
+});
+
+elements.movementScaleInput.addEventListener("change", () => {
+  const movementScale = Number(elements.movementScaleInput.value);
+  if (!Number.isFinite(movementScale)) {
+    return;
+  }
+  dispatchCommand({
+    command_type: "set_movement_scale",
+    movement_scale: movementScale,
+  });
+});
+
+elements.movementScaleTenthButton.addEventListener("click", () => {
+  dispatchCommand({
+    command_type: "set_movement_scale",
+    movement_scale: 0.1,
+  });
+});
+
+elements.movementScaleDefaultButton.addEventListener("click", () => {
+  dispatchCommand({
+    command_type: "set_movement_scale",
+    movement_scale: null,
+  });
 });
 
 elements.commandTargetSelect.addEventListener("change", () => {

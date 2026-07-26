@@ -3,7 +3,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 from math import isfinite
-from typing import Literal, cast
+from typing import Final, Literal, cast
 
 from jax import Array
 
@@ -36,6 +36,10 @@ type ScenarioAudience = Literal["researcher", "stress"]
 type SubmissionKind = Literal["interactive", "scripted"]
 type StatusKind = StatusTokenId
 type StatusChange = StatusLifecycleKind | Literal["unchanged"]
+
+MOVEMENT_SCALE_MINIMUM: Final = 0.01
+MOVEMENT_SCALE_MAXIMUM: Final = 1.0
+MOVEMENT_SCALE_STEP: Final = 0.01
 
 
 def _validate_slot(global_slot: int, *, name: str) -> None:
@@ -278,6 +282,7 @@ class DebuggerSession:
     scenario_name: str
     seed: int
     run_generation: int
+    scenario_default_movement_scale: float
     config: EnvConfig
     key: Array
     state: EnvState
@@ -296,6 +301,16 @@ class DebuggerSession:
     def __post_init__(self) -> None:
         if type(self.run_generation) is not int or self.run_generation < 0:
             msg = "run_generation must be a non-negative Python int."
+            raise ValueError(msg)
+        if (
+            type(self.scenario_default_movement_scale) is not float
+            or not isfinite(self.scenario_default_movement_scale)
+            or not 0.0 < self.scenario_default_movement_scale <= 1.0
+        ):
+            msg = (
+                "scenario_default_movement_scale must be a finite Python float "
+                "in (0.0, 1.0]."
+            )
             raise ValueError(msg)
         _validate_slot(self.controlled_global_slot, name="controlled_global_slot")
         if not bool(self.config.agent_profile.active_mask[self.controlled_global_slot]):

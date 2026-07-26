@@ -55,6 +55,35 @@
           <option value="debug">Debug</option>
         </select>
       </label>
+      <fieldset class="movement-scale-control">
+        <legend>Movement scale</legend>
+        <div class="movement-scale-control__row">
+          <input
+            id="movement-scale-input"
+            type="range"
+            min="0.01"
+            max="1.00"
+            step="0.01"
+            value="1.00"
+            aria-label="Ordinary movement distance scale"
+            aria-describedby="movement-scale-help"
+            disabled
+          >
+          <output id="movement-scale-value" for="movement-scale-input">1.00</output>
+        </div>
+        <div class="movement-scale-control__actions">
+          <button id="movement-scale-tenth-button" type="button" disabled>
+            0.10
+          </button>
+          <button id="movement-scale-default-button" type="button" disabled>
+            Default
+          </button>
+        </div>
+        <span id="movement-scale-help" class="sr-only">
+          Changing movement scale performs an authoritative reset without
+          advancing the simulator.
+        </span>
+      </fieldset>
       <fieldset class="session-facts" aria-label="Session facts">
         <span>Revision <strong id="revision-value">—</strong></span>
         <span>Step <strong id="step-value">—</strong></span>

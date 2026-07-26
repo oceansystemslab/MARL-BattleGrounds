@@ -1582,5 +1582,5 @@ def format_reset(session: DebuggerSession) -> str:
         f"step={int(session.state.step_count)} controlled=g{actor} "
         f"class={_CLASS_NAMES[class_id]} team={_TEAM_NAMES[team_id]} "
         f"active={active_count} "
-        f"movement_scale={session.config.ordinary_movement_distance_scale:.1f}"
+        f"movement_scale={session.config.ordinary_movement_distance_scale:.2f}"
     )

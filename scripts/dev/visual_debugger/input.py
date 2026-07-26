@@ -27,6 +27,7 @@ from scripts.dev.visual_debugger.control import (
     select_clicked_target,
     select_controlled_actor,
     select_no_combat,
+    set_movement_scale,
     set_pending_movement,
     submit_interactive,
     submit_next_script_frame,
@@ -41,6 +42,7 @@ from scripts.dev.visual_debugger.protocol import (
     ResetCommandV1,
     RosterSelectionCommandV1,
     ScenarioSwitchCommandV1,
+    SetMovementScaleCommandV1,
     SetPresetCommandV1,
     SetViewCommandV1,
     ViewMode,
@@ -675,6 +677,29 @@ def dispatch_command(
             preset=preset,
             handled=True,
             changed=True,
+        )
+    if isinstance(command, SetMovementScaleCommandV1):
+        if view_mode != "researcher":
+            return _result(
+                session,
+                view_mode=view_mode,
+                preset=preset,
+                handled=True,
+                changed=False,
+                notice="Movement scale can be changed only in researcher view.",
+            )
+        edited = set_movement_scale(session, command.movement_scale)
+        return _result(
+            edited,
+            view_mode=view_mode,
+            preset=preset,
+            handled=True,
+            changed=edited is not session,
+            notice=(
+                "Movement scale is already at the requested effective value."
+                if edited is session
+                else None
+            ),
         )
     if isinstance(command, SetViewCommandV1):
         edited = (

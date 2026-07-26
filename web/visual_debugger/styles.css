@@ -251,6 +251,48 @@ select {
   text-transform: uppercase;
 }
 
+.movement-scale-control {
+  display: grid;
+  min-width: 12rem;
+  gap: 0.25rem;
+  padding: 0;
+  border: 0;
+  margin: 0;
+}
+
+.movement-scale-control legend {
+  padding: 0;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.movement-scale-control__row,
+.movement-scale-control__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.movement-scale-control__row input {
+  min-width: 7rem;
+}
+
+.movement-scale-control__row output {
+  min-width: 2.8rem;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.movement-scale-control__actions button {
+  flex: 1;
+  padding-block: 0.28rem;
+  font-size: 0.7rem;
+}
+
 .session-facts {
   flex: 1;
   align-self: stretch;
@@ -2015,6 +2057,7 @@ select {
 
   .session-toolbar label,
   .session-toolbar select,
+  .movement-scale-control,
   .toolbar-actions,
   .motion-controls {
     width: 100%;

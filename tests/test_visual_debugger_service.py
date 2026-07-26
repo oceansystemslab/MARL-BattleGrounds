@@ -16,6 +16,7 @@ from scripts.dev.visual_debugger.protocol import (
     ExitCommandV1,
     KeyboardCommandV1,
     RosterSelectionCommandV1,
+    SetMovementScaleCommandV1,
     SetPresetCommandV1,
     SetViewCommandV1,
 )
@@ -187,6 +188,54 @@ def test_unavailable_browser_draft_is_a_revision_preserving_no_op() -> None:
     assert service.session is initial
     assert result.payload.notice is not None
     assert "canonical no-combat tuple" in result.payload.notice
+
+
+def test_movement_scale_reset_is_idempotent_revisioned_and_never_steps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service()
+
+    def forbidden_step(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("movement-scale reset must not call step")
+
+    monkeypatch.setattr(control_module, "step", forbidden_step)
+    request = _request(
+        "scale-once",
+        base_revision=0,
+        command=SetMovementScaleCommandV1(movement_scale=0.1),
+    )
+
+    applied = service.apply_command(request)
+    duplicate = service.apply_command(request)
+    stale = service.apply_command(
+        _request(
+            "stale-scale",
+            base_revision=0,
+            command=SetMovementScaleCommandV1(movement_scale=0.25),
+        )
+    )
+    same_effective = service.apply_command(
+        _request(
+            "same-scale",
+            base_revision=1,
+            command=SetMovementScaleCommandV1(movement_scale=0.1),
+        )
+    )
+
+    assert isinstance(applied.payload, CommandResponseV1)
+    assert applied.payload.result == "applied"
+    assert applied.payload.frame.revision == 1
+    assert applied.payload.frame.run_generation == 1
+    assert applied.payload.frame.simulator_step == 0
+    assert applied.payload.frame.scenario.ordinary_movement_distance_scale == 0.1
+    assert isinstance(duplicate.payload, CommandResponseV1)
+    assert duplicate.payload.result == "duplicate"
+    assert stale.outcome == "stale_revision"
+    assert isinstance(same_effective.payload, CommandResponseV1)
+    assert same_effective.payload.result == "no_op"
+    assert same_effective.payload.frame.revision == 1
+    assert service.session.run_generation == 1
+    assert int(service.session.state.step_count) == 0
 
 
 def test_entering_pov_clears_a_hidden_pending_target_without_stepping() -> None:

@@ -24,6 +24,7 @@ from scripts.dev.visual_debugger.protocol import (
     ResetCommandV1,
     RosterSelectionCommandV1,
     ScenarioSwitchCommandV1,
+    SetMovementScaleCommandV1,
     SetPresetCommandV1,
     SetViewCommandV1,
 )
@@ -643,6 +644,58 @@ def test_scenario_switch_enforces_stress_authorization() -> None:
     assert allowed.changed
     assert allowed.session.scenario_name == "charge_convergence"
     assert allowed.session.run_generation == session.run_generation + 1
+
+
+def test_movement_scale_dispatch_is_researcher_only_and_no_op_aware() -> None:
+    session = _session(controlled_slot=3)
+    scaled = dispatch_command(
+        session,
+        SetMovementScaleCommandV1(movement_scale=0.1),
+        view_mode="researcher",
+        preset="debug",
+        include_stress=False,
+    )
+    duplicate = dispatch_command(
+        scaled.session,
+        SetMovementScaleCommandV1(movement_scale=0.1),
+        view_mode="researcher",
+        preset="debug",
+        include_stress=False,
+    )
+    blocked = dispatch_command(
+        scaled.session,
+        SetMovementScaleCommandV1(movement_scale=0.25),
+        view_mode="pov",
+        preset="presentation",
+        include_stress=False,
+    )
+    restored = dispatch_command(
+        scaled.session,
+        SetMovementScaleCommandV1(movement_scale=None),
+        view_mode="researcher",
+        preset="debug",
+        include_stress=False,
+    )
+
+    assert scaled.handled
+    assert scaled.changed
+    assert scaled.session.config.ordinary_movement_distance_scale == 0.1
+    assert scaled.session.controlled_global_slot == 3
+    assert scaled.view_mode == "researcher"
+    assert scaled.preset == "debug"
+    assert duplicate.handled
+    assert not duplicate.changed
+    assert duplicate.session is scaled.session
+    assert duplicate.notice is not None
+    assert blocked.handled
+    assert not blocked.changed
+    assert blocked.session is scaled.session
+    assert blocked.view_mode == "pov"
+    assert blocked.preset == "presentation"
+    assert blocked.notice is not None
+    assert "researcher view" in blocked.notice
+    assert restored.changed
+    assert restored.session.config.ordinary_movement_distance_scale == 1.0
 
 
 def test_view_preset_reset_and_exit_commands_report_frame_changes_exactly() -> None:

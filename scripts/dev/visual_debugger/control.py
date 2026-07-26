@@ -7,6 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from marl_battlegrounds.core.config import validate_env_config
 from marl_battlegrounds.core.env import reset, step
 from marl_battlegrounds.core.types import (
     MAGE_CLASS_ID,
@@ -29,6 +30,8 @@ from scripts.dev.visual_debugger.diagnostics import (
     format_verbose_transition,
 )
 from scripts.dev.visual_debugger.model import (
+    MOVEMENT_SCALE_MAXIMUM,
+    MOVEMENT_SCALE_MINIMUM,
     DebuggerScenario,
     DebuggerSession,
     Lane,
@@ -233,12 +236,32 @@ def build_scripted_joint_action(
 def _fresh_snapshot(
     scenario: DebuggerScenario,
     seed: int,
-) -> tuple[EnvConfig, Array, EnvState, Observation, ActionMask, Info]:
-    config = scenario.build_config()
+    *,
+    movement_scale: float | None = None,
+) -> tuple[float, EnvConfig, Array, EnvState, Observation, ActionMask, Info]:
+    authored_config = scenario.build_config()
+    scenario_default_movement_scale = authored_config.ordinary_movement_distance_scale
+    effective_movement_scale = (
+        scenario_default_movement_scale if movement_scale is None else movement_scale
+    )
+    config = authored_config
+    if effective_movement_scale != scenario_default_movement_scale:
+        config = authored_config._replace(
+            ordinary_movement_distance_scale=effective_movement_scale
+        )
+        validate_env_config(config)
     master_key = jax.random.key(seed)
     next_key, reset_key = jax.random.split(master_key)
     state, observation, action_mask, info = reset(config, reset_key)
-    return config, next_key, state, observation, action_mask, info
+    return (
+        scenario_default_movement_scale,
+        config,
+        next_key,
+        state,
+        observation,
+        action_mask,
+        info,
+    )
 
 
 def create_session(
@@ -250,10 +273,15 @@ def create_session(
     verbose_logging: bool,
 ) -> DebuggerSession:
     """Create one deterministic immutable debugger session."""
-    config, next_key, state, observation, action_mask, info = _fresh_snapshot(
-        scenario,
-        seed,
-    )
+    (
+        scenario_default_movement_scale,
+        config,
+        next_key,
+        state,
+        observation,
+        action_mask,
+        info,
+    ) = _fresh_snapshot(scenario, seed)
     requested_slot = (
         scenario.default_controlled_slot
         if controlled_global_slot is None
@@ -270,6 +298,7 @@ def create_session(
         scenario_name=scenario.name,
         seed=seed,
         run_generation=0,
+        scenario_default_movement_scale=scenario_default_movement_scale,
         config=config,
         key=next_key,
         state=state,
@@ -589,19 +618,52 @@ def submit_next_script_frame(
 def reset_session(
     session: DebuggerSession,
 ) -> DebuggerSession:
-    """Recreate the deterministic initial key sequence and clear live history."""
+    """Recreate the deterministic initial epoch at the current effective scale."""
     scenario = get_scenario(session.scenario_name)
-    config, next_key, state, observation, action_mask, info = _fresh_snapshot(
+    return _restart_session(
+        session,
+        scenario,
+        movement_scale=session.config.ordinary_movement_distance_scale,
+        preserve_controlled_slot=True,
+    )
+
+
+def _restart_session(
+    session: DebuggerSession,
+    scenario: DebuggerScenario,
+    *,
+    movement_scale: float | None,
+    preserve_controlled_slot: bool,
+) -> DebuggerSession:
+    """Build one coherent fresh epoch without entering the simulator step seam."""
+    (
+        scenario_default_movement_scale,
+        config,
+        next_key,
+        state,
+        observation,
+        action_mask,
+        info,
+    ) = _fresh_snapshot(
         scenario,
         session.seed,
+        movement_scale=movement_scale,
     )
-    controlled_slot = session.controlled_global_slot
-    if not bool(config.agent_profile.active_mask[controlled_slot]):
+    controlled_slot = (
+        session.controlled_global_slot
+        if preserve_controlled_slot
+        else scenario.default_controlled_slot
+    )
+    if not (
+        0 <= controlled_slot < MAX_AGENT_SLOTS
+        and bool(config.agent_profile.active_mask[controlled_slot])
+    ):
         controlled_slot = scenario.default_controlled_slot
-    reset_result = replace(
+    restarted = replace(
         session,
         scenario_name=scenario.name,
         run_generation=session.run_generation + 1,
+        scenario_default_movement_scale=scenario_default_movement_scale,
         config=config,
         key=next_key,
         state=state,
@@ -618,40 +680,50 @@ def reset_session(
         next_script_frame_index=0,
         last_transition=None,
     )
-    print(format_reset(reset_result))
-    return reset_result
+    print(format_reset(restarted))
+    return restarted
+
+
+def set_movement_scale(
+    session: DebuggerSession,
+    movement_scale: float | None,
+) -> DebuggerSession:
+    """Reset at one exact scale, or at the active scenario's authored default."""
+    if movement_scale is not None:
+        if type(movement_scale) is not float:
+            msg = "movement_scale must be a Python float or None."
+            raise TypeError(msg)
+        if not np.isfinite(movement_scale) or not (
+            MOVEMENT_SCALE_MINIMUM <= movement_scale <= MOVEMENT_SCALE_MAXIMUM
+        ):
+            msg = (
+                "movement_scale must be finite and in "
+                f"[{MOVEMENT_SCALE_MINIMUM}, {MOVEMENT_SCALE_MAXIMUM}]."
+            )
+            raise ValueError(msg)
+    effective_scale = (
+        session.scenario_default_movement_scale
+        if movement_scale is None
+        else movement_scale
+    )
+    if effective_scale == session.config.ordinary_movement_distance_scale:
+        return session
+    return _restart_session(
+        session,
+        get_scenario(session.scenario_name),
+        movement_scale=effective_scale,
+        preserve_controlled_slot=True,
+    )
 
 
 def switch_scenario(
     session: DebuggerSession,
     scenario: DebuggerScenario,
 ) -> DebuggerSession:
-    """Start another deterministic scenario using the original CLI seed."""
-    config, next_key, state, observation, action_mask, info = _fresh_snapshot(
+    """Start another scenario at its authored movement-scale default."""
+    return _restart_session(
+        session,
         scenario,
-        session.seed,
+        movement_scale=None,
+        preserve_controlled_slot=False,
     )
-    switched = DebuggerSession(
-        scenario_name=scenario.name,
-        seed=session.seed,
-        run_generation=session.run_generation + 1,
-        config=config,
-        key=next_key,
-        state=state,
-        observation=observation,
-        action_mask=action_mask,
-        last_reward=None,
-        done_flags=DoneFlags(
-            terminated=jnp.asarray(False),
-            truncated=jnp.asarray(False),
-        ),
-        info=info,
-        controlled_global_slot=scenario.default_controlled_slot,
-        pending_actions=_default_pending_actions(config, action_mask),
-        next_script_frame_index=0,
-        last_transition=None,
-        show_ranges=session.show_ranges,
-        verbose_logging=session.verbose_logging,
-    )
-    print(format_reset(switched))
-    return switched

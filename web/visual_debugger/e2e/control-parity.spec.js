@@ -249,6 +249,87 @@ test("pointer, roster, toolbar, and command-deck controls use the live service",
   await expect(page.locator("#step-value")).toHaveText("0");
 });
 
+test("movement scale previews locally and resets one authoritative epoch on commit", async ({
+  page,
+}) => {
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  let revision = await currentRevision(page);
+  if ((await page.locator("#view-select").inputValue()) !== "researcher") {
+    await page.locator("#view-select").selectOption("researcher");
+    revision += 1;
+    await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  }
+  if ((await page.locator("#scenario-select").inputValue()) !== "arena_5v5") {
+    await page.locator("#scenario-select").selectOption("arena_5v5");
+    revision += 1;
+    await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  }
+  await page.locator("#reset-button").click();
+  revision += 1;
+  await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  await expect(page.locator("#step-value")).toHaveText("0");
+
+  await page.getByRole("button", { name: "Move east" }).click();
+  revision += 1;
+  await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  await expect(
+    page.locator('.pending-action-row[data-actor-slot="0"]'),
+  ).toHaveAttribute("data-move-action", "3");
+
+  let movementScaleCommands = 0;
+  await page.route("**/api/command", async (route) => {
+    const payload = route.request().postDataJSON();
+    if (payload?.command?.command_type === "set_movement_scale") {
+      movementScaleCommands += 1;
+    }
+    await route.continue();
+  });
+
+  const scaleInput = page.locator("#movement-scale-input");
+  await scaleInput.evaluate((element) => {
+    const input = /** @type {HTMLInputElement} */ (element);
+    input.value = "0.37";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await expect(page.locator("#movement-scale-value")).toHaveText("0.37");
+  await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  expect(movementScaleCommands).toBe(0);
+
+  await scaleInput.dispatchEvent("change");
+  revision += 1;
+  await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  await expect(page.locator("#movement-scale-value")).toHaveText("0.37");
+  await expect(page.locator("#step-value")).toHaveText("0");
+  await expect(
+    page.locator('.pending-action-row[data-actor-slot="0"]'),
+  ).toHaveAttribute("data-move-action", "0");
+  expect(movementScaleCommands).toBe(1);
+
+  await page.locator("#movement-scale-tenth-button").click();
+  revision += 1;
+  await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  await expect(page.locator("#movement-scale-value")).toHaveText("0.10");
+  await expect(page.locator("#step-value")).toHaveText("0");
+  expect(movementScaleCommands).toBe(2);
+
+  await page.locator("#reset-button").click();
+  revision += 1;
+  await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  await expect(page.locator("#movement-scale-value")).toHaveText("0.10");
+  await expect(page.locator("#step-value")).toHaveText("0");
+  expect(movementScaleCommands).toBe(2);
+
+  await page.locator("#movement-scale-default-button").click();
+  revision += 1;
+  await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  await expect(page.locator("#movement-scale-value")).toHaveText("1.00");
+  await expect(page.locator("#movement-scale-default-button")).toBeDisabled();
+  await expect(page.locator("#step-value")).toHaveText("0");
+  expect(movementScaleCommands).toBe(3);
+  await page.unroute("**/api/command");
+});
+
 test("joint turn drafts survive actor cycling and submit exactly once", async ({
   page,
 }) => {

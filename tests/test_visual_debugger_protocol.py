@@ -19,7 +19,9 @@ from scripts.dev.visual_debugger.protocol import (
     PendingActionCardV1,
     ResetCommandV1,
     RosterSelectionCommandV1,
+    ScenarioMetadataV1,
     ScenarioSwitchCommandV1,
+    SetMovementScaleCommandV1,
     SetPresetCommandV1,
     SetViewCommandV1,
     TargetReferenceV1,
@@ -104,6 +106,8 @@ def test_hud_movement_legality_requires_exact_canonical_action_rows() -> None:
         RosterSelectionCommandV1(role="control", global_slot=1),
         ScenarioSwitchCommandV1(scenario_name="basic_support"),
         ResetCommandV1(),
+        SetMovementScaleCommandV1(movement_scale=0.1),
+        SetMovementScaleCommandV1(movement_scale=None),
         SetViewCommandV1(view_mode="pov"),
         SetPresetCommandV1(preset="analysis"),
         ExitCommandV1(),
@@ -205,6 +209,93 @@ def test_pointer_command_rejects_nonfinite_world_coordinates(
             world_y=1.0,
             button="primary",
         )
+
+
+@pytest.mark.parametrize("movement_scale", (0.01, 0.1, 1.0, None))
+def test_movement_scale_command_accepts_exact_range_and_default(
+    movement_scale: float | None,
+) -> None:
+    command = SetMovementScaleCommandV1(movement_scale=movement_scale)
+
+    assert command.movement_scale == movement_scale
+
+
+def test_movement_scale_json_boundary_accepts_browser_integer_maximum() -> None:
+    payload = json.dumps(
+        {
+            "schema_version": 1,
+            "client_id": "client-1",
+            "command_id": "scale-max",
+            "base_revision": 0,
+            "command": {
+                "command_type": "set_movement_scale",
+                "movement_scale": 1,
+            },
+        }
+    )
+
+    request = CommandRequestV1.model_validate_json(payload)
+
+    assert isinstance(request.command, SetMovementScaleCommandV1)
+    assert request.command.movement_scale == 1.0
+    assert type(request.command.movement_scale) is float
+
+
+@pytest.mark.parametrize(
+    "movement_scale",
+    (
+        0.009,
+        1.001,
+        float("nan"),
+        float("inf"),
+        -float("inf"),
+        1,
+        True,
+        "0.1",
+    ),
+)
+def test_movement_scale_command_rejects_range_type_and_nonfinite_values(
+    movement_scale: object,
+) -> None:
+    with pytest.raises(ValidationError):
+        SetMovementScaleCommandV1(
+            movement_scale=movement_scale,  # type: ignore[arg-type]
+        )
+
+
+def test_scenario_movement_scale_metadata_enforces_advertised_coherence() -> None:
+    payload = {
+        "name": "arena_5v5",
+        "title": "Arena",
+        "description": "Interactive arena.",
+        "mode": "interactive",
+        "audience": "researcher",
+        "movement_scale_minimum": 0.01,
+        "movement_scale_maximum": 1.0,
+        "movement_scale_step": 0.01,
+        "ordinary_movement_distance_scale": 0.1,
+        "scenario_default_movement_scale": 1.0,
+        "movement_scale_overridden": True,
+        "completed_frame_count": 0,
+        "frame_count": 0,
+        "next_frame_index": None,
+        "next_frame_label": None,
+        "next_frame_description": None,
+        "script_complete": False,
+    }
+
+    metadata = ScenarioMetadataV1.model_validate(payload)
+
+    assert metadata.movement_scale_minimum == 0.01
+    assert metadata.movement_scale_maximum == 1.0
+    assert metadata.movement_scale_step == 0.01
+    for update in (
+        {"movement_scale_minimum": 0.02},
+        {"ordinary_movement_distance_scale": 0.005},
+        {"movement_scale_overridden": False},
+    ):
+        with pytest.raises(ValidationError):
+            ScenarioMetadataV1.model_validate(payload | update)
 
 
 def test_capability_token_is_not_part_of_the_request_body_schema() -> None:

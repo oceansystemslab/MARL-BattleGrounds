@@ -82,9 +82,16 @@ def _scenario_option(name: str) -> ScenarioOptionV1:
 
 def _scenario_metadata(session: DebuggerSession) -> ScenarioMetadataV1:
     scenario = get_scenario(session.scenario_name)
+    effective_movement_scale = session.config.ordinary_movement_distance_scale
+    movement_scale_overridden = (
+        effective_movement_scale != session.scenario_default_movement_scale
+    )
     if scenario.mode == "interactive":
         return ScenarioMetadataV1(
             **_scenario_option(scenario.name).model_dump(),
+            ordinary_movement_distance_scale=effective_movement_scale,
+            scenario_default_movement_scale=session.scenario_default_movement_scale,
+            movement_scale_overridden=movement_scale_overridden,
             completed_frame_count=0,
             frame_count=0,
             next_frame_index=None,
@@ -99,6 +106,9 @@ def _scenario_metadata(session: DebuggerSession) -> ScenarioMetadataV1:
     )
     return ScenarioMetadataV1(
         **_scenario_option(scenario.name).model_dump(),
+        ordinary_movement_distance_scale=effective_movement_scale,
+        scenario_default_movement_scale=session.scenario_default_movement_scale,
+        movement_scale_overridden=movement_scale_overridden,
         completed_frame_count=completed,
         frame_count=len(scenario.frames),
         next_frame_index=None if next_frame is None else completed,

@@ -21,6 +21,7 @@ from scripts.dev.visual_debugger.control import (
     select_clicked_target,
     select_controlled_actor,
     select_no_combat,
+    set_movement_scale,
     set_pending_movement,
     submit_interactive,
     submit_joint_action,
@@ -223,6 +224,7 @@ def test_every_debugger_structure_has_the_exact_audited_field_schema() -> None:
             "scenario_name",
             "seed",
             "run_generation",
+            "scenario_default_movement_scale",
             "config",
             "key",
             "state",
@@ -266,6 +268,8 @@ def test_create_session_has_exact_initial_pending_and_epoch_contract() -> None:
     session = _session()
 
     assert session.run_generation == 0
+    assert session.scenario_default_movement_scale == 1.0
+    assert session.config.ordinary_movement_distance_scale == 1.0
     assert isinstance(session.pending_actions, tuple)
     assert len(session.pending_actions) == MAX_AGENT_SLOTS
     assert session.pending_action is session.pending_actions[0]
@@ -846,6 +850,80 @@ def test_reset_replays_identical_initial_session_and_clears_history() -> None:
     assert reset_result.last_reward is None
     assert reset_result.next_script_frame_index == 0
     assert reset_result.run_generation == initial.run_generation + 1
+
+
+def test_movement_scale_reset_rebuilds_full_epoch_without_stepping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    initial = _session("basic_support", controlled_slot=2, verbose=True)
+    advanced = submit_next_script_frame(initial)
+    advanced = replace(advanced, show_ranges=False)
+
+    def forbidden_step(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("movement-scale reset must not call step")
+
+    monkeypatch.setattr(control, "step", forbidden_step)
+    scaled = set_movement_scale(advanced, 0.25)
+
+    assert scaled is not advanced
+    assert scaled.run_generation == advanced.run_generation + 1
+    assert scaled.scenario_default_movement_scale == 1.0
+    assert scaled.config.ordinary_movement_distance_scale == 0.25
+    assert int(scaled.state.step_count) == 0
+    assert scaled.state is not advanced.state
+    assert scaled.observation is not advanced.observation
+    assert scaled.action_mask is not advanced.action_mask
+    assert scaled.info is not advanced.info
+    assert scaled.last_reward is None
+    assert scaled.last_transition is None
+    assert scaled.next_script_frame_index == 0
+    assert not bool(scaled.done_flags.terminated)
+    assert not bool(scaled.done_flags.truncated)
+    assert scaled.controlled_global_slot == 2
+    assert scaled.show_ranges is False
+    assert scaled.verbose_logging is True
+    assert scaled.pending_actions == initial.pending_actions
+
+
+def test_movement_scale_no_op_reset_and_switch_ownership() -> None:
+    session = _session("arena_5v5", controlled_slot=3)
+
+    assert set_movement_scale(session, 1.0) is session
+    assert set_movement_scale(session, None) is session
+
+    overridden = set_movement_scale(session, 0.1)
+    ordinary_reset = reset_session(overridden)
+    switched = switch_scenario(
+        ordinary_reset,
+        get_scenario("status_stack"),
+    )
+    restored = set_movement_scale(overridden, None)
+
+    assert ordinary_reset.config.ordinary_movement_distance_scale == 0.1
+    assert ordinary_reset.scenario_default_movement_scale == 1.0
+    assert ordinary_reset.controlled_global_slot == 3
+    assert switched.config.ordinary_movement_distance_scale == 1.0
+    assert switched.scenario_default_movement_scale == 1.0
+    assert switched.controlled_global_slot == 5
+    assert restored.config.ordinary_movement_distance_scale == 1.0
+    assert restored.scenario_default_movement_scale == 1.0
+    assert restored.run_generation == overridden.run_generation + 1
+
+
+@pytest.mark.parametrize(
+    "movement_scale",
+    (0.0, 0.009, 1.001, float("nan"), float("inf")),
+)
+def test_movement_scale_rejects_invalid_direct_values(
+    movement_scale: float,
+) -> None:
+    with pytest.raises(ValueError, match=r"\[0\.01, 1\.0\]"):
+        set_movement_scale(_session(), movement_scale)
+
+
+def test_movement_scale_rejects_non_float_direct_values() -> None:
+    with pytest.raises(TypeError, match="Python float"):
+        set_movement_scale(_session(), 1)  # type: ignore[arg-type]
 
 
 def test_switch_scenario_preserves_seed_and_toggles_but_clears_live_state() -> None:

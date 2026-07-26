@@ -12,6 +12,7 @@ from scripts.dev.visual_debugger.control import (
     reset_session,
     select_clicked_target,
     select_controlled_actor,
+    set_movement_scale,
     set_pending_movement,
     submit_interactive,
     submit_next_script_frame,
@@ -101,6 +102,12 @@ def test_initial_researcher_frame_has_exact_metadata_and_filtered_menu() -> None
     assert frame.scene.audience_badge == "PRIVILEGED RESEARCHER VIEW"
     assert frame.scenario.name == "arena_5v5"
     assert frame.scenario.mode == "interactive"
+    assert frame.scenario.movement_scale_minimum == 0.01
+    assert frame.scenario.movement_scale_maximum == 1.0
+    assert frame.scenario.movement_scale_step == 0.01
+    assert frame.scenario.ordinary_movement_distance_scale == 1.0
+    assert frame.scenario.scenario_default_movement_scale == 1.0
+    assert not frame.scenario.movement_scale_overridden
     assert not frame.scenario.script_complete
     assert len(frame.available_scenarios) == 7
     assert all(option.audience == "researcher" for option in frame.available_scenarios)
@@ -278,6 +285,23 @@ def test_reset_clears_transition_batch_and_advances_run_generation() -> None:
     assert frame.transition_id is None
     assert frame.event_batch is None
     assert frame.hud.latest_transition is None
+
+
+def test_frame_exposes_effective_and_authored_movement_scale_metadata() -> None:
+    session = set_movement_scale(_session(), 0.01)
+    frame = _frame(session, revision=1)
+    payload = cast(dict[str, object], json.loads(frame.model_dump_json()))
+    scenario_payload = cast(dict[str, object], payload["scenario"])
+
+    assert frame.scenario.ordinary_movement_distance_scale == 0.01
+    assert frame.scenario.scenario_default_movement_scale == 1.0
+    assert frame.scenario.movement_scale_overridden
+    assert scenario_payload["movement_scale_minimum"] == 0.01
+    assert scenario_payload["movement_scale_maximum"] == 1.0
+    assert scenario_payload["movement_scale_step"] == 0.01
+    assert scenario_payload["ordinary_movement_distance_scale"] == 0.01
+    assert scenario_payload["scenario_default_movement_scale"] == 1.0
+    assert scenario_payload["movement_scale_overridden"] is True
 
 
 def test_pov_whole_frame_redacts_hidden_pending_target_and_raw_artifacts() -> None:
