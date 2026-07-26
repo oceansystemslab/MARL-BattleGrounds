@@ -60,6 +60,10 @@ const elements = {
   pendingScope: requiredElement("pending-scope"),
   pendingCard: requiredElement("pending-card"),
   stayButton: requiredElement("stay-button"),
+  commandTargetSelect: requiredElement("command-target-select"),
+  noCombatButton: requiredElement("no-combat-button"),
+  basicButton: requiredElement("basic-button"),
+  ultimateButton: requiredElement("ultimate-button"),
   submitTurnButton: requiredElement("submit-turn-button"),
   advanceScriptButton: requiredElement("advance-script-button"),
   acceptedCard: requiredElement("accepted-card"),
@@ -240,6 +244,7 @@ const DRAFT_KEYS = new Set([
   "arrowdown",
   "arrowleft",
   "arrowright",
+  "0",
   "1",
   "2",
 ]);
@@ -431,6 +436,142 @@ function renderSessionToolbar() {
   renderCommandAvailability();
 }
 
+/**
+ * @param {HTMLButtonElement} button
+ * @param {boolean} selected
+ */
+function setDraftSelection(button, selected) {
+  button.setAttribute("aria-pressed", String(selected));
+  button.dataset.selected = String(selected);
+}
+
+/**
+ * Keep masked controls focusable so their explanation remains inspectable.
+ * Python repeats the exact mask check before any pending row can change.
+ *
+ * @param {HTMLButtonElement} button
+ * @param {boolean} available
+ * @param {string} explanation
+ */
+function setAuthoritativeAvailability(button, available, explanation) {
+  button.setAttribute("aria-disabled", String(!available));
+  button.dataset.authoritativeAvailable = String(available);
+  button.dataset.tooltipKind = "legality";
+  button.dataset.tooltipText = explanation;
+}
+
+/**
+ * @param {Record<string, any>} hud
+ * @param {number} targetAction
+ * @returns {Record<string, any> | null}
+ */
+function candidateLegality(hud, targetAction) {
+  return (
+    asArray(hud.candidate_legalities).find(
+      (candidate) =>
+        isRecord(candidate) && Number(candidate.target_action) === targetAction,
+    ) ?? null
+  );
+}
+
+/**
+ * Rebuild target choices from the current controlled actor's authorized rows.
+ * The select is a view over Python facts, never a client-owned pending model.
+ *
+ * @param {Record<string, any>} hud
+ * @param {Record<string, any>} pending
+ */
+function renderCommandTargets(hud, pending) {
+  const candidates = asArray(hud.candidate_legalities).filter(isRecord);
+  const selectedSlot = isRecord(pending.target) ? pending.target.global_slot : null;
+  const fragment = document.createDocumentFragment();
+  for (const candidate of candidates) {
+    const target = isRecord(candidate.target) ? candidate.target : {};
+    const option = document.createElement("option");
+    const basic = candidate.basic_available === true ? "B ✓" : "B ×";
+    const ultimate = candidate.ultimate_available === true ? "U ✓" : "U ×";
+    if (target.disclosure === "public" && Number.isInteger(target.global_slot)) {
+      option.value = String(target.global_slot);
+      option.textContent = `id_${target.global_slot} · ${basic} · ${ultimate}`;
+      option.selected = Number(target.global_slot) === Number(selectedSlot);
+    } else if (target.disclosure === "target_none") {
+      option.value = "";
+      option.textContent = `No target · ${basic} · ${ultimate}`;
+      option.selected = selectedSlot === null || selectedSlot === undefined;
+    } else {
+      continue;
+    }
+    fragment.append(option);
+  }
+  if (fragment.childNodes.length === 0) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "No authorized targets";
+    fragment.append(option);
+  }
+  elements.commandTargetSelect.replaceChildren(fragment);
+}
+
+/**
+ * @param {Record<string, any>} hud
+ */
+function renderDraftState(hud) {
+  const pending = isRecord(hud.pending_action) ? hud.pending_action : {};
+  const pendingMove = Number(pending.move_action);
+  const movementRows = new Map(
+    asArray(hud.movement_legalities)
+      .filter(isRecord)
+      .map((row) => [Number(row.move_action), row.available]),
+  );
+  const movementButtons = /** @type {NodeListOf<HTMLButtonElement>} */ (
+    elements.commandDeck?.querySelectorAll("button[data-move-action]") ?? []
+  );
+  for (const button of movementButtons) {
+    const moveAction = Number(button.dataset.moveAction);
+    const available = movementRows.get(moveAction);
+    setDraftSelection(button, moveAction === pendingMove);
+    setAuthoritativeAvailability(
+      button,
+      available === true,
+      available === true
+        ? `${button.getAttribute("aria-label") ?? "Movement"} is legal in the current authoritative movement mask.`
+        : `${button.getAttribute("aria-label") ?? "Movement"} is unavailable in the current authoritative movement mask.`,
+    );
+  }
+
+  renderCommandTargets(hud, pending);
+  const targetAction = Number.isInteger(pending.target_action)
+    ? Number(pending.target_action)
+    : 0;
+  const candidate = candidateLegality(hud, targetAction);
+  const basicAvailable = candidate?.basic_available === true;
+  const ultimateAvailable = candidate?.ultimate_available === true;
+  const noCombatSelected =
+    pending.armed_lane === null || (pending.armed_lane === 0 && targetAction === 0);
+  setDraftSelection(elements.noCombatButton, noCombatSelected);
+  setDraftSelection(elements.basicButton, pending.armed_lane === 0 && targetAction > 0);
+  setDraftSelection(elements.ultimateButton, pending.armed_lane === 1);
+  setAuthoritativeAvailability(
+    elements.noCombatButton,
+    true,
+    "No combat is always a valid staged choice; movement can still be submitted.",
+  );
+  setAuthoritativeAvailability(
+    elements.basicButton,
+    basicAvailable,
+    basicAvailable
+      ? "Basic is legal for the currently staged target."
+      : "Basic is unavailable for the currently staged target.",
+  );
+  setAuthoritativeAvailability(
+    elements.ultimateButton,
+    ultimateAvailable,
+    ultimateAvailable
+      ? "Ultimate is legal for the currently staged target."
+      : "Ultimate is unavailable for the currently staged target.",
+  );
+}
+
 function renderCommandAvailability() {
   const disabled =
     state.busy ||
@@ -442,6 +583,9 @@ function renderCommandAvailability() {
   const scenario = scenarioRecord(state.frame);
   const scripted = scenario.mode === "scripted";
   const hud = isRecord(state.frame?.hud) ? state.frame.hud : {};
+  renderDraftState(hud);
+  elements.commandTargetSelect.disabled =
+    disabled || scripted || isTerminal(state.frame);
   elements.submitTurnButton.textContent = scripted
     ? "Manual submit unavailable"
     : hud.pending_submission_scope === "controlled_actor"
@@ -823,6 +967,23 @@ elements.resetButton.addEventListener("click", () => {
   dispatchCommand({ command_type: "reset" });
 });
 
+elements.commandTargetSelect.addEventListener("change", () => {
+  const value = elements.commandTargetSelect.value;
+  if (value === "") {
+    dispatchCommand(keyboardCommand("Escape"));
+    return;
+  }
+  const globalSlot = Number(value);
+  if (!Number.isInteger(globalSlot)) {
+    return;
+  }
+  dispatchCommand({
+    command_type: "roster_selection",
+    role: "target",
+    global_slot: globalSlot,
+  });
+});
+
 elements.exitButton.addEventListener("click", () => {
   dispatchCommand({ command_type: "exit" });
 });
@@ -865,6 +1026,15 @@ if (elements.commandDeck) {
   );
   for (const button of buttons) {
     button.addEventListener("click", () => {
+      if (button.getAttribute("aria-disabled") === "true") {
+        setNotice(
+          button.dataset.tooltipText ??
+            "That pending choice is unavailable in the current authoritative mask.",
+          "warning",
+        );
+        renderConnection();
+        return;
+      }
       dispatchCommand(
         keyboardCommand(button.dataset.key ?? "", {
           shiftKey: button.dataset.shift === "true",

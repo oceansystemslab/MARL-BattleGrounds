@@ -20,6 +20,7 @@ from scripts.dev.visual_debugger.control import (
     reset_session,
     select_clicked_target,
     select_controlled_actor,
+    select_no_combat,
     set_pending_movement,
     submit_interactive,
     submit_joint_action,
@@ -519,6 +520,26 @@ def test_arm_ultimate_for_mage_clears_target() -> None:
     assert armed.pending_action.selected_global_target_slot is None
     assert armed.pending_action.armed_lane == 1
     assert armed.pending_action.arm_origin == "explicit"
+
+
+def test_explicit_no_combat_preserves_draft_context_but_packages_no_combat() -> None:
+    session = select_clicked_target(_session("arena_5v5", controlled_slot=2), 7)
+    session = set_pending_movement(session, MOVE_EAST)
+    session = arm_ultimate(session)
+
+    no_combat = select_no_combat(session)
+    action = build_interactive_joint_action(
+        no_combat.config,
+        no_combat.pending_actions,
+        actor_global_slots=(no_combat.controlled_global_slot,),
+    )
+
+    assert no_combat.pending_action.move_action == MOVE_EAST
+    assert no_combat.pending_action.selected_global_target_slot == 7
+    assert no_combat.pending_action.armed_lane is None
+    assert no_combat.pending_action.arm_origin is None
+    assert int(action.select_target[2]) == 0
+    assert int(action.use_ultimate[2]) == 0
 
 
 def test_clear_target_applies_class_specific_lane_rule() -> None:

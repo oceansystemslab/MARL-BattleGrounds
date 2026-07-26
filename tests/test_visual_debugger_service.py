@@ -168,6 +168,27 @@ def test_repeat_submit_is_consumed_without_revision_or_step() -> None:
     assert service.command_cache_size == 1
 
 
+def test_unavailable_browser_draft_is_a_revision_preserving_no_op() -> None:
+    service = _service()
+    initial = service.session
+
+    result = service.apply_command(
+        _request(
+            "masked-basic",
+            base_revision=0,
+            command=KeyboardCommandV1(key="1"),
+        )
+    )
+
+    assert isinstance(result.payload, CommandResponseV1)
+    assert result.payload.result == "no_op"
+    assert result.payload.frame.revision == 0
+    assert result.payload.frame.simulator_step == 0
+    assert service.session is initial
+    assert result.payload.notice is not None
+    assert "canonical no-combat tuple" in result.payload.notice
+
+
 def test_entering_pov_clears_a_hidden_pending_target_without_stepping() -> None:
     service = _service()
     researcher = build_battlefield_scene(service.session, audience="researcher")

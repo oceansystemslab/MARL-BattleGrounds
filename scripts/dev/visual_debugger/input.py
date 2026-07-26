@@ -22,9 +22,11 @@ from scripts.dev.visual_debugger.control import (
     arm_basic,
     arm_ultimate,
     clear_pending_target,
+    lane_availability,
     reset_session,
     select_clicked_target,
     select_controlled_actor,
+    select_no_combat,
     set_pending_movement,
     submit_interactive,
     submit_next_script_frame,
@@ -49,6 +51,7 @@ from scripts.dev.visual_debugger.scenarios import (
     list_scenarios,
 )
 from scripts.dev.visual_debugger.scene_adapter import build_battlefield_scene
+from scripts.dev.visual_debugger.targeting import global_slot_to_target_action
 
 _MOVEMENT_KEYS = {
     "w": MOVE_NORTH,
@@ -292,7 +295,7 @@ def _dispatch_keyboard(
     scenario = get_scenario(session.scenario_name)
     terminal = _is_terminal(session)
     if scenario.mode == "scripted" and (
-        key in _MOVEMENT_KEYS or key in ("1", "2", "space", "enter")
+        key in _MOVEMENT_KEYS or key in ("0", "1", "2", "space", "enter")
     ):
         return _result(
             session,
@@ -315,13 +318,31 @@ def _dispatch_keyboard(
                 changed=False,
                 notice=_terminal_notice(session),
             )
+        move_action = _MOVEMENT_KEYS[key]
+        if not bool(
+            session.action_mask.move_mask[
+                session.controlled_global_slot,
+                move_action,
+            ]
+        ):
+            return _result(
+                session,
+                view_mode=view_mode,
+                preset=preset,
+                handled=True,
+                changed=False,
+                notice=(
+                    f"Movement action {move_action} is unavailable in the "
+                    "current action mask; pending action unchanged."
+                ),
+            )
         return _pending_edit_result(
             session,
-            set_pending_movement(session, _MOVEMENT_KEYS[key]),
+            set_pending_movement(session, move_action),
             view_mode=view_mode,
             preset=preset,
         )
-    if key in ("1", "2"):
+    if key in ("0", "1", "2"):
         if terminal:
             return _result(
                 session,
@@ -331,7 +352,50 @@ def _dispatch_keyboard(
                 changed=False,
                 notice=_terminal_notice(session),
             )
+        if key == "0":
+            return _pending_edit_result(
+                session,
+                select_no_combat(session),
+                view_mode=view_mode,
+                preset=preset,
+            )
         edited = arm_basic(session) if key == "1" else arm_ultimate(session)
+        edited_pending = edited.pending_action
+        target_action = global_slot_to_target_action(
+            edited.controlled_global_slot,
+            edited_pending.selected_global_target_slot,
+        )
+        if key == "1" and target_action == 0:
+            return _result(
+                session,
+                view_mode=view_mode,
+                preset=preset,
+                handled=True,
+                changed=False,
+                notice=(
+                    "Basic requires a selected target; target-none lane zero is "
+                    "the canonical no-combat tuple. Pending action unchanged."
+                ),
+            )
+        availability = lane_availability(
+            session.action_mask,
+            session.controlled_global_slot,
+            target_action,
+            edited_pending.armed_lane,
+        )
+        if not availability.armed_pair_legal:
+            ability = "Basic" if key == "1" else "Ultimate"
+            return _result(
+                session,
+                view_mode=view_mode,
+                preset=preset,
+                handled=True,
+                changed=False,
+                notice=(
+                    f"{ability} is unavailable for the selected target in the "
+                    "current action mask; pending action unchanged."
+                ),
+            )
         return _pending_edit_result(
             session,
             edited,

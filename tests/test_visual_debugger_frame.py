@@ -26,7 +26,7 @@ from scripts.dev.visual_debugger.protocol import (
 from scripts.dev.visual_debugger.scenarios import get_scenario
 from scripts.dev.visual_debugger.targeting import global_slot_to_target_action
 
-from marl_battlegrounds.core.types import MOVE_EAST, MOVE_NORTH
+from marl_battlegrounds.core.types import MOVE_EAST, MOVE_NORTH, NUM_MOVE_ACTIONS
 
 
 def _session(
@@ -143,6 +143,23 @@ def test_scripted_frame_marks_controlled_pending_row_inspection_only() -> None:
 
 
 @pytest.mark.parametrize("controlled_global_slot", (0, 5))
+def test_controlled_movement_legality_copies_exact_current_mask_row(
+    controlled_global_slot: int,
+) -> None:
+    session = _session(controlled_global_slot=controlled_global_slot)
+    frame = _frame(session)
+
+    assert tuple(
+        legality.move_action for legality in frame.hud.movement_legalities
+    ) == tuple(range(NUM_MOVE_ACTIONS))
+    assert tuple(
+        legality.available for legality in frame.hud.movement_legalities
+    ) == tuple(
+        bool(value) for value in session.action_mask.move_mask[controlled_global_slot]
+    )
+
+
+@pytest.mark.parametrize("controlled_global_slot", (0, 5))
 def test_researcher_candidate_legality_copies_exact_current_mask_rows(
     controlled_global_slot: int,
 ) -> None:
@@ -167,6 +184,10 @@ def test_researcher_candidate_legality_copies_exact_current_mask_rows(
         assert candidate.lane_1_available is bool(
             exact_mask[controlled, candidate.target_action, 1]
         )
+        assert candidate.basic_available is (
+            candidate.target_action > 0 and candidate.lane_0_available
+        )
+        assert candidate.ultimate_available is candidate.lane_1_available
         if candidate.target.global_slot is not None:
             assert candidate.target_action == global_slot_to_target_action(
                 controlled,
@@ -418,6 +439,7 @@ def test_post_transition_pov_response_is_a_positive_allowlisted_envelope() -> No
         "pending_actions",
         "pending_action",
         "latest_transition",
+        "movement_legalities",
         "candidate_legalities",
         "diagnostics",
     }

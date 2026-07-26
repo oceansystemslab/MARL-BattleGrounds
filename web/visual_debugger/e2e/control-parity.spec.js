@@ -274,11 +274,24 @@ test("joint turn drafts survive actor cycling and submit exactly once", async ({
   );
 
   const battlefield = page.locator("#battlefield");
+  await expect(page.locator("#basic-button")).toHaveAttribute("aria-disabled", "true");
+  await expect(page.locator("#basic-button")).not.toHaveAttribute("disabled");
+  await page.locator("#basic-button").hover();
+  await page.locator("#basic-button").dispatchEvent("click");
+  await expect(page.locator("#notice")).toContainText(
+    "Basic is unavailable for the currently staged target.",
+  );
+  await expect(page.locator("#revision-value")).toHaveText(String(revision));
   await battlefield.focus();
-  await page.keyboard.press("d");
+  await page.keyboard.press("1");
+  await expect(page.locator("#notice")).toContainText("canonical no-combat tuple");
+  await expect(page.locator("#revision-value")).toHaveText(String(revision));
+
+  await battlefield.focus();
+  await page.getByRole("button", { name: "Move east" }).click();
   revision += 1;
   await expect(page.locator("#revision-value")).toHaveText(String(revision));
-  await page.getByRole("button", { name: "Target id_6" }).click();
+  await page.locator("#command-target-select").selectOption("6");
   revision += 1;
   await expect(page.locator("#revision-value")).toHaveText(String(revision));
   const actor0 = page.locator('.pending-action-row[data-actor-slot="0"]');
@@ -290,10 +303,10 @@ test("joint turn drafts survive actor cycling and submit exactly once", async ({
   await page.keyboard.press("Tab");
   revision += 1;
   await expect(page.locator("#revision-value")).toHaveText(String(revision));
-  await page.keyboard.press("w");
+  await page.getByRole("button", { name: "Move north", exact: true }).click();
   revision += 1;
   await expect(page.locator("#revision-value")).toHaveText(String(revision));
-  await page.getByRole("button", { name: "Target id_5" }).click();
+  await page.locator("#command-target-select").selectOption("5");
   revision += 1;
   await expect(page.locator("#revision-value")).toHaveText(String(revision));
   const actor1 = page.locator('.pending-action-row[data-actor-slot="1"]');
@@ -313,6 +326,40 @@ test("joint turn drafts survive actor cycling and submit exactly once", async ({
   await expect(actor1).toHaveAttribute("data-controlled", "false");
   await expect(actor1).toHaveAttribute("data-move-action", "1");
   await expect(actor1).toHaveAttribute("data-target-slot", "5");
+
+  for (let actorSlot = 2; actorSlot < 10; actorSlot += 1) {
+    await page.getByRole("button", { name: `Control id_${actorSlot}` }).click();
+    revision += 1;
+    await expect(page.locator("#revision-value")).toHaveText(String(revision));
+    const movementName = actorSlot < 5 ? "Move east" : "Move west";
+    await page.getByRole("button", { name: movementName, exact: true }).click();
+    revision += 1;
+    await expect(page.locator("#revision-value")).toHaveText(String(revision));
+    await expect(
+      page.locator(
+        `.pending-action-row[data-actor-slot="${actorSlot}"][data-controlled="true"]`,
+      ),
+    ).toHaveAttribute("data-move-action", actorSlot < 5 ? "3" : "4");
+  }
+
+  await page.getByRole("button", { name: "Control id_0" }).click();
+  revision += 1;
+  await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  await expect(page.getByRole("button", { name: "Move east" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(page.locator("#command-target-select")).toHaveValue("6");
+  await expect(page.locator("#no-combat-button")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  const stagedMoves = await page
+    .locator(".pending-action-row")
+    .evaluateAll((rows) =>
+      rows.map((row) => Number(row.getAttribute("data-move-action"))),
+    );
+  expect(stagedMoves).toEqual([3, 1, 3, 3, 3, 4, 4, 4, 4, 4]);
 
   let enterCommands = 0;
   await page.route("**/api/command", async (route) => {

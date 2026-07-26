@@ -11,7 +11,11 @@ from pydantic import (
     model_validator,
 )
 
-from marl_battlegrounds.core.types import MAX_AGENT_SLOTS, NUM_TARGET_ACTIONS
+from marl_battlegrounds.core.types import (
+    MAX_AGENT_SLOTS,
+    NUM_MOVE_ACTIONS,
+    NUM_TARGET_ACTIONS,
+)
 from marl_battlegrounds.rendering.scene import (
     BattlefieldSceneV1,
     TargetDisclosure,
@@ -69,6 +73,7 @@ _ScenarioName = Annotated[
 ]
 _KeyName = Annotated[str, StringConstraints(min_length=1, max_length=64)]
 _GlobalSlot = Annotated[int, Field(ge=0, lt=MAX_AGENT_SLOTS)]
+_MoveAction = Annotated[int, Field(ge=0, lt=NUM_MOVE_ACTIONS)]
 _TargetAction = Annotated[int, Field(ge=0, lt=NUM_TARGET_ACTIONS)]
 _NonNegativeInt = Annotated[int, Field(ge=0)]
 _FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
@@ -271,6 +276,8 @@ class CandidateLegalityCardV1(_ProtocolModel):
     target: TargetReferenceV1
     lane_0_available: bool
     lane_1_available: bool
+    basic_available: bool
+    ultimate_available: bool
 
     @model_validator(mode="after")
     def _validate_target(self) -> Self:
@@ -281,7 +288,23 @@ class CandidateLegalityCardV1(_ProtocolModel):
             raise ValueError(
                 "positive candidate target actions require public references."
             )
+        expected_basic = self.target_action > 0 and self.lane_0_available
+        if self.basic_available != expected_basic:
+            raise ValueError(
+                "basic availability must exclude canonical target-none lane zero."
+            )
+        if self.ultimate_available != self.lane_1_available:
+            raise ValueError(
+                "ultimate availability must match the exact lane-one mask value."
+            )
         return self
+
+
+class MovementLegalityCardV1(_ProtocolModel):
+    """One controlled-actor movement category copied from the current mask."""
+
+    move_action: _MoveAction
+    available: bool
 
 
 class HudFrameV1(_ProtocolModel):
@@ -292,6 +315,7 @@ class HudFrameV1(_ProtocolModel):
     pending_actions: tuple[PendingActionCardV1, ...]
     pending_action: PendingActionCardV1
     latest_transition: LatestTransitionCardV1 | None
+    movement_legalities: tuple[MovementLegalityCardV1, ...]
     candidate_legalities: tuple[CandidateLegalityCardV1, ...] = ()
     diagnostics: tuple[DiagnosticFactV1, ...] = ()
 
@@ -329,6 +353,14 @@ class HudFrameV1(_ProtocolModel):
         if controlled_pending is None or self.pending_action != controlled_pending:
             raise ValueError(
                 "pending_action must equal the controlled pending_actions row."
+            )
+        movement_actions = tuple(
+            legality.move_action for legality in self.movement_legalities
+        )
+        if movement_actions != tuple(range(NUM_MOVE_ACTIONS)):
+            raise ValueError(
+                "movement legality rows must cover every movement action in "
+                "canonical order."
             )
         expected_pending_slots = (
             self.roster_global_slots

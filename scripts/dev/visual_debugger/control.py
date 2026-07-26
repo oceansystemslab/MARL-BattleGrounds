@@ -368,6 +368,18 @@ def arm_ultimate(session: DebuggerSession) -> DebuggerSession:
     )
 
 
+def select_no_combat(session: DebuggerSession) -> DebuggerSession:
+    """Stage no-combat intent while preserving movement and target context."""
+    return _replace_controlled_pending_action(
+        session,
+        replace(
+            session.pending_action,
+            armed_lane=None,
+            arm_origin=None,
+        ),
+    )
+
+
 def set_pending_movement(
     session: DebuggerSession,
     move_action: int,

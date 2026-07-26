@@ -15,6 +15,7 @@ from scripts.dev.visual_debugger.protocol import (
     HudFrameV1,
     KeyboardCommandV1,
     LatestTransitionCardV1,
+    MovementLegalityCardV1,
     PendingActionCardV1,
     ResetCommandV1,
     RosterSelectionCommandV1,
@@ -23,6 +24,67 @@ from scripts.dev.visual_debugger.protocol import (
     SetViewCommandV1,
     TargetReferenceV1,
 )
+
+from marl_battlegrounds.core.types import NUM_MOVE_ACTIONS
+
+
+def _movement_legalities() -> tuple[MovementLegalityCardV1, ...]:
+    return tuple(
+        MovementLegalityCardV1(move_action=move_action, available=True)
+        for move_action in range(NUM_MOVE_ACTIONS)
+    )
+
+
+def test_hud_movement_legality_requires_exact_canonical_action_rows() -> None:
+    no_target = TargetReferenceV1(disclosure="target_none", global_slot=None)
+    pending = PendingActionCardV1(
+        actor_global_slot=0,
+        move_action=0,
+        target_action=0,
+        armed_lane=None,
+        arm_origin=None,
+        target=no_target,
+        movement_mask_value=True,
+        pair_mask_value=None,
+        summary="no combat",
+    )
+    legalities = _movement_legalities()
+
+    hud = HudFrameV1(
+        roster_global_slots=(0,),
+        controlled_global_slot=0,
+        selected_global_slot=None,
+        pending_submission_scope="controlled_actor",
+        pending_actions=(pending,),
+        pending_action=pending,
+        latest_transition=None,
+        movement_legalities=legalities,
+    )
+
+    assert tuple(row.move_action for row in hud.movement_legalities) == tuple(
+        range(NUM_MOVE_ACTIONS)
+    )
+    for invalid_rows in (
+        legalities[:-1],
+        tuple(reversed(legalities)),
+        (*legalities[:-1], legalities[0]),
+    ):
+        with pytest.raises(ValidationError, match="canonical order"):
+            HudFrameV1(
+                roster_global_slots=(0,),
+                controlled_global_slot=0,
+                selected_global_slot=None,
+                pending_submission_scope="controlled_actor",
+                pending_actions=(pending,),
+                pending_action=pending,
+                latest_transition=None,
+                movement_legalities=invalid_rows,
+            )
+    with pytest.raises(ValidationError):
+        MovementLegalityCardV1(
+            move_action=NUM_MOVE_ACTIONS,
+            available=True,
+        )
 
 
 @pytest.mark.parametrize(
@@ -193,6 +255,8 @@ def test_hud_candidate_legality_requires_target_none_roster_and_actor_mapping() 
         target=no_target,
         lane_0_available=True,
         lane_1_available=False,
+        basic_available=False,
+        ultimate_available=False,
     )
     public_actor = CandidateLegalityCardV1(
         target_action=1,
@@ -202,6 +266,8 @@ def test_hud_candidate_legality_requires_target_none_roster_and_actor_mapping() 
         ),
         lane_0_available=False,
         lane_1_available=True,
+        basic_available=False,
+        ultimate_available=True,
     )
 
     hud = HudFrameV1(
@@ -212,10 +278,20 @@ def test_hud_candidate_legality_requires_target_none_roster_and_actor_mapping() 
         pending_actions=(pending,),
         pending_action=pending,
         latest_transition=None,
+        movement_legalities=_movement_legalities(),
         candidate_legalities=(target_none, public_actor),
     )
     assert hud.candidate_legalities == (target_none, public_actor)
 
+    with pytest.raises(ValidationError, match="canonical target-none"):
+        CandidateLegalityCardV1(
+            target_action=0,
+            target=no_target,
+            lane_0_available=True,
+            lane_1_available=False,
+            basic_available=True,
+            ultimate_available=False,
+        )
     with pytest.raises(ValidationError, match="exactly one target-none"):
         HudFrameV1(
             roster_global_slots=(0,),
@@ -225,6 +301,7 @@ def test_hud_candidate_legality_requires_target_none_roster_and_actor_mapping() 
             pending_actions=(pending,),
             pending_action=pending,
             latest_transition=None,
+            movement_legalities=_movement_legalities(),
             candidate_legalities=(public_actor,),
         )
     with pytest.raises(ValidationError, match="exactly match the roster"):
@@ -236,6 +313,7 @@ def test_hud_candidate_legality_requires_target_none_roster_and_actor_mapping() 
             pending_actions=(pending,),
             pending_action=pending,
             latest_transition=None,
+            movement_legalities=_movement_legalities(),
             candidate_legalities=(target_none, public_actor),
         )
     with pytest.raises(ValidationError, match="target actions must be unique"):
@@ -247,6 +325,7 @@ def test_hud_candidate_legality_requires_target_none_roster_and_actor_mapping() 
             pending_actions=(pending,),
             pending_action=pending,
             latest_transition=None,
+            movement_legalities=_movement_legalities(),
             candidate_legalities=(target_none, public_actor, public_actor),
         )
     with pytest.raises(ValidationError, match="public target slots must be unique"):
@@ -258,6 +337,7 @@ def test_hud_candidate_legality_requires_target_none_roster_and_actor_mapping() 
             pending_actions=(pending,),
             pending_action=pending,
             latest_transition=None,
+            movement_legalities=_movement_legalities(),
             candidate_legalities=(
                 target_none,
                 public_actor,
@@ -266,6 +346,8 @@ def test_hud_candidate_legality_requires_target_none_roster_and_actor_mapping() 
                     target=public_actor.target,
                     lane_0_available=True,
                     lane_1_available=True,
+                    basic_available=True,
+                    ultimate_available=True,
                 ),
             ),
         )
@@ -278,12 +360,16 @@ def test_hud_candidate_legality_requires_target_none_roster_and_actor_mapping() 
         target=TargetReferenceV1(disclosure="public", global_slot=5),
         lane_0_available=True,
         lane_1_available=False,
+        basic_available=True,
+        ultimate_available=False,
     )
     team_b_team_a_target = CandidateLegalityCardV1(
         target_action=6,
         target=TargetReferenceV1(disclosure="public", global_slot=0),
         lane_0_available=False,
         lane_1_available=True,
+        basic_available=False,
+        ultimate_available=True,
     )
     team_b_hud = HudFrameV1(
         roster_global_slots=(0, 5),
@@ -293,6 +379,7 @@ def test_hud_candidate_legality_requires_target_none_roster_and_actor_mapping() 
         pending_actions=(team_b_pending,),
         pending_action=team_b_pending,
         latest_transition=None,
+        movement_legalities=_movement_legalities(),
         candidate_legalities=(
             target_none,
             team_b_self,
@@ -312,6 +399,7 @@ def test_hud_candidate_legality_requires_target_none_roster_and_actor_mapping() 
             pending_actions=(team_b_pending,),
             pending_action=team_b_pending,
             latest_transition=None,
+            movement_legalities=_movement_legalities(),
             candidate_legalities=(
                 target_none,
                 team_b_self,
@@ -343,6 +431,7 @@ def test_hud_pending_scope_requires_exact_order_alias_and_playback_label() -> No
         pending_actions=(pending_0, pending_1),
         pending_action=pending_0,
         latest_transition=None,
+        movement_legalities=_movement_legalities(),
     )
     assert (
         tuple(pending.actor_global_slot for pending in joint.pending_actions)
@@ -358,6 +447,7 @@ def test_hud_pending_scope_requires_exact_order_alias_and_playback_label() -> No
             pending_actions=(pending_0,),
             pending_action=pending_0,
             latest_transition=None,
+            movement_legalities=_movement_legalities(),
         )
     with pytest.raises(ValidationError, match="must be unique"):
         HudFrameV1(
@@ -368,6 +458,7 @@ def test_hud_pending_scope_requires_exact_order_alias_and_playback_label() -> No
             pending_actions=(pending_0, pending_0),
             pending_action=pending_0,
             latest_transition=None,
+            movement_legalities=_movement_legalities(),
         )
     with pytest.raises(ValidationError, match="must equal"):
         HudFrameV1(
@@ -378,6 +469,7 @@ def test_hud_pending_scope_requires_exact_order_alias_and_playback_label() -> No
             pending_actions=(pending_0, pending_1),
             pending_action=pending_0.model_copy(update={"summary": "stale"}),
             latest_transition=None,
+            movement_legalities=_movement_legalities(),
         )
     with pytest.raises(ValidationError, match="labels must match"):
         HudFrameV1(
@@ -388,6 +480,7 @@ def test_hud_pending_scope_requires_exact_order_alias_and_playback_label() -> No
             pending_actions=(pending_0,),
             pending_action=pending_0,
             latest_transition=None,
+            movement_legalities=_movement_legalities(),
         )
 
     playback = pending_0.model_copy(update={"label": "PLAYBACK / INSPECTION ONLY"})
@@ -400,6 +493,7 @@ def test_hud_pending_scope_requires_exact_order_alias_and_playback_label() -> No
             pending_actions=(playback,),
             pending_action=playback,
             latest_transition=None,
+            movement_legalities=_movement_legalities(),
         ).pending_action.label
         == "PLAYBACK / INSPECTION ONLY"
     )
@@ -464,4 +558,5 @@ def test_hud_rejects_public_action_endpoints_absent_from_authorized_roster() -> 
             pending_actions=(pending,),
             pending_action=pending,
             latest_transition=latest,
+            movement_legalities=_movement_legalities(),
         )

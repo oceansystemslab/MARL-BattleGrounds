@@ -281,28 +281,32 @@ function addCandidateLegality(container, hud) {
           : "undisclosed";
     const lane0Available = Boolean(candidate.lane_0_available);
     const lane1Available = Boolean(candidate.lane_1_available);
+    const basicAvailable = Boolean(candidate.basic_available);
+    const ultimateAvailable = Boolean(candidate.ultimate_available);
     const row = htmlElement("div", "candidate-legality-row");
     row.dataset.targetAction = String(targetAction);
     row.dataset.lane0Available = String(lane0Available);
     row.dataset.lane1Available = String(lane1Available);
+    row.dataset.basicAvailable = String(basicAvailable);
+    row.dataset.ultimateAvailable = String(ultimateAvailable);
     if (targetSlot !== null) {
       row.dataset.targetSlot = String(targetSlot);
     }
     row.setAttribute(
       "aria-label",
-      `${targetLabel}, target action ${targetAction}, Basic ${lane0Available ? "available" : "unavailable"}, Ultimate ${lane1Available ? "available" : "unavailable"}`,
+      `${targetLabel}, target action ${targetAction}, Basic ${basicAvailable ? "available" : "unavailable"}, Ultimate ${ultimateAvailable ? "available" : "unavailable"}`,
     );
     row.append(
       htmlElement("strong", "candidate-legality-row__target", targetLabel),
       htmlElement(
         "span",
         "candidate-legality-row__lane",
-        `0/B ${lane0Available ? "Available" : "Unavailable"}`,
+        `Basic ${basicAvailable ? "Available" : "Unavailable"}`,
       ),
       htmlElement(
         "span",
         "candidate-legality-row__lane",
-        `1/U ${lane1Available ? "Available" : "Unavailable"}`,
+        `Ultimate ${ultimateAvailable ? "Available" : "Unavailable"}`,
       ),
     );
     rows.append(row);

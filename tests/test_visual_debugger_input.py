@@ -5,6 +5,7 @@ from dataclasses import replace
 import jax.numpy as jnp
 import pytest
 from scripts.dev.visual_debugger.control import (
+    arm_ultimate,
     create_session,
     select_clicked_target,
     select_controlled_actor,
@@ -28,6 +29,7 @@ from scripts.dev.visual_debugger.protocol import (
 )
 from scripts.dev.visual_debugger.scenarios import get_scenario
 from scripts.dev.visual_debugger.scene_adapter import build_battlefield_scene
+from scripts.dev.visual_debugger.targeting import global_slot_to_target_action
 
 from marl_battlegrounds.core.types import (
     MAX_AGENT_SLOTS,
@@ -76,6 +78,7 @@ def _session(
         ("left", None, "arrowleft"),
         ("RIGHT", None, "arrowright"),
         ("X", None, "x"),
+        ("0", None, "0"),
     ),
 )
 def test_key_normalization_covers_supported_aliases(
@@ -141,6 +144,124 @@ def test_stay_key_resets_only_the_controlled_actor_draft() -> None:
     assert result.session.key is session.key
 
 
+def test_keyboard_movement_rejects_an_unavailable_current_mask_category() -> None:
+    session = _session()
+    masked = replace(
+        session,
+        action_mask=session.action_mask._replace(
+            move_mask=session.action_mask.move_mask.at[
+                session.controlled_global_slot,
+                MOVE_EAST,
+            ].set(False)
+        ),
+    )
+
+    result = dispatch_command(
+        masked,
+        KeyboardCommandV1(key="d"),
+        view_mode="researcher",
+        preset="analysis",
+        include_stress=False,
+    )
+
+    assert result.handled
+    assert not result.changed
+    assert result.session is masked
+    assert result.notice is not None
+    assert "current action mask" in result.notice
+
+
+@pytest.mark.parametrize(("key", "lane"), (("1", 0), ("2", 1)))
+def test_keyboard_combat_lane_rejects_an_unavailable_exact_pair(
+    key: str,
+    lane: int,
+) -> None:
+    session = _session(controlled_slot=2)
+    target_slot = 7
+    target_action = global_slot_to_target_action(
+        session.controlled_global_slot,
+        target_slot,
+    )
+    joint_mask = session.action_mask.select_target_use_ultimate_joint_mask.at[
+        session.controlled_global_slot,
+        target_action,
+        lane,
+    ].set(False)
+    masked = replace(
+        session,
+        action_mask=session.action_mask._replace(
+            select_target_use_ultimate_joint_mask=joint_mask
+        ),
+    )
+    selected = select_clicked_target(masked, target_slot)
+    pending_before = selected.pending_action
+
+    result = dispatch_command(
+        selected,
+        KeyboardCommandV1(key=key),
+        view_mode="researcher",
+        preset="analysis",
+        include_stress=False,
+    )
+
+    assert result.handled
+    assert not result.changed
+    assert result.session is selected
+    assert result.session.pending_action == pending_before
+    assert result.notice is not None
+    assert "current action mask" in result.notice
+
+
+def test_keyboard_basic_does_not_alias_canonical_target_none_no_combat() -> None:
+    session = _session(controlled_slot=0)
+    assert bool(
+        session.action_mask.select_target_use_ultimate_joint_mask[
+            session.controlled_global_slot,
+            0,
+            0,
+        ]
+    )
+
+    result = dispatch_command(
+        session,
+        KeyboardCommandV1(key="1"),
+        view_mode="researcher",
+        preset="analysis",
+        include_stress=False,
+    )
+
+    assert result.handled
+    assert not result.changed
+    assert result.session is session
+    assert result.notice is not None
+    assert "canonical no-combat tuple" in result.notice
+
+
+def test_zero_key_stages_explicit_no_combat_without_losing_draft_context() -> None:
+    session = _session(controlled_slot=2)
+    session = select_clicked_target(session, 7)
+    session = set_pending_movement(session, MOVE_EAST)
+    session = arm_ultimate(session)
+
+    result = dispatch_command(
+        session,
+        KeyboardCommandV1(key="0"),
+        view_mode="researcher",
+        preset="analysis",
+        include_stress=False,
+    )
+
+    assert result.handled
+    assert result.changed
+    assert result.session.pending_action.move_action == MOVE_EAST
+    assert result.session.pending_action.selected_global_target_slot == 7
+    assert result.session.pending_action.armed_lane is None
+    assert result.session.pending_action.arm_origin is None
+    assert result.session.state is session.state
+    assert result.session.action_mask is session.action_mask
+    assert result.session.key is session.key
+
+
 @pytest.mark.parametrize("key", (" ", "Enter", "n"))
 def test_repeat_submission_keys_are_consumed_without_stepping(key: str) -> None:
     session = _session()
@@ -160,7 +281,7 @@ def test_repeat_submission_keys_are_consumed_without_stepping(key: str) -> None:
     assert result.session.key is session.key
 
 
-@pytest.mark.parametrize("key", ("w", "1", "2", "Enter", " "))
+@pytest.mark.parametrize("key", ("w", "0", "1", "2", "Enter", " "))
 def test_scripted_playback_rejects_manual_drafts_and_submit_keys(key: str) -> None:
     session = _session("basic_support")
     result = dispatch_command(

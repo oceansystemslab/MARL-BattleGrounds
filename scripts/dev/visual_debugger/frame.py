@@ -25,6 +25,7 @@ from scripts.dev.visual_debugger.protocol import (
     DiagnosticFactV1,
     HudFrameV1,
     LatestTransitionCardV1,
+    MovementLegalityCardV1,
     PendingActionCardV1,
     PendingSubmissionScope,
     Preset,
@@ -587,6 +588,8 @@ def _candidate_legalities(
             ),
             lane_0_available=bool(exact_mask[controlled, 0, 0]),
             lane_1_available=bool(exact_mask[controlled, 0, 1]),
+            basic_available=False,
+            ultimate_available=bool(exact_mask[controlled, 0, 1]),
         )
     ]
     for agent in scene.agents:
@@ -603,9 +606,26 @@ def _candidate_legalities(
                 ),
                 lane_0_available=bool(exact_mask[controlled, target_action, 0]),
                 lane_1_available=bool(exact_mask[controlled, target_action, 1]),
+                basic_available=bool(exact_mask[controlled, target_action, 0]),
+                ultimate_available=bool(exact_mask[controlled, target_action, 1]),
             )
         )
     return tuple(rows)
+
+
+def _movement_legalities(
+    session: DebuggerSession,
+) -> tuple[MovementLegalityCardV1, ...]:
+    """Copy the controlled actor's exact current movement-mask row."""
+    controlled = session.controlled_global_slot
+    exact_mask = session.action_mask.move_mask
+    return tuple(
+        MovementLegalityCardV1(
+            move_action=move_action,
+            available=bool(exact_mask[controlled, move_action]),
+        )
+        for move_action in range(NUM_MOVE_ACTIONS)
+    )
 
 
 def _hud_frame(
@@ -640,6 +660,7 @@ def _hud_frame(
             scene,
             view_mode=view_mode,
         ),
+        movement_legalities=_movement_legalities(session),
         candidate_legalities=_candidate_legalities(session, scene),
         diagnostics=_diagnostics(session, scene, revision=revision),
     )

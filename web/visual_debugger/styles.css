@@ -1214,6 +1214,44 @@ select {
   flex: 1 1 6rem;
 }
 
+.command-target {
+  display: grid;
+  grid-template-columns: auto minmax(7.5rem, 1fr);
+  gap: 0.35rem;
+  align-items: center;
+  margin-bottom: 0.4rem;
+  color: var(--text-muted);
+  font-size: 0.68rem;
+}
+
+.command-target select {
+  min-width: 0;
+  width: 100%;
+}
+
+.command-deck button[data-selected="true"] {
+  border-color: var(--text);
+  color: var(--text);
+  background:
+    linear-gradient(135deg, rgb(45 212 191 / 22%), rgb(167 139 250 / 18%)), var(--panel);
+  box-shadow:
+    0 0 0 1px rgb(244 247 251 / 72%) inset,
+    0 0 0.75rem rgb(34 211 238 / 22%);
+}
+
+.command-deck button[aria-disabled="true"]:not(:disabled) {
+  border-color: color-mix(in srgb, var(--danger) 70%, var(--border));
+  color: color-mix(in srgb, var(--danger) 70%, var(--text-muted));
+  background: color-mix(in srgb, var(--danger) 7%, var(--panel));
+  opacity: 0.62;
+  cursor: not-allowed;
+}
+
+.command-deck button[aria-disabled="true"][data-selected="true"]:not(:disabled) {
+  opacity: 0.85;
+  box-shadow: 0 0 0 1px var(--danger) inset;
+}
+
 .movement-grid {
   display: grid;
   grid-template-columns: repeat(3, 2.25rem);

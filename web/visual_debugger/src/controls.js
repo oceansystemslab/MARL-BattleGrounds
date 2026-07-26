@@ -7,6 +7,7 @@ const GAME_KEYS = new Set([
   "ArrowRight",
   " ",
   "Enter",
+  "0",
   "1",
   "2",
   "[",
