@@ -11,14 +11,15 @@ environment.
 
 | Group | Purpose |
 | --- | --- |
-| Base | JAX environment, arrays, validation, and the live loopback browser debugger. |
+| Base | JAX environment, arrays, validation, and the live loopback Visual Debugger and Analyzer. |
 | `cuda13` | CUDA 13 JAX execution. |
 | `training` | Learner/optimizer/checkpoint tooling. |
 | `interop` | Gymnasium and PettingZoo adapters. |
-| `viz` | Optional Matplotlib static/RGB/headless rendering. |
+| `viz` | Optional Matplotlib static/headless figure export. |
 | `dev` | Pytest, Ruff, Pyright, and pre-commit. |
 
-The live browser debugger uses base Python dependencies and a modern browser.
+The live Visual Debugger and Analyzer uses base Python dependencies and a
+modern browser.
 The shell launcher activates `viz` only for `--static`. Python CI installs
 `dev+viz` so supported static painter behavior is exercised rather than
 skipped.

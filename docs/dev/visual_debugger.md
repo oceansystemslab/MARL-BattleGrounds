@@ -1,6 +1,7 @@
-# Milestone 5 visual debugger
+# Milestone 5 Visual Debugger and Analyzer
 
-The Milestone 5 visual debugger is an explicit-submit research tool for
+The Milestone 5 Visual Debugger and Analyzer is an explicit-submit research
+tool for
 inspecting battlefield geometry, exact action-mask values, pending actions,
 accepted actions, combat consequences, statuses, and selected-target facts.
 The live application uses a local browser. A stateless Matplotlib snapshot
@@ -113,7 +114,7 @@ latest frame and a notice that another client advanced the session. Connection
 loss shows an offline state; Reconnect fetches current authority and never
 replays a submit.
 
-Closing the browser tab does not stop Python. Use **Exit debugger** or `Ctrl-C`
+Closing the browser tab does not stop Python. Use **Exit analyzer** or `Ctrl-C`
 in the launching terminal.
 
 ## Focus and controls
@@ -168,9 +169,11 @@ Agent POV authorizes only the controlled actor; all other rows are neutralized
 server-side. Scripted scenarios are inspection-only for manual drafts, and `N`
 advances their preflighted trajectory.
 
-Unavailable in-domain Basic or Ultimate pairs may be armed deliberately so the
-authoritative simulator can demonstrate rejection. The browser does not
-pre-filter or invent a rejection cause.
+Unavailable movement and lane choices remain visible, red/dim, and
+explainable, but normal browser input cannot execute them. Python repeats the
+exact mask check before changing a pending row. Low-level diagnostic helpers
+retain the deliberate masked-draft path used by rejection-analysis tests; the
+live deck does not expose that path or invent a rejection cause.
 
 After a successful interactive transition:
 
@@ -183,6 +186,19 @@ After a successful interactive transition:
 
 Terminal or truncated sessions block submissions before key splitting while
 leaving inspection, reset, view, preset, and scenario controls available.
+
+### Movement-scale reset
+
+The toolbar exposes the authoritative ordinary-movement scale from `0.01`
+through `1.00` in hundredth increments, plus shortcuts for `0.10` and the
+scenario-authored default. Dragging previews the two-decimal value locally;
+one command is sent only when the value is committed.
+
+Changing scale rebuilds a coherent reset epoch and calls `step` zero times. It
+preserves the seed, view, preset, range visibility, and a still-valid
+controlled slot while clearing transition events, reward, diagnostics, pending
+rows, and scripted progress. Ordinary Reset preserves the current override;
+switching scenarios restores the destination scenario's authored default.
 
 ## Views and presets
 
@@ -228,6 +244,11 @@ it is outside the supported review contract.
 
 Exact IDs are durable in the roster. Battlefield identity tags appear for
 selection/hover when space permits, avoiding permanent `id_N` clutter.
+One delegated tooltip explains the highest-priority authorized fact beneath
+the pointer or keyboard focus. Statuses, modifiers, overflow, legality, and
+cooldowns outrank agents; agents outrank event routes, obstacles, ranges, and
+auras. The tooltip switches immediately, stays within the viewport, and cannot
+explain a fact omitted from an agent-POV payload.
 
 ## Visual vocabulary
 
@@ -239,7 +260,7 @@ selection/hover when space permits, avoiding permanent `id_N` clutter.
 | Team B | Solid red physical perimeter plus a right-edge chevron, so team is not color-only. |
 | Mage | Aqua arena-star glyph with `M` fallback. |
 | Warrior | Bronze shield glyph with `W` fallback. |
-| Hunter | Green target glyph with `H` fallback. |
+| Hunter | Lime (`#84CC16`) bow, straight string, and arrow glyph with `H` fallback. |
 | Rogue | Yellow twin-blade glyph with `R` fallback. |
 | Priest | Pink healing-cross glyph with `P` fallback. |
 | Health | Inset successor-health ring; exact value remains in the roster. |
@@ -250,6 +271,7 @@ selection/hover when space permits, avoiding permanent `id_N` clutter.
 | Ultimate range | Purple dash-dot stroke. |
 | Mage/Warrior aura | Low-alpha cyan/bronze tint only, with no border. |
 | Basic/Ultimate legality | Detached selected-target `0/B` and `1/U` pills using exact mask values. |
+| Ultimate cooldown | Class-specific Ultimate icon plus exact positive tick count in a separate collision-aware dock; absent at zero. |
 
 Aura tint has no perimeter so it cannot be confused with observation, Basic,
 Ultimate, team, health, controlled, or target boundaries.
@@ -262,29 +284,37 @@ glyph but retain an accent and exact accessible name. Candidate docks use
 deterministic north/east/west/south anchors, bounded leader ticks, and overflow
 accounting; the roster always retains complete exact status facts.
 
-The supported durable vocabulary includes three stun channels, three slow
-channels, anti-heal, Freedom, Burst, and effective aura modifiers.
+The supported durable vocabulary includes three source-class stun channels
+sharing one canonical stun glyph, three source-class slow channels sharing one
+canonical swirl, anti-heal, Freedom, Burst, and effective aura modifiers.
+Source identity remains in each token's accent and accessible name. Overflow
+is neutral monochrome and its tooltip enumerates every hidden fact.
 
 Human-facing floating values, health values, durations, and multipliers show at
 most two decimal places. Final font geometry is measured before placement.
-Numeric truth takes priority over decorative glyphs: a glyph yields or text is
-width-fitted before any number may overlap an icon or escape its cell.
+Supported durations and cooldowns reserve separate icon and number
+compartments. Extraordinary future values may use a measured neutral fallback,
+but a number never overlaps an icon or escapes its cell.
 
 ### Damage, healing, targeting, and class actions
 
 | Class | Basic | Ultimate activation |
 | --- | --- | --- |
-| Mage | Directional damage route and red impact. | Source-local expanding Burst ring; durable Burst remains a separate status token. |
-| Warrior | Directional damage route and red impact. | Directional Charge impact plus the exact public before/after displacement chord. |
-| Hunter | Directional damage route and red impact. | Directional Trap delivery/freeze impact; durable Trap and its ending lifecycle remain separate. |
-| Rogue | Directional damage route and red impact. | Directional Poison needle/droplet and target splash; durable consequences remain separate. |
-| Priest | Rounded directional healing tether and green recipient pulse. | Stronger Holy Word route with dual healing pulse. |
+| Mage | Directional damage route terminating in a red minus. | Source-local expanding Burst ring and arena-star flare; durable Burst remains a separate status token. |
+| Warrior | Directional damage route terminating in a red minus. | Directional Charge impact/flare plus the exact public before/after displacement chord. |
+| Hunter | Directional damage route terminating in a red minus. | Directional Trap delivery with a neutral lattice/diamond impact; durable Trap and its ending lifecycle remain separate. |
+| Rogue | Directional damage route terminating in a red minus. | Directional Poison delivery, red-minus impact, target splash, and durable consequences. |
+| Priest | Rounded directional healing tether terminating in a green plus. | Stronger Holy Word route with green-plus impact and dual healing flare. |
 
 Selection is always the magenta corner reticle; targeting intent is a thin
-pending preview. Accepted routes use exact pre-transition source/target
-anchors, clipped at body radii. Reciprocal routes bend in opposite directions,
-same-direction multiplicity receives stable parallel offsets, and all accepted
-activations begin together.
+pending preview. Ordinary completed Basics and non-Charge Ultimates use
+successor source/recipient anchors so routes agree with displayed bodies.
+Charge activation remains pre-transition and its displacement joins the
+Warrior's pre-position to its successor position. Routes are clipped at body
+radii. Reciprocal routes bend in opposite directions, same-direction
+multiplicity receives stable parallel offsets, close distinct centers preserve
+the actual source-to-recipient bearing, and all accepted activations begin
+together.
 
 In extremely dense static frames, the event feed is the definitive direction
 and identity fallback; live particles and route markers carry direction more
@@ -362,16 +392,19 @@ Pass `--include-stress` to expose:
 
 - `charge_convergence`;
 - `trap_lifecycle`;
-- `max_status_stack`.
+- `max_status_stack`;
+- `moving_basic_crossfire`;
+- `moving_focus_crossfire`.
 
 Every simulator-backed scripted command is preflighted against its actual
 pre-state mask and accepted action.
 
 ### Renderer-only fixtures
 
-`crowded_teamfight`, `route_collision`, `mixed_net_zero`, `viewport_matrix`,
-and `pov_redaction` are explicitly synthetic presentation fixtures. They are
-never submitted to the simulator and must not be described as valid histories.
+`visual_vocabulary`, `crowded_teamfight`, `route_collision`, `mixed_net_zero`,
+`viewport_matrix`, and `pov_redaction` are explicitly synthetic presentation
+fixtures. They are never submitted to the simulator and must not be described
+as valid histories.
 
 ## Static Matplotlib snapshot
 
@@ -387,9 +420,9 @@ creates one reset session, builds one authorized researcher scene, calls the
 scene-native stateless Matplotlib painter, opens no HTTP server, registers no
 callbacks, and calls `step` zero times.
 
-The public `draw/render/redraw_geometry` and scene-native equivalents remain
-lazy-import, headless-capable compatibility APIs. Matplotlib does not reproduce
-browser animation or the live inspector.
+The public scene-native `draw_scene_geometry`, `render_scene_geometry`, and
+`redraw_scene_geometry` APIs remain lazy-import and headless-capable.
+Matplotlib does not reproduce browser animation or the live inspector.
 
 ## Contributor visual checks
 
@@ -427,16 +460,16 @@ green.
 - **First submit is slow:** the first JAX transition may compile; the busy state
   is immediate and no warm-up step is performed.
 - **Static Matplotlib missing:** run `uv sync --extra viz`.
-- **Server remains after tab close:** use Exit debugger or `Ctrl-C`.
+- **Server remains after tab close:** use Exit analyzer or `Ctrl-C`.
 
 ## Replay reuse boundary
 
 The reusable boundary is the renderer-neutral scene/event vocabulary, SVG
 painter, layout, animation controller, presets, and accessibility conventions.
 `DebuggerFrameV1`, pending actions, revision/idempotency handling, and the
-loopback command protocol are live-debugger-only.
+loopback command protocol are live-analyzer-only.
 
 A future replay product may provide the same scene/event primitives from a
 recorded artifact, but it will own a separate replay envelope, timeline,
-schema-migration, integrity, and export contract. The browser debugger does not
+schema-migration, integrity, and export contract. The live analyzer does not
 load or simulate replay data.
