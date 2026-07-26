@@ -16,7 +16,7 @@ export async function installWaapiAutopause(page) {
     const nativeAnimate = Element.prototype.animate;
     Element.prototype.animate = function animateAndPause(keyframes, options) {
       const animation = nativeAnimate.call(this, keyframes, options);
-      if (this.closest(".combat-choreography")) {
+      if (this.closest(".combat-choreography, .combat-choreography-routes")) {
         animation.pause();
       }
       return animation;
@@ -33,7 +33,11 @@ export async function installWaapiAutopause(page) {
  */
 export async function pauseAtLogicalTime(page, logicalMs) {
   const root = page.locator(CHOREOGRAPHY_ROOT);
-  await root.waitFor();
+  const routeRoot = page.locator(CHOREOGRAPHY_ROUTE_ROOT);
+  await Promise.all([
+    root.waitFor({ state: "attached" }),
+    routeRoot.waitFor({ state: "attached" }),
+  ]);
   if ((await page.locator("html").getAttribute("data-motion-paused")) !== "true") {
     await page.locator("#motion-pause-button").click();
   }
@@ -45,12 +49,21 @@ export async function pauseAtLogicalTime(page, logicalMs) {
     const animations = battlefield
       .getAnimations({ subtree: true })
       .filter(({ id }) => id.startsWith("mbg:"));
+    await document.fonts.ready;
     await Promise.all(animations.map(({ ready }) => ready));
     for (const animation of animations) {
       animation.pause();
       animation.currentTime = time;
     }
-    await new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)));
+    await Promise.all(animations.map(({ ready }) => ready));
+    for (let frame = 0; frame < 3; frame += 1) {
+      await new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)));
+    }
+    for (const animation of animations) {
+      if (animation.playState !== "paused" || Number(animation.currentTime) !== time) {
+        throw new Error(`Animation ${animation.id} did not settle at ${time} ms.`);
+      }
+    }
   }, logicalMs);
 }
 
@@ -121,6 +134,11 @@ export async function assertBoundedChoreography(page) {
   const effectIds = snapshot.effectIds.filter((eventId) => eventId !== null);
   expect(new Set(effectIds).size).toBe(effectIds.length);
   expect(effectIds.length).toBeLessThanOrEqual(eventCount);
+  expect(snapshot.routeEffectIds).not.toContain(null);
+  expect(new Set(snapshot.routeEffectIds).size).toBe(snapshot.routeEffectIds.length);
+  for (const routeEffectId of snapshot.routeEffectIds) {
+    expect(effectIds).toContain(routeEffectId);
+  }
 
   const nodeCount = await roots.evaluate(
     (root) =>
@@ -148,9 +166,14 @@ export async function assertBoundedChoreography(page) {
  * @param {import("@playwright/test").Page} page
  */
 export async function assertTransientSlotsAuthorized(page) {
-  const rosterSlots = await page
+  const rawRosterSlots = await page
     .locator("#roster .roster-row")
-    .evaluateAll((rows) => rows.map((row) => Number(row.getAttribute("data-slot"))));
+    .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-slot")));
+  expect(rawRosterSlots).not.toContain(null);
+  for (const rawSlot of rawRosterSlots) {
+    expect(rawSlot).toMatch(/^(0|[1-9]\d*)$/);
+  }
+  const rosterSlots = rawRosterSlots.map(Number);
   const transientSlots = await page.locator(CHOREOGRAPHY_ROOT).evaluate((root) => {
     const values = [];
     const battlefield = root.closest("svg");
@@ -160,10 +183,11 @@ export async function assertTransientSlotsAuthorized(page) {
     for (const element of elements ?? []) {
       for (const name of element.getAttributeNames()) {
         if (name === "data-slot" || /^data-.+-slot$/.test(name)) {
-          const value = Number(element.getAttribute(name));
-          if (Number.isInteger(value)) {
-            values.push(value);
+          const rawValue = element.getAttribute(name);
+          if (!/^(0|[1-9]\d*)$/.test(rawValue ?? "")) {
+            throw new Error(`Invalid transient slot attribute ${name}.`);
           }
+          values.push(Number(rawValue));
         }
       }
     }

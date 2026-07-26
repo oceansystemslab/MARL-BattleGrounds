@@ -253,7 +253,17 @@ test("recipient net outcomes remain separate and health lanes are bounded", () =
       outcome: "unchanged",
     })),
   ];
-  const plan = buildChoreographyPlan(debuggerFrame(events), surface);
+  const plan = buildChoreographyPlan(debuggerFrame(events), {
+    ...surface,
+    viewportBounds: {
+      left: 0,
+      top: 0,
+      right: 300,
+      bottom: 240,
+      width: 300,
+      height: 240,
+    },
+  });
   assert.ok(plan);
   const health = plan.events.filter(({ kind }) => kind === "net_health");
   assert.equal(health.length, 4);
@@ -280,6 +290,291 @@ test("recipient net outcomes remain separate and health lanes are bounded", () =
       .filter(({ kind }) => kind === "activation")
       .every((event) => !Object.hasOwn(event, "healthBefore")),
     true,
+  );
+});
+
+test("dense outcome layout searches the whole viewport before suppressing a cue", () => {
+  /** @type {ProjectionSurface} */
+  const denseSurface = {
+    worldToScreen: (value) => ({
+      x: "x" in value ? value.x : Number(value[0]),
+      y: "y" in value ? value.y : Number(value[1]),
+    }),
+    worldLengthToScreen: (length) => length,
+    viewportBounds: {
+      left: 0,
+      top: 0,
+      right: 600,
+      bottom: 200,
+      width: 600,
+      height: 200,
+    },
+    protectedRects: [
+      {
+        left: 0,
+        top: 0,
+        right: 260,
+        bottom: 200,
+        width: 260,
+        height: 200,
+      },
+    ],
+  };
+  const frame = debuggerFrame([
+    {
+      event_type: "net_health",
+      event_id: "net-global-fallback",
+      transition_id: 4,
+      recipient_global_slot: 5,
+      recipient_anchor: [100, 100],
+      health_before: 50,
+      health_after: 40,
+      net_delta: -10,
+      outcome: "damage",
+    },
+  ]);
+  const localPlan = buildChoreographyPlan(frame, {
+    ...denseSurface,
+    protectedRects: [],
+  });
+  assert.ok(localPlan);
+  assert.deepEqual(eventById(localPlan.events, "net-global-fallback").cue, {
+    x: 100,
+    y: 56,
+  });
+
+  const plan = buildChoreographyPlan(frame, denseSurface);
+  assert.ok(plan);
+  const outcome = eventById(plan.events, "net-global-fallback");
+  assert.equal(outcome.spatialDisposition, "rendered");
+  assert.equal(outcome.cueCollisionFree, true);
+  assert.ok(outcome.cue.x >= 304);
+  assert.deepEqual(buildChoreographyPlan(frame, denseSurface)?.events, plan.events);
+});
+
+test("dense outcome layout checks protected edges that a fixed grid can skip", () => {
+  /** @type {ProjectionSurface} */
+  const narrowCorridorSurface = {
+    worldToScreen: (value) => ({
+      x: "x" in value ? value.x : Number(value[0]),
+      y: "y" in value ? value.y : Number(value[1]),
+    }),
+    worldLengthToScreen: (length) => length,
+    viewportBounds: {
+      left: 0,
+      top: 0,
+      right: 320,
+      bottom: 100,
+      width: 320,
+      height: 100,
+    },
+    protectedRects: [
+      {
+        left: 0,
+        top: 0,
+        right: 110,
+        bottom: 100,
+        width: 110,
+        height: 100,
+      },
+      {
+        left: 202,
+        top: 0,
+        right: 320,
+        bottom: 100,
+        width: 118,
+        height: 100,
+      },
+    ],
+  };
+  const frame = debuggerFrame([
+    {
+      event_type: "net_health",
+      event_id: "net-critical-edge",
+      transition_id: 4,
+      recipient_global_slot: 5,
+      recipient_anchor: [60, 50],
+      health_before: 50,
+      health_after: 40,
+      net_delta: -10,
+      outcome: "damage",
+    },
+  ]);
+  const plan = buildChoreographyPlan(frame, narrowCorridorSurface);
+  assert.ok(plan);
+  const outcome = eventById(plan.events, "net-critical-edge");
+  assert.equal(outcome.spatialDisposition, "rendered");
+  assert.equal(outcome.cueCollisionFree, true);
+  assert.deepEqual(outcome.cue, { x: 156, y: 50 });
+  assert.deepEqual(
+    buildChoreographyPlan(frame, narrowCorridorSurface)?.events,
+    plan.events,
+  );
+});
+
+test("NET placement priority is order-independent and suppression stays retained", () => {
+  /** @type {ProjectionSurface} */
+  const prioritySurface = {
+    worldToScreen: (value) => ({
+      x: "x" in value ? value.x : Number(value[0]),
+      y: "y" in value ? value.y : Number(value[1]),
+    }),
+    worldLengthToScreen: (length) => length,
+    viewportBounds: {
+      left: 0,
+      top: 0,
+      right: 96,
+      bottom: 60,
+      width: 96,
+      height: 60,
+    },
+    protectedRects: [],
+  };
+  const net = {
+    event_type: "net_health",
+    event_id: "net-priority",
+    transition_id: 4,
+    recipient_global_slot: 5,
+    recipient_anchor: [48, 24],
+    health_before: 50,
+    health_after: 40,
+    net_delta: -10,
+    outcome: "damage",
+  };
+  const lifecycle = {
+    event_type: "status_lifecycle",
+    event_id: "lifecycle-priority",
+    transition_id: 4,
+    recipient_global_slot: 5,
+    recipient_anchor: [48, 24],
+    token_id: "stun_hunter_trap",
+    change: "applied",
+    duration_before: 0,
+    duration_after: 4,
+    source_class_id: 3,
+    application_event_ids: [],
+  };
+  for (const events of [
+    [lifecycle, net],
+    [net, lifecycle],
+  ]) {
+    const plan = buildChoreographyPlan(debuggerFrame(events), prioritySurface);
+    assert.ok(plan);
+    const placedNet = eventById(plan.events, "net-priority");
+    const suppressedLifecycle = eventById(plan.events, "lifecycle-priority");
+    assert.equal(placedNet.spatialDisposition, "rendered");
+    assert.equal(placedNet.cueCollisionFree, true);
+    assert.equal(suppressedLifecycle.spatial, true);
+    assert.equal(suppressedLifecycle.spatialDisposition, "suppressed_collision");
+    assert.equal(suppressedLifecycle.cue, null);
+    assert.equal(
+      suppressedLifecycle.cueSuppressionReason,
+      "no_collision_free_position",
+    );
+    assert.deepEqual(
+      plan.events.map(({ eventId }) => eventId),
+      events.map(({ event_id: eventId }) => eventId),
+    );
+  }
+});
+
+test("an impossible NET cue remains an explicit retained suppression", () => {
+  /** @type {ProjectionSurface} */
+  const impossibleSurface = {
+    worldToScreen: (value) => ({
+      x: "x" in value ? value.x : Number(value[0]),
+      y: "y" in value ? value.y : Number(value[1]),
+    }),
+    worldLengthToScreen: (length) => length,
+    viewportBounds: {
+      left: 0,
+      top: 0,
+      right: 80,
+      bottom: 24,
+      width: 80,
+      height: 24,
+    },
+    protectedRects: [],
+  };
+  const plan = buildChoreographyPlan(
+    debuggerFrame([
+      {
+        event_type: "net_health",
+        event_id: "net-impossible",
+        transition_id: 4,
+        recipient_global_slot: 5,
+        recipient_anchor: [40, 12],
+        health_before: 50,
+        health_after: 40,
+        net_delta: -10,
+        outcome: "damage",
+      },
+    ]),
+    impossibleSurface,
+  );
+  assert.ok(plan);
+  const outcome = eventById(plan.events, "net-impossible");
+  assert.equal(outcome.spatial, true);
+  assert.equal(outcome.spatialDisposition, "suppressed_collision");
+  assert.equal(outcome.cue, null);
+  assert.equal(outcome.netDelta, -10);
+});
+
+test("exact Trap endings outrank generic lifecycle decoration under pressure", () => {
+  /** @type {ProjectionSurface} */
+  const singleCueSurface = {
+    worldToScreen: (value) => ({
+      x: "x" in value ? value.x : Number(value[0]),
+      y: "y" in value ? value.y : Number(value[1]),
+    }),
+    worldLengthToScreen: (length) => length,
+    viewportBounds: {
+      left: 0,
+      top: 0,
+      right: 60,
+      bottom: 60,
+      width: 60,
+      height: 60,
+    },
+    protectedRects: [],
+  };
+  const lifecycleBase = {
+    event_type: "status_lifecycle",
+    transition_id: 4,
+    recipient_global_slot: 5,
+    recipient_anchor: [30, 30],
+    token_id: "stun_hunter_trap",
+    source_class_id: 3,
+    application_event_ids: [],
+  };
+  const plan = buildChoreographyPlan(
+    debuggerFrame([
+      {
+        ...lifecycleBase,
+        event_id: "generic-application",
+        change: "applied",
+        duration_before: 0,
+        duration_after: 4,
+      },
+      {
+        ...lifecycleBase,
+        event_id: "exact-break",
+        change: "trap_broken",
+        duration_before: 2,
+        duration_after: 0,
+      },
+    ]),
+    singleCueSurface,
+  );
+  assert.ok(plan);
+  assert.equal(eventById(plan.events, "exact-break").spatialDisposition, "rendered");
+  assert.equal(
+    eventById(plan.events, "generic-application").spatialDisposition,
+    "suppressed_collision",
+  );
+  assert.deepEqual(
+    plan.events.map(({ eventId }) => eventId),
+    ["generic-application", "exact-break"],
   );
 });
 
@@ -423,5 +718,15 @@ test("malformed and oversized payloads fail closed before SVG planning", () => {
   assert.throws(
     () => buildChoreographyPlan(debuggerFrame(oversizedEvents), surface),
     /128-event presentation limit/,
+  );
+
+  const tooManySpatialEvents = Array.from({ length: 97 }, (_, index) =>
+    activation(`spatial-${index}`, "mage_burst", 0, null, {
+      disclosure: "target_none",
+    }),
+  );
+  assert.equal(
+    buildChoreographyPlan(debuggerFrame(tooManySpatialEvents), surface)?.events.length,
+    97,
   );
 });

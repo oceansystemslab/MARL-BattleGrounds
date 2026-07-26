@@ -225,6 +225,9 @@ function harness(options = {}) {
 }
 
 const surfaceA = /** @type {any} */ ({ viewportKey: "16:12:800:600" });
+const surfaceSameSizeProtected = /** @type {any} */ ({
+  viewportKey: "16:12:800:600:protected-layout-b",
+});
 const surfaceB = /** @type {any} */ ({ viewportKey: "16:12:600:450" });
 
 test("same transition renders once and resize reprojects without replay", async () => {
@@ -238,7 +241,24 @@ test("same transition renders once and resize reprojects without replay", async 
   assert.equal(animationFactory.created.length, createdCount);
   assert.equal(painter.calls.filter(([kind]) => kind === "install").length, 1);
 
-  animationFactory.created[0].currentTime = 230;
+  animationFactory.created.forEach((animation, index) => {
+    animation.currentTime = 230 + index;
+  });
+  const animationReferences = [...animationFactory.created];
+  const animationTimes = animationFactory.created.map(({ currentTime }) => currentTime);
+  controller.presentFrame({ plan: plan("epoch-1") }, surfaceSameSizeProtected);
+  assert.deepEqual(painter.calls.at(-1), [
+    "reproject",
+    "epoch-1",
+    surfaceSameSizeProtected.viewportKey,
+  ]);
+  assert.equal(painter.calls.filter(([kind]) => kind === "install").length, 1);
+  assert.deepEqual(animationFactory.created, animationReferences);
+  assert.deepEqual(
+    animationFactory.created.map(({ currentTime }) => currentTime),
+    animationTimes,
+  );
+
   controller.reproject({ plan: plan("epoch-1") }, surfaceB);
   assert.deepEqual(painter.calls.at(-1), [
     "reproject",
@@ -246,6 +266,11 @@ test("same transition renders once and resize reprojects without replay", async 
     surfaceB.viewportKey,
   ]);
   assert.equal(animationFactory.created.length, createdCount);
+  assert.deepEqual(animationFactory.created, animationReferences);
+  assert.deepEqual(
+    animationFactory.created.map(({ currentTime }) => currentTime),
+    animationTimes,
+  );
 
   const gate = animationFactory.find(":gate");
   assert.ok(gate);
@@ -508,6 +533,15 @@ test("numeric playback rates preserve an active reduced-motion explanation", () 
 });
 
 test("ledger is bounded and storage failures never affect authority", () => {
+  const productionBound = new ConsumedTransitionLedger();
+  for (let index = 0; index < 257; index += 1) {
+    productionBound.record(`epoch-${index}`, `fingerprint-${index}`);
+  }
+  assert.equal(productionBound.has("epoch-0"), false);
+  for (let index = 1; index < 257; index += 1) {
+    assert.equal(productionBound.has(`epoch-${index}`), true);
+  }
+
   const storage = new FakeStorage();
   const ledger = new ConsumedTransitionLedger({
     storage,

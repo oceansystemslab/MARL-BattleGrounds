@@ -24,19 +24,24 @@ let routeFrame = {};
 /** @type {Record<string, any>} */
 let mixedFrame = {};
 /** @type {Record<string, any>} */
+let crowdedFrame = {};
+/** @type {Record<string, any>} */
 let povFixture = {};
 
 test.beforeAll(async () => {
-  const [started, routeFixture, mixedFixture, loadedPovFixture] = await Promise.all([
-    startDebugger(),
-    loadRendererFixture("route_collision"),
-    loadRendererFixture("mixed_net_zero"),
-    loadRendererFixture("pov_redaction"),
-  ]);
+  const [started, routeFixture, mixedFixture, crowdedFixture, loadedPovFixture] =
+    await Promise.all([
+      startDebugger(),
+      loadRendererFixture("route_collision"),
+      loadRendererFixture("mixed_net_zero"),
+      loadRendererFixture("crowded_teamfight"),
+      loadRendererFixture("pov_redaction"),
+    ]);
   serverProcess = started.process;
   debuggerUrl = started.url;
   routeFrame = syntheticDebuggerFrame(routeFixture);
   mixedFrame = syntheticDebuggerFrame(mixedFixture);
+  crowdedFrame = syntheticDebuggerFrame(crowdedFixture);
   povFixture = loadedPovFixture;
 });
 
@@ -205,6 +210,117 @@ test("directional routes share one clock, gate submissions, reproject, and do no
   await expect(page.locator(`${CHOREOGRAPHY_ROOT} .combat-effect`)).toHaveCount(0);
   expect((await choreographySnapshot(page)).animationIds).toEqual([]);
   expect(flow.commands).toHaveLength(1);
+});
+
+test("a collision-suppressed NET cue reappears after resize without replay", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await installWaapiAutopause(page);
+  const flow = await installSyntheticFlow(
+    page,
+    withoutTransition(mixedFrame),
+    (_command, index) => ({ ...mixedFrame, revision: index }),
+  );
+
+  await page.goto(debuggerUrl);
+  await page.getByRole("button", { name: "Reset" }).click();
+  await expect(page.locator(".combat-effect--net-health")).toHaveCount(1);
+  await pauseAtLogicalTime(page, 500);
+
+  const root = page.locator(CHOREOGRAPHY_ROOT);
+  const net = page.locator(".combat-effect--net-health");
+  await root.evaluate((element) => {
+    element.setAttribute("data-retained-probe", "resize-recovery");
+  });
+  await net.evaluate((element) => {
+    element.setAttribute("data-retained-probe", "net-resize-recovery");
+  });
+  await expect(net).toHaveAttribute("data-spatial-disposition", "rendered");
+  const before = await choreographySnapshot(page);
+
+  await page.locator("#battlefield").evaluate((element) => {
+    const battlefield = /** @type {SVGElement} */ (element);
+    battlefield.style.width = "100px";
+    battlefield.style.height = "100px";
+  });
+  await expect
+    .poll(async () => root.getAttribute("data-viewport-key"))
+    .not.toBe(before.viewportKey);
+  await expect(net).toHaveAttribute("data-spatial-disposition", "suppressed-collision");
+  await expect(net).toHaveAttribute("visibility", "hidden");
+  await expect(net).toHaveAttribute("aria-hidden", "true");
+  const suppressed = await choreographySnapshot(page);
+  expect(suppressed.animationIds).toEqual(before.animationIds);
+  expect(suppressed.effectIds).toEqual(before.effectIds);
+
+  await page.locator("#battlefield").evaluate((element) => {
+    const battlefield = /** @type {SVGElement} */ (element);
+    battlefield.style.removeProperty("width");
+    battlefield.style.removeProperty("height");
+  });
+  await expect
+    .poll(async () => root.getAttribute("data-viewport-key"))
+    .toBe(before.viewportKey);
+  await expect(net).toHaveAttribute("data-spatial-disposition", "rendered");
+  await expect(net).not.toHaveAttribute("visibility");
+  await expect(net).not.toHaveAttribute("aria-hidden");
+  await expect(root).toHaveAttribute("data-retained-probe", "resize-recovery");
+  await expect(net).toHaveAttribute("data-retained-probe", "net-resize-recovery");
+  const restored = await choreographySnapshot(page);
+  expect(restored.animationIds).toEqual(before.animationIds);
+  expect(restored.effectIds).toEqual(before.effectIds);
+  expect(flow.commands).toHaveLength(1);
+});
+
+test("same-size protected-layout changes reproject without replay", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await installWaapiAutopause(page);
+  /** @type {Record<string, any>} */
+  const fullFrame = { ...crowdedFrame, revision: 1 };
+  const flow = await installSyntheticFlow(
+    page,
+    withoutTransition(crowdedFrame),
+    (command) => ({
+      ...fullFrame,
+      preset: command.command_type === "set_preset" ? command.preset : fullFrame.preset,
+      revision: flow.commands.length,
+    }),
+  );
+
+  await page.goto(debuggerUrl);
+  await page.getByRole("button", { name: "Reset" }).click();
+  await pauseAtLogicalTime(page, 500);
+  const root = page.locator(CHOREOGRAPHY_ROOT);
+  await root.evaluate((element) => {
+    element.setAttribute("data-retained-probe", "protected-layout");
+  });
+  const before = await choreographySnapshot(page);
+  const beforeBounds = await page.locator("#battlefield").boundingBox();
+  expect(beforeBounds).not.toBeNull();
+
+  await page.locator("#preset-select").selectOption("presentation");
+  await expect(page.locator("#preset-select")).toHaveValue("presentation");
+  await expect
+    .poll(async () => root.getAttribute("data-viewport-key"))
+    .not.toBe(before.viewportKey);
+  const after = await choreographySnapshot(page);
+  const afterBounds = await page.locator("#battlefield").boundingBox();
+  expect(afterBounds).not.toBeNull();
+  expect(afterBounds?.width).toBeCloseTo(beforeBounds?.width ?? 0, 3);
+  expect(afterBounds?.height).toBeCloseTo(beforeBounds?.height ?? 0, 3);
+  expect(after.viewportKey?.split(":").slice(0, 8)).toEqual(
+    before.viewportKey?.split(":").slice(0, 8),
+  );
+  expect(after.viewportKey?.split(":").slice(8)).not.toEqual(
+    before.viewportKey?.split(":").slice(8),
+  );
+  expect(after.animationIds).toEqual(before.animationIds);
+  expect(after.effectIds).toEqual(before.effectIds);
+  await expect(root).toHaveAttribute("data-retained-probe", "protected-layout");
+  expect(flow.commands).toHaveLength(2);
 });
 
 test("reduced motion preserves damage/heal intent and one recipient NET outcome", async ({

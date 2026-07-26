@@ -282,6 +282,7 @@ export class SvgChoreographyPainter {
     } else {
       return null;
     }
+    this.#applySpatialDisposition(group, event);
 
     if (!options.settled && options.motionMode !== "off") {
       const reduced = options.motionMode === "reduced";
@@ -793,6 +794,7 @@ export class SvgChoreographyPainter {
    * @param {JsonRecord} event
    */
   #updateGeometry(group, underlay, event) {
+    this.#applySpatialDisposition(group, event);
     if (event.kind === "activation") {
       this.#updateActivationGeometry(group, underlay, event);
     } else if (event.kind === "net_health") {
@@ -801,7 +803,10 @@ export class SvgChoreographyPainter {
       this.#updateChargeGeometry(group, underlay, event);
     } else if (event.kind === "status_lifecycle") {
       const lifecycle = group.querySelector(".combat-lifecycle");
-      if (lifecycle && event.recipient) {
+      if (lifecycle instanceof SVGElement && event.recipient) {
+        lifecycle.dataset.layoutCollisionFree = String(
+          event.cueCollisionFree !== false,
+        );
         const position = event.cue ?? event.recipient;
         setAttributes(lifecycle, {
           transform: `translate(${position.x} ${position.y})`,
@@ -865,11 +870,34 @@ export class SvgChoreographyPainter {
     if (!label || !event.recipient) {
       return;
     }
+    group.dataset.layoutCollisionFree = String(event.cueCollisionFree !== false);
     setAttributes(label, {
       x: event.cue?.x ?? event.recipient.x,
       y: event.cue?.y ?? event.recipient.y - 32 - event.lane * 18,
     });
     this.#updateCueLeader(group, event, 48);
+  }
+
+  /**
+   * Retain collision-suppressed outcome nodes so resize reprojection can reveal
+   * them without replacing the event subtree or restarting its animation.
+   *
+   * @param {SVGElement} group
+   * @param {Record<string, any>} event
+   */
+  #applySpatialDisposition(group, event) {
+    const disposition =
+      event.spatialDisposition === "suppressed_collision"
+        ? "suppressed-collision"
+        : "rendered";
+    group.dataset.spatialDisposition = disposition;
+    if (disposition === "suppressed-collision") {
+      group.setAttribute("visibility", "hidden");
+      group.setAttribute("aria-hidden", "true");
+      return;
+    }
+    group.removeAttribute("visibility");
+    group.removeAttribute("aria-hidden");
   }
 
   /**

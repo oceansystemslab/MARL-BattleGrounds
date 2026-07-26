@@ -14,7 +14,14 @@ export const CHOREOGRAPHY_PHASES = Object.freeze({
 
 const MAX_HEALTH_CUES_PER_RECIPIENT = 3;
 const MAX_EVENT_RECORDS = 128;
-const MAX_SPATIAL_EVENTS = 96;
+const OUTCOME_CUE_CLEARANCE = 2;
+const OUTCOME_CUE_GRID_COLUMNS = 48;
+const OUTCOME_CUE_GRID_ROWS = 36;
+const OUTCOME_CUE_TARGET_STEP = 8;
+const TRANSIENT_ICON_CLEARANCE = Object.freeze({ width: 24, height: 24 });
+const NET_CUE_DIMENSIONS = Object.freeze({ width: 88, height: 48 });
+const UNCHANGED_NET_CUE_DIMENSIONS = Object.freeze({ width: 102, height: 48 });
+const LIFECYCLE_CUE_DIMENSIONS = Object.freeze({ width: 52, height: 52 });
 const STATUS_LIFECYCLE_KINDS = new Set([
   "applied",
   "refreshed",
@@ -165,52 +172,122 @@ function layoutOutcomeCues(events, surface) {
   }
   const occupied = array(surface?.protectedRects)
     .map(normalizedRectangle)
-    .filter((bounds) => bounds !== null);
+    .filter((bounds) => bounds !== null)
+    .map((bounds) => expandCueBounds(bounds, OUTCOME_CUE_CLEARANCE));
+  occupied.push(
+    ...activationIconBounds(events).map((bounds) =>
+      expandCueBounds(bounds, OUTCOME_CUE_CLEARANCE),
+    ),
+  );
+  /** @type {Map<Record<string, any>, Record<string, any>>} */
+  const placed = new Map();
 
-  return events.map((event) => {
-    if (
-      !event.spatial ||
-      (event.kind !== "net_health" && event.kind !== "status_lifecycle") ||
-      !event.recipient
-    ) {
-      return event;
-    }
+  const outcomes = events
+    .filter(
+      (event) =>
+        event.spatial &&
+        event.recipient &&
+        (event.kind === "net_health" || event.kind === "status_lifecycle"),
+    )
+    .sort(outcomePlacementOrder);
+  for (const event of outcomes) {
     const dimensions =
       event.kind === "net_health"
-        ? {
-            width: event.outcome === "unchanged" ? 102 : 88,
-            height: 24,
-          }
-        : { width: 38, height: 38 };
-    const candidates = cueCandidates(event, dimensions, viewport);
-    let selected = candidates[0] ?? null;
-    let selectedScore = Number.POSITIVE_INFINITY;
-    let collisionFree = false;
-    for (const candidate of candidates) {
-      const overlap = occupied.reduce(
-        (total, bounds) => total + rectangleIntersectionArea(candidate.bounds, bounds),
-        0,
-      );
-      const score = overlap * 10_000 + candidate.displacement;
-      if (score < selectedScore) {
-        selected = candidate;
-        selectedScore = score;
-        collisionFree = overlap === 0;
-      }
-      if (overlap === 0) {
-        break;
-      }
-    }
+        ? event.outcome === "unchanged"
+          ? UNCHANGED_NET_CUE_DIMENSIONS
+          : NET_CUE_DIMENSIONS
+        : LIFECYCLE_CUE_DIMENSIONS;
+    const selected =
+      selectCueCandidate(localCueCandidates(event, dimensions, viewport), occupied) ??
+      selectCueCandidate(
+        criticalEdgeCueCandidates(event, dimensions, viewport, occupied),
+        occupied,
+      ) ??
+      selectCueCandidate(viewportCueCandidates(event, dimensions, viewport), occupied);
     if (!selected) {
-      return event;
+      placed.set(
+        event,
+        Object.freeze({
+          ...event,
+          cue: null,
+          cueBounds: null,
+          cueCollisionFree: false,
+          cueSuppressionReason: "no_collision_free_position",
+          spatialDisposition: "suppressed_collision",
+        }),
+      );
+      continue;
     }
-    occupied.push(selected.bounds);
-    return Object.freeze({
-      ...event,
-      cue: selected.center,
-      cueBounds: selected.bounds,
-      cueCollisionFree: collisionFree,
-    });
+    occupied.push(expandCueBounds(selected.bounds, OUTCOME_CUE_CLEARANCE));
+    placed.set(
+      event,
+      Object.freeze({
+        ...event,
+        cue: selected.center,
+        cueBounds: selected.bounds,
+        cueCollisionFree: true,
+        spatialDisposition: "rendered",
+      }),
+    );
+  }
+  return events.map((event) => placed.get(event) ?? event);
+}
+
+/**
+ * NET values have no durable replacement and therefore place before lifecycle
+ * decoration. Exact ending classifications then outrank generic applications.
+ * Returned event order remains untouched.
+ *
+ * @param {Record<string, any>} left
+ * @param {Record<string, any>} right
+ */
+function outcomePlacementOrder(left, right) {
+  const kindDifference =
+    (left.kind === "net_health" ? 0 : 1) - (right.kind === "net_health" ? 0 : 1);
+  if (kindDifference !== 0) {
+    return kindDifference;
+  }
+  return (
+    lifecyclePlacementPriority(left) - lifecyclePlacementPriority(right) ||
+    Number(left.recipientSlot) - Number(right.recipientSlot) ||
+    Number(left.lane ?? 0) - Number(right.lane ?? 0) ||
+    String(left.eventId).localeCompare(String(right.eventId))
+  );
+}
+
+/**
+ * @param {Record<string, any>} event
+ */
+function lifecyclePlacementPriority(event) {
+  if (event.lifecycle === "trap_broken_and_reapplied") {
+    return 0;
+  }
+  if (event.lifecycle === "trap_broken") {
+    return 1;
+  }
+  if (event.lifecycle === "expired" || event.lifecycle === "cleared_unclassified") {
+    return 2;
+  }
+  return 3;
+}
+
+/**
+ * Reserve the fixed icon at every spatial activation source/impact. Routes
+ * remain free to cross the map; only semantic iconography blocks numeric and
+ * lifecycle cue placement.
+ *
+ * @param {ReadonlyArray<Record<string, any>>} events
+ */
+function activationIconBounds(events) {
+  return events.flatMap((event) => {
+    if (!event.spatial || event.kind !== "activation") {
+      return [];
+    }
+    const center =
+      event.presentationKind === "source_local"
+        ? event.source
+        : (event.route?.end ?? event.target);
+    return center ? [cueBounds(center, TRANSIENT_ICON_CLEARANCE)] : [];
   });
 }
 
@@ -219,7 +296,7 @@ function layoutOutcomeCues(events, surface) {
  * @param {{width: number, height: number}} dimensions
  * @param {Record<string, number>} viewport
  */
-function cueCandidates(event, dimensions, viewport) {
+function localCueCandidates(event, dimensions, viewport) {
   const recipient = event.recipient;
   const baseAngle =
     event.kind === "status_lifecycle"
@@ -245,6 +322,7 @@ function cueCandidates(event, dimensions, viewport) {
   const radii =
     event.kind === "net_health" ? [44, 64, 84, 108] : [42, 60, 78, 96, 118, 140];
   const candidates = [];
+  const candidateKeys = new Set();
   for (const radius of radii) {
     for (const offset of angleOffsets) {
       const raw = {
@@ -252,17 +330,18 @@ function cueCandidates(event, dimensions, viewport) {
         y: recipient.y + Math.sin(baseAngle + offset) * radius,
       };
       const center = clampCueCenter(raw, dimensions, viewport);
+      if (!center) {
+        continue;
+      }
+      const key = `${center.x}:${center.y}`;
+      if (candidateKeys.has(key)) {
+        continue;
+      }
+      candidateKeys.add(key);
       candidates.push(
         Object.freeze({
           center,
-          bounds: Object.freeze({
-            left: center.x - dimensions.width / 2,
-            top: center.y - dimensions.height / 2,
-            right: center.x + dimensions.width / 2,
-            bottom: center.y + dimensions.height / 2,
-            width: dimensions.width,
-            height: dimensions.height,
-          }),
+          bounds: cueBounds(center, dimensions),
           displacement: Math.hypot(center.x - recipient.x, center.y - recipient.y),
         }),
       );
@@ -272,22 +351,256 @@ function cueCandidates(event, dimensions, viewport) {
 }
 
 /**
+ * @param {Record<string, any>} event
+ * @param {{width: number, height: number}} dimensions
+ * @param {Record<string, number>} viewport
+ */
+function viewportCueCandidates(event, dimensions, viewport) {
+  return viewportCueCenters(dimensions, viewport).map((center) =>
+    Object.freeze({
+      center,
+      bounds: cueBounds(center, dimensions),
+      displacement: Math.hypot(
+        center.x - event.recipient.x,
+        center.y - event.recipient.y,
+      ),
+    }),
+  );
+}
+
+/**
+ * Test the finite set of centers at which a cue sits exactly beside an
+ * occupied edge. A regular lattice can step over a narrow valid corridor;
+ * these critical coordinates find it without an unbounded pixel search.
+ *
+ * @param {Record<string, any>} event
+ * @param {{width: number, height: number}} dimensions
+ * @param {Record<string, number>} viewport
+ * @param {ReadonlyArray<Record<string, number>>} occupied
+ */
+function criticalEdgeCueCandidates(event, dimensions, viewport, occupied) {
+  const limits = cueCenterLimits(dimensions, viewport);
+  if (!limits) {
+    return [];
+  }
+  const horizontal = dimensions.width / 2;
+  const vertical = dimensions.height / 2;
+  const horizontalPositions = boundedCriticalAxisPositions(
+    [
+      limits.minimumX,
+      limits.maximumX,
+      event.recipient.x,
+      ...occupied.flatMap((bounds) => [
+        bounds.left - horizontal,
+        bounds.right + horizontal,
+      ]),
+    ],
+    limits.minimumX,
+    limits.maximumX,
+    event.recipient.x,
+    OUTCOME_CUE_GRID_COLUMNS,
+  );
+  const verticalPositions = boundedCriticalAxisPositions(
+    [
+      limits.minimumY,
+      limits.maximumY,
+      event.recipient.y,
+      ...occupied.flatMap((bounds) => [
+        bounds.top - vertical,
+        bounds.bottom + vertical,
+      ]),
+    ],
+    limits.minimumY,
+    limits.maximumY,
+    event.recipient.y,
+    OUTCOME_CUE_GRID_ROWS,
+  );
+  return verticalPositions.flatMap((y) =>
+    horizontalPositions.map((x) =>
+      Object.freeze({
+        center: Object.freeze({ x, y }),
+        bounds: cueBounds({ x, y }, dimensions),
+        displacement: Math.hypot(x - event.recipient.x, y - event.recipient.y),
+      }),
+    ),
+  );
+}
+
+/**
+ * Keep edge-driven search bounded while retaining both viewport rails and the
+ * positions nearest the recipient. Coordinates are presentation pixels.
+ *
+ * @param {ReadonlyArray<number>} candidates
+ * @param {number} minimum
+ * @param {number} maximum
+ * @param {number} focus
+ * @param {number} maximumCount
+ */
+function boundedCriticalAxisPositions(
+  candidates,
+  minimum,
+  maximum,
+  focus,
+  maximumCount,
+) {
+  const unique = new Map();
+  for (const candidate of candidates) {
+    if (
+      !Number.isFinite(candidate) ||
+      candidate < minimum - Number.EPSILON ||
+      candidate > maximum + Number.EPSILON
+    ) {
+      continue;
+    }
+    const bounded = Math.max(minimum, Math.min(maximum, candidate));
+    unique.set(bounded.toFixed(6), bounded);
+  }
+  const rails = [minimum, maximum].filter(
+    (value, index, values) => values.indexOf(value) === index,
+  );
+  const railKeys = new Set(rails.map((value) => value.toFixed(6)));
+  const nearest = [...unique.entries()]
+    .filter(([key]) => !railKeys.has(key))
+    .map(([, value]) => value)
+    .sort(
+      (left, right) => Math.abs(left - focus) - Math.abs(right - focus) || left - right,
+    )
+    .slice(0, Math.max(0, maximumCount - rails.length));
+  return [...rails, ...nearest];
+}
+
+/**
+ * @param {ReadonlyArray<Record<string, any>>} candidates
+ * @param {ReadonlyArray<Record<string, number>>} occupied
+ */
+function selectCueCandidate(candidates, occupied) {
+  let selected = null;
+  let selectedDisplacement = Number.POSITIVE_INFINITY;
+  for (const candidate of candidates) {
+    if (
+      candidate.displacement >= selectedDisplacement ||
+      occupied.some((bounds) => rectangleIntersectionArea(candidate.bounds, bounds) > 0)
+    ) {
+      continue;
+    }
+    selected = candidate;
+    selectedDisplacement = candidate.displacement;
+  }
+  return selected;
+}
+
+/**
+ * @param {{x: number, y: number}} center
+ * @param {{width: number, height: number}} dimensions
+ */
+function cueBounds(center, dimensions) {
+  return Object.freeze({
+    left: center.x - dimensions.width / 2,
+    top: center.y - dimensions.height / 2,
+    right: center.x + dimensions.width / 2,
+    bottom: center.y + dimensions.height / 2,
+    width: dimensions.width,
+    height: dimensions.height,
+  });
+}
+
+/**
+ * @param {Record<string, number>} bounds
+ * @param {number} clearance
+ */
+function expandCueBounds(bounds, clearance) {
+  return Object.freeze({
+    left: bounds.left - clearance,
+    top: bounds.top - clearance,
+    right: bounds.right + clearance,
+    bottom: bounds.bottom + clearance,
+    width: bounds.width + clearance * 2,
+    height: bounds.height + clearance * 2,
+  });
+}
+
+/**
+ * Deterministic whole-map fallback for dense scenes whose collision-free
+ * location lies beyond the recipient-local radial candidates.
+ *
+ * @param {{width: number, height: number}} dimensions
+ * @param {Record<string, number>} viewport
+ */
+function viewportCueCenters(dimensions, viewport) {
+  const limits = cueCenterLimits(dimensions, viewport);
+  if (!limits) {
+    return [];
+  }
+  const horizontalPositions = cueAxisPositions(
+    limits.minimumX,
+    limits.maximumX,
+    OUTCOME_CUE_GRID_COLUMNS,
+  );
+  const verticalPositions = cueAxisPositions(
+    limits.minimumY,
+    limits.maximumY,
+    OUTCOME_CUE_GRID_ROWS,
+  );
+  return verticalPositions.flatMap((y) =>
+    horizontalPositions.map((x) => Object.freeze({ x, y })),
+  );
+}
+
+/**
+ * @param {number} minimum
+ * @param {number} maximum
+ * @param {number} maximumCount
+ */
+function cueAxisPositions(minimum, maximum, maximumCount) {
+  const span = maximum - minimum;
+  if (span <= Number.EPSILON) {
+    return [minimum];
+  }
+  const count = Math.min(
+    maximumCount,
+    Math.max(2, Math.floor(span / OUTCOME_CUE_TARGET_STEP) + 1),
+  );
+  return Array.from(
+    { length: count },
+    (_, index) => minimum + (span * index) / (count - 1),
+  );
+}
+
+/**
  * @param {{x: number, y: number}} center
  * @param {{width: number, height: number}} dimensions
  * @param {Record<string, number>} viewport
  */
 function clampCueCenter(center, dimensions, viewport) {
+  const limits = cueCenterLimits(dimensions, viewport);
+  if (!limits) {
+    return null;
+  }
+  return Object.freeze({
+    x: Math.max(limits.minimumX, Math.min(limits.maximumX, center.x)),
+    y: Math.max(limits.minimumY, Math.min(limits.maximumY, center.y)),
+  });
+}
+
+/**
+ * @param {{width: number, height: number}} dimensions
+ * @param {Record<string, number>} viewport
+ */
+function cueCenterLimits(dimensions, viewport) {
   const horizontal = dimensions.width / 2 + 4;
   const vertical = dimensions.height / 2 + 4;
+  const minimumX = viewport.left + horizontal;
+  const maximumX = viewport.right - horizontal;
+  const minimumY = viewport.top + vertical;
+  const maximumY = viewport.bottom - vertical;
+  if (maximumX < minimumX || maximumY < minimumY) {
+    return null;
+  }
   return Object.freeze({
-    x: Math.max(
-      viewport.left + horizontal,
-      Math.min(viewport.right - horizontal, center.x),
-    ),
-    y: Math.max(
-      viewport.top + vertical,
-      Math.min(viewport.bottom - vertical, center.y),
-    ),
+    minimumX,
+    maximumX,
+    minimumY,
+    maximumY,
   });
 }
 
@@ -866,6 +1179,7 @@ export function buildChoreographyPlan(frame, surface = null) {
       route,
     ]),
   );
+  /** @type {Record<string, any>[]} */
   const routedEvents = planned.map((event) => {
     const route =
       event.kind === "activation"
@@ -875,18 +1189,13 @@ export function buildChoreographyPlan(frame, surface = null) {
           : undefined;
     return route ? Object.freeze({ ...event, route }) : event;
   });
+  const spatialEventCount = routedEvents.filter((event) => event.spatial).length;
   /** @type {ReadonlyArray<Record<string, any>>} */
   const events = Object.freeze(
     layoutOutcomeCues(routedEvents, surface).map((event) =>
       Object.isFrozen(event) ? event : Object.freeze(event),
     ),
   );
-  const spatialEventCount = events.filter((event) => event.spatial).length;
-  if (spatialEventCount > MAX_SPATIAL_EVENTS) {
-    throw new RangeError(
-      `visual event batch exceeds the ${MAX_SPATIAL_EVENTS}-event spatial limit.`,
-    );
-  }
   const persistentEventCount = events.filter((event) => event.persistent).length;
 
   return Object.freeze({

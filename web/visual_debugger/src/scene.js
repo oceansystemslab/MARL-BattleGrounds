@@ -518,6 +518,13 @@ export class BattlefieldRenderer {
     if (!transform) {
       return null;
     }
+    const protectedLayoutKey = this.choreographyProtectedRects
+      .map((bounds) =>
+        [bounds.left, bounds.top, bounds.right, bounds.bottom]
+          .map((value) => Number(value).toFixed(3))
+          .join(","),
+      )
+      .join(";");
     /** @type {ChoreographySurface} */
     const surface = {
       layer: this.layers.transientEvents,
@@ -528,6 +535,11 @@ export class BattlefieldRenderer {
         transform.worldHeight,
         transform.viewportBounds.width,
         transform.viewportBounds.height,
+        transform.mapBounds.left,
+        transform.mapBounds.top,
+        transform.mapBounds.right,
+        transform.mapBounds.bottom,
+        protectedLayoutKey,
       ].join(":"),
       viewportBounds: Object.freeze({ ...transform.mapBounds }),
       protectedRects: this.choreographyProtectedRects,
