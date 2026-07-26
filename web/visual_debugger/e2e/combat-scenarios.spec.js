@@ -81,15 +81,31 @@ async function loadScenario(page, scenario) {
  * @param {import("@playwright/test").Page} page
  * @param {number} transitionId
  * @param {number} [logicalMs]
+ * @returns {Promise<Record<string, any>>}
  */
 async function advanceAnimatedFrame(page, transitionId, logicalMs = 520) {
+  const responsePromise = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" && response.url().endsWith("/api/command"),
+  );
   await page.locator("#battlefield").focus();
   await page.keyboard.press("n");
+  const response = await responsePromise;
   await expect(page.locator("#transition-value")).toHaveText(String(transitionId), {
     timeout: 120_000,
   });
   await expect(page.locator(CHOREOGRAPHY_ROOT)).toHaveCount(1);
   await pauseAtLogicalTime(page, logicalMs);
+  const payload = await response.json();
+  if (
+    typeof payload !== "object" ||
+    payload === null ||
+    typeof payload.frame !== "object" ||
+    payload.frame === null
+  ) {
+    throw new Error("Command response did not contain an authoritative frame.");
+  }
+  return payload.frame;
 }
 
 /**
@@ -117,6 +133,94 @@ function durableRosterStatus(page, slot, tokenId) {
   return page.locator(
     `.roster-row[data-slot="${slot}"] .roster-fact-token--status[data-token-id="${tokenId}"]`,
   );
+}
+
+/**
+ * @param {import("@playwright/test").Page} page
+ * @returns {Promise<Map<number, {x: number, y: number, radius: number}>>}
+ */
+async function battlefieldCenters(page) {
+  return new Map(
+    await page.locator("#battlefield .agent").evaluateAll((agents) =>
+      agents.map((agent) => {
+        const body = agent.querySelector(".agent-body");
+        if (!(body instanceof SVGCircleElement)) {
+          throw new Error("Agent body is not measurable.");
+        }
+        return [
+          Number(agent.getAttribute("data-slot")),
+          {
+            x: body.cx.baseVal.value,
+            y: body.cy.baseVal.value,
+            radius: body.r.baseVal.value,
+          },
+        ];
+      }),
+    ),
+  );
+}
+
+/**
+ * @param {Map<number, {x: number, y: number, radius: number}>} centers
+ * @param {number} slot
+ */
+function centerAt(centers, slot) {
+  const center = centers.get(slot);
+  if (!center) {
+    throw new Error(`Battlefield center for id_${slot} is unavailable.`);
+  }
+  return center;
+}
+
+/**
+ * @param {string | null} transform
+ */
+function translatedPoint(transform) {
+  const match = transform?.match(
+    /^translate\((-?(?:\d+\.?\d*|\.\d+)) (-?(?:\d+\.?\d*|\.\d+))\)$/,
+  );
+  if (!match) {
+    throw new Error(`Unexpected impact transform: ${transform}`);
+  }
+  return { x: Number(match[1]), y: Number(match[2]) };
+}
+
+/**
+ * @param {{x: number, y: number}} first
+ * @param {{x: number, y: number}} second
+ */
+function pointDistance(first, second) {
+  return Math.hypot(first.x - second.x, first.y - second.y);
+}
+
+/**
+ * Assert that every ordinary completed activation uses the durable successor
+ * positions shipped in the same authoritative frame.
+ *
+ * @param {Record<string, any>} frame
+ */
+function assertSuccessorActivationAnchors(frame) {
+  const positions = new Map(
+    frame.scene.agents.map(
+      /** @param {Record<string, any>} agent */ (agent) => [
+        Number(agent.global_slot),
+        agent.position,
+      ],
+    ),
+  );
+  for (const event of frame.event_batch.events.filter(
+    /** @param {Record<string, any>} event */ (event) =>
+      event.event_type === "accepted_activation" && event.token_id !== "warrior_charge",
+  )) {
+    expect(event.source_anchor).toEqual(
+      positions.get(Number(event.source_global_slot)),
+    );
+    if (Number.isInteger(event.target_global_slot)) {
+      expect(event.target_anchor).toEqual(
+        positions.get(Number(event.target_global_slot)),
+      );
+    }
+  }
 }
 
 test("focus crossfire retriggers events and keeps presentation controls local", async ({
@@ -205,6 +309,110 @@ test("focus crossfire retriggers events and keeps presentation controls local", 
   const net = page.locator(`${CHOREOGRAPHY_ROOT} .combat-effect--net-health`);
   await expect(net).toHaveCount(1);
   await expect(net).toHaveAttribute("data-recipient-slot", "5");
+  await assertBoundedChoreography(page);
+});
+
+test("moving Basics and focus fire terminate on successor bodies", async ({ page }) => {
+  await loadScenario(page, "moving_basic_crossfire");
+  const initial = await battlefieldCenters(page);
+
+  const firstFrame = await advanceAnimatedFrame(page, 1);
+  assertSuccessorActivationAnchors(firstFrame);
+  const firstSuccessor = await battlefieldCenters(page);
+  const firstActivations = page.locator(
+    `${CHOREOGRAPHY_ROOT} .combat-effect--activation`,
+  );
+  await expect(firstActivations).toHaveCount(10);
+  const firstRecords = await firstActivations.evaluateAll((nodes) =>
+    nodes.map((node) => ({
+      eventId: node.getAttribute("data-event-id"),
+      source: Number(node.getAttribute("data-source-slot")),
+      target: Number(node.getAttribute("data-target-slot")),
+      impactTransform: node.querySelector(".combat-impact")?.getAttribute("transform"),
+    })),
+  );
+  expect(new Set(firstRecords.map(({ source }) => source))).toEqual(
+    new Set([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]),
+  );
+  for (const slot of initial.keys()) {
+    expect(
+      pointDistance(centerAt(initial, slot), centerAt(firstSuccessor, slot)),
+    ).toBeGreaterThan(1);
+  }
+  for (const record of firstRecords) {
+    const targetBody = centerAt(firstSuccessor, record.target);
+    const impact = translatedPoint(record.impactTransform ?? null);
+    const successorDistance = pointDistance(impact, targetBody);
+    expect(successorDistance).toBeLessThanOrEqual(targetBody.radius + 3.01);
+  }
+  await skipIfAvailable(page);
+
+  const secondFrame = await advanceAnimatedFrame(page, 2);
+  assertSuccessorActivationAnchors(secondFrame);
+  const secondSuccessor = await battlefieldCenters(page);
+  const secondActivations = page.locator(
+    `${CHOREOGRAPHY_ROOT} .combat-effect--activation`,
+  );
+  await expect(secondActivations).toHaveCount(10);
+  const secondRecords = await secondActivations.evaluateAll((nodes) =>
+    nodes.map((node) => ({
+      eventId: node.getAttribute("data-event-id"),
+      target: Number(node.getAttribute("data-target-slot")),
+      impactTransform: node.querySelector(".combat-impact")?.getAttribute("transform"),
+    })),
+  );
+  const firstEventIds = new Set(firstRecords.map(({ eventId }) => eventId));
+  expect(secondRecords.every(({ eventId }) => !firstEventIds.has(eventId))).toBe(true);
+  for (const slot of firstSuccessor.keys()) {
+    expect(
+      pointDistance(centerAt(firstSuccessor, slot), centerAt(secondSuccessor, slot)),
+    ).toBeGreaterThan(1);
+  }
+  for (const record of secondRecords) {
+    const targetBody = centerAt(secondSuccessor, record.target);
+    const impact = translatedPoint(record.impactTransform ?? null);
+    const successorDistance = pointDistance(impact, targetBody);
+    expect(successorDistance).toBeLessThanOrEqual(targetBody.radius + 3.01);
+  }
+  await assertBoundedChoreography(page);
+  await skipIfAvailable(page);
+
+  await loadScenario(page, "moving_focus_crossfire");
+  const focusInitial = await battlefieldCenters(page);
+  const focusFrame = await advanceAnimatedFrame(page, 1);
+  assertSuccessorActivationAnchors(focusFrame);
+  const focusSuccessor = await battlefieldCenters(page);
+  for (const slot of [0, 1, 2, 3, 5, 6, 7, 8]) {
+    expect(
+      pointDistance(centerAt(focusInitial, slot), centerAt(focusSuccessor, slot)),
+    ).toBeGreaterThan(1);
+  }
+  const focusActivations = page.locator(
+    `${CHOREOGRAPHY_ROOT} .combat-effect--activation`,
+  );
+  await expect(focusActivations).toHaveCount(7);
+  await expect(
+    focusActivations.locator(".combat-impact__semantic--damage"),
+  ).toHaveCount(4);
+  await expect(
+    focusActivations.locator(".combat-impact__semantic--healing"),
+  ).toHaveCount(3);
+  const focusRecords = await focusActivations.evaluateAll((nodes) =>
+    nodes.map((node) => ({
+      target: Number(node.getAttribute("data-target-slot")),
+      impactTransform: node.querySelector(".combat-impact")?.getAttribute("transform"),
+    })),
+  );
+  expect(focusRecords.every(({ target }) => target === 5)).toBe(true);
+  for (const record of focusRecords) {
+    const targetBody = centerAt(focusSuccessor, 5);
+    const impact = translatedPoint(record.impactTransform ?? null);
+    const successorDistance = pointDistance(impact, targetBody);
+    expect(successorDistance).toBeLessThanOrEqual(targetBody.radius + 3.01);
+  }
+  await expect(
+    page.locator(`${CHOREOGRAPHY_ROOT} .combat-effect--net-health`),
+  ).toHaveAttribute("data-recipient-slot", "5");
   await assertBoundedChoreography(page);
 });
 

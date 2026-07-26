@@ -403,10 +403,10 @@ def test_non_health_activations_do_not_create_zero_health_delta_visuals() -> Non
     assert 6 not in health_visual_slots  # Hunter Trap carries no direct health delta.
 
 
-def test_activation_events_preserve_multiplicity_prestate_anchors_and_no_amount() -> (
+def test_activation_events_preserve_multiplicity_successor_anchors_and_no_amount() -> (
     None
 ):
-    session = submit_next_script_frame(_session("basic_support"))
+    session = submit_next_script_frame(_session("moving_basic_crossfire"))
     transition = session.last_transition
     assert transition is not None
     duplicated = replace(
@@ -433,12 +433,71 @@ def test_activation_events_preserve_multiplicity_prestate_anchors_and_no_amount(
         for actor in transition.actor_transitions
         if actor.actor_global_slot == activations[0].target_global_slot
     )
-    assert activations[0].source_anchor == source.position_before
-    assert activations[0].target_anchor == target.position_before
+    assert source.position_before != source.position_after
+    assert target.position_before != target.position_after
+    assert activations[0].source_anchor == source.position_after
+    assert activations[0].target_anchor == target.position_after
     payload = to_jsonable(activations[0])
     assert "amount" not in payload  # type: ignore[operator]
     assert "damage" not in payload  # type: ignore[operator]
     assert "healing" not in payload  # type: ignore[operator]
+
+
+def test_completed_activation_anchors_use_successor_with_charge_as_prestate_exception() -> (
+    None
+):
+    sessions: list[DebuggerSession] = []
+    moving_basics = submit_next_script_frame(_session("moving_basic_crossfire"))
+    sessions.append(moving_basics)
+
+    mirrored = _session("mirrored_ultimates")
+    for _ in get_scenario("mirrored_ultimates").frames:
+        mirrored = submit_next_script_frame(mirrored)
+        sessions.append(mirrored)
+
+    observed_kinds: set[str] = set()
+    for session in sessions:
+        transition = session.last_transition
+        assert transition is not None
+        batch = latest_visual_event_batch(session)
+        assert batch is not None
+        actor_by_slot = {
+            actor.actor_global_slot: actor for actor in transition.actor_transitions
+        }
+        activation_by_source = {
+            event.source_global_slot: event
+            for event in batch.events
+            if isinstance(event, AcceptedActivationEventV1)
+        }
+        for activation in transition.accepted_activations:
+            observed_kinds.add(activation.kind)
+            event = activation_by_source[activation.source_global_slot]
+            source = actor_by_slot[activation.source_global_slot]
+            target = (
+                None
+                if activation.target_global_slot is None
+                else actor_by_slot[activation.target_global_slot]
+            )
+            if activation.kind == "warrior_charge":
+                assert target is not None
+                assert source.position_before != source.position_after
+                assert event.source_anchor == source.position_before
+                assert event.target_anchor == target.position_before
+            else:
+                assert event.source_anchor == source.position_after
+                assert event.target_anchor == (
+                    None if target is None else target.position_after
+                )
+
+    assert observed_kinds == {
+        "basic_damage",
+        "basic_heal",
+        "mage_burst",
+        "warrior_charge",
+        "hunter_trap",
+        "rogue_poison",
+        "holy_word",
+    }
 
 
 def test_status_application_refresh_decrement_expiration_and_trap_break() -> None:

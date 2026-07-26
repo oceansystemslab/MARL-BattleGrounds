@@ -641,28 +641,139 @@ def test_selected_legality_is_copied_from_exact_controlled_mask_row() -> None:
     assert legality.lane_1_available is bool(exact[1])
 
 
-def test_pov_event_projection_redacts_hidden_endpoint_before_serialization() -> None:
+def test_pov_completed_effects_use_successor_visibility_and_omit_hidden_endpoints() -> (
+    None
+):
     session = submit_next_script_frame(_debugger_session("basic_support"))
     transition = session.last_transition
     assert transition is not None
 
     hidden_enemy_mask = transition.before_observation.enemy_visibility_mask.at[
         0,
-        0,
+        1,
     ].set(False)
     hidden_enemy_rows = transition.before_observation.enemy_unit_features.at[
         0,
-        0,
-    ].set(jnp.zeros_like(transition.before_observation.enemy_unit_features[0, 0]))
+        1,
+    ].set(jnp.zeros_like(transition.before_observation.enemy_unit_features[0, 1]))
     hidden_before = transition.before_observation._replace(
         enemy_visibility_mask=hidden_enemy_mask,
         enemy_unit_features=hidden_enemy_rows,
     )
-    session = replace(
+    before_hidden_session = replace(
         session,
         last_transition=replace(
             transition,
             before_observation=hidden_before,
+        ),
+    )
+
+    batch = build_visual_event_batch(before_hidden_session, audience="agent_pov")
+    assert batch is not None
+    activation = next(
+        event
+        for event in batch.events
+        if isinstance(event, AcceptedActivationEventV1)
+        and event.source_global_slot == 1
+    )
+    target_actor = next(
+        actor
+        for actor in transition.actor_transitions
+        if actor.actor_global_slot == 6
+    )
+    assert activation.target_disclosure == "public"
+    assert activation.target_global_slot == 6
+    assert activation.target_anchor == target_actor.position_after
+    assert any(
+        isinstance(event, NetHealthEventV1)
+        and event.recipient_global_slot == 6
+        and event.recipient_anchor == target_actor.position_after
+        for event in batch.events
+    )
+    assert any(
+        isinstance(event, StatusLifecycleEventV1)
+        and event.recipient_global_slot == 6
+        and event.recipient_anchor == target_actor.position_after
+        for event in batch.events
+    )
+
+    hidden_after_mask = transition.after_observation.enemy_visibility_mask.at[
+        0,
+        1,
+    ].set(False)
+    hidden_after_rows = transition.after_observation.enemy_unit_features.at[
+        0,
+        1,
+    ].set(jnp.zeros_like(transition.after_observation.enemy_unit_features[0, 1]))
+    hidden_after = transition.after_observation._replace(
+        enemy_visibility_mask=hidden_after_mask,
+        enemy_unit_features=hidden_after_rows,
+    )
+    after_hidden_session = replace(
+        session,
+        observation=hidden_after,
+        last_transition=replace(
+            transition,
+            after_observation=hidden_after,
+        ),
+    )
+    redacted_batch = build_visual_event_batch(
+        after_hidden_session,
+        audience="agent_pov",
+    )
+    assert redacted_batch is not None
+    activation = next(
+        event
+        for event in redacted_batch.events
+        if isinstance(event, AcceptedActivationEventV1)
+        and event.source_global_slot == 1
+    )
+    assert activation.target_disclosure == "redacted"
+    assert activation.target_global_slot is None
+    assert activation.target_anchor is None
+    assert not any(
+        isinstance(event, (NetHealthEventV1, StatusLifecycleEventV1))
+        and event.recipient_global_slot == 6
+        for event in redacted_batch.events
+    )
+    payload = to_jsonable(activation)
+    assert payload["target_global_slot"] is None  # type: ignore[index]
+    assert payload["target_anchor"] is None  # type: ignore[index]
+
+
+def test_pov_charge_activation_keeps_prestate_visibility_while_outcomes_use_successor() -> (
+    None
+):
+    session = create_session(
+        get_scenario("mirrored_ultimates"),
+        seed=0,
+        controlled_global_slot=1,
+        show_ranges=True,
+        verbose_logging=False,
+    )
+    session = submit_next_script_frame(session)
+    session = submit_next_script_frame(session)
+    transition = session.last_transition
+    assert transition is not None
+
+    hidden_after_mask = transition.after_observation.enemy_visibility_mask.at[
+        1,
+        1,
+    ].set(False)
+    hidden_after_rows = transition.after_observation.enemy_unit_features.at[
+        1,
+        1,
+    ].set(jnp.zeros_like(transition.after_observation.enemy_unit_features[1, 1]))
+    hidden_after = transition.after_observation._replace(
+        enemy_visibility_mask=hidden_after_mask,
+        enemy_unit_features=hidden_after_rows,
+    )
+    session = replace(
+        session,
+        observation=hidden_after,
+        last_transition=replace(
+            transition,
+            after_observation=hidden_after,
         ),
     )
 
@@ -672,14 +783,27 @@ def test_pov_event_projection_redacts_hidden_endpoint_before_serialization() -> 
         event
         for event in batch.events
         if isinstance(event, AcceptedActivationEventV1)
-        and event.source_global_slot == 0
+        and event.source_global_slot == 1
     )
-    assert activation.target_disclosure == "redacted"
-    assert activation.target_global_slot is None
-    assert activation.target_anchor is None
-    payload = to_jsonable(activation)
-    assert payload["target_global_slot"] is None  # type: ignore[index]
-    assert payload["target_anchor"] is None  # type: ignore[index]
+    source_actor = next(
+        actor
+        for actor in transition.actor_transitions
+        if actor.actor_global_slot == 1
+    )
+    target_actor = next(
+        actor
+        for actor in transition.actor_transitions
+        if actor.actor_global_slot == 6
+    )
+    assert activation.target_disclosure == "public"
+    assert activation.source_anchor == source_actor.position_before
+    assert activation.target_anchor == target_actor.position_before
+    assert source_actor.position_before != source_actor.position_after
+    assert not any(
+        isinstance(event, (NetHealthEventV1, StatusLifecycleEventV1))
+        and event.recipient_global_slot == 6
+        for event in batch.events
+    )
 
 
 def test_pov_events_are_built_independently_and_omit_other_actor_rejections(

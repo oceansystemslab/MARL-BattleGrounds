@@ -90,6 +90,7 @@ from marl_battlegrounds.rendering.vocabulary import (
     lookup_status_token,
 )
 from scripts.dev.visual_debugger.diagnostics import (
+    activation_uses_successor_anchors,
     latest_visual_event_batch,
     observer_relative_visibility,
     visual_event_id,
@@ -692,21 +693,39 @@ def _pov_event_batch(session: DebuggerSession) -> VisualEventBatchV1:
         ):
             continue
         source_actor = actor_by_slot[activation.source_global_slot]
-        source_visible_before = _visible_at(
+        use_successor_anchors = activation_uses_successor_anchors(activation.kind)
+        anchor_observation = (
+            transition.after_observation
+            if use_successor_anchors
+            else transition.before_observation
+        )
+        source_visible_at_anchor = _visible_at(
             session=session,
-            observation=transition.before_observation,
+            observation=anchor_observation,
             candidate_global_slot=activation.source_global_slot,
         )
         target_slot = activation.target_global_slot
         target_public = target_slot is not None and _visible_at(
             session=session,
-            observation=transition.before_observation,
+            observation=anchor_observation,
             candidate_global_slot=target_slot,
         )
         target_actor = (
             actor_by_slot[target_slot]
             if target_public and target_slot is not None
             else None
+        )
+        source_anchor = (
+            source_actor.position_after
+            if use_successor_anchors
+            else source_actor.position_before
+        )
+        target_anchor = (
+            None
+            if target_actor is None
+            else target_actor.position_after
+            if use_successor_anchors
+            else target_actor.position_before
         )
         event_id = visual_event_id(
             event_scope,
@@ -729,12 +748,8 @@ def _pov_event_batch(session: DebuggerSession) -> VisualEventBatchV1:
                 token_id=activation.kind,
                 source_global_slot=activation.source_global_slot,
                 target_global_slot=disclosed_target,
-                source_anchor=(
-                    source_actor.position_before if source_visible_before else None
-                ),
-                target_anchor=(
-                    target_actor.position_before if target_actor is not None else None
-                ),
+                source_anchor=source_anchor if source_visible_at_anchor else None,
+                target_anchor=target_anchor,
                 target_disclosure=(
                     "target_none"
                     if target_slot is None
@@ -767,7 +782,7 @@ def _pov_event_batch(session: DebuggerSession) -> VisualEventBatchV1:
         if (
             activation.kind == "warrior_charge"
             and target_slot is not None
-            and source_visible_before
+            and source_visible_at_anchor
             and target_public
             and _visible_at(
                 session=session,
@@ -799,19 +814,13 @@ def _pov_event_batch(session: DebuggerSession) -> VisualEventBatchV1:
 
     health_ordinal = 0
     for actor in transition.actor_transitions:
-        visible_before = _visible_at(
-            session=session,
-            observation=transition.before_observation,
-            candidate_global_slot=actor.actor_global_slot,
-        )
         visible_after = _visible_at(
             session=session,
             observation=transition.after_observation,
             candidate_global_slot=actor.actor_global_slot,
         )
         if (
-            not visible_before
-            or not visible_after
+            not visible_after
             or (
                 actor.net_health_delta == 0.0
                 and actor.actor_global_slot not in visible_direct_health_targets
@@ -848,17 +857,10 @@ def _pov_event_batch(session: DebuggerSession) -> VisualEventBatchV1:
     for status in transition.status_transitions:
         if status.change == "unchanged":
             continue
-        if not (
-            _visible_at(
-                session=session,
-                observation=transition.before_observation,
-                candidate_global_slot=status.global_slot,
-            )
-            and _visible_at(
-                session=session,
-                observation=transition.after_observation,
-                candidate_global_slot=status.global_slot,
-            )
+        if not _visible_at(
+            session=session,
+            observation=transition.after_observation,
+            candidate_global_slot=status.global_slot,
         ):
             continue
         application_event_ids = tuple(

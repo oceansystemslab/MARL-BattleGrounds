@@ -205,12 +205,18 @@ def test_researcher_candidate_legality_copies_exact_current_mask_rows(
 def test_stress_menu_is_explicitly_opt_in() -> None:
     frame = _frame(_session(), include_stress=True)
 
-    assert len(frame.available_scenarios) == 10
+    assert len(frame.available_scenarios) == 12
     assert tuple(
         option.name
         for option in frame.available_scenarios
         if option.audience == "stress"
-    ) == ("charge_convergence", "trap_lifecycle", "max_status_stack")
+    ) == (
+        "moving_basic_crossfire",
+        "moving_focus_crossfire",
+        "charge_convergence",
+        "trap_lifecycle",
+        "max_status_stack",
+    )
 
 
 def test_researcher_latest_card_uses_successor_accepted_action() -> None:

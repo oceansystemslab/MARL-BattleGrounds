@@ -14,7 +14,9 @@ from marl_battlegrounds.core.types import (
     MAX_OBSTACLE_SLOTS,
     MOVE_EAST,
     MOVE_NORTH,
+    MOVE_SOUTH,
     MOVE_STAY,
+    MOVE_WEST,
     NEUTRAL_CLASS_ID,
     OBSTACLE_FEATURE_ACTIVE,
     OBSTACLE_FEATURE_HEIGHT,
@@ -206,7 +208,7 @@ def _ultimate_showcase_config() -> EnvConfig:
             3: (8.0, 5.0),
             4: (3.0, 10.0),
             5: (7.0, 6.0),
-            6: (8.5, 8.0),
+            6: (8.0, 8.0),
             7: (10.0, 3.0),
             8: (12.0, 8.0),
             9: (13.0, 10.0),
@@ -263,7 +265,7 @@ def _status_stack_config() -> EnvConfig:
         class_ids=roster,
         active_positions={
             0: (3.0, 6.0),
-            1: (5.2, 4.2),
+            1: (5.5, 4.4),
             2: (8.0, 5.0),
             5: (8.0, 6.0),
             6: (8.0, 8.0),
@@ -323,14 +325,47 @@ def _mirrored_ultimates_config() -> EnvConfig:
         active_positions={
             0: (3.0, 2.0),
             1: (6.0, 5.0),
-            2: (6.1, 9.0),
+            2: (6.6, 9.0),
             3: (7.3, 12.0),
             4: (4.0, 11.5),
             5: (15.0, 2.0),
             6: (10.0, 5.0),
-            7: (9.9, 9.0),
+            7: (9.4, 9.0),
             8: (8.7, 12.0),
             9: (12.0, 11.5),
+        },
+    )
+
+
+def _moving_basic_crossfire_config() -> EnvConfig:
+    roster = (
+        MAGE_CLASS_ID,
+        WARRIOR_CLASS_ID,
+        HUNTER_CLASS_ID,
+        ROGUE_CLASS_ID,
+        PRIEST_CLASS_ID,
+        MAGE_CLASS_ID,
+        WARRIOR_CLASS_ID,
+        HUNTER_CLASS_ID,
+        ROGUE_CLASS_ID,
+        PRIEST_CLASS_ID,
+    )
+    return _config(
+        map_width=14.0,
+        map_height=12.0,
+        team_sizes=(5, 5),
+        class_ids=roster,
+        active_positions={
+            0: (5.0, 4.0),
+            1: (5.0, 8.5),
+            2: (5.0, 6.0),
+            3: (8.7, 8.5),
+            4: (3.0, 4.5),
+            5: (7.0, 6.0),
+            6: (6.3, 8.5),
+            7: (7.0, 4.0),
+            8: (10.0, 8.5),
+            9: (9.0, 5.5),
         },
     )
 
@@ -416,7 +451,7 @@ def _max_status_stack_config() -> EnvConfig:
             0: (8.0, 6.0),
             1: (10.5, 7.0),
             5: (3.0, 6.0),
-            6: (8.0, 2.5),
+            6: (8.0, 3.2),
             7: (11.0, 6.0),
             8: (8.0, 7.4),
         },
@@ -570,8 +605,8 @@ _MIRRORED_ULTIMATES_FRAMES = (
         "mirrored-bursts",
         "Both Mages activate Burst simultaneously.",
         (
-            ActorCommand(0, MOVE_STAY, None, 1),
-            ActorCommand(5, MOVE_STAY, None, 1),
+            ActorCommand(0, MOVE_NORTH, None, 1),
+            ActorCommand(5, MOVE_NORTH, None, 1),
         ),
     ),
     ScenarioFrame(
@@ -586,24 +621,76 @@ _MIRRORED_ULTIMATES_FRAMES = (
         "reciprocal-traps",
         "The opposing Hunters Trap one another.",
         (
-            ActorCommand(2, MOVE_STAY, 7, 1),
-            ActorCommand(7, MOVE_STAY, 2, 1),
+            ActorCommand(2, MOVE_NORTH, 7, 1),
+            ActorCommand(7, MOVE_NORTH, 2, 1),
         ),
     ),
     ScenarioFrame(
         "reciprocal-poisons",
         "The opposing Rogues Poison one another.",
         (
-            ActorCommand(3, MOVE_STAY, 8, 1),
-            ActorCommand(8, MOVE_STAY, 3, 1),
+            ActorCommand(3, MOVE_EAST, 8, 1),
+            ActorCommand(8, MOVE_EAST, 3, 1),
         ),
     ),
     ScenarioFrame(
         "mirrored-holy-words",
         "Each Priest uses Holy Word on its allied damaged Rogue.",
         (
-            ActorCommand(4, MOVE_STAY, 3, 1),
-            ActorCommand(9, MOVE_STAY, 8, 1),
+            ActorCommand(4, MOVE_NORTH, 3, 1),
+            ActorCommand(9, MOVE_NORTH, 8, 1),
+        ),
+    ),
+)
+
+_MOVING_BASIC_CROSSFIRE_FRAMES = (
+    ScenarioFrame(
+        "north-east-crossfire",
+        "Every class pair moves north or east through reciprocal Basics and healing.",
+        (
+            ActorCommand(0, MOVE_NORTH, 5, 0),
+            ActorCommand(1, MOVE_EAST, 6, 0),
+            ActorCommand(2, MOVE_NORTH, 7, 0),
+            ActorCommand(3, MOVE_EAST, 8, 0),
+            ActorCommand(4, MOVE_NORTH, 0, 0),
+            ActorCommand(5, MOVE_NORTH, 0, 0),
+            ActorCommand(6, MOVE_EAST, 1, 0),
+            ActorCommand(7, MOVE_NORTH, 2, 0),
+            ActorCommand(8, MOVE_EAST, 3, 0),
+            ActorCommand(9, MOVE_NORTH, 5, 0),
+        ),
+    ),
+    ScenarioFrame(
+        "south-west-crossfire",
+        "The same pairs reverse south or west and repeat their completed effects.",
+        (
+            ActorCommand(0, MOVE_SOUTH, 5, 0),
+            ActorCommand(1, MOVE_WEST, 6, 0),
+            ActorCommand(2, MOVE_SOUTH, 7, 0),
+            ActorCommand(3, MOVE_WEST, 8, 0),
+            ActorCommand(4, MOVE_SOUTH, 0, 0),
+            ActorCommand(5, MOVE_SOUTH, 0, 0),
+            ActorCommand(6, MOVE_WEST, 1, 0),
+            ActorCommand(7, MOVE_SOUTH, 2, 0),
+            ActorCommand(8, MOVE_WEST, 3, 0),
+            ActorCommand(9, MOVE_SOUTH, 5, 0),
+        ),
+    ),
+)
+
+_MOVING_FOCUS_CROSSFIRE_FRAMES = (
+    ScenarioFrame(
+        "eastbound-focus-fire-and-healing",
+        "Four attackers, three healers, and their shared recipient move east together.",
+        (
+            ActorCommand(0, MOVE_EAST, 5, 0),
+            ActorCommand(1, MOVE_EAST, 5, 0),
+            ActorCommand(2, MOVE_EAST, 5, 0),
+            ActorCommand(3, MOVE_EAST, 5, 0),
+            ActorCommand(5, MOVE_EAST, None, 0),
+            ActorCommand(6, MOVE_EAST, 5, 0),
+            ActorCommand(7, MOVE_EAST, 5, 0),
+            ActorCommand(8, MOVE_EAST, 5, 0),
         ),
     ),
 )
@@ -748,6 +835,26 @@ RESEARCHER_SCENARIOS: dict[str, DebuggerScenario] = {
 
 
 STRESS_SCENARIOS: dict[str, DebuggerScenario] = {
+    "moving_basic_crossfire": DebuggerScenario(
+        name="moving_basic_crossfire",
+        title="Moving Basic crossfire",
+        description="Reciprocal Basics and healing across moving successor anchors.",
+        mode="scripted",
+        build_config=_moving_basic_crossfire_config,
+        frames=_MOVING_BASIC_CROSSFIRE_FRAMES,
+        default_controlled_slot=0,
+        audience="stress",
+    ),
+    "moving_focus_crossfire": DebuggerScenario(
+        name="moving_focus_crossfire",
+        title="Moving focus crossfire",
+        description="Moving focus fire and healing converge on one recipient.",
+        mode="scripted",
+        build_config=_team_focus_crossfire_config,
+        frames=_MOVING_FOCUS_CROSSFIRE_FRAMES,
+        default_controlled_slot=2,
+        audience="stress",
+    ),
     "charge_convergence": DebuggerScenario(
         name="charge_convergence",
         title="Converging Charge routes",

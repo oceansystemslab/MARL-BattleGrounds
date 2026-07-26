@@ -42,7 +42,9 @@ from marl_battlegrounds.core.types import (
     MAX_AGENT_SLOTS,
     MOVE_EAST,
     MOVE_NORTH,
+    MOVE_SOUTH,
     MOVE_STAY,
+    MOVE_WEST,
     OBSTACLE_FEATURE_ACTIVE,
     OBSTACLE_FEATURE_HEIGHT,
     OBSTACLE_FEATURE_RADIUS,
@@ -117,6 +119,8 @@ def test_all_scenario_configs_validate_and_reset() -> None:
         "mirrored_ultimates",
     )
     stress_names = (
+        "moving_basic_crossfire",
+        "moving_focus_crossfire",
         "charge_convergence",
         "trap_lifecycle",
         "max_status_stack",
@@ -136,7 +140,9 @@ def test_all_scenario_configs_validate_and_reset() -> None:
         f"{scenario.name:<22} {scenario.mode:<11} {scenario.description}"
         for scenario in RESEARCHER_SCENARIOS.values()
     )
-    assert tuple(iter_scenario_summaries(include_stress=True))[-3:] == tuple(
+    assert tuple(iter_scenario_summaries(include_stress=True))[
+        -len(stress_names) :
+    ] == tuple(
         f"{scenario.name:<22} {scenario.mode:<11} {scenario.description}"
         for scenario in STRESS_SCENARIOS.values()
     )
@@ -246,7 +252,7 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
                 (8.0, 5.0),
                 (3.0, 10.0),
                 (7.0, 6.0),
-                (8.5, 8.0),
+                (8.0, 8.0),
                 (10.0, 3.0),
                 (12.0, 8.0),
                 (13.0, 10.0),
@@ -340,17 +346,73 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
             (
                 (3.0, 2.0),
                 (6.0, 5.0),
-                (6.1, 9.0),
+                (6.6, 9.0),
                 (7.3, 12.0),
                 (4.0, 11.5),
                 (15.0, 2.0),
                 (10.0, 5.0),
-                (9.9, 9.0),
+                (9.4, 9.0),
                 (8.7, 12.0),
                 (12.0, 11.5),
             ),
             "scripted",
             0,
+        ),
+        "moving_basic_crossfire": (
+            (14.0, 12.0),
+            tuple(range(10)),
+            (
+                MAGE_CLASS_ID,
+                WARRIOR_CLASS_ID,
+                HUNTER_CLASS_ID,
+                ROGUE_CLASS_ID,
+                PRIEST_CLASS_ID,
+                MAGE_CLASS_ID,
+                WARRIOR_CLASS_ID,
+                HUNTER_CLASS_ID,
+                ROGUE_CLASS_ID,
+                PRIEST_CLASS_ID,
+            ),
+            (
+                (5.0, 4.0),
+                (5.0, 8.5),
+                (5.0, 6.0),
+                (8.7, 8.5),
+                (3.0, 4.5),
+                (7.0, 6.0),
+                (6.3, 8.5),
+                (7.0, 4.0),
+                (10.0, 8.5),
+                (9.0, 5.5),
+            ),
+            "scripted",
+            0,
+        ),
+        "moving_focus_crossfire": (
+            (16.0, 12.0),
+            (0, 1, 2, 3, 5, 6, 7, 8),
+            (
+                MAGE_CLASS_ID,
+                WARRIOR_CLASS_ID,
+                HUNTER_CLASS_ID,
+                ROGUE_CLASS_ID,
+                WARRIOR_CLASS_ID,
+                PRIEST_CLASS_ID,
+                PRIEST_CLASS_ID,
+                PRIEST_CLASS_ID,
+            ),
+            (
+                (6.0, 6.0),
+                (7.0, 5.0),
+                (8.0, 3.0),
+                (8.0, 4.6),
+                (8.0, 6.0),
+                (10.5, 6.0),
+                (9.8, 8.0),
+                (6.2, 8.0),
+            ),
+            "scripted",
+            2,
         ),
         "charge_convergence": (
             (14.0, 12.0),
@@ -512,11 +574,49 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
             ),
         ),
         "mirrored_ultimates": (
-            ((0, MOVE_STAY, None, 1), (5, MOVE_STAY, None, 1)),
+            ((0, MOVE_NORTH, None, 1), (5, MOVE_NORTH, None, 1)),
             ((1, MOVE_STAY, 6, 1), (6, MOVE_STAY, 1, 1)),
-            ((2, MOVE_STAY, 7, 1), (7, MOVE_STAY, 2, 1)),
-            ((3, MOVE_STAY, 8, 1), (8, MOVE_STAY, 3, 1)),
-            ((4, MOVE_STAY, 3, 1), (9, MOVE_STAY, 8, 1)),
+            ((2, MOVE_NORTH, 7, 1), (7, MOVE_NORTH, 2, 1)),
+            ((3, MOVE_EAST, 8, 1), (8, MOVE_EAST, 3, 1)),
+            ((4, MOVE_NORTH, 3, 1), (9, MOVE_NORTH, 8, 1)),
+        ),
+        "moving_basic_crossfire": (
+            (
+                (0, MOVE_NORTH, 5, 0),
+                (1, MOVE_EAST, 6, 0),
+                (2, MOVE_NORTH, 7, 0),
+                (3, MOVE_EAST, 8, 0),
+                (4, MOVE_NORTH, 0, 0),
+                (5, MOVE_NORTH, 0, 0),
+                (6, MOVE_EAST, 1, 0),
+                (7, MOVE_NORTH, 2, 0),
+                (8, MOVE_EAST, 3, 0),
+                (9, MOVE_NORTH, 5, 0),
+            ),
+            (
+                (0, MOVE_SOUTH, 5, 0),
+                (1, MOVE_WEST, 6, 0),
+                (2, MOVE_SOUTH, 7, 0),
+                (3, MOVE_WEST, 8, 0),
+                (4, MOVE_SOUTH, 0, 0),
+                (5, MOVE_SOUTH, 0, 0),
+                (6, MOVE_WEST, 1, 0),
+                (7, MOVE_SOUTH, 2, 0),
+                (8, MOVE_WEST, 3, 0),
+                (9, MOVE_SOUTH, 5, 0),
+            ),
+        ),
+        "moving_focus_crossfire": (
+            (
+                (0, MOVE_EAST, 5, 0),
+                (1, MOVE_EAST, 5, 0),
+                (2, MOVE_EAST, 5, 0),
+                (3, MOVE_EAST, 5, 0),
+                (5, MOVE_EAST, None, 0),
+                (6, MOVE_EAST, 5, 0),
+                (7, MOVE_EAST, 5, 0),
+                (8, MOVE_EAST, 5, 0),
+            ),
         ),
         "charge_convergence": (
             (
@@ -1031,6 +1131,54 @@ def test_mirrored_ultimates_reference_trajectory() -> None:
     assert int(session.state.stun_durations[2, STUN_CHANNEL_HUNTER_TRAP]) > 0
     assert int(session.state.rogue_poison_anti_heal_durations[3]) > 0
     assert int(session.state.rogue_poison_anti_heal_durations[8]) > 0
+
+
+def test_moving_basic_crossfire_reference_trajectory() -> None:
+    _, session = _session("moving_basic_crossfire")
+    expected = (
+        ("basic_damage", 0, 5),
+        ("basic_damage", 1, 6),
+        ("basic_damage", 2, 7),
+        ("basic_damage", 3, 8),
+        ("basic_heal", 4, 0),
+        ("basic_damage", 5, 0),
+        ("basic_damage", 6, 1),
+        ("basic_damage", 7, 2),
+        ("basic_damage", 8, 3),
+        ("basic_heal", 9, 5),
+    )
+
+    for _ in get_scenario("moving_basic_crossfire").frames:
+        before = np.asarray(session.state.agent_positions).copy()
+        session = submit_next_script_frame(session)
+        assert _accepted_activation_signatures(session) == expected
+        after = np.asarray(session.state.agent_positions)
+        assert all(
+            not np.array_equal(before[global_slot], after[global_slot])
+            for global_slot in range(MAX_AGENT_SLOTS)
+        )
+
+
+def test_moving_focus_crossfire_reference_trajectory() -> None:
+    _, session = _session("moving_focus_crossfire")
+    involved_slots = (0, 1, 2, 3, 5, 6, 7, 8)
+    before = np.asarray(session.state.agent_positions).copy()
+    session = submit_next_script_frame(session)
+
+    assert _accepted_activation_signatures(session) == (
+        ("basic_damage", 0, 5),
+        ("basic_damage", 1, 5),
+        ("basic_damage", 2, 5),
+        ("basic_damage", 3, 5),
+        ("basic_heal", 6, 5),
+        ("basic_heal", 7, 5),
+        ("basic_heal", 8, 5),
+    )
+    after = np.asarray(session.state.agent_positions)
+    assert all(
+        not np.array_equal(before[global_slot], after[global_slot])
+        for global_slot in involved_slots
+    )
 
 
 def test_charge_convergence_reference_trajectory() -> None:

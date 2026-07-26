@@ -828,6 +828,11 @@ _DIRECT_HEALTH_ACTIVATIONS: tuple[ActivationTokenId, ...] = (
 )
 
 
+def activation_uses_successor_anchors(token_id: ActivationTokenId) -> bool:
+    """Return the presentation epoch for one accepted activation's anchors."""
+    return token_id != "warrior_charge"
+
+
 def visual_event_id(
     event_scope: str,
     transition_id: int,
@@ -918,6 +923,19 @@ def derive_visual_event_batch(
             if activation.target_global_slot is not None
             else None
         )
+        use_successor_anchors = activation_uses_successor_anchors(activation.kind)
+        source_anchor = (
+            source_actor.position_after
+            if use_successor_anchors
+            else source_actor.position_before
+        )
+        target_anchor = (
+            None
+            if target_actor is None
+            else target_actor.position_after
+            if use_successor_anchors
+            else target_actor.position_before
+        )
         event_id = visual_event_id(
             event_scope,
             transition_id,
@@ -932,10 +950,8 @@ def derive_visual_event_batch(
                 token_id=activation.kind,
                 source_global_slot=activation.source_global_slot,
                 target_global_slot=activation.target_global_slot,
-                source_anchor=source_actor.position_before,
-                target_anchor=(
-                    None if target_actor is None else target_actor.position_before
-                ),
+                source_anchor=source_anchor,
+                target_anchor=target_anchor,
                 target_disclosure=(
                     "target_none" if activation.target_global_slot is None else "public"
                 ),
