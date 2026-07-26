@@ -450,6 +450,16 @@ test("a lost applied response requires GET resync and never replays submit", asy
 }) => {
   await page.goto(debuggerUrl);
   await expect(page.locator("#connection-status")).toHaveText("Online");
+  let setupRevision = await currentRevision(page);
+  if ((await page.locator("#scenario-select").inputValue()) !== "arena_5v5") {
+    await page.locator("#scenario-select").selectOption("arena_5v5");
+    setupRevision += 1;
+    await expect(page.locator("#revision-value")).toHaveText(String(setupRevision));
+  }
+  await expect(page.locator("#pending-card")).toHaveAttribute(
+    "data-submission-scope",
+    "joint_turn",
+  );
   const baseRevision = await currentRevision(page);
   const baseStep = await currentStep(page);
   let interceptedCommands = 0;
