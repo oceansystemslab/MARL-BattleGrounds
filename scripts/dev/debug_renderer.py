@@ -1,4 +1,4 @@
-"""CLI entry point for the deterministic comprehensive visual debugger."""
+"""CLI entry point for the deterministic Visual Debugger and Analyzer."""
 
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ browser controls:
   0.5x / 1x / 2x / Off change presentation-only motion speed
   Skip                  settle the current explanation immediately
   Reconnect             fetch the current authoritative frame
-  Exit / Ctrl-C         stop the local browser debugger
+  Exit / Ctrl-C         stop the local Visual Debugger and Analyzer
 
 selected-target inspector:
   SELECTED TARGET       identity, relation, distance, and public geometry
@@ -63,10 +63,11 @@ scenarios:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the complete debugger CLI without importing Matplotlib."""
+    """Build the complete analyzer CLI without importing Matplotlib."""
     parser = argparse.ArgumentParser(
         description=(
-            "Open the deterministic MARL-BattleGrounds Milestone 1-5 visual debugger."
+            "Open the deterministic MARL-BattleGrounds Milestone 1-5 "
+            "Visual Debugger and Analyzer."
         ),
         epilog=_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -225,7 +226,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except OSError as exc:
-        print(f"error: visual debugger could not start: {exc}", file=sys.stderr)
+        print(
+            f"error: Visual Debugger and Analyzer could not start: {exc}",
+            file=sys.stderr,
+        )
         return 2
     except ValueError as exc:
         parser.error(str(exc))

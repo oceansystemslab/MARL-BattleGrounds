@@ -12,12 +12,12 @@ if [[ ! -f "${PYPROJECT_PATH}" ]]; then
 fi
 
 if [[ ! -f "${ENTRYPOINT_PATH}" ]]; then
-  echo "error: visual debugger entry point is missing: ${ENTRYPOINT_PATH}" >&2
+  echo "error: Visual Debugger and Analyzer entry point is missing: ${ENTRYPOINT_PATH}" >&2
   exit 2
 fi
 
 if ! command -v uv >/dev/null 2>&1; then
-  echo "error: uv is required to run the visual debugger." >&2
+  echo "error: uv is required to run the Visual Debugger and Analyzer." >&2
   exit 127
 fi
 

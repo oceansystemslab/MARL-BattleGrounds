@@ -221,7 +221,8 @@ def test_missing_matplotlib_is_actionable_and_returns_two(tmp_path: Path) -> Non
 
     assert result.returncode == 2
     assert (
-        "error: Matplotlib is required for static debugger snapshots. "
+        "error: Matplotlib is required for static Visual Debugger and Analyzer "
+        "snapshots. "
         "Run 'uv sync --extra viz --extra dev'."
     ) in result.stderr
 
@@ -551,7 +552,10 @@ def test_launcher_reports_missing_uv() -> None:
     )
 
     assert result.returncode == 127
-    assert "error: uv is required to run the visual debugger." in result.stderr
+    assert (
+        "error: uv is required to run the Visual Debugger and Analyzer."
+        in result.stderr
+    )
 
 
 def test_launcher_is_executable() -> None:

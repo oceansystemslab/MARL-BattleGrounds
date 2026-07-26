@@ -21,7 +21,8 @@ def _load_pyplot() -> _PyplotLike:
         return cast(_PyplotLike, import_module("matplotlib.pyplot"))
     except ImportError as exc:
         msg = (
-            "Matplotlib is required for static debugger snapshots. "
+            "Matplotlib is required for static Visual Debugger and Analyzer "
+            "snapshots. "
             "Run 'uv sync --extra viz --extra dev'."
         )
         raise ImportError(msg) from exc
