@@ -7,17 +7,28 @@ The project is currently under development.
 
 ## Development visual debugger
 
-Install the optional visualization dependencies and open the deterministic
-Milestone 1–5 debugger:
+Open the deterministic Milestone 1–5 debugger in a local browser:
 
 ```bash
-uv sync --extra viz --extra dev
 ./scripts/dev/run_debug_renderer.sh
 ```
 
+Python owns the simulator, session, legality, commands, and transitions. It
+returns an allowlisted JSON frame; the browser constructs the SVG/HTML
+presentation and presentation-only motion. The launcher always prints a
+loopback URL and also attempts to open it automatically. Running the debugger
+requires neither Node.js nor npm.
+
+For a one-frame Matplotlib snapshot instead:
+
+```bash
+uv sync --extra viz
+./scripts/dev/run_debug_renderer.sh --static
+```
+
 See the [visual debugger guide](docs/dev/visual_debugger.md) for controls,
-selected-target LOS/visibility/range diagnostics, scenarios, visual semantics,
-and terminal-log contracts.
+joint-turn planning, view authorization, scenarios, visual semantics,
+troubleshooting, and contributor checks.
 
 ## Author
 
