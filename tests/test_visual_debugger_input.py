@@ -78,7 +78,7 @@ def _session(
         ("X", None, "x"),
     ),
 )
-def test_key_normalization_covers_browser_and_legacy_aliases(
+def test_key_normalization_covers_supported_aliases(
     key: str | None,
     shift_key: bool | None,
     expected: str | None,

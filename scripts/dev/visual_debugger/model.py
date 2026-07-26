@@ -102,23 +102,6 @@ class LaneAvailability:
 
 
 @dataclass(frozen=True, slots=True)
-class HudSection:
-    """One deterministic side-panel section with an explicit typography role."""
-
-    heading: str
-    lines: tuple[str, ...]
-    technical: bool = False
-
-    def __post_init__(self) -> None:
-        if not self.heading.strip():
-            raise ValueError("HUD section heading must not be empty.")
-        if not self.lines:
-            raise ValueError("HUD section must contain at least one line.")
-        if any(not line.strip() for line in self.lines):
-            raise ValueError("HUD section lines must not be empty.")
-
-
-@dataclass(frozen=True, slots=True)
 class SelectedTargetFacts:
     controlled_global_slot: int
     target_global_slot: int

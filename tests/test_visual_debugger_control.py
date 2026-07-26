@@ -33,7 +33,6 @@ from scripts.dev.visual_debugger.model import (
     ActorTransition,
     DebuggerScenario,
     DebuggerSession,
-    HudSection,
     LaneAvailability,
     PendingAction,
     ScenarioFrame,
@@ -114,7 +113,6 @@ def test_every_debugger_structure_has_the_exact_audited_field_schema() -> None:
             "armed_lane",
             "armed_pair_legal",
         ),
-        HudSection: ("heading", "lines", "technical"),
         SelectedTargetFacts: (
             "controlled_global_slot",
             "target_global_slot",

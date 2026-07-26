@@ -17,9 +17,17 @@ if [[ ! -f "${ENTRYPOINT_PATH}" ]]; then
 fi
 
 if ! command -v uv >/dev/null 2>&1; then
-  echo "error: uv is required; install uv and run 'uv sync --extra viz --extra dev'." >&2
+  echo "error: uv is required to run the visual debugger." >&2
   exit 127
 fi
 
+UV_EXTRA_ARGS=()
+for argument in "$@"; do
+  if [[ "${argument}" == "--static" ]]; then
+    UV_EXTRA_ARGS=(--extra viz)
+    break
+  fi
+done
+
 cd "${REPO_ROOT}"
-exec uv run --project "${REPO_ROOT}" --extra viz python "${ENTRYPOINT_PATH}" "$@"
+exec uv run --project "${REPO_ROOT}" "${UV_EXTRA_ARGS[@]}" python "${ENTRYPOINT_PATH}" "$@"

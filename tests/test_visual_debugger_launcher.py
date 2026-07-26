@@ -4,12 +4,13 @@ import os
 import stat
 import subprocess
 import sys
+from importlib.util import find_spec
 from pathlib import Path
 from typing import cast
 
 import pytest
 from scripts.dev.debug_renderer import build_parser, main
-from scripts.dev.visual_debugger import app
+from scripts.dev.visual_debugger.model import DebuggerScenario
 from scripts.dev.visual_debugger.scenarios import (
     RESEARCHER_SCENARIOS,
     STRESS_SCENARIOS,
@@ -23,6 +24,8 @@ _OLD_PYTHON_ENTRYPOINT = (
     _REPOSITORY_ROOT / "scripts" / "dev" / "geometry_debug_renderer.py"
 )
 _OLD_SHELL_LAUNCHER = _REPOSITORY_ROOT / "scripts" / "dev" / "run_geometry_renderer.sh"
+_HAS_MATPLOTLIB = find_spec("matplotlib") is not None
+_HAS_PYPLOT = _HAS_MATPLOTLIB and find_spec("matplotlib.pyplot") is not None
 
 
 def test_parser_exposes_complete_cli_contract() -> None:
@@ -36,8 +39,6 @@ def test_parser_exposes_complete_cli_contract() -> None:
             "--controlled-slot",
             "5",
             "--static",
-            "--ui",
-            "browser",
             "--no-open",
             "--port",
             "8123",
@@ -55,7 +56,6 @@ def test_parser_exposes_complete_cli_contract() -> None:
     assert args.seed == 41
     assert args.controlled_slot == 5
     assert args.static
-    assert args.ui == "browser"
     assert args.no_open
     assert args.port == 8123
     assert args.include_stress
@@ -63,6 +63,13 @@ def test_parser_exposes_complete_cli_contract() -> None:
     assert args.preset == "debug"
     assert args.verbose
     assert args.ranges is False
+
+
+def test_parser_rejects_abbreviated_options() -> None:
+    parser = build_parser()
+    with pytest.raises(SystemExit) as exc_info:
+        parser.parse_args(("--stat",))
+    assert exc_info.value.code == 2
 
 
 def test_help_contains_every_option_control_inspector_and_scenario() -> None:
@@ -81,7 +88,6 @@ def test_help_contains_every_option_control_inspector_and_scenario() -> None:
         "--seed",
         "--controlled-slot",
         "--static",
-        "--ui",
         "--no-open",
         "--port",
         "--include-stress",
@@ -92,18 +98,25 @@ def test_help_contains_every_option_control_inspector_and_scenario() -> None:
         "--no-ranges",
     ):
         assert option in result.stdout
+    assert "--ui" not in result.stdout
     for control in (
         "Tab / Shift+Tab",
         "left click",
         "Shift+left click",
         "right click / Escape",
         "Shift+R",
+        "arrow keys",
         "X",
         "Space / Enter",
+        "P",
         "[ / ]",
+        "Scenario/View/Preset",
+        "0.5x / 1x / 2x / Off",
+        "Reconnect",
     ):
         assert control in result.stdout
-    assert "every staged active-agent action as one joint turn" in result.stdout
+    assert "every staged action as one joint turn" in result.stdout
+    assert "agent POV: submit only the controlled actor" in result.stdout
     assert "advance the next registered scripted frame" in result.stdout
     for inspector in ("SELECTED TARGET", "PENDING ACTION", "TECHNICAL DETAILS"):
         assert inspector in result.stdout
@@ -208,7 +221,7 @@ def test_missing_matplotlib_is_actionable_and_returns_two(tmp_path: Path) -> Non
 
     assert result.returncode == 2
     assert (
-        "error: Matplotlib is required for the visual debugger. "
+        "error: Matplotlib is required for static debugger snapshots. "
         "Run 'uv sync --extra viz --extra dev'."
     ) in result.stderr
 
@@ -236,14 +249,18 @@ def test_invalid_cli_inputs_use_argparse_exit_two(argv: tuple[str, ...]) -> None
         ("--scenario", "arena_5v5", "--controlled-slot", "-1"),
     ),
 )
-def test_semantic_cli_validation_precedes_matplotlib_loading(
+def test_semantic_cli_validation_precedes_runtime_dispatch(
     monkeypatch: pytest.MonkeyPatch,
     argv: tuple[str, ...],
 ) -> None:
-    def fail_if_loaded() -> object:
-        raise AssertionError("Matplotlib must not load before CLI validation")
+    import scripts.dev.visual_debugger.server as server_module
+    import scripts.dev.visual_debugger.static_renderer as static_module
 
-    monkeypatch.setattr(app, "_load_pyplot", fail_if_loaded)
+    def fail_if_dispatched(*_args: object, **_kwargs: object) -> int:
+        raise AssertionError("runtime must not start before CLI validation")
+
+    monkeypatch.setattr(server_module, "serve_browser_debugger", fail_if_dispatched)
+    monkeypatch.setattr(static_module, "run_static_renderer", fail_if_dispatched)
 
     with pytest.raises(SystemExit) as exc_info:
         main(argv)
@@ -251,7 +268,7 @@ def test_semantic_cli_validation_precedes_matplotlib_loading(
     assert exc_info.value.code == 2
 
 
-def test_browser_selection_builds_service_and_forwards_lifecycle_options(
+def test_browser_default_builds_service_and_forwards_lifecycle_options(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import scripts.dev.visual_debugger.server as server_module
@@ -276,8 +293,6 @@ def test_browser_selection_builds_service_and_forwards_lifecycle_options(
     monkeypatch.setattr(server_module, "serve_browser_debugger", fake_serve)
     result = main(
         (
-            "--ui",
-            "browser",
             "--no-open",
             "--port",
             "8123",
@@ -297,6 +312,59 @@ def test_browser_selection_builds_service_and_forwards_lifecycle_options(
     assert frame.view_mode == "pov"
     assert frame.preset == "debug"
     assert frame.scene.ranges == ()
+
+
+def test_static_flag_uses_only_the_stateless_snapshot_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.dev.visual_debugger.server as server_module
+    import scripts.dev.visual_debugger.static_renderer as static_module
+
+    observed: dict[str, object] = {}
+
+    def fake_static(
+        *,
+        scenario: object,
+        seed: int,
+        controlled_global_slot: int | None,
+        verbose: bool,
+        show_ranges: bool,
+    ) -> int:
+        observed.update(
+            scenario=scenario,
+            seed=seed,
+            controlled_global_slot=controlled_global_slot,
+            verbose=verbose,
+            show_ranges=show_ranges,
+        )
+        return 19
+
+    def fail_if_served(*_args: object, **_kwargs: object) -> int:
+        raise AssertionError("static mode must not start the browser server")
+
+    monkeypatch.setattr(static_module, "run_static_renderer", fake_static)
+    monkeypatch.setattr(server_module, "serve_browser_debugger", fail_if_served)
+
+    result = main(
+        (
+            "--static",
+            "--scenario",
+            "status_stack",
+            "--seed",
+            "13",
+            "--controlled-slot",
+            "5",
+            "--verbose",
+            "--no-ranges",
+        )
+    )
+
+    assert result == 19
+    assert cast(DebuggerScenario, observed["scenario"]).name == "status_stack"
+    assert observed["seed"] == 13
+    assert observed["controlled_global_slot"] == 5
+    assert observed["verbose"] is True
+    assert observed["show_ranges"] is False
 
 
 def test_stress_browser_launch_requires_and_accepts_explicit_opt_in(
@@ -320,14 +388,12 @@ def test_stress_browser_launch_requires_and_accepts_explicit_opt_in(
         ignore_browser_launch,
     )
     with pytest.raises(SystemExit) as exc_info:
-        main(("--ui", "browser", "--scenario", "charge_convergence"))
+        main(("--scenario", "charge_convergence"))
     assert exc_info.value.code == 2
 
     assert (
         main(
             (
-                "--ui",
-                "browser",
                 "--scenario",
                 "charge_convergence",
                 "--include-stress",
@@ -386,8 +452,6 @@ def test_launcher_resolves_root_outside_repository_cwd_and_forwards_arguments(
         "run",
         "--project",
         str(_REPOSITORY_ROOT),
-        "--extra",
-        "viz",
         "python",
         str(_PYTHON_ENTRYPOINT),
         "--scenario",
@@ -397,6 +461,66 @@ def test_launcher_resolves_root_outside_repository_cwd_and_forwards_arguments(
         "--verbose",
         "--no-ranges",
     ]
+
+
+def test_launcher_activates_viz_extra_only_for_static_snapshots(
+    tmp_path: Path,
+) -> None:
+    fake_bin, record = _write_fake_uv(tmp_path, exit_code=0)
+    environment = os.environ.copy()
+    environment["PATH"] = os.pathsep.join((str(fake_bin), "/usr/bin", "/bin"))
+    environment["UV_RECORD"] = str(record)
+
+    result = subprocess.run(
+        (str(_SHELL_LAUNCHER), "--static", "--scenario", "arena_5v5"),
+        cwd=tmp_path,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert record.read_text(encoding="utf-8").splitlines() == [
+        "run",
+        "--project",
+        str(_REPOSITORY_ROOT),
+        "--extra",
+        "viz",
+        "python",
+        str(_PYTHON_ENTRYPOINT),
+        "--static",
+        "--scenario",
+        "arena_5v5",
+    ]
+
+
+@pytest.mark.skipif(
+    not _HAS_PYPLOT,
+    reason="the optional viz extra is not installed",
+)
+def test_static_cli_completes_with_a_headless_matplotlib_backend() -> None:
+    environment = os.environ.copy()
+    environment["MPLBACKEND"] = "Agg"
+
+    result = subprocess.run(
+        (
+            sys.executable,
+            str(_PYTHON_ENTRYPOINT),
+            "--static",
+            "--scenario",
+            "arena_5v5",
+            "--no-ranges",
+        ),
+        cwd="/tmp",
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_launcher_propagates_uv_exit_code(tmp_path: Path) -> None:
@@ -427,9 +551,7 @@ def test_launcher_reports_missing_uv() -> None:
     )
 
     assert result.returncode == 127
-    assert (
-        "error: uv is required; install uv and run 'uv sync --extra viz --extra dev'."
-    ) in result.stderr
+    assert "error: uv is required to run the visual debugger." in result.stderr
 
 
 def test_launcher_is_executable() -> None:

@@ -5,7 +5,6 @@ from typing import cast
 
 import numpy as np
 import pytest
-import scripts.dev.visual_debugger.presentation as legacy_presentation
 from scripts.dev.visual_debugger.control import (
     arm_basic,
     arm_ultimate,
@@ -260,23 +259,13 @@ def test_reset_clears_transition_batch_and_advances_run_generation() -> None:
     assert frame.hud.latest_transition is None
 
 
-def test_pov_whole_frame_redacts_hidden_pending_target_and_raw_artifacts(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_pov_whole_frame_redacts_hidden_pending_target_and_raw_artifacts() -> None:
     session = select_clicked_target(_session(), 5)
     session = select_controlled_actor(session, 1)
     session = select_clicked_target(session, 6)
     session = set_pending_movement(session, MOVE_NORTH)
     session = select_controlled_actor(session, 0)
 
-    def fail_legacy_hud(_: DebuggerSession) -> None:
-        raise AssertionError("browser POV must not use the privileged legacy HUD")
-
-    monkeypatch.setattr(
-        legacy_presentation,
-        "build_hud_sections",
-        fail_legacy_hud,
-    )
     frame = _frame(session, view_mode="pov")
     payload = cast(dict[str, object], json.loads(frame.model_dump_json()))
     serialized = json.dumps(payload)

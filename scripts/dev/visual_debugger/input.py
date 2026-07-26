@@ -16,8 +16,6 @@ from marl_battlegrounds.core.types import (
     MOVE_SOUTHWEST,
     MOVE_STAY,
     MOVE_WEST,
-    EnvConfig,
-    EnvState,
 )
 from marl_battlegrounds.rendering.scene import AgentSceneV1
 from scripts.dev.visual_debugger.control import (
@@ -76,7 +74,7 @@ _SHIFT_R_NOTICE = (
 
 @dataclass(frozen=True, slots=True)
 class InputDispatchResult:
-    """One authoritative input outcome for the service and legacy adapter."""
+    """One authoritative input outcome for the browser debugger service."""
 
     session: DebuggerSession
     view_mode: ViewMode
@@ -92,7 +90,7 @@ def normalize_key(
     *,
     shift_key: bool | None = None,
 ) -> str | None:
-    """Normalize browser and legacy backend key names to debugger commands."""
+    """Normalize supported keyboard aliases to debugger commands."""
     if key is None:
         return None
     if shift_key is None and key == "R":
@@ -157,34 +155,6 @@ def hit_test_scene_agents(
         (
             (agent.global_slot, agent.position, agent.radius, agent.active)
             for agent in agents
-        ),
-        x,
-        y,
-    )
-
-
-def hit_test_active_agent(
-    config: EnvConfig,
-    state: EnvState,
-    x: float,
-    y: float,
-) -> int | None:
-    """Legacy researcher-view hit test retained during Matplotlib migration."""
-    positions = np.asarray(state.agent_positions, dtype=np.float32)
-    radii = np.asarray(config.agent_profile.agent_radii, dtype=np.float32)
-    active_mask = np.asarray(config.agent_profile.active_mask, dtype=bool)
-    return _hit_test_rows(
-        (
-            (
-                int(global_slot),
-                (
-                    float(positions[global_slot, 0]),
-                    float(positions[global_slot, 1]),
-                ),
-                float(radii[global_slot]),
-                bool(active_mask[global_slot]),
-            )
-            for global_slot in range(len(active_mask))
         ),
         x,
         y,

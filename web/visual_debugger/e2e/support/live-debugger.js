@@ -58,8 +58,6 @@ export function startDebugger({ scenario = "arena_5v5", extraArgs = [] } = {}) {
         "python",
         "-u",
         "scripts/dev/debug_renderer.py",
-        "--ui",
-        "browser",
         "--no-open",
         "--port",
         "0",

@@ -18,7 +18,7 @@ from scripts.dev.visual_debugger.scenarios import (  # noqa: E402 - script boots
 )
 
 _EPILOG = """\
-controls:
+battlefield controls (while the battlefield has focus):
   Tab / Shift+Tab       cycle active actors without discarding their drafts
   left click            select an active global target
   Shift+left click      control the clicked active actor
@@ -26,15 +26,24 @@ controls:
   1 / 2                 explicitly arm Basic lane 0 / Ultimate lane 1
   W A S D               cardinal movement
   Q E Z C               diagonal movement
+  arrow keys            cardinal movement aliases
   X                     select Stay movement
-  Space / Enter         submit every staged active-agent action as one joint turn
+  Space / Enter         researcher: submit every staged action as one joint turn
+                        agent POV: submit only the controlled actor
   N                     advance the next registered scripted frame
   R                     deterministic scenario reset
   Shift+R               explain why cooldown clearing is unavailable
-  G                     toggle selected-unit ranges
+  G                     toggle controlled-actor ranges
   V                     toggle concise/verbose logs
   [ / ]                 previous/next scenario
+  P                     pause/resume presentation-only motion
   ?                     open browser controls/help
+
+browser controls:
+  Scenario/View/Preset  switch authoritative session presentation
+  0.5x / 1x / 2x / Off change presentation-only motion speed
+  Skip                  settle the current explanation immediately
+  Reconnect             fetch the current authoritative frame
   Exit / Ctrl-C         stop the local browser debugger
 
 selected-target inspector:
@@ -61,6 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         epilog=_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        allow_abbrev=False,
     )
     parser.add_argument(
         "--scenario",
@@ -94,13 +104,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--static",
         action="store_true",
-        help="render a Matplotlib reset snapshot without callbacks or a server",
-    )
-    parser.add_argument(
-        "--ui",
-        choices=("matplotlib", "browser"),
-        default="matplotlib",
-        help="temporary live UI selector (default: matplotlib)",
+        help="render a stateless Matplotlib reset snapshot without a browser server",
     )
     parser.add_argument(
         "--no-open",
@@ -135,7 +139,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--ranges",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="show or hide selected-unit ranges (default: show)",
+        help="show or hide controlled-actor ranges (default: show)",
     )
     return parser
 
@@ -181,17 +185,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             controlled_global_slot=args.controlled_slot,
             include_stress=args.include_stress,
         )
-        if args.static or args.ui == "matplotlib":
-            from scripts.dev.visual_debugger.app import run_visual_debugger
+        if args.static:
+            from scripts.dev.visual_debugger.static_renderer import (
+                run_static_renderer,
+            )
 
-            return run_visual_debugger(
-                scenario_name=scenario.name,
+            return run_static_renderer(
+                scenario=scenario,
                 seed=args.seed,
                 controlled_global_slot=args.controlled_slot,
-                static=args.static,
                 verbose=args.verbose,
                 show_ranges=args.ranges,
-                include_stress=args.include_stress,
             )
 
         from scripts.dev.visual_debugger.control import create_session
