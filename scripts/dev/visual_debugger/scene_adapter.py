@@ -929,6 +929,11 @@ def _pov_event_batch(session: DebuggerSession) -> VisualEventBatchV1:
             disclosure = "public"
         else:
             disclosure = "redacted"
+        if disclosure == "redacted":
+            # A hidden target makes the pair-mask result and rejection itself
+            # observer-private. The POV HUD already preserves the submitted
+            # action while marking its combat result undisclosed.
+            continue
         events.append(
             RejectedActionEventV1(
                 event_id=visual_event_id(

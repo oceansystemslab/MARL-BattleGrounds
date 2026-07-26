@@ -369,6 +369,18 @@ def test_post_transition_pov_response_is_a_positive_allowlisted_envelope() -> No
     assert submitted.pending_actions[1].selected_global_target_slot == (
         other_actor_draft.selected_global_target_slot
     )
+    researcher_frame = _frame(submitted, revision=1, view_mode="researcher")
+    assert researcher_frame.event_batch is not None
+    researcher_rejections = tuple(
+        event
+        for event in researcher_frame.event_batch.events
+        if event.event_type == "rejected_action"
+    )
+    assert len(researcher_rejections) == 2
+    assert all(
+        rejection.target_global_slot == hidden_target
+        for rejection in researcher_rejections
+    )
 
     frame = _frame(submitted, revision=1, view_mode="pov")
     response = CommandResponseV1(result="applied", frame=frame)
@@ -457,27 +469,7 @@ def test_post_transition_pov_response_is_a_positive_allowlisted_envelope() -> No
     assert result.pair_mask_value is None
     assert result.combat_result == "undisclosed"
 
-    assert events_payload
-    for event in events_payload:
-        assert event["event_type"] == "rejected_action"
-        assert set(event) == {
-            "event_type",
-            "event_id",
-            "transition_id",
-            "actor_global_slot",
-            "component",
-            "actor_anchor",
-            "target_global_slot",
-            "target_anchor",
-            "target_disclosure",
-            "lane",
-            "movement_mask_value",
-            "pair_mask_value",
-        }
-        assert event["actor_global_slot"] == controlled
-        assert event["target_disclosure"] == "redacted"
-        assert event["target_global_slot"] is None
-        assert event["target_anchor"] is None
+    assert events_payload == []
 
     assert _json_tree_is_scalar(payload)
     forbidden_keys = {
