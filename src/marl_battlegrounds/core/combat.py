@@ -159,7 +159,7 @@ ULTIMATE_INTERACTION_RADIUS_BY_CLASS = jnp.asarray(
         0.0,  # neutral
         0.0,  # mage
         6.0,  # warrior
-        4.0,  # hunter
+        3.0,  # hunter
         1.5,  # rogue
         6.0,  # priest
     ],
