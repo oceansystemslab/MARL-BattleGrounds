@@ -281,7 +281,8 @@ def test_selected_target_facts_recompute_after_actor_switch_and_successor_step()
     assert before.center_distance == pytest.approx(4.0)
 
     switched = cycle_controlled_actor(session, 1)
-    assert switched.pending_action.selected_global_target_slot == 5
+    assert switched.pending_action.selected_global_target_slot is None
+    assert switched.pending_actions[0].selected_global_target_slot == 5
     switched_facts = _facts(switched, 5)
     assert switched_facts.controlled_global_slot == 5
     assert switched_facts.relation == "self"
