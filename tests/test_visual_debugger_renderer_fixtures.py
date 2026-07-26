@@ -15,6 +15,13 @@ from scripts.dev.visual_debugger.renderer_fixtures import (
     list_renderer_fixtures,
 )
 
+from marl_battlegrounds.core.types import (
+    HUNTER_CLASS_ID,
+    MAGE_CLASS_ID,
+    PRIEST_CLASS_ID,
+    ROGUE_CLASS_ID,
+    WARRIOR_CLASS_ID,
+)
 from marl_battlegrounds.rendering.scene import (
     AcceptedActivationEventV1,
     ChargeDisplacementEventV1,
@@ -27,6 +34,7 @@ from marl_battlegrounds.rendering.vocabulary import CANONICAL_STATUS_ORDER
 
 def test_renderer_fixture_registry_is_exact_synthetic_and_separate() -> None:
     assert tuple(RENDERER_FIXTURES) == (
+        "visual_vocabulary",
         "crowded_teamfight",
         "route_collision",
         "mixed_net_zero",
@@ -54,6 +62,58 @@ def test_renderer_fixture_registry_is_exact_synthetic_and_separate() -> None:
         "ActionMask",
     ):
         assert forbidden not in source
+
+
+def test_visual_vocabulary_contact_sheet_covers_current_class_grammar() -> None:
+    fixture = get_renderer_fixture("visual_vocabulary")
+    scene = fixture.scene
+    batch = fixture.event_batch
+    assert batch is not None
+    assert tuple(agent.class_id for agent in scene.agents[:5]) == (
+        MAGE_CLASS_ID,
+        WARRIOR_CLASS_ID,
+        HUNTER_CLASS_ID,
+        ROGUE_CLASS_ID,
+        PRIEST_CLASS_ID,
+    )
+    assert tuple(agent.class_id for agent in scene.agents[5:]) == tuple(
+        agent.class_id for agent in scene.agents[:5]
+    )
+    assert tuple(agent.ultimate_cooldown for agent in scene.agents[:5]) == (
+        1,
+        2,
+        3,
+        4,
+        5,
+    )
+    assert scene.selection is not None
+    assert scene.selection.controlled_global_slot == 0
+    assert scene.selection.selected_global_slot == 5
+    assert tuple(range_record.kind for range_record in scene.ranges) == (
+        "observation",
+        "basic",
+        "ultimate",
+    )
+    activations = tuple(
+        event for event in batch.events if isinstance(event, AcceptedActivationEventV1)
+    )
+    assert tuple(event.token_id for event in activations) == (
+        "basic_damage",
+        "basic_damage",
+        "basic_damage",
+        "basic_damage",
+        "basic_heal",
+        "mage_burst",
+        "warrior_charge",
+        "hunter_trap",
+        "rogue_poison",
+        "holy_word",
+    )
+    assert all(not hasattr(event, "amount") for event in activations)
+    outcomes = tuple(
+        event for event in batch.events if isinstance(event, NetHealthEventV1)
+    )
+    assert tuple(event.outcome for event in outcomes) == ("damage", "healing")
 
 
 def test_every_renderer_fixture_is_recursively_json_serializable() -> None:

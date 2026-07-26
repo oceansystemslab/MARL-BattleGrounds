@@ -1,3 +1,12 @@
+import { formatDisplayNumber } from "./display.js";
+import {
+  explainActivation,
+  explainAgent,
+  explainModifier,
+  explainNetHealth,
+  explainStatus,
+} from "./explanations.js";
+import { registerTooltipOwner } from "./tooltip.js";
 import { classTokenFromId, resolveVisualToken, teamTokenFromId } from "./vocabulary.js";
 
 /**
@@ -111,21 +120,6 @@ function humanize(value) {
 }
 
 /**
- * Compact one payload value for human-facing UI. The unrounded value remains
- * available in data attributes, authoritative event records, and technical
- * diagnostics.
- *
- * @param {unknown} value
- * @param {number} [digits]
- */
-function displayNumber(value, digits = 2) {
-  if (!Number.isFinite(value)) {
-    return "—";
-  }
-  return String(Number(Number(value).toFixed(digits)));
-}
-
-/**
  * @param {unknown} value
  * @param {string} emptyText
  */
@@ -180,8 +174,9 @@ function addFact(container, label, value) {
  * @param {unknown[]} items
  * @param {"status" | "modifier"} kind
  * @param {string} emptyText
+ * @param {number} globalSlot
  */
-function renderFactTokens(container, items, kind, emptyText) {
+function renderFactTokens(container, items, kind, emptyText, globalSlot) {
   const nodes = [];
   for (const rawItem of items) {
     const item = isRecord(rawItem) ? rawItem : {};
@@ -189,13 +184,13 @@ function renderFactTokens(container, items, kind, emptyText) {
     const value =
       kind === "status"
         ? `duration ${Number.isInteger(item.duration) ? item.duration : "unknown"}`
-        : `multiplier ${displayNumber(item.multiplier)}`;
+        : `multiplier ${formatDisplayNumber(item.multiplier)}`;
     const chip = htmlElement(
       "span",
       `roster-fact-token roster-fact-token--${kind}`,
       kind === "status"
         ? `${token.shortLabel} ${Number.isInteger(item.duration) ? item.duration : "?"}`
-        : `${token.shortLabel} ×${displayNumber(item.multiplier)}`,
+        : `${token.shortLabel} ×${formatDisplayNumber(item.multiplier)}`,
     );
     chip.dataset.tokenId = token.tokenId;
     if (kind === "status" && Number.isInteger(item.duration)) {
@@ -205,7 +200,13 @@ function renderFactTokens(container, items, kind, emptyText) {
       chip.dataset.multiplier = String(item.multiplier);
     }
     chip.setAttribute("aria-label", `${token.accessibleName}, ${value}`);
-    chip.title = `${token.label} · ${value}`;
+    chip.tabIndex = 0;
+    registerTooltipOwner(
+      chip,
+      kind === "status"
+        ? explainStatus(item, globalSlot)
+        : explainModifier(item, globalSlot),
+    );
     nodes.push(chip);
   }
   if (nodes.length === 0) {
@@ -322,6 +323,7 @@ function addCandidateLegality(container, hud) {
  */
 function addAgentComparison(container, agent, role) {
   const card = htmlElement("article", "comparison-agent");
+  card.tabIndex = 0;
   card.dataset.role = role === "Controlled actor" ? "controlled" : "selected";
   card.append(htmlElement("h3", null, role));
   if (!agent) {
@@ -340,15 +342,22 @@ function addAgentComparison(container, agent, role) {
   const classToken = classTokenFromId(agent.class_id);
   const teamToken = teamTokenFromId(agent.team_id);
   card.dataset.slot = String(agent.global_slot);
+  registerTooltipOwner(
+    card,
+    explainAgent(agent, {
+      controlled: role === "Controlled actor",
+      selected: role === "Selected target",
+    }),
+  );
   addFact(card, "Identity", `id_${agent.global_slot}`);
   addFact(card, "Class / team", `${classToken.label} · ${teamToken.label}`);
   addFact(
     card,
     "Health",
-    `${displayNumber(agent.current_health)} / ${displayNumber(agent.max_health)}`,
+    `${formatDisplayNumber(agent.current_health)} / ${formatDisplayNumber(agent.max_health)}`,
   );
   addFact(card, "Ultimate cooldown", agent.ultimate_cooldown ?? "—");
-  addFact(card, "Effective speed", displayNumber(agent.effective_speed));
+  addFact(card, "Effective speed", formatDisplayNumber(agent.effective_speed));
   const statuses = htmlElement("div", "comparison-agent__facts");
   statuses.append(htmlElement("h4", null, "Statuses"));
   const statusTokens = htmlElement("div", "roster-fact-list");
@@ -357,6 +366,7 @@ function addAgentComparison(container, agent, role) {
     asArray(agent.statuses),
     "status",
     "No persistent statuses",
+    Number(agent.global_slot),
   );
   statuses.append(statusTokens);
   const modifiers = htmlElement("div", "comparison-agent__facts");
@@ -367,6 +377,7 @@ function addAgentComparison(container, agent, role) {
     asArray(agent.modifiers),
     "modifier",
     "No effective modifiers",
+    Number(agent.global_slot),
   );
   modifiers.append(modifierTokens);
   card.append(statuses, modifiers);
@@ -380,6 +391,7 @@ function addAgentComparison(container, agent, role) {
  */
 function updatePendingActionRow(row, pending, controlled) {
   const element = row.element;
+  element.tabIndex = 0;
   for (const attribute of [
     "data-target-slot",
     "data-armed-lane",
@@ -439,6 +451,19 @@ function updatePendingActionRow(row, pending, controlled) {
     "aria-label",
     `Pending action for id_${pending.actor_global_slot}: ${String(pending.summary ?? "unavailable")}`,
   );
+  registerTooltipOwner(element, {
+    kind: "pending-route",
+    id: `pending-row:${pending.actor_global_slot}`,
+    title: `Pending action · id_${pending.actor_global_slot}`,
+    details: [
+      String(pending.summary ?? "Pending action unavailable"),
+      `Movement mask ${availabilityLabel(pending.movement_mask_value)}`,
+      `Target ${targetLabel(pending.target)}`,
+      `Lane ${laneLabel(pending.armed_lane)}`,
+      `Pair ${pendingPairMaskLabel(pending)}`,
+    ],
+    anchor: "element",
+  });
 }
 
 /**
@@ -556,7 +581,7 @@ function pointLabel(value) {
   ) {
     return "undisclosed";
   }
-  return `(${value.map((coordinate) => displayNumber(coordinate)).join(", ")})`;
+  return `(${value.map((coordinate) => formatDisplayNumber(coordinate)).join(", ")})`;
 }
 
 /**
@@ -585,9 +610,9 @@ function eventSummary(event) {
         : "undisclosed recipient";
       const delta = Number(event.net_delta);
       const signed = Number.isFinite(delta)
-        ? `${delta >= 0 ? "+" : ""}${displayNumber(delta)}`
+        ? `${delta >= 0 ? "+" : ""}${formatDisplayNumber(delta)}`
         : "undisclosed";
-      return `${recipient} · NET ${signed} · HP ${displayNumber(event.health_before)} → ${displayNumber(event.health_after)} · ${humanize(event.outcome ?? "unknown")}`;
+      return `${recipient} · NET ${signed} · HP ${formatDisplayNumber(event.health_before)} → ${formatDisplayNumber(event.health_after)} · ${humanize(event.outcome ?? "unknown")}`;
     }
     case "charge_displacement":
       return `Charge displacement endpoints · id_${event.source_global_slot} toward id_${event.target_global_slot} · ${pointLabel(event.start)} → ${pointLabel(event.end)} · ${humanize(event.path_kind ?? "unknown")}`;
@@ -784,11 +809,18 @@ export class DebuggerPanels {
       globalSlot === selection.selected_global_slot,
     );
     row.element.dataset.compact = String(compact);
+    registerTooltipOwner(
+      row.element,
+      explainAgent(agent, {
+        controlled: globalSlot === selection.controlled_global_slot,
+        selected: globalSlot === selection.selected_global_slot,
+      }),
+    );
 
     row.identityId.textContent = `id_${globalSlot}`;
     row.identityClass.textContent = `${classToken.label} · ${teamToken.label}`;
     row.health.textContent =
-      `HP ${displayNumber(agent.current_health)} / ${displayNumber(agent.max_health)}` +
+      `HP ${formatDisplayNumber(agent.current_health)} / ${formatDisplayNumber(agent.max_health)}` +
       ` · cooldown ${agent.ultimate_cooldown ?? "—"}`;
 
     row.statuses.hidden = compact;
@@ -802,12 +834,14 @@ export class DebuggerPanels {
         asArray(agent.statuses),
         "status",
         "No persistent statuses",
+        Number(globalSlot),
       );
       renderFactTokens(
         row.modifiers,
         asArray(agent.modifiers),
         "modifier",
         "No effective modifiers",
+        Number(globalSlot),
       );
     }
 
@@ -1192,6 +1226,7 @@ export class DebuggerPanels {
       let item = this.eventRows.get(eventId);
       if (!item) {
         item = htmlElement("li", "event-item");
+        item.tabIndex = 0;
         this.eventRows.set(eventId, item);
       }
       for (const attribute of [
@@ -1217,7 +1252,19 @@ export class DebuggerPanels {
         item.dataset.actorSlot = String(event.actor_global_slot);
       }
       item.textContent = eventSummary(event);
-      item.title = eventId;
+      if (event.event_type === "accepted_activation") {
+        registerTooltipOwner(item, explainActivation(event));
+      } else if (event.event_type === "net_health") {
+        registerTooltipOwner(item, explainNetHealth(event));
+      } else {
+        registerTooltipOwner(item, {
+          kind: "event",
+          id: `event:${eventId}`,
+          title: humanize(event.event_type ?? "Semantic event"),
+          details: [eventSummary(event)],
+          anchor: "element",
+        });
+      }
       desired.push(item);
     }
     this.reconcileChildren(this.eventFeed, desired);

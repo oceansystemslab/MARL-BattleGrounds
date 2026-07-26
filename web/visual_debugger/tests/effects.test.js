@@ -216,6 +216,36 @@ test("accepted routes preserve multiplicity, direction, and simultaneous timing"
   assert.equal(eventById(activations, "a-5").targetSlot, null);
 });
 
+test("accepted activations carry recipient impact grammar without health amounts", () => {
+  const events = [
+    activation("damage-basic", "basic_damage", 0, 5),
+    activation("healing-basic", "basic_heal", 9, 5),
+    activation("damage-charge", "warrior_charge", 1, 6),
+    activation("neutral-trap", "hunter_trap", 2, 7),
+    activation("damage-poison", "rogue_poison", 3, 8),
+    activation("healing-holy", "holy_word", 4, 9),
+    activation("local-burst", "mage_burst", 0, null, {
+      disclosure: "target_none",
+    }),
+  ];
+  const plan = buildChoreographyPlan(debuggerFrame(events), surface);
+  assert.ok(plan);
+  const activations = plan.events.filter(({ kind }) => kind === "activation");
+  assert.deepEqual(
+    activations.map(({ impactSemantic }) => impactSemantic),
+    ["damage", "healing", "damage", "neutral", "damage", "healing", "local"],
+  );
+  assert.equal(
+    activations.every(
+      (event) =>
+        !Object.hasOwn(event, "netDelta") &&
+        !Object.hasOwn(event, "healthBefore") &&
+        !Object.hasOwn(event, "healthAfter"),
+    ),
+    true,
+  );
+});
+
 test("a public target with a hidden source becomes an impact-phase target cue", () => {
   const targetOnly = activation("target-only", "holy_word", 4, 5, {
     sourceAnchor: null,

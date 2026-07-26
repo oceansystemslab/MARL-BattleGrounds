@@ -95,7 +95,7 @@ export function startDebugger({ scenario = "arena_5v5", extraArgs = [] } = {}) {
     child.stdout?.on("data", (chunk) => {
       stdout += String(chunk);
       const match = stdout.match(
-        /Visual debugger: (http:\/\/127\.0\.0\.1:\d+\/#token=[A-Za-z0-9_-]+)/,
+        /Visual Debugger and Analyzer: (http:\/\/127\.0\.0\.1:\d+\/#token=[A-Za-z0-9_-]+)/,
       );
       if (!match || settled) {
         return;

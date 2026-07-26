@@ -57,9 +57,10 @@ const ICONS = Object.freeze({
     primitive("path", { d: "M12 5.8v11.7M8.3 9.4h7.4" }),
   ]),
   "class-hunter": icon("class-hunter", [
-    primitive("circle", { cx: 12, cy: 12, r: 6.2 }),
-    primitive("circle", { cx: 12, cy: 12, r: 2 }),
-    primitive("path", { d: "M12 2v4M12 18v4M2 12h4M18 12h4" }),
+    primitive("path", { d: "M6.5 3.5c7 4.6 7 12.4 0 17" }),
+    primitive("line", { x1: 6.5, y1: 3.5, x2: 6.5, y2: 20.5 }),
+    primitive("line", { x1: 3, y1: 12, x2: 21, y2: 12 }),
+    primitive("polyline", { points: "17,8 21,12 17,16" }),
   ]),
   "class-rogue": icon("class-rogue", [
     primitive("path", { d: "m5 4 6.5 6.5-2.7 2.7L2.3 6.7Z" }),
@@ -68,8 +69,22 @@ const ICONS = Object.freeze({
     primitive("circle", { cx: 12, cy: 17.5, r: 2.4 }),
   ]),
   "class-priest": icon("class-priest", [
-    primitive("circle", { cx: 12, cy: 7, r: 4.2 }),
-    primitive("path", { d: "M12 11.2V22M7.5 16h9" }),
+    primitive("rect", {
+      x: 9,
+      y: 3,
+      width: 6,
+      height: 18,
+      fill: "currentColor",
+      stroke: "none",
+    }),
+    primitive("rect", {
+      x: 3,
+      y: 9,
+      width: 18,
+      height: 6,
+      fill: "currentColor",
+      stroke: "none",
+    }),
   ]),
   "team-a": icon("team-a", [
     primitive("path", {
@@ -83,23 +98,14 @@ const ICONS = Object.freeze({
     }),
     primitive("path", { d: "M8 12h8" }),
   ]),
-  "status-charge-stun": icon("status-charge-stun", [
+  "status-stun": icon("status-stun", [
     primitive("path", { d: "m12 2 8 5v10l-8 5-8-5V7Z" }),
     primitive("path", { d: "m8.5 8.5 7 7M15.5 8.5l-7 7" }),
   ]),
-  "status-trap": icon("status-trap", [
-    primitive("rect", { x: 4, y: 4, width: 16, height: 16, rx: 2 }),
-    primitive("path", { d: "M4 9h16M4 15h16M9 4v16M15 4v16" }),
-  ]),
-  "status-poison-stun": icon("status-poison-stun", [
-    primitive("path", {
-      d: "M12 2.5c3 4.3 5.2 7.1 5.2 10.6A5.2 5.2 0 0 1 6.8 13c0-3.5 2.2-6.3 5.2-10.5Z",
-    }),
-    primitive("path", { d: "m8.5 16.5 7-7M8.5 9.5l7 7" }),
-  ]),
   "status-slow": icon("status-slow", [
-    primitive("polyline", { points: "5,7 12,14 19,7" }),
-    primitive("polyline", { points: "5,12 12,19 19,12" }),
+    primitive("path", {
+      d: "M19.5 8.2c-2-4-7.1-5.5-10.9-3.1-4.1 2.5-4.4 8.3-.9 11.4 3 2.7 7.8 2.1 9.7-1.1 1.6-2.7.3-6.3-2.7-7.2-2.4-.7-4.9.9-5 3.4-.1 2 1.8 3.6 3.7 3.2 1.4-.3 2.3-1.8 1.8-3.2",
+    }),
   ]),
   "status-anti-heal": icon("status-anti-heal", [
     primitive("path", {

@@ -291,6 +291,68 @@ test("viewport-edge and reserved-zone collisions move a dock deterministically",
   assert.equal(rectanglesIntersect(southDock.bounds, reservedEast), false);
 });
 
+test("required one-cell docks remain expanded and collision-free in supported geometry", () => {
+  const reservedStatus = {
+    left: 275,
+    top: 140,
+    right: 325,
+    bottom: 180,
+    width: 50,
+    height: 40,
+  };
+  const agents = [
+    {
+      globalSlot: 8,
+      center: { x: 450, y: 210 },
+      radius: 20,
+      statuses: Object.freeze([{ ticks: 1 }]),
+      required: true,
+    },
+    {
+      globalSlot: 2,
+      center: { x: 300, y: 210 },
+      radius: 20,
+      statuses: Object.freeze([{ ticks: 30 }]),
+      required: true,
+    },
+  ];
+  const options = {
+    cellWidth: 38,
+    cellHeight: 18,
+    cellGap: 2,
+    dockGap: 5,
+    bodyPadding: 4,
+    selectionAllowance: 12,
+  };
+  const input = {
+    agents,
+    viewport: VIEWPORT,
+    reservedRects: [reservedStatus],
+  };
+  const forward = layoutStatusDocks(input, options);
+  const reversed = layoutStatusDocks(
+    { ...input, agents: [...agents].reverse() },
+    options,
+  );
+
+  assert.deepEqual(forward, reversed);
+  assert.deepEqual(forward.placementOrder, [2, 8]);
+  assert.deepEqual(forward.suppressedGlobalSlots, []);
+  for (const dock of forward.docks) {
+    assert.equal(dock.required, true);
+    assert.equal(dock.expanded, true);
+    assert.equal(dock.visibleCount, 1);
+    assert.equal(dock.hiddenCount, 0);
+    assert.equal(dock.collisionFree, true);
+    assert.equal(rectanglesIntersect(dock.bounds, reservedStatus), false);
+    assert.equal(viewportOverflow(dock.bounds, VIEWPORT), 0);
+  }
+  assert.equal(
+    rectanglesIntersect(forward.docks[0].bounds, forward.docks[1].bounds),
+    false,
+  );
+});
+
 test("protected body allowance grows only for selected or controlled agents", () => {
   const plain = protectedBodyRect({
     center: [50, 60],

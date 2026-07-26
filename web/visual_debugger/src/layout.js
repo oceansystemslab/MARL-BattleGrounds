@@ -60,6 +60,7 @@ export const DEFAULT_STATUS_DOCK_OPTIONS = Object.freeze({
  *   center: Point | readonly [number, number],
  *   radius: number,
  *   statuses: ReadonlyArray<unknown>,
+ *   required?: boolean,
  *   controlled?: boolean,
  *   selected?: boolean,
  * }} StatusDockAgent
@@ -92,6 +93,7 @@ export const DEFAULT_STATUS_DOCK_OPTIONS = Object.freeze({
  * @typedef {{
  *   globalSlot: number,
  *   priorityIndex: number,
+ *   required: boolean,
  *   controlled: boolean,
  *   selected: boolean,
  *   anchor: "north" | "east" | "west" | "south",
@@ -289,7 +291,7 @@ export function layoutStatusDocks(input, options = {}) {
     });
   });
   const requiredInputs = placementInputs.filter(
-    ({ agent }) => agent.controlled || agent.selected,
+    ({ agent }) => agent.required || agent.controlled || agent.selected,
   );
   const requiredPlacements = searchStatusDockPlacements(requiredInputs);
   /** @type {StatusDockPlacement[]} */
@@ -300,7 +302,7 @@ export function layoutStatusDocks(input, options = {}) {
     : requiredInputs.map(({ agent }) => agent.globalSlot);
   const priorDockBounds = docks.map(({ bounds }) => bounds);
   for (const input of placementInputs.filter(
-    ({ agent }) => !agent.controlled && !agent.selected,
+    ({ agent }) => !agent.required && !agent.controlled && !agent.selected,
   )) {
     const placement = statusDockPlacementOptions({
       ...input,
@@ -568,6 +570,7 @@ function normalizeAgent(agent) {
     center: normalizePoint(agent.center, "agent center"),
     radius: positiveFinite(agent.radius, "agent radius"),
     statuses: Object.freeze([...agent.statuses]),
+    required: agent.required === true,
     controlled: agent.controlled === true,
     selected: agent.selected === true,
   });
@@ -593,6 +596,7 @@ function assertUniqueSlots(agents) {
  */
 function comparePlacementPriority(first, second) {
   return (
+    Number(second.required) - Number(first.required) ||
     Number(second.controlled) - Number(first.controlled) ||
     Number(second.selected) - Number(first.selected) ||
     second.statuses.length - first.statuses.length ||
@@ -679,7 +683,8 @@ function statusDockPlacementOptions(input) {
   const capacityExceeded = totalCount > STATUS_DOCK_CAPACITY;
   const expandedVisibleCount = capacityExceeded ? STATUS_DOCK_CAPACITY - 1 : totalCount;
   const forceExpanded =
-    !capacityExceeded && (input.agent.controlled || input.agent.selected);
+    !capacityExceeded &&
+    (input.agent.required || input.agent.controlled || input.agent.selected);
   const visibleCounts = [expandedVisibleCount];
   if (!forceExpanded) {
     const maximumCollapsedVisible = Math.min(totalCount - 1, STATUS_DOCK_CAPACITY - 1);
@@ -721,6 +726,7 @@ function placementFromCandidate(input, candidate) {
   return Object.freeze({
     globalSlot: input.agent.globalSlot,
     priorityIndex: input.priorityIndex,
+    required: input.agent.required,
     controlled: input.agent.controlled,
     selected: input.agent.selected,
     anchor: candidate.anchor,

@@ -1,4 +1,7 @@
 import { createSvgIcon } from "./icons.js";
+import { formatDisplayNumber } from "./display.js";
+import { explainActivation, explainNetHealth } from "./explanations.js";
+import { registerTooltipOwner } from "./tooltip.js";
 
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 
@@ -223,6 +226,9 @@ export class SvgChoreographyPainter {
     if (typeof event.outcome === "string") {
       group.dataset.outcome = event.outcome;
     }
+    if (typeof event.impactSemantic === "string") {
+      group.dataset.impactSemantic = event.impactSemantic;
+    }
     if (typeof event.lifecycle === "string") {
       group.dataset.lifecycle = event.lifecycle;
     }
@@ -282,6 +288,7 @@ export class SvgChoreographyPainter {
     } else {
       return null;
     }
+    this.#registerEventExplanation(group, underlay, event);
     this.#applySpatialDisposition(group, event);
 
     if (!options.settled && options.motionMode !== "off") {
@@ -349,11 +356,15 @@ export class SvgChoreographyPainter {
         d: event.route.path,
         pathLength: 1,
       });
+      const hitPath = svgElement(ownerDocument, "path", {
+        class: "combat-route__hit",
+        d: event.route.path,
+      });
       const arrow = svgElement(ownerDocument, "path", {
         class: "combat-route__arrow",
         d: "M -9 -5 L 1 0 L -9 5 Z",
       });
-      underlay.append(path, arrow);
+      underlay.append(hitPath, path, arrow);
       if (options.motionMode === "normal") {
         const particle = svgElement(ownerDocument, "circle", {
           class: "combat-route__particle",
@@ -423,6 +434,10 @@ export class SvgChoreographyPainter {
           class: "combat-burst__wave combat-burst__wave--outer",
           r: 28,
         }),
+        svgElement(ownerDocument, "path", {
+          class: "combat-ultimate__flare combat-burst__flare",
+          d: "M 0 -34 V -25 M 0 25 V 34 M -34 0 H -25 M 25 0 H 34 M -24 -24 L -18 -18 M 18 18 L 24 24 M 24 -24 L 18 -18 M -18 18 L -24 24",
+        }),
       );
     }
     const icon = createSvgIcon(ownerDocument, event.token?.glyphKey ?? "unknown", {
@@ -484,6 +499,11 @@ export class SvgChoreographyPainter {
     });
     impact.append(
       svgElement(ownerDocument, "circle", {
+        class: "combat-impact__hit",
+        r: 22,
+        "aria-hidden": "true",
+      }),
+      svgElement(ownerDocument, "circle", {
         class: "combat-impact__core",
         r: 13,
       }),
@@ -492,11 +512,8 @@ export class SvgChoreographyPainter {
         r: 18,
       }),
     );
-    const icon = createSvgIcon(ownerDocument, event.token?.glyphKey ?? "unknown", {
-      className: "combat-impact__icon",
-    });
-    setAttributes(icon, { x: -8, y: -8, width: 16, height: 16 });
-    impact.append(icon);
+    const semantic = semanticImpactGlyph(ownerDocument, event.impactSemantic);
+    impact.append(semantic);
     if (event.tokenId === "holy_word") {
       impact.append(
         svgElement(ownerDocument, "circle", {
@@ -507,12 +524,20 @@ export class SvgChoreographyPainter {
           class: "combat-holy__pulse combat-holy__pulse--outer",
           r: 22,
         }),
+        svgElement(ownerDocument, "path", {
+          class: "combat-ultimate__flare combat-holy__flare",
+          d: "M 0 -27 V -21 M 0 21 V 27 M -27 0 H -21 M 21 0 H 27",
+        }),
       );
     } else if (event.tokenId === "hunter_trap") {
       impact.append(
         svgElement(ownerDocument, "path", {
           class: "combat-trap__lattice",
           d: "M -17 -17 H 17 V 17 H -17 Z M -17 -6 H 17 M -17 6 H 17 M -6 -17 V 17 M 6 -17 V 17",
+        }),
+        svgElement(ownerDocument, "path", {
+          class: "combat-ultimate__flare combat-trap__flare",
+          d: "M 0 -25 25 0 0 25 -25 0 Z",
         }),
       );
     } else if (event.tokenId === "rogue_poison") {
@@ -535,12 +560,20 @@ export class SvgChoreographyPainter {
           cy: -13,
           r: 2.5,
         }),
+        svgElement(ownerDocument, "path", {
+          class: "combat-ultimate__flare combat-poison__flare",
+          d: "M -23 16 Q -14 7 -7 18 M 7 18 Q 14 7 23 16",
+        }),
       );
     } else if (event.tokenId === "warrior_charge") {
       impact.append(
         svgElement(ownerDocument, "path", {
           class: "combat-charge__impact",
           d: "M -22 0 H -13 M 13 0 H 22 M 0 -22 V -13 M 0 13 V 22",
+        }),
+        svgElement(ownerDocument, "path", {
+          class: "combat-ultimate__flare combat-charge__flare",
+          d: "M -26 -11 L -18 -7 M 18 7 L 26 11 M -26 11 L -18 7 M 18 -7 L 26 -11",
         }),
       );
     }
@@ -586,6 +619,40 @@ export class SvgChoreographyPainter {
         "impact",
       ),
     );
+  }
+
+  /**
+   * Attach authorized-data-only explanations to the visible event and its
+   * independently layered route hit region.
+   *
+   * @param {SVGElement} group
+   * @param {SVGElement | null} underlay
+   * @param {JsonRecord} event
+   */
+  #registerEventExplanation(group, underlay, event) {
+    const explanation =
+      event.kind === "activation"
+        ? explainActivation(event)
+        : event.kind === "net_health"
+          ? explainNetHealth(event)
+          : {
+              kind: "event",
+              id: `event:${event.eventId ?? "unknown"}`,
+              title: String(event.token?.label ?? event.eventType ?? "Semantic event"),
+              details: [
+                `Authoritative ${String(event.kind ?? "event").replaceAll("_", " ")}`,
+              ],
+              anchor: /** @type {const} */ ("pointer"),
+            };
+    registerTooltipOwner(group, explanation);
+    if (underlay) {
+      registerTooltipOwner(underlay, {
+        ...explanation,
+        kind: event.kind === "activation" ? "accepted-route" : explanation.kind,
+        id: `${explanation.id}:route`,
+        anchor: "pointer",
+      });
+    }
   }
 
   /**
@@ -832,9 +899,13 @@ export class SvgChoreographyPainter {
    */
   #updateActivationGeometry(group, underlay, event) {
     const path = underlay?.querySelector(".combat-route__path");
+    const hitPath = underlay?.querySelector(".combat-route__hit");
     const arrow = underlay?.querySelector(".combat-route__arrow");
     if (path && event.route) {
       path.setAttribute("d", event.route.path);
+    }
+    if (hitPath && event.route) {
+      hitPath.setAttribute("d", event.route.path);
     }
     if (arrow && event.route) {
       setAttributes(arrow, {
@@ -1037,6 +1108,49 @@ function cssIdentifier(value) {
 }
 
 /**
+ * Render one intentionally non-numeric recipient mark. Damage and healing use
+ * the universal minus/plus grammar; status-only or unknown activations fail
+ * closed to a neutral diamond.
+ *
+ * @param {Document} ownerDocument
+ * @param {unknown} value
+ * @returns {SVGElement}
+ */
+function semanticImpactGlyph(ownerDocument, value) {
+  const semantic = value === "damage" || value === "healing" ? value : "neutral";
+  const group = svgElement(ownerDocument, "g", {
+    class: `combat-impact__semantic combat-impact__semantic--${semantic}`,
+  });
+  if (semantic === "neutral") {
+    group.append(
+      svgElement(ownerDocument, "path", {
+        d: "M 0 -6 L 6 0 0 6 -6 0 Z",
+      }),
+    );
+    return group;
+  }
+  group.append(
+    svgElement(ownerDocument, "line", {
+      x1: -6,
+      y1: 0,
+      x2: 6,
+      y2: 0,
+    }),
+  );
+  if (semantic === "healing") {
+    group.append(
+      svgElement(ownerDocument, "line", {
+        x1: 0,
+        y1: -6,
+        x2: 0,
+        y2: 6,
+      }),
+    );
+  }
+  return group;
+}
+
+/**
  * @param {Record<string, any>} event
  */
 function phaseFor(event) {
@@ -1060,8 +1174,9 @@ function netLabel(delta, outcome) {
   if (outcome === "unchanged" || delta === 0) {
     return "HP unchanged";
   }
-  const magnitude = Math.abs(delta).toFixed(2);
-  return delta < 0 ? `NET −${magnitude}` : `NET +${magnitude}`;
+  const magnitude = formatDisplayNumber(Math.abs(delta));
+  const visibleMagnitude = magnitude === "0" ? "<0.01" : magnitude;
+  return delta < 0 ? `NET −${visibleMagnitude}` : `NET +${visibleMagnitude}`;
 }
 
 /**

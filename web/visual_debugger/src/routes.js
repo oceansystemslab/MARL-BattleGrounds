@@ -1,4 +1,4 @@
-const EPSILON = 1e-6;
+const MIN_VISIBLE_SEGMENT_FRACTION = 0.2;
 
 /**
  * @typedef {{x: number, y: number}} RoutePoint
@@ -35,7 +35,10 @@ const EPSILON = 1e-6;
  */
 
 /**
- * Clip a source-target segment to the outside of two circular body zones.
+ * Clip a source-target segment toward two circular body boundaries.
+ *
+ * When the requested body extents overlap, compress both clips proportionally
+ * so the remaining segment still follows the ordered source-to-target bearing.
  *
  * @param {RoutePoint | ReadonlyArray<number>} source
  * @param {RoutePoint | ReadonlyArray<number>} target
@@ -59,7 +62,7 @@ export function clipRouteEndpoints(
   const deltaX = endCenter.x - startCenter.x;
   const deltaY = endCenter.y - startCenter.y;
   const distance = Math.hypot(deltaX, deltaY);
-  if (distance <= EPSILON) {
+  if (distance === 0) {
     return Object.freeze({
       start: startCenter,
       end: endCenter,
@@ -68,14 +71,22 @@ export function clipRouteEndpoints(
     });
   }
   const unit = frozenPoint(deltaX / distance, deltaY / distance);
+  const requestedExtent = sourceExtent + targetExtent;
+  const maximumCombinedClip = distance * (1 - MIN_VISIBLE_SEGMENT_FRACTION);
+  const clipScale =
+    requestedExtent > maximumCombinedClip
+      ? maximumCombinedClip / requestedExtent
+      : 1;
+  const clippedSourceExtent = sourceExtent * clipScale;
+  const clippedTargetExtent = targetExtent * clipScale;
   return Object.freeze({
     start: frozenPoint(
-      startCenter.x + unit.x * Math.min(sourceExtent, distance / 2),
-      startCenter.y + unit.y * Math.min(sourceExtent, distance / 2),
+      startCenter.x + unit.x * clippedSourceExtent,
+      startCenter.y + unit.y * clippedSourceExtent,
     ),
     end: frozenPoint(
-      endCenter.x - unit.x * Math.min(targetExtent, distance / 2),
-      endCenter.y - unit.y * Math.min(targetExtent, distance / 2),
+      endCenter.x - unit.x * clippedTargetExtent,
+      endCenter.y - unit.y * clippedTargetExtent,
     ),
     distance,
     unit,
@@ -116,11 +127,7 @@ export function createRouteGeometry(input, options = {}) {
     endpointGap,
   );
 
-  const visibleSegmentLength = Math.hypot(
-    clipped.end.x - clipped.start.x,
-    clipped.end.y - clipped.start.y,
-  );
-  if (visibleSegmentLength <= EPSILON) {
+  if (clipped.distance === 0) {
     return localArc({
       eventId,
       center: frozenPoint((source.x + target.x) / 2, (source.y + target.y) / 2),

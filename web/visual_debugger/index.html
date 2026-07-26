@@ -8,7 +8,7 @@
     >
     <meta name="referrer" content="no-referrer">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>MARL-BattleGrounds Visual Debugger</title>
+    <title>MARL-BattleGrounds Visual Debugger and Analyzer</title>
     <link rel="stylesheet" href="/styles.css">
     <script type="module" src="/src/main.js"></script>
   </head>
@@ -18,7 +18,7 @@
     <header class="app-header">
       <div class="brand">
         <p class="eyebrow">MARL-BattleGrounds</p>
-        <h1>Visual Debugger</h1>
+        <h1>Visual Debugger and Analyzer</h1>
       </div>
       <div class="header-status" aria-live="polite">
         <span id="connection-status" class="status-pill" data-state="loading">
@@ -33,7 +33,7 @@
       </div>
     </header>
 
-    <section class="session-toolbar" aria-label="Debugger session">
+    <section class="session-toolbar" aria-label="Analyzer session">
       <label>
         <span>Scenario</span>
         <select id="scenario-select" aria-label="Scenario" disabled>
@@ -125,7 +125,7 @@
           Help
         </button>
         <button id="exit-button" class="button button--danger" type="button" disabled>
-          Exit debugger
+          Exit analyzer
         </button>
       </div>
     </section>
@@ -154,7 +154,7 @@
             aria-describedby="battlefield-instructions"
           ></svg>
           <p id="battlefield-empty" class="battlefield-empty">
-            Connecting to the local debugger service…
+            Connecting to the local analyzer service…
           </p>
         </div>
         <p id="battlefield-instructions" class="sr-only">
@@ -220,7 +220,7 @@
         </section>
       </section>
 
-      <aside class="hud-panel" aria-label="Debugger inspector">
+      <aside class="hud-panel" aria-label="Analyzer inspector">
         <section class="hud-section" aria-labelledby="roster-heading">
           <div class="section-heading">
             <h2 id="roster-heading">Roster</h2>
@@ -312,12 +312,23 @@
       </aside>
     </main>
 
+    <aside
+      id="visual-tooltip"
+      class="visual-tooltip"
+      role="tooltip"
+      aria-live="off"
+      hidden
+    >
+      <strong id="visual-tooltip-title" class="visual-tooltip__title"></strong>
+      <span id="visual-tooltip-details" class="visual-tooltip__details"></span>
+    </aside>
+
     <dialog id="help-dialog" class="help-dialog" aria-labelledby="help-heading">
       <form method="dialog">
         <div class="section-heading">
           <div>
             <p class="eyebrow">Browser controls</p>
-            <h2 id="help-heading">Debugger help</h2>
+            <h2 id="help-heading">Analyzer help</h2>
           </div>
           <button class="button button--quiet" type="submit" value="close">Close</button>
         </div>
@@ -367,7 +378,7 @@
 
     <noscript>
       <p class="noscript">
-        This local debugger needs JavaScript to display authoritative Python
+        This local analyzer needs JavaScript to display authoritative Python
         frames. It does not simulate in the browser.
       </p>
     </noscript>

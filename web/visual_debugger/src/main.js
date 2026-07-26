@@ -14,6 +14,10 @@ import { bindBattlefieldControls, keyboardCommand } from "./controls.js";
 import { formatDisplayNumber } from "./display.js";
 import { DebuggerPanels } from "./panels.js";
 import { BattlefieldRenderer } from "./scene.js";
+import {
+  createTooltipController,
+  registerTooltipOwner,
+} from "./tooltip.js";
 
 /**
  * @param {string} id
@@ -76,6 +80,9 @@ const elements = {
   eventFeed: requiredElement("event-feed"),
   eventCount: requiredElement("event-count"),
   diagnosticsCard: requiredElement("diagnostics-card"),
+  visualTooltip: requiredElement("visual-tooltip"),
+  visualTooltipTitle: requiredElement("visual-tooltip-title"),
+  visualTooltipDetails: requiredElement("visual-tooltip-details"),
   helpDialog: requiredElement("help-dialog"),
 };
 
@@ -142,6 +149,13 @@ const panels = new DebuggerPanels({
   eventCount: elements.eventCount,
   diagnosticsCard: elements.diagnosticsCard,
   onCommand: dispatchCommand,
+});
+
+const tooltipController = createTooltipController({
+  root: document.body,
+  tooltip: elements.visualTooltip,
+  title: elements.visualTooltipTitle,
+  details: elements.visualTooltipDetails,
 });
 
 let lastBattlefieldSizeKey = "";
@@ -510,6 +524,16 @@ function setAuthoritativeAvailability(button, available, explanation) {
   button.dataset.authoritativeAvailable = String(available);
   button.dataset.tooltipKind = "legality";
   button.dataset.tooltipText = explanation;
+  registerTooltipOwner(button, {
+    kind: "legality",
+    id: `command:${button.id || button.dataset.key || "choice"}`,
+    title:
+      button.getAttribute("aria-label") ??
+      button.textContent?.trim() ??
+      "Pending choice",
+    details: [explanation],
+    anchor: "element",
+  });
 }
 
 /**
@@ -787,6 +811,7 @@ function render() {
     resyncRequired: state.resyncRequired,
     offline: state.offline,
   });
+  tooltipController.refresh();
 }
 
 function battlefieldSizeKey() {
@@ -817,6 +842,7 @@ function scheduleBattlefieldResize() {
       );
       renderConnection();
     }
+    tooltipController.refresh();
   });
 }
 
@@ -901,7 +927,7 @@ async function dispatchCommand(command) {
     );
     if (command.command_type === "exit") {
       state.shuttingDown = true;
-      setNotice("Exit accepted. The local debugger server is shutting down.", "info");
+      setNotice("Exit accepted. The local analyzer server is shutting down.", "info");
     }
   } catch (error) {
     if (error instanceof DebuggerApiError && error.status === 409) {
@@ -953,7 +979,7 @@ async function loadCurrentFrame() {
     state.frame = frame;
     state.offline = false;
     state.resyncRequired = false;
-    setNotice(extractNotice(payload) ?? "Connected to the local debugger.", "success");
+    setNotice(extractNotice(payload) ?? "Connected to the local analyzer.", "success");
   } catch (error) {
     const status = error instanceof DebuggerApiError ? error.status : 0;
     state.offline = status === 0 || status === 401 || status === 403;

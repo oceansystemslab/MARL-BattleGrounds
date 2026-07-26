@@ -624,7 +624,7 @@ test("a lost applied response requires GET resync and never replays submit", asy
 test("Exit button reaches the authenticated shutdown path", async ({ page }) => {
   await page.goto(debuggerUrl);
   await expect(page.locator("#connection-status")).toHaveText("Online");
-  await page.getByRole("button", { name: "Exit debugger" }).click();
+  await page.getByRole("button", { name: "Exit analyzer" }).click();
   await expect(page.locator("#connection-status")).toHaveText("Shutting down");
   await expect(page.locator("#notice")).toContainText("Exit accepted");
 });

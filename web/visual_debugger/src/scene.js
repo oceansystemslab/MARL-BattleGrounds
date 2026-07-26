@@ -1,3 +1,17 @@
+import { formatDisplayNumber } from "./display.js";
+import {
+  explainAgent,
+  explainAura,
+  explainCooldown,
+  explainLegality,
+  explainModifier,
+  explainObstacle,
+  explainOverflow,
+  explainPendingRoute,
+  explainRange,
+  explainStatus,
+  explainVisibility,
+} from "./explanations.js";
 import { createSvgIcon } from "./icons.js";
 import {
   createViewportTransform,
@@ -6,11 +20,22 @@ import {
   rectanglesIntersect,
 } from "./layout.js";
 import { createRouteGeometry } from "./routes.js";
-import { classTokenFromId, resolveVisualToken, teamTokenFromId } from "./vocabulary.js";
+import { registerTooltipOwner } from "./tooltip.js";
+import {
+  classTokenFromId,
+  resolveVisualToken,
+  teamTokenFromId,
+  ultimateTokenFromClassId,
+} from "./vocabulary.js";
 
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 const STATUS_DOCK_DIMENSIONS = Object.freeze({
-  cellWidth: 24,
+  cellWidth: 28,
+  cellHeight: 18,
+  cellGap: 2,
+});
+const COOLDOWN_DOCK_DIMENSIONS = Object.freeze({
+  cellWidth: 38,
   cellHeight: 18,
   cellGap: 2,
 });
@@ -42,11 +67,19 @@ export const BATTLEFIELD_LAYER_ORDER = Object.freeze([
 /**
  * @typedef {Record<string, any>} JsonRecord
  */
+/**
+ * @typedef {{
+ *   kind: string,
+ *   id: string,
+ *   title: string,
+ *   details: string[],
+ *   anchor: "element" | "pointer",
+ * }} TooltipDescriptor
+ */
 
 /**
  * @typedef {{
  *   root: SVGElement,
- *   title: SVGElement,
  *   body: SVGElement,
  *   teamRing: SVGElement,
  *   teamMarker: SVGElement,
@@ -119,22 +152,6 @@ function asArray(value) {
  */
 function finiteNumber(value, fallback = 0) {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
-}
-
-/**
- * @param {unknown} value
- * @param {number} digits
- */
-function formatNumber(value, digits = 1) {
-  return Number.isFinite(value) ? Number(value).toFixed(digits) : "—";
-}
-
-/**
- * @param {unknown} value
- * @param {number} digits
- */
-function compactNumber(value, digits = 2) {
-  return Number.isFinite(value) ? String(Number(Number(value).toFixed(digits))) : "—";
 }
 
 /**
@@ -243,6 +260,8 @@ function targetReticlePath(centerX, centerY, outerRadius) {
  * @param {"kind" | "token_id"} tokenAttribute
  * @param {ViewportTransform} transform
  * @param {ReadonlyMap<number, string>} [classByGlobalSlot]
+ * @param {((record: JsonRecord) => TooltipDescriptor) | null} [explain]
+ * @param {boolean} [withStrokeHitRegion]
  */
 function renderCircleLayer(
   layer,
@@ -251,6 +270,8 @@ function renderCircleLayer(
   tokenAttribute,
   transform,
   classByGlobalSlot = new Map(),
+  explain = null,
+  withStrokeHitRegion = false,
 ) {
   const circles = [];
   for (const record of records) {
@@ -285,7 +306,35 @@ function renderCircleLayer(
     if (Number.isInteger(record.source_global_slot)) {
       circle.dataset.sourceSlot = String(record.source_global_slot);
     }
-    circles.push(circle);
+    if (explain === null) {
+      circles.push(circle);
+      continue;
+    }
+    if (!withStrokeHitRegion) {
+      registerTooltipOwner(circle, explain(record));
+      circles.push(circle);
+      continue;
+    }
+    const owner = svgElement("g", {
+      class: `${className}-owner`,
+    });
+    const hitRegion = svgElement("circle", {
+      class: `${className}-hit`,
+      cx: center.x,
+      cy: center.y,
+      r: radius,
+      "aria-hidden": "true",
+    });
+    if (typeof record[tokenAttribute] === "string") {
+      hitRegion.dataset[tokenAttribute === "kind" ? "kind" : "token"] =
+        record[tokenAttribute];
+    }
+    if (Number.isInteger(record.global_slot)) {
+      hitRegion.dataset.slot = String(record.global_slot);
+    }
+    owner.append(circle, hitRegion);
+    registerTooltipOwner(owner, explain(record));
+    circles.push(owner);
   }
   layer.replaceChildren(...circles);
 }
@@ -338,7 +387,7 @@ export class BattlefieldRenderer {
     this.legalityCues = createLayer("legality-cues");
     selectionLegality.append(this.selectionCues, this.legalityCues);
     const durableStatusModifier = createLayer("durable-status-modifier", {
-      "aria-label": "Durable status and modifier cues",
+      "aria-label": "Durable status, cooldown, and modifier cues",
     });
     const transientEvents = createLayer("transient-events", {
       "aria-hidden": "true",
@@ -463,6 +512,8 @@ export class BattlefieldRenderer {
       "aura-field",
       "token_id",
       transform,
+      new Map(),
+      explainAura,
     );
     renderCircleLayer(
       this.rangeCues,
@@ -471,6 +522,8 @@ export class BattlefieldRenderer {
       "kind",
       transform,
       classByGlobalSlot,
+      explainRange,
+      true,
     );
     this.#renderPendingRoute(scene, transform);
     this.#renderObstacles(map, transform);
@@ -565,6 +618,9 @@ export class BattlefieldRenderer {
     this.selectionCues.replaceChildren();
     this.legalityCues.replaceChildren();
     this.layers.durableStatusModifier.replaceChildren();
+    this.layers.durableStatusModifier.removeAttribute("data-suppressed-status-slots");
+    this.layers.durableStatusModifier.removeAttribute("data-suppressed-cooldown-slots");
+    this.layers.durableStatusModifier.removeAttribute("data-suppressed-modifier-slots");
     this.layers.accessibleLabels.replaceChildren();
     this.agentNodes.clear();
     this.choreographyProtectedRects = Object.freeze([]);
@@ -618,12 +674,18 @@ export class BattlefieldRenderer {
       class: "pending-route",
       d: geometry.path,
     });
+    const hitPath = svgElement("path", {
+      class: "pending-route-hit",
+      d: geometry.path,
+      "aria-hidden": "true",
+    });
     path.dataset.lane = String(route.lane ?? 0);
     path.dataset.legal = String(Boolean(route.legal));
     path.dataset.sourceSlot = String(route.source_global_slot ?? "");
     path.dataset.targetSlot = String(route.target_global_slot ?? "");
     path.dataset.routeKind = geometry.kind;
-    this.layers.pendingRoute.replaceChildren(path);
+    registerTooltipOwner(hitPath, explainPendingRoute(route));
+    this.layers.pendingRoute.replaceChildren(path, hitPath);
   }
 
   /**
@@ -638,30 +700,30 @@ export class BattlefieldRenderer {
       }
       const center = screenPoint(obstacle.center, transform);
       if (obstacle.kind === "pillar") {
-        obstacles.push(
-          svgElement("circle", {
-            class: "obstacle",
-            cx: center.x,
-            cy: center.y,
-            r: transform.worldLengthToScreen(finiteNumber(obstacle.radius)),
-            "aria-label": `Pillar ${obstacle.obstacle_id ?? ""}`,
-          }),
-        );
+        const node = svgElement("circle", {
+          class: "obstacle",
+          cx: center.x,
+          cy: center.y,
+          r: transform.worldLengthToScreen(finiteNumber(obstacle.radius)),
+          "aria-label": `Pillar ${obstacle.obstacle_id ?? ""}`,
+        });
+        registerTooltipOwner(node, explainObstacle(obstacle));
+        obstacles.push(node);
       } else if (obstacle.kind === "wall") {
         const wallWidth = transform.worldLengthToScreen(finiteNumber(obstacle.width));
         const wallHeight = transform.worldLengthToScreen(finiteNumber(obstacle.height));
         const thetaDegrees = (-finiteNumber(obstacle.theta) * 180) / Math.PI;
-        obstacles.push(
-          svgElement("rect", {
-            class: "obstacle",
-            x: center.x - wallWidth / 2,
-            y: center.y - wallHeight / 2,
-            width: wallWidth,
-            height: wallHeight,
-            transform: `rotate(${thetaDegrees} ${center.x} ${center.y})`,
-            "aria-label": `Wall ${obstacle.obstacle_id ?? ""}`,
-          }),
-        );
+        const node = svgElement("rect", {
+          class: "obstacle",
+          x: center.x - wallWidth / 2,
+          y: center.y - wallHeight / 2,
+          width: wallWidth,
+          height: wallHeight,
+          transform: `rotate(${thetaDegrees} ${center.x} ${center.y})`,
+          "aria-label": `Wall ${obstacle.obstacle_id ?? ""}`,
+        });
+        registerTooltipOwner(node, explainObstacle(obstacle));
+        obstacles.push(node);
       }
     }
     this.layers.obstacle.replaceChildren(...obstacles);
@@ -700,6 +762,7 @@ export class BattlefieldRenderer {
         this.agentNodes.set(slot, nodes);
       }
       this.#updateAgentNodes(nodes, agent, center, radius, controlled, selected);
+      registerTooltipOwner(nodes.root, explainAgent(agent, { controlled, selected }));
 
       // Appending an existing child reorders it without replacing its identity.
       this.layers.body.append(nodes.root);
@@ -783,11 +846,9 @@ export class BattlefieldRenderer {
         "data-candidate-slot": agent.globalSlot,
         "data-visible": visible,
       });
-      const title = svgElement("title");
-      title.textContent = group.getAttribute("aria-label");
       const radius = agent.radius + 16;
+      registerTooltipOwner(group, explainVisibility(fact));
       group.append(
-        title,
         svgElement("circle", {
           class: "debug-visibility-cue__ring",
           cx: agent.center.x,
@@ -915,6 +976,7 @@ export class BattlefieldRenderer {
         "data-armed": armed,
         "data-pair-legal": armed ? Boolean(legality.armed_pair_legal) : null,
       });
+      registerTooltipOwner(pill, explainLegality(legality, lane.lane === 0 ? 0 : 1));
       pill.append(
         svgElement("rect", {
           class: "legality-pill__box",
@@ -950,6 +1012,40 @@ export class BattlefieldRenderer {
    * @param {{showLegality: boolean, showModifiers: boolean}} policy
    */
   #renderStatusDocks(scene, projectedAgents, transform, policy) {
+    const cooldownLayout = layoutStatusDocks(
+      {
+        agents: projectedAgents.map((agent) => {
+          const ticks = agent.agent.ultimate_cooldown;
+          const activeCooldown =
+            Number.isInteger(ticks) && Number(ticks) > 0
+              ? Object.freeze({
+                  classId: agent.agent.class_id,
+                  ticks: Number(ticks),
+                })
+              : null;
+          return {
+            globalSlot: agent.globalSlot,
+            center: agent.center,
+            radius: agent.radius,
+            statuses:
+              activeCooldown === null
+                ? Object.freeze([])
+                : Object.freeze([activeCooldown]),
+            required: activeCooldown !== null,
+            controlled: agent.controlled,
+            selected: agent.selected,
+          };
+        }),
+        viewport: transform.viewportBounds,
+      },
+      {
+        bodyPadding: 4,
+        selectionAllowance: 12,
+        ...COOLDOWN_DOCK_DIMENSIONS,
+        dockGap: 5,
+      },
+    );
+    const cooldownRects = cooldownLayout.docks.map(({ bounds }) => bounds);
     const statusLayout = layoutStatusDocks(
       {
         agents: projectedAgents.map((agent) => ({
@@ -961,6 +1057,7 @@ export class BattlefieldRenderer {
           selected: agent.selected,
         })),
         viewport: transform.viewportBounds,
+        reservedRects: cooldownRects,
       },
       {
         bodyPadding: 4,
@@ -969,15 +1066,17 @@ export class BattlefieldRenderer {
         dockGap: 5,
       },
     );
+    const statusRects = statusLayout.docks.map(({ bounds }) => bounds);
     const identityRects = this.#updateSelectedIdentityLayout(
       projectedAgents,
       statusLayout,
+      cooldownRects,
     );
-    const statusRects = statusLayout.docks.map(({ bounds }) => bounds);
     const legalityRects = policy.showLegality
       ? this.#renderSelectedLegality(scene, projectedAgents, transform, [
           ...identityRects,
           ...statusRects,
+          ...cooldownRects,
         ])
       : [];
     if (!policy.showLegality) {
@@ -996,7 +1095,13 @@ export class BattlefieldRenderer {
               selected: false,
             })),
             viewport: transform.viewportBounds,
-            reservedRects: [...identityRects, ...statusRects, ...legalityRects],
+            reservedRects: [
+              ...statusLayout.protectedBodies.map(({ bounds }) => bounds),
+              ...identityRects,
+              ...statusRects,
+              ...cooldownRects,
+              ...legalityRects,
+            ],
           },
           {
             bodyPadding: 4,
@@ -1013,8 +1118,13 @@ export class BattlefieldRenderer {
     const statusNodes = statusLayout.docks.map((placement) =>
       this.#renderFactDock(placement, "status", STATUS_DOCK_DIMENSIONS),
     );
+    const cooldownNodes = cooldownLayout.docks.map((placement) =>
+      this.#renderCooldownDock(placement),
+    );
     this.layers.durableStatusModifier.dataset.suppressedStatusSlots =
       statusLayout.suppressedGlobalSlots.join(",");
+    this.layers.durableStatusModifier.dataset.suppressedCooldownSlots =
+      cooldownLayout.suppressedGlobalSlots.join(",");
     if (policy.showModifiers) {
       this.layers.durableStatusModifier.dataset.suppressedModifierSlots =
         modifierLayout.suppressedGlobalSlots.join(",");
@@ -1023,13 +1133,18 @@ export class BattlefieldRenderer {
         "data-suppressed-modifier-slots",
       );
     }
-    this.layers.durableStatusModifier.replaceChildren(...modifierNodes, ...statusNodes);
+    this.layers.durableStatusModifier.replaceChildren(
+      ...modifierNodes,
+      ...cooldownNodes,
+      ...statusNodes,
+    );
     this.#resolveNumericDockCellContent();
     this.choreographyProtectedRects = Object.freeze(
       [
         ...statusLayout.protectedBodies.map(({ bounds }) => bounds),
         ...identityRects,
         ...statusRects,
+        ...cooldownRects,
         ...legalityRects,
         ...modifierLayout.docks.map(({ bounds }) => bounds),
       ].map((bounds) => Object.freeze({ ...bounds })),
@@ -1046,9 +1161,13 @@ export class BattlefieldRenderer {
    */
   #resolveNumericDockCellContent() {
     for (const cell of this.layers.durableStatusModifier.querySelectorAll(
-      ".status-cell, .modifier-cell",
+      ".status-cell, .cooldown-cell, .modifier-cell",
     )) {
-      const kind = cell.classList.contains("status-cell") ? "status" : "modifier";
+      const kind = cell.classList.contains("status-cell")
+        ? "status"
+        : cell.classList.contains("cooldown-cell")
+          ? "cooldown"
+          : "modifier";
       const box = cell.querySelector(`.${kind}-cell__box`);
       const icon = cell.querySelector(`.${kind}-cell__icon`);
       const value = cell.querySelector(`.${kind}-cell__value`);
@@ -1059,12 +1178,23 @@ export class BattlefieldRenderer {
       ) {
         continue;
       }
+      const supportedStatusDuration =
+        kind === "status" && /^[1-5]$/u.test(value.textContent ?? "");
+      if (supportedStatusDuration) {
+        cell.setAttribute("data-numeric-layout", "compartments");
+        cell.removeAttribute("data-icon-suppressed");
+        cell.removeAttribute("data-numeric-fallback");
+        icon.removeAttribute("hidden");
+        continue;
+      }
       const boxBounds = box.getBBox();
       const iconScreenBounds = icon.getBoundingClientRect();
       const valueScreenBounds = value.getBoundingClientRect();
       let valueBounds = value.getBBox();
       if (iconScreenBounds.right + 2 > valueScreenBounds.left) {
         cell.setAttribute("data-icon-suppressed", "true");
+        cell.setAttribute("data-numeric-fallback", "true");
+        cell.setAttribute("data-numeric-layout", "measured-fallback");
         icon.setAttribute("hidden", "");
         value.setAttribute("x", String(boxBounds.x + boxBounds.width / 2));
         valueBounds = value.getBBox();
@@ -1084,9 +1214,10 @@ export class BattlefieldRenderer {
    *
    * @param {ProjectedAgent[]} projectedAgents
    * @param {ReturnType<typeof layoutStatusDocks>} statusLayout
+   * @param {Rectangle[]} reservedRects
    * @returns {Rectangle[]}
    */
-  #updateSelectedIdentityLayout(projectedAgents, statusLayout) {
+  #updateSelectedIdentityLayout(projectedAgents, statusLayout, reservedRects) {
     for (const nodes of this.agentNodes.values()) {
       nodes.idTag.dataset.layoutSuppressed = "false";
     }
@@ -1101,6 +1232,7 @@ export class BattlefieldRenderer {
       );
       const collision = [
         ...statusLayout.docks.map(({ bounds: dockBounds }) => dockBounds),
+        ...reservedRects,
         ...statusLayout.protectedBodies
           .filter(({ globalSlot }) => globalSlot !== agent.globalSlot)
           .map(({ bounds: bodyBounds }) => bodyBounds),
@@ -1114,6 +1246,117 @@ export class BattlefieldRenderer {
       }
     }
     return visibleBounds;
+  }
+
+  /**
+   * Render one mandatory class-specific Ultimate cooldown cue.
+   *
+   * The exact tick value and icon occupy separate fixed compartments. Layout
+   * remains generic and collision-aware; this method owns only cooldown
+   * presentation.
+   *
+   * @param {ReturnType<typeof layoutStatusDocks>["docks"][number]} placement
+   * @returns {SVGElement}
+   */
+  #renderCooldownDock(placement) {
+    const rawItem = placement.visibleStatuses[0];
+    const item = isRecord(rawItem) ? rawItem : {};
+    const ticks =
+      Number.isInteger(item.ticks) && item.ticks > 0 ? Number(item.ticks) : "?";
+    const classToken = classTokenFromId(item.classId);
+    const token = ultimateTokenFromClassId(item.classId);
+    const group = svgElement("g", {
+      class: "cooldown-dock",
+      "data-zone": "cooldown-dock",
+      "data-slot": placement.globalSlot,
+      "data-class": classToken.cssKey,
+      "data-anchor": placement.anchor,
+      "data-expanded": placement.expanded,
+      "data-collision-free": placement.collisionFree,
+      "data-visible-count": placement.visibleCount,
+      "data-hidden-count": placement.hiddenCount,
+    });
+    if (placement.anchor !== "north" || placement.tangentShift !== 0) {
+      group.append(
+        svgElement("line", {
+          class: "dock-leader cooldown-dock__leader",
+          x1: placement.leader.start.x,
+          y1: placement.leader.start.y,
+          x2: placement.leader.end.x,
+          y2: placement.leader.end.y,
+          "aria-hidden": "true",
+        }),
+      );
+    }
+
+    const x = placement.bounds.left;
+    const y = placement.bounds.top;
+    const accessibleTicks =
+      typeof ticks === "number"
+        ? `${ticks} ${ticks === 1 ? "tick" : "ticks"} remaining`
+        : "remaining ticks unknown";
+    const cell = svgElement("g", {
+      class: "cooldown-cell",
+      role: "img",
+      "aria-label": `${token.accessibleName} cooldown, ${accessibleTicks}, id_${placement.globalSlot}`,
+      "data-zone": "ultimate-cooldown",
+      "data-slot": placement.globalSlot,
+      "data-class": classToken.cssKey,
+      "data-token": token.cssKey,
+      "data-token-id": token.tokenId,
+      "data-ticks": ticks,
+      "data-numeric-layout": "compartments",
+    });
+    const box = svgElement("rect", {
+      class: "cooldown-cell__box",
+      x,
+      y,
+      width: COOLDOWN_DOCK_DIMENSIONS.cellWidth,
+      height: COOLDOWN_DOCK_DIMENSIONS.cellHeight,
+      rx: 5,
+    });
+    const iconCompartment = svgElement("rect", {
+      class: "cooldown-cell__icon-compartment",
+      x: x + 2,
+      y: y + 2,
+      width: 14,
+      height: COOLDOWN_DOCK_DIMENSIONS.cellHeight - 4,
+      "aria-hidden": "true",
+    });
+    const valueCompartment = svgElement("rect", {
+      class: "cooldown-cell__value-compartment",
+      x: x + 19,
+      y: y + 2,
+      width: 16,
+      height: COOLDOWN_DOCK_DIMENSIONS.cellHeight - 4,
+      "aria-hidden": "true",
+    });
+    const icon = createSvgIcon(this.battlefield.ownerDocument, token.glyphKey, {
+      className: "cooldown-cell__icon",
+    });
+    setAttributes(icon, {
+      x: x + 3,
+      y: y + 3,
+      width: 12,
+      height: 12,
+    });
+    const value = svgElement("text", {
+      class: "cooldown-cell__value",
+      x: x + COOLDOWN_DOCK_DIMENSIONS.cellWidth - 3,
+      y: y + COOLDOWN_DOCK_DIMENSIONS.cellHeight / 2,
+    });
+    value.textContent = String(ticks);
+    registerTooltipOwner(
+      cell,
+      explainCooldown({
+        global_slot: placement.globalSlot,
+        class_id: item.classId,
+        ultimate_cooldown: ticks,
+      }),
+    );
+    cell.append(box, iconCompartment, valueCompartment, icon, value);
+    group.append(cell);
+    return group;
   }
 
   /**
@@ -1163,14 +1406,19 @@ export class BattlefieldRenderer {
                 : "?",
             )
           : Number.isFinite(item.multiplier)
-            ? `×${compactNumber(item.multiplier)}`
+            ? `×${formatDisplayNumber(item.multiplier)}`
             : "×?";
       const accessibleValue =
         kind === "status"
           ? `duration ${value}`
           : Number.isFinite(item.multiplier)
-            ? `multiplier ${compactNumber(item.multiplier)}`
+            ? `multiplier ${formatDisplayNumber(item.multiplier)}`
             : "multiplier unknown";
+      const supportedStatusDuration =
+        kind === "status" &&
+        Number.isInteger(item.duration) &&
+        item.duration >= 1 &&
+        item.duration <= 5;
       const cell = svgElement("g", {
         class: `${kind}-cell`,
         role: "img",
@@ -1180,12 +1428,12 @@ export class BattlefieldRenderer {
         "data-token": token.cssKey,
         "data-token-id": token.tokenId,
         "data-index": index,
+        "data-numeric-layout": supportedStatusDuration ? "compartments" : "measured",
+        "data-supported-duration": kind === "status" ? supportedStatusDuration : null,
       });
       if (kind === "status") {
         cell.dataset.sourceClass = classTokenFromId(item.source_class_id).cssKey;
       }
-      const title = svgElement("title");
-      title.textContent = `${token.label} · ${accessibleValue} · id_${placement.globalSlot}`;
       const box = svgElement("rect", {
         class: `${kind}-cell__box`,
         x,
@@ -1197,7 +1445,7 @@ export class BattlefieldRenderer {
       const icon = createSvgIcon(this.battlefield.ownerDocument, token.glyphKey, {
         className: `${kind}-cell__icon`,
       });
-      const iconSize = kind === "modifier" ? 9 : 12;
+      const iconSize = kind === "modifier" ? 9 : 10;
       setAttributes(icon, {
         x: x + (kind === "modifier" ? 3 : 2),
         y: y + (dimensions.cellHeight - iconSize) / 2,
@@ -1206,11 +1454,38 @@ export class BattlefieldRenderer {
       });
       const text = svgElement("text", {
         class: `${kind}-cell__value`,
-        x: x + dimensions.cellWidth - (kind === "modifier" ? 3 : 4),
+        x: x + dimensions.cellWidth - 3,
         y: y + dimensions.cellHeight / 2,
       });
       text.textContent = value;
-      cell.append(title, box, icon, text);
+      const compartments =
+        kind === "status"
+          ? [
+              svgElement("rect", {
+                class: "status-cell__icon-compartment",
+                x: x + 2,
+                y: y + 2,
+                width: 10,
+                height: dimensions.cellHeight - 4,
+                "aria-hidden": "true",
+              }),
+              svgElement("rect", {
+                class: "status-cell__value-compartment",
+                x: x + 15,
+                y: y + 2,
+                width: 10,
+                height: dimensions.cellHeight - 4,
+                "aria-hidden": "true",
+              }),
+            ]
+          : [];
+      registerTooltipOwner(
+        cell,
+        kind === "status"
+          ? explainStatus(item, placement.globalSlot)
+          : explainModifier(item, placement.globalSlot),
+      );
+      cell.append(box, ...compartments, icon, text);
       group.append(cell);
     }
 
@@ -1227,7 +1502,7 @@ export class BattlefieldRenderer {
         const token = resolveVisualToken(kind, item.token_id, item);
         return kind === "status"
           ? `${token.accessibleName}, duration ${item.duration ?? "unknown"}`
-          : `${token.accessibleName}, multiplier ${compactNumber(item.multiplier)}`;
+          : `${token.accessibleName}, multiplier ${formatDisplayNumber(item.multiplier)}`;
       });
       const overflow = svgElement("g", {
         class: `${kind}-overflow`,
@@ -1237,6 +1512,10 @@ export class BattlefieldRenderer {
         "data-slot": placement.globalSlot,
         "data-hidden-count": placement.hiddenCount,
       });
+      registerTooltipOwner(
+        overflow,
+        explainOverflow(placement.hiddenStatuses, kind, placement.globalSlot),
+      );
       overflow.append(
         svgElement("rect", {
           class: `${kind}-cell__box`,
@@ -1272,7 +1551,6 @@ export class BattlefieldRenderer {
       role: "img",
       "data-slot": slot,
     });
-    const title = svgElement("title");
     const body = svgElement("circle", {
       class: "agent-body",
       "data-zone": "body",
@@ -1315,7 +1593,6 @@ export class BattlefieldRenderer {
     const idTagLabel = svgElement("text", { class: "agent-id-tag-label" });
     idTag.append(idTagBox, idTagLabel);
     root.append(
-      title,
       body,
       teamRing,
       teamMarker,
@@ -1342,7 +1619,6 @@ export class BattlefieldRenderer {
     selectionRoot.append(controlledHalo, selectedReticle);
     return {
       root,
-      title,
       body,
       teamRing,
       teamMarker,
@@ -1392,7 +1668,7 @@ export class BattlefieldRenderer {
         `id_${agent.global_slot}`,
         classToken.label,
         teamToken.label,
-        `health ${formatNumber(agent.current_health)} of ${formatNumber(agent.max_health)}`,
+        `health ${formatDisplayNumber(agent.current_health)} of ${formatDisplayNumber(agent.max_health)}`,
         agent.alive ? "alive" : "dead",
         controlled ? "controlled actor" : null,
         selected ? "selected target" : null,
@@ -1400,17 +1676,6 @@ export class BattlefieldRenderer {
         .filter((part) => part !== null)
         .join(", "),
     );
-    nodes.title.textContent =
-      `id_${agent.global_slot} · ${classToken.label} · ${teamToken.label} · ` +
-      `HP ${formatNumber(agent.current_health)} / ${formatNumber(agent.max_health)} · ` +
-      [
-        agent.alive ? "alive" : "dead",
-        controlled ? "controlled actor" : null,
-        selected ? "selected target" : null,
-      ]
-        .filter((part) => part !== null)
-        .join(" · ");
-
     setAttributes(nodes.body, {
       cx: center.x,
       cy: center.y,
@@ -1461,7 +1726,7 @@ export class BattlefieldRenderer {
     });
     setAttributes(nodes.classLetter, {
       x: center.x,
-      y: center.y + Math.min(radius * 0.5, 11),
+      y: center.y + Math.min(radius * 0.5, 11) + 2,
     });
     nodes.classLetter.textContent = classToken.fallback;
 

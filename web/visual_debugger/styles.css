@@ -32,7 +32,7 @@
   --team-b: #f05a67;
   --class-mage: #22d3ee;
   --class-warrior: #d18b47;
-  --class-hunter: #4ade80;
+  --class-hunter: #84cc16;
   --class-rogue: #facc15;
   --class-priest: #f472b6;
   --accent: #22d3ee;
@@ -482,6 +482,39 @@ select {
   pointer-events: none;
 }
 
+#visual-tooltip.visual-tooltip {
+  position: fixed;
+  z-index: 1000;
+  width: max-content;
+  max-width: min(20rem, calc(100vw - 1rem));
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--border-bright);
+  border-radius: 0.5rem;
+  color: var(--text);
+  background: rgb(8 13 24 / 98%);
+  box-shadow: 0 10px 28px rgb(0 0 0 / 42%);
+  font-size: 0.78rem;
+  line-height: 1.35;
+  pointer-events: none;
+}
+
+#visual-tooltip.visual-tooltip[hidden] {
+  display: none;
+}
+
+.visual-tooltip__title {
+  display: block;
+  color: var(--text);
+  font-weight: 800;
+}
+
+.visual-tooltip__details {
+  display: block;
+  margin-top: 0.2rem;
+  color: var(--text-muted);
+  white-space: pre-line;
+}
+
 .map-boundary {
   fill: var(--battlefield);
   stroke: var(--border-bright);
@@ -499,6 +532,7 @@ select {
 .aura-field {
   fill: rgb(34 211 238 / 5%);
   stroke: none;
+  pointer-events: fill;
 }
 
 .aura-field[data-token*="warrior"] {
@@ -511,6 +545,15 @@ select {
   stroke-linecap: round;
   vector-effect: non-scaling-stroke;
   pointer-events: none;
+}
+
+.range-ring-hit,
+.pending-route-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 10;
+  vector-effect: non-scaling-stroke;
+  pointer-events: stroke;
 }
 
 .range-ring[data-kind="observation"] {
@@ -660,6 +703,20 @@ select {
   stroke-width: 2.5;
 }
 
+.combat-route__hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 10;
+  vector-effect: non-scaling-stroke;
+  pointer-events: stroke;
+}
+
+.combat-impact__hit {
+  fill: transparent;
+  stroke: none;
+  pointer-events: fill;
+}
+
 .combat-route-effect[data-token-id="basic_heal"] .combat-route__path {
   stroke-width: 3;
   stroke-dasharray: 2 5;
@@ -716,6 +773,26 @@ select {
   opacity: 0.28;
 }
 
+.combat-impact__semantic {
+  fill: none;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.combat-impact__semantic--damage {
+  stroke: var(--danger);
+}
+
+.combat-impact__semantic--healing {
+  stroke: var(--success);
+}
+
+.combat-impact__semantic--neutral {
+  stroke: var(--text-muted);
+}
+
 .combat-local__icon,
 .combat-impact__icon,
 .combat-lifecycle__status-icon,
@@ -742,6 +819,15 @@ select {
 
 .combat-holy__pulse--outer {
   stroke-dasharray: 3 4;
+}
+
+.combat-ultimate__flare {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
 }
 
 .combat-trap__lattice,
@@ -1089,8 +1175,18 @@ select {
 
 .legality-dock,
 .status-dock,
+.cooldown-dock,
 .modifier-dock {
   pointer-events: none;
+}
+
+.legality-pill,
+.status-cell,
+.status-overflow,
+.cooldown-cell,
+.modifier-cell,
+.modifier-overflow {
+  pointer-events: all;
 }
 
 .dock-leader {
@@ -1102,6 +1198,7 @@ select {
 
 .legality-pill__box,
 .status-cell__box,
+.cooldown-cell__box,
 .modifier-cell__box {
   fill: rgb(8 13 24 / 94%);
   stroke: currentColor;
@@ -1136,6 +1233,7 @@ select {
 
 .legality-pill__label,
 .status-cell__value,
+.cooldown-cell__value,
 .modifier-cell__value,
 .status-overflow__label,
 .modifier-overflow__label {
@@ -1153,6 +1251,10 @@ select {
 .status-cell,
 .status-overflow {
   color: var(--text-muted);
+}
+
+.cooldown-cell {
+  color: var(--ultimate);
 }
 
 .status-cell[data-source-class="mage"] {
@@ -1175,9 +1277,13 @@ select {
   color: var(--class-priest);
 }
 
-.modifier-cell,
-.modifier-overflow {
+.modifier-cell {
   color: var(--accent);
+}
+
+.status-overflow,
+.modifier-overflow {
+  color: var(--text-muted);
 }
 
 .modifier-cell[data-token="warrior-mitigation"] {
@@ -1197,12 +1303,47 @@ select {
 }
 
 .status-cell__icon,
+.cooldown-cell__icon,
 .modifier-cell__icon {
   color: currentColor;
   pointer-events: none;
 }
 
+.cooldown-cell[data-class="mage"] .cooldown-cell__icon {
+  color: var(--class-mage);
+}
+
+.cooldown-cell[data-class="warrior"] .cooldown-cell__icon {
+  color: var(--class-warrior);
+}
+
+.cooldown-cell[data-class="hunter"] .cooldown-cell__icon {
+  color: var(--class-hunter);
+}
+
+.cooldown-cell[data-class="rogue"] .cooldown-cell__icon {
+  color: var(--class-rogue);
+}
+
+.cooldown-cell[data-class="priest"] .cooldown-cell__icon {
+  color: var(--class-priest);
+}
+
+.status-cell__icon-compartment,
+.status-cell__value-compartment,
+.cooldown-cell__icon-compartment,
+.cooldown-cell__value-compartment {
+  fill: none;
+  stroke: none;
+  pointer-events: none;
+}
+
 .status-cell__value {
+  font-size: 10px;
+  text-anchor: end;
+}
+
+.cooldown-cell__value {
   font-size: 10px;
   text-anchor: end;
 }
@@ -1214,8 +1355,23 @@ select {
 }
 
 .status-cell[data-icon-suppressed="true"] .status-cell__value,
+.cooldown-cell[data-icon-suppressed="true"] .cooldown-cell__value,
 .modifier-cell[data-icon-suppressed="true"] .modifier-cell__value {
   text-anchor: middle;
+}
+
+.status-cell[data-numeric-fallback="true"],
+.cooldown-cell[data-numeric-fallback="true"],
+.modifier-cell[data-numeric-fallback="true"] {
+  color: var(--text-muted);
+}
+
+.status-cell[data-numeric-fallback="true"] .status-cell__value,
+.cooldown-cell[data-numeric-fallback="true"] .cooldown-cell__value,
+.modifier-cell[data-numeric-fallback="true"] .modifier-cell__value,
+.status-overflow__label,
+.modifier-overflow__label {
+  fill: currentColor;
 }
 
 .status-overflow__label,

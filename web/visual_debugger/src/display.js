@@ -25,7 +25,10 @@ export function formatDisplayNumber(value, options = {}) {
   }
 
   const normalized = Object.is(value, -0) ? 0 : value;
-  const [integer, fraction = ""] = normalized.toFixed(maximumFractionDigits).split(".");
+  const fixed = normalized.toFixed(maximumFractionDigits);
+  const unsignedFixed =
+    Number(fixed) === 0 ? (0).toFixed(maximumFractionDigits) : fixed;
+  const [integer, fraction = ""] = unsignedFixed.split(".");
   let retainedFraction = fraction;
   while (
     retainedFraction.length > minimumFractionDigits &&

@@ -149,6 +149,8 @@ def test_index_and_allowlisted_assets_use_security_headers(
         ("/", "text/html"),
         ("/styles.css", "text/css"),
         ("/src/main.js", "text/javascript"),
+        ("/src/explanations.js", "text/javascript"),
+        ("/src/tooltip.js", "text/javascript"),
         (
             "/assets/fonts/AtkinsonHyperlegible-Regular.woff2",
             "font/woff2",
@@ -602,9 +604,18 @@ def test_unexpected_service_failure_returns_generic_internal_error(
     "relative_path",
     (
         Path("src") / "main.js",
+        Path("src") / "display.js",
+        Path("src") / "explanations.js",
+        Path("src") / "tooltip.js",
         Path("assets") / "fonts" / "AtkinsonHyperlegible-Regular.woff2",
     ),
-    ids=("module", "font"),
+    ids=(
+        "main-module",
+        "display-module",
+        "explanations-module",
+        "tooltip-module",
+        "font",
+    ),
 )
 def test_missing_required_runtime_asset_fails_before_browser_open(
     tmp_path: Path,

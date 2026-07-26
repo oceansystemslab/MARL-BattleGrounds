@@ -48,6 +48,7 @@ from marl_battlegrounds.rendering.vocabulary import (
 )
 
 type RendererFixtureName = Literal[
+    "visual_vocabulary",
     "crowded_teamfight",
     "route_collision",
     "mixed_net_zero",
@@ -220,6 +221,7 @@ def _agents(
     status_tokens: Mapping[int, tuple[StatusTokenId, ...]] | None = None,
     health: Mapping[int, float] | None = None,
     modifiers: Mapping[int, tuple[ModifierSceneV1, ...]] | None = None,
+    cooldowns: Mapping[int, int] | None = None,
     class_ids: tuple[int, ...] = _CLASS_IDS,
     included_slots: tuple[int, ...] = tuple(range(10)),
 ) -> tuple[AgentSceneV1, ...]:
@@ -230,6 +232,7 @@ def _agents(
     status_tokens = {} if status_tokens is None else status_tokens
     health = {} if health is None else health
     modifiers = {} if modifiers is None else modifiers
+    cooldowns = {} if cooldowns is None else cooldowns
     return tuple(
         AgentSceneV1(
             global_slot=slot,
@@ -241,7 +244,7 @@ def _agents(
             alive=True,
             current_health=health.get(slot, 100.0),
             max_health=100.0,
-            ultimate_cooldown=0,
+            ultimate_cooldown=cooldowns.get(slot, 0),
             effective_speed=1.0,
             statuses=_statuses(status_tokens.get(slot, ())),
             modifiers=modifiers.get(slot, ()),
@@ -697,6 +700,123 @@ _MIXED_BATCH = _batch(
     ),
 )
 
+_VOCABULARY_POSITIONS = (
+    (2.0, 3.0),
+    (5.0, 3.0),
+    (8.0, 3.0),
+    (11.0, 3.0),
+    (14.0, 3.0),
+    (2.0, 9.0),
+    (5.0, 9.0),
+    (8.0, 9.0),
+    (11.0, 9.0),
+    (14.0, 9.0),
+)
+_VOCABULARY_AGENTS = _agents(
+    _VOCABULARY_POSITIONS,
+    health={5: 87.654, 9: 78.5},
+    cooldowns={0: 1, 1: 2, 2: 3, 3: 4, 4: 5},
+)
+_VOCABULARY_AGENT_MAP = {
+    agent.global_slot: agent for agent in _VOCABULARY_AGENTS
+}
+_VOCABULARY_SCENE = BattlefieldSceneV1(
+    schema_version=SCENE_SCHEMA_VERSION,
+    audience="researcher",
+    audience_badge="PRIVILEGED RESEARCHER VIEW · SYNTHETIC VISUAL VOCABULARY",
+    map=MapSceneV1(width=16.0, height=12.0),
+    agents=_VOCABULARY_AGENTS,
+    ranges=(
+        RangeSceneV1(
+            global_slot=0,
+            kind="observation",
+            center=_VOCABULARY_POSITIONS[0],
+            radius=2.4,
+        ),
+        RangeSceneV1(
+            global_slot=0,
+            kind="basic",
+            center=_VOCABULARY_POSITIONS[0],
+            radius=1.8,
+        ),
+        RangeSceneV1(
+            global_slot=0,
+            kind="ultimate",
+            center=_VOCABULARY_POSITIONS[0],
+            radius=1.2,
+        ),
+    ),
+    selection=SelectionSceneV1(
+        controlled_global_slot=0,
+        selected_global_slot=5,
+    ),
+)
+_VOCABULARY_BASIC_TOKENS: tuple[ActivationTokenId, ...] = (
+    "basic_damage",
+    "basic_damage",
+    "basic_damage",
+    "basic_damage",
+    "basic_heal",
+)
+_VOCABULARY_ULTIMATE_TOKENS: tuple[ActivationTokenId, ...] = (
+    "mage_burst",
+    "warrior_charge",
+    "hunter_trap",
+    "rogue_poison",
+    "holy_word",
+)
+_VOCABULARY_ACTIVATIONS = tuple(
+    _activation(
+        fixture_name="visual_vocabulary",
+        ordinal=ordinal,
+        token_id=token_id,
+        source_global_slot=source_slot,
+        target_global_slot=target_slot,
+        agents=_VOCABULARY_AGENT_MAP,
+    )
+    for ordinal, (token_id, source_slot, target_slot) in enumerate(
+        (
+            *(
+                (token_id, slot, slot + 5)
+                for slot, token_id in enumerate(_VOCABULARY_BASIC_TOKENS)
+            ),
+            *(
+                (
+                    token_id,
+                    slot,
+                    None if token_id == "mage_burst" else slot + 5,
+                )
+                for slot, token_id in enumerate(_VOCABULARY_ULTIMATE_TOKENS)
+            ),
+        )
+    )
+)
+_VOCABULARY_BATCH = _batch(
+    (
+        *_VOCABULARY_ACTIVATIONS,
+        NetHealthEventV1(
+            event_id="synthetic:visual_vocabulary:net-damage",
+            transition_id=1,
+            recipient_global_slot=5,
+            recipient_anchor=_VOCABULARY_POSITIONS[5],
+            health_before=99.999,
+            health_after=87.654,
+            net_delta=-12.345,
+            outcome="damage",
+        ),
+        NetHealthEventV1(
+            event_id="synthetic:visual_vocabulary:net-healing",
+            transition_id=1,
+            recipient_global_slot=9,
+            recipient_anchor=_VOCABULARY_POSITIONS[9],
+            health_before=70.0,
+            health_after=78.5,
+            net_delta=8.5,
+            outcome="healing",
+        ),
+    )
+)
+
 
 _POV_CLASS_IDS = (
     MAGE_CLASS_ID,
@@ -959,6 +1079,16 @@ _VIEWPORT_BATCH = _batch(
 
 RENDERER_FIXTURES: Mapping[str, RendererFixtureV1] = MappingProxyType(
     {
+        "visual_vocabulary": RendererFixtureV1(
+            name="visual_vocabulary",
+            description=(
+                "SYNTHETIC: contact sheet for all five class identities, "
+                "selection states, ranges, cooldowns, Basic and Ultimate "
+                "activations, and recipient damage/healing outcomes."
+            ),
+            scene=_VOCABULARY_SCENE,
+            event_batch=_VOCABULARY_BATCH,
+        ),
         "crowded_teamfight": RendererFixtureV1(
             name="crowded_teamfight",
             description=(

@@ -38,6 +38,16 @@ test("test-only fixture interception installs an explicitly synthetic scene", as
   const layoutStressFrame = structuredClone(syntheticFrame);
   layoutStressFrame.scene.agents[4].modifiers[0].multiplier = 123456.789;
   layoutStressFrame.scene.agents[0].statuses[0].duration = 123456789;
+  layoutStressFrame.scene.agents[7].statuses.slice(0, 5).forEach(
+    /**
+     * @param {Record<string, any>} status
+     * @param {number} index
+     */
+    (status, index) => {
+      status.duration = index + 1;
+    },
+  );
+  layoutStressFrame.scene.agents[2].ultimate_cooldown = 30;
   let commandRequests = 0;
   await page.route("**/api/frame", async (route) => {
     await route.fulfill({
@@ -63,6 +73,27 @@ test("test-only fixture interception installs an explicitly synthetic scene", as
   await expect(
     page.locator('#battlefield .agent[data-team="team-b"] .agent-team-ring'),
   ).toHaveCount(5);
+  const fallbackLetterOffsets = await page
+    .locator("#battlefield .agent")
+    .evaluateAll((agents) =>
+      agents.map((agent) => {
+        const body = agent.querySelector(".agent-body");
+        const letter = agent.querySelector(".agent-class-letter");
+        if (
+          !(body instanceof SVGCircleElement) ||
+          !(letter instanceof SVGTextElement)
+        ) {
+          throw new Error("Agent body and fallback letter must be measurable.");
+        }
+        return (
+          Number(letter.getAttribute("y")) -
+          (body.cy.baseVal.value + Math.min(body.r.baseVal.value * 0.5, 11))
+        );
+      }),
+    );
+  expect(fallbackLetterOffsets.every((offset) => Math.abs(offset - 2) <= 1e-3)).toBe(
+    true,
+  );
   await expect(page.locator("#battlefield .controlled-halo:not([hidden])")).toHaveCount(
     1,
   );
@@ -76,6 +107,23 @@ test("test-only fixture interception installs an explicitly synthetic scene", as
     await page.locator("#battlefield .status-dock").count(),
   ).toBeGreaterThanOrEqual(2);
   expect(await page.locator("#battlefield .modifier-dock").count()).toBeGreaterThan(0);
+  await expect(page.locator("#battlefield .cooldown-dock")).toHaveCount(1);
+  const cooldown = page.locator(
+    '#battlefield .cooldown-dock[data-slot="2"] .cooldown-cell',
+  );
+  await expect(cooldown).toHaveAttribute("data-class", "hunter");
+  await expect(cooldown).toHaveAttribute("data-token-id", "hunter_trap");
+  await expect(cooldown).toHaveAttribute("data-ticks", "30");
+  await expect(cooldown).toHaveAttribute("data-numeric-layout", "compartments");
+  await expect(cooldown).toHaveAttribute(
+    "aria-label",
+    /Hunter Trap.*cooldown, 30 ticks remaining, id_2/i,
+  );
+  await expect(cooldown.locator(".cooldown-cell__value")).toHaveText("30");
+  await expect(cooldown.locator(".cooldown-cell__icon:not([hidden])")).toHaveCount(1);
+  await expect(
+    page.locator('#battlefield [data-layer="durable-status-modifier"]'),
+  ).toHaveAttribute("data-suppressed-cooldown-slots", "");
   const legalityPillCount = await page.locator("#battlefield .legality-pill").count();
   expect([0, 2]).toContain(legalityPillCount);
   if (legalityPillCount === 0) {
@@ -212,12 +260,13 @@ test("test-only fixture interception installs an explicitly synthetic scene", as
     });
     const docks = [
       ...battlefield.querySelectorAll(".status-dock"),
+      ...battlefield.querySelectorAll(".cooldown-dock"),
       ...battlefield.querySelectorAll(".modifier-dock"),
       ...battlefield.querySelectorAll(".legality-dock"),
     ].map((dock) => ({
       bounds: boundsFor(
         dock,
-        ".status-cell__box, .modifier-cell__box, .legality-pill__box",
+        ".status-cell__box, .cooldown-cell__box, .modifier-cell__box, .legality-pill__box",
       ),
       collisionFree: dock.getAttribute("data-collision-free"),
       kind: dock.getAttribute("class"),
@@ -273,7 +322,7 @@ test("test-only fixture interception installs an explicitly synthetic scene", as
   );
   await expect(page.locator('#battlefield .agent[data-slot="0"]')).toHaveAttribute(
     "aria-label",
-    /id_0, Mage, Team A, health 82\.0 of 100\.0, alive, controlled actor/,
+    /id_0, Mage, Team A, health 82 of 100, alive, controlled actor/,
   );
   await expect(page.locator('#battlefield .agent[data-slot="7"]')).toHaveAttribute(
     "aria-label",
@@ -302,6 +351,33 @@ test("test-only fixture interception installs an explicitly synthetic scene", as
   await expect(
     page.locator('#battlefield .agent[data-team="team-a"] .agent-team-marker:visible'),
   ).toHaveCount(0);
+  const hunterSurfaceColors = await page.evaluate(() => {
+    const agent = document.querySelector('#battlefield .agent[data-class="hunter"]');
+    const status = document.querySelector(
+      '#battlefield .status-cell[data-source-class="hunter"]',
+    );
+    const cooldownIcon = document.querySelector(
+      '#battlefield .cooldown-cell[data-class="hunter"] .cooldown-cell__icon',
+    );
+    if (!agent || !status || !cooldownIcon) {
+      throw new Error("Hunter-owned browser surfaces are incomplete.");
+    }
+    return {
+      agent: getComputedStyle(agent).color,
+      cooldownIcon: getComputedStyle(cooldownIcon).color,
+      customProperty: getComputedStyle(document.documentElement)
+        .getPropertyValue("--class-hunter")
+        .trim()
+        .toUpperCase(),
+      status: getComputedStyle(status).color,
+    };
+  });
+  expect(hunterSurfaceColors).toEqual({
+    agent: "rgb(132, 204, 22)",
+    cooldownIcon: "rgb(132, 204, 22)",
+    customProperty: "#84CC16",
+    status: "rgb(132, 204, 22)",
+  });
   expect(
     await page
       .locator("#battlefield .aura-field")
@@ -340,10 +416,16 @@ test("test-only fixture interception installs an explicitly synthetic scene", as
     });
   });
   const numericDockInternalOverlaps = await page
-    .locator("#battlefield .status-cell, #battlefield .modifier-cell")
+    .locator(
+      "#battlefield .status-cell, #battlefield .cooldown-cell, #battlefield .modifier-cell",
+    )
     .evaluateAll((cells) =>
       cells.flatMap((cell) => {
-        const kind = cell.classList.contains("status-cell") ? "status" : "modifier";
+        const kind = cell.classList.contains("status-cell")
+          ? "status"
+          : cell.classList.contains("cooldown-cell")
+            ? "cooldown"
+            : "modifier";
         const box = cell.querySelector(`.${kind}-cell__box`);
         const icon = cell.querySelector(`.${kind}-cell__icon`);
         const value = cell.querySelector(`.${kind}-cell__value`);
@@ -352,7 +434,7 @@ test("test-only fixture interception installs an explicitly synthetic scene", as
           !(icon instanceof SVGGraphicsElement) ||
           !(value instanceof SVGGraphicsElement)
         ) {
-          return ["missing measurable modifier cue"];
+          return [`missing measurable ${kind} cue`];
         }
         const boxBounds = box.getBoundingClientRect();
         const iconBounds = icon.getBoundingClientRect();
@@ -371,6 +453,85 @@ test("test-only fixture interception installs an explicitly synthetic scene", as
       }),
     );
   expect(numericDockInternalOverlaps).toEqual([]);
+  const supportedStatusCompartments = await page
+    .locator(
+      '#battlefield .status-cell[data-slot="7"][data-index="0"], ' +
+        '#battlefield .status-cell[data-slot="7"][data-index="1"], ' +
+        '#battlefield .status-cell[data-slot="7"][data-index="2"], ' +
+        '#battlefield .status-cell[data-slot="7"][data-index="3"], ' +
+        '#battlefield .status-cell[data-slot="7"][data-index="4"]',
+    )
+    .evaluateAll((cells) =>
+      cells.map((cell) => {
+        const icon = cell.querySelector(".status-cell__icon");
+        const value = cell.querySelector(".status-cell__value");
+        const iconCompartment = cell.querySelector(".status-cell__icon-compartment");
+        const valueCompartment = cell.querySelector(".status-cell__value-compartment");
+        if (
+          !(icon instanceof SVGGraphicsElement) ||
+          !(value instanceof SVGGraphicsElement) ||
+          !(iconCompartment instanceof SVGGraphicsElement) ||
+          !(valueCompartment instanceof SVGGraphicsElement)
+        ) {
+          throw new Error("Supported status compartments are incomplete.");
+        }
+        const iconBounds = icon.getBoundingClientRect();
+        const valueBounds = value.getBoundingClientRect();
+        const iconReserved = iconCompartment.getBoundingClientRect();
+        const valueReserved = valueCompartment.getBoundingClientRect();
+        return {
+          fallback: cell.hasAttribute("data-numeric-fallback"),
+          glyphVisible: !icon.hasAttribute("hidden") && iconBounds.width > 0,
+          iconInside:
+            iconBounds.left >= iconReserved.left - 0.5 &&
+            iconBounds.right <= iconReserved.right + 0.5,
+          layout: cell.getAttribute("data-numeric-layout"),
+          separated: iconBounds.right + 2 <= valueBounds.left,
+          value: value.textContent,
+          valueInside:
+            valueBounds.left >= valueReserved.left - 0.5 &&
+            valueBounds.right <= valueReserved.right + 0.5,
+        };
+      }),
+    );
+  expect(supportedStatusCompartments).toEqual(
+    ["1", "2", "3", "4", "5"].map((value) => ({
+      fallback: false,
+      glyphVisible: true,
+      iconInside: true,
+      layout: "compartments",
+      separated: true,
+      value,
+      valueInside: true,
+    })),
+  );
+  const overflowPalette = await page
+    .locator("#battlefield .status-overflow, #battlefield .modifier-overflow")
+    .evaluateAll((overflows) =>
+      overflows.map((overflow) => {
+        const box = overflow.querySelector(".status-cell__box, .modifier-cell__box");
+        const label = overflow.querySelector(
+          ".status-overflow__label, .modifier-overflow__label",
+        );
+        if (!box || !label) {
+          throw new Error("Overflow cue is missing its monochrome surfaces.");
+        }
+        return {
+          box: getComputedStyle(box).stroke,
+          color: getComputedStyle(overflow).color,
+          label: getComputedStyle(label).fill,
+        };
+      }),
+    );
+  expect(overflowPalette.length).toBeGreaterThan(0);
+  expect(
+    overflowPalette.every(
+      ({ box, color, label }) =>
+        box === "rgb(154, 167, 184)" &&
+        color === "rgb(154, 167, 184)" &&
+        label === "rgb(154, 167, 184)",
+    ),
+  ).toBe(true);
   await expect(
     page.locator(
       '#battlefield .modifier-cell[data-slot="4"][data-index="0"][data-icon-suppressed="true"]',
@@ -383,13 +544,21 @@ test("test-only fixture interception installs an explicitly synthetic scene", as
     "×123456.79",
   );
   await expect(stressedModifier).toHaveAttribute("aria-label", /multiplier 123456\.79/);
+  await expect(stressedModifier).toHaveAttribute("data-numeric-fallback", "true");
+  expect(await stressedModifier.evaluate((cell) => getComputedStyle(cell).color)).toBe(
+    "rgb(154, 167, 184)",
+  );
   await expect(stressedModifier.locator("title")).toHaveText(/multiplier 123456\.79/);
   const stressedStatus = page.locator(
     '#battlefield .status-cell[data-slot="0"][data-index="0"]',
   );
   await expect(stressedStatus).toHaveAttribute("data-icon-suppressed", "true");
+  await expect(stressedStatus).toHaveAttribute("data-numeric-fallback", "true");
   await expect(stressedStatus.locator(".status-cell__value")).toHaveText("123456789");
   await expect(stressedStatus).toHaveAttribute("aria-label", /duration 123456789/);
+  expect(await stressedStatus.evaluate((cell) => getComputedStyle(cell).color)).toBe(
+    "rgb(154, 167, 184)",
+  );
   const visibleIdentityTags = await page
     .locator("#battlefield .agent-id-tag")
     .evaluateAll(
@@ -669,6 +838,16 @@ test("presets omit irrelevant DOM while retaining canonical facts and audience",
     preset: "analysis",
     scene: {
       ...syntheticFrame.scene,
+      agents: syntheticFrame.scene.agents.map(
+        /**
+         * @param {Record<string, any>} agent
+         * @param {number} index
+         */
+        (agent, index) => ({
+          ...agent,
+          ultimate_cooldown: index === 2 ? 30 : 0,
+        }),
+      ),
       selected_legality: {
         ...syntheticFrame.scene.selected_legality,
         armed_lane: null,
@@ -714,6 +893,7 @@ test("presets omit irrelevant DOM while retaining canonical facts and audience",
   );
   await expect(page.locator("#battlefield .agent")).toHaveCount(10);
   expect(await page.locator("#battlefield .status-cell").count()).toBeGreaterThan(0);
+  await expect(page.locator("#battlefield .cooldown-cell")).toHaveCount(1);
   expect(await page.locator("#battlefield .aura-field").count()).toBeGreaterThan(0);
   expect(await page.locator("#battlefield .range-ring").count()).toBeGreaterThan(0);
   expect(await page.locator("#battlefield .modifier-cell").count()).toBeGreaterThan(0);
@@ -735,6 +915,7 @@ test("presets omit irrelevant DOM while retaining canonical facts and audience",
   await expect(page.locator("html")).toHaveAttribute("data-preset", "debug");
   await expect(page.locator("#battlefield .debug-visibility-cue")).toHaveCount(10);
   await expect(page.locator("#battlefield .debug-protected-zone")).toHaveCount(10);
+  await expect(page.locator("#battlefield .cooldown-cell")).toHaveCount(1);
   for (const aura of await page.locator("#battlefield .aura-field").all()) {
     await expect(aura).toHaveAttribute("data-source-slot", /\d+/);
     await expect(aura).not.toHaveAttribute("data-multiplier", /.+/);
@@ -751,6 +932,7 @@ test("presets omit irrelevant DOM while retaining canonical facts and audience",
   );
   await expect(page.locator("#battlefield .agent")).toHaveCount(10);
   expect(await page.locator("#battlefield .status-cell").count()).toBeGreaterThan(0);
+  await expect(page.locator("#battlefield .cooldown-cell")).toHaveCount(1);
   await expect(page.locator("#battlefield .aura-field")).toHaveCount(0);
   await expect(page.locator("#battlefield .range-ring")).toHaveCount(0);
   await expect(page.locator("#battlefield .modifier-cell")).toHaveCount(0);

@@ -1,5 +1,8 @@
 import { layoutRouteSet } from "./routes.js";
-import { resolveVisualToken } from "./vocabulary.js";
+import {
+  activationImpactSemantic,
+  resolveVisualToken,
+} from "./vocabulary.js";
 
 export const CHOREOGRAPHY_PHASES = Object.freeze({
   activationStart: 0,
@@ -934,6 +937,7 @@ export function buildChoreographyPlan(frame, surface = null) {
           kind: "activation",
           tokenId: token.tokenId,
           token,
+          impactSemantic: activationImpactSemantic(token.tokenId),
           lane,
           sourceSlot,
           targetSlot: disclosure === "public" ? targetSlot : null,

@@ -119,7 +119,7 @@ const STATUS_TOKENS = Object.freeze({
     label: "Charge stun",
     shortLabel: "C-STN",
     accessibleName: "Warrior Charge stun",
-    glyphKey: "status-charge-stun",
+    glyphKey: "status-stun",
     cssKey: "stun-warrior-charge",
     fallback: "CS",
   }),
@@ -128,7 +128,7 @@ const STATUS_TOKENS = Object.freeze({
     label: "Trap",
     shortLabel: "TRAP",
     accessibleName: "Hunter Trap stun",
-    glyphKey: "status-trap",
+    glyphKey: "status-stun",
     cssKey: "stun-hunter-trap",
     fallback: "T",
   }),
@@ -137,7 +137,7 @@ const STATUS_TOKENS = Object.freeze({
     label: "Poison stun",
     shortLabel: "P-STN",
     accessibleName: "Rogue Poison stun",
-    glyphKey: "status-poison-stun",
+    glyphKey: "status-stun",
     cssKey: "stun-rogue-poison",
     fallback: "PS",
   }),
@@ -447,6 +447,26 @@ const CLASS_ID_TO_TOKEN = Object.freeze({
 });
 
 /** @type {Readonly<Record<number, string>>} */
+const CLASS_ID_TO_ULTIMATE_TOKEN = Object.freeze({
+  1: "mage_burst",
+  2: "warrior_charge",
+  3: "hunter_trap",
+  4: "rogue_poison",
+  5: "holy_word",
+});
+
+/** @type {Readonly<Record<string, "damage" | "healing" | "neutral" | "local">>} */
+const ACTIVATION_IMPACT_SEMANTICS = Object.freeze({
+  basic_damage: "damage",
+  basic_heal: "healing",
+  holy_word: "healing",
+  mage_burst: "local",
+  warrior_charge: "damage",
+  hunter_trap: "neutral",
+  rogue_poison: "damage",
+});
+
+/** @type {Readonly<Record<number, string>>} */
 const TEAM_ID_TO_TOKEN = Object.freeze({
   1: "team_a",
   2: "team_b",
@@ -567,6 +587,41 @@ export function classTokenFromId(classId, payload) {
     tokenId ?? (numericId === null ? "unknown" : `class_id_${numericId}`),
     payload,
   );
+}
+
+/**
+ * Resolve the class-specific Ultimate display token used by cooldown cues.
+ *
+ * @param {unknown} classId
+ * @param {unknown} [payload]
+ * @returns {Readonly<VisualToken>}
+ */
+export function ultimateTokenFromClassId(classId, payload) {
+  const numericId =
+    typeof classId === "number" && Number.isInteger(classId) ? classId : null;
+  const tokenId =
+    numericId === null ? undefined : CLASS_ID_TO_ULTIMATE_TOKEN[numericId];
+  return resolveVisualToken(
+    "activation",
+    tokenId ??
+      (numericId === null ? "unknown" : `ultimate_for_class_id_${numericId}`),
+    payload,
+  );
+}
+
+/**
+ * Resolve the presentation-only recipient impact grammar for an activation.
+ *
+ * This registry does not calculate combat outcomes or health attribution. It
+ * only assigns a stable, non-numeric visual mark to an already-authoritative
+ * activation token. Unknown future tokens fail closed to a neutral impact.
+ *
+ * @param {unknown} tokenId
+ * @returns {"damage" | "healing" | "neutral" | "local"}
+ */
+export function activationImpactSemantic(tokenId) {
+  const normalized = normalizedTokenId(tokenId);
+  return ACTIVATION_IMPACT_SEMANTICS[normalized] ?? "neutral";
 }
 
 /**

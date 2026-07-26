@@ -60,12 +60,15 @@ _REQUIRED_RUNTIME_ASSET_PATHS = (
     "src/choreography-plan.js",
     "src/choreography.js",
     "src/controls.js",
+    "src/display.js",
+    "src/explanations.js",
     "src/icons.js",
     "src/layout.js",
     "src/main.js",
     "src/panels.js",
     "src/routes.js",
     "src/scene.js",
+    "src/tooltip.js",
     "src/vocabulary.js",
     "assets/fonts/AtkinsonHyperlegible-Regular.woff2",
     "assets/fonts/AtkinsonHyperlegible-Bold.woff2",
@@ -492,7 +495,7 @@ def serve_browser_debugger(
     server = create_server(service, asset_root=asset_root, port=port)
     with server:
         url = f"{server.expected_origin}/#token={server.capability_token}"
-        print(f"Visual debugger: {url}")
+        print(f"Visual Debugger and Analyzer: {url}")
         if open_browser:
             try:
                 opened = webbrowser.open(url)
@@ -510,5 +513,5 @@ def serve_browser_debugger(
         try:
             server.serve_forever(poll_interval=0.1)
         except KeyboardInterrupt:
-            print("Visual debugger stopped.")
+            print("Visual Debugger and Analyzer stopped.")
     return 0
