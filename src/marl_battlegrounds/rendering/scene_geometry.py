@@ -6,7 +6,6 @@ from importlib import import_module
 from math import cos, sin
 from typing import Protocol, cast
 
-from marl_battlegrounds.rendering.geometry import RenderResult
 from marl_battlegrounds.rendering.scene import (
     AcceptedActivationEventV1,
     AgentSceneV1,
@@ -35,7 +34,7 @@ _TEAM_B = "#F05A67"
 _CLASS_COLORS = {
     "mage": "#22D3EE",
     "warrior": "#D18B47",
-    "hunter": "#4ADE80",
+    "hunter": "#84CC16",
     "rogue": "#FACC15",
     "priest": "#F472B6",
 }
@@ -53,6 +52,12 @@ def _aura_color(token_id: str) -> str:
         "mage_amplification": "#22D3EE",
         "warrior_mitigation": "#D18B47",
     }.get(token_id, _MUTED)
+
+
+def _format_display_number(value: float) -> str:
+    """Format a human-visible scalar without exposing binary-float spill."""
+    formatted = f"{value:.2f}".rstrip("0").rstrip(".")
+    return "0" if formatted == "-0" else formatted
 
 
 class _ArtistLike(Protocol):
@@ -100,6 +105,14 @@ class _MatplotlibParts:
     polygon: _PatchFactory
     rectangle: _PatchFactory
     wedge: _PatchFactory
+
+
+@dataclass(frozen=True, slots=True)
+class RenderResult:
+    """Matplotlib objects created by scene-native static rendering helpers."""
+
+    figure: object
+    axes: object
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -252,9 +265,8 @@ def _draw_fields(
             aura.center,
             aura.radius,
             facecolor=color,
-            edgecolor=color,
-            linewidth=1.2,
-            linestyle="--",
+            edgecolor="none",
+            linewidth=0.0,
             alpha=0.12,
             zorder=2,
         )
@@ -266,19 +278,29 @@ def _draw_fields(
         )
     if not options.show_ranges:
         return
-    range_colors = {
-        "observation": _UNAVAILABLE,
-        "basic": _BASIC,
-        "ultimate": _ULTIMATE,
-    }
+    agents = {agent.global_slot: agent for agent in scene.agents}
     for range_record in scene.ranges:
+        owner = agents.get(range_record.global_slot)
+        owner_class_color = (
+            _MUTED
+            if owner is None
+            else _CLASS_COLORS.get(
+                class_token_from_id(owner.class_id).token_id,
+                _MUTED,
+            )
+        )
+        edgecolor, linestyle = {
+            "observation": (_TEXT, ":"),
+            "basic": (owner_class_color, "--"),
+            "ultimate": (_ULTIMATE, "-."),
+        }[range_record.kind]
         patch = parts.circle(
             range_record.center,
             range_record.radius,
             facecolor="none",
-            edgecolor=range_colors[range_record.kind],
+            edgecolor=edgecolor,
             linewidth=1.0,
-            linestyle=":",
+            linestyle=linestyle,
             alpha=0.78,
             zorder=3,
         )
@@ -445,7 +467,7 @@ def _draw_agent_body(
     class_color = _CLASS_COLORS.get(class_token.token_id, _MUTED)
     team_color, team_line_style = {
         "team_a": (_TEAM_A, "-"),
-        "team_b": (_TEAM_B, "--"),
+        "team_b": (_TEAM_B, "-"),
     }.get(team_token.token_id, (_MUTED, ":"))
     body = parts.circle(
         agent.position,
@@ -468,6 +490,34 @@ def _draw_agent_body(
         zorder=25,
     )
     axes.add_patch(_tag(team_ring, f"scene:agent:{agent.global_slot}:team"))
+    if team_token.token_id == "team_b":
+        marker = parts.polygon(
+            (
+                (
+                    agent.position[0] + agent.radius * 0.52,
+                    agent.position[1] - agent.radius * 0.28,
+                ),
+                (
+                    agent.position[0] + agent.radius * 0.82,
+                    agent.position[1],
+                ),
+                (
+                    agent.position[0] + agent.radius * 0.52,
+                    agent.position[1] + agent.radius * 0.28,
+                ),
+            ),
+            closed=False,
+            facecolor="none",
+            edgecolor=team_color,
+            linewidth=1.5,
+            zorder=30,
+        )
+        axes.add_patch(
+            _tag(
+                marker,
+                f"scene:agent:{agent.global_slot}:team-marker",
+            )
+        )
 
     health_track = parts.wedge(
         agent.position,
@@ -555,7 +605,10 @@ def _draw_agent_body(
         for index, modifier in enumerate(agent.modifiers):
             token = lookup_modifier_token(modifier.token_id)
             artist = axes.annotate(
-                f"{token.short_label} x{modifier.multiplier:g}",
+                (
+                    f"{token.short_label} "
+                    f"x{_format_display_number(modifier.multiplier)}"
+                ),
                 xy=agent.position,
                 xytext=(12 + (index % 2) * 42, -18 - (index // 2) * 13),
                 textcoords="offset points",
@@ -764,7 +817,9 @@ def _draw_events(
                 health_label = "HP unchanged"
             else:
                 sign = "+" if event.net_delta > 0 else ""
-                health_label = f"NET {sign}{event.net_delta:g}"
+                health_label = (
+                    f"NET {sign}{_format_display_number(event.net_delta)}"
+                )
             artist = axes.annotate(
                 health_label,
                 xy=anchor,
@@ -932,7 +987,7 @@ def _style_axes(
     axes.set_xlim(0.0, scene.map.width)
     axes.set_ylim(0.0, scene.map.height)
     axes.set_title(
-        "MARL-BattleGrounds · Scene snapshot",
+        "MARL-BattleGrounds · Visual Debugger and Analyzer · Static scene",
         color=_TEXT,
         fontsize=10,
     )

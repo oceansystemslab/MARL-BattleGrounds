@@ -1,5 +1,6 @@
 """Focused semantic checks for the stateless scene-native Matplotlib painter."""
 
+import re
 from collections.abc import Callable, Iterable
 from dataclasses import replace
 from importlib import import_module
@@ -17,16 +18,29 @@ from marl_battlegrounds.rendering import (
     redraw_scene_geometry,
     render_scene_geometry,
 )
-from marl_battlegrounds.rendering.scene import AcceptedActivationEventV1
+from marl_battlegrounds.rendering.scene import (
+    AcceptedActivationEventV1,
+    NetHealthEventV1,
+)
 from marl_battlegrounds.rendering.scene_geometry import (
     _aura_color,  # pyright: ignore[reportPrivateUsage]
+)
+from marl_battlegrounds.rendering.vocabulary import (
+    class_token_from_id,
+    team_token_from_id,
 )
 
 
 class _ArtistLike(Protocol):
+    def get_edgecolor(self) -> object: ...
+
+    def get_facecolor(self) -> object: ...
+
     def get_gid(self) -> str | None: ...
 
     def get_linestyle(self) -> str: ...
+
+    def get_linewidth(self) -> float: ...
 
 
 class _TextLike(_ArtistLike, Protocol):
@@ -76,6 +90,12 @@ def _texts_with_gid_prefix(
         for artist in _texts(result)
         if (artist.get_gid() or "").startswith(prefix)
     )
+
+
+def _hex_color(value: object) -> str:
+    colors = import_module("matplotlib.colors")
+    to_hex = cast(Callable[..., str], colors.to_hex)
+    return to_hex(value, keep_alpha=False).upper()
 
 
 def _render_fixture(
@@ -279,6 +299,133 @@ def test_render_options_remove_optional_debug_clutter_without_hiding_truth() -> 
             f"scene:agent:{agent.global_slot}:body" for agent in fixture.scene.agents
         }
         assert "scene:audience:researcher" in gids
+    finally:
+        _close(result)
+
+
+def test_visual_language_aligns_aura_ranges_teams_and_hunter_color() -> None:
+    _skip_if_matplotlib_unavailable()
+    fixture = get_renderer_fixture("crowded_teamfight")
+    hunter = next(
+        agent
+        for agent in fixture.scene.agents
+        if class_token_from_id(agent.class_id).token_id == "hunter"
+    )
+    scene = replace(
+        fixture.scene,
+        ranges=tuple(
+            replace(
+                range_record,
+                global_slot=hunter.global_slot,
+                center=hunter.position,
+            )
+            for range_record in fixture.scene.ranges
+        ),
+    )
+    result = render_scene_geometry(scene, event_batch=fixture.event_batch)
+    try:
+        artists = _artists(result)
+        by_gid = {
+            gid: artist
+            for artist in artists
+            if (gid := artist.get_gid()) is not None
+        }
+        hunter_body = by_gid[f"scene:agent:{hunter.global_slot}:body"]
+        assert _hex_color(hunter_body.get_facecolor()) == "#84CC16"
+
+        aura_artists = tuple(
+            artist
+            for gid, artist in by_gid.items()
+            if gid.startswith("scene:aura:")
+        )
+        assert aura_artists
+        assert all(artist.get_linewidth() == 0.0 for artist in aura_artists)
+        assert all(
+            cast(tuple[float, ...], artist.get_edgecolor())[-1] == 0.0
+            for artist in aura_artists
+        )
+
+        observation = by_gid[
+            f"scene:range:{hunter.global_slot}:observation"
+        ]
+        basic = by_gid[f"scene:range:{hunter.global_slot}:basic"]
+        ultimate = by_gid[f"scene:range:{hunter.global_slot}:ultimate"]
+        assert observation.get_linestyle() == ":"
+        assert _hex_color(observation.get_edgecolor()) == "#F4F7FB"
+        assert basic.get_linestyle() == "--"
+        assert _hex_color(basic.get_edgecolor()) == "#84CC16"
+        assert ultimate.get_linestyle() == "-."
+        assert _hex_color(ultimate.get_edgecolor()) == "#A78BFA"
+
+        known_team_rings = tuple(
+            by_gid[f"scene:agent:{agent.global_slot}:team"]
+            for agent in fixture.scene.agents
+        )
+        assert all(ring.get_linestyle() == "-" for ring in known_team_rings)
+        team_b_slots = {
+            agent.global_slot
+            for agent in fixture.scene.agents
+            if team_token_from_id(agent.team_id).token_id == "team_b"
+        }
+        assert {
+            int(gid.split(":")[2])
+            for gid in by_gid
+            if gid.endswith(":team-marker")
+        } == team_b_slots
+    finally:
+        _close(result)
+
+
+def test_human_visible_float_labels_never_exceed_two_decimals() -> None:
+    _skip_if_matplotlib_unavailable()
+    fixture = get_renderer_fixture("crowded_teamfight")
+    assert fixture.event_batch is not None
+    first_agent = fixture.scene.agents[0]
+    first_modifier = replace(
+        first_agent.modifiers[0],
+        multiplier=1.234567,
+    )
+    scene = replace(
+        fixture.scene,
+        agents=(
+            replace(
+                first_agent,
+                modifiers=(first_modifier, *first_agent.modifiers[1:]),
+            ),
+            *fixture.scene.agents[1:],
+        ),
+    )
+    events = list(fixture.event_batch.events)
+    net_index = next(
+        index for index, event in enumerate(events) if type(event) is NetHealthEventV1
+    )
+    net_event = cast(NetHealthEventV1, events[net_index])
+    events[net_index] = replace(
+        net_event,
+        health_after=net_event.health_before - 12.34567,
+        net_delta=-12.34567,
+        outcome="damage",
+    )
+    event_batch = replace(fixture.event_batch, events=tuple(events))
+
+    result = render_scene_geometry(scene, event_batch=event_batch)
+    try:
+        visible_text = {
+            artist.get_gid(): artist.get_text() for artist in _texts(result)
+        }
+        modifier_gid = (
+            f"scene:agent:{first_agent.global_slot}:modifier:"
+            f"{first_modifier.token_id}"
+        )
+        assert visible_text[modifier_gid].endswith("x1.23")
+        assert (
+            visible_text[f"event:net_health:{net_event.event_id}"]
+            == "NET -12.35"
+        )
+        assert all(
+            re.search(r"\d+\.\d{3,}", text) is None
+            for text in visible_text.values()
+        )
     finally:
         _close(result)
 

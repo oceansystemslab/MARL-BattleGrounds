@@ -72,7 +72,7 @@ _FORBIDDEN_COMBAT_IMPORT_MODULES: tuple[str, ...] = (
     "marl_battlegrounds.core.env",
     "marl_battlegrounds.core.geometry",
     "marl_battlegrounds.rendering",
-    "marl_battlegrounds.rendering.geometry",
+    "marl_battlegrounds.rendering.scene_geometry",
 )
 
 _FLOAT_CLASS_CATALOG_NAMES: tuple[str, ...] = (
