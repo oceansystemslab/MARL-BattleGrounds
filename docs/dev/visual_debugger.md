@@ -109,6 +109,10 @@ The server:
 - rejects malformed, duplicate-conflicting, and stale commands without
   automatically retrying a submission.
 
+Command IDs provide mutation idempotency: an identical duplicate is never
+applied twice and receives the current authoritative frame, rather than a replay
+of the original transport outcome.
+
 Refresh reconnects to the existing Python session. A stale tab receives the
 latest frame and a notice that another client advanced the session. Connection
 loss shows an offline state; Reconnect fetches current authority and never
@@ -143,11 +147,14 @@ inspector retain normal browser keyboard and Tab behavior.
 | `P` | Pause or resume presentation-only motion. |
 | `?` | Open in-app help. |
 
-The command deck provides pointer-accessible movement, lane, submit, scripted
-advance, actor-cycle, target-clear, range, verbosity, reset, and scenario
-controls. Each authorized roster row also provides **Target** and **Control**
-buttons. The toolbar provides Scenario, View, Preset, Reconnect, Help, Exit,
-motion pause, `0.5×`, `1×`, `2×`, Off, and Skip.
+The joint-action console presents numbered **Movement** and **Action** composer
+cards, followed by a visually dominant Submit rail. Lower-emphasis
+**Inspect** and **Session** utility rows provide scripted advance, actor
+cycling, target clearing, range and verbosity controls, reset, and scenario
+navigation without competing with turn composition. Each authorized roster row
+also provides **Target** and **Control** buttons. The toolbar provides
+Scenario, View, Preset, Reconnect, Help, Exit, motion pause, `0.5×`, `1×`,
+`2×`, Off, and Skip.
 
 Normal animation briefly gates only the next Submit or scripted-frame command
 during its explanatory phase. Skip, reduced-motion preference, or Off releases
@@ -252,6 +259,10 @@ explain a fact omitted from an agent-POV payload.
 
 ## Visual vocabulary
 
+The [visual acceptance evidence gallery](visual_debugger_visual_evidence.md)
+maps every requested visual rule to its automated proof and
+original-resolution screenshot.
+
 ### Durable identity and geometry
 
 | Fact | Presentation |
@@ -284,11 +295,33 @@ glyph but retain an accent and exact accessible name. Candidate docks use
 deterministic north/east/west/south anchors, bounded leader ticks, and overflow
 accounting; the roster always retains complete exact status facts.
 
+At the `960×600` stress limit, a projected battlefield of at most `600×420`
+uses an actor-owned two-line status summary (`id_N` and `+N`) with a mandatory
+leader instead of placing a full status matrix beside every body. This applies
+to controlled and selected agents as well as ordinary agents because retaining
+all matrices made ownership ambiguous in dense combat. The exact token list
+remains available in the roster and delegated tooltip; desktop docks remain
+fully expanded. This is a responsive presentation policy, not status
+suppression or a change to simulator truth.
+
+While choreography is actively playing at that compact size, accepted routes,
+recipient NET outcomes, bodies, modifiers, and cooldowns take priority.
+Presentation-only range rings, the pending route, selected-legality pills, and
+the compact status summaries are temporarily hidden; their authoritative DOM
+and HUD facts remain intact. They return automatically when choreography
+settles or immediately when **Skip** is used. This does not dispatch a command
+or change simulator state.
+
 The supported durable vocabulary includes three source-class stun channels
 sharing one canonical stun glyph, three source-class slow channels sharing one
 canonical swirl, anti-heal, Freedom, Burst, and effective aura modifiers.
 Source identity remains in each token's accent and accessible name. Overflow
 is neutral monochrome and its tooltip enumerates every hidden fact.
+
+The static/headless painter has no interactive tooltip, so its compact status
+labels also append the source-class fallback letter (for example, `⬢W` or
+`↻H`). The family glyph remains canonical while grayscale and print exports
+retain non-color source identity.
 
 Human-facing floating values, health values, durations, and multipliers show at
 most two decimal places. Final font geometry is measured before placement.
