@@ -347,7 +347,7 @@ export async function assertHudStoryLabels(page, expected) {
 export async function assertDurableDockFlags(page) {
   const flags = await page
     .locator(
-      "#battlefield .status-dock, #battlefield .modifier-dock, #battlefield .legality-dock",
+      "#battlefield .status-dock, #battlefield .modifier-dock, #battlefield .cooldown-dock, #battlefield .legality-dock",
     )
     .evaluateAll((docks) =>
       docks.map((dock) => ({
@@ -414,7 +414,7 @@ export async function waitForStablePresentation(page) {
       const battlefieldBounds = battlefield.getBoundingClientRect();
       const geometry = [
         ...battlefield.querySelectorAll(
-          ".agent, .status-dock, .modifier-dock, .legality-dock, .combat-effect, .combat-route-effect",
+          ".agent, .status-dock, .modifier-dock, .cooldown-dock, .legality-dock, .combat-effect, .combat-route-effect",
         ),
       ]
         .map(elementFingerprint)
@@ -487,10 +487,10 @@ export async function waitForStablePresentation(page) {
 }
 
 /**
- * Prove every transient recipient-level NET label stays inside the battlefield
- * and outside the protected visual zones. Leader lines are association cues,
- * not protected geometry; only their ownership and finite endpoints are
- * validated.
+ * Prove every transient recipient-labelled NET cue stays inside the
+ * battlefield and outside the protected visual zones. Leader lines are
+ * association cues, not protected geometry; only their ownership and finite
+ * endpoints are validated.
  *
  * @param {import("@playwright/test").Page} page
  * @param {number} expectedCount
@@ -573,6 +573,7 @@ export async function assertTransientNumberLayout(page, expectedCount) {
           ".selected-reticle:not([hidden])",
           ".status-cell__box",
           ".modifier-cell__box",
+          ".cooldown-cell__box",
           ".legality-pill__box",
           '.agent-id-tag[data-layout-suppressed="false"] .agent-id-tag-box',
           ".combat-impact__icon",
@@ -599,14 +600,34 @@ export async function assertTransientNumberLayout(page, expectedCount) {
       if (!(effect instanceof SVGElement)) {
         throw new Error("NET label is detached from its semantic event.");
       }
+      const recipientLabel = effect.querySelector(".combat-net__recipient");
       const strokeWidth = Number.parseFloat(getComputedStyle(label).strokeWidth);
       const padding =
         Number.isFinite(strokeWidth) && strokeWidth > 0 ? strokeWidth / 2 : 2;
       const rect = label.getBoundingClientRect();
+      const recipientRect = recipientLabel?.getBoundingClientRect() ?? null;
+      const cueRect =
+        recipientRect === null
+          ? rect
+          : {
+              bottom: Math.max(rect.bottom, recipientRect.bottom),
+              left: Math.min(rect.left, recipientRect.left),
+              right: Math.max(rect.right, recipientRect.right),
+              top: Math.min(rect.top, recipientRect.top),
+            };
       return {
-        bounds: expand(rect, padding),
+        bounds: {
+          bottom: cueRect.bottom + padding,
+          left: cueRect.left - padding,
+          right: cueRect.right + padding,
+          top: cueRect.top - padding,
+        },
         eventId: effect.getAttribute("data-event-id"),
         painted: isPainted(label),
+        recipientLabelPainted:
+          recipientLabel instanceof Element && isPainted(recipientLabel),
+        recipientLabelText: recipientLabel?.textContent ?? null,
+        recipientRect,
         recipientSlot: effect.getAttribute("data-recipient-slot"),
         rect,
       };
@@ -618,14 +639,23 @@ export async function assertTransientNumberLayout(page, expectedCount) {
         !record.eventId ||
         !/^(0|[1-9]\d*)$/.test(record.recipientSlot ?? "") ||
         !record.painted ||
+        !record.recipientLabelPainted ||
+        record.recipientLabelText !== `id_${record.recipientSlot}` ||
+        record.recipientRect === null ||
         ![
           record.rect.left,
           record.rect.top,
           record.rect.width,
           record.rect.height,
+          record.recipientRect?.left,
+          record.recipientRect?.top,
+          record.recipientRect?.width,
+          record.recipientRect?.height,
         ].every(Number.isFinite) ||
         record.rect.width <= 0 ||
-        record.rect.height <= 0
+        record.rect.height <= 0 ||
+        (record.recipientRect?.width ?? 0) <= 0 ||
+        (record.recipientRect?.height ?? 0) <= 0
       ) {
         result.push({
           eventId: record.eventId,
@@ -634,6 +664,16 @@ export async function assertTransientNumberLayout(page, expectedCount) {
           reason: "NET label has incomplete identity or non-measurable geometry",
         });
         continue;
+      }
+      const ownTextOverlap = overlap(record.rect, record.recipientRect);
+      if (ownTextOverlap.x > tolerance && ownTextOverlap.y > tolerance) {
+        result.push({
+          eventId: record.eventId,
+          recipientSlot: record.recipientSlot,
+          protectedSelector: ".combat-net__recipient",
+          overlap: ownTextOverlap,
+          reason: "NET value overlaps its recipient identity",
+        });
       }
       const effect = battlefield.querySelector(
         `.combat-effect--net-health[data-event-id="${CSS.escape(record.eventId)}"]`,
@@ -738,9 +778,12 @@ export async function assertTransientNumberLayout(page, expectedCount) {
  * in an accepted visual baseline.
  *
  * @param {import("@playwright/test").Page} page
- * @param {{lifecycle?: number, net?: number}} [expected]
+ * @param {{lifecycle?: number, lifecycleIds?: string[] | null, net?: number}} [expected]
  */
-export async function assertOutcomeSuppression(page, { lifecycle = 0, net = 0 } = {}) {
+export async function assertOutcomeSuppression(
+  page,
+  { lifecycle = 0, lifecycleIds = null, net = 0 } = {},
+) {
   const suppressedNet = page.locator(
     `${CHOREOGRAPHY_ROOT} .combat-effect--net-health[data-spatial-disposition="suppressed-collision"]`,
   );
@@ -749,6 +792,14 @@ export async function assertOutcomeSuppression(page, { lifecycle = 0, net = 0 } 
   );
   await expect(suppressedNet).toHaveCount(net);
   await expect(suppressedLifecycle).toHaveCount(lifecycle);
+  if (lifecycleIds !== null) {
+    const observedIds = (
+      await suppressedLifecycle.evaluateAll((groups) =>
+        groups.map((group) => group.getAttribute("data-event-id")),
+      )
+    ).sort();
+    expect(observedIds).toEqual([...lifecycleIds].sort());
+  }
   const visibleSuppressions = await page
     .locator(`${CHOREOGRAPHY_ROOT} [data-spatial-disposition="suppressed-collision"]`)
     .evaluateAll((groups) =>
@@ -786,6 +837,7 @@ export async function assertVisibleDecimalPrecision(page) {
  *   commandPosts: CommandPostCounter,
  *   expectedTransientCount: number,
  *   expectedSuppressedLifecycleCount?: number,
+ *   expectedSuppressedLifecycleIds?: string[] | null,
  *   logicalMs?: number,
  *   settle?: boolean,
  *   afterSettle?: () => Promise<void>,
@@ -798,6 +850,7 @@ export async function captureBaseline(
     commandPosts,
     expectedTransientCount,
     expectedSuppressedLifecycleCount = 0,
+    expectedSuppressedLifecycleIds = null,
     logicalMs,
     settle = false,
     afterSettle,
@@ -831,6 +884,7 @@ export async function captureBaseline(
   await assertTransientNumberLayout(page, expectedTransientCount);
   await assertOutcomeSuppression(page, {
     lifecycle: expectedSuppressedLifecycleCount,
+    lifecycleIds: expectedSuppressedLifecycleIds,
   });
   await assertVisibleDecimalPrecision(page);
   const revision = await currentRevision(page);

@@ -1,5 +1,10 @@
 import { expect, test } from "@playwright/test";
 
+import {
+  CHOREOGRAPHY_ROOT,
+  installWaapiAutopause,
+  pauseAtLogicalTime,
+} from "./support/choreography.js";
 import { startDebugger, stopDebugger } from "./support/live-debugger.js";
 import {
   loadRendererFixture,
@@ -24,6 +29,10 @@ test.beforeAll(async () => {
   debuggerUrl = started.url;
   syntheticFrame = syntheticDebuggerFrame(fixture);
   syntheticPovFrame = syntheticDebuggerFrame(povFixture);
+  expect(syntheticFrame).toMatchObject({
+    schema_version: "renderer_fixture_v1",
+    frame_kind: "synthetic_renderer_fixture",
+  });
 });
 
 test.afterAll(async () => {
@@ -64,6 +73,15 @@ test("test-only fixture interception installs an explicitly synthetic scene", as
   await page.goto(debuggerUrl);
 
   await expect(page.locator("#connection-status")).toHaveText("Online");
+  const skipPresentation = page.locator("#motion-skip-button");
+  if (await skipPresentation.isEnabled()) {
+    await skipPresentation.click();
+    await expect(
+      page.locator(
+        '#battlefield [data-layer="transient-events"] > .combat-choreography',
+      ),
+    ).toHaveAttribute("data-state", "settled");
+  }
   await expect(page.locator("#terminal-badge")).toBeHidden();
   await expect(page.locator("#scenario-description")).toContainText("SYNTHETIC:");
   await expect(page.locator("#battlefield .agent")).toHaveCount(10);
@@ -540,21 +558,33 @@ test("test-only fixture interception installs an explicitly synthetic scene", as
   const stressedModifier = page.locator(
     '#battlefield .modifier-cell[data-slot="4"][data-index="0"]',
   );
-  await expect(stressedModifier.locator(".modifier-cell__value")).toHaveText(
-    "×123456.79",
-  );
+  await expect(stressedModifier.locator(".modifier-cell__value")).toHaveText("×123K");
+  await expect(stressedModifier).toHaveAttribute("data-multiplier", "123456.789");
   await expect(stressedModifier).toHaveAttribute("aria-label", /multiplier 123456\.79/);
   await expect(stressedModifier).toHaveAttribute("data-numeric-fallback", "true");
+  await expect(stressedModifier).toHaveAttribute(
+    "data-visible-value-abbreviated",
+    "true",
+  );
   expect(await stressedModifier.evaluate((cell) => getComputedStyle(cell).color)).toBe(
     "rgb(154, 167, 184)",
   );
-  await expect(stressedModifier.locator("title")).toHaveText(/multiplier 123456\.79/);
+  await expect(stressedModifier).toHaveAttribute("data-tooltip-owner", "");
   const stressedStatus = page.locator(
     '#battlefield .status-cell[data-slot="0"][data-index="0"]',
   );
   await expect(stressedStatus).toHaveAttribute("data-icon-suppressed", "true");
   await expect(stressedStatus).toHaveAttribute("data-numeric-fallback", "true");
-  await expect(stressedStatus.locator(".status-cell__value")).toHaveText("123456789");
+  await expect(stressedStatus).toHaveAttribute(
+    "data-numeric-layout",
+    "compact-measured-fallback",
+  );
+  await expect(stressedStatus).toHaveAttribute(
+    "data-visible-value-abbreviated",
+    "true",
+  );
+  await expect(stressedStatus).toHaveAttribute("data-duration", "123456789");
+  await expect(stressedStatus.locator(".status-cell__value")).toHaveText("123M");
   await expect(stressedStatus).toHaveAttribute("aria-label", /duration 123456789/);
   expect(await stressedStatus.evaluate((cell) => getComputedStyle(cell).color)).toBe(
     "rgb(154, 167, 184)",
@@ -572,7 +602,512 @@ test("test-only fixture interception installs an explicitly synthetic scene", as
   ).toBe(true);
   await expect(page.locator("#roster .roster-row")).toHaveCount(10);
   await expect(page.locator("#event-count")).not.toHaveText("0");
+  await expect(page).toHaveScreenshot(
+    "human-number-formatting-synthetic-1440x900.png",
+    { animations: "disabled" },
+  );
   expect(commandRequests).toBe(0);
+});
+
+test("compact active combat yields analysis decoration and restores it after Skip", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 960, height: 600 });
+  await installWaapiAutopause(page);
+  let commandRequests = 0;
+  await page.route("**/api/frame", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      json: syntheticFrame,
+      status: 200,
+    });
+  });
+  await page.route("**/api/command", async (route) => {
+    commandRequests += 1;
+    await route.abort("blockedbyclient");
+  });
+
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await expect(page.locator(CHOREOGRAPHY_ROOT)).toHaveCount(1);
+  await pauseAtLogicalTime(page, 520);
+
+  const battlefield = page.locator("#battlefield");
+  await expect(battlefield).toHaveAttribute("data-compact-active-combat", "true");
+  await expect(battlefield).toHaveAttribute(
+    "data-compact-active-suppressed-facts",
+    "ranges,pending-route,selected-legality,status-summaries",
+  );
+  await expect(page.locator('#battlefield [data-layer="range-cues"]')).toHaveAttribute(
+    "data-compact-active-suppressed",
+    "true",
+  );
+  await expect(
+    page.locator('#battlefield [data-layer="pending-route"]'),
+  ).toHaveAttribute("data-compact-active-suppressed", "true");
+  await expect(
+    page.locator('#battlefield [data-layer="legality-cues"]'),
+  ).toHaveAttribute("data-compact-active-suppressed", "true");
+  await expect(page.locator("#battlefield .status-dock")).toHaveCount(10);
+  expect(
+    await page
+      .locator("#battlefield .status-dock")
+      .evaluateAll((docks) =>
+        docks.every(
+          (dock) =>
+            dock.getAttribute("data-compact-active-suppressed") === "true" &&
+            getComputedStyle(dock).display === "none",
+        ),
+      ),
+  ).toBe(true);
+  expect(
+    await page
+      .locator(
+        '#battlefield [data-layer="range-cues"], #battlefield [data-layer="pending-route"], #battlefield [data-layer="legality-cues"]',
+      )
+      .evaluateAll((owners) =>
+        owners.every((owner) => getComputedStyle(owner).display === "none"),
+      ),
+  ).toBe(true);
+
+  // Suppression is battlefield-only: the authoritative nodes and structured
+  // inspection surfaces remain present while accepted combat takes priority.
+  await expect(page.locator("#battlefield .range-ring")).toHaveCount(3);
+  await expect(page.locator("#battlefield path.pending-route")).toHaveCount(1);
+  await expect(
+    page.locator("#roster .roster-row .roster-fact-token--status"),
+  ).toHaveCount(90);
+  await expect(page.locator("#selection-card .selected-legality")).toContainText(
+    "Selected target legality",
+  );
+  await expect(page.locator("#event-feed .event-item")).toHaveCount(32);
+  await expect(
+    page.locator(
+      '#battlefield [data-layer="transient-route"] .combat-route-effect--activation',
+    ),
+  ).toHaveCount(10);
+  await expect(
+    page.locator(
+      '#battlefield [data-layer="transient-events"] .combat-effect--net-health',
+    ),
+  ).toHaveCount(8);
+  await expect(page.locator("#battlefield .agent")).toHaveCount(10);
+  await expect(
+    page.locator("#battlefield .selected-reticle:not([hidden])"),
+  ).toHaveCount(1);
+
+  const skip = page.locator("#motion-skip-button");
+  await expect(skip).toBeEnabled();
+  await skip.click();
+  await expect(battlefield).toHaveAttribute("data-compact-active-combat", "false");
+  await expect(battlefield).not.toHaveAttribute(
+    "data-compact-active-suppressed-facts",
+    /.*/,
+  );
+  expect(
+    await page
+      .locator(
+        '#battlefield [data-layer="range-cues"], #battlefield [data-layer="pending-route"], #battlefield [data-layer="legality-cues"], #battlefield .status-dock',
+      )
+      .evaluateAll((owners) =>
+        owners.every(
+          (owner) =>
+            owner.getAttribute("data-compact-active-suppressed") === "false" &&
+            getComputedStyle(owner).display !== "none",
+        ),
+      ),
+  ).toBe(true);
+  await expect(
+    page.locator('#battlefield .status-dock[data-slot="0"] .status-overflow'),
+  ).toHaveAttribute("aria-label", /hidden status cues for id_0/i);
+  await expect(page.locator("#battlefield .range-ring")).toHaveCount(3);
+  await expect(page.locator("#battlefield path.pending-route")).toHaveCount(1);
+  expect(commandRequests).toBe(0);
+});
+
+test("extreme dock values use a readable visual abbreviation without losing truth", async ({
+  page,
+}) => {
+  const extremeFrame = structuredClone(syntheticFrame);
+  extremeFrame.scene.agents[0].statuses[0].duration = 123456789;
+  await page.route("**/api/frame", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      json: extremeFrame,
+      status: 200,
+    });
+  });
+  await page.route("**/api/command", async (route) => {
+    await route.abort("blockedbyclient");
+  });
+
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  const cue = page.locator('#battlefield .status-cell[data-slot="0"][data-index="0"]');
+  await expect(cue).toHaveAttribute("data-duration", "123456789");
+  await expect(cue).toHaveAttribute("data-numeric-layout", "compact-measured-fallback");
+  await expect(cue.locator(".status-cell__value")).toHaveText("123M");
+  await expect(cue).toHaveAttribute("aria-label", /duration 123456789/);
+  expect(
+    await cue.evaluate((cell) => {
+      const box = cell.querySelector(".status-cell__box");
+      const value = cell.querySelector(".status-cell__value");
+      if (
+        !(box instanceof SVGGraphicsElement) ||
+        !(value instanceof SVGGraphicsElement)
+      ) {
+        throw new Error("Extreme status cue is not measurable.");
+      }
+      return value.getBBox().width <= box.getBBox().width - 6;
+    }),
+  ).toBe(true);
+
+  await cue.hover();
+  await expect(page.locator("#visual-tooltip")).toContainText("123456789");
+
+  const rosterCue = page
+    .locator('#roster .roster-row[data-slot="0"] .roster-fact-token--status')
+    .first();
+  await expect(rosterCue).toHaveAttribute("data-duration", "123456789");
+  await expect(rosterCue).toHaveAttribute("data-visible-value-abbreviated", "true");
+  await expect(rosterCue.locator(".roster-fact-token__duration")).toHaveText("123M");
+  await expect(rosterCue).toHaveAttribute("aria-label", /duration 123456789/);
+  await rosterCue.hover();
+  await expect(page.locator("#visual-tooltip")).toContainText("123456789");
+});
+
+test("required fallback tooltip avoids the inspected agent and its local docks", async ({
+  page,
+}) => {
+  const denseRequiredFrame = structuredClone(syntheticFrame);
+  for (const agent of denseRequiredFrame.scene.agents) {
+    agent.position = [8, 6];
+    agent.ultimate_cooldown = 30;
+  }
+  await page.route("**/api/frame", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      json: denseRequiredFrame,
+      status: 200,
+    });
+  });
+  await page.route("**/api/command", async (route) => {
+    await route.abort("blockedbyclient");
+  });
+
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  const fallback = page
+    .locator('#battlefield .required-dock-fallback[data-kind="cooldown"]')
+    .first();
+  const slot = await fallback.getAttribute("data-slot");
+  expect(slot).not.toBeNull();
+  await fallback.hover();
+  const tooltip = page.locator("#visual-tooltip");
+  await expect(tooltip).toBeVisible();
+  const overlapsLocalEnvelope = await page.evaluate((globalSlot) => {
+    const tooltipElement = document.querySelector("#visual-tooltip");
+    const battlefield = document.querySelector("#battlefield");
+    if (
+      !(tooltipElement instanceof HTMLElement) ||
+      !(battlefield instanceof SVGElement)
+    ) {
+      throw new Error("Tooltip placement targets are unavailable.");
+    }
+    const tooltipBounds = tooltipElement.getBoundingClientRect();
+    const localElements = [...battlefield.querySelectorAll("[data-slot]")].filter(
+      (element) =>
+        element.getAttribute("data-slot") === globalSlot &&
+        [
+          "agent",
+          "status-dock",
+          "cooldown-dock",
+          "required-dock-fallback-dock",
+          "modifier-dock",
+          "legality-dock",
+        ].some((className) => element.classList.contains(className)),
+    );
+    return localElements.some((element) => {
+      const bounds = element.getBoundingClientRect();
+      const width =
+        Math.min(tooltipBounds.right, bounds.right) -
+        Math.max(tooltipBounds.left, bounds.left);
+      const height =
+        Math.min(tooltipBounds.bottom, bounds.bottom) -
+        Math.max(tooltipBounds.top, bounds.top);
+      return width > 0.5 && height > 0.5;
+    });
+  }, slot);
+  expect(overlapsLocalEnvelope).toBe(false);
+});
+
+test("near-dense required truth keeps every compact fallback individually associated", async ({
+  page,
+}) => {
+  const denseRequiredFrame = structuredClone(syntheticFrame);
+  const nearDensePositions = [
+    [5.8, 6.65],
+    [6.9, 6.65],
+    [8.0, 6.65],
+    [9.1, 6.65],
+    [10.2, 6.65],
+    [5.8, 5.35],
+    [6.9, 5.35],
+    [10.2, 5.35],
+    [8.0, 5.35],
+    [9.1, 5.35],
+  ];
+  denseRequiredFrame.scenario.description =
+    "SYNTHETIC: near-dense agents demonstrate individually owned compact cooldown fallbacks.";
+  for (const [index, agent] of denseRequiredFrame.scene.agents.entries()) {
+    agent.position = nearDensePositions[index];
+    agent.ultimate_cooldown = 30;
+  }
+  await page.route("**/api/frame", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      json: denseRequiredFrame,
+      status: 200,
+    });
+  });
+  await page.route("**/api/command", async (route) => {
+    await route.abort("blockedbyclient");
+  });
+
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+
+  const durableLayer = page.locator(
+    '#battlefield [data-layer="durable-status-modifier"]',
+  );
+  await expect(durableLayer).toHaveAttribute("data-suppressed-cooldown-slots", "");
+  await expect(durableLayer).toHaveAttribute(
+    "data-compacted-required-docks",
+    /cooldown:/,
+  );
+  const suppressedStatusSlots = (
+    (await durableLayer.getAttribute("data-suppressed-status-slots")) ?? ""
+  )
+    .split(",")
+    .filter(Boolean)
+    .map(Number);
+  expect(suppressedStatusSlots).not.toContain(0);
+  expect(suppressedStatusSlots).not.toContain(7);
+
+  const representedKeys = await page.evaluate(() => {
+    const keys = [
+      ...document.querySelectorAll("#battlefield .required-dock-fallback"),
+    ].map((node) => node.getAttribute("data-layout-key"));
+    for (const node of document.querySelectorAll("#battlefield .cooldown-dock")) {
+      keys.push(`cooldown:${node.getAttribute("data-slot")}`);
+    }
+    for (const node of document.querySelectorAll("#battlefield .status-dock")) {
+      const slot = Number(node.getAttribute("data-slot"));
+      if (slot === 0 || slot === 7) {
+        keys.push(`status:${slot}`);
+      }
+    }
+    return keys.filter((key) => key !== null).sort();
+  });
+  expect(representedKeys).toEqual(
+    [
+      ...Array.from({ length: 10 }, (_, slot) => `cooldown:${slot}`),
+      "status:0",
+      "status:7",
+    ].sort(),
+  );
+
+  const cooldownFallbacks = page.locator(
+    '#battlefield .required-dock-fallback[data-kind="cooldown"]',
+  );
+  expect(await cooldownFallbacks.count()).toBeGreaterThan(0);
+  for (let index = 0; index < (await cooldownFallbacks.count()); index += 1) {
+    const fallback = cooldownFallbacks.nth(index);
+    await expect(fallback).toHaveAttribute("data-ticks", "30");
+    await expect(fallback).toHaveAttribute("aria-label", /30 ticks remaining/i);
+    const slot = await fallback.getAttribute("data-slot");
+    await expect(fallback).toHaveAttribute("data-owner-label", `id_${slot}`);
+    await expect(fallback.locator(".required-dock-fallback__owner")).toHaveText(
+      `id_${slot}`,
+    );
+    await expect(fallback.locator(".required-dock-fallback__value")).toHaveText("U30");
+  }
+
+  const geometry = await page.evaluate(() => {
+    const battlefield = document.querySelector("#battlefield");
+    if (!(battlefield instanceof SVGSVGElement)) {
+      throw new Error("Battlefield SVG is unavailable.");
+    }
+    /** @param {string} selector */
+    const bounds = (selector) =>
+      [...battlefield.querySelectorAll(selector)].map((node) => {
+        if (!(node instanceof SVGGraphicsElement)) {
+          throw new Error(`Expected SVG graphics element for ${selector}.`);
+        }
+        const box = node.getBBox();
+        return {
+          left: box.x,
+          top: box.y,
+          right: box.x + box.width,
+          bottom: box.y + box.height,
+        };
+      });
+    /**
+     * @param {{left: number, top: number, right: number, bottom: number}} first
+     * @param {{left: number, top: number, right: number, bottom: number}} second
+     */
+    const overlaps = (first, second) =>
+      Math.min(first.right, second.right) - Math.max(first.left, second.left) > 0.5 &&
+      Math.min(first.bottom, second.bottom) - Math.max(first.top, second.top) > 0.5;
+    const fallbackBoxes = bounds(".required-dock-fallback__box");
+    const bodyBoxes = bounds(".agent-body");
+    const fullDockBoxes = bounds(".status-cell__box, .cooldown-cell__box");
+    const selectionBoxes = bounds(
+      ".controlled-halo:not([hidden]), .selected-reticle:not([hidden])",
+    );
+    const fallbackAssociations = [
+      ...battlefield.querySelectorAll(".required-dock-fallback-dock"),
+    ].map((dock) => {
+      const slot = Number(dock.getAttribute("data-slot"));
+      const body = battlefield.querySelector(`.agent[data-slot="${slot}"] .agent-body`);
+      const marker = dock.querySelector(".required-dock-fallback__box");
+      const leader = dock.querySelector(".required-dock-fallback__leader");
+      const owner = dock.querySelector(".required-dock-fallback__owner");
+      if (
+        !(body instanceof SVGCircleElement) ||
+        !(marker instanceof SVGGraphicsElement) ||
+        !(leader instanceof SVGLineElement) ||
+        !(owner instanceof SVGElement)
+      ) {
+        throw new Error(`Fallback ownership geometry is incomplete for slot ${slot}.`);
+      }
+      const center = {
+        x: Number(body.getAttribute("cx")),
+        y: Number(body.getAttribute("cy")),
+      };
+      const radius = Number(body.getAttribute("r"));
+      const start = {
+        x: Number(leader.getAttribute("x1")),
+        y: Number(leader.getAttribute("y1")),
+      };
+      const end = {
+        x: Number(leader.getAttribute("x2")),
+        y: Number(leader.getAttribute("y2")),
+      };
+      const markerBounds = marker.getBBox();
+      const otherCenters = [...battlefield.querySelectorAll(".agent")]
+        .filter((agent) => Number(agent.getAttribute("data-slot")) !== slot)
+        .map((agent) => {
+          const otherBody = agent.querySelector(".agent-body");
+          if (!(otherBody instanceof SVGCircleElement)) {
+            throw new Error("Fallback comparison body is unavailable.");
+          }
+          return {
+            x: Number(otherBody.getAttribute("cx")),
+            y: Number(otherBody.getAttribute("cy")),
+          };
+        });
+      /**
+       * @param {{x: number, y: number}} first
+       * @param {{x: number, y: number}} second
+       */
+      const distance = (first, second) =>
+        Math.hypot(first.x - second.x, first.y - second.y);
+      const ownerDistance = distance(start, center);
+      return {
+        endTouchesMarker:
+          end.x >= markerBounds.x - 0.5 &&
+          end.x <= markerBounds.x + markerBounds.width + 0.5 &&
+          end.y >= markerBounds.y - 0.5 &&
+          end.y <= markerBounds.y + markerBounds.height + 0.5,
+        nearestOtherDistance: Math.min(
+          ...otherCenters.map((otherCenter) => distance(start, otherCenter)),
+        ),
+        nearestStartIsOwner: otherCenters.every(
+          (otherCenter) => ownerDistance < distance(start, otherCenter),
+        ),
+        ownerDistance,
+        ownerLabel: owner.textContent,
+        radius,
+        slot,
+        startsAtOwner: ownerDistance <= radius + 20,
+      };
+    });
+    const viewBox = battlefield.viewBox.baseVal;
+    return {
+      fallbackAssociations,
+      fallbackCount: fallbackBoxes.length,
+      overlapsBody: fallbackBoxes.some((fallback) =>
+        bodyBoxes.some((body) => overlaps(fallback, body)),
+      ),
+      overlapsFullDock: fallbackBoxes.some((fallback) =>
+        fullDockBoxes.some((dock) => overlaps(fallback, dock)),
+      ),
+      overlapsFallback: fallbackBoxes.some((fallback, index) =>
+        fallbackBoxes.slice(index + 1).some((other) => overlaps(fallback, other)),
+      ),
+      overlapsSelection: fallbackBoxes.some((fallback) =>
+        selectionBoxes.some((selection) => overlaps(fallback, selection)),
+      ),
+      outsideViewport: fallbackBoxes.some(
+        (fallback) =>
+          fallback.left < viewBox.x - 0.5 ||
+          fallback.top < viewBox.y - 0.5 ||
+          fallback.right > viewBox.x + viewBox.width + 0.5 ||
+          fallback.bottom > viewBox.y + viewBox.height + 0.5,
+      ),
+    };
+  });
+  expect(geometry).toMatchObject({
+    outsideViewport: false,
+    overlapsBody: false,
+    overlapsFallback: false,
+    overlapsFullDock: false,
+    overlapsSelection: false,
+  });
+  expect(geometry.fallbackCount).toBeGreaterThan(0);
+  expect(geometry.fallbackAssociations).toHaveLength(geometry.fallbackCount);
+  expect(
+    geometry.fallbackAssociations.filter(
+      ({ endTouchesMarker, nearestStartIsOwner, ownerLabel, slot, startsAtOwner }) =>
+        !endTouchesMarker ||
+        !nearestStartIsOwner ||
+        ownerLabel !== `id_${slot}` ||
+        !startsAtOwner,
+    ),
+  ).toEqual([]);
+
+  const firstFallback = cooldownFallbacks.first();
+  await firstFallback.hover();
+  const tooltip = page.locator("#visual-tooltip");
+  await expect(tooltip).toBeVisible();
+  await expect(tooltip).toContainText("30 ticks remaining");
+  await firstFallback.focus();
+  expect(
+    await firstFallback.evaluate((node) => {
+      const style = getComputedStyle(node);
+      return `${style.outlineStyle} ${style.outlineWidth}`;
+    }),
+  ).toBe("solid 3px");
+  await page.evaluate(async () => {
+    await document.fonts.ready;
+    await new Promise((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(resolve)),
+    );
+  });
+  await expect(page).toHaveScreenshot(
+    "required-dock-fallback-focus-synthetic-1440x900.png",
+    { animations: "disabled" },
+  );
+
+  const rosterFact = page.locator('.roster-fact-token[tabindex="0"]').first();
+  await rosterFact.focus();
+  expect(
+    await rosterFact.evaluate((node) => {
+      const style = getComputedStyle(node);
+      return `${style.outlineStyle} ${style.outlineWidth}`;
+    }),
+  ).toBe("solid 3px");
 });
 
 test("structured HUD keeps exact roster, intent, and accepted-result facts distinct", async ({
@@ -704,17 +1239,76 @@ test("structured HUD keeps exact roster, intent, and accepted-result facts disti
       .evaluateAll((tokens) =>
         tokens.map((token) => ({
           duration: Number(token.getAttribute("data-duration")),
+          icon: token.getAttribute("data-icon"),
+          renderedIcon: token
+            .querySelector(".roster-fact-token__icon")
+            ?.getAttribute("data-icon"),
+          sourceClass: token.getAttribute("data-source-class"),
           tokenId: token.getAttribute("data-token-id"),
+          separated: (() => {
+            const icon = token.querySelector(".roster-fact-token__icon");
+            const duration = token.querySelector(".roster-fact-token__duration");
+            if (
+              !(icon instanceof SVGSVGElement) ||
+              !(duration instanceof HTMLElement)
+            ) {
+              return false;
+            }
+            return (
+              icon.getBoundingClientRect().right + 1 <=
+              duration.getBoundingClientRect().left
+            );
+          })(),
         })),
       ),
   ).toEqual(
     agentZero.statuses.map(
-      /** @param {{duration: number, token_id: string}} status */ (status) => ({
+      /** @param {{duration: number, source_class_id: number, token_id: string}} status */ (
+        status,
+      ) => ({
         duration: status.duration,
+        icon: status.token_id.startsWith("stun_")
+          ? "status-stun"
+          : status.token_id.startsWith("slow_")
+            ? "status-slow"
+            : {
+                anti_heal_rogue_poison: "status-anti-heal",
+                mage_burst: "status-burst",
+                priest_freedom: "status-freedom",
+              }[status.token_id],
+        renderedIcon: status.token_id.startsWith("stun_")
+          ? "status-stun"
+          : status.token_id.startsWith("slow_")
+            ? "status-slow"
+            : {
+                anti_heal_rogue_poison: "status-anti-heal",
+                mage_burst: "status-burst",
+                priest_freedom: "status-freedom",
+              }[status.token_id],
+        sourceClass: ["unknown", "mage", "warrior", "hunter", "rogue", "priest"][
+          status.source_class_id
+        ],
         tokenId: status.token_id,
+        separated: true,
       }),
     ),
   );
+  const durableControlCells = await page
+    .locator('#battlefield .status-cell[data-slot="0"]')
+    .evaluateAll((cells) =>
+      cells.slice(0, 6).map((cell) => ({
+        icon: cell.querySelector(".status-cell__icon")?.getAttribute("data-icon"),
+        sourceClass: cell.getAttribute("data-source-class"),
+      })),
+    );
+  expect(durableControlCells).toEqual([
+    { icon: "status-stun", sourceClass: "warrior" },
+    { icon: "status-stun", sourceClass: "hunter" },
+    { icon: "status-stun", sourceClass: "rogue" },
+    { icon: "status-slow", sourceClass: "warrior" },
+    { icon: "status-slow", sourceClass: "hunter" },
+    { icon: "status-slow", sourceClass: "rogue" },
+  ]);
   await expect(
     page.locator('#roster .roster-row[data-slot="0"] .roster-fact-token--modifier'),
   ).toHaveCount(agentZero.modifiers.length);

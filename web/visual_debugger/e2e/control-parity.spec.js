@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { startDebugger, stopDebugger } from "./support/live-debugger.js";
+import { waitForStablePresentation } from "./support/visual-regression.js";
 
 /** @type {import("node:child_process").ChildProcess | null} */
 let serverProcess = null;
@@ -44,6 +45,57 @@ test("battlefield commands preserve UI and simulator revision boundaries", async
   await expect(page.locator("#battlefield .agent")).toHaveCount(10);
   await expect(page.locator("#roster .roster-row")).toHaveCount(10);
   expect(page.url()).not.toContain("token=");
+
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 960, height: 600 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(resolve));
+        }),
+    );
+    const consoleLayout = await page.locator(".command-deck").evaluate((deck) => {
+      const bounds = deck.getBoundingClientRect();
+      const directSections = [...deck.children].map((child) => child.className);
+      const submit = deck.querySelector("#submit-turn-button");
+      const advance = deck.querySelector("#advance-script-button");
+      if (
+        !(submit instanceof HTMLButtonElement) ||
+        !(advance instanceof HTMLButtonElement)
+      ) {
+        throw new Error("Command console commit controls are unavailable.");
+      }
+      const submitStyle = getComputedStyle(submit);
+      const advanceStyle = getComputedStyle(advance);
+      return {
+        directSections,
+        horizontalOverflow: deck.scrollWidth - deck.clientWidth,
+        viewportEscape: {
+          left: Math.max(0, -bounds.left),
+          right: Math.max(0, bounds.right - document.documentElement.clientWidth),
+        },
+        submitDistinct:
+          submitStyle.backgroundImage !== advanceStyle.backgroundImage &&
+          submitStyle.color !== advanceStyle.color,
+      };
+    });
+    expect(consoleLayout.directSections).toEqual([
+      "command-deck__header",
+      "command-deck__composer",
+      "command-commit",
+      "command-deck__utilities",
+    ]);
+    expect(consoleLayout.horizontalOverflow).toBeLessThanOrEqual(1);
+    expect(consoleLayout.viewportEscape.left).toBe(0);
+    expect(consoleLayout.viewportEscape.right).toBe(0);
+    expect(consoleLayout.submitDistinct).toBe(true);
+    await expect(page.locator(".command-deck")).toHaveScreenshot(
+      `command-console-${viewport.width}x${viewport.height}.png`,
+    );
+  }
 
   const battlefield = page.locator("#battlefield");
   await battlefield.focus();
@@ -249,6 +301,71 @@ test("pointer, roster, toolbar, and command-deck controls use the live service",
   await expect(page.locator("#step-value")).toHaveText("0");
 });
 
+test("command composer keeps the exact controlled actor visible at both viewports", async ({
+  page,
+}) => {
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  if ((await page.locator("#scenario-select").inputValue()) !== "arena_5v5") {
+    await page.locator("#scenario-select").selectOption("arena_5v5");
+  }
+  await page.locator("#reset-button").click();
+
+  const controlledActor = page.locator("#command-controlled-actor");
+  /**
+   * @param {{width: number, height: number}} viewport
+   * @param {number} slot
+   */
+  const assertComposerIdentity = async (viewport, slot) => {
+    await page.setViewportSize(viewport);
+    await page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(resolve));
+        }),
+    );
+    await expect(controlledActor).toHaveText(`Actor · id_${slot}`);
+    await expect(controlledActor).toHaveAttribute(
+      "aria-label",
+      `Controlled actor id_${slot}`,
+    );
+    await expect(controlledActor).toHaveAttribute("data-controlled-slot", String(slot));
+    await expect(controlledActor).toBeVisible();
+    const visual = await controlledActor.evaluate((label) => {
+      const bounds = label.getBoundingClientRect();
+      const heading = label.closest(".command-group__heading");
+      if (!(heading instanceof HTMLElement)) {
+        throw new Error("Movement-stage heading is unavailable.");
+      }
+      const headingBounds = heading.getBoundingClientRect();
+      const style = getComputedStyle(label);
+      return {
+        clipped:
+          bounds.left < headingBounds.left - 0.5 ||
+          bounds.right > headingBounds.right + 0.5 ||
+          bounds.top < headingBounds.top - 0.5 ||
+          bounds.bottom > headingBounds.bottom + 0.5,
+        opacity: Number.parseFloat(style.opacity),
+        visibility: style.visibility,
+      };
+    });
+    expect(visual).toEqual({
+      clipped: false,
+      opacity: 1,
+      visibility: "visible",
+    });
+  };
+
+  await assertComposerIdentity({ width: 1440, height: 900 }, 0);
+  await page.getByRole("button", { name: "Control id_1" }).click();
+  await expect(controlledActor).toHaveText("Actor · id_1");
+  await assertComposerIdentity({ width: 960, height: 600 }, 1);
+  await page
+    .locator('#battlefield .agent[data-slot="2"] .agent-body')
+    .click({ modifiers: ["Shift"] });
+  await expect(controlledActor).toHaveText("Actor · id_2");
+});
+
 test("movement scale previews locally and resets one authoritative epoch on commit", async ({
   page,
 }) => {
@@ -264,6 +381,13 @@ test("movement scale previews locally and resets one authoritative epoch on comm
     await page.locator("#scenario-select").selectOption("arena_5v5");
     revision += 1;
     await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  }
+  const controlledActor = page.locator("#command-controlled-actor");
+  if ((await controlledActor.getAttribute("data-controlled-slot")) !== "0") {
+    await page.getByRole("button", { name: "Control id_0" }).click();
+    revision += 1;
+    await expect(page.locator("#revision-value")).toHaveText(String(revision));
+    await expect(controlledActor).toHaveAttribute("data-controlled-slot", "0");
   }
   await page.locator("#reset-button").click();
   revision += 1;
@@ -310,8 +434,21 @@ test("movement scale previews locally and resets one authoritative epoch on comm
   revision += 1;
   await expect(page.locator("#revision-value")).toHaveText(String(revision));
   await expect(page.locator("#movement-scale-value")).toHaveText("0.10");
+  await expect(scaleInput).toHaveValue("0.1");
+  expect(
+    await scaleInput.evaluate(
+      (input) => /** @type {HTMLInputElement} */ (input).valueAsNumber,
+    ),
+  ).toBeCloseTo(0.1);
+  await expect(page.locator("#movement-scale-tenth-button")).toBeDisabled();
+  await expect(page.locator("#movement-scale-default-button")).toBeEnabled();
   await expect(page.locator("#step-value")).toHaveText("0");
   expect(movementScaleCommands).toBe(2);
+  await page.setViewportSize({ width: 960, height: 600 });
+  await waitForStablePresentation(page);
+  await expect(page.locator(".movement-scale-control")).toHaveScreenshot(
+    "movement-scale-010-override-960x600.png",
+  );
 
   await page.locator("#reset-button").click();
   revision += 1;
@@ -324,9 +461,20 @@ test("movement scale previews locally and resets one authoritative epoch on comm
   revision += 1;
   await expect(page.locator("#revision-value")).toHaveText(String(revision));
   await expect(page.locator("#movement-scale-value")).toHaveText("1.00");
+  await expect(scaleInput).toHaveValue("1");
+  expect(
+    await scaleInput.evaluate(
+      (input) => /** @type {HTMLInputElement} */ (input).valueAsNumber,
+    ),
+  ).toBe(1);
+  await expect(page.locator("#movement-scale-tenth-button")).toBeEnabled();
   await expect(page.locator("#movement-scale-default-button")).toBeDisabled();
   await expect(page.locator("#step-value")).toHaveText("0");
   expect(movementScaleCommands).toBe(3);
+  await waitForStablePresentation(page);
+  await expect(page.locator(".movement-scale-control")).toHaveScreenshot(
+    "movement-scale-default-restored-960x600.png",
+  );
   await page.unroute("**/api/command");
 });
 
@@ -350,6 +498,22 @@ test("joint turn drafts survive actor cycling and submit exactly once", async ({
     "joint_turn",
   );
   await expect(page.locator(".pending-action-row")).toHaveCount(10);
+  await expect(
+    page.locator(".pending-action-row__facts").filter({
+      hasText: "Target target-none",
+    }),
+  ).toHaveCount(0);
+  await expect(
+    page.locator(".pending-action-row__facts").filter({
+      hasText: "Lane 0/B",
+    }),
+  ).toHaveCount(0);
+  await expect(
+    page.locator('.pending-action-row[data-actor-slot="0"] .pending-action-row__facts'),
+  ).toContainText("Target · None");
+  await expect(
+    page.locator('.pending-action-row[data-actor-slot="0"] .pending-action-row__facts'),
+  ).toContainText("Action · No combat");
   await expect(page.locator('.pending-action-row[data-controlled="true"]')).toHaveCount(
     1,
   );
@@ -357,6 +521,37 @@ test("joint turn drafts survive actor cycling and submit exactly once", async ({
   const battlefield = page.locator("#battlefield");
   await expect(page.locator("#basic-button")).toHaveAttribute("aria-disabled", "true");
   await expect(page.locator("#basic-button")).not.toHaveAttribute("disabled");
+  await expect
+    .poll(() =>
+      page.locator("#basic-button").evaluate((button) => {
+        const style = getComputedStyle(button);
+        const probe = document.createElement("span");
+        probe.style.color = "color-mix(in srgb, var(--danger) 70%, var(--text-muted))";
+        probe.style.borderColor =
+          "color-mix(in srgb, var(--danger) 70%, var(--border))";
+        document.body.append(probe);
+        const probeStyle = getComputedStyle(probe);
+        const matches =
+          style.borderColor === probeStyle.borderColor &&
+          style.color === probeStyle.color;
+        probe.remove();
+        return matches;
+      }),
+    )
+    .toBe(true);
+  const unavailableBasicOpacity = await page
+    .locator("#basic-button")
+    .evaluate((button) => {
+      const style = getComputedStyle(button);
+      return Number.parseFloat(style.opacity);
+    });
+  expect(unavailableBasicOpacity).toBeLessThan(1);
+  await page.setViewportSize({ width: 960, height: 600 });
+  await waitForStablePresentation(page);
+  const commandDeckOverflow = await page
+    .locator(".command-deck")
+    .evaluate((element) => element.scrollWidth - element.clientWidth);
+  expect(commandDeckOverflow).toBeLessThanOrEqual(1);
   await page.locator("#basic-button").hover();
   await page.locator("#basic-button").dispatchEvent("click");
   await expect(page.locator("#notice")).toContainText(
@@ -441,6 +636,51 @@ test("joint turn drafts survive actor cycling and submit exactly once", async ({
       rows.map((row) => Number(row.getAttribute("data-move-action"))),
     );
   expect(stagedMoves).toEqual([3, 1, 3, 3, 3, 4, 4, 4, 4, 4]);
+  // The ten exact pending rows exceed the supported viewport height. Move the
+  // real authoritative card—not a reconstructed copy—into a labelled, tall
+  // review host so every staged tuple is visible in one evidence artifact.
+  // Responsive runtime behavior remains asserted separately at 960×600.
+  await page.setViewportSize({ width: 1440, height: 1600 });
+  await page.evaluate(() => {
+    const card = document.querySelector("#pending-card");
+    if (!(card instanceof HTMLElement) || !card.parentElement) {
+      throw new Error("Authoritative pending card is unavailable.");
+    }
+    const placeholder = document.createElement("span");
+    placeholder.id = "joint-turn-evidence-placeholder";
+    card.parentElement.insertBefore(placeholder, card);
+    const host = document.createElement("section");
+    host.id = "joint-turn-evidence";
+    host.setAttribute("aria-label", "Authoritative ten-actor pending turn inventory");
+    host.style.cssText =
+      "position:fixed;left:16px;top:16px;z-index:1000;width:520px;" +
+      "padding:14px;border:1px solid #334155;border-radius:10px;" +
+      "background:#0b1020;color:#f4f7fb";
+    const heading = document.createElement("h2");
+    heading.textContent = "AUTHORITATIVE 10-ACTOR PENDING TURN · REVIEW INVENTORY";
+    heading.style.cssText =
+      "margin:0 0 10px;color:#22d3ee;font:700 14px/1.2 sans-serif;" +
+      "letter-spacing:.06em";
+    card.style.marginTop = "0";
+    host.append(heading, card);
+    document.body.append(host);
+  });
+  await waitForStablePresentation(page);
+  await expect(page.locator("#joint-turn-evidence")).toHaveScreenshot(
+    "joint-turn-ten-agent-pending-inventory-1440x1600.png",
+  );
+  await page.evaluate(() => {
+    const card = document.querySelector("#pending-card");
+    const placeholder = document.querySelector("#joint-turn-evidence-placeholder");
+    const host = document.querySelector("#joint-turn-evidence");
+    if (!(card instanceof HTMLElement) || !placeholder?.parentElement) {
+      throw new Error("Pending evidence host cannot be restored.");
+    }
+    card.style.removeProperty("margin-top");
+    placeholder.parentElement.insertBefore(card, placeholder);
+    placeholder.remove();
+    host?.remove();
+  });
 
   let enterCommands = 0;
   await page.route("**/api/command", async (route) => {

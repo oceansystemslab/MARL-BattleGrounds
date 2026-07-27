@@ -109,6 +109,279 @@ async function advanceAnimatedFrame(page, transitionId, logicalMs = 520) {
 }
 
 /**
+ * Prove each rendered Charge ownership pill stays inside the map and outside
+ * durable bodies/docks, recipient NET text, and every other ownership pill.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @param {number} expectedCount
+ */
+async function assertChargeOwnershipLayout(page, expectedCount) {
+  const labels = page.locator(
+    `${CHOREOGRAPHY_ROUTE_ROOT} .combat-route-effect--activation[data-token-id="warrior_charge"] .combat-route__ownership[data-spatial-disposition="rendered"]`,
+  );
+  await expect(labels).toHaveCount(expectedCount);
+  const violations = await page.evaluate(() => {
+    const tolerance = 0.75;
+    const battlefield = document.querySelector("#battlefield");
+    const mapBoundary = battlefield?.querySelector(".map-boundary");
+    if (
+      !(battlefield instanceof SVGSVGElement) ||
+      !(mapBoundary instanceof SVGElement)
+    ) {
+      throw new Error("Battlefield map boundary is unavailable.");
+    }
+    const mapBounds = mapBoundary.getBoundingClientRect();
+    /**
+     * @param {DOMRect} left
+     * @param {DOMRect} right
+     */
+    const overlap = (left, right) => ({
+      x: Math.min(left.right, right.right) - Math.max(left.left, right.left),
+      y: Math.min(left.bottom, right.bottom) - Math.max(left.top, right.top),
+    });
+    /**
+     * @param {Element} element
+     */
+    const isPainted = (element) => {
+      const bounds = element.getBoundingClientRect();
+      if (bounds.width <= 0 || bounds.height <= 0) {
+        return false;
+      }
+      /** @type {Element | null} */
+      let current = element;
+      while (current) {
+        const style = getComputedStyle(current);
+        if (
+          style.display === "none" ||
+          style.visibility === "hidden" ||
+          Number.parseFloat(style.opacity || "1") <= 0.001
+        ) {
+          return false;
+        }
+        if (current === battlefield) {
+          break;
+        }
+        current = current.parentElement;
+      }
+      return true;
+    };
+    const protectedElements = [
+      ...battlefield.querySelectorAll(
+        [
+          ".agent-team-ring",
+          ".controlled-halo:not([hidden])",
+          ".selected-reticle:not([hidden])",
+          ".status-cell__box",
+          ".modifier-cell__box",
+          ".cooldown-cell__box",
+          ".legality-pill__box",
+          '.agent-id-tag[data-layout-suppressed="false"] .agent-id-tag-box',
+          '.combat-effect--net-health[data-spatial-disposition="rendered"] .combat-net__recipient',
+          '.combat-effect--net-health[data-spatial-disposition="rendered"] .combat-net__label',
+        ].join(","),
+      ),
+    ].filter(isPainted);
+    const protectedRects = protectedElements.map((element) => ({
+      bounds: element.getBoundingClientRect(),
+      selector:
+        [...element.classList].map((name) => `.${name}`).join("") ||
+        element.tagName.toLowerCase(),
+    }));
+    const records = [
+      ...battlefield.querySelectorAll(
+        '.combat-route-effect--activation[data-token-id="warrior_charge"] .combat-route__ownership',
+      ),
+    ].map((ownership) => {
+      const box = ownership.querySelector(".combat-route__ownership-box");
+      return {
+        box: box?.getBoundingClientRect() ?? null,
+        collisionFree: ownership.getAttribute("data-layout-collision-free"),
+        disposition: ownership.getAttribute("data-spatial-disposition"),
+        painted: isPainted(ownership),
+        source: ownership.getAttribute("data-source-slot"),
+        target: ownership.getAttribute("data-target-slot"),
+      };
+    });
+    const result = [];
+    for (const record of records) {
+      const owner = `${record.source}->${record.target}`;
+      if (
+        record.collisionFree !== "true" ||
+        record.disposition !== "rendered" ||
+        !record.painted ||
+        record.box === null ||
+        record.box.width <= 0 ||
+        record.box.height <= 0
+      ) {
+        result.push({ owner, reason: "ownership pill is not measurably rendered" });
+        continue;
+      }
+      if (
+        record.box.left < mapBounds.left - tolerance ||
+        record.box.top < mapBounds.top - tolerance ||
+        record.box.right > mapBounds.right + tolerance ||
+        record.box.bottom > mapBounds.bottom + tolerance
+      ) {
+        result.push({ owner, reason: "ownership pill escapes the map" });
+      }
+      for (const protectedRect of protectedRects) {
+        const depth = overlap(record.box, protectedRect.bounds);
+        if (depth.x > tolerance && depth.y > tolerance) {
+          result.push({
+            owner,
+            overlap: depth,
+            protectedSelector: protectedRect.selector,
+            reason: "ownership pill overlaps protected geometry",
+          });
+        }
+      }
+    }
+    for (let index = 0; index < records.length; index += 1) {
+      for (let other = index + 1; other < records.length; other += 1) {
+        const leftBox = records[index].box;
+        const rightBox = records[other].box;
+        if (leftBox === null || rightBox === null) {
+          continue;
+        }
+        const depth = overlap(leftBox, rightBox);
+        if (depth.x > tolerance && depth.y > tolerance) {
+          result.push({
+            owner: `${records[index].source}->${records[index].target}`,
+            overlap: depth,
+            protectedSelector: `${records[other].source}->${records[other].target}`,
+            reason: "Charge ownership pills overlap",
+          });
+        }
+      }
+    }
+    return result;
+  });
+  expect(violations).toEqual([]);
+}
+
+/**
+ * Prove compact impact ports remain outside every durable class crest while
+ * retaining one distinct endpoint per accepted activation.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @param {number} expectedCount
+ */
+async function assertImpactPortsOutsideClassCrests(page, expectedCount) {
+  const result = await page.evaluate(() => {
+    const battlefield = document.querySelector("#battlefield");
+    if (!(battlefield instanceof SVGSVGElement)) {
+      throw new Error("Battlefield is unavailable.");
+    }
+    /**
+     * Return the pixel-space distance between two axis-aligned bounds. A zero
+     * result means the bounds touch or overlap.
+     *
+     * @param {DOMRect} left
+     * @param {DOMRect} right
+     */
+    const separation = (left, right) => {
+      const horizontal = Math.max(
+        0,
+        Math.max(left.left, right.left) - Math.min(left.right, right.right),
+      );
+      const vertical = Math.max(
+        0,
+        Math.max(left.top, right.top) - Math.min(left.bottom, right.bottom),
+      );
+      return Math.hypot(horizontal, vertical);
+    };
+    /**
+     * @param {DOMRect} left
+     * @param {DOMRect} right
+     */
+    const overlaps = (left, right) =>
+      Math.min(left.right, right.right) > Math.max(left.left, right.left) &&
+      Math.min(left.bottom, right.bottom) > Math.max(left.top, right.top);
+    const icons = [...battlefield.querySelectorAll(".agent-class-icon")].map(
+      (icon) => ({
+        bounds: icon.getBoundingClientRect(),
+        slot: icon.closest(".agent")?.getAttribute("data-slot") ?? null,
+      }),
+    );
+    const impacts = [
+      ...battlefield.querySelectorAll(
+        ".combat-effect--activation .combat-impact__ring",
+      ),
+    ].map((ring) => {
+      const activation = ring.closest(".combat-effect--activation");
+      return {
+        bounds: ring.getBoundingClientRect(),
+        eventId: activation?.getAttribute("data-event-id") ?? null,
+      };
+    });
+    const violations = [];
+    let minimumImpactSeparation = Number.POSITIVE_INFINITY;
+    let minimumCrestSeparation = Number.POSITIVE_INFINITY;
+    for (let index = 0; index < icons.length; index += 1) {
+      for (const other of icons.slice(index + 1)) {
+        const icon = icons[index];
+        if (overlaps(icon.bounds, other.bounds)) {
+          violations.push({
+            first: icon.slot,
+            reason: "class crests overlap",
+            second: other.slot,
+          });
+        }
+      }
+    }
+    for (const impact of impacts) {
+      for (const icon of icons) {
+        minimumCrestSeparation = Math.min(
+          minimumCrestSeparation,
+          separation(impact.bounds, icon.bounds),
+        );
+        if (overlaps(impact.bounds, icon.bounds)) {
+          violations.push({
+            eventId: impact.eventId,
+            owner: icon.slot,
+            reason: "semantic impact port overlaps class crest",
+          });
+        }
+      }
+    }
+    for (let index = 0; index < impacts.length; index += 1) {
+      for (const other of impacts.slice(index + 1)) {
+        minimumImpactSeparation = Math.min(
+          minimumImpactSeparation,
+          separation(impacts[index].bounds, other.bounds),
+        );
+        if (overlaps(impacts[index].bounds, other.bounds)) {
+          violations.push({
+            first: impacts[index].eventId,
+            reason: "semantic impact ports overlap",
+            second: other.eventId,
+          });
+        }
+      }
+    }
+    return {
+      impactCount: impacts.length,
+      minimumCrestSeparation,
+      minimumImpactSeparation,
+      uniqueImpactCenters: new Set(
+        impacts.map(
+          ({ bounds }) =>
+            `${((bounds.left + bounds.right) / 2).toFixed(3)}:${(
+              (bounds.top + bounds.bottom) / 2
+            ).toFixed(3)}`,
+        ),
+      ).size,
+      violations,
+    };
+  });
+  expect(result.impactCount).toBe(expectedCount);
+  expect(result.uniqueImpactCenters).toBe(expectedCount);
+  expect(result.minimumCrestSeparation).toBeGreaterThanOrEqual(1);
+  expect(result.minimumImpactSeparation).toBeGreaterThanOrEqual(6);
+  expect(result.violations).toEqual([]);
+}
+
+/**
  * Release the current presentation gate when one exists.
  *
  * @param {import("@playwright/test").Page} page
@@ -177,7 +450,7 @@ function centerAt(centers, slot) {
  */
 function translatedPoint(transform) {
   const match = transform?.match(
-    /^translate\((-?(?:\d+\.?\d*|\.\d+)) (-?(?:\d+\.?\d*|\.\d+))\)$/,
+    /^translate\((-?(?:\d+\.?\d*|\.\d+)) (-?(?:\d+\.?\d*|\.\d+))\)(?: scale\(-?(?:\d+\.?\d*|\.\d+)\))?$/,
   );
   if (!match) {
     throw new Error(`Unexpected impact transform: ${transform}`);
@@ -377,6 +650,7 @@ test("moving Basics and focus fire terminate on successor bodies", async ({ page
   await assertBoundedChoreography(page);
   await skipIfAvailable(page);
 
+  await page.setViewportSize({ width: 960, height: 600 });
   await loadScenario(page, "moving_focus_crossfire");
   const focusInitial = await battlefieldCenters(page);
   const focusFrame = await advanceAnimatedFrame(page, 1);
@@ -408,11 +682,111 @@ test("moving Basics and focus fire terminate on successor bodies", async ({ page
     const targetBody = centerAt(focusSuccessor, 5);
     const impact = translatedPoint(record.impactTransform ?? null);
     const successorDistance = pointDistance(impact, targetBody);
-    expect(successorDistance).toBeLessThanOrEqual(targetBody.radius + 3.01);
+    expect(successorDistance).toBeGreaterThan(targetBody.radius + 2.5);
   }
+  await assertImpactPortsOutsideClassCrests(page, 7);
+  const focusRoutes = await page
+    .locator(
+      `${CHOREOGRAPHY_ROUTE_ROOT} .combat-route-effect--activation .combat-route__path`,
+    )
+    .evaluateAll((paths) =>
+      paths.map((path) => {
+        const owner = path.closest(".combat-route-effect--activation");
+        if (!(path instanceof SVGGeometryElement)) {
+          throw new Error("Combat route is not measurable.");
+        }
+        const sourceSlot = Number(owner?.getAttribute("data-source-slot"));
+        const targetSlot = Number(owner?.getAttribute("data-target-slot"));
+        const sourceBody = document.querySelector(
+          `#battlefield .agent[data-slot="${sourceSlot}"] .agent-body`,
+        );
+        const targetBody = document.querySelector(
+          `#battlefield .agent[data-slot="${targetSlot}"] .agent-body`,
+        );
+        if (
+          !(sourceBody instanceof SVGCircleElement) ||
+          !(targetBody instanceof SVGCircleElement)
+        ) {
+          throw new Error("Route endpoint bodies are not measurable.");
+        }
+        const length = path.getTotalLength();
+        const endpoint = path.getPointAtLength(length);
+        const beforeEndpoint = path.getPointAtLength(
+          Math.max(0, length - Math.min(2, length * 0.1)),
+        );
+        const tangent = {
+          x: endpoint.x - beforeEndpoint.x,
+          y: endpoint.y - beforeEndpoint.y,
+        };
+        const bearing = {
+          x: targetBody.cx.baseVal.value - sourceBody.cx.baseVal.value,
+          y: targetBody.cy.baseVal.value - sourceBody.cy.baseVal.value,
+        };
+        return {
+          endTangentDegrees: (Math.atan2(tangent.y, tangent.x) * 180) / Math.PI,
+          path: path.getAttribute("d"),
+          recipientFacing: tangent.x * bearing.x + tangent.y * bearing.y > 0,
+          source: sourceSlot,
+          target: targetSlot,
+        };
+      }),
+    );
+  expect(focusRoutes).toHaveLength(7);
+  expect(new Set(focusRoutes.map(({ path }) => path)).size).toBe(7);
+  expect(new Set(focusRoutes.map(({ source }) => source))).toEqual(
+    new Set([0, 1, 2, 3, 6, 7, 8]),
+  );
+  expect(focusRoutes.every(({ target }) => target === 5)).toBe(true);
+  expect(focusRoutes.every(({ recipientFacing }) => recipientFacing)).toBe(true);
+  const minimumTangentSeparation = focusRoutes.reduce(
+    (minimum, route, index) =>
+      focusRoutes.slice(index + 1).reduce((pairMinimum, other) => {
+        const rawDifference = Math.abs(
+          route.endTangentDegrees - other.endTangentDegrees,
+        );
+        const angularDifference = Math.min(rawDifference, 360 - rawDifference);
+        return Math.min(pairMinimum, angularDifference);
+      }, minimum),
+    Number.POSITIVE_INFINITY,
+  );
+  expect(minimumTangentSeparation).toBeGreaterThanOrEqual(20);
   await expect(
     page.locator(`${CHOREOGRAPHY_ROOT} .combat-effect--net-health`),
   ).toHaveAttribute("data-recipient-slot", "5");
+  const netPlacement = await page
+    .locator(`${CHOREOGRAPHY_ROOT} .combat-effect--net-health`)
+    .evaluate((net) => {
+      const labels = [
+        net.querySelector(".combat-net__recipient"),
+        net.querySelector(".combat-net__label"),
+      ].filter((element) => element instanceof SVGGraphicsElement);
+      const icons = [...document.querySelectorAll("#battlefield .agent-class-icon")];
+      /**
+       * @param {DOMRect} left
+       * @param {DOMRect} right
+       */
+      const overlaps = (left, right) =>
+        Math.min(left.right, right.right) > Math.max(left.left, right.left) &&
+        Math.min(left.bottom, right.bottom) > Math.max(left.top, right.top);
+      return labels.map((label) => {
+        const bounds = label.getBoundingClientRect();
+        return {
+          insideViewport:
+            bounds.left >= 0 &&
+            bounds.top >= 0 &&
+            bounds.right <= window.innerWidth &&
+            bounds.bottom <= window.innerHeight,
+          overlapsCrest: icons.some((icon) =>
+            overlaps(bounds, icon.getBoundingClientRect()),
+          ),
+          visible: bounds.width > 0 && bounds.height > 0,
+        };
+      });
+    });
+  expect(netPlacement).toEqual([
+    { insideViewport: true, overlapsCrest: false, visible: true },
+    { insideViewport: true, overlapsCrest: false, visible: true },
+  ]);
   await assertBoundedChoreography(page);
 });
 
@@ -576,6 +950,26 @@ test("converging Charge routes reproject while displacement chords persist exact
     )
     .evaluateAll((paths) => paths.map((path) => path.getAttribute("d")));
   expect(new Set(routePaths).size).toBe(3);
+  const ownershipLabels = page.locator(
+    `${CHOREOGRAPHY_ROUTE_ROOT} .combat-route-effect--activation[data-token-id="warrior_charge"] .combat-route__ownership`,
+  );
+  await expect(ownershipLabels).toHaveCount(3);
+  expect(
+    await ownershipLabels.evaluateAll((labels) =>
+      labels
+        .map((label) => ({
+          source: Number(label.getAttribute("data-source-slot")),
+          target: Number(label.getAttribute("data-target-slot")),
+          text: label.textContent?.trim(),
+        }))
+        .sort((left, right) => left.source - right.source),
+    ),
+  ).toEqual([
+    { source: 0, target: 5, text: "id_0 → id_5" },
+    { source: 1, target: 5, text: "id_1 → id_5" },
+    { source: 5, target: 0, text: "id_5 → id_0" },
+  ]);
+  await assertChargeOwnershipLayout(page, 3);
   await expect(
     page.locator(`${CHOREOGRAPHY_ROOT} .combat-effect--charge-displacement`),
   ).toHaveCount(3);
@@ -609,6 +1003,7 @@ test("converging Charge routes reproject while displacement chords persist exact
   expect(afterResize.epochKey).toBe(beforeResize.epochKey);
   expect(afterResize.animationIds).toEqual(beforeResize.animationIds);
   expect(afterResize.effectIds).toEqual(beforeResize.effectIds);
+  await assertChargeOwnershipLayout(page, 3);
 
   await page.locator("#motion-skip-button").click();
   await expect(
@@ -737,6 +1132,9 @@ test("maximum status stack keeps nine durable channels and exact activation asso
   ];
   const durable = page.locator('#battlefield .status-cell[data-slot="0"]');
   await expect(durable).toHaveCount(9);
+  await expect(
+    page.locator('#battlefield .status-dock[data-slot="0"]'),
+  ).toHaveAttribute("data-expanded", "true");
   expect(
     (
       await durable.evaluateAll((nodes) =>
@@ -744,6 +1142,29 @@ test("maximum status stack keeps nine durable channels and exact activation asso
       )
     ).sort(),
   ).toEqual(expectedTokens);
+  const cooldowns = await page
+    .locator("#battlefield .cooldown-dock")
+    .evaluateAll((docks) =>
+      docks
+        .map((dock) => ({
+          slot: Number(dock.getAttribute("data-slot")),
+          ticks: Number(
+            dock.querySelector(".cooldown-cell")?.getAttribute("data-ticks"),
+          ),
+        }))
+        .sort((left, right) => left.slot - right.slot),
+    );
+  expect(cooldowns).toEqual([
+    { slot: 0, ticks: 30 },
+    { slot: 5, ticks: 30 },
+    { slot: 6, ticks: 30 },
+    { slot: 8, ticks: 30 },
+  ]);
+  const durableLayer = page.locator(
+    '#battlefield [data-layer="durable-status-modifier"]',
+  );
+  await expect(durableLayer).toHaveAttribute("data-suppressed-status-slots", "");
+  await expect(durableLayer).toHaveAttribute("data-suppressed-cooldown-slots", "");
 
   const activations = page.locator(`${CHOREOGRAPHY_ROOT} .combat-effect--activation`);
   await expect(activations).toHaveCount(6);

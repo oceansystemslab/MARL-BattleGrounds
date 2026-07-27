@@ -68,7 +68,8 @@ export function syntheticDebuggerFrame(fixture) {
       : null;
   const transitionId = eventBatch?.transition_id ?? 0;
   return {
-    schema_version: 1,
+    schema_version: "renderer_fixture_v1",
+    frame_kind: "synthetic_renderer_fixture",
     session_id: `synthetic:${name}`,
     run_generation: 0,
     revision: 0,

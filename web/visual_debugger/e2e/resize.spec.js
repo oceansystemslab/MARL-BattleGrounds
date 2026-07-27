@@ -93,6 +93,7 @@ test("resize observer preserves authoritative DOM across split and stacked layou
   });
 
   const cases = [
+    { width: 1601, height: 900, layout: "split" },
     { width: 1440, height: 900, layout: "split" },
     { width: 1024, height: 768, layout: "split" },
     { width: 960, height: 600, layout: "split" },
@@ -197,4 +198,126 @@ test("resize observer preserves authoritative DOM across split and stacked layou
     await expect(focusedControl).toBeFocused();
   }
   expect(commandRequests).toBe(0);
+});
+
+test("toolbar wrapping preserves DOM, visual, and keyboard focus order", async ({
+  page,
+}) => {
+  await page.route("**/api/frame", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      json: syntheticFrame,
+      status: 200,
+    });
+  });
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+
+  for (const viewport of [
+    { width: 1601, height: 900 },
+    { width: 1440, height: 900 },
+    { width: 960, height: 600 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await settleResponsiveLayout(page);
+    const measurement = await page.evaluate(() => {
+      const toolbar = document.querySelector(".session-toolbar");
+      const facts = document.querySelector(".session-facts");
+      const motion = document.querySelector(".motion-controls");
+      const actions = document.querySelector(".toolbar-actions");
+      if (
+        !(toolbar instanceof HTMLElement) ||
+        !(facts instanceof HTMLElement) ||
+        !(motion instanceof HTMLElement) ||
+        !(actions instanceof HTMLElement)
+      ) {
+        throw new Error("Toolbar ordering targets are unavailable.");
+      }
+      /**
+       * @param {Element} element
+       */
+      const bounds = (element) => {
+        const box = element.getBoundingClientRect();
+        return {
+          bottom: box.bottom,
+          left: box.left,
+          right: box.right,
+          top: box.top,
+        };
+      };
+      const focusable = [...toolbar.querySelectorAll("select, input, button")].filter(
+        (element) =>
+          (element instanceof HTMLButtonElement ||
+            element instanceof HTMLInputElement ||
+            element instanceof HTMLSelectElement) &&
+          !element.disabled,
+      );
+      return {
+        actions: bounds(actions),
+        documentClientWidth: document.documentElement.clientWidth,
+        documentScrollWidth: document.documentElement.scrollWidth,
+        facts: bounds(facts),
+        flexDirection: getComputedStyle(toolbar).flexDirection,
+        flexWrap: getComputedStyle(toolbar).flexWrap,
+        focusKeys: focusable.map(
+          (element) =>
+            element.id ||
+            `motion-rate:${element.getAttribute("data-motion-rate") ?? "missing"}`,
+        ),
+        motion: bounds(motion),
+        orders: [facts, motion, actions].map(
+          (element) => getComputedStyle(element).order,
+        ),
+      };
+    });
+    /**
+     * @param {{bottom: number, left: number, right: number, top: number}} first
+     * @param {{bottom: number, left: number, right: number, top: number}} second
+     */
+    const visuallyPrecedes = (first, second) =>
+      first.bottom <= second.top + 1 ||
+      (Math.min(first.bottom, second.bottom) - Math.max(first.top, second.top) > 1 &&
+        first.left < second.left);
+
+    expect(measurement.flexDirection).toBe("row");
+    expect(measurement.flexWrap).toBe("wrap");
+    expect(measurement.orders).toEqual(["0", "0", "0"]);
+    expect(
+      visuallyPrecedes(measurement.facts, measurement.motion),
+      `${viewport.width}px facts must precede motion visually`,
+    ).toBe(true);
+    expect(
+      visuallyPrecedes(measurement.motion, measurement.actions),
+      `${viewport.width}px motion must precede actions visually`,
+    ).toBe(true);
+    expect(measurement.documentScrollWidth).toBeLessThanOrEqual(
+      measurement.documentClientWidth,
+    );
+
+    const toolbarControls = page.locator(
+      ".session-toolbar select:not(:disabled), " +
+        ".session-toolbar input:not(:disabled), " +
+        ".session-toolbar button:not(:disabled)",
+    );
+    await toolbarControls.first().focus();
+    const actualFocusKeys = [];
+    for (let index = 0; index < measurement.focusKeys.length; index += 1) {
+      actualFocusKeys.push(
+        await page.evaluate(() => {
+          const active = document.activeElement;
+          if (!(active instanceof HTMLElement)) {
+            return "missing";
+          }
+          return (
+            active.id ||
+            `motion-rate:${active.getAttribute("data-motion-rate") ?? "missing"}`
+          );
+        }),
+      );
+      if (index < measurement.focusKeys.length - 1) {
+        await page.keyboard.press("Tab");
+      }
+    }
+    expect(actualFocusKeys).toEqual(measurement.focusKeys);
+  }
 });

@@ -165,6 +165,57 @@ test("directional routes share one clock, gate submissions, reproject, and do no
     .locator(".combat-route__path")
     .evaluateAll((paths) => paths.map((path) => path.getAttribute("d")));
   expect(new Set(routePaths).size).toBe(routePaths.length);
+  const routeAssociations = await page
+    .locator(`${CHOREOGRAPHY_ROUTE_ROOT} .combat-route-effect--activation`)
+    .evaluateAll((routes) =>
+      routes.map((route) => {
+        const eventId = route.getAttribute("data-event-id");
+        const arrow = route.querySelector(".combat-route__arrow");
+        const impact = [...document.querySelectorAll(".combat-effect--activation")]
+          .find((effect) => effect.getAttribute("data-event-id") === eventId)
+          ?.querySelector(".combat-impact");
+        const arrowMatrix =
+          arrow instanceof SVGGraphicsElement
+            ? arrow.transform.baseVal.consolidate()?.matrix
+            : null;
+        const impactMatrix =
+          impact instanceof SVGGraphicsElement
+            ? impact.transform.baseVal.consolidate()?.matrix
+            : null;
+        return {
+          sourceClass: route.getAttribute("data-source-class"),
+          arrowTransform: arrow?.getAttribute("transform"),
+          markerImpactDistance:
+            arrowMatrix && impactMatrix
+              ? Math.hypot(
+                  arrowMatrix.e - impactMatrix.e,
+                  arrowMatrix.f - impactMatrix.f,
+                )
+              : null,
+        };
+      }),
+    );
+  expect(
+    routeAssociations.every(
+      ({ sourceClass }) => sourceClass !== null && sourceClass !== "unknown",
+    ),
+  ).toBe(true);
+  expect(
+    routeAssociations.every(({ arrowTransform }) =>
+      arrowTransform?.includes("rotate("),
+    ),
+  ).toBe(true);
+  const markerImpactDistances = routeAssociations.map(
+    ({ markerImpactDistance }) => markerImpactDistance,
+  );
+  expect(
+    Math.min(
+      ...markerImpactDistances.map((distance) =>
+        distance === null ? Number.NEGATIVE_INFINITY : distance,
+      ),
+    ),
+    JSON.stringify(routeAssociations),
+  ).toBeGreaterThan(4);
   expect(
     await page
       .locator(".combat-impact")
@@ -384,6 +435,7 @@ test("reduced motion preserves damage/heal intent and one recipient NET outcome"
   await expect(net).toHaveCount(1);
   await expect(net).toHaveAttribute("data-recipient-slot", "5");
   await expect(net).toHaveAttribute("data-net-delta", "0");
+  await expect(net.locator(".combat-net__recipient")).toHaveText("id_5");
   await expect(net.locator(".combat-net__label")).toHaveText("HP unchanged");
   await expect(page.locator(".combat-effect--activation[data-net-delta]")).toHaveCount(
     0,
@@ -394,6 +446,9 @@ test("reduced motion preserves damage/heal intent and one recipient NET outcome"
     ),
   ).toBe(false);
   await assertBoundedChoreography(page);
+  await expect(page).toHaveScreenshot("reduced-motion-mixed-net-1440x900.png", {
+    animations: "allow",
+  });
 
   await finishControllerClock(page, "cleanup");
   await expect(page.locator(CHOREOGRAPHY_ROOT)).toHaveAttribute(
@@ -512,6 +567,9 @@ test("mid-transition Motion Off retains one static batch through bounded cleanup
     expect.stringMatching(/:cleanup$/),
   ]);
   await assertBoundedChoreography(page);
+  await expect(page).toHaveScreenshot("motion-off-static-route-batch-1440x900.png", {
+    animations: "allow",
+  });
   expect(flow.commands).toHaveLength(1);
 
   await page.getByRole("button", { name: "0.5×", exact: true }).click();
@@ -622,7 +680,7 @@ test("rejection and composite Trap lifecycle retain only exact supplied facts", 
   await expect(lifecycle).toHaveCount(1);
   await expect(lifecycle.locator(".combat-lifecycle__shard")).toHaveCount(6);
   await expect(
-    lifecycle.locator('.combat-lifecycle__status-icon[data-icon="status-trap"]'),
+    lifecycle.locator('.combat-lifecycle__status-icon[data-icon="status-stun"]'),
   ).toHaveCount(1);
   await expect(
     lifecycle.locator(
