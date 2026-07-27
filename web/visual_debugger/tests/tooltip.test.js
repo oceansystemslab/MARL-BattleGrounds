@@ -149,7 +149,7 @@ test("unknown future kinds remain deterministic and rank below known map cues", 
   );
 });
 
-test("placement uses right-below when every quadrant is equally valid", () => {
+test("placement favors the nearest viewport edge when every quadrant fits", () => {
   const placement = placeTooltip({
     anchorRect: { left: 120, top: 80, right: 160, bottom: 120 },
     pointer: { x: 140, y: 100 },
@@ -158,9 +158,9 @@ test("placement uses right-below when every quadrant is equally valid", () => {
   });
 
   assert.deepEqual(placement, {
-    left: 172,
+    left: 28,
     top: 132,
-    placement: "right-below",
+    placement: "left-below",
   });
   assert.equal(Object.isFrozen(placement), true);
 });
@@ -199,6 +199,63 @@ test("placement clamps to the viewport gutter without overlapping the anchor", (
   assert.ok(placement.left >= anchorRect.right);
   assert.ok(placement.left + 110 <= 172);
   assert.ok(placement.top + 50 <= 172);
+});
+
+test("placement chooses owner clearance before a nominally better viewport fit", () => {
+  const anchorRect = { left: 145, top: 132, right: 165, bottom: 152 };
+  const placement = placeTooltip({
+    anchorRect,
+    pointer: { x: 155, y: 142 },
+    tooltipSize: { width: 250, height: 110 },
+    viewport: { left: 0, top: 0, right: 320, bottom: 240 },
+  });
+  const tooltipRect = {
+    left: placement.left,
+    top: placement.top,
+    right: placement.left + 250,
+    bottom: placement.top + 110,
+  };
+  const overlapWidth =
+    Math.min(tooltipRect.right, anchorRect.right) -
+    Math.max(tooltipRect.left, anchorRect.left);
+  const overlapHeight =
+    Math.min(tooltipRect.bottom, anchorRect.bottom) -
+    Math.max(tooltipRect.top, anchorRect.top);
+
+  assert.equal(Math.max(overlapWidth, 0) * Math.max(overlapHeight, 0), 0);
+  assert.ok(placement.left >= 8);
+  assert.ok(placement.top >= 8);
+  assert.ok(tooltipRect.right <= 312);
+  assert.ok(tooltipRect.bottom <= 232);
+});
+
+test("placement avoids the inspected agent and its local dock envelope", () => {
+  const localEnvelope = { left: 105, top: 72, right: 225, bottom: 178 };
+  const placement = placeTooltip({
+    anchorRect: { left: 180, top: 82, right: 202, bottom: 100 },
+    pointer: { x: 191, y: 91 },
+    tooltipSize: { width: 138, height: 72 },
+    viewport: { left: 0, top: 0, right: 420, bottom: 280 },
+    protectedRects: [localEnvelope],
+  });
+  const tooltipRect = {
+    left: placement.left,
+    top: placement.top,
+    right: placement.left + 138,
+    bottom: placement.top + 72,
+  };
+  const overlapWidth =
+    Math.min(tooltipRect.right, localEnvelope.right) -
+    Math.max(tooltipRect.left, localEnvelope.left);
+  const overlapHeight =
+    Math.min(tooltipRect.bottom, localEnvelope.bottom) -
+    Math.max(tooltipRect.top, localEnvelope.top);
+
+  assert.equal(Math.max(overlapWidth, 0) * Math.max(overlapHeight, 0), 0);
+  assert.ok(tooltipRect.left >= 8);
+  assert.ok(tooltipRect.top >= 8);
+  assert.ok(tooltipRect.right <= 412);
+  assert.ok(tooltipRect.bottom <= 272);
 });
 
 test("registration stores a defensive descriptor and exposes no prose in markup", () => {
@@ -361,6 +418,10 @@ test("delegated controller switches one singleton tooltip and hides on leave", (
     assert.equal(tooltip.element.hidden, false);
     assert.equal(title.element.textContent, "Agent id_4");
     assert.equal(tooltip.attributes.get("data-tooltip-kind"), "agent");
+    assert.match(
+      tooltip.attributes.get("data-tooltip-placement") ?? "",
+      /^(?:right|left)-(?:below|above)$/,
+    );
 
     hitElements = [status.element, agent.element, range.element];
     dispatchPointerMove(rootTarget, 125, 85);
@@ -377,6 +438,7 @@ test("delegated controller switches one singleton tooltip and hides on leave", (
     assert.equal(tooltip.element.hidden, true);
     assert.equal(title.element.textContent, "");
     assert.equal(details.element.textContent, "");
+    assert.equal(tooltip.attributes.has("data-tooltip-placement"), false);
   } finally {
     controller.destroy();
   }
@@ -485,9 +547,9 @@ test("focus describes the real trigger and pointer leave restores its explanatio
     assert.equal(title.element.textContent, "Move east");
     assert.equal(trigger.attributes.get("aria-describedby"), "researcher-tooltip");
 
-    const escape = new Event("keydown");
-    Object.defineProperty(escape, "key", { value: "Escape" });
-    rootTarget.dispatchEvent(escape);
+    const escapeEvent = new Event("keydown");
+    Object.defineProperty(escapeEvent, "key", { value: "Escape" });
+    rootTarget.dispatchEvent(escapeEvent);
     assert.equal(tooltip.element.hidden, true);
     assert.equal(trigger.attributes.has("aria-describedby"), false);
   } finally {

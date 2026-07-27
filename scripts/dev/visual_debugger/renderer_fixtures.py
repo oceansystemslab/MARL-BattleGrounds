@@ -49,6 +49,7 @@ from marl_battlegrounds.rendering.vocabulary import (
 
 type RendererFixtureName = Literal[
     "visual_vocabulary",
+    "durable_controls",
     "crowded_teamfight",
     "route_collision",
     "mixed_net_zero",
@@ -298,21 +299,21 @@ def _batch(
 
 
 _CROWDED_POSITIONS = (
-    (4.6, 4.4),
-    (5.3, 5.0),
-    (6.8, 4.1),
-    (8.1, 4.3),
-    (9.4, 4.1),
-    (4.8, 6.2),
-    (6.5, 5.0),
-    (6.9, 6.2),
-    (8.2, 6.0),
-    (9.5, 6.2),
+    (2.5, 3.4),
+    (5.25, 3.4),
+    (8.0, 3.4),
+    (10.75, 3.4),
+    (13.5, 3.4),
+    (2.5, 8.6),
+    (5.25, 8.6),
+    (8.0, 8.6),
+    (10.75, 8.6),
+    (13.5, 8.6),
 )
 _CROWDED_PRE_ANCHORS: Mapping[int, tuple[float, float]] = MappingProxyType(
     {
-        1: (5.3, 4.1),
-        6: (6.5, 5.9),
+        1: (5.25, 2.6),
+        6: (5.25, 9.4),
     }
 )
 _CROWDED_STATUS_TOKENS: Mapping[int, tuple[StatusTokenId, ...]] = MappingProxyType(
@@ -368,13 +369,13 @@ _CROWDED_SCENE = BattlefieldSceneV1(
             ObstacleSceneV1(
                 obstacle_id="synthetic-crowded-pillar",
                 kind="pillar",
-                center=(2.0, 9.5),
+                center=(1.25, 6.0),
                 radius=0.7,
             ),
             ObstacleSceneV1(
                 obstacle_id="synthetic-crowded-wall",
                 kind="wall",
-                center=(13.0, 6.0),
+                center=(14.75, 6.0),
                 width=0.8,
                 height=4.0,
                 theta=0.0,
@@ -714,18 +715,42 @@ _VOCABULARY_POSITIONS = (
 )
 _VOCABULARY_AGENTS = _agents(
     _VOCABULARY_POSITIONS,
+    status_tokens={
+        0: (
+            "stun_warrior_charge",
+            "stun_hunter_trap",
+            "stun_rogue_poison",
+        ),
+        2: (
+            "slow_warrior_charge",
+            "slow_hunter_basic",
+            "slow_rogue_poison",
+        ),
+    },
     health={5: 87.654, 9: 78.5},
     cooldowns={0: 1, 1: 2, 2: 3, 3: 4, 4: 5},
 )
-_VOCABULARY_AGENT_MAP = {
-    agent.global_slot: agent for agent in _VOCABULARY_AGENTS
-}
+_VOCABULARY_AGENT_MAP = {agent.global_slot: agent for agent in _VOCABULARY_AGENTS}
 _VOCABULARY_SCENE = BattlefieldSceneV1(
     schema_version=SCENE_SCHEMA_VERSION,
     audience="researcher",
     audience_badge="PRIVILEGED RESEARCHER VIEW · SYNTHETIC VISUAL VOCABULARY",
     map=MapSceneV1(width=16.0, height=12.0),
     agents=_VOCABULARY_AGENTS,
+    aura_fields=(
+        AuraFieldSceneV1(
+            source_global_slot=0,
+            token_id="mage_amplification",
+            center=_VOCABULARY_POSITIONS[0],
+            radius=1.05,
+        ),
+        AuraFieldSceneV1(
+            source_global_slot=1,
+            token_id="warrior_mitigation",
+            center=_VOCABULARY_POSITIONS[1],
+            radius=1.05,
+        ),
+    ),
     ranges=(
         RangeSceneV1(
             global_slot=0,
@@ -733,11 +758,14 @@ _VOCABULARY_SCENE = BattlefieldSceneV1(
             center=_VOCABULARY_POSITIONS[0],
             radius=2.4,
         ),
-        RangeSceneV1(
-            global_slot=0,
-            kind="basic",
-            center=_VOCABULARY_POSITIONS[0],
-            radius=1.8,
+        *(
+            RangeSceneV1(
+                global_slot=slot,
+                kind="basic",
+                center=_VOCABULARY_POSITIONS[slot],
+                radius=0.85,
+            )
+            for slot in range(5)
         ),
         RangeSceneV1(
             global_slot=0,
@@ -765,6 +793,19 @@ _VOCABULARY_ULTIMATE_TOKENS: tuple[ActivationTokenId, ...] = (
     "rogue_poison",
     "holy_word",
 )
+_VOCABULARY_ACTIVATION_SPECS: tuple[
+    tuple[ActivationTokenId, int, int | None],
+    ...,
+] = (
+    *(
+        (token_id, slot, slot + 5)
+        for slot, token_id in enumerate(_VOCABULARY_BASIC_TOKENS)
+    ),
+    *(
+        (token_id, slot, None if token_id == "mage_burst" else slot + 5)
+        for slot, token_id in enumerate(_VOCABULARY_ULTIMATE_TOKENS)
+    ),
+)
 _VOCABULARY_ACTIVATIONS = tuple(
     _activation(
         fixture_name="visual_vocabulary",
@@ -775,20 +816,7 @@ _VOCABULARY_ACTIVATIONS = tuple(
         agents=_VOCABULARY_AGENT_MAP,
     )
     for ordinal, (token_id, source_slot, target_slot) in enumerate(
-        (
-            *(
-                (token_id, slot, slot + 5)
-                for slot, token_id in enumerate(_VOCABULARY_BASIC_TOKENS)
-            ),
-            *(
-                (
-                    token_id,
-                    slot,
-                    None if token_id == "mage_burst" else slot + 5,
-                )
-                for slot, token_id in enumerate(_VOCABULARY_ULTIMATE_TOKENS)
-            ),
-        )
+        _VOCABULARY_ACTIVATION_SPECS
     )
 )
 _VOCABULARY_BATCH = _batch(
@@ -815,6 +843,46 @@ _VOCABULARY_BATCH = _batch(
             outcome="healing",
         ),
     )
+)
+
+_DURABLE_CONTROL_POSITIONS = (
+    (4.0, 5.0),
+    (0.0, 0.0),
+    (0.0, 0.0),
+    (0.0, 0.0),
+    (0.0, 0.0),
+    (12.0, 5.0),
+    (0.0, 0.0),
+    (0.0, 0.0),
+    (0.0, 0.0),
+    (0.0, 0.0),
+)
+_DURABLE_CONTROL_AGENTS = _agents(
+    _DURABLE_CONTROL_POSITIONS,
+    status_tokens={
+        0: (
+            "stun_warrior_charge",
+            "stun_hunter_trap",
+            "stun_rogue_poison",
+        ),
+        5: (
+            "slow_warrior_charge",
+            "slow_hunter_basic",
+            "slow_rogue_poison",
+        ),
+    },
+    included_slots=(0, 5),
+)
+_DURABLE_CONTROL_SCENE = BattlefieldSceneV1(
+    schema_version=SCENE_SCHEMA_VERSION,
+    audience="researcher",
+    audience_badge="PRIVILEGED RESEARCHER VIEW · SYNTHETIC DURABLE CONTROLS",
+    map=MapSceneV1(width=16.0, height=10.0),
+    agents=_DURABLE_CONTROL_AGENTS,
+    selection=SelectionSceneV1(
+        controlled_global_slot=0,
+        selected_global_slot=5,
+    ),
 )
 
 
@@ -1088,6 +1156,14 @@ RENDERER_FIXTURES: Mapping[str, RendererFixtureV1] = MappingProxyType(
             ),
             scene=_VOCABULARY_SCENE,
             event_batch=_VOCABULARY_BATCH,
+        ),
+        "durable_controls": RendererFixtureV1(
+            name="durable_controls",
+            description=(
+                "SYNTHETIC: canonical stun and slow duration glyphs with "
+                "source-class accents for each originating class."
+            ),
+            scene=_DURABLE_CONTROL_SCENE,
         ),
         "crowded_teamfight": RendererFixtureV1(
             name="crowded_teamfight",

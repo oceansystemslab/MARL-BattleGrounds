@@ -443,9 +443,7 @@ def test_activation_events_preserve_multiplicity_successor_anchors_and_no_amount
     assert "healing" not in payload  # type: ignore[operator]
 
 
-def test_completed_activation_anchors_use_successor_with_charge_as_prestate_exception() -> (
-    None
-):
+def test_completed_anchors_use_successor_with_charge_prestate_exception() -> None:
     sessions: list[DebuggerSession] = []
     moving_basics = submit_next_script_frame(_session("moving_basic_crossfire"))
     sessions.append(moving_basics)

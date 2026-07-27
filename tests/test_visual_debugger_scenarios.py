@@ -294,7 +294,7 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
             ),
             (
                 (3.0, 6.0),
-                (5.2, 4.2),
+                (5.5, 4.4),
                 (8.0, 5.0),
                 (8.0, 6.0),
                 (8.0, 8.0),
@@ -402,14 +402,14 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
                 PRIEST_CLASS_ID,
             ),
             (
-                (6.0, 6.0),
-                (7.0, 5.0),
-                (8.0, 3.0),
-                (8.0, 4.6),
+                (6.02, 4.02),
+                (6.52, 6.0),
+                (6.02, 7.98),
+                (9.48, 6.0),
                 (8.0, 6.0),
-                (10.5, 6.0),
-                (9.8, 8.0),
-                (6.2, 8.0),
+                (9.98, 4.02),
+                (9.98, 7.98),
+                (8.0, 8.8),
             ),
             "scripted",
             2,
@@ -466,8 +466,8 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
             (
                 (8.0, 6.0),
                 (10.5, 7.0),
-                (3.0, 6.0),
-                (8.0, 2.5),
+                (8.0, 1.0),
+                (10.0, 4.0),
                 (11.0, 6.0),
                 (8.0, 7.4),
             ),
@@ -1179,6 +1179,12 @@ def test_moving_focus_crossfire_reference_trajectory() -> None:
         not np.array_equal(before[global_slot], after[global_slot])
         for global_slot in involved_slots
     )
+    pair_distances = tuple(
+        float(np.linalg.norm(after[left] - after[right]))
+        for index, left in enumerate(involved_slots)
+        for right in involved_slots[index + 1 :]
+    )
+    assert min(pair_distances) > 1.25
 
 
 def test_charge_convergence_reference_trajectory() -> None:

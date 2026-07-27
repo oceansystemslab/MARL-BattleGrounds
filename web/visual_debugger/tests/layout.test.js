@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   createViewportTransform,
+  layoutRequiredDocks,
   layoutStatusDocks,
   protectedBodyRect,
   rectanglesIntersect,
@@ -128,6 +129,55 @@ test("isolated nine-status dock stays expanded, ordered, and bounded", () => {
   assert.equal(viewportOverflow(dock.bounds, VIEWPORT), 0);
   assert.equal(rectanglesIntersect(dock.bounds, body), false);
   assert.ok(Math.abs(dock.tangentShift) <= 24);
+});
+
+test("minimum-viewport status summaries retain controlled and ordinary truth", () => {
+  const ordinaryStatuses = statuses(9, "ordinary");
+  const controlledStatuses = statuses(9, "controlled");
+  const layout = layoutStatusDocks(
+    {
+      viewport: {
+        left: 0,
+        top: 0,
+        right: 557,
+        bottom: 384,
+        width: 557,
+        height: 384,
+      },
+      agents: [
+        {
+          globalSlot: 0,
+          center: { x: 120, y: 190 },
+          radius: 22,
+          statuses: controlledStatuses,
+          controlled: true,
+        },
+        {
+          globalSlot: 1,
+          center: { x: 430, y: 190 },
+          radius: 22,
+          statuses: ordinaryStatuses,
+        },
+      ],
+    },
+    { ordinaryVisibleLimit: 0, requiredVisibleLimit: 0 },
+  );
+
+  const controlled = dockBySlot(layout, 0);
+  const ordinary = dockBySlot(layout, 1);
+  assert.equal(controlled.visibleCount, 0);
+  assert.equal(controlled.hiddenCount, 9);
+  assert.equal(controlled.expanded, false);
+  assert.equal(controlled.overflowLabel, "+9");
+  assert.deepEqual(controlled.hiddenStatuses, controlledStatuses);
+  assert.equal(ordinary.visibleCount, 0);
+  assert.equal(ordinary.hiddenCount, 9);
+  assert.equal(ordinary.overflowLabel, "+9");
+  assert.deepEqual(
+    [...ordinary.visibleStatuses, ...ordinary.hiddenStatuses],
+    ordinaryStatuses,
+  );
+  assert.equal(rectanglesIntersect(controlled.bounds, ordinary.bounds), false);
 });
 
 test("dense placement is input-order invariant and preserves priority truth", () => {
@@ -351,6 +401,363 @@ test("required one-cell docks remain expanded and collision-free in supported ge
     rectanglesIntersect(forward.docks[0].bounds, forward.docks[1].bounds),
     false,
   );
+});
+
+test("mixed required status and cooldown docks share one deterministic search", () => {
+  const agents = [
+    {
+      globalSlot: 2,
+      center: { x: 240, y: 200 },
+      radius: 20,
+      statuses: [],
+      controlled: true,
+    },
+    {
+      globalSlot: 7,
+      center: { x: 360, y: 200 },
+      radius: 20,
+      statuses: [],
+      selected: true,
+    },
+  ];
+  const requests = [
+    {
+      layoutKey: "status:2",
+      globalSlot: 2,
+      statuses: statuses(9, "controlled"),
+      dockOptions: {
+        cellWidth: 28,
+        cellHeight: 18,
+        cellGap: 2,
+        dockGap: 5,
+      },
+      priority: 0,
+    },
+    {
+      layoutKey: "status:7",
+      globalSlot: 7,
+      statuses: statuses(9, "selected"),
+      dockOptions: {
+        cellWidth: 28,
+        cellHeight: 18,
+        cellGap: 2,
+        dockGap: 5,
+      },
+      priority: 0,
+    },
+    {
+      layoutKey: "cooldown:2",
+      globalSlot: 2,
+      statuses: [{ ticks: 30 }],
+      dockOptions: {
+        cellWidth: 38,
+        cellHeight: 18,
+        cellGap: 2,
+        dockGap: 5,
+      },
+      priority: 1,
+    },
+    {
+      layoutKey: "cooldown:7",
+      globalSlot: 7,
+      statuses: [{ ticks: 1 }],
+      dockOptions: {
+        cellWidth: 38,
+        cellHeight: 18,
+        cellGap: 2,
+        dockGap: 5,
+      },
+      priority: 1,
+    },
+  ];
+  const options = {
+    bodyPadding: 4,
+    selectionAllowance: 12,
+    dockGap: 5,
+  };
+  const input = {
+    agents,
+    requests,
+    viewport: VIEWPORT,
+  };
+  const forward = layoutRequiredDocks(input, options);
+  const reversed = layoutRequiredDocks(
+    {
+      ...input,
+      agents: [...agents].reverse(),
+      requests: [...requests].reverse(),
+    },
+    options,
+  );
+
+  assert.deepEqual(forward, reversed);
+  assert.deepEqual(forward.placementOrder, [
+    "status:2",
+    "status:7",
+    "cooldown:2",
+    "cooldown:7",
+  ]);
+  assert.deepEqual(forward.suppressedLayoutKeys, []);
+  assert.deepEqual(
+    forward.docks.map(({ layoutKey }) => layoutKey),
+    ["cooldown:2", "status:2", "cooldown:7", "status:7"],
+  );
+  for (const dock of forward.docks) {
+    assert.equal(dock.required, true);
+    assert.equal(dock.expanded, true);
+    assert.equal(dock.hiddenCount, 0);
+    assert.equal(dock.collisionFree, true);
+    assert.equal(viewportOverflow(dock.bounds, VIEWPORT), 0);
+    for (const body of forward.protectedBodies) {
+      assert.equal(rectanglesIntersect(dock.bounds, body.bounds), false);
+    }
+  }
+  for (let index = 0; index < forward.docks.length; index += 1) {
+    for (let other = index + 1; other < forward.docks.length; other += 1) {
+      assert.equal(
+        rectanglesIntersect(forward.docks[index].bounds, forward.docks[other].bounds),
+        false,
+      );
+    }
+  }
+});
+
+test("required dock fallback preserves feasible priority truth around one impossible cue", () => {
+  const agents = [
+    {
+      globalSlot: 2,
+      center: { x: 200, y: 200 },
+      radius: 20,
+      statuses: [],
+      controlled: true,
+    },
+    {
+      globalSlot: 7,
+      center: { x: 400, y: 200 },
+      radius: 20,
+      statuses: [],
+      selected: true,
+    },
+  ];
+  const requests = [
+    {
+      layoutKey: "status:2",
+      globalSlot: 2,
+      statuses: statuses(9, "controlled"),
+      dockOptions: {
+        cellWidth: 28,
+        cellHeight: 18,
+        cellGap: 2,
+        dockGap: 5,
+      },
+      priority: 0,
+    },
+    {
+      layoutKey: "status:7",
+      globalSlot: 7,
+      statuses: statuses(9, "selected"),
+      dockOptions: {
+        cellWidth: 28,
+        cellHeight: 18,
+        cellGap: 2,
+        dockGap: 5,
+      },
+      priority: 0,
+    },
+    {
+      layoutKey: "cooldown:2",
+      globalSlot: 2,
+      statuses: [{ ticks: 30 }],
+      dockOptions: {
+        cellWidth: 1_000,
+        cellHeight: 18,
+        cellGap: 2,
+        dockGap: 5,
+      },
+      priority: 1,
+    },
+    {
+      layoutKey: "cooldown:7",
+      globalSlot: 7,
+      statuses: [{ ticks: 1 }],
+      dockOptions: {
+        cellWidth: 38,
+        cellHeight: 18,
+        cellGap: 2,
+        dockGap: 5,
+      },
+      priority: 1,
+    },
+  ];
+  const options = {
+    bodyPadding: 4,
+    selectionAllowance: 12,
+    dockGap: 5,
+  };
+  const input = {
+    agents,
+    requests,
+    viewport: VIEWPORT,
+  };
+  const forward = layoutRequiredDocks(input, options);
+  const reversed = layoutRequiredDocks(
+    {
+      ...input,
+      agents: [...agents].reverse(),
+      requests: [...requests].reverse(),
+    },
+    options,
+  );
+
+  assert.deepEqual(forward, reversed);
+  assert.deepEqual(forward.placementOrder, [
+    "status:2",
+    "status:7",
+    "cooldown:2",
+    "cooldown:7",
+  ]);
+  assert.deepEqual(forward.compactedLayoutKeys, ["cooldown:2"]);
+  assert.deepEqual(forward.suppressedLayoutKeys, []);
+  assert.deepEqual(
+    forward.docks.map(({ layoutKey }) => layoutKey),
+    ["cooldown:2", "status:2", "cooldown:7", "status:7"],
+  );
+  const cooldownFallback = forward.docks.find(
+    ({ layoutKey }) => layoutKey === "cooldown:2",
+  );
+  assert.ok(cooldownFallback);
+  assert.equal(cooldownFallback.compactFallback, true);
+  assert.equal(cooldownFallback.visibleCount, 0);
+  assert.equal(cooldownFallback.hiddenCount, 1);
+  assert.deepEqual(cooldownFallback.hiddenStatuses, [{ ticks: 30 }]);
+  assert.equal(cooldownFallback.collisionFree, true);
+  assert.equal(viewportOverflow(cooldownFallback.bounds, VIEWPORT), 0);
+  for (const statusKey of ["status:2", "status:7"]) {
+    const dock = forward.docks.find(({ layoutKey }) => layoutKey === statusKey);
+    assert.ok(dock);
+    assert.equal(dock.compactFallback, false);
+    assert.equal(dock.expanded, true);
+    assert.equal(dock.visibleCount, 9);
+    assert.equal(dock.hiddenCount, 0);
+  }
+  for (let index = 0; index < forward.docks.length; index += 1) {
+    for (let other = index + 1; other < forward.docks.length; other += 1) {
+      assert.equal(
+        rectanglesIntersect(forward.docks[index].bounds, forward.docks[other].bounds),
+        false,
+      );
+    }
+  }
+});
+
+test("required status fallback retains every selected status behind one compact marker", () => {
+  const selectedStatuses = statuses(9, "selected-required");
+  const layout = layoutRequiredDocks(
+    {
+      agents: [
+        {
+          globalSlot: 4,
+          center: { x: 300, y: 200 },
+          radius: 20,
+          statuses: [],
+          selected: true,
+        },
+      ],
+      requests: [
+        {
+          layoutKey: "status:4",
+          globalSlot: 4,
+          statuses: selectedStatuses,
+          dockOptions: {
+            cellWidth: 1_000,
+            cellHeight: 18,
+            cellGap: 2,
+            dockGap: 5,
+          },
+          priority: 0,
+        },
+      ],
+      viewport: VIEWPORT,
+    },
+    {
+      bodyPadding: 4,
+      selectionAllowance: 12,
+      dockGap: 5,
+    },
+  );
+
+  assert.deepEqual(layout.compactedLayoutKeys, ["status:4"]);
+  assert.deepEqual(layout.suppressedLayoutKeys, []);
+  assert.equal(layout.docks.length, 1);
+  const fallback = layout.docks[0];
+  assert.equal(fallback.layoutKey, "status:4");
+  assert.equal(fallback.compactFallback, true);
+  assert.equal(fallback.visibleCount, 0);
+  assert.equal(fallback.hiddenCount, 9);
+  assert.equal(fallback.totalCount, 9);
+  assert.deepEqual(fallback.hiddenStatuses, selectedStatuses);
+  assert.equal(fallback.collisionFree, true);
+  assert.equal(viewportOverflow(fallback.bounds, VIEWPORT), 0);
+  assert.equal(
+    rectanglesIntersect(fallback.bounds, layout.protectedBodies[0].bounds),
+    false,
+  );
+});
+
+test("large required-dock sets take the bounded deterministic priority path", () => {
+  const agents = Array.from({ length: 20 }, (_, globalSlot) => ({
+    globalSlot,
+    center: { x: 300, y: 200 },
+    radius: 20,
+    statuses: [],
+    controlled: globalSlot === 0,
+    selected: globalSlot === 1,
+  }));
+  const requests = agents.map(({ globalSlot }) => ({
+    layoutKey: `cooldown:${globalSlot}`,
+    globalSlot,
+    statuses: [{ ticks: 30 }],
+    dockOptions: {
+      cellWidth: 38,
+      cellHeight: 18,
+      cellGap: 2,
+      dockGap: 5,
+    },
+    priority: 1,
+  }));
+  const input = { agents, requests, viewport: VIEWPORT };
+
+  const startedAt = performance.now();
+  const forward = layoutRequiredDocks(input);
+  const elapsedMilliseconds = performance.now() - startedAt;
+  const reversed = layoutRequiredDocks({
+    ...input,
+    agents: [...agents].reverse(),
+    requests: [...requests].reverse(),
+  });
+
+  assert.ok(
+    elapsedMilliseconds < 1_000,
+    `required dock layout exceeded its bounded budget: ${elapsedMilliseconds}ms`,
+  );
+  assert.deepEqual(forward, reversed);
+  assert.equal(forward.suppressedLayoutKeys.length, 0);
+  assert.equal(forward.docks.length, requests.length);
+  assert.equal(
+    forward.docks.filter(({ compactFallback }) => compactFallback).length > 0,
+    true,
+  );
+  for (let index = 0; index < forward.docks.length; index += 1) {
+    const dock = forward.docks[index];
+    assert.equal(dock.collisionFree, true);
+    assert.equal(viewportOverflow(dock.bounds, VIEWPORT), 0);
+    for (let other = index + 1; other < forward.docks.length; other += 1) {
+      assert.equal(
+        rectanglesIntersect(dock.bounds, forward.docks[other].bounds),
+        false,
+      );
+    }
+  }
 });
 
 test("protected body allowance grows only for selected or controlled agents", () => {

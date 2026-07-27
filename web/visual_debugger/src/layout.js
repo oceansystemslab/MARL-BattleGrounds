@@ -1,5 +1,15 @@
 const EPSILON = 1e-9;
 const STATUS_DOCK_SEARCH_LIMIT = 100_000;
+const REQUIRED_DOCK_SEARCH_LIMIT = 5_000;
+const REQUIRED_DOCK_JOINT_SEARCH_MAX_REQUESTS = 6;
+const REQUIRED_DOCK_FALLBACK_OPTIONS = Object.freeze({
+  cellWidth: 32,
+  cellHeight: 16,
+  cellGap: 0,
+  dockGap: 3,
+  tangentStep: 6,
+  maxTangentShift: 24,
+});
 
 /** @type {ReadonlyArray<"north" | "east" | "west" | "south">} */
 export const STATUS_DOCK_ANCHORS = Object.freeze(["north", "east", "west", "south"]);
@@ -15,6 +25,8 @@ export const DEFAULT_STATUS_DOCK_OPTIONS = Object.freeze({
   dockGap: 7,
   tangentStep: 8,
   maxTangentShift: 24,
+  ordinaryVisibleLimit: STATUS_DOCK_CAPACITY,
+  requiredVisibleLimit: STATUS_DOCK_CAPACITY,
 });
 
 /**
@@ -73,12 +85,28 @@ export const DEFAULT_STATUS_DOCK_OPTIONS = Object.freeze({
  *   dockGap?: number,
  *   tangentStep?: number,
  *   maxTangentShift?: number,
+ *   ordinaryVisibleLimit?: number,
+ *   requiredVisibleLimit?: number,
  * }} StatusDockOptions
  * @typedef {{
  *   agents: ReadonlyArray<StatusDockAgent>,
  *   viewport: Rectangle,
  *   reservedRects?: ReadonlyArray<Rectangle>,
  * }} StatusDockLayoutInput
+ * @typedef {{
+ *   layoutKey: string,
+ *   globalSlot: number,
+ *   statuses: ReadonlyArray<unknown>,
+ *   dockOptions?: StatusDockOptions,
+ *   fallbackDockOptions?: StatusDockOptions,
+ *   priority?: number,
+ * }} RequiredDockRequest
+ * @typedef {{
+ *   agents: ReadonlyArray<StatusDockAgent>,
+ *   requests: ReadonlyArray<RequiredDockRequest>,
+ *   viewport: Rectangle,
+ *   reservedRects?: ReadonlyArray<Rectangle>,
+ * }} RequiredDockLayoutInput
  * @typedef {{
  *   viewportOverflow: number,
  *   bodyOrReservedIntersection: number,
@@ -118,6 +146,17 @@ export const DEFAULT_STATUS_DOCK_OPTIONS = Object.freeze({
  *   placementOrder: ReadonlyArray<number>,
  *   suppressedGlobalSlots: ReadonlyArray<number>,
  * }} StatusDockLayout
+ * @typedef {StatusDockPlacement & {
+ *   layoutKey: string,
+ *   compactFallback?: boolean,
+ * }} RequiredDockPlacement
+ * @typedef {{
+ *   docks: ReadonlyArray<RequiredDockPlacement>,
+ *   protectedBodies: ReadonlyArray<{globalSlot: number, bounds: Rectangle}>,
+ *   placementOrder: ReadonlyArray<string>,
+ *   compactedLayoutKeys: ReadonlyArray<string>,
+ *   suppressedLayoutKeys: ReadonlyArray<string>,
+ * }} RequiredDockLayout
  */
 
 /**
@@ -328,6 +367,186 @@ export function layoutStatusDocks(input, options = {}) {
 }
 
 /**
+ * Jointly place heterogeneous required docks around one shared body field.
+ *
+ * Required status truth and required cooldown cues can have different cell
+ * dimensions while still participating in the same deterministic search.
+ * This avoids the priority inversion produced by laying out one category and
+ * asking the other category to fit only after the first result is fixed.
+ *
+ * @param {RequiredDockLayoutInput} input
+ * @param {StatusDockOptions} [options]
+ * @returns {RequiredDockLayout}
+ */
+export function layoutRequiredDocks(input, options = {}) {
+  if (
+    !isRecord(input) ||
+    !Array.isArray(input.agents) ||
+    !Array.isArray(input.requests)
+  ) {
+    throw new TypeError("required dock input must contain agents and requests arrays.");
+  }
+  const viewport = normalizeRectangle(input.viewport, "viewport");
+  const reservedRects = (input.reservedRects ?? []).map((bounds, index) =>
+    normalizeRectangle(bounds, `reservedRects[${index}]`),
+  );
+  const sharedOptions = resolveDockOptions(options);
+  const agents = input.agents.map((agent) =>
+    normalizeAgent({ ...agent, statuses: [] }),
+  );
+  assertUniqueSlots(agents);
+  const protectedBodies = agents
+    .map((agent) => ({
+      globalSlot: agent.globalSlot,
+      bounds: protectedBodyRect(agent, sharedOptions),
+    }))
+    .sort((a, b) => a.globalSlot - b.globalSlot);
+  const bodyRects = protectedBodies.map(({ bounds }) => bounds);
+  const bodyBySlot = new Map(agents.map((agent) => [agent.globalSlot, agent]));
+  const bodyBoundsBySlot = new Map(
+    protectedBodies.map(({ globalSlot, bounds }) => [globalSlot, bounds]),
+  );
+  const seenLayoutKeys = new Set();
+  const requests = input.requests
+    .map((request) => {
+      if (!isRecord(request)) {
+        throw new TypeError("each required dock request must be an object.");
+      }
+      if (typeof request.layoutKey !== "string" || request.layoutKey.length === 0) {
+        throw new TypeError("required dock layoutKey must be a non-empty string.");
+      }
+      if (seenLayoutKeys.has(request.layoutKey)) {
+        throw new RangeError(`duplicate required dock layoutKey ${request.layoutKey}.`);
+      }
+      seenLayoutKeys.add(request.layoutKey);
+      if (!Number.isInteger(request.globalSlot) || request.globalSlot < 0) {
+        throw new RangeError(
+          "required dock globalSlot must be a non-negative integer.",
+        );
+      }
+      if (!Array.isArray(request.statuses) || request.statuses.length === 0) {
+        throw new RangeError(
+          "each required dock request must contain at least one status.",
+        );
+      }
+      const body = bodyBySlot.get(request.globalSlot);
+      if (!body) {
+        throw new RangeError(
+          `required dock ${request.layoutKey} references missing slot ${request.globalSlot}.`,
+        );
+      }
+      const priority =
+        request.priority === undefined
+          ? 0
+          : nonNegativeFinite(request.priority, "required dock priority");
+      return Object.freeze({
+        agent: normalizeAgent({
+          ...body,
+          statuses: request.statuses,
+          required: true,
+        }),
+        dockOptions: resolveDockOptions({
+          ...sharedOptions,
+          ...(request.dockOptions ?? {}),
+        }),
+        fallbackDockOptions: resolveDockOptions({
+          ...sharedOptions,
+          ...REQUIRED_DOCK_FALLBACK_OPTIONS,
+          ...(request.fallbackDockOptions ?? {}),
+        }),
+        layoutKey: request.layoutKey,
+        priority,
+      });
+    })
+    .sort(
+      (first, second) =>
+        first.priority - second.priority ||
+        Number(second.agent.controlled) - Number(first.agent.controlled) ||
+        Number(second.agent.selected) - Number(first.agent.selected) ||
+        second.agent.statuses.length - first.agent.statuses.length ||
+        first.agent.globalSlot - second.agent.globalSlot ||
+        first.layoutKey.localeCompare(second.layoutKey),
+    );
+  const placementInputs = requests.map((request, priorityIndex) => {
+    const bodyBounds = bodyBoundsBySlot.get(request.agent.globalSlot);
+    if (!bodyBounds) {
+      throw new Error(`missing protected body for slot ${request.agent.globalSlot}.`);
+    }
+    return Object.freeze({
+      agent: request.agent,
+      priorityIndex,
+      bodyBounds,
+      viewport,
+      bodyAndReservedRects: Object.freeze([...bodyRects, ...reservedRects]),
+      options: request.dockOptions,
+    });
+  });
+  const { placements, suppressedPriorityIndexes } =
+    searchPriorityPreservingDockPlacements(placementInputs);
+  const fullPlacements = placements.map((placement) =>
+    Object.freeze({
+      ...placement,
+      layoutKey: requests[placement.priorityIndex].layoutKey,
+      compactFallback: false,
+    }),
+  );
+  const occupiedDockBounds = fullPlacements.map(({ bounds }) => bounds);
+  /** @type {RequiredDockPlacement[]} */
+  const compactFallbacks = [];
+  /** @type {number[]} */
+  const unplacedPriorityIndexes = [];
+  for (const priorityIndex of suppressedPriorityIndexes) {
+    const request = requests[priorityIndex];
+    const placementInput = placementInputs[priorityIndex];
+    const compactPlacement = placeCompactRequiredDockFallback(
+      {
+        ...placementInput,
+        options: request.fallbackDockOptions,
+      },
+      occupiedDockBounds,
+    );
+    if (compactPlacement === null) {
+      unplacedPriorityIndexes.push(priorityIndex);
+      continue;
+    }
+    compactFallbacks.push(
+      Object.freeze({
+        ...compactPlacement,
+        layoutKey: request.layoutKey,
+        compactFallback: true,
+      }),
+    );
+    occupiedDockBounds.push(compactPlacement.bounds);
+  }
+  const docks = [...fullPlacements, ...compactFallbacks]
+    .map((placement) =>
+      Object.freeze({
+        ...placement,
+      }),
+    )
+    .sort(
+      (first, second) =>
+        first.globalSlot - second.globalSlot ||
+        first.layoutKey.localeCompare(second.layoutKey),
+    );
+  return Object.freeze({
+    docks: Object.freeze(docks),
+    protectedBodies: Object.freeze(
+      protectedBodies.map((entry) => Object.freeze(entry)),
+    ),
+    placementOrder: Object.freeze(requests.map(({ layoutKey }) => layoutKey)),
+    compactedLayoutKeys: Object.freeze(
+      compactFallbacks.map(({ layoutKey }) => layoutKey).sort(),
+    ),
+    suppressedLayoutKeys: Object.freeze(
+      unplacedPriorityIndexes
+        .map((priorityIndex) => requests[priorityIndex].layoutKey)
+        .sort(),
+    ),
+  });
+}
+
+/**
  * @param {unknown} value
  * @returns {value is Record<string, any>}
  */
@@ -511,6 +730,32 @@ function resolveDockOptions(options) {
   if (maxTangentShift > 24) {
     throw new RangeError("maxTangentShift may not exceed 24 CSS pixels.");
   }
+  const ordinaryVisibleLimit =
+    options.ordinaryVisibleLimit === undefined
+      ? DEFAULT_STATUS_DOCK_OPTIONS.ordinaryVisibleLimit
+      : options.ordinaryVisibleLimit;
+  if (
+    !Number.isInteger(ordinaryVisibleLimit) ||
+    ordinaryVisibleLimit < 0 ||
+    ordinaryVisibleLimit > STATUS_DOCK_CAPACITY
+  ) {
+    throw new RangeError(
+      `ordinaryVisibleLimit must be an integer from 0 through ${STATUS_DOCK_CAPACITY}.`,
+    );
+  }
+  const requiredVisibleLimit =
+    options.requiredVisibleLimit === undefined
+      ? DEFAULT_STATUS_DOCK_OPTIONS.requiredVisibleLimit
+      : options.requiredVisibleLimit;
+  if (
+    !Number.isInteger(requiredVisibleLimit) ||
+    requiredVisibleLimit < 0 ||
+    requiredVisibleLimit > STATUS_DOCK_CAPACITY
+  ) {
+    throw new RangeError(
+      `requiredVisibleLimit must be an integer from 0 through ${STATUS_DOCK_CAPACITY}.`,
+    );
+  }
   const tangentStep = optionPositive(
     options.tangentStep,
     DEFAULT_STATUS_DOCK_OPTIONS.tangentStep,
@@ -549,6 +794,8 @@ function resolveDockOptions(options) {
     ),
     tangentStep,
     maxTangentShift,
+    ordinaryVisibleLimit,
+    requiredVisibleLimit,
   });
 }
 
@@ -625,9 +872,10 @@ function comparePlacementPriority(first, second) {
  * usable result when the local geometry is physically unsatisfiable.
  *
  * @param {ReadonlyArray<StatusDockPlacementInput>} inputs
+ * @param {number} [searchLimit]
  * @returns {ReadonlyArray<StatusDockPlacement> | null}
  */
-function searchStatusDockPlacements(inputs) {
+function searchStatusDockPlacements(inputs, searchLimit = STATUS_DOCK_SEARCH_LIMIT) {
   let visited = 0;
 
   /**
@@ -640,7 +888,7 @@ function searchStatusDockPlacements(inputs) {
     if (index === inputs.length) {
       return placements;
     }
-    if (visited >= STATUS_DOCK_SEARCH_LIMIT) {
+    if (visited >= searchLimit) {
       return null;
     }
     const input = inputs[index];
@@ -661,7 +909,7 @@ function searchStatusDockPlacements(inputs) {
       if (result) {
         return result;
       }
-      if (visited >= STATUS_DOCK_SEARCH_LIMIT) {
+      if (visited >= searchLimit) {
         return null;
       }
     }
@@ -669,6 +917,261 @@ function searchStatusDockPlacements(inputs) {
   }
 
   return visit(0, [], []);
+}
+
+/**
+ * Preserve the complete joint result when it exists. If one lower-priority
+ * request makes the complete set impossible, retain every higher-priority
+ * request that remains jointly feasible and continue considering later
+ * requests around that accepted set. A rejected request can never displace an
+ * earlier accepted request.
+ *
+ * @param {ReadonlyArray<StatusDockPlacementInput>} inputs
+ * @returns {{
+ *   placements: ReadonlyArray<StatusDockPlacement>,
+ *   suppressedPriorityIndexes: ReadonlyArray<number>,
+ * }}
+ */
+function searchPriorityPreservingDockPlacements(inputs) {
+  if (inputs.length <= REQUIRED_DOCK_JOINT_SEARCH_MAX_REQUESTS) {
+    const completePlacements = searchStatusDockPlacements(
+      inputs,
+      REQUIRED_DOCK_SEARCH_LIMIT,
+    );
+    if (completePlacements !== null) {
+      return Object.freeze({
+        placements: completePlacements,
+        suppressedPriorityIndexes: Object.freeze([]),
+      });
+    }
+  }
+
+  /** @type {StatusDockPlacement[]} */
+  const placements = [];
+  /** @type {Rectangle[]} */
+  const priorDockBounds = [];
+  /** @type {number[]} */
+  const suppressedPriorityIndexes = [];
+  for (const input of inputs) {
+    const placement = statusDockPlacementOptions({
+      ...input,
+      priorDockBounds,
+    }).find((candidate) => candidate.collisionFree);
+    if (!placement) {
+      suppressedPriorityIndexes.push(input.priorityIndex);
+      continue;
+    }
+    placements.push(placement);
+    priorDockBounds.push(placement.bounds);
+  }
+  return Object.freeze({
+    placements: Object.freeze(placements),
+    suppressedPriorityIndexes: Object.freeze(suppressedPriorityIndexes),
+  });
+}
+
+/**
+ * Reduce one unplaceable required request to a single associated marker while
+ * retaining the complete authoritative payload behind that marker. Local
+ * anchors are preferred. A deterministic viewport search is the final
+ * collision-safe fallback for dense but supported layouts.
+ *
+ * @param {StatusDockPlacementInput} input
+ * @param {ReadonlyArray<Rectangle>} priorDockBounds
+ * @returns {StatusDockPlacement | null}
+ */
+function placeCompactRequiredDockFallback(input, priorDockBounds) {
+  const markerInput = Object.freeze({
+    ...input,
+    agent: Object.freeze({
+      ...input.agent,
+      statuses: Object.freeze([null]),
+      required: true,
+    }),
+  });
+  const localPlacement = statusDockPlacementOptions({
+    ...markerInput,
+    priorDockBounds,
+  }).find((candidate) => candidate.collisionFree);
+  const markerPlacement =
+    localPlacement ?? remoteCompactRequiredDockPlacement(markerInput, priorDockBounds);
+  if (markerPlacement === null) {
+    return null;
+  }
+  const hiddenStatuses = Object.freeze([...input.agent.statuses]);
+  return Object.freeze({
+    ...markerPlacement,
+    required: true,
+    expanded: false,
+    visibleStatuses: Object.freeze([]),
+    hiddenStatuses,
+    visibleCount: 0,
+    hiddenCount: hiddenStatuses.length,
+    totalCount: hiddenStatuses.length,
+    overflowLabel: `+${hiddenStatuses.length}`,
+  });
+}
+
+/**
+ * Find a remote one-cell marker when every normal anchor is occupied. Candidate
+ * coordinates are derived from viewport and blocker edges, which bounds the
+ * search quadratically in the number of rectangles rather than in viewport
+ * pixels. Any axis-aligned free region has an equivalent placement touching a
+ * viewport or blocker edge, so this remains complete for the compact marker.
+ *
+ * @param {StatusDockPlacementInput} input
+ * @param {ReadonlyArray<Rectangle>} priorDockBounds
+ * @returns {StatusDockPlacement | null}
+ */
+function remoteCompactRequiredDockPlacement(input, priorDockBounds) {
+  const dimensions = dockDimensions(1, input.options);
+  const blockers = [...input.bodyAndReservedRects, ...priorDockBounds];
+  const xPositions = candidateEdgePositions(
+    input.viewport.left,
+    input.viewport.right,
+    dimensions.width,
+    blockers.map(({ left, right }) => ({ start: left, end: right })),
+  );
+  const yPositions = candidateEdgePositions(
+    input.viewport.top,
+    input.viewport.bottom,
+    dimensions.height,
+    blockers.map(({ top, bottom }) => ({ start: top, end: bottom })),
+  );
+  const bodyCenter = rectangleCenter(input.bodyBounds);
+  /** @type {{
+   *   anchor: "north" | "east" | "west" | "south",
+   *   bounds: Rectangle,
+   *   distance: number,
+   *   score: StatusDockScore,
+   * } | null} */
+  let best = null;
+  for (const top of yPositions) {
+    for (const left of xPositions) {
+      const bounds = rectangle(
+        left,
+        top,
+        left + dimensions.width,
+        top + dimensions.height,
+      );
+      const score = scoreCandidate({
+        bounds,
+        viewport: input.viewport,
+        bodyAndReservedRects: input.bodyAndReservedRects,
+        priorDockBounds,
+        tangentShift: 0,
+        anchorIndex: 0,
+      });
+      if (
+        score.viewportOverflow > EPSILON ||
+        score.bodyOrReservedIntersection > EPSILON ||
+        score.priorDockIntersection > EPSILON
+      ) {
+        continue;
+      }
+      const markerCenter = rectangleCenter(bounds);
+      const distance = Math.hypot(
+        markerCenter.x - bodyCenter.x,
+        markerCenter.y - bodyCenter.y,
+      );
+      const anchor = relativeAnchor(bodyCenter, markerCenter);
+      if (
+        best === null ||
+        distance < best.distance - EPSILON ||
+        (Math.abs(distance - best.distance) <= EPSILON &&
+          (bounds.top < best.bounds.top - EPSILON ||
+            (Math.abs(bounds.top - best.bounds.top) <= EPSILON &&
+              bounds.left < best.bounds.left - EPSILON)))
+      ) {
+        best = { anchor, bounds, distance, score };
+      }
+    }
+  }
+  if (best === null) {
+    return null;
+  }
+  return Object.freeze({
+    globalSlot: input.agent.globalSlot,
+    priorityIndex: input.priorityIndex,
+    required: true,
+    controlled: input.agent.controlled,
+    selected: input.agent.selected,
+    anchor: best.anchor,
+    tangentShift: 0,
+    bounds: best.bounds,
+    leader: leaderLine(input.bodyBounds, best.bounds, best.anchor),
+    columns: 1,
+    rows: 1,
+    expanded: true,
+    collisionFree: true,
+    visibleStatuses: Object.freeze([null]),
+    hiddenStatuses: Object.freeze([]),
+    visibleCount: 1,
+    hiddenCount: 0,
+    totalCount: 1,
+    overflowLabel: null,
+    score: best.score,
+  });
+}
+
+/**
+ * Candidate starts where a compact rectangle touches either the viewport or
+ * one blocker edge. Filtering and sorting make the result deterministic.
+ *
+ * @param {number} viewportStart
+ * @param {number} viewportEnd
+ * @param {number} extent
+ * @param {ReadonlyArray<{start: number, end: number}>} blockers
+ * @returns {ReadonlyArray<number>}
+ */
+function candidateEdgePositions(viewportStart, viewportEnd, extent, blockers) {
+  const latestStart = viewportEnd - extent;
+  if (latestStart < viewportStart - EPSILON) {
+    return Object.freeze([]);
+  }
+  const positions = new Set([viewportStart, latestStart]);
+  for (const blocker of blockers) {
+    positions.add(blocker.start - extent);
+    positions.add(blocker.end);
+  }
+  return Object.freeze(
+    [...positions]
+      .filter(
+        (position) =>
+          position >= viewportStart - EPSILON && position <= latestStart + EPSILON,
+      )
+      .map((position) => Math.min(latestStart, Math.max(viewportStart, position)))
+      .sort((first, second) => first - second)
+      .filter(
+        (position, index, ordered) =>
+          index === 0 || Math.abs(position - ordered[index - 1]) > EPSILON,
+      ),
+  );
+}
+
+/**
+ * @param {Rectangle} bounds
+ * @returns {Point}
+ */
+function rectangleCenter(bounds) {
+  return frozenPoint(
+    (bounds.left + bounds.right) / 2,
+    (bounds.top + bounds.bottom) / 2,
+  );
+}
+
+/**
+ * @param {Point} source
+ * @param {Point} target
+ * @returns {"north" | "east" | "west" | "south"}
+ */
+function relativeAnchor(source, target) {
+  const dx = target.x - source.x;
+  const dy = target.y - source.y;
+  if (Math.abs(dx) > Math.abs(dy)) {
+    return dx >= 0 ? "east" : "west";
+  }
+  return dy >= 0 ? "south" : "north";
 }
 
 /**
@@ -682,12 +1185,21 @@ function statusDockPlacementOptions(input) {
   const totalCount = input.agent.statuses.length;
   const capacityExceeded = totalCount > STATUS_DOCK_CAPACITY;
   const expandedVisibleCount = capacityExceeded ? STATUS_DOCK_CAPACITY - 1 : totalCount;
+  const required =
+    input.agent.required || input.agent.controlled || input.agent.selected;
+  const visibleLimit = required
+    ? input.options.requiredVisibleLimit
+    : input.options.ordinaryVisibleLimit;
+  const initialVisibleCount = Math.min(expandedVisibleCount, visibleLimit);
   const forceExpanded =
-    !capacityExceeded &&
-    (input.agent.required || input.agent.controlled || input.agent.selected);
-  const visibleCounts = [expandedVisibleCount];
+    !capacityExceeded && required && initialVisibleCount === totalCount;
+  const visibleCounts = [initialVisibleCount];
   if (!forceExpanded) {
-    const maximumCollapsedVisible = Math.min(totalCount - 1, STATUS_DOCK_CAPACITY - 1);
+    const maximumCollapsedVisible = Math.min(
+      initialVisibleCount - 1,
+      totalCount - 1,
+      STATUS_DOCK_CAPACITY - 1,
+    );
     for (
       let visibleCount = maximumCollapsedVisible;
       visibleCount >= 0;

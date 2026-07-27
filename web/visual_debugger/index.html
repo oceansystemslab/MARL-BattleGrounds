@@ -165,56 +165,98 @@
         </p>
 
         <section class="command-deck" aria-label="Debugger commands">
-          <div class="command-group">
-            <h3>Movement</h3>
-            <div class="movement-grid">
-              <button type="button" data-key="q" data-move-action="6" data-command-role="draft" aria-label="Move northwest">↖</button>
-              <button type="button" data-key="w" data-move-action="1" data-command-role="draft" aria-label="Move north">↑</button>
-              <button type="button" data-key="e" data-move-action="5" data-command-role="draft" aria-label="Move northeast">↗</button>
-              <button type="button" data-key="a" data-move-action="4" data-command-role="draft" aria-label="Move west">←</button>
-              <button id="stay-button" type="button" data-key="x" data-move-action="0" data-command-role="draft" aria-label="Stay">•</button>
-              <button type="button" data-key="d" data-move-action="3" data-command-role="draft" aria-label="Move east">→</button>
-              <button type="button" data-key="z" data-move-action="8" data-command-role="draft" aria-label="Move southwest">↙</button>
-              <button type="button" data-key="s" data-move-action="2" data-command-role="draft" aria-label="Move south">↓</button>
-              <button type="button" data-key="c" data-move-action="7" data-command-role="draft" aria-label="Move southeast">↘</button>
+          <header class="command-deck__header">
+            <div>
+              <p class="command-deck__eyebrow">Joint action composer</p>
+              <h3>Stage, inspect, then submit</h3>
+            </div>
+            <span class="command-deck__shortcut">
+              <kbd>Enter</kbd>
+              commits every staged row
+            </span>
+          </header>
+
+          <div class="command-deck__composer">
+            <div class="command-group command-group--compose command-group--movement">
+              <div class="command-group__heading">
+                <span class="command-step" aria-hidden="true">01</span>
+                <div>
+                  <h4>Movement</h4>
+                  <p id="command-controlled-actor" aria-live="polite">
+                    Actor · unavailable
+                  </p>
+                </div>
+              </div>
+              <div class="movement-grid">
+                <button type="button" data-key="q" data-move-action="6" data-command-role="draft" aria-label="Move northwest">↖</button>
+                <button type="button" data-key="w" data-move-action="1" data-command-role="draft" aria-label="Move north">↑</button>
+                <button type="button" data-key="e" data-move-action="5" data-command-role="draft" aria-label="Move northeast">↗</button>
+                <button type="button" data-key="a" data-move-action="4" data-command-role="draft" aria-label="Move west">←</button>
+                <button id="stay-button" type="button" data-key="x" data-move-action="0" data-command-role="draft" aria-label="Stay">•</button>
+                <button type="button" data-key="d" data-move-action="3" data-command-role="draft" aria-label="Move east">→</button>
+                <button type="button" data-key="z" data-move-action="8" data-command-role="draft" aria-label="Move southwest">↙</button>
+                <button type="button" data-key="s" data-move-action="2" data-command-role="draft" aria-label="Move south">↓</button>
+                <button type="button" data-key="c" data-move-action="7" data-command-role="draft" aria-label="Move southeast">↘</button>
+              </div>
+            </div>
+
+            <div class="command-group command-group--compose command-group--action">
+              <div class="command-group__heading">
+                <span class="command-step" aria-hidden="true">02</span>
+                <div>
+                  <h4>Action</h4>
+                  <p>Target and combat lane</p>
+                </div>
+              </div>
+              <label class="command-target">
+                <span>Target</span>
+                <select id="command-target-select" aria-label="Pending target">
+                  <option value="">No target</option>
+                </select>
+              </label>
+              <div class="button-row command-choice-row">
+                <button id="no-combat-button" type="button" data-key="0" data-command-role="draft" aria-pressed="false">No combat</button>
+                <button id="basic-button" type="button" data-key="1" data-command-role="draft" aria-pressed="false">Arm Basic</button>
+                <button id="ultimate-button" type="button" data-key="2" data-command-role="draft" aria-pressed="false">Arm Ultimate</button>
+              </div>
             </div>
           </div>
-          <div class="command-group">
-            <h3>Action</h3>
-            <label class="command-target">
-              <span>Target</span>
-              <select id="command-target-select" aria-label="Pending target">
-                <option value="">No target</option>
-              </select>
-            </label>
-            <div class="button-row">
-              <button id="no-combat-button" type="button" data-key="0" data-command-role="draft" aria-pressed="false">No combat</button>
-              <button id="basic-button" type="button" data-key="1" data-command-role="draft" aria-pressed="false">Arm Basic</button>
-              <button id="ultimate-button" type="button" data-key="2" data-command-role="draft" aria-pressed="false">Arm Ultimate</button>
+
+          <div class="command-commit">
+            <div class="command-commit__copy">
+              <span>Commit</span>
+              <strong>Submit the staged joint turn</strong>
+              <small>One authoritative transition</small>
+            </div>
+            <div class="command-commit__actions">
               <button id="submit-turn-button" type="button" data-key="Enter" data-command-role="interactive-submit" class="button--primary">
                 Submit joint turn
               </button>
               <button id="advance-script-button" type="button" data-key="n" data-command-role="script-advance">Advance scripted frame</button>
             </div>
           </div>
-          <div class="command-group">
-            <h3>Inspect</h3>
-            <div class="button-row">
-              <button type="button" data-key="Tab">Next actor</button>
-              <button type="button" data-key="Tab" data-shift="true">
-                Previous actor
-              </button>
-              <button type="button" data-key="Escape">Clear target</button>
-              <button type="button" data-key="g">Ranges</button>
-              <button type="button" data-key="v">Verbosity</button>
+
+          <div class="command-deck__utilities">
+            <div class="command-group command-group--utility command-group--inspect">
+              <h4>Inspect</h4>
+              <div class="button-row command-button-row">
+                <button type="button" data-key="Tab">Next actor</button>
+                <button type="button" data-key="Tab" data-shift="true">
+                  Previous actor
+                </button>
+                <button type="button" data-key="Escape">Clear target</button>
+                <button type="button" data-key="g">Ranges</button>
+                <button type="button" data-key="v">Verbosity</button>
+              </div>
             </div>
-          </div>
-          <div class="command-group">
-            <h3>Session</h3>
-            <div class="button-row">
-              <button id="reset-button" type="button">Reset</button>
-              <button type="button" data-key="[">Previous scenario</button>
-              <button type="button" data-key="]">Next scenario</button>
+
+            <div class="command-group command-group--utility command-group--session">
+              <h4>Session</h4>
+              <div class="button-row command-button-row">
+                <button id="reset-button" type="button">Reset</button>
+                <button type="button" data-key="[">Previous scenario</button>
+                <button type="button" data-key="]">Next scenario</button>
+              </div>
             </div>
           </div>
         </section>

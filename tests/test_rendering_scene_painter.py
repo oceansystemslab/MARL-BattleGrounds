@@ -4,6 +4,7 @@ import re
 from collections.abc import Callable, Iterable
 from dataclasses import replace
 from importlib import import_module
+from math import hypot
 from typing import Protocol, cast
 
 import pytest
@@ -27,6 +28,7 @@ from marl_battlegrounds.rendering.scene_geometry import (
 )
 from marl_battlegrounds.rendering.vocabulary import (
     class_token_from_id,
+    lookup_activation_token,
     team_token_from_id,
 )
 
@@ -45,6 +47,8 @@ class _ArtistLike(Protocol):
 
 class _TextLike(_ArtistLike, Protocol):
     xy: tuple[float, float]
+
+    def get_bbox_patch(self) -> _ArtistLike: ...
 
     def get_position(self) -> tuple[float, float]: ...
 
@@ -98,6 +102,12 @@ def _hex_color(value: object) -> str:
     return to_hex(value, keep_alpha=False).upper()
 
 
+def _alpha(value: object) -> float:
+    colors = import_module("matplotlib.colors")
+    to_rgba = cast(Callable[..., tuple[float, float, float, float]], colors.to_rgba)
+    return to_rgba(value)[3]
+
+
 def _render_fixture(
     name: str,
     *,
@@ -131,6 +141,38 @@ def test_crowded_scene_preserves_agents_status_order_and_event_multiplicity() ->
             gid for gid in gids if gid.startswith("scene:agent:0:status:")
         ) == tuple(
             f"scene:agent:0:status:{status.token_id}" for status in first_agent.statuses
+        )
+        status_artists = tuple(
+            artist
+            for artist in _texts(result)
+            if (artist.get_gid() or "").startswith("scene:agent:0:status:")
+        )
+        assert {artist.get_text().split()[0][0] for artist in status_artists[:3]} == {
+            "⬢"
+        }
+        assert {artist.get_text().split()[0][0] for artist in status_artists[3:6]} == {
+            "↻"
+        }
+        assert {artist.get_text().split()[0][1:] for artist in status_artists[:3]} == {
+            "W",
+            "H",
+            "R",
+        }
+        assert {artist.get_text().split()[0][1:] for artist in status_artists[3:6]} == {
+            "W",
+            "H",
+            "R",
+        }
+        assert tuple(
+            _hex_color(artist.get_bbox_patch().get_edgecolor())
+            for artist in status_artists[:6]
+        ) == (
+            "#D18B47",
+            "#84CC16",
+            "#FACC15",
+            "#D18B47",
+            "#84CC16",
+            "#FACC15",
         )
 
         assert fixture.event_batch is not None
@@ -195,6 +237,141 @@ def test_route_collision_keeps_one_primary_artist_per_accepted_activation() -> N
             )
             assert artist.get_position() == event.source_anchor
             assert artist.xy == event.target_anchor
+    finally:
+        _close(result)
+
+
+def test_visual_vocabulary_static_evidence_keeps_semantic_grammar() -> None:
+    fixture, result = _render_fixture(
+        "visual_vocabulary",
+        options=SceneRenderOptions(show_agent_ids=True),
+    )
+    try:
+        assert fixture.event_batch is not None
+        by_gid = {
+            gid: artist
+            for artist in _texts(result)
+            if (gid := artist.get_gid()) is not None
+        }
+        assert tuple(
+            by_gid[f"scene:agent:{agent.global_slot}:class"].get_text()
+            for agent in fixture.scene.agents
+        ) == tuple(
+            class_token_from_id(agent.class_id).fallback
+            for agent in fixture.scene.agents
+        )
+        assert "scene:selection:controlled:0" in _gids(result)
+        assert "scene:selection:target:5" in _gids(result)
+
+        artists_by_gid = {
+            gid: artist
+            for artist in _artists(result)
+            if (gid := artist.get_gid()) is not None
+        }
+        assert tuple(
+            _hex_color(artists_by_gid[f"scene:range:{slot}:basic"].get_edgecolor())
+            for slot in range(5)
+        ) == (
+            "#22D3EE",
+            "#D18B47",
+            "#84CC16",
+            "#FACC15",
+            "#F472B6",
+        )
+        assert all(
+            artists_by_gid[f"scene:range:{slot}:basic"].get_linestyle() == "--"
+            for slot in range(5)
+        )
+        for aura_gid in (
+            "scene:aura:0:mage_amplification",
+            "scene:aura:1:warrior_mitigation",
+        ):
+            aura = artists_by_gid[aura_gid]
+            assert aura.get_linewidth() == 0.0
+            assert _alpha(aura.get_edgecolor()) == 0.0
+
+        assert {
+            by_gid[f"scene:agent:0:status:{token_id}"].get_text().split()[0][0]
+            for token_id in (
+                "stun_warrior_charge",
+                "stun_hunter_trap",
+                "stun_rogue_poison",
+            )
+        } == {"⬢"}
+        assert {
+            by_gid[f"scene:agent:2:status:{token_id}"].get_text().split()[0][0]
+            for token_id in (
+                "slow_warrior_charge",
+                "slow_hunter_basic",
+                "slow_rogue_poison",
+            )
+        } == {"↻"}
+
+        activations = tuple(
+            event
+            for event in fixture.event_batch.events
+            if type(event) is AcceptedActivationEventV1
+        )
+        assert len(activations) == 10
+        for event in activations:
+            primary = by_gid[f"event:accepted_activation:{event.event_id}"].get_text()
+            secondary = by_gid.get(f"scene:event-label:{event.event_id}")
+            visible_label = primary or (secondary.get_text() if secondary else "")
+            assert visible_label.startswith(
+                lookup_activation_token(event.token_id).short_label
+            )
+            if event.token_id == "basic_damage":
+                assert secondary is not None
+                expected_color = {
+                    "mage": "#22D3EE",
+                    "warrior": "#D18B47",
+                    "hunter": "#84CC16",
+                    "rogue": "#FACC15",
+                }[class_token_from_id(event.source_class_id).token_id]
+                assert (
+                    _hex_color(secondary.get_bbox_patch().get_edgecolor())
+                    == expected_color
+                )
+            impact = by_gid.get(f"scene:event-impact:{event.event_id}")
+            if event.token_id in (
+                "basic_damage",
+                "warrior_charge",
+                "rogue_poison",
+            ):
+                assert impact is not None
+                assert impact.get_text() == "\N{MINUS SIGN}"
+                assert _hex_color(impact.get_bbox_patch().get_edgecolor()) == "#FB7185"
+            elif event.token_id in ("basic_heal", "holy_word"):
+                assert impact is not None
+                assert impact.get_text() == "+"
+                assert _hex_color(impact.get_bbox_patch().get_edgecolor()) == "#34D399"
+            else:
+                assert impact is None
+            if impact is not None:
+                recipient = next(
+                    agent
+                    for agent in fixture.scene.agents
+                    if agent.global_slot == event.target_global_slot
+                )
+                assert event.target_anchor is not None
+                assert (
+                    hypot(
+                        impact.xy[0] - event.target_anchor[0],
+                        impact.xy[1] - event.target_anchor[1],
+                    )
+                    >= recipient.radius
+                )
+
+        assert (
+            by_gid["event:net_health:synthetic:visual_vocabulary:net-damage"].get_text()
+            == "NET -12.35"
+        )
+        assert (
+            by_gid[
+                "event:net_health:synthetic:visual_vocabulary:net-healing"
+            ].get_text()
+            == "NET +8.5"
+        )
     finally:
         _close(result)
 
@@ -326,17 +503,13 @@ def test_visual_language_aligns_aura_ranges_teams_and_hunter_color() -> None:
     try:
         artists = _artists(result)
         by_gid = {
-            gid: artist
-            for artist in artists
-            if (gid := artist.get_gid()) is not None
+            gid: artist for artist in artists if (gid := artist.get_gid()) is not None
         }
         hunter_body = by_gid[f"scene:agent:{hunter.global_slot}:body"]
         assert _hex_color(hunter_body.get_facecolor()) == "#84CC16"
 
         aura_artists = tuple(
-            artist
-            for gid, artist in by_gid.items()
-            if gid.startswith("scene:aura:")
+            artist for gid, artist in by_gid.items() if gid.startswith("scene:aura:")
         )
         assert aura_artists
         assert all(artist.get_linewidth() == 0.0 for artist in aura_artists)
@@ -345,9 +518,7 @@ def test_visual_language_aligns_aura_ranges_teams_and_hunter_color() -> None:
             for artist in aura_artists
         )
 
-        observation = by_gid[
-            f"scene:range:{hunter.global_slot}:observation"
-        ]
+        observation = by_gid[f"scene:range:{hunter.global_slot}:observation"]
         basic = by_gid[f"scene:range:{hunter.global_slot}:basic"]
         ultimate = by_gid[f"scene:range:{hunter.global_slot}:ultimate"]
         assert observation.get_linestyle() == ":"
@@ -368,9 +539,7 @@ def test_visual_language_aligns_aura_ranges_teams_and_hunter_color() -> None:
             if team_token_from_id(agent.team_id).token_id == "team_b"
         }
         assert {
-            int(gid.split(":")[2])
-            for gid in by_gid
-            if gid.endswith(":team-marker")
+            int(gid.split(":")[2]) for gid in by_gid if gid.endswith(":team-marker")
         } == team_b_slots
     finally:
         _close(result)
@@ -414,17 +583,12 @@ def test_human_visible_float_labels_never_exceed_two_decimals() -> None:
             artist.get_gid(): artist.get_text() for artist in _texts(result)
         }
         modifier_gid = (
-            f"scene:agent:{first_agent.global_slot}:modifier:"
-            f"{first_modifier.token_id}"
+            f"scene:agent:{first_agent.global_slot}:modifier:{first_modifier.token_id}"
         )
         assert visible_text[modifier_gid].endswith("x1.23")
-        assert (
-            visible_text[f"event:net_health:{net_event.event_id}"]
-            == "NET -12.35"
-        )
+        assert visible_text[f"event:net_health:{net_event.event_id}"] == "NET -12.35"
         assert all(
-            re.search(r"\d+\.\d{3,}", text) is None
-            for text in visible_text.values()
+            re.search(r"\d+\.\d{3,}", text) is None for text in visible_text.values()
         )
     finally:
         _close(result)

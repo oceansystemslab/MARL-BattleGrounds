@@ -1,4 +1,4 @@
-import { formatDisplayNumber } from "./display.js";
+import { formatCompactDisplayNumber, formatDisplayNumber } from "./display.js";
 import {
   explainAgent,
   explainAura,
@@ -15,6 +15,7 @@ import {
 import { createSvgIcon } from "./icons.js";
 import {
   createViewportTransform,
+  layoutRequiredDocks,
   layoutStatusDocks,
   protectedBodyRect,
   rectanglesIntersect,
@@ -360,6 +361,18 @@ export class BattlefieldRenderer {
     this.transform = null;
     /** @type {ReadonlyArray<Rectangle>} */
     this.choreographyProtectedRects = Object.freeze([]);
+    /** @type {Readonly<{
+     *   base: ReadonlyArray<Rectangle>,
+     *   legality: ReadonlyArray<Rectangle>,
+     *   status: ReadonlyArray<Rectangle>,
+     * }>} */
+    this.choreographyProtectedRectGroups = Object.freeze({
+      base: Object.freeze([]),
+      legality: Object.freeze([]),
+      status: Object.freeze([]),
+    });
+    this.compactActiveCombatRequested = false;
+    this.compactActiveCombat = false;
 
     const map = createLayer("map", { "aria-hidden": "true" });
     const aura = createLayer("aura", { "aria-hidden": "true" });
@@ -533,9 +546,24 @@ export class BattlefieldRenderer {
       showLegality: preset !== "presentation",
       showModifiers: preset !== "presentation",
     });
+    this.#applyCompactActiveCombatPolicy();
 
     this.layers.accessibleLabels.replaceChildren();
     return true;
+  }
+
+  /**
+   * Prioritize accepted combat truth while a compact battlefield is actively
+   * presenting transient events. Suppressed SVG owners remain in the DOM with
+   * their complete authorized metadata; only their battlefield paint and
+   * choreography collision reservation change.
+   *
+   * @param {boolean} active
+   * @returns {boolean} Whether the effective compact-active state changed.
+   */
+  setCompactActiveCombat(active) {
+    this.compactActiveCombatRequested = Boolean(active);
+    return this.#applyCompactActiveCombatPolicy();
   }
 
   /**
@@ -621,10 +649,74 @@ export class BattlefieldRenderer {
     this.layers.durableStatusModifier.removeAttribute("data-suppressed-status-slots");
     this.layers.durableStatusModifier.removeAttribute("data-suppressed-cooldown-slots");
     this.layers.durableStatusModifier.removeAttribute("data-suppressed-modifier-slots");
+    this.layers.durableStatusModifier.removeAttribute("data-compacted-required-docks");
     this.layers.accessibleLabels.replaceChildren();
     this.agentNodes.clear();
     this.choreographyProtectedRects = Object.freeze([]);
+    this.choreographyProtectedRectGroups = Object.freeze({
+      base: Object.freeze([]),
+      legality: Object.freeze([]),
+      status: Object.freeze([]),
+    });
+    this.compactActiveCombat = false;
+    this.battlefield.dataset.compactActiveCombat = "false";
+    this.battlefield.removeAttribute("data-compact-active-suppressed-facts");
     this.transform = null;
+  }
+
+  /**
+   * @returns {boolean}
+   */
+  #applyCompactActiveCombatPolicy() {
+    const transform = this.transform;
+    const nextActive = Boolean(
+      this.compactActiveCombatRequested &&
+        transform &&
+        transform.viewportBounds.width <= 600 &&
+        transform.viewportBounds.height <= 420,
+    );
+    const changed = nextActive !== this.compactActiveCombat;
+    this.compactActiveCombat = nextActive;
+    this.battlefield.dataset.compactActiveCombat = String(nextActive);
+    if (nextActive) {
+      this.battlefield.dataset.compactActiveSuppressedFacts =
+        "ranges,pending-route,selected-legality,status-summaries";
+    } else {
+      this.battlefield.removeAttribute("data-compact-active-suppressed-facts");
+    }
+
+    const suppressedOwners = [
+      this.rangeCues,
+      this.layers.pendingRoute,
+      this.legalityCues,
+      ...this.layers.durableStatusModifier.querySelectorAll(
+        '.status-dock, .required-dock-fallback-dock[data-kind="status"]',
+      ),
+    ];
+    for (const owner of suppressedOwners) {
+      if (!(owner instanceof SVGElement)) {
+        continue;
+      }
+      owner.dataset.compactActiveSuppressed = String(nextActive);
+      if (nextActive) {
+        owner.setAttribute("aria-hidden", "true");
+      } else if (owner !== this.rangeCues && owner !== this.layers.pendingRoute) {
+        owner.removeAttribute("aria-hidden");
+      }
+    }
+    this.#refreshChoreographyProtectedRects();
+    return changed;
+  }
+
+  #refreshChoreographyProtectedRects() {
+    const groups = this.choreographyProtectedRectGroups;
+    this.choreographyProtectedRects = Object.freeze(
+      [
+        ...groups.base,
+        ...(this.compactActiveCombat ? [] : groups.status),
+        ...(this.compactActiveCombat ? [] : groups.legality),
+      ].map((bounds) => Object.freeze({ ...bounds })),
+    );
   }
 
   /**
@@ -662,14 +754,17 @@ export class BattlefieldRenderer {
     const targetAgent = agents.find(
       (agent) => agent.global_slot === route.target_global_slot,
     );
-    const geometry = createRouteGeometry({
-      eventId: `pending:${route.source_global_slot ?? "unknown"}:${route.target_global_slot ?? "unknown"}:${route.lane ?? "unknown"}`,
-      source,
-      target,
-      sourceRadius: transform.worldLengthToScreen(finiteNumber(sourceAgent?.radius)),
-      targetRadius: transform.worldLengthToScreen(finiteNumber(targetAgent?.radius)),
-      offset: route.lane === 1 ? 12 : -12,
-    });
+    const geometry = createRouteGeometry(
+      {
+        eventId: `pending:${route.source_global_slot ?? "unknown"}:${route.target_global_slot ?? "unknown"}:${route.lane ?? "unknown"}`,
+        source,
+        target,
+        sourceRadius: transform.worldLengthToScreen(finiteNumber(sourceAgent?.radius)),
+        targetRadius: transform.worldLengthToScreen(finiteNumber(targetAgent?.radius)),
+        offset: route.lane === 1 ? 12 : -12,
+      },
+      { viewportBounds: transform.mapBounds },
+    );
     const path = svgElement("path", {
       class: "pending-route",
       d: geometry.path,
@@ -1012,71 +1107,158 @@ export class BattlefieldRenderer {
    * @param {{showLegality: boolean, showModifiers: boolean}} policy
    */
   #renderStatusDocks(scene, projectedAgents, transform, policy) {
-    const cooldownLayout = layoutStatusDocks(
-      {
-        agents: projectedAgents.map((agent) => {
-          const ticks = agent.agent.ultimate_cooldown;
-          const activeCooldown =
-            Number.isInteger(ticks) && Number(ticks) > 0
-              ? Object.freeze({
-                  classId: agent.agent.class_id,
-                  ticks: Number(ticks),
-                })
-              : null;
-          return {
-            globalSlot: agent.globalSlot,
-            center: agent.center,
-            radius: agent.radius,
-            statuses:
-              activeCooldown === null
-                ? Object.freeze([])
-                : Object.freeze([activeCooldown]),
-            required: activeCooldown !== null,
-            controlled: agent.controlled,
-            selected: agent.selected,
-          };
-        }),
-        viewport: transform.viewportBounds,
-      },
-      {
-        bodyPadding: 4,
-        selectionAllowance: 12,
-        ...COOLDOWN_DOCK_DIMENSIONS,
-        dockGap: 5,
-      },
+    const compactMinimumViewport =
+      transform.viewportBounds.width <= 600 && transform.viewportBounds.height <= 420;
+    const requiredStatusSlots = new Set(
+      projectedAgents
+        .filter(
+          (agent) => agent.statuses.length > 0 && (agent.controlled || agent.selected),
+        )
+        .map(({ globalSlot }) => globalSlot),
     );
-    const cooldownRects = cooldownLayout.docks.map(({ bounds }) => bounds);
-    const statusLayout = layoutStatusDocks(
+    const requiredDockRequests = [
+      ...projectedAgents
+        .filter(({ globalSlot }) => requiredStatusSlots.has(globalSlot))
+        .map((agent) => ({
+          layoutKey: `status:${agent.globalSlot}`,
+          globalSlot: agent.globalSlot,
+          statuses: agent.statuses,
+          dockOptions: {
+            ...STATUS_DOCK_DIMENSIONS,
+            dockGap: 5,
+            requiredVisibleLimit: compactMinimumViewport ? 0 : 9,
+          },
+          fallbackDockOptions: {
+            cellWidth: 32,
+            cellHeight: 16,
+            cellGap: 0,
+            dockGap: 3,
+          },
+          priority: 0,
+        })),
+      ...projectedAgents.flatMap((agent) => {
+        const ticks = agent.agent.ultimate_cooldown;
+        if (!Number.isInteger(ticks) || Number(ticks) <= 0) {
+          return [];
+        }
+        return [
+          {
+            layoutKey: `cooldown:${agent.globalSlot}`,
+            globalSlot: agent.globalSlot,
+            statuses: Object.freeze([
+              Object.freeze({
+                classId: agent.agent.class_id,
+                ticks: Number(ticks),
+              }),
+            ]),
+            dockOptions: {
+              ...COOLDOWN_DOCK_DIMENSIONS,
+              dockGap: 5,
+            },
+            fallbackDockOptions: {
+              cellWidth: 32,
+              cellHeight: 16,
+              cellGap: 0,
+              dockGap: 3,
+            },
+            priority: 1,
+          },
+        ];
+      }),
+    ];
+    const requiredDockLayout = layoutRequiredDocks(
       {
         agents: projectedAgents.map((agent) => ({
           globalSlot: agent.globalSlot,
           center: agent.center,
           radius: agent.radius,
-          statuses: agent.statuses,
+          statuses: Object.freeze([]),
+          controlled: agent.controlled,
+          selected: agent.selected,
+        })),
+        requests: requiredDockRequests,
+        viewport: transform.viewportBounds,
+      },
+      {
+        bodyPadding: 4,
+        selectionAllowance: 12,
+        dockGap: 5,
+      },
+    );
+    const requiredStatusDocks = requiredDockLayout.docks.filter(
+      ({ compactFallback, layoutKey }) =>
+        !compactFallback && layoutKey.startsWith("status:"),
+    );
+    const cooldownDocks = requiredDockLayout.docks.filter(
+      ({ compactFallback, layoutKey }) =>
+        !compactFallback && layoutKey.startsWith("cooldown:"),
+    );
+    const compactRequiredDocks = requiredDockLayout.docks.filter(
+      ({ compactFallback }) => compactFallback,
+    );
+    const requiredDockRects = requiredDockLayout.docks.map(({ bounds }) => bounds);
+    const optionalStatusLayout = layoutStatusDocks(
+      {
+        agents: projectedAgents.map((agent) => ({
+          globalSlot: agent.globalSlot,
+          center: agent.center,
+          radius: agent.radius,
+          statuses: requiredStatusSlots.has(agent.globalSlot)
+            ? Object.freeze([])
+            : agent.statuses,
           controlled: agent.controlled,
           selected: agent.selected,
         })),
         viewport: transform.viewportBounds,
-        reservedRects: cooldownRects,
+        reservedRects: requiredDockRects,
       },
       {
         bodyPadding: 4,
         selectionAllowance: 12,
         ...STATUS_DOCK_DIMENSIONS,
         dockGap: 5,
+        ordinaryVisibleLimit: compactMinimumViewport ? 0 : 9,
       },
     );
+    const suppressedStatusSlots = [
+      ...requiredDockLayout.suppressedLayoutKeys
+        .filter((layoutKey) => layoutKey.startsWith("status:"))
+        .map((layoutKey) => Number(layoutKey.slice("status:".length))),
+      ...optionalStatusLayout.suppressedGlobalSlots,
+    ].sort((left, right) => left - right);
+    const suppressedCooldownSlots = requiredDockLayout.suppressedLayoutKeys
+      .filter((layoutKey) => layoutKey.startsWith("cooldown:"))
+      .map((layoutKey) => Number(layoutKey.slice("cooldown:".length)))
+      .sort((left, right) => left - right);
+    const statusLayout = {
+      docks: [...requiredStatusDocks, ...optionalStatusLayout.docks].sort(
+        (left, right) => left.globalSlot - right.globalSlot,
+      ),
+      protectedBodies: requiredDockLayout.protectedBodies,
+      placementOrder: [
+        ...requiredStatusDocks.map(({ globalSlot }) => globalSlot),
+        ...optionalStatusLayout.placementOrder,
+      ],
+      suppressedGlobalSlots: suppressedStatusSlots,
+    };
+    const cooldownLayout = {
+      docks: cooldownDocks,
+      suppressedGlobalSlots: suppressedCooldownSlots,
+    };
     const statusRects = statusLayout.docks.map(({ bounds }) => bounds);
+    const cooldownRects = cooldownDocks.map(({ bounds }) => bounds);
+    const compactRequiredRects = compactRequiredDocks.map(({ bounds }) => bounds);
     const identityRects = this.#updateSelectedIdentityLayout(
       projectedAgents,
       statusLayout,
-      cooldownRects,
+      [...cooldownRects, ...compactRequiredRects],
     );
     const legalityRects = policy.showLegality
       ? this.#renderSelectedLegality(scene, projectedAgents, transform, [
           ...identityRects,
           ...statusRects,
           ...cooldownRects,
+          ...compactRequiredRects,
         ])
       : [];
     if (!policy.showLegality) {
@@ -1100,6 +1282,7 @@ export class BattlefieldRenderer {
               ...identityRects,
               ...statusRects,
               ...cooldownRects,
+              ...compactRequiredRects,
               ...legalityRects,
             ],
           },
@@ -1121,10 +1304,15 @@ export class BattlefieldRenderer {
     const cooldownNodes = cooldownLayout.docks.map((placement) =>
       this.#renderCooldownDock(placement),
     );
+    const compactRequiredNodes = compactRequiredDocks.map((placement) =>
+      this.#renderRequiredDockFallback(placement),
+    );
     this.layers.durableStatusModifier.dataset.suppressedStatusSlots =
       statusLayout.suppressedGlobalSlots.join(",");
     this.layers.durableStatusModifier.dataset.suppressedCooldownSlots =
       cooldownLayout.suppressedGlobalSlots.join(",");
+    this.layers.durableStatusModifier.dataset.compactedRequiredDocks =
+      requiredDockLayout.compactedLayoutKeys.join(",");
     if (policy.showModifiers) {
       this.layers.durableStatusModifier.dataset.suppressedModifierSlots =
         modifierLayout.suppressedGlobalSlots.join(",");
@@ -1135,29 +1323,46 @@ export class BattlefieldRenderer {
     }
     this.layers.durableStatusModifier.replaceChildren(
       ...modifierNodes,
+      ...compactRequiredNodes,
       ...cooldownNodes,
       ...statusNodes,
     );
     this.#resolveNumericDockCellContent();
-    this.choreographyProtectedRects = Object.freeze(
-      [
-        ...statusLayout.protectedBodies.map(({ bounds }) => bounds),
-        ...identityRects,
-        ...statusRects,
-        ...cooldownRects,
-        ...legalityRects,
-        ...modifierLayout.docks.map(({ bounds }) => bounds),
-      ].map((bounds) => Object.freeze({ ...bounds })),
-    );
+    const compactRequiredStatusRects = compactRequiredDocks
+      .filter(({ layoutKey }) => layoutKey.startsWith("status:"))
+      .map(({ bounds }) => bounds);
+    const compactRequiredCooldownRects = compactRequiredDocks
+      .filter(({ layoutKey }) => layoutKey.startsWith("cooldown:"))
+      .map(({ bounds }) => bounds);
+    this.choreographyProtectedRectGroups = Object.freeze({
+      base: Object.freeze(
+        [
+          ...statusLayout.protectedBodies.map(({ bounds }) => bounds),
+          ...identityRects,
+          ...cooldownRects,
+          ...compactRequiredCooldownRects,
+          ...modifierLayout.docks.map(({ bounds }) => bounds),
+        ].map((bounds) => Object.freeze({ ...bounds })),
+      ),
+      legality: Object.freeze(
+        legalityRects.map((bounds) => Object.freeze({ ...bounds })),
+      ),
+      status: Object.freeze(
+        [...statusRects, ...compactRequiredStatusRects].map((bounds) =>
+          Object.freeze({ ...bounds }),
+        ),
+      ),
+    });
+    this.#refreshChoreographyProtectedRects();
   }
 
   /**
    * Keep exact dock numbers and glyphs in disjoint measured regions.
    *
    * Ordinary values retain both. If future authoritative values exceed the
-   * compact pill budget, the decorative glyph yields to the exact number; an
-   * extreme number is width-fitted without changing its text or accessible
-   * label.
+   * compact pill budget, the decorative glyph yields to a readable abbreviated
+   * label. The exact value remains available in the cue's data, accessible
+   * label, and singleton tooltip instead of being squeezed into illegibility.
    */
   #resolveNumericDockCellContent() {
     for (const cell of this.layers.durableStatusModifier.querySelectorAll(
@@ -1201,8 +1406,18 @@ export class BattlefieldRenderer {
       }
       const availableWidth = Math.max(boxBounds.width - 6, 1);
       if (valueBounds.width > availableWidth) {
-        value.setAttribute("textLength", String(availableWidth));
-        value.setAttribute("lengthAdjust", "spacingAndGlyphs");
+        const exactValue =
+          kind === "status"
+            ? Number(cell.getAttribute("data-duration"))
+            : kind === "cooldown"
+              ? Number(cell.getAttribute("data-ticks"))
+              : Number(cell.getAttribute("data-multiplier"));
+        const prefix = kind === "modifier" ? "×" : "";
+        value.textContent = `${prefix}${formatCompactDisplayNumber(exactValue)}`;
+        value.removeAttribute("textLength");
+        value.removeAttribute("lengthAdjust");
+        cell.setAttribute("data-numeric-layout", "compact-measured-fallback");
+        cell.setAttribute("data-visible-value-abbreviated", "true");
       }
     }
   }
@@ -1246,6 +1461,102 @@ export class BattlefieldRenderer {
       }
     }
     return visibleBounds;
+  }
+
+  /**
+   * Render one compact, explicitly associated marker when a complete required
+   * dock cannot fit. The marker never discards the authoritative payload:
+   * status fallbacks expose every item through the shared overflow explanation,
+   * while cooldown fallbacks retain the exact tick count.
+   *
+   * @param {ReturnType<typeof layoutRequiredDocks>["docks"][number]} placement
+   * @returns {SVGElement}
+   */
+  #renderRequiredDockFallback(placement) {
+    const isCooldown = placement.layoutKey.startsWith("cooldown:");
+    const kind = isCooldown ? "cooldown" : "status";
+    const rawItems = placement.hiddenStatuses;
+    const firstItem = isRecord(rawItems[0]) ? rawItems[0] : {};
+    const ticks =
+      isCooldown && Number.isInteger(firstItem.ticks) && firstItem.ticks > 0
+        ? Number(firstItem.ticks)
+        : null;
+    const explanation = isCooldown
+      ? explainCooldown({
+          global_slot: placement.globalSlot,
+          class_id: firstItem.classId,
+          ultimate_cooldown: ticks,
+        })
+      : explainOverflow(rawItems, "status", placement.globalSlot);
+    const valueLabel = isCooldown ? `U${ticks ?? "?"}` : `S${placement.hiddenCount}`;
+    const group = svgElement("g", {
+      class: "required-dock-fallback-dock",
+      "data-zone": "required-dock-fallback-dock",
+      "data-slot": placement.globalSlot,
+      "data-layout-key": placement.layoutKey,
+      "data-kind": kind,
+      "data-anchor": placement.anchor,
+      "data-collision-free": placement.collisionFree,
+    });
+    group.append(
+      svgElement("line", {
+        class: "dock-leader required-dock-fallback__leader",
+        x1: placement.leader.start.x,
+        y1: placement.leader.start.y,
+        x2: placement.leader.end.x,
+        y2: placement.leader.end.y,
+        "aria-hidden": "true",
+      }),
+    );
+    const cell = svgElement("g", {
+      class: "required-dock-fallback",
+      role: "img",
+      tabindex: "0",
+      "aria-label": `${explanation.title}. ${explanation.details.join(". ")}`,
+      "data-zone": isCooldown ? "ultimate-cooldown" : "status-overflow",
+      "data-slot": placement.globalSlot,
+      "data-layout-key": placement.layoutKey,
+      "data-kind": kind,
+      "data-hidden-count": placement.hiddenCount,
+      "data-ticks": ticks,
+      "data-compact-fallback": "true",
+      "data-owner-label": `id_${placement.globalSlot}`,
+    });
+    if (isCooldown) {
+      cell.dataset.class = classTokenFromId(firstItem.classId).cssKey;
+    }
+    registerTooltipOwner(cell, explanation);
+    const labelText = svgElement("text", {
+      class: "required-dock-fallback__label",
+      x: placement.bounds.left + placement.bounds.width / 2,
+      y: placement.bounds.top + placement.bounds.height / 2,
+    });
+    const ownerLine = svgElement("tspan", {
+      class: "required-dock-fallback__owner",
+      x: placement.bounds.left + placement.bounds.width / 2,
+      dy: "-0.34em",
+    });
+    ownerLine.textContent = `id_${placement.globalSlot}`;
+    const valueLine = svgElement("tspan", {
+      class: "required-dock-fallback__value",
+      x: placement.bounds.left + placement.bounds.width / 2,
+      dy: "0.9em",
+    });
+    valueLine.textContent = valueLabel;
+    cell.append(
+      svgElement("rect", {
+        class: "required-dock-fallback__box",
+        x: placement.bounds.left,
+        y: placement.bounds.top,
+        width: placement.bounds.width,
+        height: placement.bounds.height,
+        rx: 5,
+      }),
+      labelText,
+    );
+    labelText.append(ownerLine, valueLine);
+    group.append(cell);
+    return group;
   }
 
   /**
@@ -1376,7 +1687,11 @@ export class BattlefieldRenderer {
       "data-visible-count": placement.visibleCount,
       "data-hidden-count": placement.hiddenCount,
     });
-    if (placement.anchor !== "north" || placement.tangentShift !== 0) {
+    if (
+      placement.hiddenCount > 0 ||
+      placement.anchor !== "north" ||
+      placement.tangentShift !== 0
+    ) {
       group.append(
         svgElement("line", {
           class: `dock-leader ${kind}-dock__leader`,
@@ -1430,6 +1745,12 @@ export class BattlefieldRenderer {
         "data-index": index,
         "data-numeric-layout": supportedStatusDuration ? "compartments" : "measured",
         "data-supported-duration": kind === "status" ? supportedStatusDuration : null,
+        "data-duration":
+          kind === "status" && Number.isInteger(item.duration) ? item.duration : null,
+        "data-multiplier":
+          kind === "modifier" && Number.isFinite(item.multiplier)
+            ? item.multiplier
+            : null,
       });
       if (kind === "status") {
         cell.dataset.sourceClass = classTokenFromId(item.source_class_id).cssKey;
@@ -1445,7 +1766,7 @@ export class BattlefieldRenderer {
       const icon = createSvgIcon(this.battlefield.ownerDocument, token.glyphKey, {
         className: `${kind}-cell__icon`,
       });
-      const iconSize = kind === "modifier" ? 9 : 10;
+      const iconSize = kind === "modifier" ? 9 : kind === "status" ? 12 : 10;
       setAttributes(icon, {
         x: x + (kind === "modifier" ? 3 : 2),
         y: y + (dimensions.cellHeight - iconSize) / 2,
@@ -1465,15 +1786,15 @@ export class BattlefieldRenderer {
                 class: "status-cell__icon-compartment",
                 x: x + 2,
                 y: y + 2,
-                width: 10,
+                width: 12,
                 height: dimensions.cellHeight - 4,
                 "aria-hidden": "true",
               }),
               svgElement("rect", {
                 class: "status-cell__value-compartment",
-                x: x + 15,
+                x: x + 16,
                 y: y + 2,
-                width: 10,
+                width: 9,
                 height: dimensions.cellHeight - 4,
                 "aria-hidden": "true",
               }),
@@ -1511,11 +1832,34 @@ export class BattlefieldRenderer {
         "data-zone": `${kind}-overflow`,
         "data-slot": placement.globalSlot,
         "data-hidden-count": placement.hiddenCount,
+        "data-owner-label": `id_${placement.globalSlot}`,
       });
       registerTooltipOwner(
         overflow,
         explainOverflow(placement.hiddenStatuses, kind, placement.globalSlot),
       );
+      const overflowLabel = svgElement("text", {
+        class: `${kind}-overflow__label`,
+        x: x + dimensions.cellWidth / 2,
+        y: y + dimensions.cellHeight / 2,
+      });
+      if (kind === "status") {
+        const ownerLine = svgElement("tspan", {
+          class: "status-overflow__owner",
+          x: x + dimensions.cellWidth / 2,
+          dy: "-0.34em",
+        });
+        ownerLine.textContent = `id_${placement.globalSlot}`;
+        const countLine = svgElement("tspan", {
+          class: "status-overflow__count",
+          x: x + dimensions.cellWidth / 2,
+          dy: "0.9em",
+        });
+        countLine.textContent = placement.overflowLabel;
+        overflowLabel.append(ownerLine, countLine);
+      } else {
+        overflowLabel.textContent = placement.overflowLabel;
+      }
       overflow.append(
         svgElement("rect", {
           class: `${kind}-cell__box`,
@@ -1525,16 +1869,8 @@ export class BattlefieldRenderer {
           height: dimensions.cellHeight,
           rx: 5,
         }),
-        svgElement("text", {
-          class: `${kind}-overflow__label`,
-          x: x + dimensions.cellWidth / 2,
-          y: y + dimensions.cellHeight / 2,
-        }),
+        overflowLabel,
       );
-      const label = overflow.lastElementChild;
-      if (label) {
-        label.textContent = placement.overflowLabel;
-      }
       group.append(overflow);
     }
     return group;

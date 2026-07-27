@@ -35,6 +35,7 @@ from marl_battlegrounds.rendering.vocabulary import CANONICAL_STATUS_ORDER
 def test_renderer_fixture_registry_is_exact_synthetic_and_separate() -> None:
     assert tuple(RENDERER_FIXTURES) == (
         "visual_vocabulary",
+        "durable_controls",
         "crowded_teamfight",
         "route_collision",
         "mixed_net_zero",
@@ -64,6 +65,31 @@ def test_renderer_fixture_registry_is_exact_synthetic_and_separate() -> None:
         assert forbidden not in source
 
 
+def test_durable_control_fixture_exposes_shared_glyph_families_and_sources() -> None:
+    fixture = get_renderer_fixture("durable_controls")
+    assert fixture.event_batch is None
+    assert tuple(agent.global_slot for agent in fixture.scene.agents) == (0, 5)
+    statuses = tuple(
+        status for agent in fixture.scene.agents for status in agent.statuses
+    )
+    assert tuple(status.token_id for status in statuses) == (
+        "stun_warrior_charge",
+        "stun_hunter_trap",
+        "stun_rogue_poison",
+        "slow_warrior_charge",
+        "slow_hunter_basic",
+        "slow_rogue_poison",
+    )
+    assert tuple(status.source_class_id for status in statuses) == (
+        WARRIOR_CLASS_ID,
+        HUNTER_CLASS_ID,
+        ROGUE_CLASS_ID,
+        WARRIOR_CLASS_ID,
+        HUNTER_CLASS_ID,
+        ROGUE_CLASS_ID,
+    )
+
+
 def test_visual_vocabulary_contact_sheet_covers_current_class_grammar() -> None:
     fixture = get_renderer_fixture("visual_vocabulary")
     scene = fixture.scene
@@ -89,10 +115,35 @@ def test_visual_vocabulary_contact_sheet_covers_current_class_grammar() -> None:
     assert scene.selection is not None
     assert scene.selection.controlled_global_slot == 0
     assert scene.selection.selected_global_slot == 5
+    assert tuple(
+        (field.source_global_slot, field.token_id) for field in scene.aura_fields
+    ) == (
+        (0, "mage_amplification"),
+        (1, "warrior_mitigation"),
+    )
     assert tuple(range_record.kind for range_record in scene.ranges) == (
         "observation",
         "basic",
+        "basic",
+        "basic",
+        "basic",
+        "basic",
         "ultimate",
+    )
+    assert tuple(
+        range_record.global_slot
+        for range_record in scene.ranges
+        if range_record.kind == "basic"
+    ) == (0, 1, 2, 3, 4)
+    assert tuple(status.token_id for status in scene.agents[0].statuses) == (
+        "stun_warrior_charge",
+        "stun_hunter_trap",
+        "stun_rogue_poison",
+    )
+    assert tuple(status.token_id for status in scene.agents[2].statuses) == (
+        "slow_warrior_charge",
+        "slow_hunter_basic",
+        "slow_rogue_poison",
     )
     activations = tuple(
         event for event in batch.events if isinstance(event, AcceptedActivationEventV1)

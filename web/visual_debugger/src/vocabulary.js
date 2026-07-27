@@ -603,8 +603,7 @@ export function ultimateTokenFromClassId(classId, payload) {
     numericId === null ? undefined : CLASS_ID_TO_ULTIMATE_TOKEN[numericId];
   return resolveVisualToken(
     "activation",
-    tokenId ??
-      (numericId === null ? "unknown" : `ultimate_for_class_id_${numericId}`),
+    tokenId ?? (numericId === null ? "unknown" : `ultimate_for_class_id_${numericId}`),
     payload,
   );
 }

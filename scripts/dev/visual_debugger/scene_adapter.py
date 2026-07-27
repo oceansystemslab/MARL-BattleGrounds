@@ -814,17 +814,21 @@ def _pov_event_batch(session: DebuggerSession) -> VisualEventBatchV1:
 
     health_ordinal = 0
     for actor in transition.actor_transitions:
+        # This record discloses both health epochs, so successor visibility
+        # alone cannot authorize it.
+        visible_before = _visible_at(
+            session=session,
+            observation=transition.before_observation,
+            candidate_global_slot=actor.actor_global_slot,
+        )
         visible_after = _visible_at(
             session=session,
             observation=transition.after_observation,
             candidate_global_slot=actor.actor_global_slot,
         )
-        if (
-            not visible_after
-            or (
-                actor.net_health_delta == 0.0
-                and actor.actor_global_slot not in visible_direct_health_targets
-            )
+        if not (visible_before and visible_after) or (
+            actor.net_health_delta == 0.0
+            and actor.actor_global_slot not in visible_direct_health_targets
         ):
             continue
         outcome = (
@@ -857,11 +861,18 @@ def _pov_event_batch(session: DebuggerSession) -> VisualEventBatchV1:
     for status in transition.status_transitions:
         if status.change == "unchanged":
             continue
-        if not _visible_at(
+        # Lifecycle records likewise disclose both duration epochs.
+        visible_before = _visible_at(
+            session=session,
+            observation=transition.before_observation,
+            candidate_global_slot=status.global_slot,
+        )
+        visible_after = _visible_at(
             session=session,
             observation=transition.after_observation,
             candidate_global_slot=status.global_slot,
-        ):
+        )
+        if not (visible_before and visible_after):
             continue
         application_event_ids = tuple(
             applications.get((status.global_slot, status.status_kind), ())

@@ -3,7 +3,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 from importlib import import_module
-from math import cos, sin
+from math import cos, hypot, sin
 from typing import Protocol, cast
 
 from marl_battlegrounds.rendering.scene import (
@@ -577,21 +577,23 @@ def _draw_agent_body(
     if options.show_statuses:
         for index, status in enumerate(agent.statuses):
             token = lookup_status_token(status.token_id)
+            source_class = class_token_from_id(status.source_class_id)
+            status_color = _CLASS_COLORS.get(source_class.token_id, _MUTED)
             column = index % 3
             row = index // 3
             artist = axes.annotate(
-                f"{token.short_label} {status.duration}",
+                f"{token.glyph}{source_class.fallback} {status.duration}",
                 xy=agent.position,
                 xytext=(12 + column * 35, 16 + row * 13),
                 textcoords="offset points",
-                color=_TEXT,
+                color=status_color,
                 fontsize=5.5,
                 ha="left",
                 va="bottom",
                 bbox={
                     "boxstyle": "round,pad=0.18",
                     "facecolor": _BACKGROUND,
-                    "edgecolor": class_color,
+                    "edgecolor": status_color,
                     "linewidth": 0.8,
                     "alpha": 0.94,
                 },
@@ -605,10 +607,7 @@ def _draw_agent_body(
         for index, modifier in enumerate(agent.modifiers):
             token = lookup_modifier_token(modifier.token_id)
             artist = axes.annotate(
-                (
-                    f"{token.short_label} "
-                    f"x{_format_display_number(modifier.multiplier)}"
-                ),
+                (f"{token.short_label} x{_format_display_number(modifier.multiplier)}"),
                 xy=agent.position,
                 xytext=(12 + (index % 2) * 42, -18 - (index // 2) * 13),
                 textcoords="offset points",
@@ -744,7 +743,10 @@ def _draw_events(
             color = (
                 _HEALING
                 if event.token_id in ("basic_heal", "holy_word")
-                else _DAMAGE
+                else _CLASS_COLORS.get(
+                    class_token_from_id(event.source_class_id).token_id,
+                    _DAMAGE,
+                )
                 if event.token_id == "basic_damage"
                 else _ULTIMATE
             )
@@ -810,6 +812,62 @@ def _draw_events(
                     zorder=46,
                 )
                 _tag(label, f"scene:event-label:{event.event_id}")
+                impact_semantic = (
+                    ("\N{MINUS SIGN}", _DAMAGE)
+                    if event.token_id
+                    in ("basic_damage", "warrior_charge", "rogue_poison")
+                    else ("+", _HEALING)
+                    if event.token_id in ("basic_heal", "holy_word")
+                    else None
+                )
+                if impact_semantic is not None:
+                    symbol, impact_color = impact_semantic
+                    recipient = next(
+                        (
+                            agent
+                            for agent in scene.agents
+                            if agent.global_slot == event.target_global_slot
+                        ),
+                        None,
+                    )
+                    source_to_target = (
+                        target[0] - source[0],
+                        target[1] - source[1],
+                    )
+                    source_to_target_distance = hypot(*source_to_target)
+                    impact_anchor = target
+                    if recipient is not None and source_to_target_distance > 0.0:
+                        perimeter_distance = recipient.radius * 1.25
+                        impact_anchor = (
+                            target[0]
+                            - source_to_target[0]
+                            / source_to_target_distance
+                            * perimeter_distance,
+                            target[1]
+                            - source_to_target[1]
+                            / source_to_target_distance
+                            * perimeter_distance,
+                        )
+                    impact = axes.annotate(
+                        symbol,
+                        xy=impact_anchor,
+                        xytext=(0, 0),
+                        textcoords="offset points",
+                        color=impact_color,
+                        fontsize=7,
+                        fontweight="bold",
+                        ha="center",
+                        va="center",
+                        bbox={
+                            "boxstyle": "circle,pad=0.12",
+                            "facecolor": _BACKGROUND,
+                            "edgecolor": impact_color,
+                            "linewidth": 1.0,
+                            "alpha": 0.96,
+                        },
+                        zorder=47,
+                    )
+                    _tag(impact, f"scene:event-impact:{event.event_id}")
         elif type(event) is NetHealthEventV1:
             gid = f"event:net_health:{event.event_id}"
             anchor = event.recipient_anchor or fallback
@@ -817,9 +875,7 @@ def _draw_events(
                 health_label = "HP unchanged"
             else:
                 sign = "+" if event.net_delta > 0 else ""
-                health_label = (
-                    f"NET {sign}{_format_display_number(event.net_delta)}"
-                )
+                health_label = f"NET {sign}{_format_display_number(event.net_delta)}"
             artist = axes.annotate(
                 health_label,
                 xy=anchor,

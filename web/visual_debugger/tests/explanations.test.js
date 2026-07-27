@@ -60,7 +60,7 @@ test("authorized scene facts produce concise two-decimal explanations", () => {
     "Public field radius 4.57",
   );
   assert.equal(
-    explainRange({ global_slot: 2, kind: "ultimate", radius: 3.14159 }).details[0],
+    explainRange({ global_slot: 2, kind: "ultimate", radius: Math.PI }).details[0],
     "Radius 3.14",
   );
   assert.deepEqual(
@@ -180,7 +180,7 @@ test("overflow names every hidden item without inheriting a class identity", () 
   );
 
   assert.equal(explanation.kind, "status-overflow");
-  assert.equal(explanation.title, "2 hidden statuses");
+  assert.equal(explanation.title, "id_5 · 2 hidden statuses");
   assert.deepEqual(explanation.details, [
     "Hunter slow · Hunter Basic slow · source Hunter · 2 ticks",
     "Poison stun · Rogue Poison stun · source Rogue · 1 tick",

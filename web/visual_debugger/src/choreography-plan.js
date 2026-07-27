@@ -1,6 +1,7 @@
-import { layoutRouteSet } from "./routes.js";
+import { layoutRouteSet, routeMarkerPose } from "./routes.js";
 import {
   activationImpactSemantic,
+  classTokenFromId,
   resolveVisualToken,
 } from "./vocabulary.js";
 
@@ -22,8 +23,14 @@ const OUTCOME_CUE_GRID_COLUMNS = 48;
 const OUTCOME_CUE_GRID_ROWS = 36;
 const OUTCOME_CUE_TARGET_STEP = 8;
 const TRANSIENT_ICON_CLEARANCE = Object.freeze({ width: 24, height: 24 });
-const NET_CUE_DIMENSIONS = Object.freeze({ width: 88, height: 48 });
-const UNCHANGED_NET_CUE_DIMENSIONS = Object.freeze({ width: 102, height: 48 });
+const CHARGE_OWNERSHIP_CUE_DIMENSIONS = Object.freeze({ width: 72, height: 22 });
+const CHARGE_OWNERSHIP_ROUTE_PROGRESS = Object.freeze([0.18, 0.32, 0.5, 0.68, 0.82]);
+const CHARGE_OWNERSHIP_NORMAL_OFFSETS = Object.freeze([0, 16, -16, 32, -32, 48, -48]);
+const BASIC_TARGET_ENDPOINT_GAP = 12;
+const CHARGE_TARGET_ENDPOINT_GAP = 18;
+const TRAP_TARGET_ENDPOINT_GAP = 26;
+const NET_CUE_DIMENSIONS = Object.freeze({ width: 88, height: 36 });
+const UNCHANGED_NET_CUE_DIMENSIONS = Object.freeze({ width: 102, height: 36 });
 const LIFECYCLE_CUE_DIMENSIONS = Object.freeze({ width: 52, height: 52 });
 const STATUS_LIFECYCLE_KINDS = new Set([
   "applied",
@@ -62,10 +69,13 @@ const REJECTION_COMPONENTS = new Set(["movement", "combat", "complete_tuple_doma
  *   eventId: string,
  *   sourceGlobalSlot: number,
  *   targetGlobalSlot: number,
+ *   tokenId?: string,
  *   source: {x: number, y: number},
  *   target: {x: number, y: number},
  *   sourceRadius: number,
  *   targetRadius: number,
+ *   targetEndpointGap?: number,
+ *   prioritizeTargetClearance?: boolean,
  * }} RouteInput
  * @typedef {Record<string, any> & {
  *   events: ReadonlyArray<Record<string, any>>,
@@ -161,14 +171,16 @@ function project(world, surface) {
 }
 
 /**
- * Place recipient-level text and lifecycle cues in deterministic screen-space
- * lanes outside durable protected rectangles. This is presentation geometry
- * only; it never changes or derives an event fact.
+ * Place one priority class of recipient-level cue in deterministic screen-space
+ * lanes outside durable protected rectangles and already placed higher-priority
+ * semantic cues. This is presentation geometry only; it never changes or
+ * derives an event fact.
  *
  * @param {ReadonlyArray<Record<string, any>>} events
  * @param {ProjectionSurface | null} surface
+ * @param {"net_health" | "status_lifecycle"} eventKind
  */
-function layoutOutcomeCues(events, surface) {
+function layoutOutcomeCues(events, surface, eventKind) {
   const viewport = normalizedRectangle(surface?.viewportBounds);
   if (!viewport) {
     return events;
@@ -181,17 +193,18 @@ function layoutOutcomeCues(events, surface) {
     ...activationIconBounds(events).map((bounds) =>
       expandCueBounds(bounds, OUTCOME_CUE_CLEARANCE),
     ),
+    ...chargeOwnershipBounds(events).map((bounds) =>
+      expandCueBounds(bounds, OUTCOME_CUE_CLEARANCE),
+    ),
+    ...outcomeCueBounds(events).map((bounds) =>
+      expandCueBounds(bounds, OUTCOME_CUE_CLEARANCE),
+    ),
   );
   /** @type {Map<Record<string, any>, Record<string, any>>} */
   const placed = new Map();
 
   const outcomes = events
-    .filter(
-      (event) =>
-        event.spatial &&
-        event.recipient &&
-        (event.kind === "net_health" || event.kind === "status_lifecycle"),
-    )
+    .filter((event) => event.spatial && event.recipient && event.kind === eventKind)
     .sort(outcomePlacementOrder);
   for (const event of outcomes) {
     const dimensions =
@@ -201,7 +214,15 @@ function layoutOutcomeCues(events, surface) {
           : NET_CUE_DIMENSIONS
         : LIFECYCLE_CUE_DIMENSIONS;
     const selected =
-      selectCueCandidate(localCueCandidates(event, dimensions, viewport), occupied) ??
+      selectCueCandidate(
+        localCueCandidates(
+          event,
+          dimensions,
+          viewport,
+          eventKind === "net_health" && outcomes.length === 1,
+        ),
+        occupied,
+      ) ??
       selectCueCandidate(
         criticalEdgeCueCandidates(event, dimensions, viewport, occupied),
         occupied,
@@ -237,9 +258,170 @@ function layoutOutcomeCues(events, surface) {
 }
 
 /**
- * NET values have no durable replacement and therefore place before lifecycle
- * decoration. Exact ending classifications then outrank generic applications.
- * Returned event order remains untouched.
+ * Place each public Charge ownership pill outside durable geometry and every
+ * other ownership pill. Route-adjacent positions preserve immediate visual
+ * association; the bounded whole-map fallback is retained for unusually dense
+ * layouts and remains associated through the route anchor stored with the cue.
+ *
+ * Authoritative NET outcomes are planned first and reserve their screen-space
+ * before these redundant ownership labels. Lifecycle decoration is planned
+ * afterward and treats both cue classes as protected semantic geometry.
+ *
+ * @param {ReadonlyArray<Record<string, any>>} events
+ * @param {ProjectionSurface | null} surface
+ */
+function layoutChargeOwnershipCues(events, surface) {
+  const viewport = normalizedRectangle(surface?.viewportBounds);
+  if (!viewport) {
+    return events;
+  }
+  const occupied = array(surface?.protectedRects)
+    .map(normalizedRectangle)
+    .filter((bounds) => bounds !== null)
+    .map((bounds) => expandCueBounds(bounds, OUTCOME_CUE_CLEARANCE));
+  occupied.push(
+    ...activationIconBounds(events).map((bounds) =>
+      expandCueBounds(bounds, OUTCOME_CUE_CLEARANCE),
+    ),
+    ...outcomeCueBounds(events).map((bounds) =>
+      expandCueBounds(bounds, OUTCOME_CUE_CLEARANCE),
+    ),
+  );
+  /** @type {Map<Record<string, any>, Record<string, any>>} */
+  const placed = new Map();
+  const charges = events
+    .filter(
+      (event) =>
+        event.spatial &&
+        event.kind === "activation" &&
+        event.tokenId === "warrior_charge" &&
+        event.route,
+    )
+    .sort(
+      (left, right) =>
+        Number(left.sourceSlot) - Number(right.sourceSlot) ||
+        Number(left.targetSlot) - Number(right.targetSlot) ||
+        String(left.eventId).localeCompare(String(right.eventId)),
+    );
+  for (const event of charges) {
+    const selected =
+      selectCueCandidate(
+        chargeOwnershipRouteCandidates(event.route, viewport),
+        occupied,
+      ) ??
+      selectCueCandidate(
+        chargeOwnershipViewportCandidates(event.route, viewport),
+        occupied,
+      );
+    if (!selected) {
+      placed.set(
+        event,
+        Object.freeze({
+          ...event,
+          ownershipAnchor: null,
+          ownershipBounds: null,
+          ownershipCue: null,
+          ownershipCueCollisionFree: false,
+          ownershipCueSuppressionReason: "no_collision_free_position",
+          ownershipSpatialDisposition: "suppressed_collision",
+        }),
+      );
+      continue;
+    }
+    occupied.push(expandCueBounds(selected.bounds, OUTCOME_CUE_CLEARANCE));
+    placed.set(
+      event,
+      Object.freeze({
+        ...event,
+        ownershipAnchor: selected.anchor,
+        ownershipBounds: selected.bounds,
+        ownershipCue: selected.center,
+        ownershipCueCollisionFree: true,
+        ownershipSpatialDisposition: "rendered",
+      }),
+    );
+  }
+  return events.map((event) => placed.get(event) ?? event);
+}
+
+/**
+ * @param {Parameters<typeof routeMarkerPose>[0]} route
+ * @param {Record<string, number>} viewport
+ */
+function chargeOwnershipRouteCandidates(route, viewport) {
+  const candidates = [];
+  const candidateKeys = new Set();
+  for (const offset of CHARGE_OWNERSHIP_NORMAL_OFFSETS) {
+    for (const progress of CHARGE_OWNERSHIP_ROUTE_PROGRESS) {
+      const anchor = routeMarkerPose(route, progress);
+      const radians = (anchor.degrees * Math.PI) / 180;
+      const raw = {
+        x: anchor.x - Math.sin(radians) * offset,
+        y: anchor.y + Math.cos(radians) * offset,
+      };
+      const center = clampCueCenter(raw, CHARGE_OWNERSHIP_CUE_DIMENSIONS, viewport);
+      if (!center) {
+        continue;
+      }
+      const key = `${center.x.toFixed(6)}:${center.y.toFixed(6)}`;
+      if (candidateKeys.has(key)) {
+        continue;
+      }
+      candidateKeys.add(key);
+      candidates.push(
+        Object.freeze({
+          anchor: Object.freeze({ x: anchor.x, y: anchor.y }),
+          center,
+          bounds: cueBounds(center, CHARGE_OWNERSHIP_CUE_DIMENSIONS),
+          displacement: Math.hypot(center.x - anchor.x, center.y - anchor.y),
+        }),
+      );
+    }
+  }
+  return candidates;
+}
+
+/**
+ * @param {Parameters<typeof routeMarkerPose>[0]} route
+ * @param {Record<string, number>} viewport
+ */
+function chargeOwnershipViewportCandidates(route, viewport) {
+  const anchor = routeMarkerPose(route, 0.5);
+  const routeAnchor = Object.freeze({ x: anchor.x, y: anchor.y });
+  return viewportCueCenters(CHARGE_OWNERSHIP_CUE_DIMENSIONS, viewport).map((center) =>
+    Object.freeze({
+      anchor: routeAnchor,
+      center,
+      bounds: cueBounds(center, CHARGE_OWNERSHIP_CUE_DIMENSIONS),
+      displacement: Math.hypot(center.x - routeAnchor.x, center.y - routeAnchor.y),
+    }),
+  );
+}
+
+/**
+ * @param {ReadonlyArray<Record<string, any>>} events
+ */
+function chargeOwnershipBounds(events) {
+  return events.flatMap((event) =>
+    event.ownershipCueCollisionFree === true && event.ownershipBounds
+      ? [event.ownershipBounds]
+      : [],
+  );
+}
+
+/**
+ * @param {ReadonlyArray<Record<string, any>>} events
+ */
+function outcomeCueBounds(events) {
+  return events.flatMap((event) =>
+    event.cueCollisionFree === true && event.cueBounds ? [event.cueBounds] : [],
+  );
+}
+
+/**
+ * Exact ending classifications outrank generic applications within the
+ * lifecycle tier. NET cues are handled in an earlier layout pass. Returned
+ * event order remains untouched.
  *
  * @param {Record<string, any>} left
  * @param {Record<string, any>} right
@@ -299,7 +481,7 @@ function activationIconBounds(events) {
  * @param {{width: number, height: number}} dimensions
  * @param {Record<string, number>} viewport
  */
-function localCueCandidates(event, dimensions, viewport) {
+function localCueCandidates(event, dimensions, viewport, isolatedNet = false) {
   const recipient = event.recipient;
   const baseAngle =
     event.kind === "status_lifecycle"
@@ -309,7 +491,9 @@ function localCueCandidates(event, dimensions, viewport) {
       : -Math.PI / 2;
   const angleOffsets =
     event.kind === "net_health"
-      ? [0, -Math.PI / 4, Math.PI / 4, Math.PI, -Math.PI / 2, Math.PI / 2]
+      ? isolatedNet
+        ? [0, -Math.PI / 4, Math.PI / 4, -Math.PI / 2, Math.PI / 2]
+        : [0, -Math.PI / 4, Math.PI / 4, Math.PI, -Math.PI / 2, Math.PI / 2]
       : [
           0,
           Math.PI / 6,
@@ -323,7 +507,11 @@ function localCueCandidates(event, dimensions, viewport) {
           Math.PI,
         ];
   const radii =
-    event.kind === "net_health" ? [44, 64, 84, 108] : [42, 60, 78, 96, 118, 140];
+    event.kind === "net_health"
+      ? isolatedNet
+        ? [44, 64, 84, 108, 132, 156]
+        : [44, 64, 84, 108]
+      : [42, 60, 78, 96, 118, 140];
   const candidates = [];
   const candidateKeys = new Set();
   for (const radius of radii) {
@@ -884,6 +1072,7 @@ export function buildChoreographyPlan(frame, surface = null) {
       const targetSlot = integer(event.target_global_slot);
       const disclosure = identifier(event.target_disclosure);
       const lane = integer(event.lane);
+      const sourceClassId = integer(event.source_class_id);
       if (
         sourceSlot === null ||
         (lane !== 0 && lane !== 1) ||
@@ -895,6 +1084,7 @@ export function buildChoreographyPlan(frame, surface = null) {
         continue;
       }
       const token = resolveVisualToken("activation", event.token_id, event);
+      const sourceClass = classTokenFromId(sourceClassId);
       const source = project(point(event.source_anchor), surface);
       const target =
         disclosure === "public" ? project(point(event.target_anchor), surface) : null;
@@ -925,10 +1115,17 @@ export function buildChoreographyPlan(frame, surface = null) {
           eventId,
           sourceGlobalSlot: sourceSlot,
           targetGlobalSlot: targetSlot,
+          tokenId: token.tokenId,
           source,
           target,
           sourceRadius: radii.get(sourceSlot) ?? 0,
           targetRadius: radii.get(targetSlot) ?? 0,
+          targetEndpointGap:
+            token.tokenId === "hunter_trap"
+              ? TRAP_TARGET_ENDPOINT_GAP
+              : token.tokenId === "warrior_charge"
+                ? CHARGE_TARGET_ENDPOINT_GAP
+                : undefined,
         });
       }
       planned.push(
@@ -940,6 +1137,8 @@ export function buildChoreographyPlan(frame, surface = null) {
           impactSemantic: activationImpactSemantic(token.tokenId),
           lane,
           sourceSlot,
+          sourceClassId,
+          sourceClass,
           targetSlot: disclosure === "public" ? targetSlot : null,
           targetDisclosure: disclosure,
           source,
@@ -1174,14 +1373,38 @@ export function buildChoreographyPlan(frame, surface = null) {
     );
   }
 
+  const routeLayoutOptions = surface?.viewportBounds
+    ? { viewportBounds: surface.viewportBounds }
+    : {};
+  const acceptedTargetCounts = new Map();
+  for (const input of acceptedRouteInputs) {
+    acceptedTargetCounts.set(
+      input.targetGlobalSlot,
+      (acceptedTargetCounts.get(input.targetGlobalSlot) ?? 0) + 1,
+    );
+  }
+  const acceptedLayoutInputs = acceptedRouteInputs.map((input) => ({
+    ...input,
+    targetEndpointGap:
+      (input.tokenId === "basic_damage" || input.tokenId === "basic_heal") &&
+      (acceptedTargetCounts.get(input.targetGlobalSlot) ?? 0) >= 4
+        ? BASIC_TARGET_ENDPOINT_GAP
+        : input.targetEndpointGap,
+    prioritizeTargetClearance:
+      (input.tokenId === "basic_damage" || input.tokenId === "basic_heal") &&
+      (acceptedTargetCounts.get(input.targetGlobalSlot) ?? 0) >= 4,
+  }));
   const acceptedRoutes = new Map(
-    layoutRouteSet(acceptedRouteInputs).map((route) => [route.eventId, route]),
-  );
-  const rejectedRoutes = new Map(
-    layoutRouteSet(rejectedRouteInputs, { spacing: 12 }).map((route) => [
+    layoutRouteSet(acceptedLayoutInputs, routeLayoutOptions).map((route) => [
       route.eventId,
       route,
     ]),
+  );
+  const rejectedRoutes = new Map(
+    layoutRouteSet(rejectedRouteInputs, {
+      ...routeLayoutOptions,
+      spacing: 12,
+    }).map((route) => [route.eventId, route]),
   );
   /** @type {Record<string, any>[]} */
   const routedEvents = planned.map((event) => {
@@ -1191,12 +1414,24 @@ export function buildChoreographyPlan(frame, surface = null) {
         : event.kind === "rejected_action"
           ? rejectedRoutes.get(event.eventId)
           : undefined;
-    return route ? Object.freeze({ ...event, route }) : event;
+    return route
+      ? Object.freeze({
+          ...event,
+          route,
+          routeMultiplicity:
+            event.kind === "activation" && event.targetSlot !== null
+              ? (acceptedTargetCounts.get(event.targetSlot) ?? 1)
+              : 1,
+        })
+      : event;
   });
   const spatialEventCount = routedEvents.filter((event) => event.spatial).length;
   /** @type {ReadonlyArray<Record<string, any>>} */
+  const netOutcomeEvents = layoutOutcomeCues(routedEvents, surface, "net_health");
+  /** @type {ReadonlyArray<Record<string, any>>} */
+  const ownershipEvents = layoutChargeOwnershipCues(netOutcomeEvents, surface);
   const events = Object.freeze(
-    layoutOutcomeCues(routedEvents, surface).map((event) =>
+    layoutOutcomeCues(ownershipEvents, surface, "status_lifecycle").map((event) =>
       Object.isFrozen(event) ? event : Object.freeze(event),
     ),
   );

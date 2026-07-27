@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { formatDisplayNumber } from "../src/display.js";
+import { formatCompactDisplayNumber, formatDisplayNumber } from "../src/display.js";
 
 test("human-facing numbers never exceed two decimal places", () => {
   assert.equal(formatDisplayNumber(12.3456), "12.35");
@@ -36,4 +36,13 @@ test("display precision cannot exceed the two-decimal product policy", () => {
       }),
     /minimum not exceeding maximum/,
   );
+});
+
+test("extreme compact labels remain readable while exact data stays external", () => {
+  assert.equal(formatCompactDisplayNumber(123456789), "123M");
+  assert.equal(formatCompactDisplayNumber(123456.789), "123K");
+  assert.equal(formatCompactDisplayNumber(12_345), "12.3K");
+  assert.equal(formatCompactDisplayNumber(-1_234), "-1.23K");
+  assert.equal(formatCompactDisplayNumber(999), "999");
+  assert.equal(formatCompactDisplayNumber(Number.POSITIVE_INFINITY), "—");
 });

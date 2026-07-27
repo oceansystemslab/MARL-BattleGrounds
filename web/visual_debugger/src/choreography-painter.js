@@ -1,6 +1,7 @@
-import { createSvgIcon } from "./icons.js";
 import { formatDisplayNumber } from "./display.js";
 import { explainActivation, explainNetHealth } from "./explanations.js";
+import { createSvgIcon } from "./icons.js";
+import { routeMarkerPose } from "./routes.js";
 import { registerTooltipOwner } from "./tooltip.js";
 
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
@@ -223,6 +224,9 @@ export class SvgChoreographyPainter {
     if (typeof event.tokenId === "string") {
       group.dataset.tokenId = event.tokenId;
     }
+    if (typeof event.sourceClass?.cssKey === "string") {
+      group.dataset.sourceClass = event.sourceClass.cssKey;
+    }
     if (typeof event.outcome === "string") {
       group.dataset.outcome = event.outcome;
     }
@@ -362,9 +366,45 @@ export class SvgChoreographyPainter {
       });
       const arrow = svgElement(ownerDocument, "path", {
         class: "combat-route__arrow",
-        d: "M -9 -5 L 1 0 L -9 5 Z",
+        d: "M -11 -6 L 2 0 L -11 6 L -7 0 Z",
       });
       underlay.append(hitPath, path, arrow);
+      if (
+        event.tokenId === "warrior_charge" &&
+        Number.isInteger(event.sourceSlot) &&
+        Number.isInteger(event.targetSlot)
+      ) {
+        const ownership = svgElement(ownerDocument, "g", {
+          class: "combat-route__ownership",
+          "aria-hidden": "true",
+          "data-source-slot": event.sourceSlot,
+          "data-target-slot": event.targetSlot,
+        });
+        const ownershipLabel = `id_${event.sourceSlot} → id_${event.targetSlot}`;
+        ownership.append(
+          svgElement(ownerDocument, "line", {
+            class: "combat-route__ownership-leader",
+          }),
+          svgElement(ownerDocument, "rect", {
+            class: "combat-route__ownership-box",
+            x: -34,
+            y: -9,
+            width: 68,
+            height: 18,
+            rx: 5,
+          }),
+          svgElement(ownerDocument, "text", {
+            class: "combat-route__ownership-label",
+            x: 0,
+            y: 0,
+          }),
+        );
+        const label = ownership.lastElementChild;
+        if (label) {
+          label.textContent = ownershipLabel;
+        }
+        underlay.append(ownership);
+      }
       if (options.motionMode === "normal") {
         const particle = svgElement(ownerDocument, "circle", {
           class: "combat-route__particle",
@@ -497,6 +537,7 @@ export class SvgChoreographyPainter {
     const impact = svgElement(ownerDocument, "g", {
       class: `combat-impact combat-impact--${cssIdentifier(event.tokenId)}`,
     });
+    const compact = event.tokenId === "basic_damage" || event.tokenId === "basic_heal";
     impact.append(
       svgElement(ownerDocument, "circle", {
         class: "combat-impact__hit",
@@ -505,11 +546,11 @@ export class SvgChoreographyPainter {
       }),
       svgElement(ownerDocument, "circle", {
         class: "combat-impact__core",
-        r: 13,
+        r: compact ? 7 : 13,
       }),
       svgElement(ownerDocument, "circle", {
         class: "combat-impact__ring",
-        r: 18,
+        r: compact ? 10 : 18,
       }),
     );
     const semantic = semanticImpactGlyph(ownerDocument, event.impactSemantic);
@@ -578,7 +619,7 @@ export class SvgChoreographyPainter {
       );
     }
     group.append(impact);
-    setAttributes(impact, { transform: `translate(${target.x} ${target.y})` });
+    setAttributes(impact, { transform: impactTransform(event, target) });
     return impact;
   }
 
@@ -668,12 +709,21 @@ export class SvgChoreographyPainter {
       class: "combat-net__label",
     });
     label.textContent = netLabel(event.netDelta, event.outcome);
+    const recipientLabel = svgElement(ownerDocument, "text", {
+      class: "combat-net__recipient",
+    });
+    recipientLabel.textContent = `id_${event.recipientSlot}`;
     group.dataset.netDelta = String(event.netDelta);
     group.dataset.layoutCollisionFree = String(event.cueCollisionFree !== false);
     group.append(
       svgElement(ownerDocument, "line", {
         class: "combat-cue__leader",
       }),
+      svgElement(ownerDocument, "circle", {
+        class: "combat-net__recipient-anchor",
+        r: 3,
+      }),
+      recipientLabel,
       label,
     );
     this.#updateNetGeometry(group, event);
@@ -901,6 +951,7 @@ export class SvgChoreographyPainter {
     const path = underlay?.querySelector(".combat-route__path");
     const hitPath = underlay?.querySelector(".combat-route__hit");
     const arrow = underlay?.querySelector(".combat-route__arrow");
+    const ownership = underlay?.querySelector(".combat-route__ownership");
     if (path && event.route) {
       path.setAttribute("d", event.route.path);
     }
@@ -908,15 +959,22 @@ export class SvgChoreographyPainter {
       hitPath.setAttribute("d", event.route.path);
     }
     if (arrow && event.route) {
+      const marker = routeMarkerPose(
+        event.route,
+        event.tokenId === "warrior_charge" ? 0.42 : undefined,
+      );
       setAttributes(arrow, {
-        transform: `translate(${event.route.end.x} ${event.route.end.y}) rotate(${routeEndDegrees(event.route)})`,
+        transform: `translate(${marker.x} ${marker.y}) rotate(${marker.degrees})`,
       });
+    }
+    if (ownership && event.route) {
+      this.#updateChargeOwnershipGeometry(ownership, event);
     }
     const impact = group.querySelector(".combat-impact");
     if (impact && (event.route?.end || event.target)) {
       const anchor = event.route?.end ?? event.target;
       setAttributes(impact, {
-        transform: `translate(${anchor.x} ${anchor.y})`,
+        transform: impactTransform(event, anchor),
       });
     }
     const local = group.querySelector(".combat-local");
@@ -933,20 +991,87 @@ export class SvgChoreographyPainter {
   }
 
   /**
+   * Keep a Charge ownership pill associated with its route while respecting
+   * the collision-aware plan. The leader is only needed when dense geometry
+   * displaces the pill away from its route anchor.
+   *
+   * @param {Element} ownership
+   * @param {JsonRecord} event
+   */
+  #updateChargeOwnershipGeometry(ownership, event) {
+    const cue = event.ownershipCue;
+    const anchor = event.ownershipAnchor;
+    const rendered =
+      event.ownershipCueCollisionFree === true &&
+      event.ownershipSpatialDisposition === "rendered" &&
+      cue &&
+      anchor;
+    ownership.setAttribute(
+      "data-layout-collision-free",
+      String(event.ownershipCueCollisionFree === true),
+    );
+    ownership.setAttribute(
+      "data-spatial-disposition",
+      rendered ? "rendered" : "suppressed-collision",
+    );
+    if (!rendered) {
+      ownership.setAttribute("visibility", "hidden");
+      return;
+    }
+    ownership.removeAttribute("visibility");
+    setAttributes(ownership, {
+      transform: `translate(${cue.x} ${cue.y})`,
+    });
+
+    const leader = ownership.querySelector(".combat-route__ownership-leader");
+    if (!(leader instanceof SVGElement)) {
+      return;
+    }
+    const deltaX = anchor.x - cue.x;
+    const deltaY = anchor.y - cue.y;
+    const distance = Math.hypot(deltaX, deltaY);
+    if (distance <= 4) {
+      leader.setAttribute("visibility", "hidden");
+      return;
+    }
+    const unitX = deltaX / distance;
+    const unitY = deltaY / distance;
+    const horizontalScale =
+      Math.abs(unitX) > Number.EPSILON ? 34 / Math.abs(unitX) : Infinity;
+    const verticalScale =
+      Math.abs(unitY) > Number.EPSILON ? 9 / Math.abs(unitY) : Infinity;
+    const edgeScale = Math.min(horizontalScale, verticalScale);
+    setAttributes(leader, {
+      visibility: "visible",
+      x1: deltaX,
+      y1: deltaY,
+      x2: unitX * edgeScale,
+      y2: unitY * edgeScale,
+    });
+  }
+
+  /**
    * @param {SVGElement} group
    * @param {JsonRecord} event
    */
   #updateNetGeometry(group, event) {
     const label = group.querySelector(".combat-net__label");
-    if (!label || !event.recipient) {
+    const recipientLabel = group.querySelector(".combat-net__recipient");
+    if (!label || !recipientLabel || !event.recipient) {
       return;
     }
     group.dataset.layoutCollisionFree = String(event.cueCollisionFree !== false);
-    setAttributes(label, {
-      x: event.cue?.x ?? event.recipient.x,
-      y: event.cue?.y ?? event.recipient.y - 32 - event.lane * 18,
+    const x = event.cue?.x ?? event.recipient.x;
+    const y = event.cue?.y ?? event.recipient.y - 32 - event.lane * 18;
+    setAttributes(recipientLabel, {
+      x,
+      y: y - 10,
     });
-    this.#updateCueLeader(group, event, 48);
+    setAttributes(label, {
+      x,
+      y: y + 6,
+    });
+    this.#updateCueLeader(group, event, 24);
   }
 
   /**
@@ -981,29 +1106,40 @@ export class SvgChoreographyPainter {
    */
   #updateCueLeader(group, event, cueGap) {
     const leader = group.querySelector(".combat-cue__leader");
+    const recipientAnchor = group.querySelector(".combat-net__recipient-anchor");
     const recipient = event.recipient;
     const cue = event.cue;
     if (!leader || !recipient || !cue) {
       leader?.removeAttribute("x1");
       leader?.removeAttribute("x2");
+      recipientAnchor?.setAttribute("visibility", "hidden");
       return;
     }
     const deltaX = cue.x - recipient.x;
     const deltaY = cue.y - recipient.y;
     const distance = Math.hypot(deltaX, deltaY);
-    if (distance <= cueGap + 18) {
+    const recipientGap = 24;
+    if (distance <= cueGap + recipientGap) {
       leader.setAttribute("visibility", "hidden");
+      recipientAnchor?.setAttribute("visibility", "hidden");
       return;
     }
     const unitX = deltaX / distance;
     const unitY = deltaY / distance;
     setAttributes(leader, {
       visibility: "visible",
-      x1: recipient.x + unitX * 24,
-      y1: recipient.y + unitY * 24,
+      x1: recipient.x + unitX * recipientGap,
+      y1: recipient.y + unitY * recipientGap,
       x2: cue.x - unitX * cueGap,
       y2: cue.y - unitY * cueGap,
     });
+    if (recipientAnchor) {
+      setAttributes(recipientAnchor, {
+        visibility: "visible",
+        cx: recipient.x + unitX * recipientGap,
+        cy: recipient.y + unitY * recipientGap,
+      });
+    }
   }
 
   /**
@@ -1151,6 +1287,27 @@ function semanticImpactGlyph(ownerDocument, value) {
 }
 
 /**
+ * Keep the largest Ultimate ornaments outside the body they identify. Route
+ * planning supplies an exterior impact port; this local scale bounds only the
+ * transient flare and does not alter the authoritative source or recipient.
+ *
+ * @param {Record<string, any>} event
+ * @param {Record<string, any>} anchor
+ */
+function impactTransform(event, anchor) {
+  const scale =
+    (event.tokenId === "basic_damage" || event.tokenId === "basic_heal") &&
+    Number(event.routeMultiplicity) >= 4
+      ? 0.48
+      : event.tokenId === "hunter_trap"
+        ? 0.5
+        : event.tokenId === "warrior_charge"
+          ? 0.58
+          : 1;
+  return `translate(${anchor.x} ${anchor.y}) scale(${scale})`;
+}
+
+/**
  * @param {Record<string, any>} event
  */
 function phaseFor(event) {
@@ -1199,24 +1356,6 @@ function eventKeyframes(event, motionMode) {
     { opacity: 1, offset: event.persistent ? 1 : 0.72 },
     { opacity: event.persistent ? 1 : 0 },
   ];
-}
-
-/**
- * @param {Record<string, any>} route
- */
-function routeEndDegrees(route) {
-  if (route.kind === "local_arc" && route.center) {
-    const radial = Math.atan2(
-      route.end.y - route.center.y,
-      route.end.x - route.center.x,
-    );
-    const tangent = radial + (route.sweep === 0 ? -Math.PI / 2 : Math.PI / 2);
-    return (tangent * 180) / Math.PI;
-  }
-  const reference = route.control ?? route.center ?? route.start;
-  return (
-    (Math.atan2(route.end.y - reference.y, route.end.x - reference.x) * 180) / Math.PI
-  );
 }
 
 /**

@@ -66,6 +66,7 @@ const KIND_PRIORITY = Object.freeze({
  *   pointer: TooltipPoint,
  *   tooltipSize: TooltipSize,
  *   viewport: TooltipRectangle,
+ *   protectedRects?: ReadonlyArray<TooltipRectangle>,
  * }} TooltipPlacementInput
  */
 /**
@@ -158,8 +159,10 @@ export function chooseTooltipCandidate(candidates) {
  * Place one fixed-position tooltip against an inspected object or pointer.
  *
  * Candidate order intentionally resolves a perfect tie toward right/below.
- * Viewport overflow is minimized before inspected-object overlap, then before
- * the displacement introduced by clamping.
+ * Owner avoidance is absolute: a clamped placement that covers the inspected
+ * cue never wins merely because its unclamped origin fit the viewport better.
+ * Remaining ties favor less overflow, then the viewport edge nearest the cue,
+ * keeping large explanations out of the battlefield's visual center.
  *
  * @param {TooltipPlacementInput} input
  * @returns {TooltipPlacement}
@@ -172,6 +175,11 @@ export function placeTooltip(input) {
   const pointer = normalizePoint(input.pointer, "pointer");
   const tooltipSize = normalizeSize(input.tooltipSize, "tooltipSize");
   const viewport = normalizeRectangle(input.viewport, "viewport");
+  const protectedRects = Array.isArray(input.protectedRects)
+    ? input.protectedRects.map((rectangle, index) =>
+        normalizeRectangle(rectangle, `protectedRects[${index}]`),
+      )
+    : [];
   if (viewport.right <= viewport.left || viewport.bottom <= viewport.top) {
     throw new RangeError("viewport must have positive width and height.");
   }
@@ -190,10 +198,21 @@ export function placeTooltip(input) {
     right: viewport.right - horizontalGutter,
     bottom: viewport.bottom - verticalGutter,
   });
-  const right = Math.max(anchorRect.right, pointer.x) + TOOLTIP_GAP;
-  const left = Math.min(anchorRect.left, pointer.x) - TOOLTIP_GAP - tooltipSize.width;
-  const below = Math.max(anchorRect.bottom, pointer.y) + TOOLTIP_GAP;
-  const above = Math.min(anchorRect.top, pointer.y) - TOOLTIP_GAP - tooltipSize.height;
+  const placementEnvelope = protectedRects.reduce(
+    (envelope, protectedRect) => ({
+      left: Math.min(envelope.left, protectedRect.left),
+      top: Math.min(envelope.top, protectedRect.top),
+      right: Math.max(envelope.right, protectedRect.right),
+      bottom: Math.max(envelope.bottom, protectedRect.bottom),
+    }),
+    anchorRect,
+  );
+  const right = Math.max(placementEnvelope.right, pointer.x) + TOOLTIP_GAP;
+  const left =
+    Math.min(placementEnvelope.left, pointer.x) - TOOLTIP_GAP - tooltipSize.width;
+  const below = Math.max(placementEnvelope.bottom, pointer.y) + TOOLTIP_GAP;
+  const above =
+    Math.min(placementEnvelope.top, pointer.y) - TOOLTIP_GAP - tooltipSize.height;
 
   /** @type {ReadonlyArray<{placement: TooltipPlacementName, left: number, top: number}>} */
   const candidates = Object.freeze([
@@ -205,7 +224,7 @@ export function placeTooltip(input) {
 
   /** @type {TooltipPlacement | null} */
   let best = null;
-  /** @type {[number, number, number, number] | null} */
+  /** @type {number[] | null} */
   let bestScore = null;
 
   for (const [index, candidate] of candidates.entries()) {
@@ -218,11 +237,41 @@ export function placeTooltip(input) {
       usableViewport,
     );
     const clampedBounds = rectangleFromPosition(clamped.left, clamped.top, tooltipSize);
-    const inspectedOverlap = rectangleOverlapArea(clampedBounds, anchorRect);
+    const ownerClearance = TOOLTIP_GAP / 2;
+    const paddedAnchor = {
+      left: anchorRect.left - ownerClearance,
+      top: anchorRect.top - ownerClearance,
+      right: anchorRect.right + ownerClearance,
+      bottom: anchorRect.bottom + ownerClearance,
+    };
+    const inspectedOverlap = rectangleOverlapArea(clampedBounds, paddedAnchor);
+    const protectedOverlap = protectedRects.reduce(
+      (total, protectedRect) =>
+        total +
+        rectangleOverlapArea(clampedBounds, {
+          left: protectedRect.left - ownerClearance,
+          top: protectedRect.top - ownerClearance,
+          right: protectedRect.right + ownerClearance,
+          bottom: protectedRect.bottom + ownerClearance,
+        }),
+      0,
+    );
+    const nearestViewportEdge = Math.min(
+      clampedBounds.left - usableViewport.left,
+      usableViewport.right - clampedBounds.right,
+      clampedBounds.top - usableViewport.top,
+      usableViewport.bottom - clampedBounds.bottom,
+    );
     const displacement =
       Math.abs(clamped.left - candidate.left) + Math.abs(clamped.top - candidate.top);
-    /** @type {[number, number, number, number]} */
-    const score = [overflow, inspectedOverlap, displacement, index];
+    const score = [
+      protectedOverlap,
+      inspectedOverlap,
+      overflow,
+      nearestViewportEdge,
+      displacement,
+      index,
+    ];
 
     if (bestScore === null || compareNumericRanks(score, bestScore) < 0) {
       bestScore = score;
@@ -325,6 +374,7 @@ export function createTooltipController(options) {
     tooltip.hidden = true;
     tooltip.style.visibility = "";
     tooltip.removeAttribute(TOOLTIP_KIND_ATTRIBUTE);
+    tooltip.removeAttribute("data-tooltip-placement");
     title.textContent = "";
     details.textContent = "";
   }
@@ -377,9 +427,11 @@ export function createTooltipController(options) {
         height: measured.height,
       },
       viewport: viewportRectangle(tooltip.ownerDocument),
+      protectedRects: localProtectedRects(candidate.element),
     });
     tooltip.style.left = `${placement.left}px`;
     tooltip.style.top = `${placement.top}px`;
+    tooltip.setAttribute("data-tooltip-placement", placement.placement);
     tooltip.style.visibility = "";
   }
 
@@ -641,18 +693,18 @@ function compareRanks(first, second) {
 }
 
 /**
- * @param {[number, number, number, number]} first
- * @param {[number, number, number, number]} second
+ * @param {number[]} first
+ * @param {number[]} second
  * @returns {number}
  */
 function compareNumericRanks(first, second) {
-  for (const index of /** @type {const} */ ([0, 1, 2, 3])) {
+  for (let index = 0; index < Math.min(first.length, second.length); index += 1) {
     const comparison = first[index] - second[index];
     if (comparison !== 0) {
       return comparison;
     }
   }
-  return 0;
+  return first.length - second.length;
 }
 
 /**
@@ -816,6 +868,52 @@ function closestRegisteredOwner(element) {
     current = current.parentElement;
   }
   return null;
+}
+
+/**
+ * Collect the inspected agent and its durable local cue envelope. This keeps a
+ * compact explanation from hiding the very tactical cluster it describes.
+ * Non-battlefield owners intentionally return no additional protected region.
+ *
+ * @param {Element} owner
+ * @returns {TooltipRectangle[]}
+ */
+function localProtectedRects(owner) {
+  if (typeof owner.closest !== "function") {
+    return [];
+  }
+  const battlefield = owner.closest("svg");
+  const slotOwner = owner.closest("[data-slot]");
+  const slot = slotOwner?.getAttribute("data-slot");
+  if (
+    battlefield === null ||
+    battlefield.tagName.toLowerCase() !== "svg" ||
+    slot === null
+  ) {
+    return [];
+  }
+  const protectedClasses = new Set([
+    "agent",
+    "status-dock",
+    "cooldown-dock",
+    "required-dock-fallback-dock",
+    "modifier-dock",
+    "legality-dock",
+  ]);
+  const rectangles = [];
+  for (const element of battlefield.querySelectorAll("[data-slot]")) {
+    if (
+      element.getAttribute("data-slot") !== slot ||
+      ![...protectedClasses].some((className) => element.classList.contains(className))
+    ) {
+      continue;
+    }
+    const bounds = element.getBoundingClientRect();
+    if (bounds.width > 0 && bounds.height > 0) {
+      rectangles.push(normalizeRectangle(bounds, "local protected rectangle"));
+    }
+  }
+  return rectangles;
 }
 
 /**

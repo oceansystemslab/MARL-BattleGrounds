@@ -151,14 +151,9 @@ test("durable control statuses share canonical glyphs without losing source iden
     ["status-stun", "status-stun", "status-stun"],
   );
   assert.equal(new Set(stuns.map((definition) => definition.cssKey)).size, 3);
-  assert.equal(
-    new Set(stuns.map((definition) => definition.accessibleName)).size,
-    3,
-  );
+  assert.equal(new Set(stuns.map((definition) => definition.accessibleName)).size, 3);
   assert.deepEqual(
-    iconDefinition("status-stun").primitives.map(
-      (primitive) => primitive.attributes.d,
-    ),
+    iconDefinition("status-stun").primitives.map((primitive) => primitive.attributes.d),
     ["m12 2 8 5v10l-8 5-8-5V7Z", "m8.5 8.5 7 7M15.5 8.5l-7 7"],
   );
   assert.equal(KNOWN_GLYPH_KEYS.includes("status-charge-stun"), false);
@@ -173,31 +168,18 @@ test("durable control statuses share canonical glyphs without losing source iden
     ["status-slow", "status-slow", "status-slow"],
   );
   assert.equal(new Set(slows.map((definition) => definition.cssKey)).size, 3);
-  assert.equal(
-    new Set(slows.map((definition) => definition.accessibleName)).size,
-    3,
-  );
+  assert.equal(new Set(slows.map((definition) => definition.accessibleName)).size, 3);
   assert.deepEqual(
-    iconDefinition("status-slow").primitives.map(
-      (primitive) => primitive.tag,
-    ),
+    iconDefinition("status-slow").primitives.map((primitive) => primitive.tag),
     ["path"],
   );
 });
 
 test("class-specific Ultimate tokens preserve activation vocabulary", () => {
-  const ultimates = [1, 2, 3, 4, 5].map((classId) =>
-    ultimateTokenFromClassId(classId),
-  );
+  const ultimates = [1, 2, 3, 4, 5].map((classId) => ultimateTokenFromClassId(classId));
   assert.deepEqual(
     ultimates.map((definition) => definition.tokenId),
-    [
-      "mage_burst",
-      "warrior_charge",
-      "hunter_trap",
-      "rogue_poison",
-      "holy_word",
-    ],
+    ["mage_burst", "warrior_charge", "hunter_trap", "rogue_poison", "holy_word"],
   );
   assert.deepEqual(
     ultimates.map((definition) => definition.glyphKey),
@@ -211,28 +193,14 @@ test("class-specific Ultimate tokens preserve activation vocabulary", () => {
   );
   assert.deepEqual(
     ultimates.map((definition) => definition.cssKey),
-    [
-      "mage-burst",
-      "warrior-charge",
-      "hunter-trap",
-      "rogue-poison",
-      "holy-word",
-    ],
+    ["mage-burst", "warrior-charge", "hunter-trap", "rogue-poison", "holy-word"],
   );
 });
 
 test("activation impact grammar is explicit, non-numeric, and fail-closed", () => {
   assert.deepEqual(
     EXPECTED_ACTIVATIONS.map((tokenId) => activationImpactSemantic(tokenId)),
-    [
-      "damage",
-      "healing",
-      "healing",
-      "local",
-      "damage",
-      "neutral",
-      "damage",
-    ],
+    ["damage", "healing", "healing", "local", "damage", "neutral", "damage"],
   );
   assert.equal(activationImpactSemantic("future_activation"), "neutral");
   assert.equal(activationImpactSemantic(null), "neutral");

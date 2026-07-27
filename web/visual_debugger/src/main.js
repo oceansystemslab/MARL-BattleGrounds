@@ -14,10 +14,7 @@ import { bindBattlefieldControls, keyboardCommand } from "./controls.js";
 import { formatDisplayNumber } from "./display.js";
 import { DebuggerPanels } from "./panels.js";
 import { BattlefieldRenderer } from "./scene.js";
-import {
-  createTooltipController,
-  registerTooltipOwner,
-} from "./tooltip.js";
+import { createTooltipController, registerTooltipOwner } from "./tooltip.js";
 
 /**
  * @param {string} id
@@ -61,6 +58,7 @@ const elements = {
   battlefield: requiredElement("battlefield"),
   battlefieldEmpty: requiredElement("battlefield-empty"),
   commandDeck: document.querySelector(".command-deck"),
+  commandControlledActor: requiredElement("command-controlled-actor"),
   roster: requiredElement("roster"),
   rosterCount: requiredElement("roster-count"),
   selectionCard: requiredElement("selection-card"),
@@ -129,9 +127,10 @@ const choreographer = new CombatChoreographer({
   painter: new SvgChoreographyPainter(),
   ledger: new ConsumedTransitionLedger({ storage: presentationStorage }),
   motionMode: reducedMotionPreference.matches ? "reduced" : "normal",
-  onStateChange: () => {
+  onStateChange: (presentation) => {
     renderMotionControls();
     renderCommandAvailability();
+    syncCompactActiveCombatPriority(presentation);
   },
 });
 
@@ -593,6 +592,21 @@ function renderCommandTargets(hud, pending) {
  */
 function renderDraftState(hud) {
   const pending = isRecord(hud.pending_action) ? hud.pending_action : {};
+  const controlledSlot = Number(hud.controlled_global_slot);
+  elements.commandControlledActor.textContent = Number.isInteger(controlledSlot)
+    ? `Actor · id_${controlledSlot}`
+    : "Actor · unavailable";
+  elements.commandControlledActor.setAttribute(
+    "aria-label",
+    Number.isInteger(controlledSlot)
+      ? `Controlled actor id_${controlledSlot}`
+      : "Controlled actor unavailable",
+  );
+  elements.commandControlledActor.dataset.controlledSlot = Number.isInteger(
+    controlledSlot,
+  )
+    ? String(controlledSlot)
+    : "";
   const pendingMove = Number(pending.move_action);
   const movementRows = new Map(
     asArray(hud.movement_legalities)
@@ -812,6 +826,35 @@ function render() {
     offline: state.offline,
   });
   tooltipController.refresh();
+}
+
+/**
+ * On the supported minimum battlefield, accepted combat truth temporarily
+ * outranks analysis decoration. The choreography controller remains the only
+ * presentation clock; this adapter merely mirrors its active-animation state
+ * into the durable SVG renderer and reprojects retained effects when the set of
+ * protected rectangles changes.
+ *
+ * @param {ReturnType<CombatChoreographer["snapshot"]>} presentation
+ */
+function syncCompactActiveCombatPriority(presentation) {
+  const changed = battlefieldRenderer.setCompactActiveCombat(
+    presentation.active && presentation.animationCount > 0,
+  );
+  if (!changed || !presentation.active || !state.frame) {
+    return;
+  }
+  try {
+    choreographer.reproject(state.frame, battlefieldRenderer.choreographySurface());
+  } catch (error) {
+    setNotice(
+      error instanceof Error
+        ? `Compact combat presentation failed to reproject: ${error.message}`
+        : "Compact combat presentation failed to reproject.",
+      "error",
+    );
+    renderConnection();
+  }
 }
 
 function battlefieldSizeKey() {

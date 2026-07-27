@@ -304,6 +304,38 @@ def _team_focus_crossfire_config() -> EnvConfig:
     )
 
 
+def _moving_focus_crossfire_config() -> EnvConfig:
+    """Return a radially separated focus-fire fixture for minimum-view review."""
+    roster = (
+        MAGE_CLASS_ID,
+        WARRIOR_CLASS_ID,
+        HUNTER_CLASS_ID,
+        ROGUE_CLASS_ID,
+        NEUTRAL_CLASS_ID,
+        WARRIOR_CLASS_ID,
+        PRIEST_CLASS_ID,
+        PRIEST_CLASS_ID,
+        PRIEST_CLASS_ID,
+        NEUTRAL_CLASS_ID,
+    )
+    return _config(
+        map_width=16.0,
+        map_height=12.0,
+        team_sizes=(4, 4),
+        class_ids=roster,
+        active_positions={
+            0: (6.02, 4.02),
+            1: (6.52, 6.0),
+            2: (6.02, 7.98),
+            3: (9.48, 6.0),
+            5: (8.0, 6.0),
+            6: (9.98, 4.02),
+            7: (9.98, 7.98),
+            8: (8.0, 8.8),
+        },
+    )
+
+
 def _mirrored_ultimates_config() -> EnvConfig:
     roster = (
         MAGE_CLASS_ID,
@@ -450,8 +482,8 @@ def _max_status_stack_config() -> EnvConfig:
         active_positions={
             0: (8.0, 6.0),
             1: (10.5, 7.0),
-            5: (3.0, 6.0),
-            6: (8.0, 3.2),
+            5: (8.0, 1.0),
+            6: (10.0, 4.0),
             7: (11.0, 6.0),
             8: (8.0, 7.4),
         },
@@ -850,7 +882,7 @@ STRESS_SCENARIOS: dict[str, DebuggerScenario] = {
         title="Moving focus crossfire",
         description="Moving focus fire and healing converge on one recipient.",
         mode="scripted",
-        build_config=_team_focus_crossfire_config,
+        build_config=_moving_focus_crossfire_config,
         frames=_MOVING_FOCUS_CROSSFIRE_FRAMES,
         default_controlled_slot=2,
         audience="stress",

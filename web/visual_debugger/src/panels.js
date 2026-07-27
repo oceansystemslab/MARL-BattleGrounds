@@ -1,4 +1,4 @@
-import { formatDisplayNumber } from "./display.js";
+import { formatCompactDisplayNumber, formatDisplayNumber } from "./display.js";
 import {
   explainActivation,
   explainAgent,
@@ -6,6 +6,7 @@ import {
   explainNetHealth,
   explainStatus,
 } from "./explanations.js";
+import { createSvgIcon } from "./icons.js";
 import { registerTooltipOwner } from "./tooltip.js";
 import { classTokenFromId, resolveVisualToken, teamTokenFromId } from "./vocabulary.js";
 
@@ -167,6 +168,16 @@ function addFact(container, label, value) {
 }
 
 /**
+ * Keep roster status values compact while leaving exact duration truth in the
+ * owning chip's data, accessible label, and tooltip.
+ *
+ * @param {unknown} duration
+ */
+export function rosterStatusDurationLabel(duration) {
+  return Number.isInteger(duration) ? formatCompactDisplayNumber(duration) : "?";
+}
+
+/**
  * Render every authorized status/modifier record without sorting, merging, or
  * deriving mechanics.
  *
@@ -185,16 +196,30 @@ function renderFactTokens(container, items, kind, emptyText, globalSlot) {
       kind === "status"
         ? `duration ${Number.isInteger(item.duration) ? item.duration : "unknown"}`
         : `multiplier ${formatDisplayNumber(item.multiplier)}`;
-    const chip = htmlElement(
-      "span",
-      `roster-fact-token roster-fact-token--${kind}`,
-      kind === "status"
-        ? `${token.shortLabel} ${Number.isInteger(item.duration) ? item.duration : "?"}`
-        : `${token.shortLabel} ×${formatDisplayNumber(item.multiplier)}`,
-    );
+    const chip = htmlElement("span", `roster-fact-token roster-fact-token--${kind}`);
     chip.dataset.tokenId = token.tokenId;
-    if (kind === "status" && Number.isInteger(item.duration)) {
-      chip.dataset.duration = String(item.duration);
+    if (kind === "status") {
+      const displayDuration = rosterStatusDurationLabel(item.duration);
+      const sourceClass = classTokenFromId(item.source_class_id);
+      const icon = createSvgIcon(container.ownerDocument, token.glyphKey, {
+        className: "roster-fact-token__icon",
+      });
+      const durationValue = htmlElement(
+        "span",
+        "roster-fact-token__duration",
+        String(displayDuration),
+      );
+      chip.dataset.icon = token.glyphKey;
+      chip.dataset.sourceClass = sourceClass.cssKey;
+      if (Number.isInteger(item.duration)) {
+        chip.dataset.duration = String(item.duration);
+        chip.dataset.visibleValueAbbreviated = String(
+          String(displayDuration) !== String(item.duration),
+        );
+      }
+      chip.append(icon, durationValue);
+    } else {
+      chip.textContent = `${token.shortLabel} ×${formatDisplayNumber(item.multiplier)}`;
     }
     if (kind === "modifier" && Number.isFinite(item.multiplier)) {
       chip.dataset.multiplier = String(item.multiplier);
@@ -223,7 +248,7 @@ function targetLabel(target) {
     return "Undisclosed";
   }
   if (target.disclosure === "target_none") {
-    return "target-none";
+    return "None";
   }
   if (target.disclosure === "public" && Number.isInteger(target.global_slot)) {
     return `id_${target.global_slot}`;
@@ -235,7 +260,57 @@ function targetLabel(target) {
  * @param {unknown} lane
  */
 function laneLabel(lane) {
-  return lane === 0 ? "0/B · Basic" : lane === 1 ? "1/U · Ultimate" : "Not armed";
+  return lane === 0 ? "Basic (0/B)" : lane === 1 ? "Ultimate (1/U)" : "No combat";
+}
+
+/**
+ * @param {unknown} moveAction
+ */
+function movementLabel(moveAction) {
+  const labels = [
+    "Stay",
+    "North",
+    "South",
+    "East",
+    "West",
+    "Northeast",
+    "Northwest",
+    "Southeast",
+    "Southwest",
+  ];
+  return Number.isInteger(moveAction) && labels[Number(moveAction)]
+    ? `${labels[Number(moveAction)]} (${moveAction})`
+    : "Undisclosed";
+}
+
+/**
+ * Present the staged combat choice, accounting for the canonical target-none
+ * row whose lane field remains an authoritative transport detail.
+ *
+ * @param {Record<string, any>} pending
+ */
+function pendingCombatLabel(pending) {
+  return Number(pending.target_action) === 0
+    ? "No combat"
+    : laneLabel(pending.armed_lane);
+}
+
+/**
+ * Convert authoritative pending fields into polished display copy without
+ * changing, inferring, or replacing the returned action tuple.
+ *
+ * @param {Record<string, any>} pending
+ */
+export function pendingActionDisplayFacts(pending) {
+  if (!isRecord(pending)) {
+    throw new TypeError("pending action display facts require an object.");
+  }
+  return Object.freeze({
+    movement: `Movement · ${movementLabel(pending.move_action)} · ${availabilityLabel(pending.movement_mask_value)}`,
+    target: `Target · ${targetLabel(pending.target)}`,
+    action: `Action · ${pendingCombatLabel(pending)}`,
+    legality: `Legality · ${pendingPairMaskLabel(pending)}`,
+  });
 }
 
 /**
@@ -249,7 +324,10 @@ function availabilityLabel(value) {
  * @param {Record<string, any>} pending
  */
 function pendingPairMaskLabel(pending) {
-  if (pending.armed_lane !== 0 && pending.armed_lane !== 1) {
+  if (
+    Number(pending.target_action) === 0 ||
+    (pending.armed_lane !== 0 && pending.armed_lane !== 1)
+  ) {
     return "Not applicable";
   }
   return availabilityLabel(pending.pair_mask_value);
@@ -435,16 +513,13 @@ function updatePendingActionRow(row, pending, controlled) {
     "pending-action-row__summary",
     String(pending.summary ?? "Pending action"),
   );
+  const displayFacts = pendingActionDisplayFacts(pending);
   const facts = htmlElement("div", "pending-action-row__facts");
   facts.append(
-    htmlElement(
-      "span",
-      "pending-action-chip",
-      `Move ${pending.move_action ?? "—"} · ${availabilityLabel(pending.movement_mask_value)}`,
-    ),
-    htmlElement("span", "pending-action-chip", `Target ${targetLabel(pending.target)}`),
-    htmlElement("span", "pending-action-chip", `Lane ${laneLabel(pending.armed_lane)}`),
-    htmlElement("span", "pending-action-chip", `Pair ${pendingPairMaskLabel(pending)}`),
+    htmlElement("span", "pending-action-chip", displayFacts.movement),
+    htmlElement("span", "pending-action-chip", displayFacts.target),
+    htmlElement("span", "pending-action-chip", displayFacts.action),
+    htmlElement("span", "pending-action-chip", displayFacts.legality),
   );
   element.replaceChildren(heading, summary, facts);
   element.setAttribute(
@@ -457,10 +532,10 @@ function updatePendingActionRow(row, pending, controlled) {
     title: `Pending action · id_${pending.actor_global_slot}`,
     details: [
       String(pending.summary ?? "Pending action unavailable"),
-      `Movement mask ${availabilityLabel(pending.movement_mask_value)}`,
-      `Target ${targetLabel(pending.target)}`,
-      `Lane ${laneLabel(pending.armed_lane)}`,
-      `Pair ${pendingPairMaskLabel(pending)}`,
+      displayFacts.movement,
+      displayFacts.target,
+      displayFacts.action,
+      displayFacts.legality,
     ],
     anchor: "element",
   });

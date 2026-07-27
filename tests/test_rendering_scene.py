@@ -119,6 +119,12 @@ def test_canonical_status_registry_is_complete_ordered_and_stable() -> None:
         CANONICAL_STATUS_ORDER
     )
     assert len(CANONICAL_STATUS_ORDER) == 9
+    assert {definition.glyph for definition in STATUS_TOKENS[:3]} == {"⬢"}
+    assert {definition.glyph for definition in STATUS_TOKENS[3:6]} == {"↻"}
+    assert len({definition.accessible_name for definition in STATUS_TOKENS[:3]}) == 3
+    assert len({definition.accessible_name for definition in STATUS_TOKENS[3:6]}) == 3
+    assert len({definition.source_class_id for definition in STATUS_TOKENS[:3]}) == 3
+    assert len({definition.source_class_id for definition in STATUS_TOKENS[3:6]}) == 3
     assert tuple(sorted(CANONICAL_STATUS_ORDER, key=status_sort_key)) == (
         CANONICAL_STATUS_ORDER
     )
@@ -641,12 +647,21 @@ def test_selected_legality_is_copied_from_exact_controlled_mask_row() -> None:
     assert legality.lane_1_available is bool(exact[1])
 
 
-def test_pov_completed_effects_use_successor_visibility_and_omit_hidden_endpoints() -> (
-    None
-):
+def test_pov_temporal_outcomes_require_visibility_at_both_epochs() -> None:
     session = submit_next_script_frame(_debugger_session("basic_support"))
     transition = session.last_transition
     assert transition is not None
+
+    baseline_batch = build_visual_event_batch(session, audience="agent_pov")
+    assert baseline_batch is not None
+    assert any(
+        isinstance(event, NetHealthEventV1) and event.recipient_global_slot == 6
+        for event in baseline_batch.events
+    )
+    assert any(
+        isinstance(event, StatusLifecycleEventV1) and event.recipient_global_slot == 6
+        for event in baseline_batch.events
+    )
 
     hidden_enemy_mask = transition.before_observation.enemy_visibility_mask.at[
         0,
@@ -677,23 +692,14 @@ def test_pov_completed_effects_use_successor_visibility_and_omit_hidden_endpoint
         and event.source_global_slot == 1
     )
     target_actor = next(
-        actor
-        for actor in transition.actor_transitions
-        if actor.actor_global_slot == 6
+        actor for actor in transition.actor_transitions if actor.actor_global_slot == 6
     )
     assert activation.target_disclosure == "public"
     assert activation.target_global_slot == 6
     assert activation.target_anchor == target_actor.position_after
-    assert any(
-        isinstance(event, NetHealthEventV1)
+    assert not any(
+        isinstance(event, (NetHealthEventV1, StatusLifecycleEventV1))
         and event.recipient_global_slot == 6
-        and event.recipient_anchor == target_actor.position_after
-        for event in batch.events
-    )
-    assert any(
-        isinstance(event, StatusLifecycleEventV1)
-        and event.recipient_global_slot == 6
-        and event.recipient_anchor == target_actor.position_after
         for event in batch.events
     )
 
@@ -741,9 +747,7 @@ def test_pov_completed_effects_use_successor_visibility_and_omit_hidden_endpoint
     assert payload["target_anchor"] is None  # type: ignore[index]
 
 
-def test_pov_charge_activation_keeps_prestate_visibility_while_outcomes_use_successor() -> (
-    None
-):
+def test_pov_charge_uses_prestate_anchors_and_dual_epoch_outcomes() -> None:
     session = create_session(
         get_scenario("mirrored_ultimates"),
         seed=0,
@@ -786,14 +790,10 @@ def test_pov_charge_activation_keeps_prestate_visibility_while_outcomes_use_succ
         and event.source_global_slot == 1
     )
     source_actor = next(
-        actor
-        for actor in transition.actor_transitions
-        if actor.actor_global_slot == 1
+        actor for actor in transition.actor_transitions if actor.actor_global_slot == 1
     )
     target_actor = next(
-        actor
-        for actor in transition.actor_transitions
-        if actor.actor_global_slot == 6
+        actor for actor in transition.actor_transitions if actor.actor_global_slot == 6
     )
     assert activation.target_disclosure == "public"
     assert activation.source_anchor == source_actor.position_before

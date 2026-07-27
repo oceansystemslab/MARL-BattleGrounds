@@ -93,7 +93,8 @@ select:hover:not(:disabled) {
 button:focus-visible,
 select:focus-visible,
 summary:focus-visible,
-.battlefield:focus-visible {
+.battlefield:focus-visible,
+[data-tooltip-owner][tabindex="0"]:focus-visible {
   outline: 3px solid rgb(34 211 238 / 62%);
   outline-offset: 2px;
 }
@@ -232,6 +233,7 @@ select {
 
 .session-toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: end;
   gap: 0.75rem;
   padding: 0.75rem;
@@ -498,6 +500,40 @@ select {
   pointer-events: none;
 }
 
+#visual-tooltip.visual-tooltip::before {
+  position: absolute;
+  width: 0.55rem;
+  height: 0.55rem;
+  border: solid var(--border-bright);
+  background: rgb(8 13 24 / 98%);
+  content: "";
+  transform: rotate(45deg);
+}
+
+#visual-tooltip.visual-tooltip[data-tooltip-placement="right-below"]::before {
+  top: -0.34rem;
+  left: 0.8rem;
+  border-width: 1px 0 0 1px;
+}
+
+#visual-tooltip.visual-tooltip[data-tooltip-placement="left-below"]::before {
+  top: -0.34rem;
+  right: 0.8rem;
+  border-width: 1px 0 0 1px;
+}
+
+#visual-tooltip.visual-tooltip[data-tooltip-placement="right-above"]::before {
+  bottom: -0.34rem;
+  left: 0.8rem;
+  border-width: 0 1px 1px 0;
+}
+
+#visual-tooltip.visual-tooltip[data-tooltip-placement="left-above"]::before {
+  right: 0.8rem;
+  bottom: -0.34rem;
+  border-width: 0 1px 1px 0;
+}
+
 #visual-tooltip.visual-tooltip[hidden] {
   display: none;
 }
@@ -628,10 +664,28 @@ select {
   color: var(--ultimate);
 }
 
-.combat-effect[data-token-id="basic_damage"],
-.combat-route-effect[data-token-id="basic_damage"],
 .combat-effect[data-outcome="damage"] {
   color: var(--danger);
+}
+
+.combat-effect[data-token-id="basic_damage"][data-source-class="mage"],
+.combat-route-effect[data-token-id="basic_damage"][data-source-class="mage"] {
+  color: var(--class-mage);
+}
+
+.combat-effect[data-token-id="basic_damage"][data-source-class="warrior"],
+.combat-route-effect[data-token-id="basic_damage"][data-source-class="warrior"] {
+  color: var(--class-warrior);
+}
+
+.combat-effect[data-token-id="basic_damage"][data-source-class="hunter"],
+.combat-route-effect[data-token-id="basic_damage"][data-source-class="hunter"] {
+  color: var(--class-hunter);
+}
+
+.combat-effect[data-token-id="basic_damage"][data-source-class="rogue"],
+.combat-route-effect[data-token-id="basic_damage"][data-source-class="rogue"] {
+  color: var(--class-rogue);
 }
 
 .combat-effect[data-token-id="basic_heal"],
@@ -745,8 +799,41 @@ select {
 .combat-route__arrow {
   fill: currentColor;
   stroke: var(--battlefield);
-  stroke-width: 1;
+  stroke-width: 1.5;
+  filter: drop-shadow(0 0 3px currentColor);
   vector-effect: non-scaling-stroke;
+}
+
+.combat-route__ownership {
+  color: var(--class-warrior);
+  pointer-events: none;
+}
+
+.combat-route__ownership-leader {
+  stroke: currentColor;
+  stroke-width: 1.25;
+  stroke-dasharray: 2 3;
+  opacity: 0.78;
+  vector-effect: non-scaling-stroke;
+}
+
+.combat-route__ownership-box {
+  fill: rgb(8 13 24 / 96%);
+  stroke: currentColor;
+  stroke-width: 1.5;
+  filter: drop-shadow(0 1px 3px rgb(0 0 0 / 62%));
+  vector-effect: non-scaling-stroke;
+}
+
+.combat-route__ownership-label {
+  fill: var(--text);
+  stroke: rgb(8 13 24 / 96%);
+  stroke-width: 2;
+  paint-order: stroke fill;
+  font-size: 9px;
+  font-weight: 800;
+  text-anchor: middle;
+  dominant-baseline: central;
 }
 
 .combat-route__particle {
@@ -771,6 +858,11 @@ select {
 .combat-local__core {
   fill: currentColor;
   opacity: 0.28;
+}
+
+.combat-impact--basic-damage .combat-impact__ring,
+.combat-impact--basic-heal .combat-impact__ring {
+  stroke-width: 2;
 }
 
 .combat-impact__semantic {
@@ -860,12 +952,37 @@ select {
   dominant-baseline: central;
 }
 
+.combat-net__recipient {
+  fill: currentColor;
+  stroke: rgb(8 13 24 / 94%);
+  stroke-width: 2.5;
+  paint-order: stroke fill;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-anchor: middle;
+  dominant-baseline: central;
+}
+
+.combat-net__recipient-anchor {
+  fill: currentColor;
+  stroke: var(--battlefield);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+
 .combat-cue__leader {
   stroke: currentColor;
   stroke-width: 1.5;
   stroke-dasharray: 2 4;
   opacity: 0.46;
   vector-effect: non-scaling-stroke;
+}
+
+.combat-effect--net-health .combat-cue__leader {
+  stroke-width: 2;
+  stroke-dasharray: none;
+  opacity: 0.82;
 }
 
 .combat-effect[data-outcome="unchanged"] {
@@ -1176,14 +1293,20 @@ select {
 .legality-dock,
 .status-dock,
 .cooldown-dock,
+.required-dock-fallback-dock,
 .modifier-dock {
   pointer-events: none;
+}
+
+#battlefield [data-compact-active-suppressed="true"] {
+  display: none;
 }
 
 .legality-pill,
 .status-cell,
 .status-overflow,
 .cooldown-cell,
+.required-dock-fallback,
 .modifier-cell,
 .modifier-overflow {
   pointer-events: all;
@@ -1199,6 +1322,7 @@ select {
 .legality-pill__box,
 .status-cell__box,
 .cooldown-cell__box,
+.required-dock-fallback__box,
 .modifier-cell__box {
   fill: rgb(8 13 24 / 94%);
   stroke: currentColor;
@@ -1257,6 +1381,40 @@ select {
   color: var(--ultimate);
 }
 
+.required-dock-fallback {
+  color: var(--text-muted);
+}
+
+.required-dock-fallback[data-kind="cooldown"] {
+  color: var(--ultimate);
+}
+
+.required-dock-fallback__box {
+  stroke-dasharray: 2 2;
+}
+
+.required-dock-fallback__label {
+  fill: var(--text);
+  font-weight: 850;
+  text-anchor: middle;
+  dominant-baseline: central;
+  pointer-events: none;
+}
+
+.required-dock-fallback__owner {
+  font-size: 7px;
+  letter-spacing: -0.02em;
+}
+
+.required-dock-fallback__value {
+  font-size: 8px;
+}
+
+.required-dock-fallback__leader {
+  stroke-width: 1.75;
+  stroke-dasharray: 2 2;
+}
+
 .status-cell[data-source-class="mage"] {
   color: var(--class-mage);
 }
@@ -1307,6 +1465,11 @@ select {
 .modifier-cell__icon {
   color: currentColor;
   pointer-events: none;
+}
+
+.status-cell__icon,
+.roster-fact-token__icon {
+  stroke-width: 2.6;
 }
 
 .cooldown-cell[data-class="mage"] .cooldown-cell__icon {
@@ -1374,33 +1537,177 @@ select {
   fill: currentColor;
 }
 
+.status-cell[data-visible-value-abbreviated="true"] .status-cell__value,
+.cooldown-cell[data-visible-value-abbreviated="true"] .cooldown-cell__value,
+.modifier-cell[data-visible-value-abbreviated="true"] .modifier-cell__value {
+  font-size: 8px;
+  letter-spacing: -0.02em;
+}
+
 .status-overflow__label,
 .modifier-overflow__label {
   font-size: 10px;
   text-anchor: middle;
 }
 
+.status-overflow__owner {
+  font-size: 7px;
+  letter-spacing: -0.02em;
+}
+
+.status-overflow__count {
+  font-size: 8px;
+}
+
 .command-deck {
+  position: relative;
   display: grid;
-  grid-template-columns: auto repeat(3, minmax(0, 1fr));
-  gap: 0.6rem;
+  gap: 0.5rem;
+  overflow: hidden;
   margin-top: 0.7rem;
-  padding: 0.65rem;
+  padding: 0.7rem;
   border: 1px solid var(--border);
   border-radius: 0.65rem;
-  background: #0b1220;
+  background:
+    linear-gradient(110deg, rgb(34 211 238 / 5%), transparent 38%),
+    linear-gradient(180deg, #0d1626, #0a111e);
+  box-shadow:
+    0 12px 28px rgb(0 0 0 / 24%),
+    inset 0 1px 0 rgb(255 255 255 / 3%);
+}
+
+.command-deck::before {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 2px;
+  background: linear-gradient(90deg, var(--accent), var(--ultimate), transparent 78%);
+  content: "";
+  opacity: 0.75;
+}
+
+.command-deck__header,
+.command-group__heading,
+.command-commit,
+.command-commit__actions {
+  display: flex;
+  align-items: center;
+}
+
+.command-deck__header {
+  justify-content: space-between;
+  gap: 1rem;
+  min-width: 0;
+  padding: 0.1rem 0.15rem 0.4rem;
+  border-bottom: 1px solid rgb(73 97 127 / 34%);
+}
+
+.command-deck__header h3,
+.command-group h4 {
+  margin: 0;
+}
+
+.command-deck__header h3 {
+  font-size: 0.93rem;
+  letter-spacing: -0.015em;
+}
+
+.command-deck__eyebrow {
+  margin: 0 0 0.08rem;
+  color: var(--accent);
+  font-size: 0.58rem;
+  font-weight: 800;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
+
+.command-deck__shortcut {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  gap: 0.35rem;
+  color: var(--text-muted);
+  font-size: 0.67rem;
+  white-space: nowrap;
+}
+
+.command-deck__shortcut kbd {
+  min-width: 2.5rem;
+  padding: 0.18rem 0.38rem;
+  border: 1px solid var(--border-bright);
+  border-bottom-width: 2px;
+  border-radius: 0.35rem;
+  color: var(--text);
+  background: var(--surface-raised);
+  font: inherit;
+  font-weight: 800;
+  text-align: center;
+}
+
+.command-deck__composer {
+  display: grid;
+  grid-template-columns: 7.9rem minmax(0, 1fr);
+  gap: 0.5rem;
 }
 
 .command-group {
   min-width: 0;
 }
 
-.command-group h3 {
-  margin: 0 0 0.4rem;
+.command-group--compose {
+  padding: 0.55rem;
+  border: 1px solid rgb(73 97 127 / 42%);
+  border-radius: 0.55rem;
+  background: rgb(16 24 39 / 72%);
+}
+
+.command-group__heading {
+  gap: 0.42rem;
+  min-height: 1.7rem;
+}
+
+.command-group__heading h4,
+.command-group--utility h4 {
   color: var(--text-muted);
-  font-size: 0.68rem;
+  font-size: 0.64rem;
+  line-height: 1;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+.command-group__heading p {
+  margin: 0.14rem 0 0;
+  color: #75859a;
+  font-size: 0.59rem;
+  line-height: 1;
+}
+
+#command-controlled-actor {
+  display: inline-flex;
+  min-height: 1rem;
+  align-items: center;
+  padding: 0.1rem 0.28rem;
+  border: 1px solid rgb(34 211 238 / 28%);
+  border-radius: 0.3rem;
+  color: #a5f3fc;
+  background: rgb(34 211 238 / 7%);
+  font-size: 0.61rem;
+  font-weight: 800;
+  letter-spacing: 0.025em;
+  white-space: nowrap;
+}
+
+.command-step {
+  display: inline-grid;
+  flex: none;
+  width: 1.45rem;
+  height: 1.45rem;
+  border: 1px solid rgb(34 211 238 / 38%);
+  border-radius: 50%;
+  color: #a5f3fc;
+  background: rgb(34 211 238 / 8%);
+  font-size: 0.58rem;
+  font-weight: 800;
+  place-items: center;
 }
 
 .button-row {
@@ -1408,30 +1715,168 @@ select {
   flex-wrap: wrap;
 }
 
-.button-row button {
-  flex: 1 1 6rem;
+.command-deck button,
+.command-deck select {
+  transition:
+    border-color 120ms ease,
+    background 120ms ease,
+    box-shadow 120ms ease,
+    color 120ms ease,
+    transform 120ms ease;
+}
+
+.command-deck button:hover:not(:disabled, [aria-disabled="true"]) {
+  transform: translateY(-1px);
 }
 
 .command-target {
   display: grid;
-  grid-template-columns: auto minmax(7.5rem, 1fr);
-  gap: 0.35rem;
+  grid-template-columns: 3.2rem minmax(0, 1fr);
+  gap: 0.4rem;
   align-items: center;
-  margin-bottom: 0.4rem;
+  margin: 0.5rem 0 0.4rem;
   color: var(--text-muted);
-  font-size: 0.68rem;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .command-target select {
   min-width: 0;
   width: 100%;
+  min-height: 2rem;
+  padding-block: 0.32rem;
+  font-size: 0.75rem;
+}
+
+.command-choice-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.3rem;
+}
+
+.command-choice-row button {
+  min-width: 0;
+  min-height: 2rem;
+  padding: 0.35rem 0.4rem;
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
+.command-commit {
+  display: grid;
+  grid-template-columns: minmax(9rem, 1fr) minmax(16rem, 1.25fr);
+  gap: 0.65rem;
+  padding: 0.48rem 0.55rem;
+  border: 1px solid rgb(34 211 238 / 32%);
+  border-radius: 0.55rem;
+  background:
+    linear-gradient(90deg, rgb(34 211 238 / 8%), transparent 54%), rgb(11 18 32 / 88%);
+}
+
+.command-commit__copy {
+  display: grid;
+  min-width: 0;
+  gap: 0.04rem;
+}
+
+.command-commit__copy > span {
+  color: var(--accent);
+  font-size: 0.55rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.command-commit__copy strong {
+  overflow: hidden;
+  font-size: 0.76rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-commit__copy small {
+  color: var(--text-muted);
+  font-size: 0.61rem;
+}
+
+.command-commit__actions {
+  justify-content: flex-end;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.command-commit__actions button {
+  min-height: 2.35rem;
+  padding: 0.42rem 0.65rem;
+  font-size: 0.72rem;
+}
+
+#submit-turn-button {
+  flex: 1 1 9.5rem;
+  border-color: #67e8f9;
+  background: linear-gradient(135deg, #22d3ee, #38bdf8);
+  box-shadow:
+    0 0 0 1px rgb(255 255 255 / 22%) inset,
+    0 7px 18px rgb(34 211 238 / 16%);
+  letter-spacing: 0.01em;
+}
+
+#advance-script-button {
+  flex: 0 1 9rem;
+  color: var(--text-muted);
+  background: rgb(22 33 52 / 70%);
+}
+
+.command-deck__utilities {
+  display: grid;
+  gap: 0.18rem;
+  padding-top: 0.12rem;
+}
+
+.command-group--utility {
+  display: grid;
+  grid-template-columns: 4.15rem minmax(0, 1fr);
+  gap: 0.45rem;
+  align-items: center;
+  min-width: 0;
+  padding: 0.24rem 0.35rem;
+}
+
+.command-button-row {
+  display: grid;
+  gap: 0.28rem;
+}
+
+.command-group--inspect .command-button-row {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.command-group--session {
+  border-top: 1px solid rgb(73 97 127 / 22%);
+}
+
+.command-group--session .command-button-row {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.command-button-row button {
+  min-width: 0;
+  min-height: 1.85rem;
+  padding: 0.27rem 0.34rem;
+  color: var(--text-muted);
+  background: rgb(22 33 52 / 58%);
+  font-size: 0.66rem;
+  line-height: 1.05;
 }
 
 .command-deck button[data-selected="true"] {
   border-color: var(--text);
   color: var(--text);
   background:
-    linear-gradient(135deg, rgb(45 212 191 / 22%), rgb(167 139 250 / 18%)), var(--panel);
+    linear-gradient(135deg, rgb(45 212 191 / 22%), rgb(167 139 250 / 18%)),
+    var(--surface-raised);
   box-shadow:
     0 0 0 1px rgb(244 247 251 / 72%) inset,
     0 0 0.75rem rgb(34 211 238 / 22%);
@@ -1440,7 +1885,7 @@ select {
 .command-deck button[aria-disabled="true"]:not(:disabled) {
   border-color: color-mix(in srgb, var(--danger) 70%, var(--border));
   color: color-mix(in srgb, var(--danger) 70%, var(--text-muted));
-  background: color-mix(in srgb, var(--danger) 7%, var(--panel));
+  background: color-mix(in srgb, var(--danger) 7%, var(--surface-raised));
   opacity: 0.62;
   cursor: not-allowed;
 }
@@ -1452,14 +1897,17 @@ select {
 
 .movement-grid {
   display: grid;
-  grid-template-columns: repeat(3, 2.25rem);
+  grid-template-columns: repeat(3, 2rem);
   gap: 0.2rem;
+  justify-content: center;
+  margin-top: 0.5rem;
 }
 
 .movement-grid button {
-  width: 2.25rem;
-  min-height: 2rem;
+  width: 2rem;
+  min-height: 1.85rem;
   padding: 0;
+  font-size: 0.9rem;
 }
 
 .hud-panel {
@@ -1597,8 +2045,44 @@ select {
 }
 
 .roster-fact-token--status {
-  border-color: color-mix(in srgb, var(--ultimate) 48%, var(--border));
-  color: #ddd6fe;
+  gap: 0.2rem;
+  border-color: currentColor;
+}
+
+.roster-fact-token--status[data-source-class="mage"] {
+  color: var(--class-mage);
+}
+
+.roster-fact-token--status[data-source-class="warrior"] {
+  color: var(--class-warrior);
+}
+
+.roster-fact-token--status[data-source-class="hunter"] {
+  color: var(--class-hunter);
+}
+
+.roster-fact-token--status[data-source-class="rogue"] {
+  color: var(--class-rogue);
+}
+
+.roster-fact-token--status[data-source-class="priest"] {
+  color: var(--class-priest);
+}
+
+.roster-fact-token__icon {
+  width: 0.78rem;
+  height: 0.78rem;
+  flex: 0 0 0.78rem;
+  color: currentColor;
+  pointer-events: none;
+}
+
+.roster-fact-token__duration {
+  min-width: 0.62rem;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+  text-align: center;
 }
 
 .roster-fact-token--modifier {
@@ -2148,27 +2632,14 @@ select {
   border: 0;
 }
 
-@media (max-width: 78rem) {
-  .session-toolbar {
-    flex-wrap: wrap;
-  }
-
+@media (max-width: 100rem) {
   .session-facts {
-    order: 3;
-    flex-basis: 100%;
+    flex-basis: 10rem;
     justify-content: flex-start;
-  }
-
-  .motion-controls {
-    order: 4;
   }
 
   .toolbar-actions {
     margin-left: auto;
-  }
-
-  .command-deck {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -2235,8 +2706,35 @@ select {
     text-align: left;
   }
 
-  .command-deck {
+  .command-deck__header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+
+  .command-deck__composer,
+  .command-commit {
     grid-template-columns: 1fr;
+  }
+
+  .command-group--movement .movement-grid {
+    justify-content: start;
+  }
+
+  .command-commit__actions {
+    justify-content: stretch;
+  }
+
+  .command-commit__actions button {
+    flex: 1;
+  }
+
+  .command-group--utility {
+    grid-template-columns: 1fr;
+  }
+
+  .command-group--inspect .command-button-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .fact-card {
@@ -2245,5 +2743,168 @@ select {
 
   .help-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-height: 40rem) and (min-width: 42.0625rem) {
+  .app-header {
+    padding-block: 0.3rem 0.25rem;
+  }
+
+  .brand h1 {
+    font-size: 1.08rem;
+  }
+
+  .eyebrow {
+    margin-bottom: 0;
+    font-size: 0.55rem;
+  }
+
+  .status-pill {
+    min-height: 1.45rem;
+    padding: 0.14rem 0.45rem;
+    font-size: 0.66rem;
+  }
+
+  .session-toolbar {
+    gap: 0.3rem 0.5rem;
+    padding: 0.4rem;
+  }
+
+  .session-toolbar label,
+  .movement-scale-control legend {
+    gap: 0.08rem;
+    font-size: 0.58rem;
+  }
+
+  .session-toolbar select,
+  .session-toolbar button {
+    min-height: 1.75rem;
+    padding-block: 0.18rem;
+    font-size: 0.72rem;
+  }
+
+  #scenario-select {
+    width: 10rem;
+    min-width: 10rem;
+  }
+
+  #view-select,
+  #preset-select {
+    width: 8rem;
+    min-width: 8rem;
+  }
+
+  .movement-scale-control {
+    grid-template-columns: minmax(8rem, 1fr) 6.6rem;
+    min-width: 15.25rem;
+    gap: 0.08rem 0.35rem;
+  }
+
+  .movement-scale-control__row input {
+    min-width: 4.8rem;
+  }
+
+  .movement-scale-control__actions button {
+    min-height: 1.75rem;
+    padding-inline: 0.35rem;
+    padding-block: 0.1rem;
+  }
+
+  .session-facts {
+    flex: 1 1 7rem;
+    gap: 0.35rem;
+    font-size: 0.68rem;
+  }
+
+  .session-facts strong {
+    font-size: 0.8rem;
+  }
+
+  .motion-controls {
+    gap: 0.3rem;
+  }
+
+  .motion-controls button {
+    min-height: 1.75rem;
+    padding: 0.2rem 0.4rem;
+    font-size: 0.7rem;
+  }
+
+  .motion-rate-group {
+    padding: 0.1rem;
+  }
+
+  .motion-rate-group button {
+    min-width: 2.35rem;
+  }
+
+  .motion-status {
+    min-width: 4.5rem;
+    font-size: 0.68rem;
+  }
+
+  .toolbar-actions {
+    gap: 0.35rem;
+  }
+
+  .toolbar-actions button {
+    padding-inline: 0.55rem;
+  }
+
+  .notice {
+    margin-top: 0.3rem;
+    padding: 0.32rem 0.55rem;
+    font-size: 0.72rem;
+  }
+
+  .workspace {
+    padding-block: 0.3rem 0.75rem;
+  }
+
+  .battlefield-panel {
+    padding: 0.4rem;
+  }
+
+  .panel-heading {
+    margin-bottom: 0.25rem;
+  }
+
+  .panel-heading h2,
+  .hud-section h2 {
+    font-size: 0.9rem;
+  }
+
+  .scenario-description {
+    overflow: hidden;
+    max-width: 60%;
+    font-size: 0.72rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .hud-panel {
+    max-height: calc(100vh - 12rem);
+  }
+
+  .command-deck {
+    gap: 0.38rem;
+    padding: 0.5rem;
+  }
+
+  .command-deck__header {
+    padding-bottom: 0.3rem;
+  }
+
+  .command-group--compose {
+    padding: 0.45rem;
+  }
+
+  .command-commit {
+    padding: 0.38rem 0.45rem;
+  }
+
+  .command-group--utility {
+    padding-block: 0.18rem;
   }
 }

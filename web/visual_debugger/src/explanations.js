@@ -183,7 +183,7 @@ export function explainOverflow(rawItems, kind, slot) {
   return descriptor(
     `${kind}-overflow`,
     `${kind}-overflow:${slot}`,
-    `${rawItems.length} hidden ${kind === "status" ? "statuses" : "modifiers"}`,
+    `id_${slot} · ${rawItems.length} hidden ${kind === "status" ? "statuses" : "modifiers"}`,
     details.length === 0 ? ["No hidden items"] : details,
   );
 }

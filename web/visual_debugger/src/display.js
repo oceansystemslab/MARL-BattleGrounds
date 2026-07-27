@@ -38,3 +38,32 @@ export function formatDisplayNumber(value, options = {}) {
   }
   return retainedFraction ? `${integer}.${retainedFraction}` : integer;
 }
+
+/**
+ * Produce a short, honest visual label for a value that cannot fit its compact
+ * battlefield cell. The exact value remains in the owning cue's accessible
+ * label, tooltip, and data attributes; this label is presentation-only.
+ *
+ * @param {unknown} value
+ * @returns {string}
+ */
+export function formatCompactDisplayNumber(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "—";
+  }
+  const normalized = Object.is(value, -0) ? 0 : value;
+  const magnitude = Math.abs(normalized);
+  if (magnitude < 1_000) {
+    return formatDisplayNumber(normalized);
+  }
+
+  const suffixes = ["K", "M", "B", "T", "P"];
+  const exponent = Math.min(Math.floor(Math.log10(magnitude) / 3), suffixes.length);
+  const scale = 1_000 ** exponent;
+  const scaled = normalized / scale;
+  const precision = Math.abs(scaled) >= 100 ? 0 : Math.abs(scaled) >= 10 ? 1 : 2;
+  const suffix = suffixes[exponent - 1] ?? "P+";
+  return `${formatDisplayNumber(scaled, {
+    maximumFractionDigits: precision,
+  })}${suffix}`;
+}
