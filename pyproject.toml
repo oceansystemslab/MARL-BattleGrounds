@@ -76,7 +76,12 @@ indent-style = "space"
 line-ending = "lf"
 
 [tool.pyright]
-include = ["src", "tests"]
+include = [
+  "src",
+  "tests",
+  "scripts/dev/visual_debugger",
+  "scripts/dev/debug_renderer.py",
+]
 exclude = [
   "**/__pycache__",
   ".venv",
@@ -93,6 +98,7 @@ venv = ".venv"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 addopts = [
   "-ra",
   "--strict-markers",

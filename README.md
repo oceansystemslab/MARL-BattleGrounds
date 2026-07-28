@@ -5,6 +5,32 @@ heterogeneous adversarial multi-agent reinforcement learning.
 
 The project is currently under development.
 
+## Development Visual Debugger and Analyzer
+
+Open the deterministic Milestone 1–5 Visual Debugger and Analyzer in a local
+browser:
+
+```bash
+./scripts/dev/run_debug_renderer.sh
+```
+
+Python owns the simulator, session, legality, commands, and transitions. It
+returns an allowlisted JSON frame; the browser constructs the SVG/HTML
+presentation and presentation-only motion. The launcher always prints a
+loopback URL and also attempts to open it automatically. Running the analyzer
+requires neither Node.js nor npm.
+
+For a one-frame Matplotlib snapshot instead:
+
+```bash
+uv sync --extra viz
+./scripts/dev/run_debug_renderer.sh --static
+```
+
+See the [Visual Debugger and Analyzer guide](docs/dev/visual_debugger.md) for
+controls, joint-turn planning, view authorization, scenarios, visual
+semantics, troubleshooting, and contributor checks.
+
 ## Author
 
 MARL-BattleGrounds is developed by Ulixes Tariq Hawili as part of the SPADS CDT,

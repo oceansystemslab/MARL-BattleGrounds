@@ -1,0 +1,428 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    >
+    <meta name="referrer" content="no-referrer">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>MARL-BattleGrounds Visual Debugger and Analyzer</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script type="module" src="/src/main.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#battlefield">Skip to battlefield</a>
+
+    <header class="app-header">
+      <div class="brand">
+        <p class="eyebrow">MARL-BattleGrounds</p>
+        <h1>Visual Debugger and Analyzer</h1>
+      </div>
+      <div class="header-status" aria-live="polite">
+        <span id="connection-status" class="status-pill" data-state="loading">
+          Connecting
+        </span>
+        <span id="audience-badge" class="status-pill status-pill--quiet">
+          View unavailable
+        </span>
+        <span id="terminal-badge" class="status-pill status-pill--warning" hidden>
+          Terminal
+        </span>
+      </div>
+    </header>
+
+    <section class="session-toolbar" aria-label="Analyzer session">
+      <label>
+        <span>Scenario</span>
+        <select id="scenario-select" aria-label="Scenario" disabled>
+          <option>Loading…</option>
+        </select>
+      </label>
+      <label>
+        <span>View</span>
+        <select id="view-select" aria-label="View mode" disabled>
+          <option value="researcher">Researcher</option>
+          <option value="pov">Agent POV</option>
+        </select>
+      </label>
+      <label>
+        <span>Preset</span>
+        <select id="preset-select" aria-label="Presentation preset" disabled>
+          <option value="presentation">Presentation</option>
+          <option value="analysis">Analysis</option>
+          <option value="debug">Debug</option>
+        </select>
+      </label>
+      <fieldset class="movement-scale-control">
+        <legend>Movement scale</legend>
+        <div class="movement-scale-control__row">
+          <input
+            id="movement-scale-input"
+            type="range"
+            min="0.01"
+            max="1.00"
+            step="0.01"
+            value="1.00"
+            aria-label="Ordinary movement distance scale"
+            aria-describedby="movement-scale-help"
+            disabled
+          >
+          <output id="movement-scale-value" for="movement-scale-input">1.00</output>
+        </div>
+        <div class="movement-scale-control__actions">
+          <button id="movement-scale-tenth-button" type="button" disabled>
+            0.10
+          </button>
+          <button id="movement-scale-default-button" type="button" disabled>
+            Default
+          </button>
+        </div>
+        <span id="movement-scale-help" class="sr-only">
+          Changing movement scale performs an authoritative reset without
+          advancing the simulator.
+        </span>
+      </fieldset>
+      <fieldset class="session-facts" aria-label="Session facts">
+        <span>Revision <strong id="revision-value">—</strong></span>
+        <span>Step <strong id="step-value">—</strong></span>
+        <span>Transition <strong id="transition-value">—</strong></span>
+      </fieldset>
+      <fieldset class="motion-controls" aria-label="Presentation motion">
+        <legend class="sr-only">Presentation motion</legend>
+        <button
+          id="motion-pause-button"
+          class="button button--quiet"
+          type="button"
+          aria-pressed="false"
+        >
+          Pause
+        </button>
+        <fieldset class="motion-rate-group" aria-label="Animation speed">
+          <button type="button" data-motion-rate="0.5" aria-pressed="false">0.5×</button>
+          <button type="button" data-motion-rate="1" aria-pressed="true">1×</button>
+          <button type="button" data-motion-rate="2" aria-pressed="false">2×</button>
+          <button type="button" data-motion-rate="off" aria-pressed="false">Off</button>
+        </fieldset>
+        <button
+          id="motion-skip-button"
+          class="button button--quiet"
+          type="button"
+          disabled
+        >
+          Skip
+        </button>
+        <output id="motion-status" class="motion-status" aria-live="polite">
+          Motion 1×
+        </output>
+      </fieldset>
+      <div class="toolbar-actions">
+        <button id="reconnect-button" class="button button--quiet" type="button">
+          Reconnect
+        </button>
+        <button id="help-button" class="button button--quiet" type="button">
+          Help
+        </button>
+        <button id="exit-button" class="button button--danger" type="button" disabled>
+          Exit analyzer
+        </button>
+      </div>
+    </section>
+
+    <div id="notice" class="notice" data-level="info" role="status" hidden></div>
+
+    <main class="workspace">
+      <section class="battlefield-panel" aria-labelledby="battlefield-heading">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Authoritative snapshot</p>
+            <h2 id="battlefield-heading">Battlefield</h2>
+          </div>
+          <p id="scenario-description" class="scenario-description">
+            Waiting for the Python debugger service.
+          </p>
+        </div>
+
+        <div id="battlefield-shell" class="battlefield-shell" aria-busy="true">
+          <svg
+            id="battlefield"
+            class="battlefield"
+            role="application"
+            tabindex="0"
+            aria-label="Interactive battlefield. Press Help for keyboard controls."
+            aria-describedby="battlefield-instructions"
+          ></svg>
+          <p id="battlefield-empty" class="battlefield-empty">
+            Connecting to the local analyzer service…
+          </p>
+        </div>
+        <p id="battlefield-instructions" class="sr-only">
+          The battlefield owns debugger keyboard commands while it has focus.
+          Tab and Shift Tab cycle controlled actors here. Escape clears the
+          target and moves focus to the command deck, or to Help while commands
+          are unavailable. Tab behaves normally in the side panel.
+        </p>
+
+        <section class="command-deck" aria-label="Debugger commands">
+          <header class="command-deck__header">
+            <div>
+              <p class="command-deck__eyebrow">Joint action composer</p>
+              <h3>Stage, inspect, then submit</h3>
+            </div>
+            <span class="command-deck__shortcut">
+              <kbd>Enter</kbd>
+              commits every staged row
+            </span>
+          </header>
+
+          <div class="command-deck__composer">
+            <div class="command-group command-group--compose command-group--movement">
+              <div class="command-group__heading">
+                <span class="command-step" aria-hidden="true">01</span>
+                <div>
+                  <h4>Movement</h4>
+                  <p id="command-controlled-actor" aria-live="polite">
+                    Actor · unavailable
+                  </p>
+                </div>
+              </div>
+              <div class="movement-grid">
+                <button type="button" data-key="q" data-move-action="6" data-command-role="draft" aria-label="Move northwest">↖</button>
+                <button type="button" data-key="w" data-move-action="1" data-command-role="draft" aria-label="Move north">↑</button>
+                <button type="button" data-key="e" data-move-action="5" data-command-role="draft" aria-label="Move northeast">↗</button>
+                <button type="button" data-key="a" data-move-action="4" data-command-role="draft" aria-label="Move west">←</button>
+                <button id="stay-button" type="button" data-key="x" data-move-action="0" data-command-role="draft" aria-label="Stay">•</button>
+                <button type="button" data-key="d" data-move-action="3" data-command-role="draft" aria-label="Move east">→</button>
+                <button type="button" data-key="z" data-move-action="8" data-command-role="draft" aria-label="Move southwest">↙</button>
+                <button type="button" data-key="s" data-move-action="2" data-command-role="draft" aria-label="Move south">↓</button>
+                <button type="button" data-key="c" data-move-action="7" data-command-role="draft" aria-label="Move southeast">↘</button>
+              </div>
+            </div>
+
+            <div class="command-group command-group--compose command-group--action">
+              <div class="command-group__heading">
+                <span class="command-step" aria-hidden="true">02</span>
+                <div>
+                  <h4>Action</h4>
+                  <p>Target and combat lane</p>
+                </div>
+              </div>
+              <label class="command-target">
+                <span>Target</span>
+                <select id="command-target-select" aria-label="Pending target">
+                  <option value="">No target</option>
+                </select>
+              </label>
+              <div class="button-row command-choice-row">
+                <button id="no-combat-button" type="button" data-key="0" data-command-role="draft" aria-pressed="false">No combat</button>
+                <button id="basic-button" type="button" data-key="1" data-command-role="draft" aria-pressed="false">Arm Basic</button>
+                <button id="ultimate-button" type="button" data-key="2" data-command-role="draft" aria-pressed="false">Arm Ultimate</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="command-commit">
+            <div class="command-commit__copy">
+              <span>Commit</span>
+              <strong>Submit the staged joint turn</strong>
+              <small>One authoritative transition</small>
+            </div>
+            <div class="command-commit__actions">
+              <button id="submit-turn-button" type="button" data-key="Enter" data-command-role="interactive-submit" class="button--primary">
+                Submit joint turn
+              </button>
+              <button id="advance-script-button" type="button" data-key="n" data-command-role="script-advance">Advance scripted frame</button>
+            </div>
+          </div>
+
+          <div class="command-deck__utilities">
+            <div class="command-group command-group--utility command-group--inspect">
+              <h4>Inspect</h4>
+              <div class="button-row command-button-row">
+                <button type="button" data-key="Tab">Next actor</button>
+                <button type="button" data-key="Tab" data-shift="true">
+                  Previous actor
+                </button>
+                <button type="button" data-key="Escape">Clear target</button>
+                <button type="button" data-key="g">Ranges</button>
+                <button type="button" data-key="v">Verbosity</button>
+              </div>
+            </div>
+
+            <div class="command-group command-group--utility command-group--session">
+              <h4>Session</h4>
+              <div class="button-row command-button-row">
+                <button id="reset-button" type="button">Reset</button>
+                <button type="button" data-key="[">Previous scenario</button>
+                <button type="button" data-key="]">Next scenario</button>
+              </div>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <aside class="hud-panel" aria-label="Analyzer inspector">
+        <section class="hud-section" aria-labelledby="roster-heading">
+          <div class="section-heading">
+            <h2 id="roster-heading">Roster</h2>
+            <span id="roster-count" class="count-badge">0 visible</span>
+          </div>
+          <div id="roster" class="roster">
+            <p class="empty-copy">No authorized agents received yet.</p>
+          </div>
+        </section>
+
+        <section class="hud-section" aria-labelledby="selection-heading">
+          <h2 id="selection-heading">Controlled and selected</h2>
+          <div id="selection-card" class="fact-card">
+            <p class="empty-copy">No selection facts received yet.</p>
+          </div>
+        </section>
+
+        <section class="hud-section" aria-labelledby="pending-heading">
+          <div class="section-heading">
+            <h2 id="pending-heading">Pending joint turn</h2>
+            <span id="pending-count" class="count-badge">0 actors</span>
+          </div>
+          <p id="pending-scope" class="section-note">
+            Waiting for authoritative submission scope.
+          </p>
+          <article id="pending-card" class="action-card">
+            <p class="empty-copy">No pending action.</p>
+          </article>
+        </section>
+
+        <section class="hud-section" aria-labelledby="accepted-heading">
+          <h2 id="accepted-heading">Latest transition</h2>
+          <article id="accepted-card" class="action-card">
+            <p class="empty-copy">No transition yet.</p>
+          </article>
+          <p
+            id="accepted-announcement"
+            class="sr-only"
+            aria-live="polite"
+            aria-atomic="true"
+          ></p>
+        </section>
+
+        <section class="hud-section" aria-labelledby="events-heading">
+          <div class="section-heading">
+            <h2 id="events-heading">Latest events</h2>
+            <span id="event-count" class="count-badge">0</span>
+          </div>
+          <ol id="event-feed" class="event-feed">
+            <li class="empty-copy">No transition events.</li>
+          </ol>
+        </section>
+
+        <details id="visual-key" class="hud-section visual-key">
+          <summary>Visual key</summary>
+          <dl class="visual-key__list">
+            <dt><span class="key-swatch key-swatch--team-a"></span>Team A</dt>
+            <dd>Blue solid perimeter</dd>
+            <dt><span class="key-swatch key-swatch--team-b"></span>Team B</dt>
+            <dd>Red solid perimeter with right-edge chevron</dd>
+            <dt><span class="key-swatch key-swatch--controlled"></span>Controlled</dt>
+            <dd>Bright outer halo</dd>
+            <dt><span class="key-swatch key-swatch--selected"></span>Selected</dt>
+            <dd>Magenta corner reticle</dd>
+            <dt><span class="key-range key-range--observation"></span>Observation</dt>
+            <dd>White dotted range</dd>
+            <dt><span class="key-range key-range--basic"></span>Basic range</dt>
+            <dd>Class-colored dashed range</dd>
+            <dt><span class="key-range key-range--ultimate"></span>Ultimate range</dt>
+            <dd>Purple dash-dot range</dd>
+            <dt><span class="key-swatch key-swatch--basic"></span>0/B</dt>
+            <dd>Exact Basic-lane availability</dd>
+            <dt><span class="key-swatch key-swatch--ultimate"></span>1/U</dt>
+            <dd>Exact Ultimate-lane availability</dd>
+            <dt><span class="key-swatch key-swatch--net"></span>NET</dt>
+            <dd>
+              One recipient-level before/after health outcome; never a
+              per-source amount
+            </dd>
+          </dl>
+        </details>
+
+        <details class="hud-section diagnostics">
+          <summary>Technical frame</summary>
+          <div id="diagnostics-card" class="diagnostics-card">
+            <p class="empty-copy">No frame received.</p>
+          </div>
+        </details>
+      </aside>
+    </main>
+
+    <aside
+      id="visual-tooltip"
+      class="visual-tooltip"
+      role="tooltip"
+      aria-live="off"
+      hidden
+    >
+      <strong id="visual-tooltip-title" class="visual-tooltip__title"></strong>
+      <span id="visual-tooltip-details" class="visual-tooltip__details"></span>
+    </aside>
+
+    <dialog id="help-dialog" class="help-dialog" aria-labelledby="help-heading">
+      <form method="dialog">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Browser controls</p>
+            <h2 id="help-heading">Analyzer help</h2>
+          </div>
+          <button class="button button--quiet" type="submit" value="close">Close</button>
+        </div>
+        <p>
+          Click the battlefield once to give it command focus. Panel controls
+          keep ordinary browser keyboard and Tab behavior.
+        </p>
+        <dl class="help-grid">
+          <dt>Tab / Shift+Tab</dt><dd>Cycle the controlled actor</dd>
+          <dt>Shift+left click</dt><dd>Control the clicked visible actor</dd>
+          <dt>Left click</dt><dd>Select a visible target</dd>
+          <dt>Right click</dt><dd>Clear the target</dd>
+          <dt>Escape</dt>
+          <dd>Clear the target and leave battlefield focus</dd>
+          <dt>WASD / QEZC</dt><dd>Choose movement for the controlled actor</dd>
+          <dt>Arrow keys</dt><dd>Cardinal movement aliases</dd>
+          <dt>X</dt><dd>Set the controlled actor to Stay</dd>
+          <dt>0 / 1 / 2</dt><dd>Stage no combat / Basic / Ultimate</dd>
+          <dt>Space / Enter</dt>
+          <dd>
+            Submit every staged actor in researcher view, or only the
+            controlled actor in agent POV
+          </dd>
+          <dt>N</dt><dd>Advance the next registered scripted frame only</dd>
+          <dt>R</dt><dd>Deterministically reset the scenario</dd>
+          <dt>Shift+R</dt><dd>Explain why cooldown clearing is unavailable</dd>
+          <dt>G / V</dt><dd>Toggle ranges / diagnostic verbosity</dd>
+          <dt>[ / ]</dt><dd>Previous / next scenario</dd>
+          <dt>P</dt><dd>Pause or resume presentation motion</dd>
+          <dt>Motion controls</dt>
+          <dd>Choose 0.5×, 1×, 2×, Off, or Skip the current explanation</dd>
+        </dl>
+        <p class="help-note">
+          Actor drafts persist when you cycle or directly control another
+          actor. Scripted scenarios are inspection-only: manual draft and
+          Submit controls are unavailable, and N advances the registered
+          trajectory.
+        </p>
+        <p class="help-note">
+          Animation, layout, hover, help, and panel state are presentation-only.
+          Python remains authoritative for every simulator and legality decision.
+          Normal motion briefly holds only the next Submit/Next-frame input;
+          Skip, reduced motion, and Off release it immediately.
+        </p>
+      </form>
+    </dialog>
+
+    <noscript>
+      <p class="noscript">
+        This local analyzer needs JavaScript to display authoritative Python
+        frames. It does not simulate in the browser.
+      </p>
+    </noscript>
+  </body>
+</html>

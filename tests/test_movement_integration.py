@@ -1,15 +1,18 @@
 """Movement integration tests for Milestone 4 Step 3."""
+# pyright: reportPrivateUsage=false
 
-from typing import cast
+from typing import TypedDict, cast
 
 import jax
 import jax.numpy as jnp
 import pytest
 from jax import Array
 
-from marl_battlegrounds.core.env import step
+from marl_battlegrounds.core.config import resolve_agent_profile
+from marl_battlegrounds.core.env import _build_observation_and_action_mask, step
 from marl_battlegrounds.core.geometry import GEOMETRY_TOLERANCE
 from marl_battlegrounds.core.types import (
+    AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED,
     CLASS_NEUTRAL,
     CONTEXT_FEATURES,
     ENVIRONMENT_DIMENSIONS,
@@ -27,6 +30,8 @@ from marl_battlegrounds.core.types import (
     MOVE_STAY,
     MOVE_WEST,
     NUM_MOVE_ACTIONS,
+    NUM_SLOW_CHANNELS,
+    NUM_STUN_CHANNELS,
     NUM_TARGET_ACTIONS,
     NUM_ULTIMATE_ACTIONS,
     OBJECTIVE_FEATURES,
@@ -42,6 +47,9 @@ from marl_battlegrounds.core.types import (
     OBSTACLE_TYPE_PILLAR,
     OBSTACLE_TYPE_WALL,
     SELF_FEATURES,
+    STUN_CHANNEL_HUNTER_TRAP,
+    STUN_CHANNEL_ROGUE_POISON,
+    STUN_CHANNEL_WARRIOR_CHARGE,
     UNIT_FEATURES,
     Action,
     ActionMask,
@@ -54,6 +62,61 @@ from marl_battlegrounds.core.types import (
 )
 
 # Test Helpers ---
+
+
+class _CombatStateFields(TypedDict):
+    """Keyword fields for inert combat and action-history test state."""
+
+    current_health: Array
+    ultimate_cooldowns: Array
+    slow_durations: Array
+    stun_durations: Array
+    rogue_poison_anti_heal_durations: Array
+    mage_burst_damage_amplification_durations: Array
+    priest_blessing_of_freedom_slow_floor_durations: Array
+    previous_timestep_move_actions: Array
+    previous_timestep_select_target_actions: Array
+    previous_timestep_use_ultimate_actions: Array
+    has_previous_timestep_joint_action: Array
+
+
+def _inert_combat_state_fields() -> _CombatStateFields:
+    """Return neutral combat fields for direct EnvState constructors."""
+    return {
+        "current_health": jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32),
+        "ultimate_cooldowns": jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        "slow_durations": jnp.zeros(
+            (MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.int32
+        ),
+        "stun_durations": jnp.zeros(
+            (MAX_AGENT_SLOTS, NUM_STUN_CHANNELS), dtype=jnp.int32
+        ),
+        "rogue_poison_anti_heal_durations": jnp.zeros(
+            (MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
+        "mage_burst_damage_amplification_durations": jnp.zeros(
+            (MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
+        "priest_blessing_of_freedom_slow_floor_durations": jnp.zeros(
+            (MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
+        "previous_timestep_move_actions": jnp.zeros(
+            (MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
+        "previous_timestep_select_target_actions": jnp.zeros(
+            (MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
+        "previous_timestep_use_ultimate_actions": jnp.zeros(
+            (MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
+        "has_previous_timestep_joint_action": jnp.asarray(False),
+    }
+
+
+def _current_action_mask(config: EnvConfig, state: EnvState) -> ActionMask:
+    """Return the action mask paired with an explicitly built test state."""
+    _, action_mask = _build_observation_and_action_mask(state, config)
+    return action_mask
 
 
 def _obstacle_array_with_rows(*rows: tuple[int, Array]) -> Array:
@@ -131,34 +194,39 @@ def _deterministic_config(
     *,
     team_size: int = 3,
     max_steps: int = 1000,
-    default_movement_speed: float = 1.0,
     map_width: float = 20.0,
     map_height: float = 12.0,
     obstacles: Array | None = None,
+    ordinary_movement_distance_scale: float = 1.0,
 ) -> EnvConfig:
     """Create a deterministic config for movement integration tests."""
+    profile = resolve_agent_profile(
+        jnp.full((MAX_AGENT_SLOTS,), CLASS_NEUTRAL, dtype=jnp.int32),
+        jnp.asarray((team_size, team_size), dtype=jnp.int32),
+    )
+    positions = jnp.asarray(
+        (
+            (0.5, 0.5),
+            (2.5, 0.5),
+            (4.5, 0.5),
+            (6.5, 0.5),
+            (8.5, 0.5),
+            (0.5, 7.5),
+            (2.5, 7.5),
+            (4.5, 7.5),
+            (6.5, 7.5),
+            (8.5, 7.5),
+        ),
+        dtype=jnp.float32,
+    )
     return EnvConfig(
-        team_size=team_size,
         max_steps=max_steps,
         map_width=map_width,
         map_height=map_height,
-        default_agent_radius=0.5,
-        default_movement_speed=default_movement_speed,
-        default_observation_radius=8.0,
-        default_basic_interaction_radius=6.0,
-        default_ultimate_interaction_radius=9.0,
         obstacles=_empty_obstacles() if obstacles is None else obstacles,
-    )
-
-
-def _team_ids() -> Array:
-    """Create the canonical fixed-slot team-id vector."""
-    return jnp.concatenate(
-        (
-            jnp.zeros((MAX_AGENTS_PER_TEAM,), dtype=jnp.int32),
-            jnp.ones((MAX_AGENTS_PER_TEAM,), dtype=jnp.int32),
-        ),
-        axis=0,
+        agent_profile=profile,
+        initial_agent_positions=jnp.where(profile.active_mask[:, None], positions, 0.0),
+        ordinary_movement_distance_scale=ordinary_movement_distance_scale,
     )
 
 
@@ -201,11 +269,6 @@ def _slot_float_vector(
     return values
 
 
-def _neutral_class_ids() -> Array:
-    """Create the placeholder neutral class-id vector."""
-    return jnp.full((MAX_AGENT_SLOTS,), CLASS_NEUTRAL, dtype=jnp.int32)
-
-
 def _mask_with_true_slots(*slots: int) -> Array:
     """Create a slot mask with only selected slots marked true."""
     mask = jnp.zeros((MAX_AGENT_SLOTS,), dtype=bool)
@@ -218,6 +281,7 @@ def _mask_with_true_slots(*slots: int) -> Array:
 
 
 def _state_with_single_active_alive_agent(
+    config: EnvConfig,
     position: Array,
     *,
     radius: float = 0.5,
@@ -226,28 +290,33 @@ def _state_with_single_active_alive_agent(
     effective_basic_interaction_radius: float = 6.0,
     effective_ultimate_interaction_radius: float = 9.0,
     step_count: int = 0,
-) -> EnvState:
-    """Create a valid state with slot 0 active and alive."""
-    return EnvState(
-        step_count=jnp.array(step_count, dtype=jnp.int32),
-        agent_positions=_agent_positions_array_with_rows((0, position)),
+) -> tuple[EnvConfig, EnvState]:
+    """Create an exact config/state pair with only slot 0 participating."""
+    active_mask = _mask_with_true_slots(0)
+    profile = config.agent_profile._replace(
+        active_mask=active_mask,
         agent_radii=_agent_radii_array_with_rows((0, radius)),
-        team_ids=_team_ids(),
-        class_ids=_neutral_class_ids(),
-        movement_speeds=_slot_float_vector(1.0, (0, effective_movement_speed)),
-        observation_radii=_slot_float_vector(8.0, (0, effective_observation_radius)),
+        base_movement_speeds=_slot_float_vector(0.0, (0, effective_movement_speed)),
+        observation_radii=_slot_float_vector(0.0, (0, effective_observation_radius)),
         basic_interaction_radii=_slot_float_vector(
-            6.0, (0, effective_basic_interaction_radius)
+            0.0, (0, effective_basic_interaction_radius)
         ),
         ultimate_interaction_radii=_slot_float_vector(
-            9.0, (0, effective_ultimate_interaction_radius)
+            0.0, (0, effective_ultimate_interaction_radius)
         ),
-        active_mask=_mask_with_true_slots(0),
-        alive_mask=_mask_with_true_slots(0),
     )
+    config = config._replace(agent_profile=profile)
+    state = EnvState(
+        step_count=jnp.array(step_count, dtype=jnp.int32),
+        agent_positions=_agent_positions_array_with_rows((0, position)),
+        alive_mask=active_mask,
+        **_inert_combat_state_fields(),
+    )
+    return config, state
 
 
 def _state_with_two_agents(
+    config: EnvConfig,
     agent_a_position: Array,
     agent_b_position: Array,
     agent_a_active_flag: bool = True,
@@ -262,8 +331,8 @@ def _state_with_two_agents(
     effective_basic_interaction_radius: float = 6.0,
     effective_ultimate_interaction_radius: float = 9.0,
     step_count: int = 0,
-) -> EnvState:
-    """Create a valid state with two agents and configurable participation flags."""
+) -> tuple[EnvConfig, EnvState]:
+    """Create an exact config/state pair with two configurable participants."""
     active_mask = jnp.zeros((MAX_AGENT_SLOTS,), dtype=bool)
     alive_mask = jnp.zeros((MAX_AGENT_SLOTS,), dtype=bool)
 
@@ -273,38 +342,41 @@ def _state_with_two_agents(
     active_mask = active_mask.at[1].set(agent_b_active_flag)
     alive_mask = alive_mask.at[1].set(agent_b_alive_flag)
 
-    return EnvState(
+    profile = config.agent_profile._replace(
+        active_mask=active_mask,
+        agent_radii=_agent_radii_array_with_rows((0, radius), (1, radius)),
+        base_movement_speeds=_slot_float_vector(
+            0.0,
+            (0, agent_a_effective_movement_speed),
+            (1, agent_b_effective_movement_speed),
+        ),
+        observation_radii=_slot_float_vector(
+            0.0,
+            (0, effective_observation_radius),
+            (1, effective_observation_radius),
+        ),
+        basic_interaction_radii=_slot_float_vector(
+            0.0,
+            (0, effective_basic_interaction_radius),
+            (1, effective_basic_interaction_radius),
+        ),
+        ultimate_interaction_radii=_slot_float_vector(
+            0.0,
+            (0, effective_ultimate_interaction_radius),
+            (1, effective_ultimate_interaction_radius),
+        ),
+    )
+    config = config._replace(agent_profile=profile)
+    state = EnvState(
         step_count=jnp.array(step_count, dtype=jnp.int32),
         agent_positions=_agent_positions_array_with_rows(
             (0, agent_a_position),
             (1, agent_b_position),
         ),
-        agent_radii=_agent_radii_array_with_rows((0, radius), (1, radius)),
-        team_ids=_team_ids(),
-        class_ids=_neutral_class_ids(),
-        movement_speeds=_slot_float_vector(
-            1.0,
-            (0, agent_a_effective_movement_speed),
-            (1, agent_b_effective_movement_speed),
-        ),
-        observation_radii=_slot_float_vector(
-            8.0,
-            (0, effective_observation_radius),
-            (1, effective_observation_radius),
-        ),
-        basic_interaction_radii=_slot_float_vector(
-            6.0,
-            (0, effective_basic_interaction_radius),
-            (1, effective_basic_interaction_radius),
-        ),
-        ultimate_interaction_radii=_slot_float_vector(
-            9.0,
-            (0, effective_ultimate_interaction_radius),
-            (1, effective_ultimate_interaction_radius),
-        ),
-        active_mask=active_mask,
         alive_mask=alive_mask,
+        **_inert_combat_state_fields(),
     )
+    return config, state
 
 
 def _joint_action_with_moves(*rows: tuple[int, int]) -> Action:
@@ -319,7 +391,7 @@ def _joint_action_with_moves(*rows: tuple[int, int]) -> Action:
 
     return Action(
         move=joint_action_moves,
-        target=joint_action_targets,
+        select_target=joint_action_targets,
         use_ultimate=joint_action_ults,
     )
 
@@ -382,30 +454,6 @@ def _assert_state_contract(state: EnvState) -> None:
     )
     assert state.agent_positions.dtype == jnp.float32
 
-    assert state.agent_radii.shape == (MAX_AGENT_SLOTS,)
-    assert state.agent_radii.dtype == jnp.float32
-
-    assert state.team_ids.shape == (MAX_AGENT_SLOTS,)
-    assert state.team_ids.dtype == jnp.int32
-
-    assert state.class_ids.shape == (MAX_AGENT_SLOTS,)
-    assert state.class_ids.dtype == jnp.int32
-
-    assert state.movement_speeds.shape == (MAX_AGENT_SLOTS,)
-    assert state.movement_speeds.dtype == jnp.float32
-
-    assert state.observation_radii.shape == (MAX_AGENT_SLOTS,)
-    assert state.observation_radii.dtype == jnp.float32
-
-    assert state.basic_interaction_radii.shape == (MAX_AGENT_SLOTS,)
-    assert state.basic_interaction_radii.dtype == jnp.float32
-
-    assert state.ultimate_interaction_radii.shape == (MAX_AGENT_SLOTS,)
-    assert state.ultimate_interaction_radii.dtype == jnp.float32
-
-    assert state.active_mask.shape == (MAX_AGENT_SLOTS,)
-    assert state.active_mask.dtype == bool
-
     assert state.alive_mask.shape == (MAX_AGENT_SLOTS,)
     assert state.alive_mask.dtype == bool
 
@@ -458,32 +506,50 @@ def _assert_observation_contract(observation: Observation) -> None:
     )
     assert observation.enemy_visibility_mask.dtype == bool
 
-    assert observation.ally_targetability_mask.shape == (
-        MAX_AGENT_SLOTS,
-        MAX_AGENTS_PER_TEAM,
-    )
-    assert observation.ally_targetability_mask.dtype == bool
-
-    assert observation.enemy_targetability_mask.shape == (
-        MAX_AGENT_SLOTS,
-        MAX_AGENTS_PER_TEAM,
-    )
-    assert observation.enemy_targetability_mask.dtype == bool
+    assert "ally_targetability_mask" not in Observation._fields
+    assert "enemy_targetability_mask" not in Observation._fields
 
 
 def _assert_action_mask_contract(action_mask: ActionMask) -> None:
     """Assert the ActionMask shape and dtype contract."""
-    assert action_mask.move.shape == (MAX_AGENT_SLOTS, NUM_MOVE_ACTIONS)
-    assert action_mask.move.dtype == bool
+    assert action_mask.move_mask.shape == (MAX_AGENT_SLOTS, NUM_MOVE_ACTIONS)
+    assert action_mask.move_mask.dtype == bool
 
-    assert action_mask.target.shape == (MAX_AGENT_SLOTS, NUM_TARGET_ACTIONS)
-    assert action_mask.target.dtype == bool
+    assert action_mask.select_target_mask.shape == (MAX_AGENT_SLOTS, NUM_TARGET_ACTIONS)
+    assert action_mask.select_target_mask.dtype == bool
 
-    assert action_mask.use_ultimate.shape == (
+    assert action_mask.use_ultimate_mask.shape == (
         MAX_AGENT_SLOTS,
         NUM_ULTIMATE_ACTIONS,
     )
-    assert action_mask.use_ultimate.dtype == bool
+    assert action_mask.use_ultimate_mask.dtype == bool
+
+    assert action_mask.select_target_use_ultimate_joint_mask.shape == (
+        MAX_AGENT_SLOTS,
+        NUM_TARGET_ACTIONS,
+        NUM_ULTIMATE_ACTIONS,
+    )
+    assert action_mask.select_target_use_ultimate_joint_mask.dtype == bool
+
+    assert jnp.array_equal(
+        action_mask.select_target_mask,
+        jnp.any(action_mask.select_target_use_ultimate_joint_mask, axis=-1),
+    )
+    assert jnp.array_equal(
+        action_mask.use_ultimate_mask,
+        jnp.any(action_mask.select_target_use_ultimate_joint_mask, axis=1),
+    )
+    assert bool(jnp.all(jnp.any(action_mask.move_mask, axis=-1)))
+    assert bool(jnp.all(jnp.any(action_mask.select_target_mask, axis=-1)))
+    assert bool(jnp.all(jnp.any(action_mask.use_ultimate_mask, axis=-1)))
+    assert bool(
+        jnp.all(
+            jnp.any(
+                action_mask.select_target_use_ultimate_joint_mask,
+                axis=(-2, -1),
+            )
+        )
+    )
 
 
 def _assert_reward_contract(reward: Reward) -> None:
@@ -509,18 +575,24 @@ def _assert_done_flags_contract(
 
 
 def _assert_single_agent_action_mask_semantics(action_mask: ActionMask) -> None:
-    """Assert current action-mask semantics for one active alive slot."""
-    assert bool(jnp.all(action_mask.move[0]))
-    assert bool(jnp.all(~action_mask.move[1:]))
+    """Assert one living actor plus canonical no-op rows for padded slots."""
+    assert bool(jnp.all(action_mask.move_mask[0]))
+    assert bool(jnp.all(action_mask.move_mask[1:, MOVE_STAY]))
+    assert bool(jnp.all(jnp.sum(action_mask.move_mask[1:], axis=-1) == 1))
 
-    assert bool(action_mask.target[0, 0])
-    assert bool(action_mask.target[0, 1])
-    assert bool(jnp.all(~action_mask.target[0, 2:]))
-    assert bool(jnp.all(~action_mask.target[1:]))
+    assert bool(action_mask.select_target_mask[0, 0])
+    assert bool(jnp.all(~action_mask.select_target_mask[0, 1:]))
+    assert bool(jnp.all(action_mask.select_target_mask[1:, 0]))
+    assert bool(jnp.all(jnp.sum(action_mask.select_target_mask[1:], axis=-1) == 1))
 
-    assert bool(action_mask.use_ultimate[0, 0])
-    assert bool(~action_mask.use_ultimate[0, 1])
-    assert bool(jnp.all(~action_mask.use_ultimate[1:]))
+    assert bool(action_mask.use_ultimate_mask[0, 0])
+    assert bool(~action_mask.use_ultimate_mask[0, 1])
+    assert bool(jnp.all(action_mask.use_ultimate_mask[1:, 0]))
+    assert bool(jnp.all(jnp.sum(action_mask.use_ultimate_mask[1:], axis=-1) == 1))
+
+    joint_mask = action_mask.select_target_use_ultimate_joint_mask
+    assert bool(jnp.all(joint_mask[1:, 0, 0]))
+    assert bool(jnp.all(jnp.sum(joint_mask[1:], axis=(-2, -1)) == 1))
 
 
 def _assert_center_inside_bounds(
@@ -605,10 +677,12 @@ def test_move_stay_preserves_valid_position_in_free_space() -> None:
     config = _deterministic_config()
     key = jax.random.key(42)
     start = jnp.array([10.0, 10.0], dtype=jnp.float32)
-    state = _state_with_single_active_alive_agent(start)
+    config, state = _state_with_single_active_alive_agent(config, start)
     joint_action = _joint_action_with_moves((0, MOVE_STAY))
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_center_close(next_state.agent_positions[0], start)
 
@@ -630,14 +704,15 @@ def test_cardinal_moves_update_position_in_free_space(
 ) -> None:
     config = _deterministic_config()
     key = jax.random.key(42)
-    state = _state_with_single_active_alive_agent(
-        jnp.array([10.0, 10.0], dtype=jnp.float32)
+    config, state = _state_with_single_active_alive_agent(
+        config, jnp.array([10.0, 10.0], dtype=jnp.float32)
     )
     joint_action = _joint_action_with_moves((0, move_action))
 
     next_state, obs, reward, done_flags, action_mask, info = step(
         config,
         state,
+        _current_action_mask(config, state),
         joint_action,
         key,
     )
@@ -665,15 +740,141 @@ def test_cardinal_moves_scale_by_effective_state_movement_speed(
 ) -> None:
     config = _deterministic_config()
     key = jax.random.key(42)
-    state = _state_with_single_active_alive_agent(
+    config, state = _state_with_single_active_alive_agent(
+        config,
         jnp.array([10.0, 6.0], dtype=jnp.float32),
         effective_movement_speed=2.5,
     )
     joint_action = _joint_action_with_moves((0, move_action))
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_center_close(next_state.agent_positions[0], expected_position)
+
+
+@pytest.mark.parametrize(
+    ("move_action", "expected_direction"),
+    (
+        pytest.param(MOVE_NORTH, (0.0, 1.0), id="north"),
+        pytest.param(MOVE_SOUTH, (0.0, -1.0), id="south"),
+        pytest.param(MOVE_EAST, (1.0, 0.0), id="east"),
+        pytest.param(MOVE_WEST, (-1.0, 0.0), id="west"),
+        pytest.param(MOVE_NORTHEAST, (1.0, 1.0), id="northeast"),
+        pytest.param(MOVE_NORTHWEST, (-1.0, 1.0), id="northwest"),
+        pytest.param(MOVE_SOUTHEAST, (1.0, -1.0), id="southeast"),
+        pytest.param(MOVE_SOUTHWEST, (-1.0, -1.0), id="southwest"),
+    ),
+)
+def test_movement_calibration_scales_every_nonstay_direction(
+    move_action: int,
+    expected_direction: tuple[float, float],
+) -> None:
+    """Prove calibrated displacement preserves direction and unit normalization."""
+    movement_scale = 0.1
+    config = _deterministic_config(ordinary_movement_distance_scale=movement_scale)
+    start = jnp.asarray((10.0, 6.0), dtype=jnp.float32)
+    config, state = _state_with_single_active_alive_agent(config, start)
+
+    next_state, observation, *_ = step(
+        config,
+        state,
+        _current_action_mask(config, state),
+        _joint_action_with_moves((0, move_action)),
+        jax.random.key(60),
+    )
+
+    direction = jnp.asarray(expected_direction, dtype=jnp.float32)
+    normalized_direction = direction / cast(Array, jnp.linalg.norm(direction))
+    displacement = next_state.agent_positions[0] - start
+    expected_displacement = normalized_direction * movement_scale
+
+    assert bool(jnp.allclose(displacement, expected_displacement, atol=1e-6))
+    assert bool(
+        jnp.isclose(
+            cast(Array, jnp.linalg.norm(displacement)),
+            movement_scale,
+            atol=2e-6,
+        )
+    )
+    assert (
+        observation.self_features[0, AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED]
+        == movement_scale
+    )
+
+
+def test_movement_calibration_matches_representative_lane_budget_under_scan() -> None:
+    """Prove exact float32 engagement and seven-unit traversal cadence."""
+    movement_scale = 0.1
+    horizon = 70
+    config = _deterministic_config(ordinary_movement_distance_scale=movement_scale)
+    start = jnp.asarray((0.5, 6.0), dtype=jnp.float32)
+    stationary_target_x = jnp.float32(7.5)
+    config, initial_state = _state_with_single_active_alive_agent(config, start)
+    initial_mask = _current_action_mask(config, initial_state)
+    action = _joint_action_with_moves((0, MOVE_EAST))
+    keys = jax.random.split(jax.random.key(61), horizon)
+
+    def _rollout(
+        state: EnvState,
+        action_mask: ActionMask,
+        rollout_keys: Array,
+    ) -> tuple[Array, Array]:
+        def _scan_step(
+            carry: tuple[EnvState, ActionMask],
+            key: Array,
+        ) -> tuple[tuple[EnvState, ActionMask], tuple[Array, Array]]:
+            current_state, current_mask = carry
+            next_state, observation, _, _, next_mask, _ = step(
+                config,
+                current_state,
+                current_mask,
+                action,
+                key,
+            )
+            return (
+                (next_state, next_mask),
+                (
+                    next_state.agent_positions[0],
+                    observation.self_features[
+                        0, AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED
+                    ],
+                ),
+            )
+
+        _, history = jax.lax.scan(
+            _scan_step,
+            (state, action_mask),
+            rollout_keys,
+        )
+        return history
+
+    position_history, speed_history = _rollout(initial_state, initial_mask, keys)
+    compiled_positions, compiled_speeds = cast(
+        tuple[Array, Array],
+        jax.jit(_rollout)(initial_state, initial_mask, keys),
+    )
+    distance_history = stationary_target_x - position_history[:, 0]
+
+    # Four float32 geometry substeps leave the nominal 10- and 15-step
+    # boundaries just outside range; the following decision crosses them.
+    assert bool(distance_history[9] > 6.0)
+    assert bool(distance_history[10] <= 6.0)
+    assert bool(distance_history[14] > 5.5)
+    assert bool(distance_history[15] <= 5.5)
+    assert bool(distance_history[18] > 5.0)
+    assert bool(distance_history[19] <= 5.0)
+    assert bool(
+        jnp.isclose(
+            position_history[-1, 0] - start[0],
+            7.0,
+            atol=1e-5,
+        )
+    )
+    assert bool(jnp.all(speed_history == movement_scale))
+    assert bool(jnp.array_equal(position_history, compiled_positions))
+    assert bool(jnp.array_equal(speed_history, compiled_speeds))
 
 
 @pytest.mark.parametrize(
@@ -708,10 +909,12 @@ def test_diagonal_moves_are_normalized_in_free_space(
     config = _deterministic_config()
     key = jax.random.key(42)
     start = jnp.array([10.0, 10.0], dtype=jnp.float32)
-    state = _state_with_single_active_alive_agent(start)
+    config, state = _state_with_single_active_alive_agent(config, start)
     joint_action = _joint_action_with_moves((0, move_action))
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     displacement = next_state.agent_positions[0] - start
     expected_position = start + expected_delta
@@ -720,7 +923,7 @@ def test_diagonal_moves_are_normalized_in_free_space(
     assert bool(
         jnp.isclose(
             cast(Array, jnp.linalg.norm(displacement)),
-            state.movement_speeds[0],
+            config.agent_profile.base_movement_speeds[0],
             atol=GEOMETRY_TOLERANCE,
             rtol=0.0,
         )
@@ -732,12 +935,14 @@ def test_diagonal_moves_scale_by_effective_state_movement_speed() -> None:
     config = _deterministic_config()
     key = jax.random.key(42)
     start = jnp.array([10.0, 10.0], dtype=jnp.float32)
-    state = _state_with_single_active_alive_agent(
-        start, effective_movement_speed=effective_movement_speed
+    config, state = _state_with_single_active_alive_agent(
+        config, start, effective_movement_speed=effective_movement_speed
     )
     joint_action = _joint_action_with_moves((0, MOVE_NORTHEAST))
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     displacement = next_state.agent_positions[0] - start
 
@@ -758,7 +963,8 @@ def test_same_move_action_uses_per_slot_movement_speeds() -> None:
     key = jax.random.key(42)
     agent_a_start = jnp.array([5.0, 5.0], dtype=jnp.float32)
     agent_b_start = jnp.array([12.0, 5.0], dtype=jnp.float32)
-    state = _state_with_two_agents(
+    config, state = _state_with_two_agents(
+        config,
         agent_a_start,
         agent_b_start,
         agent_a_effective_movement_speed=1.0,
@@ -766,7 +972,9 @@ def test_same_move_action_uses_per_slot_movement_speeds() -> None:
     )
     joint_action = _joint_action_with_moves((0, MOVE_EAST), (1, MOVE_EAST))
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_center_close(
         next_state.agent_positions[0],
@@ -778,14 +986,18 @@ def test_same_move_action_uses_per_slot_movement_speeds() -> None:
     )
 
 
-def test_step_ignores_config_default_movement_speed_after_state_exists() -> None:
-    config = _deterministic_config(default_movement_speed=9.0)
+def test_step_uses_state_movement_speed_after_state_exists() -> None:
+    config = _deterministic_config()
     key = jax.random.key(42)
     start = jnp.array([5.0, 5.0], dtype=jnp.float32)
-    state = _state_with_single_active_alive_agent(start, effective_movement_speed=1.25)
+    config, state = _state_with_single_active_alive_agent(
+        config, start, effective_movement_speed=1.25
+    )
     joint_action = _joint_action_with_moves((0, MOVE_EAST))
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_center_close(
         next_state.agent_positions[0],
@@ -793,34 +1005,23 @@ def test_step_ignores_config_default_movement_speed_after_state_exists() -> None
     )
 
 
-def test_step_preserves_placeholder_contracts_after_non_stay_movement() -> None:
+def test_step_preserves_current_contracts_after_non_stay_movement() -> None:
     config = _deterministic_config(max_steps=10)
     key = jax.random.key(42)
-    state = _state_with_single_active_alive_agent(
-        jnp.array([10.0, 10.0], dtype=jnp.float32)
+    config, state = _state_with_single_active_alive_agent(
+        config, jnp.array([10.0, 10.0], dtype=jnp.float32)
     )
     joint_action = _joint_action_with_moves((0, MOVE_EAST))
 
     next_state, obs, reward, done_flags, action_mask, info = step(
         config,
         state,
+        _current_action_mask(config, state),
         joint_action,
         key,
     )
 
     assert next_state.step_count == state.step_count + 1
-    assert jnp.array_equal(next_state.agent_radii, state.agent_radii)
-    assert jnp.array_equal(next_state.team_ids, state.team_ids)
-    assert jnp.array_equal(next_state.class_ids, state.class_ids)
-    assert jnp.array_equal(next_state.movement_speeds, state.movement_speeds)
-    assert jnp.array_equal(next_state.observation_radii, state.observation_radii)
-    assert jnp.array_equal(
-        next_state.basic_interaction_radii, state.basic_interaction_radii
-    )
-    assert jnp.array_equal(
-        next_state.ultimate_interaction_radii, state.ultimate_interaction_radii
-    )
-    assert jnp.array_equal(next_state.active_mask, state.active_mask)
     assert jnp.array_equal(next_state.alive_mask, state.alive_mask)
     _assert_state_contract(next_state)
     _assert_observation_contract(obs)
@@ -834,13 +1035,16 @@ def test_step_preserves_placeholder_contracts_after_non_stay_movement() -> None:
 def test_step_truncates_after_incremented_step_count() -> None:
     config = _deterministic_config(max_steps=1)
     key = jax.random.key(42)
-    state = _state_with_single_active_alive_agent(
+    config, state = _state_with_single_active_alive_agent(
+        config,
         jnp.array([10.0, 10.0], dtype=jnp.float32),
         step_count=0,
     )
     joint_action = _joint_action_with_moves((0, MOVE_EAST))
 
-    _, _, _, done_flags, _, _ = step(config, state, joint_action, key)
+    _, _, _, done_flags, _, _ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_done_flags_contract(done_flags, expected_truncated=True)
 
@@ -864,13 +1068,16 @@ def test_step_projects_active_alive_agent_inside_bounds(
     key = jax.random.key(42)
 
     agent_radius = 0.5
-    state = _state_with_single_active_alive_agent(
+    config, state = _state_with_single_active_alive_agent(
+        config,
         start,
         radius=agent_radius,
     )
     joint_action = _joint_action_with_moves((0, move_action))
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_center_inside_bounds(
         next_state.agent_positions[0],
@@ -890,13 +1097,16 @@ def test_step_projects_active_alive_agent_outside_active_pillar() -> None:
     key = jax.random.key(42)
 
     agent_radius = 0.5
-    state = _state_with_single_active_alive_agent(
+    config, state = _state_with_single_active_alive_agent(
+        config,
         jnp.array([10.0, 10.0], dtype=jnp.float32),
         radius=agent_radius,
     )
     joint_action = _joint_action_with_moves((0, MOVE_EAST))
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_center_outside_pillar(
         next_state.agent_positions[0],
@@ -918,13 +1128,16 @@ def test_step_projects_active_alive_agent_outside_active_wall() -> None:
     key = jax.random.key(42)
 
     agent_radius = 0.5
-    state = _state_with_single_active_alive_agent(
+    config, state = _state_with_single_active_alive_agent(
+        config,
         jnp.array([10.0, 10.0], dtype=jnp.float32),
         radius=agent_radius,
     )
     joint_action = _joint_action_with_moves((0, MOVE_EAST))
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_center_outside_axis_aligned_wall(
         next_state.agent_positions[0],
@@ -944,12 +1157,14 @@ def test_step_ignores_inactive_obstacle_rows() -> None:
     config = _deterministic_config(obstacles=obstacles)
     key = jax.random.key(42)
 
-    state = _state_with_single_active_alive_agent(
-        jnp.array([10.0, 10.0], dtype=jnp.float32)
+    config, state = _state_with_single_active_alive_agent(
+        config, jnp.array([10.0, 10.0], dtype=jnp.float32)
     )
     joint_action = _joint_action_with_moves((0, MOVE_EAST))
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_center_close(
         next_state.agent_positions[0],
@@ -968,12 +1183,14 @@ def test_step_ignores_inactive_wall_rows() -> None:
     config = _deterministic_config(obstacles=obstacles)
     key = jax.random.key(42)
 
-    state = _state_with_single_active_alive_agent(
-        jnp.array([10.0, 10.0], dtype=jnp.float32)
+    config, state = _state_with_single_active_alive_agent(
+        config, jnp.array([10.0, 10.0], dtype=jnp.float32)
     )
     joint_action = _joint_action_with_moves((0, MOVE_EAST))
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_center_close(
         next_state.agent_positions[0],
@@ -993,13 +1210,16 @@ def test_step_uses_active_obstacles_in_late_padded_slots() -> None:
     key = jax.random.key(42)
 
     agent_radius = 0.5
-    state = _state_with_single_active_alive_agent(
+    config, state = _state_with_single_active_alive_agent(
+        config,
         jnp.array([10.0, 10.0], dtype=jnp.float32),
         radius=agent_radius,
     )
     joint_action = _joint_action_with_moves((0, MOVE_EAST))
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_center_outside_pillar(
         next_state.agent_positions[0],
@@ -1022,13 +1242,16 @@ def test_step_projects_active_alive_agent_outside_rotated_wall() -> None:
     key = jax.random.key(42)
 
     agent_radius = 0.5
-    state = _state_with_single_active_alive_agent(
+    config, state = _state_with_single_active_alive_agent(
+        config,
         jnp.array([10.0, 10.0], dtype=jnp.float32),
         radius=agent_radius,
     )
     joint_action = _joint_action_with_moves((0, MOVE_EAST))
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_center_outside_rotated_wall(
         next_state.agent_positions[0],
@@ -1047,7 +1270,8 @@ def test_inactive_slots_with_nonstay_action_preserve_original_positions() -> Non
     agent_a_position = jnp.array([10.0, 10.0], dtype=jnp.float32)
     agent_b_position = jnp.array([12.0, 10.0], dtype=jnp.float32)
 
-    state = _state_with_two_agents(
+    config, state = _state_with_two_agents(
+        config,
         agent_a_position,
         agent_b_position,
         agent_a_active_flag=False,
@@ -1061,7 +1285,9 @@ def test_inactive_slots_with_nonstay_action_preserve_original_positions() -> Non
         (1, MOVE_WEST),
     )
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_center_close(next_state.agent_positions[0], agent_a_position)
     _assert_center_close(next_state.agent_positions[1], agent_b_position)
@@ -1074,7 +1300,8 @@ def test_dead_slots_with_nonstay_action_preserve_original_positions() -> None:
     agent_a_position = jnp.array([10.0, 10.0], dtype=jnp.float32)
     agent_b_position = jnp.array([12.0, 10.0], dtype=jnp.float32)
 
-    state = _state_with_two_agents(
+    config, state = _state_with_two_agents(
+        config,
         agent_a_position,
         agent_b_position,
         agent_a_active_flag=True,
@@ -1088,7 +1315,9 @@ def test_dead_slots_with_nonstay_action_preserve_original_positions() -> None:
         (1, MOVE_WEST),
     )
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_center_close(next_state.agent_positions[0], agent_a_position)
     _assert_center_close(next_state.agent_positions[1], agent_b_position)
@@ -1112,7 +1341,8 @@ def test_active_alive_slot_moves_while_nonparticipant_neighbor_is_preserved(
     agent_a_position = jnp.array([10.0, 10.0], dtype=jnp.float32)
     agent_b_position = jnp.array([11.0, 10.0], dtype=jnp.float32)
 
-    state = _state_with_two_agents(
+    config, state = _state_with_two_agents(
+        config,
         agent_a_position,
         agent_b_position,
         agent_a_active_flag=True,
@@ -1126,7 +1356,9 @@ def test_active_alive_slot_moves_while_nonparticipant_neighbor_is_preserved(
         (1, MOVE_WEST),
     )
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_center_close(
         next_state.agent_positions[0],
@@ -1151,6 +1383,24 @@ def test_active_alive_overlapping_agents_separate_in_free_space(
     radius = 0.5
     agent_a_position = jnp.array([10.0, 10.0], dtype=jnp.float32)
     blocker_position = jnp.array([11.25, 10.0], dtype=jnp.float32)
+    active_mask = _mask_with_true_slots(0, blocker_slot)
+    config = config._replace(
+        agent_profile=config.agent_profile._replace(
+            active_mask=active_mask,
+            agent_radii=_agent_radii_array_with_rows(
+                (0, radius),
+                (blocker_slot, radius),
+            ),
+            base_movement_speeds=_slot_float_vector(
+                0.0,
+                (0, 1.0),
+                (blocker_slot, 1.0),
+            ),
+            observation_radii=_slot_float_vector(0.0),
+            basic_interaction_radii=_slot_float_vector(0.0),
+            ultimate_interaction_radii=_slot_float_vector(0.0),
+        )
+    )
 
     state = EnvState(
         step_count=jnp.array(0, dtype=jnp.int32),
@@ -1158,18 +1408,8 @@ def test_active_alive_overlapping_agents_separate_in_free_space(
             (0, agent_a_position),
             (blocker_slot, blocker_position),
         ),
-        agent_radii=_agent_radii_array_with_rows(
-            (0, radius),
-            (blocker_slot, radius),
-        ),
-        team_ids=_team_ids(),
-        class_ids=_neutral_class_ids(),
-        movement_speeds=_slot_float_vector(1.0),
-        observation_radii=_slot_float_vector(8.0),
-        basic_interaction_radii=_slot_float_vector(6.0),
-        ultimate_interaction_radii=_slot_float_vector(9.0),
-        active_mask=_mask_with_true_slots(0, blocker_slot),
-        alive_mask=_mask_with_true_slots(0, blocker_slot),
+        alive_mask=active_mask,
+        **_inert_combat_state_fields(),
     )
 
     joint_action = _joint_action_with_moves(
@@ -1177,7 +1417,9 @@ def test_active_alive_overlapping_agents_separate_in_free_space(
         (blocker_slot, MOVE_STAY),
     )
 
-    next_state, *_ = step(config, state, joint_action, key)
+    next_state, *_ = step(
+        config, state, _current_action_mask(config, state), joint_action, key
+    )
 
     _assert_agent_positions_are_finite(next_state.agent_positions)
     _assert_agents_do_not_overlap(
@@ -1189,6 +1431,188 @@ def test_active_alive_overlapping_agents_separate_in_free_space(
     )
 
 
+@pytest.mark.parametrize(
+    "active_stun_channels",
+    (
+        pytest.param((STUN_CHANNEL_WARRIOR_CHARGE,), id="warrior-charge"),
+        pytest.param((STUN_CHANNEL_HUNTER_TRAP,), id="hunter-trap"),
+        pytest.param((STUN_CHANNEL_ROGUE_POISON,), id="rogue-poison"),
+        pytest.param(
+            (
+                STUN_CHANNEL_WARRIOR_CHARGE,
+                STUN_CHANNEL_HUNTER_TRAP,
+                STUN_CHANNEL_ROGUE_POISON,
+            ),
+            id="concurrent-stuns",
+        ),
+    ),
+)
+def test_current_stun_exposes_stay_only_and_suppresses_voluntary_movement(
+    active_stun_channels: tuple[int, ...],
+) -> None:
+    """Prove every current stun source aligns speed, mask, and movement intent."""
+    config = _deterministic_config(team_size=1)
+    start = jnp.asarray((10.0, 6.0), dtype=jnp.float32)
+    config, state = _state_with_single_active_alive_agent(config, start)
+    for channel in active_stun_channels:
+        state = state._replace(
+            stun_durations=state.stun_durations.at[0, channel].set(1)
+        )
+
+    observation, current_action_mask = _build_observation_and_action_mask(state, config)
+
+    assert observation.self_features[0, AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED] == 0.0
+    assert bool(current_action_mask.move_mask[0, MOVE_STAY])
+    assert int(jnp.sum(current_action_mask.move_mask[0])) == 1
+
+    next_state, next_observation, _, _, next_action_mask, _ = step(
+        config,
+        state,
+        current_action_mask,
+        _joint_action_with_moves((0, MOVE_EAST)),
+        jax.random.key(50),
+    )
+
+    _assert_center_close(next_state.agent_positions[0], start)
+    assert bool(jnp.all(next_state.stun_durations[0] == 0))
+    assert (
+        next_observation.self_features[0, AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED]
+        == config.agent_profile.base_movement_speeds[0]
+    )
+    assert bool(jnp.all(next_action_mask.move_mask[0]))
+
+
+def test_forged_movement_mask_cannot_restore_stunned_voluntary_movement() -> None:
+    """Prove direct transition enforcement survives a stale or forged mask."""
+    config = _deterministic_config(team_size=1)
+    start = jnp.asarray((10.0, 6.0), dtype=jnp.float32)
+    config, state = _state_with_single_active_alive_agent(config, start)
+    state = state._replace(
+        stun_durations=state.stun_durations.at[0, STUN_CHANNEL_HUNTER_TRAP].set(2)
+    )
+    current_action_mask = _current_action_mask(config, state)
+    forged_action_mask = current_action_mask._replace(
+        move_mask=current_action_mask.move_mask.at[0].set(True)
+    )
+
+    next_state, next_observation, _, _, next_action_mask, _ = step(
+        config,
+        state,
+        forged_action_mask,
+        _joint_action_with_moves((0, MOVE_EAST)),
+        jax.random.key(51),
+    )
+
+    _assert_center_close(next_state.agent_positions[0], start)
+    assert next_state.stun_durations[0, STUN_CHANNEL_HUNTER_TRAP] == 1
+    assert (
+        next_observation.self_features[0, AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED] == 0.0
+    )
+    assert bool(next_action_mask.move_mask[0, MOVE_STAY])
+    assert int(jnp.sum(next_action_mask.move_mask[0])) == 1
+
+
+def test_collision_projection_may_displace_a_stunned_zero_intent_body() -> None:
+    """Prove stun removes voluntary agency without freezing physical geometry."""
+    config = _deterministic_config(team_size=1)
+    stunned_start = jnp.asarray((5.0, 5.0), dtype=jnp.float32)
+    neighbor_start = jnp.asarray((5.5, 5.0), dtype=jnp.float32)
+    config, state = _state_with_two_agents(
+        config,
+        stunned_start,
+        neighbor_start,
+        radius=0.5,
+    )
+    state = state._replace(
+        stun_durations=state.stun_durations.at[0, STUN_CHANNEL_HUNTER_TRAP].set(2)
+    )
+
+    next_state, next_observation, *_ = step(
+        config,
+        state,
+        _current_action_mask(config, state),
+        _joint_action_with_moves(),
+        jax.random.key(52),
+    )
+
+    assert not bool(jnp.array_equal(next_state.agent_positions[0], stunned_start))
+    assert (
+        next_observation.self_features[0, AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED] == 0.0
+    )
+    _assert_agents_do_not_overlap(
+        next_state.agent_positions,
+        slot_a=0,
+        slot_b=1,
+        radius_a=0.5,
+        radius_b=0.5,
+    )
+
+
+def test_stun_control_trajectory_matches_jit_and_scan() -> None:
+    """Prove paired masks preserve D=2 stun control across compiled rollout."""
+    horizon = 3
+    config = _deterministic_config(team_size=1)
+    start = jnp.asarray((5.0, 5.0), dtype=jnp.float32)
+    config, initial_state = _state_with_single_active_alive_agent(config, start)
+    initial_state = initial_state._replace(
+        stun_durations=initial_state.stun_durations.at[0, STUN_CHANNEL_HUNTER_TRAP].set(
+            2
+        )
+    )
+    initial_action_mask = _current_action_mask(config, initial_state)
+    action = _joint_action_with_moves((0, MOVE_EAST))
+    keys = jax.random.split(jax.random.key(53), horizon)
+
+    def _rollout(
+        state: EnvState, action_mask: ActionMask, step_keys: Array
+    ) -> tuple[Array, Array, Array, Array]:
+        def _scan_step(
+            carry: tuple[EnvState, ActionMask], key: Array
+        ) -> tuple[tuple[EnvState, ActionMask], tuple[Array, Array, Array, Array]]:
+            current_state, current_mask = carry
+            next_state, observation, _, _, next_mask, _ = step(
+                config, current_state, current_mask, action, key
+            )
+            outputs = (
+                next_state.agent_positions[0],
+                next_state.stun_durations[0, STUN_CHANNEL_HUNTER_TRAP],
+                observation.self_features[0, AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED],
+                next_mask.move_mask[0],
+            )
+            return (next_state, next_mask), outputs
+
+        _, outputs = jax.lax.scan(_scan_step, (state, action_mask), step_keys)
+        return outputs
+
+    eager_outputs = _rollout(initial_state, initial_action_mask, keys)
+    compiled_outputs = cast(
+        tuple[Array, Array, Array, Array],
+        jax.jit(_rollout)(initial_state, initial_action_mask, keys),
+    )
+
+    for eager_output, compiled_output in zip(
+        eager_outputs, compiled_outputs, strict=True
+    ):
+        assert bool(jnp.array_equal(eager_output, compiled_output))
+
+    position_history, duration_history, speed_history, move_mask_history = eager_outputs
+    assert bool(
+        jnp.array_equal(
+            position_history[:, 0],
+            jnp.asarray((5.0, 5.0, 6.0), dtype=jnp.float32),
+        )
+    )
+    assert bool(jnp.array_equal(duration_history, jnp.asarray((1, 0, 0))))
+    assert bool(
+        jnp.array_equal(
+            speed_history,
+            jnp.asarray((0.0, 1.0, 1.0), dtype=jnp.float32),
+        )
+    )
+    assert int(jnp.sum(move_mask_history[0])) == 1
+    assert bool(jnp.all(move_mask_history[1:]))
+
+
 def test_step_can_be_jit_compiled_with_non_stay_movement() -> None:
     jitted_step = jax.jit(step)
 
@@ -1198,7 +1622,8 @@ def test_step_can_be_jit_compiled_with_non_stay_movement() -> None:
     agent_a_start = jnp.array([5.0, 5.0], dtype=jnp.float32)
     agent_b_start = jnp.array([15.0, 5.0], dtype=jnp.float32)
 
-    state = _state_with_two_agents(
+    config, state = _state_with_two_agents(
+        config,
         agent_a_start,
         agent_b_start,
         agent_a_active_flag=True,
@@ -1213,7 +1638,13 @@ def test_step_can_be_jit_compiled_with_non_stay_movement() -> None:
 
     next_state, observation, reward, done_flags, action_mask, info = cast(
         tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info],
-        jitted_step(config, state, joint_action, key),
+        jitted_step(
+            config,
+            state,
+            _current_action_mask(config, state),
+            joint_action,
+            key,
+        ),
     )
 
     _assert_center_close(
@@ -1239,7 +1670,8 @@ def test_step_can_run_non_stay_movement_in_jitted_scanned_rollout() -> None:
     agent_a_start = jnp.array([5.0, 5.0], dtype=jnp.float32)
     agent_b_start = jnp.array([15.0, 5.0], dtype=jnp.float32)
 
-    state = _state_with_two_agents(
+    config, state = _state_with_two_agents(
+        config,
         agent_a_start,
         agent_b_start,
         agent_a_active_flag=True,
@@ -1252,23 +1684,35 @@ def test_step_can_run_non_stay_movement_in_jitted_scanned_rollout() -> None:
         (0, MOVE_EAST),
         (1, MOVE_STAY),
     )
+    initial_action_mask = _current_action_mask(config, state)
 
     def _rollout(
         initial_state: EnvState,
+        initial_mask: ActionMask,
         step_keys: Array,
-    ) -> tuple[EnvState, tuple[Array, Array]]:
+    ) -> tuple[tuple[EnvState, ActionMask], tuple[Array, Array]]:
         """Run a compiled fixed-horizon rollout with stable scan outputs."""
 
         def _step_wrapper(
-            carry: EnvState,
+            carry: tuple[EnvState, ActionMask],
             step_key: Array,
-        ) -> tuple[EnvState, tuple[Array, Array]]:
-            new_state, _, _, _, _, _ = step(config, carry, joint_action, step_key)
-            return new_state, (new_state.step_count, new_state.agent_positions)
+        ) -> tuple[tuple[EnvState, ActionMask], tuple[Array, Array]]:
+            current_state, current_action_mask = carry
+            new_state, _, _, _, next_action_mask, _ = step(
+                config,
+                current_state,
+                current_action_mask,
+                joint_action,
+                step_key,
+            )
+            return (new_state, next_action_mask), (
+                new_state.step_count,
+                new_state.agent_positions,
+            )
 
         return jax.lax.scan(
             f=_step_wrapper,
-            init=initial_state,
+            init=(initial_state, initial_mask),
             xs=step_keys,
             length=horizon,
         )
@@ -1276,9 +1720,9 @@ def test_step_can_run_non_stay_movement_in_jitted_scanned_rollout() -> None:
     keys = jax.random.split(key, horizon)
     assert keys.shape == (horizon,)
 
-    final_state, history = cast(
-        tuple[EnvState, tuple[Array, Array]],
-        jax.jit(_rollout)(state, keys),
+    (final_state, final_action_mask), history = cast(
+        tuple[tuple[EnvState, ActionMask], tuple[Array, Array]],
+        jax.jit(_rollout)(state, initial_action_mask, keys),
     )
     step_count_history, position_history = history
 
@@ -1297,6 +1741,9 @@ def test_step_can_run_non_stay_movement_in_jitted_scanned_rollout() -> None:
 
     assert final_state.step_count == horizon
     assert final_state.step_count.dtype == jnp.int32
+    assert jax.tree_util.tree_structure(
+        final_action_mask
+    ) == jax.tree_util.tree_structure(initial_action_mask)
 
     assert step_count_history.shape == (horizon,)
     assert step_count_history.dtype == jnp.int32

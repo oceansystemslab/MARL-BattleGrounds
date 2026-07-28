@@ -34,6 +34,7 @@ DEFAULT_MOVEMENT_SUBSTEPS = 4
 DEFAULT_AGENT_PROJECTION_PASSES = 4
 
 __all__ = (
+    "disc_overlaps_obstacle",
     "has_clear_line_of_sight",
     "project_movement_with_geometry",
 )
@@ -124,9 +125,11 @@ def _project_disc_out_of_active_pillar(
     pillar_radius = obstacle[OBSTACLE_FEATURE_RADIUS]
 
     distance_vector = center - pillar_center
-    distance_between_centers = cast(Array, jnp.linalg.norm(distance_vector))
+    distance_between_centers = jnp.hypot(distance_vector[0], distance_vector[1])
     sum_of_radii = radius + pillar_radius
-    projection_needed = cast(bool, distance_between_centers < sum_of_radii)
+    projection_needed = cast(
+        bool, _disc_overlaps_active_pillar(center, radius, obstacle)
+    )
 
     return cast(
         Array,
@@ -154,6 +157,107 @@ def _create_2d_rotation_matrix(theta: Array | float) -> Array:
             [sin_theta, cos_theta],
         ],
         dtype=jnp.float32,
+    )
+
+
+def _disc_overlaps_active_pillar(
+    center: Array,
+    radius: Array | float,
+    obstacle: Array,
+) -> Array:
+    """Return whether one disc strictly overlaps an active circular pillar."""
+    pillar_center = jnp.stack(
+        (
+            obstacle[OBSTACLE_FEATURE_X],
+            obstacle[OBSTACLE_FEATURE_Y],
+        )
+    )
+    center_delta = center - pillar_center
+    center_distance = jnp.hypot(center_delta[0], center_delta[1])
+    minimum_distance = radius + obstacle[OBSTACLE_FEATURE_RADIUS]
+    return center_distance < minimum_distance
+
+
+def _disc_overlaps_active_wall(
+    center: Array,
+    radius: Array | float,
+    obstacle: Array,
+) -> Array:
+    """Return whether one disc strictly overlaps an active rotated wall."""
+    wall_center = jnp.stack(
+        (
+            obstacle[OBSTACLE_FEATURE_X],
+            obstacle[OBSTACLE_FEATURE_Y],
+        )
+    )
+    world_to_wall = _create_2d_rotation_matrix(-obstacle[OBSTACLE_FEATURE_THETA])
+    center_wall_local = world_to_wall @ (center - wall_center)
+    wall_half_width = obstacle[OBSTACLE_FEATURE_WIDTH] / 2.0
+    wall_half_height = obstacle[OBSTACLE_FEATURE_HEIGHT] / 2.0
+    nearest_point = jnp.stack(
+        (
+            jnp.clip(center_wall_local[0], -wall_half_width, wall_half_width),
+            jnp.clip(center_wall_local[1], -wall_half_height, wall_half_height),
+        )
+    )
+    center_is_inside_or_on_wall = jnp.array_equal(nearest_point, center_wall_local)
+    wall_delta = center_wall_local - nearest_point
+    distance_to_wall = jnp.hypot(wall_delta[0], wall_delta[1])
+    # A world->local rotation round-trip can move an exact tangent by a few
+    # float32 ULPs. Treat only separation violations beyond the geometry
+    # epsilon as wall overlap so legal tangency is representation-stable.
+    outside_overlap = distance_to_wall < radius - GEOMETRY_EPSILON
+    return jnp.logical_or(center_is_inside_or_on_wall, outside_overlap)
+
+
+def _disc_does_not_overlap_obstacle(
+    center: Array,
+    radius: Array | float,
+    obstacle: Array,
+) -> Array:
+    """Return false for inactive, none, or padded obstacle rows."""
+    del center, radius, obstacle
+    return jnp.array(False)
+
+
+def _active_disc_obstacle_overlap(
+    center: Array,
+    radius: Array | float,
+    obstacle: Array,
+) -> Array:
+    """Dispatch one active obstacle row to its authoritative overlap predicate."""
+    obstacle_type = obstacle[OBSTACLE_FEATURE_TYPE].astype(jnp.int32)
+    branches = (
+        _disc_does_not_overlap_obstacle,
+        _disc_overlaps_active_pillar,
+        _disc_overlaps_active_wall,
+    )
+    return cast(
+        Array,
+        jax.lax.switch(obstacle_type, branches, center, radius, obstacle),
+    )
+
+
+def disc_overlaps_obstacle(
+    center: Array,
+    radius: Array | float,
+    obstacle: Array,
+) -> Array:
+    """Return whether one disc strictly overlaps one active obstacle row.
+
+    Tangency is legal. Inactive obstacle rows never overlap. Callers must honor
+    the fixed obstacle schema and validate obstacle type categories beforehand.
+    """
+    return cast(
+        Array,
+        jax.lax.cond(
+            obstacle[OBSTACLE_FEATURE_ACTIVE] == 1.0,
+            _active_disc_obstacle_overlap,
+            _disc_does_not_overlap_obstacle,
+            center,
+            radius,
+            obstacle,
+        ),
     )
 
 
@@ -290,9 +394,8 @@ def _project_outside_disc_out_of_active_wall(
     wall_to_agent_center_vector = (
         agent_center_wall_local - nearest_point_to_agent_center
     )
-    distance_to_wall = cast(
-        Array,
-        jnp.linalg.norm(wall_to_agent_center_vector),
+    distance_to_wall = jnp.hypot(
+        wall_to_agent_center_vector[0], wall_to_agent_center_vector[1]
     )
     projection_needed = radius > distance_to_wall
 
@@ -404,8 +507,13 @@ def _project_disc_out_of_active_wall(
     )
 
     wall_to_world = world_to_wall.T
+    projected_world_center = (wall_to_world @ new_center_wall_local) + wall_center
 
-    return (wall_to_world @ new_center_wall_local) + wall_center
+    # Preserve the original world coordinates exactly when no collision exists.
+    # Rotating a separated center into the wall frame and back can otherwise
+    # introduce float32 drift during MOVE_STAY.
+    projection_needed = _disc_overlaps_active_wall(center, radius, obstacle)
+    return jnp.where(projection_needed, projected_world_center, center)
 
 
 def _keep_obstacle_projection_center(
@@ -931,6 +1039,7 @@ def project_movement_with_geometry(
     Returns:
         Slot-aligned projected positions. Inactive and dead slots preserve their
         original positions.
+
     """
     original_agent_positions = agent_positions
 
@@ -1052,6 +1161,7 @@ def has_clear_line_of_sight(
     Returns:
         Scalar boolean JAX array. ``True`` means no active static obstacle blocks
         the segment; ``False`` means at least one active pillar or wall blocks it.
+
     """
     obstacle_blocks_line_of_sight_vmap = jax.vmap(
         _obstacle_blocks_line_of_sight,

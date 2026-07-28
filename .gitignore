@@ -23,6 +23,13 @@ dist/
 coverage.xml
 htmlcov/
 
+# Frontend contributor tooling
+node_modules/
+web/visual_debugger/playwright-report/
+web/visual_debugger/test-results/
+web/visual_debugger/blob-report/
+web/visual_debugger/.playwright-browsers/
+
 # Jupyter/IPython
 .ipynb_checkpoints/
 
@@ -63,3 +70,6 @@ Thumbs.db
 # Local IDE settings
 .vscode/
 .idea/
+
+# Local Codex milestone planning docs
+docs/dev/milestone*.md
