@@ -94,7 +94,7 @@ BASE_MOVEMENT_SPEED_BY_CLASS = jnp.asarray(
         1.0,  # mage
         1.0,  # warrior
         1.0,  # hunter
-        1.25,  # rogue
+        1.3,  # rogue
         1.0,  # priest
     ],
     dtype=jnp.float32,
@@ -130,9 +130,9 @@ BASIC_INTERACTION_RADIUS_BY_CLASS = jnp.asarray(
 BASIC_DAMAGE_BY_CLASS = jnp.asarray(
     [
         0.0,  # neutral
-        12.0,  # mage
+        13.0,  # mage
         8.0,  # warrior
-        8.0,  # hunter
+        6.0,  # hunter
         12.0,  # rogue
         0.0,  # priest
     ],
@@ -158,10 +158,10 @@ ULTIMATE_INTERACTION_RADIUS_BY_CLASS = jnp.asarray(
     [
         0.0,  # neutral
         0.0,  # mage
-        6.0,  # warrior
+        5.75,  # warrior
         3.0,  # hunter
         1.5,  # rogue
-        6.0,  # priest
+        5.75,  # priest
     ],
     dtype=jnp.float32,
 )
@@ -183,9 +183,9 @@ ULTIMATE_DAMAGE_BY_CLASS = jnp.asarray(
     [
         0.0,  # neutral
         0.0,  # mage
-        16.0,  # warrior
+        20.0,  # warrior
         0.0,  # hunter
-        10.0,  # rogue
+        36.0,  # rogue
         0.0,  # priest
     ],
     dtype=jnp.float32,
@@ -199,7 +199,7 @@ ULTIMATE_HEALING_BY_CLASS = jnp.asarray(
         0.0,  # warrior
         0.0,  # hunter
         0.0,  # rogue
-        75.0,  # priest
+        jnp.max(MAX_HEALTH_BY_CLASS),  # priest
     ],
     dtype=jnp.float32,
 )
@@ -209,7 +209,7 @@ OBSERVATION_RADIUS_BY_CLASS = jnp.asarray(
         0,  # neutral
         6,  # mage
         6,  # warrior
-        6,  # hunter
+        6.5,  # hunter
         6,  # rogue
         6,  # priest
     ],

@@ -265,10 +265,13 @@ def _open_space_charge_scenario(
 def test_ultimate_health_catalogs_are_exact_class_aligned_and_jit_stable() -> None:
     """Prove both ultimate health catalogs are complete authoritative tables."""
     expected_damage = jnp.asarray(
-        (0.0, 0.0, 16.0, 0.0, 10.0, 0.0),
+        (0.0, 0.0, 20.0, 0.0, 36.0, 0.0),
         dtype=jnp.float32,
     )
-    expected_healing = jnp.asarray((0.0, 0.0, 0.0, 0.0, 0.0, 75.0), dtype=jnp.float32)
+    expected_healing = jnp.asarray(
+        (0.0, 0.0, 0.0, 0.0, 0.0, 200.0),
+        dtype=jnp.float32,
+    )
     class_ids = jnp.arange(NUM_CLASSES, dtype=jnp.int32)
 
     assert combat.ULTIMATE_DAMAGE_BY_CLASS.shape == (NUM_CLASSES,)
@@ -421,8 +424,14 @@ def test_priest_ultimates_route_to_self_and_allies_for_both_teams() -> None:
 
     next_state, _, _ = _step(config, state, action)
 
-    assert next_state.current_health[_TEAM_A_FIRST_SLOT] == 85.0
-    assert next_state.current_health[_TEAM_B_SECOND_SLOT] == 85.0
+    assert (
+        next_state.current_health[_TEAM_A_FIRST_SLOT]
+        == combat.MAX_HEALTH_BY_CLASS[PRIEST_CLASS_ID]
+    )
+    assert (
+        next_state.current_health[_TEAM_B_SECOND_SLOT]
+        == combat.MAX_HEALTH_BY_CLASS[HUNTER_CLASS_ID]
+    )
 
 
 @pytest.mark.parametrize(
@@ -1317,7 +1326,10 @@ def test_holy_word_uses_pre_state_anti_heal_and_still_starts_cooldown() -> None:
         combat.ULTIMATE_HEALING_BY_CLASS[PRIEST_CLASS_ID]
         * combat.ROGUE_POISON_ANTI_HEAL_MULTIPLIER
     )
-    assert next_state.current_health[1] == expected_health
+    assert next_state.current_health[1] == jnp.minimum(
+        expected_health,
+        combat.MAX_HEALTH_BY_CLASS[HUNTER_CLASS_ID],
+    )
     assert (
         next_state.ultimate_cooldowns[0]
         == combat.ULTIMATE_COOLDOWN_BY_CLASS[PRIEST_CLASS_ID]
@@ -1414,7 +1426,10 @@ def test_mixed_ultimate_damage_and_healing_net_before_single_clamp() -> None:
         + combat.ULTIMATE_HEALING_BY_CLASS[PRIEST_CLASS_ID]
         - combat.ULTIMATE_DAMAGE_BY_CLASS[WARRIOR_CLASS_ID]
     )
-    assert next_state.current_health[1] == expected_health
+    assert next_state.current_health[1] == jnp.minimum(
+        expected_health,
+        combat.MAX_HEALTH_BY_CLASS[HUNTER_CLASS_ID],
+    )
 
 
 @pytest.mark.parametrize("starting_cooldown", (1, 7))
