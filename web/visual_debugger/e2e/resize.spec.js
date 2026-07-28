@@ -212,6 +212,13 @@ test("toolbar wrapping preserves DOM, visual, and keyboard focus order", async (
   });
   await page.goto(debuggerUrl);
   await expect(page.locator("#connection-status")).toHaveText("Online");
+  // Keep Pause and Skip focusable throughout the native Tab-order audit.
+  await page.locator("#motion-pause-button").click();
+  await expect(page.locator("#motion-pause-button")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(page.locator("#motion-skip-button")).toBeEnabled();
 
   for (const viewport of [
     { width: 1601, height: 900 },
