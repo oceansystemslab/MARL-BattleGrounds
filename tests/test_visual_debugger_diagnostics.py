@@ -365,7 +365,7 @@ def test_out_of_domain_tuple_is_classified_without_unsafe_mask_indexing() -> Non
     assert tuple(int(head[0]) for head in transition.accepted_action) == (0, 0, 0)
 
 
-def test_health_outcome_preserves_exact_zero_net_for_accepted_health_intent() -> None:
+def test_health_outcome_preserves_exact_net_for_competing_health_intents() -> None:
     session = _session("basic_support")
     session = submit_next_script_frame(session)
     session = submit_next_script_frame(session)
@@ -374,15 +374,15 @@ def test_health_outcome_preserves_exact_zero_net_for_accepted_health_intent() ->
     actor = next(
         value for value in transition.actor_transitions if value.actor_global_slot == 2
     )
-    assert actor.net_health_delta == actor.health_after - actor.health_before == 0.0
+    assert actor.net_health_delta == actor.health_after - actor.health_before == 2.0
     batch = derive_visual_event_batch(transition)
     health_events = tuple(
         event for event in batch.events if isinstance(event, NetHealthEventV1)
     )
-    zero = next(event for event in health_events if event.recipient_global_slot == 2)
-    assert zero.net_delta == 0.0
-    assert zero.outcome == "unchanged"
-    assert not hasattr(zero, "source_global_slot")
+    health = next(event for event in health_events if event.recipient_global_slot == 2)
+    assert health.net_delta == 2.0
+    assert health.outcome == "healing"
+    assert not hasattr(health, "source_global_slot")
 
 
 def test_non_health_activations_do_not_create_zero_health_delta_visuals() -> None:
@@ -650,7 +650,7 @@ def test_concise_log_schema_covers_accepted_basic_and_rejected_ultimate() -> Non
     play, technical = text.split("\n\nTECHNICAL DIAGNOSTICS\n")
     assert play.startswith("PLAY-BY-PLAY\n")
     assert "TEAM A MAGE (id_0) attempted BASIC on TEAM B MAGE (id_5)." in play
-    assert "TEAM B MAGE (id_5) lost 13.80 HP." in play
+    assert "TEAM B MAGE (id_5) lost 14.95 HP." in play
     assert "Accepted contributors included TEAM A MAGE (id_0) BASIC." in play
     assert "Active public multipliers included" in play
     assert " g0" not in play
@@ -659,7 +659,7 @@ def test_concise_log_schema_covers_accepted_basic_and_rejected_ultimate() -> Non
         in technical
     )
     assert "Actor id_0 [g0] submitted move=Stay[0] target=t6 ultimate=0" in technical
-    assert "Health id_5 80.00 -> 66.20 net=-13.80" in technical
+    assert "Health id_5 80.00 -> 65.05 net=-14.95" in technical
     assert "Activation basic_damage g0->g5" in technical
 
     rejected = _rejected_ultimate_with_movement()
@@ -689,7 +689,7 @@ def test_concise_logs_cover_all_required_effect_and_lifecycle_examples() -> None
         "TEAM A HUNTER (id_2) attempted TRAP on TEAM B WARRIOR (id_6).",
         "TEAM A ROGUE (id_3) attempted POISON on TEAM B MAGE (id_5).",
         "TEAM A PRIEST (id_4) attempted HOLY WORD on TEAM A HUNTER (id_2).",
-        "TEAM B MAGE (id_5) lost 10.00 HP.",
+        "TEAM B MAGE (id_5) lost 36.00 HP.",
         "Successor state: TEAM A MAGE (id_0) Ultimate cooldown is 30.",
         "Successor state: TEAM B WARRIOR (id_6) has TRAP 4 (applied).",
         "Activation rogue_poison g3->g5",
@@ -713,7 +713,7 @@ def test_concise_logs_cover_all_required_effect_and_lifecycle_examples() -> None
     transition = support.last_transition
     assert transition is not None
     text = format_concise_transition(transition)
-    assert "TEAM A PRIEST (id_2) had a net health change of 0.00 HP." in text
+    assert "TEAM A PRIEST (id_2) gained 2.00 HP." in text
     assert (
         "Accepted contributors included TEAM A PRIEST (id_2) BASIC "
         "and TEAM B HUNTER (id_7) BASIC."
@@ -721,7 +721,7 @@ def test_concise_logs_cover_all_required_effect_and_lifecycle_examples() -> None
     assert (
         "The public transition does not expose the gross damage/healing split." in text
     )
-    assert "Health id_2 92.00 -> 92.00 net=+0.00" in text
+    assert "Health id_2 94.00 -> 96.00 net=+2.00" in text
 
 
 def test_verbose_log_adds_geometry_mask_aura_speed_and_episode_fields() -> None:

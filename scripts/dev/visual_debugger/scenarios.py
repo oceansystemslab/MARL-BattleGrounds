@@ -502,7 +502,7 @@ _BASIC_SUPPORT_FRAMES = (
     ),
     ScenarioFrame(
         "simultaneous-heal-damage",
-        "Priest self-heal and Hunter damage produce zero net health.",
+        "Priest self-heal exceeds simultaneous Hunter damage by 2 HP.",
         (
             ActorCommand(2, MOVE_STAY, 2, 0),
             ActorCommand(7, MOVE_STAY, 2, 0),

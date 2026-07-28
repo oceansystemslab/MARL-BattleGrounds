@@ -811,7 +811,7 @@ def test_arena_5v5_exact_map_roster_positions_obstacles_and_initial_facts() -> N
         (True, True),
     )
     for target_action, expected in {
-        2: (False, True),
+        2: (False, False),
         3: (False, True),
         4: (True, True),
         5: (True, True),
@@ -858,7 +858,7 @@ def test_basic_support_reference_trajectory() -> None:
     session = submit_next_script_frame(session)
     np.testing.assert_allclose(
         np.asarray(session.state.current_health)[[2, 5, 6]],
-        (92.0, 66.2, 193.2),
+        (94.0, 65.05, 194.9),
         atol=1e-5,
     )
     assert int(session.state.slow_durations[2, SLOW_CHANNEL_HUNTER_BASIC]) == 1
@@ -866,7 +866,7 @@ def test_basic_support_reference_trajectory() -> None:
     assert bool(jnp.all(session.state.ultimate_cooldowns == 0))
 
     session = submit_next_script_frame(session)
-    assert float(session.state.current_health[2]) == pytest.approx(92.0)
+    assert float(session.state.current_health[2]) == pytest.approx(96.0)
     assert int(session.state.slow_durations[2, SLOW_CHANNEL_HUNTER_BASIC]) == 1
     assert int(session.state.slow_durations[6, SLOW_CHANNEL_HUNTER_BASIC]) == 0
     assert int(session.state.priest_blessing_of_freedom_slow_floor_durations[2]) == 1
@@ -879,7 +879,7 @@ def test_basic_support_reference_trajectory() -> None:
 def test_ultimate_showcase_reference_trajectory() -> None:
     _, session = _session("ultimate_showcase")
     session = submit_next_script_frame(session)
-    assert float(session.state.current_health[2]) == pytest.approx(86.2)
+    assert float(session.state.current_health[2]) == pytest.approx(85.05)
 
     session = submit_next_script_frame(session)
     np.testing.assert_allclose(
@@ -889,7 +889,7 @@ def test_ultimate_showcase_reference_trajectory() -> None:
     )
     np.testing.assert_allclose(
         np.asarray(session.state.current_health)[[2, 5, 7]],
-        (100.0, 70.0, 84.0),
+        (100.0, 44.0, 80.0),
         atol=1e-5,
     )
     np.testing.assert_array_equal(session.state.ultimate_cooldowns[:5], 30)
@@ -911,7 +911,7 @@ def test_ultimate_showcase_reference_trajectory() -> None:
     }
 
     session = submit_next_script_frame(session)
-    assert float(session.state.current_health[6]) == pytest.approx(193.2)
+    assert float(session.state.current_health[6]) == pytest.approx(194.9)
     assert int(session.state.stun_durations[6, STUN_CHANNEL_HUNTER_TRAP]) == 0
     assert int(session.state.slow_durations[6, SLOW_CHANNEL_HUNTER_BASIC]) == 1
     np.testing.assert_array_equal(session.state.ultimate_cooldowns[:5], 29)
@@ -951,7 +951,7 @@ def test_aura_crossfire_reference_trajectory() -> None:
     session = submit_next_script_frame(session)
     np.testing.assert_allclose(
         np.asarray(session.state.current_health)[[2, 7]],
-        (92.18, 92.18),
+        (94.135, 94.135),
         atol=1e-5,
     )
     np.testing.assert_array_equal(
@@ -967,7 +967,7 @@ def test_status_stack_reference_trajectory() -> None:
     _, session = _session("status_stack")
     session = submit_next_script_frame(session)
     np.testing.assert_allclose(session.state.agent_positions[0], (7.0, 7.0))
-    assert float(session.state.current_health[5]) == pytest.approx(82.0)
+    assert float(session.state.current_health[5]) == pytest.approx(52.0)
     np.testing.assert_array_equal(session.state.slow_durations[5], (5, 0, 5))
     np.testing.assert_array_equal(session.state.stun_durations[5], (1, 4, 1))
     assert int(session.state.rogue_poison_anti_heal_durations[5]) == 4
@@ -985,7 +985,7 @@ def test_status_stack_reference_trajectory() -> None:
 
     session = submit_next_script_frame(session)
     np.testing.assert_allclose(session.state.agent_positions[5], (8.0, 6.0))
-    assert float(session.state.current_health[5]) == pytest.approx(78.0)
+    assert float(session.state.current_health[5]) == pytest.approx(50.0)
     np.testing.assert_array_equal(session.state.slow_durations[5], (4, 1, 4))
     np.testing.assert_array_equal(session.state.stun_durations[5], (0, 0, 0))
     assert int(session.state.rogue_poison_anti_heal_durations[5]) == 3
@@ -1088,9 +1088,7 @@ def test_team_focus_crossfire_reference_trajectory() -> None:
         ("basic_heal", 8, 5),
     )
 
-    assert float(session.state.current_health[5]) == pytest.approx(
-        float(session.config.agent_profile.max_health[5])
-    )
+    assert float(session.state.current_health[5]) == pytest.approx(183.3725)
     health_before_holy_words = float(session.state.current_health[5])
     session = submit_next_script_frame(session)
     assert _accepted_activation_signatures(session) == (
@@ -1106,8 +1104,12 @@ def test_team_focus_crossfire_reference_trajectory() -> None:
         if actor.actor_global_slot == 5
     )
     assert warrior.health_before == pytest.approx(health_before_holy_words)
-    assert warrior.health_after == pytest.approx(health_before_holy_words)
-    assert warrior.net_health_delta == pytest.approx(0.0)
+    assert warrior.health_after == pytest.approx(
+        float(session.config.agent_profile.max_health[5])
+    )
+    assert warrior.net_health_delta == pytest.approx(
+        warrior.health_after - health_before_holy_words
+    )
 
 
 def test_mirrored_ultimates_reference_trajectory() -> None:

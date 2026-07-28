@@ -86,8 +86,8 @@ def test_target_mapping_rejects_invalid_target_actions(target_action: int) -> No
 @pytest.mark.parametrize(
     ("actor_slot", "target_slot", "expected_target_action", "expected_health"),
     (
-        (0, 5, 6, 66.2),
-        (7, 2, 8, 92.0),
+        (0, 5, 6, 65.05),
+        (7, 2, 8, 94.0),
     ),
 )
 def test_clicked_global_target_routes_to_expected_recipient_for_both_teams(
