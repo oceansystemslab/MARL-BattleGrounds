@@ -1421,7 +1421,9 @@ def test_zero_health_but_alive_target_remains_bounded_without_death_semantics() 
     assert bool(jnp.all(rewards.rewards == 0.0))
     assert not bool(done_flags.terminated)
     assert not bool(done_flags.truncated)
-    assert len(info) == 0
+    assert bool(info.transition_facts.has_transition)
+    combat_facts = info.transition_facts.combat_transition_facts
+    assert combat_facts.total_effective_damage_by_recipient[_TEAM_B_ACTOR] > 0.0
 
 
 def test_legal_movement_survives_an_invalid_combat_pair() -> None:

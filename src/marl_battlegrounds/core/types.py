@@ -314,5 +314,52 @@ class DoneFlags(NamedTuple):
         return jnp.logical_or(self.terminated, self.truncated)
 
 
+class ActionAcceptanceFacts(NamedTuple):
+    """Submitted intent, accepted behavior, and per-actor rejection provenance."""
+
+    submitted_joint_action: Action
+    accepted_joint_action: Action
+    submitted_action_tuple_is_out_of_domain_by_actor: Array
+    in_domain_move_action_is_rejected_by_actor: Array
+    in_domain_combat_action_pair_is_rejected_by_actor: Array
+
+
+class CombatTransitionFacts(NamedTuple):
+    """Source-aligned accepted effects and authoritative recipient totals."""
+
+    basic_effect_is_activated_by_source: Array
+    ultimate_effect_is_activated_by_source: Array
+    combat_effect_has_recipient_by_source: Array
+    combat_effect_recipient_global_slot_by_source: Array
+    raw_damage_output_by_source: Array
+    source_modified_damage_output_by_source: Array
+    recipient_damage_modifier_by_source: Array
+    total_effective_damage_by_recipient: Array
+    raw_healing_output_by_source: Array
+    source_modified_healing_output_by_source: Array
+    recipient_healing_modifier_by_source: Array
+    total_effective_healing_by_recipient: Array
+    slow_is_applied_by_source_and_channel: Array
+    stun_is_applied_by_source_and_channel: Array
+    rogue_poison_anti_heal_is_applied_by_source: Array
+    mage_burst_damage_amplification_is_applied_by_source: Array
+    priest_blessing_of_freedom_is_applied_by_source: Array
+
+
+class TransitionFacts(NamedTuple):
+    """Fixed-shape authoritative facts for one reset or environment transition."""
+
+    has_transition: Array
+    choosing_step_count: Array
+    action_acceptance_facts: ActionAcceptanceFacts
+    combat_transition_facts: CombatTransitionFacts
+
+
 class Info(NamedTuple):
-    """Lightweight auxiliary diagnostics placeholder for reset and step."""
+    """Privileged fixed-shape host diagnostics returned by reset and step.
+
+    Transition facts are global simulator truth and are not decentralized
+    policy observations.
+    """
+
+    transition_facts: TransitionFacts

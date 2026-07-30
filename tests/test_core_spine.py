@@ -722,10 +722,17 @@ def test_done_flags_derive_done_from_termination_or_truncation(
     assert jnp.array_equal(done_flags.done, expected)
 
 
-def test_info_is_empty_placeholder_for_auxiliary_diagnostics() -> None:
-    info = Info()
+def test_reset_info_marks_absence_of_a_transition() -> None:
+    config = _config(team_size=1)
 
-    assert len(info) == 0
+    _, _, _, info = reset(config, jax.random.key(42))
+
+    assert isinstance(info, Info)
+    assert not bool(info.transition_facts.has_transition)
+    assert jnp.array_equal(
+        info.transition_facts.choosing_step_count,
+        jnp.array(-1, dtype=jnp.int32),
+    )
 
 
 @pytest.mark.parametrize("team_size", VALID_TEAM_SIZES)
@@ -897,7 +904,7 @@ def test_step_preserves_slot_aligned_state_arrays() -> None:
     )
 
 
-def test_zero_health_does_not_trigger_death_rewards_done_or_info() -> None:
+def test_zero_health_does_not_trigger_death_rewards_or_done() -> None:
     config = _config(team_size=3, max_steps=1000)
     key = jax.random.key(42)
     state, _, _, _ = reset(config, key)
@@ -920,7 +927,14 @@ def test_zero_health_does_not_trigger_death_rewards_done_or_info() -> None:
     assert jnp.array_equal(done_flags.truncated, jnp.array(False))
     assert jnp.array_equal(done_flags.done, jnp.array(False))
     assert isinstance(info, Info)
-    assert len(info) == 0
+    assert bool(info.transition_facts.has_transition)
+    assert jnp.array_equal(
+        info.transition_facts.choosing_step_count,
+        state.step_count,
+    )
+    combat_facts = info.transition_facts.combat_transition_facts
+    assert jnp.all(combat_facts.total_effective_damage_by_recipient == 0.0)
+    assert jnp.all(combat_facts.total_effective_healing_by_recipient == 0.0)
 
 
 def test_step_returns_fixed_shape_core_outputs() -> None:
