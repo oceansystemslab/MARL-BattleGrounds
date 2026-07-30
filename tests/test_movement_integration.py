@@ -80,10 +80,10 @@ class _CombatStateFields(TypedDict):
     has_previous_timestep_joint_action: Array
 
 
-def _inert_combat_state_fields() -> _CombatStateFields:
-    """Return neutral combat fields for direct EnvState constructors."""
+def _inert_combat_state_fields(living_mask: Array) -> _CombatStateFields:
+    """Return neutral fields with coherent positive health for living slots."""
     return {
-        "current_health": jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32),
+        "current_health": living_mask.astype(jnp.float32),
         "ultimate_cooldowns": jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
         "slow_durations": jnp.zeros(
             (MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.int32
@@ -304,13 +304,14 @@ def _state_with_single_active_alive_agent(
         ultimate_interaction_radii=_slot_float_vector(
             0.0, (0, effective_ultimate_interaction_radius)
         ),
+        max_health=active_mask.astype(jnp.float32),
     )
     config = config._replace(agent_profile=profile)
     state = EnvState(
         step_count=jnp.array(step_count, dtype=jnp.int32),
         agent_positions=_agent_positions_array_with_rows((0, position)),
         alive_mask=active_mask,
-        **_inert_combat_state_fields(),
+        **_inert_combat_state_fields(active_mask),
     )
     return config, state
 
@@ -332,7 +333,12 @@ def _state_with_two_agents(
     effective_ultimate_interaction_radius: float = 9.0,
     step_count: int = 0,
 ) -> tuple[EnvConfig, EnvState]:
-    """Create an exact config/state pair with two configurable participants."""
+    """Create an exact low-level pair for movement-kernel boundary tests.
+
+    The helper intentionally permits catalog overrides and noncanonical payload
+    in inactive rows so masking is tested rather than assumed. Such cases are
+    adversarial kernel inputs, not official host-validated state evidence.
+    """
     active_mask = jnp.zeros((MAX_AGENT_SLOTS,), dtype=bool)
     alive_mask = jnp.zeros((MAX_AGENT_SLOTS,), dtype=bool)
 
@@ -365,6 +371,7 @@ def _state_with_two_agents(
             (0, effective_ultimate_interaction_radius),
             (1, effective_ultimate_interaction_radius),
         ),
+        max_health=active_mask.astype(jnp.float32),
     )
     config = config._replace(agent_profile=profile)
     state = EnvState(
@@ -374,7 +381,7 @@ def _state_with_two_agents(
             (1, agent_b_position),
         ),
         alive_mask=alive_mask,
-        **_inert_combat_state_fields(),
+        **_inert_combat_state_fields(alive_mask),
     )
     return config, state
 
@@ -1264,6 +1271,7 @@ def test_step_projects_active_alive_agent_outside_rotated_wall() -> None:
 
 
 def test_inactive_slots_with_nonstay_action_preserve_original_positions() -> None:
+    """Prove malformed inactive payload remains physically inert at kernel level."""
     config = _deterministic_config()
     key = jax.random.key(42)
 
@@ -1275,9 +1283,9 @@ def test_inactive_slots_with_nonstay_action_preserve_original_positions() -> Non
         agent_a_position,
         agent_b_position,
         agent_a_active_flag=False,
-        agent_a_alive_flag=True,
+        agent_a_alive_flag=False,
         agent_b_active_flag=False,
-        agent_b_alive_flag=True,
+        agent_b_alive_flag=False,
     )
 
     joint_action = _joint_action_with_moves(
@@ -1326,9 +1334,8 @@ def test_dead_slots_with_nonstay_action_preserve_original_positions() -> None:
 @pytest.mark.parametrize(
     ("agent_b_active_flag", "agent_b_alive_flag"),
     [
-        pytest.param(False, True, id="inactive_alive_neighbor"),
+        pytest.param(False, False, id="inactive_neighbor"),
         pytest.param(True, False, id="active_dead_neighbor"),
-        pytest.param(False, False, id="inactive_dead_neighbor"),
     ],
 )
 def test_active_alive_slot_moves_while_nonparticipant_neighbor_is_preserved(
@@ -1399,6 +1406,7 @@ def test_active_alive_overlapping_agents_separate_in_free_space(
             observation_radii=_slot_float_vector(0.0),
             basic_interaction_radii=_slot_float_vector(0.0),
             ultimate_interaction_radii=_slot_float_vector(0.0),
+            max_health=active_mask.astype(jnp.float32),
         )
     )
 
@@ -1409,7 +1417,7 @@ def test_active_alive_overlapping_agents_separate_in_free_space(
             (blocker_slot, blocker_position),
         ),
         alive_mask=active_mask,
-        **_inert_combat_state_fields(),
+        **_inert_combat_state_fields(active_mask),
     )
 
     joint_action = _joint_action_with_moves(

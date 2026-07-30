@@ -1,4 +1,4 @@
-"""Authoritative action and combat transition-fact proofs for Milestone 6."""
+"""Authoritative action, combat, and death transition-fact proofs for Milestone 6."""
 # pyright: reportPrivateUsage=false
 
 from typing import cast
@@ -44,6 +44,7 @@ from marl_battlegrounds.core.types import (
     ActionAcceptanceFacts,
     ActionMask,
     CombatTransitionFacts,
+    DeathTransitionFacts,
     DoneFlags,
     EnvConfig,
     EnvState,
@@ -58,8 +59,8 @@ _TEAM_B_FIRST_SLOT = MAX_AGENTS_PER_TEAM
 _TARGET_NONE = 0
 _SELF_TARGET = 1
 _FIRST_ENEMY_TARGET = 1 + MAX_AGENTS_PER_TEAM
-_CP1_TRANSITION_FACT_LEAF_COUNT = 28
-_CP1_TRANSITION_FACT_RAW_BYTES = 755
+_TRANSITION_FACT_LEAF_COUNT = 31
+_TRANSITION_FACT_RAW_BYTES = 815
 
 
 def _empty_obstacles() -> Array:
@@ -233,8 +234,24 @@ def _assert_canonical_empty_combat_facts(facts: CombatTransitionFacts) -> None:
         assert bool(jnp.all(vector == 0.0))
 
 
+def _assert_canonical_empty_death_facts(facts: DeathTransitionFacts) -> None:
+    """Assert the reset/neutral canonical values for every death fact leaf."""
+    boolean_vectors = (
+        facts.is_newly_dead_by_recipient,
+        facts.contributed_to_new_death_by_source,
+    )
+    for vector in boolean_vectors:
+        assert vector.shape == (MAX_AGENT_SLOTS,)
+        assert vector.dtype == jnp.bool_
+        assert not bool(jnp.any(vector))
+
+    assert facts.attributed_death_damage_by_source.shape == (MAX_AGENT_SLOTS,)
+    assert facts.attributed_death_damage_by_source.dtype == jnp.float32
+    assert bool(jnp.all(facts.attributed_death_damage_by_source == 0.0))
+
+
 def test_reset_and_real_neutral_step_share_the_exact_static_fact_schema() -> None:
-    """Prove canonical reset facts, real-step identity, and the CP1 byte budget."""
+    """Prove canonical reset facts, real-step identity, and the payload budget."""
     config, state, action_mask = _scenario(
         (_TEAM_A_FIRST_SLOT, HUNTER_CLASS_ID),
         (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
@@ -268,11 +285,17 @@ def test_reset_and_real_neutral_step_share_the_exact_static_fact_schema() -> Non
         "mage_burst_damage_amplification_is_applied_by_source",
         "priest_blessing_of_freedom_is_applied_by_source",
     )
+    assert DeathTransitionFacts._fields == (
+        "is_newly_dead_by_recipient",
+        "contributed_to_new_death_by_source",
+        "attributed_death_damage_by_source",
+    )
     assert TransitionFacts._fields == (
         "has_transition",
         "choosing_step_count",
         "action_acceptance_facts",
         "combat_transition_facts",
+        "death_facts",
     )
     assert Info._fields == ("transition_facts",)
 
@@ -298,12 +321,13 @@ def test_reset_and_real_neutral_step_share_the_exact_static_fact_schema() -> Non
         assert rejected.dtype == jnp.bool_
         assert not bool(jnp.any(rejected))
     _assert_canonical_empty_combat_facts(reset_facts.combat_transition_facts)
+    _assert_canonical_empty_death_facts(reset_facts.death_facts)
 
     leaves = jax.tree_util.tree_leaves(reset_facts)
-    assert len(leaves) == _CP1_TRANSITION_FACT_LEAF_COUNT
+    assert len(leaves) == _TRANSITION_FACT_LEAF_COUNT
     assert all(isinstance(leaf, jax.Array) for leaf in leaves)
     raw_bytes = sum(int(leaf.size) * int(leaf.dtype.itemsize) for leaf in leaves)
-    assert raw_bytes == _CP1_TRANSITION_FACT_RAW_BYTES
+    assert raw_bytes == _TRANSITION_FACT_RAW_BYTES
 
     *_, neutral_info = _take_step(
         config,
@@ -318,6 +342,7 @@ def test_reset_and_real_neutral_step_share_the_exact_static_fact_schema() -> Non
     assert bool(neutral_facts.has_transition)
     assert int(neutral_facts.choosing_step_count) == 0
     _assert_canonical_empty_combat_facts(neutral_facts.combat_transition_facts)
+    _assert_canonical_empty_death_facts(neutral_facts.death_facts)
 
 
 @pytest.mark.parametrize(
@@ -481,7 +506,10 @@ def test_dead_and_inactive_rows_distinguish_canonical_noop_from_rejection(
     )
     actor_slot = _TEAM_A_FIRST_SLOT
     if nonacting_kind == "dead":
-        state = state._replace(alive_mask=state.alive_mask.at[actor_slot].set(False))
+        state = state._replace(
+            alive_mask=state.alive_mask.at[actor_slot].set(False),
+            current_health=state.current_health.at[actor_slot].set(0.0),
+        )
     else:
         actor_slot = 1
     action_mask = _build_observation_and_action_mask(state, config)[1]
@@ -517,6 +545,7 @@ def test_dead_and_inactive_rows_distinguish_canonical_noop_from_rejection(
     _assert_canonical_empty_combat_facts(
         rejected_info.transition_facts.combat_transition_facts
     )
+    _assert_canonical_empty_death_facts(rejected_info.transition_facts.death_facts)
 
 
 _ROUTING_CASES = (
@@ -1191,12 +1220,35 @@ def test_health_clamps_do_not_rewrite_gross_damage_or_healing_facts() -> None:
         _joint_action((0, MOVE_STAY, _FIRST_ENEMY_TARGET, 0)),
     )
     damage_facts = damage_info.transition_facts.combat_transition_facts
+    damage_death_facts = damage_info.transition_facts.death_facts
     assert (
         damage_facts.total_effective_damage_by_recipient[5]
         == (combat.BASIC_DAMAGE_BY_CLASS[ROGUE_CLASS_ID])
     )
     assert damage_state.current_health[5] - damage_next_state.current_health[5] == 1.0
     assert damage_facts.total_effective_damage_by_recipient[5] > 1.0
+    assert bool(
+        jnp.array_equal(
+            damage_death_facts.is_newly_dead_by_recipient,
+            _single_source_mask(5),
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            damage_death_facts.contributed_to_new_death_by_source,
+            _single_source_mask(0),
+        )
+    )
+    assert (
+        damage_death_facts.attributed_death_damage_by_source[0]
+        == damage_facts.source_modified_damage_output_by_source[0]
+        * damage_facts.recipient_damage_modifier_by_source[0]
+    )
+    assert bool(
+        jnp.all(
+            damage_death_facts.attributed_death_damage_by_source.at[0].set(0.0) == 0.0
+        )
+    )
 
     healing_config, healing_state, healing_mask = _scenario(
         (0, PRIEST_CLASS_ID),
@@ -1346,7 +1398,7 @@ def test_transition_facts_compose_under_eager_jit_vmap_and_scan() -> None:
         )
     )
     assert len(jax.tree_util.tree_leaves(scanned_facts)) == (
-        _CP1_TRANSITION_FACT_LEAF_COUNT
+        _TRANSITION_FACT_LEAF_COUNT
     )
 
     def discard_fact_rollout(

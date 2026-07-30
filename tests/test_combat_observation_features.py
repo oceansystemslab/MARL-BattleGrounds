@@ -590,19 +590,47 @@ def test_attached_statuses_and_effective_speed_follow_duration_state() -> None:
             state.slow_durations.at[0, SLOW_CHANNEL_WARRIOR_CHARGE]
             .set(2)
             .at[1, SLOW_CHANNEL_HUNTER_BASIC]
-            .set(3)
+            .set(combat.HUNTER_BASIC_SLOW_DURATION_TICKS)
             .at[2, SLOW_CHANNEL_ROGUE_POISON]
             .set(4)
         ),
         rogue_poison_anti_heal_durations=(
-            state.rogue_poison_anti_heal_durations.at[3].set(5)
+            state.rogue_poison_anti_heal_durations.at[3].set(
+                combat.ROGUE_POISON_ANTI_HEAL_DURATION_TICKS
+            )
         ),
         mage_burst_damage_amplification_durations=(
-            state.mage_burst_damage_amplification_durations.at[4].set(6)
+            state.mage_burst_damage_amplification_durations.at[0].set(
+                combat.MAGE_BURST_DAMAGE_DURATION_TICKS
+            )
         ),
         priest_blessing_of_freedom_slow_floor_durations=(
-            state.priest_blessing_of_freedom_slow_floor_durations.at[0].set(7)
+            state.priest_blessing_of_freedom_slow_floor_durations.at[4].set(
+                combat.PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS
+            )
         ),
+    )
+    choosing_observation, _ = _build_observation_and_action_mask(state, config)
+    choosing_rows = choosing_observation.self_features
+
+    assert choosing_rows[0, AGENT_FEATURE_SLOW_WARRIOR_CHARGE_DURATION] == 2.0
+    assert choosing_rows[1, AGENT_FEATURE_SLOW_HUNTER_BASIC_DURATION] == 1.0
+    assert choosing_rows[2, AGENT_FEATURE_SLOW_ROGUE_POISON_DURATION] == 4.0
+    assert (
+        choosing_rows[1, AGENT_FEATURE_SLOW_HUNTER_BASIC_MULTIPLIER]
+        == combat.HUNTER_BASIC_SLOW_MULTIPLIER
+    )
+    assert choosing_rows[3, AGENT_FEATURE_ANTI_HEAL_ROGUE_POISON_DURATION] == 4.0
+    assert (
+        choosing_rows[0, AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_BURST_DURATION] == 5.0
+    )
+    assert (
+        choosing_rows[4, AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_DURATION]
+        == 1.0
+    )
+    assert (
+        choosing_rows[4, AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_FRACTION]
+        == combat.PRIEST_HEAL_SPEED_FLOOR
     )
 
     next_state, observation, *_ = step(
@@ -615,31 +643,25 @@ def test_attached_statuses_and_effective_speed_follow_duration_state() -> None:
     rows = observation.self_features
 
     assert rows[0, AGENT_FEATURE_SLOW_WARRIOR_CHARGE_DURATION] == 1.0
-    assert rows[1, AGENT_FEATURE_SLOW_HUNTER_BASIC_DURATION] == 2.0
+    assert rows[1, AGENT_FEATURE_SLOW_HUNTER_BASIC_DURATION] == 0.0
     assert rows[2, AGENT_FEATURE_SLOW_ROGUE_POISON_DURATION] == 3.0
     assert (
         rows[0, AGENT_FEATURE_SLOW_WARRIOR_CHARGE_MULTIPLIER]
         == combat.WARRIOR_CHARGE_SLOW_MULTIPLIER
     )
-    assert (
-        rows[1, AGENT_FEATURE_SLOW_HUNTER_BASIC_MULTIPLIER]
-        == combat.HUNTER_BASIC_SLOW_MULTIPLIER
-    )
+    assert rows[1, AGENT_FEATURE_SLOW_HUNTER_BASIC_MULTIPLIER] == 1.0
     assert (
         rows[2, AGENT_FEATURE_SLOW_ROGUE_POISON_MULTIPLIER]
         == combat.ROGUE_POISON_SLOW_MULTIPLIER
     )
-    assert rows[3, AGENT_FEATURE_ANTI_HEAL_ROGUE_POISON_DURATION] == 4.0
+    assert rows[3, AGENT_FEATURE_ANTI_HEAL_ROGUE_POISON_DURATION] == 3.0
     assert (
         rows[3, AGENT_FEATURE_ANTI_HEAL_ROGUE_POISON_MULTIPLIER]
         == combat.ROGUE_POISON_ANTI_HEAL_MULTIPLIER
     )
-    assert rows[4, AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_BURST_DURATION] == 5.0
-    assert rows[0, AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_DURATION] == 6.0
-    assert (
-        rows[0, AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_FRACTION]
-        == combat.PRIEST_HEAL_SPEED_FLOOR
-    )
+    assert rows[0, AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_BURST_DURATION] == 4.0
+    assert rows[4, AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_DURATION] == 0.0
+    assert rows[4, AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_FRACTION] == 0.0
 
     expected_observed_effective = combat.derive_effective_movement_speeds(
         next_state.slow_durations,

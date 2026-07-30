@@ -668,6 +668,7 @@ def test_hidden_actor_rows_are_zero_but_hidden_target_identity_remains_public() 
     previous_actions = observation.previous_timestep_actions
 
     assert next_state.current_health[_TEAM_B_ACTOR_0] == 0.0
+    assert not bool(next_state.alive_mask[_TEAM_B_ACTOR_0])
     assert bool(observation.ally_visibility_mask[_TEAM_A_ACTOR_0, 1])
     assert not bool(observation.enemy_visibility_mask[_TEAM_A_ACTOR_0, 0])
     assert bool(

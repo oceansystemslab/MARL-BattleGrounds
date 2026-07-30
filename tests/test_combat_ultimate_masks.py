@@ -8,6 +8,7 @@ import jax.numpy as jnp
 import pytest
 from jax import Array
 
+import marl_battlegrounds.core.combat as combat
 from marl_battlegrounds.core.combat import (
     MAGE_DAMAGE_AURA_MULTIPLIER,
     ULTIMATE_COOLDOWN_BY_CLASS,
@@ -39,6 +40,7 @@ from marl_battlegrounds.core.types import (
     OBSTACLE_TYPE_PILLAR,
     PRIEST_CLASS_ID,
     ROGUE_CLASS_ID,
+    SLOW_CHANNEL_WARRIOR_CHARGE,
     STUN_CHANNEL_HUNTER_TRAP,
     STUN_CHANNEL_ROGUE_POISON,
     STUN_CHANNEL_WARRIOR_CHARGE,
@@ -355,12 +357,19 @@ def test_actor_stun_removes_nonempty_combat_control(
 ) -> None:
     """Prove every actor stun source preserves only target-none/no-ultimate."""
     config, state = _scenario(WARRIOR_CLASS_ID, enemy_x=2.25)
+    stun_maxima = (
+        combat.WARRIOR_CHARGE_STUN_DURATION_TICKS,
+        combat.HUNTER_TRAP_STUN_DURATION_TICKS,
+        combat.ROGUE_POISON_STUN_DURATION_TICKS,
+    )
     for channel in stun_channels:
         state = state._replace(
-            stun_durations=state.stun_durations.at[_ACTOR_SLOT, channel].set(2)
+            stun_durations=state.stun_durations.at[_ACTOR_SLOT, channel].set(
+                stun_maxima[channel]
+            )
         )
 
-    _, _, action_mask = _outputs(config, state)
+    _, action_mask = _build_observation_and_action_mask(state, config)
     actor_pair = action_mask.select_target_use_ultimate_joint_mask[_ACTOR_SLOT]
 
     assert bool(actor_pair[_NONE_TARGET, 0])
@@ -397,9 +406,8 @@ def test_candidate_stun_changes_its_own_row_but_not_actor_legality() -> None:
 @pytest.mark.parametrize(
     ("actor_active", "actor_alive"),
     [
-        pytest.param(False, True, id="inactive"),
+        pytest.param(False, False, id="inactive"),
         pytest.param(True, False, id="dead"),
-        pytest.param(False, False, id="inactive-and-dead"),
     ],
 )
 def test_inactive_or_dead_actor_exposes_only_canonical_no_op(
@@ -408,6 +416,9 @@ def test_inactive_or_dead_actor_exposes_only_canonical_no_op(
 ) -> None:
     """Prove every nonacting actor mask has exact singleton no-op support."""
     config, state = _scenario(MAGE_CLASS_ID)
+    # The inactive case deliberately mutates only the identity gates so this
+    # low-level mask test can isolate redaction behavior. It is not an
+    # official host-valid configuration/state pair.
     profile = config.agent_profile._replace(
         active_mask=config.agent_profile.active_mask.at[_ACTOR_SLOT].set(actor_active),
         team_ids=config.agent_profile.team_ids.at[_ACTOR_SLOT].set(
@@ -415,7 +426,12 @@ def test_inactive_or_dead_actor_exposes_only_canonical_no_op(
         ),
     )
     config = config._replace(agent_profile=profile)
-    state = state._replace(alive_mask=state.alive_mask.at[_ACTOR_SLOT].set(actor_alive))
+    state = state._replace(
+        alive_mask=state.alive_mask.at[_ACTOR_SLOT].set(actor_alive),
+        current_health=state.current_health.at[_ACTOR_SLOT].set(
+            state.current_health[_ACTOR_SLOT] if actor_alive else 0.0
+        ),
+    )
 
     _, _, action_mask = _outputs(config, state)
 
@@ -464,32 +480,37 @@ def test_every_categorical_mask_row_is_numerically_sampleable() -> None:
 
 
 @pytest.mark.parametrize(
-    ("candidate_active", "candidate_alive"),
+    ("candidate_slot", "target_action", "candidate_active", "candidate_alive"),
     [
-        pytest.param(False, True, id="inactive"),
-        pytest.param(True, False, id="dead"),
-        pytest.param(False, False, id="padded"),
+        pytest.param(_ENEMY_SLOT, _ENEMY_TARGET, False, False, id="inactive"),
+        pytest.param(_ENEMY_SLOT, _ENEMY_TARGET, True, False, id="dead"),
+        pytest.param(_PADDED_SLOT, 1 + _PADDED_SLOT, False, False, id="padded"),
     ],
 )
 def test_inactive_dead_or_padded_candidate_cannot_be_targeted(
+    candidate_slot: int,
+    target_action: int,
     candidate_active: bool,
     candidate_alive: bool,
 ) -> None:
     """Prove candidate participation gates both basic and ultimate lanes."""
     config, state = _scenario(WARRIOR_CLASS_ID, enemy_x=2.25)
     profile = config.agent_profile._replace(
-        active_mask=config.agent_profile.active_mask.at[_ENEMY_SLOT].set(
+        active_mask=config.agent_profile.active_mask.at[candidate_slot].set(
             candidate_active
         ),
-        team_ids=config.agent_profile.team_ids.at[_ENEMY_SLOT].set(
-            config.agent_profile.team_ids[_ENEMY_SLOT]
+        team_ids=config.agent_profile.team_ids.at[candidate_slot].set(
+            config.agent_profile.team_ids[candidate_slot]
             if candidate_active
             else NO_TEAM_ID
         ),
     )
     config = config._replace(agent_profile=profile)
     state = state._replace(
-        alive_mask=state.alive_mask.at[_ENEMY_SLOT].set(candidate_alive)
+        alive_mask=state.alive_mask.at[candidate_slot].set(candidate_alive),
+        current_health=state.current_health.at[candidate_slot].set(
+            state.current_health[candidate_slot] if candidate_alive else 0.0
+        ),
     )
 
     _, _, action_mask = _outputs(config, state)
@@ -497,7 +518,7 @@ def test_inactive_dead_or_padded_candidate_cannot_be_targeted(
     assert not bool(
         jnp.any(
             action_mask.select_target_use_ultimate_joint_mask[
-                _ACTOR_SLOT, _ENEMY_TARGET
+                _ACTOR_SLOT, target_action
             ]
         )
     )
@@ -519,7 +540,11 @@ def test_no_team_sentinels_never_form_combat_relations() -> None:
     assert not bool(jnp.any(actor_pair[1:]))
 
 
-@pytest.mark.parametrize("health_fraction", [0.0, 1.0], ids=["zero", "full"])
+@pytest.mark.parametrize(
+    "health_fraction",
+    [0.01, 1.0],
+    ids=["low-positive", "full"],
+)
 def test_priest_ultimate_legality_is_independent_of_ally_health(
     health_fraction: float,
 ) -> None:
@@ -541,20 +566,22 @@ def test_priest_ultimate_legality_is_independent_of_ally_health(
 def test_unrelated_statuses_do_not_gate_ultimate_legality() -> None:
     """Prove only stun and cooldown affect actor-side ultimate availability."""
     config, state = _scenario(WARRIOR_CLASS_ID, enemy_x=2.25)
-    _, _, control_mask = _outputs(config, state)
+    _, control_mask = _build_observation_and_action_mask(state, config)
     changed_state = state._replace(
         slow_durations=state.slow_durations.at[_ACTOR_SLOT, 0].set(4),
         rogue_poison_anti_heal_durations=(
             state.rogue_poison_anti_heal_durations.at[_ACTOR_SLOT].set(4)
         ),
         mage_burst_damage_amplification_durations=(
-            state.mage_burst_damage_amplification_durations.at[_ACTOR_SLOT].set(4)
+            state.mage_burst_damage_amplification_durations.at[_ALLY_SLOT].set(4)
         ),
         priest_blessing_of_freedom_slow_floor_durations=(
-            state.priest_blessing_of_freedom_slow_floor_durations.at[_ACTOR_SLOT].set(4)
+            state.priest_blessing_of_freedom_slow_floor_durations.at[_ACTOR_SLOT].set(
+                combat.PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS
+            )
         ),
     )
-    _, _, changed_mask = _outputs(config, changed_state)
+    _, changed_mask = _build_observation_and_action_mask(changed_state, config)
 
     assert bool(
         jnp.array_equal(
@@ -619,17 +646,27 @@ def test_hidden_candidate_changes_do_not_leak_through_actor_outputs() -> None:
         enemy_x=8.0,
         observation_radius=3.0,
     )
-    _, control_observation, control_mask = _outputs(config, state)
+    control_observation, control_mask = _build_observation_and_action_mask(
+        state,
+        config,
+    )
     hidden_changed_state = state._replace(
         agent_positions=state.agent_positions.at[_ENEMY_SLOT].set(
             jnp.asarray((10.0, 2.0), dtype=jnp.float32)
         ),
         current_health=state.current_health.at[_ENEMY_SLOT].set(1.0),
         ultimate_cooldowns=state.ultimate_cooldowns.at[_ENEMY_SLOT].set(9),
-        slow_durations=state.slow_durations.at[_ENEMY_SLOT, 1].set(5),
-        stun_durations=state.stun_durations.at[_ENEMY_SLOT, 2].set(5),
+        slow_durations=state.slow_durations.at[
+            _ENEMY_SLOT, SLOW_CHANNEL_WARRIOR_CHARGE
+        ].set(combat.WARRIOR_CHARGE_SLOW_DURATION_TICKS),
+        stun_durations=state.stun_durations.at[
+            _ENEMY_SLOT, STUN_CHANNEL_HUNTER_TRAP
+        ].set(combat.HUNTER_TRAP_STUN_DURATION_TICKS),
     )
-    _, changed_observation, changed_mask = _outputs(config, hidden_changed_state)
+    changed_observation, changed_mask = _build_observation_and_action_mask(
+        hidden_changed_state,
+        config,
+    )
 
     assert not bool(control_observation.enemy_visibility_mask[_ACTOR_SLOT, 0])
     assert not bool(changed_observation.enemy_visibility_mask[_ACTOR_SLOT, 0])

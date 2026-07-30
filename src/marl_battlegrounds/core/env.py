@@ -89,6 +89,7 @@ from marl_battlegrounds.core.types import (
     ActionAcceptanceFacts,
     ActionMask,
     CombatTransitionFacts,
+    DeathTransitionFacts,
     DoneFlags,
     EnvConfig,
     EnvState,
@@ -1642,6 +1643,7 @@ def _resolve_status_duration_lifecycle(
     priest_freedom_applied_this_tick_by_global_recipient_slot: Array,
     accepted_positive_raw_damage_received_this_tick_by_global_recipient_slot: Array,
     hunter_basic_slow_applied_this_tick_by_global_actor_slot: Array,
+    next_alive_mask: Array,
 ) -> tuple[Array, Array, Array, Array, Array, Array, Array, Array, Array]:
     """Resolve successor status durations and source-aligned application facts.
 
@@ -1649,7 +1651,8 @@ def _resolve_status_duration_lifecycle(
     clears only the aged successor of a pre-existing Hunter Trap, after which
     fresh source-local applications merge at full configured duration. A fresh
     application never shortens a longer aged remainder and first governs the
-    next observable decision epoch.
+    next observable decision epoch. Dead successor slots retain the application
+    facts but carry no transient status duration into that epoch.
     """
 
     # Derive fresh applications once from the accepted action at this epoch.
@@ -1859,6 +1862,19 @@ def _resolve_status_duration_lifecycle(
         mage_uses_accepted_ultimate_this_tick_by_actor_slot
     )
 
+    # Transient status memory cannot survive into a dead successor slot.
+    next_slow_durations = next_slow_durations * next_alive_mask[:, None]
+
+    next_stun_durations = next_stun_durations * next_alive_mask[:, None]
+
+    next_mage_burst_durations = next_mage_burst_durations * next_alive_mask
+
+    next_rogue_anti_heal_durations = next_rogue_anti_heal_durations * next_alive_mask
+
+    next_priest_freedom_slow_floor_durations = (
+        next_priest_freedom_slow_floor_durations * next_alive_mask
+    )
+
     return (
         next_slow_durations,
         next_stun_durations,
@@ -2048,6 +2064,57 @@ def _resolve_post_charge_agent_positions(
     )
 
 
+def _build_death_transition_facts(
+    current_state: EnvState,
+    config: EnvConfig,
+    next_health_after_effective_damage_and_healing: Array,
+    combat_effect_recipient_global_slot_by_source: Array,
+    source_modified_damage_output_by_source: Array,
+    recipient_damage_modifier_by_source: Array,
+) -> DeathTransitionFacts:
+    """Derive new successor deaths and source-aligned damage attribution.
+
+    A recipient dies only when it was active and alive in the choosing state
+    and its final clamped successor health is zero. Each contributing source
+    retains its gross post-source, post-recipient effective damage; simultaneous
+    healing and health clamping do not redistribute or select a killer.
+    """
+
+    was_active_and_alive = jnp.logical_and(
+        current_state.alive_mask,
+        config.agent_profile.active_mask,
+    )
+
+    is_newly_dead_by_recipient = jnp.logical_and(
+        was_active_and_alive,
+        next_health_after_effective_damage_and_healing == 0,
+    )
+
+    combat_effect_has_recipient_by_source_global_one_hot_routing_matrix = (
+        jax.nn.one_hot(
+            combat_effect_recipient_global_slot_by_source,
+            num_classes=MAX_AGENT_SLOTS,
+            dtype=jnp.bool_,
+        )
+    )
+
+    attributed_death_damage_by_source = jnp.sum(
+        combat_effect_has_recipient_by_source_global_one_hot_routing_matrix
+        * is_newly_dead_by_recipient[None, :]
+        * source_modified_damage_output_by_source[:, None]
+        * recipient_damage_modifier_by_source[:, None],
+        axis=-1,
+    )
+
+    contributed_to_new_death_by_source = attributed_death_damage_by_source > 0
+
+    return DeathTransitionFacts(
+        is_newly_dead_by_recipient=is_newly_dead_by_recipient,
+        contributed_to_new_death_by_source=contributed_to_new_death_by_source,
+        attributed_death_damage_by_source=attributed_death_damage_by_source,
+    )
+
+
 # Public ---
 
 
@@ -2138,11 +2205,18 @@ def reset(
         in_domain_combat_action_pair_is_rejected_by_actor=all_false_vector,
     )
 
+    reset_death_facts = DeathTransitionFacts(
+        is_newly_dead_by_recipient=all_false_vector,
+        contributed_to_new_death_by_source=all_false_vector,
+        attributed_death_damage_by_source=all_zeroes_vector,
+    )
+
     reset_transition_facts = TransitionFacts(
         has_transition=jnp.asarray(False),
         choosing_step_count=jnp.asarray(-1, dtype=jnp.int32),
         action_acceptance_facts=reset_action_acceptance_facts,
         combat_transition_facts=reset_combat_transition_facts,
+        death_facts=reset_death_facts,
     )
 
     info = Info(transition_facts=reset_transition_facts)
@@ -2243,6 +2317,20 @@ def step(
         config.obstacles,
     )
 
+    death_facts = _build_death_transition_facts(
+        current_state,
+        config,
+        next_health_after_effective_damage_and_healing,
+        combat_effect_recipient_global_slot_by_source,
+        health_effect_aggregation_result.source_modified_damage_output_by_source,
+        health_effect_aggregation_result.recipient_damage_modifier_by_source,
+    )
+
+    next_alive_mask = jnp.logical_and(
+        jnp.logical_not(death_facts.is_newly_dead_by_recipient),
+        current_state.alive_mask,
+    )
+
     (
         next_slow_durations,
         next_stun_durations,
@@ -2262,6 +2350,7 @@ def step(
         health_effect_aggregation_result.priest_freedom_applied_this_tick_by_global_recipient_slot,
         health_effect_aggregation_result.accepted_positive_raw_damage_received_this_tick_by_global_recipient_slot,
         health_effect_aggregation_result.hunter_basic_slow_applied_this_tick_by_global_actor_slot,
+        next_alive_mask,
     )
 
     combat_transition_facts = CombatTransitionFacts(
@@ -2315,7 +2404,7 @@ def step(
     next_state = EnvState(
         step_count=current_state.step_count + 1,
         agent_positions=next_agent_positions,
-        alive_mask=current_state.alive_mask,
+        alive_mask=next_alive_mask,
         current_health=next_health_after_effective_damage_and_healing,
         ultimate_cooldowns=next_ultimate_cooldowns,
         slow_durations=next_slow_durations,
@@ -2345,8 +2434,11 @@ def step(
         choosing_step_count=current_state.step_count,
         action_acceptance_facts=action_acceptance_facts,
         combat_transition_facts=combat_transition_facts,
+        death_facts=death_facts,
     )
 
-    info = Info(transition_facts=transition_facts)
+    info = Info(
+        transition_facts=transition_facts,
+    )
 
     return (next_state, next_observation, rewards, done_flags, next_action_mask, info)

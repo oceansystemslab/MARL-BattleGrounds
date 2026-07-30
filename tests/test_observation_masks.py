@@ -91,10 +91,10 @@ class _CombatStateFields(TypedDict):
     has_previous_timestep_joint_action: Array
 
 
-def _inert_combat_state_fields() -> _CombatStateFields:
-    """Return neutral combat fields for direct EnvState constructors."""
+def _inert_combat_state_fields(current_health: Array) -> _CombatStateFields:
+    """Return neutral combat fields with caller-owned coherent health."""
     return {
-        "current_health": jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32),
+        "current_health": current_health,
         "ultimate_cooldowns": jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
         "slow_durations": jnp.zeros(
             (MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.int32
@@ -363,7 +363,9 @@ def _state_two_versus_two_game(
 
     Team A occupies global slots 0 and 1 in these scenarios. Team B occupies
     global slots 5 and 6, which become relation-local enemy slots 0 and 1 for
-    Team A observers.
+    Team A observers. Individual tests may deliberately place payload in
+    inactive rows or override catalog fields to prove redaction itself; those
+    adversarial fixtures are not official host-validated state evidence.
     """
     agent_a_index = 0
     agent_b_index = 1
@@ -454,6 +456,11 @@ def _state_two_versus_two_game(
             (agent_c_index, effective_ultimate_interaction_radius),
             (agent_d_index, effective_ultimate_interaction_radius),
         ),
+        max_health=jnp.where(
+            active_mask,
+            jnp.maximum(resolved_profile.max_health, 1.0),
+            0.0,
+        ).astype(jnp.float32),
     )
     config = config._replace(agent_profile=profile)
 
@@ -466,7 +473,9 @@ def _state_two_versus_two_game(
             (agent_d_index, agent_d_position),
         ),
         alive_mask=alive_mask,
-        **_inert_combat_state_fields(),
+        **_inert_combat_state_fields(
+            jnp.where(alive_mask, profile.max_health, 0.0).astype(jnp.float32)
+        ),
     )
     return config, state
 

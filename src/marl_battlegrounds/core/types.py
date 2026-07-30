@@ -346,6 +346,19 @@ class CombatTransitionFacts(NamedTuple):
     priest_blessing_of_freedom_is_applied_by_source: Array
 
 
+class DeathTransitionFacts(NamedTuple):
+    """New successor deaths and their positive effective-damage contributors.
+
+    Recipient truth is aligned by global slot. Contributor truth and attributed
+    gross damage are aligned by source slot; attribution is neither killer
+    selection nor realized-health-loss apportionment.
+    """
+
+    is_newly_dead_by_recipient: Array
+    contributed_to_new_death_by_source: Array
+    attributed_death_damage_by_source: Array
+
+
 class TransitionFacts(NamedTuple):
     """Fixed-shape authoritative facts for one reset or environment transition."""
 
@@ -353,6 +366,7 @@ class TransitionFacts(NamedTuple):
     choosing_step_count: Array
     action_acceptance_facts: ActionAcceptanceFacts
     combat_transition_facts: CombatTransitionFacts
+    death_facts: DeathTransitionFacts
 
 
 class Info(NamedTuple):
