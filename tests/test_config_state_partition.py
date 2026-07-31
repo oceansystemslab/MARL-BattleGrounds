@@ -322,8 +322,8 @@ def test_step_preserves_non_inert_dynamic_memory() -> None:
     state = state._replace(
         current_health=state.current_health.at[0].set(12.5),
         ultimate_cooldowns=state.ultimate_cooldowns.at[0].set(7),
-        slow_durations=state.slow_durations.at[0, 1].set(3),
-        stun_durations=state.stun_durations.at[5, 2].set(2),
+        slow_durations=state.slow_durations.at[0, 1].set(1),
+        stun_durations=state.stun_durations.at[5, 2].set(1),
         rogue_poison_anti_heal_durations=(
             state.rogue_poison_anti_heal_durations.at[5].set(4)
         ),

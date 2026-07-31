@@ -151,7 +151,10 @@ def test_reset_exposes_raw_actor_relative_asymmetric_context() -> None:
 def test_active_dead_actor_retains_decision_context() -> None:
     config = _config(team_sizes=(3, 2))
     state, _, _, _ = reset(config, jax.random.key(1))
-    state_with_dead_actor = state._replace(alive_mask=state.alive_mask.at[1].set(False))
+    state_with_dead_actor = state._replace(
+        alive_mask=state.alive_mask.at[1].set(False),
+        current_health=state.current_health.at[1].set(0.0),
+    )
 
     observation, _ = _build_observation_and_action_mask(state_with_dead_actor, config)
 

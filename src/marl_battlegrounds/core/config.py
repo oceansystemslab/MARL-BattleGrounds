@@ -1,4 +1,4 @@
-"""Host-facing episode configuration and fixed-slot profile resolution."""
+"""Host-facing configuration, fixed-slot profile, and state validation."""
 
 import math
 
@@ -7,22 +7,41 @@ import numpy as np
 from jax import Array
 
 from marl_battlegrounds.core.combat import (
+    HUNTER_BASIC_SLOW_DURATION_TICKS,
+    HUNTER_TRAP_STUN_DURATION_TICKS,
+    MAGE_BURST_DAMAGE_DURATION_TICKS,
+    PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS,
+    ROGUE_POISON_ANTI_HEAL_DURATION_TICKS,
+    ROGUE_POISON_SLOW_DURATION_TICKS,
+    ROGUE_POISON_STUN_DURATION_TICKS,
+    WARRIOR_CHARGE_SLOW_DURATION_TICKS,
+    WARRIOR_CHARGE_STUN_DURATION_TICKS,
     get_base_movement_speed_by_class_ids,
     get_basic_interaction_radius_by_class_ids,
     get_body_radius_by_class_ids,
     get_max_health_by_class_ids,
     get_observation_radius_by_class_ids,
+    get_ultimate_cooldown_by_class_ids,
     get_ultimate_interaction_radius_by_class_ids,
 )
-from marl_battlegrounds.core.geometry import disc_overlaps_obstacle
+from marl_battlegrounds.core.geometry import (
+    GEOMETRY_TOLERANCE,
+    disc_overlaps_obstacle,
+)
 from marl_battlegrounds.core.types import (
     ENVIRONMENT_DIMENSIONS,
+    MAGE_CLASS_ID,
     MAX_AGENT_SLOTS,
     MAX_AGENTS_PER_TEAM,
     MAX_OBSTACLE_SLOTS,
     NEUTRAL_CLASS_ID,
     NO_TEAM_ID,
     NUM_CLASSES,
+    NUM_MOVE_ACTIONS,
+    NUM_SLOW_CHANNELS,
+    NUM_STUN_CHANNELS,
+    NUM_TARGET_ACTIONS,
+    NUM_ULTIMATE_ACTIONS,
     OBSTACLE_FEATURE_ACTIVE,
     OBSTACLE_FEATURE_HEIGHT,
     OBSTACLE_FEATURE_RADIUS,
@@ -37,6 +56,7 @@ from marl_battlegrounds.core.types import (
     TEAM_A_ID,
     TEAM_B_ID,
     EnvConfig,
+    EnvState,
     ResolvedAgentProfile,
 )
 
@@ -476,4 +496,378 @@ def validate_env_config(config: EnvConfig) -> None:
         map_height=config.map_height,
         obstacles=obstacles,
         profile=profile,
+    )
+
+
+def _validate_state_positions(
+    positions: Array,
+    *,
+    config: EnvConfig,
+    active_mask: np.ndarray,
+) -> None:
+    """Validate runtime positions against hard static-geometry rules."""
+    host_positions = np.asarray(positions)
+    host_radii = np.asarray(config.agent_profile.agent_radii)
+
+    if not bool(np.all(host_positions[~active_mask] == 0.0)):
+        raise ValueError("inactive agent_positions rows must be exactly zero.")
+
+    for agent_index in np.flatnonzero(active_mask):
+        center = host_positions[agent_index]
+        radius = float(host_radii[agent_index])
+        if not (
+            radius - GEOMETRY_TOLERANCE
+            <= float(center[0])
+            <= config.map_width - radius + GEOMETRY_TOLERANCE
+            and radius - GEOMETRY_TOLERANCE
+            <= float(center[1])
+            <= config.map_height - radius + GEOMETRY_TOLERANCE
+        ):
+            raise ValueError(
+                f"agent_positions[{agent_index}] places the active body outside "
+                "radius-adjusted map bounds."
+            )
+
+        for obstacle_index in np.flatnonzero(
+            np.asarray(config.obstacles)[:, OBSTACLE_FEATURE_ACTIVE] == 1.0
+        ):
+            if bool(
+                disc_overlaps_obstacle(
+                    positions[agent_index],
+                    config.agent_profile.agent_radii[agent_index],
+                    config.obstacles[obstacle_index],
+                )
+            ):
+                raise ValueError(
+                    f"agent_positions[{agent_index}] overlaps active "
+                    f"obstacles[{obstacle_index}]."
+                )
+
+    # Agent-agent projection deliberately has a fixed-pass residual contract.
+    # A strict pairwise-separation check would reject legitimate crowded or
+    # boundary-pinned simulator outputs, so runtime state validation enforces
+    # only the kernel's hard static-geometry guarantees here.
+
+
+def _validate_scenario_living_body_clearance(
+    positions: Array,
+    *,
+    config: EnvConfig,
+    alive_mask: Array,
+) -> None:
+    """Reject positive-area overlap between living bodies in a curated start."""
+    host_positions = np.asarray(positions)
+    host_radii = np.asarray(config.agent_profile.agent_radii)
+    active_and_alive = np.asarray(config.agent_profile.active_mask) & np.asarray(
+        alive_mask
+    )
+    living_indices = np.flatnonzero(active_and_alive)
+
+    for pair_position, agent_a_index in enumerate(living_indices):
+        for agent_b_index in living_indices[pair_position + 1 :]:
+            center_delta = host_positions[agent_a_index] - host_positions[agent_b_index]
+            center_distance = math.hypot(float(center_delta[0]), float(center_delta[1]))
+            minimum_distance = float(
+                host_radii[agent_a_index] + host_radii[agent_b_index]
+            )
+            if center_distance < minimum_distance:
+                raise ValueError(
+                    "curated scenario living bodies overlap at slots "
+                    f"{agent_a_index} and {agent_b_index}."
+                )
+
+
+def _validate_nonnegative_bounded_integer_array(
+    values: Array,
+    *,
+    field_name: str,
+    upper_bounds: np.ndarray | int,
+) -> np.ndarray:
+    """Return host integer values after enforcing a closed duration domain."""
+    host_values = np.asarray(values)
+    if bool(np.any(host_values < 0)):
+        raise ValueError(f"{field_name} must contain only nonnegative values.")
+    if bool(np.any(host_values > upper_bounds)):
+        raise ValueError(f"{field_name} exceeds its catalog maximum.")
+    return host_values
+
+
+def _validate_previous_action_domain(
+    values: Array,
+    *,
+    field_name: str,
+    category_count: int,
+) -> np.ndarray:
+    """Return host action history after enforcing one categorical domain."""
+    host_values = np.asarray(values)
+    if bool(np.any((host_values < 0) | (host_values >= category_count))):
+        raise ValueError(
+            f"{field_name} must contain categories in [0, {category_count})."
+        )
+    return host_values
+
+
+def validate_env_state(config: EnvConfig, state: EnvState) -> None:
+    """Validate one runtime-representable state at a host-owned boundary.
+
+    ``config`` must already have passed :func:`validate_env_config`. This
+    function is deliberately host-only: replay readers and tooling call it
+    before consuming simulator snapshots. It must never run from ``reset``,
+    ``step``, ``jax.jit``, ``jax.vmap``, or ``jax.lax.scan``.
+
+    Dead agents retain valid cooldown and accepted-action history. Their health
+    and transient statuses are canonical zeros. This boundary cannot infer
+    collision provenance from one snapshot, so it accepts living-body residuals
+    emitted by the fixed-pass solver. Curated starts must additionally pass
+    :func:`validate_scenario_initial_state`.
+
+    Raises:
+        TypeError: The container, array storage, or dtype is invalid.
+        ValueError: A shape, domain, lifecycle, padding, or geometry invariant
+            is invalid.
+    """
+    if type(config) is not EnvConfig:
+        raise TypeError(f"config must be an EnvConfig, not {type(config).__name__}.")
+    if type(state) is not EnvState:
+        raise TypeError(f"state must be an EnvState, not {type(state).__name__}.")
+
+    step_count = _require_jax_array(
+        state.step_count,
+        field_name="step_count",
+        expected_shape=(),
+        expected_dtype=jnp.int32,
+    )
+    positions = _require_jax_array(
+        state.agent_positions,
+        field_name="agent_positions",
+        expected_shape=(MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS),
+        expected_dtype=jnp.float32,
+    )
+    alive_mask = _require_jax_array(
+        state.alive_mask,
+        field_name="alive_mask",
+        expected_shape=(MAX_AGENT_SLOTS,),
+        expected_dtype=jnp.bool_,
+    )
+    current_health = _require_jax_array(
+        state.current_health,
+        field_name="current_health",
+        expected_shape=(MAX_AGENT_SLOTS,),
+        expected_dtype=jnp.float32,
+    )
+    ultimate_cooldowns = _require_jax_array(
+        state.ultimate_cooldowns,
+        field_name="ultimate_cooldowns",
+        expected_shape=(MAX_AGENT_SLOTS,),
+        expected_dtype=jnp.int32,
+    )
+    slow_durations = _require_jax_array(
+        state.slow_durations,
+        field_name="slow_durations",
+        expected_shape=(MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS),
+        expected_dtype=jnp.int32,
+    )
+    stun_durations = _require_jax_array(
+        state.stun_durations,
+        field_name="stun_durations",
+        expected_shape=(MAX_AGENT_SLOTS, NUM_STUN_CHANNELS),
+        expected_dtype=jnp.int32,
+    )
+    rogue_anti_heal_durations = _require_jax_array(
+        state.rogue_poison_anti_heal_durations,
+        field_name="rogue_poison_anti_heal_durations",
+        expected_shape=(MAX_AGENT_SLOTS,),
+        expected_dtype=jnp.int32,
+    )
+    mage_burst_durations = _require_jax_array(
+        state.mage_burst_damage_amplification_durations,
+        field_name="mage_burst_damage_amplification_durations",
+        expected_shape=(MAX_AGENT_SLOTS,),
+        expected_dtype=jnp.int32,
+    )
+    priest_freedom_durations = _require_jax_array(
+        state.priest_blessing_of_freedom_slow_floor_durations,
+        field_name="priest_blessing_of_freedom_slow_floor_durations",
+        expected_shape=(MAX_AGENT_SLOTS,),
+        expected_dtype=jnp.int32,
+    )
+    previous_move_actions = _require_jax_array(
+        state.previous_timestep_move_actions,
+        field_name="previous_timestep_move_actions",
+        expected_shape=(MAX_AGENT_SLOTS,),
+        expected_dtype=jnp.int32,
+    )
+    previous_target_actions = _require_jax_array(
+        state.previous_timestep_select_target_actions,
+        field_name="previous_timestep_select_target_actions",
+        expected_shape=(MAX_AGENT_SLOTS,),
+        expected_dtype=jnp.int32,
+    )
+    previous_ultimate_actions = _require_jax_array(
+        state.previous_timestep_use_ultimate_actions,
+        field_name="previous_timestep_use_ultimate_actions",
+        expected_shape=(MAX_AGENT_SLOTS,),
+        expected_dtype=jnp.int32,
+    )
+    has_previous_action = _require_jax_array(
+        state.has_previous_timestep_joint_action,
+        field_name="has_previous_timestep_joint_action",
+        expected_shape=(),
+        expected_dtype=jnp.bool_,
+    )
+
+    _require_finite_array(positions, field_name="agent_positions")
+    _require_finite_array(current_health, field_name="current_health")
+
+    if int(np.asarray(step_count)) < 0:
+        raise ValueError("step_count must be nonnegative.")
+
+    configured_active = np.asarray(config.agent_profile.active_mask)
+    host_alive = np.asarray(alive_mask)
+    if bool(np.any(host_alive & ~configured_active)):
+        raise ValueError("alive_mask may be true only for configured active slots.")
+
+    active_and_alive = configured_active & host_alive
+    active_and_dead = configured_active & ~host_alive
+    inactive = ~configured_active
+
+    host_health = np.asarray(current_health)
+    host_max_health = np.asarray(config.agent_profile.max_health)
+    if bool(np.any(host_health[active_and_alive] <= 0.0)):
+        raise ValueError("active living current_health must be strictly positive.")
+    if bool(np.any(host_health[active_and_alive] > host_max_health[active_and_alive])):
+        raise ValueError("active living current_health must not exceed max_health.")
+    if bool(np.any(host_health[active_and_dead] != 0.0)):
+        raise ValueError("active dead current_health must be exactly zero.")
+    if bool(np.any(host_health[inactive] != 0.0)):
+        raise ValueError("inactive current_health rows must be exactly zero.")
+
+    raw_host_cooldowns = np.asarray(ultimate_cooldowns)
+    if bool(np.any(raw_host_cooldowns[inactive] != 0)):
+        raise ValueError("inactive ultimate_cooldowns rows must be exactly zero.")
+    _validate_nonnegative_bounded_integer_array(
+        ultimate_cooldowns,
+        field_name="ultimate_cooldowns",
+        upper_bounds=np.asarray(
+            get_ultimate_cooldown_by_class_ids(config.agent_profile.class_ids)
+        ),
+    )
+    slow_maxima = np.asarray(
+        (
+            WARRIOR_CHARGE_SLOW_DURATION_TICKS,
+            HUNTER_BASIC_SLOW_DURATION_TICKS,
+            ROGUE_POISON_SLOW_DURATION_TICKS,
+        ),
+        dtype=np.int32,
+    )
+    host_slow_durations = _validate_nonnegative_bounded_integer_array(
+        slow_durations,
+        field_name="slow_durations",
+        upper_bounds=slow_maxima[None, :],
+    )
+    stun_maxima = np.asarray(
+        (
+            WARRIOR_CHARGE_STUN_DURATION_TICKS,
+            HUNTER_TRAP_STUN_DURATION_TICKS,
+            ROGUE_POISON_STUN_DURATION_TICKS,
+        ),
+        dtype=np.int32,
+    )
+    host_stun_durations = _validate_nonnegative_bounded_integer_array(
+        stun_durations,
+        field_name="stun_durations",
+        upper_bounds=stun_maxima[None, :],
+    )
+    host_rogue_anti_heal_durations = _validate_nonnegative_bounded_integer_array(
+        rogue_anti_heal_durations,
+        field_name="rogue_poison_anti_heal_durations",
+        upper_bounds=ROGUE_POISON_ANTI_HEAL_DURATION_TICKS,
+    )
+    host_mage_burst_durations = _validate_nonnegative_bounded_integer_array(
+        mage_burst_durations,
+        field_name="mage_burst_damage_amplification_durations",
+        upper_bounds=MAGE_BURST_DAMAGE_DURATION_TICKS,
+    )
+    host_class_ids = np.asarray(config.agent_profile.class_ids)
+    if bool(np.any(host_mage_burst_durations[host_class_ids != MAGE_CLASS_ID] != 0)):
+        raise ValueError(
+            "mage_burst_damage_amplification_durations may be positive only "
+            "for configured Mage slots."
+        )
+    host_priest_freedom_durations = _validate_nonnegative_bounded_integer_array(
+        priest_freedom_durations,
+        field_name="priest_blessing_of_freedom_slow_floor_durations",
+        upper_bounds=PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS,
+    )
+
+    transient_status_families = (
+        ("slow_durations", host_slow_durations),
+        ("stun_durations", host_stun_durations),
+        (
+            "rogue_poison_anti_heal_durations",
+            host_rogue_anti_heal_durations,
+        ),
+        (
+            "mage_burst_damage_amplification_durations",
+            host_mage_burst_durations,
+        ),
+        (
+            "priest_blessing_of_freedom_slow_floor_durations",
+            host_priest_freedom_durations,
+        ),
+    )
+    for field_name, host_values in transient_status_families:
+        if bool(np.any(host_values[active_and_dead] != 0)):
+            raise ValueError(f"active dead {field_name} rows must be exactly zero.")
+        if bool(np.any(host_values[inactive] != 0)):
+            raise ValueError(f"inactive {field_name} rows must be exactly zero.")
+
+    host_previous_move_actions = _validate_previous_action_domain(
+        previous_move_actions,
+        field_name="previous_timestep_move_actions",
+        category_count=NUM_MOVE_ACTIONS,
+    )
+    host_previous_target_actions = _validate_previous_action_domain(
+        previous_target_actions,
+        field_name="previous_timestep_select_target_actions",
+        category_count=NUM_TARGET_ACTIONS,
+    )
+    host_previous_ultimate_actions = _validate_previous_action_domain(
+        previous_ultimate_actions,
+        field_name="previous_timestep_use_ultimate_actions",
+        category_count=NUM_ULTIMATE_ACTIONS,
+    )
+    previous_action_families = (
+        ("previous_timestep_move_actions", host_previous_move_actions),
+        ("previous_timestep_select_target_actions", host_previous_target_actions),
+        ("previous_timestep_use_ultimate_actions", host_previous_ultimate_actions),
+    )
+    for field_name, host_values in previous_action_families:
+        if bool(np.any(host_values[inactive] != 0)):
+            raise ValueError(f"inactive {field_name} rows must be exactly zero.")
+        if not bool(np.asarray(has_previous_action)) and bool(np.any(host_values != 0)):
+            raise ValueError(
+                f"{field_name} must be zero when "
+                "has_previous_timestep_joint_action is false."
+            )
+
+    _validate_state_positions(
+        positions,
+        config=config,
+        active_mask=configured_active,
+    )
+
+
+def validate_scenario_initial_state(config: EnvConfig, state: EnvState) -> None:
+    """Validate a curated start, including strict living-body clearance.
+
+    Runtime snapshots may contain deterministic fixed-pass collision residuals,
+    but authored scenario starts have no such transition provenance. Tangency is
+    legal, and preserved corpses remain nonphysical for pairwise clearance.
+    """
+    validate_env_state(config, state)
+    _validate_scenario_living_body_clearance(
+        state.agent_positions,
+        config=config,
+        alive_mask=state.alive_mask,
     )

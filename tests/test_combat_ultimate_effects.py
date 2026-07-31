@@ -74,7 +74,8 @@ _TEAM_A_FIRST_SLOT = 0
 _TEAM_A_SECOND_SLOT = 1
 _TEAM_B_FIRST_SLOT = MAX_AGENTS_PER_TEAM
 _TEAM_B_SECOND_SLOT = MAX_AGENTS_PER_TEAM + 1
-_SELF_TARGET = 1
+_FIRST_ALLY_TARGET = 1
+_SELF_TARGET = _FIRST_ALLY_TARGET
 _SECOND_ALLY_TARGET = 2
 _FIRST_ENEMY_TARGET = 1 + MAX_AGENTS_PER_TEAM
 _SECOND_ENEMY_TARGET = _FIRST_ENEMY_TARGET + 1
@@ -1696,8 +1697,8 @@ def test_duplicate_status_sources_refresh_once_without_duration_stacking() -> No
     )
 
 
-def test_refresh_never_shortens_and_preserves_concurrent_channels() -> None:
-    """Prove each application refreshes only its owned irreducible duration."""
+def test_refresh_restores_full_duration_and_preserves_concurrent_channels() -> None:
+    """Prove each application refreshes its channel from a valid public state."""
     config, state = _scenario(
         (0, MAGE_CLASS_ID),
         (1, WARRIOR_CLASS_ID),
@@ -1711,29 +1712,35 @@ def test_refresh_never_shortens_and_preserves_concurrent_channels() -> None:
     )
     state = state._replace(
         mage_burst_damage_amplification_durations=(
-            state.mage_burst_damage_amplification_durations.at[0].set(8)
+            state.mage_burst_damage_amplification_durations.at[0].set(
+                combat.MAGE_BURST_DAMAGE_DURATION_TICKS
+            )
         ),
         slow_durations=(
             state.slow_durations.at[5, SLOW_CHANNEL_WARRIOR_CHARGE]
-            .set(9)
+            .set(combat.WARRIOR_CHARGE_SLOW_DURATION_TICKS)
             .at[5, SLOW_CHANNEL_HUNTER_BASIC]
-            .set(6)
+            .set(combat.HUNTER_BASIC_SLOW_DURATION_TICKS)
             .at[7, SLOW_CHANNEL_ROGUE_POISON]
-            .set(8)
+            .set(combat.ROGUE_POISON_SLOW_DURATION_TICKS)
         ),
         stun_durations=(
             state.stun_durations.at[5, STUN_CHANNEL_WARRIOR_CHARGE]
-            .set(3)
+            .set(combat.WARRIOR_CHARGE_STUN_DURATION_TICKS)
             .at[6, STUN_CHANNEL_HUNTER_TRAP]
-            .set(7)
+            .set(combat.HUNTER_TRAP_STUN_DURATION_TICKS)
             .at[7, STUN_CHANNEL_ROGUE_POISON]
-            .set(4)
+            .set(combat.ROGUE_POISON_STUN_DURATION_TICKS)
         ),
         rogue_poison_anti_heal_durations=(
-            state.rogue_poison_anti_heal_durations.at[7].set(9)
+            state.rogue_poison_anti_heal_durations.at[7].set(
+                combat.ROGUE_POISON_ANTI_HEAL_DURATION_TICKS
+            )
         ),
         priest_blessing_of_freedom_slow_floor_durations=(
-            state.priest_blessing_of_freedom_slow_floor_durations.at[8].set(4)
+            state.priest_blessing_of_freedom_slow_floor_durations.at[8].set(
+                combat.PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS
+            )
         ),
     )
     action = _joint_action(
@@ -1745,15 +1752,36 @@ def test_refresh_never_shortens_and_preserves_concurrent_channels() -> None:
 
     next_state, _, _ = _step(config, state, action)
 
-    assert next_state.mage_burst_damage_amplification_durations[0] == 7
-    assert next_state.slow_durations[5, SLOW_CHANNEL_WARRIOR_CHARGE] == 8
-    assert next_state.slow_durations[5, SLOW_CHANNEL_HUNTER_BASIC] == 5
-    assert next_state.stun_durations[5, STUN_CHANNEL_WARRIOR_CHARGE] == 2
-    assert next_state.stun_durations[6, STUN_CHANNEL_HUNTER_TRAP] == 6
-    assert next_state.slow_durations[7, SLOW_CHANNEL_ROGUE_POISON] == 7
-    assert next_state.stun_durations[7, STUN_CHANNEL_ROGUE_POISON] == 3
-    assert next_state.rogue_poison_anti_heal_durations[7] == 8
-    assert next_state.priest_blessing_of_freedom_slow_floor_durations[8] == 3
+    assert (
+        next_state.mage_burst_damage_amplification_durations[0]
+        == combat.MAGE_BURST_DAMAGE_DURATION_TICKS
+    )
+    assert (
+        next_state.slow_durations[5, SLOW_CHANNEL_WARRIOR_CHARGE]
+        == combat.WARRIOR_CHARGE_SLOW_DURATION_TICKS
+    )
+    assert next_state.slow_durations[5, SLOW_CHANNEL_HUNTER_BASIC] == 0
+    assert (
+        next_state.stun_durations[5, STUN_CHANNEL_WARRIOR_CHARGE]
+        == combat.WARRIOR_CHARGE_STUN_DURATION_TICKS
+    )
+    assert (
+        next_state.stun_durations[6, STUN_CHANNEL_HUNTER_TRAP]
+        == combat.HUNTER_TRAP_STUN_DURATION_TICKS
+    )
+    assert (
+        next_state.slow_durations[7, SLOW_CHANNEL_ROGUE_POISON]
+        == combat.ROGUE_POISON_SLOW_DURATION_TICKS
+    )
+    assert (
+        next_state.stun_durations[7, STUN_CHANNEL_ROGUE_POISON]
+        == combat.ROGUE_POISON_STUN_DURATION_TICKS
+    )
+    assert (
+        next_state.rogue_poison_anti_heal_durations[7]
+        == combat.ROGUE_POISON_ANTI_HEAL_DURATION_TICKS
+    )
+    assert next_state.priest_blessing_of_freedom_slow_floor_durations[8] == 0
 
 
 @pytest.mark.parametrize(
@@ -1763,11 +1791,11 @@ def test_refresh_never_shortens_and_preserves_concurrent_channels() -> None:
         pytest.param(WARRIOR_CLASS_ID, 1, id="charge-damage"),
     ),
 )
-def test_accepted_raw_damage_breaks_only_pre_existing_hunter_trap(
+def test_accepted_raw_damage_breaks_trap_while_other_stuns_age_normally(
     damage_actor_class_id: int,
     uses_ultimate: int,
 ) -> None:
-    """Prove accepted raw damage clears Trap without erasing other stuns."""
+    """Prove raw damage clears Trap before any fresh Charge stun is merged."""
     config, state = _scenario(
         (0, damage_actor_class_id),
         (5, HUNTER_CLASS_ID),
@@ -1776,11 +1804,11 @@ def test_accepted_raw_damage_breaks_only_pre_existing_hunter_trap(
     state = state._replace(
         stun_durations=(
             state.stun_durations.at[5, STUN_CHANNEL_WARRIOR_CHARGE]
-            .set(3)
+            .set(combat.WARRIOR_CHARGE_STUN_DURATION_TICKS)
             .at[5, STUN_CHANNEL_HUNTER_TRAP]
-            .set(4)
+            .set(combat.HUNTER_TRAP_STUN_DURATION_TICKS)
             .at[5, STUN_CHANNEL_ROGUE_POISON]
-            .set(3)
+            .set(combat.ROGUE_POISON_STUN_DURATION_TICKS)
         )
     )
 
@@ -1791,19 +1819,26 @@ def test_accepted_raw_damage_breaks_only_pre_existing_hunter_trap(
     )
 
     assert next_state.stun_durations[5, STUN_CHANNEL_HUNTER_TRAP] == 0
-    assert next_state.stun_durations[5, STUN_CHANNEL_WARRIOR_CHARGE] == 2
-    assert next_state.stun_durations[5, STUN_CHANNEL_ROGUE_POISON] == 2
+    expected_charge_stun = (
+        combat.WARRIOR_CHARGE_STUN_DURATION_TICKS if uses_ultimate else 0
+    )
+    assert (
+        next_state.stun_durations[5, STUN_CHANNEL_WARRIOR_CHARGE]
+        == expected_charge_stun
+    )
+    assert next_state.stun_durations[5, STUN_CHANNEL_ROGUE_POISON] == 0
 
 
-def test_accepted_damage_breaks_trap_at_zero_health_without_effective_loss() -> None:
-    """Prove Trap break follows accepted raw damage, not final health delta."""
+def test_accepted_damage_breaks_trap_without_net_health_loss() -> None:
+    """Prove Trap break follows accepted raw damage, not final net health delta."""
     config, state = _scenario(
         (0, MAGE_CLASS_ID),
         (5, HUNTER_CLASS_ID),
-        team_sizes=(1, 1),
+        (6, PRIEST_CLASS_ID),
+        (7, PRIEST_CLASS_ID),
+        team_sizes=(1, 3),
     )
     state = state._replace(
-        current_health=state.current_health.at[5].set(0.0),
         stun_durations=state.stun_durations.at[5, STUN_CHANNEL_HUNTER_TRAP].set(4),
     )
 
@@ -1813,10 +1848,15 @@ def test_accepted_damage_breaks_trap_at_zero_health_without_effective_loss() -> 
     next_state, _, next_mask = _step(
         config,
         state,
-        _joint_action((0, _FIRST_ENEMY_TARGET, 0)),
+        _joint_action(
+            (0, _FIRST_ENEMY_TARGET, 0),
+            (6, _FIRST_ALLY_TARGET, 0),
+            (7, _FIRST_ALLY_TARGET, 0),
+        ),
     )
 
-    assert next_state.current_health[5] == 0.0
+    assert next_state.current_health[5] == state.current_health[5]
+    assert bool(next_state.alive_mask[5])
     assert next_state.stun_durations[5, STUN_CHANNEL_HUNTER_TRAP] == 0
     assert bool(jnp.any(next_mask.select_target_mask[5, 1:]))
 
@@ -1858,7 +1898,9 @@ def test_new_trap_survives_damage_that_breaks_the_pre_existing_trap() -> None:
         team_sizes=(2, 1),
     )
     state = state._replace(
-        stun_durations=state.stun_durations.at[5, STUN_CHANNEL_HUNTER_TRAP].set(7)
+        stun_durations=state.stun_durations.at[5, STUN_CHANNEL_HUNTER_TRAP].set(
+            combat.HUNTER_TRAP_STUN_DURATION_TICKS
+        )
     )
     action = _joint_action(
         (0, _FIRST_ENEMY_TARGET, 0),
@@ -1881,7 +1923,7 @@ def test_rejected_ultimate_applies_no_status_and_existing_durations_tick() -> No
     )
     state = state._replace(
         ultimate_cooldowns=state.ultimate_cooldowns.at[0].set(1),
-        slow_durations=state.slow_durations.at[5, SLOW_CHANNEL_HUNTER_BASIC].set(3),
+        slow_durations=state.slow_durations.at[5, SLOW_CHANNEL_ROGUE_POISON].set(3),
     )
 
     next_state, _, _ = _step(
@@ -1890,8 +1932,8 @@ def test_rejected_ultimate_applies_no_status_and_existing_durations_tick() -> No
         _joint_action((0, _FIRST_ENEMY_TARGET, 1)),
     )
 
-    assert bool(jnp.all(next_state.slow_durations[5, [0, 2]] == 0))
-    assert next_state.slow_durations[5, SLOW_CHANNEL_HUNTER_BASIC] == 2
+    assert bool(jnp.all(next_state.slow_durations[5, [0, 1]] == 0))
+    assert next_state.slow_durations[5, SLOW_CHANNEL_ROGUE_POISON] == 2
     assert bool(jnp.all(next_state.stun_durations[5] == 0))
     assert next_state.rogue_poison_anti_heal_durations[5] == 0
     assert next_state.ultimate_cooldowns[0] == 0
@@ -1957,7 +1999,9 @@ def test_jitted_step_matches_eager_status_application_and_trap_break() -> None:
         team_sizes=(2, 1),
     )
     state = state._replace(
-        stun_durations=state.stun_durations.at[5, STUN_CHANNEL_HUNTER_TRAP].set(6)
+        stun_durations=state.stun_durations.at[5, STUN_CHANNEL_HUNTER_TRAP].set(
+            combat.HUNTER_TRAP_STUN_DURATION_TICKS
+        )
     )
     action = _joint_action(
         (0, _FIRST_ENEMY_TARGET, 0),

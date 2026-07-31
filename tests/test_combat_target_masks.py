@@ -8,6 +8,7 @@ import jax.numpy as jnp
 import pytest
 from jax import Array
 
+import marl_battlegrounds.core.combat as combat
 from marl_battlegrounds.core.config import resolve_agent_profile
 from marl_battlegrounds.core.env import (
     _build_observation_and_action_mask,
@@ -238,12 +239,19 @@ def test_actor_stun_disables_nonempty_targets_but_preserves_none(
 ) -> None:
     """Prove every stun source removes actor control but preserves target-none."""
     config, state = _target_scenario()
+    stun_maxima = (
+        combat.WARRIOR_CHARGE_STUN_DURATION_TICKS,
+        combat.HUNTER_TRAP_STUN_DURATION_TICKS,
+        combat.ROGUE_POISON_STUN_DURATION_TICKS,
+    )
     for channel in active_stun_channels:
         state = state._replace(
-            stun_durations=state.stun_durations.at[_ACTOR_SLOT, channel].set(2)
+            stun_durations=state.stun_durations.at[_ACTOR_SLOT, channel].set(
+                stun_maxima[channel]
+            )
         )
 
-    _, observation, action_mask = _step_scenario(config, state)
+    observation, action_mask = _build_observation_and_action_mask(state, config)
 
     _assert_public_target_contract(observation, action_mask)
     basic_ally, basic_enemy = _basic_relation_masks(action_mask)
@@ -277,13 +285,21 @@ def test_candidate_stun_does_not_change_targetability(
 ) -> None:
     """Prove stun is an actor-control predicate, not a candidate predicate."""
     config, state = _target_scenario()
-    _, _, control_action_mask = _step_scenario(config, state)
+    _, control_action_mask = _build_observation_and_action_mask(state, config)
+    stun_maxima = (
+        combat.WARRIOR_CHARGE_STUN_DURATION_TICKS,
+        combat.HUNTER_TRAP_STUN_DURATION_TICKS,
+        combat.ROGUE_POISON_STUN_DURATION_TICKS,
+    )
     stunned_state = state._replace(
         stun_durations=state.stun_durations.at[_ENEMY_SLOT, candidate_stun_channel].set(
-            2
+            stun_maxima[candidate_stun_channel]
         )
     )
-    _, _, stunned_action_mask = _step_scenario(config, stunned_state)
+    _, stunned_action_mask = _build_observation_and_action_mask(
+        stunned_state,
+        config,
+    )
 
     control_ally, control_enemy = _basic_relation_masks(control_action_mask)
     stunned_ally, stunned_enemy = _basic_relation_masks(stunned_action_mask)
@@ -382,7 +398,7 @@ def test_actor_stun_changes_only_control_and_exposed_stun_features(
     "candidate_health_fraction",
     [
         pytest.param(1.0, id="full-health"),
-        pytest.param(0.0, id="zero-health-alive"),
+        pytest.param(0.01, id="low-positive-health"),
     ],
 )
 def test_priest_targetability_is_independent_of_ally_health(
@@ -435,7 +451,7 @@ def test_unrelated_combat_state_does_not_change_basic_targetability(
 ) -> None:
     """Prove unrelated cooldown and status fields do not enter basic legality."""
     config, state = _target_scenario()
-    _, _, control_action_mask = _step_scenario(config, state)
+    _, control_action_mask = _build_observation_and_action_mask(state, config)
 
     if unrelated_state_case == "ultimate-cooldown":
         changed_state = state._replace(
@@ -462,11 +478,14 @@ def test_unrelated_combat_state_does_not_change_basic_targetability(
             priest_blessing_of_freedom_slow_floor_durations=(
                 state.priest_blessing_of_freedom_slow_floor_durations.at[
                     _ACTOR_SLOT
-                ].set(3)
+                ].set(combat.PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS)
             )
         )
 
-    _, _, changed_action_mask = _step_scenario(config, changed_state)
+    _, changed_action_mask = _build_observation_and_action_mask(
+        changed_state,
+        config,
+    )
 
     control_ally, control_enemy = _basic_relation_masks(control_action_mask)
     changed_ally, changed_enemy = _basic_relation_masks(changed_action_mask)
@@ -497,9 +516,8 @@ def test_unrelated_combat_state_does_not_change_basic_targetability(
 @pytest.mark.parametrize(
     ("actor_active", "actor_alive"),
     [
-        pytest.param(False, True, id="inactive"),
+        pytest.param(False, False, id="inactive"),
         pytest.param(True, False, id="dead"),
-        pytest.param(False, False, id="inactive-and-dead"),
     ],
 )
 def test_inactive_or_dead_actor_exposes_only_target_none(
@@ -508,6 +526,9 @@ def test_inactive_or_dead_actor_exposes_only_target_none(
 ) -> None:
     """Prove nonacting actors expose target-none without enabling unit targets."""
     config, state = _target_scenario()
+    # The inactive case deliberately mutates only the identity gates so this
+    # low-level mask test can isolate redaction behavior. It is not an
+    # official host-valid configuration/state pair.
     profile = config.agent_profile._replace(
         active_mask=config.agent_profile.active_mask.at[_ACTOR_SLOT].set(actor_active),
         team_ids=config.agent_profile.team_ids.at[_ACTOR_SLOT].set(
@@ -515,7 +536,12 @@ def test_inactive_or_dead_actor_exposes_only_target_none(
         ),
     )
     config = config._replace(agent_profile=profile)
-    state = state._replace(alive_mask=state.alive_mask.at[_ACTOR_SLOT].set(actor_alive))
+    state = state._replace(
+        alive_mask=state.alive_mask.at[_ACTOR_SLOT].set(actor_alive),
+        current_health=state.current_health.at[_ACTOR_SLOT].set(
+            state.current_health[_ACTOR_SLOT] if actor_alive else 0.0
+        ),
+    )
 
     _, _, action_mask = _step_scenario(config, state)
 
@@ -558,7 +584,7 @@ def test_jitted_step_matches_eager_class_and_stun_targetability() -> None:
     config, state = _target_scenario()
     state = state._replace(
         stun_durations=state.stun_durations.at[
-            _ALLY_SLOT, STUN_CHANNEL_ROGUE_POISON
+            _ALLY_SLOT, STUN_CHANNEL_HUNTER_TRAP
         ].set(2)
     )
 

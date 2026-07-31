@@ -19,11 +19,15 @@ from marl_battlegrounds.core.combat import (
     MAGE_DAMAGE_AURA_RADIUS,
     PRIEST_HEAL_SPEED_FLOOR,
     PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS,
+    ROGUE_POISON_ANTI_HEAL_DURATION_TICKS,
     ROGUE_POISON_ANTI_HEAL_MULTIPLIER,
+    ROGUE_POISON_SLOW_DURATION_TICKS,
     ROGUE_POISON_SLOW_MULTIPLIER,
     ULTIMATE_COOLDOWN_BY_CLASS,
     ULTIMATE_DAMAGE_BY_CLASS,
+    WARRIOR_CHARGE_SLOW_DURATION_TICKS,
     WARRIOR_CHARGE_SLOW_MULTIPLIER,
+    WARRIOR_CHARGE_STUN_DURATION_TICKS,
     WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER,
 )
 from marl_battlegrounds.core.config import resolve_agent_profile
@@ -233,30 +237,40 @@ def _aura_multipliers(config: EnvConfig, state: EnvState) -> tuple[Array, Array]
     return _derive_aura_damage_multipliers(config, distances, state.alive_mask)
 
 
-def _assert_only_health_changed(
+def _assert_health_resolution_and_lifecycle(
     before: EnvState,
     after: EnvState,
     expected_health: Array,
 ) -> None:
-    """Assert health resolution and fields outside basic-passive ownership."""
+    """Assert health resolution and its resolve-then-die lifecycle consequences."""
     assert bool(jnp.array_equal(after.current_health, expected_health))
     assert int(after.step_count) == int(before.step_count) + 1
     assert bool(jnp.array_equal(after.agent_positions, before.agent_positions))
-    assert bool(jnp.array_equal(after.alive_mask, before.alive_mask))
+    expected_alive_mask = jnp.logical_and(before.alive_mask, expected_health > 0.0)
+    assert bool(jnp.array_equal(after.alive_mask, expected_alive_mask))
     assert bool(jnp.array_equal(after.ultimate_cooldowns, before.ultimate_cooldowns))
-    assert bool(
-        jnp.array_equal(after.stun_durations, jnp.maximum(before.stun_durations - 1, 0))
+    expected_stun_durations = (
+        jnp.maximum(before.stun_durations - 1, 0) * expected_alive_mask[:, None]
+    )
+    assert bool(jnp.array_equal(after.stun_durations, expected_stun_durations))
+    expected_anti_heal_durations = (
+        jnp.maximum(before.rogue_poison_anti_heal_durations - 1, 0)
+        * expected_alive_mask
     )
     assert bool(
         jnp.array_equal(
             after.rogue_poison_anti_heal_durations,
-            jnp.maximum(before.rogue_poison_anti_heal_durations - 1, 0),
+            expected_anti_heal_durations,
         )
+    )
+    expected_mage_burst_durations = (
+        jnp.maximum(before.mage_burst_damage_amplification_durations - 1, 0)
+        * expected_alive_mask
     )
     assert bool(
         jnp.array_equal(
             after.mage_burst_damage_amplification_durations,
-            jnp.maximum(before.mage_burst_damage_amplification_durations - 1, 0),
+            expected_mage_burst_durations,
         )
     )
 
@@ -321,27 +335,37 @@ def test_nonparticipating_mage_does_not_emit_an_aura(emitter_state: str) -> None
         team_sizes=(2, 1),
     )
     if emitter_state == "dead":
-        state = state._replace(alive_mask=state.alive_mask.at[0].set(False))
+        state = state._replace(
+            alive_mask=state.alive_mask.at[0].set(False),
+            current_health=state.current_health.at[0].set(0.0),
+        )
     else:
+        # This branch deliberately changes only participation gates to isolate
+        # the low-level aura predicate. It is not an official host-valid
+        # configuration/state pair.
         profile = config.agent_profile._replace(
             active_mask=config.agent_profile.active_mask.at[0].set(False)
         )
         config = config._replace(agent_profile=profile)
+        state = state._replace(
+            alive_mask=state.alive_mask.at[0].set(False),
+            current_health=state.current_health.at[0].set(0.0),
+        )
 
     mage_multipliers, _ = _aura_multipliers(config, state)
 
     assert bool(jnp.all(mage_multipliers == 1.0))
 
 
-def test_zero_health_living_mage_still_emits_an_aura() -> None:
-    """Prove liveness, rather than current health, owns participation."""
+def test_low_health_living_mage_still_emits_an_aura() -> None:
+    """Prove every positive-health living Mage retains aura participation."""
     config, state = _scenario(
         (0, MAGE_CLASS_ID),
         (1, HUNTER_CLASS_ID),
         (_TEAM_B_ACTOR, HUNTER_CLASS_ID),
         team_sizes=(2, 1),
     )
-    state = state._replace(current_health=state.current_health.at[0].set(0.0))
+    state = state._replace(current_health=state.current_health.at[0].set(1.0))
 
     mage_multipliers, _ = _aura_multipliers(config, state)
 
@@ -453,7 +477,7 @@ def test_mage_aura_amplifies_allied_damage_but_not_healing() -> None:
         -BASIC_DAMAGE_BY_CLASS[HUNTER_CLASS_ID] * MAGE_DAMAGE_AURA_MULTIPLIER
     )
     expected_health = expected_health.at[2].add(BASIC_HEALING_BY_CLASS[PRIEST_CLASS_ID])
-    _assert_only_health_changed(state, next_state, expected_health)
+    _assert_health_resolution_and_lifecycle(state, next_state, expected_health)
 
 
 def test_mage_burst_applies_only_to_its_owner_and_stacks_with_aura() -> None:
@@ -483,7 +507,7 @@ def test_mage_burst_applies_only_to_its_owner_and_stacks_with_aura() -> None:
         + BASIC_DAMAGE_BY_CLASS[HUNTER_CLASS_ID] * MAGE_DAMAGE_AURA_MULTIPLIER
     )
     expected_health = state.current_health.at[_TEAM_B_ACTOR].add(-expected_damage)
-    _assert_only_health_changed(state, next_state, expected_health)
+    _assert_health_resolution_and_lifecycle(state, next_state, expected_health)
 
 
 def test_warrior_aura_mitigates_allied_incoming_damage() -> None:
@@ -504,7 +528,7 @@ def test_warrior_aura_mitigates_allied_incoming_damage() -> None:
         -BASIC_DAMAGE_BY_CLASS[HUNTER_CLASS_ID]
         * WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER
     )
-    _assert_only_health_changed(state, next_state, expected_health)
+    _assert_health_resolution_and_lifecycle(state, next_state, expected_health)
 
 
 def test_rogue_anti_heal_reduces_healing_without_reducing_damage() -> None:
@@ -532,7 +556,7 @@ def test_rogue_anti_heal_reduces_healing_without_reducing_damage() -> None:
         -BASIC_DAMAGE_BY_CLASS[HUNTER_CLASS_ID]
         + BASIC_HEALING_BY_CLASS[PRIEST_CLASS_ID] * ROGUE_POISON_ANTI_HEAL_MULTIPLIER
     )
-    _assert_only_health_changed(state, next_state, expected_health)
+    _assert_health_resolution_and_lifecycle(state, next_state, expected_health)
 
 
 def test_outgoing_amplification_and_incoming_mitigation_compose() -> None:
@@ -555,7 +579,7 @@ def test_outgoing_amplification_and_incoming_mitigation_compose() -> None:
         * MAGE_DAMAGE_AURA_MULTIPLIER
         * WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER
     )
-    _assert_only_health_changed(state, next_state, expected_health)
+    _assert_health_resolution_and_lifecycle(state, next_state, expected_health)
 
 
 def test_hunter_basic_slow_is_observed_before_its_affected_decision() -> None:
@@ -563,9 +587,6 @@ def test_hunter_basic_slow_is_observed_before_its_affected_decision() -> None:
     config, state = _scenario(
         (_TEAM_A_ACTOR, HUNTER_CLASS_ID),
         (_TEAM_B_ACTOR, HUNTER_CLASS_ID),
-    )
-    state = state._replace(
-        current_health=state.current_health.at[_TEAM_B_ACTOR].set(0.0)
     )
     action = _joint_action(
         (_TEAM_A_ACTOR, MOVE_STAY, _FIRST_ENEMY_TARGET, 0),
@@ -585,7 +606,9 @@ def test_hunter_basic_slow_is_observed_before_its_affected_decision() -> None:
         )
     )
     assert application_displacement[1] == 0.0
-    assert applied_state.current_health[_TEAM_B_ACTOR] == 0.0
+    assert applied_state.current_health[_TEAM_B_ACTOR] == (
+        state.current_health[_TEAM_B_ACTOR] - BASIC_DAMAGE_BY_CLASS[HUNTER_CLASS_ID]
+    )
     assert (
         applied_state.slow_durations[_TEAM_B_ACTOR, SLOW_CHANNEL_HUNTER_BASIC]
         == HUNTER_BASIC_SLOW_DURATION_TICKS
@@ -801,8 +824,8 @@ def test_priest_freedom_is_observed_before_its_affected_decision(
     )
 
 
-def test_passive_refresh_never_shortens_and_only_owned_channels_tick() -> None:
-    """Prove source-local max refresh within the complete duration lifecycle."""
+def test_passive_refresh_restores_owned_channels_and_ticks_the_rest() -> None:
+    """Prove passive refresh from a catalog-valid public duration state."""
     recipient = _TEAM_B_ACTOR + 1
     config, state = _scenario(
         (_TEAM_A_ACTOR, HUNTER_CLASS_ID),
@@ -811,21 +834,30 @@ def test_passive_refresh_never_shortens_and_only_owned_channels_tick() -> None:
         team_sizes=(1, 2),
     )
     slow_durations = state.slow_durations
-    slow_durations = slow_durations.at[recipient, SLOW_CHANNEL_WARRIOR_CHARGE].set(5)
-    slow_durations = slow_durations.at[recipient, SLOW_CHANNEL_HUNTER_BASIC].set(4)
-    slow_durations = slow_durations.at[recipient, SLOW_CHANNEL_ROGUE_POISON].set(3)
+    slow_durations = slow_durations.at[recipient, SLOW_CHANNEL_WARRIOR_CHARGE].set(
+        WARRIOR_CHARGE_SLOW_DURATION_TICKS
+    )
+    slow_durations = slow_durations.at[recipient, SLOW_CHANNEL_HUNTER_BASIC].set(
+        HUNTER_BASIC_SLOW_DURATION_TICKS
+    )
+    slow_durations = slow_durations.at[recipient, SLOW_CHANNEL_ROGUE_POISON].set(
+        ROGUE_POISON_SLOW_DURATION_TICKS
+    )
     state = state._replace(
         slow_durations=slow_durations,
         ultimate_cooldowns=state.ultimate_cooldowns.at[recipient].set(7),
-        stun_durations=state.stun_durations.at[recipient, 0].set(2),
-        rogue_poison_anti_heal_durations=(
-            state.rogue_poison_anti_heal_durations.at[recipient].set(5)
+        stun_durations=state.stun_durations.at[recipient, 0].set(
+            WARRIOR_CHARGE_STUN_DURATION_TICKS
         ),
-        mage_burst_damage_amplification_durations=(
-            state.mage_burst_damage_amplification_durations.at[recipient].set(6)
+        rogue_poison_anti_heal_durations=(
+            state.rogue_poison_anti_heal_durations.at[recipient].set(
+                ROGUE_POISON_ANTI_HEAL_DURATION_TICKS
+            )
         ),
         priest_blessing_of_freedom_slow_floor_durations=(
-            state.priest_blessing_of_freedom_slow_floor_durations.at[recipient].set(4)
+            state.priest_blessing_of_freedom_slow_floor_durations.at[recipient].set(
+                PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS
+            )
         ),
     )
     action = _joint_action(
@@ -835,10 +867,22 @@ def test_passive_refresh_never_shortens_and_only_owned_channels_tick() -> None:
 
     next_state, _, _ = _step(config, state, action)
 
-    assert next_state.slow_durations[recipient, SLOW_CHANNEL_HUNTER_BASIC] == 3
-    assert next_state.slow_durations[recipient, SLOW_CHANNEL_WARRIOR_CHARGE] == 4
-    assert next_state.slow_durations[recipient, SLOW_CHANNEL_ROGUE_POISON] == 2
-    assert next_state.priest_blessing_of_freedom_slow_floor_durations[recipient] == 3
+    assert (
+        next_state.slow_durations[recipient, SLOW_CHANNEL_HUNTER_BASIC]
+        == HUNTER_BASIC_SLOW_DURATION_TICKS
+    )
+    assert (
+        next_state.slow_durations[recipient, SLOW_CHANNEL_WARRIOR_CHARGE]
+        == WARRIOR_CHARGE_SLOW_DURATION_TICKS - 1
+    )
+    assert (
+        next_state.slow_durations[recipient, SLOW_CHANNEL_ROGUE_POISON]
+        == ROGUE_POISON_SLOW_DURATION_TICKS - 1
+    )
+    assert (
+        next_state.priest_blessing_of_freedom_slow_floor_durations[recipient]
+        == PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS
+    )
     assert bool(
         jnp.array_equal(
             next_state.ultimate_cooldowns,
@@ -1215,7 +1259,7 @@ def test_each_damage_class_applies_its_catalog_payload(actor_class_id: int) -> N
     expected_health = state.current_health.at[_TEAM_B_ACTOR].add(
         -BASIC_DAMAGE_BY_CLASS[actor_class_id] * outgoing_multiplier
     )
-    _assert_only_health_changed(state, next_state, expected_health)
+    _assert_health_resolution_and_lifecycle(state, next_state, expected_health)
 
 
 @pytest.mark.parametrize(
@@ -1249,7 +1293,7 @@ def test_priest_basic_heals_self_and_allies(
     expected_health = state.current_health.at[recipient_slot].add(
         BASIC_HEALING_BY_CLASS[PRIEST_CLASS_ID]
     )
-    _assert_only_health_changed(state, next_state, expected_health)
+    _assert_health_resolution_and_lifecycle(state, next_state, expected_health)
 
 
 _STABLE_TARGET_CASES: Sequence[tuple[int, int, int, int]] = (
@@ -1299,7 +1343,7 @@ def test_relation_local_targets_route_to_stable_global_slots(
         else -BASIC_DAMAGE_BY_CLASS[actor_class_id]
     )
     expected_health = state.current_health.at[recipient_slot].add(payload)
-    _assert_only_health_changed(state, next_state, expected_health)
+    _assert_health_resolution_and_lifecycle(state, next_state, expected_health)
 
 
 @pytest.mark.parametrize(
@@ -1331,7 +1375,7 @@ def test_focus_fire_is_independent_of_contributor_slots(
         BASIC_DAMAGE_BY_CLASS[HUNTER_CLASS_ID] + BASIC_DAMAGE_BY_CLASS[ROGUE_CLASS_ID]
     )
     expected_health = state.current_health.at[_TEAM_B_ACTOR].add(-expected_damage)
-    _assert_only_health_changed(state, next_state, expected_health)
+    _assert_health_resolution_and_lifecycle(state, next_state, expected_health)
 
 
 def test_duplicate_priest_healing_aggregates_on_one_recipient() -> None:
@@ -1354,7 +1398,7 @@ def test_duplicate_priest_healing_aggregates_on_one_recipient() -> None:
     expected_health = state.current_health.at[2].add(
         2 * BASIC_HEALING_BY_CLASS[PRIEST_CLASS_ID]
     )
-    _assert_only_health_changed(state, next_state, expected_health)
+    _assert_health_resolution_and_lifecycle(state, next_state, expected_health)
 
 
 def test_mixed_damage_and_healing_aggregate_before_lower_clamp() -> None:
@@ -1376,7 +1420,7 @@ def test_mixed_damage_and_healing_aggregate_before_lower_clamp() -> None:
     next_state, _, _ = _step(config, state, action)
 
     expected_health = state.current_health.at[_TEAM_B_ACTOR].set(0.0)
-    _assert_only_health_changed(state, next_state, expected_health)
+    _assert_health_resolution_and_lifecycle(state, next_state, expected_health)
 
 
 def test_healing_clamps_once_at_resolved_max_health() -> None:
@@ -1392,17 +1436,23 @@ def test_healing_clamps_once_at_resolved_max_health() -> None:
         _joint_action((_TEAM_A_ACTOR, MOVE_STAY, _FIRST_ALLY_TARGET, 0)),
     )
 
-    _assert_only_health_changed(state, next_state, state.current_health)
+    _assert_health_resolution_and_lifecycle(
+        state,
+        next_state,
+        state.current_health,
+    )
 
 
-def test_zero_health_but_alive_target_remains_bounded_without_death_semantics() -> None:
-    """Prove Checkpoint 1 clamps health without changing liveness or rewards."""
+def test_lethal_damage_clamps_health_and_updates_liveness_without_task_signals() -> (
+    None
+):
+    """Prove lethal combat changes lifecycle state but not M6 rewards or dones."""
     config, state = _scenario(
         (_TEAM_A_ACTOR, MAGE_CLASS_ID),
         (_TEAM_B_ACTOR, MAGE_CLASS_ID),
     )
     state = state._replace(
-        current_health=state.current_health.at[_TEAM_B_ACTOR].set(0.0)
+        current_health=state.current_health.at[_TEAM_B_ACTOR].set(1.0)
     )
     action = _joint_action(
         (_TEAM_A_ACTOR, MOVE_STAY, _FIRST_ENEMY_TARGET, 0),
@@ -1416,12 +1466,23 @@ def test_zero_health_but_alive_target_remains_bounded_without_death_semantics() 
         jax.random.key(19),
     )
 
-    _assert_only_health_changed(state, next_state, state.current_health)
-    assert bool(next_state.alive_mask[_TEAM_B_ACTOR])
+    expected_health = state.current_health.at[_TEAM_B_ACTOR].set(0.0)
+    _assert_health_resolution_and_lifecycle(state, next_state, expected_health)
+    assert not bool(next_state.alive_mask[_TEAM_B_ACTOR])
     assert bool(jnp.all(rewards.rewards == 0.0))
     assert not bool(done_flags.terminated)
     assert not bool(done_flags.truncated)
-    assert len(info) == 0
+    assert bool(info.transition_facts.has_transition)
+    combat_facts = info.transition_facts.combat_transition_facts
+    assert combat_facts.total_effective_damage_by_recipient[_TEAM_B_ACTOR] > 0.0
+    death_facts = info.transition_facts.death_facts
+    assert bool(death_facts.is_newly_dead_by_recipient[_TEAM_B_ACTOR])
+    assert bool(death_facts.contributed_to_new_death_by_source[_TEAM_A_ACTOR])
+    assert (
+        death_facts.attributed_death_damage_by_source[_TEAM_A_ACTOR]
+        == combat_facts.source_modified_damage_output_by_source[_TEAM_A_ACTOR]
+        * combat_facts.recipient_damage_modifier_by_source[_TEAM_A_ACTOR]
+    )
 
 
 def test_legal_movement_survives_an_invalid_combat_pair() -> None:
@@ -1458,7 +1519,11 @@ def test_invalid_ultimate_pair_cannot_fall_back_to_a_valid_basic() -> None:
         _joint_action((_TEAM_A_ACTOR, MOVE_STAY, _FIRST_ENEMY_TARGET, 1)),
     )
 
-    _assert_only_health_changed(state, next_state, state.current_health)
+    _assert_health_resolution_and_lifecycle(
+        state,
+        next_state,
+        state.current_health,
+    )
 
 
 def test_accepted_ultimate_lane_does_not_also_apply_a_basic() -> None:
@@ -1499,7 +1564,11 @@ def test_target_none_no_ultimate_is_effect_inert() -> None:
 
     next_state, _, _ = _step(config, state, _joint_action())
 
-    _assert_only_health_changed(state, next_state, state.current_health)
+    _assert_health_resolution_and_lifecycle(
+        state,
+        next_state,
+        state.current_health,
+    )
 
 
 @pytest.mark.parametrize(
@@ -1517,7 +1586,10 @@ def test_nonacting_actor_submissions_remain_physically_inert(actor_state: str) -
             (actor_slot, MAGE_CLASS_ID),
             (_TEAM_B_ACTOR, MAGE_CLASS_ID),
         )
-        state = state._replace(alive_mask=state.alive_mask.at[actor_slot].set(False))
+        state = state._replace(
+            alive_mask=state.alive_mask.at[actor_slot].set(False),
+            current_health=state.current_health.at[actor_slot].set(0.0),
+        )
     else:
         actor_slot = _TEAM_A_ALLY
         config, state = _scenario(
@@ -1574,7 +1646,10 @@ def test_invalid_basic_attempts_create_no_health_effect(invalidity: str) -> None
             ].set(1)
         )
     elif invalidity == "dead-candidate":
-        state = state._replace(alive_mask=state.alive_mask.at[_TEAM_B_ACTOR].set(False))
+        state = state._replace(
+            alive_mask=state.alive_mask.at[_TEAM_B_ACTOR].set(False),
+            current_health=state.current_health.at[_TEAM_B_ACTOR].set(0.0),
+        )
     elif invalidity == "inactive-candidate":
         target_action = _FIRST_ENEMY_TARGET + 1
 
@@ -1584,7 +1659,11 @@ def test_invalid_basic_attempts_create_no_health_effect(invalidity: str) -> None
         _joint_action((_TEAM_A_ACTOR, MOVE_STAY, target_action, 0)),
     )
 
-    _assert_only_health_changed(state, next_state, state.current_health)
+    _assert_health_resolution_and_lifecycle(
+        state,
+        next_state,
+        state.current_health,
+    )
 
 
 @pytest.mark.parametrize(
