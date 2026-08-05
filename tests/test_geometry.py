@@ -1658,6 +1658,7 @@ def test_resolve_agent_agent_overlaps(
         agent_radii,
         active_mask,
         alive_mask,
+        jnp.logical_and(active_mask, alive_mask),
         projection_passes,
     )
 
@@ -1679,6 +1680,7 @@ def test_resolve_agent_agent_overlaps_multi_agent_chain_improves() -> None:
         agent_radii,
         active_mask,
         alive_mask,
+        jnp.logical_and(active_mask, alive_mask),
         projection_passes=8,
     )
 
@@ -1709,6 +1711,7 @@ def test_resolve_agent_agent_overlaps_jit_compiles() -> None:
             agent_radii,
             active_mask,
             alive_mask,
+            jnp.logical_and(active_mask, alive_mask),
             projection_passes=1,
         ),
     )
@@ -1890,6 +1893,7 @@ def test_project_movement_with_geometry(
     collision_projection_passes: int,
     movement_substeps: int,
 ) -> None:
+    collision_participant_mask = jnp.logical_and(active_mask, alive_mask)
     result = project_movement_with_geometry(
         agent_positions,
         agent_radii,
@@ -1899,12 +1903,207 @@ def test_project_movement_with_geometry(
         map_width,
         map_height,
         obstacles,
+        collision_participant_mask,
+        collision_participant_mask,
         agent_agent_overlap_projection_passes,
         collision_projection_passes,
         movement_substeps,
     )
 
     _assert_agent_positions_close(result, expected)
+
+
+@pytest.mark.parametrize(
+    (
+        "collision_participant_mask_during_movement",
+        "collision_participant_mask_at_final_position",
+    ),
+    (
+        pytest.param(
+            _mask_with_true_slots(),
+            _mask_with_true_slots(),
+            id="both-agents-collision-exempt",
+        ),
+        pytest.param(
+            _mask_with_true_slots(1),
+            _mask_with_true_slots(1),
+            id="one-agent-collision-exempt",
+        ),
+    ),
+)
+def test_collision_exempt_agents_neither_push_nor_receive_displacement(
+    collision_participant_mask_during_movement: Array,
+    collision_participant_mask_at_final_position: Array,
+) -> None:
+    """Prove collision participation requires both members of an agent pair."""
+    agent_positions = _agent_positions_array_with_rows(
+        (0, jnp.asarray((5.0, 5.0), dtype=jnp.float32)),
+        (1, jnp.asarray((7.0, 5.0), dtype=jnp.float32)),
+    )
+    agent_radii = _agent_radii_array_with_rows((0, 0.5), (1, 0.5))
+    active_and_alive_mask = _mask_with_true_slots(0, 1)
+    intended_movement_deltas = _movement_deltas_array_with_rows(
+        (0, jnp.asarray((2.0, 0.0), dtype=jnp.float32)),
+    )
+
+    result = project_movement_with_geometry(
+        agent_positions,
+        agent_radii,
+        intended_movement_deltas,
+        active_and_alive_mask,
+        active_and_alive_mask,
+        20.0,
+        20.0,
+        _obstacle_array_with_rows(),
+        collision_participant_mask_during_movement,
+        collision_participant_mask_at_final_position,
+        movement_substeps=4,
+    )
+
+    _assert_agent_positions_close(
+        result,
+        _agent_positions_array_with_rows(
+            (0, jnp.asarray((7.0, 5.0), dtype=jnp.float32)),
+            (1, jnp.asarray((7.0, 5.0), dtype=jnp.float32)),
+        ),
+    )
+
+
+def test_final_position_collision_mask_does_not_apply_during_traversal() -> None:
+    """Prove an expiring actor can pass through a blocker before its endpoint."""
+    agent_positions = _agent_positions_array_with_rows(
+        (0, jnp.asarray((4.0, 5.0), dtype=jnp.float32)),
+        (1, jnp.asarray((6.0, 5.0), dtype=jnp.float32)),
+    )
+    agent_radii = _agent_radii_array_with_rows((0, 0.5), (1, 0.5))
+    active_and_alive_mask = _mask_with_true_slots(0, 1)
+    intended_movement_deltas = _movement_deltas_array_with_rows(
+        (0, jnp.asarray((4.0, 0.0), dtype=jnp.float32)),
+    )
+
+    result = project_movement_with_geometry(
+        agent_positions,
+        agent_radii,
+        intended_movement_deltas,
+        active_and_alive_mask,
+        active_and_alive_mask,
+        20.0,
+        20.0,
+        _obstacle_array_with_rows(),
+        _mask_with_true_slots(1),
+        active_and_alive_mask,
+        movement_substeps=4,
+    )
+
+    _assert_agent_positions_close(
+        result,
+        _agent_positions_array_with_rows(
+            (0, jnp.asarray((8.0, 5.0), dtype=jnp.float32)),
+            (1, jnp.asarray((6.0, 5.0), dtype=jnp.float32)),
+        ),
+    )
+
+
+def test_final_position_collision_mask_resolves_only_the_realized_endpoint() -> None:
+    """Prove an expiring actor rejoins the existing endpoint collision pass."""
+    agent_positions = _agent_positions_array_with_rows(
+        (0, jnp.asarray((4.0, 5.0), dtype=jnp.float32)),
+        (1, jnp.asarray((6.0, 5.0), dtype=jnp.float32)),
+    )
+    agent_radii = _agent_radii_array_with_rows((0, 0.5), (1, 0.5))
+    active_and_alive_mask = _mask_with_true_slots(0, 1)
+    intended_movement_deltas = _movement_deltas_array_with_rows(
+        (0, jnp.asarray((1.5, 0.0), dtype=jnp.float32)),
+    )
+    raw_endpoint_positions = agent_positions + intended_movement_deltas
+
+    result = project_movement_with_geometry(
+        agent_positions,
+        agent_radii,
+        intended_movement_deltas,
+        active_and_alive_mask,
+        active_and_alive_mask,
+        20.0,
+        20.0,
+        _obstacle_array_with_rows(),
+        _mask_with_true_slots(1),
+        active_and_alive_mask,
+        movement_substeps=4,
+    )
+
+    assert not bool(jnp.array_equal(result[0], raw_endpoint_positions[0]))
+    assert not bool(jnp.array_equal(result[1], raw_endpoint_positions[1]))
+    assert (
+        _max_active_alive_agent_overlap_residual(
+            result,
+            agent_radii,
+            active_and_alive_mask,
+            active_and_alive_mask,
+        )
+        <= GEOMETRY_TOLERANCE
+    )
+
+
+def test_collision_masks_are_dynamic_under_jit_and_fixed_shape_vmap() -> None:
+    """Prove batched expiry masks preserve one compiled geometry structure."""
+    agent_positions = _agent_positions_array_with_rows(
+        (0, jnp.asarray((4.0, 5.0), dtype=jnp.float32)),
+        (1, jnp.asarray((6.0, 5.0), dtype=jnp.float32)),
+    )
+    agent_radii = _agent_radii_array_with_rows((0, 0.5), (1, 0.5))
+    active_and_alive_mask = _mask_with_true_slots(0, 1)
+    intended_movement_deltas = _movement_deltas_array_with_rows(
+        (0, jnp.asarray((1.5, 0.0), dtype=jnp.float32)),
+    )
+    during_movement_masks = jnp.stack(
+        (_mask_with_true_slots(1), _mask_with_true_slots(1))
+    )
+    final_position_masks = jnp.stack((_mask_with_true_slots(1), active_and_alive_mask))
+
+    def _project_with_collision_masks(
+        during_movement_mask: Array,
+        final_position_mask: Array,
+    ) -> Array:
+        return project_movement_with_geometry(
+            agent_positions,
+            agent_radii,
+            intended_movement_deltas,
+            active_and_alive_mask,
+            active_and_alive_mask,
+            20.0,
+            20.0,
+            _obstacle_array_with_rows(),
+            during_movement_mask,
+            final_position_mask,
+            movement_substeps=4,
+        )
+
+    eager_result = jax.vmap(_project_with_collision_masks)(
+        during_movement_masks,
+        final_position_masks,
+    )
+    compiled_result = cast(
+        Array,
+        jax.jit(jax.vmap(_project_with_collision_masks))(
+            during_movement_masks,
+            final_position_masks,
+        ),
+    )
+
+    assert bool(jnp.array_equal(compiled_result, eager_result))
+    _assert_agent_positions_close(
+        eager_result[0],
+        agent_positions + intended_movement_deltas,
+    )
+    assert (
+        _max_active_alive_agent_overlap_residual(
+            eager_result[1],
+            agent_radii,
+            active_and_alive_mask,
+            active_and_alive_mask,
+        )
+        <= GEOMETRY_TOLERANCE
+    )
 
 
 def test_project_movement_with_geometry_projects_agent_out_of_wall() -> None:
@@ -1934,6 +2133,8 @@ def test_project_movement_with_geometry_projects_agent_out_of_wall() -> None:
         20.0,
         20.0,
         _obstacle_array_with_rows((0, wall)),
+        active_mask,
+        active_mask,
         1,
         1,
         1,
@@ -1967,6 +2168,8 @@ def test_project_movement_keeps_static_validity_with_bounded_agent_residual() ->
         20.0,
         20.0,
         _obstacle_array_with_rows(),
+        active_mask,
+        active_mask,
         1,
         1,
         1,
@@ -2017,6 +2220,8 @@ def test_project_movement_more_collision_passes_reduce_boundary_residual() -> No
         20.0,
         20.0,
         obstacles,
+        active_mask,
+        active_mask,
         1,
         1,
         1,
@@ -2030,6 +2235,8 @@ def test_project_movement_more_collision_passes_reduce_boundary_residual() -> No
         20.0,
         20.0,
         obstacles,
+        active_mask,
+        active_mask,
         1,
         4,
         1,
@@ -2093,6 +2300,8 @@ def test_project_movement_overconstrained_crowd_stays_finite_and_static_valid() 
         1.0,
         1.0,
         _obstacle_array_with_rows(),
+        active_mask,
+        active_mask,
         1,
         4,
         1,
@@ -2153,6 +2362,8 @@ def test_project_movement_with_geometry_jit_compiles_with_static_args() -> None:
             20.0,
             20.0,
             obstacles,
+            active_mask,
+            active_mask,
             agent_agent_overlap_projection_passes=1,
             collision_projection_passes=1,
             movement_substeps=4,

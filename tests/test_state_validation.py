@@ -104,6 +104,7 @@ _STATE_ARRAY_FIELDS = (
         (MAX_AGENT_SLOTS,),
         jnp.int32,
     ),
+    ("spawn_shield_durations", (MAX_AGENT_SLOTS,), jnp.int32),
     ("previous_timestep_move_actions", (MAX_AGENT_SLOTS,), jnp.int32),
     (
         "previous_timestep_select_target_actions",
@@ -165,7 +166,7 @@ def _valid_config(
         requested_classes,
         jnp.asarray(team_sizes, dtype=jnp.int32),
     )
-    positions = jnp.asarray(
+    spawn_pad_positions = jnp.asarray(
         (
             (2.0, 2.0),
             (2.0, 5.0),
@@ -179,15 +180,17 @@ def _valid_config(
             (28.0, 14.0),
         ),
         dtype=jnp.float32,
-    )
+    ).reshape(2, MAX_AGENTS_PER_TEAM, ENVIRONMENT_DIMENSIONS)
     return EnvConfig(
         max_steps=100,
         map_width=30.0,
         map_height=20.0,
         obstacles=_empty_obstacles() if obstacles is None else obstacles,
         agent_profile=profile,
-        initial_agent_positions=jnp.where(profile.active_mask[:, None], positions, 0.0),
         ordinary_movement_distance_scale=1.0,
+        team_spawn_pad_positions=spawn_pad_positions,
+        spawn_shield_duration_steps=3,
+        spawn_shield_movement_speed=2.0,
     )
 
 
@@ -231,6 +234,11 @@ def _assert_pytrees_equal(left: object, right: object) -> None:
 def test_valid_living_and_dead_states_return_none_without_mutation() -> None:
     """Accept official states while preserving every input leaf."""
     config, living_state = _valid_state()
+    shielded_living_state = living_state._replace(
+        spawn_shield_durations=living_state.spawn_shield_durations.at[0].set(
+            config.spawn_shield_duration_steps
+        )
+    )
     dead_slot = 0
     dead_state = living_state._replace(
         alive_mask=living_state.alive_mask.at[dead_slot].set(False),
@@ -252,7 +260,7 @@ def test_valid_living_and_dead_states_return_none_without_mutation() -> None:
         has_previous_timestep_joint_action=jnp.asarray(True),
     )
 
-    for state in (living_state, dead_state):
+    for state in (living_state, shielded_living_state, dead_state):
         before = state
         assert validate_env_state(config, state) is None
         _assert_pytrees_equal(state, before)
@@ -328,7 +336,7 @@ def test_float_state_fields_reject_nonfinite_values(
 
 
 def test_step_count_must_be_nonnegative() -> None:
-    """Reject a choosing epoch outside the public nonnegative domain."""
+    """Reject a transition-start step count outside the nonnegative domain."""
     config, state = _valid_state()
     with pytest.raises(ValueError, match="step_count"):
         validate_env_state(
@@ -346,6 +354,80 @@ def test_liveness_must_be_a_subset_of_configured_activity() -> None:
     )
     with pytest.raises(ValueError, match="alive_mask"):
         validate_env_state(config, invalid_state)
+
+
+@pytest.mark.parametrize(
+    ("duration", "counter"),
+    (
+        pytest.param(0, 0, id="disabled"),
+        pytest.param(1, 1, id="single-transition"),
+        pytest.param(3, 3, id="official-maximum"),
+        pytest.param(7, 4, id="larger-config-intermediate"),
+    ),
+)
+def test_spawn_shield_counter_accepts_configured_living_domain(
+    duration: int,
+    counter: int,
+) -> None:
+    """Accept any living counter in the closed configured duration range."""
+    config, state = _valid_state()
+    config = config._replace(spawn_shield_duration_steps=duration)
+    state = state._replace(
+        spawn_shield_durations=state.spawn_shield_durations.at[0].set(counter)
+    )
+
+    assert validate_env_state(config, state) is None
+
+
+@pytest.mark.parametrize(
+    ("counter", "message"),
+    (
+        pytest.param(-1, "nonnegative", id="negative"),
+        pytest.param(4, "spawn_shield_duration_steps", id="above-configured-duration"),
+    ),
+)
+def test_spawn_shield_counter_rejects_values_outside_configured_domain(
+    counter: int,
+    message: str,
+) -> None:
+    """Reject underflow and counters exceeding the public config authority."""
+    config, state = _valid_state()
+    invalid_state = state._replace(
+        spawn_shield_durations=state.spawn_shield_durations.at[0].set(counter)
+    )
+
+    with pytest.raises(ValueError, match=message):
+        validate_env_state(config, invalid_state)
+
+
+def test_spawn_shield_counter_must_be_zero_for_dead_and_inactive_slots() -> None:
+    """Prevent protection memory from surviving death or entering padding."""
+    config, state = _valid_state(team_sizes=(1, 1))
+    dead_state = state._replace(
+        alive_mask=state.alive_mask.at[0].set(False),
+        current_health=state.current_health.at[0].set(0.0),
+        spawn_shield_durations=state.spawn_shield_durations.at[0].set(1),
+    )
+    with pytest.raises(ValueError, match="dead spawn_shield_durations"):
+        validate_env_state(config, dead_state)
+
+    inactive_state = state._replace(
+        spawn_shield_durations=state.spawn_shield_durations.at[1].set(1)
+    )
+    with pytest.raises(ValueError, match="inactive spawn_shield_durations"):
+        validate_env_state(config, inactive_state)
+
+
+def test_disabled_spawn_shield_requires_all_counter_rows_to_be_zero() -> None:
+    """Make duration zero a complete ablation rather than a partial state."""
+    config, state = _valid_state()
+    disabled_config = config._replace(spawn_shield_duration_steps=0)
+    invalid_state = state._replace(
+        spawn_shield_durations=state.spawn_shield_durations.at[0].set(1)
+    )
+
+    with pytest.raises(ValueError, match="spawn_shield_duration_steps"):
+        validate_env_state(disabled_config, invalid_state)
 
 
 @pytest.mark.parametrize(
@@ -967,13 +1049,13 @@ def test_preserved_corpse_may_overlap_a_living_body() -> None:
 def test_runtime_validator_accepts_public_death_and_corpse_successors() -> None:
     """Validate actual public successor states without entering traced execution."""
     config = _valid_config(team_sizes=(1, 1))
-    positions = (
-        config.initial_agent_positions.at[0]
+    spawn_pad_positions = (
+        config.team_spawn_pad_positions.at[0, 0]
         .set(jnp.asarray((2.0, 2.0), dtype=jnp.float32))
-        .at[MAX_AGENTS_PER_TEAM]
+        .at[1, 0]
         .set(jnp.asarray((4.0, 2.0), dtype=jnp.float32))
     )
-    config = config._replace(initial_agent_positions=positions)
+    config = config._replace(team_spawn_pad_positions=spawn_pad_positions)
     state, _, _, _ = reset(config, jax.random.key(21))
     target_slot = MAX_AGENTS_PER_TEAM
     state = state._replace(current_health=state.current_health.at[target_slot].set(1.0))
@@ -1015,13 +1097,13 @@ def test_runtime_validator_accepts_an_actual_boundary_residual_successor() -> No
     """Accept fixed-pass overlap only at the runtime/replay snapshot boundary."""
     config = _valid_config(team_sizes=(1, 1))
     moving_slot = MAX_AGENTS_PER_TEAM
-    positions = (
-        config.initial_agent_positions.at[0]
+    spawn_pad_positions = (
+        config.team_spawn_pad_positions.at[0, 0]
         .set(jnp.asarray((0.5, 10.0), dtype=jnp.float32))
-        .at[moving_slot]
+        .at[1, 0]
         .set(jnp.asarray((2.0, 10.0), dtype=jnp.float32))
     )
-    config = config._replace(initial_agent_positions=positions)
+    config = config._replace(team_spawn_pad_positions=spawn_pad_positions)
     state, _, action_mask, _ = reset(config, jax.random.key(31))
     movement = (
         jnp.full((MAX_AGENT_SLOTS,), MOVE_STAY, dtype=jnp.int32)

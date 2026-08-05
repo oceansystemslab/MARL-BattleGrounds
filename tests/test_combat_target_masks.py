@@ -106,8 +106,12 @@ def _target_scenario(actor_class_id: int = MAGE_CLASS_ID) -> tuple[EnvConfig, En
         map_height=12.0,
         obstacles=jnp.zeros((MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES), dtype=jnp.float32),
         agent_profile=profile,
-        initial_agent_positions=positions,
         ordinary_movement_distance_scale=1.0,
+        team_spawn_pad_positions=positions.reshape(
+            (2, MAX_AGENTS_PER_TEAM, ENVIRONMENT_DIMENSIONS)
+        ),
+        spawn_shield_duration_steps=3,
+        spawn_shield_movement_speed=2.0,
     )
     state, *_ = reset(config, jax.random.key(1))
     return config, state

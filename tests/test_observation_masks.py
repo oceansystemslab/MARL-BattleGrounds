@@ -85,6 +85,7 @@ class _CombatStateFields(TypedDict):
     rogue_poison_anti_heal_durations: Array
     mage_burst_damage_amplification_durations: Array
     priest_blessing_of_freedom_slow_floor_durations: Array
+    spawn_shield_durations: Array
     previous_timestep_move_actions: Array
     previous_timestep_select_target_actions: Array
     previous_timestep_use_ultimate_actions: Array
@@ -111,6 +112,7 @@ def _inert_combat_state_fields(current_health: Array) -> _CombatStateFields:
         "priest_blessing_of_freedom_slow_floor_durations": jnp.zeros(
             (MAX_AGENT_SLOTS,), dtype=jnp.int32
         ),
+        "spawn_shield_durations": jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
         "previous_timestep_move_actions": jnp.zeros(
             (MAX_AGENT_SLOTS,), dtype=jnp.int32
         ),
@@ -267,8 +269,12 @@ def _deterministic_config(
         map_height=map_height,
         obstacles=_empty_obstacles() if obstacles is None else obstacles,
         agent_profile=profile,
-        initial_agent_positions=jnp.where(profile.active_mask[:, None], positions, 0.0),
         ordinary_movement_distance_scale=1.0,
+        team_spawn_pad_positions=positions.reshape(
+            (2, MAX_AGENTS_PER_TEAM, ENVIRONMENT_DIMENSIONS)
+        ),
+        spawn_shield_duration_steps=3,
+        spawn_shield_movement_speed=2.0,
     )
 
 

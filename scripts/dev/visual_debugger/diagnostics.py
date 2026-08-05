@@ -22,21 +22,12 @@ from marl_battlegrounds.core.geometry import has_clear_line_of_sight
 from marl_battlegrounds.core.types import (
     AGENT_FEATURE_ACTIVE,
     AGENT_FEATURE_ANTI_HEAL_ROGUE_POISON_MULTIPLIER,
-    AGENT_FEATURE_BASE_MOVEMENT_SPEED,
-    AGENT_FEATURE_BASIC_INTERACTION_RADIUS,
     AGENT_FEATURE_CLASS_ID,
     AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_AURA_MULTIPLIER,
     AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_BURST_DURATION,
     AGENT_FEATURE_DAMAGE_MITIGATION_WARRIOR_AURA_MULTIPLIER,
     AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED,
-    AGENT_FEATURE_MAX_HEALTH,
-    AGENT_FEATURE_OBSERVATION_RADIUS,
-    AGENT_FEATURE_RADIUS,
     AGENT_FEATURE_TEAM_ID,
-    AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS,
-    CONTEXT_FEATURE_EPISODE_HORIZON,
-    CONTEXT_FEATURE_MAP_HEIGHT,
-    CONTEXT_FEATURE_MAP_WIDTH,
     HUNTER_CLASS_ID,
     MAGE_CLASS_ID,
     MAX_AGENT_SLOTS,
@@ -62,7 +53,6 @@ from marl_battlegrounds.core.types import (
     EnvState,
     Info,
     Observation,
-    ResolvedAgentProfile,
     Reward,
 )
 from marl_battlegrounds.rendering.scene import (
@@ -502,6 +492,7 @@ def _classify_status_change(
 def extract_transition_view(
     *,
     scenario_name: str,
+    config: EnvConfig,
     submission_kind: SubmissionKind,
     report_actor_slots: tuple[int, ...],
     before_state: EnvState,
@@ -515,7 +506,7 @@ def extract_transition_view(
     done_flags: DoneFlags,
     info: Info,
 ) -> TransitionView:
-    """Retain public before/after facts and derive conservative host diagnostics."""
+    """Retain exact config and public transition facts for host diagnostics."""
     accepted_action = accepted_action_from_successor(after_state)
     active_mask = np.asarray(
         before_observation.self_features[:, AGENT_FEATURE_ACTIVE],
@@ -740,6 +731,7 @@ def extract_transition_view(
 
     return TransitionView(
         scenario_name=scenario_name,
+        config=config,
         submission_kind=submission_kind,
         report_actor_slots=report_actor_slots,
         before_state=before_state,
@@ -757,25 +749,6 @@ def extract_transition_view(
         status_transitions=tuple(status_transitions),
         accepted_activations=activations,
         rejections=tuple(rejections),
-    )
-
-
-def _profile_from_observation(observation: Observation) -> ResolvedAgentProfile:
-    """Build the resolved profile fields exposed in self observation rows."""
-    values = observation.self_features
-    return ResolvedAgentProfile(
-        class_ids=values[:, AGENT_FEATURE_CLASS_ID].astype(np.int32),
-        team_ids=values[:, AGENT_FEATURE_TEAM_ID].astype(np.int32),
-        active_mask=values[:, AGENT_FEATURE_ACTIVE].astype(bool),
-        agent_radii=values[:, AGENT_FEATURE_RADIUS],
-        base_movement_speeds=values[:, AGENT_FEATURE_BASE_MOVEMENT_SPEED],
-        observation_radii=values[:, AGENT_FEATURE_OBSERVATION_RADIUS],
-        basic_interaction_radii=values[:, AGENT_FEATURE_BASIC_INTERACTION_RADIUS],
-        ultimate_interaction_radii=values[
-            :,
-            AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS,
-        ],
-        max_health=values[:, AGENT_FEATURE_MAX_HEALTH],
     )
 
 
@@ -1434,7 +1407,7 @@ def _technical_transition_lines(
                 )
             else:
                 facts = derive_selected_target_facts(
-                    config=_config_from_transition(transition),
+                    config=transition.config,
                     state=transition.before_state,
                     observation=transition.before_observation,
                     action_mask=transition.before_action_mask,
@@ -1572,19 +1545,6 @@ def format_verbose_transition(transition: TransitionView) -> str:
         f"  {line}" for line in _technical_transition_lines(transition, verbose=True)
     )
     return f"PLAY-BY-PLAY\n{play_by_play}\n\nTECHNICAL DIAGNOSTICS\n{technical}"
-
-
-def _config_from_transition(transition: TransitionView) -> EnvConfig:
-    context = transition.before_observation.context_features[0]
-    return EnvConfig(
-        max_steps=int(context[CONTEXT_FEATURE_EPISODE_HORIZON]),
-        map_width=float(context[CONTEXT_FEATURE_MAP_WIDTH]),
-        map_height=float(context[CONTEXT_FEATURE_MAP_HEIGHT]),
-        obstacles=transition.before_observation.map_obstacle_features[0],
-        agent_profile=_profile_from_observation(transition.before_observation),
-        initial_agent_positions=transition.before_state.agent_positions,
-        ordinary_movement_distance_scale=1.0,
-    )
 
 
 def format_reset(session: DebuggerSession) -> str:

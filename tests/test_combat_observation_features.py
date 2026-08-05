@@ -61,6 +61,7 @@ from marl_battlegrounds.core.types import (
     AGENT_FEATURE_SLOW_WARRIOR_CHARGE_MULTIPLIER,
     AGENT_FEATURE_STUN_HUNTER_TRAP_DURATION,
     AGENT_FEATURE_ULTIMATE_COOLDOWN_REMAINING,
+    ENVIRONMENT_DIMENSIONS,
     HUNTER_CLASS_ID,
     MAGE_CLASS_ID,
     MAX_AGENT_SLOTS,
@@ -188,8 +189,12 @@ def _config(
         map_height=12.0,
         obstacles=jnp.zeros((MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES), dtype=jnp.float32),
         agent_profile=profile,
-        initial_agent_positions=jnp.where(profile.active_mask[:, None], positions, 0.0),
         ordinary_movement_distance_scale=ordinary_movement_distance_scale,
+        team_spawn_pad_positions=positions.reshape(
+            (2, MAX_AGENTS_PER_TEAM, ENVIRONMENT_DIMENSIONS)
+        ),
+        spawn_shield_duration_steps=3,
+        spawn_shield_movement_speed=2.0,
     )
 
 
@@ -301,10 +306,10 @@ def test_movement_calibration_is_public_without_changing_catalog_base_speed() ->
         ordinary_movement_distance_scale=movement_scale,
     )
     visible_enemy_slot = MAX_AGENTS_PER_TEAM
-    visible_positions = config.initial_agent_positions.at[visible_enemy_slot].set(
+    visible_spawn_pads = config.team_spawn_pad_positions.at[1, 0].set(
         jnp.asarray((1.5, 0.5), dtype=jnp.float32)
     )
-    config = config._replace(initial_agent_positions=visible_positions)
+    config = config._replace(team_spawn_pad_positions=visible_spawn_pads)
     _, observation, *_ = reset(config, jax.random.key(20))
     expected_effective_speed = (
         config.agent_profile.base_movement_speeds * movement_scale
@@ -667,7 +672,9 @@ def test_attached_statuses_and_effective_speed_follow_duration_state() -> None:
         next_state.slow_durations,
         next_state.priest_blessing_of_freedom_slow_floor_durations,
         next_state.stun_durations,
+        next_state.spawn_shield_durations,
         config.agent_profile.base_movement_speeds,
+        config.spawn_shield_movement_speed,
         jnp.logical_and(config.agent_profile.active_mask, next_state.alive_mask),
         config.ordinary_movement_distance_scale,
     )
@@ -681,7 +688,9 @@ def test_attached_statuses_and_effective_speed_follow_duration_state() -> None:
         state.slow_durations,
         state.priest_blessing_of_freedom_slow_floor_durations,
         state.stun_durations,
+        state.spawn_shield_durations,
         config.agent_profile.base_movement_speeds,
+        config.spawn_shield_movement_speed,
         jnp.logical_and(config.agent_profile.active_mask, state.alive_mask),
         config.ordinary_movement_distance_scale,
     )

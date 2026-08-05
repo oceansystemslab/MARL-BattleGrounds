@@ -41,6 +41,7 @@ from marl_battlegrounds.core.types import (
     NUM_SLOW_CHANNELS,
     NUM_STUN_CHANNELS,
     NUM_TARGET_ACTIONS,
+    NUM_TEAMS,
     NUM_ULTIMATE_ACTIONS,
     OBSTACLE_FEATURE_ACTIVE,
     OBSTACLE_FEATURE_HEIGHT,
@@ -320,16 +321,13 @@ def _validate_agent_obstacle_clearance(
     positions: Array,
     *,
     obstacles: Array,
-    profile: ResolvedAgentProfile,
+    agent_radii: Array,
+    field_name: str,
 ) -> None:
-    """Reject starts intersecting an obstacle under authoritative M4 geometry."""
+    """Reject configured bodies intersecting authoritative M4 obstacles."""
     host_obstacles = np.asarray(obstacles)
-    active_agent_indices = np.flatnonzero(np.asarray(profile.active_mask))
-    max_active_radius = (
-        float(np.max(np.asarray(profile.agent_radii)[active_agent_indices]))
-        if active_agent_indices.size
-        else 0.0
-    )
+    host_radii = np.asarray(agent_radii)
+    max_body_radius = float(np.max(host_radii)) if host_radii.size else 0.0
 
     for obstacle_index in np.flatnonzero(
         host_obstacles[:, OBSTACLE_FEATURE_ACTIVE] == 1.0
@@ -337,41 +335,42 @@ def _validate_agent_obstacle_clearance(
         obstacle = host_obstacles[obstacle_index]
         obstacle_type = obstacle[OBSTACLE_FEATURE_TYPE]
         if obstacle_type == float(OBSTACLE_TYPE_PILLAR):
-            x_extent = float(obstacle[OBSTACLE_FEATURE_RADIUS]) + max_active_radius
+            x_extent = float(obstacle[OBSTACLE_FEATURE_RADIUS]) + max_body_radius
             y_extent = x_extent
         else:
             half_width = float(obstacle[OBSTACLE_FEATURE_WIDTH]) / 2.0
             half_height = float(obstacle[OBSTACLE_FEATURE_HEIGHT]) / 2.0
             # The L1 bound is conservative for every rotation angle and avoids
             # host/JAX range-reduction differences for very large finite theta.
-            x_extent = half_width + half_height + max_active_radius
+            x_extent = half_width + half_height + max_body_radius
             y_extent = x_extent
 
         x_limit = abs(float(obstacle[OBSTACLE_FEATURE_X])) + x_extent
         y_limit = abs(float(obstacle[OBSTACLE_FEATURE_Y])) + y_extent
         if x_limit > _FLOAT32_MAX or y_limit > _FLOAT32_MAX:
             raise ValueError(
-                f"obstacles[{obstacle_index}] geometry plus active agent radius "
+                f"obstacles[{obstacle_index}] geometry plus configured body radius "
                 "must remain representable by float32."
             )
 
-        for agent_index in active_agent_indices:
+        for agent_index in range(positions.shape[0]):
             overlaps = disc_overlaps_obstacle(
                 positions[agent_index],
-                profile.agent_radii[agent_index],
+                agent_radii[agent_index],
                 obstacles[obstacle_index],
             )
             if bool(overlaps):
+                team_index, team_local_index = divmod(agent_index, MAX_AGENTS_PER_TEAM)
                 obstacle_name = (
                     "pillar" if obstacle_type == float(OBSTACLE_TYPE_PILLAR) else "wall"
                 )
                 raise ValueError(
-                    f"initial_agent_positions[{agent_index}] overlaps active "
+                    f"{field_name}[{team_index}, {team_local_index}] overlaps active "
                     f"{obstacle_name} obstacles[{obstacle_index}]."
                 )
 
 
-def _validate_initial_agent_positions(
+def _validate_team_spawn_pad_positions(
     positions: object,
     *,
     map_width: float,
@@ -379,52 +378,74 @@ def _validate_initial_agent_positions(
     obstacles: Array,
     profile: ResolvedAgentProfile,
 ) -> None:
-    """Validate fixed reset centers against roster and M4 geometry contracts."""
+    """Validate all spawn pads and the complete fallback-body formation."""
     position_array = _require_jax_array(
         positions,
-        field_name="initial_agent_positions",
-        expected_shape=(MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS),
+        field_name="team_spawn_pad_positions",
+        expected_shape=(NUM_TEAMS, MAX_AGENTS_PER_TEAM, ENVIRONMENT_DIMENSIONS),
         expected_dtype=jnp.float32,
     )
-    _require_finite_array(position_array, field_name="initial_agent_positions")
+    _require_finite_array(position_array, field_name="team_spawn_pad_positions")
 
-    host_positions = np.asarray(position_array)
+    host_positions = np.asarray(position_array).reshape(
+        MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS
+    )
     host_active_mask = np.asarray(profile.active_mask)
     host_radii = np.asarray(profile.agent_radii)
 
-    if not bool(np.all(host_positions[~host_active_mask] == 0.0)):
-        raise ValueError("inactive initial_agent_positions rows must be exactly zero.")
+    # Every configured pad remains a real lifecycle location, including pad rows
+    # whose corresponding roster slot is inactive. Validate each pad for the
+    # largest body that can belong to its configured team.
+    fallback_radii_by_team = np.zeros((NUM_TEAMS,), dtype=np.float32)
+    for team_index in range(NUM_TEAMS):
+        team_start = team_index * MAX_AGENTS_PER_TEAM
+        team_stop = team_start + MAX_AGENTS_PER_TEAM
+        team_active_radii = host_radii[team_start:team_stop][
+            host_active_mask[team_start:team_stop]
+        ]
+        if team_active_radii.size:
+            fallback_radii_by_team[team_index] = np.max(team_active_radii)
+    pad_body_radii = np.repeat(fallback_radii_by_team, MAX_AGENTS_PER_TEAM)
 
-    active_indices = np.flatnonzero(host_active_mask)
-    for agent_index in active_indices:
-        center = host_positions[agent_index]
-        radius = float(host_radii[agent_index])
+    for pad_index in range(MAX_AGENT_SLOTS):
+        center = host_positions[pad_index]
+        radius = float(pad_body_radii[pad_index])
+        team_index, team_local_index = divmod(pad_index, MAX_AGENTS_PER_TEAM)
         if not (
             radius <= float(center[0]) <= map_width - radius
             and radius <= float(center[1]) <= map_height - radius
         ):
             raise ValueError(
-                f"initial_agent_positions[{agent_index}] places the active body "
-                "outside radius-adjusted map bounds."
+                "team_spawn_pad_positions"
+                f"[{team_index}, {team_local_index}] places a configured same-team "
+                "body outside radius-adjusted map bounds."
             )
 
     _validate_agent_obstacle_clearance(
-        position_array,
+        position_array.reshape(MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS),
         obstacles=obstacles,
-        profile=profile,
+        agent_radii=jnp.asarray(pad_body_radii, dtype=jnp.float32),
+        field_name="team_spawn_pad_positions",
     )
 
-    for pair_position, agent_a_index in enumerate(active_indices):
-        for agent_b_index in active_indices[pair_position + 1 :]:
-            center_delta = host_positions[agent_a_index] - host_positions[agent_b_index]
+    for pad_a_index in range(MAX_AGENT_SLOTS):
+        for pad_b_index in range(pad_a_index + 1, MAX_AGENT_SLOTS):
+            center_delta = host_positions[pad_a_index] - host_positions[pad_b_index]
             center_distance = math.hypot(float(center_delta[0]), float(center_delta[1]))
             minimum_distance = float(
-                host_radii[agent_a_index] + host_radii[agent_b_index]
+                pad_body_radii[pad_a_index] + pad_body_radii[pad_b_index]
             )
             if center_distance < minimum_distance:
+                team_a_index, team_a_local_index = divmod(
+                    pad_a_index, MAX_AGENTS_PER_TEAM
+                )
+                team_b_index, team_b_local_index = divmod(
+                    pad_b_index, MAX_AGENTS_PER_TEAM
+                )
                 raise ValueError(
-                    "initial_agent_positions active bodies overlap at slots "
-                    f"{agent_a_index} and {agent_b_index}."
+                    "team_spawn_pad_positions fallback bodies overlap at pads "
+                    f"[{team_a_index}, {team_a_local_index}] and "
+                    f"[{team_b_index}, {team_b_local_index}]."
                 )
 
 
@@ -488,10 +509,44 @@ def validate_env_config(config: EnvConfig) -> None:
             "after conversion to float32."
         )
 
+    if type(config.spawn_shield_duration_steps) is not int:
+        raise TypeError(
+            "spawn_shield_duration_steps must be an int, not "
+            f"{type(config.spawn_shield_duration_steps).__name__}."
+        )
+    if config.spawn_shield_duration_steps < 0:
+        raise ValueError(
+            "spawn_shield_duration_steps must be nonnegative, not "
+            f"{config.spawn_shield_duration_steps}."
+        )
+    if config.spawn_shield_duration_steps > _INT32_MAX:
+        raise ValueError(
+            f"spawn_shield_duration_steps must be at most {_INT32_MAX}, not "
+            f"{config.spawn_shield_duration_steps}."
+        )
+
+    if type(config.spawn_shield_movement_speed) is not float:
+        raise TypeError(
+            "spawn_shield_movement_speed must be a float, not "
+            f"{type(config.spawn_shield_movement_speed).__name__}."
+        )
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        execution_spawn_shield_speed = np.float32(config.spawn_shield_movement_speed)
+    if not bool(np.isfinite(execution_spawn_shield_speed)):
+        raise ValueError(
+            "spawn_shield_movement_speed must remain finite after conversion "
+            "to float32."
+        )
+    if execution_spawn_shield_speed <= 0.0:
+        raise ValueError(
+            "spawn_shield_movement_speed must remain greater than 0 after "
+            "conversion to float32."
+        )
+
     obstacles = _validate_obstacles(config.obstacles)
     profile = _validate_agent_profile(config.agent_profile)
-    _validate_initial_agent_positions(
-        config.initial_agent_positions,
+    _validate_team_spawn_pad_positions(
+        config.team_spawn_pad_positions,
         map_width=config.map_width,
         map_height=config.map_height,
         obstacles=obstacles,
@@ -691,6 +746,12 @@ def validate_env_state(config: EnvConfig, state: EnvState) -> None:
         expected_shape=(MAX_AGENT_SLOTS,),
         expected_dtype=jnp.int32,
     )
+    spawn_shield_durations = _require_jax_array(
+        state.spawn_shield_durations,
+        field_name="spawn_shield_durations",
+        expected_shape=(MAX_AGENT_SLOTS,),
+        expected_dtype=jnp.int32,
+    )
     previous_move_actions = _require_jax_array(
         state.previous_timestep_move_actions,
         field_name="previous_timestep_move_actions",
@@ -821,6 +882,20 @@ def validate_env_state(config: EnvConfig, state: EnvState) -> None:
             raise ValueError(f"active dead {field_name} rows must be exactly zero.")
         if bool(np.any(host_values[inactive] != 0)):
             raise ValueError(f"inactive {field_name} rows must be exactly zero.")
+
+    host_spawn_shield_durations = np.asarray(spawn_shield_durations)
+    if bool(np.any(host_spawn_shield_durations < 0)):
+        raise ValueError("spawn_shield_durations must contain only nonnegative values.")
+    if bool(np.any(host_spawn_shield_durations > config.spawn_shield_duration_steps)):
+        raise ValueError(
+            "spawn_shield_durations must not exceed spawn_shield_duration_steps."
+        )
+    if bool(np.any(host_spawn_shield_durations[active_and_dead] != 0)):
+        raise ValueError(
+            "active dead spawn_shield_durations rows must be exactly zero."
+        )
+    if bool(np.any(host_spawn_shield_durations[inactive] != 0)):
+        raise ValueError("inactive spawn_shield_durations rows must be exactly zero.")
 
     host_previous_move_actions = _validate_previous_action_domain(
         previous_move_actions,

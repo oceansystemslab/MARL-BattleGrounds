@@ -13,7 +13,9 @@ from marl_battlegrounds.core.env import _build_observation_and_action_mask, rese
 from marl_battlegrounds.core.types import (
     CLASS_NEUTRAL,
     CONTEXT_FEATURES,
+    ENVIRONMENT_DIMENSIONS,
     MAX_AGENT_SLOTS,
+    MAX_AGENTS_PER_TEAM,
     MAX_OBSTACLE_SLOTS,
     MOVE_STAY,
     OBSTACLE_FEATURES,
@@ -59,8 +61,12 @@ def _config(
         map_height=map_height,
         obstacles=jnp.zeros((MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES), dtype=jnp.float32),
         agent_profile=profile,
-        initial_agent_positions=jnp.where(profile.active_mask[:, None], positions, 0.0),
         ordinary_movement_distance_scale=1.0,
+        team_spawn_pad_positions=positions.reshape(
+            (2, MAX_AGENTS_PER_TEAM, ENVIRONMENT_DIMENSIONS)
+        ),
+        spawn_shield_duration_steps=3,
+        spawn_shield_movement_speed=2.0,
     )
 
 

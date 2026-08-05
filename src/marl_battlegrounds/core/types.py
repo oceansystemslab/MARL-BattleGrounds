@@ -198,7 +198,9 @@ class EnvConfig(NamedTuple):
     during an episode. ``agent_profile`` is the sole authority for immutable
     fixed-slot roster topology and capabilities resolved before ordinary reset.
     ``ordinary_movement_distance_scale`` converts catalog movement speeds into
-    per-decision voluntary displacement without scaling forced relocation.
+    per-step voluntary displacement without scaling forced relocation.
+    Team-local spawn pads are the sole ordinary-reset position authority.
+    Spawn-shield duration and movement speed remain episode-static rules.
     """
 
     max_steps: int
@@ -206,8 +208,10 @@ class EnvConfig(NamedTuple):
     map_height: float
     obstacles: Array
     agent_profile: ResolvedAgentProfile
-    initial_agent_positions: Array
     ordinary_movement_distance_scale: float
+    team_spawn_pad_positions: Array  # (NUM_TEAMS, MAX_AGENTS_PER_TEAM, 2)
+    spawn_shield_duration_steps: int
+    spawn_shield_movement_speed: float
 
 
 class EnvState(NamedTuple):
@@ -217,7 +221,9 @@ class EnvState(NamedTuple):
     only source-specific remaining durations; fixed magnitudes are derived by
     ``core.combat.derive_status_magnitudes``. Previous-action fields retain the
     one accepted category per actor from the immediately preceding transition.
-    The scalar validity leaf distinguishes reset from a real neutral action.
+    The spawn-shield vector stores remaining protected movement steps without a
+    duplicate active flag. The scalar validity leaf distinguishes reset from a
+    real neutral action.
     """
 
     step_count: Array
@@ -230,6 +236,7 @@ class EnvState(NamedTuple):
     rogue_poison_anti_heal_durations: Array
     mage_burst_damage_amplification_durations: Array
     priest_blessing_of_freedom_slow_floor_durations: Array
+    spawn_shield_durations: Array
     previous_timestep_move_actions: Array
     previous_timestep_select_target_actions: Array
     previous_timestep_use_ultimate_actions: Array
@@ -277,6 +284,14 @@ class PreviousTimestepActionObservation(NamedTuple):
     enemy_previous_timestep_use_ultimate_actions_one_hot: Array
 
 
+class SpawnLifecycleObservation(NamedTuple):
+    """Actor-relative public spawn-pad and roster lifecycle structure."""
+
+    spawn_pad_positions: Array  # (MAX_AGENT_SLOTS, NUM_TEAMS, MAX_AGENTS_PER_TEAM, 2)
+    active_mask: Array  # (MAX_AGENT_SLOTS, NUM_TEAMS, MAX_AGENTS_PER_TEAM)
+    alive_mask: Array  # (MAX_AGENT_SLOTS, NUM_TEAMS, MAX_AGENTS_PER_TEAM)
+
+
 class Observation(NamedTuple):
     """Structured per-slot observations emitted by reset and step.
 
@@ -294,6 +309,7 @@ class Observation(NamedTuple):
     ally_visibility_mask: Array
     enemy_visibility_mask: Array
     previous_timestep_actions: PreviousTimestepActionObservation
+    spawn_lifecycle: SpawnLifecycleObservation
 
 
 class Reward(NamedTuple):

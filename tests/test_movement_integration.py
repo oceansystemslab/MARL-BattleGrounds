@@ -1,4 +1,4 @@
-"""Movement integration tests for Milestone 4 Step 3."""
+"""Movement integration tests across the simulator's movement contracts."""
 # pyright: reportPrivateUsage=false
 
 from typing import TypedDict, cast
@@ -33,6 +33,7 @@ from marl_battlegrounds.core.types import (
     NUM_SLOW_CHANNELS,
     NUM_STUN_CHANNELS,
     NUM_TARGET_ACTIONS,
+    NUM_TEAMS,
     NUM_ULTIMATE_ACTIONS,
     OBJECTIVE_FEATURES,
     OBSTACLE_FEATURE_ACTIVE,
@@ -51,6 +52,7 @@ from marl_battlegrounds.core.types import (
     STUN_CHANNEL_ROGUE_POISON,
     STUN_CHANNEL_WARRIOR_CHARGE,
     UNIT_FEATURES,
+    WARRIOR_CLASS_ID,
     Action,
     ActionMask,
     DoneFlags,
@@ -198,6 +200,8 @@ def _deterministic_config(
     map_height: float = 12.0,
     obstacles: Array | None = None,
     ordinary_movement_distance_scale: float = 1.0,
+    spawn_shield_duration_steps: int = 3,
+    spawn_shield_movement_speed: float = 2.0,
 ) -> EnvConfig:
     """Create a deterministic config for movement integration tests."""
     profile = resolve_agent_profile(
@@ -225,8 +229,12 @@ def _deterministic_config(
         map_height=map_height,
         obstacles=_empty_obstacles() if obstacles is None else obstacles,
         agent_profile=profile,
-        initial_agent_positions=jnp.where(profile.active_mask[:, None], positions, 0.0),
         ordinary_movement_distance_scale=ordinary_movement_distance_scale,
+        team_spawn_pad_positions=positions.reshape(
+            (NUM_TEAMS, MAX_AGENTS_PER_TEAM, ENVIRONMENT_DIMENSIONS)
+        ),
+        spawn_shield_duration_steps=spawn_shield_duration_steps,
+        spawn_shield_movement_speed=spawn_shield_movement_speed,
     )
 
 
@@ -269,6 +277,20 @@ def _slot_float_vector(
     return values
 
 
+def _slot_int_vector(
+    default_value: int,
+    *rows: tuple[int, Array | int],
+) -> Array:
+    """Create an int32 slot vector with selected overrides."""
+    values = jnp.full((MAX_AGENT_SLOTS,), default_value, dtype=jnp.int32)
+
+    for slot, value in rows:
+        assert 0 <= slot < MAX_AGENT_SLOTS
+        values = values.at[slot].set(value)
+
+    return values
+
+
 def _mask_with_true_slots(*slots: int) -> Array:
     """Create a slot mask with only selected slots marked true."""
     mask = jnp.zeros((MAX_AGENT_SLOTS,), dtype=bool)
@@ -289,6 +311,7 @@ def _state_with_single_active_alive_agent(
     effective_observation_radius: float = 8.0,
     effective_basic_interaction_radius: float = 6.0,
     effective_ultimate_interaction_radius: float = 9.0,
+    spawn_shield_duration: int = 0,
     step_count: int = 0,
 ) -> tuple[EnvConfig, EnvState]:
     """Create an exact config/state pair with only slot 0 participating."""
@@ -311,6 +334,10 @@ def _state_with_single_active_alive_agent(
         step_count=jnp.array(step_count, dtype=jnp.int32),
         agent_positions=_agent_positions_array_with_rows((0, position)),
         alive_mask=active_mask,
+        spawn_shield_durations=_slot_int_vector(
+            0,
+            (0, spawn_shield_duration),
+        ),
         **_inert_combat_state_fields(active_mask),
     )
     return config, state
@@ -325,12 +352,15 @@ def _state_with_two_agents(
     agent_b_active_flag: bool = True,
     agent_b_alive_flag: bool = True,
     *,
+    agent_b_slot: int = 1,
     radius: float = 0.5,
     agent_a_effective_movement_speed: float = 1.0,
     agent_b_effective_movement_speed: float = 1.0,
     effective_observation_radius: float = 8.0,
     effective_basic_interaction_radius: float = 6.0,
     effective_ultimate_interaction_radius: float = 9.0,
+    agent_a_spawn_shield_duration: int = 0,
+    agent_b_spawn_shield_duration: int = 0,
     step_count: int = 0,
 ) -> tuple[EnvConfig, EnvState]:
     """Create an exact low-level pair for movement-kernel boundary tests.
@@ -339,37 +369,42 @@ def _state_with_two_agents(
     in inactive rows so masking is tested rather than assumed. Such cases are
     adversarial kernel inputs, not official host-validated state evidence.
     """
+    assert 0 < agent_b_slot < MAX_AGENT_SLOTS
+
     active_mask = jnp.zeros((MAX_AGENT_SLOTS,), dtype=bool)
     alive_mask = jnp.zeros((MAX_AGENT_SLOTS,), dtype=bool)
 
     active_mask = active_mask.at[0].set(agent_a_active_flag)
     alive_mask = alive_mask.at[0].set(agent_a_alive_flag)
 
-    active_mask = active_mask.at[1].set(agent_b_active_flag)
-    alive_mask = alive_mask.at[1].set(agent_b_alive_flag)
+    active_mask = active_mask.at[agent_b_slot].set(agent_b_active_flag)
+    alive_mask = alive_mask.at[agent_b_slot].set(agent_b_alive_flag)
 
     profile = config.agent_profile._replace(
         active_mask=active_mask,
-        agent_radii=_agent_radii_array_with_rows((0, radius), (1, radius)),
+        agent_radii=_agent_radii_array_with_rows(
+            (0, radius),
+            (agent_b_slot, radius),
+        ),
         base_movement_speeds=_slot_float_vector(
             0.0,
             (0, agent_a_effective_movement_speed),
-            (1, agent_b_effective_movement_speed),
+            (agent_b_slot, agent_b_effective_movement_speed),
         ),
         observation_radii=_slot_float_vector(
             0.0,
             (0, effective_observation_radius),
-            (1, effective_observation_radius),
+            (agent_b_slot, effective_observation_radius),
         ),
         basic_interaction_radii=_slot_float_vector(
             0.0,
             (0, effective_basic_interaction_radius),
-            (1, effective_basic_interaction_radius),
+            (agent_b_slot, effective_basic_interaction_radius),
         ),
         ultimate_interaction_radii=_slot_float_vector(
             0.0,
             (0, effective_ultimate_interaction_radius),
-            (1, effective_ultimate_interaction_radius),
+            (agent_b_slot, effective_ultimate_interaction_radius),
         ),
         max_health=active_mask.astype(jnp.float32),
     )
@@ -378,9 +413,14 @@ def _state_with_two_agents(
         step_count=jnp.array(step_count, dtype=jnp.int32),
         agent_positions=_agent_positions_array_with_rows(
             (0, agent_a_position),
-            (1, agent_b_position),
+            (agent_b_slot, agent_b_position),
         ),
         alive_mask=alive_mask,
+        spawn_shield_durations=_slot_int_vector(
+            0,
+            (0, agent_a_spawn_shield_duration),
+            (agent_b_slot, agent_b_spawn_shield_duration),
+        ),
         **_inert_combat_state_fields(alive_mask),
     )
     return config, state
@@ -463,6 +503,9 @@ def _assert_state_contract(state: EnvState) -> None:
 
     assert state.alive_mask.shape == (MAX_AGENT_SLOTS,)
     assert state.alive_mask.dtype == bool
+
+    assert state.spawn_shield_durations.shape == (MAX_AGENT_SLOTS,)
+    assert state.spawn_shield_durations.dtype == jnp.int32
 
 
 def _assert_observation_contract(observation: Observation) -> None:
@@ -1417,6 +1460,7 @@ def test_active_alive_overlapping_agents_separate_in_free_space(
             (blocker_slot, blocker_position),
         ),
         alive_mask=active_mask,
+        spawn_shield_durations=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
         **_inert_combat_state_fields(active_mask),
     )
 
@@ -1436,6 +1480,668 @@ def test_active_alive_overlapping_agents_separate_in_free_space(
         slot_b=blocker_slot,
         radius_a=radius,
         radius_b=radius,
+    )
+
+
+@pytest.mark.parametrize(
+    ("configured_duration", "current_duration", "expected_next_duration"),
+    (
+        pytest.param(0, 0, 0, id="disabled"),
+        pytest.param(1, 1, 0, id="expires"),
+        pytest.param(3, 3, 2, id="official-duration"),
+        pytest.param(7, 7, 6, id="larger-valid-duration"),
+    ),
+)
+def test_spawn_shield_counter_decrements_once_without_underflow(
+    configured_duration: int,
+    current_duration: int,
+    expected_next_duration: int,
+) -> None:
+    """Prove one current-state counter controls one transition of protection."""
+    config = _deterministic_config(
+        team_size=1,
+        spawn_shield_duration_steps=configured_duration,
+    )
+    start = jnp.asarray((10.0, 6.0), dtype=jnp.float32)
+    config, state = _state_with_single_active_alive_agent(
+        config,
+        start,
+        spawn_shield_duration=current_duration,
+    )
+
+    next_state, *_ = step(
+        config,
+        state,
+        _current_action_mask(config, state),
+        _joint_action_with_moves((0, MOVE_STAY)),
+        jax.random.key(70),
+    )
+
+    _assert_center_close(next_state.agent_positions[0], start)
+    assert next_state.spawn_shield_durations.dtype == jnp.int32
+    assert int(next_state.spawn_shield_durations[0]) == expected_next_duration
+    assert bool(jnp.all(next_state.spawn_shield_durations[1:] == 0))
+
+
+def test_spawn_shield_counter_clears_dead_and_inactive_rows() -> None:
+    """Prove nonparticipating slots cannot retain malformed shield counters."""
+    config = _deterministic_config(
+        team_size=1,
+        spawn_shield_duration_steps=3,
+    )
+    config, state = _state_with_two_agents(
+        config,
+        jnp.asarray((5.0, 5.0), dtype=jnp.float32),
+        jnp.asarray((8.0, 5.0), dtype=jnp.float32),
+        agent_a_active_flag=False,
+        agent_a_alive_flag=False,
+        agent_b_active_flag=True,
+        agent_b_alive_flag=False,
+        agent_b_slot=MAX_AGENTS_PER_TEAM,
+        agent_a_spawn_shield_duration=3,
+        agent_b_spawn_shield_duration=3,
+    )
+
+    next_state, *_ = step(
+        config,
+        state,
+        _current_action_mask(config, state),
+        _joint_action_with_moves(),
+        jax.random.key(71),
+    )
+
+    assert bool(jnp.all(next_state.spawn_shield_durations == 0))
+
+
+@pytest.mark.parametrize(
+    ("move_action", "expected_direction"),
+    (
+        pytest.param(MOVE_NORTH, (0.0, 1.0), id="north"),
+        pytest.param(MOVE_SOUTH, (0.0, -1.0), id="south"),
+        pytest.param(MOVE_EAST, (1.0, 0.0), id="east"),
+        pytest.param(MOVE_WEST, (-1.0, 0.0), id="west"),
+        pytest.param(MOVE_NORTHEAST, (1.0, 1.0), id="northeast"),
+        pytest.param(MOVE_NORTHWEST, (-1.0, 1.0), id="northwest"),
+        pytest.param(MOVE_SOUTHEAST, (1.0, -1.0), id="southeast"),
+        pytest.param(MOVE_SOUTHWEST, (-1.0, -1.0), id="southwest"),
+    ),
+)
+@pytest.mark.parametrize(
+    "spawn_shield_movement_speed",
+    (
+        pytest.param(2.0, id="official-speed"),
+        pytest.param(1.375, id="nondefault-speed"),
+    ),
+)
+def test_spawn_shield_uses_absolute_speed_for_every_nonstay_heading(
+    move_action: int,
+    expected_direction: tuple[float, float],
+    spawn_shield_movement_speed: float,
+) -> None:
+    """Prove shield movement bypasses profile, status, and ordinary scaling."""
+    config = _deterministic_config(
+        team_size=1,
+        ordinary_movement_distance_scale=0.125,
+        spawn_shield_movement_speed=spawn_shield_movement_speed,
+    )
+    start = jnp.asarray((10.0, 6.0), dtype=jnp.float32)
+    config, state = _state_with_single_active_alive_agent(
+        config,
+        start,
+        effective_movement_speed=7.0,
+        spawn_shield_duration=3,
+    )
+    state = state._replace(
+        slow_durations=state.slow_durations.at[0].set(5),
+        stun_durations=state.stun_durations.at[0, STUN_CHANNEL_HUNTER_TRAP].set(2),
+    )
+    observation, current_action_mask = _build_observation_and_action_mask(state, config)
+
+    # CP3 owns canonical shield action masks. This forged row isolates CP2's
+    # defense-in-depth movement semantics from the pre-existing stun mask.
+    movement_permissive_action_mask = current_action_mask._replace(
+        move_mask=current_action_mask.move_mask.at[0].set(True)
+    )
+    next_state, next_observation, *_ = step(
+        config,
+        state,
+        movement_permissive_action_mask,
+        _joint_action_with_moves((0, move_action)),
+        jax.random.key(72),
+    )
+
+    expected_heading = jnp.asarray(expected_direction, dtype=jnp.float32)
+    expected_heading = expected_heading / cast(
+        Array,
+        jnp.linalg.norm(expected_heading),
+    )
+    displacement = next_state.agent_positions[0] - start
+
+    assert bool(
+        jnp.allclose(
+            displacement,
+            expected_heading * spawn_shield_movement_speed,
+            atol=2 * GEOMETRY_TOLERANCE,
+            rtol=0.0,
+        )
+    )
+    assert (
+        observation.self_features[0, AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED]
+        == spawn_shield_movement_speed
+    )
+    assert (
+        next_observation.self_features[0, AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED]
+        == spawn_shield_movement_speed
+    )
+    assert int(next_state.spawn_shield_durations[0]) == 2
+
+
+def test_spawn_shield_stay_is_zero_movement_and_consumes_one_step() -> None:
+    """Prove the speed override never turns Stay into forced movement."""
+    config = _deterministic_config(
+        team_size=1,
+        spawn_shield_movement_speed=2.0,
+    )
+    start = jnp.asarray((10.0, 6.0), dtype=jnp.float32)
+    config, state = _state_with_single_active_alive_agent(
+        config,
+        start,
+        spawn_shield_duration=3,
+    )
+
+    next_state, *_ = step(
+        config,
+        state,
+        _current_action_mask(config, state),
+        _joint_action_with_moves((0, MOVE_STAY)),
+        jax.random.key(73),
+    )
+
+    _assert_center_close(next_state.agent_positions[0], start)
+    assert int(next_state.spawn_shield_durations[0]) == 2
+
+
+@pytest.mark.parametrize(
+    ("agent_a_duration", "agent_b_duration"),
+    (
+        pytest.param(3, 3, id="shielded-versus-shielded"),
+        pytest.param(3, 0, id="shielded-versus-unshielded"),
+    ),
+)
+def test_spawn_shielded_body_neither_pushes_nor_receives_displacement(
+    agent_a_duration: int,
+    agent_b_duration: int,
+) -> None:
+    """Prove one exempt endpoint makes the entire agent pair noncolliding."""
+    config = _deterministic_config(
+        team_size=5,
+        spawn_shield_movement_speed=2.0,
+    )
+    agent_a_start = jnp.asarray((5.0, 5.0), dtype=jnp.float32)
+    agent_b_start = jnp.asarray((7.0, 5.0), dtype=jnp.float32)
+    config, state = _state_with_two_agents(
+        config,
+        agent_a_start,
+        agent_b_start,
+        agent_a_spawn_shield_duration=agent_a_duration,
+        agent_b_spawn_shield_duration=agent_b_duration,
+    )
+
+    next_state, *_ = step(
+        config,
+        state,
+        _current_action_mask(config, state),
+        _joint_action_with_moves((0, MOVE_EAST), (1, MOVE_STAY)),
+        jax.random.key(74),
+    )
+
+    _assert_center_close(next_state.agent_positions[0], agent_b_start)
+    _assert_center_close(next_state.agent_positions[1], agent_b_start)
+
+
+@pytest.mark.parametrize(
+    ("spawn_shield_duration", "collision_is_expected"),
+    (
+        pytest.param(1, True, id="expiring-at-final-position"),
+        pytest.param(2, False, id="still-shielded-at-final-position"),
+    ),
+)
+def test_spawn_shield_expiry_controls_only_final_endpoint_collision(
+    spawn_shield_duration: int,
+    collision_is_expected: bool,
+) -> None:
+    """Prove counter one rejoins collision after collision-exempt traversal."""
+    config = _deterministic_config(
+        team_size=5,
+        spawn_shield_movement_speed=2.0,
+    )
+    raw_shared_endpoint = jnp.asarray((6.0, 5.0), dtype=jnp.float32)
+    config, state = _state_with_two_agents(
+        config,
+        jnp.asarray((4.0, 5.0), dtype=jnp.float32),
+        raw_shared_endpoint,
+        agent_a_spawn_shield_duration=spawn_shield_duration,
+    )
+
+    next_state, *_ = step(
+        config,
+        state,
+        _current_action_mask(config, state),
+        _joint_action_with_moves((0, MOVE_EAST), (1, MOVE_STAY)),
+        jax.random.key(75),
+    )
+
+    if collision_is_expected:
+        assert not bool(
+            jnp.array_equal(next_state.agent_positions[0], raw_shared_endpoint)
+        )
+        assert not bool(
+            jnp.array_equal(next_state.agent_positions[1], raw_shared_endpoint)
+        )
+        _assert_agents_do_not_overlap(
+            next_state.agent_positions,
+            slot_a=0,
+            slot_b=1,
+            radius_a=0.5,
+            radius_b=0.5,
+        )
+    else:
+        _assert_center_close(next_state.agent_positions[0], raw_shared_endpoint)
+        _assert_center_close(next_state.agent_positions[1], raw_shared_endpoint)
+
+
+def test_expiring_spawn_shield_remains_active_through_conditional_charge() -> None:
+    """Prove Charge cannot consume protection before ordinary movement."""
+    config = _deterministic_config(
+        team_size=5,
+        ordinary_movement_distance_scale=0.1,
+        spawn_shield_movement_speed=2.0,
+    )
+    blocker_slot = 1
+    target_slot = MAX_AGENTS_PER_TEAM
+    active_mask = _mask_with_true_slots(0, blocker_slot, target_slot)
+    profile = config.agent_profile._replace(
+        class_ids=config.agent_profile.class_ids.at[0].set(WARRIOR_CLASS_ID),
+        active_mask=active_mask,
+        agent_radii=_agent_radii_array_with_rows(
+            (0, 0.5),
+            (blocker_slot, 0.5),
+            (target_slot, 0.5),
+        ),
+        base_movement_speeds=_slot_float_vector(0.0, (0, 0.25)),
+        observation_radii=_slot_float_vector(
+            0.0,
+            (0, 20.0),
+            (blocker_slot, 20.0),
+            (target_slot, 20.0),
+        ),
+        basic_interaction_radii=_slot_float_vector(
+            0.0,
+            (0, 20.0),
+            (blocker_slot, 20.0),
+            (target_slot, 20.0),
+        ),
+        ultimate_interaction_radii=_slot_float_vector(
+            0.0,
+            (0, 20.0),
+            (blocker_slot, 20.0),
+            (target_slot, 20.0),
+        ),
+        max_health=active_mask.astype(jnp.float32),
+    )
+    config = config._replace(agent_profile=profile)
+    charger_start = jnp.asarray((2.0, 6.0), dtype=jnp.float32)
+    blocker_start = jnp.asarray((6.0, 6.0), dtype=jnp.float32)
+    target_start = jnp.asarray((7.0, 6.0), dtype=jnp.float32)
+    state = EnvState(
+        step_count=jnp.asarray(0, dtype=jnp.int32),
+        agent_positions=_agent_positions_array_with_rows(
+            (0, charger_start),
+            (blocker_slot, blocker_start),
+            (target_slot, target_start),
+        ),
+        alive_mask=active_mask,
+        spawn_shield_durations=_slot_int_vector(0, (0, 1)),
+        **_inert_combat_state_fields(active_mask),
+    )
+    movement_only_action = _joint_action_with_moves((0, MOVE_NORTH))
+    charge_action = movement_only_action._replace(
+        select_target=movement_only_action.select_target.at[0].set(
+            1 + MAX_AGENTS_PER_TEAM
+        ),
+        use_ultimate=movement_only_action.use_ultimate.at[0].set(1),
+    )
+    current_action_mask = _current_action_mask(config, state)
+
+    charge_next_state, *_ = step(
+        config,
+        state,
+        current_action_mask,
+        charge_action,
+        jax.random.key(81),
+    )
+    no_charge_next_state, *_ = step(
+        config,
+        state,
+        current_action_mask,
+        movement_only_action,
+        jax.random.key(82),
+    )
+
+    # The shielded Charge landing may overlap the blocker temporarily. The
+    # protected ordinary move then starts from that landing, traverses without
+    # body collision, and rejoins collision only at its nonoverlapping endpoint.
+    _assert_center_close(
+        charge_next_state.agent_positions[0],
+        jnp.asarray((6.0, 8.0), dtype=jnp.float32),
+    )
+    _assert_center_close(
+        no_charge_next_state.agent_positions[0],
+        jnp.asarray((2.0, 8.0), dtype=jnp.float32),
+    )
+    _assert_center_close(
+        charge_next_state.agent_positions[blocker_slot],
+        blocker_start,
+    )
+    _assert_center_close(
+        no_charge_next_state.agent_positions[blocker_slot],
+        blocker_start,
+    )
+    assert int(charge_next_state.spawn_shield_durations[0]) == 0
+    assert int(no_charge_next_state.spawn_shield_durations[0]) == 0
+
+
+@pytest.mark.parametrize(
+    ("spawn_shield_duration", "collision_is_expected"),
+    (
+        pytest.param(1, True, id="expiring-stay"),
+        pytest.param(2, False, id="protected-stay"),
+    ),
+)
+def test_spawn_shield_stay_rejoins_collision_only_on_expiry(
+    spawn_shield_duration: int,
+    collision_is_expected: bool,
+) -> None:
+    """Prove zero movement still reaches the existing final collision pass."""
+    config = _deterministic_config(team_size=5)
+    first_start = jnp.asarray((5.0, 5.0), dtype=jnp.float32)
+    second_start = jnp.asarray((5.5, 5.0), dtype=jnp.float32)
+    config, state = _state_with_two_agents(
+        config,
+        first_start,
+        second_start,
+        agent_a_spawn_shield_duration=spawn_shield_duration,
+    )
+
+    next_state, *_ = step(
+        config,
+        state,
+        _current_action_mask(config, state),
+        _joint_action_with_moves(),
+        jax.random.key(76),
+    )
+
+    if collision_is_expected:
+        _assert_agents_do_not_overlap(
+            next_state.agent_positions,
+            slot_a=0,
+            slot_b=1,
+            radius_a=0.5,
+            radius_b=0.5,
+        )
+    else:
+        _assert_center_close(next_state.agent_positions[0], first_start)
+        _assert_center_close(next_state.agent_positions[1], second_start)
+
+
+def test_simultaneous_spawn_shield_expiry_is_team_and_slot_independent() -> None:
+    """Prove equivalent same-team and opposing-team pairs resolve identically."""
+    pair_results: list[Array] = []
+
+    for second_slot in (1, MAX_AGENTS_PER_TEAM):
+        config = _deterministic_config(team_size=5)
+        config, state = _state_with_two_agents(
+            config,
+            jnp.asarray((5.0, 5.0), dtype=jnp.float32),
+            jnp.asarray((5.5, 5.0), dtype=jnp.float32),
+            agent_b_slot=second_slot,
+            agent_a_spawn_shield_duration=1,
+            agent_b_spawn_shield_duration=1,
+        )
+
+        next_state, *_ = step(
+            config,
+            state,
+            _current_action_mask(config, state),
+            _joint_action_with_moves((0, MOVE_STAY), (second_slot, MOVE_STAY)),
+            jax.random.key(77),
+        )
+        pair_results.append(
+            jnp.stack(
+                (
+                    next_state.agent_positions[0],
+                    next_state.agent_positions[second_slot],
+                )
+            )
+        )
+
+    assert bool(jnp.array_equal(pair_results[0], pair_results[1]))
+
+
+def test_spawn_shield_movement_keeps_bounds_and_obstacles_authoritative() -> None:
+    """Prove collision exemption does not bypass static world geometry."""
+    pillar_center = jnp.asarray((10.0, 6.0), dtype=jnp.float32)
+    pillar_radius = 0.5
+    obstacles = _obstacle_array_with_rows(
+        (0, _pillar_obstacle(pillar_center, pillar_radius))
+    )
+    config = _deterministic_config(
+        team_size=5,
+        obstacles=obstacles,
+        spawn_shield_movement_speed=2.0,
+    )
+    config, state = _state_with_two_agents(
+        config,
+        jnp.asarray((18.75, 10.0), dtype=jnp.float32),
+        jnp.asarray((8.5, 6.0), dtype=jnp.float32),
+        agent_a_spawn_shield_duration=3,
+        agent_b_spawn_shield_duration=3,
+    )
+
+    next_state, *_ = step(
+        config,
+        state,
+        _current_action_mask(config, state),
+        _joint_action_with_moves((0, MOVE_EAST), (1, MOVE_EAST)),
+        jax.random.key(78),
+    )
+
+    _assert_center_inside_bounds(
+        next_state.agent_positions[0],
+        radius=0.5,
+        config=config,
+    )
+    _assert_center_outside_pillar(
+        next_state.agent_positions[1],
+        agent_radius=0.5,
+        pillar_center=pillar_center,
+        pillar_radius=pillar_radius,
+    )
+    assert bool(jnp.all(next_state.spawn_shield_durations[:2] == 2))
+
+
+def test_spawn_shield_duration_paths_match_eager_jit_and_vmap() -> None:
+    """Prove mixed counters batch through one fixed-shape transition program."""
+    durations = (0, 1, 3, 7)
+    config = _deterministic_config(
+        team_size=1,
+        ordinary_movement_distance_scale=0.25,
+        spawn_shield_duration_steps=max(durations),
+        spawn_shield_movement_speed=2.0,
+    )
+    states: list[EnvState] = []
+    action_masks: list[ActionMask] = []
+
+    for duration in durations:
+        config, state = _state_with_single_active_alive_agent(
+            config,
+            jnp.asarray((3.0, 5.0), dtype=jnp.float32),
+            effective_movement_speed=1.0,
+            spawn_shield_duration=duration,
+        )
+        states.append(state)
+        action_masks.append(_current_action_mask(config, state))
+
+    batched_states = jax.tree.map(lambda *leaves: jnp.stack(leaves), *states)
+    batched_action_masks = jax.tree.map(
+        lambda *leaves: jnp.stack(leaves),
+        *action_masks,
+    )
+    action = _joint_action_with_moves((0, MOVE_EAST))
+    keys = jax.random.split(jax.random.key(80), len(durations))
+
+    def _batched_transition(
+        states_batch: EnvState,
+        masks_batch: ActionMask,
+        step_keys: Array,
+    ) -> tuple[Array, Array]:
+        def _one_transition(
+            state: EnvState,
+            action_mask: ActionMask,
+            step_key: Array,
+        ) -> tuple[Array, Array]:
+            next_state, *_ = step(
+                config,
+                state,
+                action_mask,
+                action,
+                step_key,
+            )
+            return (
+                next_state.agent_positions[0],
+                next_state.spawn_shield_durations[0],
+            )
+
+        return jax.vmap(_one_transition)(
+            states_batch,
+            masks_batch,
+            step_keys,
+        )
+
+    eager_positions, eager_durations = _batched_transition(
+        batched_states,
+        batched_action_masks,
+        keys,
+    )
+    compiled_positions, compiled_durations = cast(
+        tuple[Array, Array],
+        jax.jit(_batched_transition)(
+            batched_states,
+            batched_action_masks,
+            keys,
+        ),
+    )
+
+    assert bool(jnp.array_equal(compiled_positions, eager_positions))
+    assert bool(jnp.array_equal(compiled_durations, eager_durations))
+    assert bool(
+        jnp.allclose(
+            eager_positions[:, 0],
+            jnp.asarray((3.25, 5.0, 5.0, 5.0), dtype=jnp.float32),
+            atol=2 * GEOMETRY_TOLERANCE,
+            rtol=0.0,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            eager_durations,
+            jnp.asarray((0, 0, 2, 6), dtype=jnp.int32),
+        )
+    )
+
+
+def test_spawn_shield_trajectory_matches_eager_jit_and_scan() -> None:
+    """Prove three protected moves then ordinary movement in a compiled rollout."""
+    horizon = 4
+    config = _deterministic_config(
+        team_size=1,
+        ordinary_movement_distance_scale=0.25,
+        spawn_shield_duration_steps=3,
+        spawn_shield_movement_speed=2.0,
+    )
+    config, initial_state = _state_with_single_active_alive_agent(
+        config,
+        jnp.asarray((3.0, 5.0), dtype=jnp.float32),
+        effective_movement_speed=1.0,
+        spawn_shield_duration=3,
+    )
+    initial_action_mask = _current_action_mask(config, initial_state)
+    action = _joint_action_with_moves((0, MOVE_EAST))
+    keys = jax.random.split(jax.random.key(79), horizon)
+
+    def _rollout(
+        state: EnvState,
+        action_mask: ActionMask,
+        step_keys: Array,
+    ) -> tuple[Array, Array, Array]:
+        def _scan_step(
+            carry: tuple[EnvState, ActionMask],
+            step_key: Array,
+        ) -> tuple[tuple[EnvState, ActionMask], tuple[Array, Array, Array]]:
+            current_state, current_mask = carry
+            next_state, observation, _, _, next_mask, _ = step(
+                config,
+                current_state,
+                current_mask,
+                action,
+                step_key,
+            )
+            return (next_state, next_mask), (
+                next_state.agent_positions[0],
+                next_state.spawn_shield_durations[0],
+                observation.self_features[0, AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED],
+            )
+
+        _, outputs = jax.lax.scan(
+            _scan_step,
+            (state, action_mask),
+            step_keys,
+        )
+        return outputs
+
+    eager_outputs = _rollout(initial_state, initial_action_mask, keys)
+    compiled_outputs = cast(
+        tuple[Array, Array, Array],
+        jax.jit(_rollout)(initial_state, initial_action_mask, keys),
+    )
+
+    for eager_output, compiled_output in zip(
+        eager_outputs,
+        compiled_outputs,
+        strict=True,
+    ):
+        assert bool(jnp.array_equal(eager_output, compiled_output))
+
+    position_history, duration_history, speed_history = eager_outputs
+    assert bool(
+        jnp.allclose(
+            position_history[:, 0],
+            jnp.asarray((5.0, 7.0, 9.0, 9.25), dtype=jnp.float32),
+            atol=2 * GEOMETRY_TOLERANCE,
+            rtol=0.0,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            duration_history,
+            jnp.asarray((2, 1, 0, 0), dtype=jnp.int32),
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            speed_history,
+            jnp.asarray((2.0, 2.0, 0.25, 0.25), dtype=jnp.float32),
+        )
     )
 
 

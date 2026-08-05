@@ -156,7 +156,7 @@ def _validate_launch(
         raise ValueError(msg)
     if controlled_global_slot is None:
         return
-    config = scenario.build_config()
+    config, _ = scenario.build_scenario()
     active_mask = config.agent_profile.active_mask
     if not (
         0 <= controlled_global_slot < len(active_mask)

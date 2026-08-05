@@ -365,7 +365,9 @@ def derive_effective_movement_speeds(
     slow_durations: Array,
     priest_freedom_slow_floor_durations: Array,
     stun_durations: Array,
+    spawn_shield_durations: Array,
     base_movement_speeds: Array,
+    spawn_shield_movement_speed: Array | float,
     active_and_alive_mask: Array,
     ordinary_movement_distance_scale: float,
 ) -> Array:
@@ -373,10 +375,13 @@ def derive_effective_movement_speeds(
 
     Slow sources compose multiplicatively before the global and Blessing of
     Freedom floors apply. The episode's ordinary-movement distance scale then
-    converts catalog speed into per-decision voluntary displacement. Inactive,
-    dead, or currently stunned actors expose exactly zero effective speed. The
-    returned ``float32`` vector has shape ``(MAX_AGENT_SLOTS,)`` and is shared
-    by movement actuation and the policy-facing observation contract.
+    converts catalog speed into per-step voluntary displacement. A positive
+    spawn-shield counter instead selects the configured absolute shield speed,
+    bypassing ordinary class, status, and distance-scale adjustments. Inactive
+    and dead actors expose exactly zero effective speed; unshielded stunned
+    actors also expose zero. The returned ``float32`` vector has shape
+    ``(MAX_AGENT_SLOTS,)`` and is shared by movement actuation and the
+    policy-facing observation contract.
     """
     effective_movement_multipliers = jnp.maximum(
         jnp.prod(_build_slow_multipliers(slow_durations), axis=-1),
@@ -385,19 +390,28 @@ def derive_effective_movement_speeds(
         ),
     )
 
-    active_alive_not_stunned_mask = jnp.logical_and(
-        active_and_alive_mask,
-        jnp.all(stun_durations == 0, axis=-1),
-    )
-
     adjusted_movement_speeds = (
         base_movement_speeds
         * jnp.maximum(effective_movement_multipliers, GLOBAL_SLOW_FLOOR)
         * ordinary_movement_distance_scale
     )
 
-    return jnp.where(
-        active_alive_not_stunned_mask,
+    stun_adjusted_movement_speeds = jnp.where(
+        jnp.all(stun_durations == 0, axis=-1),
         adjusted_movement_speeds,
         jnp.zeros_like(adjusted_movement_speeds),
     ).astype(jnp.float32)
+
+    spawn_shield_adjusted_movement_speeds = jnp.where(
+        spawn_shield_durations > 0,
+        spawn_shield_movement_speed,
+        stun_adjusted_movement_speeds,
+    ).astype(jnp.float32)
+
+    # Derive from the sole stored counter so movement and visible effective
+    # speed cannot disagree about whether the shield override is active.
+    return jnp.where(
+        active_and_alive_mask,
+        spawn_shield_adjusted_movement_speeds,
+        jnp.zeros_like(spawn_shield_adjusted_movement_speeds),
+    )

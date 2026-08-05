@@ -46,6 +46,10 @@ from marl_battlegrounds.core.combat import (
     get_ultimate_healing_by_class_ids,
     get_ultimate_target_mode_by_class_ids,
 )
+from marl_battlegrounds.core.config import (
+    validate_env_config,
+    validate_scenario_initial_state,
+)
 from marl_battlegrounds.core.geometry import (
     DEFAULT_AGENT_PROJECTION_PASSES,
     has_clear_line_of_sight,
@@ -97,6 +101,7 @@ from marl_battlegrounds.core.types import (
     Observation,
     PreviousTimestepActionObservation,
     Reward,
+    SpawnLifecycleObservation,
     TransitionFacts,
 )
 
@@ -741,6 +746,119 @@ def _build_visibility_masked_previous_timestep_action_observation(
     )
 
 
+def _build_spawn_lifecycle_observation(
+    state: EnvState, config: EnvConfig
+) -> SpawnLifecycleObservation:
+    """Build actor-relative public spawn pads and fixed-slot lifecycle truth.
+
+    Team row zero is the observer's team and row one is its opponent. Configured
+    living and dead observers receive the same public roster information;
+    padded observer rows remain zero.
+    """
+    spawn_pad_positions_team_a_view = jnp.concatenate(
+        (
+            config.team_spawn_pad_positions[TEAM_A_ID - 1, :, :][None, :, :],
+            config.team_spawn_pad_positions[TEAM_B_ID - 1, :, :][None, :, :],
+        ),
+        axis=0,
+    )
+
+    spawn_pad_positions_team_b_view = jnp.concatenate(
+        (
+            config.team_spawn_pad_positions[TEAM_B_ID - 1, :, :][None, :, :],
+            config.team_spawn_pad_positions[TEAM_A_ID - 1, :, :][None, :, :],
+        ),
+        axis=0,
+    )
+
+    unmasked_spawn_pad_positions = jnp.concatenate(
+        (
+            jnp.repeat(
+                spawn_pad_positions_team_a_view[None, :, :, :],
+                MAX_AGENTS_PER_TEAM,
+                axis=0,
+            ),
+            jnp.repeat(
+                spawn_pad_positions_team_b_view[None, :, :, :],
+                MAX_AGENTS_PER_TEAM,
+                axis=0,
+            ),
+        ),
+        axis=0,
+    )
+
+    spawn_pad_positions = (
+        config.agent_profile.active_mask[:, None, None, None]
+        * unmasked_spawn_pad_positions
+    )
+
+    active_mask_team_a_view = jnp.concatenate(
+        (
+            config.agent_profile.active_mask[TEAM_A_START:TEAM_A_END][None, :],
+            config.agent_profile.active_mask[TEAM_B_START:TEAM_B_END][None, :],
+        ),
+        axis=0,
+    )
+
+    active_mask_team_b_view = jnp.concatenate(
+        (
+            config.agent_profile.active_mask[TEAM_B_START:TEAM_B_END][None, :],
+            config.agent_profile.active_mask[TEAM_A_START:TEAM_A_END][None, :],
+        ),
+        axis=0,
+    )
+
+    unmasked_active_mask = jnp.concatenate(
+        (
+            jnp.repeat(
+                active_mask_team_a_view[None, :, :], MAX_AGENTS_PER_TEAM, axis=0
+            ),
+            jnp.repeat(
+                active_mask_team_b_view[None, :, :], MAX_AGENTS_PER_TEAM, axis=0
+            ),
+        ),
+        axis=0,
+    )
+
+    active_mask = jnp.logical_and(
+        unmasked_active_mask, config.agent_profile.active_mask[:, None, None]
+    )
+
+    alive_mask_team_a_view = jnp.concatenate(
+        (
+            state.alive_mask[TEAM_A_START:TEAM_A_END][None, :],
+            state.alive_mask[TEAM_B_START:TEAM_B_END][None, :],
+        ),
+        axis=0,
+    )
+
+    alive_mask_team_b_view = jnp.concatenate(
+        (
+            state.alive_mask[TEAM_B_START:TEAM_B_END][None, :],
+            state.alive_mask[TEAM_A_START:TEAM_A_END][None, :],
+        ),
+        axis=0,
+    )
+
+    unmasked_alive_mask = jnp.concatenate(
+        (
+            jnp.repeat(alive_mask_team_a_view[None, :, :], MAX_AGENTS_PER_TEAM, axis=0),
+            jnp.repeat(alive_mask_team_b_view[None, :, :], MAX_AGENTS_PER_TEAM, axis=0),
+        ),
+        axis=0,
+    )
+
+    alive_mask = jnp.logical_and(
+        unmasked_alive_mask, config.agent_profile.active_mask[:, None, None]
+    )
+
+    return SpawnLifecycleObservation(
+        spawn_pad_positions,
+        active_mask,
+        alive_mask,
+    )
+
+
 def _build_observation_and_action_mask(
     state: EnvState, config: EnvConfig
 ) -> tuple[Observation, ActionMask]:
@@ -807,6 +925,8 @@ def _build_observation_and_action_mask(
         )
     )
 
+    spawn_lifecycle_observation = _build_spawn_lifecycle_observation(state, config)
+
     current_observation = Observation(
         self_features=self_features,
         ally_unit_features=ally_features,
@@ -820,6 +940,7 @@ def _build_observation_and_action_mask(
         ally_visibility_mask=ally_visibility_mask,
         enemy_visibility_mask=enemy_visibility_mask,
         previous_timestep_actions=visibility_masked_previous_timestep_action_observation,
+        spawn_lifecycle=spawn_lifecycle_observation,
     )
 
     return current_observation, current_action_mask
@@ -832,9 +953,9 @@ def _build_intended_movement_deltas(
 ) -> Array:
     """Build voluntary movement intent from current public control truth.
 
-    Status durations in ``current_state`` must be the values visible at the
-    current decision epoch. Statuses accepted during this transition are
-    packaged for the next decision and must not retroactively change this
+    Status durations in ``current_state`` must be the values visible when the
+    policy selects the current action. Statuses accepted during this transition
+    are packaged for the next action and must not retroactively change this
     movement intent. Current stun, death, or inactivity yields zero intent here
     as defense in depth; geometry remains free to displace a zero-intent body
     during collision resolution.
@@ -847,7 +968,9 @@ def _build_intended_movement_deltas(
         current_state.slow_durations,
         current_state.priest_blessing_of_freedom_slow_floor_durations,
         current_state.stun_durations,
+        current_state.spawn_shield_durations,
         config.agent_profile.base_movement_speeds,
+        config.spawn_shield_movement_speed,
         jnp.logical_and(config.agent_profile.active_mask, current_state.alive_mask),
         config.ordinary_movement_distance_scale,
     )
@@ -922,7 +1045,9 @@ def _build_self_features(
         state.slow_durations,
         state.priest_blessing_of_freedom_slow_floor_durations,
         state.stun_durations,
+        state.spawn_shield_durations,
         config.agent_profile.base_movement_speeds,
+        config.spawn_shield_movement_speed,
         jnp.logical_and(config.agent_profile.active_mask, state.alive_mask),
         config.ordinary_movement_distance_scale,
     )
@@ -1644,18 +1769,19 @@ def _resolve_status_duration_lifecycle(
     accepted_positive_raw_damage_received_this_tick_by_global_recipient_slot: Array,
     hunter_basic_slow_applied_this_tick_by_global_actor_slot: Array,
     next_alive_mask: Array,
-) -> tuple[Array, Array, Array, Array, Array, Array, Array, Array, Array]:
-    """Resolve successor status durations and source-aligned application facts.
+) -> tuple[Array, Array, Array, Array, Array, Array, Array, Array, Array, Array]:
+    """Resolve successor transient durations and status-application facts.
 
     Current durations age once toward zero. Accepted positive raw damage then
     clears only the aged successor of a pre-existing Hunter Trap, after which
     fresh source-local applications merge at full configured duration. A fresh
     application never shortens a longer aged remainder and first governs the
-    next observable decision epoch. Dead successor slots retain the application
-    facts but carry no transient status duration into that epoch.
+    next policy action. The spawn-shield counter also ages once after movement.
+    Dead successor slots retain status-application facts but carry no transient
+    duration into the next state.
     """
 
-    # Derive fresh applications once from the accepted action at this epoch.
+    # Derive fresh applications once from the action accepted for this transition.
     (
         mage_uses_accepted_ultimate_this_tick_by_actor_slot,
         warrior_uses_accepted_ultimate_this_tick_by_actor_slot,
@@ -1875,12 +2001,20 @@ def _resolve_status_duration_lifecycle(
         next_priest_freedom_slow_floor_durations * next_alive_mask
     )
 
+    # Spawn shielding ages after movement and cannot survive death or padding.
+    next_spawn_shield_durations = (
+        jnp.maximum(current_state.spawn_shield_durations - 1, 0).astype(jnp.int32)
+        * next_alive_mask
+        * config.agent_profile.active_mask
+    )
+
     return (
         next_slow_durations,
         next_stun_durations,
         next_rogue_anti_heal_durations,
         next_mage_burst_durations,
         next_priest_freedom_slow_floor_durations,
+        next_spawn_shield_durations,
         slow_is_applied_by_source_and_channel,
         stun_is_applied_by_source_and_channel,
         rogue_poison_anti_heal_is_applied_by_source,
@@ -1954,6 +2088,8 @@ def _return_unchanged_agent_positions(
     map_width: Array | float,
     map_height: Array | float,
     obstacles: Array,
+    always_participates_in_agent_agent_collision: Array,
+    participates_in_agent_agent_collision_at_final_position: Array,
     agent_agent_overlap_projection_passes: int,
     collision_projection_passes: int,
     movement_substeps: int,
@@ -1970,6 +2106,8 @@ def _return_unchanged_agent_positions(
         agent_agent_overlap_projection_passes,
         collision_projection_passes,
         movement_substeps,
+        always_participates_in_agent_agent_collision,
+        participates_in_agent_agent_collision_at_final_position,
     )
 
     return agent_positions
@@ -1980,6 +2118,7 @@ def _resolve_post_charge_agent_positions(
     config: EnvConfig,
     accepted_joint_action: Action,
     accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix: Array,
+    always_participates_in_agent_agent_collision: Array,
 ) -> Array:
     """Resolve all accepted Warrior Charge relocations from one pre-state.
 
@@ -2057,6 +2196,8 @@ def _resolve_post_charge_agent_positions(
             config.map_width,
             config.map_height,
             config.obstacles,
+            always_participates_in_agent_agent_collision,
+            always_participates_in_agent_agent_collision,
             agent_agent_overlap_projection_passes,
             collision_projection_passes,
             movement_substeps,
@@ -2074,7 +2215,7 @@ def _build_death_transition_facts(
 ) -> DeathTransitionFacts:
     """Derive new successor deaths and source-aligned damage attribution.
 
-    A recipient dies only when it was active and alive in the choosing state
+    A recipient dies only when it was active and alive at transition start
     and its final clamped successor health is zero. Each contributing source
     retains its gross post-source, post-recipient effective damage; simultaneous
     healing and health clamping do not redistribute or select a killer.
@@ -2115,51 +2256,13 @@ def _build_death_transition_facts(
     )
 
 
-# Public ---
+def _build_canonical_no_transition_info_object(initial_state: EnvState) -> Info:
+    """Return neutral facts for reset or curated initialization.
 
-
-def reset(
-    config: EnvConfig, key: Array
-) -> tuple[EnvState, Observation, ActionMask, Info]:
-    """Create initial fixed-slot state from a host-validated configuration."""
-    # Reset keeps all arrays at MAX_AGENT_SLOTS length. Smaller tasks use the
-    # resolved profile's active mask to distinguish agents from padded slots.
-    # Ordinary reset starts all active agents alive. Scenario loaders may later
-    # create active-but-dead agents from curated states.
-    # Randomized task builders consume keys while constructing resolved episode
-    # configurations. Ordinary reset intentionally does not resample starts.
-    # TODO(Scenario): Keep curated scenario starts out of ordinary reset. A future
-    # scenario loader should validate and return EnvState values that reuse the
-    # same transition, observation, and mask machinery.
-    del key
-    initial_state = EnvState(
-        step_count=jnp.array(0, dtype=jnp.int32),
-        agent_positions=config.initial_agent_positions,
-        alive_mask=config.agent_profile.active_mask,
-        current_health=config.agent_profile.max_health,
-        ultimate_cooldowns=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
-        slow_durations=jnp.zeros((MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.int32),
-        stun_durations=jnp.zeros((MAX_AGENT_SLOTS, NUM_STUN_CHANNELS), dtype=jnp.int32),
-        rogue_poison_anti_heal_durations=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
-        mage_burst_damage_amplification_durations=jnp.zeros(
-            (MAX_AGENT_SLOTS,), dtype=jnp.int32
-        ),
-        priest_blessing_of_freedom_slow_floor_durations=jnp.zeros(
-            (MAX_AGENT_SLOTS,), dtype=jnp.int32
-        ),
-        previous_timestep_move_actions=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
-        previous_timestep_select_target_actions=jnp.zeros(
-            (MAX_AGENT_SLOTS,), dtype=jnp.int32
-        ),
-        previous_timestep_use_ultimate_actions=jnp.zeros(
-            (MAX_AGENT_SLOTS,), dtype=jnp.int32
-        ),
-        has_previous_timestep_joint_action=jnp.asarray(0, dtype=bool),
-    )
-
-    initial_observation, initial_action_mask = _build_observation_and_action_mask(
-        initial_state, config
-    )
+    Initialization exposes the supplied state's step count only through the
+    state itself. Transition facts use their canonical sentinel because no
+    action was accepted and no simulator transition occurred.
+    """
 
     all_false_vector = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.bool_)
     all_zeroes_vector = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32)
@@ -2219,7 +2322,80 @@ def reset(
         death_facts=reset_death_facts,
     )
 
-    info = Info(transition_facts=reset_transition_facts)
+    return Info(transition_facts=reset_transition_facts)
+
+
+# Public ---
+
+
+def initialize_scenario_state(
+    initial_state: EnvState, config: EnvConfig
+) -> tuple[EnvState, Observation, ActionMask, Info]:
+    """Validate and expose one authored state without advancing the simulator."""
+    validate_env_config(config)
+    validate_scenario_initial_state(config, initial_state)
+    obs, action_mask = _build_observation_and_action_mask(initial_state, config)
+    info = _build_canonical_no_transition_info_object(initial_state)
+    return (initial_state, obs, action_mask, info)
+
+
+def reset(
+    config: EnvConfig, key: Array
+) -> tuple[EnvState, Observation, ActionMask, Info]:
+    """Create initial fixed-slot state from a host-validated configuration."""
+    # Reset keeps all arrays at MAX_AGENT_SLOTS length. Smaller tasks use the
+    # resolved profile's active mask to distinguish agents from padded slots.
+    # Ordinary reset starts all active agents alive. Scenario loaders may later
+    # create active-but-dead agents from curated states.
+    # Randomized task builders consume keys while constructing resolved episode
+    # configurations. Ordinary reset intentionally does not resample starts.
+    # Curated starts use ``initialize_scenario_state`` so ordinary reset keeps a
+    # single deterministic pad-based position authority.
+    del key
+
+    team_spawn_pad_positions = jnp.concatenate(
+        (
+            config.team_spawn_pad_positions[TEAM_A_ID - 1, :, :],
+            config.team_spawn_pad_positions[TEAM_B_ID - 1, :, :],
+        ),
+        axis=0,
+    )
+
+    active_team_spawn_pad_positions = (
+        team_spawn_pad_positions * config.agent_profile.active_mask[:, None]
+    )
+
+    initial_state = EnvState(
+        step_count=jnp.array(0, dtype=jnp.int32),
+        agent_positions=active_team_spawn_pad_positions.astype(jnp.float32),
+        alive_mask=config.agent_profile.active_mask,
+        current_health=config.agent_profile.max_health,
+        ultimate_cooldowns=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        slow_durations=jnp.zeros((MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.int32),
+        stun_durations=jnp.zeros((MAX_AGENT_SLOTS, NUM_STUN_CHANNELS), dtype=jnp.int32),
+        rogue_poison_anti_heal_durations=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        mage_burst_damage_amplification_durations=jnp.zeros(
+            (MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
+        priest_blessing_of_freedom_slow_floor_durations=jnp.zeros(
+            (MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
+        spawn_shield_durations=jnp.zeros((MAX_AGENT_SLOTS), dtype=jnp.int32),
+        previous_timestep_move_actions=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        previous_timestep_select_target_actions=jnp.zeros(
+            (MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
+        previous_timestep_use_ultimate_actions=jnp.zeros(
+            (MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
+        has_previous_timestep_joint_action=jnp.asarray(0, dtype=bool),
+    )
+
+    initial_observation, initial_action_mask = _build_observation_and_action_mask(
+        initial_state, config
+    )
+
+    info = _build_canonical_no_transition_info_object(initial_state)
 
     return (initial_state, initial_observation, initial_action_mask, info)
 
@@ -2298,11 +2474,22 @@ def step(
         accepted_joint_action,
     )
 
+    # The current counter governs both traversal and final-endpoint collision.
+    # Geometry independently intersects these lifecycle masks with active/alive.
+    always_participates_in_agent_agent_collision = (
+        current_state.spawn_shield_durations == 0
+    )
+    participates_in_agent_agent_collision_at_final_position = jnp.logical_or(
+        always_participates_in_agent_agent_collision,
+        current_state.spawn_shield_durations == 1,
+    )
+
     post_charge_current_agent_positions = _resolve_post_charge_agent_positions(
         current_state,
         config,
         accepted_joint_action,
         accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix,
+        always_participates_in_agent_agent_collision,
     )
 
     # Resolve every precommitted voluntary move from the realized Charge phase.
@@ -2315,6 +2502,8 @@ def step(
         config.map_width,
         config.map_height,
         config.obstacles,
+        always_participates_in_agent_agent_collision,
+        participates_in_agent_agent_collision_at_final_position,
     )
 
     death_facts = _build_death_transition_facts(
@@ -2337,6 +2526,7 @@ def step(
         next_rogue_anti_heal_durations,
         next_mage_burst_durations,
         next_priest_freedom_slow_floor_durations,
+        next_spawn_shield_durations,
         slow_is_applied_by_source_and_channel,
         stun_is_applied_by_source_and_channel,
         rogue_poison_anti_heal_is_applied_by_source,
@@ -2412,6 +2602,7 @@ def step(
         rogue_poison_anti_heal_durations=next_rogue_anti_heal_durations,
         mage_burst_damage_amplification_durations=next_mage_burst_durations,
         priest_blessing_of_freedom_slow_floor_durations=next_priest_freedom_slow_floor_durations,
+        spawn_shield_durations=next_spawn_shield_durations,
         previous_timestep_move_actions=accepted_joint_action.move,
         previous_timestep_select_target_actions=accepted_joint_action.select_target,
         previous_timestep_use_ultimate_actions=accepted_joint_action.use_ultimate,

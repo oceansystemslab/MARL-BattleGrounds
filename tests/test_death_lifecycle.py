@@ -149,8 +149,12 @@ def _scenario(
         map_height=12.0,
         obstacles=_empty_obstacles() if obstacles is None else obstacles,
         agent_profile=profile,
-        initial_agent_positions=initial_positions,
         ordinary_movement_distance_scale=ordinary_movement_distance_scale,
+        team_spawn_pad_positions=initial_positions.reshape(
+            (2, MAX_AGENTS_PER_TEAM, ENVIRONMENT_DIMENSIONS)
+        ),
+        spawn_shield_duration_steps=3,
+        spawn_shield_movement_speed=2.0,
     )
     state, _, action_mask, info = reset(config, jax.random.key(1))
     return config, state, action_mask, info

@@ -21,6 +21,7 @@ from marl_battlegrounds.core.env import (
     step,
 )
 from marl_battlegrounds.core.types import (
+    ENVIRONMENT_DIMENSIONS,
     MAGE_CLASS_ID,
     MAX_AGENT_SLOTS,
     MAX_AGENTS_PER_TEAM,
@@ -129,10 +130,12 @@ def _config(
         map_height=12.0,
         obstacles=jnp.zeros((MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES), dtype=jnp.float32),
         agent_profile=profile,
-        initial_agent_positions=jnp.where(
-            profile.active_mask[:, None], configured_positions, 0.0
-        ),
         ordinary_movement_distance_scale=0.1,
+        team_spawn_pad_positions=configured_positions.reshape(
+            (2, MAX_AGENTS_PER_TEAM, ENVIRONMENT_DIMENSIONS)
+        ),
+        spawn_shield_duration_steps=3,
+        spawn_shield_movement_speed=2.0,
     )
 
 

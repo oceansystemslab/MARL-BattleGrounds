@@ -1,16 +1,19 @@
-"""Deterministic ordinary-reset scenarios for the Milestone 5 debugger."""
+"""Deterministic authored-state scenarios for the visual debugger."""
 
 from collections.abc import Iterator
 
+import jax
 import jax.numpy as jnp
 from jax import Array
 
-from marl_battlegrounds.core.config import resolve_agent_profile, validate_env_config
+from marl_battlegrounds.core.config import resolve_agent_profile
+from marl_battlegrounds.core.env import reset
 from marl_battlegrounds.core.types import (
     ENVIRONMENT_DIMENSIONS,
     HUNTER_CLASS_ID,
     MAGE_CLASS_ID,
     MAX_AGENT_SLOTS,
+    MAX_AGENTS_PER_TEAM,
     MAX_OBSTACLE_SLOTS,
     MOVE_EAST,
     MOVE_NORTH,
@@ -33,6 +36,7 @@ from marl_battlegrounds.core.types import (
     ROGUE_CLASS_ID,
     WARRIOR_CLASS_ID,
     EnvConfig,
+    EnvState,
 )
 from scripts.dev.visual_debugger.model import (
     ActorCommand,
@@ -77,7 +81,26 @@ def _wall(
     return obstacle.at[OBSTACLE_FEATURE_ACTIVE].set(1.0)
 
 
-def _config(
+def _spawn_pad_positions(map_width: float, map_height: float) -> Array:
+    """Return two unobstructed edge formations for later wave respawns."""
+    y_coordinates = jnp.linspace(
+        1.5,
+        map_height - 1.5,
+        MAX_AGENTS_PER_TEAM,
+        dtype=jnp.float32,
+    )
+    team_a = jnp.stack(
+        (jnp.full_like(y_coordinates, 1.5), y_coordinates),
+        axis=-1,
+    )
+    team_b = jnp.stack(
+        (jnp.full_like(y_coordinates, map_width - 1.5), y_coordinates),
+        axis=-1,
+    )
+    return jnp.stack((team_a, team_b), axis=0)
+
+
+def _scenario(
     *,
     map_width: float,
     map_height: float,
@@ -85,7 +108,8 @@ def _config(
     class_ids: tuple[int, ...],
     active_positions: dict[int, tuple[float, float]],
     obstacles: Array | None = None,
-) -> EnvConfig:
+) -> tuple[EnvConfig, EnvState]:
+    """Build a validated respawn configuration and authored debugger state."""
     if len(class_ids) != MAX_AGENT_SLOTS:
         msg = f"class_ids must contain {MAX_AGENT_SLOTS} fixed-slot values."
         raise ValueError(msg)
@@ -109,14 +133,16 @@ def _config(
         map_height=map_height,
         obstacles=_empty_obstacles() if obstacles is None else obstacles,
         agent_profile=profile,
-        initial_agent_positions=positions,
         ordinary_movement_distance_scale=_MOVEMENT_SCALE,
+        team_spawn_pad_positions=_spawn_pad_positions(map_width, map_height),
+        spawn_shield_duration_steps=3,
+        spawn_shield_movement_speed=2.0,
     )
-    validate_env_config(config)
-    return config
+    initial_state, _, _, _ = reset(config, jax.random.key(0))
+    return config, initial_state._replace(agent_positions=positions)
 
 
-def _arena_5v5_config() -> EnvConfig:
+def _arena_5v5_scenario() -> tuple[EnvConfig, EnvState]:
     obstacles = _empty_obstacles()
     obstacles = obstacles.at[0].set(_pillar(9.0, 3.0, 0.9))
     obstacles = obstacles.at[1].set(_wall(9.0, 7.8, 3.0, 0.5, 0.45))
@@ -144,7 +170,7 @@ def _arena_5v5_config() -> EnvConfig:
         8: (15.0, 4.0),
         9: (15.0, 2.0),
     }
-    return _config(
+    return _scenario(
         map_width=18.0,
         map_height=12.0,
         team_sizes=(5, 5),
@@ -154,7 +180,7 @@ def _arena_5v5_config() -> EnvConfig:
     )
 
 
-def _basic_support_config() -> EnvConfig:
+def _basic_support_scenario() -> tuple[EnvConfig, EnvState]:
     roster = (
         MAGE_CLASS_ID,
         HUNTER_CLASS_ID,
@@ -167,7 +193,7 @@ def _basic_support_config() -> EnvConfig:
         NEUTRAL_CLASS_ID,
         NEUTRAL_CLASS_ID,
     )
-    return _config(
+    return _scenario(
         map_width=14.0,
         map_height=12.0,
         team_sizes=(3, 3),
@@ -183,7 +209,7 @@ def _basic_support_config() -> EnvConfig:
     )
 
 
-def _ultimate_showcase_config() -> EnvConfig:
+def _ultimate_showcase_scenario() -> tuple[EnvConfig, EnvState]:
     roster = (
         MAGE_CLASS_ID,
         WARRIOR_CLASS_ID,
@@ -196,7 +222,7 @@ def _ultimate_showcase_config() -> EnvConfig:
         ROGUE_CLASS_ID,
         PRIEST_CLASS_ID,
     )
-    return _config(
+    return _scenario(
         map_width=16.0,
         map_height=12.0,
         team_sizes=(5, 5),
@@ -216,7 +242,7 @@ def _ultimate_showcase_config() -> EnvConfig:
     )
 
 
-def _aura_crossfire_config() -> EnvConfig:
+def _aura_crossfire_scenario() -> tuple[EnvConfig, EnvState]:
     roster = (
         MAGE_CLASS_ID,
         WARRIOR_CLASS_ID,
@@ -229,7 +255,7 @@ def _aura_crossfire_config() -> EnvConfig:
         NEUTRAL_CLASS_ID,
         NEUTRAL_CLASS_ID,
     )
-    return _config(
+    return _scenario(
         map_width=14.0,
         map_height=12.0,
         team_sizes=(3, 3),
@@ -245,7 +271,7 @@ def _aura_crossfire_config() -> EnvConfig:
     )
 
 
-def _status_stack_config() -> EnvConfig:
+def _status_stack_scenario() -> tuple[EnvConfig, EnvState]:
     roster = (
         WARRIOR_CLASS_ID,
         HUNTER_CLASS_ID,
@@ -258,7 +284,7 @@ def _status_stack_config() -> EnvConfig:
         NEUTRAL_CLASS_ID,
         NEUTRAL_CLASS_ID,
     )
-    return _config(
+    return _scenario(
         map_width=14.0,
         map_height=12.0,
         team_sizes=(3, 2),
@@ -273,7 +299,7 @@ def _status_stack_config() -> EnvConfig:
     )
 
 
-def _team_focus_crossfire_config() -> EnvConfig:
+def _team_focus_crossfire_scenario() -> tuple[EnvConfig, EnvState]:
     roster = (
         MAGE_CLASS_ID,
         WARRIOR_CLASS_ID,
@@ -286,7 +312,7 @@ def _team_focus_crossfire_config() -> EnvConfig:
         PRIEST_CLASS_ID,
         NEUTRAL_CLASS_ID,
     )
-    return _config(
+    return _scenario(
         map_width=16.0,
         map_height=12.0,
         team_sizes=(4, 4),
@@ -304,7 +330,7 @@ def _team_focus_crossfire_config() -> EnvConfig:
     )
 
 
-def _moving_focus_crossfire_config() -> EnvConfig:
+def _moving_focus_crossfire_scenario() -> tuple[EnvConfig, EnvState]:
     """Return a radially separated focus-fire fixture for minimum-view review."""
     roster = (
         MAGE_CLASS_ID,
@@ -318,7 +344,7 @@ def _moving_focus_crossfire_config() -> EnvConfig:
         PRIEST_CLASS_ID,
         NEUTRAL_CLASS_ID,
     )
-    return _config(
+    return _scenario(
         map_width=16.0,
         map_height=12.0,
         team_sizes=(4, 4),
@@ -336,7 +362,7 @@ def _moving_focus_crossfire_config() -> EnvConfig:
     )
 
 
-def _mirrored_ultimates_config() -> EnvConfig:
+def _mirrored_ultimates_scenario() -> tuple[EnvConfig, EnvState]:
     roster = (
         MAGE_CLASS_ID,
         WARRIOR_CLASS_ID,
@@ -349,7 +375,7 @@ def _mirrored_ultimates_config() -> EnvConfig:
         ROGUE_CLASS_ID,
         PRIEST_CLASS_ID,
     )
-    return _config(
+    return _scenario(
         map_width=18.0,
         map_height=14.0,
         team_sizes=(5, 5),
@@ -369,7 +395,7 @@ def _mirrored_ultimates_config() -> EnvConfig:
     )
 
 
-def _moving_basic_crossfire_config() -> EnvConfig:
+def _moving_basic_crossfire_scenario() -> tuple[EnvConfig, EnvState]:
     roster = (
         MAGE_CLASS_ID,
         WARRIOR_CLASS_ID,
@@ -382,7 +408,7 @@ def _moving_basic_crossfire_config() -> EnvConfig:
         ROGUE_CLASS_ID,
         PRIEST_CLASS_ID,
     )
-    return _config(
+    return _scenario(
         map_width=14.0,
         map_height=12.0,
         team_sizes=(5, 5),
@@ -402,7 +428,7 @@ def _moving_basic_crossfire_config() -> EnvConfig:
     )
 
 
-def _charge_convergence_config() -> EnvConfig:
+def _charge_convergence_scenario() -> tuple[EnvConfig, EnvState]:
     roster = (
         WARRIOR_CLASS_ID,
         WARRIOR_CLASS_ID,
@@ -415,7 +441,7 @@ def _charge_convergence_config() -> EnvConfig:
         NEUTRAL_CLASS_ID,
         NEUTRAL_CLASS_ID,
     )
-    return _config(
+    return _scenario(
         map_width=14.0,
         map_height=12.0,
         team_sizes=(2, 1),
@@ -428,7 +454,7 @@ def _charge_convergence_config() -> EnvConfig:
     )
 
 
-def _trap_lifecycle_config() -> EnvConfig:
+def _trap_lifecycle_scenario() -> tuple[EnvConfig, EnvState]:
     roster = (
         HUNTER_CLASS_ID,
         HUNTER_CLASS_ID,
@@ -441,7 +467,7 @@ def _trap_lifecycle_config() -> EnvConfig:
         WARRIOR_CLASS_ID,
         WARRIOR_CLASS_ID,
     )
-    return _config(
+    return _scenario(
         map_width=12.0,
         map_height=12.0,
         team_sizes=(5, 5),
@@ -461,7 +487,7 @@ def _trap_lifecycle_config() -> EnvConfig:
     )
 
 
-def _max_status_stack_config() -> EnvConfig:
+def _max_status_stack_scenario() -> tuple[EnvConfig, EnvState]:
     roster = (
         MAGE_CLASS_ID,
         PRIEST_CLASS_ID,
@@ -474,7 +500,7 @@ def _max_status_stack_config() -> EnvConfig:
         ROGUE_CLASS_ID,
         NEUTRAL_CLASS_ID,
     )
-    return _config(
+    return _scenario(
         map_width=16.0,
         map_height=12.0,
         team_sizes=(2, 4),
@@ -796,7 +822,7 @@ RESEARCHER_SCENARIOS: dict[str, DebuggerScenario] = {
             "Interactive LOS, visibility, range, relation, and mask inspection."
         ),
         mode="interactive",
-        build_config=_arena_5v5_config,
+        build_scenario=_arena_5v5_scenario,
         frames=(),
         default_controlled_slot=0,
         audience="researcher",
@@ -806,7 +832,7 @@ RESEARCHER_SCENARIOS: dict[str, DebuggerScenario] = {
         title="Basic damage and support",
         description="Scripted simultaneous Basic damage, healing, and passives.",
         mode="scripted",
-        build_config=_basic_support_config,
+        build_scenario=_basic_support_scenario,
         frames=_BASIC_SUPPORT_FRAMES,
         default_controlled_slot=0,
         audience="researcher",
@@ -816,7 +842,7 @@ RESEARCHER_SCENARIOS: dict[str, DebuggerScenario] = {
         title="Five-class Ultimate showcase",
         description="Scripted activation and lifecycle of all class Ultimates.",
         mode="scripted",
-        build_config=_ultimate_showcase_config,
+        build_scenario=_ultimate_showcase_scenario,
         frames=_ULTIMATE_SHOWCASE_FRAMES,
         default_controlled_slot=0,
         audience="researcher",
@@ -826,7 +852,7 @@ RESEARCHER_SCENARIOS: dict[str, DebuggerScenario] = {
         title="Aura crossfire",
         description="Scripted reciprocal Basics under both aura families.",
         mode="scripted",
-        build_config=_aura_crossfire_config,
+        build_scenario=_aura_crossfire_scenario,
         frames=_AURA_CROSSFIRE_FRAMES,
         default_controlled_slot=2,
         audience="researcher",
@@ -836,7 +862,7 @@ RESEARCHER_SCENARIOS: dict[str, DebuggerScenario] = {
         title="Status composition and lifecycle",
         description="Scripted stacked control, mitigation, break, and movement.",
         mode="scripted",
-        build_config=_status_stack_config,
+        build_scenario=_status_stack_scenario,
         frames=_STATUS_STACK_FRAMES,
         default_controlled_slot=5,
         audience="researcher",
@@ -848,7 +874,7 @@ RESEARCHER_SCENARIOS: dict[str, DebuggerScenario] = {
             "Repeated and simultaneous damage, healing, Poison, and Holy Word."
         ),
         mode="scripted",
-        build_config=_team_focus_crossfire_config,
+        build_scenario=_team_focus_crossfire_scenario,
         frames=_TEAM_FOCUS_CROSSFIRE_FRAMES,
         default_controlled_slot=2,
         audience="researcher",
@@ -858,7 +884,7 @@ RESEARCHER_SCENARIOS: dict[str, DebuggerScenario] = {
         title="Mirrored five-class Ultimates",
         description="Reciprocal and mirrored activation of all Ultimate families.",
         mode="scripted",
-        build_config=_mirrored_ultimates_config,
+        build_scenario=_mirrored_ultimates_scenario,
         frames=_MIRRORED_ULTIMATES_FRAMES,
         default_controlled_slot=0,
         audience="researcher",
@@ -872,7 +898,7 @@ STRESS_SCENARIOS: dict[str, DebuggerScenario] = {
         title="Moving Basic crossfire",
         description="Reciprocal Basics and healing across moving successor anchors.",
         mode="scripted",
-        build_config=_moving_basic_crossfire_config,
+        build_scenario=_moving_basic_crossfire_scenario,
         frames=_MOVING_BASIC_CROSSFIRE_FRAMES,
         default_controlled_slot=0,
         audience="stress",
@@ -882,7 +908,7 @@ STRESS_SCENARIOS: dict[str, DebuggerScenario] = {
         title="Moving focus crossfire",
         description="Moving focus fire and healing converge on one recipient.",
         mode="scripted",
-        build_config=_moving_focus_crossfire_config,
+        build_scenario=_moving_focus_crossfire_scenario,
         frames=_MOVING_FOCUS_CROSSFIRE_FRAMES,
         default_controlled_slot=2,
         audience="stress",
@@ -892,7 +918,7 @@ STRESS_SCENARIOS: dict[str, DebuggerScenario] = {
         title="Converging Charge routes",
         description="Three simultaneous reciprocal and shared-target Charges.",
         mode="scripted",
-        build_config=_charge_convergence_config,
+        build_scenario=_charge_convergence_scenario,
         frames=_CHARGE_CONVERGENCE_FRAMES,
         default_controlled_slot=0,
         audience="stress",
@@ -902,7 +928,7 @@ STRESS_SCENARIOS: dict[str, DebuggerScenario] = {
         title="Trap lifecycle stress",
         description="Application, break, reapplication, ambiguous end, and expiry.",
         mode="scripted",
-        build_config=_trap_lifecycle_config,
+        build_scenario=_trap_lifecycle_scenario,
         frames=_TRAP_LIFECYCLE_FRAMES,
         default_controlled_slot=0,
         audience="stress",
@@ -912,7 +938,7 @@ STRESS_SCENARIOS: dict[str, DebuggerScenario] = {
         title="Maximum status density",
         description="All nine compatible status channels on one recipient.",
         mode="scripted",
-        build_config=_max_status_stack_config,
+        build_scenario=_max_status_stack_scenario,
         frames=_MAX_STATUS_STACK_FRAMES,
         default_controlled_slot=0,
         audience="stress",

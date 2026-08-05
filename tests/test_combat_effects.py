@@ -156,10 +156,12 @@ def _scenario(
         map_height=12.0,
         obstacles=_empty_obstacles() if obstacles is None else obstacles,
         agent_profile=profile,
-        initial_agent_positions=(
-            _default_positions(team_sizes) if positions is None else positions
-        ),
         ordinary_movement_distance_scale=1.0,
+        team_spawn_pad_positions=(
+            _default_positions(team_sizes) if positions is None else positions
+        ).reshape((2, MAX_AGENTS_PER_TEAM, ENVIRONMENT_DIMENSIONS)),
+        spawn_shield_duration_steps=3,
+        spawn_shield_movement_speed=2.0,
     )
     state = EnvState(
         step_count=jnp.array(0, dtype=jnp.int32),
@@ -178,6 +180,7 @@ def _scenario(
         priest_blessing_of_freedom_slow_floor_durations=jnp.zeros(
             (MAX_AGENT_SLOTS,), dtype=jnp.int32
         ),
+        spawn_shield_durations=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
         previous_timestep_move_actions=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
         previous_timestep_select_target_actions=jnp.zeros(
             (MAX_AGENT_SLOTS,), dtype=jnp.int32

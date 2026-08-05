@@ -1,6 +1,5 @@
 """Exact public-trajectory integration tests for every debugger scenario."""
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -32,7 +31,7 @@ from tests.visual_debugger_fixtures import (
 )
 
 from marl_battlegrounds.core.config import validate_env_config
-from marl_battlegrounds.core.env import reset
+from marl_battlegrounds.core.env import initialize_scenario_state
 from marl_battlegrounds.core.types import (
     AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_AURA_MULTIPLIER,
     AGENT_FEATURE_DAMAGE_MITIGATION_WARRIOR_AURA_MULTIPLIER,
@@ -108,7 +107,7 @@ def _status_change(
     )
 
 
-def test_all_scenario_configs_validate_and_reset() -> None:
+def test_all_scenario_configs_validate_and_initialize_authored_state() -> None:
     researcher_names = (
         "arena_5v5",
         "basic_support",
@@ -154,12 +153,18 @@ def test_all_scenario_configs_validate_and_reset() -> None:
     )
 
     for scenario in list_scenarios(include_stress=True):
-        config = scenario.build_config()
+        config, authored_state = scenario.build_scenario()
         validate_env_config(config)
-        state, observation, action_mask, _ = reset(config, jax.random.key(17))
+        state, observation, action_mask, _ = initialize_scenario_state(
+            authored_state,
+            config,
+        )
 
         assert config.max_steps == 300
         assert config.ordinary_movement_distance_scale == 1.0
+        assert config.spawn_shield_duration_steps == 3
+        assert config.spawn_shield_movement_speed == 2.0
+        assert state is authored_state
         assert int(state.step_count) == 0
         assert not bool(state.has_previous_timestep_joint_action)
         assert observation.self_features.shape[0] == MAX_AGENT_SLOTS
@@ -484,7 +489,7 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
         controlled_slot,
     ) in expected_configs.items():
         scenario = get_scenario(name)
-        config = scenario.build_config()
+        config, state = scenario.build_scenario()
         observed_active = tuple(
             int(slot)
             for slot in np.flatnonzero(
@@ -498,7 +503,7 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
             == class_ids
         )
         np.testing.assert_allclose(
-            np.asarray(config.initial_agent_positions)[list(active_slots)],
+            np.asarray(state.agent_positions)[list(active_slots)],
             positions,
         )
         assert scenario.mode == mode
@@ -669,7 +674,7 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
 
 def test_every_scenario_frame_has_unique_active_actors_and_targets() -> None:
     for scenario in list_scenarios(include_stress=True):
-        config = scenario.build_config()
+        config, _ = scenario.build_scenario()
         active = np.asarray(config.agent_profile.active_mask, dtype=bool)
         for frame in scenario.frames:
             actor_slots = [command.actor_global_slot for command in frame.commands]

@@ -86,6 +86,7 @@ from marl_battlegrounds.core.types import (
     Observation,
     PreviousTimestepActionObservation,
     Reward,
+    SpawnLifecycleObservation,
 )
 
 VALID_TEAM_SIZES = (1, 2, 3, 4, 5)
@@ -119,6 +120,7 @@ class _CombatStateFields(TypedDict):
     rogue_poison_anti_heal_durations: Array
     mage_burst_damage_amplification_durations: Array
     priest_blessing_of_freedom_slow_floor_durations: Array
+    spawn_shield_durations: Array
     previous_timestep_move_actions: Array
     previous_timestep_select_target_actions: Array
     previous_timestep_use_ultimate_actions: Array
@@ -145,6 +147,7 @@ def _inert_combat_state_fields() -> _CombatStateFields:
         "priest_blessing_of_freedom_slow_floor_durations": jnp.zeros(
             shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32
         ),
+        "spawn_shield_durations": jnp.zeros(shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32),
         "previous_timestep_move_actions": jnp.zeros(
             shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32
         ),
@@ -177,6 +180,7 @@ def _non_inert_combat_state_fields(state: EnvState) -> _CombatStateFields:
         "priest_blessing_of_freedom_slow_floor_durations": (
             state.priest_blessing_of_freedom_slow_floor_durations.at[6].set(1)
         ),
+        "spawn_shield_durations": state.spawn_shield_durations,
         "previous_timestep_move_actions": state.previous_timestep_move_actions,
         "previous_timestep_select_target_actions": (
             state.previous_timestep_select_target_actions
@@ -247,8 +251,12 @@ def _config(
         map_height=12.0,
         obstacles=_empty_obstacles() if obstacles is None else obstacles,
         agent_profile=profile,
-        initial_agent_positions=jnp.where(profile.active_mask[:, None], positions, 0.0),
         ordinary_movement_distance_scale=1.0,
+        team_spawn_pad_positions=positions.reshape(
+            (NUM_TEAMS, MAX_AGENTS_PER_TEAM, ENVIRONMENT_DIMENSIONS)
+        ),
+        spawn_shield_duration_steps=3,
+        spawn_shield_movement_speed=2.0,
     )
 
 
@@ -330,6 +338,25 @@ def _zero_observation() -> Observation:
             shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM), dtype=bool
         ),
         previous_timestep_actions=previous_timestep_actions,
+        spawn_lifecycle=SpawnLifecycleObservation(
+            spawn_pad_positions=jnp.zeros(
+                (
+                    MAX_AGENT_SLOTS,
+                    NUM_TEAMS,
+                    MAX_AGENTS_PER_TEAM,
+                    ENVIRONMENT_DIMENSIONS,
+                ),
+                dtype=jnp.float32,
+            ),
+            active_mask=jnp.zeros(
+                (MAX_AGENT_SLOTS, NUM_TEAMS, MAX_AGENTS_PER_TEAM),
+                dtype=bool,
+            ),
+            alive_mask=jnp.zeros(
+                (MAX_AGENT_SLOTS, NUM_TEAMS, MAX_AGENTS_PER_TEAM),
+                dtype=bool,
+            ),
+        ),
     )
 
 
@@ -358,6 +385,9 @@ def _assert_state_contract(state: EnvState) -> None:
 
     assert state.stun_durations.shape == (MAX_AGENT_SLOTS, NUM_STUN_CHANNELS)
     assert state.stun_durations.dtype == jnp.int32
+
+    assert state.spawn_shield_durations.shape == (MAX_AGENT_SLOTS,)
+    assert state.spawn_shield_durations.dtype == jnp.int32
 
     assert state.rogue_poison_anti_heal_durations.shape == (MAX_AGENT_SLOTS,)
     assert state.rogue_poison_anti_heal_durations.dtype == jnp.int32
@@ -391,6 +421,7 @@ def _assert_effect_state_is_inert(state: EnvState) -> None:
     assert jnp.all(state.rogue_poison_anti_heal_durations == 0)
     assert jnp.all(state.mage_burst_damage_amplification_durations == 0)
     assert jnp.all(state.priest_blessing_of_freedom_slow_floor_durations == 0)
+    assert jnp.all(state.spawn_shield_durations == 0)
 
 
 def _assert_observation_contract(observation: Observation) -> None:
@@ -440,6 +471,26 @@ def _assert_observation_contract(observation: Observation) -> None:
         MAX_AGENTS_PER_TEAM,
     )
     assert observation.enemy_visibility_mask.dtype == bool
+
+    assert observation.spawn_lifecycle.spawn_pad_positions.shape == (
+        MAX_AGENT_SLOTS,
+        NUM_TEAMS,
+        MAX_AGENTS_PER_TEAM,
+        ENVIRONMENT_DIMENSIONS,
+    )
+    assert observation.spawn_lifecycle.spawn_pad_positions.dtype == jnp.float32
+    assert observation.spawn_lifecycle.active_mask.shape == (
+        MAX_AGENT_SLOTS,
+        NUM_TEAMS,
+        MAX_AGENTS_PER_TEAM,
+    )
+    assert observation.spawn_lifecycle.active_mask.dtype == bool
+    assert observation.spawn_lifecycle.alive_mask.shape == (
+        MAX_AGENT_SLOTS,
+        NUM_TEAMS,
+        MAX_AGENTS_PER_TEAM,
+    )
+    assert observation.spawn_lifecycle.alive_mask.dtype == bool
 
     assert "ally_targetability_mask" not in Observation._fields
     assert "enemy_targetability_mask" not in Observation._fields
@@ -640,6 +691,14 @@ def test_env_config_stores_static_episode_settings() -> None:
     assert jnp.array_equal(
         env_config.agent_profile.class_ids, _CANONICAL_INITIAL_CLASS_IDS
     )
+    assert env_config.team_spawn_pad_positions.shape == (
+        NUM_TEAMS,
+        MAX_AGENTS_PER_TEAM,
+        ENVIRONMENT_DIMENSIONS,
+    )
+    assert env_config.team_spawn_pad_positions.dtype == jnp.float32
+    assert env_config.spawn_shield_duration_steps == 3
+    assert env_config.spawn_shield_movement_speed == 2.0
 
 
 def test_env_state_stores_slot_aligned_arrays() -> None:

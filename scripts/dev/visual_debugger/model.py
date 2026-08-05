@@ -178,7 +178,7 @@ class DebuggerScenario:
     title: str
     description: str
     mode: ScenarioMode
-    build_config: Callable[[], EnvConfig]
+    build_scenario: Callable[[], tuple[EnvConfig, EnvState]]
     frames: tuple[ScenarioFrame, ...]
     default_controlled_slot: int
     audience: ScenarioAudience = "researcher"
@@ -258,6 +258,7 @@ class ActionRejection:
 @dataclass(frozen=True, slots=True)
 class TransitionView:
     scenario_name: str
+    config: EnvConfig
     submission_kind: SubmissionKind
     report_actor_slots: tuple[int, ...]
     before_state: EnvState

@@ -1,4 +1,4 @@
-"""Focused config/state ownership proofs for Milestone 5 Step 2 CP3C."""
+"""Focused config/state ownership and retained spawn-lifecycle proofs."""
 # pyright: reportPrivateUsage=false
 
 from typing import cast
@@ -58,6 +58,7 @@ _FINAL_STATE_FIELDS = (
     "rogue_poison_anti_heal_durations",
     "mage_burst_damage_amplification_durations",
     "priest_blessing_of_freedom_slow_floor_durations",
+    "spawn_shield_durations",
     "previous_timestep_move_actions",
     "previous_timestep_select_target_actions",
     "previous_timestep_use_ultimate_actions",
@@ -87,7 +88,7 @@ def _config(team_sizes: tuple[int, int] = (1, 1)) -> EnvConfig:
     profile = resolve_agent_profile(
         _requested_roster(), jnp.asarray(team_sizes, dtype=jnp.int32)
     )
-    positions = jnp.asarray(
+    spawn_pad_positions = jnp.asarray(
         (
             (0.5, 0.5),
             (2.5, 0.5),
@@ -101,15 +102,17 @@ def _config(team_sizes: tuple[int, int] = (1, 1)) -> EnvConfig:
             (8.5, 7.5),
         ),
         dtype=jnp.float32,
-    )
+    ).reshape(2, MAX_AGENTS_PER_TEAM, ENVIRONMENT_DIMENSIONS)
     return EnvConfig(
         max_steps=1000,
         map_width=20.0,
         map_height=12.0,
         obstacles=jnp.zeros((MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES), dtype=jnp.float32),
         agent_profile=profile,
-        initial_agent_positions=jnp.where(profile.active_mask[:, None], positions, 0.0),
         ordinary_movement_distance_scale=1.0,
+        team_spawn_pad_positions=spawn_pad_positions,
+        spawn_shield_duration_steps=3,
+        spawn_shield_movement_speed=2.0,
     )
 
 
@@ -146,9 +149,20 @@ def test_reset_initializes_dynamic_state_from_resolved_profile() -> None:
     state, observation, action_mask, _ = reset(config, jax.random.key(7))
     profile = config.agent_profile
 
+    configured_pad_positions = config.team_spawn_pad_positions.reshape(
+        MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS
+    )
+    expected_reset_positions = jnp.where(
+        profile.active_mask[:, None],
+        configured_pad_positions,
+        0.0,
+    )
+    assert bool(jnp.array_equal(state.agent_positions, expected_reset_positions))
     assert state.alive_mask.dtype == jnp.bool_
     assert bool(jnp.array_equal(state.alive_mask, profile.active_mask))
     assert bool(jnp.array_equal(state.current_health, profile.max_health))
+    assert state.spawn_shield_durations.dtype == jnp.int32
+    assert bool(jnp.all(state.spawn_shield_durations == 0))
     inactive_mask = jnp.logical_not(profile.active_mask)
     assert bool(jnp.all(action_mask.move_mask[inactive_mask, MOVE_STAY]))
     assert bool(jnp.all(jnp.sum(action_mask.move_mask[inactive_mask], axis=-1) == 1))
@@ -177,6 +191,69 @@ def test_reset_initializes_dynamic_state_from_resolved_profile() -> None:
     )
     for column, expected in static_columns:
         assert bool(jnp.array_equal(observation.self_features[:, column], expected))
+
+
+def test_spawn_lifecycle_is_team_relative_and_available_to_dead_observers() -> None:
+    """Retain public pads/rosters while zeroing only padded observer rows."""
+    config = _config((2, 1))
+    state, observation, _, _ = reset(config, jax.random.key(13))
+    lifecycle = observation.spawn_lifecycle
+    team_roster = config.agent_profile.active_mask.reshape(2, MAX_AGENTS_PER_TEAM)
+
+    assert bool(
+        jnp.array_equal(
+            lifecycle.spawn_pad_positions[0],
+            config.team_spawn_pad_positions,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            lifecycle.spawn_pad_positions[MAX_AGENTS_PER_TEAM],
+            config.team_spawn_pad_positions[::-1],
+        )
+    )
+    assert bool(jnp.array_equal(lifecycle.active_mask[0], team_roster))
+    assert bool(
+        jnp.array_equal(
+            lifecycle.active_mask[MAX_AGENTS_PER_TEAM],
+            team_roster[::-1],
+        )
+    )
+    assert bool(jnp.array_equal(lifecycle.alive_mask[0], team_roster))
+    assert bool(
+        jnp.array_equal(
+            lifecycle.alive_mask[MAX_AGENTS_PER_TEAM],
+            team_roster[::-1],
+        )
+    )
+
+    padded_observer = 2
+    assert bool(jnp.all(lifecycle.spawn_pad_positions[padded_observer] == 0.0))
+    assert not bool(jnp.any(lifecycle.active_mask[padded_observer]))
+    assert not bool(jnp.any(lifecycle.alive_mask[padded_observer]))
+
+    dead_observer_state = state._replace(
+        alive_mask=state.alive_mask.at[0].set(False),
+        current_health=state.current_health.at[0].set(0.0),
+    )
+    dead_observer_observation, _ = _build_observation_and_action_mask(
+        dead_observer_state,
+        config,
+    )
+    dead_lifecycle = dead_observer_observation.spawn_lifecycle
+    assert bool(
+        jnp.array_equal(
+            dead_lifecycle.spawn_pad_positions[0],
+            lifecycle.spawn_pad_positions[0],
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            dead_lifecycle.active_mask[0],
+            lifecycle.active_mask[0],
+        )
+    )
+    assert not bool(dead_lifecycle.alive_mask[0, 0, 0])
 
 
 def test_profile_base_speed_changes_movement_without_replacing_state() -> None:
