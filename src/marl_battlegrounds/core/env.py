@@ -102,6 +102,7 @@ from marl_battlegrounds.core.types import (
     PreviousTimestepActionObservation,
     Reward,
     SpawnLifecycleObservation,
+    SpawnShieldTransitionFacts,
     TransitionFacts,
 )
 
@@ -200,8 +201,10 @@ def _build_global_visibility_mask_and_distances(
     2. candidate is active and alive;
     3. candidate center is within observer i's observation radius;
     4. static line of sight from observer to candidate is clear.
+    5. an opposing candidate does not have an active spawn shield.
 
-    Self-visibility falls out naturally from the same predicate.
+    Spawn shield concealment is directional: self and allied visibility retain
+    the ordinary range and line-of-sight rules.
     """
     # Pairwise observer-candidate validity from active/alive state.
     alive_active_mask = jnp.logical_and(
@@ -244,11 +247,48 @@ def _build_global_visibility_mask_and_distances(
         config.obstacles,
     )
 
+    pre_spawn_shield_pairwise_global_visibility_mask = jnp.logical_and(
+        global_pairwise_validity_mask,
+        jnp.logical_and(observation_radii_mask, los_mask),
+    )
+
+    # Preserve ordinary self/ally visibility while hiding shielded opponents.
+    canvas = jnp.ones_like(pre_spawn_shield_pairwise_global_visibility_mask)
+    shielded_agents_by_global_slot = (
+        state.spawn_shield_durations > 0
+    )  # (MAX_AGENT_SLOTS)
+    team_a_shielded_agents_by_global_slot = shielded_agents_by_global_slot[
+        TEAM_A_START:TEAM_A_END
+    ]
+    team_b_shielded_agents_by_global_slot = shielded_agents_by_global_slot[
+        TEAM_B_START:TEAM_B_END
+    ]
+
+    team_a_shielded_opponent_mask = jnp.logical_not(
+        jnp.repeat(
+            team_b_shielded_agents_by_global_slot[None, :], MAX_AGENTS_PER_TEAM, axis=0
+        )
+    )
+    team_b_shielded_opponent_mask = jnp.logical_not(
+        jnp.repeat(
+            team_a_shielded_agents_by_global_slot[None, :], MAX_AGENTS_PER_TEAM, axis=0
+        )
+    )
+
+    # Replace only the two opposing-team blocks of the directed visibility mask.
+    shielded_opponent_mask = canvas.at[
+        TEAM_A_START:TEAM_A_END, TEAM_B_START:TEAM_B_END
+    ].set(team_a_shielded_opponent_mask)
+    shielded_opponent_mask = shielded_opponent_mask.at[
+        TEAM_B_START:TEAM_B_END, TEAM_A_START:TEAM_A_END
+    ].set(team_b_shielded_opponent_mask)
+
+    final_global_pairwise_visibility_mask = jnp.logical_and(
+        pre_spawn_shield_pairwise_global_visibility_mask, shielded_opponent_mask
+    )
+
     return (
-        jnp.logical_and(
-            global_pairwise_validity_mask,
-            jnp.logical_and(observation_radii_mask, los_mask),
-        ),
+        final_global_pairwise_visibility_mask,
         global_pairwise_distances,
     )
 
@@ -334,13 +374,17 @@ def _build_select_target_use_ultimate_joint_mask(
     # Stun is actor-side control: any active channel removes non-empty targets.
     is_not_stunned = jnp.all(state.stun_durations == 0, axis=-1)
 
+    # Stun and spawn shield independently make a source combat-ineligible.
+    is_not_under_spawn_shield = state.spawn_shield_durations == 0
+    is_combat_capable = jnp.logical_and(is_not_stunned, is_not_under_spawn_shield)
+
     # Fixed catalog payloads describe whether each actor owns the interaction.
     does_basic_damage = get_basic_damage_by_class_ids(class_ids) > 0
     does_basic_healing = get_basic_healing_by_class_ids(class_ids) > 0
 
     # Actor-owned facts broadcast across candidate columns.
-    actor_can_damage = jnp.logical_and(is_not_stunned, does_basic_damage)[:, None]
-    actor_can_heal = jnp.logical_and(is_not_stunned, does_basic_healing)[:, None]
+    actor_can_damage = jnp.logical_and(is_combat_capable, does_basic_damage)[:, None]
+    actor_can_heal = jnp.logical_and(is_combat_capable, does_basic_healing)[:, None]
 
     global_pairwise_ally_mask, global_pairwise_enemy_mask = (
         _build_global_pairwise_team_masks(config.agent_profile.team_ids)
@@ -395,13 +439,13 @@ def _build_select_target_use_ultimate_joint_mask(
     )
 
     actor_can_use_enemy_targeted_ultimate = jnp.logical_and(
-        is_not_stunned, has_available_enemy_targeted_ultimate
+        is_combat_capable, has_available_enemy_targeted_ultimate
     )[:, None]
     actor_can_use_ally_targeted_ultimate = jnp.logical_and(
-        is_not_stunned, has_available_ally_targeted_ultimate
+        is_combat_capable, has_available_ally_targeted_ultimate
     )[:, None]
     actor_can_use_no_target_ultimate = jnp.logical_and(
-        is_not_stunned, has_available_no_target_ultimate
+        is_combat_capable, has_available_no_target_ultimate
     )
     actor_can_use_no_target_ultimate = jnp.logical_and(
         active_and_alive_mask, actor_can_use_no_target_ultimate
@@ -749,11 +793,11 @@ def _build_visibility_masked_previous_timestep_action_observation(
 def _build_spawn_lifecycle_observation(
     state: EnvState, config: EnvConfig
 ) -> SpawnLifecycleObservation:
-    """Build actor-relative public spawn pads and fixed-slot lifecycle truth.
+    """Build actor-relative public spawn pads, shield rules, and lifecycle truth.
 
     Team row zero is the observer's team and row one is its opponent. Configured
-    living and dead observers receive the same public roster information;
-    padded observer rows remain zero.
+    living and dead observers receive the same public roster, spawn-shield
+    counters, and configured rules; padded observer rows remain zero.
     """
     spawn_pad_positions_team_a_view = jnp.concatenate(
         (
@@ -852,10 +896,59 @@ def _build_spawn_lifecycle_observation(
         unmasked_alive_mask, config.agent_profile.active_mask[:, None, None]
     )
 
+    spawn_shield_actual_durations_team_a_view = jnp.concatenate(
+        (
+            state.spawn_shield_durations[TEAM_A_START:TEAM_A_END][None, :],
+            state.spawn_shield_durations[TEAM_B_START:TEAM_B_END][None, :],
+        ),
+        axis=0,
+    )
+
+    spawn_shield_actual_durations_team_b_view = jnp.concatenate(
+        (
+            state.spawn_shield_durations[TEAM_B_START:TEAM_B_END][None, :],
+            state.spawn_shield_durations[TEAM_A_START:TEAM_A_END][None, :],
+        ),
+        axis=0,
+    )
+
+    unmasked_spawn_shield_actual_durations = jnp.concatenate(
+        (
+            jnp.repeat(
+                spawn_shield_actual_durations_team_a_view[None, :, :],
+                MAX_AGENTS_PER_TEAM,
+                axis=0,
+            ),
+            jnp.repeat(
+                spawn_shield_actual_durations_team_b_view[None, :, :],
+                MAX_AGENTS_PER_TEAM,
+                axis=0,
+            ),
+        ),
+        axis=0,
+    )
+
+    spawn_shield_actual_durations = (
+        unmasked_spawn_shield_actual_durations
+        * config.agent_profile.active_mask[:, None, None]
+    ).astype(jnp.int32)
+
+    spawn_shield_configured_duration_by_agent = (
+        config.spawn_shield_duration_steps * config.agent_profile.active_mask
+    )
+    spawn_shield_speed_by_agent = (
+        config.spawn_shield_movement_speed * config.agent_profile.active_mask
+    )
+
     return SpawnLifecycleObservation(
-        spawn_pad_positions,
-        active_mask,
-        alive_mask,
+        spawn_pad_positions_by_agent_by_team=spawn_pad_positions,
+        spawn_shield_actual_durations_by_agent_by_team=spawn_shield_actual_durations,
+        spawn_shield_configured_duration_by_agent=spawn_shield_configured_duration_by_agent.astype(
+            jnp.int32
+        ),
+        spawn_shield_speed_by_agent=spawn_shield_speed_by_agent.astype(jnp.float32),
+        active_mask_by_agent_by_team=active_mask,
+        alive_mask_by_agent_by_team=alive_mask,
     )
 
 
@@ -956,9 +1049,10 @@ def _build_intended_movement_deltas(
     Status durations in ``current_state`` must be the values visible when the
     policy selects the current action. Statuses accepted during this transition
     are packaged for the next action and must not retroactively change this
-    movement intent. Current stun, death, or inactivity yields zero intent here
-    as defense in depth; geometry remains free to displace a zero-intent body
-    during collision resolution.
+    movement intent. For a host-valid unshielded actor, current stun yields zero
+    intent; spawn shield and stun cannot coexist at the host boundary. Death or
+    inactivity also yields zero intent as defense in depth. Geometry remains
+    free to displace a zero-intent body during collision resolution.
     """
     intended_movement_deltas_unscaled = _JOINT_ACTION_MOVE_TO_DISPLACEMENT_LOOKUP_TABLE[
         accepted_joint_action.move
@@ -2314,12 +2408,18 @@ def _build_canonical_no_transition_info_object(initial_state: EnvState) -> Info:
         attributed_death_damage_by_source=all_zeroes_vector,
     )
 
+    reset_spawn_shield_facts = SpawnShieldTransitionFacts(
+        was_active_at_transition_start_by_agent=all_false_vector,
+        expired_at_transition_end_by_agent=all_false_vector,
+    )
+
     reset_transition_facts = TransitionFacts(
         has_transition=jnp.asarray(False),
-        choosing_step_count=jnp.asarray(-1, dtype=jnp.int32),
+        transition_start_step_count=jnp.asarray(-1, dtype=jnp.int32),
         action_acceptance_facts=reset_action_acceptance_facts,
         combat_transition_facts=reset_combat_transition_facts,
         death_facts=reset_death_facts,
+        spawn_shield_facts=reset_spawn_shield_facts,
     )
 
     return Info(transition_facts=reset_transition_facts)
@@ -2620,12 +2720,21 @@ def step(
         truncated=jnp.array(next_state.step_count >= config.max_steps),
     )
 
+    spawn_shield_facts = SpawnShieldTransitionFacts(
+        was_active_at_transition_start_by_agent=current_state.spawn_shield_durations
+        > 0,
+        expired_at_transition_end_by_agent=jnp.logical_and(
+            current_state.spawn_shield_durations == 1, next_alive_mask
+        ),
+    )
+
     transition_facts = TransitionFacts(
         has_transition=jnp.asarray(True),
-        choosing_step_count=current_state.step_count,
+        transition_start_step_count=current_state.step_count,
         action_acceptance_facts=action_acceptance_facts,
         combat_transition_facts=combat_transition_facts,
         death_facts=death_facts,
+        spawn_shield_facts=spawn_shield_facts,
     )
 
     info = Info(

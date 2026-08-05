@@ -34,6 +34,7 @@ from marl_battlegrounds.core.types import (
     NUM_SLOW_CHANNELS,
     NUM_STUN_CHANNELS,
     NUM_TARGET_ACTIONS,
+    NUM_TEAMS,
     NUM_ULTIMATE_ACTIONS,
     OBSTACLE_FEATURES,
     PRIEST_CLASS_ID,
@@ -84,7 +85,12 @@ def _requested_roster() -> Array:
     )
 
 
-def _config(team_sizes: tuple[int, int] = (1, 1)) -> EnvConfig:
+def _config(
+    team_sizes: tuple[int, int] = (1, 1),
+    *,
+    spawn_shield_duration_steps: int = 3,
+    spawn_shield_movement_speed: float = 2.0,
+) -> EnvConfig:
     profile = resolve_agent_profile(
         _requested_roster(), jnp.asarray(team_sizes, dtype=jnp.int32)
     )
@@ -111,8 +117,8 @@ def _config(team_sizes: tuple[int, int] = (1, 1)) -> EnvConfig:
         agent_profile=profile,
         ordinary_movement_distance_scale=1.0,
         team_spawn_pad_positions=spawn_pad_positions,
-        spawn_shield_duration_steps=3,
-        spawn_shield_movement_speed=2.0,
+        spawn_shield_duration_steps=spawn_shield_duration_steps,
+        spawn_shield_movement_speed=spawn_shield_movement_speed,
     )
 
 
@@ -194,47 +200,114 @@ def test_reset_initializes_dynamic_state_from_resolved_profile() -> None:
 
 
 def test_spawn_lifecycle_is_team_relative_and_available_to_dead_observers() -> None:
-    """Retain public pads/rosters while zeroing only padded observer rows."""
-    config = _config((2, 1))
-    state, observation, _, _ = reset(config, jax.random.key(13))
+    """Expose team-relative counters and rules to living and dead observers."""
+    configured_duration = 4
+    configured_speed = 1.75
+    config = _config(
+        (2, 1),
+        spawn_shield_duration_steps=configured_duration,
+        spawn_shield_movement_speed=configured_speed,
+    )
+    state, _, _, _ = reset(config, jax.random.key(13))
+    state = state._replace(
+        spawn_shield_durations=(
+            state.spawn_shield_durations.at[0]
+            .set(configured_duration)
+            .at[1]
+            .set(1)
+            .at[MAX_AGENTS_PER_TEAM]
+            .set(2)
+        )
+    )
+    observation, _ = _build_observation_and_action_mask(state, config)
     lifecycle = observation.spawn_lifecycle
     team_roster = config.agent_profile.active_mask.reshape(2, MAX_AGENTS_PER_TEAM)
+    team_shield_durations = state.spawn_shield_durations.reshape(
+        NUM_TEAMS,
+        MAX_AGENTS_PER_TEAM,
+    )
 
     assert bool(
         jnp.array_equal(
-            lifecycle.spawn_pad_positions[0],
+            lifecycle.spawn_pad_positions_by_agent_by_team[0],
             config.team_spawn_pad_positions,
         )
     )
     assert bool(
         jnp.array_equal(
-            lifecycle.spawn_pad_positions[MAX_AGENTS_PER_TEAM],
+            lifecycle.spawn_pad_positions_by_agent_by_team[MAX_AGENTS_PER_TEAM],
             config.team_spawn_pad_positions[::-1],
         )
     )
-    assert bool(jnp.array_equal(lifecycle.active_mask[0], team_roster))
+    assert bool(jnp.array_equal(lifecycle.active_mask_by_agent_by_team[0], team_roster))
     assert bool(
         jnp.array_equal(
-            lifecycle.active_mask[MAX_AGENTS_PER_TEAM],
+            lifecycle.active_mask_by_agent_by_team[MAX_AGENTS_PER_TEAM],
             team_roster[::-1],
         )
     )
-    assert bool(jnp.array_equal(lifecycle.alive_mask[0], team_roster))
+    assert bool(jnp.array_equal(lifecycle.alive_mask_by_agent_by_team[0], team_roster))
     assert bool(
         jnp.array_equal(
-            lifecycle.alive_mask[MAX_AGENTS_PER_TEAM],
+            lifecycle.alive_mask_by_agent_by_team[MAX_AGENTS_PER_TEAM],
             team_roster[::-1],
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            lifecycle.spawn_shield_actual_durations_by_agent_by_team[0],
+            team_shield_durations,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            lifecycle.spawn_shield_actual_durations_by_agent_by_team[
+                MAX_AGENTS_PER_TEAM
+            ],
+            team_shield_durations[::-1],
+        )
+    )
+    expected_configured_durations = jnp.where(
+        config.agent_profile.active_mask,
+        configured_duration,
+        0,
+    ).astype(jnp.int32)
+    expected_configured_speeds = jnp.where(
+        config.agent_profile.active_mask,
+        configured_speed,
+        0.0,
+    ).astype(jnp.float32)
+    assert bool(
+        jnp.array_equal(
+            lifecycle.spawn_shield_configured_duration_by_agent,
+            expected_configured_durations,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            lifecycle.spawn_shield_speed_by_agent,
+            expected_configured_speeds,
         )
     )
 
     padded_observer = 2
-    assert bool(jnp.all(lifecycle.spawn_pad_positions[padded_observer] == 0.0))
-    assert not bool(jnp.any(lifecycle.active_mask[padded_observer]))
-    assert not bool(jnp.any(lifecycle.alive_mask[padded_observer]))
+    assert bool(
+        jnp.all(lifecycle.spawn_pad_positions_by_agent_by_team[padded_observer] == 0.0)
+    )
+    assert not bool(
+        jnp.any(
+            lifecycle.spawn_shield_actual_durations_by_agent_by_team[padded_observer]
+        )
+    )
+    assert lifecycle.spawn_shield_configured_duration_by_agent[padded_observer] == 0
+    assert lifecycle.spawn_shield_speed_by_agent[padded_observer] == 0.0
+    assert not bool(jnp.any(lifecycle.active_mask_by_agent_by_team[padded_observer]))
+    assert not bool(jnp.any(lifecycle.alive_mask_by_agent_by_team[padded_observer]))
 
     dead_observer_state = state._replace(
         alive_mask=state.alive_mask.at[0].set(False),
         current_health=state.current_health.at[0].set(0.0),
+        spawn_shield_durations=state.spawn_shield_durations.at[0].set(0),
     )
     dead_observer_observation, _ = _build_observation_and_action_mask(
         dead_observer_state,
@@ -243,17 +316,58 @@ def test_spawn_lifecycle_is_team_relative_and_available_to_dead_observers() -> N
     dead_lifecycle = dead_observer_observation.spawn_lifecycle
     assert bool(
         jnp.array_equal(
-            dead_lifecycle.spawn_pad_positions[0],
-            lifecycle.spawn_pad_positions[0],
+            dead_lifecycle.spawn_pad_positions_by_agent_by_team[0],
+            lifecycle.spawn_pad_positions_by_agent_by_team[0],
         )
     )
     assert bool(
         jnp.array_equal(
-            dead_lifecycle.active_mask[0],
-            lifecycle.active_mask[0],
+            dead_lifecycle.active_mask_by_agent_by_team[0],
+            lifecycle.active_mask_by_agent_by_team[0],
         )
     )
-    assert not bool(dead_lifecycle.alive_mask[0, 0, 0])
+    assert not bool(dead_lifecycle.alive_mask_by_agent_by_team[0, 0, 0])
+    assert bool(
+        jnp.array_equal(
+            dead_lifecycle.spawn_shield_actual_durations_by_agent_by_team[0],
+            dead_observer_state.spawn_shield_durations.reshape(
+                NUM_TEAMS,
+                MAX_AGENTS_PER_TEAM,
+            ),
+        )
+    )
+    assert (
+        dead_lifecycle.spawn_shield_configured_duration_by_agent[0]
+        == configured_duration
+    )
+    assert dead_lifecycle.spawn_shield_speed_by_agent[0] == configured_speed
+
+
+def test_disabled_spawn_shield_lifecycle_keeps_public_speed_and_zero_timing() -> None:
+    """Represent duration-zero ablation without hiding its configured speed."""
+    configured_speed = 1.25
+    config = _config(
+        (1, 1),
+        spawn_shield_duration_steps=0,
+        spawn_shield_movement_speed=configured_speed,
+    )
+
+    state, observation, _, _ = reset(config, jax.random.key(14))
+    lifecycle = observation.spawn_lifecycle
+
+    assert not bool(jnp.any(state.spawn_shield_durations))
+    assert not bool(jnp.any(lifecycle.spawn_shield_actual_durations_by_agent_by_team))
+    assert not bool(jnp.any(lifecycle.spawn_shield_configured_duration_by_agent))
+    assert bool(
+        jnp.array_equal(
+            lifecycle.spawn_shield_speed_by_agent,
+            jnp.where(
+                config.agent_profile.active_mask,
+                configured_speed,
+                0.0,
+            ).astype(jnp.float32),
+        )
+    )
 
 
 def test_profile_base_speed_changes_movement_without_replacing_state() -> None:

@@ -285,11 +285,22 @@ class PreviousTimestepActionObservation(NamedTuple):
 
 
 class SpawnLifecycleObservation(NamedTuple):
-    """Actor-relative public spawn-pad and roster lifecycle structure."""
+    """Actor-relative public spawn pads, shield rules, and roster lifecycle."""
 
-    spawn_pad_positions: Array  # (MAX_AGENT_SLOTS, NUM_TEAMS, MAX_AGENTS_PER_TEAM, 2)
-    active_mask: Array  # (MAX_AGENT_SLOTS, NUM_TEAMS, MAX_AGENTS_PER_TEAM)
-    alive_mask: Array  # (MAX_AGENT_SLOTS, NUM_TEAMS, MAX_AGENTS_PER_TEAM)
+    spawn_pad_positions_by_agent_by_team: (
+        Array  # (MAX_AGENT_SLOTS, NUM_TEAMS, MAX_AGENTS_PER_TEAM, 2)
+    )
+    spawn_shield_actual_durations_by_agent_by_team: (
+        Array  # (MAX_AGENT_SLOTS, NUM_TEAMS, MAX_AGENTS_PER_TEAM)
+    )
+    spawn_shield_configured_duration_by_agent: Array  # (MAX_AGENT_SLOTS)
+    spawn_shield_speed_by_agent: Array  # (MAX_AGENT_SLOTS)
+    active_mask_by_agent_by_team: (
+        Array  # (MAX_AGENT_SLOTS, NUM_TEAMS, MAX_AGENTS_PER_TEAM)
+    )
+    alive_mask_by_agent_by_team: (
+        Array  # (MAX_AGENT_SLOTS, NUM_TEAMS, MAX_AGENTS_PER_TEAM)
+    )
 
 
 class Observation(NamedTuple):
@@ -375,14 +386,22 @@ class DeathTransitionFacts(NamedTuple):
     attributed_death_damage_by_source: Array
 
 
+class SpawnShieldTransitionFacts(NamedTuple):
+    """Authoritative spawn-shield activity and ordinary-expiry facts."""
+
+    was_active_at_transition_start_by_agent: Array  # (MAX_AGENT_SLOTS,)
+    expired_at_transition_end_by_agent: Array  # (MAX_AGENT_SLOTS,)
+
+
 class TransitionFacts(NamedTuple):
     """Fixed-shape authoritative facts for one reset or environment transition."""
 
     has_transition: Array
-    choosing_step_count: Array
+    transition_start_step_count: Array
     action_acceptance_facts: ActionAcceptanceFacts
     combat_transition_facts: CombatTransitionFacts
     death_facts: DeathTransitionFacts
+    spawn_shield_facts: SpawnShieldTransitionFacts
 
 
 class Info(NamedTuple):

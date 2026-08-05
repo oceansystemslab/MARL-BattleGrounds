@@ -896,6 +896,15 @@ def validate_env_state(config: EnvConfig, state: EnvState) -> None:
         )
     if bool(np.any(host_spawn_shield_durations[inactive] != 0)):
         raise ValueError("inactive spawn_shield_durations rows must be exactly zero.")
+    if bool(
+        np.any(
+            (host_spawn_shield_durations > 0) & np.any(host_stun_durations > 0, axis=-1)
+        )
+    ):
+        raise ValueError(
+            "spawn_shield_durations and stun_durations cannot both be positive "
+            "for the same slot."
+        )
 
     host_previous_move_actions = _validate_previous_action_domain(
         previous_move_actions,

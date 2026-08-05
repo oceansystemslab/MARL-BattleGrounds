@@ -155,7 +155,7 @@ def test_all_scenario_configs_validate_and_initialize_authored_state() -> None:
     for scenario in list_scenarios(include_stress=True):
         config, authored_state = scenario.build_scenario()
         validate_env_config(config)
-        state, observation, action_mask, _ = initialize_scenario_state(
+        state, observation, action_mask, info = initialize_scenario_state(
             authored_state,
             config,
         )
@@ -173,6 +173,9 @@ def test_all_scenario_configs_validate_and_initialize_authored_state() -> None:
             11,
             2,
         )
+        shield_facts = info.transition_facts.spawn_shield_facts
+        assert not bool(jnp.any(shield_facts.was_active_at_transition_start_by_agent))
+        assert not bool(jnp.any(shield_facts.expired_at_transition_end_by_agent))
         assert bool(
             jnp.array_equal(
                 state.current_health,

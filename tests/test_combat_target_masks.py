@@ -27,7 +27,9 @@ from marl_battlegrounds.core.types import (
     MOVE_STAY,
     NEUTRAL_CLASS_ID,
     NO_TEAM_ID,
+    NUM_MOVE_ACTIONS,
     NUM_TARGET_ACTIONS,
+    NUM_ULTIMATE_ACTIONS,
     OBSTACLE_FEATURES,
     PRIEST_CLASS_ID,
     ROGUE_CLASS_ID,
@@ -175,6 +177,43 @@ def _basic_relation_masks(action_mask: ActionMask) -> tuple[Array, Array]:
         basic_lane[:, _ALLY_TARGET_START : _ALLY_TARGET_START + MAX_AGENTS_PER_TEAM],
         basic_lane[:, _ENEMY_TARGET_START:],
     )
+
+
+@pytest.mark.parametrize(
+    "shielded_source_slot",
+    (
+        pytest.param(_ACTOR_SLOT, id="team-a"),
+        pytest.param(_ENEMY_SLOT, id="team-b"),
+    ),
+)
+def test_spawn_shield_source_allows_every_move_and_only_neutral_combat(
+    shielded_source_slot: int,
+) -> None:
+    """A shielded source retains all movement and exactly one inert combat pair."""
+    config, state = _target_scenario()
+    shielded_state = state._replace(
+        spawn_shield_durations=state.spawn_shield_durations.at[
+            shielded_source_slot
+        ].set(3)
+    )
+
+    observation, action_mask = _build_observation_and_action_mask(
+        shielded_state, config
+    )
+    source_joint_mask = action_mask.select_target_use_ultimate_joint_mask[
+        shielded_source_slot
+    ]
+
+    _assert_public_target_contract(observation, action_mask)
+    assert action_mask.move_mask[shielded_source_slot].shape == (NUM_MOVE_ACTIONS,)
+    assert bool(jnp.all(action_mask.move_mask[shielded_source_slot]))
+    assert bool(action_mask.select_target_mask[shielded_source_slot, 0])
+    assert not bool(jnp.any(action_mask.select_target_mask[shielded_source_slot, 1:]))
+    assert bool(action_mask.use_ultimate_mask[shielded_source_slot, 0])
+    assert not bool(jnp.any(action_mask.use_ultimate_mask[shielded_source_slot, 1:]))
+    assert source_joint_mask.shape == (NUM_TARGET_ACTIONS, NUM_ULTIMATE_ACTIONS)
+    assert bool(source_joint_mask[0, 0])
+    assert int(jnp.sum(source_joint_mask)) == 1
 
 
 @pytest.mark.parametrize(

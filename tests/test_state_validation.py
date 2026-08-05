@@ -431,6 +431,63 @@ def test_disabled_spawn_shield_requires_all_counter_rows_to_be_zero() -> None:
 
 
 @pytest.mark.parametrize(
+    "stun_channels",
+    (
+        pytest.param((0,), id="warrior-charge"),
+        pytest.param((1,), id="hunter-trap"),
+        pytest.param((2,), id="rogue-poison"),
+        pytest.param(tuple(range(NUM_STUN_CHANNELS)), id="multiple-channels"),
+    ),
+)
+@pytest.mark.parametrize(
+    "spawn_shield_duration",
+    (
+        pytest.param(1, id="one-step-remaining"),
+        pytest.param(3, id="configured-maximum"),
+    ),
+)
+def test_spawn_shield_and_stun_cannot_coexist_on_one_living_slot(
+    stun_channels: tuple[int, ...],
+    spawn_shield_duration: int,
+) -> None:
+    """Reject lifecycle states that combine shielding with any active stun."""
+    config, state = _valid_state()
+    stun_durations = state.stun_durations
+    for channel in stun_channels:
+        stun_durations = stun_durations.at[0, channel].set(1)
+    invalid_state = state._replace(
+        stun_durations=stun_durations,
+        spawn_shield_durations=state.spawn_shield_durations.at[0].set(
+            spawn_shield_duration
+        ),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="spawn_shield_durations and stun_durations",
+    ):
+        validate_env_state(config, invalid_state)
+
+
+def test_spawn_shield_stun_exclusion_preserves_each_independent_state() -> None:
+    """Accept shielding without stun and stun without shielding."""
+    config, state = _valid_state()
+    shielded_state = state._replace(
+        spawn_shield_durations=state.spawn_shield_durations.at[0].set(
+            config.spawn_shield_duration_steps
+        )
+    )
+    stunned_state = state._replace(
+        stun_durations=state.stun_durations.at[0].set(
+            jnp.ones((NUM_STUN_CHANNELS,), dtype=jnp.int32)
+        )
+    )
+
+    assert validate_env_state(config, shielded_state) is None
+    assert validate_env_state(config, stunned_state) is None
+
+
+@pytest.mark.parametrize(
     "health_case",
     (
         pytest.param("zero", id="alive-zero"),

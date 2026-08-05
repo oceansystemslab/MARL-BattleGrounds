@@ -1593,19 +1593,13 @@ def test_spawn_shield_uses_absolute_speed_for_every_nonstay_heading(
     )
     state = state._replace(
         slow_durations=state.slow_durations.at[0].set(5),
-        stun_durations=state.stun_durations.at[0, STUN_CHANNEL_HUNTER_TRAP].set(2),
     )
     observation, current_action_mask = _build_observation_and_action_mask(state, config)
 
-    # CP3 owns canonical shield action masks. This forged row isolates CP2's
-    # defense-in-depth movement semantics from the pre-existing stun mask.
-    movement_permissive_action_mask = current_action_mask._replace(
-        move_mask=current_action_mask.move_mask.at[0].set(True)
-    )
     next_state, next_observation, *_ = step(
         config,
         state,
-        movement_permissive_action_mask,
+        current_action_mask,
         _joint_action_with_moves((0, move_action)),
         jax.random.key(72),
     )

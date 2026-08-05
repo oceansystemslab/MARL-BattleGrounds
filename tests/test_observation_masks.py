@@ -1247,6 +1247,142 @@ def test_visibility_masks(
     _assert_visibility_masks_match(observation, expected_ally, expected_enemy)
 
 
+def test_spawn_shield_conceals_only_opponents_and_preserves_self_and_ally_rows() -> (
+    None
+):
+    """Shielded actors retain normal self/ally truth while opponents see no row."""
+    config = _deterministic_config(obstacles=_empty_obstacles())
+    config, state = _state_two_versus_two_game(
+        config,
+        agent_a_position=jnp.array([2.0, 2.0], dtype=jnp.float32),
+        agent_b_position=jnp.array([4.0, 2.0], dtype=jnp.float32),
+        agent_c_position=jnp.array([2.0, 5.0], dtype=jnp.float32),
+        agent_d_position=jnp.array([4.0, 5.0], dtype=jnp.float32),
+        effective_observation_radius=8.0,
+    )
+    shielded_slot = MAX_AGENTS_PER_TEAM
+    shielded_state = state._replace(
+        spawn_shield_durations=state.spawn_shield_durations.at[shielded_slot].set(3)
+    )
+
+    observation, _ = _build_observation_and_action_mask(shielded_state, config)
+
+    assert bool(observation.ally_visibility_mask[shielded_slot, 0])
+    assert bool(observation.ally_visibility_mask[shielded_slot + 1, 0])
+    _assert_unit_feature_row_matches_self_row(
+        observation,
+        expected_global_slot=shielded_slot,
+        result_row=observation.ally_unit_features[shielded_slot + 1, 0],
+    )
+    assert bool(
+        jnp.array_equal(
+            observation.self_features[
+                shielded_slot, AGENT_FEATURE_X : AGENT_FEATURE_Y + 1
+            ],
+            shielded_state.agent_positions[shielded_slot],
+        )
+    )
+    assert (
+        observation.self_features[shielded_slot, AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED]
+        == config.spawn_shield_movement_speed
+    )
+
+    assert not bool(observation.enemy_visibility_mask[0, 0])
+    _assert_unit_feature_row_is_zero(observation.enemy_unit_features[0, 0])
+    assert bool(observation.enemy_visibility_mask[shielded_slot, 0])
+
+
+@pytest.mark.parametrize(
+    ("obstacles", "observation_radius"),
+    (
+        pytest.param(_empty_obstacles(), 3.0, id="outside-range"),
+        pytest.param(
+            _obstacle_array_with_rows(
+                (
+                    0,
+                    _pillar_obstacle(
+                        x=5.0,
+                        y=8.0,
+                        radius=0.75,
+                        active=True,
+                    ),
+                )
+            ),
+            10.0,
+            id="blocked-line-of-sight",
+        ),
+    ),
+)
+def test_spawn_shield_does_not_override_ordinary_ally_visibility(
+    obstacles: Array,
+    observation_radius: float,
+) -> None:
+    """Spawn shield must not grant ally visibility through range or LOS limits."""
+    config = _deterministic_config(obstacles=obstacles)
+    config, state = _state_two_versus_two_game(
+        config,
+        agent_a_position=jnp.array([2.0, 2.0], dtype=jnp.float32),
+        agent_b_position=jnp.array([4.0, 2.0], dtype=jnp.float32),
+        agent_c_position=jnp.array([2.0, 8.0], dtype=jnp.float32),
+        agent_d_position=jnp.array([8.0, 8.0], dtype=jnp.float32),
+        effective_observation_radius=observation_radius,
+    )
+    shielded_slot = MAX_AGENTS_PER_TEAM
+    shielded_state = state._replace(
+        spawn_shield_durations=state.spawn_shield_durations.at[shielded_slot].set(3)
+    )
+
+    shielded_observation, _ = _build_observation_and_action_mask(shielded_state, config)
+    unshielded_observation, _ = _build_observation_and_action_mask(state, config)
+
+    assert not bool(shielded_observation.ally_visibility_mask[shielded_slot + 1, 0])
+    assert bool(
+        shielded_observation.ally_visibility_mask[shielded_slot + 1, 0]
+        == unshielded_observation.ally_visibility_mask[shielded_slot + 1, 0]
+    )
+    _assert_unit_feature_row_is_zero(
+        shielded_observation.ally_unit_features[shielded_slot + 1, 0]
+    )
+
+
+def test_spawn_shield_expiry_lifts_concealment_only_in_next_observation() -> None:
+    """A 1-to-0 countdown remains hidden now and becomes visible next step."""
+    config = _deterministic_config(obstacles=_empty_obstacles())
+    config, state = _state_two_versus_two_game(
+        config,
+        agent_a_position=jnp.array([2.0, 2.0], dtype=jnp.float32),
+        agent_b_position=jnp.array([4.0, 2.0], dtype=jnp.float32),
+        agent_c_position=jnp.array([2.0, 5.0], dtype=jnp.float32),
+        agent_d_position=jnp.array([4.0, 5.0], dtype=jnp.float32),
+        effective_observation_radius=8.0,
+    )
+    expiring_slot = MAX_AGENTS_PER_TEAM
+    expiring_state = state._replace(
+        spawn_shield_durations=state.spawn_shield_durations.at[expiring_slot].set(1)
+    )
+    current_observation, current_action_mask = _build_observation_and_action_mask(
+        expiring_state, config
+    )
+
+    next_state, next_observation, *_ = step(
+        config,
+        expiring_state,
+        current_action_mask,
+        _joint_action_with_moves(),
+        jax.random.key(42),
+    )
+
+    assert not bool(current_observation.enemy_visibility_mask[0, 0])
+    _assert_unit_feature_row_is_zero(current_observation.enemy_unit_features[0, 0])
+    assert next_state.spawn_shield_durations[expiring_slot] == 0
+    assert bool(next_observation.enemy_visibility_mask[0, 0])
+    _assert_unit_feature_row_matches_self_row(
+        next_observation,
+        expected_global_slot=expiring_slot,
+        result_row=next_observation.enemy_unit_features[0, 0],
+    )
+
+
 def test_visible_candidate_rows_match_shared_self_feature_schema() -> None:
     """Visible relation-local rows expose the candidate's shared agent schema."""
     config = _deterministic_config(obstacles=_empty_obstacles())

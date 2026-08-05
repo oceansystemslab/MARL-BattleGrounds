@@ -339,7 +339,7 @@ def _zero_observation() -> Observation:
         ),
         previous_timestep_actions=previous_timestep_actions,
         spawn_lifecycle=SpawnLifecycleObservation(
-            spawn_pad_positions=jnp.zeros(
+            spawn_pad_positions_by_agent_by_team=jnp.zeros(
                 (
                     MAX_AGENT_SLOTS,
                     NUM_TEAMS,
@@ -348,11 +348,23 @@ def _zero_observation() -> Observation:
                 ),
                 dtype=jnp.float32,
             ),
-            active_mask=jnp.zeros(
+            spawn_shield_actual_durations_by_agent_by_team=jnp.zeros(
+                (MAX_AGENT_SLOTS, NUM_TEAMS, MAX_AGENTS_PER_TEAM),
+                dtype=jnp.int32,
+            ),
+            spawn_shield_configured_duration_by_agent=jnp.zeros(
+                (MAX_AGENT_SLOTS,),
+                dtype=jnp.int32,
+            ),
+            spawn_shield_speed_by_agent=jnp.zeros(
+                (MAX_AGENT_SLOTS,),
+                dtype=jnp.float32,
+            ),
+            active_mask_by_agent_by_team=jnp.zeros(
                 (MAX_AGENT_SLOTS, NUM_TEAMS, MAX_AGENTS_PER_TEAM),
                 dtype=bool,
             ),
-            alive_mask=jnp.zeros(
+            alive_mask_by_agent_by_team=jnp.zeros(
                 (MAX_AGENT_SLOTS, NUM_TEAMS, MAX_AGENTS_PER_TEAM),
                 dtype=bool,
             ),
@@ -472,25 +484,52 @@ def _assert_observation_contract(observation: Observation) -> None:
     )
     assert observation.enemy_visibility_mask.dtype == bool
 
-    assert observation.spawn_lifecycle.spawn_pad_positions.shape == (
+    assert observation.spawn_lifecycle.spawn_pad_positions_by_agent_by_team.shape == (
         MAX_AGENT_SLOTS,
         NUM_TEAMS,
         MAX_AGENTS_PER_TEAM,
         ENVIRONMENT_DIMENSIONS,
     )
-    assert observation.spawn_lifecycle.spawn_pad_positions.dtype == jnp.float32
-    assert observation.spawn_lifecycle.active_mask.shape == (
+    assert (
+        observation.spawn_lifecycle.spawn_pad_positions_by_agent_by_team.dtype
+        == jnp.float32
+    )
+    assert (
+        observation.spawn_lifecycle.spawn_shield_actual_durations_by_agent_by_team.shape
+        == (
+            MAX_AGENT_SLOTS,
+            NUM_TEAMS,
+            MAX_AGENTS_PER_TEAM,
+        )
+    )
+    assert (
+        observation.spawn_lifecycle.spawn_shield_actual_durations_by_agent_by_team.dtype
+        == jnp.int32
+    )
+    assert (
+        observation.spawn_lifecycle.spawn_shield_configured_duration_by_agent.shape
+        == (MAX_AGENT_SLOTS,)
+    )
+    assert (
+        observation.spawn_lifecycle.spawn_shield_configured_duration_by_agent.dtype
+        == jnp.int32
+    )
+    assert observation.spawn_lifecycle.spawn_shield_speed_by_agent.shape == (
+        MAX_AGENT_SLOTS,
+    )
+    assert observation.spawn_lifecycle.spawn_shield_speed_by_agent.dtype == jnp.float32
+    assert observation.spawn_lifecycle.active_mask_by_agent_by_team.shape == (
         MAX_AGENT_SLOTS,
         NUM_TEAMS,
         MAX_AGENTS_PER_TEAM,
     )
-    assert observation.spawn_lifecycle.active_mask.dtype == bool
-    assert observation.spawn_lifecycle.alive_mask.shape == (
+    assert observation.spawn_lifecycle.active_mask_by_agent_by_team.dtype == bool
+    assert observation.spawn_lifecycle.alive_mask_by_agent_by_team.shape == (
         MAX_AGENT_SLOTS,
         NUM_TEAMS,
         MAX_AGENTS_PER_TEAM,
     )
-    assert observation.spawn_lifecycle.alive_mask.dtype == bool
+    assert observation.spawn_lifecycle.alive_mask_by_agent_by_team.dtype == bool
 
     assert "ally_targetability_mask" not in Observation._fields
     assert "enemy_targetability_mask" not in Observation._fields
@@ -761,7 +800,17 @@ def test_action_mask_stores_validity_for_each_action_head() -> None:
 
 
 def test_observation_stores_structured_families() -> None:
-    _assert_observation_contract(_zero_observation())
+    observation = _zero_observation()
+
+    _assert_observation_contract(observation)
+    assert SpawnLifecycleObservation._fields == (
+        "spawn_pad_positions_by_agent_by_team",
+        "spawn_shield_actual_durations_by_agent_by_team",
+        "spawn_shield_configured_duration_by_agent",
+        "spawn_shield_speed_by_agent",
+        "active_mask_by_agent_by_team",
+        "alive_mask_by_agent_by_team",
+    )
 
 
 @pytest.mark.parametrize(
@@ -789,7 +838,7 @@ def test_reset_info_marks_absence_of_a_transition() -> None:
     assert isinstance(info, Info)
     assert not bool(info.transition_facts.has_transition)
     assert jnp.array_equal(
-        info.transition_facts.choosing_step_count,
+        info.transition_facts.transition_start_step_count,
         jnp.array(-1, dtype=jnp.int32),
     )
 
@@ -991,7 +1040,7 @@ def test_existing_death_does_not_repeat_or_change_rewards_or_done() -> None:
     assert isinstance(info, Info)
     assert bool(info.transition_facts.has_transition)
     assert jnp.array_equal(
-        info.transition_facts.choosing_step_count,
+        info.transition_facts.transition_start_step_count,
         state.step_count,
     )
     combat_facts = info.transition_facts.combat_transition_facts
