@@ -929,6 +929,106 @@ def test_absent_previous_action_requires_zero_history(field_name: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "combat_head",
+    (
+        pytest.param("target", id="target"),
+        pytest.param("ultimate", id="ultimate"),
+    ),
+)
+def test_curated_scenario_rejects_shielded_source_combat_history(
+    combat_head: str,
+) -> None:
+    """Keep authored shielded-source history movement-only."""
+    config, state = _valid_state()
+    previous_targets = state.previous_timestep_select_target_actions
+    previous_ultimates = state.previous_timestep_use_ultimate_actions
+    if combat_head == "target":
+        previous_targets = previous_targets.at[0].set(2)
+    else:
+        previous_ultimates = previous_ultimates.at[0].set(1)
+    inconsistent_state = state._replace(
+        spawn_shield_durations=state.spawn_shield_durations.at[0].set(2),
+        previous_timestep_select_target_actions=previous_targets,
+        previous_timestep_use_ultimate_actions=previous_ultimates,
+        has_previous_timestep_joint_action=jnp.asarray(True),
+    )
+
+    assert validate_env_state(config, inconsistent_state) is None
+    with pytest.raises(ValueError, match="shielded scenario source"):
+        validate_scenario_initial_state(config, inconsistent_state)
+
+
+@pytest.mark.parametrize(
+    ("source_slot", "target_action", "shielded_recipient_slot"),
+    (
+        pytest.param(0, 2, 1, id="team-a-ally"),
+        pytest.param(0, 1 + MAX_AGENTS_PER_TEAM, 5, id="team-a-enemy"),
+        pytest.param(5, 2, 6, id="team-b-ally"),
+        pytest.param(5, 1 + MAX_AGENTS_PER_TEAM, 0, id="team-b-enemy"),
+    ),
+)
+def test_curated_scenario_rejects_history_targeting_shielded_recipient(
+    source_slot: int,
+    target_action: int,
+    shielded_recipient_slot: int,
+) -> None:
+    """Reject impossible authored target provenance for either team relation."""
+    config, state = _valid_state()
+    inconsistent_state = state._replace(
+        spawn_shield_durations=state.spawn_shield_durations.at[
+            shielded_recipient_slot
+        ].set(2),
+        previous_timestep_select_target_actions=(
+            state.previous_timestep_select_target_actions.at[source_slot].set(
+                target_action
+            )
+        ),
+        has_previous_timestep_joint_action=jnp.asarray(True),
+    )
+
+    assert validate_env_state(config, inconsistent_state) is None
+    with pytest.raises(ValueError, match="currently shielded recipient"):
+        validate_scenario_initial_state(config, inconsistent_state)
+
+
+@pytest.mark.parametrize(
+    "recipient_condition",
+    (
+        pytest.param("out-of-range", id="out-of-range"),
+        pytest.param("hidden", id="hidden"),
+        pytest.param("dead", id="dead"),
+    ),
+)
+def test_curated_scenario_preserves_nonshielded_historical_target_identity(
+    recipient_condition: str,
+) -> None:
+    """Do not reinterpret accepted target history from current observability."""
+    obstacles = None
+    if recipient_condition == "hidden":
+        obstacles = (
+            _empty_obstacles().at[0].set(_wall(x=15.0, y=2.0, width=2.0, height=4.0))
+        )
+    config, state = _valid_state(obstacles=obstacles)
+    recipient_slot = MAX_AGENTS_PER_TEAM
+    historical_state = state._replace(
+        previous_timestep_select_target_actions=(
+            state.previous_timestep_select_target_actions.at[0].set(
+                1 + MAX_AGENTS_PER_TEAM
+            )
+        ),
+        has_previous_timestep_joint_action=jnp.asarray(True),
+    )
+    if recipient_condition == "dead":
+        historical_state = historical_state._replace(
+            alive_mask=historical_state.alive_mask.at[recipient_slot].set(False),
+            current_health=historical_state.current_health.at[recipient_slot].set(0.0),
+        )
+
+    assert validate_env_state(config, historical_state) is None
+    assert validate_scenario_initial_state(config, historical_state) is None
+
+
+@pytest.mark.parametrize(
     ("axis", "side"),
     (
         pytest.param(0, "lower", id="left"),

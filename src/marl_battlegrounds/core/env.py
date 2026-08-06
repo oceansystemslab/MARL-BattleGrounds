@@ -390,6 +390,13 @@ def _build_select_target_use_ultimate_joint_mask(
         _build_global_pairwise_team_masks(config.agent_profile.team_ids)
     )
 
+    # Opponent concealment already excludes shielded enemy candidates; apply
+    # the same interaction rule to visible ally candidates.
+    global_pairwise_ally_mask = jnp.logical_and(
+        global_pairwise_ally_mask,
+        is_not_under_spawn_shield[None, :],
+    )
+
     global_basic_relation_mask = jnp.logical_or(
         jnp.logical_and(actor_can_heal, global_pairwise_ally_mask),
         jnp.logical_and(actor_can_damage, global_pairwise_enemy_mask),
@@ -969,7 +976,10 @@ def _build_observation_and_action_mask(
         mage_damage_amplification_aura_multipliers,
         warrior_damage_mitigation_aura_multipliers,
     ) = _derive_aura_damage_multipliers(
-        config, global_pairwise_distances, state.alive_mask
+        config,
+        global_pairwise_distances,
+        state.alive_mask,
+        state.spawn_shield_durations == 0,
     )
 
     self_features = _build_self_features(
@@ -1783,13 +1793,15 @@ def _derive_aura_damage_multipliers(
     config: EnvConfig,
     global_pairwise_distances: Array,
     alive_mask: Array,
+    is_not_under_spawn_shield: Array,
 ) -> tuple[Array, Array]:
     """Derive bounded Mage outgoing and Warrior incoming aura modifiers.
 
     Rows represent aura emitters and columns represent beneficiary slots.
-    Only active, living allies with real team IDs participate. Auras include
-    their emitter, use inclusive radius boundaries, and stack multiplicatively
-    before the completed vectors are bounded.
+    Only interaction-eligible active, living allies with real team IDs
+    participate as emitters or beneficiaries. Auras include eligible emitters,
+    use inclusive radius boundaries, and stack multiplicatively before the
+    completed vectors are bounded.
     """
     global_pairwise_ally_mask, _ = _build_global_pairwise_team_masks(
         config.agent_profile.team_ids
@@ -1800,8 +1812,13 @@ def _derive_aura_damage_multipliers(
         active_and_alive[None, :], active_and_alive[:, None]
     )
     global_pairwise_active_and_alive_ally_mask = jnp.logical_and(
-        active_and_alive_pairs, global_pairwise_ally_mask
+        jnp.logical_and(active_and_alive_pairs, global_pairwise_ally_mask),
+        jnp.logical_and(
+            is_not_under_spawn_shield[:, None],
+            is_not_under_spawn_shield[None, :],
+        ),
     )
+
     mage_masked_global_pairwise_distances = jnp.where(
         jnp.logical_and(
             _active_mage_class_mask(config)[:, None],
@@ -2537,7 +2554,10 @@ def step(
         current_mage_damage_amplification_aura_multipliers,
         current_warrior_damage_mitigation_aura_multipliers,
     ) = _derive_aura_damage_multipliers(
-        config, current_global_pairwise_distances, current_state.alive_mask
+        config,
+        current_global_pairwise_distances,
+        current_state.alive_mask,
+        current_state.spawn_shield_durations == 0,
     )
 
     health_effect_aggregation_result = (

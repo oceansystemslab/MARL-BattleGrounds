@@ -218,6 +218,77 @@ def test_spawn_shield_source_allows_every_move_and_only_neutral_combat(
 
 @pytest.mark.parametrize(
     (
+        "actor_slot",
+        "actor_class_id",
+        "shielded_candidate_slot",
+        "target_action",
+    ),
+    (
+        pytest.param(
+            _ACTOR_SLOT,
+            PRIEST_CLASS_ID,
+            _ALLY_SLOT,
+            2,
+            id="team-a-support-to-shielded-ally",
+        ),
+        pytest.param(
+            _ACTOR_SLOT,
+            HUNTER_CLASS_ID,
+            _ENEMY_SLOT,
+            1 + MAX_AGENTS_PER_TEAM,
+            id="team-a-offense-to-shielded-enemy",
+        ),
+        pytest.param(
+            _ENEMY_SLOT,
+            MAGE_CLASS_ID,
+            _ACTOR_SLOT,
+            1 + MAX_AGENTS_PER_TEAM,
+            id="team-b-offense-to-shielded-enemy",
+        ),
+    ),
+)
+def test_spawn_shield_removes_candidates_from_authoritative_combat_masks(
+    actor_slot: int,
+    actor_class_id: int,
+    shielded_candidate_slot: int,
+    target_action: int,
+) -> None:
+    """Exclude shielded ally and enemy recipients from the shared joint mask."""
+    config, state = _target_scenario(actor_class_id)
+    _, control_mask = _build_observation_and_action_mask(state, config)
+    shielded_state = state._replace(
+        spawn_shield_durations=state.spawn_shield_durations.at[
+            shielded_candidate_slot
+        ].set(3)
+    )
+
+    observation, shielded_mask = _build_observation_and_action_mask(
+        shielded_state,
+        config,
+    )
+
+    _assert_public_target_contract(observation, shielded_mask)
+    assert bool(
+        jnp.any(
+            control_mask.select_target_use_ultimate_joint_mask[
+                actor_slot,
+                target_action,
+            ]
+        )
+    )
+    assert not bool(
+        jnp.any(
+            shielded_mask.select_target_use_ultimate_joint_mask[
+                actor_slot,
+                target_action,
+            ]
+        )
+    )
+    assert not bool(shielded_mask.select_target_mask[actor_slot, target_action])
+
+
+@pytest.mark.parametrize(
+    (
         "actor_class_id",
         "expects_ally_targets",
         "expects_enemy_targets",

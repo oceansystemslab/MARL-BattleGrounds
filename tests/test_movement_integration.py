@@ -1744,8 +1744,8 @@ def test_spawn_shield_expiry_controls_only_final_endpoint_collision(
         _assert_center_close(next_state.agent_positions[1], raw_shared_endpoint)
 
 
-def test_expiring_spawn_shield_remains_active_through_conditional_charge() -> None:
-    """Prove Charge cannot consume protection before ordinary movement."""
+def test_expiring_spawn_shield_rejects_charge_but_preserves_movement() -> None:
+    """Keep an expiring shield movement-only for the complete transition."""
     config = _deterministic_config(
         team_size=5,
         ordinary_movement_distance_scale=0.1,
@@ -1807,7 +1807,7 @@ def test_expiring_spawn_shield_remains_active_through_conditional_charge() -> No
     )
     current_action_mask = _current_action_mask(config, state)
 
-    charge_next_state, *_ = step(
+    charge_next_state, *_, charge_info = step(
         config,
         state,
         current_action_mask,
@@ -1822,16 +1822,15 @@ def test_expiring_spawn_shield_remains_active_through_conditional_charge() -> No
         jax.random.key(82),
     )
 
-    # The shielded Charge landing may overlap the blocker temporarily. The
-    # protected ordinary move then starts from that landing, traverses without
-    # body collision, and rejoins collision only at its nonoverlapping endpoint.
-    _assert_center_close(
-        charge_next_state.agent_positions[0],
-        jnp.asarray((6.0, 8.0), dtype=jnp.float32),
-    )
+    # Shielding is still active when this action is accepted, so the combat
+    # pair is rejected while its independently legal movement is preserved.
     _assert_center_close(
         no_charge_next_state.agent_positions[0],
         jnp.asarray((2.0, 8.0), dtype=jnp.float32),
+    )
+    _assert_center_close(
+        charge_next_state.agent_positions[0],
+        no_charge_next_state.agent_positions[0],
     )
     _assert_center_close(
         charge_next_state.agent_positions[blocker_slot],
@@ -1843,6 +1842,13 @@ def test_expiring_spawn_shield_remains_active_through_conditional_charge() -> No
     )
     assert int(charge_next_state.spawn_shield_durations[0]) == 0
     assert int(no_charge_next_state.spawn_shield_durations[0]) == 0
+    acceptance = charge_info.transition_facts.action_acceptance_facts
+    combat_facts = charge_info.transition_facts.combat_transition_facts
+    assert bool(acceptance.in_domain_combat_action_pair_is_rejected_by_actor[0])
+    assert int(acceptance.accepted_joint_action.select_target[0]) == 0
+    assert int(acceptance.accepted_joint_action.use_ultimate[0]) == 0
+    assert not bool(combat_facts.ultimate_effect_is_activated_by_source[0])
+    assert int(charge_next_state.ultimate_cooldowns[0]) == 0
 
 
 @pytest.mark.parametrize(

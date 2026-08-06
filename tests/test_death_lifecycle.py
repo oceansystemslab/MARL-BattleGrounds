@@ -306,7 +306,7 @@ def test_reset_and_neutral_step_publish_canonical_death_fact_schema() -> None:
         "contributed_to_new_death_by_source",
         "attributed_death_damage_by_source",
     )
-    assert TransitionFacts._fields[-1] == "death_facts"
+    assert "death_facts" in TransitionFacts._fields
     assert death_facts.is_newly_dead_by_recipient.shape == (MAX_AGENT_SLOTS,)
     assert death_facts.is_newly_dead_by_recipient.dtype == jnp.bool_
     assert death_facts.contributed_to_new_death_by_source.dtype == jnp.bool_

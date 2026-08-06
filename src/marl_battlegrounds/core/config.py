@@ -943,13 +943,66 @@ def validate_env_state(config: EnvConfig, state: EnvState) -> None:
 
 
 def validate_scenario_initial_state(config: EnvConfig, state: EnvState) -> None:
-    """Validate a curated start, including strict living-body clearance.
+    """Validate a curated start and its official transition provenance.
 
     Runtime snapshots may contain deterministic fixed-pass collision residuals,
     but authored scenario starts have no such transition provenance. Tangency is
     legal, and preserved corpses remain nonphysical for pairwise clearance.
+    Authored previous-action history must also be compatible with the current
+    spawn-shield counters; general runtime validation deliberately remains
+    permissive so externally supplied mask provenance can still be inspected.
     """
     validate_env_state(config, state)
+
+    if bool(np.asarray(state.has_previous_timestep_joint_action)):
+        shielded_slots = np.asarray(state.spawn_shield_durations) > 0
+        previous_target_actions = np.asarray(
+            state.previous_timestep_select_target_actions
+        )
+        previous_ultimate_actions = np.asarray(
+            state.previous_timestep_use_ultimate_actions
+        )
+
+        shielded_source_has_combat_history = np.logical_and(
+            shielded_slots,
+            np.logical_or(
+                previous_target_actions != 0,
+                previous_ultimate_actions != 0,
+            ),
+        )
+        if bool(np.any(shielded_source_has_combat_history)):
+            source_slot = int(np.flatnonzero(shielded_source_has_combat_history)[0])
+            raise ValueError(
+                "A shielded scenario source must have target-none and "
+                f"no-Ultimate in previous action history; slot {source_slot} "
+                "has nonneutral combat history."
+            )
+
+        for source_slot, target_action in enumerate(previous_target_actions):
+            if target_action == 0:
+                continue
+
+            source_team_start = (
+                source_slot // MAX_AGENTS_PER_TEAM
+            ) * MAX_AGENTS_PER_TEAM
+            candidate_index = int(target_action) - 1
+            if candidate_index < MAX_AGENTS_PER_TEAM:
+                recipient_slot = source_team_start + candidate_index
+            else:
+                opposing_team_start = (
+                    MAX_AGENTS_PER_TEAM if source_team_start == 0 else 0
+                )
+                recipient_slot = (
+                    opposing_team_start + candidate_index - MAX_AGENTS_PER_TEAM
+                )
+
+            if shielded_slots[recipient_slot]:
+                raise ValueError(
+                    "Scenario previous action history cannot target a currently "
+                    f"shielded recipient; source slot {source_slot} resolves to "
+                    f"recipient slot {recipient_slot}."
+                )
+
     _validate_scenario_living_body_clearance(
         state.agent_positions,
         config=config,

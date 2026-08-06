@@ -241,7 +241,12 @@ def _aura_multipliers(config: EnvConfig, state: EnvState) -> tuple[Array, Array]
     distances = _compute_global_pairwise_distances_from_agent_positions(
         state.agent_positions
     )
-    return _derive_aura_damage_multipliers(config, distances, state.alive_mask)
+    return _derive_aura_damage_multipliers(
+        config,
+        distances,
+        state.alive_mask,
+        state.spawn_shield_durations == 0,
+    )
 
 
 def _open_space_charge_scenario(
@@ -343,7 +348,12 @@ def test_three_duplicate_auras_are_bounded_and_observation_consistent() -> None:
     )
     compiled_mage, compiled_warrior = cast(
         tuple[Array, Array],
-        jax.jit(_derive_aura_damage_multipliers)(config, distances, state.alive_mask),
+        jax.jit(_derive_aura_damage_multipliers)(
+            config,
+            distances,
+            state.alive_mask,
+            state.spawn_shield_durations == 0,
+        ),
     )
     observation, _ = _build_observation_and_action_mask(state, config)
 

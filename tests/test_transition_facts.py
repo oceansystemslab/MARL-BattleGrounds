@@ -426,9 +426,11 @@ def test_spawn_shield_facts_distinguish_activity_from_surviving_expiry(
     assert bool(next_state.alive_mask[_TEAM_A_FIRST_SLOT])
 
 
-def test_spawn_shield_death_cleanup_is_not_reported_as_countdown_expiry() -> None:
-    """Keep death cleanup distinct from an ordinary surviving shield expiry."""
-    config, state, stale_unshielded_mask = _scenario(
+def test_expiring_spawn_shield_rejects_current_target_then_reenables_next_mask() -> (
+    None
+):
+    """Keep a counter-one recipient protected until the next policy action."""
+    config, state, _ = _scenario(
         (_TEAM_A_FIRST_SLOT, HUNTER_CLASS_ID),
         (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
     )
@@ -439,11 +441,12 @@ def test_spawn_shield_death_cleanup_is_not_reported_as_countdown_expiry() -> Non
             shielded_recipient_slot
         ].set(1),
     )
+    current_action_mask = _build_observation_and_action_mask(state, config)[1]
 
-    next_state, *_, info = _take_step(
+    next_state, _, _, _, next_action_mask, info = _take_step(
         config,
         state,
-        stale_unshielded_mask,
+        current_action_mask,
         _joint_action(
             (
                 _TEAM_A_FIRST_SLOT,
@@ -454,20 +457,64 @@ def test_spawn_shield_death_cleanup_is_not_reported_as_countdown_expiry() -> Non
         ),
     )
     shield_facts = info.transition_facts.spawn_shield_facts
+    acceptance_facts = info.transition_facts.action_acceptance_facts
 
     assert bool(
         shield_facts.was_active_at_transition_start_by_agent[shielded_recipient_slot]
     )
     assert bool(
-        info.transition_facts.death_facts.is_newly_dead_by_recipient[
-            shielded_recipient_slot
+        acceptance_facts.in_domain_combat_action_pair_is_rejected_by_actor[
+            _TEAM_A_FIRST_SLOT
         ]
     )
-    assert not bool(
+    assert (
+        int(acceptance_facts.accepted_joint_action.select_target[_TEAM_A_FIRST_SLOT])
+        == _TARGET_NONE
+    )
+    _assert_canonical_empty_combat_facts(info.transition_facts.combat_transition_facts)
+    _assert_canonical_empty_death_facts(info.transition_facts.death_facts)
+    assert bool(
         shield_facts.expired_at_transition_end_by_agent[shielded_recipient_slot]
     )
-    assert not bool(next_state.alive_mask[shielded_recipient_slot])
+    assert bool(next_state.alive_mask[shielded_recipient_slot])
+    assert next_state.current_health[shielded_recipient_slot] == 1.0
     assert int(next_state.spawn_shield_durations[shielded_recipient_slot]) == 0
+    assert bool(
+        next_action_mask.select_target_use_ultimate_joint_mask[
+            _TEAM_A_FIRST_SLOT,
+            _FIRST_ENEMY_TARGET,
+            0,
+        ]
+    )
+
+    final_state, *_, final_info = _take_step(
+        config,
+        next_state,
+        next_action_mask,
+        _joint_action(
+            (
+                _TEAM_A_FIRST_SLOT,
+                MOVE_STAY,
+                _FIRST_ENEMY_TARGET,
+                0,
+            )
+        ),
+    )
+    final_acceptance = final_info.transition_facts.action_acceptance_facts
+    final_combat = final_info.transition_facts.combat_transition_facts
+
+    assert not bool(
+        final_acceptance.in_domain_combat_action_pair_is_rejected_by_actor[
+            _TEAM_A_FIRST_SLOT
+        ]
+    )
+    assert (
+        int(final_acceptance.accepted_joint_action.select_target[_TEAM_A_FIRST_SLOT])
+        == _FIRST_ENEMY_TARGET
+    )
+    assert bool(final_combat.basic_effect_is_activated_by_source[_TEAM_A_FIRST_SLOT])
+    assert bool(final_combat.combat_effect_has_recipient_by_source[_TEAM_A_FIRST_SLOT])
+    assert final_state.current_health[shielded_recipient_slot] < 1.0
 
 
 @pytest.mark.parametrize(
