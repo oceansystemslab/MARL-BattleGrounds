@@ -74,6 +74,7 @@ from marl_battlegrounds.core.types import (
     NUM_SLOW_CHANNELS,
     NUM_STUN_CHANNELS,
     NUM_TARGET_ACTIONS,
+    NUM_TEAMS,
     NUM_ULTIMATE_ACTIONS,
     OBJECTIVE_FEATURES,
     OBSTACLE_FEATURES,
@@ -100,6 +101,7 @@ from marl_battlegrounds.core.types import (
     Info,
     Observation,
     PreviousTimestepActionObservation,
+    RespawnTransitionFacts,
     Reward,
     SpawnLifecycleObservation,
     SpawnShieldTransitionFacts,
@@ -947,6 +949,62 @@ def _build_spawn_lifecycle_observation(
         config.spawn_shield_movement_speed * config.agent_profile.active_mask
     )
 
+    # Actor-relative respawn-wave periods (MAX_AGENT_SLOTS, NUM_TEAMS), int32
+    team_respawn_wave_period_step_count_team_a_view = jnp.repeat(
+        config.team_respawn_wave_period_step_count[None, :], MAX_AGENTS_PER_TEAM, axis=0
+    )
+
+    team_respawn_wave_period_step_count_team_b_view = jnp.repeat(
+        jnp.asarray(
+            (
+                config.team_respawn_wave_period_step_count[TEAM_B_ID - 1],
+                config.team_respawn_wave_period_step_count[TEAM_A_ID - 1],
+            )
+        )[None, :],
+        MAX_AGENTS_PER_TEAM,
+        axis=0,
+    )
+
+    respawn_wave_period_step_count_by_agent_by_team = (
+        jnp.concatenate(
+            (
+                team_respawn_wave_period_step_count_team_a_view,
+                team_respawn_wave_period_step_count_team_b_view,
+            ),
+            axis=0,
+            dtype=jnp.int32,
+        )
+        * config.agent_profile.active_mask[:, None]
+    )
+
+    # Actor-relative respawn-wave countdowns (MAX_AGENT_SLOTS, NUM_TEAMS), int32
+    team_respawn_wave_countdowns_team_a_view = jnp.repeat(
+        state.team_respawn_wave_countdowns[None, :], MAX_AGENTS_PER_TEAM, axis=0
+    )
+
+    team_respawn_wave_countdowns_team_b_view = jnp.repeat(
+        jnp.asarray(
+            (
+                state.team_respawn_wave_countdowns[TEAM_B_ID - 1],
+                state.team_respawn_wave_countdowns[TEAM_A_ID - 1],
+            )
+        )[None, :],
+        MAX_AGENTS_PER_TEAM,
+        axis=0,
+    )
+
+    respawn_wave_countdowns_by_agent_by_team = (
+        jnp.concatenate(
+            (
+                team_respawn_wave_countdowns_team_a_view,
+                team_respawn_wave_countdowns_team_b_view,
+            ),
+            axis=0,
+            dtype=jnp.int32,
+        )
+        * config.agent_profile.active_mask[:, None]
+    )
+
     return SpawnLifecycleObservation(
         spawn_pad_positions_by_agent_by_team=spawn_pad_positions,
         spawn_shield_actual_durations_by_agent_by_team=spawn_shield_actual_durations,
@@ -954,6 +1012,8 @@ def _build_spawn_lifecycle_observation(
             jnp.int32
         ),
         spawn_shield_speed_by_agent=spawn_shield_speed_by_agent.astype(jnp.float32),
+        respawn_wave_period_step_count_by_agent_by_team=respawn_wave_period_step_count_by_agent_by_team,
+        respawn_wave_countdowns_by_agent_by_team=respawn_wave_countdowns_by_agent_by_team,
         active_mask_by_agent_by_team=active_mask,
         alive_mask_by_agent_by_team=alive_mask,
     )
@@ -2430,6 +2490,13 @@ def _build_canonical_no_transition_info_object(initial_state: EnvState) -> Info:
         expired_at_transition_end_by_agent=all_false_vector,
     )
 
+    reset_respawn_facts = RespawnTransitionFacts(
+        respawn_wave_occurred_this_transition_by_team=jnp.full(
+            (NUM_TEAMS,), False, dtype=jnp.bool_
+        ),
+        was_respawned_this_transition_by_agent=all_false_vector,
+    )
+
     reset_transition_facts = TransitionFacts(
         has_transition=jnp.asarray(False),
         transition_start_step_count=jnp.asarray(-1, dtype=jnp.int32),
@@ -2437,9 +2504,112 @@ def _build_canonical_no_transition_info_object(initial_state: EnvState) -> Info:
         combat_transition_facts=reset_combat_transition_facts,
         death_facts=reset_death_facts,
         spawn_shield_facts=reset_spawn_shield_facts,
+        respawn_facts=reset_respawn_facts,
     )
 
     return Info(transition_facts=reset_transition_facts)
+
+
+def _build_was_respawned_this_transition_by_agent_array(
+    current_state: EnvState, config: EnvConfig
+) -> Array:
+    """Return transition-start dead slots whose team wave is currently due."""
+    is_active_but_dead = jnp.logical_and(
+        config.agent_profile.active_mask, jnp.logical_not(current_state.alive_mask)
+    )
+
+    team_a_respawned_this_transition_array = jnp.logical_and(
+        is_active_but_dead[TEAM_A_START:TEAM_A_END],
+        current_state.team_respawn_wave_countdowns[TEAM_A_ID - 1] == 0,
+    )
+
+    team_b_respawned_this_transition_array = jnp.logical_and(
+        is_active_but_dead[TEAM_B_START:TEAM_B_END],
+        current_state.team_respawn_wave_countdowns[TEAM_B_ID - 1] == 0,
+    )
+
+    return jnp.concatenate(
+        (
+            team_a_respawned_this_transition_array,
+            team_b_respawned_this_transition_array,
+        ),
+        dtype=jnp.bool_,
+    )
+
+
+def _handle_end_of_transition_respawn_wave_event(
+    config: EnvConfig,
+    was_respawned_this_transition_by_agent: Array,
+    next_alive_mask: Array,
+    next_health_after_effective_damage_and_healing: Array,
+    next_spawn_shield_durations: Array,
+    next_agent_positions: Array,
+) -> tuple[Array, Array, Array, Array]:
+    """Apply the simultaneous end-of-transition respawn state override."""
+    updated_next_alive_mask = jnp.where(
+        was_respawned_this_transition_by_agent,
+        jnp.ones_like(next_alive_mask),
+        next_alive_mask,
+    )
+
+    # Health and shield are successor values, so the newly created shield does
+    # not participate in the ordinary decrement that already occurred.
+    updated_next_health = jnp.where(
+        was_respawned_this_transition_by_agent,
+        config.agent_profile.max_health,
+        next_health_after_effective_damage_and_healing,
+    )
+
+    updated_next_spawn_shield_durations = jnp.where(
+        was_respawned_this_transition_by_agent,
+        config.spawn_shield_duration_steps,
+        next_spawn_shield_durations,
+    )
+
+    # Global slot identity determines the immutable team-local pad; occupancy
+    # deliberately does not participate in this selection.
+    updated_team_a_next_agent_positions = jnp.where(
+        was_respawned_this_transition_by_agent[TEAM_A_START:TEAM_A_END, None],
+        config.team_spawn_pad_positions[TEAM_A_ID - 1, :, :],
+        next_agent_positions[TEAM_A_START:TEAM_A_END, :],
+    )
+
+    updated_team_b_next_agent_positions = jnp.where(
+        was_respawned_this_transition_by_agent[TEAM_B_START:TEAM_B_END, None],
+        config.team_spawn_pad_positions[TEAM_B_ID - 1, :, :],
+        next_agent_positions[TEAM_B_START:TEAM_B_END, :],
+    )
+
+    updated_next_agent_positions = jnp.concatenate(
+        (updated_team_a_next_agent_positions, updated_team_b_next_agent_positions),
+        axis=0,
+        dtype=jnp.float32,
+    )
+
+    return (
+        updated_next_alive_mask,
+        updated_next_health,
+        updated_next_spawn_shield_durations,
+        updated_next_agent_positions,
+    )
+
+
+def _return_original_next_state_items(
+    config: EnvConfig,
+    was_respawned_this_transition_by_agent: Array,
+    next_alive_mask: Array,
+    next_health_after_effective_damage_and_healing: Array,
+    next_spawn_shield_durations: Array,
+    next_agent_positions: Array,
+) -> tuple[Array, Array, Array, Array]:
+    """Return unchanged successor leaves when neither team wave is due."""
+    del config, was_respawned_this_transition_by_agent
+    return (
+        next_alive_mask,
+        next_health_after_effective_damage_and_healing,
+        next_spawn_shield_durations,
+        next_agent_positions,
+    )
 
 
 # Public ---
@@ -2497,6 +2667,7 @@ def reset(
         priest_blessing_of_freedom_slow_floor_durations=jnp.zeros(
             (MAX_AGENT_SLOTS,), dtype=jnp.int32
         ),
+        team_respawn_wave_countdowns=config.team_respawn_wave_period_step_count - 1,
         spawn_shield_durations=jnp.zeros((MAX_AGENT_SLOTS), dtype=jnp.int32),
         previous_timestep_move_actions=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
         previous_timestep_select_target_actions=jnp.zeros(
@@ -2711,11 +2882,49 @@ def step(
         ),
     )
 
+    respawn_facts = RespawnTransitionFacts(
+        respawn_wave_occurred_this_transition_by_team=current_state.team_respawn_wave_countdowns
+        == 0,
+        was_respawned_this_transition_by_agent=_build_was_respawned_this_transition_by_agent_array(
+            current_state, config
+        ),
+    )
+
+    # Every team clock advances independently, including an empty due wave.
+    next_team_respawn_wave_countdowns = jnp.where(
+        current_state.team_respawn_wave_countdowns == 0,
+        config.team_respawn_wave_period_step_count - 1,
+        current_state.team_respawn_wave_countdowns - 1,
+    )
+
+    (
+        next_alive_mask,
+        next_health_bars,
+        next_spawn_shield_durations,
+        next_agent_positions,
+    ) = cast(
+        tuple[Array, Array, Array, Array],
+        jax.lax.cond(
+            jnp.any(
+                respawn_facts.respawn_wave_occurred_this_transition_by_team, axis=-1
+            ),
+            _handle_end_of_transition_respawn_wave_event,
+            _return_original_next_state_items,
+            config,
+            respawn_facts.was_respawned_this_transition_by_agent,
+            next_alive_mask,
+            next_health_after_effective_damage_and_healing,
+            next_spawn_shield_durations,
+            next_agent_positions,
+        ),
+    )
+
     next_state = EnvState(
         step_count=current_state.step_count + 1,
         agent_positions=next_agent_positions,
         alive_mask=next_alive_mask,
-        current_health=next_health_after_effective_damage_and_healing,
+        current_health=next_health_bars,
+        # NOTE: Ultimate CD carries over into death to prevent abuse.
         ultimate_cooldowns=next_ultimate_cooldowns,
         slow_durations=next_slow_durations,
         stun_durations=next_stun_durations,
@@ -2723,6 +2932,7 @@ def step(
         mage_burst_damage_amplification_durations=next_mage_burst_durations,
         priest_blessing_of_freedom_slow_floor_durations=next_priest_freedom_slow_floor_durations,
         spawn_shield_durations=next_spawn_shield_durations,
+        team_respawn_wave_countdowns=next_team_respawn_wave_countdowns,
         previous_timestep_move_actions=accepted_joint_action.move,
         previous_timestep_select_target_actions=accepted_joint_action.select_target,
         previous_timestep_use_ultimate_actions=accepted_joint_action.use_ultimate,
@@ -2755,6 +2965,7 @@ def step(
         combat_transition_facts=combat_transition_facts,
         death_facts=death_facts,
         spawn_shield_facts=spawn_shield_facts,
+        respawn_facts=respawn_facts,
     )
 
     info = Info(

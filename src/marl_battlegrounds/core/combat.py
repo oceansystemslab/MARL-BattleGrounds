@@ -184,7 +184,7 @@ ULTIMATE_DAMAGE_BY_CLASS = jnp.asarray(
         0.0,  # neutral
         0.0,  # mage
         20.0,  # warrior
-        0.0,  # hunter
+        10.0,  # hunter
         36.0,  # rogue
         0.0,  # priest
     ],

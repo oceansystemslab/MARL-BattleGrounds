@@ -50,6 +50,7 @@ from marl_battlegrounds.core.types import (
     EnvState,
     Info,
     Observation,
+    RespawnTransitionFacts,
     Reward,
     SpawnShieldTransitionFacts,
     TransitionFacts,
@@ -60,8 +61,8 @@ _TEAM_B_FIRST_SLOT = MAX_AGENTS_PER_TEAM
 _TARGET_NONE = 0
 _SELF_TARGET = 1
 _FIRST_ENEMY_TARGET = 1 + MAX_AGENTS_PER_TEAM
-_TRANSITION_FACT_LEAF_COUNT = 33
-_TRANSITION_FACT_RAW_BYTES = 835
+_TRANSITION_FACT_LEAF_COUNT = 35
+_TRANSITION_FACT_RAW_BYTES = 847
 
 
 def _empty_obstacles() -> Array:
@@ -133,6 +134,7 @@ def _scenario(
         ),
         spawn_shield_duration_steps=3,
         spawn_shield_movement_speed=2.0,
+        team_respawn_wave_period_step_count=jnp.asarray((5, 5), dtype=jnp.int32),
     )
     state, _, action_mask, _ = reset(config, jax.random.key(1))
     return config, state, action_mask
@@ -312,6 +314,10 @@ def test_reset_and_real_neutral_step_share_the_exact_static_fact_schema() -> Non
         "was_active_at_transition_start_by_agent",
         "expired_at_transition_end_by_agent",
     )
+    assert RespawnTransitionFacts._fields == (
+        "respawn_wave_occurred_this_transition_by_team",
+        "was_respawned_this_transition_by_agent",
+    )
     assert TransitionFacts._fields == (
         "has_transition",
         "transition_start_step_count",
@@ -319,6 +325,7 @@ def test_reset_and_real_neutral_step_share_the_exact_static_fact_schema() -> Non
         "combat_transition_facts",
         "death_facts",
         "spawn_shield_facts",
+        "respawn_facts",
     )
     assert Info._fields == ("transition_facts",)
 

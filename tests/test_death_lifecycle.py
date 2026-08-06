@@ -155,6 +155,7 @@ def _scenario(
         ),
         spawn_shield_duration_steps=3,
         spawn_shield_movement_speed=2.0,
+        team_respawn_wave_period_step_count=jnp.asarray((5, 5), dtype=jnp.int32),
     )
     state, _, action_mask, info = reset(config, jax.random.key(1))
     return config, state, action_mask, info
@@ -433,13 +434,14 @@ def test_exact_zero_health_boundary_is_a_death_not_a_surviving_zero() -> None:
     "source_class_id",
     (
         pytest.param(WARRIOR_CLASS_ID, id="warrior-charge"),
+        pytest.param(HUNTER_CLASS_ID, id="hunter-trap"),
         pytest.param(ROGUE_CLASS_ID, id="rogue-poison"),
     ),
 )
 def test_every_damage_ultimate_produces_gross_attributed_death_damage(
     source_class_id: int,
 ) -> None:
-    """Prove both damaging Ultimates retain gross contribution and cooldown."""
+    """Prove all damaging Ultimates retain gross contribution and cooldown."""
     config, state, _, _ = _scenario(
         (_TEAM_A_FIRST_SLOT, source_class_id),
         (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
@@ -599,8 +601,8 @@ def test_focus_fire_preserves_every_gross_contributor_through_overkill(
     )
 
 
-def test_status_only_source_is_not_a_contributor_to_its_dead_recipient() -> None:
-    """Prove accepted status application is distinct from positive death damage."""
+def test_status_applying_damage_source_contributes_to_its_dead_recipient() -> None:
+    """Prove Hunter Trap's status and damage share one accepted activation."""
     config, state, _, _ = _scenario(
         (_TEAM_A_FIRST_SLOT, HUNTER_CLASS_ID),
         (_TEAM_A_SECOND_SLOT, ROGUE_CLASS_ID),
@@ -635,9 +637,9 @@ def test_status_only_source_is_not_a_contributor_to_its_dead_recipient() -> None
             _TEAM_A_FIRST_SLOT, STUN_CHANNEL_HUNTER_TRAP
         ]
     )
-    assert not bool(death_facts.contributed_to_new_death_by_source[_TEAM_A_FIRST_SLOT])
+    assert bool(death_facts.contributed_to_new_death_by_source[_TEAM_A_FIRST_SLOT])
     assert (
-        float(death_facts.attributed_death_damage_by_source[_TEAM_A_FIRST_SLOT]) == 0.0
+        float(death_facts.attributed_death_damage_by_source[_TEAM_A_FIRST_SLOT]) > 0.0
     )
     assert bool(death_facts.contributed_to_new_death_by_source[_TEAM_A_SECOND_SLOT])
     _assert_statuses_are_clear(next_state, _TEAM_B_FIRST_SLOT)

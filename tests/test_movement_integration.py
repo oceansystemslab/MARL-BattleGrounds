@@ -235,6 +235,7 @@ def _deterministic_config(
         ),
         spawn_shield_duration_steps=spawn_shield_duration_steps,
         spawn_shield_movement_speed=spawn_shield_movement_speed,
+        team_respawn_wave_period_step_count=jnp.asarray((5, 5), dtype=jnp.int32),
     )
 
 
@@ -334,6 +335,7 @@ def _state_with_single_active_alive_agent(
         step_count=jnp.array(step_count, dtype=jnp.int32),
         agent_positions=_agent_positions_array_with_rows((0, position)),
         alive_mask=active_mask,
+        team_respawn_wave_countdowns=config.team_respawn_wave_period_step_count - 1,
         spawn_shield_durations=_slot_int_vector(
             0,
             (0, spawn_shield_duration),
@@ -416,6 +418,7 @@ def _state_with_two_agents(
             (agent_b_slot, agent_b_position),
         ),
         alive_mask=alive_mask,
+        team_respawn_wave_countdowns=config.team_respawn_wave_period_step_count - 1,
         spawn_shield_durations=_slot_int_vector(
             0,
             (0, agent_a_spawn_shield_duration),
@@ -1460,6 +1463,7 @@ def test_active_alive_overlapping_agents_separate_in_free_space(
             (blocker_slot, blocker_position),
         ),
         alive_mask=active_mask,
+        team_respawn_wave_countdowns=config.team_respawn_wave_period_step_count - 1,
         spawn_shield_durations=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
         **_inert_combat_state_fields(active_mask),
     )
@@ -1795,6 +1799,7 @@ def test_expiring_spawn_shield_rejects_charge_but_preserves_movement() -> None:
             (target_slot, target_start),
         ),
         alive_mask=active_mask,
+        team_respawn_wave_countdowns=config.team_respawn_wave_period_step_count - 1,
         spawn_shield_durations=_slot_int_vector(0, (0, 1)),
         **_inert_combat_state_fields(active_mask),
     )

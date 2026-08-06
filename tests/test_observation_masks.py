@@ -275,6 +275,7 @@ def _deterministic_config(
         ),
         spawn_shield_duration_steps=3,
         spawn_shield_movement_speed=2.0,
+        team_respawn_wave_period_step_count=jnp.asarray((5, 5), dtype=jnp.int32),
     )
 
 
@@ -479,6 +480,7 @@ def _state_two_versus_two_game(
             (agent_d_index, agent_d_position),
         ),
         alive_mask=alive_mask,
+        team_respawn_wave_countdowns=config.team_respawn_wave_period_step_count - 1,
         **_inert_combat_state_fields(
             jnp.where(alive_mask, profile.max_health, 0.0).astype(jnp.float32)
         ),

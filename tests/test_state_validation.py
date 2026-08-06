@@ -6,6 +6,7 @@ from typing import Any, cast
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 from jax import Array
 
@@ -46,6 +47,7 @@ from marl_battlegrounds.core.types import (
     NUM_SLOW_CHANNELS,
     NUM_STUN_CHANNELS,
     NUM_TARGET_ACTIONS,
+    NUM_TEAMS,
     NUM_ULTIMATE_ACTIONS,
     OBSTACLE_FEATURE_ACTIVE,
     OBSTACLE_FEATURE_HEIGHT,
@@ -104,6 +106,7 @@ _STATE_ARRAY_FIELDS = (
         (MAX_AGENT_SLOTS,),
         jnp.int32,
     ),
+    ("team_respawn_wave_countdowns", (NUM_TEAMS,), jnp.int32),
     ("spawn_shield_durations", (MAX_AGENT_SLOTS,), jnp.int32),
     ("previous_timestep_move_actions", (MAX_AGENT_SLOTS,), jnp.int32),
     (
@@ -191,6 +194,10 @@ def _valid_config(
         team_spawn_pad_positions=spawn_pad_positions,
         spawn_shield_duration_steps=3,
         spawn_shield_movement_speed=2.0,
+        team_respawn_wave_period_step_count=jnp.asarray(
+            (5, 7),
+            dtype=jnp.int32,
+        ),
     )
 
 
@@ -354,6 +361,103 @@ def test_liveness_must_be_a_subset_of_configured_activity() -> None:
     )
     with pytest.raises(ValueError, match="alive_mask"):
         validate_env_state(config, invalid_state)
+
+
+def test_reset_respawn_wave_countdowns_match_each_team_period() -> None:
+    """Accept the official reset state at each period's inclusive upper bound."""
+    config, state = _valid_state()
+
+    assert bool(
+        jnp.array_equal(
+            state.team_respawn_wave_countdowns,
+            config.team_respawn_wave_period_step_count - 1,
+        )
+    )
+    assert validate_env_state(config, state) is None
+
+
+@pytest.mark.parametrize(
+    ("period_step_counts", "countdowns"),
+    (
+        pytest.param((1, 1), (0, 0), id="wave-every-transition"),
+        pytest.param((1, 7), (0, 6), id="asymmetric-upper-bounds"),
+        pytest.param((5, 7), (2, 0), id="independent-interior-and-due"),
+        pytest.param(
+            (np.iinfo(np.int32).max, np.iinfo(np.int32).max),
+            (np.iinfo(np.int32).max - 1, np.iinfo(np.int32).max - 1),
+            id="int32-boundary",
+        ),
+    ),
+)
+def test_respawn_wave_countdowns_accept_each_team_domain(
+    period_step_counts: tuple[int, int],
+    countdowns: tuple[int, int],
+) -> None:
+    """Accept independent countdowns in each team's half-open period domain."""
+    config, state = _valid_state()
+    config = config._replace(
+        team_respawn_wave_period_step_count=jnp.asarray(
+            period_step_counts,
+            dtype=jnp.int32,
+        )
+    )
+    state = state._replace(
+        team_respawn_wave_countdowns=jnp.asarray(countdowns, dtype=jnp.int32)
+    )
+
+    assert validate_env_state(config, state) is None
+
+
+@pytest.mark.parametrize(
+    ("period_step_counts", "countdowns", "message"),
+    (
+        pytest.param((5, 7), (-1, 0), "nonnegative", id="team-a-negative"),
+        pytest.param((5, 7), (0, -1), "nonnegative", id="team-b-negative"),
+        pytest.param(
+            (5, 7),
+            (5, 0),
+            "strictly less",
+            id="team-a-equals-period",
+        ),
+        pytest.param(
+            (5, 7),
+            (0, 7),
+            "strictly less",
+            id="team-b-equals-period",
+        ),
+        pytest.param(
+            (5, 7),
+            (6, 0),
+            "strictly less",
+            id="team-a-exceeds-period",
+        ),
+        pytest.param(
+            (5, 7),
+            (0, 8),
+            "strictly less",
+            id="team-b-exceeds-period",
+        ),
+    ),
+)
+def test_respawn_wave_countdowns_reject_values_outside_each_team_period(
+    period_step_counts: tuple[int, int],
+    countdowns: tuple[int, int],
+    message: str,
+) -> None:
+    """Reject underflow and elementwise values outside the half-open domain."""
+    config, state = _valid_state()
+    config = config._replace(
+        team_respawn_wave_period_step_count=jnp.asarray(
+            period_step_counts,
+            dtype=jnp.int32,
+        )
+    )
+    state = state._replace(
+        team_respawn_wave_countdowns=jnp.asarray(countdowns, dtype=jnp.int32)
+    )
+
+    with pytest.raises(ValueError, match=message):
+        validate_env_state(config, state)
 
 
 @pytest.mark.parametrize(

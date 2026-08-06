@@ -86,6 +86,7 @@ def rejection_lane_scenario() -> DebuggerScenario:
         team_spawn_pad_positions=_spawn_pad_positions(12.0, 12.0),
         spawn_shield_duration_steps=3,
         spawn_shield_movement_speed=2.0,
+        team_respawn_wave_period_step_count=jnp.asarray((5, 5), dtype=jnp.int32),
     )
     state, _, _, _ = reset(config, jax.random.key(0))
     frames = (

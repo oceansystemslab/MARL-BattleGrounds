@@ -201,6 +201,8 @@ class EnvConfig(NamedTuple):
     per-step voluntary displacement without scaling forced relocation.
     Team-local spawn pads are the sole ordinary-reset position authority.
     Spawn-shield duration and movement speed remain episode-static rules.
+    Team respawn-wave periods are immutable public clocks whose current
+    countdowns live in ``EnvState``.
     """
 
     max_steps: int
@@ -212,6 +214,7 @@ class EnvConfig(NamedTuple):
     team_spawn_pad_positions: Array  # (NUM_TEAMS, MAX_AGENTS_PER_TEAM, 2)
     spawn_shield_duration_steps: int
     spawn_shield_movement_speed: float
+    team_respawn_wave_period_step_count: Array  # (NUM_TEAMS,)
 
 
 class EnvState(NamedTuple):
@@ -222,8 +225,9 @@ class EnvState(NamedTuple):
     ``core.combat.derive_status_magnitudes``. Previous-action fields retain the
     one accepted category per actor from the immediately preceding transition.
     The spawn-shield vector stores remaining protected movement steps without a
-    duplicate active flag. The scalar validity leaf distinguishes reset from a
-    real neutral action.
+    duplicate active flag. Team respawn-wave countdowns store one public clock
+    per team without duplicating eligibility or queue state. The scalar validity
+    leaf distinguishes reset from a real neutral action.
     """
 
     step_count: Array
@@ -236,6 +240,7 @@ class EnvState(NamedTuple):
     rogue_poison_anti_heal_durations: Array
     mage_burst_damage_amplification_durations: Array
     priest_blessing_of_freedom_slow_floor_durations: Array
+    team_respawn_wave_countdowns: Array
     spawn_shield_durations: Array
     previous_timestep_move_actions: Array
     previous_timestep_select_target_actions: Array
@@ -285,7 +290,12 @@ class PreviousTimestepActionObservation(NamedTuple):
 
 
 class SpawnLifecycleObservation(NamedTuple):
-    """Actor-relative public spawn pads, shield rules, and roster lifecycle."""
+    """Actor-relative public spawn, shield, roster, and respawn-clock truth.
+
+    Team A observers receive Team A before Team B; Team B observers receive
+    Team B before Team A. Configured inactive observer rows remain canonical
+    zeros across every leaf.
+    """
 
     spawn_pad_positions_by_agent_by_team: (
         Array  # (MAX_AGENT_SLOTS, NUM_TEAMS, MAX_AGENTS_PER_TEAM, 2)
@@ -295,6 +305,10 @@ class SpawnLifecycleObservation(NamedTuple):
     )
     spawn_shield_configured_duration_by_agent: Array  # (MAX_AGENT_SLOTS)
     spawn_shield_speed_by_agent: Array  # (MAX_AGENT_SLOTS)
+    respawn_wave_period_step_count_by_agent_by_team: (
+        Array  # (MAX_AGENT_SLOTS, NUM_TEAMS)
+    )
+    respawn_wave_countdowns_by_agent_by_team: Array  # (MAX_AGENT_SLOTS, NUM_TEAMS)
     active_mask_by_agent_by_team: (
         Array  # (MAX_AGENT_SLOTS, NUM_TEAMS, MAX_AGENTS_PER_TEAM)
     )
@@ -393,6 +407,13 @@ class SpawnShieldTransitionFacts(NamedTuple):
     expired_at_transition_end_by_agent: Array  # (MAX_AGENT_SLOTS,)
 
 
+class RespawnTransitionFacts(NamedTuple):
+    """Authoritative due-wave and realized-respawn facts for one transition."""
+
+    respawn_wave_occurred_this_transition_by_team: Array  # (NUM_TEAMS,)
+    was_respawned_this_transition_by_agent: Array  # (MAX_AGENT_SLOTS,)
+
+
 class TransitionFacts(NamedTuple):
     """Fixed-shape authoritative facts for one reset or environment transition."""
 
@@ -402,6 +423,7 @@ class TransitionFacts(NamedTuple):
     combat_transition_facts: CombatTransitionFacts
     death_facts: DeathTransitionFacts
     spawn_shield_facts: SpawnShieldTransitionFacts
+    respawn_facts: RespawnTransitionFacts
 
 
 class Info(NamedTuple):

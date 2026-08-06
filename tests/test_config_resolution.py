@@ -234,6 +234,7 @@ def test_env_config_packages_only_the_resolved_profile_for_roster_facts() -> Non
         ),
         spawn_shield_duration_steps=3,
         spawn_shield_movement_speed=2.0,
+        team_respawn_wave_period_step_count=jnp.asarray((5, 5), dtype=jnp.int32),
     )
 
     assert "agent_profile" in EnvConfig._fields

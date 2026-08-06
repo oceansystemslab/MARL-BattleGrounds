@@ -137,6 +137,7 @@ def _scenario(
         team_spawn_pad_positions=_spawn_pad_positions(map_width, map_height),
         spawn_shield_duration_steps=3,
         spawn_shield_movement_speed=2.0,
+        team_respawn_wave_period_step_count=jnp.asarray((5, 5), dtype=jnp.int32),
     )
     initial_state, _, _, _ = reset(config, jax.random.key(0))
     return config, initial_state._replace(agent_positions=positions)

@@ -109,6 +109,7 @@ def _valid_config(
     spawn_pad_positions: Array | None = None,
     spawn_shield_duration_steps: int = 3,
     spawn_shield_movement_speed: float = 2.0,
+    team_respawn_wave_period_step_count: Array | None = None,
 ) -> EnvConfig:
     profile = resolve_agent_profile(
         jnp.full((MAX_AGENT_SLOTS,), MAGE_CLASS_ID, dtype=jnp.int32),
@@ -128,6 +129,11 @@ def _valid_config(
         ),
         spawn_shield_duration_steps=spawn_shield_duration_steps,
         spawn_shield_movement_speed=spawn_shield_movement_speed,
+        team_respawn_wave_period_step_count=(
+            jnp.asarray((5, 7), dtype=jnp.int32)
+            if team_respawn_wave_period_step_count is None
+            else team_respawn_wave_period_step_count
+        ),
     )
 
 
@@ -190,6 +196,7 @@ def test_validation_inventory_covers_current_public_schemas() -> None:
         "team_spawn_pad_positions",
         "spawn_shield_duration_steps",
         "spawn_shield_movement_speed",
+        "team_respawn_wave_period_step_count",
     )
     assert ResolvedAgentProfile._fields == (
         "class_ids",
@@ -416,6 +423,98 @@ def test_spawn_shield_speed_rejects_wrong_types_and_invalid_float32_values(
                 spawn_shield_movement_speed=invalid_speed,
             )
         )
+
+
+@pytest.mark.parametrize(
+    "period_step_counts",
+    (
+        pytest.param(
+            jnp.asarray((1, 1), dtype=jnp.int32),
+            id="wave-every-transition",
+        ),
+        pytest.param(
+            jnp.asarray((1, 7), dtype=jnp.int32),
+            id="asymmetric-periods",
+        ),
+        pytest.param(
+            jnp.asarray(
+                (np.iinfo(np.int32).max, np.iinfo(np.int32).max - 1),
+                dtype=jnp.int32,
+            ),
+            id="int32-boundary",
+        ),
+    ),
+)
+def test_respawn_wave_period_accepts_positive_int32_team_values(
+    period_step_counts: Array,
+) -> None:
+    """Accept positive per-team periods across the complete int32 domain."""
+    assert (
+        validate_env_config(
+            _valid_config(
+                team_respawn_wave_period_step_count=period_step_counts,
+            )
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("invalid_periods", "error_type"),
+    (
+        pytest.param(cast(Any, []), TypeError, id="python-list"),
+        pytest.param(
+            np.asarray((3, 5), dtype=np.int32),
+            TypeError,
+            id="numpy-array",
+        ),
+        pytest.param(
+            jnp.asarray(3, dtype=jnp.int32),
+            ValueError,
+            id="scalar",
+        ),
+        pytest.param(
+            jnp.ones((NUM_TEAMS, 1), dtype=jnp.int32),
+            ValueError,
+            id="wrong-shape",
+        ),
+        pytest.param(
+            jnp.asarray((3.0, 5.0), dtype=jnp.float32),
+            TypeError,
+            id="wrong-dtype",
+        ),
+    ),
+)
+def test_respawn_wave_period_enforces_exact_jax_storage(
+    invalid_periods: object,
+    error_type: type[Exception],
+) -> None:
+    """Reject host containers and shape or dtype drift at the public boundary."""
+    with pytest.raises(error_type, match="team_respawn_wave_period_step_count"):
+        validate_env_config(
+            _replace_config(
+                _valid_config(),
+                team_respawn_wave_period_step_count=invalid_periods,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "invalid_periods",
+    (
+        pytest.param((0, 1), id="team-a-zero"),
+        pytest.param((1, 0), id="team-b-zero"),
+        pytest.param((-1, 1), id="team-a-negative"),
+        pytest.param((1, -1), id="team-b-negative"),
+    ),
+)
+def test_respawn_wave_period_rejects_nonpositive_team_values(
+    invalid_periods: tuple[int, int],
+) -> None:
+    """Require every team clock period to make forward progress."""
+    periods = jnp.asarray(invalid_periods, dtype=jnp.int32)
+    with pytest.raises(ValueError, match="positive"):
+        validate_env_config(_valid_config(team_respawn_wave_period_step_count=periods))
 
 
 @pytest.mark.parametrize(
@@ -809,6 +908,7 @@ def test_bounds_pillar_wall_and_agent_tangency_are_legal() -> None:
         team_spawn_pad_positions=positions,
         spawn_shield_duration_steps=3,
         spawn_shield_movement_speed=2.0,
+        team_respawn_wave_period_step_count=jnp.asarray((5, 7), dtype=jnp.int32),
     )
     assert validate_env_config(config) is None
 

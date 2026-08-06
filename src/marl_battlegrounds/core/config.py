@@ -543,6 +543,17 @@ def validate_env_config(config: EnvConfig) -> None:
             "conversion to float32."
         )
 
+    team_respawn_wave_period_step_count = _require_jax_array(
+        config.team_respawn_wave_period_step_count,
+        field_name="team_respawn_wave_period_step_count",
+        expected_shape=(NUM_TEAMS,),
+        expected_dtype=jnp.int32,
+    )
+    if bool(np.any(np.asarray(team_respawn_wave_period_step_count) <= 0)):
+        raise ValueError(
+            "team_respawn_wave_period_step_count must contain only positive values."
+        )
+
     obstacles = _validate_obstacles(config.obstacles)
     profile = _validate_agent_profile(config.agent_profile)
     _validate_team_spawn_pad_positions(
@@ -746,6 +757,12 @@ def validate_env_state(config: EnvConfig, state: EnvState) -> None:
         expected_shape=(MAX_AGENT_SLOTS,),
         expected_dtype=jnp.int32,
     )
+    team_respawn_wave_countdowns = _require_jax_array(
+        state.team_respawn_wave_countdowns,
+        field_name="team_respawn_wave_countdowns",
+        expected_shape=(NUM_TEAMS,),
+        expected_dtype=jnp.int32,
+    )
     spawn_shield_durations = _require_jax_array(
         state.spawn_shield_durations,
         field_name="spawn_shield_durations",
@@ -882,6 +899,22 @@ def validate_env_state(config: EnvConfig, state: EnvState) -> None:
             raise ValueError(f"active dead {field_name} rows must be exactly zero.")
         if bool(np.any(host_values[inactive] != 0)):
             raise ValueError(f"inactive {field_name} rows must be exactly zero.")
+
+    host_team_respawn_wave_countdowns = np.asarray(team_respawn_wave_countdowns)
+    if bool(np.any(host_team_respawn_wave_countdowns < 0)):
+        raise ValueError(
+            "team_respawn_wave_countdowns must contain only nonnegative values."
+        )
+    if bool(
+        np.any(
+            host_team_respawn_wave_countdowns
+            >= np.asarray(config.team_respawn_wave_period_step_count)
+        )
+    ):
+        raise ValueError(
+            "team_respawn_wave_countdowns must be strictly less than "
+            "team_respawn_wave_period_step_count."
+        )
 
     host_spawn_shield_durations = np.asarray(spawn_shield_durations)
     if bool(np.any(host_spawn_shield_durations < 0)):

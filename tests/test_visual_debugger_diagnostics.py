@@ -398,9 +398,9 @@ def test_non_health_activations_do_not_create_zero_health_delta_visuals() -> Non
         if isinstance(event, NetHealthEventV1)
     }
 
-    assert health_visual_slots == {2, 5, 7}
+    assert health_visual_slots == {2, 5, 6, 7}
     assert 5 in health_visual_slots  # Rogue Poison carries approved direct damage.
-    assert 6 not in health_visual_slots  # Hunter Trap carries no direct health delta.
+    assert 6 in health_visual_slots  # Hunter Trap carries approved direct damage.
 
 
 def test_activation_events_preserve_multiplicity_successor_anchors_and_no_amount() -> (

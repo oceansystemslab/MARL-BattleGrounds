@@ -257,6 +257,7 @@ def _config(
         ),
         spawn_shield_duration_steps=3,
         spawn_shield_movement_speed=2.0,
+        team_respawn_wave_period_step_count=jnp.asarray((5, 5), dtype=jnp.int32),
     )
 
 
@@ -359,6 +360,14 @@ def _zero_observation() -> Observation:
             spawn_shield_speed_by_agent=jnp.zeros(
                 (MAX_AGENT_SLOTS,),
                 dtype=jnp.float32,
+            ),
+            respawn_wave_period_step_count_by_agent_by_team=jnp.zeros(
+                (MAX_AGENT_SLOTS, NUM_TEAMS),
+                dtype=jnp.int32,
+            ),
+            respawn_wave_countdowns_by_agent_by_team=jnp.zeros(
+                (MAX_AGENT_SLOTS, NUM_TEAMS),
+                dtype=jnp.int32,
             ),
             active_mask_by_agent_by_team=jnp.zeros(
                 (MAX_AGENT_SLOTS, NUM_TEAMS, MAX_AGENTS_PER_TEAM),
@@ -747,6 +756,7 @@ def test_env_state_stores_slot_aligned_arrays() -> None:
             shape=(MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS), dtype=jnp.float32
         ),
         alive_mask=jnp.zeros(shape=(MAX_AGENT_SLOTS,), dtype=bool),
+        team_respawn_wave_countdowns=jnp.asarray((4, 4), dtype=jnp.int32),
         **_inert_combat_state_fields(),
     )
 
@@ -808,6 +818,8 @@ def test_observation_stores_structured_families() -> None:
         "spawn_shield_actual_durations_by_agent_by_team",
         "spawn_shield_configured_duration_by_agent",
         "spawn_shield_speed_by_agent",
+        "respawn_wave_period_step_count_by_agent_by_team",
+        "respawn_wave_countdowns_by_agent_by_team",
         "active_mask_by_agent_by_team",
         "alive_mask_by_agent_by_team",
     )

@@ -896,8 +896,8 @@ def test_ultimate_showcase_reference_trajectory() -> None:
         atol=1e-4,
     )
     np.testing.assert_allclose(
-        np.asarray(session.state.current_health)[[2, 5, 7]],
-        (100.0, 44.0, 80.0),
+        np.asarray(session.state.current_health)[[2, 5, 6, 7]],
+        (100.0, 44.0, 191.5, 80.0),
         atol=1e-5,
     )
     np.testing.assert_array_equal(session.state.ultimate_cooldowns[:5], 30)
@@ -919,7 +919,7 @@ def test_ultimate_showcase_reference_trajectory() -> None:
     }
 
     session = submit_next_script_frame(session)
-    assert float(session.state.current_health[6]) == pytest.approx(194.9)
+    assert float(session.state.current_health[6]) == pytest.approx(186.4)
     assert int(session.state.stun_durations[6, STUN_CHANNEL_HUNTER_TRAP]) == 0
     assert int(session.state.slow_durations[6, SLOW_CHANNEL_HUNTER_BASIC]) == 1
     np.testing.assert_array_equal(session.state.ultimate_cooldowns[:5], 29)
@@ -975,7 +975,7 @@ def test_status_stack_reference_trajectory() -> None:
     _, session = _session("status_stack")
     session = submit_next_script_frame(session)
     np.testing.assert_allclose(session.state.agent_positions[0], (7.0, 7.0))
-    assert float(session.state.current_health[5]) == pytest.approx(52.0)
+    assert float(session.state.current_health[5]) == pytest.approx(42.0)
     np.testing.assert_array_equal(session.state.slow_durations[5], (5, 0, 5))
     np.testing.assert_array_equal(session.state.stun_durations[5], (1, 4, 1))
     assert int(session.state.rogue_poison_anti_heal_durations[5]) == 4
@@ -993,7 +993,7 @@ def test_status_stack_reference_trajectory() -> None:
 
     session = submit_next_script_frame(session)
     np.testing.assert_allclose(session.state.agent_positions[5], (8.0, 6.0))
-    assert float(session.state.current_health[5]) == pytest.approx(50.0)
+    assert float(session.state.current_health[5]) == pytest.approx(40.0)
     np.testing.assert_array_equal(session.state.slow_durations[5], (4, 1, 4))
     np.testing.assert_array_equal(session.state.stun_durations[5], (0, 0, 0))
     assert int(session.state.rogue_poison_anti_heal_durations[5]) == 3
