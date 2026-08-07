@@ -980,10 +980,18 @@ def test_dying_source_completes_each_class_defining_action(
                 _TEAM_A_FIRST_SLOT
             ]
         )
+        regeneration_facts = info.transition_facts.regeneration_facts
+        actual_regeneration = (
+            regeneration_facts.actual_health_regenerated_this_step_by_agent[
+                _TEAM_A_SECOND_SLOT
+            ]
+        )
+        assert actual_regeneration == 4.0
         assert (
             next_state.current_health[_TEAM_A_SECOND_SLOT]
             == state.current_health[_TEAM_A_SECOND_SLOT]
             + combat.BASIC_HEALING_BY_CLASS[PRIEST_CLASS_ID]
+            + actual_regeneration
         )
 
 

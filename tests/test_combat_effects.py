@@ -185,6 +185,7 @@ def _scenario(
         ),
         team_respawn_wave_countdowns=config.team_respawn_wave_period_step_count - 1,
         spawn_shield_durations=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        steps_until_out_of_combat=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
         previous_timestep_move_actions=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
         previous_timestep_select_target_actions=jnp.zeros(
             (MAX_AGENT_SLOTS,), dtype=jnp.int32
@@ -195,6 +196,17 @@ def _scenario(
         has_previous_timestep_joint_action=jnp.asarray(False),
     )
     return config, state
+
+
+def _with_active_agents_in_combat(config: EnvConfig, state: EnvState) -> EnvState:
+    """Keep combat-effect tests independent from out-of-combat regeneration."""
+    return state._replace(
+        steps_until_out_of_combat=jnp.where(
+            config.agent_profile.active_mask,
+            config.agent_profile.out_of_combat_delay_steps,
+            0,
+        ).astype(jnp.int32)
+    )
 
 
 def _joint_action(
@@ -654,6 +666,7 @@ def test_mage_aura_amplifies_allied_damage_but_not_healing() -> None:
         team_sizes=(3, 1),
     )
     state = state._replace(current_health=state.current_health.at[2].add(-20.0))
+    state = _with_active_agents_in_combat(config, state)
     action = _joint_action(
         (1, MOVE_STAY, _FIRST_ENEMY_TARGET, 0),
         (2, MOVE_STAY, 3, 0),
@@ -1472,6 +1485,7 @@ def test_priest_basic_heals_self_and_allies(
     state = state._replace(
         current_health=state.current_health.at[recipient_slot].add(-20.0)
     )
+    state = _with_active_agents_in_combat(config, state)
 
     next_state, _, _ = _step(
         config,
@@ -1519,6 +1533,7 @@ def test_relation_local_targets_route_to_stable_global_slots(
     class_rows[actor_slot] = (actor_slot, actor_class_id)
     config, state = _scenario(*class_rows, team_sizes=(5, 5))
     state = state._replace(current_health=state.current_health - 20.0)
+    state = _with_active_agents_in_combat(config, state)
 
     next_state, _, _ = _step(
         config,
@@ -1577,6 +1592,7 @@ def test_duplicate_priest_healing_aggregates_on_one_recipient() -> None:
         team_sizes=(3, 1),
     )
     state = state._replace(current_health=state.current_health.at[2].add(-30.0))
+    state = _with_active_agents_in_combat(config, state)
     action = _joint_action(
         (0, MOVE_STAY, 3, 0),
         (1, MOVE_STAY, 3, 0),

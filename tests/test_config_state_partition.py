@@ -17,10 +17,13 @@ from marl_battlegrounds.core.types import (
     AGENT_FEATURE_ACTIVE,
     AGENT_FEATURE_BASE_MOVEMENT_SPEED,
     AGENT_FEATURE_BASIC_INTERACTION_RADIUS,
+    AGENT_FEATURE_CAPABILITY_OUT_OF_COMBAT_DELAY_STEPS,
+    AGENT_FEATURE_CAPABILITY_OUT_OF_COMBAT_HEALTH_REGEN_FRACTION_PER_STEP,
     AGENT_FEATURE_CLASS_ID,
     AGENT_FEATURE_MAX_HEALTH,
     AGENT_FEATURE_OBSERVATION_RADIUS,
     AGENT_FEATURE_RADIUS,
+    AGENT_FEATURE_STEPS_UNTIL_OUT_OF_COMBAT,
     AGENT_FEATURE_TEAM_ID,
     AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS,
     ENVIRONMENT_DIMENSIONS,
@@ -61,6 +64,7 @@ _FINAL_STATE_FIELDS = (
     "priest_blessing_of_freedom_slow_floor_durations",
     "team_respawn_wave_countdowns",
     "spawn_shield_durations",
+    "steps_until_out_of_combat",
     "previous_timestep_move_actions",
     "previous_timestep_select_target_actions",
     "previous_timestep_use_ultimate_actions",
@@ -171,6 +175,8 @@ def test_reset_initializes_dynamic_state_from_resolved_profile() -> None:
     assert bool(jnp.array_equal(state.current_health, profile.max_health))
     assert state.spawn_shield_durations.dtype == jnp.int32
     assert bool(jnp.all(state.spawn_shield_durations == 0))
+    assert state.steps_until_out_of_combat.dtype == jnp.int32
+    assert bool(jnp.all(state.steps_until_out_of_combat == 0))
     inactive_mask = jnp.logical_not(profile.active_mask)
     assert bool(jnp.all(action_mask.move_mask[inactive_mask, MOVE_STAY]))
     assert bool(jnp.all(jnp.sum(action_mask.move_mask[inactive_mask], axis=-1) == 1))
@@ -196,9 +202,23 @@ def test_reset_initializes_dynamic_state_from_resolved_profile() -> None:
             profile.ultimate_interaction_radii,
         ),
         (AGENT_FEATURE_MAX_HEALTH, profile.max_health),
+        (
+            AGENT_FEATURE_CAPABILITY_OUT_OF_COMBAT_DELAY_STEPS,
+            profile.out_of_combat_delay_steps.astype(jnp.float32),
+        ),
+        (
+            AGENT_FEATURE_CAPABILITY_OUT_OF_COMBAT_HEALTH_REGEN_FRACTION_PER_STEP,
+            profile.out_of_combat_health_regen_fraction_per_step,
+        ),
     )
     for column, expected in static_columns:
         assert bool(jnp.array_equal(observation.self_features[:, column], expected))
+    assert bool(
+        jnp.array_equal(
+            observation.self_features[:, AGENT_FEATURE_STEPS_UNTIL_OUT_OF_COMBAT],
+            state.steps_until_out_of_combat.astype(jnp.float32),
+        )
+    )
 
 
 def test_spawn_lifecycle_is_team_relative_and_available_to_dead_observers() -> None:
@@ -526,6 +546,7 @@ def test_step_preserves_non_inert_dynamic_memory() -> None:
         priest_blessing_of_freedom_slow_floor_durations=(
             state.priest_blessing_of_freedom_slow_floor_durations.at[5].set(1)
         ),
+        steps_until_out_of_combat=state.steps_until_out_of_combat.at[0].set(1),
     )
 
     next_state, *_ = step(
@@ -538,6 +559,12 @@ def test_step_preserves_non_inert_dynamic_memory() -> None:
 
     assert next_state.step_count == state.step_count + 1
     assert bool(jnp.array_equal(next_state.current_health, state.current_health))
+    assert bool(
+        jnp.array_equal(
+            next_state.steps_until_out_of_combat,
+            jnp.maximum(state.steps_until_out_of_combat - 1, 0),
+        )
+    )
     assert bool(
         jnp.array_equal(
             next_state.ultimate_cooldowns,

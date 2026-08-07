@@ -101,6 +101,7 @@ from marl_battlegrounds.core.types import (
     Info,
     Observation,
     PreviousTimestepActionObservation,
+    RegenerationTransitionFacts,
     RespawnTransitionFacts,
     Reward,
     SpawnLifecycleObservation,
@@ -156,7 +157,7 @@ _ACTOR_RELATIVE_SELECT_TARGET_ACTION_TO_GLOBAL_AGENT_SLOT_LOOKUP_TABLE = jnp.asa
 )
 
 
-class _HealthEffectAggregationResult(NamedTuple):
+class _CombatEffectAggregationResult(NamedTuple):
     """Internal effect arrays shared by successor state and transition facts."""
 
     hunter_basic_slow_applied_this_tick_by_global_recipient_slot: Array
@@ -174,6 +175,7 @@ class _HealthEffectAggregationResult(NamedTuple):
     recipient_healing_modifier_by_source: Array
     total_effective_healing_by_recipient: Array
     priest_blessing_of_freedom_is_applied_by_source: Array
+    is_combat_participant_this_tick_by_source: Array
 
 
 def _compute_global_pairwise_distances_from_agent_positions(
@@ -1237,7 +1239,7 @@ def _build_self_features(
         dtype=jnp.float32,
     )
 
-    features_15_to_30 = jnp.concatenate(
+    features_15_to_31 = jnp.concatenate(
         (
             state.slow_durations,
             slow_multipliers,
@@ -1247,6 +1249,7 @@ def _build_self_features(
             state.mage_burst_damage_amplification_durations[:, None],
             state.priest_blessing_of_freedom_slow_floor_durations[:, None],
             priest_blessing_of_freedom_slow_floor_fraction[:, None],
+            state.steps_until_out_of_combat[:, None],
             mage_damage_amplification_aura_multipliers[:, None],
             warrior_damage_mitigation_aura_multipliers[:, None],
         ),
@@ -1360,7 +1363,19 @@ def _build_self_features(
         0.0,
     )[:, None]
 
-    feature_31_to_54 = jnp.concatenate(
+    ooc_delay_steps_capability_features = jnp.where(
+        config.agent_profile.active_mask,
+        config.agent_profile.out_of_combat_delay_steps,
+        0,
+    )[:, None].astype(jnp.float32)
+
+    ooc_health_regen_fraction_per_step_capability_features = jnp.where(
+        config.agent_profile.active_mask,
+        config.agent_profile.out_of_combat_health_regen_fraction_per_step,
+        0,
+    )[:, None]
+
+    feature_32_to_57 = jnp.concatenate(
         (
             basic_health_and_ultimate_cooldown_capability_features,
             slow_stun_durations_multipliers,
@@ -1370,6 +1385,8 @@ def _build_self_features(
             mage_and_warrior_aura_capability_features,
             ultimate_healing_capability_features,
             ultimate_damage_capability_features,
+            ooc_delay_steps_capability_features,
+            ooc_health_regen_fraction_per_step_capability_features,
         ),
         axis=-1,
         dtype=jnp.float32,
@@ -1378,8 +1395,8 @@ def _build_self_features(
     return jnp.concatenate(
         (
             features_0_to_14,
-            features_15_to_30,
-            feature_31_to_54,
+            features_15_to_31,
+            feature_32_to_57,
         ),
         axis=-1,
         dtype=jnp.float32,
@@ -1581,7 +1598,7 @@ def _aggregate_health_effects_and_basic_passives_by_global_slot(
     accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix: Array,
     mage_damage_amplification_aura_multipliers: Array,
     warrior_damage_mitigation_aura_multipliers: Array,
-) -> _HealthEffectAggregationResult:
+) -> _CombatEffectAggregationResult:
     """Aggregate accepted health effects and basic-passive applications.
 
     The accepted target categories are actor-relative. After fixed-slot
@@ -1797,7 +1814,47 @@ def _aggregate_health_effects_and_basic_passives_by_global_slot(
         total_healing_received_by_global_recipient_slot
     )
 
-    return _HealthEffectAggregationResult(
+    # Healing qualification reads only transition-start combat truth. Combine
+    # healing and damage participants only after that snapshot decision so a
+    # same-transition reset cannot propagate through another healing route.
+    is_currently_in_combat = current_state.steps_until_out_of_combat > 0
+    combat_healing_source_this_tick_by_agent = jnp.any(
+        jnp.logical_and(
+            accepted_healing_global_pairwise_actor_and_recipient_target_one_hot_matrix,
+            is_currently_in_combat[None, :],
+        ),
+        axis=1,
+    )
+    combat_healing_recipient_this_tick_by_agent = jnp.logical_and(
+        is_currently_in_combat,
+        jnp.any(
+            accepted_healing_global_pairwise_actor_and_recipient_target_one_hot_matrix,
+            axis=0,
+        ),
+    )
+    combat_healing_participation_this_tick_by_agent = jnp.logical_or(
+        combat_healing_source_this_tick_by_agent,
+        combat_healing_recipient_this_tick_by_agent,
+    )
+
+    damage_source_this_tick_by_agent = jnp.any(
+        accepted_damage_global_pairwise_actor_and_recipient_target_one_hot_matrix,
+        axis=1,
+    )
+    damage_recipient_this_tick_by_agent = jnp.any(
+        accepted_damage_global_pairwise_actor_and_recipient_target_one_hot_matrix,
+        axis=0,
+    )
+    combat_damage_participation_this_tick_by_agent = jnp.logical_or(
+        damage_source_this_tick_by_agent, damage_recipient_this_tick_by_agent
+    )
+
+    is_combat_participant_this_tick_by_source = jnp.logical_or(
+        combat_healing_participation_this_tick_by_agent,
+        combat_damage_participation_this_tick_by_agent,
+    )
+
+    return _CombatEffectAggregationResult(
         hunter_basic_slow_applied_this_tick_by_global_recipient_slot=(
             hunter_basic_slow_applied_this_tick_by_global_recipient_slot
         ),
@@ -1827,6 +1884,7 @@ def _aggregate_health_effects_and_basic_passives_by_global_slot(
         priest_blessing_of_freedom_is_applied_by_source=(
             priest_freedom_applied_this_tick_by_global_actor_slot
         ),
+        is_combat_participant_this_tick_by_source=is_combat_participant_this_tick_by_source,
     )
 
 
@@ -2376,6 +2434,65 @@ def _resolve_post_charge_agent_positions(
     )
 
 
+def _build_combat_transition_facts(
+    combat_effect_aggregation_result: _CombatEffectAggregationResult,
+    combat_effect_has_recipient_by_source: Array,
+    combat_effect_recipient_global_slot_by_source: Array,
+    slow_is_applied_by_source_and_channel: Array,
+    stun_is_applied_by_source_and_channel: Array,
+    rogue_poison_anti_heal_is_applied_by_source: Array,
+    mage_burst_damage_amplification_is_applied_by_source: Array,
+) -> CombatTransitionFacts:
+    """Package existing combat intermediates as authoritative public facts."""
+    return CombatTransitionFacts(
+        basic_effect_is_activated_by_source=(
+            combat_effect_aggregation_result.basic_effect_is_activated_by_source
+        ),
+        ultimate_effect_is_activated_by_source=(
+            combat_effect_aggregation_result.ultimate_effect_is_activated_by_source
+        ),
+        combat_effect_has_recipient_by_source=combat_effect_has_recipient_by_source,
+        combat_effect_recipient_global_slot_by_source=(
+            combat_effect_recipient_global_slot_by_source
+        ),
+        raw_damage_output_by_source=(
+            combat_effect_aggregation_result.raw_damage_output_by_source
+        ),
+        source_modified_damage_output_by_source=(
+            combat_effect_aggregation_result.source_modified_damage_output_by_source
+        ),
+        recipient_damage_modifier_by_source=(
+            combat_effect_aggregation_result.recipient_damage_modifier_by_source
+        ),
+        total_effective_damage_by_recipient=(
+            combat_effect_aggregation_result.total_effective_damage_by_recipient
+        ),
+        raw_healing_output_by_source=(
+            combat_effect_aggregation_result.raw_healing_output_by_source
+        ),
+        source_modified_healing_output_by_source=(
+            combat_effect_aggregation_result.source_modified_healing_output_by_source
+        ),
+        recipient_healing_modifier_by_source=(
+            combat_effect_aggregation_result.recipient_healing_modifier_by_source
+        ),
+        total_effective_healing_by_recipient=(
+            combat_effect_aggregation_result.total_effective_healing_by_recipient
+        ),
+        slow_is_applied_by_source_and_channel=slow_is_applied_by_source_and_channel,
+        stun_is_applied_by_source_and_channel=stun_is_applied_by_source_and_channel,
+        rogue_poison_anti_heal_is_applied_by_source=(
+            rogue_poison_anti_heal_is_applied_by_source
+        ),
+        mage_burst_damage_amplification_is_applied_by_source=(
+            mage_burst_damage_amplification_is_applied_by_source
+        ),
+        priest_blessing_of_freedom_is_applied_by_source=(
+            combat_effect_aggregation_result.priest_blessing_of_freedom_is_applied_by_source
+        ),
+    )
+
+
 def _build_death_transition_facts(
     current_state: EnvState,
     config: EnvConfig,
@@ -2497,6 +2614,11 @@ def _build_canonical_no_transition_info_object(initial_state: EnvState) -> Info:
         was_respawned_this_transition_by_agent=all_false_vector,
     )
 
+    reset_regeneration_facts = RegenerationTransitionFacts(
+        combat_countdown_was_reset_by_agent=all_false_vector,
+        actual_health_regenerated_this_step_by_agent=all_zeroes_vector,
+    )
+
     reset_transition_facts = TransitionFacts(
         has_transition=jnp.asarray(False),
         transition_start_step_count=jnp.asarray(-1, dtype=jnp.int32),
@@ -2505,6 +2627,7 @@ def _build_canonical_no_transition_info_object(initial_state: EnvState) -> Info:
         death_facts=reset_death_facts,
         spawn_shield_facts=reset_spawn_shield_facts,
         respawn_facts=reset_respawn_facts,
+        regeneration_facts=reset_regeneration_facts,
     )
 
     return Info(transition_facts=reset_transition_facts)
@@ -2612,6 +2735,77 @@ def _return_original_next_state_items(
     )
 
 
+def _compute_next_steps_until_out_of_combat(
+    current_state: EnvState,
+    config: EnvConfig,
+    is_combat_participant_this_tick_by_agent: Array,
+    next_alive_mask: Array,
+) -> Array:
+    """Reset, decrement, or clear each successor combat countdown."""
+    next_steps_until_ooc_active_masked = jnp.where(
+        is_combat_participant_this_tick_by_agent,
+        config.agent_profile.out_of_combat_delay_steps,
+        jnp.maximum(current_state.steps_until_out_of_combat - 1, 0),
+    )
+
+    return jnp.where(
+        jnp.logical_and(next_alive_mask, config.agent_profile.active_mask),
+        next_steps_until_ooc_active_masked,
+        0,
+    ).astype(jnp.int32)
+
+
+def _compute_health_after_out_of_combat_health_regeneration(
+    current_state: EnvState,
+    config: EnvConfig,
+    next_health_after_effective_damage_and_healing: Array,
+    is_combat_participant_this_tick: Array,
+) -> tuple[Array, Array]:
+    """Apply eligible post-combat regeneration and return its actual amount."""
+    raw_health_regen_deltas = (
+        config.agent_profile.max_health
+        * config.agent_profile.out_of_combat_health_regen_fraction_per_step
+    )
+
+    is_afflicted_with_rogue_poison = current_state.rogue_poison_anti_heal_durations > 0
+    health_regen_deltas = jnp.where(
+        is_afflicted_with_rogue_poison,
+        raw_health_regen_deltas * ROGUE_POISON_ANTI_HEAL_MULTIPLIER,
+        raw_health_regen_deltas,
+    )
+
+    regenerated_health_bars = jnp.minimum(
+        next_health_after_effective_damage_and_healing + health_regen_deltas,
+        config.agent_profile.max_health,
+    )
+
+    regenerates_health_this_tick = jnp.logical_and(
+        jnp.logical_not(is_combat_participant_this_tick),
+        jnp.logical_and(
+            current_state.steps_until_out_of_combat == 0, current_state.alive_mask
+        ),
+    )
+
+    health_after_out_of_combat_regeneration = jnp.where(
+        regenerates_health_this_tick,
+        regenerated_health_bars,
+        next_health_after_effective_damage_and_healing,
+    )
+
+    actual_health_regenerated_this_tick_by_agent = (
+        regenerates_health_this_tick
+        * (
+            health_after_out_of_combat_regeneration
+            - next_health_after_effective_damage_and_healing
+        )
+    ).astype(jnp.float32)
+
+    return (
+        health_after_out_of_combat_regeneration,
+        actual_health_regenerated_this_tick_by_agent,
+    )
+
+
 # Public ---
 
 
@@ -2669,6 +2863,7 @@ def reset(
         ),
         team_respawn_wave_countdowns=config.team_respawn_wave_period_step_count - 1,
         spawn_shield_durations=jnp.zeros((MAX_AGENT_SLOTS), dtype=jnp.int32),
+        steps_until_out_of_combat=jnp.zeros((MAX_AGENT_SLOTS), dtype=jnp.int32),
         previous_timestep_move_actions=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
         previous_timestep_select_target_actions=jnp.zeros(
             (MAX_AGENT_SLOTS,), dtype=jnp.int32
@@ -2731,7 +2926,7 @@ def step(
         current_state.spawn_shield_durations == 0,
     )
 
-    health_effect_aggregation_result = (
+    combat_effect_aggregation_result = (
         _aggregate_health_effects_and_basic_passives_by_global_slot(
             current_state,
             config,
@@ -2744,11 +2939,21 @@ def step(
 
     next_health_after_effective_damage_and_healing = (
         _compute_health_after_simultaneous_damage_and_healing(
-            health_effect_aggregation_result.total_effective_damage_by_recipient,
-            health_effect_aggregation_result.total_effective_healing_by_recipient,
+            combat_effect_aggregation_result.total_effective_damage_by_recipient,
+            combat_effect_aggregation_result.total_effective_healing_by_recipient,
             current_state,
             config,
         )
+    )
+
+    (
+        next_health_after_out_of_combat_regeneration,
+        actual_health_regenerated_this_tick_by_agent,
+    ) = _compute_health_after_out_of_combat_health_regeneration(
+        current_state,
+        config,
+        next_health_after_effective_damage_and_healing,
+        combat_effect_aggregation_result.is_combat_participant_this_tick_by_source,
     )
 
     # Accepted use starts a full cooldown; every unreplaced cooldown ticks once.
@@ -2800,15 +3005,27 @@ def step(
     death_facts = _build_death_transition_facts(
         current_state,
         config,
-        next_health_after_effective_damage_and_healing,
+        next_health_after_out_of_combat_regeneration,
         combat_effect_recipient_global_slot_by_source,
-        health_effect_aggregation_result.source_modified_damage_output_by_source,
-        health_effect_aggregation_result.recipient_damage_modifier_by_source,
+        combat_effect_aggregation_result.source_modified_damage_output_by_source,
+        combat_effect_aggregation_result.recipient_damage_modifier_by_source,
     )
 
     next_alive_mask = jnp.logical_and(
         jnp.logical_not(death_facts.is_newly_dead_by_recipient),
         current_state.alive_mask,
+    )
+
+    next_steps_until_ooc = _compute_next_steps_until_out_of_combat(
+        current_state,
+        config,
+        combat_effect_aggregation_result.is_combat_participant_this_tick_by_source,
+        next_alive_mask,
+    )
+
+    regeneration_facts = RegenerationTransitionFacts(
+        combat_countdown_was_reset_by_agent=combat_effect_aggregation_result.is_combat_participant_this_tick_by_source,
+        actual_health_regenerated_this_step_by_agent=actual_health_regenerated_this_tick_by_agent,
     )
 
     (
@@ -2827,59 +3044,21 @@ def step(
         config,
         accepted_joint_action.use_ultimate,
         accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix,
-        health_effect_aggregation_result.hunter_basic_slow_applied_this_tick_by_global_recipient_slot,
-        health_effect_aggregation_result.priest_freedom_applied_this_tick_by_global_recipient_slot,
-        health_effect_aggregation_result.accepted_positive_raw_damage_received_this_tick_by_global_recipient_slot,
-        health_effect_aggregation_result.hunter_basic_slow_applied_this_tick_by_global_actor_slot,
+        combat_effect_aggregation_result.hunter_basic_slow_applied_this_tick_by_global_recipient_slot,
+        combat_effect_aggregation_result.priest_freedom_applied_this_tick_by_global_recipient_slot,
+        combat_effect_aggregation_result.accepted_positive_raw_damage_received_this_tick_by_global_recipient_slot,
+        combat_effect_aggregation_result.hunter_basic_slow_applied_this_tick_by_global_actor_slot,
         next_alive_mask,
     )
 
-    combat_transition_facts = CombatTransitionFacts(
-        basic_effect_is_activated_by_source=(
-            health_effect_aggregation_result.basic_effect_is_activated_by_source
-        ),
-        ultimate_effect_is_activated_by_source=(
-            health_effect_aggregation_result.ultimate_effect_is_activated_by_source
-        ),
-        combat_effect_has_recipient_by_source=combat_effect_has_recipient_by_source,
-        combat_effect_recipient_global_slot_by_source=(
-            combat_effect_recipient_global_slot_by_source
-        ),
-        raw_damage_output_by_source=(
-            health_effect_aggregation_result.raw_damage_output_by_source
-        ),
-        source_modified_damage_output_by_source=(
-            health_effect_aggregation_result.source_modified_damage_output_by_source
-        ),
-        recipient_damage_modifier_by_source=(
-            health_effect_aggregation_result.recipient_damage_modifier_by_source
-        ),
-        total_effective_damage_by_recipient=(
-            health_effect_aggregation_result.total_effective_damage_by_recipient
-        ),
-        raw_healing_output_by_source=(
-            health_effect_aggregation_result.raw_healing_output_by_source
-        ),
-        source_modified_healing_output_by_source=(
-            health_effect_aggregation_result.source_modified_healing_output_by_source
-        ),
-        recipient_healing_modifier_by_source=(
-            health_effect_aggregation_result.recipient_healing_modifier_by_source
-        ),
-        total_effective_healing_by_recipient=(
-            health_effect_aggregation_result.total_effective_healing_by_recipient
-        ),
-        slow_is_applied_by_source_and_channel=slow_is_applied_by_source_and_channel,
-        stun_is_applied_by_source_and_channel=stun_is_applied_by_source_and_channel,
-        rogue_poison_anti_heal_is_applied_by_source=(
-            rogue_poison_anti_heal_is_applied_by_source
-        ),
-        mage_burst_damage_amplification_is_applied_by_source=(
-            mage_burst_damage_amplification_is_applied_by_source
-        ),
-        priest_blessing_of_freedom_is_applied_by_source=(
-            health_effect_aggregation_result.priest_blessing_of_freedom_is_applied_by_source
-        ),
+    combat_transition_facts = _build_combat_transition_facts(
+        combat_effect_aggregation_result,
+        combat_effect_has_recipient_by_source,
+        combat_effect_recipient_global_slot_by_source,
+        slow_is_applied_by_source_and_channel,
+        stun_is_applied_by_source_and_channel,
+        rogue_poison_anti_heal_is_applied_by_source,
+        mage_burst_damage_amplification_is_applied_by_source,
     )
 
     respawn_facts = RespawnTransitionFacts(
@@ -2913,7 +3092,7 @@ def step(
             config,
             respawn_facts.was_respawned_this_transition_by_agent,
             next_alive_mask,
-            next_health_after_effective_damage_and_healing,
+            next_health_after_out_of_combat_regeneration,
             next_spawn_shield_durations,
             next_agent_positions,
         ),
@@ -2931,8 +3110,9 @@ def step(
         rogue_poison_anti_heal_durations=next_rogue_anti_heal_durations,
         mage_burst_damage_amplification_durations=next_mage_burst_durations,
         priest_blessing_of_freedom_slow_floor_durations=next_priest_freedom_slow_floor_durations,
-        spawn_shield_durations=next_spawn_shield_durations,
         team_respawn_wave_countdowns=next_team_respawn_wave_countdowns,
+        spawn_shield_durations=next_spawn_shield_durations,
+        steps_until_out_of_combat=next_steps_until_ooc,
         previous_timestep_move_actions=accepted_joint_action.move,
         previous_timestep_select_target_actions=accepted_joint_action.select_target,
         previous_timestep_use_ultimate_actions=accepted_joint_action.use_ultimate,
@@ -2966,6 +3146,7 @@ def step(
         death_facts=death_facts,
         spawn_shield_facts=spawn_shield_facts,
         respawn_facts=respawn_facts,
+        regeneration_facts=regeneration_facts,
     )
 
     info = Info(

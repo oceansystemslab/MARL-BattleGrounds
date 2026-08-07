@@ -172,6 +172,7 @@ def _scenario(
         ),
         team_respawn_wave_countdowns=config.team_respawn_wave_period_step_count - 1,
         spawn_shield_durations=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        steps_until_out_of_combat=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
         previous_timestep_move_actions=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
         previous_timestep_select_target_actions=jnp.zeros(
             (MAX_AGENT_SLOTS,), dtype=jnp.int32

@@ -76,6 +76,7 @@ class _CombatStateFields(TypedDict):
     rogue_poison_anti_heal_durations: Array
     mage_burst_damage_amplification_durations: Array
     priest_blessing_of_freedom_slow_floor_durations: Array
+    steps_until_out_of_combat: Array
     previous_timestep_move_actions: Array
     previous_timestep_select_target_actions: Array
     previous_timestep_use_ultimate_actions: Array
@@ -102,6 +103,7 @@ def _inert_combat_state_fields(living_mask: Array) -> _CombatStateFields:
         "priest_blessing_of_freedom_slow_floor_durations": jnp.zeros(
             (MAX_AGENT_SLOTS,), dtype=jnp.int32
         ),
+        "steps_until_out_of_combat": jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
         "previous_timestep_move_actions": jnp.zeros(
             (MAX_AGENT_SLOTS,), dtype=jnp.int32
         ),

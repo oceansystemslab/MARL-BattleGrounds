@@ -21,10 +21,13 @@ from marl_battlegrounds.core.types import (
     AGENT_FEATURE_ALIVE,
     AGENT_FEATURE_BASE_MOVEMENT_SPEED,
     AGENT_FEATURE_BASIC_INTERACTION_RADIUS,
+    AGENT_FEATURE_CAPABILITY_OUT_OF_COMBAT_DELAY_STEPS,
+    AGENT_FEATURE_CAPABILITY_OUT_OF_COMBAT_HEALTH_REGEN_FRACTION_PER_STEP,
     AGENT_FEATURE_CLASS_ID,
     AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED,
     AGENT_FEATURE_OBSERVATION_RADIUS,
     AGENT_FEATURE_RADIUS,
+    AGENT_FEATURE_STEPS_UNTIL_OUT_OF_COMBAT,
     AGENT_FEATURE_TEAM_ID,
     AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS,
     AGENT_FEATURE_X,
@@ -121,6 +124,7 @@ class _CombatStateFields(TypedDict):
     mage_burst_damage_amplification_durations: Array
     priest_blessing_of_freedom_slow_floor_durations: Array
     spawn_shield_durations: Array
+    steps_until_out_of_combat: Array
     previous_timestep_move_actions: Array
     previous_timestep_select_target_actions: Array
     previous_timestep_use_ultimate_actions: Array
@@ -148,6 +152,9 @@ def _inert_combat_state_fields() -> _CombatStateFields:
             shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32
         ),
         "spawn_shield_durations": jnp.zeros(shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        "steps_until_out_of_combat": jnp.zeros(
+            shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
         "previous_timestep_move_actions": jnp.zeros(
             shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32
         ),
@@ -181,6 +188,7 @@ def _non_inert_combat_state_fields(state: EnvState) -> _CombatStateFields:
             state.priest_blessing_of_freedom_slow_floor_durations.at[6].set(1)
         ),
         "spawn_shield_durations": state.spawn_shield_durations,
+        "steps_until_out_of_combat": state.steps_until_out_of_combat.at[0].set(1),
         "previous_timestep_move_actions": state.previous_timestep_move_actions,
         "previous_timestep_select_target_actions": (
             state.previous_timestep_select_target_actions
@@ -410,6 +418,9 @@ def _assert_state_contract(state: EnvState) -> None:
     assert state.spawn_shield_durations.shape == (MAX_AGENT_SLOTS,)
     assert state.spawn_shield_durations.dtype == jnp.int32
 
+    assert state.steps_until_out_of_combat.shape == (MAX_AGENT_SLOTS,)
+    assert state.steps_until_out_of_combat.dtype == jnp.int32
+
     assert state.rogue_poison_anti_heal_durations.shape == (MAX_AGENT_SLOTS,)
     assert state.rogue_poison_anti_heal_durations.dtype == jnp.int32
 
@@ -443,6 +454,7 @@ def _assert_effect_state_is_inert(state: EnvState) -> None:
     assert jnp.all(state.mage_burst_damage_amplification_durations == 0)
     assert jnp.all(state.priest_blessing_of_freedom_slow_floor_durations == 0)
     assert jnp.all(state.spawn_shield_durations == 0)
+    assert jnp.all(state.steps_until_out_of_combat == 0)
 
 
 def _assert_observation_contract(observation: Observation) -> None:
@@ -661,8 +673,8 @@ def test_static_shape_constants_are_consistent() -> None:
         MOVE_SOUTHWEST,
     )
 
-    assert SELF_FEATURES == 55
-    assert UNIT_FEATURES == 55
+    assert SELF_FEATURES == 58
+    assert UNIT_FEATURES == 58
     assert SELF_FEATURES == UNIT_FEATURES
     assert CLASS_NEUTRAL == 0
     assert NUM_SLOW_CHANNELS == 3
@@ -698,6 +710,9 @@ def test_static_shape_constants_are_consistent() -> None:
         if name.startswith("AGENT_FEATURE_") and isinstance(value, int)
     )
     assert all_agent_feature_indices == list(range(SELF_FEATURES))
+    assert AGENT_FEATURE_STEPS_UNTIL_OUT_OF_COMBAT == 29
+    assert AGENT_FEATURE_CAPABILITY_OUT_OF_COMBAT_DELAY_STEPS == 56
+    assert AGENT_FEATURE_CAPABILITY_OUT_OF_COMBAT_HEALTH_REGEN_FRACTION_PER_STEP == 57
     assert AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS < SELF_FEATURES
     assert AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS < UNIT_FEATURES
     assert MAX_OBJECTIVE_SLOTS == 8
@@ -738,6 +753,18 @@ def test_env_config_stores_static_episode_settings() -> None:
     assert env_config.agent_profile.class_ids.dtype == jnp.int32
     assert jnp.array_equal(
         env_config.agent_profile.class_ids, _CANONICAL_INITIAL_CLASS_IDS
+    )
+    assert env_config.agent_profile.out_of_combat_delay_steps.shape == (
+        MAX_AGENT_SLOTS,
+    )
+    assert env_config.agent_profile.out_of_combat_delay_steps.dtype == jnp.int32
+    assert (
+        env_config.agent_profile.out_of_combat_health_regen_fraction_per_step.shape
+        == (MAX_AGENT_SLOTS,)
+    )
+    assert (
+        env_config.agent_profile.out_of_combat_health_regen_fraction_per_step.dtype
+        == jnp.float32
     )
     assert env_config.team_spawn_pad_positions.shape == (
         NUM_TEAMS,
@@ -995,6 +1022,10 @@ def test_step_preserves_slot_aligned_state_arrays() -> None:
     assert jnp.array_equal(next_state.agent_positions, state.agent_positions)
     assert jnp.array_equal(next_state.alive_mask, state.alive_mask)
     assert jnp.array_equal(next_state.current_health, state.current_health)
+    assert jnp.array_equal(
+        next_state.steps_until_out_of_combat,
+        jnp.maximum(state.steps_until_out_of_combat - 1, 0),
+    )
     assert jnp.array_equal(
         next_state.ultimate_cooldowns,
         jnp.maximum(state.ultimate_cooldowns - 1, 0),

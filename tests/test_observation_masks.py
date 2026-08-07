@@ -86,6 +86,7 @@ class _CombatStateFields(TypedDict):
     mage_burst_damage_amplification_durations: Array
     priest_blessing_of_freedom_slow_floor_durations: Array
     spawn_shield_durations: Array
+    steps_until_out_of_combat: Array
     previous_timestep_move_actions: Array
     previous_timestep_select_target_actions: Array
     previous_timestep_use_ultimate_actions: Array
@@ -113,6 +114,7 @@ def _inert_combat_state_fields(current_health: Array) -> _CombatStateFields:
             (MAX_AGENT_SLOTS,), dtype=jnp.int32
         ),
         "spawn_shield_durations": jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        "steps_until_out_of_combat": jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
         "previous_timestep_move_actions": jnp.zeros(
             (MAX_AGENT_SLOTS,), dtype=jnp.int32
         ),

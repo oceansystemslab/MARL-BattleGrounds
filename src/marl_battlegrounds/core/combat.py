@@ -228,6 +228,32 @@ ULTIMATE_TARGET_MODE_BY_CLASS = jnp.asarray(
     dtype=jnp.int32,
 )
 
+OUT_OF_COMBAT_DELAY_STEPS_BY_CLASS = jnp.asarray(
+    [
+        0,  # neutral
+        5,  # mage
+        5,  # warrior
+        5,  # hunter
+        3,  # rogue
+        5,  # priest
+    ],
+    dtype=jnp.int32,
+)
+
+# These remain independent tuning surfaces even though every active class
+# currently shares the same regeneration rate.
+OUT_OF_COMBAT_HEALTH_REGENERATION_FRACTION_PER_STEP_BY_CLASS = jnp.asarray(
+    [
+        0.0,  # neutral
+        0.04,  # mage
+        0.04,  # warrior
+        0.04,  # hunter
+        0.04,  # rogue
+        0.04,  # priest
+    ],
+    dtype=jnp.float32,
+)
+
 
 # Catalog access helpers.
 
@@ -290,6 +316,18 @@ def get_ultimate_damage_by_class_ids(class_ids: int | Array) -> Array:
 def get_ultimate_healing_by_class_ids(class_ids: int | Array) -> Array:
     """Return ultimate healing values for one or more class IDs."""
     return ULTIMATE_HEALING_BY_CLASS[class_ids]
+
+
+def get_ooc_delay_steps_by_class_ids(class_ids: int | Array) -> Array:
+    """Return out-of-combat countdown reset values for one or more class IDs."""
+    return OUT_OF_COMBAT_DELAY_STEPS_BY_CLASS[class_ids]
+
+
+def get_ooc_health_regen_fraction_per_step_by_class_ids(
+    class_ids: int | Array,
+) -> Array:
+    """Return maximum-health regeneration fractions for one or more class IDs."""
+    return OUT_OF_COMBAT_HEALTH_REGENERATION_FRACTION_PER_STEP_BY_CLASS[class_ids]
 
 
 def _build_slow_multipliers(slow_durations: Array) -> Array:

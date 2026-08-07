@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 from jax import Array
 
+from marl_battlegrounds.core import combat
 from marl_battlegrounds.core.config import (
     resolve_agent_profile,
     validate_env_config,
@@ -208,6 +209,8 @@ def test_validation_inventory_covers_current_public_schemas() -> None:
         "basic_interaction_radii",
         "ultimate_interaction_radii",
         "max_health",
+        "out_of_combat_delay_steps",
+        "out_of_combat_health_regen_fraction_per_step",
     )
 
 
@@ -236,7 +239,7 @@ def test_validator_rejects_wrong_top_level_and_profile_types() -> None:
         ("max_steps", True, TypeError, "max_steps"),
         ("max_steps", np.int32(100), TypeError, "max_steps"),
         ("max_steps", 0, ValueError, "max_steps"),
-        ("max_steps", int(jnp.iinfo(jnp.int32).max) + 1, ValueError, "max_steps"),
+        ("max_steps", 2**24 + 1, ValueError, "max_steps"),
         ("map_width", 12, TypeError, "map_width"),
         ("map_width", np.float32(12.0), TypeError, "map_width"),
         ("map_width", np.float64(12.0), TypeError, "map_width"),
@@ -264,6 +267,15 @@ def test_invalid_scalar_fields_fail_early(
     config = _replace_config(_valid_config(), **{field_name: invalid_value})
     with pytest.raises(error_type, match=message):
         validate_env_config(config)
+
+
+@pytest.mark.parametrize("max_steps", (1, 2**24), ids=("minimum", "float32-exact-max"))
+def test_max_steps_accepts_exact_float32_integer_domain(max_steps: int) -> None:
+    """Accept both closed endpoints of the public exact-integer horizon."""
+    assert (
+        validate_env_config(_replace_config(_valid_config(), max_steps=max_steps))
+        is None
+    )
 
 
 @pytest.mark.parametrize(
@@ -596,6 +608,171 @@ def test_obstacle_value_contract_is_enforced(
 
 
 @pytest.mark.parametrize(
+    ("catalog_name", "invalid_catalog", "error_type"),
+    (
+        pytest.param(
+            "OUT_OF_COMBAT_DELAY_STEPS_BY_CLASS",
+            cast(Any, []),
+            TypeError,
+            id="delay-non-jax",
+        ),
+        pytest.param(
+            "OUT_OF_COMBAT_DELAY_STEPS_BY_CLASS",
+            jnp.zeros((5,), dtype=jnp.int32),
+            ValueError,
+            id="delay-shape",
+        ),
+        pytest.param(
+            "OUT_OF_COMBAT_DELAY_STEPS_BY_CLASS",
+            jnp.zeros((6,), dtype=jnp.float32),
+            TypeError,
+            id="delay-dtype",
+        ),
+        pytest.param(
+            "OUT_OF_COMBAT_HEALTH_REGENERATION_FRACTION_PER_STEP_BY_CLASS",
+            cast(Any, np.zeros((6,), dtype=np.float32)),
+            TypeError,
+            id="regeneration-non-jax",
+        ),
+        pytest.param(
+            "OUT_OF_COMBAT_HEALTH_REGENERATION_FRACTION_PER_STEP_BY_CLASS",
+            jnp.zeros((5,), dtype=jnp.float32),
+            ValueError,
+            id="regeneration-shape",
+        ),
+        pytest.param(
+            "OUT_OF_COMBAT_HEALTH_REGENERATION_FRACTION_PER_STEP_BY_CLASS",
+            jnp.zeros((6,), dtype=jnp.int32),
+            TypeError,
+            id="regeneration-dtype",
+        ),
+    ),
+)
+def test_recovery_catalogs_require_exact_jax_storage(
+    monkeypatch: pytest.MonkeyPatch,
+    catalog_name: str,
+    invalid_catalog: object,
+    error_type: type[Exception],
+) -> None:
+    """Reject catalog container, shape, and dtype drift at the host boundary."""
+    config = _valid_config()
+    monkeypatch.setattr(combat, catalog_name, invalid_catalog)
+
+    with pytest.raises(error_type, match=catalog_name):
+        validate_env_config(config)
+
+
+@pytest.mark.parametrize(
+    ("catalog_name", "invalid_catalog", "message"),
+    (
+        pytest.param(
+            "OUT_OF_COMBAT_DELAY_STEPS_BY_CLASS",
+            combat.OUT_OF_COMBAT_DELAY_STEPS_BY_CLASS.at[1].set(-1),
+            r"\[0, 16777216\]",
+            id="delay-negative",
+        ),
+        pytest.param(
+            "OUT_OF_COMBAT_DELAY_STEPS_BY_CLASS",
+            combat.OUT_OF_COMBAT_DELAY_STEPS_BY_CLASS.at[1].set(2**24 + 1),
+            r"\[0, 16777216\]",
+            id="delay-above-float32-exact-max",
+        ),
+        pytest.param(
+            "OUT_OF_COMBAT_DELAY_STEPS_BY_CLASS",
+            combat.OUT_OF_COMBAT_DELAY_STEPS_BY_CLASS.at[0].set(1),
+            "neutral row",
+            id="delay-nonneutral-padding",
+        ),
+        pytest.param(
+            "OUT_OF_COMBAT_HEALTH_REGENERATION_FRACTION_PER_STEP_BY_CLASS",
+            (
+                combat.OUT_OF_COMBAT_HEALTH_REGENERATION_FRACTION_PER_STEP_BY_CLASS.at[
+                    1
+                ].set(jnp.nan)
+            ),
+            "finite",
+            id="regeneration-nan",
+        ),
+        pytest.param(
+            "OUT_OF_COMBAT_HEALTH_REGENERATION_FRACTION_PER_STEP_BY_CLASS",
+            (
+                combat.OUT_OF_COMBAT_HEALTH_REGENERATION_FRACTION_PER_STEP_BY_CLASS.at[
+                    1
+                ].set(jnp.inf)
+            ),
+            "finite",
+            id="regeneration-infinity",
+        ),
+        pytest.param(
+            "OUT_OF_COMBAT_HEALTH_REGENERATION_FRACTION_PER_STEP_BY_CLASS",
+            (
+                combat.OUT_OF_COMBAT_HEALTH_REGENERATION_FRACTION_PER_STEP_BY_CLASS.at[
+                    1
+                ].set(-0.01)
+            ),
+            r"\[0\.0, 1\.0\]",
+            id="regeneration-negative",
+        ),
+        pytest.param(
+            "OUT_OF_COMBAT_HEALTH_REGENERATION_FRACTION_PER_STEP_BY_CLASS",
+            (
+                combat.OUT_OF_COMBAT_HEALTH_REGENERATION_FRACTION_PER_STEP_BY_CLASS.at[
+                    1
+                ].set(1.01)
+            ),
+            r"\[0\.0, 1\.0\]",
+            id="regeneration-above-one",
+        ),
+        pytest.param(
+            "OUT_OF_COMBAT_HEALTH_REGENERATION_FRACTION_PER_STEP_BY_CLASS",
+            (
+                combat.OUT_OF_COMBAT_HEALTH_REGENERATION_FRACTION_PER_STEP_BY_CLASS.at[
+                    0
+                ].set(0.01)
+            ),
+            "neutral row",
+            id="regeneration-nonneutral-padding",
+        ),
+    ),
+)
+def test_recovery_catalogs_enforce_value_domains_and_neutral_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    catalog_name: str,
+    invalid_catalog: Array,
+    message: str,
+) -> None:
+    """Reject recovery tuning values outside their versioned catalog contract."""
+    config = _valid_config()
+    monkeypatch.setattr(combat, catalog_name, invalid_catalog)
+
+    with pytest.raises(ValueError, match=message):
+        validate_env_config(config)
+
+
+def test_valid_alternate_recovery_catalogs_resolve_and_validate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep catalog values tunable while enforcing profile/catalog agreement."""
+    alternate_delays = jnp.asarray((0, 1, 2, 3, 4, 5), dtype=jnp.int32)
+    alternate_regeneration_fractions = jnp.asarray(
+        (0.0, 0.01, 0.02, 0.03, 0.04, 1.0),
+        dtype=jnp.float32,
+    )
+    monkeypatch.setattr(
+        combat,
+        "OUT_OF_COMBAT_DELAY_STEPS_BY_CLASS",
+        alternate_delays,
+    )
+    monkeypatch.setattr(
+        combat,
+        "OUT_OF_COMBAT_HEALTH_REGENERATION_FRACTION_PER_STEP_BY_CLASS",
+        alternate_regeneration_fractions,
+    )
+
+    assert validate_env_config(_valid_config(team_sizes=(5, 5))) is None
+
+
+@pytest.mark.parametrize(
     ("field_name", "expected_dtype"),
     (
         ("class_ids", jnp.int32),
@@ -607,6 +784,8 @@ def test_obstacle_value_contract_is_enforced(
         ("basic_interaction_radii", jnp.float32),
         ("ultimate_interaction_radii", jnp.float32),
         ("max_health", jnp.float32),
+        ("out_of_combat_delay_steps", jnp.int32),
+        ("out_of_combat_health_regen_fraction_per_step", jnp.float32),
     ),
 )
 def test_every_profile_field_rejects_wrong_storage(
@@ -644,6 +823,7 @@ def test_every_profile_field_rejects_wrong_storage(
         "basic_interaction_radii",
         "ultimate_interaction_radii",
         "max_health",
+        "out_of_combat_health_regen_fraction_per_step",
     ),
 )
 def test_float_profile_fields_reject_dtype_nonfinite_and_catalog_drift(
@@ -667,6 +847,100 @@ def test_float_profile_fields_reject_dtype_nonfinite_and_catalog_drift(
         validate_env_config(
             _replace_profile(config, **{field_name: actual.at[0].add(1.0)})
         )
+
+
+@pytest.mark.parametrize(
+    ("invalid_delay_steps", "message"),
+    (
+        pytest.param(
+            lambda values: values.at[0].set(-1),
+            r"\[0, 16777216\]",
+            id="negative",
+        ),
+        pytest.param(
+            lambda values: values.at[0].set(2**24 + 1),
+            r"\[0, 16777216\]",
+            id="above-float32-exact-max",
+        ),
+        pytest.param(
+            lambda values: values.at[0].add(1),
+            "resolved class catalog",
+            id="catalog-drift",
+        ),
+    ),
+)
+def test_profile_recovery_delay_rejects_domain_and_catalog_drift(
+    invalid_delay_steps: Callable[[Array], Array],
+    message: str,
+) -> None:
+    """Enforce exact per-slot delay values resolved from the class catalog."""
+    config = _valid_config()
+    invalid_values = invalid_delay_steps(config.agent_profile.out_of_combat_delay_steps)
+
+    with pytest.raises(ValueError, match=message):
+        validate_env_config(
+            _replace_profile(
+                config,
+                out_of_combat_delay_steps=invalid_values,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("replacement", "message"),
+    (
+        pytest.param(-0.01, r"\[0\.0, 1\.0\]", id="negative"),
+        pytest.param(0.05, "resolved class catalog", id="catalog-drift"),
+    ),
+)
+def test_profile_recovery_regeneration_rejects_range_and_catalog_drift(
+    replacement: float,
+    message: str,
+) -> None:
+    """Enforce bounded rates and exact per-slot catalog resolution."""
+    config = _valid_config()
+    invalid_values = (
+        config.agent_profile.out_of_combat_health_regen_fraction_per_step.at[0].set(
+            replacement
+        )
+    )
+
+    with pytest.raises(ValueError, match=message):
+        validate_env_config(
+            _replace_profile(
+                config,
+                out_of_combat_health_regen_fraction_per_step=invalid_values,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "replacement"),
+    (
+        pytest.param(
+            "out_of_combat_delay_steps",
+            1,
+            id="delay",
+        ),
+        pytest.param(
+            "out_of_combat_health_regen_fraction_per_step",
+            0.25,
+            id="regeneration",
+        ),
+    ),
+)
+def test_inactive_profile_recovery_rows_must_be_canonical_zero(
+    field_name: str,
+    replacement: int | float,
+) -> None:
+    """Reject hidden recovery configuration in fixed-slot padding."""
+    config = _valid_config(team_sizes=(1, 1))
+    inactive_slot = 1
+    values = cast(Array, getattr(config.agent_profile, field_name))
+    invalid_values = values.at[inactive_slot].set(replacement)
+
+    with pytest.raises(ValueError, match=rf"inactive agent_profile\.{field_name}"):
+        validate_env_config(_replace_profile(config, **{field_name: invalid_values}))
 
 
 def test_profile_categorical_and_padding_invariants_are_enforced() -> None:

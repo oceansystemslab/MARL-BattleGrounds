@@ -335,7 +335,7 @@ def test_reset_exposes_canonical_clock_observation_and_respawn_facts() -> None:
     )
 
     facts = info.transition_facts
-    assert TransitionFacts._fields[-1] == "respawn_facts"
+    assert TransitionFacts._fields[-2] == "respawn_facts"
     assert RespawnTransitionFacts._fields == (
         "respawn_wave_occurred_this_transition_by_team",
         "was_respawned_this_transition_by_agent",

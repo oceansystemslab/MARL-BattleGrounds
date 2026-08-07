@@ -139,19 +139,42 @@ def test_resolve_agent_profile_establishes_fixed_slots_and_neutral_padding(
 
 
 @pytest.mark.parametrize(
-    ("profile_field", "catalog"),
+    ("profile_field", "catalog", "expected_dtype"),
     (
-        ("agent_radii", combat.BODY_RADIUS_BY_CLASS),
-        ("base_movement_speeds", combat.BASE_MOVEMENT_SPEED_BY_CLASS),
-        ("observation_radii", combat.OBSERVATION_RADIUS_BY_CLASS),
-        ("basic_interaction_radii", combat.BASIC_INTERACTION_RADIUS_BY_CLASS),
-        ("ultimate_interaction_radii", combat.ULTIMATE_INTERACTION_RADIUS_BY_CLASS),
-        ("max_health", combat.MAX_HEALTH_BY_CLASS),
+        ("agent_radii", combat.BODY_RADIUS_BY_CLASS, jnp.float32),
+        (
+            "base_movement_speeds",
+            combat.BASE_MOVEMENT_SPEED_BY_CLASS,
+            jnp.float32,
+        ),
+        ("observation_radii", combat.OBSERVATION_RADIUS_BY_CLASS, jnp.float32),
+        (
+            "basic_interaction_radii",
+            combat.BASIC_INTERACTION_RADIUS_BY_CLASS,
+            jnp.float32,
+        ),
+        (
+            "ultimate_interaction_radii",
+            combat.ULTIMATE_INTERACTION_RADIUS_BY_CLASS,
+            jnp.float32,
+        ),
+        ("max_health", combat.MAX_HEALTH_BY_CLASS, jnp.float32),
+        (
+            "out_of_combat_delay_steps",
+            combat.OUT_OF_COMBAT_DELAY_STEPS_BY_CLASS,
+            jnp.int32,
+        ),
+        (
+            "out_of_combat_health_regen_fraction_per_step",
+            combat.OUT_OF_COMBAT_HEALTH_REGENERATION_FRACTION_PER_STEP_BY_CLASS,
+            jnp.float32,
+        ),
     ),
 )
 def test_resolved_agent_profile_stats_match_combat_catalogs(
     profile_field: str,
     catalog: Array,
+    expected_dtype: object,
 ) -> None:
     resolved = resolve_agent_profile(
         _CANONICAL_ROSTER,
@@ -161,8 +184,40 @@ def test_resolved_agent_profile_stats_match_combat_catalogs(
     expected = catalog[resolved.class_ids]
 
     assert actual.shape == (MAX_AGENT_SLOTS,)
-    assert actual.dtype == jnp.float32
+    assert actual.dtype == expected_dtype
     assert bool(jnp.array_equal(actual, expected))
+
+
+def test_recovery_catalogs_pin_current_versioned_values() -> None:
+    """Lock the approved tuning rows without coupling independent surfaces."""
+    expected_delays = jnp.asarray((0, 5, 5, 5, 3, 5), dtype=jnp.int32)
+    expected_regeneration_fractions = jnp.asarray(
+        (0.0, 0.04, 0.04, 0.04, 0.04, 0.04),
+        dtype=jnp.float32,
+    )
+
+    assert combat.OUT_OF_COMBAT_DELAY_STEPS_BY_CLASS.shape == (6,)
+    assert combat.OUT_OF_COMBAT_DELAY_STEPS_BY_CLASS.dtype == jnp.int32
+    assert bool(
+        jnp.array_equal(
+            combat.OUT_OF_COMBAT_DELAY_STEPS_BY_CLASS,
+            expected_delays,
+        )
+    )
+    assert (
+        combat.OUT_OF_COMBAT_HEALTH_REGENERATION_FRACTION_PER_STEP_BY_CLASS.shape
+        == (6,)
+    )
+    assert (
+        combat.OUT_OF_COMBAT_HEALTH_REGENERATION_FRACTION_PER_STEP_BY_CLASS.dtype
+        == jnp.float32
+    )
+    assert bool(
+        jnp.array_equal(
+            combat.OUT_OF_COMBAT_HEALTH_REGENERATION_FRACTION_PER_STEP_BY_CLASS,
+            expected_regeneration_fractions,
+        )
+    )
 
 
 def test_resolved_profile_uses_approved_basic_radii() -> None:

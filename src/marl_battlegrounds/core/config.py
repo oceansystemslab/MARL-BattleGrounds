@@ -6,6 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from marl_battlegrounds.core import combat
 from marl_battlegrounds.core.combat import (
     HUNTER_BASIC_SLOW_DURATION_TICKS,
     HUNTER_TRAP_STUN_DURATION_TICKS,
@@ -21,6 +22,8 @@ from marl_battlegrounds.core.combat import (
     get_body_radius_by_class_ids,
     get_max_health_by_class_ids,
     get_observation_radius_by_class_ids,
+    get_ooc_delay_steps_by_class_ids,
+    get_ooc_health_regen_fraction_per_step_by_class_ids,
     get_ultimate_cooldown_by_class_ids,
     get_ultimate_interaction_radius_by_class_ids,
 )
@@ -63,6 +66,7 @@ from marl_battlegrounds.core.types import (
 
 _INT32_MAX = int(np.iinfo(np.int32).max)
 _FLOAT32_MAX = float(np.finfo(np.float32).max)
+_MAX_EXACT_FLOAT32_INTEGER = 2**24
 
 
 def resolve_agent_profile(
@@ -94,6 +98,10 @@ def resolve_agent_profile(
     basic_interaction_radii = get_basic_interaction_radius_by_class_ids(class_ids)
     ultimate_interaction_radii = get_ultimate_interaction_radius_by_class_ids(class_ids)
     max_health = get_max_health_by_class_ids(class_ids)
+    ooc_delay_steps = get_ooc_delay_steps_by_class_ids(class_ids)
+    ooc_health_regen_fraction_per_step = (
+        get_ooc_health_regen_fraction_per_step_by_class_ids(class_ids)
+    )
 
     return ResolvedAgentProfile(
         class_ids,
@@ -105,6 +113,8 @@ def resolve_agent_profile(
         basic_interaction_radii,
         ultimate_interaction_radii,
         max_health,
+        ooc_delay_steps,
+        ooc_health_regen_fraction_per_step,
     )
 
 
@@ -200,7 +210,64 @@ def _validate_obstacles(obstacles: object) -> Array:
     return obstacle_array
 
 
-def _validate_agent_profile(profile: object) -> ResolvedAgentProfile:
+def _validate_recovery_catalogs() -> tuple[Array, Array]:
+    """Validate the versioned class recovery catalogs at the host boundary."""
+    delay_catalog = _require_jax_array(
+        combat.OUT_OF_COMBAT_DELAY_STEPS_BY_CLASS,
+        field_name="OUT_OF_COMBAT_DELAY_STEPS_BY_CLASS",
+        expected_shape=(NUM_CLASSES,),
+        expected_dtype=jnp.int32,
+    )
+    regeneration_fraction_catalog = _require_jax_array(
+        combat.OUT_OF_COMBAT_HEALTH_REGENERATION_FRACTION_PER_STEP_BY_CLASS,
+        field_name=("OUT_OF_COMBAT_HEALTH_REGENERATION_FRACTION_PER_STEP_BY_CLASS"),
+        expected_shape=(NUM_CLASSES,),
+        expected_dtype=jnp.float32,
+    )
+    _require_finite_array(
+        delay_catalog,
+        field_name="OUT_OF_COMBAT_DELAY_STEPS_BY_CLASS",
+    )
+    _require_finite_array(
+        regeneration_fraction_catalog,
+        field_name=("OUT_OF_COMBAT_HEALTH_REGENERATION_FRACTION_PER_STEP_BY_CLASS"),
+    )
+
+    host_delays = np.asarray(delay_catalog)
+    if bool(np.any((host_delays < 0) | (host_delays > _MAX_EXACT_FLOAT32_INTEGER))):
+        raise ValueError(
+            "OUT_OF_COMBAT_DELAY_STEPS_BY_CLASS values must be in "
+            f"[0, {_MAX_EXACT_FLOAT32_INTEGER}]."
+        )
+
+    host_regeneration_fractions = np.asarray(regeneration_fraction_catalog)
+    if bool(
+        np.any(
+            (host_regeneration_fractions < 0.0) | (host_regeneration_fractions > 1.0)
+        )
+    ):
+        raise ValueError(
+            "OUT_OF_COMBAT_HEALTH_REGENERATION_FRACTION_PER_STEP_BY_CLASS "
+            "values must be in [0.0, 1.0]."
+        )
+
+    if int(host_delays[NEUTRAL_CLASS_ID]) != 0:
+        raise ValueError("OUT_OF_COMBAT_DELAY_STEPS_BY_CLASS neutral row must be zero.")
+    if float(host_regeneration_fractions[NEUTRAL_CLASS_ID]) != 0.0:
+        raise ValueError(
+            "OUT_OF_COMBAT_HEALTH_REGENERATION_FRACTION_PER_STEP_BY_CLASS "
+            "neutral row must be zero."
+        )
+
+    return delay_catalog, regeneration_fraction_catalog
+
+
+def _validate_agent_profile(
+    profile: object,
+    *,
+    recovery_delay_catalog: Array,
+    recovery_regeneration_fraction_catalog: Array,
+) -> ResolvedAgentProfile:
     """Validate one fully resolved fixed-slot agent profile."""
     if type(profile) is not ResolvedAgentProfile:
         raise TypeError(
@@ -226,6 +293,12 @@ def _validate_agent_profile(profile: object) -> ResolvedAgentProfile:
         expected_shape=(MAX_AGENT_SLOTS,),
         expected_dtype=jnp.bool_,
     )
+    out_of_combat_delay_steps = _require_jax_array(
+        profile.out_of_combat_delay_steps,
+        field_name="agent_profile.out_of_combat_delay_steps",
+        expected_shape=(MAX_AGENT_SLOTS,),
+        expected_dtype=jnp.int32,
+    )
 
     float_profile_fields = (
         ("agent_radii", profile.agent_radii),
@@ -234,6 +307,10 @@ def _validate_agent_profile(profile: object) -> ResolvedAgentProfile:
         ("basic_interaction_radii", profile.basic_interaction_radii),
         ("ultimate_interaction_radii", profile.ultimate_interaction_radii),
         ("max_health", profile.max_health),
+        (
+            "out_of_combat_health_regen_fraction_per_step",
+            profile.out_of_combat_health_regen_fraction_per_step,
+        ),
     )
     for field_name, field_value in float_profile_fields:
         validated_value = _require_jax_array(
@@ -247,6 +324,43 @@ def _validate_agent_profile(profile: object) -> ResolvedAgentProfile:
     host_class_ids = np.asarray(class_ids)
     host_team_ids = np.asarray(team_ids)
     host_active_mask = np.asarray(active_mask)
+    host_out_of_combat_delay_steps = np.asarray(out_of_combat_delay_steps)
+    host_out_of_combat_regeneration_fractions = np.asarray(
+        profile.out_of_combat_health_regen_fraction_per_step
+    )
+
+    if bool(
+        np.any(
+            (host_out_of_combat_delay_steps < 0)
+            | (host_out_of_combat_delay_steps > _MAX_EXACT_FLOAT32_INTEGER)
+        )
+    ):
+        raise ValueError(
+            "agent_profile.out_of_combat_delay_steps values must be in "
+            f"[0, {_MAX_EXACT_FLOAT32_INTEGER}]."
+        )
+    if bool(
+        np.any(
+            (host_out_of_combat_regeneration_fractions < 0.0)
+            | (host_out_of_combat_regeneration_fractions > 1.0)
+        )
+    ):
+        raise ValueError(
+            "agent_profile.out_of_combat_health_regen_fraction_per_step "
+            "values must be in [0.0, 1.0]."
+        )
+    if bool(np.any(host_out_of_combat_delay_steps[~host_active_mask] != 0)):
+        raise ValueError(
+            "inactive agent_profile.out_of_combat_delay_steps rows must be zero."
+        )
+    if bool(
+        np.any(host_out_of_combat_regeneration_fractions[~host_active_mask] != 0.0)
+    ):
+        raise ValueError(
+            "inactive "
+            "agent_profile.out_of_combat_health_regen_fraction_per_step "
+            "rows must be zero."
+        )
 
     if not bool(
         np.all((host_class_ids >= NEUTRAL_CLASS_ID) & (host_class_ids < NUM_CLASSES))
@@ -306,6 +420,14 @@ def _validate_agent_profile(profile: object) -> ResolvedAgentProfile:
             get_ultimate_interaction_radius_by_class_ids(class_ids),
         ),
         ("max_health", get_max_health_by_class_ids(class_ids)),
+        (
+            "out_of_combat_delay_steps",
+            recovery_delay_catalog[class_ids],
+        ),
+        (
+            "out_of_combat_health_regen_fraction_per_step",
+            recovery_regeneration_fraction_catalog[class_ids],
+        ),
     )
     for field_name, expected_values in expected_catalog_fields:
         actual_values = np.asarray(getattr(profile, field_name))
@@ -469,9 +591,10 @@ def validate_env_config(config: EnvConfig) -> None:
         )
     if config.max_steps <= 0:
         raise ValueError(f"max_steps must be greater than 0, not {config.max_steps}.")
-    if config.max_steps > _INT32_MAX:
+    if config.max_steps > _MAX_EXACT_FLOAT32_INTEGER:
         raise ValueError(
-            f"max_steps must be at most {_INT32_MAX}, not {config.max_steps}."
+            "max_steps must be at most "
+            f"{_MAX_EXACT_FLOAT32_INTEGER}, not {config.max_steps}."
         )
 
     for field_name, dimension in (
@@ -554,8 +677,15 @@ def validate_env_config(config: EnvConfig) -> None:
             "team_respawn_wave_period_step_count must contain only positive values."
         )
 
+    recovery_delay_catalog, recovery_regeneration_fraction_catalog = (
+        _validate_recovery_catalogs()
+    )
     obstacles = _validate_obstacles(config.obstacles)
-    profile = _validate_agent_profile(config.agent_profile)
+    profile = _validate_agent_profile(
+        config.agent_profile,
+        recovery_delay_catalog=recovery_delay_catalog,
+        recovery_regeneration_fraction_catalog=(recovery_regeneration_fraction_catalog),
+    )
     _validate_team_spawn_pad_positions(
         config.team_spawn_pad_positions,
         map_width=config.map_width,
@@ -769,6 +899,12 @@ def validate_env_state(config: EnvConfig, state: EnvState) -> None:
         expected_shape=(MAX_AGENT_SLOTS,),
         expected_dtype=jnp.int32,
     )
+    steps_until_out_of_combat = _require_jax_array(
+        state.steps_until_out_of_combat,
+        field_name="steps_until_out_of_combat",
+        expected_shape=(MAX_AGENT_SLOTS,),
+        expected_dtype=jnp.int32,
+    )
     previous_move_actions = _require_jax_array(
         state.previous_timestep_move_actions,
         field_name="previous_timestep_move_actions",
@@ -937,6 +1073,29 @@ def validate_env_state(config: EnvConfig, state: EnvState) -> None:
         raise ValueError(
             "spawn_shield_durations and stun_durations cannot both be positive "
             "for the same slot."
+        )
+
+    host_steps_until_out_of_combat = np.asarray(steps_until_out_of_combat)
+    if bool(np.any(host_steps_until_out_of_combat < 0)):
+        raise ValueError(
+            "steps_until_out_of_combat must contain only nonnegative values."
+        )
+    if bool(np.any(host_steps_until_out_of_combat[active_and_dead] != 0)):
+        raise ValueError(
+            "active dead steps_until_out_of_combat rows must be exactly zero."
+        )
+    if bool(np.any(host_steps_until_out_of_combat[inactive] != 0)):
+        raise ValueError(
+            "inactive steps_until_out_of_combat rows must be exactly zero."
+        )
+    if bool(
+        np.any(
+            host_steps_until_out_of_combat
+            > np.asarray(config.agent_profile.out_of_combat_delay_steps)
+        )
+    ):
+        raise ValueError(
+            "steps_until_out_of_combat exceeds its resolved per-slot delay."
         )
 
     host_previous_move_actions = _validate_previous_action_domain(

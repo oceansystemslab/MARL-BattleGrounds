@@ -108,6 +108,7 @@ _STATE_ARRAY_FIELDS = (
     ),
     ("team_respawn_wave_countdowns", (NUM_TEAMS,), jnp.int32),
     ("spawn_shield_durations", (MAX_AGENT_SLOTS,), jnp.int32),
+    ("steps_until_out_of_combat", (MAX_AGENT_SLOTS,), jnp.int32),
     ("previous_timestep_move_actions", (MAX_AGENT_SLOTS,), jnp.int32),
     (
         "previous_timestep_select_target_actions",
@@ -591,6 +592,64 @@ def test_spawn_shield_stun_exclusion_preserves_each_independent_state() -> None:
     assert validate_env_state(config, stunned_state) is None
 
 
+def test_out_of_combat_countdown_accepts_each_resolved_delay_inclusively() -> None:
+    """Accept every living slot at its class-resolved closed upper bound."""
+    config, state = _valid_state()
+    bounded_state = state._replace(
+        steps_until_out_of_combat=config.agent_profile.out_of_combat_delay_steps
+    )
+
+    assert validate_env_state(config, bounded_state) is None
+
+
+@pytest.mark.parametrize(
+    ("slot", "countdown", "message"),
+    (
+        pytest.param(0, -1, "nonnegative", id="negative"),
+        pytest.param(3, 4, "resolved per-slot delay", id="above-rogue-delay"),
+    ),
+)
+def test_out_of_combat_countdown_rejects_values_outside_resolved_slot_domain(
+    slot: int,
+    countdown: int,
+    message: str,
+) -> None:
+    """Reject underflow and row-wise overflow against the resolved profile."""
+    config, state = _valid_state()
+    invalid_state = state._replace(
+        steps_until_out_of_combat=state.steps_until_out_of_combat.at[slot].set(
+            countdown
+        )
+    )
+
+    with pytest.raises(ValueError, match=message):
+        validate_env_state(config, invalid_state)
+
+
+def test_out_of_combat_countdown_must_be_zero_for_dead_and_inactive_slots() -> None:
+    """Prevent recovery memory from surviving death or entering padding."""
+    config, state = _valid_state(team_sizes=(1, 1))
+    dead_state = state._replace(
+        alive_mask=state.alive_mask.at[0].set(False),
+        current_health=state.current_health.at[0].set(0.0),
+        steps_until_out_of_combat=state.steps_until_out_of_combat.at[0].set(1),
+    )
+    with pytest.raises(
+        ValueError,
+        match="dead steps_until_out_of_combat",
+    ):
+        validate_env_state(config, dead_state)
+
+    inactive_state = state._replace(
+        steps_until_out_of_combat=state.steps_until_out_of_combat.at[1].set(1)
+    )
+    with pytest.raises(
+        ValueError,
+        match="inactive steps_until_out_of_combat",
+    ):
+        validate_env_state(config, inactive_state)
+
+
 @pytest.mark.parametrize(
     "health_case",
     (
@@ -917,6 +976,11 @@ def test_mage_burst_duration_is_owned_only_by_configured_mages() -> None:
             "priest_blessing_of_freedom_slow_floor_durations",
             None,
             id="priest-freedom",
+        ),
+        pytest.param(
+            "steps_until_out_of_combat",
+            None,
+            id="out-of-combat-countdown",
         ),
         pytest.param(
             "previous_timestep_move_actions",
