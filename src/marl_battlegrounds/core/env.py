@@ -46,6 +46,10 @@ from marl_battlegrounds.core.combat import (
     get_ultimate_healing_by_class_ids,
     get_ultimate_target_mode_by_class_ids,
 )
+from marl_battlegrounds.core.config import (
+    validate_env_config,
+    validate_scenario_initial_state,
+)
 from marl_battlegrounds.core.geometry import (
     DEFAULT_AGENT_PROJECTION_PASSES,
     has_clear_line_of_sight,
@@ -70,6 +74,7 @@ from marl_battlegrounds.core.types import (
     NUM_SLOW_CHANNELS,
     NUM_STUN_CHANNELS,
     NUM_TARGET_ACTIONS,
+    NUM_TEAMS,
     NUM_ULTIMATE_ACTIONS,
     OBJECTIVE_FEATURES,
     OBSTACLE_FEATURES,
@@ -96,7 +101,11 @@ from marl_battlegrounds.core.types import (
     Info,
     Observation,
     PreviousTimestepActionObservation,
+    RegenerationTransitionFacts,
+    RespawnTransitionFacts,
     Reward,
+    SpawnLifecycleObservation,
+    SpawnShieldTransitionFacts,
     TransitionFacts,
 )
 
@@ -148,7 +157,7 @@ _ACTOR_RELATIVE_SELECT_TARGET_ACTION_TO_GLOBAL_AGENT_SLOT_LOOKUP_TABLE = jnp.asa
 )
 
 
-class _HealthEffectAggregationResult(NamedTuple):
+class _CombatEffectAggregationResult(NamedTuple):
     """Internal effect arrays shared by successor state and transition facts."""
 
     hunter_basic_slow_applied_this_tick_by_global_recipient_slot: Array
@@ -166,6 +175,7 @@ class _HealthEffectAggregationResult(NamedTuple):
     recipient_healing_modifier_by_source: Array
     total_effective_healing_by_recipient: Array
     priest_blessing_of_freedom_is_applied_by_source: Array
+    is_combat_participant_this_tick_by_source: Array
 
 
 def _compute_global_pairwise_distances_from_agent_positions(
@@ -195,8 +205,10 @@ def _build_global_visibility_mask_and_distances(
     2. candidate is active and alive;
     3. candidate center is within observer i's observation radius;
     4. static line of sight from observer to candidate is clear.
+    5. an opposing candidate does not have an active spawn shield.
 
-    Self-visibility falls out naturally from the same predicate.
+    Spawn shield concealment is directional: self and allied visibility retain
+    the ordinary range and line-of-sight rules.
     """
     # Pairwise observer-candidate validity from active/alive state.
     alive_active_mask = jnp.logical_and(
@@ -239,11 +251,48 @@ def _build_global_visibility_mask_and_distances(
         config.obstacles,
     )
 
+    pre_spawn_shield_pairwise_global_visibility_mask = jnp.logical_and(
+        global_pairwise_validity_mask,
+        jnp.logical_and(observation_radii_mask, los_mask),
+    )
+
+    # Preserve ordinary self/ally visibility while hiding shielded opponents.
+    canvas = jnp.ones_like(pre_spawn_shield_pairwise_global_visibility_mask)
+    shielded_agents_by_global_slot = (
+        state.spawn_shield_durations > 0
+    )  # (MAX_AGENT_SLOTS)
+    team_a_shielded_agents_by_global_slot = shielded_agents_by_global_slot[
+        TEAM_A_START:TEAM_A_END
+    ]
+    team_b_shielded_agents_by_global_slot = shielded_agents_by_global_slot[
+        TEAM_B_START:TEAM_B_END
+    ]
+
+    team_a_shielded_opponent_mask = jnp.logical_not(
+        jnp.repeat(
+            team_b_shielded_agents_by_global_slot[None, :], MAX_AGENTS_PER_TEAM, axis=0
+        )
+    )
+    team_b_shielded_opponent_mask = jnp.logical_not(
+        jnp.repeat(
+            team_a_shielded_agents_by_global_slot[None, :], MAX_AGENTS_PER_TEAM, axis=0
+        )
+    )
+
+    # Replace only the two opposing-team blocks of the directed visibility mask.
+    shielded_opponent_mask = canvas.at[
+        TEAM_A_START:TEAM_A_END, TEAM_B_START:TEAM_B_END
+    ].set(team_a_shielded_opponent_mask)
+    shielded_opponent_mask = shielded_opponent_mask.at[
+        TEAM_B_START:TEAM_B_END, TEAM_A_START:TEAM_A_END
+    ].set(team_b_shielded_opponent_mask)
+
+    final_global_pairwise_visibility_mask = jnp.logical_and(
+        pre_spawn_shield_pairwise_global_visibility_mask, shielded_opponent_mask
+    )
+
     return (
-        jnp.logical_and(
-            global_pairwise_validity_mask,
-            jnp.logical_and(observation_radii_mask, los_mask),
-        ),
+        final_global_pairwise_visibility_mask,
         global_pairwise_distances,
     )
 
@@ -329,16 +378,27 @@ def _build_select_target_use_ultimate_joint_mask(
     # Stun is actor-side control: any active channel removes non-empty targets.
     is_not_stunned = jnp.all(state.stun_durations == 0, axis=-1)
 
+    # Stun and spawn shield independently make a source combat-ineligible.
+    is_not_under_spawn_shield = state.spawn_shield_durations == 0
+    is_combat_capable = jnp.logical_and(is_not_stunned, is_not_under_spawn_shield)
+
     # Fixed catalog payloads describe whether each actor owns the interaction.
     does_basic_damage = get_basic_damage_by_class_ids(class_ids) > 0
     does_basic_healing = get_basic_healing_by_class_ids(class_ids) > 0
 
     # Actor-owned facts broadcast across candidate columns.
-    actor_can_damage = jnp.logical_and(is_not_stunned, does_basic_damage)[:, None]
-    actor_can_heal = jnp.logical_and(is_not_stunned, does_basic_healing)[:, None]
+    actor_can_damage = jnp.logical_and(is_combat_capable, does_basic_damage)[:, None]
+    actor_can_heal = jnp.logical_and(is_combat_capable, does_basic_healing)[:, None]
 
     global_pairwise_ally_mask, global_pairwise_enemy_mask = (
         _build_global_pairwise_team_masks(config.agent_profile.team_ids)
+    )
+
+    # Opponent concealment already excludes shielded enemy candidates; apply
+    # the same interaction rule to visible ally candidates.
+    global_pairwise_ally_mask = jnp.logical_and(
+        global_pairwise_ally_mask,
+        is_not_under_spawn_shield[None, :],
     )
 
     global_basic_relation_mask = jnp.logical_or(
@@ -390,13 +450,13 @@ def _build_select_target_use_ultimate_joint_mask(
     )
 
     actor_can_use_enemy_targeted_ultimate = jnp.logical_and(
-        is_not_stunned, has_available_enemy_targeted_ultimate
+        is_combat_capable, has_available_enemy_targeted_ultimate
     )[:, None]
     actor_can_use_ally_targeted_ultimate = jnp.logical_and(
-        is_not_stunned, has_available_ally_targeted_ultimate
+        is_combat_capable, has_available_ally_targeted_ultimate
     )[:, None]
     actor_can_use_no_target_ultimate = jnp.logical_and(
-        is_not_stunned, has_available_no_target_ultimate
+        is_combat_capable, has_available_no_target_ultimate
     )
     actor_can_use_no_target_ultimate = jnp.logical_and(
         active_and_alive_mask, actor_can_use_no_target_ultimate
@@ -741,6 +801,226 @@ def _build_visibility_masked_previous_timestep_action_observation(
     )
 
 
+def _build_spawn_lifecycle_observation(
+    state: EnvState, config: EnvConfig
+) -> SpawnLifecycleObservation:
+    """Build actor-relative public spawn pads, shield rules, and lifecycle truth.
+
+    Team row zero is the observer's team and row one is its opponent. Configured
+    living and dead observers receive the same public roster, spawn-shield
+    counters, and configured rules; padded observer rows remain zero.
+    """
+    spawn_pad_positions_team_a_view = jnp.concatenate(
+        (
+            config.team_spawn_pad_positions[TEAM_A_ID - 1, :, :][None, :, :],
+            config.team_spawn_pad_positions[TEAM_B_ID - 1, :, :][None, :, :],
+        ),
+        axis=0,
+    )
+
+    spawn_pad_positions_team_b_view = jnp.concatenate(
+        (
+            config.team_spawn_pad_positions[TEAM_B_ID - 1, :, :][None, :, :],
+            config.team_spawn_pad_positions[TEAM_A_ID - 1, :, :][None, :, :],
+        ),
+        axis=0,
+    )
+
+    unmasked_spawn_pad_positions = jnp.concatenate(
+        (
+            jnp.repeat(
+                spawn_pad_positions_team_a_view[None, :, :, :],
+                MAX_AGENTS_PER_TEAM,
+                axis=0,
+            ),
+            jnp.repeat(
+                spawn_pad_positions_team_b_view[None, :, :, :],
+                MAX_AGENTS_PER_TEAM,
+                axis=0,
+            ),
+        ),
+        axis=0,
+    )
+
+    spawn_pad_positions = (
+        config.agent_profile.active_mask[:, None, None, None]
+        * unmasked_spawn_pad_positions
+    )
+
+    active_mask_team_a_view = jnp.concatenate(
+        (
+            config.agent_profile.active_mask[TEAM_A_START:TEAM_A_END][None, :],
+            config.agent_profile.active_mask[TEAM_B_START:TEAM_B_END][None, :],
+        ),
+        axis=0,
+    )
+
+    active_mask_team_b_view = jnp.concatenate(
+        (
+            config.agent_profile.active_mask[TEAM_B_START:TEAM_B_END][None, :],
+            config.agent_profile.active_mask[TEAM_A_START:TEAM_A_END][None, :],
+        ),
+        axis=0,
+    )
+
+    unmasked_active_mask = jnp.concatenate(
+        (
+            jnp.repeat(
+                active_mask_team_a_view[None, :, :], MAX_AGENTS_PER_TEAM, axis=0
+            ),
+            jnp.repeat(
+                active_mask_team_b_view[None, :, :], MAX_AGENTS_PER_TEAM, axis=0
+            ),
+        ),
+        axis=0,
+    )
+
+    active_mask = jnp.logical_and(
+        unmasked_active_mask, config.agent_profile.active_mask[:, None, None]
+    )
+
+    alive_mask_team_a_view = jnp.concatenate(
+        (
+            state.alive_mask[TEAM_A_START:TEAM_A_END][None, :],
+            state.alive_mask[TEAM_B_START:TEAM_B_END][None, :],
+        ),
+        axis=0,
+    )
+
+    alive_mask_team_b_view = jnp.concatenate(
+        (
+            state.alive_mask[TEAM_B_START:TEAM_B_END][None, :],
+            state.alive_mask[TEAM_A_START:TEAM_A_END][None, :],
+        ),
+        axis=0,
+    )
+
+    unmasked_alive_mask = jnp.concatenate(
+        (
+            jnp.repeat(alive_mask_team_a_view[None, :, :], MAX_AGENTS_PER_TEAM, axis=0),
+            jnp.repeat(alive_mask_team_b_view[None, :, :], MAX_AGENTS_PER_TEAM, axis=0),
+        ),
+        axis=0,
+    )
+
+    alive_mask = jnp.logical_and(
+        unmasked_alive_mask, config.agent_profile.active_mask[:, None, None]
+    )
+
+    spawn_shield_actual_durations_team_a_view = jnp.concatenate(
+        (
+            state.spawn_shield_durations[TEAM_A_START:TEAM_A_END][None, :],
+            state.spawn_shield_durations[TEAM_B_START:TEAM_B_END][None, :],
+        ),
+        axis=0,
+    )
+
+    spawn_shield_actual_durations_team_b_view = jnp.concatenate(
+        (
+            state.spawn_shield_durations[TEAM_B_START:TEAM_B_END][None, :],
+            state.spawn_shield_durations[TEAM_A_START:TEAM_A_END][None, :],
+        ),
+        axis=0,
+    )
+
+    unmasked_spawn_shield_actual_durations = jnp.concatenate(
+        (
+            jnp.repeat(
+                spawn_shield_actual_durations_team_a_view[None, :, :],
+                MAX_AGENTS_PER_TEAM,
+                axis=0,
+            ),
+            jnp.repeat(
+                spawn_shield_actual_durations_team_b_view[None, :, :],
+                MAX_AGENTS_PER_TEAM,
+                axis=0,
+            ),
+        ),
+        axis=0,
+    )
+
+    spawn_shield_actual_durations = (
+        unmasked_spawn_shield_actual_durations
+        * config.agent_profile.active_mask[:, None, None]
+    ).astype(jnp.int32)
+
+    spawn_shield_configured_duration_by_agent = (
+        config.spawn_shield_duration_steps * config.agent_profile.active_mask
+    )
+    spawn_shield_speed_by_agent = (
+        config.spawn_shield_movement_speed * config.agent_profile.active_mask
+    )
+
+    # Actor-relative respawn-wave periods (MAX_AGENT_SLOTS, NUM_TEAMS), int32
+    team_respawn_wave_period_step_count_team_a_view = jnp.repeat(
+        config.team_respawn_wave_period_step_count[None, :], MAX_AGENTS_PER_TEAM, axis=0
+    )
+
+    team_respawn_wave_period_step_count_team_b_view = jnp.repeat(
+        jnp.asarray(
+            (
+                config.team_respawn_wave_period_step_count[TEAM_B_ID - 1],
+                config.team_respawn_wave_period_step_count[TEAM_A_ID - 1],
+            )
+        )[None, :],
+        MAX_AGENTS_PER_TEAM,
+        axis=0,
+    )
+
+    respawn_wave_period_step_count_by_agent_by_team = (
+        jnp.concatenate(
+            (
+                team_respawn_wave_period_step_count_team_a_view,
+                team_respawn_wave_period_step_count_team_b_view,
+            ),
+            axis=0,
+            dtype=jnp.int32,
+        )
+        * config.agent_profile.active_mask[:, None]
+    )
+
+    # Actor-relative respawn-wave countdowns (MAX_AGENT_SLOTS, NUM_TEAMS), int32
+    team_respawn_wave_countdowns_team_a_view = jnp.repeat(
+        state.team_respawn_wave_countdowns[None, :], MAX_AGENTS_PER_TEAM, axis=0
+    )
+
+    team_respawn_wave_countdowns_team_b_view = jnp.repeat(
+        jnp.asarray(
+            (
+                state.team_respawn_wave_countdowns[TEAM_B_ID - 1],
+                state.team_respawn_wave_countdowns[TEAM_A_ID - 1],
+            )
+        )[None, :],
+        MAX_AGENTS_PER_TEAM,
+        axis=0,
+    )
+
+    respawn_wave_countdowns_by_agent_by_team = (
+        jnp.concatenate(
+            (
+                team_respawn_wave_countdowns_team_a_view,
+                team_respawn_wave_countdowns_team_b_view,
+            ),
+            axis=0,
+            dtype=jnp.int32,
+        )
+        * config.agent_profile.active_mask[:, None]
+    )
+
+    return SpawnLifecycleObservation(
+        spawn_pad_positions_by_agent_by_team=spawn_pad_positions,
+        spawn_shield_actual_durations_by_agent_by_team=spawn_shield_actual_durations,
+        spawn_shield_configured_duration_by_agent=spawn_shield_configured_duration_by_agent.astype(
+            jnp.int32
+        ),
+        spawn_shield_speed_by_agent=spawn_shield_speed_by_agent.astype(jnp.float32),
+        respawn_wave_period_step_count_by_agent_by_team=respawn_wave_period_step_count_by_agent_by_team,
+        respawn_wave_countdowns_by_agent_by_team=respawn_wave_countdowns_by_agent_by_team,
+        active_mask_by_agent_by_team=active_mask,
+        alive_mask_by_agent_by_team=alive_mask,
+    )
+
+
 def _build_observation_and_action_mask(
     state: EnvState, config: EnvConfig
 ) -> tuple[Observation, ActionMask]:
@@ -758,7 +1038,10 @@ def _build_observation_and_action_mask(
         mage_damage_amplification_aura_multipliers,
         warrior_damage_mitigation_aura_multipliers,
     ) = _derive_aura_damage_multipliers(
-        config, global_pairwise_distances, state.alive_mask
+        config,
+        global_pairwise_distances,
+        state.alive_mask,
+        state.spawn_shield_durations == 0,
     )
 
     self_features = _build_self_features(
@@ -807,6 +1090,8 @@ def _build_observation_and_action_mask(
         )
     )
 
+    spawn_lifecycle_observation = _build_spawn_lifecycle_observation(state, config)
+
     current_observation = Observation(
         self_features=self_features,
         ally_unit_features=ally_features,
@@ -820,6 +1105,7 @@ def _build_observation_and_action_mask(
         ally_visibility_mask=ally_visibility_mask,
         enemy_visibility_mask=enemy_visibility_mask,
         previous_timestep_actions=visibility_masked_previous_timestep_action_observation,
+        spawn_lifecycle=spawn_lifecycle_observation,
     )
 
     return current_observation, current_action_mask
@@ -832,12 +1118,13 @@ def _build_intended_movement_deltas(
 ) -> Array:
     """Build voluntary movement intent from current public control truth.
 
-    Status durations in ``current_state`` must be the values visible at the
-    current decision epoch. Statuses accepted during this transition are
-    packaged for the next decision and must not retroactively change this
-    movement intent. Current stun, death, or inactivity yields zero intent here
-    as defense in depth; geometry remains free to displace a zero-intent body
-    during collision resolution.
+    Status durations in ``current_state`` must be the values visible when the
+    policy selects the current action. Statuses accepted during this transition
+    are packaged for the next action and must not retroactively change this
+    movement intent. For a host-valid unshielded actor, current stun yields zero
+    intent; spawn shield and stun cannot coexist at the host boundary. Death or
+    inactivity also yields zero intent as defense in depth. Geometry remains
+    free to displace a zero-intent body during collision resolution.
     """
     intended_movement_deltas_unscaled = _JOINT_ACTION_MOVE_TO_DISPLACEMENT_LOOKUP_TABLE[
         accepted_joint_action.move
@@ -847,7 +1134,9 @@ def _build_intended_movement_deltas(
         current_state.slow_durations,
         current_state.priest_blessing_of_freedom_slow_floor_durations,
         current_state.stun_durations,
+        current_state.spawn_shield_durations,
         config.agent_profile.base_movement_speeds,
+        config.spawn_shield_movement_speed,
         jnp.logical_and(config.agent_profile.active_mask, current_state.alive_mask),
         config.ordinary_movement_distance_scale,
     )
@@ -922,7 +1211,9 @@ def _build_self_features(
         state.slow_durations,
         state.priest_blessing_of_freedom_slow_floor_durations,
         state.stun_durations,
+        state.spawn_shield_durations,
         config.agent_profile.base_movement_speeds,
+        config.spawn_shield_movement_speed,
         jnp.logical_and(config.agent_profile.active_mask, state.alive_mask),
         config.ordinary_movement_distance_scale,
     )
@@ -948,7 +1239,7 @@ def _build_self_features(
         dtype=jnp.float32,
     )
 
-    features_15_to_30 = jnp.concatenate(
+    features_15_to_31 = jnp.concatenate(
         (
             state.slow_durations,
             slow_multipliers,
@@ -958,6 +1249,7 @@ def _build_self_features(
             state.mage_burst_damage_amplification_durations[:, None],
             state.priest_blessing_of_freedom_slow_floor_durations[:, None],
             priest_blessing_of_freedom_slow_floor_fraction[:, None],
+            state.steps_until_out_of_combat[:, None],
             mage_damage_amplification_aura_multipliers[:, None],
             warrior_damage_mitigation_aura_multipliers[:, None],
         ),
@@ -1071,7 +1363,19 @@ def _build_self_features(
         0.0,
     )[:, None]
 
-    feature_31_to_54 = jnp.concatenate(
+    ooc_delay_steps_capability_features = jnp.where(
+        config.agent_profile.active_mask,
+        config.agent_profile.out_of_combat_delay_steps,
+        0,
+    )[:, None].astype(jnp.float32)
+
+    ooc_health_regen_fraction_per_step_capability_features = jnp.where(
+        config.agent_profile.active_mask,
+        config.agent_profile.out_of_combat_health_regen_fraction_per_step,
+        0,
+    )[:, None]
+
+    feature_32_to_57 = jnp.concatenate(
         (
             basic_health_and_ultimate_cooldown_capability_features,
             slow_stun_durations_multipliers,
@@ -1081,6 +1385,8 @@ def _build_self_features(
             mage_and_warrior_aura_capability_features,
             ultimate_healing_capability_features,
             ultimate_damage_capability_features,
+            ooc_delay_steps_capability_features,
+            ooc_health_regen_fraction_per_step_capability_features,
         ),
         axis=-1,
         dtype=jnp.float32,
@@ -1089,8 +1395,8 @@ def _build_self_features(
     return jnp.concatenate(
         (
             features_0_to_14,
-            features_15_to_30,
-            feature_31_to_54,
+            features_15_to_31,
+            feature_32_to_57,
         ),
         axis=-1,
         dtype=jnp.float32,
@@ -1292,7 +1598,7 @@ def _aggregate_health_effects_and_basic_passives_by_global_slot(
     accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix: Array,
     mage_damage_amplification_aura_multipliers: Array,
     warrior_damage_mitigation_aura_multipliers: Array,
-) -> _HealthEffectAggregationResult:
+) -> _CombatEffectAggregationResult:
     """Aggregate accepted health effects and basic-passive applications.
 
     The accepted target categories are actor-relative. After fixed-slot
@@ -1508,7 +1814,47 @@ def _aggregate_health_effects_and_basic_passives_by_global_slot(
         total_healing_received_by_global_recipient_slot
     )
 
-    return _HealthEffectAggregationResult(
+    # Healing qualification reads only transition-start combat truth. Combine
+    # healing and damage participants only after that snapshot decision so a
+    # same-transition reset cannot propagate through another healing route.
+    is_currently_in_combat = current_state.steps_until_out_of_combat > 0
+    combat_healing_source_this_tick_by_agent = jnp.any(
+        jnp.logical_and(
+            accepted_healing_global_pairwise_actor_and_recipient_target_one_hot_matrix,
+            is_currently_in_combat[None, :],
+        ),
+        axis=1,
+    )
+    combat_healing_recipient_this_tick_by_agent = jnp.logical_and(
+        is_currently_in_combat,
+        jnp.any(
+            accepted_healing_global_pairwise_actor_and_recipient_target_one_hot_matrix,
+            axis=0,
+        ),
+    )
+    combat_healing_participation_this_tick_by_agent = jnp.logical_or(
+        combat_healing_source_this_tick_by_agent,
+        combat_healing_recipient_this_tick_by_agent,
+    )
+
+    damage_source_this_tick_by_agent = jnp.any(
+        accepted_damage_global_pairwise_actor_and_recipient_target_one_hot_matrix,
+        axis=1,
+    )
+    damage_recipient_this_tick_by_agent = jnp.any(
+        accepted_damage_global_pairwise_actor_and_recipient_target_one_hot_matrix,
+        axis=0,
+    )
+    combat_damage_participation_this_tick_by_agent = jnp.logical_or(
+        damage_source_this_tick_by_agent, damage_recipient_this_tick_by_agent
+    )
+
+    is_combat_participant_this_tick_by_source = jnp.logical_or(
+        combat_healing_participation_this_tick_by_agent,
+        combat_damage_participation_this_tick_by_agent,
+    )
+
+    return _CombatEffectAggregationResult(
         hunter_basic_slow_applied_this_tick_by_global_recipient_slot=(
             hunter_basic_slow_applied_this_tick_by_global_recipient_slot
         ),
@@ -1538,6 +1884,7 @@ def _aggregate_health_effects_and_basic_passives_by_global_slot(
         priest_blessing_of_freedom_is_applied_by_source=(
             priest_freedom_applied_this_tick_by_global_actor_slot
         ),
+        is_combat_participant_this_tick_by_source=is_combat_participant_this_tick_by_source,
     )
 
 
@@ -1564,13 +1911,15 @@ def _derive_aura_damage_multipliers(
     config: EnvConfig,
     global_pairwise_distances: Array,
     alive_mask: Array,
+    is_not_under_spawn_shield: Array,
 ) -> tuple[Array, Array]:
     """Derive bounded Mage outgoing and Warrior incoming aura modifiers.
 
     Rows represent aura emitters and columns represent beneficiary slots.
-    Only active, living allies with real team IDs participate. Auras include
-    their emitter, use inclusive radius boundaries, and stack multiplicatively
-    before the completed vectors are bounded.
+    Only interaction-eligible active, living allies with real team IDs
+    participate as emitters or beneficiaries. Auras include eligible emitters,
+    use inclusive radius boundaries, and stack multiplicatively before the
+    completed vectors are bounded.
     """
     global_pairwise_ally_mask, _ = _build_global_pairwise_team_masks(
         config.agent_profile.team_ids
@@ -1581,8 +1930,13 @@ def _derive_aura_damage_multipliers(
         active_and_alive[None, :], active_and_alive[:, None]
     )
     global_pairwise_active_and_alive_ally_mask = jnp.logical_and(
-        active_and_alive_pairs, global_pairwise_ally_mask
+        jnp.logical_and(active_and_alive_pairs, global_pairwise_ally_mask),
+        jnp.logical_and(
+            is_not_under_spawn_shield[:, None],
+            is_not_under_spawn_shield[None, :],
+        ),
     )
+
     mage_masked_global_pairwise_distances = jnp.where(
         jnp.logical_and(
             _active_mage_class_mask(config)[:, None],
@@ -1644,18 +1998,19 @@ def _resolve_status_duration_lifecycle(
     accepted_positive_raw_damage_received_this_tick_by_global_recipient_slot: Array,
     hunter_basic_slow_applied_this_tick_by_global_actor_slot: Array,
     next_alive_mask: Array,
-) -> tuple[Array, Array, Array, Array, Array, Array, Array, Array, Array]:
-    """Resolve successor status durations and source-aligned application facts.
+) -> tuple[Array, Array, Array, Array, Array, Array, Array, Array, Array, Array]:
+    """Resolve successor transient durations and status-application facts.
 
     Current durations age once toward zero. Accepted positive raw damage then
     clears only the aged successor of a pre-existing Hunter Trap, after which
     fresh source-local applications merge at full configured duration. A fresh
     application never shortens a longer aged remainder and first governs the
-    next observable decision epoch. Dead successor slots retain the application
-    facts but carry no transient status duration into that epoch.
+    next policy action. The spawn-shield counter also ages once after movement.
+    Dead successor slots retain status-application facts but carry no transient
+    duration into the next state.
     """
 
-    # Derive fresh applications once from the accepted action at this epoch.
+    # Derive fresh applications once from the action accepted for this transition.
     (
         mage_uses_accepted_ultimate_this_tick_by_actor_slot,
         warrior_uses_accepted_ultimate_this_tick_by_actor_slot,
@@ -1875,12 +2230,20 @@ def _resolve_status_duration_lifecycle(
         next_priest_freedom_slow_floor_durations * next_alive_mask
     )
 
+    # Spawn shielding ages after movement and cannot survive death or padding.
+    next_spawn_shield_durations = (
+        jnp.maximum(current_state.spawn_shield_durations - 1, 0).astype(jnp.int32)
+        * next_alive_mask
+        * config.agent_profile.active_mask
+    )
+
     return (
         next_slow_durations,
         next_stun_durations,
         next_rogue_anti_heal_durations,
         next_mage_burst_durations,
         next_priest_freedom_slow_floor_durations,
+        next_spawn_shield_durations,
         slow_is_applied_by_source_and_channel,
         stun_is_applied_by_source_and_channel,
         rogue_poison_anti_heal_is_applied_by_source,
@@ -1954,6 +2317,8 @@ def _return_unchanged_agent_positions(
     map_width: Array | float,
     map_height: Array | float,
     obstacles: Array,
+    always_participates_in_agent_agent_collision: Array,
+    participates_in_agent_agent_collision_at_final_position: Array,
     agent_agent_overlap_projection_passes: int,
     collision_projection_passes: int,
     movement_substeps: int,
@@ -1970,6 +2335,8 @@ def _return_unchanged_agent_positions(
         agent_agent_overlap_projection_passes,
         collision_projection_passes,
         movement_substeps,
+        always_participates_in_agent_agent_collision,
+        participates_in_agent_agent_collision_at_final_position,
     )
 
     return agent_positions
@@ -1980,6 +2347,7 @@ def _resolve_post_charge_agent_positions(
     config: EnvConfig,
     accepted_joint_action: Action,
     accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix: Array,
+    always_participates_in_agent_agent_collision: Array,
 ) -> Array:
     """Resolve all accepted Warrior Charge relocations from one pre-state.
 
@@ -2057,9 +2425,70 @@ def _resolve_post_charge_agent_positions(
             config.map_width,
             config.map_height,
             config.obstacles,
+            always_participates_in_agent_agent_collision,
+            always_participates_in_agent_agent_collision,
             agent_agent_overlap_projection_passes,
             collision_projection_passes,
             movement_substeps,
+        ),
+    )
+
+
+def _build_combat_transition_facts(
+    combat_effect_aggregation_result: _CombatEffectAggregationResult,
+    combat_effect_has_recipient_by_source: Array,
+    combat_effect_recipient_global_slot_by_source: Array,
+    slow_is_applied_by_source_and_channel: Array,
+    stun_is_applied_by_source_and_channel: Array,
+    rogue_poison_anti_heal_is_applied_by_source: Array,
+    mage_burst_damage_amplification_is_applied_by_source: Array,
+) -> CombatTransitionFacts:
+    """Package existing combat intermediates as authoritative public facts."""
+    return CombatTransitionFacts(
+        basic_effect_is_activated_by_source=(
+            combat_effect_aggregation_result.basic_effect_is_activated_by_source
+        ),
+        ultimate_effect_is_activated_by_source=(
+            combat_effect_aggregation_result.ultimate_effect_is_activated_by_source
+        ),
+        combat_effect_has_recipient_by_source=combat_effect_has_recipient_by_source,
+        combat_effect_recipient_global_slot_by_source=(
+            combat_effect_recipient_global_slot_by_source
+        ),
+        raw_damage_output_by_source=(
+            combat_effect_aggregation_result.raw_damage_output_by_source
+        ),
+        source_modified_damage_output_by_source=(
+            combat_effect_aggregation_result.source_modified_damage_output_by_source
+        ),
+        recipient_damage_modifier_by_source=(
+            combat_effect_aggregation_result.recipient_damage_modifier_by_source
+        ),
+        total_effective_damage_by_recipient=(
+            combat_effect_aggregation_result.total_effective_damage_by_recipient
+        ),
+        raw_healing_output_by_source=(
+            combat_effect_aggregation_result.raw_healing_output_by_source
+        ),
+        source_modified_healing_output_by_source=(
+            combat_effect_aggregation_result.source_modified_healing_output_by_source
+        ),
+        recipient_healing_modifier_by_source=(
+            combat_effect_aggregation_result.recipient_healing_modifier_by_source
+        ),
+        total_effective_healing_by_recipient=(
+            combat_effect_aggregation_result.total_effective_healing_by_recipient
+        ),
+        slow_is_applied_by_source_and_channel=slow_is_applied_by_source_and_channel,
+        stun_is_applied_by_source_and_channel=stun_is_applied_by_source_and_channel,
+        rogue_poison_anti_heal_is_applied_by_source=(
+            rogue_poison_anti_heal_is_applied_by_source
+        ),
+        mage_burst_damage_amplification_is_applied_by_source=(
+            mage_burst_damage_amplification_is_applied_by_source
+        ),
+        priest_blessing_of_freedom_is_applied_by_source=(
+            combat_effect_aggregation_result.priest_blessing_of_freedom_is_applied_by_source
         ),
     )
 
@@ -2074,7 +2503,7 @@ def _build_death_transition_facts(
 ) -> DeathTransitionFacts:
     """Derive new successor deaths and source-aligned damage attribution.
 
-    A recipient dies only when it was active and alive in the choosing state
+    A recipient dies only when it was active and alive at transition start
     and its final clamped successor health is zero. Each contributing source
     retains its gross post-source, post-recipient effective damage; simultaneous
     healing and health clamping do not redistribute or select a killer.
@@ -2115,51 +2544,13 @@ def _build_death_transition_facts(
     )
 
 
-# Public ---
+def _build_canonical_no_transition_info_object(initial_state: EnvState) -> Info:
+    """Return neutral facts for reset or curated initialization.
 
-
-def reset(
-    config: EnvConfig, key: Array
-) -> tuple[EnvState, Observation, ActionMask, Info]:
-    """Create initial fixed-slot state from a host-validated configuration."""
-    # Reset keeps all arrays at MAX_AGENT_SLOTS length. Smaller tasks use the
-    # resolved profile's active mask to distinguish agents from padded slots.
-    # Ordinary reset starts all active agents alive. Scenario loaders may later
-    # create active-but-dead agents from curated states.
-    # Randomized task builders consume keys while constructing resolved episode
-    # configurations. Ordinary reset intentionally does not resample starts.
-    # TODO(Scenario): Keep curated scenario starts out of ordinary reset. A future
-    # scenario loader should validate and return EnvState values that reuse the
-    # same transition, observation, and mask machinery.
-    del key
-    initial_state = EnvState(
-        step_count=jnp.array(0, dtype=jnp.int32),
-        agent_positions=config.initial_agent_positions,
-        alive_mask=config.agent_profile.active_mask,
-        current_health=config.agent_profile.max_health,
-        ultimate_cooldowns=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
-        slow_durations=jnp.zeros((MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.int32),
-        stun_durations=jnp.zeros((MAX_AGENT_SLOTS, NUM_STUN_CHANNELS), dtype=jnp.int32),
-        rogue_poison_anti_heal_durations=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
-        mage_burst_damage_amplification_durations=jnp.zeros(
-            (MAX_AGENT_SLOTS,), dtype=jnp.int32
-        ),
-        priest_blessing_of_freedom_slow_floor_durations=jnp.zeros(
-            (MAX_AGENT_SLOTS,), dtype=jnp.int32
-        ),
-        previous_timestep_move_actions=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
-        previous_timestep_select_target_actions=jnp.zeros(
-            (MAX_AGENT_SLOTS,), dtype=jnp.int32
-        ),
-        previous_timestep_use_ultimate_actions=jnp.zeros(
-            (MAX_AGENT_SLOTS,), dtype=jnp.int32
-        ),
-        has_previous_timestep_joint_action=jnp.asarray(0, dtype=bool),
-    )
-
-    initial_observation, initial_action_mask = _build_observation_and_action_mask(
-        initial_state, config
-    )
+    Initialization exposes the supplied state's step count only through the
+    state itself. Transition facts use their canonical sentinel because no
+    action was accepted and no simulator transition occurred.
+    """
 
     all_false_vector = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.bool_)
     all_zeroes_vector = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32)
@@ -2211,15 +2602,283 @@ def reset(
         attributed_death_damage_by_source=all_zeroes_vector,
     )
 
+    reset_spawn_shield_facts = SpawnShieldTransitionFacts(
+        was_active_at_transition_start_by_agent=all_false_vector,
+        expired_at_transition_end_by_agent=all_false_vector,
+    )
+
+    reset_respawn_facts = RespawnTransitionFacts(
+        respawn_wave_occurred_this_transition_by_team=jnp.full(
+            (NUM_TEAMS,), False, dtype=jnp.bool_
+        ),
+        was_respawned_this_transition_by_agent=all_false_vector,
+    )
+
+    reset_regeneration_facts = RegenerationTransitionFacts(
+        combat_countdown_was_reset_by_agent=all_false_vector,
+        actual_health_regenerated_this_step_by_agent=all_zeroes_vector,
+    )
+
     reset_transition_facts = TransitionFacts(
         has_transition=jnp.asarray(False),
-        choosing_step_count=jnp.asarray(-1, dtype=jnp.int32),
+        transition_start_step_count=jnp.asarray(-1, dtype=jnp.int32),
         action_acceptance_facts=reset_action_acceptance_facts,
         combat_transition_facts=reset_combat_transition_facts,
         death_facts=reset_death_facts,
+        spawn_shield_facts=reset_spawn_shield_facts,
+        respawn_facts=reset_respawn_facts,
+        regeneration_facts=reset_regeneration_facts,
     )
 
-    info = Info(transition_facts=reset_transition_facts)
+    return Info(transition_facts=reset_transition_facts)
+
+
+def _build_was_respawned_this_transition_by_agent_array(
+    current_state: EnvState, config: EnvConfig
+) -> Array:
+    """Return transition-start dead slots whose team wave is currently due."""
+    is_active_but_dead = jnp.logical_and(
+        config.agent_profile.active_mask, jnp.logical_not(current_state.alive_mask)
+    )
+
+    team_a_respawned_this_transition_array = jnp.logical_and(
+        is_active_but_dead[TEAM_A_START:TEAM_A_END],
+        current_state.team_respawn_wave_countdowns[TEAM_A_ID - 1] == 0,
+    )
+
+    team_b_respawned_this_transition_array = jnp.logical_and(
+        is_active_but_dead[TEAM_B_START:TEAM_B_END],
+        current_state.team_respawn_wave_countdowns[TEAM_B_ID - 1] == 0,
+    )
+
+    return jnp.concatenate(
+        (
+            team_a_respawned_this_transition_array,
+            team_b_respawned_this_transition_array,
+        ),
+        dtype=jnp.bool_,
+    )
+
+
+def _handle_end_of_transition_respawn_wave_event(
+    config: EnvConfig,
+    was_respawned_this_transition_by_agent: Array,
+    next_alive_mask: Array,
+    next_health_after_effective_damage_and_healing: Array,
+    next_spawn_shield_durations: Array,
+    next_agent_positions: Array,
+) -> tuple[Array, Array, Array, Array]:
+    """Apply the simultaneous end-of-transition respawn state override."""
+    updated_next_alive_mask = jnp.where(
+        was_respawned_this_transition_by_agent,
+        jnp.ones_like(next_alive_mask),
+        next_alive_mask,
+    )
+
+    # Health and shield are successor values, so the newly created shield does
+    # not participate in the ordinary decrement that already occurred.
+    updated_next_health = jnp.where(
+        was_respawned_this_transition_by_agent,
+        config.agent_profile.max_health,
+        next_health_after_effective_damage_and_healing,
+    )
+
+    updated_next_spawn_shield_durations = jnp.where(
+        was_respawned_this_transition_by_agent,
+        config.spawn_shield_duration_steps,
+        next_spawn_shield_durations,
+    )
+
+    # Global slot identity determines the immutable team-local pad; occupancy
+    # deliberately does not participate in this selection.
+    updated_team_a_next_agent_positions = jnp.where(
+        was_respawned_this_transition_by_agent[TEAM_A_START:TEAM_A_END, None],
+        config.team_spawn_pad_positions[TEAM_A_ID - 1, :, :],
+        next_agent_positions[TEAM_A_START:TEAM_A_END, :],
+    )
+
+    updated_team_b_next_agent_positions = jnp.where(
+        was_respawned_this_transition_by_agent[TEAM_B_START:TEAM_B_END, None],
+        config.team_spawn_pad_positions[TEAM_B_ID - 1, :, :],
+        next_agent_positions[TEAM_B_START:TEAM_B_END, :],
+    )
+
+    updated_next_agent_positions = jnp.concatenate(
+        (updated_team_a_next_agent_positions, updated_team_b_next_agent_positions),
+        axis=0,
+        dtype=jnp.float32,
+    )
+
+    return (
+        updated_next_alive_mask,
+        updated_next_health,
+        updated_next_spawn_shield_durations,
+        updated_next_agent_positions,
+    )
+
+
+def _return_original_next_state_items(
+    config: EnvConfig,
+    was_respawned_this_transition_by_agent: Array,
+    next_alive_mask: Array,
+    next_health_after_effective_damage_and_healing: Array,
+    next_spawn_shield_durations: Array,
+    next_agent_positions: Array,
+) -> tuple[Array, Array, Array, Array]:
+    """Return unchanged successor leaves when neither team wave is due."""
+    del config, was_respawned_this_transition_by_agent
+    return (
+        next_alive_mask,
+        next_health_after_effective_damage_and_healing,
+        next_spawn_shield_durations,
+        next_agent_positions,
+    )
+
+
+def _compute_next_steps_until_out_of_combat(
+    current_state: EnvState,
+    config: EnvConfig,
+    is_combat_participant_this_tick_by_agent: Array,
+    next_alive_mask: Array,
+) -> Array:
+    """Reset, decrement, or clear each successor combat countdown."""
+    next_steps_until_ooc_active_masked = jnp.where(
+        is_combat_participant_this_tick_by_agent,
+        config.agent_profile.out_of_combat_delay_steps,
+        jnp.maximum(current_state.steps_until_out_of_combat - 1, 0),
+    )
+
+    return jnp.where(
+        jnp.logical_and(next_alive_mask, config.agent_profile.active_mask),
+        next_steps_until_ooc_active_masked,
+        0,
+    ).astype(jnp.int32)
+
+
+def _compute_health_after_out_of_combat_health_regeneration(
+    current_state: EnvState,
+    config: EnvConfig,
+    next_health_after_effective_damage_and_healing: Array,
+    is_combat_participant_this_tick: Array,
+) -> tuple[Array, Array]:
+    """Apply eligible post-combat regeneration and return its actual amount."""
+    raw_health_regen_deltas = (
+        config.agent_profile.max_health
+        * config.agent_profile.out_of_combat_health_regen_fraction_per_step
+    )
+
+    is_afflicted_with_rogue_poison = current_state.rogue_poison_anti_heal_durations > 0
+    health_regen_deltas = jnp.where(
+        is_afflicted_with_rogue_poison,
+        raw_health_regen_deltas * ROGUE_POISON_ANTI_HEAL_MULTIPLIER,
+        raw_health_regen_deltas,
+    )
+
+    regenerated_health_bars = jnp.minimum(
+        next_health_after_effective_damage_and_healing + health_regen_deltas,
+        config.agent_profile.max_health,
+    )
+
+    regenerates_health_this_tick = jnp.logical_and(
+        jnp.logical_not(is_combat_participant_this_tick),
+        jnp.logical_and(
+            current_state.steps_until_out_of_combat == 0, current_state.alive_mask
+        ),
+    )
+
+    health_after_out_of_combat_regeneration = jnp.where(
+        regenerates_health_this_tick,
+        regenerated_health_bars,
+        next_health_after_effective_damage_and_healing,
+    )
+
+    actual_health_regenerated_this_tick_by_agent = (
+        regenerates_health_this_tick
+        * (
+            health_after_out_of_combat_regeneration
+            - next_health_after_effective_damage_and_healing
+        )
+    ).astype(jnp.float32)
+
+    return (
+        health_after_out_of_combat_regeneration,
+        actual_health_regenerated_this_tick_by_agent,
+    )
+
+
+# Public ---
+
+
+def initialize_scenario_state(
+    initial_state: EnvState, config: EnvConfig
+) -> tuple[EnvState, Observation, ActionMask, Info]:
+    """Validate and expose one authored state without advancing the simulator."""
+    validate_env_config(config)
+    validate_scenario_initial_state(config, initial_state)
+    obs, action_mask = _build_observation_and_action_mask(initial_state, config)
+    info = _build_canonical_no_transition_info_object(initial_state)
+    return (initial_state, obs, action_mask, info)
+
+
+def reset(
+    config: EnvConfig, key: Array
+) -> tuple[EnvState, Observation, ActionMask, Info]:
+    """Create initial fixed-slot state from a host-validated configuration."""
+    # Reset keeps all arrays at MAX_AGENT_SLOTS length. Smaller tasks use the
+    # resolved profile's active mask to distinguish agents from padded slots.
+    # Ordinary reset starts all active agents alive. Scenario loaders may later
+    # create active-but-dead agents from curated states.
+    # Randomized task builders consume keys while constructing resolved episode
+    # configurations. Ordinary reset intentionally does not resample starts.
+    # Curated starts use ``initialize_scenario_state`` so ordinary reset keeps a
+    # single deterministic pad-based position authority.
+    del key
+
+    team_spawn_pad_positions = jnp.concatenate(
+        (
+            config.team_spawn_pad_positions[TEAM_A_ID - 1, :, :],
+            config.team_spawn_pad_positions[TEAM_B_ID - 1, :, :],
+        ),
+        axis=0,
+    )
+
+    active_team_spawn_pad_positions = (
+        team_spawn_pad_positions * config.agent_profile.active_mask[:, None]
+    )
+
+    initial_state = EnvState(
+        step_count=jnp.array(0, dtype=jnp.int32),
+        agent_positions=active_team_spawn_pad_positions.astype(jnp.float32),
+        alive_mask=config.agent_profile.active_mask,
+        current_health=config.agent_profile.max_health,
+        ultimate_cooldowns=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        slow_durations=jnp.zeros((MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.int32),
+        stun_durations=jnp.zeros((MAX_AGENT_SLOTS, NUM_STUN_CHANNELS), dtype=jnp.int32),
+        rogue_poison_anti_heal_durations=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        mage_burst_damage_amplification_durations=jnp.zeros(
+            (MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
+        priest_blessing_of_freedom_slow_floor_durations=jnp.zeros(
+            (MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
+        team_respawn_wave_countdowns=config.team_respawn_wave_period_step_count - 1,
+        spawn_shield_durations=jnp.zeros((MAX_AGENT_SLOTS), dtype=jnp.int32),
+        steps_until_out_of_combat=jnp.zeros((MAX_AGENT_SLOTS), dtype=jnp.int32),
+        previous_timestep_move_actions=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        previous_timestep_select_target_actions=jnp.zeros(
+            (MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
+        previous_timestep_use_ultimate_actions=jnp.zeros(
+            (MAX_AGENT_SLOTS,), dtype=jnp.int32
+        ),
+        has_previous_timestep_joint_action=jnp.asarray(0, dtype=bool),
+    )
+
+    initial_observation, initial_action_mask = _build_observation_and_action_mask(
+        initial_state, config
+    )
+
+    info = _build_canonical_no_transition_info_object(initial_state)
 
     return (initial_state, initial_observation, initial_action_mask, info)
 
@@ -2261,10 +2920,13 @@ def step(
         current_mage_damage_amplification_aura_multipliers,
         current_warrior_damage_mitigation_aura_multipliers,
     ) = _derive_aura_damage_multipliers(
-        config, current_global_pairwise_distances, current_state.alive_mask
+        config,
+        current_global_pairwise_distances,
+        current_state.alive_mask,
+        current_state.spawn_shield_durations == 0,
     )
 
-    health_effect_aggregation_result = (
+    combat_effect_aggregation_result = (
         _aggregate_health_effects_and_basic_passives_by_global_slot(
             current_state,
             config,
@@ -2277,11 +2939,21 @@ def step(
 
     next_health_after_effective_damage_and_healing = (
         _compute_health_after_simultaneous_damage_and_healing(
-            health_effect_aggregation_result.total_effective_damage_by_recipient,
-            health_effect_aggregation_result.total_effective_healing_by_recipient,
+            combat_effect_aggregation_result.total_effective_damage_by_recipient,
+            combat_effect_aggregation_result.total_effective_healing_by_recipient,
             current_state,
             config,
         )
+    )
+
+    (
+        next_health_after_out_of_combat_regeneration,
+        actual_health_regenerated_this_tick_by_agent,
+    ) = _compute_health_after_out_of_combat_health_regeneration(
+        current_state,
+        config,
+        next_health_after_effective_damage_and_healing,
+        combat_effect_aggregation_result.is_combat_participant_this_tick_by_source,
     )
 
     # Accepted use starts a full cooldown; every unreplaced cooldown ticks once.
@@ -2298,11 +2970,22 @@ def step(
         accepted_joint_action,
     )
 
+    # The current counter governs both traversal and final-endpoint collision.
+    # Geometry independently intersects these lifecycle masks with active/alive.
+    always_participates_in_agent_agent_collision = (
+        current_state.spawn_shield_durations == 0
+    )
+    participates_in_agent_agent_collision_at_final_position = jnp.logical_or(
+        always_participates_in_agent_agent_collision,
+        current_state.spawn_shield_durations == 1,
+    )
+
     post_charge_current_agent_positions = _resolve_post_charge_agent_positions(
         current_state,
         config,
         accepted_joint_action,
         accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix,
+        always_participates_in_agent_agent_collision,
     )
 
     # Resolve every precommitted voluntary move from the realized Charge phase.
@@ -2315,20 +2998,34 @@ def step(
         config.map_width,
         config.map_height,
         config.obstacles,
+        always_participates_in_agent_agent_collision,
+        participates_in_agent_agent_collision_at_final_position,
     )
 
     death_facts = _build_death_transition_facts(
         current_state,
         config,
-        next_health_after_effective_damage_and_healing,
+        next_health_after_out_of_combat_regeneration,
         combat_effect_recipient_global_slot_by_source,
-        health_effect_aggregation_result.source_modified_damage_output_by_source,
-        health_effect_aggregation_result.recipient_damage_modifier_by_source,
+        combat_effect_aggregation_result.source_modified_damage_output_by_source,
+        combat_effect_aggregation_result.recipient_damage_modifier_by_source,
     )
 
     next_alive_mask = jnp.logical_and(
         jnp.logical_not(death_facts.is_newly_dead_by_recipient),
         current_state.alive_mask,
+    )
+
+    next_steps_until_ooc = _compute_next_steps_until_out_of_combat(
+        current_state,
+        config,
+        combat_effect_aggregation_result.is_combat_participant_this_tick_by_source,
+        next_alive_mask,
+    )
+
+    regeneration_facts = RegenerationTransitionFacts(
+        combat_countdown_was_reset_by_agent=combat_effect_aggregation_result.is_combat_participant_this_tick_by_source,
+        actual_health_regenerated_this_step_by_agent=actual_health_regenerated_this_tick_by_agent,
     )
 
     (
@@ -2337,6 +3034,7 @@ def step(
         next_rogue_anti_heal_durations,
         next_mage_burst_durations,
         next_priest_freedom_slow_floor_durations,
+        next_spawn_shield_durations,
         slow_is_applied_by_source_and_channel,
         stun_is_applied_by_source_and_channel,
         rogue_poison_anti_heal_is_applied_by_source,
@@ -2346,58 +3044,57 @@ def step(
         config,
         accepted_joint_action.use_ultimate,
         accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix,
-        health_effect_aggregation_result.hunter_basic_slow_applied_this_tick_by_global_recipient_slot,
-        health_effect_aggregation_result.priest_freedom_applied_this_tick_by_global_recipient_slot,
-        health_effect_aggregation_result.accepted_positive_raw_damage_received_this_tick_by_global_recipient_slot,
-        health_effect_aggregation_result.hunter_basic_slow_applied_this_tick_by_global_actor_slot,
+        combat_effect_aggregation_result.hunter_basic_slow_applied_this_tick_by_global_recipient_slot,
+        combat_effect_aggregation_result.priest_freedom_applied_this_tick_by_global_recipient_slot,
+        combat_effect_aggregation_result.accepted_positive_raw_damage_received_this_tick_by_global_recipient_slot,
+        combat_effect_aggregation_result.hunter_basic_slow_applied_this_tick_by_global_actor_slot,
         next_alive_mask,
     )
 
-    combat_transition_facts = CombatTransitionFacts(
-        basic_effect_is_activated_by_source=(
-            health_effect_aggregation_result.basic_effect_is_activated_by_source
+    combat_transition_facts = _build_combat_transition_facts(
+        combat_effect_aggregation_result,
+        combat_effect_has_recipient_by_source,
+        combat_effect_recipient_global_slot_by_source,
+        slow_is_applied_by_source_and_channel,
+        stun_is_applied_by_source_and_channel,
+        rogue_poison_anti_heal_is_applied_by_source,
+        mage_burst_damage_amplification_is_applied_by_source,
+    )
+
+    respawn_facts = RespawnTransitionFacts(
+        respawn_wave_occurred_this_transition_by_team=current_state.team_respawn_wave_countdowns
+        == 0,
+        was_respawned_this_transition_by_agent=_build_was_respawned_this_transition_by_agent_array(
+            current_state, config
         ),
-        ultimate_effect_is_activated_by_source=(
-            health_effect_aggregation_result.ultimate_effect_is_activated_by_source
-        ),
-        combat_effect_has_recipient_by_source=combat_effect_has_recipient_by_source,
-        combat_effect_recipient_global_slot_by_source=(
-            combat_effect_recipient_global_slot_by_source
-        ),
-        raw_damage_output_by_source=(
-            health_effect_aggregation_result.raw_damage_output_by_source
-        ),
-        source_modified_damage_output_by_source=(
-            health_effect_aggregation_result.source_modified_damage_output_by_source
-        ),
-        recipient_damage_modifier_by_source=(
-            health_effect_aggregation_result.recipient_damage_modifier_by_source
-        ),
-        total_effective_damage_by_recipient=(
-            health_effect_aggregation_result.total_effective_damage_by_recipient
-        ),
-        raw_healing_output_by_source=(
-            health_effect_aggregation_result.raw_healing_output_by_source
-        ),
-        source_modified_healing_output_by_source=(
-            health_effect_aggregation_result.source_modified_healing_output_by_source
-        ),
-        recipient_healing_modifier_by_source=(
-            health_effect_aggregation_result.recipient_healing_modifier_by_source
-        ),
-        total_effective_healing_by_recipient=(
-            health_effect_aggregation_result.total_effective_healing_by_recipient
-        ),
-        slow_is_applied_by_source_and_channel=slow_is_applied_by_source_and_channel,
-        stun_is_applied_by_source_and_channel=stun_is_applied_by_source_and_channel,
-        rogue_poison_anti_heal_is_applied_by_source=(
-            rogue_poison_anti_heal_is_applied_by_source
-        ),
-        mage_burst_damage_amplification_is_applied_by_source=(
-            mage_burst_damage_amplification_is_applied_by_source
-        ),
-        priest_blessing_of_freedom_is_applied_by_source=(
-            health_effect_aggregation_result.priest_blessing_of_freedom_is_applied_by_source
+    )
+
+    # Every team clock advances independently, including an empty due wave.
+    next_team_respawn_wave_countdowns = jnp.where(
+        current_state.team_respawn_wave_countdowns == 0,
+        config.team_respawn_wave_period_step_count - 1,
+        current_state.team_respawn_wave_countdowns - 1,
+    )
+
+    (
+        next_alive_mask,
+        next_health_bars,
+        next_spawn_shield_durations,
+        next_agent_positions,
+    ) = cast(
+        tuple[Array, Array, Array, Array],
+        jax.lax.cond(
+            jnp.any(
+                respawn_facts.respawn_wave_occurred_this_transition_by_team, axis=-1
+            ),
+            _handle_end_of_transition_respawn_wave_event,
+            _return_original_next_state_items,
+            config,
+            respawn_facts.was_respawned_this_transition_by_agent,
+            next_alive_mask,
+            next_health_after_out_of_combat_regeneration,
+            next_spawn_shield_durations,
+            next_agent_positions,
         ),
     )
 
@@ -2405,13 +3102,17 @@ def step(
         step_count=current_state.step_count + 1,
         agent_positions=next_agent_positions,
         alive_mask=next_alive_mask,
-        current_health=next_health_after_effective_damage_and_healing,
+        current_health=next_health_bars,
+        # NOTE: Ultimate CD carries over into death to prevent abuse.
         ultimate_cooldowns=next_ultimate_cooldowns,
         slow_durations=next_slow_durations,
         stun_durations=next_stun_durations,
         rogue_poison_anti_heal_durations=next_rogue_anti_heal_durations,
         mage_burst_damage_amplification_durations=next_mage_burst_durations,
         priest_blessing_of_freedom_slow_floor_durations=next_priest_freedom_slow_floor_durations,
+        team_respawn_wave_countdowns=next_team_respawn_wave_countdowns,
+        spawn_shield_durations=next_spawn_shield_durations,
+        steps_until_out_of_combat=next_steps_until_ooc,
         previous_timestep_move_actions=accepted_joint_action.move,
         previous_timestep_select_target_actions=accepted_joint_action.select_target,
         previous_timestep_use_ultimate_actions=accepted_joint_action.use_ultimate,
@@ -2429,12 +3130,23 @@ def step(
         truncated=jnp.array(next_state.step_count >= config.max_steps),
     )
 
+    spawn_shield_facts = SpawnShieldTransitionFacts(
+        was_active_at_transition_start_by_agent=current_state.spawn_shield_durations
+        > 0,
+        expired_at_transition_end_by_agent=jnp.logical_and(
+            current_state.spawn_shield_durations == 1, next_alive_mask
+        ),
+    )
+
     transition_facts = TransitionFacts(
         has_transition=jnp.asarray(True),
-        choosing_step_count=current_state.step_count,
+        transition_start_step_count=current_state.step_count,
         action_acceptance_facts=action_acceptance_facts,
         combat_transition_facts=combat_transition_facts,
         death_facts=death_facts,
+        spawn_shield_facts=spawn_shield_facts,
+        respawn_facts=respawn_facts,
+        regeneration_facts=regeneration_facts,
     )
 
     info = Info(

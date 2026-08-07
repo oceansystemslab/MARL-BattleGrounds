@@ -1,4 +1,4 @@
-"""Authoritative action, combat, and death transition-fact proofs for Milestone 6."""
+"""Authoritative fixed-shape transition facts for Milestone 6."""
 # pyright: reportPrivateUsage=false
 
 from typing import cast
@@ -50,7 +50,10 @@ from marl_battlegrounds.core.types import (
     EnvState,
     Info,
     Observation,
+    RegenerationTransitionFacts,
+    RespawnTransitionFacts,
     Reward,
+    SpawnShieldTransitionFacts,
     TransitionFacts,
 )
 
@@ -59,8 +62,8 @@ _TEAM_B_FIRST_SLOT = MAX_AGENTS_PER_TEAM
 _TARGET_NONE = 0
 _SELF_TARGET = 1
 _FIRST_ENEMY_TARGET = 1 + MAX_AGENTS_PER_TEAM
-_TRANSITION_FACT_LEAF_COUNT = 31
-_TRANSITION_FACT_RAW_BYTES = 815
+_TRANSITION_FACT_LEAF_COUNT = 37
+_TRANSITION_FACT_RAW_BYTES = 897
 
 
 def _empty_obstacles() -> Array:
@@ -126,8 +129,13 @@ def _scenario(
         map_height=12.0,
         obstacles=_empty_obstacles(),
         agent_profile=profile,
-        initial_agent_positions=initial_positions,
         ordinary_movement_distance_scale=1.0,
+        team_spawn_pad_positions=initial_positions.reshape(
+            (2, MAX_AGENTS_PER_TEAM, ENVIRONMENT_DIMENSIONS)
+        ),
+        spawn_shield_duration_steps=3,
+        spawn_shield_movement_speed=2.0,
+        team_respawn_wave_period_step_count=jnp.asarray((5, 5), dtype=jnp.int32),
     )
     state, _, action_mask, _ = reset(config, jax.random.key(1))
     return config, state, action_mask
@@ -250,6 +258,33 @@ def _assert_canonical_empty_death_facts(facts: DeathTransitionFacts) -> None:
     assert bool(jnp.all(facts.attributed_death_damage_by_source == 0.0))
 
 
+def _assert_canonical_empty_spawn_shield_facts(
+    facts: SpawnShieldTransitionFacts,
+) -> None:
+    """Assert canonical shape, dtype, and neutrality for spawn-shield facts."""
+    for vector in (
+        facts.was_active_at_transition_start_by_agent,
+        facts.expired_at_transition_end_by_agent,
+    ):
+        assert vector.shape == (MAX_AGENT_SLOTS,)
+        assert vector.dtype == jnp.bool_
+        assert not bool(jnp.any(vector))
+
+
+def _assert_canonical_empty_regeneration_facts(
+    facts: RegenerationTransitionFacts,
+) -> None:
+    """Assert canonical shape, dtype, and neutrality for regeneration facts."""
+    assert facts.combat_countdown_was_reset_by_agent.shape == (MAX_AGENT_SLOTS,)
+    assert facts.combat_countdown_was_reset_by_agent.dtype == jnp.bool_
+    assert not bool(jnp.any(facts.combat_countdown_was_reset_by_agent))
+    assert facts.actual_health_regenerated_this_step_by_agent.shape == (
+        MAX_AGENT_SLOTS,
+    )
+    assert facts.actual_health_regenerated_this_step_by_agent.dtype == jnp.float32
+    assert bool(jnp.all(facts.actual_health_regenerated_this_step_by_agent == 0.0))
+
+
 def test_reset_and_real_neutral_step_share_the_exact_static_fact_schema() -> None:
     """Prove canonical reset facts, real-step identity, and the payload budget."""
     config, state, action_mask = _scenario(
@@ -290,21 +325,36 @@ def test_reset_and_real_neutral_step_share_the_exact_static_fact_schema() -> Non
         "contributed_to_new_death_by_source",
         "attributed_death_damage_by_source",
     )
+    assert SpawnShieldTransitionFacts._fields == (
+        "was_active_at_transition_start_by_agent",
+        "expired_at_transition_end_by_agent",
+    )
+    assert RespawnTransitionFacts._fields == (
+        "respawn_wave_occurred_this_transition_by_team",
+        "was_respawned_this_transition_by_agent",
+    )
+    assert RegenerationTransitionFacts._fields == (
+        "combat_countdown_was_reset_by_agent",
+        "actual_health_regenerated_this_step_by_agent",
+    )
     assert TransitionFacts._fields == (
         "has_transition",
-        "choosing_step_count",
+        "transition_start_step_count",
         "action_acceptance_facts",
         "combat_transition_facts",
         "death_facts",
+        "spawn_shield_facts",
+        "respawn_facts",
+        "regeneration_facts",
     )
     assert Info._fields == ("transition_facts",)
 
     assert reset_facts.has_transition.shape == ()
     assert reset_facts.has_transition.dtype == jnp.bool_
     assert not bool(reset_facts.has_transition)
-    assert reset_facts.choosing_step_count.shape == ()
-    assert reset_facts.choosing_step_count.dtype == jnp.int32
-    assert int(reset_facts.choosing_step_count) == -1
+    assert reset_facts.transition_start_step_count.shape == ()
+    assert reset_facts.transition_start_step_count.dtype == jnp.int32
+    assert int(reset_facts.transition_start_step_count) == -1
 
     acceptance = reset_facts.action_acceptance_facts
     for action in (acceptance.submitted_joint_action, acceptance.accepted_joint_action):
@@ -322,6 +372,8 @@ def test_reset_and_real_neutral_step_share_the_exact_static_fact_schema() -> Non
         assert not bool(jnp.any(rejected))
     _assert_canonical_empty_combat_facts(reset_facts.combat_transition_facts)
     _assert_canonical_empty_death_facts(reset_facts.death_facts)
+    _assert_canonical_empty_spawn_shield_facts(reset_facts.spawn_shield_facts)
+    _assert_canonical_empty_regeneration_facts(reset_facts.regeneration_facts)
 
     leaves = jax.tree_util.tree_leaves(reset_facts)
     assert len(leaves) == _TRANSITION_FACT_LEAF_COUNT
@@ -340,9 +392,165 @@ def test_reset_and_real_neutral_step_share_the_exact_static_fact_schema() -> Non
         reset_facts
     )
     assert bool(neutral_facts.has_transition)
-    assert int(neutral_facts.choosing_step_count) == 0
+    assert int(neutral_facts.transition_start_step_count) == 0
     _assert_canonical_empty_combat_facts(neutral_facts.combat_transition_facts)
     _assert_canonical_empty_death_facts(neutral_facts.death_facts)
+    _assert_canonical_empty_spawn_shield_facts(neutral_facts.spawn_shield_facts)
+    _assert_canonical_empty_regeneration_facts(neutral_facts.regeneration_facts)
+
+
+@pytest.mark.parametrize(
+    ("starting_duration", "expected_next_duration", "expected_expiry"),
+    (
+        pytest.param(1, 0, True, id="surviving-final-shielded-transition"),
+        pytest.param(3, 2, False, id="shield-remains-active"),
+    ),
+)
+def test_spawn_shield_facts_distinguish_activity_from_surviving_expiry(
+    starting_duration: int,
+    expected_next_duration: int,
+    expected_expiry: bool,
+) -> None:
+    """Report transition-start shielding and only a surviving countdown expiry."""
+    config, state, _ = _scenario(
+        (_TEAM_A_FIRST_SLOT, HUNTER_CLASS_ID),
+        (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
+    )
+    state = state._replace(
+        spawn_shield_durations=state.spawn_shield_durations.at[_TEAM_A_FIRST_SLOT].set(
+            starting_duration
+        )
+    )
+    action_mask = _build_observation_and_action_mask(state, config)[1]
+
+    next_state, *_, info = _take_step(
+        config,
+        state,
+        action_mask,
+        _joint_action(),
+    )
+    facts = info.transition_facts.spawn_shield_facts
+
+    assert bool(
+        jnp.array_equal(
+            facts.was_active_at_transition_start_by_agent,
+            _single_source_mask(_TEAM_A_FIRST_SLOT),
+        )
+    )
+    expected_expiry_mask = (
+        _single_source_mask(_TEAM_A_FIRST_SLOT)
+        if expected_expiry
+        else jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.bool_)
+    )
+    assert bool(
+        jnp.array_equal(
+            facts.expired_at_transition_end_by_agent,
+            expected_expiry_mask,
+        )
+    )
+    assert (
+        int(next_state.spawn_shield_durations[_TEAM_A_FIRST_SLOT])
+        == expected_next_duration
+    )
+    assert bool(next_state.alive_mask[_TEAM_A_FIRST_SLOT])
+
+
+def test_expiring_spawn_shield_rejects_current_target_then_reenables_next_mask() -> (
+    None
+):
+    """Keep a counter-one recipient protected until the next policy action."""
+    config, state, _ = _scenario(
+        (_TEAM_A_FIRST_SLOT, HUNTER_CLASS_ID),
+        (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
+    )
+    shielded_recipient_slot = _TEAM_B_FIRST_SLOT
+    state = state._replace(
+        current_health=state.current_health.at[shielded_recipient_slot].set(1.0),
+        spawn_shield_durations=state.spawn_shield_durations.at[
+            shielded_recipient_slot
+        ].set(1),
+    )
+    current_action_mask = _build_observation_and_action_mask(state, config)[1]
+
+    next_state, _, _, _, next_action_mask, info = _take_step(
+        config,
+        state,
+        current_action_mask,
+        _joint_action(
+            (
+                _TEAM_A_FIRST_SLOT,
+                MOVE_STAY,
+                _FIRST_ENEMY_TARGET,
+                0,
+            )
+        ),
+    )
+    shield_facts = info.transition_facts.spawn_shield_facts
+    acceptance_facts = info.transition_facts.action_acceptance_facts
+
+    assert bool(
+        shield_facts.was_active_at_transition_start_by_agent[shielded_recipient_slot]
+    )
+    assert bool(
+        acceptance_facts.in_domain_combat_action_pair_is_rejected_by_actor[
+            _TEAM_A_FIRST_SLOT
+        ]
+    )
+    assert (
+        int(acceptance_facts.accepted_joint_action.select_target[_TEAM_A_FIRST_SLOT])
+        == _TARGET_NONE
+    )
+    _assert_canonical_empty_combat_facts(info.transition_facts.combat_transition_facts)
+    _assert_canonical_empty_death_facts(info.transition_facts.death_facts)
+    assert bool(
+        shield_facts.expired_at_transition_end_by_agent[shielded_recipient_slot]
+    )
+    assert bool(next_state.alive_mask[shielded_recipient_slot])
+    regeneration_facts = info.transition_facts.regeneration_facts
+    assert (
+        regeneration_facts.actual_health_regenerated_this_step_by_agent[
+            shielded_recipient_slot
+        ]
+        == 4.0
+    )
+    assert next_state.current_health[shielded_recipient_slot] == 5.0
+    assert int(next_state.spawn_shield_durations[shielded_recipient_slot]) == 0
+    assert bool(
+        next_action_mask.select_target_use_ultimate_joint_mask[
+            _TEAM_A_FIRST_SLOT,
+            _FIRST_ENEMY_TARGET,
+            0,
+        ]
+    )
+
+    final_state, *_, final_info = _take_step(
+        config,
+        next_state,
+        next_action_mask,
+        _joint_action(
+            (
+                _TEAM_A_FIRST_SLOT,
+                MOVE_STAY,
+                _FIRST_ENEMY_TARGET,
+                0,
+            )
+        ),
+    )
+    final_acceptance = final_info.transition_facts.action_acceptance_facts
+    final_combat = final_info.transition_facts.combat_transition_facts
+
+    assert not bool(
+        final_acceptance.in_domain_combat_action_pair_is_rejected_by_actor[
+            _TEAM_A_FIRST_SLOT
+        ]
+    )
+    assert (
+        int(final_acceptance.accepted_joint_action.select_target[_TEAM_A_FIRST_SLOT])
+        == _FIRST_ENEMY_TARGET
+    )
+    assert bool(final_combat.basic_effect_is_activated_by_source[_TEAM_A_FIRST_SLOT])
+    assert bool(final_combat.combat_effect_has_recipient_by_source[_TEAM_A_FIRST_SLOT])
+    assert final_state.current_health[shielded_recipient_slot] < 1.0
 
 
 @pytest.mark.parametrize(
@@ -833,11 +1041,15 @@ def test_every_class_basic_emits_its_authoritative_effect_lane(
         )
     )
     assert facts.total_effective_healing_by_recipient[recipient_slot] == raw_healing
+    regeneration_facts = info.transition_facts.regeneration_facts
+    actual_regeneration = (
+        regeneration_facts.actual_health_regenerated_this_step_by_agent[recipient_slot]
+    )
     assert bool(
         jnp.isclose(
             next_state.current_health[recipient_slot]
             - state.current_health[recipient_slot],
-            raw_healing - expected_source_damage,
+            raw_healing - expected_source_damage + actual_regeneration,
         )
     )
 
@@ -1195,10 +1407,23 @@ def test_anti_heal_reconciles_source_healing_to_authoritative_recipient_total() 
             expected_total,
         )
     )
+    expected_regeneration = (
+        config.agent_profile.max_health[2]
+        * config.agent_profile.out_of_combat_health_regen_fraction_per_step[2]
+        * combat.ROGUE_POISON_ANTI_HEAL_MULTIPLIER
+    )
+    assert bool(
+        jnp.isclose(
+            info.transition_facts.regeneration_facts.actual_health_regenerated_this_step_by_agent[
+                2
+            ],
+            expected_regeneration,
+        )
+    )
     assert bool(
         jnp.isclose(
             next_state.current_health[2] - state.current_health[2],
-            expected_total,
+            expected_total + expected_regeneration,
         )
     )
 
@@ -1312,7 +1537,7 @@ def test_simultaneous_damage_and_healing_remain_separate_gross_totals() -> None:
 
 
 def test_transition_facts_compose_under_eager_jit_vmap_and_scan() -> None:
-    """Prove the nested fact PyTree remains static across JAX execution modes."""
+    """Prove public transition PyTrees remain static across JAX execution modes."""
     config, state, action_mask = _scenario(
         (0, HUNTER_CLASS_ID),
         (5, HUNTER_CLASS_ID),
@@ -1339,20 +1564,35 @@ def test_transition_facts_compose_under_eager_jit_vmap_and_scan() -> None:
         basic_action,
     )
 
-    def consume_facts(action: Action) -> TransitionFacts:
-        """Return facts only, as a host decoder or rollout tap would."""
-        return step(
+    def consume_public_transition(
+        action: Action,
+    ) -> tuple[Observation, ActionMask, TransitionFacts]:
+        """Return policy outputs and facts from one shared-config transition."""
+        _, observation, _, _, next_mask, info = step(
             config,
             state,
             action_mask,
             action,
             jax.random.key(4),
-        )[-1].transition_facts
+        )
+        return observation, next_mask, info.transition_facts
 
-    batched_facts = jax.vmap(consume_facts)(batched_actions)
+    batched_observations, batched_masks, batched_facts = jax.vmap(
+        consume_public_transition
+    )(batched_actions)
+    assert (
+        batched_observations.spawn_lifecycle.spawn_shield_actual_durations_by_agent_by_team.shape
+        == (2, MAX_AGENT_SLOTS, 2, MAX_AGENTS_PER_TEAM)
+    )
+    assert batched_masks.select_target_use_ultimate_joint_mask.shape == (
+        2,
+        MAX_AGENT_SLOTS,
+        NUM_TARGET_ACTIONS,
+        NUM_ULTIMATE_ACTIONS,
+    )
     assert batched_facts.has_transition.shape == (2,)
     assert bool(jnp.all(batched_facts.has_transition))
-    assert bool(jnp.all(batched_facts.choosing_step_count == 0))
+    assert bool(jnp.all(batched_facts.transition_start_step_count == 0))
     assert bool(
         jnp.array_equal(
             batched_facts.combat_transition_facts.basic_effect_is_activated_by_source[
@@ -1361,6 +1601,19 @@ def test_transition_facts_compose_under_eager_jit_vmap_and_scan() -> None:
             jnp.asarray((False, True), dtype=jnp.bool_),
         )
     )
+    batched_shield_facts = batched_facts.spawn_shield_facts
+    assert batched_shield_facts.was_active_at_transition_start_by_agent.shape == (
+        2,
+        MAX_AGENT_SLOTS,
+    )
+    assert batched_shield_facts.expired_at_transition_end_by_agent.shape == (
+        2,
+        MAX_AGENT_SLOTS,
+    )
+    assert not bool(
+        jnp.any(batched_shield_facts.was_active_at_transition_start_by_agent)
+    )
+    assert not bool(jnp.any(batched_shield_facts.expired_at_transition_end_by_agent))
 
     def repeat_action_head(head: Array) -> Array:
         """Repeat one fixed-slot action head along the scan time axis."""
@@ -1372,34 +1625,64 @@ def test_transition_facts_compose_under_eager_jit_vmap_and_scan() -> None:
     def scan_body(
         carry: tuple[EnvState, ActionMask],
         inputs: tuple[Action, Array],
-    ) -> tuple[tuple[EnvState, ActionMask], TransitionFacts]:
-        """Carry only state/mask and stack facts as explicit scan output."""
+    ) -> tuple[
+        tuple[EnvState, ActionMask],
+        tuple[Observation, ActionMask, TransitionFacts],
+    ]:
+        """Carry state/mask and stack every public transition structure."""
         current_state, current_mask = carry
         action, key = inputs
-        next_state, _, _, _, next_mask, info = step(
+        next_state, observation, _, _, next_mask, info = step(
             config,
             current_state,
             current_mask,
             action,
             key,
         )
-        return (next_state, next_mask), info.transition_facts
+        return (next_state, next_mask), (
+            observation,
+            next_mask,
+            info.transition_facts,
+        )
 
-    (_, _), scanned_facts = jax.lax.scan(
+    (_, _), (scanned_observations, scanned_masks, scanned_facts) = jax.lax.scan(
         scan_body,
         (state, action_mask),
         (scan_actions, scan_keys),
     )
+    assert (
+        scanned_observations.spawn_lifecycle.spawn_shield_actual_durations_by_agent_by_team.shape
+        == (3, MAX_AGENT_SLOTS, 2, MAX_AGENTS_PER_TEAM)
+    )
+    assert scanned_masks.select_target_use_ultimate_joint_mask.shape == (
+        3,
+        MAX_AGENT_SLOTS,
+        NUM_TARGET_ACTIONS,
+        NUM_ULTIMATE_ACTIONS,
+    )
     assert bool(jnp.all(scanned_facts.has_transition))
     assert bool(
         jnp.array_equal(
-            scanned_facts.choosing_step_count,
+            scanned_facts.transition_start_step_count,
             jnp.asarray((0, 1, 2), dtype=jnp.int32),
         )
     )
     assert len(jax.tree_util.tree_leaves(scanned_facts)) == (
         _TRANSITION_FACT_LEAF_COUNT
     )
+    scanned_shield_facts = scanned_facts.spawn_shield_facts
+    assert scanned_shield_facts.was_active_at_transition_start_by_agent.shape == (
+        3,
+        MAX_AGENT_SLOTS,
+    )
+    assert scanned_shield_facts.expired_at_transition_end_by_agent.shape == (
+        3,
+        MAX_AGENT_SLOTS,
+    )
+    assert not bool(
+        jnp.any(scanned_shield_facts.was_active_at_transition_start_by_agent)
+    )
+    assert not bool(jnp.any(scanned_shield_facts.expired_at_transition_end_by_agent))
 
     def discard_fact_rollout(
         initial_state: EnvState,

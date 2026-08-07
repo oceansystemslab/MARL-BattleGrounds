@@ -184,7 +184,7 @@ ULTIMATE_DAMAGE_BY_CLASS = jnp.asarray(
         0.0,  # neutral
         0.0,  # mage
         20.0,  # warrior
-        0.0,  # hunter
+        10.0,  # hunter
         36.0,  # rogue
         0.0,  # priest
     ],
@@ -226,6 +226,32 @@ ULTIMATE_TARGET_MODE_BY_CLASS = jnp.asarray(
         ONLY_ALLY_TARGET_ULTIMATE_MODE,  # priest
     ],
     dtype=jnp.int32,
+)
+
+OUT_OF_COMBAT_DELAY_STEPS_BY_CLASS = jnp.asarray(
+    [
+        0,  # neutral
+        5,  # mage
+        5,  # warrior
+        5,  # hunter
+        3,  # rogue
+        5,  # priest
+    ],
+    dtype=jnp.int32,
+)
+
+# These remain independent tuning surfaces even though every active class
+# currently shares the same regeneration rate.
+OUT_OF_COMBAT_HEALTH_REGENERATION_FRACTION_PER_STEP_BY_CLASS = jnp.asarray(
+    [
+        0.0,  # neutral
+        0.04,  # mage
+        0.04,  # warrior
+        0.04,  # hunter
+        0.04,  # rogue
+        0.04,  # priest
+    ],
+    dtype=jnp.float32,
 )
 
 
@@ -290,6 +316,18 @@ def get_ultimate_damage_by_class_ids(class_ids: int | Array) -> Array:
 def get_ultimate_healing_by_class_ids(class_ids: int | Array) -> Array:
     """Return ultimate healing values for one or more class IDs."""
     return ULTIMATE_HEALING_BY_CLASS[class_ids]
+
+
+def get_ooc_delay_steps_by_class_ids(class_ids: int | Array) -> Array:
+    """Return out-of-combat countdown reset values for one or more class IDs."""
+    return OUT_OF_COMBAT_DELAY_STEPS_BY_CLASS[class_ids]
+
+
+def get_ooc_health_regen_fraction_per_step_by_class_ids(
+    class_ids: int | Array,
+) -> Array:
+    """Return maximum-health regeneration fractions for one or more class IDs."""
+    return OUT_OF_COMBAT_HEALTH_REGENERATION_FRACTION_PER_STEP_BY_CLASS[class_ids]
 
 
 def _build_slow_multipliers(slow_durations: Array) -> Array:
@@ -365,7 +403,9 @@ def derive_effective_movement_speeds(
     slow_durations: Array,
     priest_freedom_slow_floor_durations: Array,
     stun_durations: Array,
+    spawn_shield_durations: Array,
     base_movement_speeds: Array,
+    spawn_shield_movement_speed: Array | float,
     active_and_alive_mask: Array,
     ordinary_movement_distance_scale: float,
 ) -> Array:
@@ -373,10 +413,13 @@ def derive_effective_movement_speeds(
 
     Slow sources compose multiplicatively before the global and Blessing of
     Freedom floors apply. The episode's ordinary-movement distance scale then
-    converts catalog speed into per-decision voluntary displacement. Inactive,
-    dead, or currently stunned actors expose exactly zero effective speed. The
-    returned ``float32`` vector has shape ``(MAX_AGENT_SLOTS,)`` and is shared
-    by movement actuation and the policy-facing observation contract.
+    converts catalog speed into per-step voluntary displacement. A positive
+    spawn-shield counter instead selects the configured absolute shield speed,
+    bypassing ordinary class, status, and distance-scale adjustments. Inactive
+    and dead actors expose exactly zero effective speed; unshielded stunned
+    actors also expose zero. The returned ``float32`` vector has shape
+    ``(MAX_AGENT_SLOTS,)`` and is shared by movement actuation and the
+    policy-facing observation contract.
     """
     effective_movement_multipliers = jnp.maximum(
         jnp.prod(_build_slow_multipliers(slow_durations), axis=-1),
@@ -385,19 +428,28 @@ def derive_effective_movement_speeds(
         ),
     )
 
-    active_alive_not_stunned_mask = jnp.logical_and(
-        active_and_alive_mask,
-        jnp.all(stun_durations == 0, axis=-1),
-    )
-
     adjusted_movement_speeds = (
         base_movement_speeds
         * jnp.maximum(effective_movement_multipliers, GLOBAL_SLOW_FLOOR)
         * ordinary_movement_distance_scale
     )
 
-    return jnp.where(
-        active_alive_not_stunned_mask,
+    stun_adjusted_movement_speeds = jnp.where(
+        jnp.all(stun_durations == 0, axis=-1),
         adjusted_movement_speeds,
         jnp.zeros_like(adjusted_movement_speeds),
     ).astype(jnp.float32)
+
+    spawn_shield_adjusted_movement_speeds = jnp.where(
+        spawn_shield_durations > 0,
+        spawn_shield_movement_speed,
+        stun_adjusted_movement_speeds,
+    ).astype(jnp.float32)
+
+    # Derive from the sole stored counter so movement and visible effective
+    # speed cannot disagree about whether the shield override is active.
+    return jnp.where(
+        active_and_alive_mask,
+        spawn_shield_adjusted_movement_speeds,
+        jnp.zeros_like(spawn_shield_adjusted_movement_speeds),
+    )

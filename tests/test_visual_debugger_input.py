@@ -41,6 +41,7 @@ from marl_battlegrounds.core.types import (
     MOVE_WEST,
     DoneFlags,
     EnvConfig,
+    EnvState,
 )
 
 
@@ -567,17 +568,17 @@ def test_entering_pov_clears_hidden_pending_target_without_advancing_epoch() -> 
 
 def test_pov_submit_clears_target_that_leaves_successor_visibility() -> None:
     registered = get_scenario("arena_5v5")
-    build_registered_config = registered.build_config
+    build_registered_scenario = registered.build_scenario
 
-    def build_boundary_config() -> EnvConfig:
-        config = build_registered_config()
-        positions = config.initial_agent_positions.at[5].set(
-            jnp.asarray((8.9, 2.0), dtype=jnp.float32)
+    def build_boundary_scenario() -> tuple[EnvConfig, EnvState]:
+        config, state = build_registered_scenario()
+        positions = state.agent_positions.at[5].set(
+            jnp.asarray((8.9, 1.0), dtype=jnp.float32)
         )
-        return config._replace(initial_agent_positions=positions)
+        return config, state._replace(agent_positions=positions)
 
     session = create_session(
-        replace(registered, build_config=build_boundary_config),
+        replace(registered, build_scenario=build_boundary_scenario),
         seed=0,
         controlled_global_slot=0,
         show_ranges=True,

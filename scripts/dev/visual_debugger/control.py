@@ -7,8 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
-from marl_battlegrounds.core.config import validate_env_config
-from marl_battlegrounds.core.env import reset, step
+from marl_battlegrounds.core.env import initialize_scenario_state, step
 from marl_battlegrounds.core.types import (
     MAGE_CLASS_ID,
     MAX_AGENT_SLOTS,
@@ -239,7 +238,8 @@ def _fresh_snapshot(
     *,
     movement_scale: float | None = None,
 ) -> tuple[float, EnvConfig, Array, EnvState, Observation, ActionMask, Info]:
-    authored_config = scenario.build_config()
+    """Validate and expose an authored scenario without replacing its state."""
+    authored_config, authored_state = scenario.build_scenario()
     scenario_default_movement_scale = authored_config.ordinary_movement_distance_scale
     effective_movement_scale = (
         scenario_default_movement_scale if movement_scale is None else movement_scale
@@ -249,10 +249,12 @@ def _fresh_snapshot(
         config = authored_config._replace(
             ordinary_movement_distance_scale=effective_movement_scale
         )
-        validate_env_config(config)
     master_key = jax.random.key(seed)
-    next_key, reset_key = jax.random.split(master_key)
-    state, observation, action_mask, info = reset(config, reset_key)
+    next_key, _ = jax.random.split(master_key)
+    state, observation, action_mask, info = initialize_scenario_state(
+        authored_state,
+        config,
+    )
     return (
         scenario_default_movement_scale,
         config,
@@ -531,6 +533,7 @@ def submit_joint_action(
     )
     transition = extract_transition_view(
         scenario_name=session.scenario_name,
+        config=session.config,
         submission_kind=submission_kind,
         report_actor_slots=report_actor_slots,
         before_state=session.state,

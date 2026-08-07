@@ -39,6 +39,8 @@ from marl_battlegrounds.core.env import (
 )
 from marl_battlegrounds.core.types import (
     AGENT_FEATURE_CURRENT_HEALTH,
+    AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_AURA_MULTIPLIER,
+    AGENT_FEATURE_DAMAGE_MITIGATION_WARRIOR_AURA_MULTIPLIER,
     AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED,
     AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_DURATION,
     AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_FRACTION,
@@ -156,10 +158,13 @@ def _scenario(
         map_height=12.0,
         obstacles=_empty_obstacles() if obstacles is None else obstacles,
         agent_profile=profile,
-        initial_agent_positions=(
-            _default_positions(team_sizes) if positions is None else positions
-        ),
         ordinary_movement_distance_scale=1.0,
+        team_spawn_pad_positions=(
+            _default_positions(team_sizes) if positions is None else positions
+        ).reshape((2, MAX_AGENTS_PER_TEAM, ENVIRONMENT_DIMENSIONS)),
+        spawn_shield_duration_steps=3,
+        spawn_shield_movement_speed=2.0,
+        team_respawn_wave_period_step_count=jnp.asarray((5, 5), dtype=jnp.int32),
     )
     state = EnvState(
         step_count=jnp.array(0, dtype=jnp.int32),
@@ -178,6 +183,9 @@ def _scenario(
         priest_blessing_of_freedom_slow_floor_durations=jnp.zeros(
             (MAX_AGENT_SLOTS,), dtype=jnp.int32
         ),
+        team_respawn_wave_countdowns=config.team_respawn_wave_period_step_count - 1,
+        spawn_shield_durations=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        steps_until_out_of_combat=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
         previous_timestep_move_actions=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
         previous_timestep_select_target_actions=jnp.zeros(
             (MAX_AGENT_SLOTS,), dtype=jnp.int32
@@ -188,6 +196,17 @@ def _scenario(
         has_previous_timestep_joint_action=jnp.asarray(False),
     )
     return config, state
+
+
+def _with_active_agents_in_combat(config: EnvConfig, state: EnvState) -> EnvState:
+    """Keep combat-effect tests independent from out-of-combat regeneration."""
+    return state._replace(
+        steps_until_out_of_combat=jnp.where(
+            config.agent_profile.active_mask,
+            config.agent_profile.out_of_combat_delay_steps,
+            0,
+        ).astype(jnp.int32)
+    )
 
 
 def _joint_action(
@@ -234,7 +253,12 @@ def _aura_multipliers(config: EnvConfig, state: EnvState) -> tuple[Array, Array]
     distances = _compute_global_pairwise_distances_from_agent_positions(
         state.agent_positions
     )
-    return _derive_aura_damage_multipliers(config, distances, state.alive_mask)
+    return _derive_aura_damage_multipliers(
+        config,
+        distances,
+        state.alive_mask,
+        state.spawn_shield_durations == 0,
+    )
 
 
 def _assert_health_resolution_and_lifecycle(
@@ -273,6 +297,26 @@ def _assert_health_resolution_and_lifecycle(
             expected_mage_burst_durations,
         )
     )
+
+
+def _assert_observer_rows_equal(
+    left: Observation,
+    right: Observation,
+    observer_slot: int,
+) -> None:
+    """Assert equality of every public observation leaf for one observer."""
+    assert jax.tree_util.tree_structure(left) == jax.tree_util.tree_structure(right)
+    for left_leaf, right_leaf in zip(
+        jax.tree_util.tree_leaves(left),
+        jax.tree_util.tree_leaves(right),
+        strict=True,
+    ):
+        assert bool(
+            jnp.array_equal(
+                left_leaf[observer_slot],
+                right_leaf[observer_slot],
+            )
+        )
 
 
 def test_aura_derivation_is_neutral_without_an_emitter() -> None:
@@ -445,14 +489,171 @@ def test_aura_derivation_matches_jit() -> None:
         state.agent_positions
     )
 
-    eager = _derive_aura_damage_multipliers(config, distances, state.alive_mask)
+    interaction_eligible = state.spawn_shield_durations == 0
+    eager = _derive_aura_damage_multipliers(
+        config,
+        distances,
+        state.alive_mask,
+        interaction_eligible,
+    )
     compiled = cast(
         tuple[Array, Array],
-        jax.jit(_derive_aura_damage_multipliers)(config, distances, state.alive_mask),
+        jax.jit(_derive_aura_damage_multipliers)(
+            config,
+            distances,
+            state.alive_mask,
+            interaction_eligible,
+        ),
     )
 
     assert bool(jnp.array_equal(eager[0], compiled[0]))
     assert bool(jnp.array_equal(eager[1], compiled[1]))
+
+
+@pytest.mark.parametrize(
+    ("aura_kind", "excluded_role"),
+    (
+        pytest.param("mage", "emitter", id="mage-emitter"),
+        pytest.param("mage", "beneficiary", id="mage-beneficiary"),
+        pytest.param("warrior", "emitter", id="warrior-emitter"),
+        pytest.param("warrior", "beneficiary", id="warrior-beneficiary"),
+    ),
+)
+def test_spawn_shield_excludes_aura_emitters_and_beneficiaries(
+    aura_kind: str,
+    excluded_role: str,
+) -> None:
+    """Keep shared physical and observed aura truth neutral for shielded roles."""
+    emitter_class_id = MAGE_CLASS_ID if aura_kind == "mage" else WARRIOR_CLASS_ID
+    aura_feature = (
+        AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_AURA_MULTIPLIER
+        if aura_kind == "mage"
+        else AGENT_FEATURE_DAMAGE_MITIGATION_WARRIOR_AURA_MULTIPLIER
+    )
+    active_multiplier = (
+        MAGE_DAMAGE_AURA_MULTIPLIER
+        if aura_kind == "mage"
+        else WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER
+    )
+    config, state = _scenario(
+        (0, emitter_class_id),
+        (1, HUNTER_CLASS_ID),
+        (_TEAM_B_ACTOR, HUNTER_CLASS_ID),
+        team_sizes=(2, 1),
+    )
+    shielded_slot = 0 if excluded_role == "emitter" else 1
+    shielded_state = state._replace(
+        spawn_shield_durations=state.spawn_shield_durations.at[shielded_slot].set(3)
+    )
+
+    positions_to_check = (shielded_state.agent_positions,)
+    if excluded_role == "emitter":
+        positions_to_check += (
+            shielded_state.agent_positions.at[0].set(
+                jnp.asarray((2.0, 7.0), dtype=jnp.float32)
+            ),
+        )
+
+    opponent_observations: list[Observation] = []
+    for positions in positions_to_check:
+        positioned_state = shielded_state._replace(agent_positions=positions)
+        mage_multipliers, warrior_multipliers = _aura_multipliers(
+            config,
+            positioned_state,
+        )
+        selected_multipliers = (
+            mage_multipliers if aura_kind == "mage" else warrior_multipliers
+        )
+        observation, _ = _build_observation_and_action_mask(
+            positioned_state,
+            config,
+        )
+        opponent_observations.append(observation)
+
+        assert selected_multipliers[1] == 1.0
+        assert observation.self_features[1, aura_feature] == 1.0
+        assert bool(observation.ally_visibility_mask[0, 1])
+        assert observation.ally_unit_features[0, 1, aura_feature] == 1.0
+        if excluded_role == "beneficiary":
+            assert selected_multipliers[0] == active_multiplier
+            continue
+
+        if aura_kind == "mage":
+            action = _joint_action(
+                (1, MOVE_STAY, _FIRST_ENEMY_TARGET, 0),
+            )
+            expected_recipient = _TEAM_B_ACTOR
+        else:
+            action = _joint_action(
+                (
+                    _TEAM_B_ACTOR,
+                    MOVE_STAY,
+                    _FIRST_ENEMY_TARGET + 1,
+                    0,
+                ),
+            )
+            expected_recipient = 1
+
+        next_state, _, _ = _step(config, positioned_state, action)
+        assert next_state.current_health[expected_recipient] == (
+            positioned_state.current_health[expected_recipient]
+            - BASIC_DAMAGE_BY_CLASS[HUNTER_CLASS_ID]
+        )
+
+    if excluded_role == "emitter":
+        _assert_observer_rows_equal(
+            opponent_observations[0],
+            opponent_observations[1],
+            _TEAM_B_ACTOR,
+        )
+
+
+def test_expiring_spawn_shield_restores_aura_for_the_next_action() -> None:
+    """Resume ordinary aura observation and effects only after shield expiry."""
+    config, state = _scenario(
+        (0, MAGE_CLASS_ID),
+        (1, HUNTER_CLASS_ID),
+        (_TEAM_B_ACTOR, HUNTER_CLASS_ID),
+        team_sizes=(2, 1),
+    )
+    expiring_state = state._replace(
+        spawn_shield_durations=state.spawn_shield_durations.at[0].set(1)
+    )
+    attack = _joint_action((1, MOVE_STAY, _FIRST_ENEMY_TARGET, 0))
+
+    next_state, next_observation, next_action_mask = _step(
+        config,
+        expiring_state,
+        attack,
+    )
+
+    assert next_state.current_health[_TEAM_B_ACTOR] == (
+        expiring_state.current_health[_TEAM_B_ACTOR]
+        - BASIC_DAMAGE_BY_CLASS[HUNTER_CLASS_ID]
+    )
+    assert next_state.spawn_shield_durations[0] == 0
+    assert (
+        next_observation.ally_unit_features[
+            1,
+            0,
+            AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_AURA_MULTIPLIER,
+        ]
+        == MAGE_DAMAGE_AURA_MULTIPLIER
+    )
+    assert bool(
+        next_action_mask.select_target_use_ultimate_joint_mask[
+            1,
+            _FIRST_ENEMY_TARGET,
+            0,
+        ]
+    )
+
+    final_state, _, _ = _step(config, next_state, attack)
+
+    assert final_state.current_health[_TEAM_B_ACTOR] == (
+        next_state.current_health[_TEAM_B_ACTOR]
+        - BASIC_DAMAGE_BY_CLASS[HUNTER_CLASS_ID] * MAGE_DAMAGE_AURA_MULTIPLIER
+    )
 
 
 def test_mage_aura_amplifies_allied_damage_but_not_healing() -> None:
@@ -465,6 +666,7 @@ def test_mage_aura_amplifies_allied_damage_but_not_healing() -> None:
         team_sizes=(3, 1),
     )
     state = state._replace(current_health=state.current_health.at[2].add(-20.0))
+    state = _with_active_agents_in_combat(config, state)
     action = _joint_action(
         (1, MOVE_STAY, _FIRST_ENEMY_TARGET, 0),
         (2, MOVE_STAY, 3, 0),
@@ -1283,6 +1485,7 @@ def test_priest_basic_heals_self_and_allies(
     state = state._replace(
         current_health=state.current_health.at[recipient_slot].add(-20.0)
     )
+    state = _with_active_agents_in_combat(config, state)
 
     next_state, _, _ = _step(
         config,
@@ -1330,6 +1533,7 @@ def test_relation_local_targets_route_to_stable_global_slots(
     class_rows[actor_slot] = (actor_slot, actor_class_id)
     config, state = _scenario(*class_rows, team_sizes=(5, 5))
     state = state._replace(current_health=state.current_health - 20.0)
+    state = _with_active_agents_in_combat(config, state)
 
     next_state, _, _ = _step(
         config,
@@ -1388,6 +1592,7 @@ def test_duplicate_priest_healing_aggregates_on_one_recipient() -> None:
         team_sizes=(3, 1),
     )
     state = state._replace(current_health=state.current_health.at[2].add(-30.0))
+    state = _with_active_agents_in_combat(config, state)
     action = _joint_action(
         (0, MOVE_STAY, 3, 0),
         (1, MOVE_STAY, 3, 0),

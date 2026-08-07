@@ -980,9 +980,10 @@ test("mirrored Hunter Trap keeps delivery separate from durable control", async 
     scenario: "mirrored_ultimates",
     transition: 3,
     roster: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-    eventCount: 10,
+    eventCount: 12,
     eventKinds: {
       accepted_activation: 2,
+      net_health: 2,
       status_lifecycle: 8,
     },
     activations: [
@@ -990,7 +991,7 @@ test("mirrored Hunter Trap keeps delivery separate from durable control", async 
       { tokenId: "hunter_trap", source: 7, target: 2 },
     ],
     routeCount: 2,
-    netCount: 0,
+    netCount: 2,
   });
   await expect(page.locator(".combat-trap__lattice")).toHaveCount(2);
   await expectRosterStatuses(page, 2, statuses([["stun_hunter_trap", 4]]));
@@ -1001,7 +1002,7 @@ test("mirrored Hunter Trap keeps delivery separate from durable control", async 
     "mirrored-ultimates-hunter-trap-t3-mid-impact-1440x900.png",
     {
       commandPosts,
-      expectedTransientCount: 0,
+      expectedTransientCount: 2,
       logicalMs: MID_IMPACT_MS,
     },
   );
@@ -1155,9 +1156,10 @@ test("Trap lifecycle t1 proves four exact applications", async ({ page }) => {
     scenario: "trap_lifecycle",
     transition: 1,
     roster: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-    eventCount: 8,
+    eventCount: 12,
     eventKinds: {
       accepted_activation: 4,
+      net_health: 4,
       status_lifecycle: 4,
     },
     activations: [
@@ -1167,7 +1169,7 @@ test("Trap lifecycle t1 proves four exact applications", async ({ page }) => {
       { tokenId: "hunter_trap", source: 3, target: 8 },
     ],
     routeCount: 4,
-    netCount: 0,
+    netCount: 4,
   });
   const lifecycle = [5, 6, 7, 8].map((recipient) => ({
     after: 4,
@@ -1194,7 +1196,7 @@ test("Trap lifecycle t1 proves four exact applications", async ({ page }) => {
 
   await captureBaseline(page, "trap-lifecycle-t1-applied-1440x900.png", {
     commandPosts,
-    expectedTransientCount: 0,
+    expectedTransientCount: 4,
     logicalMs: MID_IMPACT_MS,
   });
 });
@@ -1285,14 +1287,15 @@ test("Trap lifecycle t4 proves exact refresh and durable successor values", asyn
     scenario: "trap_lifecycle",
     transition: 4,
     roster: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-    eventCount: 4,
+    eventCount: 5,
     eventKinds: {
       accepted_activation: 1,
+      net_health: 1,
       status_lifecycle: 3,
     },
     activations: [{ tokenId: "hunter_trap", source: 4, target: 6 }],
     routeCount: 1,
-    netCount: 0,
+    netCount: 1,
   });
   await expectRenderedLifecycle(page, [
     {
@@ -1327,7 +1330,7 @@ test("Trap lifecycle t4 proves exact refresh and durable successor values", asyn
 
   await captureBaseline(page, "trap-lifecycle-t4-refreshed-1440x900.png", {
     commandPosts,
-    expectedTransientCount: 0,
+    expectedTransientCount: 1,
     logicalMs: MID_IMPACT_MS,
   });
 });

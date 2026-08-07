@@ -27,7 +27,9 @@ from marl_battlegrounds.core.types import (
     MOVE_STAY,
     NEUTRAL_CLASS_ID,
     NO_TEAM_ID,
+    NUM_MOVE_ACTIONS,
     NUM_TARGET_ACTIONS,
+    NUM_ULTIMATE_ACTIONS,
     OBSTACLE_FEATURES,
     PRIEST_CLASS_ID,
     ROGUE_CLASS_ID,
@@ -106,8 +108,13 @@ def _target_scenario(actor_class_id: int = MAGE_CLASS_ID) -> tuple[EnvConfig, En
         map_height=12.0,
         obstacles=jnp.zeros((MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES), dtype=jnp.float32),
         agent_profile=profile,
-        initial_agent_positions=positions,
         ordinary_movement_distance_scale=1.0,
+        team_spawn_pad_positions=positions.reshape(
+            (2, MAX_AGENTS_PER_TEAM, ENVIRONMENT_DIMENSIONS)
+        ),
+        spawn_shield_duration_steps=3,
+        spawn_shield_movement_speed=2.0,
+        team_respawn_wave_period_step_count=jnp.asarray((5, 5), dtype=jnp.int32),
     )
     state, *_ = reset(config, jax.random.key(1))
     return config, state
@@ -171,6 +178,114 @@ def _basic_relation_masks(action_mask: ActionMask) -> tuple[Array, Array]:
         basic_lane[:, _ALLY_TARGET_START : _ALLY_TARGET_START + MAX_AGENTS_PER_TEAM],
         basic_lane[:, _ENEMY_TARGET_START:],
     )
+
+
+@pytest.mark.parametrize(
+    "shielded_source_slot",
+    (
+        pytest.param(_ACTOR_SLOT, id="team-a"),
+        pytest.param(_ENEMY_SLOT, id="team-b"),
+    ),
+)
+def test_spawn_shield_source_allows_every_move_and_only_neutral_combat(
+    shielded_source_slot: int,
+) -> None:
+    """A shielded source retains all movement and exactly one inert combat pair."""
+    config, state = _target_scenario()
+    shielded_state = state._replace(
+        spawn_shield_durations=state.spawn_shield_durations.at[
+            shielded_source_slot
+        ].set(3)
+    )
+
+    observation, action_mask = _build_observation_and_action_mask(
+        shielded_state, config
+    )
+    source_joint_mask = action_mask.select_target_use_ultimate_joint_mask[
+        shielded_source_slot
+    ]
+
+    _assert_public_target_contract(observation, action_mask)
+    assert action_mask.move_mask[shielded_source_slot].shape == (NUM_MOVE_ACTIONS,)
+    assert bool(jnp.all(action_mask.move_mask[shielded_source_slot]))
+    assert bool(action_mask.select_target_mask[shielded_source_slot, 0])
+    assert not bool(jnp.any(action_mask.select_target_mask[shielded_source_slot, 1:]))
+    assert bool(action_mask.use_ultimate_mask[shielded_source_slot, 0])
+    assert not bool(jnp.any(action_mask.use_ultimate_mask[shielded_source_slot, 1:]))
+    assert source_joint_mask.shape == (NUM_TARGET_ACTIONS, NUM_ULTIMATE_ACTIONS)
+    assert bool(source_joint_mask[0, 0])
+    assert int(jnp.sum(source_joint_mask)) == 1
+
+
+@pytest.mark.parametrize(
+    (
+        "actor_slot",
+        "actor_class_id",
+        "shielded_candidate_slot",
+        "target_action",
+    ),
+    (
+        pytest.param(
+            _ACTOR_SLOT,
+            PRIEST_CLASS_ID,
+            _ALLY_SLOT,
+            2,
+            id="team-a-support-to-shielded-ally",
+        ),
+        pytest.param(
+            _ACTOR_SLOT,
+            HUNTER_CLASS_ID,
+            _ENEMY_SLOT,
+            1 + MAX_AGENTS_PER_TEAM,
+            id="team-a-offense-to-shielded-enemy",
+        ),
+        pytest.param(
+            _ENEMY_SLOT,
+            MAGE_CLASS_ID,
+            _ACTOR_SLOT,
+            1 + MAX_AGENTS_PER_TEAM,
+            id="team-b-offense-to-shielded-enemy",
+        ),
+    ),
+)
+def test_spawn_shield_removes_candidates_from_authoritative_combat_masks(
+    actor_slot: int,
+    actor_class_id: int,
+    shielded_candidate_slot: int,
+    target_action: int,
+) -> None:
+    """Exclude shielded ally and enemy recipients from the shared joint mask."""
+    config, state = _target_scenario(actor_class_id)
+    _, control_mask = _build_observation_and_action_mask(state, config)
+    shielded_state = state._replace(
+        spawn_shield_durations=state.spawn_shield_durations.at[
+            shielded_candidate_slot
+        ].set(3)
+    )
+
+    observation, shielded_mask = _build_observation_and_action_mask(
+        shielded_state,
+        config,
+    )
+
+    _assert_public_target_contract(observation, shielded_mask)
+    assert bool(
+        jnp.any(
+            control_mask.select_target_use_ultimate_joint_mask[
+                actor_slot,
+                target_action,
+            ]
+        )
+    )
+    assert not bool(
+        jnp.any(
+            shielded_mask.select_target_use_ultimate_joint_mask[
+                actor_slot,
+                target_action,
+            ]
+        )
+    )
+    assert not bool(shielded_mask.select_target_mask[actor_slot, target_action])
 
 
 @pytest.mark.parametrize(

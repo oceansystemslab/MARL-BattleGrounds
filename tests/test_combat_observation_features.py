@@ -31,6 +31,8 @@ from marl_battlegrounds.core.types import (
     AGENT_FEATURE_CAPABILITY_DAMAGE_AMPLIFICATION_MAGE_BURST_MULTIPLIER,
     AGENT_FEATURE_CAPABILITY_DAMAGE_MITIGATION_WARRIOR_AURA_MULTIPLIER,
     AGENT_FEATURE_CAPABILITY_DAMAGE_MITIGATION_WARRIOR_AURA_RADIUS,
+    AGENT_FEATURE_CAPABILITY_OUT_OF_COMBAT_DELAY_STEPS,
+    AGENT_FEATURE_CAPABILITY_OUT_OF_COMBAT_HEALTH_REGEN_FRACTION_PER_STEP,
     AGENT_FEATURE_CAPABILITY_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_DURATION,
     AGENT_FEATURE_CAPABILITY_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_FRACTION,
     AGENT_FEATURE_CAPABILITY_SLOW_HUNTER_BASIC_DURATION,
@@ -59,8 +61,10 @@ from marl_battlegrounds.core.types import (
     AGENT_FEATURE_SLOW_ROGUE_POISON_MULTIPLIER,
     AGENT_FEATURE_SLOW_WARRIOR_CHARGE_DURATION,
     AGENT_FEATURE_SLOW_WARRIOR_CHARGE_MULTIPLIER,
+    AGENT_FEATURE_STEPS_UNTIL_OUT_OF_COMBAT,
     AGENT_FEATURE_STUN_HUNTER_TRAP_DURATION,
     AGENT_FEATURE_ULTIMATE_COOLDOWN_REMAINING,
+    ENVIRONMENT_DIMENSIONS,
     HUNTER_CLASS_ID,
     MAGE_CLASS_ID,
     MAX_AGENT_SLOTS,
@@ -132,6 +136,7 @@ _FEATURE_NAMES_IN_ORDER: tuple[str, ...] = (
     "AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_BURST_DURATION",
     "AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_DURATION",
     "AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_FRACTION",
+    "AGENT_FEATURE_STEPS_UNTIL_OUT_OF_COMBAT",
     "AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_AURA_MULTIPLIER",
     "AGENT_FEATURE_DAMAGE_MITIGATION_WARRIOR_AURA_MULTIPLIER",
     "AGENT_FEATURE_CAPABILITY_BASIC_DAMAGE",
@@ -158,6 +163,8 @@ _FEATURE_NAMES_IN_ORDER: tuple[str, ...] = (
     "AGENT_FEATURE_CAPABILITY_DAMAGE_MITIGATION_WARRIOR_AURA_MULTIPLIER",
     "AGENT_FEATURE_CAPABILITY_ULTIMATE_HEALING",
     "AGENT_FEATURE_CAPABILITY_ULTIMATE_DAMAGE",
+    "AGENT_FEATURE_CAPABILITY_OUT_OF_COMBAT_DELAY_STEPS",
+    "AGENT_FEATURE_CAPABILITY_OUT_OF_COMBAT_HEALTH_REGEN_FRACTION_PER_STEP",
 )
 
 
@@ -188,8 +195,13 @@ def _config(
         map_height=12.0,
         obstacles=jnp.zeros((MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES), dtype=jnp.float32),
         agent_profile=profile,
-        initial_agent_positions=jnp.where(profile.active_mask[:, None], positions, 0.0),
         ordinary_movement_distance_scale=ordinary_movement_distance_scale,
+        team_spawn_pad_positions=positions.reshape(
+            (2, MAX_AGENTS_PER_TEAM, ENVIRONMENT_DIMENSIONS)
+        ),
+        spawn_shield_duration_steps=3,
+        spawn_shield_movement_speed=2.0,
+        team_respawn_wave_period_step_count=jnp.asarray((5, 5), dtype=jnp.int32),
     )
 
 
@@ -238,8 +250,8 @@ def _current_action_mask(config: EnvConfig, state: EnvState) -> ActionMask:
 def test_shared_agent_feature_schema_is_contiguous_and_duration_first() -> None:
     indices = tuple(getattr(core_types, name) for name in _FEATURE_NAMES_IN_ORDER)
 
-    assert SELF_FEATURES == UNIT_FEATURES == len(_FEATURE_NAMES_IN_ORDER) == 55
-    assert indices == tuple(range(55))
+    assert SELF_FEATURES == UNIT_FEATURES == len(_FEATURE_NAMES_IN_ORDER) == 58
+    assert indices == tuple(range(58))
     assert not hasattr(
         core_types, "AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_BURST_MULTIPLIER"
     )
@@ -278,6 +290,27 @@ def test_reset_rows_expose_profile_state_and_neutral_attached_values() -> None:
             state.ultimate_cooldowns.astype(jnp.float32),
         )
     )
+    assert bool(
+        jnp.array_equal(
+            rows[:, AGENT_FEATURE_STEPS_UNTIL_OUT_OF_COMBAT],
+            state.steps_until_out_of_combat.astype(jnp.float32),
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            rows[:, AGENT_FEATURE_CAPABILITY_OUT_OF_COMBAT_DELAY_STEPS],
+            config.agent_profile.out_of_combat_delay_steps.astype(jnp.float32),
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            rows[
+                :,
+                AGENT_FEATURE_CAPABILITY_OUT_OF_COMBAT_HEALTH_REGEN_FRACTION_PER_STEP,
+            ],
+            config.agent_profile.out_of_combat_health_regen_fraction_per_step,
+        )
+    )
 
     multiplicative_columns = (
         AGENT_FEATURE_SLOW_WARRIOR_CHARGE_MULTIPLIER,
@@ -301,10 +334,10 @@ def test_movement_calibration_is_public_without_changing_catalog_base_speed() ->
         ordinary_movement_distance_scale=movement_scale,
     )
     visible_enemy_slot = MAX_AGENTS_PER_TEAM
-    visible_positions = config.initial_agent_positions.at[visible_enemy_slot].set(
+    visible_spawn_pads = config.team_spawn_pad_positions.at[1, 0].set(
         jnp.asarray((1.5, 0.5), dtype=jnp.float32)
     )
-    config = config._replace(initial_agent_positions=visible_positions)
+    config = config._replace(team_spawn_pad_positions=visible_spawn_pads)
     _, observation, *_ = reset(config, jax.random.key(20))
     expected_effective_speed = (
         config.agent_profile.base_movement_speeds * movement_scale
@@ -445,6 +478,27 @@ def test_capabilities_are_class_owned_payloads_not_cooldown_availability() -> No
     )
     for column, catalog in expected_catalog_columns:
         expected = catalog[config.agent_profile.class_ids].astype(jnp.float32)
+        assert bool(
+            jnp.array_equal(second_observation.self_features[:, column], expected)
+        )
+        assert bool(
+            jnp.array_equal(
+                second_observation.self_features[:, column],
+                first_observation.self_features[:, column],
+            )
+        )
+
+    expected_recovery_capability_columns = (
+        (
+            AGENT_FEATURE_CAPABILITY_OUT_OF_COMBAT_DELAY_STEPS,
+            config.agent_profile.out_of_combat_delay_steps.astype(jnp.float32),
+        ),
+        (
+            AGENT_FEATURE_CAPABILITY_OUT_OF_COMBAT_HEALTH_REGEN_FRACTION_PER_STEP,
+            config.agent_profile.out_of_combat_health_regen_fraction_per_step,
+        ),
+    )
+    for column, expected in expected_recovery_capability_columns:
         assert bool(
             jnp.array_equal(second_observation.self_features[:, column], expected)
         )
@@ -667,7 +721,9 @@ def test_attached_statuses_and_effective_speed_follow_duration_state() -> None:
         next_state.slow_durations,
         next_state.priest_blessing_of_freedom_slow_floor_durations,
         next_state.stun_durations,
+        next_state.spawn_shield_durations,
         config.agent_profile.base_movement_speeds,
+        config.spawn_shield_movement_speed,
         jnp.logical_and(config.agent_profile.active_mask, next_state.alive_mask),
         config.ordinary_movement_distance_scale,
     )
@@ -681,7 +737,9 @@ def test_attached_statuses_and_effective_speed_follow_duration_state() -> None:
         state.slow_durations,
         state.priest_blessing_of_freedom_slow_floor_durations,
         state.stun_durations,
+        state.spawn_shield_durations,
         config.agent_profile.base_movement_speeds,
+        config.spawn_shield_movement_speed,
         jnp.logical_and(config.agent_profile.active_mask, state.alive_mask),
         config.ordinary_movement_distance_scale,
     )
@@ -793,7 +851,7 @@ def test_capabilities_remain_zero_for_inactive_non_neutral_padding(
     config = config._replace(agent_profile=profile)
     _, observation, *_ = reset(config, jax.random.key(8))
 
-    assert bool(jnp.all(observation.self_features[padded_slot, 31:] == 0.0))
+    assert bool(jnp.all(observation.self_features[padded_slot, 32:] == 0.0))
 
 
 def test_cp4_observation_contract_is_jit_stable() -> None:

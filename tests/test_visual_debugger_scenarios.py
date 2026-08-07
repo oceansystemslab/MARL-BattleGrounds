@@ -1,6 +1,5 @@
 """Exact public-trajectory integration tests for every debugger scenario."""
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -32,7 +31,7 @@ from tests.visual_debugger_fixtures import (
 )
 
 from marl_battlegrounds.core.config import validate_env_config
-from marl_battlegrounds.core.env import reset
+from marl_battlegrounds.core.env import initialize_scenario_state
 from marl_battlegrounds.core.types import (
     AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_AURA_MULTIPLIER,
     AGENT_FEATURE_DAMAGE_MITIGATION_WARRIOR_AURA_MULTIPLIER,
@@ -108,7 +107,7 @@ def _status_change(
     )
 
 
-def test_all_scenario_configs_validate_and_reset() -> None:
+def test_all_scenario_configs_validate_and_initialize_authored_state() -> None:
     researcher_names = (
         "arena_5v5",
         "basic_support",
@@ -154,12 +153,18 @@ def test_all_scenario_configs_validate_and_reset() -> None:
     )
 
     for scenario in list_scenarios(include_stress=True):
-        config = scenario.build_config()
+        config, authored_state = scenario.build_scenario()
         validate_env_config(config)
-        state, observation, action_mask, _ = reset(config, jax.random.key(17))
+        state, observation, action_mask, info = initialize_scenario_state(
+            authored_state,
+            config,
+        )
 
         assert config.max_steps == 300
         assert config.ordinary_movement_distance_scale == 1.0
+        assert config.spawn_shield_duration_steps == 3
+        assert config.spawn_shield_movement_speed == 2.0
+        assert state is authored_state
         assert int(state.step_count) == 0
         assert not bool(state.has_previous_timestep_joint_action)
         assert observation.self_features.shape[0] == MAX_AGENT_SLOTS
@@ -168,6 +173,9 @@ def test_all_scenario_configs_validate_and_reset() -> None:
             11,
             2,
         )
+        shield_facts = info.transition_facts.spawn_shield_facts
+        assert not bool(jnp.any(shield_facts.was_active_at_transition_start_by_agent))
+        assert not bool(jnp.any(shield_facts.expired_at_transition_end_by_agent))
         assert bool(
             jnp.array_equal(
                 state.current_health,
@@ -484,7 +492,7 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
         controlled_slot,
     ) in expected_configs.items():
         scenario = get_scenario(name)
-        config = scenario.build_config()
+        config, state = scenario.build_scenario()
         observed_active = tuple(
             int(slot)
             for slot in np.flatnonzero(
@@ -498,7 +506,7 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
             == class_ids
         )
         np.testing.assert_allclose(
-            np.asarray(config.initial_agent_positions)[list(active_slots)],
+            np.asarray(state.agent_positions)[list(active_slots)],
             positions,
         )
         assert scenario.mode == mode
@@ -669,7 +677,7 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
 
 def test_every_scenario_frame_has_unique_active_actors_and_targets() -> None:
     for scenario in list_scenarios(include_stress=True):
-        config = scenario.build_config()
+        config, _ = scenario.build_scenario()
         active = np.asarray(config.agent_profile.active_mask, dtype=bool)
         for frame in scenario.frames:
             actor_slots = [command.actor_global_slot for command in frame.commands]
@@ -888,8 +896,8 @@ def test_ultimate_showcase_reference_trajectory() -> None:
         atol=1e-4,
     )
     np.testing.assert_allclose(
-        np.asarray(session.state.current_health)[[2, 5, 7]],
-        (100.0, 44.0, 80.0),
+        np.asarray(session.state.current_health)[[2, 5, 6, 7]],
+        (100.0, 44.0, 191.5, 80.0),
         atol=1e-5,
     )
     np.testing.assert_array_equal(session.state.ultimate_cooldowns[:5], 30)
@@ -911,7 +919,7 @@ def test_ultimate_showcase_reference_trajectory() -> None:
     }
 
     session = submit_next_script_frame(session)
-    assert float(session.state.current_health[6]) == pytest.approx(194.9)
+    assert float(session.state.current_health[6]) == pytest.approx(186.4)
     assert int(session.state.stun_durations[6, STUN_CHANNEL_HUNTER_TRAP]) == 0
     assert int(session.state.slow_durations[6, SLOW_CHANNEL_HUNTER_BASIC]) == 1
     np.testing.assert_array_equal(session.state.ultimate_cooldowns[:5], 29)
@@ -967,7 +975,7 @@ def test_status_stack_reference_trajectory() -> None:
     _, session = _session("status_stack")
     session = submit_next_script_frame(session)
     np.testing.assert_allclose(session.state.agent_positions[0], (7.0, 7.0))
-    assert float(session.state.current_health[5]) == pytest.approx(52.0)
+    assert float(session.state.current_health[5]) == pytest.approx(42.0)
     np.testing.assert_array_equal(session.state.slow_durations[5], (5, 0, 5))
     np.testing.assert_array_equal(session.state.stun_durations[5], (1, 4, 1))
     assert int(session.state.rogue_poison_anti_heal_durations[5]) == 4
@@ -985,7 +993,7 @@ def test_status_stack_reference_trajectory() -> None:
 
     session = submit_next_script_frame(session)
     np.testing.assert_allclose(session.state.agent_positions[5], (8.0, 6.0))
-    assert float(session.state.current_health[5]) == pytest.approx(50.0)
+    assert float(session.state.current_health[5]) == pytest.approx(40.0)
     np.testing.assert_array_equal(session.state.slow_durations[5], (4, 1, 4))
     np.testing.assert_array_equal(session.state.stun_durations[5], (0, 0, 0))
     assert int(session.state.rogue_poison_anti_heal_durations[5]) == 3

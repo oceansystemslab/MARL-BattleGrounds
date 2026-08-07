@@ -141,7 +141,7 @@ def test_every_debugger_structure_has_the_exact_audited_field_schema() -> None:
             "title",
             "description",
             "mode",
-            "build_config",
+            "build_scenario",
             "frames",
             "default_controlled_slot",
             "audience",
@@ -202,6 +202,7 @@ def test_every_debugger_structure_has_the_exact_audited_field_schema() -> None:
         ),
         TransitionView: (
             "scenario_name",
+            "config",
             "submission_kind",
             "report_actor_slots",
             "before_state",
@@ -989,7 +990,7 @@ def test_debugger_scenario_validates_default_fixed_slot() -> None:
             "bad",
             "bad",
             "interactive",
-            get_scenario("arena_5v5").build_config,
+            get_scenario("arena_5v5").build_scenario,
             (),
             MAX_AGENT_SLOTS,
         )
@@ -1000,7 +1001,7 @@ def test_debugger_scenario_validates_default_fixed_slot() -> None:
             "bad",
             "bad",
             "interactive",
-            get_scenario("arena_5v5").build_config,
+            get_scenario("arena_5v5").build_scenario,
             (),
             0,
             "public",  # type: ignore[arg-type]

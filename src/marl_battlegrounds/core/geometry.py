@@ -800,10 +800,14 @@ def _resolve_agent_agent_overlaps(
     agent_radii: Array,
     active_mask: Array,
     alive_mask: Array,
+    agent_agent_collision_participation_mask: Array,
     projection_passes: int = DEFAULT_AGENT_PROJECTION_PASSES,
 ) -> Array:
     """Reduce active-alive body overlap with fixed pairwise passes."""
-    participants = jnp.logical_and(active_mask, alive_mask)
+    participants = jnp.logical_and(
+        jnp.logical_and(active_mask, alive_mask),
+        agent_agent_collision_participation_mask,
+    )
 
     def _projection_pass(
         pass_index: int,
@@ -1004,6 +1008,8 @@ def project_movement_with_geometry(
     map_width: Array | float,
     map_height: Array | float,
     obstacles: Array,
+    always_participates_in_agent_agent_collision: Array,
+    participates_in_agent_agent_collision_at_final_position: Array,
     agent_agent_overlap_projection_passes: int = 1,
     collision_projection_passes: int = DEFAULT_AGENT_PROJECTION_PASSES,
     movement_substeps: int = DEFAULT_MOVEMENT_SUBSTEPS,
@@ -1011,11 +1017,11 @@ def project_movement_with_geometry(
     """Project intended per-slot movement through shared geometry constraints.
 
     This helper is the public array-level geometry primitive that ``env.step``
-    will call in the next milestone step. It accepts already-computed movement
-    deltas; action-id semantics belong outside this module. Final committed
-    positions prioritize static world validity. Agent-agent body blocking uses a
-    deterministic fixed-pass projection, which fully separates ordinary feasible
-    cases and may leave bounded residual overlap in pinned or crowded cases.
+    calls with already-computed movement deltas; action and lifecycle semantics
+    belong outside this module. Final committed positions prioritize static
+    world validity. Agent-agent body blocking uses a deterministic fixed-pass
+    projection, which fully separates ordinary feasible cases and may leave
+    bounded residual overlap in pinned or crowded cases.
 
     Args:
         agent_positions: Current slot-aligned centers with shape
@@ -1029,6 +1035,12 @@ def project_movement_with_geometry(
         map_height: Height of the rectangular battleground.
         obstacles: Fixed obstacle table with shape
             ``(MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES)``.
+        always_participates_in_agent_agent_collision: Slot mask governing
+            agent-agent collision during movement traversal.
+        participates_in_agent_agent_collision_at_final_position: Slot mask
+            governing agent-agent collision after the final movement increment.
+            A pair exchanges collision displacement only when both rows
+            participate.
         agent_agent_overlap_projection_passes: Fixed pairwise overlap sweeps
             inside each collision projection pass.
         collision_projection_passes: Fixed passes that compose boundary,
@@ -1083,20 +1095,26 @@ def project_movement_with_geometry(
 
     def _project_collision_pass(
         pass_index: int,
-        current_positions: Array,
-    ) -> Array:
+        current_positions_and_agent_agent_participation_mask: tuple[Array, Array],
+    ) -> tuple[Array, Array]:
         """Run one fixed collision-composition pass."""
         del pass_index
 
-        current_positions = _project_to_bounds(current_positions)
+        current_positions = _project_to_bounds(
+            current_positions_and_agent_agent_participation_mask[0]
+        )
         current_positions = _project_out_of_obstacles(current_positions)
 
-        return _resolve_agent_agent_overlaps(
-            current_positions,
-            agent_radii,
-            active_mask,
-            alive_mask,
-            agent_agent_overlap_projection_passes,
+        return (
+            _resolve_agent_agent_overlaps(
+                current_positions,
+                agent_radii,
+                active_mask,
+                alive_mask,
+                current_positions_and_agent_agent_participation_mask[1],
+                agent_agent_overlap_projection_passes,
+            ),
+            current_positions_and_agent_agent_participation_mask[1],
         )
 
     def _project_movement_substep(
@@ -1104,17 +1122,23 @@ def project_movement_with_geometry(
         current_positions: Array,
     ) -> Array:
         """Apply and project one fixed movement substep."""
-        del substep_index
 
         current_positions = current_positions + masked_substep_deltas
 
-        current_positions = cast(
-            Array,
+        agent_agent_collision_participation_mask = jnp.where(
+            substep_index == movement_substeps - 1,
+            # The final-position mask includes every traversal participant.
+            participates_in_agent_agent_collision_at_final_position,
+            always_participates_in_agent_agent_collision,
+        )
+
+        current_positions, _ = cast(
+            tuple[Array, Array],
             jax.lax.fori_loop(
                 0,
                 collision_projection_passes,
                 _project_collision_pass,
-                current_positions,
+                (current_positions, agent_agent_collision_participation_mask),
             ),
         )
 

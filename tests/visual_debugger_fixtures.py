@@ -2,6 +2,7 @@
 
 from collections.abc import Sequence
 
+import jax
 import jax.numpy as jnp
 from scripts.dev.visual_debugger.control import (
     build_scripted_joint_action,
@@ -15,11 +16,13 @@ from scripts.dev.visual_debugger.model import (
 )
 
 from marl_battlegrounds.core.config import resolve_agent_profile
+from marl_battlegrounds.core.env import reset
 from marl_battlegrounds.core.types import (
     ENVIRONMENT_DIMENSIONS,
     HUNTER_CLASS_ID,
     MAGE_CLASS_ID,
     MAX_AGENT_SLOTS,
+    MAX_AGENTS_PER_TEAM,
     MAX_OBSTACLE_SLOTS,
     MOVE_EAST,
     MOVE_STAY,
@@ -27,6 +30,32 @@ from marl_battlegrounds.core.types import (
     OBSTACLE_FEATURES,
     EnvConfig,
 )
+
+
+def _spawn_pad_positions(map_width: float, map_height: float) -> jax.Array:
+    """Return valid fixed pads independent of the authored combat layout."""
+    y_coordinates = jnp.linspace(
+        1.5,
+        map_height - 1.5,
+        MAX_AGENTS_PER_TEAM,
+        dtype=jnp.float32,
+    )
+    return jnp.stack(
+        (
+            jnp.stack(
+                (jnp.full_like(y_coordinates, 1.5), y_coordinates),
+                axis=-1,
+            ),
+            jnp.stack(
+                (
+                    jnp.full_like(y_coordinates, map_width - 1.5),
+                    y_coordinates,
+                ),
+                axis=-1,
+            ),
+        ),
+        axis=0,
+    )
 
 
 def rejection_lane_scenario() -> DebuggerScenario:
@@ -53,9 +82,13 @@ def rejection_lane_scenario() -> DebuggerScenario:
             dtype=jnp.float32,
         ),
         agent_profile=profile,
-        initial_agent_positions=positions,
         ordinary_movement_distance_scale=1.0,
+        team_spawn_pad_positions=_spawn_pad_positions(12.0, 12.0),
+        spawn_shield_duration_steps=3,
+        spawn_shield_movement_speed=2.0,
+        team_respawn_wave_period_step_count=jnp.asarray((5, 5), dtype=jnp.int32),
     )
+    state, _, _, _ = reset(config, jax.random.key(0))
     frames = (
         ScenarioFrame(
             "rejected-basic-with-movement",
@@ -73,7 +106,7 @@ def rejection_lane_scenario() -> DebuggerScenario:
         title="Test-only movement and combat rejection boundary",
         description="Not exposed by the debugger launcher.",
         mode="scripted",
-        build_config=lambda: config,
+        build_scenario=lambda: (config, state._replace(agent_positions=positions)),
         frames=frames,
         default_controlled_slot=0,
     )

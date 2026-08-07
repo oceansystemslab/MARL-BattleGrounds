@@ -46,8 +46,8 @@ HUNTER_CLASS_ID = 3
 ROGUE_CLASS_ID = 4
 PRIEST_CLASS_ID = 5
 NUM_CLASSES = 6
-SELF_FEATURES = 55
-UNIT_FEATURES = 55
+SELF_FEATURES = 58
+UNIT_FEATURES = 58
 MAX_OBJECTIVE_SLOTS = 8
 OBJECTIVE_FEATURES = 12
 CONTEXT_FEATURES = 19
@@ -127,44 +127,50 @@ AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_BURST_DURATION = 26
 AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_DURATION = 27
 AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_FRACTION = 28
 
+# Dynamic out-of-combat status sits beside the other policy-visible timers.
+AGENT_FEATURE_STEPS_UNTIL_OUT_OF_COMBAT = 29
+
 # Everything below is no longer part of state.
 # Agent is under these aura modifiers.
-AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_AURA_MULTIPLIER = 29
-AGENT_FEATURE_DAMAGE_MITIGATION_WARRIOR_AURA_MULTIPLIER = 30
+AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_AURA_MULTIPLIER = 30
+AGENT_FEATURE_DAMAGE_MITIGATION_WARRIOR_AURA_MULTIPLIER = 31
 
 # Describe row-local capabilities of the agent. Capability multipliers use
 # 0.0 for absence; they are payload descriptors, not active effective values.
-AGENT_FEATURE_CAPABILITY_BASIC_DAMAGE = 31
-AGENT_FEATURE_CAPABILITY_BASIC_HEALING = 32
-AGENT_FEATURE_CAPABILITY_ULTIMATE_COOLDOWN_DURATION = 33
+AGENT_FEATURE_CAPABILITY_BASIC_DAMAGE = 32
+AGENT_FEATURE_CAPABILITY_BASIC_HEALING = 33
+AGENT_FEATURE_CAPABILITY_ULTIMATE_COOLDOWN_DURATION = 34
 
-AGENT_FEATURE_CAPABILITY_SLOW_WARRIOR_CHARGE_DURATION = 34
-AGENT_FEATURE_CAPABILITY_SLOW_HUNTER_BASIC_DURATION = 35
-AGENT_FEATURE_CAPABILITY_SLOW_ROGUE_POISON_DURATION = 36
-AGENT_FEATURE_CAPABILITY_SLOW_WARRIOR_CHARGE_MULTIPLIER = 37
-AGENT_FEATURE_CAPABILITY_SLOW_HUNTER_BASIC_MULTIPLIER = 38
-AGENT_FEATURE_CAPABILITY_SLOW_ROGUE_POISON_MULTIPLIER = 39
+AGENT_FEATURE_CAPABILITY_SLOW_WARRIOR_CHARGE_DURATION = 35
+AGENT_FEATURE_CAPABILITY_SLOW_HUNTER_BASIC_DURATION = 36
+AGENT_FEATURE_CAPABILITY_SLOW_ROGUE_POISON_DURATION = 37
+AGENT_FEATURE_CAPABILITY_SLOW_WARRIOR_CHARGE_MULTIPLIER = 38
+AGENT_FEATURE_CAPABILITY_SLOW_HUNTER_BASIC_MULTIPLIER = 39
+AGENT_FEATURE_CAPABILITY_SLOW_ROGUE_POISON_MULTIPLIER = 40
 
-AGENT_FEATURE_CAPABILITY_STUN_WARRIOR_CHARGE_DURATION = 40
-AGENT_FEATURE_CAPABILITY_STUN_HUNTER_TRAP_DURATION = 41
-AGENT_FEATURE_CAPABILITY_STUN_ROGUE_POISON_DURATION = 42
+AGENT_FEATURE_CAPABILITY_STUN_WARRIOR_CHARGE_DURATION = 41
+AGENT_FEATURE_CAPABILITY_STUN_HUNTER_TRAP_DURATION = 42
+AGENT_FEATURE_CAPABILITY_STUN_ROGUE_POISON_DURATION = 43
 
-AGENT_FEATURE_CAPABILITY_ANTI_HEAL_ROGUE_POISON_DURATION = 43
-AGENT_FEATURE_CAPABILITY_ANTI_HEAL_ROGUE_POISON_MULTIPLIER = 44
+AGENT_FEATURE_CAPABILITY_ANTI_HEAL_ROGUE_POISON_DURATION = 44
+AGENT_FEATURE_CAPABILITY_ANTI_HEAL_ROGUE_POISON_MULTIPLIER = 45
 
-AGENT_FEATURE_CAPABILITY_DAMAGE_AMPLIFICATION_MAGE_BURST_DURATION = 45
-AGENT_FEATURE_CAPABILITY_DAMAGE_AMPLIFICATION_MAGE_BURST_MULTIPLIER = 46
+AGENT_FEATURE_CAPABILITY_DAMAGE_AMPLIFICATION_MAGE_BURST_DURATION = 46
+AGENT_FEATURE_CAPABILITY_DAMAGE_AMPLIFICATION_MAGE_BURST_MULTIPLIER = 47
 
-AGENT_FEATURE_CAPABILITY_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_DURATION = 47
-AGENT_FEATURE_CAPABILITY_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_FRACTION = 48
+AGENT_FEATURE_CAPABILITY_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_DURATION = 48
+AGENT_FEATURE_CAPABILITY_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_FRACTION = 49
 
-AGENT_FEATURE_CAPABILITY_DAMAGE_AMPLIFICATION_MAGE_AURA_RADIUS = 49
-AGENT_FEATURE_CAPABILITY_DAMAGE_AMPLIFICATION_MAGE_AURA_MULTIPLIER = 50
-AGENT_FEATURE_CAPABILITY_DAMAGE_MITIGATION_WARRIOR_AURA_RADIUS = 51
-AGENT_FEATURE_CAPABILITY_DAMAGE_MITIGATION_WARRIOR_AURA_MULTIPLIER = 52
+AGENT_FEATURE_CAPABILITY_DAMAGE_AMPLIFICATION_MAGE_AURA_RADIUS = 50
+AGENT_FEATURE_CAPABILITY_DAMAGE_AMPLIFICATION_MAGE_AURA_MULTIPLIER = 51
+AGENT_FEATURE_CAPABILITY_DAMAGE_MITIGATION_WARRIOR_AURA_RADIUS = 52
+AGENT_FEATURE_CAPABILITY_DAMAGE_MITIGATION_WARRIOR_AURA_MULTIPLIER = 53
 
-AGENT_FEATURE_CAPABILITY_ULTIMATE_HEALING = 53
-AGENT_FEATURE_CAPABILITY_ULTIMATE_DAMAGE = 54
+AGENT_FEATURE_CAPABILITY_ULTIMATE_HEALING = 54
+AGENT_FEATURE_CAPABILITY_ULTIMATE_DAMAGE = 55
+
+AGENT_FEATURE_CAPABILITY_OUT_OF_COMBAT_DELAY_STEPS = 56
+AGENT_FEATURE_CAPABILITY_OUT_OF_COMBAT_HEALTH_REGEN_FRACTION_PER_STEP = 57
 
 NUM_SLOW_CHANNELS = 3
 SLOW_CHANNEL_WARRIOR_CHARGE = 0
@@ -189,6 +195,8 @@ class ResolvedAgentProfile(NamedTuple):
     basic_interaction_radii: Array
     ultimate_interaction_radii: Array
     max_health: Array
+    out_of_combat_delay_steps: Array  # (MAX_AGENT_SLOTS,)
+    out_of_combat_health_regen_fraction_per_step: Array  # (MAX_AGENT_SLOTS,)
 
 
 class EnvConfig(NamedTuple):
@@ -198,7 +206,11 @@ class EnvConfig(NamedTuple):
     during an episode. ``agent_profile`` is the sole authority for immutable
     fixed-slot roster topology and capabilities resolved before ordinary reset.
     ``ordinary_movement_distance_scale`` converts catalog movement speeds into
-    per-decision voluntary displacement without scaling forced relocation.
+    per-step voluntary displacement without scaling forced relocation.
+    Team-local spawn pads are the sole ordinary-reset position authority.
+    Spawn-shield duration and movement speed remain episode-static rules.
+    Team respawn-wave periods are immutable public clocks whose current
+    countdowns live in ``EnvState``.
     """
 
     max_steps: int
@@ -206,8 +218,11 @@ class EnvConfig(NamedTuple):
     map_height: float
     obstacles: Array
     agent_profile: ResolvedAgentProfile
-    initial_agent_positions: Array
     ordinary_movement_distance_scale: float
+    team_spawn_pad_positions: Array  # (NUM_TEAMS, MAX_AGENTS_PER_TEAM, 2)
+    spawn_shield_duration_steps: int
+    spawn_shield_movement_speed: float
+    team_respawn_wave_period_step_count: Array  # (NUM_TEAMS,)
 
 
 class EnvState(NamedTuple):
@@ -217,7 +232,10 @@ class EnvState(NamedTuple):
     only source-specific remaining durations; fixed magnitudes are derived by
     ``core.combat.derive_status_magnitudes``. Previous-action fields retain the
     one accepted category per actor from the immediately preceding transition.
-    The scalar validity leaf distinguishes reset from a real neutral action.
+    The spawn-shield vector stores remaining protected movement steps without a
+    duplicate active flag. Team respawn-wave countdowns store one public clock
+    per team without duplicating eligibility or queue state. The scalar validity
+    leaf distinguishes reset from a real neutral action.
     """
 
     step_count: Array
@@ -230,6 +248,9 @@ class EnvState(NamedTuple):
     rogue_poison_anti_heal_durations: Array
     mage_burst_damage_amplification_durations: Array
     priest_blessing_of_freedom_slow_floor_durations: Array
+    team_respawn_wave_countdowns: Array
+    spawn_shield_durations: Array
+    steps_until_out_of_combat: Array  # (MAX_AGENT_SLOTS,)
     previous_timestep_move_actions: Array
     previous_timestep_select_target_actions: Array
     previous_timestep_use_ultimate_actions: Array
@@ -277,6 +298,34 @@ class PreviousTimestepActionObservation(NamedTuple):
     enemy_previous_timestep_use_ultimate_actions_one_hot: Array
 
 
+class SpawnLifecycleObservation(NamedTuple):
+    """Actor-relative public spawn, shield, roster, and respawn-clock truth.
+
+    Team A observers receive Team A before Team B; Team B observers receive
+    Team B before Team A. Configured inactive observer rows remain canonical
+    zeros across every leaf.
+    """
+
+    spawn_pad_positions_by_agent_by_team: (
+        Array  # (MAX_AGENT_SLOTS, NUM_TEAMS, MAX_AGENTS_PER_TEAM, 2)
+    )
+    spawn_shield_actual_durations_by_agent_by_team: (
+        Array  # (MAX_AGENT_SLOTS, NUM_TEAMS, MAX_AGENTS_PER_TEAM)
+    )
+    spawn_shield_configured_duration_by_agent: Array  # (MAX_AGENT_SLOTS)
+    spawn_shield_speed_by_agent: Array  # (MAX_AGENT_SLOTS)
+    respawn_wave_period_step_count_by_agent_by_team: (
+        Array  # (MAX_AGENT_SLOTS, NUM_TEAMS)
+    )
+    respawn_wave_countdowns_by_agent_by_team: Array  # (MAX_AGENT_SLOTS, NUM_TEAMS)
+    active_mask_by_agent_by_team: (
+        Array  # (MAX_AGENT_SLOTS, NUM_TEAMS, MAX_AGENTS_PER_TEAM)
+    )
+    alive_mask_by_agent_by_team: (
+        Array  # (MAX_AGENT_SLOTS, NUM_TEAMS, MAX_AGENTS_PER_TEAM)
+    )
+
+
 class Observation(NamedTuple):
     """Structured per-slot observations emitted by reset and step.
 
@@ -290,10 +339,11 @@ class Observation(NamedTuple):
     enemy_unit_features: Array
     map_obstacle_features: Array
     objective_features: Array
-    context_features: Array
+    context_features: Array  # Meta/Config features.
     ally_visibility_mask: Array
     enemy_visibility_mask: Array
     previous_timestep_actions: PreviousTimestepActionObservation
+    spawn_lifecycle: SpawnLifecycleObservation
 
 
 class Reward(NamedTuple):
@@ -359,14 +409,38 @@ class DeathTransitionFacts(NamedTuple):
     attributed_death_damage_by_source: Array
 
 
+class SpawnShieldTransitionFacts(NamedTuple):
+    """Authoritative spawn-shield activity and ordinary-expiry facts."""
+
+    was_active_at_transition_start_by_agent: Array  # (MAX_AGENT_SLOTS,)
+    expired_at_transition_end_by_agent: Array  # (MAX_AGENT_SLOTS,)
+
+
+class RespawnTransitionFacts(NamedTuple):
+    """Authoritative due-wave and realized-respawn facts for one transition."""
+
+    respawn_wave_occurred_this_transition_by_team: Array  # (NUM_TEAMS,)
+    was_respawned_this_transition_by_agent: Array  # (MAX_AGENT_SLOTS,)
+
+
+class RegenerationTransitionFacts(NamedTuple):
+    """Authoritative combat-countdown and regeneration facts for one transition."""
+
+    combat_countdown_was_reset_by_agent: Array  # (MAX_AGENT_SLOTS,)
+    actual_health_regenerated_this_step_by_agent: Array  # (MAX_AGENT_SLOTS,)
+
+
 class TransitionFacts(NamedTuple):
     """Fixed-shape authoritative facts for one reset or environment transition."""
 
     has_transition: Array
-    choosing_step_count: Array
+    transition_start_step_count: Array
     action_acceptance_facts: ActionAcceptanceFacts
     combat_transition_facts: CombatTransitionFacts
     death_facts: DeathTransitionFacts
+    spawn_shield_facts: SpawnShieldTransitionFacts
+    respawn_facts: RespawnTransitionFacts
+    regeneration_facts: RegenerationTransitionFacts
 
 
 class Info(NamedTuple):

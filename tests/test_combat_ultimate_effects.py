@@ -155,10 +155,13 @@ def _scenario(
         map_height=12.0,
         obstacles=_empty_obstacles() if obstacles is None else obstacles,
         agent_profile=profile,
-        initial_agent_positions=(
-            _default_positions(team_sizes) if positions is None else positions
-        ),
         ordinary_movement_distance_scale=ordinary_movement_distance_scale,
+        team_spawn_pad_positions=(
+            _default_positions(team_sizes) if positions is None else positions
+        ).reshape((2, MAX_AGENTS_PER_TEAM, ENVIRONMENT_DIMENSIONS)),
+        spawn_shield_duration_steps=3,
+        spawn_shield_movement_speed=2.0,
+        team_respawn_wave_period_step_count=jnp.asarray((5, 5), dtype=jnp.int32),
     )
     state = EnvState(
         step_count=jnp.array(0, dtype=jnp.int32),
@@ -177,6 +180,9 @@ def _scenario(
         priest_blessing_of_freedom_slow_floor_durations=jnp.zeros(
             (MAX_AGENT_SLOTS,), dtype=jnp.int32
         ),
+        team_respawn_wave_countdowns=config.team_respawn_wave_period_step_count - 1,
+        spawn_shield_durations=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        steps_until_out_of_combat=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
         previous_timestep_move_actions=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
         previous_timestep_select_target_actions=jnp.zeros(
             (MAX_AGENT_SLOTS,), dtype=jnp.int32
@@ -238,7 +244,12 @@ def _aura_multipliers(config: EnvConfig, state: EnvState) -> tuple[Array, Array]
     distances = _compute_global_pairwise_distances_from_agent_positions(
         state.agent_positions
     )
-    return _derive_aura_damage_multipliers(config, distances, state.alive_mask)
+    return _derive_aura_damage_multipliers(
+        config,
+        distances,
+        state.alive_mask,
+        state.spawn_shield_durations == 0,
+    )
 
 
 def _open_space_charge_scenario(
@@ -266,7 +277,7 @@ def _open_space_charge_scenario(
 def test_ultimate_health_catalogs_are_exact_class_aligned_and_jit_stable() -> None:
     """Prove both ultimate health catalogs are complete authoritative tables."""
     expected_damage = jnp.asarray(
-        (0.0, 0.0, 20.0, 0.0, 36.0, 0.0),
+        (0.0, 0.0, 20.0, 10.0, 36.0, 0.0),
         dtype=jnp.float32,
     )
     expected_healing = jnp.asarray(
@@ -340,7 +351,12 @@ def test_three_duplicate_auras_are_bounded_and_observation_consistent() -> None:
     )
     compiled_mage, compiled_warrior = cast(
         tuple[Array, Array],
-        jax.jit(_derive_aura_damage_multipliers)(config, distances, state.alive_mask),
+        jax.jit(_derive_aura_damage_multipliers)(
+            config,
+            distances,
+            state.alive_mask,
+            state.spawn_shield_durations == 0,
+        ),
     )
     observation, _ = _build_observation_and_action_mask(state, config)
 
@@ -436,17 +452,23 @@ def test_priest_ultimates_route_to_self_and_allies_for_both_teams() -> None:
 
 
 @pytest.mark.parametrize(
-    ("actor_class_id", "target_action"),
+    ("actor_class_id", "target_action", "expected_damage"),
     (
-        pytest.param(MAGE_CLASS_ID, 0, id="mage-burst"),
-        pytest.param(HUNTER_CLASS_ID, _FIRST_ENEMY_TARGET, id="hunter-trap"),
+        pytest.param(MAGE_CLASS_ID, 0, 0.0, id="mage-burst"),
+        pytest.param(
+            HUNTER_CLASS_ID,
+            _FIRST_ENEMY_TARGET,
+            10.0,
+            id="hunter-trap",
+        ),
     ),
 )
-def test_zero_health_payload_ultimates_change_no_health_but_start_cooldown(
+def test_ultimate_health_payloads_apply_catalog_damage_and_start_cooldown(
     actor_class_id: int,
     target_action: int,
+    expected_damage: float,
 ) -> None:
-    """Prove zero-payload ultimates remain accepted cooldown-bearing actions."""
+    """Prove Mage and Hunter Ultimates apply their catalog health payloads."""
     config, state = _scenario(
         (0, actor_class_id),
         (5, HUNTER_CLASS_ID),
@@ -457,7 +479,8 @@ def test_zero_health_payload_ultimates_change_no_health_but_start_cooldown(
         config, state, _joint_action((0, target_action, 1))
     )
 
-    assert bool(jnp.array_equal(next_state.current_health, state.current_health))
+    expected_health = state.current_health.at[_TEAM_B_FIRST_SLOT].add(-expected_damage)
+    assert bool(jnp.array_equal(next_state.current_health, expected_health))
     assert (
         next_state.ultimate_cooldowns[0]
         == combat.ULTIMATE_COOLDOWN_BY_CLASS[actor_class_id]

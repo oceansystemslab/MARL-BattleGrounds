@@ -21,6 +21,7 @@ from marl_battlegrounds.core.env import (
     step,
 )
 from marl_battlegrounds.core.types import (
+    ENVIRONMENT_DIMENSIONS,
     MAGE_CLASS_ID,
     MAX_AGENT_SLOTS,
     MAX_AGENTS_PER_TEAM,
@@ -129,10 +130,13 @@ def _config(
         map_height=12.0,
         obstacles=jnp.zeros((MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES), dtype=jnp.float32),
         agent_profile=profile,
-        initial_agent_positions=jnp.where(
-            profile.active_mask[:, None], configured_positions, 0.0
-        ),
         ordinary_movement_distance_scale=0.1,
+        team_spawn_pad_positions=configured_positions.reshape(
+            (2, MAX_AGENTS_PER_TEAM, ENVIRONMENT_DIMENSIONS)
+        ),
+        spawn_shield_duration_steps=3,
+        spawn_shield_movement_speed=2.0,
+        team_respawn_wave_period_step_count=jnp.asarray((5, 5), dtype=jnp.int32),
     )
 
 
@@ -679,6 +683,22 @@ def test_hidden_actor_rows_are_zero_but_hidden_target_identity_remains_public() 
             == 0.0
         )
     )
+    assert bool(
+        jnp.all(
+            previous_actions.enemy_previous_timestep_select_target_actions_one_hot[
+                _TEAM_A_ACTOR_0, 0
+            ]
+            == 0.0
+        )
+    )
+    assert bool(
+        jnp.all(
+            previous_actions.enemy_previous_timestep_use_ultimate_actions_one_hot[
+                _TEAM_A_ACTOR_0, 0
+            ]
+            == 0.0
+        )
+    )
     assert (
         previous_actions.ally_previous_timestep_select_target_actions_one_hot[
             _TEAM_A_ACTOR_0, 1, _FIRST_ENEMY_TARGET
@@ -686,6 +706,158 @@ def test_hidden_actor_rows_are_zero_but_hidden_target_identity_remains_public() 
         == 1.0
     )
     assert bool(jnp.all(observation.enemy_unit_features[_TEAM_A_ACTOR_0, 0] == 0.0))
+
+
+def test_spawn_shield_hides_actor_history_without_rewriting_target_history() -> None:
+    """Conceal actor rows while preserving a visible actor's target provenance."""
+    config = _config()
+    state, _, _, _ = reset(config, jax.random.key(0))
+    state = state._replace(
+        spawn_shield_durations=state.spawn_shield_durations.at[_TEAM_B_ACTOR_0].set(3),
+        previous_timestep_move_actions=state.previous_timestep_move_actions.at[
+            _TEAM_B_ACTOR_0
+        ].set(MOVE_EAST),
+        previous_timestep_select_target_actions=(
+            state.previous_timestep_select_target_actions.at[_TEAM_A_ACTOR_1].set(
+                _FIRST_ENEMY_TARGET
+            )
+        ),
+        has_previous_timestep_joint_action=jnp.asarray(True),
+    )
+
+    observation, _ = _build_observation_and_action_mask(state, config)
+    previous_actions = observation.previous_timestep_actions
+
+    assert bool(observation.ally_visibility_mask[_TEAM_A_ACTOR_0, 1])
+    assert not bool(observation.enemy_visibility_mask[_TEAM_A_ACTOR_0, 0])
+    assert bool(
+        jnp.all(
+            previous_actions.enemy_previous_timestep_move_actions_one_hot[
+                _TEAM_A_ACTOR_0, 0
+            ]
+            == 0.0
+        )
+    )
+    assert (
+        previous_actions.ally_previous_timestep_select_target_actions_one_hot[
+            _TEAM_A_ACTOR_0, 1, _FIRST_ENEMY_TARGET
+        ]
+        == 1.0
+    )
+
+
+def test_spawn_shield_concealment_is_invariant_to_hidden_position_and_move() -> None:
+    """Hidden spatial and actor-history rows reveal neither position nor movement."""
+    config = _config(team_b_first_class=PRIEST_CLASS_ID)
+    state, _, _, _ = reset(config, jax.random.key(0))
+    shielded_slot = _TEAM_B_ACTOR_0
+    first_state = state._replace(
+        spawn_shield_durations=state.spawn_shield_durations.at[shielded_slot].set(2),
+        previous_timestep_move_actions=state.previous_timestep_move_actions.at[
+            shielded_slot
+        ].set(MOVE_EAST),
+        has_previous_timestep_joint_action=jnp.asarray(True),
+    )
+    second_state = first_state._replace(
+        agent_positions=first_state.agent_positions.at[shielded_slot].set(
+            jnp.asarray((3.0, 8.0), dtype=jnp.float32)
+        ),
+        previous_timestep_move_actions=first_state.previous_timestep_move_actions.at[
+            shielded_slot
+        ].set(MOVE_WEST),
+    )
+
+    first_observation, _ = _build_observation_and_action_mask(first_state, config)
+    second_observation, _ = _build_observation_and_action_mask(second_state, config)
+    first_history = first_observation.previous_timestep_actions
+    second_history = second_observation.previous_timestep_actions
+
+    assert not bool(first_observation.enemy_visibility_mask[_TEAM_A_ACTOR_0, 0])
+    assert not bool(second_observation.enemy_visibility_mask[_TEAM_A_ACTOR_0, 0])
+    assert bool(
+        jnp.array_equal(
+            first_observation.enemy_unit_features[_TEAM_A_ACTOR_0, 0],
+            second_observation.enemy_unit_features[_TEAM_A_ACTOR_0, 0],
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            first_history.enemy_previous_timestep_move_actions_one_hot[
+                _TEAM_A_ACTOR_0, 0
+            ],
+            second_history.enemy_previous_timestep_move_actions_one_hot[
+                _TEAM_A_ACTOR_0, 0
+            ],
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            first_history.enemy_previous_timestep_select_target_actions_one_hot[
+                _TEAM_A_ACTOR_0, 0
+            ],
+            second_history.enemy_previous_timestep_select_target_actions_one_hot[
+                _TEAM_A_ACTOR_0, 0
+            ],
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            first_history.enemy_previous_timestep_use_ultimate_actions_one_hot[
+                _TEAM_A_ACTOR_0, 0
+            ],
+            second_history.enemy_previous_timestep_use_ultimate_actions_one_hot[
+                _TEAM_A_ACTOR_0, 0
+            ],
+        )
+    )
+
+
+def test_spawn_shield_rejected_combat_pair_preserves_legal_movement() -> None:
+    """Official shield masks reject combat without discarding legal movement."""
+    config = _config(team_sizes=(1, 1))
+    state, _, _, _ = reset(config, jax.random.key(0))
+    shielded_state = state._replace(
+        spawn_shield_durations=state.spawn_shield_durations.at[_TEAM_A_ACTOR_0].set(3)
+    )
+    _, action_mask = _build_observation_and_action_mask(shielded_state, config)
+    submitted_action = _action(
+        move_rows=((_TEAM_A_ACTOR_0, MOVE_EAST),),
+        target_rows=((_TEAM_A_ACTOR_0, _FIRST_ENEMY_TARGET),),
+        ultimate_rows=((_TEAM_A_ACTOR_0, 1),),
+    )
+
+    next_state, observation, _ = _step(
+        config,
+        shielded_state,
+        action_mask,
+        submitted_action,
+    )
+
+    assert next_state.previous_timestep_move_actions[_TEAM_A_ACTOR_0] == MOVE_EAST
+    assert (
+        next_state.previous_timestep_select_target_actions[_TEAM_A_ACTOR_0]
+        == _TARGET_NONE
+    )
+    assert next_state.previous_timestep_use_ultimate_actions[_TEAM_A_ACTOR_0] == 0
+    previous_actions = observation.previous_timestep_actions
+    assert (
+        previous_actions.ally_previous_timestep_move_actions_one_hot[
+            _TEAM_A_ACTOR_0, 0, MOVE_EAST
+        ]
+        == 1.0
+    )
+    assert (
+        previous_actions.ally_previous_timestep_select_target_actions_one_hot[
+            _TEAM_A_ACTOR_0, 0, _TARGET_NONE
+        ]
+        == 1.0
+    )
+    assert (
+        previous_actions.ally_previous_timestep_use_ultimate_actions_one_hot[
+            _TEAM_A_ACTOR_0, 0, 0
+        ]
+        == 1.0
+    )
 
 
 @pytest.mark.parametrize(

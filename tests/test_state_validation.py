@@ -6,6 +6,7 @@ from typing import Any, cast
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 from jax import Array
 
@@ -46,6 +47,7 @@ from marl_battlegrounds.core.types import (
     NUM_SLOW_CHANNELS,
     NUM_STUN_CHANNELS,
     NUM_TARGET_ACTIONS,
+    NUM_TEAMS,
     NUM_ULTIMATE_ACTIONS,
     OBSTACLE_FEATURE_ACTIVE,
     OBSTACLE_FEATURE_HEIGHT,
@@ -104,6 +106,9 @@ _STATE_ARRAY_FIELDS = (
         (MAX_AGENT_SLOTS,),
         jnp.int32,
     ),
+    ("team_respawn_wave_countdowns", (NUM_TEAMS,), jnp.int32),
+    ("spawn_shield_durations", (MAX_AGENT_SLOTS,), jnp.int32),
+    ("steps_until_out_of_combat", (MAX_AGENT_SLOTS,), jnp.int32),
     ("previous_timestep_move_actions", (MAX_AGENT_SLOTS,), jnp.int32),
     (
         "previous_timestep_select_target_actions",
@@ -165,7 +170,7 @@ def _valid_config(
         requested_classes,
         jnp.asarray(team_sizes, dtype=jnp.int32),
     )
-    positions = jnp.asarray(
+    spawn_pad_positions = jnp.asarray(
         (
             (2.0, 2.0),
             (2.0, 5.0),
@@ -179,15 +184,21 @@ def _valid_config(
             (28.0, 14.0),
         ),
         dtype=jnp.float32,
-    )
+    ).reshape(2, MAX_AGENTS_PER_TEAM, ENVIRONMENT_DIMENSIONS)
     return EnvConfig(
         max_steps=100,
         map_width=30.0,
         map_height=20.0,
         obstacles=_empty_obstacles() if obstacles is None else obstacles,
         agent_profile=profile,
-        initial_agent_positions=jnp.where(profile.active_mask[:, None], positions, 0.0),
         ordinary_movement_distance_scale=1.0,
+        team_spawn_pad_positions=spawn_pad_positions,
+        spawn_shield_duration_steps=3,
+        spawn_shield_movement_speed=2.0,
+        team_respawn_wave_period_step_count=jnp.asarray(
+            (5, 7),
+            dtype=jnp.int32,
+        ),
     )
 
 
@@ -231,6 +242,11 @@ def _assert_pytrees_equal(left: object, right: object) -> None:
 def test_valid_living_and_dead_states_return_none_without_mutation() -> None:
     """Accept official states while preserving every input leaf."""
     config, living_state = _valid_state()
+    shielded_living_state = living_state._replace(
+        spawn_shield_durations=living_state.spawn_shield_durations.at[0].set(
+            config.spawn_shield_duration_steps
+        )
+    )
     dead_slot = 0
     dead_state = living_state._replace(
         alive_mask=living_state.alive_mask.at[dead_slot].set(False),
@@ -252,7 +268,7 @@ def test_valid_living_and_dead_states_return_none_without_mutation() -> None:
         has_previous_timestep_joint_action=jnp.asarray(True),
     )
 
-    for state in (living_state, dead_state):
+    for state in (living_state, shielded_living_state, dead_state):
         before = state
         assert validate_env_state(config, state) is None
         _assert_pytrees_equal(state, before)
@@ -328,7 +344,7 @@ def test_float_state_fields_reject_nonfinite_values(
 
 
 def test_step_count_must_be_nonnegative() -> None:
-    """Reject a choosing epoch outside the public nonnegative domain."""
+    """Reject a transition-start step count outside the nonnegative domain."""
     config, state = _valid_state()
     with pytest.raises(ValueError, match="step_count"):
         validate_env_state(
@@ -346,6 +362,292 @@ def test_liveness_must_be_a_subset_of_configured_activity() -> None:
     )
     with pytest.raises(ValueError, match="alive_mask"):
         validate_env_state(config, invalid_state)
+
+
+def test_reset_respawn_wave_countdowns_match_each_team_period() -> None:
+    """Accept the official reset state at each period's inclusive upper bound."""
+    config, state = _valid_state()
+
+    assert bool(
+        jnp.array_equal(
+            state.team_respawn_wave_countdowns,
+            config.team_respawn_wave_period_step_count - 1,
+        )
+    )
+    assert validate_env_state(config, state) is None
+
+
+@pytest.mark.parametrize(
+    ("period_step_counts", "countdowns"),
+    (
+        pytest.param((1, 1), (0, 0), id="wave-every-transition"),
+        pytest.param((1, 7), (0, 6), id="asymmetric-upper-bounds"),
+        pytest.param((5, 7), (2, 0), id="independent-interior-and-due"),
+        pytest.param(
+            (np.iinfo(np.int32).max, np.iinfo(np.int32).max),
+            (np.iinfo(np.int32).max - 1, np.iinfo(np.int32).max - 1),
+            id="int32-boundary",
+        ),
+    ),
+)
+def test_respawn_wave_countdowns_accept_each_team_domain(
+    period_step_counts: tuple[int, int],
+    countdowns: tuple[int, int],
+) -> None:
+    """Accept independent countdowns in each team's half-open period domain."""
+    config, state = _valid_state()
+    config = config._replace(
+        team_respawn_wave_period_step_count=jnp.asarray(
+            period_step_counts,
+            dtype=jnp.int32,
+        )
+    )
+    state = state._replace(
+        team_respawn_wave_countdowns=jnp.asarray(countdowns, dtype=jnp.int32)
+    )
+
+    assert validate_env_state(config, state) is None
+
+
+@pytest.mark.parametrize(
+    ("period_step_counts", "countdowns", "message"),
+    (
+        pytest.param((5, 7), (-1, 0), "nonnegative", id="team-a-negative"),
+        pytest.param((5, 7), (0, -1), "nonnegative", id="team-b-negative"),
+        pytest.param(
+            (5, 7),
+            (5, 0),
+            "strictly less",
+            id="team-a-equals-period",
+        ),
+        pytest.param(
+            (5, 7),
+            (0, 7),
+            "strictly less",
+            id="team-b-equals-period",
+        ),
+        pytest.param(
+            (5, 7),
+            (6, 0),
+            "strictly less",
+            id="team-a-exceeds-period",
+        ),
+        pytest.param(
+            (5, 7),
+            (0, 8),
+            "strictly less",
+            id="team-b-exceeds-period",
+        ),
+    ),
+)
+def test_respawn_wave_countdowns_reject_values_outside_each_team_period(
+    period_step_counts: tuple[int, int],
+    countdowns: tuple[int, int],
+    message: str,
+) -> None:
+    """Reject underflow and elementwise values outside the half-open domain."""
+    config, state = _valid_state()
+    config = config._replace(
+        team_respawn_wave_period_step_count=jnp.asarray(
+            period_step_counts,
+            dtype=jnp.int32,
+        )
+    )
+    state = state._replace(
+        team_respawn_wave_countdowns=jnp.asarray(countdowns, dtype=jnp.int32)
+    )
+
+    with pytest.raises(ValueError, match=message):
+        validate_env_state(config, state)
+
+
+@pytest.mark.parametrize(
+    ("duration", "counter"),
+    (
+        pytest.param(0, 0, id="disabled"),
+        pytest.param(1, 1, id="single-transition"),
+        pytest.param(3, 3, id="official-maximum"),
+        pytest.param(7, 4, id="larger-config-intermediate"),
+    ),
+)
+def test_spawn_shield_counter_accepts_configured_living_domain(
+    duration: int,
+    counter: int,
+) -> None:
+    """Accept any living counter in the closed configured duration range."""
+    config, state = _valid_state()
+    config = config._replace(spawn_shield_duration_steps=duration)
+    state = state._replace(
+        spawn_shield_durations=state.spawn_shield_durations.at[0].set(counter)
+    )
+
+    assert validate_env_state(config, state) is None
+
+
+@pytest.mark.parametrize(
+    ("counter", "message"),
+    (
+        pytest.param(-1, "nonnegative", id="negative"),
+        pytest.param(4, "spawn_shield_duration_steps", id="above-configured-duration"),
+    ),
+)
+def test_spawn_shield_counter_rejects_values_outside_configured_domain(
+    counter: int,
+    message: str,
+) -> None:
+    """Reject underflow and counters exceeding the public config authority."""
+    config, state = _valid_state()
+    invalid_state = state._replace(
+        spawn_shield_durations=state.spawn_shield_durations.at[0].set(counter)
+    )
+
+    with pytest.raises(ValueError, match=message):
+        validate_env_state(config, invalid_state)
+
+
+def test_spawn_shield_counter_must_be_zero_for_dead_and_inactive_slots() -> None:
+    """Prevent protection memory from surviving death or entering padding."""
+    config, state = _valid_state(team_sizes=(1, 1))
+    dead_state = state._replace(
+        alive_mask=state.alive_mask.at[0].set(False),
+        current_health=state.current_health.at[0].set(0.0),
+        spawn_shield_durations=state.spawn_shield_durations.at[0].set(1),
+    )
+    with pytest.raises(ValueError, match="dead spawn_shield_durations"):
+        validate_env_state(config, dead_state)
+
+    inactive_state = state._replace(
+        spawn_shield_durations=state.spawn_shield_durations.at[1].set(1)
+    )
+    with pytest.raises(ValueError, match="inactive spawn_shield_durations"):
+        validate_env_state(config, inactive_state)
+
+
+def test_disabled_spawn_shield_requires_all_counter_rows_to_be_zero() -> None:
+    """Make duration zero a complete ablation rather than a partial state."""
+    config, state = _valid_state()
+    disabled_config = config._replace(spawn_shield_duration_steps=0)
+    invalid_state = state._replace(
+        spawn_shield_durations=state.spawn_shield_durations.at[0].set(1)
+    )
+
+    with pytest.raises(ValueError, match="spawn_shield_duration_steps"):
+        validate_env_state(disabled_config, invalid_state)
+
+
+@pytest.mark.parametrize(
+    "stun_channels",
+    (
+        pytest.param((0,), id="warrior-charge"),
+        pytest.param((1,), id="hunter-trap"),
+        pytest.param((2,), id="rogue-poison"),
+        pytest.param(tuple(range(NUM_STUN_CHANNELS)), id="multiple-channels"),
+    ),
+)
+@pytest.mark.parametrize(
+    "spawn_shield_duration",
+    (
+        pytest.param(1, id="one-step-remaining"),
+        pytest.param(3, id="configured-maximum"),
+    ),
+)
+def test_spawn_shield_and_stun_cannot_coexist_on_one_living_slot(
+    stun_channels: tuple[int, ...],
+    spawn_shield_duration: int,
+) -> None:
+    """Reject lifecycle states that combine shielding with any active stun."""
+    config, state = _valid_state()
+    stun_durations = state.stun_durations
+    for channel in stun_channels:
+        stun_durations = stun_durations.at[0, channel].set(1)
+    invalid_state = state._replace(
+        stun_durations=stun_durations,
+        spawn_shield_durations=state.spawn_shield_durations.at[0].set(
+            spawn_shield_duration
+        ),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="spawn_shield_durations and stun_durations",
+    ):
+        validate_env_state(config, invalid_state)
+
+
+def test_spawn_shield_stun_exclusion_preserves_each_independent_state() -> None:
+    """Accept shielding without stun and stun without shielding."""
+    config, state = _valid_state()
+    shielded_state = state._replace(
+        spawn_shield_durations=state.spawn_shield_durations.at[0].set(
+            config.spawn_shield_duration_steps
+        )
+    )
+    stunned_state = state._replace(
+        stun_durations=state.stun_durations.at[0].set(
+            jnp.ones((NUM_STUN_CHANNELS,), dtype=jnp.int32)
+        )
+    )
+
+    assert validate_env_state(config, shielded_state) is None
+    assert validate_env_state(config, stunned_state) is None
+
+
+def test_out_of_combat_countdown_accepts_each_resolved_delay_inclusively() -> None:
+    """Accept every living slot at its class-resolved closed upper bound."""
+    config, state = _valid_state()
+    bounded_state = state._replace(
+        steps_until_out_of_combat=config.agent_profile.out_of_combat_delay_steps
+    )
+
+    assert validate_env_state(config, bounded_state) is None
+
+
+@pytest.mark.parametrize(
+    ("slot", "countdown", "message"),
+    (
+        pytest.param(0, -1, "nonnegative", id="negative"),
+        pytest.param(3, 4, "resolved per-slot delay", id="above-rogue-delay"),
+    ),
+)
+def test_out_of_combat_countdown_rejects_values_outside_resolved_slot_domain(
+    slot: int,
+    countdown: int,
+    message: str,
+) -> None:
+    """Reject underflow and row-wise overflow against the resolved profile."""
+    config, state = _valid_state()
+    invalid_state = state._replace(
+        steps_until_out_of_combat=state.steps_until_out_of_combat.at[slot].set(
+            countdown
+        )
+    )
+
+    with pytest.raises(ValueError, match=message):
+        validate_env_state(config, invalid_state)
+
+
+def test_out_of_combat_countdown_must_be_zero_for_dead_and_inactive_slots() -> None:
+    """Prevent recovery memory from surviving death or entering padding."""
+    config, state = _valid_state(team_sizes=(1, 1))
+    dead_state = state._replace(
+        alive_mask=state.alive_mask.at[0].set(False),
+        current_health=state.current_health.at[0].set(0.0),
+        steps_until_out_of_combat=state.steps_until_out_of_combat.at[0].set(1),
+    )
+    with pytest.raises(
+        ValueError,
+        match="dead steps_until_out_of_combat",
+    ):
+        validate_env_state(config, dead_state)
+
+    inactive_state = state._replace(
+        steps_until_out_of_combat=state.steps_until_out_of_combat.at[1].set(1)
+    )
+    with pytest.raises(
+        ValueError,
+        match="inactive steps_until_out_of_combat",
+    ):
+        validate_env_state(config, inactive_state)
 
 
 @pytest.mark.parametrize(
@@ -676,6 +978,11 @@ def test_mage_burst_duration_is_owned_only_by_configured_mages() -> None:
             id="priest-freedom",
         ),
         pytest.param(
+            "steps_until_out_of_combat",
+            None,
+            id="out-of-combat-countdown",
+        ),
+        pytest.param(
             "previous_timestep_move_actions",
             None,
             id="previous-move",
@@ -787,6 +1094,106 @@ def test_absent_previous_action_requires_zero_history(field_name: str) -> None:
         match="has_previous_timestep_joint_action",
     ):
         validate_env_state(config, invalid_state)
+
+
+@pytest.mark.parametrize(
+    "combat_head",
+    (
+        pytest.param("target", id="target"),
+        pytest.param("ultimate", id="ultimate"),
+    ),
+)
+def test_curated_scenario_rejects_shielded_source_combat_history(
+    combat_head: str,
+) -> None:
+    """Keep authored shielded-source history movement-only."""
+    config, state = _valid_state()
+    previous_targets = state.previous_timestep_select_target_actions
+    previous_ultimates = state.previous_timestep_use_ultimate_actions
+    if combat_head == "target":
+        previous_targets = previous_targets.at[0].set(2)
+    else:
+        previous_ultimates = previous_ultimates.at[0].set(1)
+    inconsistent_state = state._replace(
+        spawn_shield_durations=state.spawn_shield_durations.at[0].set(2),
+        previous_timestep_select_target_actions=previous_targets,
+        previous_timestep_use_ultimate_actions=previous_ultimates,
+        has_previous_timestep_joint_action=jnp.asarray(True),
+    )
+
+    assert validate_env_state(config, inconsistent_state) is None
+    with pytest.raises(ValueError, match="shielded scenario source"):
+        validate_scenario_initial_state(config, inconsistent_state)
+
+
+@pytest.mark.parametrize(
+    ("source_slot", "target_action", "shielded_recipient_slot"),
+    (
+        pytest.param(0, 2, 1, id="team-a-ally"),
+        pytest.param(0, 1 + MAX_AGENTS_PER_TEAM, 5, id="team-a-enemy"),
+        pytest.param(5, 2, 6, id="team-b-ally"),
+        pytest.param(5, 1 + MAX_AGENTS_PER_TEAM, 0, id="team-b-enemy"),
+    ),
+)
+def test_curated_scenario_rejects_history_targeting_shielded_recipient(
+    source_slot: int,
+    target_action: int,
+    shielded_recipient_slot: int,
+) -> None:
+    """Reject impossible authored target provenance for either team relation."""
+    config, state = _valid_state()
+    inconsistent_state = state._replace(
+        spawn_shield_durations=state.spawn_shield_durations.at[
+            shielded_recipient_slot
+        ].set(2),
+        previous_timestep_select_target_actions=(
+            state.previous_timestep_select_target_actions.at[source_slot].set(
+                target_action
+            )
+        ),
+        has_previous_timestep_joint_action=jnp.asarray(True),
+    )
+
+    assert validate_env_state(config, inconsistent_state) is None
+    with pytest.raises(ValueError, match="currently shielded recipient"):
+        validate_scenario_initial_state(config, inconsistent_state)
+
+
+@pytest.mark.parametrize(
+    "recipient_condition",
+    (
+        pytest.param("out-of-range", id="out-of-range"),
+        pytest.param("hidden", id="hidden"),
+        pytest.param("dead", id="dead"),
+    ),
+)
+def test_curated_scenario_preserves_nonshielded_historical_target_identity(
+    recipient_condition: str,
+) -> None:
+    """Do not reinterpret accepted target history from current observability."""
+    obstacles = None
+    if recipient_condition == "hidden":
+        obstacles = (
+            _empty_obstacles().at[0].set(_wall(x=15.0, y=2.0, width=2.0, height=4.0))
+        )
+    config, state = _valid_state(obstacles=obstacles)
+    recipient_slot = MAX_AGENTS_PER_TEAM
+    historical_state = state._replace(
+        previous_timestep_select_target_actions=(
+            state.previous_timestep_select_target_actions.at[0].set(
+                1 + MAX_AGENTS_PER_TEAM
+            )
+        ),
+        has_previous_timestep_joint_action=jnp.asarray(True),
+    )
+    if recipient_condition == "dead":
+        historical_state = historical_state._replace(
+            alive_mask=historical_state.alive_mask.at[recipient_slot].set(False),
+            current_health=historical_state.current_health.at[recipient_slot].set(0.0),
+        )
+
+    assert validate_env_state(config, historical_state) is None
+    assert validate_scenario_initial_state(config, historical_state) is None
 
 
 @pytest.mark.parametrize(
@@ -967,13 +1374,13 @@ def test_preserved_corpse_may_overlap_a_living_body() -> None:
 def test_runtime_validator_accepts_public_death_and_corpse_successors() -> None:
     """Validate actual public successor states without entering traced execution."""
     config = _valid_config(team_sizes=(1, 1))
-    positions = (
-        config.initial_agent_positions.at[0]
+    spawn_pad_positions = (
+        config.team_spawn_pad_positions.at[0, 0]
         .set(jnp.asarray((2.0, 2.0), dtype=jnp.float32))
-        .at[MAX_AGENTS_PER_TEAM]
+        .at[1, 0]
         .set(jnp.asarray((4.0, 2.0), dtype=jnp.float32))
     )
-    config = config._replace(initial_agent_positions=positions)
+    config = config._replace(team_spawn_pad_positions=spawn_pad_positions)
     state, _, _, _ = reset(config, jax.random.key(21))
     target_slot = MAX_AGENTS_PER_TEAM
     state = state._replace(current_health=state.current_health.at[target_slot].set(1.0))
@@ -1015,13 +1422,13 @@ def test_runtime_validator_accepts_an_actual_boundary_residual_successor() -> No
     """Accept fixed-pass overlap only at the runtime/replay snapshot boundary."""
     config = _valid_config(team_sizes=(1, 1))
     moving_slot = MAX_AGENTS_PER_TEAM
-    positions = (
-        config.initial_agent_positions.at[0]
+    spawn_pad_positions = (
+        config.team_spawn_pad_positions.at[0, 0]
         .set(jnp.asarray((0.5, 10.0), dtype=jnp.float32))
-        .at[moving_slot]
+        .at[1, 0]
         .set(jnp.asarray((2.0, 10.0), dtype=jnp.float32))
     )
-    config = config._replace(initial_agent_positions=positions)
+    config = config._replace(team_spawn_pad_positions=spawn_pad_positions)
     state, _, action_mask, _ = reset(config, jax.random.key(31))
     movement = (
         jnp.full((MAX_AGENT_SLOTS,), MOVE_STAY, dtype=jnp.int32)

@@ -398,9 +398,9 @@ def test_non_health_activations_do_not_create_zero_health_delta_visuals() -> Non
         if isinstance(event, NetHealthEventV1)
     }
 
-    assert health_visual_slots == {2, 5, 7}
+    assert health_visual_slots == {2, 5, 6, 7}
     assert 5 in health_visual_slots  # Rogue Poison carries approved direct damage.
-    assert 6 not in health_visual_slots  # Hunter Trap carries no direct health delta.
+    assert 6 in health_visual_slots  # Hunter Trap carries approved direct damage.
 
 
 def test_activation_events_preserve_multiplicity_successor_anchors_and_no_amount() -> (
@@ -768,8 +768,10 @@ def test_extract_transition_retains_every_public_before_after_artifact() -> None
     after = submit_fixture_frame(before, scenario.frames[0])
     transition = after.last_transition
     assert transition is not None
+    assert transition.config is before.config
     reconstructed = extract_transition_view(
         scenario_name=transition.scenario_name,
+        config=transition.config,
         submission_kind=transition.submission_kind,
         report_actor_slots=transition.report_actor_slots,
         before_state=transition.before_state,
@@ -783,6 +785,7 @@ def test_extract_transition_retains_every_public_before_after_artifact() -> None
         done_flags=transition.done_flags,
         info=transition.info,
     )
+    assert reconstructed.config is transition.config
     assert reconstructed.before_state is transition.before_state
     assert reconstructed.before_observation is transition.before_observation
     assert reconstructed.before_action_mask is transition.before_action_mask

@@ -27,6 +27,7 @@ from marl_battlegrounds.core.types import (
     AGENT_FEATURE_X,
     AGENT_FEATURE_Y,
     CLASS_NEUTRAL,
+    ENVIRONMENT_DIMENSIONS,
     HUNTER_CLASS_ID,
     MAGE_CLASS_ID,
     MAX_AGENT_SLOTS,
@@ -157,8 +158,13 @@ def _config(
         map_height=12.0,
         obstacles=_empty_obstacles(),
         agent_profile=profile,
-        initial_agent_positions=jnp.where(profile.active_mask[:, None], positions, 0.0),
         ordinary_movement_distance_scale=1.0,
+        team_spawn_pad_positions=positions.reshape(
+            (2, MAX_AGENTS_PER_TEAM, ENVIRONMENT_DIMENSIONS)
+        ),
+        spawn_shield_duration_steps=3,
+        spawn_shield_movement_speed=2.0,
+        team_respawn_wave_period_step_count=jnp.asarray((5, 5), dtype=jnp.int32),
     )
 
 
@@ -653,7 +659,9 @@ def test_effective_movement_speed_aligns_status_and_participation_control(
         slow_durations,
         freedom_durations,
         stun_durations,
+        jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
         base_movement_speeds,
+        2.0,
         active_and_alive_mask,
         movement_scale,
     )
@@ -663,7 +671,9 @@ def test_effective_movement_speed_aligns_status_and_participation_control(
             slow_durations,
             freedom_durations,
             stun_durations,
+            jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
             base_movement_speeds,
+            2.0,
             active_and_alive_mask,
             movement_scale,
         ),
