@@ -1032,7 +1032,7 @@ test("converging Charge routes reproject while displacement chords persist exact
   await expect(page.locator(CHOREOGRAPHY_ROOT)).toHaveCount(0);
 });
 
-test("Trap lifecycle distinguishes application, break, aging, refresh, and ambiguous ending", async ({
+test("Trap lifecycle distinguishes application, break, aging, break plus reapplication, and ambiguous ending", async ({
   page,
 }) => {
   await loadScenario(page, "trap_lifecycle");
@@ -1087,12 +1087,20 @@ test("Trap lifecycle distinguishes application, break, aging, refresh, and ambig
   await skipIfAvailable(page);
 
   await advanceAnimatedFrame(page, 4);
-  const refreshed = page.locator(
-    `${CHOREOGRAPHY_ROOT} .combat-effect--status-lifecycle[data-token-id="stun_hunter_trap"][data-lifecycle="refreshed"]`,
+  const brokenAndReapplied = page.locator(
+    `${CHOREOGRAPHY_ROOT} .combat-effect--status-lifecycle[data-token-id="stun_hunter_trap"][data-lifecycle="trap_broken_and_reapplied"]`,
   );
-  await expect(refreshed).toHaveCount(1);
-  await expect(refreshed).toHaveAttribute("data-recipient-slot", "6");
-  await expect(refreshed).toHaveAttribute("data-application-event-ids", /activation/);
+  await expect(
+    page.locator(
+      `${CHOREOGRAPHY_ROOT} .combat-effect--activation[data-token-id="hunter_trap"] .combat-impact__semantic--damage`,
+    ),
+  ).toHaveCount(1);
+  await expect(brokenAndReapplied).toHaveCount(1);
+  await expect(brokenAndReapplied).toHaveAttribute("data-recipient-slot", "6");
+  await expect(brokenAndReapplied).toHaveAttribute(
+    "data-application-event-ids",
+    /activation/,
+  );
   await assertBoundedChoreography(page);
   await skipIfAvailable(page);
 

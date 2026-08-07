@@ -74,7 +74,7 @@ isolation.
 | Aura multiplier values do not overlap icons | Modifier-cell geometry assertions | [Maximum status stack][max-status], [crowded minimum viewport][crowded] |
 | Repeated/focus damage and coordinated healing remain readable | Exact activation, route, recipient-NET, and collision assertions | [Focus fire and healing][focus-fire], [moving focus at 960×600][moving-focus] |
 | Close, reciprocal, crossing, and Charge routes keep source-to-recipient direction | Route tangent/unit tests and scenario endpoint assertions | [Moving Basic crossfire][moving-basic], [Charge convergence][charge-convergence] |
-| Trap application, exact break, refresh, ambiguous end, and expiry remain distinct | Lifecycle classification and event-ID assertions | [Applied][trap-applied], [exact break][trap-break], [refresh][trap-refresh], [ambiguous end and expiry][trap-end] |
+| Trap damage impact, application, exact break, break plus reapplication, ambiguous end, and expiry remain distinct | Activation-impact grammar, lifecycle classification, and event-ID assertions | [Applied][trap-applied], [exact break][trap-break], [damage plus reapplication][trap-reapplication], [ambiguous end and expiry][trap-end] |
 | One tooltip wins overlaps, clamps to the viewport, and exposes full neutral overflow | Tooltip arbitration, content, leave, focus, edge, and POV tests | [Agent over broad fields][agent-tooltip], [edge-clamped overflow][overflow-tooltip] |
 | Agent POV omits hidden entities and route endpoints server-side | Python payload projection tests and browser DOM absence assertions | [Redacted POV fixture][pov] |
 | Movement scale is exact and professionally integrated | Protocol/service zero-step reset tests and slider E2E | [`0.10` override][scale-010], [authored default restored][scale-default] |
@@ -106,7 +106,7 @@ isolation.
 - Trap lifecycle:
   [application][trap-applied],
   [exact break][trap-break],
-  [refresh][trap-refresh], and
+  [break plus reapplication][trap-reapplication], and
   [ambiguous ending beside natural expiry][trap-end].
 
 ### Synthetic presentation fixtures
@@ -170,7 +170,7 @@ acceptance.
 [trap-applied]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/trap-lifecycle-t1-applied-1440x900-linux.png
 [trap-break]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/trap-lifecycle-t2-broken-1440x900-linux.png
 [trap-end]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/trap-lifecycle-t5-ambiguous-and-expired-1440x900-linux.png
-[trap-refresh]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/trap-lifecycle-t4-refreshed-1440x900-linux.png
+[trap-reapplication]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/trap-lifecycle-t4-broken-and-reapplied-1440x900-linux.png
 [ultimate-hunter]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/mirrored-ultimates-hunter-trap-t3-mid-impact-1440x900-linux.png
 [ultimate-mage]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/mirrored-ultimates-mage-burst-t1-mid-impact-1440x900-linux.png
 [ultimate-priest]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/mirrored-ultimates-holy-word-t5-mid-impact-1440x900-linux.png

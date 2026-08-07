@@ -67,7 +67,10 @@ from marl_battlegrounds.rendering.scene import (
 from marl_battlegrounds.rendering.scene import (
     Lane as SceneLane,
 )
-from marl_battlegrounds.rendering.vocabulary import ActivationTokenId
+from marl_battlegrounds.rendering.vocabulary import (
+    ActivationTokenId,
+    StatusLifecycleKind,
+)
 from scripts.dev.visual_debugger.model import (
     AcceptedActivation,
     ActionRejection,
@@ -373,7 +376,8 @@ def _positive_damage_targets(
         activation.target_global_slot
         for activation in activations
         if activation.target_global_slot is not None
-        and activation.kind in ("basic_damage", "warrior_charge", "rogue_poison")
+        and activation.kind
+        in ("basic_damage", "warrior_charge", "hunter_trap", "rogue_poison")
     }
 
 
@@ -487,6 +491,22 @@ def _classify_status_change(
     if before == after and not has_application:
         return "unchanged"
     return "cleared_unclassified"
+
+
+def _status_change_with_damage_context(
+    status: StatusTransition,
+    positive_damage_targets: set[int],
+) -> StatusChange:
+    """Refine legacy Trap refresh inference when accepted damage proves a break."""
+    if (
+        status.status_kind == "stun_hunter_trap"
+        and status.change == "refreshed"
+        and status.duration_before > 1
+        and status.duration_after == _STATUS_CATALOG_DURATIONS["stun_hunter_trap"]
+        and status.global_slot in positive_damage_targets
+    ):
+        return "trap_broken_and_reapplied"
+    return status.change
 
 
 def extract_transition_view(
@@ -797,6 +817,7 @@ _DIRECT_HEALTH_ACTIVATIONS: tuple[ActivationTokenId, ...] = (
     "basic_heal",
     "holy_word",
     "warrior_charge",
+    "hunter_trap",
     "rogue_poison",
 )
 
@@ -1006,15 +1027,10 @@ def derive_visual_event_batch(
             (status.global_slot, status.status_kind),
             (),
         )
-        change = status.change
-        if (
-            status.status_kind == "stun_hunter_trap"
-            and application_ids
-            and status.duration_before > 1
-            and status.duration_after == _STATUS_CATALOG_DURATIONS["stun_hunter_trap"]
-            and status.global_slot in positive_damage_targets
-        ):
-            change = "trap_broken_and_reapplied"
+        change = cast(
+            StatusLifecycleKind,
+            _status_change_with_damage_context(status, positive_damage_targets),
+        )
         events.append(
             StatusLifecycleEventV1(
                 event_id=visual_event_id(
@@ -1250,18 +1266,11 @@ def build_play_by_play_lines(transition: TransitionView) -> tuple[str, ...]:
                 f"{_move_name(actor.submitted_move_action)} movement was {result}."
             )
 
-    health_capable_kinds = {
-        "basic_damage",
-        "basic_heal",
-        "holy_word",
-        "warrior_charge",
-        "rogue_poison",
-    }
     contributions: dict[int, list[AcceptedActivation]] = {}
     for activation in transition.accepted_activations:
         if (
             activation.target_global_slot is not None
-            and activation.kind in health_capable_kinds
+            and activation.kind in _DIRECT_HEALTH_ACTIVATIONS
         ):
             contributions.setdefault(activation.target_global_slot, []).append(
                 activation
@@ -1309,19 +1318,23 @@ def build_play_by_play_lines(transition: TransitionView) -> tuple[str, ...]:
             identity = _observation_identity(observation, actor.actor_global_slot)
             lines.append(f"Successor state: {identity} Ultimate cooldown is ready.")
 
+    positive_damage_targets = _positive_damage_targets(transition.accepted_activations)
     for status in transition.status_transitions:
-        if status.change == "unchanged":
+        status_change = _status_change_with_damage_context(
+            status, positive_damage_targets
+        )
+        if status_change == "unchanged":
             continue
         identity = _observation_identity(observation, status.global_slot)
         label = _STATUS_NAMES[status.status_kind]
         if status.duration_after > 0:
-            result = f"has {label} {status.duration_after} ({status.change})"
-        elif status.change == "trap_broken":
+            result = f"has {label} {status.duration_after} ({status_change})"
+        elif status_change == "trap_broken":
             result = "has no TRAP (broken after an accepted damage activation)"
-        elif status.change == "cleared_unclassified":
+        elif status_change == "cleared_unclassified":
             result = f"has no {label} (ending cause is not uniquely exposed)"
         else:
-            result = f"has no {label} ({status.change})"
+            result = f"has no {label} ({status_change})"
         lines.append(f"Successor state: {identity} {result}.")
     return tuple(lines or ("No reported actor changed public state.",))
 
@@ -1470,18 +1483,11 @@ def _technical_transition_lines(
                 )
             )
 
-    health_capable_kinds = {
-        "basic_damage",
-        "basic_heal",
-        "holy_word",
-        "warrior_charge",
-        "rogue_poison",
-    }
     health_targets = {
         activation.target_global_slot
         for activation in transition.accepted_activations
         if activation.target_global_slot is not None
-        and activation.kind in health_capable_kinds
+        and activation.kind in _DIRECT_HEALTH_ACTIVATIONS
     }
     for actor in transition.actor_transitions:
         if actor.net_health_delta != 0.0 or actor.actor_global_slot in health_targets:
@@ -1495,11 +1501,15 @@ def _technical_transition_lines(
                 f"Cooldown id_{actor.actor_global_slot} "
                 f"{actor.cooldown_before}->{actor.cooldown_after}"
             )
+    positive_damage_targets = _positive_damage_targets(transition.accepted_activations)
     for status in transition.status_transitions:
-        if status.change != "unchanged":
+        status_change = _status_change_with_damage_context(
+            status, positive_damage_targets
+        )
+        if status_change != "unchanged":
             lines.append(
                 f"Status id_{status.global_slot} {_STATUS_NAMES[status.status_kind]} "
-                f"{status.duration_before}->{status.duration_after} {status.change}"
+                f"{status.duration_before}->{status.duration_after} {status_change}"
             )
     for activation in transition.accepted_activations:
         recipient = (

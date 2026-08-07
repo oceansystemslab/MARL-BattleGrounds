@@ -31,6 +31,7 @@ from scripts.dev.visual_debugger.diagnostics import (
 )
 from scripts.dev.visual_debugger.model import DebuggerSession, SelectedTargetFacts
 from scripts.dev.visual_debugger.scenarios import get_scenario
+from scripts.dev.visual_debugger.scene_adapter import build_visual_event_batch
 from scripts.dev.visual_debugger.targeting import global_slot_to_target_action
 from tests.visual_debugger_fixtures import (
     rejection_lane_scenario,
@@ -401,6 +402,100 @@ def test_non_health_activations_do_not_create_zero_health_delta_visuals() -> Non
     assert health_visual_slots == {2, 5, 6, 7}
     assert 5 in health_visual_slots  # Rogue Poison carries approved direct damage.
     assert 6 in health_visual_slots  # Hunter Trap carries approved direct damage.
+
+
+def test_hunter_trap_preserves_zero_net_health_event_when_healing_offsets_damage() -> (
+    None
+):
+    session = _session("ultimate_showcase", 2)
+    session = submit_next_script_frame(session)
+    session = submit_next_script_frame(session)
+    transition = session.last_transition
+    assert transition is not None
+
+    trap_activation = next(
+        activation
+        for activation in transition.accepted_activations
+        if activation.kind == "hunter_trap"
+    )
+    assert trap_activation.target_global_slot is not None
+    target_slot = trap_activation.target_global_slot
+    zero_net_transition = replace(
+        transition,
+        actor_transitions=tuple(
+            replace(
+                actor,
+                health_after=actor.health_before,
+                net_health_delta=0.0,
+            )
+            if actor.actor_global_slot == target_slot
+            else actor
+            for actor in transition.actor_transitions
+        ),
+    )
+
+    pov_batch = build_visual_event_batch(
+        replace(session, last_transition=zero_net_transition),
+        audience="agent_pov",
+    )
+    assert pov_batch is not None
+    for batch in (derive_visual_event_batch(zero_net_transition), pov_batch):
+        health_event = next(
+            event
+            for event in batch.events
+            if isinstance(event, NetHealthEventV1)
+            and event.recipient_global_slot == target_slot
+        )
+        assert health_event.net_delta == 0.0
+        assert health_event.outcome == "unchanged"
+
+    formatted = format_concise_transition(zero_net_transition)
+    assert "had a net health change of 0.00 HP" in formatted
+    assert f"Health id_{target_slot}" in formatted
+    assert "net=+0.00" in formatted
+
+
+def test_hunter_trap_damage_is_classified_before_same_transition_reapplication() -> (
+    None
+):
+    session = _session("ultimate_showcase", 2)
+    session = submit_next_script_frame(session)
+    session = submit_next_script_frame(session)
+    transition = session.last_transition
+    assert transition is not None
+
+    trap_status = next(
+        status
+        for status in transition.status_transitions
+        if status.status_kind == "stun_hunter_trap" and status.change == "applied"
+    )
+    reapplication_transition = replace(
+        transition,
+        status_transitions=tuple(
+            replace(status, duration_before=2, change="refreshed")
+            if status is trap_status
+            else status
+            for status in transition.status_transitions
+        ),
+    )
+
+    pov_batch = build_visual_event_batch(
+        replace(session, last_transition=reapplication_transition),
+        audience="agent_pov",
+    )
+    assert pov_batch is not None
+    for batch in (derive_visual_event_batch(reapplication_transition), pov_batch):
+        lifecycle_event = next(
+            event
+            for event in batch.events
+            if isinstance(event, StatusLifecycleEventV1)
+            and event.recipient_global_slot == trap_status.global_slot
+            and event.token_id == "stun_hunter_trap"
+        )
+        assert lifecycle_event.change == "trap_broken_and_reapplied"
+
+    formatted = format_concise_transition(reapplication_transition)
+    assert formatted.count("trap_broken_and_reapplied") == 2
 
 
 def test_activation_events_preserve_multiplicity_successor_anchors_and_no_amount() -> (

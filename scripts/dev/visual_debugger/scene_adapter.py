@@ -622,7 +622,14 @@ def _visible_at(
 
 
 _POV_DIRECT_HEALTH_ACTIVATIONS = frozenset(
-    ("basic_damage", "basic_heal", "holy_word", "warrior_charge", "rogue_poison")
+    (
+        "basic_damage",
+        "basic_heal",
+        "holy_word",
+        "warrior_charge",
+        "hunter_trap",
+        "rogue_poison",
+    )
 )
 
 
@@ -775,7 +782,8 @@ def _pov_event_batch(session: DebuggerSession) -> VisualEventBatchV1:
         ):
             visible_direct_health_targets.add(disclosed_target)
         if (
-            activation.kind in ("basic_damage", "warrior_charge", "rogue_poison")
+            activation.kind
+            in ("basic_damage", "warrior_charge", "hunter_trap", "rogue_poison")
             and disclosed_target is not None
         ):
             visible_positive_damage_targets.add(disclosed_target)

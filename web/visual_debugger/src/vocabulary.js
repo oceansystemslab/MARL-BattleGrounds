@@ -462,7 +462,7 @@ const ACTIVATION_IMPACT_SEMANTICS = Object.freeze({
   holy_word: "healing",
   mage_burst: "local",
   warrior_charge: "damage",
-  hunter_trap: "neutral",
+  hunter_trap: "damage",
   rogue_poison: "damage",
 });
 
