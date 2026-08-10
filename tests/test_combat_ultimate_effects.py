@@ -12,6 +12,7 @@ import marl_battlegrounds.core.combat as combat
 from marl_battlegrounds.core.config import resolve_agent_profile
 from marl_battlegrounds.core.env import (
     _build_observation_and_action_mask,
+    _CombatAuraAggregationResult,
     _compute_global_pairwise_distances_from_agent_positions,
     _derive_aura_damage_multipliers,
     step,
@@ -239,8 +240,8 @@ def _step(
     return next_state, observation, next_mask
 
 
-def _aura_multipliers(config: EnvConfig, state: EnvState) -> tuple[Array, Array]:
-    """Derive current Mage and Warrior aura vectors for a scenario."""
+def _aura_result(config: EnvConfig, state: EnvState) -> _CombatAuraAggregationResult:
+    """Derive the named aura result for a scenario's current snapshot."""
     distances = _compute_global_pairwise_distances_from_agent_positions(
         state.agent_positions
     )
@@ -345,12 +346,12 @@ def test_three_duplicate_auras_are_bounded_and_observation_consistent() -> None:
         positions=positions,
     )
 
-    eager_mage, eager_warrior = _aura_multipliers(config, state)
+    eager = _aura_result(config, state)
     distances = _compute_global_pairwise_distances_from_agent_positions(
         state.agent_positions
     )
-    compiled_mage, compiled_warrior = cast(
-        tuple[Array, Array],
+    compiled = cast(
+        _CombatAuraAggregationResult,
         jax.jit(_derive_aura_damage_multipliers)(
             config,
             distances,
@@ -360,22 +361,66 @@ def test_three_duplicate_auras_are_bounded_and_observation_consistent() -> None:
     )
     observation, _ = _build_observation_and_action_mask(state, config)
 
+    expected_mage_coverage = jnp.zeros((MAX_AGENT_SLOTS, MAX_AGENT_SLOTS), dtype=bool)
+    expected_mage_coverage = expected_mage_coverage.at[:3, :4].set(True)
+    expected_warrior_coverage = jnp.zeros(
+        (MAX_AGENT_SLOTS, MAX_AGENT_SLOTS), dtype=bool
+    )
+    expected_warrior_coverage = expected_warrior_coverage.at[5:8, 5:9].set(True)
+
     assert bool(
-        jnp.allclose(eager_mage[:4], combat.MAGE_DAMAGE_AURA_MULTIPLIER_CEILING)
+        jnp.allclose(
+            eager.mage_damage_amplification_aura_multipliers[:4],
+            combat.MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER_CEILING,
+        )
     )
     assert bool(
         jnp.allclose(
-            eager_warrior[5:9],
+            eager.warrior_damage_mitigation_aura_multipliers[5:9],
             combat.WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER_FLOOR,
         )
     )
-    assert bool(jnp.array_equal(eager_mage, compiled_mage))
-    assert bool(jnp.array_equal(eager_warrior, compiled_warrior))
+    assert bool(
+        jnp.array_equal(
+            eager.aura_facts.is_covered_by_mage_damage_aura_by_emitter_and_beneficiary,
+            expected_mage_coverage,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            eager.aura_facts.is_covered_by_warrior_mitigation_aura_by_emitter_and_beneficiary,
+            expected_warrior_coverage,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            eager.mage_damage_amplification_aura_multipliers,
+            compiled.mage_damage_amplification_aura_multipliers,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            eager.warrior_damage_mitigation_aura_multipliers,
+            compiled.warrior_damage_mitigation_aura_multipliers,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            eager.aura_facts.is_covered_by_mage_damage_aura_by_emitter_and_beneficiary,
+            compiled.aura_facts.is_covered_by_mage_damage_aura_by_emitter_and_beneficiary,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            eager.aura_facts.is_covered_by_warrior_mitigation_aura_by_emitter_and_beneficiary,
+            compiled.aura_facts.is_covered_by_warrior_mitigation_aura_by_emitter_and_beneficiary,
+        )
+    )
     assert (
         observation.self_features[
             3, AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_AURA_MULTIPLIER
         ]
-        == combat.MAGE_DAMAGE_AURA_MULTIPLIER_CEILING
+        == combat.MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER_CEILING
     )
     assert (
         observation.self_features[
@@ -534,7 +579,7 @@ def test_fresh_mage_burst_first_amplifies_next_transition_damage() -> None:
     expected_damage = (
         combat.BASIC_DAMAGE_BY_CLASS[MAGE_CLASS_ID]
         * combat.MAGE_BURST_DAMAGE_MULTIPLIER
-        * combat.MAGE_DAMAGE_AURA_MULTIPLIER
+        * combat.MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER
     )
     assert governed_state.current_health[5] == (
         applied_state.current_health[5] - expected_damage
@@ -576,7 +621,7 @@ def test_charge_damage_uses_burst_mage_aura_and_warrior_mitigation() -> None:
     expected_damage = (
         combat.ULTIMATE_DAMAGE_BY_CLASS[WARRIOR_CLASS_ID]
         * combat.MAGE_BURST_DAMAGE_MULTIPLIER
-        * combat.MAGE_DAMAGE_AURA_MULTIPLIER
+        * combat.MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER
         * combat.WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER
     )
     assert bool(
@@ -603,13 +648,28 @@ def test_charge_then_precommitted_movement_has_one_public_causal_trajectory() ->
         ),
     )
 
-    next_state, next_observation, _, _, next_mask, _ = step(
+    next_state, next_observation, _, _, next_mask, info = step(
         config,
         state,
         current_mask,
         action,
         jax.random.key(51),
     )
+
+    expected_charge_displacement = jnp.zeros(
+        (MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS), dtype=jnp.float32
+    )
+    expected_charge_displacement = expected_charge_displacement.at[
+        _TEAM_A_FIRST_SLOT
+    ].set(jnp.asarray((4.0, 0.0), dtype=jnp.float32))
+    expected_ordinary_displacement = jnp.zeros_like(expected_charge_displacement)
+    expected_ordinary_displacement = expected_ordinary_displacement.at[
+        _TEAM_A_FIRST_SLOT
+    ].set(jnp.asarray((0.0, movement_scale), dtype=jnp.float32))
+    expected_ordinary_displacement = expected_ordinary_displacement.at[
+        _TEAM_B_FIRST_SLOT
+    ].set(jnp.asarray((movement_scale, 0.0), dtype=jnp.float32))
+    physical_facts = info.transition_facts.physical_facts
 
     assert (
         current_observation.self_features[
@@ -628,6 +688,29 @@ def test_charge_then_precommitted_movement_has_one_public_causal_trajectory() ->
         jnp.allclose(
             next_state.agent_positions[_TEAM_B_FIRST_SLOT],
             jnp.asarray((7.0 + movement_scale, 6.0), dtype=jnp.float32),
+            atol=1e-6,
+        )
+    )
+    assert bool(
+        jnp.allclose(
+            physical_facts.charge_phase_displacement_by_agent,
+            expected_charge_displacement,
+            atol=1e-6,
+        )
+    )
+    assert bool(
+        jnp.allclose(
+            physical_facts.ordinary_movement_phase_displacement_by_agent,
+            expected_ordinary_displacement,
+            atol=1e-6,
+        )
+    )
+    assert bool(
+        jnp.allclose(
+            state.agent_positions
+            + physical_facts.charge_phase_displacement_by_agent
+            + physical_facts.ordinary_movement_phase_displacement_by_agent,
+            next_state.agent_positions,
             atol=1e-6,
         )
     )
@@ -701,10 +784,12 @@ def test_charge_and_stay_reaches_source_facing_tangency_in_open_space() -> None:
     """Prove the isolated forced endpoint preserves exact body tangency."""
     config, state = _open_space_charge_scenario()
 
-    next_state, _, _ = _step(
+    next_state, _, _, _, _, info = step(
         config,
         state,
+        _current_action_mask(config, state),
         _joint_action((_TEAM_A_FIRST_SLOT, _FIRST_ENEMY_TARGET, 1)),
+        jax.random.key(23),
     )
 
     source_to_target = (
@@ -721,6 +806,12 @@ def test_charge_and_stay_reaches_source_facing_tangency_in_open_space() -> None:
         )
         * source_to_target_direction
     )
+    expected_charge_displacement = (
+        jnp.zeros((MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS), dtype=jnp.float32)
+        .at[_TEAM_A_FIRST_SLOT]
+        .set(expected_endpoint - state.agent_positions[_TEAM_A_FIRST_SLOT])
+    )
+    physical_facts = info.transition_facts.physical_facts
 
     assert bool(
         jnp.allclose(
@@ -741,6 +832,16 @@ def test_charge_and_stay_reaches_source_facing_tangency_in_open_space() -> None:
             1.0,
             atol=1e-6,
         )
+    )
+    assert bool(
+        jnp.allclose(
+            physical_facts.charge_phase_displacement_by_agent,
+            expected_charge_displacement,
+            atol=1e-6,
+        )
+    )
+    assert bool(
+        jnp.all(physical_facts.ordinary_movement_phase_displacement_by_agent == 0.0)
     )
 
 
@@ -920,7 +1021,13 @@ def test_charge_leaps_over_midpath_body_but_respects_endpoint_body_blocking() ->
         team_sizes=(1, 2),
         positions=endpoint_positions,
     )
-    endpoint_result, _, _ = _step(endpoint_config, endpoint_state, charge)
+    endpoint_result, _, _, _, _, endpoint_info = step(
+        endpoint_config,
+        endpoint_state,
+        _current_action_mask(endpoint_config, endpoint_state),
+        charge,
+        jax.random.key(24),
+    )
     charger_to_blocker_distance = cast(
         Array,
         jnp.linalg.norm(
@@ -934,6 +1041,29 @@ def test_charge_leaps_over_midpath_body_but_respects_endpoint_body_blocking() ->
         jnp.array_equal(
             endpoint_result.agent_positions[0],
             jnp.asarray((6.0, 6.0), dtype=jnp.float32),
+        )
+    )
+    endpoint_physical_facts = endpoint_info.transition_facts.physical_facts
+    intended_charge_displacement = jnp.asarray((4.0, 0.0), dtype=jnp.float32)
+    assert not bool(
+        jnp.allclose(
+            endpoint_physical_facts.charge_phase_displacement_by_agent[0],
+            intended_charge_displacement,
+        )
+    )
+    assert bool(
+        jnp.any(endpoint_physical_facts.charge_phase_displacement_by_agent[5:7] != 0.0)
+    )
+    assert bool(
+        jnp.any(
+            endpoint_physical_facts.ordinary_movement_phase_displacement_by_agent != 0.0
+        )
+    )
+    assert bool(
+        jnp.allclose(
+            endpoint_physical_facts.charge_phase_displacement_by_agent
+            + endpoint_physical_facts.ordinary_movement_phase_displacement_by_agent,
+            endpoint_result.agent_positions - endpoint_state.agent_positions,
         )
     )
 
@@ -971,7 +1101,13 @@ def test_charge_leaps_over_midpath_pillar_but_respects_endpoint_overlap() -> Non
         positions=positions,
         obstacles=endpoint_obstacles,
     )
-    endpoint_result, _, _ = _step(endpoint_config, endpoint_state, charge)
+    endpoint_result, _, _, _, _, endpoint_info = step(
+        endpoint_config,
+        endpoint_state,
+        _current_action_mask(endpoint_config, endpoint_state),
+        charge,
+        jax.random.key(25),
+    )
 
     assert not bool(
         jnp.allclose(
@@ -985,6 +1121,18 @@ def test_charge_leaps_over_midpath_pillar_but_respects_endpoint_overlap() -> Non
             endpoint_result.agent_positions[0],
             endpoint_config.agent_profile.agent_radii[0],
             endpoint_obstacles[0],
+        )
+    )
+    endpoint_physical_facts = endpoint_info.transition_facts.physical_facts
+    assert bool(
+        jnp.allclose(
+            endpoint_physical_facts.charge_phase_displacement_by_agent,
+            endpoint_result.agent_positions - endpoint_state.agent_positions,
+        )
+    )
+    assert bool(
+        jnp.all(
+            endpoint_physical_facts.ordinary_movement_phase_displacement_by_agent == 0.0
         )
     )
 
@@ -1209,7 +1357,7 @@ def test_prestate_warrior_aura_governs_health_before_charge_breaks_formation() -
 
     expected_damage = (
         combat.BASIC_DAMAGE_BY_CLASS[MAGE_CLASS_ID]
-        * combat.MAGE_DAMAGE_AURA_MULTIPLIER
+        * combat.MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER
         * combat.WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER
     )
     assert bool(

@@ -389,7 +389,10 @@ def test_attached_aura_features_follow_slot_aligned_team_geometry() -> None:
     active_slots = jnp.asarray((0, 1, MAX_AGENTS_PER_TEAM, MAX_AGENTS_PER_TEAM + 1))
     inactive_slots = jnp.asarray((2, 3, 4, 7, 8, 9))
     assert bool(
-        jnp.all(mage_attached[active_slots] == combat.MAGE_DAMAGE_AURA_MULTIPLIER)
+        jnp.all(
+            mage_attached[active_slots]
+            == combat.MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER
+        )
     )
     assert bool(
         jnp.all(
@@ -402,18 +405,30 @@ def test_attached_aura_features_follow_slot_aligned_team_geometry() -> None:
 
 
 @pytest.mark.parametrize(
-    ("start_distance", "move_west", "expected_multiplier"),
     (
-        pytest.param(2.25, True, combat.MAGE_DAMAGE_AURA_MULTIPLIER, id="enters"),
-        pytest.param(1.75, False, 1.0, id="leaves"),
+        "start_distance",
+        "move_west",
+        "expected_transition_start_coverage",
+        "expected_multiplier",
+    ),
+    (
+        pytest.param(
+            2.25,
+            True,
+            False,
+            combat.MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER,
+            id="enters",
+        ),
+        pytest.param(1.75, False, True, 1.0, id="leaves"),
     ),
 )
-def test_returned_aura_features_use_post_movement_positions(
+def test_aura_facts_use_start_positions_while_features_use_successor_positions(
     start_distance: float,
     move_west: bool,
+    expected_transition_start_coverage: bool,
     expected_multiplier: float,
 ) -> None:
-    """Prove returned attached modifiers describe the produced next state."""
+    """Separate transition-start aura facts from successor observation truth."""
     config = _config((2, 1))
     state, *_ = reset(config, jax.random.key(12))
     positions = state.agent_positions
@@ -427,7 +442,7 @@ def test_returned_aura_features_use_post_movement_positions(
     state = state._replace(agent_positions=positions)
     action = _action(west_slots=(1,)) if move_west else _action(east_slots=(1,))
 
-    next_state, observation, *_ = step(
+    next_state, observation, _, _, _, info = step(
         config,
         state,
         _current_action_mask(config, state),
@@ -435,12 +450,21 @@ def test_returned_aura_features_use_post_movement_positions(
         jax.random.key(13),
     )
 
+    aura_facts = info.transition_facts.aura_facts
+    transition_start_coverage = (
+        aura_facts.is_covered_by_mage_damage_aura_by_emitter_and_beneficiary[0, 1]
+    )
     next_distance = cast(
         Array,
         jnp.linalg.norm(next_state.agent_positions[1] - next_state.agent_positions[0]),
     )
-    assert bool(next_distance <= combat.MAGE_DAMAGE_AURA_RADIUS) is (
-        expected_multiplier == combat.MAGE_DAMAGE_AURA_MULTIPLIER
+    successor_is_covered = bool(
+        next_distance <= combat.MAGE_DAMAGE_AMPLIFICATION_AURA_RADIUS
+    )
+    assert bool(transition_start_coverage) is expected_transition_start_coverage
+    assert successor_is_covered is not expected_transition_start_coverage
+    assert bool(next_distance <= combat.MAGE_DAMAGE_AMPLIFICATION_AURA_RADIUS) is (
+        expected_multiplier == combat.MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER
     )
     assert (
         observation.self_features[
@@ -588,12 +612,12 @@ def test_capabilities_are_class_owned_payloads_not_cooldown_availability() -> No
         (
             AGENT_FEATURE_CAPABILITY_DAMAGE_AMPLIFICATION_MAGE_AURA_RADIUS,
             MAGE_CLASS_ID,
-            combat.MAGE_DAMAGE_AURA_RADIUS,
+            combat.MAGE_DAMAGE_AMPLIFICATION_AURA_RADIUS,
         ),
         (
             AGENT_FEATURE_CAPABILITY_DAMAGE_AMPLIFICATION_MAGE_AURA_MULTIPLIER,
             MAGE_CLASS_ID,
-            combat.MAGE_DAMAGE_AURA_MULTIPLIER,
+            combat.MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER,
         ),
         (
             AGENT_FEATURE_CAPABILITY_DAMAGE_MITIGATION_WARRIOR_AURA_RADIUS,

@@ -705,8 +705,8 @@ def test_effective_movement_speed_aligns_status_and_participation_control(
 
 
 def test_passive_and_support_defaults_are_scalar_parameters() -> None:
-    assert combat.MAGE_DAMAGE_AURA_RADIUS > 0.0
-    assert combat.MAGE_DAMAGE_AURA_MULTIPLIER > 1.0
+    assert combat.MAGE_DAMAGE_AMPLIFICATION_AURA_RADIUS > 0.0
+    assert combat.MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER > 1.0
 
     assert combat.WARRIOR_DAMAGE_MITIGATION_AURA_RADIUS > 0.0
     assert 0.0 < combat.WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER < 1.0

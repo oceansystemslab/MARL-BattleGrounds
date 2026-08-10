@@ -15,8 +15,9 @@ from marl_battlegrounds.core.combat import (
     HUNTER_BASIC_SLOW_DURATION_TICKS,
     HUNTER_BASIC_SLOW_MULTIPLIER,
     MAGE_BURST_DAMAGE_MULTIPLIER,
-    MAGE_DAMAGE_AURA_MULTIPLIER,
-    MAGE_DAMAGE_AURA_RADIUS,
+    MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER,
+    MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER_CEILING,
+    MAGE_DAMAGE_AMPLIFICATION_AURA_RADIUS,
     PRIEST_HEAL_SPEED_FLOOR,
     PRIEST_HEAL_SPEED_FLOOR_DURATION_TICKS,
     ROGUE_POISON_ANTI_HEAL_DURATION_TICKS,
@@ -29,10 +30,13 @@ from marl_battlegrounds.core.combat import (
     WARRIOR_CHARGE_SLOW_MULTIPLIER,
     WARRIOR_CHARGE_STUN_DURATION_TICKS,
     WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER,
+    WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER_FLOOR,
+    WARRIOR_DAMAGE_MITIGATION_AURA_RADIUS,
 )
 from marl_battlegrounds.core.config import resolve_agent_profile
 from marl_battlegrounds.core.env import (
     _build_observation_and_action_mask,
+    _CombatAuraAggregationResult,
     _compute_global_pairwise_distances_from_agent_positions,
     _derive_aura_damage_multipliers,
     step,
@@ -248,8 +252,8 @@ def _step(
     return next_state, observation, next_action_mask
 
 
-def _aura_multipliers(config: EnvConfig, state: EnvState) -> tuple[Array, Array]:
-    """Derive both aura vectors from a test scenario's current snapshot."""
+def _aura_result(config: EnvConfig, state: EnvState) -> _CombatAuraAggregationResult:
+    """Derive the named aura result from a test scenario's current snapshot."""
     distances = _compute_global_pairwise_distances_from_agent_positions(
         state.agent_positions
     )
@@ -326,7 +330,9 @@ def test_aura_derivation_is_neutral_without_an_emitter() -> None:
         (_TEAM_B_ACTOR, ROGUE_CLASS_ID),
     )
 
-    mage_multipliers, warrior_multipliers = _aura_multipliers(config, state)
+    aura_result = _aura_result(config, state)
+    mage_multipliers = aura_result.mage_damage_amplification_aura_multipliers
+    warrior_multipliers = aura_result.warrior_damage_mitigation_aura_multipliers
 
     assert mage_multipliers.shape == warrior_multipliers.shape == (MAX_AGENT_SLOTS,)
     assert mage_multipliers.dtype == warrior_multipliers.dtype == jnp.float32
@@ -339,10 +345,14 @@ def test_mage_aura_includes_self_and_boundary_ally_but_excludes_others() -> None
     positions = _default_positions((3, 1))
     positions = positions.at[0].set(jnp.asarray((4.0, 4.0), dtype=jnp.float32))
     positions = positions.at[1].set(
-        jnp.asarray((4.0 + MAGE_DAMAGE_AURA_RADIUS, 4.0), dtype=jnp.float32)
+        jnp.asarray(
+            (4.0 + MAGE_DAMAGE_AMPLIFICATION_AURA_RADIUS, 4.0), dtype=jnp.float32
+        )
     )
     positions = positions.at[2].set(
-        jnp.asarray((4.1 + MAGE_DAMAGE_AURA_RADIUS, 4.0), dtype=jnp.float32)
+        jnp.asarray(
+            (4.1 + MAGE_DAMAGE_AMPLIFICATION_AURA_RADIUS, 4.0), dtype=jnp.float32
+        )
     )
     positions = positions.at[_TEAM_B_ACTOR].set(
         jnp.asarray((4.0, 4.0), dtype=jnp.float32)
@@ -356,11 +366,123 @@ def test_mage_aura_includes_self_and_boundary_ally_but_excludes_others() -> None
         positions=positions,
     )
 
-    mage_multipliers, _ = _aura_multipliers(config, state)
+    mage_multipliers = _aura_result(
+        config, state
+    ).mage_damage_amplification_aura_multipliers
 
     expected = jnp.ones((MAX_AGENT_SLOTS,), dtype=jnp.float32)
-    expected = expected.at[jnp.asarray((0, 1))].set(MAGE_DAMAGE_AURA_MULTIPLIER)
+    expected = expected.at[jnp.asarray((0, 1))].set(
+        MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER
+    )
     assert bool(jnp.array_equal(mage_multipliers, expected))
+
+
+@pytest.mark.parametrize("aura_kind", ("mage", "warrior"))
+def test_aura_coverage_preserves_exact_eligible_emitter_beneficiary_pairs(
+    aura_kind: str,
+) -> None:
+    """Prove exact pre-collapse relations across every eligibility boundary."""
+    emitter_class_id = MAGE_CLASS_ID if aura_kind == "mage" else WARRIOR_CLASS_ID
+    aura_radius = (
+        MAGE_DAMAGE_AMPLIFICATION_AURA_RADIUS
+        if aura_kind == "mage"
+        else WARRIOR_DAMAGE_MITIGATION_AURA_RADIUS
+    )
+    per_emitter_multiplier = (
+        MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER
+        if aura_kind == "mage"
+        else WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER
+    )
+    duplicate_emitter_multiplier = (
+        MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER_CEILING
+        if aura_kind == "mage"
+        else WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER_FLOOR
+    )
+
+    positions = _default_positions((5, 4))
+    # Team A: duplicate emitters, an inclusive-boundary beneficiary, an
+    # outside beneficiary, and a dead emitter/beneficiary.
+    positions = positions.at[0].set(jnp.asarray((4.0, 4.0), dtype=jnp.float32))
+    positions = positions.at[1].set(jnp.asarray((4.0, 4.0), dtype=jnp.float32))
+    positions = positions.at[2].set(
+        jnp.asarray((4.0 + aura_radius, 4.0), dtype=jnp.float32)
+    )
+    positions = positions.at[3].set(
+        jnp.asarray((4.1 + aura_radius, 4.0), dtype=jnp.float32)
+    )
+    positions = positions.at[4].set(jnp.asarray((4.0, 4.0), dtype=jnp.float32))
+    # Team B: an enemy emitter at the same point, a boundary beneficiary, a
+    # shielded emitter/beneficiary, an inactive emitter, and padded slot 9.
+    positions = positions.at[5].set(jnp.asarray((4.0, 4.0), dtype=jnp.float32))
+    positions = positions.at[6].set(
+        jnp.asarray((4.0 + aura_radius, 4.0), dtype=jnp.float32)
+    )
+    positions = positions.at[7].set(jnp.asarray((4.0, 4.0), dtype=jnp.float32))
+    positions = positions.at[8].set(jnp.asarray((4.0, 4.0), dtype=jnp.float32))
+
+    config, state = _scenario(
+        (0, emitter_class_id),
+        (1, emitter_class_id),
+        (2, HUNTER_CLASS_ID),
+        (3, ROGUE_CLASS_ID),
+        (4, emitter_class_id),
+        (5, emitter_class_id),
+        (6, HUNTER_CLASS_ID),
+        (7, emitter_class_id),
+        (8, emitter_class_id),
+        team_sizes=(5, 4),
+        positions=positions,
+    )
+    # Deliberately isolate the low-level active-mask gate while retaining a
+    # living row. This is not an official host-valid profile/state pair.
+    config = config._replace(
+        agent_profile=config.agent_profile._replace(
+            active_mask=config.agent_profile.active_mask.at[8].set(False)
+        )
+    )
+    state = state._replace(
+        alive_mask=state.alive_mask.at[4].set(False),
+        current_health=state.current_health.at[4].set(0.0),
+        spawn_shield_durations=state.spawn_shield_durations.at[7].set(3),
+    )
+
+    aura_result = _aura_result(config, state)
+    aura_facts = aura_result.aura_facts
+    if aura_kind == "mage":
+        coverage = aura_facts.is_covered_by_mage_damage_aura_by_emitter_and_beneficiary
+        other_coverage = (
+            aura_facts.is_covered_by_warrior_mitigation_aura_by_emitter_and_beneficiary
+        )
+        multipliers = aura_result.mage_damage_amplification_aura_multipliers
+    else:
+        coverage = (
+            aura_facts.is_covered_by_warrior_mitigation_aura_by_emitter_and_beneficiary
+        )
+        other_coverage = (
+            aura_facts.is_covered_by_mage_damage_aura_by_emitter_and_beneficiary
+        )
+        multipliers = aura_result.warrior_damage_mitigation_aura_multipliers
+
+    expected_coverage = jnp.zeros((MAX_AGENT_SLOTS, MAX_AGENT_SLOTS), dtype=bool)
+    team_a_beneficiaries = jnp.asarray((0, 1, 2), dtype=jnp.int32)
+    expected_coverage = expected_coverage.at[0, team_a_beneficiaries].set(True)
+    expected_coverage = expected_coverage.at[1, team_a_beneficiaries].set(True)
+    team_b_beneficiaries = jnp.asarray((5, 6), dtype=jnp.int32)
+    expected_coverage = expected_coverage.at[5, team_b_beneficiaries].set(True)
+
+    expected_multipliers = jnp.ones((MAX_AGENT_SLOTS,), dtype=jnp.float32)
+    expected_multipliers = expected_multipliers.at[team_a_beneficiaries].set(
+        duplicate_emitter_multiplier
+    )
+    expected_multipliers = expected_multipliers.at[team_b_beneficiaries].set(
+        per_emitter_multiplier
+    )
+
+    assert coverage.shape == (MAX_AGENT_SLOTS, MAX_AGENT_SLOTS)
+    assert coverage.dtype == jnp.bool_
+    assert bool(jnp.array_equal(coverage, expected_coverage))
+    assert bool(jnp.all(other_coverage == 0))
+    assert bool(jnp.allclose(multipliers, expected_multipliers))
 
 
 @pytest.mark.parametrize(
@@ -396,7 +518,9 @@ def test_nonparticipating_mage_does_not_emit_an_aura(emitter_state: str) -> None
             current_health=state.current_health.at[0].set(0.0),
         )
 
-    mage_multipliers, _ = _aura_multipliers(config, state)
+    mage_multipliers = _aura_result(
+        config, state
+    ).mage_damage_amplification_aura_multipliers
 
     assert bool(jnp.all(mage_multipliers == 1.0))
 
@@ -411,10 +535,12 @@ def test_low_health_living_mage_still_emits_an_aura() -> None:
     )
     state = state._replace(current_health=state.current_health.at[0].set(1.0))
 
-    mage_multipliers, _ = _aura_multipliers(config, state)
+    mage_multipliers = _aura_result(
+        config, state
+    ).mage_damage_amplification_aura_multipliers
 
-    assert mage_multipliers[0] == MAGE_DAMAGE_AURA_MULTIPLIER
-    assert mage_multipliers[1] == MAGE_DAMAGE_AURA_MULTIPLIER
+    assert mage_multipliers[0] == MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER
+    assert mage_multipliers[1] == MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER
 
 
 def test_duplicate_auras_stack_multiplicatively_and_ignore_emitter_order() -> None:
@@ -432,7 +558,7 @@ def test_duplicate_auras_stack_multiplicatively_and_ignore_emitter_order() -> No
     positions = positions.at[2].set(jnp.asarray((3.0, 4.0), dtype=jnp.float32))
     positions = positions.at[3].set(jnp.asarray((3.0, 4.5), dtype=jnp.float32))
     config, state = _scenario(*class_rows, team_sizes=(4, 1), positions=positions)
-    first = _aura_multipliers(config, state)
+    first = _aura_result(config, state)
 
     swapped_class_ids = (
         config.agent_profile.class_ids.at[0]
@@ -447,14 +573,33 @@ def test_duplicate_auras_stack_multiplicatively_and_ignore_emitter_order() -> No
     second_config = config._replace(
         agent_profile=config.agent_profile._replace(class_ids=swapped_class_ids)
     )
-    second = _aura_multipliers(second_config, state)
+    second = _aura_result(second_config, state)
 
-    expected_mage = MAGE_DAMAGE_AURA_MULTIPLIER**2
+    expected_mage = MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER**2
     expected_warrior = WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER**2
-    assert bool(jnp.allclose(first[0][:4], expected_mage))
-    assert bool(jnp.allclose(first[1][:4], expected_warrior))
-    assert bool(jnp.array_equal(first[0], second[0]))
-    assert bool(jnp.array_equal(first[1], second[1]))
+    assert bool(
+        jnp.allclose(
+            first.mage_damage_amplification_aura_multipliers[:4], expected_mage
+        )
+    )
+    assert bool(
+        jnp.allclose(
+            first.warrior_damage_mitigation_aura_multipliers[:4],
+            expected_warrior,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            first.mage_damage_amplification_aura_multipliers,
+            second.mage_damage_amplification_aura_multipliers,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            first.warrior_damage_mitigation_aura_multipliers,
+            second.warrior_damage_mitigation_aura_multipliers,
+        )
+    )
 
 
 def test_aura_derivation_is_independent_of_los_and_observation_radius() -> None:
@@ -472,9 +617,11 @@ def test_aura_derivation_is_independent_of_los_and_observation_radius() -> None:
         observation_radius=0.25,
     )
 
-    mage_multipliers, _ = _aura_multipliers(config, state)
+    mage_multipliers = _aura_result(
+        config, state
+    ).mage_damage_amplification_aura_multipliers
 
-    assert mage_multipliers[1] == MAGE_DAMAGE_AURA_MULTIPLIER
+    assert mage_multipliers[1] == MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER
 
 
 def test_aura_derivation_matches_jit() -> None:
@@ -497,7 +644,7 @@ def test_aura_derivation_matches_jit() -> None:
         interaction_eligible,
     )
     compiled = cast(
-        tuple[Array, Array],
+        _CombatAuraAggregationResult,
         jax.jit(_derive_aura_damage_multipliers)(
             config,
             distances,
@@ -506,8 +653,30 @@ def test_aura_derivation_matches_jit() -> None:
         ),
     )
 
-    assert bool(jnp.array_equal(eager[0], compiled[0]))
-    assert bool(jnp.array_equal(eager[1], compiled[1]))
+    assert bool(
+        jnp.array_equal(
+            eager.mage_damage_amplification_aura_multipliers,
+            compiled.mage_damage_amplification_aura_multipliers,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            eager.warrior_damage_mitigation_aura_multipliers,
+            compiled.warrior_damage_mitigation_aura_multipliers,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            eager.aura_facts.is_covered_by_mage_damage_aura_by_emitter_and_beneficiary,
+            compiled.aura_facts.is_covered_by_mage_damage_aura_by_emitter_and_beneficiary,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            eager.aura_facts.is_covered_by_warrior_mitigation_aura_by_emitter_and_beneficiary,
+            compiled.aura_facts.is_covered_by_warrior_mitigation_aura_by_emitter_and_beneficiary,
+        )
+    )
 
 
 @pytest.mark.parametrize(
@@ -531,7 +700,7 @@ def test_spawn_shield_excludes_aura_emitters_and_beneficiaries(
         else AGENT_FEATURE_DAMAGE_MITIGATION_WARRIOR_AURA_MULTIPLIER
     )
     active_multiplier = (
-        MAGE_DAMAGE_AURA_MULTIPLIER
+        MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER
         if aura_kind == "mage"
         else WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER
     )
@@ -557,10 +726,9 @@ def test_spawn_shield_excludes_aura_emitters_and_beneficiaries(
     opponent_observations: list[Observation] = []
     for positions in positions_to_check:
         positioned_state = shielded_state._replace(agent_positions=positions)
-        mage_multipliers, warrior_multipliers = _aura_multipliers(
-            config,
-            positioned_state,
-        )
+        aura_result = _aura_result(config, positioned_state)
+        mage_multipliers = aura_result.mage_damage_amplification_aura_multipliers
+        warrior_multipliers = aura_result.warrior_damage_mitigation_aura_multipliers
         selected_multipliers = (
             mage_multipliers if aura_kind == "mage" else warrior_multipliers
         )
@@ -638,7 +806,7 @@ def test_expiring_spawn_shield_restores_aura_for_the_next_action() -> None:
             0,
             AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_AURA_MULTIPLIER,
         ]
-        == MAGE_DAMAGE_AURA_MULTIPLIER
+        == MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER
     )
     assert bool(
         next_action_mask.select_target_use_ultimate_joint_mask[
@@ -652,7 +820,8 @@ def test_expiring_spawn_shield_restores_aura_for_the_next_action() -> None:
 
     assert final_state.current_health[_TEAM_B_ACTOR] == (
         next_state.current_health[_TEAM_B_ACTOR]
-        - BASIC_DAMAGE_BY_CLASS[HUNTER_CLASS_ID] * MAGE_DAMAGE_AURA_MULTIPLIER
+        - BASIC_DAMAGE_BY_CLASS[HUNTER_CLASS_ID]
+        * MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER
     )
 
 
@@ -676,7 +845,8 @@ def test_mage_aura_amplifies_allied_damage_but_not_healing() -> None:
 
     expected_health = state.current_health
     expected_health = expected_health.at[_TEAM_B_ACTOR].add(
-        -BASIC_DAMAGE_BY_CLASS[HUNTER_CLASS_ID] * MAGE_DAMAGE_AURA_MULTIPLIER
+        -BASIC_DAMAGE_BY_CLASS[HUNTER_CLASS_ID]
+        * MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER
     )
     expected_health = expected_health.at[2].add(BASIC_HEALING_BY_CLASS[PRIEST_CLASS_ID])
     _assert_health_resolution_and_lifecycle(state, next_state, expected_health)
@@ -705,8 +875,9 @@ def test_mage_burst_applies_only_to_its_owner_and_stacks_with_aura() -> None:
     expected_damage = (
         BASIC_DAMAGE_BY_CLASS[MAGE_CLASS_ID]
         * MAGE_BURST_DAMAGE_MULTIPLIER
-        * MAGE_DAMAGE_AURA_MULTIPLIER
-        + BASIC_DAMAGE_BY_CLASS[HUNTER_CLASS_ID] * MAGE_DAMAGE_AURA_MULTIPLIER
+        * MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER
+        + BASIC_DAMAGE_BY_CLASS[HUNTER_CLASS_ID]
+        * MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER
     )
     expected_health = state.current_health.at[_TEAM_B_ACTOR].add(-expected_damage)
     _assert_health_resolution_and_lifecycle(state, next_state, expected_health)
@@ -778,7 +949,7 @@ def test_outgoing_amplification_and_incoming_mitigation_compose() -> None:
 
     expected_health = state.current_health.at[_TEAM_B_ACTOR + 1].add(
         -BASIC_DAMAGE_BY_CLASS[HUNTER_CLASS_ID]
-        * MAGE_DAMAGE_AURA_MULTIPLIER
+        * MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER
         * WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER
     )
     _assert_health_resolution_and_lifecycle(state, next_state, expected_health)
@@ -1456,7 +1627,9 @@ def test_each_damage_class_applies_its_catalog_payload(actor_class_id: int) -> N
     )
 
     outgoing_multiplier = (
-        MAGE_DAMAGE_AURA_MULTIPLIER if actor_class_id == MAGE_CLASS_ID else 1.0
+        MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER
+        if actor_class_id == MAGE_CLASS_ID
+        else 1.0
     )
     expected_health = state.current_health.at[_TEAM_B_ACTOR].add(
         -BASIC_DAMAGE_BY_CLASS[actor_class_id] * outgoing_multiplier
@@ -1970,6 +2143,18 @@ def test_jitted_step_matches_eager_accepted_effects() -> None:
     ):
         assert bool(jnp.array_equal(eager_leaf, compiled_leaf))
 
+    eager_aura_facts = eager_outputs[-1].transition_facts.aura_facts
+    compiled_aura_facts = compiled_outputs[-1].transition_facts.aura_facts
+    mage_coverage = (
+        eager_aura_facts.is_covered_by_mage_damage_aura_by_emitter_and_beneficiary
+    )
+    compiled_mage_coverage = (
+        compiled_aura_facts.is_covered_by_mage_damage_aura_by_emitter_and_beneficiary
+    )
+    assert bool(mage_coverage[_TEAM_A_ACTOR, _TEAM_A_ACTOR])
+    assert bool(mage_coverage[_TEAM_B_ACTOR, _TEAM_B_ACTOR])
+    assert bool(jnp.array_equal(mage_coverage, compiled_mage_coverage))
+
 
 def test_scanned_rollout_reuses_each_post_state_mask_for_repeated_basics() -> None:
     """Prove accepted basic effects remain stable in a compiled temporal carry."""
@@ -2010,7 +2195,9 @@ def test_scanned_rollout_reuses_each_post_state_mask_for_repeated_basics() -> No
         jax.jit(_rollout)(state, _current_action_mask(config, state), keys),
     )
 
-    damage = BASIC_DAMAGE_BY_CLASS[MAGE_CLASS_ID] * MAGE_DAMAGE_AURA_MULTIPLIER
+    damage = (
+        BASIC_DAMAGE_BY_CLASS[MAGE_CLASS_ID] * MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER
+    )
     expected_history = state.current_health[_TEAM_B_ACTOR] - damage * jnp.arange(
         1, horizon + 1, dtype=jnp.float32
     )

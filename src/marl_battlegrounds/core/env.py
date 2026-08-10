@@ -14,9 +14,9 @@ from marl_battlegrounds.core.combat import (
     HUNTER_TRAP_STUN_DURATION_TICKS,
     MAGE_BURST_DAMAGE_DURATION_TICKS,
     MAGE_BURST_DAMAGE_MULTIPLIER,
-    MAGE_DAMAGE_AURA_MULTIPLIER,
-    MAGE_DAMAGE_AURA_MULTIPLIER_CEILING,
-    MAGE_DAMAGE_AURA_RADIUS,
+    MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER,
+    MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER_CEILING,
+    MAGE_DAMAGE_AMPLIFICATION_AURA_RADIUS,
     ONLY_ALLY_TARGET_ULTIMATE_MODE,
     ONLY_ENEMY_TARGET_ULTIMATE_MODE,
     ONLY_NONE_TARGET_ULTIMATE_MODE,
@@ -93,6 +93,7 @@ from marl_battlegrounds.core.types import (
     Action,
     ActionAcceptanceFacts,
     ActionMask,
+    AuraTransitionFacts,
     CombatTransitionFacts,
     DeathTransitionFacts,
     DoneFlags,
@@ -100,12 +101,14 @@ from marl_battlegrounds.core.types import (
     EnvState,
     Info,
     Observation,
+    PhysicalTransitionFacts,
     PreviousTimestepActionObservation,
     RegenerationTransitionFacts,
     RespawnTransitionFacts,
     Reward,
     SpawnLifecycleObservation,
     SpawnShieldTransitionFacts,
+    StatusLifecycleTransitionFacts,
     TransitionFacts,
 )
 
@@ -176,6 +179,30 @@ class _CombatEffectAggregationResult(NamedTuple):
     total_effective_healing_by_recipient: Array
     priest_blessing_of_freedom_is_applied_by_source: Array
     is_combat_participant_this_tick_by_source: Array
+
+
+class _CombatStatusAggregationResult(NamedTuple):
+    """Successor status memory, application facts, and lifecycle causes."""
+
+    next_slow_durations: Array
+    next_stun_durations: Array
+    next_rogue_anti_heal_durations: Array
+    next_mage_burst_durations: Array
+    next_priest_freedom_slow_floor_durations: Array
+    next_spawn_shield_durations: Array
+    slow_is_applied_by_source_and_channel: Array
+    stun_is_applied_by_source_and_channel: Array
+    rogue_poison_anti_heal_is_applied_by_source: Array
+    mage_burst_damage_amplification_is_applied_by_source: Array
+    status_lifecycle_facts: StatusLifecycleTransitionFacts
+
+
+class _CombatAuraAggregationResult(NamedTuple):
+    """Reduced aura modifiers and their exact coverage provenance."""
+
+    mage_damage_amplification_aura_multipliers: Array
+    warrior_damage_mitigation_aura_multipliers: Array
+    aura_facts: AuraTransitionFacts
 
 
 def _compute_global_pairwise_distances_from_agent_positions(
@@ -1034,10 +1061,7 @@ def _build_observation_and_action_mask(
         _build_global_visibility_mask_and_distances(state, config)
     )
 
-    (
-        mage_damage_amplification_aura_multipliers,
-        warrior_damage_mitigation_aura_multipliers,
-    ) = _derive_aura_damage_multipliers(
+    combat_aura_aggregation_result = _derive_aura_damage_multipliers(
         config,
         global_pairwise_distances,
         state.alive_mask,
@@ -1047,8 +1071,8 @@ def _build_observation_and_action_mask(
     self_features = _build_self_features(
         state,
         config,
-        mage_damage_amplification_aura_multipliers,
-        warrior_damage_mitigation_aura_multipliers,
+        combat_aura_aggregation_result.mage_damage_amplification_aura_multipliers,
+        combat_aura_aggregation_result.warrior_damage_mitigation_aura_multipliers,
     )
     ally_features = _build_ally_features(self_features)
     enemy_features = _build_enemy_features(self_features)
@@ -1340,8 +1364,8 @@ def _build_self_features(
         mage_warrior_aura_mask,
         jnp.asarray(
             [
-                MAGE_DAMAGE_AURA_RADIUS,
-                MAGE_DAMAGE_AURA_MULTIPLIER,
+                MAGE_DAMAGE_AMPLIFICATION_AURA_RADIUS,
+                MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER,
                 WARRIOR_DAMAGE_MITIGATION_AURA_RADIUS,
                 WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER,
             ]
@@ -1912,7 +1936,7 @@ def _derive_aura_damage_multipliers(
     global_pairwise_distances: Array,
     alive_mask: Array,
     is_not_under_spawn_shield: Array,
-) -> tuple[Array, Array]:
+) -> _CombatAuraAggregationResult:
     """Derive bounded Mage outgoing and Warrior incoming aura modifiers.
 
     Rows represent aura emitters and columns represent beneficiary slots.
@@ -1955,14 +1979,21 @@ def _derive_aura_damage_multipliers(
         jnp.inf,
     )
 
+    is_covered_by_mage_damage_aura_by_emitter_and_beneficiary = (
+        mage_masked_global_pairwise_distances <= MAGE_DAMAGE_AMPLIFICATION_AURA_RADIUS
+    )
     mage_actor_benefits_recipient_with_aura = jnp.where(
-        mage_masked_global_pairwise_distances <= MAGE_DAMAGE_AURA_RADIUS,
-        MAGE_DAMAGE_AURA_MULTIPLIER,
+        is_covered_by_mage_damage_aura_by_emitter_and_beneficiary,
+        MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER,
         1.0,
     )
-    warrior_actor_benefits_recipient_with_aura = jnp.where(
+
+    is_covered_by_warrior_mitigation_aura_by_emitter_and_beneficiary = (
         warrior_masked_global_pairwise_distances
-        <= WARRIOR_DAMAGE_MITIGATION_AURA_RADIUS,
+        <= WARRIOR_DAMAGE_MITIGATION_AURA_RADIUS
+    )
+    warrior_actor_benefits_recipient_with_aura = jnp.where(
+        is_covered_by_warrior_mitigation_aura_by_emitter_and_beneficiary,
         WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER,
         1.0,
     )
@@ -1974,16 +2005,20 @@ def _derive_aura_damage_multipliers(
         warrior_actor_benefits_recipient_with_aura, axis=0
     )
 
-    return (
+    return _CombatAuraAggregationResult(
         jnp.clip(
             mage_aura_outgoing_damage_multiplier_by_actor_slot,
             min=1.0,
-            max=MAGE_DAMAGE_AURA_MULTIPLIER_CEILING,
+            max=MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER_CEILING,
         ),
         jnp.clip(
             warrior_aura_incoming_damage_multiplier_by_global_recipient_slot,
             min=WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER_FLOOR,
             max=1.0,
+        ),
+        AuraTransitionFacts(
+            is_covered_by_mage_damage_aura_by_emitter_and_beneficiary,
+            is_covered_by_warrior_mitigation_aura_by_emitter_and_beneficiary,
         ),
     )
 
@@ -1998,7 +2033,8 @@ def _resolve_status_duration_lifecycle(
     accepted_positive_raw_damage_received_this_tick_by_global_recipient_slot: Array,
     hunter_basic_slow_applied_this_tick_by_global_actor_slot: Array,
     next_alive_mask: Array,
-) -> tuple[Array, Array, Array, Array, Array, Array, Array, Array, Array, Array]:
+    is_newly_dead: Array,
+) -> _CombatStatusAggregationResult:
     """Resolve successor transient durations and status-application facts.
 
     Current durations age once toward zero. Accepted positive raw damage then
@@ -2009,6 +2045,17 @@ def _resolve_status_duration_lifecycle(
     Dead successor slots retain status-application facts but carry no transient
     duration into the next state.
     """
+    current_status_durations = jnp.concatenate(
+        (
+            current_state.slow_durations,
+            current_state.stun_durations,
+            current_state.rogue_poison_anti_heal_durations[:, None],
+            current_state.mage_burst_damage_amplification_durations[:, None],
+            current_state.priest_blessing_of_freedom_slow_floor_durations[:, None],
+        ),
+        axis=-1,
+        dtype=jnp.int32,
+    )
 
     # Derive fresh applications once from the action accepted for this transition.
     (
@@ -2038,6 +2085,24 @@ def _resolve_status_duration_lifecycle(
         0, current_state.priest_blessing_of_freedom_slow_floor_durations - 1
     )
 
+    # Pack every duration family into the public nine-channel order.
+    aged_next_status_durations = jnp.concatenate(
+        (
+            decremented_slow_durations,
+            decremented_stun_durations,
+            decremented_rogue_anti_heal_durations[:, None],
+            decremented_mage_burst_durations[:, None],
+            decremented_priest_freedom_slow_floor_durations[:, None],
+        ),
+        axis=-1,
+        dtype=jnp.int32,
+    )
+
+    # Natural expiry is authored before Trap break or fresh application.
+    aged_to_zero_by_recipient_and_status_channel = jnp.logical_and(
+        current_status_durations == 1, aged_next_status_durations == 0
+    )
+
     # Raw damage breaks only the pre-existing Trap successor. A fresh Trap is
     # merged later, so damage cannot retroactively break the new application.
     decremented_stun_durations_after_trap_break = decremented_stun_durations.at[
@@ -2048,6 +2113,18 @@ def _resolve_status_duration_lifecycle(
             0,
             decremented_stun_durations[:, STUN_CHANNEL_HUNTER_TRAP],
         )
+    )
+
+    # Hunter Trap is the only damage-breakable status in the current catalog.
+    hunter_trap_broken_by_damage_by_recipient = jnp.logical_and(
+        accepted_positive_raw_damage_received_this_tick_by_global_recipient_slot,
+        decremented_stun_durations[:, STUN_CHANNEL_HUNTER_TRAP] >= 1,
+    )
+    broken_by_damage_by_recipient_and_status_channel = (
+        jnp.zeros((MAX_AGENT_SLOTS, 9), dtype=jnp.bool_)
+        # Column 4 is Hunter Trap in the canonical combined status order.
+        .at[:, NUM_SLOW_CHANNELS + STUN_CHANNEL_HUNTER_TRAP]
+        .set(hunter_trap_broken_by_damage_by_recipient)
     )
 
     # Mage Burst is source-local rather than recipient-routed.
@@ -2217,37 +2294,78 @@ def _resolve_status_duration_lifecycle(
         mage_uses_accepted_ultimate_this_tick_by_actor_slot
     )
 
+    # A refresh restores or extends a still-positive status after ordinary age.
+    # Natural expiry followed by application and Trap break followed by
+    # reapplication remain separate causal edges rather than refreshes.
+    pre_death_next_status_durations = jnp.concatenate(
+        (
+            next_slow_durations,
+            next_stun_durations,
+            next_rogue_anti_heal_durations[:, None],
+            next_mage_burst_durations[:, None],
+            next_priest_freedom_slow_floor_durations[:, None],
+        ),
+        axis=-1,
+        dtype=jnp.int32,
+    )
+
+    refreshed_or_extended_by_recipient_and_status_channel = jnp.logical_and(
+        jnp.logical_and(
+            pre_death_next_status_durations >= current_status_durations,
+            jnp.logical_and(
+                current_status_durations > 0,
+                jnp.logical_not(aged_to_zero_by_recipient_and_status_channel),
+            ),
+        ),
+        jnp.logical_not(broken_by_damage_by_recipient_and_status_channel),
+    )
+
     # Transient status memory cannot survive into a dead successor slot.
-    next_slow_durations = next_slow_durations * next_alive_mask[:, None]
+    death_masked_next_slow_durations = next_slow_durations * next_alive_mask[:, None]
 
-    next_stun_durations = next_stun_durations * next_alive_mask[:, None]
+    death_masked_next_stun_durations = next_stun_durations * next_alive_mask[:, None]
 
-    next_mage_burst_durations = next_mage_burst_durations * next_alive_mask
+    death_masked_next_mage_burst_durations = next_mage_burst_durations * next_alive_mask
 
-    next_rogue_anti_heal_durations = next_rogue_anti_heal_durations * next_alive_mask
+    death_masked_next_rogue_anti_heal_durations = (
+        next_rogue_anti_heal_durations * next_alive_mask
+    )
 
-    next_priest_freedom_slow_floor_durations = (
+    death_masked_next_priest_freedom_slow_floor_durations = (
         next_priest_freedom_slow_floor_durations * next_alive_mask
     )
 
     # Spawn shielding ages after movement and cannot survive death or padding.
-    next_spawn_shield_durations = (
+    death_masked_next_spawn_shield_durations = (
         jnp.maximum(current_state.spawn_shield_durations - 1, 0).astype(jnp.int32)
         * next_alive_mask
         * config.agent_profile.active_mask
     )
 
-    return (
-        next_slow_durations,
-        next_stun_durations,
-        next_rogue_anti_heal_durations,
-        next_mage_burst_durations,
-        next_priest_freedom_slow_floor_durations,
-        next_spawn_shield_durations,
+    # New death clears only statuses that survived through the application phase.
+    cleared_by_new_death_by_recipient_and_status_channel = jnp.logical_and(
+        pre_death_next_status_durations > 0, is_newly_dead[:, None]
+    )
+
+    status_lifecycle_facts = StatusLifecycleTransitionFacts(
+        aged_to_zero_by_recipient_and_status_channel,
+        refreshed_or_extended_by_recipient_and_status_channel,
+        broken_by_damage_by_recipient_and_status_channel,
+        cleared_by_new_death_by_recipient_and_status_channel,
+    )
+
+    return _CombatStatusAggregationResult(
+        death_masked_next_slow_durations,
+        death_masked_next_stun_durations,
+        death_masked_next_rogue_anti_heal_durations,
+        death_masked_next_mage_burst_durations,
+        death_masked_next_priest_freedom_slow_floor_durations,
+        death_masked_next_spawn_shield_durations,
         slow_is_applied_by_source_and_channel,
         stun_is_applied_by_source_and_channel,
         rogue_poison_anti_heal_is_applied_by_source,
         mage_burst_damage_amplification_is_applied_by_source,
+        status_lifecycle_facts,
     )
 
 
@@ -2442,6 +2560,7 @@ def _build_combat_transition_facts(
     stun_is_applied_by_source_and_channel: Array,
     rogue_poison_anti_heal_is_applied_by_source: Array,
     mage_burst_damage_amplification_is_applied_by_source: Array,
+    next_health_after_effective_damage_and_healing: Array,
 ) -> CombatTransitionFacts:
     """Package existing combat intermediates as authoritative public facts."""
     return CombatTransitionFacts(
@@ -2479,6 +2598,7 @@ def _build_combat_transition_facts(
         total_effective_healing_by_recipient=(
             combat_effect_aggregation_result.total_effective_healing_by_recipient
         ),
+        health_after_combat_resolution_by_recipient=next_health_after_effective_damage_and_healing,
         slow_is_applied_by_source_and_channel=slow_is_applied_by_source_and_channel,
         stun_is_applied_by_source_and_channel=stun_is_applied_by_source_and_channel,
         rogue_poison_anti_heal_is_applied_by_source=(
@@ -2571,6 +2691,7 @@ def _build_canonical_no_transition_info_object(initial_state: EnvState) -> Info:
         source_modified_healing_output_by_source=all_zeroes_vector,
         recipient_healing_modifier_by_source=all_zeroes_vector,
         total_effective_healing_by_recipient=all_zeroes_vector,
+        health_after_combat_resolution_by_recipient=all_zeroes_vector,
         slow_is_applied_by_source_and_channel=jnp.zeros_like(
             initial_state.slow_durations, dtype=jnp.bool_
         ),
@@ -2619,6 +2740,39 @@ def _build_canonical_no_transition_info_object(initial_state: EnvState) -> Info:
         actual_health_regenerated_this_step_by_agent=all_zeroes_vector,
     )
 
+    reset_physical_facts = PhysicalTransitionFacts(
+        charge_phase_displacement_by_agent=jnp.zeros_like(
+            initial_state.agent_positions, dtype=jnp.float32
+        ),
+        ordinary_movement_phase_displacement_by_agent=jnp.zeros_like(
+            initial_state.agent_positions, dtype=jnp.float32
+        ),
+    )
+
+    reset_aura_facts = AuraTransitionFacts(
+        is_covered_by_mage_damage_aura_by_emitter_and_beneficiary=jnp.zeros(
+            (MAX_AGENT_SLOTS, MAX_AGENT_SLOTS), dtype=jnp.bool_
+        ),
+        is_covered_by_warrior_mitigation_aura_by_emitter_and_beneficiary=jnp.zeros(
+            (MAX_AGENT_SLOTS, MAX_AGENT_SLOTS), dtype=jnp.bool_
+        ),
+    )
+
+    reset_status_lifecycle_facts = StatusLifecycleTransitionFacts(
+        aged_to_zero_by_recipient_and_status_channel=jnp.zeros(
+            (MAX_AGENT_SLOTS, 9), dtype=jnp.bool_
+        ),
+        refreshed_or_extended_by_recipient_and_status_channel=jnp.zeros(
+            (MAX_AGENT_SLOTS, 9), dtype=jnp.bool_
+        ),
+        broken_by_damage_by_recipient_and_status_channel=jnp.zeros(
+            (MAX_AGENT_SLOTS, 9), dtype=jnp.bool_
+        ),
+        cleared_by_new_death_by_recipient_and_status_channel=jnp.zeros(
+            (MAX_AGENT_SLOTS, 9), dtype=jnp.bool_
+        ),
+    )
+
     reset_transition_facts = TransitionFacts(
         has_transition=jnp.asarray(False),
         transition_start_step_count=jnp.asarray(-1, dtype=jnp.int32),
@@ -2628,6 +2782,9 @@ def _build_canonical_no_transition_info_object(initial_state: EnvState) -> Info:
         spawn_shield_facts=reset_spawn_shield_facts,
         respawn_facts=reset_respawn_facts,
         regeneration_facts=reset_regeneration_facts,
+        physical_facts=reset_physical_facts,
+        aura_facts=reset_aura_facts,
+        status_lifecycle_facts=reset_status_lifecycle_facts,
     )
 
     return Info(transition_facts=reset_transition_facts)
@@ -2916,10 +3073,7 @@ def step(
         )
     )
 
-    (
-        current_mage_damage_amplification_aura_multipliers,
-        current_warrior_damage_mitigation_aura_multipliers,
-    ) = _derive_aura_damage_multipliers(
+    combat_aura_aggregation_result = _derive_aura_damage_multipliers(
         config,
         current_global_pairwise_distances,
         current_state.alive_mask,
@@ -2932,8 +3086,8 @@ def step(
             config,
             accepted_joint_action,
             accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix,
-            current_mage_damage_amplification_aura_multipliers,
-            current_warrior_damage_mitigation_aura_multipliers,
+            combat_aura_aggregation_result.mage_damage_amplification_aura_multipliers,
+            combat_aura_aggregation_result.warrior_damage_mitigation_aura_multipliers,
         )
     )
 
@@ -3002,6 +3156,11 @@ def step(
         participates_in_agent_agent_collision_at_final_position,
     )
 
+    physical_facts = PhysicalTransitionFacts(
+        post_charge_current_agent_positions - current_state.agent_positions,
+        next_agent_positions - post_charge_current_agent_positions,
+    )
+
     death_facts = _build_death_transition_facts(
         current_state,
         config,
@@ -3028,18 +3187,7 @@ def step(
         actual_health_regenerated_this_step_by_agent=actual_health_regenerated_this_tick_by_agent,
     )
 
-    (
-        next_slow_durations,
-        next_stun_durations,
-        next_rogue_anti_heal_durations,
-        next_mage_burst_durations,
-        next_priest_freedom_slow_floor_durations,
-        next_spawn_shield_durations,
-        slow_is_applied_by_source_and_channel,
-        stun_is_applied_by_source_and_channel,
-        rogue_poison_anti_heal_is_applied_by_source,
-        mage_burst_damage_amplification_is_applied_by_source,
-    ) = _resolve_status_duration_lifecycle(
+    combat_status_aggregation_result = _resolve_status_duration_lifecycle(
         current_state,
         config,
         accepted_joint_action.use_ultimate,
@@ -3049,16 +3197,18 @@ def step(
         combat_effect_aggregation_result.accepted_positive_raw_damage_received_this_tick_by_global_recipient_slot,
         combat_effect_aggregation_result.hunter_basic_slow_applied_this_tick_by_global_actor_slot,
         next_alive_mask,
+        death_facts.is_newly_dead_by_recipient,
     )
 
     combat_transition_facts = _build_combat_transition_facts(
         combat_effect_aggregation_result,
         combat_effect_has_recipient_by_source,
         combat_effect_recipient_global_slot_by_source,
-        slow_is_applied_by_source_and_channel,
-        stun_is_applied_by_source_and_channel,
-        rogue_poison_anti_heal_is_applied_by_source,
-        mage_burst_damage_amplification_is_applied_by_source,
+        combat_status_aggregation_result.slow_is_applied_by_source_and_channel,
+        combat_status_aggregation_result.stun_is_applied_by_source_and_channel,
+        combat_status_aggregation_result.rogue_poison_anti_heal_is_applied_by_source,
+        combat_status_aggregation_result.mage_burst_damage_amplification_is_applied_by_source,
+        next_health_after_effective_damage_and_healing,
     )
 
     respawn_facts = RespawnTransitionFacts(
@@ -3093,7 +3243,7 @@ def step(
             respawn_facts.was_respawned_this_transition_by_agent,
             next_alive_mask,
             next_health_after_out_of_combat_regeneration,
-            next_spawn_shield_durations,
+            combat_status_aggregation_result.next_spawn_shield_durations,
             next_agent_positions,
         ),
     )
@@ -3105,11 +3255,11 @@ def step(
         current_health=next_health_bars,
         # NOTE: Ultimate CD carries over into death to prevent abuse.
         ultimate_cooldowns=next_ultimate_cooldowns,
-        slow_durations=next_slow_durations,
-        stun_durations=next_stun_durations,
-        rogue_poison_anti_heal_durations=next_rogue_anti_heal_durations,
-        mage_burst_damage_amplification_durations=next_mage_burst_durations,
-        priest_blessing_of_freedom_slow_floor_durations=next_priest_freedom_slow_floor_durations,
+        slow_durations=combat_status_aggregation_result.next_slow_durations,
+        stun_durations=combat_status_aggregation_result.next_stun_durations,
+        rogue_poison_anti_heal_durations=combat_status_aggregation_result.next_rogue_anti_heal_durations,
+        mage_burst_damage_amplification_durations=combat_status_aggregation_result.next_mage_burst_durations,
+        priest_blessing_of_freedom_slow_floor_durations=combat_status_aggregation_result.next_priest_freedom_slow_floor_durations,
         team_respawn_wave_countdowns=next_team_respawn_wave_countdowns,
         spawn_shield_durations=next_spawn_shield_durations,
         steps_until_out_of_combat=next_steps_until_ooc,
@@ -3147,6 +3297,9 @@ def step(
         spawn_shield_facts=spawn_shield_facts,
         respawn_facts=respawn_facts,
         regeneration_facts=regeneration_facts,
+        physical_facts=physical_facts,
+        aura_facts=combat_aura_aggregation_result.aura_facts,
+        status_lifecycle_facts=combat_status_aggregation_result.status_lifecycle_facts,
     )
 
     info = Info(

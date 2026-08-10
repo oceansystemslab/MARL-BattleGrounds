@@ -889,8 +889,12 @@ def test_regeneration_uses_class_maximum_clamp_profile_rate_and_start_anti_heal(
     )
 
     next_state, observation, _, _, _, info = _take_step(config, state, _joint_action())
+    combat_facts = info.transition_facts.combat_transition_facts
+    post_combat_health = combat_facts.health_after_combat_resolution_by_recipient
     regeneration_facts = info.transition_facts.regeneration_facts
     actual = regeneration_facts.actual_health_regenerated_this_step_by_agent
+    assert bool(jnp.array_equal(post_combat_health, state.current_health))
+    assert bool(jnp.allclose(next_state.current_health, post_combat_health + actual))
     expected_health = {
         _TEAM_A_FIRST_SLOT: 43.2,
         _TEAM_A_SECOND_SLOT: 108.0,

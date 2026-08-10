@@ -1054,6 +1054,14 @@ def test_lethally_hit_mover_remains_a_physical_body_through_collision() -> None:
         next_state.agent_positions[_TEAM_A_SECOND_SLOT, 0]
         > state.agent_positions[_TEAM_A_SECOND_SLOT, 0]
     )
+    physical_facts = info.transition_facts.physical_facts
+    assert bool(jnp.all(physical_facts.charge_phase_displacement_by_agent == 0.0))
+    assert bool(
+        jnp.allclose(
+            physical_facts.ordinary_movement_phase_displacement_by_agent,
+            next_state.agent_positions - state.agent_positions,
+        )
+    )
 
 
 def test_dying_mage_aura_still_amplifies_an_ally_this_transition() -> None:
@@ -1095,7 +1103,7 @@ def test_dying_mage_aura_still_amplifies_an_ally_this_transition() -> None:
         jnp.isclose(
             combat_facts.source_modified_damage_output_by_source[_TEAM_A_SECOND_SLOT],
             combat.BASIC_DAMAGE_BY_CLASS[HUNTER_CLASS_ID]
-            * combat.MAGE_DAMAGE_AURA_MULTIPLIER,
+            * combat.MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER,
         )
     )
 

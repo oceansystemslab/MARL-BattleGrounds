@@ -40,7 +40,6 @@ from marl_battlegrounds.core.types import (
     RespawnTransitionFacts,
     Reward,
     SpawnLifecycleObservation,
-    TransitionFacts,
 )
 
 _TEAM_A_FIRST_SLOT = 0
@@ -335,7 +334,6 @@ def test_reset_exposes_canonical_clock_observation_and_respawn_facts() -> None:
     )
 
     facts = info.transition_facts
-    assert TransitionFacts._fields[-2] == "respawn_facts"
     assert RespawnTransitionFacts._fields == (
         "respawn_wave_occurred_this_transition_by_team",
         "was_respawned_this_transition_by_agent",
@@ -501,6 +499,23 @@ def test_independent_wave_respawns_only_transition_start_corpses_for_due_team(
     assert bool(next_state.alive_mask[dead_slot])
     assert float(next_state.current_health[dead_slot]) == float(
         config.agent_profile.max_health[dead_slot]
+    )
+    assert (
+        float(
+            info.transition_facts.combat_transition_facts.health_after_combat_resolution_by_recipient[
+                dead_slot
+            ]
+        )
+        == 0.0
+    )
+    physical_facts = info.transition_facts.physical_facts
+    assert bool(
+        jnp.all(physical_facts.charge_phase_displacement_by_agent[dead_slot] == 0)
+    )
+    assert bool(
+        jnp.all(
+            physical_facts.ordinary_movement_phase_displacement_by_agent[dead_slot] == 0
+        )
     )
     assert bool(
         jnp.array_equal(

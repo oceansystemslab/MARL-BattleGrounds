@@ -735,11 +735,16 @@ def test_move_stay_preserves_valid_position_in_free_space() -> None:
     config, state = _state_with_single_active_alive_agent(config, start)
     joint_action = _joint_action_with_moves((0, MOVE_STAY))
 
-    next_state, *_ = step(
+    next_state, _, _, _, _, info = step(
         config, state, _current_action_mask(config, state), joint_action, key
     )
 
     _assert_center_close(next_state.agent_positions[0], start)
+    physical_facts = info.transition_facts.physical_facts
+    assert bool(jnp.all(physical_facts.charge_phase_displacement_by_agent == 0.0))
+    assert bool(
+        jnp.all(physical_facts.ordinary_movement_phase_displacement_by_agent == 0.0)
+    )
 
 
 @pytest.mark.parametrize(
@@ -780,6 +785,14 @@ def test_cardinal_moves_update_position_in_free_space(
     _assert_action_mask_contract(action_mask)
     _assert_single_agent_action_mask_semantics(action_mask)
     assert isinstance(info, Info)
+    physical_facts = info.transition_facts.physical_facts
+    assert bool(jnp.all(physical_facts.charge_phase_displacement_by_agent == 0.0))
+    assert bool(
+        jnp.allclose(
+            physical_facts.ordinary_movement_phase_displacement_by_agent,
+            next_state.agent_positions - state.agent_positions,
+        )
+    )
 
 
 @pytest.mark.parametrize(
@@ -1159,7 +1172,7 @@ def test_step_projects_active_alive_agent_outside_active_pillar() -> None:
     )
     joint_action = _joint_action_with_moves((0, MOVE_EAST))
 
-    next_state, *_ = step(
+    next_state, _, _, _, _, info = step(
         config, state, _current_action_mask(config, state), joint_action, key
     )
 
@@ -1168,6 +1181,14 @@ def test_step_projects_active_alive_agent_outside_active_pillar() -> None:
         agent_radius=agent_radius,
         pillar_center=pillar_center,
         pillar_radius=pillar_radius,
+    )
+    physical_facts = info.transition_facts.physical_facts
+    assert bool(jnp.all(physical_facts.charge_phase_displacement_by_agent == 0.0))
+    assert bool(
+        jnp.allclose(
+            physical_facts.ordinary_movement_phase_displacement_by_agent,
+            next_state.agent_positions - state.agent_positions,
+        )
     )
 
 
@@ -2011,22 +2032,25 @@ def test_spawn_shield_duration_paths_match_eager_jit_and_vmap() -> None:
         states_batch: EnvState,
         masks_batch: ActionMask,
         step_keys: Array,
-    ) -> tuple[Array, Array]:
+    ) -> tuple[Array, Array, Array, Array]:
         def _one_transition(
             state: EnvState,
             action_mask: ActionMask,
             step_key: Array,
-        ) -> tuple[Array, Array]:
-            next_state, *_ = step(
+        ) -> tuple[Array, Array, Array, Array]:
+            next_state, _, _, _, _, info = step(
                 config,
                 state,
                 action_mask,
                 action,
                 step_key,
             )
+            physical_facts = info.transition_facts.physical_facts
             return (
                 next_state.agent_positions[0],
                 next_state.spawn_shield_durations[0],
+                physical_facts.charge_phase_displacement_by_agent,
+                physical_facts.ordinary_movement_phase_displacement_by_agent,
             )
 
         return jax.vmap(_one_transition)(
@@ -2035,13 +2059,20 @@ def test_spawn_shield_duration_paths_match_eager_jit_and_vmap() -> None:
             step_keys,
         )
 
-    eager_positions, eager_durations = _batched_transition(
-        batched_states,
-        batched_action_masks,
-        keys,
+    eager_positions, eager_durations, eager_charge, eager_ordinary = (
+        _batched_transition(
+            batched_states,
+            batched_action_masks,
+            keys,
+        )
     )
-    compiled_positions, compiled_durations = cast(
-        tuple[Array, Array],
+    (
+        compiled_positions,
+        compiled_durations,
+        compiled_charge,
+        compiled_ordinary,
+    ) = cast(
+        tuple[Array, Array, Array, Array],
         jax.jit(_batched_transition)(
             batched_states,
             batched_action_masks,
@@ -2051,6 +2082,23 @@ def test_spawn_shield_duration_paths_match_eager_jit_and_vmap() -> None:
 
     assert bool(jnp.array_equal(compiled_positions, eager_positions))
     assert bool(jnp.array_equal(compiled_durations, eager_durations))
+    assert bool(jnp.array_equal(compiled_charge, eager_charge))
+    assert bool(jnp.array_equal(compiled_ordinary, eager_ordinary))
+    assert eager_charge.shape == (
+        len(durations),
+        MAX_AGENT_SLOTS,
+        ENVIRONMENT_DIMENSIONS,
+    )
+    assert eager_ordinary.shape == eager_charge.shape
+    assert bool(jnp.all(eager_charge == 0.0))
+    assert bool(
+        jnp.allclose(
+            eager_ordinary[:, 0, 0],
+            jnp.asarray((0.25, 2.0, 2.0, 2.0), dtype=jnp.float32),
+        )
+    )
+    assert bool(jnp.all(eager_ordinary[:, 0, 1] == 0.0))
+    assert bool(jnp.all(eager_ordinary[:, 1:] == 0.0))
     assert bool(
         jnp.allclose(
             eager_positions[:, 0],
@@ -2248,7 +2296,7 @@ def test_collision_projection_may_displace_a_stunned_zero_intent_body() -> None:
         stun_durations=state.stun_durations.at[0, STUN_CHANNEL_HUNTER_TRAP].set(2)
     )
 
-    next_state, next_observation, *_ = step(
+    next_state, next_observation, _, _, _, info = step(
         config,
         state,
         _current_action_mask(config, state),
@@ -2266,6 +2314,14 @@ def test_collision_projection_may_displace_a_stunned_zero_intent_body() -> None:
         slot_b=1,
         radius_a=0.5,
         radius_b=0.5,
+    )
+    physical_facts = info.transition_facts.physical_facts
+    assert bool(jnp.all(physical_facts.charge_phase_displacement_by_agent == 0.0))
+    assert bool(
+        jnp.allclose(
+            physical_facts.ordinary_movement_phase_displacement_by_agent,
+            next_state.agent_positions - state.agent_positions,
+        )
     )
 
 
@@ -2411,15 +2467,15 @@ def test_step_can_run_non_stay_movement_in_jitted_scanned_rollout() -> None:
         initial_state: EnvState,
         initial_mask: ActionMask,
         step_keys: Array,
-    ) -> tuple[tuple[EnvState, ActionMask], tuple[Array, Array]]:
+    ) -> tuple[tuple[EnvState, ActionMask], tuple[Array, Array, Array]]:
         """Run a compiled fixed-horizon rollout with stable scan outputs."""
 
         def _step_wrapper(
             carry: tuple[EnvState, ActionMask],
             step_key: Array,
-        ) -> tuple[tuple[EnvState, ActionMask], tuple[Array, Array]]:
+        ) -> tuple[tuple[EnvState, ActionMask], tuple[Array, Array, Array]]:
             current_state, current_action_mask = carry
-            new_state, _, _, _, next_action_mask, _ = step(
+            new_state, _, _, _, next_action_mask, info = step(
                 config,
                 current_state,
                 current_action_mask,
@@ -2429,6 +2485,7 @@ def test_step_can_run_non_stay_movement_in_jitted_scanned_rollout() -> None:
             return (new_state, next_action_mask), (
                 new_state.step_count,
                 new_state.agent_positions,
+                info.transition_facts.physical_facts.ordinary_movement_phase_displacement_by_agent,
             )
 
         return jax.lax.scan(
@@ -2442,10 +2499,10 @@ def test_step_can_run_non_stay_movement_in_jitted_scanned_rollout() -> None:
     assert keys.shape == (horizon,)
 
     (final_state, final_action_mask), history = cast(
-        tuple[tuple[EnvState, ActionMask], tuple[Array, Array]],
+        tuple[tuple[EnvState, ActionMask], tuple[Array, Array, Array]],
         jax.jit(_rollout)(state, initial_action_mask, keys),
     )
-    step_count_history, position_history = history
+    step_count_history, position_history, ordinary_displacement_history = history
 
     expected_agent_a_position = jnp.array([8.0, 5.0], dtype=jnp.float32)
     expected_agent_a_history = jnp.array(
@@ -2485,6 +2542,23 @@ def test_step_can_run_non_stay_movement_in_jitted_scanned_rollout() -> None:
             jnp.broadcast_to(agent_b_start, (horizon, ENVIRONMENT_DIMENSIONS)),
             atol=GEOMETRY_TOLERANCE,
             rtol=0.0,
+        )
+    )
+    expected_ordinary_displacement_history = (
+        jnp.zeros((horizon, MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS), dtype=jnp.float32)
+        .at[:, 0, 0]
+        .set(1.0)
+    )
+    assert ordinary_displacement_history.shape == (
+        horizon,
+        MAX_AGENT_SLOTS,
+        ENVIRONMENT_DIMENSIONS,
+    )
+    assert ordinary_displacement_history.dtype == jnp.float32
+    assert bool(
+        jnp.array_equal(
+            ordinary_displacement_history,
+            expected_ordinary_displacement_history,
         )
     )
 

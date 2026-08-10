@@ -12,10 +12,13 @@ import marl_battlegrounds.core.combat as combat
 from marl_battlegrounds.core.config import resolve_agent_profile
 from marl_battlegrounds.core.env import (
     _build_observation_and_action_mask,
+    initialize_scenario_state,
     reset,
     step,
 )
 from marl_battlegrounds.core.types import (
+    AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED,
+    AGENT_FEATURE_SLOW_HUNTER_BASIC_DURATION,
     ENVIRONMENT_DIMENSIONS,
     HUNTER_CLASS_ID,
     MAGE_CLASS_ID,
@@ -29,6 +32,7 @@ from marl_battlegrounds.core.types import (
     NUM_SLOW_CHANNELS,
     NUM_STUN_CHANNELS,
     NUM_TARGET_ACTIONS,
+    NUM_TEAMS,
     NUM_ULTIMATE_ACTIONS,
     OBSTACLE_FEATURES,
     PRIEST_CLASS_ID,
@@ -43,6 +47,7 @@ from marl_battlegrounds.core.types import (
     Action,
     ActionAcceptanceFacts,
     ActionMask,
+    AuraTransitionFacts,
     CombatTransitionFacts,
     DeathTransitionFacts,
     DoneFlags,
@@ -50,20 +55,37 @@ from marl_battlegrounds.core.types import (
     EnvState,
     Info,
     Observation,
+    PhysicalTransitionFacts,
     RegenerationTransitionFacts,
     RespawnTransitionFacts,
     Reward,
     SpawnShieldTransitionFacts,
+    StatusLifecycleTransitionFacts,
     TransitionFacts,
 )
 
 _TEAM_A_FIRST_SLOT = 0
 _TEAM_B_FIRST_SLOT = MAX_AGENTS_PER_TEAM
+_TEAM_B_INDEX = 1
 _TARGET_NONE = 0
 _SELF_TARGET = 1
 _FIRST_ENEMY_TARGET = 1 + MAX_AGENTS_PER_TEAM
-_TRANSITION_FACT_LEAF_COUNT = 37
-_TRANSITION_FACT_RAW_BYTES = 897
+_TRANSITION_FACT_LEAF_COUNT = 46
+_TRANSITION_FACT_RAW_BYTES = 1_657
+
+_STATUS_CHANNEL_INDEX_BY_NAME = {
+    "warrior-charge-slow": SLOW_CHANNEL_WARRIOR_CHARGE,
+    "hunter-basic-slow": SLOW_CHANNEL_HUNTER_BASIC,
+    "rogue-poison-slow": SLOW_CHANNEL_ROGUE_POISON,
+    "warrior-charge-stun": NUM_SLOW_CHANNELS + STUN_CHANNEL_WARRIOR_CHARGE,
+    "hunter-trap-stun": NUM_SLOW_CHANNELS + STUN_CHANNEL_HUNTER_TRAP,
+    "rogue-poison-stun": NUM_SLOW_CHANNELS + STUN_CHANNEL_ROGUE_POISON,
+    "rogue-poison-anti-heal": NUM_SLOW_CHANNELS + NUM_STUN_CHANNELS,
+    "mage-burst-damage-amplification": NUM_SLOW_CHANNELS + NUM_STUN_CHANNELS + 1,
+    "priest-blessing-of-freedom": NUM_SLOW_CHANNELS + NUM_STUN_CHANNELS + 2,
+}
+_NUM_STATUS_LIFECYCLE_CHANNELS = len(_STATUS_CHANNEL_INDEX_BY_NAME)
+_HUNTER_TRAP_STATUS_CHANNEL = _STATUS_CHANNEL_INDEX_BY_NAME["hunter-trap-stun"]
 
 
 def _empty_obstacles() -> Array:
@@ -192,8 +214,232 @@ def _single_source_mask(source_slot: int) -> Array:
     return jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.bool_).at[source_slot].set(True)
 
 
-def _assert_canonical_empty_combat_facts(facts: CombatTransitionFacts) -> None:
-    """Assert the reset/neutral canonical values for every combat fact family."""
+def _status_durations_by_recipient_and_channel(state: EnvState) -> Array:
+    """Pack state durations in the one canonical lifecycle channel order."""
+    return jnp.concatenate(
+        (
+            state.slow_durations,
+            state.stun_durations,
+            state.rogue_poison_anti_heal_durations[:, None],
+            state.mage_burst_damage_amplification_durations[:, None],
+            state.priest_blessing_of_freedom_slow_floor_durations[:, None],
+        ),
+        axis=-1,
+    )
+
+
+def _replace_status_duration_row(
+    state: EnvState,
+    recipient_slot: int,
+    durations: Array,
+) -> EnvState:
+    """Replace one recipient's packed status row without duplicating ordering."""
+    packed = (
+        _status_durations_by_recipient_and_channel(state)
+        .at[recipient_slot]
+        .set(durations)
+    )
+    scalar_offset = NUM_SLOW_CHANNELS + NUM_STUN_CHANNELS
+    return state._replace(
+        slow_durations=packed[:, :NUM_SLOW_CHANNELS],
+        stun_durations=packed[
+            :, NUM_SLOW_CHANNELS : NUM_SLOW_CHANNELS + NUM_STUN_CHANNELS
+        ],
+        rogue_poison_anti_heal_durations=packed[:, scalar_offset],
+        mage_burst_damage_amplification_durations=packed[:, scalar_offset + 1],
+        priest_blessing_of_freedom_slow_floor_durations=packed[:, scalar_offset + 2],
+    )
+
+
+def _status_row(*durations_by_name: tuple[str, int]) -> Array:
+    """Build one int32 duration row from canonical channel names."""
+    row = jnp.zeros((_NUM_STATUS_LIFECYCLE_CHANNELS,), dtype=jnp.int32)
+    for name, duration in durations_by_name:
+        row = row.at[_STATUS_CHANNEL_INDEX_BY_NAME[name]].set(duration)
+    return row
+
+
+def _status_cause_matrix(
+    recipient_slot: int,
+    *status_names: str,
+) -> Array:
+    """Build one exact recipient-aligned lifecycle-cause expectation."""
+    matrix = jnp.zeros(
+        (MAX_AGENT_SLOTS, _NUM_STATUS_LIFECYCLE_CHANNELS), dtype=jnp.bool_
+    )
+    for name in status_names:
+        matrix = matrix.at[recipient_slot, _STATUS_CHANNEL_INDEX_BY_NAME[name]].set(
+            True
+        )
+    return matrix
+
+
+def _assert_status_lifecycle_facts_equal(
+    facts: StatusLifecycleTransitionFacts,
+    *,
+    aged: Array,
+    refreshed: Array,
+    broken: Array,
+    cleared: Array,
+) -> None:
+    """Assert all four independent lifecycle causes by their public names."""
+    assert bool(
+        jnp.array_equal(
+            facts.aged_to_zero_by_recipient_and_status_channel,
+            aged,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            facts.refreshed_or_extended_by_recipient_and_status_channel,
+            refreshed,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            facts.broken_by_damage_by_recipient_and_status_channel,
+            broken,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            facts.cleared_by_new_death_by_recipient_and_status_channel,
+            cleared,
+        )
+    )
+
+
+def _assert_empty_status_lifecycle_facts(
+    facts: StatusLifecycleTransitionFacts,
+) -> None:
+    """Assert canonical shape, dtype, and neutrality for lifecycle facts."""
+    empty = jnp.zeros(
+        (MAX_AGENT_SLOTS, _NUM_STATUS_LIFECYCLE_CHANNELS), dtype=jnp.bool_
+    )
+    _assert_status_lifecycle_facts_equal(
+        facts,
+        aged=empty,
+        refreshed=empty,
+        broken=empty,
+        cleared=empty,
+    )
+    for matrix in facts:
+        assert matrix.shape == (MAX_AGENT_SLOTS, _NUM_STATUS_LIFECYCLE_CHANNELS)
+        assert matrix.dtype == jnp.bool_
+
+
+def _assert_empty_physical_facts(facts: PhysicalTransitionFacts) -> None:
+    """Assert canonical shape, dtype, and neutrality for physical facts."""
+    for displacement in facts:
+        assert displacement.shape == (MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS)
+        assert displacement.dtype == jnp.float32
+        assert bool(jnp.all(displacement == 0.0))
+
+
+def _assert_empty_aura_facts(facts: AuraTransitionFacts) -> None:
+    """Assert canonical shape, dtype, and neutrality for aura facts."""
+    for coverage in facts:
+        assert coverage.shape == (MAX_AGENT_SLOTS, MAX_AGENT_SLOTS)
+        assert coverage.dtype == jnp.bool_
+        assert not bool(jnp.any(coverage))
+
+
+def _assert_status_application_channels(
+    facts: CombatTransitionFacts,
+    source_slot: int,
+    *status_names: str,
+) -> None:
+    """Assert one source's exact application facts in canonical channel terms."""
+    expected_slow = jnp.zeros((MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.bool_)
+    expected_stun = jnp.zeros((MAX_AGENT_SLOTS, NUM_STUN_CHANNELS), dtype=jnp.bool_)
+    expected_anti_heal = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.bool_)
+    expected_mage_burst = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.bool_)
+    expected_priest_freedom = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.bool_)
+    scalar_offset = NUM_SLOW_CHANNELS + NUM_STUN_CHANNELS
+
+    for name in status_names:
+        channel = _STATUS_CHANNEL_INDEX_BY_NAME[name]
+        if channel < NUM_SLOW_CHANNELS:
+            expected_slow = expected_slow.at[source_slot, channel].set(True)
+        elif channel < scalar_offset:
+            expected_stun = expected_stun.at[
+                source_slot, channel - NUM_SLOW_CHANNELS
+            ].set(True)
+        elif channel == scalar_offset:
+            expected_anti_heal = expected_anti_heal.at[source_slot].set(True)
+        elif channel == scalar_offset + 1:
+            expected_mage_burst = expected_mage_burst.at[source_slot].set(True)
+        else:
+            expected_priest_freedom = expected_priest_freedom.at[source_slot].set(True)
+
+    assert bool(
+        jnp.array_equal(facts.slow_is_applied_by_source_and_channel, expected_slow)
+    )
+    assert bool(
+        jnp.array_equal(facts.stun_is_applied_by_source_and_channel, expected_stun)
+    )
+    assert bool(
+        jnp.array_equal(
+            facts.rogue_poison_anti_heal_is_applied_by_source,
+            expected_anti_heal,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            facts.mage_burst_damage_amplification_is_applied_by_source,
+            expected_mage_burst,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            facts.priest_blessing_of_freedom_is_applied_by_source,
+            expected_priest_freedom,
+        )
+    )
+
+
+def _assert_batched_cp1_fact_shapes(
+    facts: TransitionFacts,
+    batch_size: int,
+) -> None:
+    """Assert every CP1 addition retains its named shape after JAX stacking."""
+    assert (
+        facts.combat_transition_facts.health_after_combat_resolution_by_recipient.shape
+        == (batch_size, MAX_AGENT_SLOTS)
+    )
+    assert facts.physical_facts.charge_phase_displacement_by_agent.shape == (
+        batch_size,
+        MAX_AGENT_SLOTS,
+        ENVIRONMENT_DIMENSIONS,
+    )
+    assert facts.physical_facts.ordinary_movement_phase_displacement_by_agent.shape == (
+        batch_size,
+        MAX_AGENT_SLOTS,
+        ENVIRONMENT_DIMENSIONS,
+    )
+    assert (
+        facts.aura_facts.is_covered_by_mage_damage_aura_by_emitter_and_beneficiary.shape
+        == (batch_size, MAX_AGENT_SLOTS, MAX_AGENT_SLOTS)
+    )
+    assert (
+        facts.aura_facts.is_covered_by_warrior_mitigation_aura_by_emitter_and_beneficiary.shape
+        == (batch_size, MAX_AGENT_SLOTS, MAX_AGENT_SLOTS)
+    )
+    for cause_matrix in facts.status_lifecycle_facts:
+        assert cause_matrix.shape == (
+            batch_size,
+            MAX_AGENT_SLOTS,
+            _NUM_STATUS_LIFECYCLE_CHANNELS,
+        )
+        assert cause_matrix.dtype == jnp.bool_
+
+
+def _assert_empty_combat_effect_facts(
+    facts: CombatTransitionFacts,
+    *,
+    expected_post_combat_health: Array | None = None,
+) -> None:
+    """Assert empty effects plus the supplied authoritative health boundary."""
     boolean_vectors = (
         facts.basic_effect_is_activated_by_source,
         facts.ultimate_effect_is_activated_by_source,
@@ -241,6 +487,20 @@ def _assert_canonical_empty_combat_facts(facts: CombatTransitionFacts) -> None:
         assert vector.dtype == jnp.float32
         assert bool(jnp.all(vector == 0.0))
 
+    expected_health = (
+        jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32)
+        if expected_post_combat_health is None
+        else expected_post_combat_health
+    )
+    assert facts.health_after_combat_resolution_by_recipient.shape == (MAX_AGENT_SLOTS,)
+    assert facts.health_after_combat_resolution_by_recipient.dtype == jnp.float32
+    assert bool(
+        jnp.array_equal(
+            facts.health_after_combat_resolution_by_recipient,
+            expected_health,
+        )
+    )
+
 
 def _assert_canonical_empty_death_facts(facts: DeathTransitionFacts) -> None:
     """Assert the reset/neutral canonical values for every death fact leaf."""
@@ -271,6 +531,16 @@ def _assert_canonical_empty_spawn_shield_facts(
         assert not bool(jnp.any(vector))
 
 
+def _assert_canonical_empty_respawn_facts(facts: RespawnTransitionFacts) -> None:
+    """Assert canonical shape, dtype, and neutrality for respawn facts."""
+    assert facts.respawn_wave_occurred_this_transition_by_team.shape == (NUM_TEAMS,)
+    assert facts.respawn_wave_occurred_this_transition_by_team.dtype == jnp.bool_
+    assert not bool(jnp.any(facts.respawn_wave_occurred_this_transition_by_team))
+    assert facts.was_respawned_this_transition_by_agent.shape == (MAX_AGENT_SLOTS,)
+    assert facts.was_respawned_this_transition_by_agent.dtype == jnp.bool_
+    assert not bool(jnp.any(facts.was_respawned_this_transition_by_agent))
+
+
 def _assert_canonical_empty_regeneration_facts(
     facts: RegenerationTransitionFacts,
 ) -> None:
@@ -285,13 +555,19 @@ def _assert_canonical_empty_regeneration_facts(
     assert bool(jnp.all(facts.actual_health_regenerated_this_step_by_agent == 0.0))
 
 
-def test_reset_and_real_neutral_step_share_the_exact_static_fact_schema() -> None:
-    """Prove canonical reset facts, real-step identity, and the payload budget."""
+def test_reset_scenario_and_real_step_share_the_exact_static_fact_schema() -> None:
+    """Prove initialization neutrality, real-step identity, and payload budget."""
     config, state, action_mask = _scenario(
         (_TEAM_A_FIRST_SLOT, HUNTER_CLASS_ID),
         (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
     )
-    _, _, _, reset_info = reset(config, jax.random.key(3))
+    reset_result = reset(config, jax.random.key(3))
+    _, _, _, reset_info = reset_result
+    compiled_reset = cast(
+        tuple[EnvState, Observation, ActionMask, Info],
+        jax.jit(reset)(config, jax.random.key(3)),
+    )
+    _assert_array_equal(reset_result, compiled_reset)
     reset_facts = reset_info.transition_facts
 
     assert ActionAcceptanceFacts._fields == (
@@ -314,6 +590,7 @@ def test_reset_and_real_neutral_step_share_the_exact_static_fact_schema() -> Non
         "source_modified_healing_output_by_source",
         "recipient_healing_modifier_by_source",
         "total_effective_healing_by_recipient",
+        "health_after_combat_resolution_by_recipient",
         "slow_is_applied_by_source_and_channel",
         "stun_is_applied_by_source_and_channel",
         "rogue_poison_anti_heal_is_applied_by_source",
@@ -337,6 +614,20 @@ def test_reset_and_real_neutral_step_share_the_exact_static_fact_schema() -> Non
         "combat_countdown_was_reset_by_agent",
         "actual_health_regenerated_this_step_by_agent",
     )
+    assert PhysicalTransitionFacts._fields == (
+        "charge_phase_displacement_by_agent",
+        "ordinary_movement_phase_displacement_by_agent",
+    )
+    assert AuraTransitionFacts._fields == (
+        "is_covered_by_mage_damage_aura_by_emitter_and_beneficiary",
+        "is_covered_by_warrior_mitigation_aura_by_emitter_and_beneficiary",
+    )
+    assert StatusLifecycleTransitionFacts._fields == (
+        "aged_to_zero_by_recipient_and_status_channel",
+        "refreshed_or_extended_by_recipient_and_status_channel",
+        "broken_by_damage_by_recipient_and_status_channel",
+        "cleared_by_new_death_by_recipient_and_status_channel",
+    )
     assert TransitionFacts._fields == (
         "has_transition",
         "transition_start_step_count",
@@ -346,8 +637,14 @@ def test_reset_and_real_neutral_step_share_the_exact_static_fact_schema() -> Non
         "spawn_shield_facts",
         "respawn_facts",
         "regeneration_facts",
+        "physical_facts",
+        "aura_facts",
+        "status_lifecycle_facts",
     )
     assert Info._fields == ("transition_facts",)
+    assert tuple(_STATUS_CHANNEL_INDEX_BY_NAME.values()) == tuple(
+        range(_NUM_STATUS_LIFECYCLE_CHANNELS)
+    )
 
     assert reset_facts.has_transition.shape == ()
     assert reset_facts.has_transition.dtype == jnp.bool_
@@ -370,16 +667,35 @@ def test_reset_and_real_neutral_step_share_the_exact_static_fact_schema() -> Non
         assert rejected.shape == (MAX_AGENT_SLOTS,)
         assert rejected.dtype == jnp.bool_
         assert not bool(jnp.any(rejected))
-    _assert_canonical_empty_combat_facts(reset_facts.combat_transition_facts)
+    _assert_empty_combat_effect_facts(reset_facts.combat_transition_facts)
     _assert_canonical_empty_death_facts(reset_facts.death_facts)
     _assert_canonical_empty_spawn_shield_facts(reset_facts.spawn_shield_facts)
+    _assert_canonical_empty_respawn_facts(reset_facts.respawn_facts)
     _assert_canonical_empty_regeneration_facts(reset_facts.regeneration_facts)
+    _assert_empty_physical_facts(reset_facts.physical_facts)
+    _assert_empty_aura_facts(reset_facts.aura_facts)
+    _assert_empty_status_lifecycle_facts(reset_facts.status_lifecycle_facts)
 
     leaves = jax.tree_util.tree_leaves(reset_facts)
     assert len(leaves) == _TRANSITION_FACT_LEAF_COUNT
     assert all(isinstance(leaf, jax.Array) for leaf in leaves)
     raw_bytes = sum(int(leaf.size) * int(leaf.dtype.itemsize) for leaf in leaves)
     assert raw_bytes == _TRANSITION_FACT_RAW_BYTES
+
+    validated_scenario_config = config._replace(
+        agent_profile=resolve_agent_profile(
+            config.agent_profile.class_ids,
+            jnp.asarray((1, 1), dtype=jnp.int32),
+        ),
+        team_spawn_pad_positions=_default_positions((5, 5)).reshape(
+            (NUM_TEAMS, MAX_AGENTS_PER_TEAM, ENVIRONMENT_DIMENSIONS)
+        ),
+    )
+    _, _, _, scenario_info = initialize_scenario_state(
+        state,
+        validated_scenario_config,
+    )
+    _assert_array_equal(scenario_info.transition_facts, reset_facts)
 
     *_, neutral_info = _take_step(
         config,
@@ -393,10 +709,17 @@ def test_reset_and_real_neutral_step_share_the_exact_static_fact_schema() -> Non
     )
     assert bool(neutral_facts.has_transition)
     assert int(neutral_facts.transition_start_step_count) == 0
-    _assert_canonical_empty_combat_facts(neutral_facts.combat_transition_facts)
+    _assert_empty_combat_effect_facts(
+        neutral_facts.combat_transition_facts,
+        expected_post_combat_health=state.current_health,
+    )
     _assert_canonical_empty_death_facts(neutral_facts.death_facts)
     _assert_canonical_empty_spawn_shield_facts(neutral_facts.spawn_shield_facts)
+    _assert_canonical_empty_respawn_facts(neutral_facts.respawn_facts)
     _assert_canonical_empty_regeneration_facts(neutral_facts.regeneration_facts)
+    _assert_empty_physical_facts(neutral_facts.physical_facts)
+    _assert_empty_aura_facts(neutral_facts.aura_facts)
+    _assert_empty_status_lifecycle_facts(neutral_facts.status_lifecycle_facts)
 
 
 @pytest.mark.parametrize(
@@ -500,7 +823,10 @@ def test_expiring_spawn_shield_rejects_current_target_then_reenables_next_mask()
         int(acceptance_facts.accepted_joint_action.select_target[_TEAM_A_FIRST_SLOT])
         == _TARGET_NONE
     )
-    _assert_canonical_empty_combat_facts(info.transition_facts.combat_transition_facts)
+    _assert_empty_combat_effect_facts(
+        info.transition_facts.combat_transition_facts,
+        expected_post_combat_health=state.current_health,
+    )
     _assert_canonical_empty_death_facts(info.transition_facts.death_facts)
     assert bool(
         shield_facts.expired_at_transition_end_by_agent[shielded_recipient_slot]
@@ -612,7 +938,10 @@ def test_out_of_domain_head_has_exclusive_precedence_before_mask_rejection(
     assert int(facts.accepted_joint_action.move[_TEAM_A_FIRST_SLOT]) == MOVE_STAY
     assert int(facts.accepted_joint_action.select_target[_TEAM_A_FIRST_SLOT]) == 0
     assert int(facts.accepted_joint_action.use_ultimate[_TEAM_A_FIRST_SLOT]) == 0
-    _assert_canonical_empty_combat_facts(info.transition_facts.combat_transition_facts)
+    _assert_empty_combat_effect_facts(
+        info.transition_facts.combat_transition_facts,
+        expected_post_combat_health=state.current_health,
+    )
 
 
 @pytest.mark.parametrize(
@@ -750,8 +1079,9 @@ def test_dead_and_inactive_rows_distinguish_canonical_noop_from_rejection(
     assert int(rejected.accepted_joint_action.move[actor_slot]) == MOVE_STAY
     assert int(rejected.accepted_joint_action.select_target[actor_slot]) == 0
     assert int(rejected.accepted_joint_action.use_ultimate[actor_slot]) == 0
-    _assert_canonical_empty_combat_facts(
-        rejected_info.transition_facts.combat_transition_facts
+    _assert_empty_combat_effect_facts(
+        rejected_info.transition_facts.combat_transition_facts,
+        expected_post_combat_health=state.current_health,
     )
     _assert_canonical_empty_death_facts(rejected_info.transition_facts.death_facts)
 
@@ -1011,7 +1341,9 @@ def test_every_class_basic_emits_its_authoritative_effect_lane(
     assert facts.raw_healing_output_by_source[_TEAM_A_FIRST_SLOT] == raw_healing
 
     source_damage_multiplier = (
-        combat.MAGE_DAMAGE_AURA_MULTIPLIER if actor_class_id == MAGE_CLASS_ID else 1.0
+        combat.MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER
+        if actor_class_id == MAGE_CLASS_ID
+        else 1.0
     )
     expected_source_damage = raw_damage * source_damage_multiplier
     assert bool(
@@ -1052,6 +1384,19 @@ def test_every_class_basic_emits_its_authoritative_effect_lane(
             raw_healing - expected_source_damage + actual_regeneration,
         )
     )
+    expected_post_combat_health = state.current_health.at[recipient_slot].set(
+        jnp.clip(
+            state.current_health[recipient_slot] + raw_healing - expected_source_damage,
+            0.0,
+            config.agent_profile.max_health[recipient_slot],
+        )
+    )
+    assert bool(
+        jnp.allclose(
+            facts.health_after_combat_resolution_by_recipient,
+            expected_post_combat_health,
+        )
+    )
 
     expected_slow = jnp.zeros((MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.bool_)
     if actor_class_id == HUNTER_CLASS_ID:
@@ -1070,6 +1415,34 @@ def test_every_class_basic_emits_its_authoritative_effect_lane(
     ) is (actor_class_id == PRIEST_CLASS_ID)
     assert not bool(jnp.any(facts.rogue_poison_anti_heal_is_applied_by_source))
     assert not bool(jnp.any(facts.mage_burst_damage_amplification_is_applied_by_source))
+
+    expected_mage_coverage = jnp.zeros(
+        (MAX_AGENT_SLOTS, MAX_AGENT_SLOTS), dtype=jnp.bool_
+    )
+    expected_warrior_coverage = jnp.zeros_like(expected_mage_coverage)
+    if actor_class_id == MAGE_CLASS_ID:
+        expected_mage_coverage = expected_mage_coverage.at[
+            _TEAM_A_FIRST_SLOT, _TEAM_A_FIRST_SLOT
+        ].set(True)
+    elif actor_class_id == WARRIOR_CLASS_ID:
+        expected_warrior_coverage = expected_warrior_coverage.at[
+            _TEAM_A_FIRST_SLOT, _TEAM_A_FIRST_SLOT
+        ].set(True)
+    aura_facts = info.transition_facts.aura_facts
+    assert bool(
+        jnp.array_equal(
+            aura_facts.is_covered_by_mage_damage_aura_by_emitter_and_beneficiary,
+            expected_mage_coverage,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            aura_facts.is_covered_by_warrior_mitigation_aura_by_emitter_and_beneficiary,
+            expected_warrior_coverage,
+        )
+    )
+    _assert_empty_physical_facts(info.transition_facts.physical_facts)
+    _assert_empty_status_lifecycle_facts(info.transition_facts.status_lifecycle_facts)
 
 
 @pytest.mark.parametrize(
@@ -1215,22 +1588,358 @@ def test_every_class_ultimate_emits_health_and_status_application_truth(
         assert next_state.current_health[recipient_slot] == (expected_successor_health)
         assert facts.total_effective_damage_by_recipient[recipient_slot] == raw_damage
         assert facts.total_effective_healing_by_recipient[recipient_slot] == raw_healing
+        expected_post_combat_health = state.current_health.at[recipient_slot].set(
+            expected_successor_health
+        )
     else:
         assert bool(jnp.all(facts.total_effective_damage_by_recipient == 0.0))
         assert bool(jnp.all(facts.total_effective_healing_by_recipient == 0.0))
+        expected_post_combat_health = state.current_health
+
+    assert bool(
+        jnp.array_equal(
+            facts.health_after_combat_resolution_by_recipient,
+            expected_post_combat_health,
+        )
+    )
+    physical_facts = info.transition_facts.physical_facts
+    assert physical_facts.charge_phase_displacement_by_agent.dtype == jnp.float32
+    assert bool(
+        jnp.allclose(
+            physical_facts.charge_phase_displacement_by_agent,
+            next_state.agent_positions - state.agent_positions,
+        )
+    )
+    assert bool(
+        jnp.all(physical_facts.ordinary_movement_phase_displacement_by_agent == 0.0)
+    )
+    assert bool(jnp.any(physical_facts.charge_phase_displacement_by_agent)) is (
+        actor_class_id == WARRIOR_CLASS_ID
+    )
+    _assert_empty_status_lifecycle_facts(info.transition_facts.status_lifecycle_facts)
 
 
-def test_status_application_fact_is_not_inferred_from_duration_change() -> None:
-    """Prove a refresh remains explicit when the successor duration is unchanged."""
+def test_status_application_remains_explicit_when_it_cannot_extend_duration() -> None:
+    """Keep accepted application truth separate from a non-extending merge."""
     config, state, action_mask = _scenario(
+        (_TEAM_A_FIRST_SLOT, MAGE_CLASS_ID),
+        (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
+    )
+    current_duration = combat.MAGE_BURST_DAMAGE_DURATION_TICKS + 2
+    state = state._replace(
+        mage_burst_damage_amplification_durations=(
+            state.mage_burst_damage_amplification_durations.at[_TEAM_A_FIRST_SLOT].set(
+                current_duration
+            )
+        )
+    )
+    action_mask = _build_observation_and_action_mask(state, config)[1]
+
+    next_state, *_, info = _take_step(
+        config,
+        state,
+        action_mask,
+        _joint_action((_TEAM_A_FIRST_SLOT, MOVE_STAY, _TARGET_NONE, 1)),
+    )
+
+    assert (
+        int(next_state.mage_burst_damage_amplification_durations[_TEAM_A_FIRST_SLOT])
+        == current_duration - 1
+    )
+    assert bool(
+        info.transition_facts.combat_transition_facts.mage_burst_damage_amplification_is_applied_by_source[
+            _TEAM_A_FIRST_SLOT
+        ]
+    )
+    _assert_empty_status_lifecycle_facts(info.transition_facts.status_lifecycle_facts)
+
+
+@pytest.mark.parametrize(
+    ("starting_duration", "expected_next_duration", "expected_aged"),
+    (
+        pytest.param(0, 0, False, id="zero-remains-absent"),
+        pytest.param(1, 0, True, id="one-ages-to-zero"),
+        pytest.param(2, 1, False, id="many-remains-positive"),
+    ),
+)
+def test_all_nine_status_channels_share_the_exact_ordinary_age_boundary(
+    starting_duration: int,
+    expected_next_duration: int,
+    expected_aged: bool,
+) -> None:
+    """Exercise zero, one, and many for every canonical lifecycle channel."""
+    config, state, _ = _scenario(
+        (_TEAM_A_FIRST_SLOT, HUNTER_CLASS_ID),
+        (_TEAM_B_FIRST_SLOT, MAGE_CLASS_ID),
+    )
+    starting_row = jnp.full(
+        (_NUM_STATUS_LIFECYCLE_CHANNELS,),
+        starting_duration,
+        dtype=jnp.int32,
+    )
+    state = _replace_status_duration_row(state, _TEAM_B_FIRST_SLOT, starting_row)
+    action_mask = _build_observation_and_action_mask(state, config)[1]
+
+    next_state, *_, info = _take_step(
+        config,
+        state,
+        action_mask,
+        _joint_action(),
+    )
+
+    assert bool(
+        jnp.array_equal(
+            _status_durations_by_recipient_and_channel(next_state)[_TEAM_B_FIRST_SLOT],
+            jnp.full_like(starting_row, expected_next_duration),
+        )
+    )
+    expected_aged_matrix = (
+        jnp.zeros((MAX_AGENT_SLOTS, _NUM_STATUS_LIFECYCLE_CHANNELS), dtype=jnp.bool_)
+        .at[_TEAM_B_FIRST_SLOT]
+        .set(expected_aged)
+    )
+    empty = jnp.zeros_like(expected_aged_matrix)
+    _assert_status_lifecycle_facts_equal(
+        info.transition_facts.status_lifecycle_facts,
+        aged=expected_aged_matrix,
+        refreshed=empty,
+        broken=empty,
+        cleared=empty,
+    )
+
+
+_NON_TRAP_STATUS_APPLICATION_CASES = (
+    pytest.param(
+        WARRIOR_CLASS_ID,
+        _FIRST_ENEMY_TARGET,
+        1,
+        _TEAM_B_FIRST_SLOT,
+        (
+            ("warrior-charge-slow", 2),
+            ("warrior-charge-stun", 1),
+        ),
+        ("warrior-charge-stun",),
+        ("warrior-charge-slow",),
+        ("warrior-charge-slow", "warrior-charge-stun"),
+        id="warrior-charge",
+    ),
+    pytest.param(
+        HUNTER_CLASS_ID,
+        _FIRST_ENEMY_TARGET,
+        0,
+        _TEAM_B_FIRST_SLOT,
+        (("hunter-basic-slow", 1),),
+        ("hunter-basic-slow",),
+        (),
+        ("hunter-basic-slow",),
+        id="hunter-basic",
+    ),
+    pytest.param(
+        ROGUE_CLASS_ID,
+        _FIRST_ENEMY_TARGET,
+        1,
+        _TEAM_B_FIRST_SLOT,
+        (
+            ("rogue-poison-slow", 2),
+            ("rogue-poison-stun", 1),
+            ("rogue-poison-anti-heal", 2),
+        ),
+        ("rogue-poison-stun",),
+        ("rogue-poison-slow", "rogue-poison-anti-heal"),
+        (
+            "rogue-poison-slow",
+            "rogue-poison-stun",
+            "rogue-poison-anti-heal",
+        ),
+        id="rogue-poison",
+    ),
+    pytest.param(
+        MAGE_CLASS_ID,
+        _TARGET_NONE,
+        1,
+        _TEAM_A_FIRST_SLOT,
+        (("mage-burst-damage-amplification", 2),),
+        (),
+        ("mage-burst-damage-amplification",),
+        ("mage-burst-damage-amplification",),
+        id="mage-burst",
+    ),
+    pytest.param(
+        PRIEST_CLASS_ID,
+        _SELF_TARGET,
+        0,
+        _TEAM_A_FIRST_SLOT,
+        (("priest-blessing-of-freedom", 1),),
+        ("priest-blessing-of-freedom",),
+        (),
+        ("priest-blessing-of-freedom",),
+        id="priest-blessing-of-freedom",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    (
+        "actor_class_id",
+        "target_action",
+        "use_ultimate",
+        "recipient_slot",
+        "starting_durations",
+        "aged_statuses",
+        "refreshed_statuses",
+        "applied_statuses",
+    ),
+    _NON_TRAP_STATUS_APPLICATION_CASES,
+)
+def test_non_trap_status_applications_preserve_age_and_refresh_cooccurrences(
+    actor_class_id: int,
+    target_action: int,
+    use_ultimate: int,
+    recipient_slot: int,
+    starting_durations: tuple[tuple[str, int], ...],
+    aged_statuses: tuple[str, ...],
+    refreshed_statuses: tuple[str, ...],
+    applied_statuses: tuple[str, ...],
+) -> None:
+    """Prove all eight non-Trap application channels retain independent causes."""
+    config, state, _ = _scenario(
+        (_TEAM_A_FIRST_SLOT, actor_class_id),
+        (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
+    )
+    state = _replace_status_duration_row(
+        state,
+        recipient_slot,
+        _status_row(*starting_durations),
+    )
+    if actor_class_id == PRIEST_CLASS_ID:
+        state = state._replace(
+            current_health=state.current_health.at[recipient_slot].add(-20.0)
+        )
+    action_mask = _build_observation_and_action_mask(state, config)[1]
+
+    next_state, *_, info = _take_step(
+        config,
+        state,
+        action_mask,
+        _joint_action((_TEAM_A_FIRST_SLOT, MOVE_STAY, target_action, use_ultimate)),
+    )
+
+    _assert_status_application_channels(
+        info.transition_facts.combat_transition_facts,
+        _TEAM_A_FIRST_SLOT,
+        *applied_statuses,
+    )
+    empty = _status_cause_matrix(recipient_slot)
+    _assert_status_lifecycle_facts_equal(
+        info.transition_facts.status_lifecycle_facts,
+        aged=_status_cause_matrix(recipient_slot, *aged_statuses),
+        refreshed=_status_cause_matrix(recipient_slot, *refreshed_statuses),
+        broken=empty,
+        cleared=empty,
+    )
+    next_statuses = _status_durations_by_recipient_and_channel(next_state)[
+        recipient_slot
+    ]
+    applied_indices = jnp.asarray(
+        [_STATUS_CHANNEL_INDEX_BY_NAME[name] for name in applied_statuses],
+        dtype=jnp.int32,
+    )
+    assert bool(jnp.all(next_statuses[applied_indices] > 0))
+
+
+@pytest.mark.parametrize(
+    ("starting_duration", "use_ultimate", "expected_aged", "expected_broken"),
+    (
+        pytest.param(1, 0, True, False, id="damage-on-natural-expiry"),
+        pytest.param(2, 0, False, True, id="damage-break"),
+        pytest.param(1, 1, True, False, id="expiry-and-reapplication"),
+        pytest.param(2, 1, False, True, id="break-and-reapplication"),
+    ),
+)
+def test_hunter_trap_break_and_reapplication_keep_independent_causes(
+    starting_duration: int,
+    use_ultimate: int,
+    expected_aged: bool,
+    expected_broken: bool,
+) -> None:
+    """Pin Trap break to combined column four across all damage boundaries."""
+    config, state, _ = _scenario(
         (_TEAM_A_FIRST_SLOT, HUNTER_CLASS_ID),
         (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
     )
-    current_trap_duration = combat.HUNTER_TRAP_STUN_DURATION_TICKS + 1
+    state = _replace_status_duration_row(
+        state,
+        _TEAM_B_FIRST_SLOT,
+        _status_row(("hunter-trap-stun", starting_duration)),
+    )
+    action_mask = _build_observation_and_action_mask(state, config)[1]
+
+    next_state, *_, info = _take_step(
+        config,
+        state,
+        action_mask,
+        _joint_action(
+            (
+                _TEAM_A_FIRST_SLOT,
+                MOVE_STAY,
+                _FIRST_ENEMY_TARGET,
+                use_ultimate,
+            )
+        ),
+    )
+
+    expected_application = (
+        ("hunter-trap-stun",) if use_ultimate else ("hunter-basic-slow",)
+    )
+    _assert_status_application_channels(
+        info.transition_facts.combat_transition_facts,
+        _TEAM_A_FIRST_SLOT,
+        *expected_application,
+    )
+    aged = (
+        _status_cause_matrix(_TEAM_B_FIRST_SLOT, "hunter-trap-stun")
+        if expected_aged
+        else _status_cause_matrix(_TEAM_B_FIRST_SLOT)
+    )
+    broken = (
+        _status_cause_matrix(_TEAM_B_FIRST_SLOT, "hunter-trap-stun")
+        if expected_broken
+        else _status_cause_matrix(_TEAM_B_FIRST_SLOT)
+    )
+    empty = _status_cause_matrix(_TEAM_B_FIRST_SLOT)
+    _assert_status_lifecycle_facts_equal(
+        info.transition_facts.status_lifecycle_facts,
+        aged=aged,
+        refreshed=empty,
+        broken=broken,
+        cleared=empty,
+    )
+    expected_next_trap_duration = (
+        combat.HUNTER_TRAP_STUN_DURATION_TICKS if use_ultimate else 0
+    )
+    assert (
+        int(
+            _status_durations_by_recipient_and_channel(next_state)[
+                _TEAM_B_FIRST_SLOT, _HUNTER_TRAP_STATUS_CHANNEL
+            ]
+        )
+        == expected_next_trap_duration
+    )
+
+
+def test_new_death_can_clear_all_nine_statuses_after_trap_break_and_reapply() -> None:
+    """Preserve break and death-clear edges even when every status disappears."""
+    config, state, _ = _scenario(
+        (_TEAM_A_FIRST_SLOT, HUNTER_CLASS_ID),
+        (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
+    )
+    state = _replace_status_duration_row(
+        state,
+        _TEAM_B_FIRST_SLOT,
+        jnp.full((_NUM_STATUS_LIFECYCLE_CHANNELS,), 2, dtype=jnp.int32),
+    )
     state = state._replace(
-        stun_durations=state.stun_durations.at[
-            _TEAM_B_FIRST_SLOT, STUN_CHANNEL_HUNTER_TRAP
-        ].set(current_trap_duration)
+        current_health=state.current_health.at[_TEAM_B_FIRST_SLOT].set(1.0)
     )
     action_mask = _build_observation_and_action_mask(state, config)[1]
 
@@ -1241,14 +1950,200 @@ def test_status_application_fact_is_not_inferred_from_duration_change() -> None:
         _joint_action((_TEAM_A_FIRST_SLOT, MOVE_STAY, _FIRST_ENEMY_TARGET, 1)),
     )
 
-    assert (
-        int(next_state.stun_durations[_TEAM_B_FIRST_SLOT, STUN_CHANNEL_HUNTER_TRAP])
-        == current_trap_duration - 1
+    assert bool(
+        info.transition_facts.death_facts.is_newly_dead_by_recipient[_TEAM_B_FIRST_SLOT]
+    )
+    _assert_status_application_channels(
+        info.transition_facts.combat_transition_facts,
+        _TEAM_A_FIRST_SLOT,
+        "hunter-trap-stun",
+    )
+    empty = _status_cause_matrix(_TEAM_B_FIRST_SLOT)
+    all_cleared = jnp.zeros_like(empty).at[_TEAM_B_FIRST_SLOT].set(True)
+    _assert_status_lifecycle_facts_equal(
+        info.transition_facts.status_lifecycle_facts,
+        aged=empty,
+        refreshed=empty,
+        broken=_status_cause_matrix(_TEAM_B_FIRST_SLOT, "hunter-trap-stun"),
+        cleared=all_cleared,
+    )
+    assert not bool(
+        jnp.any(
+            _status_durations_by_recipient_and_channel(next_state)[_TEAM_B_FIRST_SLOT]
+        )
+    )
+
+    dead_action_mask = _build_observation_and_action_mask(next_state, config)[1]
+    *_, dead_info = _take_step(
+        config,
+        next_state,
+        dead_action_mask,
+        _joint_action(),
+    )
+    _assert_empty_status_lifecycle_facts(
+        dead_info.transition_facts.status_lifecycle_facts
+    )
+
+
+def test_refresh_and_fresh_application_can_both_precede_new_death_clear() -> None:
+    """Retain independent refresh, application, and clear edges on one recipient."""
+    config, state, _ = _scenario(
+        (_TEAM_A_FIRST_SLOT, HUNTER_CLASS_ID),
+        (_TEAM_B_FIRST_SLOT, MAGE_CLASS_ID),
+    )
+    state = _replace_status_duration_row(
+        state,
+        _TEAM_B_FIRST_SLOT,
+        _status_row(("mage-burst-damage-amplification", 2)),
+    )
+    state = state._replace(
+        current_health=state.current_health.at[_TEAM_B_FIRST_SLOT].set(1.0)
+    )
+    action_mask = _build_observation_and_action_mask(state, config)[1]
+
+    next_state, *_, info = _take_step(
+        config,
+        state,
+        action_mask,
+        _joint_action(
+            (_TEAM_A_FIRST_SLOT, MOVE_STAY, _FIRST_ENEMY_TARGET, 0),
+            (_TEAM_B_FIRST_SLOT, MOVE_STAY, _TARGET_NONE, 1),
+        ),
+    )
+
+    combat_facts = info.transition_facts.combat_transition_facts
+    assert bool(
+        combat_facts.slow_is_applied_by_source_and_channel[
+            _TEAM_A_FIRST_SLOT, SLOW_CHANNEL_HUNTER_BASIC
+        ]
     )
     assert bool(
-        info.transition_facts.combat_transition_facts.stun_is_applied_by_source_and_channel[
-            _TEAM_A_FIRST_SLOT, STUN_CHANNEL_HUNTER_TRAP
+        combat_facts.mage_burst_damage_amplification_is_applied_by_source[
+            _TEAM_B_FIRST_SLOT
         ]
+    )
+    empty = _status_cause_matrix(_TEAM_B_FIRST_SLOT)
+    _assert_status_lifecycle_facts_equal(
+        info.transition_facts.status_lifecycle_facts,
+        aged=empty,
+        refreshed=_status_cause_matrix(
+            _TEAM_B_FIRST_SLOT, "mage-burst-damage-amplification"
+        ),
+        broken=empty,
+        cleared=_status_cause_matrix(
+            _TEAM_B_FIRST_SLOT,
+            "hunter-basic-slow",
+            "mage-burst-damage-amplification",
+        ),
+    )
+    assert not bool(next_state.alive_mask[_TEAM_B_FIRST_SLOT])
+    assert not bool(
+        jnp.any(
+            _status_durations_by_recipient_and_channel(next_state)[_TEAM_B_FIRST_SLOT]
+        )
+    )
+
+
+def test_hunter_slow_public_apply_observe_choose_effect_expire_trajectory() -> None:
+    """Prove a one-tick slow is seen before it controls exactly one decision."""
+    config, state, _ = _scenario(
+        (_TEAM_A_FIRST_SLOT, HUNTER_CLASS_ID),
+        (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
+    )
+    profile = config.agent_profile._replace(
+        base_movement_speeds=config.agent_profile.base_movement_speeds.at[
+            _TEAM_B_FIRST_SLOT
+        ].set(1.0)
+    )
+    config = config._replace(agent_profile=profile)
+    action_mask = _build_observation_and_action_mask(state, config)[1]
+
+    applied_state, applied_observation, _, _, applied_mask, applied_info = _take_step(
+        config,
+        state,
+        action_mask,
+        _joint_action((_TEAM_A_FIRST_SLOT, MOVE_STAY, _FIRST_ENEMY_TARGET, 0)),
+    )
+    _assert_status_application_channels(
+        applied_info.transition_facts.combat_transition_facts,
+        _TEAM_A_FIRST_SLOT,
+        "hunter-basic-slow",
+    )
+    _assert_empty_status_lifecycle_facts(
+        applied_info.transition_facts.status_lifecycle_facts
+    )
+    assert (
+        applied_observation.self_features[
+            _TEAM_B_FIRST_SLOT, AGENT_FEATURE_SLOW_HUNTER_BASIC_DURATION
+        ]
+        == 1.0
+    )
+    assert (
+        applied_observation.self_features[
+            _TEAM_B_FIRST_SLOT, AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED
+        ]
+        == combat.HUNTER_BASIC_SLOW_MULTIPLIER
+    )
+
+    expired_state, expired_observation, _, _, expired_mask, expired_info = _take_step(
+        config,
+        applied_state,
+        applied_mask,
+        _joint_action((_TEAM_B_FIRST_SLOT, MOVE_EAST, _TARGET_NONE, 0)),
+    )
+    expected_slowed_displacement = (
+        jnp.zeros((MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS), dtype=jnp.float32)
+        .at[_TEAM_B_FIRST_SLOT, 0]
+        .set(combat.HUNTER_BASIC_SLOW_MULTIPLIER)
+    )
+    physical_facts = expired_info.transition_facts.physical_facts
+    assert bool(
+        jnp.allclose(
+            physical_facts.ordinary_movement_phase_displacement_by_agent,
+            expected_slowed_displacement,
+        )
+    )
+    assert not bool(jnp.any(physical_facts.charge_phase_displacement_by_agent))
+    _assert_status_lifecycle_facts_equal(
+        expired_info.transition_facts.status_lifecycle_facts,
+        aged=_status_cause_matrix(_TEAM_B_FIRST_SLOT, "hunter-basic-slow"),
+        refreshed=_status_cause_matrix(_TEAM_B_FIRST_SLOT),
+        broken=_status_cause_matrix(_TEAM_B_FIRST_SLOT),
+        cleared=_status_cause_matrix(_TEAM_B_FIRST_SLOT),
+    )
+    assert (
+        expired_observation.self_features[
+            _TEAM_B_FIRST_SLOT, AGENT_FEATURE_SLOW_HUNTER_BASIC_DURATION
+        ]
+        == 0.0
+    )
+    assert (
+        expired_observation.self_features[
+            _TEAM_B_FIRST_SLOT, AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED
+        ]
+        == 1.0
+    )
+
+    restored_state, *_, restored_info = _take_step(
+        config,
+        expired_state,
+        expired_mask,
+        _joint_action((_TEAM_B_FIRST_SLOT, MOVE_EAST, _TARGET_NONE, 0)),
+    )
+    assert bool(
+        jnp.allclose(
+            restored_info.transition_facts.physical_facts.ordinary_movement_phase_displacement_by_agent[
+                _TEAM_B_FIRST_SLOT
+            ],
+            jnp.asarray((1.0, 0.0), dtype=jnp.float32),
+        )
+    )
+    assert bool(
+        jnp.allclose(
+            restored_state.agent_positions[_TEAM_B_FIRST_SLOT]
+            - expired_state.agent_positions[_TEAM_B_FIRST_SLOT],
+            jnp.asarray((1.0, 0.0), dtype=jnp.float32),
+        )
     )
 
 
@@ -1295,7 +2190,9 @@ def test_focus_fire_reconciles_source_and_recipient_modifier_stages() -> None:
             dtype=jnp.int32,
         )
     ]
-    expected_source_modified = expected_raw * combat.MAGE_DAMAGE_AURA_MULTIPLIER
+    expected_source_modified = (
+        expected_raw * combat.MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER
+    )
     expected_source_modified = expected_source_modified.at[0].multiply(
         combat.MAGE_BURST_DAMAGE_MULTIPLIER
     )
@@ -1341,6 +2238,12 @@ def test_focus_fire_reconciles_source_and_recipient_modifier_stages() -> None:
         jnp.all(
             facts.total_effective_damage_by_recipient.at[_TEAM_B_FIRST_SLOT].set(0.0)
             == 0.0
+        )
+    )
+    assert bool(
+        jnp.allclose(
+            facts.health_after_combat_resolution_by_recipient,
+            next_state.current_health,
         )
     )
 
@@ -1426,6 +2329,20 @@ def test_anti_heal_reconciles_source_healing_to_authoritative_recipient_total() 
             expected_total + expected_regeneration,
         )
     )
+    expected_post_combat_health = state.current_health.at[2].add(expected_total)
+    assert bool(
+        jnp.allclose(
+            facts.health_after_combat_resolution_by_recipient,
+            expected_post_combat_health,
+        )
+    )
+    assert bool(
+        jnp.isclose(
+            next_state.current_health[2]
+            - facts.health_after_combat_resolution_by_recipient[2],
+            expected_regeneration,
+        )
+    )
 
 
 def test_health_clamps_do_not_rewrite_gross_damage_or_healing_facts() -> None:
@@ -1452,6 +2369,7 @@ def test_health_clamps_do_not_rewrite_gross_damage_or_healing_facts() -> None:
     )
     assert damage_state.current_health[5] - damage_next_state.current_health[5] == 1.0
     assert damage_facts.total_effective_damage_by_recipient[5] > 1.0
+    assert damage_facts.health_after_combat_resolution_by_recipient[5] == 0.0
     assert bool(
         jnp.array_equal(
             damage_death_facts.is_newly_dead_by_recipient,
@@ -1502,6 +2420,65 @@ def test_health_clamps_do_not_rewrite_gross_damage_or_healing_facts() -> None:
     )
     assert healing_next_state.current_health[2] - healing_state.current_health[2] == 2.0
     assert healing_facts.total_effective_healing_by_recipient[2] > 2.0
+    assert (
+        healing_facts.health_after_combat_resolution_by_recipient[2]
+        == healing_config.agent_profile.max_health[2]
+    )
+
+
+def test_post_combat_health_precedes_respawn_and_physical_facts_ignore_overwrite() -> (
+    None
+):
+    """Keep pre-respawn health and phase displacement despite final state overwrite."""
+    config, state, _ = _scenario(
+        (_TEAM_A_FIRST_SLOT, HUNTER_CLASS_ID),
+        (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
+    )
+    displaced_dead_position = jnp.asarray((7.0, 7.0), dtype=jnp.float32)
+    state = state._replace(
+        agent_positions=state.agent_positions.at[_TEAM_B_FIRST_SLOT].set(
+            displaced_dead_position
+        ),
+        alive_mask=state.alive_mask.at[_TEAM_B_FIRST_SLOT].set(False),
+        current_health=state.current_health.at[_TEAM_B_FIRST_SLOT].set(0.0),
+        team_respawn_wave_countdowns=state.team_respawn_wave_countdowns.at[
+            _TEAM_B_INDEX
+        ].set(0),
+    )
+    action_mask = _build_observation_and_action_mask(state, config)[1]
+
+    next_state, *_, info = _take_step(
+        config,
+        state,
+        action_mask,
+        _joint_action(),
+    )
+
+    facts = info.transition_facts
+    assert (
+        facts.combat_transition_facts.health_after_combat_resolution_by_recipient[
+            _TEAM_B_FIRST_SLOT
+        ]
+        == 0.0
+    )
+    assert bool(
+        facts.respawn_facts.respawn_wave_occurred_this_transition_by_team[_TEAM_B_INDEX]
+    )
+    assert bool(
+        facts.respawn_facts.was_respawned_this_transition_by_agent[_TEAM_B_FIRST_SLOT]
+    )
+    assert bool(next_state.alive_mask[_TEAM_B_FIRST_SLOT])
+    assert (
+        next_state.current_health[_TEAM_B_FIRST_SLOT]
+        == config.agent_profile.max_health[_TEAM_B_FIRST_SLOT]
+    )
+    assert not bool(
+        jnp.array_equal(
+            next_state.agent_positions[_TEAM_B_FIRST_SLOT],
+            displaced_dead_position,
+        )
+    )
+    _assert_empty_physical_facts(facts.physical_facts)
 
 
 def test_simultaneous_damage_and_healing_remain_separate_gross_totals() -> None:
@@ -1512,7 +2489,7 @@ def test_simultaneous_damage_and_healing_remain_separate_gross_totals() -> None:
         (6, PRIEST_CLASS_ID),
         team_sizes=(1, 2),
     )
-    state = state._replace(current_health=state.current_health.at[5].set(50.0))
+    state = state._replace(current_health=state.current_health.at[5].set(5.0))
     action_mask = _build_observation_and_action_mask(state, config)[1]
     submitted = _joint_action(
         (0, MOVE_STAY, _FIRST_ENEMY_TARGET, 0),
@@ -1531,9 +2508,20 @@ def test_simultaneous_damage_and_healing_remain_separate_gross_totals() -> None:
 
     assert facts.total_effective_damage_by_recipient[5] == expected_damage
     assert facts.total_effective_healing_by_recipient[5] == expected_healing
-    assert next_state.current_health[5] == (
+    assert expected_damage >= state.current_health[5]
+    expected_post_combat_health = (
         state.current_health[5] + expected_healing - expected_damage
     )
+    assert expected_post_combat_health > 0.0
+    assert (
+        facts.health_after_combat_resolution_by_recipient[5]
+        == expected_post_combat_health
+    )
+    assert (
+        next_state.current_health[5]
+        == (facts.health_after_combat_resolution_by_recipient[5])
+    )
+    assert bool(next_state.alive_mask[5])
 
 
 def test_transition_facts_compose_under_eager_jit_vmap_and_scan() -> None:
@@ -1542,6 +2530,12 @@ def test_transition_facts_compose_under_eager_jit_vmap_and_scan() -> None:
         (0, HUNTER_CLASS_ID),
         (5, HUNTER_CLASS_ID),
     )
+    state = _replace_status_duration_row(
+        state,
+        _TEAM_B_FIRST_SLOT,
+        _status_row(("hunter-trap-stun", 2)),
+    )
+    action_mask = _build_observation_and_action_mask(state, config)[1]
     neutral_action = _joint_action()
     basic_action = _joint_action((0, MOVE_STAY, _FIRST_ENEMY_TARGET, 0))
 
@@ -1600,6 +2594,37 @@ def test_transition_facts_compose_under_eager_jit_vmap_and_scan() -> None:
             ],
             jnp.asarray((False, True), dtype=jnp.bool_),
         )
+    )
+    _assert_batched_cp1_fact_shapes(batched_facts, 2)
+    assert bool(
+        jnp.array_equal(
+            batched_facts.status_lifecycle_facts.broken_by_damage_by_recipient_and_status_channel[
+                :, _TEAM_B_FIRST_SLOT, _HUNTER_TRAP_STATUS_CHANNEL
+            ],
+            jnp.asarray((False, True), dtype=jnp.bool_),
+        )
+    )
+    assert not bool(
+        jnp.any(
+            batched_facts.status_lifecycle_facts.broken_by_damage_by_recipient_and_status_channel.at[
+                :, _TEAM_B_FIRST_SLOT, _HUNTER_TRAP_STATUS_CHANNEL
+            ].set(False)
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            batched_facts.combat_transition_facts.health_after_combat_resolution_by_recipient[
+                0
+            ],
+            state.current_health,
+        )
+    )
+    assert (
+        batched_facts.combat_transition_facts.health_after_combat_resolution_by_recipient[
+            1, _TEAM_B_FIRST_SLOT
+        ]
+        == state.current_health[_TEAM_B_FIRST_SLOT]
+        - combat.BASIC_DAMAGE_BY_CLASS[HUNTER_CLASS_ID]
     )
     batched_shield_facts = batched_facts.spawn_shield_facts
     assert batched_shield_facts.was_active_at_transition_start_by_agent.shape == (
@@ -1669,6 +2694,37 @@ def test_transition_facts_compose_under_eager_jit_vmap_and_scan() -> None:
     )
     assert len(jax.tree_util.tree_leaves(scanned_facts)) == (
         _TRANSITION_FACT_LEAF_COUNT
+    )
+    _assert_batched_cp1_fact_shapes(scanned_facts, 3)
+    assert bool(
+        jnp.array_equal(
+            scanned_facts.status_lifecycle_facts.aged_to_zero_by_recipient_and_status_channel[
+                :, _TEAM_B_FIRST_SLOT, _HUNTER_TRAP_STATUS_CHANNEL
+            ],
+            jnp.asarray((False, True, False), dtype=jnp.bool_),
+        )
+    )
+    assert not bool(
+        jnp.any(
+            scanned_facts.status_lifecycle_facts.aged_to_zero_by_recipient_and_status_channel.at[
+                :, _TEAM_B_FIRST_SLOT, _HUNTER_TRAP_STATUS_CHANNEL
+            ].set(False)
+        )
+    )
+    assert not bool(
+        jnp.any(
+            scanned_facts.status_lifecycle_facts.refreshed_or_extended_by_recipient_and_status_channel
+        )
+    )
+    assert not bool(
+        jnp.any(
+            scanned_facts.status_lifecycle_facts.broken_by_damage_by_recipient_and_status_channel
+        )
+    )
+    assert not bool(
+        jnp.any(
+            scanned_facts.status_lifecycle_facts.cleared_by_new_death_by_recipient_and_status_channel
+        )
     )
     scanned_shield_facts = scanned_facts.spawn_shield_facts
     assert scanned_shield_facts.was_active_at_transition_start_by_agent.shape == (
