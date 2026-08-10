@@ -4,6 +4,10 @@ from typing import cast
 
 import numpy as np
 
+from marl_battlegrounds.core.axis_mappings import (
+    MOVEMENT_ACTION_NAME_BY_ID,
+    observation_relation_and_row,
+)
 from marl_battlegrounds.core.combat import (
     HUNTER_BASIC_SLOW_DURATION_TICKS,
     HUNTER_TRAP_STUN_DURATION_TICKS,
@@ -31,7 +35,6 @@ from marl_battlegrounds.core.types import (
     HUNTER_CLASS_ID,
     MAGE_CLASS_ID,
     MAX_AGENT_SLOTS,
-    MAX_AGENTS_PER_TEAM,
     MOVE_STAY,
     NUM_MOVE_ACTIONS,
     NUM_TARGET_ACTIONS,
@@ -44,7 +47,6 @@ from marl_battlegrounds.core.types import (
     STUN_CHANNEL_HUNTER_TRAP,
     STUN_CHANNEL_ROGUE_POISON,
     STUN_CHANNEL_WARRIOR_CHARGE,
-    TEAM_A_ID,
     WARRIOR_CLASS_ID,
     Action,
     ActionMask,
@@ -88,17 +90,6 @@ from scripts.dev.visual_debugger.targeting import (
     target_action_to_global_slot,
 )
 
-_MOVE_NAMES = (
-    "Stay",
-    "North",
-    "South",
-    "East",
-    "West",
-    "Northeast",
-    "Northwest",
-    "Southeast",
-    "Southwest",
-)
 _CLASS_NAMES = ("Neutral", "Mage", "Warrior", "Hunter", "Rogue", "Priest")
 _TEAM_NAMES = {1: "A", 2: "B"}
 _ULTIMATE_NAMES = {
@@ -122,8 +113,8 @@ _STATUS_NAMES: dict[StatusKind, str] = {
 
 
 def _move_name(move_action: int) -> str:
-    if 0 <= move_action < len(_MOVE_NAMES):
-        return _MOVE_NAMES[move_action]
+    if 0 <= move_action < len(MOVEMENT_ACTION_NAME_BY_ID):
+        return MOVEMENT_ACTION_NAME_BY_ID[move_action]
     return "Invalid"
 
 
@@ -266,28 +257,17 @@ def observer_relative_visibility(
     """Read one public relation-local visibility entry without reconstructing it."""
     _validate_active_slot(config, observer_global_slot, name="observer_global_slot")
     _validate_active_slot(config, candidate_global_slot, name="candidate_global_slot")
-    observer_team = int(config.agent_profile.team_ids[observer_global_slot])
-    candidate_team = int(config.agent_profile.team_ids[candidate_global_slot])
-    same_team = observer_team == candidate_team
-    if same_team:
-        relation_row = (
-            candidate_global_slot
-            if observer_team == TEAM_A_ID
-            else candidate_global_slot - MAX_AGENTS_PER_TEAM
-        )
-        return bool(
-            observation.ally_visibility_mask[
-                observer_global_slot,
-                relation_row,
-            ]
-        )
-    relation_row = (
-        candidate_global_slot - MAX_AGENTS_PER_TEAM
-        if observer_team == TEAM_A_ID
-        else candidate_global_slot
+    relation, relation_row = observation_relation_and_row(
+        observer_global_slot,
+        candidate_global_slot,
+    )
+    visibility_mask = (
+        observation.ally_visibility_mask
+        if relation == "ally"
+        else observation.enemy_visibility_mask
     )
     return bool(
-        observation.enemy_visibility_mask[
+        visibility_mask[
             observer_global_slot,
             relation_row,
         ]

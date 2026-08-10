@@ -1,14 +1,12 @@
 # MARL-BattleGrounds Specification Amendments
 
-> **PROPOSED NORMATIVE CONTRACT — ACTIVATES ONLY AFTER EXPLICIT USER
-> ACCEPTANCE.** Until activation, this draft records the intended disposition
-> and does not silently supersede the design PDF.
+> **NORMATIVE CONTRACT — ACTIVATED 2026-08-10.** This document records the
+> accepted amendments to the historical design PDF.
 
-This document proposes changes to
-`MARL_BGs_Design_Document.pdf`. The PDF remains the original architectural
-blueprint; after explicit acceptance, this file becomes the controlling public
-source when the two disagree. An activated amendment changes only the clauses
-it names. Unmentioned requirements remain in force.
+This document changes `MARL_BGs_Design_Document.pdf`. The PDF remains the
+unaltered historical architectural blueprint; this file is the controlling
+public source where the two disagree. An amendment changes only the clauses it
+names. Unmentioned PDF requirements remain in force.
 
 The amendments below were drafted before Milestone 6 Step 5 implementation.
 They deliberately favor the four project North Stars: researcher-centricity,
@@ -20,21 +18,28 @@ professional MARL/software engineering.
 **Classification:** risky, accepted design drift.
 **Supersedes:** R20; Sections 2.4, 2.4.1, 2.4.8, 2.4.11, 2.6.18, 2.8.5,
 2.13.8, 2.15.7, 2.16.2, and 2.16.19; Appendix A.11; and baseline or paper
-clauses that make NoComm the default and SharedObs merely optional.
+clauses that use the historical disabled-sharing label, make that regime the
+default, or make SharedObs merely optional.
 
 SharedObs is the approved future default execution-time actor-information
 regime. It is not current runtime behavior and does not become active until its
 versioned learner-input projection is implemented, performance-tested, and
 accepted before canonical baseline training.
 
-NoComm remains an official first-class regime. It must remain selectable and
-must be evaluated and reported separately from SharedObs. Results from the two
-regimes must never be pooled into one benchmark cell or summary.
+NoSharedObs remains an official first-class regime. It must remain selectable
+and must be evaluated and reported separately from SharedObs. Results from the
+two regimes must never be pooled into one benchmark cell or summary.
+
+The editable specification uses **NoSharedObs** and `no_shared_obs`. The
+historical PDF's earlier disabled-sharing wording is superseded rather than
+rewritten in the PDF itself. NoSharedObs means only that the SharedObs
+compositor is disabled; it does not claim that an algorithm has no
+communication mechanism of its own.
 
 The canonical implementation boundary is:
 
-- `shared_obs` and `no_comm` are values of an extensible learner-side
-  information-regime configuration;
+- `execution_information_mode` is the extensible learner-side setting whose
+  current values are `shared_obs` and `no_shared_obs`;
 - a command-line Boolean may be a convenience alias, but is not the canonical
   persisted representation;
 - simulator state, dynamics, rewards, action semantics, base observations, and
@@ -48,8 +53,8 @@ The canonical implementation boundary is:
   may receive different source subsets rather than one identical team tensor;
 - the compositor never recomputes geometry, visibility, line of sight, or
   redaction, and the actor's own base observation remains separate;
-- in `no_comm`, the learner returns the actor's base observation and bypasses
-  material shared-bank and recipient-by-source-mask construction;
+- in `no_shared_obs`, the learner returns the actor's base observation and
+  bypasses material shared-bank and recipient-by-source-mask construction;
 - teammate masks, previous-action/history fields, recurrent state, policy
   memory, rewards, transition facts, raw state, analysis snapshots, and critic
   world state are excluded;
@@ -59,9 +64,18 @@ The canonical implementation boundary is:
 
 Replay and evaluation records store base observations once, together with the
 source-axis/provenance mapping, any information-availability input not
-losslessly derivable from those observations, the execution regime, and the
-actor-input projection version. They do not persist a second copy of
+losslessly derivable from those observations, `execution_information_mode`,
+and the actor-input projection version. They do not persist a second copy of
 materialized SharedObs tensors.
+
+The Milestone 6 V1 frame schema supports both information regimes without
+implementing the future compositor. Its availability field is an optional,
+explicit Boolean matrix with axes
+`(recipient_global_slot, sensor_source_global_slot)` and shape `(10, 10)`.
+Conditional validation requires that matrix for `shared_obs` and forbids it
+for `no_shared_obs`. Its diagonal, cross-team cells, inactive-recipient rows,
+and inactive-source columns are false. Neither regime stores a materialized
+SharedObs tensor.
 
 ## A2. Metric architecture and simulator cost
 
@@ -79,6 +93,60 @@ MARL-BattleGrounds uses three deliberately separate data planes:
 3. Trainer-owned telemetry contains algorithm-specific values such as policy
    statistics, optimizer state, runtime timing, and optional reward-shaping
    components.
+
+Milestone 6 CP2 normalizes those planes through the following accepted host
+boundary:
+
+- `EvaluationEpisodeContextV1` owns the roster's fixed-slot identity/topology
+  fields and the resolved configuration's per-slot body radius, movement,
+  interaction ranges, maximum health, and recovery mechanics. It also owns
+  policy, catalog, seed, `execution_information_mode`, `actor_projection`,
+  `critic_information_regime`, `canonical_reward_mode`,
+  `shaping_configuration`, and code provenance. It carries exactly ten
+  discriminated policy-assignment rows; inactive slots use an explicit
+  `not_applicable` variant.
+- `GlobalAnalysisSnapshotV1` contains dynamic state only. It does not repeat
+  configured-active, team, class, identity, body radius, maximum health, or
+  any other static context/catalog value.
+- Submitted and accepted actions occur exactly once, inside
+  `TransitionFactsV1.action_acceptance_facts`. `EvaluationTransitionV1` may
+  expose read-only conveniences but must not serialize a second action
+  authority. `TransitionFactsV1` mirrors every core subtree and leaf name
+  exactly rather than introducing shortened host aliases.
+- Transition rewards are named `canonical_reward_by_agent` with fixed length
+  ten and optional `canonical_reward_by_team` with fixed length two. Shaping
+  values are excluded; only the shaping configuration identity belongs in
+  context.
+- A core recipient sentinel of `-1` normalizes to JSON `null`, agrees with the
+  corresponding `has_recipient` flag in both directions, and reverses
+  losslessly.
+- Sparse events form an exactly 21-variant discriminated V1 union derived from
+  facts and adjacent frames. `AgentDiedEventV1` records the newly dead recipient;
+  one `LethalDamageContributionEventV1` separately records each authoritative
+  positive source contribution on that lethal transition. Rank 90 orders the
+  death event before its contribution events. Neither record claims a killer,
+  last hit, or complete historical elimination credit. Aura attachments name
+  direct transition-start covering emitters, not causal credit.
+- Rank 120 uses family-specific canonical coordinates: a team-wave event sorts
+  by `(120, team_index, -1, wave_subtype, neutral_source)`, while each realized
+  agent respawn sorts by `(120, configured_team_index, agent_global_slot,
+  respawn_subtype, neutral_source)`. This groups teams and places each wave
+  before that team's realized agents.
+- Catalog digests use finite-only canonical JSON with ASCII identifiers,
+  recursive `-0.0` normalization, sorted keys, compact separators, and UTF-8
+  encoding. Every code revision requires `source_tree_digest`; additionally,
+  `dirty_patch_digest` is required exactly when `is_dirty` is true. Local paths
+  are never durable policy or code identities.
+- One public semantic validator consumes the context, transition-start frame,
+  transition, and successor frame together, then re-decodes and exactly
+  compares the deterministic event sequence. Structural model validation is
+  not misrepresented as cross-record semantic validation.
+
+The core mapping change permitted by CP2 is limited to a pure public
+`core.axis_mappings` authority and bounded mechanical imports in the current
+core environment/configuration consumers. Any changed mapping value, traced
+operation, simulator result, or wider core edit stops the checkpoint for
+review; host code never recreates an actor-relative indexing formula.
 
 Derived totals, ratios, windows, engagement groupings, distributions,
 leaderboards, ratings, and population summaries do not belong in `EnvState` or

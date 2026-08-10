@@ -6,6 +6,18 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
+from marl_battlegrounds.core.axis_mappings import (
+    GLOBAL_RECIPIENT_SLOT_INDEX_BY_ACTOR_AND_TARGET_ACTION as _ACTOR_RELATIVE_SELECT_TARGET_ACTION_TO_GLOBAL_AGENT_SLOT_LOOKUP_TABLE,  # noqa: E501
+)
+from marl_battlegrounds.core.axis_mappings import (
+    TEAM_A_END,
+    TEAM_A_START,
+    TEAM_B_END,
+    TEAM_B_START,
+)
+from marl_battlegrounds.core.axis_mappings import (
+    UNIT_DIRECTION_VECTOR_BY_MOVEMENT_ACTION_ARRAY as _JOINT_ACTION_MOVE_TO_DISPLACEMENT_LOOKUP_TABLE,  # noqa: E501
+)
 from marl_battlegrounds.core.combat import (
     BASIC_DAMAGE_BY_CLASS,
     BASIC_HEALING_BY_CLASS,
@@ -114,50 +126,7 @@ from marl_battlegrounds.core.types import (
 
 # Private Helpers ---
 
-TEAM_A_START = 0
-TEAM_A_END = MAX_AGENTS_PER_TEAM
-TEAM_B_START = MAX_AGENTS_PER_TEAM
-TEAM_B_END = MAX_AGENT_SLOTS
-
-# Direction rows are unit-length and ordered to match the MOVE_* constants.
-_INV_SQRT_2 = 1 / jnp.sqrt(2.0)
-
 _GLOBAL_AGENT_SLOT_INDICES = jnp.arange(MAX_AGENT_SLOTS, dtype=jnp.int32)
-
-_JOINT_ACTION_MOVE_TO_DISPLACEMENT_LOOKUP_TABLE = jnp.array(
-    [
-        jnp.array((0, 0), dtype=jnp.float32),  # MOVE_STAY = 0
-        jnp.array((0, 1), dtype=jnp.float32),  # MOVE_NORTH = 1
-        jnp.array((0, -1), dtype=jnp.float32),  # MOVE_SOUTH = 2
-        jnp.array((1, 0), dtype=jnp.float32),  # MOVE_EAST = 3
-        jnp.array((-1, 0), dtype=jnp.float32),  # MOVE_WEST = 4
-        jnp.array((_INV_SQRT_2, _INV_SQRT_2), dtype=jnp.float32),  # MOVE_NORTHEAST = 5
-        jnp.array((-_INV_SQRT_2, _INV_SQRT_2), dtype=jnp.float32),  # MOVE_NORTHWEST = 6
-        jnp.array((_INV_SQRT_2, -_INV_SQRT_2), dtype=jnp.float32),  # MOVE_SOUTHEAST = 7
-        jnp.array(
-            (-_INV_SQRT_2, -_INV_SQRT_2), dtype=jnp.float32
-        ),  # MOVE_SOUTHWEST = 8
-    ]
-)
-
-
-# Each fixed team block shares one actor-relative candidate order. Mapping
-# target-none to -1 makes that category an all-zero row under ``jax.nn.one_hot``.
-_ACTOR_RELATIVE_SELECT_TARGET_ACTION_TO_GLOBAL_AGENT_SLOT_LOOKUP_TABLE = jnp.asarray(
-    [
-        [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9],  # agent 0
-        [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9],  # agent 1
-        [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9],  # agent 2
-        [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9],  # agent 3
-        [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9],  # agent 4
-        [-1, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4],  # agent 5
-        [-1, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4],  # agent 6
-        [-1, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4],  # agent 7
-        [-1, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4],  # agent 8
-        [-1, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4],  # agent 9
-    ],
-    dtype=jnp.int32,
-)
 
 
 class _CombatEffectAggregationResult(NamedTuple):

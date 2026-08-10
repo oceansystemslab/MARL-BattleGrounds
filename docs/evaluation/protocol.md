@@ -2,12 +2,11 @@
 
 ## Status and authority
 
-> **PROPOSED NORMATIVE CONTRACT — ACTIVATES ONLY AFTER EXPLICIT USER
-> ACCEPTANCE.** Until activation, this draft is an audit target rather than an
-> official benchmark protocol.
+> **NORMATIVE CONTRACT — ACTIVATED 2026-08-10.** This is the controlling public
+> evaluation protocol.
 
-Once activated, this document is the normative protocol for evaluating
-MARL-BattleGrounds policies. It owns evaluation populations, cells, frozen
+This document is the normative protocol for evaluating MARL-BattleGrounds
+policies. It owns evaluation populations, cells, frozen
 weights, aggregation,
 uncertainty, checkpoint selection, information-regime separation, cross-play,
 controlled scenarios, runtime measurement, and failure/censoring treatment.
@@ -42,7 +41,7 @@ An `EvaluationSuiteV1`-equivalent declaration freezes:
 
 - suite ID, version, canonical digest, and intended scientific claim;
 - task and task version;
-- execution-time actor-information regime and compositor/projection version;
+- execution-time actor-information regime and actor-input projection version;
 - critic-information regime, canonical reward mode, and shaping configuration;
 - primary, secondary, exploratory, and diagnostic metric IDs;
 - layouts/maps, scenarios, rosters/compositions, cooperative partners,
@@ -106,7 +105,7 @@ The canonical cell coordinates are:
 
 ```text
 task x layout/map x cooperative-partner/pool x adversarial-opponent/pool
-     x side/role x roster/composition x execution-information regime
+     x side/role x roster/composition x execution_information_mode
 ```
 
 Use a declared not-applicable sentinel when the evaluated setting has no
@@ -116,13 +115,13 @@ the opponent confounds cooperative generalization with adversarial robustness.
 
 Task configuration, scenario version, policy IDs, critic-information regime,
 reward mode, shaping configuration, code revision, static-catalog digest, and
-actor-projection version remain mandatory provenance. They become separate
-cell axes whenever varying one can change the intended estimand.
+actor-input projection version remain mandatory provenance. They become
+separate cell axes whenever varying one can change the intended estimand.
 
-Task and execution-information regime are separate reporting strata by
-default. SharedObs and NoComm results are never pooled. Raw task-score units
-are never pooled across tasks. A cross-task scalar requires a separately
-versioned normalization and suite contract.
+Task and `execution_information_mode` are separate reporting strata by default.
+SharedObs and NoSharedObs results are never pooled. Raw task-score units are
+never pooled across tasks. A cross-task scalar requires a separately versioned
+normalization and suite contract.
 
 ## Suite construction and frozen weights
 
@@ -330,7 +329,7 @@ task-justified symmetry reduction that remains recoverable.
 The [metric specification](metric_specification.md#presentation-budgets)
 exclusively owns the contents and budgets of the primary team and agent/class
 cards. An evaluation suite instantiates that scorecard for each task and
-execution-information regime; this protocol does not redefine its metric
+`execution_information_mode`; this protocol does not redefine its metric
 blocks. The suite and manifest freeze which eligible candidate fills each
 optional slot and place those primary blocks in the confirmatory endpoint
 family before locked-test evaluation.
@@ -488,9 +487,60 @@ entries.
 Evaluation frames store base observations and masks once. They do not duplicate
 materialized SharedObs. SharedObs actor inputs remain reproducible from the
 same-epoch base sensor projections, source-axis/provenance mapping, required
-recipient-by-source availability inputs, and recorded compositor version.
+recipient-by-source availability inputs, and recorded actor-input projection
+version.
 World-state critic inputs and privileged evaluation snapshots are separate
 contracts and never leak into actor inputs.
+
+The canonical `execution_information_mode` values are `shared_obs` and
+`no_shared_obs`; the historical design PDF's earlier disabled-sharing
+terminology is explicitly superseded without modifying that historical
+artifact. The frame schema has an optional, explicit Boolean availability
+matrix with axes
+`(recipient_global_slot, sensor_source_global_slot)` and exact shape `(10,
+10)`. Conditional validation requires the matrix for `shared_obs` and forbids
+it for `no_shared_obs`. Diagonal, cross-team, inactive-recipient, and
+inactive-source entries are false. Neither regime stores a materialized
+SharedObs actor-input projection in the evaluation frame.
+
+Milestone 6 evaluation records use a single normalized authority for submitted
+and accepted actions inside `TransitionFactsV1.action_acceptance_facts`; the
+transition record does not duplicate them. The normalized model preserves
+every core transition-fact subtree and leaf name exactly. Each transition
+stores `canonical_reward_by_agent` with ten entries and may store
+`canonical_reward_by_team` with two entries. Reward-shaping values remain
+trainer-owned and excluded even though the immutable context records the
+shaping configuration identity.
+
+Static slot truth belongs to the episode context: fixed-slot identity/topology
+is in the roster, while body radius, movement, interaction ranges, maximum
+health, and recovery mechanics are in `resolved_env_config.slot_mechanics`.
+The global analysis snapshot contains dynamic state only. The context contains
+exactly ten discriminated policy-assignment rows, and every inactive slot uses
+the explicit `not_applicable` variant. Durable policy and code identities never
+rely on local paths. Every revision requires `source_tree_digest`;
+`dirty_patch_digest` is additionally required exactly when `is_dirty` is true.
+Catalog digests use finite-only canonical JSON with ASCII identifiers,
+recursive `-0.0` normalization, sorted keys, compact separators, and UTF-8
+encoding.
+
+Cross-record validity is established by one public four-record validator over
+the context, transition-start frame, transition, and successor frame. It
+checks adjacency, identity, lossless core-recipient `-1`/JSON `null`
+normalization with `has_recipient` agreement, padding, catalog joins, and exact
+equality with a newly decoded canonical event tuple. The discriminated V1 event
+union has exactly 21 atomic variants. At rank 90, `AgentDiedEventV1` records the
+newly dead recipient before one `LethalDamageContributionEventV1` per ordered
+authoritative positive source; contributor records are not killer, last-hit,
+or complete historical credit. Aura attachments identify direct
+transition-start covering emitters rather than asserting causal credit.
+Rank 120 uses family-specific coordinates: team waves sort by `(120,
+team_index, -1, wave_subtype, neutral_source)` and realized respawns by `(120,
+configured_team_index, agent_global_slot, respawn_subtype, neutral_source)`.
+Therefore each team's wave precedes its realized agents and team groups cannot
+interleave.
+Pydantic serialization/revalidation alone proves structural roundtrip, not
+semantic trajectory validity.
 
 Dashboard, CSV, JSON, and paper-table layers reference metric IDs and protocol
 versions. They do not duplicate or silently modify formulas. Presentation

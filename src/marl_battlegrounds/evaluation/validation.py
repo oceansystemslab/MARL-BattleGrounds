@@ -1,0 +1,316 @@
+"""Cross-record semantic validation for one captured evaluation transition."""
+
+from typing import cast
+
+from pydantic import ValidationError
+
+from marl_battlegrounds.evaluation.events import decode_evaluation_events_v1
+from marl_battlegrounds.evaluation.models import (
+    EvaluationEpisodeContextV1,
+    EvaluationFrameV1,
+    EvaluationModel,
+    EvaluationTransitionV1,
+)
+
+
+def _is_canonical_neutral(value: object) -> bool:
+    """Return whether one fixed-axis payload contains only padding values."""
+    if value is None:
+        return True
+    if isinstance(value, tuple):
+        items = cast(tuple[object, ...], value)
+        return all(_is_canonical_neutral(item) for item in items)
+    if type(value) is bool:
+        return not value
+    if type(value) in (int, float):
+        return value == 0
+    return False
+
+
+def _require_inactive_slot_neutral(
+    value: object,
+    *,
+    global_slot: int,
+    field_name: str,
+) -> None:
+    if not _is_canonical_neutral(value):
+        raise ValueError(f"inactive slot {global_slot} must be neutral in {field_name}")
+
+
+def _validate_inactive_frame_padding(
+    context: EvaluationEpisodeContextV1,
+    frame: EvaluationFrameV1,
+) -> None:
+    """Validate dynamic snapshot padding without reconstructing actor inputs."""
+    snapshot = frame.snapshot
+    slot_fields = (
+        "alive_mask",
+        "agent_positions",
+        "current_health",
+        "ultimate_cooldowns",
+        "slow_durations",
+        "stun_durations",
+        "rogue_poison_anti_heal_durations",
+        "mage_burst_damage_amplification_durations",
+        "priest_blessing_of_freedom_slow_floor_durations",
+        "spawn_shield_durations",
+        "steps_until_out_of_combat",
+        "previous_timestep_move_actions",
+        "previous_timestep_select_target_actions",
+        "previous_timestep_use_ultimate_actions",
+    )
+    for global_slot, roster_row in enumerate(context.roster):
+        if roster_row.configured_active:
+            continue
+        for field_name in slot_fields:
+            _require_inactive_slot_neutral(
+                getattr(snapshot, field_name)[global_slot],
+                global_slot=global_slot,
+                field_name=f"frame.snapshot.{field_name}",
+            )
+
+
+def _validate_inactive_fact_padding(
+    context: EvaluationEpisodeContextV1,
+    transition: EvaluationTransitionV1,
+) -> None:
+    """Validate core-authored inactive fact rows while retaining submitted intent."""
+    facts = transition.facts
+    acceptance = facts.action_acceptance_facts
+    combat = facts.combat_transition_facts
+    source_aligned_combat_fields = (
+        "basic_effect_is_activated_by_source",
+        "ultimate_effect_is_activated_by_source",
+        "combat_effect_has_recipient_by_source",
+        "combat_effect_recipient_global_slot_by_source",
+        "raw_damage_output_by_source",
+        "source_modified_damage_output_by_source",
+        "recipient_damage_modifier_by_source",
+        "raw_healing_output_by_source",
+        "source_modified_healing_output_by_source",
+        "recipient_healing_modifier_by_source",
+        "slow_is_applied_by_source_and_channel",
+        "stun_is_applied_by_source_and_channel",
+        "rogue_poison_anti_heal_is_applied_by_source",
+        "mage_burst_damage_amplification_is_applied_by_source",
+        "priest_blessing_of_freedom_is_applied_by_source",
+    )
+    recipient_aligned_combat_fields = (
+        "total_effective_damage_by_recipient",
+        "total_effective_healing_by_recipient",
+        "health_after_combat_resolution_by_recipient",
+    )
+    per_agent_fact_fields = (
+        (
+            facts.death_facts,
+            (
+                "is_newly_dead_by_recipient",
+                "contributed_to_new_death_by_source",
+                "attributed_death_damage_by_source",
+            ),
+            "death_facts",
+        ),
+        (
+            facts.spawn_shield_facts,
+            (
+                "was_active_at_transition_start_by_agent",
+                "expired_at_transition_end_by_agent",
+            ),
+            "spawn_shield_facts",
+        ),
+        (
+            facts.regeneration_facts,
+            (
+                "combat_countdown_was_reset_by_agent",
+                "actual_health_regenerated_this_step_by_agent",
+            ),
+            "regeneration_facts",
+        ),
+        (
+            facts.physical_facts,
+            (
+                "charge_phase_displacement_by_agent",
+                "ordinary_movement_phase_displacement_by_agent",
+            ),
+            "physical_facts",
+        ),
+        (
+            facts.status_lifecycle_facts,
+            (
+                "aged_to_zero_by_recipient_and_status_channel",
+                "refreshed_or_extended_by_recipient_and_status_channel",
+                "broken_by_damage_by_recipient_and_status_channel",
+                "cleared_by_new_death_by_recipient_and_status_channel",
+            ),
+            "status_lifecycle_facts",
+        ),
+    )
+
+    for recipient_global_slot in combat.combat_effect_recipient_global_slot_by_source:
+        if (
+            recipient_global_slot is not None
+            and not context.roster[recipient_global_slot].configured_active
+        ):
+            raise ValueError(
+                "combat recipient routes must not resolve to an inactive slot"
+            )
+
+    for global_slot, roster_row in enumerate(context.roster):
+        if roster_row.configured_active:
+            continue
+        accepted = acceptance.accepted_joint_action
+        for field_name in ("move", "select_target", "use_ultimate"):
+            _require_inactive_slot_neutral(
+                getattr(accepted, field_name)[global_slot],
+                global_slot=global_slot,
+                field_name=f"action_acceptance_facts.accepted_joint_action.{field_name}",
+            )
+        for field_name in source_aligned_combat_fields:
+            _require_inactive_slot_neutral(
+                getattr(combat, field_name)[global_slot],
+                global_slot=global_slot,
+                field_name=f"combat_transition_facts.{field_name}",
+            )
+        for field_name in recipient_aligned_combat_fields:
+            _require_inactive_slot_neutral(
+                getattr(combat, field_name)[global_slot],
+                global_slot=global_slot,
+                field_name=f"combat_transition_facts.{field_name}",
+            )
+        for model, field_names, subtree_name in per_agent_fact_fields:
+            for field_name in field_names:
+                _require_inactive_slot_neutral(
+                    getattr(model, field_name)[global_slot],
+                    global_slot=global_slot,
+                    field_name=f"{subtree_name}.{field_name}",
+                )
+        _require_inactive_slot_neutral(
+            facts.respawn_facts.was_respawned_this_transition_by_agent[global_slot],
+            global_slot=global_slot,
+            field_name="respawn_facts.was_respawned_this_transition_by_agent",
+        )
+        for field_name in (
+            "is_covered_by_mage_damage_aura_by_emitter_and_beneficiary",
+            "is_covered_by_warrior_mitigation_aura_by_emitter_and_beneficiary",
+        ):
+            coverage = getattr(facts.aura_facts, field_name)
+            _require_inactive_slot_neutral(
+                coverage[global_slot],
+                global_slot=global_slot,
+                field_name=f"aura_facts.{field_name} emitter row",
+            )
+            _require_inactive_slot_neutral(
+                tuple(row[global_slot] for row in coverage),
+                global_slot=global_slot,
+                field_name=f"aura_facts.{field_name} beneficiary column",
+            )
+
+
+def _revalidate_model(model: EvaluationModel, *, record_name: str) -> None:
+    """Reject records assembled through unchecked Pydantic escape hatches."""
+    try:
+        reconstructed = type(model).model_validate(model.model_dump(mode="python"))
+    except ValidationError as error:
+        raise ValueError(f"{record_name} fails structural revalidation") from error
+    if reconstructed != model:
+        raise ValueError(f"{record_name} changes under structural revalidation")
+
+
+def _validate_frame_information_regime(
+    context: EvaluationEpisodeContextV1,
+    frame: EvaluationFrameV1,
+) -> None:
+    availability = (
+        frame.shared_obs_information_availability_by_recipient_and_sensor_source
+    )
+    if context.execution_information_mode == "no_shared_obs":
+        if availability is not None:
+            raise ValueError("no_shared_obs frames must omit SharedObs availability")
+        return
+    if availability is None:
+        raise ValueError("shared_obs frames require SharedObs availability")
+
+    for recipient, recipient_row in enumerate(context.roster):
+        for sensor_source, source_row in enumerate(context.roster):
+            is_forbidden = (
+                recipient == sensor_source
+                or not recipient_row.configured_active
+                or not source_row.configured_active
+                or recipient_row.configured_team_id != source_row.configured_team_id
+            )
+            if is_forbidden and availability[recipient][sensor_source]:
+                raise ValueError(
+                    "SharedObs availability must be false on diagonal, cross-team, "
+                    "and inactive recipient/source cells"
+                )
+
+
+def validate_evaluation_transition_unit_v1(
+    context: EvaluationEpisodeContextV1,
+    start_frame: EvaluationFrameV1,
+    transition: EvaluationTransitionV1,
+    successor_frame: EvaluationFrameV1,
+) -> None:
+    """Validate one context/start/transition/successor semantic unit.
+
+    Validation reconstructs identifiers from trusted fields, checks both
+    simulator and artifact adjacency, revalidates each strict record, and
+    re-decodes the complete canonical event sequence. It deliberately does not
+    reconstruct simulator rules or infer optional team rewards.
+    """
+    _revalidate_model(context, record_name="context")
+    _revalidate_model(start_frame, record_name="start frame")
+    _revalidate_model(transition, record_name="transition")
+    _revalidate_model(successor_frame, record_name="successor frame")
+
+    episode_id = context.identity.episode_id
+    if (
+        start_frame.episode_id != episode_id
+        or transition.episode_id != episode_id
+        or successor_frame.episode_id != episode_id
+    ):
+        raise ValueError("all transition-unit records must join to the context episode")
+
+    expected_start_frame_id = f"{episode_id}:frame:{start_frame.frame_index}"
+    expected_successor_index = start_frame.frame_index + 1
+    expected_successor_frame_id = f"{episode_id}:frame:{expected_successor_index}"
+    expected_transition_id = f"{episode_id}:transition:{start_frame.frame_index}"
+    if start_frame.frame_id != expected_start_frame_id:
+        raise ValueError("start frame ID is not canonical")
+    if successor_frame.frame_index != expected_successor_index:
+        raise ValueError("successor frame index must be start frame index plus one")
+    if successor_frame.frame_id != expected_successor_frame_id:
+        raise ValueError("successor frame ID is not canonical")
+    if transition.transition_index != start_frame.frame_index:
+        raise ValueError("transition index must equal its start frame index")
+    if transition.transition_id != expected_transition_id:
+        raise ValueError("transition ID is not canonical")
+    if transition.start_frame_id != expected_start_frame_id:
+        raise ValueError("transition start-frame reference is not canonical")
+    if transition.successor_frame_id != expected_successor_frame_id:
+        raise ValueError("transition successor-frame reference is not canonical")
+
+    if not transition.facts.has_transition:
+        raise ValueError("initialization facts cannot construct a transition")
+    if transition.facts.transition_start_step_count != start_frame.simulator_step_count:
+        raise ValueError("facts must name the start frame's simulator step")
+    if successor_frame.simulator_step_count != start_frame.simulator_step_count + 1:
+        raise ValueError("successor simulator step must be start step plus one")
+
+    _validate_frame_information_regime(context, start_frame)
+    _validate_frame_information_regime(context, successor_frame)
+    _validate_inactive_frame_padding(context, start_frame)
+    _validate_inactive_frame_padding(context, successor_frame)
+    _validate_inactive_fact_padding(context, transition)
+
+    expected_events = decode_evaluation_events_v1(
+        context,
+        start_frame,
+        transition.facts,
+        successor_frame,
+    )
+    if transition.events != expected_events:
+        raise ValueError("transition events must exactly equal canonical fact decoding")
+
+
+__all__ = ["validate_evaluation_transition_unit_v1"]

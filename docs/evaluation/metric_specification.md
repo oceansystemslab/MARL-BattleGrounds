@@ -2,12 +2,10 @@
 
 ## Status and authority
 
-> **PROPOSED NORMATIVE CONTRACT — ACTIVATES ONLY AFTER EXPLICIT USER
-> ACCEPTANCE.** No metric in this draft is an official benchmark result before
-> that activation and its stated readiness/validity gates.
+> **NORMATIVE CONTRACT — ACTIVATED 2026-08-10.** Metric rows remain subject to
+> their stated readiness and validity gates.
 
-Once activated, this document is the normative MARL-BattleGrounds metric
-contract. It owns
+This document is the normative MARL-BattleGrounds metric contract. It owns
 metric identities, meanings, dispositions, amount stages, opportunity rules,
 attribution limits, and presentation tiers. The companion
 [evaluation protocol](protocol.md) owns evaluation cells, aggregation,
@@ -70,6 +68,27 @@ stages:
 
 The word **effective** is not an amount stage. Existing code fields containing
 that word are interpreted through the table above.
+
+Milestone 6 CP2 preserves the fixed transition facts losslessly and exposes
+sparse events only as a deterministic semantic view. Event absence never
+erases false, zero, padded, or continuously active normalized facts. Submitted
+and accepted actions remain one normalized authority inside action-acceptance
+facts. Evaluation rewards are explicitly `canonical_reward_by_agent` and,
+when task-authored, `canonical_reward_by_team`; shaped or auxiliary rewards do
+not enter these fields.
+
+The discriminated V1 event union has exactly 21 atomic variants. Newly dead
+recipient truth belongs to `AgentDiedEventV1`; each authoritative positive damage
+source on that lethal transition receives a separate
+`LethalDamageContributionEventV1`. Death sorts before its contribution records
+at phase rank 90. A contribution is not a killer, last hit, or complete
+historical elimination attribution.
+
+Rank-120 ordering uses family-specific coordinates: team waves sort by `(120,
+team_index, -1, wave_subtype, neutral_source)` and realized agent respawns by
+`(120, configured_team_index, agent_global_slot, respawn_subtype,
+neutral_source)`. Each team wave therefore precedes its realized agents, with
+teams kept in canonical order.
 
 Recipient-modified gross damage can exceed remaining health. Gross healing can
 offset simultaneous damage without producing a positive net-health change.
@@ -175,7 +194,7 @@ not a request for a universal production registry.
 
 ### Primary team card
 
-Each task and execution-information regime receives at most four endpoint
+Each task and `execution_information_mode` receives at most four endpoint
 blocks; this is a ceiling, not a quota:
 
 1. win/draw/loss as one outcome distribution;
@@ -262,7 +281,7 @@ censored result never silently becomes a draw, loss, zero, or excluded row.
 | `marlbg.support.recipient_modified_gross_healing_output.v1` | Sum, by source/team, of source-modified gross healing times the recipient modifier for accepted routed healing. | `key_secondary` / primary cards + advanced | descriptive | `pass`; do not label “effective healing” or realized restoration |
 | `marlbg.combat.realized_net_health_change.v1` | For each recipient-transition, preserve post-combat health minus transition-start health, plus gross damage and healing. | `exploratory_descriptive` / advanced | descriptive | `pass`; recipient-only net result |
 | `marlbg.combat.upper_health_clamp_overflow.v1` | Recipient-level positive health amount discarded only by the upper health clamp after simultaneous netting. Preserve overflow and gross-healing exposure. | `exploratory_descriptive` / advanced | lower may indicate less saturation, but conditional | `conditional`; never attribute to one healer under overlap |
-| `marlbg.combat.death_count.v1` | Count authoritative newly dead recipients for each team and class. | `key_secondary` / primary cards + advanced | lower for own team, higher for opponent, task-context dependent | `pass` |
+| `marlbg.combat.death_count.v1` | Count authoritative `AgentDiedEventV1` newly dead recipients for each team and class. | `key_secondary` / primary cards + advanced | lower for own team, higher for opponent, task-context dependent | `pass` |
 
 Shares use the pooled agent/class component divided by its pooled team total
 within the same cell. A team total of zero yields `N/A`. Damage/healing totals
@@ -272,7 +291,7 @@ are always accompanied by episode count and exposure opportunities.
 
 | ID | Exact definition and raw components | Role / surface | Direction | Validity and caveat |
 | --- | --- | --- | --- | --- |
-| `marlbg.combat.lethal_transition_damage_contribution.v1` | Count enemy deaths for which the source dealt authoritative positive recipient-modified gross damage on the lethal transition. Preserve source, recipient, class, team, and team enemy-death count. | `exploratory_descriptive` / advanced | descriptive | `pass`; not a kill, last hit, or complete historical elimination contribution |
+| `marlbg.combat.lethal_transition_damage_contribution.v1` | Count atomic `LethalDamageContributionEventV1` records where the source dealt authoritative positive recipient-modified gross damage on an enemy's lethal transition. Preserve source, recipient, class, team, and team enemy-death count. | `exploratory_descriptive` / advanced | descriptive | `pass`; not a kill, last hit, or complete historical elimination contribution |
 | `marlbg.combat.lethal_transition_contribution_rate.v1` | Lethal-transition damage contributions divided by enemy deaths caused by the source's team, using the protocol's raw-component reduction. | `exploratory_descriptive` / advanced | descriptive | `conditional`; `N/A` when the team caused no deaths and susceptible to last-transition crowding |
 | `marlbg.coordination.single_contributor_lethal_transition_count.v1` | Count enemy deaths having exactly one authoritative positive-damage source on the lethal transition. | `exploratory_descriptive` / advanced | descriptive | `pass`; earlier damage may have occurred, so this is not a “solo kill” |
 | `marlbg.coordination.multi_contributor_lethal_transition_rate.v1` | Enemy deaths with at least two allied positive-damage sources on the lethal transition divided by all team-caused enemy deaths; always show the denominator. | `key_secondary` / primary-team candidate + advanced | descriptive | `conditional`; outcome-conditioned and gameable without death exposure |
