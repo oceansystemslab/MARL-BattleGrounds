@@ -389,6 +389,7 @@ class CombatTransitionFacts(NamedTuple):
     source_modified_healing_output_by_source: Array
     recipient_healing_modifier_by_source: Array
     total_effective_healing_by_recipient: Array
+    health_after_combat_resolution_by_recipient: Array
     slow_is_applied_by_source_and_channel: Array
     stun_is_applied_by_source_and_channel: Array
     rogue_poison_anti_heal_is_applied_by_source: Array
@@ -430,6 +431,37 @@ class RegenerationTransitionFacts(NamedTuple):
     actual_health_regenerated_this_step_by_agent: Array  # (MAX_AGENT_SLOTS,)
 
 
+class PhysicalTransitionFacts(NamedTuple):
+    """Realized per-slot displacement authored at each movement phase."""
+
+    charge_phase_displacement_by_agent: Array  # (MAX_AGENT_SLOTS, 2)
+    ordinary_movement_phase_displacement_by_agent: Array  # (MAX_AGENT_SLOTS, 2)
+
+
+class AuraTransitionFacts(NamedTuple):
+    """Transition-start emitter-to-beneficiary aura coverage relations."""
+
+    # (MAX_AGENT_SLOTS, MAX_AGENT_SLOTS)
+    is_covered_by_mage_damage_aura_by_emitter_and_beneficiary: Array
+    # (MAX_AGENT_SLOTS, MAX_AGENT_SLOTS)
+    is_covered_by_warrior_mitigation_aura_by_emitter_and_beneficiary: Array
+
+
+class StatusLifecycleTransitionFacts(NamedTuple):
+    """Independent recipient-aligned causes across nine status channels.
+
+    Columns are Warrior Charge slow, Hunter Basic slow, Rogue Poison slow,
+    Warrior Charge stun, Hunter Trap stun, Rogue Poison stun, Rogue Poison
+    anti-heal, Mage Burst damage amplification, and Priest Blessing of Freedom
+    movement floor, in that order.
+    """
+
+    aged_to_zero_by_recipient_and_status_channel: Array  # (MAX_AGENT_SLOTS, 9)
+    refreshed_or_extended_by_recipient_and_status_channel: Array  # (MAX_AGENT_SLOTS, 9)
+    broken_by_damage_by_recipient_and_status_channel: Array  # (MAX_AGENT_SLOTS, 9)
+    cleared_by_new_death_by_recipient_and_status_channel: Array  # (MAX_AGENT_SLOTS, 9)
+
+
 class TransitionFacts(NamedTuple):
     """Fixed-shape authoritative facts for one reset or environment transition."""
 
@@ -441,6 +473,9 @@ class TransitionFacts(NamedTuple):
     spawn_shield_facts: SpawnShieldTransitionFacts
     respawn_facts: RespawnTransitionFacts
     regeneration_facts: RegenerationTransitionFacts
+    physical_facts: PhysicalTransitionFacts
+    aura_facts: AuraTransitionFacts
+    status_lifecycle_facts: StatusLifecycleTransitionFacts
 
 
 class Info(NamedTuple):

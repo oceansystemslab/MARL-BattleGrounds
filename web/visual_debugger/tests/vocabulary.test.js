@@ -200,7 +200,7 @@ test("class-specific Ultimate tokens preserve activation vocabulary", () => {
 test("activation impact grammar is explicit, non-numeric, and fail-closed", () => {
   assert.deepEqual(
     EXPECTED_ACTIVATIONS.map((tokenId) => activationImpactSemantic(tokenId)),
-    ["damage", "healing", "healing", "local", "damage", "neutral", "damage"],
+    ["damage", "healing", "healing", "local", "damage", "damage", "damage"],
   );
   assert.equal(activationImpactSemantic("future_activation"), "neutral");
   assert.equal(activationImpactSemantic(null), "neutral");

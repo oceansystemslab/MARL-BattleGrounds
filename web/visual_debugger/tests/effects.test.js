@@ -702,7 +702,7 @@ test("accepted activations carry recipient impact grammar without health amounts
     activation("damage-basic", "basic_damage", 0, 5),
     activation("healing-basic", "basic_heal", 9, 5),
     activation("damage-charge", "warrior_charge", 1, 6),
-    activation("neutral-trap", "hunter_trap", 2, 7),
+    activation("damage-trap", "hunter_trap", 2, 7),
     activation("damage-poison", "rogue_poison", 3, 8),
     activation("healing-holy", "holy_word", 4, 9),
     activation("local-burst", "mage_burst", 0, null, {
@@ -714,7 +714,7 @@ test("accepted activations carry recipient impact grammar without health amounts
   const activations = plan.events.filter(({ kind }) => kind === "activation");
   assert.deepEqual(
     activations.map(({ impactSemantic }) => impactSemantic),
-    ["damage", "healing", "damage", "neutral", "damage", "healing", "local"],
+    ["damage", "healing", "damage", "damage", "damage", "healing", "local"],
   );
   assert.equal(
     activations.every(

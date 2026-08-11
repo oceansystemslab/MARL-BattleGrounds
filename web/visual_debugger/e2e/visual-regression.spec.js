@@ -1276,7 +1276,7 @@ test("Trap lifecycle t2 proves one exact break without overclaiming decrements",
   });
 });
 
-test("Trap lifecycle t4 proves exact refresh and durable successor values", async ({
+test("Trap lifecycle t4 proves exact break, reapplication, and durable successor values", async ({
   page,
 }) => {
   const commandPosts = await loadLiveVisualCase(page, debuggerUrl, {
@@ -1302,7 +1302,7 @@ test("Trap lifecycle t4 proves exact refresh and durable successor values", asyn
       after: 4,
       applicationCount: 1,
       before: 2,
-      change: "refreshed",
+      change: "trap_broken_and_reapplied",
       recipient: 6,
       tokenId: "stun_hunter_trap",
     },
@@ -1311,7 +1311,7 @@ test("Trap lifecycle t4 proves exact refresh and durable successor values", asyn
     {
       after: 4,
       before: 2,
-      change: "Refreshed",
+      change: "Trap Broken And Reapplied",
       label: "Trap",
       recipient: 6,
     },
@@ -1328,7 +1328,7 @@ test("Trap lifecycle t4 proves exact refresh and durable successor values", asyn
     await expectRosterStatuses(page, recipient, statuses([["stun_hunter_trap", 1]]));
   }
 
-  await captureBaseline(page, "trap-lifecycle-t4-refreshed-1440x900.png", {
+  await captureBaseline(page, "trap-lifecycle-t4-broken-and-reapplied-1440x900.png", {
     commandPosts,
     expectedTransientCount: 1,
     logicalMs: MID_IMPACT_MS,

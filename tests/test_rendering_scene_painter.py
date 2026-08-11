@@ -336,6 +336,7 @@ def test_visual_vocabulary_static_evidence_keeps_semantic_grammar() -> None:
             if event.token_id in (
                 "basic_damage",
                 "warrior_charge",
+                "hunter_trap",
                 "rogue_poison",
             ):
                 assert impact is not None

@@ -815,7 +815,12 @@ def _draw_events(
                 impact_semantic = (
                     ("\N{MINUS SIGN}", _DAMAGE)
                     if event.token_id
-                    in ("basic_damage", "warrior_charge", "rogue_poison")
+                    in (
+                        "basic_damage",
+                        "warrior_charge",
+                        "hunter_trap",
+                        "rogue_poison",
+                    )
                     else ("+", _HEALING)
                     if event.token_id in ("basic_heal", "holy_word")
                     else None

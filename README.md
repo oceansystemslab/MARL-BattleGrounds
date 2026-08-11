@@ -31,6 +31,18 @@ See the [Visual Debugger and Analyzer guide](docs/dev/visual_debugger.md) for
 controls, joint-turn planning, view authorization, scenarios, visual
 semantics, troubleshooting, and contributor checks.
 
+## Design and evaluation
+
+- [Specification amendments](docs/design/specification_amendments.md) record
+  proposed departures from the original design document and state their
+  activation status.
+- [Evaluation metric specification](docs/evaluation/metric_specification.md)
+  defines metric meanings, attribution limits, scorecard surfaces, and
+  candidate dispositions.
+- [Evaluation protocol](docs/evaluation/protocol.md) defines evaluation cells,
+  aggregation, inference, cross-play, scenarios, failure handling, and
+  information-regime reporting.
+
 ## Author
 
 MARL-BattleGrounds is developed by Ulixes Tariq Hawili as part of the SPADS CDT,

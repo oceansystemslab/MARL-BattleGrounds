@@ -1,4 +1,4 @@
-"""Exhaustive tests for the debugger-local target adapter."""
+"""Exhaustive debugger parity tests for the canonical target mapping."""
 
 import pytest
 from scripts.dev.visual_debugger.control import (

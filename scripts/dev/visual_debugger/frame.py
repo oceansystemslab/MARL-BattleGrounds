@@ -2,8 +2,11 @@
 
 import numpy as np
 
+from marl_battlegrounds.core.axis_mappings import (
+    MOVEMENT_ACTION_NAME_BY_ID,
+    observation_relation_and_row,
+)
 from marl_battlegrounds.core.types import (
-    MAX_AGENTS_PER_TEAM,
     NUM_MOVE_ACTIONS,
     NUM_TARGET_ACTIONS,
     NUM_ULTIMATE_ACTIONS,
@@ -48,23 +51,11 @@ from scripts.dev.visual_debugger.targeting import (
     target_action_to_global_slot,
 )
 
-_MOVE_NAMES = (
-    "Stay",
-    "North",
-    "South",
-    "East",
-    "West",
-    "Northeast",
-    "Northwest",
-    "Southeast",
-    "Southwest",
-)
-
 
 def _move_name(move_action: int) -> str:
     return (
-        _MOVE_NAMES[move_action]
-        if 0 <= move_action < len(_MOVE_NAMES)
+        MOVEMENT_ACTION_NAME_BY_ID[move_action]
+        if 0 <= move_action < len(MOVEMENT_ACTION_NAME_BY_ID)
         else "Invalid move"
     )
 
@@ -344,24 +335,12 @@ def _previous_action_row(
     """Decode only observer-authorized successor previous-action one-hots."""
     agents = _scene_agents(scene)
     observer_slot = session.controlled_global_slot
-    observer = agents[observer_slot]
     actor = agents.get(actor_global_slot)
     if actor is None:
         return None
 
-    same_team = observer.team_id == actor.team_id
-    if same_team:
-        row = (
-            actor_global_slot
-            if observer_slot < MAX_AGENTS_PER_TEAM
-            else actor_global_slot - MAX_AGENTS_PER_TEAM
-        )
-    else:
-        row = (
-            actor_global_slot - MAX_AGENTS_PER_TEAM
-            if observer_slot < MAX_AGENTS_PER_TEAM
-            else actor_global_slot
-        )
+    relation, row = observation_relation_and_row(observer_slot, actor_global_slot)
+    same_team = relation == "ally"
 
     previous = session.observation.previous_timestep_actions
     if same_team:

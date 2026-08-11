@@ -10,7 +10,7 @@ from jax import Array
 
 import marl_battlegrounds.core.combat as combat
 from marl_battlegrounds.core.combat import (
-    MAGE_DAMAGE_AURA_MULTIPLIER,
+    MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER,
     ULTIMATE_COOLDOWN_BY_CLASS,
     ULTIMATE_DAMAGE_BY_CLASS,
 )
@@ -707,7 +707,8 @@ def test_accepted_ultimate_updates_health_cooldown_and_returned_mask() -> None:
     assert (
         next_state.current_health[_ENEMY_SLOT]
         == state.current_health[_ENEMY_SLOT]
-        - ULTIMATE_DAMAGE_BY_CLASS[WARRIOR_CLASS_ID] * MAGE_DAMAGE_AURA_MULTIPLIER
+        - ULTIMATE_DAMAGE_BY_CLASS[WARRIOR_CLASS_ID]
+        * MAGE_DAMAGE_AMPLIFICATION_AURA_MULTIPLIER
     )
     assert (
         next_state.ultimate_cooldowns[_ACTOR_SLOT]

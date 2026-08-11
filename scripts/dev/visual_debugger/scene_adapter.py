@@ -5,6 +5,7 @@ from typing import cast
 import numpy as np
 import numpy.typing as npt
 
+from marl_battlegrounds.core.axis_mappings import observation_relation_and_row
 from marl_battlegrounds.core.combat import HUNTER_TRAP_STUN_DURATION_TICKS
 from marl_battlegrounds.core.types import (
     AGENT_FEATURE_ACTIVE,
@@ -42,7 +43,6 @@ from marl_battlegrounds.core.types import (
     HUNTER_CLASS_ID,
     MAGE_CLASS_ID,
     MAX_AGENT_SLOTS,
-    MAX_AGENTS_PER_TEAM,
     MAX_OBSTACLE_SLOTS,
     MOVE_STAY,
     NUM_TARGET_ACTIONS,
@@ -56,7 +56,6 @@ from marl_battlegrounds.core.types import (
     OBSTACLE_FEATURE_Y,
     OBSTACLE_TYPE_PILLAR,
     OBSTACLE_TYPE_WALL,
-    TEAM_A_ID,
     WARRIOR_CLASS_ID,
     EnvConfig,
     Observation,
@@ -102,7 +101,6 @@ from scripts.dev.visual_debugger.targeting import (
 )
 
 type _FeatureRow = npt.NDArray[np.float32]
-type _Relation = tuple[str, int]
 
 _STATUS_FEATURES: tuple[tuple[str, int], ...] = (
     ("stun_warrior_charge", AGENT_FEATURE_STUN_WARRIOR_CHARGE_DURATION),
@@ -118,28 +116,6 @@ _STATUS_FEATURES: tuple[tuple[str, int], ...] = (
     ),
     ("mage_burst", AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_BURST_DURATION),
 )
-
-
-def _relation_row(
-    config: EnvConfig,
-    observer_global_slot: int,
-    candidate_global_slot: int,
-) -> _Relation:
-    observer_team = int(config.agent_profile.team_ids[observer_global_slot])
-    candidate_team = int(config.agent_profile.team_ids[candidate_global_slot])
-    if observer_team == candidate_team:
-        row = (
-            candidate_global_slot
-            if observer_team == TEAM_A_ID
-            else candidate_global_slot - MAX_AGENTS_PER_TEAM
-        )
-        return "ally", row
-    row = (
-        candidate_global_slot - MAX_AGENTS_PER_TEAM
-        if observer_team == TEAM_A_ID
-        else candidate_global_slot
-    )
-    return "enemy", row
 
 
 def _candidate_row(
@@ -161,8 +137,7 @@ def _candidate_row(
         candidate_global_slot=candidate_global_slot,
     ):
         return None
-    relation, row = _relation_row(
-        config,
+    relation, row = observation_relation_and_row(
         observer_global_slot,
         candidate_global_slot,
     )
@@ -566,8 +541,7 @@ def _previous_action_visible(
     observer_global_slot: int,
     actor_global_slot: int,
 ) -> bool:
-    relation, row = _relation_row(
-        session.config,
+    relation, row = observation_relation_and_row(
         observer_global_slot,
         actor_global_slot,
     )
@@ -622,7 +596,14 @@ def _visible_at(
 
 
 _POV_DIRECT_HEALTH_ACTIVATIONS = frozenset(
-    ("basic_damage", "basic_heal", "holy_word", "warrior_charge", "rogue_poison")
+    (
+        "basic_damage",
+        "basic_heal",
+        "holy_word",
+        "warrior_charge",
+        "hunter_trap",
+        "rogue_poison",
+    )
 )
 
 
@@ -775,7 +756,8 @@ def _pov_event_batch(session: DebuggerSession) -> VisualEventBatchV1:
         ):
             visible_direct_health_targets.add(disclosed_target)
         if (
-            activation.kind in ("basic_damage", "warrior_charge", "rogue_poison")
+            activation.kind
+            in ("basic_damage", "warrior_charge", "hunter_trap", "rogue_poison")
             and disclosed_target is not None
         ):
             visible_positive_damage_targets.add(disclosed_target)

@@ -7,6 +7,7 @@ import numpy as np
 from jax import Array
 
 from marl_battlegrounds.core import combat
+from marl_battlegrounds.core.axis_mappings import target_action_to_global_slot
 from marl_battlegrounds.core.combat import (
     HUNTER_BASIC_SLOW_DURATION_TICKS,
     HUNTER_TRAP_STUN_DURATION_TICKS,
@@ -1174,19 +1175,12 @@ def validate_scenario_initial_state(config: EnvConfig, state: EnvState) -> None:
             if target_action == 0:
                 continue
 
-            source_team_start = (
-                source_slot // MAX_AGENTS_PER_TEAM
-            ) * MAX_AGENTS_PER_TEAM
-            candidate_index = int(target_action) - 1
-            if candidate_index < MAX_AGENTS_PER_TEAM:
-                recipient_slot = source_team_start + candidate_index
-            else:
-                opposing_team_start = (
-                    MAX_AGENTS_PER_TEAM if source_team_start == 0 else 0
-                )
-                recipient_slot = (
-                    opposing_team_start + candidate_index - MAX_AGENTS_PER_TEAM
-                )
+            recipient_slot = target_action_to_global_slot(
+                source_slot,
+                int(target_action),
+            )
+            if recipient_slot is None:
+                raise AssertionError("A nonzero target action resolved to target-none.")
 
             if shielded_slots[recipient_slot]:
                 raise ValueError(
