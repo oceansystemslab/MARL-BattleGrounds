@@ -78,13 +78,42 @@ A `MetricResultV1`-equivalent row carries:
 - complete evaluation-cell and subject coordinates;
 - raw sufficient components and source-schema versions;
 - computed value or `null`;
-- artifact validity, completion state, and end/failure reason; and
+- artifact validity, rollout completion, processing status, and end/failure
+  reason;
+- a per-statistic endpoint-observation status when the metric has a scientific
+  event endpoint; and
 - one result status: `defined`, `zero_opportunity`,
   `structurally_inapplicable`, `ambiguous_attribution`, `invalid_artifact`, or
   `insufficient_data`.
 
 `null` is never silently converted to zero. Presentation code may render it as
 `N/A` together with the status and reason.
+
+When multiple conditions apply, result status uses this precedence:
+`invalid_artifact`, `structurally_inapplicable`, `ambiguous_attribution`,
+`insufficient_data`, `zero_opportunity`, then `defined`. In particular, an
+ineligible prefix with an observed zero denominator is `insufficient_data`,
+not `zero_opportunity`; zero opportunity is available only after artifact,
+subject, completion, and endpoint eligibility pass.
+
+Milestone 6 CP3 realizes the generic host-side portion of this contract without
+activating a universal metric registry. An opt-in `EvaluationEpisodeObserverV1`
+passes each reducer one already validated coherent view consisting of the
+episode context, transition-start frame, transition, and successor frame.
+Reducers are deterministic, immutable, copy-on-write consumers; they never
+receive unresolved frame references or permission to reconstruct simulator
+rules. `EvaluationMetricReportV1` stores its episode context once and joins raw
+statistic rows back to that context rather than repeating policy, seed, task,
+scenario, information-regime, reward, and shaping provenance on every row.
+
+The observer distinguishes validated transition count from successfully
+processed transition count. A failed append or reducer operation poisons the
+observer, preserves the last validated gap-free prefix, and cannot publish a
+partially updated statistic set. `EvaluationProcessingStatusV1` reports that
+failure independently of `EvaluationEpisodeCompletionV1`; a processing failure
+after a completed rollout never rewrites the rollout as failed. There is no
+logging sink, file writer, replay envelope, runner framework, or core callback
+in CP3.
 
 ## Experimental units and terminology
 
@@ -266,8 +295,9 @@ explain the defect, and revise the manifest rather than overwriting history.
 
 ## Completion, failure, missingness, and censoring
 
-Artifact validity, rollout completion, and endpoint observation are separate
-dimensions.
+Artifact validity, observer processing, rollout completion, and per-statistic
+endpoint observation are separate dimensions. None may be inferred from or
+collapsed into another.
 
 ### Artifact validity
 
@@ -280,16 +310,36 @@ but no tactical metric.
 
 ### Rollout completion
 
-- **Terminal complete:** the task emitted an authoritative terminal outcome.
-- **Horizon complete/truncated:** the declared evaluation horizon was reached.
-  It is outcome-eligible only when the task/suite defines the resulting score
-  or result; otherwise relevant time-to-event endpoints are censored.
-- **Partial/interrupted:** a valid prefix exists but infrastructure or an
-  external stop prevented the declared rollout. Prefix-valid diagnostics may
-  be retained with the label; full-outcome metrics are ineligible.
-- **Failed:** simulation, policy, validation, or infrastructure failure made
-  the intended sample invalid. Failures remain visible in denominators and
-  failure tables under the manifest's predeclared policy.
+- **Complete:** the task emitted an authoritative terminal outcome or the
+  declared evaluation horizon was reached. The completion basis remains
+  explicit. Truncation is preserved separately and does not by itself make a
+  task outcome observed.
+- **Partial:** an intentional stop preserved a valid gap-free prefix without
+  completing the declared rollout.
+- **Interrupted:** an external interruption preserved a valid gap-free prefix.
+- **Failed:** simulation, policy, validation, or capture failure prevented the
+  intended rollout. Its stable failure origin and reason remain visible under
+  the manifest's predeclared policy.
+
+The initial frame is required before any completion record exists. A
+zero-transition episode may therefore be partial, interrupted, or failed after
+valid frame zero, but it cannot be complete. Artifact frame zero is independent
+of simulator epoch zero: a valid capture may begin at any nonnegative simulator
+step. A complete rollout has either authoritative task termination or exactly
+the declared number of artifact transitions; no host consumer derives task
+outcome from that structural evidence.
+
+### Observer processing
+
+Processing success means that every validated transition was consumed by every
+declared reducer and the final report was validated atomically. Processing
+failure records the stage, stable code, optional reducer identity, attempted
+transition, and diagnostic detail. It does not erase the last validated prefix
+or alter already-authored termination/truncation truth. A report exposes both
+validated and processed counts, and no successful report may contain a partial
+subset of reducers or rows. A failure after every validated unit was processed
+remains visible but does not by itself make a complete-only statistic
+ineligible; a validated/processed count gap does.
 
 Retry count, retryable causes, replacement-seed policy, and maximum attempts
 are frozen. A retry never silently erases its failed predecessor.
@@ -297,7 +347,10 @@ are frozen. A retry never silently erases its failed predecessor.
 ### Scientific censoring
 
 Censoring means a valid endpoint was not observed within a declared scientific
-window; it is not a synonym for corrupted data. For time-to-success:
+window; it is not an episode completion state or a synonym for corrupted data.
+Each statistic records one endpoint-observation status from `not_applicable`,
+`observed`, `right_censored`, `competing_event`, or `unavailable`. For
+time-to-success:
 
 - success by the horizon is an observed event;
 - horizon reached without success is a failure for binary success-rate
@@ -308,6 +361,11 @@ window; it is not a synonym for corrupted data. For time-to-success:
   censoring; and
 - completion time among successes is never reported without success
   probability and censoring information.
+
+Different statistics from the same complete rollout may legitimately have
+different endpoint-observation statuses. A prefix-valid descriptive statistic
+may remain defined on a partial rollout while a complete-only outcome is
+`insufficient_data`; neither case turns missing future opportunity into zero.
 
 Missingness policies state whether a claim targets all scheduled runs,
 successfully trained runs, or valid completed evaluations. The distinction is
@@ -456,7 +514,13 @@ Warm-up iterations and timed repetitions are fixed in the manifest. Evaluation
 capture must not be included in a claimed ordinary-training throughput number
 unless the label explicitly says so. A disabled evaluation path performs no
 host transfer, model validation, event decoding, logging, or trajectory
-retention.
+retention. In CP3, disabled means that no observer or evaluation context is
+constructed and the caller never invokes capture. An explicitly constructed
+`training_light` or `debug` observer is enabled work: it streams the public
+semantic view without retaining trajectory history. The
+`evaluation_metric_complete` and `scenario_metric_complete` profiles retain
+the exact in-memory `T + 1` frame / `T` transition prefix; scenario capture
+continues to require scenario identity. Debug adds no private-state payload.
 
 ## Artifact, replay, and reporting requirements
 
@@ -472,7 +536,8 @@ Official results retain enough information to reproduce every reduction:
   reward, and shaping identities;
 - `T + 1` semantic frames and `T` transitions when replay retention is enabled;
 - raw metric sufficient components and complete cell/subject keys;
-- completion, failure, censoring, and validation status; and
+- rollout completion, observer-processing failure, per-statistic endpoint
+  observation, result eligibility, and artifact-validation status; and
 - deterministic links from aggregate rows to source artifacts.
 
 The catalog mappings, joined through the episode roster, are the sole artifact

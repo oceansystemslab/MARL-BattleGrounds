@@ -206,14 +206,75 @@ def _validate_inactive_fact_padding(
             )
 
 
-def _revalidate_model(model: EvaluationModel, *, record_name: str) -> None:
-    """Reject records assembled through unchecked Pydantic escape hatches."""
+def _matches_declared_model_tree(candidate: object, canonical: object) -> bool:
+    """Compare exact nested schema types and primitive values without model equality."""
+    if isinstance(canonical, EvaluationModel):
+        if type(candidate) is not type(canonical):
+            return False
+        if getattr(candidate, "__pydantic_private__", None):
+            return False
+        if getattr(candidate, "__pydantic_extra__", None):
+            return False
+        if candidate.__dict__.keys() != canonical.__dict__.keys():
+            return False
+        return all(
+            _matches_declared_model_tree(
+                getattr(candidate, field_name),
+                getattr(canonical, field_name),
+            )
+            for field_name in type(canonical).model_fields
+        )
+    if isinstance(canonical, tuple):
+        if type(candidate) is not tuple:
+            return False
+        candidate_items = cast(tuple[object, ...], candidate)
+        canonical_items = cast(tuple[object, ...], canonical)
+        return len(candidate_items) == len(canonical_items) and all(
+            _matches_declared_model_tree(candidate_item, canonical_item)
+            for candidate_item, canonical_item in zip(
+                candidate_items,
+                canonical_items,
+                strict=True,
+            )
+        )
+    if isinstance(canonical, dict):
+        if type(candidate) is not dict:
+            return False
+        candidate_items = cast(dict[object, object], candidate)
+        canonical_items = cast(dict[object, object], canonical)
+        if candidate_items.keys() != canonical_items.keys():
+            return False
+        return all(
+            _matches_declared_model_tree(candidate_items[key], canonical_value)
+            for key, canonical_value in canonical_items.items()
+        )
+    return type(candidate) is type(canonical) and candidate == canonical
+
+
+def validate_declared_model_tree(
+    model: EvaluationModel,
+    *,
+    record_name: str,
+    expected_type: type[EvaluationModel],
+) -> EvaluationModel:
+    """Reject undeclared root subtypes and unchecked Pydantic escape hatches."""
+    if type(model) is not expected_type:
+        raise ValueError(
+            f"{record_name} must use exact declared root type {expected_type.__name__}"
+        )
     try:
-        reconstructed = type(model).model_validate(model.model_dump(mode="python"))
+        reconstructed = expected_type.model_validate(model.model_dump(mode="python"))
     except ValidationError as error:
         raise ValueError(f"{record_name} fails structural revalidation") from error
-    if reconstructed != model:
-        raise ValueError(f"{record_name} changes under structural revalidation")
+    if type(reconstructed) is not expected_type or not _matches_declared_model_tree(
+        model,
+        reconstructed,
+    ):
+        raise ValueError(
+            f"{record_name} contains an undeclared nested model type or changes "
+            "under structural revalidation"
+        )
+    return reconstructed
 
 
 def _validate_frame_information_regime(
@@ -245,6 +306,55 @@ def _validate_frame_information_regime(
                 )
 
 
+def _validate_context_joined_frame(
+    context: EvaluationEpisodeContextV1,
+    frame: EvaluationFrameV1,
+    *,
+    record_name: str,
+) -> None:
+    """Revalidate one frame and its context-owned semantic constraints."""
+    validate_declared_model_tree(
+        frame,
+        record_name=record_name,
+        expected_type=EvaluationFrameV1,
+    )
+    episode_id = context.identity.episode_id
+    if frame.episode_id != episode_id:
+        raise ValueError(f"{record_name} must join to the context episode")
+    expected_frame_id = f"{episode_id}:frame:{frame.frame_index}"
+    if frame.frame_id != expected_frame_id:
+        raise ValueError(f"{record_name} ID is not canonical")
+    _validate_frame_information_regime(context, frame)
+    _validate_inactive_frame_padding(context, frame)
+
+
+def validate_initial_evaluation_frame_v1(
+    context: EvaluationEpisodeContextV1,
+    initial_frame: EvaluationFrameV1,
+) -> None:
+    """Validate the context-joined artifact frame at capture index zero.
+
+    The artifact index and ID are canonicalized independently of the simulator
+    epoch. Scenario and resumed-state capture may therefore begin at any
+    nonnegative ``simulator_step_count`` accepted by ``EvaluationFrameV1``.
+    """
+    validate_declared_model_tree(
+        context,
+        record_name="context",
+        expected_type=EvaluationEpisodeContextV1,
+    )
+    _validate_context_joined_frame(
+        context,
+        initial_frame,
+        record_name="initial frame",
+    )
+    if initial_frame.frame_index != 0:
+        raise ValueError("initial frame index must be zero")
+    expected_frame_id = f"{context.identity.episode_id}:frame:0"
+    if initial_frame.frame_id != expected_frame_id:
+        raise ValueError("initial frame ID must identify artifact frame zero")
+
+
 def validate_evaluation_transition_unit_v1(
     context: EvaluationEpisodeContextV1,
     start_frame: EvaluationFrameV1,
@@ -258,17 +368,29 @@ def validate_evaluation_transition_unit_v1(
     re-decodes the complete canonical event sequence. It deliberately does not
     reconstruct simulator rules or infer optional team rewards.
     """
-    _revalidate_model(context, record_name="context")
-    _revalidate_model(start_frame, record_name="start frame")
-    _revalidate_model(transition, record_name="transition")
-    _revalidate_model(successor_frame, record_name="successor frame")
+    validate_declared_model_tree(
+        context,
+        record_name="context",
+        expected_type=EvaluationEpisodeContextV1,
+    )
+    validate_declared_model_tree(
+        transition,
+        record_name="transition",
+        expected_type=EvaluationTransitionV1,
+    )
+    _validate_context_joined_frame(
+        context,
+        start_frame,
+        record_name="start frame",
+    )
+    _validate_context_joined_frame(
+        context,
+        successor_frame,
+        record_name="successor frame",
+    )
 
     episode_id = context.identity.episode_id
-    if (
-        start_frame.episode_id != episode_id
-        or transition.episode_id != episode_id
-        or successor_frame.episode_id != episode_id
-    ):
+    if transition.episode_id != episode_id:
         raise ValueError("all transition-unit records must join to the context episode")
 
     expected_start_frame_id = f"{episode_id}:frame:{start_frame.frame_index}"
@@ -297,10 +419,6 @@ def validate_evaluation_transition_unit_v1(
     if successor_frame.simulator_step_count != start_frame.simulator_step_count + 1:
         raise ValueError("successor simulator step must be start step plus one")
 
-    _validate_frame_information_regime(context, start_frame)
-    _validate_frame_information_regime(context, successor_frame)
-    _validate_inactive_frame_padding(context, start_frame)
-    _validate_inactive_frame_padding(context, successor_frame)
     _validate_inactive_fact_padding(context, transition)
 
     expected_events = decode_evaluation_events_v1(
@@ -313,4 +431,7 @@ def validate_evaluation_transition_unit_v1(
         raise ValueError("transition events must exactly equal canonical fact decoding")
 
 
-__all__ = ["validate_evaluation_transition_unit_v1"]
+__all__ = [
+    "validate_evaluation_transition_unit_v1",
+    "validate_initial_evaluation_frame_v1",
+]

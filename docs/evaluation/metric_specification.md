@@ -183,7 +183,8 @@ conceptually into four layers:
   and train/validation/locked-test partition.
 - **Metric result:** metric/suite/manifest identities, complete cell and subject
   coordinates, raw sufficient components, computed value or `null`, result
-  status, completion state, and source-schema versions.
+  status, rollout completion, observer-processing status, per-statistic
+  endpoint observation where applicable, and source-schema versions.
 
 Only a semantic-definition change increments a metric version. Population,
 weighting, comparison, or inferential changes increment the suite or manifest
@@ -253,9 +254,43 @@ otherwise, preserve:
 - a distribution's event- or episode-level observations at its declared unit.
 
 A zero opportunity produces `N/A`, not zero. Partial prefixes are excluded
-from every official endpoint estimator unless that metric explicitly declares
-a censoring estimand. Prefix-valid diagnostic or descriptive components may be
-exported only with completion state and remain outside the official estimator.
+from every official endpoint estimator unless the metric explicitly declares
+prefix validity. Scientific censoring is a separate per-statistic endpoint
+observation, not an episode completion state. Prefix-valid diagnostic or
+descriptive components may be exported only with rollout and processing status
+and remain outside the official estimator.
+
+Result status follows this precedence: `invalid_artifact`,
+`structurally_inapplicable`, `ambiguous_attribution`, `insufficient_data`,
+`zero_opportunity`, then `defined`. A currently zero denominator on an
+ineligible prefix is insufficient data rather than zero opportunity. A
+right-censored result is defined only when that versioned metric declares a
+censoring estimand and preserves the required censoring component.
+
+Milestone 6 CP3 supplies strict generic count, sum, ratio-component,
+duration-component, opportunity, and distribution-observation records. It does
+not implement the metric formulas below. One immutable
+`SufficientStatisticAccumulatorV1` combines only drafts with the same complete
+semantic key and preserves raw components; ratios, means, ratings, uncertainty,
+and presentation values remain downstream derivations. Agent and policy
+subjects must join configured-active context rows. An absent class may appear
+as `structurally_inapplicable`, never as a fabricated zero, and padded actors
+never enter opportunity denominators merely because their canonical no-op mask
+has a valid category.
+
+The CP3 accumulator is episode-local. Its `eligible_episode_count` is therefore
+exactly `0` or `1`, and a ratio's `zero_opportunity_occurrence` is the final
+episode-level `0` or `1` incidence after local contributions merge. Later
+cross-episode reduction counts those finalized raw rows; it does not merge CP3
+draft accumulators and cannot erase zero-opportunity episodes.
+At final materialization, an incomplete or otherwise ineligible row carries
+`eligible_episode_count = 0`; `defined` and eligible `zero_opportunity` rows
+carry `1`. A ratio with a recorded zero-opportunity occurrence finalizes as
+`zero_opportunity`, never `defined`. Other zero-valued component families do
+not by themselves reveal metric-specific opportunity semantics. A separately
+recorded observer-processing failure does not erase a fully consumed prefix:
+complete-only eligibility requires rollout completion and equal validated and
+processed transition counts, not a successful-status label by itself.
 
 ## Canonical task-independent metrics
 
@@ -267,10 +302,11 @@ exported only with completion state and remain outside the official estimator.
 | `marlbg.task.terminal_score_differential.v1` | By how much did the team lead at the terminal frame? Preserve `team_score - opponent_score` per complete episode. | `primary_confirmatory` / `primary_team` | higher | `requires_future_task_authority` / task |
 | `marlbg.task.evaluation_return.v1` | What canonical evaluation reward did the team/agent receive? Preserve the unshaped episode return and reward-mode identity. | `key_secondary` / `advanced` | task-defined | `requires_future_task_authority` / task |
 | `marlbg.task.episode_length.v1` | How many valid transitions occurred before completion? Preserve transition count and end reason. | `exploratory_descriptive` / `advanced` | descriptive | `derivable_now` / host evaluation |
-| `marlbg.artifact.completion.v1` | Was the artifact complete, partial, interrupted, failed, or censored? Preserve completion state, valid prefix length, and failure/end reason. | `diagnostic_qc` / `none` | descriptive | `derivable_now` / host evaluation |
+| `marlbg.artifact.completion.v1` | Was the rollout complete, partial, interrupted, or failed, and did host processing succeed? Preserve completion basis, validated/processed prefix lengths, processing failure, and end/failure reason. | `diagnostic_qc` / `none` | descriptive | `derivable_now` / host evaluation |
 
 Outcome rows are complete-only. A missing outcome, failed run, truncation, or
-censored result never silently becomes a draw, loss, zero, or excluded row.
+right-censored endpoint never silently becomes a draw, loss, zero, or excluded
+row.
 
 ### Combat output and exposure
 
@@ -567,7 +603,9 @@ Before a metric becomes active, its owner must provide:
 
 - hand-constructed neutral, positive, negative, and zero-opportunity traces;
 - team-swap and side-swap invariance where applicable;
-- complete/partial/censored eligibility tests;
+- complete/partial/interrupted/failed rollout tests plus independent observed,
+  right-censored, competing-event, unavailable, and not-applicable endpoint
+  tests where relevant;
 - simultaneous damage/healing/clamp and duplicate-class overlap cases;
 - live-model and replay-loaded parity once file replay exists;
 - raw sufficient-statistic and presentation-roundtrip checks;

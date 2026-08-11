@@ -1,9 +1,13 @@
 """Reusable strict host-model fixtures for evaluation tests."""
 
+from dataclasses import dataclass
+
+import jax
 import jax.numpy as jnp
 import numpy as np
 
 from marl_battlegrounds.core.config import resolve_agent_profile
+from marl_battlegrounds.core.env import reset, step
 from marl_battlegrounds.core.types import (
     HUNTER_CLASS_ID,
     MAGE_CLASS_ID,
@@ -14,7 +18,12 @@ from marl_battlegrounds.core.types import (
     PRIEST_CLASS_ID,
     ROGUE_CLASS_ID,
     WARRIOR_CLASS_ID,
+    Action,
     EnvConfig,
+)
+from marl_battlegrounds.evaluation.capture import (
+    capture_evaluation_transition_unit_v1,
+    capture_initial_evaluation_frame_v1,
 )
 from marl_battlegrounds.evaluation.catalog import (
     build_code_revision_v1,
@@ -24,11 +33,14 @@ from marl_battlegrounds.evaluation.catalog import (
 from marl_battlegrounds.evaluation.models import (
     AggregationKeyV1,
     AssignedPolicySlotV1,
+    CaptureProfile,
     ContentAddressedIdentityV1,
     EvaluationEpisodeContextV1,
     EvaluationEpisodeIdentityV1,
+    EvaluationFrameV1,
     EvaluationRole,
     EvaluationSeedProtocolV1,
+    EvaluationTransitionV1,
     ExecutionInformationMode,
     NotApplicablePolicySlotV1,
     PolicyAssignmentSlotV1,
@@ -113,6 +125,7 @@ def content_identity(
 def evaluation_episode_identity(
     *,
     with_scenario: bool = False,
+    episode_id: str = "episode-001",
 ) -> EvaluationEpisodeIdentityV1:
     """Return deterministic runner-owned episode identity."""
     return EvaluationEpisodeIdentityV1(
@@ -120,7 +133,7 @@ def evaluation_episode_identity(
         evaluation_id="evaluation-001",
         matchup_id="matchup-001",
         match_id="match-001",
-        episode_id="episode-001",
+        episode_id=episode_id,
         paired_comparison_key="pair-001",
         evaluation_suite=content_identity("suite", digest=_DIGEST_A),
         experiment_manifest=content_identity("manifest", digest=_DIGEST_B),
@@ -204,19 +217,30 @@ def evaluation_context(
     execution_information_mode: ExecutionInformationMode = "no_shared_obs",
     with_scenario: bool = False,
     public_agent_id_prefix: str = "agent-slot",
+    capture_profile: CaptureProfile | None = None,
+    expected_horizon: int = 100,
+    aggregation_keys: tuple[AggregationKeyV1, ...] | None = None,
+    episode_id: str = "episode-001",
 ) -> EvaluationEpisodeContextV1:
     """Build a complete valid episode context through the public constructor."""
     config = evaluation_env_config()
     return build_evaluation_episode_context_v1(
-        identity=evaluation_episode_identity(with_scenario=with_scenario),
-        aggregation_keys=(
-            AggregationKeyV1(
-                name="information_regime",
-                value=execution_information_mode,
-            ),
-            AggregationKeyV1(name="side", value="team_a"),
+        identity=evaluation_episode_identity(
+            with_scenario=with_scenario,
+            episode_id=episode_id,
         ),
-        expected_horizon=100,
+        aggregation_keys=(
+            aggregation_keys
+            if aggregation_keys is not None
+            else (
+                AggregationKeyV1(
+                    name="information_regime",
+                    value=execution_information_mode,
+                ),
+                AggregationKeyV1(name="side", value="team_a"),
+            )
+        ),
+        expected_horizon=expected_horizon,
         config=config,
         public_agent_id_by_global_slot=tuple(
             f"{public_agent_id_prefix}-{slot}" for slot in range(MAX_AGENT_SLOTS)
@@ -224,9 +248,13 @@ def evaluation_context(
         policy_assignments=policy_assignments(config),
         seed_protocol=evaluation_seed_protocol(with_scenario=with_scenario),
         capture_profile=(
-            "scenario_metric_complete"
-            if with_scenario
-            else "evaluation_metric_complete"
+            capture_profile
+            if capture_profile is not None
+            else (
+                "scenario_metric_complete"
+                if with_scenario
+                else "evaluation_metric_complete"
+            )
         ),
         execution_information_mode=execution_information_mode,
         actor_projection=VersionedIdentityV1(
@@ -252,11 +280,144 @@ def evaluation_context(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class CapturedEvaluationTrajectory:
+    """One public reset/step trajectory normalized through the CP2 seam."""
+
+    context: EvaluationEpisodeContextV1
+    frames: tuple[EvaluationFrameV1, ...]
+    transitions: tuple[EvaluationTransitionV1, ...]
+
+
+def neutral_action() -> Action:
+    """Return the canonical all-Stay/no-target/no-Ultimate joint action."""
+    zeros = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32)
+    return Action(move=zeros, select_target=zeros, use_ultimate=zeros)
+
+
+def mage_target_none_ultimate_action() -> Action:
+    """Return an action that activates slot-zero Mage Ultimate at target-none."""
+    action = neutral_action()
+    return Action(
+        move=action.move,
+        select_target=action.select_target,
+        use_ultimate=action.use_ultimate.at[0].set(1),
+    )
+
+
+def valid_shared_availability(
+    context: EvaluationEpisodeContextV1,
+) -> jax.Array:
+    """Return a valid same-team off-diagonal SharedObs availability matrix."""
+    availability = np.zeros(
+        (MAX_AGENT_SLOTS, MAX_AGENT_SLOTS),
+        dtype=np.bool_,
+    )
+    for recipient, recipient_row in enumerate(context.roster):
+        for sensor_source, source_row in enumerate(context.roster):
+            availability[recipient, sensor_source] = bool(
+                recipient != sensor_source
+                and recipient_row.configured_active
+                and source_row.configured_active
+                and recipient_row.configured_team_id == source_row.configured_team_id
+            )
+    return jnp.asarray(availability, dtype=jnp.bool_)
+
+
+def captured_evaluation_trajectory(
+    *,
+    transition_count: int = 2,
+    capture_profile: CaptureProfile = "evaluation_metric_complete",
+    execution_information_mode: ExecutionInformationMode = "no_shared_obs",
+    expected_horizon: int = 100,
+    with_scenario: bool = False,
+    episode_id: str = "episode-001",
+    aggregation_keys: tuple[AggregationKeyV1, ...] | None = None,
+    actions: tuple[Action, ...] | None = None,
+) -> CapturedEvaluationTrajectory:
+    """Capture a deterministic trajectory through public reset, step, and CP2 APIs."""
+    if transition_count < 0:
+        raise ValueError("transition_count must be nonnegative")
+    if transition_count > 100:
+        raise ValueError("transition_count cannot exceed the fixture config horizon")
+    if actions is not None and len(actions) != transition_count:
+        raise ValueError("actions must contain exactly one joint action per transition")
+
+    config = evaluation_env_config()
+    context = evaluation_context(
+        execution_information_mode=execution_information_mode,
+        with_scenario=with_scenario,
+        capture_profile=capture_profile,
+        expected_horizon=expected_horizon,
+        aggregation_keys=aggregation_keys,
+        episode_id=episode_id,
+    )
+    state, observation, action_mask, _reset_info = reset(
+        config,
+        jax.random.PRNGKey(0),
+    )
+    availability = (
+        valid_shared_availability(context)
+        if execution_information_mode == "shared_obs"
+        else None
+    )
+    current_frame = capture_initial_evaluation_frame_v1(
+        context,
+        state,
+        observation,
+        action_mask,
+        availability,
+    )
+    frames = [current_frame]
+    transitions: list[EvaluationTransitionV1] = []
+    for transition_index in range(transition_count):
+        (
+            state,
+            observation,
+            canonical_reward,
+            done_flags,
+            action_mask,
+            info,
+        ) = step(
+            config,
+            state,
+            action_mask,
+            neutral_action() if actions is None else actions[transition_index],
+            jax.random.PRNGKey(transition_index + 1),
+        )
+        transition, current_frame = capture_evaluation_transition_unit_v1(
+            context,
+            current_frame,
+            state,
+            observation,
+            action_mask,
+            info.transition_facts,
+            canonical_reward,
+            done_flags,
+            successor_shared_obs_information_availability_by_recipient_and_sensor_source=(
+                availability
+            ),
+        )
+        transitions.append(transition)
+        frames.append(current_frame)
+
+    return CapturedEvaluationTrajectory(
+        context=context,
+        frames=tuple(frames),
+        transitions=tuple(transitions),
+    )
+
+
 __all__ = [
+    "CapturedEvaluationTrajectory",
+    "captured_evaluation_trajectory",
     "content_identity",
     "evaluation_context",
     "evaluation_env_config",
     "evaluation_episode_identity",
     "evaluation_seed_protocol",
+    "mage_target_none_ultimate_action",
+    "neutral_action",
     "policy_assignments",
+    "valid_shared_availability",
 ]

@@ -142,6 +142,43 @@ boundary:
   compares the deterministic event sequence. Structural model validation is
   not misrepresented as cross-record semantic validation.
 
+Milestone 6 CP3 adds the following host-only streaming boundary:
+
+- `validate_initial_evaluation_frame_v1` separately validates context join,
+  artifact index zero, canonical frame identity, information-regime rules, and
+  inactive dynamic padding. Artifact frame zero may correspond to any
+  nonnegative simulator epoch; capture indices are never inferred from an
+  arbitrary simulator step.
+- An opt-in `EvaluationEpisodeObserverV1` accepts exactly one initial frame and
+  then gap-free coherent context/start-frame/transition/successor-frame views.
+  It tracks validated and successfully processed transition counts separately.
+- Versioned reducers are immutable and copy-on-write. All reducer replacements
+  and final rows validate before one atomic observer commit. A failed append,
+  reducer, or final report poisons the observer, preserves the last validated
+  prefix, and never publishes a partially updated statistic set.
+- `EvaluationEpisodeCompletionV1` records only rollout completion
+  (`complete`, `partial`, `interrupted`, or `failed`) and its authoritative
+  basis or failure origin. `EvaluationProcessingStatusV1` independently records
+  host processing success/failure. A processing failure after task terminal or
+  declared horizon does not relabel the completed rollout as failed.
+- Scientific endpoint observation is per statistic, using `not_applicable`,
+  `observed`, `right_censored`, `competing_event`, or `unavailable`. It is not
+  an episode completion state. Missing or ineligible data never become zero.
+- Raw count, sum, numerator/denominator, duration, opportunity, and distribution
+  components join one immutable episode context in
+  `EvaluationMetricReportV1`. They retain exact subjects and dimensions but do
+  not duplicate policy, seed, task/scenario, information-regime, reward, or
+  shaping provenance on every row.
+- An absent observer is the only disabled path. Explicit `training_light` and
+  `debug` observers stream the standard semantic view without history;
+  evaluation/scenario metric-complete observers retain exact `T + 1` frame /
+  `T` transition prefixes. Debug adds no private-state payload.
+
+CP3 adds no core callback, runner, logging sink, file I/O, replay artifact,
+official metric formula, universal registry, materialized SharedObs tensor, or
+private debug-state format. Replay persistence and loaded-file parity remain
+the next milestone step.
+
 The core mapping change permitted by CP2 is limited to a pure public
 `core.axis_mappings` authority and bounded mechanical imports in the current
 core environment/configuration consumers. Any changed mapping value, traced

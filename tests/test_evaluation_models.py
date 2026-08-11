@@ -515,7 +515,7 @@ def test_root_models_reject_unknown_versions_and_extra_fields() -> None:
         EvaluationEpisodeContextV1.model_validate_json(json.dumps(context_payload))
 
 
-def test_package_exports_only_the_seven_approved_public_functions() -> None:
+def test_package_exports_only_the_nine_step_5_public_functions() -> None:
     exported_functions = {
         name
         for name in evaluation_api.__all__
@@ -524,11 +524,13 @@ def test_package_exports_only_the_seven_approved_public_functions() -> None:
     assert exported_functions == {
         "build_static_mechanics_catalog_v1",
         "build_evaluation_episode_context_v1",
+        "build_evaluation_observer_v1",
         "capture_initial_evaluation_frame_v1",
         "capture_evaluation_transition_unit_v1",
         "normalize_transition_facts_v1",
         "decode_evaluation_events_v1",
         "validate_evaluation_transition_unit_v1",
+        "validate_initial_evaluation_frame_v1",
     }
 
 
