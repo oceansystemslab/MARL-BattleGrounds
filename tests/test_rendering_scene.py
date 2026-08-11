@@ -3,20 +3,8 @@
 import json
 from dataclasses import FrozenInstanceError, fields, replace
 
-import jax.numpy as jnp
 import numpy as np
 import pytest
-from scripts.dev.visual_debugger.control import (
-    create_session,
-    select_clicked_target,
-    submit_next_script_frame,
-)
-from scripts.dev.visual_debugger.model import ActionRejection, DebuggerSession
-from scripts.dev.visual_debugger.scenarios import get_scenario
-from scripts.dev.visual_debugger.scene_adapter import (
-    build_battlefield_scene,
-    build_visual_event_batch,
-)
 
 from marl_battlegrounds.rendering.scene import (
     EVENT_SCHEMA_VERSION,
@@ -39,10 +27,13 @@ from marl_battlegrounds.rendering.scene import (
 )
 from marl_battlegrounds.rendering.vocabulary import (
     CANONICAL_STATUS_ORDER,
+    CATALOG_STATUS_ID_BY_CHANNEL,
+    CATALOG_STATUS_TOKEN_ID_BY_STATUS_ID,
     STATUS_TOKENS,
     class_token_from_id,
     lookup_status_token,
     status_sort_key,
+    status_token_id_from_catalog_status_id,
 )
 
 
@@ -127,6 +118,20 @@ def test_canonical_status_registry_is_complete_ordered_and_stable() -> None:
     assert len({definition.source_class_id for definition in STATUS_TOKENS[3:6]}) == 3
     assert tuple(sorted(CANONICAL_STATUS_ORDER, key=status_sort_key)) == (
         CANONICAL_STATUS_ORDER
+    )
+    assert tuple(CATALOG_STATUS_TOKEN_ID_BY_STATUS_ID.values()) == (
+        CANONICAL_STATUS_ORDER
+    )
+    assert tuple(
+        CATALOG_STATUS_ID_BY_CHANNEL.index(status_id)
+        for status_id in CATALOG_STATUS_TOKEN_ID_BY_STATUS_ID
+    ) == (3, 4, 5, 0, 1, 2, 6, 8, 7)
+    assert (
+        tuple(
+            status_token_id_from_catalog_status_id(status_id)
+            for status_id in CATALOG_STATUS_TOKEN_ID_BY_STATUS_ID
+        )
+        == CANONICAL_STATUS_ORDER
     )
     assert lookup_status_token("future_status").family == "unknown"
     assert lookup_status_token("future_status").token_id == "future_status"
@@ -592,263 +597,3 @@ def test_event_batch_rejects_duplicate_or_cross_transition_ids() -> None:
             simulator_step=2,
             events=(event,),
         )
-
-
-def _debugger_session(name: str = "arena_5v5") -> DebuggerSession:
-    return create_session(
-        get_scenario(name),
-        seed=0,
-        controlled_global_slot=0,
-        show_ranges=True,
-        verbose_logging=False,
-    )
-
-
-def test_researcher_scene_is_explicitly_privileged_and_pov_omits_hidden_agents() -> (
-    None
-):
-    session = _debugger_session()
-    researcher = build_battlefield_scene(session, audience="researcher")
-    pov = build_battlefield_scene(session, audience="agent_pov")
-
-    assert researcher.audience_badge == "PRIVILEGED RESEARCHER VIEW"
-    assert len(researcher.agents) == 10
-    assert len(researcher.observer_visibility) == 10
-    assert pov.audience == "agent_pov"
-    assert pov.observer_visibility == ()
-    assert 5 not in {agent.global_slot for agent in pov.agents}
-
-    hidden_selected = select_clicked_target(session, 5)
-    hidden_pov = build_battlefield_scene(hidden_selected, audience="agent_pov")
-    assert hidden_pov.selection is not None
-    assert hidden_pov.selection.selected_global_slot is None
-    assert hidden_pov.selected_legality is None
-    assert hidden_pov.pending_route is None
-
-    payload = to_jsonable(hidden_pov)
-    assert "agent_positions" not in json.dumps(payload)
-    assert "current_health" in json.dumps(payload)
-    assert all(
-        agent["global_slot"] != 5  # type: ignore[index]
-        for agent in payload["agents"]  # type: ignore[index]
-    )
-
-
-def test_selected_legality_is_copied_from_exact_controlled_mask_row() -> None:
-    session = select_clicked_target(_debugger_session("basic_support"), 5)
-    scene = build_battlefield_scene(session, audience="agent_pov")
-    legality = scene.selected_legality
-    assert legality is not None
-    exact = session.action_mask.select_target_use_ultimate_joint_mask[
-        session.controlled_global_slot,
-        legality.target_action,
-    ]
-    assert legality.lane_0_available is bool(exact[0])
-    assert legality.lane_1_available is bool(exact[1])
-
-
-def test_pov_temporal_outcomes_require_visibility_at_both_epochs() -> None:
-    session = submit_next_script_frame(_debugger_session("basic_support"))
-    transition = session.last_transition
-    assert transition is not None
-
-    baseline_batch = build_visual_event_batch(session, audience="agent_pov")
-    assert baseline_batch is not None
-    assert any(
-        isinstance(event, NetHealthEventV1) and event.recipient_global_slot == 6
-        for event in baseline_batch.events
-    )
-    assert any(
-        isinstance(event, StatusLifecycleEventV1) and event.recipient_global_slot == 6
-        for event in baseline_batch.events
-    )
-
-    hidden_enemy_mask = transition.before_observation.enemy_visibility_mask.at[
-        0,
-        1,
-    ].set(False)
-    hidden_enemy_rows = transition.before_observation.enemy_unit_features.at[
-        0,
-        1,
-    ].set(jnp.zeros_like(transition.before_observation.enemy_unit_features[0, 1]))
-    hidden_before = transition.before_observation._replace(
-        enemy_visibility_mask=hidden_enemy_mask,
-        enemy_unit_features=hidden_enemy_rows,
-    )
-    before_hidden_session = replace(
-        session,
-        last_transition=replace(
-            transition,
-            before_observation=hidden_before,
-        ),
-    )
-
-    batch = build_visual_event_batch(before_hidden_session, audience="agent_pov")
-    assert batch is not None
-    activation = next(
-        event
-        for event in batch.events
-        if isinstance(event, AcceptedActivationEventV1)
-        and event.source_global_slot == 1
-    )
-    target_actor = next(
-        actor for actor in transition.actor_transitions if actor.actor_global_slot == 6
-    )
-    assert activation.target_disclosure == "public"
-    assert activation.target_global_slot == 6
-    assert activation.target_anchor == target_actor.position_after
-    assert not any(
-        isinstance(event, (NetHealthEventV1, StatusLifecycleEventV1))
-        and event.recipient_global_slot == 6
-        for event in batch.events
-    )
-
-    hidden_after_mask = transition.after_observation.enemy_visibility_mask.at[
-        0,
-        1,
-    ].set(False)
-    hidden_after_rows = transition.after_observation.enemy_unit_features.at[
-        0,
-        1,
-    ].set(jnp.zeros_like(transition.after_observation.enemy_unit_features[0, 1]))
-    hidden_after = transition.after_observation._replace(
-        enemy_visibility_mask=hidden_after_mask,
-        enemy_unit_features=hidden_after_rows,
-    )
-    after_hidden_session = replace(
-        session,
-        observation=hidden_after,
-        last_transition=replace(
-            transition,
-            after_observation=hidden_after,
-        ),
-    )
-    redacted_batch = build_visual_event_batch(
-        after_hidden_session,
-        audience="agent_pov",
-    )
-    assert redacted_batch is not None
-    activation = next(
-        event
-        for event in redacted_batch.events
-        if isinstance(event, AcceptedActivationEventV1)
-        and event.source_global_slot == 1
-    )
-    assert activation.target_disclosure == "redacted"
-    assert activation.target_global_slot is None
-    assert activation.target_anchor is None
-    assert not any(
-        isinstance(event, (NetHealthEventV1, StatusLifecycleEventV1))
-        and event.recipient_global_slot == 6
-        for event in redacted_batch.events
-    )
-    payload = to_jsonable(activation)
-    assert payload["target_global_slot"] is None  # type: ignore[index]
-    assert payload["target_anchor"] is None  # type: ignore[index]
-
-
-def test_pov_charge_uses_prestate_anchors_and_dual_epoch_outcomes() -> None:
-    session = create_session(
-        get_scenario("mirrored_ultimates"),
-        seed=0,
-        controlled_global_slot=1,
-        show_ranges=True,
-        verbose_logging=False,
-    )
-    session = submit_next_script_frame(session)
-    session = submit_next_script_frame(session)
-    transition = session.last_transition
-    assert transition is not None
-
-    hidden_after_mask = transition.after_observation.enemy_visibility_mask.at[
-        1,
-        1,
-    ].set(False)
-    hidden_after_rows = transition.after_observation.enemy_unit_features.at[
-        1,
-        1,
-    ].set(jnp.zeros_like(transition.after_observation.enemy_unit_features[1, 1]))
-    hidden_after = transition.after_observation._replace(
-        enemy_visibility_mask=hidden_after_mask,
-        enemy_unit_features=hidden_after_rows,
-    )
-    session = replace(
-        session,
-        observation=hidden_after,
-        last_transition=replace(
-            transition,
-            after_observation=hidden_after,
-        ),
-    )
-
-    batch = build_visual_event_batch(session, audience="agent_pov")
-    assert batch is not None
-    activation = next(
-        event
-        for event in batch.events
-        if isinstance(event, AcceptedActivationEventV1)
-        and event.source_global_slot == 1
-    )
-    source_actor = next(
-        actor for actor in transition.actor_transitions if actor.actor_global_slot == 1
-    )
-    target_actor = next(
-        actor for actor in transition.actor_transitions if actor.actor_global_slot == 6
-    )
-    assert activation.target_disclosure == "public"
-    assert activation.source_anchor == source_actor.position_before
-    assert activation.target_anchor == target_actor.position_before
-    assert source_actor.position_before != source_actor.position_after
-    assert not any(
-        isinstance(event, (NetHealthEventV1, StatusLifecycleEventV1))
-        and event.recipient_global_slot == 6
-        for event in batch.events
-    )
-
-
-def test_pov_events_are_built_independently_and_omit_other_actor_rejections(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    session = submit_next_script_frame(_debugger_session("basic_support"))
-    transition = session.last_transition
-    assert transition is not None
-    session = replace(
-        session,
-        last_transition=replace(
-            transition,
-            rejections=(
-                ActionRejection(
-                    actor_global_slot=1,
-                    component="combat",
-                    submitted_move_action=0,
-                    submitted_target_action=6,
-                    submitted_use_ultimate=1,
-                    movement_mask_value=True,
-                    pair_mask_value=False,
-                ),
-                ActionRejection(
-                    actor_global_slot=0,
-                    component="combat",
-                    submitted_move_action=0,
-                    submitted_target_action=6,
-                    submitted_use_ultimate=1,
-                    movement_mask_value=True,
-                    pair_mask_value=False,
-                ),
-            ),
-        ),
-    )
-
-    def fail_privileged_batch(_: DebuggerSession) -> None:
-        raise AssertionError("POV construction must not create a privileged batch")
-
-    monkeypatch.setattr(
-        "scripts.dev.visual_debugger.scene_adapter.latest_visual_event_batch",
-        fail_privileged_batch,
-    )
-    batch = build_visual_event_batch(session, audience="agent_pov")
-    assert batch is not None
-    rejections = tuple(
-        event for event in batch.events if isinstance(event, RejectedActionEventV1)
-    )
-    assert tuple(event.actor_global_slot for event in rejections) == (0,)

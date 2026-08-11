@@ -7,6 +7,7 @@ from pydantic import ValidationError
 from scripts.dev.visual_debugger.protocol import (
     ActionTupleCardV1,
     ActorActionResultV1,
+    ActorPovTargetActionCommandV1,
     BattlefieldPointerCommandV1,
     CandidateLegalityCardV1,
     CommandRequestV1,
@@ -104,6 +105,7 @@ def test_hud_movement_legality_requires_exact_canonical_action_rows() -> None:
             shift_key=True,
         ),
         RosterSelectionCommandV1(role="control", global_slot=1),
+        ActorPovTargetActionCommandV1(target_action=6),
         ScenarioSwitchCommandV1(scenario_name="basic_support"),
         ResetCommandV1(),
         SetMovementScaleCommandV1(movement_scale=0.1),
@@ -197,6 +199,55 @@ def test_command_request_rejects_version_type_shape_and_extra_field_drift(
 ) -> None:
     with pytest.raises(ValidationError):
         CommandRequestV1.model_validate(payload)
+
+
+def test_actor_pov_target_action_json_is_strict_bounded_and_global_slot_free() -> None:
+    payload = json.dumps(
+        {
+            "schema_version": 1,
+            "client_id": "client-1",
+            "command_id": "pov-target-1",
+            "base_revision": 0,
+            "command": {
+                "command_type": "actor_pov_target_action",
+                "target_action": 6,
+            },
+        }
+    )
+
+    request = CommandRequestV1.model_validate_json(payload)
+    assert isinstance(request.command, ActorPovTargetActionCommandV1)
+    assert request.command.target_action == 6
+    encoded_command = json.loads(request.model_dump_json())["command"]
+    assert encoded_command == {
+        "command_type": "actor_pov_target_action",
+        "target_action": 6,
+    }
+    assert "global_slot" not in encoded_command
+
+    for invalid_command in (
+        {"command_type": "actor_pov_target_action", "target_action": -1},
+        {"command_type": "actor_pov_target_action", "target_action": 11},
+        {"command_type": "actor_pov_target_action", "target_action": True},
+        {"command_type": "pov_target", "target_action": 6},
+        {
+            "command_type": "actor_pov_target_action",
+            "target_action": 6,
+            "global_slot": 5,
+        },
+    ):
+        with pytest.raises(ValidationError):
+            CommandRequestV1.model_validate_json(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "client_id": "client-1",
+                        "command_id": "pov-target-invalid",
+                        "base_revision": 0,
+                        "command": invalid_command,
+                    }
+                )
+            )
 
 
 @pytest.mark.parametrize("coordinate", (float("nan"), float("inf"), -float("inf")))
@@ -325,7 +376,7 @@ def test_target_reference_disclosure_is_structural() -> None:
         TargetReferenceV1(disclosure="redacted", global_slot=5)
 
 
-def test_hud_candidate_legality_requires_target_none_roster_and_actor_mapping() -> None:
+def test_hud_candidate_legality_requires_target_none_and_exact_roster() -> None:
     no_target = TargetReferenceV1(
         disclosure="target_none",
         global_slot=None,
@@ -480,23 +531,6 @@ def test_hud_candidate_legality_requires_target_none_roster_and_actor_mapping() 
     assert tuple(
         candidate.target_action for candidate in team_b_hud.candidate_legalities
     ) == (0, 1, 6)
-
-    with pytest.raises(ValidationError, match="actor-relative target mapping"):
-        HudFrameV1(
-            roster_global_slots=(0, 5),
-            controlled_global_slot=5,
-            selected_global_slot=None,
-            pending_submission_scope="controlled_actor",
-            pending_actions=(team_b_pending,),
-            pending_action=team_b_pending,
-            latest_transition=None,
-            movement_legalities=_movement_legalities(),
-            candidate_legalities=(
-                target_none,
-                team_b_self,
-                team_b_team_a_target.model_copy(update={"target_action": 2}),
-            ),
-        )
 
 
 def test_hud_pending_scope_requires_exact_order_alias_and_playback_label() -> None:

@@ -12,30 +12,23 @@ from marl_battlegrounds.core.types import (
     MOVE_STAY,
     NUM_MOVE_ACTIONS,
     NUM_TARGET_ACTIONS,
-    Action,
     ActionMask,
-    DoneFlags,
     EnvConfig,
     EnvState,
-    Info,
     Observation,
-    Reward,
 )
-from marl_battlegrounds.rendering.scene import RejectionComponent
-from marl_battlegrounds.rendering.vocabulary import (
-    ActivationTokenId,
-    StatusLifecycleKind,
-    StatusTokenId,
+from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
+from marl_battlegrounds.evaluation.models import (
+    EvaluationEpisodeContextV1,
+    EvaluationFrameV1,
 )
+from marl_battlegrounds.rendering.scene import StatusSourceEvidenceStateV2
 
 type Lane = Literal[0, 1]
 type ArmOrigin = Literal["automatic", "explicit"]
-type Relation = Literal["self", "ally", "enemy"]
 type ScenarioMode = Literal["interactive", "scripted"]
 type ScenarioAudience = Literal["researcher", "stress"]
 type SubmissionKind = Literal["interactive", "scripted"]
-type StatusKind = StatusTokenId
-type StatusChange = StatusLifecycleKind | Literal["unchanged"]
 
 MOVEMENT_SCALE_MINIMUM: Final = 0.01
 MOVEMENT_SCALE_MAXIMUM: Final = 1.0
@@ -106,38 +99,6 @@ class LaneAvailability:
 
 
 @dataclass(frozen=True, slots=True)
-class SelectedTargetFacts:
-    controlled_global_slot: int
-    target_global_slot: int
-    target_action: int
-    relation: Relation
-    center_distance: float
-    has_clear_line_of_sight: bool
-    observer_visible: bool
-    inside_observation_radius: bool
-    inside_basic_radius: bool
-    inside_ultimate_radius: bool | None
-    lane_0_available: bool
-    lane_1_available: bool
-
-    def __post_init__(self) -> None:
-        _validate_slot(self.controlled_global_slot, name="controlled_global_slot")
-        _validate_slot(self.target_global_slot, name="target_global_slot")
-        if not 1 <= self.target_action < NUM_TARGET_ACTIONS:
-            msg = f"selected target_action must be non-none; got {self.target_action}."
-            raise ValueError(msg)
-        if self.relation not in ("self", "ally", "enemy"):
-            msg = f"unknown target relation: {self.relation!r}."
-            raise ValueError(msg)
-        if not isfinite(self.center_distance) or self.center_distance < 0:
-            msg = (
-                "center_distance must be finite and non-negative; "
-                f"got {self.center_distance}."
-            )
-            raise ValueError(msg)
-
-
-@dataclass(frozen=True, slots=True)
 class ActorCommand:
     actor_global_slot: int
     move_action: int = MOVE_STAY
@@ -194,88 +155,32 @@ class DebuggerScenario:
 
 
 @dataclass(frozen=True, slots=True)
-class ActorTransition:
-    actor_global_slot: int
-    submitted_move_action: int
-    submitted_target_action: int
-    submitted_use_ultimate: int
-    accepted_move_action: int
-    accepted_target_action: int
-    accepted_use_ultimate: int
-    submitted_tuple_in_domain: bool
-    submitted_move_mask_value: bool
-    submitted_lane_0_value: bool
-    submitted_lane_1_value: bool
-    submitted_pair_mask_value: bool
-    movement_accepted: bool
-    combat_pair_accepted: bool
-    position_before: tuple[float, float]
-    position_after: tuple[float, float]
-    realized_displacement: tuple[float, float]
-    health_before: float
-    health_after: float
-    net_health_delta: float
-    cooldown_before: int
-    cooldown_after: int
-    effective_speed_before: float
-    effective_speed_after: float
-    mage_aura_before: float
-    mage_aura_after: float
-    warrior_aura_before: float
-    warrior_aura_after: float
+class RawContinuationIdentity:
+    """Identity-bind the exact raw objects that feed the next core step."""
 
-
-@dataclass(frozen=True, slots=True)
-class StatusTransition:
-    global_slot: int
-    status_kind: StatusKind
-    source_class_id: int
-    duration_before: int
-    duration_after: int
-    change: StatusChange
-
-
-@dataclass(frozen=True, slots=True)
-class AcceptedActivation:
-    kind: ActivationTokenId
-    source_global_slot: int
-    target_global_slot: int | None
-    target_action: int
-    use_ultimate: int
-
-
-@dataclass(frozen=True, slots=True)
-class ActionRejection:
-    actor_global_slot: int
-    component: RejectionComponent
-    submitted_move_action: int
-    submitted_target_action: int
-    submitted_use_ultimate: int
-    movement_mask_value: bool
-    pair_mask_value: bool
-
-
-@dataclass(frozen=True, slots=True)
-class TransitionView:
-    scenario_name: str
     config: EnvConfig
-    submission_kind: SubmissionKind
-    report_actor_slots: tuple[int, ...]
-    before_state: EnvState
-    before_observation: Observation
-    before_action_mask: ActionMask
-    submitted_action: Action
-    accepted_action: Action
-    after_state: EnvState
-    after_observation: Observation
-    after_action_mask: ActionMask
-    reward: Reward
-    done_flags: DoneFlags
-    info: Info
-    actor_transitions: tuple[ActorTransition, ...]
-    status_transitions: tuple[StatusTransition, ...]
-    accepted_activations: tuple[AcceptedActivation, ...]
-    rejections: tuple[ActionRejection, ...]
+    key: Array
+    state: EnvState
+    observation: Observation
+    action_mask: ActionMask
+
+    def matches(
+        self,
+        *,
+        config: EnvConfig,
+        key: Array,
+        state: EnvState,
+        observation: Observation,
+        action_mask: ActionMask,
+    ) -> bool:
+        """Return whether every raw continuation object is the bound object."""
+        return (
+            self.config is config
+            and self.key is key
+            and self.state is state
+            and self.observation is observation
+            and self.action_mask is action_mask
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,20 +194,53 @@ class DebuggerSession:
     state: EnvState
     observation: Observation
     action_mask: ActionMask
-    last_reward: Reward | None
-    done_flags: DoneFlags
-    info: Info
+    evaluation_context: EvaluationEpisodeContextV1
+    current_evaluation_frame: EvaluationFrameV1
+    incoming_evaluation_view: EvaluationTransitionViewV1 | None
+    status_source_evidence_state: StatusSourceEvidenceStateV2
+    last_submission_kind: SubmissionKind | None
+    last_report_actor_slots: tuple[int, ...]
     controlled_global_slot: int
     pending_actions: tuple[PendingAction, ...]
     next_script_frame_index: int
-    last_transition: TransitionView | None
     show_ranges: bool
     verbose_logging: bool
+    raw_continuation_identity: RawContinuationIdentity | None = None
 
     def __post_init__(self) -> None:
+        continuation = self.raw_continuation_identity
+        if continuation is None:
+            continuation = RawContinuationIdentity(
+                config=self.config,
+                key=self.key,
+                state=self.state,
+                observation=self.observation,
+                action_mask=self.action_mask,
+            )
+            object.__setattr__(self, "raw_continuation_identity", continuation)
+        elif type(
+            continuation
+        ) is not RawContinuationIdentity or not continuation.matches(
+            config=self.config,
+            key=self.key,
+            state=self.state,
+            observation=self.observation,
+            action_mask=self.action_mask,
+        ):
+            raise ValueError(
+                "raw continuation identity must bind the exact next-step objects."
+            )
         if type(self.run_generation) is not int or self.run_generation < 0:
             msg = "run_generation must be a non-negative Python int."
             raise ValueError(msg)
+        if type(self.evaluation_context) is not EvaluationEpisodeContextV1:
+            raise TypeError(
+                "evaluation_context must be the exact EvaluationEpisodeContextV1 root."
+            )
+        if type(self.current_evaluation_frame) is not EvaluationFrameV1:
+            raise TypeError(
+                "current_evaluation_frame must be the exact EvaluationFrameV1 root."
+            )
         if (
             type(self.scenario_default_movement_scale) is not float
             or not isfinite(self.scenario_default_movement_scale)
@@ -314,7 +252,8 @@ class DebuggerSession:
             )
             raise ValueError(msg)
         _validate_slot(self.controlled_global_slot, name="controlled_global_slot")
-        if not bool(self.config.agent_profile.active_mask[self.controlled_global_slot]):
+        roster = self.evaluation_context.roster
+        if not roster[self.controlled_global_slot].configured_active:
             msg = f"controlled slot g{self.controlled_global_slot} is inactive."
             raise ValueError(msg)
         if len(self.pending_actions) != MAX_AGENT_SLOTS:
@@ -329,21 +268,100 @@ class DebuggerSession:
             if not isinstance(pending, PendingAction):
                 msg = f"pending_actions[{actor_slot}] must be a PendingAction."
                 raise TypeError(msg)
-            actor_active = bool(self.config.agent_profile.active_mask[actor_slot])
+            actor_active = roster[actor_slot].configured_active
             if not actor_active and pending != inactive_pending:
                 msg = f"inactive pending row g{actor_slot} must remain neutral."
                 raise ValueError(msg)
             target_slot = pending.selected_global_target_slot
-            if target_slot is not None and not bool(
-                self.config.agent_profile.active_mask[target_slot]
-            ):
+            if target_slot is not None and not roster[target_slot].configured_active:
                 msg = f"pending target g{target_slot} is inactive."
                 raise ValueError(msg)
         if self.next_script_frame_index < 0:
             msg = "next_script_frame_index must be non-negative."
             raise ValueError(msg)
+        episode_id = self.evaluation_context.identity.episode_id
+        current_frame = self.current_evaluation_frame
+        if current_frame.episode_id != episode_id:
+            raise ValueError("current evaluation frame must join the session episode.")
+        if current_frame.frame_index > self.evaluation_context.expected_horizon:
+            raise ValueError(
+                "current evaluation frame cannot exceed the declared horizon."
+            )
+        incoming = self.incoming_evaluation_view
+        if incoming is None:
+            if current_frame.frame_index != 0:
+                raise ValueError(
+                    "only evaluation frame zero may omit an incoming transition."
+                )
+            if self.last_submission_kind is not None or self.last_report_actor_slots:
+                raise ValueError(
+                    "initial sessions cannot retain transition submission metadata."
+                )
+        else:
+            if type(incoming) is not EvaluationTransitionViewV1:
+                raise TypeError(
+                    "incoming_evaluation_view must be an exact coherent V1 view."
+                )
+            if (
+                incoming.context != self.evaluation_context
+                or incoming.successor_frame != current_frame
+                or incoming.transition.transition_index != current_frame.frame_index - 1
+            ):
+                raise ValueError(
+                    "incoming evaluation view must enter the current session frame."
+                )
+            if self.last_submission_kind not in ("interactive", "scripted"):
+                raise ValueError(
+                    "non-initial sessions require exact submission-kind metadata."
+                )
+        if type(self.last_report_actor_slots) is not tuple:
+            raise TypeError("last_report_actor_slots must be a Python tuple.")
+        if self.last_report_actor_slots != tuple(
+            sorted(set(self.last_report_actor_slots))
+        ):
+            raise ValueError("last_report_actor_slots must be sorted and unique.")
+        for actor_slot in self.last_report_actor_slots:
+            _validate_slot(actor_slot, name="last_report_actor_slot")
+            if not self.evaluation_context.roster[actor_slot].configured_active:
+                raise ValueError("last report actor slots must be configured active.")
+        evidence_state = self.status_source_evidence_state
+        if type(evidence_state) is not StatusSourceEvidenceStateV2:
+            raise TypeError("status_source_evidence_state must be the exact V2 state.")
+        if (
+            evidence_state.episode_id != episode_id
+            or evidence_state.frame_index != current_frame.frame_index
+            or evidence_state.frame_id != current_frame.frame_id
+        ):
+            raise ValueError(
+                "status-source evidence must join the current evaluation frame."
+            )
 
     @property
     def pending_action(self) -> PendingAction:
         """Return the currently controlled actor's authoritative draft row."""
         return self.pending_actions[self.controlled_global_slot]
+
+    @property
+    def terminated(self) -> bool:
+        """Return canonical task-termination truth for the current frame."""
+        incoming = self.incoming_evaluation_view
+        return incoming is not None and incoming.transition.terminated
+
+    @property
+    def truncated(self) -> bool:
+        """Return canonical truncation truth for the current frame."""
+        incoming = self.incoming_evaluation_view
+        return incoming is not None and incoming.transition.truncated
+
+    @property
+    def reached_declared_horizon(self) -> bool:
+        """Return whether the canonical episode prefix reached its exact horizon."""
+        return (
+            self.current_evaluation_frame.frame_index
+            == self.evaluation_context.expected_horizon
+        )
+
+    @property
+    def episode_sealed(self) -> bool:
+        """Return whether another simulator transition is scientifically invalid."""
+        return self.terminated or self.truncated or self.reached_declared_horizon

@@ -12,7 +12,14 @@ import {
 
 export const DESKTOP_VIEWPORT = Object.freeze({ width: 1440, height: 900 });
 export const MINIMUM_VIEWPORT = Object.freeze({ width: 960, height: 600 });
-export const MID_IMPACT_MS = 520;
+export const ABILITY_PHASE_MS = 120;
+export const HEALTH_RESOLUTION_PHASE_MS = 210;
+export const CHARGE_PHASE_MS = 400;
+export const STATUS_PHASE_MS = 680;
+// Both recipient-safe successor deltas begin together at 520 ms. Sample just
+// inside that shared, explicitly non-causal observation phase so both are
+// visibly painted without inventing an order between them.
+export const POV_SUCCESSOR_OBSERVATION_PHASE_MS = 600;
 
 const SNAPSHOT_STYLE_PATH = fileURLToPath(
   new URL("./visual-snapshot.css", import.meta.url),
@@ -130,9 +137,10 @@ export async function advanceScriptTo(page, targetTransition) {
   for (let transition = 1; transition <= targetTransition; transition += 1) {
     await page.locator("#battlefield").focus();
     await page.keyboard.press("n");
-    await expect(page.locator("#transition-value")).toHaveText(String(transition), {
-      timeout: 120_000,
-    });
+    await expect(page.locator("#transition-value")).toHaveText(
+      new RegExp(`:transition:${transition - 1}$`),
+      { timeout: 120_000 },
+    );
     await expect(page.locator("#step-value")).toHaveText(String(transition));
     await expect(page.locator(CHOREOGRAPHY_ROOT)).toHaveCount(1);
     await expect(page.locator(CHOREOGRAPHY_ROUTE_ROOT)).toHaveCount(1);
@@ -186,7 +194,7 @@ export async function installSyntheticVisualCase(
 /**
  * @param {import("@playwright/test").Page} page
  * @param {{
- *   scenario: string,
+ *   scenario: string | null,
  *   simulatorStep: number,
  *   transitionId: number | null,
  *   view: "researcher" | "pov",
@@ -195,10 +203,18 @@ export async function installSyntheticVisualCase(
  * }} expected
  */
 export async function assertFrameIdentity(page, expected) {
-  await expect(page.locator("#scenario-select")).toHaveValue(expected.scenario);
+  const scenario = page.locator("#scenario-select");
+  if (expected.scenario === null) {
+    await expect(scenario).toHaveValue("");
+    await expect(scenario).toBeDisabled();
+  } else {
+    await expect(scenario).toHaveValue(expected.scenario);
+  }
   await expect(page.locator("#step-value")).toHaveText(String(expected.simulatorStep));
   await expect(page.locator("#transition-value")).toHaveText(
-    expected.transitionId === null ? "—" : String(expected.transitionId),
+    expected.transitionId === null
+      ? "—"
+      : new RegExp(`:transition:${expected.transitionId - 1}$`),
   );
   await expect(page.locator("#view-select")).toHaveValue(expected.view);
   await expect(page.locator("#preset-select")).toHaveValue(expected.preset);
@@ -496,11 +512,7 @@ export async function waitForStablePresentation(page) {
  * @param {number} expectedCount
  */
 export async function assertTransientNumberLayout(page, expectedCount) {
-  const labels = page.locator(
-    `${CHOREOGRAPHY_ROOT} .combat-effect--net-health[data-spatial-disposition="rendered"] .combat-net__label`,
-  );
-  await expect(labels).toHaveCount(expectedCount);
-  const violations = await page.evaluate(() => {
+  const result = await page.evaluate(() => {
     const tolerance = 0.75;
     const battlefield = document.querySelector("#battlefield");
     const mapBoundary = battlefield?.querySelector(".map-boundary");
@@ -633,8 +645,11 @@ export async function assertTransientNumberLayout(page, expectedCount) {
       };
     });
 
-    const result = [];
-    for (const record of labelRecords) {
+    const paintedLabelRecords = labelRecords.filter(
+      (record) => record.painted || record.recipientLabelPainted,
+    );
+    const violations = [];
+    for (const record of paintedLabelRecords) {
       if (
         !record.eventId ||
         !/^(0|[1-9]\d*)$/.test(record.recipientSlot ?? "") ||
@@ -657,7 +672,7 @@ export async function assertTransientNumberLayout(page, expectedCount) {
         (record.recipientRect?.width ?? 0) <= 0 ||
         (record.recipientRect?.height ?? 0) <= 0
       ) {
-        result.push({
+        violations.push({
           eventId: record.eventId,
           recipientSlot: record.recipientSlot,
           protectedSelector: "self",
@@ -667,7 +682,7 @@ export async function assertTransientNumberLayout(page, expectedCount) {
       }
       const ownTextOverlap = overlap(record.rect, record.recipientRect);
       if (ownTextOverlap.x > tolerance && ownTextOverlap.y > tolerance) {
-        result.push({
+        violations.push({
           eventId: record.eventId,
           recipientSlot: record.recipientSlot,
           protectedSelector: ".combat-net__recipient",
@@ -679,7 +694,7 @@ export async function assertTransientNumberLayout(page, expectedCount) {
         `.combat-effect--net-health[data-event-id="${CSS.escape(record.eventId)}"]`,
       );
       if (effect?.getAttribute("data-layout-collision-free") !== "true") {
-        result.push({
+        violations.push({
           eventId: record.eventId,
           recipientSlot: record.recipientSlot,
           protectedSelector: "self",
@@ -692,7 +707,7 @@ export async function assertTransientNumberLayout(page, expectedCount) {
         record.bounds.right > mapBounds.right + tolerance ||
         record.bounds.bottom > mapBounds.bottom + tolerance
       ) {
-        result.push({
+        violations.push({
           eventId: record.eventId,
           recipientSlot: record.recipientSlot,
           protectedSelector: ".map-boundary",
@@ -702,7 +717,7 @@ export async function assertTransientNumberLayout(page, expectedCount) {
       for (const protectedRect of protectedRects) {
         const depth = overlap(record.bounds, protectedRect.bounds);
         if (depth.x > tolerance && depth.y > tolerance) {
-          result.push({
+          violations.push({
             eventId: record.eventId,
             recipientSlot: record.recipientSlot,
             protectedSelector: protectedRect.selector,
@@ -718,7 +733,7 @@ export async function assertTransientNumberLayout(page, expectedCount) {
       const leader = effectGroup?.querySelector(".combat-cue__leader");
       if (leader && getComputedStyle(leader).visibility !== "hidden") {
         if (leader.closest(".combat-effect--net-health") !== effectGroup) {
-          result.push({
+          violations.push({
             eventId: record.eventId,
             recipientSlot: record.recipientSlot,
             protectedSelector: ".combat-cue__leader",
@@ -733,7 +748,7 @@ export async function assertTransientNumberLayout(page, expectedCount) {
           rawEndpoints.some((value) => value === null || value.trim() === "") ||
           !endpoints.every(Number.isFinite)
         ) {
-          result.push({
+          violations.push({
             eventId: record.eventId,
             recipientSlot: record.recipientSlot,
             protectedSelector: ".combat-cue__leader",
@@ -743,23 +758,27 @@ export async function assertTransientNumberLayout(page, expectedCount) {
       }
     }
 
-    for (let index = 0; index < labelRecords.length; index += 1) {
-      for (let other = index + 1; other < labelRecords.length; other += 1) {
-        const depth = overlap(labelRecords[index].bounds, labelRecords[other].bounds);
+    for (let index = 0; index < paintedLabelRecords.length; index += 1) {
+      for (let other = index + 1; other < paintedLabelRecords.length; other += 1) {
+        const depth = overlap(
+          paintedLabelRecords[index].bounds,
+          paintedLabelRecords[other].bounds,
+        );
         if (depth.x > tolerance && depth.y > tolerance) {
-          result.push({
-            eventId: labelRecords[index].eventId,
-            recipientSlot: labelRecords[index].recipientSlot,
-            protectedSelector: `NET ${labelRecords[other].eventId}`,
+          violations.push({
+            eventId: paintedLabelRecords[index].eventId,
+            recipientSlot: paintedLabelRecords[index].recipientSlot,
+            protectedSelector: `NET ${paintedLabelRecords[other].eventId}`,
             overlap: depth,
             reason: "NET labels overlap",
           });
         }
       }
     }
-    return result;
+    return { paintedCount: paintedLabelRecords.length, violations };
   });
-  expect(violations).toEqual([]);
+  expect(result.paintedCount).toBe(expectedCount);
+  expect(result.violations).toEqual([]);
   await expect(
     page.locator(
       `${CHOREOGRAPHY_ROOT} .combat-effect--net-health[data-spatial-disposition="rendered"][data-layout-collision-free="false"]`,
@@ -790,8 +809,6 @@ export async function assertOutcomeSuppression(
   const suppressedLifecycle = page.locator(
     `${CHOREOGRAPHY_ROOT} .combat-effect--status-lifecycle[data-spatial-disposition="suppressed-collision"]`,
   );
-  await expect(suppressedNet).toHaveCount(net);
-  await expect(suppressedLifecycle).toHaveCount(lifecycle);
   if (lifecycleIds !== null) {
     const observedIds = (
       await suppressedLifecycle.evaluateAll((groups) =>
@@ -800,6 +817,8 @@ export async function assertOutcomeSuppression(
     ).sort();
     expect(observedIds).toEqual([...lifecycleIds].sort());
   }
+  await expect(suppressedNet).toHaveCount(net);
+  await expect(suppressedLifecycle).toHaveCount(lifecycle);
   const visibleSuppressions = await page
     .locator(`${CHOREOGRAPHY_ROOT} [data-spatial-disposition="suppressed-collision"]`)
     .evaluateAll((groups) =>

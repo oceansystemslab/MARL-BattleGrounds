@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+import { normalizeLiveDebuggerFrameV2 } from "../../src/frame-normalizer.js";
 import { REPOSITORY_ROOT } from "./live-debugger.js";
 
 const execFileAsync = promisify(execFile);
@@ -28,8 +29,10 @@ export async function loadRendererFixture(name) {
       env: {
         ...process.env,
         JAX_PLATFORMS: "cpu",
+        UV_CACHE_DIR:
+          process.env.UV_CACHE_DIR ?? "/tmp/marl-battlegrounds-renderer-fixture-uv",
       },
-      maxBuffer: 4 * 1024 * 1024,
+      maxBuffer: 8 * 1024 * 1024,
     },
   );
   if (stderr.trim()) {
@@ -43,67 +46,49 @@ export async function loadRendererFixture(name) {
 }
 
 /**
- * Wrap a renderer-only fixture in the smallest explicitly synthetic browser
- * presentation envelope. No live command can install this frame.
+ * Return the exact Python-produced outbound live-frame envelope after proving
+ * that the production browser normalizer accepts it. The returned object is
+ * intentionally not decorated with presentation aliases.
+ *
+ * @param {Record<string, any>} fixture
+ * @returns {Record<string, any>}
+ */
+export function syntheticDebuggerWireFrame(fixture) {
+  const scene = fixture?.scene;
+  if (!scene || typeof scene !== "object" || Array.isArray(scene)) {
+    throw new Error("Renderer fixture is missing its scene.");
+  }
+  const liveFrame = fixture.live_frame;
+  if (!liveFrame || typeof liveFrame !== "object" || Array.isArray(liveFrame)) {
+    throw new Error("Renderer fixture is missing its validated live frame.");
+  }
+  if (
+    fixture.audience === "researcher" &&
+    (scene.schema_version !== 2 ||
+      scene.audience !== "researcher" ||
+      liveFrame.frame_kind !== "researcher_live_debugger")
+  ) {
+    throw new Error("Researcher fixture must contain exact V2 presentation roots.");
+  }
+  if (
+    fixture.audience === "agent_pov" &&
+    (scene.schema_version !== 1 ||
+      liveFrame.frame_kind !== "actor_pov_live_debugger" ||
+      liveFrame.projection?.scene?.pov_frame_id !== scene.pov_frame_id)
+  ) {
+    throw new Error("POV fixture must contain exact recipient presentation roots.");
+  }
+  normalizeLiveDebuggerFrameV2(liveFrame);
+  return liveFrame;
+}
+
+/**
+ * Pass the Python-validated production V2 fixture envelope through the same
+ * strict normalization boundary used for loopback API responses.
  *
  * @param {Record<string, any>} fixture
  * @returns {Record<string, any>}
  */
 export function syntheticDebuggerFrame(fixture) {
-  const scene = fixture.scene;
-  if (!scene || typeof scene !== "object" || Array.isArray(scene)) {
-    throw new Error("Renderer fixture is missing its scene.");
-  }
-  const name = typeof fixture.name === "string" ? fixture.name : "renderer_fixture";
-  const description =
-    typeof fixture.description === "string"
-      ? fixture.description
-      : "SYNTHETIC: renderer-only fixture.";
-  const audience = scene.audience === "agent_pov" ? "agent_pov" : "researcher";
-  const eventBatch =
-    fixture.event_batch &&
-    typeof fixture.event_batch === "object" &&
-    !Array.isArray(fixture.event_batch)
-      ? fixture.event_batch
-      : null;
-  const transitionId = eventBatch?.transition_id ?? 0;
-  return {
-    schema_version: "renderer_fixture_v1",
-    frame_kind: "synthetic_renderer_fixture",
-    session_id: `synthetic:${name}`,
-    run_generation: 0,
-    revision: 0,
-    simulator_step: eventBatch?.simulator_step ?? 0,
-    transition_id: transitionId,
-    scenario: {
-      name,
-      title: `SYNTHETIC · ${name}`,
-      description,
-      audience: "renderer_fixture",
-      frame_index: 0,
-      frame_count: 1,
-    },
-    available_scenarios: [],
-    view_mode: audience === "agent_pov" ? "pov" : "researcher",
-    preset: "analysis",
-    terminal: false,
-    scene,
-    event_batch: eventBatch,
-    hud: {
-      controlled_global_slot: scene.selection?.controlled_global_slot ?? null,
-      pending_submission_scope: "scripted_playback",
-      pending_actions: [],
-      pending_action: null,
-      latest_transition:
-        eventBatch === null
-          ? null
-          : {
-              label: "SYNTHETIC EVENT BATCH",
-              transition_id: transitionId,
-              submission_kind: "renderer_fixture",
-              actors: [],
-            },
-      diagnostics: [],
-    },
-  };
+  return normalizeLiveDebuggerFrameV2(syntheticDebuggerWireFrame(fixture));
 }

@@ -20,7 +20,10 @@ from marl_battlegrounds.evaluation.metrics import (
     EvaluationTransitionViewV1,
     build_evaluation_observer_v1,
 )
-from marl_battlegrounds.evaluation.pov import export_actor_pov_replay_v1
+from marl_battlegrounds.evaluation.pov import (
+    build_actor_pov_current_slice_v1,
+    export_actor_pov_replay_v1,
+)
 from marl_battlegrounds.evaluation.replay import (
     ReplayArtifactV1,
     ReplayBundleV1,
@@ -35,8 +38,13 @@ from marl_battlegrounds.rendering.evaluation_adapter import (
     EvaluationScenePresentationStateV1,
     SharedObsBaseSensorFrameV1,
     SharedObsSourceMaterialProjectionV1,
+    advance_status_source_evidence_v2,
     build_evaluation_battlefield_scene_v2,
+    build_researcher_analyzer_projection_v2,
     build_shared_obs_source_material_projection_v1,
+    build_status_source_evidence_index_v2,
+    build_visual_event_batch_v2,
+    initialize_status_source_evidence_v2,
 )
 from marl_battlegrounds.rendering.evaluation_wire_features import (
     AGENT_FEATURE_ACTIVE_V1,
@@ -55,7 +63,12 @@ from marl_battlegrounds.rendering.pov_scene import (
     build_actor_pov_analyzer_projection_v1,
     build_actor_pov_projection_index_v1,
 )
-from marl_battlegrounds.rendering.scene import BattlefieldSceneV2
+from marl_battlegrounds.rendering.scene import (
+    BattlefieldSceneV2,
+    ResearcherAnalyzerProjectionV2,
+    StatusSourceEvidenceStateV2,
+    VisualEventBatchV2,
+)
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
@@ -171,6 +184,24 @@ def test_researcher_scene_v2_projects_only_canonical_context_and_frame_truth(
         "warrior_damage_mitigation",
     )
     frame = trajectory.frames[1]
+    catalog = trajectory.context.static_mechanics_catalog
+    visible_by_slot = dict(
+        zip(
+            (
+                *catalog.global_slot_by_actor_and_ally_observation_row[0],
+                *catalog.global_slot_by_actor_and_enemy_observation_row[0],
+            ),
+            (
+                *frame.base_observation.ally_visibility_mask[0],
+                *frame.base_observation.enemy_visibility_mask[0],
+            ),
+            strict=True,
+        )
+    )
+    assert tuple(
+        (row.observer_global_slot, row.candidate_global_slot, row.visible)
+        for row in scene.observer_visibility
+    ) == tuple((0, slot, visible_by_slot[slot]) for slot in (0, 1, 2, 5, 6))
     first_agent = scene.agents[0]
     self_row = frame.base_observation.self_features[0]
     assert (
@@ -236,6 +267,77 @@ def test_scene_v2_rejects_contradictory_nested_identity(
     with pytest.raises(ValueError, match="at least 1"):
         replace(scene.class_mechanics[0], class_id=0)
 
+    selected_scene = build_evaluation_battlefield_scene_v2(
+        replay.header.context,
+        replay.frames[0],
+        presentation=EvaluationScenePresentationStateV1(
+            controlled_global_slot=0,
+            selected_global_slot=5,
+        ),
+    )
+    with pytest.raises(ValueError, match="ordered scene roster exactly"):
+        replace(
+            selected_scene,
+            observer_visibility=selected_scene.observer_visibility[:-1],
+        )
+    self_visibility = selected_scene.observer_visibility[0]
+    assert self_visibility.candidate_global_slot == 0
+    dead_observer_compatible = replace(
+        selected_scene,
+        observer_visibility=tuple(
+            replace(row, visible=False) for row in selected_scene.observer_visibility
+        ),
+    )
+    assert not any(row.visible for row in dead_observer_compatible.observer_visibility)
+    with pytest.raises(ValueError, match="controlled researcher"):
+        replace(
+            selected_scene,
+            observer_visibility=(
+                replace(self_visibility, observer_global_slot=5),
+                *selected_scene.observer_visibility[1:],
+            ),
+        )
+
+
+def test_researcher_visibility_uses_team_b_axes_and_omits_inactive_padding(
+    replay_scene_case: _ReplaySceneCase,
+) -> None:
+    trajectory = replay_scene_case.trajectory
+    frame = trajectory.frames[0]
+    controlled = 5
+    scene = build_evaluation_battlefield_scene_v2(
+        trajectory.context,
+        frame,
+        presentation=EvaluationScenePresentationStateV1(
+            controlled_global_slot=controlled,
+            selected_global_slot=0,
+        ),
+    )
+    catalog = trajectory.context.static_mechanics_catalog
+    expected_by_slot = dict(
+        zip(
+            (
+                *catalog.global_slot_by_actor_and_ally_observation_row[controlled],
+                *catalog.global_slot_by_actor_and_enemy_observation_row[controlled],
+            ),
+            (
+                *frame.base_observation.ally_visibility_mask[controlled],
+                *frame.base_observation.enemy_visibility_mask[controlled],
+            ),
+            strict=True,
+        )
+    )
+    active_slots = tuple(
+        row.global_slot for row in trajectory.context.roster if row.configured_active
+    )
+    assert tuple(
+        (row.observer_global_slot, row.candidate_global_slot, row.visible)
+        for row in scene.observer_visibility
+    ) == tuple(
+        (controlled, candidate, expected_by_slot[candidate])
+        for candidate in active_slots
+    )
+
 
 def test_loaded_and_direct_records_produce_equal_static_scene(
     replay_scene_case: _ReplaySceneCase,
@@ -258,11 +360,15 @@ def test_loaded_and_direct_records_produce_equal_static_scene(
     )
     assert loaded_scene == direct_scene
 
-    rendered: list[BattlefieldSceneV2] = []
+    rendered: list[tuple[BattlefieldSceneV2, VisualEventBatchV2 | None]] = []
     pyplot = SimpleNamespace(show=lambda: None)
 
-    def capture_render(scene: BattlefieldSceneV2) -> object:
-        rendered.append(scene)
+    def capture_render(
+        scene: BattlefieldSceneV2,
+        *,
+        event_batch: VisualEventBatchV2 | None,
+    ) -> object:
+        rendered.append((scene, event_batch))
         return object()
 
     monkeypatch.setattr(static_renderer, "_load_pyplot", lambda: pyplot)
@@ -279,7 +385,81 @@ def test_loaded_and_direct_records_produce_equal_static_scene(
         )
         == 0
     )
-    assert rendered == [loaded_scene]
+    incoming_view = _incoming_view(loaded, frame_index)
+    assert incoming_view is not None
+    expected_events = build_visual_event_batch_v2(incoming_view)
+    assert rendered == [(loaded_scene, expected_events)]
+
+
+def test_loaded_and_live_records_produce_equal_researcher_projection(
+    replay_scene_case: _ReplaySceneCase,
+    tmp_path: Path,
+) -> None:
+    replay_path = tmp_path / "researcher-parity.marlbg-replay.json"
+    save_replay_bundle_v1(replay_scene_case.bundle, replay_path)
+    direct = replay_scene_case.bundle.replay
+    loaded = load_replay_artifact_v1(replay_path)
+    frame_index = 1
+    presentation = EvaluationScenePresentationStateV1(
+        controlled_global_slot=0,
+        selected_global_slot=5,
+        show_ranges=True,
+    )
+    direct_status = build_status_source_evidence_index_v2(
+        direct.header.context,
+        direct.frames,
+        direct.transitions,
+    )
+    loaded_status = build_status_source_evidence_index_v2(
+        loaded.header.context,
+        loaded.frames,
+        loaded.transitions,
+    )
+
+    live_projection = build_researcher_analyzer_projection_v2(
+        direct.header.context,
+        direct.frames[frame_index],
+        transition_view=_incoming_view(direct, frame_index),
+        presentation=presentation,
+        status_source_evidence_state=direct_status.state_for_frame(frame_index),
+    )
+    loaded_projection = build_researcher_analyzer_projection_v2(
+        loaded.header.context,
+        loaded.frames[frame_index],
+        transition_view=_incoming_view(loaded, frame_index),
+        presentation=presentation,
+        status_source_evidence_state=loaded_status.state_for_frame(frame_index),
+    )
+
+    assert loaded_projection == live_projection
+
+
+def test_loaded_pov_projection_equals_live_current_slice_projection(
+    replay_scene_case: _ReplaySceneCase,
+    tmp_path: Path,
+) -> None:
+    replay_path = tmp_path / "pov-parity.marlbg-replay.json"
+    save_replay_bundle_v1(replay_scene_case.bundle, replay_path)
+    direct = replay_scene_case.bundle.replay
+    loaded = load_replay_artifact_v1(replay_path)
+    frame_index = 1
+    incoming = _incoming_view(direct, frame_index)
+    assert incoming is not None
+    live_slice = build_actor_pov_current_slice_v1(
+        direct.header.context,
+        direct.frames[frame_index],
+        global_slot=5,
+        incoming_transition_view=incoming,
+    )
+    live_projection = build_actor_pov_analyzer_projection_v1(live_slice)
+
+    loaded_pov = export_actor_pov_replay_v1(loaded, global_slot=5)
+    loaded_projection = build_actor_pov_analyzer_projection_v1(
+        build_actor_pov_projection_index_v1(loaded_pov.content),
+        frame_index=frame_index,
+    )
+
+    assert loaded_projection == live_projection
 
 
 def test_static_replay_validates_before_loading_matplotlib(
@@ -521,7 +701,7 @@ print('isolated')
     assert result.stdout.strip() == "isolated"
 
 
-def test_cp63_rendering_surface_exports_only_stabilized_projection_seams() -> None:
+def test_rendering_surface_exports_stabilized_cp7_projection_seams() -> None:
     import marl_battlegrounds.rendering as rendering
 
     assert (
@@ -537,5 +717,22 @@ def test_cp63_rendering_surface_exports_only_stabilized_projection_seams() -> No
         rendering.SharedObsSourceMaterialProjectionV1
         is SharedObsSourceMaterialProjectionV1
     )
-    assert not hasattr(rendering, "ResearcherAnalyzerProjectionV2")
-    assert not hasattr(rendering, "VisualEventBatchV2")
+    assert rendering.ResearcherAnalyzerProjectionV2 is ResearcherAnalyzerProjectionV2
+    assert rendering.StatusSourceEvidenceStateV2 is StatusSourceEvidenceStateV2
+    assert rendering.VisualEventBatchV2 is VisualEventBatchV2
+    assert (
+        rendering.advance_status_source_evidence_v2 is advance_status_source_evidence_v2
+    )
+    assert (
+        rendering.build_researcher_analyzer_projection_v2
+        is build_researcher_analyzer_projection_v2
+    )
+    assert (
+        rendering.build_status_source_evidence_index_v2
+        is build_status_source_evidence_index_v2
+    )
+    assert rendering.build_visual_event_batch_v2 is build_visual_event_batch_v2
+    assert (
+        rendering.initialize_status_source_evidence_v2
+        is initialize_status_source_evidence_v2
+    )

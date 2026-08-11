@@ -340,18 +340,30 @@ export function explainLegality(rawLegality, lane) {
  */
 export function explainPendingRoute(rawRoute) {
   const route = isRecord(rawRoute) ? rawRoute : {};
-  const source = integer(route.source_global_slot);
-  const target = integer(route.target_global_slot);
+  const source =
+    typeof route.source_public_agent_id === "string"
+      ? route.source_public_agent_id
+      : null;
+  const target =
+    typeof route.target_public_agent_id === "string"
+      ? route.target_public_agent_id
+      : null;
   const lane = integer(route.lane);
   return descriptor(
     "pending-route",
     `pending:${source ?? "unknown"}:${target ?? "unknown"}:${lane ?? "unknown"}`,
-    "Pending action route",
+    lane === 0
+      ? "Basic Action Route"
+      : lane === 1
+        ? "Ultimate Action Route"
+        : "Action Route",
     [
-      source === null ? "Source unavailable" : `Source id_${source}`,
-      target === null ? "Target unavailable" : `Target id_${target}`,
+      source === null ? "Source unavailable" : `Source Agent ID ${source}`,
+      target === null ? "Target unavailable" : `Target Agent ID ${target}`,
       lane === 0 ? "Basic lane" : lane === 1 ? "Ultimate lane" : "Lane unavailable",
-      `Exact staged pair legal ${route.legal === true}`,
+      typeof route.legal === "boolean"
+        ? `Exact staged pair legal ${route.legal}`
+        : "Staged pair legality unavailable",
     ],
     "pointer",
   );

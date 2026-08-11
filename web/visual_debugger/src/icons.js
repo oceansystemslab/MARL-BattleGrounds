@@ -188,6 +188,10 @@ const ICONS = Object.freeze({
     primitive("rect", { x: 4, y: 4, width: 16, height: 16, rx: 2 }),
     primitive("path", { d: "m5 19 5-7-2-2 5-6-1 7 3 2-5 7 1-6Z" }),
   ]),
+  "lifecycle-death-clear": icon("lifecycle-death-clear", [
+    primitive("path", { d: "M5 5 19 19M19 5 5 19" }),
+    primitive("path", { d: "M3 12h18" }),
+  ]),
   "lifecycle-ended": icon("lifecycle-ended", [
     primitive("circle", { cx: 12, cy: 12, r: 8 }),
     primitive("path", { d: "M8.5 8.5h.1M15.5 8.5h.1M9 16c1.8-1.3 4.2-1.3 6 0" }),

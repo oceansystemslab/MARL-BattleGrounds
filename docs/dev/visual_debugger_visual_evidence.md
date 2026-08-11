@@ -74,7 +74,7 @@ isolation.
 | Aura multiplier values do not overlap icons | Modifier-cell geometry assertions | [Maximum status stack][max-status], [crowded minimum viewport][crowded] |
 | Repeated/focus damage and coordinated healing remain readable | Exact activation, route, recipient-NET, and collision assertions | [Focus fire and healing][focus-fire], [moving focus at 960×600][moving-focus] |
 | Close, reciprocal, crossing, and Charge routes keep source-to-recipient direction | Route tangent/unit tests and scenario endpoint assertions | [Moving Basic crossfire][moving-basic], [Charge convergence][charge-convergence] |
-| Trap damage impact, application, exact break, break plus reapplication, ambiguous end, and expiry remain distinct | Activation-impact grammar, lifecycle classification, and event-ID assertions | [Applied][trap-applied], [exact break][trap-break], [damage plus reapplication][trap-reapplication], [ambiguous end and expiry][trap-end] |
+| Trap damage impact, application, exact break, break plus reapplication, and age-to-zero remain distinct | Activation-impact grammar, lifecycle classification, and event-ID assertions | [Applied][trap-applied], [exact break][trap-break], [damage plus reapplication][trap-reapplication], [age-to-zero][trap-end] |
 | One tooltip wins overlaps, clamps to the viewport, and exposes full neutral overflow | Tooltip arbitration, content, leave, focus, edge, and POV tests | [Agent over broad fields][agent-tooltip], [edge-clamped overflow][overflow-tooltip] |
 | Agent POV omits hidden entities and route endpoints server-side | Python payload projection tests and browser DOM absence assertions | [Redacted POV fixture][pov] |
 | Movement scale is exact and professionally integrated | Protocol/service zero-step reset tests and slider E2E | [`0.10` override][scale-010], [authored default restored][scale-default] |
@@ -107,7 +107,7 @@ isolation.
   [application][trap-applied],
   [exact break][trap-break],
   [break plus reapplication][trap-reapplication], and
-  [ambiguous ending beside natural expiry][trap-end].
+  [exact age-to-zero][trap-end].
 
 ### Synthetic presentation fixtures
 
@@ -148,32 +148,32 @@ Automated checks and Codex review do not substitute for this explicit human
 acceptance.
 
 [agent-tooltip]: ../../web/visual_debugger/e2e/tooltip.spec.js-snapshots/agent-tooltip-overlapping-fields-960x600-linux.png
-[charge-convergence]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/charge-convergence-t1-mid-impact-1440x900-linux.png
+[charge-convergence]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/charge-convergence-t1-charge-phase-1440x900-linux.png
 [console-desktop]: ../../web/visual_debugger/e2e/control-parity.spec.js-snapshots/command-console-1440x900-linux.png
 [console-minimum]: ../../web/visual_debugger/e2e/control-parity.spec.js-snapshots/command-console-960x600-linux.png
-[crowded]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/crowded-teamfight-synthetic-mid-impact-960x600-linux.png
+[crowded]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/crowded-teamfight-synthetic-health-resolution-phase-960x600-linux.png
 [durable-controls]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/durable-control-vocabulary-synthetic-settled-1440x900-linux.png
-[focus-fire]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/team-focus-crossfire-t3-mid-impact-1440x900-linux.png
+[focus-fire]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/team-focus-crossfire-t3-health-resolution-phase-1440x900-linux.png
 [joint-turn]: ../../web/visual_debugger/e2e/control-parity.spec.js-snapshots/joint-turn-ten-agent-pending-inventory-1440x1600-linux.png
 [max-status]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/max-status-stack-t1-settled-1440x900-linux.png
-[moving-basic]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/moving-basic-crossfire-t1-mid-impact-1440x900-linux.png
-[moving-focus]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/moving-focus-crossfire-t1-mid-impact-960x600-linux.png
+[moving-basic]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/moving-basic-crossfire-t1-health-resolution-phase-1440x900-linux.png
+[moving-focus]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/moving-focus-crossfire-t1-health-resolution-phase-960x600-linux.png
 [motion-off]: ../../web/visual_debugger/e2e/combat-choreography.spec.js-snapshots/motion-off-static-route-batch-1440x900-linux.png
 [number-format]: ../../web/visual_debugger/e2e/renderer-fixture.spec.js-snapshots/human-number-formatting-synthetic-1440x900-linux.png
 [overflow-tooltip]: ../../web/visual_debugger/e2e/tooltip.spec.js-snapshots/neutral-status-overflow-tooltip-edge-clamped-960x600-linux.png
-[pov]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/pov-redaction-synthetic-debug-mid-impact-1440x900-linux.png
+[pov]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/pov-redaction-synthetic-debug-successor-observation-phase-1440x900-linux.png
 [required-fallback]: ../../web/visual_debugger/e2e/renderer-fixture.spec.js-snapshots/required-dock-fallback-focus-synthetic-1440x900-linux.png
-[reduced-motion]: ../../web/visual_debugger/e2e/combat-choreography.spec.js-snapshots/reduced-motion-mixed-net-1440x900-linux.png
+[reduced-motion]: ../../web/visual_debugger/e2e/combat-choreography.spec.js-snapshots/reduced-motion-mixed-net-health-phase-1440x900-linux.png
 [scale-010]: ../../web/visual_debugger/e2e/control-parity.spec.js-snapshots/movement-scale-010-override-960x600-linux.png
 [scale-default]: ../../web/visual_debugger/e2e/control-parity.spec.js-snapshots/movement-scale-default-restored-960x600-linux.png
 [static-vocabulary]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/static-renderer-visual-vocabulary-1440x900.png
 [trap-applied]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/trap-lifecycle-t1-applied-1440x900-linux.png
 [trap-break]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/trap-lifecycle-t2-broken-1440x900-linux.png
-[trap-end]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/trap-lifecycle-t5-ambiguous-and-expired-1440x900-linux.png
+[trap-end]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/trap-lifecycle-t5-aged-to-zero-1440x900-linux.png
 [trap-reapplication]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/trap-lifecycle-t4-broken-and-reapplied-1440x900-linux.png
-[ultimate-hunter]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/mirrored-ultimates-hunter-trap-t3-mid-impact-1440x900-linux.png
-[ultimate-mage]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/mirrored-ultimates-mage-burst-t1-mid-impact-1440x900-linux.png
-[ultimate-priest]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/mirrored-ultimates-holy-word-t5-mid-impact-1440x900-linux.png
-[ultimate-rogue]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/mirrored-ultimates-rogue-poison-t4-mid-impact-1440x900-linux.png
-[ultimate-warrior]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/mirrored-ultimates-warrior-charge-t2-mid-impact-1440x900-linux.png
-[vocabulary]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/visual-vocabulary-synthetic-mid-impact-1440x900-linux.png
+[ultimate-hunter]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/mirrored-ultimates-hunter-trap-t3-status-phase-1440x900-linux.png
+[ultimate-mage]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/mirrored-ultimates-mage-burst-t1-ability-phase-1440x900-linux.png
+[ultimate-priest]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/mirrored-ultimates-holy-word-t5-poison-expiry-phase-1440x900-linux.png
+[ultimate-rogue]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/mirrored-ultimates-rogue-poison-t4-status-phase-1440x900-linux.png
+[ultimate-warrior]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/mirrored-ultimates-warrior-charge-t2-charge-phase-1440x900-linux.png
+[vocabulary]: ../../web/visual_debugger/e2e/visual-regression.spec.js-snapshots/visual-vocabulary-synthetic-ability-phase-1440x900-linux.png

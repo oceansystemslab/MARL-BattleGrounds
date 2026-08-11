@@ -10,8 +10,16 @@ import {
 import { CombatChoreographer, ConsumedTransitionLedger } from "./choreography.js";
 import { SvgChoreographyPainter } from "./choreography-painter.js";
 import { isSubmissionCommand } from "./choreography-plan.js";
-import { bindBattlefieldControls, keyboardCommand } from "./controls.js";
+import {
+  bindBattlefieldControls,
+  keyboardCommand,
+  targetSelectionCommand,
+} from "./controls.js";
 import { formatDisplayNumber } from "./display.js";
+import {
+  liveDebuggerFrameIsScripted,
+  liveDebuggerScenarioControlsAvailable,
+} from "./frame-normalizer.js";
 import { DebuggerPanels } from "./panels.js";
 import { BattlefieldRenderer } from "./scene.js";
 import { createTooltipController, registerTooltipOwner } from "./tooltip.js";
@@ -32,6 +40,7 @@ const elements = {
   connectionStatus: requiredElement("connection-status"),
   audienceBadge: requiredElement("audience-badge"),
   terminalBadge: requiredElement("terminal-badge"),
+  scenarioControl: requiredElement("scenario-control"),
   scenarioSelect: requiredElement("scenario-select"),
   viewSelect: requiredElement("view-select"),
   presetSelect: requiredElement("preset-select"),
@@ -193,11 +202,7 @@ function frameScene(frame) {
   if (!isRecord(frame)) {
     return null;
   }
-  return isRecord(frame.scene)
-    ? frame.scene
-    : isRecord(frame.battlefield_scene)
-      ? frame.battlefield_scene
-      : null;
+  return isRecord(frame.scene) ? frame.scene : null;
 }
 
 /**
@@ -243,7 +248,12 @@ function isTerminal(frame) {
     return record.terminal;
   }
   if (isRecord(record.terminal)) {
-    return Boolean(record.terminal.terminated || record.terminal.truncated);
+    return Boolean(
+      record.terminal.is_sealed ||
+        record.terminal.terminated ||
+        record.terminal.truncated ||
+        record.terminal.reached_declared_horizon,
+    );
   }
   return Boolean(record.terminated || record.truncated);
 }
@@ -298,7 +308,7 @@ function modeAvailability(command, frame) {
     return { allowed: true, notice: null };
   }
   const scenario = scenarioRecord(frame);
-  const scripted = scenario.mode === "scripted";
+  const scripted = liveDebuggerFrameIsScripted(frame);
   if (isTerminal(frame)) {
     return {
       allowed: false,
@@ -492,7 +502,17 @@ function renderSessionToolbar() {
     (Number.isFinite(movementScale) && Math.abs(movementScale - 0.1) < 1e-9);
   elements.movementScaleDefaultButton.disabled =
     movementScaleDisabled || scenario.movement_scale_overridden !== true;
-  elements.scenarioSelect.disabled = disabled;
+  const scenarioControlsAvailable =
+    !state.frame || liveDebuggerScenarioControlsAvailable(state.frame);
+  elements.scenarioControl.toggleAttribute("hidden", !scenarioControlsAvailable);
+  elements.scenarioSelect.disabled = disabled || !scenarioControlsAvailable;
+  elements.scenarioSelect.setAttribute(
+    "aria-disabled",
+    String(disabled || !scenarioControlsAvailable),
+  );
+  elements.scenarioSelect.title = scenarioControlsAvailable
+    ? "Choose a registered live researcher scenario."
+    : "Scenario controls are unavailable in recipient POV.";
   elements.viewSelect.disabled = disabled;
   elements.presetSelect.disabled = disabled;
   elements.reconnectButton.disabled = state.busy || state.shuttingDown;
@@ -542,10 +562,16 @@ function setAuthoritativeAvailability(button, available, explanation) {
  */
 function candidateLegality(hud, targetAction) {
   return (
-    asArray(hud.candidate_legalities).find(
-      (candidate) =>
-        isRecord(candidate) && Number(candidate.target_action) === targetAction,
-    ) ?? null
+    asArray(hud.candidate_legalities).find((candidate) => {
+      if (!isRecord(candidate)) {
+        return false;
+      }
+      const candidateTarget = isRecord(candidate.target) ? candidate.target : null;
+      return (
+        Number(candidateTarget?.target_action ?? candidate.target_action) ===
+        targetAction
+      );
+    }) ?? null
   );
 }
 
@@ -555,17 +581,26 @@ function candidateLegality(hud, targetAction) {
  *
  * @param {Record<string, any>} hud
  * @param {Record<string, any>} pending
+ * @param {boolean} pov
  */
-function renderCommandTargets(hud, pending) {
+function renderCommandTargets(hud, pending, pov) {
   const candidates = asArray(hud.candidate_legalities).filter(isRecord);
-  const selectedSlot = isRecord(pending.target) ? pending.target.global_slot : null;
+  const pendingTarget = isRecord(pending.target) ? pending.target : {};
+  const selectedSlot = pendingTarget.global_slot;
+  const selectedTargetAction = Number(
+    pendingTarget.target_action ?? pending.target_action,
+  );
   const fragment = document.createDocumentFragment();
   for (const candidate of candidates) {
     const target = isRecord(candidate.target) ? candidate.target : {};
     const option = document.createElement("option");
     const basic = candidate.basic_available === true ? "B ✓" : "B ×";
     const ultimate = candidate.ultimate_available === true ? "U ✓" : "U ×";
-    if (target.disclosure === "public" && Number.isInteger(target.global_slot)) {
+    if (pov && Number.isInteger(target.target_action)) {
+      option.value = `pov-target-action:${target.target_action}`;
+      option.textContent = `${target.public_agent_id ?? "No target"} · action ${target.target_action} · ${basic} · ${ultimate}`;
+      option.selected = Number(target.target_action) === selectedTargetAction;
+    } else if (target.disclosure === "public" && Number.isInteger(target.global_slot)) {
       option.value = String(target.global_slot);
       option.textContent = `id_${target.global_slot} · ${basic} · ${ultimate}`;
       option.selected = Number(target.global_slot) === Number(selectedSlot);
@@ -589,17 +624,24 @@ function renderCommandTargets(hud, pending) {
 
 /**
  * @param {Record<string, any>} hud
+ * @param {Record<string, any> | null} frame
  */
-function renderDraftState(hud) {
+function renderDraftState(hud, frame) {
   const pending = isRecord(hud.pending_action) ? hud.pending_action : {};
+  const pov = frame?.frame_kind === "actor_pov_live_debugger";
   const controlledSlot = Number(hud.controlled_global_slot);
-  elements.commandControlledActor.textContent = Number.isInteger(controlledSlot)
-    ? `Actor · id_${controlledSlot}`
+  const controlledIdentity = pov
+    ? hud.controlled_public_agent_id
+    : Number.isInteger(controlledSlot)
+      ? `id_${controlledSlot}`
+      : null;
+  elements.commandControlledActor.textContent = controlledIdentity
+    ? `Actor · ${controlledIdentity}`
     : "Actor · unavailable";
   elements.commandControlledActor.setAttribute(
     "aria-label",
-    Number.isInteger(controlledSlot)
-      ? `Controlled actor id_${controlledSlot}`
+    controlledIdentity
+      ? `Controlled actor ${controlledIdentity}`
       : "Controlled actor unavailable",
   );
   elements.commandControlledActor.dataset.controlledSlot = Number.isInteger(
@@ -629,10 +671,10 @@ function renderDraftState(hud) {
     );
   }
 
-  renderCommandTargets(hud, pending);
-  const targetAction = Number.isInteger(pending.target_action)
-    ? Number(pending.target_action)
-    : 0;
+  renderCommandTargets(hud, pending, pov);
+  const pendingTarget = isRecord(pending.target) ? pending.target : {};
+  const rawTargetAction = pendingTarget.target_action ?? pending.target_action;
+  const targetAction = Number.isInteger(rawTargetAction) ? Number(rawTargetAction) : 0;
   const candidate = candidateLegality(hud, targetAction);
   const basicAvailable = candidate?.basic_available === true;
   const ultimateAvailable = candidate?.ultimate_available === true;
@@ -671,9 +713,9 @@ function renderCommandAvailability() {
     state.offline;
   const presentation = choreographer.snapshot();
   const scenario = scenarioRecord(state.frame);
-  const scripted = scenario.mode === "scripted";
+  const scripted = liveDebuggerFrameIsScripted(state.frame);
   const hud = isRecord(state.frame?.hud) ? state.frame.hud : {};
-  renderDraftState(hud);
+  renderDraftState(hud, state.frame);
   elements.commandTargetSelect.disabled =
     disabled || scripted || isTerminal(state.frame);
   elements.submitTurnButton.textContent = scripted
@@ -1127,20 +1169,13 @@ elements.movementScaleDefaultButton.addEventListener("click", () => {
 });
 
 elements.commandTargetSelect.addEventListener("change", () => {
-  const value = elements.commandTargetSelect.value;
-  if (value === "") {
-    dispatchCommand(keyboardCommand("Escape"));
-    return;
-  }
-  const globalSlot = Number(value);
-  if (!Number.isInteger(globalSlot)) {
-    return;
-  }
-  dispatchCommand({
-    command_type: "roster_selection",
-    role: "target",
-    global_slot: globalSlot,
+  const command = targetSelectionCommand(elements.commandTargetSelect.value, {
+    actorPov: state.frame?.frame_kind === "actor_pov_live_debugger",
   });
+  if (!command) {
+    return;
+  }
+  dispatchCommand(command);
 });
 
 elements.exitButton.addEventListener("click", () => {

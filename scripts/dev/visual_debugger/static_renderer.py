@@ -7,6 +7,9 @@ from typing import TYPE_CHECKING, Protocol, cast
 from marl_battlegrounds.rendering import SceneRenderOptions, render_scene_geometry
 
 if TYPE_CHECKING:
+    from scripts.dev.visual_debugger.evaluation_bridge import (
+        DebuggerEvaluationLaunchSpecificationV1,
+    )
     from scripts.dev.visual_debugger.scenarios import DebuggerScenario
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -54,28 +57,42 @@ def run_static_renderer(
     *,
     scenario: DebuggerScenario,
     seed: int,
+    evaluation_launch_specification: DebuggerEvaluationLaunchSpecificationV1,
     controlled_global_slot: int | None,
     verbose: bool,
     show_ranges: bool,
 ) -> int:
     """Render one reset scene without callbacks, a server, or a transition."""
-    from scripts.dev.visual_debugger.control import create_session
-    from scripts.dev.visual_debugger.scene_adapter import (
-        build_battlefield_scene,
-        build_visual_event_batch,
+    from marl_battlegrounds.rendering.evaluation_adapter import (
+        EvaluationScenePresentationStateV1,
+        build_researcher_analyzer_projection_v2,
     )
+    from scripts.dev.visual_debugger.control import create_session
 
     pyplot = _load_pyplot()
     session = create_session(
         scenario,
         seed=seed,
+        evaluation_launch_specification=evaluation_launch_specification,
         controlled_global_slot=controlled_global_slot,
         show_ranges=show_ranges,
         verbose_logging=verbose,
     )
-    scene = build_battlefield_scene(session, audience="researcher")
-    event_batch = build_visual_event_batch(session, audience="researcher")
-    render_scene_geometry(scene, event_batch=event_batch)
+    projection = build_researcher_analyzer_projection_v2(
+        session.evaluation_context,
+        session.current_evaluation_frame,
+        transition_view=session.incoming_evaluation_view,
+        presentation=EvaluationScenePresentationStateV1(
+            controlled_global_slot=session.controlled_global_slot,
+            selected_global_slot=session.controlled_global_slot,
+            show_ranges=show_ranges,
+        ),
+        status_source_evidence_state=session.status_source_evidence_state,
+    )
+    render_scene_geometry(
+        projection.scene,
+        event_batch=projection.incoming_events,
+    )
     pyplot.show()
     return 0
 
@@ -94,7 +111,8 @@ def run_static_replay_renderer(
     )
     from marl_battlegrounds.rendering.evaluation_adapter import (
         EvaluationScenePresentationStateV1,
-        build_evaluation_battlefield_scene_v2,
+        build_researcher_analyzer_projection_v2,
+        build_status_source_evidence_index_v2,
     )
 
     if type(frame_index) is not int:
@@ -118,14 +136,23 @@ def run_static_replay_renderer(
             successor_frame=frame,
         )
     )
-    scene = build_evaluation_battlefield_scene_v2(
+    status_index = build_status_source_evidence_index_v2(
+        replay.header.context,
+        replay.frames,
+        replay.transitions,
+    )
+    projection = build_researcher_analyzer_projection_v2(
         replay.header.context,
         frame,
         transition_view=transition_view,
         presentation=EvaluationScenePresentationStateV1(show_ranges=show_ranges),
+        status_source_evidence_state=status_index.state_for_frame(frame_index),
     )
     pyplot = _load_pyplot()
-    render_scene_geometry(scene)
+    render_scene_geometry(
+        projection.scene,
+        event_batch=projection.incoming_events,
+    )
     pyplot.show()
     return 0
 
@@ -134,9 +161,17 @@ def export_static_visual_vocabulary(
     output_path: Path = STATIC_VISUAL_VOCABULARY_PATH,
 ) -> Path:
     """Export the canonical static vocabulary evidence at exactly 1440x900."""
+    from marl_battlegrounds.rendering.scene import BattlefieldSceneV2
     from scripts.dev.visual_debugger.renderer_fixtures import get_renderer_fixture
 
     fixture = get_renderer_fixture("visual_vocabulary")
+    if (
+        fixture.audience != "researcher"
+        or type(fixture.scene) is not BattlefieldSceneV2
+    ):
+        raise ValueError(
+            "the static visual vocabulary must remain a researcher V2 fixture"
+        )
     result = render_scene_geometry(
         fixture.scene,
         event_batch=fixture.event_batch,

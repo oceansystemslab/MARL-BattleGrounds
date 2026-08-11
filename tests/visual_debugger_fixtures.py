@@ -8,6 +8,10 @@ from scripts.dev.visual_debugger.control import (
     build_scripted_joint_action,
     submit_joint_action,
 )
+from scripts.dev.visual_debugger.evaluation_bridge import (
+    DebuggerEvaluationLaunchSpecificationV1,
+    build_debugger_evaluation_launch_specification_v1,
+)
 from scripts.dev.visual_debugger.model import (
     ActorCommand,
     DebuggerScenario,
@@ -30,6 +34,25 @@ from marl_battlegrounds.core.types import (
     OBSTACLE_FEATURES,
     EnvConfig,
 )
+from marl_battlegrounds.evaluation.catalog import build_code_revision_v1
+
+_TEST_DIGEST = "a" * 64
+
+
+def debugger_test_launch_specification(
+    seed: int = 0,
+) -> DebuggerEvaluationLaunchSpecificationV1:
+    """Return stable path-free provenance for focused debugger host tests."""
+    return build_debugger_evaluation_launch_specification_v1(
+        root_seed=seed,
+        code_revision=build_code_revision_v1(
+            package_version="0.1.0",
+            commit_sha="a" * 40,
+            source_tree_digest=_TEST_DIGEST,
+            is_dirty=False,
+            dirty_patch_digest=None,
+        ),
+    )
 
 
 def _spawn_pad_positions(map_width: float, map_height: float) -> jax.Array:
@@ -117,7 +140,7 @@ def submit_fixture_frame(
     frame: ScenarioFrame,
 ) -> DebuggerSession:
     """Submit one test-only frame without consulting the user scenario registry."""
-    action = build_scripted_joint_action(session.config, frame)
+    action = build_scripted_joint_action(session.evaluation_context, frame)
     report_slots: Sequence[int] = sorted(
         command.actor_global_slot for command in frame.commands
     )

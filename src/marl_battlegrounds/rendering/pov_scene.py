@@ -6,8 +6,12 @@ from typing import Literal, cast
 
 from marl_battlegrounds.evaluation.pov import (
     ActorPovActionMaskV1,
+    ActorPovAxisMappingV1,
+    ActorPovCurrentSliceV1,
+    ActorPovFrameV1,
     ActorPovPresentationCueV1,
     ActorPovReplayContentV1,
+    ActorPovTransitionV1,
     validate_actor_pov_replay_content_v1,
 )
 from marl_battlegrounds.rendering.evaluation_wire_features import (
@@ -509,23 +513,58 @@ def build_actor_pov_projection_index_v1(
 
 
 def build_actor_pov_analyzer_projection_v1(
-    source: ActorPovProjectionIndexV1 | ActorPovReplayContentV1,
+    source: (
+        ActorPovProjectionIndexV1 | ActorPovReplayContentV1 | ActorPovCurrentSliceV1
+    ),
     *,
-    frame_index: int,
+    frame_index: int | None = None,
 ) -> ActorPovAnalyzerProjectionV1:
     """Build one projection exclusively from recipient-authorized POV content."""
     if type(source) is ActorPovProjectionIndexV1:
-        index = source
+        content = source.content
+        if type(frame_index) is not int or not 0 <= frame_index < len(content.frames):
+            raise IndexError("frame_index is outside the captured POV prefix.")
+        frame = content.frames[frame_index]
+        incoming = None if frame_index == 0 else content.transitions[frame_index - 1]
+        episode_id = content.episode_id
+        selected_global_slot = content.selected_global_slot
+        selected_team_local_slot = content.selected_team_local_slot
+        public_agent_id = content.public_agent_id
+        configured_team_id = content.configured_team_id
+        class_id = content.class_id
+        observation_materialization = content.observation_materialization
+        axis_mapping = content.axis_mapping
     elif type(source) is ActorPovReplayContentV1:
-        index = build_actor_pov_projection_index_v1(source)
+        return build_actor_pov_analyzer_projection_v1(
+            build_actor_pov_projection_index_v1(source),
+            frame_index=frame_index,
+        )
+    elif type(source) is ActorPovCurrentSliceV1:
+        if frame_index is not None and frame_index != source.frame.frame_index:
+            raise ValueError(
+                "a live current slice accepts only its own canonical frame index."
+            )
+        frame = source.frame
+        incoming = source.incoming_transition
+        episode_id = source.episode_id
+        selected_global_slot = source.selected_global_slot
+        selected_team_local_slot = source.selected_team_local_slot
+        public_agent_id = source.public_agent_id
+        configured_team_id = source.configured_team_id
+        class_id = source.class_id
+        observation_materialization = source.observation_materialization
+        axis_mapping = source.axis_mapping
     else:
         raise TypeError(
-            "source must be ActorPovProjectionIndexV1 or ActorPovReplayContentV1."
+            "source must be an exact POV projection index, replay content, or "
+            "current slice."
         )
-    content = index.content
-    if type(frame_index) is not int or not 0 <= frame_index < len(content.frames):
-        raise IndexError("frame_index is outside the captured POV prefix.")
-    frame = content.frames[frame_index]
+    if type(frame) is not ActorPovFrameV1:
+        raise TypeError("selected POV frame must be the exact V1 root.")
+    if incoming is not None and type(incoming) is not ActorPovTransitionV1:
+        raise TypeError("incoming POV transition must be the exact V1 root.")
+    if type(axis_mapping) is not ActorPovAxisMappingV1:
+        raise TypeError("POV axis mapping must be the exact V1 root.")
     self_row = frame.self_features
     if not _decode_wire_bool(
         self_row[AGENT_FEATURE_ACTIVE_V1],
@@ -539,27 +578,27 @@ def build_actor_pov_analyzer_projection_v1(
             minimum=1,
             maximum=2,
         )
-        != content.configured_team_id
+        != configured_team_id
         or _decode_wire_int(
             self_row[AGENT_FEATURE_CLASS_ID_V1],
             name="selected actor class",
             minimum=1,
             maximum=5,
         )
-        != content.class_id
+        != class_id
     ):
         raise ValueError("POV self row team/class must join content identity.")
     lifecycle = frame.spawn_lifecycle
     own_team_index = 0
     own_spawn_shield = lifecycle.spawn_shield_actual_durations_by_team[own_team_index][
-        content.selected_team_local_slot
+        selected_team_local_slot
     ]
     self_actor = ActorPovSelfSceneV1(
-        global_slot=content.selected_global_slot,
-        public_agent_id=content.public_agent_id,
-        team_local_slot=content.selected_team_local_slot,
-        team_id=content.configured_team_id,
-        class_id=content.class_id,
+        global_slot=selected_global_slot,
+        public_agent_id=public_agent_id,
+        team_local_slot=selected_team_local_slot,
+        team_id=configured_team_id,
+        class_id=class_id,
         position=_point(self_row),
         radius=self_row[AGENT_FEATURE_RADIUS_V1],
         alive=_decode_wire_bool(
@@ -584,9 +623,7 @@ def build_actor_pov_analyzer_projection_v1(
         ActorPovSpawnPadSceneV1(
             actor_relative_team_index=team_index,
             team_relation="own" if team_index == 0 else "opponent",
-            team_label=content.axis_mapping.spawn_lifecycle_team_axis_name_by_id[
-                team_index
-            ],
+            team_label=axis_mapping.spawn_lifecycle_team_axis_name_by_id[team_index],
             team_local_slot=team_local_slot,
             position=(position[0], position[1]),
             configured_active=lifecycle.active_mask_by_team[team_index][
@@ -608,21 +645,18 @@ def build_actor_pov_analyzer_projection_v1(
         ActorPovRespawnWaveSceneV1(
             actor_relative_team_index=team_index,
             team_relation="own" if team_index == 0 else "opponent",
-            team_label=content.axis_mapping.spawn_lifecycle_team_axis_name_by_id[
-                team_index
-            ],
+            team_label=axis_mapping.spawn_lifecycle_team_axis_name_by_id[team_index],
             period_steps=lifecycle.respawn_wave_period_step_count_by_team[team_index],
             countdown_steps=lifecycle.respawn_wave_countdowns_by_team[team_index],
         )
         for team_index in range(2)
     )
-    incoming = None if frame_index == 0 else content.transitions[frame_index - 1]
     return ActorPovAnalyzerProjectionV1(
         scene=ActorPovBattlefieldSceneV1(
             schema_version=ACTOR_POV_SCENE_SCHEMA_VERSION,
-            audience_badge=f"AGENT POV · {content.public_agent_id}",
-            observation_materialization=content.observation_materialization,
-            episode_id=content.episode_id,
+            audience_badge=f"AGENT POV · {public_agent_id}",
+            observation_materialization=observation_materialization,
+            episode_id=episode_id,
             frame_index=frame.frame_index,
             pov_frame_id=frame.pov_frame_id,
             source_frame_id=frame.source_frame_id,
@@ -634,13 +668,13 @@ def build_actor_pov_analyzer_projection_v1(
                     "ally",
                     frame.ally_unit_features,
                     frame.ally_visibility_mask,
-                    content.axis_mapping.ally_observation_row_public_agent_id_by_id,
+                    axis_mapping.ally_observation_row_public_agent_id_by_id,
                 ),
                 *_visible_bodies(
                     "enemy",
                     frame.enemy_unit_features,
                     frame.enemy_visibility_mask,
-                    content.axis_mapping.enemy_observation_row_public_agent_id_by_id,
+                    axis_mapping.enemy_observation_row_public_agent_id_by_id,
                 ),
             ),
             spawn_pads=spawn_pads,

@@ -8,19 +8,39 @@ import {
   postCommand,
 } from "../src/api.js";
 
-test("extractFrame accepts success, stale, and direct frame envelopes", () => {
-  const frame = { revision: 3, scene: {} };
+test("extractFrame rejects stale and unknown frame schemas at every envelope", () => {
+  const stale = { schema_version: 1, revision: 3, scene: {} };
+  const unknown = { schema_version: 99, revision: 3, projection: {} };
 
-  assert.equal(extractFrame({ frame }), frame);
-  assert.equal(extractFrame({ latest_frame: frame }), frame);
-  assert.equal(extractFrame(frame), frame);
+  assert.throws(
+    () => extractFrame({ schema_version: 2, frame: stale }),
+    /schema version 2/,
+  );
+  assert.throws(
+    () => extractFrame({ schema_version: 2, latest_frame: unknown }),
+    /schema version 2/,
+  );
+  assert.throws(() => extractFrame(stale), /schema version 2/);
+  assert.equal(extractFrame({ schema_version: 2, current_frame: stale }), null);
   assert.equal(extractFrame({ revision: 3 }), null);
   assert.equal(extractFrame(null), null);
 });
 
+test("extractFrame rejects a V2 frame carried by a stale response envelope", () => {
+  const v2Frame = { schema_version: 2 };
+  assert.throws(
+    () => extractFrame({ schema_version: 1, frame: v2Frame }),
+    /response envelope must use schema version 2/u,
+  );
+  assert.throws(
+    () => extractFrame({ frame: v2Frame }),
+    /response envelope must use schema version 2/u,
+  );
+});
+
 test("extractNotice accepts only non-empty protocol notices", () => {
   assert.equal(extractNotice({ notice: "Applied." }), "Applied.");
-  assert.equal(extractNotice({ notice: { message: "Stale." } }), "Stale.");
+  assert.equal(extractNotice({ notice: { message: "Stale." } }), null);
   assert.equal(extractNotice({ notice: "  " }), null);
   assert.equal(extractNotice({}), null);
 });

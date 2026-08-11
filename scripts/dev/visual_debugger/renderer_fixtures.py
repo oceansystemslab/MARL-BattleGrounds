@@ -1,13 +1,18 @@
-"""SYNTHETIC renderer-only fixtures for deterministic browser layout tests.
+"""Canonical synthetic fixtures for deterministic renderer/browser tests.
 
 These records are deliberately not simulator scenarios. They never construct
-or submit actions, and they must not be presented as valid simulator history.
+or submit actions, and they must never be presented as scientific history.
+Researcher fixtures use the exact Scene/Event V2 roots consumed in production;
+the POV fixture is independently recipient-sliced and never filters a
+researcher scene in the browser.
 """
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from types import MappingProxyType
-from typing import Literal
+from typing import Literal, TypedDict, cast
+
+from pydantic import BaseModel
 
 from marl_battlegrounds.core.types import (
     HUNTER_CLASS_ID,
@@ -18,33 +23,94 @@ from marl_battlegrounds.core.types import (
     TEAM_B_ID,
     WARRIOR_CLASS_ID,
 )
+from marl_battlegrounds.evaluation.pov import (
+    ActorPovActionMaskV1,
+    ActorPovOwnActionOutcomeCueV1,
+    ActorPovOwnHealthChangedCueV1,
+    ActorPovOwnPositionChangedCueV1,
+    ActorPovOwnStatusChangedCueV1,
+)
+from marl_battlegrounds.rendering.pov_scene import (
+    ACTOR_POV_SCENE_SCHEMA_VERSION,
+    ActorPovAnalyzerProjectionV1,
+    ActorPovBattlefieldSceneV1,
+    ActorPovRespawnWaveSceneV1,
+    ActorPovSelfSceneV1,
+    ActorPovSpawnPadSceneV1,
+    ActorPovVisibleBodySceneV1,
+)
 from marl_battlegrounds.rendering.scene import (
-    EVENT_SCHEMA_VERSION,
-    SCENE_SCHEMA_VERSION,
-    AcceptedActivationEventV1,
-    AgentSceneV1,
-    AuraFieldSceneV1,
-    BattlefieldSceneV1,
-    ChargeDisplacementEventV1,
-    HealthOutcome,
+    EVENT_V2_SCHEMA_VERSION,
+    SCENE_V2_SCHEMA_VERSION,
+    AbilityActivatedEventV2,
+    ActionRejectedEventV2,
+    AgentDiedEventV2,
+    AgentRespawnedEventV2,
+    AgentSceneV2,
+    AuraFieldSceneV2,
+    AuraRecipientModifierSceneV2,
+    BasicTargetModeV2,
+    BattlefieldSceneV2,
+    ChargePhaseDisplacementEventV2,
+    ClassMechanicsSceneV2,
+    CombatCountdownResetEventV2,
+    CooldownReadyEventV2,
+    CooldownStartedEventV2,
+    HealthRegeneratedEventV2,
+    LethalDamageContributionEventV2,
     MapSceneV1,
-    ModifierSceneV1,
-    NetHealthEventV1,
     ObserverVisibilitySceneV1,
     ObstacleSceneV1,
-    PendingRouteSceneV1,
+    OrdinaryMovementPhaseDisplacementEventV2,
     RangeSceneV1,
+    RecipientHealthResolutionEventV2,
+    ResearcherAnalyzerProjectionV2,
+    RespawnWaveOccurredEventV2,
+    RespawnWaveSceneV2,
     SelectedLegalitySceneV1,
     SelectionSceneV1,
-    StatusLifecycleEventV1,
-    StatusSceneV1,
-    VisualEventBatchV1,
+    SourceDamageOutputEventV2,
+    SourceHealingOutputEventV2,
+    SpawnPadSceneV2,
+    SpawnShieldExpiredEventV2,
+    StatusAgedToZeroEventV2,
+    StatusAppliedEventV2,
+    StatusBrokenByDamageEventV2,
+    StatusClearedByNewDeathEventV2,
+    StatusFamilyV2,
+    StatusMagnitudeKindV2,
+    StatusRefreshedOrExtendedEventV2,
+    StatusSceneV2,
+    StatusSourceChannelEvidenceV2,
+    StatusSourceEvidenceStateV2,
+    UltimateTargetModeV2,
+    VisualAgentAnchorV2,
+    VisualAgentPhaseTrajectoryV2,
+    VisualAnchorPhaseV2,
+    VisualEventBatchV2,
+    VisualEventV2,
+    VisualTeamAnchorV2,
 )
 from marl_battlegrounds.rendering.vocabulary import (
     CANONICAL_STATUS_ORDER,
-    ActivationTokenId,
+    CATALOG_STATUS_ID_BY_CHANNEL,
     StatusTokenId,
     lookup_status_token,
+)
+from scripts.dev.visual_debugger.protocol import (
+    ActorPovCandidateLegalityCardV1,
+    ActorPovHudFrameV1,
+    ActorPovLiveDebuggerFrameV2,
+    ActorPovPendingActionCardV1,
+    ActorPovTargetReferenceV1,
+    MovementLegalityCardV1,
+    PendingActionCardV1,
+    ResearcherHudFrameV2,
+    ResearcherLiveDebuggerFrameV2,
+    ScenarioMetadataV1,
+    ScenarioOptionV1,
+    TargetReferenceV1,
+    TerminalStateV2,
 )
 
 type RendererFixtureName = Literal[
@@ -54,21 +120,28 @@ type RendererFixtureName = Literal[
     "route_collision",
     "mixed_net_zero",
     "viewport_matrix",
+    "canonical_event_vocabulary",
     "pov_redaction",
 ]
-type ViewportLabel = Literal[
-    "desktop",
-    "compact",
-    "minimum",
-    "stacked",
-]
+type ViewportLabel = Literal["desktop", "compact", "minimum", "stacked"]
 type ViewportLayout = Literal["split", "stacked"]
-type SyntheticEventV1 = (
-    AcceptedActivationEventV1
-    | NetHealthEventV1
-    | ChargeDisplacementEventV1
-    | StatusLifecycleEventV1
-)
+type AuraIdV2 = Literal[
+    "mage_damage_amplification",
+    "warrior_damage_mitigation",
+]
+type CatalogStatusId = Literal[
+    "warrior_charge_slow",
+    "hunter_basic_slow",
+    "rogue_poison_slow",
+    "warrior_charge_stun",
+    "hunter_trap_stun",
+    "rogue_poison_stun",
+    "rogue_poison_anti_heal",
+    "mage_burst_damage_amplification",
+    "priest_blessing_of_freedom_movement_floor",
+]
+type RendererScene = BattlefieldSceneV2 | ActorPovBattlefieldSceneV1
+type RendererLiveFrame = ResearcherLiveDebuggerFrameV2 | ActorPovLiveDebuggerFrameV2
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -92,17 +165,21 @@ class ViewportCaseV1:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class RendererFixtureV1:
-    """One explicitly synthetic, already-authorized presentation payload."""
+class RendererFixtureV2:
+    """One explicitly synthetic, audience-specific presentation payload."""
 
     name: RendererFixtureName
     description: str
-    scene: BattlefieldSceneV1
-    event_batch: VisualEventBatchV1 | None = None
+    audience: Literal["researcher", "agent_pov"]
+    scene: RendererScene
+    live_frame: RendererLiveFrame
+    event_batch: VisualEventBatchV2 | None = None
+    pov_projection: ActorPovAnalyzerProjectionV1 | None = None
+    pov_target_public_agent_ids: tuple[str | None, ...] | None = None
     viewports: tuple[ViewportCaseV1, ...] = ()
     exercise_reduced_motion: bool = False
-    privileged_source_scene: BattlefieldSceneV1 | None = None
-    privileged_source_event_batch: VisualEventBatchV1 | None = None
+    privileged_source_scene: BattlefieldSceneV2 | None = None
+    privileged_source_event_batch: VisualEventBatchV2 | None = None
 
     def __post_init__(self) -> None:
         if type(self.name) is not str or not self.name:
@@ -111,49 +188,75 @@ class RendererFixtureV1:
             "SYNTHETIC:"
         ):
             raise ValueError("fixture description must begin with 'SYNTHETIC:'.")
-        if type(self.scene) is not BattlefieldSceneV1:
-            raise ValueError("fixture scene must be BattlefieldSceneV1.")
-        if (
-            self.event_batch is not None
-            and type(self.event_batch) is not VisualEventBatchV1
-        ):
-            raise ValueError("event_batch must be VisualEventBatchV1 or None.")
         if type(self.viewports) is not tuple or any(
             type(viewport) is not ViewportCaseV1 for viewport in self.viewports
         ):
-            raise ValueError("viewports must be a tuple of ViewportCaseV1 records.")
+            raise ValueError("viewports must contain exact ViewportCaseV1 rows.")
         labels = tuple(viewport.label for viewport in self.viewports)
         if len(labels) != len(set(labels)):
             raise ValueError("viewport labels must be unique.")
         if type(self.exercise_reduced_motion) is not bool:
             raise ValueError("exercise_reduced_motion must be a Python bool.")
-        if (
-            self.privileged_source_scene is not None
-            and type(self.privileged_source_scene) is not BattlefieldSceneV1
-        ):
-            raise ValueError(
-                "privileged_source_scene must be BattlefieldSceneV1 or None."
-            )
-        if (
-            self.privileged_source_event_batch is not None
-            and type(self.privileged_source_event_batch) is not VisualEventBatchV1
-        ):
-            raise ValueError(
-                "privileged_source_event_batch must be VisualEventBatchV1 or None."
-            )
-        if (self.privileged_source_scene is None) is not (
+
+        if self.audience == "researcher":
+            if type(self.scene) is not BattlefieldSceneV2:
+                raise ValueError("researcher fixtures require BattlefieldSceneV2.")
+            if self.pov_projection is not None:
+                raise ValueError("researcher fixtures cannot carry a POV projection.")
+            if self.pov_target_public_agent_ids is not None:
+                raise ValueError("researcher fixtures cannot carry a POV target axis.")
+            if (
+                type(self.live_frame) is not ResearcherLiveDebuggerFrameV2
+                or self.live_frame.projection.scene != self.scene
+                or self.live_frame.projection.incoming_events != self.event_batch
+            ):
+                raise ValueError(
+                    "researcher fixtures require their exact validated V2 frame."
+                )
+        elif self.audience == "agent_pov":
+            if type(self.scene) is not ActorPovBattlefieldSceneV1:
+                raise ValueError("POV fixtures require the exact recipient scene.")
+            if self.event_batch is not None:
+                raise ValueError("POV fixtures cannot carry researcher event batches.")
+            if (
+                type(self.pov_projection) is not ActorPovAnalyzerProjectionV1
+                or self.pov_projection.scene != self.scene
+            ):
+                raise ValueError("POV fixtures require their exact local projection.")
+            target_axis = self.pov_target_public_agent_ids
+            if (
+                type(target_axis) is not tuple
+                or len(target_axis) != 11
+                or target_axis[0] is not None
+                or any(type(value) is not str or not value for value in target_axis[1:])
+                or len(set(target_axis[1:])) != 10
+            ):
+                raise ValueError(
+                    "POV fixtures require one exact recipient-local target axis."
+                )
+            if (
+                type(self.live_frame) is not ActorPovLiveDebuggerFrameV2
+                or self.live_frame.projection != self.pov_projection
+            ):
+                raise ValueError(
+                    "POV fixtures require their exact validated recipient frame."
+                )
+        else:
+            raise ValueError("unknown fixture audience.")
+
+        if (self.privileged_source_scene is None) != (
             self.privileged_source_event_batch is None
         ):
             raise ValueError(
                 "privileged source scene and event batch must be supplied together."
             )
         if self.privileged_source_scene is not None:
-            if self.privileged_source_scene.audience != "researcher":
-                raise ValueError("privileged source scenes must be researcher scenes.")
-            if self.scene.audience != "agent_pov":
-                raise ValueError(
-                    "fixtures with a privileged source must render an agent-POV scene."
-                )
+            if self.audience != "agent_pov":
+                raise ValueError("only POV fixtures may carry a comparison source.")
+            if type(self.privileged_source_scene) is not BattlefieldSceneV2:
+                raise ValueError("privileged comparison must use BattlefieldSceneV2.")
+            if type(self.privileged_source_event_batch) is not VisualEventBatchV2:
+                raise ValueError("privileged comparison must use VisualEventBatchV2.")
 
 
 _CLASS_IDS = (
@@ -169,50 +272,180 @@ _CLASS_IDS = (
     PRIEST_CLASS_ID,
 )
 _TEAM_IDS = (TEAM_A_ID,) * 5 + (TEAM_B_ID,) * 5
+_CLASS_NAMES = {
+    MAGE_CLASS_ID: "Mage",
+    WARRIOR_CLASS_ID: "Warrior",
+    HUNTER_CLASS_ID: "Hunter",
+    ROGUE_CLASS_ID: "Rogue",
+    PRIEST_CLASS_ID: "Priest",
+}
+_STATUS_DETAILS: Mapping[
+    StatusTokenId,
+    tuple[
+        StatusFamilyV2,
+        Literal["basic", "ultimate"],
+        StatusMagnitudeKindV2,
+        float | None,
+        bool,
+    ],
+] = MappingProxyType(
+    {
+        "stun_warrior_charge": ("stun", "ultimate", "none", None, False),
+        "stun_hunter_trap": ("stun", "ultimate", "none", None, True),
+        "stun_rogue_poison": ("stun", "ultimate", "none", None, False),
+        "slow_warrior_charge": (
+            "slow",
+            "ultimate",
+            "movement_multiplier",
+            0.5,
+            False,
+        ),
+        "slow_hunter_basic": (
+            "slow",
+            "basic",
+            "movement_multiplier",
+            0.8,
+            False,
+        ),
+        "slow_rogue_poison": (
+            "slow",
+            "ultimate",
+            "movement_multiplier",
+            0.6,
+            False,
+        ),
+        "anti_heal_rogue_poison": (
+            "anti_heal",
+            "ultimate",
+            "healing_multiplier",
+            0.0,
+            False,
+        ),
+        "priest_freedom": (
+            "movement_floor",
+            "ultimate",
+            "movement_floor",
+            1.0,
+            False,
+        ),
+        "mage_burst": (
+            "damage_amplification",
+            "ultimate",
+            "damage_multiplier",
+            1.5,
+            False,
+        ),
+    }
+)
+_CATALOG_STATUS_ID_BY_TOKEN_ID: Mapping[StatusTokenId, CatalogStatusId] = (
+    MappingProxyType(
+        {
+            "slow_warrior_charge": "warrior_charge_slow",
+            "slow_hunter_basic": "hunter_basic_slow",
+            "slow_rogue_poison": "rogue_poison_slow",
+            "stun_warrior_charge": "warrior_charge_stun",
+            "stun_hunter_trap": "hunter_trap_stun",
+            "stun_rogue_poison": "rogue_poison_stun",
+            "anti_heal_rogue_poison": "rogue_poison_anti_heal",
+            "mage_burst": "mage_burst_damage_amplification",
+            "priest_freedom": "priest_blessing_of_freedom_movement_floor",
+        }
+    )
+)
+CATALOG_STATUS_ORDER: tuple[CatalogStatusId, ...] = tuple(
+    _CATALOG_STATUS_ID_BY_TOKEN_ID[token_id] for token_id in CANONICAL_STATUS_ORDER
+)
 
 
-def _status(token_id: StatusTokenId, duration: int) -> StatusSceneV1:
+def renderer_fixture_to_jsonable(value: object) -> object:
+    """Return plain JSON data for dataclass and Pydantic fixture roots."""
+    if isinstance(value, BaseModel):
+        return renderer_fixture_to_jsonable(value.model_dump(mode="json"))
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            row.name: renderer_fixture_to_jsonable(getattr(value, row.name))
+            for row in fields(value)
+        }
+    if isinstance(value, Mapping):
+        mapping = cast(Mapping[object, object], value)
+        return {
+            str(key): renderer_fixture_to_jsonable(item)
+            for key, item in mapping.items()
+        }
+    if isinstance(value, (tuple, list)):
+        items = cast(tuple[object, ...] | list[object], value)
+        return [renderer_fixture_to_jsonable(item) for item in items]
+    if value is None or type(value) in (str, int, float, bool):
+        return value
+    raise TypeError(f"unsupported renderer fixture value: {type(value).__name__}.")
+
+
+def _class_mechanics() -> tuple[ClassMechanicsSceneV2, ...]:
+    basic_modes: dict[int, BasicTargetModeV2] = {
+        MAGE_CLASS_ID: "enemy",
+        WARRIOR_CLASS_ID: "enemy",
+        HUNTER_CLASS_ID: "enemy",
+        ROGUE_CLASS_ID: "enemy",
+        PRIEST_CLASS_ID: "ally",
+    }
+    ultimate_modes: dict[int, UltimateTargetModeV2] = {
+        MAGE_CLASS_ID: "target_none",
+        WARRIOR_CLASS_ID: "enemy",
+        HUNTER_CLASS_ID: "enemy",
+        ROGUE_CLASS_ID: "enemy",
+        PRIEST_CLASS_ID: "ally",
+    }
+    return tuple(
+        ClassMechanicsSceneV2(
+            class_id=class_id,
+            class_name=_CLASS_NAMES[class_id],
+            maximum_health=100.0,
+            body_radius=0.5,
+            base_movement_speed=1.0,
+            observation_radius=6.0,
+            basic_target_mode=basic_modes[class_id],
+            basic_interaction_radius=3.0,
+            basic_raw_damage=0.0 if class_id == PRIEST_CLASS_ID else 10.0,
+            basic_raw_healing=10.0 if class_id == PRIEST_CLASS_ID else 0.0,
+            ultimate_target_mode=ultimate_modes[class_id],
+            ultimate_interaction_radius=4.0,
+            ultimate_cooldown_steps=5,
+            ultimate_raw_damage=15.0 if class_id != PRIEST_CLASS_ID else 0.0,
+            ultimate_raw_healing=20.0 if class_id == PRIEST_CLASS_ID else 0.0,
+            out_of_combat_delay_steps=3,
+            out_of_combat_health_regeneration_fraction_per_step=0.05,
+        )
+        for class_id in range(1, 6)
+    )
+
+
+def _status(token_id: StatusTokenId, duration: int) -> StatusSceneV2:
     definition = lookup_status_token(token_id)
     if definition.source_class_id is None:
         raise AssertionError(f"status {token_id!r} must have a source class")
-    return StatusSceneV1(
-        token_id=token_id,
-        duration=duration,
+    family, component, magnitude_kind, magnitude, breaks = _STATUS_DETAILS[token_id]
+    catalog_status_id = _CATALOG_STATUS_ID_BY_TOKEN_ID[token_id]
+    return StatusSceneV2(
+        status_channel=CATALOG_STATUS_ID_BY_CHANNEL.index(catalog_status_id),
+        status_id=catalog_status_id,
+        family=family,
+        remaining_duration=duration,
         source_class_id=definition.source_class_id,
-        label=definition.label,
-        short_label=definition.short_label,
-        accessible_name=definition.accessible_name,
-        priority=definition.priority,
+        source_class_name=_CLASS_NAMES[definition.source_class_id],
+        source_action_component=component,
+        magnitude_kind=magnitude_kind,
+        magnitude=magnitude,
+        breaks_on_positive_damage=breaks,
     )
 
 
-def _statuses(token_ids: tuple[StatusTokenId, ...]) -> tuple[StatusSceneV1, ...]:
-    ordered: tuple[StatusTokenId, ...] = tuple(
-        sorted(token_ids, key=CANONICAL_STATUS_ORDER.index)
-    )
+def _statuses(token_ids: tuple[StatusTokenId, ...]) -> tuple[StatusSceneV2, ...]:
     duration_by_token = dict(
-        zip(
-            CANONICAL_STATUS_ORDER,
-            (3, 3, 3, 2, 2, 2, 3, 2, 3),
-            strict=True,
-        )
+        zip(CANONICAL_STATUS_ORDER, (3, 3, 3, 2, 2, 2, 3, 2, 3), strict=True)
     )
     return tuple(
-        _status(token_id, duration=duration_by_token[token_id]) for token_id in ordered
-    )
-
-
-def _modifier(
-    token_id: str,
-    multiplier: float,
-    label: str,
-    accessible_name: str,
-) -> ModifierSceneV1:
-    return ModifierSceneV1(
-        token_id=token_id,
-        multiplier=multiplier,
-        label=label,
-        accessible_name=accessible_name,
+        _status(token_id, duration_by_token[token_id])
+        for token_id in sorted(token_ids, key=CANONICAL_STATUS_ORDER.index)
     )
 
 
@@ -221,80 +454,499 @@ def _agents(
     *,
     status_tokens: Mapping[int, tuple[StatusTokenId, ...]] | None = None,
     health: Mapping[int, float] | None = None,
-    modifiers: Mapping[int, tuple[ModifierSceneV1, ...]] | None = None,
+    modifier_values: Mapping[int, tuple[float, float]] | None = None,
     cooldowns: Mapping[int, int] | None = None,
     class_ids: tuple[int, ...] = _CLASS_IDS,
     included_slots: tuple[int, ...] = tuple(range(10)),
-) -> tuple[AgentSceneV1, ...]:
-    if len(positions) != 10:
-        raise ValueError("synthetic position tables require ten fixed-slot rows.")
-    if len(class_ids) != 10:
-        raise ValueError("synthetic class tables require ten fixed-slot rows.")
-    status_tokens = {} if status_tokens is None else status_tokens
-    health = {} if health is None else health
-    modifiers = {} if modifiers is None else modifiers
-    cooldowns = {} if cooldowns is None else cooldowns
-    return tuple(
-        AgentSceneV1(
-            global_slot=slot,
-            team_id=_TEAM_IDS[slot],
-            class_id=class_ids[slot],
-            position=positions[slot],
-            radius=0.5,
-            active=True,
-            alive=True,
-            current_health=health.get(slot, 100.0),
-            max_health=100.0,
-            ultimate_cooldown=cooldowns.get(slot, 0),
-            effective_speed=1.0,
-            statuses=_statuses(status_tokens.get(slot, ())),
-            modifiers=modifiers.get(slot, ()),
+    corpses: tuple[int, ...] = (),
+    spawn_shields: Mapping[int, int] | None = None,
+    respawn_event_ids: Mapping[int, str] | None = None,
+) -> tuple[AgentSceneV2, ...]:
+    if len(positions) != 10 or len(class_ids) != 10:
+        raise ValueError("synthetic position/class tables require ten rows.")
+    status_tokens = status_tokens or {}
+    health = health or {}
+    modifier_values = modifier_values or {}
+    cooldowns = cooldowns or {}
+    spawn_shields = spawn_shields or {}
+    respawn_event_ids = respawn_event_ids or {}
+    rows: list[AgentSceneV2] = []
+    for slot in included_slots:
+        mage_modifier, warrior_modifier = modifier_values.get(slot, (1.0, 1.0))
+        respawn_event_id = respawn_event_ids.get(slot)
+        rows.append(
+            AgentSceneV2(
+                global_slot=slot,
+                public_agent_id=str(slot),
+                team_id=_TEAM_IDS[slot],
+                team_local_slot=slot % 5,
+                class_id=class_ids[slot],
+                position=positions[slot],
+                radius=0.5,
+                life_state="corpse" if slot in corpses else "alive",
+                current_health=health.get(slot, 0.0 if slot in corpses else 100.0),
+                max_health=100.0,
+                effective_movement_speed=1.0,
+                ultimate_cooldown_remaining=cooldowns.get(slot, 0),
+                spawn_shield_remaining=spawn_shields.get(slot, 0),
+                steps_until_out_of_combat=0,
+                respawned_on_incoming_transition=respawn_event_id is not None,
+                respawn_event_id=respawn_event_id,
+                statuses=_statuses(status_tokens.get(slot, ())),
+                aura_modifiers=(
+                    AuraRecipientModifierSceneV2(
+                        aura_id="mage_damage_amplification",
+                        multiplier=mage_modifier,
+                    ),
+                    AuraRecipientModifierSceneV2(
+                        aura_id="warrior_damage_mitigation",
+                        multiplier=warrior_modifier,
+                    ),
+                ),
+            )
         )
-        for slot in included_slots
-    )
+    return tuple(rows)
 
 
-def _activation(
-    *,
-    fixture_name: str,
-    ordinal: int,
-    token_id: ActivationTokenId,
+def _aura_field(
+    agents: Mapping[int, AgentSceneV2],
     source_global_slot: int,
-    target_global_slot: int | None,
-    agents: Mapping[int, AgentSceneV1],
-    anchor_positions: Mapping[int, tuple[float, float]] | None = None,
-) -> AcceptedActivationEventV1:
+    aura_id: AuraIdV2,
+    radius: float,
+) -> AuraFieldSceneV2:
     source = agents[source_global_slot]
-    target = None if target_global_slot is None else agents[target_global_slot]
-    anchor_positions = {} if anchor_positions is None else anchor_positions
-    if target is None:
-        target_anchor = None
-    else:
-        if target_global_slot is None:
-            raise AssertionError("target object requires a target global slot")
-        target_anchor = anchor_positions.get(target_global_slot, target.position)
-    return AcceptedActivationEventV1(
-        event_id=f"synthetic:{fixture_name}:activation-{ordinal}",
-        transition_id=1,
-        token_id=token_id,
+    mage = aura_id == "mage_damage_amplification"
+    return AuraFieldSceneV2(
+        aura_id=aura_id,
         source_global_slot=source_global_slot,
-        target_global_slot=target_global_slot,
-        source_anchor=anchor_positions.get(source_global_slot, source.position),
-        target_anchor=target_anchor,
-        target_disclosure=("target_none" if target_global_slot is None else "public"),
-        lane=0 if token_id in ("basic_damage", "basic_heal") else 1,
+        source_public_agent_id=source.public_agent_id,
         source_class_id=source.class_id,
+        source_class_name=_CLASS_NAMES[source.class_id],
+        source_alive=source.life_state == "alive",
+        center=source.position,
+        radius=radius,
+        beneficiary_relation="same_team",
+        per_emitter_multiplier=1.2 if mage else 0.8,
+        stacking_rule="multiply_then_clamp",
+        clamp_kind="ceiling" if mage else "floor",
+        clamp_value=2.0 if mage else 0.2,
     )
+
+
+def _anchor(
+    agents: Mapping[int, AgentSceneV2],
+    positions: Mapping[int, tuple[float, float]],
+    slot: int,
+    phase: Literal["transition_start", "post_charge", "successor"],
+) -> VisualAgentAnchorV2:
+    return VisualAgentAnchorV2(
+        phase=phase,
+        global_slot=slot,
+        public_agent_id=agents[slot].public_agent_id,
+        position=positions[slot],
+    )
+
+
+class _EventIdentity(TypedDict):
+    event_id: str
+    transition_id: str
+    ordinal: int
+
+
+class _StatusEventArguments(_EventIdentity):
+    recipient_global_slot: int
+    status_channel: int
+    status_id: str
+    recipient_anchor: VisualAgentAnchorV2
+
+
+def _event_from_spec(
+    *,
+    event_id: str,
+    transition_id: str,
+    ordinal: int,
+    spec: Mapping[str, object],
+    agents: Mapping[int, AgentSceneV2],
+    start: Mapping[int, tuple[float, float]],
+    post_charge: Mapping[int, tuple[float, float]],
+    successor: Mapping[int, tuple[float, float]],
+) -> VisualEventV2:
+    event_type = cast(str, spec["event_type"])
+    common: _EventIdentity = {
+        "event_id": event_id,
+        "transition_id": transition_id,
+        "ordinal": ordinal,
+    }
+    if event_type == "action_rejected":
+        slot = cast(int, spec["actor"])
+        active = cast(bool, spec.get("active", True))
+        return ActionRejectedEventV2(
+            **common,
+            actor_global_slot=slot,
+            actor_public_agent_id=str(slot),
+            actor_configured_active=active,
+            rejection_component=cast(
+                Literal["domain", "movement", "combat_pair"],
+                spec.get("component", "movement"),
+            ),
+            submitted_move_action=cast(int, spec.get("move_action", 1)),
+            submitted_select_target_action=cast(int, spec.get("target_action", 1)),
+            submitted_use_ultimate_action=cast(int, spec.get("ultimate_action", 0)),
+            actor_anchor=(
+                _anchor(agents, start, slot, "transition_start") if active else None
+            ),
+        )
+    if event_type == "ability_activated":
+        source = cast(int, spec["source"])
+        recipient = cast(int | None, spec.get("recipient"))
+        return AbilityActivatedEventV2(
+            **common,
+            source_global_slot=source,
+            ability_component=cast(Literal["basic", "ultimate"], spec["component"]),
+            recipient_global_slot=recipient,
+            source_anchor=_anchor(agents, start, source, "transition_start"),
+            recipient_anchor=(
+                None
+                if recipient is None
+                else _anchor(agents, start, recipient, "transition_start")
+            ),
+        )
+    if event_type == "source_damage_output":
+        source = cast(int, spec["source"])
+        recipient = cast(int | None, spec.get("recipient"))
+        return SourceDamageOutputEventV2(
+            **common,
+            source_global_slot=source,
+            recipient_global_slot=recipient,
+            raw_damage_output=cast(float, spec.get("raw", 10.0)),
+            source_modified_damage_output=cast(float, spec.get("modified", 12.0)),
+            recipient_damage_modifier=cast(float, spec.get("modifier", 0.8)),
+            mage_damage_aura_covering_emitter_global_slots=cast(
+                tuple[int, ...], spec.get("mage_emitters", ())
+            ),
+            warrior_mitigation_aura_covering_emitter_global_slots=cast(
+                tuple[int, ...], spec.get("warrior_emitters", ())
+            ),
+            source_anchor=_anchor(agents, start, source, "transition_start"),
+            recipient_anchor=(
+                None
+                if recipient is None
+                else _anchor(agents, start, recipient, "transition_start")
+            ),
+        )
+    if event_type == "source_healing_output":
+        source = cast(int, spec["source"])
+        recipient = cast(int | None, spec.get("recipient"))
+        return SourceHealingOutputEventV2(
+            **common,
+            source_global_slot=source,
+            recipient_global_slot=recipient,
+            raw_healing_output=cast(float, spec.get("raw", 10.0)),
+            source_modified_healing_output=cast(float, spec.get("modified", 10.0)),
+            recipient_healing_modifier=cast(float, spec.get("modifier", 1.0)),
+            source_anchor=_anchor(agents, start, source, "transition_start"),
+            recipient_anchor=(
+                None
+                if recipient is None
+                else _anchor(agents, start, recipient, "transition_start")
+            ),
+        )
+    if event_type == "recipient_health_resolution":
+        recipient = cast(int, spec["recipient"])
+        return RecipientHealthResolutionEventV2(
+            **common,
+            recipient_global_slot=recipient,
+            transition_start_health=cast(float, spec["before"]),
+            total_effective_damage=cast(float, spec.get("damage", 0.0)),
+            total_effective_healing=cast(float, spec.get("healing", 0.0)),
+            health_after_combat_resolution=cast(float, spec["after"]),
+            realized_net_health_change=cast(float, spec["delta"]),
+            recipient_anchor=_anchor(agents, start, recipient, "transition_start"),
+        )
+    if event_type in {
+        "combat_countdown_reset",
+        "health_regenerated",
+        "cooldown_started",
+        "cooldown_ready",
+    }:
+        slot = cast(int, spec["agent"])
+        agent_anchor = _anchor(agents, start, slot, "transition_start")
+        if event_type == "combat_countdown_reset":
+            return CombatCountdownResetEventV2(
+                **common, agent_global_slot=slot, agent_anchor=agent_anchor
+            )
+        if event_type == "health_regenerated":
+            return HealthRegeneratedEventV2(
+                **common,
+                agent_global_slot=slot,
+                actual_health_regenerated=cast(float, spec.get("amount", 2.0)),
+                agent_anchor=agent_anchor,
+            )
+        if event_type == "cooldown_started":
+            return CooldownStartedEventV2(
+                **common, agent_global_slot=slot, agent_anchor=agent_anchor
+            )
+        return CooldownReadyEventV2(
+            **common, agent_global_slot=slot, agent_anchor=agent_anchor
+        )
+    if event_type in {
+        "charge_phase_displacement",
+        "ordinary_movement_phase_displacement",
+    }:
+        slot = cast(int, spec["agent"])
+        if event_type == "charge_phase_displacement":
+            phase_start, phase_end = start, post_charge
+            event_class = ChargePhaseDisplacementEventV2
+            start_phase: VisualAnchorPhaseV2 = "transition_start"
+            end_phase: VisualAnchorPhaseV2 = "post_charge"
+        else:
+            phase_start, phase_end = post_charge, successor
+            event_class = OrdinaryMovementPhaseDisplacementEventV2
+            start_phase = "post_charge"
+            end_phase = "successor"
+        displacement = (
+            phase_end[slot][0] - phase_start[slot][0],
+            phase_end[slot][1] - phase_start[slot][1],
+        )
+        return event_class(
+            **common,
+            agent_global_slot=slot,
+            realized_displacement=displacement,
+            start_anchor=_anchor(agents, phase_start, slot, start_phase),
+            end_anchor=_anchor(agents, phase_end, slot, end_phase),
+        )
+    if event_type == "agent_died":
+        recipient = cast(int, spec["recipient"])
+        return AgentDiedEventV2(
+            **common,
+            recipient_global_slot=recipient,
+            recipient_anchor=_anchor(agents, successor, recipient, "successor"),
+        )
+    if event_type == "lethal_damage_contribution":
+        source = cast(int, spec["source"])
+        recipient = cast(int, spec["recipient"])
+        return LethalDamageContributionEventV2(
+            **common,
+            source_global_slot=source,
+            recipient_global_slot=recipient,
+            attributed_death_damage=cast(float, spec.get("amount", 5.0)),
+            source_anchor=_anchor(agents, successor, source, "successor"),
+            recipient_anchor=_anchor(agents, successor, recipient, "successor"),
+        )
+    if event_type in {
+        "status_aged_to_zero",
+        "status_broken_by_damage",
+        "status_applied",
+        "status_refreshed_or_extended",
+        "status_cleared_by_new_death",
+    }:
+        recipient = cast(int, spec["recipient"])
+        catalog_status_id = cast(CatalogStatusId, spec["status_id"])
+        status_common: _StatusEventArguments = {
+            **common,
+            "recipient_global_slot": recipient,
+            "status_channel": CATALOG_STATUS_ID_BY_CHANNEL.index(catalog_status_id),
+            "status_id": catalog_status_id,
+            "recipient_anchor": _anchor(agents, successor, recipient, "successor"),
+        }
+        if event_type == "status_aged_to_zero":
+            return StatusAgedToZeroEventV2(**status_common)
+        if event_type == "status_broken_by_damage":
+            return StatusBrokenByDamageEventV2(**status_common)
+        if event_type == "status_refreshed_or_extended":
+            return StatusRefreshedOrExtendedEventV2(**status_common)
+        if event_type == "status_cleared_by_new_death":
+            return StatusClearedByNewDeathEventV2(**status_common)
+        source = cast(int, spec["source"])
+        return StatusAppliedEventV2(
+            **status_common,
+            source_global_slot=source,
+            source_anchor=_anchor(agents, successor, source, "successor"),
+        )
+    if event_type == "spawn_shield_expired":
+        slot = cast(int, spec["agent"])
+        return SpawnShieldExpiredEventV2(
+            **common,
+            agent_global_slot=slot,
+            agent_anchor=_anchor(agents, successor, slot, "successor"),
+        )
+    if event_type == "respawn_wave_occurred":
+        team_index = cast(int, spec["team_index"])
+        return RespawnWaveOccurredEventV2(
+            **common,
+            team_index=team_index,
+            team_id=team_index + 1,
+            team_anchor=VisualTeamAnchorV2(
+                phase="successor",
+                team_index=team_index,
+                team_id=team_index + 1,
+            ),
+        )
+    if event_type == "agent_respawned":
+        slot = cast(int, spec["agent"])
+        return AgentRespawnedEventV2(
+            **common,
+            agent_global_slot=slot,
+            team_id=agents[slot].team_id,
+            realized_successor_position=successor[slot],
+            agent_anchor=_anchor(agents, successor, slot, "successor"),
+        )
+    raise AssertionError(f"unsupported synthetic V2 event: {event_type}.")
 
 
 def _batch(
-    events: tuple[SyntheticEventV1, ...],
-) -> VisualEventBatchV1:
-    return VisualEventBatchV1(
-        schema_version=EVENT_SCHEMA_VERSION,
-        transition_id=1,
-        simulator_step=1,
+    name: str,
+    agents: tuple[AgentSceneV2, ...],
+    specs: tuple[Mapping[str, object], ...],
+    *,
+    start_positions: Mapping[int, tuple[float, float]] | None = None,
+    post_charge_positions: Mapping[int, tuple[float, float]] | None = None,
+) -> VisualEventBatchV2:
+    episode_id = f"synthetic:{name}"
+    transition_id = f"{episode_id}:transition:0"
+    by_slot = {agent.global_slot: agent for agent in agents}
+    successor = {slot: agent.position for slot, agent in by_slot.items()}
+    start = {**successor, **(start_positions or {})}
+    post_charge = {**successor, **(post_charge_positions or {})}
+    trajectories = tuple(
+        VisualAgentPhaseTrajectoryV2(
+            global_slot=slot,
+            public_agent_id=agent.public_agent_id,
+            transition_start=_anchor(by_slot, start, slot, "transition_start"),
+            post_charge=_anchor(by_slot, post_charge, slot, "post_charge"),
+            successor=_anchor(by_slot, successor, slot, "successor"),
+        )
+        for slot, agent in sorted(by_slot.items())
+    )
+    events = tuple(
+        _event_from_spec(
+            event_id=f"{transition_id}:event:{ordinal:04d}",
+            transition_id=transition_id,
+            ordinal=ordinal,
+            spec=spec,
+            agents=by_slot,
+            start=start,
+            post_charge=post_charge,
+            successor=successor,
+        )
+        for ordinal, spec in enumerate(specs)
+    )
+    active_slots = set(by_slot)
+    return VisualEventBatchV2(
+        schema_version=EVENT_V2_SCHEMA_VERSION,
+        episode_id=episode_id,
+        transition_index=0,
+        transition_id=transition_id,
+        start_frame_id=f"{episode_id}:frame:0",
+        successor_frame_id=f"{episode_id}:frame:1",
+        start_simulator_step_count=0,
+        successor_simulator_step_count=1,
+        public_agent_id_by_global_slot=tuple(str(slot) for slot in range(10)),
+        configured_active_by_global_slot=tuple(
+            slot in active_slots for slot in range(10)
+        ),
+        agent_phase_trajectories=trajectories,
         events=events,
+    )
+
+
+def _scene(
+    name: str,
+    agents: tuple[AgentSceneV2, ...],
+    *,
+    event_batch: VisualEventBatchV2 | None = None,
+    map_scene: MapSceneV1,
+    aura_fields: tuple[AuraFieldSceneV2, ...] = (),
+    ranges: tuple[RangeSceneV1, ...] = (),
+    selection: SelectionSceneV1 | None = None,
+    selected_legality: SelectedLegalitySceneV1 | None = None,
+    visibility_by_slot: Mapping[int, bool] | None = None,
+    badge: str = "PRIVILEGED RESEARCHER VIEW · SYNTHETIC FIXTURE",
+) -> BattlefieldSceneV2:
+    episode_id = f"synthetic:{name}"
+    frame_index = 0 if event_batch is None else 1
+    if event_batch is not None and event_batch.episode_id != episode_id:
+        raise ValueError("synthetic scene and event batch names must join.")
+    resolved_visibility = (
+        {}
+        if selection is None
+        else {
+            agent.global_slot: (
+                visibility_by_slot[agent.global_slot]
+                if visibility_by_slot is not None
+                else agent.global_slot < 7
+            )
+            for agent in agents
+        }
+    )
+    return BattlefieldSceneV2(
+        schema_version=SCENE_V2_SCHEMA_VERSION,
+        audience="researcher",
+        audience_badge=badge,
+        episode_id=episode_id,
+        frame_index=frame_index,
+        frame_id=f"{episode_id}:frame:{frame_index}",
+        simulator_step_count=frame_index,
+        incoming_transition_id=(
+            None if event_batch is None else event_batch.transition_id
+        ),
+        incoming_event_ids=(
+            ()
+            if event_batch is None
+            else tuple(event.event_id for event in event_batch.events)
+        ),
+        map=map_scene,
+        agents=agents,
+        aura_fields=aura_fields,
+        class_mechanics=_class_mechanics(),
+        spawn_pads=tuple(
+            SpawnPadSceneV2(
+                team_id=agent.team_id,
+                team_local_slot=agent.team_local_slot,
+                assigned_global_slot=agent.global_slot,
+                assigned_public_agent_id=agent.public_agent_id,
+                position=agent.position,
+            )
+            for agent in agents
+        ),
+        respawn_waves=(
+            RespawnWaveSceneV2(
+                team_index=0, team_id=1, period_steps=10, countdown_steps=4
+            ),
+            RespawnWaveSceneV2(
+                team_index=1, team_id=2, period_steps=10, countdown_steps=7
+            ),
+        ),
+        ranges=ranges,
+        selection=selection,
+        next_decision_selected_legality=selected_legality,
+        observer_visibility=tuple(
+            ObserverVisibilitySceneV1(
+                observer_global_slot=selection.controlled_global_slot,
+                candidate_global_slot=agent.global_slot,
+                visible=resolved_visibility[agent.global_slot],
+            )
+            for agent in agents
+            if selection is not None
+        ),
+    )
+
+
+def _activation_specs(
+    rows: tuple[tuple[str, int, int | None], ...],
+) -> tuple[Mapping[str, object], ...]:
+    return tuple(
+        MappingProxyType(
+            {
+                "event_type": "ability_activated",
+                "component": (
+                    "basic" if token in ("basic_damage", "basic_heal") else "ultimate"
+                ),
+                "source": source,
+                "recipient": recipient,
+            }
+        )
+        for token, source, recipient in rows
     )
 
 
@@ -310,34 +962,12 @@ _CROWDED_POSITIONS = (
     (10.75, 8.6),
     (13.5, 8.6),
 )
-_CROWDED_PRE_ANCHORS: Mapping[int, tuple[float, float]] = MappingProxyType(
-    {
-        1: (5.25, 2.6),
-        6: (5.25, 9.4),
-    }
-)
-_CROWDED_STATUS_TOKENS: Mapping[int, tuple[StatusTokenId, ...]] = MappingProxyType(
+_CROWDED_PRE_ANCHORS = MappingProxyType({1: (5.25, 2.6), 6: (5.25, 9.4)})
+_CROWDED_STATUS_TOKENS = MappingProxyType(
     {slot: CANONICAL_STATUS_ORDER for slot in range(10)}
 )
-_CROWDED_AGENT_MODIFIERS = (
-    _modifier(
-        "mage_amplification",
-        1.2,
-        "Mage aura x1.20",
-        "Effective Mage amplification multiplier 1.20",
-    ),
-    _modifier(
-        "warrior_mitigation",
-        0.8,
-        "Warrior aura x0.80",
-        "Effective Warrior mitigation multiplier 0.80",
-    ),
-)
-_CROWDED_MODIFIERS: Mapping[
-    int,
-    tuple[ModifierSceneV1, ...],
-] = MappingProxyType({slot: _CROWDED_AGENT_MODIFIERS for slot in range(10)})
-_CROWDED_HEALTH: Mapping[int, float] = MappingProxyType(
+_CROWDED_MODIFIERS = MappingProxyType({slot: (1.2, 0.8) for slot in range(10)})
+_CROWDED_HEALTH = MappingProxyType(
     {
         0: 82.0,
         1: 88.0,
@@ -355,14 +985,86 @@ _CROWDED_AGENTS = _agents(
     _CROWDED_POSITIONS,
     status_tokens=_CROWDED_STATUS_TOKENS,
     health=_CROWDED_HEALTH,
-    modifiers=_CROWDED_MODIFIERS,
+    modifier_values=_CROWDED_MODIFIERS,
 )
 _CROWDED_AGENT_MAP = {agent.global_slot: agent for agent in _CROWDED_AGENTS}
-_CROWDED_SCENE = BattlefieldSceneV1(
-    schema_version=SCENE_SCHEMA_VERSION,
-    audience="researcher",
-    audience_badge="PRIVILEGED RESEARCHER VIEW · SYNTHETIC FIXTURE",
-    map=MapSceneV1(
+_CROWDED_ACTIVATION_ROWS = (
+    ("basic_damage", 0, 5),
+    ("basic_damage", 5, 0),
+    ("warrior_charge", 1, 6),
+    ("warrior_charge", 6, 1),
+    ("hunter_trap", 2, 7),
+    ("hunter_trap", 7, 2),
+    ("rogue_poison", 3, 8),
+    ("rogue_poison", 8, 3),
+    ("holy_word", 4, 4),
+    ("holy_word", 9, 9),
+)
+_CROWDED_HEALTH_ROWS = (
+    (0, 90.0, 82.0),
+    (1, 100.0, 88.0),
+    (3, 100.0, 92.0),
+    (4, 70.0, 80.0),
+    (5, 90.0, 82.0),
+    (6, 100.0, 88.0),
+    (8, 100.0, 92.0),
+    (9, 70.0, 80.0),
+)
+_CROWDED_STATUS_ROWS = (
+    (6, "warrior_charge_stun", 1),
+    (6, "warrior_charge_slow", 1),
+    (1, "warrior_charge_stun", 6),
+    (1, "warrior_charge_slow", 6),
+    (7, "hunter_trap_stun", 2),
+    (2, "hunter_trap_stun", 7),
+    (8, "rogue_poison_stun", 3),
+    (8, "rogue_poison_slow", 3),
+    (8, "rogue_poison_anti_heal", 3),
+    (3, "rogue_poison_stun", 8),
+    (3, "rogue_poison_slow", 8),
+    (3, "rogue_poison_anti_heal", 8),
+)
+_CROWDED_SPECS = (
+    *_activation_specs(_CROWDED_ACTIVATION_ROWS),
+    *(
+        MappingProxyType(
+            {
+                "event_type": "recipient_health_resolution",
+                "recipient": slot,
+                "before": before,
+                "after": after,
+                "delta": after - before,
+                "damage": max(before - after, 0.0),
+                "healing": max(after - before, 0.0),
+            }
+        )
+        for slot, before, after in _CROWDED_HEALTH_ROWS
+    ),
+    MappingProxyType({"event_type": "charge_phase_displacement", "agent": 1}),
+    MappingProxyType({"event_type": "charge_phase_displacement", "agent": 6}),
+    *(
+        MappingProxyType(
+            {
+                "event_type": "status_applied",
+                "recipient": recipient,
+                "status_id": status_id,
+                "source": source,
+            }
+        )
+        for recipient, status_id, source in _CROWDED_STATUS_ROWS
+    ),
+)
+_CROWDED_BATCH = _batch(
+    "crowded_teamfight",
+    _CROWDED_AGENTS,
+    _CROWDED_SPECS,
+    start_positions=_CROWDED_PRE_ANCHORS,
+)
+_CROWDED_SCENE = _scene(
+    "crowded_teamfight",
+    _CROWDED_AGENTS,
+    event_batch=_CROWDED_BATCH,
+    map_scene=MapSceneV1(
         width=16.0,
         height=12.0,
         obstacles=(
@@ -382,57 +1084,24 @@ _CROWDED_SCENE = BattlefieldSceneV1(
             ),
         ),
     ),
-    agents=_CROWDED_AGENTS,
     aura_fields=(
-        AuraFieldSceneV1(
-            source_global_slot=0,
-            token_id="mage_amplification",
-            center=_CROWDED_POSITIONS[0],
-            radius=4.0,
-        ),
-        AuraFieldSceneV1(
-            source_global_slot=1,
-            token_id="warrior_mitigation",
-            center=_CROWDED_POSITIONS[1],
-            radius=4.0,
-        ),
-        AuraFieldSceneV1(
-            source_global_slot=5,
-            token_id="mage_amplification",
-            center=_CROWDED_POSITIONS[5],
-            radius=4.0,
-        ),
-        AuraFieldSceneV1(
-            source_global_slot=6,
-            token_id="warrior_mitigation",
-            center=_CROWDED_POSITIONS[6],
-            radius=4.0,
-        ),
+        _aura_field(_CROWDED_AGENT_MAP, 0, "mage_damage_amplification", 4.0),
+        _aura_field(_CROWDED_AGENT_MAP, 1, "warrior_damage_mitigation", 4.0),
+        _aura_field(_CROWDED_AGENT_MAP, 5, "mage_damage_amplification", 4.0),
+        _aura_field(_CROWDED_AGENT_MAP, 6, "warrior_damage_mitigation", 4.0),
     ),
     ranges=(
         RangeSceneV1(
-            global_slot=0,
-            center=_CROWDED_POSITIONS[0],
-            radius=6.0,
-            kind="observation",
+            global_slot=0, center=_CROWDED_POSITIONS[0], radius=6.0, kind="observation"
         ),
         RangeSceneV1(
-            global_slot=0,
-            center=_CROWDED_POSITIONS[0],
-            radius=3.0,
-            kind="basic",
+            global_slot=0, center=_CROWDED_POSITIONS[0], radius=3.0, kind="basic"
         ),
         RangeSceneV1(
-            global_slot=0,
-            center=_CROWDED_POSITIONS[0],
-            radius=4.0,
-            kind="ultimate",
+            global_slot=0, center=_CROWDED_POSITIONS[0], radius=4.0, kind="ultimate"
         ),
     ),
-    selection=SelectionSceneV1(
-        controlled_global_slot=0,
-        selected_global_slot=7,
-    ),
+    selection=SelectionSceneV1(controlled_global_slot=0, selected_global_slot=7),
     selected_legality=SelectedLegalitySceneV1(
         controlled_global_slot=0,
         target_global_slot=7,
@@ -442,146 +1111,6 @@ _CROWDED_SCENE = BattlefieldSceneV1(
         armed_lane=1,
         armed_pair_legal=False,
     ),
-    pending_route=PendingRouteSceneV1(
-        source_global_slot=0,
-        target_global_slot=7,
-        source_anchor=_CROWDED_POSITIONS[0],
-        target_anchor=_CROWDED_POSITIONS[7],
-        lane=1,
-        legal=False,
-    ),
-    observer_visibility=tuple(
-        ObserverVisibilitySceneV1(
-            observer_global_slot=0,
-            candidate_global_slot=slot,
-            visible=slot < 7,
-        )
-        for slot in range(10)
-    ),
-)
-_CROWDED_ACTIVATION_SPECS: tuple[
-    tuple[ActivationTokenId, int, int | None],
-    ...,
-] = (
-    ("basic_damage", 0, 5),
-    ("basic_damage", 5, 0),
-    ("warrior_charge", 1, 6),
-    ("warrior_charge", 6, 1),
-    ("hunter_trap", 2, 7),
-    ("hunter_trap", 7, 2),
-    ("rogue_poison", 3, 8),
-    ("rogue_poison", 8, 3),
-    ("holy_word", 4, 4),
-    ("holy_word", 9, 9),
-)
-_CROWDED_ACTIVATIONS = tuple(
-    _activation(
-        fixture_name="crowded_teamfight",
-        ordinal=ordinal,
-        token_id=token_id,
-        source_global_slot=source,
-        target_global_slot=target,
-        agents=_CROWDED_AGENT_MAP,
-        anchor_positions=_CROWDED_PRE_ANCHORS,
-    )
-    for ordinal, (token_id, source, target) in enumerate(_CROWDED_ACTIVATION_SPECS)
-)
-_CROWDED_NET_SPECS: tuple[
-    tuple[int, float, float, HealthOutcome],
-    ...,
-] = (
-    (0, 90.0, 82.0, "damage"),
-    (1, 100.0, 88.0, "damage"),
-    (3, 100.0, 92.0, "damage"),
-    (4, 70.0, 80.0, "healing"),
-    (5, 90.0, 82.0, "damage"),
-    (6, 100.0, 88.0, "damage"),
-    (8, 100.0, 92.0, "damage"),
-    (9, 70.0, 80.0, "healing"),
-)
-_CROWDED_NET_EVENTS = tuple(
-    NetHealthEventV1(
-        event_id=f"synthetic:crowded_teamfight:net-health-{ordinal}",
-        transition_id=1,
-        recipient_global_slot=slot,
-        recipient_anchor=_CROWDED_POSITIONS[slot],
-        health_before=health_before,
-        health_after=health_after,
-        net_delta=health_after - health_before,
-        outcome=outcome,
-    )
-    for ordinal, (slot, health_before, health_after, outcome) in enumerate(
-        _CROWDED_NET_SPECS
-    )
-)
-_CROWDED_CHARGE_EVENTS = (
-    ChargeDisplacementEventV1(
-        event_id="synthetic:crowded_teamfight:charge-0",
-        transition_id=1,
-        source_global_slot=1,
-        target_global_slot=6,
-        start=_CROWDED_PRE_ANCHORS[1],
-        end=_CROWDED_POSITIONS[1],
-        path_kind="charge_only",
-    ),
-    ChargeDisplacementEventV1(
-        event_id="synthetic:crowded_teamfight:charge-1",
-        transition_id=1,
-        source_global_slot=6,
-        target_global_slot=1,
-        start=_CROWDED_PRE_ANCHORS[6],
-        end=_CROWDED_POSITIONS[6],
-        path_kind="charge_only",
-    ),
-)
-_CROWDED_LIFECYCLE_SPECS: tuple[
-    tuple[int, StatusTokenId, int, int],
-    ...,
-] = (
-    (6, "stun_warrior_charge", 2, WARRIOR_CLASS_ID),
-    (6, "slow_warrior_charge", 2, WARRIOR_CLASS_ID),
-    (1, "stun_warrior_charge", 3, WARRIOR_CLASS_ID),
-    (1, "slow_warrior_charge", 3, WARRIOR_CLASS_ID),
-    (7, "stun_hunter_trap", 4, HUNTER_CLASS_ID),
-    (2, "stun_hunter_trap", 5, HUNTER_CLASS_ID),
-    (8, "stun_rogue_poison", 6, ROGUE_CLASS_ID),
-    (8, "slow_rogue_poison", 6, ROGUE_CLASS_ID),
-    (8, "anti_heal_rogue_poison", 6, ROGUE_CLASS_ID),
-    (3, "stun_rogue_poison", 7, ROGUE_CLASS_ID),
-    (3, "slow_rogue_poison", 7, ROGUE_CLASS_ID),
-    (3, "anti_heal_rogue_poison", 7, ROGUE_CLASS_ID),
-)
-_CROWDED_LIFECYCLE_EVENTS = tuple(
-    StatusLifecycleEventV1(
-        event_id=f"synthetic:crowded_teamfight:status-{ordinal}",
-        transition_id=1,
-        recipient_global_slot=recipient,
-        recipient_anchor=_CROWDED_POSITIONS[recipient],
-        token_id=token_id,
-        change="applied",
-        duration_before=0,
-        duration_after=next(
-            status.duration
-            for status in _CROWDED_AGENT_MAP[recipient].statuses
-            if status.token_id == token_id
-        ),
-        source_class_id=source_class_id,
-        application_event_ids=(_CROWDED_ACTIVATIONS[activation_index].event_id,),
-    )
-    for ordinal, (
-        recipient,
-        token_id,
-        activation_index,
-        source_class_id,
-    ) in enumerate(_CROWDED_LIFECYCLE_SPECS)
-)
-_CROWDED_BATCH = _batch(
-    (
-        *_CROWDED_ACTIVATIONS,
-        *_CROWDED_NET_EVENTS,
-        *_CROWDED_CHARGE_EVENTS,
-        *_CROWDED_LIFECYCLE_EVENTS,
-    )
 )
 
 
@@ -597,23 +1126,8 @@ _ROUTE_POSITIONS = (
     (10.5, 5.8),
     (6.08, 8.04),
 )
-_ROUTE_AGENTS = _agents(
-    _ROUTE_POSITIONS,
-    class_ids=(HUNTER_CLASS_ID,) * 10,
-)
-_ROUTE_AGENT_MAP = {agent.global_slot: agent for agent in _ROUTE_AGENTS}
-_ROUTE_SCENE = BattlefieldSceneV1(
-    schema_version=SCENE_SCHEMA_VERSION,
-    audience="researcher",
-    audience_badge="PRIVILEGED RESEARCHER VIEW · SYNTHETIC FIXTURE",
-    map=MapSceneV1(width=12.0, height=10.0),
-    agents=_ROUTE_AGENTS,
-    selection=SelectionSceneV1(
-        controlled_global_slot=0,
-        selected_global_slot=5,
-    ),
-)
-_ROUTE_SPECS: tuple[tuple[ActivationTokenId, int, int | None], ...] = (
+_ROUTE_AGENTS = _agents(_ROUTE_POSITIONS, class_ids=(HUNTER_CLASS_ID,) * 10)
+_ROUTE_ROWS = (
     ("basic_damage", 0, 5),
     ("basic_damage", 5, 0),
     ("basic_damage", 1, 6),
@@ -624,18 +1138,13 @@ _ROUTE_SPECS: tuple[tuple[ActivationTokenId, int, int | None], ...] = (
     ("basic_damage", 3, 5),
     ("basic_damage", 4, 9),
 )
-_ROUTE_BATCH = _batch(
-    tuple(
-        _activation(
-            fixture_name="route_collision",
-            ordinal=ordinal,
-            token_id=token_id,
-            source_global_slot=source,
-            target_global_slot=target,
-            agents=_ROUTE_AGENT_MAP,
-        )
-        for ordinal, (token_id, source, target) in enumerate(_ROUTE_SPECS)
-    ),
+_ROUTE_BATCH = _batch("route_collision", _ROUTE_AGENTS, _activation_specs(_ROUTE_ROWS))
+_ROUTE_SCENE = _scene(
+    "route_collision",
+    _ROUTE_AGENTS,
+    event_batch=_ROUTE_BATCH,
+    map_scene=MapSceneV1(width=12.0, height=10.0),
+    selection=SelectionSceneV1(controlled_global_slot=0, selected_global_slot=5),
 )
 
 
@@ -651,55 +1160,30 @@ _MIXED_POSITIONS = (
     (8.0, 8.0),
     (7.0, 5.5),
 )
-_MIXED_AGENTS = _agents(
-    _MIXED_POSITIONS,
-    health={5: 50.0},
-    included_slots=(0, 5, 9),
-)
-_MIXED_AGENT_MAP = {agent.global_slot: agent for agent in _MIXED_AGENTS}
-_MIXED_SCENE = BattlefieldSceneV1(
-    schema_version=SCENE_SCHEMA_VERSION,
-    audience="researcher",
-    audience_badge="PRIVILEGED RESEARCHER VIEW · SYNTHETIC FIXTURE",
-    map=MapSceneV1(width=10.0, height=12.0),
-    agents=_MIXED_AGENTS,
-    selection=SelectionSceneV1(
-        controlled_global_slot=0,
-        selected_global_slot=5,
+_MIXED_AGENTS = _agents(_MIXED_POSITIONS, health={5: 50.0}, included_slots=(0, 5, 9))
+_MIXED_SPECS = (
+    *_activation_specs((("basic_damage", 0, 5), ("basic_heal", 9, 5))),
+    MappingProxyType(
+        {
+            "event_type": "recipient_health_resolution",
+            "recipient": 5,
+            "before": 50.0,
+            "after": 50.0,
+            "delta": 0.0,
+            "damage": 10.0,
+            "healing": 10.0,
+        }
     ),
 )
-_MIXED_DAMAGE = _activation(
-    fixture_name="mixed_net_zero",
-    ordinal=0,
-    token_id="basic_damage",
-    source_global_slot=0,
-    target_global_slot=5,
-    agents=_MIXED_AGENT_MAP,
+_MIXED_BATCH = _batch("mixed_net_zero", _MIXED_AGENTS, _MIXED_SPECS)
+_MIXED_SCENE = _scene(
+    "mixed_net_zero",
+    _MIXED_AGENTS,
+    event_batch=_MIXED_BATCH,
+    map_scene=MapSceneV1(width=10.0, height=12.0),
+    selection=SelectionSceneV1(controlled_global_slot=0, selected_global_slot=5),
 )
-_MIXED_HEAL = _activation(
-    fixture_name="mixed_net_zero",
-    ordinal=1,
-    token_id="basic_heal",
-    source_global_slot=9,
-    target_global_slot=5,
-    agents=_MIXED_AGENT_MAP,
-)
-_MIXED_BATCH = _batch(
-    (
-        _MIXED_DAMAGE,
-        _MIXED_HEAL,
-        NetHealthEventV1(
-            event_id="synthetic:mixed_net_zero:net-health-0",
-            transition_id=1,
-            recipient_global_slot=5,
-            recipient_anchor=_MIXED_POSITIONS[5],
-            health_before=50.0,
-            health_after=50.0,
-            net_delta=0.0,
-            outcome="unchanged",
-        ),
-    ),
-)
+
 
 _VOCABULARY_POSITIONS = (
     (2.0, 3.0),
@@ -716,40 +1200,59 @@ _VOCABULARY_POSITIONS = (
 _VOCABULARY_AGENTS = _agents(
     _VOCABULARY_POSITIONS,
     status_tokens={
-        0: (
-            "stun_warrior_charge",
-            "stun_hunter_trap",
-            "stun_rogue_poison",
-        ),
-        2: (
-            "slow_warrior_charge",
-            "slow_hunter_basic",
-            "slow_rogue_poison",
-        ),
+        0: ("stun_warrior_charge", "stun_hunter_trap", "stun_rogue_poison"),
+        2: ("slow_warrior_charge", "slow_hunter_basic", "slow_rogue_poison"),
     },
     health={5: 87.654, 9: 78.5},
     cooldowns={0: 1, 1: 2, 2: 3, 3: 4, 4: 5},
 )
 _VOCABULARY_AGENT_MAP = {agent.global_slot: agent for agent in _VOCABULARY_AGENTS}
-_VOCABULARY_SCENE = BattlefieldSceneV1(
-    schema_version=SCENE_SCHEMA_VERSION,
-    audience="researcher",
-    audience_badge="PRIVILEGED RESEARCHER VIEW · SYNTHETIC VISUAL VOCABULARY",
-    map=MapSceneV1(width=16.0, height=12.0),
-    agents=_VOCABULARY_AGENTS,
+_VOCABULARY_ROWS = (
+    ("basic_damage", 0, 5),
+    ("basic_damage", 1, 6),
+    ("basic_damage", 2, 7),
+    ("basic_damage", 3, 8),
+    ("basic_heal", 4, 9),
+    ("mage_burst", 0, None),
+    ("warrior_charge", 1, 6),
+    ("hunter_trap", 2, 7),
+    ("rogue_poison", 3, 8),
+    ("holy_word", 4, 9),
+)
+_VOCABULARY_SPECS = (
+    *_activation_specs(_VOCABULARY_ROWS),
+    MappingProxyType(
+        {
+            "event_type": "recipient_health_resolution",
+            "recipient": 5,
+            "before": 99.999,
+            "after": 87.654,
+            "delta": -12.345,
+            "damage": 12.345,
+            "healing": 0.0,
+        }
+    ),
+    MappingProxyType(
+        {
+            "event_type": "recipient_health_resolution",
+            "recipient": 9,
+            "before": 70.0,
+            "after": 78.5,
+            "delta": 8.5,
+            "damage": 0.0,
+            "healing": 8.5,
+        }
+    ),
+)
+_VOCABULARY_BATCH = _batch("visual_vocabulary", _VOCABULARY_AGENTS, _VOCABULARY_SPECS)
+_VOCABULARY_SCENE = _scene(
+    "visual_vocabulary",
+    _VOCABULARY_AGENTS,
+    event_batch=_VOCABULARY_BATCH,
+    map_scene=MapSceneV1(width=16.0, height=12.0),
     aura_fields=(
-        AuraFieldSceneV1(
-            source_global_slot=0,
-            token_id="mage_amplification",
-            center=_VOCABULARY_POSITIONS[0],
-            radius=1.05,
-        ),
-        AuraFieldSceneV1(
-            source_global_slot=1,
-            token_id="warrior_mitigation",
-            center=_VOCABULARY_POSITIONS[1],
-            radius=1.05,
-        ),
+        _aura_field(_VOCABULARY_AGENT_MAP, 0, "mage_damage_amplification", 1.05),
+        _aura_field(_VOCABULARY_AGENT_MAP, 1, "warrior_damage_mitigation", 1.05),
     ),
     ranges=(
         RangeSceneV1(
@@ -768,84 +1271,15 @@ _VOCABULARY_SCENE = BattlefieldSceneV1(
             for slot in range(5)
         ),
         RangeSceneV1(
-            global_slot=0,
-            kind="ultimate",
-            center=_VOCABULARY_POSITIONS[0],
-            radius=1.2,
+            global_slot=0, kind="ultimate", center=_VOCABULARY_POSITIONS[0], radius=1.2
         ),
     ),
-    selection=SelectionSceneV1(
-        controlled_global_slot=0,
-        selected_global_slot=5,
-    ),
-)
-_VOCABULARY_BASIC_TOKENS: tuple[ActivationTokenId, ...] = (
-    "basic_damage",
-    "basic_damage",
-    "basic_damage",
-    "basic_damage",
-    "basic_heal",
-)
-_VOCABULARY_ULTIMATE_TOKENS: tuple[ActivationTokenId, ...] = (
-    "mage_burst",
-    "warrior_charge",
-    "hunter_trap",
-    "rogue_poison",
-    "holy_word",
-)
-_VOCABULARY_ACTIVATION_SPECS: tuple[
-    tuple[ActivationTokenId, int, int | None],
-    ...,
-] = (
-    *(
-        (token_id, slot, slot + 5)
-        for slot, token_id in enumerate(_VOCABULARY_BASIC_TOKENS)
-    ),
-    *(
-        (token_id, slot, None if token_id == "mage_burst" else slot + 5)
-        for slot, token_id in enumerate(_VOCABULARY_ULTIMATE_TOKENS)
-    ),
-)
-_VOCABULARY_ACTIVATIONS = tuple(
-    _activation(
-        fixture_name="visual_vocabulary",
-        ordinal=ordinal,
-        token_id=token_id,
-        source_global_slot=source_slot,
-        target_global_slot=target_slot,
-        agents=_VOCABULARY_AGENT_MAP,
-    )
-    for ordinal, (token_id, source_slot, target_slot) in enumerate(
-        _VOCABULARY_ACTIVATION_SPECS
-    )
-)
-_VOCABULARY_BATCH = _batch(
-    (
-        *_VOCABULARY_ACTIVATIONS,
-        NetHealthEventV1(
-            event_id="synthetic:visual_vocabulary:net-damage",
-            transition_id=1,
-            recipient_global_slot=5,
-            recipient_anchor=_VOCABULARY_POSITIONS[5],
-            health_before=99.999,
-            health_after=87.654,
-            net_delta=-12.345,
-            outcome="damage",
-        ),
-        NetHealthEventV1(
-            event_id="synthetic:visual_vocabulary:net-healing",
-            transition_id=1,
-            recipient_global_slot=9,
-            recipient_anchor=_VOCABULARY_POSITIONS[9],
-            health_before=70.0,
-            health_after=78.5,
-            net_delta=8.5,
-            outcome="healing",
-        ),
-    )
+    selection=SelectionSceneV1(controlled_global_slot=0, selected_global_slot=5),
+    badge="PRIVILEGED RESEARCHER VIEW · SYNTHETIC VISUAL VOCABULARY",
 )
 
-_DURABLE_CONTROL_POSITIONS = (
+
+_DURABLE_POSITIONS = (
     (4.0, 5.0),
     (0.0, 0.0),
     (0.0, 0.0),
@@ -857,32 +1291,154 @@ _DURABLE_CONTROL_POSITIONS = (
     (0.0, 0.0),
     (0.0, 0.0),
 )
-_DURABLE_CONTROL_AGENTS = _agents(
-    _DURABLE_CONTROL_POSITIONS,
+_DURABLE_AGENTS = _agents(
+    _DURABLE_POSITIONS,
     status_tokens={
-        0: (
-            "stun_warrior_charge",
-            "stun_hunter_trap",
-            "stun_rogue_poison",
-        ),
-        5: (
-            "slow_warrior_charge",
-            "slow_hunter_basic",
-            "slow_rogue_poison",
-        ),
+        0: ("stun_warrior_charge", "stun_hunter_trap", "stun_rogue_poison"),
+        5: ("slow_warrior_charge", "slow_hunter_basic", "slow_rogue_poison"),
     },
     included_slots=(0, 5),
 )
-_DURABLE_CONTROL_SCENE = BattlefieldSceneV1(
-    schema_version=SCENE_SCHEMA_VERSION,
-    audience="researcher",
-    audience_badge="PRIVILEGED RESEARCHER VIEW · SYNTHETIC DURABLE CONTROLS",
-    map=MapSceneV1(width=16.0, height=10.0),
-    agents=_DURABLE_CONTROL_AGENTS,
-    selection=SelectionSceneV1(
-        controlled_global_slot=0,
-        selected_global_slot=5,
+_DURABLE_SCENE = _scene(
+    "durable_controls",
+    _DURABLE_AGENTS,
+    map_scene=MapSceneV1(width=16.0, height=10.0),
+    selection=SelectionSceneV1(controlled_global_slot=0, selected_global_slot=5),
+    badge="PRIVILEGED RESEARCHER VIEW · SYNTHETIC DURABLE CONTROLS",
+)
+
+
+_VIEWPORTS = (
+    ViewportCaseV1(label="desktop", width=1440, height=900, expected_layout="split"),
+    ViewportCaseV1(label="compact", width=1024, height=768, expected_layout="split"),
+    ViewportCaseV1(label="minimum", width=960, height=600, expected_layout="split"),
+    ViewportCaseV1(label="stacked", width=800, height=900, expected_layout="stacked"),
+)
+_VIEWPORT_SPECS = (
+    *_activation_specs((("basic_damage", 0, 5), ("hunter_trap", 2, 7))),
+    MappingProxyType(
+        {
+            "event_type": "recipient_health_resolution",
+            "recipient": 0,
+            "before": 90.0,
+            "after": 82.0,
+            "delta": -8.0,
+            "damage": 8.0,
+            "healing": 0.0,
+        }
     ),
+)
+_VIEWPORT_BATCH = _batch("viewport_matrix", _CROWDED_AGENTS, _VIEWPORT_SPECS)
+_VIEWPORT_AURA_SPECS: tuple[tuple[int, AuraIdV2], ...] = (
+    (0, "mage_damage_amplification"),
+    (1, "warrior_damage_mitigation"),
+    (5, "mage_damage_amplification"),
+    (6, "warrior_damage_mitigation"),
+)
+_VIEWPORT_SCENE = _scene(
+    "viewport_matrix",
+    _CROWDED_AGENTS,
+    event_batch=_VIEWPORT_BATCH,
+    map_scene=_CROWDED_SCENE.map,
+    aura_fields=tuple(
+        _aura_field(_CROWDED_AGENT_MAP, slot, aura_id, 4.0)
+        for slot, aura_id in _VIEWPORT_AURA_SPECS
+    ),
+    ranges=_CROWDED_SCENE.ranges,
+    selection=_CROWDED_SCENE.selection,
+    selected_legality=_CROWDED_SCENE.next_decision_selected_legality,
+)
+
+
+_GRAMMAR_NAME = "canonical_event_vocabulary"
+_GRAMMAR_EPISODE = f"synthetic:{_GRAMMAR_NAME}"
+_GRAMMAR_TRANSITION = f"{_GRAMMAR_EPISODE}:transition:0"
+_GRAMMAR_POSITIONS = _VOCABULARY_POSITIONS
+_GRAMMAR_AGENTS = _agents(
+    _GRAMMAR_POSITIONS,
+    health={5: 0.0},
+    corpses=(5,),
+    spawn_shields={9: 3},
+    respawn_event_ids={9: f"{_GRAMMAR_TRANSITION}:event:0020"},
+)
+_GRAMMAR_SPECS = tuple(
+    MappingProxyType(row)
+    for row in (
+        {"event_type": "action_rejected", "actor": 0, "component": "movement"},
+        {
+            "event_type": "ability_activated",
+            "source": 0,
+            "recipient": None,
+            "component": "ultimate",
+        },
+        {"event_type": "source_damage_output", "source": 1, "recipient": 6},
+        {"event_type": "source_healing_output", "source": 4, "recipient": 0},
+        {
+            "event_type": "recipient_health_resolution",
+            "recipient": 0,
+            "before": 90.0,
+            "after": 92.0,
+            "delta": 2.0,
+            "damage": 8.0,
+            "healing": 10.0,
+        },
+        {"event_type": "combat_countdown_reset", "agent": 0},
+        {"event_type": "health_regenerated", "agent": 0, "amount": 2.0},
+        {"event_type": "cooldown_started", "agent": 0},
+        {"event_type": "cooldown_ready", "agent": 1},
+        {"event_type": "charge_phase_displacement", "agent": 1},
+        {"event_type": "ordinary_movement_phase_displacement", "agent": 1},
+        {"event_type": "agent_died", "recipient": 5},
+        {
+            "event_type": "lethal_damage_contribution",
+            "source": 0,
+            "recipient": 5,
+            "amount": 4.0,
+        },
+        {
+            "event_type": "status_aged_to_zero",
+            "recipient": 6,
+            "status_id": "warrior_charge_stun",
+        },
+        {
+            "event_type": "status_broken_by_damage",
+            "recipient": 7,
+            "status_id": "hunter_trap_stun",
+        },
+        {
+            "event_type": "status_applied",
+            "source": 2,
+            "recipient": 7,
+            "status_id": "hunter_basic_slow",
+        },
+        {
+            "event_type": "status_refreshed_or_extended",
+            "recipient": 8,
+            "status_id": "rogue_poison_slow",
+        },
+        {
+            "event_type": "status_cleared_by_new_death",
+            "recipient": 5,
+            "status_id": "rogue_poison_anti_heal",
+        },
+        {"event_type": "spawn_shield_expired", "agent": 0},
+        {"event_type": "respawn_wave_occurred", "team_index": 1},
+        {"event_type": "agent_respawned", "agent": 9},
+    )
+)
+_GRAMMAR_BATCH = _batch(
+    _GRAMMAR_NAME,
+    _GRAMMAR_AGENTS,
+    _GRAMMAR_SPECS,
+    start_positions={1: (5.0, 2.4)},
+    post_charge_positions={1: (5.0, 2.8)},
+)
+_GRAMMAR_SCENE = _scene(
+    _GRAMMAR_NAME,
+    _GRAMMAR_AGENTS,
+    event_batch=_GRAMMAR_BATCH,
+    map_scene=MapSceneV1(width=16.0, height=12.0),
+    selection=SelectionSceneV1(controlled_global_slot=0, selected_global_slot=5),
 )
 
 
@@ -901,316 +1457,574 @@ _POV_CLASS_IDS = (
 _POV_SOURCE_AGENTS = _agents(
     _MIXED_POSITIONS,
     status_tokens={
-        0: (
-            "stun_rogue_poison",
-            "slow_rogue_poison",
-            "anti_heal_rogue_poison",
-        ),
+        0: ("stun_rogue_poison", "slow_rogue_poison", "anti_heal_rogue_poison"),
         5: ("stun_hunter_trap",),
     },
     health={0: 70.0, 5: 30.0},
     class_ids=_POV_CLASS_IDS,
     included_slots=(0, 1, 5),
 )
-_POV_SOURCE_AGENT_MAP = {agent.global_slot: agent for agent in _POV_SOURCE_AGENTS}
-_POV_SOURCE_SCENE = BattlefieldSceneV1(
-    schema_version=SCENE_SCHEMA_VERSION,
-    audience="researcher",
-    audience_badge="PRIVILEGED RESEARCHER VIEW · SYNTHETIC SOURCE",
-    map=MapSceneV1(width=10.0, height=12.0),
-    agents=_POV_SOURCE_AGENTS,
-    selection=SelectionSceneV1(
-        controlled_global_slot=0,
-        selected_global_slot=5,
+_POV_SOURCE_SPECS = (
+    *_activation_specs((("basic_damage", 0, 5), ("rogue_poison", 5, 0))),
+    MappingProxyType(
+        {
+            "event_type": "recipient_health_resolution",
+            "recipient": 0,
+            "before": 80.0,
+            "after": 70.0,
+            "delta": -10.0,
+            "damage": 10.0,
+            "healing": 0.0,
+        }
     ),
-    selected_legality=SelectedLegalitySceneV1(
-        controlled_global_slot=0,
-        target_global_slot=5,
-        target_action=6,
-        lane_0_available=False,
-        lane_1_available=False,
-        armed_lane=0,
-        armed_pair_legal=False,
+    MappingProxyType(
+        {
+            "event_type": "recipient_health_resolution",
+            "recipient": 5,
+            "before": 37.0,
+            "after": 30.0,
+            "delta": -7.0,
+            "damage": 7.0,
+            "healing": 0.0,
+        }
     ),
-    pending_route=PendingRouteSceneV1(
-        source_global_slot=0,
-        target_global_slot=5,
-        source_anchor=_MIXED_POSITIONS[0],
-        target_anchor=_MIXED_POSITIONS[5],
-        lane=0,
-        legal=False,
+    *(
+        MappingProxyType(
+            {
+                "event_type": "status_applied",
+                "source": 5,
+                "recipient": 0,
+                "status_id": status_id,
+            }
+        )
+        for status_id in (
+            "rogue_poison_stun",
+            "rogue_poison_slow",
+            "rogue_poison_anti_heal",
+        )
     ),
-    observer_visibility=(
-        ObserverVisibilitySceneV1(
-            observer_global_slot=0,
-            candidate_global_slot=0,
-            visible=True,
-        ),
-        ObserverVisibilitySceneV1(
-            observer_global_slot=0,
-            candidate_global_slot=1,
-            visible=True,
-        ),
-        ObserverVisibilitySceneV1(
-            observer_global_slot=0,
-            candidate_global_slot=5,
-            visible=False,
-        ),
-    ),
-)
-_POV_EXPECTED_SCENE = BattlefieldSceneV1(
-    schema_version=SCENE_SCHEMA_VERSION,
-    audience="agent_pov",
-    audience_badge="AGENT POV · id_0 · SYNTHETIC FIXTURE",
-    map=MapSceneV1(width=10.0, height=12.0),
-    agents=tuple(agent for agent in _POV_SOURCE_AGENTS if agent.global_slot in (0, 1)),
-    selection=SelectionSceneV1(
-        controlled_global_slot=0,
-        selected_global_slot=None,
-    ),
-)
-_POV_VISIBLE_TO_HIDDEN_ACTIVATION = _activation(
-    fixture_name="pov_redaction:source",
-    ordinal=0,
-    token_id="basic_damage",
-    source_global_slot=0,
-    target_global_slot=5,
-    agents=_POV_SOURCE_AGENT_MAP,
-)
-_POV_HIDDEN_TO_VISIBLE_ACTIVATION = _activation(
-    fixture_name="pov_redaction:source",
-    ordinal=1,
-    token_id="rogue_poison",
-    source_global_slot=5,
-    target_global_slot=0,
-    agents=_POV_SOURCE_AGENT_MAP,
-)
-_POV_SOURCE_LIFECYCLE_TOKENS: tuple[StatusTokenId, ...] = (
-    "stun_rogue_poison",
-    "slow_rogue_poison",
-    "anti_heal_rogue_poison",
-)
-_POV_SOURCE_LIFECYCLE_EVENTS = tuple(
-    StatusLifecycleEventV1(
-        event_id=f"synthetic:pov_redaction:source:status-{ordinal}",
-        transition_id=1,
-        recipient_global_slot=0,
-        recipient_anchor=_MIXED_POSITIONS[0],
-        token_id=token_id,
-        change="applied",
-        duration_before=0,
-        duration_after=next(
-            status.duration
-            for status in _POV_SOURCE_AGENT_MAP[0].statuses
-            if status.token_id == token_id
-        ),
-        source_class_id=ROGUE_CLASS_ID,
-        application_event_ids=(_POV_HIDDEN_TO_VISIBLE_ACTIVATION.event_id,),
-    )
-    for ordinal, token_id in enumerate(_POV_SOURCE_LIFECYCLE_TOKENS)
 )
 _POV_SOURCE_BATCH = _batch(
-    (
-        _POV_VISIBLE_TO_HIDDEN_ACTIVATION,
-        _POV_HIDDEN_TO_VISIBLE_ACTIVATION,
-        NetHealthEventV1(
-            event_id="synthetic:pov_redaction:source:net-health-0",
-            transition_id=1,
-            recipient_global_slot=0,
-            recipient_anchor=_MIXED_POSITIONS[0],
-            health_before=80.0,
-            health_after=70.0,
-            net_delta=-10.0,
-            outcome="damage",
-        ),
-        NetHealthEventV1(
-            event_id="synthetic:pov_redaction:source:net-health-1",
-            transition_id=1,
-            recipient_global_slot=5,
-            recipient_anchor=_MIXED_POSITIONS[5],
-            health_before=37.0,
-            health_after=30.0,
-            net_delta=-7.0,
-            outcome="damage",
-        ),
-        *_POV_SOURCE_LIFECYCLE_EVENTS,
-    ),
+    "pov_redaction_source", _POV_SOURCE_AGENTS, _POV_SOURCE_SPECS
 )
-_POV_SAFE_ACTIVATION = AcceptedActivationEventV1(
-    event_id="synthetic:pov_redaction:safe:activation-0",
-    transition_id=1,
-    token_id="basic_damage",
-    source_global_slot=0,
-    target_global_slot=None,
-    source_anchor=_MIXED_POSITIONS[0],
-    target_anchor=None,
-    target_disclosure="redacted",
-    lane=0,
-    source_class_id=MAGE_CLASS_ID,
-)
-_POV_SAFE_LIFECYCLE_EVENTS = tuple(
-    StatusLifecycleEventV1(
-        event_id=f"synthetic:pov_redaction:safe:status-{ordinal}",
-        transition_id=1,
-        recipient_global_slot=0,
-        recipient_anchor=_MIXED_POSITIONS[0],
-        token_id=token_id,
-        change="applied",
-        duration_before=0,
-        duration_after=next(
-            status.duration
-            for status in _POV_SOURCE_AGENT_MAP[0].statuses
-            if status.token_id == token_id
-        ),
-        source_class_id=ROGUE_CLASS_ID,
-        application_event_ids=(),
-    )
-    for ordinal, token_id in enumerate(_POV_SOURCE_LIFECYCLE_TOKENS)
-)
-_POV_SAFE_BATCH = _batch(
-    (
-        _POV_SAFE_ACTIVATION,
-        NetHealthEventV1(
-            event_id="synthetic:pov_redaction:safe:net-health-0",
-            transition_id=1,
-            recipient_global_slot=0,
-            recipient_anchor=_MIXED_POSITIONS[0],
-            health_before=80.0,
-            health_after=70.0,
-            net_delta=-10.0,
-            outcome="damage",
-        ),
-        *_POV_SAFE_LIFECYCLE_EVENTS,
-    )
+_POV_SOURCE_SCENE = _scene(
+    "pov_redaction_source",
+    _POV_SOURCE_AGENTS,
+    event_batch=_POV_SOURCE_BATCH,
+    map_scene=MapSceneV1(width=10.0, height=12.0),
+    selection=SelectionSceneV1(controlled_global_slot=0, selected_global_slot=5),
+    visibility_by_slot={0: True, 1: True, 5: False},
 )
 
-
-_VIEWPORTS = (
-    ViewportCaseV1(
-        label="desktop",
-        width=1440,
-        height=900,
-        expected_layout="split",
+_POV_EPISODE = "synthetic:pov_redaction"
+_POV_PUBLIC_ID = "0"
+_POV_TRANSITION = f"{_POV_EPISODE}:actor-pov:{_POV_PUBLIC_ID}:transition:0"
+_POV_SCENE = ActorPovBattlefieldSceneV1(
+    schema_version=ACTOR_POV_SCENE_SCHEMA_VERSION,
+    audience_badge="AGENT POV · EXACT · SYNTHETIC FIXTURE",
+    observation_materialization="exact_no_shared_obs_actor_input",
+    episode_id=_POV_EPISODE,
+    frame_index=1,
+    pov_frame_id=f"{_POV_EPISODE}:actor-pov:{_POV_PUBLIC_ID}:frame:1",
+    source_frame_id=f"{_POV_EPISODE}:frame:1",
+    simulator_step_count=1,
+    map=MapSceneV1(width=10.0, height=12.0),
+    self_actor=ActorPovSelfSceneV1(
+        global_slot=0,
+        public_agent_id=_POV_PUBLIC_ID,
+        team_local_slot=0,
+        team_id=1,
+        class_id=MAGE_CLASS_ID,
+        position=_MIXED_POSITIONS[0],
+        radius=0.5,
+        alive=True,
+        current_health=70.0,
+        max_health=100.0,
+        effective_movement_speed=1.0,
+        ultimate_cooldown_remaining=2,
+        steps_until_out_of_combat=1,
+        spawn_shield_remaining=0,
+        status_feature_values=(
+            1.0,
+            1.0,
+            1.0,
+            0.5,
+            0.85,
+            0.5,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+        ),
     ),
-    ViewportCaseV1(
-        label="compact",
-        width=1024,
-        height=768,
-        expected_layout="split",
+    visible_bodies=(
+        ActorPovVisibleBodySceneV1(
+            relation="ally",
+            observation_row=1,
+            public_agent_id="1",
+            position=_MIXED_POSITIONS[1],
+            radius=0.5,
+            team_id=1,
+            class_id=PRIEST_CLASS_ID,
+            alive=True,
+            current_health=100.0,
+            max_health=100.0,
+            effective_movement_speed=1.0,
+            ultimate_cooldown_remaining=0,
+            steps_until_out_of_combat=0,
+            status_feature_values=(
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                1.0,
+                1.0,
+                0.0,
+                2.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+            ),
+        ),
     ),
-    ViewportCaseV1(
-        label="minimum",
-        width=960,
-        height=600,
-        expected_layout="split",
+    spawn_pads=(
+        ActorPovSpawnPadSceneV1(
+            actor_relative_team_index=0,
+            team_relation="own",
+            team_label="Own Team",
+            team_local_slot=0,
+            position=_MIXED_POSITIONS[0],
+            configured_active=True,
+            currently_alive=True,
+            spawn_shield_remaining=0,
+        ),
+        ActorPovSpawnPadSceneV1(
+            actor_relative_team_index=0,
+            team_relation="own",
+            team_label="Own Team",
+            team_local_slot=1,
+            position=_MIXED_POSITIONS[1],
+            configured_active=True,
+            currently_alive=True,
+            spawn_shield_remaining=0,
+        ),
     ),
-    ViewportCaseV1(
-        label="stacked",
-        width=800,
-        height=900,
-        expected_layout="stacked",
+    respawn_waves=(
+        ActorPovRespawnWaveSceneV1(
+            actor_relative_team_index=0,
+            team_relation="own",
+            team_label="Own Team",
+            period_steps=10,
+            countdown_steps=4,
+        ),
+        ActorPovRespawnWaveSceneV1(
+            actor_relative_team_index=1,
+            team_relation="opponent",
+            team_label="Opponent Team",
+            period_steps=10,
+            countdown_steps=7,
+        ),
     ),
 )
-_VIEWPORT_ACTIVATIONS = (
-    _activation(
-        fixture_name="viewport_matrix",
+_POV_JOINT_MASK = ((True, True),) + ((False, False),) * 10
+_POV_ACTION_MASK = ActorPovActionMaskV1(
+    move=(True,) * 9,
+    select_target=(True,) + (False,) * 10,
+    use_ultimate=(True, True),
+    select_target_use_ultimate_joint=_POV_JOINT_MASK,
+)
+_POV_TARGET_PUBLIC_AGENT_IDS: tuple[str | None, ...] = (
+    None,
+    "0",
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8",
+    "9",
+)
+_POV_CUES = (
+    ActorPovOwnActionOutcomeCueV1(
+        cue_id=f"{_POV_TRANSITION}:cue:0",
+        pov_transition_id=_POV_TRANSITION,
         ordinal=0,
-        token_id="basic_damage",
-        source_global_slot=0,
-        target_global_slot=5,
-        agents=_CROWDED_AGENT_MAP,
+        outcome="accepted",
     ),
-    _activation(
-        fixture_name="viewport_matrix",
+    ActorPovOwnPositionChangedCueV1(
+        cue_id=f"{_POV_TRANSITION}:cue:1",
+        pov_transition_id=_POV_TRANSITION,
         ordinal=1,
-        token_id="hunter_trap",
-        source_global_slot=2,
-        target_global_slot=7,
-        agents=_CROWDED_AGENT_MAP,
+        start_position=(2.5, 4.0),
+        successor_position=_MIXED_POSITIONS[0],
+    ),
+    ActorPovOwnHealthChangedCueV1(
+        cue_id=f"{_POV_TRANSITION}:cue:2",
+        pov_transition_id=_POV_TRANSITION,
+        ordinal=2,
+        start_health=80.0,
+        successor_health=70.0,
+    ),
+    ActorPovOwnStatusChangedCueV1(
+        cue_id=f"{_POV_TRANSITION}:cue:3",
+        pov_transition_id=_POV_TRANSITION,
+        ordinal=3,
+        changed_feature_indices=(15,),
+        start_values=(0.0,),
+        successor_values=(1.0,),
+    ),
+    ActorPovOwnStatusChangedCueV1(
+        cue_id=f"{_POV_TRANSITION}:cue:4",
+        pov_transition_id=_POV_TRANSITION,
+        ordinal=4,
+        changed_feature_indices=(16,),
+        start_values=(0.0,),
+        successor_values=(1.0,),
+    ),
+    ActorPovOwnStatusChangedCueV1(
+        cue_id=f"{_POV_TRANSITION}:cue:5",
+        pov_transition_id=_POV_TRANSITION,
+        ordinal=5,
+        changed_feature_indices=(17,),
+        start_values=(0.0,),
+        successor_values=(1.0,),
     ),
 )
-_VIEWPORT_BATCH = _batch(
-    (
-        *_VIEWPORT_ACTIVATIONS,
-        NetHealthEventV1(
-            event_id="synthetic:viewport_matrix:net-health-0",
-            transition_id=1,
-            recipient_global_slot=0,
-            recipient_anchor=_CROWDED_POSITIONS[0],
-            health_before=90.0,
-            health_after=82.0,
-            net_delta=-8.0,
-            outcome="damage",
-        ),
-    )
+_POV_PROJECTION = ActorPovAnalyzerProjectionV1(
+    scene=_POV_SCENE,
+    next_decision_action_mask=_POV_ACTION_MASK,
+    incoming_transition_id=_POV_TRANSITION,
+    incoming_cues=_POV_CUES,
 )
 
-RENDERER_FIXTURES: Mapping[str, RendererFixtureV1] = MappingProxyType(
+
+def _terminal_state() -> TerminalStateV2:
+    return TerminalStateV2(
+        is_sealed=False,
+        terminated=False,
+        truncated=False,
+        reached_declared_horizon=False,
+        reason=None,
+    )
+
+
+def _scenario_metadata(
+    name: RendererFixtureName,
+    description: str,
+    *,
+    frame_index: int,
+) -> ScenarioMetadataV1:
+    return ScenarioMetadataV1(
+        name=name,
+        title=f"SYNTHETIC · {name}",
+        description=description,
+        mode="scripted",
+        audience="researcher",
+        movement_scale_minimum=0.01,
+        movement_scale_maximum=1.0,
+        movement_scale_step=0.01,
+        ordinary_movement_distance_scale=1.0,
+        scenario_default_movement_scale=1.0,
+        movement_scale_overridden=False,
+        completed_frame_count=frame_index,
+        frame_count=frame_index,
+        next_frame_index=None,
+        next_frame_label=None,
+        next_frame_description=None,
+        script_complete=True,
+    )
+
+
+def _scenario_option(
+    name: RendererFixtureName,
+    description: str,
+) -> ScenarioOptionV1:
+    return ScenarioOptionV1(
+        name=name,
+        title=f"SYNTHETIC · {name}",
+        description=description,
+        mode="scripted",
+        audience="researcher",
+    )
+
+
+def _status_source_state(scene: BattlefieldSceneV2) -> StatusSourceEvidenceStateV2:
+    rows = tuple(
+        StatusSourceChannelEvidenceV2(
+            recipient_global_slot=agent.global_slot,
+            recipient_public_agent_id=agent.public_agent_id,
+            status_channel=status.status_channel,
+            status_id=status.status_id,
+            direct_source_evidence=status.direct_source_evidence,
+        )
+        for agent in scene.agents
+        for status in agent.statuses
+    )
+    return StatusSourceEvidenceStateV2(
+        schema_version=2,
+        episode_id=scene.episode_id,
+        frame_index=scene.frame_index,
+        frame_id=scene.frame_id,
+        active_statuses=tuple(
+            sorted(
+                rows,
+                key=lambda row: (row.recipient_global_slot, row.status_channel),
+            )
+        ),
+    )
+
+
+def _researcher_live_frame(
+    name: RendererFixtureName,
+    description: str,
+    scene: BattlefieldSceneV2,
+    event_batch: VisualEventBatchV2 | None,
+) -> ResearcherLiveDebuggerFrameV2:
+    selection = scene.selection
+    if selection is None:
+        raise ValueError("synthetic researcher scenes require an exact selection.")
+    pending = PendingActionCardV1(
+        label="PLAYBACK / INSPECTION ONLY",
+        actor_global_slot=selection.controlled_global_slot,
+        move_action=0,
+        target_action=0,
+        armed_lane=None,
+        arm_origin=None,
+        target=TargetReferenceV1(disclosure="target_none", global_slot=None),
+        movement_mask_value=True,
+        pair_mask_value=None,
+        summary="STAY + NO COMBAT",
+    )
+    scenario = _scenario_metadata(name, description, frame_index=scene.frame_index)
+    return ResearcherLiveDebuggerFrameV2(
+        session_id=f"synthetic_{name}",
+        run_generation=0,
+        revision=0,
+        episode_id=scene.episode_id,
+        frame_index=scene.frame_index,
+        frame_id=scene.frame_id,
+        simulator_step_count=scene.simulator_step_count,
+        incoming_transition_index=(
+            None if scene.frame_index == 0 else scene.frame_index - 1
+        ),
+        incoming_transition_id=scene.incoming_transition_id,
+        preset="analysis",
+        terminal=_terminal_state(),
+        scenario=scenario,
+        available_scenarios=(_scenario_option(name, description),),
+        projection=ResearcherAnalyzerProjectionV2(
+            schema_version=2,
+            scene=scene,
+            incoming_events=event_batch,
+            status_source_evidence=_status_source_state(scene),
+        ),
+        hud=ResearcherHudFrameV2(
+            roster_global_slots=tuple(agent.global_slot for agent in scene.agents),
+            controlled_global_slot=selection.controlled_global_slot,
+            selected_global_slot=selection.selected_global_slot,
+            pending_submission_scope="scripted_playback",
+            pending_actions=(pending,),
+            pending_action=pending,
+            latest_transition=None,
+            movement_legalities=tuple(
+                MovementLegalityCardV1(move_action=move_action, available=True)
+                for move_action in range(9)
+            ),
+            candidate_legalities=(),
+            diagnostics=(),
+        ),
+    )
+
+
+def fixture_pov_target_reference_v1(
+    target_action: int,
+    target_public_agent_ids: tuple[str | None, ...],
+) -> ActorPovTargetReferenceV1:
+    """Resolve a synthetic POV target through its explicit recipient-local axis."""
+    if type(target_action) is not int or not 0 <= target_action < len(
+        target_public_agent_ids
+    ):
+        raise ValueError("target_action is outside the supplied POV target axis.")
+    return ActorPovTargetReferenceV1(
+        target_action=target_action,
+        public_agent_id=target_public_agent_ids[target_action],
+    )
+
+
+def _pov_live_frame(
+    name: RendererFixtureName,
+    projection: ActorPovAnalyzerProjectionV1,
+    target_public_agent_ids: tuple[str | None, ...],
+) -> ActorPovLiveDebuggerFrameV2:
+    scene = projection.scene
+    mask = projection.next_decision_action_mask
+    pending_target = fixture_pov_target_reference_v1(0, target_public_agent_ids)
+    return ActorPovLiveDebuggerFrameV2(
+        session_id=f"synthetic_{name}",
+        run_generation=0,
+        revision=0,
+        episode_id=scene.episode_id,
+        frame_index=scene.frame_index,
+        frame_id=scene.source_frame_id,
+        simulator_step_count=scene.simulator_step_count,
+        preset="analysis",
+        terminal=_terminal_state(),
+        incoming_pov_transition_id=projection.incoming_transition_id,
+        projection=projection,
+        hud=ActorPovHudFrameV1(
+            controlled_public_agent_id=scene.self_actor.public_agent_id,
+            pending_submission_scope="scripted_playback",
+            pending_action=ActorPovPendingActionCardV1(
+                label="PLAYBACK / INSPECTION ONLY",
+                actor_public_agent_id=scene.self_actor.public_agent_id,
+                move_action=0,
+                target=pending_target,
+                armed_lane=None,
+                arm_origin=None,
+                movement_mask_value=mask.move[0],
+                pair_mask_value=None,
+                summary="STAY + NO COMBAT",
+            ),
+            latest_transition=None,
+            movement_legalities=tuple(
+                MovementLegalityCardV1(
+                    move_action=move_action,
+                    available=available,
+                )
+                for move_action, available in enumerate(mask.move)
+            ),
+            candidate_legalities=tuple(
+                ActorPovCandidateLegalityCardV1(
+                    target=fixture_pov_target_reference_v1(
+                        target_action,
+                        target_public_agent_ids,
+                    ),
+                    lane_0_available=lanes[0],
+                    lane_1_available=lanes[1],
+                    basic_available=target_action > 0 and lanes[0],
+                    ultimate_available=lanes[1],
+                )
+                for target_action, lanes in enumerate(
+                    mask.select_target_use_ultimate_joint
+                )
+            ),
+            diagnostics=(),
+        ),
+    )
+
+
+def _researcher_fixture(
+    *,
+    name: RendererFixtureName,
+    description: str,
+    scene: BattlefieldSceneV2,
+    event_batch: VisualEventBatchV2 | None,
+    viewports: tuple[ViewportCaseV1, ...] = (),
+    exercise_reduced_motion: bool = False,
+) -> RendererFixtureV2:
+    return RendererFixtureV2(
+        name=name,
+        description=description,
+        audience="researcher",
+        scene=scene,
+        live_frame=_researcher_live_frame(name, description, scene, event_batch),
+        event_batch=event_batch,
+        viewports=viewports,
+        exercise_reduced_motion=exercise_reduced_motion,
+    )
+
+
+RENDERER_FIXTURES: Mapping[str, RendererFixtureV2] = MappingProxyType(
     {
-        "visual_vocabulary": RendererFixtureV1(
+        "visual_vocabulary": _researcher_fixture(
             name="visual_vocabulary",
             description=(
-                "SYNTHETIC: contact sheet for all five class identities, "
-                "selection states, ranges, cooldowns, Basic and Ultimate "
-                "activations, and recipient damage/healing outcomes."
+                "SYNTHETIC: class identities, ranges, cooldowns, and canonical "
+                "Basic/Ultimate activation grammar."
             ),
             scene=_VOCABULARY_SCENE,
             event_batch=_VOCABULARY_BATCH,
         ),
-        "durable_controls": RendererFixtureV1(
+        "durable_controls": _researcher_fixture(
             name="durable_controls",
             description=(
                 "SYNTHETIC: canonical stun and slow duration glyphs with "
-                "source-class accents for each originating class."
+                "source-class accents."
             ),
-            scene=_DURABLE_CONTROL_SCENE,
+            scene=_DURABLE_SCENE,
+            event_batch=None,
         ),
-        "crowded_teamfight": RendererFixtureV1(
+        "crowded_teamfight": _researcher_fixture(
             name="crowded_teamfight",
             description=(
-                "SYNTHETIC: ten adjacent agents with dense docks, auras, ranges, "
-                "selection, legality, pending intent, and simultaneous events."
+                "SYNTHETIC: dense V2 status, aura, range, selection, legality, "
+                "and simultaneous-event pressure."
             ),
             scene=_CROWDED_SCENE,
             event_batch=_CROWDED_BATCH,
         ),
-        "route_collision": RendererFixtureV1(
+        "route_collision": _researcher_fixture(
             name="route_collision",
             description=(
-                "SYNTHETIC: reciprocal, parallel, crossing, and near-zero route "
-                "geometry."
+                "SYNTHETIC: reciprocal, parallel, crossing, and near-zero "
+                "canonical activation routes."
             ),
             scene=_ROUTE_SCENE,
             event_batch=_ROUTE_BATCH,
         ),
-        "mixed_net_zero": RendererFixtureV1(
+        "mixed_net_zero": _researcher_fixture(
             name="mixed_net_zero",
             description=(
-                "SYNTHETIC: simultaneous damage and healing intent with one exact "
-                "recipient-level zero net outcome."
+                "SYNTHETIC: damage and healing activations with one exact "
+                "zero-net recipient resolution."
             ),
             scene=_MIXED_SCENE,
             event_batch=_MIXED_BATCH,
         ),
-        "viewport_matrix": RendererFixtureV1(
+        "viewport_matrix": _researcher_fixture(
             name="viewport_matrix",
             description=(
-                "SYNTHETIC: crowded scene rendered at desktop, compact, minimum, "
-                "stacked, and reduced-motion browser settings."
+                "SYNTHETIC: crowded V2 scene at all supported responsive and "
+                "reduced-motion settings."
             ),
-            scene=_CROWDED_SCENE,
+            scene=_VIEWPORT_SCENE,
             event_batch=_VIEWPORT_BATCH,
             viewports=_VIEWPORTS,
             exercise_reduced_motion=True,
         ),
-        "pov_redaction": RendererFixtureV1(
+        "canonical_event_vocabulary": _researcher_fixture(
+            name="canonical_event_vocabulary",
+            description=(
+                "SYNTHETIC: one gap-free ordered instance of every canonical "
+                "V2 event variant."
+            ),
+            scene=_GRAMMAR_SCENE,
+            event_batch=_GRAMMAR_BATCH,
+        ),
+        "pov_redaction": RendererFixtureV2(
             name="pov_redaction",
             description=(
-                "SYNTHETIC: privileged source scene paired with an expected "
-                "observer-safe payload and redacted endpoint."
+                "SYNTHETIC: independent recipient-local POV scene/cues beside "
+                "a private V2 comparison source."
             ),
-            scene=_POV_EXPECTED_SCENE,
-            event_batch=_POV_SAFE_BATCH,
+            audience="agent_pov",
+            scene=_POV_SCENE,
+            live_frame=_pov_live_frame(
+                "pov_redaction",
+                _POV_PROJECTION,
+                _POV_TARGET_PUBLIC_AGENT_IDS,
+            ),
+            pov_projection=_POV_PROJECTION,
+            pov_target_public_agent_ids=_POV_TARGET_PUBLIC_AGENT_IDS,
             privileged_source_scene=_POV_SOURCE_SCENE,
             privileged_source_event_batch=_POV_SOURCE_BATCH,
         ),
@@ -1218,7 +2032,7 @@ RENDERER_FIXTURES: Mapping[str, RendererFixtureV1] = MappingProxyType(
 )
 
 
-def get_renderer_fixture(name: str) -> RendererFixtureV1:
+def get_renderer_fixture(name: str) -> RendererFixtureV2:
     """Return a synthetic renderer fixture by stable name."""
     try:
         return RENDERER_FIXTURES[name]
@@ -1229,6 +2043,6 @@ def get_renderer_fixture(name: str) -> RendererFixtureV1:
         ) from exc
 
 
-def list_renderer_fixtures() -> tuple[RendererFixtureV1, ...]:
+def list_renderer_fixtures() -> tuple[RendererFixtureV2, ...]:
     """Return synthetic renderer fixtures in deterministic review order."""
     return tuple(RENDERER_FIXTURES.values())

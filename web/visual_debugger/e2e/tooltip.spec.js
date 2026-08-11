@@ -57,6 +57,30 @@ async function installFrame(page, frame) {
 }
 
 /**
+ * Return a canonical researcher frame-zero envelope with no incoming events.
+ * Mutating normalized aliases would be ignored by the strict API boundary;
+ * intercepted tests therefore edit the raw wire projection itself.
+ *
+ * @param {Record<string, any>} frame
+ */
+function withoutIncomingResearcherEvents(frame) {
+  const initial = structuredClone(frame);
+  initial.frame_index = 0;
+  initial.frame_id = `${initial.episode_id}:frame:0`;
+  initial.simulator_step_count = 0;
+  initial.incoming_transition_index = null;
+  initial.incoming_transition_id = null;
+  initial.hud.latest_transition = null;
+  initial.projection.scene.frame_index = 0;
+  initial.projection.scene.frame_id = initial.frame_id;
+  initial.projection.scene.simulator_step_count = 0;
+  initial.projection.scene.incoming_transition_id = null;
+  initial.projection.scene.incoming_event_ids = [];
+  initial.projection.incoming_events = null;
+  return initial;
+}
+
+/**
  * Find a stable pointer coordinate where one agent remains the foreground
  * semantic owner over a broad aura or range field.
  *
@@ -213,7 +237,7 @@ test("one tooltip arbitrates dense battlefield and keyboard explanations", async
   page,
 }) => {
   const frame = structuredClone(crowdedFrame);
-  frame.scene.agents[2].ultimate_cooldown = 30;
+  frame.projection.scene.agents[2].ultimate_cooldown_remaining = 30;
   await installFrame(page, frame);
   await page.goto(debuggerUrl);
   await expect(page.locator("#connection-status")).toHaveText("Online");
@@ -412,18 +436,27 @@ test("status overflow explanation names its recipient and retains every item", a
 test("durable semantic cues all use the delegated tooltip controller", async ({
   page,
 }) => {
-  const frame = structuredClone(crowdedFrame);
-  frame.event_batch = null;
-  frame.transition_id = 0;
-  frame.simulator_step = 0;
-  frame.hud.latest_transition = null;
-  frame.scene.agents = frame.scene.agents.map(
+  const frame = withoutIncomingResearcherEvents(crowdedFrame);
+  frame.projection.scene.agents = frame.projection.scene.agents.map(
     /** @param {Record<string, any>} agent */ (agent) => ({
       ...agent,
       statuses: [],
-      ultimate_cooldown: 0,
+      ultimate_cooldown_remaining: 0,
     }),
   );
+  const pendingAction = {
+    ...frame.hud.pending_action,
+    label: "Basic Action Route",
+    actor_global_slot: 0,
+    target_action: 6,
+    armed_lane: 0,
+    arm_origin: "manual",
+    target: { disclosure: "public", global_slot: 5 },
+    pair_mask_value: true,
+    summary: "STAY + BASIC → Agent ID 5",
+  };
+  frame.hud.pending_action = pendingAction;
+  frame.hud.pending_actions = [pendingAction];
   await installFrame(page, frame);
   await page.goto(debuggerUrl);
   await expect(page.locator("#connection-status")).toHaveText("Online");
@@ -453,8 +486,7 @@ test("durable semantic cues all use the delegated tooltip controller", async ({
     "pending-route",
   );
 
-  frame.scene = structuredClone(vocabularyFrame.scene);
-  frame.scene.selected_legality = {
+  frame.projection.scene.next_decision_selected_legality = {
     armed_lane: 0,
     armed_pair_legal: true,
     controlled_global_slot: 0,
@@ -480,18 +512,20 @@ test("an accepted route yields to an agent body at the same pointer coordinate",
   page,
 }) => {
   const frame = structuredClone(vocabularyFrame);
-  const activation = frame.event_batch.events.find(
+  const activation = frame.projection.incoming_events.events.find(
     /** @param {Record<string, any>} event */ (event) =>
-      event.event_type === "accepted_activation" &&
-      event.event_id === "synthetic:visual_vocabulary:activation-0",
+      event.event_type === "ability_activated" && event.source_global_slot === 0,
   );
-  const target = frame.scene.agents.find(
-    /** @param {Record<string, any>} agent */ (agent) => agent.global_slot === 4,
-  );
+  const targetTrajectory =
+    frame.projection.incoming_events.agent_phase_trajectories.find(
+      /** @param {Record<string, any>} trajectory */ (trajectory) =>
+        trajectory.global_slot === 4,
+    );
   expect(activation).toBeTruthy();
-  expect(target).toBeTruthy();
-  activation.target_global_slot = 4;
-  activation.target_anchor = target.position;
+  expect(targetTrajectory).toBeTruthy();
+  activation.recipient_global_slot = 4;
+  activation.recipient_anchor = targetTrajectory.transition_start;
+  const activationId = String(activation.event_id);
 
   await installFrame(page, frame);
   await page.goto(debuggerUrl);
@@ -499,7 +533,7 @@ test("an accepted route yields to an agent body at the same pointer coordinate",
   await waitForStablePresentation(page);
 
   const routeOwner = page.locator(
-    '#battlefield .combat-route-effect[data-event-id="synthetic:visual_vocabulary:activation-0"]',
+    `#battlefield .combat-route-effect[data-event-id="${activationId}"]`,
   );
   const route = routeOwner.locator(".combat-route__hit");
   const emptyRoutePoint = await registeredOwnerPoint(routeOwner, {
@@ -630,14 +664,12 @@ test("range hits are inspectable and POV explanations retain redaction", async (
   await page.reload();
   await expect(page.locator("#connection-status")).toHaveText("Online");
 
-  const activation = page.locator(
-    '#event-feed .event-item[data-event-type="accepted_activation"]',
+  const actionOutcome = page.locator(
+    '#event-feed .event-item[data-event-type="own_action_outcome"]',
   );
-  await activation.hover();
-  await expect(page.locator("#visual-tooltip-details")).toContainText(
-    "Target endpoint not disclosed in this view",
-  );
-  await expect(page.locator("#visual-tooltip-details")).not.toContainText(/Target id_/);
+  await actionOutcome.hover();
+  await expect(page.locator("#visual-tooltip-details")).not.toContainText(/target/i);
+  await expect(page.locator("#visual-tooltip-details")).not.toContainText(/id_5/);
   const tooltipText = await page.locator("#visual-tooltip").textContent();
   expect(tooltipText).not.toContain("target_anchor");
   expect(tooltipText).not.toMatch(/\b(?:37|30)\b/);

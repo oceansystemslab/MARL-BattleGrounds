@@ -10,6 +10,9 @@ from typing import cast
 
 import pytest
 from scripts.dev.debug_renderer import build_parser, main
+from scripts.dev.visual_debugger.evaluation_bridge import (
+    DebuggerEvaluationLaunchSpecificationV1,
+)
 from scripts.dev.visual_debugger.model import DebuggerScenario
 from scripts.dev.visual_debugger.scenarios import (
     RESEARCHER_SCENARIOS,
@@ -385,7 +388,7 @@ def test_browser_default_builds_service_and_forwards_lifecycle_options(
     frame = cast(DebuggerService, observed["service"]).current_frame()
     assert frame.view_mode == "pov"
     assert frame.preset == "debug"
-    assert frame.scene.ranges == ()
+    assert not hasattr(frame.projection.scene, "ranges")
 
 
 def test_static_flag_uses_only_the_stateless_snapshot_adapter(
@@ -400,6 +403,7 @@ def test_static_flag_uses_only_the_stateless_snapshot_adapter(
         *,
         scenario: object,
         seed: int,
+        evaluation_launch_specification: object,
         controlled_global_slot: int | None,
         verbose: bool,
         show_ranges: bool,
@@ -407,6 +411,7 @@ def test_static_flag_uses_only_the_stateless_snapshot_adapter(
         observed.update(
             scenario=scenario,
             seed=seed,
+            evaluation_launch_specification=evaluation_launch_specification,
             controlled_global_slot=controlled_global_slot,
             verbose=verbose,
             show_ranges=show_ranges,
@@ -436,6 +441,13 @@ def test_static_flag_uses_only_the_stateless_snapshot_adapter(
     assert result == 19
     assert cast(DebuggerScenario, observed["scenario"]).name == "status_stack"
     assert observed["seed"] == 13
+    assert (
+        cast(
+            DebuggerEvaluationLaunchSpecificationV1,
+            observed["evaluation_launch_specification"],
+        ).root_seed
+        == 13
+    )
     assert observed["controlled_global_slot"] == 5
     assert observed["verbose"] is True
     assert observed["show_ranges"] is False

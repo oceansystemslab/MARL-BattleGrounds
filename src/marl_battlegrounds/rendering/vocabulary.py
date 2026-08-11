@@ -4,7 +4,9 @@ This module names presentation facts; it does not define simulator mechanics,
 durations, legality, acceptance, or combat values.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Final, Literal
 
 # These are version-bound presentation vocabulary IDs, not live simulator
@@ -200,6 +202,39 @@ CANONICAL_STATUS_ORDER: tuple[StatusTokenId, ...] = (
     "anti_heal_rogue_poison",
     "priest_freedom",
     "mage_burst",
+)
+
+# Exact V1 scientific status-axis identity. Presentation ordering below never
+# renumbers these channels.
+CATALOG_STATUS_ID_BY_CHANNEL: Final[tuple[str, ...]] = (
+    "warrior_charge_slow",
+    "hunter_basic_slow",
+    "rogue_poison_slow",
+    "warrior_charge_stun",
+    "hunter_trap_stun",
+    "rogue_poison_stun",
+    "rogue_poison_anti_heal",
+    "mage_burst_damage_amplification",
+    "priest_blessing_of_freedom_movement_floor",
+)
+
+# Evaluation records retain scientific catalog IDs and channel numbers; the
+# renderer vocabulary uses stable presentation IDs.  This V2 mapping is
+# explicit so neither side relies on string rewriting or channel order.
+CATALOG_STATUS_TOKEN_ID_BY_STATUS_ID: Final[Mapping[str, StatusTokenId]] = (
+    MappingProxyType(
+        {
+            "warrior_charge_stun": "stun_warrior_charge",
+            "hunter_trap_stun": "stun_hunter_trap",
+            "rogue_poison_stun": "stun_rogue_poison",
+            "warrior_charge_slow": "slow_warrior_charge",
+            "hunter_basic_slow": "slow_hunter_basic",
+            "rogue_poison_slow": "slow_rogue_poison",
+            "rogue_poison_anti_heal": "anti_heal_rogue_poison",
+            "priest_blessing_of_freedom_movement_floor": "priest_freedom",
+            "mage_burst_damage_amplification": "mage_burst",
+        }
+    )
 )
 
 STATUS_TOKENS: tuple[VisualTokenDefinition, ...] = (
@@ -560,6 +595,16 @@ def lookup_status_token(token_id: str) -> VisualTokenDefinition:
     return _lookup(STATUS_TOKENS, token_id)
 
 
+def status_token_id_from_catalog_status_id(status_id: str) -> StatusTokenId:
+    """Map one exact V1 catalog status ID to its V2 presentation token."""
+    if type(status_id) is not str:
+        raise ValueError("status_id must be a Python string.")
+    token_id = CATALOG_STATUS_TOKEN_ID_BY_STATUS_ID.get(status_id)
+    if token_id is None:
+        raise ValueError(f"unknown V1 catalog status ID: {status_id!r}.")
+    return token_id
+
+
 def lookup_activation_token(token_id: str) -> VisualTokenDefinition:
     """Return one activation token definition or a safe unknown fallback."""
     return _lookup(ACTIVATION_TOKENS, token_id)
@@ -606,3 +651,7 @@ if tuple(definition.token_id for definition in STATUS_TOKENS) != (
     CANONICAL_STATUS_ORDER
 ):
     raise AssertionError("status-token registry order must match canonical order")
+if tuple(CATALOG_STATUS_TOKEN_ID_BY_STATUS_ID.values()) != CANONICAL_STATUS_ORDER:
+    raise AssertionError("catalog-status mapping must match canonical status order")
+if set(CATALOG_STATUS_TOKEN_ID_BY_STATUS_ID) != set(CATALOG_STATUS_ID_BY_CHANNEL):
+    raise AssertionError("catalog status channel and token maps must cover one set")

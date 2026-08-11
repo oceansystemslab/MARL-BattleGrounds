@@ -8,7 +8,7 @@ is not rerun until a later edit creates a plausible impact path to it.
 | Change | Smallest justified proof |
 | --- | --- |
 | Core or Python semantics | Nearest Python unit/integration tests, then targeted Ruff/Pyright |
-| Debugger scene/event schema | Scene, diagnostics, frame, and presentation-boundary tests |
+| Debugger scene/event schema | Scene/Event V2, live-frame, audience-boundary, and choreography tests |
 | Command/service/server behavior | Protocol, input, service, server, and affected real-browser case |
 | Scenario trajectory | Scenario preflight/reference tests |
 | Replay/POV/scenario artifact | Focused semantic, canonical-I/O, tamper, privacy, and import-isolation tests |

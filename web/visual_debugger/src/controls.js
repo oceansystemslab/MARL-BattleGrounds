@@ -82,6 +82,40 @@ export function keyboardCommand(
 }
 
 /**
+ * Convert the target select's audience-specific option value into the one
+ * command authorized for that audience. Actor POV values deliberately carry
+ * only the recipient-relative target-action axis; this boundary must never
+ * manufacture or transmit a researcher global slot.
+ *
+ * @param {string} value
+ * @param {{actorPov?: boolean}} options
+ * @returns {Record<string, unknown> | null}
+ */
+export function targetSelectionCommand(value, { actorPov = false } = {}) {
+  if (actorPov) {
+    const match = /^pov-target-action:(0|[1-9]|10)$/u.exec(value);
+    if (!match) {
+      return null;
+    }
+    return {
+      command_type: "actor_pov_target_action",
+      target_action: Number(match[1]),
+    };
+  }
+  if (value === "") {
+    return keyboardCommand("Escape");
+  }
+  if (!/^(0|[1-9])$/u.test(value)) {
+    return null;
+  }
+  return {
+    command_type: "roster_selection",
+    role: "target",
+    global_slot: Number(value),
+  };
+}
+
+/**
  * @param {KeyboardEvent} event
  */
 function keyboardCommandFromEvent(event) {

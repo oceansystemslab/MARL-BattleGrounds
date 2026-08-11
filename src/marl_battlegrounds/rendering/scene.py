@@ -11,13 +11,19 @@ from typing import Literal, cast
 
 from marl_battlegrounds.evaluation.wire_shapes import MAX_AGENT_SLOTS_V1
 from marl_battlegrounds.rendering.vocabulary import (
+    CATALOG_STATUS_ID_BY_CHANNEL,
     ActivationTokenId,
     StatusLifecycleKind,
+    status_sort_key,
+    status_token_id_from_catalog_status_id,
 )
 
 SCENE_SCHEMA_VERSION = 1
 SCENE_V2_SCHEMA_VERSION = 2
 EVENT_SCHEMA_VERSION = 1
+EVENT_V2_SCHEMA_VERSION = 2
+RESEARCHER_ANALYZER_PROJECTION_SCHEMA_VERSION = 2
+STATUS_SOURCE_EVIDENCE_SCHEMA_VERSION = 2
 
 MAX_AGENT_SLOTS = MAX_AGENT_SLOTS_V1
 
@@ -55,6 +61,11 @@ type UltimateTargetModeV2 = Literal[
     "target_none",
     "ally",
     "enemy",
+]
+type VisualAnchorPhaseV2 = Literal[
+    "transition_start",
+    "post_charge",
+    "successor",
 ]
 
 
@@ -109,11 +120,24 @@ def _require_finite(value: float, *, name: str) -> None:
         raise ValueError(f"{name} must be a finite Python float; got {value!r}.")
 
 
+def _require_nonnegative_finite(value: float, *, name: str) -> None:
+    _require_finite(value, name=name)
+    if value < 0.0:
+        raise ValueError(f"{name} must be non-negative; got {value!r}.")
+
+
 def _require_point(value: Point2D, *, name: str) -> None:
     if type(value) is not tuple or len(value) != 2:
         raise ValueError(f"{name} must be a two-coordinate Python tuple.")
     for coordinate in value:
         _require_finite(coordinate, name=f"{name} coordinate")
+
+
+def _points_close(left: Point2D, right: Point2D) -> bool:
+    return all(
+        isclose(left_value, right_value, rel_tol=1e-6, abs_tol=1e-5)
+        for left_value, right_value in zip(left, right, strict=True)
+    )
 
 
 def _require_text(value: str, *, name: str) -> None:
@@ -140,6 +164,24 @@ def _require_tuple_items(
 def _require_unique(values: tuple[str, ...], *, name: str) -> None:
     if len(values) != len(set(values)):
         raise ValueError(f"{name} values must be unique.")
+
+
+def _is_canonical_event_before_frame(
+    event_id: str,
+    *,
+    episode_id: str,
+    frame_index: int,
+) -> bool:
+    prefix = f"{episode_id}:transition:"
+    if not event_id.startswith(prefix):
+        return False
+    suffix = event_id[len(prefix) :]
+    transition_text, separator, ordinal_text = suffix.partition(":event:")
+    if separator != ":event:" or not transition_text.isdigit():
+        return False
+    if len(ordinal_text) != 4 or not ordinal_text.isdigit():
+        return False
+    return int(transition_text) < frame_index
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -588,6 +630,148 @@ class StatusSourceEvidenceSceneV2:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class StatusSourceChannelEvidenceV2:
+    """Durable direct-source evidence for one active recipient/status channel."""
+
+    recipient_global_slot: int
+    recipient_public_agent_id: str
+    status_channel: int
+    status_id: str
+    direct_source_evidence: tuple[StatusSourceEvidenceSceneV2, ...] = ()
+
+    def __post_init__(self) -> None:
+        _require_slot(self.recipient_global_slot, name="recipient_global_slot")
+        _require_text(
+            self.recipient_public_agent_id,
+            name="recipient_public_agent_id",
+        )
+        _require_python_int(self.status_channel, name="status_channel", minimum=0)
+        _require_text(self.status_id, name="status_id")
+        if (
+            self.status_channel >= len(CATALOG_STATUS_ID_BY_CHANNEL)
+            or CATALOG_STATUS_ID_BY_CHANNEL[self.status_channel] != self.status_id
+        ):
+            raise ValueError(
+                "status-source channel and catalog status ID must retain V1 identity."
+            )
+        _require_tuple_items(
+            self.direct_source_evidence,
+            name="direct_source_evidence",
+            item_types=(StatusSourceEvidenceSceneV2,),
+        )
+        evidence_keys = tuple(
+            (row.source_global_slot, row.event_id)
+            for row in self.direct_source_evidence
+        )
+        if evidence_keys != tuple(sorted(evidence_keys)) or len(evidence_keys) != len(
+            set(evidence_keys)
+        ):
+            raise ValueError("status source evidence must have canonical unique keys.")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class StatusSourceEvidenceStateV2:
+    """Immutable status-source evidence bound to one canonical frame."""
+
+    schema_version: int
+    episode_id: str
+    frame_index: int
+    frame_id: str
+    active_statuses: tuple[StatusSourceChannelEvidenceV2, ...]
+
+    def __post_init__(self) -> None:
+        _require_python_int(self.schema_version, name="schema_version")
+        if self.schema_version != STATUS_SOURCE_EVIDENCE_SCHEMA_VERSION:
+            raise ValueError("unknown status-source evidence state version.")
+        _require_text(self.episode_id, name="episode_id")
+        _require_python_int(self.frame_index, name="frame_index", minimum=0)
+        if self.frame_id != f"{self.episode_id}:frame:{self.frame_index}":
+            raise ValueError("status-source state frame ID is not canonical.")
+        _require_tuple_items(
+            self.active_statuses,
+            name="active_statuses",
+            item_types=(StatusSourceChannelEvidenceV2,),
+        )
+        keys = tuple(
+            (row.recipient_global_slot, row.status_channel)
+            for row in self.active_statuses
+        )
+        if keys != tuple(sorted(keys)) or len(keys) != len(set(keys)):
+            raise ValueError("active status-source rows require canonical unique keys.")
+        recipient_public_id_by_slot: dict[int, str] = {}
+        direct_event_ids: list[str] = []
+        for row in self.active_statuses:
+            existing_public_id = recipient_public_id_by_slot.setdefault(
+                row.recipient_global_slot,
+                row.recipient_public_agent_id,
+            )
+            if existing_public_id != row.recipient_public_agent_id:
+                raise ValueError(
+                    "one recipient slot cannot carry conflicting public IDs."
+                )
+            for evidence in row.direct_source_evidence:
+                if not _is_canonical_event_before_frame(
+                    evidence.event_id,
+                    episode_id=self.episode_id,
+                    frame_index=self.frame_index,
+                ):
+                    raise ValueError(
+                        "direct status-source evidence must identify a canonical "
+                        "event before the bound frame."
+                    )
+                direct_event_ids.append(evidence.event_id)
+        if len(direct_event_ids) != len(set(direct_event_ids)):
+            raise ValueError(
+                "one direct status-application event cannot support multiple rows."
+            )
+
+    def evidence_by_recipient_and_channel(
+        self,
+    ) -> dict[tuple[int, int], tuple[StatusSourceEvidenceSceneV2, ...]]:
+        """Return a fresh lookup without exposing mutable stored state."""
+        return {
+            (row.recipient_global_slot, row.status_channel): (
+                row.direct_source_evidence
+            )
+            for row in self.active_statuses
+        }
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class StatusSourceEvidenceIndexV2:
+    """Gap-free immutable replay index of per-frame source-evidence states."""
+
+    schema_version: int
+    episode_id: str
+    frame_states: tuple[StatusSourceEvidenceStateV2, ...]
+
+    def __post_init__(self) -> None:
+        _require_python_int(self.schema_version, name="schema_version")
+        if self.schema_version != STATUS_SOURCE_EVIDENCE_SCHEMA_VERSION:
+            raise ValueError("unknown status-source evidence index version.")
+        _require_text(self.episode_id, name="episode_id")
+        if type(self.frame_states) is not tuple or not self.frame_states:
+            raise ValueError("status-source index requires at least frame zero.")
+        if any(
+            type(row) is not StatusSourceEvidenceStateV2 for row in self.frame_states
+        ):
+            raise ValueError("frame_states must contain exact evidence states.")
+        if tuple(row.frame_index for row in self.frame_states) != tuple(
+            range(len(self.frame_states))
+        ):
+            raise ValueError("status-source index frame states must be gap-free.")
+        if any(row.episode_id != self.episode_id for row in self.frame_states):
+            raise ValueError("status-source index states must join its episode.")
+
+    def state_for_frame(self, frame_index: int) -> StatusSourceEvidenceStateV2:
+        """Return one O(1) frame-bound immutable state."""
+        _require_python_int(frame_index, name="frame_index", minimum=0)
+        if frame_index >= len(self.frame_states):
+            raise IndexError("frame_index is outside the status-source index.")
+        return self.frame_states[frame_index]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class StatusSceneV2:
     """One recorded status channel with conservative source evidence."""
 
@@ -605,9 +789,14 @@ class StatusSceneV2:
 
     def __post_init__(self) -> None:
         _require_python_int(self.status_channel, name="status_channel", minimum=0)
-        if self.status_channel >= 9:
-            raise ValueError("status_channel must be less than nine.")
         _require_text(self.status_id, name="status_id")
+        if (
+            self.status_channel >= len(CATALOG_STATUS_ID_BY_CHANNEL)
+            or CATALOG_STATUS_ID_BY_CHANNEL[self.status_channel] != self.status_id
+        ):
+            raise ValueError(
+                "status channel and catalog status ID must retain V1 identity."
+            )
         _require_python_int(
             self.remaining_duration,
             name="remaining_duration",
@@ -804,8 +993,23 @@ class AgentSceneV2:
             self.statuses, name="statuses", item_types=(StatusSceneV2,)
         )
         channels = tuple(status.status_channel for status in self.statuses)
-        if channels != tuple(sorted(channels)) or len(channels) != len(set(channels)):
-            raise ValueError("statuses must have unique increasing channel IDs.")
+        if len(channels) != len(set(channels)):
+            raise ValueError("statuses must have unique scientific channel IDs.")
+        for status in self.statuses:
+            if (
+                status.status_channel >= len(CATALOG_STATUS_ID_BY_CHANNEL)
+                or CATALOG_STATUS_ID_BY_CHANNEL[status.status_channel]
+                != status.status_id
+            ):
+                raise ValueError(
+                    "status channel and catalog status ID must retain V1 identity."
+                )
+        presentation_keys = tuple(
+            status_sort_key(status_token_id_from_catalog_status_id(status.status_id))
+            for status in self.statuses
+        )
+        if presentation_keys != tuple(sorted(presentation_keys)):
+            raise ValueError("statuses must use canonical presentation order.")
         _require_tuple_items(
             self.aura_modifiers,
             name="aura_modifiers",
@@ -882,6 +1086,7 @@ class BattlefieldSceneV2:
     ranges: tuple[RangeSceneV1, ...] = ()
     selection: SelectionSceneV1 | None = None
     next_decision_selected_legality: SelectedLegalitySceneV1 | None = None
+    observer_visibility: tuple[ObserverVisibilitySceneV1, ...] = ()
 
     def __post_init__(self) -> None:
         _require_python_int(self.schema_version, name="schema_version")
@@ -958,6 +1163,11 @@ class BattlefieldSceneV2:
             name="next_decision_selected_legality",
             record_type=SelectedLegalitySceneV1,
         )
+        _require_tuple_items(
+            self.observer_visibility,
+            name="observer_visibility",
+            item_types=(ObserverVisibilitySceneV1,),
+        )
         slots = tuple(agent.global_slot for agent in self.agents)
         if slots != tuple(sorted(slots)) or len(slots) != len(set(slots)):
             raise ValueError("agents must have unique increasing global slots.")
@@ -966,6 +1176,32 @@ class BattlefieldSceneV2:
             name="public_agent_id",
         )
         agent_by_slot = {agent.global_slot: agent for agent in self.agents}
+        if self.selection is None:
+            if self.observer_visibility:
+                raise ValueError(
+                    "observer visibility requires a selected researcher observer."
+                )
+        else:
+            if self.selection.controlled_global_slot not in agent_by_slot:
+                raise ValueError(
+                    "observer visibility requires an active controlled researcher."
+                )
+            visibility_observers = tuple(
+                row.observer_global_slot for row in self.observer_visibility
+            )
+            visibility_candidates = tuple(
+                row.candidate_global_slot for row in self.observer_visibility
+            )
+            if visibility_candidates != slots:
+                raise ValueError(
+                    "observer visibility must cover the ordered scene roster exactly."
+                )
+            if visibility_observers != (self.selection.controlled_global_slot,) * len(
+                slots
+            ):
+                raise ValueError(
+                    "observer visibility must belong to the controlled researcher."
+                )
         for agent in self.agents:
             expected_team_id = 1 if agent.global_slot < 5 else 2
             if agent.team_id != expected_team_id:
@@ -997,9 +1233,14 @@ class BattlefieldSceneV2:
                         raise ValueError(
                             "status source evidence must join a scene agent identity."
                         )
-                    if evidence.event_id not in self.incoming_event_ids:
+                    if not _is_canonical_event_before_frame(
+                        evidence.event_id,
+                        episode_id=self.episode_id,
+                        frame_index=self.frame_index,
+                    ):
                         raise ValueError(
-                            "status source evidence must join an incoming event ID."
+                            "status source evidence must identify a canonical "
+                            "event before the selected frame."
                         )
         aura_keys = tuple(
             (field.source_global_slot, field.aura_id) for field in self.aura_fields
@@ -1332,6 +1573,958 @@ class VisualEventBatchV1:
                     "AcceptedActivationEventV1 events in the same batch; "
                     f"missing {missing_application_ids!r}."
                 )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class VisualAgentAnchorV2:
+    """One public actor position at an explicit canonical transition phase."""
+
+    phase: VisualAnchorPhaseV2
+    global_slot: int
+    public_agent_id: str
+    position: Point2D
+
+    def __post_init__(self) -> None:
+        if self.phase not in ("transition_start", "post_charge", "successor"):
+            raise ValueError(f"unknown visual anchor phase: {self.phase!r}.")
+        _require_slot(self.global_slot, name="global_slot")
+        _require_text(self.public_agent_id, name="public_agent_id")
+        _require_point(self.position, name="position")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class VisualTeamAnchorV2:
+    """One non-spatial team cue at an explicit canonical transition phase."""
+
+    phase: VisualAnchorPhaseV2
+    team_index: int
+    team_id: int
+
+    def __post_init__(self) -> None:
+        if self.phase not in ("transition_start", "post_charge", "successor"):
+            raise ValueError(f"unknown visual anchor phase: {self.phase!r}.")
+        _require_python_int(self.team_index, name="team_index", minimum=0)
+        if self.team_index not in (0, 1):
+            raise ValueError("team_index must be zero or one.")
+        _require_python_int(self.team_id, name="team_id", minimum=1)
+        if self.team_id != self.team_index + 1:
+            raise ValueError("team_id must equal team_index + 1.")
+
+
+def _require_agent_anchor(
+    anchor: VisualAgentAnchorV2,
+    *,
+    name: str,
+    phase: VisualAnchorPhaseV2,
+    global_slot: int,
+) -> None:
+    if type(anchor) is not VisualAgentAnchorV2:
+        raise ValueError(f"{name} must be the exact VisualAgentAnchorV2.")
+    if anchor.phase != phase or anchor.global_slot != global_slot:
+        raise ValueError(f"{name} must join slot {global_slot} at phase {phase}.")
+
+
+def _require_optional_agent_anchor(
+    anchor: VisualAgentAnchorV2 | None,
+    *,
+    name: str,
+    phase: VisualAnchorPhaseV2,
+    global_slot: int | None,
+) -> None:
+    if (anchor is None) != (global_slot is None):
+        raise ValueError(f"{name} presence must match its nullable global slot.")
+    if anchor is not None and global_slot is not None:
+        _require_agent_anchor(
+            anchor,
+            name=name,
+            phase=phase,
+            global_slot=global_slot,
+        )
+
+
+def _require_int32(value: int, *, name: str) -> None:
+    _require_python_int(value, name=name)
+    if not -(2**31) <= value < 2**31:
+        raise ValueError(f"{name} must fit signed int32.")
+
+
+def _require_slot_tuple(value: tuple[int, ...], *, name: str) -> None:
+    if type(value) is not tuple:
+        raise ValueError(f"{name} must be a Python tuple.")
+    for slot in value:
+        _require_slot(slot, name=f"{name} item")
+    if value != tuple(sorted(set(value))):
+        raise ValueError(f"{name} must be sorted and unique.")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CanonicalVisualEventBaseV2:
+    """Common string identity and gap-free ordinal for one CP2 event."""
+
+    event_id: str
+    transition_id: str
+    ordinal: int
+
+    def __post_init__(self) -> None:
+        _require_text(self.transition_id, name="transition_id")
+        _require_python_int(self.ordinal, name="ordinal", minimum=0)
+        if self.event_id != f"{self.transition_id}:event:{self.ordinal:04d}":
+            raise ValueError("visual event ID must remain canonical and gap-free.")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ActionRejectedEventV2(CanonicalVisualEventBaseV2):
+    event_type: Literal["action_rejected"] = field(
+        default="action_rejected", init=False
+    )
+    phase_rank: Literal[10] = field(default=10, init=False)
+    actor_global_slot: int
+    actor_public_agent_id: str
+    actor_configured_active: bool
+    rejection_component: Literal["domain", "movement", "combat_pair"]
+    submitted_move_action: int
+    submitted_select_target_action: int
+    submitted_use_ultimate_action: int
+    actor_anchor: VisualAgentAnchorV2 | None
+
+    def __post_init__(self) -> None:
+        CanonicalVisualEventBaseV2.__post_init__(self)
+        _require_slot(self.actor_global_slot, name="actor_global_slot")
+        _require_text(self.actor_public_agent_id, name="actor_public_agent_id")
+        _require_python_bool(
+            self.actor_configured_active,
+            name="actor_configured_active",
+        )
+        if self.rejection_component not in ("domain", "movement", "combat_pair"):
+            raise ValueError("unknown action rejection component.")
+        for name in (
+            "submitted_move_action",
+            "submitted_select_target_action",
+            "submitted_use_ultimate_action",
+        ):
+            _require_int32(cast(int, getattr(self, name)), name=name)
+        if self.actor_configured_active:
+            if self.actor_anchor is None:
+                raise ValueError("active rejected actors require a start anchor.")
+            _require_agent_anchor(
+                self.actor_anchor,
+                name="actor_anchor",
+                phase="transition_start",
+                global_slot=self.actor_global_slot,
+            )
+            if self.actor_anchor.public_agent_id != self.actor_public_agent_id:
+                raise ValueError("rejected actor anchor must join its public ID.")
+        elif self.actor_anchor is not None:
+            raise ValueError("inactive rejected actors must remain feed-only.")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AbilityActivatedEventV2(CanonicalVisualEventBaseV2):
+    event_type: Literal["ability_activated"] = field(
+        default="ability_activated", init=False
+    )
+    phase_rank: Literal[20] = field(default=20, init=False)
+    source_global_slot: int
+    ability_component: Literal["basic", "ultimate"]
+    recipient_global_slot: int | None
+    source_anchor: VisualAgentAnchorV2
+    recipient_anchor: VisualAgentAnchorV2 | None
+
+    def __post_init__(self) -> None:
+        CanonicalVisualEventBaseV2.__post_init__(self)
+        _require_slot(self.source_global_slot, name="source_global_slot")
+        if self.ability_component not in ("basic", "ultimate"):
+            raise ValueError("ability_component must be basic or ultimate.")
+        if self.recipient_global_slot is not None:
+            _require_slot(self.recipient_global_slot, name="recipient_global_slot")
+        _require_agent_anchor(
+            self.source_anchor,
+            name="source_anchor",
+            phase="transition_start",
+            global_slot=self.source_global_slot,
+        )
+        _require_optional_agent_anchor(
+            self.recipient_anchor,
+            name="recipient_anchor",
+            phase="transition_start",
+            global_slot=self.recipient_global_slot,
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SourceDamageOutputEventV2(CanonicalVisualEventBaseV2):
+    event_type: Literal["source_damage_output"] = field(
+        default="source_damage_output", init=False
+    )
+    phase_rank: Literal[30] = field(default=30, init=False)
+    source_global_slot: int
+    recipient_global_slot: int | None
+    raw_damage_output: float
+    source_modified_damage_output: float
+    recipient_damage_modifier: float
+    mage_damage_aura_covering_emitter_global_slots: tuple[int, ...]
+    warrior_mitigation_aura_covering_emitter_global_slots: tuple[int, ...]
+    source_anchor: VisualAgentAnchorV2
+    recipient_anchor: VisualAgentAnchorV2 | None
+
+    def __post_init__(self) -> None:
+        CanonicalVisualEventBaseV2.__post_init__(self)
+        _require_slot(self.source_global_slot, name="source_global_slot")
+        if self.recipient_global_slot is not None:
+            _require_slot(self.recipient_global_slot, name="recipient_global_slot")
+        for name in (
+            "raw_damage_output",
+            "source_modified_damage_output",
+            "recipient_damage_modifier",
+        ):
+            _require_nonnegative_finite(cast(float, getattr(self, name)), name=name)
+        _require_slot_tuple(
+            self.mage_damage_aura_covering_emitter_global_slots,
+            name="mage_damage_aura_covering_emitter_global_slots",
+        )
+        _require_slot_tuple(
+            self.warrior_mitigation_aura_covering_emitter_global_slots,
+            name="warrior_mitigation_aura_covering_emitter_global_slots",
+        )
+        _require_agent_anchor(
+            self.source_anchor,
+            name="source_anchor",
+            phase="transition_start",
+            global_slot=self.source_global_slot,
+        )
+        _require_optional_agent_anchor(
+            self.recipient_anchor,
+            name="recipient_anchor",
+            phase="transition_start",
+            global_slot=self.recipient_global_slot,
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SourceHealingOutputEventV2(CanonicalVisualEventBaseV2):
+    event_type: Literal["source_healing_output"] = field(
+        default="source_healing_output", init=False
+    )
+    phase_rank: Literal[30] = field(default=30, init=False)
+    source_global_slot: int
+    recipient_global_slot: int | None
+    raw_healing_output: float
+    source_modified_healing_output: float
+    recipient_healing_modifier: float
+    source_anchor: VisualAgentAnchorV2
+    recipient_anchor: VisualAgentAnchorV2 | None
+
+    def __post_init__(self) -> None:
+        CanonicalVisualEventBaseV2.__post_init__(self)
+        _require_slot(self.source_global_slot, name="source_global_slot")
+        if self.recipient_global_slot is not None:
+            _require_slot(self.recipient_global_slot, name="recipient_global_slot")
+        for name in (
+            "raw_healing_output",
+            "source_modified_healing_output",
+            "recipient_healing_modifier",
+        ):
+            _require_nonnegative_finite(cast(float, getattr(self, name)), name=name)
+        _require_agent_anchor(
+            self.source_anchor,
+            name="source_anchor",
+            phase="transition_start",
+            global_slot=self.source_global_slot,
+        )
+        _require_optional_agent_anchor(
+            self.recipient_anchor,
+            name="recipient_anchor",
+            phase="transition_start",
+            global_slot=self.recipient_global_slot,
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RecipientHealthResolutionEventV2(CanonicalVisualEventBaseV2):
+    event_type: Literal["recipient_health_resolution"] = field(
+        default="recipient_health_resolution", init=False
+    )
+    phase_rank: Literal[40] = field(default=40, init=False)
+    recipient_global_slot: int
+    transition_start_health: float
+    total_effective_damage: float
+    total_effective_healing: float
+    health_after_combat_resolution: float
+    realized_net_health_change: float
+    recipient_anchor: VisualAgentAnchorV2
+
+    def __post_init__(self) -> None:
+        CanonicalVisualEventBaseV2.__post_init__(self)
+        _require_slot(self.recipient_global_slot, name="recipient_global_slot")
+        for name in (
+            "transition_start_health",
+            "total_effective_damage",
+            "total_effective_healing",
+            "health_after_combat_resolution",
+        ):
+            _require_nonnegative_finite(cast(float, getattr(self, name)), name=name)
+        _require_finite(
+            self.realized_net_health_change,
+            name="realized_net_health_change",
+        )
+        _require_agent_anchor(
+            self.recipient_anchor,
+            name="recipient_anchor",
+            phase="transition_start",
+            global_slot=self.recipient_global_slot,
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CombatCountdownResetEventV2(CanonicalVisualEventBaseV2):
+    event_type: Literal["combat_countdown_reset"] = field(
+        default="combat_countdown_reset", init=False
+    )
+    phase_rank: Literal[50] = field(default=50, init=False)
+    agent_global_slot: int
+    agent_anchor: VisualAgentAnchorV2
+
+    def __post_init__(self) -> None:
+        CanonicalVisualEventBaseV2.__post_init__(self)
+        _require_slot(self.agent_global_slot, name="agent_global_slot")
+        _require_agent_anchor(
+            self.agent_anchor,
+            name="agent_anchor",
+            phase="transition_start",
+            global_slot=self.agent_global_slot,
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class HealthRegeneratedEventV2(CanonicalVisualEventBaseV2):
+    event_type: Literal["health_regenerated"] = field(
+        default="health_regenerated", init=False
+    )
+    phase_rank: Literal[50] = field(default=50, init=False)
+    agent_global_slot: int
+    actual_health_regenerated: float
+    agent_anchor: VisualAgentAnchorV2
+
+    def __post_init__(self) -> None:
+        CanonicalVisualEventBaseV2.__post_init__(self)
+        _require_slot(self.agent_global_slot, name="agent_global_slot")
+        _require_nonnegative_finite(
+            self.actual_health_regenerated,
+            name="actual_health_regenerated",
+        )
+        _require_agent_anchor(
+            self.agent_anchor,
+            name="agent_anchor",
+            phase="transition_start",
+            global_slot=self.agent_global_slot,
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CooldownStartedEventV2(CanonicalVisualEventBaseV2):
+    event_type: Literal["cooldown_started"] = field(
+        default="cooldown_started", init=False
+    )
+    phase_rank: Literal[60] = field(default=60, init=False)
+    agent_global_slot: int
+    agent_anchor: VisualAgentAnchorV2
+
+    def __post_init__(self) -> None:
+        CanonicalVisualEventBaseV2.__post_init__(self)
+        _require_slot(self.agent_global_slot, name="agent_global_slot")
+        _require_agent_anchor(
+            self.agent_anchor,
+            name="agent_anchor",
+            phase="transition_start",
+            global_slot=self.agent_global_slot,
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CooldownReadyEventV2(CanonicalVisualEventBaseV2):
+    event_type: Literal["cooldown_ready"] = field(default="cooldown_ready", init=False)
+    phase_rank: Literal[60] = field(default=60, init=False)
+    agent_global_slot: int
+    agent_anchor: VisualAgentAnchorV2
+
+    def __post_init__(self) -> None:
+        CanonicalVisualEventBaseV2.__post_init__(self)
+        _require_slot(self.agent_global_slot, name="agent_global_slot")
+        _require_agent_anchor(
+            self.agent_anchor,
+            name="agent_anchor",
+            phase="transition_start",
+            global_slot=self.agent_global_slot,
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ChargePhaseDisplacementEventV2(CanonicalVisualEventBaseV2):
+    event_type: Literal["charge_phase_displacement"] = field(
+        default="charge_phase_displacement", init=False
+    )
+    phase_rank: Literal[70] = field(default=70, init=False)
+    agent_global_slot: int
+    realized_displacement: Point2D
+    start_anchor: VisualAgentAnchorV2
+    end_anchor: VisualAgentAnchorV2
+
+    def __post_init__(self) -> None:
+        CanonicalVisualEventBaseV2.__post_init__(self)
+        _require_slot(self.agent_global_slot, name="agent_global_slot")
+        _require_point(self.realized_displacement, name="realized_displacement")
+        _require_agent_anchor(
+            self.start_anchor,
+            name="start_anchor",
+            phase="transition_start",
+            global_slot=self.agent_global_slot,
+        )
+        _require_agent_anchor(
+            self.end_anchor,
+            name="end_anchor",
+            phase="post_charge",
+            global_slot=self.agent_global_slot,
+        )
+        expected_end = (
+            self.start_anchor.position[0] + self.realized_displacement[0],
+            self.start_anchor.position[1] + self.realized_displacement[1],
+        )
+        if not _points_close(self.end_anchor.position, expected_end):
+            raise ValueError("Charge end anchor must apply its recorded displacement.")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class OrdinaryMovementPhaseDisplacementEventV2(CanonicalVisualEventBaseV2):
+    event_type: Literal["ordinary_movement_phase_displacement"] = field(
+        default="ordinary_movement_phase_displacement", init=False
+    )
+    phase_rank: Literal[80] = field(default=80, init=False)
+    agent_global_slot: int
+    realized_displacement: Point2D
+    start_anchor: VisualAgentAnchorV2
+    end_anchor: VisualAgentAnchorV2
+
+    def __post_init__(self) -> None:
+        CanonicalVisualEventBaseV2.__post_init__(self)
+        _require_slot(self.agent_global_slot, name="agent_global_slot")
+        _require_point(self.realized_displacement, name="realized_displacement")
+        _require_agent_anchor(
+            self.start_anchor,
+            name="start_anchor",
+            phase="post_charge",
+            global_slot=self.agent_global_slot,
+        )
+        _require_agent_anchor(
+            self.end_anchor,
+            name="end_anchor",
+            phase="successor",
+            global_slot=self.agent_global_slot,
+        )
+        expected_end = (
+            self.start_anchor.position[0] + self.realized_displacement[0],
+            self.start_anchor.position[1] + self.realized_displacement[1],
+        )
+        if not _points_close(self.end_anchor.position, expected_end):
+            raise ValueError(
+                "ordinary-movement end anchor must apply its recorded displacement."
+            )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AgentDiedEventV2(CanonicalVisualEventBaseV2):
+    event_type: Literal["agent_died"] = field(default="agent_died", init=False)
+    phase_rank: Literal[90] = field(default=90, init=False)
+    recipient_global_slot: int
+    recipient_anchor: VisualAgentAnchorV2
+
+    def __post_init__(self) -> None:
+        CanonicalVisualEventBaseV2.__post_init__(self)
+        _require_slot(self.recipient_global_slot, name="recipient_global_slot")
+        _require_agent_anchor(
+            self.recipient_anchor,
+            name="recipient_anchor",
+            phase="successor",
+            global_slot=self.recipient_global_slot,
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class LethalDamageContributionEventV2(CanonicalVisualEventBaseV2):
+    event_type: Literal["lethal_damage_contribution"] = field(
+        default="lethal_damage_contribution", init=False
+    )
+    phase_rank: Literal[90] = field(default=90, init=False)
+    source_global_slot: int
+    recipient_global_slot: int
+    attributed_death_damage: float
+    source_anchor: VisualAgentAnchorV2
+    recipient_anchor: VisualAgentAnchorV2
+
+    def __post_init__(self) -> None:
+        CanonicalVisualEventBaseV2.__post_init__(self)
+        _require_slot(self.source_global_slot, name="source_global_slot")
+        _require_slot(self.recipient_global_slot, name="recipient_global_slot")
+        _require_nonnegative_finite(
+            self.attributed_death_damage,
+            name="attributed_death_damage",
+        )
+        _require_agent_anchor(
+            self.source_anchor,
+            name="source_anchor",
+            phase="successor",
+            global_slot=self.source_global_slot,
+        )
+        _require_agent_anchor(
+            self.recipient_anchor,
+            name="recipient_anchor",
+            phase="successor",
+            global_slot=self.recipient_global_slot,
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class StatusVisualEventBaseV2(CanonicalVisualEventBaseV2):
+    """Common direct recipient/status payload for one lifecycle event."""
+
+    recipient_global_slot: int
+    status_channel: int
+    status_id: str
+    recipient_anchor: VisualAgentAnchorV2
+
+    def __post_init__(self) -> None:
+        CanonicalVisualEventBaseV2.__post_init__(self)
+        _require_slot(self.recipient_global_slot, name="recipient_global_slot")
+        _require_python_int(self.status_channel, name="status_channel", minimum=0)
+        _require_text(self.status_id, name="status_id")
+        if (
+            self.status_channel >= len(CATALOG_STATUS_ID_BY_CHANNEL)
+            or CATALOG_STATUS_ID_BY_CHANNEL[self.status_channel] != self.status_id
+        ):
+            raise ValueError(
+                "status event channel and catalog status ID must retain V1 identity."
+            )
+        _require_agent_anchor(
+            self.recipient_anchor,
+            name="recipient_anchor",
+            phase="successor",
+            global_slot=self.recipient_global_slot,
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class StatusAgedToZeroEventV2(StatusVisualEventBaseV2):
+    event_type: Literal["status_aged_to_zero"] = field(
+        default="status_aged_to_zero", init=False
+    )
+    phase_rank: Literal[100] = field(default=100, init=False)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class StatusBrokenByDamageEventV2(StatusVisualEventBaseV2):
+    event_type: Literal["status_broken_by_damage"] = field(
+        default="status_broken_by_damage", init=False
+    )
+    phase_rank: Literal[100] = field(default=100, init=False)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class StatusAppliedEventV2(StatusVisualEventBaseV2):
+    event_type: Literal["status_applied"] = field(default="status_applied", init=False)
+    phase_rank: Literal[100] = field(default=100, init=False)
+    source_global_slot: int
+    source_anchor: VisualAgentAnchorV2
+
+    def __post_init__(self) -> None:
+        StatusVisualEventBaseV2.__post_init__(self)
+        _require_slot(self.source_global_slot, name="source_global_slot")
+        _require_agent_anchor(
+            self.source_anchor,
+            name="source_anchor",
+            phase="successor",
+            global_slot=self.source_global_slot,
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class StatusRefreshedOrExtendedEventV2(StatusVisualEventBaseV2):
+    event_type: Literal["status_refreshed_or_extended"] = field(
+        default="status_refreshed_or_extended", init=False
+    )
+    phase_rank: Literal[100] = field(default=100, init=False)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class StatusClearedByNewDeathEventV2(StatusVisualEventBaseV2):
+    event_type: Literal["status_cleared_by_new_death"] = field(
+        default="status_cleared_by_new_death", init=False
+    )
+    phase_rank: Literal[100] = field(default=100, init=False)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SpawnShieldExpiredEventV2(CanonicalVisualEventBaseV2):
+    event_type: Literal["spawn_shield_expired"] = field(
+        default="spawn_shield_expired", init=False
+    )
+    phase_rank: Literal[110] = field(default=110, init=False)
+    agent_global_slot: int
+    agent_anchor: VisualAgentAnchorV2
+
+    def __post_init__(self) -> None:
+        CanonicalVisualEventBaseV2.__post_init__(self)
+        _require_slot(self.agent_global_slot, name="agent_global_slot")
+        _require_agent_anchor(
+            self.agent_anchor,
+            name="agent_anchor",
+            phase="successor",
+            global_slot=self.agent_global_slot,
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RespawnWaveOccurredEventV2(CanonicalVisualEventBaseV2):
+    event_type: Literal["respawn_wave_occurred"] = field(
+        default="respawn_wave_occurred", init=False
+    )
+    phase_rank: Literal[120] = field(default=120, init=False)
+    team_index: int
+    team_id: int
+    team_anchor: VisualTeamAnchorV2
+
+    def __post_init__(self) -> None:
+        CanonicalVisualEventBaseV2.__post_init__(self)
+        _require_python_int(self.team_index, name="team_index", minimum=0)
+        if self.team_index not in (0, 1):
+            raise ValueError("team_index must be zero or one.")
+        _require_python_int(self.team_id, name="team_id", minimum=1)
+        if self.team_id != self.team_index + 1:
+            raise ValueError("team_id must equal team_index + 1.")
+        if type(self.team_anchor) is not VisualTeamAnchorV2 or (
+            self.team_anchor.phase != "successor"
+            or self.team_anchor.team_index != self.team_index
+            or self.team_anchor.team_id != self.team_id
+        ):
+            raise ValueError("team_anchor must join the successor team wave.")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AgentRespawnedEventV2(CanonicalVisualEventBaseV2):
+    event_type: Literal["agent_respawned"] = field(
+        default="agent_respawned", init=False
+    )
+    phase_rank: Literal[120] = field(default=120, init=False)
+    agent_global_slot: int
+    team_id: int
+    realized_successor_position: Point2D
+    agent_anchor: VisualAgentAnchorV2
+
+    def __post_init__(self) -> None:
+        CanonicalVisualEventBaseV2.__post_init__(self)
+        _require_slot(self.agent_global_slot, name="agent_global_slot")
+        _require_python_int(self.team_id, name="team_id", minimum=1)
+        if self.team_id not in (1, 2):
+            raise ValueError("team_id must be one or two.")
+        _require_point(
+            self.realized_successor_position,
+            name="realized_successor_position",
+        )
+        _require_agent_anchor(
+            self.agent_anchor,
+            name="agent_anchor",
+            phase="successor",
+            global_slot=self.agent_global_slot,
+        )
+        if self.agent_anchor.position != self.realized_successor_position:
+            raise ValueError(
+                "respawn anchor must equal the recorded successor position."
+            )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class VisualAgentPhaseTrajectoryV2:
+    """One actor's explicit start, post-Charge, and successor anchors."""
+
+    global_slot: int
+    public_agent_id: str
+    transition_start: VisualAgentAnchorV2
+    post_charge: VisualAgentAnchorV2
+    successor: VisualAgentAnchorV2
+
+    def __post_init__(self) -> None:
+        _require_slot(self.global_slot, name="global_slot")
+        _require_text(self.public_agent_id, name="public_agent_id")
+        for name, phase in (
+            ("transition_start", "transition_start"),
+            ("post_charge", "post_charge"),
+            ("successor", "successor"),
+        ):
+            anchor = cast(VisualAgentAnchorV2, getattr(self, name))
+            _require_agent_anchor(
+                anchor,
+                name=name,
+                phase=cast(VisualAnchorPhaseV2, phase),
+                global_slot=self.global_slot,
+            )
+            if anchor.public_agent_id != self.public_agent_id:
+                raise ValueError("phase anchors must retain one public agent ID.")
+
+
+type VisualEventV2 = (
+    ActionRejectedEventV2
+    | AbilityActivatedEventV2
+    | SourceDamageOutputEventV2
+    | SourceHealingOutputEventV2
+    | RecipientHealthResolutionEventV2
+    | CombatCountdownResetEventV2
+    | HealthRegeneratedEventV2
+    | CooldownStartedEventV2
+    | CooldownReadyEventV2
+    | ChargePhaseDisplacementEventV2
+    | OrdinaryMovementPhaseDisplacementEventV2
+    | AgentDiedEventV2
+    | LethalDamageContributionEventV2
+    | StatusAgedToZeroEventV2
+    | StatusBrokenByDamageEventV2
+    | StatusAppliedEventV2
+    | StatusRefreshedOrExtendedEventV2
+    | StatusClearedByNewDeathEventV2
+    | SpawnShieldExpiredEventV2
+    | RespawnWaveOccurredEventV2
+    | AgentRespawnedEventV2
+)
+
+_VISUAL_EVENT_V2_TYPES: tuple[type[object], ...] = (
+    ActionRejectedEventV2,
+    AbilityActivatedEventV2,
+    SourceDamageOutputEventV2,
+    SourceHealingOutputEventV2,
+    RecipientHealthResolutionEventV2,
+    CombatCountdownResetEventV2,
+    HealthRegeneratedEventV2,
+    CooldownStartedEventV2,
+    CooldownReadyEventV2,
+    ChargePhaseDisplacementEventV2,
+    OrdinaryMovementPhaseDisplacementEventV2,
+    AgentDiedEventV2,
+    LethalDamageContributionEventV2,
+    StatusAgedToZeroEventV2,
+    StatusBrokenByDamageEventV2,
+    StatusAppliedEventV2,
+    StatusRefreshedOrExtendedEventV2,
+    StatusClearedByNewDeathEventV2,
+    SpawnShieldExpiredEventV2,
+    RespawnWaveOccurredEventV2,
+    AgentRespawnedEventV2,
+)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class VisualEventBatchV2:
+    """All canonical CP2 events for one transition, unchanged in order."""
+
+    schema_version: int
+    episode_id: str
+    transition_index: int
+    transition_id: str
+    start_frame_id: str
+    successor_frame_id: str
+    start_simulator_step_count: int
+    successor_simulator_step_count: int
+    public_agent_id_by_global_slot: tuple[str, ...]
+    configured_active_by_global_slot: tuple[bool, ...]
+    agent_phase_trajectories: tuple[VisualAgentPhaseTrajectoryV2, ...]
+    events: tuple[VisualEventV2, ...]
+
+    def __post_init__(self) -> None:
+        _require_python_int(self.schema_version, name="schema_version")
+        if self.schema_version != EVENT_V2_SCHEMA_VERSION:
+            raise ValueError("unknown VisualEventBatchV2 schema version.")
+        _require_text(self.episode_id, name="episode_id")
+        _require_python_int(
+            self.transition_index,
+            name="transition_index",
+            minimum=0,
+        )
+        expected_transition_id = f"{self.episode_id}:transition:{self.transition_index}"
+        if self.transition_id != expected_transition_id:
+            raise ValueError("visual batch transition ID is not canonical.")
+        if self.start_frame_id != f"{self.episode_id}:frame:{self.transition_index}":
+            raise ValueError("visual batch start frame ID is not canonical.")
+        if self.successor_frame_id != (
+            f"{self.episode_id}:frame:{self.transition_index + 1}"
+        ):
+            raise ValueError("visual batch successor frame ID is not canonical.")
+        for name in (
+            "start_simulator_step_count",
+            "successor_simulator_step_count",
+        ):
+            _require_python_int(cast(int, getattr(self, name)), name=name, minimum=0)
+        if self.successor_simulator_step_count != (self.start_simulator_step_count + 1):
+            raise ValueError("V2 event batches require adjacent simulator step counts.")
+        _require_tuple_items(
+            self.public_agent_id_by_global_slot,
+            name="public_agent_id_by_global_slot",
+            item_types=(str,),
+        )
+        if len(self.public_agent_id_by_global_slot) != MAX_AGENT_SLOTS:
+            raise ValueError("V2 event batches require all ten public agent IDs.")
+        for public_agent_id in self.public_agent_id_by_global_slot:
+            _require_text(public_agent_id, name="public_agent_id")
+        _require_unique(
+            self.public_agent_id_by_global_slot,
+            name="public_agent_id_by_global_slot",
+        )
+        if (
+            type(self.configured_active_by_global_slot) is not tuple
+            or len(self.configured_active_by_global_slot) != MAX_AGENT_SLOTS
+        ):
+            raise ValueError("V2 event batches require all ten active flags.")
+        for active in self.configured_active_by_global_slot:
+            _require_python_bool(active, name="configured_active")
+        _require_tuple_items(
+            self.agent_phase_trajectories,
+            name="agent_phase_trajectories",
+            item_types=(VisualAgentPhaseTrajectoryV2,),
+        )
+        trajectory_slots = tuple(
+            row.global_slot for row in self.agent_phase_trajectories
+        )
+        if trajectory_slots != tuple(sorted(trajectory_slots)) or len(
+            trajectory_slots
+        ) != len(set(trajectory_slots)):
+            raise ValueError("agent phase trajectories require canonical unique slots.")
+        expected_trajectory_slots = tuple(
+            slot
+            for slot, active in enumerate(self.configured_active_by_global_slot)
+            if active
+        )
+        if trajectory_slots != expected_trajectory_slots:
+            raise ValueError("phase trajectories must cover configured-active slots.")
+        for trajectory in self.agent_phase_trajectories:
+            if (
+                trajectory.public_agent_id
+                != self.public_agent_id_by_global_slot[trajectory.global_slot]
+            ):
+                raise ValueError("phase trajectory must join public roster identity.")
+        _require_tuple_items(
+            self.events,
+            name="events",
+            item_types=_VISUAL_EVENT_V2_TYPES,
+        )
+        if tuple(event.ordinal for event in self.events) != tuple(
+            range(len(self.events))
+        ):
+            raise ValueError("V2 event ordinals must be gap-free and ordered.")
+        if any(event.transition_id != self.transition_id for event in self.events):
+            raise ValueError("every V2 event must join its containing transition.")
+        if tuple(event.phase_rank for event in self.events) != tuple(
+            sorted(event.phase_rank for event in self.events)
+        ):
+            raise ValueError("V2 event phase ranks must retain canonical order.")
+        trajectory_by_slot = {
+            row.global_slot: row for row in self.agent_phase_trajectories
+        }
+        for event in self.events:
+            if type(event) is ActionRejectedEventV2 and (
+                event.actor_public_agent_id
+                != self.public_agent_id_by_global_slot[event.actor_global_slot]
+                or event.actor_configured_active
+                != self.configured_active_by_global_slot[event.actor_global_slot]
+            ):
+                raise ValueError("rejected action must join batch roster identity.")
+            for field_name in (
+                "actor_anchor",
+                "source_anchor",
+                "recipient_anchor",
+                "agent_anchor",
+                "start_anchor",
+                "end_anchor",
+            ):
+                anchor = getattr(event, field_name, None)
+                if anchor is None:
+                    continue
+                if type(anchor) is not VisualAgentAnchorV2:
+                    raise ValueError("V2 event agent anchors must use exact roots.")
+                trajectory = trajectory_by_slot.get(anchor.global_slot)
+                if trajectory is None or (getattr(trajectory, anchor.phase) != anchor):
+                    raise ValueError(
+                        "V2 event anchors must join their canonical phase trajectory."
+                    )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ResearcherAnalyzerProjectionV2:
+    """Stable researcher scene plus its exact incoming event batch."""
+
+    schema_version: int
+    scene: BattlefieldSceneV2
+    incoming_events: VisualEventBatchV2 | None
+    status_source_evidence: StatusSourceEvidenceStateV2
+
+    def __post_init__(self) -> None:
+        _require_python_int(self.schema_version, name="schema_version")
+        if self.schema_version != RESEARCHER_ANALYZER_PROJECTION_SCHEMA_VERSION:
+            raise ValueError("unknown researcher analyzer projection version.")
+        if type(self.scene) is not BattlefieldSceneV2:
+            raise ValueError("scene must be the exact BattlefieldSceneV2 root.")
+        if type(self.status_source_evidence) is not StatusSourceEvidenceStateV2:
+            raise ValueError("status_source_evidence must use its exact state root.")
+        state = self.status_source_evidence
+        if (
+            state.episode_id != self.scene.episode_id
+            or state.frame_index != self.scene.frame_index
+            or state.frame_id != self.scene.frame_id
+        ):
+            raise ValueError("status-source evidence must join the selected scene.")
+        if self.scene.frame_index == 0:
+            if self.incoming_events is not None:
+                raise ValueError("frame zero cannot have incoming visual events.")
+        elif type(self.incoming_events) is not VisualEventBatchV2:
+            raise ValueError("non-initial scenes require exact incoming V2 events.")
+        if self.incoming_events is not None:
+            batch = self.incoming_events
+            if (
+                batch.episode_id != self.scene.episode_id
+                or batch.transition_id != self.scene.incoming_transition_id
+                or batch.successor_frame_id != self.scene.frame_id
+                or tuple(event.event_id for event in batch.events)
+                != self.scene.incoming_event_ids
+            ):
+                raise ValueError("incoming V2 events must join the selected scene.")
+            agents = {row.global_slot: row for row in self.scene.agents}
+            if tuple(
+                row.global_slot for row in batch.agent_phase_trajectories
+            ) != tuple(agents):
+                raise ValueError("V2 phase trajectories must join all scene agents.")
+            for trajectory in batch.agent_phase_trajectories:
+                agent = agents[trajectory.global_slot]
+                if (
+                    trajectory.public_agent_id != agent.public_agent_id
+                    or trajectory.successor.position != agent.position
+                ):
+                    raise ValueError(
+                        "V2 phase trajectory must join successor scene identity."
+                    )
+        state_by_key = {
+            (row.recipient_global_slot, row.status_channel): row
+            for row in state.active_statuses
+        }
+        scene_status_keys: set[tuple[int, int]] = set()
+        for agent in self.scene.agents:
+            for status in agent.statuses:
+                key = (agent.global_slot, status.status_channel)
+                row = state_by_key.get(key)
+                if row is None or (
+                    row.recipient_public_agent_id != agent.public_agent_id
+                    or row.status_id != status.status_id
+                    or row.direct_source_evidence != status.direct_source_evidence
+                ):
+                    raise ValueError(
+                        "scene status evidence must equal its frame-bound state."
+                    )
+                scene_status_keys.add(key)
+        if scene_status_keys != set(state_by_key):
+            raise ValueError("status-source state must cover exactly active statuses.")
 
 
 def _validate_event_header(event_id: str, transition_id: int) -> None:

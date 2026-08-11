@@ -16,7 +16,10 @@ from marl_battlegrounds.rendering.scene import (
     NetHealthEventV1,
     RejectedActionEventV1,
     StatusLifecycleEventV1,
+    VisualAgentAnchorV2,
     VisualEventBatchV1,
+    VisualEventBatchV2,
+    VisualEventV2,
 )
 from marl_battlegrounds.rendering.vocabulary import (
     class_token_from_id,
@@ -48,6 +51,7 @@ _UNAVAILABLE = "#64748B"
 _TARGET = "#F472B6"
 
 type BattlefieldScene = BattlefieldSceneV1 | BattlefieldSceneV2
+type VisualEventBatch = VisualEventBatchV1 | VisualEventBatchV2
 
 
 def _aura_color(token_id: str) -> str:
@@ -147,14 +151,17 @@ def draw_scene_geometry(
     axes: object,
     scene: BattlefieldScene,
     *,
-    event_batch: VisualEventBatchV1 | None = None,
+    event_batch: VisualEventBatch | None = None,
     options: SceneRenderOptions | None = None,
 ) -> None:
     """Clear and draw one authorized scene plus its latest static event batch."""
     if type(scene) not in (BattlefieldSceneV1, BattlefieldSceneV2):
         raise TypeError("scene must be BattlefieldSceneV1 or BattlefieldSceneV2.")
-    if event_batch is not None and type(event_batch) is not VisualEventBatchV1:
-        raise TypeError("event_batch must be VisualEventBatchV1 or None.")
+    if event_batch is not None and type(event_batch) not in (
+        VisualEventBatchV1,
+        VisualEventBatchV2,
+    ):
+        raise TypeError("event_batch must be VisualEventBatchV1/V2 or None.")
     if options is not None and type(options) is not SceneRenderOptions:
         raise TypeError("options must be SceneRenderOptions or None.")
     render_options = options or SceneRenderOptions()
@@ -162,11 +169,25 @@ def draw_scene_geometry(
     typed_axes = cast(_AxesLike, axes)
 
     if type(scene) is BattlefieldSceneV2:
-        if event_batch is not None:
+        if event_batch is not None and type(event_batch) is not VisualEventBatchV2:
             raise ValueError(
                 "BattlefieldSceneV2 does not accept legacy VisualEventBatchV1."
             )
-        _draw_scene_v2(typed_axes, parts, scene, render_options)
+        typed_v2_batch = event_batch
+        if typed_v2_batch is not None and (
+            typed_v2_batch.transition_id != scene.incoming_transition_id
+            or typed_v2_batch.successor_frame_id != scene.frame_id
+            or tuple(event.event_id for event in typed_v2_batch.events)
+            != scene.incoming_event_ids
+        ):
+            raise ValueError("VisualEventBatchV2 must join its BattlefieldSceneV2.")
+        _draw_scene_v2(
+            typed_axes,
+            parts,
+            scene,
+            render_options,
+            typed_v2_batch,
+        )
         return
 
     legacy_scene = cast(BattlefieldSceneV1, scene)
@@ -180,7 +201,11 @@ def draw_scene_geometry(
     if render_options.show_observer_visibility:
         _draw_observer_visibility(typed_axes, legacy_scene)
     if render_options.show_events and event_batch is not None:
-        _draw_events(typed_axes, legacy_scene, event_batch)
+        _draw_events(
+            typed_axes,
+            legacy_scene,
+            cast(VisualEventBatchV1, event_batch),
+        )
     _draw_audience_badge(typed_axes, legacy_scene)
     _style_axes(typed_axes, legacy_scene)
 
@@ -188,7 +213,7 @@ def draw_scene_geometry(
 def render_scene_geometry(
     scene: BattlefieldScene,
     *,
-    event_batch: VisualEventBatchV1 | None = None,
+    event_batch: VisualEventBatch | None = None,
     options: SceneRenderOptions | None = None,
 ) -> RenderResult:
     """Create a Matplotlib figure for one authorized scene/event snapshot."""
@@ -211,7 +236,7 @@ def redraw_scene_geometry(
     scene: BattlefieldScene,
     result: RenderResult,
     *,
-    event_batch: VisualEventBatchV1 | None = None,
+    event_batch: VisualEventBatch | None = None,
     options: SceneRenderOptions | None = None,
 ) -> RenderResult:
     """Redraw an existing scene figure and return the identical result object."""
@@ -229,6 +254,7 @@ def _draw_scene_v2(
     parts: _MatplotlibParts,
     scene: BattlefieldSceneV2,
     options: SceneRenderOptions,
+    event_batch: VisualEventBatchV2 | None,
 ) -> None:
     """Draw one canonical-record durable scene without inferred events."""
     axes.clear()
@@ -240,6 +266,8 @@ def _draw_scene_v2(
     _draw_obstacles(axes, parts, scene)
     _draw_v2_agents(axes, parts, scene, options)
     _draw_v2_wave_clocks(axes, scene)
+    if options.show_events and event_batch is not None:
+        _draw_events_v2(axes, event_batch)
     _draw_audience_badge(axes, scene)
     _style_axes(axes, scene)
     axes.set_title(
@@ -250,6 +278,72 @@ def _draw_scene_v2(
         color=_TEXT,
         fontsize=10,
     )
+
+
+def _v2_primary_anchor(event: VisualEventV2) -> VisualAgentAnchorV2 | None:
+    """Return one direct display anchor without joining event variants."""
+    for field_name in (
+        "recipient_anchor",
+        "agent_anchor",
+        "actor_anchor",
+        "source_anchor",
+        "end_anchor",
+    ):
+        anchor = getattr(event, field_name, None)
+        if type(anchor) is VisualAgentAnchorV2:
+            return anchor
+    return None
+
+
+def _draw_events_v2(
+    axes: _AxesLike,
+    event_batch: VisualEventBatchV2,
+) -> None:
+    """Draw each canonical event exactly once as a static labelled cue."""
+    for event in event_batch.events:
+        anchor = _v2_primary_anchor(event)
+        label = event.event_type.replace("_", " ").upper()
+        color = {
+            "action_rejected": _DAMAGE,
+            "source_damage_output": _DAMAGE,
+            "recipient_health_resolution": _DAMAGE,
+            "health_regenerated": _HEALING,
+            "source_healing_output": _HEALING,
+            "ability_activated": _ULTIMATE,
+            "agent_respawned": _HEALING,
+        }.get(event.event_type, _TEXT)
+        if anchor is None:
+            artist = axes.text(
+                0.01,
+                max(0.02, 0.96 - event.ordinal * 0.028),
+                label,
+                transform=axes.transAxes,
+                color=color,
+                fontsize=5.0,
+                ha="left",
+                va="top",
+                zorder=80,
+            )
+        else:
+            artist = axes.annotate(
+                label,
+                xy=anchor.position,
+                xytext=(5, 5 + (event.ordinal % 3) * 7),
+                textcoords="offset points",
+                color=color,
+                fontsize=4.8,
+                ha="left",
+                va="bottom",
+                bbox={
+                    "boxstyle": "round,pad=0.12",
+                    "facecolor": _BACKGROUND,
+                    "edgecolor": color,
+                    "linewidth": 0.5,
+                    "alpha": 0.88,
+                },
+                zorder=80,
+            )
+        _tag(artist, f"scene:v2:event:{event.event_id}")
 
 
 def _draw_v2_spawn_pads(

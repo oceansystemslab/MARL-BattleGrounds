@@ -77,7 +77,9 @@ test("resize observer preserves authoritative DOM across split and stacked layou
   await expect(page.locator("#roster .roster-fact-token--status")).toHaveCount(
     expectedStatusCount,
   );
-  const focusedControl = page.getByRole("button", { name: "Control id_0" });
+  const focusedControl = page.getByRole("button", {
+    name: "Control Agent ID 0",
+  });
   await focusedControl.focus();
   await expect(focusedControl).toBeFocused();
   await page.locator("#battlefield").evaluate((battlefield) => {

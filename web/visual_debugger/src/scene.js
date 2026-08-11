@@ -181,10 +181,7 @@ function frameScene(frame) {
   if (!isRecord(frame)) {
     return null;
   }
-  if (isRecord(frame.scene)) {
-    return frame.scene;
-  }
-  return isRecord(frame.battlefield_scene) ? frame.battlefield_scene : null;
+  return isRecord(frame.scene) ? frame.scene : null;
 }
 
 /**
@@ -423,6 +420,8 @@ export class BattlefieldRenderer {
 
     /** @type {Map<number, AgentNodes>} */
     this.agentNodes = new Map();
+    /** @type {Map<string, SVGElement>} */
+    this.observedBodyNodes = new Map();
 
     battlefield.replaceChildren(
       map,
@@ -541,6 +540,7 @@ export class BattlefieldRenderer {
     this.#renderPendingRoute(scene, transform);
     this.#renderObstacles(map, transform);
     const projectedAgents = this.#renderAgents(scene, transform);
+    this.#renderObservedBodies(scene, transform);
     this.#renderDebugOverlays(scene, projectedAgents, preset === "debug");
     this.#renderStatusDocks(scene, projectedAgents, transform, {
       showLegality: preset !== "presentation",
@@ -652,6 +652,7 @@ export class BattlefieldRenderer {
     this.layers.durableStatusModifier.removeAttribute("data-compacted-required-docks");
     this.layers.accessibleLabels.replaceChildren();
     this.agentNodes.clear();
+    this.observedBodyNodes.clear();
     this.choreographyProtectedRects = Object.freeze([]);
     this.choreographyProtectedRectGroups = Object.freeze({
       base: Object.freeze([]),
@@ -747,20 +748,14 @@ export class BattlefieldRenderer {
     }
     const source = screenPoint(route.source_anchor, transform);
     const target = screenPoint(route.target_anchor, transform);
-    const agents = asArray(scene.agents).filter(isRecord);
-    const sourceAgent = agents.find(
-      (agent) => agent.global_slot === route.source_global_slot,
-    );
-    const targetAgent = agents.find(
-      (agent) => agent.global_slot === route.target_global_slot,
-    );
+    const routeIdentity = `${route.source_public_agent_id ?? "unknown"}:${route.target_public_agent_id ?? "unknown"}`;
     const geometry = createRouteGeometry(
       {
-        eventId: `pending:${route.source_global_slot ?? "unknown"}:${route.target_global_slot ?? "unknown"}:${route.lane ?? "unknown"}`,
+        eventId: `pending:${routeIdentity}:${route.lane ?? "unknown"}`,
         source,
         target,
-        sourceRadius: transform.worldLengthToScreen(finiteNumber(sourceAgent?.radius)),
-        targetRadius: transform.worldLengthToScreen(finiteNumber(targetAgent?.radius)),
+        sourceRadius: transform.worldLengthToScreen(finiteNumber(route.source_radius)),
+        targetRadius: transform.worldLengthToScreen(finiteNumber(route.target_radius)),
         offset: route.lane === 1 ? 12 : -12,
       },
       { viewportBounds: transform.mapBounds },
@@ -776,8 +771,14 @@ export class BattlefieldRenderer {
     });
     path.dataset.lane = String(route.lane ?? 0);
     path.dataset.legal = String(Boolean(route.legal));
-    path.dataset.sourceSlot = String(route.source_global_slot ?? "");
-    path.dataset.targetSlot = String(route.target_global_slot ?? "");
+    path.dataset.sourceAgentId = String(route.source_public_agent_id ?? "");
+    path.dataset.targetAgentId = String(route.target_public_agent_id ?? "");
+    if (Number.isInteger(route.source_global_slot)) {
+      path.dataset.sourceSlot = String(route.source_global_slot);
+    }
+    if (Number.isInteger(route.target_global_slot)) {
+      path.dataset.targetSlot = String(route.target_global_slot);
+    }
     path.dataset.routeKind = geometry.kind;
     registerTooltipOwner(hitPath, explainPendingRoute(route));
     this.layers.pendingRoute.replaceChildren(path, hitPath);
@@ -876,6 +877,226 @@ export class BattlefieldRenderer {
   }
 
   /**
+   * Paint recipient-authorized POV body rows without assigning them simulator
+   * global slots. Their stable browser identity is exactly the disclosed
+   * `(relation, observation_row)` axis key; consequently they expose hover and
+   * keyboard inspection but never become target/control hit regions.
+   *
+   * @param {JsonRecord} scene
+   * @param {ViewportTransform} transform
+   */
+  #renderObservedBodies(scene, transform) {
+    const bodies = asArray(scene.observed_bodies).filter(
+      (body) =>
+        isRecord(body) &&
+        (body.relation === "ally" || body.relation === "enemy") &&
+        Number.isInteger(body.observation_row) &&
+        body.observation_key === `${body.relation}:${body.observation_row}`,
+    );
+    const keys = new Set(bodies.map((body) => String(body.observation_key)));
+    for (const [key, node] of this.observedBodyNodes) {
+      if (!keys.has(key)) {
+        node.remove();
+        this.observedBodyNodes.delete(key);
+      }
+    }
+
+    for (const body of bodies) {
+      const key = String(body.observation_key);
+      const center = screenPoint(body.position, transform);
+      const radius = transform.worldLengthToScreen(finiteNumber(body.radius, 0.5));
+      const classToken = classTokenFromId(body.class_id);
+      const teamToken = teamTokenFromId(body.team_id);
+      let root = this.observedBodyNodes.get(key);
+      if (!root) {
+        root = svgElement("g", {
+          class: "agent pov-observed-body",
+          tabindex: "0",
+          role: "img",
+          "data-observation-key": key,
+        });
+        root.append(
+          svgElement("circle", {
+            class: "agent-body",
+            "data-zone": "observed-body",
+          }),
+          svgElement("circle", {
+            class: "agent-team-ring",
+            "data-zone": "observed-team",
+          }),
+          svgElement("circle", {
+            class: "agent-health-track",
+            "data-zone": "observed-health",
+          }),
+          svgElement("circle", {
+            class: "agent-health",
+            "data-zone": "observed-health",
+            pathLength: 100,
+          }),
+          createSvgIcon(this.battlefield.ownerDocument, classToken.glyphKey, {
+            className: "agent-class-icon",
+          }),
+          svgElement("text", { class: "pov-observed-body__label" }),
+          svgElement("g", {
+            class: "pov-observed-body__statuses",
+            "data-zone": "observed-statuses",
+          }),
+        );
+        this.observedBodyNodes.set(key, root);
+      }
+
+      root.dataset.relation = body.relation;
+      root.dataset.observationRow = String(body.observation_row);
+      root.dataset.publicAgentId = String(body.public_agent_id);
+      root.dataset.team = teamToken.cssKey;
+      root.dataset.class = classToken.cssKey;
+      root.dataset.alive = String(Boolean(body.alive));
+      const statuses = asArray(body.statuses);
+      const statusDescriptions = statuses.map((status) => {
+        const token = resolveVisualToken("status", status.token_id, status);
+        return `${token.accessibleName}, ${formatDisplayNumber(status.duration)} ticks`;
+      });
+      root.dataset.statusCount = String(statuses.length);
+      root.setAttribute(
+        "aria-label",
+        `${body.relation} observation row ${body.observation_row}, ${body.public_agent_id}, ${classToken.label}, health ${formatDisplayNumber(body.current_health)} of ${formatDisplayNumber(body.max_health)}, ${statusDescriptions.length === 0 ? "no persistent statuses" : `statuses ${statusDescriptions.join(", ")}`}`,
+      );
+
+      const healthRadius = Math.max(radius - 4, radius * 0.7);
+      const healthRatio = Math.max(
+        0,
+        Math.min(
+          1,
+          finiteNumber(body.current_health) /
+            Math.max(finiteNumber(body.max_health, 1), Number.EPSILON),
+        ),
+      );
+      const [bodyCircle, teamRing, healthTrack, health, icon, label, statusGroup] =
+        root.children;
+      setAttributes(/** @type {SVGElement} */ (bodyCircle), {
+        cx: center.x,
+        cy: center.y,
+        r: radius,
+      });
+      setAttributes(/** @type {SVGElement} */ (teamRing), {
+        cx: center.x,
+        cy: center.y,
+        r: radius,
+      });
+      setAttributes(/** @type {SVGElement} */ (healthTrack), {
+        cx: center.x,
+        cy: center.y,
+        r: healthRadius,
+      });
+      setAttributes(/** @type {SVGElement} */ (health), {
+        cx: center.x,
+        cy: center.y,
+        r: healthRadius,
+        "stroke-dasharray": `${healthRatio * 100} ${100 - healthRatio * 100}`,
+        transform: `rotate(-90 ${center.x} ${center.y})`,
+      });
+      const iconSize = Math.max(14, Math.min(radius * 0.95, 28));
+      setAttributes(/** @type {SVGElement} */ (icon), {
+        x: center.x - iconSize / 2,
+        y: center.y - iconSize * 0.62,
+        width: iconSize,
+        height: iconSize,
+      });
+      setAttributes(/** @type {SVGElement} */ (label), {
+        x: center.x,
+        y: center.y + radius + 15,
+      });
+      label.textContent = `${body.relation === "ally" ? "ALLY" : "ENEMY"} ${body.observation_row}`;
+      const statusCellWidth = 18;
+      const statusCellHeight = 15;
+      const statusColumns = Math.min(statuses.length, 5);
+      const statusNodes = statuses.map((status, index) => {
+        const token = resolveVisualToken("status", status.token_id, status);
+        const rowIndex = Math.floor(index / 5);
+        const columnIndex = index % 5;
+        const rowCount = Math.min(5, statuses.length - rowIndex * 5);
+        const x =
+          center.x - (rowCount * statusCellWidth) / 2 + columnIndex * statusCellWidth;
+        const y = center.y - radius - 19 - rowIndex * statusCellHeight;
+        const effectClass = classTokenFromId(status.source_class_id);
+        const cell = svgElement("g", {
+          class: "pov-observed-status",
+          transform: `translate(${x} ${y})`,
+          role: "img",
+          "aria-label": `${token.accessibleName}, duration ${formatDisplayNumber(status.duration)} ticks; source agent identity is not disclosed`,
+          "data-token-id": token.tokenId,
+          "data-duration": status.duration,
+          "data-status-feature-index": status.status_feature_index,
+          "data-effect-class-id": status.source_class_id,
+          "data-effect-class": effectClass.cssKey,
+        });
+        const statusIcon = createSvgIcon(
+          this.battlefield.ownerDocument,
+          token.glyphKey,
+          { className: "pov-observed-status__icon" },
+        );
+        setAttributes(statusIcon, {
+          x: 2,
+          y: 2,
+          width: 8,
+          height: 8,
+        });
+        cell.append(
+          svgElement("rect", {
+            class: "pov-observed-status__box",
+            x: 0,
+            y: 0,
+            width: statusCellWidth - 2,
+            height: statusCellHeight - 1,
+            rx: 3,
+          }),
+          statusIcon,
+          svgElement("text", {
+            class: "pov-observed-status__duration",
+            x: 12,
+            y: 11,
+          }),
+        );
+        const duration = cell.lastElementChild;
+        if (duration) {
+          duration.textContent = formatCompactDisplayNumber(status.duration);
+        }
+        registerTooltipOwner(cell, {
+          kind: "status",
+          id: `pov-status:${key}:${status.status_feature_index}`,
+          title: token.label,
+          details: [
+            token.accessibleName,
+            `Duration ${formatDisplayNumber(status.duration)} ticks`,
+            `Effect class ${effectClass.label} from the recipient-visible V1 channel`,
+            "Source agent identity is not disclosed in actor POV.",
+          ],
+          anchor: "element",
+        });
+        return cell;
+      });
+      statusGroup.replaceChildren(...statusNodes);
+      statusGroup.setAttribute("data-columns", String(statusColumns));
+      registerTooltipOwner(root, {
+        kind: "agent",
+        id: `pov-body:${key}`,
+        title: `${body.relation === "ally" ? "Visible ally" : "Visible enemy"} · row ${body.observation_row}`,
+        details: [
+          `Public observation identity ${body.public_agent_id}`,
+          `${classToken.label} · ${teamToken.label}`,
+          `Health ${formatDisplayNumber(body.current_health)} / ${formatDisplayNumber(body.max_health)}`,
+          ...(statusDescriptions.length === 0
+            ? ["No persistent statuses"]
+            : statusDescriptions.map((description) => `Status ${description}`)),
+          "Global simulator slot is not disclosed in actor POV.",
+        ],
+        anchor: "element",
+      });
+      this.layers.body.append(root);
+    }
+  }
+
+  /**
    * Render only researcher-authorized observer visibility and clearly marked
    * presentation-layout protected zones in Debug. Neither cue changes bodies
    * or claims to be simulator geometry.
@@ -887,7 +1108,8 @@ export class BattlefieldRenderer {
   #renderDebugOverlays(scene, projectedAgents, showDebug) {
     this.visibilityCues.replaceChildren();
     this.protectedZoneCues.replaceChildren();
-    if (!showDebug) {
+    const transform = this.transform;
+    if (!showDebug || !transform) {
       return;
     }
 
@@ -915,7 +1137,50 @@ export class BattlefieldRenderer {
         "data-slot": agent.globalSlot,
       });
     });
-    this.protectedZoneCues.replaceChildren(...protectedZones);
+    const observedProtectedZones = asArray(scene.observed_bodies).flatMap((body) => {
+      if (
+        !isRecord(body) ||
+        (body.relation !== "ally" && body.relation !== "enemy") ||
+        !Number.isInteger(body.observation_row) ||
+        !Array.isArray(body.position) ||
+        body.position.length !== 2 ||
+        body.position.some(
+          (coordinate) =>
+            typeof coordinate !== "number" || !Number.isFinite(coordinate),
+        )
+      ) {
+        return [];
+      }
+      const center = screenPoint(body.position, transform);
+      const bounds = protectedBodyRect(
+        {
+          center,
+          radius: transform.worldLengthToScreen(finiteNumber(body.radius, 0.5)),
+          controlled: false,
+          selected: false,
+        },
+        {
+          bodyPadding: 4,
+          selectionAllowance: 12,
+        },
+      );
+      return [
+        svgElement("rect", {
+          class: "debug-protected-zone",
+          x: bounds.left,
+          y: bounds.top,
+          width: bounds.width,
+          height: bounds.height,
+          rx: 5,
+          "data-zone": "debug-protected",
+          "data-observation-key": `${body.relation}:${body.observation_row}`,
+        }),
+      ];
+    });
+    this.protectedZoneCues.replaceChildren(
+      ...protectedZones,
+      ...observedProtectedZones,
+    );
 
     if (scene.audience !== "researcher") {
       return;

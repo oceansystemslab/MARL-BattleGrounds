@@ -7,18 +7,19 @@ The project is currently under development.
 
 ## Development Visual Debugger and Analyzer
 
-Open the deterministic Milestone 1–5 Visual Debugger and Analyzer in a local
-browser:
+Open the deterministic, evaluation-backed Visual Debugger and Analyzer in a
+local browser:
 
 ```bash
 ./scripts/dev/run_debug_renderer.sh
 ```
 
-Python owns the simulator, session, legality, commands, and transitions. It
-returns an allowlisted JSON frame; the browser constructs the SVG/HTML
-presentation and presentation-only motion. The launcher always prints a
-loopback URL and also attempts to open it automatically. Running the analyzer
-requires neither Node.js nor npm.
+Python owns the simulator, session, legality, commands, canonical CP2/CP3
+capture, and transitions. It returns a structurally separate, audience-specific
+V2 live frame; the browser constructs the SVG/HTML presentation and
+presentation-only motion without inferring simulator truth.
+The launcher always prints a loopback URL and also attempts to open it
+automatically. Running the analyzer requires neither Node.js nor npm.
 
 For a one-frame Matplotlib snapshot instead:
 

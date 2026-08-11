@@ -5,12 +5,14 @@ import { iconDefinition, KNOWN_GLYPH_KEYS } from "../src/icons.js";
 import {
   activationImpactSemantic,
   ACTIVATION_TOKEN_IDS,
+  CATALOG_STATUS_IDS,
   CANONICAL_STATUS_ORDER,
   CLASS_TOKEN_IDS,
   classTokenFromId,
   LIFECYCLE_TOKEN_IDS,
   MODIFIER_TOKEN_IDS,
   resolveVisualToken,
+  statusTokenIdFromCatalogId,
   TEAM_TOKEN_IDS,
   teamTokenFromId,
   ultimateTokenFromClassId,
@@ -51,9 +53,21 @@ const EXPECTED_LIFECYCLE = [
   "decremented",
   "expired",
   "trap_broken",
+  "cleared_by_death",
   "cleared_unclassified",
   "trap_broken_and_reapplied",
 ];
+const EXPECTED_CATALOG_STATUS_MAP = Object.freeze({
+  warrior_charge_slow: "slow_warrior_charge",
+  hunter_basic_slow: "slow_hunter_basic",
+  rogue_poison_slow: "slow_rogue_poison",
+  warrior_charge_stun: "stun_warrior_charge",
+  hunter_trap_stun: "stun_hunter_trap",
+  rogue_poison_stun: "stun_rogue_poison",
+  rogue_poison_anti_heal: "anti_heal_rogue_poison",
+  mage_burst_damage_amplification: "mage_burst",
+  priest_blessing_of_freedom_movement_floor: "priest_freedom",
+});
 
 test("display registries cover every current stable semantic token", () => {
   assert.deepEqual(CLASS_TOKEN_IDS, EXPECTED_CLASSES);
@@ -85,6 +99,35 @@ test("display registries cover every current stable semantic token", () => {
       assert.ok(Object.isFrozen(definition));
     }
   }
+});
+
+test("death clear is distinct from natural expiry and damage break", () => {
+  const deathClear = resolveVisualToken("lifecycle", "cleared_by_death");
+  const expired = resolveVisualToken("lifecycle", "expired");
+  const damageBreak = resolveVisualToken("lifecycle", "trap_broken");
+
+  assert.equal(deathClear.label, "Cleared by death");
+  assert.match(deathClear.accessibleName, /cleared.*recorded new death/u);
+  assert.notEqual(deathClear.glyphKey, expired.glyphKey);
+  assert.notEqual(deathClear.glyphKey, damageBreak.glyphKey);
+  assert.notEqual(deathClear.cssKey, expired.cssKey);
+  assert.notEqual(deathClear.cssKey, damageBreak.cssKey);
+});
+
+test("every CP2 catalog status resolves through an explicit presentation mapping", () => {
+  assert.deepEqual(CATALOG_STATUS_IDS, Object.keys(EXPECTED_CATALOG_STATUS_MAP));
+  for (const [catalogId, tokenId] of Object.entries(EXPECTED_CATALOG_STATUS_MAP)) {
+    assert.equal(statusTokenIdFromCatalogId(catalogId), tokenId);
+    const token = resolveVisualToken("status", catalogId);
+    assert.equal(token.tokenId, tokenId);
+    assert.notEqual(token.cssKey, "unknown");
+    assert.notEqual(token.glyphKey, "unknown");
+  }
+  assert.equal(
+    statusTokenIdFromCatalogId("future_catalog_status"),
+    "future_catalog_status",
+  );
+  assert.equal(resolveVisualToken("status", "future_catalog_status").cssKey, "unknown");
 });
 
 test("numeric class and team identities map only to display vocabulary", () => {

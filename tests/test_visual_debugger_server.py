@@ -25,6 +25,7 @@ from scripts.dev.visual_debugger.server import (
     serve_browser_debugger,
 )
 from scripts.dev.visual_debugger.service import DebuggerService
+from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _ASSET_ROOT = _REPOSITORY_ROOT / "web" / "visual_debugger"
@@ -35,6 +36,7 @@ def _service() -> DebuggerService:
     session = create_session(
         get_scenario("arena_5v5"),
         seed=0,
+        evaluation_launch_specification=debugger_test_launch_specification(),
         controlled_global_slot=None,
         show_ranges=True,
         verbose_logging=False,
@@ -408,10 +410,10 @@ def test_identical_http_submit_body_is_applied_then_returned_as_duplicate(
     assert duplicate_payload["result"] == "duplicate"
     assert applied_payload["frame"]["revision"] == 1
     assert duplicate_payload["frame"]["revision"] == 1
-    assert applied_payload["frame"]["simulator_step"] == 1
-    assert duplicate_payload["frame"]["simulator_step"] == 1
-    assert applied_payload["frame"]["transition_id"] == 1
-    assert duplicate_payload["frame"]["transition_id"] == 1
+    assert applied_payload["frame"]["simulator_step_count"] == 1
+    assert duplicate_payload["frame"]["simulator_step_count"] == 1
+    assert applied_payload["frame"]["incoming_transition_index"] == 0
+    assert duplicate_payload["frame"]["incoming_transition_index"] == 0
     assert server.debugger_service.revision == 1
     assert int(server.debugger_service.session.state.step_count) == 1
 

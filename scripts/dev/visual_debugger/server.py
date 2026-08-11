@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import secrets
 import sys
 import webbrowser
@@ -19,7 +18,7 @@ from pydantic import ValidationError
 
 from scripts.dev.visual_debugger.protocol import (
     ApiErrorCode,
-    ApiErrorV1,
+    ApiErrorV2,
     CommandRequestV1,
 )
 from scripts.dev.visual_debugger.service import DebuggerService
@@ -62,6 +61,7 @@ _REQUIRED_RUNTIME_ASSET_PATHS = (
     "src/controls.js",
     "src/display.js",
     "src/explanations.js",
+    "src/frame-normalizer.js",
     "src/icons.js",
     "src/layout.js",
     "src/main.js",
@@ -235,21 +235,23 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
         if body is None:
             return
         try:
-            raw_request = json.loads(body)
-        except json.JSONDecodeError, UnicodeDecodeError:
-            self._send_api_error(
-                HTTPStatus.BAD_REQUEST,
-                error_code="invalid_request",
-                message="Request body is not valid JSON.",
+            request = CommandRequestV1.model_validate_json(body)
+        except ValidationError as error:
+            malformed_json = any(
+                detail.get("type") == "json_invalid" for detail in error.errors()
             )
-            return
-        try:
-            request = CommandRequestV1.model_validate(raw_request)
-        except ValidationError:
             self._send_api_error(
-                HTTPStatus.UNPROCESSABLE_ENTITY,
+                (
+                    HTTPStatus.BAD_REQUEST
+                    if malformed_json
+                    else HTTPStatus.UNPROCESSABLE_ENTITY
+                ),
                 error_code="invalid_request",
-                message="Request body does not match CommandRequestV1.",
+                message=(
+                    "Request body is not valid JSON."
+                    if malformed_json
+                    else "Request body does not match CommandRequestV1."
+                ),
             )
             return
 
@@ -429,7 +431,7 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
     ) -> None:
         self._send_model(
             status,
-            ApiErrorV1(
+            ApiErrorV2(
                 error_code=error_code,
                 message=message,
                 latest_frame=None,

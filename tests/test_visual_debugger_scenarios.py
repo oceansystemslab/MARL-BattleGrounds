@@ -12,8 +12,6 @@ from scripts.dev.visual_debugger.model import (
     ActorCommand,
     DebuggerScenario,
     DebuggerSession,
-    StatusChange,
-    StatusKind,
 )
 from scripts.dev.visual_debugger.scenarios import (
     RESEARCHER_SCENARIOS,
@@ -26,6 +24,7 @@ from scripts.dev.visual_debugger.scenarios import (
 )
 from scripts.dev.visual_debugger.targeting import global_slot_to_target_action
 from tests.visual_debugger_fixtures import (
+    debugger_test_launch_specification,
     rejection_lane_scenario,
     submit_fixture_frame,
 )
@@ -64,6 +63,11 @@ from marl_battlegrounds.core.types import (
     STUN_CHANNEL_WARRIOR_CHARGE,
     WARRIOR_CLASS_ID,
 )
+from marl_battlegrounds.evaluation.models import (
+    AbilityActivatedEventV1,
+    RecipientHealthResolutionEventV1,
+    StatusLifecycleEventBaseV1,
+)
 
 
 def _session(name: str) -> tuple[DebuggerScenario, DebuggerSession]:
@@ -71,39 +75,43 @@ def _session(name: str) -> tuple[DebuggerScenario, DebuggerSession]:
     return scenario, create_session(
         scenario,
         seed=0,
+        evaluation_launch_specification=debugger_test_launch_specification(),
         controlled_global_slot=None,
         show_ranges=True,
         verbose_logging=False,
     )
 
 
-def _accepted_activation_signatures(
+def _canonical_ability_signatures(
     session: DebuggerSession,
 ) -> tuple[tuple[str, int, int | None], ...]:
-    transition = session.last_transition
-    assert transition is not None
+    view = session.incoming_evaluation_view
+    assert view is not None
     return tuple(
         (
-            activation.kind,
-            activation.source_global_slot,
-            activation.target_global_slot,
+            event.ability_component,
+            event.source_global_slot,
+            event.recipient_global_slot,
         )
-        for activation in transition.accepted_activations
+        for event in view.transition.events
+        if isinstance(event, AbilityActivatedEventV1)
     )
 
 
-def _status_change(
+def _canonical_status_event_types(
     session: DebuggerSession,
     *,
     global_slot: int,
-    status_kind: StatusKind,
-) -> StatusChange:
-    transition = session.last_transition
-    assert transition is not None
-    return next(
-        status.change
-        for status in transition.status_transitions
-        if status.global_slot == global_slot and status.status_kind == status_kind
+    status_id: str,
+) -> tuple[str, ...]:
+    view = session.incoming_evaluation_view
+    assert view is not None
+    return tuple(
+        event.event_type
+        for event in view.transition.events
+        if isinstance(event, StatusLifecycleEventBaseV1)
+        and event.recipient_global_slot == global_slot
+        and event.status_id == status_id
     )
 
 
@@ -695,7 +703,7 @@ def test_every_registered_scripted_command_is_legal_and_accepted() -> None:
         _, session = _session(scenario.name)
         for frame in scenario.frames:
             step_before = int(session.state.step_count)
-            action = build_scripted_joint_action(session.config, frame)
+            action = build_scripted_joint_action(session.evaluation_context, frame)
             for command in frame.commands:
                 slot = command.actor_global_slot
                 target_action = global_slot_to_target_action(
@@ -723,35 +731,58 @@ def test_every_registered_scripted_command_is_legal_and_accepted() -> None:
                 )
 
             submitted = submit_next_script_frame(session)
-            transition = submitted.last_transition
-            assert transition is not None
+            view = submitted.incoming_evaluation_view
+            assert view is not None
+            acceptance = view.transition.facts.action_acceptance_facts
             assert int(submitted.state.step_count) == step_before + 1
             assert (
                 submitted.next_script_frame_index == session.next_script_frame_index + 1
             )
             for retained_head, expected_head in zip(
-                transition.submitted_action,
+                (
+                    acceptance.submitted_joint_action.move,
+                    acceptance.submitted_joint_action.select_target,
+                    acceptance.submitted_joint_action.use_ultimate,
+                ),
                 action,
                 strict=True,
             ):
                 np.testing.assert_array_equal(retained_head, expected_head)
             for accepted_head, expected_head in zip(
-                transition.accepted_action,
+                (
+                    acceptance.accepted_joint_action.move,
+                    acceptance.accepted_joint_action.select_target,
+                    acceptance.accepted_joint_action.use_ultimate,
+                ),
                 action,
                 strict=True,
             ):
                 np.testing.assert_array_equal(accepted_head, expected_head)
-            actors = {
-                actor.actor_global_slot: actor for actor in transition.actor_transitions
-            }
             for command in frame.commands:
-                actor = actors[command.actor_global_slot]
-                expected_target = int(action.select_target[command.actor_global_slot])
-                assert actor.accepted_move_action == command.move_action
-                assert actor.accepted_target_action == expected_target
-                assert actor.accepted_use_ultimate == command.use_ultimate
-                assert actor.movement_accepted
-                assert actor.combat_pair_accepted
+                actor_slot = command.actor_global_slot
+                expected_target = int(action.select_target[actor_slot])
+                assert acceptance.accepted_joint_action.move[actor_slot] == (
+                    command.move_action
+                )
+                assert acceptance.accepted_joint_action.select_target[actor_slot] == (
+                    expected_target
+                )
+                assert acceptance.accepted_joint_action.use_ultimate[actor_slot] == (
+                    command.use_ultimate
+                )
+                assert not (
+                    acceptance.submitted_action_tuple_is_out_of_domain_by_actor[
+                        actor_slot
+                    ]
+                )
+                assert not acceptance.in_domain_move_action_is_rejected_by_actor[
+                    actor_slot
+                ]
+                assert not (
+                    acceptance.in_domain_combat_action_pair_is_rejected_by_actor[
+                        actor_slot
+                    ]
+                )
             session = submitted
 
 
@@ -838,27 +869,39 @@ def test_rejection_boundary_is_preserved_as_a_test_only_fixture() -> None:
     session = create_session(
         scenario,
         seed=0,
+        evaluation_launch_specification=debugger_test_launch_specification(),
         controlled_global_slot=None,
         show_ranges=True,
         verbose_logging=False,
     )
     first, second = scenario.frames
-    first_action = build_scripted_joint_action(session.config, first)
+    first_action = build_scripted_joint_action(session.evaluation_context, first)
     assert bool(session.action_mask.move_mask[0, MOVE_EAST])
     assert not bool(session.action_mask.select_target_use_ultimate_joint_mask[0, 6, 0])
 
     rejected = submit_fixture_frame(session, first)
-    actor = rejected.last_transition.actor_transitions[0]  # type: ignore[union-attr]
-    assert actor.movement_accepted
-    assert not actor.combat_pair_accepted
+    rejected_view = rejected.incoming_evaluation_view
+    assert rejected_view is not None
+    rejected_facts = rejected_view.transition.facts.action_acceptance_facts
+    assert not rejected_facts.in_domain_move_action_is_rejected_by_actor[0]
+    assert rejected_facts.in_domain_combat_action_pair_is_rejected_by_actor[0]
     assert int(first_action.select_target[0]) == 6
-    assert (actor.accepted_target_action, actor.accepted_use_ultimate) == (0, 0)
+    assert (
+        rejected_facts.accepted_joint_action.select_target[0],
+        rejected_facts.accepted_joint_action.use_ultimate[0],
+    ) == (0, 0)
     assert bool(rejected.action_mask.select_target_use_ultimate_joint_mask[0, 6, 0])
 
     accepted = submit_fixture_frame(rejected, second)
-    actor = accepted.last_transition.actor_transitions[0]  # type: ignore[union-attr]
-    assert actor.movement_accepted and actor.combat_pair_accepted
-    assert (actor.accepted_target_action, actor.accepted_use_ultimate) == (6, 0)
+    accepted_view = accepted.incoming_evaluation_view
+    assert accepted_view is not None
+    accepted_facts = accepted_view.transition.facts.action_acceptance_facts
+    assert not accepted_facts.in_domain_move_action_is_rejected_by_actor[0]
+    assert not accepted_facts.in_domain_combat_action_pair_is_rejected_by_actor[0]
+    assert (
+        accepted_facts.accepted_joint_action.select_target[0],
+        accepted_facts.accepted_joint_action.use_ultimate[0],
+    ) == (6, 0)
 
 
 def test_basic_support_reference_trajectory() -> None:
@@ -878,10 +921,10 @@ def test_basic_support_reference_trajectory() -> None:
     assert int(session.state.slow_durations[2, SLOW_CHANNEL_HUNTER_BASIC]) == 1
     assert int(session.state.slow_durations[6, SLOW_CHANNEL_HUNTER_BASIC]) == 0
     assert int(session.state.priest_blessing_of_freedom_slow_floor_durations[2]) == 1
-    transition = session.last_transition
-    assert transition is not None
-    kinds = {activation.kind for activation in transition.accepted_activations}
-    assert kinds == {"basic_heal", "basic_damage"}
+    view = session.incoming_evaluation_view
+    assert view is not None
+    event_types = {event.event_type for event in view.transition.events}
+    assert {"source_damage_output", "source_healing_output"}.issubset(event_types)
 
 
 def test_ultimate_showcase_reference_trajectory() -> None:
@@ -908,15 +951,13 @@ def test_ultimate_showcase_reference_trajectory() -> None:
     assert int(session.state.slow_durations[5, SLOW_CHANNEL_ROGUE_POISON]) == 5
     assert int(session.state.stun_durations[5, STUN_CHANNEL_ROGUE_POISON]) == 1
     assert int(session.state.rogue_poison_anti_heal_durations[5]) == 4
-    transition = session.last_transition
-    assert transition is not None
-    assert {activation.kind for activation in transition.accepted_activations} == {
-        "mage_burst",
-        "warrior_charge",
-        "hunter_trap",
-        "rogue_poison",
-        "holy_word",
-    }
+    assert _canonical_ability_signatures(session) == (
+        ("ultimate", 0, None),
+        ("ultimate", 1, 7),
+        ("ultimate", 2, 6),
+        ("ultimate", 3, 5),
+        ("ultimate", 4, 2),
+    )
 
     session = submit_next_script_frame(session)
     assert float(session.state.current_health[6]) == pytest.approx(186.4)
@@ -929,14 +970,11 @@ def test_ultimate_showcase_reference_trajectory() -> None:
     assert int(session.state.slow_durations[5, SLOW_CHANNEL_ROGUE_POISON]) == 4
     assert int(session.state.stun_durations[5, STUN_CHANNEL_ROGUE_POISON]) == 0
     assert int(session.state.rogue_poison_anti_heal_durations[5]) == 3
-    transition = session.last_transition
-    assert transition is not None
-    trap = next(
-        status
-        for status in transition.status_transitions
-        if status.global_slot == 6 and status.status_kind == "stun_hunter_trap"
-    )
-    assert trap.change == "trap_broken"
+    assert _canonical_status_event_types(
+        session,
+        global_slot=6,
+        status_id="hunter_trap_stun",
+    ) == ("status_broken_by_damage",)
 
 
 def test_aura_crossfire_reference_trajectory() -> None:
@@ -1038,101 +1076,99 @@ def test_team_focus_crossfire_reference_trajectory() -> None:
     _, session = _session("team_focus_crossfire")
 
     session = submit_next_script_frame(session)
-    first_transition = session.last_transition
-    assert first_transition is not None
-    assert _accepted_activation_signatures(session) == (("basic_damage", 2, 5),)
+    first_view = session.incoming_evaluation_view
+    assert first_view is not None
+    assert _canonical_ability_signatures(session) == (("basic", 2, 5),)
     first_net = next(
-        actor.net_health_delta
-        for actor in first_transition.actor_transitions
-        if actor.actor_global_slot == 5
+        event.realized_net_health_change
+        for event in first_view.transition.events
+        if isinstance(event, RecipientHealthResolutionEventV1)
+        and event.recipient_global_slot == 5
     )
     assert first_net == pytest.approx(
-        float(
-            first_transition.after_state.current_health[5]
-            - first_transition.before_state.current_health[5]
-        )
+        first_view.successor_frame.snapshot.current_health[5]
+        - first_view.start_frame.snapshot.current_health[5]
     )
 
     session = submit_next_script_frame(session)
-    assert _accepted_activation_signatures(session) == (("basic_damage", 2, 5),)
-    second_transition = session.last_transition
-    assert second_transition is not None
-    assert int(second_transition.after_state.step_count) == (
-        int(first_transition.after_state.step_count) + 1
+    assert _canonical_ability_signatures(session) == (("basic", 2, 5),)
+    second_view = session.incoming_evaluation_view
+    assert second_view is not None
+    assert second_view.successor_frame.simulator_step_count == (
+        first_view.successor_frame.simulator_step_count + 1
     )
 
     session = submit_next_script_frame(session)
-    assert _accepted_activation_signatures(session) == (
-        ("basic_damage", 0, 5),
-        ("basic_damage", 1, 5),
-        ("basic_damage", 2, 5),
-        ("basic_damage", 3, 5),
-        ("basic_heal", 6, 5),
-        ("basic_heal", 7, 5),
-        ("basic_heal", 8, 5),
+    assert _canonical_ability_signatures(session) == (
+        ("basic", 0, 5),
+        ("basic", 1, 5),
+        ("basic", 2, 5),
+        ("basic", 3, 5),
+        ("basic", 6, 5),
+        ("basic", 7, 5),
+        ("basic", 8, 5),
     )
 
     session = submit_next_script_frame(session)
-    poison_transition = session.last_transition
-    assert poison_transition is not None
-    assert int(poison_transition.before_state.rogue_poison_anti_heal_durations[5]) == 0
-    assert int(poison_transition.after_state.rogue_poison_anti_heal_durations[5]) > 0
-    assert _accepted_activation_signatures(session) == (
-        ("rogue_poison", 3, 5),
-        ("basic_heal", 6, 5),
-        ("basic_heal", 7, 5),
-        ("basic_heal", 8, 5),
+    poison_view = session.incoming_evaluation_view
+    assert poison_view is not None
+    assert poison_view.start_frame.snapshot.rogue_poison_anti_heal_durations[5] == 0
+    assert poison_view.successor_frame.snapshot.rogue_poison_anti_heal_durations[5] > 0
+    assert _canonical_ability_signatures(session) == (
+        ("ultimate", 3, 5),
+        ("basic", 6, 5),
+        ("basic", 7, 5),
+        ("basic", 8, 5),
     )
 
     session = submit_next_script_frame(session)
-    anti_heal_transition = session.last_transition
-    assert anti_heal_transition is not None
-    assert (
-        int(anti_heal_transition.before_state.rogue_poison_anti_heal_durations[5]) > 0
-    )
-    assert _accepted_activation_signatures(session) == (
-        ("basic_heal", 6, 5),
-        ("basic_heal", 7, 5),
-        ("basic_heal", 8, 5),
+    anti_heal_view = session.incoming_evaluation_view
+    assert anti_heal_view is not None
+    assert anti_heal_view.start_frame.snapshot.rogue_poison_anti_heal_durations[5] > 0
+    assert _canonical_ability_signatures(session) == (
+        ("basic", 6, 5),
+        ("basic", 7, 5),
+        ("basic", 8, 5),
     )
 
     assert float(session.state.current_health[5]) == pytest.approx(183.3725)
     health_before_holy_words = float(session.state.current_health[5])
     session = submit_next_script_frame(session)
-    assert _accepted_activation_signatures(session) == (
-        ("holy_word", 6, 5),
-        ("holy_word", 7, 5),
-        ("holy_word", 8, 5),
+    assert _canonical_ability_signatures(session) == (
+        ("ultimate", 6, 5),
+        ("ultimate", 7, 5),
+        ("ultimate", 8, 5),
     )
-    final_transition = session.last_transition
-    assert final_transition is not None
+    final_view = session.incoming_evaluation_view
+    assert final_view is not None
     warrior = next(
-        actor
-        for actor in final_transition.actor_transitions
-        if actor.actor_global_slot == 5
+        event
+        for event in final_view.transition.events
+        if isinstance(event, RecipientHealthResolutionEventV1)
+        and event.recipient_global_slot == 5
     )
-    assert warrior.health_before == pytest.approx(health_before_holy_words)
-    assert warrior.health_after == pytest.approx(
+    assert warrior.transition_start_health == pytest.approx(health_before_holy_words)
+    assert warrior.health_after_combat_resolution == pytest.approx(
         float(session.config.agent_profile.max_health[5])
     )
-    assert warrior.net_health_delta == pytest.approx(
-        warrior.health_after - health_before_holy_words
+    assert warrior.realized_net_health_change == pytest.approx(
+        warrior.health_after_combat_resolution - health_before_holy_words
     )
 
 
 def test_mirrored_ultimates_reference_trajectory() -> None:
     _, session = _session("mirrored_ultimates")
     expected = (
-        (("mage_burst", 0, None), ("mage_burst", 5, None)),
-        (("warrior_charge", 1, 6), ("warrior_charge", 6, 1)),
-        (("hunter_trap", 2, 7), ("hunter_trap", 7, 2)),
-        (("rogue_poison", 3, 8), ("rogue_poison", 8, 3)),
-        (("holy_word", 4, 3), ("holy_word", 9, 8)),
+        (("ultimate", 0, None), ("ultimate", 5, None)),
+        (("ultimate", 1, 6), ("ultimate", 6, 1)),
+        (("ultimate", 2, 7), ("ultimate", 7, 2)),
+        (("ultimate", 3, 8), ("ultimate", 8, 3)),
+        (("ultimate", 4, 3), ("ultimate", 9, 8)),
     )
 
     for frame_index, expected_signatures in enumerate(expected):
         session = submit_next_script_frame(session)
-        assert _accepted_activation_signatures(session) == expected_signatures
+        assert _canonical_ability_signatures(session) == expected_signatures
         assert int(session.state.step_count) == frame_index + 1
 
     assert int(session.state.mage_burst_damage_amplification_durations[0]) > 0
@@ -1146,22 +1182,22 @@ def test_mirrored_ultimates_reference_trajectory() -> None:
 def test_moving_basic_crossfire_reference_trajectory() -> None:
     _, session = _session("moving_basic_crossfire")
     expected = (
-        ("basic_damage", 0, 5),
-        ("basic_damage", 1, 6),
-        ("basic_damage", 2, 7),
-        ("basic_damage", 3, 8),
-        ("basic_heal", 4, 0),
-        ("basic_damage", 5, 0),
-        ("basic_damage", 6, 1),
-        ("basic_damage", 7, 2),
-        ("basic_damage", 8, 3),
-        ("basic_heal", 9, 5),
+        ("basic", 0, 5),
+        ("basic", 1, 6),
+        ("basic", 2, 7),
+        ("basic", 3, 8),
+        ("basic", 4, 0),
+        ("basic", 5, 0),
+        ("basic", 6, 1),
+        ("basic", 7, 2),
+        ("basic", 8, 3),
+        ("basic", 9, 5),
     )
 
     for _ in get_scenario("moving_basic_crossfire").frames:
         before = np.asarray(session.state.agent_positions).copy()
         session = submit_next_script_frame(session)
-        assert _accepted_activation_signatures(session) == expected
+        assert _canonical_ability_signatures(session) == expected
         after = np.asarray(session.state.agent_positions)
         assert all(
             not np.array_equal(before[global_slot], after[global_slot])
@@ -1175,14 +1211,14 @@ def test_moving_focus_crossfire_reference_trajectory() -> None:
     before = np.asarray(session.state.agent_positions).copy()
     session = submit_next_script_frame(session)
 
-    assert _accepted_activation_signatures(session) == (
-        ("basic_damage", 0, 5),
-        ("basic_damage", 1, 5),
-        ("basic_damage", 2, 5),
-        ("basic_damage", 3, 5),
-        ("basic_heal", 6, 5),
-        ("basic_heal", 7, 5),
-        ("basic_heal", 8, 5),
+    assert _canonical_ability_signatures(session) == (
+        ("basic", 0, 5),
+        ("basic", 1, 5),
+        ("basic", 2, 5),
+        ("basic", 3, 5),
+        ("basic", 6, 5),
+        ("basic", 7, 5),
+        ("basic", 8, 5),
     )
     after = np.asarray(session.state.agent_positions)
     assert all(
@@ -1202,10 +1238,10 @@ def test_charge_convergence_reference_trajectory() -> None:
     before_positions = np.asarray(session.state.agent_positions).copy()
     session = submit_next_script_frame(session)
 
-    assert _accepted_activation_signatures(session) == (
-        ("warrior_charge", 0, 5),
-        ("warrior_charge", 1, 5),
-        ("warrior_charge", 5, 0),
+    assert _canonical_ability_signatures(session) == (
+        ("ultimate", 0, 5),
+        ("ultimate", 1, 5),
+        ("ultimate", 5, 0),
     )
     after_positions = np.asarray(session.state.agent_positions)
     for source_slot in (0, 1, 5):
@@ -1220,73 +1256,62 @@ def test_trap_lifecycle_reference_trajectory() -> None:
     _, session = _session("trap_lifecycle")
 
     session = submit_next_script_frame(session)
-    assert _accepted_activation_signatures(session) == (
-        ("hunter_trap", 0, 5),
-        ("hunter_trap", 1, 6),
-        ("hunter_trap", 2, 7),
-        ("hunter_trap", 3, 8),
+    assert _canonical_ability_signatures(session) == (
+        ("ultimate", 0, 5),
+        ("ultimate", 1, 6),
+        ("ultimate", 2, 7),
+        ("ultimate", 3, 8),
     )
     for target_slot in (5, 6, 7, 8):
-        assert (
-            _status_change(
-                session,
-                global_slot=target_slot,
-                status_kind="stun_hunter_trap",
-            )
-            == "applied"
-        )
-
-    session = submit_next_script_frame(session)
-    assert (
-        _status_change(
+        assert _canonical_status_event_types(
             session,
-            global_slot=5,
-            status_kind="stun_hunter_trap",
-        )
-        == "trap_broken"
-    )
+            global_slot=target_slot,
+            status_id="hunter_trap_stun",
+        ) == ("status_applied",)
 
     session = submit_next_script_frame(session)
-    assert session.last_transition is not None
-    for accepted_head in session.last_transition.accepted_action:
+    assert _canonical_status_event_types(
+        session,
+        global_slot=5,
+        status_id="hunter_trap_stun",
+    ) == ("status_broken_by_damage",)
+
+    session = submit_next_script_frame(session)
+    view = session.incoming_evaluation_view
+    assert view is not None
+    accepted = view.transition.facts.action_acceptance_facts.accepted_joint_action
+    for accepted_head in (accepted.move, accepted.select_target, accepted.use_ultimate):
         np.testing.assert_array_equal(
             accepted_head,
             np.zeros((MAX_AGENT_SLOTS,), dtype=np.int32),
         )
 
     session = submit_next_script_frame(session)
-    assert _accepted_activation_signatures(session) == (("hunter_trap", 4, 6),)
-    assert (
-        _status_change(
-            session,
-            global_slot=6,
-            status_kind="stun_hunter_trap",
-        )
-        == "refreshed"
-    )
+    assert _canonical_ability_signatures(session) == (("ultimate", 4, 6),)
+    assert _canonical_status_event_types(
+        session,
+        global_slot=6,
+        status_id="hunter_trap_stun",
+    ) == ("status_broken_by_damage", "status_applied")
 
     session = submit_next_script_frame(session)
-    transition = session.last_transition
-    assert transition is not None
-    assert (
-        _status_change(
-            session,
-            global_slot=7,
-            status_kind="stun_hunter_trap",
-        )
-        == "cleared_unclassified"
-    )
-    assert (
-        _status_change(
-            session,
-            global_slot=8,
-            status_kind="stun_hunter_trap",
-        )
-        == "expired"
-    )
+    view = session.incoming_evaluation_view
+    assert view is not None
+    assert _canonical_status_event_types(
+        session,
+        global_slot=7,
+        status_id="hunter_trap_stun",
+    ) == ("status_aged_to_zero",)
+    assert _canonical_status_event_types(
+        session,
+        global_slot=8,
+        status_id="hunter_trap_stun",
+    ) == ("status_aged_to_zero",)
     assert not any(
-        status.global_slot == 7 and status.change == "trap_broken"
-        for status in transition.status_transitions
+        isinstance(event, StatusLifecycleEventBaseV1)
+        and event.recipient_global_slot == 7
+        and event.event_type == "status_broken_by_damage"
+        for event in view.transition.events
     )
 
 
@@ -1294,13 +1319,13 @@ def test_max_status_stack_reference_trajectory() -> None:
     _, session = _session("max_status_stack")
     session = submit_next_script_frame(session)
 
-    assert _accepted_activation_signatures(session) == (
-        ("mage_burst", 0, None),
-        ("basic_heal", 1, 0),
-        ("warrior_charge", 5, 0),
-        ("hunter_trap", 6, 0),
-        ("basic_damage", 7, 0),
-        ("rogue_poison", 8, 0),
+    assert _canonical_ability_signatures(session) == (
+        ("ultimate", 0, None),
+        ("basic", 1, 0),
+        ("ultimate", 5, 0),
+        ("ultimate", 6, 0),
+        ("basic", 7, 0),
+        ("ultimate", 8, 0),
     )
     assert tuple(int(value) for value in session.state.stun_durations[0]) == (
         1,

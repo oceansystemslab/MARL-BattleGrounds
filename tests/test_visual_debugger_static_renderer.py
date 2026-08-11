@@ -6,11 +6,12 @@ from types import SimpleNamespace
 import pytest
 import scripts.dev.visual_debugger.static_renderer as static_renderer
 from scripts.dev.visual_debugger.scenarios import get_scenario
+from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
 from marl_battlegrounds.rendering import SceneRenderOptions
 from marl_battlegrounds.rendering.scene import (
-    BattlefieldSceneV1,
-    VisualEventBatchV1,
+    BattlefieldSceneV2,
+    VisualEventBatchV2,
 )
 
 
@@ -29,12 +30,12 @@ def test_static_renderer_builds_one_reset_scene_and_shows_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pyplot = _FakePyplot()
-    rendered: list[tuple[BattlefieldSceneV1, VisualEventBatchV1 | None]] = []
+    rendered: list[tuple[BattlefieldSceneV2, VisualEventBatchV2 | None]] = []
 
     def capture_render(
-        scene: BattlefieldSceneV1,
+        scene: BattlefieldSceneV2,
         *,
-        event_batch: VisualEventBatchV1 | None = None,
+        event_batch: VisualEventBatchV2 | None = None,
     ) -> object:
         rendered.append((scene, event_batch))
         return object()
@@ -45,6 +46,7 @@ def test_static_renderer_builds_one_reset_scene_and_shows_once(
     result = static_renderer.run_static_renderer(
         scenario=get_scenario("arena_5v5"),
         seed=9,
+        evaluation_launch_specification=debugger_test_launch_specification(9),
         controlled_global_slot=1,
         verbose=False,
         show_ranges=False,
@@ -67,7 +69,7 @@ def test_static_visual_vocabulary_export_has_exact_canvas_and_semantics(
 ) -> None:
     pyplot = _FakePyplot()
     render_calls: list[
-        tuple[BattlefieldSceneV1, VisualEventBatchV1 | None, SceneRenderOptions | None]
+        tuple[BattlefieldSceneV2, VisualEventBatchV2 | None, SceneRenderOptions | None]
     ] = []
     size_calls: list[tuple[float, float, bool]] = []
     save_calls: list[tuple[Path, dict[str, object]]] = []
@@ -88,9 +90,9 @@ def test_static_visual_vocabulary_export_has_exact_canvas_and_semantics(
     figure = _FakeFigure()
 
     def capture_render(
-        scene: BattlefieldSceneV1,
+        scene: BattlefieldSceneV2,
         *,
-        event_batch: VisualEventBatchV1 | None = None,
+        event_batch: VisualEventBatchV2 | None = None,
         options: SceneRenderOptions | None = None,
     ) -> object:
         render_calls.append((scene, event_batch, options))
@@ -111,20 +113,20 @@ def test_static_visual_vocabulary_export_has_exact_canvas_and_semantics(
     assert len(event_batch.events) == 12
     assert options == SceneRenderOptions(show_agent_ids=True)
     assert tuple(
-        (field.source_global_slot, field.token_id) for field in scene.aura_fields
+        (field.source_global_slot, field.aura_id) for field in scene.aura_fields
     ) == (
-        (0, "mage_amplification"),
-        (1, "warrior_mitigation"),
+        (0, "mage_damage_amplification"),
+        (1, "warrior_damage_mitigation"),
     )
-    assert tuple(status.token_id for status in scene.agents[0].statuses) == (
-        "stun_warrior_charge",
-        "stun_hunter_trap",
-        "stun_rogue_poison",
+    assert tuple(status.status_id for status in scene.agents[0].statuses) == (
+        "warrior_charge_stun",
+        "hunter_trap_stun",
+        "rogue_poison_stun",
     )
-    assert tuple(status.token_id for status in scene.agents[2].statuses) == (
-        "slow_warrior_charge",
-        "slow_hunter_basic",
-        "slow_rogue_poison",
+    assert tuple(status.status_id for status in scene.agents[2].statuses) == (
+        "warrior_charge_slow",
+        "hunter_basic_slow",
+        "rogue_poison_slow",
     )
     assert save_calls == [
         (

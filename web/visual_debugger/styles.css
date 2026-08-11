@@ -51,7 +51,7 @@
   box-sizing: border-box;
 }
 
-html [hidden] {
+html body [hidden] {
   display: none;
 }
 
@@ -703,8 +703,8 @@ select {
 
 .combat-effect[data-token-id="warrior_charge"],
 .combat-route-effect[data-token-id="warrior_charge"],
-.combat-effect[data-event-type="charge_displacement"],
-.combat-route-effect[data-event-type="charge_displacement"] {
+.combat-effect[data-event-type="charge_phase_displacement"],
+.combat-route-effect[data-event-type="charge_phase_displacement"] {
   color: var(--class-warrior);
 }
 
@@ -718,8 +718,8 @@ select {
   color: var(--class-rogue);
 }
 
-.combat-effect[data-event-type="rejected_action"],
-.combat-route-effect[data-event-type="rejected_action"] {
+.combat-effect[data-event-type="action_rejected"],
+.combat-route-effect[data-event-type="action_rejected"] {
   color: var(--danger);
 }
 
@@ -1057,8 +1057,29 @@ select {
   vector-effect: non-scaling-stroke;
 }
 
+.combat-lifecycle__death-sweep-arc,
+.combat-lifecycle__death-sweep-cut {
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.combat-lifecycle__death-sweep-arc {
+  stroke-width: 2;
+  stroke-dasharray: 3 3;
+}
+
+.combat-lifecycle__death-sweep-cut {
+  stroke-width: 4;
+}
+
 .combat-effect[data-lifecycle="expired"] {
   color: var(--text-muted);
+}
+
+.combat-effect[data-lifecycle="cleared_by_death"] {
+  color: var(--danger);
 }
 
 .combat-effect[data-lifecycle="cleared_unclassified"] {
@@ -1075,9 +1096,141 @@ select {
   stroke-dasharray: 2 3;
 }
 
+.combat-status-source-link {
+  fill: none;
+  stroke: rgb(167 139 250 / 74%);
+  stroke-width: 2;
+  stroke-dasharray: 4 4;
+  vector-effect: non-scaling-stroke;
+}
+
+.combat-semantic-pulse {
+  color: var(--accent);
+}
+
+.combat-semantic-pulse__ring,
+.combat-semantic-pulse__core,
+.combat-semantic-pulse__wave,
+.combat-semantic-pulse__mark,
+.combat-semantic-pulse__beam {
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.combat-semantic-pulse__ring {
+  opacity: 0.72;
+  stroke-dasharray: 3 3;
+}
+
+.combat-semantic-pulse__core {
+  fill: rgb(8 15 29 / 82%);
+  opacity: 0.92;
+}
+
+.combat-semantic-pulse__wave {
+  opacity: 0.48;
+}
+
+.combat-semantic-pulse__beam {
+  fill: rgb(125 211 252 / 12%);
+}
+
+.combat-semantic-pulse__value {
+  fill: currentColor;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 800;
+  text-anchor: middle;
+}
+
+.combat-semantic-pulse--health-regenerated,
+.combat-semantic-pulse--cooldown-ready,
+.combat-semantic-pulse--agent-respawned {
+  color: var(--success);
+}
+
+.combat-semantic-pulse--agent-died {
+  color: var(--danger);
+}
+
+.combat-semantic-pulse--spawn-shield-expired {
+  color: #7dd3fc;
+}
+
+.combat-semantic-pulse--respawn-wave-occurred {
+  color: var(--warning);
+}
+
 .agent {
   cursor: pointer;
   color: var(--text);
+}
+
+.pov-observed-body {
+  cursor: help;
+}
+
+.pov-observed-body__label {
+  fill: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 8px;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+  text-anchor: middle;
+  pointer-events: none;
+}
+
+.pov-observed-body__statuses {
+  pointer-events: all;
+}
+
+.pov-observed-status {
+  cursor: help;
+}
+
+.pov-observed-status[data-effect-class="mage"] {
+  color: var(--class-mage);
+}
+
+.pov-observed-status[data-effect-class="warrior"] {
+  color: var(--class-warrior);
+}
+
+.pov-observed-status[data-effect-class="hunter"] {
+  color: var(--class-hunter);
+}
+
+.pov-observed-status[data-effect-class="rogue"] {
+  color: var(--class-rogue);
+}
+
+.pov-observed-status[data-effect-class="priest"] {
+  color: var(--class-priest);
+}
+
+.pov-observed-status__box {
+  fill: rgb(8 13 24 / 94%);
+  stroke: currentColor;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.pov-observed-status__icon {
+  color: currentColor;
+  pointer-events: none;
+}
+
+.pov-observed-status__duration {
+  fill: var(--text);
+  font-family: var(--font-mono);
+  font-size: 7px;
+  font-weight: 850;
+  text-anchor: middle;
+  pointer-events: none;
 }
 
 .agent-body {

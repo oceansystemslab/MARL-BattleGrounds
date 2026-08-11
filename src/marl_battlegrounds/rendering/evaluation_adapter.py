@@ -9,15 +9,80 @@ source evidence.
 
 from dataclasses import dataclass
 from math import isfinite
-from typing import Literal, cast
+from typing import Literal, TypedDict, cast
 
 from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
 from marl_battlegrounds.evaluation.models import (
-    AgentRespawnedEventV1,
+    AbilityActivatedEventV1 as EvaluationAbilityActivatedEventV1,
+)
+from marl_battlegrounds.evaluation.models import (
+    ActionRejectedEventV1 as EvaluationActionRejectedEventV1,
+)
+from marl_battlegrounds.evaluation.models import (
+    AgentDiedEventV1 as EvaluationAgentDiedEventV1,
+)
+from marl_battlegrounds.evaluation.models import (
+    AgentRespawnedEventV1 as EvaluationAgentRespawnedEventV1,
+)
+from marl_battlegrounds.evaluation.models import (
+    ChargePhaseDisplacementEventV1 as EvaluationChargePhaseDisplacementEventV1,
+)
+from marl_battlegrounds.evaluation.models import (
+    CombatCountdownResetEventV1 as EvaluationCombatCountdownResetEventV1,
+)
+from marl_battlegrounds.evaluation.models import (
+    CooldownReadyEventV1 as EvaluationCooldownReadyEventV1,
+)
+from marl_battlegrounds.evaluation.models import (
+    CooldownStartedEventV1 as EvaluationCooldownStartedEventV1,
+)
+from marl_battlegrounds.evaluation.models import (
     EvaluationEpisodeContextV1,
+    EvaluationEventV1,
     EvaluationFrameV1,
-    StatusAppliedEventV1,
-    StatusRefreshedOrExtendedEventV1,
+    EvaluationTransitionV1,
+)
+from marl_battlegrounds.evaluation.models import (
+    HealthRegeneratedEventV1 as EvaluationHealthRegeneratedEventV1,
+)
+from marl_battlegrounds.evaluation.models import (
+    LethalDamageContributionEventV1 as EvaluationLethalDamageContributionEventV1,
+)
+from marl_battlegrounds.evaluation.models import (
+    OrdinaryMovementPhaseDisplacementEventV1 as Cp2OrdinaryMovementEventV1,
+)
+from marl_battlegrounds.evaluation.models import (
+    RecipientHealthResolutionEventV1 as Cp2RecipientHealthEventV1,
+)
+from marl_battlegrounds.evaluation.models import (
+    RespawnWaveOccurredEventV1 as EvaluationRespawnWaveOccurredEventV1,
+)
+from marl_battlegrounds.evaluation.models import (
+    SourceDamageOutputEventV1 as EvaluationSourceDamageOutputEventV1,
+)
+from marl_battlegrounds.evaluation.models import (
+    SourceHealingOutputEventV1 as EvaluationSourceHealingOutputEventV1,
+)
+from marl_battlegrounds.evaluation.models import (
+    SpawnShieldExpiredEventV1 as EvaluationSpawnShieldExpiredEventV1,
+)
+from marl_battlegrounds.evaluation.models import (
+    StatusAgedToZeroEventV1 as EvaluationStatusAgedToZeroEventV1,
+)
+from marl_battlegrounds.evaluation.models import (
+    StatusAppliedEventV1 as EvaluationStatusAppliedEventV1,
+)
+from marl_battlegrounds.evaluation.models import (
+    StatusBrokenByDamageEventV1 as EvaluationStatusBrokenByDamageEventV1,
+)
+from marl_battlegrounds.evaluation.models import (
+    StatusClearedByNewDeathEventV1 as EvaluationStatusClearedByNewDeathEventV1,
+)
+from marl_battlegrounds.evaluation.models import (
+    StatusLifecycleEventBaseV1 as EvaluationStatusLifecycleEventBaseV1,
+)
+from marl_battlegrounds.evaluation.models import (
+    StatusRefreshedOrExtendedEventV1 as Cp2StatusRefreshedEventV1,
 )
 from marl_battlegrounds.evaluation.pov import (
     ActorPovActionMaskV1,
@@ -74,22 +139,60 @@ from marl_battlegrounds.rendering.pov_scene import (
     ActorPovVisibleBodySceneV1,
 )
 from marl_battlegrounds.rendering.scene import (
+    EVENT_V2_SCHEMA_VERSION,
+    RESEARCHER_ANALYZER_PROJECTION_SCHEMA_VERSION,
     SCENE_V2_SCHEMA_VERSION,
+    STATUS_SOURCE_EVIDENCE_SCHEMA_VERSION,
+    AbilityActivatedEventV2,
+    ActionRejectedEventV2,
+    AgentDiedEventV2,
+    AgentRespawnedEventV2,
     AgentSceneV2,
     AuraFieldSceneV2,
     AuraRecipientModifierSceneV2,
     BattlefieldSceneV2,
+    ChargePhaseDisplacementEventV2,
     ClassMechanicsSceneV2,
+    CombatCountdownResetEventV2,
+    CooldownReadyEventV2,
+    CooldownStartedEventV2,
+    HealthRegeneratedEventV2,
+    LethalDamageContributionEventV2,
     MapSceneV1,
+    ObserverVisibilitySceneV1,
     ObstacleSceneV1,
+    OrdinaryMovementPhaseDisplacementEventV2,
     RangeKind,
     RangeSceneV1,
+    RecipientHealthResolutionEventV2,
+    ResearcherAnalyzerProjectionV2,
+    RespawnWaveOccurredEventV2,
     RespawnWaveSceneV2,
     SelectedLegalitySceneV1,
     SelectionSceneV1,
+    SourceDamageOutputEventV2,
+    SourceHealingOutputEventV2,
     SpawnPadSceneV2,
+    SpawnShieldExpiredEventV2,
+    StatusAgedToZeroEventV2,
+    StatusAppliedEventV2,
+    StatusBrokenByDamageEventV2,
+    StatusClearedByNewDeathEventV2,
+    StatusRefreshedOrExtendedEventV2,
     StatusSceneV2,
+    StatusSourceChannelEvidenceV2,
+    StatusSourceEvidenceIndexV2,
     StatusSourceEvidenceSceneV2,
+    StatusSourceEvidenceStateV2,
+    VisualAgentAnchorV2,
+    VisualAgentPhaseTrajectoryV2,
+    VisualEventBatchV2,
+    VisualEventV2,
+    VisualTeamAnchorV2,
+)
+from marl_battlegrounds.rendering.vocabulary import (
+    status_sort_key,
+    status_token_id_from_catalog_status_id,
 )
 
 type PresentationLaneV1 = Literal[0, 1]
@@ -1078,12 +1181,12 @@ def _incoming_status_sources(
     sources: dict[tuple[int, int], list[StatusSourceEvidenceSceneV2]] = {}
     refreshed_keys: set[tuple[int, int]] = set()
     for event in transition_view.transition.events:
-        if type(event) is StatusRefreshedOrExtendedEventV1:
+        if type(event) is Cp2StatusRefreshedEventV1:
             refreshed = event
             refreshed_keys.add(
                 (refreshed.recipient_global_slot, refreshed.status_channel)
             )
-        elif type(event) is StatusAppliedEventV1:
+        elif type(event) is EvaluationStatusAppliedEventV1:
             applied = event
             roster = context.roster[applied.source_global_slot]
             key = (applied.recipient_global_slot, applied.status_channel)
@@ -1110,6 +1213,141 @@ def _status_durations(frame: EvaluationFrameV1, global_slot: int) -> tuple[int, 
         snapshot.rogue_poison_anti_heal_durations[global_slot],
         snapshot.mage_burst_damage_amplification_durations[global_slot],
         snapshot.priest_blessing_of_freedom_slow_floor_durations[global_slot],
+    )
+
+
+def _status_source_state_from_frame(
+    context: EvaluationEpisodeContextV1,
+    frame: EvaluationFrameV1,
+    evidence_by_key: dict[tuple[int, int], tuple[StatusSourceEvidenceSceneV2, ...]],
+) -> StatusSourceEvidenceStateV2:
+    catalog = context.static_mechanics_catalog
+    rows: list[StatusSourceChannelEvidenceV2] = []
+    for roster in context.roster:
+        if not roster.configured_active:
+            continue
+        durations = _status_durations(frame, roster.global_slot)
+        for status_channel, (duration, mechanic) in enumerate(
+            zip(durations, catalog.status_channels, strict=True)
+        ):
+            if duration <= 0:
+                continue
+            rows.append(
+                StatusSourceChannelEvidenceV2(
+                    recipient_global_slot=roster.global_slot,
+                    recipient_public_agent_id=roster.public_agent_id,
+                    status_channel=status_channel,
+                    status_id=mechanic.status_id,
+                    direct_source_evidence=evidence_by_key.get(
+                        (roster.global_slot, status_channel),
+                        (),
+                    ),
+                )
+            )
+    return StatusSourceEvidenceStateV2(
+        schema_version=STATUS_SOURCE_EVIDENCE_SCHEMA_VERSION,
+        episode_id=context.identity.episode_id,
+        frame_index=frame.frame_index,
+        frame_id=frame.frame_id,
+        active_statuses=tuple(rows),
+    )
+
+
+def initialize_status_source_evidence_v2(
+    context: EvaluationEpisodeContextV1,
+    initial_frame: EvaluationFrameV1,
+) -> StatusSourceEvidenceStateV2:
+    """Initialize frame-zero status evidence without inventing source agents."""
+    _validate_projection_inputs(context, initial_frame, None)
+    return _status_source_state_from_frame(context, initial_frame, {})
+
+
+def advance_status_source_evidence_v2(
+    previous_state: StatusSourceEvidenceStateV2,
+    coherent_view: EvaluationTransitionViewV1,
+) -> StatusSourceEvidenceStateV2:
+    """Return the next immutable evidence state from one validated CP2 view."""
+    if type(previous_state) is not StatusSourceEvidenceStateV2:
+        raise TypeError("previous_state must be the exact StatusSourceEvidenceStateV2.")
+    if type(coherent_view) is not EvaluationTransitionViewV1:
+        raise TypeError("coherent_view must be EvaluationTransitionViewV1.")
+    view = EvaluationTransitionViewV1(
+        context=coherent_view.context,
+        start_frame=coherent_view.start_frame,
+        transition=coherent_view.transition,
+        successor_frame=coherent_view.successor_frame,
+    )
+    if (
+        previous_state.episode_id != view.context.identity.episode_id
+        or previous_state.frame_index != view.start_frame.frame_index
+        or previous_state.frame_id != view.start_frame.frame_id
+    ):
+        raise ValueError("previous status-source state must join the view start frame.")
+    evidence_by_key = previous_state.evidence_by_recipient_and_channel()
+    for event in view.transition.events:
+        if type(event) is EvaluationStatusAppliedEventV1:
+            key = (event.recipient_global_slot, event.status_channel)
+            source = view.context.roster[event.source_global_slot]
+            candidate = StatusSourceEvidenceSceneV2(
+                source_global_slot=event.source_global_slot,
+                source_public_agent_id=source.public_agent_id,
+                event_id=event.event_id,
+            )
+            evidence_by_key[key] = tuple(
+                sorted(
+                    (*evidence_by_key.get(key, ()), candidate),
+                    key=lambda row: (row.source_global_slot, row.event_id),
+                )
+            )
+        elif type(event) is Cp2StatusRefreshedEventV1:
+            evidence_by_key[(event.recipient_global_slot, event.status_channel)] = ()
+        elif type(event) in (
+            EvaluationStatusAgedToZeroEventV1,
+            EvaluationStatusBrokenByDamageEventV1,
+            EvaluationStatusClearedByNewDeathEventV1,
+        ):
+            lifecycle_event = cast(EvaluationStatusLifecycleEventBaseV1, event)
+            evidence_by_key.pop(
+                (
+                    lifecycle_event.recipient_global_slot,
+                    lifecycle_event.status_channel,
+                ),
+                None,
+            )
+    return _status_source_state_from_frame(
+        view.context,
+        view.successor_frame,
+        evidence_by_key,
+    )
+
+
+def build_status_source_evidence_index_v2(
+    context: EvaluationEpisodeContextV1,
+    frames: tuple[EvaluationFrameV1, ...],
+    transitions: tuple[EvaluationTransitionV1, ...],
+) -> StatusSourceEvidenceIndexV2:
+    """Build one O(T) replay index through the live replacement-state reducer."""
+    if type(frames) is not tuple or type(transitions) is not tuple:
+        raise TypeError("frames and transitions must be Python tuples.")
+    if not frames or len(frames) != len(transitions) + 1:
+        raise ValueError("status-source index requires exact T+1/T trajectory shape.")
+    state = initialize_status_source_evidence_v2(context, frames[0])
+    states = [state]
+    for transition_index, transition in enumerate(transitions):
+        if type(transition) is not EvaluationTransitionV1:
+            raise TypeError("transitions must contain exact EvaluationTransitionV1.")
+        view = EvaluationTransitionViewV1(
+            context=context,
+            start_frame=frames[transition_index],
+            transition=transition,
+            successor_frame=frames[transition_index + 1],
+        )
+        state = advance_status_source_evidence_v2(state, view)
+        states.append(state)
+    return StatusSourceEvidenceIndexV2(
+        schema_version=STATUS_SOURCE_EVIDENCE_SCHEMA_VERSION,
+        episode_id=context.identity.episode_id,
+        frame_states=tuple(states),
     )
 
 
@@ -1145,7 +1383,14 @@ def _status_scenes(
                 direct_source_evidence=source_evidence.get((global_slot, channel), ()),
             )
         )
-    return tuple(rows)
+    return tuple(
+        sorted(
+            rows,
+            key=lambda row: status_sort_key(
+                status_token_id_from_catalog_status_id(row.status_id)
+            ),
+        )
+    )
 
 
 def _incoming_respawn_event_ids(
@@ -1156,7 +1401,7 @@ def _incoming_respawn_event_ids(
     return {
         event.agent_global_slot: event.event_id
         for event in transition_view.transition.events
-        if type(event) is AgentRespawnedEventV1
+        if type(event) is EvaluationAgentRespawnedEventV1
     }
 
 
@@ -1164,8 +1409,23 @@ def _agent_scenes(
     context: EvaluationEpisodeContextV1,
     frame: EvaluationFrameV1,
     transition_view: EvaluationTransitionViewV1 | None,
+    status_source_evidence_state: StatusSourceEvidenceStateV2 | None = None,
 ) -> tuple[AgentSceneV2, ...]:
-    source_evidence = _incoming_status_sources(context, transition_view)
+    if status_source_evidence_state is None:
+        source_evidence = _incoming_status_sources(context, transition_view)
+    else:
+        if (
+            type(status_source_evidence_state) is not StatusSourceEvidenceStateV2
+            or status_source_evidence_state.episode_id != context.identity.episode_id
+            or status_source_evidence_state.frame_index != frame.frame_index
+            or status_source_evidence_state.frame_id != frame.frame_id
+        ):
+            raise ValueError(
+                "status_source_evidence_state must join the selected frame."
+            )
+        source_evidence = (
+            status_source_evidence_state.evidence_by_recipient_and_channel()
+        )
     respawn_event_ids = _incoming_respawn_event_ids(transition_view)
     snapshot = frame.snapshot
     rows: list[AgentSceneV2] = []
@@ -1379,6 +1639,40 @@ def _selection_projection(
     return ranges, selection, legality
 
 
+def _observer_visibility_projection(
+    context: EvaluationEpisodeContextV1,
+    frame: EvaluationFrameV1,
+    presentation: EvaluationScenePresentationStateV1,
+) -> tuple[ObserverVisibilitySceneV1, ...]:
+    """Project one researcher's exact recorded base-sensor visibility row."""
+    observer = presentation.controlled_global_slot
+    if observer is None:
+        return ()
+    catalog = context.static_mechanics_catalog
+    ally_slots = catalog.global_slot_by_actor_and_ally_observation_row[observer]
+    enemy_slots = catalog.global_slot_by_actor_and_enemy_observation_row[observer]
+    observation = frame.base_observation
+    visible_by_global_slot = dict(
+        zip(
+            (*ally_slots, *enemy_slots),
+            (
+                *observation.ally_visibility_mask[observer],
+                *observation.enemy_visibility_mask[observer],
+            ),
+            strict=True,
+        )
+    )
+    return tuple(
+        ObserverVisibilitySceneV1(
+            observer_global_slot=observer,
+            candidate_global_slot=roster.global_slot,
+            visible=visible_by_global_slot[roster.global_slot],
+        )
+        for roster in context.roster
+        if roster.configured_active
+    )
+
+
 def build_evaluation_battlefield_scene_v2(
     context: EvaluationEpisodeContextV1,
     frame: EvaluationFrameV1,
@@ -1386,6 +1680,7 @@ def build_evaluation_battlefield_scene_v2(
     transition_view: EvaluationTransitionViewV1 | None = None,
     audience: Literal["researcher"] = "researcher",
     presentation: EvaluationScenePresentationStateV1 | None = None,
+    status_source_evidence_state: StatusSourceEvidenceStateV2 | None = None,
 ) -> BattlefieldSceneV2:
     """Project one canonical selected frame into the V2 researcher scene."""
     if audience != "researcher":
@@ -1420,7 +1715,12 @@ def build_evaluation_battlefield_scene_v2(
             else tuple(event.event_id for event in transition.events)
         ),
         map=_map_scene(context),
-        agents=_agent_scenes(context, frame, canonical_view),
+        agents=_agent_scenes(
+            context,
+            frame,
+            canonical_view,
+            status_source_evidence_state,
+        ),
         aura_fields=_aura_fields(context, frame),
         class_mechanics=_class_mechanics(context),
         spawn_pads=_spawn_pads(context),
@@ -1428,6 +1728,7 @@ def build_evaluation_battlefield_scene_v2(
         ranges=ranges,
         selection=selection,
         next_decision_selected_legality=legality,
+        observer_visibility=_observer_visibility_projection(context, frame, state),
     )
 
 
@@ -1537,6 +1838,371 @@ def build_shared_obs_source_material_projection_v1(
     )
 
 
+def _visual_phase_trajectories_v2(
+    view: EvaluationTransitionViewV1,
+) -> tuple[VisualAgentPhaseTrajectoryV2, ...]:
+    context = view.context
+    start_positions = view.start_frame.snapshot.agent_positions
+    successor_positions = view.successor_frame.snapshot.agent_positions
+    charge_displacements = (
+        view.transition.facts.physical_facts.charge_phase_displacement_by_agent
+    )
+    rows: list[VisualAgentPhaseTrajectoryV2] = []
+    for roster in context.roster:
+        if not roster.configured_active:
+            continue
+        global_slot = roster.global_slot
+        start = start_positions[global_slot]
+        charge = charge_displacements[global_slot]
+        post_charge = (start[0] + charge[0], start[1] + charge[1])
+        successor = successor_positions[global_slot]
+        rows.append(
+            VisualAgentPhaseTrajectoryV2(
+                global_slot=global_slot,
+                public_agent_id=roster.public_agent_id,
+                transition_start=VisualAgentAnchorV2(
+                    phase="transition_start",
+                    global_slot=global_slot,
+                    public_agent_id=roster.public_agent_id,
+                    position=(start[0], start[1]),
+                ),
+                post_charge=VisualAgentAnchorV2(
+                    phase="post_charge",
+                    global_slot=global_slot,
+                    public_agent_id=roster.public_agent_id,
+                    position=post_charge,
+                ),
+                successor=VisualAgentAnchorV2(
+                    phase="successor",
+                    global_slot=global_slot,
+                    public_agent_id=roster.public_agent_id,
+                    position=(successor[0], successor[1]),
+                ),
+            )
+        )
+    return tuple(rows)
+
+
+class _VisualEventIdentityV2(TypedDict):
+    event_id: str
+    transition_id: str
+    ordinal: int
+
+
+def _project_visual_event_v2(
+    event: EvaluationEventV1,
+    *,
+    trajectory_by_slot: dict[int, VisualAgentPhaseTrajectoryV2],
+    public_agent_id_by_global_slot: tuple[str, ...],
+    configured_active_by_global_slot: tuple[bool, ...],
+) -> VisualEventV2:
+    def anchor(
+        global_slot: int,
+        phase: Literal["transition_start", "post_charge", "successor"],
+    ) -> VisualAgentAnchorV2:
+        trajectory = trajectory_by_slot.get(global_slot)
+        if trajectory is None:
+            raise ValueError(
+                "canonical event references an inactive presentation slot."
+            )
+        return cast(VisualAgentAnchorV2, getattr(trajectory, phase))
+
+    identity: _VisualEventIdentityV2 = {
+        "event_id": event.event_id,
+        "transition_id": event.transition_id,
+        "ordinal": event.ordinal,
+    }
+    if type(event) is EvaluationActionRejectedEventV1:
+        return ActionRejectedEventV2(
+            **identity,
+            actor_global_slot=event.actor_global_slot,
+            actor_public_agent_id=public_agent_id_by_global_slot[
+                event.actor_global_slot
+            ],
+            actor_configured_active=configured_active_by_global_slot[
+                event.actor_global_slot
+            ],
+            rejection_component=event.rejection_component,
+            submitted_move_action=event.submitted_move_action,
+            submitted_select_target_action=event.submitted_select_target_action,
+            submitted_use_ultimate_action=event.submitted_use_ultimate_action,
+            actor_anchor=(
+                anchor(event.actor_global_slot, "transition_start")
+                if configured_active_by_global_slot[event.actor_global_slot]
+                else None
+            ),
+        )
+    if type(event) is EvaluationAbilityActivatedEventV1:
+        return AbilityActivatedEventV2(
+            **identity,
+            source_global_slot=event.source_global_slot,
+            ability_component=event.ability_component,
+            recipient_global_slot=event.recipient_global_slot,
+            source_anchor=anchor(event.source_global_slot, "transition_start"),
+            recipient_anchor=(
+                None
+                if event.recipient_global_slot is None
+                else anchor(event.recipient_global_slot, "transition_start")
+            ),
+        )
+    if type(event) is EvaluationSourceDamageOutputEventV1:
+        return SourceDamageOutputEventV2(
+            **identity,
+            source_global_slot=event.source_global_slot,
+            recipient_global_slot=event.recipient_global_slot,
+            raw_damage_output=event.raw_damage_output,
+            source_modified_damage_output=event.source_modified_damage_output,
+            recipient_damage_modifier=event.recipient_damage_modifier,
+            mage_damage_aura_covering_emitter_global_slots=(
+                event.mage_damage_aura_covering_emitter_global_slots
+            ),
+            warrior_mitigation_aura_covering_emitter_global_slots=(
+                event.warrior_mitigation_aura_covering_emitter_global_slots
+            ),
+            source_anchor=anchor(event.source_global_slot, "transition_start"),
+            recipient_anchor=(
+                None
+                if event.recipient_global_slot is None
+                else anchor(event.recipient_global_slot, "transition_start")
+            ),
+        )
+    if type(event) is EvaluationSourceHealingOutputEventV1:
+        return SourceHealingOutputEventV2(
+            **identity,
+            source_global_slot=event.source_global_slot,
+            recipient_global_slot=event.recipient_global_slot,
+            raw_healing_output=event.raw_healing_output,
+            source_modified_healing_output=event.source_modified_healing_output,
+            recipient_healing_modifier=event.recipient_healing_modifier,
+            source_anchor=anchor(event.source_global_slot, "transition_start"),
+            recipient_anchor=(
+                None
+                if event.recipient_global_slot is None
+                else anchor(event.recipient_global_slot, "transition_start")
+            ),
+        )
+    if type(event) is Cp2RecipientHealthEventV1:
+        return RecipientHealthResolutionEventV2(
+            **identity,
+            recipient_global_slot=event.recipient_global_slot,
+            transition_start_health=event.transition_start_health,
+            total_effective_damage=event.total_effective_damage,
+            total_effective_healing=event.total_effective_healing,
+            health_after_combat_resolution=event.health_after_combat_resolution,
+            realized_net_health_change=event.realized_net_health_change,
+            recipient_anchor=anchor(
+                event.recipient_global_slot,
+                "transition_start",
+            ),
+        )
+    if type(event) is EvaluationCombatCountdownResetEventV1:
+        return CombatCountdownResetEventV2(
+            **identity,
+            agent_global_slot=event.agent_global_slot,
+            agent_anchor=anchor(event.agent_global_slot, "transition_start"),
+        )
+    if type(event) is EvaluationHealthRegeneratedEventV1:
+        return HealthRegeneratedEventV2(
+            **identity,
+            agent_global_slot=event.agent_global_slot,
+            actual_health_regenerated=event.actual_health_regenerated,
+            agent_anchor=anchor(event.agent_global_slot, "transition_start"),
+        )
+    if type(event) is EvaluationCooldownStartedEventV1:
+        return CooldownStartedEventV2(
+            **identity,
+            agent_global_slot=event.agent_global_slot,
+            agent_anchor=anchor(event.agent_global_slot, "transition_start"),
+        )
+    if type(event) is EvaluationCooldownReadyEventV1:
+        return CooldownReadyEventV2(
+            **identity,
+            agent_global_slot=event.agent_global_slot,
+            agent_anchor=anchor(event.agent_global_slot, "transition_start"),
+        )
+    if type(event) is EvaluationChargePhaseDisplacementEventV1:
+        return ChargePhaseDisplacementEventV2(
+            **identity,
+            agent_global_slot=event.agent_global_slot,
+            realized_displacement=event.realized_displacement,
+            start_anchor=anchor(event.agent_global_slot, "transition_start"),
+            end_anchor=anchor(event.agent_global_slot, "post_charge"),
+        )
+    if type(event) is Cp2OrdinaryMovementEventV1:
+        return OrdinaryMovementPhaseDisplacementEventV2(
+            **identity,
+            agent_global_slot=event.agent_global_slot,
+            realized_displacement=event.realized_displacement,
+            start_anchor=anchor(event.agent_global_slot, "post_charge"),
+            end_anchor=anchor(event.agent_global_slot, "successor"),
+        )
+    if type(event) is EvaluationAgentDiedEventV1:
+        return AgentDiedEventV2(
+            **identity,
+            recipient_global_slot=event.recipient_global_slot,
+            recipient_anchor=anchor(event.recipient_global_slot, "successor"),
+        )
+    if type(event) is EvaluationLethalDamageContributionEventV1:
+        return LethalDamageContributionEventV2(
+            **identity,
+            source_global_slot=event.source_global_slot,
+            recipient_global_slot=event.recipient_global_slot,
+            attributed_death_damage=event.attributed_death_damage,
+            source_anchor=anchor(event.source_global_slot, "successor"),
+            recipient_anchor=anchor(event.recipient_global_slot, "successor"),
+        )
+    if type(event) is EvaluationStatusAgedToZeroEventV1:
+        return StatusAgedToZeroEventV2(
+            **identity,
+            recipient_global_slot=event.recipient_global_slot,
+            status_channel=event.status_channel,
+            status_id=event.status_id,
+            recipient_anchor=anchor(event.recipient_global_slot, "successor"),
+        )
+    if type(event) is EvaluationStatusBrokenByDamageEventV1:
+        return StatusBrokenByDamageEventV2(
+            **identity,
+            recipient_global_slot=event.recipient_global_slot,
+            status_channel=event.status_channel,
+            status_id=event.status_id,
+            recipient_anchor=anchor(event.recipient_global_slot, "successor"),
+        )
+    if type(event) is EvaluationStatusAppliedEventV1:
+        return StatusAppliedEventV2(
+            **identity,
+            recipient_global_slot=event.recipient_global_slot,
+            status_channel=event.status_channel,
+            status_id=event.status_id,
+            recipient_anchor=anchor(event.recipient_global_slot, "successor"),
+            source_global_slot=event.source_global_slot,
+            source_anchor=anchor(event.source_global_slot, "successor"),
+        )
+    if type(event) is Cp2StatusRefreshedEventV1:
+        return StatusRefreshedOrExtendedEventV2(
+            **identity,
+            recipient_global_slot=event.recipient_global_slot,
+            status_channel=event.status_channel,
+            status_id=event.status_id,
+            recipient_anchor=anchor(event.recipient_global_slot, "successor"),
+        )
+    if type(event) is EvaluationStatusClearedByNewDeathEventV1:
+        return StatusClearedByNewDeathEventV2(
+            **identity,
+            recipient_global_slot=event.recipient_global_slot,
+            status_channel=event.status_channel,
+            status_id=event.status_id,
+            recipient_anchor=anchor(event.recipient_global_slot, "successor"),
+        )
+    if type(event) is EvaluationSpawnShieldExpiredEventV1:
+        return SpawnShieldExpiredEventV2(
+            **identity,
+            agent_global_slot=event.agent_global_slot,
+            agent_anchor=anchor(event.agent_global_slot, "successor"),
+        )
+    if type(event) is EvaluationRespawnWaveOccurredEventV1:
+        return RespawnWaveOccurredEventV2(
+            **identity,
+            team_index=event.team_index,
+            team_id=event.team_id,
+            team_anchor=VisualTeamAnchorV2(
+                phase="successor",
+                team_index=event.team_index,
+                team_id=event.team_id,
+            ),
+        )
+    if type(event) is EvaluationAgentRespawnedEventV1:
+        return AgentRespawnedEventV2(
+            **identity,
+            agent_global_slot=event.agent_global_slot,
+            team_id=event.team_id,
+            realized_successor_position=event.realized_successor_position,
+            agent_anchor=anchor(event.agent_global_slot, "successor"),
+        )
+    raise TypeError(f"unsupported canonical event type: {type(event).__name__}.")
+
+
+def build_visual_event_batch_v2(
+    coherent_view: EvaluationTransitionViewV1,
+) -> VisualEventBatchV2:
+    """Project every canonical event independently without cross-event joins."""
+    if type(coherent_view) is not EvaluationTransitionViewV1:
+        raise TypeError("coherent_view must be EvaluationTransitionViewV1.")
+    view = EvaluationTransitionViewV1(
+        context=coherent_view.context,
+        start_frame=coherent_view.start_frame,
+        transition=coherent_view.transition,
+        successor_frame=coherent_view.successor_frame,
+    )
+    trajectories = _visual_phase_trajectories_v2(view)
+    by_slot = {row.global_slot: row for row in trajectories}
+    public_agent_ids = tuple(row.public_agent_id for row in view.context.roster)
+    configured_active = tuple(row.configured_active for row in view.context.roster)
+    return VisualEventBatchV2(
+        schema_version=EVENT_V2_SCHEMA_VERSION,
+        episode_id=view.context.identity.episode_id,
+        transition_index=view.transition.transition_index,
+        transition_id=view.transition.transition_id,
+        start_frame_id=view.start_frame.frame_id,
+        successor_frame_id=view.successor_frame.frame_id,
+        start_simulator_step_count=view.start_frame.simulator_step_count,
+        successor_simulator_step_count=view.successor_frame.simulator_step_count,
+        public_agent_id_by_global_slot=public_agent_ids,
+        configured_active_by_global_slot=configured_active,
+        agent_phase_trajectories=trajectories,
+        events=tuple(
+            _project_visual_event_v2(
+                event,
+                trajectory_by_slot=by_slot,
+                public_agent_id_by_global_slot=public_agent_ids,
+                configured_active_by_global_slot=configured_active,
+            )
+            for event in view.transition.events
+        ),
+    )
+
+
+def build_researcher_analyzer_projection_v2(
+    context: EvaluationEpisodeContextV1,
+    frame: EvaluationFrameV1,
+    *,
+    transition_view: EvaluationTransitionViewV1 | None = None,
+    presentation: EvaluationScenePresentationStateV1 | None = None,
+    status_source_evidence_state: StatusSourceEvidenceStateV2 | None = None,
+) -> ResearcherAnalyzerProjectionV2:
+    """Build the stable researcher scene/event envelope for one frame."""
+    canonical_view = _validate_projection_inputs(context, frame, transition_view)
+    if frame.frame_index == 0:
+        evidence_state = (
+            initialize_status_source_evidence_v2(context, frame)
+            if status_source_evidence_state is None
+            else status_source_evidence_state
+        )
+    else:
+        if status_source_evidence_state is None:
+            raise ValueError(
+                "non-initial researcher projections require frame-bound "
+                "status-source evidence state."
+            )
+        evidence_state = status_source_evidence_state
+    scene = build_evaluation_battlefield_scene_v2(
+        context,
+        frame,
+        transition_view=canonical_view,
+        presentation=presentation,
+        status_source_evidence_state=evidence_state,
+    )
+    return ResearcherAnalyzerProjectionV2(
+        schema_version=RESEARCHER_ANALYZER_PROJECTION_SCHEMA_VERSION,
+        scene=scene,
+        incoming_events=(
+            None
+            if canonical_view is None
+            else build_visual_event_batch_v2(canonical_view)
+        ),
+        status_source_evidence=evidence_state,
+    )
+
+
 __all__ = [
     "SHARED_OBS_SOURCE_MATERIAL_PROJECTION_SCHEMA_VERSION",
     "EvaluationScenePresentationStateV1",
@@ -1544,6 +2210,11 @@ __all__ = [
     "SharedObsBaseSensorSceneV1",
     "SharedObsSensorSourceAvailabilityV1",
     "SharedObsSourceMaterialProjectionV1",
+    "advance_status_source_evidence_v2",
     "build_evaluation_battlefield_scene_v2",
+    "build_researcher_analyzer_projection_v2",
     "build_shared_obs_source_material_projection_v1",
+    "build_status_source_evidence_index_v2",
+    "build_visual_event_batch_v2",
+    "initialize_status_source_evidence_v2",
 ]

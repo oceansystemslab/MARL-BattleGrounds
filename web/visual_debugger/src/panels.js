@@ -1,11 +1,5 @@
 import { formatCompactDisplayNumber, formatDisplayNumber } from "./display.js";
-import {
-  explainActivation,
-  explainAgent,
-  explainModifier,
-  explainNetHealth,
-  explainStatus,
-} from "./explanations.js";
+import { explainAgent, explainModifier, explainStatus } from "./explanations.js";
 import { createSvgIcon } from "./icons.js";
 import { registerTooltipOwner } from "./tooltip.js";
 import { classTokenFromId, resolveVisualToken, teamTokenFromId } from "./vocabulary.js";
@@ -89,11 +83,7 @@ function frameScene(frame) {
   if (!isRecord(frame)) {
     return null;
   }
-  return isRecord(frame.scene)
-    ? frame.scene
-    : isRecord(frame.battlefield_scene)
-      ? frame.battlefield_scene
-      : null;
+  return isRecord(frame.scene) ? frame.scene : null;
 }
 
 /**
@@ -104,11 +94,7 @@ function frameEvents(frame) {
   if (!isRecord(frame)) {
     return null;
   }
-  return isRecord(frame.event_batch)
-    ? frame.event_batch
-    : isRecord(frame.visual_event_batch)
-      ? frame.visual_event_batch
-      : null;
+  return isRecord(frame.event_batch) ? frame.event_batch : null;
 }
 
 /**
@@ -250,6 +236,15 @@ function targetLabel(target) {
   if (target.disclosure === "target_none") {
     return "None";
   }
+  if (target.target_action === 0) {
+    return "None";
+  }
+  if (
+    Number.isInteger(target.target_action) &&
+    typeof target.public_agent_id === "string"
+  ) {
+    return `${target.public_agent_id} (action ${target.target_action})`;
+  }
   if (target.disclosure === "public" && Number.isInteger(target.global_slot)) {
     return `id_${target.global_slot}`;
   }
@@ -290,7 +285,11 @@ function movementLabel(moveAction) {
  * @param {Record<string, any>} pending
  */
 function pendingCombatLabel(pending) {
-  return Number(pending.target_action) === 0
+  const targetAction = Number(
+    (isRecord(pending.target) ? pending.target.target_action : undefined) ??
+      pending.target_action,
+  );
+  return targetAction === 0 && pending.armed_lane !== 1
     ? "No combat"
     : laneLabel(pending.armed_lane);
 }
@@ -324,8 +323,12 @@ function availabilityLabel(value) {
  * @param {Record<string, any>} pending
  */
 function pendingPairMaskLabel(pending) {
+  const targetAction = Number(
+    (isRecord(pending.target) ? pending.target.target_action : undefined) ??
+      pending.target_action,
+  );
   if (
-    Number(pending.target_action) === 0 ||
+    (targetAction === 0 && pending.armed_lane !== 1) ||
     (pending.armed_lane !== 0 && pending.armed_lane !== 1)
   ) {
     return "Not applicable";
@@ -348,16 +351,20 @@ function addCandidateLegality(container, hud) {
   const rows = htmlElement("div", "candidate-legality__rows");
   for (const candidate of candidates) {
     const target = isRecord(candidate.target) ? candidate.target : {};
-    const targetAction = Number(candidate.target_action);
+    const targetAction = Number(target.target_action ?? candidate.target_action);
     const hasPublicTargetSlot =
       target.disclosure === "public" && Number.isInteger(target.global_slot);
     const targetSlot = hasPublicTargetSlot ? Number(target.global_slot) : null;
-    const targetLabel =
+    const candidateTargetLabel =
       target.disclosure === "target_none"
         ? "target-none"
-        : targetSlot !== null
-          ? `id_${targetSlot}`
-          : "undisclosed";
+        : target.target_action === 0
+          ? "target-none"
+          : typeof target.public_agent_id === "string"
+            ? `${target.public_agent_id} (action ${target.target_action})`
+            : targetSlot !== null
+              ? `id_${targetSlot}`
+              : "undisclosed";
     const lane0Available = Boolean(candidate.lane_0_available);
     const lane1Available = Boolean(candidate.lane_1_available);
     const basicAvailable = Boolean(candidate.basic_available);
@@ -373,10 +380,10 @@ function addCandidateLegality(container, hud) {
     }
     row.setAttribute(
       "aria-label",
-      `${targetLabel}, target action ${targetAction}, Basic ${basicAvailable ? "available" : "unavailable"}, Ultimate ${ultimateAvailable ? "available" : "unavailable"}`,
+      `${candidateTargetLabel}, target action ${targetAction}, Basic ${basicAvailable ? "available" : "unavailable"}, Ultimate ${ultimateAvailable ? "available" : "unavailable"}`,
     );
     row.append(
-      htmlElement("strong", "candidate-legality-row__target", targetLabel),
+      htmlElement("strong", "candidate-legality-row__target", candidateTargetLabel),
       htmlElement(
         "span",
         "candidate-legality-row__lane",
@@ -427,7 +434,11 @@ function addAgentComparison(container, agent, role) {
       selected: role === "Selected target",
     }),
   );
-  addFact(card, "Identity", `id_${agent.global_slot}`);
+  addFact(
+    card,
+    "Identity",
+    `Agent ID ${agent.public_agent_id ?? `id_${agent.global_slot}`}`,
+  );
   addFact(card, "Class / team", `${classToken.label} · ${teamToken.label}`);
   addFact(
     card,
@@ -542,6 +553,75 @@ function updatePendingActionRow(row, pending, controlled) {
 }
 
 /**
+ * @param {PendingActionRow} row
+ * @param {Record<string, any>} pending
+ */
+function updatePovPendingActionRow(row, pending) {
+  const identity = String(pending.actor_public_agent_id ?? "unavailable");
+  const target = isRecord(pending.target) ? pending.target : {};
+  row.element.removeAttribute("data-actor-slot");
+  row.element.dataset.actorPublicAgentId = identity;
+  row.element.dataset.targetAction = String(target.target_action ?? "");
+  row.element.dataset.controlled = "true";
+  row.element.dataset.movementMaskValue = String(pending.movement_mask_value === true);
+  if (pending.armed_lane === 0 || pending.armed_lane === 1) {
+    row.element.dataset.armedLane = String(pending.armed_lane);
+  } else {
+    row.element.removeAttribute("data-armed-lane");
+  }
+  const heading = htmlElement("div", "pending-action-row__heading");
+  heading.append(
+    htmlElement("strong", null, `Agent ID ${identity}`),
+    htmlElement("span", "pending-action-row__state", "Editing now"),
+  );
+  const facts = htmlElement("div", "pending-action-row__facts");
+  facts.append(
+    htmlElement(
+      "span",
+      "pending-action-chip",
+      `Movement · ${movementLabel(pending.move_action)} · ${availabilityLabel(pending.movement_mask_value)}`,
+    ),
+    htmlElement("span", "pending-action-chip", `Target · ${targetLabel(target)}`),
+    htmlElement(
+      "span",
+      "pending-action-chip",
+      `Action · ${pendingCombatLabel(pending)}`,
+    ),
+    htmlElement(
+      "span",
+      "pending-action-chip",
+      `Legality · ${pendingPairMaskLabel(pending)}`,
+    ),
+  );
+  row.element.replaceChildren(
+    heading,
+    htmlElement(
+      "p",
+      "pending-action-row__summary",
+      String(pending.summary ?? "Pending actor-POV action"),
+    ),
+    facts,
+  );
+  row.element.setAttribute(
+    "aria-label",
+    `Pending action for Agent ID ${identity}: ${String(pending.summary ?? "unavailable")}`,
+  );
+  registerTooltipOwner(row.element, {
+    kind: "pending-route",
+    id: `pov-pending:${identity}`,
+    title: `Pending action · Agent ID ${identity}`,
+    details: [
+      String(pending.summary ?? "Pending action unavailable"),
+      `Target action ${target.target_action ?? "unavailable"}`,
+      target.public_agent_id
+        ? `Target Agent ID ${target.public_agent_id}`
+        : "No target identity disclosed",
+    ],
+    anchor: "element",
+  });
+}
+
+/**
  * @param {HTMLElement} container
  * @param {string} label
  * @param {Record<string, any>} action
@@ -560,19 +640,27 @@ function addActionTuple(container, label, action) {
   const facts = htmlElement("div", "action-tuple__facts");
   addFact(facts, "Move action", action.move_action ?? "—");
   addFact(facts, "Target", targetLabel(action.target));
-  addFact(
-    facts,
-    "Combat lane",
-    action.use_ultimate_action === 0
-      ? isRecord(action.target) && action.target.disclosure === "target_none"
-        ? "No combat"
-        : "0/B · Basic"
-      : action.use_ultimate_action === 1
-        ? "1/U · Ultimate"
-        : "Undisclosed",
-  );
+  addFact(facts, "Combat lane", actionTupleCombatLabel(action));
   card.append(facts);
   container.append(card);
+}
+
+/**
+ * @param {Record<string, any>} action
+ */
+export function actionTupleCombatLabel(action) {
+  const target = isRecord(action.target) ? action.target : {};
+  if (
+    action.use_ultimate_action === 0 &&
+    (target.disclosure === "target_none" || target.target_action === 0)
+  ) {
+    return "No combat";
+  }
+  return action.use_ultimate_action === 0
+    ? "0/B · Basic"
+    : action.use_ultimate_action === 1
+      ? "1/U · Ultimate"
+      : "Undisclosed";
 }
 
 /**
@@ -586,6 +674,42 @@ function renderLatestTransition(container, latest) {
   if (!latest) {
     container.append(htmlElement("p", "empty-copy", "No transition yet."));
     return null;
+  }
+  if (
+    typeof latest.pov_transition_id === "string" &&
+    isRecord(latest.actor) &&
+    typeof latest.actor.actor_public_agent_id === "string"
+  ) {
+    const actor = latest.actor;
+    container.dataset.transitionId = latest.pov_transition_id;
+    container.append(
+      htmlElement(
+        "p",
+        "action-card__label",
+        String(latest.label ?? "LATEST ACCEPTED RESULT"),
+      ),
+    );
+    const metadata = htmlElement("div", "action-card__facts");
+    addFact(metadata, "POV transition", latest.pov_transition_id);
+    addFact(metadata, "Submission", humanize(latest.submission_kind ?? "unknown"));
+    container.append(metadata);
+    const result = htmlElement("section", "action-result");
+    result.dataset.actorPublicAgentId = actor.actor_public_agent_id;
+    result.dataset.combatResult = String(actor.combat_result ?? "undisclosed");
+    result.append(htmlElement("h3", null, `Agent ID ${actor.actor_public_agent_id}`));
+    const comparison = htmlElement("div", "action-result__comparison");
+    if (isRecord(actor.submitted)) {
+      addActionTuple(comparison, "Submitted", actor.submitted);
+    }
+    if (isRecord(actor.accepted)) {
+      addActionTuple(comparison, "Accepted", actor.accepted);
+    }
+    const results = htmlElement("div", "action-card__facts");
+    addFact(results, "Movement accepted", availabilityLabel(actor.movement_accepted));
+    addFact(results, "Combat result", humanize(actor.combat_result ?? "undisclosed"));
+    result.append(comparison, results);
+    container.append(result);
+    return `POV transition ${latest.pov_transition_id}. Agent ID ${actor.actor_public_agent_id}: ${String(actor.accepted?.summary ?? "accepted action unavailable")}; combat ${humanize(actor.combat_result ?? "undisclosed")}`;
   }
   container.dataset.transitionId = String(latest.transition_id);
   container.append(
@@ -662,45 +786,78 @@ function pointLabel(value) {
 /**
  * @param {unknown} event
  */
-function eventSummary(event) {
+export function eventSummary(event) {
   if (!isRecord(event)) {
     return "Unknown event";
   }
   switch (event.event_type) {
-    case "accepted_activation": {
-      const token = resolveVisualToken("activation", event.token_id, event);
-      const source = Number.isInteger(event.source_global_slot)
-        ? `id_${event.source_global_slot}`
-        : "undisclosed source";
-      const target = Number.isInteger(event.target_global_slot)
-        ? `id_${event.target_global_slot}`
-        : event.target_disclosure === "target_none"
-          ? "source-local"
-          : humanize(event.target_disclosure ?? "undisclosed target");
-      return `${token.label} · ${source} → ${target} · ${laneLabel(event.lane)}`;
-    }
-    case "net_health": {
+    case "action_rejected":
+      return `Action rejected · actor id_${event.actor_global_slot} · recorded component ${humanize(event.rejection_component ?? "unknown")}`;
+    case "ability_activated": {
       const recipient = Number.isInteger(event.recipient_global_slot)
         ? `id_${event.recipient_global_slot}`
-        : "undisclosed recipient";
-      const delta = Number(event.net_delta);
+        : "source-local";
+      return `${humanize(event.ability_component ?? "ability")} activated · id_${event.source_global_slot} → ${recipient}`;
+    }
+    case "source_damage_output":
+      return `Damage output · id_${event.source_global_slot} · raw ${formatDisplayNumber(event.raw_damage_output)} · source-modified ${formatDisplayNumber(event.source_modified_damage_output)} · recipient modifier ×${formatDisplayNumber(event.recipient_damage_modifier)} · Mage aura emitters ${asArray(event.mage_damage_aura_covering_emitter_global_slots).length} · Warrior mitigation emitters ${asArray(event.warrior_mitigation_aura_covering_emitter_global_slots).length}`;
+    case "source_healing_output":
+      return `Healing output · id_${event.source_global_slot} · raw ${formatDisplayNumber(event.raw_healing_output)} · source-modified ${formatDisplayNumber(event.source_modified_healing_output)} · recipient modifier ×${formatDisplayNumber(event.recipient_healing_modifier)} · aura emitter evidence not recorded`;
+    case "recipient_health_resolution": {
+      const delta = Number(event.realized_net_health_change);
       const signed = Number.isFinite(delta)
         ? `${delta >= 0 ? "+" : ""}${formatDisplayNumber(delta)}`
         : "undisclosed";
-      return `${recipient} · NET ${signed} · HP ${formatDisplayNumber(event.health_before)} → ${formatDisplayNumber(event.health_after)} · ${humanize(event.outcome ?? "unknown")}`;
+      return `Net combat health · id_${event.recipient_global_slot} · ${signed} · HP ${formatDisplayNumber(event.transition_start_health)} → ${formatDisplayNumber(event.health_after_combat_resolution)}`;
     }
-    case "charge_displacement":
-      return `Charge displacement endpoints · id_${event.source_global_slot} toward id_${event.target_global_slot} · ${pointLabel(event.start)} → ${pointLabel(event.end)} · ${humanize(event.path_kind ?? "unknown")}`;
-    case "status_lifecycle": {
-      const status = resolveVisualToken("status", event.token_id, event);
-      return `${status.label} · id_${event.recipient_global_slot} · ${humanize(event.change ?? "unknown")} · duration ${event.duration_before ?? "?"} → ${event.duration_after ?? "?"}`;
-    }
-    case "rejected_action": {
-      const target = Number.isInteger(event.target_global_slot)
-        ? `id_${event.target_global_slot}`
-        : humanize(event.target_disclosure ?? "undisclosed target");
-      return `Rejected ${humanize(event.component ?? "action")} · actor id_${event.actor_global_slot} · target ${target} · movement mask ${Number(Boolean(event.movement_mask_value))} · pair mask ${Number(Boolean(event.pair_mask_value))}`;
-    }
+    case "combat_countdown_reset":
+      return `Combat countdown reset · id_${event.agent_global_slot}`;
+    case "health_regenerated":
+      return `Out-of-combat regeneration · id_${event.agent_global_slot} · +${formatDisplayNumber(event.actual_health_regenerated)}`;
+    case "cooldown_started":
+      return `Ultimate cooldown started · id_${event.agent_global_slot}`;
+    case "cooldown_ready":
+      return `Ultimate ready · id_${event.agent_global_slot}`;
+    case "charge_phase_displacement":
+      return `Charge phase displacement · id_${event.agent_global_slot} · ${pointLabel(event.start_anchor?.position)} → ${pointLabel(event.end_anchor?.position)}`;
+    case "ordinary_movement_phase_displacement":
+      return `Ordinary movement phase displacement · id_${event.agent_global_slot} · ${pointLabel(event.start_anchor?.position)} → ${pointLabel(event.end_anchor?.position)}`;
+    case "agent_died":
+      return `Agent died · id_${event.recipient_global_slot}`;
+    case "lethal_damage_contribution":
+      return `Positive lethal-damage contributor · id_${event.source_global_slot} → id_${event.recipient_global_slot} · ${formatDisplayNumber(event.attributed_death_damage)}`;
+    case "status_aged_to_zero":
+      return `${humanize(event.status_id ?? "status")} expired · id_${event.recipient_global_slot}`;
+    case "status_broken_by_damage":
+      return `${humanize(event.status_id ?? "status")} broken by damage · id_${event.recipient_global_slot}`;
+    case "status_applied":
+      return `${humanize(event.status_id ?? "status")} applied · id_${event.source_global_slot} → id_${event.recipient_global_slot}`;
+    case "status_refreshed_or_extended":
+      return `${humanize(event.status_id ?? "status")} refreshed or extended · id_${event.recipient_global_slot} · source agent not recorded`;
+    case "status_cleared_by_new_death":
+      return `${humanize(event.status_id ?? "status")} cleared by new death · id_${event.recipient_global_slot}`;
+    case "spawn_shield_expired":
+      return `Spawn shield expired · id_${event.agent_global_slot}`;
+    case "respawn_wave_occurred":
+      return `Respawn wave occurred · Team ${event.team_id}`;
+    case "agent_respawned":
+      return `Agent respawned · id_${event.agent_global_slot} · ${pointLabel(event.realized_successor_position)}`;
+    case "own_action_outcome":
+      return `Own action ${humanize(event.outcome ?? "outcome")}`;
+    case "own_position_changed":
+      return `Own position changed · ${pointLabel(event.start_position)} → ${pointLabel(event.successor_position)}`;
+    case "own_health_changed":
+      return `Own health changed · ${formatDisplayNumber(event.start_health)} → ${formatDisplayNumber(event.successor_health)}`;
+    case "own_status_changed":
+      return `Own status observation changed · ${asArray(event.changed_feature_indices).length} recorded feature${asArray(event.changed_feature_indices).length === 1 ? "" : "s"}`;
+    case "own_cooldown_changed":
+      return `Own cooldown changed · ${formatDisplayNumber(event.start_remaining_ticks)} → ${formatDisplayNumber(event.successor_remaining_ticks)}`;
+    case "own_lifecycle_changed":
+      return `Own lifecycle changed · ${event.successor_alive === true ? "alive" : "not alive"} · shield ${event.successor_spawn_shield_remaining_ticks ?? "?"}`;
+    case "visible_body_observation_changed":
+      return `${humanize(event.relation ?? "visible body")} observation row ${event.observation_row} changed`;
+    case "episode_ended":
+      return `Episode ended · ${event.terminated === true ? "terminated" : event.truncated === true ? "truncated" : "recorded end"}`;
     default:
       return `Unknown semantic event · ${String(event.event_type ?? "missing type")}`;
   }
@@ -753,7 +910,7 @@ export class DebuggerPanels {
     this.eventRows = new Map();
     /** @type {Map<string, HTMLElement>} */
     this.diagnosticRows = new Map();
-    /** @type {Map<number, PendingActionRow>} */
+    /** @type {Map<number | string, PendingActionRow>} */
     this.pendingActionRows = new Map();
     /** @type {{role: "target" | "control", slot: number} | null} */
     this.pendingRosterFocus = null;
@@ -866,11 +1023,15 @@ export class DebuggerPanels {
    */
   updateRosterRow(row, agent, selection, disabled, compact) {
     const globalSlot = agent.global_slot;
+    const publicAgentId =
+      typeof agent.public_agent_id === "string"
+        ? agent.public_agent_id
+        : `id_${globalSlot}`;
     const classToken = classTokenFromId(agent.class_id);
     const teamToken = teamTokenFromId(agent.team_id);
     row.element.setAttribute(
       "aria-label",
-      `Agent id_${globalSlot}, ${classToken.label}, ${teamToken.label}`,
+      `Agent ID ${publicAgentId}, ${classToken.label}, ${teamToken.label}`,
     );
     row.element.dataset.slot = String(globalSlot);
     row.element.dataset.teamId = String(agent.team_id);
@@ -892,7 +1053,7 @@ export class DebuggerPanels {
       }),
     );
 
-    row.identityId.textContent = `id_${globalSlot}`;
+    row.identityId.textContent = `Agent ID ${publicAgentId}`;
     row.identityClass.textContent = `${classToken.label} · ${teamToken.label}`;
     row.health.textContent =
       `HP ${formatDisplayNumber(agent.current_health)} / ${formatDisplayNumber(agent.max_health)}` +
@@ -920,13 +1081,13 @@ export class DebuggerPanels {
       );
     }
 
-    row.targetButton.setAttribute("aria-label", `Target id_${globalSlot}`);
+    row.targetButton.setAttribute("aria-label", `Target Agent ID ${publicAgentId}`);
     row.targetButton.setAttribute(
       "aria-pressed",
       String(globalSlot === selection.selected_global_slot),
     );
     row.targetButton.disabled = disabled;
-    row.controlButton.setAttribute("aria-label", `Control id_${globalSlot}`);
+    row.controlButton.setAttribute("aria-label", `Control Agent ID ${publicAgentId}`);
     row.controlButton.setAttribute(
       "aria-pressed",
       String(globalSlot === selection.controlled_global_slot),
@@ -987,6 +1148,7 @@ export class DebuggerPanels {
       .filter((agent) => isRecord(agent) && Number.isInteger(agent.global_slot))
       .sort((left, right) => left.global_slot - right.global_slot);
     const selection = isRecord(scene?.selection) ? scene.selection : {};
+    const povIdentityOnly = frame?.frame_kind === "actor_pov_live_debugger";
     const focused = this.focusedRosterControl();
     if (focused) {
       this.pendingRosterFocus = {
@@ -1015,7 +1177,7 @@ export class DebuggerPanels {
         row = this.createRosterRow(globalSlot);
         this.rosterRows.set(globalSlot, row);
       }
-      this.updateRosterRow(row, agent, selection, disabled, compact);
+      this.updateRosterRow(row, agent, selection, disabled || povIdentityOnly, compact);
       const desired = desiredByTeam.get(teamId) ?? [];
       desired.push(row.element);
       desiredByTeam.set(teamId, desired);
@@ -1060,6 +1222,39 @@ export class DebuggerPanels {
       hud.pending_submission_scope === "scripted_playback"
         ? hud.pending_submission_scope
         : "controlled_actor";
+    if (
+      typeof hud.controlled_public_agent_id === "string" &&
+      isRecord(hud.pending_action) &&
+      typeof hud.pending_action.actor_public_agent_id === "string"
+    ) {
+      const identity = hud.controlled_public_agent_id;
+      this.pendingHeading.textContent =
+        scope === "scripted_playback"
+          ? "Scripted playback"
+          : "Pending controlled actor";
+      this.pendingCount.textContent = "1 actor";
+      this.pendingScope.textContent =
+        scope === "scripted_playback"
+          ? "Inspection only. Press N to advance the registered scripted trajectory."
+          : "Only this recipient-authorized actor action will be submitted.";
+      this.pendingCard.dataset.submissionScope = scope;
+      this.pendingCard.dataset.pendingCount = "1";
+      this.pendingLabel.textContent = String(hud.pending_action.label);
+      for (const [key, row] of this.pendingActionRows) {
+        if (key !== identity) {
+          row.element.remove();
+          this.pendingActionRows.delete(key);
+        }
+      }
+      let row = this.pendingActionRows.get(identity);
+      if (!row) {
+        row = { element: htmlElement("li", "pending-action-row") };
+        this.pendingActionRows.set(identity, row);
+      }
+      updatePovPendingActionRow(row, hud.pending_action);
+      this.reconcileChildren(this.pendingList, [row.element]);
+      return;
+    }
     let pendingActions = asArray(hud.pending_actions).filter(
       (pending) => isRecord(pending) && Number.isInteger(pending.actor_global_slot),
     );
@@ -1103,7 +1298,7 @@ export class DebuggerPanels {
       pendingActions.map((pending) => Number(pending.actor_global_slot)),
     );
     for (const [actorSlot, row] of this.pendingActionRows) {
-      if (!activeSlots.has(actorSlot)) {
+      if (typeof actorSlot !== "number" || !activeSlots.has(actorSlot)) {
         row.element.remove();
         this.pendingActionRows.delete(actorSlot);
       }
@@ -1142,6 +1337,7 @@ export class DebuggerPanels {
       ? scene.selected_legality
       : null;
     const presentation = preset === "presentation";
+    const pov = frame?.frame_kind === "actor_pov_live_debugger";
     const agents = asArray(scene?.agents).filter(isRecord);
     const agentsBySlot = new Map(
       agents
@@ -1154,6 +1350,21 @@ export class DebuggerPanels {
     if (presentation) {
       // Presentation keeps a compact exact roster plus pending/result/event
       // story; detailed actor comparison belongs to Analysis and Debug.
+    } else if (pov) {
+      const selfAgent =
+        agents.find(
+          (agent) => agent.public_agent_id === hud.controlled_public_agent_id,
+        ) ?? null;
+      const comparison = htmlElement("div", "selection-comparison");
+      addAgentComparison(comparison, selfAgent, "Controlled actor");
+      this.selectionCard.append(comparison);
+      this.selectionCard.append(
+        htmlElement(
+          "p",
+          "empty-copy",
+          "Visible bodies retain actor-relative observation-row identity; researcher target slots are not disclosed.",
+        ),
+      );
     } else if (!selection) {
       this.selectionCard.append(
         htmlElement("p", "empty-copy", "No selection facts received yet."),
@@ -1207,7 +1418,7 @@ export class DebuggerPanels {
     this.renderPendingPlan(hud);
     const announcement = renderLatestTransition(this.acceptedCard, latest);
     if (latest && announcement) {
-      const transitionKey = `${frame?.run_generation ?? "unknown"}:${latest.transition_id}`;
+      const transitionKey = `${frame?.run_generation ?? "unknown"}:${latest.pov_transition_id ?? latest.transition_id}`;
       if (transitionKey !== this.lastAnnouncedTransitionKey) {
         this.lastAnnouncedTransitionKey = transitionKey;
         this.acceptedAnnouncement.textContent = announcement;
@@ -1327,19 +1538,13 @@ export class DebuggerPanels {
         item.dataset.actorSlot = String(event.actor_global_slot);
       }
       item.textContent = eventSummary(event);
-      if (event.event_type === "accepted_activation") {
-        registerTooltipOwner(item, explainActivation(event));
-      } else if (event.event_type === "net_health") {
-        registerTooltipOwner(item, explainNetHealth(event));
-      } else {
-        registerTooltipOwner(item, {
-          kind: "event",
-          id: `event:${eventId}`,
-          title: humanize(event.event_type ?? "Semantic event"),
-          details: [eventSummary(event)],
-          anchor: "element",
-        });
-      }
+      registerTooltipOwner(item, {
+        kind: "event",
+        id: `event:${eventId}`,
+        title: humanize(event.event_type ?? "Semantic event"),
+        details: [eventSummary(event)],
+        anchor: "element",
+      });
       desired.push(item);
     }
     this.reconcileChildren(this.eventFeed, desired);

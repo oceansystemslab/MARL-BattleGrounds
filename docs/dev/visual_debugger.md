@@ -1,9 +1,9 @@
-# Milestone 5 Visual Debugger and Analyzer
+# Visual Debugger and Analyzer
 
-The Milestone 5 Visual Debugger and Analyzer is an explicit-submit research
-tool for
+The Visual Debugger and Analyzer is an explicit-submit research tool for
 inspecting battlefield geometry, exact action-mask values, pending actions,
-accepted actions, combat consequences, statuses, and selected-target facts.
+accepted actions, canonical transition causes, statuses, and selected-target
+facts.
 The live application uses a local browser. A stateless Matplotlib snapshot
 remains available for compatibility and headless use.
 
@@ -15,16 +15,22 @@ Python is the sole authority for:
 - `DebuggerSession`, every active agent's staged action, and scenario state;
 - simulator-command normalization, authorized agent hit testing,
   global/relative target mapping, and exact legality;
-- accepted actions, transition diagnostics, status lifecycle classification,
-  and reset/switch behavior;
-- one submission, one key split, and one `core.step` call.
+- one submission, one key split, and one `core.step` call;
+- the single bundled CP2 capture of each accepted core result, CP3 coherent-view
+  validation, status-source prefix evidence, and reset/switch behavior; and
+- the renderer-neutral `BattlefieldSceneV2`, `VisualEventBatchV2`, researcher
+  projection, exact NoSharedObs POV projection, and labelled SharedObs
+  source-material projection.
 
 The browser owns input capture, pointer-to-world coordinate projection,
 responsive layout, SVG/HTML rendering, hover/help/panel state, local
 presentation keys such as `P` and `?`, focus release after Escape, and
-presentation-only animation time. It receives a small allowlisted
-`DebuggerFrameV1`; it never receives raw JAX arrays or recomputes combat,
-visibility, targetability, agent hit testing, or legality.
+presentation-only animation time. It receives one small audience-specific
+`ResearcherLiveDebuggerFrameV2` or `ActorPovLiveDebuggerFrameV2`; it never
+receives raw JAX arrays or recomputes combat, visibility, targetability, agent
+hit testing, legality, accepted actions, or event causes. Researcher and POV
+wire roots are structurally distinct, so hiding a researcher field in CSS is
+never used as an authorization boundary.
 
 The live path is:
 
@@ -34,12 +40,16 @@ browser input
   -> Python DebuggerService
   -> shared input/control/targeting helpers
   -> optional single authoritative submit
-  -> allowlisted scene, HUD, and latest event batch
+  -> one CP2 capture and CP3 coherent transition view
+  -> audience-specific Scene/Event V2 projection and HUD
   -> SVG battlefield and HTML inspector
 ```
 
 UI-only activity never calls `step`, splits a key, or restarts an already
-consumed transition animation.
+consumed transition animation. The live service builds and validates the full
+candidate browser frame before its service-owned zero-reducer observer append;
+that append is the final fallible scientific operation before immutable state
+assignment.
 
 ## Launch
 
@@ -227,6 +237,13 @@ identities, and endpoints are omitted from the payload rather than hidden with
 CSS. A submitted action may remain visible while its hidden combat result is
 reported as undisclosed.
 
+The controlled row and every disclosed visible-body row retain their exact V1
+status feature vector. The browser decodes only the nine duration columns into
+durable status badges in canonical presentation order. Effect class is fixed by
+the published feature channel; source-agent identity and researcher-only source
+attribution are never reconstructed. Multiplier/fraction columns remain exact
+recipient input but are not mislabelled as additional statuses.
+
 ### Presentation presets
 
 - **Presentation:** durable geometry and semantic events with minimal analysis
@@ -344,34 +361,72 @@ but a number never overlaps an icon or escapes its cell.
 | Priest | Rounded directional healing tether terminating in a green plus. | Stronger Holy Word route with green-plus impact and dual healing flare. |
 
 Selection is always the magenta corner reticle; targeting intent is a thin
-pending preview. Ordinary completed Basics and non-Charge Ultimates use
-successor source/recipient anchors so routes agree with displayed bodies.
-Charge activation remains pre-transition and its displacement joins the
-Warrior's pre-position to its successor position. Routes are clipped at body
-radii. Reciprocal routes bend in opposite directions, same-direction
-multiplicity receives stable parallel offsets, close distinct centers preserve
-the actual source-to-recipient bearing, and all accepted activations begin
-together.
+pending preview. Combat, activation, output, health, regeneration, and cooldown
+cues use transition-start anchors. Charge then uses its explicit first-phase
+displacement, ordinary movement uses its separate second-phase displacement,
+and lifecycle/status/shield/wave/respawn cues use their recorded later phase.
+Routes are clipped at body radii. Reciprocal routes bend in opposite directions,
+same-direction multiplicity receives stable parallel offsets, close distinct
+centers preserve the actual source-to-recipient bearing, and all accepted
+activations begin together.
 
 In extremely dense static frames, the event feed is the definitive direction
 and identity fallback; live particles and route markers carry direction more
 clearly than a frozen overlapping screenshot.
 
-## Outcomes, animation, and honest attribution
+## Canonical Scene/Event V2 grammar
 
-Accepted source/target activations and recipient health consequences are
-different facts:
+The live, loaded-replay, and static paths consume the same validated evaluation
+records. `BattlefieldSceneV2` owns durable frame truth: public identities,
+positions, alive/corpse state, health, cooldowns, combat countdowns, statuses,
+spawn pads/shields, wave clocks, class mechanics, aura fields/modifiers, current
+legality, and status-source evidence. `VisualEventBatchV2` owns only the
+incoming transition and preserves every canonical CP2 event ID and order once.
 
-- one activation event/route exists for every exact accepted activation;
-- one recipient-level `NET −N.NN`, `NET +N.NN`, or `HP unchanged` cue reports
-  exact before/after health;
-- no source route carries a fabricated damage or healing amount.
+Status rows retain the evaluation catalog's scientific channel number and
+catalog status ID as an inseparable pair. Renderers present those rows in the
+versioned hard-control, slow, anti-heal, Freedom, then Burst order without
+renumbering the underlying channels.
 
-NET cues place before lifecycle decoration and search deterministic local,
-protected-edge, and whole-viewport candidates. Bodies, status docks, selection
-marks, activation icons, and existing outcome cues are protected regions. If
-no collision-free location exists, the transient node is retained but hidden
-so resize/preset reprojection can reveal it without replaying the event.
+Events are independent facts. The renderer never joins output to activation,
+guesses a Charge target, calls a positive lethal contributor a killer, or
+reconstructs a cause from before/after state:
+
+| Canonical event | Presentation contract |
+| --- | --- |
+| `action_rejected` | Source-actor rejection mark and feed row for the recorded component only. An inactive padded submission remains feed-visible without inventing a body. |
+| `ability_activated` | Independent Basic/Ultimate cue using only its recorded source/recipient payload. |
+| `source_damage_output` | Independent raw/source-modified/modifier/aura detail; never a second net-health number or guessed activation link. |
+| `source_healing_output` | The corresponding independent healing-output detail. |
+| `recipient_health_resolution` | The sole authoritative recipient net-combat-health cue. |
+| `combat_countdown_reset` | Crossed-swords/clock pulse plus the durable countdown. |
+| `health_regenerated` | Regeneration cue distinct from Priest healing. |
+| `cooldown_started` / `cooldown_ready` | Dock start pulse / ready flash. |
+| `charge_phase_displacement` | Exact first displacement segment; no inferred target. |
+| `ordinary_movement_phase_displacement` | Exact second segment, never relabelled voluntary intent. |
+| `agent_died` | Death at the post-displacement position, followed by durable corpse state. |
+| `lethal_damage_contribution` | Positive-contributor detail only; no killer claim or extra projectile. |
+| `status_aged_to_zero` | Neutral expiry/fade. |
+| `status_broken_by_damage` | Distinct recorded shatter. |
+| `status_applied` | Recorded source-to-recipient application cue. |
+| `status_refreshed_or_extended` | Source-less refresh pulse; durable source-agent attribution becomes unknown. |
+| `status_cleared_by_new_death` | Death-clear sweep distinct from expiry. |
+| `spawn_shield_expired` | Shield crack/fade. |
+| `respawn_wave_occurred` | Team clock/feed cue even when no actor respawns. |
+| `agent_respawned` | Pad materialization at the recorded successor position, followed by durable body/shield state. |
+
+Status-source evidence is a pure prefix index. A recorded application supplies
+direct evidence; a source-less refresh clears agent attribution; expiry, break,
+and death-clear remove it; and a nonzero status in frame zero starts with unknown
+source. Random seek and sequential playback therefore settle to the same scene.
+
+Recipient health cues place before lifecycle decoration and search deterministic
+local, protected-edge, and whole-viewport candidates. Durable bodies, status
+docks, and selection marks are always protected regions. Transient cues protect
+only peers in the same authored phase, so non-coexisting evidence does not
+consume later-phase layout capacity. If no collision-free location exists, the
+transient node is retained but hidden so resize/preset reprojection can reveal
+it without replaying the event.
 
 At the `960×600` crowded stress limit, lower-priority lifecycle decoration can
 be suppressed under this explicit policy; exact NET outcomes, durable statuses,
@@ -379,34 +434,31 @@ and the structured event feed retain the authoritative story. This density case
 remains part of final human acceptance rather than being presented as unlimited
 screen capacity.
 
-All accepted activations start in one shared phase; impact and NET cues share
-one impact phase. Ordinary choreography is bounded and uses the latest
-transition only. Hover, help, panel changes, and redraw do not restart it.
+Choreography follows non-overlapping causal phases: transition-start combat,
+Charge, ordinary movement, death, status, then shield/wave/respawn. Ordinary
+choreography is bounded and uses the latest transition only. Hover, help, panel
+changes, reconnect, and redraw do not restart it.
+
+Animated nodes honor those authored phase boundaries exactly. Transient labels
+fade without moving outside their collision-planned geometry; only the exact
+Charge displacement remains as settled transition evidence after its animated
+phase.
 
 ### Charge
 
-Charge shows only the exact public pre-transition source position and successor
-source position. It never reconstructs a private collision-resolved
-intermediate landing or claims a literal continuous physical path. The
-displacement remains through UI-only activity and is replaced by the next
-successful transition, reset, or scenario switch.
+Charge shows only the exact recorded transition-start and post-Charge anchors.
+Ordinary movement begins at that post-Charge anchor and ends at the authoritative
+successor. The renderer never reconstructs a private collision-resolved target
+or a different physical path. The displacement remains through UI-only activity
+and is replaced by the next successful transition, reset, or scenario switch.
 
 ### Trap
 
-Trap lifecycle language remains conservative:
-
-| Public evidence | Classification |
-| --- | --- |
-| `0 -> full` with accepted Trap | Applied |
-| Positive duration `-> full` with accepted Trap | Refreshed/reapplied |
-| `before > 1 -> 0`, no new Trap, accepted positive raw-damage action | Exact break/shatter |
-| `1 -> 0` with accepted damage | Ambiguous end; neutral dissolve, never “break” |
-| `1 -> 0` without damage/application | Natural expiry |
-| Unexpected clear | Unclassified neutral ending |
-| Defensible break plus reapplication | Composite break-and-reapply |
-
-The debugger does not invent a breaker when several damage sources were
-accepted.
+Trap application, source-less refresh, age-to-zero, damage break, and
+death-clear are separate authoritative CP2 variants. The analyzer renders the
+recorded variant and never classifies Trap lifecycle from accepted actions or
+duration deltas. The route terminates at the target body boundary; its durable
+status card remains a separate frame fact.
 
 ## Scenarios
 
@@ -438,10 +490,14 @@ pre-state mask and accepted action.
 
 ### Renderer-only fixtures
 
-`visual_vocabulary`, `crowded_teamfight`, `route_collision`, `mixed_net_zero`,
-`viewport_matrix`, and `pov_redaction` are explicitly synthetic presentation
-fixtures. They are never submitted to the simulator and must not be described
-as valid histories.
+`visual_vocabulary`, `durable_controls`, `crowded_teamfight`,
+`route_collision`, `mixed_net_zero`, `viewport_matrix`,
+`canonical_event_vocabulary`, and `pov_redaction` are explicitly synthetic
+presentation fixtures. Researcher fixtures use exact Scene/Event V2 roots; the
+POV fixture uses its independently recipient-sliced projection. Every fixture
+is wrapped in an exact typed live response root before outbound JSON enters the
+same strict browser normalizer as production. They are never submitted to the
+simulator and must not be described as valid histories.
 
 ## Static Matplotlib snapshot
 
@@ -515,14 +571,18 @@ green.
 
 ## Replay reuse boundary
 
-The reusable boundary is the renderer-neutral scene/event vocabulary, SVG
+The reusable boundary is the renderer-neutral Scene/Event V2 vocabulary, SVG
 painter, layout, animation controller, presets, and accessibility conventions.
-`DebuggerFrameV1`, pending actions, revision/idempotency handling, and the
-loopback command protocol are live-analyzer-only.
+Pending actions, revision/idempotency handling, and the loopback command
+protocol are live-analyzer-only. Live responses are outbound-only presentation
+roots: Python constructs them from exact typed projections and serializes them,
+and the browser validates the JSON at its single normalization boundary. Inbound
+commands use strict Pydantic JSON validation; durable replay/POV/scenario files
+use their separate canonical loaders and whole-artifact validators.
 
 The standard replay owns a separate integrity/export contract and already
 reuses the renderer-neutral durable-scene boundary for offline static frames.
 The live analyzer still owns pending actions and simulator commands; replay
 never simulates them. Interactive replay owns a separate read-only timeline and
-outer frame/command envelope rather than reusing `DebuggerFrameV1` as artifact
-authority.
+outer frame/command envelope rather than reusing either live V2 frame as
+artifact authority.

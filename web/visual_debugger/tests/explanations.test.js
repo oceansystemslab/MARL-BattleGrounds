@@ -106,12 +106,17 @@ test("legality and pending explanations report exact returned booleans", () => {
   );
   assert.deepEqual(
     explainPendingRoute({
-      source_global_slot: 2,
-      target_global_slot: 7,
+      source_public_agent_id: "researcher-2",
+      target_public_agent_id: "researcher-7",
       lane: 1,
       legal: false,
     }).details,
-    ["Source id_2", "Target id_7", "Ultimate lane", "Exact staged pair legal false"],
+    [
+      "Source Agent ID researcher-2",
+      "Target Agent ID researcher-7",
+      "Ultimate lane",
+      "Exact staged pair legal false",
+    ],
   );
 });
 

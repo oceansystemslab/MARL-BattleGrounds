@@ -1,3 +1,5 @@
+import { normalizeLiveDebuggerFrameV2 } from "./frame-normalizer.js";
+
 const TOKEN_STORAGE_KEY = "marl-battlegrounds.debugger-token";
 const CLIENT_STORAGE_KEY = "marl-battlegrounds.debugger-client-id";
 const TOKEN_HEADER = "X-MARL-Debugger-Token";
@@ -221,20 +223,20 @@ export function extractFrame(payload) {
   if (!isRecord(payload)) {
     return null;
   }
-  for (const candidate of [
-    payload.frame,
-    payload.latest_frame,
-    payload.current_frame,
-  ]) {
+  const envelopeCandidates = [payload.frame, payload.latest_frame];
+  for (const candidate of envelopeCandidates) {
     if (isRecord(candidate)) {
-      return candidate;
+      if (payload.schema_version !== 2) {
+        throw new TypeError("Debugger response envelope must use schema version 2.");
+      }
+      return normalizeLiveDebuggerFrameV2(candidate);
     }
   }
   if (
     Number.isInteger(payload.revision) &&
-    (isRecord(payload.scene) || isRecord(payload.battlefield_scene))
+    (isRecord(payload.scene) || isRecord(payload.projection))
   ) {
-    return payload;
+    return normalizeLiveDebuggerFrameV2(payload);
   }
   return null;
 }
@@ -249,9 +251,6 @@ export function extractNotice(payload) {
   }
   if (typeof payload.notice === "string" && payload.notice.trim()) {
     return payload.notice;
-  }
-  if (isRecord(payload.notice) && typeof payload.notice.message === "string") {
-    return payload.notice.message;
   }
   return null;
 }

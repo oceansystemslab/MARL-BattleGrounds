@@ -8,21 +8,25 @@ import pytest
 import scripts.dev.visual_debugger.control as control_module
 import scripts.dev.visual_debugger.service as service_module
 from scripts.dev.visual_debugger.control import create_session, select_clicked_target
+from scripts.dev.visual_debugger.frame import build_debugger_frame
 from scripts.dev.visual_debugger.input import InputDispatchResult
+from scripts.dev.visual_debugger.model import DebuggerSession
 from scripts.dev.visual_debugger.protocol import (
-    ApiErrorV1,
+    ActorPovLiveDebuggerFrameV2,
+    ApiErrorV2,
     CommandRequestV1,
-    CommandResponseV1,
+    CommandResponseV2,
     ExitCommandV1,
     KeyboardCommandV1,
+    ResearcherLiveDebuggerFrameV2,
     RosterSelectionCommandV1,
     SetMovementScaleCommandV1,
     SetPresetCommandV1,
     SetViewCommandV1,
 )
 from scripts.dev.visual_debugger.scenarios import get_scenario
-from scripts.dev.visual_debugger.scene_adapter import build_battlefield_scene
 from scripts.dev.visual_debugger.service import DebuggerService
+from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
 
 def _service(
@@ -33,6 +37,7 @@ def _service(
     session = create_session(
         get_scenario(scenario_name),
         seed=0,
+        evaluation_launch_specification=debugger_test_launch_specification(),
         controlled_global_slot=None,
         show_ranges=True,
         verbose_logging=False,
@@ -61,6 +66,27 @@ def _request(
     )
 
 
+def _authorized_pov_slots(debugger_session: DebuggerSession) -> set[int]:
+    frame = build_debugger_frame(
+        debugger_session,
+        session_id="test-pov-slots",
+        revision=0,
+        view_mode="pov",
+        preset="analysis",
+        include_stress=False,
+    )
+    assert isinstance(frame, ActorPovLiveDebuggerFrameV2)
+    public_ids = {
+        frame.projection.scene.self_actor.public_agent_id,
+        *(body.public_agent_id for body in frame.projection.scene.visible_bodies),
+    }
+    return {
+        row.global_slot
+        for row in debugger_session.evaluation_context.roster
+        if row.public_agent_id in public_ids
+    }
+
+
 def test_initial_and_current_frame_reads_are_coherent_and_non_mutating() -> None:
     service = _service()
     initial_session = service.session
@@ -70,9 +96,10 @@ def test_initial_and_current_frame_reads_are_coherent_and_non_mutating() -> None
     second = service.current_frame()
 
     assert first is second
+    assert isinstance(first, ResearcherLiveDebuggerFrameV2)
     assert first.revision == 0
-    assert first.simulator_step == 0
-    assert first.transition_id is None
+    assert first.simulator_step_count == 0
+    assert first.incoming_transition_id is None
     assert service.session is initial_session
     assert bool(jnp.array_equal(service.session.key, initial_key))
 
@@ -89,10 +116,10 @@ def test_ui_edit_advances_only_frame_revision() -> None:
     result = service.apply_command(request)
 
     assert result.outcome == "response"
-    assert isinstance(result.payload, CommandResponseV1)
+    assert isinstance(result.payload, CommandResponseV2)
     assert result.payload.result == "applied"
     assert result.payload.frame.revision == 1
-    assert result.payload.frame.simulator_step == 0
+    assert result.payload.frame.simulator_step_count == 0
     assert service.session.state is initial.state
     assert bool(jnp.array_equal(service.session.key, initial.key))
 
@@ -136,16 +163,17 @@ def test_submit_duplicate_conflict_and_stale_requests_cannot_restep() -> None:
         )
     )
 
-    assert isinstance(applied.payload, CommandResponseV1)
+    assert isinstance(applied.payload, CommandResponseV2)
+    assert isinstance(applied.payload.frame, ResearcherLiveDebuggerFrameV2)
     assert applied.payload.result == "applied"
-    assert applied.payload.frame.simulator_step == 1
-    assert applied.payload.frame.transition_id == 1
-    assert isinstance(duplicate.payload, CommandResponseV1)
+    assert applied.payload.frame.simulator_step_count == 1
+    assert applied.payload.frame.incoming_transition_index == 0
+    assert isinstance(duplicate.payload, CommandResponseV2)
     assert duplicate.payload.result == "duplicate"
-    assert duplicate.payload.frame.simulator_step == 1
+    assert duplicate.payload.frame.simulator_step_count == 1
     assert conflicting.outcome == "command_id_conflict"
     assert stale.outcome == "stale_revision"
-    assert isinstance(stale_duplicate.payload, CommandResponseV1)
+    assert isinstance(stale_duplicate.payload, CommandResponseV2)
     assert stale_duplicate.payload.result == "duplicate"
     assert stale_id_reuse.outcome == "command_id_conflict"
     assert int(service.session.state.step_count) == 1
@@ -162,10 +190,10 @@ def test_repeat_submit_is_consumed_without_revision_or_step() -> None:
         )
     )
 
-    assert isinstance(result.payload, CommandResponseV1)
+    assert isinstance(result.payload, CommandResponseV2)
     assert result.payload.result == "no_op"
     assert result.payload.frame.revision == 0
-    assert result.payload.frame.simulator_step == 0
+    assert result.payload.frame.simulator_step_count == 0
     assert service.command_cache_size == 1
 
 
@@ -181,10 +209,10 @@ def test_unavailable_browser_draft_is_a_revision_preserving_no_op() -> None:
         )
     )
 
-    assert isinstance(result.payload, CommandResponseV1)
+    assert isinstance(result.payload, CommandResponseV2)
     assert result.payload.result == "no_op"
     assert result.payload.frame.revision == 0
-    assert result.payload.frame.simulator_step == 0
+    assert result.payload.frame.simulator_step_count == 0
     assert service.session is initial
     assert result.payload.notice is not None
     assert "canonical no-combat tuple" in result.payload.notice
@@ -222,16 +250,17 @@ def test_movement_scale_reset_is_idempotent_revisioned_and_never_steps(
         )
     )
 
-    assert isinstance(applied.payload, CommandResponseV1)
+    assert isinstance(applied.payload, CommandResponseV2)
+    assert isinstance(applied.payload.frame, ResearcherLiveDebuggerFrameV2)
     assert applied.payload.result == "applied"
     assert applied.payload.frame.revision == 1
     assert applied.payload.frame.run_generation == 1
-    assert applied.payload.frame.simulator_step == 0
+    assert applied.payload.frame.simulator_step_count == 0
     assert applied.payload.frame.scenario.ordinary_movement_distance_scale == 0.1
-    assert isinstance(duplicate.payload, CommandResponseV1)
+    assert isinstance(duplicate.payload, CommandResponseV2)
     assert duplicate.payload.result == "duplicate"
     assert stale.outcome == "stale_revision"
-    assert isinstance(same_effective.payload, CommandResponseV1)
+    assert isinstance(same_effective.payload, CommandResponseV2)
     assert same_effective.payload.result == "no_op"
     assert same_effective.payload.frame.revision == 1
     assert service.session.run_generation == 1
@@ -240,11 +269,12 @@ def test_movement_scale_reset_is_idempotent_revisioned_and_never_steps(
 
 def test_entering_pov_clears_a_hidden_pending_target_without_stepping() -> None:
     service = _service()
-    researcher = build_battlefield_scene(service.session, audience="researcher")
-    pov = build_battlefield_scene(service.session, audience="agent_pov")
-    hidden_slots = {agent.global_slot for agent in researcher.agents} - {
-        agent.global_slot for agent in pov.agents
+    researcher_slots = {
+        row.global_slot
+        for row in service.session.evaluation_context.roster
+        if row.configured_active
     }
+    hidden_slots = researcher_slots - _authorized_pov_slots(service.session)
     assert hidden_slots
     hidden_target = min(hidden_slots)
 
@@ -258,7 +288,7 @@ def test_entering_pov_clears_a_hidden_pending_target_without_stepping() -> None:
             ),
         )
     )
-    assert isinstance(selected.payload, CommandResponseV1)
+    assert isinstance(selected.payload, CommandResponseV2)
     assert service.session.pending_action.selected_global_target_slot == hidden_target
     before_view = service.session
 
@@ -270,7 +300,7 @@ def test_entering_pov_clears_a_hidden_pending_target_without_stepping() -> None:
         )
     )
 
-    assert isinstance(changed_view.payload, CommandResponseV1)
+    assert isinstance(changed_view.payload, CommandResponseV2)
     assert changed_view.payload.frame.view_mode == "pov"
     assert service.session.pending_action.selected_global_target_slot is None
     assert service.session.state is before_view.state
@@ -282,18 +312,16 @@ def test_initial_pov_service_clears_hidden_pending_target() -> None:
     session = create_session(
         get_scenario("arena_5v5"),
         seed=0,
+        evaluation_launch_specification=debugger_test_launch_specification(),
         controlled_global_slot=None,
         show_ranges=True,
         verbose_logging=False,
     )
-    pov_slots = {
-        agent.global_slot
-        for agent in build_battlefield_scene(session, audience="agent_pov").agents
-    }
+    pov_slots = _authorized_pov_slots(session)
     hidden_target = min(
-        agent.global_slot
-        for agent in build_battlefield_scene(session, audience="researcher").agents
-        if agent.global_slot not in pov_slots
+        row.global_slot
+        for row in session.evaluation_context.roster
+        if row.configured_active and row.global_slot not in pov_slots
     )
     selected = select_clicked_target(session, hidden_target)
 
@@ -306,7 +334,9 @@ def test_initial_pov_service_clears_hidden_pending_target() -> None:
     )
 
     assert service.session.pending_action.selected_global_target_slot is None
-    assert service.current_frame().hud.selected_global_slot is None
+    frame = service.current_frame()
+    assert isinstance(frame, ActorPovLiveDebuggerFrameV2)
+    assert not hasattr(frame.hud, "selected_global_slot")
     assert service.session.state is session.state
     assert service.session.key is session.key
     assert int(service.session.state.step_count) == 0
@@ -424,7 +454,7 @@ def test_frame_build_failure_keeps_epoch_coherent_and_consumes_command_id(
     assert service.revision == 0
     assert service.faulted
     assert step_calls == 1
-    assert isinstance(duplicate.payload, CommandResponseV1)
+    assert isinstance(duplicate.payload, CommandResponseV2)
     assert duplicate.payload.result == "duplicate"
     assert duplicate.payload.frame is initial_frame
 
@@ -465,15 +495,15 @@ def test_accepted_exit_fences_concurrent_submissions_without_stepping() -> None:
         results = tuple(executor.map(service.apply_command, submissions))
     duplicate_exit = service.apply_command(exit_request)
 
-    assert isinstance(accepted_exit.payload, CommandResponseV1)
+    assert isinstance(accepted_exit.payload, CommandResponseV2)
     assert accepted_exit.payload.result == "shutdown_scheduled"
     assert accepted_exit.shutdown_requested
     assert service.shutting_down
     assert {result.outcome for result in results} == {"server_shutting_down"}
     for result in results:
-        assert isinstance(result.payload, ApiErrorV1)
+        assert isinstance(result.payload, ApiErrorV2)
         assert result.payload.error_code == "server_shutting_down"
-    assert isinstance(duplicate_exit.payload, CommandResponseV1)
+    assert isinstance(duplicate_exit.payload, CommandResponseV2)
     assert duplicate_exit.payload.result == "duplicate"
     assert int(service.session.state.step_count) == 0
     assert service.revision == 0
@@ -504,10 +534,10 @@ def test_evicted_applied_submit_is_stale_and_cannot_restep() -> None:
     )
 
     applied = service.apply_command(submit)
-    assert isinstance(applied.payload, CommandResponseV1)
+    assert isinstance(applied.payload, CommandResponseV2)
     assert applied.payload.result == "applied"
     assert applied.payload.frame.revision == 1
-    assert applied.payload.frame.simulator_step == 1
+    assert applied.payload.frame.simulator_step_count == 1
 
     for index in range(256):
         no_op = service.apply_command(
@@ -517,18 +547,18 @@ def test_evicted_applied_submit_is_stale_and_cannot_restep() -> None:
                 command=KeyboardCommandV1(key="F13"),
             )
         )
-        assert isinstance(no_op.payload, CommandResponseV1)
+        assert isinstance(no_op.payload, CommandResponseV2)
         assert no_op.payload.result == "no_op"
 
     assert service.command_cache_size == 256
     replayed = service.apply_command(submit)
 
     assert replayed.outcome == "stale_revision"
-    assert isinstance(replayed.payload, ApiErrorV1)
+    assert isinstance(replayed.payload, ApiErrorV2)
     assert replayed.payload.error_code == "stale_revision"
     assert replayed.payload.latest_frame is not None
     assert replayed.payload.latest_frame.revision == 1
-    assert replayed.payload.latest_frame.simulator_step == 1
+    assert replayed.payload.latest_frame.simulator_step_count == 1
     assert service.revision == 1
     assert int(service.session.state.step_count) == 1
 
@@ -537,6 +567,7 @@ def test_stress_scenario_requires_explicit_service_authorization() -> None:
     session = create_session(
         get_scenario("charge_convergence"),
         seed=0,
+        evaluation_launch_specification=debugger_test_launch_specification(),
         controlled_global_slot=None,
         show_ranges=True,
         verbose_logging=False,

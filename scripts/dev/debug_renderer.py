@@ -64,8 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the complete analyzer CLI without importing Matplotlib."""
     parser = argparse.ArgumentParser(
         description=(
-            "Open the deterministic MARL-BattleGrounds Milestone 1-5 "
-            "Visual Debugger and Analyzer."
+            "Open the deterministic MARL-BattleGrounds Visual Debugger and Analyzer."
         ),
         epilog=_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -226,6 +225,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 show_ranges=args.ranges,
             )
 
+        from scripts.dev.visual_debugger.evaluation_bridge import (
+            build_debugger_evaluation_launch_specification_v1,
+        )
+        from scripts.dev.visual_debugger.revision import (
+            discover_debugger_code_revision_v1,
+        )
         from scripts.dev.visual_debugger.scenarios import get_scenario
 
         scenario = get_scenario(args.scenario or "arena_5v5")
@@ -233,6 +238,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             scenario,
             controlled_global_slot=args.controlled_slot,
             include_stress=args.include_stress,
+        )
+        evaluation_launch_specification = (
+            build_debugger_evaluation_launch_specification_v1(
+                root_seed=args.seed,
+                code_revision=discover_debugger_code_revision_v1(
+                    _REPOSITORY_ROOT,
+                ),
+            )
         )
         if args.static:
             from scripts.dev.visual_debugger.static_renderer import (
@@ -242,6 +255,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_static_renderer(
                 scenario=scenario,
                 seed=args.seed,
+                evaluation_launch_specification=evaluation_launch_specification,
                 controlled_global_slot=args.controlled_slot,
                 verbose=args.verbose,
                 show_ranges=args.ranges,
@@ -254,6 +268,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         session = create_session(
             scenario,
             seed=args.seed,
+            evaluation_launch_specification=evaluation_launch_specification,
             controlled_global_slot=args.controlled_slot,
             show_ranges=args.ranges,
             verbose_logging=args.verbose,

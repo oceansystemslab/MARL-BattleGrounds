@@ -9,6 +9,7 @@ import { startDebugger, stopDebugger } from "./support/live-debugger.js";
 import {
   loadRendererFixture,
   syntheticDebuggerFrame,
+  syntheticDebuggerWireFrame,
 } from "./support/renderer-fixture.js";
 
 /** @type {import("node:child_process").ChildProcess | null} */
@@ -17,22 +18,35 @@ let debuggerUrl = "";
 /** @type {Record<string, any>} */
 let syntheticFrame = {};
 /** @type {Record<string, any>} */
-let syntheticPovFrame = {};
+let syntheticWireFrame = {};
+/** @type {Record<string, any>} */
+let syntheticPovWireFrame = {};
+/** @type {Record<string, any>} */
+let canonicalGrammarFrame = {};
+/** @type {Record<string, any>} */
+let canonicalGrammarWireFrame = {};
 
 test.beforeAll(async () => {
-  const [started, fixture, povFixture] = await Promise.all([
+  const [started, fixture, povFixture, grammarFixture] = await Promise.all([
     startDebugger(),
     loadRendererFixture("crowded_teamfight"),
     loadRendererFixture("pov_redaction"),
+    loadRendererFixture("canonical_event_vocabulary"),
   ]);
   serverProcess = started.process;
   debuggerUrl = started.url;
   syntheticFrame = syntheticDebuggerFrame(fixture);
-  syntheticPovFrame = syntheticDebuggerFrame(povFixture);
+  syntheticWireFrame = syntheticDebuggerWireFrame(fixture);
+  syntheticPovWireFrame = syntheticDebuggerWireFrame(povFixture);
+  canonicalGrammarFrame = syntheticDebuggerFrame(grammarFixture);
+  canonicalGrammarWireFrame = syntheticDebuggerWireFrame(grammarFixture);
   expect(syntheticFrame).toMatchObject({
-    schema_version: "renderer_fixture_v1",
-    frame_kind: "synthetic_renderer_fixture",
+    schema_version: 2,
+    frame_kind: "researcher_live_debugger",
   });
+  expect(syntheticWireFrame).not.toHaveProperty("scene");
+  expect(syntheticWireFrame).not.toHaveProperty("event_batch");
+  expect(syntheticWireFrame.projection).toMatchObject({ schema_version: 2 });
 });
 
 test.afterAll(async () => {
@@ -44,19 +58,20 @@ test.afterAll(async () => {
 test("test-only fixture interception installs an explicitly synthetic scene", async ({
   page,
 }) => {
-  const layoutStressFrame = structuredClone(syntheticFrame);
-  layoutStressFrame.scene.agents[4].modifiers[0].multiplier = 123456.789;
-  layoutStressFrame.scene.agents[0].statuses[0].duration = 123456789;
-  layoutStressFrame.scene.agents[7].statuses.slice(0, 5).forEach(
+  const layoutStressFrame = structuredClone(syntheticWireFrame);
+  const layoutStressScene = layoutStressFrame.projection.scene;
+  layoutStressScene.agents[4].aura_modifiers[0].multiplier = 123456.789;
+  layoutStressScene.agents[0].statuses[0].remaining_duration = 123456789;
+  layoutStressScene.agents[7].statuses.slice(0, 5).forEach(
     /**
      * @param {Record<string, any>} status
      * @param {number} index
      */
     (status, index) => {
-      status.duration = index + 1;
+      status.remaining_duration = index + 1;
     },
   );
-  layoutStressFrame.scene.agents[2].ultimate_cooldown = 30;
+  layoutStressScene.agents[2].ultimate_cooldown_remaining = 30;
   let commandRequests = 0;
   await page.route("**/api/frame", async (route) => {
     await route.fulfill({
@@ -334,10 +349,6 @@ test("test-only fixture interception installs an explicitly synthetic scene", as
     return violations;
   });
   expect(geometryViolations).toEqual([]);
-  await expect(page.locator("#battlefield path.pending-route")).toHaveAttribute(
-    "data-route-kind",
-    /curve|local_arc/,
-  );
   await expect(page.locator('#battlefield .agent[data-slot="0"]')).toHaveAttribute(
     "aria-label",
     /id_0, Mage, Team A, health 82 of 100, alive, controlled actor/,
@@ -618,7 +629,7 @@ test("compact active combat yields analysis decoration and restores it after Ski
   await page.route("**/api/frame", async (route) => {
     await route.fulfill({
       contentType: "application/json",
-      json: syntheticFrame,
+      json: syntheticWireFrame,
       status: 200,
     });
   });
@@ -670,10 +681,9 @@ test("compact active combat yields analysis decoration and restores it after Ski
       ),
   ).toBe(true);
 
-  // Suppression is battlefield-only: the authoritative nodes and structured
+  // Suppression is battlefield-only: the settled V2 scene facts and structured
   // inspection surfaces remain present while accepted combat takes priority.
   await expect(page.locator("#battlefield .range-ring")).toHaveCount(3);
-  await expect(page.locator("#battlefield path.pending-route")).toHaveCount(1);
   await expect(
     page.locator("#roster .roster-row .roster-fact-token--status"),
   ).toHaveCount(90);
@@ -721,15 +731,14 @@ test("compact active combat yields analysis decoration and restores it after Ski
     page.locator('#battlefield .status-dock[data-slot="0"] .status-overflow'),
   ).toHaveAttribute("aria-label", /hidden status cues for id_0/i);
   await expect(page.locator("#battlefield .range-ring")).toHaveCount(3);
-  await expect(page.locator("#battlefield path.pending-route")).toHaveCount(1);
   expect(commandRequests).toBe(0);
 });
 
 test("extreme dock values use a readable visual abbreviation without losing truth", async ({
   page,
 }) => {
-  const extremeFrame = structuredClone(syntheticFrame);
-  extremeFrame.scene.agents[0].statuses[0].duration = 123456789;
+  const extremeFrame = structuredClone(syntheticWireFrame);
+  extremeFrame.projection.scene.agents[0].statuses[0].remaining_duration = 123456789;
   await page.route("**/api/frame", async (route) => {
     await route.fulfill({
       contentType: "application/json",
@@ -779,10 +788,10 @@ test("extreme dock values use a readable visual abbreviation without losing trut
 test("required fallback tooltip avoids the inspected agent and its local docks", async ({
   page,
 }) => {
-  const denseRequiredFrame = structuredClone(syntheticFrame);
-  for (const agent of denseRequiredFrame.scene.agents) {
+  const denseRequiredFrame = structuredClone(syntheticWireFrame);
+  for (const agent of denseRequiredFrame.projection.scene.agents) {
     agent.position = [8, 6];
-    agent.ultimate_cooldown = 30;
+    agent.ultimate_cooldown_remaining = 30;
   }
   await page.route("**/api/frame", async (route) => {
     await route.fulfill({
@@ -844,7 +853,7 @@ test("required fallback tooltip avoids the inspected agent and its local docks",
 test("near-dense required truth keeps every compact fallback individually associated", async ({
   page,
 }) => {
-  const denseRequiredFrame = structuredClone(syntheticFrame);
+  const denseRequiredFrame = structuredClone(syntheticWireFrame);
   const nearDensePositions = [
     [5.8, 6.65],
     [6.9, 6.65],
@@ -859,9 +868,9 @@ test("near-dense required truth keeps every compact fallback individually associ
   ];
   denseRequiredFrame.scenario.description =
     "SYNTHETIC: near-dense agents demonstrate individually owned compact cooldown fallbacks.";
-  for (const [index, agent] of denseRequiredFrame.scene.agents.entries()) {
+  for (const [index, agent] of denseRequiredFrame.projection.scene.agents.entries()) {
     agent.position = nearDensePositions[index];
-    agent.ultimate_cooldown = 30;
+    agent.ultimate_cooldown_remaining = 30;
   }
   await page.route("**/api/frame", async (route) => {
     await route.fulfill({
@@ -1110,81 +1119,265 @@ test("near-dense required truth keeps every compact fallback individually associ
   ).toBe("solid 3px");
 });
 
+test("live pending routes use authorized researcher and POV public identities", async ({
+  page,
+}) => {
+  const researcher = structuredClone(syntheticWireFrame);
+  const researcherTarget = researcher.projection.scene.agents[5];
+  const researcherPending = {
+    ...researcher.hud.pending_action,
+    target_action: 1,
+    armed_lane: 1,
+    arm_origin: "explicit",
+    target: {
+      disclosure: "public",
+      global_slot: researcherTarget.global_slot,
+    },
+    pair_mask_value: false,
+    summary: "STAY + ULTIMATE",
+  };
+  researcher.hud.pending_action = researcherPending;
+  researcher.hud.pending_actions = [researcherPending];
+
+  const pov = structuredClone(syntheticPovWireFrame);
+  const povTarget = pov.projection.scene.visible_bodies[0];
+  const povTargetAction = pov.hud.candidate_legalities.find(
+    /** @param {Record<string, any>} candidate */
+    (candidate) => candidate.target.public_agent_id === povTarget.public_agent_id,
+  ).target.target_action;
+  pov.projection.next_decision_action_mask.select_target[povTargetAction] = true;
+  pov.projection.next_decision_action_mask.select_target_use_ultimate_joint[
+    povTargetAction
+  ] = [true, false];
+  const povCandidate = pov.hud.candidate_legalities.find(
+    /** @param {Record<string, any>} candidate */
+    (candidate) => candidate.target.target_action === povTargetAction,
+  );
+  povCandidate.lane_0_available = true;
+  povCandidate.basic_available = true;
+  pov.hud.pending_action = {
+    ...pov.hud.pending_action,
+    target: {
+      target_action: povTargetAction,
+      public_agent_id: povTarget.public_agent_id,
+    },
+    armed_lane: 0,
+    arm_origin: "explicit",
+    pair_mask_value: true,
+    summary: "STAY + BASIC",
+  };
+
+  let servedFrame = researcher;
+  await page.route("**/api/frame", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      json: servedFrame,
+      status: 200,
+    });
+  });
+  await page.route("**/api/command", async (route) => {
+    await route.abort("blockedbyclient");
+  });
+
+  await page.goto(debuggerUrl);
+  const researcherRoute = page.locator("#battlefield .pending-route");
+  await expect(researcherRoute).toHaveCount(1);
+  await expect(researcherRoute).toHaveAttribute(
+    "data-source-agent-id",
+    researcher.projection.scene.agents.find(
+      /** @param {Record<string, any>} agent */
+      (agent) => agent.global_slot === researcher.hud.pending_action.actor_global_slot,
+    ).public_agent_id,
+  );
+  await expect(researcherRoute).toHaveAttribute(
+    "data-target-agent-id",
+    researcherTarget.public_agent_id,
+  );
+  await expect(researcherRoute).toHaveAttribute("data-lane", "1");
+  await expect(researcherRoute).toHaveAttribute("data-legal", "false");
+
+  servedFrame = pov;
+  await page.reload();
+  const povRoute = page.locator("#battlefield .pending-route");
+  await expect(povRoute).toHaveCount(1);
+  await expect(povRoute).toHaveAttribute(
+    "data-source-agent-id",
+    pov.projection.scene.self_actor.public_agent_id,
+  );
+  await expect(povRoute).toHaveAttribute(
+    "data-target-agent-id",
+    povTarget.public_agent_id,
+  );
+  await expect(povRoute).not.toHaveAttribute("data-source-slot", /.+/u);
+  await expect(povRoute).not.toHaveAttribute("data-target-slot", /.+/u);
+  await expect(povRoute).toHaveAttribute("data-lane", "0");
+  await expect(povRoute).toHaveAttribute("data-legal", "true");
+  const routePointer = await page
+    .locator("#battlefield .pending-route-hit")
+    .evaluate((path) => {
+      if (!(path instanceof SVGPathElement)) {
+        throw new Error("Pending route hit owner must be an SVG path.");
+      }
+      const matrix = path.getScreenCTM();
+      if (matrix === null) {
+        throw new Error("Pending route has no screen transform.");
+      }
+      const local = path.getPointAtLength(path.getTotalLength() / 2);
+      const screen = new DOMPoint(local.x, local.y).matrixTransform(matrix);
+      return { x: screen.x, y: screen.y };
+    });
+  await page.mouse.move(routePointer.x, routePointer.y);
+  await expect(page.locator("#visual-tooltip-title")).toHaveText("Basic Action Route");
+  await expect(page.locator("#visual-tooltip-details")).toContainText(
+    `Target Agent ID ${povTarget.public_agent_id}`,
+  );
+  await expect(page.locator("#visual-tooltip-details")).not.toContainText("id_");
+});
+
+test("canonical V2 death clear is distinct in cue, feed, and accessible copy", async ({
+  page,
+}) => {
+  await installWaapiAutopause(page);
+  await page.route("**/api/frame", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      json: canonicalGrammarWireFrame,
+      status: 200,
+    });
+  });
+  await page.route("**/api/command", async (route) => {
+    await route.abort("blockedbyclient");
+  });
+
+  await page.goto(debuggerUrl);
+  await pauseAtLogicalTime(page, 680);
+
+  const deathClear = page.locator(
+    `${CHOREOGRAPHY_ROOT} .combat-effect[data-event-type="status_cleared_by_new_death"][data-lifecycle="cleared_by_death"]`,
+  );
+  const expiry = page.locator(
+    `${CHOREOGRAPHY_ROOT} .combat-effect[data-event-type="status_aged_to_zero"][data-lifecycle="expired"]`,
+  );
+  const damageBreak = page.locator(
+    `${CHOREOGRAPHY_ROOT} .combat-effect[data-event-type="status_broken_by_damage"][data-lifecycle="trap_broken"]`,
+  );
+  await expect(deathClear).toHaveCount(1);
+  await expect(deathClear.locator(".combat-lifecycle__death-sweep")).toHaveCount(1);
+  await expect(expiry.locator(".combat-lifecycle__death-sweep")).toHaveCount(0);
+  await expect(damageBreak.locator(".combat-lifecycle__death-sweep")).toHaveCount(0);
+  await expect(damageBreak.locator(".combat-lifecycle__shard")).toHaveCount(6);
+
+  const deathClearFeed = page.locator(
+    '#event-feed .event-item[data-event-type="status_cleared_by_new_death"]',
+  );
+  await expect(deathClearFeed).toContainText("cleared by new death");
+  await deathClearFeed.focus();
+  await expect(page.locator("#visual-tooltip")).toBeVisible();
+  await expect(page.locator("#visual-tooltip")).toContainText(
+    /Status Cleared By New Death/u,
+  );
+
+  const rejection = page.locator(
+    `${CHOREOGRAPHY_ROOT} .combat-effect[data-event-type="action_rejected"]`,
+  );
+  const charge = page.locator(
+    `${CHOREOGRAPHY_ROOT} .combat-effect[data-event-type="charge_phase_displacement"]`,
+  );
+  await expect(rejection).toHaveCSS("color", "rgb(251, 113, 133)");
+  await expect(charge).toHaveCSS("color", "rgb(209, 139, 71)");
+  expect(canonicalGrammarFrame.event_batch.events).toHaveLength(21);
+});
+
 test("structured HUD keeps exact roster, intent, and accepted-result facts distinct", async ({
   page,
 }) => {
-  const transitionId = Number(syntheticFrame.transition_id);
+  const transitionId = String(syntheticFrame.transition_id);
+  const sourceEvents = syntheticWireFrame.projection.incoming_events.events;
+  const ordinal = sourceEvents.length;
   const rejectedEvent = {
-    event_type: "rejected_action",
-    event_id: "synthetic:crowded_teamfight:rejected-panel-proof",
+    event_type: "action_rejected",
+    event_id: `${transitionId}:event:${String(ordinal).padStart(4, "0")}`,
     transition_id: transitionId,
+    ordinal,
     actor_global_slot: 0,
-    component: "combat",
-    actor_anchor: [6.4, 5.7],
-    target_global_slot: 7,
-    target_anchor: [7.15, 6.15],
-    target_disclosure: "public",
-    lane: 1,
-    movement_mask_value: true,
-    pair_mask_value: false,
+    actor_public_agent_id: "0",
+    actor_configured_active: true,
+    rejection_component: "combat_pair",
+    submitted_move_action: 0,
+    submitted_select_target_action: 8,
+    submitted_use_ultimate_action: 1,
+    actor_anchor: {
+      phase: "transition_start",
+      global_slot: 0,
+      public_agent_id: "0",
+      position: syntheticWireFrame.projection.scene.agents[0].position,
+    },
   };
   /** @type {Record<string, any>} */
-  let structuredFrame = {
-    ...syntheticFrame,
-    event_batch: {
-      ...syntheticFrame.event_batch,
-      events: [...syntheticFrame.event_batch.events, rejectedEvent],
-    },
-    hud: {
-      roster_global_slots: syntheticFrame.scene.agents.map(
-        /** @param {{global_slot: number}} agent */ (agent) => agent.global_slot,
-      ),
-      controlled_global_slot: 0,
-      selected_global_slot: 7,
-      pending_action: {
-        label: "PENDING / WILL SUBMIT",
-        actor_global_slot: 0,
-        move_action: 0,
-        target_action: 8,
-        armed_lane: 1,
-        arm_origin: "explicit",
-        target: { disclosure: "public", global_slot: 7 },
-        movement_mask_value: true,
-        pair_mask_value: false,
-        summary: "Stay + Burst → id_7",
-      },
-      latest_transition: {
-        label: "LATEST ACCEPTED RESULT",
-        transition_id: transitionId,
-        submission_kind: "interactive",
-        actors: [
-          {
-            actor_global_slot: 0,
-            submitted: {
-              move_action: 0,
-              target_action: 8,
-              use_ultimate_action: 1,
-              target: { disclosure: "public", global_slot: 7 },
-              summary: "Stay + Burst → id_7",
-            },
-            accepted: {
-              move_action: 0,
-              target_action: 0,
-              use_ultimate_action: 0,
-              target: { disclosure: "target_none", global_slot: null },
-              summary: "Stay + NO COMBAT",
-            },
-            movement_mask_value: true,
-            pair_mask_value: false,
-            movement_accepted: true,
-            combat_result: "rejected",
-          },
-        ],
-      },
-      candidate_legalities: [],
-      diagnostics: [],
-    },
+  let structuredFrame = structuredClone(syntheticWireFrame);
+  structuredFrame.projection.incoming_events.events = [
+    ...structuredFrame.projection.incoming_events.events,
+    rejectedEvent,
+  ];
+  structuredFrame.projection.scene.incoming_event_ids =
+    structuredFrame.projection.incoming_events.events.map(
+      /** @param {{event_id: string}} event */ (event) => event.event_id,
+    );
+  const pendingAction = {
+    label: "PENDING / WILL SUBMIT",
+    actor_global_slot: 0,
+    move_action: 0,
+    target_action: 8,
+    armed_lane: 1,
+    arm_origin: "explicit",
+    target: { disclosure: "public", global_slot: 7 },
+    movement_mask_value: true,
+    pair_mask_value: false,
+    summary: "Stay + Burst → id_7",
   };
+  structuredFrame.hud = {
+    ...structuredFrame.hud,
+    roster_global_slots: syntheticFrame.scene.agents.map(
+      /** @param {{global_slot: number}} agent */ (agent) => agent.global_slot,
+    ),
+    controlled_global_slot: 0,
+    selected_global_slot: 7,
+    pending_submission_scope: "controlled_actor",
+    pending_actions: [pendingAction],
+    pending_action: pendingAction,
+    latest_transition: {
+      label: "LATEST ACCEPTED RESULT",
+      transition_index: 0,
+      transition_id: transitionId,
+      submission_kind: "interactive",
+      actors: [
+        {
+          actor_global_slot: 0,
+          submitted: {
+            move_action: 0,
+            target_action: 8,
+            use_ultimate_action: 1,
+            target: { disclosure: "public", global_slot: 7 },
+            summary: "Stay + Burst → id_7",
+          },
+          accepted: {
+            move_action: 0,
+            target_action: 0,
+            use_ultimate_action: 0,
+            target: { disclosure: "target_none", global_slot: null },
+            summary: "Stay + NO COMBAT",
+          },
+          movement_mask_value: true,
+          pair_mask_value: false,
+          movement_accepted: true,
+          combat_result: "rejected",
+        },
+      ],
+    },
+    candidate_legalities: [],
+    diagnostics: [],
+  };
+  const structuredEvents = structuredFrame.projection.incoming_events.events;
   await page.route("**/api/frame", async (route) => {
     await route.fulfill({
       contentType: "application/json",
@@ -1206,7 +1399,7 @@ test("structured HUD keeps exact roster, intent, and accepted-result facts disti
     await route.fulfill({
       contentType: "application/json",
       json: {
-        schema_version: 1,
+        schema_version: 2,
         result: "applied",
         frame: structuredFrame,
         notice: null,
@@ -1357,7 +1550,7 @@ test("structured HUD keeps exact roster, intent, and accepted-result facts disti
     `Transition ${transitionId}`,
   );
   await expect(page.locator("#event-count")).toHaveText(
-    String(structuredFrame.event_batch.events.length),
+    String(structuredEvents.length),
   );
   expect(
     await page.locator("#event-feed .event-item").evaluateAll((items) =>
@@ -1367,7 +1560,7 @@ test("structured HUD keeps exact roster, intent, and accepted-result facts disti
       })),
     ),
   ).toEqual(
-    structuredFrame.event_batch.events.map(
+    structuredEvents.map(
       /** @param {{event_id: string, event_type: string}} event */ (event) => ({
         eventId: event.event_id,
         eventType: event.event_type,
@@ -1375,24 +1568,23 @@ test("structured HUD keeps exact roster, intent, and accepted-result facts disti
     ),
   );
   for (const activation of await page
-    .locator('#event-feed .event-item[data-event-type="accepted_activation"]')
+    .locator('#event-feed .event-item[data-event-type="ability_activated"]')
     .all()) {
     await expect(activation).not.toContainText(/NET|HP|amount/i);
   }
   for (const netHealth of await page
-    .locator('#event-feed .event-item[data-event-type="net_health"]')
+    .locator('#event-feed .event-item[data-event-type="recipient_health_resolution"]')
     .all()) {
-    await expect(netHealth).toContainText("NET");
+    await expect(netHealth).toContainText("Net combat health");
     await expect(netHealth).toHaveAttribute("data-recipient-slot", /\d+/);
     await expect(netHealth).not.toHaveAttribute("data-source-slot", /.+/);
   }
   const rejected = page.locator(
-    '#event-feed .event-item[data-event-type="rejected_action"]',
+    '#event-feed .event-item[data-event-type="action_rejected"]',
   );
   await expect(rejected).toHaveAttribute("data-actor-slot", "0");
-  await expect(rejected).toHaveAttribute("data-target-slot", "7");
-  await expect(rejected).toContainText("movement mask 1");
-  await expect(rejected).toContainText("pair mask 0");
+  await expect(rejected).not.toHaveAttribute("data-target-slot", /.+/);
+  await expect(rejected).toContainText("recorded component Combat Pair");
   await expect(rejected).not.toContainText(/range|cooldown|line of sight|LOS/);
   await expect(page.locator("#visual-key")).toContainText("never a per-source amount");
   await expect(page.locator("#visual-key")).not.toHaveAttribute("open", "");
@@ -1427,27 +1619,22 @@ test("presets omit irrelevant DOM while retaining canonical facts and audience",
   page,
 }) => {
   /** @type {Record<string, any>} */
-  let servedFrame = {
-    ...syntheticFrame,
-    preset: "analysis",
-    scene: {
-      ...syntheticFrame.scene,
-      agents: syntheticFrame.scene.agents.map(
-        /**
-         * @param {Record<string, any>} agent
-         * @param {number} index
-         */
-        (agent, index) => ({
-          ...agent,
-          ultimate_cooldown: index === 2 ? 30 : 0,
-        }),
-      ),
-      selected_legality: {
-        ...syntheticFrame.scene.selected_legality,
-        armed_lane: null,
-        armed_pair_legal: false,
-      },
-    },
+  let servedFrame = structuredClone(syntheticWireFrame);
+  servedFrame.preset = "analysis";
+  servedFrame.projection.scene.agents = servedFrame.projection.scene.agents.map(
+    /**
+     * @param {Record<string, any>} agent
+     * @param {number} index
+     */
+    (agent, index) => ({
+      ...agent,
+      ultimate_cooldown_remaining: index === 2 ? 30 : 0,
+    }),
+  );
+  servedFrame.projection.scene.next_decision_selected_legality = {
+    ...servedFrame.projection.scene.next_decision_selected_legality,
+    armed_lane: null,
+    armed_pair_legal: false,
   };
   await page.route("**/api/frame", async (route) => {
     await route.fulfill({
@@ -1470,7 +1657,7 @@ test("presets omit irrelevant DOM while retaining canonical facts and audience",
     await route.fulfill({
       contentType: "application/json",
       json: {
-        schema_version: 1,
+        schema_version: 2,
         result: "applied",
         frame: servedFrame,
         notice: null,
@@ -1548,7 +1735,8 @@ test("presets omit irrelevant DOM while retaining canonical facts and audience",
 test("debug POV omits hidden agents and researcher-only visibility DOM", async ({
   page,
 }) => {
-  const servedFrame = { ...syntheticPovFrame, preset: "debug" };
+  const servedFrame = structuredClone(syntheticPovWireFrame);
+  servedFrame.preset = "debug";
   await page.route("**/api/frame", async (route) => {
     await route.fulfill({
       contentType: "application/json",
@@ -1565,12 +1753,19 @@ test("debug POV omits hidden agents and researcher-only visibility DOM", async (
   await expect(page.locator("html")).toHaveAttribute("data-audience", "agent_pov");
   await expect(page.locator("#audience-badge")).toContainText("AGENT POV");
   await expect(page.locator("#battlefield .agent")).toHaveCount(2);
-  await expect(page.locator("#roster .roster-row")).toHaveCount(2);
+  await expect(page.locator("#battlefield .pov-observed-body")).toHaveCount(1);
+  await expect(page.locator("#roster .roster-row")).toHaveCount(1);
   await expect(page.locator('#battlefield .agent[data-slot="5"]')).toHaveCount(0);
   await expect(page.locator('#roster .roster-row[data-slot="5"]')).toHaveCount(0);
   await expect(page.locator("#battlefield .pending-route")).toHaveCount(0);
   await expect(page.locator("#battlefield .debug-visibility-cue")).toHaveCount(0);
   await expect(page.locator("#battlefield .debug-protected-zone")).toHaveCount(2);
+  await expect(page.locator("#scenario-control")).toBeHidden();
+  await expect(page.locator("#scenario-select")).toBeDisabled();
+  await expect(page.locator("#scenario-select")).toHaveAttribute(
+    "title",
+    "Scenario controls are unavailable in recipient POV.",
+  );
   await expect(page.locator("body")).not.toContainText("id_5");
   expect(
     await page.evaluate(() => {

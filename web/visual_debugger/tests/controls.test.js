@@ -5,6 +5,7 @@ import {
   isDebuggerKey,
   isPresentationPauseEvent,
   keyboardCommand,
+  targetSelectionCommand,
 } from "../src/controls.js";
 
 test("keyboardCommand forwards raw key and modifier state without semantics", () => {
@@ -45,4 +46,27 @@ test("presentation pause is edge-triggered and ignores key repeat", () => {
   assert.equal(isPresentationPauseEvent({ key: "P", repeat: false }), true);
   assert.equal(isPresentationPauseEvent({ key: "p", repeat: true }), false);
   assert.equal(isPresentationPauseEvent({ key: "Enter" }), false);
+});
+
+test("target selection keeps researcher and actor-POV identity domains separate", () => {
+  assert.deepEqual(targetSelectionCommand("7"), {
+    command_type: "roster_selection",
+    role: "target",
+    global_slot: 7,
+  });
+  assert.deepEqual(targetSelectionCommand("pov-target-action:7", { actorPov: true }), {
+    command_type: "actor_pov_target_action",
+    target_action: 7,
+  });
+  const povCommand = targetSelectionCommand("pov-target-action:7", {
+    actorPov: true,
+  });
+  assert.ok(povCommand);
+  assert.equal(Object.hasOwn(povCommand, "global_slot"), false);
+  assert.deepEqual(targetSelectionCommand("pov-target-action:0", { actorPov: true }), {
+    command_type: "actor_pov_target_action",
+    target_action: 0,
+  });
+  assert.equal(targetSelectionCommand("7", { actorPov: true }), null);
+  assert.equal(targetSelectionCommand("pov-target-action:7"), null);
 });
