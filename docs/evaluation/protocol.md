@@ -551,6 +551,13 @@ The V1 filesystem backend requires descriptor-relative POSIX no-follow
 operations and fails closed on platforms that cannot keep every path component
 and both bundle publications bound to one opened directory inode.
 
+Scenario and actor-POV companions use the same finite canonical JSON,
+descriptor-bound nonsymlink path walk, size/depth limits, and atomic no-clobber
+publication. A POV save must validate its completed replay reference. A
+scenario save or load must validate both its replay and metric-report evidence
+joins; a structurally valid but foreign record is not accepted as a local
+scenario result.
+
 Rollout completion, evaluation-processing validity, and per-statistic endpoint
 observation remain independent in both live and replay-loaded analysis. A
 processing failure never rewrites a provably complete rollout, and an
@@ -580,6 +587,15 @@ ally/enemy row mappings cover unit features, visibility, visible action
 history, and own-team/opponent-team local-slot axes in spawn-lifecycle
 observations; the aligned vocabulary names the two lifecycle team-axis
 entries.
+
+An independently shareable NoSharedObs POV artifact copies only the selected
+recipient's rows and the minimal recipient-local forms of those mappings. It
+uses separate submitted-int32 and accepted-category action records so rejected
+out-of-domain intent is preserved rather than normalized. Its local cues may
+describe only changes present in authorized adjacent rows plus own action,
+reward, mask, and done truth. Full replay provenance remains in a separate outer
+reference; privacy equality applies to recipient-content bytes, not to that
+truthful provenance wrapper.
 
 Evaluation frames store base observations and masks once. They do not duplicate
 materialized SharedObs. SharedObs actor inputs remain reproducible from the

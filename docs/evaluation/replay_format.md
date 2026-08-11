@@ -160,6 +160,26 @@ event tuple. Exact actor-input export is supported for `no_shared_obs`. Under
 view, but exact materialized input export fails closed until the Milestone 12
 compositor exists.
 
+`ActorPovReplayContentV1` is the independently privacy-testable payload. It
+contains one active actor's exact recorded base-observation and action-mask row,
+own submitted int32 and accepted category-bounded actions, own rejection flags,
+own canonical reward, public done truth, a minimal rollout-completion row, and
+recipient-local presentation cues derived only from adjacent authorized rows.
+Its compact axis map supplies public recipient IDs, relation rows, action names,
+movement directions, actor-relative spawn axes, and source projection/schema
+identities without embedding the full roster, policy table, seed protocol, or
+mechanics catalog. Hidden CP2 event IDs, ordinals, counts, sources, aura
+emitters, contributors, other-agent actions/rewards, snapshots, and policies
+remain absent.
+
+`ActorPovReplayArtifactV1` wraps that content with a mandatory path-free
+`ReplayArtifactReferenceV1` and an outer digest. Privacy noninterference is
+therefore evaluated over canonical recipient-content bytes/digest: two source
+replays with equal authorized actor inputs but different hidden truth produce
+equal content, while their outer artifacts may differ because truthful source
+provenance differs. The source reference is never omitted or forged merely to
+make the outer bytes equal.
+
 ## Canonical local persistence
 
 `marl_battlegrounds.evaluation.replay_io` owns paths and bytes while
@@ -170,13 +190,21 @@ surface is:
   `canonical_metric_report_artifact_json_bytes_v1` for exact target bytes;
 - `save_replay_bundle_v1` for report-first, replay-last publication;
 - `load_replay_artifact_v1` for a standalone trajectory; and
-- `load_replay_bundle_v1` for optional or required metric-sidecar resolution.
+- `load_replay_bundle_v1` for optional or required metric-sidecar resolution;
+- `save_actor_pov_replay_artifact_v1` and
+  `load_actor_pov_replay_artifact_v1` for source-validated, independently
+  shareable POV companions; and
+- `save_scenario_evaluation_record_v1` and
+  `load_scenario_evaluation_record_v1` for scenario records whose replay and
+  metric-report evidence joins are mandatory.
 
 The filename pair is derived locally, never serialized:
 
 ```text
 episode.marlbg-replay.json
 episode.marlbg-metrics.json
+episode.marlbg-scenario.json
+episode.agent-<public-id>.marlbg-pov.json
 ```
 
 Version 1 accepts finite plain UTF-8 JSON only. Loading rejects a byte-order

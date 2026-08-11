@@ -461,3 +461,26 @@ The V1 filesystem backend fails closed unless POSIX directory-descriptor and
 no-follow operations can prevent ancestor-symlink races; report reuse
 synchronizes the exact compared file descriptor before a referencing replay is
 published.
+
+Scenario and actor-POV companions use the same bounded canonical JSON and
+descriptor-bound, no-clobber publication contract. Scenario records are valid
+only against their referenced replay and metric-report evidence. Exact
+NoSharedObs POV exports use recipient-sliced schemas and keep submitted int32
+intent distinct from category-bounded accepted actions. Their privacy claim is
+defined over the recipient-content bytes; the outer artifact retains a truthful
+completed-replay reference and may therefore differ when hidden source truth
+differs.
+
+Exact materialized SharedObs export remains unavailable until the Milestone 12
+compositor exists. Milestone 6 may instead project a prominently labelled
+`source_material_only` view containing the selected recipient's recorded base
+sensor row and the recorded recipient-by-source availability inputs. That view
+is not an actor-input artifact and may never be described as the composed
+SharedObs tensor.
+
+Offline presentation consumes these canonical records through a pure,
+renderer-neutral scene projection. It may expose recorded durable state,
+catalog mechanics, actor-relative mappings, and direct event evidence, but it
+must not call simulator, geometry, visibility, masking, policy, or mechanic
+helpers. Researcher and actor-authorized presentation roots remain
+structurally distinct.

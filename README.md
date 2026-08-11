@@ -27,9 +27,17 @@ uv sync --extra viz
 ./scripts/dev/run_debug_renderer.sh --static
 ```
 
+A validated semantic replay can be rendered at an exact recorded frame without
+starting the simulator or a browser:
+
+```bash
+./scripts/dev/run_debug_renderer.sh \
+  --replay episode.marlbg-replay.json --static --frame-index 0
+```
+
 See the [Visual Debugger and Analyzer guide](docs/dev/visual_debugger.md) for
-controls, joint-turn planning, view authorization, scenarios, visual
-semantics, troubleshooting, and contributor checks.
+controls, joint-turn planning, view authorization, scenarios, replay/static
+rendering, visual semantics, troubleshooting, and contributor checks.
 
 ## Design and evaluation
 

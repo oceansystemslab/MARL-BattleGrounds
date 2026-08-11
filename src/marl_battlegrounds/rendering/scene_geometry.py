@@ -9,7 +9,9 @@ from typing import Protocol, cast
 from marl_battlegrounds.rendering.scene import (
     AcceptedActivationEventV1,
     AgentSceneV1,
+    AgentSceneV2,
     BattlefieldSceneV1,
+    BattlefieldSceneV2,
     ChargeDisplacementEventV1,
     NetHealthEventV1,
     RejectedActionEventV1,
@@ -44,6 +46,8 @@ _BASIC = "#2DD4BF"
 _ULTIMATE = "#A78BFA"
 _UNAVAILABLE = "#64748B"
 _TARGET = "#F472B6"
+
+type BattlefieldScene = BattlefieldSceneV1 | BattlefieldSceneV2
 
 
 def _aura_color(token_id: str) -> str:
@@ -141,14 +145,14 @@ class SceneRenderOptions:
 
 def draw_scene_geometry(
     axes: object,
-    scene: BattlefieldSceneV1,
+    scene: BattlefieldScene,
     *,
     event_batch: VisualEventBatchV1 | None = None,
     options: SceneRenderOptions | None = None,
 ) -> None:
     """Clear and draw one authorized scene plus its latest static event batch."""
-    if type(scene) is not BattlefieldSceneV1:
-        raise TypeError("scene must be BattlefieldSceneV1.")
+    if type(scene) not in (BattlefieldSceneV1, BattlefieldSceneV2):
+        raise TypeError("scene must be BattlefieldSceneV1 or BattlefieldSceneV2.")
     if event_batch is not None and type(event_batch) is not VisualEventBatchV1:
         raise TypeError("event_batch must be VisualEventBatchV1 or None.")
     if options is not None and type(options) is not SceneRenderOptions:
@@ -157,23 +161,32 @@ def draw_scene_geometry(
     parts = _load_matplotlib()
     typed_axes = cast(_AxesLike, axes)
 
+    if type(scene) is BattlefieldSceneV2:
+        if event_batch is not None:
+            raise ValueError(
+                "BattlefieldSceneV2 does not accept legacy VisualEventBatchV1."
+            )
+        _draw_scene_v2(typed_axes, parts, scene, render_options)
+        return
+
+    legacy_scene = cast(BattlefieldSceneV1, scene)
     typed_axes.clear()
-    _draw_map(typed_axes, parts, scene)
-    _draw_fields(typed_axes, parts, scene, render_options)
-    _draw_pending_route(typed_axes, scene)
-    _draw_obstacles(typed_axes, parts, scene)
-    _draw_agents(typed_axes, parts, scene, render_options)
-    _draw_selected_legality(typed_axes, scene)
+    _draw_map(typed_axes, parts, legacy_scene)
+    _draw_fields(typed_axes, parts, legacy_scene, render_options)
+    _draw_pending_route(typed_axes, legacy_scene)
+    _draw_obstacles(typed_axes, parts, legacy_scene)
+    _draw_agents(typed_axes, parts, legacy_scene, render_options)
+    _draw_selected_legality(typed_axes, legacy_scene)
     if render_options.show_observer_visibility:
-        _draw_observer_visibility(typed_axes, scene)
+        _draw_observer_visibility(typed_axes, legacy_scene)
     if render_options.show_events and event_batch is not None:
-        _draw_events(typed_axes, scene, event_batch)
-    _draw_audience_badge(typed_axes, scene)
-    _style_axes(typed_axes, scene)
+        _draw_events(typed_axes, legacy_scene, event_batch)
+    _draw_audience_badge(typed_axes, legacy_scene)
+    _style_axes(typed_axes, legacy_scene)
 
 
 def render_scene_geometry(
-    scene: BattlefieldSceneV1,
+    scene: BattlefieldScene,
     *,
     event_batch: VisualEventBatchV1 | None = None,
     options: SceneRenderOptions | None = None,
@@ -195,7 +208,7 @@ def render_scene_geometry(
 
 
 def redraw_scene_geometry(
-    scene: BattlefieldSceneV1,
+    scene: BattlefieldScene,
     result: RenderResult,
     *,
     event_batch: VisualEventBatchV1 | None = None,
@@ -209,6 +222,339 @@ def redraw_scene_geometry(
         options=options,
     )
     return result
+
+
+def _draw_scene_v2(
+    axes: _AxesLike,
+    parts: _MatplotlibParts,
+    scene: BattlefieldSceneV2,
+    options: SceneRenderOptions,
+) -> None:
+    """Draw one canonical-record durable scene without inferred events."""
+    axes.clear()
+    _draw_map(axes, parts, scene)
+    _draw_v2_spawn_pads(axes, parts, scene)
+    _draw_v2_aura_fields(axes, parts, scene)
+    if options.show_ranges:
+        _draw_v2_ranges(axes, parts, scene)
+    _draw_obstacles(axes, parts, scene)
+    _draw_v2_agents(axes, parts, scene, options)
+    _draw_v2_wave_clocks(axes, scene)
+    _draw_audience_badge(axes, scene)
+    _style_axes(axes, scene)
+    axes.set_title(
+        (
+            "MARL-BattleGrounds · Replay Analyzer · "
+            f"Frame {scene.frame_index} · step {scene.simulator_step_count}"
+        ),
+        color=_TEXT,
+        fontsize=10,
+    )
+
+
+def _draw_v2_spawn_pads(
+    axes: _AxesLike,
+    parts: _MatplotlibParts,
+    scene: BattlefieldSceneV2,
+) -> None:
+    for pad in scene.spawn_pads:
+        color = _TEAM_A if pad.team_id == 1 else _TEAM_B
+        marker = parts.circle(
+            pad.position,
+            0.22,
+            facecolor="none",
+            edgecolor=color,
+            linewidth=1.0,
+            linestyle=":",
+            alpha=0.65,
+            zorder=4,
+        )
+        axes.add_patch(
+            _tag(
+                marker,
+                f"scene:v2:spawn-pad:{pad.assigned_public_agent_id}",
+            )
+        )
+
+
+def _draw_v2_aura_fields(
+    axes: _AxesLike,
+    parts: _MatplotlibParts,
+    scene: BattlefieldSceneV2,
+) -> None:
+    for aura in scene.aura_fields:
+        if not aura.source_alive:
+            continue
+        color = "#22D3EE" if aura.aura_id == "mage_damage_amplification" else "#D18B47"
+        field_patch = parts.circle(
+            aura.center,
+            aura.radius,
+            facecolor=color,
+            edgecolor=color,
+            linewidth=0.8,
+            alpha=0.12,
+            zorder=3,
+        )
+        axes.add_patch(
+            _tag(
+                field_patch,
+                f"scene:v2:aura:{aura.source_public_agent_id}:{aura.aura_id}",
+            )
+        )
+
+
+def _draw_v2_ranges(
+    axes: _AxesLike,
+    parts: _MatplotlibParts,
+    scene: BattlefieldSceneV2,
+) -> None:
+    colors = {
+        "observation": _UNAVAILABLE,
+        "basic": _BASIC,
+        "ultimate": _ULTIMATE,
+    }
+    for range_row in scene.ranges:
+        if range_row.radius <= 0.0:
+            continue
+        patch = parts.circle(
+            range_row.center,
+            range_row.radius,
+            facecolor="none",
+            edgecolor=colors[range_row.kind],
+            linewidth=0.8,
+            linestyle="--",
+            alpha=0.55,
+            zorder=5,
+        )
+        axes.add_patch(
+            _tag(
+                patch,
+                f"scene:v2:range:{range_row.global_slot}:{range_row.kind}",
+            )
+        )
+
+
+def _draw_v2_agents(
+    axes: _AxesLike,
+    parts: _MatplotlibParts,
+    scene: BattlefieldSceneV2,
+    options: SceneRenderOptions,
+) -> None:
+    selection = scene.selection
+    for agent in scene.agents:
+        show_identity = options.show_agent_ids or (
+            selection is not None
+            and agent.global_slot
+            in (
+                selection.controlled_global_slot,
+                selection.selected_global_slot,
+            )
+        )
+        _draw_v2_agent_body(
+            axes,
+            parts,
+            agent,
+            options,
+            show_identity=show_identity,
+        )
+        if selection is not None and (
+            agent.global_slot == selection.controlled_global_slot
+        ):
+            halo = parts.circle(
+                agent.position,
+                agent.radius * 1.32,
+                facecolor="none",
+                edgecolor=_TEXT,
+                linewidth=2.5,
+                zorder=31,
+            )
+            axes.add_patch(
+                _tag(halo, f"scene:v2:selection:controlled:{agent.public_agent_id}")
+            )
+        if selection is not None and (
+            agent.global_slot == selection.selected_global_slot
+        ):
+            reticle = parts.circle(
+                agent.position,
+                agent.radius * 1.48,
+                facecolor="none",
+                edgecolor=_TARGET,
+                linewidth=2.2,
+                linestyle="--",
+                zorder=32,
+            )
+            axes.add_patch(
+                _tag(reticle, f"scene:v2:selection:target:{agent.public_agent_id}")
+            )
+
+
+def _draw_v2_agent_body(
+    axes: _AxesLike,
+    parts: _MatplotlibParts,
+    agent: AgentSceneV2,
+    options: SceneRenderOptions,
+    *,
+    show_identity: bool,
+) -> None:
+    class_token = class_token_from_id(agent.class_id)
+    team_token = team_token_from_id(agent.team_id)
+    class_color = _CLASS_COLORS.get(class_token.token_id, _MUTED)
+    team_color = _TEAM_A if agent.team_id == 1 else _TEAM_B
+    alive = agent.life_state == "alive"
+    body = parts.circle(
+        agent.position,
+        agent.radius,
+        facecolor=class_color,
+        edgecolor=team_color,
+        linewidth=3.0,
+        alpha=0.95 if alive else 0.35,
+        zorder=24,
+    )
+    axes.add_patch(_tag(body, f"scene:v2:agent:{agent.public_agent_id}:body"))
+    health_fraction = min(max(agent.current_health / agent.max_health, 0.0), 1.0)
+    if health_fraction > 0.0:
+        health = parts.wedge(
+            agent.position,
+            agent.radius * 0.86,
+            90.0,
+            90.0 + 360.0 * health_fraction,
+            width=max(agent.radius * 0.10, 0.02),
+            facecolor=_HEALING,
+            edgecolor="none",
+            zorder=27,
+        )
+        axes.add_patch(_tag(health, f"scene:v2:agent:{agent.public_agent_id}:health"))
+    class_artist = axes.text(
+        agent.position[0],
+        agent.position[1],
+        "DEAD" if not alive else class_token.fallback,
+        color=_TEXT,
+        fontsize=9,
+        fontweight="bold",
+        ha="center",
+        va="center",
+        zorder=28,
+    )
+    _tag(class_artist, f"scene:v2:agent:{agent.public_agent_id}:class")
+    if show_identity:
+        identity = axes.annotate(
+            f"Agent ID {agent.public_agent_id}",
+            xy=agent.position,
+            xytext=(0, -16),
+            textcoords="offset points",
+            color=_TEXT,
+            fontsize=6,
+            fontweight="bold",
+            ha="center",
+            va="top",
+            zorder=29,
+        )
+        _tag(identity, f"scene:v2:agent:{agent.public_agent_id}:identity")
+    if agent.spawn_shield_remaining > 0:
+        shield = parts.circle(
+            agent.position,
+            agent.radius * 1.18,
+            facecolor="none",
+            edgecolor="#67E8F9",
+            linewidth=1.8,
+            alpha=0.9,
+            zorder=30,
+        )
+        axes.add_patch(
+            _tag(shield, f"scene:v2:agent:{agent.public_agent_id}:spawn-shield")
+        )
+    countdown = axes.annotate(
+        (
+            f"U {agent.ultimate_cooldown_remaining} · "
+            f"OOC {agent.steps_until_out_of_combat}"
+        ),
+        xy=agent.position,
+        xytext=(0, 14),
+        textcoords="offset points",
+        color=_MUTED,
+        fontsize=5.5,
+        ha="center",
+        va="bottom",
+        zorder=34,
+    )
+    _tag(countdown, f"scene:v2:agent:{agent.public_agent_id}:countdowns")
+    if options.show_statuses:
+        for index, status in enumerate(agent.statuses):
+            source = class_token_from_id(status.source_class_id)
+            status_color = _CLASS_COLORS.get(source.token_id, _MUTED)
+            source_suffix = (
+                ""
+                if not status.direct_source_evidence
+                else " · "
+                + ",".join(
+                    row.source_public_agent_id for row in status.direct_source_evidence
+                )
+            )
+            status_artist = axes.annotate(
+                f"{status.status_id} {status.remaining_duration}{source_suffix}",
+                xy=agent.position,
+                xytext=(12, 16 + index * 11),
+                textcoords="offset points",
+                color=status_color,
+                fontsize=5.2,
+                ha="left",
+                va="bottom",
+                bbox={
+                    "boxstyle": "round,pad=0.16",
+                    "facecolor": _BACKGROUND,
+                    "edgecolor": status_color,
+                    "linewidth": 0.7,
+                    "alpha": 0.94,
+                },
+                zorder=36,
+            )
+            _tag(
+                status_artist,
+                f"scene:v2:agent:{agent.public_agent_id}:status:{status.status_id}",
+            )
+    if options.show_modifiers:
+        visible_modifiers = tuple(
+            row for row in agent.aura_modifiers if row.multiplier != 1.0
+        )
+        for index, modifier in enumerate(visible_modifiers):
+            modifier_artist = axes.annotate(
+                f"{modifier.aura_id} x{_format_display_number(modifier.multiplier)}",
+                xy=agent.position,
+                xytext=(-12, 16 + index * 11),
+                textcoords="offset points",
+                color=_BASIC,
+                fontsize=5.2,
+                ha="right",
+                va="bottom",
+                zorder=36,
+            )
+            _tag(
+                modifier_artist,
+                f"scene:v2:agent:{agent.public_agent_id}:aura:{modifier.aura_id}",
+            )
+    del team_token
+
+
+def _draw_v2_wave_clocks(
+    axes: _AxesLike,
+    scene: BattlefieldSceneV2,
+) -> None:
+    label = " · ".join(
+        f"Team {wave.team_id} wave {wave.countdown_steps}/{wave.period_steps}"
+        for wave in scene.respawn_waves
+    )
+    artist = axes.text(
+        0.99,
+        0.99,
+        label,
+        transform=axes.transAxes,
+        color=_MUTED,
+        fontsize=6.5,
+        ha="right",
+        va="top",
+        zorder=60,
+    )
+    _tag(artist, f"scene:v2:waves:{scene.frame_id}")
 
 
 def _load_matplotlib() -> _MatplotlibParts:
@@ -239,7 +585,7 @@ def _tag(artist: object, gid: str) -> object:
 def _draw_map(
     axes: _AxesLike,
     parts: _MatplotlibParts,
-    scene: BattlefieldSceneV1,
+    scene: BattlefieldScene,
 ) -> None:
     background = parts.rectangle(
         (0.0, 0.0),
@@ -348,7 +694,7 @@ def _draw_pending_route(
 def _draw_obstacles(
     axes: _AxesLike,
     parts: _MatplotlibParts,
-    scene: BattlefieldSceneV1,
+    scene: BattlefieldScene,
 ) -> None:
     for obstacle in scene.map.obstacles:
         if obstacle.kind == "pillar":
@@ -1015,7 +1361,7 @@ def _draw_events(
 
 def _draw_audience_badge(
     axes: _AxesLike,
-    scene: BattlefieldSceneV1,
+    scene: BattlefieldScene,
 ) -> None:
     artist = axes.text(
         0.01,
@@ -1041,7 +1387,7 @@ def _draw_audience_badge(
 
 def _style_axes(
     axes: _AxesLike,
-    scene: BattlefieldSceneV1,
+    scene: BattlefieldScene,
 ) -> None:
     axes.set_facecolor(_BACKGROUND)
     axes.set_aspect("equal", adjustable="box")

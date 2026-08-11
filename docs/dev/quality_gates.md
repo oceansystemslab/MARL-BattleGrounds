@@ -11,6 +11,8 @@ is not rerun until a later edit creates a plausible impact path to it.
 | Debugger scene/event schema | Scene, diagnostics, frame, and presentation-boundary tests |
 | Command/service/server behavior | Protocol, input, service, server, and affected real-browser case |
 | Scenario trajectory | Scenario preflight/reference tests |
+| Replay/POV/scenario artifact | Focused semantic, canonical-I/O, tamper, privacy, and import-isolation tests |
+| Evaluation-to-scene projection | Researcher/POV adapter tests plus static replay launcher smoke |
 | Static Matplotlib path | Launcher plus relevant renderer smoke/scene-painter tests with `viz` |
 | SVG/CSS/layout | Affected JavaScript unit test and selected Playwright case |
 | Choreography/effects | Effect/animation unit tests and relevant scenario browser case |

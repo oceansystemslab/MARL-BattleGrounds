@@ -68,6 +68,8 @@ Useful invocations:
 ./scripts/dev/run_debug_renderer.sh --controlled-slot 5 --no-ranges
 ./scripts/dev/run_debug_renderer.sh --view pov --preset debug
 ./scripts/dev/run_debug_renderer.sh --no-open --port 8123
+./scripts/dev/run_debug_renderer.sh \
+  --replay episode.marlbg-replay.json --static --frame-index 12
 ```
 
 ### Options
@@ -86,6 +88,8 @@ Useful invocations:
 | `--verbose` | Enable expanded diagnostics. |
 | `--ranges` / `--no-ranges` | Initially show or hide controlled-actor ranges. |
 | `--static` | Render one Matplotlib reset snapshot; start no server and register no callbacks. |
+| `--replay PATH` | Load a validated semantic replay; currently paired with `--static`. |
+| `--frame-index N` | Select the absolute replay frame for static rendering. Default: `0`. |
 
 Option abbreviations are rejected. Unknown scenarios, invalid ports or
 arguments, and inactive controlled slots exit with code `2`.
@@ -457,6 +461,20 @@ The public scene-native `draw_scene_geometry`, `render_scene_geometry`, and
 `redraw_scene_geometry` APIs remain lazy-import and headless-capable.
 Matplotlib does not reproduce browser animation or the live inspector.
 
+Render an exact frame from a canonical replay without importing or running the
+simulator:
+
+```bash
+./scripts/dev/run_debug_renderer.sh \
+  --replay episode.marlbg-replay.json --static --frame-index 12
+```
+
+Replay static mode validates the complete artifact before importing
+Matplotlib, selects frame `N` and its incoming transition `N - 1`, and projects
+the same versioned researcher scene used by other evaluation consumers. Frame
+zero has no incoming transition. Out-of-range indices, noncanonical files, and
+live-only option combinations fail before rendering.
+
 ## Contributor visual checks
 
 Browser source is native JavaScript with strict JSDoc checking and no build
@@ -502,7 +520,9 @@ painter, layout, animation controller, presets, and accessibility conventions.
 `DebuggerFrameV1`, pending actions, revision/idempotency handling, and the
 loopback command protocol are live-analyzer-only.
 
-A future replay product may provide the same scene/event primitives from a
-recorded artifact, but it will own a separate replay envelope, timeline,
-schema-migration, integrity, and export contract. The live analyzer does not
-load or simulate replay data.
+The standard replay owns a separate integrity/export contract and already
+reuses the renderer-neutral durable-scene boundary for offline static frames.
+The live analyzer still owns pending actions and simulator commands; replay
+never simulates them. Interactive replay owns a separate read-only timeline and
+outer frame/command envelope rather than reusing `DebuggerFrameV1` as artifact
+authority.

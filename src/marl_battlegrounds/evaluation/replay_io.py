@@ -1,9 +1,9 @@
-"""Canonical, bounded local persistence for semantic evaluation replays.
+"""Canonical, bounded local persistence for semantic evaluation artifacts.
 
 This module owns bytes and paths, not rollout semantics.  It accepts only the
-strict replay/report models, reuses their semantic validators, and publishes a
-metric sidecar before the replay that references it.  It performs no network,
-archive, plugin, simulator, policy, JAX, or device work.
+strict replay/report/POV/scenario models, reuses their semantic validators, and
+publishes a metric sidecar before the replay that references it.  It performs
+no network, archive, plugin, simulator, policy, JAX, or device work.
 """
 
 from __future__ import annotations
@@ -25,6 +25,12 @@ from marl_battlegrounds.evaluation.models import (
     EvaluationTransitionV1,
     canonical_json_bytes,
 )
+from marl_battlegrounds.evaluation.pov import (
+    ACTOR_POV_ARTIFACT_SCHEMA_ID,
+    ActorPovReplayArtifactV1,
+    validate_actor_pov_replay_against_replay_v1,
+    validate_actor_pov_replay_artifact_v1,
+)
 from marl_battlegrounds.evaluation.replay import (
     METRIC_REPORT_ARTIFACT_SCHEMA_ID,
     REPLAY_ARTIFACT_SCHEMA_ID,
@@ -35,12 +41,19 @@ from marl_battlegrounds.evaluation.replay import (
     _validate_metric_report_artifact_against_validated_replay_v1,  # pyright: ignore[reportPrivateUsage]
     validate_replay_artifact_v1,
 )
+from marl_battlegrounds.evaluation.scenario import (
+    SCENARIO_EVALUATION_RECORD_SCHEMA_ID,
+    ScenarioEvaluationRecordV1,
+    validate_scenario_evaluation_record_v1,
+)
 from marl_battlegrounds.evaluation.validation import validate_declared_model_tree
 
 DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1 = 1024**3
 DEFAULT_MAX_REPLAY_JSON_DEPTH_V1 = 128
 REPLAY_FILE_SUFFIX_V1 = ".marlbg-replay.json"
 METRIC_REPORT_FILE_SUFFIX_V1 = ".marlbg-metrics.json"
+ACTOR_POV_FILE_SUFFIX_V1 = ".marlbg-pov.json"
+SCENARIO_FILE_SUFFIX_V1 = ".marlbg-scenario.json"
 
 type ReplayBundleLoadStatusV1 = Literal["complete", "metric_report_missing"]
 type ReplayIOErrorCodeV1 = Literal[
@@ -69,6 +82,7 @@ type ReplayIOErrorCodeV1 = Literal[
     "metric_report_mismatch",
     "replay_target_exists",
     "metric_report_conflict",
+    "companion_target_exists",
     "temporary_write_failed",
     "atomic_publish_failed",
 ]
@@ -141,6 +155,14 @@ class SavedReplayBundleV1:
     metric_report_reused: bool
 
 
+@dataclass(frozen=True, slots=True)
+class SavedCompanionArtifactV1:
+    """Publication result for one independently addressed companion artifact."""
+
+    path: Path
+    byte_length: int
+
+
 class _DuplicateKeyError(ValueError):
     pass
 
@@ -174,6 +196,11 @@ def _metric_report_path_for_replay(replay_path: Path) -> Path:
     if not base_name:
         raise ValueError("replay filename must include an episode stem")
     return replay_path.with_name(f"{base_name}{METRIC_REPORT_FILE_SUFFIX_V1}")
+
+
+def _require_artifact_suffix(path: Path, *, suffix: str, label: str) -> None:
+    if not path.name.endswith(suffix) or path.name == suffix:
+        raise ValueError(f"{label} filename must end with {suffix}")
 
 
 def _require_secure_directory_fd_support(
@@ -579,6 +606,73 @@ def _load_metric_report_bytes(
     return canonical_report
 
 
+def _load_actor_pov_bytes(
+    payload: bytes,
+    *,
+    path: Path,
+    max_json_depth: int,
+) -> ActorPovReplayArtifactV1:
+    _preflight_json(
+        payload,
+        path=path,
+        expected_schema_id=ACTOR_POV_ARTIFACT_SCHEMA_ID,
+        max_json_depth=max_json_depth,
+    )
+    try:
+        artifact = ActorPovReplayArtifactV1.model_validate_json(payload)
+        validate_actor_pov_replay_artifact_v1(artifact)
+    except (TypeError, ValueError, ValidationError) as error:
+        raise ReplayLoadError(
+            "model_validation_failed",
+            path=path,
+            detail="actor POV does not satisfy its strict artifact contract",
+        ) from error
+    if canonical_json_bytes(artifact) != payload:
+        raise ReplayLoadError(
+            "noncanonical_json",
+            path=path,
+            detail="actor POV bytes are not the canonical V1 encoding",
+        )
+    return artifact
+
+
+def _load_scenario_record_bytes(
+    payload: bytes,
+    *,
+    path: Path,
+    max_json_depth: int,
+) -> ScenarioEvaluationRecordV1:
+    _preflight_json(
+        payload,
+        path=path,
+        expected_schema_id=SCENARIO_EVALUATION_RECORD_SCHEMA_ID,
+        max_json_depth=max_json_depth,
+    )
+    try:
+        record = ScenarioEvaluationRecordV1.model_validate_json(payload)
+        canonical_record = cast(
+            ScenarioEvaluationRecordV1,
+            validate_declared_model_tree(
+                record,
+                record_name="loaded scenario evaluation record",
+                expected_type=ScenarioEvaluationRecordV1,
+            ),
+        )
+    except (TypeError, ValueError, ValidationError) as error:
+        raise ReplayLoadError(
+            "model_validation_failed",
+            path=path,
+            detail="scenario record does not satisfy its strict artifact contract",
+        ) from error
+    if canonical_json_bytes(canonical_record) != payload:
+        raise ReplayLoadError(
+            "noncanonical_json",
+            path=path,
+            detail="scenario bytes are not the canonical V1 encoding",
+        )
+    return canonical_record
+
+
 def canonical_replay_json_bytes_v1(artifact: ReplayArtifactV1) -> bytes:
     """Return canonical replay bytes after full semantic validation."""
     validate_replay_artifact_v1(artifact)
@@ -598,6 +692,21 @@ def canonical_metric_report_artifact_json_bytes_v1(
         ),
     )
     return canonical_json_bytes(canonical_artifact)
+
+
+def canonical_scenario_evaluation_record_json_bytes_v1(
+    record: ScenarioEvaluationRecordV1,
+) -> bytes:
+    """Return canonical bytes for one structurally valid scenario record."""
+    canonical_record = cast(
+        ScenarioEvaluationRecordV1,
+        validate_declared_model_tree(
+            record,
+            record_name="scenario evaluation record",
+            expected_type=ScenarioEvaluationRecordV1,
+        ),
+    )
+    return canonical_json_bytes(canonical_record)
 
 
 def load_replay_artifact_v1(
@@ -734,6 +843,121 @@ def load_replay_bundle_v1(
         metric_report_artifact=metric_report,
         status="complete",
     )
+
+
+def load_actor_pov_replay_artifact_v1(
+    path: str | os.PathLike[str],
+    *,
+    source_replay: ReplayArtifactV1 | None = None,
+    max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
+    max_json_depth: int = DEFAULT_MAX_REPLAY_JSON_DEPTH_V1,
+) -> ActorPovReplayArtifactV1:
+    """Load one independently shareable POV artifact, optionally source-joined."""
+    try:
+        pov_path = _coerce_path(path)
+        size_limit = _require_positive_limit(
+            max_file_size_bytes,
+            name="max_file_size_bytes",
+        )
+        depth_limit = _require_positive_limit(max_json_depth, name="max_json_depth")
+    except (TypeError, ValueError) as error:
+        raise ReplayLoadError(
+            "invalid_argument",
+            path=None,
+            detail=str(error),
+        ) from error
+    try:
+        _require_artifact_suffix(
+            pov_path,
+            suffix=ACTOR_POV_FILE_SUFFIX_V1,
+            label="actor POV",
+        )
+    except ValueError as error:
+        raise ReplayLoadError(
+            "invalid_filename",
+            path=pov_path,
+            detail=str(error),
+        ) from error
+    payload = _read_bounded_regular_file(
+        pov_path,
+        max_file_size_bytes=size_limit,
+    )
+    artifact = _load_actor_pov_bytes(
+        payload,
+        path=pov_path,
+        max_json_depth=depth_limit,
+    )
+    if source_replay is not None:
+        try:
+            validate_actor_pov_replay_against_replay_v1(
+                artifact,
+                source_replay,
+            )
+        except (TypeError, ValueError) as error:
+            raise ReplayLoadError(
+                "semantic_validation_failed",
+                path=pov_path,
+                detail="actor POV does not join its supplied source replay",
+            ) from error
+    return artifact
+
+
+def load_scenario_evaluation_record_v1(
+    path: str | os.PathLike[str],
+    *,
+    source_replay: ReplayArtifactV1,
+    metric_report_artifact: EvaluationMetricReportArtifactV1,
+    max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
+    max_json_depth: int = DEFAULT_MAX_REPLAY_JSON_DEPTH_V1,
+) -> ScenarioEvaluationRecordV1:
+    """Load one canonical scenario record and verify both evidence joins."""
+    try:
+        scenario_path = _coerce_path(path)
+        size_limit = _require_positive_limit(
+            max_file_size_bytes,
+            name="max_file_size_bytes",
+        )
+        depth_limit = _require_positive_limit(max_json_depth, name="max_json_depth")
+    except (TypeError, ValueError) as error:
+        raise ReplayLoadError(
+            "invalid_argument",
+            path=None,
+            detail=str(error),
+        ) from error
+    try:
+        _require_artifact_suffix(
+            scenario_path,
+            suffix=SCENARIO_FILE_SUFFIX_V1,
+            label="scenario",
+        )
+    except ValueError as error:
+        raise ReplayLoadError(
+            "invalid_filename",
+            path=scenario_path,
+            detail=str(error),
+        ) from error
+    payload = _read_bounded_regular_file(
+        scenario_path,
+        max_file_size_bytes=size_limit,
+    )
+    record = _load_scenario_record_bytes(
+        payload,
+        path=scenario_path,
+        max_json_depth=depth_limit,
+    )
+    try:
+        validate_scenario_evaluation_record_v1(
+            record,
+            source_replay,
+            metric_report_artifact,
+        )
+    except (TypeError, ValueError) as error:
+        raise ReplayLoadError(
+            "semantic_validation_failed",
+            path=scenario_path,
+            detail="scenario record does not join its supplied replay/report",
+        ) from error
+    return record
 
 
 def _validate_save_destination(replay_path: Path) -> Path:
@@ -1093,21 +1317,170 @@ def save_replay_bundle_v1(
     )
 
 
+def _save_companion_payload(
+    path: Path,
+    payload: bytes,
+    *,
+    max_file_size_bytes: int,
+) -> SavedCompanionArtifactV1:
+    if len(payload) > max_file_size_bytes:
+        raise ReplaySaveError(
+            "file_too_large",
+            path=path,
+            detail=f"companion artifact exceeds {max_file_size_bytes} bytes",
+        )
+    parent_descriptor = _open_parent_directory(
+        path,
+        error_type=ReplaySaveError,
+    )
+    try:
+        if (
+            _entry_status_at(
+                parent_descriptor,
+                path.name,
+                path=path,
+                error_type=ReplaySaveError,
+            )
+            is not None
+        ):
+            raise ReplaySaveError(
+                "companion_target_exists",
+                path=path,
+                detail="companion artifacts are never overwritten",
+            )
+        _publish_bytes_no_clobber(
+            path,
+            payload,
+            existing_code="companion_target_exists",
+            parent_descriptor=parent_descriptor,
+        )
+    finally:
+        os.close(parent_descriptor)
+    return SavedCompanionArtifactV1(path=path, byte_length=len(payload))
+
+
+def save_actor_pov_replay_artifact_v1(
+    artifact: ActorPovReplayArtifactV1,
+    source_replay: ReplayArtifactV1,
+    path: str | os.PathLike[str],
+    *,
+    max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
+) -> SavedCompanionArtifactV1:
+    """Validate, source-join, and publish one canonical actor-POV artifact."""
+    try:
+        pov_path = _coerce_path(path)
+        size_limit = _require_positive_limit(
+            max_file_size_bytes,
+            name="max_file_size_bytes",
+        )
+    except (TypeError, ValueError) as error:
+        raise ReplaySaveError(
+            "invalid_argument",
+            path=None,
+            detail=str(error),
+        ) from error
+    try:
+        _require_artifact_suffix(
+            pov_path,
+            suffix=ACTOR_POV_FILE_SUFFIX_V1,
+            label="actor POV",
+        )
+    except ValueError as error:
+        raise ReplaySaveError(
+            "invalid_filename",
+            path=pov_path,
+            detail=str(error),
+        ) from error
+    try:
+        validate_actor_pov_replay_against_replay_v1(artifact, source_replay)
+    except (TypeError, ValueError) as error:
+        raise ReplaySaveError(
+            "invalid_argument",
+            path=pov_path,
+            detail="actor POV does not match its supplied source replay",
+        ) from error
+    return _save_companion_payload(
+        pov_path,
+        canonical_json_bytes(artifact),
+        max_file_size_bytes=size_limit,
+    )
+
+
+def save_scenario_evaluation_record_v1(
+    record: ScenarioEvaluationRecordV1,
+    source_replay: ReplayArtifactV1,
+    metric_report_artifact: EvaluationMetricReportArtifactV1,
+    path: str | os.PathLike[str],
+    *,
+    max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
+) -> SavedCompanionArtifactV1:
+    """Validate both evidence joins and publish one canonical scenario record."""
+    try:
+        scenario_path = _coerce_path(path)
+        size_limit = _require_positive_limit(
+            max_file_size_bytes,
+            name="max_file_size_bytes",
+        )
+    except (TypeError, ValueError) as error:
+        raise ReplaySaveError(
+            "invalid_argument",
+            path=None,
+            detail=str(error),
+        ) from error
+    try:
+        _require_artifact_suffix(
+            scenario_path,
+            suffix=SCENARIO_FILE_SUFFIX_V1,
+            label="scenario",
+        )
+    except ValueError as error:
+        raise ReplaySaveError(
+            "invalid_filename",
+            path=scenario_path,
+            detail=str(error),
+        ) from error
+    try:
+        validate_scenario_evaluation_record_v1(
+            record,
+            source_replay,
+            metric_report_artifact,
+        )
+    except (TypeError, ValueError) as error:
+        raise ReplaySaveError(
+            "invalid_argument",
+            path=scenario_path,
+            detail="scenario record does not match its supplied replay/report",
+        ) from error
+    return _save_companion_payload(
+        scenario_path,
+        canonical_json_bytes(record),
+        max_file_size_bytes=size_limit,
+    )
+
+
 __all__ = [
+    "ACTOR_POV_FILE_SUFFIX_V1",
     "DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1",
     "DEFAULT_MAX_REPLAY_JSON_DEPTH_V1",
     "METRIC_REPORT_FILE_SUFFIX_V1",
     "REPLAY_FILE_SUFFIX_V1",
+    "SCENARIO_FILE_SUFFIX_V1",
     "LoadedReplayBundleV1",
     "ReplayBundleLoadStatusV1",
     "ReplayIOError",
     "ReplayIOErrorCodeV1",
     "ReplayLoadError",
     "ReplaySaveError",
+    "SavedCompanionArtifactV1",
     "SavedReplayBundleV1",
     "canonical_metric_report_artifact_json_bytes_v1",
     "canonical_replay_json_bytes_v1",
+    "canonical_scenario_evaluation_record_json_bytes_v1",
+    "load_actor_pov_replay_artifact_v1",
     "load_replay_artifact_v1",
     "load_replay_bundle_v1",
+    "load_scenario_evaluation_record_v1",
+    "save_actor_pov_replay_artifact_v1",
     "save_replay_bundle_v1",
+    "save_scenario_evaluation_record_v1",
 ]

@@ -6,16 +6,14 @@ import argparse
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPOSITORY_ROOT))
 
-from scripts.dev.visual_debugger.scenarios import (  # noqa: E402 - script bootstrap.
-    DebuggerScenario,
-    get_scenario,
-    iter_scenario_summaries,
-)
+if TYPE_CHECKING:
+    from scripts.dev.visual_debugger.scenarios import DebuggerScenario
 
 _EPILOG = """\
 battlefield controls (while the battlefield has focus):
@@ -76,8 +74,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--scenario",
         metavar="NAME",
-        default="arena_5v5",
+        default=None,
         help="scenario to open (default: arena_5v5)",
+    )
+    parser.add_argument(
+        "--replay",
+        metavar="PATH",
+        type=Path,
+        help="validated local replay to render (requires --static in this step)",
+    )
+    parser.add_argument(
+        "--frame-index",
+        metavar="N",
+        type=int,
+        help="absolute replay frame index (default with --replay: 0)",
     )
     parser.add_argument(
         "--list-scenarios",
@@ -173,14 +183,52 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Parse, list, or run while preserving standard command exit semantics."""
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.replay is None and args.frame_index is not None:
+        parser.error("--frame-index requires --replay.")
+    if args.replay is not None:
+        if not args.static:
+            parser.error("--replay currently requires --static.")
+        replay_conflicts = (
+            (args.scenario is not None, "--scenario"),
+            (args.list_scenarios, "--list-scenarios"),
+            (args.include_stress, "--include-stress"),
+            (args.seed != 0, "--seed"),
+            (args.controlled_slot is not None, "--controlled-slot"),
+            (args.no_open, "--no-open"),
+            (args.port != 0, "--port"),
+            (args.view != "researcher", "--view"),
+            (args.preset != "analysis", "--preset"),
+            (args.verbose, "--verbose"),
+        )
+        conflicting_option = next(
+            (name for conflicts, name in replay_conflicts if conflicts),
+            None,
+        )
+        if conflicting_option is not None:
+            parser.error(f"{conflicting_option} is unavailable with --replay.")
     if args.list_scenarios:
+        from scripts.dev.visual_debugger.scenarios import iter_scenario_summaries
+
         for summary in iter_scenario_summaries(
             include_stress=args.include_stress,
         ):
             print(summary)
         return 0
     try:
-        scenario = get_scenario(args.scenario)
+        if args.replay is not None:
+            from scripts.dev.visual_debugger.static_renderer import (
+                run_static_replay_renderer,
+            )
+
+            return run_static_replay_renderer(
+                replay_path=args.replay,
+                frame_index=0 if args.frame_index is None else args.frame_index,
+                show_ranges=args.ranges,
+            )
+
+        from scripts.dev.visual_debugger.scenarios import get_scenario
+
+        scenario = get_scenario(args.scenario or "arena_5v5")
         _validate_launch(
             scenario,
             controlled_global_slot=args.controlled_slot,

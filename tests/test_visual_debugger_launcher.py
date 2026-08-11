@@ -65,6 +65,79 @@ def test_parser_exposes_complete_cli_contract() -> None:
     assert args.ranges is False
 
 
+def test_parser_exposes_narrow_static_replay_contract() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        (
+            "--replay",
+            "episode.marlbg-replay.json",
+            "--static",
+            "--frame-index",
+            "7",
+            "--no-ranges",
+        )
+    )
+
+    assert args.replay == Path("episode.marlbg-replay.json")
+    assert args.static
+    assert args.frame_index == 7
+    assert args.scenario is None
+    assert args.ranges is False
+
+
+@pytest.mark.parametrize(
+    "argv, message",
+    (
+        (("--frame-index", "1"), "--frame-index requires --replay"),
+        (("--replay", "x.marlbg-replay.json"), "--replay currently requires"),
+        (
+            (
+                "--replay",
+                "x.marlbg-replay.json",
+                "--static",
+                "--scenario",
+                "arena_5v5",
+            ),
+            "--scenario is unavailable with --replay",
+        ),
+    ),
+)
+def test_static_replay_cli_rejects_live_only_combinations(
+    argv: tuple[str, ...],
+    message: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        main(argv)
+    assert exc_info.value.code == 2
+    assert message in capsys.readouterr().err
+
+
+def test_replay_static_cli_import_path_is_core_and_jax_free() -> None:
+    code = """
+import sys
+from scripts.dev.debug_renderer import build_parser
+parser = build_parser()
+parser.parse_args(['--replay', 'episode.marlbg-replay.json', '--static'])
+for prefix in ('jax', 'jaxlib', 'numpy', 'marl_battlegrounds.core'):
+    loaded = any(
+        name == prefix or name.startswith(prefix + '.') for name in sys.modules
+    )
+    assert not loaded, prefix
+print('isolated')
+"""
+    result = subprocess.run(
+        (sys.executable, "-c", code),
+        cwd=_REPOSITORY_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "isolated"
+
+
 def test_parser_rejects_abbreviated_options() -> None:
     parser = build_parser()
     with pytest.raises(SystemExit) as exc_info:

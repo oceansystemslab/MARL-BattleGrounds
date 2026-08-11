@@ -2,16 +2,12 @@
 
 from importlib import import_module
 from pathlib import Path
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from marl_battlegrounds.rendering import SceneRenderOptions, render_scene_geometry
-from scripts.dev.visual_debugger.control import create_session
-from scripts.dev.visual_debugger.renderer_fixtures import get_renderer_fixture
-from scripts.dev.visual_debugger.scenarios import DebuggerScenario
-from scripts.dev.visual_debugger.scene_adapter import (
-    build_battlefield_scene,
-    build_visual_event_batch,
-)
+
+if TYPE_CHECKING:
+    from scripts.dev.visual_debugger.scenarios import DebuggerScenario
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 STATIC_VISUAL_VOCABULARY_PATH = (
@@ -63,6 +59,12 @@ def run_static_renderer(
     show_ranges: bool,
 ) -> int:
     """Render one reset scene without callbacks, a server, or a transition."""
+    from scripts.dev.visual_debugger.control import create_session
+    from scripts.dev.visual_debugger.scene_adapter import (
+        build_battlefield_scene,
+        build_visual_event_batch,
+    )
+
     pyplot = _load_pyplot()
     session = create_session(
         scenario,
@@ -78,10 +80,62 @@ def run_static_renderer(
     return 0
 
 
+def run_static_replay_renderer(
+    *,
+    replay_path: Path,
+    frame_index: int,
+    show_ranges: bool,
+) -> int:
+    """Validate, project, and render one canonical replay frame offline."""
+    from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
+    from marl_battlegrounds.evaluation.replay_io import (
+        ReplayLoadError,
+        load_replay_artifact_v1,
+    )
+    from marl_battlegrounds.rendering.evaluation_adapter import (
+        EvaluationScenePresentationStateV1,
+        build_evaluation_battlefield_scene_v2,
+    )
+
+    if type(frame_index) is not int:
+        raise ValueError("replay frame index must be a Python integer.")
+    try:
+        replay = load_replay_artifact_v1(replay_path)
+    except ReplayLoadError as exc:
+        raise ValueError(f"Replay could not be loaded: {exc}") from exc
+    if not 0 <= frame_index < len(replay.frames):
+        raise ValueError(
+            f"replay frame index must be in [0, {len(replay.frames) - 1}]."
+        )
+    frame = replay.frames[frame_index]
+    transition_view = (
+        None
+        if frame_index == 0
+        else EvaluationTransitionViewV1(
+            context=replay.header.context,
+            start_frame=replay.frames[frame_index - 1],
+            transition=replay.transitions[frame_index - 1],
+            successor_frame=frame,
+        )
+    )
+    scene = build_evaluation_battlefield_scene_v2(
+        replay.header.context,
+        frame,
+        transition_view=transition_view,
+        presentation=EvaluationScenePresentationStateV1(show_ranges=show_ranges),
+    )
+    pyplot = _load_pyplot()
+    render_scene_geometry(scene)
+    pyplot.show()
+    return 0
+
+
 def export_static_visual_vocabulary(
     output_path: Path = STATIC_VISUAL_VOCABULARY_PATH,
 ) -> Path:
     """Export the canonical static vocabulary evidence at exactly 1440x900."""
+    from scripts.dev.visual_debugger.renderer_fixtures import get_renderer_fixture
+
     fixture = get_renderer_fixture("visual_vocabulary")
     result = render_scene_geometry(
         fixture.scene,
@@ -111,4 +165,5 @@ __all__ = [
     "STATIC_VISUAL_VOCABULARY_PATH",
     "export_static_visual_vocabulary",
     "run_static_renderer",
+    "run_static_replay_renderer",
 ]

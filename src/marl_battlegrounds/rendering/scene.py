@@ -9,14 +9,17 @@ from dataclasses import dataclass, field
 from math import isclose, isfinite
 from typing import Literal, cast
 
-from marl_battlegrounds.core.types import MAX_AGENT_SLOTS
+from marl_battlegrounds.evaluation.wire_shapes import MAX_AGENT_SLOTS_V1
 from marl_battlegrounds.rendering.vocabulary import (
     ActivationTokenId,
     StatusLifecycleKind,
 )
 
 SCENE_SCHEMA_VERSION = 1
+SCENE_V2_SCHEMA_VERSION = 2
 EVENT_SCHEMA_VERSION = 1
+
+MAX_AGENT_SLOTS = MAX_AGENT_SLOTS_V1
 
 type Point2D = tuple[float, float]
 type SceneAudience = Literal["researcher", "agent_pov"]
@@ -27,6 +30,32 @@ type TargetDisclosure = Literal["public", "target_none", "redacted", "invalid"]
 type HealthOutcome = Literal["damage", "healing", "unchanged"]
 type ChargePathKind = Literal["charge_only", "combined_charge_and_movement"]
 type RejectionComponent = Literal["movement", "combat", "complete_tuple_domain"]
+type AgentLifeStateV2 = Literal["alive", "corpse"]
+type StatusFamilyV2 = Literal[
+    "slow",
+    "stun",
+    "anti_heal",
+    "damage_amplification",
+    "movement_floor",
+]
+type StatusMagnitudeKindV2 = Literal[
+    "movement_multiplier",
+    "none",
+    "healing_multiplier",
+    "damage_multiplier",
+    "movement_floor",
+]
+type BasicTargetModeV2 = Literal[
+    "unavailable",
+    "ally",
+    "enemy",
+]
+type UltimateTargetModeV2 = Literal[
+    "unavailable",
+    "target_none",
+    "ally",
+    "enemy",
+]
 
 
 def _require_python_int(value: int, *, name: str, minimum: int | None = None) -> None:
@@ -464,6 +493,582 @@ class BattlefieldSceneV1:
             raise ValueError(
                 "agent-POV scenes must not disclose privileged visibility."
             )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ClassMechanicsSceneV2:
+    """Serialized class vocabulary and exact context-owned mechanics."""
+
+    class_id: int
+    class_name: str
+    maximum_health: float
+    body_radius: float
+    base_movement_speed: float
+    observation_radius: float
+    basic_target_mode: BasicTargetModeV2
+    basic_interaction_radius: float
+    basic_raw_damage: float
+    basic_raw_healing: float
+    ultimate_target_mode: UltimateTargetModeV2
+    ultimate_interaction_radius: float
+    ultimate_cooldown_steps: int
+    ultimate_raw_damage: float
+    ultimate_raw_healing: float
+    out_of_combat_delay_steps: int
+    out_of_combat_health_regeneration_fraction_per_step: float
+
+    def __post_init__(self) -> None:
+        _require_python_int(self.class_id, name="class_id", minimum=1)
+        if self.class_id > 5:
+            raise ValueError("class_id must identify a real V1 class.")
+        _require_text(self.class_name, name="class_name")
+        for name in (
+            "body_radius",
+            "maximum_health",
+            "base_movement_speed",
+            "observation_radius",
+            "basic_interaction_radius",
+            "basic_raw_damage",
+            "basic_raw_healing",
+            "ultimate_interaction_radius",
+            "ultimate_raw_damage",
+            "ultimate_raw_healing",
+            "out_of_combat_health_regeneration_fraction_per_step",
+        ):
+            value = cast(float, getattr(self, name))
+            _require_finite(value, name=name)
+            if value < 0.0:
+                raise ValueError(f"{name} must be non-negative.")
+        _require_python_int(
+            self.ultimate_cooldown_steps,
+            name="ultimate_cooldown_steps",
+            minimum=0,
+        )
+        if self.maximum_health <= 0.0 or self.body_radius <= 0.0:
+            raise ValueError("real class health and body radius must be positive.")
+        _require_python_int(
+            self.out_of_combat_delay_steps,
+            name="out_of_combat_delay_steps",
+            minimum=0,
+        )
+        if self.basic_target_mode not in (
+            "unavailable",
+            "ally",
+            "enemy",
+        ):
+            raise ValueError(f"unknown basic_target_mode: {self.basic_target_mode!r}.")
+        if self.ultimate_target_mode not in (
+            "unavailable",
+            "target_none",
+            "ally",
+            "enemy",
+        ):
+            raise ValueError(
+                f"unknown ultimate_target_mode: {self.ultimate_target_mode!r}."
+            )
+        if self.out_of_combat_health_regeneration_fraction_per_step > 1.0:
+            raise ValueError(
+                "out_of_combat_health_regeneration_fraction_per_step must not "
+                "exceed one."
+            )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class StatusSourceEvidenceSceneV2:
+    """One direct incoming-event source for a durable status row."""
+
+    source_global_slot: int
+    source_public_agent_id: str
+    event_id: str
+
+    def __post_init__(self) -> None:
+        _require_slot(self.source_global_slot, name="source_global_slot")
+        _require_text(self.source_public_agent_id, name="source_public_agent_id")
+        _require_text(self.event_id, name="event_id")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class StatusSceneV2:
+    """One recorded status channel with conservative source evidence."""
+
+    status_channel: int
+    status_id: str
+    family: StatusFamilyV2
+    remaining_duration: int
+    source_class_id: int
+    source_class_name: str
+    source_action_component: Literal["basic", "ultimate"]
+    magnitude_kind: StatusMagnitudeKindV2
+    magnitude: float | None
+    breaks_on_positive_damage: bool
+    direct_source_evidence: tuple[StatusSourceEvidenceSceneV2, ...] = ()
+
+    def __post_init__(self) -> None:
+        _require_python_int(self.status_channel, name="status_channel", minimum=0)
+        if self.status_channel >= 9:
+            raise ValueError("status_channel must be less than nine.")
+        _require_text(self.status_id, name="status_id")
+        _require_python_int(
+            self.remaining_duration,
+            name="remaining_duration",
+            minimum=1,
+        )
+        _require_python_int(self.source_class_id, name="source_class_id", minimum=1)
+        if self.source_class_id > 5:
+            raise ValueError("source_class_id must identify a real V1 class.")
+        _require_text(self.source_class_name, name="source_class_name")
+        if self.family not in (
+            "slow",
+            "stun",
+            "anti_heal",
+            "damage_amplification",
+            "movement_floor",
+        ):
+            raise ValueError(f"unknown status family: {self.family!r}.")
+        if self.source_action_component not in ("basic", "ultimate"):
+            raise ValueError("source_action_component must be 'basic' or 'ultimate'.")
+        if self.magnitude_kind not in (
+            "movement_multiplier",
+            "none",
+            "healing_multiplier",
+            "damage_multiplier",
+            "movement_floor",
+        ):
+            raise ValueError(f"unknown magnitude_kind: {self.magnitude_kind!r}.")
+        if self.magnitude is None:
+            if self.magnitude_kind != "none":
+                raise ValueError("non-none magnitude kinds require a magnitude.")
+        else:
+            _require_finite(self.magnitude, name="magnitude")
+            if self.magnitude_kind == "none":
+                raise ValueError("the none magnitude kind must omit magnitude.")
+        _require_python_bool(
+            self.breaks_on_positive_damage,
+            name="breaks_on_positive_damage",
+        )
+        _require_tuple_items(
+            self.direct_source_evidence,
+            name="direct_source_evidence",
+            item_types=(StatusSourceEvidenceSceneV2,),
+        )
+        evidence_slots = tuple(
+            row.source_global_slot for row in self.direct_source_evidence
+        )
+        if evidence_slots != tuple(sorted(evidence_slots)):
+            raise ValueError("direct source evidence must be ordered by source slot.")
+        _require_unique(
+            tuple(row.event_id for row in self.direct_source_evidence),
+            name="direct source event_id",
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AuraRecipientModifierSceneV2:
+    """One exact recipient-local aura multiplier from the selected frame."""
+
+    aura_id: Literal[
+        "mage_damage_amplification",
+        "warrior_damage_mitigation",
+    ]
+    multiplier: float
+
+    def __post_init__(self) -> None:
+        if self.aura_id not in (
+            "mage_damage_amplification",
+            "warrior_damage_mitigation",
+        ):
+            raise ValueError(f"unknown aura_id: {self.aura_id!r}.")
+        _require_finite(self.multiplier, name="multiplier")
+        if self.multiplier < 0.0:
+            raise ValueError("aura multiplier must be non-negative.")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AuraFieldSceneV2:
+    """One catalog-declared aura capability anchored to its recorded emitter."""
+
+    aura_id: Literal[
+        "mage_damage_amplification",
+        "warrior_damage_mitigation",
+    ]
+    source_global_slot: int
+    source_public_agent_id: str
+    source_class_id: int
+    source_class_name: str
+    source_alive: bool
+    center: Point2D
+    radius: float
+    beneficiary_relation: Literal["same_team"]
+    per_emitter_multiplier: float
+    stacking_rule: Literal["multiply_then_clamp"]
+    clamp_kind: Literal["ceiling", "floor"]
+    clamp_value: float
+
+    def __post_init__(self) -> None:
+        if self.aura_id not in (
+            "mage_damage_amplification",
+            "warrior_damage_mitigation",
+        ):
+            raise ValueError(f"unknown aura_id: {self.aura_id!r}.")
+        _require_slot(self.source_global_slot, name="source_global_slot")
+        _require_text(self.source_public_agent_id, name="source_public_agent_id")
+        _require_python_int(self.source_class_id, name="source_class_id", minimum=1)
+        if self.source_class_id > 5:
+            raise ValueError("source_class_id must identify a real V1 class.")
+        _require_text(self.source_class_name, name="source_class_name")
+        _require_python_bool(self.source_alive, name="source_alive")
+        _require_point(self.center, name="center")
+        for name in ("radius", "per_emitter_multiplier", "clamp_value"):
+            value = cast(float, getattr(self, name))
+            _require_finite(value, name=name)
+            if value < 0.0:
+                raise ValueError(f"{name} must be non-negative.")
+        if self.radius <= 0.0:
+            raise ValueError("aura radius must be positive.")
+        if self.beneficiary_relation != "same_team":
+            raise ValueError("V2 aura fields require same-team beneficiaries.")
+        if self.stacking_rule != "multiply_then_clamp":
+            raise ValueError("V2 aura fields require multiply-then-clamp stacking.")
+        if self.clamp_kind not in ("ceiling", "floor"):
+            raise ValueError("clamp_kind must be ceiling or floor.")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AgentSceneV2:
+    """One configured-active actor copied from a selected evaluation frame."""
+
+    global_slot: int
+    public_agent_id: str
+    team_id: int
+    team_local_slot: int
+    class_id: int
+    position: Point2D
+    radius: float
+    life_state: AgentLifeStateV2
+    current_health: float
+    max_health: float
+    effective_movement_speed: float
+    ultimate_cooldown_remaining: int
+    spawn_shield_remaining: int
+    steps_until_out_of_combat: int
+    respawned_on_incoming_transition: bool
+    respawn_event_id: str | None
+    statuses: tuple[StatusSceneV2, ...] = ()
+    aura_modifiers: tuple[AuraRecipientModifierSceneV2, ...] = ()
+
+    def __post_init__(self) -> None:
+        _require_slot(self.global_slot, name="global_slot")
+        _require_text(self.public_agent_id, name="public_agent_id")
+        _require_python_int(self.team_id, name="team_id", minimum=1)
+        if self.team_id not in (1, 2):
+            raise ValueError("team_id must be one or two.")
+        _require_python_int(self.team_local_slot, name="team_local_slot", minimum=0)
+        if self.team_local_slot >= 5:
+            raise ValueError("team_local_slot must be less than five.")
+        _require_python_int(self.class_id, name="class_id", minimum=1)
+        if self.class_id > 5:
+            raise ValueError("class_id must identify a real V1 class.")
+        _require_point(self.position, name="position")
+        _require_finite(self.radius, name="radius")
+        _require_finite(self.current_health, name="current_health")
+        _require_finite(self.max_health, name="max_health")
+        _require_finite(
+            self.effective_movement_speed,
+            name="effective_movement_speed",
+        )
+        if self.radius <= 0.0 or self.max_health <= 0.0:
+            raise ValueError("active agents require positive radius and max_health.")
+        if not 0.0 <= self.current_health <= self.max_health:
+            raise ValueError("current_health must lie within [0, max_health].")
+        if self.effective_movement_speed < 0.0:
+            raise ValueError("effective_movement_speed must be non-negative.")
+        if self.life_state not in ("alive", "corpse"):
+            raise ValueError(f"unknown life_state: {self.life_state!r}.")
+        for name in (
+            "ultimate_cooldown_remaining",
+            "spawn_shield_remaining",
+            "steps_until_out_of_combat",
+        ):
+            _require_python_int(cast(int, getattr(self, name)), name=name, minimum=0)
+        _require_python_bool(
+            self.respawned_on_incoming_transition,
+            name="respawned_on_incoming_transition",
+        )
+        if self.respawned_on_incoming_transition != (self.respawn_event_id is not None):
+            raise ValueError(
+                "respawn_event_id presence must match incoming-transition respawn."
+            )
+        if self.respawn_event_id is not None:
+            _require_text(self.respawn_event_id, name="respawn_event_id")
+        _require_tuple_items(
+            self.statuses, name="statuses", item_types=(StatusSceneV2,)
+        )
+        channels = tuple(status.status_channel for status in self.statuses)
+        if channels != tuple(sorted(channels)) or len(channels) != len(set(channels)):
+            raise ValueError("statuses must have unique increasing channel IDs.")
+        _require_tuple_items(
+            self.aura_modifiers,
+            name="aura_modifiers",
+            item_types=(AuraRecipientModifierSceneV2,),
+        )
+        modifier_ids = tuple(row.aura_id for row in self.aura_modifiers)
+        if modifier_ids != tuple(sorted(modifier_ids)) or len(modifier_ids) != len(
+            set(modifier_ids)
+        ):
+            raise ValueError("aura modifiers must have unique sorted aura IDs.")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SpawnPadSceneV2:
+    """One configured-active actor's recorded team spawn pad."""
+
+    team_id: int
+    team_local_slot: int
+    assigned_global_slot: int
+    assigned_public_agent_id: str
+    position: Point2D
+
+    def __post_init__(self) -> None:
+        _require_python_int(self.team_id, name="team_id", minimum=1)
+        if self.team_id not in (1, 2):
+            raise ValueError("team_id must be one or two.")
+        _require_python_int(self.team_local_slot, name="team_local_slot", minimum=0)
+        if self.team_local_slot >= 5:
+            raise ValueError("team_local_slot must be less than five.")
+        _require_slot(self.assigned_global_slot, name="assigned_global_slot")
+        _require_text(self.assigned_public_agent_id, name="assigned_public_agent_id")
+        _require_point(self.position, name="position")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RespawnWaveSceneV2:
+    """One team's exact configured wave period and selected-frame countdown."""
+
+    team_index: int
+    team_id: int
+    period_steps: int
+    countdown_steps: int
+
+    def __post_init__(self) -> None:
+        _require_python_int(self.team_index, name="team_index", minimum=0)
+        if self.team_index not in (0, 1):
+            raise ValueError("team_index must be zero or one.")
+        _require_python_int(self.team_id, name="team_id", minimum=1)
+        if self.team_id != self.team_index + 1:
+            raise ValueError("team_id must match team_index + 1.")
+        _require_python_int(self.period_steps, name="period_steps", minimum=1)
+        _require_python_int(self.countdown_steps, name="countdown_steps", minimum=0)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BattlefieldSceneV2:
+    """Researcher-authorized durable state from one canonical evaluation frame."""
+
+    schema_version: int
+    audience: Literal["researcher"]
+    audience_badge: str
+    episode_id: str
+    frame_index: int
+    frame_id: str
+    simulator_step_count: int
+    incoming_transition_id: str | None
+    incoming_event_ids: tuple[str, ...]
+    map: MapSceneV1
+    agents: tuple[AgentSceneV2, ...]
+    aura_fields: tuple[AuraFieldSceneV2, ...]
+    class_mechanics: tuple[ClassMechanicsSceneV2, ...]
+    spawn_pads: tuple[SpawnPadSceneV2, ...]
+    respawn_waves: tuple[RespawnWaveSceneV2, ...]
+    ranges: tuple[RangeSceneV1, ...] = ()
+    selection: SelectionSceneV1 | None = None
+    next_decision_selected_legality: SelectedLegalitySceneV1 | None = None
+
+    def __post_init__(self) -> None:
+        _require_python_int(self.schema_version, name="schema_version")
+        if self.schema_version != SCENE_V2_SCHEMA_VERSION:
+            raise ValueError(
+                f"scene schema_version must be {SCENE_V2_SCHEMA_VERSION}; "
+                f"got {self.schema_version}."
+            )
+        if self.audience != "researcher":
+            raise ValueError("BattlefieldSceneV2 is researcher-authorized only.")
+        if "PRIVILEGED" not in self.audience_badge:
+            raise ValueError("researcher scenes require an explicit PRIVILEGED badge.")
+        _require_text(self.episode_id, name="episode_id")
+        _require_python_int(self.frame_index, name="frame_index", minimum=0)
+        _require_text(self.frame_id, name="frame_id")
+        if self.frame_id != f"{self.episode_id}:frame:{self.frame_index}":
+            raise ValueError("frame_id must match episode_id and frame_index.")
+        _require_python_int(
+            self.simulator_step_count,
+            name="simulator_step_count",
+            minimum=0,
+        )
+        expected_transition_id = (
+            None
+            if self.frame_index == 0
+            else f"{self.episode_id}:transition:{self.frame_index - 1}"
+        )
+        if self.incoming_transition_id != expected_transition_id:
+            raise ValueError(
+                "incoming_transition_id must identify the transition entering frame."
+            )
+        _require_tuple_items(
+            self.incoming_event_ids,
+            name="incoming_event_ids",
+            item_types=(str,),
+        )
+        expected_event_ids = tuple(
+            f"{self.incoming_transition_id}:event:{ordinal:04d}"
+            for ordinal in range(len(self.incoming_event_ids))
+        )
+        if self.incoming_event_ids != expected_event_ids:
+            raise ValueError("incoming_event_ids must be canonical and gap-free.")
+        if type(self.map) is not MapSceneV1:
+            raise ValueError(f"map must be MapSceneV1; got {type(self.map).__name__}.")
+        _require_tuple_items(self.agents, name="agents", item_types=(AgentSceneV2,))
+        _require_tuple_items(
+            self.aura_fields,
+            name="aura_fields",
+            item_types=(AuraFieldSceneV2,),
+        )
+        _require_tuple_items(
+            self.class_mechanics,
+            name="class_mechanics",
+            item_types=(ClassMechanicsSceneV2,),
+        )
+        _require_tuple_items(
+            self.spawn_pads,
+            name="spawn_pads",
+            item_types=(SpawnPadSceneV2,),
+        )
+        _require_tuple_items(
+            self.respawn_waves,
+            name="respawn_waves",
+            item_types=(RespawnWaveSceneV2,),
+        )
+        _require_tuple_items(self.ranges, name="ranges", item_types=(RangeSceneV1,))
+        _require_optional_record(
+            self.selection,
+            name="selection",
+            record_type=SelectionSceneV1,
+        )
+        _require_optional_record(
+            self.next_decision_selected_legality,
+            name="next_decision_selected_legality",
+            record_type=SelectedLegalitySceneV1,
+        )
+        slots = tuple(agent.global_slot for agent in self.agents)
+        if slots != tuple(sorted(slots)) or len(slots) != len(set(slots)):
+            raise ValueError("agents must have unique increasing global slots.")
+        _require_unique(
+            tuple(agent.public_agent_id for agent in self.agents),
+            name="public_agent_id",
+        )
+        agent_by_slot = {agent.global_slot: agent for agent in self.agents}
+        for agent in self.agents:
+            expected_team_id = 1 if agent.global_slot < 5 else 2
+            if agent.team_id != expected_team_id:
+                raise ValueError("agent team must match the V1 global-slot topology.")
+            if agent.team_local_slot != agent.global_slot % 5:
+                raise ValueError(
+                    "agent team-local slot must match the V1 global-slot topology."
+                )
+            if agent.respawn_event_id is not None and (
+                agent.respawn_event_id not in self.incoming_event_ids
+            ):
+                raise ValueError("respawn evidence must join an incoming event ID.")
+            expected_modifier_ids = (
+                "mage_damage_amplification",
+                "warrior_damage_mitigation",
+            )
+            if tuple(row.aura_id for row in agent.aura_modifiers) != (
+                expected_modifier_ids
+            ):
+                raise ValueError(
+                    "each researcher agent requires both ordered aura modifiers."
+                )
+            for status in agent.statuses:
+                for evidence in status.direct_source_evidence:
+                    source_agent = agent_by_slot.get(evidence.source_global_slot)
+                    if source_agent is None or (
+                        source_agent.public_agent_id != evidence.source_public_agent_id
+                    ):
+                        raise ValueError(
+                            "status source evidence must join a scene agent identity."
+                        )
+                    if evidence.event_id not in self.incoming_event_ids:
+                        raise ValueError(
+                            "status source evidence must join an incoming event ID."
+                        )
+        aura_keys = tuple(
+            (field.source_global_slot, field.aura_id) for field in self.aura_fields
+        )
+        if aura_keys != tuple(sorted(aura_keys)) or len(aura_keys) != len(
+            set(aura_keys)
+        ):
+            raise ValueError("aura fields must have unique canonical source/aura keys.")
+        for aura_field in self.aura_fields:
+            source_agent = agent_by_slot.get(aura_field.source_global_slot)
+            if source_agent is None or (
+                source_agent.public_agent_id != aura_field.source_public_agent_id
+                or source_agent.class_id != aura_field.source_class_id
+                or source_agent.position != aura_field.center
+                or (source_agent.life_state == "alive") != aura_field.source_alive
+            ):
+                raise ValueError("aura fields must join their scene source agent.")
+        class_ids = tuple(row.class_id for row in self.class_mechanics)
+        if class_ids != tuple(sorted(class_ids)) or len(class_ids) != len(
+            set(class_ids)
+        ):
+            raise ValueError("class mechanics must have unique increasing class IDs.")
+        if not set(agent.class_id for agent in self.agents).issubset(class_ids):
+            raise ValueError("every scene agent requires its class mechanics row.")
+        mechanics_by_class = {row.class_id: row for row in self.class_mechanics}
+        for agent in self.agents:
+            for status in agent.statuses:
+                source_mechanics = mechanics_by_class.get(status.source_class_id)
+                if source_mechanics is None or (
+                    source_mechanics.class_name != status.source_class_name
+                ):
+                    raise ValueError(
+                        "status source class must join scene class mechanics."
+                    )
+        pad_keys = tuple((pad.team_id, pad.team_local_slot) for pad in self.spawn_pads)
+        if pad_keys != tuple(sorted(pad_keys)) or len(pad_keys) != len(set(pad_keys)):
+            raise ValueError("spawn pads must have unique canonical team/slot keys.")
+        if len(self.spawn_pads) != len(self.agents):
+            raise ValueError("each scene agent requires exactly one spawn pad.")
+        for pad in self.spawn_pads:
+            agent = agent_by_slot.get(pad.assigned_global_slot)
+            if agent is None or (
+                agent.public_agent_id != pad.assigned_public_agent_id
+                or agent.team_id != pad.team_id
+                or agent.team_local_slot != pad.team_local_slot
+            ):
+                raise ValueError("spawn pads must join their assigned scene agent.")
+        if tuple(wave.team_index for wave in self.respawn_waves) != (0, 1):
+            raise ValueError("respawn waves must contain ordered team indices 0 and 1.")
+        for range_row in self.ranges:
+            if range_row.global_slot not in agent_by_slot:
+                raise ValueError("ranges must join a scene agent.")
+        if self.selection is not None and (
+            self.selection.controlled_global_slot not in agent_by_slot
+            or (
+                self.selection.selected_global_slot is not None
+                and self.selection.selected_global_slot not in agent_by_slot
+            )
+        ):
+            raise ValueError("selection must join configured-active scene agents.")
+        if self.next_decision_selected_legality is not None:
+            legality = self.next_decision_selected_legality
+            if self.selection is None or (
+                legality.controlled_global_slot != self.selection.controlled_global_slot
+                or legality.target_global_slot != self.selection.selected_global_slot
+            ):
+                raise ValueError(
+                    "next-decision legality must join the current scene selection."
+                )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

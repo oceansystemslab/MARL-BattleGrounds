@@ -50,6 +50,7 @@ def test_evaluation_v1_wire_shapes_match_current_core_contract() -> None:
     (
         "marl_battlegrounds.evaluation.replay",
         "marl_battlegrounds.evaluation.replay_io",
+        "marl_battlegrounds.evaluation.pov",
     ),
 )
 def test_replay_modules_import_without_array_or_capture_dependencies(

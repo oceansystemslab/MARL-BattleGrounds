@@ -5,17 +5,19 @@ durations, legality, acceptance, or combat values.
 """
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Final, Literal
 
-from marl_battlegrounds.core.types import (
-    HUNTER_CLASS_ID,
-    MAGE_CLASS_ID,
-    PRIEST_CLASS_ID,
-    ROGUE_CLASS_ID,
-    TEAM_A_ID,
-    TEAM_B_ID,
-    WARRIOR_CLASS_ID,
-)
+# These are version-bound presentation vocabulary IDs, not live simulator
+# imports.  Their parity with the published evaluation catalog is tested.  A
+# future semantic renumbering therefore requires an explicit scene-version
+# migration instead of silently changing offline rendering.
+MAGE_CLASS_ID: Final = 1
+WARRIOR_CLASS_ID: Final = 2
+HUNTER_CLASS_ID: Final = 3
+ROGUE_CLASS_ID: Final = 4
+PRIEST_CLASS_ID: Final = 5
+TEAM_A_ID: Final = 1
+TEAM_B_ID: Final = 2
 
 type ClassTokenId = Literal["mage", "warrior", "hunter", "rogue", "priest"]
 type TeamTokenId = Literal["team_a", "team_b"]
