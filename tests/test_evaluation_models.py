@@ -515,7 +515,7 @@ def test_root_models_reject_unknown_versions_and_extra_fields() -> None:
         EvaluationEpisodeContextV1.model_validate_json(json.dumps(context_payload))
 
 
-def test_package_exports_only_the_nine_step_5_public_functions() -> None:
+def test_package_exports_only_the_approved_step_6_1_public_functions() -> None:
     exported_functions = {
         name
         for name in evaluation_api.__all__
@@ -525,12 +525,21 @@ def test_package_exports_only_the_nine_step_5_public_functions() -> None:
         "build_static_mechanics_catalog_v1",
         "build_evaluation_episode_context_v1",
         "build_evaluation_observer_v1",
+        "build_replay_artifact_reference_v1",
+        "build_replay_artifact_v1",
+        "build_replay_bundle_v1",
+        "build_scenario_evaluation_record_v1",
         "capture_initial_evaluation_frame_v1",
         "capture_evaluation_transition_unit_v1",
         "normalize_transition_facts_v1",
         "decode_evaluation_events_v1",
+        "iter_replay_transition_views_v1",
+        "validate_evaluation_processing_progress_v1",
         "validate_evaluation_transition_unit_v1",
         "validate_initial_evaluation_frame_v1",
+        "validate_metric_report_artifact_against_replay_v1",
+        "validate_replay_artifact_v1",
+        "validate_scenario_evaluation_record_v1",
     }
 
 

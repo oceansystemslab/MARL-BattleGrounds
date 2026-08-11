@@ -333,8 +333,14 @@ outcome from that structural evidence.
 
 Processing success means that every validated transition was consumed by every
 declared reducer and the final report was validated atomically. Processing
-failure records the stage, stable code, optional reducer identity, attempted
-transition, and diagnostic detail. It does not erase the last validated prefix
+failure records the stage, stable code, stage-governed reducer identity and
+attempted-transition provenance, and diagnostic detail. Reducer initialize,
+advance, and finalize failures require the exact reducer identity/version;
+non-reducer stages forbid one. Reducer advance requires an attempted transition
+index equal to processed progress and leaves validated progress exactly one
+unit ahead. Transition validation may preserve the submitted attempted index as
+diagnostic provenance even when it is malformed or noncontiguous. Other stages
+forbid an attempted index. These rules do not erase the last validated prefix
 or alter already-authored termination/truncation truth. A report exposes both
 validated and processed counts, and no successful report may contain a partial
 subset of reducers or rows. A failure after every validated unit was processed
@@ -523,6 +529,20 @@ the exact in-memory `T + 1` frame / `T` transition prefix; scenario capture
 continues to require scenario identity. Debug adds no private-state payload.
 
 ## Artifact, replay, and reporting requirements
+
+The normative version-1 replay normal form and its non-circular artifact graph
+are specified in [Standard Evaluation Replay Format](replay_format.md). Replay
+stores the context once plus exact `T + 1` frames and `T` transitions,
+completion, processing status, and a content-addressed metric-report reference.
+The context's schema map remains the exact eight CP2 bindings; replay-envelope
+bindings live in the replay header. Structural model validation alone is not a
+semantic replay-validity claim: every loaded artifact must pass the explicit
+whole-artifact validator over frame zero and all adjacent four-record units.
+
+Rollout completion, evaluation-processing validity, and per-statistic endpoint
+observation remain independent in both live and replay-loaded analysis. A
+processing failure never rewrites a provably complete rollout, and an
+infrastructure prefix never becomes scientific right censoring.
 
 Official results retain enough information to reproduce every reduction:
 

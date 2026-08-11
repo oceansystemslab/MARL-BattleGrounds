@@ -42,6 +42,9 @@ semantics, troubleshooting, and contributor checks.
 - [Evaluation protocol](docs/evaluation/protocol.md) defines evaluation cells,
   aggregation, inference, cross-play, scenarios, failure handling, and
   information-regime reporting.
+- [Standard replay format](docs/evaluation/replay_format.md) defines the
+  versioned semantic replay normal form, content-addressed companion artifacts,
+  and whole-artifact validation boundary.
 
 ## Author
 

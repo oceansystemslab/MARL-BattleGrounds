@@ -292,6 +292,14 @@ recorded observer-processing failure does not erase a fully consumed prefix:
 complete-only eligibility requires rollout completion and equal validated and
 processed transition counts, not a successful-status label by itself.
 
+For standard replay, `EvaluationMetricReportV1` is wrapped in its own
+content-addressed artifact and joined to the replay's pre-link trajectory
+content. The replay stores only the report artifact's path-free identity,
+schema, digest, and canonical byte length. Missing sidecar bytes do not make
+the semantic trajectory unrenderable, but they do make metric-bundle evidence
+incomplete and must be reported as such. See the
+[standard replay format](replay_format.md).
+
 ## Canonical task-independent metrics
 
 ### Outcome and completion templates

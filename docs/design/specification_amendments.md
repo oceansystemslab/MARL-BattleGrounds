@@ -419,3 +419,32 @@ according to its resolved class profile when the countdown permits it.
 Movement is not itself a regeneration blocker. The authoritative transition
 facts preserve countdown resets and actual realized regeneration rather than a
 cumulative recovery metric.
+
+## A10. Standard semantic replay ownership
+
+**Classification:** required artifact-boundary clarification.
+**Supersedes:** any historical wording that treats a raw simulator state,
+renderer frame, or debugger session as the durable replay authority.
+
+Milestone 6 version-1 replay stores the accepted evaluation context once plus
+exactly `T + 1` semantic frames and `T` adjacent transitions, rollout
+completion, independent evaluation-processing status, and a path-free
+content-addressed metric-report reference. It does not store `EnvState`, policy
+state, renderer summaries, local paths, or browser/session authority.
+
+The episode context keeps exactly its eight CP2 schema bindings. The closed
+replay/metric-report envelope has a separate exact binding map in the replay
+header. Downstream scenario and actor-POV companions self-version and carry a
+typed replay reference; their schemas are not retroactively inserted into the
+replay header. A pre-link trajectory-content digest covers the header,
+completion, processing status, frames, and transitions while excluding the
+report reference and replay-level digests. The report artifact references that
+pre-link content; the completed replay references the report artifact; later
+scenario and actor-POV artifacts reference the completed replay. This one-way
+graph prevents content-hash cycles.
+
+Replay validity requires an explicit O(T) semantic pass using the public
+initial-frame and four-record validators. Direct Pydantic revalidation proves
+structure only. Offline analysis and presentation may consume only serialized
+catalog mappings and captured semantic records; they never rerun a simulator
+or recreate mechanics.
