@@ -160,14 +160,60 @@ event tuple. Exact actor-input export is supported for `no_shared_obs`. Under
 view, but exact materialized input export fails closed until the Milestone 12
 compositor exists.
 
-## Persistence ownership
+## Canonical local persistence
 
-Canonical local JSON persistence, bounded parsing, atomic publication, and
-sidecar resolution are owned by the replay I/O layer defined in the next
-contract checkpoint. The in-memory model contract does not contain paths and
-does not treat a direct `model_validate_json` call as proof of canonical bytes,
-digest validity, or whole-artifact semantics.
+`marl_battlegrounds.evaluation.replay_io` owns paths and bytes while
+`evaluation.replay` remains the semantic model boundary. The stable library
+surface is:
 
-Version 1 permits only finite plain UTF-8 JSON. URLs, symlinks, archives,
-compression, pickle, dynamic imports, and network resolution are outside the
-standard replay contract.
+- `canonical_replay_json_bytes_v1` and
+  `canonical_metric_report_artifact_json_bytes_v1` for exact target bytes;
+- `save_replay_bundle_v1` for report-first, replay-last publication;
+- `load_replay_artifact_v1` for a standalone trajectory; and
+- `load_replay_bundle_v1` for optional or required metric-sidecar resolution.
+
+The filename pair is derived locally, never serialized:
+
+```text
+episode.marlbg-replay.json
+episode.marlbg-metrics.json
+```
+
+Version 1 accepts finite plain UTF-8 JSON only. Loading rejects a byte-order
+mark, invalid UTF-8, duplicate object keys, non-finite or overflowing numeric
+literals, trailing content, excessive nesting, unknown/future roots, extra
+model fields, digest mismatches, and noncanonical whitespace or key order.
+Files are bounded before parsing (1 GiB by default, with an explicit positive
+library override) and the JSON nesting limit defaults to 128. A direct
+`model_validate_json` call is never advertised as proof of canonical bytes,
+digest validity, or whole-artifact semantics: the loader performs byte
+preflight, strict model validation, the O(T) replay validator, and exact
+canonical reserialization in that order.
+
+Only existing local directories and regular nonsymlink files participate.
+URLs, symlinks in any path component, archives, compression, pickle, dynamic
+imports, implicit directory creation, and network resolution are outside the
+contract. Replay loading imports no JAX, backend, simulator, policy, capture,
+or device-transfer path. Evaluation-owned V1 wire dimensions are frozen for
+artifact decoding and checked against the current core dimensions in ordinary
+tests; changing them requires an explicit schema migration. The V1 filesystem
+backend requires POSIX directory-descriptor and no-follow support so every
+component and final operation remain bound to one opened directory inode; it
+fails closed with `unsupported_platform` when those guarantees are unavailable.
+
+Saving writes each member to a same-directory temporary file, flushes and
+`fsync`s it, then publishes by atomic no-clobber hard link and `fsync`s the
+directory. The content-addressed metric report is published first and may be
+reused only when existing bytes are identical. The replay is published last
+and is never overwritten. A publication failure removes only a link proven to
+belong to that temporary inode, preserves every pre-existing target, and leaves
+immutable bytes available for a safe retry. A report orphan created before a
+failed replay publication is recoverable by identical-byte reuse; no published
+replay can point to an unpublished report.
+
+`load_replay_bundle_v1(..., require_metric_report=False)` returns a typed
+`metric_report_missing` status when the trajectory is valid but its sidecar is
+absent. Requiring the sidecar makes absence an error. A present but malformed,
+noncanonical, foreign, or digest-mismatched sidecar always fails; it is never
+downgraded to “missing.” Loaded frame and incoming-transition selection is a
+direct tuple lookup after the one-time O(T) semantic validation.

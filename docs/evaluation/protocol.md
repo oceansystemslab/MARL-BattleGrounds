@@ -539,6 +539,18 @@ bindings live in the replay header. Structural model validation alone is not a
 semantic replay-validity claim: every loaded artifact must pass the explicit
 whole-artifact validator over frame zero and all adjacent four-record units.
 
+Canonical replay persistence is local, bounded, and fail-closed. The loader
+accepts only canonical finite UTF-8 JSON in regular nonsymlink files, rejects
+duplicate keys, excessive depth/size, unknown versions, and digest or semantic
+mismatches, and performs no JAX/backend, simulator, policy, capture, or device
+work. Bundle publication writes the content-addressed metric report first and
+the replay last through same-directory durable no-clobber publication. A replay
+is still renderable when a report sidecar is absent, but a present invalid or
+foreign sidecar is an error and metric completeness is never inferred.
+The V1 filesystem backend requires descriptor-relative POSIX no-follow
+operations and fails closed on platforms that cannot keep every path component
+and both bundle publications bound to one opened directory inode.
+
 Rollout completion, evaluation-processing validity, and per-statistic endpoint
 observation remain independent in both live and replay-loaded analysis. A
 processing failure never rewrites a provably complete rollout, and an

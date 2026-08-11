@@ -44,7 +44,7 @@ semantics, troubleshooting, and contributor checks.
   information-regime reporting.
 - [Standard replay format](docs/evaluation/replay_format.md) defines the
   versioned semantic replay normal form, content-addressed companion artifacts,
-  and whole-artifact validation boundary.
+  whole-artifact validation boundary, and canonical bounded local persistence.
 
 ## Author
 

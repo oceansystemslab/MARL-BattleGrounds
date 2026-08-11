@@ -5,30 +5,30 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
+from math import hypot, isfinite
 from typing import Annotated, Literal, cast
 
-import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
-from marl_battlegrounds.core.types import (
-    CONTEXT_FEATURES,
-    ENVIRONMENT_DIMENSIONS,
-    MAX_AGENT_SLOTS,
-    MAX_AGENTS_PER_TEAM,
-    MAX_OBJECTIVE_SLOTS,
-    MAX_OBSTACLE_SLOTS,
-    NUM_CLASSES,
-    NUM_MOVE_ACTIONS,
-    NUM_SLOW_CHANNELS,
-    NUM_STUN_CHANNELS,
-    NUM_TARGET_ACTIONS,
-    NUM_TEAMS,
-    NUM_ULTIMATE_ACTIONS,
-    OBJECTIVE_FEATURES,
-    OBSTACLE_FEATURES,
-    SELF_FEATURES,
-    UNIT_FEATURES,
-)
+import marl_battlegrounds.evaluation.wire_shapes as _wire_shapes
+
+CONTEXT_FEATURES = _wire_shapes.CONTEXT_FEATURES_V1
+ENVIRONMENT_DIMENSIONS = _wire_shapes.ENVIRONMENT_DIMENSIONS_V1
+MAX_AGENT_SLOTS = _wire_shapes.MAX_AGENT_SLOTS_V1
+MAX_AGENTS_PER_TEAM = _wire_shapes.MAX_AGENTS_PER_TEAM_V1
+MAX_OBJECTIVE_SLOTS = _wire_shapes.MAX_OBJECTIVE_SLOTS_V1
+MAX_OBSTACLE_SLOTS = _wire_shapes.MAX_OBSTACLE_SLOTS_V1
+NUM_CLASSES = _wire_shapes.NUM_CLASSES_V1
+NUM_MOVE_ACTIONS = _wire_shapes.NUM_MOVE_ACTIONS_V1
+NUM_SLOW_CHANNELS = _wire_shapes.NUM_SLOW_CHANNELS_V1
+NUM_STUN_CHANNELS = _wire_shapes.NUM_STUN_CHANNELS_V1
+NUM_TARGET_ACTIONS = _wire_shapes.NUM_TARGET_ACTIONS_V1
+NUM_TEAMS = _wire_shapes.NUM_TEAMS_V1
+NUM_ULTIMATE_ACTIONS = _wire_shapes.NUM_ULTIMATE_ACTIONS_V1
+OBJECTIVE_FEATURES = _wire_shapes.OBJECTIVE_FEATURES_V1
+OBSTACLE_FEATURES = _wire_shapes.OBSTACLE_FEATURES_V1
+SELF_FEATURES = _wire_shapes.SELF_FEATURES_V1
+UNIT_FEATURES = _wire_shapes.UNIT_FEATURES_V1
 
 CATALOG_SCHEMA_ID = "marl_battlegrounds.evaluation.static_mechanics_catalog"
 CATALOG_SCHEMA_VERSION = 1
@@ -213,7 +213,7 @@ class StatusMechanicV1(EvaluationModel):
         if self.magnitude_kind == "none":
             if self.magnitude is not None:
                 raise ValueError("stun-like status channels must omit magnitude")
-        elif self.magnitude is None or not np.isfinite(self.magnitude):
+        elif self.magnitude is None or not isfinite(self.magnitude):
             raise ValueError("non-stun status channels require a finite magnitude")
         return self
 
@@ -430,7 +430,9 @@ def _validate_catalog_mappings(catalog: StaticMechanicsCatalogV1) -> None:
     if len(set(directions)) != NUM_MOVE_ACTIONS:
         raise ValueError("movement direction rows must be unique")
     for direction in directions[1:]:
-        if not np.isclose(np.linalg.norm(direction), 1.0, rtol=1e-6, atol=1e-6):
+        norm = hypot(*direction)
+        # Preserve the V1 ``atol + rtol * abs(reference)`` acceptance boundary.
+        if abs(norm - 1.0) > 1e-6 + 1e-6 * abs(1.0):
             raise ValueError("non-Stay movement directions must be unit vectors")
 
 

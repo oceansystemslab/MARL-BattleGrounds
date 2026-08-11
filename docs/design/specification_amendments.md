@@ -448,3 +448,16 @@ initial-frame and four-record validators. Direct Pydantic revalidation proves
 structure only. Offline analysis and presentation may consume only serialized
 catalog mappings and captured semantic records; they never rerun a simulator
 or recreate mechanics.
+
+Canonical V1 persistence is finite local UTF-8 JSON with exact canonical-byte
+equality after strict model and whole-replay validation. It rejects symlinks,
+nonregular files, duplicate keys, non-finite or oversized/deep inputs, unknown
+versions, and mismatched content references. Publication is atomic and
+no-clobber: the metric-report object is durable before the referencing replay,
+an existing report is reused only when bytes are identical, and replay targets
+are never overwritten. The host loader owns frozen V1 wire dimensions and must
+not import or initialize JAX, a backend, simulator, policy, or capture path.
+The V1 filesystem backend fails closed unless POSIX directory-descriptor and
+no-follow operations can prevent ancestor-symlink races; report reuse
+synchronizes the exact compared file descriptor before a referencing replay is
+published.
