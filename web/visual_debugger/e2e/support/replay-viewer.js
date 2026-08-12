@@ -1,0 +1,250 @@
+import { execFile, spawn } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
+import { promisify } from "node:util";
+
+import {
+  DEBUGGER_STOP_TIMEOUT_MS,
+  REPOSITORY_ROOT,
+  stopDebugger,
+} from "./live-debugger.js";
+
+const execFileAsync = promisify(execFile);
+const STARTUP_TIMEOUT_MS = 60_000;
+
+/**
+ * Generate real canonical artifacts through the public Python capture,
+ * observer, replay, and persistence APIs.
+ *
+ * @returns {Promise<{
+ *   outputDirectory: string,
+ *   complete: string,
+ *   partial: string,
+ *   shared: string,
+ *   missingMetric: string,
+ * }>}
+ */
+export async function exportReplayArtifacts() {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "marl-battlegrounds-replay-e2e-"),
+  );
+  try {
+    const result = await execFileAsync(
+      "uv",
+      [
+        "run",
+        "python",
+        "-m",
+        "tests.export_visual_debugger_replay_artifacts",
+        "--output-directory",
+        outputDirectory,
+      ],
+      {
+        cwd: REPOSITORY_ROOT,
+        env: process.env,
+        maxBuffer: 1024 * 1024,
+        timeout: 120_000,
+      },
+    );
+    const payload = JSON.parse(result.stdout.trim());
+    if (
+      typeof payload.complete !== "string" ||
+      typeof payload.partial !== "string" ||
+      typeof payload.shared !== "string" ||
+      typeof payload.missing_metric !== "string"
+    ) {
+      throw new TypeError("Replay exporter returned an invalid path manifest.");
+    }
+    return {
+      outputDirectory,
+      complete: payload.complete,
+      partial: payload.partial,
+      shared: payload.shared,
+      missingMetric: payload.missing_metric,
+    };
+  } catch (error) {
+    await rm(outputDirectory, { force: true, recursive: true });
+    throw error;
+  }
+}
+
+/**
+ * Remove only the unique temporary directory created by exportReplayArtifacts.
+ *
+ * @param {string | null | undefined} outputDirectory
+ */
+export async function removeReplayArtifacts(outputDirectory) {
+  if (!outputDirectory) {
+    return;
+  }
+  const resolvedDirectory = resolve(outputDirectory);
+  if (
+    dirname(resolvedDirectory) !== resolve(tmpdir()) ||
+    !basename(resolvedDirectory).startsWith("marl-battlegrounds-replay-e2e-")
+  ) {
+    throw new Error("Refusing to remove a directory outside the replay E2E prefix.");
+  }
+  await rm(resolvedDirectory, { force: true, recursive: true });
+}
+
+/**
+ * Start the production CLI in browser replay mode against one canonical file.
+ *
+ * @param {{
+ *   replayPath: string,
+ *   frameIndex?: number,
+ *   view?: "researcher" | "pov",
+ *   povSlot?: number,
+ *   preset?: "presentation" | "analysis" | "debug",
+ *   ranges?: boolean,
+ * }} options
+ * @returns {Promise<{
+ *   process: import("node:child_process").ChildProcess,
+ *   url: string,
+ * }>}
+ */
+export function startReplayViewer({
+  replayPath,
+  frameIndex,
+  view,
+  povSlot,
+  preset,
+  ranges,
+}) {
+  /** @type {string[]} */
+  const replayArguments = ["--replay", replayPath, "--no-open", "--port", "0"];
+  if (Number.isInteger(frameIndex)) {
+    replayArguments.push("--frame-index", String(frameIndex));
+  }
+  if (view) {
+    replayArguments.push("--view", view);
+  }
+  if (Number.isInteger(povSlot)) {
+    replayArguments.push("--pov-slot", String(povSlot));
+  }
+  if (preset) {
+    replayArguments.push("--preset", preset);
+  }
+  if (typeof ranges === "boolean") {
+    replayArguments.push(ranges ? "--ranges" : "--no-ranges");
+  }
+
+  return new Promise((resolveUrl, reject) => {
+    const child = spawn(
+      "uv",
+      ["run", "python", "-u", "scripts/dev/debug_renderer.py", ...replayArguments],
+      {
+        cwd: REPOSITORY_ROOT,
+        env: process.env,
+      },
+    );
+    let settled = false;
+    let stdout = "";
+    let stderr = "";
+    const timeout = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      child.kill("SIGTERM");
+      reject(new Error(`Replay viewer startup timed out.\n${stderr}`));
+    }, STARTUP_TIMEOUT_MS);
+
+    child.once("error", (error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk) => {
+      stdout += String(chunk);
+      const match = stdout.match(
+        /Visual Debugger and Analyzer: (http:\/\/127\.0\.0\.1:\d+\/#token=[A-Za-z0-9_-]+)/,
+      );
+      if (!match || settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      resolveUrl({ process: child, url: match[1] });
+    });
+    child.once("exit", (code) => {
+      clearTimeout(timeout);
+      if (!settled) {
+        settled = true;
+        reject(
+          new Error(
+            `Replay viewer exited before startup with code ${code}.\n${stderr}`,
+          ),
+        );
+      }
+    });
+  });
+}
+
+/**
+ * Read one authenticated replay route from inside the real browser origin.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @param {"/api/frame" | "/api/replay/timeline"} path
+ * @returns {Promise<Record<string, any>>}
+ */
+async function authenticatedReplayGet(page, path) {
+  return page.evaluate(async (requestPath) => {
+    const token = window.sessionStorage.getItem("marl-battlegrounds.debugger-token");
+    if (!token) {
+      throw new Error("Replay capability token is unavailable.");
+    }
+    const response = await fetch(requestPath, {
+      cache: "no-store",
+      credentials: "omit",
+      headers: { "X-MARL-Debugger-Token": token },
+      redirect: "error",
+    });
+    if (!response.ok) {
+      throw new Error(`${requestPath} failed with HTTP ${response.status}.`);
+    }
+    return response.json();
+  }, path);
+}
+
+/** @param {import("@playwright/test").Page} page */
+export function currentReplayFrame(page) {
+  return authenticatedReplayGet(page, "/api/frame");
+}
+
+/** @param {import("@playwright/test").Page} page */
+export function currentReplayTimeline(page) {
+  return authenticatedReplayGet(page, "/api/replay/timeline");
+}
+
+/**
+ * Wait for the browser to install a replay frame at one exact cursor index.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @param {number} frameIndex
+ */
+export async function expectReplayFrameIndex(page, frameIndex) {
+  const expected = String(frameIndex);
+  await page
+    .locator("#replay-frame-slider")
+    .waitFor({ state: "visible", timeout: 30_000 });
+  await page.waitForFunction(
+    ([selector, value]) => {
+      const slider = document.querySelector(selector);
+      return slider instanceof HTMLInputElement && slider.value === value;
+    },
+    ["#replay-frame-slider", expected],
+    { timeout: 30_000 },
+  );
+}
+
+export { DEBUGGER_STOP_TIMEOUT_MS, stopDebugger };

@@ -151,6 +151,8 @@ def test_index_and_allowlisted_assets_use_security_headers(
         ("/", "text/html"),
         ("/styles.css", "text/css"),
         ("/src/main.js", "text/javascript"),
+        ("/src/replay-controls.js", "text/javascript"),
+        ("/src/replay-frame-normalizer.js", "text/javascript"),
         ("/src/explanations.js", "text/javascript"),
         ("/src/tooltip.js", "text/javascript"),
         (
@@ -479,10 +481,26 @@ def test_unknown_routes_and_methods_are_not_cors_enabled(
     server, _ = running_server
     missing, _ = _exchange(server, "GET", "/missing")
     options, _ = _exchange(server, "OPTIONS", "/api/command")
+    replay_timeline, _ = _exchange(
+        server,
+        "GET",
+        "/api/replay/timeline",
+        headers=_authorized_headers(),
+    )
+    replay_command, _ = _exchange(
+        server,
+        "POST",
+        "/api/replay/command",
+        body=b"{}",
+        headers=_authorized_headers(**{"Content-Type": "application/json"}),
+    )
 
     assert missing.status == 404
     assert options.status == 405
     assert options.getheader("Access-Control-Allow-Origin") is None
+    assert replay_timeline.status == replay_command.status == 404
+    assert server.coordinator.mode == "live"
+    assert server.debugger_service.revision == 0
 
 
 def test_authenticated_exit_delivers_response_then_stops_server() -> None:

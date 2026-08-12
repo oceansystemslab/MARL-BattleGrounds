@@ -182,6 +182,7 @@ function pointInSvg(svg, event) {
  *   onHelp: () => void,
  *   onPresentationKey?: (key: "toggle-pause") => void,
  *   onReleaseFocus: () => void,
+ *   isInteractive?: () => boolean,
  * }} bindings
  */
 export function bindBattlefieldControls({
@@ -191,8 +192,12 @@ export function bindBattlefieldControls({
   onHelp,
   onPresentationKey = () => {},
   onReleaseFocus,
+  isInteractive = () => true,
 }) {
   battlefield.addEventListener("keydown", async (event) => {
+    if (!isInteractive()) {
+      return;
+    }
     if (!isDebuggerKey(event)) {
       return;
     }
@@ -220,6 +225,9 @@ export function bindBattlefieldControls({
   });
 
   battlefield.addEventListener("pointerdown", (event) => {
+    if (!isInteractive()) {
+      return;
+    }
     if (event.button !== 0 && event.button !== 2) {
       return;
     }
@@ -247,6 +255,8 @@ export function bindBattlefieldControls({
   });
 
   battlefield.addEventListener("contextmenu", (event) => {
-    event.preventDefault();
+    if (isInteractive()) {
+      event.preventDefault();
+    }
   });
 }

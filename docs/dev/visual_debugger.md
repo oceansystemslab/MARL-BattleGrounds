@@ -1,11 +1,12 @@
 # Visual Debugger and Analyzer
 
-The Visual Debugger and Analyzer is an explicit-submit research tool for
-inspecting battlefield geometry, exact action-mask values, pending actions,
-accepted actions, canonical transition causes, statuses, and selected-target
-facts.
-The live application uses a local browser. A stateless Matplotlib snapshot
-remains available for compatibility and headless use.
+The Visual Debugger and Analyzer is a research tool for inspecting battlefield
+geometry, exact action-mask values, canonical transition causes, statuses, and
+audience-authorized actor facts. Its live mode adds explicit-submit controls,
+pending actions, and accepted-action inspection. Its replay mode is strictly
+read-only and traverses a validated recorded artifact without importing or
+running the simulator. A stateless Matplotlib snapshot remains available for
+compatibility and headless use.
 
 ## Authority boundary
 
@@ -22,11 +23,14 @@ Python is the sole authority for:
   projection, exact NoSharedObs POV projection, and labelled SharedObs
   source-material projection.
 
-The browser owns input capture, pointer-to-world coordinate projection,
+The live browser owns input capture and pointer-to-world coordinate projection.
+Both browser modes own
 responsive layout, SVG/HTML rendering, hover/help/panel state, local
 presentation keys such as `P` and `?`, focus release after Escape, and
-presentation-only animation time. It receives one small audience-specific
-`ResearcherLiveDebuggerFrameV2` or `ActorPovLiveDebuggerFrameV2`; it never
+presentation-only animation time. Live receives one small audience-specific
+`ResearcherLiveDebuggerFrameV2` or `ActorPovLiveDebuggerFrameV2`; replay
+receives a separate audience-specific read-only viewer frame and timeline. The
+browser never
 receives raw JAX arrays or recomputes combat, visibility, targetability, agent
 hit testing, legality, accepted actions, or event causes. Researcher and POV
 wire roots are structurally distinct, so hiding a researcher field in CSS is
@@ -78,6 +82,10 @@ Useful invocations:
 ./scripts/dev/run_debug_renderer.sh --controlled-slot 5 --no-ranges
 ./scripts/dev/run_debug_renderer.sh --view pov --preset debug
 ./scripts/dev/run_debug_renderer.sh --no-open --port 8123
+./scripts/dev/run_debug_renderer.sh --replay episode.marlbg-replay.json
+./scripts/dev/run_debug_renderer.sh \
+  --replay episode.marlbg-replay.json --frame-index 12 \
+  --view pov --pov-slot 5 --preset analysis
 ./scripts/dev/run_debug_renderer.sh \
   --replay episode.marlbg-replay.json --static --frame-index 12
 ```
@@ -98,13 +106,17 @@ Useful invocations:
 | `--verbose` | Enable expanded diagnostics. |
 | `--ranges` / `--no-ranges` | Initially show or hide controlled-actor ranges. |
 | `--static` | Render one Matplotlib reset snapshot; start no server and register no callbacks. |
-| `--replay PATH` | Load a validated semantic replay; currently paired with `--static`. |
-| `--frame-index N` | Select the absolute replay frame for static rendering. Default: `0`. |
+| `--replay PATH` | Load a validated semantic replay in the read-only browser viewer, or pair it with `--static`. |
+| `--frame-index N` | Select the initial absolute replay frame. Browser default: `0`; required for replay `--static`. |
+| `--pov-slot N` | Select the initial configured-active actor for replay POV authorization. |
 
 Option abbreviations are rejected. Unknown scenarios, invalid ports or
 arguments, and inactive controlled slots exit with code `2`.
-`--no-open`, `--port`, `--view`, and `--preset` are browser-only and have no
-effect on a `--static` snapshot.
+Browser replay accepts only `--frame-index`, `--pov-slot`, `--view`, `--preset`,
+`--ranges`/`--no-ranges`, `--port`, and `--no-open`. Replay static mode is the
+exact combination `--replay PATH --static --frame-index N`; it rejects every
+browser- and live-only option, including an explicitly supplied default. This
+presence-aware matrix prevents a mistyped option from being silently ignored.
 
 ## Loopback lifecycle and safety
 
@@ -499,6 +511,77 @@ is wrapped in an exact typed live response root before outbound JSON enters the
 same strict browser normalizer as production. They are never submitted to the
 simulator and must not be described as valid histories.
 
+## Read-only browser replay
+
+Open a canonical replay without starting the simulator:
+
+```bash
+./scripts/dev/run_debug_renderer.sh --replay episode.marlbg-replay.json
+```
+
+The launcher resolves and validates the replay bundle, its completion record,
+processing record, and optional metric sidecar before importing the loopback
+server or asking the operating system to open a browser. Invalid paths,
+symlinks, noncanonical artifacts, out-of-range frames, and unavailable POV
+actors fail before bind/open. A successful replay launch imports neither JAX,
+NumPy, the simulator core, live debugger control, scenarios, nor policies.
+
+Replay uses the same renderer-neutral Scene/Event projection as live analysis,
+but its outer protocol is separate and read-only. The browser fetches an exact
+current frame and a matching audience-owned timeline:
+
+- Researcher frames expose canonical transition IDs, exact event counts,
+  completion and processing badges, durable status-source evidence, and the
+  full researcher projection. Roster selection is labelled **Reference** and
+  controls only inspector/highlight state; it is never a controlled actor or a
+  submission target.
+- Exact NoSharedObs actor POV frames expose only the recipient projection,
+  recipient-local transition/cue IDs, public completion evidence, and a
+  constant statement that processing and metric-report availability are not
+  available in actor POV. Researcher processing truth is never copied into the
+  POV root.
+- SharedObs POV mode is explicitly labelled **source material only**. It shows
+  the recorded base-sensor material and availability joins, never claims a
+  materialized actor input, and never invents an exact SharedObs export.
+
+The timeline controls are **First**, **Previous**, **Play/Pause**, **Next**,
+**Last**, and an absolute frame slider. `Home`/`End`, Left/Right, and Space are
+their keyboard equivalents while the replay timeline has focus. The slider is
+debounced; autoplay keeps exactly one request and one presentation in flight.
+Seeking, a hidden tab, disconnect, error, or the captured endpoint pauses it.
+Motion Off still uses a bounded cadence rather than issuing an unbounded request
+loop.
+
+Only an exact accepted `Next` from frame `k` to `k + 1` may animate the incoming
+recorded explanation. Absolute seeks, backward moves, same-frame seeks,
+audience/preset/range/verbosity changes, duplicate commands, stale responses,
+and reconnects install settled frames. The animation hint belongs to that one
+command response; it is not durable replay state and cannot be recovered from a
+later `GET /api/frame`.
+
+Live scenario, action-composer, submission, reset, movement-scale, and pending
+action controls are hidden and removed from keyboard focus in replay. Replay
+keeps presentation presets, local motion controls, researcher-only ranges and
+Reference selection, recipient switching, verbosity, Reconnect, Help, and
+Exit. Every accepted command is revisioned and idempotent under the same
+single-request loopback safety model as live mode, but none can call `step` or
+mutate the replay artifact.
+
+Useful launches:
+
+```bash
+# Start at a researcher frame without opening the browser automatically.
+./scripts/dev/run_debug_renderer.sh \
+  --replay episode.marlbg-replay.json --frame-index 12 --no-open
+
+# Start in recipient-safe POV for configured-active slot 5.
+./scripts/dev/run_debug_renderer.sh \
+  --replay episode.marlbg-replay.json --view pov --pov-slot 5
+```
+
+Closing the tab does not stop Python. Use **Exit analyzer** or `Ctrl-C` in the
+launching terminal.
+
 ## Static Matplotlib snapshot
 
 Install the optional visualization dependency and render one reset frame:
@@ -564,6 +647,12 @@ green.
   before binding.
 - **Offline/stale banner:** use Reconnect to fetch current authority; never
   retry a submit by hand unless the latest frame proves it was not applied.
+- **Replay rejected before a URL is printed:** inspect the reported artifact,
+  companion-sidecar, frame-index, or POV-slot validation error. The launcher
+  deliberately does not bind or open a browser after a failed replay load.
+- **Replay controls are disabled:** Previous/Next stop at the captured bounds;
+  Reference and ranges are Researcher-only; action and scenario controls are
+  never available in read-only replay.
 - **First submit is slow:** the first JAX transition may compile; the busy state
   is immediate and no warm-up step is performed.
 - **Static Matplotlib missing:** run `uv sync --extra viz`.
@@ -573,16 +662,19 @@ green.
 
 The reusable boundary is the renderer-neutral Scene/Event V2 vocabulary, SVG
 painter, layout, animation controller, presets, and accessibility conventions.
-Pending actions, revision/idempotency handling, and the loopback command
-protocol are live-analyzer-only. Live responses are outbound-only presentation
-roots: Python constructs them from exact typed projections and serializes them,
-and the browser validates the JSON at its single normalization boundary. Inbound
-commands use strict Pydantic JSON validation; durable replay/POV/scenario files
-use their separate canonical loaders and whole-artifact validators.
+Pending actions and simulator commands are live-analyzer-only. Replay has a
+separate read-only, revisioned, idempotent loopback command protocol. Live
+responses are outbound-only presentation roots: Python constructs them from
+exact typed projections and serializes them, and the browser validates the JSON
+at its single normalization boundary. Inbound commands use strict Pydantic JSON
+validation; durable replay/POV/scenario files use their separate canonical
+loaders and whole-artifact validators.
 
-The standard replay owns a separate integrity/export contract and already
-reuses the renderer-neutral durable-scene boundary for offline static frames.
-The live analyzer still owns pending actions and simulator commands; replay
-never simulates them. Interactive replay owns a separate read-only timeline and
-outer frame/command envelope rather than reusing either live V2 frame as
-artifact authority.
+The standard replay owns a separate integrity/export contract and reuses the
+renderer-neutral durable-scene boundary for browser and static frames. The live
+analyzer still owns pending actions and simulator commands; replay never
+simulates them. Interactive replay owns a separate audience-specific read-only
+timeline and outer frame/command envelope rather than reusing either live V2
+frame as artifact authority. Its HTTP coordinator is core-free and receives
+the exact live or replay request model and service through injection, so loading
+the replay viewer cannot transitively import the live simulator stack.

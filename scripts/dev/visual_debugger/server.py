@@ -1,27 +1,22 @@
-"""Authenticated loopback HTTP transport for the live visual debugger."""
+"""Core-free authenticated HTTP coordinator for debugger browser modes."""
 
 from __future__ import annotations
 
 import secrets
 import sys
 import webbrowser
+from collections.abc import Callable
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from inspect import Parameter, Signature, signature
 from pathlib import Path
 from socket import socket
 from threading import Event, Lock, Thread
-from typing import cast
+from typing import Any, Literal, Protocol, cast, get_args
 from urllib.parse import urlsplit
 
-from pydantic import ValidationError
-
-from scripts.dev.visual_debugger.protocol import (
-    ApiErrorCode,
-    ApiErrorV2,
-    CommandRequestV1,
-)
-from scripts.dev.visual_debugger.service import DebuggerService
+from pydantic import BaseModel, ValidationError
 
 _TOKEN_HEADER = "X-MARL-Debugger-Token"
 _MAX_COMMAND_BODY_BYTES = 64 * 1024
@@ -66,6 +61,8 @@ _REQUIRED_RUNTIME_ASSET_PATHS = (
     "src/layout.js",
     "src/main.js",
     "src/panels.js",
+    "src/replay-controls.js",
+    "src/replay-frame-normalizer.js",
     "src/routes.js",
     "src/scene.js",
     "src/tooltip.js",
@@ -73,6 +70,193 @@ _REQUIRED_RUNTIME_ASSET_PATHS = (
     "assets/fonts/AtkinsonHyperlegible-Regular.woff2",
     "assets/fonts/AtkinsonHyperlegible-Bold.woff2",
 )
+
+type DebuggerServerMode = Literal["live", "replay"]
+
+
+@dataclass(frozen=True, slots=True)
+class HttpRouteSet:
+    """Exact API routes exposed by one debugger server mode."""
+
+    frame: str
+    command: str
+    timeline: str | None
+
+
+LIVE_HTTP_ROUTES = HttpRouteSet(
+    frame="/api/frame",
+    command="/api/command",
+    timeline=None,
+)
+REPLAY_HTTP_ROUTES = HttpRouteSet(
+    frame="/api/frame",
+    command="/api/replay/command",
+    timeline="/api/replay/timeline",
+)
+
+
+class HttpCommandResult(Protocol):
+    """Structural command result shared by live and replay services."""
+
+    @property
+    def outcome(self) -> str: ...
+
+    @property
+    def payload(self) -> object: ...
+
+    @property
+    def shutdown_requested(self) -> bool: ...
+
+
+class _LegacyServiceOperations(Protocol):
+    def current_frame(self) -> object: ...
+
+    def apply_command(self, request: BaseModel) -> HttpCommandResult: ...
+
+
+def _default_result_status(result: HttpCommandResult) -> HTTPStatus:
+    """Preserve the established live service-outcome HTTP mapping."""
+    outcome = _require_string(result.outcome, name="outcome")
+    return {
+        "invalid_cursor": HTTPStatus.UNPROCESSABLE_ENTITY,
+        "audience_unavailable": HTTPStatus.UNPROCESSABLE_ENTITY,
+        "stale_revision": HTTPStatus.CONFLICT,
+        "command_id_conflict": HTTPStatus.CONFLICT,
+        "server_shutting_down": HTTPStatus.SERVICE_UNAVAILABLE,
+        "service_faulted": HTTPStatus.INTERNAL_SERVER_ERROR,
+    }.get(outcome, HTTPStatus.OK)
+
+
+def _require_string(value: object, *, name: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"Debugger service results require a string {name}.")
+    return value
+
+
+def _require_boolean(value: object, *, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise TypeError(f"Debugger service results require a boolean {name}.")
+    return value
+
+
+def _require_http_status(value: object) -> HTTPStatus:
+    if not isinstance(value, HTTPStatus):
+        raise TypeError("Result status resolver must return HTTPStatus.")
+    return value
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class HttpCoordinatorBinding:
+    """Injected protocol and service operations for one isolated server mode."""
+
+    mode: DebuggerServerMode
+    routes: HttpRouteSet
+    request_model: type[BaseModel]
+    error_factory: Callable[..., object]
+    current_frame: Callable[[], object]
+    apply_command: Callable[..., HttpCommandResult]
+    current_timeline: Callable[[], object] | None = None
+    result_status: Callable[[HttpCommandResult], HTTPStatus] = _default_result_status
+
+    def __post_init__(self) -> None:
+        if self.mode not in ("live", "replay"):
+            raise ValueError("debugger server mode must be 'live' or 'replay'.")
+        expected_routes = (
+            LIVE_HTTP_ROUTES if self.mode == "live" else REPLAY_HTTP_ROUTES
+        )
+        if self.routes != expected_routes:
+            raise ValueError(
+                f"{self.mode} debugger mode requires its exact HTTP route set."
+            )
+        request_model = cast(object, self.request_model)
+        if not isinstance(request_model, type) or not issubclass(
+            request_model, BaseModel
+        ):
+            raise TypeError("request_model must be an exact Pydantic model class.")
+        operations = {
+            "error_factory": self.error_factory,
+            "current_frame": self.current_frame,
+            "apply_command": self.apply_command,
+            "result_status": self.result_status,
+        }
+        for name, operation in operations.items():
+            if not callable(operation):
+                raise TypeError(f"{name} must be callable.")
+        if self.mode == "live" and self.current_timeline is not None:
+            raise ValueError("live debugger mode cannot expose a replay timeline.")
+        if self.mode == "replay" and not callable(self.current_timeline):
+            raise ValueError("replay debugger mode requires a timeline operation.")
+
+
+def _legacy_live_binding(service: object) -> HttpCoordinatorBinding:
+    """Derive the existing live wire types without importing their modules here."""
+    current_frame = getattr(service, "current_frame", None)
+    apply_command = getattr(service, "apply_command", None)
+    if not callable(current_frame) or not callable(apply_command):
+        raise TypeError(
+            "Debugger services require callable current_frame and apply_command."
+        )
+
+    try:
+        apply_signature = signature(apply_command)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            "Could not inspect the live debugger service contract."
+        ) from exc
+    request_model = _request_model_from_signature(apply_signature)
+    error_model = _error_model_from_signature(apply_signature)
+    typed_service = cast(_LegacyServiceOperations, service)
+
+    def create_error(*, error_code: str, message: str) -> object:
+        return error_model(
+            error_code=error_code,
+            message=message,
+            latest_frame=None,
+        )
+
+    def call_current_frame() -> object:
+        return typed_service.current_frame()
+
+    def call_apply_command(request: BaseModel) -> HttpCommandResult:
+        return typed_service.apply_command(request)
+
+    return HttpCoordinatorBinding(
+        mode="live",
+        routes=LIVE_HTTP_ROUTES,
+        request_model=request_model,
+        error_factory=create_error,
+        current_frame=call_current_frame,
+        apply_command=call_apply_command,
+    )
+
+
+def _request_model_from_signature(apply_signature: Signature) -> type[BaseModel]:
+    parameters = tuple(apply_signature.parameters.values())
+    request_parameters = tuple(
+        parameter
+        for parameter in parameters
+        if parameter.kind
+        in (Parameter.POSITIONAL_ONLY, Parameter.POSITIONAL_OR_KEYWORD)
+    )
+    if len(request_parameters) != 1:
+        raise TypeError("Live apply_command must accept exactly one request model.")
+    request_model = request_parameters[0].annotation
+    if not isinstance(request_model, type) or not issubclass(request_model, BaseModel):
+        raise TypeError("Live apply_command must annotate its exact request model.")
+    return request_model
+
+
+def _error_model_from_signature(apply_signature: Signature) -> type[BaseModel]:
+    result_type = apply_signature.return_annotation
+    payload_type = getattr(result_type, "__annotations__", {}).get("payload")
+    for candidate in get_args(payload_type):
+        if not isinstance(candidate, type) or not issubclass(candidate, BaseModel):
+            continue
+        if {"error_code", "message", "latest_frame"} <= set(candidate.model_fields):
+            return candidate
+    raise TypeError(
+        "Live apply_command must return a result annotated with its API error model."
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,7 +312,7 @@ def build_static_manifest(asset_root: Path) -> dict[str, StaticAsset]:
 
 
 class DebuggerHTTPServer(ThreadingHTTPServer):
-    """Threaded loopback server carrying one authoritative debugger service."""
+    """Threaded loopback server carrying one mode-isolated coordinator."""
 
     daemon_threads = True
     block_on_close = True
@@ -136,12 +320,16 @@ class DebuggerHTTPServer(ThreadingHTTPServer):
     def __init__(
         self,
         *,
-        service: DebuggerService,
+        service: object,
+        coordinator: HttpCoordinatorBinding,
         capability_token: str,
         static_manifest: dict[str, StaticAsset],
         port: int,
     ) -> None:
-        self.debugger_service = service
+        # Retained as a deliberately untyped compatibility surface for callers
+        # that inspect the mode-specific authoritative service.
+        self.debugger_service = cast(Any, service)
+        self.coordinator = coordinator
         self.capability_token = capability_token
         self.static_manifest = static_manifest
         self.shutdown_started = Event()
@@ -193,16 +381,36 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
         route = self._route()
         if route is None or not self._valid_request_origin():
             return
-        if route == "/api/frame":
+        coordinator = self.debugger_server.coordinator
+        if route == coordinator.routes.frame:
             if not self._authenticated():
                 return
             try:
-                frame = self.debugger_server.debugger_service.current_frame()
+                frame = coordinator.current_frame()
             except Exception:
                 self._send_internal_error()
                 return
             try:
                 self._send_model(HTTPStatus.OK, frame)
+            except BrokenPipeError, ConnectionError, TimeoutError:
+                self.close_connection = True
+            except Exception:
+                self._send_internal_error()
+            return
+        if route == coordinator.routes.timeline:
+            if not self._authenticated():
+                return
+            current_timeline = coordinator.current_timeline
+            if current_timeline is None:
+                self._send_internal_error()
+                return
+            try:
+                timeline = current_timeline()
+            except Exception:
+                self._send_internal_error()
+                return
+            try:
+                self._send_model(HTTPStatus.OK, timeline)
             except BrokenPipeError, ConnectionError, TimeoutError:
                 self.close_connection = True
             except Exception:
@@ -222,7 +430,8 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
         route = self._route()
         if route is None or not self._valid_request_origin():
             return
-        if route != "/api/command":
+        coordinator = self.debugger_server.coordinator
+        if route != coordinator.routes.command:
             self._send_api_error(
                 HTTPStatus.NOT_FOUND,
                 error_code="not_found",
@@ -235,7 +444,7 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
         if body is None:
             return
         try:
-            request = CommandRequestV1.model_validate_json(body)
+            request = coordinator.request_model.model_validate_json(body)
         except ValidationError as error:
             malformed_json = any(
                 detail.get("type") == "json_invalid" for detail in error.errors()
@@ -250,32 +459,35 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
                 message=(
                     "Request body is not valid JSON."
                     if malformed_json
-                    else "Request body does not match CommandRequestV1."
+                    else (
+                        "Request body does not match "
+                        f"{coordinator.request_model.__name__}."
+                    )
                 ),
             )
             return
 
         try:
-            result = self.debugger_server.debugger_service.apply_command(request)
+            result = coordinator.apply_command(request)
+            shutdown_requested = _require_boolean(
+                result.shutdown_requested,
+                name="shutdown flag",
+            )
         except Exception:
             self._send_internal_error()
             return
-        status = {
-            "stale_revision": HTTPStatus.CONFLICT,
-            "command_id_conflict": HTTPStatus.CONFLICT,
-            "server_shutting_down": HTTPStatus.SERVICE_UNAVAILABLE,
-            "service_faulted": HTTPStatus.INTERNAL_SERVER_ERROR,
-        }.get(result.outcome, HTTPStatus.OK)
         try:
-            self._send_model(status, result.payload)
-            if result.shutdown_requested:
+            status = _require_http_status(coordinator.result_status(result))
+            payload = result.payload
+            self._send_model(status, payload)
+            if shutdown_requested:
                 self.wfile.flush()
         except BrokenPipeError, ConnectionError, TimeoutError:
             self.close_connection = True
         except Exception:
             self._send_internal_error()
         finally:
-            if result.shutdown_requested:
+            if shutdown_requested:
                 self.debugger_server.request_shutdown()
 
     def do_OPTIONS(self) -> None:
@@ -426,17 +638,14 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
         self,
         status: HTTPStatus,
         *,
-        error_code: ApiErrorCode,
+        error_code: str,
         message: str,
     ) -> None:
-        self._send_model(
-            status,
-            ApiErrorV2(
-                error_code=error_code,
-                message=message,
-                latest_frame=None,
-            ),
+        error = self.debugger_server.coordinator.error_factory(
+            error_code=error_code,
+            message=message,
         )
+        self._send_model(status, error)
 
     def _send_model(self, status: HTTPStatus, model: object) -> None:
         model_dump_json = getattr(model, "model_dump_json", None)
@@ -468,18 +677,21 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
 
 
 def create_server(
-    service: DebuggerService,
+    service: object,
     *,
     asset_root: Path,
     port: int,
     capability_token: str | None = None,
+    coordinator: HttpCoordinatorBinding | None = None,
 ) -> DebuggerHTTPServer:
     """Validate assets, then bind one debugger server to loopback."""
     if not 0 <= port <= 65535:
         raise ValueError(f"port must be in [0, 65535]; got {port}.")
+    resolved_coordinator = coordinator or _legacy_live_binding(service)
     manifest = build_static_manifest(asset_root)
     return DebuggerHTTPServer(
         service=service,
+        coordinator=resolved_coordinator,
         capability_token=capability_token or secrets.token_urlsafe(32),
         static_manifest=manifest,
         port=port,
@@ -487,14 +699,20 @@ def create_server(
 
 
 def serve_browser_debugger(
-    service: DebuggerService,
+    service: object,
     *,
     asset_root: Path,
     port: int,
     open_browser: bool,
+    coordinator: HttpCoordinatorBinding | None = None,
 ) -> int:
     """Bind, announce, optionally open, serve, and always close cleanly."""
-    server = create_server(service, asset_root=asset_root, port=port)
+    server = create_server(
+        service,
+        asset_root=asset_root,
+        port=port,
+        coordinator=coordinator,
+    )
     with server:
         url = f"{server.expected_origin}/#token={server.capability_token}"
         print(f"Visual Debugger and Analyzer: {url}")

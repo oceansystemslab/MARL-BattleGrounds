@@ -18,6 +18,7 @@ export async function loadRendererFixture(name) {
     "uv",
     [
       "run",
+      "--quiet",
       "python",
       "-m",
       "scripts.dev.visual_debugger.export_renderer_fixture",

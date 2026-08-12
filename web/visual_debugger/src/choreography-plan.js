@@ -908,9 +908,17 @@ export function authorizationContextKey(frame) {
   if (audience === null) {
     return null;
   }
+  const replayActor =
+    candidate?.viewer_mode === "replay"
+      ? candidate.replay_audience === "actor_pov"
+        ? integer(candidate.pov_global_slot)
+        : candidate.replay_audience === "shared_obs_source_material"
+          ? integer(candidate.selected_global_slot)
+          : null
+      : null;
   const controlled =
     audience === "agent_pov"
-      ? integer(record(scene?.selection)?.controlled_global_slot)
+      ? (replayActor ?? integer(record(scene?.selection)?.controlled_global_slot))
       : null;
   if (
     sessionId === null ||

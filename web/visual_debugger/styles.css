@@ -128,6 +128,7 @@ select {
 
 .app-header,
 .session-toolbar,
+.replay-timeline,
 .workspace,
 .notice {
   width: min(100% - 2rem, 112rem);
@@ -241,6 +242,128 @@ select {
   border-radius: var(--radius);
   background: rgb(16 24 39 / 88%);
   box-shadow: var(--shadow);
+}
+
+.replay-timeline {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+  padding: 0.8rem;
+  border: 1px solid rgb(34 211 238 / 38%);
+  border-radius: var(--radius);
+  background: linear-gradient(135deg, rgb(34 211 238 / 7%), rgb(16 24 39 / 94%));
+  box-shadow: var(--shadow);
+}
+
+.replay-timeline__summary,
+.replay-timeline__transport,
+.replay-timeline__options,
+.replay-badges {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.replay-timeline__transport,
+.replay-timeline__options {
+  min-inline-size: 0;
+  padding: 0;
+  border: 0;
+  margin: 0;
+}
+
+.replay-timeline__summary {
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.replay-timeline__summary h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.replay-badges {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  margin: 0;
+}
+
+.replay-badges div {
+  display: grid;
+  min-width: 7rem;
+  gap: 0.05rem;
+  padding: 0.35rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+  background: rgb(8 13 24 / 52%);
+}
+
+.replay-badges dt {
+  color: var(--text-muted);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.replay-badges dd {
+  overflow: hidden;
+  max-width: 19rem;
+  margin: 0;
+  font-size: 0.78rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.replay-timeline__transport {
+  display: grid;
+  grid-template-columns: repeat(5, max-content) minmax(12rem, 1fr) max-content;
+}
+
+.replay-timeline__transport button {
+  min-width: 5rem;
+}
+
+.replay-timeline__slider {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.replay-timeline__slider input {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+#replay-frame-position {
+  min-width: 6.5rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  text-align: end;
+}
+
+.replay-timeline__options {
+  flex-wrap: wrap;
+}
+
+.replay-timeline__options button[aria-pressed="true"] {
+  border-color: rgb(34 211 238 / 58%);
+  color: #a5f3fc;
+  background: rgb(34 211 238 / 12%);
+}
+
+.replay-shortcuts {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+}
+
+.replay-shortcuts kbd {
+  color: var(--text);
 }
 
 .session-toolbar label {
@@ -2799,6 +2922,7 @@ select {
 @media (max-width: 59.9375rem) {
   .app-header,
   .session-toolbar,
+  .replay-timeline,
   .workspace,
   .notice {
     width: min(100% - 1rem, 112rem);
@@ -2853,6 +2977,36 @@ select {
 
   .toolbar-actions button {
     flex: 1;
+  }
+
+  .replay-timeline__summary {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .replay-badges {
+    justify-content: stretch;
+  }
+
+  .replay-badges div {
+    flex: 1 1 9rem;
+  }
+
+  .replay-timeline__transport {
+    grid-template-columns: repeat(5, 1fr);
+  }
+
+  .replay-timeline__transport button {
+    min-width: 0;
+  }
+
+  .replay-timeline__slider {
+    grid-column: 1 / -2;
+  }
+
+  .replay-shortcuts {
+    width: 100%;
+    margin-left: 0;
   }
 
   .scenario-description {

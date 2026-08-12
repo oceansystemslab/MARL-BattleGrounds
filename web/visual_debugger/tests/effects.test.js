@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-
+import {
+  loadRendererFixture,
+  syntheticDebuggerFrame,
+} from "../e2e/support/renderer-fixture.js";
 import {
   authorizationContextKey,
   buildChoreographyPlan,
@@ -10,10 +13,6 @@ import {
   isSubmissionCommand,
   transitionEpochKey,
 } from "../src/choreography-plan.js";
-import {
-  loadRendererFixture,
-  syntheticDebuggerFrame,
-} from "../e2e/support/renderer-fixture.js";
 
 /**
  * @typedef {{
@@ -99,6 +98,25 @@ test("transition identity excludes revision while authorization tracks POV actor
     null,
   ]);
   assert.deepEqual(JSON.parse(authorizationContextKey(pov) ?? "null"), [
+    pov.session_id,
+    pov.run_generation,
+    "agent_pov",
+    pov.scene.self_actor.global_slot,
+  ]);
+  const replayPov = {
+    ...pov,
+    viewer_mode: "replay",
+    replay_audience: "actor_pov",
+    pov_global_slot: pov.scene.self_actor.global_slot,
+    scene: {
+      ...pov.scene,
+      selection: {
+        controlled_global_slot: null,
+        selected_global_slot: null,
+      },
+    },
+  };
+  assert.deepEqual(JSON.parse(authorizationContextKey(replayPov) ?? "null"), [
     pov.session_id,
     pov.run_generation,
     "agent_pov",

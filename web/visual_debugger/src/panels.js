@@ -404,12 +404,19 @@ function addCandidateLegality(container, hud) {
 /**
  * @param {HTMLElement} container
  * @param {Record<string, any> | null} agent
- * @param {"Controlled actor" | "Selected target"} role
+ * @param {"Controlled actor" | "Selected target" | "Reference" | "Recipient actor"} role
  */
 function addAgentComparison(container, agent, role) {
   const card = htmlElement("article", "comparison-agent");
   card.tabIndex = 0;
-  card.dataset.role = role === "Controlled actor" ? "controlled" : "selected";
+  card.dataset.role =
+    role === "Controlled actor"
+      ? "controlled"
+      : role === "Selected target"
+        ? "selected"
+        : role === "Reference"
+          ? "reference"
+          : "recipient";
   card.append(htmlElement("h3", null, role));
   if (!agent) {
     card.append(
@@ -418,7 +425,11 @@ function addAgentComparison(container, agent, role) {
         "empty-copy",
         role === "Selected target"
           ? "No target selected."
-          : "Controlled actor unavailable.",
+          : role === "Reference"
+            ? "No Reference selected."
+            : role === "Recipient actor"
+              ? "Recipient actor unavailable."
+              : "Controlled actor unavailable.",
       ),
     );
     container.append(card);
@@ -1020,8 +1031,9 @@ export class DebuggerPanels {
    * @param {Record<string, any>} selection
    * @param {boolean} disabled
    * @param {boolean} compact
+   * @param {string | null} replayAudience
    */
-  updateRosterRow(row, agent, selection, disabled, compact) {
+  updateRosterRow(row, agent, selection, disabled, compact, replayAudience) {
     const globalSlot = agent.global_slot;
     const publicAgentId =
       typeof agent.public_agent_id === "string"
@@ -1044,12 +1056,17 @@ export class DebuggerPanels {
     row.element.dataset.selected = String(
       globalSlot === selection.selected_global_slot,
     );
+    row.element.dataset.reference = String(
+      replayAudience === "researcher" && globalSlot === selection.selected_global_slot,
+    );
     row.element.dataset.compact = String(compact);
     registerTooltipOwner(
       row.element,
       explainAgent(agent, {
-        controlled: globalSlot === selection.controlled_global_slot,
-        selected: globalSlot === selection.selected_global_slot,
+        controlled:
+          replayAudience === null && globalSlot === selection.controlled_global_slot,
+        selected:
+          replayAudience === null && globalSlot === selection.selected_global_slot,
       }),
     );
 
@@ -1081,13 +1098,29 @@ export class DebuggerPanels {
       );
     }
 
-    row.targetButton.setAttribute("aria-label", `Target Agent ID ${publicAgentId}`);
+    const researcherReplay = replayAudience === "researcher";
+    const replayIdentityOnly = replayAudience !== null && !researcherReplay;
+    row.targetButton.hidden = replayIdentityOnly;
+    row.controlButton.hidden = replayIdentityOnly;
+    row.targetButton.textContent = researcherReplay ? "Reference" : "Target";
+    row.controlButton.textContent = researcherReplay ? "POV actor" : "Control";
+    row.targetButton.setAttribute(
+      "aria-label",
+      researcherReplay
+        ? `Use Agent ID ${publicAgentId} as Reference`
+        : `Target Agent ID ${publicAgentId}`,
+    );
     row.targetButton.setAttribute(
       "aria-pressed",
       String(globalSlot === selection.selected_global_slot),
     );
     row.targetButton.disabled = disabled;
-    row.controlButton.setAttribute("aria-label", `Control Agent ID ${publicAgentId}`);
+    row.controlButton.setAttribute(
+      "aria-label",
+      researcherReplay
+        ? `Choose Agent ID ${publicAgentId} as POV actor`
+        : `Control Agent ID ${publicAgentId}`,
+    );
     row.controlButton.setAttribute(
       "aria-pressed",
       String(globalSlot === selection.controlled_global_slot),
@@ -1148,7 +1181,13 @@ export class DebuggerPanels {
       .filter((agent) => isRecord(agent) && Number.isInteger(agent.global_slot))
       .sort((left, right) => left.global_slot - right.global_slot);
     const selection = isRecord(scene?.selection) ? scene.selection : {};
-    const povIdentityOnly = frame?.frame_kind === "actor_pov_live_debugger";
+    const replayAudience =
+      frame?.viewer_mode === "replay" && typeof frame.replay_audience === "string"
+        ? frame.replay_audience
+        : null;
+    const povIdentityOnly =
+      frame?.frame_kind === "actor_pov_live_debugger" ||
+      (replayAudience !== null && replayAudience !== "researcher");
     const focused = this.focusedRosterControl();
     if (focused) {
       this.pendingRosterFocus = {
@@ -1177,7 +1216,14 @@ export class DebuggerPanels {
         row = this.createRosterRow(globalSlot);
         this.rosterRows.set(globalSlot, row);
       }
-      this.updateRosterRow(row, agent, selection, disabled || povIdentityOnly, compact);
+      this.updateRosterRow(
+        row,
+        agent,
+        selection,
+        disabled || povIdentityOnly,
+        compact,
+        replayAudience,
+      );
       const desired = desiredByTeam.get(teamId) ?? [];
       desired.push(row.element);
       desiredByTeam.set(teamId, desired);
@@ -1338,6 +1384,10 @@ export class DebuggerPanels {
       : null;
     const presentation = preset === "presentation";
     const pov = frame?.frame_kind === "actor_pov_live_debugger";
+    const replayAudience =
+      frame?.viewer_mode === "replay" && typeof frame.replay_audience === "string"
+        ? frame.replay_audience
+        : null;
     const agents = asArray(scene?.agents).filter(isRecord);
     const agentsBySlot = new Map(
       agents
@@ -1350,6 +1400,38 @@ export class DebuggerPanels {
     if (presentation) {
       // Presentation keeps a compact exact roster plus pending/result/event
       // story; detailed actor comparison belongs to Analysis and Debug.
+    } else if (replayAudience === "researcher") {
+      const comparison = htmlElement("div", "selection-comparison");
+      const referenceSlot = selection?.selected_global_slot;
+      addAgentComparison(
+        comparison,
+        Number.isInteger(referenceSlot)
+          ? (agentsBySlot.get(Number(referenceSlot)) ?? null)
+          : null,
+        "Reference",
+      );
+      this.selectionCard.append(comparison);
+      this.selectionCard.append(
+        htmlElement(
+          "p",
+          "empty-copy",
+          "Reference controls inspector and highlight only; replay range anchoring is immutable.",
+        ),
+      );
+    } else if (replayAudience !== null) {
+      const selfAgent = agents[0] ?? null;
+      const comparison = htmlElement("div", "selection-comparison");
+      addAgentComparison(comparison, selfAgent, "Recipient actor");
+      this.selectionCard.append(comparison);
+      this.selectionCard.append(
+        htmlElement(
+          "p",
+          "empty-copy",
+          replayAudience === "actor_pov"
+            ? "Exact recorded actor POV; researcher slots and processing truth are not disclosed."
+            : "SharedObs source material only; this is not a materialized actor input.",
+        ),
+      );
     } else if (pov) {
       const selfAgent =
         agents.find(
@@ -1410,7 +1492,7 @@ export class DebuggerPanels {
       }
     }
 
-    if (preset === "debug") {
+    if (preset === "debug" && replayAudience === null) {
       addCandidateLegality(this.selectionCard, hud);
     }
     const latestCandidate = hud.latest_transition ?? null;
@@ -1438,6 +1520,32 @@ export class DebuggerPanels {
   renderDiagnostics(frame, hud, preset) {
     const diagnosticsSection = this.diagnosticsCard.closest(".diagnostics");
     diagnosticsSection?.toggleAttribute("hidden", preset === "presentation");
+    if (frame?.viewer_mode === "replay") {
+      if (preset === "presentation") {
+        this.diagnosticsCard.replaceChildren();
+        return;
+      }
+      const replayFacts = htmlElement("div", "diagnostics-card");
+      addFact(replayFacts, "Frame kind", frame.frame_kind ?? "unavailable");
+      addFact(replayFacts, "Timeline", frame.timeline_id ?? "unavailable");
+      addFact(
+        replayFacts,
+        "Cursor generation",
+        frame.cursor?.cursor_generation ?? "unavailable",
+      );
+      addFact(
+        replayFacts,
+        "Choreography generation",
+        frame.cursor?.choreography_generation ?? "unavailable",
+      );
+      addFact(
+        replayFacts,
+        "Metric report",
+        frame.artifact_summary?.metric_report_availability ?? "unavailable",
+      );
+      this.diagnosticsCard.replaceChildren(replayFacts);
+      return;
+    }
     if (preset === "debug") {
       const raw = htmlElement(
         "pre",

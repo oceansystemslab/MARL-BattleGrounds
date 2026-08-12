@@ -4,8 +4,11 @@ import {
   DebuggerApiError,
   extractFrame,
   extractNotice,
+  extractReplayTimeline,
   getCurrentFrame,
+  getReplayTimeline,
   postCommand,
+  postReplayCommand,
 } from "./api.js";
 import { CombatChoreographer, ConsumedTransitionLedger } from "./choreography.js";
 import { SvgChoreographyPainter } from "./choreography-painter.js";
@@ -21,6 +24,17 @@ import {
   liveDebuggerScenarioControlsAvailable,
 } from "./frame-normalizer.js";
 import { DebuggerPanels } from "./panels.js";
+import {
+  bindReplayTimelineControls,
+  ReplayPlaybackController,
+  renderReplayTimelineControls,
+  replayCommandRequest,
+  validateReplayCommandOutcome,
+} from "./replay-controls.js";
+import {
+  joinReplayFrameAndTimeline,
+  validateReplayFrameContinuity,
+} from "./replay-frame-normalizer.js";
 import { BattlefieldRenderer } from "./scene.js";
 import { createTooltipController, registerTooltipOwner } from "./tooltip.js";
 
@@ -51,6 +65,22 @@ const elements = {
   revisionValue: requiredElement("revision-value"),
   stepValue: requiredElement("step-value"),
   transitionValue: requiredElement("transition-value"),
+  replayTimeline: requiredElement("replay-timeline"),
+  replayArtifactReference: requiredElement("replay-artifact-reference"),
+  replayCompletionBadge: requiredElement("replay-completion-badge"),
+  replayProcessingBadge: requiredElement("replay-processing-badge"),
+  replayEndReason: requiredElement("replay-end-reason"),
+  replayIncomingValue: requiredElement("replay-incoming-value"),
+  replayFirstButton: requiredElement("replay-first-button"),
+  replayPreviousButton: requiredElement("replay-previous-button"),
+  replayPlayPauseButton: requiredElement("replay-play-pause-button"),
+  replayNextButton: requiredElement("replay-next-button"),
+  replayLastButton: requiredElement("replay-last-button"),
+  replayFrameSlider: requiredElement("replay-frame-slider"),
+  replayFramePosition: requiredElement("replay-frame-position"),
+  replayRangesButton: requiredElement("replay-ranges-button"),
+  replayVerbosityButton: requiredElement("replay-verbosity-button"),
+  replayClearReferenceButton: requiredElement("replay-clear-reference-button"),
   reconnectButton: requiredElement("reconnect-button"),
   helpButton: requiredElement("help-button"),
   exitButton: requiredElement("exit-button"),
@@ -71,6 +101,7 @@ const elements = {
   roster: requiredElement("roster"),
   rosterCount: requiredElement("roster-count"),
   selectionCard: requiredElement("selection-card"),
+  selectionHeading: requiredElement("selection-heading"),
   pendingHeading: requiredElement("pending-heading"),
   pendingCount: requiredElement("pending-count"),
   pendingScope: requiredElement("pending-scope"),
@@ -91,6 +122,13 @@ const elements = {
   visualTooltipTitle: requiredElement("visual-tooltip-title"),
   visualTooltipDetails: requiredElement("visual-tooltip-details"),
   helpDialog: requiredElement("help-dialog"),
+  battlefieldInstructions: requiredElement("battlefield-instructions"),
+  liveOnly: /** @type {NodeListOf<HTMLElement>} */ (
+    document.querySelectorAll("[data-live-only]")
+  ),
+  replayOnly: /** @type {NodeListOf<HTMLElement>} */ (
+    document.querySelectorAll("[data-replay-only]")
+  ),
 };
 
 /**
@@ -98,6 +136,7 @@ const elements = {
  *   token: string | null,
  *   clientId: string,
  *   frame: Record<string, any> | null,
+ *   timeline: Record<string, any> | null,
  *   busy: boolean,
  *   offline: boolean,
  *   resyncRequired: boolean,
@@ -110,6 +149,7 @@ const state = {
   token: acquireCapabilityToken(),
   clientId: acquireClientId(),
   frame: null,
+  timeline: null,
   busy: false,
   offline: false,
   resyncRequired: false,
@@ -143,6 +183,35 @@ const choreographer = new CombatChoreographer({
   },
 });
 
+const replayTimelineElements = {
+  root: elements.replayTimeline,
+  firstButton: elements.replayFirstButton,
+  previousButton: elements.replayPreviousButton,
+  playPauseButton: elements.replayPlayPauseButton,
+  nextButton: elements.replayNextButton,
+  lastButton: elements.replayLastButton,
+  slider: elements.replayFrameSlider,
+  position: elements.replayFramePosition,
+};
+
+const replayPlayback = new ReplayPlaybackController({
+  request: sendReplayCommand,
+  waitForPresentation: () => choreographer.whenSettled(),
+  getMotionMode: () => choreographer.snapshot().motionMode,
+  onStateChange: (playback) => {
+    renderReplayTimelineControls(replayTimelineElements, playback);
+  },
+  onError: (error) => {
+    if (!state.notice || state.noticeLevel !== "error") {
+      setNotice(
+        error instanceof Error ? error.message : "Replay navigation failed.",
+        "error",
+      );
+      renderConnection();
+    }
+  },
+});
+
 const panels = new DebuggerPanels({
   roster: elements.roster,
   rosterCount: elements.rosterCount,
@@ -156,7 +225,7 @@ const panels = new DebuggerPanels({
   eventFeed: elements.eventFeed,
   eventCount: elements.eventCount,
   diagnosticsCard: elements.diagnosticsCard,
-  onCommand: dispatchCommand,
+  onCommand: dispatchPanelCommand,
 });
 
 const tooltipController = createTooltipController({
@@ -178,6 +247,93 @@ function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isReplayMode() {
+  return state.frame?.viewer_mode === "replay";
+}
+
+function renderViewerBoundary() {
+  const replay = isReplayMode();
+  document.documentElement.dataset.viewerMode = replay ? "replay" : "live";
+  for (const element of elements.liveOnly) {
+    element.toggleAttribute("hidden", replay);
+  }
+  for (const element of elements.replayOnly) {
+    element.toggleAttribute("hidden", !replay);
+  }
+  elements.replayTimeline.toggleAttribute("hidden", !replay);
+  elements.battlefield.setAttribute("role", replay ? "img" : "application");
+  elements.battlefield.tabIndex = replay ? -1 : 0;
+  elements.battlefield.setAttribute(
+    "aria-label",
+    replay
+      ? "Read-only replay battlefield snapshot."
+      : "Interactive battlefield. Press Help for keyboard controls.",
+  );
+  elements.battlefieldInstructions.textContent = replay
+    ? "Replay transport changes only the selected recorded frame. The battlefield cannot submit actions or advance the simulator."
+    : "The battlefield owns debugger keyboard commands while it has focus. Tab and Shift Tab cycle controlled actors here. Escape clears the target and moves focus to the command deck, or to Help while commands are unavailable. Tab behaves normally in the side panel.";
+  elements.selectionHeading.textContent = replay
+    ? state.frame?.replay_audience === "researcher"
+      ? "Reference"
+      : "Replay recipient"
+    : "Controlled and selected";
+}
+
+function renderReplayMetadata() {
+  const frame = state.frame;
+  if (!isReplayMode() || !frame) {
+    return;
+  }
+  const reference = isRecord(frame.artifact_summary?.replay_reference)
+    ? frame.artifact_summary.replay_reference
+    : {};
+  const completion = isRecord(frame.completion) ? frame.completion : {};
+  const processing = isRecord(frame.processing) ? frame.processing : {};
+  const scene = frameScene(frame);
+  elements.replayArtifactReference.textContent = String(
+    reference.artifact_id ?? "Unavailable",
+  );
+  elements.replayArtifactReference.title = String(
+    reference.canonical_digest_sha256 ?? "",
+  );
+  elements.replayCompletionBadge.textContent = humanize(
+    completion.completion_state ?? "unavailable",
+  );
+  elements.replayProcessingBadge.textContent =
+    processing.disclosure === "not_available_in_actor_pov"
+      ? "Not available in actor POV"
+      : humanize(processing.status ?? "unavailable");
+  elements.replayEndReason.textContent = String(
+    completion.public_end_or_failure_reason ??
+      completion.end_or_failure_reason ??
+      (asArray(completion.completion_bases).length > 0
+        ? asArray(completion.completion_bases).map(humanize).join(" + ")
+        : "Captured prefix"),
+  );
+  elements.replayIncomingValue.textContent = frame.transition_id
+    ? String(frame.transition_id)
+    : "Initial frame";
+  elements.replayRangesButton.setAttribute(
+    "aria-pressed",
+    String(frame.show_ranges === true),
+  );
+  elements.replayRangesButton.disabled =
+    state.busy || frame.replay_audience !== "researcher";
+  elements.replayVerbosityButton.setAttribute(
+    "aria-pressed",
+    String(frame.verbose === true),
+  );
+  elements.replayVerbosityButton.disabled = state.busy;
+  const selectedSlot = isRecord(scene?.selection)
+    ? scene.selection.selected_global_slot
+    : null;
+  elements.replayClearReferenceButton.disabled =
+    state.busy ||
+    frame.replay_audience !== "researcher" ||
+    !Number.isInteger(selectedSlot);
+  renderReplayTimelineControls(replayTimelineElements, replayPlayback.snapshot());
+}
+
 /**
  * @param {unknown} value
  * @returns {any[]}
@@ -189,9 +345,10 @@ function asArray(value) {
 /**
  * @param {unknown} value
  * @param {number} fallback
+ * @returns {number}
  */
 function integer(value, fallback = 0) {
-  return Number.isInteger(value) ? value : fallback;
+  return Number.isInteger(value) ? Number(value) : fallback;
 }
 
 /**
@@ -244,6 +401,9 @@ function scenarioDescription(frame) {
  */
 function isTerminal(frame) {
   const record = isRecord(frame) ? frame : {};
+  if (record.viewer_mode === "replay" && isRecord(record.cursor)) {
+    return record.cursor.frame_index === record.cursor.final_frame_index;
+  }
   if (typeof record.terminal === "boolean") {
     return record.terminal;
   }
@@ -408,6 +568,8 @@ function renderConnection() {
 function renderSessionToolbar() {
   const frame = state.frame;
   const scene = frameScene(frame);
+  renderViewerBoundary();
+  const replay = isReplayMode();
   const disabled =
     state.busy || !frame || state.shuttingDown || state.resyncRequired || state.offline;
 
@@ -439,12 +601,29 @@ function renderSessionToolbar() {
 
   const terminal = isTerminal(frame);
   elements.terminalBadge.hidden = !terminal;
-  elements.terminalBadge.textContent = terminal
-    ? "Terminal · submissions blocked by Python"
-    : "Terminal";
+  if (terminal && replay) {
+    const completion = isRecord(frame?.completion) ? frame.completion : {};
+    const bases = asArray(completion.completion_bases);
+    elements.terminalBadge.textContent =
+      completion.completion_state !== "complete"
+        ? "End of captured prefix"
+        : bases.includes("task_terminal") && bases.includes("declared_horizon")
+          ? "Task terminal · declared horizon"
+          : bases.includes("task_terminal")
+            ? "Task terminal"
+            : bases.includes("declared_horizon")
+              ? "Declared horizon"
+              : "Complete replay";
+  } else {
+    elements.terminalBadge.textContent = terminal
+      ? "Terminal · submissions blocked by Python"
+      : "Terminal";
+  }
 
   elements.scenarioDescription.textContent = frame
-    ? scenarioDescription(frame)
+    ? replay
+      ? `${humanize(frame.replay_audience ?? "replay")} · recorded frame ${frame.cursor?.frame_index ?? "—"} of ${frame.cursor?.final_frame_index ?? "—"}`
+      : scenarioDescription(frame)
     : "Waiting for the Python debugger service.";
 
   renderScenarioOptions(frame);
@@ -503,7 +682,7 @@ function renderSessionToolbar() {
   elements.movementScaleDefaultButton.disabled =
     movementScaleDisabled || scenario.movement_scale_overridden !== true;
   const scenarioControlsAvailable =
-    !state.frame || liveDebuggerScenarioControlsAvailable(state.frame);
+    !replay && (!state.frame || liveDebuggerScenarioControlsAvailable(state.frame));
   elements.scenarioControl.toggleAttribute("hidden", !scenarioControlsAvailable);
   elements.scenarioSelect.disabled = disabled || !scenarioControlsAvailable;
   elements.scenarioSelect.setAttribute(
@@ -517,7 +696,9 @@ function renderSessionToolbar() {
   elements.presetSelect.disabled = disabled;
   elements.reconnectButton.disabled = state.busy || state.shuttingDown;
   elements.exitButton.disabled = disabled;
+  elements.exitButton.textContent = replay ? "Exit replay viewer" : "Exit analyzer";
   elements.resetButton.disabled = disabled;
+  renderReplayMetadata();
   renderCommandAvailability();
 }
 
@@ -712,6 +893,15 @@ function renderCommandAvailability() {
     state.resyncRequired ||
     state.offline;
   const presentation = choreographer.snapshot();
+  if (isReplayMode()) {
+    elements.commandTargetSelect.disabled = true;
+    if (elements.commandDeck) {
+      for (const button of elements.commandDeck.querySelectorAll("button")) {
+        /** @type {HTMLButtonElement} */ (button).disabled = true;
+      }
+    }
+    return;
+  }
   const scenario = scenarioRecord(state.frame);
   const scripted = liveDebuggerFrameIsScripted(state.frame);
   const hud = isRecord(state.frame?.hud) ? state.frame.hud : {};
@@ -844,10 +1034,49 @@ function renderScenarioOptions(frame) {
   }
 }
 
+function applyReplayReferenceSemantics() {
+  if (state.frame?.replay_audience !== "researcher") {
+    return;
+  }
+  const scene = frameScene(state.frame);
+  const selectedSlot = isRecord(scene?.selection)
+    ? scene.selection.selected_global_slot
+    : null;
+  if (!Number.isInteger(selectedSlot)) {
+    return;
+  }
+  const reference = elements.battlefield.querySelector(
+    `.agent[data-slot="${selectedSlot}"]`,
+  );
+  if (!(reference instanceof Element)) {
+    return;
+  }
+  const agent = asArray(scene?.agents).find(
+    (candidate) => isRecord(candidate) && candidate.global_slot === selectedSlot,
+  );
+  if (!isRecord(agent) || typeof agent.public_agent_id !== "string") {
+    return;
+  }
+  const publicAgentId = agent.public_agent_id;
+  const ariaLabel = reference.getAttribute("aria-label") ?? `Agent ID ${publicAgentId}`;
+  reference.setAttribute(
+    "aria-label",
+    ariaLabel.replace(/selected target/giu, "Reference"),
+  );
+  registerTooltipOwner(reference, {
+    kind: "agent",
+    id: `replay-reference:${publicAgentId}`,
+    title: `Agent ID ${publicAgentId}`,
+    details: ["Researcher Reference", "Inspector and highlight only"],
+    anchor: "element",
+  });
+}
+
 function render() {
   renderConnection();
   renderSessionToolbar();
   battlefieldRenderer.render(state.frame, { offline: state.offline });
+  applyReplayReferenceSemantics();
   try {
     choreographer.presentFrame(state.frame, battlefieldRenderer.choreographySurface());
   } catch (error) {
@@ -945,9 +1174,211 @@ function commandRequest(command) {
 }
 
 /**
+ * Send one replay command through the replay-only route. This function is the
+ * controller's single request boundary; it installs the authoritative frame
+ * before resolving so presentation settling can begin immediately.
+ *
+ * @param {Readonly<Record<string, any>>} command
+ */
+async function sendReplayCommand(command) {
+  if (!isReplayMode() || !state.frame) {
+    throw new DebuggerApiError("Replay controls require an installed replay frame.");
+  }
+  if (state.busy || state.shuttingDown) {
+    throw new DebuggerApiError("A replay request is already in flight.");
+  }
+  if (state.resyncRequired || state.offline) {
+    throw new DebuggerApiError("Reconnect before sending another replay command.");
+  }
+  state.busy = true;
+  setNotice("Waiting for the read-only replay response…", "info");
+  render();
+  try {
+    const previousFrame = state.frame;
+    const previousCursor = previousFrame.cursor;
+    const payload = await postReplayCommand(
+      state.token,
+      replayCommandRequest({
+        clientId: state.clientId,
+        commandId: window.crypto.randomUUID(),
+        baseRevision: currentRevision(),
+        command,
+      }),
+    );
+    const frame = extractFrame(payload);
+    if (frame?.viewer_mode !== "replay") {
+      throw new DebuggerApiError("Replay response did not contain a replay frame.");
+    }
+    validateReplayFrameContinuity(previousFrame, frame, payload.result);
+    validateReplayCommandOutcome(command, payload, previousCursor);
+    let timeline = state.timeline;
+    if (
+      frame.timeline_id !== previousFrame.timeline_id ||
+      timeline?.timeline_id !== frame.timeline_id
+    ) {
+      timeline = extractReplayTimeline(await getReplayTimeline(state.token));
+    }
+    if (!timeline) {
+      throw new TypeError("Replay response has no audience timeline candidate.");
+    }
+    const joinedTimeline = joinReplayFrameAndTimeline(frame, timeline);
+    state.frame = frame;
+    state.timeline = joinedTimeline;
+    state.offline = false;
+    state.resyncRequired = false;
+    replayPlayback.setConnected(true);
+    const notice = extractNotice(payload);
+    setNotice(
+      notice ??
+        (payload?.result === "duplicate"
+          ? "Duplicate replay command recognized; it was not applied again."
+          : payload?.result === "no_op"
+            ? "Replay already matched that request."
+            : "Read-only replay frame updated."),
+      payload?.result === "duplicate" || payload?.result === "no_op"
+        ? "warning"
+        : "success",
+    );
+    if (command.command_type === "exit") {
+      state.shuttingDown = true;
+      setNotice("Exit accepted. The local replay viewer is shutting down.", "info");
+    }
+    return payload;
+  } catch (error) {
+    let replayError = null;
+    if (error instanceof DebuggerApiError && isRecord(error.payload)) {
+      // postReplayCommand's decode boundary has already strictly normalized
+      // this envelope. Its latest frame is an internal settled replay frame,
+      // not raw wire data, so it must never cross the raw normalizer twice.
+      replayError = error.payload;
+    }
+    if (error instanceof DebuggerApiError && error.status === 409) {
+      const latest = replayError?.latest_frame ?? null;
+      if (latest?.viewer_mode !== "replay") {
+        state.offline = false;
+        state.resyncRequired = true;
+        replayPlayback.setConnected(false);
+        setNotice(
+          "The replay service reported stale state without a valid latest frame. Reconnect is required.",
+          "error",
+        );
+        throw error;
+      }
+      try {
+        validateReplayFrameContinuity(state.frame, latest, "stale_resync");
+        const latestTimeline = joinReplayFrameAndTimeline(
+          latest,
+          extractReplayTimeline(await getReplayTimeline(state.token)),
+        );
+        state.frame = latest;
+        state.timeline = latestTimeline;
+      } catch (candidateError) {
+        state.offline = false;
+        state.resyncRequired = true;
+        replayPlayback.setConnected(false);
+        setNotice(
+          candidateError instanceof Error
+            ? `The stale replay candidate failed validation: ${candidateError.message}`
+            : "The stale replay candidate failed validation.",
+          "error",
+        );
+        throw candidateError;
+      }
+      state.offline = false;
+      state.resyncRequired = false;
+      replayPlayback.setConnected(true);
+      const errorCode = replayError?.error_code ?? null;
+      setNotice(
+        errorCode === "command_id_conflict"
+          ? "The replay service rejected a command-ID conflict. Its latest frame was installed; nothing was retried."
+          : "This replay tab was stale. The latest frame was installed; the command was not retried.",
+        "warning",
+      );
+      return Object.freeze({ handled_resync: true, frame: latest });
+    } else {
+      const status = error instanceof DebuggerApiError ? error.status : 0;
+      state.offline = status === 0 || status === 401 || status === 403;
+      state.resyncRequired = true;
+      replayPlayback.setConnected(false);
+      setNotice(
+        status === 401 || status === 403
+          ? "Replay capability is invalid. Reopen the exact URL printed by the Python launcher."
+          : error instanceof Error
+            ? `${error.message} Reconnect before sending another replay command.`
+            : "Replay command failed. Reconnect before sending another command.",
+        "error",
+      );
+    }
+    throw error;
+  } finally {
+    state.busy = false;
+    render();
+  }
+}
+
+/** @param {Readonly<Record<string, any>>} command */
+async function dispatchReplayCommand(command) {
+  if (
+    state.frame?.replay_audience !== "researcher" &&
+    (command.command_type === "select_agent" || command.command_type === "set_ranges")
+  ) {
+    setNotice(
+      "Reference and range controls are unavailable in actor POV replay.",
+      "warning",
+    );
+    renderConnection();
+    return null;
+  }
+  replayPlayback.pause("user_command");
+  try {
+    const payload = await sendReplayCommand(command);
+    const frame =
+      payload?.handled_resync === true ? payload.frame : extractFrame(payload);
+    if (frame) {
+      replayPlayback.installCursor(frame.cursor);
+    }
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+/** @param {Record<string, unknown>} command */
+function dispatchPanelCommand(command) {
+  if (!isReplayMode()) {
+    return dispatchCommand(command);
+  }
+  if (
+    command.command_type === "roster_selection" &&
+    Number.isInteger(command.global_slot)
+  ) {
+    if (command.role === "target") {
+      return dispatchReplayCommand({
+        command_type: "select_agent",
+        selected_global_slot: command.global_slot,
+      });
+    }
+    if (command.role === "control") {
+      return dispatchReplayCommand({
+        command_type: "set_pov_actor",
+        global_slot: command.global_slot,
+      });
+    }
+  }
+  setNotice("That live debugger action is unavailable in replay.", "warning");
+  renderConnection();
+  return Promise.resolve(null);
+}
+
+/**
  * @param {Record<string, unknown>} command
  */
 async function dispatchCommand(command) {
+  if (isReplayMode()) {
+    setNotice("Live debugger commands are unavailable in read-only replay.", "warning");
+    renderConnection();
+    return;
+  }
   if (state.busy || state.shuttingDown) {
     setNotice("A command is already in flight; no second command was sent.", "warning");
     renderConnection();
@@ -1053,6 +1484,9 @@ async function loadCurrentFrame() {
     return;
   }
   state.busy = true;
+  if (isReplayMode()) {
+    replayPlayback.pause("reconnect");
+  }
   setNotice("Fetching the current authoritative frame…", "info");
   renderConnection();
   try {
@@ -1061,7 +1495,27 @@ async function loadCurrentFrame() {
     if (!frame) {
       throw new DebuggerApiError("Frame response did not contain a debugger frame.");
     }
+    if (state.frame?.viewer_mode === "replay" && frame.viewer_mode !== "replay") {
+      throw new DebuggerApiError(
+        "A replay viewer cannot reconnect to a live debugger frame. Reopen the replay URL to resynchronize.",
+      );
+    }
+    let timeline = null;
+    if (frame.viewer_mode === "replay") {
+      if (state.frame?.viewer_mode === "replay") {
+        validateReplayFrameContinuity(state.frame, frame, "stale_resync");
+      }
+      timeline = joinReplayFrameAndTimeline(
+        frame,
+        extractReplayTimeline(await getReplayTimeline(state.token)),
+      );
+    }
     state.frame = frame;
+    state.timeline = timeline;
+    if (frame.viewer_mode === "replay") {
+      replayPlayback.installCursor(frame.cursor);
+      replayPlayback.setConnected(true);
+    }
     state.offline = false;
     state.resyncRequired = false;
     setNotice(extractNotice(payload) ?? "Connected to the local analyzer.", "success");
@@ -1069,6 +1523,9 @@ async function loadCurrentFrame() {
     const status = error instanceof DebuggerApiError ? error.status : 0;
     state.offline = status === 0 || status === 401 || status === 403;
     state.resyncRequired = true;
+    if (isReplayMode()) {
+      replayPlayback.setConnected(false);
+    }
     setNotice(
       status === 401 || status === 403
         ? "Debugger capability is invalid. Reopen the exact URL printed by the Python launcher."
@@ -1093,6 +1550,7 @@ bindBattlefieldControls({
     }
   },
   onHelp: () => elements.helpDialog.showModal(),
+  isInteractive: () => !isReplayMode(),
   onReleaseFocus: () => {
     const firstCommand = /** @type {HTMLButtonElement | null} */ (
       elements.commandDeck?.querySelector("button:not([disabled])") ?? null
@@ -1113,17 +1571,27 @@ elements.scenarioSelect.addEventListener("change", () => {
 });
 
 elements.viewSelect.addEventListener("change", () => {
-  dispatchCommand({
+  const command = {
     command_type: "set_view",
     view_mode: elements.viewSelect.value,
-  });
+  };
+  if (isReplayMode()) {
+    void dispatchReplayCommand(command);
+  } else {
+    void dispatchCommand(command);
+  }
 });
 
 elements.presetSelect.addEventListener("change", () => {
-  dispatchCommand({
+  const command = {
     command_type: "set_preset",
     preset: elements.presetSelect.value,
-  });
+  };
+  if (isReplayMode()) {
+    void dispatchReplayCommand(command);
+  } else {
+    void dispatchCommand(command);
+  }
 });
 
 elements.resetButton.addEventListener("click", () => {
@@ -1179,7 +1647,11 @@ elements.commandTargetSelect.addEventListener("change", () => {
 });
 
 elements.exitButton.addEventListener("click", () => {
-  dispatchCommand({ command_type: "exit" });
+  if (isReplayMode()) {
+    void dispatchReplayCommand({ command_type: "exit" });
+  } else {
+    void dispatchCommand({ command_type: "exit" });
+  }
 });
 
 elements.reconnectButton.addEventListener("click", loadCurrentFrame);
@@ -1214,6 +1686,42 @@ for (const button of elements.motionRateButtons) {
   });
 }
 
+bindReplayTimelineControls(replayTimelineElements, replayPlayback);
+
+elements.replayRangesButton.addEventListener("click", () => {
+  if (!isReplayMode() || state.frame?.replay_audience !== "researcher") {
+    return;
+  }
+  void dispatchReplayCommand({
+    command_type: "set_ranges",
+    show_ranges: state.frame.show_ranges !== true,
+  });
+});
+
+elements.replayVerbosityButton.addEventListener("click", () => {
+  if (!isReplayMode()) {
+    return;
+  }
+  void dispatchReplayCommand({
+    command_type: "set_verbosity",
+    verbose: state.frame?.verbose !== true,
+  });
+});
+
+elements.replayClearReferenceButton.addEventListener("click", () => {
+  if (!isReplayMode() || state.frame?.replay_audience !== "researcher") {
+    return;
+  }
+  void dispatchReplayCommand({
+    command_type: "select_agent",
+    selected_global_slot: null,
+  });
+});
+
+document.addEventListener("visibilitychange", () => {
+  replayPlayback.setHidden(document.hidden);
+});
+
 if (elements.commandDeck) {
   const buttons = /** @type {NodeListOf<HTMLButtonElement>} */ (
     elements.commandDeck.querySelectorAll("button[data-key]")
@@ -1240,6 +1748,7 @@ if (elements.commandDeck) {
 
 const battlefieldResizeObserver = new ResizeObserver(scheduleBattlefieldResize);
 battlefieldResizeObserver.observe(elements.battlefieldShell);
+replayPlayback.setHidden(document.hidden);
 
 render();
 loadCurrentFrame();

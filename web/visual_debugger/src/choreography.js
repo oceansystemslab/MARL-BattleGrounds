@@ -232,6 +232,8 @@ export class CombatChoreographer {
     this.gateClock = null;
     /** @type {AnimationHandle | null} */
     this.cleanupClock = null;
+    /** @type {Set<(value?: unknown) => void>} */
+    this.settleWaiters = new Set();
   }
 
   snapshot() {
@@ -246,6 +248,20 @@ export class CombatChoreographer {
       paused: this.paused,
       playbackRate: this.playbackRate,
       submissionBlocked: this.submissionBlocked,
+    });
+  }
+
+  /**
+   * Resolve after the current authorized presentation has reached its durable
+   * settled state. Replay autoplay uses this boundary so it cannot outrun the
+   * explanation clock or overlap requests.
+   */
+  whenSettled() {
+    if (this.#isSettled()) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      this.settleWaiters.add(resolve);
     });
   }
 
@@ -267,6 +283,10 @@ export class CombatChoreographer {
     const sameAuthorization =
       currentPlan?.authorizationKey === nextPlan.authorizationKey;
     const sameFingerprint = currentPlan?.fingerprint === nextPlan.fingerprint;
+    const replayMustSettle =
+      isRecord(frame) &&
+      frame.viewer_mode === "replay" &&
+      frame.animate_incoming !== true;
 
     if (sameEpoch && sameAuthorization && sameFingerprint) {
       if (this.surface?.viewportKey !== surface.viewportKey && this.installation) {
@@ -274,6 +294,9 @@ export class CombatChoreographer {
       }
       this.plan = nextPlan;
       this.surface = surface;
+      if (replayMustSettle && !this.#isSettled()) {
+        return this.skip();
+      }
       this.#publish();
       return this.snapshot();
     }
@@ -298,8 +321,8 @@ export class CombatChoreographer {
     this.plan = nextPlan;
     this.surface = surface;
     this.#install(nextPlan, surface, {
-      settled: alreadyConsumed,
-      persistentOnly: alreadyConsumed,
+      settled: alreadyConsumed || replayMustSettle,
+      persistentOnly: alreadyConsumed || replayMustSettle,
     });
     if (consumedFingerprint !== nextPlan.fingerprint) {
       this.ledger.record(nextPlan.epochKey, nextPlan.fingerprint);
@@ -628,8 +651,28 @@ export class CombatChoreographer {
   }
 
   #publish() {
-    this.onStateChange(this.snapshot());
+    const snapshot = this.snapshot();
+    this.onStateChange(snapshot);
+    if (this.#isSettled()) {
+      const waiters = [...this.settleWaiters];
+      this.settleWaiters.clear();
+      for (const resolve of waiters) {
+        resolve();
+      }
+    }
   }
+
+  #isSettled() {
+    return this.#allAnimations().length === 0 && !this.submissionBlocked;
+  }
+}
+
+/**
+ * @param {unknown} value
+ * @returns {value is Record<string, any>}
+ */
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**

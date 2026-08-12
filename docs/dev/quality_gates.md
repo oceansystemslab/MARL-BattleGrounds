@@ -12,14 +12,17 @@ is not rerun until a later edit creates a plausible impact path to it.
 | Command/service/server behavior | Protocol, input, service, server, and affected real-browser case |
 | Scenario trajectory | Scenario preflight/reference tests |
 | Replay/POV/scenario artifact | Focused semantic, canonical-I/O, tamper, privacy, and import-isolation tests |
+| Read-only replay viewer | Replay protocol/service/server/launcher tests, strict browser normalizer/controller units, and a real canonical-artifact Playwright flow |
 | Evaluation-to-scene projection | Researcher/POV adapter tests plus static replay launcher smoke |
 | Static Matplotlib path | Launcher plus relevant renderer smoke/scene-painter tests with `viz` |
 | SVG/CSS/layout | Affected JavaScript unit test and selected Playwright case |
 | Choreography/effects | Effect/animation unit tests and relevant scenario browser case |
 | Tracked prose only | Link, command, and stale-text inspection; no simulator tests |
 
-Do not run the complete Python or browser suite after every commit. Do not rerun
-an unchanged visual comparison merely for reassurance.
+Do not run the complete Python or browser suite after every local edit. Run both
+complete suites on the frozen commit candidate before committing or pushing;
+focused checks are the fast feedback loop that gets the tree to that point. Do
+not rerun an unchanged visual comparison merely for reassurance.
 
 ## Focused commands
 
@@ -42,6 +45,13 @@ npm run test:unit --prefix web/visual_debugger
 
 Select one browser case with the Playwright CLI or `--grep` when only one
 interaction/layout path changed.
+
+Replay changes should include a real canonical-artifact browser case rather
+than only synthetic JavaScript objects. That case must exercise the injected
+replay HTTP routes, audience-matching frame/timeline roots, settled seek and
+reconnect behavior, exact-next animation, endpoint pause, and actor-POV
+non-disclosure. Keep the replay subprocess on the CPU/import-isolation path so
+an accidental simulator or JAX import fails the test.
 
 ## Complete closeout gates
 
@@ -70,7 +80,11 @@ scripts/dev/check_frontend.sh
 
 The frontend script runs format check, lint, typecheck, unit tests, and the
 complete Playwright E2E/visual suite. It does not install dependencies or update
-snapshots.
+snapshots. Run it from the exact frozen commit candidate. When a changed helper
+spawns a package manager, interpreter, generated-artifact exporter, or browser,
+also exercise that path once from a clean worktree with cold local environment
+state; a warm developer environment can suppress first-run output and setup
+behavior that CI will encounter.
 
 If a later fix occurs, rerun only the affected gate:
 

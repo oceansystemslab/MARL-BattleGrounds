@@ -410,6 +410,62 @@ test("same-tab restoration installs only settled persistent cues", () => {
   assert.equal(restored.controller.snapshot().submissionBlocked, false);
 });
 
+test("replay animates only response-authorized incoming frames and exposes settle completion", async () => {
+  const settled = harness();
+  settled.controller.presentFrame(
+    {
+      viewer_mode: "replay",
+      animate_incoming: false,
+      plan: plan("replay-direct-get"),
+    },
+    surfaceA,
+  );
+  const settledInstall = settled.painter.calls.find(([kind]) => kind === "install");
+  assert.ok(settledInstall);
+  assert.equal(settledInstall[3].settled, true);
+  assert.equal(settled.controller.snapshot().animationCount, 0);
+  await settled.controller.whenSettled();
+
+  const animated = harness();
+  animated.controller.presentFrame(
+    {
+      viewer_mode: "replay",
+      animate_incoming: true,
+      plan: plan("replay-exact-next"),
+    },
+    surfaceA,
+  );
+  assert.ok(animated.controller.snapshot().animationCount > 0);
+  let didSettle = false;
+  const presentation = animated.controller.whenSettled().then(() => {
+    didSettle = true;
+  });
+  await Promise.resolve();
+  assert.equal(didSettle, false);
+  animated.animationFactory.find(":cleanup")?.finish();
+  await presentation;
+  assert.equal(didSettle, true);
+  assert.equal(animated.controller.snapshot().animationCount, 0);
+});
+
+test("a direct replay refresh settles an in-flight presentation of the same epoch", () => {
+  const { controller } = harness();
+  const replayPlan = plan("replay-refresh");
+  controller.presentFrame(
+    { viewer_mode: "replay", animate_incoming: true, plan: replayPlan },
+    surfaceA,
+  );
+  assert.ok(controller.snapshot().animationCount > 0);
+
+  controller.presentFrame(
+    { viewer_mode: "replay", animate_incoming: false, plan: replayPlan },
+    surfaceA,
+  );
+
+  assert.equal(controller.snapshot().animationCount, 0);
+  assert.equal(controller.snapshot().submissionBlocked, false);
+});
+
 test("pause, rate, Skip, reduced motion, and Off remain presentation-only", async () => {
   const idle = harness();
   assert.equal(idle.controller.togglePaused().paused, false);

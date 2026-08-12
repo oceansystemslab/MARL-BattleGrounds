@@ -21,6 +21,17 @@ presentation-only motion without inferring simulator truth.
 The launcher always prints a loopback URL and also attempts to open it
 automatically. Running the analyzer requires neither Node.js nor npm.
 
+Open a validated semantic replay in the same read-only browser analyzer:
+
+```bash
+./scripts/dev/run_debug_renderer.sh --replay episode.marlbg-replay.json
+```
+
+Replay mode validates the complete artifact before opening a server, exposes an
+audience-specific timeline, and never imports or runs the simulator. Use
+`--frame-index`, `--view pov`, and `--pov-slot` to choose the initial recorded
+frame and recipient-safe view.
+
 For a one-frame Matplotlib snapshot instead:
 
 ```bash

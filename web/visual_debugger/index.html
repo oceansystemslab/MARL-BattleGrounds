@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
     >
     <meta name="referrer" content="no-referrer">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -34,7 +34,7 @@
     </header>
 
     <section class="session-toolbar" aria-label="Analyzer session">
-      <label id="scenario-control">
+      <label id="scenario-control" data-live-only>
         <span>Scenario</span>
         <select id="scenario-select" aria-label="Scenario" disabled>
           <option>Loading…</option>
@@ -55,7 +55,7 @@
           <option value="debug">Debug</option>
         </select>
       </label>
-      <fieldset class="movement-scale-control">
+      <fieldset class="movement-scale-control" data-live-only>
         <legend>Movement scale</legend>
         <div class="movement-scale-control__row">
           <input
@@ -130,6 +130,88 @@
       </div>
     </section>
 
+    <section
+      id="replay-timeline"
+      class="replay-timeline"
+      aria-labelledby="replay-timeline-heading"
+      tabindex="0"
+      hidden
+    >
+      <div class="replay-timeline__summary">
+        <div>
+          <p class="eyebrow">Read-only artifact</p>
+          <h2 id="replay-timeline-heading">Replay timeline</h2>
+        </div>
+        <dl class="replay-badges">
+          <div>
+            <dt>Artifact</dt>
+            <dd id="replay-artifact-reference">—</dd>
+          </div>
+          <div>
+            <dt>Completion</dt>
+            <dd id="replay-completion-badge">—</dd>
+          </div>
+          <div>
+            <dt>Processing</dt>
+            <dd id="replay-processing-badge">—</dd>
+          </div>
+          <div>
+            <dt>End reason</dt>
+            <dd id="replay-end-reason">—</dd>
+          </div>
+          <div>
+            <dt>Incoming</dt>
+            <dd id="replay-incoming-value">Initial frame</dd>
+          </div>
+        </dl>
+      </div>
+      <fieldset class="replay-timeline__transport">
+        <legend class="sr-only">Replay transport</legend>
+        <button id="replay-first-button" type="button" aria-label="First replay frame">First</button>
+        <button id="replay-previous-button" type="button" aria-label="Previous replay frame">Previous</button>
+        <button
+          id="replay-play-pause-button"
+          class="button--primary"
+          type="button"
+          aria-label="Play replay"
+          aria-pressed="false"
+        >Play</button>
+        <button id="replay-next-button" type="button" aria-label="Next replay frame">Next</button>
+        <button id="replay-last-button" type="button" aria-label="Last replay frame">Last</button>
+        <label class="replay-timeline__slider">
+          <span>Frame</span>
+          <input
+            id="replay-frame-slider"
+            type="range"
+            min="0"
+            max="0"
+            step="1"
+            value="0"
+            aria-label="Replay frame"
+            disabled
+          >
+        </label>
+        <output id="replay-frame-position" for="replay-frame-slider" aria-live="polite">
+          Frame 0 / 0
+        </output>
+      </fieldset>
+      <fieldset class="replay-timeline__options">
+        <legend class="sr-only">Replay presentation options</legend>
+        <button id="replay-ranges-button" type="button" aria-pressed="false">
+          Ranges
+        </button>
+        <button id="replay-verbosity-button" type="button" aria-pressed="false">
+          Verbose details
+        </button>
+        <button id="replay-clear-reference-button" type="button">
+          Clear Reference
+        </button>
+        <span class="replay-shortcuts">
+          <kbd>Home</kbd>/<kbd>End</kbd> edges · <kbd>←</kbd>/<kbd>→</kbd> step · <kbd>Space</kbd> play
+        </span>
+      </fieldset>
+    </section>
+
     <div id="notice" class="notice" data-level="info" role="status" hidden></div>
 
     <main class="workspace">
@@ -164,7 +246,7 @@
           are unavailable. Tab behaves normally in the side panel.
         </p>
 
-        <section class="command-deck" aria-label="Debugger commands">
+        <section class="command-deck" aria-label="Debugger commands" data-live-only>
           <header class="command-deck__header">
             <div>
               <p class="command-deck__eyebrow">Joint action composer</p>
@@ -280,7 +362,7 @@
           </div>
         </section>
 
-        <section class="hud-section" aria-labelledby="pending-heading">
+        <section class="hud-section" aria-labelledby="pending-heading" data-live-only>
           <div class="section-heading">
             <h2 id="pending-heading">Pending joint turn</h2>
             <span id="pending-count" class="count-badge">0 actors</span>
@@ -293,7 +375,7 @@
           </article>
         </section>
 
-        <section class="hud-section" aria-labelledby="accepted-heading">
+        <section class="hud-section" aria-labelledby="accepted-heading" data-live-only>
           <h2 id="accepted-heading">Latest transition</h2>
           <article id="accepted-card" class="action-card">
             <p class="empty-copy">No transition yet.</p>
@@ -316,7 +398,7 @@
           </ol>
         </section>
 
-        <details id="visual-key" class="hud-section visual-key">
+        <details id="visual-key" class="hud-section visual-key" data-live-only>
           <summary>Visual key</summary>
           <dl class="visual-key__list">
             <dt><span class="key-swatch key-swatch--team-a"></span>Team A</dt>
@@ -374,11 +456,11 @@
           </div>
           <button class="button button--quiet" type="submit" value="close">Close</button>
         </div>
-        <p>
+        <p data-live-only>
           Click the battlefield once to give it command focus. Panel controls
           keep ordinary browser keyboard and Tab behavior.
         </p>
-        <dl class="help-grid">
+        <dl class="help-grid" data-live-only>
           <dt>Tab / Shift+Tab</dt><dd>Cycle the controlled actor</dd>
           <dt>Shift+left click</dt><dd>Control the clicked visible actor</dd>
           <dt>Left click</dt><dd>Select a visible target</dd>
@@ -403,18 +485,37 @@
           <dt>Motion controls</dt>
           <dd>Choose 0.5×, 1×, 2×, Off, or Skip the current explanation</dd>
         </dl>
-        <p class="help-note">
+        <p class="help-note" data-live-only>
           Actor drafts persist when you cycle or directly control another
           actor. Scripted scenarios are inspection-only: manual draft and
           Submit controls are unavailable, and N advances the registered
           trajectory.
         </p>
-        <p class="help-note">
+        <p class="help-note" data-live-only>
           Animation, layout, hover, help, and panel state are presentation-only.
           Python remains authoritative for every simulator and legality decision.
           Normal motion briefly holds only the next Submit/Next-frame input;
           Skip, reduced motion, and Off release it immediately.
         </p>
+        <div data-replay-only hidden>
+          <p>
+            This viewer is read-only. Replay transport changes only the selected
+            recorded frame; it cannot submit an action or advance the simulator.
+          </p>
+          <dl class="help-grid">
+            <dt>Home / End</dt><dd>Go to the first / last captured frame</dd>
+            <dt>Left / Right</dt><dd>Go to the previous / next captured frame</dd>
+            <dt>Space</dt><dd>Play or pause serialized replay</dd>
+            <dt>Frame slider</dt><dd>Seek after a short debounce</dd>
+            <dt>Motion controls</dt>
+            <dd>Change local explanation speed or disable motion</dd>
+          </dl>
+          <p class="help-note">
+            Autoplay keeps one request in flight and waits for each incoming
+            explanation to settle. Seeking, errors, disconnects, hidden tabs,
+            and the captured endpoint pause it.
+          </p>
+        </div>
       </form>
     </dialog>
 

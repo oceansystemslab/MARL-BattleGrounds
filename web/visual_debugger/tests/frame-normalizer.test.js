@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { extractFrame } from "../src/api.js";
+import { buildChoreographyPlan, transitionEpochKey } from "../src/choreography-plan.js";
 import {
   liveDebuggerFrameIsScripted,
   liveDebuggerScenarioControlsAvailable,
   normalizeLiveDebuggerFrameV2,
   researcherEventTypesV2,
 } from "../src/frame-normalizer.js";
-import { buildChoreographyPlan, transitionEpochKey } from "../src/choreography-plan.js";
 
 const episodeId = "evaluation-episode";
 const transitionId = `${episodeId}:transition:0`;

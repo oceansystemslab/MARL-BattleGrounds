@@ -3,10 +3,10 @@ import test from "node:test";
 
 import { iconDefinition, KNOWN_GLYPH_KEYS } from "../src/icons.js";
 import {
-  activationImpactSemantic,
   ACTIVATION_TOKEN_IDS,
-  CATALOG_STATUS_IDS,
+  activationImpactSemantic,
   CANONICAL_STATUS_ORDER,
+  CATALOG_STATUS_IDS,
   CLASS_TOKEN_IDS,
   classTokenFromId,
   LIFECYCLE_TOKEN_IDS,
