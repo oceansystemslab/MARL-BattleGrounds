@@ -23,6 +23,7 @@ import {
   targetSelectionCommand,
 } from "./controls.js";
 import { formatDisplayNumber } from "./display.js";
+import { explainAgent, explainLegality } from "./explanations.js";
 import {
   liveDebuggerFrameIsScripted,
   liveDebuggerScenarioControlsAvailable,
@@ -40,7 +41,12 @@ import {
   validateReplayFrameContinuity,
 } from "./replay-frame-normalizer.js";
 import { BattlefieldRenderer } from "./scene.js";
-import { createTooltipController, registerTooltipOwner } from "./tooltip.js";
+import {
+  createSemanticDescriptor,
+  createTooltipController,
+  registerTooltipOwner,
+  renderSemanticDescriptor,
+} from "./tooltip.js";
 
 /**
  * @param {string} id
@@ -107,12 +113,14 @@ const elements = {
   helpButton: requiredElement("help-button"),
   exitButton: requiredElement("exit-button"),
   resetButton: requiredElement("reset-button"),
+  liveRangesButton: requiredElement("live-ranges-button"),
+  liveVerbosityButton: requiredElement("live-verbosity-button"),
   motionPauseButton: requiredElement("motion-pause-button"),
   motionSkipButton: requiredElement("motion-skip-button"),
+  motionOffButton: requiredElement("motion-off-button"),
+  graphicsSpeedInput: requiredElement("graphics-speed-input"),
+  graphicsSpeedValue: requiredElement("graphics-speed-value"),
   motionStatus: requiredElement("motion-status"),
-  motionRateButtons: /** @type {NodeListOf<HTMLButtonElement>} */ (
-    document.querySelectorAll("[data-motion-rate]")
-  ),
   notice: requiredElement("notice"),
   scenarioDescription: requiredElement("scenario-description"),
   battlefieldShell: requiredElement("battlefield-shell"),
@@ -143,6 +151,10 @@ const elements = {
   visualTooltip: requiredElement("visual-tooltip"),
   visualTooltipTitle: requiredElement("visual-tooltip-title"),
   visualTooltipDetails: requiredElement("visual-tooltip-details"),
+  semanticInspector: requiredElement("semantic-inspector"),
+  semanticInspectorHeading: requiredElement("semantic-inspector-heading"),
+  semanticInspectorContent: requiredElement("semantic-inspector-content"),
+  semanticInspectorCloseButton: requiredElement("semantic-inspector-close-button"),
   helpDialog: requiredElement("help-dialog"),
   battlefieldInstructions: requiredElement("battlefield-instructions"),
   liveOnly: /** @type {NodeListOf<HTMLElement>} */ (
@@ -179,6 +191,209 @@ const state = {
   notice: null,
   noticeLevel: "info",
 };
+
+const CONTROL_HELP = Object.freeze([
+  [
+    "#battlefield",
+    "Battlefield commands",
+    "Inspect the authoritative scene. In live mode, focus this surface to use debugger keyboard commands.",
+    "composite",
+  ],
+  [
+    "#replay-timeline",
+    "Replay timeline",
+    "Use the read-only transport and presentation controls to inspect recorded frames.",
+    "composite",
+  ],
+  ["#scenario-select", "Scenario", "Choose a registered live episode setup."],
+  [
+    "#view-select",
+    "Audience view",
+    "Switch between researcher and recipient-authorized views.",
+  ],
+  [
+    "#preset-select",
+    "Presentation preset",
+    "Choose Presentation, Analysis, or Technical rendering.",
+  ],
+  [
+    "#movement-scale-input",
+    "Movement scale",
+    "Set authoritative ordinary movement distance for a fresh episode.",
+  ],
+  [
+    "#movement-scale-tenth-button",
+    "Movement scale 0.10",
+    "Start a fresh episode at movement scale 0.10.",
+  ],
+  [
+    "#movement-scale-default-button",
+    "Default movement scale",
+    "Restore the scenario-authored movement scale in a fresh episode.",
+  ],
+  [
+    "#motion-pause-button",
+    "Pause graphics",
+    "Pause or resume only the current visual explanation.",
+  ],
+  [
+    "#graphics-speed-input",
+    "Graphics rendering speed",
+    "Set local explanation speed from 0.01× through 2.00×.",
+  ],
+  [
+    "#motion-off-button",
+    "Motion Off",
+    "Disable or restore animated visual explanations without changing simulator state.",
+  ],
+  [
+    "#motion-skip-button",
+    "Skip explanation",
+    "Settle the current visual explanation immediately.",
+  ],
+  [
+    "#reconnect-button",
+    "Reconnect",
+    "Fetch and atomically install the latest authoritative frame.",
+  ],
+  ["#help-button", "Help", "Open the keyboard, recording, and replay controls guide."],
+  ["#help-close-button", "Close help", "Close the analyzer help dialog."],
+  [
+    "#semantic-inspector-close-button",
+    "Close full explanation",
+    "Close the persistent semantic explanation and return focus.",
+  ],
+  ["#exit-button", "Exit", "Ask the local Python service to close safely."],
+  [
+    "#recording-finish-button",
+    "Finish and review",
+    "Finalize the captured prefix, save it, and enter read-only review.",
+  ],
+  [
+    "#recording-review-button",
+    "Review replay",
+    "Enter read-only review for the saved replay.",
+  ],
+  [
+    "#recording-retry-button",
+    "Retry save",
+    "Retry publishing the same immutable replay bytes.",
+  ],
+  [
+    "#recording-save-as-input",
+    "Save As basename",
+    "Enter a basename only; paths and overwrites are rejected.",
+  ],
+  [
+    "#recording-save-as-button",
+    "Save As",
+    "Publish the same immutable replay bytes under the entered basename.",
+  ],
+  [
+    "#recording-discard-cancel-button",
+    "Keep recording",
+    "Cancel replacement and preserve the captured prefix.",
+  ],
+  [
+    "#recording-discard-confirm-button",
+    "Discard and replace",
+    "Confirm permanent loss of the unpublished prefix and start its named replacement.",
+  ],
+  ["#replay-first-button", "First replay frame", "Seek to settled replay frame zero."],
+  [
+    "#replay-previous-button",
+    "Previous replay frame",
+    "Seek one captured frame backward.",
+  ],
+  [
+    "#replay-play-pause-button",
+    "Replay playback",
+    "Start or pause serialized read-only autoplay.",
+  ],
+  [
+    "#replay-next-button",
+    "Next replay frame",
+    "Advance exactly one captured replay frame.",
+  ],
+  [
+    "#replay-last-button",
+    "Last replay frame",
+    "Seek to the end of the captured prefix.",
+  ],
+  [
+    "#replay-frame-slider",
+    "Replay frame",
+    "Seek to an exact captured frame after a short debounce.",
+  ],
+  [
+    "#replay-ranges-button",
+    "Replay ranges",
+    "Toggle recorded researcher range presentation.",
+  ],
+  [
+    "#replay-verbosity-button",
+    "Replay verbosity",
+    "Toggle technical detail without changing artifact truth.",
+  ],
+  [
+    "#replay-clear-reference-button",
+    "Clear Reference",
+    "Clear the researcher inspector highlight; the range anchor is unchanged.",
+  ],
+  [
+    "#command-target-select",
+    "Selected target",
+    "Stage an authorized target for the controlled actor.",
+  ],
+  [
+    "#submit-turn-button",
+    "Submit joint turn",
+    "Submit the complete staged action through the authoritative Python service.",
+  ],
+  [
+    "#advance-script-button",
+    "Advance scripted frame",
+    "Apply the next registered scripted action only.",
+  ],
+  [
+    "#live-ranges-button",
+    "Ranges",
+    "Toggle server-authored researcher range presentation.",
+  ],
+  ["#live-verbosity-button", "Verbosity", "Toggle server-authored technical detail."],
+  [
+    "#reset-button",
+    "Reset",
+    "Start a deterministic fresh episode; recorded prefixes require confirmation.",
+  ],
+  [
+    "#visual-key > summary",
+    "Visual key",
+    "Explain the non-color visual grammar used on the battlefield.",
+  ],
+  [
+    ".diagnostics > summary",
+    "Technical frame",
+    "Inspect authorized wire and diagnostic details.",
+  ],
+  [
+    "[data-key='Tab']:not([data-shift])",
+    "Next actor",
+    "Move researcher control to the next active actor.",
+  ],
+  [
+    "[data-key='Tab'][data-shift='true']",
+    "Previous actor",
+    "Move researcher control to the previous active actor.",
+  ],
+  [
+    "[data-key='Escape']",
+    "Clear target",
+    "Clear the selected target and leave battlefield command focus.",
+  ],
+  ["[data-key='[']", "Previous scenario", "Start the previous registered scenario."],
+  ["[data-key=']']", "Next scenario", "Start the next registered scenario."],
+]);
 
 const battlefieldRenderer = new BattlefieldRenderer({
   battlefield: elements.battlefield,
@@ -255,13 +470,96 @@ const tooltipController = createTooltipController({
   tooltip: elements.visualTooltip,
   title: elements.visualTooltipTitle,
   details: elements.visualTooltipDetails,
+  onInspect: showSemanticInspector,
 });
+
+/** @type {Element | null} */
+let semanticInspectorReturnFocus = null;
+/** @type {string | null} */
+let semanticInspectorFrameKey = null;
 
 let lastBattlefieldSizeKey = "";
 /** @type {number | null} */
 let pendingResizeFrame = null;
 /** @type {Readonly<Record<string, unknown>> | null} */
 let pendingRecordingReplacement = null;
+
+function semanticInspectorAuthorityKey() {
+  const frame = state.frame;
+  if (!isRecord(frame)) {
+    return null;
+  }
+  return [
+    frame.viewer_session_id ?? frame.session_id ?? frame.episode_id ?? "unknown",
+    frame.frame_kind ?? "unknown",
+    frame.view_mode ?? frame.replay_audience ?? "unknown",
+    frame.revision ?? "unknown",
+    frame.frame_index ?? frame.cursor?.frame_index ?? "unknown",
+  ].join(":");
+}
+
+function closeSemanticInspector({ restoreFocus = false } = {}) {
+  elements.semanticInspector.hidden = true;
+  elements.semanticInspectorHeading.textContent = "Full explanation";
+  elements.semanticInspectorContent.replaceChildren();
+  delete elements.semanticInspector.dataset.tone;
+  delete elements.semanticInspector.dataset.accent;
+  semanticInspectorFrameKey = null;
+  const returnFocus = semanticInspectorReturnFocus;
+  semanticInspectorReturnFocus = null;
+  if (
+    restoreFocus &&
+    returnFocus instanceof Element &&
+    returnFocus.isConnected &&
+    "focus" in returnFocus &&
+    typeof returnFocus.focus === "function"
+  ) {
+    returnFocus.focus();
+  }
+}
+
+/**
+ * @param {unknown} descriptor
+ * @param {{owner: Element, trigger: Element | null}} context
+ */
+function showSemanticInspector(descriptor, context) {
+  const normalized = createSemanticDescriptor(descriptor);
+  semanticInspectorReturnFocus = context.trigger ?? context.owner;
+  semanticInspectorFrameKey = semanticInspectorAuthorityKey();
+  renderSemanticDescriptor({
+    descriptor: normalized,
+    title: elements.semanticInspectorHeading,
+    details: elements.semanticInspectorContent,
+    surface: "full",
+  });
+  elements.semanticInspector.dataset.tone = normalized.tone;
+  elements.semanticInspector.dataset.accent = normalized.accent;
+  elements.semanticInspector.hidden = false;
+  elements.semanticInspectorCloseButton.focus();
+}
+
+function registerControlHelp() {
+  for (const [selector, title, summary, kind = "control"] of CONTROL_HELP) {
+    for (const control of document.querySelectorAll(selector)) {
+      registerTooltipOwner(
+        control,
+        createSemanticDescriptor({
+          kind,
+          id: `control:${selector}:${title}`,
+          title,
+          tone: "information",
+          accent: "none",
+          summary,
+          rows: [],
+          sections: [],
+          metadata: { compact: true, full: false },
+          anchor: "element",
+        }),
+        { inspectable: false },
+      );
+    }
+  }
+}
 
 /**
  * @param {unknown} value
@@ -343,8 +641,32 @@ function renderReplayMetadata() {
   elements.replayArtifactReference.textContent = String(
     reference.artifact_id ?? "Unavailable",
   );
-  elements.replayArtifactReference.title = String(
-    reference.canonical_digest_sha256 ?? "",
+  elements.replayArtifactReference.removeAttribute("title");
+  registerTooltipOwner(
+    elements.replayArtifactReference,
+    createSemanticDescriptor({
+      kind: "control",
+      id: "replay-artifact-reference",
+      title: "Replay artifact",
+      tone: "information",
+      accent: "none",
+      summary: "Canonical identity for the loaded immutable replay artifact.",
+      rows: [
+        {
+          label: "Artifact",
+          value: String(reference.artifact_id ?? "Unavailable"),
+          metadata: { compact: true, full: true },
+        },
+        {
+          label: "Canonical digest",
+          value: String(reference.canonical_digest_sha256 ?? "Unavailable"),
+          metadata: { compact: false, full: true },
+        },
+      ],
+      sections: [],
+      metadata: { compact: true, full: true },
+      anchor: "element",
+    }),
   );
   elements.replayCompletionBadge.textContent = humanize(
     completion.completion_state ?? "unavailable",
@@ -490,6 +812,37 @@ function frameScene(frame) {
     return null;
   }
   return isRecord(frame.scene) ? frame.scene : null;
+}
+
+/**
+ * Resolve front-facing identity only from the currently authorized scene.
+ * Global slots remain internal join keys and are never presented as identities.
+ *
+ * @param {Record<string, any> | null} frame
+ * @param {unknown} globalSlot
+ * @returns {string | null}
+ */
+function publicAgentIdForSlot(frame, globalSlot) {
+  if (!Number.isInteger(globalSlot)) {
+    return null;
+  }
+  const agent = asArray(frameScene(frame)?.agents).find(
+    (candidate) =>
+      isRecord(candidate) && Number(candidate.global_slot) === Number(globalSlot),
+  );
+  return typeof agent?.public_agent_id === "string" && agent.public_agent_id.length > 0
+    ? agent.public_agent_id
+    : null;
+}
+
+/**
+ * @param {unknown} publicAgentId
+ * @returns {string}
+ */
+function agentIdentity(publicAgentId) {
+  return typeof publicAgentId === "string" && publicAgentId.length > 0
+    ? `Agent ID ${publicAgentId}`
+    : "Agent unavailable";
 }
 
 /**
@@ -822,15 +1175,23 @@ function renderSessionToolbar() {
     "aria-disabled",
     String(disabled || restartControlsBlocked || !scenarioControlsAvailable),
   );
-  elements.scenarioSelect.title = scenarioControlsAvailable
-    ? "Choose a registered live researcher scenario."
-    : "Scenario controls are unavailable in recipient POV.";
+  elements.scenarioSelect.removeAttribute("title");
   elements.viewSelect.disabled = disabled;
   elements.presetSelect.disabled = disabled;
   elements.reconnectButton.disabled = state.busy || state.shuttingDown;
   elements.exitButton.disabled = disabled;
   elements.exitButton.textContent = replay ? "Exit replay viewer" : "Exit analyzer";
   elements.resetButton.disabled = disabled || restartControlsBlocked;
+  const researcherLive = !replay && frame?.view_mode === "researcher";
+  elements.liveRangesButton.hidden = !researcherLive;
+  elements.liveRangesButton.setAttribute(
+    "aria-pressed",
+    String(researcherLive && frame?.show_ranges === true),
+  );
+  elements.liveVerbosityButton.setAttribute(
+    "aria-pressed",
+    String(!replay && frame?.verbose === true),
+  );
   renderRecordingControls();
   renderReplayMetadata();
   renderCommandAvailability();
@@ -852,22 +1213,42 @@ function setDraftSelection(button, selected) {
  * @param {HTMLButtonElement} button
  * @param {boolean} available
  * @param {string} explanation
+ * @param {unknown} [descriptor]
  */
-function setAuthoritativeAvailability(button, available, explanation) {
+function setAuthoritativeAvailability(
+  button,
+  available,
+  explanation,
+  descriptor = null,
+) {
   button.setAttribute("aria-disabled", String(!available));
   button.dataset.authoritativeAvailable = String(available);
   button.dataset.tooltipKind = "legality";
   button.dataset.tooltipText = explanation;
-  registerTooltipOwner(button, {
-    kind: "legality",
-    id: `command:${button.id || button.dataset.key || "choice"}`,
-    title:
-      button.getAttribute("aria-label") ??
-      button.textContent?.trim() ??
-      "Pending choice",
-    details: [explanation],
-    anchor: "element",
-  });
+  registerTooltipOwner(
+    button,
+    descriptor ?? {
+      kind: "legality",
+      id: `command:${button.id || button.dataset.key || "choice"}`,
+      title:
+        button.getAttribute("aria-label") ??
+        button.textContent?.trim() ??
+        "Pending choice",
+      tone: available ? "positive" : "warning",
+      accent: "none",
+      summary: explanation,
+      rows: [
+        {
+          label: "Status",
+          value: available ? "True" : "False",
+          metadata: { compact: true, full: true },
+        },
+      ],
+      sections: [],
+      metadata: { compact: true, full: true },
+      anchor: "element",
+    },
+  );
 }
 
 /**
@@ -896,9 +1277,10 @@ function candidateLegality(hud, targetAction) {
  *
  * @param {Record<string, any>} hud
  * @param {Record<string, any>} pending
- * @param {boolean} pov
+ * @param {Record<string, any> | null} frame
  */
-function renderCommandTargets(hud, pending, pov) {
+function renderCommandTargets(hud, pending, frame) {
+  const pov = frame?.frame_kind === "actor_pov_live_debugger";
   const candidates = asArray(hud.candidate_legalities).filter(isRecord);
   const pendingTarget = isRecord(pending.target) ? pending.target : {};
   const selectedSlot = pendingTarget.global_slot;
@@ -913,11 +1295,15 @@ function renderCommandTargets(hud, pending, pov) {
     const ultimate = candidate.ultimate_available === true ? "U ✓" : "U ×";
     if (pov && Number.isInteger(target.target_action)) {
       option.value = `pov-target-action:${target.target_action}`;
-      option.textContent = `${target.public_agent_id ?? "No target"} · action ${target.target_action} · ${basic} · ${ultimate}`;
+      option.textContent = `${agentIdentity(target.public_agent_id)} · action ${target.target_action} · ${basic} · ${ultimate}`;
       option.selected = Number(target.target_action) === selectedTargetAction;
     } else if (target.disclosure === "public" && Number.isInteger(target.global_slot)) {
+      const publicAgentId = publicAgentIdForSlot(frame, target.global_slot);
+      if (publicAgentId === null) {
+        continue;
+      }
       option.value = String(target.global_slot);
-      option.textContent = `id_${target.global_slot} · ${basic} · ${ultimate}`;
+      option.textContent = `${agentIdentity(publicAgentId)} · ${basic} · ${ultimate}`;
       option.selected = Number(target.global_slot) === Number(selectedSlot);
     } else if (target.disclosure === "target_none") {
       option.value = "";
@@ -945,10 +1331,12 @@ function renderDraftState(hud, frame) {
   const pending = isRecord(hud.pending_action) ? hud.pending_action : {};
   const pov = frame?.frame_kind === "actor_pov_live_debugger";
   const controlledSlot = Number(hud.controlled_global_slot);
-  const controlledIdentity = pov
+  const controlledPublicAgentId = pov
     ? hud.controlled_public_agent_id
-    : Number.isInteger(controlledSlot)
-      ? `id_${controlledSlot}`
+    : publicAgentIdForSlot(frame, controlledSlot);
+  const controlledIdentity =
+    typeof controlledPublicAgentId === "string"
+      ? agentIdentity(controlledPublicAgentId)
       : null;
   elements.commandControlledActor.textContent = controlledIdentity
     ? `Actor · ${controlledIdentity}`
@@ -986,7 +1374,7 @@ function renderDraftState(hud, frame) {
     );
   }
 
-  renderCommandTargets(hud, pending, pov);
+  renderCommandTargets(hud, pending, frame);
   const pendingTarget = isRecord(pending.target) ? pending.target : {};
   const rawTargetAction = pendingTarget.target_action ?? pending.target_action;
   const targetAction = Number.isInteger(rawTargetAction) ? Number(rawTargetAction) : 0;
@@ -1006,16 +1394,14 @@ function renderDraftState(hud, frame) {
   setAuthoritativeAvailability(
     elements.basicButton,
     basicAvailable,
-    basicAvailable
-      ? "Basic is legal for the currently staged target."
-      : "Basic is unavailable for the currently staged target.",
+    `Basic ability is ${basicAvailable ? "" : "not "}available this tick.`,
+    explainLegality({ lane_0_available: basicAvailable }, 0),
   );
   setAuthoritativeAvailability(
     elements.ultimateButton,
     ultimateAvailable,
-    ultimateAvailable
-      ? "Ultimate is legal for the currently staged target."
-      : "Ultimate is unavailable for the currently staged target.",
+    `Ultimate ability is ${ultimateAvailable ? "" : "not "}available this tick.`,
+    explainLegality({ lane_1_available: ultimateAvailable }, 1),
   );
 }
 
@@ -1101,17 +1487,16 @@ function renderMotionControls() {
   elements.motionPauseButton.textContent = presentation.paused ? "Resume" : "Pause";
   elements.motionSkipButton.disabled =
     presentationDisabled || (!hasActiveClock && !presentation.submissionBlocked);
-
-  for (const button of elements.motionRateButtons) {
-    const value = button.dataset.motionRate;
-    const selected =
-      value === "off"
-        ? presentation.motionMode === "off"
-        : presentation.motionMode !== "off" &&
-          Number(value) === presentation.playbackRate;
-    button.disabled = presentationDisabled;
-    button.setAttribute("aria-pressed", String(selected));
-  }
+  elements.motionOffButton.disabled = presentationDisabled;
+  elements.motionOffButton.setAttribute(
+    "aria-pressed",
+    String(presentation.motionMode === "off"),
+  );
+  elements.graphicsSpeedInput.disabled = presentationDisabled;
+  const displayedRate = presentation.playbackRate.toFixed(2);
+  elements.graphicsSpeedInput.value = displayedRate;
+  elements.graphicsSpeedValue.value = `${displayedRate}×`;
+  elements.graphicsSpeedValue.textContent = `${displayedRate}×`;
 
   if (presentation.motionMode === "off") {
     elements.motionStatus.textContent = "Motion off";
@@ -1124,8 +1509,8 @@ function renderMotionControls() {
         ? "Paused"
         : presentation.submissionBlocked
           ? "Explaining"
-          : "Motion";
-  elements.motionStatus.textContent = `${prefix} ${presentation.playbackRate}×`;
+          : "Graphics";
+  elements.motionStatus.textContent = `${prefix} ${displayedRate}×`;
 }
 
 /**
@@ -1195,21 +1580,33 @@ function applyReplayReferenceSemantics() {
     return;
   }
   const publicAgentId = agent.public_agent_id;
+  const classMechanics = asArray(scene?.class_mechanics).find(
+    (candidate) => isRecord(candidate) && candidate.class_id === agent.class_id,
+  );
   const ariaLabel = reference.getAttribute("aria-label") ?? `Agent ID ${publicAgentId}`;
   reference.setAttribute(
     "aria-label",
     ariaLabel.replace(/selected target/giu, "Reference"),
   );
-  registerTooltipOwner(reference, {
-    kind: "agent",
-    id: `replay-reference:${publicAgentId}`,
-    title: `Agent ID ${publicAgentId}`,
-    details: ["Researcher Reference", "Inspector and highlight only"],
-    anchor: "element",
-  });
+  registerTooltipOwner(
+    reference,
+    explainAgent(
+      agent,
+      { reference: true, audience: "researcher" },
+      isRecord(classMechanics) ? classMechanics : null,
+      asArray(scene?.agents),
+    ),
+  );
 }
 
 function render() {
+  const currentInspectorKey = semanticInspectorAuthorityKey();
+  if (
+    !elements.semanticInspector.hidden &&
+    semanticInspectorFrameKey !== currentInspectorKey
+  ) {
+    closeSemanticInspector();
+  }
   renderConnection();
   renderSessionToolbar();
   battlefieldRenderer.render(state.frame, { offline: state.offline });
@@ -1948,6 +2345,20 @@ elements.helpButton.addEventListener("click", () => {
   elements.helpDialog.showModal();
 });
 
+elements.semanticInspectorCloseButton.addEventListener("click", () => {
+  closeSemanticInspector({ restoreFocus: true });
+});
+
+elements.semanticInspector.addEventListener(
+  "keydown",
+  (/** @type {KeyboardEvent} */ event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeSemanticInspector({ restoreFocus: true });
+    }
+  },
+);
+
 elements.motionPauseButton.addEventListener("click", () => {
   togglePresentationPause();
 });
@@ -1956,23 +2367,24 @@ elements.motionSkipButton.addEventListener("click", () => {
   choreographer.skip();
 });
 
-for (const button of elements.motionRateButtons) {
-  button.addEventListener("click", () => {
-    const value = button.dataset.motionRate;
-    if (value === "off") {
-      choreographer.setMotionMode("off");
-      return;
-    }
-    const rate = Number(value);
-    if (!Number.isFinite(rate) || rate <= 0) {
-      return;
-    }
-    if (choreographer.snapshot().motionMode === "off") {
-      choreographer.setMotionMode("normal");
-    }
-    choreographer.setPlaybackRate(rate);
-  });
-}
+elements.graphicsSpeedInput.addEventListener("input", () => {
+  const rate = Number(elements.graphicsSpeedInput.value);
+  if (!Number.isFinite(rate) || rate < 0.01 || rate > 2) {
+    return;
+  }
+  choreographer.setPlaybackRate(rate);
+});
+
+elements.motionOffButton.addEventListener("click", () => {
+  const current = choreographer.snapshot().motionMode;
+  choreographer.setMotionMode(
+    current === "off"
+      ? reducedMotionPreference.matches
+        ? "reduced"
+        : "normal"
+      : "off",
+  );
+});
 
 bindReplayTimelineControls(replayTimelineElements, replayPlayback);
 
@@ -2038,5 +2450,6 @@ const battlefieldResizeObserver = new ResizeObserver(scheduleBattlefieldResize);
 battlefieldResizeObserver.observe(elements.battlefieldShell);
 replayPlayback.setHidden(document.hidden);
 
+registerControlHelp();
 render();
 loadCurrentFrame();

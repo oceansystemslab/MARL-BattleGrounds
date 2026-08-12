@@ -94,6 +94,9 @@ button:focus-visible,
 select:focus-visible,
 summary:focus-visible,
 .battlefield:focus-visible,
+.roster-row:focus-visible,
+.comparison-agent:focus-visible,
+.pending-action-row:focus-visible,
 [data-tooltip-owner][tabindex="0"]:focus-visible {
   outline: 3px solid rgb(34 211 238 / 62%);
   outline-offset: 2px;
@@ -170,8 +173,7 @@ select {
 .button-row,
 .section-heading,
 .session-facts,
-.motion-controls,
-.motion-rate-group {
+.motion-controls {
   display: flex;
   align-items: center;
   gap: 0.55rem;
@@ -579,23 +581,38 @@ select {
   font-size: 0.78rem;
 }
 
-.motion-rate-group {
-  gap: 0.2rem;
-  min-inline-size: 0;
-  margin: 0;
-  padding: 0.18rem;
-  border: 1px solid var(--border);
-  border-radius: 0.55rem;
-  background: rgb(8 13 24 / 55%);
+.graphics-speed-control {
+  display: grid;
+  min-width: 11rem;
+  gap: 0.12rem;
+  color: var(--text-muted);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: none;
 }
 
-.motion-rate-group button {
-  min-width: 2.75rem;
-  border-color: transparent;
-  background: transparent;
+.graphics-speed-control__row {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
 }
 
-.motion-rate-group button[aria-pressed="true"] {
+.graphics-speed-control input {
+  min-width: 7rem;
+  accent-color: var(--accent);
+}
+
+.graphics-speed-control output {
+  min-width: 3.4rem;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  text-align: end;
+}
+
+#motion-off-button[aria-pressed="true"],
+#live-ranges-button[aria-pressed="true"],
+#live-verbosity-button[aria-pressed="true"] {
   border-color: rgb(34 211 238 / 58%);
   color: #a5f3fc;
   background: rgb(34 211 238 / 12%);
@@ -618,6 +635,83 @@ select {
 .button--primary:hover:not(:disabled) {
   color: #061018;
   background: #67e8f9;
+}
+
+.semantic-inspector {
+  border-color: rgb(34 211 238 / 38%);
+  background: linear-gradient(145deg, rgb(34 211 238 / 5%), rgb(16 24 39 / 92%));
+}
+
+.semantic-inspector__content,
+.semantic-explanation__section {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.semantic-explanation__summary,
+.semantic-explanation__section-summary {
+  margin: 0;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.semantic-explanation__rows {
+  display: grid;
+  grid-template-columns: minmax(7rem, max-content) minmax(0, 1fr);
+  gap: 0.25rem 0.65rem;
+  margin: 0;
+}
+
+.semantic-explanation__rows dt {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 750;
+  letter-spacing: 0.03em;
+}
+
+.semantic-explanation__rows dd {
+  margin: 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.semantic-explanation__heading {
+  margin: 0.3rem 0 0;
+  color: var(--text);
+  font-size: 0.82rem;
+}
+
+.semantic-inspector[data-tone="warning"] {
+  border-color: rgb(250 204 21 / 45%);
+}
+
+.semantic-inspector[data-tone="danger"] {
+  border-color: rgb(251 113 133 / 55%);
+}
+
+.visual-tooltip[data-tooltip-accent="mage"] .visual-tooltip__title,
+.semantic-inspector[data-accent="mage"] h2 {
+  color: var(--class-mage);
+}
+
+.visual-tooltip[data-tooltip-accent="warrior"] .visual-tooltip__title,
+.semantic-inspector[data-accent="warrior"] h2 {
+  color: var(--class-warrior);
+}
+
+.visual-tooltip[data-tooltip-accent="hunter"] .visual-tooltip__title,
+.semantic-inspector[data-accent="hunter"] h2 {
+  color: var(--class-hunter);
+}
+
+.visual-tooltip[data-tooltip-accent="rogue"] .visual-tooltip__title,
+.semantic-inspector[data-accent="rogue"] h2 {
+  color: var(--class-rogue);
+}
+
+.visual-tooltip[data-tooltip-accent="priest"] .visual-tooltip__title,
+.semantic-inspector[data-accent="priest"] h2 {
+  color: var(--class-priest);
 }
 
 .button--danger {
@@ -746,6 +840,7 @@ select {
   font-size: 0.78rem;
   line-height: 1.35;
   pointer-events: none;
+  overflow: auto;
 }
 
 #visual-tooltip.visual-tooltip::before {
@@ -796,7 +891,17 @@ select {
   display: block;
   margin-top: 0.2rem;
   color: var(--text-muted);
-  white-space: pre-line;
+}
+
+.visual-tooltip .semantic-explanation__summary,
+.visual-tooltip .semantic-explanation__section-summary {
+  font-size: 0.76rem;
+}
+
+.visual-tooltip .semantic-explanation__rows {
+  grid-template-columns: minmax(5.5rem, max-content) minmax(0, 1fr);
+  margin-top: 0.35rem;
+  font-size: 0.74rem;
 }
 
 .map-boundary {
@@ -1598,36 +1703,6 @@ select {
   pointer-events: none;
 }
 
-.agent-id-tag {
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 110ms ease-out;
-}
-
-.agent:hover .agent-id-tag,
-.agent[data-selected="true"] .agent-id-tag {
-  opacity: 1;
-}
-
-.agent .agent-id-tag[data-layout-suppressed="true"] {
-  opacity: 0;
-}
-
-.agent-id-tag-box {
-  fill: rgb(8 13 24 / 94%);
-  stroke: currentColor;
-  stroke-width: 1;
-  vector-effect: non-scaling-stroke;
-}
-
-.agent-id-tag-label {
-  fill: var(--text);
-  font-size: 11px;
-  font-weight: 700;
-  text-anchor: middle;
-  dominant-baseline: central;
-}
-
 .controlled-halo,
 .selected-reticle {
   fill: none;
@@ -2046,7 +2121,7 @@ select {
 
 .command-deck__composer {
   display: grid;
-  grid-template-columns: 7.9rem minmax(0, 1fr);
+  grid-template-columns: max-content minmax(0, 1fr);
   gap: 0.5rem;
 }
 
@@ -3300,12 +3375,8 @@ select {
     font-size: 0.7rem;
   }
 
-  .motion-rate-group {
-    padding: 0.1rem;
-  }
-
-  .motion-rate-group button {
-    min-width: 2.35rem;
+  .graphics-speed-control {
+    min-width: 10rem;
   }
 
   .motion-status {

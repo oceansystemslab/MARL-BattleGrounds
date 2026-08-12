@@ -59,7 +59,6 @@ battlefield controls (while the battlefield has focus):
                         agent POV: submit only the controlled actor
   N                     advance the next registered scripted frame
   R                     deterministic scenario reset
-  Shift+R               explain why cooldown clearing is unavailable
   G                     toggle controlled-actor ranges
   V                     toggle concise/verbose logs
   [ / ]                 previous/next scenario
@@ -68,7 +67,8 @@ battlefield controls (while the battlefield has focus):
 
 browser controls:
   Scenario/View/Preset  switch authoritative session presentation
-  0.5x / 1x / 2x / Off change presentation-only motion speed
+  Graphics speed        set presentation-only motion from 0.01x through 2.00x
+  Motion Off            disable or restore animated explanations
   Skip                  settle the current explanation immediately
   Reconnect             fetch the current authoritative frame
   Exit / Ctrl-C         stop the local Visual Debugger and Analyzer

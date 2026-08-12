@@ -55,7 +55,7 @@
         <select id="preset-select" aria-label="Presentation preset" disabled>
           <option value="presentation">Presentation</option>
           <option value="analysis">Analysis</option>
-          <option value="debug">Debug</option>
+          <option value="debug">Technical</option>
         </select>
       </label>
       <fieldset class="movement-scale-control" data-live-only>
@@ -92,8 +92,8 @@
         <span>Step <strong id="step-value">—</strong></span>
         <span>Transition <strong id="transition-value">—</strong></span>
       </fieldset>
-      <fieldset class="motion-controls" aria-label="Presentation motion">
-        <legend class="sr-only">Presentation motion</legend>
+      <fieldset class="motion-controls" aria-label="Graphics rendering controls">
+        <legend class="sr-only">Graphics rendering controls</legend>
         <button
           id="motion-pause-button"
           class="button button--quiet"
@@ -102,12 +102,29 @@
         >
           Pause
         </button>
-        <fieldset class="motion-rate-group" aria-label="Animation speed">
-          <button type="button" data-motion-rate="0.5" aria-pressed="false">0.5×</button>
-          <button type="button" data-motion-rate="1" aria-pressed="true">1×</button>
-          <button type="button" data-motion-rate="2" aria-pressed="false">2×</button>
-          <button type="button" data-motion-rate="off" aria-pressed="false">Off</button>
-        </fieldset>
+        <label class="graphics-speed-control">
+          <span>Graphics rendering speed</span>
+          <span class="graphics-speed-control__row">
+            <input
+              id="graphics-speed-input"
+              type="range"
+              min="0.01"
+              max="2.00"
+              step="0.01"
+              value="1.00"
+              aria-label="Graphics rendering speed"
+            >
+            <output id="graphics-speed-value" for="graphics-speed-input">1.00×</output>
+          </span>
+        </label>
+        <button
+          id="motion-off-button"
+          class="button button--quiet"
+          type="button"
+          aria-pressed="false"
+        >
+          Motion Off
+        </button>
         <button
           id="motion-skip-button"
           class="button button--quiet"
@@ -117,7 +134,7 @@
           Skip
         </button>
         <output id="motion-status" class="motion-status" aria-live="polite">
-          Motion 1×
+          Graphics 1.00×
         </output>
       </fieldset>
       <div class="toolbar-actions">
@@ -226,7 +243,7 @@
         <dl class="replay-badges">
           <div>
             <dt>Artifact</dt>
-            <dd id="replay-artifact-reference">—</dd>
+            <dd id="replay-artifact-reference" tabindex="0">—</dd>
           </div>
           <div>
             <dt>Completion</dt>
@@ -408,8 +425,8 @@
                   Previous actor
                 </button>
                 <button type="button" data-key="Escape">Clear target</button>
-                <button type="button" data-key="g">Ranges</button>
-                <button type="button" data-key="v">Verbosity</button>
+                <button id="live-ranges-button" type="button" data-key="g" aria-pressed="false">Ranges</button>
+                <button id="live-verbosity-button" type="button" data-key="v" aria-pressed="false">Verbosity</button>
               </div>
             </div>
 
@@ -441,6 +458,25 @@
           <div id="selection-card" class="fact-card">
             <p class="empty-copy">No selection facts received yet.</p>
           </div>
+        </section>
+
+        <section
+          id="semantic-inspector"
+          class="hud-section semantic-inspector"
+          aria-labelledby="semantic-inspector-heading"
+          hidden
+        >
+          <div class="section-heading">
+            <h2 id="semantic-inspector-heading">Full explanation</h2>
+            <button
+              id="semantic-inspector-close-button"
+              class="button button--quiet"
+              type="button"
+            >
+              Close
+            </button>
+          </div>
+          <div id="semantic-inspector-content" class="semantic-inspector__content"></div>
         </section>
 
         <section class="hud-section" aria-labelledby="pending-heading" data-live-only>
@@ -535,7 +571,7 @@
             <p class="eyebrow">Browser controls</p>
             <h2 id="help-heading">Analyzer help</h2>
           </div>
-          <button class="button button--quiet" type="submit" value="close">Close</button>
+          <button id="help-close-button" class="button button--quiet" type="submit" value="close">Close</button>
         </div>
         <p data-live-only>
           Click the battlefield once to give it command focus. Panel controls
@@ -559,12 +595,13 @@
           </dd>
           <dt>N</dt><dd>Advance the next registered scripted frame only</dd>
           <dt>R</dt><dd>Deterministically reset the scenario</dd>
-          <dt>Shift+R</dt><dd>Explain why cooldown clearing is unavailable</dd>
           <dt>G / V</dt><dd>Toggle ranges / diagnostic verbosity</dd>
           <dt>[ / ]</dt><dd>Previous / next scenario</dd>
           <dt>P</dt><dd>Pause or resume presentation motion</dd>
-          <dt>Motion controls</dt>
-          <dd>Choose 0.5×, 1×, 2×, Off, or Skip the current explanation</dd>
+          <dt>Graphics rendering speed</dt>
+          <dd>Choose any local explanation speed from 0.01× to 2.00×</dd>
+          <dt>Pause / Motion Off / Skip</dt>
+          <dd>Pause, disable, or settle the current visual explanation</dd>
         </dl>
         <p class="help-note" data-live-only>
           Actor drafts persist when you cycle or directly control another
@@ -588,7 +625,7 @@
             <dt>Left / Right</dt><dd>Go to the previous / next captured frame</dd>
             <dt>Space</dt><dd>Play or pause serialized replay</dd>
             <dt>Frame slider</dt><dd>Seek after a short debounce</dd>
-            <dt>Motion controls</dt>
+            <dt>Graphics rendering controls</dt>
             <dd>Change local explanation speed or disable motion</dd>
           </dl>
           <p class="help-note">

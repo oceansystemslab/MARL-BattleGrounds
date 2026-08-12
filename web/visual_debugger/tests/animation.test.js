@@ -505,6 +505,25 @@ test("pause, rate, Skip, reduced motion, and Off remain presentation-only", asyn
   assert.equal(off.controller.snapshot().animationCount, 0);
 });
 
+test("graphics rendering speed accepts only the bounded 0.01 to 2.00 range", () => {
+  const minimum = harness();
+  minimum.controller.setPlaybackRate(0.01);
+  assert.equal(minimum.controller.snapshot().playbackRate, 0.01);
+
+  const maximum = harness();
+  maximum.controller.setPlaybackRate(2);
+  assert.equal(maximum.controller.snapshot().playbackRate, 2);
+
+  for (const invalid of [0, 0.009, 2.001, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const bounded = harness();
+    assert.throws(
+      () => bounded.controller.setPlaybackRate(invalid),
+      /between 0\.01 and 2/,
+    );
+    assert.equal(bounded.controller.snapshot().playbackRate, 1);
+  }
+});
+
 test("switching an active explanation Off reinstalls the authorized batch until bounded cleanup", async () => {
   const { animationFactory, controller, painter } = harness();
   const authorizedPlan = plan("epoch-mid-off", "researcher", "authorized-events");

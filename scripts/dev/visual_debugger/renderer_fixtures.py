@@ -8,7 +8,7 @@ researcher scene in the browser.
 """
 
 from collections.abc import Mapping
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
 from types import MappingProxyType
 from typing import Literal, TypedDict, cast
 
@@ -52,7 +52,9 @@ from marl_battlegrounds.rendering.scene import (
     BasicTargetModeV2,
     BattlefieldSceneV2,
     ChargePhaseDisplacementEventV2,
+    ClassAuraMechanicSceneV2,
     ClassMechanicsSceneV2,
+    ClassStatusMechanicSceneV2,
     CombatCountdownResetEventV2,
     CooldownReadyEventV2,
     CooldownStartedEventV2,
@@ -117,6 +119,7 @@ type RendererFixtureName = Literal[
     "visual_vocabulary",
     "durable_controls",
     "crowded_teamfight",
+    "required_dock_fallback",
     "route_collision",
     "mixed_net_zero",
     "viewport_matrix",
@@ -323,7 +326,7 @@ _STATUS_DETAILS: Mapping[
         ),
         "priest_freedom": (
             "movement_floor",
-            "ultimate",
+            "basic",
             "movement_floor",
             1.0,
             False,
@@ -354,6 +357,9 @@ _CATALOG_STATUS_ID_BY_TOKEN_ID: Mapping[StatusTokenId, CatalogStatusId] = (
 )
 CATALOG_STATUS_ORDER: tuple[CatalogStatusId, ...] = tuple(
     _CATALOG_STATUS_ID_BY_TOKEN_ID[token_id] for token_id in CANONICAL_STATUS_ORDER
+)
+_STATUS_DURATION_BY_TOKEN_ID: Mapping[StatusTokenId, int] = MappingProxyType(
+    dict(zip(CANONICAL_STATUS_ORDER, (3, 3, 3, 2, 2, 2, 3, 2, 3), strict=True))
 )
 
 
@@ -395,6 +401,51 @@ def _class_mechanics() -> tuple[ClassMechanicsSceneV2, ...]:
         ROGUE_CLASS_ID: "enemy",
         PRIEST_CLASS_ID: "ally",
     }
+    status_rows_by_class: dict[int, list[ClassStatusMechanicSceneV2]] = {
+        class_id: [] for class_id in range(1, 6)
+    }
+    for token_id in CANONICAL_STATUS_ORDER:
+        definition = lookup_status_token(token_id)
+        if definition.source_class_id is None:
+            raise AssertionError(f"status {token_id!r} must have a source class")
+        family, component, magnitude_kind, magnitude, breaks = _STATUS_DETAILS[token_id]
+        status_rows_by_class[definition.source_class_id].append(
+            ClassStatusMechanicSceneV2(
+                status_channel=CATALOG_STATUS_ID_BY_CHANNEL.index(
+                    _CATALOG_STATUS_ID_BY_TOKEN_ID[token_id]
+                ),
+                status_id=_CATALOG_STATUS_ID_BY_TOKEN_ID[token_id],
+                family=family,
+                source_action_component=component,
+                duration_steps=_STATUS_DURATION_BY_TOKEN_ID[token_id],
+                magnitude_kind=magnitude_kind,
+                magnitude=magnitude,
+                breaks_on_positive_damage=breaks,
+            )
+        )
+    aura_rows_by_class: dict[int, tuple[ClassAuraMechanicSceneV2, ...]] = {
+        class_id: () for class_id in range(1, 6)
+    }
+    aura_rows_by_class[MAGE_CLASS_ID] = (
+        ClassAuraMechanicSceneV2(
+            aura_id="mage_damage_amplification",
+            radius=4.0,
+            per_emitter_multiplier=1.1,
+            stacking_rule="multiply_then_clamp",
+            clamp_kind="ceiling",
+            clamp_value=1.5,
+        ),
+    )
+    aura_rows_by_class[WARRIOR_CLASS_ID] = (
+        ClassAuraMechanicSceneV2(
+            aura_id="warrior_damage_mitigation",
+            radius=4.0,
+            per_emitter_multiplier=0.9,
+            stacking_rule="multiply_then_clamp",
+            clamp_kind="floor",
+            clamp_value=0.5,
+        ),
+    )
     return tuple(
         ClassMechanicsSceneV2(
             class_id=class_id,
@@ -414,9 +465,19 @@ def _class_mechanics() -> tuple[ClassMechanicsSceneV2, ...]:
             ultimate_raw_healing=20.0 if class_id == PRIEST_CLASS_ID else 0.0,
             out_of_combat_delay_steps=3,
             out_of_combat_health_regeneration_fraction_per_step=0.05,
+            status_mechanics=tuple(
+                sorted(
+                    status_rows_by_class[class_id],
+                    key=lambda status: status.status_channel,
+                )
+            ),
+            aura_mechanics=aura_rows_by_class[class_id],
         )
         for class_id in range(1, 6)
     )
+
+
+_CLASS_MECHANICS_V2 = _class_mechanics()
 
 
 def _status(token_id: StatusTokenId, duration: int) -> StatusSceneV2:
@@ -440,11 +501,8 @@ def _status(token_id: StatusTokenId, duration: int) -> StatusSceneV2:
 
 
 def _statuses(token_ids: tuple[StatusTokenId, ...]) -> tuple[StatusSceneV2, ...]:
-    duration_by_token = dict(
-        zip(CANONICAL_STATUS_ORDER, (3, 3, 3, 2, 2, 2, 3, 2, 3), strict=True)
-    )
     return tuple(
-        _status(token_id, duration_by_token[token_id])
+        _status(token_id, _STATUS_DURATION_BY_TOKEN_ID[token_id])
         for token_id in sorted(token_ids, key=CANONICAL_STATUS_ORDER.index)
     )
 
@@ -456,6 +514,7 @@ def _agents(
     health: Mapping[int, float] | None = None,
     modifier_values: Mapping[int, tuple[float, float]] | None = None,
     cooldowns: Mapping[int, int] | None = None,
+    out_of_combat: Mapping[int, int] | None = None,
     class_ids: tuple[int, ...] = _CLASS_IDS,
     included_slots: tuple[int, ...] = tuple(range(10)),
     corpses: tuple[int, ...] = (),
@@ -468,6 +527,7 @@ def _agents(
     health = health or {}
     modifier_values = modifier_values or {}
     cooldowns = cooldowns or {}
+    out_of_combat = out_of_combat or {}
     spawn_shields = spawn_shields or {}
     respawn_event_ids = respawn_event_ids or {}
     rows: list[AgentSceneV2] = []
@@ -486,10 +546,10 @@ def _agents(
                 life_state="corpse" if slot in corpses else "alive",
                 current_health=health.get(slot, 0.0 if slot in corpses else 100.0),
                 max_health=100.0,
-                effective_movement_speed=1.0,
+                effective_movement_speed=0.0 if slot in corpses else 1.0,
                 ultimate_cooldown_remaining=cooldowns.get(slot, 0),
                 spawn_shield_remaining=spawn_shields.get(slot, 0),
-                steps_until_out_of_combat=0,
+                steps_until_out_of_combat=out_of_combat.get(slot, 0),
                 respawned_on_incoming_transition=respawn_event_id is not None,
                 respawn_event_id=respawn_event_id,
                 statuses=_statuses(status_tokens.get(slot, ())),
@@ -512,10 +572,15 @@ def _aura_field(
     agents: Mapping[int, AgentSceneV2],
     source_global_slot: int,
     aura_id: AuraIdV2,
-    radius: float,
 ) -> AuraFieldSceneV2:
     source = agents[source_global_slot]
-    mage = aura_id == "mage_damage_amplification"
+    class_mechanics = _CLASS_MECHANICS_V2[source.class_id - 1]
+    mechanic = next(
+        (row for row in class_mechanics.aura_mechanics if row.aura_id == aura_id),
+        None,
+    )
+    if mechanic is None:
+        raise ValueError("synthetic aura field must join its source class mechanic.")
     return AuraFieldSceneV2(
         aura_id=aura_id,
         source_global_slot=source_global_slot,
@@ -524,12 +589,12 @@ def _aura_field(
         source_class_name=_CLASS_NAMES[source.class_id],
         source_alive=source.life_state == "alive",
         center=source.position,
-        radius=radius,
+        radius=mechanic.radius,
         beneficiary_relation="same_team",
-        per_emitter_multiplier=1.2 if mage else 0.8,
-        stacking_rule="multiply_then_clamp",
-        clamp_kind="ceiling" if mage else "floor",
-        clamp_value=2.0 if mage else 0.2,
+        per_emitter_multiplier=mechanic.per_emitter_multiplier,
+        stacking_rule=mechanic.stacking_rule,
+        clamp_kind=mechanic.clamp_kind,
+        clamp_value=mechanic.clamp_value,
     )
 
 
@@ -861,6 +926,8 @@ def _scene(
     selection: SelectionSceneV1 | None = None,
     selected_legality: SelectedLegalitySceneV1 | None = None,
     visibility_by_slot: Mapping[int, bool] | None = None,
+    respawn_wave_countdowns: tuple[int, int] = (4, 7),
+    class_mechanics: tuple[ClassMechanicsSceneV2, ...] = _CLASS_MECHANICS_V2,
     badge: str = "PRIVILEGED RESEARCHER VIEW · SYNTHETIC FIXTURE",
 ) -> BattlefieldSceneV2:
     episode_id = f"synthetic:{name}"
@@ -898,7 +965,7 @@ def _scene(
         map=map_scene,
         agents=agents,
         aura_fields=aura_fields,
-        class_mechanics=_class_mechanics(),
+        class_mechanics=class_mechanics,
         spawn_pads=tuple(
             SpawnPadSceneV2(
                 team_id=agent.team_id,
@@ -911,10 +978,16 @@ def _scene(
         ),
         respawn_waves=(
             RespawnWaveSceneV2(
-                team_index=0, team_id=1, period_steps=10, countdown_steps=4
+                team_index=0,
+                team_id=1,
+                period_steps=10,
+                countdown_steps=respawn_wave_countdowns[0],
             ),
             RespawnWaveSceneV2(
-                team_index=1, team_id=2, period_steps=10, countdown_steps=7
+                team_index=1,
+                team_id=2,
+                period_steps=10,
+                countdown_steps=respawn_wave_countdowns[1],
             ),
         ),
         ranges=ranges,
@@ -962,7 +1035,20 @@ _CROWDED_POSITIONS = (
     (10.75, 8.6),
     (13.5, 8.6),
 )
-_CROWDED_PRE_ANCHORS = MappingProxyType({1: (5.25, 2.6), 6: (5.25, 9.4)})
+_CROWDED_PRE_ANCHORS = MappingProxyType(
+    {
+        0: (2.5, 5.0),
+        1: (5.25, 4.0),
+        2: (8.0, 5.0),
+        3: (10.75, 5.0),
+        4: (13.5, 5.0),
+        5: (2.5, 7.0),
+        6: (5.25, 8.0),
+        7: (8.0, 7.0),
+        8: (10.75, 7.0),
+        9: (13.5, 7.0),
+    }
+)
 _CROWDED_STATUS_TOKENS = MappingProxyType(
     {slot: CANONICAL_STATUS_ORDER for slot in range(10)}
 )
@@ -1085,10 +1171,10 @@ _CROWDED_SCENE = _scene(
         ),
     ),
     aura_fields=(
-        _aura_field(_CROWDED_AGENT_MAP, 0, "mage_damage_amplification", 4.0),
-        _aura_field(_CROWDED_AGENT_MAP, 1, "warrior_damage_mitigation", 4.0),
-        _aura_field(_CROWDED_AGENT_MAP, 5, "mage_damage_amplification", 4.0),
-        _aura_field(_CROWDED_AGENT_MAP, 6, "warrior_damage_mitigation", 4.0),
+        _aura_field(_CROWDED_AGENT_MAP, 0, "mage_damage_amplification"),
+        _aura_field(_CROWDED_AGENT_MAP, 1, "warrior_damage_mitigation"),
+        _aura_field(_CROWDED_AGENT_MAP, 5, "mage_damage_amplification"),
+        _aura_field(_CROWDED_AGENT_MAP, 6, "warrior_damage_mitigation"),
     ),
     ranges=(
         RangeSceneV1(
@@ -1111,6 +1197,35 @@ _CROWDED_SCENE = _scene(
         armed_lane=1,
         armed_pair_legal=False,
     ),
+)
+
+
+_REQUIRED_DOCK_POSITIONS = (
+    (5.8, 6.65),
+    (6.9, 6.65),
+    (8.0, 6.65),
+    (9.1, 6.65),
+    (10.2, 6.65),
+    (5.8, 5.35),
+    (6.9, 5.35),
+    (10.2, 5.35),
+    (8.0, 5.35),
+    (9.1, 5.35),
+)
+_REQUIRED_DOCK_AGENTS = _agents(
+    _REQUIRED_DOCK_POSITIONS,
+    status_tokens=_CROWDED_STATUS_TOKENS,
+    cooldowns={slot: 30 for slot in range(10)},
+)
+_REQUIRED_DOCK_CLASS_MECHANICS = tuple(
+    replace(mechanics, ultimate_cooldown_steps=30) for mechanics in _CLASS_MECHANICS_V2
+)
+_REQUIRED_DOCK_SCENE = _scene(
+    "required_dock_fallback",
+    _REQUIRED_DOCK_AGENTS,
+    map_scene=MapSceneV1(width=16.0, height=12.0),
+    selection=SelectionSceneV1(controlled_global_slot=0, selected_global_slot=7),
+    class_mechanics=_REQUIRED_DOCK_CLASS_MECHANICS,
 )
 
 
@@ -1138,7 +1253,26 @@ _ROUTE_ROWS = (
     ("basic_damage", 3, 5),
     ("basic_damage", 4, 9),
 )
-_ROUTE_BATCH = _batch("route_collision", _ROUTE_AGENTS, _activation_specs(_ROUTE_ROWS))
+_ROUTE_START_POSITIONS = MappingProxyType(
+    {
+        0: (3.0, 3.0),
+        1: (3.0, 4.0),
+        2: (3.0, 5.0),
+        3: (3.0, 5.2),
+        4: (4.2, 6.0),
+        5: (5.0, 3.0),
+        6: (5.0, 4.0),
+        7: (5.0, 5.0),
+        8: (5.0, 5.2),
+        9: (4.28, 6.04),
+    }
+)
+_ROUTE_BATCH = _batch(
+    "route_collision",
+    _ROUTE_AGENTS,
+    _activation_specs(_ROUTE_ROWS),
+    start_positions=_ROUTE_START_POSITIONS,
+)
 _ROUTE_SCENE = _scene(
     "route_collision",
     _ROUTE_AGENTS,
@@ -1175,7 +1309,12 @@ _MIXED_SPECS = (
         }
     ),
 )
-_MIXED_BATCH = _batch("mixed_net_zero", _MIXED_AGENTS, _MIXED_SPECS)
+_MIXED_BATCH = _batch(
+    "mixed_net_zero",
+    _MIXED_AGENTS,
+    _MIXED_SPECS,
+    start_positions={0: (4.0, 4.0)},
+)
 _MIXED_SCENE = _scene(
     "mixed_net_zero",
     _MIXED_AGENTS,
@@ -1212,12 +1351,12 @@ _VOCABULARY_ROWS = (
     ("basic_damage", 1, 6),
     ("basic_damage", 2, 7),
     ("basic_damage", 3, 8),
-    ("basic_heal", 4, 9),
+    ("basic_heal", 4, 4),
     ("mage_burst", 0, None),
     ("warrior_charge", 1, 6),
     ("hunter_trap", 2, 7),
     ("rogue_poison", 3, 8),
-    ("holy_word", 4, 9),
+    ("holy_word", 4, 4),
 )
 _VOCABULARY_SPECS = (
     *_activation_specs(_VOCABULARY_ROWS),
@@ -1244,34 +1383,62 @@ _VOCABULARY_SPECS = (
         }
     ),
 )
-_VOCABULARY_BATCH = _batch("visual_vocabulary", _VOCABULARY_AGENTS, _VOCABULARY_SPECS)
+_VOCABULARY_START_POSITIONS = MappingProxyType(
+    {
+        0: (2.0, 5.0),
+        1: (5.0, 5.0),
+        2: (8.0, 5.0),
+        3: (11.0, 5.0),
+        4: (14.0, 5.0),
+        5: (2.0, 7.0),
+        6: (5.0, 7.0),
+        7: (8.0, 7.0),
+        8: (11.0, 7.0),
+        9: (14.0, 7.0),
+    }
+)
+_VOCABULARY_BATCH = _batch(
+    "visual_vocabulary",
+    _VOCABULARY_AGENTS,
+    _VOCABULARY_SPECS,
+    start_positions=_VOCABULARY_START_POSITIONS,
+)
 _VOCABULARY_SCENE = _scene(
     "visual_vocabulary",
     _VOCABULARY_AGENTS,
     event_batch=_VOCABULARY_BATCH,
     map_scene=MapSceneV1(width=16.0, height=12.0),
     aura_fields=(
-        _aura_field(_VOCABULARY_AGENT_MAP, 0, "mage_damage_amplification", 1.05),
-        _aura_field(_VOCABULARY_AGENT_MAP, 1, "warrior_damage_mitigation", 1.05),
+        _aura_field(_VOCABULARY_AGENT_MAP, 0, "mage_damage_amplification"),
+        _aura_field(_VOCABULARY_AGENT_MAP, 1, "warrior_damage_mitigation"),
     ),
     ranges=(
         RangeSceneV1(
             global_slot=0,
             kind="observation",
             center=_VOCABULARY_POSITIONS[0],
-            radius=2.4,
+            radius=_CLASS_MECHANICS_V2[
+                _VOCABULARY_AGENTS[0].class_id - 1
+            ].observation_radius,
         ),
         *(
             RangeSceneV1(
                 global_slot=slot,
                 kind="basic",
                 center=_VOCABULARY_POSITIONS[slot],
-                radius=0.85,
+                radius=_CLASS_MECHANICS_V2[
+                    _VOCABULARY_AGENTS[slot].class_id - 1
+                ].basic_interaction_radius,
             )
             for slot in range(5)
         ),
         RangeSceneV1(
-            global_slot=0, kind="ultimate", center=_VOCABULARY_POSITIONS[0], radius=1.2
+            global_slot=0,
+            kind="ultimate",
+            center=_VOCABULARY_POSITIONS[0],
+            radius=_CLASS_MECHANICS_V2[
+                _VOCABULARY_AGENTS[0].class_id - 1
+            ].ultimate_interaction_radius,
         ),
     ),
     selection=SelectionSceneV1(controlled_global_slot=0, selected_global_slot=5),
@@ -1328,7 +1495,12 @@ _VIEWPORT_SPECS = (
         }
     ),
 )
-_VIEWPORT_BATCH = _batch("viewport_matrix", _CROWDED_AGENTS, _VIEWPORT_SPECS)
+_VIEWPORT_BATCH = _batch(
+    "viewport_matrix",
+    _CROWDED_AGENTS,
+    _VIEWPORT_SPECS,
+    start_positions=_CROWDED_PRE_ANCHORS,
+)
 _VIEWPORT_AURA_SPECS: tuple[tuple[int, AuraIdV2], ...] = (
     (0, "mage_damage_amplification"),
     (1, "warrior_damage_mitigation"),
@@ -1341,7 +1513,7 @@ _VIEWPORT_SCENE = _scene(
     event_batch=_VIEWPORT_BATCH,
     map_scene=_CROWDED_SCENE.map,
     aura_fields=tuple(
-        _aura_field(_CROWDED_AGENT_MAP, slot, aura_id, 4.0)
+        _aura_field(_CROWDED_AGENT_MAP, slot, aura_id)
         for slot, aura_id in _VIEWPORT_AURA_SPECS
     ),
     ranges=_CROWDED_SCENE.ranges,
@@ -1353,13 +1525,26 @@ _VIEWPORT_SCENE = _scene(
 _GRAMMAR_NAME = "canonical_event_vocabulary"
 _GRAMMAR_EPISODE = f"synthetic:{_GRAMMAR_NAME}"
 _GRAMMAR_TRANSITION = f"{_GRAMMAR_EPISODE}:transition:0"
-_GRAMMAR_POSITIONS = _VOCABULARY_POSITIONS
+_GRAMMAR_POSITIONS = (
+    _VOCABULARY_POSITIONS[0],
+    (5.0, 6.0),
+    _VOCABULARY_POSITIONS[2],
+    _VOCABULARY_POSITIONS[3],
+    (2.0, 6.0),
+    *_VOCABULARY_POSITIONS[5:],
+)
 _GRAMMAR_AGENTS = _agents(
     _GRAMMAR_POSITIONS,
-    health={5: 0.0},
-    corpses=(5,),
+    status_tokens={
+        0: ("priest_freedom",),
+        8: ("slow_rogue_poison",),
+    },
+    health={6: 0.0},
+    cooldowns={1: 5},
+    out_of_combat={1: 3},
+    corpses=(6,),
     spawn_shields={9: 3},
-    respawn_event_ids={9: f"{_GRAMMAR_TRANSITION}:event:0020"},
+    respawn_event_ids={9: f"{_GRAMMAR_TRANSITION}:event:0022"},
 )
 _GRAMMAR_SPECS = tuple(
     MappingProxyType(row)
@@ -1367,33 +1552,64 @@ _GRAMMAR_SPECS = tuple(
         {"event_type": "action_rejected", "actor": 0, "component": "movement"},
         {
             "event_type": "ability_activated",
-            "source": 0,
-            "recipient": None,
+            "source": 1,
+            "recipient": 6,
             "component": "ultimate",
         },
-        {"event_type": "source_damage_output", "source": 1, "recipient": 6},
-        {"event_type": "source_healing_output", "source": 4, "recipient": 0},
+        {
+            "event_type": "ability_activated",
+            "source": 4,
+            "recipient": 0,
+            "component": "basic",
+        },
+        {
+            "event_type": "source_damage_output",
+            "source": 1,
+            "recipient": 6,
+            "raw": 15.0,
+            "modified": 15.0,
+            "modifier": 0.9,
+            "mage_emitters": (),
+            "warrior_emitters": (6,),
+        },
+        {
+            "event_type": "source_healing_output",
+            "source": 4,
+            "recipient": 0,
+            "raw": 10.0,
+            "modified": 10.0,
+            "modifier": 1.0,
+        },
         {
             "event_type": "recipient_health_resolution",
             "recipient": 0,
             "before": 90.0,
-            "after": 92.0,
-            "delta": 2.0,
-            "damage": 8.0,
+            "after": 100.0,
+            "delta": 10.0,
+            "damage": 0.0,
             "healing": 10.0,
         },
-        {"event_type": "combat_countdown_reset", "agent": 0},
-        {"event_type": "health_regenerated", "agent": 0, "amount": 2.0},
-        {"event_type": "cooldown_started", "agent": 0},
-        {"event_type": "cooldown_ready", "agent": 1},
+        {
+            "event_type": "recipient_health_resolution",
+            "recipient": 6,
+            "before": 10.0,
+            "after": 0.0,
+            "delta": -10.0,
+            "damage": 13.5,
+            "healing": 0.0,
+        },
+        {"event_type": "combat_countdown_reset", "agent": 1},
+        {"event_type": "health_regenerated", "agent": 2, "amount": 2.0},
+        {"event_type": "cooldown_started", "agent": 1},
+        {"event_type": "cooldown_ready", "agent": 0},
         {"event_type": "charge_phase_displacement", "agent": 1},
         {"event_type": "ordinary_movement_phase_displacement", "agent": 1},
-        {"event_type": "agent_died", "recipient": 5},
+        {"event_type": "agent_died", "recipient": 6},
         {
             "event_type": "lethal_damage_contribution",
-            "source": 0,
-            "recipient": 5,
-            "amount": 4.0,
+            "source": 1,
+            "recipient": 6,
+            "amount": 13.5,
         },
         {
             "event_type": "status_aged_to_zero",
@@ -1402,14 +1618,14 @@ _GRAMMAR_SPECS = tuple(
         },
         {
             "event_type": "status_broken_by_damage",
-            "recipient": 7,
+            "recipient": 6,
             "status_id": "hunter_trap_stun",
         },
         {
             "event_type": "status_applied",
-            "source": 2,
-            "recipient": 7,
-            "status_id": "hunter_basic_slow",
+            "source": 4,
+            "recipient": 0,
+            "status_id": "priest_blessing_of_freedom_movement_floor",
         },
         {
             "event_type": "status_refreshed_or_extended",
@@ -1418,7 +1634,7 @@ _GRAMMAR_SPECS = tuple(
         },
         {
             "event_type": "status_cleared_by_new_death",
-            "recipient": 5,
+            "recipient": 6,
             "status_id": "rogue_poison_anti_heal",
         },
         {"event_type": "spawn_shield_expired", "agent": 0},
@@ -1430,8 +1646,8 @@ _GRAMMAR_BATCH = _batch(
     _GRAMMAR_NAME,
     _GRAMMAR_AGENTS,
     _GRAMMAR_SPECS,
-    start_positions={1: (5.0, 2.4)},
-    post_charge_positions={1: (5.0, 2.8)},
+    start_positions={1: (5.0, 5.4)},
+    post_charge_positions={1: (5.0, 5.8)},
 )
 _GRAMMAR_SCENE = _scene(
     _GRAMMAR_NAME,
@@ -1439,6 +1655,7 @@ _GRAMMAR_SCENE = _scene(
     event_batch=_GRAMMAR_BATCH,
     map_scene=MapSceneV1(width=16.0, height=12.0),
     selection=SelectionSceneV1(controlled_global_slot=0, selected_global_slot=5),
+    respawn_wave_countdowns=(4, 9),
 )
 
 
@@ -1818,6 +2035,8 @@ def _researcher_live_frame(
         ),
         incoming_transition_id=scene.incoming_transition_id,
         preset="analysis",
+        verbose=False,
+        show_ranges=bool(scene.ranges),
         terminal=_terminal_state(),
         scenario=scenario,
         available_scenarios=(_scenario_option(name, description),),
@@ -1877,6 +2096,7 @@ def _pov_live_frame(
         frame_id=scene.source_frame_id,
         simulator_step_count=scene.simulator_step_count,
         preset="analysis",
+        verbose=False,
         terminal=_terminal_state(),
         incoming_pov_transition_id=projection.incoming_transition_id,
         projection=projection,
@@ -1971,6 +2191,15 @@ RENDERER_FIXTURES: Mapping[str, RendererFixtureV2] = MappingProxyType(
             ),
             scene=_CROWDED_SCENE,
             event_batch=_CROWDED_BATCH,
+        ),
+        "required_dock_fallback": _researcher_fixture(
+            name="required_dock_fallback",
+            description=(
+                "SYNTHETIC: near-dense agents demonstrate individually owned "
+                "compact cooldown fallbacks."
+            ),
+            scene=_REQUIRED_DOCK_SCENE,
+            event_batch=None,
         ),
         "route_collision": _researcher_fixture(
             name="route_collision",

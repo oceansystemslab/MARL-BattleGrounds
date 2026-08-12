@@ -27,6 +27,14 @@ STATUS_SOURCE_EVIDENCE_SCHEMA_VERSION = 2
 
 MAX_AGENT_SLOTS = MAX_AGENT_SLOTS_V1
 
+_CANONICAL_CLASS_NAME_BY_ID_V1 = {
+    1: "Mage",
+    2: "Warrior",
+    3: "Hunter",
+    4: "Rogue",
+    5: "Priest",
+}
+
 type Point2D = tuple[float, float]
 type SceneAudience = Literal["researcher", "agent_pov"]
 type ObstacleKind = Literal["pillar", "wall"]
@@ -62,6 +70,9 @@ type UltimateTargetModeV2 = Literal[
     "ally",
     "enemy",
 ]
+type StatusActionComponentV2 = Literal["basic", "ultimate"]
+type AuraStackingRuleV2 = Literal["multiply_then_clamp"]
+type AuraClampKindV2 = Literal["ceiling", "floor"]
 type VisualAnchorPhaseV2 = Literal[
     "transition_start",
     "post_charge",
@@ -178,6 +189,8 @@ def _is_canonical_event_before_frame(
     suffix = event_id[len(prefix) :]
     transition_text, separator, ordinal_text = suffix.partition(":event:")
     if separator != ":event:" or not transition_text.isdigit():
+        return False
+    if str(int(transition_text)) != transition_text:
         return False
     if len(ordinal_text) != 4 or not ordinal_text.isdigit():
         return False
@@ -538,6 +551,87 @@ class BattlefieldSceneV1:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class ClassStatusMechanicSceneV2:
+    """One catalog-authored status mechanic owned by a researcher class card."""
+
+    status_channel: int
+    status_id: str
+    family: StatusFamilyV2
+    source_action_component: StatusActionComponentV2
+    duration_steps: int
+    magnitude_kind: StatusMagnitudeKindV2
+    magnitude: float | None
+    breaks_on_positive_damage: bool
+
+    def __post_init__(self) -> None:
+        _require_python_int(
+            self.status_channel,
+            name="status_channel",
+            minimum=0,
+        )
+        if self.status_channel >= 9:
+            raise ValueError("status_channel must identify the exact V1 status axis.")
+        _require_text(self.status_id, name="status_id")
+        if CATALOG_STATUS_ID_BY_CHANNEL[self.status_channel] != self.status_id:
+            raise ValueError(
+                "class status channel and catalog status ID must retain V1 identity."
+            )
+        if self.family not in (
+            "slow",
+            "stun",
+            "anti_heal",
+            "damage_amplification",
+            "movement_floor",
+        ):
+            raise ValueError(f"unknown status family: {self.family!r}.")
+        if self.source_action_component not in ("basic", "ultimate"):
+            raise ValueError("status source action must be basic or ultimate.")
+        _require_python_int(self.duration_steps, name="duration_steps", minimum=1)
+        if self.magnitude_kind not in (
+            "movement_multiplier",
+            "none",
+            "healing_multiplier",
+            "damage_multiplier",
+            "movement_floor",
+        ):
+            raise ValueError(f"unknown status magnitude kind: {self.magnitude_kind!r}.")
+        if self.magnitude_kind == "none":
+            if self.magnitude is not None:
+                raise ValueError(
+                    "stun-like class status mechanics must omit magnitude."
+                )
+        elif self.magnitude is None:
+            raise ValueError("non-stun class status mechanics require magnitude.")
+        else:
+            _require_finite(self.magnitude, name="magnitude")
+        _require_python_bool(
+            self.breaks_on_positive_damage,
+            name="breaks_on_positive_damage",
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ClassAuraMechanicSceneV2:
+    """One catalog-authored passive aura owned by a researcher class card."""
+
+    aura_id: str
+    radius: float
+    per_emitter_multiplier: float
+    stacking_rule: AuraStackingRuleV2
+    clamp_kind: AuraClampKindV2
+    clamp_value: float
+
+    def __post_init__(self) -> None:
+        _require_text(self.aura_id, name="aura_id")
+        for name in ("radius", "per_emitter_multiplier", "clamp_value"):
+            _require_nonnegative_finite(cast(float, getattr(self, name)), name=name)
+        if self.stacking_rule != "multiply_then_clamp":
+            raise ValueError("class aura stacking rule must be multiply_then_clamp.")
+        if self.clamp_kind not in ("ceiling", "floor"):
+            raise ValueError("class aura clamp kind must be ceiling or floor.")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ClassMechanicsSceneV2:
     """Serialized class vocabulary and exact context-owned mechanics."""
 
@@ -558,12 +652,18 @@ class ClassMechanicsSceneV2:
     ultimate_raw_healing: float
     out_of_combat_delay_steps: int
     out_of_combat_health_regeneration_fraction_per_step: float
+    status_mechanics: tuple[ClassStatusMechanicSceneV2, ...]
+    aura_mechanics: tuple[ClassAuraMechanicSceneV2, ...]
 
     def __post_init__(self) -> None:
         _require_python_int(self.class_id, name="class_id", minimum=1)
         if self.class_id > 5:
             raise ValueError("class_id must identify a real V1 class.")
         _require_text(self.class_name, name="class_name")
+        if self.class_name != _CANONICAL_CLASS_NAME_BY_ID_V1[self.class_id]:
+            raise ValueError(
+                "class_name must match the canonical V1 identity for class_id."
+            )
         for name in (
             "body_radius",
             "maximum_health",
@@ -613,6 +713,31 @@ class ClassMechanicsSceneV2:
                 "out_of_combat_health_regeneration_fraction_per_step must not "
                 "exceed one."
             )
+        _require_tuple_items(
+            self.status_mechanics,
+            name="status_mechanics",
+            item_types=(ClassStatusMechanicSceneV2,),
+        )
+        _require_tuple_items(
+            self.aura_mechanics,
+            name="aura_mechanics",
+            item_types=(ClassAuraMechanicSceneV2,),
+        )
+        status_channels = tuple(row.status_channel for row in self.status_mechanics)
+        if status_channels != tuple(sorted(status_channels)) or len(
+            status_channels
+        ) != len(set(status_channels)):
+            raise ValueError(
+                "class status mechanics must have unique increasing channels."
+            )
+        _require_unique(
+            tuple(row.status_id for row in self.status_mechanics),
+            name="class status mechanic ID",
+        )
+        _require_unique(
+            tuple(row.aura_id for row in self.aura_mechanics),
+            name="class aura mechanic ID",
+        )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -1062,6 +1187,8 @@ class RespawnWaveSceneV2:
             raise ValueError("team_id must match team_index + 1.")
         _require_python_int(self.period_steps, name="period_steps", minimum=1)
         _require_python_int(self.countdown_steps, name="countdown_steps", minimum=0)
+        if self.countdown_steps >= self.period_steps:
+            raise ValueError("countdown_steps must be less than period_steps.")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -1263,8 +1390,58 @@ class BattlefieldSceneV2:
             set(class_ids)
         ):
             raise ValueError("class mechanics must have unique increasing class IDs.")
+        if any(
+            _CANONICAL_CLASS_NAME_BY_ID_V1.get(row.class_id) != row.class_name
+            for row in self.class_mechanics
+        ):
+            raise ValueError(
+                "class mechanics must retain canonical V1 class identities."
+            )
         if not set(agent.class_id for agent in self.agents).issubset(class_ids):
             raise ValueError("every scene agent requires its class mechanics row.")
+        projected_status_channels = tuple(
+            status.status_channel
+            for mechanics in self.class_mechanics
+            for status in mechanics.status_mechanics
+        )
+        if tuple(sorted(projected_status_channels)) != tuple(range(9)):
+            raise ValueError(
+                "class mechanics must partition the exact nine status channels."
+            )
+        expected_status_class_by_channel = (2, 3, 4, 2, 3, 4, 4, 1, 5)
+        for mechanics in self.class_mechanics:
+            if any(
+                expected_status_class_by_channel[status.status_channel]
+                != mechanics.class_id
+                for status in mechanics.status_mechanics
+            ):
+                raise ValueError(
+                    "class status mechanics must retain their catalog source class."
+                )
+        projected_aura_ids = tuple(
+            aura.aura_id
+            for mechanics in self.class_mechanics
+            for aura in mechanics.aura_mechanics
+        )
+        if projected_aura_ids != (
+            "mage_damage_amplification",
+            "warrior_damage_mitigation",
+        ):
+            raise ValueError(
+                "class mechanics must partition the exact ordered aura catalog."
+            )
+        expected_aura_class = {
+            "mage_damage_amplification": 1,
+            "warrior_damage_mitigation": 2,
+        }
+        for mechanics in self.class_mechanics:
+            if any(
+                expected_aura_class.get(aura.aura_id) != mechanics.class_id
+                for aura in mechanics.aura_mechanics
+            ):
+                raise ValueError(
+                    "class aura mechanics must retain their catalog emitter class."
+                )
         mechanics_by_class = {row.class_id: row for row in self.class_mechanics}
         for agent in self.agents:
             for status in agent.statuses:
@@ -2504,6 +2681,19 @@ class ResearcherAnalyzerProjectionV2:
                 ):
                     raise ValueError(
                         "V2 phase trajectory must join successor scene identity."
+                    )
+            event_by_id = {event.event_id: event for event in batch.events}
+            for agent in self.scene.agents:
+                if agent.respawn_event_id is None:
+                    continue
+                respawn_event = event_by_id.get(agent.respawn_event_id)
+                if (
+                    type(respawn_event) is not AgentRespawnedEventV2
+                    or respawn_event.agent_global_slot != agent.global_slot
+                ):
+                    raise ValueError(
+                        "agent respawn evidence must identify the same agent's "
+                        "incoming respawn event."
                     )
         state_by_key = {
             (row.recipient_global_slot, row.status_channel): row

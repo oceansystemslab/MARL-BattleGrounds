@@ -18,6 +18,7 @@ from marl_battlegrounds.rendering.scene import (
     ObstacleSceneV1,
     PendingRouteSceneV1,
     RejectedActionEventV1,
+    RespawnWaveSceneV2,
     SelectedLegalitySceneV1,
     SelectionSceneV1,
     StatusLifecycleEventV1,
@@ -49,6 +50,18 @@ def _status(token_id: str, priority: int) -> StatusSceneV1:
         accessible_name=definition.accessible_name,
         priority=priority,
     )
+
+
+def test_researcher_respawn_wave_countdown_stays_below_period() -> None:
+    wave = RespawnWaveSceneV2(
+        team_index=0,
+        team_id=1,
+        period_steps=10,
+        countdown_steps=9,
+    )
+    assert wave.countdown_steps == 9
+    with pytest.raises(ValueError, match="less than period_steps"):
+        replace(wave, countdown_steps=10)
 
 
 def _agent() -> AgentSceneV1:

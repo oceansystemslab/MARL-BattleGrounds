@@ -1,10 +1,33 @@
 const TOOLTIP_OWNER_ATTRIBUTE = "data-tooltip-owner";
 const TOOLTIP_KIND_ATTRIBUTE = "data-tooltip-kind";
+const TOOLTIP_TONE_ATTRIBUTE = "data-tooltip-tone";
+const TOOLTIP_ACCENT_ATTRIBUTE = "data-tooltip-accent";
 const VIEWPORT_GUTTER = 8;
 const TOOLTIP_GAP = 12;
 
 const descriptorByOwner = new WeakMap();
+const surfaceByOwner = new WeakMap();
+const inspectableByOwner = new WeakMap();
 const controllerByTooltip = new WeakMap();
+const semanticDescriptors = new WeakSet();
+
+export const SEMANTIC_TONES = Object.freeze([
+  "neutral",
+  "information",
+  "positive",
+  "warning",
+  "danger",
+]);
+const SEMANTIC_TONE_SET = new Set(SEMANTIC_TONES);
+export const SEMANTIC_ACCENTS = Object.freeze([
+  "none",
+  "mage",
+  "warrior",
+  "hunter",
+  "rogue",
+  "priest",
+]);
+const SEMANTIC_ACCENT_SET = new Set(SEMANTIC_ACCENTS);
 
 const KIND_PRIORITY = Object.freeze({
   status: 0,
@@ -15,6 +38,7 @@ const KIND_PRIORITY = Object.freeze({
   legality: 0,
   cooldown: 0,
   visibility: 0,
+  control: 0,
   agent: 1,
   activation: 2,
   impact: 2,
@@ -29,15 +53,38 @@ const KIND_PRIORITY = Object.freeze({
   "range-observation": 5,
   aura: 6,
   map: 7,
+  composite: 8,
 });
 
 /** @typedef {"element" | "pointer"} TooltipAnchor */
+/** @typedef {"compact" | "full"} SemanticSurface */
+/** @typedef {{compact: boolean, full: boolean}} SemanticMetadata */
+/**
+ * @typedef {{
+ *   label: string,
+ *   value: string,
+ *   metadata: Readonly<SemanticMetadata>,
+ * }} SemanticRow
+ */
+/**
+ * @typedef {{
+ *   title: string,
+ *   summary: string | null,
+ *   rows: ReadonlyArray<SemanticRow>,
+ *   metadata: Readonly<SemanticMetadata>,
+ * }} SemanticSection
+ */
 /**
  * @typedef {{
  *   kind: string,
  *   id: string,
  *   title: string,
- *   details: ReadonlyArray<string>,
+ *   tone: "neutral" | "information" | "positive" | "warning" | "danger",
+ *   accent: "none" | "mage" | "warrior" | "hunter" | "rogue" | "priest",
+ *   summary: string,
+ *   rows: ReadonlyArray<SemanticRow>,
+ *   sections: ReadonlyArray<SemanticSection>,
+ *   metadata: Readonly<SemanticMetadata>,
  *   anchor: TooltipAnchor,
  * }} TooltipDescriptor
  */
@@ -82,32 +129,260 @@ const KIND_PRIORITY = Object.freeze({
  *   tooltip: HTMLElement,
  *   title: HTMLElement,
  *   details: HTMLElement,
+ *   onInspect?: (descriptor: TooltipDescriptor, context: Readonly<{owner: Element, trigger: Element | null}>) => void,
  * }} TooltipControllerOptions
  */
 /**
  * @typedef {{
  *   refresh: () => void,
  *   hide: () => void,
+ *   inspect: (target?: unknown) => boolean,
  *   destroy: () => void,
  * }} TooltipController
  */
 
 /**
+ * Construct and recursively freeze the only semantic explanation shape that
+ * leaves the browser fact layer. Payload prose remains text; it cannot select
+ * a tag name, class name, data attribute, or tone outside the fixed allowlist.
+ *
+ * @param {unknown} rawDescriptor
+ * @returns {TooltipDescriptor}
+ */
+export function createSemanticDescriptor(rawDescriptor) {
+  if (!isRecord(rawDescriptor)) {
+    throw new TypeError("semantic descriptor must be an object.");
+  }
+  if (semanticDescriptors.has(rawDescriptor)) {
+    return /** @type {TooltipDescriptor} */ (rawDescriptor);
+  }
+  assertExactKeys(
+    rawDescriptor,
+    [
+      "kind",
+      "id",
+      "title",
+      "tone",
+      "accent",
+      "summary",
+      "rows",
+      "sections",
+      "metadata",
+      "anchor",
+    ],
+    "semantic descriptor",
+  );
+  const kind = nonEmptyString(rawDescriptor.kind, "descriptor.kind");
+  const id = nonEmptyString(rawDescriptor.id, "descriptor.id");
+  const title = nonEmptyString(rawDescriptor.title, "descriptor.title");
+  const summary = nonEmptyString(rawDescriptor.summary, "descriptor.summary");
+  const tone =
+    typeof rawDescriptor.tone === "string" && SEMANTIC_TONE_SET.has(rawDescriptor.tone)
+      ? /** @type {TooltipDescriptor["tone"]} */ (rawDescriptor.tone)
+      : "neutral";
+  const accent =
+    typeof rawDescriptor.accent === "string" &&
+    SEMANTIC_ACCENT_SET.has(rawDescriptor.accent)
+      ? /** @type {TooltipDescriptor["accent"]} */ (rawDescriptor.accent)
+      : "none";
+  const anchor = rawDescriptor.anchor;
+  if (anchor !== "element" && anchor !== "pointer") {
+    throw new TypeError('descriptor.anchor must be "element" or "pointer".');
+  }
+  const metadata = normalizeMetadata(rawDescriptor.metadata, "descriptor.metadata");
+  const rows = Object.freeze(
+    normalizeArray(rawDescriptor.rows, "descriptor.rows").map((row, index) =>
+      normalizeSemanticRow(row, `descriptor.rows[${index}]`),
+    ),
+  );
+  const sections = Object.freeze(
+    normalizeArray(rawDescriptor.sections, "descriptor.sections").map(
+      (section, index) =>
+        normalizeSemanticSection(section, `descriptor.sections[${index}]`),
+    ),
+  );
+  const descriptor = Object.freeze({
+    kind,
+    id,
+    title,
+    tone,
+    accent,
+    summary,
+    rows,
+    sections,
+    metadata,
+    anchor,
+  });
+  semanticDescriptors.add(descriptor);
+  return descriptor;
+}
+
+/**
+ * Produce an immutable compact or full projection without changing fact order.
+ *
+ * @param {unknown} rawDescriptor
+ * @param {SemanticSurface} surface
+ */
+export function projectSemanticDescriptor(rawDescriptor, surface) {
+  const descriptor = normalizeDescriptor(rawDescriptor);
+  if (surface !== "compact" && surface !== "full") {
+    throw new TypeError('semantic surface must be "compact" or "full".');
+  }
+  const rows = Object.freeze(descriptor.rows.filter((row) => row.metadata[surface]));
+  const sections = Object.freeze(
+    descriptor.sections
+      .filter((section) => section.metadata[surface])
+      .map((section) =>
+        Object.freeze({
+          ...section,
+          rows: Object.freeze(section.rows.filter((row) => row.metadata[surface])),
+        }),
+      ),
+  );
+  return Object.freeze({
+    kind: descriptor.kind,
+    id: descriptor.id,
+    title: descriptor.title,
+    tone: descriptor.tone,
+    accent: descriptor.accent,
+    summary: descriptor.summary,
+    rows,
+    sections,
+    metadata: descriptor.metadata,
+    anchor: descriptor.anchor,
+    surface,
+  });
+}
+
+/**
+ * Render a compact tooltip or persistent full inspector using created nodes and
+ * textContent only. The container structure and classes are fixed here.
+ *
+ * @param {{
+ *   descriptor: unknown,
+ *   title: HTMLElement,
+ *   details: HTMLElement,
+ *   surface?: SemanticSurface,
+ * }} options
+ */
+export function renderSemanticDescriptor(options) {
+  if (!isRecord(options)) {
+    throw new TypeError("semantic render options must be an object.");
+  }
+  const surface = options.surface ?? "compact";
+  const projection = projectSemanticDescriptor(options.descriptor, surface);
+  const title = options.title;
+  const details = options.details;
+  if (!isTextSurface(title) || !isTextSurface(details)) {
+    throw new TypeError("semantic title and details must be text elements.");
+  }
+  title.textContent = projection.title;
+  const ownerDocument = details.ownerDocument;
+  if (
+    !ownerDocument ||
+    typeof ownerDocument.createElement !== "function" ||
+    typeof details.replaceChildren !== "function"
+  ) {
+    details.textContent = semanticDescriptorText(projection).join("\n");
+    return projection;
+  }
+
+  const nodes = [];
+  const summary = ownerDocument.createElement("p");
+  summary.className = "semantic-explanation__summary";
+  summary.textContent = projection.summary;
+  nodes.push(summary);
+  if (projection.rows.length > 0) {
+    nodes.push(renderRows(ownerDocument, projection.rows));
+  }
+  for (const section of projection.sections) {
+    const sectionNode = ownerDocument.createElement("section");
+    sectionNode.className = "semantic-explanation__section";
+    const heading = ownerDocument.createElement("h3");
+    heading.className = "semantic-explanation__heading";
+    heading.textContent = section.title;
+    sectionNode.append(heading);
+    if (section.summary !== null) {
+      const sectionSummary = ownerDocument.createElement("p");
+      sectionSummary.className = "semantic-explanation__section-summary";
+      sectionSummary.textContent = section.summary;
+      sectionNode.append(sectionSummary);
+    }
+    if (section.rows.length > 0) {
+      sectionNode.append(renderRows(ownerDocument, section.rows));
+    }
+    nodes.push(sectionNode);
+  }
+  details.replaceChildren(...nodes);
+  return projection;
+}
+
+/**
+ * Flatten a semantic projection for announcements and test diagnostics without
+ * losing the deterministic row/section order.
+ *
+ * @param {ReturnType<typeof projectSemanticDescriptor>} projection
+ * @returns {string[]}
+ */
+export function semanticDescriptorText(projection) {
+  const text = [projection.summary];
+  for (const row of projection.rows) {
+    text.push(`${row.label}: ${row.value}`);
+  }
+  for (const section of projection.sections) {
+    text.push(section.title);
+    if (section.summary !== null) {
+      text.push(section.summary);
+    }
+    for (const row of section.rows) {
+      text.push(`${row.label}: ${row.value}`);
+    }
+  }
+  return text;
+}
+
+/**
  * Register one rendered element as a tooltip owner.
  *
- * Descriptors stay in a WeakMap rather than in DOM attributes, so explanatory
- * prose is never duplicated into markup or interpreted as HTML.
+ * Descriptors stay in a WeakMap rather than in data attributes, so explanatory
+ * prose is never interpreted as HTML. Interactive owners mirror the compact
+ * summary in a plain-text `aria-description`, so disabled native controls and
+ * SVG composites retain durable help even when they cannot receive focus.
  *
  * @param {Element} element
- * @param {TooltipDescriptor} descriptor
+ * @param {unknown} descriptor
+ * @param {{surface?: Element, inspectable?: boolean}} [options]
  * @returns {void}
  */
-export function registerTooltipOwner(element, descriptor) {
+export function registerTooltipOwner(element, descriptor, options = {}) {
   if (!isTooltipOwner(element)) {
     throw new TypeError("tooltip owner must be an element.");
   }
+  if (!isRecord(options)) {
+    throw new TypeError("tooltip owner options must be an object.");
+  }
   const normalized = normalizeDescriptor(descriptor);
   descriptorByOwner.set(element, normalized);
+  const tagName =
+    typeof element.tagName === "string" ? element.tagName.toLowerCase() : "";
+  if (
+    normalized.kind === "control" ||
+    normalized.kind === "composite" ||
+    ["a", "button", "input", "select", "textarea", "summary"].includes(tagName) ||
+    (element.getAttribute("tabindex") !== null &&
+      element.getAttribute("tabindex") !== "-1")
+  ) {
+    element.setAttribute("aria-description", normalized.summary);
+  }
+  if (options.surface !== undefined) {
+    if (!isTooltipOwner(options.surface)) {
+      throw new TypeError("tooltip owner surface must be an element.");
+    }
+    surfaceByOwner.set(element, options.surface);
+  } else {
+    surfaceByOwner.delete(element);
+  }
+  inspectableByOwner.set(element, options.inspectable !== false);
   element.setAttribute(TOOLTIP_OWNER_ATTRIBUTE, "");
 }
 
@@ -161,8 +436,8 @@ export function chooseTooltipCandidate(candidates) {
  * Candidate order intentionally resolves a perfect tie toward right/below.
  * Owner avoidance is absolute: a clamped placement that covers the inspected
  * cue never wins merely because its unclamped origin fit the viewport better.
- * Remaining ties favor less overflow, then the viewport edge nearest the cue,
- * keeping large explanations out of the battlefield's visual center.
+ * Remaining choices favor less overflow and the card edge nearest the pointer;
+ * viewport-edge proximity never pulls a legal card away from the inspected cue.
  *
  * @param {TooltipPlacementInput} input
  * @returns {TooltipPlacement}
@@ -256,19 +531,14 @@ export function placeTooltip(input) {
         }),
       0,
     );
-    const nearestViewportEdge = Math.min(
-      clampedBounds.left - usableViewport.left,
-      usableViewport.right - clampedBounds.right,
-      clampedBounds.top - usableViewport.top,
-      usableViewport.bottom - clampedBounds.bottom,
-    );
+    const pointerDistance = pointToRectangleDistance(pointer, clampedBounds);
     const displacement =
       Math.abs(clamped.left - candidate.left) + Math.abs(clamped.top - candidate.top);
     const score = [
       protectedOverlap,
       inspectedOverlap,
       overflow,
-      nearestViewportEdge,
+      pointerDistance,
       displacement,
       index,
     ];
@@ -290,6 +560,82 @@ export function placeTooltip(input) {
 }
 
 /**
+ * Measure one compact card against both its owning surface and the free space
+ * around the inspected cue. Ordinary cards keep the full surface cap. When a
+ * tall or wide card would make every candidate overlap the owner/protected
+ * envelope, constrain the single axis that preserves the larger visible card;
+ * the tooltip's existing overflow scrolling keeps the remaining facts usable.
+ *
+ * @param {{
+ *   tooltip: HTMLElement,
+ *   anchorRect: TooltipRectangle,
+ *   pointer: TooltipPoint,
+ *   viewport: TooltipRectangle,
+ *   protectedRects: ReadonlyArray<TooltipRectangle>,
+ * }} input
+ * @returns {DOMRect}
+ */
+function measureTooltipForPlacement(input) {
+  const { tooltip, anchorRect, pointer, viewport, protectedRects } = input;
+  const viewportWidth = viewport.right - viewport.left;
+  const viewportHeight = viewport.bottom - viewport.top;
+  const horizontalGutter = Math.min(VIEWPORT_GUTTER, viewportWidth / 2);
+  const verticalGutter = Math.min(VIEWPORT_GUTTER, viewportHeight / 2);
+  const maxWidth = Math.max(viewportWidth - 2 * horizontalGutter, 0);
+  const maxHeight = Math.max(viewportHeight - 2 * verticalGutter, 0);
+  tooltip.style.maxWidth = `${maxWidth}px`;
+  tooltip.style.maxHeight = `${maxHeight}px`;
+
+  let measured = tooltip.getBoundingClientRect();
+  const placementEnvelope = protectedRects.reduce(
+    (envelope, protectedRect) => ({
+      left: Math.min(envelope.left, protectedRect.left),
+      top: Math.min(envelope.top, protectedRect.top),
+      right: Math.max(envelope.right, protectedRect.right),
+      bottom: Math.max(envelope.bottom, protectedRect.bottom),
+    }),
+    anchorRect,
+  );
+  const usableViewport = {
+    left: viewport.left + horizontalGutter,
+    top: viewport.top + verticalGutter,
+    right: viewport.right - horizontalGutter,
+    bottom: viewport.bottom - verticalGutter,
+  };
+  const horizontalClearance = Math.min(
+    maxWidth,
+    Math.max(
+      Math.min(placementEnvelope.left, pointer.x) - TOOLTIP_GAP - usableViewport.left,
+      usableViewport.right - Math.max(placementEnvelope.right, pointer.x) - TOOLTIP_GAP,
+      0,
+    ),
+  );
+  const verticalClearance = Math.min(
+    maxHeight,
+    Math.max(
+      Math.min(placementEnvelope.top, pointer.y) - TOOLTIP_GAP - usableViewport.top,
+      usableViewport.bottom -
+        Math.max(placementEnvelope.bottom, pointer.y) -
+        TOOLTIP_GAP,
+      0,
+    ),
+  );
+
+  if (measured.width > horizontalClearance && measured.height > verticalClearance) {
+    const widthLimitedArea = horizontalClearance * measured.height;
+    const heightLimitedArea = measured.width * verticalClearance;
+    if (heightLimitedArea >= widthLimitedArea) {
+      tooltip.style.maxHeight = `${verticalClearance}px`;
+    } else {
+      tooltip.style.maxWidth = `${horizontalClearance}px`;
+    }
+    measured = tooltip.getBoundingClientRect();
+  }
+
+  return measured;
+}
+
+/**
  * Create the one delegated controller for a tooltip surface.
  *
  * Pointer and focus listeners live on the supplied root. Rendered cue elements
@@ -303,6 +649,7 @@ export function createTooltipController(options) {
     throw new TypeError("tooltip controller options must be an object.");
   }
   const { root, tooltip, title, details } = options;
+  const onInspect = options.onInspect;
   if (!isEventRoot(root)) {
     throw new TypeError("tooltip root must support delegated events.");
   }
@@ -311,6 +658,9 @@ export function createTooltipController(options) {
   }
   if (!isTextSurface(title) || !isTextSurface(details)) {
     throw new TypeError("tooltip title and details must be text elements.");
+  }
+  if (onInspect !== undefined && typeof onInspect !== "function") {
+    throw new TypeError("tooltip onInspect must be a function when provided.");
   }
   const tooltipId = nonEmptyString(tooltip.id, "tooltip.id");
   if (controllerByTooltip.has(tooltip)) {
@@ -374,9 +724,17 @@ export function createTooltipController(options) {
     tooltip.hidden = true;
     tooltip.style.visibility = "";
     tooltip.removeAttribute(TOOLTIP_KIND_ATTRIBUTE);
+    tooltip.removeAttribute(TOOLTIP_TONE_ATTRIBUTE);
+    tooltip.removeAttribute(TOOLTIP_ACCENT_ATTRIBUTE);
     tooltip.removeAttribute("data-tooltip-placement");
+    tooltip.style.maxWidth = "";
+    tooltip.style.maxHeight = "";
     title.textContent = "";
-    details.textContent = "";
+    if (typeof details.replaceChildren === "function") {
+      details.replaceChildren();
+    } else {
+      details.textContent = "";
+    }
   }
 
   /**
@@ -392,9 +750,10 @@ export function createTooltipController(options) {
     const descriptor = candidate.descriptor;
     activeOwner = candidate.element;
     setDescribedByTrigger(fromFocus ? (candidate.trigger ?? candidate.element) : null);
-    title.textContent = descriptor.title;
-    details.textContent = descriptor.details.join("\n");
+    renderSemanticDescriptor({ descriptor, title, details, surface: "compact" });
     tooltip.setAttribute(TOOLTIP_KIND_ATTRIBUTE, descriptor.kind);
+    tooltip.setAttribute(TOOLTIP_TONE_ATTRIBUTE, descriptor.tone);
+    tooltip.setAttribute(TOOLTIP_ACCENT_ATTRIBUTE, descriptor.accent);
     tooltip.style.visibility = "hidden";
     tooltip.hidden = false;
 
@@ -418,7 +777,15 @@ export function createTooltipController(options) {
             bottom: anchorPoint.y,
           })
         : ownerRect;
-    const measured = tooltip.getBoundingClientRect();
+    const viewport = ownerSurfaceRectangle(candidate.element, tooltip.ownerDocument);
+    const protectedRects = localProtectedRects(candidate.element);
+    const measured = measureTooltipForPlacement({
+      tooltip,
+      anchorRect,
+      pointer: anchorPoint,
+      viewport,
+      protectedRects,
+    });
     const placement = placeTooltip({
       anchorRect,
       pointer: anchorPoint,
@@ -426,8 +793,8 @@ export function createTooltipController(options) {
         width: measured.width,
         height: measured.height,
       },
-      viewport: viewportRectangle(tooltip.ownerDocument),
-      protectedRects: localProtectedRects(candidate.element),
+      viewport,
+      protectedRects,
     });
     tooltip.style.left = `${placement.left}px`;
     tooltip.style.top = `${placement.top}px`;
@@ -573,7 +940,46 @@ export function createTooltipController(options) {
     if ("key" in event && event.key === "Escape" && !tooltip.hidden) {
       dismissedUntilInteraction = true;
       hide();
+      return;
     }
+    if (
+      "key" in event &&
+      (event.key === "Enter" || event.key === " ") &&
+      inspect(event.target)
+    ) {
+      event.preventDefault();
+    }
+  }
+
+  /** @param {Event} event */
+  function onClick(event) {
+    inspect(event.target);
+  }
+
+  /**
+   * Request the persistent full-card projection for one registered owner.
+   * Native controls nested inside a registered card retain their own action.
+   *
+   * @param {unknown} [target]
+   * @returns {boolean}
+   */
+  function inspect(target = activeOwner) {
+    if (destroyed || onInspect === undefined || target === null) {
+      return false;
+    }
+    const candidate = candidateForTarget(target);
+    if (
+      candidate === null ||
+      inspectableByOwner.get(candidate.element) === false ||
+      isNativeInteractiveTarget(candidate.trigger, candidate.element)
+    ) {
+      return false;
+    }
+    onInspect(
+      candidate.descriptor,
+      Object.freeze({ owner: candidate.element, trigger: candidate.trigger ?? null }),
+    );
+    return true;
   }
 
   function onViewportChange() {
@@ -586,6 +992,7 @@ export function createTooltipController(options) {
   eventRoot.addEventListener("focusin", onFocusIn, true);
   eventRoot.addEventListener("focusout", onFocusOut, true);
   eventRoot.addEventListener("keydown", onKeyDown, true);
+  eventRoot.addEventListener("click", onClick, true);
   eventRoot.addEventListener("scroll", onViewportChange, true);
 
   const ownerDocument =
@@ -619,6 +1026,7 @@ export function createTooltipController(options) {
     eventRoot.removeEventListener("focusin", onFocusIn, true);
     eventRoot.removeEventListener("focusout", onFocusOut, true);
     eventRoot.removeEventListener("keydown", onKeyDown, true);
+    eventRoot.removeEventListener("click", onClick, true);
     eventRoot.removeEventListener("scroll", onViewportChange, true);
     ownerWindow?.removeEventListener?.("resize", onViewportChange);
     mutationObserver?.disconnect();
@@ -627,41 +1035,131 @@ export function createTooltipController(options) {
   }
 
   /** @type {TooltipController} */
-  const controller = Object.freeze({ refresh, hide, destroy });
+  const controller = Object.freeze({ refresh, hide, inspect, destroy });
   controllerByTooltip.set(tooltip, controller);
   hide();
   return controller;
 }
 
 /**
- * @param {TooltipDescriptor} descriptor
+ * @param {unknown} descriptor
  * @returns {TooltipDescriptor}
  */
 function normalizeDescriptor(descriptor) {
   if (!isRecord(descriptor)) {
     throw new TypeError("tooltip descriptor must be an object.");
   }
-  const kind = nonEmptyString(descriptor.kind, "descriptor.kind");
-  const id = nonEmptyString(descriptor.id, "descriptor.id");
-  const title = nonEmptyString(descriptor.title, "descriptor.title");
-  if (!Array.isArray(descriptor.details)) {
-    throw new TypeError("descriptor.details must be an array.");
+  if (semanticDescriptors.has(descriptor)) {
+    return /** @type {TooltipDescriptor} */ (descriptor);
   }
-  const details = Object.freeze(
-    descriptor.details.map((detail, index) =>
-      nonEmptyString(detail, `descriptor.details[${index}]`),
-    ),
-  );
-  if (descriptor.anchor !== "element" && descriptor.anchor !== "pointer") {
-    throw new TypeError('descriptor.anchor must be "element" or "pointer".');
+  return createSemanticDescriptor(descriptor);
+}
+
+/**
+ * @param {unknown} raw
+ * @param {string} name
+ * @returns {Readonly<SemanticMetadata>}
+ */
+function normalizeMetadata(raw, name) {
+  if (
+    !isRecord(raw) ||
+    typeof raw.compact !== "boolean" ||
+    typeof raw.full !== "boolean"
+  ) {
+    throw new TypeError(`${name} must contain compact and full booleans.`);
   }
+  assertExactKeys(raw, ["compact", "full"], name);
+  return Object.freeze({ compact: raw.compact, full: raw.full });
+}
+
+/**
+ * @param {unknown} raw
+ * @param {string} name
+ * @returns {SemanticRow}
+ */
+function normalizeSemanticRow(raw, name) {
+  if (!isRecord(raw)) {
+    throw new TypeError(`${name} must be an object.`);
+  }
+  assertExactKeys(raw, ["label", "value", "metadata"], name);
   return Object.freeze({
-    kind,
-    id,
-    title,
-    details,
-    anchor: descriptor.anchor,
+    label: nonEmptyString(raw.label, `${name}.label`),
+    value: nonEmptyString(raw.value, `${name}.value`),
+    metadata: normalizeMetadata(raw.metadata, `${name}.metadata`),
   });
+}
+
+/**
+ * @param {unknown} raw
+ * @param {string} name
+ * @returns {SemanticSection}
+ */
+function normalizeSemanticSection(raw, name) {
+  if (!isRecord(raw)) {
+    throw new TypeError(`${name} must be an object.`);
+  }
+  assertExactKeys(raw, ["title", "summary", "rows", "metadata"], name);
+  const summary =
+    raw.summary === undefined || raw.summary === null
+      ? null
+      : nonEmptyString(raw.summary, `${name}.summary`);
+  return Object.freeze({
+    title: nonEmptyString(raw.title, `${name}.title`),
+    summary,
+    rows: Object.freeze(
+      normalizeArray(raw.rows, `${name}.rows`).map((row, index) =>
+        normalizeSemanticRow(row, `${name}.rows[${index}]`),
+      ),
+    ),
+    metadata: normalizeMetadata(raw.metadata, `${name}.metadata`),
+  });
+}
+
+/**
+ * @param {unknown} value
+ * @param {string} name
+ * @returns {unknown[]}
+ */
+function normalizeArray(value, name) {
+  if (!Array.isArray(value)) {
+    throw new TypeError(`${name} must be an array.`);
+  }
+  return value;
+}
+
+/**
+ * @param {Record<string, unknown>} value
+ * @param {ReadonlyArray<string>} expected
+ * @param {string} name
+ */
+function assertExactKeys(value, expected, name) {
+  const actual = Object.keys(value).sort();
+  const required = [...expected].sort();
+  if (
+    actual.length !== required.length ||
+    actual.some((key, index) => key !== required[index])
+  ) {
+    throw new TypeError(`${name} must contain exactly: ${expected.join(", ")}.`);
+  }
+}
+
+/**
+ * @param {Document} ownerDocument
+ * @param {ReadonlyArray<SemanticRow>} rows
+ */
+function renderRows(ownerDocument, rows) {
+  const list = ownerDocument.createElement("dl");
+  list.className = "semantic-explanation__rows";
+  for (const row of rows) {
+    const term = ownerDocument.createElement("dt");
+    term.className = "semantic-explanation__label";
+    term.textContent = row.label;
+    const value = ownerDocument.createElement("dd");
+    value.className = "semantic-explanation__value";
+    value.textContent = row.value;
+    list.append(term, value);
+  }
+  return list;
 }
 
 /**
@@ -731,6 +1229,27 @@ function rectangleOverlapArea(first, second) {
   const height =
     Math.min(first.bottom, second.bottom) - Math.max(first.top, second.top);
   return Math.max(width, 0) * Math.max(height, 0);
+}
+
+/**
+ * @param {TooltipPoint} point
+ * @param {TooltipRectangle} rectangle
+ * @returns {number}
+ */
+function pointToRectangleDistance(point, rectangle) {
+  const horizontal =
+    point.x < rectangle.left
+      ? rectangle.left - point.x
+      : point.x > rectangle.right
+        ? point.x - rectangle.right
+        : 0;
+  const vertical =
+    point.y < rectangle.top
+      ? rectangle.top - point.y
+      : point.y > rectangle.bottom
+        ? point.y - rectangle.bottom
+        : 0;
+  return Math.hypot(horizontal, vertical);
 }
 
 /**
@@ -837,6 +1356,39 @@ function viewportRectangle(ownerDocument) {
 }
 
 /**
+ * Keep a compact card inside the visual surface that owns its cue. Battlefield
+ * SVGs therefore use battlefield-local corners, while panel facts continue to
+ * use the document viewport.
+ *
+ * @param {Element} owner
+ * @param {Document} ownerDocument
+ * @returns {TooltipRectangle}
+ */
+function ownerSurfaceRectangle(owner, ownerDocument) {
+  const viewport = viewportRectangle(ownerDocument);
+  const explicit = surfaceByOwner.get(owner);
+  const inferred =
+    explicit ?? (typeof owner.closest === "function" ? owner.closest("svg") : null);
+  if (inferred === null || inferred === undefined) {
+    return viewport;
+  }
+  const raw = normalizeRectangle(
+    inferred.getBoundingClientRect(),
+    "tooltip owner surface rectangle",
+  );
+  const intersection = Object.freeze({
+    left: Math.max(raw.left, viewport.left),
+    top: Math.max(raw.top, viewport.top),
+    right: Math.min(raw.right, viewport.right),
+    bottom: Math.min(raw.bottom, viewport.bottom),
+  });
+  return intersection.right > intersection.left &&
+    intersection.bottom > intersection.top
+    ? intersection
+    : viewport;
+}
+
+/**
  * @param {Document | ShadowRoot | HTMLElement} root
  * @param {number} x
  * @param {number} y
@@ -868,6 +1420,30 @@ function closestRegisteredOwner(element) {
     current = current.parentElement;
   }
   return null;
+}
+
+/**
+ * @param {Element} trigger
+ * @param {Element} owner
+ * @returns {boolean}
+ */
+function isNativeInteractiveTarget(trigger, owner) {
+  /** @type {Element | null} */
+  let current = trigger;
+  while (current !== null) {
+    const tagName = current.tagName.toLowerCase();
+    if (
+      ["a", "button", "input", "select", "textarea", "summary"].includes(tagName) ||
+      current.getAttribute("contenteditable") === "true"
+    ) {
+      return true;
+    }
+    if (current === owner) {
+      break;
+    }
+    current = current.parentElement;
+  }
+  return false;
 }
 
 /**

@@ -440,6 +440,45 @@ def test_scenario_movement_scale_metadata_enforces_advertised_coherence() -> Non
             ScenarioMetadataV1.model_validate(payload | update)
 
 
+def test_scenario_metadata_json_accepts_integer_and_rejects_coercion() -> None:
+    payload = {
+        "name": "arena_5v5",
+        "title": "Arena",
+        "description": "Interactive arena.",
+        "mode": "interactive",
+        "audience": "researcher",
+        "movement_scale_minimum": 0.01,
+        "movement_scale_maximum": 1,
+        "movement_scale_step": 0.01,
+        "ordinary_movement_distance_scale": 1,
+        "scenario_default_movement_scale": 1,
+        "movement_scale_overridden": False,
+        "completed_frame_count": 0,
+        "frame_count": 0,
+        "next_frame_index": None,
+        "next_frame_label": None,
+        "next_frame_description": None,
+        "script_complete": False,
+    }
+
+    metadata = ScenarioMetadataV1.model_validate_json(json.dumps(payload))
+
+    assert metadata.ordinary_movement_distance_scale == 1.0
+    assert type(metadata.ordinary_movement_distance_scale) is float
+    for invalid in ("1", None, True, [1], {"value": 1}):
+        with pytest.raises(ValidationError):
+            ScenarioMetadataV1.model_validate_json(
+                json.dumps(payload | {"ordinary_movement_distance_scale": invalid})
+            )
+    for mutation in (
+        {"unexpected": True},
+        {"script_complete": None},
+        {"completed_frame_count": False},
+    ):
+        with pytest.raises(ValidationError):
+            ScenarioMetadataV1.model_validate_json(json.dumps(payload | mutation))
+
+
 def test_capability_token_is_not_part_of_the_request_body_schema() -> None:
     schema_text = json.dumps(CommandRequestV1.model_json_schema())
     assert "capability" not in schema_text.lower()

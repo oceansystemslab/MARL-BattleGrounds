@@ -1,6 +1,7 @@
 """Focused allowlisting tests for canonical live-debugger browser frames."""
 
 import json
+from dataclasses import replace
 from typing import cast
 
 import jax.numpy as jnp
@@ -97,6 +98,8 @@ def test_initial_researcher_frame_joins_canonical_frame_zero_and_menu() -> None:
     assert frame.frame_index == 0
     assert frame.frame_id == session.current_evaluation_frame.frame_id
     assert frame.simulator_step_count == 0
+    assert frame.show_ranges is True
+    assert frame.verbose is False
     assert frame.incoming_transition_index is None
     assert frame.incoming_transition_id is None
     assert frame.projection.incoming_events is None
@@ -425,6 +428,8 @@ def test_pov_frame_uses_dedicated_projection_and_omits_researcher_ranges() -> No
     assert frame.projection.scene.self_actor.public_agent_id == "0"
     assert frame.hud.controlled_public_agent_id == "0"
     assert frame.hud.pending_submission_scope == "controlled_actor"
+    assert frame.verbose is False
+    assert "show_ranges" not in payload
     assert "ranges" not in scene_payload
     assert "selection" not in scene_payload
     assert "class_mechanics" not in scene_payload
@@ -439,6 +444,22 @@ def test_pov_frame_uses_dedicated_projection_and_omits_researcher_ranges() -> No
             "policy_assignments",
         }
     )
+
+
+def test_live_presentation_authority_tracks_session_without_changing_identity() -> None:
+    original = _session()
+    presented = replace(original, show_ranges=False, verbose_logging=True)
+    researcher = _frame(presented)
+    pov = _frame(presented, view_mode="pov")
+
+    assert isinstance(researcher, ResearcherLiveDebuggerFrameV2)
+    assert isinstance(pov, ActorPovLiveDebuggerFrameV2)
+    assert researcher.show_ranges is False
+    assert researcher.verbose is True
+    assert pov.verbose is True
+    assert researcher.frame_id == original.current_evaluation_frame.frame_id
+    assert pov.frame_id == original.current_evaluation_frame.frame_id
+    assert "show_ranges" not in pov.model_dump(mode="json")
 
 
 def test_post_transition_pov_response_is_serializable_and_audience_distinct() -> None:

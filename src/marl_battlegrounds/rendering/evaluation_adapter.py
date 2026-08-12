@@ -152,7 +152,9 @@ from marl_battlegrounds.rendering.scene import (
     AuraRecipientModifierSceneV2,
     BattlefieldSceneV2,
     ChargePhaseDisplacementEventV2,
+    ClassAuraMechanicSceneV2,
     ClassMechanicsSceneV2,
+    ClassStatusMechanicSceneV2,
     CombatCountdownResetEventV2,
     CooldownReadyEventV2,
     CooldownStartedEventV2,
@@ -1146,6 +1148,32 @@ def _class_mechanics(
     rows: list[ClassMechanicsSceneV2] = []
     for class_id in real_class_ids:
         row = context.static_mechanics_catalog.class_mechanics[class_id]
+        status_mechanics = tuple(
+            ClassStatusMechanicSceneV2(
+                status_channel=status.status_channel_id,
+                status_id=status.status_id,
+                family=status.family,
+                source_action_component=status.source_action_component,
+                duration_steps=status.duration_steps,
+                magnitude_kind=status.magnitude_kind,
+                magnitude=status.magnitude,
+                breaks_on_positive_damage=status.breaks_on_positive_damage,
+            )
+            for status in context.static_mechanics_catalog.status_channels
+            if status.source_class_id == class_id
+        )
+        aura_mechanics = tuple(
+            ClassAuraMechanicSceneV2(
+                aura_id=aura.aura_id,
+                radius=aura.radius,
+                per_emitter_multiplier=aura.per_emitter_multiplier,
+                stacking_rule=aura.stacking_rule,
+                clamp_kind=aura.clamp_kind,
+                clamp_value=aura.clamp_value,
+            )
+            for aura in context.static_mechanics_catalog.aura_mechanics
+            if aura.emitter_class_id == class_id
+        )
         rows.append(
             ClassMechanicsSceneV2(
                 class_id=row.class_id,
@@ -1167,6 +1195,8 @@ def _class_mechanics(
                 out_of_combat_health_regeneration_fraction_per_step=(
                     row.out_of_combat_health_regeneration_fraction_per_step
                 ),
+                status_mechanics=status_mechanics,
+                aura_mechanics=aura_mechanics,
             )
         )
     return tuple(rows)

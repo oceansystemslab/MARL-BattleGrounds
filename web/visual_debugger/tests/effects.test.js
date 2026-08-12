@@ -5,6 +5,7 @@ import {
   loadRendererFixture,
   syntheticDebuggerPresentationFrame,
 } from "../e2e/support/renderer-fixture.js";
+import { explainChoreographyEvent } from "../src/choreography-painter.js";
 import {
   authorizationContextKey,
   buildChoreographyPlan,
@@ -146,15 +147,15 @@ test("canonical V2 displacement and rejection selectors own transient color", as
   assert.match(css, /data-event-type="action_rejected"/u);
 });
 
-test("canonical fixture gives all 21 V2 events one exact ordered disposition", async () => {
+test("canonical fixture gives every V2 event one exact ordered disposition", async () => {
   const { grammar } = await canonicalFrames();
   const plan = buildChoreographyPlan(grammar, surface);
   assert.ok(plan);
   assert.equal(plan.transitionId, grammar.incoming_transition_id);
-  assert.equal(plan.events.length, 21);
   const sourceEvents = /** @type {Record<string, any>[]} */ (
     grammar.event_batch.events
   );
+  assert.equal(plan.events.length, sourceEvents.length);
   assert.deepEqual(
     plan.events.map((event) => event.eventId),
     sourceEvents.map((event) => event.event_id),
@@ -239,17 +240,200 @@ test("crowded fixture retains every health and status cue under pressure", async
   );
 });
 
+test("Hunter Trap uses ordinary target-body route clearance while Charge stays exceptional", async () => {
+  const { crowded } = await canonicalFrames();
+  const plan = buildChoreographyPlan(crowded, surface);
+  assert.ok(plan);
+  const agentsBySlot = new Map(
+    crowded.scene.agents.map(
+      /** @param {Record<string, any>} agent */ (agent) => [agent.global_slot, agent],
+    ),
+  );
+  const routed = plan.events.filter(
+    (event) =>
+      event.kind === "activation" &&
+      ["hunter_trap", "rogue_poison", "warrior_charge"].includes(event.tokenId),
+  );
+  assert.equal(routed.length, 6);
+
+  /** @param {Record<string, any>} event */
+  const targetClearance = (event) => {
+    assert.ok(event.route);
+    assert.ok(event.target);
+    return Math.hypot(
+      event.route.end.x - event.target.x,
+      event.route.end.y - event.target.y,
+    );
+  };
+  for (const event of routed) {
+    const target = agentsBySlot.get(event.targetSlot);
+    assert.ok(target);
+    const targetRadius = surface.worldLengthToScreen(target.radius);
+    const expectedGap = event.tokenId === "warrior_charge" ? 18 : 3;
+    assert.ok(
+      Math.abs(targetClearance(event) - (targetRadius + expectedGap)) < 1e-9,
+      `${event.tokenId} must stop at its declared target-body clearance`,
+    );
+  }
+  const trapClearances = routed
+    .filter((event) => event.tokenId === "hunter_trap")
+    .map(targetClearance);
+  const ordinaryClearances = routed
+    .filter((event) => event.tokenId === "rogue_poison")
+    .map(targetClearance);
+  assert.deepEqual(trapClearances, ordinaryClearances);
+  assert.ok(
+    routed
+      .filter((event) => event.tokenId === "warrior_charge")
+      .every((event) => targetClearance(event) > Math.max(...trapClearances)),
+  );
+});
+
+test("choreography preserves nonnumeric public identities independently of slots", async () => {
+  const { grammar } = await canonicalFrames();
+  const publicIds = Object.freeze([
+    "zulu",
+    "alpha",
+    "kestrel",
+    "bravo",
+    "ember",
+    "quartz",
+    "delta",
+    "sierra",
+    "nova",
+    "cobalt",
+  ]);
+  const remapped = structuredClone(grammar);
+  /** @param {unknown} value */
+  const remapExplicitPublicIds = (value) => {
+    if (Array.isArray(value)) {
+      value.forEach(remapExplicitPublicIds);
+      return;
+    }
+    if (!value || typeof value !== "object") {
+      return;
+    }
+    const candidate = /** @type {Record<string, any>} */ (value);
+    for (const [key, child] of Object.entries(candidate)) {
+      if (
+        key.includes("public_agent_id") &&
+        typeof child === "string" &&
+        Number.isInteger(Number(child)) &&
+        publicIds[Number(child)] !== undefined
+      ) {
+        candidate[key] = publicIds[Number(child)];
+      } else if (key === "public_agent_id_by_global_slot" && Array.isArray(child)) {
+        candidate[key] = [...publicIds];
+      } else {
+        remapExplicitPublicIds(child);
+      }
+    }
+  };
+  remapExplicitPublicIds(remapped);
+
+  const plan = buildChoreographyPlan(remapped, surface);
+  assert.ok(plan);
+  const roles = ["source", "target", "recipient", "actor", "agent"];
+  let identityJoinCount = 0;
+  for (const event of plan.events) {
+    for (const role of roles) {
+      const slot = event[`${role}Slot`];
+      if (!Number.isInteger(slot)) {
+        continue;
+      }
+      identityJoinCount += 1;
+      assert.equal(event[`${role}PublicAgentId`], publicIds[slot]);
+      assert.notEqual(event[`${role}PublicAgentId`], String(slot));
+    }
+  }
+  assert.ok(identityJoinCount > 0);
+
+  const splitIdentityRoot = structuredClone(remapped);
+  splitIdentityRoot.event_batch.public_agent_id_by_global_slot[0] = "impostor";
+  assert.equal(buildChoreographyPlan(splitIdentityRoot, surface), null);
+
+  const truncatedIdentityRoot = structuredClone(remapped);
+  truncatedIdentityRoot.event_batch.public_agent_id_by_global_slot.pop();
+  assert.equal(buildChoreographyPlan(truncatedIdentityRoot, surface), null);
+
+  const permutedIdentityRoot = structuredClone(remapped);
+  [
+    permutedIdentityRoot.event_batch.public_agent_id_by_global_slot[0],
+    permutedIdentityRoot.event_batch.public_agent_id_by_global_slot[1],
+  ] = [
+    permutedIdentityRoot.event_batch.public_agent_id_by_global_slot[1],
+    permutedIdentityRoot.event_batch.public_agent_id_by_global_slot[0],
+  ];
+  assert.equal(buildChoreographyPlan(permutedIdentityRoot, surface), null);
+
+  const mismatchedEventRoot = structuredClone(remapped);
+  const mismatchedEvent = mismatchedEventRoot.event_batch.events.find(
+    /** @param {Record<string, any>} event */ (event) =>
+      Number.isInteger(event.source_global_slot) &&
+      Number.isInteger(event.recipient_global_slot) &&
+      event.source_global_slot !== event.recipient_global_slot &&
+      event.source_anchor,
+  );
+  assert.ok(mismatchedEvent);
+  mismatchedEvent.source_global_slot = mismatchedEvent.recipient_global_slot;
+  assert.equal(buildChoreographyPlan(mismatchedEventRoot, surface), null);
+
+  const absentPaddedSlot = structuredClone(remapped);
+  absentPaddedSlot.scene.agents = absentPaddedSlot.scene.agents.filter(
+    /** @param {Record<string, any>} agent */ (agent) => agent.global_slot !== 9,
+  );
+  const paddedEvent = absentPaddedSlot.event_batch.events.find(
+    /** @param {Record<string, any>} event */ (event) =>
+      event.event_type === "recipient_health_resolution",
+  );
+  assert.ok(paddedEvent);
+  paddedEvent.recipient_global_slot = 9;
+  paddedEvent.recipient_anchor = {
+    ...paddedEvent.recipient_anchor,
+    global_slot: 9,
+    public_agent_id: publicIds[9],
+  };
+  const paddedPlan = buildChoreographyPlan(absentPaddedSlot, surface);
+  assert.ok(paddedPlan);
+  assert.equal(
+    paddedPlan.events.find((event) => event.eventId === paddedEvent.event_id)
+      ?.recipientPublicAgentId,
+    null,
+  );
+
+  const semanticEvent = plan.events.find(
+    (event) => event.kind === "status_lifecycle" && event.sourceSlot !== null,
+  );
+  assert.ok(semanticEvent);
+  const serializedDescriptor = JSON.stringify(explainChoreographyEvent(semanticEvent));
+  assert.equal(serializedDescriptor.includes(semanticEvent.eventId), false);
+  assert.equal(serializedDescriptor.includes(semanticEvent.transitionId), false);
+  assert.ok(
+    serializedDescriptor.includes(`Agent ID ${publicIds[semanticEvent.sourceSlot]}`),
+  );
+  assert.ok(
+    serializedDescriptor.includes(`Agent ID ${publicIds[semanticEvent.recipientSlot]}`),
+  );
+});
+
 test("non-coexisting activation and health phases do not reserve each other's geometry", async () => {
   const { grammar } = await canonicalFrames();
   const events = /** @type {Record<string, any>[]} */ (grammar.event_batch.events);
   const ability = {
     ...events.find((event) => event.event_type === "ability_activated"),
-    source_anchor: { position: [150, 100] },
-    recipient_anchor: { position: [100, 56] },
+    source_anchor: {
+      ...events.find((event) => event.event_type === "ability_activated")
+        ?.source_anchor,
+      position: [150, 100],
+    },
   };
   const health = {
     ...events.find((event) => event.event_type === "recipient_health_resolution"),
-    recipient_anchor: { position: [100, 100] },
+    recipient_anchor: {
+      ...events.find((event) => event.event_type === "recipient_health_resolution")
+        ?.recipient_anchor,
+      position: [100, 100],
+    },
   };
   const phaseSurface = /** @type {ProjectionSurface} */ ({
     worldToScreen: (point) => ({

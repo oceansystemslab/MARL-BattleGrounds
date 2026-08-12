@@ -132,10 +132,6 @@ def recording_restart_intent_v1(
 
 
 _SUBMISSION_KEYS = frozenset(("space", "enter", "n"))
-_SHIFT_R_NOTICE = (
-    "Shift+R cooldown clearing is unavailable because no public coherent "
-    "snapshot-rebuild API exists; use R for a full reset."
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,9 +197,9 @@ def normalize_key(
     """Normalize supported keyboard aliases to debugger commands."""
     if key is None:
         return None
-    if shift_key is None and key == "R":
-        return "shift+r"
     normalized = key.lower()
+    if normalized == "shift+r" or (normalized == "r" and shift_key is True):
+        return None
     if normalized in (
         "shift+tab",
         "backtab",
@@ -227,8 +223,6 @@ def normalize_key(
         return "arrowleft"
     if normalized == "tab" and shift_key:
         return "shift+tab"
-    if normalized in ("r", "shift+r") and (shift_key or normalized == "shift+r"):
-        return "shift+r"
     return normalized
 
 
@@ -711,15 +705,6 @@ def _dispatch_keyboard(
             handled=True,
             changed=True,
             episode_restarted=True,
-        )
-    if key == "shift+r":
-        return _result(
-            session,
-            view_mode=view_mode,
-            preset=preset,
-            handled=True,
-            changed=False,
-            notice=_SHIFT_R_NOTICE,
         )
     if key == "g":
         return _result(

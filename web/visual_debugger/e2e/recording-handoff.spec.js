@@ -11,6 +11,7 @@ import {
   stopRecordingDebugger,
   waitForRecordingDebuggerExit,
 } from "./support/recording-handoff.js";
+import { expectVisibleInteractiveHelpInventory } from "./support/visual-regression.js";
 
 test.describe.configure({ mode: "serial" });
 
@@ -437,8 +438,18 @@ test("confirmed prefix discard restarts capture and Finish opens settled frame-z
   );
   await expect(page.locator("#recording-discard-cancel-button")).toBeFocused();
   await expectRecordingCount(page, 1);
+  const openDiscardHelp = await expectVisibleInteractiveHelpInventory(page);
+  expect(openDiscardHelp.registered).toContain("#recording-discard-cancel-button");
+  expect(openDiscardHelp.registered).toContain("#recording-discard-confirm-button");
   await page.locator("#recording-discard-cancel-button").click();
   await expect(page.locator("#recording-discard-dialog")).toBeHidden();
+  const closedDiscardHelp = await expectVisibleInteractiveHelpInventory(page);
+  expect(closedDiscardHelp.registered).not.toContain(
+    "#recording-discard-cancel-button",
+  );
+  expect(closedDiscardHelp.registered).not.toContain(
+    "#recording-discard-confirm-button",
+  );
   await expectRecordingCount(page, 1);
 
   await page.locator("#reset-button").click();
@@ -815,6 +826,8 @@ test("target race remains Online and fenced until Save As recovers cached artifa
   });
   await expect(page.locator("body")).not.toContainText(started.outputDirectory);
   await expect(page.locator("body")).not.toContainText(started.replayPath);
+  const recoveryHelp = await expectVisibleInteractiveHelpInventory(page);
+  expect(recoveryHelp.disabled.length).toBeGreaterThan(0);
 
   await page.locator("#recording-retry-button").click();
   await expect(page.locator("#connection-status")).toHaveText("Online");

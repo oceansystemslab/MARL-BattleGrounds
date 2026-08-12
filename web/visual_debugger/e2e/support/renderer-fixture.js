@@ -47,6 +47,50 @@ export async function loadRendererFixture(name) {
 }
 
 /**
+ * Load the one Python-mutated catalog payload shared by the host and browser
+ * propagation proofs. Unlike the synthetic renderer vocabulary, this envelope
+ * is rebuilt from the validated evaluation catalog before it crosses JSON.
+ *
+ * @returns {Promise<{live_frame: Record<string, any>, expected: Record<string, number>}>}
+ */
+export async function loadCatalogPropagationFixture() {
+  const { stdout, stderr } = await execFileAsync(
+    "uv",
+    ["run", "--quiet", "python", "-m", "tests.catalog_propagation_fixture"],
+    {
+      cwd: REPOSITORY_ROOT,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        JAX_PLATFORMS: "cpu",
+        UV_CACHE_DIR:
+          process.env.UV_CACHE_DIR ?? "/tmp/marl-battlegrounds-renderer-fixture-uv",
+      },
+      maxBuffer: 8 * 1024 * 1024,
+    },
+  );
+  if (stderr.trim()) {
+    throw new Error(`Catalog propagation exporter wrote to stderr:\n${stderr}`);
+  }
+  const parsed = JSON.parse(stdout);
+  if (
+    !parsed ||
+    typeof parsed !== "object" ||
+    Array.isArray(parsed) ||
+    !parsed.live_frame ||
+    typeof parsed.live_frame !== "object" ||
+    Array.isArray(parsed.live_frame) ||
+    !parsed.expected ||
+    typeof parsed.expected !== "object" ||
+    Array.isArray(parsed.expected)
+  ) {
+    throw new Error("Catalog propagation exporter returned an invalid payload.");
+  }
+  normalizeLiveDebuggerFrameV2(parsed.live_frame);
+  return parsed;
+}
+
+/**
  * Return the exact Python-produced outbound live-frame envelope after proving
  * that the production browser normalizer accepts it. The returned object is
  * intentionally not decorated with presentation aliases.

@@ -953,6 +953,7 @@ class _LiveDebuggerEnvelopeV2(_ProtocolModel):
     frame_id: _CanonicalScientificId
     simulator_step_count: _NonNegativeInt
     preset: Preset
+    verbose: bool
     terminal: TerminalStateV2
     recording: RecordingStatusV1 | None = None
 
@@ -976,6 +977,7 @@ class ResearcherLiveDebuggerFrameV2(_LiveDebuggerEnvelopeV2):
     view_mode: Literal["researcher"] = "researcher"
     incoming_transition_index: _NonNegativeInt | None
     incoming_transition_id: _CanonicalScientificId | None
+    show_ranges: bool
     scenario: ScenarioMetadataV1
     available_scenarios: tuple[ScenarioOptionV1, ...]
     projection: ResearcherAnalyzerProjectionV2

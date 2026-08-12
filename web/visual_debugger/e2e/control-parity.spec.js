@@ -237,9 +237,11 @@ test("pointer, roster, toolbar, and command-deck controls use the live service",
   await expect(page.locator('#battlefield .legality-dock[data-slot="6"]')).toHaveCount(
     1,
   );
-  await expect(
-    page.locator('#battlefield .agent[data-slot="6"] .agent-id-tag'),
-  ).toHaveCSS("opacity", "1");
+  await expect(page.locator("#battlefield .agent-id-tag")).toHaveCount(0);
+  await expect(page.locator('#battlefield .agent[data-slot="6"]')).toHaveAttribute(
+    "aria-label",
+    /Agent ID 6/,
+  );
   await expect(page.locator(".candidate-legality-row")).toHaveCount(0);
   await expect(page.locator("#diagnostics-card")).not.toContainText(
     "candidate_legalities",
@@ -297,7 +299,7 @@ test("pointer, roster, toolbar, and command-deck controls use the live service",
             targetAction === 0
               ? "target-none"
               : typeof publicAgentId === "string"
-                ? `${publicAgentId} (action ${targetAction})`
+                ? `Agent ID ${publicAgentId} (action ${targetAction})`
                 : "undisclosed",
           hasTargetSlot: false,
           lane0Available: String(candidate.lane_0_available),
@@ -396,10 +398,10 @@ test("command composer keeps the exact controlled actor visible at both viewport
           requestAnimationFrame(() => requestAnimationFrame(resolve));
         }),
     );
-    await expect(controlledActor).toHaveText(`Actor · id_${slot}`);
+    await expect(controlledActor).toHaveText(`Actor · Agent ID ${slot}`);
     await expect(controlledActor).toHaveAttribute(
       "aria-label",
-      `Controlled actor id_${slot}`,
+      `Controlled actor Agent ID ${slot}`,
     );
     await expect(controlledActor).toHaveAttribute("data-controlled-slot", String(slot));
     await expect(controlledActor).toBeVisible();
@@ -430,12 +432,12 @@ test("command composer keeps the exact controlled actor visible at both viewport
 
   await assertComposerIdentity({ width: 1440, height: 900 }, 0);
   await page.getByRole("button", { name: "Control Agent ID 1" }).click();
-  await expect(controlledActor).toHaveText("Actor · id_1");
+  await expect(controlledActor).toHaveText("Actor · Agent ID 1");
   await assertComposerIdentity({ width: 960, height: 600 }, 1);
   await page
     .locator('#battlefield .agent[data-slot="2"] .agent-body')
     .click({ modifiers: ["Shift"] });
-  await expect(controlledActor).toHaveText("Actor · id_2");
+  await expect(controlledActor).toHaveText("Actor · Agent ID 2");
 });
 
 test("movement scale previews locally and resets one authoritative epoch on commit", async ({
@@ -547,6 +549,23 @@ test("movement scale previews locally and resets one authoritative epoch on comm
   await expect(page.locator(".movement-scale-control")).toHaveScreenshot(
     "movement-scale-default-restored-960x600.png",
   );
+
+  // Exercise the original-JSON boundary at the upper slider endpoint. The
+  // browser sends JSON number 1 (not Python float syntax), and the strict
+  // request model must accept it without a resync failure.
+  await scaleInput.press("ArrowLeft");
+  revision += 1;
+  await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  await expect(page.locator("#movement-scale-value")).toHaveText("0.99");
+  expect(movementScaleCommands).toBe(4);
+
+  await scaleInput.press("End");
+  revision += 1;
+  await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  await expect(page.locator("#movement-scale-value")).toHaveText("1.00");
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await expect(page.locator("#notice")).not.toContainText("Resync required");
+  expect(movementScaleCommands).toBe(5);
   await page.unroute("**/api/command");
 });
 
@@ -627,7 +646,7 @@ test("joint turn drafts survive actor cycling and submit exactly once", async ({
   await page.locator("#basic-button").hover();
   await page.locator("#basic-button").dispatchEvent("click");
   await expect(page.locator("#notice")).toContainText(
-    "Basic is unavailable for the currently staged target.",
+    "Basic ability is not available this tick.",
   );
   await expect(page.locator("#revision-value")).toHaveText(String(revision));
   await battlefield.focus();
@@ -671,9 +690,15 @@ test("joint turn drafts survive actor cycling and submit exactly once", async ({
   await expect(actor0).toHaveAttribute("data-controlled", "true");
   await expect(actor0).toHaveAttribute("data-move-action", "3");
   await expect(actor0).toHaveAttribute("data-target-slot", "6");
+  await expect(actor0.locator(".pending-action-row__facts")).toContainText(
+    "Target · Agent ID 6 (action 7)",
+  );
   await expect(actor1).toHaveAttribute("data-controlled", "false");
   await expect(actor1).toHaveAttribute("data-move-action", "1");
   await expect(actor1).toHaveAttribute("data-target-slot", "5");
+  await expect(actor1.locator(".pending-action-row__facts")).toContainText(
+    "Target · Agent ID 5 (action 6)",
+  );
 
   for (let actorSlot = 2; actorSlot < 10; actorSlot += 1) {
     await page.getByRole("button", { name: `Control Agent ID ${actorSlot}` }).click();
@@ -863,24 +888,57 @@ test("a stale tab adopts the latest frame without replaying its command", async 
   const baseRevision = await currentRevision(page);
   await expect(stalePage.locator("#revision-value")).toHaveText(String(baseRevision));
 
-  await page.getByRole("button", { name: "Ranges" }).click();
-  await expect(page.locator("#revision-value")).toHaveText(String(baseRevision + 1));
+  const ranges = page.locator("#live-ranges-button");
+  const staleRanges = stalePage.locator("#live-ranges-button");
+  const verbosity = stalePage.locator("#live-verbosity-button");
+  const initialRangesPressed = await ranges.getAttribute("aria-pressed");
+  const initialVerbosityPressed = await verbosity.getAttribute("aria-pressed");
+  expect(["true", "false"]).toContain(initialRangesPressed);
+  expect(["true", "false"]).toContain(initialVerbosityPressed);
+  if (initialRangesPressed === null || initialVerbosityPressed === null) {
+    throw new Error("Live toggle controls did not publish pressed state.");
+  }
 
-  await stalePage.getByRole("button", { name: "Verbosity" }).click();
+  await ranges.click();
+  await expect(page.locator("#revision-value")).toHaveText(String(baseRevision + 1));
+  await expect(ranges).toHaveAttribute(
+    "aria-pressed",
+    initialRangesPressed === "true" ? "false" : "true",
+  );
+  await expect(staleRanges).toHaveAttribute("aria-pressed", initialRangesPressed);
+
+  await verbosity.click();
   await expect(stalePage.locator("#revision-value")).toHaveText(
     String(baseRevision + 1),
   );
   await expect(stalePage.locator("#notice")).toContainText("stale");
+  await expect(verbosity).toHaveAttribute("aria-pressed", initialVerbosityPressed);
+  await expect(staleRanges).toHaveAttribute(
+    "aria-pressed",
+    initialRangesPressed === "true" ? "false" : "true",
+  );
   await expect(page.locator("#revision-value")).toHaveText(String(baseRevision + 1));
 
-  await stalePage.getByRole("button", { name: "Verbosity" }).click();
+  await verbosity.click();
   await expect(stalePage.locator("#revision-value")).toHaveText(
     String(baseRevision + 2),
+  );
+  await expect(verbosity).toHaveAttribute(
+    "aria-pressed",
+    initialVerbosityPressed === "true" ? "false" : "true",
   );
 
   await page.reload();
   await expect(page.locator("#connection-status")).toHaveText("Online");
   await expect(page.locator("#revision-value")).toHaveText(String(baseRevision + 2));
+  await expect(page.locator("#live-ranges-button")).toHaveAttribute(
+    "aria-pressed",
+    initialRangesPressed === "true" ? "false" : "true",
+  );
+  await expect(page.locator("#live-verbosity-button")).toHaveAttribute(
+    "aria-pressed",
+    initialVerbosityPressed === "true" ? "false" : "true",
+  );
   await stalePage.close();
 });
 

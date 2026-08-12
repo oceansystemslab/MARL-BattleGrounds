@@ -12,6 +12,7 @@ import {
   startReplayViewer,
   stopDebugger,
 } from "./support/replay-viewer.js";
+import { expectVisibleInteractiveHelpInventory } from "./support/visual-regression.js";
 
 test.describe.configure({ mode: "serial" });
 
@@ -317,6 +318,13 @@ test("canonical complete and partial artifacts join their frame-zero and capture
   await expect(page.locator("#replay-incoming-value")).toHaveText("Initial frame");
   await expect(page.locator("#battlefield")).toHaveAttribute("role", "img");
   await expect(page.locator("#battlefield")).toHaveAttribute("tabindex", "-1");
+  const researcherHelp = await expectVisibleInteractiveHelpInventory(page);
+  expect(researcherHelp.disabled.length).toBeGreaterThan(0);
+  expect(researcherHelp.registered).toContain("#replay-timeline");
+  await expect(page.locator("#replay-timeline")).toHaveAttribute(
+    "aria-description",
+    "Use the read-only transport and presentation controls to inspect recorded frames.",
+  );
 
   const replayBoundary = await page.evaluate(() => {
     const liveRoots = [...document.querySelectorAll("[data-live-only]")];
@@ -573,6 +581,26 @@ test("buttons, slider debounce, keyboard, and researcher Reference preserve exac
   expect(arrowForward.animate_incoming).toBe(true);
 
   await pressReplayCommand(page, "Home");
+  const referenceButton = page.locator(
+    '#roster button[aria-label="Use Agent ID agent-slot-1 as Reference"]',
+  );
+  const povActorButton = page.locator(
+    '#roster button[aria-label="Choose Agent ID agent-slot-1 as POV actor"]',
+  );
+  await referenceButton.hover();
+  await expect(page.locator("#visual-tooltip")).toHaveAttribute(
+    "data-tooltip-kind",
+    "control",
+  );
+  await expect(page.locator("#visual-tooltip-title")).toHaveText("Reference");
+  await referenceButton.focus();
+  await expect(referenceButton).toHaveAttribute("aria-describedby", "visual-tooltip");
+  await expect(page.locator("#visual-tooltip-title")).toHaveText("Reference");
+  await povActorButton.hover();
+  await expect(page.locator("#visual-tooltip-title")).toHaveText("POV actor");
+  await povActorButton.focus();
+  await expect(povActorButton).toHaveAttribute("aria-describedby", "visual-tooltip");
+  await expect(page.locator("#visual-tooltip-title")).toHaveText("POV actor");
   const reference = await clickReplayCommand(
     page,
     '#roster button[aria-label="Use Agent ID agent-slot-1 as Reference"]',
@@ -586,6 +614,20 @@ test("buttons, slider debounce, keyboard, and researcher Reference preserve exac
     "data-reference",
     "true",
   );
+  const rosterReference = page.locator('.roster-row[data-slot="1"]');
+  await rosterReference.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#semantic-inspector")).toBeVisible();
+  await expect(page.locator("#semantic-inspector")).toContainText("Reference");
+  await expect(page.locator("#semantic-inspector")).toContainText(
+    "Exact Class Mechanics",
+  );
+  await expect(page.locator("#semantic-inspector")).not.toContainText(
+    "Selected target",
+  );
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#semantic-inspector")).toBeHidden();
+  await expect(rosterReference).toBeFocused();
   const cleared = await clickReplayCommand(page, "#replay-clear-reference-button");
   expect(cleared.frame.projection.scene.selection.selected_global_slot).toBeNull();
   await expect(page.locator("#replay-clear-reference-button")).toBeDisabled();
@@ -663,6 +705,8 @@ test("invalid response and audience-timeline candidates never replace the instal
   expect(povFrame.frame_kind).toBe("actor_pov_replay_viewer");
   expect(povTimeline.timeline_kind).toBe("actor_pov");
   expect(povTimeline.timeline_id).toBe(povFrame.timeline_id);
+  const povHelp = await expectVisibleInteractiveHelpInventory(page);
+  expect(povHelp.disabled.length).toBeGreaterThan(0);
 
   const restoreResponse = nextReplayResponse(page);
   await page.locator("#view-select").selectOption("researcher");
@@ -943,7 +987,7 @@ test("reduced-motion and Motion Off playback use their slower serialized cadence
   const complete = requiredViewer(completeViewer, "complete");
   await openReplay(page, complete.url);
   await installFirstFrame(page);
-  await page.locator('[data-motion-rate="off"]').click();
+  await page.locator("#motion-off-button").click();
   await expect(page.locator("html")).toHaveAttribute("data-motion-mode", "off");
   await expect(page.locator("#motion-status")).toHaveText("Motion off");
 

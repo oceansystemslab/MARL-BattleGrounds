@@ -154,9 +154,10 @@ def test_recording_lifecycle_command_is_safe_when_recording_is_disabled() -> Non
     ("key", "shift_key", "expected"),
     (
         (None, None, None),
-        ("R", None, "shift+r"),
+        ("R", None, "r"),
         ("R", False, "r"),
-        ("r", True, "shift+r"),
+        ("r", True, None),
+        ("shift+r", None, None),
         ("shift+tab", None, "shift+tab"),
         ("backtab", None, "shift+tab"),
         ("iso_left_tab", None, "shift+tab"),
@@ -180,6 +181,33 @@ def test_key_normalization_covers_supported_aliases(
     expected: str | None,
 ) -> None:
     assert normalize_key(key, shift_key=shift_key) == expected
+
+
+def test_shift_r_is_unrecognized_while_ordinary_r_still_resets() -> None:
+    session = _session()
+
+    shifted = dispatch_command(
+        session,
+        KeyboardCommandV1(key="R", shift_key=True),
+        view_mode="researcher",
+        preset="analysis",
+        include_stress=False,
+    )
+    ordinary = dispatch_command(
+        session,
+        KeyboardCommandV1(key="r"),
+        view_mode="researcher",
+        preset="analysis",
+        include_stress=False,
+    )
+
+    assert not shifted.handled
+    assert not shifted.changed
+    assert shifted.session is session
+    assert shifted.notice is None
+    assert ordinary.handled
+    assert ordinary.changed
+    assert ordinary.episode_restarted
 
 
 @pytest.mark.parametrize(

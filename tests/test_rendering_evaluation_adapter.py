@@ -66,11 +66,36 @@ from marl_battlegrounds.rendering.pov_scene import (
 from marl_battlegrounds.rendering.scene import (
     BattlefieldSceneV2,
     ResearcherAnalyzerProjectionV2,
+    StatusSourceChannelEvidenceV2,
+    StatusSourceEvidenceSceneV2,
     StatusSourceEvidenceStateV2,
     VisualEventBatchV2,
 )
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_status_source_state_rejects_noncanonical_prior_transition_text() -> None:
+    evidence = StatusSourceEvidenceSceneV2(
+        source_global_slot=0,
+        source_public_agent_id="public-zero",
+        event_id="episode:transition:00:event:0000",
+    )
+    channel = StatusSourceChannelEvidenceV2(
+        recipient_global_slot=1,
+        recipient_public_agent_id="public-one",
+        status_channel=1,
+        status_id="hunter_basic_slow",
+        direct_source_evidence=(evidence,),
+    )
+    with pytest.raises(ValueError, match="canonical event before"):
+        StatusSourceEvidenceStateV2(
+            schema_version=2,
+            episode_id="episode",
+            frame_index=1,
+            frame_id="episode:frame:1",
+            active_statuses=(channel,),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +202,19 @@ def test_researcher_scene_v2_projects_only_canonical_context_and_frame_truth(
         "agent-slot-6",
     )
     assert tuple(row.class_id for row in scene.class_mechanics) == (1, 2, 3, 4, 5)
+    assert tuple(
+        status.status_channel
+        for mechanics in scene.class_mechanics
+        for status in mechanics.status_mechanics
+    ) == (7, 0, 3, 1, 4, 2, 5, 6, 8)
+    assert tuple(
+        aura.aura_id
+        for mechanics in scene.class_mechanics
+        for aura in mechanics.aura_mechanics
+    ) == (
+        "mage_damage_amplification",
+        "warrior_damage_mitigation",
+    )
     assert len(scene.spawn_pads) == len(scene.agents)
     assert tuple(wave.team_index for wave in scene.respawn_waves) == (0, 1)
     assert tuple(field.aura_id for field in scene.aura_fields) == (
@@ -266,6 +304,44 @@ def test_scene_v2_rejects_contradictory_nested_identity(
         replace(scene, spawn_pads=(bad_pad, *scene.spawn_pads[1:]))
     with pytest.raises(ValueError, match="at least 1"):
         replace(scene.class_mechanics[0], class_id=0)
+    mage_mechanics = scene.class_mechanics[0]
+    warrior_mechanics = scene.class_mechanics[1]
+    with pytest.raises(ValueError, match="canonical V1 identity"):
+        replace(mage_mechanics, class_name="Warrior")
+    tampered_mage_mechanics = replace(mage_mechanics)
+    object.__setattr__(tampered_mage_mechanics, "class_name", "Warrior")
+    with pytest.raises(ValueError, match="canonical V1 class identities"):
+        replace(
+            scene,
+            class_mechanics=(tampered_mage_mechanics, *scene.class_mechanics[1:]),
+        )
+    with pytest.raises(ValueError, match="source class"):
+        replace(
+            scene,
+            class_mechanics=(
+                replace(
+                    mage_mechanics,
+                    status_mechanics=warrior_mechanics.status_mechanics,
+                ),
+                replace(
+                    warrior_mechanics, status_mechanics=mage_mechanics.status_mechanics
+                ),
+                *scene.class_mechanics[2:],
+            ),
+        )
+    with pytest.raises(ValueError, match=r"ordered aura catalog|emitter class"):
+        replace(
+            scene,
+            class_mechanics=(
+                replace(
+                    mage_mechanics, aura_mechanics=warrior_mechanics.aura_mechanics
+                ),
+                replace(
+                    warrior_mechanics, aura_mechanics=mage_mechanics.aura_mechanics
+                ),
+                *scene.class_mechanics[2:],
+            ),
+        )
 
     selected_scene = build_evaluation_battlefield_scene_v2(
         replay.header.context,

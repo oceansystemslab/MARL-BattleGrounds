@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 
+import { formatDisplayNumber } from "../src/display.js";
 import {
   CHOREOGRAPHY_ROOT,
   installWaapiAutopause,
@@ -7,6 +8,7 @@ import {
 } from "./support/choreography.js";
 import { startDebugger, stopDebugger } from "./support/live-debugger.js";
 import {
+  loadCatalogPropagationFixture,
   loadRendererFixture,
   syntheticDebuggerPresentationFrame,
   syntheticDebuggerWireFrame,
@@ -25,14 +27,111 @@ let syntheticPovWireFrame = {};
 let canonicalGrammarFrame = {};
 /** @type {Record<string, any>} */
 let canonicalGrammarWireFrame = {};
+/** @type {{live_frame: Record<string, any>, expected: Record<string, number>}} */
+let catalogPropagationFixture = { live_frame: {}, expected: {} };
+
+/**
+ * Replace one catalog-owned display fragment while preserving every stable
+ * word around it for the semantic snapshot. A missing or repeated fragment is
+ * evidence drift, not permission to normalize an arbitrary string.
+ *
+ * @param {string | undefined} value
+ * @param {string} fragment
+ * @param {string} placeholder
+ * @param {string} label
+ */
+function replaceCatalogFragmentOnce(value, fragment, placeholder, label) {
+  if (typeof value !== "string") {
+    throw new Error(`${label} has no semantic value to snapshot.`);
+  }
+  const first = value.indexOf(fragment);
+  const repeated = first >= 0 && value.indexOf(fragment, first + fragment.length) >= 0;
+  if (first < 0 || repeated) {
+    throw new Error(
+      `${label} must contain exactly one catalog fragment ${JSON.stringify(fragment)}.`,
+    );
+  }
+  return `${value.slice(0, first)}${placeholder}${value.slice(first + fragment.length)}`;
+}
+
+/**
+ * Keep deliberately extreme synthetic presentation values within the same
+ * serialized mechanics authority that the strict browser boundary validates.
+ *
+ * @param {Record<string, any>} scene
+ * @param {number} agentIndex
+ * @param {number} statusIndex
+ * @param {number} duration
+ */
+function authorizeSyntheticStatusDuration(scene, agentIndex, statusIndex, duration) {
+  const status = scene.agents[agentIndex]?.statuses?.[statusIndex];
+  const mechanic = scene.class_mechanics
+    .flatMap(/** @param {Record<string, any>} row */ (row) => row.status_mechanics)
+    .find(
+      /** @param {Record<string, any>} row */ (row) =>
+        row.status_channel === status?.status_channel,
+    );
+  if (!status || !mechanic) {
+    throw new Error("Synthetic status stress value has no serialized mechanic.");
+  }
+  status.remaining_duration = duration;
+  mechanic.duration_steps = Math.max(mechanic.duration_steps, duration);
+}
+
+/**
+ * @param {Record<string, any>} scene
+ * @param {number} agentIndex
+ * @param {number} ticks
+ */
+function authorizeSyntheticCooldown(scene, agentIndex, ticks) {
+  const agent = scene.agents[agentIndex];
+  const mechanic = scene.class_mechanics.find(
+    /** @param {Record<string, any>} row */
+    (row) => row.class_id === agent?.class_id,
+  );
+  if (!agent || !mechanic) {
+    throw new Error("Synthetic cooldown stress value has no serialized mechanic.");
+  }
+  agent.ultimate_cooldown_remaining = ticks;
+  mechanic.ultimate_cooldown_steps = Math.max(mechanic.ultimate_cooldown_steps, ticks);
+}
+
+/**
+ * @param {Record<string, any>} scene
+ * @param {number} agentIndex
+ * @param {number} modifierIndex
+ * @param {number} multiplier
+ */
+function authorizeSyntheticAuraModifier(scene, agentIndex, modifierIndex, multiplier) {
+  const modifier = scene.agents[agentIndex]?.aura_modifiers?.[modifierIndex];
+  const mechanic = scene.class_mechanics
+    .flatMap(/** @param {Record<string, any>} row */ (row) => row.aura_mechanics)
+    .find(
+      /** @param {Record<string, any>} row */ (row) =>
+        row.aura_id === modifier?.aura_id,
+    );
+  if (!modifier || !mechanic || mechanic.clamp_kind !== "ceiling") {
+    throw new Error("Synthetic aura stress value has no ceiling mechanic.");
+  }
+  modifier.multiplier = multiplier;
+  mechanic.clamp_value = multiplier;
+  for (const field of scene.aura_fields.filter(
+    /** @param {Record<string, any>} row */
+    (row) => row.aura_id === modifier.aura_id,
+  )) {
+    field.clamp_value = multiplier;
+  }
+}
 
 test.beforeAll(async () => {
-  const [started, fixture, povFixture, grammarFixture] = await Promise.all([
-    startDebugger(),
-    loadRendererFixture("crowded_teamfight"),
-    loadRendererFixture("pov_redaction"),
-    loadRendererFixture("canonical_event_vocabulary"),
-  ]);
+  const [started, fixture, povFixture, grammarFixture, catalogFixture] =
+    await Promise.all([
+      startDebugger(),
+      loadRendererFixture("crowded_teamfight"),
+      loadRendererFixture("pov_redaction"),
+      loadRendererFixture("canonical_event_vocabulary"),
+      loadCatalogPropagationFixture(),
+    ]);
   serverProcess = started.process;
   debuggerUrl = started.url;
   syntheticFrame = syntheticDebuggerPresentationFrame(fixture);
@@ -40,6 +139,7 @@ test.beforeAll(async () => {
   syntheticPovWireFrame = syntheticDebuggerWireFrame(povFixture);
   canonicalGrammarFrame = syntheticDebuggerPresentationFrame(grammarFixture);
   canonicalGrammarWireFrame = syntheticDebuggerWireFrame(grammarFixture);
+  catalogPropagationFixture = catalogFixture;
   expect(syntheticFrame).toMatchObject({
     schema_version: 2,
     frame_kind: "researcher_live_debugger",
@@ -64,18 +164,18 @@ test("test-only fixture interception installs an explicitly synthetic scene", as
 }) => {
   const layoutStressFrame = structuredClone(syntheticWireFrame);
   const layoutStressScene = layoutStressFrame.projection.scene;
-  layoutStressScene.agents[4].aura_modifiers[0].multiplier = 123456.789;
-  layoutStressScene.agents[0].statuses[0].remaining_duration = 123456789;
+  authorizeSyntheticAuraModifier(layoutStressScene, 4, 0, 123456.789);
+  authorizeSyntheticStatusDuration(layoutStressScene, 0, 0, 123456789);
   layoutStressScene.agents[7].statuses.slice(0, 5).forEach(
     /**
-     * @param {Record<string, any>} status
+     * @param {Record<string, any>} _status
      * @param {number} index
      */
-    (status, index) => {
-      status.remaining_duration = index + 1;
+    (_status, index) => {
+      authorizeSyntheticStatusDuration(layoutStressScene, 7, index, index + 1);
     },
   );
-  layoutStressScene.agents[2].ultimate_cooldown_remaining = 30;
+  authorizeSyntheticCooldown(layoutStressScene, 2, 30);
   let commandRequests = 0;
   await page.route("**/api/frame", async (route) => {
     await route.fulfill({
@@ -154,7 +254,7 @@ test("test-only fixture interception installs an explicitly synthetic scene", as
   await expect(cooldown).toHaveAttribute("data-numeric-layout", "compartments");
   await expect(cooldown).toHaveAttribute(
     "aria-label",
-    /Hunter Trap.*cooldown, 30 ticks remaining, id_2/i,
+    /Accepted Hunter Trap activation cooldown.*30 ticks remaining.*Agent ID 2/i,
   );
   await expect(cooldown.locator(".cooldown-cell__value")).toHaveText("30");
   await expect(cooldown.locator(".cooldown-cell__icon:not([hidden])")).toHaveCount(1);
@@ -309,12 +409,6 @@ test("test-only fixture interception installs an explicitly synthetic scene", as
       kind: dock.getAttribute("class"),
       slot: dock.getAttribute("data-slot"),
     }));
-    const identities = [...battlefield.querySelectorAll(".agent-id-tag")]
-      .filter((tag) => Number.parseFloat(getComputedStyle(tag).opacity) > 0.5)
-      .map((tag) => ({
-        bounds: tag.getBoundingClientRect(),
-        slot: tag.parentElement?.getAttribute("data-slot"),
-      }));
     const violations = [];
     for (const dock of docks) {
       if (dock.collisionFree !== "true") {
@@ -333,13 +427,6 @@ test("test-only fixture interception installs an explicitly synthetic scene", as
           violations.push(`${dock.kind} id_${dock.slot} overlaps body id_${body.slot}`);
         }
       }
-      for (const identity of identities) {
-        if (intersects(dock.bounds, identity.bounds)) {
-          violations.push(
-            `${dock.kind} id_${dock.slot} overlaps identity id_${identity.slot}`,
-          );
-        }
-      }
     }
     for (let index = 0; index < docks.length; index += 1) {
       for (let other = index + 1; other < docks.length; other += 1) {
@@ -355,7 +442,7 @@ test("test-only fixture interception installs an explicitly synthetic scene", as
   expect(geometryViolations).toEqual([]);
   await expect(page.locator('#battlefield .agent[data-slot="0"]')).toHaveAttribute(
     "aria-label",
-    /id_0, Mage, Team A, health 82 of 100, alive, controlled actor/,
+    /Agent ID 0, Mage, Team A, health 82 of 100, alive, controlled actor/,
   );
   await expect(page.locator('#battlefield .agent[data-slot="7"]')).toHaveAttribute(
     "aria-label",
@@ -604,14 +691,7 @@ test("test-only fixture interception installs an explicitly synthetic scene", as
   expect(await stressedStatus.evaluate((cell) => getComputedStyle(cell).color)).toBe(
     "rgb(154, 167, 184)",
   );
-  const visibleIdentityTags = await page
-    .locator("#battlefield .agent-id-tag")
-    .evaluateAll(
-      (tags) =>
-        tags.filter((tag) => Number.parseFloat(getComputedStyle(tag).opacity) > 0.5)
-          .length,
-    );
-  expect(visibleIdentityTags).toBeLessThanOrEqual(1);
+  await expect(page.locator("#battlefield .agent-id-tag")).toHaveCount(0);
   expect(
     await page.evaluate(() => document.fonts.check('16px "Atkinson Hyperlegible"')),
   ).toBe(true);
@@ -622,6 +702,185 @@ test("test-only fixture interception installs an explicitly synthetic scene", as
     { animations: "disabled" },
   );
   expect(commandRequests).toBe(0);
+});
+
+test("serialized mechanics tuning flows through the full semantic inspector", async ({
+  page,
+}) => {
+  const catalogMutationFrame = catalogPropagationFixture.live_frame;
+  const expected = catalogPropagationFixture.expected;
+  const mechanics = catalogMutationFrame.projection.scene.class_mechanics.find(
+    /** @param {Record<string, any>} row */ (row) => row.class_id === 1,
+  );
+  if (!mechanics) {
+    throw new Error("The Python catalog mutation has no Mage mechanics row.");
+  }
+  const burst = mechanics.status_mechanics.find(
+    /** @param {Record<string, any>} row */ (row) =>
+      row.status_id === "mage_burst_damage_amplification",
+  );
+  const mageAura = mechanics.aura_mechanics.find(
+    /** @param {Record<string, any>} row */ (row) =>
+      row.aura_id === "mage_damage_amplification",
+  );
+  if (!burst || !mageAura) {
+    throw new Error(
+      "The Python catalog mutation has no Mage authored status/aura mechanics.",
+    );
+  }
+  expect(mechanics.basic_raw_damage).toBe(expected.basic_raw_damage);
+  expect(burst.duration_steps).toBe(expected.burst_duration_steps);
+  expect(burst.magnitude).toBe(expected.burst_multiplier);
+  expect(mageAura.radius).toBe(expected.aura_radius);
+  expect(mageAura.per_emitter_multiplier).toBe(expected.aura_multiplier);
+
+  await page.route("**/api/frame", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      json: catalogMutationFrame,
+      status: 200,
+    });
+  });
+  await page.route("**/api/command", async (route) => {
+    await route.abort("blockedbyclient");
+  });
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+
+  const mageComparison = page.locator(
+    '.comparison-agent[data-role="controlled"][data-slot="0"]',
+  );
+  await expect(mageComparison).toBeVisible();
+  await mageComparison.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#semantic-inspector")).toBeVisible();
+  const mechanicsSection = page
+    .locator("#semantic-inspector .semantic-explanation__section")
+    .filter({ hasText: "Exact Class Mechanics" });
+  const damageTerm = mechanicsSection.locator("dt", {
+    hasText: "Basic Raw Damage",
+  });
+  await expect(damageTerm).toHaveCount(1);
+  await expect(damageTerm.locator("xpath=following-sibling::dd[1]")).toHaveText(
+    String(expected.basic_raw_damage),
+  );
+  const statusSection = page
+    .locator("#semantic-inspector .semantic-explanation__section")
+    .filter({ hasText: "Authored Status Mechanics" });
+  await expect(statusSection).toContainText(
+    "Mage (Ultimate: Burst) Damage Amplification",
+  );
+  await expect(statusSection).toContainText(`${expected.burst_duration_steps} Ticks`);
+  await expect(statusSection).toContainText(
+    `${Math.round((expected.burst_multiplier - 1) * 100)}% more damage dealt`,
+  );
+  const passiveSection = page
+    .locator("#semantic-inspector .semantic-explanation__section")
+    .filter({ hasText: "Authored Passive Mechanics" });
+  await expect(passiveSection).toContainText("Sorcerer's Aura Field");
+  await expect(passiveSection).toContainText(`Radius ${expected.aura_radius}`);
+  await expect(passiveSection).toContainText(
+    `${Math.round((expected.aura_multiplier - 1) * 100)}% more damage dealt`,
+  );
+
+  const semanticInspector = await page
+    .locator("#semantic-inspector")
+    .evaluate((node) => ({
+      rows: [...node.querySelectorAll("dt")].map((term) => ({
+        label: term.textContent?.trim(),
+        value: term.nextElementSibling?.textContent?.trim(),
+      })),
+      sections: [...node.querySelectorAll("h3")].map((heading) =>
+        heading.textContent?.trim(),
+      ),
+    }));
+  expect(semanticInspector.sections).toContain("Exact Class Mechanics");
+  expect(semanticInspector.rows).toContainEqual({
+    label: "Basic Raw Damage",
+    value: String(expected.basic_raw_damage),
+  });
+  const snapshotLabels = [
+    "Basic Raw Damage",
+    "Mage (Ultimate: Burst) Damage Amplification",
+    "Sorcerer's Aura Field (Mage Damage Amplification Aura)",
+  ];
+  const semanticSnapshot = {
+    sections: semanticInspector.sections.filter((section) =>
+      [
+        "Exact Class Mechanics",
+        "Authored Status Mechanics",
+        "Authored Passive Mechanics",
+      ].includes(section ?? ""),
+    ),
+    rows: semanticInspector.rows.filter((row) =>
+      snapshotLabels.includes(row.label ?? ""),
+    ),
+  };
+  expect(semanticSnapshot.sections).toHaveLength(3);
+  expect(semanticSnapshot.rows).toHaveLength(3);
+  const burstPercent = formatDisplayNumber(
+    Math.abs(expected.burst_multiplier - 1) * 100,
+  );
+  const auraPercent = formatDisplayNumber(Math.abs(expected.aura_multiplier - 1) * 100);
+  const tuningIndependentSnapshot = {
+    sections: semanticSnapshot.sections,
+    rows: semanticSnapshot.rows.map((row) => {
+      if (row.label === "Basic Raw Damage") {
+        return {
+          label: row.label,
+          value: replaceCatalogFragmentOnce(
+            row.value,
+            formatDisplayNumber(expected.basic_raw_damage),
+            "<catalog-number>",
+            row.label,
+          ),
+        };
+      }
+      if (row.label === "Mage (Ultimate: Burst) Damage Amplification") {
+        let value = replaceCatalogFragmentOnce(
+          row.value,
+          `${formatDisplayNumber(expected.burst_duration_steps)} Ticks`,
+          "<catalog-duration> Ticks",
+          row.label,
+        );
+        value = replaceCatalogFragmentOnce(
+          value,
+          `${burstPercent}% more damage dealt`,
+          "<catalog-percent>% more damage dealt",
+          row.label,
+        );
+        value = replaceCatalogFragmentOnce(
+          value,
+          `×${formatDisplayNumber(expected.burst_multiplier)}`,
+          "×<catalog-multiplier>",
+          row.label,
+        );
+        return { label: row.label, value };
+      }
+      let value = replaceCatalogFragmentOnce(
+        row.value,
+        `Radius ${formatDisplayNumber(expected.aura_radius)}`,
+        "Radius <catalog-radius>",
+        row.label ?? "Authored aura mechanics",
+      );
+      value = replaceCatalogFragmentOnce(
+        value,
+        `${auraPercent}% more damage dealt per recorded emitter`,
+        "<catalog-percent>% more damage dealt per recorded emitter",
+        row.label ?? "Authored aura mechanics",
+      );
+      value = replaceCatalogFragmentOnce(
+        value,
+        `×${formatDisplayNumber(mageAura.clamp_value)}`,
+        "×<catalog-clamp>",
+        row.label ?? "Authored aura mechanics",
+      );
+      return { label: row.label, value };
+    }),
+  };
+  expect(`${JSON.stringify(tuningIndependentSnapshot, null, 2)}\n`).toMatchSnapshot(
+    "catalog-mechanics-semantic-snapshot.json",
+  );
 });
 
 test("compact active combat yields analysis decoration and restores it after Skip", async ({
@@ -733,7 +992,7 @@ test("compact active combat yields analysis decoration and restores it after Ski
   ).toBe(true);
   await expect(
     page.locator('#battlefield .status-dock[data-slot="0"] .status-overflow'),
-  ).toHaveAttribute("aria-label", /hidden status cues for id_0/i);
+  ).toHaveAttribute("aria-label", /hidden status cues for Agent ID 0/i);
   await expect(page.locator("#battlefield .range-ring")).toHaveCount(3);
   expect(commandRequests).toBe(0);
 });
@@ -742,7 +1001,7 @@ test("extreme dock values use a readable visual abbreviation without losing trut
   page,
 }) => {
   const extremeFrame = structuredClone(syntheticWireFrame);
-  extremeFrame.projection.scene.agents[0].statuses[0].remaining_duration = 123456789;
+  authorizeSyntheticStatusDuration(extremeFrame.projection.scene, 0, 0, 123456789);
   await page.route("**/api/frame", async (route) => {
     await route.fulfill({
       contentType: "application/json",
@@ -792,11 +1051,9 @@ test("extreme dock values use a readable visual abbreviation without losing trut
 test("required fallback tooltip avoids the inspected agent and its local docks", async ({
   page,
 }) => {
-  const denseRequiredFrame = structuredClone(syntheticWireFrame);
-  for (const agent of denseRequiredFrame.projection.scene.agents) {
-    agent.position = [8, 6];
-    agent.ultimate_cooldown_remaining = 30;
-  }
+  const denseRequiredFrame = structuredClone(
+    syntheticDebuggerWireFrame(await loadRendererFixture("required_dock_fallback")),
+  );
   await page.route("**/api/frame", async (route) => {
     await route.fulfill({
       contentType: "application/json",
@@ -857,25 +1114,9 @@ test("required fallback tooltip avoids the inspected agent and its local docks",
 test("near-dense required truth keeps every compact fallback individually associated", async ({
   page,
 }) => {
-  const denseRequiredFrame = structuredClone(syntheticWireFrame);
-  const nearDensePositions = [
-    [5.8, 6.65],
-    [6.9, 6.65],
-    [8.0, 6.65],
-    [9.1, 6.65],
-    [10.2, 6.65],
-    [5.8, 5.35],
-    [6.9, 5.35],
-    [10.2, 5.35],
-    [8.0, 5.35],
-    [9.1, 5.35],
-  ];
-  denseRequiredFrame.scenario.description =
-    "SYNTHETIC: near-dense agents demonstrate individually owned compact cooldown fallbacks.";
-  for (const [index, agent] of denseRequiredFrame.projection.scene.agents.entries()) {
-    agent.position = nearDensePositions[index];
-    agent.ultimate_cooldown_remaining = 30;
-  }
+  const denseRequiredFrame = structuredClone(
+    syntheticDebuggerWireFrame(await loadRendererFixture("required_dock_fallback")),
+  );
   await page.route("**/api/frame", async (route) => {
     await route.fulfill({
       contentType: "application/json",
@@ -937,11 +1178,14 @@ test("near-dense required truth keeps every compact fallback individually associ
   for (let index = 0; index < (await cooldownFallbacks.count()); index += 1) {
     const fallback = cooldownFallbacks.nth(index);
     await expect(fallback).toHaveAttribute("data-ticks", "30");
-    await expect(fallback).toHaveAttribute("aria-label", /30 ticks remaining/i);
+    await expect(fallback).toHaveAttribute(
+      "aria-label",
+      /Cooldown Remaining: 30 Ticks/i,
+    );
     const slot = await fallback.getAttribute("data-slot");
-    await expect(fallback).toHaveAttribute("data-owner-label", `id_${slot}`);
+    await expect(fallback).toHaveAttribute("data-owner-label", `Agent ID ${slot}`);
     await expect(fallback.locator(".required-dock-fallback__owner")).toHaveText(
-      `id_${slot}`,
+      `Agent ID ${slot}`,
     );
     await expect(fallback.locator(".required-dock-fallback__value")).toHaveText("U30");
   }
@@ -1085,7 +1329,7 @@ test("near-dense required truth keeps every compact fallback individually associ
       ({ endTouchesMarker, nearestStartIsOwner, ownerLabel, slot, startsAtOwner }) =>
         !endTouchesMarker ||
         !nearestStartIsOwner ||
-        ownerLabel !== `id_${slot}` ||
+        ownerLabel !== `Agent ID ${slot}` ||
         !startsAtOwner,
     ),
   ).toEqual([]);
@@ -1094,7 +1338,7 @@ test("near-dense required truth keeps every compact fallback individually associ
   await firstFallback.hover();
   const tooltip = page.locator("#visual-tooltip");
   await expect(tooltip).toBeVisible();
-  await expect(tooltip).toContainText("30 ticks remaining");
+  await expect(tooltip).toContainText(/Cooldown Remaining\s*30 Ticks/);
   await firstFallback.focus();
   expect(
     await firstFallback.evaluate((node) => {
@@ -1127,10 +1371,24 @@ test("live pending routes use authorized researcher and POV public identities", 
   page,
 }) => {
   const researcher = structuredClone(syntheticWireFrame);
-  const researcherTarget = researcher.projection.scene.agents[5];
+  const researcherLegality =
+    researcher.projection.scene.next_decision_selected_legality;
+  const researcherTarget = researcher.projection.scene.agents.find(
+    /** @param {Record<string, any>} agent */
+    (agent) => agent.global_slot === researcherLegality.target_global_slot,
+  );
+  if (
+    !researcherTarget ||
+    researcherLegality.lane_0_available !== true ||
+    researcherLegality.lane_1_available !== false
+  ) {
+    throw new Error(
+      "Synthetic researcher pending-route proof requires its exact selected legality.",
+    );
+  }
   const researcherPending = {
     ...researcher.hud.pending_action,
-    target_action: 1,
+    target_action: researcherLegality.target_action,
     armed_lane: 1,
     arm_origin: "explicit",
     target: {
@@ -1142,6 +1400,15 @@ test("live pending routes use authorized researcher and POV public identities", 
   };
   researcher.hud.pending_action = researcherPending;
   researcher.hud.pending_actions = [researcherPending];
+  const legalResearcher = structuredClone(researcher);
+  const legalResearcherPending = {
+    ...researcherPending,
+    armed_lane: 0,
+    pair_mask_value: true,
+    summary: "STAY + BASIC",
+  };
+  legalResearcher.hud.pending_action = legalResearcherPending;
+  legalResearcher.hud.pending_actions = [legalResearcherPending];
 
   const pov = structuredClone(syntheticPovWireFrame);
   const povTarget = pov.projection.scene.visible_bodies[0];
@@ -1184,21 +1451,26 @@ test("live pending routes use authorized researcher and POV public identities", 
   });
 
   await page.goto(debuggerUrl);
+  await expect(page.locator("#battlefield .pending-route")).toHaveCount(0);
+
+  servedFrame = legalResearcher;
+  await page.reload();
   const researcherRoute = page.locator("#battlefield .pending-route");
   await expect(researcherRoute).toHaveCount(1);
   await expect(researcherRoute).toHaveAttribute(
     "data-source-agent-id",
-    researcher.projection.scene.agents.find(
+    legalResearcher.projection.scene.agents.find(
       /** @param {Record<string, any>} agent */
-      (agent) => agent.global_slot === researcher.hud.pending_action.actor_global_slot,
+      (agent) =>
+        agent.global_slot === legalResearcher.hud.pending_action.actor_global_slot,
     ).public_agent_id,
   );
   await expect(researcherRoute).toHaveAttribute(
     "data-target-agent-id",
     researcherTarget.public_agent_id,
   );
-  await expect(researcherRoute).toHaveAttribute("data-lane", "1");
-  await expect(researcherRoute).toHaveAttribute("data-legal", "false");
+  await expect(researcherRoute).toHaveAttribute("data-lane", "0");
+  await expect(researcherRoute).toHaveAttribute("data-legal", "true");
 
   servedFrame = pov;
   await page.reload();
@@ -1233,7 +1505,10 @@ test("live pending routes use authorized researcher and POV public identities", 
   await page.mouse.move(routePointer.x, routePointer.y);
   await expect(page.locator("#visual-tooltip-title")).toHaveText("Basic Action Route");
   await expect(page.locator("#visual-tooltip-details")).toContainText(
-    `Target Agent ID ${povTarget.public_agent_id}`,
+    "Selected Target",
+  );
+  await expect(page.locator("#visual-tooltip-details")).toContainText(
+    `Agent ID ${povTarget.public_agent_id}`,
   );
   await expect(page.locator("#visual-tooltip-details")).not.toContainText("id_");
 });
@@ -1289,7 +1564,7 @@ test("canonical V2 death clear is distinct in cue, feed, and accessible copy", a
   );
   await expect(rejection).toHaveCSS("color", "rgb(251, 113, 133)");
   await expect(charge).toHaveCSS("color", "rgb(209, 139, 71)");
-  expect(canonicalGrammarFrame.event_batch.events).toHaveLength(21);
+  expect(canonicalGrammarFrame.event_batch.events).toHaveLength(23);
 });
 
 test("structured HUD keeps exact roster, intent, and accepted-result facts distinct", async ({
@@ -1297,12 +1572,18 @@ test("structured HUD keeps exact roster, intent, and accepted-result facts disti
 }) => {
   const transitionId = String(syntheticFrame.transition_id);
   const sourceEvents = syntheticWireFrame.projection.incoming_events.events;
-  const ordinal = sourceEvents.length;
+  const firstSourceEvent = sourceEvents[0];
+  if (!firstSourceEvent) {
+    throw new Error(
+      "Synthetic crowded fixture requires at least one transition event.",
+    );
+  }
   const rejectedEvent = {
     event_type: "action_rejected",
-    event_id: `${transitionId}:event:${String(ordinal).padStart(4, "0")}`,
+    event_id: firstSourceEvent.event_id,
     transition_id: transitionId,
-    ordinal,
+    ordinal: firstSourceEvent.ordinal,
+    phase_rank: 10,
     actor_global_slot: 0,
     actor_public_agent_id: "0",
     actor_configured_active: true,
@@ -1314,14 +1595,18 @@ test("structured HUD keeps exact roster, intent, and accepted-result facts disti
       phase: "transition_start",
       global_slot: 0,
       public_agent_id: "0",
-      position: syntheticWireFrame.projection.scene.agents[0].position,
+      position:
+        syntheticWireFrame.projection.incoming_events.agent_phase_trajectories.find(
+          /** @param {Record<string, any>} trajectory */
+          (trajectory) => trajectory.global_slot === 0,
+        ).transition_start.position,
     },
   };
   /** @type {Record<string, any>} */
   let structuredFrame = structuredClone(syntheticWireFrame);
   structuredFrame.projection.incoming_events.events = [
-    ...structuredFrame.projection.incoming_events.events,
     rejectedEvent,
+    ...structuredFrame.projection.incoming_events.events.slice(1),
   ];
   structuredFrame.projection.scene.incoming_event_ids =
     structuredFrame.projection.incoming_events.events.map(
@@ -1337,7 +1622,7 @@ test("structured HUD keeps exact roster, intent, and accepted-result facts disti
     target: { disclosure: "public", global_slot: 7 },
     movement_mask_value: true,
     pair_mask_value: false,
-    summary: "Stay + Burst → id_7",
+    summary: "Stay + Burst → Agent ID 7",
   };
   structuredFrame.hud = {
     ...structuredFrame.hud,
@@ -1362,7 +1647,7 @@ test("structured HUD keeps exact roster, intent, and accepted-result facts disti
             target_action: 8,
             use_ultimate_action: 1,
             target: { disclosure: "public", global_slot: 7 },
-            summary: "Stay + Burst → id_7",
+            summary: "Stay + Burst → Agent ID 7",
           },
           accepted: {
             move_action: 0,
@@ -1425,7 +1710,7 @@ test("structured HUD keeps exact roster, intent, and accepted-result facts disti
     /** @param {{global_slot: number}} agent */ (agent) => agent.global_slot === 0,
   );
   if (!agentZero) {
-    throw new Error("Synthetic crowded fixture is missing id_0.");
+    throw new Error("Synthetic crowded fixture is missing global slot 0.");
   }
   await expect(
     page.locator('#roster .roster-row[data-slot="0"] .roster-fact-token--status'),
@@ -1533,18 +1818,30 @@ test("structured HUD keeps exact roster, intent, and accepted-result facts disti
     "data-slot",
     "7",
   );
-  await expect(page.locator(".selected-legality")).toContainText("Basic lane");
-  await expect(page.locator(".selected-legality")).toContainText("Ultimate lane");
+  await expect(
+    page
+      .locator(".selected-legality__lane")
+      .filter({ has: page.getByRole("heading", { name: "Basic Legality" }) })
+      .locator(".semantic-explanation__value"),
+  ).toHaveText("True");
+  await expect(
+    page
+      .locator(".selected-legality__lane")
+      .filter({ has: page.getByRole("heading", { name: "Ultimate Legality" }) })
+      .locator(".semantic-explanation__value"),
+  ).toHaveText("False");
   await expect(page.locator("#pending-card .action-card__label")).toHaveText(
     "PENDING / WILL SUBMIT",
   );
-  await expect(page.locator("#pending-card")).toContainText("Stay + Burst → id_7");
+  await expect(page.locator("#pending-card")).toContainText(
+    "Stay + Burst → Agent ID 7",
+  );
   await expect(page.locator("#accepted-card .action-card__label")).toHaveText(
     "LATEST ACCEPTED RESULT",
   );
   await expect(
     page.locator('#accepted-card .action-tuple[data-kind="submitted"]'),
-  ).toContainText("Stay + Burst → id_7");
+  ).toContainText("Stay + Burst → Agent ID 7");
   await expect(
     page.locator('#accepted-card .action-tuple[data-kind="accepted"]'),
   ).toContainText("Stay + NO COMBAT");
@@ -1625,16 +1922,12 @@ test("presets omit irrelevant DOM while retaining canonical facts and audience",
   /** @type {Record<string, any>} */
   let servedFrame = structuredClone(syntheticWireFrame);
   servedFrame.preset = "analysis";
-  servedFrame.projection.scene.agents = servedFrame.projection.scene.agents.map(
-    /**
-     * @param {Record<string, any>} agent
-     * @param {number} index
-     */
-    (agent, index) => ({
-      ...agent,
-      ultimate_cooldown_remaining: index === 2 ? 30 : 0,
-    }),
+  servedFrame.projection.scene.agents.forEach(
+    /** @param {Record<string, any>} agent */ (agent) => {
+      agent.ultimate_cooldown_remaining = 0;
+    },
   );
+  authorizeSyntheticCooldown(servedFrame.projection.scene, 2, 30);
   servedFrame.projection.scene.next_decision_selected_legality = {
     ...servedFrame.projection.scene.next_decision_selected_legality,
     armed_lane: null,
@@ -1679,16 +1972,27 @@ test("presets omit irrelevant DOM while retaining canonical facts and audience",
   await expect(page.locator("#battlefield .agent")).toHaveCount(10);
   expect(await page.locator("#battlefield .status-cell").count()).toBeGreaterThan(0);
   await expect(page.locator("#battlefield .cooldown-cell")).toHaveCount(1);
-  expect(await page.locator("#battlefield .aura-field").count()).toBeGreaterThan(0);
-  expect(await page.locator("#battlefield .range-ring").count()).toBeGreaterThan(0);
-  expect(await page.locator("#battlefield .modifier-cell").count()).toBeGreaterThan(0);
+  const authorizedAuraCount = await page.locator("#battlefield .aura-field").count();
+  const authorizedRangeCount = await page.locator("#battlefield .range-ring").count();
+  const authorizedModifierCount = await page
+    .locator("#battlefield .modifier-cell")
+    .count();
+  expect(authorizedAuraCount).toBeGreaterThan(0);
+  expect(authorizedRangeCount).toBeGreaterThan(0);
+  expect(authorizedModifierCount).toBeGreaterThan(0);
   await expect(page.locator(".selected-legality")).toHaveCount(1);
   await expect(
     page
-      .locator(".selected-legality .fact")
-      .filter({ hasText: "Armed pair" })
-      .locator("strong"),
-  ).toHaveText("Not applicable");
+      .locator(".selected-legality__lane")
+      .filter({ has: page.getByRole("heading", { name: "Basic Legality" }) })
+      .locator(".semantic-explanation__value"),
+  ).toHaveText("True");
+  await expect(
+    page
+      .locator(".selected-legality__lane")
+      .filter({ has: page.getByRole("heading", { name: "Ultimate Legality" }) })
+      .locator(".semantic-explanation__value"),
+  ).toHaveText("False");
   await expect(page.locator("#battlefield .debug-visibility-cue")).toHaveCount(0);
   await expect(page.locator("#battlefield .debug-protected-zone")).toHaveCount(0);
   await expect(page.locator(".candidate-legality-row")).toHaveCount(0);
@@ -1718,9 +2022,15 @@ test("presets omit irrelevant DOM while retaining canonical facts and audience",
   await expect(page.locator("#battlefield .agent")).toHaveCount(10);
   expect(await page.locator("#battlefield .status-cell").count()).toBeGreaterThan(0);
   await expect(page.locator("#battlefield .cooldown-cell")).toHaveCount(1);
-  await expect(page.locator("#battlefield .aura-field")).toHaveCount(0);
-  await expect(page.locator("#battlefield .range-ring")).toHaveCount(0);
-  await expect(page.locator("#battlefield .modifier-cell")).toHaveCount(0);
+  await expect(page.locator("#battlefield .aura-field")).toHaveCount(
+    authorizedAuraCount,
+  );
+  await expect(page.locator("#battlefield .range-ring")).toHaveCount(
+    authorizedRangeCount,
+  );
+  await expect(page.locator("#battlefield .modifier-cell")).toHaveCount(
+    authorizedModifierCount,
+  );
   await expect(page.locator("#battlefield .legality-pill")).toHaveCount(0);
   await expect(page.locator(".selected-legality")).toHaveCount(0);
   await expect(page.locator("#battlefield .debug-visibility-cue")).toHaveCount(0);
@@ -1734,6 +2044,19 @@ test("presets omit irrelevant DOM while retaining canonical facts and audience",
   await expect(page.locator("#pending-card")).toBeVisible();
   await expect(page.locator("#accepted-card")).toBeVisible();
   await expect(page.locator("#event-feed")).toBeVisible();
+
+  await page.locator("#battlefield .aura-field").first().focus();
+  await expect(page.locator("#visual-tooltip")).toHaveAttribute(
+    "data-tooltip-kind",
+    "aura",
+  );
+  await expect(page.locator("#visual-tooltip-title")).toContainText("Aura Field");
+  await page.locator("#battlefield .modifier-cell").first().hover();
+  await expect(page.locator("#visual-tooltip")).toHaveAttribute(
+    "data-tooltip-kind",
+    "modifier",
+  );
+  await expect(page.locator("#visual-tooltip-title")).toContainText("Aura");
 });
 
 test("debug POV omits hidden agents and researcher-only visibility DOM", async ({
@@ -1766,11 +2089,24 @@ test("debug POV omits hidden agents and researcher-only visibility DOM", async (
   await expect(page.locator("#battlefield .debug-protected-zone")).toHaveCount(2);
   await expect(page.locator("#scenario-control")).toBeHidden();
   await expect(page.locator("#scenario-select")).toBeDisabled();
+  await expect(page.locator("#scenario-select")).not.toHaveAttribute("title", /.+/u);
   await expect(page.locator("#scenario-select")).toHaveAttribute(
-    "title",
-    "Scenario controls are unavailable in recipient POV.",
+    "data-tooltip-owner",
+    "",
   );
-  await expect(page.locator("body")).not.toContainText("id_5");
+  await expect(page.locator("#scenario-select")).toHaveAttribute(
+    "aria-description",
+    "Choose a registered live episode setup.",
+  );
+  await expect(
+    page.locator('#battlefield .agent[data-public-agent-id="5"]'),
+  ).toHaveCount(0);
+  await expect(
+    page.locator('#roster .roster-row[data-public-agent-id="5"]'),
+  ).toHaveCount(0);
+  await expect(
+    page.locator('[data-source-slot="5"], [data-target-slot="5"]'),
+  ).toHaveCount(0);
   expect(
     await page.evaluate(() => {
       const authorized = new Set(

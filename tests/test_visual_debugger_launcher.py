@@ -661,14 +661,13 @@ def test_help_contains_every_option_control_inspector_and_scenario() -> None:
         "left click",
         "Shift+left click",
         "right click / Escape",
-        "Shift+R",
         "arrow keys",
         "X",
         "Space / Enter",
         "P",
         "[ / ]",
         "Scenario/View/Preset",
-        "0.5x / 1x / 2x / Off",
+        "Graphics speed",
         "Reconnect",
     ):
         assert control in result.stdout

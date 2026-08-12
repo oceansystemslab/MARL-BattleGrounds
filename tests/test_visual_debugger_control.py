@@ -753,7 +753,10 @@ def test_mage_burst_can_be_explicitly_rearmed_on_cooldown_for_rejection() -> Non
     session = _session("ultimate_showcase", controlled_slot=0)
     session = submit_next_script_frame(session)
     session = submit_next_script_frame(session)
-    assert int(session.state.ultimate_cooldowns[0]) == 30
+    mage_cooldown = session.evaluation_context.static_mechanics_catalog.class_mechanics[
+        MAGE_CLASS_ID
+    ].ultimate_cooldown_steps
+    assert int(session.state.ultimate_cooldowns[0]) == mage_cooldown
 
     armed = arm_ultimate(session)
     assert armed.pending_action.selected_global_target_slot is None

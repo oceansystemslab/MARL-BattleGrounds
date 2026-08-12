@@ -363,6 +363,82 @@ def test_ui_edit_advances_only_frame_revision() -> None:
     assert bool(jnp.array_equal(service.session.key, initial.key))
 
 
+def test_live_presentation_commands_publish_authoritative_audience_fields() -> None:
+    service = _service()
+
+    ranges = service.apply_command(
+        _request(
+            "toggle-ranges",
+            base_revision=0,
+            command=KeyboardCommandV1(key="g"),
+        )
+    )
+    verbose = service.apply_command(
+        _request(
+            "toggle-verbose",
+            base_revision=1,
+            command=KeyboardCommandV1(key="v"),
+        )
+    )
+    pov = service.apply_command(
+        _request(
+            "switch-pov",
+            base_revision=2,
+            command=SetViewCommandV1(view_mode="pov"),
+        )
+    )
+
+    assert isinstance(ranges.payload, CommandResponseV2)
+    assert isinstance(ranges.payload.frame, ResearcherLiveDebuggerFrameV2)
+    assert ranges.payload.frame.show_ranges is False
+    assert ranges.payload.frame.verbose is False
+    assert isinstance(verbose.payload, CommandResponseV2)
+    assert isinstance(verbose.payload.frame, ResearcherLiveDebuggerFrameV2)
+    assert verbose.payload.frame.show_ranges is False
+    assert verbose.payload.frame.verbose is True
+    assert isinstance(pov.payload, CommandResponseV2)
+    assert isinstance(pov.payload.frame, ActorPovLiveDebuggerFrameV2)
+    assert pov.payload.frame.verbose is True
+    assert "show_ranges" not in pov.payload.frame.model_dump(mode="json")
+
+
+def test_shift_r_is_a_host_no_op_and_ordinary_r_remains_a_restart() -> None:
+    service = _service()
+    initial_session = service.session
+    initial_frame = service.current_frame()
+    initial_count = service.evaluation_validated_transition_count
+    shifted_request = _request(
+        "removed-shift-r",
+        base_revision=0,
+        command=KeyboardCommandV1(key="R", shift_key=True),
+    )
+
+    shifted = service.apply_command(shifted_request)
+    duplicate = service.apply_command(shifted_request)
+
+    assert isinstance(shifted.payload, CommandResponseV2)
+    assert shifted.payload.result == "no_op"
+    assert shifted.payload.frame is initial_frame
+    assert service.session is initial_session
+    assert service.revision == 0
+    assert service.evaluation_validated_transition_count == initial_count
+    assert isinstance(duplicate.payload, CommandResponseV2)
+    assert duplicate.payload.result == "duplicate"
+    assert duplicate.payload.frame is initial_frame
+
+    ordinary = service.apply_command(
+        _request(
+            "ordinary-r",
+            base_revision=0,
+            command=KeyboardCommandV1(key="r"),
+        )
+    )
+    assert isinstance(ordinary.payload, CommandResponseV2)
+    assert ordinary.payload.result == "applied"
+    assert ordinary.payload.frame.run_generation == initial_frame.run_generation + 1
+    assert service.revision == 1
+
+
 def test_submit_duplicate_conflict_and_stale_requests_cannot_restep() -> None:
     service = _service()
     submit = _request(

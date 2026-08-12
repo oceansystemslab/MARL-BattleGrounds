@@ -70,6 +70,8 @@ function withoutTransition(frame) {
     initial.projection.scene.incoming_transition_id = null;
     initial.projection.scene.incoming_event_ids = [];
     initial.projection.incoming_events = null;
+    initial.projection.status_source_evidence.frame_index = 0;
+    initial.projection.status_source_evidence.frame_id = initial.frame_id;
   } else {
     const publicAgentId = initial.projection.scene.self_actor.public_agent_id;
     initial.incoming_pov_transition_id = null;
@@ -104,6 +106,45 @@ function withResearcherEvents(frame, payloads) {
   }));
   next.projection.incoming_events.events = events;
   next.projection.scene.incoming_event_ids = events.map((event) => event.event_id);
+  return next;
+}
+
+/**
+ * Replace fixture-owned numeric public IDs at every explicit public-ID field.
+ * Global slots and all simulator facts stay untouched. This deliberately
+ * exercises identity as an opaque external string instead of a slot alias.
+ *
+ * @param {Record<string, any>} frame
+ * @param {readonly string[]} publicIds
+ */
+function withOpaquePublicAgentIds(frame, publicIds) {
+  const next = structuredClone(frame);
+  /** @param {unknown} value */
+  const visit = (value) => {
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (!value || typeof value !== "object") {
+      return;
+    }
+    const candidate = /** @type {Record<string, any>} */ (value);
+    for (const [key, child] of Object.entries(candidate)) {
+      if (
+        key.includes("public_agent_id") &&
+        typeof child === "string" &&
+        Number.isInteger(Number(child)) &&
+        publicIds[Number(child)] !== undefined
+      ) {
+        candidate[key] = publicIds[Number(child)];
+      } else if (key === "public_agent_id_by_global_slot" && Array.isArray(child)) {
+        candidate[key] = [...publicIds];
+      } else {
+        visit(child);
+      }
+    }
+  };
+  visit(next);
   return next;
 }
 
@@ -161,6 +202,81 @@ async function installSyntheticFlow(page, initial, next) {
   return flow;
 }
 
+/**
+ * Find a real hit-test coordinate owned by a retained choreography route.
+ * Broad aura fields may overlap its SVG bounds, so browser-level hover on the
+ * group center is not a truthful interaction probe.
+ *
+ * @param {import("@playwright/test").Locator} owner
+ */
+async function registeredRoutePoint(owner) {
+  return owner.evaluate((element) => {
+    const route = element.querySelector(".combat-route__hit");
+    if (!(route instanceof SVGGeometryElement)) {
+      return null;
+    }
+    const matrix = route.getScreenCTM();
+    const length = route.getTotalLength();
+    if (!matrix || !Number.isFinite(length) || length <= 0) {
+      return null;
+    }
+    let fieldOverlapPoint = null;
+    for (const ratio of [
+      0.04, 0.08, 0.12, 0.18, 0.24, 0.32, 0.4, 0.5, 0.6, 0.68, 0.76, 0.82, 0.88, 0.92,
+      0.96,
+    ]) {
+      const local = route.getPointAtLength(length * ratio);
+      const screen = new DOMPoint(local.x, local.y).matrixTransform(matrix);
+      const owners = [
+        ...new Set(
+          document
+            .elementsFromPoint(screen.x, screen.y)
+            .map((hit) => hit.closest("[data-tooltip-owner]"))
+            .filter(
+              (candidate) =>
+                candidate instanceof Element &&
+                (candidate === element || !candidate.matches("#battlefield")),
+            ),
+        ),
+      ];
+      if (owners.length === 1 && owners[0] === element) {
+        return { x: screen.x, y: screen.y };
+      }
+      if (
+        owners.includes(element) &&
+        owners.every(
+          (candidate) =>
+            candidate instanceof Element &&
+            (candidate === element ||
+              candidate.matches(".aura-field, .range-ring-hit")),
+        )
+      ) {
+        fieldOverlapPoint ??= { x: screen.x, y: screen.y };
+      }
+    }
+    return fieldOverlapPoint;
+  });
+}
+
+/**
+ * Drive the native range input through the same bubbling input event used by
+ * pointer and keyboard interaction. Playwright's text `fill` is intentionally
+ * unsupported for range controls.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @param {number} rate
+ */
+async function setGraphicsSpeed(page, rate) {
+  await page.locator("#graphics-speed-input").evaluate((input, nextRate) => {
+    if (!(input instanceof HTMLInputElement) || input.type !== "range") {
+      throw new Error("Graphics rendering speed input is unavailable.");
+    }
+    input.value = Number(nextRate).toFixed(2);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }, rate);
+  await expect(page.locator("html")).toHaveAttribute("data-motion-rate", String(rate));
+}
+
 test("directional routes share one clock, gate submissions, reproject, and do not replay", async ({
   page,
 }) => {
@@ -178,7 +294,7 @@ test("directional routes share one clock, gate submissions, reproject, and do no
   );
 
   await page.goto(debuggerUrl);
-  await page.getByRole("button", { name: "0.5×", exact: true }).click();
+  await setGraphicsSpeed(page, 0.5);
   await page.getByRole("button", { name: "Reset" }).click();
 
   await expect(page.locator(CHOREOGRAPHY_ROOT)).toHaveCount(1);
@@ -447,7 +563,7 @@ test("reduced motion preserves damage/heal intent and one recipient NET outcome"
   await page.goto(debuggerUrl);
   await page.getByRole("button", { name: "Reset" }).click();
   await expect(page.locator("html")).toHaveAttribute("data-motion-mode", "reduced");
-  await page.getByRole("button", { name: "2×", exact: true }).click();
+  await setGraphicsSpeed(page, 2);
   await expect(page.locator("html")).toHaveAttribute("data-motion-mode", "reduced");
   await expect(page.locator("html")).toHaveAttribute("data-motion-rate", "2");
   await expect(page.locator("html")).toHaveAttribute(
@@ -530,7 +646,7 @@ test("reduced motion preserves damage/heal intent and one recipient NET outcome"
   await expect(net).toHaveCount(1);
   await expect(net).toHaveAttribute("data-recipient-slot", "5");
   await expect(net).toHaveAttribute("data-net-delta", "0");
-  await expect(net.locator(".combat-net__recipient")).toHaveText("id_5");
+  await expect(net.locator(".combat-net__recipient")).toHaveText("Agent ID 5");
   await expect(net.locator(".combat-net__label")).toHaveText("HP unchanged");
   expect(
     await net.evaluate((node) => Number.parseFloat(getComputedStyle(node).opacity)),
@@ -562,6 +678,12 @@ test("reduced motion preserves damage/heal intent and one recipient NET outcome"
     ),
   ).toBe(false);
   await assertBoundedChoreography(page);
+  await page.locator("#battlefield").focus();
+  await expect(page.locator("#visual-tooltip")).toHaveAttribute(
+    "data-tooltip-kind",
+    "composite",
+  );
+  await page.mouse.move(0, 0);
   await expect(page).toHaveScreenshot(
     "reduced-motion-mixed-net-health-phase-1440x900.png",
     { animations: "allow" },
@@ -575,6 +697,250 @@ test("reduced motion preserves damage/heal intent and one recipient NET outcome"
   await expect(page.locator(`${CHOREOGRAPHY_ROOT} .combat-effect`)).toHaveCount(0);
   expect((await choreographySnapshot(page)).animationIds).toEqual([]);
   expect(flow.commands).toHaveLength(1);
+});
+
+test("opaque public IDs label choreography while Basic transients own no tooltip", async ({
+  page,
+}) => {
+  await installWaapiAutopause(page);
+  const publicIds = Object.freeze([
+    "zulu",
+    "alpha",
+    "kestrel",
+    "bravo",
+    "ember",
+    "quartz",
+    "delta",
+    "sierra",
+    "nova",
+    "cobalt",
+  ]);
+  const opaqueFrame = withOpaquePublicAgentIds(crowdedFrame, publicIds);
+  opaqueFrame.projection.scene.agents = opaqueFrame.projection.scene.agents.map(
+    /** @param {Record<string, any>} agent */ (agent) => ({
+      ...agent,
+      statuses: [],
+    }),
+  );
+  opaqueFrame.projection.status_source_evidence.active_statuses = [];
+  const flow = await installSyntheticFlow(
+    page,
+    { ...opaqueFrame, revision: 1 },
+    (_command, index) => ({ ...opaqueFrame, revision: index }),
+  );
+
+  await page.goto(debuggerUrl);
+  await pauseAtLogicalTime(page, 680);
+
+  const basicGroups = page.locator(
+    `${CHOREOGRAPHY_ROOT} .combat-effect--activation[data-token-id="basic_damage"], ${CHOREOGRAPHY_ROOT} .combat-effect--activation[data-token-id="basic_heal"]`,
+  );
+  const basicRoutes = page.locator(
+    `${CHOREOGRAPHY_ROUTE_ROOT} .combat-route-effect--activation[data-token-id="basic_damage"], ${CHOREOGRAPHY_ROUTE_ROOT} .combat-route-effect--activation[data-token-id="basic_heal"]`,
+  );
+  await expect(basicGroups).toHaveCount(2);
+  await expect(basicRoutes).toHaveCount(2);
+  expect(
+    await basicGroups.evaluateAll((groups) =>
+      groups.every(
+        (group) =>
+          !group.hasAttribute("data-tooltip-owner") &&
+          !group.querySelector(".combat-impact")?.hasAttribute("data-tooltip-owner"),
+      ),
+    ),
+  ).toBe(true);
+  expect(
+    await basicRoutes.evaluateAll((routes) =>
+      routes.every((route) => !route.hasAttribute("data-tooltip-owner")),
+    ),
+  ).toBe(true);
+
+  const ultimateGroups = page.locator(
+    `${CHOREOGRAPHY_ROOT} .combat-effect--activation:not([data-token-id="basic_damage"]):not([data-token-id="basic_heal"])`,
+  );
+  const ultimateRoutes = page.locator(
+    `${CHOREOGRAPHY_ROUTE_ROOT} .combat-route-effect--activation:not([data-token-id="basic_damage"]):not([data-token-id="basic_heal"])`,
+  );
+  await expect(ultimateGroups).toHaveCount(8);
+  await expect(ultimateRoutes).toHaveCount(8);
+  expect(
+    await ultimateGroups.evaluateAll((groups) =>
+      groups.every((group) => group.hasAttribute("data-tooltip-owner")),
+    ),
+  ).toBe(true);
+  expect(
+    await ultimateRoutes.evaluateAll((routes) =>
+      routes.every((route) => route.hasAttribute("data-tooltip-owner")),
+    ),
+  ).toBe(true);
+  expect(
+    await page
+      .locator(`${CHOREOGRAPHY_ROOT} .combat-effect--net-health`)
+      .evaluateAll((events) =>
+        events.every((event) => event.hasAttribute("data-tooltip-owner")),
+      ),
+  ).toBe(true);
+  expect(
+    await page
+      .locator(`${CHOREOGRAPHY_ROOT} .combat-effect--status-lifecycle`)
+      .evaluateAll((events) =>
+        events.every((event) => event.hasAttribute("data-tooltip-owner")),
+      ),
+  ).toBe(true);
+
+  const chargeLabels = await page
+    .locator(
+      `${CHOREOGRAPHY_ROUTE_ROOT} .combat-route-effect--activation[data-token-id="warrior_charge"] .combat-route__ownership-label`,
+    )
+    .allTextContents();
+  expect(chargeLabels).toEqual([
+    `Agent ID ${publicIds[1]} → Agent ID ${publicIds[6]}`,
+    `Agent ID ${publicIds[6]} → Agent ID ${publicIds[1]}`,
+  ]);
+  const netLabels = await page
+    .locator(`${CHOREOGRAPHY_ROOT} .combat-net__recipient`)
+    .evaluateAll((labels) =>
+      labels.map((label) => ({
+        slot: Number(
+          label.closest("[data-recipient-slot]")?.getAttribute("data-recipient-slot"),
+        ),
+        text: label.textContent,
+      })),
+    );
+  expect(netLabels).toEqual(
+    netLabels.map(({ slot }) => ({ slot, text: `Agent ID ${publicIds[slot]}` })),
+  );
+  expect([...chargeLabels, ...netLabels.map(({ text }) => text)].join(" ")).not.toMatch(
+    /\bid_\d+\b/u,
+  );
+
+  const basicActivationEvents = opaqueFrame.projection.incoming_events.events.filter(
+    /** @param {Record<string, any>} event */ (event) =>
+      event.event_type === "ability_activated" && event.ability_component === "basic",
+  );
+  expect(basicActivationEvents).toHaveLength(2);
+  for (const basicEvent of basicActivationEvents) {
+    const basicFeed = page.locator(
+      `#event-feed [data-event-id="${basicEvent.event_id}"]`,
+    );
+    await expect(basicFeed).toHaveCount(1);
+    await expect(basicFeed).toContainText(
+      `Agent ID ${publicIds[basicEvent.source_global_slot]}`,
+    );
+    await expect(basicFeed).toContainText(
+      `Agent ID ${publicIds[basicEvent.recipient_global_slot]}`,
+    );
+  }
+
+  const appliedEvent = opaqueFrame.projection.incoming_events.events.find(
+    /** @param {Record<string, any>} event */ (event) =>
+      event.event_type === "status_applied" &&
+      Number.isInteger(event.source_global_slot) &&
+      Number.isInteger(event.recipient_global_slot),
+  );
+  expect(appliedEvent).toBeTruthy();
+  const appliedFeed = page.locator(
+    `#event-feed [data-event-id="${appliedEvent.event_id}"]`,
+  );
+  await expect(appliedFeed).toContainText(
+    `Agent ID ${publicIds[appliedEvent.source_global_slot]}`,
+  );
+  await expect(appliedFeed).toContainText(
+    `Agent ID ${publicIds[appliedEvent.recipient_global_slot]}`,
+  );
+  expect(await page.locator("#event-feed").innerText()).not.toMatch(/\bid_\d+\b/u);
+
+  const lifecycleOwner = page.locator(
+    `${CHOREOGRAPHY_ROOT} .combat-effect--status-lifecycle[data-event-id="${appliedEvent.event_id}"]`,
+  );
+  await lifecycleOwner.evaluate((owner) => {
+    owner.setAttribute("tabindex", "0");
+    if (owner instanceof SVGElement && typeof owner.focus === "function") {
+      owner.focus();
+    }
+  });
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#semantic-inspector")).toBeVisible();
+  await expect(page.locator("#semantic-inspector")).toContainText(
+    `Agent ID ${publicIds[appliedEvent.source_global_slot]}`,
+  );
+  await expect(page.locator("#semantic-inspector")).toContainText(
+    `Agent ID ${publicIds[appliedEvent.recipient_global_slot]}`,
+  );
+  await expect(page.locator("#semantic-inspector")).not.toContainText(
+    String(appliedEvent.event_id),
+  );
+  await page.locator("#semantic-inspector-close-button").click();
+
+  const chargeRoute = page
+    .locator(
+      `${CHOREOGRAPHY_ROUTE_ROOT} .combat-route-effect--activation[data-token-id="warrior_charge"]`,
+    )
+    .first();
+  const chargeRoutePoint = await registeredRoutePoint(chargeRoute);
+  expect(chargeRoutePoint).not.toBeNull();
+  await page.mouse.move(chargeRoutePoint?.x ?? 0, chargeRoutePoint?.y ?? 0);
+  await expect(page.locator("#visual-tooltip")).toHaveAttribute(
+    "data-tooltip-kind",
+    "accepted-route",
+  );
+  await expect(page.locator("#visual-tooltip-details")).toContainText(
+    `Agent ID ${publicIds[1]}`,
+  );
+  await expect(page.locator("#visual-tooltip-details")).toContainText(
+    `Agent ID ${publicIds[6]}`,
+  );
+  const eventIds = opaqueFrame.projection.incoming_events.events.map(
+    /** @param {Record<string, any>} event */ (event) => String(event.event_id),
+  );
+  const tooltipSemanticText = await page
+    .locator("#visual-tooltip")
+    .evaluate(
+      (tooltip) =>
+        `${tooltip.textContent ?? ""} ${tooltip.getAttribute("aria-label") ?? ""}`,
+    );
+  expect(
+    eventIds.every(
+      /** @param {string} eventId */ (eventId) =>
+        !tooltipSemanticText.includes(eventId),
+    ),
+  ).toBe(true);
+
+  await page.mouse.click(chargeRoutePoint?.x ?? 0, chargeRoutePoint?.y ?? 0);
+  await expect(page.locator("#semantic-inspector")).toBeVisible();
+  const inspectorSemanticText = await page
+    .locator("#semantic-inspector")
+    .evaluate(
+      (inspector) =>
+        `${inspector.textContent ?? ""} ${inspector.getAttribute("aria-label") ?? ""} ${inspector.getAttribute("aria-labelledby") ?? ""}`,
+    );
+  expect(
+    eventIds.every(
+      /** @param {string} eventId */ (eventId) =>
+        !inspectorSemanticText.includes(eventId),
+    ),
+  ).toBe(true);
+  expect(
+    await page
+      .locator("#visual-tooltip, #semantic-inspector")
+      .evaluateAll((roots) =>
+        roots.every((root) =>
+          [...root.querySelectorAll("*")].every((node) =>
+            [...node.attributes].every(
+              (attribute) =>
+                !attribute.name.includes("event-id") &&
+                !attribute.name.includes("cue-id"),
+            ),
+          ),
+        ),
+      ),
+  ).toBe(true);
+  await assertBoundedChoreography(page);
+  expect(flow.commands).toHaveLength(1);
+  expect(flow.commands[0]).toMatchObject({
+    command_type: "battlefield_pointer",
+    button: "primary",
+  });
 });
 
 test("reduced motion keeps Mage Burst static while preserving its identity", async ({
@@ -647,7 +1013,7 @@ test("mid-transition Motion Off retains one static batch through bounded cleanup
   await page.getByRole("button", { name: "Reset" }).click();
   await pauseAtLogicalTime(page, 300);
   const animatedSnapshot = await choreographySnapshot(page);
-  await page.getByRole("button", { name: "Off", exact: true }).click();
+  await page.getByRole("button", { name: "Motion Off", exact: true }).click();
 
   await expect(page.locator("html")).toHaveAttribute("data-motion-mode", "off");
   await expect(page.locator("html")).toHaveAttribute("data-motion-paused", "false");
@@ -665,12 +1031,19 @@ test("mid-transition Motion Off retains one static batch through bounded cleanup
     expect.stringMatching(/:cleanup$/),
   ]);
   await assertBoundedChoreography(page);
+  await page.locator("#battlefield").focus();
+  await expect(page.locator("#visual-tooltip")).toHaveAttribute(
+    "data-tooltip-kind",
+    "composite",
+  );
+  await page.mouse.move(0, 0);
   await expect(page).toHaveScreenshot("motion-off-static-route-batch-1440x900.png", {
     animations: "allow",
   });
   expect(flow.commands).toHaveLength(1);
 
-  await page.getByRole("button", { name: "0.5×", exact: true }).click();
+  await setGraphicsSpeed(page, 0.5);
+  await page.getByRole("button", { name: "Motion Off", exact: true }).click();
   await expect(page.locator("html")).toHaveAttribute("data-motion-mode", "normal");
   await expect(page.locator("html")).toHaveAttribute("data-motion-rate", "0.5");
   const restoredPreference = await choreographySnapshot(page);

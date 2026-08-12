@@ -170,9 +170,9 @@ const STATUS_TOKENS = Object.freeze({
   }),
   anti_heal_rogue_poison: token({
     tokenId: "anti_heal_rogue_poison",
-    label: "Anti-heal",
+    label: "Anti-Heal",
     shortLabel: "ANTI",
-    accessibleName: "Rogue Poison anti-heal",
+    accessibleName: "Rogue Poison Anti-Heal",
     glyphKey: "status-anti-heal",
     cssKey: "anti-heal-rogue-poison",
     fallback: "AH",
@@ -284,9 +284,9 @@ const MODIFIER_TOKENS = Object.freeze({
   }),
   rogue_anti_heal: token({
     tokenId: "rogue_anti_heal",
-    label: "Anti-heal modifier",
+    label: "Anti-Heal modifier",
     shortLabel: "ANTI",
-    accessibleName: "Effective Rogue Poison anti-heal modifier",
+    accessibleName: "Effective Rogue Poison Anti-Heal modifier",
     glyphKey: "status-anti-heal",
     cssKey: "rogue-anti-heal",
     fallback: "AH",

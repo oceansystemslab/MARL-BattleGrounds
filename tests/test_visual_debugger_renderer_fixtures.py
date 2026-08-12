@@ -76,6 +76,7 @@ def test_renderer_fixture_registry_is_exact_synthetic_and_v2() -> None:
         "visual_vocabulary",
         "durable_controls",
         "crowded_teamfight",
+        "required_dock_fallback",
         "route_collision",
         "mixed_net_zero",
         "viewport_matrix",
@@ -128,6 +129,8 @@ def test_every_fixture_carries_an_exact_validated_live_envelope() -> None:
             payload = fixture.live_frame.model_dump(mode="json")
             assert payload["schema_version"] == 2
             assert payload["frame_kind"] == "researcher_live_debugger"
+            assert payload["verbose"] is False
+            assert payload["show_ranges"] == bool(fixture.scene.ranges)
         else:
             assert type(fixture.scene) is ActorPovBattlefieldSceneV1
             assert type(fixture.live_frame) is ActorPovLiveDebuggerFrameV2
@@ -135,6 +138,8 @@ def test_every_fixture_carries_an_exact_validated_live_envelope() -> None:
             payload = fixture.live_frame.model_dump(mode="json")
             assert payload["schema_version"] == 2
             assert payload["frame_kind"] == "actor_pov_live_debugger"
+            assert payload["verbose"] is False
+            assert "show_ranges" not in payload
 
 
 def test_every_renderer_fixture_is_recursively_json_serializable() -> None:
@@ -168,6 +173,28 @@ def test_durable_fixture_preserves_canonical_status_channels_and_sources() -> No
         "rogue_poison_slow",
     )
     assert tuple(status.status_channel for status in statuses) == (3, 4, 5, 0, 1, 2)
+    assert tuple(
+        (status.status_channel, status.status_id)
+        for mechanics in fixture.scene.class_mechanics
+        for status in mechanics.status_mechanics
+    ) == (
+        (7, "mage_burst_damage_amplification"),
+        (0, "warrior_charge_slow"),
+        (3, "warrior_charge_stun"),
+        (1, "hunter_basic_slow"),
+        (4, "hunter_trap_stun"),
+        (2, "rogue_poison_slow"),
+        (5, "rogue_poison_stun"),
+        (6, "rogue_poison_anti_heal"),
+        (8, "priest_blessing_of_freedom_movement_floor"),
+    )
+    priest_freedom = next(
+        status
+        for mechanics in fixture.scene.class_mechanics
+        for status in mechanics.status_mechanics
+        if status.status_id == "priest_blessing_of_freedom_movement_floor"
+    )
+    assert priest_freedom.source_action_component == "basic"
     assert tuple(status.source_class_id for status in statuses) == (
         WARRIOR_CLASS_ID,
         HUNTER_CLASS_ID,
@@ -320,19 +347,77 @@ def test_canonical_event_fixture_covers_exact_union_order_and_ids() -> None:
     assert type(fixture.scene) is BattlefieldSceneV2
     batch = fixture.event_batch
     assert batch is not None
-    assert tuple(event.event_type for event in batch.events) == CANONICAL_EVENT_TYPES
-    assert tuple(event.ordinal for event in batch.events) == tuple(range(21))
+    event_types = tuple(event.event_type for event in batch.events)
+    assert set(event_types) == set(CANONICAL_EVENT_TYPES)
+    assert tuple(dict.fromkeys(event_types)) == CANONICAL_EVENT_TYPES
+    assert Counter(event_types) == Counter(
+        {
+            event_type: (
+                2
+                if event_type in {"ability_activated", "recipient_health_resolution"}
+                else 1
+            )
+            for event_type in CANONICAL_EVENT_TYPES
+        }
+    )
+    assert tuple(event.ordinal for event in batch.events) == tuple(
+        range(len(batch.events))
+    )
     assert tuple(event.event_id for event in batch.events) == tuple(
-        f"{batch.transition_id}:event:{ordinal:04d}" for ordinal in range(21)
+        f"{batch.transition_id}:event:{ordinal:04d}"
+        for ordinal in range(len(batch.events))
     )
     assert fixture.scene.incoming_event_ids == tuple(
         event.event_id for event in batch.events
     )
-    aged = batch.events[13]
-    broken = batch.events[14]
-    applied = batch.events[15]
-    refreshed = batch.events[16]
-    cleared = batch.events[17]
+    respawned_agent = next(
+        agent for agent in fixture.scene.agents if agent.respawn_event_id is not None
+    )
+    respawn_event_id = respawned_agent.respawn_event_id
+    assert respawn_event_id is not None
+    unrelated_claim_scene = replace(
+        fixture.scene,
+        agents=tuple(
+            replace(agent, respawn_event_id=batch.events[0].event_id)
+            if agent.global_slot == respawned_agent.global_slot
+            else agent
+            for agent in fixture.scene.agents
+        ),
+    )
+    with pytest.raises(ValueError, match="same agent's incoming respawn event"):
+        replace(fixture.live_frame.projection, scene=unrelated_claim_scene)
+    wrong_agent_scene = replace(
+        fixture.scene,
+        agents=tuple(
+            replace(
+                agent,
+                respawned_on_incoming_transition=True,
+                respawn_event_id=respawn_event_id,
+            )
+            if agent.global_slot == 0
+            else agent
+            for agent in fixture.scene.agents
+        ),
+    )
+    with pytest.raises(ValueError, match="same agent's incoming respawn event"):
+        replace(fixture.live_frame.projection, scene=wrong_agent_scene)
+    aged = next(
+        event for event in batch.events if type(event) is StatusAgedToZeroEventV2
+    )
+    broken = next(
+        event for event in batch.events if type(event) is StatusBrokenByDamageEventV2
+    )
+    applied = next(
+        event for event in batch.events if type(event) is StatusAppliedEventV2
+    )
+    refreshed = next(
+        event
+        for event in batch.events
+        if type(event) is StatusRefreshedOrExtendedEventV2
+    )
+    cleared = next(
+        event for event in batch.events if type(event) is StatusClearedByNewDeathEventV2
+    )
     assert type(aged) is StatusAgedToZeroEventV2
     assert type(broken) is StatusBrokenByDamageEventV2
     assert type(applied) is StatusAppliedEventV2
@@ -344,7 +429,7 @@ def test_canonical_event_fixture_covers_exact_union_order_and_ids() -> None:
         applied.status_channel,
         refreshed.status_channel,
         cleared.status_channel,
-    ) == (3, 4, 1, 2, 6)
+    ) == (3, 4, 8, 2, 6)
     assert (
         aged.status_id,
         broken.status_id,
@@ -354,7 +439,7 @@ def test_canonical_event_fixture_covers_exact_union_order_and_ids() -> None:
     ) == (
         "warrior_charge_stun",
         "hunter_trap_stun",
-        "hunter_basic_slow",
+        "priest_blessing_of_freedom_movement_floor",
         "rogue_poison_slow",
         "rogue_poison_anti_heal",
     )

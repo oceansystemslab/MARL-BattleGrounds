@@ -722,6 +722,8 @@ def build_debugger_frame(
                 None if incoming is None else incoming.transition.transition_id
             ),
             preset=preset,
+            verbose=session.verbose_logging,
+            show_ranges=session.show_ranges,
             terminal=terminal,
             recording=recording_status,
             scenario=_scenario_metadata(session),
@@ -751,6 +753,7 @@ def build_debugger_frame(
         frame_id=frame.frame_id,
         simulator_step_count=frame.simulator_step_count,
         preset=preset,
+        verbose=session.verbose_logging,
         terminal=terminal,
         recording=_actor_pov_recording_status(recording_status),
         incoming_pov_transition_id=pov_projection.incoming_transition_id,

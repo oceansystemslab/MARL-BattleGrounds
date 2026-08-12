@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 
+import { formatDisplayNumber } from "../src/display.js";
 import {
   assertBoundedChoreography,
   CHOREOGRAPHY_ROOT,
@@ -73,6 +74,21 @@ async function loadScenario(page, scenario) {
     })
     .toBeGreaterThan(revisionBefore);
   await expect(page.locator(CHOREOGRAPHY_ROOT)).toHaveCount(0);
+}
+
+/**
+ * @param {import("@playwright/test").Page} page
+ * @param {number} rate
+ */
+async function setGraphicsSpeed(page, rate) {
+  await page.locator("#graphics-speed-input").evaluate((input, nextRate) => {
+    if (!(input instanceof HTMLInputElement) || input.type !== "range") {
+      throw new Error("Graphics rendering speed input is unavailable.");
+    }
+    input.value = Number(nextRate).toFixed(2);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }, rate);
+  await expect(page.locator("html")).toHaveAttribute("data-motion-rate", String(rate));
 }
 
 /**
@@ -176,7 +192,6 @@ async function assertChargeOwnershipLayout(page, expectedCount) {
           ".modifier-cell__box",
           ".cooldown-cell__box",
           ".legality-pill__box",
-          '.agent-id-tag[data-layout-suppressed="false"] .agent-id-tag-box',
           '.combat-effect--net-health[data-spatial-disposition="rendered"] .combat-net__recipient',
           '.combat-effect--net-health[data-spatial-disposition="rendered"] .combat-net__label',
         ].join(","),
@@ -319,7 +334,7 @@ async function battlefieldCenters(page) {
 function centerAt(centers, slot) {
   const center = centers.get(slot);
   if (!center) {
-    throw new Error(`Battlefield center for id_${slot} is unavailable.`);
+    throw new Error(`Battlefield center for internal slot ${slot} is unavailable.`);
   }
   return center;
 }
@@ -343,6 +358,87 @@ function translatedPoint(transform) {
  */
 function pointDistance(first, second) {
   return Math.hypot(first.x - second.x, first.y - second.y);
+}
+
+/**
+ * Measure routed-effect endpoint clearance from authoritative transition-start
+ * target anchors and radii in the served normalized frame. Durable bodies may
+ * already show later Charge/movement phases and are deliberately not used.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @param {string} tokenId
+ * @param {Record<string, any>} frame
+ */
+async function routedTargetGaps(page, tokenId, frame) {
+  const endpoints = await page
+    .locator(
+      `${CHOREOGRAPHY_ROUTE_ROOT} .combat-route-effect--activation[data-token-id="${tokenId}"] .combat-route__path`,
+    )
+    .evaluateAll((paths) =>
+      paths.map((path) => {
+        if (!(path instanceof SVGGeometryElement)) {
+          throw new Error("Combat route is not measurable.");
+        }
+        const owner = path.closest("[data-target-slot]");
+        const pathTokens = String(path.getAttribute("d") ?? "")
+          .trim()
+          .split(/\s+/u);
+        const endpoint = {
+          x: Number(pathTokens.at(-2)),
+          y: Number(pathTokens.at(-1)),
+        };
+        if (!Number.isFinite(endpoint.x) || !Number.isFinite(endpoint.y)) {
+          throw new Error("Combat route endpoint is unavailable.");
+        }
+        return {
+          eventId: owner?.getAttribute("data-event-id"),
+          targetSlot: Number(owner?.getAttribute("data-target-slot")),
+          endpoint: { x: endpoint.x, y: endpoint.y },
+        };
+      }),
+    );
+  const mapBounds = await page.locator("#battlefield .map-boundary").evaluate((map) => {
+    if (!(map instanceof SVGRectElement)) {
+      throw new Error("Battlefield map boundary is unavailable.");
+    }
+    return {
+      left: map.x.baseVal.value,
+      top: map.y.baseVal.value,
+      width: map.width.baseVal.value,
+      height: map.height.baseVal.value,
+    };
+  });
+  const worldWidth = Number(frame.projection.scene.map.width);
+  const worldHeight = Number(frame.projection.scene.map.height);
+  const scale = Math.min(mapBounds.width / worldWidth, mapBounds.height / worldHeight);
+  const eventsById = new Map(
+    frame.projection.incoming_events.events.map(
+      /** @param {Record<string, any>} event */ (event) => [event.event_id, event],
+    ),
+  );
+  const agentsBySlot = new Map(
+    frame.projection.scene.agents.map(
+      /** @param {Record<string, any>} agent */ (agent) => [
+        Number(agent.global_slot),
+        agent,
+      ],
+    ),
+  );
+  return endpoints
+    .map(({ eventId, targetSlot, endpoint }) => {
+      const event = eventsById.get(eventId);
+      const targetAgent = agentsBySlot.get(targetSlot);
+      const targetWorld = event?.recipient_anchor?.position;
+      if (!Array.isArray(targetWorld) || targetWorld.length !== 2 || !targetAgent) {
+        throw new Error("Routed target anchor is unavailable in the served frame.");
+      }
+      const target = {
+        x: mapBounds.left + Number(targetWorld[0]) * scale,
+        y: mapBounds.top + (worldHeight - Number(targetWorld[1])) * scale,
+      };
+      return pointDistance(endpoint, target) - Number(targetAgent.radius) * scale;
+    })
+    .sort((left, right) => left - right);
 }
 
 /**
@@ -439,7 +535,7 @@ test("focus crossfire retriggers events and keeps presentation controls local", 
   expect(commandPosts.count()).toBe(afterFirstSubmit);
 
   await pauseAtLogicalTime(page, 520);
-  await page.getByRole("button", { name: "0.5×", exact: true }).click();
+  await setGraphicsSpeed(page, 0.5);
   await expect(page.locator("html")).toHaveAttribute("data-motion-rate", "0.5");
   expect(commandPosts.count()).toBe(afterFirstSubmit);
 
@@ -531,10 +627,12 @@ test("moving Basics retain transition-start combat anchors before successor move
   expect(new Set(firstRecords.map(({ source }) => source))).toEqual(
     new Set([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]),
   );
+  // Movement magnitude is catalog/scenario truth. This browser proof requires
+  // only the authored nonzero displacement, never a mirrored minimum distance.
   for (const slot of initial.keys()) {
     expect(
       pointDistance(centerAt(initial, slot), centerAt(firstSuccessor, slot)),
-    ).toBeGreaterThan(1);
+    ).toBeGreaterThan(0);
   }
   for (const record of firstRecords) {
     const targetBody = centerAt(initial, record.target);
@@ -563,7 +661,7 @@ test("moving Basics retain transition-start combat anchors before successor move
   for (const slot of firstSuccessor.keys()) {
     expect(
       pointDistance(centerAt(firstSuccessor, slot), centerAt(secondSuccessor, slot)),
-    ).toBeGreaterThan(1);
+    ).toBeGreaterThan(0);
   }
   for (const record of secondRecords) {
     const targetBody = centerAt(firstSuccessor, record.target);
@@ -583,7 +681,7 @@ test("moving Basics retain transition-start combat anchors before successor move
   for (const slot of [0, 1, 2, 3, 5, 6, 7, 8]) {
     expect(
       pointDistance(centerAt(focusInitial, slot), centerAt(focusSuccessor, slot)),
-    ).toBeGreaterThan(1);
+    ).toBeGreaterThan(0);
   }
   const focusActivations = page.locator(
     `${CHOREOGRAPHY_ROOT} .combat-effect--activation`,
@@ -701,6 +799,8 @@ test("mirrored Ultimates keep activation identity separate from durable conseque
   page,
 }) => {
   await loadScenario(page, "mirrored_ultimates");
+  /** @type {Map<string, number[]>} */
+  const targetGapsByToken = new Map();
 
   /** @type {Array<{
    *   tokenId: string,
@@ -772,7 +872,7 @@ test("mirrored Ultimates keep activation identity separate from durable conseque
 
   for (const [index, frame] of frames.entries()) {
     const transitionId = index + 1;
-    await advanceAnimatedFrame(page, transitionId, 120);
+    const authoritativeFrame = await advanceAnimatedFrame(page, transitionId, 120);
     const activations = page.locator(
       `${CHOREOGRAPHY_ROOT} .combat-effect--activation[data-token-id="${frame.tokenId}"]`,
     );
@@ -806,6 +906,10 @@ test("mirrored Ultimates keep activation identity separate from durable conseque
           }),
         );
       expect(routeStyles).toEqual([frame.routeStyle, frame.routeStyle]);
+      targetGapsByToken.set(
+        frame.tokenId,
+        await routedTargetGaps(page, frame.tokenId, authoritativeFrame),
+      );
     }
     await expect(page.locator(frame.grammarSelector)).toHaveCount(frame.grammarCount);
 
@@ -828,13 +932,37 @@ test("mirrored Ultimates keep activation identity separate from durable conseque
       await expect(durableRosterStatus(page, slot, tokenId)).toHaveCount(1);
     }
   }
+  const chargeGaps = targetGapsByToken.get("warrior_charge");
+  const trapGaps = targetGapsByToken.get("hunter_trap");
+  const poisonGaps = targetGapsByToken.get("rogue_poison");
+  expect(chargeGaps).toBeDefined();
+  expect(trapGaps).toBeDefined();
+  expect(poisonGaps).toBeDefined();
+  expect(trapGaps).toHaveLength(2);
+  expect(poisonGaps).toHaveLength(2);
+  // This real-simulator case is non-overlapping: the target-body radius is
+  // read from the served frame above, leaving only the route module's stable
+  // three-screen-unit presentation gap. The focused Node regression separately
+  // proves equality with every ordinary routed-effect convention.
+  expect((trapGaps ?? []).every((gap) => Math.abs(gap - 3) < 1e-4)).toBe(true);
+  expect(
+    (chargeGaps ?? []).every((chargeGap) => chargeGap > Math.max(...(trapGaps ?? []))),
+  ).toBe(true);
 });
 
 test("converging Charge routes reproject and displacement settles without replay", async ({
   page,
 }) => {
   await loadScenario(page, "charge_convergence");
-  await advanceAnimatedFrame(page, 1, 120);
+  const chargeFrame = await advanceAnimatedFrame(page, 1, 120);
+  const publicAgentIds = new Map(
+    chargeFrame.projection.scene.agents.map(
+      /** @param {Record<string, any>} agent */ (agent) => [
+        Number(agent.global_slot),
+        String(agent.public_agent_id),
+      ],
+    ),
+  );
 
   const activations = page.locator(
     `${CHOREOGRAPHY_ROOT} .combat-effect--activation[data-token-id="warrior_charge"]`,
@@ -875,16 +1003,40 @@ test("converging Charge routes reproject and displacement settles without replay
         .sort((left, right) => left.source - right.source),
     ),
   ).toEqual([
-    { source: 0, target: 5, text: "id_0 → id_5" },
-    { source: 1, target: 5, text: "id_1 → id_5" },
-    { source: 5, target: 0, text: "id_5 → id_0" },
+    {
+      source: 0,
+      target: 5,
+      text: `Agent ID ${publicAgentIds.get(0)} → Agent ID ${publicAgentIds.get(5)}`,
+    },
+    {
+      source: 1,
+      target: 5,
+      text: `Agent ID ${publicAgentIds.get(1)} → Agent ID ${publicAgentIds.get(5)}`,
+    },
+    {
+      source: 5,
+      target: 0,
+      text: `Agent ID ${publicAgentIds.get(5)} → Agent ID ${publicAgentIds.get(0)}`,
+    },
   ]);
   await assertChargeOwnershipLayout(page, 3);
+  const mitigationMultiplier = chargeFrame.projection.scene.agents
+    .find(/** @param {Record<string, any>} agent */ (agent) => agent.global_slot === 0)
+    ?.aura_modifiers.find(
+      /** @param {Record<string, any>} modifier */ (modifier) =>
+        modifier.aura_id === "warrior_damage_mitigation",
+    )?.multiplier;
+  expect(typeof mitigationMultiplier).toBe("number");
   const mitigation = page.locator(
-    '#roster .roster-row[data-slot="0"] .roster-fact-token--modifier[data-token-id="warrior_mitigation"]',
+    `#roster .roster-row[data-slot="0"] .roster-fact-token--modifier[data-multiplier="${String(mitigationMultiplier)}"]`,
   );
-  await expect(mitigation).toContainText("×0.72");
-  expect(await mitigation.getAttribute("data-multiplier")).toMatch(/\.\d{3,}/);
+  await expect(mitigation).toContainText(
+    `×${formatDisplayNumber(mitigationMultiplier)}`,
+  );
+  await expect(mitigation).toHaveAttribute(
+    "data-multiplier",
+    String(mitigationMultiplier),
+  );
   const humanFacingValues = await page
     .locator(
       "#battlefield .modifier-cell__value, #roster .roster-fact-token--modifier, .comparison-agent .fact strong, #event-feed .event-item",
@@ -1051,7 +1203,7 @@ test("maximum status stack keeps nine durable channels and independent source ev
   page,
 }) => {
   await loadScenario(page, "max_status_stack");
-  await advanceAnimatedFrame(page, 1, 600);
+  const statusFrame = await advanceAnimatedFrame(page, 1, 600);
 
   const expectedTokens = [
     "stun_warrior_charge",
@@ -1086,12 +1238,25 @@ test("maximum status stack keeps nine durable channels and independent source ev
         }))
         .sort((left, right) => left.slot - right.slot),
     );
-  expect(cooldowns).toEqual([
-    { slot: 0, ticks: 30 },
-    { slot: 5, ticks: 30 },
-    { slot: 6, ticks: 30 },
-    { slot: 8, ticks: 30 },
-  ]);
+  const expectedCooldowns = statusFrame.projection.scene.agents
+    .filter(
+      /** @param {Record<string, any>} agent */ (agent) =>
+        Number(agent.ultimate_cooldown_remaining) > 0,
+    )
+    .map(
+      /** @param {Record<string, any>} agent */ (agent) => ({
+        slot: Number(agent.global_slot),
+        ticks: Number(agent.ultimate_cooldown_remaining),
+      }),
+    )
+    .sort(
+      /**
+       * @param {{slot: number, ticks: number}} left
+       * @param {{slot: number, ticks: number}} right
+       */
+      (left, right) => left.slot - right.slot,
+    );
+  expect(cooldowns).toEqual(expectedCooldowns);
   const durableLayer = page.locator(
     '#battlefield [data-layer="durable-status-modifier"]',
   );

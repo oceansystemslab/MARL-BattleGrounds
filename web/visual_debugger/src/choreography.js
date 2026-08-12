@@ -215,7 +215,7 @@ export class CombatChoreographer {
     this.ledger = options.ledger ?? new ConsumedTransitionLedger();
     this.onStateChange = options.onStateChange ?? (() => {});
     this.motionMode = normalizeMotionMode(options.motionMode ?? "normal");
-    this.playbackRate = positiveRate(options.playbackRate ?? 1);
+    this.playbackRate = boundedPlaybackRate(options.playbackRate ?? 1);
     this.paused = false;
     this.submissionBlocked = false;
     this.logicalTime = 0;
@@ -378,7 +378,7 @@ export class CombatChoreographer {
    * @param {number} rate
    */
   setPlaybackRate(rate) {
-    this.playbackRate = positiveRate(rate);
+    this.playbackRate = boundedPlaybackRate(rate);
     for (const animation of this.#allAnimations()) {
       if (typeof animation.updatePlaybackRate === "function") {
         animation.updatePlaybackRate(this.playbackRate);
@@ -718,10 +718,10 @@ function normalizeMotionMode(value) {
 /**
  * @param {unknown} value
  */
-function positiveRate(value) {
+function boundedPlaybackRate(value) {
   const numeric = Number(value);
-  if (!Number.isFinite(numeric) || numeric <= 0) {
-    throw new RangeError("playback rate must be positive and finite.");
+  if (!Number.isFinite(numeric) || numeric < 0.01 || numeric > 2) {
+    throw new RangeError("playback rate must be finite and between 0.01 and 2.");
   }
   return numeric;
 }

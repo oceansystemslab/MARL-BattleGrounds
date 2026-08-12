@@ -2,9 +2,77 @@ import { formatDisplayNumber } from "./display.js";
 import { explainActivation, explainNetHealth } from "./explanations.js";
 import { createSvgIcon } from "./icons.js";
 import { routeMarkerPose } from "./routes.js";
-import { registerTooltipOwner } from "./tooltip.js";
+import { createSemanticDescriptor, registerTooltipOwner } from "./tooltip.js";
 
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
+
+/**
+ * @param {unknown} publicAgentId
+ */
+function formatAgentIdentity(publicAgentId) {
+  return typeof publicAgentId === "string" && publicAgentId.trim()
+    ? `Agent ID ${publicAgentId}`
+    : "Agent ID unavailable";
+}
+
+/**
+ * Build one structured semantic explanation from fields already authorized in
+ * the choreography plan. Internal slots may key DOM records, but never supply
+ * display identity.
+ *
+ * @param {Record<string, any>} event
+ */
+export function explainChoreographyEvent(event) {
+  const title = String(
+    event.lifecycleToken?.label ??
+      event.token?.label ??
+      event.eventType ??
+      "Semantic event",
+  );
+  const rows = [];
+  for (const [label, value] of [
+    ["Actor", event.actorPublicAgentId],
+    ["Source", event.sourcePublicAgentId],
+    ["Recipient", event.recipientPublicAgentId],
+    ["Agent", event.agentPublicAgentId],
+  ]) {
+    if (typeof value === "string" && value.trim()) {
+      rows.push({
+        label,
+        value: formatAgentIdentity(value),
+        metadata: { compact: true, full: true },
+      });
+    }
+  }
+  const semanticOwnerKey = [
+    event.kind,
+    event.eventType,
+    event.tokenId,
+    event.lifecycle,
+    event.actorPublicAgentId,
+    event.sourcePublicAgentId,
+    event.recipientPublicAgentId,
+    event.agentPublicAgentId,
+  ]
+    .filter((value) => typeof value === "string" && value.length > 0)
+    .join(":");
+  return createSemanticDescriptor({
+    kind: "event",
+    id: `semantic-event:${semanticOwnerKey || "unclassified"}`,
+    title,
+    tone: event.kind === "rejected_action" ? "warning" : "information",
+    accent: "none",
+    summary: String(
+      event.lifecycleToken?.accessibleName ??
+        event.token?.accessibleName ??
+        `Authoritative ${String(event.kind ?? "event").replaceAll("_", " ")}`,
+    ),
+    rows,
+    sections: [],
+    metadata: { compact: true, full: true },
+    anchor: "pointer",
+  });
+}
 
 /**
  * @typedef {Record<string, any>} JsonRecord
@@ -414,7 +482,7 @@ export class SvgChoreographyPainter {
           "data-source-slot": event.sourceSlot,
           "data-target-slot": event.targetSlot,
         });
-        const ownershipLabel = `id_${event.sourceSlot} → id_${event.targetSlot}`;
+        const ownershipLabel = `${formatAgentIdentity(event.sourcePublicAgentId)} → ${formatAgentIdentity(event.targetPublicAgentId)}`;
         ownership.append(
           svgElement(ownerDocument, "line", {
             class: "combat-route__ownership-leader",
@@ -725,46 +793,26 @@ export class SvgChoreographyPainter {
    * @param {JsonRecord} event
    */
   #registerEventExplanation(group, underlay, event) {
+    if (event.tokenId === "basic_damage" || event.tokenId === "basic_heal") {
+      return;
+    }
     const explanation =
       event.kind === "activation"
         ? explainActivation(event)
         : event.kind === "net_health"
           ? explainNetHealth(event)
-          : event.kind === "status_lifecycle"
-            ? {
-                kind: "event",
-                id: `event:${event.eventId ?? "unknown"}`,
-                title: String(
-                  event.lifecycleToken?.label ?? event.token?.label ?? "Status change",
-                ),
-                details: [
-                  String(
-                    event.lifecycleToken?.accessibleName ??
-                      "Authoritative status lifecycle event",
-                  ),
-                  String(event.token?.accessibleName ?? "Recorded status"),
-                ],
-                anchor: /** @type {const} */ ("pointer"),
-              }
-            : {
-                kind: "event",
-                id: `event:${event.eventId ?? "unknown"}`,
-                title: String(
-                  event.token?.label ?? event.eventType ?? "Semantic event",
-                ),
-                details: [
-                  `Authoritative ${String(event.kind ?? "event").replaceAll("_", " ")}`,
-                ],
-                anchor: /** @type {const} */ ("pointer"),
-              };
+          : explainChoreographyEvent(event);
     registerTooltipOwner(group, explanation);
     if (underlay) {
-      registerTooltipOwner(underlay, {
-        ...explanation,
-        kind: event.kind === "activation" ? "accepted-route" : explanation.kind,
-        id: `${explanation.id}:route`,
-        anchor: "pointer",
-      });
+      registerTooltipOwner(
+        underlay,
+        createSemanticDescriptor({
+          ...explanation,
+          kind: event.kind === "activation" ? "accepted-route" : explanation.kind,
+          id: `${explanation.id}:route`,
+          anchor: "pointer",
+        }),
+      );
     }
   }
 
@@ -784,7 +832,7 @@ export class SvgChoreographyPainter {
     const recipientLabel = svgElement(ownerDocument, "text", {
       class: "combat-net__recipient",
     });
-    recipientLabel.textContent = `id_${event.recipientSlot}`;
+    recipientLabel.textContent = formatAgentIdentity(event.recipientPublicAgentId);
     group.dataset.netDelta = String(event.netDelta);
     group.dataset.layoutCollisionFree = String(event.cueCollisionFree !== false);
     group.append(

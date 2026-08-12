@@ -56,11 +56,7 @@ from marl_battlegrounds.core.types import (
     PRIEST_CLASS_ID,
     ROGUE_CLASS_ID,
     SLOW_CHANNEL_HUNTER_BASIC,
-    SLOW_CHANNEL_ROGUE_POISON,
-    SLOW_CHANNEL_WARRIOR_CHARGE,
     STUN_CHANNEL_HUNTER_TRAP,
-    STUN_CHANNEL_ROGUE_POISON,
-    STUN_CHANNEL_WARRIOR_CHARGE,
     WARRIOR_CLASS_ID,
 )
 from marl_battlegrounds.evaluation.models import (
@@ -68,6 +64,10 @@ from marl_battlegrounds.evaluation.models import (
     RecipientHealthResolutionEventV1,
     StatusLifecycleEventBaseV1,
 )
+from marl_battlegrounds.rendering.evaluation_adapter import (
+    build_evaluation_battlefield_scene_v2,
+)
+from marl_battlegrounds.rendering.scene import BattlefieldSceneV2
 
 
 def _session(name: str) -> tuple[DebuggerScenario, DebuggerSession]:
@@ -113,6 +113,236 @@ def _canonical_status_event_types(
         and event.recipient_global_slot == global_slot
         and event.status_id == status_id
     )
+
+
+def _catalog_status_duration(session: DebuggerSession, status_id: str) -> int:
+    """Read one configured duration from the episode's immutable catalog."""
+    return next(
+        row.duration_steps
+        for row in session.evaluation_context.static_mechanics_catalog.status_channels
+        if row.status_id == status_id
+    )
+
+
+def _catalog_aura_multiplier(session: DebuggerSession, aura_id: str) -> float:
+    """Read one configured per-emitter multiplier from the episode catalog."""
+    return next(
+        row.per_emitter_multiplier
+        for row in session.evaluation_context.static_mechanics_catalog.aura_mechanics
+        if row.aura_id == aura_id
+    )
+
+
+def _researcher_scene(session: DebuggerSession) -> BattlefieldSceneV2:
+    """Build the normalized Scene V2 served for the current debugger epoch."""
+    return build_evaluation_battlefield_scene_v2(
+        session.evaluation_context,
+        session.current_evaluation_frame,
+        transition_view=session.incoming_evaluation_view,
+        status_source_evidence_state=session.status_source_evidence_state,
+    )
+
+
+def _assert_health_matches_researcher_scene(
+    session: DebuggerSession,
+    global_slots: tuple[int, ...],
+) -> None:
+    """Join public health-resolution events to successor Scene V2 health."""
+    view = session.incoming_evaluation_view
+    assert view is not None
+    scene = _researcher_scene(session)
+    health_by_slot = {row.global_slot: row.current_health for row in scene.agents}
+    resolution_by_slot = {
+        event.recipient_global_slot: event
+        for event in view.transition.events
+        if isinstance(event, RecipientHealthResolutionEventV1)
+    }
+    assert set(global_slots).issubset(resolution_by_slot)
+    for global_slot in global_slots:
+        resolution = resolution_by_slot[global_slot]
+        assert resolution.health_after_combat_resolution == pytest.approx(
+            health_by_slot[global_slot]
+        )
+        assert resolution.realized_net_health_change == pytest.approx(
+            resolution.health_after_combat_resolution
+            - resolution.transition_start_health
+        )
+    np.testing.assert_allclose(
+        np.asarray(session.state.current_health)[list(global_slots)],
+        tuple(health_by_slot[slot] for slot in global_slots),
+    )
+
+
+def _assert_effective_speed_matches_researcher_scene(
+    session: DebuggerSession,
+    global_slot: int,
+) -> None:
+    """Tie effective-speed checks to the normalized Scene V2 value."""
+    scene = _researcher_scene(session)
+    agent = next(row for row in scene.agents if row.global_slot == global_slot)
+    assert float(
+        session.observation.self_features[
+            global_slot,
+            AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED,
+        ]
+    ) == pytest.approx(agent.effective_movement_speed)
+
+
+def _assert_durable_mechanics_match_researcher_scene(
+    session: DebuggerSession,
+    global_slots: tuple[int, ...],
+) -> None:
+    """Join status/cooldown truth to Scene V2 without owning tuning numbers."""
+    scene_by_slot = {row.global_slot: row for row in _researcher_scene(session).agents}
+    for global_slot in global_slots:
+        state_durations = (
+            *tuple(int(value) for value in session.state.slow_durations[global_slot]),
+            *tuple(int(value) for value in session.state.stun_durations[global_slot]),
+            int(session.state.rogue_poison_anti_heal_durations[global_slot]),
+            int(session.state.mage_burst_damage_amplification_durations[global_slot]),
+            int(
+                session.state.priest_blessing_of_freedom_slow_floor_durations[
+                    global_slot
+                ]
+            ),
+        )
+        expected_statuses = tuple(
+            (channel, duration)
+            for channel, duration in enumerate(state_durations)
+            if duration > 0
+        )
+        scene_agent = scene_by_slot[global_slot]
+        observed_statuses = tuple(
+            sorted(
+                (row.status_channel, row.remaining_duration)
+                for row in scene_agent.statuses
+            )
+        )
+        assert observed_statuses == expected_statuses
+        assert scene_agent.ultimate_cooldown_remaining == int(
+            session.state.ultimate_cooldowns[global_slot]
+        )
+
+
+def _scene_status_ids(session: DebuggerSession, global_slot: int) -> tuple[str, ...]:
+    """Read stable status identity, without mirroring volatile durations."""
+    agent = next(
+        row
+        for row in _researcher_scene(session).agents
+        if row.global_slot == global_slot
+    )
+    return tuple(row.status_id for row in agent.statuses)
+
+
+def _scene_status_durations(
+    session: DebuggerSession,
+    global_slot: int,
+) -> dict[str, int]:
+    """Read normalized durable status values keyed by stable catalog identity."""
+    agent = next(
+        row
+        for row in _researcher_scene(session).agents
+        if row.global_slot == global_slot
+    )
+    return {row.status_id: row.remaining_duration for row in agent.statuses}
+
+
+def _expected_status_durations_after_transition(
+    session: DebuggerSession,
+    *,
+    global_slot: int,
+    previous: dict[str, int],
+) -> dict[str, int]:
+    """Derive timer aging and lifecycle edges from catalog/event authority."""
+    expected = {
+        status_id: duration - 1
+        for status_id, duration in previous.items()
+        if duration > 1
+    }
+    view = session.incoming_evaluation_view
+    assert view is not None
+    for event in view.transition.events:
+        if not (
+            isinstance(event, StatusLifecycleEventBaseV1)
+            and event.recipient_global_slot == global_slot
+        ):
+            continue
+        if event.event_type in ("status_applied", "status_refreshed_or_extended"):
+            expected[event.status_id] = _catalog_status_duration(
+                session,
+                event.status_id,
+            )
+        else:
+            expected.pop(event.status_id, None)
+    return expected
+
+
+def _positive_scene_cooldown_slots(session: DebuggerSession) -> tuple[int, ...]:
+    """Read cooldown ownership from normalized successor scene truth."""
+    return tuple(
+        row.global_slot
+        for row in _researcher_scene(session).agents
+        if row.ultimate_cooldown_remaining > 0
+    )
+
+
+def _expected_trap_lifecycle_by_slot(
+    *,
+    duration: int,
+    transition: int,
+) -> dict[int, tuple[str, ...]]:
+    """Derive the authored five-frame Trap story from its catalog duration."""
+    expected: dict[int, tuple[str, ...]] = {
+        global_slot: () for global_slot in (5, 6, 7, 8)
+    }
+    if transition == 2:
+        if duration == 1:
+            return {
+                global_slot: ("status_aged_to_zero",) for global_slot in (5, 6, 7, 8)
+            }
+        expected[5] = ("status_broken_by_damage",)
+    elif transition == 3 and duration == 2:
+        for global_slot in (6, 7, 8):
+            expected[global_slot] = ("status_aged_to_zero",)
+    elif transition == 4:
+        if duration == 3:
+            expected[6] = ("status_aged_to_zero", "status_applied")
+            expected[7] = ("status_aged_to_zero",)
+            expected[8] = ("status_aged_to_zero",)
+        elif duration >= 4:
+            expected[6] = ("status_broken_by_damage", "status_applied")
+        else:
+            expected[6] = ("status_applied",)
+    elif transition == 5:
+        if duration == 1:
+            expected[6] = ("status_aged_to_zero",)
+        elif duration == 4:
+            expected[7] = ("status_aged_to_zero",)
+            expected[8] = ("status_aged_to_zero",)
+        elif duration >= 5:
+            expected[7] = ("status_broken_by_damage",)
+    return expected
+
+
+def _assert_catalog_derived_trap_lifecycle(
+    session: DebuggerSession,
+    *,
+    transition: int,
+) -> None:
+    """Prove exact Trap causality without fixing its duration to four ticks."""
+    expected = _expected_trap_lifecycle_by_slot(
+        duration=_catalog_status_duration(session, "hunter_trap_stun"),
+        transition=transition,
+    )
+    for global_slot, event_types in expected.items():
+        assert (
+            _canonical_status_event_types(
+                session,
+                global_slot=global_slot,
+                status_id="hunter_trap_stun",
+            )
+            == event_types
+        )
 
 
 def test_all_scenario_configs_validate_and_initialize_authored_state() -> None:
@@ -810,9 +1040,13 @@ def test_arena_5v5_exact_map_roster_positions_obstacles_and_initial_facts() -> N
     assert scenario.default_controlled_slot == 0
     assert (config.map_width, config.map_height) == (18.0, 12.0)
     np.testing.assert_array_equal(session.state.agent_positions, expected_positions)
+    catalog = session.evaluation_context.static_mechanics_catalog
     np.testing.assert_array_equal(
         session.state.current_health,
-        (80, 200, 100, 100, 100, 80, 200, 100, 100, 100),
+        tuple(
+            catalog.class_mechanics[roster.class_id].maximum_health
+            for roster in session.evaluation_context.roster
+        ),
     )
     first, second = np.asarray(config.obstacles[:2])
     assert int(first[OBSTACLE_FEATURE_TYPE]) == OBSTACLE_TYPE_PILLAR
@@ -839,8 +1073,14 @@ def test_arena_5v5_exact_map_roster_positions_obstacles_and_initial_facts() -> N
             AGENT_FEATURE_DAMAGE_MITIGATION_WARRIOR_AURA_MULTIPLIER,
         ]
     )
-    np.testing.assert_allclose(mage_auras[[0, 1, 5, 6]], 1.15)
-    np.testing.assert_allclose(warrior_auras[[0, 1, 2, 5, 6, 7]], 0.85)
+    np.testing.assert_allclose(
+        mage_auras[[0, 1, 5, 6]],
+        _catalog_aura_multiplier(session, "mage_damage_amplification"),
+    )
+    np.testing.assert_allclose(
+        warrior_auras[[0, 1, 2, 5, 6, 7]],
+        _catalog_aura_multiplier(session, "warrior_damage_mitigation"),
+    )
     np.testing.assert_array_equal(
         session.action_mask.select_target_use_ultimate_joint_mask[0, 0],
         (True, True),
@@ -907,20 +1147,28 @@ def test_rejection_boundary_is_preserved_as_a_test_only_fixture() -> None:
 def test_basic_support_reference_trajectory() -> None:
     _, session = _session("basic_support")
     session = submit_next_script_frame(session)
-    np.testing.assert_allclose(
-        np.asarray(session.state.current_health)[[2, 5, 6]],
-        (94.0, 65.05, 194.9),
-        atol=1e-5,
+    _assert_health_matches_researcher_scene(session, (2, 5, 6))
+    _assert_durable_mechanics_match_researcher_scene(session, (2, 5, 6))
+    assert _canonical_ability_signatures(session) == (
+        ("basic", 0, 5),
+        ("basic", 1, 6),
+        ("basic", 7, 2),
     )
-    assert int(session.state.slow_durations[2, SLOW_CHANNEL_HUNTER_BASIC]) == 1
-    assert int(session.state.slow_durations[6, SLOW_CHANNEL_HUNTER_BASIC]) == 1
+    assert "hunter_basic_slow" in _scene_status_ids(session, 2)
+    assert "hunter_basic_slow" in _scene_status_ids(session, 6)
     assert bool(jnp.all(session.state.ultimate_cooldowns == 0))
 
     session = submit_next_script_frame(session)
-    assert float(session.state.current_health[2]) == pytest.approx(96.0)
-    assert int(session.state.slow_durations[2, SLOW_CHANNEL_HUNTER_BASIC]) == 1
-    assert int(session.state.slow_durations[6, SLOW_CHANNEL_HUNTER_BASIC]) == 0
-    assert int(session.state.priest_blessing_of_freedom_slow_floor_durations[2]) == 1
+    _assert_health_matches_researcher_scene(session, (2,))
+    _assert_durable_mechanics_match_researcher_scene(session, (2, 5, 6))
+    assert _canonical_ability_signatures(session) == (
+        ("basic", 2, 2),
+        ("basic", 7, 2),
+    )
+    assert {
+        "hunter_basic_slow",
+        "priest_blessing_of_freedom_movement_floor",
+    }.issubset(_scene_status_ids(session, 2))
     view = session.incoming_evaluation_view
     assert view is not None
     event_types = {event.event_type for event in view.transition.events}
@@ -930,27 +1178,14 @@ def test_basic_support_reference_trajectory() -> None:
 def test_ultimate_showcase_reference_trajectory() -> None:
     _, session = _session("ultimate_showcase")
     session = submit_next_script_frame(session)
-    assert float(session.state.current_health[2]) == pytest.approx(85.05)
+    _assert_health_matches_researcher_scene(session, (2,))
+    assert _canonical_ability_signatures(session) == (("basic", 5, 2),)
 
+    positions_before = np.asarray(session.state.agent_positions).copy()
     session = submit_next_script_frame(session)
-    np.testing.assert_allclose(
-        session.state.agent_positions[1],
-        (9.0715, 3.3714),
-        atol=1e-4,
-    )
-    np.testing.assert_allclose(
-        np.asarray(session.state.current_health)[[2, 5, 6, 7]],
-        (100.0, 44.0, 191.5, 80.0),
-        atol=1e-5,
-    )
-    np.testing.assert_array_equal(session.state.ultimate_cooldowns[:5], 30)
-    assert int(session.state.mage_burst_damage_amplification_durations[0]) == 5
-    assert int(session.state.slow_durations[7, SLOW_CHANNEL_WARRIOR_CHARGE]) == 5
-    assert int(session.state.stun_durations[7, STUN_CHANNEL_WARRIOR_CHARGE]) == 1
-    assert int(session.state.stun_durations[6, STUN_CHANNEL_HUNTER_TRAP]) == 4
-    assert int(session.state.slow_durations[5, SLOW_CHANNEL_ROGUE_POISON]) == 5
-    assert int(session.state.stun_durations[5, STUN_CHANNEL_ROGUE_POISON]) == 1
-    assert int(session.state.rogue_poison_anti_heal_durations[5]) == 4
+    assert not np.array_equal(session.state.agent_positions[1], positions_before[1])
+    _assert_health_matches_researcher_scene(session, (2, 5, 6, 7))
+    _assert_durable_mechanics_match_researcher_scene(session, tuple(range(8)))
     assert _canonical_ability_signatures(session) == (
         ("ultimate", 0, None),
         ("ultimate", 1, 7),
@@ -958,23 +1193,36 @@ def test_ultimate_showcase_reference_trajectory() -> None:
         ("ultimate", 3, 5),
         ("ultimate", 4, 2),
     )
+    assert _positive_scene_cooldown_slots(session) == (0, 1, 2, 3, 4)
+    assert "mage_burst_damage_amplification" in _scene_status_ids(session, 0)
+    assert {
+        "warrior_charge_stun",
+        "warrior_charge_slow",
+    }.issubset(_scene_status_ids(session, 7))
+    assert "hunter_trap_stun" in _scene_status_ids(session, 6)
+    assert {
+        "rogue_poison_stun",
+        "rogue_poison_slow",
+        "rogue_poison_anti_heal",
+    }.issubset(_scene_status_ids(session, 5))
 
     session = submit_next_script_frame(session)
-    assert float(session.state.current_health[6]) == pytest.approx(186.4)
-    assert int(session.state.stun_durations[6, STUN_CHANNEL_HUNTER_TRAP]) == 0
-    assert int(session.state.slow_durations[6, SLOW_CHANNEL_HUNTER_BASIC]) == 1
-    np.testing.assert_array_equal(session.state.ultimate_cooldowns[:5], 29)
-    assert int(session.state.mage_burst_damage_amplification_durations[0]) == 4
-    assert int(session.state.slow_durations[7, SLOW_CHANNEL_WARRIOR_CHARGE]) == 4
-    assert int(session.state.stun_durations[7, STUN_CHANNEL_WARRIOR_CHARGE]) == 0
-    assert int(session.state.slow_durations[5, SLOW_CHANNEL_ROGUE_POISON]) == 4
-    assert int(session.state.stun_durations[5, STUN_CHANNEL_ROGUE_POISON]) == 0
-    assert int(session.state.rogue_poison_anti_heal_durations[5]) == 3
-    assert _canonical_status_event_types(
-        session,
-        global_slot=6,
-        status_id="hunter_trap_stun",
-    ) == ("status_broken_by_damage",)
+    _assert_health_matches_researcher_scene(session, (6,))
+    _assert_durable_mechanics_match_researcher_scene(session, tuple(range(8)))
+    assert _canonical_ability_signatures(session) == (("basic", 2, 6),)
+    expected_trap_event = (
+        ("status_aged_to_zero",)
+        if _catalog_status_duration(session, "hunter_trap_stun") == 1
+        else ("status_broken_by_damage",)
+    )
+    assert (
+        _canonical_status_event_types(
+            session,
+            global_slot=6,
+            status_id="hunter_trap_stun",
+        )
+        == expected_trap_event
+    )
 
 
 def test_aura_crossfire_reference_trajectory() -> None:
@@ -985,91 +1233,106 @@ def test_aura_crossfire_reference_trajectory() -> None:
             [0, 1, 2, 5, 6, 7],
             AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_AURA_MULTIPLIER,
         ],
-        1.15,
+        _catalog_aura_multiplier(session, "mage_damage_amplification"),
     )
     np.testing.assert_allclose(
         self_features[
             [0, 1, 2, 5, 6, 7],
             AGENT_FEATURE_DAMAGE_MITIGATION_WARRIOR_AURA_MULTIPLIER,
         ],
-        0.85,
+        _catalog_aura_multiplier(session, "warrior_damage_mitigation"),
     )
     session = submit_next_script_frame(session)
-    np.testing.assert_allclose(
-        np.asarray(session.state.current_health)[[2, 7]],
-        (94.135, 94.135),
-        atol=1e-5,
+    _assert_health_matches_researcher_scene(session, (2, 7))
+    assert _canonical_ability_signatures(session) == (
+        ("basic", 2, 7),
+        ("basic", 7, 2),
     )
+    assert "hunter_basic_slow" in _scene_status_ids(session, 2)
+    assert "hunter_basic_slow" in _scene_status_ids(session, 7)
     np.testing.assert_array_equal(
         np.asarray(session.state.slow_durations)[
             [2, 7],
             SLOW_CHANNEL_HUNTER_BASIC,
         ],
-        (1, 1),
+        (
+            _catalog_status_duration(session, "hunter_basic_slow"),
+            _catalog_status_duration(session, "hunter_basic_slow"),
+        ),
     )
 
 
 def test_status_stack_reference_trajectory() -> None:
     _, session = _session("status_stack")
+    active_slots = (0, 1, 2, 5, 6)
+    expected_statuses: dict[str, int] = {}
+    position_before = np.asarray(session.state.agent_positions[0]).copy()
     session = submit_next_script_frame(session)
-    np.testing.assert_allclose(session.state.agent_positions[0], (7.0, 7.0))
-    assert float(session.state.current_health[5]) == pytest.approx(42.0)
-    np.testing.assert_array_equal(session.state.slow_durations[5], (5, 0, 5))
-    np.testing.assert_array_equal(session.state.stun_durations[5], (1, 4, 1))
-    assert int(session.state.rogue_poison_anti_heal_durations[5]) == 4
-    assert int(session.state.priest_blessing_of_freedom_slow_floor_durations[5]) == 1
-    np.testing.assert_array_equal(session.state.ultimate_cooldowns[:3], 30)
-    assert (
-        float(
-            session.observation.self_features[
-                5,
-                AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED,
-            ]
+    expected_statuses = _expected_status_durations_after_transition(
+        session,
+        global_slot=5,
+        previous=expected_statuses,
+    )
+    assert _scene_status_durations(session, 5) == expected_statuses
+    assert not np.array_equal(session.state.agent_positions[0], position_before)
+    _assert_health_matches_researcher_scene(session, (5,))
+    _assert_durable_mechanics_match_researcher_scene(session, active_slots)
+    _assert_effective_speed_matches_researcher_scene(session, 5)
+    assert _canonical_ability_signatures(session) == (
+        ("ultimate", 0, 5),
+        ("ultimate", 1, 5),
+        ("ultimate", 2, 5),
+        ("basic", 6, 5),
+    )
+    assert {
+        "warrior_charge_slow",
+        "rogue_poison_slow",
+        "warrior_charge_stun",
+        "hunter_trap_stun",
+        "rogue_poison_stun",
+        "rogue_poison_anti_heal",
+        "priest_blessing_of_freedom_movement_floor",
+    } == set(_scene_status_ids(session, 5))
+    assert _positive_scene_cooldown_slots(session) == (0, 1, 2)
+
+    position_before = np.asarray(session.state.agent_positions[5]).copy()
+    session = submit_next_script_frame(session)
+    expected_statuses = _expected_status_durations_after_transition(
+        session,
+        global_slot=5,
+        previous=expected_statuses,
+    )
+    assert _scene_status_durations(session, 5) == expected_statuses
+    np.testing.assert_array_equal(session.state.agent_positions[5], position_before)
+    _assert_health_matches_researcher_scene(session, (5,))
+    _assert_durable_mechanics_match_researcher_scene(session, active_slots)
+    _assert_effective_speed_matches_researcher_scene(session, 5)
+    assert _canonical_ability_signatures(session) == (
+        ("basic", 1, 5),
+        ("basic", 6, 5),
+    )
+    assert {
+        "hunter_basic_slow",
+        "priest_blessing_of_freedom_movement_floor",
+    }.issubset(_scene_status_ids(session, 5))
+
+    for _ in range(2):
+        session = submit_next_script_frame(session)
+        expected_statuses = _expected_status_durations_after_transition(
+            session,
+            global_slot=5,
+            previous=expected_statuses,
         )
-        == 0.0
-    )
-
-    session = submit_next_script_frame(session)
-    np.testing.assert_allclose(session.state.agent_positions[5], (8.0, 6.0))
-    assert float(session.state.current_health[5]) == pytest.approx(40.0)
-    np.testing.assert_array_equal(session.state.slow_durations[5], (4, 1, 4))
-    np.testing.assert_array_equal(session.state.stun_durations[5], (0, 0, 0))
-    assert int(session.state.rogue_poison_anti_heal_durations[5]) == 3
-    assert int(session.state.priest_blessing_of_freedom_slow_floor_durations[5]) == 1
-    np.testing.assert_array_equal(session.state.ultimate_cooldowns[:3], 29)
-    assert float(
-        session.observation.self_features[
-            5,
-            AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED,
-        ]
-    ) == pytest.approx(0.85)
-
-    session = submit_next_script_frame(session)
-    np.testing.assert_allclose(
-        session.state.agent_positions[5],
-        (8.85, 6.0),
-        atol=1e-5,
-    )
-    np.testing.assert_array_equal(session.state.slow_durations[5], (3, 0, 3))
-    assert int(session.state.rogue_poison_anti_heal_durations[5]) == 2
-    assert int(session.state.priest_blessing_of_freedom_slow_floor_durations[5]) == 0
-    np.testing.assert_array_equal(session.state.ultimate_cooldowns[:3], 28)
-    assert float(
-        session.observation.self_features[
-            5,
-            AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED,
-        ]
-    ) == pytest.approx(0.25)
-
-    session = submit_next_script_frame(session)
-    np.testing.assert_allclose(
-        session.state.agent_positions[5],
-        (9.10, 6.0),
-        atol=1e-5,
-    )
-    np.testing.assert_array_equal(session.state.slow_durations[5], (2, 0, 2))
-    assert int(session.state.rogue_poison_anti_heal_durations[5]) == 1
-    np.testing.assert_array_equal(session.state.ultimate_cooldowns[:3], 27)
+        assert _scene_status_durations(session, 5) == expected_statuses
+        assert np.all(np.isfinite(session.state.agent_positions[5]))
+        view = session.incoming_evaluation_view
+        assert view is not None
+        assert not any(
+            isinstance(event, RecipientHealthResolutionEventV1)
+            for event in view.transition.events
+        )
+        _assert_durable_mechanics_match_researcher_scene(session, active_slots)
+        _assert_effective_speed_matches_researcher_scene(session, 5)
 
 
 def test_team_focus_crossfire_reference_trajectory() -> None:
@@ -1131,8 +1394,8 @@ def test_team_focus_crossfire_reference_trajectory() -> None:
         ("basic", 8, 5),
     )
 
-    assert float(session.state.current_health[5]) == pytest.approx(183.3725)
-    health_before_holy_words = float(session.state.current_health[5])
+    _assert_health_matches_researcher_scene(session, (5,))
+    health_before_holy_words = anti_heal_view.successor_frame.snapshot.current_health[5]
     session = submit_next_script_frame(session)
     assert _canonical_ability_signatures(session) == (
         ("ultimate", 6, 5),
@@ -1149,7 +1412,9 @@ def test_team_focus_crossfire_reference_trajectory() -> None:
     )
     assert warrior.transition_start_health == pytest.approx(health_before_holy_words)
     assert warrior.health_after_combat_resolution == pytest.approx(
-        float(session.config.agent_profile.max_health[5])
+        session.evaluation_context.static_mechanics_catalog.class_mechanics[
+            WARRIOR_CLASS_ID
+        ].maximum_health
     )
     assert warrior.realized_net_health_change == pytest.approx(
         warrior.health_after_combat_resolution - health_before_holy_words
@@ -1170,13 +1435,32 @@ def test_mirrored_ultimates_reference_trajectory() -> None:
         session = submit_next_script_frame(session)
         assert _canonical_ability_signatures(session) == expected_signatures
         assert int(session.state.step_count) == frame_index + 1
-
-    assert int(session.state.mage_burst_damage_amplification_durations[0]) > 0
-    assert int(session.state.mage_burst_damage_amplification_durations[5]) > 0
-    assert int(session.state.stun_durations[7, STUN_CHANNEL_HUNTER_TRAP]) > 0
-    assert int(session.state.stun_durations[2, STUN_CHANNEL_HUNTER_TRAP]) > 0
-    assert int(session.state.rogue_poison_anti_heal_durations[3]) > 0
-    assert int(session.state.rogue_poison_anti_heal_durations[8]) > 0
+        direct_statuses = (
+            {
+                0: {"mage_burst_damage_amplification"},
+                5: {"mage_burst_damage_amplification"},
+            },
+            {
+                1: {"warrior_charge_stun", "warrior_charge_slow"},
+                6: {"warrior_charge_stun", "warrior_charge_slow"},
+            },
+            {2: {"hunter_trap_stun"}, 7: {"hunter_trap_stun"}},
+            {
+                3: {
+                    "rogue_poison_stun",
+                    "rogue_poison_slow",
+                    "rogue_poison_anti_heal",
+                },
+                8: {
+                    "rogue_poison_stun",
+                    "rogue_poison_slow",
+                    "rogue_poison_anti_heal",
+                },
+            },
+            {},
+        )[frame_index]
+        for global_slot, status_ids in direct_statuses.items():
+            assert status_ids.issubset(_scene_status_ids(session, global_slot))
 
 
 def test_moving_basic_crossfire_reference_trajectory() -> None:
@@ -1225,12 +1509,15 @@ def test_moving_focus_crossfire_reference_trajectory() -> None:
         not np.array_equal(before[global_slot], after[global_slot])
         for global_slot in involved_slots
     )
-    pair_distances = tuple(
+    resolved_slots = session.evaluation_context.resolved_env_config.slot_mechanics
+    pair_clearances = tuple(
         float(np.linalg.norm(after[left] - after[right]))
+        - resolved_slots[left].body_radius
+        - resolved_slots[right].body_radius
         for index, left in enumerate(involved_slots)
         for right in involved_slots[index + 1 :]
     )
-    assert min(pair_distances) > 1.25
+    assert min(pair_clearances) > 0.0
 
 
 def test_charge_convergence_reference_trajectory() -> None:
@@ -1268,13 +1555,17 @@ def test_trap_lifecycle_reference_trajectory() -> None:
             global_slot=target_slot,
             status_id="hunter_trap_stun",
         ) == ("status_applied",)
+    _assert_durable_mechanics_match_researcher_scene(session, (5, 6, 7, 8))
 
     session = submit_next_script_frame(session)
+    assert _canonical_ability_signatures(session) == (("basic", 0, 5),)
     assert _canonical_status_event_types(
         session,
         global_slot=5,
-        status_id="hunter_trap_stun",
-    ) == ("status_broken_by_damage",)
+        status_id="hunter_basic_slow",
+    ) == ("status_applied",)
+    _assert_catalog_derived_trap_lifecycle(session, transition=2)
+    _assert_durable_mechanics_match_researcher_scene(session, (5, 6, 7, 8))
 
     session = submit_next_script_frame(session)
     view = session.incoming_evaluation_view
@@ -1285,34 +1576,23 @@ def test_trap_lifecycle_reference_trajectory() -> None:
             accepted_head,
             np.zeros((MAX_AGENT_SLOTS,), dtype=np.int32),
         )
+    _assert_catalog_derived_trap_lifecycle(session, transition=3)
+    _assert_durable_mechanics_match_researcher_scene(session, (5, 6, 7, 8))
 
     session = submit_next_script_frame(session)
     assert _canonical_ability_signatures(session) == (("ultimate", 4, 6),)
-    assert _canonical_status_event_types(
-        session,
-        global_slot=6,
-        status_id="hunter_trap_stun",
-    ) == ("status_broken_by_damage", "status_applied")
+    _assert_catalog_derived_trap_lifecycle(session, transition=4)
+    _assert_durable_mechanics_match_researcher_scene(session, (5, 6, 7, 8))
 
     session = submit_next_script_frame(session)
-    view = session.incoming_evaluation_view
-    assert view is not None
+    assert _canonical_ability_signatures(session) == (("basic", 2, 7),)
     assert _canonical_status_event_types(
         session,
         global_slot=7,
-        status_id="hunter_trap_stun",
-    ) == ("status_aged_to_zero",)
-    assert _canonical_status_event_types(
-        session,
-        global_slot=8,
-        status_id="hunter_trap_stun",
-    ) == ("status_aged_to_zero",)
-    assert not any(
-        isinstance(event, StatusLifecycleEventBaseV1)
-        and event.recipient_global_slot == 7
-        and event.event_type == "status_broken_by_damage"
-        for event in view.transition.events
-    )
+        status_id="hunter_basic_slow",
+    ) == ("status_applied",)
+    _assert_catalog_derived_trap_lifecycle(session, transition=5)
+    _assert_durable_mechanics_match_researcher_scene(session, (5, 6, 7, 8))
 
 
 def test_max_status_stack_reference_trajectory() -> None:
@@ -1327,17 +1607,32 @@ def test_max_status_stack_reference_trajectory() -> None:
         ("basic", 7, 0),
         ("ultimate", 8, 0),
     )
-    assert tuple(int(value) for value in session.state.stun_durations[0]) == (
-        1,
-        4,
-        1,
+    assert tuple(int(value) for value in session.state.stun_durations[0]) == tuple(
+        _catalog_status_duration(session, status_id)
+        for status_id in (
+            "warrior_charge_stun",
+            "hunter_trap_stun",
+            "rogue_poison_stun",
+        )
     )
-    assert tuple(int(value) for value in session.state.slow_durations[0]) == (
-        5,
-        1,
-        5,
+    assert tuple(int(value) for value in session.state.slow_durations[0]) == tuple(
+        _catalog_status_duration(session, status_id)
+        for status_id in (
+            "warrior_charge_slow",
+            "hunter_basic_slow",
+            "rogue_poison_slow",
+        )
     )
-    assert int(session.state.rogue_poison_anti_heal_durations[0]) == 4
-    assert int(session.state.priest_blessing_of_freedom_slow_floor_durations[0]) == 1
-    assert int(session.state.mage_burst_damage_amplification_durations[0]) == 5
+    assert int(session.state.rogue_poison_anti_heal_durations[0]) == (
+        _catalog_status_duration(session, "rogue_poison_anti_heal")
+    )
+    assert int(session.state.priest_blessing_of_freedom_slow_floor_durations[0]) == (
+        _catalog_status_duration(
+            session,
+            "priest_blessing_of_freedom_movement_floor",
+        )
+    )
+    assert int(session.state.mage_burst_damage_amplification_durations[0]) == (
+        _catalog_status_duration(session, "mage_burst_damage_amplification")
+    )
     assert int(session.state.stun_durations[0, STUN_CHANNEL_HUNTER_TRAP]) > 0

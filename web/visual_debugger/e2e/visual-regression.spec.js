@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 
+import { statusTokenIdFromCatalogId } from "../src/vocabulary.js";
 import {
   assertBoundedChoreography,
   assertTransientSlotsAuthorized,
@@ -21,6 +22,7 @@ import {
   assertDurableDockFlags,
   assertFrameIdentity,
   assertHudStoryLabels,
+  assertStablePresentationFrame,
   assertTransientNumberLayout,
   CHARGE_PHASE_MS,
   captureBaseline,
@@ -52,6 +54,177 @@ let povFrame = {};
 let povWireFrame = {};
 /** @type {Record<string, any>} */
 let vocabularyWireFrame = {};
+
+/**
+ * Read the authenticated wire frame that authored the current browser view.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @returns {Promise<Record<string, any>>}
+ */
+async function currentWireFrame(page) {
+  return page.evaluate(async () => {
+    const token = window.sessionStorage.getItem("marl-battlegrounds.debugger-token");
+    if (!token) {
+      throw new Error("Debugger capability token is unavailable.");
+    }
+    const response = await fetch("/api/frame", {
+      cache: "no-store",
+      credentials: "omit",
+      headers: { "X-MARL-Debugger-Token": token },
+      redirect: "error",
+    });
+    if (!response.ok) {
+      throw new Error(`Frame request failed with HTTP ${response.status}.`);
+    }
+    return response.json();
+  });
+}
+
+/** @param {Record<string, any>} frame */
+function incomingEvents(frame) {
+  const events = frame.projection?.incoming_events?.events;
+  expect(Array.isArray(events)).toBe(true);
+  return /** @type {Record<string, any>[]} */ (events);
+}
+
+/** @param {Record<string, any>} frame */
+function eventKindCountsFromFrame(frame) {
+  const kinds = incomingEvents(frame).map((event) => String(event.event_type));
+  return Object.fromEntries(
+    [...new Set(kinds)]
+      .sort()
+      .map((kind) => [kind, kinds.filter((candidate) => candidate === kind).length]),
+  );
+}
+
+/**
+ * Derive exact durable status values from the served researcher Scene V2.
+ * Stable token identity remains a renderer-vocabulary assertion; numeric
+ * duration truth stays owned by the simulator frame.
+ *
+ * @param {Record<string, any>} frame
+ * @param {number} slot
+ */
+function sceneStatuses(frame, slot) {
+  const agent = frame.projection?.scene?.agents?.find(
+    /** @param {Record<string, any>} row */ (row) => row.global_slot === slot,
+  );
+  expect(agent).toBeTruthy();
+  return /** @type {Record<string, any>[]} */ (agent.statuses).map((status) => ({
+    duration: Number(status.remaining_duration),
+    tokenId: statusTokenIdFromCatalogId(status.status_id),
+  }));
+}
+
+/** @param {Record<string, any>} frame */
+function sceneCooldowns(frame) {
+  return /** @type {Record<string, any>[]} */ (frame.projection.scene.agents)
+    .filter((agent) => Number(agent.ultimate_cooldown_remaining) > 0)
+    .map((agent) => ({
+      slot: Number(agent.global_slot),
+      ticks: Number(agent.ultimate_cooldown_remaining),
+    }))
+    .sort((left, right) => left.slot - right.slot);
+}
+
+/**
+ * Read one volatile duration from the catalog-normalized Scene V2 root.
+ *
+ * @param {Record<string, any>} frame
+ * @param {string} statusId
+ */
+function sceneStatusDuration(frame, statusId) {
+  const mechanics = /** @type {Record<string, any>[]} */ (
+    frame.projection.scene.class_mechanics
+  ).flatMap((row) => row.status_mechanics);
+  const mechanic = mechanics.find((row) => row.status_id === statusId);
+  expect(mechanic).toBeTruthy();
+  return Number(mechanic.duration_steps);
+}
+
+/** @param {Record<string, any>} frame */
+function statusEventsFromFrame(frame) {
+  const lifecycleByType = /** @type {Readonly<Record<string, string>>} */ (
+    Object.freeze({
+      status_aged_to_zero: "expired",
+      status_applied: "applied",
+      status_broken_by_damage: "trap_broken",
+      status_cleared_by_new_death: "cleared_by_death",
+      status_refreshed_or_extended: "refreshed",
+    })
+  );
+  return incomingEvents(frame)
+    .filter((event) => Object.hasOwn(lifecycleByType, event.event_type))
+    .map((event) => ({
+      eventType: String(event.event_type),
+      lifecycle: lifecycleByType[event.event_type],
+      recipient: Number(event.recipient_global_slot),
+      source:
+        event.event_type === "status_applied" ? Number(event.source_global_slot) : null,
+      tokenId: statusTokenIdFromCatalogId(event.status_id),
+    }));
+}
+
+/**
+ * Preserve the authored Trap causal story while letting its expiry epoch move
+ * with the Scene V2 catalog duration.
+ *
+ * @param {Record<string, any>} frame
+ * @param {2 | 4 | 5} transition
+ */
+function expectedTrapLifecycle(frame, transition) {
+  const duration = sceneStatusDuration(frame, "hunter_trap_stun");
+  /**
+   * @param {"status_aged_to_zero" | "status_applied" | "status_broken_by_damage"} eventType
+   * @param {number} recipient
+   * @param {number | null} source
+   */
+  const row = (eventType, recipient, source = null) => ({
+    eventType,
+    lifecycle:
+      eventType === "status_applied"
+        ? "applied"
+        : eventType === "status_broken_by_damage"
+          ? "trap_broken"
+          : "expired",
+    recipient,
+    source,
+    tokenId: "stun_hunter_trap",
+  });
+
+  if (transition === 2) {
+    return duration === 1
+      ? [5, 6, 7, 8].map((recipient) => row("status_aged_to_zero", recipient))
+      : [row("status_broken_by_damage", 5)];
+  }
+  if (transition === 4) {
+    if (duration === 3) {
+      return [
+        row("status_aged_to_zero", 6),
+        row("status_applied", 6, 4),
+        row("status_aged_to_zero", 7),
+        row("status_aged_to_zero", 8),
+      ];
+    }
+    return duration >= 4
+      ? [row("status_broken_by_damage", 6), row("status_applied", 6, 4)]
+      : [row("status_applied", 6, 4)];
+  }
+  if (duration === 1) {
+    return [row("status_aged_to_zero", 6)];
+  }
+  if (duration === 4) {
+    return [row("status_aged_to_zero", 7), row("status_aged_to_zero", 8)];
+  }
+  return duration >= 5 ? [row("status_broken_by_damage", 7)] : [];
+}
+
+/** @param {Record<string, any>} frame */
+function healthResolutionCount(frame) {
+  return incomingEvents(frame).filter(
+    (event) => event.event_type === "recipient_health_resolution",
+  ).length;
+}
 
 // Screenshot-only CSS hides run-specific identity values while retaining their
 // stable labels and layout. The production CSP is exercised by every ordinary
@@ -364,7 +537,7 @@ async function assertCompactActiveCombatPriority(page, expectedStatusSlots) {
   ).toEqual([...expectedStatusSlots].sort((left, right) => left - right));
   expect(
     evidence.statusSummaries.every(
-      ({ count, owner, slot }) => count === "9" && owner === `id_${slot}`,
+      ({ count, owner, slot }) => count === "9" && owner === `Agent ID ${slot}`,
     ),
   ).toBe(true);
 }
@@ -479,14 +652,17 @@ function expectPovPayloadRedacted(frame) {
  *   scenario: string,
  *   transition: number,
  *   roster: number[],
- *   eventCount: number,
- *   eventKinds: Record<string, number>,
+ *   stableEventKinds: Record<string, number>,
  *   activations: Array<{tokenId: string, source: number, target: number | null}>,
  *   routeCount: number,
  *   netCount: number,
  * }} expected
+ * @returns {Promise<Record<string, any>>}
  */
 async function assertLiveCanonicalFrame(page, expected) {
+  const frame = await currentWireFrame(page);
+  const events = incomingEvents(frame);
+  const eventKindCounts = eventKindCountsFromFrame(frame);
   await assertFrameIdentity(page, {
     scenario: expected.scenario,
     simulatorStep: expected.transition,
@@ -500,14 +676,18 @@ async function assertLiveCanonicalFrame(page, expected) {
     pending: "PLAYBACK / INSPECTION ONLY",
     accepted: "LATEST ACCEPTED RESULT",
   });
-  await assertCurrentEventIds(page, expected.eventCount);
-  await expectEventKindCounts(page, expected.eventKinds);
+  await assertCurrentEventIds(page, events.length);
+  await expectEventKindCounts(page, eventKindCounts);
+  for (const [eventKind, count] of Object.entries(expected.stableEventKinds)) {
+    expect(eventKindCounts[eventKind] ?? 0).toBe(count);
+  }
   await expectActivationPairs(page, expected.activations);
   await expectActivationRouteCount(page, expected.routeCount);
   await expectNetCount(page, expected.netCount);
   await assertDurableDockFlags(page);
   await assertBoundedChoreography(page);
   await assertTransientSlotsAuthorized(page);
+  return frame;
 }
 
 /**
@@ -557,7 +737,7 @@ test("idle 5v5 Analysis battlefield remains readable", async ({ page }) => {
   await expect(page.locator(".pending-action-row")).toHaveCount(10);
   await expect(page.locator("#pending-count")).toHaveText("10 actors");
 
-  await captureBaseline(page, "arena-5v5-idle-analysis-1440x900.png", {
+  await assertStablePresentationFrame(page, {
     commandPosts,
     expectedTransientCount: 0,
   });
@@ -596,12 +776,12 @@ test("visual vocabulary presents every class and combat grammar", async ({ page 
     { tokenId: "basic_damage", source: 1, target: 6 },
     { tokenId: "basic_damage", source: 2, target: 7 },
     { tokenId: "basic_damage", source: 3, target: 8 },
-    { tokenId: "basic_heal", source: 4, target: 9 },
+    { tokenId: "basic_heal", source: 4, target: 4 },
     { tokenId: "mage_burst", source: 0, target: null },
     { tokenId: "warrior_charge", source: 1, target: 6 },
     { tokenId: "hunter_trap", source: 2, target: 7 },
     { tokenId: "rogue_poison", source: 3, target: 8 },
-    { tokenId: "holy_word", source: 4, target: 9 },
+    { tokenId: "holy_word", source: 4, target: 4 },
   ]);
   await expectActivationRouteCount(page, 9);
   await expectNetCount(page, 2);
@@ -811,18 +991,16 @@ test("focus fire and healing remain traceable at one shared impact phase", async
     scenario: "team_focus_crossfire",
   });
   await advanceScriptTo(page, 3);
-  await assertLiveCanonicalFrame(page, {
+  const frame = await assertLiveCanonicalFrame(page, {
     scenario: "team_focus_crossfire",
     transition: 3,
     roster: [0, 1, 2, 3, 5, 6, 7, 8],
-    eventCount: 28,
-    eventKinds: {
+    stableEventKinds: {
       ability_activated: 7,
       combat_countdown_reset: 8,
       recipient_health_resolution: 1,
       source_damage_output: 4,
       source_healing_output: 3,
-      status_aged_to_zero: 1,
       status_applied: 4,
     },
     activations: [
@@ -837,24 +1015,18 @@ test("focus fire and healing remain traceable at one shared impact phase", async
     routeCount: 7,
     netCount: 1,
   });
-  await expectRosterStatuses(
-    page,
-    5,
-    statuses([
-      ["slow_hunter_basic", 1],
-      ["priest_freedom", 1],
-    ]),
-  );
+  const focusStatuses = sceneStatuses(frame, 5);
+  expect(focusStatuses.map(({ tokenId }) => tokenId)).toEqual([
+    "slow_hunter_basic",
+    "priest_freedom",
+  ]);
+  await expectRosterStatuses(page, 5, focusStatuses);
 
-  await captureBaseline(
-    page,
-    "team-focus-crossfire-t3-health-resolution-phase-1440x900.png",
-    {
-      commandPosts,
-      expectedTransientCount: 1,
-      logicalMs: HEALTH_RESOLUTION_PHASE_MS,
-    },
-  );
+  await assertStablePresentationFrame(page, {
+    commandPosts,
+    expectedTransientCount: healthResolutionCount(frame),
+    logicalMs: HEALTH_RESOLUTION_PHASE_MS,
+  });
 });
 
 test("moving Basic crossfire preserves combat before successor movement", async ({
@@ -864,12 +1036,11 @@ test("moving Basic crossfire preserves combat before successor movement", async 
     scenario: "moving_basic_crossfire",
   });
   await advanceScriptTo(page, 1);
-  await assertLiveCanonicalFrame(page, {
+  const frame = await assertLiveCanonicalFrame(page, {
     scenario: "moving_basic_crossfire",
     transition: 1,
     roster: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-    eventCount: 50,
-    eventKinds: {
+    stableEventKinds: {
       ability_activated: 10,
       combat_countdown_reset: 8,
       ordinary_movement_phase_displacement: 10,
@@ -894,20 +1065,16 @@ test("moving Basic crossfire preserves combat before successor movement", async 
     netCount: 8,
   });
   await expectNetRecipients(page, [0, 1, 2, 3, 5, 6, 7, 8]);
-  await expectRosterStatuses(page, 0, statuses([["priest_freedom", 1]]));
-  await expectRosterStatuses(page, 2, statuses([["slow_hunter_basic", 1]]));
-  await expectRosterStatuses(page, 5, statuses([["priest_freedom", 1]]));
-  await expectRosterStatuses(page, 7, statuses([["slow_hunter_basic", 1]]));
+  await expectRosterStatuses(page, 0, sceneStatuses(frame, 0));
+  await expectRosterStatuses(page, 2, sceneStatuses(frame, 2));
+  await expectRosterStatuses(page, 5, sceneStatuses(frame, 5));
+  await expectRosterStatuses(page, 7, sceneStatuses(frame, 7));
 
-  await captureBaseline(
-    page,
-    "moving-basic-crossfire-t1-health-resolution-phase-1440x900.png",
-    {
-      commandPosts,
-      expectedTransientCount: 8,
-      logicalMs: HEALTH_RESOLUTION_PHASE_MS,
-    },
-  );
+  await assertStablePresentationFrame(page, {
+    commandPosts,
+    expectedTransientCount: healthResolutionCount(frame),
+    logicalMs: HEALTH_RESOLUTION_PHASE_MS,
+  });
 });
 
 test("moving focus fire and healing remain readable at minimum size", async ({
@@ -918,12 +1085,11 @@ test("moving focus fire and healing remain readable at minimum size", async ({
     viewport: MINIMUM_VIEWPORT,
   });
   await advanceScriptTo(page, 1);
-  await assertLiveCanonicalFrame(page, {
+  const frame = await assertLiveCanonicalFrame(page, {
     scenario: "moving_focus_crossfire",
     transition: 1,
     roster: [0, 1, 2, 3, 5, 6, 7, 8],
-    eventCount: 32,
-    eventKinds: {
+    stableEventKinds: {
       ability_activated: 7,
       combat_countdown_reset: 5,
       ordinary_movement_phase_displacement: 8,
@@ -945,24 +1111,18 @@ test("moving focus fire and healing remain readable at minimum size", async ({
     netCount: 1,
   });
   await expectNetRecipients(page, [5]);
-  await expectRosterStatuses(
-    page,
-    5,
-    statuses([
-      ["slow_hunter_basic", 1],
-      ["priest_freedom", 1],
-    ]),
-  );
+  const focusStatuses = sceneStatuses(frame, 5);
+  expect(focusStatuses.map(({ tokenId }) => tokenId)).toEqual([
+    "slow_hunter_basic",
+    "priest_freedom",
+  ]);
+  await expectRosterStatuses(page, 5, focusStatuses);
 
-  await captureBaseline(
-    page,
-    "moving-focus-crossfire-t1-health-resolution-phase-960x600.png",
-    {
-      commandPosts,
-      expectedTransientCount: 1,
-      logicalMs: HEALTH_RESOLUTION_PHASE_MS,
-    },
-  );
+  await assertStablePresentationFrame(page, {
+    commandPosts,
+    expectedTransientCount: healthResolutionCount(frame),
+    logicalMs: HEALTH_RESOLUTION_PHASE_MS,
+  });
 });
 
 test("mirrored Mage Burst separates activation from persistence", async ({ page }) => {
@@ -970,12 +1130,11 @@ test("mirrored Mage Burst separates activation from persistence", async ({ page 
     scenario: "mirrored_ultimates",
   });
   await advanceScriptTo(page, 1);
-  await assertLiveCanonicalFrame(page, {
+  const frame = await assertLiveCanonicalFrame(page, {
     scenario: "mirrored_ultimates",
     transition: 1,
     roster: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-    eventCount: 8,
-    eventKinds: {
+    stableEventKinds: {
       ability_activated: 2,
       cooldown_started: 2,
       ordinary_movement_phase_displacement: 2,
@@ -989,18 +1148,15 @@ test("mirrored Mage Burst separates activation from persistence", async ({ page 
     netCount: 0,
   });
   await expect(page.locator(".combat-burst__wave")).toHaveCount(4);
-  await expectRosterStatuses(page, 0, statuses([["mage_burst", 5]]));
-  await expectRosterStatuses(page, 5, statuses([["mage_burst", 5]]));
+  expect(sceneStatuses(frame, 0).map(({ tokenId }) => tokenId)).toEqual(["mage_burst"]);
+  await expectRosterStatuses(page, 0, sceneStatuses(frame, 0));
+  await expectRosterStatuses(page, 5, sceneStatuses(frame, 5));
 
-  await captureBaseline(
-    page,
-    "mirrored-ultimates-mage-burst-t1-ability-phase-1440x900.png",
-    {
-      commandPosts,
-      expectedTransientCount: 0,
-      logicalMs: ABILITY_PHASE_MS,
-    },
-  );
+  await assertStablePresentationFrame(page, {
+    commandPosts,
+    expectedTransientCount: 0,
+    logicalMs: ABILITY_PHASE_MS,
+  });
 });
 
 test("mirrored Warrior Charge keeps reciprocal routes and consequences distinct", async ({
@@ -1010,12 +1166,11 @@ test("mirrored Warrior Charge keeps reciprocal routes and consequences distinct"
     scenario: "mirrored_ultimates",
   });
   await advanceScriptTo(page, 2);
-  await assertLiveCanonicalFrame(page, {
+  const frame = await assertLiveCanonicalFrame(page, {
     scenario: "mirrored_ultimates",
     transition: 2,
     roster: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-    eventCount: 16,
-    eventKinds: {
+    stableEventKinds: {
       ability_activated: 2,
       charge_phase_displacement: 2,
       combat_countdown_reset: 2,
@@ -1034,33 +1189,19 @@ test("mirrored Warrior Charge keeps reciprocal routes and consequences distinct"
   await expect(
     page.locator(`${CHOREOGRAPHY_ROOT} .combat-effect--charge-displacement`),
   ).toHaveCount(2);
-  await expectRosterStatuses(
-    page,
-    1,
-    statuses([
-      ["stun_warrior_charge", 1],
-      ["slow_warrior_charge", 5],
-    ]),
-  );
-  await expectRosterStatuses(
-    page,
-    6,
-    statuses([
-      ["stun_warrior_charge", 1],
-      ["slow_warrior_charge", 5],
-    ]),
-  );
+  expect(sceneStatuses(frame, 1).map(({ tokenId }) => tokenId)).toEqual([
+    "stun_warrior_charge",
+    "slow_warrior_charge",
+  ]);
+  await expectRosterStatuses(page, 1, sceneStatuses(frame, 1));
+  await expectRosterStatuses(page, 6, sceneStatuses(frame, 6));
 
-  await assertHealthResolutionPhase(page, 2);
-  await captureBaseline(
-    page,
-    "mirrored-ultimates-warrior-charge-t2-charge-phase-1440x900.png",
-    {
-      commandPosts,
-      expectedTransientCount: 0,
-      logicalMs: CHARGE_PHASE_MS,
-    },
-  );
+  await assertHealthResolutionPhase(page, healthResolutionCount(frame));
+  await assertStablePresentationFrame(page, {
+    commandPosts,
+    expectedTransientCount: 0,
+    logicalMs: CHARGE_PHASE_MS,
+  });
 });
 
 test("mirrored Hunter Trap keeps delivery separate from durable control", async ({
@@ -1070,19 +1211,17 @@ test("mirrored Hunter Trap keeps delivery separate from durable control", async 
     scenario: "mirrored_ultimates",
   });
   await advanceScriptTo(page, 3);
-  await assertLiveCanonicalFrame(page, {
+  const frame = await assertLiveCanonicalFrame(page, {
     scenario: "mirrored_ultimates",
     transition: 3,
     roster: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-    eventCount: 16,
-    eventKinds: {
+    stableEventKinds: {
       ability_activated: 2,
       combat_countdown_reset: 2,
       cooldown_started: 2,
       ordinary_movement_phase_displacement: 2,
       recipient_health_resolution: 2,
       source_damage_output: 2,
-      status_aged_to_zero: 2,
       status_applied: 2,
     },
     activations: [
@@ -1093,19 +1232,18 @@ test("mirrored Hunter Trap keeps delivery separate from durable control", async 
     netCount: 2,
   });
   await expect(page.locator(".combat-trap__lattice")).toHaveCount(2);
-  await expectRosterStatuses(page, 2, statuses([["stun_hunter_trap", 4]]));
-  await expectRosterStatuses(page, 7, statuses([["stun_hunter_trap", 4]]));
-
-  await assertHealthResolutionPhase(page, 2);
-  await captureBaseline(
-    page,
-    "mirrored-ultimates-hunter-trap-t3-status-phase-1440x900.png",
-    {
-      commandPosts,
-      expectedTransientCount: 0,
-      logicalMs: STATUS_PHASE_MS,
-    },
+  expect(sceneStatuses(frame, 2).map(({ tokenId }) => tokenId)).toContain(
+    "stun_hunter_trap",
   );
+  await expectRosterStatuses(page, 2, sceneStatuses(frame, 2));
+  await expectRosterStatuses(page, 7, sceneStatuses(frame, 7));
+
+  await assertHealthResolutionPhase(page, healthResolutionCount(frame));
+  await assertStablePresentationFrame(page, {
+    commandPosts,
+    expectedTransientCount: 0,
+    logicalMs: STATUS_PHASE_MS,
+  });
 });
 
 test("mirrored Rogue Poison keeps route identity and three consequences legible", async ({
@@ -1115,12 +1253,11 @@ test("mirrored Rogue Poison keeps route identity and three consequences legible"
     scenario: "mirrored_ultimates",
   });
   await advanceScriptTo(page, 4);
-  await assertLiveCanonicalFrame(page, {
+  const frame = await assertLiveCanonicalFrame(page, {
     scenario: "mirrored_ultimates",
     transition: 4,
     roster: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-    eventCount: 18,
-    eventKinds: {
+    stableEventKinds: {
       ability_activated: 2,
       combat_countdown_reset: 2,
       cooldown_started: 2,
@@ -1137,47 +1274,41 @@ test("mirrored Rogue Poison keeps route identity and three consequences legible"
     netCount: 2,
   });
   await expect(page.locator(".combat-poison__splash")).toHaveCount(6);
-  const poisonStatuses = statuses([
-    ["stun_rogue_poison", 1],
-    ["slow_rogue_poison", 5],
-    ["anti_heal_rogue_poison", 4],
+  const poisonStatuses = sceneStatuses(frame, 3);
+  expect(poisonStatuses.map(({ tokenId }) => tokenId)).toEqual([
+    "stun_rogue_poison",
+    "slow_rogue_poison",
+    "anti_heal_rogue_poison",
   ]);
   await expectRosterStatuses(page, 3, poisonStatuses);
   await expectRosterStatuses(page, 8, poisonStatuses);
 
-  await assertHealthResolutionPhase(page, 2);
-  await captureBaseline(
-    page,
-    "mirrored-ultimates-rogue-poison-t4-status-phase-1440x900.png",
-    {
-      commandPosts,
-      expectedTransientCount: 0,
-      logicalMs: STATUS_PHASE_MS,
-    },
-  );
+  await assertHealthResolutionPhase(page, healthResolutionCount(frame));
+  await assertStablePresentationFrame(page, {
+    commandPosts,
+    expectedTransientCount: 0,
+    logicalMs: STATUS_PHASE_MS,
+  });
 });
 
-test("mirrored Holy Word and Poison expiry remain distinct across causal phases", async ({
+test("mirrored Holy Word and Poison lifecycle remains distinct across causal phases", async ({
   page,
 }) => {
   const commandPosts = await loadLiveVisualCase(page, debuggerUrl, {
     scenario: "mirrored_ultimates",
   });
   await advanceScriptTo(page, 5);
-  await assertLiveCanonicalFrame(page, {
+  const frame = await assertLiveCanonicalFrame(page, {
     scenario: "mirrored_ultimates",
     transition: 5,
     roster: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-    eventCount: 18,
-    eventKinds: {
+    stableEventKinds: {
       ability_activated: 2,
       combat_countdown_reset: 4,
       cooldown_started: 2,
       ordinary_movement_phase_displacement: 2,
       recipient_health_resolution: 2,
-      respawn_wave_occurred: 2,
       source_healing_output: 2,
-      status_aged_to_zero: 2,
     },
     activations: [
       { tokenId: "holy_word", source: 4, target: 3 },
@@ -1187,28 +1318,40 @@ test("mirrored Holy Word and Poison expiry remain distinct across causal phases"
     netCount: 2,
   });
   await expect(page.locator(".combat-holy__pulse")).toHaveCount(4);
-  await expect(
-    page.locator(
-      `${CHOREOGRAPHY_ROOT} .combat-effect--status-lifecycle[data-token-id="stun_rogue_poison"][data-lifecycle="expired"]`,
-    ),
-  ).toHaveCount(2);
-  const remainingPoisonStatuses = statuses([
-    ["slow_rogue_poison", 4],
-    ["anti_heal_rogue_poison", 3],
-  ]);
+  const lifecycle = statusEventsFromFrame(frame);
+  const poisonStunLifecycle = lifecycle.filter(
+    ({ tokenId }) => tokenId === "stun_rogue_poison",
+  );
+  expect(poisonStunLifecycle).toEqual(
+    sceneStatusDuration(frame, "rogue_poison_stun") === 1
+      ? [3, 8].map((recipient) => ({
+          eventType: "status_aged_to_zero",
+          lifecycle: "expired",
+          recipient,
+          source: null,
+          tokenId: "stun_rogue_poison",
+        }))
+      : [],
+  );
+  await expectRenderedStatusEvents(page, lifecycle);
+  await expectStatusFeed(
+    page,
+    lifecycle.map(({ eventType, recipient, source }) => ({
+      eventType,
+      recipient,
+      source,
+    })),
+  );
+  const remainingPoisonStatuses = sceneStatuses(frame, 3);
   await expectRosterStatuses(page, 3, remainingPoisonStatuses);
   await expectRosterStatuses(page, 8, remainingPoisonStatuses);
 
-  await assertHealthResolutionPhase(page, 2);
-  await captureBaseline(
-    page,
-    "mirrored-ultimates-holy-word-t5-poison-expiry-phase-1440x900.png",
-    {
-      commandPosts,
-      expectedTransientCount: 0,
-      logicalMs: STATUS_PHASE_MS,
-    },
-  );
+  await assertHealthResolutionPhase(page, healthResolutionCount(frame));
+  await assertStablePresentationFrame(page, {
+    commandPosts,
+    expectedTransientCount: 0,
+    logicalMs: STATUS_PHASE_MS,
+  });
 });
 
 test("converging Charge preserves three directions without numeric collisions", async ({
@@ -1218,12 +1361,11 @@ test("converging Charge preserves three directions without numeric collisions", 
     scenario: "charge_convergence",
   });
   await advanceScriptTo(page, 1);
-  await assertLiveCanonicalFrame(page, {
+  const frame = await assertLiveCanonicalFrame(page, {
     scenario: "charge_convergence",
     transition: 1,
     roster: [0, 1, 5],
-    eventCount: 23,
-    eventKinds: {
+    stableEventKinds: {
       ability_activated: 3,
       charge_phase_displacement: 3,
       combat_countdown_reset: 3,
@@ -1247,15 +1389,16 @@ test("converging Charge preserves three directions without numeric collisions", 
     .evaluateAll((paths) => paths.map((path) => path.getAttribute("d")));
   expect(routePaths).not.toContain(null);
   expect(new Set(routePaths).size).toBe(3);
-  const chargeStatuses = statuses([
-    ["stun_warrior_charge", 1],
-    ["slow_warrior_charge", 5],
+  const chargeStatuses = sceneStatuses(frame, 0);
+  expect(chargeStatuses.map(({ tokenId }) => tokenId)).toEqual([
+    "stun_warrior_charge",
+    "slow_warrior_charge",
   ]);
   await expectRosterStatuses(page, 0, chargeStatuses);
   await expectRosterStatuses(page, 5, chargeStatuses);
 
-  await assertHealthResolutionPhase(page, 2);
-  await captureBaseline(page, "charge-convergence-t1-charge-phase-1440x900.png", {
+  await assertHealthResolutionPhase(page, healthResolutionCount(frame));
+  await assertStablePresentationFrame(page, {
     commandPosts,
     expectedTransientCount: 0,
     logicalMs: CHARGE_PHASE_MS,
@@ -1267,12 +1410,11 @@ test("Trap lifecycle t1 proves four exact applications", async ({ page }) => {
     scenario: "trap_lifecycle",
   });
   await advanceScriptTo(page, 1);
-  await assertLiveCanonicalFrame(page, {
+  const frame = await assertLiveCanonicalFrame(page, {
     scenario: "trap_lifecycle",
     transition: 1,
     roster: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-    eventCount: 28,
-    eventKinds: {
+    stableEventKinds: {
       ability_activated: 4,
       combat_countdown_reset: 8,
       cooldown_started: 4,
@@ -1289,13 +1431,9 @@ test("Trap lifecycle t1 proves four exact applications", async ({ page }) => {
     routeCount: 4,
     netCount: 4,
   });
-  const lifecycle = [5, 6, 7, 8].map((recipient, source) => ({
-    eventType: "status_applied",
-    lifecycle: "applied",
-    recipient,
-    source,
-    tokenId: "stun_hunter_trap",
-  }));
+  const lifecycle = statusEventsFromFrame(frame);
+  expect(lifecycle).toHaveLength(4);
+  expect(lifecycle.every(({ tokenId }) => tokenId === "stun_hunter_trap")).toBe(true);
   await expectRenderedStatusEvents(page, lifecycle);
   await expectStatusFeed(
     page,
@@ -1306,170 +1444,146 @@ test("Trap lifecycle t1 proves four exact applications", async ({ page }) => {
     })),
   );
   for (const recipient of [5, 6, 7, 8]) {
-    await expectRosterStatuses(page, recipient, statuses([["stun_hunter_trap", 4]]));
+    await expectRosterStatuses(page, recipient, sceneStatuses(frame, recipient));
   }
 
-  await assertHealthResolutionPhase(page, 4);
-  await captureBaseline(page, "trap-lifecycle-t1-applied-1440x900.png", {
+  await assertHealthResolutionPhase(page, healthResolutionCount(frame));
+  await assertStablePresentationFrame(page, {
     commandPosts,
     expectedTransientCount: 0,
     logicalMs: STATUS_PHASE_MS,
   });
 });
 
-test("Trap lifecycle t2 proves one exact break without overclaiming decrements", async ({
+test("Trap lifecycle t2 proves authoritative records without overclaiming decrements", async ({
   page,
 }) => {
   const commandPosts = await loadLiveVisualCase(page, debuggerUrl, {
     scenario: "trap_lifecycle",
   });
   await advanceScriptTo(page, 2);
-  await assertLiveCanonicalFrame(page, {
+  const frame = await assertLiveCanonicalFrame(page, {
     scenario: "trap_lifecycle",
     transition: 2,
     roster: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-    eventCount: 7,
-    eventKinds: {
+    stableEventKinds: {
       ability_activated: 1,
       combat_countdown_reset: 2,
       recipient_health_resolution: 1,
       source_damage_output: 1,
       status_applied: 1,
-      status_broken_by_damage: 1,
     },
     activations: [{ tokenId: "basic_damage", source: 0, target: 5 }],
     routeCount: 1,
     netCount: 1,
   });
   await expectNetRecipients(page, [5]);
-  await expectRenderedStatusEvents(page, [
-    {
-      eventType: "status_applied",
-      lifecycle: "applied",
-      recipient: 5,
-      source: 0,
-      tokenId: "slow_hunter_basic",
-    },
-    {
-      eventType: "status_broken_by_damage",
-      lifecycle: "trap_broken",
-      recipient: 5,
-      source: null,
-      tokenId: "stun_hunter_trap",
-    },
-  ]);
+  const lifecycle = statusEventsFromFrame(frame);
+  expect(lifecycle.filter(({ tokenId }) => tokenId === "stun_hunter_trap")).toEqual(
+    expectedTrapLifecycle(frame, 2),
+  );
+  expect(lifecycle).toContainEqual({
+    eventType: "status_applied",
+    lifecycle: "applied",
+    recipient: 5,
+    source: 0,
+    tokenId: "slow_hunter_basic",
+  });
+  await expectRenderedStatusEvents(page, lifecycle);
   await expectStatusFeed(page, [
-    {
-      eventType: "status_applied",
-      recipient: 5,
-      source: 0,
-    },
-    {
-      eventType: "status_broken_by_damage",
-      recipient: 5,
-      source: null,
-    },
+    ...lifecycle.map(({ eventType, recipient, source }) => ({
+      eventType,
+      recipient,
+      source,
+    })),
   ]);
   // Former V1 decrement rows had no CP2 event identity. Their absence here is
   // now proved by durable successor status values instead of inferred events.
-  await expectRosterStatuses(page, 5, statuses([["slow_hunter_basic", 1]]));
+  await expectRosterStatuses(page, 5, sceneStatuses(frame, 5));
   for (const recipient of [6, 7, 8]) {
-    await expectRosterStatuses(page, recipient, statuses([["stun_hunter_trap", 3]]));
+    await expectRosterStatuses(page, recipient, sceneStatuses(frame, recipient));
   }
 
-  await assertHealthResolutionPhase(page, 1);
-  await captureBaseline(page, "trap-lifecycle-t2-broken-1440x900.png", {
+  await assertHealthResolutionPhase(page, healthResolutionCount(frame));
+  await assertStablePresentationFrame(page, {
     commandPosts,
     expectedTransientCount: 0,
     logicalMs: STATUS_PHASE_MS,
   });
 });
 
-test("Trap lifecycle t4 proves exact break, reapplication, and durable successor values", async ({
+test("Trap lifecycle t4 proves authoritative lifecycle and durable successor values", async ({
   page,
 }) => {
   const commandPosts = await loadLiveVisualCase(page, debuggerUrl, {
     scenario: "trap_lifecycle",
   });
   await advanceScriptTo(page, 4);
-  await assertLiveCanonicalFrame(page, {
+  const frame = await assertLiveCanonicalFrame(page, {
     scenario: "trap_lifecycle",
     transition: 4,
     roster: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-    eventCount: 8,
-    eventKinds: {
+    stableEventKinds: {
       ability_activated: 1,
       combat_countdown_reset: 2,
       cooldown_started: 1,
       recipient_health_resolution: 1,
       source_damage_output: 1,
       status_applied: 1,
-      status_broken_by_damage: 1,
     },
     activations: [{ tokenId: "hunter_trap", source: 4, target: 6 }],
     routeCount: 1,
     netCount: 1,
   });
-  await expectRenderedStatusEvents(page, [
-    {
-      eventType: "status_broken_by_damage",
-      lifecycle: "trap_broken",
-      recipient: 6,
-      source: null,
-      tokenId: "stun_hunter_trap",
-    },
-    {
-      eventType: "status_applied",
-      lifecycle: "applied",
-      recipient: 6,
-      source: 4,
-      tokenId: "stun_hunter_trap",
-    },
-  ]);
-  await expectStatusFeed(page, [
-    {
-      eventType: "status_broken_by_damage",
-      recipient: 6,
-      source: null,
-    },
-    {
-      eventType: "status_applied",
-      recipient: 6,
-      source: 4,
-    },
-  ]);
-  await expectRosterStatuses(page, 6, statuses([["stun_hunter_trap", 4]]));
+  const lifecycle = statusEventsFromFrame(frame);
+  expect(lifecycle.filter(({ tokenId }) => tokenId === "stun_hunter_trap")).toEqual(
+    expectedTrapLifecycle(frame, 4),
+  );
+  expect(lifecycle).toContainEqual({
+    eventType: "status_applied",
+    lifecycle: "applied",
+    recipient: 6,
+    source: 4,
+    tokenId: "stun_hunter_trap",
+  });
+  await expectRenderedStatusEvents(page, lifecycle);
+  await expectStatusFeed(
+    page,
+    lifecycle.map(({ eventType, recipient, source }) => ({
+      eventType,
+      recipient,
+      source,
+    })),
+  );
+  await expectRosterStatuses(page, 6, sceneStatuses(frame, 6));
   for (const recipient of [7, 8]) {
-    await expectRosterStatuses(page, recipient, statuses([["stun_hunter_trap", 1]]));
+    await expectRosterStatuses(page, recipient, sceneStatuses(frame, recipient));
   }
 
-  await assertHealthResolutionPhase(page, 1);
-  await captureBaseline(page, "trap-lifecycle-t4-broken-and-reapplied-1440x900.png", {
+  await assertHealthResolutionPhase(page, healthResolutionCount(frame));
+  await assertStablePresentationFrame(page, {
     commandPosts,
     expectedTransientCount: 0,
     logicalMs: STATUS_PHASE_MS,
   });
 });
 
-test("Trap lifecycle t5 retains two independent aged-to-zero records", async ({
+test("Trap lifecycle t5 retains independent authoritative lifecycle records", async ({
   page,
 }) => {
   const commandPosts = await loadLiveVisualCase(page, debuggerUrl, {
     scenario: "trap_lifecycle",
   });
   await advanceScriptTo(page, 5);
-  await assertLiveCanonicalFrame(page, {
+  const frame = await assertLiveCanonicalFrame(page, {
     scenario: "trap_lifecycle",
     transition: 5,
     roster: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-    eventCount: 10,
-    eventKinds: {
+    stableEventKinds: {
       ability_activated: 1,
       combat_countdown_reset: 2,
       recipient_health_resolution: 1,
-      respawn_wave_occurred: 2,
       source_damage_output: 1,
-      status_aged_to_zero: 2,
       status_applied: 1,
     },
     activations: [{ tokenId: "basic_damage", source: 2, target: 7 }],
@@ -1477,55 +1591,35 @@ test("Trap lifecycle t5 retains two independent aged-to-zero records", async ({
     netCount: 1,
   });
   await expectNetRecipients(page, [7]);
-  await expectRenderedStatusEvents(page, [
-    {
-      eventType: "status_applied",
-      lifecycle: "applied",
-      recipient: 7,
-      source: 2,
-      tokenId: "slow_hunter_basic",
-    },
-    {
-      eventType: "status_aged_to_zero",
-      lifecycle: "expired",
-      recipient: 7,
-      source: null,
-      tokenId: "stun_hunter_trap",
-    },
-    {
-      eventType: "status_aged_to_zero",
-      lifecycle: "expired",
-      recipient: 8,
-      source: null,
-      tokenId: "stun_hunter_trap",
-    },
-  ]);
-  await expectStatusFeed(page, [
-    {
-      eventType: "status_applied",
-      recipient: 7,
-      source: 2,
-    },
-    {
-      eventType: "status_aged_to_zero",
-      recipient: 7,
-      source: null,
-    },
-    {
-      eventType: "status_aged_to_zero",
-      recipient: 8,
-      source: null,
-    },
-  ]);
-  await expectRosterStatuses(page, 6, statuses([["stun_hunter_trap", 3]]));
-  await expectRosterStatuses(page, 7, statuses([["slow_hunter_basic", 1]]));
-  await expectRosterStatuses(page, 8, []);
+  const lifecycle = statusEventsFromFrame(frame);
+  expect(lifecycle.filter(({ tokenId }) => tokenId === "stun_hunter_trap")).toEqual(
+    expectedTrapLifecycle(frame, 5),
+  );
+  expect(lifecycle).toContainEqual({
+    eventType: "status_applied",
+    lifecycle: "applied",
+    recipient: 7,
+    source: 2,
+    tokenId: "slow_hunter_basic",
+  });
+  await expectRenderedStatusEvents(page, lifecycle);
+  await expectStatusFeed(
+    page,
+    lifecycle.map(({ eventType, recipient, source }) => ({
+      eventType,
+      recipient,
+      source,
+    })),
+  );
+  await expectRosterStatuses(page, 6, sceneStatuses(frame, 6));
+  await expectRosterStatuses(page, 7, sceneStatuses(frame, 7));
+  await expectRosterStatuses(page, 8, sceneStatuses(frame, 8));
   await expect(
     page.locator(`${CHOREOGRAPHY_ROOT} .combat-lifecycle__shard`),
   ).toHaveCount(0);
 
-  await assertHealthResolutionPhase(page, 1);
-  await captureBaseline(page, "trap-lifecycle-t5-aged-to-zero-1440x900.png", {
+  await assertHealthResolutionPhase(page, healthResolutionCount(frame));
+  await assertStablePresentationFrame(page, {
     commandPosts,
     expectedTransientCount: 0,
     logicalMs: STATUS_PHASE_MS,
@@ -1539,12 +1633,11 @@ test("maximum status density remains complete after the explanation settles", as
     scenario: "max_status_stack",
   });
   await advanceScriptTo(page, 1);
-  await assertLiveCanonicalFrame(page, {
+  const frame = await assertLiveCanonicalFrame(page, {
     scenario: "max_status_stack",
     transition: 1,
     roster: [0, 1, 5, 6, 7, 8],
-    eventCount: 31,
-    eventKinds: {
+    stableEventKinds: {
       ability_activated: 6,
       charge_phase_displacement: 1,
       combat_countdown_reset: 5,
@@ -1565,25 +1658,21 @@ test("maximum status density remains complete after the explanation settles", as
     routeCount: 5,
     netCount: 1,
   });
-  const fullStatusStack = statuses([
-    ["stun_warrior_charge", 1],
-    ["stun_hunter_trap", 4],
-    ["stun_rogue_poison", 1],
-    ["slow_warrior_charge", 5],
-    ["slow_hunter_basic", 1],
-    ["slow_rogue_poison", 5],
-    ["anti_heal_rogue_poison", 4],
-    ["priest_freedom", 1],
-    ["mage_burst", 5],
+  const fullStatusStack = sceneStatuses(frame, 0);
+  expect(fullStatusStack.map(({ tokenId }) => tokenId)).toEqual([
+    "stun_warrior_charge",
+    "stun_hunter_trap",
+    "stun_rogue_poison",
+    "slow_warrior_charge",
+    "slow_hunter_basic",
+    "slow_rogue_poison",
+    "anti_heal_rogue_poison",
+    "priest_freedom",
+    "mage_burst",
   ]);
   await expectRosterStatuses(page, 0, fullStatusStack);
   await expectBattlefieldStatuses(page, 0, fullStatusStack);
-  await expectBattlefieldCooldowns(page, [
-    { slot: 0, ticks: 30 },
-    { slot: 5, ticks: 30 },
-    { slot: 6, ticks: 30 },
-    { slot: 8, ticks: 30 },
-  ]);
+  await expectBattlefieldCooldowns(page, sceneCooldowns(frame));
   const durableLayer = page.locator(
     '#battlefield [data-layer="durable-status-modifier"]',
   );
@@ -1594,7 +1683,7 @@ test("maximum status density remains complete after the explanation settles", as
   ).toHaveAttribute("data-expanded", "true");
   await expect(page.locator("#battlefield .cooldown-dock")).toHaveCount(4);
 
-  await captureBaseline(page, "max-status-stack-t1-settled-1440x900.png", {
+  await assertStablePresentationFrame(page, {
     commandPosts,
     expectedTransientCount: 0,
     settle: true,
@@ -1687,7 +1776,7 @@ test("crowded synthetic renderer fixture remains bounded at the minimum viewport
   expect(netAssociations).toEqual(
     [0, 1, 3, 4, 5, 6, 8, 9].map((recipient) => ({
       recipient: String(recipient),
-      recipientLabel: `id_${recipient}`,
+      recipientLabel: `Agent ID ${recipient}`,
       hasAnchor: true,
       hasLeader: true,
     })),
@@ -1833,14 +1922,24 @@ test("synthetic POV fixture omits hidden agents and spatial endpoints", async ({
     page.locator('.pov-observed-body[data-observation-key="ally:1"]'),
   ).toHaveAttribute("aria-label", /Hunter Trap stun, 2 ticks/u);
   await observedTrap.hover();
-  await expect(page.locator("#visual-tooltip-title")).toHaveText("Trap");
+  await expect(page.locator("#visual-tooltip-title")).toHaveText(
+    "Hunter (Ultimate: Trap) Stun",
+  );
   await expect(page.locator("#visual-tooltip-details")).toContainText(
     "Source agent identity is not disclosed",
   );
   await expect(page.locator("#battlefield .pending-route")).toHaveCount(0);
   await expect(page.locator("#battlefield .debug-visibility-cue")).toHaveCount(0);
   await expect(page.locator("#battlefield .debug-protected-zone")).toHaveCount(2);
-  await expect(page.locator("body")).not.toContainText("id_5");
+  await expect(
+    page.locator('#battlefield .agent[data-public-agent-id="5"]'),
+  ).toHaveCount(0);
+  await expect(
+    page.locator('#roster .roster-row[data-public-agent-id="5"]'),
+  ).toHaveCount(0);
+  await expect(
+    page.locator('[data-source-slot="5"], [data-target-slot="5"]'),
+  ).toHaveCount(0);
   await expect(
     page.locator(`${CHOREOGRAPHY_ROOT} .combat-effect--activation[data-target-slot]`),
   ).toHaveCount(0);

@@ -122,7 +122,7 @@ def test_crowded_v2_scene_preserves_agents_statuses_and_event_multiplicity() -> 
         _close(result)
 
 
-def test_canonical_event_vocabulary_draws_all_21_events_exactly_once() -> None:
+def test_canonical_event_vocabulary_draws_every_event_row_exactly_once() -> None:
     fixture, result = _render_fixture("canonical_event_vocabulary")
     try:
         assert fixture.event_batch is not None
@@ -132,7 +132,7 @@ def test_canonical_event_vocabulary_draws_all_21_events_exactly_once() -> None:
         assert event_gids == tuple(
             f"scene:v2:event:{event.event_id}" for event in fixture.event_batch.events
         )
-        assert len(event_gids) == 21
+        assert len(event_gids) == len(fixture.event_batch.events) == 23
         labels = tuple(
             artist.get_text()
             for artist in _texts(result)

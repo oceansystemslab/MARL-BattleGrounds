@@ -21,6 +21,86 @@ export const STATUS_PHASE_MS = 680;
 // visibly painted without inventing an order between them.
 export const POV_SUCCESSOR_OBSERVATION_PHASE_MS = 600;
 
+/**
+ * Fail closed when a visible native interaction surface has not been enrolled
+ * in the delegated semantic-help registry. Hidden mode/dialog controls are
+ * intentionally audited only when their owning surface becomes visible. A
+ * registered local ancestor may own an SVG focus child; battlefield/timeline
+ * composites never excuse an otherwise unregistered descendant control.
+ *
+ * @param {import("@playwright/test").Page} page
+ */
+export async function expectVisibleInteractiveHelpInventory(page) {
+  const inventory = await page
+    .locator('button, select, input, summary, [tabindex]:not([tabindex="-1"])')
+    .evaluateAll((elements) => {
+      /** @param {Element} element */
+      const label = (element) => {
+        if (element.id) return `#${element.id}`;
+        const ariaLabel = element.getAttribute("aria-label");
+        if (ariaLabel) return `${element.localName}[aria-label=${ariaLabel}]`;
+        const key = element.getAttribute("data-key");
+        if (key) return `${element.localName}[data-key=${key}]`;
+        return `${element.localName}:${element.textContent?.trim() ?? ""}`;
+      };
+      /** @param {Element} element */
+      const localHelpOwner = (element) => {
+        const owner = element.closest("[data-tooltip-owner]");
+        if (owner !== element && owner?.matches("#battlefield, #replay-timeline")) {
+          return null;
+        }
+        return owner;
+      };
+      const visible = elements.filter((element) => {
+        if (!(element instanceof Element)) return false;
+        const style = getComputedStyle(element);
+        return (
+          !element.hasAttribute("hidden") &&
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          element.getClientRects().length > 0
+        );
+      });
+      return {
+        disabled: visible
+          .filter(
+            (element) =>
+              "disabled" in element &&
+              /** @type {{disabled?: unknown}} */ (element).disabled === true,
+          )
+          .map(label),
+        missing: visible
+          .filter((element) => localHelpOwner(element) === null)
+          .map(label),
+        missingDescriptions: visible
+          .filter((element) => {
+            const owner = localHelpOwner(element);
+            return owner !== null && !owner.hasAttribute("aria-description");
+          })
+          .map(label),
+        unregisteredDescriptions: visible
+          .filter(
+            (element) =>
+              element.hasAttribute("aria-description") &&
+              localHelpOwner(element) === null,
+          )
+          .map(label),
+        nativeTitles: visible
+          .filter((element) => element.hasAttribute("title"))
+          .map(label),
+        registered: visible
+          .filter((element) => localHelpOwner(element) !== null)
+          .map(label),
+      };
+    });
+  expect(inventory.missing).toEqual([]);
+  expect(inventory.missingDescriptions).toEqual([]);
+  expect(inventory.unregisteredDescriptions).toEqual([]);
+  expect(inventory.nativeTitles).toEqual([]);
+  expect(inventory.registered.length).toBeGreaterThan(0);
+  return inventory;
+}
+
 const SNAPSHOT_STYLE_PATH = fileURLToPath(
   new URL("./visual-snapshot.css", import.meta.url),
 );
@@ -587,7 +667,6 @@ export async function assertTransientNumberLayout(page, expectedCount) {
           ".modifier-cell__box",
           ".cooldown-cell__box",
           ".legality-pill__box",
-          '.agent-id-tag[data-layout-suppressed="false"] .agent-id-tag-box',
           ".combat-impact__icon",
           ".combat-local__icon",
           ".combat-lifecycle__status-icon",
@@ -603,6 +682,12 @@ export async function assertTransientNumberLayout(page, expectedCount) {
         element.tagName.toLowerCase(),
     }));
     const mapBounds = expand(mapBoundary.getBoundingClientRect(), 0);
+    const publicIdentityBySlot = new Map(
+      [...document.querySelectorAll("#roster .roster-row[data-slot]")].map((row) => [
+        row.getAttribute("data-slot"),
+        row.querySelector(".roster-id")?.textContent?.trim() ?? null,
+      ]),
+    );
     const labelRecords = [
       ...battlefield.querySelectorAll(
         '.combat-effect--net-health[data-spatial-disposition="rendered"] .combat-net__label',
@@ -655,7 +740,7 @@ export async function assertTransientNumberLayout(page, expectedCount) {
         !/^(0|[1-9]\d*)$/.test(record.recipientSlot ?? "") ||
         !record.painted ||
         !record.recipientLabelPainted ||
-        record.recipientLabelText !== `id_${record.recipientSlot}` ||
+        record.recipientLabelText !== publicIdentityBySlot.get(record.recipientSlot) ||
         record.recipientRect === null ||
         ![
           record.rect.left,
@@ -847,11 +932,9 @@ export async function assertVisibleDecimalPrecision(page) {
 
 /**
  * Seek or settle one case, prove presentation-only work sent no command, wait
- * for observable geometry stability, run collision checks, and compare the
- * viewport against its reviewed baseline.
+ * for observable geometry stability, and run the shared presentation checks.
  *
  * @param {import("@playwright/test").Page} page
- * @param {string} snapshotName
  * @param {{
  *   commandPosts: CommandPostCounter,
  *   expectedTransientCount: number,
@@ -861,10 +944,10 @@ export async function assertVisibleDecimalPrecision(page) {
  *   settle?: boolean,
  *   afterSettle?: () => Promise<void>,
  * }} options
+ * @returns {Promise<number>}
  */
-export async function captureBaseline(
+export async function assertStablePresentationFrame(
   page,
-  snapshotName,
   {
     commandPosts,
     expectedTransientCount,
@@ -908,9 +991,27 @@ export async function captureBaseline(
   await assertVisibleDecimalPrecision(page);
   const revision = await currentRevision(page);
   expect(Number.isInteger(revision) && revision >= 0).toBe(true);
+  return commandCountBeforePresentation;
+}
+
+/**
+ * Run the shared presentation checks and compare an explicitly synthetic or
+ * UI-only viewport against its reviewed fixed baseline. Real simulator
+ * trajectories use `assertStablePresentationFrame` directly because catalog
+ * tuning may truthfully alter their geometry, topology, and durable facts.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @param {string} snapshotName
+ * @param {Parameters<typeof assertStablePresentationFrame>[1]} options
+ */
+export async function captureBaseline(page, snapshotName, options) {
+  const commandCountBeforePresentation = await assertStablePresentationFrame(
+    page,
+    options,
+  );
   await expect(page).toHaveScreenshot(snapshotName, {
     animations: "allow",
     stylePath: SNAPSHOT_STYLE_PATH,
   });
-  expect(commandPosts.count()).toBe(commandCountBeforePresentation);
+  expect(options.commandPosts.count()).toBe(commandCountBeforePresentation);
 }

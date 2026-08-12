@@ -80,7 +80,7 @@ Useful invocations:
 ./scripts/dev/run_debug_renderer.sh --scenario team_focus_crossfire
 ./scripts/dev/run_debug_renderer.sh --scenario max_status_stack --include-stress
 ./scripts/dev/run_debug_renderer.sh --controlled-slot 5 --no-ranges
-./scripts/dev/run_debug_renderer.sh --view pov --preset debug
+./scripts/dev/run_debug_renderer.sh --view pov --preset debug  # Technical
 ./scripts/dev/run_debug_renderer.sh --no-open --port 8123
 ./scripts/dev/run_debug_renderer.sh \
   --record-replay recordings/episode.marlbg-replay.json
@@ -104,7 +104,7 @@ Useful invocations:
 | `--no-open` | Print the URL without asking the operating system to open it. |
 | `--port N` | Loopback port; `0` selects an ephemeral port. |
 | `--view researcher\|pov` | Initial authorization mode. Default: `researcher`. |
-| `--preset presentation\|analysis\|debug` | Initial visual-density preset. Default: `analysis`. |
+| `--preset presentation\|analysis\|debug` | Initial visual-density preset. The `debug` wire/CLI value is displayed as **Technical**. Default: `analysis`. |
 | `--verbose` | Enable expanded diagnostics. |
 | `--ranges` / `--no-ranges` | Initially show or hide controlled-actor ranges. |
 | `--static` | Render one Matplotlib reset snapshot; start no server and register no callbacks. |
@@ -246,7 +246,6 @@ inspector retain normal browser keyboard and Tab behavior.
 | `Space` / `Enter` | Submit the staged joint turn in researcher view, or the controlled actor only in agent POV. |
 | `N` | Advance the next registered scripted frame. |
 | `R` | Reset the scenario deterministically. |
-| `Shift+R` | Explain why cooldown-only clearing is unavailable; state is unchanged. |
 | `G` / `V` | Toggle controlled-actor ranges / diagnostic verbosity. |
 | `[` / `]` | Previous / next scenario. |
 | `P` | Pause or resume presentation-only motion. |
@@ -258,8 +257,10 @@ cards, followed by a visually dominant Submit rail. Lower-emphasis
 cycling, target clearing, range and verbosity controls, reset, and scenario
 navigation without competing with turn composition. Each authorized roster row
 also provides **Target** and **Control** buttons. The toolbar provides
-Scenario, View, Preset, Reconnect, Help, Exit, motion pause, `0.5×`, `1×`,
-`2×`, Off, and Skip.
+Scenario, View, Preset, Reconnect, Help, Exit, motion pause, a continuous
+**Graphics rendering speed** control from `0.01×` through `2.00×`, Motion Off,
+and Skip. Graphics rendering speed is presentation-only and never changes the
+authoritative simulator movement scale.
 
 Normal animation briefly gates only the next Submit or scripted-frame command
 during its explanatory phase. Skip, reduced-motion preference, or Off releases
@@ -335,14 +336,26 @@ the published feature channel; source-agent identity and researcher-only source
 attribution are never reconstructed. Multiplier/fraction columns remain exact
 recipient input but are not mislabelled as additional statuses.
 
+Researcher semantic cards use exact recorded Scene V2 facts. Status cards name
+the class action, duration, magnitude, and every directly recorded source agent;
+the source Team/Class join comes from the same scene roster and empty evidence is
+reported as unavailable rather than guessed. Range, Wall/Pillar, aura-field,
+aura-modifier, and Ultimate-cooldown cards follow the same rule. Recipient aura
+modifiers describe only the recorded aggregate multiplier and never invent a
+nearby emitter. Compact **Now** cards stay bounded at the pointer; explicit
+inspection adds numeric-free role/strength/limitation/teamwork/counterplay
+guidance and exact catalog mechanics to the full inspector. No target-independent
+effective output is reconstructed in JavaScript.
+
 ### Presentation presets
 
-- **Presentation:** durable geometry and semantic events with minimal analysis
-  decoration.
+- **Presentation:** durable geometry, semantic events, exact aura fields, and
+  recipient aura modifiers with minimal analysis decoration. Recorded ranges
+  remain governed by the authoritative Ranges toggle.
 - **Analysis:** default researcher layout with roster, selected facts, event
   feed, selected ranges, and selected legality.
-- **Debug:** privileged visibility, expanded candidate legality, geometry, and
-  technical frame details.
+- **Technical:** privileged visibility, expanded candidate legality, geometry,
+  and technical frame details. The wire/CLI preset identifier remains `debug`.
 
 ## Responsive battlefield and inspector
 
@@ -361,19 +374,25 @@ independently. The primary review viewport is `1440×900`; the minimum supported
 viewport is `960×600`. A stacked convenience layout exists below `960px`, but
 it is outside the supported review contract.
 
-Exact IDs are durable in the roster. Battlefield identity tags appear for
-selection/hover when space permits, avoiding permanent `id_N` clutter.
+Public Agent IDs are durable in the roster and semantic explanations. Internal
+global-slot joins are never presented as agent identity on the battlefield.
 One delegated tooltip explains the highest-priority authorized fact beneath
 the pointer or keyboard focus. Statuses, modifiers, overflow, legality, and
 cooldowns outrank agents; agents outrank event routes, obstacles, ranges, and
-auras. The tooltip switches immediately, stays within the viewport, and cannot
-explain a fact omitted from an agent-POV payload.
+auras. Cards use escaped structured label/value rows and remain inside the
+battlefield or panel that owns the fact. The tooltip switches immediately and
+cannot explain a fact omitted from an agent-POV payload. Explicit inspection
+opens the same normalized descriptor in a persistent full-explanation pane;
+audience changes clear that pane before any reduced view is installed.
 
 ## Visual vocabulary
 
-The [visual acceptance evidence gallery](visual_debugger_visual_evidence.md)
-maps every requested visual rule to its automated proof and
-original-resolution screenshot.
+CI maintains fixed visual-regression baselines for explicitly synthetic combat
+vocabulary and UI-only cases. Real-simulator trajectories instead assert their
+served Scene/event semantics, geometry, and collision invariants without frozen
+pixels, so reasonable catalog tuning does not require image churn. Manual
+original-resolution review captures remain local development artifacts, not
+public documentation.
 
 ### Durable identity and geometry
 
@@ -408,7 +427,7 @@ deterministic north/east/west/south anchors, bounded leader ticks, and overflow
 accounting; the roster always retains complete exact status facts.
 
 At the `960×600` stress limit, a projected battlefield of at most `600×420`
-uses an actor-owned two-line status summary (`id_N` and `+N`) with a mandatory
+uses an actor-owned two-line status summary (public Agent ID and `+N`) with a mandatory
 leader instead of placing a full status matrix beside every body. This applies
 to controlled and selected agents as well as ordinary agents because retaining
 all matrices made ownership ambiguous in dense combat. The exact token list
@@ -699,8 +718,10 @@ Browser source is native JavaScript with strict JSDoc checking and no build
 step. See [quality_gates.md](quality_gates.md) for the impact-based selection
 policy and complete closeout commands.
 
-Curated Playwright baselines use pinned Chromium, bundled fonts, fixed
-viewports/device scale/locale, and a deterministic paused animation clock:
+Curated synthetic/UI Playwright baselines use pinned Chromium, bundled fonts,
+fixed viewports/device scale/locale, and a deterministic paused animation
+clock. Real-simulator cases remain in the same suite as assertion-only visual
+checks whose expected mechanics come from the served frame:
 
 ```bash
 npm run test:visual --prefix web/visual_debugger

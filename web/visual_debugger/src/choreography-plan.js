@@ -44,7 +44,6 @@ const CHARGE_OWNERSHIP_ROUTE_PROGRESS = Object.freeze([0.18, 0.32, 0.5, 0.68, 0.
 const CHARGE_OWNERSHIP_NORMAL_OFFSETS = Object.freeze([0, 16, -16, 32, -32, 48, -48]);
 const BASIC_TARGET_ENDPOINT_GAP = 12;
 const CHARGE_TARGET_ENDPOINT_GAP = 18;
-const TRAP_TARGET_ENDPOINT_GAP = 26;
 const NET_CUE_DIMENSIONS = Object.freeze({ width: 88, height: 36 });
 const UNCHANGED_NET_CUE_DIMENSIONS = Object.freeze({ width: 102, height: 36 });
 const LIFECYCLE_CUE_DIMENSIONS = Object.freeze({ width: 52, height: 52 });
@@ -1055,6 +1054,118 @@ export function buildChoreographyPlan(frame, surface = null) {
         return [integer(row.global_slot), row];
       }),
   );
+  const publicAgentIds = array(batch.public_agent_id_by_global_slot);
+  /**
+   * Event roles and their phase anchors are one semantic identity join. A slot
+   * may remain internal, but it must never select a different public identity
+   * than the exact authorized anchor carried by the same batch.
+   *
+   * @param {Record<string, any>} event
+   * @param {string} slotField
+   * @param {readonly string[]} anchorFields
+   * @param {string | null} publicIdField
+   */
+  const eventRoleIdentityMatches = (
+    event,
+    slotField,
+    anchorFields,
+    publicIdField = null,
+  ) => {
+    const slot = integer(event[slotField]);
+    const expectedPublicAgentId =
+      slot === null ? null : identifier(publicAgentIds[slot]);
+    if (
+      publicIdField !== null &&
+      Object.hasOwn(event, publicIdField) &&
+      (slot === null || identifier(event[publicIdField]) !== expectedPublicAgentId)
+    ) {
+      return false;
+    }
+    for (const anchorField of anchorFields) {
+      if (!Object.hasOwn(event, anchorField) || event[anchorField] === null) {
+        continue;
+      }
+      const anchor = record(event[anchorField]);
+      if (
+        slot === null ||
+        !anchor ||
+        integer(anchor.global_slot) !== slot ||
+        identifier(anchor.public_agent_id) !== expectedPublicAgentId
+      ) {
+        return false;
+      }
+    }
+    return true;
+  };
+  /** @param {Record<string, any>} event */
+  const researcherEventIdentityMatches = (event) =>
+    eventRoleIdentityMatches(
+      event,
+      "actor_global_slot",
+      ["actor_anchor"],
+      "actor_public_agent_id",
+    ) &&
+    eventRoleIdentityMatches(event, "source_global_slot", ["source_anchor"]) &&
+    eventRoleIdentityMatches(event, "recipient_global_slot", ["recipient_anchor"]) &&
+    eventRoleIdentityMatches(event, "agent_global_slot", [
+      "agent_anchor",
+      "start_anchor",
+      "end_anchor",
+    ]);
+  if (
+    scene.audience === "researcher" &&
+    (publicAgentIds.length === 0 ||
+      [...sceneAgentBySlot].some(
+        ([slot, agent]) =>
+          slot === null ||
+          identifier(publicAgentIds[slot]) === null ||
+          identifier(publicAgentIds[slot]) !== identifier(agent.public_agent_id),
+      ) ||
+      rawEvents.some(
+        (rawEvent) =>
+          !record(rawEvent) ||
+          !researcherEventIdentityMatches(
+            /** @type {Record<string, any>} */ (record(rawEvent)),
+          ),
+      ) ||
+      array(batch.agent_phase_trajectories).some((rawTrajectory) => {
+        const trajectory = record(rawTrajectory);
+        if (!trajectory) {
+          return true;
+        }
+        const slot = integer(trajectory.global_slot);
+        const expectedPublicAgentId =
+          slot === null ? null : identifier(publicAgentIds[slot]);
+        return ["transition_start", "post_charge", "successor"].some((phase) => {
+          const anchor = record(trajectory[phase]);
+          return (
+            anchor !== null &&
+            (slot === null ||
+              integer(anchor.global_slot) !== slot ||
+              identifier(anchor.public_agent_id) !== expectedPublicAgentId)
+          );
+        });
+      }))
+  ) {
+    return null;
+  }
+  /**
+   * Resolve display identity only from the same authorized scene/event roots.
+   * Actor POV event batches intentionally omit the researcher roster, so their
+   * self identity falls back to the exact recipient-sliced scene actor.
+   *
+   * @param {number | null} slot
+   * @returns {string | null}
+   */
+  const publicAgentIdForSlot = (slot) => {
+    const sceneAgent = slot === null ? null : sceneAgentBySlot.get(slot);
+    if (slot === null || !sceneAgent) {
+      return null;
+    }
+    return scene.audience === "researcher"
+      ? identifier(publicAgentIds[slot])
+      : identifier(sceneAgent.public_agent_id);
+  };
 
   for (const rawEvent of rawEvents) {
     const event = record(rawEvent);
@@ -1111,11 +1222,7 @@ export function buildChoreographyPlan(frame, surface = null) {
           sourceRadius: radii.get(sourceSlot) ?? 0,
           targetRadius: radii.get(recipientSlot) ?? 0,
           targetEndpointGap:
-            token.tokenId === "hunter_trap"
-              ? TRAP_TARGET_ENDPOINT_GAP
-              : token.tokenId === "warrior_charge"
-                ? CHARGE_TARGET_ENDPOINT_GAP
-                : undefined,
+            token.tokenId === "warrior_charge" ? CHARGE_TARGET_ENDPOINT_GAP : undefined,
         });
       }
       planned.push(
@@ -1127,9 +1234,11 @@ export function buildChoreographyPlan(frame, surface = null) {
           impactSemantic: activationImpactSemantic(token.tokenId),
           lane: component === "basic" ? 0 : 1,
           sourceSlot,
+          sourcePublicAgentId: publicAgentIdForSlot(sourceSlot),
           sourceClassId,
           sourceClass,
           targetSlot: recipientSlot,
+          targetPublicAgentId: publicAgentIdForSlot(recipientSlot),
           targetDisclosure: recipientSlot === null ? "target_none" : "public",
           source,
           target: recipient,
@@ -1167,6 +1276,7 @@ export function buildChoreographyPlan(frame, surface = null) {
           ...common,
           kind: "net_health",
           recipientSlot,
+          recipientPublicAgentId: publicAgentIdForSlot(recipientSlot),
           recipient,
           netDelta: delta,
           healthBefore,
@@ -1200,6 +1310,7 @@ export function buildChoreographyPlan(frame, surface = null) {
               ? "charge_displacement"
               : "movement_displacement",
           sourceSlot: agentSlot,
+          sourcePublicAgentId: publicAgentIdForSlot(agentSlot),
           targetSlot: null,
           start,
           end,
@@ -1268,8 +1379,10 @@ export function buildChoreographyPlan(frame, surface = null) {
           lifecycle: lifecycle.tokenId,
           lifecycleToken: lifecycle,
           recipientSlot,
+          recipientPublicAgentId: publicAgentIdForSlot(recipientSlot),
           recipient,
           sourceSlot,
+          sourcePublicAgentId: publicAgentIdForSlot(sourceSlot),
           source,
           durationBefore: null,
           durationAfter: null,
@@ -1302,6 +1415,7 @@ export function buildChoreographyPlan(frame, surface = null) {
           ...common,
           kind: "rejected_action",
           actorSlot,
+          actorPublicAgentId: publicAgentIdForSlot(actorSlot),
           targetSlot: null,
           actor,
           target: null,
@@ -1327,6 +1441,9 @@ export function buildChoreographyPlan(frame, surface = null) {
           ...common,
           kind: "movement_displacement",
           sourceSlot: integer(scene.selection?.controlled_global_slot),
+          sourcePublicAgentId: publicAgentIdForSlot(
+            integer(scene.selection?.controlled_global_slot),
+          ),
           targetSlot: null,
           start,
           end,
@@ -1361,6 +1478,7 @@ export function buildChoreographyPlan(frame, surface = null) {
           ...common,
           kind: "net_health",
           recipientSlot,
+          recipientPublicAgentId: publicAgentIdForSlot(recipientSlot),
           recipient,
           netDelta: delta,
           healthBefore,
@@ -1398,6 +1516,7 @@ export function buildChoreographyPlan(frame, surface = null) {
           cueSemantic: eventType,
           anchor: eventAnchor,
           agentSlot,
+          agentPublicAgentId: publicAgentIdForSlot(agentSlot),
           teamId,
           value:
             eventType === "health_regenerated"

@@ -1,4 +1,4 @@
-import { normalizeLiveDebuggerFrameV2 } from "./frame-normalizer.js";
+import { normalizeDebuggerAudienceProjectionV2 } from "./frame-normalizer.js";
 
 const REPLAY_FRAME_KINDS = new Set([
   "researcher_replay_viewer",
@@ -1732,25 +1732,14 @@ function normalizeResearcherProjection(frame, cursor) {
   const projection = record(frame.projection, "Researcher replay projection");
   const scene = record(projection.scene, "Researcher replay scene");
   const episodeId = nonEmptyString(scene.episode_id, "scene.episode_id");
-  const normalized = normalizeLiveDebuggerFrameV2({
-    schema_version: 2,
+  const normalized = normalizeDebuggerAudienceProjectionV2({
     frame_kind: "researcher_live_debugger",
-    session_id: frame.viewer_session_id,
-    run_generation: cursor.choreography_generation,
-    revision: frame.revision,
     episode_id: episodeId,
     frame_index: cursor.frame_index,
     frame_id: frame.frame_id,
     simulator_step_count: frame.simulator_step_count,
-    recording: null,
-    incoming_transition_index: frame.incoming_transition_index,
     incoming_transition_id: frame.incoming_transition_id,
-    view_mode: "researcher",
-    preset: frame.preset,
     projection,
-    terminal: {},
-    scenario: {},
-    available_scenarios: [],
     hud: {},
   });
   return { normalized, episodeId };
@@ -1773,22 +1762,14 @@ function normalizePovProjection(frame, cursor) {
   ) {
     throw new TypeError("Actor POV replay identity does not join its projection.");
   }
-  const normalized = normalizeLiveDebuggerFrameV2({
-    schema_version: 2,
+  const normalized = normalizeDebuggerAudienceProjectionV2({
     frame_kind: "actor_pov_live_debugger",
-    session_id: frame.viewer_session_id,
-    run_generation: cursor.choreography_generation,
-    revision: frame.revision,
     episode_id: episodeId,
     frame_index: cursor.frame_index,
     frame_id: sourceFrameId,
     simulator_step_count: frame.simulator_step_count,
-    recording: null,
     incoming_pov_transition_id: frame.incoming_pov_transition_id,
-    view_mode: "pov",
-    preset: frame.preset,
     projection,
-    terminal: {},
     hud: {},
   });
   return { normalized, episodeId };
@@ -1989,7 +1970,6 @@ function normalizeSourceMaterialProjection(frame, cursor) {
       effective_speed: body.effective_movement_speed,
       ultimate_cooldown: body.ultimate_cooldown_remaining,
       statuses: normalizeStatusFeatures(body.status_feature_values),
-      modifiers: Object.freeze([]),
     });
   });
   const normalizedSelf = Object.freeze({
@@ -1997,7 +1977,6 @@ function normalizeSourceMaterialProjection(frame, cursor) {
     effective_speed: selfActor.effective_movement_speed,
     ultimate_cooldown: selfActor.ultimate_cooldown_remaining,
     statuses: normalizeStatusFeatures(selfActor.status_feature_values),
-    modifiers: Object.freeze([]),
   });
   const scene = Object.freeze({
     ...normalizedSourceScene,
@@ -2127,6 +2106,7 @@ function normalizeReplayViewerFrame(value, animateIncoming = false) {
       throw new TypeError("Researcher replay mode fields are invalid.");
     }
     const projectionResult = normalizeResearcherProjection(frame, cursor);
+    normalizedProjection = projectionResult.normalized.projection;
     const researcherScene = projectionResult.normalized.scene;
     const researcherSelection = isRecord(researcherScene.selection)
       ? researcherScene.selection
@@ -2139,7 +2119,7 @@ function normalizeReplayViewerFrame(value, animateIncoming = false) {
       }),
       selected_legality: null,
     });
-    eventBatch = projectionResult.normalized.event_batch;
+    eventBatch = projectionResult.normalized.eventBatch;
     episodeId = projectionResult.episodeId;
     completion = normalizeResearcherCompletion(
       record(frame.completion, "Researcher completion"),
@@ -2172,6 +2152,7 @@ function normalizeReplayViewerFrame(value, animateIncoming = false) {
     globalSlot(frame.pov_global_slot, "pov_global_slot");
     nonEmptyString(frame.public_agent_id, "public_agent_id");
     const projectionResult = normalizePovProjection(frame, cursor);
+    normalizedProjection = projectionResult.normalized.projection;
     scene = Object.freeze({
       ...projectionResult.normalized.scene,
       selection: Object.freeze({
@@ -2180,7 +2161,7 @@ function normalizeReplayViewerFrame(value, animateIncoming = false) {
       }),
       selected_legality: null,
     });
-    eventBatch = projectionResult.normalized.event_batch;
+    eventBatch = projectionResult.normalized.eventBatch;
     episodeId = projectionResult.episodeId;
     completion = normalizePovCompletion(
       record(frame.completion, "Actor POV completion"),
@@ -2202,6 +2183,28 @@ function normalizeReplayViewerFrame(value, animateIncoming = false) {
       frame.incoming_pov_transition_id !== expectedPovTransitionId
     ) {
       throw new TypeError("Actor POV replay frame identity is not canonical.");
+    }
+    const incomingCues = normalizedProjection.incoming_cues;
+    const endedCues = incomingCues.filter(
+      (/** @type {Record<string, any>} */ cue) => cue.cue_type === "episode_ended",
+    );
+    const isFinalCursor = cursor.frame_index === cursor.final_frame_index;
+    const physicalEpisodeEnded = completion.terminated || completion.truncated;
+    if (
+      endedCues.length > 1 ||
+      (!isFinalCursor && endedCues.length !== 0) ||
+      (isFinalCursor && physicalEpisodeEnded && endedCues.length !== 1) ||
+      (endedCues.length === 1 &&
+        (endedCues[0] !== incomingCues.at(-1) ||
+          endedCues[0].terminated !== completion.terminated ||
+          endedCues[0].truncated !== completion.truncated ||
+          (endedCues[0].public_end_reason !== null &&
+            endedCues[0].public_end_reason !==
+              completion.public_end_or_failure_reason)))
+    ) {
+      throw new TypeError(
+        "Actor POV replay episode-ended cue does not join completion and cursor authority.",
+      );
     }
   } else {
     if (summary.metric_report_availability === "not_available_in_actor_pov") {
@@ -2252,6 +2255,9 @@ function normalizeReplayViewerFrame(value, animateIncoming = false) {
     cursor,
     completion,
     processing,
+    ...(frame.frame_kind === "actor_pov_replay_viewer"
+      ? { processing_disclosure: processing }
+      : {}),
     projection: normalizedProjection,
     viewer_mode: "replay",
     replay_audience: replayAudience,

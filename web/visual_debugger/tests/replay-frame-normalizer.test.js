@@ -116,6 +116,124 @@ function selfActor() {
   };
 }
 
+const researcherClassNames = Object.freeze([
+  null,
+  "Mage",
+  "Warrior",
+  "Hunter",
+  "Rogue",
+  "Priest",
+]);
+const researcherStatusMechanics = Object.freeze([
+  [0, "warrior_charge_slow", "slow", 2, "ultimate", "movement_multiplier", 0.5, false],
+  [1, "hunter_basic_slow", "slow", 3, "basic", "movement_multiplier", 0.8, false],
+  [2, "rogue_poison_slow", "slow", 4, "ultimate", "movement_multiplier", 0.6, false],
+  [3, "warrior_charge_stun", "stun", 2, "ultimate", "none", null, false],
+  [4, "hunter_trap_stun", "stun", 3, "ultimate", "none", null, true],
+  [5, "rogue_poison_stun", "stun", 4, "ultimate", "none", null, false],
+  [
+    6,
+    "rogue_poison_anti_heal",
+    "anti_heal",
+    4,
+    "ultimate",
+    "healing_multiplier",
+    0,
+    false,
+  ],
+  [
+    7,
+    "mage_burst_damage_amplification",
+    "damage_amplification",
+    1,
+    "ultimate",
+    "damage_multiplier",
+    1.5,
+    false,
+  ],
+  [
+    8,
+    "priest_blessing_of_freedom_movement_floor",
+    "movement_floor",
+    5,
+    "basic",
+    "movement_floor",
+    1,
+    false,
+  ],
+]);
+
+/** Return the exact five-row BattlefieldSceneV2 mechanics catalog. */
+function researcherClassMechanics() {
+  return [1, 2, 3, 4, 5].map((classId) => ({
+    class_id: classId,
+    class_name: researcherClassNames[classId],
+    maximum_health: 100,
+    body_radius: 0.5,
+    base_movement_speed: 1,
+    observation_radius: 6,
+    basic_target_mode: classId === 5 ? "ally" : "enemy",
+    basic_interaction_radius: 3,
+    basic_raw_damage: classId === 5 ? 0 : 10,
+    basic_raw_healing: classId === 5 ? 10 : 0,
+    ultimate_target_mode:
+      classId === 1 ? "target_none" : classId === 5 ? "ally" : "enemy",
+    ultimate_interaction_radius: 4,
+    ultimate_cooldown_steps: 5,
+    ultimate_raw_damage: classId === 5 ? 0 : 15,
+    ultimate_raw_healing: classId === 5 ? 20 : 0,
+    out_of_combat_delay_steps: 3,
+    out_of_combat_health_regeneration_fraction_per_step: 0.05,
+    status_mechanics: researcherStatusMechanics
+      .filter((row) => row[3] === classId)
+      .map(
+        ([
+          statusChannel,
+          statusId,
+          family,
+          _sourceClassId,
+          sourceActionComponent,
+          magnitudeKind,
+          magnitude,
+          breaks,
+        ]) => ({
+          status_channel: statusChannel,
+          status_id: statusId,
+          family,
+          source_action_component: sourceActionComponent,
+          duration_steps: 2,
+          magnitude_kind: magnitudeKind,
+          magnitude,
+          breaks_on_positive_damage: breaks,
+        }),
+      ),
+    aura_mechanics:
+      classId === 1
+        ? [
+            {
+              aura_id: "mage_damage_amplification",
+              radius: 4,
+              per_emitter_multiplier: 1.1,
+              stacking_rule: "multiply_then_clamp",
+              clamp_kind: "ceiling",
+              clamp_value: 1.5,
+            },
+          ]
+        : classId === 2
+          ? [
+              {
+                aura_id: "warrior_damage_mitigation",
+                radius: 4,
+                per_emitter_multiplier: 0.9,
+                stacking_rule: "multiply_then_clamp",
+                clamp_kind: "floor",
+                clamp_value: 0.5,
+              },
+            ]
+          : [],
+  }));
+}
+
 /**
  * @param {number} frameIndex
  * @returns {any}
@@ -132,8 +250,47 @@ function researcherProjection(frameIndex) {
             event_id: `${transitionId}:event:0000`,
             transition_id: transitionId,
             ordinal: 0,
+            phase_rank: 10,
+            actor_global_slot: 0,
+            actor_public_agent_id: "0",
+            actor_configured_active: true,
+            rejection_component: "movement",
+            submitted_move_action: 1,
+            submitted_select_target_action: 1,
+            submitted_use_ultimate_action: 0,
+            actor_anchor: {
+              phase: "transition_start",
+              global_slot: 0,
+              public_agent_id: "0",
+              position: [1, 1],
+            },
           },
         ];
+  const agents = [
+    {
+      global_slot: 0,
+      public_agent_id: "0",
+      team_id: 1,
+      team_local_slot: 0,
+      class_id: 1,
+      position: [1, 1],
+      radius: 0.5,
+      life_state: "alive",
+      current_health: 100,
+      max_health: 100,
+      effective_movement_speed: 1,
+      ultimate_cooldown_remaining: 0,
+      spawn_shield_remaining: 0,
+      steps_until_out_of_combat: 0,
+      respawned_on_incoming_transition: false,
+      respawn_event_id: null,
+      statuses: [],
+      aura_modifiers: [
+        { aura_id: "mage_damage_amplification", multiplier: 1 },
+        { aura_id: "warrior_damage_mitigation", multiplier: 1 },
+      ],
+    },
+  ];
   return {
     schema_version: 2,
     scene: {
@@ -147,8 +304,22 @@ function researcherProjection(frameIndex) {
       incoming_transition_id: transitionId,
       incoming_event_ids: events.map((event) => event.event_id),
       map: { width: 10, height: 8, obstacles: [] },
-      agents: [],
+      agents,
+      class_mechanics: researcherClassMechanics(),
       aura_fields: [],
+      spawn_pads: [
+        {
+          team_id: 1,
+          team_local_slot: 0,
+          assigned_global_slot: 0,
+          assigned_public_agent_id: "0",
+          position: [1, 1],
+        },
+      ],
+      respawn_waves: [
+        { team_index: 0, team_id: 1, period_steps: 10, countdown_steps: 4 },
+        { team_index: 1, team_id: 2, period_steps: 10, countdown_steps: 7 },
+      ],
       ranges: [],
       selection: null,
       next_decision_selected_legality: null,
@@ -160,12 +331,60 @@ function researcherProjection(frameIndex) {
         : {
             schema_version: 2,
             episode_id: episodeId,
+            transition_index: 0,
             transition_id: transitionId,
+            start_frame_id: `${episodeId}:frame:0`,
             successor_frame_id: frameId,
+            start_simulator_step_count: 0,
             successor_simulator_step_count: frameIndex,
+            public_agent_id_by_global_slot: Array.from({ length: 10 }, (_, slot) =>
+              String(slot),
+            ),
+            configured_active_by_global_slot: [
+              true,
+              false,
+              false,
+              false,
+              false,
+              false,
+              false,
+              false,
+              false,
+              false,
+            ],
+            agent_phase_trajectories: [
+              {
+                global_slot: 0,
+                public_agent_id: "0",
+                transition_start: {
+                  phase: "transition_start",
+                  global_slot: 0,
+                  public_agent_id: "0",
+                  position: [1, 1],
+                },
+                post_charge: {
+                  phase: "post_charge",
+                  global_slot: 0,
+                  public_agent_id: "0",
+                  position: [1, 1],
+                },
+                successor: {
+                  phase: "successor",
+                  global_slot: 0,
+                  public_agent_id: "0",
+                  position: [1, 1],
+                },
+              },
+            ],
             events,
           },
-    status_source_evidence: {},
+    status_source_evidence: {
+      schema_version: 2,
+      episode_id: episodeId,
+      frame_index: frameIndex,
+      frame_id: frameId,
+      active_statuses: [],
+    },
   };
 }
 
@@ -193,12 +412,12 @@ function researcherFrame(frameIndex = 0, choreographyGeneration = 0) {
 }
 
 function povProjection() {
+  const jointMask = Array.from({ length: 11 }, (_, target) => [target === 0, false]);
   return {
-    schema_version: 1,
     scene: {
       schema_version: 1,
       observation_materialization: "exact_no_shared_obs_actor_input",
-      audience_badge: "EXACT ACTOR POV",
+      audience_badge: "AGENT POV · EXACT",
       episode_id: episodeId,
       frame_index: 0,
       pov_frame_id: `${episodeId}:actor-pov:agent-0:frame:0`,
@@ -208,11 +427,33 @@ function povProjection() {
       map: { width: 10, height: 8, obstacles: [] },
       visible_bodies: [],
       spawn_pads: [],
-      respawn_waves: [],
+      respawn_waves: [
+        {
+          actor_relative_team_index: 0,
+          team_relation: "own",
+          team_label: "Own Team",
+          period_steps: 10,
+          countdown_steps: 4,
+        },
+        {
+          actor_relative_team_index: 1,
+          team_relation: "opponent",
+          team_label: "Opponent Team",
+          period_steps: 10,
+          countdown_steps: 7,
+        },
+      ],
     },
     incoming_transition_id: null,
     incoming_cues: [],
-    next_decision_action_mask: {},
+    next_decision_action_mask: {
+      schema_id: "marl_battlegrounds.evaluation.actor_pov_action_mask",
+      schema_version: 1,
+      move: Array(9).fill(true),
+      select_target: [true, ...Array(10).fill(false)],
+      use_ultimate: [true, false],
+      select_target_use_ultimate_joint: jointMask,
+    },
   };
 }
 
@@ -240,6 +481,44 @@ function povFrame() {
     },
     projection: povProjection(),
   };
+}
+
+/** @param {{ended?: boolean, terminal?: boolean}} [options] @returns {any} */
+function finalPovFrame({ ended = false, terminal = false } = {}) {
+  /** @type {any} */
+  const frame = povFrame();
+  const transitionId = `${episodeId}:actor-pov:agent-0:transition:0`;
+  frame.cursor = cursor(1);
+  frame.pov_frame_id = `${episodeId}:actor-pov:agent-0:frame:1`;
+  frame.simulator_step_count = 1;
+  frame.incoming_pov_transition_id = transitionId;
+  frame.projection.scene.frame_index = 1;
+  frame.projection.scene.pov_frame_id = frame.pov_frame_id;
+  frame.projection.scene.source_frame_id = `${episodeId}:frame:1`;
+  frame.projection.scene.simulator_step_count = 1;
+  frame.projection.incoming_transition_id = transitionId;
+  frame.projection.incoming_cues = ended
+    ? [
+        {
+          schema_id: "marl_battlegrounds.evaluation.actor_pov_cue",
+          schema_version: 1,
+          cue_id: `${transitionId}:cue:0`,
+          pov_transition_id: transitionId,
+          ordinal: 0,
+          cue_type: "episode_ended",
+          terminated: true,
+          truncated: false,
+          public_end_reason: "task complete",
+        },
+      ]
+    : [];
+  if (terminal) {
+    frame.completion.completion_state = "complete";
+    frame.completion.terminated = true;
+    frame.completion.completion_bases = ["task_terminal"];
+    frame.completion.public_end_or_failure_reason = "task complete";
+  }
+  return frame;
 }
 
 /** @param {number} rows @param {number} columns @param {number} [value] */
@@ -534,8 +813,16 @@ test("three replay frame roots normalize through separate audience boundaries", 
   assert.equal(researcher.session_id, "viewer-session");
   assert.equal(researcher.timeline_id, `${artifactId}:timeline:researcher`);
   assert.equal(researcher.animate_incoming, false);
+  assert.equal(researcher.show_ranges, true);
+  assert.equal(researcher.verbose, false);
+  assert.equal(Object.hasOwn(researcher, "scenario"), false);
+  assert.equal(Object.hasOwn(researcher, "available_scenarios"), false);
+  assert.equal(Object.hasOwn(researcher, "recording"), false);
   assert.equal(pov.replay_audience, "actor_pov");
   assert.equal(pov.scene.audience, "agent_pov");
+  assert.equal(pov.verbose, false);
+  assert.equal(Object.hasOwn(pov, "show_ranges"), false);
+  assert.equal(Object.hasOwn(pov, "scenario"), false);
   assert.deepEqual(pov.processing, {
     schema_version: 1,
     disclosure: "not_available_in_actor_pov",
@@ -546,6 +833,33 @@ test("three replay frame roots normalize through separate audience boundaries", 
   assert.equal(source.scene.audience, "agent_pov");
   assert.match(source.scene.audience_badge, /SOURCE MATERIAL ONLY/u);
   assert.equal(source.event_batch, null);
+});
+
+test("researcher replay installs the rebuilt frozen projection boundary", () => {
+  const raw = researcherFrame(1);
+  const normalized = normalizeReplayViewerFrameV1(raw);
+  assert.notEqual(normalized.projection, raw.projection);
+  assert.notEqual(normalized.projection.scene, raw.projection.scene);
+  assert.ok(Object.isFrozen(normalized.projection));
+  assert.ok(Object.isFrozen(normalized.projection.scene));
+  assert.ok(Object.isFrozen(normalized.projection.incoming_events.events[0]));
+  assert.equal("alive" in normalized.projection.scene.agents[0], false);
+
+  raw.projection.scene.agents[0].current_health = 1;
+  assert.equal(normalized.projection.scene.agents[0].current_health, 100);
+});
+
+test("actor POV replay processing disclosure is sanitized, frozen, and unaliased", () => {
+  const wire = povFrame();
+  const rawDisclosure = wire.processing_disclosure;
+  const normalized = normalizeReplayViewerFrameV1(wire);
+
+  assert.notEqual(normalized.processing_disclosure, rawDisclosure);
+  assert.equal(normalized.processing_disclosure, normalized.processing);
+  assert.equal(Object.isFrozen(normalized.processing_disclosure), true);
+
+  rawDisclosure.disclosure = "HOST SECRET";
+  assert.equal(JSON.stringify(normalized).includes("HOST SECRET"), false);
 });
 
 test("source-material boundary is exact, derived, and closed to nested identity leaks", () => {
@@ -643,6 +957,53 @@ test("completion boundary requires nonempty reasons and exact failure origins", 
   assert.throws(
     () => normalizeReplayViewerFrameV1(emptyPovReason),
     /completion evidence/u,
+  );
+});
+
+test("actor POV replay ending cues join physical completion at the final cursor", () => {
+  const terminal = finalPovFrame({ ended: true, terminal: true });
+  const normalized = normalizeReplayViewerFrameV1(terminal);
+  assert.equal(normalized.completion.terminated, true);
+  assert.equal(normalized.projection.incoming_cues.at(-1).cue_type, "episode_ended");
+
+  const endedWithoutCompletion = finalPovFrame({ ended: true });
+  assert.throws(
+    () => normalizeReplayViewerFrameV1(endedWithoutCompletion),
+    /episode-ended cue does not join completion/u,
+  );
+
+  const completionWithoutEnded = finalPovFrame({ terminal: true });
+  assert.throws(
+    () => normalizeReplayViewerFrameV1(completionWithoutEnded),
+    /episode-ended cue does not join completion/u,
+  );
+
+  const endedBeforeAnotherCue = finalPovFrame({ ended: true, terminal: true });
+  const transitionId = endedBeforeAnotherCue.incoming_pov_transition_id;
+  endedBeforeAnotherCue.projection.incoming_cues.push({
+    schema_id: "marl_battlegrounds.evaluation.actor_pov_cue",
+    schema_version: 1,
+    cue_id: `${transitionId}:cue:1`,
+    pov_transition_id: transitionId,
+    ordinal: 1,
+    cue_type: "own_health_changed",
+    start_health: 10,
+    successor_health: 9,
+  });
+  assert.throws(
+    () => normalizeReplayViewerFrameV1(endedBeforeAnotherCue),
+    /episode-ended cue does not join completion/u,
+  );
+
+  const declaredHorizonOnly = finalPovFrame();
+  declaredHorizonOnly.artifact_summary.expected_transition_count = 1;
+  declaredHorizonOnly.completion.expected_transition_count = 1;
+  declaredHorizonOnly.completion.completion_state = "complete";
+  declaredHorizonOnly.completion.completion_bases = ["declared_horizon"];
+  declaredHorizonOnly.completion.public_end_or_failure_reason = null;
+  assert.equal(
+    normalizeReplayViewerFrameV1(declaredHorizonOnly).projection.incoming_cues.length,
+    0,
   );
 });
 
