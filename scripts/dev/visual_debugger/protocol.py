@@ -54,6 +54,26 @@ type CommandResult = Literal[
     "no_op",
     "shutdown_scheduled",
 ]
+type RecordingLifecycleV1 = Literal[
+    "recording",
+    "sealed",
+    "finalized_unsaved",
+    "persistence_failed",
+    "saved",
+    "reviewing",
+    "discarded",
+]
+type RecordingCompletionStateV1 = Literal[
+    "complete",
+    "partial",
+    "interrupted",
+    "failed",
+]
+type RecordingPersistenceErrorCodeV1 = Literal[
+    "target_unavailable",
+    "publication_failed",
+    "verification_failed",
+]
 type ApiErrorCode = Literal[
     "invalid_request",
     "unauthorized",
@@ -201,6 +221,41 @@ class ExitCommandV1(_ProtocolModel):
     command_type: Literal["exit"] = "exit"
 
 
+class FinishAndReviewCommandV1(_ProtocolModel):
+    command_type: Literal["finish_and_review"] = "finish_and_review"
+
+
+class ReviewReplayCommandV1(_ProtocolModel):
+    command_type: Literal["review_replay"] = "review_replay"
+
+
+class RetrySaveCommandV1(_ProtocolModel):
+    command_type: Literal["retry_save"] = "retry_save"
+
+
+class SaveAsCommandV1(_ProtocolModel):
+    command_type: Literal["save_as"] = "save_as"
+    file_name: Annotated[
+        str,
+        StringConstraints(
+            min_length=20,
+            max_length=160,
+            pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*\.marlbg-replay\.json$",
+        ),
+    ]
+
+
+type RecordingReplacementCommandV1 = Annotated[
+    ResetCommandV1 | ScenarioSwitchCommandV1 | SetMovementScaleCommandV1,
+    Field(discriminator="command_type"),
+]
+
+
+class ConfirmDiscardAndReplaceCommandV1(_ProtocolModel):
+    command_type: Literal["confirm_discard_and_replace"] = "confirm_discard_and_replace"
+    replacement: RecordingReplacementCommandV1
+
+
 type DebuggerCommandV1 = Annotated[
     KeyboardCommandV1
     | BattlefieldPointerCommandV1
@@ -211,6 +266,11 @@ type DebuggerCommandV1 = Annotated[
     | SetViewCommandV1
     | SetPresetCommandV1
     | SetMovementScaleCommandV1
+    | FinishAndReviewCommandV1
+    | ReviewReplayCommandV1
+    | RetrySaveCommandV1
+    | SaveAsCommandV1
+    | ConfirmDiscardAndReplaceCommandV1
     | ExitCommandV1,
     Field(discriminator="command_type"),
 ]
@@ -807,6 +867,81 @@ class TerminalStateV2(_ProtocolModel):
         return self
 
 
+class RecordingStatusV1(_ProtocolModel):
+    """Path-free live recording lifecycle shared by both audience envelopes."""
+
+    schema_version: Literal[1] = PROTOCOL_SCHEMA_VERSION
+    lifecycle: RecordingLifecycleV1
+    captured_transition_count: _NonNegativeInt
+    expected_transition_count: Annotated[int, Field(gt=0)]
+    completion_state: RecordingCompletionStateV1 | None = None
+    completion_reason: (
+        Annotated[
+            str,
+            StringConstraints(min_length=1, max_length=256),
+        ]
+        | None
+    ) = None
+    restart_fenced: bool
+    finish_available: bool
+    review_available: bool
+    retry_available: bool
+    save_as_available: bool
+    discard_available: bool
+    persistence_error_code: RecordingPersistenceErrorCodeV1 | None = None
+
+    @model_validator(mode="after")
+    def _validate_recording_lifecycle(self) -> Self:
+        if self.captured_transition_count > self.expected_transition_count:
+            raise ValueError("recording progress cannot exceed the declared horizon.")
+        finalized = self.lifecycle in (
+            "sealed",
+            "finalized_unsaved",
+            "persistence_failed",
+            "saved",
+            "reviewing",
+        )
+        if finalized != (self.completion_state is not None):
+            raise ValueError(
+                "finalized recording lifecycle requires one completion state."
+            )
+        reason_required = self.completion_state in (
+            "partial",
+            "interrupted",
+            "failed",
+        )
+        if reason_required != (self.completion_reason is not None):
+            raise ValueError(
+                "non-complete recording completion requires one stable reason."
+            )
+        expected_restart_fenced = (
+            self.captured_transition_count > 0 or self.lifecycle != "recording"
+        )
+        if self.restart_fenced != expected_restart_fenced:
+            raise ValueError("restart_fenced must follow exact recorder progress.")
+        expected_finish = self.lifecycle == "recording"
+        expected_review = self.lifecycle == "saved"
+        expected_retry = self.lifecycle == "persistence_failed"
+        expected_discard = (
+            self.lifecycle == "recording" and self.captured_transition_count > 0
+        )
+        if (
+            self.finish_available != expected_finish
+            or self.review_available != expected_review
+            or self.retry_available != expected_retry
+            or self.save_as_available != expected_retry
+            or self.discard_available != expected_discard
+        ):
+            raise ValueError(
+                "recording lifecycle availability flags are not canonical."
+            )
+        if (self.persistence_error_code is not None) != expected_retry:
+            raise ValueError(
+                "only persistence_failed may expose a coarse persistence error."
+            )
+        return self
+
+
 class _LiveDebuggerEnvelopeV2(_ProtocolModel):
     """Transport metadata shared without sharing audience payload authority."""
 
@@ -819,11 +954,17 @@ class _LiveDebuggerEnvelopeV2(_ProtocolModel):
     simulator_step_count: _NonNegativeInt
     preset: Preset
     terminal: TerminalStateV2
+    recording: RecordingStatusV1 | None = None
 
     @model_validator(mode="after")
     def _validate_common_epoch(self) -> Self:
         if self.frame_id != f"{self.episode_id}:frame:{self.frame_index}":
             raise ValueError("live frame ID must remain canonical.")
+        if (
+            self.recording is not None
+            and self.recording.captured_transition_count != self.frame_index
+        ):
+            raise ValueError("recording progress must equal the live frame index.")
         return self
 
 

@@ -13,6 +13,7 @@ is not rerun until a later edit creates a plausible impact path to it.
 | Scenario trajectory | Scenario preflight/reference tests |
 | Replay/POV/scenario artifact | Focused semantic, canonical-I/O, tamper, privacy, and import-isolation tests |
 | Read-only replay viewer | Replay protocol/service/server/launcher tests, strict browser normalizer/controller units, and a real canonical-artifact Playwright flow |
+| Live replay recording/handoff | Recording/replay-I/O/service/router/launcher tests, strict lifecycle controls, and real T0/prefix/endpoint/recovery/Exit/Ctrl-C/two-tab/POV Playwright flows |
 | Evaluation-to-scene projection | Researcher/POV adapter tests plus static replay launcher smoke |
 | Static Matplotlib path | Launcher plus relevant renderer smoke/scene-painter tests with `viz` |
 | SVG/CSS/layout | Affected JavaScript unit test and selected Playwright case |
@@ -52,6 +53,15 @@ replay HTTP routes, audience-matching frame/timeline roots, settled seek and
 reconnect behavior, exact-next animation, endpoint pause, and actor-POV
 non-disclosure. Keep the replay subprocess on the CPU/import-isolation path so
 an accidental simulator or JAX import fails the test.
+
+Recording changes must exercise the production `--record-replay` launcher, not
+only an in-memory recorder fixture. The real-browser gate must load the saved
+replay and metric sidecar through public contracts and prove frame-zero handoff,
+complete versus open-prefix closeout, restart/discard fencing, immutable-byte
+Retry/Save As recovery, durable Exit and Ctrl-C, two-tab stale authority, POV
+non-disclosure, strict console/page-error collection, and subprocess/temp-file
+cleanup. A mocked provenance test does not replace one real host discovery run;
+runtime strings may differ across CPU/CUDA/PJRT installations.
 
 ## Complete closeout gates
 

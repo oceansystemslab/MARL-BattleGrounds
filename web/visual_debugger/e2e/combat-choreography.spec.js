@@ -13,7 +13,7 @@ import {
 import { startDebugger, stopDebugger } from "./support/live-debugger.js";
 import {
   loadRendererFixture,
-  syntheticDebuggerFrame,
+  syntheticDebuggerWireFrame,
 } from "./support/renderer-fixture.js";
 
 /** @type {import("node:child_process").ChildProcess | null} */
@@ -39,9 +39,9 @@ test.beforeAll(async () => {
     ]);
   serverProcess = started.process;
   debuggerUrl = started.url;
-  routeFrame = syntheticDebuggerFrame(routeFixture);
-  mixedFrame = syntheticDebuggerFrame(mixedFixture);
-  crowdedFrame = syntheticDebuggerFrame(crowdedFixture);
+  routeFrame = syntheticDebuggerWireFrame(routeFixture);
+  mixedFrame = syntheticDebuggerWireFrame(mixedFixture);
+  crowdedFrame = syntheticDebuggerWireFrame(crowdedFixture);
   povFixture = loadedPovFixture;
 });
 
@@ -780,7 +780,7 @@ test("same-epoch POV switch clears privileged effects before safe redacted rebui
 }) => {
   await installWaapiAutopause(page);
   const researcherFrame = structuredClone(crowdedFrame);
-  const safeFrame = syntheticDebuggerFrame(povFixture);
+  const safeFrame = syntheticDebuggerWireFrame(povFixture);
   const flow = await installSyntheticFlow(
     page,
     withoutTransition(researcherFrame),
@@ -847,7 +847,7 @@ test("same-epoch POV switch clears privileged effects before safe redacted rebui
 });
 
 test("POV bootstrap rejects an impossible split simulator epoch", async ({ page }) => {
-  const splitEpoch = withoutTransition(syntheticDebuggerFrame(povFixture));
+  const splitEpoch = withoutTransition(syntheticDebuggerWireFrame(povFixture));
   splitEpoch.projection.scene.simulator_step_count = 1;
   await installSyntheticFlow(page, splitEpoch, () => splitEpoch);
 
@@ -863,7 +863,7 @@ test("recipient POV cues never reconstruct a researcher target-only activation",
   page,
 }) => {
   await installWaapiAutopause(page);
-  const safeFrame = syntheticDebuggerFrame(povFixture);
+  const safeFrame = syntheticDebuggerWireFrame(povFixture);
   const targetOnlyFrame = { ...safeFrame, revision: 1 };
   const flow = await installSyntheticFlow(
     page,

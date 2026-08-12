@@ -5,12 +5,12 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.client import HTTPConnection, HTTPResponse
 from pathlib import Path
-from threading import Thread
+from threading import Event, Thread
 from typing import Annotated, Literal, cast
 
 import pytest
@@ -20,8 +20,11 @@ from scripts.dev.visual_debugger.server import (
     REPLAY_HTTP_ROUTES,
     DebuggerHTTPServer,
     HttpCoordinatorBinding,
+    HttpCoordinatorReplacement,
+    HttpCoordinatorRouter,
     HttpRouteSet,
     create_server,
+    serve_browser_debugger,
 )
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -100,10 +103,41 @@ class _FakeReplayError(_StrictModel):
     latest_frame: _FakeReplayFrame | None = None
 
 
+class _FakeLiveFrame(_StrictModel):
+    schema_version: Literal[2] = 2
+    frame_kind: Literal["live_debugger"] = "live_debugger"
+    revision: Annotated[int, Field(ge=0)]
+
+
+class _FakeLiveRequest(_StrictModel):
+    schema_version: Literal[2] = 2
+    command_type: Literal["advance"] = "advance"
+
+
+class _FakeLiveResponse(_StrictModel):
+    schema_version: Literal[2] = 2
+    result: Literal["applied"] = "applied"
+    frame: _FakeLiveFrame
+
+
+class _FakeLiveError(_StrictModel):
+    schema_version: Literal[2] = 2
+    error_code: _ErrorCode
+    message: str = Field(min_length=1)
+    latest_frame: _FakeLiveFrame | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class _FakeServiceResult:
     outcome: str
     payload: _FakeReplayResponse | _FakeReplayError
+    shutdown_requested: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _FakeLiveServiceResult:
+    outcome: str
+    payload: _FakeLiveResponse | _FakeLiveError
     shutdown_requested: bool = False
 
 
@@ -208,10 +242,60 @@ class _FakeReplayService:
         )
 
 
+class _BlockingLiveService:
+    """Transport fake whose selected operation remains inside one request."""
+
+    def __init__(self, *, block_frame_with_error: bool = False) -> None:
+        self.block_frame_with_error = block_frame_with_error
+        self.entered = Event()
+        self.release = Event()
+        self.received_request: _FakeLiveRequest | None = None
+        self.on_apply: Callable[[], None] | None = None
+
+    def current_frame(self) -> _FakeLiveFrame:
+        if self.block_frame_with_error:
+            self._wait_for_release()
+            raise RuntimeError("synthetic live failure")
+        return _FakeLiveFrame(revision=0)
+
+    def apply_command(self, request: _FakeLiveRequest) -> _FakeLiveServiceResult:
+        self.received_request = request
+        self._wait_for_release()
+        if self.on_apply is not None:
+            self.on_apply()
+        return _FakeLiveServiceResult(
+            outcome="response",
+            payload=_FakeLiveResponse(frame=_FakeLiveFrame(revision=1)),
+        )
+
+    def _wait_for_release(self) -> None:
+        self.entered.set()
+        if not self.release.wait(timeout=5):
+            raise RuntimeError("synthetic live request was not released")
+
+
 def _error_factory(*, error_code: str, message: str) -> _FakeReplayError:
     return _FakeReplayError(
         error_code=cast(_ErrorCode, error_code),
         message=message,
+    )
+
+
+def _live_error_factory(*, error_code: str, message: str) -> _FakeLiveError:
+    return _FakeLiveError(
+        error_code=cast(_ErrorCode, error_code),
+        message=message,
+    )
+
+
+def _live_coordinator(service: _BlockingLiveService) -> HttpCoordinatorBinding:
+    return HttpCoordinatorBinding(
+        mode="live",
+        routes=LIVE_HTTP_ROUTES,
+        request_model=_FakeLiveRequest,
+        error_factory=_live_error_factory,
+        current_frame=service.current_frame,
+        apply_command=service.apply_command,
     )
 
 
@@ -326,6 +410,407 @@ assert loaded == [], loaded
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_live_request_and_replay_replacement_are_serialized_and_coherent() -> None:
+    live_service = _BlockingLiveService()
+    server = create_server(
+        live_service,
+        asset_root=_ASSET_ROOT,
+        port=0,
+        capability_token=_TOKEN,
+        coordinator=_live_coordinator(live_service),
+    )
+    server_thread = Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    expected = server.coordinator_snapshot()
+    original_origin = server.expected_origin
+    original_host = server.expected_host
+    original_token = server.capability_token
+    old_responses: list[tuple[HTTPResponse, bytes]] = []
+    old_request = Thread(
+        target=lambda: old_responses.append(
+            _exchange(
+                server,
+                "POST",
+                "/api/command",
+                body=b'{"schema_version":2,"command_type":"advance"}',
+                headers=_authorized_headers(**{"Content-Type": "application/json"}),
+            )
+        ),
+        daemon=True,
+    )
+    replay_service = _FakeReplayService()
+    replay_binding = _coordinator(replay_service)
+    replacement = HttpCoordinatorReplacement(
+        service=replay_service,
+        binding=replay_binding,
+    )
+    swap_started = Event()
+    swap_finished = Event()
+    swap_results: list[bool] = []
+
+    def install_replay() -> None:
+        swap_started.set()
+        swap_results.append(
+            server.install_replay_coordinator(
+                expected=expected,
+                replacement=replacement,
+            )
+        )
+        swap_finished.set()
+
+    swap_thread = Thread(target=install_replay, daemon=True)
+    try:
+        old_request.start()
+        assert live_service.entered.wait(timeout=2)
+        swap_thread.start()
+        assert swap_started.wait(timeout=2)
+        assert not swap_finished.wait(timeout=0.1)
+
+        live_service.release.set()
+        old_request.join(timeout=2)
+        swap_thread.join(timeout=2)
+        assert not old_request.is_alive()
+        assert not swap_thread.is_alive()
+
+        old_response, old_body = old_responses[0]
+        replay_frame, replay_frame_body = _exchange(
+            server,
+            "GET",
+            "/api/frame",
+            headers=_authorized_headers(),
+        )
+        replay_timeline, _ = _exchange(
+            server,
+            "GET",
+            "/api/replay/timeline",
+            headers=_authorized_headers(),
+        )
+        removed_live_route, removed_live_body = _exchange(
+            server,
+            "POST",
+            "/api/command",
+            body=b"{}",
+            headers=_authorized_headers(**{"Content-Type": "application/json"}),
+        )
+
+        assert old_response.status == HTTPStatus.OK
+        assert json.loads(old_body) == {
+            "schema_version": 2,
+            "result": "applied",
+            "frame": {
+                "schema_version": 2,
+                "frame_kind": "live_debugger",
+                "revision": 1,
+            },
+        }
+        assert isinstance(live_service.received_request, _FakeLiveRequest)
+        assert swap_results == [True]
+        assert replay_frame.status == replay_timeline.status == HTTPStatus.OK
+        assert json.loads(replay_frame_body)["schema_version"] == 1
+        assert removed_live_route.status == HTTPStatus.NOT_FOUND
+        assert json.loads(removed_live_body)["schema_version"] == 1
+        active = server.coordinator_snapshot()
+        assert active.generation == 1
+        assert active.service is replay_service
+        assert active.binding is replay_binding
+        assert server.debugger_service is replay_service
+        assert server.coordinator is replay_binding
+        assert server.expected_origin == original_origin
+        assert server.expected_host == original_host
+        assert server.capability_token == original_token
+    finally:
+        live_service.release.set()
+        if server_thread.is_alive():
+            server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)
+        old_request.join(timeout=2)
+        swap_thread.join(timeout=2)
+
+
+def test_live_request_can_reentrantly_install_replay_before_live_response() -> None:
+    live_service = _BlockingLiveService()
+    live_service.release.set()
+    live_binding = _live_coordinator(live_service)
+    router = HttpCoordinatorRouter(
+        service=live_service,
+        binding=live_binding,
+    )
+    server = create_server(
+        asset_root=_ASSET_ROOT,
+        port=0,
+        capability_token=_TOKEN,
+        coordinator_router=router,
+    )
+    expected = router.snapshot()
+    replay_service = _FakeReplayService()
+    replay_binding = _coordinator(replay_service)
+    replacement = HttpCoordinatorReplacement(
+        service=replay_service,
+        binding=replay_binding,
+    )
+    install_results: list[bool] = []
+
+    def install_from_live_request() -> None:
+        install_results.append(
+            router.compare_and_swap(
+                expected=expected,
+                replacement=replacement,
+            )
+        )
+
+    live_service.on_apply = install_from_live_request
+    server_thread = Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    try:
+        handoff_response, handoff_body = _exchange(
+            server,
+            "POST",
+            "/api/command",
+            body=b'{"schema_version":2,"command_type":"advance"}',
+            headers=_authorized_headers(**{"Content-Type": "application/json"}),
+        )
+        replay_timeline, _ = _exchange(
+            server,
+            "GET",
+            "/api/replay/timeline",
+            headers=_authorized_headers(),
+        )
+
+        assert install_results == [True]
+        assert handoff_response.status == HTTPStatus.OK
+        assert json.loads(handoff_body)["schema_version"] == 2
+        assert json.loads(handoff_body)["frame"]["frame_kind"] == "live_debugger"
+        assert replay_timeline.status == HTTPStatus.OK
+        active = server.coordinator_snapshot()
+        assert active.generation == 1
+        assert active.service is replay_service
+        assert active.binding is replay_binding
+        assert server.coordinator_router is router
+    finally:
+        if server_thread.is_alive():
+            server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)
+
+
+def test_preconstructed_router_requires_exact_coherent_redundant_inputs() -> None:
+    live_service = _BlockingLiveService()
+    live_binding = _live_coordinator(live_service)
+    router = HttpCoordinatorRouter(
+        service=live_service,
+        binding=live_binding,
+    )
+    server = create_server(
+        live_service,
+        asset_root=_ASSET_ROOT,
+        port=0,
+        capability_token=_TOKEN,
+        coordinator=live_binding,
+        coordinator_router=router,
+    )
+    try:
+        assert server.coordinator_router is router
+        assert server.debugger_service is live_service
+        assert server.coordinator is live_binding
+    finally:
+        server.server_close()
+
+    with pytest.raises(ValueError, match="supplied debugger service"):
+        create_server(
+            _BlockingLiveService(),
+            asset_root=_ASSET_ROOT,
+            port=0,
+            coordinator_router=router,
+        )
+    with pytest.raises(ValueError, match="supplied coordinator binding"):
+        create_server(
+            live_service,
+            asset_root=_ASSET_ROOT,
+            port=0,
+            coordinator=_live_coordinator(live_service),
+            coordinator_router=router,
+        )
+    with pytest.raises(TypeError, match="exact HttpCoordinatorRouter"):
+        create_server(
+            asset_root=_ASSET_ROOT,
+            port=0,
+            coordinator_router=cast(HttpCoordinatorRouter, object()),
+        )
+    with pytest.raises(TypeError, match="service is required"):
+        create_server(
+            asset_root=_ASSET_ROOT,
+            port=0,
+        )
+
+
+def test_serve_browser_debugger_accepts_router_only_launch(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    replay_service = _FakeReplayService()
+    router = HttpCoordinatorRouter(
+        service=replay_service,
+        binding=_coordinator(replay_service),
+    )
+
+    def interrupt_server(
+        server: DebuggerHTTPServer,
+        *,
+        poll_interval: float,
+    ) -> None:
+        assert server.coordinator_router is router
+        del poll_interval
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(DebuggerHTTPServer, "serve_forever", interrupt_server)
+
+    result = serve_browser_debugger(
+        asset_root=_ASSET_ROOT,
+        port=0,
+        open_browser=False,
+        coordinator_router=router,
+    )
+
+    assert result == 0
+    assert "Visual Debugger and Analyzer stopped." in capsys.readouterr().out
+
+
+def test_in_flight_error_uses_the_pinned_protocol_family() -> None:
+    live_service = _BlockingLiveService(block_frame_with_error=True)
+    server = create_server(
+        live_service,
+        asset_root=_ASSET_ROOT,
+        port=0,
+        capability_token=_TOKEN,
+        coordinator=_live_coordinator(live_service),
+    )
+    server_thread = Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    expected = server.coordinator_snapshot()
+    old_responses: list[tuple[HTTPResponse, bytes]] = []
+    old_request = Thread(
+        target=lambda: old_responses.append(
+            _exchange(
+                server,
+                "GET",
+                "/api/frame",
+                headers=_authorized_headers(),
+            )
+        ),
+        daemon=True,
+    )
+    replay_service = _FakeReplayService()
+    replacement = HttpCoordinatorReplacement(
+        service=replay_service,
+        binding=_coordinator(replay_service),
+    )
+    swap_finished = Event()
+
+    def install_replay() -> None:
+        assert server.install_replay_coordinator(
+            expected=expected,
+            replacement=replacement,
+        )
+        swap_finished.set()
+
+    swap_thread = Thread(target=install_replay, daemon=True)
+    try:
+        old_request.start()
+        assert live_service.entered.wait(timeout=2)
+        swap_thread.start()
+        assert not swap_finished.wait(timeout=0.1)
+
+        live_service.release.set()
+        old_request.join(timeout=2)
+        swap_thread.join(timeout=2)
+        assert not old_request.is_alive()
+        assert not swap_thread.is_alive()
+
+        old_response, old_body = old_responses[0]
+        replay_error, replay_error_body = _exchange(
+            server,
+            "GET",
+            "/api/frame?query=forbidden",
+        )
+
+        assert old_response.status == HTTPStatus.INTERNAL_SERVER_ERROR
+        assert json.loads(old_body) == {
+            "schema_version": 2,
+            "error_code": "internal_error",
+            "message": "The debugger could not process this request.",
+            "latest_frame": None,
+        }
+        assert replay_error.status == HTTPStatus.NOT_FOUND
+        assert json.loads(replay_error_body)["schema_version"] == 1
+        assert json.loads(replay_error_body)["error_code"] == "not_found"
+    finally:
+        live_service.release.set()
+        if server_thread.is_alive():
+            server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)
+        old_request.join(timeout=2)
+        swap_thread.join(timeout=2)
+
+
+def test_coordinator_cas_failure_never_partially_swaps_active_pair() -> None:
+    live_service = _BlockingLiveService()
+    server = create_server(
+        live_service,
+        asset_root=_ASSET_ROOT,
+        port=0,
+        capability_token=_TOKEN,
+        coordinator=_live_coordinator(live_service),
+    )
+    expected = server.coordinator_snapshot()
+    first_replay_service = _FakeReplayService()
+    first_replay_binding = _coordinator(first_replay_service)
+    first_replacement = HttpCoordinatorReplacement(
+        service=first_replay_service,
+        binding=first_replay_binding,
+    )
+    second_replay_service = _FakeReplayService()
+    second_replacement = HttpCoordinatorReplacement(
+        service=second_replay_service,
+        binding=_coordinator(second_replay_service),
+    )
+    try:
+        assert server.install_replay_coordinator(
+            expected=expected,
+            replacement=first_replacement,
+        )
+        installed = server.coordinator_snapshot()
+
+        assert not server.install_replay_coordinator(
+            expected=expected,
+            replacement=second_replacement,
+        )
+        after_stale_cas = server.coordinator_snapshot()
+        assert after_stale_cas is installed
+        assert after_stale_cas.service is first_replay_service
+        assert after_stale_cas.binding is first_replay_binding
+
+        replacement_live_service = _BlockingLiveService()
+        replacement_live = HttpCoordinatorReplacement(
+            service=replacement_live_service,
+            binding=_live_coordinator(replacement_live_service),
+        )
+        with pytest.raises(ValueError, match="monotonic live-to-replay"):
+            server.install_replay_coordinator(
+                expected=installed,
+                replacement=replacement_live,
+            )
+
+        after_forbidden_swap = server.coordinator_snapshot()
+        assert after_forbidden_swap is installed
+        assert after_forbidden_swap.generation == 1
+        assert after_forbidden_swap.service is first_replay_service
+        assert after_forbidden_swap.binding is first_replay_binding
+    finally:
+        server.server_close()
 
 
 def test_binding_rejects_route_or_timeline_cross_mode_configuration() -> None:

@@ -29,6 +29,19 @@ const GAME_KEYS = new Set([
   "?",
 ]);
 
+const RECORDING_LIFECYCLE_COMMANDS = new Set([
+  "finish_and_review",
+  "review_replay",
+  "retry_save",
+  "save_as",
+  "confirm_discard_and_replace",
+  "exit",
+]);
+
+const RECORDING_PRESENTATION_KEYS = new Set(["g", "v", "p", "?"]);
+
+const RECORDING_SAVE_AS_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*\.marlbg-replay\.json$/u;
+
 /**
  * @typedef {{
  *   shiftKey?: boolean,
@@ -113,6 +126,188 @@ export function targetSelectionCommand(value, { actorPov = false } = {}) {
     role: "target",
     global_slot: Number(value),
   };
+}
+
+/**
+ * Resolve only effective episode replacements to the exact non-keyboard
+ * command accepted by ConfirmDiscardAndReplaceCommandV1. This is advisory UX;
+ * Python repeats the same classification against authoritative session state.
+ *
+ * @param {Record<string, any>} frame
+ * @param {Record<string, unknown>} command
+ * @returns {Readonly<Record<string, unknown>> | null}
+ */
+export function recordingReplacementCommand(frame, command) {
+  if (command.command_type === "reset") {
+    return Object.freeze({ command_type: "reset" });
+  }
+  if (command.command_type === "scenario_switch") {
+    const scenarioName = command.scenario_name;
+    if (
+      typeof scenarioName !== "string" ||
+      scenarioName === frame.scenario?.name ||
+      !Array.isArray(frame.available_scenarios) ||
+      !frame.available_scenarios.some(
+        (entry) => (typeof entry === "string" ? entry : entry?.name) === scenarioName,
+      )
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      command_type: "scenario_switch",
+      scenario_name: scenarioName,
+    });
+  }
+  if (command.command_type === "set_movement_scale") {
+    const requested = command.movement_scale;
+    const scenario = frame.scenario;
+    const current = scenario?.ordinary_movement_distance_scale;
+    const fallback = scenario?.scenario_default_movement_scale;
+    const effective = requested === null ? fallback : requested;
+    if (
+      typeof effective !== "number" ||
+      !Number.isFinite(effective) ||
+      typeof current !== "number" ||
+      !Number.isFinite(current) ||
+      effective === current
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      command_type: "set_movement_scale",
+      movement_scale: requested,
+    });
+  }
+  if (
+    command.command_type !== "keyboard" ||
+    typeof command.key !== "string" ||
+    command.ctrl_key === true ||
+    command.alt_key === true ||
+    command.meta_key === true
+  ) {
+    return null;
+  }
+  const key = command.key.toLowerCase();
+  if (key === "r" && command.shift_key !== true) {
+    return Object.freeze({ command_type: "reset" });
+  }
+  if (key !== "[" && key !== "]") {
+    return null;
+  }
+  const names = Array.isArray(frame.available_scenarios)
+    ? frame.available_scenarios.flatMap((entry) => {
+        const name = typeof entry === "string" ? entry : entry?.name;
+        return typeof name === "string" ? [name] : [];
+      })
+    : [];
+  const currentName = frame.scenario?.name;
+  const currentIndex = names.indexOf(currentName);
+  if (currentIndex < 0 || names.length < 2) {
+    return null;
+  }
+  const direction = key === "[" ? -1 : 1;
+  const nextIndex = (currentIndex + direction + names.length) % names.length;
+  return Object.freeze({
+    command_type: "scenario_switch",
+    scenario_name: names[nextIndex],
+  });
+}
+
+/**
+ * @param {Record<string, any>} frame
+ * @param {Record<string, unknown>} command
+ * @returns {Readonly<{
+ *   action: "allow" | "block" | "confirm",
+ *   command?: Record<string, unknown>,
+ *   replacement?: Record<string, unknown>,
+ *   notice?: string,
+ * }>}
+ */
+export function recordingCommandDecision(frame, command) {
+  const status = frame.recording;
+  if (!status || typeof status !== "object" || Array.isArray(status)) {
+    return Object.freeze({ action: "allow", command });
+  }
+  if (RECORDING_LIFECYCLE_COMMANDS.has(String(command.command_type))) {
+    return Object.freeze({ action: "allow", command });
+  }
+  const replacement = recordingReplacementCommand(frame, command);
+  if (replacement) {
+    if (status.discard_available === true) {
+      return Object.freeze({
+        action: "confirm",
+        replacement,
+        notice:
+          "Replacing this episode discards the captured in-memory prefix. Confirm the exact replacement to continue.",
+      });
+    }
+    if (status.restart_fenced === true) {
+      return Object.freeze({
+        action: "block",
+        notice:
+          "Episode replacement is fenced after recording closeout. Review or recover the replay first.",
+      });
+    }
+    return Object.freeze({ action: "allow", command });
+  }
+
+  const presentationOnly =
+    command.command_type === "set_view" ||
+    command.command_type === "set_preset" ||
+    (command.command_type === "keyboard" &&
+      typeof command.key === "string" &&
+      RECORDING_PRESENTATION_KEYS.has(command.key.toLowerCase()));
+  if (status.lifecycle !== "recording" && !presentationOnly) {
+    return Object.freeze({
+      action: "block",
+      notice:
+        "Scientific controls are fenced because this recording is no longer capturing transitions.",
+    });
+  }
+  return Object.freeze({ action: "allow", command });
+}
+
+/**
+ * @param {unknown} value
+ * @returns {Readonly<{command_type: "save_as", file_name: string}> | null}
+ */
+export function recordingSaveAsCommand(value) {
+  if (
+    typeof value !== "string" ||
+    value.length < 20 ||
+    value.length > 160 ||
+    !RECORDING_SAVE_AS_PATTERN.test(value)
+  ) {
+    return null;
+  }
+  return Object.freeze({ command_type: "save_as", file_name: value });
+}
+
+/**
+ * @param {Record<string, unknown>} command
+ * @param {unknown} payload
+ */
+export function commandResponseSchedulesShutdown(command, payload) {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+    return false;
+  }
+  const response = /** @type {Record<string, unknown>} */ (payload);
+  return command.command_type === "exit" && response.result === "shutdown_scheduled";
+}
+
+/** @param {unknown} frame */
+export function recordingReviewHandoffRequired(frame) {
+  if (typeof frame !== "object" || frame === null || Array.isArray(frame)) {
+    return false;
+  }
+  const candidate = /** @type {Record<string, any>} */ (frame);
+  return (
+    candidate.viewer_mode !== "replay" &&
+    typeof candidate.recording === "object" &&
+    candidate.recording !== null &&
+    !Array.isArray(candidate.recording) &&
+    candidate.recording.lifecycle === "reviewing"
+  );
 }
 
 /**

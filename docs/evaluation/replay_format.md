@@ -188,6 +188,12 @@ surface is:
 
 - `canonical_replay_json_bytes_v1` and
   `canonical_metric_report_artifact_json_bytes_v1` for exact target bytes;
+- `prepare_replay_bundle_v1` for one path-independent validation and canonical
+  serialization pass whose immutable bytes can be retried without rebuilding
+  scientific evidence;
+- `preflight_replay_bundle_destination_v1` and
+  `publish_prepared_replay_bundle_v1` for an explicitly authorized local
+  destination and no-clobber publication of those prepared bytes;
 - `save_replay_bundle_v1` for report-first, replay-last publication;
 - `load_replay_artifact_v1` for a standalone trajectory; and
 - `load_replay_bundle_v1` for optional or required metric-sidecar resolution;
@@ -238,6 +244,15 @@ belong to that temporary inode, preserves every pre-existing target, and leaves
 immutable bytes available for a safe retry. A report orphan created before a
 failed replay publication is recoverable by identical-byte reuse; no published
 replay can point to an unpublished report.
+
+`PreparedReplayBundleV1` derives its byte payloads, lengths, and SHA-256
+digests from one exact validated `ReplayBundleV1`; callers cannot supply or
+forge those cache fields. Normal publication still rejects an existing replay.
+The explicit recovery mode of `publish_prepared_replay_bundle_v1` is narrower:
+it performs no serialization or overwrite and succeeds only when both existing
+files are byte-for-byte identical to the prepared replay and report. This is
+the retry seam used by live debugger recording after an uncertain publication
+or verification outcome.
 
 `load_replay_bundle_v1(..., require_metric_report=False)` returns a typed
 `metric_report_missing` status when the trajectory is valid but its sidecar is

@@ -30,6 +30,9 @@
         <span id="terminal-badge" class="status-pill status-pill--warning" hidden>
           Terminal
         </span>
+        <span id="recording-badge" class="status-pill status-pill--recording" hidden>
+          Recording
+        </span>
       </div>
     </header>
 
@@ -128,6 +131,84 @@
           Exit analyzer
         </button>
       </div>
+    </section>
+
+    <section
+      id="recording-panel"
+      class="recording-panel"
+      aria-labelledby="recording-heading"
+      data-live-only
+      hidden
+    >
+      <div class="recording-panel__summary">
+        <div>
+          <p class="eyebrow">Canonical replay capture</p>
+          <h2 id="recording-heading">Replay recording</h2>
+        </div>
+        <dl class="recording-facts">
+          <div>
+            <dt>Lifecycle</dt>
+            <dd id="recording-lifecycle">Unavailable</dd>
+          </div>
+          <div>
+            <dt>Progress</dt>
+            <dd id="recording-progress">0 / 0 transitions</dd>
+          </div>
+          <div>
+            <dt>Completion</dt>
+            <dd id="recording-completion">Capture has not started</dd>
+          </div>
+          <div id="recording-persistence-fact" hidden>
+            <dt>Persistence</dt>
+            <dd id="recording-persistence-error">Unavailable</dd>
+          </div>
+        </dl>
+      </div>
+      <fieldset class="recording-panel__actions">
+        <legend class="sr-only">Replay recording actions</legend>
+        <button
+          id="recording-finish-button"
+          class="button--primary"
+          type="button"
+          hidden
+          disabled
+        >
+          Finish &amp; Review
+        </button>
+        <button
+          id="recording-review-button"
+          class="button--primary"
+          type="button"
+          hidden
+          disabled
+        >
+          Review replay
+        </button>
+        <button id="recording-retry-button" type="button" hidden disabled>
+          Retry save
+        </button>
+        <div id="recording-save-as-control" class="recording-save-as" hidden>
+          <label for="recording-save-as-input">Save As basename</label>
+          <input
+            id="recording-save-as-input"
+            type="text"
+            minlength="20"
+            maxlength="160"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="episode-copy.marlbg-replay.json"
+            aria-describedby="recording-save-as-help"
+            disabled
+          >
+          <button id="recording-save-as-button" type="button" disabled>Save As</button>
+          <span id="recording-save-as-help" class="sr-only">
+            Enter only a filename ending in .marlbg-replay.json. Paths are not accepted.
+          </span>
+        </div>
+      </fieldset>
+      <p id="recording-status-note" class="recording-panel__note" aria-live="polite">
+        Recording authority is supplied by the local Python service.
+      </p>
     </section>
 
     <section
@@ -515,6 +596,43 @@
             explanation to settle. Seeking, errors, disconnects, hidden tabs,
             and the captured endpoint pause it.
           </p>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog
+      id="recording-discard-dialog"
+      class="help-dialog recording-discard-dialog"
+      aria-labelledby="recording-discard-heading"
+      aria-describedby="recording-discard-description"
+      data-live-only
+    >
+      <form method="dialog">
+        <p class="eyebrow">Destructive in-memory action</p>
+        <h2 id="recording-discard-heading">Discard captured prefix?</h2>
+        <p id="recording-discard-description">
+          This replaces the active episode and permanently discards its unpublished
+          in-memory recording prefix. No saved replay file is deleted or overwritten.
+        </p>
+        <p class="recording-discard-dialog__intent">
+          Requested replacement: <strong id="recording-discard-intent">Unavailable</strong>
+        </p>
+        <div class="recording-discard-dialog__actions">
+          <button
+            id="recording-discard-cancel-button"
+            class="button button--quiet"
+            type="submit"
+            value="cancel"
+          >
+            Keep recording
+          </button>
+          <button
+            id="recording-discard-confirm-button"
+            class="button button--danger"
+            type="button"
+          >
+            Discard and replace
+          </button>
         </div>
       </form>
     </dialog>

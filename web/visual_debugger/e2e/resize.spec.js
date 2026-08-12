@@ -3,7 +3,8 @@ import { expect, test } from "@playwright/test";
 import { startDebugger, stopDebugger } from "./support/live-debugger.js";
 import {
   loadRendererFixture,
-  syntheticDebuggerFrame,
+  syntheticDebuggerPresentationFrame,
+  syntheticDebuggerWireFrame,
 } from "./support/renderer-fixture.js";
 
 /** @type {import("node:child_process").ChildProcess | null} */
@@ -11,6 +12,8 @@ let serverProcess = null;
 let debuggerUrl = "";
 /** @type {Record<string, any>} */
 let syntheticFrame = {};
+/** @type {Record<string, any>} */
+let syntheticWireFrame = {};
 
 test.beforeAll(async () => {
   const [started, fixture] = await Promise.all([
@@ -19,7 +22,8 @@ test.beforeAll(async () => {
   ]);
   serverProcess = started.process;
   debuggerUrl = started.url;
-  syntheticFrame = syntheticDebuggerFrame(fixture);
+  syntheticFrame = syntheticDebuggerPresentationFrame(fixture);
+  syntheticWireFrame = syntheticDebuggerWireFrame(fixture);
 });
 
 test.afterAll(async () => {
@@ -54,7 +58,7 @@ test("resize observer preserves authoritative DOM across split and stacked layou
   await page.route("**/api/frame", async (route) => {
     await route.fulfill({
       contentType: "application/json",
-      json: syntheticFrame,
+      json: syntheticWireFrame,
       status: 200,
     });
   });
@@ -208,7 +212,7 @@ test("toolbar wrapping preserves DOM, visual, and keyboard focus order", async (
   await page.route("**/api/frame", async (route) => {
     await route.fulfill({
       contentType: "application/json",
-      json: syntheticFrame,
+      json: syntheticWireFrame,
       status: 200,
     });
   });

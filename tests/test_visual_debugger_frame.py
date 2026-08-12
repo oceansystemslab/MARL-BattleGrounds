@@ -23,6 +23,7 @@ from scripts.dev.visual_debugger.protocol import (
     ActorPovLiveDebuggerFrameV2,
     ApiErrorV2,
     CommandResponseV2,
+    RecordingStatusV1,
     ResearcherLiveDebuggerFrameV2,
     ViewMode,
 )
@@ -54,6 +55,7 @@ def _frame(
     revision: int = 0,
     view_mode: ViewMode = "researcher",
     include_stress: bool = False,
+    recording_status: RecordingStatusV1 | None = None,
 ) -> LiveDebuggerFrame:
     return build_debugger_frame(
         session,
@@ -62,6 +64,7 @@ def _frame(
         view_mode=view_mode,
         preset="analysis",
         include_stress=include_stress,
+        recording_status=recording_status,
     )
 
 
@@ -113,6 +116,74 @@ def test_initial_researcher_frame_joins_canonical_frame_zero_and_menu() -> None:
         == frame.hud.roster_global_slots
     )
     assert frame.hud.pending_action == frame.hud.pending_actions[0]
+
+
+def test_recording_status_is_audience_common_and_joins_live_frame_progress() -> None:
+    status = RecordingStatusV1(
+        lifecycle="recording",
+        captured_transition_count=0,
+        expected_transition_count=5,
+        restart_fenced=False,
+        finish_available=True,
+        review_available=False,
+        retry_available=False,
+        save_as_available=False,
+        discard_available=False,
+    )
+
+    researcher = _frame(_session(), recording_status=status)
+    pov = _frame(_session(), view_mode="pov", recording_status=status)
+
+    assert researcher.recording == status
+    assert pov.recording == status
+    assert "replay_path" not in _recursive_keys(researcher.model_dump(mode="json"))
+    assert "replay_path" not in _recursive_keys(pov.model_dump(mode="json"))
+
+    with pytest.raises(ValueError, match="recording progress"):
+        build_debugger_frame(
+            _session(),
+            session_id="session-1",
+            revision=0,
+            view_mode="researcher",
+            preset="analysis",
+            include_stress=False,
+            recording_status=status.model_copy(
+                update={
+                    "captured_transition_count": 1,
+                    "restart_fenced": True,
+                    "discard_available": True,
+                }
+            ),
+        )
+
+
+def test_pov_recording_status_redacts_reducer_processing_failure_reason() -> None:
+    status = RecordingStatusV1(
+        lifecycle="saved",
+        captured_transition_count=0,
+        expected_transition_count=5,
+        completion_state="interrupted",
+        completion_reason="evaluation_processing_failure",
+        restart_fenced=True,
+        finish_available=False,
+        review_available=True,
+        retry_available=False,
+        save_as_available=False,
+        discard_available=False,
+    )
+
+    researcher = _frame(_session(), recording_status=status)
+    pov = _frame(_session(), view_mode="pov", recording_status=status)
+
+    assert researcher.recording == status
+    assert researcher.recording is not None
+    assert researcher.recording.completion_reason == "evaluation_processing_failure"
+    assert pov.recording is not None
+    assert pov.recording.completion_reason == "evaluation_unavailable"
+    assert pov.recording.model_copy(
+        update={"completion_reason": status.completion_reason}
+    ) == (status)
+    assert "evaluation_processing_failure" not in pov.model_dump_json()
 
 
 def test_researcher_pending_plan_preserves_each_actor_draft_and_public_target() -> None:

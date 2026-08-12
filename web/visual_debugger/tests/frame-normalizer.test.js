@@ -7,6 +7,7 @@ import {
   liveDebuggerFrameIsScripted,
   liveDebuggerScenarioControlsAvailable,
   normalizeLiveDebuggerFrameV2,
+  normalizeRecordingStatusV1,
   researcherEventTypesV2,
 } from "../src/frame-normalizer.js";
 
@@ -208,6 +209,7 @@ function researcherFrame() {
     revision: 9,
     episode_id: episodeId,
     frame_index: 1,
+    recording: null,
     frame_id: `${episodeId}:frame:1`,
     simulator_step_count: 1,
     incoming_transition_index: 0,
@@ -531,6 +533,7 @@ function povFrame() {
     revision: 10,
     episode_id: episodeId,
     frame_index: 1,
+    recording: null,
     frame_id: `${episodeId}:frame:1`,
     simulator_step_count: 1,
     incoming_pov_transition_id: povTransitionId,
@@ -593,8 +596,6 @@ function povFrame() {
       ],
     },
     terminal: {},
-    scenario: {},
-    available_scenarios: [],
     hud: {
       pending_action: {
         actor_public_agent_id: publicAgentId,
@@ -811,6 +812,189 @@ test("POV normalization rejects noncanonical local cue identity", () => {
     () => normalizeLiveDebuggerFrameV2(frame),
     /cue order or local identity/u,
   );
+});
+
+function activeRecordingStatus() {
+  return {
+    schema_version: 1,
+    lifecycle: "recording",
+    captured_transition_count: 1,
+    expected_transition_count: 5,
+    completion_state: null,
+    completion_reason: null,
+    restart_fenced: true,
+    finish_available: true,
+    review_available: false,
+    retry_available: false,
+    save_as_available: false,
+    discard_available: true,
+    persistence_error_code: null,
+  };
+}
+
+test("recording status is exact, path-free, frozen, and joined to both live audiences", () => {
+  assert.equal(normalizeRecordingStatusV1(null, 1), null);
+  const status = activeRecordingStatus();
+  const normalized = normalizeRecordingStatusV1(status, 1);
+  assert.deepEqual(normalized, status);
+  assert.notEqual(normalized, status);
+  assert.equal(Object.isFrozen(normalized), true);
+
+  const researcher = researcherFrame();
+  researcher.recording = status;
+  const pov = povFrame();
+  pov.recording = structuredClone(status);
+  assert.deepEqual(normalizeLiveDebuggerFrameV2(researcher).recording, status);
+  assert.deepEqual(normalizeLiveDebuggerFrameV2(pov).recording, status);
+  assert.equal(Object.hasOwn(normalized, "path"), false);
+  assert.equal(Object.hasOwn(normalized, "detail"), false);
+});
+
+test("recording status rejects missing, extra, inconsistent, and over-disclosing fields", () => {
+  const { completion_reason: _omittedReason, ...missing } = activeRecordingStatus();
+  assert.throws(
+    () => normalizeRecordingStatusV1(missing, 1),
+    /unknown or missing fields/u,
+  );
+
+  for (const extra of [
+    { path: "/private/replay.marlbg-replay.json" },
+    { details: "raw host failure" },
+  ]) {
+    assert.throws(
+      () => normalizeRecordingStatusV1({ ...activeRecordingStatus(), ...extra }, 1),
+      /unknown or missing fields/u,
+    );
+  }
+
+  for (const mutation of [
+    { captured_transition_count: 0 },
+    { expected_transition_count: 0 },
+    { lifecycle: "unknown" },
+    { restart_fenced: false },
+    { finish_available: false },
+    { retry_available: true },
+    { persistence_error_code: "publication_failed" },
+    { completion_state: "partial", completion_reason: null },
+  ]) {
+    assert.throws(() =>
+      normalizeRecordingStatusV1({ ...activeRecordingStatus(), ...mutation }, 1),
+    );
+  }
+
+  const missingAuthority = researcherFrame();
+  delete missingAuthority.recording;
+  assert.throws(
+    () => normalizeLiveDebuggerFrameV2(missingAuthority),
+    /missing recording authority/u,
+  );
+});
+
+test("both live audience roots reject path-shaped and arbitrary top-level siblings", () => {
+  for (const frame of [researcherFrame(), povFrame()]) {
+    for (const mutation of [
+      { replay_path: "/private/episode.marlbg-replay.json" },
+      { persistence_details: "host exception detail" },
+      { unknown_extension: true },
+    ]) {
+      assert.throws(
+        () => normalizeLiveDebuggerFrameV2({ ...frame, ...mutation }),
+        /unknown or missing top-level fields/u,
+      );
+    }
+  }
+});
+
+test("recording status accepts only canonical saved and persistence-failed availability", () => {
+  const completed = {
+    ...activeRecordingStatus(),
+    captured_transition_count: 5,
+    lifecycle: "saved",
+    completion_state: "complete",
+    completion_reason: null,
+    finish_available: false,
+    review_available: true,
+    discard_available: false,
+  };
+  assert.deepEqual(normalizeRecordingStatusV1(completed, 5), completed);
+
+  const failed = {
+    ...completed,
+    captured_transition_count: 3,
+    lifecycle: "persistence_failed",
+    completion_state: "partial",
+    completion_reason: "user_finish_and_review",
+    review_available: false,
+    retry_available: true,
+    save_as_available: true,
+    persistence_error_code: "verification_failed",
+  };
+  assert.deepEqual(normalizeRecordingStatusV1(failed, 3), failed);
+});
+
+test("recording status accepts every declared lifecycle only with its canonical joins", () => {
+  const cases = [
+    {
+      lifecycle: "recording",
+      captured: 0,
+      completionState: null,
+      completionReason: null,
+    },
+    {
+      lifecycle: "sealed",
+      captured: 1,
+      completionState: "complete",
+      completionReason: null,
+    },
+    {
+      lifecycle: "finalized_unsaved",
+      captured: 1,
+      completionState: "partial",
+      completionReason: "user_finish_and_review",
+    },
+    {
+      lifecycle: "persistence_failed",
+      captured: 1,
+      completionState: "partial",
+      completionReason: "user_finish_and_review",
+    },
+    {
+      lifecycle: "saved",
+      captured: 1,
+      completionState: "partial",
+      completionReason: "user_finish_and_review",
+    },
+    {
+      lifecycle: "reviewing",
+      captured: 1,
+      completionState: "partial",
+      completionReason: "user_finish_and_review",
+    },
+    {
+      lifecycle: "discarded",
+      captured: 0,
+      completionState: null,
+      completionReason: null,
+    },
+  ];
+  for (const { captured, completionReason, completionState, lifecycle } of cases) {
+    const persistenceFailed = lifecycle === "persistence_failed";
+    const status = {
+      ...activeRecordingStatus(),
+      lifecycle,
+      captured_transition_count: captured,
+      completion_state: completionState,
+      completion_reason: completionReason,
+      restart_fenced: captured > 0 || lifecycle !== "recording",
+      finish_available: lifecycle === "recording",
+      review_available: lifecycle === "saved",
+      retry_available: persistenceFailed,
+      save_as_available: persistenceFailed,
+      discard_available: lifecycle === "recording" && captured > 0,
+      persistence_error_code: persistenceFailed ? "publication_failed" : null,
+    };
+    assert.deepEqual(normalizeRecordingStatusV1(status, captured), status, lifecycle);
+  }
 });
 
 test("scripted authority comes from the audience-owned live envelope", () => {

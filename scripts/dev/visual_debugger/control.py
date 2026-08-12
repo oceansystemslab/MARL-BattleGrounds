@@ -1,7 +1,7 @@
 """Pure debugger state transitions and the single simulator submission boundary."""
 
 from dataclasses import replace
-from typing import cast
+from typing import Literal, cast
 
 import jax
 import jax.numpy as jnp
@@ -35,6 +35,7 @@ from marl_battlegrounds.rendering.evaluation_adapter import (
 )
 from scripts.dev.visual_debugger.evaluation_bridge import (
     DebuggerActionSourceKindV1,
+    DebuggerCaptureProfileV1,
     DebuggerEvaluationLaunchSpecificationV1,
     build_debugger_evaluation_context_v1,
     build_debugger_evaluation_launch_specification_v1,
@@ -51,6 +52,59 @@ from scripts.dev.visual_debugger.model import (
     SubmissionKind,
 )
 from scripts.dev.visual_debugger.scenarios import get_scenario
+
+type DebuggerTransitionFailureStageV1 = Literal[
+    "action_build",
+    "simulation",
+    "capture",
+    "validation",
+]
+type DebuggerTransitionFailureCodeV1 = Literal[
+    "interactive_action_build_failed",
+    "scripted_action_build_failed",
+    "invalid_submitted_action",
+    "simulator_step_failed",
+    "transition_capture_failed",
+    "transition_packaging_failed",
+]
+
+
+class DebuggerTransitionFailureV1(RuntimeError):  # noqa: N818 - frozen protocol name
+    """Stable submission-stage failure without leaking raw exception detail."""
+
+    __slots__ = ("stable_code", "stage")
+
+    stage: DebuggerTransitionFailureStageV1
+    stable_code: DebuggerTransitionFailureCodeV1
+
+    def __init__(
+        self,
+        stage: DebuggerTransitionFailureStageV1,
+        stable_code: DebuggerTransitionFailureCodeV1,
+    ) -> None:
+        if stage not in ("action_build", "simulation", "capture", "validation"):
+            raise ValueError("unknown debugger transition failure stage")
+        if stable_code not in (
+            "interactive_action_build_failed",
+            "scripted_action_build_failed",
+            "invalid_submitted_action",
+            "simulator_step_failed",
+            "transition_capture_failed",
+            "transition_packaging_failed",
+        ):
+            raise ValueError("unknown debugger transition failure code")
+        self.stage = stage
+        self.stable_code = stable_code
+        super().__init__(f"debugger transition failed during {stage}")
+
+
+def _transition_failure(
+    stage: DebuggerTransitionFailureStageV1,
+    stable_code: DebuggerTransitionFailureCodeV1,
+    error: Exception,
+) -> DebuggerTransitionFailureV1:
+    del error
+    return DebuggerTransitionFailureV1(stage, stable_code)
 
 
 def make_neutral_joint_action() -> Action:
@@ -594,70 +648,97 @@ def submit_joint_action(
     terminal_reason = _terminal_reason(session)
     if terminal_reason is not None:
         return session
-    _validate_joint_action(submitted_action)
-    if len(report_actor_slots) != len(set(report_actor_slots)):
-        raise ValueError("report_actor_slots must not contain duplicates.")
-    for actor_slot in report_actor_slots:
-        _validate_active_context_slot(
-            session.evaluation_context,
-            actor_slot,
-            name="report actor",
-        )
+    try:
+        _validate_joint_action(submitted_action)
+        if len(report_actor_slots) != len(set(report_actor_slots)):
+            raise ValueError("report_actor_slots must not contain duplicates.")
+        for actor_slot in report_actor_slots:
+            _validate_active_context_slot(
+                session.evaluation_context,
+                actor_slot,
+                name="report actor",
+            )
+    except Exception as error:
+        raise _transition_failure(
+            "action_build",
+            "invalid_submitted_action",
+            error,
+        ) from error
 
-    next_key, step_key = jax.random.split(session.key)
-    (
-        next_state,
-        next_observation,
-        reward,
-        done_flags,
-        next_action_mask,
-        info,
-    ) = step(
-        session.config,
-        session.state,
-        session.action_mask,
-        submitted_action,
-        step_key,
-    )
-    transition, successor_frame = capture_evaluation_transition_unit_v1(
-        session.evaluation_context,
-        session.current_evaluation_frame,
-        next_state,
-        next_observation,
-        next_action_mask,
-        info.transition_facts,
-        reward,
-        done_flags,
-    )
-    coherent_view = EvaluationTransitionViewV1(
-        context=session.evaluation_context,
-        start_frame=session.current_evaluation_frame,
-        transition=transition,
-        successor_frame=successor_frame,
-    )
-    status_source_evidence_state = advance_status_source_evidence_v2(
-        session.status_source_evidence_state,
-        coherent_view,
-    )
-    next_session = replace(
-        session,
-        key=next_key,
-        state=next_state,
-        observation=next_observation,
-        action_mask=next_action_mask,
-        evaluation_context=coherent_view.context,
-        current_evaluation_frame=coherent_view.successor_frame,
-        incoming_evaluation_view=coherent_view,
-        status_source_evidence_state=status_source_evidence_state,
-        last_submission_kind=submission_kind,
-        last_report_actor_slots=tuple(sorted(report_actor_slots)),
-        raw_continuation_identity=None,
-        pending_actions=_post_submit_pending(
+    try:
+        next_key, step_key = jax.random.split(session.key)
+        (
+            next_state,
+            next_observation,
+            reward,
+            done_flags,
+            next_action_mask,
+            info,
+        ) = step(
+            session.config,
+            session.state,
+            session.action_mask,
+            submitted_action,
+            step_key,
+        )
+    except Exception as error:
+        raise _transition_failure(
+            "simulation",
+            "simulator_step_failed",
+            error,
+        ) from error
+    try:
+        transition, successor_frame = capture_evaluation_transition_unit_v1(
+            session.evaluation_context,
+            session.current_evaluation_frame,
+            next_state,
+            next_observation,
+            next_action_mask,
+            info.transition_facts,
+            reward,
+            done_flags,
+        )
+    except Exception as error:
+        raise _transition_failure(
+            "capture",
+            "transition_capture_failed",
+            error,
+        ) from error
+    try:
+        coherent_view = EvaluationTransitionViewV1(
+            context=session.evaluation_context,
+            start_frame=session.current_evaluation_frame,
+            transition=transition,
+            successor_frame=successor_frame,
+        )
+        status_source_evidence_state = advance_status_source_evidence_v2(
+            session.status_source_evidence_state,
+            coherent_view,
+        )
+        return replace(
             session,
-            coherent_view.successor_frame.action_mask,
-        ),
-    )
-    return next_session
+            key=next_key,
+            state=next_state,
+            observation=next_observation,
+            action_mask=next_action_mask,
+            evaluation_context=coherent_view.context,
+            current_evaluation_frame=coherent_view.successor_frame,
+            incoming_evaluation_view=coherent_view,
+            status_source_evidence_state=status_source_evidence_state,
+            last_submission_kind=submission_kind,
+            last_report_actor_slots=tuple(sorted(report_actor_slots)),
+            raw_continuation_identity=None,
+            pending_actions=_post_submit_pending(
+                session,
+                coherent_view.successor_frame.action_mask,
+            ),
+        )
+    except Exception as error:
+        raise _transition_failure(
+            "validation",
+            "transition_packaging_failed",
+            error,
+        ) from error
 
 
 def submit_interactive(
@@ -671,11 +752,18 @@ def submit_interactive(
         if actor_global_slots is None
         else actor_global_slots
     )
-    action = build_interactive_joint_action(
-        session.evaluation_context,
-        session.pending_actions,
-        actor_global_slots=submission_slots,
-    )
+    try:
+        action = build_interactive_joint_action(
+            session.evaluation_context,
+            session.pending_actions,
+            actor_global_slots=submission_slots,
+        )
+    except Exception as error:
+        raise _transition_failure(
+            "action_build",
+            "interactive_action_build_failed",
+            error,
+        ) from error
     return submit_joint_action(
         session,
         action,
@@ -692,10 +780,17 @@ def submit_next_script_frame(
     if session.next_script_frame_index >= len(scenario.frames):
         return session
     frame = scenario.frames[session.next_script_frame_index]
-    action = build_scripted_joint_action(session.evaluation_context, frame)
-    report_slots = tuple(
-        sorted(command.actor_global_slot for command in frame.commands)
-    )
+    try:
+        action = build_scripted_joint_action(session.evaluation_context, frame)
+        report_slots = tuple(
+            sorted(command.actor_global_slot for command in frame.commands)
+        )
+    except Exception as error:
+        raise _transition_failure(
+            "action_build",
+            "scripted_action_build_failed",
+            error,
+        ) from error
     submitted = submit_joint_action(
         session,
         action,
@@ -751,6 +846,10 @@ def _restart_session(
     launch_specification = build_debugger_evaluation_launch_specification_v1(
         root_seed=session.evaluation_context.seed_protocol.root_seed,
         code_revision=session.evaluation_context.code_revision,
+        capture_profile=cast(
+            DebuggerCaptureProfileV1,
+            session.evaluation_context.capture_profile,
+        ),
     )
     evaluation_context = build_debugger_evaluation_context_v1(
         launch_specification,

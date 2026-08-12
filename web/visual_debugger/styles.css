@@ -128,6 +128,7 @@ select {
 
 .app-header,
 .session-toolbar,
+.recording-panel,
 .replay-timeline,
 .workspace,
 .notice {
@@ -232,6 +233,25 @@ select {
   background: rgb(34 211 238 / 10%);
 }
 
+.status-pill--recording {
+  border-color: rgb(251 113 133 / 58%);
+  color: #fecdd3;
+  background: rgb(251 113 133 / 10%);
+}
+
+.status-pill--recording[data-lifecycle="saved"],
+.status-pill--recording[data-lifecycle="reviewing"] {
+  border-color: rgb(52 211 153 / 55%);
+  color: #a7f3d0;
+  background: rgb(52 211 153 / 10%);
+}
+
+.status-pill--recording[data-lifecycle="persistence_failed"] {
+  border-color: rgb(250 204 21 / 55%);
+  color: #fde68a;
+  background: rgb(250 204 21 / 10%);
+}
+
 .session-toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -242,6 +262,111 @@ select {
   border-radius: var(--radius);
   background: rgb(16 24 39 / 88%);
   box-shadow: var(--shadow);
+}
+
+.recording-panel {
+  display: grid;
+  gap: 0.7rem;
+  margin-top: 0.75rem;
+  padding: 0.8rem;
+  border: 1px solid rgb(251 113 133 / 38%);
+  border-radius: var(--radius);
+  background: linear-gradient(135deg, rgb(251 113 133 / 6%), rgb(16 24 39 / 94%));
+  box-shadow: var(--shadow);
+}
+
+.recording-panel__summary,
+.recording-panel__actions,
+.recording-facts,
+.recording-save-as,
+.recording-discard-dialog__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.recording-panel__summary {
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.recording-panel h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.recording-facts {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  margin: 0;
+}
+
+.recording-facts div {
+  display: grid;
+  min-width: 8rem;
+  gap: 0.05rem;
+  padding: 0.35rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+  background: rgb(8 13 24 / 52%);
+}
+
+.recording-facts dt,
+.recording-save-as label {
+  color: var(--text-muted);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.recording-facts dd {
+  margin: 0;
+  font-size: 0.78rem;
+}
+
+.recording-panel__actions {
+  flex-wrap: wrap;
+  min-inline-size: 0;
+  padding: 0;
+  border: 0;
+  margin: 0;
+}
+
+.recording-save-as {
+  flex: 1 1 28rem;
+}
+
+.recording-save-as label {
+  white-space: nowrap;
+}
+
+.recording-save-as input {
+  min-width: min(23rem, 50vw);
+  min-height: 2.25rem;
+  flex: 1;
+  padding: 0.45rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  color: var(--text);
+  background: var(--surface-raised);
+  font: inherit;
+}
+
+.recording-save-as input:focus-visible {
+  outline: 3px solid rgb(34 211 238 / 62%);
+  outline-offset: 2px;
+}
+
+.recording-save-as input:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.recording-panel__note {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.78rem;
 }
 
 .replay-timeline {
@@ -2863,6 +2988,19 @@ select {
   backdrop-filter: blur(3px);
 }
 
+.recording-discard-dialog__intent {
+  padding: 0.75rem;
+  border: 1px solid rgb(250 204 21 / 40%);
+  border-radius: 0.55rem;
+  color: #fde68a;
+  background: rgb(250 204 21 / 8%);
+}
+
+.recording-discard-dialog__actions {
+  justify-content: flex-end;
+  margin-top: 1rem;
+}
+
 .help-grid {
   display: grid;
   grid-template-columns: minmax(9rem, auto) 1fr;
@@ -2922,6 +3060,7 @@ select {
 @media (max-width: 59.9375rem) {
   .app-header,
   .session-toolbar,
+  .recording-panel,
   .replay-timeline,
   .workspace,
   .notice {
@@ -2982,6 +3121,29 @@ select {
   .replay-timeline__summary {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .recording-panel__summary {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .recording-facts {
+    justify-content: stretch;
+  }
+
+  .recording-facts div {
+    flex: 1 1 9rem;
+  }
+
+  .recording-save-as {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .recording-save-as input {
+    width: 100%;
+    min-width: 0;
   }
 
   .replay-badges {

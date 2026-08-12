@@ -5,14 +5,15 @@ from __future__ import annotations
 import secrets
 import sys
 import webbrowser
-from collections.abc import Callable
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from inspect import Parameter, Signature, signature
 from pathlib import Path
 from socket import socket
-from threading import Event, Lock, Thread
+from threading import Event, Lock, RLock, Thread
 from typing import Any, Literal, Protocol, cast, get_args
 from urllib.parse import urlsplit
 
@@ -188,6 +189,125 @@ class HttpCoordinatorBinding:
             raise ValueError("replay debugger mode requires a timeline operation.")
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class HttpCoordinatorReplacement:
+    """Fully constructed service/binding pair eligible for atomic installation."""
+
+    service: object
+    binding: HttpCoordinatorBinding
+
+    def __post_init__(self) -> None:
+        binding = cast(object, self.binding)
+        if not isinstance(binding, HttpCoordinatorBinding):
+            raise TypeError("coordinator replacement requires an exact binding.")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class HttpCoordinatorSnapshot:
+    """Immutable identity for one active coordinator generation."""
+
+    generation: int
+    service: object
+    binding: HttpCoordinatorBinding
+
+    def __post_init__(self) -> None:
+        generation = cast(object, self.generation)
+        if (
+            isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or generation < 0
+        ):
+            raise ValueError("coordinator generation must be a non-negative integer.")
+        binding = cast(object, self.binding)
+        if not isinstance(binding, HttpCoordinatorBinding):
+            raise TypeError("coordinator snapshot requires an exact binding.")
+
+
+class HttpCoordinatorRouter:
+    """Serialize requests and one monotonic live-to-replay binding replacement."""
+
+    def __init__(self, *, service: object, binding: HttpCoordinatorBinding) -> None:
+        raw_binding = cast(object, binding)
+        if not isinstance(raw_binding, HttpCoordinatorBinding):
+            raise TypeError("coordinator router requires an exact binding.")
+        self._lock = RLock()
+        self._active = HttpCoordinatorSnapshot(
+            generation=0,
+            service=service,
+            binding=binding,
+        )
+
+    def snapshot(self) -> HttpCoordinatorSnapshot:
+        """Return one coherent active service/binding identity."""
+        with self._lock:
+            return self._active
+
+    @contextmanager
+    def pinned_snapshot(self) -> Generator[HttpCoordinatorSnapshot]:
+        """Pin one generation while a request is routed and answered."""
+        with self._lock:
+            yield self._active
+
+    def compare_and_swap(
+        self,
+        *,
+        expected: HttpCoordinatorSnapshot,
+        replacement: HttpCoordinatorReplacement,
+    ) -> bool:
+        """Install one complete replay pair iff the expected live pair is active."""
+        raw_expected = cast(object, expected)
+        if not isinstance(raw_expected, HttpCoordinatorSnapshot):
+            raise TypeError("expected coordinator state must be an exact snapshot.")
+        raw_replacement = cast(object, replacement)
+        if not isinstance(raw_replacement, HttpCoordinatorReplacement):
+            raise TypeError(
+                "replacement coordinator state must be an exact replacement."
+            )
+        if replacement.binding.mode != "replay":
+            raise ValueError(
+                "coordinator replacement must be monotonic live-to-replay."
+            )
+        with self._lock:
+            active = self._active
+            if (
+                active.generation != expected.generation
+                or active.service is not expected.service
+                or active.binding is not expected.binding
+            ):
+                return False
+            if active.binding.mode != "live":
+                return False
+            self._active = HttpCoordinatorSnapshot(
+                generation=active.generation + 1,
+                service=replacement.service,
+                binding=replacement.binding,
+            )
+            return True
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class GracefulCloseResult:
+    """Typed launcher outcome produced by an optional graceful-close callback."""
+
+    exit_code: int
+    message: str | None = None
+
+    def __post_init__(self) -> None:
+        exit_code = cast(object, self.exit_code)
+        if (
+            isinstance(exit_code, bool)
+            or not isinstance(exit_code, int)
+            or not 0 <= exit_code <= 255
+        ):
+            raise ValueError("graceful-close exit_code must be an integer in [0, 255].")
+        message = cast(object, self.message)
+        if message is not None and (not isinstance(message, str) or not message):
+            raise ValueError("graceful-close message must be null or non-empty.")
+
+
+type GracefulCloseCallback = Callable[[], GracefulCloseResult]
+
+
 def _legacy_live_binding(service: object) -> HttpCoordinatorBinding:
     """Derive the existing live wire types without importing their modules here."""
     current_frame = getattr(service, "current_frame", None)
@@ -312,7 +432,7 @@ def build_static_manifest(asset_root: Path) -> dict[str, StaticAsset]:
 
 
 class DebuggerHTTPServer(ThreadingHTTPServer):
-    """Threaded loopback server carrying one mode-isolated coordinator."""
+    """Threaded loopback server carrying one monotonic active coordinator."""
 
     daemon_threads = True
     block_on_close = True
@@ -322,14 +442,28 @@ class DebuggerHTTPServer(ThreadingHTTPServer):
         *,
         service: object,
         coordinator: HttpCoordinatorBinding,
+        coordinator_router: HttpCoordinatorRouter | None = None,
         capability_token: str,
         static_manifest: dict[str, StaticAsset],
         port: int,
     ) -> None:
-        # Retained as a deliberately untyped compatibility surface for callers
-        # that inspect the mode-specific authoritative service.
-        self.debugger_service = cast(Any, service)
-        self.coordinator = coordinator
+        if coordinator_router is None:
+            self._coordinator_router = HttpCoordinatorRouter(
+                service=service,
+                binding=coordinator,
+            )
+        else:
+            raw_router = cast(object, coordinator_router)
+            if type(raw_router) is not HttpCoordinatorRouter:
+                raise TypeError(
+                    "coordinator_router must be an exact HttpCoordinatorRouter."
+                )
+            snapshot = coordinator_router.snapshot()
+            if snapshot.service is not service or snapshot.binding is not coordinator:
+                raise ValueError(
+                    "coordinator_router must own the supplied service and binding."
+                )
+            self._coordinator_router = coordinator_router
         self.capability_token = capability_token
         self.static_manifest = static_manifest
         self.shutdown_started = Event()
@@ -338,6 +472,53 @@ class DebuggerHTTPServer(ThreadingHTTPServer):
         host, actual_port = cast(tuple[str, int], self.server_address)
         self.expected_host = f"{host}:{actual_port}"
         self.expected_origin = f"http://{self.expected_host}"
+
+    @property
+    def coordinator_router(self) -> HttpCoordinatorRouter:
+        """Expose the narrow dynamic coordinator for lifecycle integration."""
+        return self._coordinator_router
+
+    @property
+    def coordinator(self) -> HttpCoordinatorBinding:
+        """Preserve the legacy active-binding inspection surface."""
+        return self._coordinator_router.snapshot().binding
+
+    @property
+    def debugger_service(self) -> Any:  # noqa: ANN401
+        """Preserve the deliberately untyped active-service inspection surface."""
+        return cast(Any, self._coordinator_router.snapshot().service)
+
+    def coordinator_snapshot(self) -> HttpCoordinatorSnapshot:
+        """Return one coherent service/binding generation for a future CAS."""
+        return self._coordinator_router.snapshot()
+
+    def install_replay_coordinator(
+        self,
+        *,
+        expected: HttpCoordinatorSnapshot,
+        replacement: HttpCoordinatorReplacement,
+    ) -> bool:
+        """Atomically replace the expected live coordinator with replay."""
+        return self._coordinator_router.compare_and_swap(
+            expected=expected,
+            replacement=replacement,
+        )
+
+    def run_graceful_close(
+        self,
+        callback: GracefulCloseCallback,
+    ) -> GracefulCloseResult:
+        """Invoke one close callback while excluding HTTP requests and swaps."""
+        if not callable(callback):
+            raise TypeError("graceful-close callback must be callable.")
+        with self._coordinator_router.pinned_snapshot():
+            result = callback()
+            raw_result = cast(object, result)
+            if not isinstance(raw_result, GracefulCloseResult):
+                raise TypeError(
+                    "graceful-close callback must return GracefulCloseResult."
+                )
+            return result
 
     def request_shutdown(self) -> None:
         """Schedule one non-blocking shutdown after an Exit response."""
@@ -378,47 +559,51 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
         del format, args
 
     def do_GET(self) -> None:
-        route = self._route()
-        if route is None or not self._valid_request_origin():
+        with self.debugger_server.coordinator_router.pinned_snapshot() as snapshot:
+            self._handle_get(snapshot.binding)
+
+    def _handle_get(self, coordinator: HttpCoordinatorBinding) -> None:
+        route = self._route(coordinator)
+        if route is None or not self._valid_request_origin(coordinator):
             return
-        coordinator = self.debugger_server.coordinator
         if route == coordinator.routes.frame:
-            if not self._authenticated():
+            if not self._authenticated(coordinator):
                 return
             try:
                 frame = coordinator.current_frame()
             except Exception:
-                self._send_internal_error()
+                self._send_internal_error(coordinator)
                 return
             try:
                 self._send_model(HTTPStatus.OK, frame)
             except BrokenPipeError, ConnectionError, TimeoutError:
                 self.close_connection = True
             except Exception:
-                self._send_internal_error()
+                self._send_internal_error(coordinator)
             return
         if route == coordinator.routes.timeline:
-            if not self._authenticated():
+            if not self._authenticated(coordinator):
                 return
             current_timeline = coordinator.current_timeline
             if current_timeline is None:
-                self._send_internal_error()
+                self._send_internal_error(coordinator)
                 return
             try:
                 timeline = current_timeline()
             except Exception:
-                self._send_internal_error()
+                self._send_internal_error(coordinator)
                 return
             try:
                 self._send_model(HTTPStatus.OK, timeline)
             except BrokenPipeError, ConnectionError, TimeoutError:
                 self.close_connection = True
             except Exception:
-                self._send_internal_error()
+                self._send_internal_error(coordinator)
             return
         asset = self.debugger_server.static_manifest.get(route)
         if asset is None:
             self._send_api_error(
+                coordinator,
                 HTTPStatus.NOT_FOUND,
                 error_code="not_found",
                 message="No such debugger route.",
@@ -427,20 +612,24 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
         self._send_bytes(HTTPStatus.OK, asset.body, content_type=asset.content_type)
 
     def do_POST(self) -> None:
-        route = self._route()
-        if route is None or not self._valid_request_origin():
+        with self.debugger_server.coordinator_router.pinned_snapshot() as snapshot:
+            self._handle_post(snapshot.binding)
+
+    def _handle_post(self, coordinator: HttpCoordinatorBinding) -> None:
+        route = self._route(coordinator)
+        if route is None or not self._valid_request_origin(coordinator):
             return
-        coordinator = self.debugger_server.coordinator
         if route != coordinator.routes.command:
             self._send_api_error(
+                coordinator,
                 HTTPStatus.NOT_FOUND,
                 error_code="not_found",
                 message="No such debugger route.",
             )
             return
-        if not self._authenticated():
+        if not self._authenticated(coordinator):
             return
-        body = self._read_command_body()
+        body = self._read_command_body(coordinator)
         if body is None:
             return
         try:
@@ -450,6 +639,7 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
                 detail.get("type") == "json_invalid" for detail in error.errors()
             )
             self._send_api_error(
+                coordinator,
                 (
                     HTTPStatus.BAD_REQUEST
                     if malformed_json
@@ -474,7 +664,7 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
                 name="shutdown flag",
             )
         except Exception:
-            self._send_internal_error()
+            self._send_internal_error(coordinator)
             return
         try:
             status = _require_http_status(coordinator.result_status(result))
@@ -485,7 +675,7 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
         except BrokenPipeError, ConnectionError, TimeoutError:
             self.close_connection = True
         except Exception:
-            self._send_internal_error()
+            self._send_internal_error(coordinator)
         finally:
             if shutdown_requested:
                 self.debugger_server.request_shutdown()
@@ -506,16 +696,19 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
         self._method_not_allowed()
 
     def _method_not_allowed(self) -> None:
-        self._send_api_error(
-            HTTPStatus.METHOD_NOT_ALLOWED,
-            error_code="method_not_allowed",
-            message="Method is not supported by this debugger.",
-        )
+        with self.debugger_server.coordinator_router.pinned_snapshot() as snapshot:
+            self._send_api_error(
+                snapshot.binding,
+                HTTPStatus.METHOD_NOT_ALLOWED,
+                error_code="method_not_allowed",
+                message="Method is not supported by this debugger.",
+            )
 
-    def _route(self) -> str | None:
+    def _route(self, coordinator: HttpCoordinatorBinding) -> str | None:
         parsed = urlsplit(self.path)
         if parsed.query or parsed.fragment:
             self._send_api_error(
+                coordinator,
                 HTTPStatus.NOT_FOUND,
                 error_code="not_found",
                 message="No such debugger route.",
@@ -523,12 +716,13 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
             return None
         return parsed.path
 
-    def _valid_request_origin(self) -> bool:
+    def _valid_request_origin(self, coordinator: HttpCoordinatorBinding) -> bool:
         hosts = self.headers.get_all("Host", [])
         origins = self.headers.get_all("Origin", [])
         fetch_sites = self.headers.get_all("Sec-Fetch-Site", [])
         if len(hosts) != 1 or hosts[0] != self.debugger_server.expected_host:
             self._send_api_error(
+                coordinator,
                 HTTPStatus.FORBIDDEN,
                 error_code="forbidden_origin",
                 message="Request origin is not authorized.",
@@ -538,6 +732,7 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
             origins and origins[0] != self.debugger_server.expected_origin
         ):
             self._send_api_error(
+                coordinator,
                 HTTPStatus.FORBIDDEN,
                 error_code="forbidden_origin",
                 message="Request origin is not authorized.",
@@ -545,6 +740,7 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
             return False
         if len(fetch_sites) > 1 or (fetch_sites and fetch_sites[0] == "cross-site"):
             self._send_api_error(
+                coordinator,
                 HTTPStatus.FORBIDDEN,
                 error_code="forbidden_origin",
                 message="Request origin is not authorized.",
@@ -552,13 +748,14 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
             return False
         return True
 
-    def _authenticated(self) -> bool:
+    def _authenticated(self, coordinator: HttpCoordinatorBinding) -> bool:
         supplied = self.headers.get_all(_TOKEN_HEADER, [])
         if len(supplied) != 1 or not secrets.compare_digest(
             supplied[0],
             self.debugger_server.capability_token,
         ):
             self._send_api_error(
+                coordinator,
                 HTTPStatus.UNAUTHORIZED,
                 error_code="unauthorized",
                 message="Debugger capability is missing or invalid.",
@@ -566,9 +763,13 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
             return False
         return True
 
-    def _read_command_body(self) -> bytes | None:
+    def _read_command_body(
+        self,
+        coordinator: HttpCoordinatorBinding,
+    ) -> bytes | None:
         if self.headers.get_all("Transfer-Encoding", []):
             self._send_api_error(
+                coordinator,
                 HTTPStatus.BAD_REQUEST,
                 error_code="invalid_request",
                 message="Chunked command requests are not supported.",
@@ -580,6 +781,7 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
             or self.headers.get_content_type() != "application/json"
         ):
             self._send_api_error(
+                coordinator,
                 HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
                 error_code="unsupported_media_type",
                 message="Command requests require application/json.",
@@ -588,6 +790,7 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
         raw_lengths = self.headers.get_all("Content-Length", [])
         if len(raw_lengths) != 1:
             self._send_api_error(
+                coordinator,
                 HTTPStatus.LENGTH_REQUIRED,
                 error_code="invalid_request",
                 message="Command requests require one Content-Length value.",
@@ -596,6 +799,7 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
         raw_length = raw_lengths[0]
         if not raw_length.isascii() or not raw_length.isdecimal():
             self._send_api_error(
+                coordinator,
                 HTTPStatus.BAD_REQUEST,
                 error_code="invalid_request",
                 message="Content-Length must be a non-negative integer.",
@@ -604,6 +808,7 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
         length = int(raw_length)
         if length > _MAX_COMMAND_BODY_BYTES:
             self._send_api_error(
+                coordinator,
                 HTTPStatus.CONTENT_TOO_LARGE,
                 error_code="payload_too_large",
                 message="Command request exceeds the debugger body limit.",
@@ -613,6 +818,7 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
             body = self.rfile.read(length)
         except TimeoutError, OSError:
             self._send_api_error(
+                coordinator,
                 HTTPStatus.REQUEST_TIMEOUT,
                 error_code="invalid_request",
                 message="Command request body was not received in time.",
@@ -620,6 +826,7 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
             return None
         if len(body) != length:
             self._send_api_error(
+                coordinator,
                 HTTPStatus.BAD_REQUEST,
                 error_code="invalid_request",
                 message="Command request body ended before Content-Length.",
@@ -627,8 +834,9 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
             return None
         return body
 
-    def _send_internal_error(self) -> None:
+    def _send_internal_error(self, coordinator: HttpCoordinatorBinding) -> None:
         self._send_api_error(
+            coordinator,
             HTTPStatus.INTERNAL_SERVER_ERROR,
             error_code="internal_error",
             message="The debugger could not process this request.",
@@ -636,12 +844,13 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
 
     def _send_api_error(
         self,
+        coordinator: HttpCoordinatorBinding,
         status: HTTPStatus,
         *,
         error_code: str,
         message: str,
     ) -> None:
-        error = self.debugger_server.coordinator.error_factory(
+        error = coordinator.error_factory(
             error_code=error_code,
             message=message,
         )
@@ -677,21 +886,46 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
 
 
 def create_server(
-    service: object,
+    service: object | None = None,
     *,
     asset_root: Path,
     port: int,
     capability_token: str | None = None,
     coordinator: HttpCoordinatorBinding | None = None,
+    coordinator_router: HttpCoordinatorRouter | None = None,
 ) -> DebuggerHTTPServer:
     """Validate assets, then bind one debugger server to loopback."""
     if not 0 <= port <= 65535:
         raise ValueError(f"port must be in [0, 65535]; got {port}.")
-    resolved_coordinator = coordinator or _legacy_live_binding(service)
+    if coordinator_router is None:
+        if service is None:
+            raise TypeError(
+                "service is required when coordinator_router is not supplied."
+            )
+        resolved_service = service
+        resolved_coordinator = coordinator or _legacy_live_binding(service)
+    else:
+        raw_router = cast(object, coordinator_router)
+        if type(raw_router) is not HttpCoordinatorRouter:
+            raise TypeError(
+                "coordinator_router must be an exact HttpCoordinatorRouter."
+            )
+        snapshot = coordinator_router.snapshot()
+        if service is not None and snapshot.service is not service:
+            raise ValueError(
+                "coordinator_router does not own the supplied debugger service."
+            )
+        if coordinator is not None and snapshot.binding is not coordinator:
+            raise ValueError(
+                "coordinator_router does not own the supplied coordinator binding."
+            )
+        resolved_service = snapshot.service
+        resolved_coordinator = snapshot.binding
     manifest = build_static_manifest(asset_root)
     return DebuggerHTTPServer(
-        service=service,
+        service=resolved_service,
         coordinator=resolved_coordinator,
+        coordinator_router=coordinator_router,
         capability_token=capability_token or secrets.token_urlsafe(32),
         static_manifest=manifest,
         port=port,
@@ -699,12 +933,14 @@ def create_server(
 
 
 def serve_browser_debugger(
-    service: object,
+    service: object | None = None,
     *,
     asset_root: Path,
     port: int,
     open_browser: bool,
     coordinator: HttpCoordinatorBinding | None = None,
+    coordinator_router: HttpCoordinatorRouter | None = None,
+    graceful_close: GracefulCloseCallback | None = None,
 ) -> int:
     """Bind, announce, optionally open, serve, and always close cleanly."""
     server = create_server(
@@ -712,7 +948,9 @@ def serve_browser_debugger(
         asset_root=asset_root,
         port=port,
         coordinator=coordinator,
+        coordinator_router=coordinator_router,
     )
+    exit_code = 0
     with server:
         url = f"{server.expected_origin}/#token={server.capability_token}"
         print(f"Visual Debugger and Analyzer: {url}")
@@ -733,5 +971,26 @@ def serve_browser_debugger(
         try:
             server.serve_forever(poll_interval=0.1)
         except KeyboardInterrupt:
-            print("Visual Debugger and Analyzer stopped.")
-    return 0
+            if graceful_close is None:
+                print("Visual Debugger and Analyzer stopped.")
+            else:
+                try:
+                    close_result = server.run_graceful_close(graceful_close)
+                except Exception:
+                    print(
+                        "error: Visual Debugger and Analyzer graceful close failed.",
+                        file=sys.stderr,
+                    )
+                    exit_code = 1
+                else:
+                    if close_result.message is not None:
+                        print(
+                            close_result.message,
+                            file=(
+                                sys.stdout
+                                if close_result.exit_code == 0
+                                else sys.stderr
+                            ),
+                        )
+                    exit_code = close_result.exit_code
+    return exit_code

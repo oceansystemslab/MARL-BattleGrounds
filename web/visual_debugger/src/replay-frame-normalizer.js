@@ -1742,11 +1742,15 @@ function normalizeResearcherProjection(frame, cursor) {
     frame_index: cursor.frame_index,
     frame_id: frame.frame_id,
     simulator_step_count: frame.simulator_step_count,
+    recording: null,
     incoming_transition_index: frame.incoming_transition_index,
     incoming_transition_id: frame.incoming_transition_id,
     view_mode: "researcher",
     preset: frame.preset,
     projection,
+    terminal: {},
+    scenario: {},
+    available_scenarios: [],
     hud: {},
   });
   return { normalized, episodeId };
@@ -1779,10 +1783,12 @@ function normalizePovProjection(frame, cursor) {
     frame_index: cursor.frame_index,
     frame_id: sourceFrameId,
     simulator_step_count: frame.simulator_step_count,
+    recording: null,
     incoming_pov_transition_id: frame.incoming_pov_transition_id,
     view_mode: "pov",
     preset: frame.preset,
     projection,
+    terminal: {},
     hud: {},
   });
   return { normalized, episodeId };

@@ -15,7 +15,11 @@ import { SvgChoreographyPainter } from "./choreography-painter.js";
 import { isSubmissionCommand } from "./choreography-plan.js";
 import {
   bindBattlefieldControls,
+  commandResponseSchedulesShutdown,
   keyboardCommand,
+  recordingCommandDecision,
+  recordingReviewHandoffRequired,
+  recordingSaveAsCommand,
   targetSelectionCommand,
 } from "./controls.js";
 import { formatDisplayNumber } from "./display.js";
@@ -54,6 +58,7 @@ const elements = {
   connectionStatus: requiredElement("connection-status"),
   audienceBadge: requiredElement("audience-badge"),
   terminalBadge: requiredElement("terminal-badge"),
+  recordingBadge: requiredElement("recording-badge"),
   scenarioControl: requiredElement("scenario-control"),
   scenarioSelect: requiredElement("scenario-select"),
   viewSelect: requiredElement("view-select"),
@@ -65,6 +70,23 @@ const elements = {
   revisionValue: requiredElement("revision-value"),
   stepValue: requiredElement("step-value"),
   transitionValue: requiredElement("transition-value"),
+  recordingPanel: requiredElement("recording-panel"),
+  recordingLifecycle: requiredElement("recording-lifecycle"),
+  recordingProgress: requiredElement("recording-progress"),
+  recordingCompletion: requiredElement("recording-completion"),
+  recordingPersistenceFact: requiredElement("recording-persistence-fact"),
+  recordingPersistenceError: requiredElement("recording-persistence-error"),
+  recordingStatusNote: requiredElement("recording-status-note"),
+  recordingFinishButton: requiredElement("recording-finish-button"),
+  recordingReviewButton: requiredElement("recording-review-button"),
+  recordingRetryButton: requiredElement("recording-retry-button"),
+  recordingSaveAsControl: requiredElement("recording-save-as-control"),
+  recordingSaveAsInput: requiredElement("recording-save-as-input"),
+  recordingSaveAsButton: requiredElement("recording-save-as-button"),
+  recordingDiscardDialog: requiredElement("recording-discard-dialog"),
+  recordingDiscardIntent: requiredElement("recording-discard-intent"),
+  recordingDiscardCancelButton: requiredElement("recording-discard-cancel-button"),
+  recordingDiscardConfirmButton: requiredElement("recording-discard-confirm-button"),
   replayTimeline: requiredElement("replay-timeline"),
   replayArtifactReference: requiredElement("replay-artifact-reference"),
   replayCompletionBadge: requiredElement("replay-completion-badge"),
@@ -238,6 +260,8 @@ const tooltipController = createTooltipController({
 let lastBattlefieldSizeKey = "";
 /** @type {number | null} */
 let pendingResizeFrame = null;
+/** @type {Readonly<Record<string, unknown>> | null} */
+let pendingRecordingReplacement = null;
 
 /**
  * @param {unknown} value
@@ -251,8 +275,27 @@ function isReplayMode() {
   return state.frame?.viewer_mode === "replay";
 }
 
+function recordingStatus() {
+  return isRecord(state.frame?.recording) ? state.frame.recording : null;
+}
+
+function recordingScientificControlsFenced() {
+  const recording = recordingStatus();
+  return recording !== null && recording.lifecycle !== "recording";
+}
+
+function recordingRestartControlsBlocked() {
+  const recording = recordingStatus();
+  return (
+    recording !== null &&
+    recording.restart_fenced === true &&
+    recording.discard_available !== true
+  );
+}
+
 function renderViewerBoundary() {
   const replay = isReplayMode();
+  const scientificFenced = recordingScientificControlsFenced();
   document.documentElement.dataset.viewerMode = replay ? "replay" : "live";
   for (const element of elements.liveOnly) {
     element.toggleAttribute("hidden", replay);
@@ -261,17 +304,24 @@ function renderViewerBoundary() {
     element.toggleAttribute("hidden", !replay);
   }
   elements.replayTimeline.toggleAttribute("hidden", !replay);
-  elements.battlefield.setAttribute("role", replay ? "img" : "application");
-  elements.battlefield.tabIndex = replay ? -1 : 0;
+  elements.battlefield.setAttribute(
+    "role",
+    replay || scientificFenced ? "img" : "application",
+  );
+  elements.battlefield.tabIndex = replay || scientificFenced ? -1 : 0;
   elements.battlefield.setAttribute(
     "aria-label",
     replay
       ? "Read-only replay battlefield snapshot."
-      : "Interactive battlefield. Press Help for keyboard controls.",
+      : scientificFenced
+        ? "Read-only recording closeout battlefield snapshot."
+        : "Interactive battlefield. Press Help for keyboard controls.",
   );
   elements.battlefieldInstructions.textContent = replay
     ? "Replay transport changes only the selected recorded frame. The battlefield cannot submit actions or advance the simulator."
-    : "The battlefield owns debugger keyboard commands while it has focus. Tab and Shift Tab cycle controlled actors here. Escape clears the target and moves focus to the command deck, or to Help while commands are unavailable. Tab behaves normally in the side panel.";
+    : scientificFenced
+      ? "Recording closeout has fenced simulator and pending-action controls. Presentation, recovery, review, and Exit controls remain available."
+      : "The battlefield owns debugger keyboard commands while it has focus. Tab and Shift Tab cycle controlled actors here. Escape clears the target and moves focus to the command deck, or to Help while commands are unavailable. Tab behaves normally in the side panel.";
   elements.selectionHeading.textContent = replay
     ? state.frame?.replay_audience === "researcher"
       ? "Reference"
@@ -332,6 +382,86 @@ function renderReplayMetadata() {
     frame.replay_audience !== "researcher" ||
     !Number.isInteger(selectedSlot);
   renderReplayTimelineControls(replayTimelineElements, replayPlayback.snapshot());
+}
+
+/** @type {Readonly<Record<string, string>>} */
+const recordingPersistenceLabels = Object.freeze({
+  target_unavailable: "Destination unavailable",
+  publication_failed: "Publication failed",
+  verification_failed: "Publication verification failed",
+});
+
+function renderRecordingControls() {
+  const recording = recordingStatus();
+  const unavailable = isReplayMode() || recording === null;
+  elements.recordingPanel.toggleAttribute("hidden", unavailable);
+  elements.recordingBadge.toggleAttribute("hidden", unavailable);
+  if (unavailable) {
+    delete document.documentElement.dataset.recordingLifecycle;
+    if (elements.recordingDiscardDialog.open) {
+      elements.recordingDiscardDialog.close();
+    }
+    pendingRecordingReplacement = null;
+    return;
+  }
+
+  document.documentElement.dataset.recordingLifecycle = recording.lifecycle;
+  elements.recordingBadge.dataset.lifecycle = recording.lifecycle;
+  elements.recordingBadge.textContent =
+    recording.lifecycle === "recording"
+      ? `Recording ${recording.captured_transition_count} / ${recording.expected_transition_count}`
+      : `Recording · ${humanize(recording.lifecycle)}`;
+  elements.recordingLifecycle.textContent = humanize(recording.lifecycle);
+  elements.recordingProgress.textContent = `${recording.captured_transition_count} / ${recording.expected_transition_count} transitions`;
+  elements.recordingCompletion.textContent =
+    recording.completion_state === null
+      ? "Capture in progress"
+      : recording.completion_reason === null
+        ? humanize(recording.completion_state)
+        : `${humanize(recording.completion_state)} · ${humanize(recording.completion_reason)}`;
+
+  const persistenceLabel =
+    recordingPersistenceLabels[recording.persistence_error_code] ?? null;
+  elements.recordingPersistenceFact.toggleAttribute(
+    "hidden",
+    persistenceLabel === null,
+  );
+  elements.recordingPersistenceError.textContent =
+    persistenceLabel ?? "No persistence error";
+
+  const interactionDisabled =
+    state.busy || state.shuttingDown || state.resyncRequired || state.offline;
+  const actionAvailability = [
+    [elements.recordingFinishButton, recording.finish_available === true],
+    [elements.recordingReviewButton, recording.review_available === true],
+    [elements.recordingRetryButton, recording.retry_available === true],
+  ];
+  for (const [element, available] of actionAvailability) {
+    element.toggleAttribute("hidden", !available);
+    element.disabled = interactionDisabled || !available;
+  }
+  const saveAsAvailable = recording.save_as_available === true;
+  elements.recordingSaveAsControl.toggleAttribute("hidden", !saveAsAvailable);
+  elements.recordingSaveAsInput.disabled = interactionDisabled || !saveAsAvailable;
+  elements.recordingSaveAsButton.disabled = interactionDisabled || !saveAsAvailable;
+
+  elements.recordingStatusNote.textContent =
+    recording.lifecycle === "recording" && recording.discard_available === true
+      ? "Capture is active. Reset, scenario changes, and movement-scale changes require confirmation because they replace this recorded prefix."
+      : recording.lifecycle === "recording"
+        ? "Capture is active. Scientific controls remain authoritative in Python."
+        : recording.lifecycle === "persistence_failed"
+          ? "The exact canonical replay bytes remain cached. Retry the same destination or choose a basename-only Save As target."
+          : recording.lifecycle === "saved"
+            ? "The replay and metric report were saved and publicly verified. Review opens the same local session in read-only mode."
+            : recording.lifecycle === "reviewing"
+              ? "The local service is switching this session to read-only replay review."
+              : "Recording closeout has fenced scientific controls while the canonical artifact is finalized.";
+
+  if (recording.discard_available !== true && elements.recordingDiscardDialog.open) {
+    elements.recordingDiscardDialog.close();
+    pendingRecordingReplacement = null;
+  }
 }
 
 /**
@@ -572,6 +702,7 @@ function renderSessionToolbar() {
   const replay = isReplayMode();
   const disabled =
     state.busy || !frame || state.shuttingDown || state.resyncRequired || state.offline;
+  const restartControlsBlocked = recordingRestartControlsBlocked();
 
   elements.revisionValue.textContent = frame ? String(frame.revision ?? "—") : "—";
   elements.stepValue.textContent = frame
@@ -670,6 +801,7 @@ function renderSessionToolbar() {
   }
   const movementScaleDisabled =
     disabled ||
+    restartControlsBlocked ||
     frame?.view_mode !== "researcher" ||
     !Number.isFinite(movementScale) ||
     !Number.isFinite(movementScaleMinimum) ||
@@ -684,10 +816,11 @@ function renderSessionToolbar() {
   const scenarioControlsAvailable =
     !replay && (!state.frame || liveDebuggerScenarioControlsAvailable(state.frame));
   elements.scenarioControl.toggleAttribute("hidden", !scenarioControlsAvailable);
-  elements.scenarioSelect.disabled = disabled || !scenarioControlsAvailable;
+  elements.scenarioSelect.disabled =
+    disabled || restartControlsBlocked || !scenarioControlsAvailable;
   elements.scenarioSelect.setAttribute(
     "aria-disabled",
-    String(disabled || !scenarioControlsAvailable),
+    String(disabled || restartControlsBlocked || !scenarioControlsAvailable),
   );
   elements.scenarioSelect.title = scenarioControlsAvailable
     ? "Choose a registered live researcher scenario."
@@ -697,7 +830,8 @@ function renderSessionToolbar() {
   elements.reconnectButton.disabled = state.busy || state.shuttingDown;
   elements.exitButton.disabled = disabled;
   elements.exitButton.textContent = replay ? "Exit replay viewer" : "Exit analyzer";
-  elements.resetButton.disabled = disabled;
+  elements.resetButton.disabled = disabled || restartControlsBlocked;
+  renderRecordingControls();
   renderReplayMetadata();
   renderCommandAvailability();
 }
@@ -893,6 +1027,7 @@ function renderCommandAvailability() {
     state.resyncRequired ||
     state.offline;
   const presentation = choreographer.snapshot();
+  const scientificFenced = recordingScientificControlsFenced();
   if (isReplayMode()) {
     elements.commandTargetSelect.disabled = true;
     if (elements.commandDeck) {
@@ -907,7 +1042,7 @@ function renderCommandAvailability() {
   const hud = isRecord(state.frame?.hud) ? state.frame.hud : {};
   renderDraftState(hud, state.frame);
   elements.commandTargetSelect.disabled =
-    disabled || scripted || isTerminal(state.frame);
+    disabled || scientificFenced || scripted || isTerminal(state.frame);
   elements.submitTurnButton.textContent = scripted
     ? "Manual submit unavailable"
     : hud.pending_submission_scope === "controlled_actor"
@@ -926,8 +1061,10 @@ function renderCommandAvailability() {
         shiftKey: button.dataset.shift === "true",
       });
       const mode = modeAvailability(command, state.frame);
+      const recordingDecision = recordingCommandDecision(state.frame ?? {}, command);
       button.disabled =
         disabled ||
+        recordingDecision.action === "block" ||
         !mode.allowed ||
         (presentation.submissionBlocked && isSubmissionCommand(command));
     }
@@ -1092,7 +1229,7 @@ function render() {
   lastBattlefieldSizeKey = battlefieldSizeKey();
   panels.render(state.frame, {
     busy: state.busy,
-    shuttingDown: state.shuttingDown,
+    shuttingDown: state.shuttingDown || recordingScientificControlsFenced(),
     resyncRequired: state.resyncRequired,
     offline: state.offline,
   });
@@ -1173,6 +1310,33 @@ function commandRequest(command) {
   };
 }
 
+/** @param {Readonly<Record<string, unknown>>} replacement */
+function recordingReplacementLabel(replacement) {
+  if (replacement.command_type === "reset") {
+    return "Reset the current scenario to a fresh episode";
+  }
+  if (replacement.command_type === "scenario_switch") {
+    return `Switch to scenario ${String(replacement.scenario_name)}`;
+  }
+  if (replacement.command_type === "set_movement_scale") {
+    return replacement.movement_scale === null
+      ? "Restore the scenario-authored movement scale and start a fresh episode"
+      : `Set movement scale to ${formatDisplayNumber(replacement.movement_scale)} and start a fresh episode`;
+  }
+  return "Replace the current episode";
+}
+
+/** @param {Readonly<Record<string, unknown>>} replacement */
+function requestRecordingDiscardConfirmation(replacement) {
+  pendingRecordingReplacement = replacement;
+  renderSessionToolbar();
+  elements.recordingDiscardIntent.textContent = recordingReplacementLabel(replacement);
+  if (!elements.recordingDiscardDialog.open) {
+    elements.recordingDiscardDialog.showModal();
+  }
+  elements.recordingDiscardCancelButton.focus({ preventScroll: true });
+}
+
 /**
  * Send one replay command through the replay-only route. This function is the
  * controller's single request boundary; it installs the authoritative frame
@@ -1239,7 +1403,7 @@ async function sendReplayCommand(command) {
         ? "warning"
         : "success",
     );
-    if (command.command_type === "exit") {
+    if (commandResponseSchedulesShutdown(command, payload)) {
       state.shuttingDown = true;
       setNotice("Exit accepted. The local replay viewer is shutting down.", "info");
     }
@@ -1400,6 +1564,23 @@ async function dispatchCommand(command) {
     renderConnection();
     return;
   }
+  const recordingDecision = recordingCommandDecision(state.frame, command);
+  if (recordingDecision.action === "block") {
+    setNotice(
+      recordingDecision.notice ??
+        "That command is fenced by the current recording lifecycle.",
+      "warning",
+    );
+    renderConnection();
+    renderSessionToolbar();
+    return;
+  }
+  if (recordingDecision.action === "confirm") {
+    if (recordingDecision.replacement) {
+      requestRecordingDiscardConfirmation(recordingDecision.replacement);
+    }
+    return;
+  }
   const mode = modeAvailability(command, state.frame);
   if (!mode.allowed) {
     setNotice(
@@ -1425,6 +1606,7 @@ async function dispatchCommand(command) {
   setNotice("Waiting for the authoritative Python response…", "info");
   render();
 
+  let reviewHandoff = false;
   try {
     const payload = await postCommand(state.token, commandRequest(command));
     const frame = extractFrame(payload);
@@ -1432,7 +1614,10 @@ async function dispatchCommand(command) {
       throw new DebuggerApiError("Command response did not contain a debugger frame.");
     }
     state.frame = frame;
+    state.timeline = null;
     state.offline = false;
+    state.resyncRequired = false;
+    reviewHandoff = recordingReviewHandoffRequired(frame);
     const notice = extractNotice(payload);
     setNotice(
       notice ??
@@ -1441,7 +1626,7 @@ async function dispatchCommand(command) {
           : "Authoritative frame updated."),
       payload?.result === "duplicate" ? "warning" : "success",
     );
-    if (command.command_type === "exit") {
+    if (commandResponseSchedulesShutdown(command, payload)) {
       state.shuttingDown = true;
       setNotice("Exit accepted. The local analyzer server is shutting down.", "info");
     }
@@ -1450,6 +1635,8 @@ async function dispatchCommand(command) {
       const latest = extractFrame(error.payload);
       if (latest) {
         state.frame = latest;
+        state.timeline = null;
+        reviewHandoff = recordingReviewHandoffRequired(latest);
       }
       state.offline = false;
       state.resyncRequired = false;
@@ -1477,9 +1664,13 @@ async function dispatchCommand(command) {
     state.busy = false;
     render();
   }
+  if (reviewHandoff && !state.shuttingDown && !state.resyncRequired) {
+    await loadCurrentFrame({ reviewHandoff: true });
+  }
 }
 
-async function loadCurrentFrame() {
+/** @param {{reviewHandoff?: boolean}} options */
+async function loadCurrentFrame({ reviewHandoff = false } = {}) {
   if (state.busy || state.shuttingDown) {
     return;
   }
@@ -1487,8 +1678,15 @@ async function loadCurrentFrame() {
   if (isReplayMode()) {
     replayPlayback.pause("reconnect");
   }
-  setNotice("Fetching the current authoritative frame…", "info");
+  setNotice(
+    reviewHandoff
+      ? "Opening the publicly verified replay in this local session…"
+      : "Fetching the current authoritative frame…",
+    "info",
+  );
   renderConnection();
+  const previousFrame = state.frame;
+  let focusReplayTimeline = false;
   try {
     const payload = await getCurrentFrame(state.token);
     const frame = extractFrame(payload);
@@ -1498,6 +1696,16 @@ async function loadCurrentFrame() {
     if (state.frame?.viewer_mode === "replay" && frame.viewer_mode !== "replay") {
       throw new DebuggerApiError(
         "A replay viewer cannot reconnect to a live debugger frame. Reopen the replay URL to resynchronize.",
+      );
+    }
+    if (reviewHandoff && frame.viewer_mode !== "replay") {
+      throw new DebuggerApiError(
+        "Replay review was accepted, but the read-only router is not available yet. Reconnect to complete the handoff.",
+      );
+    }
+    if (reviewHandoff && (!isRecord(frame.cursor) || frame.cursor.frame_index !== 0)) {
+      throw new DebuggerApiError(
+        "Replay review did not open at recorded frame zero. Reconnect before reviewing the artifact.",
       );
     }
     let timeline = null;
@@ -1510,6 +1718,11 @@ async function loadCurrentFrame() {
         extractReplayTimeline(await getReplayTimeline(state.token)),
       );
     }
+    focusReplayTimeline =
+      frame.viewer_mode === "replay" && previousFrame?.viewer_mode !== "replay";
+    if (focusReplayTimeline) {
+      choreographer.clear("replay_handoff");
+    }
     state.frame = frame;
     state.timeline = timeline;
     if (frame.viewer_mode === "replay") {
@@ -1518,7 +1731,13 @@ async function loadCurrentFrame() {
     }
     state.offline = false;
     state.resyncRequired = false;
-    setNotice(extractNotice(payload) ?? "Connected to the local analyzer.", "success");
+    setNotice(
+      extractNotice(payload) ??
+        (focusReplayTimeline
+          ? "Read-only replay review is ready."
+          : "Connected to the local analyzer."),
+      "success",
+    );
   } catch (error) {
     const status = error instanceof DebuggerApiError ? error.status : 0;
     state.offline = status === 0 || status === 401 || status === 403;
@@ -1538,6 +1757,9 @@ async function loadCurrentFrame() {
     state.busy = false;
     render();
   }
+  if (focusReplayTimeline && !state.resyncRequired) {
+    elements.replayTimeline.focus({ preventScroll: true });
+  }
 }
 
 bindBattlefieldControls({
@@ -1550,7 +1772,7 @@ bindBattlefieldControls({
     }
   },
   onHelp: () => elements.helpDialog.showModal(),
-  isInteractive: () => !isReplayMode(),
+  isInteractive: () => !isReplayMode() && !recordingScientificControlsFenced(),
   onReleaseFocus: () => {
     const firstCommand = /** @type {HTMLButtonElement | null} */ (
       elements.commandDeck?.querySelector("button:not([disabled])") ?? null
@@ -1644,6 +1866,72 @@ elements.commandTargetSelect.addEventListener("change", () => {
     return;
   }
   dispatchCommand(command);
+});
+
+elements.recordingFinishButton.addEventListener("click", () => {
+  void dispatchCommand({ command_type: "finish_and_review" });
+});
+
+elements.recordingReviewButton.addEventListener("click", () => {
+  void dispatchCommand({ command_type: "review_replay" });
+});
+
+elements.recordingRetryButton.addEventListener("click", () => {
+  void dispatchCommand({ command_type: "retry_save" });
+});
+
+function dispatchRecordingSaveAs() {
+  const command = recordingSaveAsCommand(elements.recordingSaveAsInput.value);
+  if (!command) {
+    setNotice(
+      "Save As requires a basename ending in .marlbg-replay.json; paths, spaces, and hidden filenames are not accepted.",
+      "warning",
+    );
+    renderConnection();
+    elements.recordingSaveAsInput.focus({ preventScroll: true });
+    return;
+  }
+  void dispatchCommand(command);
+}
+
+elements.recordingSaveAsButton.addEventListener("click", dispatchRecordingSaveAs);
+elements.recordingSaveAsInput.addEventListener(
+  "keydown",
+  (/** @type {KeyboardEvent} */ event) => {
+    if (event.key !== "Enter") {
+      return;
+    }
+    event.preventDefault();
+    dispatchRecordingSaveAs();
+  },
+);
+
+elements.recordingDiscardDialog.addEventListener("close", () => {
+  pendingRecordingReplacement = null;
+});
+
+elements.recordingDiscardDialog.addEventListener("cancel", () => {
+  pendingRecordingReplacement = null;
+});
+
+elements.recordingDiscardConfirmButton.addEventListener("click", () => {
+  const replacement = pendingRecordingReplacement;
+  if (!replacement || recordingStatus()?.discard_available !== true) {
+    pendingRecordingReplacement = null;
+    elements.recordingDiscardDialog.close();
+    setNotice(
+      "The recording lifecycle changed before discard confirmation. No episode replacement was sent.",
+      "warning",
+    );
+    renderConnection();
+    return;
+  }
+  pendingRecordingReplacement = null;
+  elements.recordingDiscardDialog.close();
+  void dispatchCommand({
+    command_type: "confirm_discard_and_replace",
+    replacement,
+  });
 });
 
 elements.exitButton.addEventListener("click", () => {

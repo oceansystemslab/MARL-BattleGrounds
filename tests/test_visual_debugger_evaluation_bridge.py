@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from scripts.dev.visual_debugger.evaluation_bridge import (
     DEBUGGER_PUBLIC_AGENT_IDS_V1,
     DebuggerActionSourceKindV1,
+    DebuggerCaptureProfileV1,
     DebuggerEvaluationLaunchSpecificationV1,
     build_debugger_evaluation_context_v1,
     build_debugger_evaluation_launch_specification_v1,
@@ -39,10 +40,15 @@ def _code_revision(*, dirty: bool = False) -> CodeRevisionV1:
     )
 
 
-def _launch(*, root_seed: int = 7) -> DebuggerEvaluationLaunchSpecificationV1:
+def _launch(
+    *,
+    root_seed: int = 7,
+    capture_profile: DebuggerCaptureProfileV1 = "debug",
+) -> DebuggerEvaluationLaunchSpecificationV1:
     return build_debugger_evaluation_launch_specification_v1(
         root_seed=root_seed,
         code_revision=_code_revision(),
+        capture_profile=capture_profile,
     )
 
 
@@ -51,11 +57,12 @@ def _context(
     root_seed: int = 7,
     run_generation: int = 0,
     action_source_kind: DebuggerActionSourceKindV1 = "mixed",
+    capture_profile: DebuggerCaptureProfileV1 = "debug",
 ) -> EvaluationEpisodeContextV1:
     scenario = get_scenario("basic_support")
     config, _state = scenario.build_scenario()
     return build_debugger_evaluation_context_v1(
-        _launch(root_seed=root_seed),
+        _launch(root_seed=root_seed, capture_profile=capture_profile),
         scenario=scenario,
         config=config,
         run_generation=run_generation,
@@ -68,6 +75,7 @@ def test_launch_specification_is_strict_content_addressed_and_roundtrippable() -
     second = _launch()
 
     assert first == second
+    assert first.capture_profile == "debug"
     assert canonical_json_bytes(first) == canonical_json_bytes(second)
     assert first.specification_id == (
         f"debugger-evaluation-launch:{first.launch_content_digest_sha256}"
@@ -79,6 +87,16 @@ def test_launch_specification_is_strict_content_addressed_and_roundtrippable() -
         == first
     )
     assert _launch(root_seed=8) != first
+    retaining = _launch(capture_profile="evaluation_metric_complete")
+    assert retaining.capture_profile == "evaluation_metric_complete"
+    assert retaining.root_seed == first.root_seed
+    assert retaining.code_revision == first.code_revision
+    assert retaining.specification_id != first.specification_id
+    assert retaining.launch_content_digest_sha256 != (
+        first.launch_content_digest_sha256
+    )
+    assert retaining.canonical_digest_sha256 != first.canonical_digest_sha256
+    assert canonical_json_bytes(retaining) != canonical_json_bytes(first)
     assert (
         build_debugger_evaluation_launch_specification_v1(
             root_seed=7,
@@ -93,6 +111,12 @@ def test_launch_specification_rejects_bool_future_extra_and_tampered_digest() ->
         build_debugger_evaluation_launch_specification_v1(
             root_seed=True,  # type: ignore[arg-type]
             code_revision=_code_revision(),
+        )
+    with pytest.raises(ValidationError):
+        build_debugger_evaluation_launch_specification_v1(
+            root_seed=7,
+            code_revision=_code_revision(),
+            capture_profile="training_light",  # type: ignore[arg-type]
         )
 
     launch = _launch()
@@ -266,7 +290,7 @@ def test_context_captures_the_authored_initial_frame_through_public_cp2_api() ->
     scenario = get_scenario("basic_support")
     config, authored_state = scenario.build_scenario()
     context = build_debugger_evaluation_context_v1(
-        _launch(),
+        _launch(capture_profile="evaluation_metric_complete"),
         scenario=scenario,
         config=config,
         run_generation=0,
@@ -286,6 +310,7 @@ def test_context_captures_the_authored_initial_frame_through_public_cp2_api() ->
     )
     assert frame.episode_id == context.identity.episode_id
     assert frame.frame_index == 0
+    assert context.capture_profile == "evaluation_metric_complete"
 
 
 def test_context_rejects_invalid_horizon_generation_source_and_focal_slot() -> None:
@@ -330,7 +355,13 @@ def test_context_rejects_invalid_horizon_generation_source_and_focal_slot() -> N
 
 
 def test_serialized_bridge_records_contain_no_local_path_or_browser_token() -> None:
-    payload = canonical_json_bytes(_context())
+    launch = _launch(capture_profile="evaluation_metric_complete")
+    payload = canonical_json_bytes(
+        {
+            "launch": launch,
+            "context": _context(capture_profile="evaluation_metric_complete"),
+        }
+    )
     assert b"/home/" not in payload
     assert b"file://" not in payload
     assert b"capability_token" not in payload

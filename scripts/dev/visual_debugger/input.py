@@ -3,6 +3,7 @@
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from math import hypot, isfinite
+from typing import Literal
 
 from marl_battlegrounds.core.types import (
     MOVE_EAST,
@@ -26,6 +27,7 @@ from marl_battlegrounds.rendering.pov_scene import (
 )
 from marl_battlegrounds.rendering.scene import AgentSceneV1, AgentSceneV2
 from scripts.dev.visual_debugger.control import (
+    DebuggerTransitionFailureV1,
     arm_basic,
     arm_ultimate,
     clear_pending_target,
@@ -45,6 +47,7 @@ from scripts.dev.visual_debugger.protocol import (
     ActorPovTargetActionCommandV1,
     BattlefieldPointerCommandV1,
     DebuggerCommandV1,
+    ExitCommandV1,
     KeyboardCommandV1,
     Preset,
     ResetCommandV1,
@@ -76,6 +79,58 @@ _MOVEMENT_KEYS = {
     "arrowright": MOVE_EAST,
     "arrowleft": MOVE_WEST,
 }
+
+type RecordingRestartIntentV1 = Literal[
+    "reset",
+    "scenario_switch",
+    "movement_scale",
+]
+
+
+def recording_restart_intent_v1(
+    session: DebuggerSession,
+    command: DebuggerCommandV1,
+    *,
+    view_mode: ViewMode,
+    include_stress: bool,
+) -> RecordingRestartIntentV1 | None:
+    """Classify an effective episode replacement before dispatch constructs it."""
+    if isinstance(command, KeyboardCommandV1):
+        if command.ctrl_key or command.alt_key or command.meta_key:
+            return None
+        key = normalize_key(command.key, shift_key=command.shift_key)
+        if key == "r":
+            return "reset"
+        if key in ("[", "]"):
+            return "scenario_switch"
+        return None
+    if isinstance(command, ResetCommandV1):
+        return "reset"
+    if isinstance(command, ScenarioSwitchCommandV1):
+        allowed_names = {
+            scenario.name for scenario in list_scenarios(include_stress=include_stress)
+        }
+        if (
+            command.scenario_name in allowed_names
+            and command.scenario_name != session.scenario_name
+        ):
+            return "scenario_switch"
+        return None
+    if isinstance(command, SetMovementScaleCommandV1):
+        if view_mode != "researcher":
+            return None
+        effective_scale = (
+            session.scenario_default_movement_scale
+            if command.movement_scale is None
+            else command.movement_scale
+        )
+        recorded_scale = (
+            session.evaluation_context.resolved_env_config
+        ).ordinary_movement_distance_scale
+        return "movement_scale" if effective_scale != recorded_scale else None
+    return None
+
+
 _SUBMISSION_KEYS = frozenset(("space", "enter", "n"))
 _SHIFT_R_NOTICE = (
     "Shift+R cooldown clearing is unavailable because no public coherent "
@@ -274,6 +329,35 @@ def _result(
         notice=notice,
         shutdown_requested=shutdown_requested,
     )
+
+
+def _applied_transition_result(
+    session: DebuggerSession,
+    *,
+    view_mode: ViewMode,
+    preset: Preset,
+    sanitize_pov: bool = False,
+) -> InputDispatchResult:
+    """Package one captured transition behind the typed validation boundary."""
+    try:
+        packaged_session = (
+            sanitize_pov_pending_target(session) if sanitize_pov else session
+        )
+        return _result(
+            packaged_session,
+            view_mode=view_mode,
+            preset=preset,
+            handled=True,
+            changed=True,
+            transition_applied=packaged_session.incoming_evaluation_view,
+        )
+    except DebuggerTransitionFailureV1:
+        raise
+    except Exception as error:
+        raise DebuggerTransitionFailureV1(
+            "validation",
+            "transition_packaging_failed",
+        ) from error
 
 
 def _pending_edit_result(
@@ -565,6 +649,12 @@ def _dispatch_keyboard(
             )
         edited = submit_next_script_frame(session)
         changed = edited is not session
+        if changed:
+            return _applied_transition_result(
+                edited,
+                view_mode=view_mode,
+                preset=preset,
+            )
         notice = (
             _terminal_notice(session)
             if terminal
@@ -578,7 +668,6 @@ def _dispatch_keyboard(
             preset=preset,
             handled=True,
             changed=changed,
-            transition_applied=(edited.incoming_evaluation_view if changed else None),
             notice=notice,
         )
     if key in ("space", "enter"):
@@ -588,6 +677,14 @@ def _dispatch_keyboard(
                 (session.controlled_global_slot,) if view_mode == "pov" else None
             ),
         )
+        transition_applied = edited is not session
+        if transition_applied:
+            return _applied_transition_result(
+                edited,
+                view_mode=view_mode,
+                preset=preset,
+                sanitize_pov=view_mode == "pov",
+            )
         if view_mode == "pov":
             edited = sanitize_pov_pending_target(edited)
         changed = edited is not session
@@ -604,7 +701,6 @@ def _dispatch_keyboard(
             preset=preset,
             handled=True,
             changed=changed,
-            transition_applied=(edited.incoming_evaluation_view if changed else None),
             notice=notice,
         )
     if key == "r":
@@ -933,12 +1029,21 @@ def dispatch_command(
             handled=True,
             changed=command.preset != preset,
         )
+    if isinstance(command, ExitCommandV1):
+        return _result(
+            session,
+            view_mode=view_mode,
+            preset=preset,
+            handled=True,
+            changed=False,
+            notice="Debugger shutdown requested.",
+            shutdown_requested=True,
+        )
     return _result(
         session,
         view_mode=view_mode,
         preset=preset,
         handled=True,
         changed=False,
-        notice="Debugger shutdown requested.",
-        shutdown_requested=True,
+        notice="Replay recording is not enabled for this debugger session.",
     )

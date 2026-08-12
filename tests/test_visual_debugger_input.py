@@ -1,10 +1,14 @@
 """Renderer-independent input dispatch and authorization tests."""
 
 from dataclasses import replace
+from unittest.mock import Mock
 
 import jax.numpy as jnp
 import pytest
+import scripts.dev.visual_debugger.control as control_module
+import scripts.dev.visual_debugger.input as input_module
 from scripts.dev.visual_debugger.control import (
+    DebuggerTransitionFailureV1,
     arm_ultimate,
     create_session,
     select_clicked_target,
@@ -15,12 +19,15 @@ from scripts.dev.visual_debugger.input import (
     dispatch_command,
     hit_test_scene_agents,
     normalize_key,
+    recording_restart_intent_v1,
 )
 from scripts.dev.visual_debugger.model import DebuggerSession
 from scripts.dev.visual_debugger.protocol import (
     ActorPovTargetActionCommandV1,
     BattlefieldPointerCommandV1,
+    DebuggerCommandV1,
     ExitCommandV1,
+    FinishAndReviewCommandV1,
     KeyboardCommandV1,
     ResetCommandV1,
     RosterSelectionCommandV1,
@@ -95,6 +102,52 @@ def _authorized_pov_slots(session: DebuggerSession) -> set[int]:
         for row in session.evaluation_context.roster
         if row.public_agent_id in authorized_public_ids
     }
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    (
+        (ResetCommandV1(), "reset"),
+        (KeyboardCommandV1(key="r"), "reset"),
+        (KeyboardCommandV1(key="R", shift_key=True), None),
+        (
+            ScenarioSwitchCommandV1(scenario_name="basic_support"),
+            "scenario_switch",
+        ),
+        (SetMovementScaleCommandV1(movement_scale=0.1), "movement_scale"),
+        (FinishAndReviewCommandV1(), None),
+    ),
+)
+def test_recording_restart_intent_classifies_before_restart_construction(
+    command: DebuggerCommandV1,
+    expected: str | None,
+) -> None:
+    session = _session()
+    assert (
+        recording_restart_intent_v1(
+            session,
+            command,
+            view_mode="researcher",
+            include_stress=False,
+        )
+        == expected
+    )
+
+
+def test_recording_lifecycle_command_is_safe_when_recording_is_disabled() -> None:
+    session = _session()
+    result = dispatch_command(
+        session,
+        FinishAndReviewCommandV1(),
+        view_mode="researcher",
+        preset="analysis",
+        include_stress=False,
+    )
+
+    assert result.session is session
+    assert result.handled
+    assert not result.changed
+    assert result.notice == "Replay recording is not enabled for this debugger session."
 
 
 @pytest.mark.parametrize(
@@ -478,6 +531,49 @@ def test_n_advances_only_scripted_playback() -> None:
     assert scripted_result.session.last_submission_kind == "scripted"
 
 
+def test_applied_transition_packaging_preserves_typed_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failure = DebuggerTransitionFailureV1(
+        "validation",
+        "transition_packaging_failed",
+    )
+
+    def fail_result(*_args: object, **_kwargs: object) -> object:
+        raise failure
+
+    monkeypatch.setattr(input_module, "_result", fail_result)
+
+    with pytest.raises(DebuggerTransitionFailureV1) as caught:
+        dispatch_command(
+            _session(),
+            KeyboardCommandV1(key="Enter"),
+            view_mode="researcher",
+            preset="analysis",
+            include_stress=False,
+        )
+
+    assert caught.value is failure
+
+
+def test_ui_only_pov_sanitizer_failure_remains_outside_transition_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_sanitizer(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("ui-only sanitizer failure")
+
+    monkeypatch.setattr(input_module, "sanitize_pov_pending_target", fail_sanitizer)
+
+    with pytest.raises(RuntimeError, match="ui-only sanitizer failure"):
+        dispatch_command(
+            _session(),
+            SetViewCommandV1(view_mode="pov"),
+            view_mode="researcher",
+            preset="analysis",
+            include_stress=False,
+        )
+
+
 def test_researcher_and_pov_submit_scopes_are_explicit_and_single_step() -> None:
     researcher = _session()
     researcher_result = dispatch_command(
@@ -605,6 +701,69 @@ def test_terminal_blocks_pending_edits_but_keeps_actor_inspection() -> None:
     assert cycled.session.controlled_global_slot == 1
     assert cycled.session.state is terminal.state
     assert cycled.session.key is terminal.key
+
+
+def test_terminal_pov_submit_sanitizes_draft_without_reusing_incoming_transition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registered = get_scenario("arena_5v5")
+    build_registered_scenario = registered.build_scenario
+
+    def build_one_step_scenario() -> tuple[EnvConfig, EnvState]:
+        config, state = build_registered_scenario()
+        return config._replace(max_steps=1), state
+
+    session = create_session(
+        replace(registered, build_scenario=build_one_step_scenario),
+        seed=0,
+        evaluation_launch_specification=debugger_test_launch_specification(),
+        controlled_global_slot=0,
+        show_ranges=True,
+        verbose_logging=False,
+    )
+    terminal = dispatch_command(
+        session,
+        KeyboardCommandV1(key="Enter"),
+        view_mode="pov",
+        preset="analysis",
+        include_stress=False,
+    ).session
+    assert terminal.reached_declared_horizon
+    hidden_target = min(
+        row.global_slot
+        for row in terminal.evaluation_context.roster
+        if row.configured_active
+        and row.global_slot not in _authorized_pov_slots(terminal)
+    )
+    staged = select_clicked_target(terminal, hidden_target)
+    previous_incoming = staged.incoming_evaluation_view
+    state = staged.state
+    key = staged.key
+    step_spy = Mock(side_effect=AssertionError("terminal submit must not step"))
+    capture_spy = Mock(side_effect=AssertionError("terminal submit must not capture"))
+    monkeypatch.setattr(control_module, "step", step_spy)
+    monkeypatch.setattr(
+        control_module,
+        "capture_evaluation_transition_unit_v1",
+        capture_spy,
+    )
+
+    result = dispatch_command(
+        staged,
+        KeyboardCommandV1(key="Enter"),
+        view_mode="pov",
+        preset="analysis",
+        include_stress=False,
+    )
+
+    assert result.changed
+    assert result.transition_applied is None
+    assert result.session.pending_action.selected_global_target_slot is None
+    assert result.session.incoming_evaluation_view is previous_incoming
+    assert result.session.state is state
+    assert result.session.key is key
+    assert step_spy.call_count == 0
+    assert capture_spy.call_count == 0
 
 
 def test_scene_hit_test_uses_only_authorized_agents_and_stable_tie_break() -> None:

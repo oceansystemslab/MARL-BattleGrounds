@@ -50,6 +50,7 @@ DEBUGGER_EVALUATION_LAUNCH_SPECIFICATION_SCHEMA_ID = (
 DEBUGGER_PUBLIC_AGENT_IDS_V1 = tuple(str(slot) for slot in range(MAX_AGENT_SLOTS))
 
 type DebuggerActionSourceKindV1 = Literal["manual", "scripted", "mixed"]
+type DebuggerCaptureProfileV1 = Literal["debug", "evaluation_metric_complete"]
 
 _Sha256Hex = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 _Seed = Annotated[int, Field(ge=0, le=2**32 - 1)]
@@ -71,6 +72,7 @@ class DebuggerEvaluationLaunchSpecificationV1(EvaluationModel):
     canonical_digest_sha256: _Sha256Hex
     root_seed: _Seed
     code_revision: CodeRevisionV1
+    capture_profile: DebuggerCaptureProfileV1
 
     @model_validator(mode="after")
     def _validate_launch_specification(
@@ -81,6 +83,7 @@ class DebuggerEvaluationLaunchSpecificationV1(EvaluationModel):
             "schema_version": self.schema_version,
             "root_seed": self.root_seed,
             "code_revision": self.code_revision,
+            "capture_profile": self.capture_profile,
         }
         expected_content_digest = canonical_digest_sha256(launch_payload)
         if self.launch_content_digest_sha256 != expected_content_digest:
@@ -101,6 +104,7 @@ def build_debugger_evaluation_launch_specification_v1(
     *,
     root_seed: int,
     code_revision: CodeRevisionV1,
+    capture_profile: DebuggerCaptureProfileV1 = "debug",
 ) -> DebuggerEvaluationLaunchSpecificationV1:
     """Build one launch record without performing filesystem or Git discovery."""
     launch_payload = {
@@ -108,6 +112,7 @@ def build_debugger_evaluation_launch_specification_v1(
         "schema_version": DEBUGGER_EVALUATION_BRIDGE_SCHEMA_VERSION,
         "root_seed": root_seed,
         "code_revision": code_revision,
+        "capture_profile": capture_profile,
     }
     launch_content_digest = canonical_digest_sha256(launch_payload)
     payload = {
@@ -426,7 +431,7 @@ def build_debugger_evaluation_context_v1(
         public_agent_id_by_global_slot=DEBUGGER_PUBLIC_AGENT_IDS_V1,
         policy_assignments=assignments,
         seed_protocol=seed_protocol,
-        capture_profile="debug",
+        capture_profile=launch.capture_profile,
         execution_information_mode="no_shared_obs",
         actor_projection=VersionedIdentityV1(
             identifier="base-observation-no-shared-obs",
@@ -457,6 +462,7 @@ __all__ = [
     "DEBUGGER_EVALUATION_LAUNCH_SPECIFICATION_SCHEMA_ID",
     "DEBUGGER_PUBLIC_AGENT_IDS_V1",
     "DebuggerActionSourceKindV1",
+    "DebuggerCaptureProfileV1",
     "DebuggerEvaluationLaunchSpecificationV1",
     "build_debugger_evaluation_context_v1",
     "build_debugger_evaluation_launch_specification_v1",

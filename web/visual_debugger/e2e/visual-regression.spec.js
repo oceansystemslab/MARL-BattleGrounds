@@ -11,7 +11,8 @@ import {
 import { startDebugger, stopDebugger } from "./support/live-debugger.js";
 import {
   loadRendererFixture,
-  syntheticDebuggerFrame,
+  syntheticDebuggerPresentationFrame,
+  syntheticDebuggerWireFrame,
 } from "./support/renderer-fixture.js";
 import {
   ABILITY_PHASE_MS,
@@ -42,11 +43,15 @@ let debuggerUrl = "";
 /** @type {Record<string, any>} */
 let crowdedFrame = {};
 /** @type {Record<string, any>} */
-let durableControlsFrame = {};
+let crowdedWireFrame = {};
+/** @type {Record<string, any>} */
+let durableControlsWireFrame = {};
 /** @type {Record<string, any>} */
 let povFrame = {};
 /** @type {Record<string, any>} */
-let vocabularyFrame = {};
+let povWireFrame = {};
+/** @type {Record<string, any>} */
+let vocabularyWireFrame = {};
 
 // Screenshot-only CSS hides run-specific identity values while retaining their
 // stable labels and layout. The production CSP is exercised by every ordinary
@@ -73,10 +78,12 @@ test.beforeAll(async () => {
   ]);
   serverProcess = started.process;
   debuggerUrl = started.url;
-  crowdedFrame = syntheticDebuggerFrame(crowdedFixture);
-  durableControlsFrame = syntheticDebuggerFrame(durableControlsFixture);
-  povFrame = syntheticDebuggerFrame(povFixture);
-  vocabularyFrame = syntheticDebuggerFrame(vocabularyFixture);
+  crowdedFrame = syntheticDebuggerPresentationFrame(crowdedFixture);
+  crowdedWireFrame = syntheticDebuggerWireFrame(crowdedFixture);
+  durableControlsWireFrame = syntheticDebuggerWireFrame(durableControlsFixture);
+  povFrame = syntheticDebuggerPresentationFrame(povFixture);
+  povWireFrame = syntheticDebuggerWireFrame(povFixture);
+  vocabularyWireFrame = syntheticDebuggerWireFrame(vocabularyFixture);
 });
 
 test.afterAll(async () => {
@@ -560,7 +567,7 @@ test("visual vocabulary presents every class and combat grammar", async ({ page 
   const commandPosts = await installSyntheticVisualCase(
     page,
     debuggerUrl,
-    vocabularyFrame,
+    vocabularyWireFrame,
     { viewport: DESKTOP_VIEWPORT },
   );
   await assertFrameIdentity(page, {
@@ -726,7 +733,7 @@ test("durable controls use one stun and one slow glyph with source accents", asy
   const commandPosts = await installSyntheticVisualCase(
     page,
     debuggerUrl,
-    durableControlsFrame,
+    durableControlsWireFrame,
     { viewport: DESKTOP_VIEWPORT },
   );
   await assertFrameIdentity(page, {
@@ -1621,7 +1628,7 @@ test("crowded synthetic renderer fixture remains bounded at the minimum viewport
   const commandPosts = await installSyntheticVisualCase(
     page,
     debuggerUrl,
-    crowdedFrame,
+    crowdedWireFrame,
     { viewport: MINIMUM_VIEWPORT },
   );
   await assertFrameIdentity(page, {
@@ -1750,6 +1757,10 @@ test("synthetic POV fixture omits hidden agents and spatial endpoints", async ({
     ...povFrame,
     preset: "debug",
   });
+  const servedWireFrame = /** @type {Record<string, any>} */ ({
+    ...povWireFrame,
+    preset: "debug",
+  });
   expectPovPayloadRedacted(servedFrame);
   expect(
     /** @type {Array<{global_slot: number}>} */ (servedFrame.scene.agents).map(
@@ -1767,7 +1778,7 @@ test("synthetic POV fixture omits hidden agents and spatial endpoints", async ({
   const commandPosts = await installSyntheticVisualCase(
     page,
     debuggerUrl,
-    servedFrame,
+    servedWireFrame,
     { viewport: DESKTOP_VIEWPORT },
   );
   await assertFrameIdentity(page, {

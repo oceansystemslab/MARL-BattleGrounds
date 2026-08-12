@@ -11,15 +11,21 @@ from scripts.dev.visual_debugger.protocol import (
     BattlefieldPointerCommandV1,
     CandidateLegalityCardV1,
     CommandRequestV1,
+    ConfirmDiscardAndReplaceCommandV1,
     DebuggerCommandV1,
     ExitCommandV1,
+    FinishAndReviewCommandV1,
     HudFrameV1,
     KeyboardCommandV1,
     LatestTransitionCardV1,
     MovementLegalityCardV1,
     PendingActionCardV1,
+    RecordingStatusV1,
     ResetCommandV1,
+    RetrySaveCommandV1,
+    ReviewReplayCommandV1,
     RosterSelectionCommandV1,
+    SaveAsCommandV1,
     ScenarioMetadataV1,
     ScenarioSwitchCommandV1,
     SetMovementScaleCommandV1,
@@ -112,6 +118,17 @@ def test_hud_movement_legality_requires_exact_canonical_action_rows() -> None:
         SetMovementScaleCommandV1(movement_scale=None),
         SetViewCommandV1(view_mode="pov"),
         SetPresetCommandV1(preset="analysis"),
+        FinishAndReviewCommandV1(),
+        ReviewReplayCommandV1(),
+        RetrySaveCommandV1(),
+        SaveAsCommandV1(file_name="a.marlbg-replay.json"),
+        ConfirmDiscardAndReplaceCommandV1(replacement=ResetCommandV1()),
+        ConfirmDiscardAndReplaceCommandV1(
+            replacement=ScenarioSwitchCommandV1(scenario_name="basic_support")
+        ),
+        ConfirmDiscardAndReplaceCommandV1(
+            replacement=SetMovementScaleCommandV1(movement_scale=0.2)
+        ),
         ExitCommandV1(),
     ),
 )
@@ -130,6 +147,80 @@ def test_command_request_round_trips_every_discriminated_variant(
 
     assert decoded == request
     assert json.loads(encoded)["command"]["command_type"] == command.command_type
+
+
+def test_recording_status_enforces_exact_lifecycle_availability() -> None:
+    capturing = RecordingStatusV1(
+        lifecycle="recording",
+        captured_transition_count=0,
+        expected_transition_count=5,
+        restart_fenced=False,
+        finish_available=True,
+        review_available=False,
+        retry_available=False,
+        save_as_available=False,
+        discard_available=False,
+    )
+    failed = RecordingStatusV1(
+        lifecycle="persistence_failed",
+        captured_transition_count=2,
+        expected_transition_count=5,
+        completion_state="partial",
+        completion_reason="user_finish_and_review",
+        restart_fenced=True,
+        finish_available=False,
+        review_available=False,
+        retry_available=True,
+        save_as_available=True,
+        discard_available=False,
+        persistence_error_code="publication_failed",
+    )
+    saved = RecordingStatusV1(
+        lifecycle="saved",
+        captured_transition_count=5,
+        expected_transition_count=5,
+        completion_state="complete",
+        restart_fenced=True,
+        finish_available=False,
+        review_available=True,
+        retry_available=False,
+        save_as_available=False,
+        discard_available=False,
+    )
+
+    assert (
+        RecordingStatusV1.model_validate_json(capturing.model_dump_json()) == capturing
+    )
+    assert RecordingStatusV1.model_validate_json(failed.model_dump_json()) == failed
+    assert RecordingStatusV1.model_validate_json(saved.model_dump_json()) == saved
+
+    for mutation, message in (
+        ({"restart_fenced": True}, "restart_fenced"),
+        ({"retry_available": True}, "availability"),
+        ({"completion_state": "partial"}, "completion state"),
+        ({"persistence_error_code": "publication_failed"}, "persistence_failed"),
+    ):
+        with pytest.raises(ValidationError, match=message):
+            RecordingStatusV1.model_validate(
+                {**capturing.model_dump(mode="python"), **mutation}
+            )
+
+
+@pytest.mark.parametrize(
+    "file_name",
+    (
+        "../escape.marlbg-replay.json",
+        "/tmp/escape.marlbg-replay.json",
+        ".hidden.marlbg-replay.json",
+        "missing.json",
+        "bad name.marlbg-replay.json",
+    ),
+)
+def test_recording_save_as_accepts_only_one_safe_replay_basename(
+    file_name: str,
+) -> None:
+    with pytest.raises(ValidationError):
+        SaveAsCommandV1(file_name=file_name)
 
 
 @pytest.mark.parametrize(

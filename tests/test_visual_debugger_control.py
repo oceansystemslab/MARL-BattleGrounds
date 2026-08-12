@@ -8,6 +8,7 @@ import jax.numpy as jnp
 import pytest
 import scripts.dev.visual_debugger.control as control
 from scripts.dev.visual_debugger.control import (
+    DebuggerTransitionFailureV1,
     arm_basic,
     arm_ultimate,
     build_interactive_joint_action,
@@ -27,6 +28,10 @@ from scripts.dev.visual_debugger.control import (
     submit_joint_action,
     submit_next_script_frame,
     switch_scenario,
+)
+from scripts.dev.visual_debugger.evaluation_bridge import (
+    DebuggerCaptureProfileV1,
+    build_debugger_evaluation_launch_specification_v1,
 )
 from scripts.dev.visual_debugger.model import (
     ActorCommand,
@@ -57,12 +62,23 @@ def _session(
     *,
     controlled_slot: int | None = None,
     verbose: bool = False,
+    capture_profile: DebuggerCaptureProfileV1 = "debug",
 ) -> DebuggerSession:
     scenario = get_scenario(name)
+    default_launch = debugger_test_launch_specification(7)
+    launch = (
+        default_launch
+        if capture_profile == "debug"
+        else build_debugger_evaluation_launch_specification_v1(
+            root_seed=default_launch.root_seed,
+            code_revision=default_launch.code_revision,
+            capture_profile=capture_profile,
+        )
+    )
     return create_session(
         scenario,
         seed=7,
-        evaluation_launch_specification=debugger_test_launch_specification(7),
+        evaluation_launch_specification=launch,
         controlled_global_slot=controlled_slot,
         show_ranges=True,
         verbose_logging=verbose,
@@ -198,6 +214,44 @@ def test_create_session_has_exact_initial_pending_and_epoch_contract() -> None:
     assert session.next_script_frame_index == 0
     assert int(session.state.step_count) == 0
     assert not session.episode_sealed
+    assert session.evaluation_context.capture_profile == "debug"
+    assert (
+        dict(
+            (row.name, row.value) for row in session.evaluation_context.aggregation_keys
+        )["action_source"]
+        == "manual"
+    )
+
+
+def test_retaining_capture_profile_survives_every_session_replacement() -> None:
+    initial = _session(
+        "basic_support",
+        capture_profile="evaluation_metric_complete",
+    )
+    reset = reset_session(initial)
+    scaled = set_movement_scale(reset, 0.25)
+    switched = switch_scenario(scaled, get_scenario("arena_5v5"))
+
+    sessions = (initial, reset, scaled, switched)
+    assert {candidate.evaluation_context.capture_profile for candidate in sessions} == {
+        "evaluation_metric_complete"
+    }
+    assert {candidate.evaluation_context.identity.run_id for candidate in sessions} == {
+        initial.evaluation_context.identity.run_id
+    }
+    assert tuple(candidate.run_generation for candidate in sessions) == (0, 1, 2, 3)
+    assert all(
+        candidate.current_evaluation_frame.frame_index == 0
+        and candidate.incoming_evaluation_view is None
+        for candidate in sessions
+    )
+    assert tuple(
+        dict(
+            (row.name, row.value)
+            for row in candidate.evaluation_context.aggregation_keys
+        )["action_source"]
+        for candidate in sessions
+    ) == ("scripted", "scripted", "scripted", "manual")
 
 
 def test_session_rejects_invalid_fixed_slot_pending_rows() -> None:
@@ -914,13 +968,72 @@ def test_submission_rejects_bad_shape_or_dtype_before_stepping(
     bad_action: object,
 ) -> None:
     session = _session("arena_5v5")
-    with pytest.raises(ValueError):
+    with pytest.raises(DebuggerTransitionFailureV1) as raised:
         submit_joint_action(
             session,
             bad_action,  # type: ignore[arg-type]
             submission_kind="interactive",
             report_actor_slots=(0,),
         )
+    assert raised.value.stage == "action_build"
+    assert raised.value.stable_code == "invalid_submitted_action"
+    assert isinstance(raised.value.__cause__, ValueError)
+
+
+@pytest.mark.parametrize(
+    ("boundary", "expected_stage", "expected_code"),
+    (
+        ("interactive_action", "action_build", "interactive_action_build_failed"),
+        ("scripted_action", "action_build", "scripted_action_build_failed"),
+        ("random_split", "simulation", "simulator_step_failed"),
+        ("step", "simulation", "simulator_step_failed"),
+        ("capture", "capture", "transition_capture_failed"),
+        ("coherent_view", "validation", "transition_packaging_failed"),
+        ("status_evidence", "validation", "transition_packaging_failed"),
+    ),
+)
+def test_submission_failures_have_stable_typed_stage_and_preserve_input_epoch(
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+    expected_stage: str,
+    expected_code: str,
+) -> None:
+    scripted = boundary == "scripted_action"
+    session = _session("basic_support" if scripted else "arena_5v5")
+    initial_frame = session.current_evaluation_frame
+    initial_state = session.state
+
+    def fail(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("private injected detail")
+
+    if boundary == "interactive_action":
+        monkeypatch.setattr(control, "build_interactive_joint_action", fail)
+    elif boundary == "scripted_action":
+        monkeypatch.setattr(control, "build_scripted_joint_action", fail)
+    elif boundary == "random_split":
+        monkeypatch.setattr(control.jax.random, "split", fail)
+    elif boundary == "step":
+        monkeypatch.setattr(control, "step", fail)
+    elif boundary == "capture":
+        monkeypatch.setattr(control, "capture_evaluation_transition_unit_v1", fail)
+    elif boundary == "coherent_view":
+        monkeypatch.setattr(control, "EvaluationTransitionViewV1", fail)
+    else:
+        monkeypatch.setattr(control, "advance_status_source_evidence_v2", fail)
+
+    with pytest.raises(DebuggerTransitionFailureV1) as raised:
+        if scripted:
+            submit_next_script_frame(session)
+        else:
+            submit_interactive(session)
+
+    assert raised.value.stage == expected_stage
+    assert raised.value.stable_code == expected_code
+    assert isinstance(raised.value.__cause__, RuntimeError)
+    assert str(raised.value) == f"debugger transition failed during {expected_stage}"
+    assert "private injected detail" not in str(raised.value)
+    assert session.current_evaluation_frame is initial_frame
+    assert session.state is initial_state
 
 
 def test_scenario_contract_rejects_duplicate_frame_actors() -> None:

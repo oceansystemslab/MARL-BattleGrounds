@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   loadRendererFixture,
-  syntheticDebuggerFrame,
+  syntheticDebuggerWireFrame,
 } from "../e2e/support/renderer-fixture.js";
 import {
   DebuggerApiError,
@@ -82,7 +82,7 @@ test("extractFrame enforces the exact replay error envelope even without a lates
 });
 
 test("live V2 and replay V1 error envelopes retain separate frame boundaries", async () => {
-  const liveFrame = syntheticDebuggerFrame(
+  const liveFrame = syntheticDebuggerWireFrame(
     await loadRendererFixture("canonical_event_vocabulary"),
   );
   const liveLatest = extractFrame({

@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 type _ViewMode = Literal["researcher", "pov"]
 type _Preset = Literal["presentation", "analysis", "debug"]
+type _ActionSourceKind = Literal["manual", "scripted", "mixed"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +27,7 @@ class _LaunchOptions:
 
     scenario: str | None
     replay: Path | None
+    record_replay: Path | None
     frame_index: int | None
     pov_slot: int | None
     list_scenarios: bool
@@ -116,6 +118,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=argparse.SUPPRESS,
         help="validated local replay to view in a browser or render with --static",
+    )
+    parser.add_argument(
+        "--record-replay",
+        metavar="PATH",
+        type=Path,
+        default=argparse.SUPPRESS,
+        help=(
+            "record one live browser episode to a canonical replay and metric "
+            "sidecar, then review it"
+        ),
     )
     parser.add_argument(
         "--frame-index",
@@ -209,6 +221,10 @@ def _resolve_launch_options(namespace: argparse.Namespace) -> _LaunchOptions:
     return _LaunchOptions(
         scenario=cast(str | None, getattr(namespace, "scenario", None)),
         replay=cast(Path | None, getattr(namespace, "replay", None)),
+        record_replay=cast(
+            Path | None,
+            getattr(namespace, "record_replay", None),
+        ),
         frame_index=cast(int | None, getattr(namespace, "frame_index", None)),
         pov_slot=cast(int | None, getattr(namespace, "pov_slot", None)),
         list_scenarios=cast(bool, getattr(namespace, "list_scenarios", False)),
@@ -242,6 +258,7 @@ _OPTION_LABELS = (
     ("port", "--port"),
     ("no_open", "--no-open"),
     ("verbose", "--verbose"),
+    ("record_replay", "--record-replay"),
 )
 
 
@@ -249,6 +266,18 @@ def _validate_option_matrix(
     parser: argparse.ArgumentParser,
     options: _LaunchOptions,
 ) -> None:
+    if options.record_replay is not None:
+        if options.replay is not None:
+            parser.error("--record-replay cannot be combined with --replay.")
+        if options.static:
+            parser.error("--record-replay is available only in live browser mode.")
+        if options.list_scenarios:
+            parser.error("--record-replay cannot be combined with --list-scenarios.")
+        if "frame_index" in options.supplied:
+            parser.error("--frame-index is unavailable with --record-replay.")
+        if "pov_slot" in options.supplied:
+            parser.error("--pov-slot is unavailable with --record-replay.")
+
     if options.replay is None:
         if "frame_index" in options.supplied:
             parser.error("--frame-index requires --replay.")
@@ -359,6 +388,22 @@ def _validate_launch(
         raise ValueError(msg)
 
 
+def _recording_action_source_kind(session: object) -> _ActionSourceKind:
+    """Read the one path-free action-source contract from a live session."""
+    evaluation_context = getattr(session, "evaluation_context", None)
+    aggregation_keys = getattr(evaluation_context, "aggregation_keys", ())
+    rows = tuple(
+        row.value
+        for row in aggregation_keys
+        if getattr(row, "name", None) == "action_source"
+    )
+    if len(rows) != 1 or rows[0] not in ("manual", "scripted", "mixed"):
+        raise ValueError(
+            "recording sessions require one canonical action-source contract."
+        )
+    return rows[0]
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Parse, list, or run while preserving standard command exit semantics."""
     parser = build_parser()
@@ -387,6 +432,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         if options.replay is not None:
             return _run_browser_replay(options)
 
+        recording_destination = None
+        if options.record_replay is not None:
+            from marl_battlegrounds.evaluation.replay_io import (
+                ReplaySaveError,
+                preflight_replay_bundle_destination_v1,
+            )
+
+            try:
+                recording_destination = preflight_replay_bundle_destination_v1(
+                    options.record_replay,
+                )
+            except ReplaySaveError as exc:
+                raise ValueError(
+                    f"Replay recording target is unavailable: {exc}"
+                ) from exc
+
         from scripts.dev.visual_debugger.evaluation_bridge import (
             build_debugger_evaluation_launch_specification_v1,
         )
@@ -401,11 +462,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             controlled_global_slot=options.controlled_slot,
             include_stress=options.include_stress,
         )
+        code_revision = discover_debugger_code_revision_v1(
+            _REPOSITORY_ROOT,
+        )
         evaluation_launch_specification = (
             build_debugger_evaluation_launch_specification_v1(
                 root_seed=options.seed,
-                code_revision=discover_debugger_code_revision_v1(
-                    _REPOSITORY_ROOT,
+                code_revision=code_revision,
+                capture_profile=(
+                    "evaluation_metric_complete"
+                    if recording_destination is not None
+                    else "debug"
                 ),
             )
         )
@@ -435,17 +502,64 @@ def main(argv: Sequence[str] | None = None) -> int:
             show_ranges=options.ranges,
             verbose_logging=options.verbose,
         )
+        if recording_destination is None:
+            service = DebuggerService(
+                session,
+                view_mode=options.view,
+                preset=options.preset,
+                include_stress=options.include_stress,
+            )
+            return serve_browser_debugger(
+                service,
+                asset_root=_REPOSITORY_ROOT / "web" / "visual_debugger",
+                port=options.port,
+                open_browser=not options.no_open,
+            )
+
+        from scripts.dev.visual_debugger.recording import (
+            DebuggerReplayRecorderV1,
+            build_debugger_recording_specification_v1,
+        )
+        from scripts.dev.visual_debugger.recording_coordinator import (
+            RecordingDebuggerCoordinator,
+        )
+        from scripts.dev.visual_debugger.runtime_provenance import (
+            capture_debugger_runtime_provenance_v1,
+        )
+
+        try:
+            runtime_provenance = capture_debugger_runtime_provenance_v1(
+                code_revision,
+            )
+        except RuntimeError as exc:
+            raise ValueError(
+                "Replay recording runtime provenance is unavailable; verify the "
+                "selected JAX backend exposes a usable device and precision setting."
+            ) from exc
+
+        recorder = DebuggerReplayRecorderV1(
+            specification=build_debugger_recording_specification_v1(
+                action_source_kind=_recording_action_source_kind(session),
+                runtime_provenance=runtime_provenance,
+            ),
+            destination=recording_destination,
+            context=session.evaluation_context,
+            initial_frame=session.current_evaluation_frame,
+        )
         service = DebuggerService(
             session,
             view_mode=options.view,
             preset=options.preset,
             include_stress=options.include_stress,
+            recorder=recorder,
         )
+        recording_coordinator = RecordingDebuggerCoordinator(service)
         return serve_browser_debugger(
-            service,
             asset_root=_REPOSITORY_ROOT / "web" / "visual_debugger",
             port=options.port,
             open_browser=not options.no_open,
+            coordinator_router=recording_coordinator.router,
+            graceful_close=recording_coordinator.graceful_close,
         )
     except ImportError as exc:
         print(f"error: {exc}", file=sys.stderr)

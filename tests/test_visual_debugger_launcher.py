@@ -167,6 +167,48 @@ def test_parser_exposes_complete_browser_replay_contract() -> None:
     assert not hasattr(args, "scenario")
 
 
+def test_parser_exposes_opt_in_live_recording_target() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        (
+            "--record-replay",
+            "episode.marlbg-replay.json",
+            "--scenario",
+            "status_stack",
+            "--seed",
+            "7",
+            "--no-open",
+        )
+    )
+
+    assert args.record_replay == Path("episode.marlbg-replay.json")
+    assert args.scenario == "status_stack"
+    assert args.seed == 7
+    assert args.no_open
+    assert not hasattr(args, "replay")
+
+
+@pytest.mark.parametrize(
+    "conflict",
+    (
+        ("--replay", "other.marlbg-replay.json"),
+        ("--static",),
+        ("--list-scenarios",),
+        ("--frame-index", "0"),
+        ("--pov-slot", "0"),
+    ),
+)
+def test_recording_rejects_replay_static_and_list_only_modes(
+    conflict: tuple[str, ...],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        main(("--record-replay", "episode.marlbg-replay.json", *conflict))
+
+    assert exc_info.value.code == 2
+    assert "--record-replay" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize(
     "argv, message",
     (
@@ -828,6 +870,206 @@ def test_browser_default_builds_service_and_forwards_lifecycle_options(
     assert frame.view_mode == "pov"
     assert frame.preset == "debug"
     assert not hasattr(frame.projection.scene, "ranges")
+
+
+def test_recording_preflights_before_scenario_provenance_session_or_server(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from scripts.dev.visual_debugger import revision as revision_module
+    from scripts.dev.visual_debugger import runtime_provenance as runtime_module
+    from scripts.dev.visual_debugger import scenarios as scenarios_module
+    from scripts.dev.visual_debugger import server as server_module
+    from scripts.dev.visual_debugger import service as service_module
+
+    from marl_battlegrounds.evaluation import replay_io as replay_io_module
+    from marl_battlegrounds.evaluation.replay_io import ReplaySaveError
+
+    target = tmp_path / "missing" / "episode.marlbg-replay.json"
+
+    def fail_preflight(path: Path) -> object:
+        raise ReplaySaveError(
+            "missing_parent",
+            path=path.parent,
+            detail="injected missing parent",
+        )
+
+    def forbidden(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("recording preflight must precede runtime construction")
+
+    monkeypatch.setattr(
+        replay_io_module,
+        "preflight_replay_bundle_destination_v1",
+        fail_preflight,
+    )
+    monkeypatch.setattr(scenarios_module, "get_scenario", forbidden)
+    monkeypatch.setattr(
+        revision_module,
+        "discover_debugger_code_revision_v1",
+        forbidden,
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "capture_debugger_runtime_provenance_v1",
+        forbidden,
+    )
+    monkeypatch.setattr(service_module, "DebuggerService", forbidden)
+    monkeypatch.setattr(server_module, "serve_browser_debugger", forbidden)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(("--record-replay", str(target), "--no-open"))
+
+    assert exc_info.value.code == 2
+    error = capsys.readouterr().err
+    assert "Replay recording target is unavailable" in error
+    assert "missing_parent" in error
+
+
+def test_recording_runtime_provenance_failure_exits_before_router_or_browser(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from scripts.dev.visual_debugger import recording as recording_module
+    from scripts.dev.visual_debugger import (
+        recording_coordinator as coordinator_module,
+    )
+    from scripts.dev.visual_debugger import runtime_provenance as runtime_module
+    from scripts.dev.visual_debugger import server as server_module
+
+    def fail_provenance(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("private device discovery detail")
+
+    def forbidden(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("runtime provenance must precede binding and browser open")
+
+    monkeypatch.setattr(
+        runtime_module,
+        "capture_debugger_runtime_provenance_v1",
+        fail_provenance,
+    )
+    monkeypatch.setattr(recording_module, "DebuggerReplayRecorderV1", forbidden)
+    monkeypatch.setattr(coordinator_module, "RecordingDebuggerCoordinator", forbidden)
+    monkeypatch.setattr(server_module, "serve_browser_debugger", forbidden)
+    monkeypatch.setattr(server_module.webbrowser, "open", forbidden)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(
+            (
+                "--record-replay",
+                str(tmp_path / "episode.marlbg-replay.json"),
+            )
+        )
+
+    assert exc_info.value.code == 2
+    error = capsys.readouterr().err
+    assert "Replay recording runtime provenance is unavailable" in error
+    assert "private device discovery detail" not in error
+
+
+def test_recording_launch_injects_retaining_recorder_router_and_graceful_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.dev.visual_debugger import runtime_provenance as runtime_module
+    from scripts.dev.visual_debugger import server as server_module
+    from scripts.dev.visual_debugger.recording_coordinator import (
+        RecordingDebuggerCoordinator,
+    )
+    from scripts.dev.visual_debugger.server import HttpCoordinatorRouter
+
+    from marl_battlegrounds.evaluation.models import CodeRevisionV1
+    from marl_battlegrounds.evaluation.replay import RuntimeProvenanceV1
+
+    target = tmp_path / "recorded.marlbg-replay.json"
+    observed: dict[str, object] = {}
+    capture_count = 0
+
+    def fake_runtime(
+        code_revision: CodeRevisionV1,
+    ) -> RuntimeProvenanceV1:
+        nonlocal capture_count
+        capture_count += 1
+        return RuntimeProvenanceV1(
+            python_version="3.14.0",
+            package_version=code_revision.package_version,
+            jax_version="0.7.0",
+            jaxlib_version="0.7.0",
+            numpy_version="2.3.0",
+            pydantic_version="2.11.0",
+            platform="linux",
+            machine="x86_64",
+            backend="cpu",
+            device="generic-cpu",
+            precision="float32",
+            environment_count=1,
+            batch_shape=(1,),
+            policy_execution_included=False,
+        )
+
+    def fake_serve(
+        service: object | None = None,
+        *,
+        asset_root: Path,
+        port: int,
+        open_browser: bool,
+        coordinator_router: HttpCoordinatorRouter,
+        graceful_close: object,
+    ) -> int:
+        observed.update(
+            service=service,
+            asset_root=asset_root,
+            port=port,
+            open_browser=open_browser,
+            router=coordinator_router,
+            graceful_close=graceful_close,
+        )
+        return 43
+
+    monkeypatch.setattr(
+        runtime_module,
+        "capture_debugger_runtime_provenance_v1",
+        fake_runtime,
+    )
+    monkeypatch.setattr(server_module, "serve_browser_debugger", fake_serve)
+
+    result = main(
+        (
+            "--record-replay",
+            str(target),
+            "--scenario",
+            "arena_5v5",
+            "--view",
+            "pov",
+            "--preset",
+            "debug",
+            "--no-ranges",
+            "--port",
+            "0",
+            "--no-open",
+        )
+    )
+
+    assert result == 43
+    assert capture_count == 1
+    assert observed["service"] is None
+    assert observed["asset_root"] == _REPOSITORY_ROOT / "web" / "visual_debugger"
+    assert observed["port"] == 0
+    assert observed["open_browser"] is False
+    router = cast(HttpCoordinatorRouter, observed["router"])
+    snapshot = router.snapshot()
+    service = cast(DebuggerService, snapshot.service)
+    assert snapshot.binding.mode == "live"
+    assert service.session.evaluation_context.capture_profile == (
+        "evaluation_metric_complete"
+    )
+    assert service.current_frame().recording == service.recording_status
+    assert service.current_frame().view_mode == "pov"
+    assert service.current_frame().preset == "debug"
+    assert getattr(observed["graceful_close"], "__self__", None).__class__ is (
+        RecordingDebuggerCoordinator
+    )
 
 
 def test_static_flag_uses_only_the_stateless_snapshot_adapter(

@@ -12,7 +12,8 @@ import json
 import os
 import stat
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from hashlib import sha256
 from math import isfinite
 from pathlib import Path
 from secrets import token_hex
@@ -85,6 +86,7 @@ type ReplayIOErrorCodeV1 = Literal[
     "companion_target_exists",
     "temporary_write_failed",
     "atomic_publish_failed",
+    "replay_publication_verification_failed",
 ]
 
 
@@ -153,6 +155,85 @@ class SavedReplayBundleV1:
     replay_byte_length: int
     metric_report_byte_length: int
     metric_report_reused: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayBundleDestinationV1:
+    """One structurally preflighted local replay/report filename pair."""
+
+    replay_path: Path
+    metric_report_path: Path
+
+    def __post_init__(self) -> None:
+        if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
+            self.replay_path, Path
+        ) or not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
+            self.metric_report_path, Path
+        ):
+            raise TypeError("replay bundle destination paths must use pathlib.Path")
+        if _metric_report_path_for_replay(self.replay_path) != self.metric_report_path:
+            raise ValueError("metric report path must derive from the replay filename")
+
+
+class _PreparedReplayBundleTooLargeError(ValueError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedReplayBundleV1:
+    """Validated replay/report models and their immutable canonical bytes."""
+
+    bundle: ReplayBundleV1
+    max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1
+    replay_json_bytes: bytes = field(init=False, repr=False)
+    metric_report_json_bytes: bytes = field(init=False, repr=False)
+    replay_byte_length: int = field(init=False)
+    metric_report_byte_length: int = field(init=False)
+    replay_payload_sha256: str = field(init=False)
+    metric_report_payload_sha256: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        if type(self.bundle) is not ReplayBundleV1:
+            raise TypeError("prepared replay bundle requires exact ReplayBundleV1")
+        size_limit = _require_positive_limit(
+            self.max_file_size_bytes,
+            name="max_file_size_bytes",
+        )
+        validate_replay_artifact_v1(self.bundle.replay)
+        _validate_metric_report_artifact_against_validated_replay_v1(
+            self.bundle.metric_report_artifact,
+            self.bundle.replay,
+        )
+        replay_payload = canonical_json_bytes(self.bundle.replay)
+        metric_report_payload = canonical_json_bytes(self.bundle.metric_report_artifact)
+        replay_byte_length = len(replay_payload)
+        metric_report_byte_length = len(metric_report_payload)
+        if replay_byte_length > size_limit or metric_report_byte_length > size_limit:
+            raise _PreparedReplayBundleTooLargeError(
+                f"bundle member exceeds {size_limit} bytes"
+            )
+        object.__setattr__(self, "replay_json_bytes", replay_payload)
+        object.__setattr__(
+            self,
+            "metric_report_json_bytes",
+            metric_report_payload,
+        )
+        object.__setattr__(self, "replay_byte_length", replay_byte_length)
+        object.__setattr__(
+            self,
+            "metric_report_byte_length",
+            metric_report_byte_length,
+        )
+        object.__setattr__(
+            self,
+            "replay_payload_sha256",
+            sha256(replay_payload).hexdigest(),
+        )
+        object.__setattr__(
+            self,
+            "metric_report_payload_sha256",
+            sha256(metric_report_payload).hexdigest(),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -960,6 +1041,31 @@ def load_scenario_evaluation_record_v1(
     return record
 
 
+def prepare_replay_bundle_v1(
+    bundle: ReplayBundleV1,
+    *,
+    max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
+) -> PreparedReplayBundleV1:
+    """Validate one bundle and cache its exact canonical publication bytes."""
+    try:
+        return PreparedReplayBundleV1(
+            bundle=bundle,
+            max_file_size_bytes=max_file_size_bytes,
+        )
+    except _PreparedReplayBundleTooLargeError as error:
+        raise ReplaySaveError(
+            "file_too_large",
+            path=None,
+            detail=str(error),
+        ) from error
+    except (TypeError, ValueError) as error:
+        raise ReplaySaveError(
+            "invalid_argument",
+            path=None,
+            detail="bundle fails replay/report validation",
+        ) from error
+
+
 def _validate_save_destination(replay_path: Path) -> Path:
     try:
         metric_report_path = _metric_report_path_for_replay(replay_path)
@@ -1000,6 +1106,58 @@ def _entry_status_at(
             detail="symlink paths are outside the replay contract",
         )
     return entry_status
+
+
+def preflight_replay_bundle_destination_v1(
+    path: str | os.PathLike[str],
+) -> ReplayBundleDestinationV1:
+    """Validate an absent replay target and existing local parent without writes."""
+    try:
+        replay_path = _coerce_path(path)
+    except (TypeError, ValueError) as error:
+        raise ReplaySaveError(
+            "invalid_argument",
+            path=None,
+            detail=str(error),
+        ) from error
+    metric_report_path = _validate_save_destination(replay_path)
+    parent_descriptor = _open_parent_directory(
+        replay_path,
+        error_type=ReplaySaveError,
+    )
+    try:
+        if (
+            _entry_status_at(
+                parent_descriptor,
+                replay_path.name,
+                path=replay_path,
+                error_type=ReplaySaveError,
+            )
+            is not None
+        ):
+            raise ReplaySaveError(
+                "replay_target_exists",
+                path=replay_path,
+                detail="replay destinations are never overwritten",
+            )
+        metric_status = _entry_status_at(
+            parent_descriptor,
+            metric_report_path.name,
+            path=metric_report_path,
+            error_type=ReplaySaveError,
+        )
+        if metric_status is not None and not stat.S_ISREG(metric_status.st_mode):
+            raise ReplaySaveError(
+                "metric_report_conflict",
+                path=metric_report_path,
+                detail="existing metric sidecar is not a regular file",
+            )
+    finally:
+        os.close(parent_descriptor)
+    return ReplayBundleDestinationV1(
+        replay_path=replay_path,
+        metric_report_path=metric_report_path,
+    )
 
 
 def _fsync_directory(parent_descriptor: int) -> None:
@@ -1229,6 +1387,141 @@ def _publish_metric_report(
             os.close(parent_descriptor)
 
 
+def _verify_prepared_replay_bundle_at(
+    prepared: PreparedReplayBundleV1,
+    destination: ReplayBundleDestinationV1,
+    *,
+    parent_descriptor: int,
+) -> None:
+    """Require both published files to equal the cached canonical bytes."""
+    try:
+        replay_payload = _read_bounded_regular_file_at(
+            parent_descriptor,
+            destination.replay_path.name,
+            path=destination.replay_path,
+            max_file_size_bytes=prepared.max_file_size_bytes,
+            error_type=ReplaySaveError,
+            fsync_before_close=True,
+        )
+        metric_report_payload = _read_bounded_regular_file_at(
+            parent_descriptor,
+            destination.metric_report_path.name,
+            path=destination.metric_report_path,
+            max_file_size_bytes=prepared.max_file_size_bytes,
+            error_type=ReplaySaveError,
+            fsync_before_close=True,
+        )
+        if replay_payload != prepared.replay_json_bytes:
+            raise ReplaySaveError(
+                "replay_publication_verification_failed",
+                path=destination.replay_path,
+                detail="published replay bytes differ from the prepared bytes",
+            )
+        if metric_report_payload != prepared.metric_report_json_bytes:
+            raise ReplaySaveError(
+                "replay_publication_verification_failed",
+                path=destination.metric_report_path,
+                detail="published metric-report bytes differ from the prepared bytes",
+            )
+        _fsync_directory(parent_descriptor)
+    except ReplaySaveError as error:
+        if error.code == "replay_publication_verification_failed":
+            raise
+        raise ReplaySaveError(
+            "replay_publication_verification_failed",
+            path=error.path,
+            detail="published replay bundle could not be verified",
+        ) from error
+    except OSError as error:
+        raise ReplaySaveError(
+            "replay_publication_verification_failed",
+            path=destination.replay_path,
+            detail="published replay bundle durability could not be verified",
+        ) from error
+
+
+def publish_prepared_replay_bundle_v1(
+    prepared: PreparedReplayBundleV1,
+    destination: ReplayBundleDestinationV1,
+    *,
+    verify_existing_replay: bool = False,
+) -> SavedReplayBundleV1:
+    """Publish cached bytes, or explicitly verify one prior uncertain publish."""
+    if type(prepared) is not PreparedReplayBundleV1:
+        raise ReplaySaveError(
+            "invalid_argument",
+            path=None,
+            detail="publication requires the exact PreparedReplayBundleV1 type",
+        )
+    if type(destination) is not ReplayBundleDestinationV1:
+        raise ReplaySaveError(
+            "invalid_argument",
+            path=None,
+            detail="publication requires the exact ReplayBundleDestinationV1 type",
+        )
+    if type(verify_existing_replay) is not bool:
+        raise ReplaySaveError(
+            "invalid_argument",
+            path=destination.replay_path,
+            detail="verify_existing_replay must be a boolean",
+        )
+
+    parent_descriptor = _open_parent_directory(
+        destination.replay_path,
+        error_type=ReplaySaveError,
+    )
+    try:
+        if verify_existing_replay:
+            _verify_prepared_replay_bundle_at(
+                prepared,
+                destination,
+                parent_descriptor=parent_descriptor,
+            )
+            metric_report_reused = True
+        else:
+            if (
+                _entry_status_at(
+                    parent_descriptor,
+                    destination.replay_path.name,
+                    path=destination.replay_path,
+                    error_type=ReplaySaveError,
+                )
+                is not None
+            ):
+                raise ReplaySaveError(
+                    "replay_target_exists",
+                    path=destination.replay_path,
+                    detail="replay destinations are never overwritten",
+                )
+            metric_report_reused = _publish_metric_report(
+                destination.metric_report_path,
+                prepared.metric_report_json_bytes,
+                max_file_size_bytes=prepared.max_file_size_bytes,
+                parent_descriptor=parent_descriptor,
+            )
+            _publish_bytes_no_clobber(
+                destination.replay_path,
+                prepared.replay_json_bytes,
+                existing_code="replay_target_exists",
+                parent_descriptor=parent_descriptor,
+            )
+            _verify_prepared_replay_bundle_at(
+                prepared,
+                destination,
+                parent_descriptor=parent_descriptor,
+            )
+    finally:
+        os.close(parent_descriptor)
+
+    return SavedReplayBundleV1(
+        replay_path=destination.replay_path,
+        metric_report_path=destination.metric_report_path,
+        replay_byte_length=prepared.replay_byte_length,
+        metric_report_byte_length=prepared.metric_report_byte_length,
+        metric_report_reused=metric_report_reused,
+    )
+
+
 def save_replay_bundle_v1(
     bundle: ReplayBundleV1,
     path: str | os.PathLike[str],
@@ -1236,84 +1529,14 @@ def save_replay_bundle_v1(
     max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
 ) -> SavedReplayBundleV1:
     """Publish metric bytes first and the referencing replay last, without overwrite."""
-    if type(bundle) is not ReplayBundleV1:
-        raise ReplaySaveError(
-            "invalid_argument",
-            path=None,
-            detail="save requires the exact ReplayBundleV1 type",
-        )
-    try:
-        replay_path = _coerce_path(path)
-        size_limit = _require_positive_limit(
-            max_file_size_bytes,
-            name="max_file_size_bytes",
-        )
-    except (TypeError, ValueError) as error:
-        raise ReplaySaveError(
-            "invalid_argument",
-            path=None,
-            detail=str(error),
-        ) from error
-    metric_report_path = _validate_save_destination(replay_path)
-    try:
-        validate_replay_artifact_v1(bundle.replay)
-        _validate_metric_report_artifact_against_validated_replay_v1(
-            bundle.metric_report_artifact,
-            bundle.replay,
-        )
-    except (TypeError, ValueError) as error:
-        raise ReplaySaveError(
-            "invalid_argument",
-            path=replay_path,
-            detail="bundle fails replay/report validation",
-        ) from error
-    replay_payload = canonical_json_bytes(bundle.replay)
-    metric_report_payload = canonical_json_bytes(bundle.metric_report_artifact)
-    if len(replay_payload) > size_limit or len(metric_report_payload) > size_limit:
-        raise ReplaySaveError(
-            "file_too_large",
-            path=replay_path,
-            detail=f"bundle member exceeds {size_limit} bytes",
-        )
-    parent_descriptor = _open_parent_directory(
-        replay_path,
-        error_type=ReplaySaveError,
+    prepared = prepare_replay_bundle_v1(
+        bundle,
+        max_file_size_bytes=max_file_size_bytes,
     )
-    try:
-        if (
-            _entry_status_at(
-                parent_descriptor,
-                replay_path.name,
-                path=replay_path,
-                error_type=ReplaySaveError,
-            )
-            is not None
-        ):
-            raise ReplaySaveError(
-                "replay_target_exists",
-                path=replay_path,
-                detail="replay destinations are never overwritten",
-            )
-        metric_report_reused = _publish_metric_report(
-            metric_report_path,
-            metric_report_payload,
-            max_file_size_bytes=size_limit,
-            parent_descriptor=parent_descriptor,
-        )
-        _publish_bytes_no_clobber(
-            replay_path,
-            replay_payload,
-            existing_code="replay_target_exists",
-            parent_descriptor=parent_descriptor,
-        )
-    finally:
-        os.close(parent_descriptor)
-    return SavedReplayBundleV1(
-        replay_path=replay_path,
-        metric_report_path=metric_report_path,
-        replay_byte_length=len(replay_payload),
-        metric_report_byte_length=len(metric_report_payload),
-        metric_report_reused=metric_report_reused,
+    destination = preflight_replay_bundle_destination_v1(path)
+    return publish_prepared_replay_bundle_v1(
+        prepared,
+        destination,
     )
 
 
@@ -1466,6 +1689,8 @@ __all__ = [
     "REPLAY_FILE_SUFFIX_V1",
     "SCENARIO_FILE_SUFFIX_V1",
     "LoadedReplayBundleV1",
+    "PreparedReplayBundleV1",
+    "ReplayBundleDestinationV1",
     "ReplayBundleLoadStatusV1",
     "ReplayIOError",
     "ReplayIOErrorCodeV1",
@@ -1480,6 +1705,9 @@ __all__ = [
     "load_replay_artifact_v1",
     "load_replay_bundle_v1",
     "load_scenario_evaluation_record_v1",
+    "preflight_replay_bundle_destination_v1",
+    "prepare_replay_bundle_v1",
+    "publish_prepared_replay_bundle_v1",
     "save_actor_pov_replay_artifact_v1",
     "save_replay_bundle_v1",
     "save_scenario_evaluation_record_v1",

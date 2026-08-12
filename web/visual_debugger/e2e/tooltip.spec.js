@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 import { startDebugger, stopDebugger } from "./support/live-debugger.js";
 import {
   loadRendererFixture,
-  syntheticDebuggerFrame,
+  syntheticDebuggerWireFrame,
 } from "./support/renderer-fixture.js";
 import { waitForStablePresentation } from "./support/visual-regression.js";
 
@@ -28,9 +28,9 @@ test.beforeAll(async () => {
   ]);
   serverProcess = started.process;
   debuggerUrl = started.url;
-  crowdedFrame = syntheticDebuggerFrame(crowded);
-  povFrame = syntheticDebuggerFrame(pov);
-  vocabularyFrame = syntheticDebuggerFrame(vocabulary);
+  crowdedFrame = syntheticDebuggerWireFrame(crowded);
+  povFrame = syntheticDebuggerWireFrame(pov);
+  vocabularyFrame = syntheticDebuggerWireFrame(vocabulary);
 });
 
 test.afterAll(async () => {

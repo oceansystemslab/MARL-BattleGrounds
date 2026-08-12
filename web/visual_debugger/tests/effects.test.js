@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   loadRendererFixture,
-  syntheticDebuggerFrame,
+  syntheticDebuggerPresentationFrame,
 } from "../e2e/support/renderer-fixture.js";
 import {
   authorizationContextKey,
@@ -70,16 +70,18 @@ let canonicalFramesPromise;
 async function canonicalFrames() {
   if (!canonicalFramesPromise) {
     canonicalFramesPromise = (async () => {
-      const grammar = syntheticDebuggerFrame(
+      const grammar = syntheticDebuggerPresentationFrame(
         await loadRendererFixture("canonical_event_vocabulary"),
       );
-      const routes = syntheticDebuggerFrame(
+      const routes = syntheticDebuggerPresentationFrame(
         await loadRendererFixture("route_collision"),
       );
-      const crowded = syntheticDebuggerFrame(
+      const crowded = syntheticDebuggerPresentationFrame(
         await loadRendererFixture("crowded_teamfight"),
       );
-      const pov = syntheticDebuggerFrame(await loadRendererFixture("pov_redaction"));
+      const pov = syntheticDebuggerPresentationFrame(
+        await loadRendererFixture("pov_redaction"),
+      );
       return { grammar, routes, crowded, pov };
     })();
   }

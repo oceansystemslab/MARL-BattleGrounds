@@ -20,6 +20,7 @@ from scripts.dev.visual_debugger.scenarios import get_scenario
 from scripts.dev.visual_debugger.server import (
     DebuggerHTTPServer,
     DebuggerRequestHandler,
+    GracefulCloseResult,
     build_static_manifest,
     create_server,
     serve_browser_debugger,
@@ -709,3 +710,85 @@ def test_static_manifest_snapshots_asset_bytes_at_startup(tmp_path: Path) -> Non
     index.write_text("<html>replaced</html>", encoding="utf-8")
 
     assert manifest["/"].body == b"<html>initial</html>"
+
+
+def test_keyboard_interrupt_without_close_hook_preserves_legacy_success(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def interrupt_server(
+        server: DebuggerHTTPServer,
+        *,
+        poll_interval: float,
+    ) -> None:
+        del server, poll_interval
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(DebuggerHTTPServer, "serve_forever", interrupt_server)
+
+    result = serve_browser_debugger(
+        _service(),
+        asset_root=_ASSET_ROOT,
+        port=0,
+        open_browser=False,
+    )
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert "Visual Debugger and Analyzer stopped." in captured.out
+
+
+def test_keyboard_interrupt_invokes_graceful_close_once_under_router_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def interrupt_server(
+        server: DebuggerHTTPServer,
+        *,
+        poll_interval: float,
+    ) -> None:
+        del server, poll_interval
+        raise KeyboardInterrupt
+
+    observed_servers: list[DebuggerHTTPServer] = []
+    real_run_graceful_close = DebuggerHTTPServer.run_graceful_close
+
+    def capture_server_and_close(
+        server: DebuggerHTTPServer,
+        callback: server_module.GracefulCloseCallback,
+    ) -> GracefulCloseResult:
+        observed_servers.append(server)
+        return real_run_graceful_close(server, callback)
+
+    monkeypatch.setattr(DebuggerHTTPServer, "serve_forever", interrupt_server)
+    monkeypatch.setattr(
+        DebuggerHTTPServer,
+        "run_graceful_close",
+        capture_server_and_close,
+    )
+    calls: list[int] = []
+
+    def graceful_close() -> GracefulCloseResult:
+        calls.append(1)
+        server = observed_servers[0]
+        with server.coordinator_router.pinned_snapshot() as nested:
+            assert nested.binding.mode == "live"
+            assert nested is server.coordinator_snapshot()
+        return GracefulCloseResult(
+            exit_code=7,
+            message="synthetic recovery publication failed",
+        )
+
+    result = serve_browser_debugger(
+        _service(),
+        asset_root=_ASSET_ROOT,
+        port=0,
+        open_browser=False,
+        graceful_close=graceful_close,
+    )
+
+    captured = capsys.readouterr()
+    assert result == 7
+    assert calls == [1]
+    assert len(observed_servers) == 1
+    assert "synthetic recovery publication failed" in captured.err

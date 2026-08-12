@@ -35,6 +35,86 @@ const POV_CUE_TYPES_V1 = new Set([
   "episode_ended",
 ]);
 
+const RECORDING_STATUS_KEYS_V1 = Object.freeze([
+  "captured_transition_count",
+  "completion_reason",
+  "completion_state",
+  "discard_available",
+  "expected_transition_count",
+  "finish_available",
+  "lifecycle",
+  "persistence_error_code",
+  "restart_fenced",
+  "retry_available",
+  "review_available",
+  "save_as_available",
+  "schema_version",
+]);
+
+const RECORDING_LIFECYCLES_V1 = new Set([
+  "recording",
+  "sealed",
+  "finalized_unsaved",
+  "persistence_failed",
+  "saved",
+  "reviewing",
+  "discarded",
+]);
+
+const RECORDING_COMPLETION_STATES_V1 = new Set([
+  "complete",
+  "partial",
+  "interrupted",
+  "failed",
+]);
+
+const RECORDING_PERSISTENCE_ERRORS_V1 = new Set([
+  "target_unavailable",
+  "publication_failed",
+  "verification_failed",
+]);
+
+const RESEARCHER_LIVE_FRAME_KEYS_V2 = Object.freeze([
+  "available_scenarios",
+  "episode_id",
+  "frame_id",
+  "frame_index",
+  "frame_kind",
+  "hud",
+  "incoming_transition_id",
+  "incoming_transition_index",
+  "preset",
+  "projection",
+  "recording",
+  "revision",
+  "run_generation",
+  "scenario",
+  "schema_version",
+  "session_id",
+  "simulator_step_count",
+  "terminal",
+  "view_mode",
+]);
+
+const ACTOR_POV_LIVE_FRAME_KEYS_V2 = Object.freeze([
+  "episode_id",
+  "frame_id",
+  "frame_index",
+  "frame_kind",
+  "hud",
+  "incoming_pov_transition_id",
+  "preset",
+  "projection",
+  "recording",
+  "revision",
+  "run_generation",
+  "schema_version",
+  "session_id",
+  "simulator_step_count",
+  "terminal",
+  "view_mode",
+]);
+
 // ActorPovSelfSceneV1 retains observation columns 15..28 exactly.  Only the
 // nine duration columns denote durable status presence; multiplier/fraction
 // columns remain policy input but must not be misread as additional statuses.
@@ -121,6 +201,147 @@ function requireRecord(value, message) {
     throw new TypeError(message);
   }
   return value;
+}
+
+/**
+ * @param {Record<string, any>} value
+ * @param {readonly string[]} expected
+ * @param {string} message
+ */
+function requireExactKeys(value, expected, message) {
+  const actual = Object.keys(value).sort();
+  if (
+    actual.length !== expected.length ||
+    actual.some((key, index) => key !== expected[index])
+  ) {
+    throw new TypeError(message);
+  }
+}
+
+/**
+ * Strictly normalize the path-free recording lifecycle shared by both live
+ * audiences. Availability is joined here rather than inferred later by the
+ * UI, so malformed or over-disclosing state never reaches a control surface.
+ *
+ * @param {unknown} value
+ * @param {number} frameIndex
+ * @returns {Readonly<Record<string, any>> | null}
+ */
+export function normalizeRecordingStatusV1(value, frameIndex) {
+  if (value === null) {
+    return null;
+  }
+  const status = requireRecord(
+    value,
+    "Live debugger recording status must be an object or null.",
+  );
+  requireExactKeys(
+    status,
+    RECORDING_STATUS_KEYS_V1,
+    "Live debugger recording status has unknown or missing fields.",
+  );
+  if (status.schema_version !== 1) {
+    throw new TypeError("Live debugger recording status must use schema version 1.");
+  }
+  if (!RECORDING_LIFECYCLES_V1.has(status.lifecycle)) {
+    throw new TypeError("Live debugger recording lifecycle is unknown.");
+  }
+  if (
+    !Number.isInteger(status.captured_transition_count) ||
+    status.captured_transition_count < 0 ||
+    !Number.isInteger(status.expected_transition_count) ||
+    status.expected_transition_count <= 0 ||
+    status.captured_transition_count > status.expected_transition_count ||
+    status.captured_transition_count !== frameIndex
+  ) {
+    throw new TypeError(
+      "Live debugger recording progress does not join its frame and horizon.",
+    );
+  }
+  if (
+    status.completion_state !== null &&
+    !RECORDING_COMPLETION_STATES_V1.has(status.completion_state)
+  ) {
+    throw new TypeError("Live debugger recording completion state is unknown.");
+  }
+  const reasonLength =
+    typeof status.completion_reason === "string"
+      ? [...status.completion_reason].length
+      : 0;
+  if (
+    status.completion_reason !== null &&
+    (typeof status.completion_reason !== "string" ||
+      reasonLength < 1 ||
+      reasonLength > 256)
+  ) {
+    throw new TypeError("Live debugger recording completion reason is invalid.");
+  }
+  const booleanFields = [
+    "restart_fenced",
+    "finish_available",
+    "review_available",
+    "retry_available",
+    "save_as_available",
+    "discard_available",
+  ];
+  if (booleanFields.some((field) => typeof status[field] !== "boolean")) {
+    throw new TypeError("Live debugger recording availability must be boolean.");
+  }
+  if (
+    status.persistence_error_code !== null &&
+    !RECORDING_PERSISTENCE_ERRORS_V1.has(status.persistence_error_code)
+  ) {
+    throw new TypeError("Live debugger recording persistence error is unknown.");
+  }
+
+  const finalized = [
+    "sealed",
+    "finalized_unsaved",
+    "persistence_failed",
+    "saved",
+    "reviewing",
+  ].includes(status.lifecycle);
+  const reasonRequired = ["partial", "interrupted", "failed"].includes(
+    status.completion_state,
+  );
+  const restartFenced =
+    status.captured_transition_count > 0 || status.lifecycle !== "recording";
+  const finishAvailable = status.lifecycle === "recording";
+  const reviewAvailable = status.lifecycle === "saved";
+  const retryAvailable = status.lifecycle === "persistence_failed";
+  const discardAvailable =
+    status.lifecycle === "recording" && status.captured_transition_count > 0;
+  if (
+    finalized !== (status.completion_state !== null) ||
+    reasonRequired !== (status.completion_reason !== null) ||
+    status.restart_fenced !== restartFenced ||
+    status.finish_available !== finishAvailable ||
+    status.review_available !== reviewAvailable ||
+    status.retry_available !== retryAvailable ||
+    status.save_as_available !== retryAvailable ||
+    status.discard_available !== discardAvailable ||
+    (status.persistence_error_code !== null) !== retryAvailable
+  ) {
+    throw new TypeError(
+      "Live debugger recording lifecycle and availability are not canonical.",
+    );
+  }
+
+  return Object.freeze({
+    schema_version: status.schema_version,
+    lifecycle: status.lifecycle,
+    captured_transition_count: status.captured_transition_count,
+    expected_transition_count: status.expected_transition_count,
+    completion_state: status.completion_state,
+    completion_reason: status.completion_reason,
+    restart_fenced: status.restart_fenced,
+    finish_available: status.finish_available,
+    review_available: status.review_available,
+    retry_available: status.retry_available,
+    save_as_available: status.save_as_available,
+    discard_available: status.discard_available,
+    persistence_error_code: status.persistence_error_code,
+  });
 }
 
 /**
@@ -676,6 +897,16 @@ export function normalizeLiveDebuggerFrameV2(value) {
   ) {
     throw new TypeError("Live debugger frame has an unknown audience mode.");
   }
+  if (!Object.hasOwn(frame, "recording")) {
+    throw new TypeError("Live debugger frame is missing recording authority.");
+  }
+  requireExactKeys(
+    frame,
+    frame.frame_kind === "researcher_live_debugger"
+      ? RESEARCHER_LIVE_FRAME_KEYS_V2
+      : ACTOR_POV_LIVE_FRAME_KEYS_V2,
+    "Live debugger frame has unknown or missing top-level fields.",
+  );
   if (
     !Number.isInteger(frame.frame_index) ||
     typeof frame.episode_id !== "string" ||
@@ -683,6 +914,7 @@ export function normalizeLiveDebuggerFrameV2(value) {
   ) {
     throw new TypeError("Live debugger frame identity is not canonical.");
   }
+  const recording = normalizeRecordingStatusV1(frame.recording, frame.frame_index);
   if (frame.frame_kind === "researcher_live_debugger") {
     const expectedTransitionIndex =
       frame.frame_index === 0 ? null : frame.frame_index - 1;
@@ -713,6 +945,7 @@ export function normalizeLiveDebuggerFrameV2(value) {
       : frame.incoming_pov_transition_id;
   return Object.freeze({
     ...frame,
+    recording,
     simulator_step: frame.simulator_step_count,
     transition_id: presentationTransitionId,
     scene: normalized.scene,

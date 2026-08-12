@@ -82,6 +82,8 @@ Useful invocations:
 ./scripts/dev/run_debug_renderer.sh --controlled-slot 5 --no-ranges
 ./scripts/dev/run_debug_renderer.sh --view pov --preset debug
 ./scripts/dev/run_debug_renderer.sh --no-open --port 8123
+./scripts/dev/run_debug_renderer.sh \
+  --record-replay recordings/episode.marlbg-replay.json
 ./scripts/dev/run_debug_renderer.sh --replay episode.marlbg-replay.json
 ./scripts/dev/run_debug_renderer.sh \
   --replay episode.marlbg-replay.json --frame-index 12 \
@@ -106,6 +108,7 @@ Useful invocations:
 | `--verbose` | Enable expanded diagnostics. |
 | `--ranges` / `--no-ranges` | Initially show or hide controlled-actor ranges. |
 | `--static` | Render one Matplotlib reset snapshot; start no server and register no callbacks. |
+| `--record-replay PATH` | Record one live browser episode to a canonical replay plus metric sidecar, then offer read-only review. |
 | `--replay PATH` | Load a validated semantic replay in the read-only browser viewer, or pair it with `--static`. |
 | `--frame-index N` | Select the initial absolute replay frame. Browser default: `0`; required for replay `--static`. |
 | `--pov-slot N` | Select the initial configured-active actor for replay POV authorization. |
@@ -117,6 +120,15 @@ Browser replay accepts only `--frame-index`, `--pov-slot`, `--view`, `--preset`,
 exact combination `--replay PATH --static --frame-index N`; it rejects every
 browser- and live-only option, including an explicitly supplied default. This
 presence-aware matrix prevents a mistyped option from being silently ignored.
+
+Recording is a fourth, live-browser-only launch shape. `--record-replay` accepts
+the ordinary live scenario, seed, controlled-slot, audience, preset, range,
+verbosity, port, and browser-opening options. It rejects `--replay`, `--static`,
+`--frame-index`, `--pov-slot`, and list-only operation, including explicitly
+supplied defaults. The target is preflighted before scenario construction,
+runtime discovery, server bind, or browser open. Its parent must already exist,
+its name must end in `.marlbg-replay.json`, and neither the replay nor an
+incompatible companion target may already exist.
 
 ## Loopback lifecycle and safety
 
@@ -146,6 +158,73 @@ replays a submit.
 
 Closing the browser tab does not stop Python. Use **Exit analyzer** or `Ctrl-C`
 in the launching terminal.
+
+## Live replay recording and recovery
+
+Create the destination directory, then opt into recording:
+
+```bash
+mkdir -p recordings
+./scripts/dev/run_debug_renderer.sh \
+  --record-replay recordings/episode.marlbg-replay.json
+```
+
+Recording replaces the ordinary diagnostic observer with one retaining,
+metric-complete observer from frame zero. Each accepted simulator step still
+performs exactly one core transition and one canonical CP2 capture; the service
+appends that unit once and performs no replay serialization or filesystem I/O
+between transitions. The local destination and capability token never enter the
+scientific context, replay identity, or either browser audience root.
+
+The compact recording panel is authoritative:
+
+- **Finish & Review** closes an open prefix, publishes the replay and adjacent
+  `.marlbg-metrics.json` report, validates both through the public loader, and
+  changes the same server, origin, capability, and browser page to read-only
+  replay. Review always opens settled at frame zero; the captured tail remains
+  reachable from the timeline.
+- Reaching task termination or the declared horizon closes and saves a complete
+  episode automatically while leaving the live page available. **Review Replay**
+  performs the same frame-zero handoff when the researcher is ready.
+- **Retry save** republishes the exact immutable cached bytes. If publication
+  may already have succeeded, Retry verifies those exact existing replay and
+  report bytes instead of overwriting them.
+- **Save As** accepts only a new safe replay basename in the original resolved
+  parent directory. It cannot select another directory, traverse paths, follow
+  symlinks, or overwrite an existing target.
+- **Exit analyzer** persists an open prefix as interrupted and schedules server
+  shutdown only after saving succeeds. On failure the page remains online,
+  stepping stays fenced, and recovery actions remain available.
+
+At frame zero, Reset, scenario changes, and effective movement-scale changes
+replace the empty retaining draft without writing an artifact. After one or
+more captured transitions, those episode-replacement actions require an
+explicit dialog that names the discarded prefix and replacement intent.
+Cancelling preserves the current recording. Confirming marks the old recorder
+discarded and begins a fresh metric-complete frame-zero episode at the same
+destination. Ordinary draft edits and submissions remain usable while the
+recorder is actively capturing; all scientific controls are fenced after
+finalization or a persistence failure.
+
+Completion truth is not inferred from the UI:
+
+- terminal or declared-horizon capture is `complete` (including a truncation
+  flag that occurs exactly at the declared horizon);
+- early Finish is `partial` with `user_finish_and_review`;
+- browser Exit, `Ctrl-C`, and early environment truncation are `interrupted`
+  with their stable cause;
+- action/policy construction, simulation, canonical capture, and post-capture
+  validation failures are `failed` with their exact CP3 failure origin;
+- metric-reducer processing failure is tracked separately from physical
+  rollout completion and is redacted to an audience-safe reason in actor POV.
+
+`Ctrl-C` runs one lock-serialized graceful close before the loopback server is
+torn down. If ordinary publication fails, it retries the same bytes and then
+attempts a deterministic, no-clobber sibling named
+`<stem>.recovery-<digest-prefix>.marlbg-replay.json`; the terminal prints the
+host-only saved path. A second `Ctrl-C`, `SIGKILL`, power loss, storage failure
+that also prevents the recovery sibling, and browser-tab closure are outside
+the durability guarantee. Closing a tab alone never stops Python.
 
 ## Focus and controls
 

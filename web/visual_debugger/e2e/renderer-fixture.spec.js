@@ -8,7 +8,7 @@ import {
 import { startDebugger, stopDebugger } from "./support/live-debugger.js";
 import {
   loadRendererFixture,
-  syntheticDebuggerFrame,
+  syntheticDebuggerPresentationFrame,
   syntheticDebuggerWireFrame,
 } from "./support/renderer-fixture.js";
 
@@ -35,10 +35,10 @@ test.beforeAll(async () => {
   ]);
   serverProcess = started.process;
   debuggerUrl = started.url;
-  syntheticFrame = syntheticDebuggerFrame(fixture);
+  syntheticFrame = syntheticDebuggerPresentationFrame(fixture);
   syntheticWireFrame = syntheticDebuggerWireFrame(fixture);
   syntheticPovWireFrame = syntheticDebuggerWireFrame(povFixture);
-  canonicalGrammarFrame = syntheticDebuggerFrame(grammarFixture);
+  canonicalGrammarFrame = syntheticDebuggerPresentationFrame(grammarFixture);
   canonicalGrammarWireFrame = syntheticDebuggerWireFrame(grammarFixture);
   expect(syntheticFrame).toMatchObject({
     schema_version: 2,
@@ -46,6 +46,10 @@ test.beforeAll(async () => {
   });
   expect(syntheticWireFrame).not.toHaveProperty("scene");
   expect(syntheticWireFrame).not.toHaveProperty("event_batch");
+  expect(syntheticWireFrame).not.toHaveProperty("simulator_step");
+  expect(syntheticWireFrame).not.toHaveProperty("transition_id");
+  expect(syntheticFrame).toHaveProperty("scene");
+  expect(syntheticFrame).toHaveProperty("event_batch");
   expect(syntheticWireFrame.projection).toMatchObject({ schema_version: 2 });
 });
 

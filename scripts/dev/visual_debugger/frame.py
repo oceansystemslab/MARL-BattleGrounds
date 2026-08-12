@@ -44,6 +44,7 @@ from scripts.dev.visual_debugger.protocol import (
     PendingActionCardV1,
     PendingSubmissionScope,
     Preset,
+    RecordingStatusV1,
     ResearcherHudFrameV2,
     ResearcherLiveDebuggerFrameV2,
     ScenarioMetadataV1,
@@ -55,6 +56,20 @@ from scripts.dev.visual_debugger.protocol import (
 from scripts.dev.visual_debugger.scenarios import get_scenario, list_scenarios
 
 type LiveDebuggerFrame = ResearcherLiveDebuggerFrameV2 | ActorPovLiveDebuggerFrameV2
+
+
+def _actor_pov_recording_status(
+    status: RecordingStatusV1 | None,
+) -> RecordingStatusV1 | None:
+    """Project reducer-processing closeout into one audience-safe stable reason."""
+    if status is None or status.completion_reason != "evaluation_processing_failure":
+        return status
+    return RecordingStatusV1.model_validate(
+        {
+            **status.model_dump(mode="python"),
+            "completion_reason": "evaluation_unavailable",
+        }
+    )
 
 
 def _scenario_option(name: str) -> ScenarioOptionV1:
@@ -663,6 +678,7 @@ def build_debugger_frame(
     view_mode: ViewMode,
     preset: Preset,
     include_stress: bool,
+    recording_status: RecordingStatusV1 | None = None,
 ) -> LiveDebuggerFrame:
     """Build one audience-exact frame from canonical evaluation records."""
     context = session.evaluation_context
@@ -707,6 +723,7 @@ def build_debugger_frame(
             ),
             preset=preset,
             terminal=terminal,
+            recording=recording_status,
             scenario=_scenario_metadata(session),
             available_scenarios=tuple(
                 _scenario_option(scenario.name)
@@ -735,6 +752,7 @@ def build_debugger_frame(
         simulator_step_count=frame.simulator_step_count,
         preset=preset,
         terminal=terminal,
+        recording=_actor_pov_recording_status(recording_status),
         incoming_pov_transition_id=pov_projection.incoming_transition_id,
         projection=pov_projection,
         hud=_build_pov_hud(session, slice_, revision=revision),

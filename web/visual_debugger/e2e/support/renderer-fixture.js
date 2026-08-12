@@ -84,12 +84,14 @@ export function syntheticDebuggerWireFrame(fixture) {
 }
 
 /**
- * Pass the Python-validated production V2 fixture envelope through the same
- * strict normalization boundary used for loopback API responses.
+ * Build a presentation-only view of the Python-validated production V2 fixture.
+ * The returned object contains browser-owned aliases such as `scene` and
+ * `event_batch`; it is for local assertions only and must never be serialized
+ * into an intercepted HTTP response. Use `syntheticDebuggerWireFrame` for that.
  *
  * @param {Record<string, any>} fixture
  * @returns {Record<string, any>}
  */
-export function syntheticDebuggerFrame(fixture) {
+export function syntheticDebuggerPresentationFrame(fixture) {
   return normalizeLiveDebuggerFrameV2(syntheticDebuggerWireFrame(fixture));
 }

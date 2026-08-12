@@ -6,10 +6,13 @@ import json
 import stat
 import subprocess
 import sys
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import FrozenInstanceError, dataclass
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
+from pydantic import BaseModel
 from tests.evaluation_fixtures import (
     CapturedEvaluationTrajectory,
     captured_evaluation_trajectory,
@@ -37,6 +40,8 @@ from marl_battlegrounds.evaluation.replay_io import (
     METRIC_REPORT_FILE_SUFFIX_V1,
     REPLAY_FILE_SUFFIX_V1,
     LoadedReplayBundleV1,
+    PreparedReplayBundleV1,
+    ReplayBundleDestinationV1,
     ReplayIOErrorCodeV1,
     ReplayLoadError,
     ReplaySaveError,
@@ -44,6 +49,9 @@ from marl_battlegrounds.evaluation.replay_io import (
     canonical_replay_json_bytes_v1,
     load_replay_artifact_v1,
     load_replay_bundle_v1,
+    preflight_replay_bundle_destination_v1,
+    prepare_replay_bundle_v1,
+    publish_prepared_replay_bundle_v1,
     save_replay_bundle_v1,
 )
 
@@ -214,6 +222,394 @@ def test_canonical_bytes_are_exact_and_save_load_save_is_stable(
 
     assert second_path.read_bytes() == first_path.read_bytes()
     assert _metric_path(second_directory).read_bytes() == metric_bytes
+
+
+def test_prepared_bundle_freezes_validated_models_and_exact_canonical_bytes(
+    replay_io_case: _ReplayIoCase,
+) -> None:
+    prepared = prepare_replay_bundle_v1(replay_io_case.bundle)
+    replay_bytes = canonical_replay_json_bytes_v1(replay_io_case.bundle.replay)
+    metric_report_bytes = canonical_metric_report_artifact_json_bytes_v1(
+        replay_io_case.bundle.metric_report_artifact
+    )
+
+    assert type(prepared) is PreparedReplayBundleV1
+    assert prepared.bundle is replay_io_case.bundle
+    assert type(prepared.replay_json_bytes) is bytes
+    assert type(prepared.metric_report_json_bytes) is bytes
+    assert prepared.replay_json_bytes == replay_bytes
+    assert prepared.metric_report_json_bytes == metric_report_bytes
+    assert prepared.replay_byte_length == len(replay_bytes)
+    assert prepared.metric_report_byte_length == len(metric_report_bytes)
+    assert prepared.replay_payload_sha256 == sha256(replay_bytes).hexdigest()
+    assert (
+        prepared.metric_report_payload_sha256 == sha256(metric_report_bytes).hexdigest()
+    )
+    with pytest.raises(FrozenInstanceError):
+        prepared.replay_byte_length = 0  # pyright: ignore[reportAttributeAccessIssue]
+
+
+def test_prepared_bundle_cache_fields_cannot_be_supplied_or_forged(
+    replay_io_case: _ReplayIoCase,
+) -> None:
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        PreparedReplayBundleV1(
+            bundle=replay_io_case.bundle,
+            replay_json_bytes=b"unrelated replay bytes",  # pyright: ignore[reportCallIssue]
+        )
+
+
+def test_preparation_serializes_each_validated_bundle_member_exactly_once(
+    replay_io_case: _ReplayIoCase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_canonical_json_bytes = replay_io.canonical_json_bytes
+    serialized: list[object] = []
+
+    def tracked_canonical_json_bytes(
+        value: BaseModel | Mapping[str, object],
+    ) -> bytes:
+        serialized.append(value)
+        return real_canonical_json_bytes(value)
+
+    monkeypatch.setattr(
+        replay_io,
+        "canonical_json_bytes",
+        tracked_canonical_json_bytes,
+    )
+
+    prepared = prepare_replay_bundle_v1(replay_io_case.bundle)
+
+    assert serialized == [
+        replay_io_case.bundle.replay,
+        replay_io_case.bundle.metric_report_artifact,
+    ]
+    assert prepared.replay_json_bytes == real_canonical_json_bytes(
+        replay_io_case.bundle.replay
+    )
+    assert prepared.metric_report_json_bytes == real_canonical_json_bytes(
+        replay_io_case.bundle.metric_report_artifact
+    )
+
+
+def test_one_prepared_bundle_publishes_byte_identical_save_as_destinations(
+    replay_io_case: _ReplayIoCase,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = prepare_replay_bundle_v1(replay_io_case.bundle)
+    first_directory = tmp_path / "first"
+    second_directory = tmp_path / "second"
+    first_directory.mkdir()
+    second_directory.mkdir()
+    destinations = (
+        preflight_replay_bundle_destination_v1(_replay_path(first_directory)),
+        preflight_replay_bundle_destination_v1(_replay_path(second_directory)),
+    )
+    published_cached_objects: list[bool] = []
+    real_publish = replay_io._publish_bytes_no_clobber  # pyright: ignore[reportPrivateUsage]
+
+    def tracked_publish(
+        target: Path,
+        payload: bytes,
+        *,
+        existing_code: ReplayIOErrorCodeV1,
+        parent_descriptor: int | None = None,
+    ) -> None:
+        expected_payload = (
+            prepared.replay_json_bytes
+            if target.name.endswith(REPLAY_FILE_SUFFIX_V1)
+            else prepared.metric_report_json_bytes
+        )
+        published_cached_objects.append(payload is expected_payload)
+        real_publish(
+            target,
+            payload,
+            existing_code=existing_code,
+            parent_descriptor=parent_descriptor,
+        )
+
+    def forbid_reserialization(*args: object, **kwargs: object) -> bytes:
+        del args, kwargs
+        raise AssertionError("prepared publication must not reserialize")
+
+    monkeypatch.setattr(replay_io, "_publish_bytes_no_clobber", tracked_publish)
+    monkeypatch.setattr(replay_io, "canonical_json_bytes", forbid_reserialization)
+
+    saved = tuple(
+        publish_prepared_replay_bundle_v1(prepared, destination)
+        for destination in destinations
+    )
+
+    assert published_cached_objects == [True, True, True, True]
+    assert all(not result.metric_report_reused for result in saved)
+    for destination in destinations:
+        assert destination.replay_path.read_bytes() == prepared.replay_json_bytes
+        assert destination.metric_report_path.read_bytes() == (
+            prepared.metric_report_json_bytes
+        )
+
+
+def test_destination_preflight_is_structural_and_never_publishes(
+    tmp_path: Path,
+) -> None:
+    replay_path = _replay_path(tmp_path)
+    destination = preflight_replay_bundle_destination_v1(replay_path)
+
+    assert destination == ReplayBundleDestinationV1(
+        replay_path=replay_path,
+        metric_report_path=_metric_path(tmp_path),
+    )
+    assert list(tmp_path.iterdir()) == []
+
+    orphan_bytes = b"structural preflight does not parse an orphan"
+    _metric_path(tmp_path).write_bytes(orphan_bytes)
+    assert preflight_replay_bundle_destination_v1(replay_path) == destination
+    assert not replay_path.exists()
+    assert _metric_path(tmp_path).read_bytes() == orphan_bytes
+
+    with pytest.raises(ReplaySaveError) as suffix_error:
+        preflight_replay_bundle_destination_v1(tmp_path / "episode.json")
+    assert suffix_error.value.code == "invalid_filename"
+
+    missing_parent = tmp_path / "missing" / replay_path.name
+    with pytest.raises(ReplaySaveError) as parent_error:
+        preflight_replay_bundle_destination_v1(missing_parent)
+    assert parent_error.value.code == "missing_parent"
+    assert not missing_parent.parent.exists()
+
+
+def test_destination_preflight_rejects_existing_and_symlink_targets(
+    tmp_path: Path,
+) -> None:
+    existing_path = _replay_path(tmp_path, stem="existing")
+    existing_bytes = b"existing replay"
+    existing_path.write_bytes(existing_bytes)
+    with pytest.raises(ReplaySaveError) as existing_error:
+        preflight_replay_bundle_destination_v1(existing_path)
+    assert existing_error.value.code == "replay_target_exists"
+    assert existing_path.read_bytes() == existing_bytes
+    assert not _metric_path(tmp_path, stem="existing").exists()
+
+    real_directory = tmp_path / "real"
+    real_directory.mkdir()
+    parent_link = tmp_path / "parent-link"
+    parent_link.symlink_to(real_directory, target_is_directory=True)
+    with pytest.raises(ReplaySaveError) as parent_link_error:
+        preflight_replay_bundle_destination_v1(_replay_path(parent_link))
+    assert parent_link_error.value.code == "path_is_symlink"
+    assert list(real_directory.iterdir()) == []
+
+    symlink_path = _replay_path(tmp_path, stem="symlink")
+    symlink_path.symlink_to(existing_path)
+    with pytest.raises(ReplaySaveError) as symlink_error:
+        preflight_replay_bundle_destination_v1(symlink_path)
+    assert symlink_error.value.code == "path_is_symlink"
+    assert existing_path.read_bytes() == existing_bytes
+
+
+def test_target_created_after_preflight_wins_without_sidecar_or_clobber(
+    replay_io_case: _ReplayIoCase,
+    tmp_path: Path,
+) -> None:
+    prepared = prepare_replay_bundle_v1(replay_io_case.bundle)
+    destination = preflight_replay_bundle_destination_v1(_replay_path(tmp_path))
+    racing_bytes = b"racing replay target"
+    destination.replay_path.write_bytes(racing_bytes)
+
+    with pytest.raises(ReplaySaveError) as caught:
+        publish_prepared_replay_bundle_v1(prepared, destination)
+
+    assert caught.value.code == "replay_target_exists"
+    assert destination.replay_path.read_bytes() == racing_bytes
+    assert not destination.metric_report_path.exists()
+
+
+def test_prepared_retry_reuses_orphan_without_reserialization(
+    replay_io_case: _ReplayIoCase,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = prepare_replay_bundle_v1(replay_io_case.bundle)
+    destination = preflight_replay_bundle_destination_v1(_replay_path(tmp_path))
+    real_publish = replay_io._publish_bytes_no_clobber  # pyright: ignore[reportPrivateUsage]
+    fail_replay_once = True
+
+    def fail_first_replay_publish(
+        target: Path,
+        payload: bytes,
+        *,
+        existing_code: ReplayIOErrorCodeV1,
+        parent_descriptor: int | None = None,
+    ) -> None:
+        nonlocal fail_replay_once
+        if target == destination.replay_path and fail_replay_once:
+            fail_replay_once = False
+            raise ReplaySaveError(
+                "atomic_publish_failed",
+                path=target,
+                detail="injected replay publication failure",
+            )
+        real_publish(
+            target,
+            payload,
+            existing_code=existing_code,
+            parent_descriptor=parent_descriptor,
+        )
+
+    monkeypatch.setattr(
+        replay_io,
+        "_publish_bytes_no_clobber",
+        fail_first_replay_publish,
+    )
+    with pytest.raises(ReplaySaveError) as first_attempt:
+        publish_prepared_replay_bundle_v1(prepared, destination)
+    assert first_attempt.value.code == "atomic_publish_failed"
+    assert not destination.replay_path.exists()
+    assert destination.metric_report_path.read_bytes() == (
+        prepared.metric_report_json_bytes
+    )
+
+    def forbid_reserialization(*args: object, **kwargs: object) -> bytes:
+        del args, kwargs
+        raise AssertionError("retry must use the cached prepared bytes")
+
+    monkeypatch.setattr(replay_io, "canonical_json_bytes", forbid_reserialization)
+    saved = publish_prepared_replay_bundle_v1(prepared, destination)
+
+    assert saved.metric_report_reused is True
+    assert destination.replay_path.read_bytes() == prepared.replay_json_bytes
+    assert destination.metric_report_path.read_bytes() == (
+        prepared.metric_report_json_bytes
+    )
+
+
+def test_verification_retry_never_publishes_an_absent_destination(
+    replay_io_case: _ReplayIoCase,
+    tmp_path: Path,
+) -> None:
+    prepared = prepare_replay_bundle_v1(replay_io_case.bundle)
+    destination = preflight_replay_bundle_destination_v1(_replay_path(tmp_path))
+
+    with pytest.raises(ReplaySaveError) as caught:
+        publish_prepared_replay_bundle_v1(
+            prepared,
+            destination,
+            verify_existing_replay=True,
+        )
+
+    assert caught.value.code == "replay_publication_verification_failed"
+    assert caught.value.path == destination.replay_path
+    assert not destination.replay_path.exists()
+    assert not destination.metric_report_path.exists()
+
+
+def test_failed_post_publish_verification_reconciles_exact_cached_bytes(
+    replay_io_case: _ReplayIoCase,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = prepare_replay_bundle_v1(replay_io_case.bundle)
+    destination = preflight_replay_bundle_destination_v1(_replay_path(tmp_path))
+    real_read = replay_io._read_bounded_regular_file_at  # pyright: ignore[reportPrivateUsage]
+    verification_reads = 0
+
+    def fail_first_verification_read(
+        parent_descriptor: int,
+        name: str,
+        *,
+        path: Path,
+        max_file_size_bytes: int,
+        error_type: type[ReplayLoadError] | type[ReplaySaveError] = ReplayLoadError,
+        fsync_before_close: bool = False,
+    ) -> bytes:
+        nonlocal verification_reads
+        verification_reads += 1
+        if verification_reads == 1:
+            raise ReplaySaveError(
+                "file_read_failed",
+                path=path,
+                detail="injected post-publication read failure",
+            )
+        return real_read(
+            parent_descriptor,
+            name,
+            path=path,
+            max_file_size_bytes=max_file_size_bytes,
+            error_type=error_type,
+            fsync_before_close=fsync_before_close,
+        )
+
+    monkeypatch.setattr(
+        replay_io,
+        "_read_bounded_regular_file_at",
+        fail_first_verification_read,
+    )
+    with pytest.raises(ReplaySaveError) as first_attempt:
+        publish_prepared_replay_bundle_v1(prepared, destination)
+    assert first_attempt.value.code == "replay_publication_verification_failed"
+    assert destination.replay_path.read_bytes() == prepared.replay_json_bytes
+    assert destination.metric_report_path.read_bytes() == (
+        prepared.metric_report_json_bytes
+    )
+
+    with pytest.raises(ReplaySaveError) as ordinary_retry:
+        publish_prepared_replay_bundle_v1(prepared, destination)
+    assert ordinary_retry.value.code == "replay_target_exists"
+
+    def forbid_reserialization(*args: object, **kwargs: object) -> bytes:
+        del args, kwargs
+        raise AssertionError("verification retry must not reserialize")
+
+    def forbid_republication(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise AssertionError("verification retry must not republish")
+
+    monkeypatch.setattr(replay_io, "canonical_json_bytes", forbid_reserialization)
+    monkeypatch.setattr(
+        replay_io,
+        "_publish_bytes_no_clobber",
+        forbid_republication,
+    )
+    saved = publish_prepared_replay_bundle_v1(
+        prepared,
+        destination,
+        verify_existing_replay=True,
+    )
+
+    assert verification_reads == 3
+    assert saved.metric_report_reused is True
+    assert saved.replay_byte_length == len(prepared.replay_json_bytes)
+    assert saved.metric_report_byte_length == len(prepared.metric_report_json_bytes)
+
+
+@pytest.mark.parametrize("tampered_member", ("replay", "metric_report"))
+def test_verification_retry_requires_both_cached_payloads_to_match(
+    replay_io_case: _ReplayIoCase,
+    tmp_path: Path,
+    tampered_member: str,
+) -> None:
+    prepared = prepare_replay_bundle_v1(replay_io_case.bundle)
+    destination = preflight_replay_bundle_destination_v1(_replay_path(tmp_path))
+    publish_prepared_replay_bundle_v1(prepared, destination)
+    tampered_path = (
+        destination.replay_path
+        if tampered_member == "replay"
+        else destination.metric_report_path
+    )
+    tampered_bytes = b"tampered after an uncertain verification"
+    tampered_path.write_bytes(tampered_bytes)
+
+    with pytest.raises(ReplaySaveError) as caught:
+        publish_prepared_replay_bundle_v1(
+            prepared,
+            destination,
+            verify_existing_replay=True,
+        )
+
+    assert caught.value.code == "replay_publication_verification_failed"
+    assert caught.value.path == tampered_path
+    assert tampered_path.read_bytes() == tampered_bytes
 
 
 def test_relative_parent_traversal_remains_descriptor_bound_and_supported(

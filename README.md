@@ -32,6 +32,24 @@ audience-specific timeline, and never imports or runs the simulator. Use
 `--frame-index`, `--view pov`, and `--pov-slot` to choose the initial recorded
 frame and recipient-safe view.
 
+Record one live browser episode and review the saved result without leaving the
+page:
+
+```bash
+./scripts/dev/run_debug_renderer.sh \
+  --record-replay recordings/episode.marlbg-replay.json
+```
+
+The destination parent must already exist and the replay target must be absent.
+Python retains one canonical evaluation trajectory in memory, performs no
+per-transition file writes, and publishes the replay plus its adjacent metric
+sidecar only when the episode closes. **Finish & Review** saves an open prefix
+and switches the same loopback page, capability, and server process to settled
+read-only replay at frame zero. Terminal or declared-horizon episodes save
+automatically and expose **Review Replay**. Save failures remain online with
+bounded Retry and basename-only Save As recovery; `Ctrl-C` attempts the same
+durable closeout before the server exits.
+
 For a one-frame Matplotlib snapshot instead:
 
 ```bash
@@ -49,7 +67,8 @@ starting the simulator or a browser:
 
 See the [Visual Debugger and Analyzer guide](docs/dev/visual_debugger.md) for
 controls, joint-turn planning, view authorization, scenarios, replay/static
-rendering, visual semantics, troubleshooting, and contributor checks.
+rendering, recording/recovery, visual semantics, troubleshooting, and
+contributor checks.
 
 ## Design and evaluation
 
