@@ -1330,6 +1330,288 @@ test("exact NoSharedObs POV hides metric/processing truth and SharedObs stays so
   await sharedPage.close();
 });
 
+test("Actor POV all-surface scan excludes researcher authority and host secrets", async ({
+  page,
+}) => {
+  const complete = requiredViewer(completeViewer, "complete");
+  const artifactManifest = artifacts;
+  if (!artifactManifest) {
+    throw new Error("Replay artifacts are unavailable for the POV isolation scan.");
+  }
+
+  await openReplay(page, complete.url);
+  await installFirstFrame(page);
+  if ((await page.locator("#view-select").inputValue()) !== "researcher") {
+    const researcherResponse = nextReplayResponse(page);
+    await page.locator("#view-select").selectOption("researcher");
+    expect((await researcherResponse).status()).toBe(200);
+  }
+  const next = await clickReplayCommand(page, "#replay-next-button");
+  expect(next.frame.cursor.frame_index).toBe(1);
+  await expectReplayFrameIndex(page, 1);
+  if (await page.locator("#motion-skip-button").isEnabled()) {
+    await page.locator("#motion-skip-button").click();
+  }
+  const researcherFrame = await currentReplayFrame(page);
+  expect(researcherFrame.frame_kind).toBe("researcher_replay_viewer");
+
+  const povResponse = nextReplayResponse(page);
+  await page.locator("#view-select").selectOption("pov");
+  expect((await povResponse).status()).toBe(200);
+  await expect(page.locator("#view-select")).toHaveValue("pov");
+  await expectReplayFrameIndex(page, 1);
+  const technicalResponse = nextReplayResponse(page);
+  await page.locator("#preset-select").selectOption("debug");
+  expect((await technicalResponse).status()).toBe(200);
+  await expect(page.locator("html")).toHaveAttribute("data-preset", "debug");
+  await page
+    .locator("details.diagnostics")
+    .last()
+    .evaluate((details) => {
+      if (!(details instanceof HTMLDetailsElement)) {
+        throw new TypeError("Technical frame details are unavailable.");
+      }
+      details.open = true;
+    });
+
+  const [povFrame, povTimeline, capabilityToken] = await Promise.all([
+    currentReplayFrame(page),
+    currentReplayTimeline(page),
+    page.evaluate(() =>
+      window.sessionStorage.getItem("marl-battlegrounds.debugger-token"),
+    ),
+  ]);
+  expect(povFrame.frame_kind).toBe("actor_pov_replay_viewer");
+  expect(povTimeline.timeline_kind).toBe("actor_pov");
+  expect(capabilityToken).toMatch(/^[A-Za-z0-9_-]+$/u);
+
+  /** @param {unknown} value @param {string} field @returns {unknown[]} */
+  const recursiveFieldValues = (value, field) => {
+    /** @type {unknown[]} */
+    const found = [];
+    /** @param {unknown} candidate */
+    const visit = (candidate) => {
+      if (Array.isArray(candidate)) {
+        candidate.forEach(visit);
+        return;
+      }
+      if (!candidate || typeof candidate !== "object") {
+        return;
+      }
+      for (const [key, child] of Object.entries(candidate)) {
+        if (key === field) {
+          found.push(child);
+        }
+        visit(child);
+      }
+    };
+    visit(value);
+    return found;
+  };
+  /** @param {unknown} value @returns {Set<string>} */
+  const recursiveKeys = (value) => {
+    /** @type {Set<string>} */
+    const found = new Set();
+    /** @param {unknown} candidate */
+    const visit = (candidate) => {
+      if (Array.isArray(candidate)) {
+        candidate.forEach(visit);
+        return;
+      }
+      if (!candidate || typeof candidate !== "object") {
+        return;
+      }
+      for (const [key, child] of Object.entries(candidate)) {
+        found.add(key);
+        visit(child);
+      }
+    };
+    visit(value);
+    return found;
+  };
+
+  const authorizedPublicIds = new Set(
+    recursiveFieldValues([povFrame, povTimeline], "public_agent_id").filter(
+      (value) => typeof value === "string",
+    ),
+  );
+  expect(authorizedPublicIds.has(povFrame.public_agent_id)).toBe(true);
+  /** @type {Array<Record<string, any>>} */
+  const researcherAgents = researcherFrame.projection.scene.agents;
+  const hiddenAgents = researcherAgents.filter(
+    (agent) => !authorizedPublicIds.has(agent.public_agent_id),
+  );
+  expect(hiddenAgents.length).toBeGreaterThan(0);
+  const hiddenSlots = new Set(hiddenAgents.map((agent) => agent.global_slot));
+  const hiddenPublicIds = hiddenAgents.map((agent) => agent.public_agent_id);
+  const researcherEventIds = recursiveFieldValues(
+    researcherFrame.projection.incoming_events,
+    "event_id",
+  ).filter((value) => typeof value === "string");
+  expect(researcherEventIds.length).toBeGreaterThan(0);
+
+  const selfRoster = page.locator("#roster .roster-row").first();
+  await expect(selfRoster).toBeVisible();
+  await selfRoster.hover();
+  await expect(page.locator("#visual-tooltip")).toBeVisible();
+  const tooltipSnapshot = await page.locator("#visual-tooltip").evaluate((root) => ({
+    text: root.textContent ?? "",
+    attributes: [...root.querySelectorAll("*")].flatMap((element) =>
+      [...element.attributes].map((attribute) => ({
+        name: attribute.name,
+        value: attribute.value,
+      })),
+    ),
+  }));
+  await selfRoster.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#semantic-inspector")).toBeVisible();
+  await expect(page.locator("#event-feed .event-item")).not.toHaveCount(0);
+
+  const surfaces = await page.evaluate(() => {
+    /** @param {Element} element */
+    const isVisible = (element) => {
+      if (element.closest("[hidden], [aria-hidden='true']")) return false;
+      const style = getComputedStyle(element);
+      return (
+        style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        element.getClientRects().length > 0
+      );
+    };
+    /** @param {Element} root */
+    const snapshot = (root) => ({
+      text: root.textContent ?? "",
+      attributes: [root, ...root.querySelectorAll("*")].flatMap((element) =>
+        [...element.attributes].map((attribute) => ({
+          name: attribute.name,
+          value: attribute.value,
+        })),
+      ),
+    });
+    /** @param {string} selector @returns {Element} */
+    const requiredRoot = (selector) => {
+      const root = document.querySelector(selector);
+      if (!root) {
+        throw new Error(`Required isolation surface is missing: ${selector}`);
+      }
+      return root;
+    };
+    const visibleElements = [
+      document.body,
+      ...document.body.querySelectorAll("*"),
+    ].filter(isVisible);
+    const visibleAttributes = visibleElements.flatMap((element) =>
+      [...element.attributes].map((attribute) => ({
+        name: attribute.name,
+        value: attribute.value,
+      })),
+    );
+    const descriptorText = visibleElements
+      .filter((element) => element.hasAttribute("data-tooltip-owner"))
+      .flatMap((element) => [
+        element.getAttribute("aria-label") ?? "",
+        element.getAttribute("aria-description") ?? "",
+      ])
+      .join("\n");
+    return {
+      normalText: document.body.innerText,
+      visibleAttributes,
+      descriptorText,
+      feed: snapshot(requiredRoot("#event-feed")),
+      inspector: snapshot(requiredRoot("#semantic-inspector")),
+      technical: snapshot(requiredRoot("#diagnostics-card")),
+      technicalJson: [...document.querySelectorAll(".technical-json")].map(
+        (node) => node.textContent ?? "",
+      ),
+    };
+  });
+
+  const allAttributes = [
+    ...surfaces.visibleAttributes,
+    ...tooltipSnapshot.attributes,
+    ...surfaces.feed.attributes,
+    ...surfaces.inspector.attributes,
+    ...surfaces.technical.attributes,
+  ];
+  const semanticSurfaceText = [
+    surfaces.normalText,
+    surfaces.descriptorText,
+    tooltipSnapshot.text,
+    surfaces.feed.text,
+    surfaces.inspector.text,
+    surfaces.technical.text,
+    ...allAttributes
+      .filter(({ name }) => name.startsWith("aria-") || name === "title")
+      .map(({ value }) => value),
+  ].join("\n");
+  const completeSurfaceBytes = JSON.stringify({
+    surfaces,
+    tooltipSnapshot,
+  });
+  const povWireBytes = JSON.stringify([povFrame, povTimeline]);
+
+  for (const authorizedId of authorizedPublicIds) {
+    if (authorizedId === povFrame.public_agent_id) {
+      expect(completeSurfaceBytes).toContain(authorizedId);
+    }
+  }
+  for (const forbiddenValue of [
+    ...hiddenPublicIds,
+    ...researcherEventIds,
+    artifactManifest.outputDirectory,
+    artifactManifest.complete,
+    artifactManifest.missingMetric,
+    capabilityToken,
+  ]) {
+    if (typeof forbiddenValue === "string" && forbiddenValue.length > 0) {
+      expect(completeSurfaceBytes).not.toContain(forbiddenValue);
+      expect(povWireBytes).not.toContain(forbiddenValue);
+    }
+  }
+  for (const slot of hiddenSlots) {
+    expect(semanticSurfaceText).not.toMatch(
+      new RegExp(`\\b(?:global[ _-]?slot|slot|id_)\\s*[:#= -]?\\s*${slot}\\b`, "iu"),
+    );
+  }
+  const hiddenSlotAttributes = allAttributes.filter(
+    ({ name, value }) =>
+      /slot/iu.test(name) && /^\d+$/u.test(value) && hiddenSlots.has(Number(value)),
+  );
+  expect(hiddenSlotAttributes).toEqual([]);
+
+  for (const researcherOnlyPhrase of [
+    "PRIVILEGED RESEARCHER",
+    "Exact Class Mechanics",
+    "Observer visibility",
+    "Status source evidence",
+    "Researcher selection",
+  ]) {
+    expect(semanticSurfaceText).not.toContain(researcherOnlyPhrase);
+  }
+  const actorKeys = recursiveKeys([povFrame, povTimeline]);
+  for (const researcherOnlyKey of [
+    "agent_phase_trajectories",
+    "aura_fields",
+    "class_mechanics",
+    "configured_active_by_global_slot",
+    "event_id",
+    "incoming_event_ids",
+    "metric_report_reference",
+    "observer_visibility",
+    "processing",
+    "public_agent_id_by_global_slot",
+    "status_source_evidence",
+  ]) {
+    expect(actorKeys.has(researcherOnlyKey), researcherOnlyKey).toBe(false);
+  }
+  expect(surfaces.technical.text).toContain("actor_pov_replay_viewer");
+  expect(surfaces.normalText).toContain("actor_pov_replay_viewer");
+  expect(surfaces.technicalJson).toEqual([]);
+  expect(completeSurfaceBytes).not.toMatch(/(?:token|secret|password)\s*[:=]/iu);
+  expectNoBrowserErrors(page);
+});
+
 test("Exit flushes its replay response before clean server shutdown", async ({
   page,
 }) => {

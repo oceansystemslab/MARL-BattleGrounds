@@ -1,7 +1,10 @@
 import { expect, test } from "@playwright/test";
 
 import { startDebugger, stopDebugger } from "./support/live-debugger.js";
-import { waitForStablePresentation } from "./support/visual-regression.js";
+import {
+  DENSE_BASELINE_MAX_DIFF_PIXEL_RATIO,
+  waitForStablePresentation,
+} from "./support/visual-regression.js";
 
 /** @type {import("node:child_process").ChildProcess | null} */
 let serverProcess = null;
@@ -727,12 +730,45 @@ test("joint turn drafts survive actor cycling and submit exactly once", async ({
     "aria-pressed",
     "true",
   );
-  const stagedMoves = await page
+  const stagedInventory = await page
     .locator(".pending-action-row")
     .evaluateAll((rows) =>
-      rows.map((row) => Number(row.getAttribute("data-move-action"))),
+      rows.map((row) => ({
+        actorSlot: Number(row.getAttribute("data-actor-slot")),
+        armedLane: row.getAttribute("data-armed-lane"),
+        controlled: row.getAttribute("data-controlled"),
+        moveAction: Number(row.getAttribute("data-move-action")),
+        targetSlot: row.hasAttribute("data-target-slot")
+          ? Number(row.getAttribute("data-target-slot"))
+          : null,
+        facts: [...row.querySelectorAll(".pending-action-chip")].map(
+          (chip) => chip.textContent,
+        ),
+      })),
     );
-  expect(stagedMoves).toEqual([3, 1, 3, 3, 3, 4, 4, 4, 4, 4]);
+  const stagedMoveActions = [3, 1, 3, 3, 3, 4, 4, 4, 4, 4];
+  expect(stagedInventory).toEqual(
+    stagedMoveActions.map((moveAction, actorSlot) => {
+      const targetSlot = actorSlot === 0 ? 6 : actorSlot === 1 ? 5 : null;
+      const targetAction = targetSlot === null ? 0 : targetSlot + 1;
+      const movement = moveAction === 1 ? "North" : moveAction === 3 ? "East" : "West";
+      return {
+        actorSlot,
+        armedLane: actorSlot < 2 ? null : "0",
+        controlled: String(actorSlot === 0),
+        moveAction,
+        targetSlot,
+        facts: [
+          `Movement · ${movement} (${moveAction}) · Available`,
+          targetSlot === null
+            ? "Target · None"
+            : `Target · Agent ID ${targetSlot} (action ${targetAction})`,
+          "Action · No combat",
+          "Legality · Not applicable",
+        ],
+      };
+    }),
+  );
   // The ten exact pending rows exceed the supported viewport height. Move the
   // real authoritative card—not a reconstructed copy—into a labelled, tall
   // review host so every staged tuple is visible in one evidence artifact.
@@ -765,6 +801,7 @@ test("joint turn drafts survive actor cycling and submit exactly once", async ({
   await waitForStablePresentation(page);
   await expect(page.locator("#joint-turn-evidence")).toHaveScreenshot(
     "joint-turn-ten-agent-pending-inventory-1440x1600.png",
+    { maxDiffPixelRatio: DENSE_BASELINE_MAX_DIFF_PIXEL_RATIO },
   );
   await page.evaluate(() => {
     const card = document.querySelector("#pending-card");

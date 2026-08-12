@@ -2,6 +2,11 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import { normalizeLiveDebuggerFrameV2 } from "../../src/frame-normalizer.js";
+import {
+  joinReplayFrameAndTimeline,
+  normalizeReplayTimelineV1,
+  normalizeReplayViewerFrameV1,
+} from "../../src/replay-frame-normalizer.js";
 import { REPOSITORY_ROOT } from "./live-debugger.js";
 
 const execFileAsync = promisify(execFile);
@@ -138,4 +143,55 @@ export function syntheticDebuggerWireFrame(fixture) {
  */
 export function syntheticDebuggerPresentationFrame(fixture) {
   return normalizeLiveDebuggerFrameV2(syntheticDebuggerWireFrame(fixture));
+}
+
+/**
+ * Return one fixture-owned live/replay transport pair after both production
+ * browser boundaries and the replay frame/timeline join accept it. These are
+ * existing protocol envelopes around one synthetic authorized projection;
+ * this helper does not fabricate a replay from a live frame.
+ *
+ * @param {Record<string, any>} fixture
+ * @returns {{
+ *   audience: "researcher" | "agent_pov",
+ *   liveFrame: Record<string, any>,
+ *   replayFrame: Record<string, any>,
+ *   replayTimeline: Record<string, any>,
+ * }}
+ */
+export function syntheticFixturePresentationPair(fixture) {
+  const pair = fixture?.synthetic_presentation_pair;
+  if (!pair || typeof pair !== "object" || Array.isArray(pair)) {
+    throw new Error("Renderer fixture has no synthetic presentation pair.");
+  }
+  const keys = Object.keys(pair).sort();
+  if (
+    keys.join("|") !==
+    ["audience", "live_frame", "replay_frame", "replay_timeline"].sort().join("|")
+  ) {
+    throw new Error("Synthetic presentation pair has an invalid fixture shape.");
+  }
+  if (pair.audience !== fixture.audience) {
+    throw new Error("Synthetic presentation pair audience does not match its fixture.");
+  }
+  const liveFrame = syntheticDebuggerWireFrame({
+    audience: pair.audience,
+    scene: pair.live_frame?.projection?.scene,
+    live_frame: pair.live_frame,
+  });
+  const replayFrame = normalizeReplayViewerFrameV1(pair.replay_frame);
+  const replayTimeline = normalizeReplayTimelineV1(pair.replay_timeline);
+  joinReplayFrameAndTimeline(replayFrame, replayTimeline);
+  if (
+    replayFrame.projection.scene.episode_id !== liveFrame.projection.scene.episode_id ||
+    replayFrame.projection.scene.frame_index !== liveFrame.projection.scene.frame_index
+  ) {
+    throw new Error("Synthetic live and replay projections do not share one epoch.");
+  }
+  return Object.freeze({
+    audience: pair.audience,
+    liveFrame,
+    replayFrame: pair.replay_frame,
+    replayTimeline: pair.replay_timeline,
+  });
 }

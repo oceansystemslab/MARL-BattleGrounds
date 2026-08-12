@@ -5,14 +5,19 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Barrier
-from typing import cast
+from types import SimpleNamespace
+from typing import Literal, cast
 
+import jax
 import pytest
+import scripts.dev.visual_debugger.control as live_control_module
 import scripts.dev.visual_debugger.replay_service as replay_service_module
+import scripts.dev.visual_debugger.static_renderer as static_renderer_module
 from scripts.dev.visual_debugger.replay_protocol import (
     ACTOR_POV_METRIC_REPORT_AVAILABILITY_V1,
     ACTOR_POV_PROCESSING_DISCLOSURE_V1,
@@ -48,6 +53,10 @@ from tests.evaluation_fixtures import (
     captured_evaluation_trajectory,
 )
 
+import marl_battlegrounds.core.env as core_env_module
+import marl_battlegrounds.core.geometry as core_geometry_module
+import marl_battlegrounds.evaluation.capture as evaluation_capture_module
+import marl_battlegrounds.evaluation.events as evaluation_events_module
 from marl_battlegrounds.evaluation.metrics import (
     CompletionState,
     EvaluationEpisodeCompletionV1,
@@ -68,11 +77,20 @@ from marl_battlegrounds.evaluation.models import (
     canonical_json_bytes,
 )
 from marl_battlegrounds.evaluation.replay import (
+    ReplayBundleV1,
     RuntimeProvenanceV1,
     build_replay_bundle_v1,
 )
-from marl_battlegrounds.evaluation.replay_io import LoadedReplayBundleV1
-from marl_battlegrounds.rendering.scene import StatusSourceEvidenceIndexV2
+from marl_battlegrounds.evaluation.replay_io import (
+    LoadedReplayBundleV1,
+    load_replay_bundle_v1,
+    save_replay_bundle_v1,
+)
+from marl_battlegrounds.rendering.scene import (
+    BattlefieldSceneV2,
+    StatusSourceEvidenceIndexV2,
+    VisualEventBatchV2,
+)
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
@@ -639,6 +657,16 @@ def test_inactive_actor_requests_fail_closed_without_state_change(
     with pytest.raises(ValueError, match="configured-active"):
         ReplayViewerService(
             service_cases.complete.bundle,
+            reference_global_slot=3,
+        )
+    with pytest.raises(ValueError, match="configured-active"):
+        ReplayViewerService(
+            service_cases.complete.bundle,
+            reference_global_slot=cast(int, True),
+        )
+    with pytest.raises(ValueError, match="configured-active"):
+        ReplayViewerService(
+            service_cases.complete.bundle,
             pov_global_slot=3,
         )
     with pytest.raises(ValueError, match="configured-active"):
@@ -666,6 +694,62 @@ def test_inactive_actor_requests_fail_closed_without_state_change(
     assert _error(invalid_selection).latest_frame == before
     assert service.revision == 0
     assert service.current_frame() == before
+
+
+@pytest.mark.parametrize("invalid_lane", (True, -1, 2, "1"))
+def test_initial_researcher_lane_requires_exact_domain_and_selection(
+    service_cases: _ServiceCases,
+    invalid_lane: object,
+) -> None:
+    with pytest.raises(ValueError, match="armed_lane"):
+        ReplayViewerService(
+            service_cases.complete.bundle,
+            reference_global_slot=0,
+            selected_global_slot=0,
+            armed_lane=cast(Literal[0, 1], invalid_lane),
+        )
+
+    with pytest.raises(ValueError, match="selected_global_slot"):
+        ReplayViewerService(
+            service_cases.complete.bundle,
+            reference_global_slot=0,
+            armed_lane=0,
+        )
+
+
+def test_explicit_researcher_handoff_lane_clears_on_new_selection(
+    service_cases: _ServiceCases,
+) -> None:
+    service = ReplayViewerService(
+        service_cases.complete.bundle,
+        reference_global_slot=0,
+        selected_global_slot=0,
+        armed_lane=1,
+        viewer_session_id="explicit-researcher-presentation",
+    )
+    initial = cast(ResearcherReplayViewerFrameV1, service.current_frame())
+    initial_legality = initial.projection.scene.next_decision_selected_legality
+    assert initial.projection.scene.selection is not None
+    assert initial.projection.scene.selection.controlled_global_slot == 0
+    assert initial.projection.scene.selection.selected_global_slot == 0
+    assert initial_legality is not None
+    assert initial_legality.armed_lane == 1
+
+    selected = _response(
+        _apply(
+            service,
+            ReplaySelectAgentCommandV1(selected_global_slot=5),
+            command_id="replace-handoff-selection",
+        )
+    ).frame
+    assert isinstance(selected, ResearcherReplayViewerFrameV1)
+    selected_legality = selected.projection.scene.next_decision_selected_legality
+    assert selected.projection.scene.selection is not None
+    assert selected.projection.scene.selection.controlled_global_slot == 0
+    assert selected.projection.scene.selection.selected_global_slot == 5
+    assert selected_legality is not None
+    assert selected_legality.armed_lane is None
+    assert selected_legality.armed_pair_legal is False
 
 
 def test_cursor_generations_and_forward_choreography_are_exact(
@@ -1243,6 +1327,165 @@ def test_outbound_current_frame_is_bounded_and_never_contains_replay_payload(
     assert len(long.model_dump_json()) < len(
         canonical_json_bytes(service_cases.long.bundle.replay)
     )
+
+
+def test_loaded_commands_and_static_render_never_enter_scientific_factories(
+    service_cases: _ServiceCases,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Loaded replay consumers cannot become a second simulator or event source."""
+    source = service_cases.complete.bundle
+    assert source.metric_report_artifact is not None
+    replay_path = tmp_path / "scientific-authority-sentinel.marlbg-replay.json"
+    save_replay_bundle_v1(
+        ReplayBundleV1(
+            replay=source.replay,
+            metric_report_artifact=source.metric_report_artifact,
+        ),
+        replay_path,
+    )
+
+    forbidden_calls: list[str] = []
+
+    def forbidden_factory(label: str) -> Callable[..., object]:
+        def fail(*_args: object, **_kwargs: object) -> object:
+            forbidden_calls.append(label)
+            raise AssertionError(f"loaded replay entered forbidden authority: {label}")
+
+        return fail
+
+    forbidden_seams = (
+        (core_env_module, ("initialize_scenario_state", "reset", "step")),
+        (
+            core_geometry_module,
+            ("project_movement_with_geometry", "has_clear_line_of_sight"),
+        ),
+        (
+            evaluation_capture_module,
+            (
+                "capture_initial_evaluation_frame_v1",
+                "capture_evaluation_transition_unit_v1",
+                "_normalize_reward_v1",
+                "_reconstruct_transition_facts",
+            ),
+        ),
+        (evaluation_events_module, ("decode_evaluation_events_v1",)),
+        (
+            live_control_module,
+            (
+                "create_session",
+                "reset_session",
+                "submit_joint_action",
+                "build_interactive_joint_action",
+                "build_scripted_joint_action",
+                "step",
+                "capture_initial_evaluation_frame_v1",
+                "capture_evaluation_transition_unit_v1",
+            ),
+        ),
+        (jax.random, ("key", "split")),
+    )
+    for module, names in forbidden_seams:
+        for name in names:
+            monkeypatch.setattr(
+                module,
+                name,
+                forbidden_factory(f"{module.__name__}.{name}"),
+            )
+
+    loaded = load_replay_bundle_v1(replay_path, require_metric_report=True)
+    service = ReplayViewerService(
+        loaded,
+        viewer_session_id="cp75-no-second-simulator",
+    )
+    assert isinstance(service.current_frame(), ResearcherReplayViewerFrameV1)
+    assert isinstance(service.current_timeline(), ResearcherReplayTimelineV1)
+
+    advanced = _response(
+        _apply(service, ReplayNextFrameCommandV1(), command_id="sentinel-next")
+    )
+    assert advanced.frame.cursor.frame_index == 1
+    _response(
+        _apply(
+            service,
+            ReplaySetPovActorCommandV1(global_slot=1),
+            command_id="sentinel-choose-pov-actor",
+        )
+    )
+    pov = _response(
+        _apply(
+            service,
+            ReplaySetViewCommandV1(view_mode="pov"),
+            command_id="sentinel-enter-pov",
+        )
+    ).frame
+    assert isinstance(pov, ActorPovReplayViewerFrameV1)
+    assert pov.pov_global_slot == 1
+    assert isinstance(service.current_timeline(), ActorPovReplayTimelineV1)
+
+    switched_actor = _response(
+        _apply(
+            service,
+            ReplaySetPovActorCommandV1(global_slot=0),
+            command_id="sentinel-switch-pov-actor",
+        )
+    ).frame
+    assert isinstance(switched_actor, ActorPovReplayViewerFrameV1)
+    assert switched_actor.pov_global_slot == 0
+    restored = _response(
+        _apply(
+            service,
+            ReplaySetViewCommandV1(view_mode="researcher"),
+            command_id="sentinel-return-researcher",
+        )
+    ).frame
+    assert isinstance(restored, ResearcherReplayViewerFrameV1)
+    selected = _response(
+        _apply(
+            service,
+            ReplaySelectAgentCommandV1(selected_global_slot=1),
+            command_id="sentinel-select-reference",
+        )
+    ).frame
+    assert isinstance(selected, ResearcherReplayViewerFrameV1)
+    assert selected.projection.scene.selection is not None
+    assert selected.projection.scene.selection.selected_global_slot == 1
+
+    rendered: list[tuple[BattlefieldSceneV2, VisualEventBatchV2 | None]] = []
+    show_calls: list[None] = []
+
+    def capture_render(
+        scene: BattlefieldSceneV2,
+        *,
+        event_batch: VisualEventBatchV2 | None = None,
+    ) -> object:
+        rendered.append((scene, event_batch))
+        return object()
+
+    monkeypatch.setattr(
+        static_renderer_module,
+        "_load_pyplot",
+        lambda: SimpleNamespace(show=lambda: show_calls.append(None)),
+    )
+    monkeypatch.setattr(
+        static_renderer_module,
+        "render_scene_geometry",
+        capture_render,
+    )
+    assert (
+        static_renderer_module.run_static_replay_renderer(
+            replay_path=replay_path,
+            frame_index=1,
+            show_ranges=True,
+        )
+        == 0
+    )
+    assert show_calls == [None]
+    assert len(rendered) == 1
+    assert rendered[0][0].frame_index == 1
+    assert rendered[0][1] is not None
+    assert forbidden_calls == []
 
 
 def test_replay_service_import_is_core_jax_policy_and_live_seam_free() -> None:

@@ -393,16 +393,25 @@ class DebuggerService:
         recorder = self._recorder
         if recorder is None or recorder.verified_loaded_bundle is None:
             raise RuntimeError("replay handoff requires a verified recording.")
-        selected_global_slot = (
-            self._session.pending_action.selected_global_target_slot
-            if self._view_mode == "researcher"
-            else None
-        )
+        reference_global_slot: int | None = None
+        selected_global_slot: int | None = None
+        armed_lane: Literal[0, 1] | None = None
+        if self._view_mode == "researcher":
+            reference_global_slot = self._session.controlled_global_slot
+            pending = self._session.pending_actions[reference_global_slot]
+            selected_global_slot = (
+                reference_global_slot
+                if pending.selected_global_target_slot is None
+                else pending.selected_global_target_slot
+            )
+            armed_lane = pending.armed_lane
         return ReplayViewerService(
             recorder.verified_loaded_bundle,
             initial_frame_index=0,
             view_mode=self._view_mode,
+            reference_global_slot=reference_global_slot,
             selected_global_slot=selected_global_slot,
+            armed_lane=armed_lane,
             pov_global_slot=self._session.controlled_global_slot,
             preset=self._preset,
             show_ranges=self._session.show_ranges,

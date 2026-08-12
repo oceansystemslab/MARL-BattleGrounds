@@ -803,6 +803,192 @@ function sourceFrame() {
   };
 }
 
+/**
+ * Enumerate every object-record path in one JSON wire root. Arrays are
+ * traversed because their record elements are independently strict schema
+ * families, but only records receive an injected field.
+ *
+ * @param {unknown} value
+ * @param {(string | number)[]} [path]
+ * @param {Array<(string | number)[]>} [paths]
+ * @returns {Array<(string | number)[]>}
+ */
+function recordPaths(value, path = [], paths = []) {
+  if (Array.isArray(value)) {
+    value.forEach((child, index) => {
+      recordPaths(child, [...path, index], paths);
+    });
+    return paths;
+  }
+  if (!value || typeof value !== "object") {
+    return paths;
+  }
+  paths.push(path);
+  for (const [key, child] of Object.entries(value)) {
+    recordPaths(child, [...path, key], paths);
+  }
+  return paths;
+}
+
+/** @param {Record<string, any>} root @param {(string | number)[]} path */
+function recordAtPath(root, path) {
+  return path.reduce((value, segment) => value[segment], root);
+}
+
+/** @param {(string | number)[]} path */
+function displayPath(path) {
+  return path.length === 0
+    ? "$"
+    : path.reduce(
+        (label, segment) =>
+          typeof segment === "number" ? `${label}[${segment}]` : `${label}.${segment}`,
+        "$",
+      );
+}
+
+/**
+ * Assert that every array and record in a normalized graph is frozen and
+ * shares no mutable container identity with its raw wire input.
+ *
+ * @param {unknown} raw
+ * @param {unknown} normalized
+ * @param {string} label
+ */
+function assertRecursivelyFrozenAndUnaliased(raw, normalized, label) {
+  const rawContainers = new Set();
+  /** @param {unknown} value */
+  const collectRaw = (value) => {
+    if (!value || typeof value !== "object" || rawContainers.has(value)) {
+      return;
+    }
+    rawContainers.add(value);
+    for (const child of Array.isArray(value) ? value : Object.values(value)) {
+      collectRaw(child);
+    }
+  };
+  collectRaw(raw);
+
+  const visited = new Set();
+  /** @param {unknown} value @param {string} path */
+  const inspectNormalized = (value, path) => {
+    if (!value || typeof value !== "object" || visited.has(value)) {
+      return;
+    }
+    visited.add(value);
+    assert.equal(Object.isFrozen(value), true, `${label} ${path} is not frozen`);
+    assert.equal(
+      rawContainers.has(value),
+      false,
+      `${label} ${path} aliases a raw wire container`,
+    );
+    const children = Array.isArray(value)
+      ? value.map((child, index) => [index, child])
+      : Object.entries(value);
+    for (const [key, child] of children) {
+      inspectNormalized(
+        child,
+        typeof key === "number" ? `${path}[${key}]` : `${path}.${key}`,
+      );
+    }
+  };
+  inspectNormalized(normalized, "$normalized");
+}
+
+/**
+ * Destructively perturb every mutable raw container after normalization. This
+ * deliberately changes existing scalar values as well as container shapes;
+ * installed normalized bytes must remain unaffected.
+ *
+ * @param {unknown} value
+ * @param {Set<object>} [visited]
+ */
+function mutateRawGraph(value, visited = new Set()) {
+  if (!value || typeof value !== "object" || visited.has(value)) {
+    return;
+  }
+  visited.add(value);
+  if (Array.isArray(value)) {
+    for (const child of value) {
+      mutateRawGraph(child, visited);
+    }
+    value.push("__cp75_raw_array_mutation__");
+    return;
+  }
+  const rawRecord = /** @type {Record<string, any>} */ (value);
+  for (const [key, child] of Object.entries(rawRecord)) {
+    mutateRawGraph(child, visited);
+    if (child === null) {
+      rawRecord[key] = "__cp75_raw_null_mutation__";
+    } else if (typeof child === "string") {
+      rawRecord[key] = "__cp75_raw_string_mutation__";
+    } else if (typeof child === "number") {
+      rawRecord[key] = child + 10_000;
+    } else if (typeof child === "boolean") {
+      rawRecord[key] = !child;
+    }
+  }
+  rawRecord.__cp75_raw_record_mutation__ = true;
+}
+
+test("every replay frame and timeline record family rejects an unknown key", () => {
+  /** @type {Array<readonly [string, () => Record<string, any>, (value: unknown) => Readonly<Record<string, any>>]>} */
+  const cases = [
+    ["researcher frame", () => researcherFrame(), normalizeReplayViewerFrameV1],
+    ["Actor POV frame", () => povFrame(), normalizeReplayViewerFrameV1],
+    ["SharedObs source frame", () => sourceFrame(), normalizeReplayViewerFrameV1],
+    ["researcher timeline", () => timeline("researcher"), normalizeReplayTimelineV1],
+    ["Actor POV timeline", () => timeline("actor_pov"), normalizeReplayTimelineV1],
+    [
+      "SharedObs source timeline",
+      () => timeline("shared_obs_source_material"),
+      normalizeReplayTimelineV1,
+    ],
+  ];
+
+  for (const [label, factory, normalize] of cases) {
+    const paths = recordPaths(factory());
+    assert.ok(paths.length > 1, `${label} did not expose nested record families`);
+    for (const path of paths) {
+      const candidate = structuredClone(factory());
+      recordAtPath(candidate, path).__cp75_unknown_field__ = "researcher-only";
+      assert.throws(
+        () => normalize(candidate),
+        /unknown(?: or missing)? fields?/u,
+        `${label} accepted an unknown key at ${displayPath(path)}`,
+      );
+    }
+  }
+});
+
+test("all replay audiences and timelines are recursively frozen, unaliased, and raw-mutation independent", () => {
+  /** @type {Array<readonly [string, () => Record<string, any>, (value: unknown) => Readonly<Record<string, any>>]>} */
+  const cases = [
+    ["researcher frame", () => researcherFrame(), normalizeReplayViewerFrameV1],
+    ["Actor POV frame", () => povFrame(), normalizeReplayViewerFrameV1],
+    ["SharedObs source frame", () => sourceFrame(), normalizeReplayViewerFrameV1],
+    ["researcher timeline", () => timeline("researcher"), normalizeReplayTimelineV1],
+    ["Actor POV timeline", () => timeline("actor_pov"), normalizeReplayTimelineV1],
+    [
+      "SharedObs source timeline",
+      () => timeline("shared_obs_source_material"),
+      normalizeReplayTimelineV1,
+    ],
+  ];
+
+  for (const [label, factory, normalize] of cases) {
+    const raw = factory();
+    const normalized = normalize(raw);
+    const installedBytes = JSON.stringify(normalized);
+    assertRecursivelyFrozenAndUnaliased(raw, normalized, label);
+    mutateRawGraph(raw);
+    assert.equal(
+      JSON.stringify(normalized),
+      installedBytes,
+      `${label} changed after its raw wire graph was mutated`,
+    );
+  }
+});
+
 test("three replay frame roots normalize through separate audience boundaries", () => {
   const researcher = normalizeReplayViewerFrameV1(researcherFrame());
   const pov = normalizeReplayViewerFrameV1(povFrame());

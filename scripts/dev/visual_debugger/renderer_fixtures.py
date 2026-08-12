@@ -9,6 +9,7 @@ researcher scene in the browser.
 
 from collections.abc import Mapping
 from dataclasses import dataclass, fields, is_dataclass, replace
+from hashlib import sha256
 from types import MappingProxyType
 from typing import Literal, TypedDict, cast
 
@@ -25,11 +26,16 @@ from marl_battlegrounds.core.types import (
 )
 from marl_battlegrounds.evaluation.pov import (
     ActorPovActionMaskV1,
+    ActorPovEpisodeEndedCueV1,
     ActorPovOwnActionOutcomeCueV1,
+    ActorPovOwnCooldownChangedCueV1,
     ActorPovOwnHealthChangedCueV1,
+    ActorPovOwnLifecycleChangedCueV1,
     ActorPovOwnPositionChangedCueV1,
     ActorPovOwnStatusChangedCueV1,
+    ActorPovVisibleBodyObservationChangedCueV1,
 )
+from marl_battlegrounds.evaluation.replay import ReplayArtifactReferenceV1
 from marl_battlegrounds.rendering.pov_scene import (
     ACTOR_POV_SCENE_SCHEMA_VERSION,
     ActorPovAnalyzerProjectionV1,
@@ -114,6 +120,21 @@ from scripts.dev.visual_debugger.protocol import (
     TargetReferenceV1,
     TerminalStateV2,
 )
+from scripts.dev.visual_debugger.replay_protocol import (
+    ACTOR_POV_METRIC_REPORT_AVAILABILITY_V1,
+    ActorPovProcessingDisclosureV1,
+    ActorPovReplayCompletionBadgeV1,
+    ActorPovReplayTimelineRowV1,
+    ActorPovReplayTimelineV1,
+    ActorPovReplayViewerFrameV1,
+    ReplayArtifactSummaryV1,
+    ReplayCompletionBadgeV1,
+    ReplayCursorV1,
+    ReplayProcessingBadgeV1,
+    ResearcherReplayTimelineRowV1,
+    ResearcherReplayTimelineV1,
+    ResearcherReplayViewerFrameV1,
+)
 
 type RendererFixtureName = Literal[
     "visual_vocabulary",
@@ -145,6 +166,8 @@ type CatalogStatusId = Literal[
 ]
 type RendererScene = BattlefieldSceneV2 | ActorPovBattlefieldSceneV1
 type RendererLiveFrame = ResearcherLiveDebuggerFrameV2 | ActorPovLiveDebuggerFrameV2
+type RendererReplayFrame = ResearcherReplayViewerFrameV1 | ActorPovReplayViewerFrameV1
+type RendererReplayTimeline = ResearcherReplayTimelineV1 | ActorPovReplayTimelineV1
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -168,6 +191,84 @@ class ViewportCaseV1:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class SyntheticFixturePresentationPair:
+    """Fixture-only live/replay envelopes; this is not a replay wire schema."""
+
+    audience: Literal["researcher", "agent_pov"]
+    live_frame: RendererLiveFrame
+    replay_frame: RendererReplayFrame
+    replay_timeline: RendererReplayTimeline
+
+    def __post_init__(self) -> None:
+        if self.audience == "researcher":
+            if (
+                type(self.live_frame) is not ResearcherLiveDebuggerFrameV2
+                or type(self.replay_frame) is not ResearcherReplayViewerFrameV1
+                or type(self.replay_timeline) is not ResearcherReplayTimelineV1
+            ):
+                raise ValueError(
+                    "researcher presentation pairs require exact researcher roots."
+                )
+        elif self.audience == "agent_pov":
+            if (
+                type(self.live_frame) is not ActorPovLiveDebuggerFrameV2
+                or type(self.replay_frame) is not ActorPovReplayViewerFrameV1
+                or type(self.replay_timeline) is not ActorPovReplayTimelineV1
+            ):
+                raise ValueError("POV presentation pairs require exact POV roots.")
+        else:
+            raise ValueError("unknown presentation-pair audience.")
+
+        if self.live_frame.projection != self.replay_frame.projection:
+            raise ValueError(
+                "live and replay envelopes must share one exact projection root."
+            )
+        if (
+            self.replay_timeline.artifact_summary != self.replay_frame.artifact_summary
+            or self.replay_timeline.timeline_id != self.replay_frame.timeline_id
+            or self.replay_timeline.final_frame_index
+            != self.replay_frame.cursor.final_frame_index
+        ):
+            raise ValueError("synthetic replay frame and timeline must join exactly.")
+        selected_row = self.replay_timeline.rows[self.replay_frame.cursor.frame_index]
+        if selected_row.simulator_step_count != self.replay_frame.simulator_step_count:
+            raise ValueError("synthetic replay row must join the selected frame epoch.")
+        if self.audience == "researcher":
+            researcher_live = cast(ResearcherLiveDebuggerFrameV2, self.live_frame)
+            researcher_replay = cast(
+                ResearcherReplayViewerFrameV1,
+                self.replay_frame,
+            )
+            researcher_row = cast(ResearcherReplayTimelineRowV1, selected_row)
+            incoming_events = researcher_live.projection.incoming_events
+            if (
+                incoming_events is None
+                or researcher_row.frame_id != researcher_replay.frame_id
+                or researcher_row.incoming_transition_id
+                != researcher_replay.incoming_transition_id
+                or researcher_row.incoming_event_count != len(incoming_events.events)
+            ):
+                raise ValueError(
+                    "synthetic researcher timeline rows must join frame and event "
+                    "counts exactly."
+                )
+        else:
+            pov_live = cast(ActorPovLiveDebuggerFrameV2, self.live_frame)
+            pov_replay = cast(ActorPovReplayViewerFrameV1, self.replay_frame)
+            pov_row = cast(ActorPovReplayTimelineRowV1, selected_row)
+            if (
+                pov_row.pov_frame_id != pov_replay.pov_frame_id
+                or pov_row.incoming_pov_transition_id
+                != pov_replay.incoming_pov_transition_id
+                or pov_row.incoming_cue_count != len(pov_live.projection.incoming_cues)
+            ):
+                raise ValueError(
+                    "synthetic POV timeline rows must join frame and cue counts "
+                    "exactly."
+                )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class RendererFixtureV2:
     """One explicitly synthetic, audience-specific presentation payload."""
 
@@ -183,6 +284,7 @@ class RendererFixtureV2:
     exercise_reduced_motion: bool = False
     privileged_source_scene: BattlefieldSceneV2 | None = None
     privileged_source_event_batch: VisualEventBatchV2 | None = None
+    synthetic_presentation_pair: SyntheticFixturePresentationPair | None = None
 
     def __post_init__(self) -> None:
         if type(self.name) is not str or not self.name:
@@ -260,6 +362,29 @@ class RendererFixtureV2:
                 raise ValueError("privileged comparison must use BattlefieldSceneV2.")
             if type(self.privileged_source_event_batch) is not VisualEventBatchV2:
                 raise ValueError("privileged comparison must use VisualEventBatchV2.")
+
+        pair = self.synthetic_presentation_pair
+        if pair is not None:
+            if type(pair) is not SyntheticFixturePresentationPair:
+                raise ValueError(
+                    "synthetic_presentation_pair must be an exact "
+                    "SyntheticFixturePresentationPair."
+                )
+            if pair.audience != self.audience:
+                raise ValueError("presentation pair audience must match its fixture.")
+            if pair.live_frame.projection.scene != self.scene:
+                raise ValueError(
+                    "presentation pair must reuse the fixture's exact scene root."
+                )
+            if self.audience == "researcher":
+                researcher_pair = cast(
+                    ResearcherLiveDebuggerFrameV2,
+                    pair.live_frame,
+                )
+                if researcher_pair.projection.incoming_events != self.event_batch:
+                    raise ValueError(
+                        "researcher presentation pair must reuse the exact event batch."
+                    )
 
 
 _CLASS_IDS = (
@@ -384,6 +509,195 @@ def renderer_fixture_to_jsonable(value: object) -> object:
     if value is None or type(value) in (str, int, float, bool):
         return value
     raise TypeError(f"unsupported renderer fixture value: {type(value).__name__}.")
+
+
+_SYNTHETIC_DIGEST_A = sha256(b"synthetic-renderer-context").hexdigest()
+_SYNTHETIC_DIGEST_B = sha256(b"synthetic-renderer-trajectory").hexdigest()
+_SYNTHETIC_DIGEST_C = sha256(b"synthetic-renderer-canonical-bytes").hexdigest()
+
+
+def _synthetic_replay_summary(
+    episode_id: str,
+    *,
+    actor_pov: bool,
+) -> ReplayArtifactSummaryV1:
+    """Build path-free fixture provenance without claiming a persisted replay."""
+    return ReplayArtifactSummaryV1(
+        replay_reference=ReplayArtifactReferenceV1(
+            artifact_id=f"{episode_id}:replay",
+            episode_id=episode_id,
+            context_digest_sha256=_SYNTHETIC_DIGEST_A,
+            trajectory_content_digest_sha256=_SYNTHETIC_DIGEST_B,
+            canonical_digest_sha256=_SYNTHETIC_DIGEST_C,
+            canonical_byte_length=1,
+        ),
+        expected_transition_count=1,
+        recorded_transition_count=1,
+        recorded_frame_count=2,
+        metric_report_availability=(
+            ACTOR_POV_METRIC_REPORT_AVAILABILITY_V1 if actor_pov else "missing"
+        ),
+    )
+
+
+def _synthetic_researcher_presentation_pair(
+    live_frame: ResearcherLiveDebuggerFrameV2,
+) -> SyntheticFixturePresentationPair:
+    """Package one exact synthetic researcher projection in both wire modes."""
+    scene = live_frame.projection.scene
+    events = live_frame.projection.incoming_events
+    if scene.frame_index != 1 or events is None:
+        raise ValueError(
+            "synthetic researcher replay pairs require one incoming transition."
+        )
+    summary = _synthetic_replay_summary(scene.episode_id, actor_pov=False)
+    completion = ReplayCompletionBadgeV1(
+        episode_id=scene.episode_id,
+        completion_state="complete",
+        expected_transition_count=1,
+        validated_transition_count=1,
+        last_valid_frame_index=1,
+        last_valid_frame_id=scene.frame_id,
+        terminated=False,
+        truncated=False,
+        completion_bases=("declared_horizon",),
+    )
+    processing = ReplayProcessingBadgeV1(
+        status="succeeded",
+        processed_transition_count=1,
+    )
+    timeline_id = f"{summary.replay_reference.artifact_id}:timeline:researcher"
+    replay_frame = ResearcherReplayViewerFrameV1(
+        viewer_session_id=f"fixture-{live_frame.session_id}",
+        revision=0,
+        artifact_summary=summary,
+        timeline_id=timeline_id,
+        cursor=ReplayCursorV1(
+            frame_index=1,
+            final_frame_index=1,
+            cursor_generation=1,
+            choreography_generation=1,
+        ),
+        preset=live_frame.preset,
+        verbose=live_frame.verbose,
+        frame_id=scene.frame_id,
+        simulator_step_count=scene.simulator_step_count,
+        incoming_transition_index=0,
+        incoming_transition_id=scene.incoming_transition_id,
+        completion=completion,
+        processing=processing,
+        show_ranges=live_frame.show_ranges,
+        projection=live_frame.projection,
+    )
+    replay_timeline = ResearcherReplayTimelineV1(
+        timeline_id=timeline_id,
+        artifact_summary=summary,
+        final_frame_index=1,
+        completion=completion,
+        rows=(
+            ResearcherReplayTimelineRowV1(
+                frame_index=0,
+                frame_id=f"{scene.episode_id}:frame:0",
+                simulator_step_count=scene.simulator_step_count - 1,
+                incoming_transition_id=None,
+                incoming_event_count=0,
+            ),
+            ResearcherReplayTimelineRowV1(
+                frame_index=1,
+                frame_id=scene.frame_id,
+                simulator_step_count=scene.simulator_step_count,
+                incoming_transition_id=scene.incoming_transition_id,
+                incoming_event_count=len(events.events),
+                endpoint_kind="declared_horizon",
+            ),
+        ),
+    )
+    return SyntheticFixturePresentationPair(
+        audience="researcher",
+        live_frame=live_frame,
+        replay_frame=replay_frame,
+        replay_timeline=replay_timeline,
+    )
+
+
+def _synthetic_pov_presentation_pair(
+    live_frame: ActorPovLiveDebuggerFrameV2,
+) -> SyntheticFixturePresentationPair:
+    """Package one exact recipient projection in live and replay wire modes."""
+    projection = live_frame.projection
+    scene = projection.scene
+    if scene.frame_index != 1 or projection.incoming_transition_id is None:
+        raise ValueError("synthetic POV replay pairs require one incoming transition.")
+    summary = _synthetic_replay_summary(scene.episode_id, actor_pov=True)
+    completion = ActorPovReplayCompletionBadgeV1(
+        episode_id=scene.episode_id,
+        completion_state="complete",
+        expected_transition_count=1,
+        captured_transition_count=1,
+        terminated=True,
+        truncated=False,
+        completion_bases=("task_terminal", "declared_horizon"),
+        public_end_or_failure_reason="synthetic fixture complete",
+    )
+    public_agent_id = scene.self_actor.public_agent_id
+    timeline_id = (
+        f"{summary.replay_reference.artifact_id}:timeline:actor-pov:{public_agent_id}"
+    )
+    replay_frame = ActorPovReplayViewerFrameV1(
+        viewer_session_id=f"fixture-{live_frame.session_id}",
+        revision=0,
+        artifact_summary=summary,
+        timeline_id=timeline_id,
+        cursor=ReplayCursorV1(
+            frame_index=1,
+            final_frame_index=1,
+            cursor_generation=1,
+            choreography_generation=1,
+        ),
+        preset=live_frame.preset,
+        verbose=live_frame.verbose,
+        pov_global_slot=scene.self_actor.global_slot,
+        public_agent_id=public_agent_id,
+        pov_frame_id=scene.pov_frame_id,
+        simulator_step_count=scene.simulator_step_count,
+        incoming_pov_transition_id=projection.incoming_transition_id,
+        completion=completion,
+        processing_disclosure=ActorPovProcessingDisclosureV1(),
+        projection=projection,
+    )
+    replay_timeline = ActorPovReplayTimelineV1(
+        timeline_id=timeline_id,
+        artifact_summary=summary,
+        final_frame_index=1,
+        pov_global_slot=scene.self_actor.global_slot,
+        public_agent_id=public_agent_id,
+        completion=completion,
+        rows=(
+            ActorPovReplayTimelineRowV1(
+                frame_index=0,
+                pov_frame_id=(
+                    f"{scene.episode_id}:actor-pov:{public_agent_id}:frame:0"
+                ),
+                simulator_step_count=scene.simulator_step_count - 1,
+                incoming_pov_transition_id=None,
+                incoming_cue_count=0,
+            ),
+            ActorPovReplayTimelineRowV1(
+                frame_index=1,
+                pov_frame_id=scene.pov_frame_id,
+                simulator_step_count=scene.simulator_step_count,
+                incoming_pov_transition_id=projection.incoming_transition_id,
+                incoming_cue_count=len(projection.incoming_cues),
+                endpoint_kind="task_terminal_and_declared_horizon",
+            ),
+        ),
+    )
+    return SyntheticFixturePresentationPair(
+        audience="agent_pov",
+        live_frame=live_frame,
+        replay_frame=replay_frame,
+        replay_timeline=replay_timeline,
+    )
 
 
 def _class_mechanics() -> tuple[ClassMechanicsSceneV2, ...]:
@@ -1923,6 +2237,79 @@ _POV_PROJECTION = ActorPovAnalyzerProjectionV1(
     incoming_cues=_POV_CUES,
 )
 
+_POV_EXHAUSTIVE_CUES = (
+    ActorPovOwnActionOutcomeCueV1(
+        cue_id=f"{_POV_TRANSITION}:cue:0",
+        pov_transition_id=_POV_TRANSITION,
+        ordinal=0,
+        outcome="accepted",
+    ),
+    ActorPovOwnPositionChangedCueV1(
+        cue_id=f"{_POV_TRANSITION}:cue:1",
+        pov_transition_id=_POV_TRANSITION,
+        ordinal=1,
+        start_position=(2.5, 4.0),
+        successor_position=_MIXED_POSITIONS[0],
+    ),
+    ActorPovOwnHealthChangedCueV1(
+        cue_id=f"{_POV_TRANSITION}:cue:2",
+        pov_transition_id=_POV_TRANSITION,
+        ordinal=2,
+        start_health=80.0,
+        successor_health=70.0,
+    ),
+    ActorPovOwnStatusChangedCueV1(
+        cue_id=f"{_POV_TRANSITION}:cue:3",
+        pov_transition_id=_POV_TRANSITION,
+        ordinal=3,
+        changed_feature_indices=(15, 16, 17),
+        start_values=(0.0, 0.0, 0.0),
+        successor_values=(1.0, 1.0, 1.0),
+    ),
+    ActorPovOwnCooldownChangedCueV1(
+        cue_id=f"{_POV_TRANSITION}:cue:4",
+        pov_transition_id=_POV_TRANSITION,
+        ordinal=4,
+        start_remaining_ticks=3.0,
+        successor_remaining_ticks=2.0,
+    ),
+    ActorPovOwnLifecycleChangedCueV1(
+        cue_id=f"{_POV_TRANSITION}:cue:5",
+        pov_transition_id=_POV_TRANSITION,
+        ordinal=5,
+        start_active=True,
+        successor_active=True,
+        start_alive=True,
+        successor_alive=True,
+        start_spawn_shield_remaining_ticks=2,
+        successor_spawn_shield_remaining_ticks=0,
+    ),
+    ActorPovVisibleBodyObservationChangedCueV1(
+        cue_id=f"{_POV_TRANSITION}:cue:6",
+        pov_transition_id=_POV_TRANSITION,
+        ordinal=6,
+        relation="ally",
+        observation_row=1,
+        start_visible=False,
+        successor_visible=True,
+        observed_payload_changed=True,
+    ),
+    ActorPovEpisodeEndedCueV1(
+        cue_id=f"{_POV_TRANSITION}:cue:7",
+        pov_transition_id=_POV_TRANSITION,
+        ordinal=7,
+        terminated=True,
+        truncated=False,
+        public_end_reason="synthetic fixture complete",
+    ),
+)
+_POV_EXHAUSTIVE_PROJECTION = ActorPovAnalyzerProjectionV1(
+    scene=_POV_SCENE,
+    next_decision_action_mask=_POV_ACTION_MASK,
+    incoming_transition_id=_POV_TRANSITION,
+    incoming_cues=_POV_EXHAUSTIVE_CUES,
+)
+
 
 def _terminal_state() -> TerminalStateV2:
     return TerminalStateV2(
@@ -2083,6 +2470,8 @@ def _pov_live_frame(
     name: RendererFixtureName,
     projection: ActorPovAnalyzerProjectionV1,
     target_public_agent_ids: tuple[str | None, ...],
+    *,
+    terminal: TerminalStateV2 | None = None,
 ) -> ActorPovLiveDebuggerFrameV2:
     scene = projection.scene
     mask = projection.next_decision_action_mask
@@ -2097,7 +2486,7 @@ def _pov_live_frame(
         simulator_step_count=scene.simulator_step_count,
         preset="analysis",
         verbose=False,
-        terminal=_terminal_state(),
+        terminal=_terminal_state() if terminal is None else terminal,
         incoming_pov_transition_id=projection.incoming_transition_id,
         projection=projection,
         hud=ActorPovHudFrameV1(
@@ -2150,17 +2539,39 @@ def _researcher_fixture(
     event_batch: VisualEventBatchV2 | None,
     viewports: tuple[ViewportCaseV1, ...] = (),
     exercise_reduced_motion: bool = False,
+    with_presentation_pair: bool = False,
 ) -> RendererFixtureV2:
+    live_frame = _researcher_live_frame(name, description, scene, event_batch)
     return RendererFixtureV2(
         name=name,
         description=description,
         audience="researcher",
         scene=scene,
-        live_frame=_researcher_live_frame(name, description, scene, event_batch),
+        live_frame=live_frame,
         event_batch=event_batch,
         viewports=viewports,
         exercise_reduced_motion=exercise_reduced_motion,
+        synthetic_presentation_pair=(
+            _synthetic_researcher_presentation_pair(live_frame)
+            if with_presentation_pair
+            else None
+        ),
     )
+
+
+_POV_EXHAUSTIVE_LIVE_FRAME = _pov_live_frame(
+    "pov_redaction",
+    _POV_EXHAUSTIVE_PROJECTION,
+    _POV_TARGET_PUBLIC_AGENT_IDS,
+    terminal=TerminalStateV2(
+        is_sealed=True,
+        terminated=True,
+        truncated=False,
+        reached_declared_horizon=True,
+        reason="terminated",
+    ),
+)
+_POV_PRESENTATION_PAIR = _synthetic_pov_presentation_pair(_POV_EXHAUSTIVE_LIVE_FRAME)
 
 
 RENDERER_FIXTURES: Mapping[str, RendererFixtureV2] = MappingProxyType(
@@ -2173,6 +2584,7 @@ RENDERER_FIXTURES: Mapping[str, RendererFixtureV2] = MappingProxyType(
             ),
             scene=_VOCABULARY_SCENE,
             event_batch=_VOCABULARY_BATCH,
+            with_presentation_pair=True,
         ),
         "durable_controls": _researcher_fixture(
             name="durable_controls",
@@ -2191,6 +2603,7 @@ RENDERER_FIXTURES: Mapping[str, RendererFixtureV2] = MappingProxyType(
             ),
             scene=_CROWDED_SCENE,
             event_batch=_CROWDED_BATCH,
+            with_presentation_pair=True,
         ),
         "required_dock_fallback": _researcher_fixture(
             name="required_dock_fallback",
@@ -2218,6 +2631,7 @@ RENDERER_FIXTURES: Mapping[str, RendererFixtureV2] = MappingProxyType(
             ),
             scene=_MIXED_SCENE,
             event_batch=_MIXED_BATCH,
+            with_presentation_pair=True,
         ),
         "viewport_matrix": _researcher_fixture(
             name="viewport_matrix",
@@ -2238,6 +2652,7 @@ RENDERER_FIXTURES: Mapping[str, RendererFixtureV2] = MappingProxyType(
             ),
             scene=_GRAMMAR_SCENE,
             event_batch=_GRAMMAR_BATCH,
+            with_presentation_pair=True,
         ),
         "pov_redaction": RendererFixtureV2(
             name="pov_redaction",
@@ -2256,6 +2671,7 @@ RENDERER_FIXTURES: Mapping[str, RendererFixtureV2] = MappingProxyType(
             pov_target_public_agent_ids=_POV_TARGET_PUBLIC_AGENT_IDS,
             privileged_source_scene=_POV_SOURCE_SCENE,
             privileged_source_event_batch=_POV_SOURCE_BATCH,
+            synthetic_presentation_pair=_POV_PRESENTATION_PAIR,
         ),
     }
 )

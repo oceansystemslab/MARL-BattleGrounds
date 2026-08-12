@@ -179,7 +179,11 @@ def _endpoint_kind(
 
 
 class ReplayViewerService:
-    """Serialize immutable cursor and presentation state around one replay."""
+    """Serialize immutable cursor and viewer-owned presentation around one replay.
+
+    Initial reference, selection, and lane values describe the viewer handoff;
+    they are not historical fields recovered independently at each replay cursor.
+    """
 
     def __init__(
         self,
@@ -187,7 +191,9 @@ class ReplayViewerService:
         *,
         initial_frame_index: int = 0,
         view_mode: ReplayViewModeV1 = "researcher",
+        reference_global_slot: int | None = None,
         selected_global_slot: int | None = None,
+        armed_lane: Literal[0, 1] | None = None,
         pov_global_slot: int | None = None,
         preset: ReplayPresetV1 = "analysis",
         show_ranges: bool = True,
@@ -229,10 +235,25 @@ class ReplayViewerService:
             if isinstance(row, AssignedPolicySlotV1) and row.evaluation_role == "focal"
         )
         default_slot = min(focal_slots) if focal_slots else None
+        researcher_slot = (
+            default_slot if reference_global_slot is None else reference_global_slot
+        )
         reference_slot = selected_global_slot
         actor_slot = default_slot if pov_global_slot is None else pov_global_slot
+        self._require_active_or_none(
+            researcher_slot,
+            name="reference_global_slot",
+        )
         self._require_active_or_none(reference_slot, name="selected_global_slot")
         self._require_active_or_none(actor_slot, name="pov_global_slot")
+        if armed_lane is not None and (
+            type(armed_lane) is not int or armed_lane not in (0, 1)
+        ):
+            raise ValueError("armed_lane must be the Python int zero or one, or None")
+        if reference_slot is not None and researcher_slot is None:
+            raise ValueError("selected_global_slot requires a researcher reference")
+        if armed_lane is not None and reference_slot is None:
+            raise ValueError("armed_lane requires a selected_global_slot")
         if view_mode == "pov" and actor_slot is None:
             raise ValueError("POV replay view requires a configured-active actor")
 
@@ -273,8 +294,9 @@ class ReplayViewerService:
         self._cursor_generation = 0
         self._choreography_generation = 0
         self._view_mode: ReplayViewModeV1 = view_mode
-        self._reference_global_slot = default_slot
+        self._reference_global_slot = researcher_slot
         self._selected_global_slot = reference_slot
+        self._armed_lane = armed_lane
         self._pov_global_slot = actor_slot
         self._preset: ReplayPresetV1 = preset
         self._show_ranges = show_ranges
@@ -292,6 +314,7 @@ class ReplayViewerService:
             choreography_generation=self._choreography_generation,
             view_mode=self._view_mode,
             selected_global_slot=self._selected_global_slot,
+            armed_lane=self._armed_lane,
             pov_global_slot=self._pov_global_slot,
             preset=self._preset,
             show_ranges=self._show_ranges,
@@ -413,6 +436,7 @@ class ReplayViewerService:
             choreography_generation = self._choreography_generation
             view_mode = self._view_mode
             selected_global_slot = self._selected_global_slot
+            armed_lane = self._armed_lane
             pov_global_slot = self._pov_global_slot
             preset = self._preset
             show_ranges = self._show_ranges
@@ -497,6 +521,7 @@ class ReplayViewerService:
                     )
                 if command.selected_global_slot != selected_global_slot:
                     selected_global_slot = command.selected_global_slot
+                    armed_lane = None
                     changed = True
             elif type(command) is ReplaySetViewCommandV1:
                 if command.view_mode == "pov" and pov_global_slot is None:
@@ -562,6 +587,7 @@ class ReplayViewerService:
                         choreography_generation=choreography_generation,
                         view_mode=view_mode,
                         selected_global_slot=selected_global_slot,
+                        armed_lane=armed_lane,
                         pov_global_slot=pov_global_slot,
                         preset=preset,
                         show_ranges=show_ranges,
@@ -605,6 +631,7 @@ class ReplayViewerService:
             self._choreography_generation = choreography_generation
             self._view_mode = view_mode
             self._selected_global_slot = selected_global_slot
+            self._armed_lane = armed_lane
             self._pov_global_slot = pov_global_slot
             self._preset = preset
             self._show_ranges = show_ranges
@@ -626,6 +653,7 @@ class ReplayViewerService:
         choreography_generation: int,
         view_mode: ReplayViewModeV1,
         selected_global_slot: int | None,
+        armed_lane: Literal[0, 1] | None,
         pov_global_slot: int | None,
         preset: ReplayPresetV1,
         show_ranges: bool,
@@ -652,6 +680,7 @@ class ReplayViewerService:
                 presentation=EvaluationScenePresentationStateV1(
                     controlled_global_slot=self._reference_global_slot,
                     selected_global_slot=selected_global_slot,
+                    armed_lane=armed_lane,
                     show_ranges=show_ranges,
                 ),
                 status_source_evidence_state=self._status_index.state_for_frame(

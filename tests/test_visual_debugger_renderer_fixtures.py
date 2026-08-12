@@ -6,6 +6,7 @@ import re
 from collections import Counter
 from dataclasses import FrozenInstanceError, replace
 from math import dist
+from typing import cast
 
 import pytest
 import scripts.dev.visual_debugger.renderer_fixtures as fixture_module
@@ -17,10 +18,17 @@ from scripts.dev.visual_debugger.renderer_fixtures import (
     CATALOG_STATUS_ORDER,
     RENDERER_FIXTURES,
     RendererFixtureV2,
+    SyntheticFixturePresentationPair,
     fixture_pov_target_reference_v1,
     get_renderer_fixture,
     list_renderer_fixtures,
     renderer_fixture_to_jsonable,
+)
+from scripts.dev.visual_debugger.replay_protocol import (
+    ActorPovReplayTimelineV1,
+    ActorPovReplayViewerFrameV1,
+    ResearcherReplayTimelineV1,
+    ResearcherReplayViewerFrameV1,
 )
 
 from marl_battlegrounds.core.types import (
@@ -154,6 +162,110 @@ def test_every_renderer_fixture_is_recursively_json_serializable() -> None:
                 event.event_id for event in fixture.privileged_source_event_batch.events
             )
     assert len(all_event_ids) == len(set(all_event_ids))
+
+
+def test_exhaustive_fixture_roots_have_exact_live_and_loaded_replay_pairs() -> None:
+    for name in (
+        "canonical_event_vocabulary",
+        "visual_vocabulary",
+        "crowded_teamfight",
+        "mixed_net_zero",
+        "pov_redaction",
+    ):
+        fixture = get_renderer_fixture(name)
+        pair = fixture.synthetic_presentation_pair
+        assert type(pair) is SyntheticFixturePresentationPair
+        assert pair.live_frame.projection == pair.replay_frame.projection
+        assert pair.replay_frame.cursor.frame_index == 1
+        assert pair.replay_frame.cursor.final_frame_index == 1
+        assert pair.replay_timeline.rows[1].simulator_step_count == (
+            pair.replay_frame.simulator_step_count
+        )
+        assert pair.replay_timeline.rows[0].simulator_step_count + 1 == (
+            pair.replay_timeline.rows[1].simulator_step_count
+        )
+
+        if fixture.audience == "researcher":
+            assert type(pair.replay_frame) is ResearcherReplayViewerFrameV1
+            assert type(pair.replay_timeline) is ResearcherReplayTimelineV1
+            assert pair.replay_frame.projection.scene == fixture.scene
+            assert pair.replay_frame.projection.incoming_events == fixture.event_batch
+            incoming_events = pair.replay_frame.projection.incoming_events
+            assert incoming_events is not None
+            assert pair.replay_timeline.rows[1].incoming_event_count == len(
+                incoming_events.events
+            )
+        else:
+            assert type(pair.replay_frame) is ActorPovReplayViewerFrameV1
+            assert type(pair.replay_timeline) is ActorPovReplayTimelineV1
+            assert pair.replay_frame.projection.scene == fixture.scene
+            assert pair.replay_timeline.rows[1].incoming_cue_count == len(
+                pair.replay_frame.projection.incoming_cues
+            )
+
+
+def test_exhaustive_fixture_matrix_owns_every_accepted_presentation_variant() -> None:
+    grammar = get_renderer_fixture("canonical_event_vocabulary")
+    vocabulary = get_renderer_fixture("visual_vocabulary")
+    crowded = get_renderer_fixture("crowded_teamfight")
+    pov = get_renderer_fixture("pov_redaction")
+    assert grammar.event_batch is not None
+    assert set(event.event_type for event in grammar.event_batch.events) == set(
+        CANONICAL_EVENT_TYPES
+    )
+    assert len(grammar.event_batch.events) == 23
+
+    assert type(vocabulary.scene) is BattlefieldSceneV2
+    assert {agent.class_id for agent in vocabulary.scene.agents} == {
+        MAGE_CLASS_ID,
+        WARRIOR_CLASS_ID,
+        HUNTER_CLASS_ID,
+        ROGUE_CLASS_ID,
+        PRIEST_CLASS_ID,
+    }
+    assert {
+        row.status_channel
+        for mechanics in vocabulary.scene.class_mechanics
+        for row in mechanics.status_mechanics
+    } == set(range(9))
+    assert {row.kind for row in vocabulary.scene.ranges} == {
+        "observation",
+        "basic",
+        "ultimate",
+    }
+    assert {row.aura_id for row in vocabulary.scene.aura_fields} == {
+        "mage_damage_amplification",
+        "warrior_damage_mitigation",
+    }
+    assert {
+        row.aura_id for agent in vocabulary.scene.agents for row in agent.aura_modifiers
+    } == {"mage_damage_amplification", "warrior_damage_mitigation"}
+
+    assert type(crowded.scene) is BattlefieldSceneV2
+    assert {obstacle.kind for obstacle in crowded.scene.map.obstacles} == {
+        "pillar",
+        "wall",
+    }
+    assert {
+        status.status_channel
+        for agent in crowded.scene.agents
+        for status in agent.statuses
+    } == set(range(9))
+
+    pair = pov.synthetic_presentation_pair
+    assert type(pair) is SyntheticFixturePresentationPair
+    pov_live_frame = cast(ActorPovLiveDebuggerFrameV2, pair.live_frame)
+    cue_types = tuple(cue.cue_type for cue in pov_live_frame.projection.incoming_cues)
+    assert cue_types == (
+        "own_action_outcome",
+        "own_position_changed",
+        "own_health_changed",
+        "own_status_changed",
+        "own_cooldown_changed",
+        "own_lifecycle_changed",
+        "visible_body_observation_changed",
+        "episode_ended",
+    )
 
 
 def test_durable_fixture_preserves_canonical_status_channels_and_sources() -> None:

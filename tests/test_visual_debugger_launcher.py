@@ -31,6 +31,13 @@ _HAS_MATPLOTLIB = find_spec("matplotlib") is not None
 _HAS_PYPLOT = _HAS_MATPLOTLIB and find_spec("matplotlib.pyplot") is not None
 
 
+def _cpu_only_subprocess_environment() -> dict[str, str]:
+    """Keep import-only child probes independent of the parent's GPU allocator."""
+    environment = os.environ.copy()
+    environment["JAX_PLATFORMS"] = "cpu"
+    return environment
+
+
 def _write_valid_replay(tmp_path: Path) -> Path:
     """Write one small canonical replay for launcher-boundary integration tests."""
     from tests.evaluation_fixtures import captured_evaluation_trajectory
@@ -696,6 +703,7 @@ def test_list_scenarios_is_stable_and_does_not_import_matplotlib() -> None:
     result = subprocess.run(
         (sys.executable, "-c", code),
         cwd=_REPOSITORY_ROOT,
+        env=_cpu_only_subprocess_environment(),
         check=False,
         capture_output=True,
         text=True,
@@ -720,6 +728,7 @@ def test_list_scenarios_includes_stress_only_when_explicitly_requested() -> None
     result = subprocess.run(
         (sys.executable, "-c", code),
         cwd=_REPOSITORY_ROOT,
+        env=_cpu_only_subprocess_environment(),
         check=False,
         capture_output=True,
         text=True,
@@ -742,6 +751,7 @@ def test_lazy_rendering_and_debugger_models_import_without_matplotlib() -> None:
     result = subprocess.run(
         (sys.executable, "-c", code),
         cwd=_REPOSITORY_ROOT,
+        env=_cpu_only_subprocess_environment(),
         check=False,
         capture_output=True,
         text=True,

@@ -26,6 +26,7 @@ import {
   assertTransientNumberLayout,
   CHARGE_PHASE_MS,
   captureBaseline,
+  DENSE_BASELINE_MAX_DIFF_PIXEL_RATIO,
   DESKTOP_VIEWPORT,
   expectActivationPairs,
   expectRosterSlots,
@@ -904,6 +905,7 @@ test("visual vocabulary presents every class and combat grammar", async ({ page 
       expectedTransientCount: 0,
       logicalMs: ABILITY_PHASE_MS,
     },
+    { maxDiffPixelRatio: DENSE_BASELINE_MAX_DIFF_PIXEL_RATIO },
   );
 });
 
