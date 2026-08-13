@@ -7,7 +7,7 @@ import {
   CHOREOGRAPHY_ROOT,
   CHOREOGRAPHY_ROUTE_ROOT,
   choreographySnapshot,
-  pauseAtLogicalTime,
+  pauseInsideEventWindow,
 } from "./support/choreography.js";
 import { startDebugger, stopDebugger } from "./support/live-debugger.js";
 import {
@@ -16,7 +16,7 @@ import {
   syntheticDebuggerWireFrame,
 } from "./support/renderer-fixture.js";
 import {
-  ABILITY_PHASE_MS,
+  ABILITY_EVENT_TYPE,
   advanceScriptTo,
   assertCurrentEventIds,
   assertDurableDockFlags,
@@ -24,19 +24,19 @@ import {
   assertHudStoryLabels,
   assertStablePresentationFrame,
   assertTransientNumberLayout,
-  CHARGE_PHASE_MS,
+  CHARGE_EVENT_TYPE,
   captureBaseline,
   DENSE_BASELINE_MAX_DIFF_PIXEL_RATIO,
   DESKTOP_VIEWPORT,
   expectActivationPairs,
   expectRosterSlots,
   expectRosterStatuses,
-  HEALTH_RESOLUTION_PHASE_MS,
+  HEALTH_RESOLUTION_EVENT_TYPE,
   installSyntheticVisualCase,
   loadLiveVisualCase,
   MINIMUM_VIEWPORT,
-  POV_SUCCESSOR_OBSERVATION_PHASE_MS,
-  STATUS_PHASE_MS,
+  POV_HEALTH_EVENT_TYPE,
+  STATUS_EVENT_TYPE,
   waitForStablePresentation,
 } from "./support/visual-regression.js";
 
@@ -706,7 +706,7 @@ function statuses(pairs) {
  * @param {number} expectedCount
  */
 async function assertHealthResolutionPhase(page, expectedCount) {
-  await pauseAtLogicalTime(page, HEALTH_RESOLUTION_PHASE_MS);
+  await pauseInsideEventWindow(page, HEALTH_RESOLUTION_EVENT_TYPE);
   await waitForStablePresentation(page);
   await assertTransientNumberLayout(page, expectedCount);
 }
@@ -903,7 +903,7 @@ test("visual vocabulary presents every class and combat grammar", async ({ page 
     {
       commandPosts,
       expectedTransientCount: 0,
-      logicalMs: ABILITY_PHASE_MS,
+      eventWindow: { eventType: ABILITY_EVENT_TYPE, part: "route", progress: 0.2 },
     },
     { maxDiffPixelRatio: DENSE_BASELINE_MAX_DIFF_PIXEL_RATIO },
   );
@@ -1027,7 +1027,7 @@ test("focus fire and healing remain traceable at one shared impact phase", async
   await assertStablePresentationFrame(page, {
     commandPosts,
     expectedTransientCount: healthResolutionCount(frame),
-    logicalMs: HEALTH_RESOLUTION_PHASE_MS,
+    eventWindow: { eventType: HEALTH_RESOLUTION_EVENT_TYPE },
   });
 });
 
@@ -1075,7 +1075,7 @@ test("moving Basic crossfire preserves combat before successor movement", async 
   await assertStablePresentationFrame(page, {
     commandPosts,
     expectedTransientCount: healthResolutionCount(frame),
-    logicalMs: HEALTH_RESOLUTION_PHASE_MS,
+    eventWindow: { eventType: HEALTH_RESOLUTION_EVENT_TYPE },
   });
 });
 
@@ -1123,7 +1123,7 @@ test("moving focus fire and healing remain readable at minimum size", async ({
   await assertStablePresentationFrame(page, {
     commandPosts,
     expectedTransientCount: healthResolutionCount(frame),
-    logicalMs: HEALTH_RESOLUTION_PHASE_MS,
+    eventWindow: { eventType: HEALTH_RESOLUTION_EVENT_TYPE },
   });
 });
 
@@ -1157,7 +1157,7 @@ test("mirrored Mage Burst separates activation from persistence", async ({ page 
   await assertStablePresentationFrame(page, {
     commandPosts,
     expectedTransientCount: 0,
-    logicalMs: ABILITY_PHASE_MS,
+    eventWindow: { eventType: ABILITY_EVENT_TYPE, part: "group", progress: 0.2 },
   });
 });
 
@@ -1202,11 +1202,11 @@ test("mirrored Warrior Charge keeps reciprocal routes and consequences distinct"
   await assertStablePresentationFrame(page, {
     commandPosts,
     expectedTransientCount: 0,
-    logicalMs: CHARGE_PHASE_MS,
+    eventWindow: { eventType: CHARGE_EVENT_TYPE },
   });
 });
 
-test("mirrored Hunter Trap keeps delivery separate from durable control", async ({
+test("mirrored Hunter Freezing Trap keeps delivery separate from durable control", async ({
   page,
 }) => {
   const commandPosts = await loadLiveVisualCase(page, debuggerUrl, {
@@ -1244,11 +1244,11 @@ test("mirrored Hunter Trap keeps delivery separate from durable control", async 
   await assertStablePresentationFrame(page, {
     commandPosts,
     expectedTransientCount: 0,
-    logicalMs: STATUS_PHASE_MS,
+    eventWindow: { eventType: STATUS_EVENT_TYPE },
   });
 });
 
-test("mirrored Rogue Poison keeps route identity and three consequences legible", async ({
+test("mirrored Rogue Crippling Poison keeps route identity and three consequences legible", async ({
   page,
 }) => {
   const commandPosts = await loadLiveVisualCase(page, debuggerUrl, {
@@ -1289,11 +1289,11 @@ test("mirrored Rogue Poison keeps route identity and three consequences legible"
   await assertStablePresentationFrame(page, {
     commandPosts,
     expectedTransientCount: 0,
-    logicalMs: STATUS_PHASE_MS,
+    eventWindow: { eventType: STATUS_EVENT_TYPE },
   });
 });
 
-test("mirrored Holy Word and Poison lifecycle remains distinct across causal phases", async ({
+test("mirrored Holy Word: Salvation and Crippling Poison lifecycle remains distinct across causal phases", async ({
   page,
 }) => {
   const commandPosts = await loadLiveVisualCase(page, debuggerUrl, {
@@ -1352,7 +1352,9 @@ test("mirrored Holy Word and Poison lifecycle remains distinct across causal pha
   await assertStablePresentationFrame(page, {
     commandPosts,
     expectedTransientCount: 0,
-    logicalMs: STATUS_PHASE_MS,
+    // This transition has no status event family. Dynamic choreography omits
+    // that dead window, so prove the post-health settled frame directly.
+    settle: true,
   });
 });
 
@@ -1403,11 +1405,11 @@ test("converging Charge preserves three directions without numeric collisions", 
   await assertStablePresentationFrame(page, {
     commandPosts,
     expectedTransientCount: 0,
-    logicalMs: CHARGE_PHASE_MS,
+    eventWindow: { eventType: CHARGE_EVENT_TYPE },
   });
 });
 
-test("Trap lifecycle t1 proves four exact applications", async ({ page }) => {
+test("Freezing Trap lifecycle t1 proves four exact applications", async ({ page }) => {
   const commandPosts = await loadLiveVisualCase(page, debuggerUrl, {
     scenario: "trap_lifecycle",
   });
@@ -1453,11 +1455,11 @@ test("Trap lifecycle t1 proves four exact applications", async ({ page }) => {
   await assertStablePresentationFrame(page, {
     commandPosts,
     expectedTransientCount: 0,
-    logicalMs: STATUS_PHASE_MS,
+    eventWindow: { eventType: STATUS_EVENT_TYPE },
   });
 });
 
-test("Trap lifecycle t2 proves authoritative records without overclaiming decrements", async ({
+test("Freezing Trap lifecycle t2 proves authoritative records without overclaiming decrements", async ({
   page,
 }) => {
   const commandPosts = await loadLiveVisualCase(page, debuggerUrl, {
@@ -1510,11 +1512,11 @@ test("Trap lifecycle t2 proves authoritative records without overclaiming decrem
   await assertStablePresentationFrame(page, {
     commandPosts,
     expectedTransientCount: 0,
-    logicalMs: STATUS_PHASE_MS,
+    eventWindow: { eventType: STATUS_EVENT_TYPE },
   });
 });
 
-test("Trap lifecycle t4 proves authoritative lifecycle and durable successor values", async ({
+test("Freezing Trap lifecycle t4 proves authoritative lifecycle and durable successor values", async ({
   page,
 }) => {
   const commandPosts = await loadLiveVisualCase(page, debuggerUrl, {
@@ -1537,21 +1539,38 @@ test("Trap lifecycle t4 proves authoritative lifecycle and durable successor val
     routeCount: 1,
     netCount: 1,
   });
-  const lifecycle = statusEventsFromFrame(frame);
-  expect(lifecycle.filter(({ tokenId }) => tokenId === "stun_hunter_trap")).toEqual(
-    expectedTrapLifecycle(frame, 4),
-  );
-  expect(lifecycle).toContainEqual({
+  const atomicLifecycle = statusEventsFromFrame(frame);
+  expect(
+    atomicLifecycle.filter(({ tokenId }) => tokenId === "stun_hunter_trap"),
+  ).toEqual(expectedTrapLifecycle(frame, 4));
+  expect(atomicLifecycle).toContainEqual({
     eventType: "status_applied",
     lifecycle: "applied",
     recipient: 6,
     source: 4,
     tokenId: "stun_hunter_trap",
   });
-  await expectRenderedStatusEvents(page, lifecycle);
+  const renderedLifecycle = atomicLifecycle
+    .filter(
+      (row) =>
+        !(
+          row.tokenId === "stun_hunter_trap" &&
+          row.recipient === 6 &&
+          (row.eventType === "status_broken_by_damage" ||
+            row.eventType === "status_applied")
+        ),
+    )
+    .concat({
+      eventType: "status_applied",
+      lifecycle: "trap_broken_and_reapplied",
+      recipient: 6,
+      source: 4,
+      tokenId: "stun_hunter_trap",
+    });
+  await expectRenderedStatusEvents(page, renderedLifecycle);
   await expectStatusFeed(
     page,
-    lifecycle.map(({ eventType, recipient, source }) => ({
+    atomicLifecycle.map(({ eventType, recipient, source }) => ({
       eventType,
       recipient,
       source,
@@ -1566,11 +1585,11 @@ test("Trap lifecycle t4 proves authoritative lifecycle and durable successor val
   await assertStablePresentationFrame(page, {
     commandPosts,
     expectedTransientCount: 0,
-    logicalMs: STATUS_PHASE_MS,
+    eventWindow: { eventType: STATUS_EVENT_TYPE },
   });
 });
 
-test("Trap lifecycle t5 retains independent authoritative lifecycle records", async ({
+test("Freezing Trap lifecycle t5 retains independent authoritative lifecycle records", async ({
   page,
 }) => {
   const commandPosts = await loadLiveVisualCase(page, debuggerUrl, {
@@ -1624,7 +1643,7 @@ test("Trap lifecycle t5 retains independent authoritative lifecycle records", as
   await assertStablePresentationFrame(page, {
     commandPosts,
     expectedTransientCount: 0,
-    logicalMs: STATUS_PHASE_MS,
+    eventWindow: { eventType: STATUS_EVENT_TYPE },
   });
 });
 
@@ -1836,7 +1855,7 @@ test("crowded synthetic renderer fixture remains bounded at the minimum viewport
       // collision-free disposition instead of competing with health labels
       // that no longer coexist on screen.
       expectedSuppressedLifecycleCount: 0,
-      logicalMs: HEALTH_RESOLUTION_PHASE_MS,
+      eventWindow: { eventType: HEALTH_RESOLUTION_EVENT_TYPE },
     },
   );
 });
@@ -1846,11 +1865,11 @@ test("synthetic POV fixture omits hidden agents and spatial endpoints", async ({
 }) => {
   const servedFrame = /** @type {Record<string, any>} */ ({
     ...povFrame,
-    preset: "debug",
+    preset: "analysis",
   });
   const servedWireFrame = /** @type {Record<string, any>} */ ({
     ...povWireFrame,
-    preset: "debug",
+    preset: "analysis",
   });
   expectPovPayloadRedacted(servedFrame);
   expect(
@@ -1877,7 +1896,7 @@ test("synthetic POV fixture omits hidden agents and spatial endpoints", async ({
     simulatorStep: 1,
     transitionId: 1,
     view: "pov",
-    preset: "debug",
+    preset: "analysis",
     badge: /AGENT POV.*SYNTHETIC FIXTURE/,
   });
   await expect(page.locator("#scenario-description")).toContainText(
@@ -1922,17 +1941,17 @@ test("synthetic POV fixture omits hidden agents and spatial endpoints", async ({
   ).toBe("rgb(132, 204, 22)");
   await expect(
     page.locator('.pov-observed-body[data-observation-key="ally:1"]'),
-  ).toHaveAttribute("aria-label", /Hunter Trap stun, 2 ticks/u);
+  ).toHaveAttribute("aria-label", /Hunter Freezing Trap stun, 2 ticks/u);
   await observedTrap.hover();
   await expect(page.locator("#visual-tooltip-title")).toHaveText(
-    "Hunter (Ultimate: Trap) Stun",
+    "Hunter (Ultimate: Freezing Trap) Stun",
   );
   await expect(page.locator("#visual-tooltip-details")).toContainText(
     "Source agent identity is not disclosed",
   );
   await expect(page.locator("#battlefield .pending-route")).toHaveCount(0);
   await expect(page.locator("#battlefield .debug-visibility-cue")).toHaveCount(0);
-  await expect(page.locator("#battlefield .debug-protected-zone")).toHaveCount(2);
+  await expect(page.locator("#battlefield .debug-protected-zone")).toHaveCount(0);
   await expect(
     page.locator('#battlefield .agent[data-public-agent-id="5"]'),
   ).toHaveCount(0);
@@ -1951,13 +1970,13 @@ test("synthetic POV fixture omits hidden agents and spatial endpoints", async ({
 
   await captureBaseline(
     page,
-    "pov-redaction-synthetic-debug-successor-observation-phase-1440x900.png",
+    "pov-redaction-synthetic-analysis-successor-observation-phase-1440x900.png",
     {
       commandPosts,
       expectedTransientCount: 1,
       // Authorized successor-only POV deltas share one non-causal observation
       // phase; this capture must not imply movement-before-health ordering.
-      logicalMs: POV_SUCCESSOR_OBSERVATION_PHASE_MS,
+      eventWindow: { eventType: POV_HEALTH_EVENT_TYPE },
     },
   );
 });

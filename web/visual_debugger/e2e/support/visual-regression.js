@@ -7,19 +7,16 @@ import {
   CHOREOGRAPHY_ROUTE_ROOT,
   choreographySnapshot,
   installWaapiAutopause,
-  pauseAtLogicalTime,
+  pauseInsideEventWindow,
 } from "./choreography.js";
 
 export const DESKTOP_VIEWPORT = Object.freeze({ width: 1440, height: 900 });
 export const MINIMUM_VIEWPORT = Object.freeze({ width: 960, height: 600 });
-export const ABILITY_PHASE_MS = 120;
-export const HEALTH_RESOLUTION_PHASE_MS = 210;
-export const CHARGE_PHASE_MS = 400;
-export const STATUS_PHASE_MS = 680;
-// Both recipient-safe successor deltas begin together at 520 ms. Sample just
-// inside that shared, explicitly non-causal observation phase so both are
-// visibly painted without inventing an order between them.
-export const POV_SUCCESSOR_OBSERVATION_PHASE_MS = 600;
+export const ABILITY_EVENT_TYPE = "ability_activated";
+export const HEALTH_RESOLUTION_EVENT_TYPE = "recipient_health_resolution";
+export const CHARGE_EVENT_TYPE = "charge_phase_displacement";
+export const STATUS_EVENT_TYPE = "status_applied";
+export const POV_HEALTH_EVENT_TYPE = "own_health_changed";
 
 // Reported hosted-Linux retries held these two dense, semantically asserted
 // proofs at stable 0.1013% and 0.1005% diffs. Keep the normal 0.1% policy for
@@ -66,42 +63,63 @@ export async function expectVisibleInteractiveHelpInventory(page) {
           element.getClientRects().length > 0
         );
       });
+      const nativeDisclosures = visible.filter(
+        (element) => element instanceof HTMLElement && element.localName === "summary",
+      );
+      const operational = visible.filter(
+        (element) =>
+          !(element instanceof HTMLElement && element.localName === "summary"),
+      );
       return {
-        disabled: visible
+        disabled: operational
           .filter(
             (element) =>
               "disabled" in element &&
               /** @type {{disabled?: unknown}} */ (element).disabled === true,
           )
           .map(label),
-        missing: visible
+        missing: operational
           .filter((element) => localHelpOwner(element) === null)
           .map(label),
-        missingDescriptions: visible
+        missingDescriptions: operational
           .filter((element) => {
             const owner = localHelpOwner(element);
             return owner !== null && !owner.hasAttribute("aria-description");
           })
           .map(label),
-        unregisteredDescriptions: visible
+        unregisteredDescriptions: operational
           .filter(
             (element) =>
               element.hasAttribute("aria-description") &&
               localHelpOwner(element) === null,
           )
           .map(label),
-        nativeTitles: visible
+        nativeTitles: operational
           .filter((element) => element.hasAttribute("title"))
           .map(label),
-        registered: visible
+        registered: operational
           .filter((element) => localHelpOwner(element) !== null)
           .map(label),
+        nativeDisclosures: nativeDisclosures.map((element) => ({
+          detailsId:
+            element.parentElement instanceof HTMLDetailsElement
+              ? element.parentElement.id
+              : "",
+          label: element.textContent?.trim() ?? "",
+          ownsNativeDetails: element.parentElement instanceof HTMLDetailsElement,
+        })),
       };
     });
   expect(inventory.missing).toEqual([]);
   expect(inventory.missingDescriptions).toEqual([]);
   expect(inventory.unregisteredDescriptions).toEqual([]);
   expect(inventory.nativeTitles).toEqual([]);
+  expect(
+    inventory.nativeDisclosures.filter(
+      ({ detailsId, label, ownsNativeDetails }) =>
+        !ownsNativeDetails || detailsId.length === 0 || label.length === 0,
+    ),
+  ).toEqual([]);
   expect(inventory.registered.length).toBeGreaterThan(0);
   return inventory;
 }
@@ -479,7 +497,10 @@ export async function waitForStablePresentation(page) {
       hud.scrollTop = 0;
       hud.scrollLeft = 0;
     }
-    if (document.activeElement instanceof HTMLElement) {
+    if (
+      document.activeElement instanceof HTMLElement ||
+      document.activeElement instanceof SVGElement
+    ) {
       document.activeElement.blur();
     }
 
@@ -945,7 +966,7 @@ export async function assertVisibleDecimalPrecision(page) {
  *   expectedTransientCount: number,
  *   expectedSuppressedLifecycleCount?: number,
  *   expectedSuppressedLifecycleIds?: string[] | null,
- *   logicalMs?: number,
+ *   eventWindow?: {eventType: string, part?: "auto" | "group" | "route", progress?: number},
  *   settle?: boolean,
  *   afterSettle?: () => Promise<void>,
  * }} options
@@ -958,15 +979,15 @@ export async function assertStablePresentationFrame(
     expectedTransientCount,
     expectedSuppressedLifecycleCount = 0,
     expectedSuppressedLifecycleIds = null,
-    logicalMs,
+    eventWindow,
     settle = false,
     afterSettle,
   },
 ) {
   const commandCountBeforePresentation = commandPosts.count();
-  if (logicalMs !== undefined) {
+  if (eventWindow !== undefined) {
     await expect(page.locator(CHOREOGRAPHY_ROOT)).toHaveCount(1);
-    await pauseAtLogicalTime(page, logicalMs);
+    await pauseInsideEventWindow(page, eventWindow.eventType, eventWindow);
   } else if (settle) {
     const skip = page.locator("#motion-skip-button");
     await expect(skip).toBeEnabled();

@@ -9,6 +9,7 @@ import {
   finishControllerClock,
   installWaapiAutopause,
   pauseAtLogicalTime,
+  pauseInsideEventWindow,
 } from "./support/choreography.js";
 import { startDebugger, stopDebugger } from "./support/live-debugger.js";
 import {
@@ -258,25 +259,6 @@ async function registeredRoutePoint(owner) {
   });
 }
 
-/**
- * Drive the native range input through the same bubbling input event used by
- * pointer and keyboard interaction. Playwright's text `fill` is intentionally
- * unsupported for range controls.
- *
- * @param {import("@playwright/test").Page} page
- * @param {number} rate
- */
-async function setGraphicsSpeed(page, rate) {
-  await page.locator("#graphics-speed-input").evaluate((input, nextRate) => {
-    if (!(input instanceof HTMLInputElement) || input.type !== "range") {
-      throw new Error("Graphics rendering speed input is unavailable.");
-    }
-    input.value = Number(nextRate).toFixed(2);
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-  }, rate);
-  await expect(page.locator("html")).toHaveAttribute("data-motion-rate", String(rate));
-}
-
 test("directional routes share one clock, gate submissions, reproject, and do not replay", async ({
   page,
 }) => {
@@ -294,7 +276,7 @@ test("directional routes share one clock, gate submissions, reproject, and do no
   );
 
   await page.goto(debuggerUrl);
-  await setGraphicsSpeed(page, 0.5);
+  await expect(page.locator("#graphics-speed-input")).toHaveCount(0);
   await page.getByRole("button", { name: "Reset" }).click();
 
   await expect(page.locator(CHOREOGRAPHY_ROOT)).toHaveCount(1);
@@ -325,9 +307,12 @@ test("directional routes share one clock, gate submissions, reproject, and do no
   );
   expect(flow.commands).toHaveLength(1);
 
-  // Sample inside the authored V2 ability phase (60–180 ms). Route and impact
-  // geometry must not depend on later health or successor phases.
-  await pauseAtLogicalTime(page, 165);
+  // Sample after the authored impact begins but before the M5 ability window
+  // ends. Route and impact geometry must not depend on later outcomes.
+  await pauseInsideEventWindow(page, "ability_activated", {
+    part: "route",
+    progress: 0.7,
+  });
   await expect(page.locator("html")).toHaveAttribute("data-motion-paused", "true");
   await expect(page.locator(".combat-effect--activation")).toHaveCount(9);
   await expect(page.locator(".combat-route__path")).toHaveCount(9);
@@ -452,7 +437,7 @@ test("a collision-suppressed NET cue reappears after resize without replay", asy
   await page.goto(debuggerUrl);
   await page.getByRole("button", { name: "Reset" }).click();
   await expect(page.locator(".combat-effect--net-health")).toHaveCount(1);
-  await pauseAtLogicalTime(page, 210);
+  await pauseInsideEventWindow(page, "recipient_health_resolution");
 
   const root = page.locator(CHOREOGRAPHY_ROOT);
   const net = page.locator(".combat-effect--net-health");
@@ -518,7 +503,7 @@ test("same-size protected-layout changes reproject without replay", async ({
 
   await page.goto(debuggerUrl);
   await page.getByRole("button", { name: "Reset" }).click();
-  await pauseAtLogicalTime(page, 210);
+  await pauseInsideEventWindow(page, "recipient_health_resolution");
   const root = page.locator(CHOREOGRAPHY_ROOT);
   await root.evaluate((element) => {
     element.setAttribute("data-retained-probe", "protected-layout");
@@ -563,21 +548,21 @@ test("reduced motion preserves damage/heal intent and one recipient NET outcome"
   await page.goto(debuggerUrl);
   await page.getByRole("button", { name: "Reset" }).click();
   await expect(page.locator("html")).toHaveAttribute("data-motion-mode", "reduced");
-  await setGraphicsSpeed(page, 2);
+  await expect(page.locator("#graphics-speed-input")).toHaveCount(0);
   await expect(page.locator("html")).toHaveAttribute("data-motion-mode", "reduced");
-  await expect(page.locator("html")).toHaveAttribute("data-motion-rate", "2");
+  await expect(page.locator("html")).not.toHaveAttribute("data-motion-rate", /.+/u);
   await expect(page.locator("html")).toHaveAttribute(
     "data-submission-blocked",
     "false",
   );
   expect(
     (await choreographySnapshot(page)).animationIds.every(
-      ({ playbackRate }) => playbackRate === 2,
+      ({ playbackRate }) => playbackRate === 1,
     ),
   ).toBe(true);
   expect(flow.commands).toHaveLength(1);
-  // Reduced motion preserves V2 causal order on a 220 ms clock: ability cues
-  // paint first, followed by the independently authoritative health result.
+  // Reduced motion compresses the accepted M5 schedule onto a 220 ms clock.
+  // Ability travel remains visible before its impact and health outcome.
   await pauseAtLogicalTime(page, 30);
 
   const activations = page.locator(".combat-effect--activation");
@@ -633,7 +618,7 @@ test("reduced motion preserves damage/heal intent and one recipient NET outcome"
 
   // The compact impact subphase remains inside the ability interval and ends
   // before health resolution begins.
-  await pauseAtLogicalTime(page, 42);
+  await pauseAtLogicalTime(page, 90);
   expect(
     await page
       .locator(".combat-impact")
@@ -642,7 +627,7 @@ test("reduced motion preserves damage/heal intent and one recipient NET outcome"
       ),
   ).toBe(true);
 
-  await pauseAtLogicalTime(page, 52);
+  await pauseAtLogicalTime(page, 120);
   await expect(net).toHaveCount(1);
   await expect(net).toHaveAttribute("data-recipient-slot", "5");
   await expect(net).toHaveAttribute("data-net-delta", "0");
@@ -655,18 +640,14 @@ test("reduced motion preserves damage/heal intent and one recipient NET outcome"
     await page
       .locator(".combat-impact")
       .evaluateAll((nodes) =>
-        nodes.every(
-          (node) => Number.parseFloat(getComputedStyle(node).opacity) <= 0.001,
-        ),
+        nodes.every((node) => Number.parseFloat(getComputedStyle(node).opacity) > 0),
       ),
   ).toBe(true);
   expect(
     await page
       .locator(`${CHOREOGRAPHY_ROUTE_ROOT} .combat-route-effect--activation`)
       .evaluateAll((nodes) =>
-        nodes.every(
-          (node) => Number.parseFloat(getComputedStyle(node).opacity) <= 0.001,
-        ),
+        nodes.every((node) => Number.parseFloat(getComputedStyle(node).opacity) > 0),
       ),
   ).toBe(true);
   await expect(page.locator(".combat-effect--activation[data-net-delta]")).toHaveCount(
@@ -730,7 +711,7 @@ test("opaque public IDs label choreography while Basic transients own no tooltip
   );
 
   await page.goto(debuggerUrl);
-  await pauseAtLogicalTime(page, 680);
+  await pauseInsideEventWindow(page, "recipient_health_resolution");
 
   const basicGroups = page.locator(
     `${CHOREOGRAPHY_ROOT} .combat-effect--activation[data-token-id="basic_damage"], ${CHOREOGRAPHY_ROOT} .combat-effect--activation[data-token-id="basic_heal"]`,
@@ -860,17 +841,17 @@ test("opaque public IDs label choreography while Basic transients own no tooltip
     }
   });
   await page.keyboard.press("Enter");
-  await expect(page.locator("#semantic-inspector")).toBeVisible();
-  await expect(page.locator("#semantic-inspector")).toContainText(
+  await expect(page.locator("#agent-details")).toHaveAttribute("open", "");
+  await expect(page.locator("#agent-details")).toContainText(
     `Agent ID ${publicIds[appliedEvent.source_global_slot]}`,
   );
-  await expect(page.locator("#semantic-inspector")).toContainText(
+  await expect(page.locator("#agent-details")).toContainText(
     `Agent ID ${publicIds[appliedEvent.recipient_global_slot]}`,
   );
-  await expect(page.locator("#semantic-inspector")).not.toContainText(
+  await expect(page.locator("#agent-details")).not.toContainText(
     String(appliedEvent.event_id),
   );
-  await page.locator("#semantic-inspector-close-button").click();
+  await page.locator("#agent-details > summary").click();
 
   const chargeRoute = page
     .locator(
@@ -907,9 +888,9 @@ test("opaque public IDs label choreography while Basic transients own no tooltip
   ).toBe(true);
 
   await page.mouse.click(chargeRoutePoint?.x ?? 0, chargeRoutePoint?.y ?? 0);
-  await expect(page.locator("#semantic-inspector")).toBeVisible();
+  await expect(page.locator("#agent-details")).toHaveAttribute("open", "");
   const inspectorSemanticText = await page
-    .locator("#semantic-inspector")
+    .locator("#agent-details")
     .evaluate(
       (inspector) =>
         `${inspector.textContent ?? ""} ${inspector.getAttribute("aria-label") ?? ""} ${inspector.getAttribute("aria-labelledby") ?? ""}`,
@@ -922,7 +903,7 @@ test("opaque public IDs label choreography while Basic transients own no tooltip
   ).toBe(true);
   expect(
     await page
-      .locator("#visual-tooltip, #semantic-inspector")
+      .locator("#visual-tooltip, #agent-details")
       .evaluateAll((roots) =>
         roots.every((root) =>
           [...root.querySelectorAll("*")].every((node) =>
@@ -1011,7 +992,10 @@ test("mid-transition Motion Off retains one static batch through bounded cleanup
 
   await page.goto(debuggerUrl);
   await page.getByRole("button", { name: "Reset" }).click();
-  await pauseAtLogicalTime(page, 300);
+  await pauseInsideEventWindow(page, "ability_activated", {
+    part: "route",
+    progress: 0.4,
+  });
   const animatedSnapshot = await choreographySnapshot(page);
   await page.getByRole("button", { name: "Motion Off", exact: true }).click();
 
@@ -1042,15 +1026,14 @@ test("mid-transition Motion Off retains one static batch through bounded cleanup
   });
   expect(flow.commands).toHaveLength(1);
 
-  await setGraphicsSpeed(page, 0.5);
   await page.getByRole("button", { name: "Motion Off", exact: true }).click();
   await expect(page.locator("html")).toHaveAttribute("data-motion-mode", "normal");
-  await expect(page.locator("html")).toHaveAttribute("data-motion-rate", "0.5");
+  await expect(page.locator("html")).not.toHaveAttribute("data-motion-rate", /.+/u);
   const restoredPreference = await choreographySnapshot(page);
   expect(restoredPreference.effectIds).toEqual(snapshot.effectIds);
   expect(restoredPreference.animationIds).toHaveLength(1);
   expect(restoredPreference.animationIds[0].id).toMatch(/:cleanup$/);
-  expect(restoredPreference.animationIds[0].playbackRate).toBe(0.5);
+  expect(restoredPreference.animationIds[0].playbackRate).toBe(1);
   expect(flow.commands).toHaveLength(1);
 
   await finishControllerClock(page, "cleanup");
@@ -1059,7 +1042,7 @@ test("mid-transition Motion Off retains one static batch through bounded cleanup
   expect(flow.commands).toHaveLength(1);
 });
 
-test("rejection and composite Trap lifecycle retain only exact supplied facts", async ({
+test("rejection and composite Freezing Trap lifecycle retain only exact supplied facts", async ({
   page,
 }) => {
   await installWaapiAutopause(page);
@@ -1112,7 +1095,9 @@ test("rejection and composite Trap lifecycle retain only exact supplied facts", 
 
   await page.goto(debuggerUrl);
   await page.getByRole("button", { name: "Reset" }).click();
-  await pauseAtLogicalTime(page, 680);
+  // Break + reapply composes into the applied row; the broken atomic row is
+  // retained for identity but intentionally owns no duplicate animation.
+  await pauseInsideEventWindow(page, "status_applied");
 
   const rejection = page.locator(".combat-effect--rejected-action");
   await expect(rejection).toHaveCount(1);
@@ -1124,26 +1109,41 @@ test("rejection and composite Trap lifecycle retain only exact supplied facts", 
     page.locator(`${CHOREOGRAPHY_ROUTE_ROOT} .combat-route-effect--rejected-action`),
   ).toHaveCount(0);
 
-  const broken = page.locator(
-    '.combat-effect--status-lifecycle[data-event-type="status_broken_by_damage"]',
+  const statusEvents = /** @type {Array<Record<string, any>>} */ (
+    compositeFrame.projection.incoming_events.events
+  ).filter(
+    (event) =>
+      event.event_type === "status_broken_by_damage" ||
+      event.event_type === "status_applied",
   );
-  const reapplied = page.locator(
-    '.combat-effect--status-lifecycle[data-event-type="status_applied"]',
+  const atomicEventIds = statusEvents.map((event) => event.event_id);
+  const applicationEventIds = statusEvents
+    .filter((event) => event.event_type === "status_applied")
+    .map((event) => event.event_id);
+  const composed = page.locator(
+    '.combat-effect--status-lifecycle[data-event-type="status_applied"][data-lifecycle="trap_broken_and_reapplied"]',
   );
-  await expect(broken).toHaveCount(1);
-  await expect(reapplied).toHaveCount(1);
-  await expect(broken.locator(".combat-lifecycle__shard")).toHaveCount(6);
+  await expect(composed).toHaveCount(1);
+  await expect(composed).toHaveAttribute(
+    "data-atomic-event-ids",
+    JSON.stringify(atomicEventIds),
+  );
+  await expect(composed).toHaveAttribute(
+    "data-application-event-ids",
+    JSON.stringify(applicationEventIds),
+  );
+  await expect(composed.locator(".combat-lifecycle__shard")).toHaveCount(6);
   await expect(
-    broken.locator('.combat-lifecycle__status-icon[data-icon="status-stun"]'),
+    composed.locator('.combat-lifecycle__status-icon[data-icon="status-stun"]'),
   ).toHaveCount(1);
   await expect(
-    broken.locator('.combat-lifecycle__change-icon[data-icon="lifecycle-trap-broken"]'),
+    composed.locator(
+      '.combat-lifecycle__change-icon[data-icon="lifecycle-trap-broken-reapplied"]',
+    ),
   ).toHaveCount(1);
-  await expect(reapplied.locator(".combat-lifecycle__reapply")).toHaveCount(0);
-  await expect(broken).toHaveAttribute("data-application-event-ids", "[]");
-  await expect(reapplied).toHaveAttribute("data-application-event-ids", "[]");
-  await expect(broken).not.toHaveAttribute("data-duration-before", /.+/);
-  await expect(reapplied).not.toHaveAttribute("data-duration-after", /.+/);
+  await expect(composed.locator(".combat-lifecycle__reapply")).toHaveCount(1);
+  await expect(composed).not.toHaveAttribute("data-duration-before", /.+/);
+  await expect(composed).not.toHaveAttribute("data-duration-after", /.+/);
   await assertBoundedChoreography(page);
   expect(flow.commands).toHaveLength(1);
 });
@@ -1170,7 +1170,7 @@ test("same-epoch POV switch clears privileged effects before safe redacted rebui
 
   await page.goto(debuggerUrl);
   await page.getByRole("button", { name: "Reset" }).click();
-  await pauseAtLogicalTime(page, 600);
+  await pauseInsideEventWindow(page, "recipient_health_resolution");
   const privilegedRoot = page.locator(CHOREOGRAPHY_ROOT);
   await expect(privilegedRoot.locator('[data-target-slot="5"]')).not.toHaveCount(0);
   await privilegedRoot.evaluate((element) => {
@@ -1246,7 +1246,7 @@ test("recipient POV cues never reconstruct a researcher target-only activation",
 
   await page.goto(debuggerUrl);
   await page.getByRole("button", { name: "Reset" }).click();
-  await pauseAtLogicalTime(page, 600);
+  await pauseInsideEventWindow(page, "own_health_changed");
 
   await expect(
     page.locator(`${CHOREOGRAPHY_ROOT} .combat-effect--activation`),

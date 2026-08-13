@@ -56,6 +56,7 @@ const EXPECTED_LIFECYCLE = [
   "cleared_by_death",
   "cleared_unclassified",
   "trap_broken_and_reapplied",
+  "expired_then_reapplied",
 ];
 const EXPECTED_CATALOG_STATUS_MAP = Object.freeze({
   warrior_charge_slow: "slow_warrior_charge",
@@ -106,12 +107,31 @@ test("death clear is distinct from natural expiry and damage break", () => {
   const expired = resolveVisualToken("lifecycle", "expired");
   const damageBreak = resolveVisualToken("lifecycle", "trap_broken");
 
-  assert.equal(deathClear.label, "Cleared by death");
+  assert.equal(deathClear.label, "Cleared on death");
   assert.match(deathClear.accessibleName, /cleared.*recorded new death/u);
   assert.notEqual(deathClear.glyphKey, expired.glyphKey);
   assert.notEqual(deathClear.glyphKey, damageBreak.glyphKey);
   assert.notEqual(deathClear.cssKey, expired.cssKey);
   assert.notEqual(deathClear.cssKey, damageBreak.cssKey);
+});
+
+test("product vocabulary uses the locked exact ability and aura names", () => {
+  assert.deepEqual(
+    [1, 2, 3, 4, 5].map((classId) => ultimateTokenFromClassId(classId).label),
+    ["Burst", "Charge", "Freezing Trap", "Crippling Poison", "Holy Word: Salvation"],
+  );
+  assert.equal(
+    resolveVisualToken("modifier", "mage_amplification").label,
+    "Sorcerer’s Empowerment",
+  );
+  assert.equal(
+    resolveVisualToken("modifier", "warrior_mitigation").label,
+    "Guardian’s Barrier",
+  );
+  assert.equal(
+    resolveVisualToken("modifier", "rogue_anti_heal").label,
+    "Crippling Poison Anti-Heal",
+  );
 });
 
 test("every CP2 catalog status resolves through an explicit presentation mapping", () => {

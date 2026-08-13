@@ -89,10 +89,12 @@ export async function removeReplayArtifacts(outputDirectory) {
 }
 
 /**
- * Start the production CLI in browser replay mode against one canonical file.
+ * Start the production CLI in browser replay mode against one canonical file
+ * or one checked sample registry entry.
  *
  * @param {{
- *   replayPath: string,
+ *   replayPath?: string,
+ *   sampleReplay?: string,
  *   frameIndex?: number,
  *   view?: "researcher" | "pov",
  *   povSlot?: number,
@@ -106,14 +108,34 @@ export async function removeReplayArtifacts(outputDirectory) {
  */
 export function startReplayViewer({
   replayPath,
+  sampleReplay,
   frameIndex,
   view,
   povSlot,
   preset,
   ranges,
 }) {
+  if ((typeof replayPath === "string") === (typeof sampleReplay === "string")) {
+    throw new TypeError(
+      "Replay viewer startup requires exactly one replayPath or sampleReplay.",
+    );
+  }
+  const replayValue =
+    typeof replayPath === "string"
+      ? replayPath
+      : typeof sampleReplay === "string"
+        ? sampleReplay
+        : (() => {
+            throw new TypeError("Replay viewer startup requires a replay selector.");
+          })();
   /** @type {string[]} */
-  const replayArguments = ["--replay", replayPath, "--no-open", "--port", "0"];
+  const replayArguments = [
+    typeof replayPath === "string" ? "--replay" : "--sample-replay",
+    replayValue,
+    "--no-open",
+    "--port",
+    "0",
+  ];
   if (Number.isInteger(frameIndex)) {
     replayArguments.push("--frame-index", String(frameIndex));
   }

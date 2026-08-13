@@ -2,14 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  loadRendererFixture,
-  syntheticDebuggerPresentationFrame,
-} from "../e2e/support/renderer-fixture.js";
-import {
   commandResponseSchedulesShutdown,
   isDebuggerKey,
   isPresentationPauseEvent,
   keyboardCommand,
+  presentationRequiresSubmissionSettle,
   recordingCommandDecision,
   recordingReplacementCommand,
   recordingReviewHandoffRequired,
@@ -35,9 +32,46 @@ test("keyboardCommand forwards raw key and modifier state without semantics", ()
   );
 });
 
+test("Submit settlement covers gated, post-gate active, and paused explanations", () => {
+  assert.equal(
+    presentationRequiresSubmissionSettle({
+      submissionBlocked: true,
+      animationCount: 3,
+      paused: false,
+    }),
+    true,
+  );
+  assert.equal(
+    presentationRequiresSubmissionSettle({
+      submissionBlocked: false,
+      animationCount: 2,
+      paused: false,
+    }),
+    true,
+  );
+  assert.equal(
+    presentationRequiresSubmissionSettle({
+      submissionBlocked: false,
+      animationCount: 2,
+      paused: true,
+    }),
+    true,
+  );
+  assert.equal(
+    presentationRequiresSubmissionSettle({
+      submissionBlocked: false,
+      animationCount: 0,
+      paused: false,
+    }),
+    false,
+  );
+  assert.equal(presentationRequiresSubmissionSettle(null), false);
+});
+
 test("debugger key capture leaves modified browser shortcuts native", () => {
   assert.equal(isDebuggerKey({ key: "r" }), true);
   assert.equal(isDebuggerKey({ key: "p" }), true);
+  assert.equal(isDebuggerKey({ key: "v" }), false);
   assert.equal(isDebuggerKey({ key: "P", shiftKey: true }), true);
   assert.equal(isDebuggerKey({ key: "x" }), true);
   assert.equal(isDebuggerKey({ key: "X" }), true);
@@ -93,7 +127,6 @@ function recordingFrame({ lifecycle = "recording", captured = 1 } = {}) {
     scenario: {
       name: "alpha",
       ordinary_movement_distance_scale: 0.5,
-      scenario_default_movement_scale: 1,
     },
     available_scenarios: [{ name: "alpha" }, { name: "bravo" }, { name: "charlie" }],
     recording: {
@@ -127,57 +160,9 @@ test("recording restart resolution canonicalizes direct and keyboard replacement
     command_type: "scenario_switch",
     scenario_name: "bravo",
   });
-  assert.deepEqual(
-    recordingReplacementCommand(frame, {
-      command_type: "set_movement_scale",
-      movement_scale: null,
-    }),
-    { command_type: "set_movement_scale", movement_scale: null },
-  );
-  assert.deepEqual(
-    recordingReplacementCommand(frame, {
-      command_type: "set_movement_scale",
-      movement_scale: 0.5,
-    }),
-    null,
-  );
   assert.equal(
     recordingReplacementCommand(frame, keyboardCommand("R", { shiftKey: true })),
     null,
-  );
-});
-
-test("movement-scale replacement reads exact normalized ScenarioMetadataV1 fields", async () => {
-  const frame = syntheticDebuggerPresentationFrame(
-    await loadRendererFixture("canonical_event_vocabulary"),
-  );
-  const current = frame.scenario.ordinary_movement_distance_scale;
-  const authored = frame.scenario.scenario_default_movement_scale;
-  assert.equal(typeof current, "number");
-  assert.equal(typeof authored, "number");
-  assert.equal(
-    recordingReplacementCommand(frame, {
-      command_type: "set_movement_scale",
-      movement_scale: current,
-    }),
-    null,
-  );
-  assert.equal(
-    recordingReplacementCommand(frame, {
-      command_type: "set_movement_scale",
-      movement_scale: null,
-    }),
-    current === authored
-      ? null
-      : { command_type: "set_movement_scale", movement_scale: null },
-  );
-  const changed = current === 0.1 ? 0.2 : 0.1;
-  assert.deepEqual(
-    recordingReplacementCommand(frame, {
-      command_type: "set_movement_scale",
-      movement_scale: changed,
-    }),
-    { command_type: "set_movement_scale", movement_scale: changed },
   );
 });
 

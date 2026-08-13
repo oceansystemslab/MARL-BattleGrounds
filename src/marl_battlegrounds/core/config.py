@@ -1,6 +1,7 @@
 """Host-facing configuration, fixed-slot profile, and state validation."""
 
 import math
+from typing import Final
 
 import jax.numpy as jnp
 import numpy as np
@@ -68,6 +69,12 @@ from marl_battlegrounds.core.types import (
 _INT32_MAX = int(np.iinfo(np.int32).max)
 _FLOAT32_MAX = float(np.finfo(np.float32).max)
 _MAX_EXACT_FLOAT32_INTEGER = 2**24
+
+# Product sessions use one movement calibration so researchers cannot change
+# policy-relevant dynamics from a presentation surface. Generic ``EnvConfig``
+# construction deliberately retains the full validated ``(0.0, 1.0]`` domain
+# for tests and explicitly experimental callers.
+CANONICAL_PRODUCT_MOVEMENT_SCALE: Final = 1.0
 
 
 def resolve_agent_profile(
@@ -694,6 +701,23 @@ def validate_env_config(config: EnvConfig) -> None:
         obstacles=obstacles,
         profile=profile,
     )
+
+
+def validate_product_env_config(config: EnvConfig) -> None:
+    """Validate one product episode, including its fixed movement calibration.
+
+    This boundary composes the generic scientific configuration validator and
+    then applies the product-only movement-scale contract. Tests and explicit
+    experimental construction should continue to call :func:`validate_env_config`
+    when exercising noncanonical scales.
+    """
+    validate_env_config(config)
+    if config.ordinary_movement_distance_scale != CANONICAL_PRODUCT_MOVEMENT_SCALE:
+        raise ValueError(
+            "product ordinary_movement_distance_scale must equal "
+            f"{CANONICAL_PRODUCT_MOVEMENT_SCALE:.2f}, not "
+            f"{config.ordinary_movement_distance_scale}."
+        )
 
 
 def _validate_state_positions(

@@ -407,6 +407,7 @@ function researcherFrame(frameIndex = 0, choreographyGeneration = 0) {
     completion: researcherCompletion(),
     processing: processing(),
     show_ranges: true,
+    recorded_ordinary_movement_distance_scale: 1.0,
     projection: researcherProjection(frameIndex),
   };
 }
@@ -1001,6 +1002,7 @@ test("three replay frame roots normalize through separate audience boundaries", 
   assert.equal(researcher.animate_incoming, false);
   assert.equal(researcher.show_ranges, true);
   assert.equal(researcher.verbose, false);
+  assert.equal(researcher.recorded_ordinary_movement_distance_scale, 1);
   assert.equal(Object.hasOwn(researcher, "scenario"), false);
   assert.equal(Object.hasOwn(researcher, "available_scenarios"), false);
   assert.equal(Object.hasOwn(researcher, "recording"), false);
@@ -1009,6 +1011,7 @@ test("three replay frame roots normalize through separate audience boundaries", 
   assert.equal(pov.verbose, false);
   assert.equal(Object.hasOwn(pov, "show_ranges"), false);
   assert.equal(Object.hasOwn(pov, "scenario"), false);
+  assert.equal(Object.hasOwn(pov, "recorded_ordinary_movement_distance_scale"), false);
   assert.deepEqual(pov.processing, {
     schema_version: 1,
     disclosure: "not_available_in_actor_pov",
@@ -1019,6 +1022,55 @@ test("three replay frame roots normalize through separate audience boundaries", 
   assert.equal(source.scene.audience, "agent_pov");
   assert.match(source.scene.audience_badge, /SOURCE MATERIAL ONLY/u);
   assert.equal(source.event_batch, null);
+  assert.equal(
+    Object.hasOwn(source, "recorded_ordinary_movement_distance_scale"),
+    false,
+  );
+
+  for (const raw of [researcherFrame(), povFrame(), sourceFrame()]) {
+    raw.verbose = true;
+    assert.throws(() => normalizeReplayViewerFrameV1(raw), /scalar contract/u);
+  }
+  for (const raw of [researcherFrame(), povFrame(), sourceFrame()]) {
+    raw.preset = "debug";
+    assert.throws(() => normalizeReplayViewerFrameV1(raw), /scalar contract/u);
+  }
+});
+
+test("researcher replay preserves one recorded experimental movement scale", () => {
+  const raw = researcherFrame();
+  raw.recorded_ordinary_movement_distance_scale = 0.375;
+
+  const normalized = normalizeReplayViewerFrameV1(raw);
+
+  assert.equal(normalized.recorded_ordinary_movement_distance_scale, 0.375);
+
+  for (const invalid of [0, -0.1, 1.01, Number.POSITIVE_INFINITY, Number.NaN]) {
+    const candidate = researcherFrame();
+    candidate.recorded_ordinary_movement_distance_scale = invalid;
+    assert.throws(
+      () => normalizeReplayViewerFrameV1(candidate),
+      /recorded_ordinary_movement_distance_scale/u,
+    );
+  }
+
+  const missing = /** @type {any} */ (researcherFrame());
+  delete missing.recorded_ordinary_movement_distance_scale;
+  assert.throws(
+    () => normalizeReplayViewerFrameV1(missing),
+    /unknown or missing fields/u,
+  );
+
+  for (const hiddenAudience of /** @type {Array<Record<string, any>>} */ ([
+    povFrame(),
+    sourceFrame(),
+  ])) {
+    hiddenAudience.recorded_ordinary_movement_distance_scale = 0.375;
+    assert.throws(
+      () => normalizeReplayViewerFrameV1(hiddenAudience),
+      /unknown or missing fields/u,
+    );
+  }
 });
 
 test("researcher replay installs the rebuilt frozen projection boundary", () => {

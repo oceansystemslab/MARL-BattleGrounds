@@ -27,10 +27,42 @@ Open a validated semantic replay in the same read-only browser analyzer:
 ./scripts/dev/run_debug_renderer.sh --replay episode.marlbg-replay.json
 ```
 
+Three checked-in demonstration episodes can be listed and opened without
+locating an artifact path:
+
+```bash
+./scripts/dev/run_debug_renderer.sh --list-sample-replays
+./scripts/dev/run_debug_renderer.sh --sample-replay death-respawn-shield
+```
+
+Sample headers retain the actual generating source/runtime provenance, while
+the launcher explicitly identifies them as unofficial presentation demos—not
+benchmarks or source/host attestations.
+
 Replay mode validates the complete artifact before opening a server, exposes an
 audience-specific timeline, and never imports or runs the simulator. Use
 `--frame-index`, `--view pov`, and `--pov-slot` to choose the initial recorded
 frame and recipient-safe view.
+
+Live debugger scenarios use one canonical product movement scale (`1.00`). The
+browser does not edit it; replay preserves the recorded scale as read-only
+scientific truth. Presentation and Analysis are the visible presets, while
+authorized concise diagnostics remain available in the collapsible Technical
+Frame panel.
+
+On the live battlefield, primary click changes the controlled actor,
+Shift+primary click selects a target, and right click clears that target. In a
+researcher replay, activating an authorized agent changes the read-only
+reference; Actor POV remains limited to its authorized self. Replay transport
+provides First, −10, −1, Play/Pause, +1, +10, Last, a frame slider, and an
+authoritative tick label. The Command Deck and right-side information modules
+use native collapsible panels, including a comprehensive Agent Details card.
+
+Readable presentation cues preserve the canonical event feed while composing
+status refresh/reapplication, spawn-shield lifetime, death, and respawn for
+inspection. User-facing class vocabulary is consistent across live and replay:
+Burst, Charge, Freezing Trap, Crippling Poison, Holy Word: Salvation,
+Sorcerer’s Empowerment, and Guardian’s Barrier.
 
 Record one live browser episode and review the saved result without leaving the
 page:

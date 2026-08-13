@@ -12,6 +12,7 @@ import {
   replayKeyboardIntent,
   replayNavigationCommand,
   replaySeekCommand,
+  replayTimelineSimulatorStep,
   validateReplayAnimationIntent,
   validateReplayCommandOutcome,
   validateReplayCursorTransition,
@@ -115,16 +116,22 @@ class FakeElement {
   }
 }
 
-function controlElements() {
+/** @param {(frameIndex: number) => unknown} [tickForFrameIndex] */
+function controlElements(
+  tickForFrameIndex = (/** @type {number} */ frameIndex) => frameIndex,
+) {
   return {
     root: new FakeElement(),
     firstButton: new FakeElement(),
+    backTenButton: new FakeElement(),
     previousButton: new FakeElement(),
     playPauseButton: new FakeElement(),
     nextButton: new FakeElement(),
+    forwardTenButton: new FakeElement(),
     lastButton: new FakeElement(),
     slider: new FakeElement(),
     position: new FakeElement(),
+    tickForFrameIndex,
   };
 }
 
@@ -192,6 +199,14 @@ test("cursor and replay command constructors reject malformed authority inputs",
     }),
     { command_type: "select_agent", selected_global_slot: null },
   );
+  assert.deepEqual(
+    normalizeReplayCommand({ command_type: "set_preset", preset: "debug" }),
+    { command_type: "set_preset", preset: "analysis" },
+  );
+  assert.deepEqual(
+    normalizeReplayCommand({ command_type: "set_verbosity", verbose: true }),
+    { command_type: "set_verbosity", verbose: false },
+  );
   assert.throws(
     () =>
       normalizeReplayCommand({
@@ -225,6 +240,11 @@ test("keyboard intent is bounded to unmodified replay navigation and edge-trigge
   assert.equal(replayKeyboardIntent({ key: "End" }), "last");
   assert.equal(replayKeyboardIntent({ key: "ArrowLeft" }), "previous");
   assert.equal(replayKeyboardIntent({ key: "ArrowRight" }), "next");
+  assert.equal(replayKeyboardIntent({ key: "ArrowLeft", shiftKey: true }), "back_ten");
+  assert.equal(
+    replayKeyboardIntent({ key: "ArrowRight", shiftKey: true }),
+    "forward_ten",
+  );
   assert.equal(replayKeyboardIntent({ key: " ", repeat: false }), "toggle");
   assert.equal(replayKeyboardIntent({ key: " ", repeat: true }), null);
   assert.equal(replayKeyboardIntent({ key: "ArrowRight", ctrlKey: true }), null);
@@ -270,7 +290,7 @@ test("timeline binding debounces slider seeks and preserves native control keys"
     elements.slider.dispatch("input");
     assert.equal(controller.snapshot().pauseReason, "user_seek");
     assert.equal(elements.slider.value, "2");
-    assert.equal(elements.position.textContent, "Frame 2 / 3");
+    assert.equal(elements.position.textContent, "Tick 2 / 3");
     await clock.advance(159);
     assert.deepEqual(commands, []);
     await clock.advance(1);
@@ -308,11 +328,49 @@ test("timeline rendering publishes bounded controls and accessible cursor text",
   });
   assert.equal(elements.slider.value, "2");
   assert.equal(elements.slider.max, "3");
-  assert.equal(elements.slider.getAttribute("aria-valuetext"), "Frame 2 of 3");
-  assert.equal(elements.position.textContent, "Frame 2 / 3");
+  assert.equal(elements.slider.getAttribute("aria-valuetext"), "Tick 2 of 3");
+  assert.equal(elements.position.textContent, "Tick 2 / 3");
+  assert.equal(elements.backTenButton.disabled, false);
   assert.equal(elements.previousButton.disabled, false);
   assert.equal(elements.nextButton.disabled, false);
+  assert.equal(elements.forwardTenButton.disabled, false);
   assert.equal(elements.playPauseButton.getAttribute("aria-label"), "Play replay");
+});
+
+test("timeline labels use nonzero simulator ticks while slider seeks frame indices", () => {
+  const timeline = {
+    rows: Array.from({ length: 4 }, (_, frameIndex) => ({
+      frame_index: frameIndex,
+      simulator_step_count: 40 + frameIndex,
+    })),
+  };
+  const elements = controlElements((frameIndex) =>
+    replayTimelineSimulatorStep(timeline, frameIndex),
+  );
+  renderReplayTimelineControls(/** @type {any} */ (elements), {
+    cursor: cursor(2, 3),
+    playing: false,
+    requestPending: false,
+    presentationPending: false,
+    connected: true,
+    hidden: false,
+    pauseReason: null,
+    atStart: false,
+    atEnd: false,
+  });
+  assert.equal(elements.slider.value, "2");
+  assert.equal(elements.slider.max, "3");
+  assert.equal(elements.slider.getAttribute("aria-valuetext"), "Tick 42 of 43");
+  assert.equal(elements.position.textContent, "Tick 42 / 43");
+  assert.equal(replayTimelineSimulatorStep(timeline, 2), 42);
+  assert.equal(replayTimelineSimulatorStep(timeline, 4), null);
+  assert.equal(
+    replayTimelineSimulatorStep(
+      { rows: [{ frame_index: 1, simulator_step_count: 40 }] },
+      0,
+    ),
+    null,
+  );
 });
 
 test("durable generations advance only for exact next and reject animation aliases", () => {
@@ -488,6 +546,40 @@ test("same-frame absolute seek is sent while out-of-range seek is rejected local
   assert.deepEqual(commands, [replaySeekCommand(1)]);
   await assert.rejects(controller.seek(4), /outside/u);
   assert.equal(commands.length, 1);
+});
+
+test("ten-tick jumps clamp and send one absolute seek instead of repeated requests", async () => {
+  /** @type {Array<Record<string, any>>} */
+  const commands = [];
+  let authoritative = cursor(12, 25, { cursor: 7, choreography: 2 });
+  const controller = new ReplayPlaybackController({
+    request: async (command) => {
+      commands.push(command);
+      authoritative = cursor(Number(command.frame_index), 25, {
+        cursor: authoritative.cursor_generation + 1,
+        choreography: authoritative.choreography_generation,
+      });
+      return { frame: { cursor: authoritative } };
+    },
+  });
+  controller.installCursor(authoritative);
+
+  assert.equal(await controller.jump(-10), true);
+  assert.deepEqual(commands, [replaySeekCommand(2)]);
+  assert.equal(await controller.jump(10), true);
+  assert.deepEqual(commands, [replaySeekCommand(2), replaySeekCommand(12)]);
+
+  authoritative = cursor(24, 25, {
+    cursor: authoritative.cursor_generation,
+    choreography: authoritative.choreography_generation,
+  });
+  controller.installCursor(authoritative);
+  assert.equal(await controller.jump(10), true);
+  assert.deepEqual(commands.at(-1), replaySeekCommand(25));
+  assert.equal(commands.length, 3);
+  assert.equal(await controller.jump(10), false);
+  assert.equal(commands.length, 3);
+  await assert.rejects(controller.jump(0), /non-zero integer/u);
 });
 
 test("autoplay waits for both response and presentation before scheduling another request", async () => {

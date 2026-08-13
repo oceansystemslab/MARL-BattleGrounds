@@ -36,7 +36,6 @@ from scripts.dev.visual_debugger.control import (
     select_clicked_target,
     select_controlled_actor,
     select_no_combat,
-    set_movement_scale,
     set_pending_movement,
     submit_interactive,
     submit_next_script_frame,
@@ -53,7 +52,6 @@ from scripts.dev.visual_debugger.protocol import (
     ResetCommandV1,
     RosterSelectionCommandV1,
     ScenarioSwitchCommandV1,
-    SetMovementScaleCommandV1,
     SetPresetCommandV1,
     SetViewCommandV1,
     ViewMode,
@@ -83,7 +81,6 @@ _MOVEMENT_KEYS = {
 type RecordingRestartIntentV1 = Literal[
     "reset",
     "scenario_switch",
-    "movement_scale",
 ]
 
 
@@ -116,18 +113,6 @@ def recording_restart_intent_v1(
         ):
             return "scenario_switch"
         return None
-    if isinstance(command, SetMovementScaleCommandV1):
-        if view_mode != "researcher":
-            return None
-        effective_scale = (
-            session.scenario_default_movement_scale
-            if command.movement_scale is None
-            else command.movement_scale
-        )
-        recorded_scale = (
-            session.evaluation_context.resolved_env_config
-        ).ordinary_movement_distance_scale
-        return "movement_scale" if effective_scale != recorded_scale else None
     return None
 
 
@@ -715,12 +700,17 @@ def _dispatch_keyboard(
             changed=True,
         )
     if key == "v":
+        edited = (
+            replace(session, verbose_logging=False)
+            if session.verbose_logging
+            else session
+        )
         return _result(
-            replace(session, verbose_logging=not session.verbose_logging),
+            edited,
             view_mode=view_mode,
             preset=preset,
             handled=True,
-            changed=True,
+            changed=edited is not session,
         )
     if key in ("[", "]"):
         direction = -1 if key == "[" else 1
@@ -785,11 +775,11 @@ def _dispatch_pointer(
             changed=False,
         )
     edited = (
-        select_controlled_actor(session, target)
+        select_clicked_target(session, target)
         if command.shift_key
-        else select_clicked_target(session, target)
+        else select_controlled_actor(session, target)
     )
-    if view_mode == "pov" and command.shift_key:
+    if view_mode == "pov" and not command.shift_key:
         edited = sanitize_pov_pending_target(edited)
     return _pending_edit_result(
         session,
@@ -967,30 +957,6 @@ def dispatch_command(
             handled=True,
             changed=True,
             episode_restarted=True,
-        )
-    if isinstance(command, SetMovementScaleCommandV1):
-        if view_mode != "researcher":
-            return _result(
-                session,
-                view_mode=view_mode,
-                preset=preset,
-                handled=True,
-                changed=False,
-                notice="Movement scale can be changed only in researcher view.",
-            )
-        edited = set_movement_scale(session, command.movement_scale)
-        return _result(
-            edited,
-            view_mode=view_mode,
-            preset=preset,
-            handled=True,
-            changed=edited is not session,
-            episode_restarted=edited is not session,
-            notice=(
-                "Movement scale is already at the requested effective value."
-                if edited is session
-                else None
-            ),
         )
     if isinstance(command, SetViewCommandV1):
         edited = (

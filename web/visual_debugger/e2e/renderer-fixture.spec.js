@@ -4,7 +4,7 @@ import { formatDisplayNumber } from "../src/display.js";
 import {
   CHOREOGRAPHY_ROOT,
   installWaapiAutopause,
-  pauseAtLogicalTime,
+  pauseInsideEventWindow,
 } from "./support/choreography.js";
 import { startDebugger, stopDebugger } from "./support/live-debugger.js";
 import {
@@ -89,10 +89,10 @@ const ULTIMATE_TOKEN_BY_CLASS = Object.freeze({
 });
 
 const ULTIMATE_NAME_BY_CLASS = Object.freeze({
-  hunter: "Trap",
+  hunter: "Freezing Trap",
   mage: "Burst",
-  priest: "Holy Word",
-  rogue: "Poison",
+  priest: "Holy Word: Salvation",
+  rogue: "Crippling Poison",
   warrior: "Charge",
 });
 
@@ -363,13 +363,14 @@ async function expectNoVisibleLegacySlotLabels(page) {
  * @param {Array<Record<string, any>>} events
  */
 async function expectExactResearcherChoreography(page, events) {
-  const feedOnlyKinds = new Set([
+  const nonPaintedKinds = new Set([
     "lethal_damage_contribution",
+    "ordinary_movement_phase_displacement",
     "source_damage_output",
     "source_healing_output",
   ]);
   const painted = events.filter(
-    (event) => !feedOnlyKinds.has(String(event.event_type)),
+    (event) => !nonPaintedKinds.has(String(event.event_type)),
   );
   expect(
     await page.locator(`${CHOREOGRAPHY_ROOT} .combat-effect`).evaluateAll((nodes) =>
@@ -425,16 +426,25 @@ async function expectSettledResearcherChoreography(page, events) {
  */
 async function expectExactResearcherPublicIds(page, agents) {
   const expected = agents.map((agent) => String(agent.public_agent_id));
-  expect(
-    await page
-      .locator("#battlefield .agent")
-      .evaluateAll((nodes) =>
-        nodes.map(
-          (node) =>
-            node.getAttribute("aria-label")?.match(/^Agent ID ([^,]+)/u)?.[1] ?? null,
-        ),
-      ),
-  ).toEqual(expected);
+  const battlefieldAgents = await page
+    .locator("#battlefield .agent")
+    .evaluateAll((nodes) =>
+      nodes.map((node) => ({
+        hasPublicIdData: node.hasAttribute("data-public-agent-id"),
+        label: node.getAttribute("aria-label"),
+        replayInteractive: node.getAttribute("role") === "button",
+      })),
+    );
+  for (const [index, agent] of battlefieldAgents.entries()) {
+    expect(agent.hasPublicIdData).toBe(false);
+    if (agent.replayInteractive) {
+      expect(agent.label).toBe(
+        `Agent ID ${expected[index]}. Activate to open authorized Agent Details and set replay Reference.`,
+      );
+    } else {
+      expect(agent.label).toMatch(new RegExp(`^Agent ID ${expected[index]},`, "u"));
+    }
+  }
   expect(await page.locator("#roster .roster-id").allTextContents()).toEqual(
     expected.map((publicAgentId) => `Agent ID ${publicAgentId}`),
   );
@@ -489,7 +499,6 @@ test("exhaustive presentation roots survive live and loaded-replay main paths", 
         "cooldown_started",
         "cooldown_ready",
         "charge_phase_displacement",
-        "ordinary_movement_phase_displacement",
         "agent_died",
         "spawn_shield_expired",
         "respawn_wave_occurred",
@@ -501,6 +510,16 @@ test("exhaustive presentation roots survive live and loaded-replay main paths", 
           ),
         ).toHaveCount(1);
       }
+      await expect(
+        page.locator(
+          `${CHOREOGRAPHY_ROOT} .combat-effect[data-event-type="ordinary_movement_phase_displacement"]`,
+        ),
+      ).toHaveCount(0);
+      await expect(
+        page.locator(
+          '#event-feed .event-item[data-event-type="ordinary_movement_phase_displacement"][data-tooltip-owner]',
+        ),
+      ).toHaveCount(1);
     }
     await expectNoVisibleLegacySlotLabels(page);
 
@@ -558,19 +577,17 @@ test("exhaustive presentation roots survive live and loaded-replay main paths", 
         .locator(`#roster .roster-row[data-class="${className}"]`)
         .first();
       await rosterRow.press("Enter");
-      await expect(page.locator("#semantic-inspector")).toBeVisible();
-      await expect(page.locator("#semantic-inspector-content")).toContainText(
+      await expect(page.locator("#agent-details")).toHaveAttribute("open", "");
+      await expect(page.locator("#selection-card")).toContainText(
         "Exact Class Mechanics",
       );
-      await expect(page.locator("#semantic-inspector-content")).toContainText(
-        "Ultimate Name",
-      );
-      await expect(page.locator("#semantic-inspector-content")).toContainText(
+      await expect(page.locator("#selection-card")).toContainText("Ultimate Name");
+      await expect(page.locator("#selection-card")).toContainText(
         ULTIMATE_NAME_BY_CLASS[
           /** @type {keyof typeof ULTIMATE_NAME_BY_CLASS} */ (className)
         ],
       );
-      await page.locator("#semantic-inspector-close-button").click();
+      await page.locator("#agent-details > summary").click();
     }
     expect(
       new Set(
@@ -594,6 +611,36 @@ test("exhaustive presentation roots survive live and loaded-replay main paths", 
       ),
     ).toEqual(new Set(["mage_amplification", "warrior_mitigation"]));
     expect(
+      vocabularyAgents.flatMap((agent) =>
+        /** @type {Array<Record<string, any>>} */ (agent.aura_modifiers).map(
+          (modifier) => modifier.aura_id,
+        ),
+      ),
+    ).toContain("mage_damage_amplification");
+    expect(
+      vocabularyAgents.flatMap((agent) =>
+        /** @type {Array<Record<string, any>>} */ (agent.aura_modifiers).map(
+          (modifier) => modifier.aura_id,
+        ),
+      ),
+    ).toContain("warrior_damage_mitigation");
+    const auraTokenById = Object.freeze({
+      mage_damage_amplification: "mage_amplification",
+      warrior_damage_mitigation: "warrior_mitigation",
+    });
+    const expectedPaintedModifierTokens = new Set(
+      vocabularyAgents.flatMap((agent) =>
+        /** @type {Array<Record<string, any>>} */ (agent.aura_modifiers)
+          .filter((modifier) => modifier.multiplier !== 1)
+          .map(
+            (modifier) =>
+              auraTokenById[
+                /** @type {keyof typeof auraTokenById} */ (modifier.aura_id)
+              ],
+          ),
+      ),
+    );
+    expect(
       new Set(
         await page
           .locator("#battlefield .modifier-cell[data-tooltip-owner]")
@@ -601,7 +648,7 @@ test("exhaustive presentation roots survive live and loaded-replay main paths", 
             nodes.map((node) => node.getAttribute("data-token-id")),
           ),
       ),
-    ).toEqual(new Set(["mage_amplification", "warrior_mitigation"]));
+    ).toEqual(expectedPaintedModifierTokens);
     await expectNoVisibleLegacySlotLabels(page);
 
     const crowded = exhaustivePresentationPairs.crowded;
@@ -717,10 +764,15 @@ test("exhaustive presentation roots survive live and loaded-replay main paths", 
         page.locator(
           `${CHOREOGRAPHY_ROOT} .combat-effect[data-event-type="own_position_changed"][data-tooltip-owner]`,
         ),
-      ).toHaveCount(1);
+      ).toHaveCount(0);
       await expect(
         page.locator(
           `${CHOREOGRAPHY_ROOT} .combat-effect[data-event-type="own_health_changed"][data-tooltip-owner]`,
+        ),
+      ).toHaveCount(1);
+      await expect(
+        page.locator(
+          `${CHOREOGRAPHY_ROOT} .combat-effect[data-event-type="own_lifecycle_changed"][data-cue-semantic="spawn_shield_expired"] .combat-semantic-pulse__shield-shell`,
         ),
       ).toHaveCount(1);
     } else {
@@ -840,7 +892,7 @@ test("test-only fixture interception installs an explicitly synthetic scene", as
   await expect(cooldown).toHaveAttribute("data-numeric-layout", "compartments");
   await expect(cooldown).toHaveAttribute(
     "aria-label",
-    /Accepted Hunter Trap activation cooldown.*30 ticks remaining.*Agent ID 2/i,
+    /Accepted Hunter Freezing Trap activation cooldown.*30 ticks remaining.*Agent ID 2/i,
   );
   await expect(cooldown.locator(".cooldown-cell__value")).toHaveText("30");
   await expect(cooldown.locator(".cooldown-cell__icon:not([hidden])")).toHaveCount(1);
@@ -1333,15 +1385,14 @@ test("serialized mechanics tuning flows through the full semantic inspector", as
   await page.goto(debuggerUrl);
   await expect(page.locator("#connection-status")).toHaveText("Online");
 
-  const mageComparison = page.locator(
-    '.comparison-agent[data-role="controlled"][data-slot="0"]',
-  );
-  await expect(mageComparison).toBeVisible();
-  await mageComparison.focus();
+  const mageRoster = page.locator('#roster .roster-row[data-slot="0"]');
+  await expect(mageRoster).toHaveAttribute("data-controlled", "true");
+  await expect(mageRoster).toContainText("Mage");
+  await mageRoster.focus();
   await page.keyboard.press("Enter");
-  await expect(page.locator("#semantic-inspector")).toBeVisible();
+  await expect(page.locator("#agent-details")).toHaveAttribute("open", "");
   const mechanicsSection = page
-    .locator("#semantic-inspector .semantic-explanation__section")
+    .locator("#agent-details .semantic-explanation__section")
     .filter({ hasText: "Exact Class Mechanics" });
   const damageTerm = mechanicsSection.locator("dt", {
     hasText: "Basic Raw Damage",
@@ -1351,7 +1402,7 @@ test("serialized mechanics tuning flows through the full semantic inspector", as
     String(expected.basic_raw_damage),
   );
   const statusSection = page
-    .locator("#semantic-inspector .semantic-explanation__section")
+    .locator("#agent-details .semantic-explanation__section")
     .filter({ hasText: "Authored Status Mechanics" });
   await expect(statusSection).toContainText(
     "Mage (Ultimate: Burst) Damage Amplification",
@@ -1361,25 +1412,23 @@ test("serialized mechanics tuning flows through the full semantic inspector", as
     `${Math.round((expected.burst_multiplier - 1) * 100)}% more damage dealt`,
   );
   const passiveSection = page
-    .locator("#semantic-inspector .semantic-explanation__section")
+    .locator("#agent-details .semantic-explanation__section")
     .filter({ hasText: "Authored Passive Mechanics" });
-  await expect(passiveSection).toContainText("Sorcerer's Aura Field");
+  await expect(passiveSection).toContainText("Sorcerer’s Empowerment");
   await expect(passiveSection).toContainText(`Radius ${expected.aura_radius}`);
   await expect(passiveSection).toContainText(
     `${Math.round((expected.aura_multiplier - 1) * 100)}% more damage dealt`,
   );
 
-  const semanticInspector = await page
-    .locator("#semantic-inspector")
-    .evaluate((node) => ({
-      rows: [...node.querySelectorAll("dt")].map((term) => ({
-        label: term.textContent?.trim(),
-        value: term.nextElementSibling?.textContent?.trim(),
-      })),
-      sections: [...node.querySelectorAll("h3")].map((heading) =>
-        heading.textContent?.trim(),
-      ),
-    }));
+  const semanticInspector = await page.locator("#agent-details").evaluate((node) => ({
+    rows: [...node.querySelectorAll("dt")].map((term) => ({
+      label: term.textContent?.trim(),
+      value: term.nextElementSibling?.textContent?.trim(),
+    })),
+    sections: [...node.querySelectorAll("h3")].map((heading) =>
+      heading.textContent?.trim(),
+    ),
+  }));
   expect(semanticInspector.sections).toContain("Exact Class Mechanics");
   expect(semanticInspector.rows).toContainEqual({
     label: "Basic Raw Damage",
@@ -1388,7 +1437,7 @@ test("serialized mechanics tuning flows through the full semantic inspector", as
   const snapshotLabels = [
     "Basic Raw Damage",
     "Mage (Ultimate: Burst) Damage Amplification",
-    "Sorcerer's Aura Field (Mage Damage Amplification Aura)",
+    "Sorcerer’s Empowerment",
   ];
   const semanticSnapshot = {
     sections: semanticInspector.sections.filter((section) =>
@@ -1469,6 +1518,73 @@ test("serialized mechanics tuning flows through the full semantic inspector", as
   );
 });
 
+test("dead aura sources stay authoritative on the wire without painting a field", async ({
+  page,
+}) => {
+  const auraTokenById = Object.freeze({
+    mage_damage_amplification: "mage_amplification",
+    warrior_damage_mitigation: "warrior_mitigation",
+  });
+  const auraFrame = structuredClone(syntheticWireFrame);
+  const fields = auraFrame.projection.scene.aura_fields;
+  const deadField = fields.find(
+    /** @param {Record<string, any>} field */ (field) => field.source_alive === true,
+  );
+  const liveField = fields.find(
+    /** @param {Record<string, any>} field */ (field) =>
+      field.source_alive === true && field !== deadField,
+  );
+  if (!deadField || !liveField) {
+    throw new Error("Aura regression requires two living authoritative fields.");
+  }
+  const deadSource = auraFrame.projection.scene.agents.find(
+    /** @param {Record<string, any>} agent */ (agent) =>
+      agent.global_slot === deadField.source_global_slot,
+  );
+  if (!deadSource) {
+    throw new Error("Aura regression cannot join its dead source.");
+  }
+  deadSource.life_state = "corpse";
+  deadSource.current_health = 0;
+  deadField.source_alive = false;
+
+  await page.route("**/api/frame", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      json: auraFrame,
+      status: 200,
+    });
+  });
+  await page.route("**/api/command", async (route) => {
+    await route.abort("blockedbyclient");
+  });
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+
+  const deadToken =
+    auraTokenById[/** @type {keyof typeof auraTokenById} */ (deadField.aura_id)];
+  const liveToken =
+    auraTokenById[/** @type {keyof typeof auraTokenById} */ (liveField.aura_id)];
+  const deadSelector = `.aura-field[data-source-slot="${deadField.source_global_slot}"][data-token="${deadToken}"]`;
+  const liveSelector = `.aura-field[data-source-slot="${liveField.source_global_slot}"][data-token="${liveToken}"]`;
+  await expect(page.locator(`#battlefield ${deadSelector}`)).toHaveCount(0);
+  await expect(
+    page.locator(`#battlefield ${deadSelector}[data-tooltip-owner]`),
+  ).toHaveCount(0);
+  await expect(page.locator(`#battlefield ${liveSelector}`)).toHaveCount(1);
+  await expect(
+    page.locator(`#battlefield ${liveSelector}[data-tooltip-owner]`),
+  ).toHaveCount(1);
+  expect(
+    auraFrame.projection.scene.aura_fields.some(
+      /** @param {Record<string, any>} field */ (field) =>
+        field.source_global_slot === deadField.source_global_slot &&
+        field.aura_id === deadField.aura_id &&
+        field.source_alive === false,
+    ),
+  ).toBe(true);
+});
+
 test("compact active combat yields analysis decoration and restores it after Skip", async ({
   page,
 }) => {
@@ -1490,7 +1606,7 @@ test("compact active combat yields analysis decoration and restores it after Ski
   await page.goto(debuggerUrl);
   await expect(page.locator("#connection-status")).toHaveText("Online");
   await expect(page.locator(CHOREOGRAPHY_ROOT)).toHaveCount(1);
-  await pauseAtLogicalTime(page, 520);
+  await pauseInsideEventWindow(page, "recipient_health_resolution");
 
   const battlefield = page.locator("#battlefield");
   await expect(battlefield).toHaveAttribute("data-compact-active-combat", "true");
@@ -1537,8 +1653,9 @@ test("compact active combat yields analysis decoration and restores it after Ski
     page.locator("#roster .roster-row .roster-fact-token--status"),
   ).toHaveCount(90);
   await expect(page.locator("#selection-card .selected-legality")).toContainText(
-    "Selected target legality",
+    "Current legality",
   );
+  await expect(page.locator("#selection-card .selected-legality__lane")).toHaveCount(2);
   await expect(page.locator("#event-feed .event-item")).toHaveCount(32);
   await expect(
     page.locator(
@@ -2115,7 +2232,7 @@ test("canonical V2 death clear is distinct in cue, feed, and accessible copy", a
   });
 
   await page.goto(debuggerUrl);
-  await pauseAtLogicalTime(page, 680);
+  await pauseInsideEventWindow(page, "status_cleared_by_new_death");
 
   const deathClear = page.locator(
     `${CHOREOGRAPHY_ROOT} .combat-effect[data-event-type="status_cleared_by_new_death"][data-lifecycle="cleared_by_death"]`,
@@ -2136,8 +2253,14 @@ test("canonical V2 death clear is distinct in cue, feed, and accessible copy", a
     '#event-feed .event-item[data-event-type="status_cleared_by_new_death"]',
   );
   await expect(deathClearFeed).toContainText("cleared by new death");
+  await page.locator("#events-details > summary").click();
+  await expect(deathClearFeed).toBeVisible();
   await deathClearFeed.focus();
   await expect(page.locator("#visual-tooltip")).toBeVisible();
+  await expect(page.locator("#visual-tooltip")).toHaveAttribute(
+    "data-tooltip-kind",
+    "event",
+  );
   await expect(page.locator("#visual-tooltip")).toContainText(
     /Status Cleared By New Death/u,
   );
@@ -2397,25 +2520,45 @@ test("structured HUD keeps exact roster, intent, and accepted-result facts disti
       }),
     ),
   );
-  await expect(
-    page.locator('.comparison-agent[data-role="controlled"]'),
-  ).toHaveAttribute("data-slot", "0");
-  await expect(page.locator('.comparison-agent[data-role="selected"]')).toHaveAttribute(
+  await expect(page.locator('.roster-row[data-controlled="true"]')).toHaveAttribute(
     "data-slot",
-    "7",
+    "0",
   );
+  const selectedRoster = page.locator('.roster-row[data-selected="true"]');
+  await expect(selectedRoster).toHaveAttribute("data-slot", "7");
+  const selectedLegality = page.locator("#selection-card .selected-legality");
   await expect(
-    page
+    selectedLegality.locator(".selected-legality__lane").filter({
+      hasText: "Basic Legality",
+    }),
+  ).toContainText("StatusTrue");
+  await expect(
+    selectedLegality.locator(".selected-legality__lane").filter({
+      hasText: "Ultimate Legality",
+    }),
+  ).toContainText("StatusFalse");
+  await expect(
+    selectedLegality
       .locator(".selected-legality__lane")
-      .filter({ has: page.getByRole("heading", { name: "Basic Legality" }) })
-      .locator(".semantic-explanation__value"),
+      .filter({ hasText: "Basic Legality" })
+      .locator("dt"),
+  ).toHaveText("Status");
+  await expect(
+    selectedLegality
+      .locator(".selected-legality__lane")
+      .filter({ hasText: "Basic Legality" })
+      .locator("dd"),
   ).toHaveText("True");
   await expect(
-    page
+    selectedLegality
       .locator(".selected-legality__lane")
-      .filter({ has: page.getByRole("heading", { name: "Ultimate Legality" }) })
-      .locator(".semantic-explanation__value"),
+      .filter({ hasText: "Ultimate Legality" })
+      .locator("dd"),
   ).toHaveText("False");
+  await selectedRoster.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#agent-details")).toHaveAttribute("open", "");
+  await expect(page.locator("#agent-details")).toContainText("Agent ID 7");
   await expect(page.locator("#pending-card .action-card__label")).toHaveText(
     "PENDING / WILL SUBMIT",
   );
@@ -2492,7 +2635,7 @@ test("structured HUD keeps exact roster, intent, and accepted-result facts disti
     });
     observer.observe(element, { childList: true, characterData: true, subtree: true });
   });
-  await page.locator("#preset-select").selectOption("debug");
+  await page.locator("#preset-select").selectOption("presentation");
   await expect(page.locator("#revision-value")).toHaveText("1");
   await expect(firstEvent).toHaveAttribute("data-retained-probe", "event");
   await expect(page.locator("details.diagnostics")).toHaveAttribute("open", "");
@@ -2500,6 +2643,23 @@ test("structured HUD keeps exact roster, intent, and accepted-result facts disti
     "data-mutation-count",
     "0",
   );
+});
+
+test("researcher replay displays recorded experimental movement scale read-only", async ({
+  page,
+}) => {
+  const pair = structuredClone(exhaustivePresentationPairs.grammar);
+  pair.replayFrame.recorded_ordinary_movement_distance_scale = 0.375;
+
+  await installPresentationPair(page, pair, "replay");
+  await page.locator("details.diagnostics > summary").click();
+
+  await expect(page.locator("#diagnostics-card")).toContainText(
+    "Recorded movement scale",
+  );
+  await expect(page.locator("#diagnostics-card")).toContainText("0.38");
+  await expect(page.locator("#movement-scale-input")).toHaveCount(0);
+  await expect(page.locator("#movement-scale-reset")).toHaveCount(0);
 });
 
 test("presets omit irrelevant DOM while retaining canonical facts and audience", async ({
@@ -2567,17 +2727,18 @@ test("presets omit irrelevant DOM while retaining canonical facts and audience",
   expect(authorizedRangeCount).toBeGreaterThan(0);
   expect(authorizedModifierCount).toBeGreaterThan(0);
   await expect(page.locator(".selected-legality")).toHaveCount(1);
+  const presetLegality = page.locator("#selection-card .selected-legality");
   await expect(
-    page
+    presetLegality
       .locator(".selected-legality__lane")
-      .filter({ has: page.getByRole("heading", { name: "Basic Legality" }) })
-      .locator(".semantic-explanation__value"),
+      .filter({ hasText: "Basic Legality" })
+      .locator("dd"),
   ).toHaveText("True");
   await expect(
-    page
+    presetLegality
       .locator(".selected-legality__lane")
-      .filter({ has: page.getByRole("heading", { name: "Ultimate Legality" }) })
-      .locator(".semantic-explanation__value"),
+      .filter({ hasText: "Ultimate Legality" })
+      .locator("dd"),
   ).toHaveText("False");
   await expect(page.locator("#battlefield .debug-visibility-cue")).toHaveCount(0);
   await expect(page.locator("#battlefield .debug-protected-zone")).toHaveCount(0);
@@ -2585,20 +2746,8 @@ test("presets omit irrelevant DOM while retaining canonical facts and audience",
   await expect(page.locator("#diagnostics-card")).not.toContainText(
     "candidate_legalities",
   );
-
-  await page.locator("#preset-select").selectOption("debug");
-  await expect(page.locator("html")).toHaveAttribute("data-preset", "debug");
-  await expect(page.locator("#battlefield .debug-visibility-cue")).toHaveCount(10);
-  await expect(page.locator("#battlefield .debug-protected-zone")).toHaveCount(10);
-  await expect(page.locator("#battlefield .cooldown-cell")).toHaveCount(1);
-  for (const aura of await page.locator("#battlefield .aura-field").all()) {
-    await expect(aura).toHaveAttribute("data-source-slot", /\d+/);
-    await expect(aura).not.toHaveAttribute("data-multiplier", /.+/);
-  }
-  for (const modifier of await page.locator("#battlefield .modifier-cell").all()) {
-    await expect(modifier).not.toHaveAttribute("data-source-slot", /.+/);
-    await expect(modifier).toHaveAttribute("aria-label", /multiplier/);
-  }
+  await expect(page.locator("#preset-select option")).toHaveCount(2);
+  await expect(page.locator('#preset-select option[value="debug"]')).toHaveCount(0);
 
   await page.locator("#preset-select").selectOption("presentation");
   await expect(page.locator("html")).toHaveAttribute("data-preset", "presentation");
@@ -2618,38 +2767,112 @@ test("presets omit irrelevant DOM while retaining canonical facts and audience",
     authorizedModifierCount,
   );
   await expect(page.locator("#battlefield .legality-pill")).toHaveCount(0);
-  await expect(page.locator(".selected-legality")).toHaveCount(0);
+  await expect(presetLegality).toHaveCount(1);
+  await expect(
+    presetLegality
+      .locator(".selected-legality__lane")
+      .filter({ hasText: "Basic Legality" })
+      .locator("dd"),
+  ).toHaveText("True");
+  await expect(
+    presetLegality
+      .locator(".selected-legality__lane")
+      .filter({ hasText: "Ultimate Legality" })
+      .locator("dd"),
+  ).toHaveText("False");
   await expect(page.locator("#battlefield .debug-visibility-cue")).toHaveCount(0);
   await expect(page.locator("#battlefield .debug-protected-zone")).toHaveCount(0);
   await expect(page.locator(".candidate-legality-row")).toHaveCount(0);
   await expect(page.locator("#roster")).toHaveAttribute("data-compact", "true");
   await expect(page.locator("#roster .roster-row")).toHaveCount(10);
   await expect(page.locator("#roster .roster-fact-token")).toHaveCount(0);
-  await expect(page.locator("#selection-card").locator("..")).toBeHidden();
-  await expect(page.locator("#diagnostics-card").locator("..")).toBeHidden();
-  await expect(page.locator("#pending-card")).toBeVisible();
-  await expect(page.locator("#accepted-card")).toBeVisible();
-  await expect(page.locator("#event-feed")).toBeVisible();
+  await expect(page.locator("#agent-details")).not.toHaveAttribute("open", "");
+  await expect(page.locator("#technical-frame-details")).not.toHaveAttribute(
+    "open",
+    "",
+  );
+  await expect(page.locator("#pending-turn-details")).not.toHaveAttribute("open", "");
+  await expect(page.locator("#latest-transition-details")).not.toHaveAttribute(
+    "open",
+    "",
+  );
+  await expect(page.locator("#events-details")).not.toHaveAttribute("open", "");
 
   await page.locator("#battlefield .aura-field").first().focus();
   await expect(page.locator("#visual-tooltip")).toHaveAttribute(
     "data-tooltip-kind",
     "aura",
   );
-  await expect(page.locator("#visual-tooltip-title")).toContainText("Aura Field");
+  await expect(page.locator("#visual-tooltip-title")).toHaveText(
+    "Sorcerer’s Empowerment",
+  );
   await page.locator("#battlefield .modifier-cell").first().hover();
   await expect(page.locator("#visual-tooltip")).toHaveAttribute(
     "data-tooltip-kind",
     "modifier",
   );
-  await expect(page.locator("#visual-tooltip-title")).toContainText("Aura");
+  await expect(page.locator("#visual-tooltip-title")).toHaveText(
+    "Sorcerer’s Empowerment",
+  );
 });
 
-test("debug POV omits hidden agents and researcher-only visibility DOM", async ({
+test("exact-neutral aura rows stay on the wire while only near-neutral effects render", async ({
   page,
 }) => {
+  let servedFrame = structuredClone(syntheticWireFrame);
+  servedFrame.preset = "analysis";
+
+  await page.route("**/api/frame", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      json: servedFrame,
+      status: 200,
+    });
+  });
+  await page.route("**/api/command", async (route) => {
+    await route.abort("blockedbyclient");
+  });
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+
+  const visibleSlot = Number(
+    await page.locator("#battlefield .modifier-cell").first().getAttribute("data-slot"),
+  );
+  expect(Number.isInteger(visibleSlot)).toBe(true);
+  const mutatedFrame = structuredClone(servedFrame);
+  const agent = mutatedFrame.projection.scene.agents.find(
+    /** @param {Record<string, any>} row */ (row) => row.global_slot === visibleSlot,
+  );
+  if (agent?.aura_modifiers.length !== 2) {
+    throw new Error("The visible synthetic agent does not carry both aura rows.");
+  }
+  agent.aura_modifiers[0].multiplier = 1;
+  agent.aura_modifiers[1].multiplier = 1.000001;
+  servedFrame = mutatedFrame;
+  await page.reload();
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+
+  expect(
+    agent.aura_modifiers.map(
+      /** @param {Record<string, any>} row */ (row) => row.multiplier,
+    ),
+  ).toEqual([1, 1.000001]);
+  const battlefieldModifiers = page.locator(
+    `#battlefield .modifier-cell[data-slot="${visibleSlot}"]`,
+  );
+  await expect(battlefieldModifiers).toHaveCount(1);
+  await expect(battlefieldModifiers).toHaveAttribute("data-multiplier", "1.000001");
+  const rosterModifiers = page.locator(
+    `#roster .roster-row[data-slot="${visibleSlot}"] .roster-fact-token--modifier`,
+  );
+  await expect(rosterModifiers).toHaveCount(1);
+  await expect(rosterModifiers).toHaveAttribute("data-multiplier", "1.000001");
+  await expect(page.locator('[data-multiplier="1"]')).toHaveCount(0);
+});
+
+test("Analysis POV omits hidden agents and Technical-only DOM", async ({ page }) => {
   const servedFrame = structuredClone(syntheticPovWireFrame);
-  servedFrame.preset = "debug";
+  servedFrame.preset = "analysis";
   await page.route("**/api/frame", async (route) => {
     await route.fulfill({
       contentType: "application/json",
@@ -2662,7 +2885,8 @@ test("debug POV omits hidden agents and researcher-only visibility DOM", async (
   });
 
   await page.goto(debuggerUrl);
-  await expect(page.locator("html")).toHaveAttribute("data-preset", "debug");
+  await expect(page.locator("html")).toHaveAttribute("data-preset", "analysis");
+  await expect(page.locator('#preset-select option[value="debug"]')).toHaveCount(0);
   await expect(page.locator("html")).toHaveAttribute("data-audience", "agent_pov");
   await expect(page.locator("#audience-badge")).toContainText("AGENT POV");
   await expect(page.locator("#battlefield .agent")).toHaveCount(2);
@@ -2672,7 +2896,7 @@ test("debug POV omits hidden agents and researcher-only visibility DOM", async (
   await expect(page.locator('#roster .roster-row[data-slot="5"]')).toHaveCount(0);
   await expect(page.locator("#battlefield .pending-route")).toHaveCount(0);
   await expect(page.locator("#battlefield .debug-visibility-cue")).toHaveCount(0);
-  await expect(page.locator("#battlefield .debug-protected-zone")).toHaveCount(2);
+  await expect(page.locator("#battlefield .debug-protected-zone")).toHaveCount(0);
   await expect(page.locator("#scenario-control")).toBeHidden();
   await expect(page.locator("#scenario-select")).toBeDisabled();
   await expect(page.locator("#scenario-select")).not.toHaveAttribute("title", /.+/u);

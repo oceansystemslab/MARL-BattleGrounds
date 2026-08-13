@@ -195,7 +195,7 @@ class ReplayViewerService:
         selected_global_slot: int | None = None,
         armed_lane: Literal[0, 1] | None = None,
         pov_global_slot: int | None = None,
-        preset: ReplayPresetV1 = "analysis",
+        preset: ReplayPresetV1 | Literal["debug"] = "analysis",
         show_ranges: bool = True,
         verbose: bool = False,
         viewer_session_id: str | None = None,
@@ -298,9 +298,9 @@ class ReplayViewerService:
         self._selected_global_slot = reference_slot
         self._armed_lane = armed_lane
         self._pov_global_slot = actor_slot
-        self._preset: ReplayPresetV1 = preset
+        self._preset: ReplayPresetV1 = "analysis" if preset == "debug" else preset
         self._show_ranges = show_ranges
-        self._verbose = verbose
+        self._verbose = False
         self._shutting_down = False
         self._faulted = False
         self._lock = RLock()
@@ -569,9 +569,9 @@ class ReplayViewerService:
                     show_ranges = command.show_ranges
                     changed = True
             elif type(command) is ReplaySetVerbosityCommandV1:
-                if command.verbose != verbose:
-                    verbose = command.verbose
-                    changed = True
+                # Retained as a V1 compatibility command. Verbose presentation
+                # is no longer a product mode, so both values are a fixed no-op.
+                verbose = False
             elif type(command) is ReplayExitCommandV1:
                 shutdown_requested = True
             else:  # pragma: no cover - exact discriminated union is exhaustive.
@@ -694,7 +694,7 @@ class ReplayViewerService:
                 timeline_id=self._researcher_timeline.timeline_id,
                 cursor=cursor,
                 preset=preset,
-                verbose=verbose,
+                verbose=False,
                 frame_id=frame.frame_id,
                 simulator_step_count=frame.simulator_step_count,
                 incoming_transition_index=(
@@ -706,6 +706,9 @@ class ReplayViewerService:
                 completion=self._completion,
                 processing=self._processing,
                 show_ranges=show_ranges,
+                recorded_ordinary_movement_distance_scale=(
+                    self._context.resolved_env_config.ordinary_movement_distance_scale
+                ),
                 projection=projection,
             )
         if pov_global_slot is None:
@@ -725,7 +728,7 @@ class ReplayViewerService:
                 timeline_id=entry.timeline.timeline_id,
                 cursor=cursor,
                 preset=preset,
-                verbose=verbose,
+                verbose=False,
                 pov_global_slot=pov_global_slot,
                 public_agent_id=roster.public_agent_id,
                 pov_frame_id=pov_frame.pov_frame_id,
@@ -752,7 +755,7 @@ class ReplayViewerService:
             timeline_id=timeline.timeline_id,
             cursor=cursor,
             preset=preset,
-            verbose=verbose,
+            verbose=False,
             selected_global_slot=pov_global_slot,
             public_agent_id=roster.public_agent_id,
             source_material_frame_id=projection.base_sensor_frame.source_material_frame_id,

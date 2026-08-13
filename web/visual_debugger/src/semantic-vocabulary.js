@@ -24,7 +24,7 @@ const CLASS_PRESENTATION = Object.freeze({
     counterplay: "Respect its visible control range and cooldown state.",
   }),
   hunter: profile({
-    ultimateName: "Trap",
+    ultimateName: "Freezing Trap",
     role: "Ranged control and target pressure.",
     strengths: "Can apply recorded slow and stun effects at range.",
     limitations: "Target access and cooldown state constrain its control windows.",
@@ -32,7 +32,7 @@ const CLASS_PRESENTATION = Object.freeze({
     counterplay: "Watch its visible ranges and current availability.",
   }),
   rogue: profile({
-    ultimateName: "Poison",
+    ultimateName: "Crippling Poison",
     role: "Target disruption and persistent control.",
     strengths: "Can apply recorded slow, stun, and healing-reduction effects.",
     limitations: "Its effects are timed and depend on an authorized target.",
@@ -40,7 +40,7 @@ const CLASS_PRESENTATION = Object.freeze({
     counterplay: "Track current status durations and the Rogue's cooldown.",
   }),
   priest: profile({
-    ultimateName: "Holy Word",
+    ultimateName: "Holy Word: Salvation",
     role: "Allied healing and control support.",
     strengths: "Can restore allied health and apply a recorded freedom effect.",
     limitations:
@@ -57,13 +57,13 @@ const STATUS_PRESENTATION = Object.freeze({
     "warrior",
   ),
   stun_hunter_trap: statusProfile(
-    "Hunter (Ultimate: Trap) Stun",
-    "A Hunter's Trap incapacitates this agent, preventing action while the status remains.",
+    "Hunter (Ultimate: Freezing Trap) Stun",
+    "A Hunter's Freezing Trap incapacitates this agent, preventing action while the status remains.",
     "hunter",
   ),
   stun_rogue_poison: statusProfile(
-    "Rogue (Ultimate: Poison) Stun",
-    "A Rogue's Poison incapacitates this agent, preventing action while the status remains.",
+    "Rogue (Ultimate: Crippling Poison) Stun",
+    "A Rogue's Crippling Poison incapacitates this agent, preventing action while the status remains.",
     "rogue",
   ),
   slow_warrior_charge: statusProfile(
@@ -77,13 +77,13 @@ const STATUS_PRESENTATION = Object.freeze({
     "hunter",
   ),
   slow_rogue_poison: statusProfile(
-    "Rogue (Ultimate: Poison) Slow",
-    "A Rogue's poisoned dagger slows this agent while the status remains.",
+    "Rogue (Ultimate: Crippling Poison) Slow",
+    "A Rogue's Crippling Poison slows this agent while the status remains.",
     "rogue",
   ),
   anti_heal_rogue_poison: statusProfile(
-    "Rogue (Ultimate: Poison) Anti-Heal",
-    "A Rogue's noxious Poison reduces the healing this agent receives while the status remains.",
+    "Rogue (Ultimate: Crippling Poison) Anti-Heal",
+    "A Rogue's Crippling Poison reduces the healing this agent receives while the status remains.",
     "rogue",
   ),
   priest_freedom: statusProfile(
@@ -100,14 +100,14 @@ const STATUS_PRESENTATION = Object.freeze({
 
 const AURA_PRESENTATION = Object.freeze({
   mage_damage_amplification: auraProfile(
-    "Sorcerer's Aura Field (Mage Damage Amplification Aura)",
-    "Sorcerer's Aura",
+    "Sorcerer’s Empowerment",
+    "Sorcerer’s Empowerment",
     "mage",
     "damage_dealt",
   ),
   warrior_damage_mitigation: auraProfile(
-    "Guardian's Aura Field (Warrior Damage Mitigation Aura)",
-    "Guardian's Aura",
+    "Guardian’s Barrier",
+    "Guardian’s Barrier",
     "warrior",
     "damage_received",
   ),

@@ -157,13 +157,13 @@ def test_presentation_command_keeps_the_exact_live_binding(tmp_path: Path) -> No
         _live_request(
             "preset",
             base_revision=0,
-            command=SetPresetCommandV1(preset="debug"),
+            command=SetPresetCommandV1.model_validate({"preset": "debug"}),
         )
     )
 
     assert result.replay_handoff is None
     assert isinstance(result.payload, CommandResponseV2)
-    assert result.payload.frame.preset == "debug"
+    assert result.payload.frame.preset == "analysis"
     assert coordinator.router.snapshot().generation == 0
     assert coordinator.router.snapshot().service is initial.service
     assert coordinator.router.snapshot().binding is initial.binding

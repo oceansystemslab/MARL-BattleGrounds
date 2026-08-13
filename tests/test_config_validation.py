@@ -12,8 +12,10 @@ from jax import Array
 
 from marl_battlegrounds.core import combat
 from marl_battlegrounds.core.config import (
+    CANONICAL_PRODUCT_MOVEMENT_SCALE,
     resolve_agent_profile,
     validate_env_config,
+    validate_product_env_config,
 )
 from marl_battlegrounds.core.env import reset, step
 from marl_battlegrounds.core.geometry import (
@@ -301,6 +303,20 @@ def test_movement_scale_accepts_positive_finite_float32_execution_values(
 
     assert validate_env_config(config) is None
     _assert_pytrees_equal(config, before)
+
+
+def test_product_config_requires_the_canonical_movement_scale() -> None:
+    canonical = _valid_config()
+    experimental = _replace_config(
+        canonical,
+        ordinary_movement_distance_scale=0.375,
+    )
+
+    assert CANONICAL_PRODUCT_MOVEMENT_SCALE == 1.0
+    assert validate_product_env_config(canonical) is None
+    assert validate_env_config(experimental) is None
+    with pytest.raises(ValueError, match=r"must equal 1\.00"):
+        validate_product_env_config(experimental)
 
 
 @pytest.mark.parametrize(

@@ -12,7 +12,10 @@ import {
   startReplayViewer,
   stopDebugger,
 } from "./support/replay-viewer.js";
-import { expectVisibleInteractiveHelpInventory } from "./support/visual-regression.js";
+import {
+  expectVisibleInteractiveHelpInventory,
+  waitForStablePresentation,
+} from "./support/visual-regression.js";
 
 test.describe.configure({ mode: "serial" });
 
@@ -26,6 +29,12 @@ let partialViewer = null;
 let missingMetricViewer = null;
 /** @type {Awaited<ReturnType<typeof startReplayViewer>> | null} */
 let sharedViewer = null;
+/** @type {Awaited<ReturnType<typeof startReplayViewer>> | null} */
+let deathSampleViewer = null;
+/** @type {Awaited<ReturnType<typeof startReplayViewer>> | null} */
+let deathSamplePovViewer = null;
+/** @type {Awaited<ReturnType<typeof startReplayViewer>> | null} */
+let recoverySampleViewer = null;
 /** @type {Record<string, any> | null} */
 let liveFrameCandidate = null;
 
@@ -59,6 +68,20 @@ test.beforeAll(async () => {
       povSlot: 0,
     });
     startedProcesses.push(sharedViewer.process);
+    deathSampleViewer = await startReplayViewer({
+      sampleReplay: "death-respawn-shield",
+    });
+    startedProcesses.push(deathSampleViewer.process);
+    deathSamplePovViewer = await startReplayViewer({
+      sampleReplay: "death-respawn-shield",
+      view: "pov",
+      povSlot: 5,
+    });
+    startedProcesses.push(deathSamplePovViewer.process);
+    recoverySampleViewer = await startReplayViewer({
+      sampleReplay: "recovery-status-lifecycle",
+    });
+    startedProcesses.push(recoverySampleViewer.process);
   } catch (error) {
     const stopResults = await Promise.allSettled(
       startedProcesses.map((process) => stopDebugger(process)),
@@ -71,6 +94,9 @@ test.beforeAll(async () => {
     partialViewer = null;
     missingMetricViewer = null;
     sharedViewer = null;
+    deathSampleViewer = null;
+    deathSamplePovViewer = null;
+    recoverySampleViewer = null;
     liveFrameCandidate = null;
     try {
       await removeReplayArtifacts(artifacts.outputDirectory);
@@ -94,11 +120,17 @@ test.afterAll(async () => {
     partialViewer?.process ?? null,
     missingMetricViewer?.process ?? null,
     sharedViewer?.process ?? null,
+    deathSampleViewer?.process ?? null,
+    deathSamplePovViewer?.process ?? null,
+    recoverySampleViewer?.process ?? null,
   ];
   completeViewer = null;
   partialViewer = null;
   missingMetricViewer = null;
   sharedViewer = null;
+  deathSampleViewer = null;
+  deathSamplePovViewer = null;
+  recoverySampleViewer = null;
   liveFrameCandidate = null;
   const stopResults = await Promise.allSettled(
     processes.map((process) => stopDebugger(process)),
@@ -146,6 +178,67 @@ async function openReplay(page, url) {
 /** @param {import("@playwright/test").Page} page */
 function expectNoBrowserErrors(page) {
   expect(browserErrors.get(page) ?? []).toEqual([]);
+}
+
+/**
+ * Prove the persistent inspector owns one readable content column. This guards
+ * the direct POV descriptor path as well as the researcher wrapper path: no
+ * semantic row may inherit the selection card's former half-width column.
+ *
+ * @param {import("@playwright/test").Page} page
+ */
+async function expectReadableAgentDetails(page) {
+  const details = page.locator("#agent-details");
+  await expect(details).toBeVisible();
+  await expect(details).toHaveAttribute("open", "");
+  const layout = await details.evaluate((element) => {
+    const card = element.querySelector("#selection-card");
+    if (!(card instanceof HTMLElement)) {
+      throw new Error("Agent Details selection card is unavailable.");
+    }
+    const cardBounds = card.getBoundingClientRect();
+    const rows = [...card.querySelectorAll(".semantic-explanation__rows")];
+    const values = [...card.querySelectorAll(".semantic-explanation__rows dd")];
+    return {
+      cardColumns: getComputedStyle(card).gridTemplateColumns,
+      cardWidth: cardBounds.width,
+      rows: rows.map((row) => ({
+        left: row.getBoundingClientRect().left - cardBounds.left,
+        width: row.getBoundingClientRect().width,
+      })),
+      values: values.map((value) => {
+        const bounds = value.getBoundingClientRect();
+        const style = getComputedStyle(value);
+        const lineHeight = Number.parseFloat(style.lineHeight);
+        const label = value.previousElementSibling;
+        const labelBounds = label?.getBoundingClientRect();
+        return {
+          height: bounds.height,
+          labelRight: labelBounds?.right ?? Number.NaN,
+          lineHeight,
+          text: value.textContent ?? "",
+          valueLeft: bounds.left,
+          width: bounds.width,
+          wrapsEveryCharacter:
+            value.textContent !== null &&
+            value.textContent.trim().length >= 4 &&
+            Number.isFinite(lineHeight) &&
+            bounds.height / lineHeight >= value.textContent.trim().length / 2,
+        };
+      }),
+    };
+  });
+  expect(layout.cardColumns.split(" ")).toHaveLength(1);
+  expect(layout.rows.length).toBeGreaterThan(0);
+  expect(layout.values.length).toBeGreaterThan(0);
+  for (const row of layout.rows) {
+    expect(row.left).toBeLessThanOrEqual(1);
+    expect(row.width / layout.cardWidth).toBeGreaterThan(0.99);
+  }
+  for (const value of layout.values) {
+    expect(value.valueLeft).toBeGreaterThanOrEqual(value.labelRight - 1);
+    expect(value.wrapsEveryCharacter).toBe(false);
+  }
 }
 
 /**
@@ -258,6 +351,149 @@ async function installFirstFrame(page) {
   await expectReplayFrameIndex(page, 0);
 }
 
+/**
+ * Seek through the public absolute-seek boundary and prove the browser installs
+ * a settled, durable frame rather than replaying transient choreography.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @param {number} frameIndex
+ */
+async function seekReplaySettled(page, frameIndex) {
+  const requestPromise = page.waitForRequest(
+    (request) =>
+      request.method() === "POST" &&
+      new URL(request.url()).pathname === "/api/replay/command",
+    { timeout: 30_000 },
+  );
+  const responsePromise = nextReplayResponse(page);
+  await page.locator("#replay-frame-slider").evaluate((element, value) => {
+    if (!(element instanceof HTMLInputElement)) {
+      throw new TypeError("Replay slider is unavailable.");
+    }
+    element.value = String(value);
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+  }, frameIndex);
+  const [request, response] = await Promise.all([requestPromise, responsePromise]);
+  expect(request.postDataJSON().command).toEqual({
+    command_type: "absolute_seek",
+    frame_index: frameIndex,
+  });
+  expect(response.status()).toBe(200);
+  const payload = await response.json();
+  expect(payload).toMatchObject({
+    animate_incoming: false,
+    frame: { cursor: { frame_index: frameIndex } },
+  });
+  await expectReplayFrameIndex(page, frameIndex);
+  await waitForStablePresentation(page);
+  await expect(page.locator("#motion-skip-button")).toBeDisabled();
+  await expect(page.locator(".combat-effect, .combat-route-effect")).toHaveCount(0);
+  return payload.frame;
+}
+
+/**
+ * @param {Record<string, any>} frame
+ * @param {number} globalSlot
+ */
+function researcherAgent(frame, globalSlot) {
+  const agents = /** @type {Record<string, any>[]} */ (frame.projection.scene.agents);
+  const agent = agents.find((candidate) => candidate.global_slot === globalSlot);
+  if (!agent) {
+    throw new Error(`Researcher replay frame omits global slot ${globalSlot}.`);
+  }
+  return agent;
+}
+
+/**
+ * @param {Record<string, any>} frame
+ * @returns {Record<string, any>[]}
+ */
+function researcherEvents(frame) {
+  return frame.projection.incoming_events?.events ?? [];
+}
+
+/**
+ * @param {Record<string, any>} frame
+ * @returns {Record<string, any>[]}
+ */
+function povCues(frame) {
+  return frame.projection.incoming_cues;
+}
+
+/**
+ * Freeze and prove the complete replay transport at one supported viewport.
+ * The element screenshot is intentionally paired with its semantic ordering,
+ * cursor, range, and overflow contract so a visually plausible but incomplete
+ * transport cannot refresh the baseline.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @param {{width: number, height: number}} viewport
+ */
+async function captureReplayTransportBaseline(page, viewport) {
+  await page.setViewportSize(viewport);
+  await waitForStablePresentation(page);
+
+  const transport = page.locator("#replay-timeline .replay-timeline__transport");
+  await expect(transport).toBeVisible();
+  expect(
+    await transport.locator(":scope > button").evaluateAll((buttons) =>
+      buttons.map((button) => ({
+        id: button.id,
+        label: button.textContent?.trim(),
+      })),
+    ),
+  ).toEqual([
+    { id: "replay-first-button", label: "First" },
+    { id: "replay-back-ten-button", label: "−10" },
+    { id: "replay-previous-button", label: "−1" },
+    { id: "replay-play-pause-button", label: "Play" },
+    { id: "replay-next-button", label: "+1" },
+    { id: "replay-forward-ten-button", label: "+10" },
+    { id: "replay-last-button", label: "Last" },
+  ]);
+  await expect(page.locator("#replay-frame-slider")).toHaveAttribute("min", "0");
+  await expect(page.locator("#replay-frame-slider")).toHaveAttribute("max", "5");
+  await expect(page.locator("#replay-frame-slider")).toHaveValue("0");
+  await expect(page.locator("#replay-frame-slider")).toBeEnabled();
+  for (const selector of [
+    "#replay-first-button",
+    "#replay-back-ten-button",
+    "#replay-previous-button",
+  ]) {
+    await expect(page.locator(selector)).toBeDisabled();
+  }
+  for (const selector of [
+    "#replay-play-pause-button",
+    "#replay-next-button",
+    "#replay-forward-ten-button",
+    "#replay-last-button",
+  ]) {
+    await expect(page.locator(selector)).toBeEnabled();
+  }
+  await expect(page.locator("#replay-play-pause-button")).toHaveAttribute(
+    "aria-pressed",
+    "false",
+  );
+  await expect(page.locator("#replay-frame-position")).toHaveText("Tick 0 / 5");
+  const layout = await transport.evaluate((element) => ({
+    horizontalOverflow: element.scrollWidth - element.clientWidth,
+    viewportEscape: {
+      left: Math.max(0, -element.getBoundingClientRect().left),
+      right: Math.max(
+        0,
+        element.getBoundingClientRect().right - document.documentElement.clientWidth,
+      ),
+    },
+  }));
+  expect(layout.horizontalOverflow).toBeLessThanOrEqual(1);
+  expect(layout.viewportEscape).toEqual({ left: 0, right: 0 });
+
+  await expect(transport).toHaveScreenshot(
+    `replay-transport-${viewport.width}x${viewport.height}.png`,
+    { animations: "disabled" },
+  );
+}
+
 /** @param {number} milliseconds */
 function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -312,11 +548,35 @@ test("canonical complete and partial artifacts join their frame-zero and capture
     recorded_frame_count: 6,
     metric_report_availability: "available",
   });
-  await expect(page.locator("#replay-frame-position")).toHaveText("Frame 0 / 5");
+  await expect(page.locator("#replay-frame-position")).toHaveText("Tick 0 / 5");
+  expect(
+    await page
+      .locator("#replay-timeline .replay-timeline__transport")
+      .evaluate((transport) =>
+        [...transport.querySelectorAll(":scope > button")].map((button) => button.id),
+      ),
+  ).toEqual([
+    "replay-first-button",
+    "replay-back-ten-button",
+    "replay-previous-button",
+    "replay-play-pause-button",
+    "replay-next-button",
+    "replay-forward-ten-button",
+    "replay-last-button",
+  ]);
+  await expect(page.locator("#roster-details")).toHaveAttribute("open", "");
+  for (const selector of [
+    "#agent-details",
+    "#events-details",
+    "#visual-key",
+    "#technical-frame-details",
+  ]) {
+    await expect(page.locator(selector)).not.toHaveAttribute("open", "");
+  }
   await expect(page.locator("#replay-completion-badge")).toHaveText("Complete");
   await expect(page.locator("#replay-processing-badge")).toHaveText("Succeeded");
   await expect(page.locator("#replay-incoming-value")).toHaveText("Initial frame");
-  await expect(page.locator("#battlefield")).toHaveAttribute("role", "img");
+  await expect(page.locator("#battlefield")).toHaveAttribute("role", "group");
   await expect(page.locator("#battlefield")).toHaveAttribute("tabindex", "-1");
   const researcherHelp = await expectVisibleInteractiveHelpInventory(page);
   expect(researcherHelp.disabled.length).toBeGreaterThan(0);
@@ -394,7 +654,7 @@ test("canonical complete and partial artifacts join their frame-zero and capture
   expect(partialTimeline.rows).toHaveLength(3);
   expect(partialTimeline.rows[2].endpoint_kind).toBe("captured_prefix");
   expectResearcherJoin(partialFrame, partialTimeline, 2);
-  await expect(partialPage.locator("#replay-frame-position")).toHaveText("Frame 2 / 2");
+  await expect(partialPage.locator("#replay-frame-position")).toHaveText("Tick 2 / 2");
   await expect(partialPage.locator("#terminal-badge")).toHaveText(
     "End of captured prefix",
   );
@@ -405,6 +665,24 @@ test("canonical complete and partial artifacts join their frame-zero and capture
   expectNoBrowserErrors(page);
   expectNoBrowserErrors(partialPage);
   await partialPage.close();
+});
+
+test("replay transport has permanent visual proof at both supported viewports", async ({
+  page,
+}) => {
+  const complete = requiredViewer(completeViewer, "complete");
+  await openReplay(page, complete.url);
+  await installFirstFrame(page);
+
+  const [frame, timeline] = await Promise.all([
+    currentReplayFrame(page),
+    currentReplayTimeline(page),
+  ]);
+  expectResearcherJoin(frame, timeline, 0);
+  expect(timeline.final_frame_index).toBe(5);
+  await captureReplayTransportBaseline(page, { width: 1440, height: 900 });
+  await captureReplayTransportBaseline(page, { width: 960, height: 600 });
+  expectNoBrowserErrors(page);
 });
 
 test("replay reconnect rejects a valid live frame without crossing the viewer boundary", async ({
@@ -469,7 +747,7 @@ test("replay reconnect rejects a valid live frame without crossing the viewer bo
   await expect(page.locator("#view-select")).toHaveValue(installedDom.view);
   await expect(page.locator("[data-live-only]:not([hidden])")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Submit joint turn" })).toHaveCount(0);
-  await expect(page.locator("#battlefield")).toHaveAttribute("role", "img");
+  await expect(page.locator("#battlefield")).toHaveAttribute("role", "group");
   await expect(page.locator("#battlefield")).toHaveAttribute("tabindex", "-1");
   expect(frameRequestCount).toBe(1);
   expect(timelineRequestCount).toBe(0);
@@ -493,6 +771,8 @@ test("buttons, slider debounce, keyboard, and researcher Reference preserve exac
   await openReplay(page, complete.url);
   await installFirstFrame(page);
   const initial = await currentReplayFrame(page);
+  await page.locator("#events-details > summary").click();
+  await page.locator("#technical-frame-details > summary").click();
 
   const next = await clickReplayCommand(page, "#replay-next-button");
   expect(next).toMatchObject({
@@ -507,6 +787,8 @@ test("buttons, slider debounce, keyboard, and researcher Reference preserve exac
     initial.cursor.choreography_generation + 1,
   );
   await expectReplayFrameIndex(page, 1);
+  await expect(page.locator("#events-details")).toHaveAttribute("open", "");
+  await expect(page.locator("#technical-frame-details")).toHaveAttribute("open", "");
   await expect(page.locator("#motion-skip-button")).toBeEnabled();
 
   const previous = await clickReplayCommand(page, "#replay-previous-button");
@@ -571,6 +853,38 @@ test("buttons, slider debounce, keyboard, and researcher Reference preserve exac
   });
   await expect(page.locator("#motion-skip-button")).toBeDisabled();
 
+  /** @type {Record<string, any>[]} */
+  const jumpRequests = [];
+  /** @param {import("@playwright/test").Request} request */
+  const recordJumpRequest = (request) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname === "/api/replay/command"
+    ) {
+      jumpRequests.push(request.postDataJSON());
+    }
+  };
+  page.on("request", recordJumpRequest);
+  expect(
+    (await clickReplayCommand(page, "#replay-back-ten-button")).frame.cursor
+      .frame_index,
+  ).toBe(0);
+  expect(
+    (await clickReplayCommand(page, "#replay-forward-ten-button")).frame.cursor
+      .frame_index,
+  ).toBe(5);
+  page.off("request", recordJumpRequest);
+  expect(jumpRequests.map((request) => request.command)).toEqual([
+    { command_type: "absolute_seek", frame_index: 0 },
+    { command_type: "absolute_seek", frame_index: 5 },
+  ]);
+  expect(
+    (await pressReplayCommand(page, "Shift+ArrowLeft")).frame.cursor.frame_index,
+  ).toBe(0);
+  expect(
+    (await pressReplayCommand(page, "Shift+ArrowRight")).frame.cursor.frame_index,
+  ).toBe(5);
+
   expect((await pressReplayCommand(page, "Home")).frame.cursor.frame_index).toBe(0);
   expect((await pressReplayCommand(page, "End")).frame.cursor.frame_index).toBe(5);
   expect((await pressReplayCommand(page, "ArrowLeft")).frame.cursor.frame_index).toBe(
@@ -601,15 +915,18 @@ test("buttons, slider debounce, keyboard, and researcher Reference preserve exac
   await povActorButton.focus();
   await expect(povActorButton).toHaveAttribute("aria-describedby", "visual-tooltip");
   await expect(page.locator("#visual-tooltip-title")).toHaveText("POV actor");
+  const replayAgent = page.locator('#battlefield .agent[data-slot="1"]');
+  await expect(replayAgent).toHaveAttribute("role", "button");
+  await expect(replayAgent).toHaveAttribute("tabindex", "0");
   const reference = await clickReplayCommand(
     page,
-    '#roster button[aria-label="Use Agent ID agent-slot-1 as Reference"]',
+    '#battlefield .agent[data-slot="1"]',
   );
   expect(reference.frame.projection.scene.selection.selected_global_slot).toBe(1);
-  await expect(page.locator("#selection-heading")).toHaveText("Reference");
-  await expect(
-    page.locator('.comparison-agent[data-role="reference"][data-slot="1"]'),
-  ).toBeVisible();
+  await expect(page.locator("#selection-heading")).toHaveText("Agent Details");
+  await expect(page.locator("#agent-details")).toHaveAttribute("open", "");
+  await expect(page.locator("#agent-details")).toContainText("Agent ID agent-slot-1");
+  await expect(page.locator("#agent-details")).toContainText("Reference");
   await expect(page.locator('.roster-row[data-slot="1"]')).toHaveAttribute(
     "data-reference",
     "true",
@@ -617,20 +934,386 @@ test("buttons, slider debounce, keyboard, and researcher Reference preserve exac
   const rosterReference = page.locator('.roster-row[data-slot="1"]');
   await rosterReference.focus();
   await page.keyboard.press("Enter");
-  await expect(page.locator("#semantic-inspector")).toBeVisible();
-  await expect(page.locator("#semantic-inspector")).toContainText("Reference");
-  await expect(page.locator("#semantic-inspector")).toContainText(
-    "Exact Class Mechanics",
+  await expect(page.locator("#agent-details")).toHaveAttribute("open", "");
+  await expect(page.locator("#agent-details")).toContainText("Reference");
+  await expect(page.locator("#agent-details")).toContainText("Exact Class Mechanics");
+  await expect(page.locator("#agent-details")).not.toContainText("Selected target");
+  const agentDetailsSummary = page.locator("#agent-details > summary");
+  await agentDetailsSummary.click();
+  await expect(page.locator("#agent-details")).not.toHaveAttribute("open", "");
+  await expect(agentDetailsSummary).toBeFocused();
+  const firstClear = await clickReplayCommand(page, "#replay-clear-reference-button");
+  expect(firstClear.frame.projection.scene.selection.selected_global_slot).toBeNull();
+  const keyboardResponsePromise = nextReplayResponse(page);
+  await replayAgent.focus();
+  await page.keyboard.press("Enter");
+  const keyboardResponse = await keyboardResponsePromise;
+  expect(keyboardResponse.status()).toBe(200);
+  const keyboardReference = await keyboardResponse.json();
+  expect(keyboardReference.frame.projection.scene.selection.selected_global_slot).toBe(
+    1,
   );
-  await expect(page.locator("#semantic-inspector")).not.toContainText(
-    "Selected target",
-  );
-  await page.keyboard.press("Escape");
-  await expect(page.locator("#semantic-inspector")).toBeHidden();
-  await expect(rosterReference).toBeFocused();
+  await expect(page.locator("#agent-details")).toHaveAttribute("open", "");
   const cleared = await clickReplayCommand(page, "#replay-clear-reference-button");
   expect(cleared.frame.projection.scene.selection.selected_global_slot).toBeNull();
   await expect(page.locator("#replay-clear-reference-button")).toBeDisabled();
+  expectNoBrowserErrors(page);
+});
+
+test("replay Agent Details keep readable values for both audiences at supported viewports", async ({
+  page,
+}) => {
+  const researcher = requiredViewer(deathSampleViewer, "death sample");
+  const pov = requiredViewer(deathSamplePovViewer, "death sample POV");
+  const cases = [
+    {
+      activate: async () =>
+        clickReplayCommand(page, '#battlefield .agent[data-slot="5"]'),
+      audience: "researcher",
+      url: researcher.url,
+    },
+    {
+      activate: async () => {
+        const selfAgent = page.locator('#battlefield .agent[role="button"]');
+        await selfAgent.focus();
+        await page.keyboard.press("Enter");
+      },
+      audience: "pov",
+      url: pov.url,
+    },
+  ];
+  for (const viewport of [
+    { width: 960, height: 600 },
+    { width: 1440, height: 900 },
+  ]) {
+    await page.setViewportSize(viewport);
+    for (const replayCase of cases) {
+      await openReplay(page, replayCase.url);
+      await installFirstFrame(page);
+      await replayCase.activate();
+      await expect(page.locator("html")).toHaveAttribute(
+        "data-audience",
+        replayCase.audience === "pov" ? "agent_pov" : "researcher",
+      );
+      await expectReadableAgentDetails(page);
+    }
+  }
+  expectNoBrowserErrors(page);
+});
+
+test("checked samples preserve settled death, shield, interaction, and status lifecycle truth", async ({
+  page,
+}) => {
+  const death = requiredViewer(deathSampleViewer, "death sample");
+  await openReplay(page, death.url);
+  await installFirstFrame(page);
+  await clickReplayCommand(page, '#battlefield .agent[data-slot="5"]');
+
+  let frame = await seekReplaySettled(page, 1);
+  expect(researcherAgent(frame, 5)).toMatchObject({
+    current_health: 0,
+    life_state: "corpse",
+    spawn_shield_remaining: 0,
+    statuses: [],
+  });
+  expect(researcherEvents(frame).map((event) => event.event_type)).toEqual(
+    expect.arrayContaining([
+      "agent_died",
+      "status_broken_by_damage",
+      "status_cleared_by_new_death",
+    ]),
+  );
+  await expect(page.locator('#battlefield .agent[data-slot="5"]')).toHaveAttribute(
+    "data-alive",
+    "false",
+  );
+  await expect(page.locator("#agent-details")).toContainText(/Life State\s*Corpse/u);
+  await expect(page.locator("#agent-details")).toContainText(/Health\s*0 \/ 100/u);
+  await expect(
+    page.locator('#event-feed .event-item[data-event-type="agent_died"]'),
+  ).toHaveCount(1);
+
+  frame = await seekReplaySettled(page, 2);
+  expect(researcherAgent(frame, 5).life_state).toBe("corpse");
+  expect(researcherEvents(frame)).toEqual([]);
+  await expect(page.locator("#event-count")).toHaveText("0");
+
+  frame = await seekReplaySettled(page, 3);
+  expect(researcherAgent(frame, 5)).toMatchObject({
+    current_health: 100,
+    life_state: "alive",
+    respawned_on_incoming_transition: true,
+    spawn_shield_remaining: 3,
+  });
+  expect(researcherEvents(frame).map((event) => event.event_type)).toEqual(
+    expect.arrayContaining(["agent_respawned", "respawn_wave_occurred"]),
+  );
+  const respawned = page.locator('#battlefield .agent[data-slot="5"]');
+  await expect(respawned).toHaveAttribute("data-alive", "true");
+  await expect(respawned).toHaveAttribute("data-spawn-shield-remaining", "3");
+  await expect(respawned.locator(".agent-spawn-shield")).toBeVisible();
+  await expect(respawned.locator(".agent-spawn-shield__ticks")).toHaveText("S3");
+  await expect(page.locator("#agent-details")).toContainText(
+    /Spawn Shield\s*Invulnerable · 3 Ticks remaining/u,
+  );
+
+  for (const [cursor, remaining] of [
+    [4, 2],
+    [5, 1],
+  ]) {
+    frame = await seekReplaySettled(page, cursor);
+    expect(researcherAgent(frame, 5).spawn_shield_remaining).toBe(remaining);
+    await expect(respawned).toHaveAttribute(
+      "data-spawn-shield-remaining",
+      String(remaining),
+    );
+    await expect(respawned.locator(".agent-spawn-shield__ticks")).toHaveText(
+      `S${remaining}`,
+    );
+  }
+
+  frame = await seekReplaySettled(page, 6);
+  expect(researcherAgent(frame, 5).spawn_shield_remaining).toBe(0);
+  expect(researcherEvents(frame).map((event) => event.event_type)).toContain(
+    "spawn_shield_expired",
+  );
+  await expect(respawned.locator(".agent-spawn-shield")).toBeHidden();
+  await expect(page.locator("#agent-details")).toContainText(
+    /Spawn Shield\s*Inactive/u,
+  );
+  await expect(
+    page.locator('#event-feed .event-item[data-event-type="spawn_shield_expired"]'),
+  ).toHaveCount(1);
+
+  frame = await seekReplaySettled(page, 7);
+  expect(researcherAgent(frame, 5).spawn_shield_remaining).toBe(0);
+  expect(researcherAgent(frame, 0).current_health).toBe(68);
+  expect(researcherEvents(frame)).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        event_type: "ability_activated",
+        source_global_slot: 5,
+        recipient_global_slot: 0,
+      }),
+      expect.objectContaining({
+        event_type: "recipient_health_resolution",
+        recipient_global_slot: 0,
+      }),
+    ]),
+  );
+  await expect(page.locator("#agent-details")).toContainText(/Life State\s*Alive/u);
+
+  const recovery = requiredViewer(recoverySampleViewer, "recovery sample");
+  await openReplay(page, recovery.url);
+  await installFirstFrame(page);
+  await clickReplayCommand(page, '#battlefield .agent[data-slot="5"]');
+
+  frame = await seekReplaySettled(page, 1);
+  expect(researcherAgent(frame, 5).statuses).toHaveLength(3);
+  await expect(
+    page.locator(
+      '#event-feed .event-item[data-event-type="status_applied"][data-recipient-slot="5"]',
+    ),
+  ).toHaveCount(3);
+  await expect(page.locator("#agent-details")).toContainText(
+    /Persistent Statuses\s*3/u,
+  );
+
+  frame = await seekReplaySettled(page, 2);
+  const compositeEvents = researcherEvents(frame);
+  /**
+   * @param {string} eventType
+   * @param {number} recipient
+   * @param {string} statusId
+   */
+  const hasStatusEvent = (eventType, recipient, statusId) =>
+    compositeEvents.some(
+      (event) =>
+        event.event_type === eventType &&
+        event.recipient_global_slot === recipient &&
+        event.status_id === statusId,
+    );
+  expect(hasStatusEvent("status_aged_to_zero", 5, "rogue_poison_stun")).toBe(true);
+  expect(hasStatusEvent("status_applied", 5, "rogue_poison_stun")).toBe(true);
+  expect(hasStatusEvent("status_refreshed_or_extended", 5, "rogue_poison_slow")).toBe(
+    true,
+  );
+  expect(
+    hasStatusEvent("status_refreshed_or_extended", 5, "rogue_poison_anti_heal"),
+  ).toBe(true);
+  expect(hasStatusEvent("status_broken_by_damage", 7, "hunter_trap_stun")).toBe(true);
+  expect(hasStatusEvent("status_applied", 7, "hunter_trap_stun")).toBe(true);
+  await expect(page.locator("#event-feed")).toContainText(/Rogue Poison Stun expired/u);
+  await expect(page.locator("#event-feed")).toContainText(/Rogue Poison Stun applied/u);
+  await expect(page.locator("#event-feed")).toContainText(
+    /Hunter Trap Stun broken by damage/u,
+  );
+  await expect(page.locator("#agent-details")).toContainText(
+    /Persistent Statuses\s*3/u,
+  );
+  await clickReplayCommand(page, '#battlefield .agent[data-slot="7"]');
+  await expect(page.locator("#agent-details")).toContainText(
+    /Hunter \(Ultimate: Freezing Trap\) Stun/u,
+  );
+
+  frame = await seekReplaySettled(page, 3);
+  expect(researcherAgent(frame, 5).statuses).toHaveLength(2);
+  expect(researcherEvents(frame)).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        event_type: "status_aged_to_zero",
+        recipient_global_slot: 5,
+        status_id: "rogue_poison_stun",
+      }),
+    ]),
+  );
+  await clickReplayCommand(page, '#battlefield .agent[data-slot="5"]');
+  await expect(page.locator("#agent-details")).toContainText(
+    /Persistent Statuses\s*2/u,
+  );
+
+  frame = await seekReplaySettled(page, 6);
+  expect(researcherAgent(frame, 5).statuses).toHaveLength(1);
+  expect(researcherAgent(frame, 7).statuses).toHaveLength(0);
+  expect(researcherEvents(frame)).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        event_type: "status_aged_to_zero",
+        recipient_global_slot: 5,
+        status_id: "rogue_poison_anti_heal",
+      }),
+      expect.objectContaining({
+        event_type: "status_aged_to_zero",
+        recipient_global_slot: 7,
+        status_id: "hunter_trap_stun",
+      }),
+    ]),
+  );
+  await expect(page.locator("#agent-details")).toContainText(
+    /Persistent Statuses\s*1/u,
+  );
+
+  frame = await seekReplaySettled(page, 7);
+  expect(researcherAgent(frame, 5).statuses).toHaveLength(0);
+  expect(researcherEvents(frame)).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        event_type: "status_aged_to_zero",
+        recipient_global_slot: 5,
+        status_id: "rogue_poison_slow",
+      }),
+    ]),
+  );
+  await expect(page.locator("#agent-details")).toContainText(
+    /Persistent Statuses\s*0/u,
+  );
+  expectNoBrowserErrors(page);
+});
+
+test("checked death sample POV exposes only self lifecycle truth and seeks read-only", async ({
+  page,
+}) => {
+  const viewer = requiredViewer(deathSamplePovViewer, "death sample POV");
+  await openReplay(page, viewer.url);
+  await installFirstFrame(page);
+  /** @type {Array<{path: string, payload: Record<string, any>}>} */
+  const posts = [];
+  page.on("request", (request) => {
+    if (request.method() === "POST") {
+      posts.push({
+        path: new URL(request.url()).pathname,
+        payload: request.postDataJSON(),
+      });
+    }
+  });
+
+  const firstDeath = await seekReplaySettled(page, 1);
+  expect(firstDeath).toMatchObject({
+    frame_kind: "actor_pov_replay_viewer",
+    pov_global_slot: 5,
+    public_agent_id: "5",
+  });
+  expect(firstDeath.projection.scene.self_actor).toMatchObject({
+    alive: false,
+    current_health: 0,
+    global_slot: 5,
+    public_agent_id: "5",
+    spawn_shield_remaining: 0,
+  });
+  expect(povCues(firstDeath).map((cue) => cue.cue_type)).toEqual(
+    expect.arrayContaining([
+      "own_health_changed",
+      "own_status_changed",
+      "own_lifecycle_changed",
+    ]),
+  );
+  expect(JSON.stringify(firstDeath)).not.toContain("event_id");
+  expect(JSON.stringify(firstDeath)).not.toContain("agent_died");
+  expect(JSON.stringify(firstDeath)).not.toContain("lethal_damage_contribution");
+  await expect(page.locator('#battlefield .agent[role="button"]')).toHaveCount(1);
+  await page.locator('#battlefield .agent[role="button"]').click();
+  await expect(page.locator("#agent-details")).toHaveAttribute("open", "");
+  await expect(page.locator("#agent-details")).toContainText(/Life State\s*Corpse/u);
+  await expect(page.locator("#agent-details")).not.toContainText(
+    "Exact Class Mechanics",
+  );
+  await expect(page.locator("#event-feed")).toContainText(
+    /Own lifecycle changed · not alive · shield 0/u,
+  );
+
+  const respawn = await seekReplaySettled(page, 3);
+  expect(respawn.projection.scene.self_actor).toMatchObject({
+    alive: true,
+    current_health: 100,
+    global_slot: 5,
+    public_agent_id: "5",
+    spawn_shield_remaining: 3,
+  });
+  expect(povCues(respawn).map((cue) => cue.cue_type)).toContain(
+    "own_lifecycle_changed",
+  );
+  await expect(page.locator("#agent-details")).toContainText(
+    /Spawn Shield\s*Invulnerable · 3 Ticks remaining/u,
+  );
+
+  const expiredShield = await seekReplaySettled(page, 6);
+  expect(expiredShield.projection.scene.self_actor).toMatchObject({
+    alive: true,
+    current_health: 100,
+    global_slot: 5,
+    public_agent_id: "5",
+    spawn_shield_remaining: 0,
+  });
+  expect(povCues(expiredShield).map((cue) => cue.cue_type)).toContain(
+    "own_lifecycle_changed",
+  );
+  await expect(
+    page.locator('#battlefield .agent[data-slot="5"] .agent-spawn-shield'),
+  ).toBeHidden();
+  await expect(page.locator("#agent-details")).toContainText(
+    /Spawn Shield\s*Inactive/u,
+  );
+
+  const replayedDeath = await seekReplaySettled(page, 1);
+  expect(replayedDeath.pov_frame_id).toBe(firstDeath.pov_frame_id);
+  expect(replayedDeath.projection.scene.self_actor).toEqual(
+    firstDeath.projection.scene.self_actor,
+  );
+  expect(replayedDeath.projection.incoming_cues).toEqual(
+    firstDeath.projection.incoming_cues,
+  );
+  expect(posts.map(({ path }) => path)).toEqual([
+    "/api/replay/command",
+    "/api/replay/command",
+    "/api/replay/command",
+    "/api/replay/command",
+  ]);
+  expect(posts.map(({ payload }) => payload.command)).toEqual([
+    { command_type: "absolute_seek", frame_index: 1 },
+    { command_type: "absolute_seek", frame_index: 3 },
+    { command_type: "absolute_seek", frame_index: 6 },
+    { command_type: "absolute_seek", frame_index: 1 },
+  ]);
   expectNoBrowserErrors(page);
 });
 
@@ -1109,7 +1792,7 @@ test("exact NoSharedObs POV hides metric/processing truth and SharedObs stays so
   await expect(page.locator("#replay-processing-badge")).toHaveText(
     "Not available in actor POV",
   );
-  await expect(page.locator("#selection-heading")).toHaveText("Replay recipient");
+  await expect(page.locator("#selection-heading")).toHaveText("Agent Details");
   await expect(page.locator("#replay-ranges-button")).toBeDisabled();
   await expect(
     page.getByRole("button", { name: /as Reference|as POV actor/ }),
@@ -1360,19 +2043,19 @@ test("Actor POV all-surface scan excludes researcher authority and host secrets"
   expect((await povResponse).status()).toBe(200);
   await expect(page.locator("#view-select")).toHaveValue("pov");
   await expectReplayFrameIndex(page, 1);
-  const technicalResponse = nextReplayResponse(page);
-  await page.locator("#preset-select").selectOption("debug");
-  expect((await technicalResponse).status()).toBe(200);
-  await expect(page.locator("html")).toHaveAttribute("data-preset", "debug");
-  await page
-    .locator("details.diagnostics")
-    .last()
-    .evaluate((details) => {
-      if (!(details instanceof HTMLDetailsElement)) {
-        throw new TypeError("Technical frame details are unavailable.");
-      }
-      details.open = true;
-    });
+  await expect(page.locator('#preset-select option[value="debug"]')).toHaveCount(0);
+  if ((await page.locator("#preset-select").inputValue()) !== "analysis") {
+    const analysisResponse = nextReplayResponse(page);
+    await page.locator("#preset-select").selectOption("analysis");
+    expect((await analysisResponse).status()).toBe(200);
+  }
+  await expect(page.locator("html")).toHaveAttribute("data-preset", "analysis");
+  await page.locator("#technical-frame-details").evaluate((details) => {
+    if (!(details instanceof HTMLDetailsElement)) {
+      throw new TypeError("Technical frame details are unavailable.");
+    }
+    details.open = true;
+  });
 
   const [povFrame, povTimeline, capabilityToken] = await Promise.all([
     currentReplayFrame(page),
@@ -1463,9 +2146,17 @@ test("Actor POV all-surface scan excludes researcher authority and host secrets"
       })),
     ),
   }));
-  await selfRoster.focus();
+  const selfAgent = page.locator("#battlefield .agent").first();
+  await expect(page.locator('#battlefield .agent[role="button"]')).toHaveCount(1);
+  await expect(selfAgent).toHaveAttribute("role", "button");
+  await expect(selfAgent).toHaveAttribute("tabindex", "0");
+  await expect(selfAgent).toHaveAttribute(
+    "data-slot",
+    String(povFrame.pov_global_slot ?? povFrame.selected_global_slot),
+  );
+  await selfAgent.focus();
   await page.keyboard.press("Enter");
-  await expect(page.locator("#semantic-inspector")).toBeVisible();
+  await expect(page.locator("#agent-details")).toHaveAttribute("open", "");
   await expect(page.locator("#event-feed .event-item")).not.toHaveCount(0);
 
   const surfaces = await page.evaluate(() => {
@@ -1519,7 +2210,7 @@ test("Actor POV all-surface scan excludes researcher authority and host secrets"
       visibleAttributes,
       descriptorText,
       feed: snapshot(requiredRoot("#event-feed")),
-      inspector: snapshot(requiredRoot("#semantic-inspector")),
+      inspector: snapshot(requiredRoot("#agent-details")),
       technical: snapshot(requiredRoot("#diagnostics-card")),
       technicalJson: [...document.querySelectorAll(".technical-json")].map(
         (node) => node.textContent ?? "",

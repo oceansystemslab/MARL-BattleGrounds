@@ -68,6 +68,122 @@ export async function pauseAtLogicalTime(page, logicalMs) {
 }
 
 /**
+ * Resolve one readable event-owned animation window. Some event rows are
+ * intentionally durable-only and therefore own no transient animation. Walk
+ * the rendered rows in DOM order and select the first row with the requested
+ * animation part instead of assuming the first row is animated.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @param {{eventType?: string, part: "auto" | "group" | "route", progress: number}} request
+ */
+async function resolveReadableEventWindow(page, request) {
+  const root = page.locator(CHOREOGRAPHY_ROOT);
+  await root.waitFor({ state: "attached" });
+  return root.evaluate((element, requested) => {
+    const battlefield = element.closest("svg");
+    const epochKey = element.getAttribute("data-epoch-key");
+    if (!battlefield || !epochKey) {
+      throw new Error("Event animation authority is unavailable.");
+    }
+
+    const parts = requested.part === "auto" ? ["group", "route"] : [requested.part];
+    const animations = battlefield.getAnimations({ subtree: true });
+    const effects = [
+      ...element.querySelectorAll(".combat-effect[data-event-type][data-event-id]"),
+    ].filter(
+      (effect) =>
+        requested.eventType === undefined ||
+        effect.getAttribute("data-event-type") === requested.eventType,
+    );
+
+    for (const effect of effects) {
+      const eventId = effect.getAttribute("data-event-id");
+      const eventType = effect.getAttribute("data-event-type");
+      if (!eventId || !eventType) {
+        continue;
+      }
+      for (const part of parts) {
+        const expectedId = `mbg:${epochKey}:${eventId}:${part}`;
+        const animation = animations.find(({ id }) => id === expectedId);
+        const timing = animation?.effect?.getTiming();
+        const delay = Number(timing?.delay);
+        const duration = Number(timing?.duration);
+        if (Number.isFinite(delay) && duration > 0) {
+          return {
+            eventId,
+            eventType,
+            logicalMs: delay + duration * requested.progress,
+            part,
+          };
+        }
+      }
+    }
+
+    const eventDescription =
+      requested.eventType === undefined
+        ? "any rendered event"
+        : `event type ${requested.eventType}`;
+    throw new Error(
+      `Missing readable ${parts.join(" or ")} animation window for ${eventDescription}.`,
+    );
+  }, request);
+}
+
+/**
+ * Seek inside the installed animation for one exact event family. Dynamic
+ * choreography omits absent families, so browser proofs derive their sample
+ * point from the authored WAAPI window instead of duplicating one static
+ * transition schedule.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @param {string} eventType
+ * @param {{part?: "auto" | "group" | "route", progress?: number}} [options]
+ */
+export async function pauseInsideEventWindow(
+  page,
+  eventType,
+  { part = "auto", progress = 0.5 } = {},
+) {
+  if (typeof eventType !== "string" || eventType.length === 0) {
+    throw new TypeError("eventType must be a non-empty string.");
+  }
+  if (!new Set(["auto", "group", "route"]).has(part)) {
+    throw new TypeError("part must be auto, group, or route.");
+  }
+  if (!(typeof progress === "number" && progress > 0 && progress < 1)) {
+    throw new RangeError("progress must lie strictly between zero and one.");
+  }
+  const resolved = await resolveReadableEventWindow(page, {
+    eventType,
+    part,
+    progress,
+  });
+  await pauseAtLogicalTime(page, resolved.logicalMs);
+  return resolved.logicalMs;
+}
+
+/**
+ * Seek the first rendered event that owns a readable animation window.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @param {{part?: "auto" | "group" | "route", progress?: number}} [options]
+ */
+export async function pauseInsideFirstEventWindow(
+  page,
+  { part = "auto", progress = 0.5 } = {},
+) {
+  if (!new Set(["auto", "group", "route"]).has(part)) {
+    throw new TypeError("part must be auto, group, or route.");
+  }
+  if (!(typeof progress === "number" && progress > 0 && progress < 1)) {
+    throw new RangeError("progress must lie strictly between zero and one.");
+  }
+  const resolved = await resolveReadableEventWindow(page, { part, progress });
+  await pauseAtLogicalTime(page, resolved.logicalMs);
+  return resolved.logicalMs;
+}
+
+/**
  * Finish one controller-owned sentinel clock without wall-clock waiting.
  *
  * @param {import("@playwright/test").Page} page

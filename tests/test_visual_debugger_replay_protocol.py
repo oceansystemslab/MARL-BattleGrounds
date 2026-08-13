@@ -232,6 +232,7 @@ def _researcher_frame(
         completion=_completion(episode_id),
         processing=_processing(),
         show_ranges=True,
+        recorded_ordinary_movement_distance_scale=1.0,
         projection=projection,
     )
 
@@ -260,6 +261,7 @@ def _researcher_initial_frame(
         completion=_completion(episode_id),
         processing=_processing(),
         show_ranges=True,
+        recorded_ordinary_movement_distance_scale=1.0,
         projection=projection,
     )
 
@@ -279,8 +281,8 @@ def _actor_pov_frame(
         ),
         timeline_id=(f"{episode_id}:replay:timeline:actor-pov:{public_agent_id}"),
         cursor=_cursor(),
-        preset="debug",
-        verbose=True,
+        preset="analysis",
+        verbose=False,
         pov_global_slot=scene.self_actor.global_slot,
         public_agent_id=public_agent_id,
         pov_frame_id=scene.pov_frame_id,
@@ -451,7 +453,7 @@ def _recursive_keys(value: object) -> set[str]:
         ReplaySelectAgentCommandV1(selected_global_slot=7),
         ReplaySetViewCommandV1(view_mode="pov"),
         ReplaySetPovActorCommandV1(global_slot=5),
-        ReplaySetPresetCommandV1(preset="debug"),
+        ReplaySetPresetCommandV1.model_validate({"preset": "debug"}),
         ReplaySetRangesCommandV1(show_ranges=False),
         ReplaySetVerbosityCommandV1(verbose=True),
         ReplayExitCommandV1(),
@@ -665,6 +667,41 @@ def test_output_frames_serialize_canonical_audience_specific_envelopes(
         assert "scenario" not in payload
         assert "available_scenarios" not in payload
         assert "animate_incoming" not in payload
+        if expected_kind == "researcher_replay_viewer":
+            assert payload["recorded_ordinary_movement_distance_scale"] == 1.0
+        else:
+            assert "recorded_ordinary_movement_distance_scale" not in payload
+
+
+def test_recorded_movement_scale_is_strict_researcher_only_replay_truth(
+    projection_cases: _ProjectionCases,
+) -> None:
+    researcher = _researcher_frame(projection_cases.researcher)
+    payload = _exact_model_input(researcher)
+    payload["recorded_ordinary_movement_distance_scale"] = 0.375
+    experimental = ResearcherReplayViewerFrameV1.model_validate(payload)
+
+    assert experimental.recorded_ordinary_movement_distance_scale == 0.375
+
+    for invalid in (0.0, -0.1, 1.01, float("inf"), float("nan")):
+        invalid_payload = _exact_model_input(researcher)
+        invalid_payload["recorded_ordinary_movement_distance_scale"] = invalid
+        with pytest.raises(ValidationError):
+            ResearcherReplayViewerFrameV1.model_validate(invalid_payload)
+
+    missing_payload = _exact_model_input(researcher)
+    missing_payload.pop("recorded_ordinary_movement_distance_scale")
+    with pytest.raises(ValidationError, match="Field required"):
+        ResearcherReplayViewerFrameV1.model_validate(missing_payload)
+
+    for hidden_frame in (
+        _actor_pov_frame(projection_cases.pov),
+        _source_material_frame(projection_cases.source_material),
+    ):
+        hidden_payload = _exact_model_input(hidden_frame)
+        hidden_payload["recorded_ordinary_movement_distance_scale"] = 0.375
+        with pytest.raises(ValidationError, match="Extra inputs"):
+            type(hidden_frame).model_validate(hidden_payload)
 
 
 def test_exact_pov_frame_cannot_expose_processing_or_researcher_truth(

@@ -78,13 +78,16 @@ Useful invocations:
 ./scripts/dev/run_debug_renderer.sh --help
 ./scripts/dev/run_debug_renderer.sh --list-scenarios
 ./scripts/dev/run_debug_renderer.sh --scenario team_focus_crossfire
+./scripts/dev/run_debug_renderer.sh --scenario death_respawn_cycle
 ./scripts/dev/run_debug_renderer.sh --scenario max_status_stack --include-stress
 ./scripts/dev/run_debug_renderer.sh --controlled-slot 5 --no-ranges
-./scripts/dev/run_debug_renderer.sh --view pov --preset debug  # Technical
+./scripts/dev/run_debug_renderer.sh --view pov --preset analysis
 ./scripts/dev/run_debug_renderer.sh --no-open --port 8123
 ./scripts/dev/run_debug_renderer.sh \
   --record-replay recordings/episode.marlbg-replay.json
 ./scripts/dev/run_debug_renderer.sh --replay episode.marlbg-replay.json
+./scripts/dev/run_debug_renderer.sh --list-sample-replays
+./scripts/dev/run_debug_renderer.sh --sample-replay death-respawn-shield
 ./scripts/dev/run_debug_renderer.sh \
   --replay episode.marlbg-replay.json --frame-index 12 \
   --view pov --pov-slot 5 --preset analysis
@@ -104,12 +107,13 @@ Useful invocations:
 | `--no-open` | Print the URL without asking the operating system to open it. |
 | `--port N` | Loopback port; `0` selects an ephemeral port. |
 | `--view researcher\|pov` | Initial authorization mode. Default: `researcher`. |
-| `--preset presentation\|analysis\|debug` | Initial visual-density preset. The `debug` wire/CLI value is displayed as **Technical**. Default: `analysis`. |
-| `--verbose` | Enable expanded diagnostics. |
+| `--preset presentation\|analysis` | Initial visual-density preset. Default: `analysis`. Legacy `debug` input canonicalizes to Analysis for V1 compatibility. |
 | `--ranges` / `--no-ranges` | Initially show or hide controlled-actor ranges. |
 | `--static` | Render one Matplotlib reset snapshot; start no server and register no callbacks. |
 | `--record-replay PATH` | Record one live browser episode to a canonical replay plus metric sidecar, then offer read-only review. |
 | `--replay PATH` | Load a validated semantic replay in the read-only browser viewer, or pair it with `--static`. |
+| `--list-sample-replays` | List the checked-in, verified demonstration replays and exit without importing the simulator. |
+| `--sample-replay NAME` | Open one checked-in demonstration replay by registry name. It is mutually exclusive with live mode and `--replay`. |
 | `--frame-index N` | Select the initial absolute replay frame. Browser default: `0`; required for replay `--static`. |
 | `--pov-slot N` | Select the initial configured-active actor for replay POV authorization. |
 
@@ -123,7 +127,7 @@ presence-aware matrix prevents a mistyped option from being silently ignored.
 
 Recording is a fourth, live-browser-only launch shape. `--record-replay` accepts
 the ordinary live scenario, seed, controlled-slot, audience, preset, range,
-verbosity, port, and browser-opening options. It rejects `--replay`, `--static`,
+port, and browser-opening options. It rejects `--replay`, `--static`,
 `--frame-index`, `--pov-slot`, and list-only operation, including explicitly
 supplied defaults. The target is preflighted before scenario construction,
 runtime discovery, server bind, or browser open. Its parent must already exist,
@@ -196,9 +200,9 @@ The compact recording panel is authoritative:
   shutdown only after saving succeeds. On failure the page remains online,
   stepping stays fenced, and recovery actions remain available.
 
-At frame zero, Reset, scenario changes, and effective movement-scale changes
-replace the empty retaining draft without writing an artifact. After one or
-more captured transitions, those episode-replacement actions require an
+At frame zero, Reset and scenario changes replace the empty retaining draft
+without writing an artifact. After one or more captured transitions, those
+episode-replacement actions require an
 explicit dialog that names the discarded prefix and replacement intent.
 Cancelling preserves the current recording. Confirming marks the old recorder
 discarded and begins a fresh metric-complete frame-zero episode at the same
@@ -235,8 +239,8 @@ inspector retain normal browser keyboard and Tab behavior.
 | Input | Action |
 | --- | --- |
 | `Tab` / `Shift+Tab` | Cycle the controlled actor without discarding any staged draft. |
-| Left click | Select a visible active target. |
-| `Shift` + left click | Control the clicked visible active actor. |
+| Left click | Control the clicked authorized actor in live Researcher mode; select the clicked reference agent in Researcher replay. |
+| `Shift` + left click | Select a visible active target in live mode. |
 | Right click | Clear the selected target. |
 | `Escape` | Clear the target and leave battlefield focus. |
 | `W A S D` / arrow keys | Choose cardinal movement for the controlled actor. |
@@ -246,7 +250,7 @@ inspector retain normal browser keyboard and Tab behavior.
 | `Space` / `Enter` | Submit the staged joint turn in researcher view, or the controlled actor only in agent POV. |
 | `N` | Advance the next registered scripted frame. |
 | `R` | Reset the scenario deterministically. |
-| `G` / `V` | Toggle controlled-actor ranges / diagnostic verbosity. |
+| `G` | Toggle controlled-actor ranges. |
 | `[` / `]` | Previous / next scenario. |
 | `P` | Pause or resume presentation-only motion. |
 | `?` | Open in-app help. |
@@ -254,17 +258,16 @@ inspector retain normal browser keyboard and Tab behavior.
 The joint-action console presents numbered **Movement** and **Action** composer
 cards, followed by a visually dominant Submit rail. Lower-emphasis
 **Inspect** and **Session** utility rows provide scripted advance, actor
-cycling, target clearing, range and verbosity controls, reset, and scenario
+cycling, target clearing, ranges, reset, and scenario
 navigation without competing with turn composition. Each authorized roster row
 also provides **Target** and **Control** buttons. The toolbar provides
-Scenario, View, Preset, Reconnect, Help, Exit, motion pause, a continuous
-**Graphics rendering speed** control from `0.01×` through `2.00×`, Motion Off,
-and Skip. Graphics rendering speed is presentation-only and never changes the
-authoritative simulator movement scale.
+Scenario, View, Preset, Reconnect, Help, Exit, motion pause, Motion Off, and
+Skip. Presentation choreography uses its single authored readable pace.
 
-Normal animation briefly gates only the next Submit or scripted-frame command
-during its explanatory phase. Skip, reduced-motion preference, or Off releases
-that gate immediately. Animation state never changes simulator authority.
+Submitting while an explanation is active or paused first settles that local
+presentation synchronously, then sends the current revision-fenced draft once.
+Network-busy duplicate submissions remain blocked. Reduced-motion, Motion Off,
+Pause, and Skip never change simulator authority.
 
 ## Joint-turn planning
 
@@ -300,18 +303,12 @@ After a successful interactive transition:
 Terminal or truncated sessions block submissions before key splitting while
 leaving inspection, reset, view, preset, and scenario controls available.
 
-### Movement-scale reset
+### Product movement scale
 
-The toolbar exposes the authoritative ordinary-movement scale from `0.01`
-through `1.00` in hundredth increments, plus shortcuts for `0.10` and the
-scenario-authored default. Dragging previews the two-decimal value locally;
-one command is sent only when the value is committed.
-
-Changing scale rebuilds a coherent reset epoch and calls `step` zero times. It
-preserves the seed, view, preset, range visibility, and a still-valid
-controlled slot while clearing transition events, reward, diagnostics, pending
-rows, and scripted progress. Ordinary Reset preserves the current override;
-switching scenarios restores the destination scenario's authored default.
+Live debugger scenarios use the canonical product movement scale `1.00`; it is
+not an editable browser control or command. The generic simulator configuration
+still permits explicit non-1 values for experiments and tests. Replays preserve
+and display their recorded effective scale as immutable scientific provenance.
 
 ## Views and presets
 
@@ -354,20 +351,31 @@ effective output is reconstructed in JavaScript.
   remain governed by the authoritative Ranges toggle.
 - **Analysis:** default researcher layout with roster, selected facts, event
   feed, selected ranges, and selected legality.
-- **Technical:** privileged visibility, expanded candidate legality, geometry,
-  and technical frame details. The wire/CLI preset identifier remains `debug`.
+
+Legacy V1 `debug` preset requests canonicalize to Analysis. The separate
+collapsible **Technical Frame** panel remains available for authorized concise
+diagnostics; there is no Technical rendering preset or raw-frame browser dump.
 
 ## Responsive battlefield and inspector
 
-The battlefield is native SVG. The inspector is responsive HTML with:
+The battlefield is native SVG. Right-side information uses stable native
+`details` panels whose open state survives ordinary frames and cursor movement.
+The inspector contains:
 
 1. scenario, revision, step, transition, view, and preset state;
 2. exact-ID team rosters with health, cooldown, statuses, and selection;
-3. controlled/selected comparison;
+3. a comprehensive authorized Agent Details card with role, strengths,
+   limitations, teamwork, counterplay, exact mechanics, state, statuses, active
+   auras, cooldown, and legality;
 4. **Pending joint turn** with explicit submission scope;
 5. **Latest transition** with submitted/accepted/rejected facts;
 6. latest semantic event feed;
 7. visual key and collapsible technical frame.
+
+Roster is initially open in live and replay. The live Command Deck is initially
+open. Explicit agent selection opens Agent Details; other informational panels
+start closed. User choices persist until scenario, replay artifact, or audience
+authority changes. Closing a panel that owns focus returns focus to its summary.
 
 At the minimum supported viewport the two-column regions compress and scroll
 independently. The primary review viewport is `1440×900`; the minimum supported
@@ -411,7 +419,7 @@ public documentation.
 | Observation range | White dotted circle. |
 | Basic range | Controlled actor's class color with a dashed stroke. |
 | Ultimate range | Purple dash-dot stroke. |
-| Mage/Warrior aura | Low-alpha cyan/bronze tint only, with no border. |
+| Sorcerer’s Empowerment / Guardian’s Barrier | Low-alpha cyan/bronze tint only for an exact non-neutral multiplier, with no border or neutral `×1` clutter. |
 | Basic/Ultimate legality | Detached selected-target `0/B` and `1/U` pills using exact mask values. |
 | Ultimate cooldown | Class-specific Ultimate icon plus exact positive tick count in a separate collision-aware dock; absent at zero. |
 
@@ -446,6 +454,10 @@ or change simulator state.
 The supported durable vocabulary includes three source-class stun channels
 sharing one canonical stun glyph, three source-class slow channels sharing one
 canonical swirl, anti-heal, Freedom, Burst, and effective aura modifiers.
+Human-facing class actions are **Burst**, **Charge**, **Freezing Trap**,
+**Crippling Poison**, and **Holy Word: Salvation**. Passive aura mechanics are
+**Sorcerer’s Empowerment** and **Guardian’s Barrier**; scientific IDs remain
+unchanged.
 Source identity remains in each token's accent and accessible name. Overflow
 is neutral monochrome and its tooltip enumerates every hidden fact.
 
@@ -466,15 +478,16 @@ but a number never overlaps an icon or escapes its cell.
 | --- | --- | --- |
 | Mage | Directional damage route terminating in a red minus. | Source-local expanding Burst ring and arena-star flare; durable Burst remains a separate status token. |
 | Warrior | Directional damage route terminating in a red minus. | Directional Charge impact/flare plus the exact public before/after displacement chord. |
-| Hunter | Directional damage route terminating in a red minus. | Directional Trap delivery with a neutral lattice/diamond impact; durable Trap and its ending lifecycle remain separate. |
-| Rogue | Directional damage route terminating in a red minus. | Directional Poison delivery, red-minus impact, target splash, and durable consequences. |
-| Priest | Rounded directional healing tether terminating in a green plus. | Stronger Holy Word route with green-plus impact and dual healing flare. |
+| Hunter | Directional damage route terminating in a red minus. | Directional Freezing Trap delivery with a neutral lattice/diamond impact; its durable status and ending lifecycle remain separate. |
+| Rogue | Directional damage route terminating in a red minus. | Directional Crippling Poison delivery, red-minus impact, target splash, and durable consequences. |
+| Priest | Rounded directional healing tether terminating in a green plus. | Stronger Holy Word: Salvation route with green-plus impact and dual healing flare. |
 
 Selection is always the magenta corner reticle; targeting intent is a thin
 pending preview. Combat, activation, output, health, regeneration, and cooldown
 cues use transition-start anchors. Charge then uses its explicit first-phase
-displacement, ordinary movement uses its separate second-phase displacement,
-and lifecycle/status/shield/wave/respawn cues use their recorded later phase.
+displacement. Ordinary movement stays in the canonical event feed but has no
+Charge-like spatial arrow. Lifecycle/status/shield/wave/respawn cues use their
+recorded later phase.
 Routes are clipped at body radii. Reciprocal routes bend in opposite directions,
 same-direction multiplicity receives stable parallel offsets, close distinct
 centers preserve the actual source-to-recipient bearing, and all accepted
@@ -513,17 +526,17 @@ reconstructs a cause from before/after state:
 | `health_regenerated` | Regeneration cue distinct from Priest healing. |
 | `cooldown_started` / `cooldown_ready` | Dock start pulse / ready flash. |
 | `charge_phase_displacement` | Exact first displacement segment; no inferred target. |
-| `ordinary_movement_phase_displacement` | Exact second segment, never relabelled voluntary intent. |
-| `agent_died` | Death at the post-displacement position, followed by durable corpse state. |
+| `ordinary_movement_phase_displacement` | Feed-visible exact second-segment fact; no battlefield direction arrow. |
+| `agent_died` | Recorded death shock/fade at the post-displacement position, followed by the unchanged durable corpse. |
 | `lethal_damage_contribution` | Positive-contributor detail only; no killer claim or extra projectile. |
-| `status_aged_to_zero` | Neutral expiry/fade. |
-| `status_broken_by_damage` | Distinct recorded shatter. |
-| `status_applied` | Recorded source-to-recipient application cue. |
+| `status_aged_to_zero` | Neutral prior-instance expiry/fade. |
+| `status_broken_by_damage` | Distinct recorded shatter; same-channel application is presented as “Broken, then reapplied.” |
+| `status_applied` | Recorded source-to-recipient application; same-channel age is presented as “Previous instance expired, then reapplied.” |
 | `status_refreshed_or_extended` | Source-less refresh pulse; durable source-agent attribution becomes unknown. |
 | `status_cleared_by_new_death` | Death-clear sweep distinct from expiry. |
-| `spawn_shield_expired` | Shield crack/fade. |
+| `spawn_shield_expired` | Durable cyan invulnerability shell reaches zero, then cracks/fades. |
 | `respawn_wave_occurred` | Team clock/feed cue even when no actor respawns. |
-| `agent_respawned` | Pad materialization at the recorded successor position, followed by durable body/shield state. |
+| `agent_respawned` | Beam/radial materialization at the recorded successor position, followed by the authoritative body and shield shell. |
 
 Status-source evidence is a pure prefix index. A recorded application supplies
 direct evidence; a source-less refresh clears agent attribution; expiry, break,
@@ -544,10 +557,12 @@ and the structured event feed retain the authoritative story. This density case
 remains part of final human acceptance rather than being presented as unlimited
 screen capacity.
 
-Choreography follows non-overlapping causal phases: transition-start combat,
-Charge, ordinary movement, death, status, then shield/wave/respawn. Ordinary
-choreography is bounded and uses the latest transition only. Hover, help, panel
-changes, reconnect, and redraw do not restart it.
+Choreography follows canonical causal order while restoring the accepted M5
+perceptual dwell: readable ability travel/impact, 480-ms outcome/status/Charge
+windows, and extended death/shield/wave/respawn beats. Absent beat families add
+no dead waiting time. Ordinary choreography is bounded and uses the latest
+transition only. Hover, help, panel changes, reconnect, and redraw do not
+restart it.
 
 Animated nodes honor those authored phase boundaries exactly. Transient labels
 fade without moving outside their collision-planned geometry; only the exact
@@ -562,12 +577,12 @@ successor. The renderer never reconstructs a private collision-resolved target
 or a different physical path. The displacement remains through UI-only activity
 and is replaced by the next successful transition, reset, or scenario switch.
 
-### Trap
+### Freezing Trap
 
-Trap application, source-less refresh, age-to-zero, damage break, and
+Freezing Trap application, source-less refresh, age-to-zero, damage break, and
 death-clear are separate authoritative CP2 variants. The analyzer renders the
-recorded variant and never classifies Trap lifecycle from accepted actions or
-duration deltas. The route terminates at the target body boundary; its durable
+recorded variant and never classifies Freezing Trap lifecycle from accepted
+actions or duration deltas. The route terminates at the target body boundary; its durable
 status card remains a separate frame fact.
 
 ## Scenarios
@@ -578,12 +593,19 @@ status card remains a separate frame fact.
 - `basic_support`: simultaneous Basic damage, healing, passives, and zero-net
   attribution.
 - `ultimate_showcase`: all five class Ultimates and lifecycle follow-up.
-- `aura_crossfire`: reciprocal Basics under Mage and Warrior auras.
+- `aura_crossfire`: reciprocal Basics under Sorcerer’s Empowerment and
+  Guardian’s Barrier.
 - `status_stack`: stacked control, mitigation, break, movement, and expiry.
 - `team_focus_crossfire`: repeated damage, four-way focus fire, three-way
-  healing, anti-heal, and multiple Holy Words.
+  healing, anti-heal, and multiple Holy Word: Salvation activations.
 - `mirrored_ultimates`: reciprocal mirrored activation of all Ultimate
   families.
+- `death_respawn_cycle`: multi-source lethal damage, death clearing, corpse
+  wait, populated respawn wave, respawn, shield countdown/expiry, and first
+  unshielded interaction.
+- `recovery_refresh_cycle`: rejection, regeneration, cooldown readiness,
+  application, refresh/extension, age+reapply, break+reapply, and natural
+  expiry.
 
 ### Developer stress menu
 
@@ -596,7 +618,10 @@ Pass `--include-stress` to expose:
 - `moving_focus_crossfire`.
 
 Every simulator-backed scripted command is preflighted against its actual
-pre-state mask and accepted action.
+pre-state mask. The two lifecycle scenarios deliberately include authored
+masked commands whose exact independent rejection events are part of the public
+trajectory. The union of registered Researcher scenarios is tested against all
+21 canonical event kinds.
 
 ### Renderer-only fixtures
 
@@ -642,9 +667,11 @@ current frame and a matching audience-owned timeline:
   the recorded base-sensor material and availability joins, never claims a
   materialized actor input, and never invents an exact SharedObs export.
 
-The timeline controls are **First**, **Previous**, **Play/Pause**, **Next**,
-**Last**, and an absolute frame slider. `Home`/`End`, Left/Right, and Space are
-their keyboard equivalents while the replay timeline has focus. The slider is
+The visible timeline controls are **First**, **−10**, **−1**,
+**Play/Pause**, **+1**, **+10**, **Last**, an absolute slider, and
+**Tick current / final**. ±10 is one clamped absolute-seek request, never ten
+Next commands. `Home`/`End`, Left/Right, Shift+Left/Right, and Space are their
+keyboard equivalents while the replay timeline has focus. The slider is
 debounced; autoplay keeps exactly one request and one presentation in flight.
 Seeking, a hidden tab, disconnect, error, or the captured endpoint pauses it.
 Motion Off still uses a bounded cadence rather than issuing an unbounded request
@@ -652,15 +679,15 @@ loop.
 
 Only an exact accepted `Next` from frame `k` to `k + 1` may animate the incoming
 recorded explanation. Absolute seeks, backward moves, same-frame seeks,
-audience/preset/range/verbosity changes, duplicate commands, stale responses,
+audience/preset/range changes, duplicate commands, stale responses,
 and reconnects install settled frames. The animation hint belongs to that one
 command response; it is not durable replay state and cannot be recovered from a
 later `GET /api/frame`.
 
-Live scenario, action-composer, submission, reset, movement-scale, and pending
+Live scenario, action-composer, submission, reset, and pending
 action controls are hidden and removed from keyboard focus in replay. Replay
 keeps presentation presets, local motion controls, researcher-only ranges and
-Reference selection, recipient switching, verbosity, Reconnect, Help, and
+Reference selection, recipient switching, Reconnect, Help, and
 Exit. Every accepted command is revisioned and idempotent under the same
 single-request loopback safety model as live mode, but none can call `step` or
 mutate the replay artifact.
@@ -676,6 +703,46 @@ Useful launches:
 ./scripts/dev/run_debug_renderer.sh \
   --replay episode.marlbg-replay.json --view pov --pov-slot 5
 ```
+
+### Checked sample replay artifacts
+
+The three launcher samples live under `examples/replays/v1/`. Each replay has
+an adjacent metric sidecar and one row in `manifest.json` recording its stable
+launch name, source scenario, transition and frame counts, canonical event-kind
+coverage, byte length, and SHA-256 digest. The manifest marks every member as
+an unofficial deterministic presentation demonstration—not a benchmark,
+policy evaluation, source-tree attestation, or host attestation. Replay headers
+still preserve the actual generating Git/source identity and CPU runtime facts;
+the launcher repeats the unofficial-demo notice before opening a sample.
+
+Before reviewing or publishing a change that touches the sample registry,
+scenario sources, replay persistence, or checked artifacts, verify the complete
+set through the public replay loader:
+
+```bash
+.venv/bin/python scripts/dev/generate_visual_debugger_sample_replays.py --check
+```
+
+Maintainers generate the set only when `examples/replays/v1/` is intentionally
+absent:
+
+```bash
+.venv/bin/python scripts/dev/generate_visual_debugger_sample_replays.py --generate
+```
+
+Generation uses the real scripted debugger session, recording coordinator,
+canonical replay persistence, metric sidecar persistence, and public loader.
+It captures the actual source identity and runtime before creating its staging
+directory. Repeated generation from the same frozen source on the same runtime
+is byte-stable; cross-host verification compares canonical artifacts and
+scientific scenario/event truth without rewriting historical provenance.
+It stages the complete set beside the destination, verifies it, publishes it
+atomically, and refuses to overwrite any existing target. Never delete the
+checked directory merely to bypass that refusal; investigate and review the
+intended source or artifact change first.
+Secure generation currently requires Linux `renameat2(RENAME_NOREPLACE)`;
+generation and verification fail closed when the required no-follow,
+directory-file-descriptor, or atomic no-replace primitives are unavailable.
 
 Closing the tab does not stop Python. Use **Exit analyzer** or `Ctrl-C` in the
 launching terminal.

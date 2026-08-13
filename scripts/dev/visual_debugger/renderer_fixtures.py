@@ -587,6 +587,9 @@ def _synthetic_researcher_presentation_pair(
         completion=completion,
         processing=processing,
         show_ranges=live_frame.show_ranges,
+        recorded_ordinary_movement_distance_scale=(
+            live_frame.scenario.ordinary_movement_distance_scale
+        ),
         projection=live_frame.projection,
     )
     replay_timeline = ResearcherReplayTimelineV1(
@@ -2333,12 +2336,7 @@ def _scenario_metadata(
         description=description,
         mode="scripted",
         audience="researcher",
-        movement_scale_minimum=0.01,
-        movement_scale_maximum=1.0,
-        movement_scale_step=0.01,
         ordinary_movement_distance_scale=1.0,
-        scenario_default_movement_scale=1.0,
-        movement_scale_overridden=False,
         completed_frame_count=frame_index,
         frame_count=frame_index,
         next_frame_index=None,

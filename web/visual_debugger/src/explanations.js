@@ -80,6 +80,18 @@ function tickCount(value) {
   return count === null ? "Unavailable" : `${count} ${count === 1 ? "Tick" : "Ticks"}`;
 }
 
+/**
+ * Neutral aggregate aura rows are serialized scientific truth, but they do not
+ * describe an active visual effect. Suppress only the exact multiplicative
+ * identity at presentation boundaries; near-neutral recorded values remain
+ * visible without tolerance or rounding.
+ *
+ * @param {JsonRecord} modifier
+ */
+function isNeutralAuraModifier(modifier) {
+  return finiteNumber(modifier.multiplier) === 1;
+}
+
 /** @param {unknown} value */
 function point(value) {
   return Array.isArray(value) &&
@@ -252,8 +264,11 @@ export function explainAgent(
     integer(agent.ultimate_cooldown_remaining) ?? integer(agent.ultimate_cooldown);
   const profile = classPresentation(mechanics?.class_name ?? classToken.label);
   const statuses = records(agent.statuses);
-  const modifiers = records(agent.aura_modifiers ?? agent.modifiers);
+  const modifiers = records(agent.aura_modifiers ?? agent.modifiers).filter(
+    (modifier) => !isNeutralAuraModifier(modifier),
+  );
   const modifiersAvailable = Array.isArray(agent.aura_modifiers ?? agent.modifiers);
+  const spawnShieldRemaining = integer(agent.spawn_shield_remaining);
   const nowRows = [
     row("Identity", publicIdentity),
     row("Class", classToken.label),
@@ -276,6 +291,14 @@ export function explainAgent(
         : cooldown === 0
           ? "Ready"
           : `On cooldown (${tickCount(cooldown)})`,
+    ),
+    row(
+      "Spawn Shield",
+      spawnShieldRemaining === null
+        ? "Unavailable"
+        : spawnShieldRemaining > 0
+          ? `Invulnerable · ${tickCount(spawnShieldRemaining)} remaining`
+          : "Inactive",
     ),
   ];
   if (selection.controlled) {
@@ -400,6 +423,7 @@ export function explainPovAgent(rawAgent, selection = {}) {
     effective_movement_speed: input.effective_movement_speed,
     ultimate_cooldown_remaining: input.ultimate_cooldown_remaining,
     steps_until_out_of_combat: input.steps_until_out_of_combat,
+    spawn_shield_remaining: input.spawn_shield_remaining,
     alive: input.alive,
     statuses,
   };
@@ -411,6 +435,36 @@ export function explainPovAgent(rawAgent, selection = {}) {
       audience: "reduced_agent_pov",
     },
     null,
+  );
+}
+
+/**
+ * Explain the exact lifecycle input used by the durable cyan shell. This
+ * builder copies only agent identity and the serialized shield countdown, so
+ * the same descriptor is safe for researcher agents and the authorized POV
+ * self row.
+ *
+ * @param {unknown} rawAgent
+ * @returns {SemanticDescriptor}
+ */
+export function explainSpawnShield(rawAgent) {
+  const agent = isRecord(rawAgent) ? rawAgent : {};
+  const remaining = integer(agent.spawn_shield_remaining);
+  const active = remaining !== null && remaining > 0;
+  return descriptor(
+    "status",
+    `spawn-shield:${text(agent.public_agent_id) ?? "unknown"}`,
+    "Spawn Shield",
+    active
+      ? `This agent is invulnerable while the spawn shield remains active; ${tickCount(remaining)} remain.`
+      : "The spawn shield is inactive.",
+    [
+      row("Agent", publicAgentLabel(agent.public_agent_id)),
+      row("Protection", active ? "Invulnerable" : "Inactive"),
+      row("Remaining", remaining === null ? "Unavailable" : tickCount(remaining)),
+    ],
+    [],
+    { tone: active ? "positive" : "neutral", accent: "none" },
   );
 }
 
@@ -890,7 +944,7 @@ export function explainAura(rawField, rawSourceAgent = null) {
     "aura",
     `aura:${integer(field.source_global_slot) ?? text(sourcePublicId) ?? "unknown"}:${token.tokenId}`,
     presentation.fieldTitle,
-    `Allies inside this field have ${effect}.`,
+    `Catalog-declared same-team aura capability: allies within this recorded radius may receive ${effect}. Consult each recipient's exact aggregate modifier for realized effect.`,
     [
       row("Source ID", publicAgentLabel(sourcePublicId)),
       row(
@@ -901,10 +955,10 @@ export function explainAura(rawField, rawSourceAgent = null) {
       ),
       row("Radius", exactNumber(field.radius)),
       row(
-        "Per-emitter Multiplier",
+        "Catalog Multiplier",
         multiplier === null ? "Unavailable" : `×${formatDisplayNumber(multiplier)}`,
       ),
-      row("Per-emitter Effect", effect),
+      row("Catalog Effect", effect),
     ],
     [
       section("Field Contract", [

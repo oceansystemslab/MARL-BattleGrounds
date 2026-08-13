@@ -13,7 +13,6 @@ from scripts.dev.visual_debugger.control import (
     reset_session,
     select_clicked_target,
     select_controlled_actor,
-    set_movement_scale,
     set_pending_movement,
     submit_joint_action,
     submit_next_script_frame,
@@ -28,7 +27,11 @@ from scripts.dev.visual_debugger.protocol import (
     ResearcherLiveDebuggerFrameV2,
     ViewMode,
 )
-from scripts.dev.visual_debugger.scenarios import get_scenario
+from scripts.dev.visual_debugger.scenarios import (
+    RESEARCHER_SCENARIOS,
+    STRESS_SCENARIOS,
+    get_scenario,
+)
 from scripts.dev.visual_debugger.targeting import global_slot_to_target_action
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
@@ -108,7 +111,7 @@ def test_initial_researcher_frame_joins_canonical_frame_zero_and_menu() -> None:
     assert scene.frame_id == frame.frame_id
     assert frame.scenario.name == "arena_5v5"
     assert frame.scenario.mode == "interactive"
-    assert len(frame.available_scenarios) == 7
+    assert len(frame.available_scenarios) == len(RESEARCHER_SCENARIOS)
     assert all(option.audience == "researcher" for option in frame.available_scenarios)
     assert frame.hud.roster_global_slots == tuple(
         agent.global_slot for agent in scene.agents
@@ -277,7 +280,9 @@ def test_stress_menu_is_explicitly_opt_in() -> None:
     frame = _frame(_session(), include_stress=True)
     assert isinstance(frame, ResearcherLiveDebuggerFrameV2)
 
-    assert len(frame.available_scenarios) == 12
+    assert len(frame.available_scenarios) == len(RESEARCHER_SCENARIOS) + len(
+        STRESS_SCENARIOS
+    )
     assert tuple(
         option.name
         for option in frame.available_scenarios
@@ -400,20 +405,26 @@ def test_reset_returns_canonical_frame_zero_and_advances_run_generation() -> Non
     assert reset.incoming_evaluation_view is None
 
 
-def test_frame_exposes_effective_and_authored_movement_scale_metadata() -> None:
-    session = set_movement_scale(_session(), 0.01)
+def test_frame_exposes_product_movement_scale_as_read_only_metadata() -> None:
+    session = _session()
     frame = _frame(session, revision=1)
     assert isinstance(frame, ResearcherLiveDebuggerFrameV2)
     payload = cast(dict[str, object], json.loads(frame.model_dump_json()))
     scenario_payload = cast(dict[str, object], payload["scenario"])
 
-    assert frame.scenario.ordinary_movement_distance_scale == 0.01
-    assert frame.scenario.scenario_default_movement_scale == 1.0
-    assert frame.scenario.movement_scale_overridden
-    assert scenario_payload["movement_scale_minimum"] == 0.01
-    assert scenario_payload["movement_scale_maximum"] == 1.0
-    assert scenario_payload["movement_scale_step"] == 0.01
-    assert scenario_payload["movement_scale_overridden"] is True
+    assert frame.scenario.ordinary_movement_distance_scale == 1.0
+    assert scenario_payload == {
+        key: value
+        for key, value in scenario_payload.items()
+        if key
+        not in {
+            "movement_scale_minimum",
+            "movement_scale_maximum",
+            "movement_scale_step",
+            "scenario_default_movement_scale",
+            "movement_scale_overridden",
+        }
+    }
 
 
 def test_pov_frame_uses_dedicated_projection_and_omits_researcher_ranges() -> None:
@@ -455,8 +466,8 @@ def test_live_presentation_authority_tracks_session_without_changing_identity() 
     assert isinstance(researcher, ResearcherLiveDebuggerFrameV2)
     assert isinstance(pov, ActorPovLiveDebuggerFrameV2)
     assert researcher.show_ranges is False
-    assert researcher.verbose is True
-    assert pov.verbose is True
+    assert researcher.verbose is False
+    assert pov.verbose is False
     assert researcher.frame_id == original.current_evaluation_frame.frame_id
     assert pov.frame_id == original.current_evaluation_frame.frame_id
     assert "show_ranges" not in pov.model_dump(mode="json")

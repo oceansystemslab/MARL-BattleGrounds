@@ -24,7 +24,6 @@ const GAME_KEYS = new Set([
   "n",
   "r",
   "g",
-  "v",
   "p",
   "?",
 ]);
@@ -38,7 +37,7 @@ const RECORDING_LIFECYCLE_COMMANDS = new Set([
   "exit",
 ]);
 
-const RECORDING_PRESENTATION_KEYS = new Set(["g", "v", "p", "?"]);
+const RECORDING_PRESENTATION_KEYS = new Set(["g", "p", "?"]);
 
 const RECORDING_SAVE_AS_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*\.marlbg-replay\.json$/u;
 
@@ -92,6 +91,31 @@ export function keyboardCommand(
     meta_key: Boolean(metaKey),
     repeat: Boolean(repeat),
   };
+}
+
+/**
+ * Decide whether Submit must synchronously settle local presentation before
+ * entering the normal request fence. The readable submission gate may already
+ * be open while animations are still active, and paused animations remain
+ * active regardless of that gate.
+ *
+ * @param {unknown} rawPresentation
+ */
+export function presentationRequiresSubmissionSettle(rawPresentation) {
+  if (
+    typeof rawPresentation !== "object" ||
+    rawPresentation === null ||
+    Array.isArray(rawPresentation)
+  ) {
+    return false;
+  }
+  const presentation = /** @type {Record<string, unknown>} */ (rawPresentation);
+  return (
+    presentation.submissionBlocked === true ||
+    presentation.paused === true ||
+    (Number.isInteger(presentation.animationCount) &&
+      Number(presentation.animationCount) > 0)
+  );
 }
 
 /**
@@ -156,26 +180,6 @@ export function recordingReplacementCommand(frame, command) {
     return Object.freeze({
       command_type: "scenario_switch",
       scenario_name: scenarioName,
-    });
-  }
-  if (command.command_type === "set_movement_scale") {
-    const requested = command.movement_scale;
-    const scenario = frame.scenario;
-    const current = scenario?.ordinary_movement_distance_scale;
-    const fallback = scenario?.scenario_default_movement_scale;
-    const effective = requested === null ? fallback : requested;
-    if (
-      typeof effective !== "number" ||
-      !Number.isFinite(effective) ||
-      typeof current !== "number" ||
-      !Number.isFinite(current) ||
-      effective === current
-    ) {
-      return null;
-    }
-    return Object.freeze({
-      command_type: "set_movement_scale",
-      movement_scale: requested,
     });
   }
   if (
@@ -374,6 +378,10 @@ function pointInSvg(svg, event) {
  *   toWorldPoint: (point: {x: number, y: number}) =>
  *     {world_x: number, world_y: number} | null,
  *   onCommand: (command: Record<string, unknown>) => void | Promise<void>,
+ *   onPointerCommand?: (
+ *     target: EventTarget | null,
+ *     command: Readonly<Record<string, unknown>>,
+ *   ) => void,
  *   onHelp: () => void,
  *   onPresentationKey?: (key: "toggle-pause") => void,
  *   onReleaseFocus: () => void,
@@ -384,6 +392,7 @@ export function bindBattlefieldControls({
   battlefield,
   toWorldPoint,
   onCommand,
+  onPointerCommand = () => {},
   onHelp,
   onPresentationKey = () => {},
   onReleaseFocus,
@@ -440,13 +449,15 @@ export function bindBattlefieldControls({
     ) {
       return;
     }
-    onCommand({
+    const command = {
       command_type: "battlefield_pointer",
       world_x: worldPoint.world_x,
       world_y: worldPoint.world_y,
       button: event.button === 0 ? "primary" : "secondary",
       ...modifierFields(event),
-    });
+    };
+    onPointerCommand(event.target, command);
+    onCommand(command);
   });
 
   battlefield.addEventListener("contextmenu", (event) => {

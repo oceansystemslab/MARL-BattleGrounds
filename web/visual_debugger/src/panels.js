@@ -80,6 +80,30 @@ function isRecord(value) {
 }
 
 /**
+ * Neutral aggregate modifiers remain valid wire truth, but they are visual
+ * noise. Filter exact ×1 rows only at this browser presentation boundary.
+ *
+ * @param {Record<string, any>} agent
+ */
+function agentForPresentation(agent) {
+  const key = Array.isArray(agent.aura_modifiers)
+    ? "aura_modifiers"
+    : Array.isArray(agent.modifiers)
+      ? "modifiers"
+      : null;
+  if (key === null) {
+    return agent;
+  }
+  return {
+    ...agent,
+    [key]: agent[key].filter(
+      (/** @type {unknown} */ modifier) =>
+        !isRecord(modifier) || modifier.multiplier !== 1,
+    ),
+  };
+}
+
+/**
  * @param {unknown} value
  * @returns {any[]}
  */
@@ -96,6 +120,65 @@ function frameScene(frame) {
     return null;
   }
   return isRecord(frame.scene) ? frame.scene : null;
+}
+
+export const DISCLOSURE_PANEL_IDS = Object.freeze([
+  "command-deck",
+  "roster-details",
+  "agent-details",
+  "pending-turn-details",
+  "latest-transition-details",
+  "events-details",
+  "visual-key",
+  "technical-frame-details",
+]);
+
+/**
+ * Build the disclosure reset epoch without revisions, transition IDs, or
+ * replay cursors. Ordinary authoritative refreshes therefore preserve native
+ * details state; only scenario/artifact or audience authority changes reset it.
+ *
+ * @param {unknown} rawFrame
+ */
+export function panelDisclosureAuthorityKey(rawFrame) {
+  const frame = isRecord(rawFrame) ? rawFrame : null;
+  if (frame === null) {
+    return null;
+  }
+  const scene = frameScene(frame);
+  const replay = frame.viewer_mode === "replay";
+  const reference = isRecord(frame.artifact_summary?.replay_reference)
+    ? frame.artifact_summary.replay_reference
+    : {};
+  const scenario = isRecord(frame.scenario) ? frame.scenario : {};
+  const episode = replay
+    ? (reference.canonical_digest_sha256 ??
+      reference.artifact_id ??
+      frame.timeline_id ??
+      "unknown-artifact")
+    : (scenario.name ?? frame.scenario_name ?? "unknown-scenario");
+  const audience =
+    frame.replay_audience ?? scene?.audience ?? frame.view_mode ?? "unknown-audience";
+  const recipient =
+    audience === "researcher"
+      ? "researcher"
+      : (frame.pov_global_slot ??
+        frame.selected_global_slot ??
+        frame.public_agent_id ??
+        asArray(scene?.agents)[0]?.public_agent_id ??
+        "recipient");
+  return `${replay ? "replay" : "live"}:${episode}:${audience}:${recipient}`;
+}
+
+/**
+ * @param {string} panelId
+ * @param {boolean} replay
+ */
+export function disclosurePanelInitiallyOpen(panelId, replay) {
+  if (!DISCLOSURE_PANEL_IDS.includes(panelId)) {
+    throw new RangeError(`Unknown disclosure panel ${panelId}.`);
+  }
+  return panelId === "roster-details" || (!replay && panelId === "command-deck");
 }
 
 /**
@@ -282,21 +365,6 @@ function humanize(value) {
 }
 
 /**
- * @param {unknown} value
- * @param {string} emptyText
- */
-function formatRecord(value, emptyText) {
-  if (value === null || value === undefined) {
-    return emptyText;
-  }
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-}
-
-/**
  * @template {keyof HTMLElementTagNameMap} K
  * @param {K} tagName
  * @param {string | null} className
@@ -360,7 +428,12 @@ function renderFactTokens(
   audience,
 ) {
   const nodes = [];
-  const authorizedItems = audience === "agent_pov" && kind === "modifier" ? [] : items;
+  const authorizedItems =
+    audience === "agent_pov" && kind === "modifier"
+      ? []
+      : kind === "modifier"
+        ? items.filter((item) => !isRecord(item) || item.multiplier !== 1)
+        : items;
   for (const rawItem of authorizedItems) {
     const item = isRecord(rawItem) ? rawItem : {};
     const token = resolveVisualToken(
@@ -542,195 +615,6 @@ function pendingPairMaskLabel(pending) {
     return "Not applicable";
   }
   return availabilityLabel(pending.pair_mask_value);
-}
-
-/**
- * @param {HTMLElement} container
- * @param {Record<string, any>} hud
- * @param {ReadonlyMap<number, string> | ((slot: number) => string | null)} resolver
- */
-function addCandidateLegality(container, hud, resolver) {
-  const candidates = asArray(hud.candidate_legalities).filter(isRecord);
-  if (candidates.length === 0) {
-    return;
-  }
-  const group = htmlElement("section", "candidate-legality");
-  group.setAttribute("aria-label", "Exact controlled-actor candidate legality");
-  group.append(htmlElement("h3", null, "All candidate lanes"));
-  const rows = htmlElement("div", "candidate-legality__rows");
-  for (const candidate of candidates) {
-    const target = isRecord(candidate.target) ? candidate.target : {};
-    const targetAction = Number(target.target_action ?? candidate.target_action);
-    const hasPublicTargetSlot =
-      target.disclosure === "public" && Number.isInteger(target.global_slot);
-    const targetSlot = hasPublicTargetSlot ? Number(target.global_slot) : null;
-    const candidateTargetLabel =
-      target.disclosure === "target_none"
-        ? "target-none"
-        : target.target_action === 0
-          ? "target-none"
-          : typeof target.public_agent_id === "string" &&
-              (targetSlot === null ||
-                resolvePublicAgentId(resolver, targetSlot) === target.public_agent_id)
-            ? `Agent ID ${target.public_agent_id} (action ${target.target_action})`
-            : targetSlot !== null
-              ? agentLabelForSlot(resolver, targetSlot)
-              : "undisclosed";
-    const lane0Available = Boolean(candidate.lane_0_available);
-    const lane1Available = Boolean(candidate.lane_1_available);
-    const basicAvailable = Boolean(candidate.basic_available);
-    const ultimateAvailable = Boolean(candidate.ultimate_available);
-    const row = htmlElement("div", "candidate-legality-row");
-    row.dataset.targetAction = String(targetAction);
-    row.dataset.lane0Available = String(lane0Available);
-    row.dataset.lane1Available = String(lane1Available);
-    row.dataset.basicAvailable = String(basicAvailable);
-    row.dataset.ultimateAvailable = String(ultimateAvailable);
-    if (targetSlot !== null) {
-      row.dataset.targetSlot = String(targetSlot);
-    }
-    row.setAttribute(
-      "aria-label",
-      `${candidateTargetLabel}, target action ${targetAction}, Basic ${basicAvailable ? "available" : "unavailable"}, Ultimate ${ultimateAvailable ? "available" : "unavailable"}`,
-    );
-    row.append(
-      htmlElement("strong", "candidate-legality-row__target", candidateTargetLabel),
-      htmlElement(
-        "span",
-        "candidate-legality-row__lane",
-        `Basic ${basicAvailable ? "Available" : "Unavailable"}`,
-      ),
-      htmlElement(
-        "span",
-        "candidate-legality-row__lane",
-        `Ultimate ${ultimateAvailable ? "Available" : "Unavailable"}`,
-      ),
-    );
-    rows.append(row);
-  }
-  group.append(rows);
-  container.append(group);
-}
-
-/**
- * @param {HTMLElement} container
- * @param {Record<string, any> | null} agent
- * @param {"Controlled actor" | "Selected target" | "Reference" | "Recipient actor"} role
- * @param {Record<string, any> | null} classMechanics
- * @param {ReadonlyArray<unknown>} sourceAgents
- * @param {"researcher" | "agent_pov"} audience
- */
-function addAgentComparison(
-  container,
-  agent,
-  role,
-  classMechanics,
-  sourceAgents,
-  audience,
-) {
-  const card = htmlElement("article", "comparison-agent");
-  card.tabIndex = 0;
-  card.dataset.role =
-    role === "Controlled actor"
-      ? "controlled"
-      : role === "Selected target"
-        ? "selected"
-        : role === "Reference"
-          ? "reference"
-          : "recipient";
-  card.append(htmlElement("h3", null, role));
-  if (!agent) {
-    card.tabIndex = -1;
-    card.append(
-      htmlElement(
-        "p",
-        "empty-copy",
-        role === "Selected target"
-          ? "No target selected."
-          : role === "Reference"
-            ? "No Reference selected."
-            : role === "Recipient actor"
-              ? "Recipient actor unavailable."
-              : "Controlled actor unavailable.",
-      ),
-    );
-    container.append(card);
-    return;
-  }
-  const classToken = classTokenFromId(agent.class_id);
-  const teamToken = teamTokenFromId(agent.team_id);
-  card.dataset.slot = String(agent.global_slot);
-  registerTooltipOwner(
-    card,
-    audience === "agent_pov"
-      ? explainPovAgent(agent, {
-          controlled: role === "Controlled actor",
-          selected: role === "Selected target",
-        })
-      : explainAgent(
-          agent,
-          {
-            controlled: role === "Controlled actor",
-            selected: role === "Selected target",
-            reference: role === "Reference",
-          },
-          classMechanics,
-          sourceAgents,
-        ),
-  );
-  addFact(
-    card,
-    "Identity",
-    typeof agent.public_agent_id === "string"
-      ? `Agent ID ${agent.public_agent_id}`
-      : "Agent ID unavailable",
-  );
-  addFact(card, "Class / team", `${classToken.label} · ${teamToken.label}`);
-  addFact(
-    card,
-    "Health",
-    `${formatDisplayNumber(agent.current_health)} / ${formatDisplayNumber(agent.max_health)}`,
-  );
-  addFact(
-    card,
-    "Ultimate cooldown",
-    agent.ultimate_cooldown_remaining ?? agent.ultimate_cooldown ?? "—",
-  );
-  addFact(
-    card,
-    "Effective speed",
-    formatDisplayNumber(agent.effective_movement_speed ?? agent.effective_speed),
-  );
-  const statuses = htmlElement("div", "comparison-agent__facts");
-  statuses.append(htmlElement("h4", null, "Statuses"));
-  const statusTokens = htmlElement("div", "roster-fact-list");
-  renderFactTokens(
-    statusTokens,
-    asArray(agent.statuses),
-    "status",
-    "No persistent statuses",
-    agent,
-    sourceAgents,
-    audience,
-  );
-  statuses.append(statusTokens);
-  const modifiers = htmlElement("div", "comparison-agent__facts");
-  modifiers.append(htmlElement("h4", null, "Effective modifiers"));
-  const modifierTokens = htmlElement("div", "roster-fact-list");
-  const modifiersAvailable =
-    audience === "researcher" && Array.isArray(agent.modifiers ?? agent.aura_modifiers);
-  renderFactTokens(
-    modifierTokens,
-    modifiersAvailable ? (agent.modifiers ?? agent.aura_modifiers) : [],
-    "modifier",
-    modifiersAvailable ? "No effective modifiers" : "Effective modifiers unavailable",
-    agent,
-    sourceAgents,
-    audience,
-  );
-  modifiers.append(modifierTokens);
-  card.append(statuses, modifiers);
-  container.append(card);
 }
 
 /**
@@ -1064,7 +948,7 @@ export function eventSummary(event, resolver = new Map()) {
       return `${humanize(event.ability_component ?? "ability")} activated · ${agentLabelForSlot(resolver, event.source_global_slot)} → ${recipient}`;
     }
     case "source_damage_output":
-      return `Damage output · ${agentLabelForSlot(resolver, event.source_global_slot)} · raw ${formatDisplayNumber(event.raw_damage_output)} · source-modified ${formatDisplayNumber(event.source_modified_damage_output)} · recipient modifier ×${formatDisplayNumber(event.recipient_damage_modifier)} · Mage aura emitters ${asArray(event.mage_damage_aura_covering_emitter_global_slots).length} · Warrior mitigation emitters ${asArray(event.warrior_mitigation_aura_covering_emitter_global_slots).length}`;
+      return `Damage output · ${agentLabelForSlot(resolver, event.source_global_slot)} · raw ${formatDisplayNumber(event.raw_damage_output)} · source-modified ${formatDisplayNumber(event.source_modified_damage_output)} · recipient modifier ×${formatDisplayNumber(event.recipient_damage_modifier)} · Sorcerer’s Empowerment emitters ${asArray(event.mage_damage_aura_covering_emitter_global_slots).length} · Guardian’s Barrier emitters ${asArray(event.warrior_mitigation_aura_covering_emitter_global_slots).length}`;
     case "source_healing_output":
       return `Healing output · ${agentLabelForSlot(resolver, event.source_global_slot)} · raw ${formatDisplayNumber(event.raw_healing_output)} · source-modified ${formatDisplayNumber(event.source_modified_healing_output)} · recipient modifier ×${formatDisplayNumber(event.recipient_healing_modifier)} · aura emitter evidence not recorded`;
     case "recipient_health_resolution": {
@@ -1154,6 +1038,48 @@ export function eventDescriptor(event, eventOrdinal, resolver = new Map()) {
     metadata: { compact: true, full: true },
     anchor: "element",
   });
+}
+
+/**
+ * Project the replay Technical Frame facts without crossing its audience
+ * boundary. Recorded movement scale exists only on the researcher envelope;
+ * POV/source-material roots never receive or derive it.
+ *
+ * @param {unknown} rawFrame
+ * @returns {ReadonlyArray<Readonly<{label: string, value: unknown}>>}
+ */
+export function replayDiagnosticFacts(rawFrame) {
+  const frame = isRecord(rawFrame) ? rawFrame : null;
+  if (frame?.viewer_mode !== "replay") {
+    return Object.freeze([]);
+  }
+  const facts = [
+    { label: "Frame kind", value: frame.frame_kind ?? "unavailable" },
+    { label: "Timeline", value: frame.timeline_id ?? "unavailable" },
+    {
+      label: "Cursor generation",
+      value: frame.cursor?.cursor_generation ?? "unavailable",
+    },
+    {
+      label: "Choreography generation",
+      value: frame.cursor?.choreography_generation ?? "unavailable",
+    },
+    {
+      label: "Metric report",
+      value: frame.artifact_summary?.metric_report_availability ?? "unavailable",
+    },
+  ];
+  if (
+    frame.replay_audience === "researcher" &&
+    typeof frame.recorded_ordinary_movement_distance_scale === "number" &&
+    Number.isFinite(frame.recorded_ordinary_movement_distance_scale)
+  ) {
+    facts.push({
+      label: "Recorded movement scale",
+      value: frame.recorded_ordinary_movement_distance_scale.toFixed(2),
+    });
+  }
+  return Object.freeze(facts.map((fact) => Object.freeze(fact)));
 }
 
 /**
@@ -1365,7 +1291,7 @@ export class DebuggerPanels {
               replayAudience === null && globalSlot === selection.selected_global_slot,
           })
         : explainAgent(
-            agent,
+            agentForPresentation(agent),
             {
               controlled:
                 replayAudience === null &&
@@ -1723,17 +1649,10 @@ export class DebuggerPanels {
   renderInspector(frame, resolver) {
     const scene = frameScene(frame);
     const hud = isRecord(frame?.hud) ? frame.hud : {};
-    const preset =
-      frame?.preset === "presentation" ||
-      frame?.preset === "analysis" ||
-      frame?.preset === "debug"
-        ? frame.preset
-        : "analysis";
     const selection = isRecord(scene?.selection) ? scene.selection : null;
     const legality = isRecord(scene?.selected_legality)
       ? scene.selected_legality
       : null;
-    const presentation = preset === "presentation";
     const pov = frame?.frame_kind === "actor_pov_live_debugger";
     const replayAudience =
       frame?.viewer_mode === "replay" && typeof frame.replay_audience === "string"
@@ -1757,121 +1676,81 @@ export class DebuggerPanels {
       (replayAudience === null || replayAudience === "researcher") &&
       !pov;
     const sourceAgents = researcherAudience ? agents : [];
-    const comparisonAudience = researcherAudience ? "researcher" : "agent_pov";
     /** @param {unknown} agent */
     const mechanicsFor = (agent) =>
       researcherAudience && isRecord(agent)
         ? (classMechanicsById.get(Number(agent.class_id)) ?? null)
         : null;
-    const selectionSection = this.selectionCard.closest(".hud-section");
-    selectionSection?.toggleAttribute("hidden", presentation);
     this.selectionCard.replaceChildren();
-    if (presentation) {
-      // Presentation keeps a compact exact roster plus pending/result/event
-      // story; detailed actor comparison belongs to Analysis and Technical.
-    } else if (replayAudience === "researcher") {
-      const comparison = htmlElement("div", "selection-comparison");
-      const referenceSlot = selection?.selected_global_slot;
-      addAgentComparison(
-        comparison,
-        Number.isInteger(referenceSlot)
-          ? (agentsBySlot.get(Number(referenceSlot)) ?? null)
-          : null,
-        "Reference",
-        mechanicsFor(
-          Number.isInteger(referenceSlot)
-            ? agentsBySlot.get(Number(referenceSlot))
-            : null,
-        ),
-        sourceAgents,
-        comparisonAudience,
-      );
-      this.selectionCard.append(comparison);
+    const selectedSlot = selection?.selected_global_slot;
+    const controlledSlot = selection?.controlled_global_slot;
+    const primaryAgent =
+      replayAudience === "researcher"
+        ? Number.isInteger(selectedSlot)
+          ? (agentsBySlot.get(Number(selectedSlot)) ?? null)
+          : null
+        : replayAudience !== null
+          ? (agents.find(
+              (agent) =>
+                agent.global_slot === frame?.pov_global_slot ||
+                agent.global_slot === frame?.selected_global_slot ||
+                agent.public_agent_id === frame?.public_agent_id,
+            ) ??
+            agents[0] ??
+            null)
+          : pov
+            ? (agents.find(
+                (agent) => agent.public_agent_id === hud.controlled_public_agent_id,
+              ) ??
+              agents[0] ??
+              null)
+            : Number.isInteger(selectedSlot)
+              ? (agentsBySlot.get(Number(selectedSlot)) ?? null)
+              : Number.isInteger(controlledSlot)
+                ? (agentsBySlot.get(Number(controlledSlot)) ?? null)
+                : null;
+    if (primaryAgent === null) {
       this.selectionCard.append(
         htmlElement(
           "p",
           "empty-copy",
-          "Reference controls inspector and highlight only; replay range anchoring is immutable.",
+          replayAudience === "researcher"
+            ? "Choose an authorized replay agent to open its comprehensive details."
+            : "No authorized agent details are available.",
         ),
-      );
-    } else if (replayAudience !== null) {
-      const selfAgent = agents[0] ?? null;
-      const comparison = htmlElement("div", "selection-comparison");
-      addAgentComparison(
-        comparison,
-        selfAgent,
-        "Recipient actor",
-        null,
-        [],
-        "agent_pov",
-      );
-      this.selectionCard.append(comparison);
-      this.selectionCard.append(
-        htmlElement(
-          "p",
-          "empty-copy",
-          replayAudience === "actor_pov"
-            ? "Exact recorded actor POV; researcher slots and processing truth are not disclosed."
-            : "SharedObs source material only; this is not a materialized actor input.",
-        ),
-      );
-    } else if (pov) {
-      const selfAgent =
-        agents.find(
-          (agent) => agent.public_agent_id === hud.controlled_public_agent_id,
-        ) ?? null;
-      const comparison = htmlElement("div", "selection-comparison");
-      addAgentComparison(
-        comparison,
-        selfAgent,
-        "Controlled actor",
-        null,
-        [],
-        "agent_pov",
-      );
-      this.selectionCard.append(comparison);
-      this.selectionCard.append(
-        htmlElement(
-          "p",
-          "empty-copy",
-          "Visible bodies retain actor-relative observation-row identity; researcher target slots are not disclosed.",
-        ),
-      );
-    } else if (!selection) {
-      this.selectionCard.append(
-        htmlElement("p", "empty-copy", "No selection facts received yet."),
       );
     } else {
-      const comparison = htmlElement("div", "selection-comparison");
-      const controlledAgent =
-        agentsBySlot.get(Number(selection.controlled_global_slot)) ?? null;
-      const selectedAgent = Number.isInteger(selection.selected_global_slot)
-        ? (agentsBySlot.get(Number(selection.selected_global_slot)) ?? null)
-        : null;
-      addAgentComparison(
-        comparison,
-        controlledAgent,
-        "Controlled actor",
-        mechanicsFor(controlledAgent),
-        sourceAgents,
-        comparisonAudience,
-      );
-      addAgentComparison(
-        comparison,
-        selectedAgent,
-        "Selected target",
-        mechanicsFor(selectedAgent),
-        sourceAgents,
-        comparisonAudience,
-      );
-      this.selectionCard.append(comparison);
-      if (legality && preset !== "presentation") {
+      const descriptor = researcherAudience
+        ? explainAgent(
+            agentForPresentation(primaryAgent),
+            {
+              controlled:
+                replayAudience === null && primaryAgent.global_slot === controlledSlot,
+              selected:
+                replayAudience === null && primaryAgent.global_slot === selectedSlot,
+              reference:
+                replayAudience === "researcher" &&
+                primaryAgent.global_slot === selectedSlot,
+            },
+            mechanicsFor(primaryAgent),
+            sourceAgents,
+          )
+        : explainPovAgent(primaryAgent, {
+            controlled: replayAudience === null,
+            selected: false,
+          });
+      renderSemanticInspector(this.selectionCard, descriptor);
+      if (
+        researcherAudience &&
+        legality !== null &&
+        primaryAgent.global_slot === selectedSlot
+      ) {
         const selectedLegality = htmlElement("section", "selected-legality");
         selectedLegality.setAttribute(
           "aria-label",
           "Exact selected-target Basic and Ultimate legality",
         );
-        selectedLegality.append(htmlElement("h3", null, "Selected target legality"));
+        selectedLegality.append(htmlElement("h3", null, "Current legality"));
         const facts = htmlElement("div", "selected-legality__facts");
         facts.append(
           semanticPanelCard(explainLegality(legality, 0), "selected-legality__lane"),
@@ -1880,10 +1759,6 @@ export class DebuggerPanels {
         selectedLegality.append(facts);
         this.selectionCard.append(selectedLegality);
       }
-    }
-
-    if (preset === "debug" && replayAudience === null) {
-      addCandidateLegality(this.selectionCard, hud, resolver);
     }
     const latestCandidate = hud.latest_transition ?? null;
     const latest = isRecord(latestCandidate) ? latestCandidate : null;
@@ -1899,57 +1774,24 @@ export class DebuggerPanels {
       this.lastAnnouncedTransitionKey = null;
       this.acceptedAnnouncement.textContent = "";
     }
-    this.renderDiagnostics(frame, hud, preset);
+    this.renderDiagnostics(frame, hud);
   }
 
   /**
    * @param {Record<string, any> | null} frame
    * @param {Record<string, any>} hud
-   * @param {"presentation" | "analysis" | "debug"} preset
    */
-  renderDiagnostics(frame, hud, preset) {
+  renderDiagnostics(frame, hud) {
     const diagnosticsSection = this.diagnosticsCard.closest(".diagnostics");
-    diagnosticsSection?.toggleAttribute("hidden", preset === "presentation");
+    diagnosticsSection?.removeAttribute("hidden");
     if (frame?.viewer_mode === "replay") {
-      if (preset === "presentation") {
-        this.diagnosticsCard.replaceChildren();
-        return;
-      }
       const replayFacts = htmlElement("div", "diagnostics-card");
-      addFact(replayFacts, "Frame kind", frame.frame_kind ?? "unavailable");
-      addFact(replayFacts, "Timeline", frame.timeline_id ?? "unavailable");
-      addFact(
-        replayFacts,
-        "Cursor generation",
-        frame.cursor?.cursor_generation ?? "unavailable",
-      );
-      addFact(
-        replayFacts,
-        "Choreography generation",
-        frame.cursor?.choreography_generation ?? "unavailable",
-      );
-      addFact(
-        replayFacts,
-        "Metric report",
-        frame.artifact_summary?.metric_report_availability ?? "unavailable",
-      );
+      for (const fact of replayDiagnosticFacts(frame)) {
+        addFact(replayFacts, fact.label, fact.value);
+      }
       this.diagnosticsCard.replaceChildren(replayFacts);
       return;
     }
-    if (preset === "debug") {
-      const raw = htmlElement(
-        "pre",
-        "record-card technical-json",
-        formatRecord(frame, "No frame received."),
-      );
-      this.diagnosticsCard.replaceChildren(raw);
-      return;
-    }
-    if (preset === "presentation") {
-      this.diagnosticsCard.replaceChildren();
-      return;
-    }
-
     const facts = asArray(hud.diagnostics).filter(
       (fact) => isRecord(fact) && typeof fact.fact_id === "string",
     );

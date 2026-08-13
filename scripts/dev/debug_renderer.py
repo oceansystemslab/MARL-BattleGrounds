@@ -14,10 +14,11 @@ if str(_REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPOSITORY_ROOT))
 
 if TYPE_CHECKING:
+    from marl_battlegrounds.evaluation.replay_io import LoadedReplayBundleV1
     from scripts.dev.visual_debugger.scenarios import DebuggerScenario
 
 type _ViewMode = Literal["researcher", "pov"]
-type _Preset = Literal["presentation", "analysis", "debug"]
+type _Preset = Literal["presentation", "analysis"]
 type _ActionSourceKind = Literal["manual", "scripted", "mixed"]
 
 
@@ -27,10 +28,12 @@ class _LaunchOptions:
 
     scenario: str | None
     replay: Path | None
+    sample_replay: str | None
     record_replay: Path | None
     frame_index: int | None
     pov_slot: int | None
     list_scenarios: bool
+    list_sample_replays: bool
     include_stress: bool
     seed: int
     controlled_slot: int | None
@@ -39,7 +42,6 @@ class _LaunchOptions:
     port: int
     view: _ViewMode
     preset: _Preset
-    verbose: bool
     ranges: bool
     supplied: frozenset[str]
 
@@ -47,8 +49,8 @@ class _LaunchOptions:
 _EPILOG = """\
 battlefield controls (while the battlefield has focus):
   Tab / Shift+Tab       cycle active actors without discarding their drafts
-  left click            select an active global target
-  Shift+left click      control the clicked active actor
+  left click            control the clicked authorized actor
+  Shift+left click      select the clicked active target
   right click / Escape  clear target to target-none
   1 / 2                 explicitly arm Basic lane 0 / Ultimate lane 1
   W A S D               cardinal movement
@@ -60,30 +62,30 @@ battlefield controls (while the battlefield has focus):
   N                     advance the next registered scripted frame
   R                     deterministic scenario reset
   G                     toggle controlled-actor ranges
-  V                     toggle concise/verbose logs
   [ / ]                 previous/next scenario
   P                     pause/resume presentation-only motion
   ?                     open browser controls/help
 
 browser controls:
   Scenario/View/Preset  switch authoritative session presentation
-  Graphics speed        set presentation-only motion from 0.01x through 2.00x
   Motion Off            disable or restore animated explanations
   Skip                  settle the current explanation immediately
   Reconnect             fetch the current authoritative frame
   Exit / Ctrl-C         stop the local Visual Debugger and Analyzer
 
 read-only replay controls:
-  First / Previous      move to an earlier captured frame, settled
-  Play / Next           serialize exact next-frame explanations
+  First / -10 / -1      seek backward with one clamped absolute request
+  Play/Pause / +1 / +10 serialize playback or seek forward exactly once
   Last / frame slider   seek to an absolute captured frame, settled
+  Tick current / final  show the exact captured cursor and terminal tick
   Home / End            keyboard first/last while the timeline has focus
   Left / Right / Space  keyboard previous/next/play-pause
+  Shift+Left / Right    seek ten captured positions backward/forward, clamped
 
 live selected-target inspector:
   SELECTED TARGET       identity, relation, distance, and public geometry
   PENDING ACTION        movement, ability, target, and exact lane legality
-  TECHNICAL DETAILS     raw actor/target indices and same-epoch mask values
+  TECHNICAL FRAME       raw actor/target indices and same-epoch mask values
 
 scenarios:
   arena_5v5             interactive geometry/combat laboratory
@@ -93,6 +95,12 @@ scenarios:
   status_stack          scripted status composition and lifecycle sequence
   team_focus_crossfire  scripted focus fire and coordinated healing
   mirrored_ultimates    scripted reciprocal five-class Ultimate sequence
+  death_respawn_cycle   scripted death, respawn, shield, and expiry lifecycle
+  recovery_refresh_cycle scripted recovery, rejection, refresh, and expiry lifecycle
+
+checked-in sample replays:
+  --list-sample-replays list stable launch names without simulator imports
+  --sample-replay NAME open one immutable validated sample artifact
 """
 
 
@@ -118,6 +126,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=argparse.SUPPRESS,
         help="validated local replay to view in a browser or render with --static",
+    )
+    parser.add_argument(
+        "--sample-replay",
+        metavar="NAME",
+        default=argparse.SUPPRESS,
+        help="open one checked-in sample replay by its stable launch name",
     )
     parser.add_argument(
         "--record-replay",
@@ -148,6 +162,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=argparse.SUPPRESS,
         help="list scenario names, modes, and descriptions, then exit",
+    )
+    parser.add_argument(
+        "--list-sample-replays",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="list checked-in sample replay names and descriptions, then exit",
     )
     parser.add_argument(
         "--include-stress",
@@ -196,7 +216,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--preset",
-        choices=("presentation", "analysis", "debug"),
+        type=_parse_preset,
+        metavar="{presentation,analysis}",
         default=argparse.SUPPRESS,
         help="initial browser presentation preset (default: analysis)",
     )
@@ -204,7 +225,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--verbose",
         action="store_true",
         default=argparse.SUPPRESS,
-        help="print verbose transition diagnostics",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--ranges",
@@ -215,12 +236,27 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _parse_preset(value: str) -> _Preset:
+    """Parse canonical presets while accepting the legacy Technical token."""
+    if value == "debug":
+        return "analysis"
+    if value in ("presentation", "analysis"):
+        return value
+    raise argparse.ArgumentTypeError(
+        "invalid choice: expected 'presentation' or 'analysis'"
+    )
+
+
 def _resolve_launch_options(namespace: argparse.Namespace) -> _LaunchOptions:
     """Apply defaults only after preserving which options were explicit."""
-    supplied = frozenset(vars(namespace))
+    supplied = frozenset(vars(namespace)) - {"verbose"}
     return _LaunchOptions(
         scenario=cast(str | None, getattr(namespace, "scenario", None)),
         replay=cast(Path | None, getattr(namespace, "replay", None)),
+        sample_replay=cast(
+            str | None,
+            getattr(namespace, "sample_replay", None),
+        ),
         record_replay=cast(
             Path | None,
             getattr(namespace, "record_replay", None),
@@ -228,6 +264,10 @@ def _resolve_launch_options(namespace: argparse.Namespace) -> _LaunchOptions:
         frame_index=cast(int | None, getattr(namespace, "frame_index", None)),
         pov_slot=cast(int | None, getattr(namespace, "pov_slot", None)),
         list_scenarios=cast(bool, getattr(namespace, "list_scenarios", False)),
+        list_sample_replays=cast(
+            bool,
+            getattr(namespace, "list_sample_replays", False),
+        ),
         include_stress=cast(bool, getattr(namespace, "include_stress", False)),
         seed=cast(int, getattr(namespace, "seed", 0)),
         controlled_slot=cast(
@@ -239,7 +279,6 @@ def _resolve_launch_options(namespace: argparse.Namespace) -> _LaunchOptions:
         port=cast(int, getattr(namespace, "port", 0)),
         view=cast(_ViewMode, getattr(namespace, "view", "researcher")),
         preset=cast(_Preset, getattr(namespace, "preset", "analysis")),
-        verbose=cast(bool, getattr(namespace, "verbose", False)),
         ranges=cast(bool, getattr(namespace, "ranges", True)),
         supplied=supplied,
     )
@@ -247,7 +286,9 @@ def _resolve_launch_options(namespace: argparse.Namespace) -> _LaunchOptions:
 
 _OPTION_LABELS = (
     ("scenario", "--scenario"),
+    ("sample_replay", "--sample-replay"),
     ("list_scenarios", "--list-scenarios"),
+    ("list_sample_replays", "--list-sample-replays"),
     ("include_stress", "--include-stress"),
     ("seed", "--seed"),
     ("controlled_slot", "--controlled-slot"),
@@ -257,7 +298,6 @@ _OPTION_LABELS = (
     ("ranges", "--ranges/--no-ranges"),
     ("port", "--port"),
     ("no_open", "--no-open"),
-    ("verbose", "--verbose"),
     ("record_replay", "--record-replay"),
 )
 
@@ -266,9 +306,23 @@ def _validate_option_matrix(
     parser: argparse.ArgumentParser,
     options: _LaunchOptions,
 ) -> None:
+    if options.list_sample_replays:
+        if options.supplied != frozenset(("list_sample_replays",)):
+            parser.error(
+                "--list-sample-replays cannot be combined with launch options."
+            )
+        return
+
+    if options.replay is not None and options.sample_replay is not None:
+        parser.error("--sample-replay cannot be combined with --replay.")
+    if options.sample_replay is not None and options.static:
+        parser.error("--static is unavailable with --sample-replay.")
+
     if options.record_replay is not None:
         if options.replay is not None:
             parser.error("--record-replay cannot be combined with --replay.")
+        if options.sample_replay is not None:
+            parser.error("--record-replay cannot be combined with --sample-replay.")
         if options.static:
             parser.error("--record-replay is available only in live browser mode.")
         if options.list_scenarios:
@@ -278,7 +332,8 @@ def _validate_option_matrix(
         if "pov_slot" in options.supplied:
             parser.error("--pov-slot is unavailable with --record-replay.")
 
-    if options.replay is None:
+    replay_selected = options.replay is not None or options.sample_replay is not None
+    if not replay_selected:
         if "frame_index" in options.supplied:
             parser.error("--frame-index requires --replay.")
         if "pov_slot" in options.supplied:
@@ -287,13 +342,22 @@ def _validate_option_matrix(
 
     if options.static:
         if "frame_index" not in options.supplied:
-            parser.error("--frame-index is required with --replay --static.")
-        allowed = frozenset(("replay", "static", "frame_index"))
-        launch_label = "--replay --static"
+            selection_label = (
+                "--sample-replay" if options.sample_replay is not None else "--replay"
+            )
+            parser.error(f"--frame-index is required with {selection_label} --static.")
+        selector = "sample_replay" if options.sample_replay is not None else "replay"
+        allowed = frozenset((selector, "static", "frame_index"))
+        launch_label = (
+            "--sample-replay --static"
+            if options.sample_replay is not None
+            else "--replay --static"
+        )
     else:
+        selector = "sample_replay" if options.sample_replay is not None else "replay"
         allowed = frozenset(
             (
-                "replay",
+                selector,
                 "frame_index",
                 "pov_slot",
                 "view",
@@ -303,7 +367,9 @@ def _validate_option_matrix(
                 "no_open",
             )
         )
-        launch_label = "--replay"
+        launch_label = (
+            "--sample-replay" if options.sample_replay is not None else "--replay"
+        )
 
     forbidden = options.supplied - allowed
     for destination, option_label in _OPTION_LABELS:
@@ -311,18 +377,24 @@ def _validate_option_matrix(
             parser.error(f"{option_label} is unavailable with {launch_label}.")
 
 
-def _run_browser_replay(options: _LaunchOptions) -> int:
+def _run_browser_replay(
+    options: _LaunchOptions,
+    *,
+    loaded_bundle: LoadedReplayBundleV1 | None = None,
+) -> int:
     """Load and resolve replay authority before importing the HTTP server."""
-    from marl_battlegrounds.evaluation.replay_io import (
-        ReplayLoadError,
-        load_replay_bundle_v1,
-    )
+    bundle = loaded_bundle
+    if bundle is None:
+        from marl_battlegrounds.evaluation.replay_io import (
+            ReplayLoadError,
+            load_replay_bundle_v1,
+        )
 
-    assert options.replay is not None
-    try:
-        bundle = load_replay_bundle_v1(options.replay)
-    except ReplayLoadError as exc:
-        raise ValueError(f"Replay could not be loaded: {exc}") from exc
+        assert options.replay is not None
+        try:
+            bundle = load_replay_bundle_v1(options.replay)
+        except ReplayLoadError as exc:
+            raise ValueError(f"Replay could not be loaded: {exc}") from exc
 
     from scripts.dev.visual_debugger.replay_service import ReplayViewerService
 
@@ -409,15 +481,40 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     options = _resolve_launch_options(parser.parse_args(argv))
     _validate_option_matrix(parser, options)
+    if options.list_sample_replays:
+        from scripts.dev.visual_debugger.sample_replays import iter_sample_replays
+
+        for sample in iter_sample_replays():
+            print(sample.summary())
+        return 0
     if options.list_scenarios:
-        from scripts.dev.visual_debugger.scenarios import iter_scenario_summaries
+        from scripts.dev.visual_debugger.scenario_catalog import (
+            iter_scenario_summaries,
+        )
 
         for summary in iter_scenario_summaries(
             include_stress=options.include_stress,
         ):
             print(summary)
         return 0
+    sample_replay_bundle = None
+    if options.sample_replay is not None:
+        from scripts.dev.visual_debugger.sample_replays import (
+            SAMPLE_REPLAY_DEMO_PROVENANCE_NOTICE,
+            load_verified_sample_replay,
+        )
+
+        try:
+            sample_replay_bundle = load_verified_sample_replay(options.sample_replay)
+        except ValueError as exc:
+            parser.error(str(exc))
+        print(f"Sample replay notice: {SAMPLE_REPLAY_DEMO_PROVENANCE_NOTICE}")
     try:
+        if sample_replay_bundle is not None:
+            return _run_browser_replay(
+                options,
+                loaded_bundle=sample_replay_bundle,
+            )
         if options.replay is not None and options.static:
             from scripts.dev.visual_debugger.static_renderer import (
                 run_static_replay_renderer,
@@ -486,7 +583,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 seed=options.seed,
                 evaluation_launch_specification=evaluation_launch_specification,
                 controlled_global_slot=options.controlled_slot,
-                verbose=options.verbose,
+                verbose=False,
                 show_ranges=options.ranges,
             )
 
@@ -500,7 +597,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             evaluation_launch_specification=evaluation_launch_specification,
             controlled_global_slot=options.controlled_slot,
             show_ranges=options.ranges,
-            verbose_logging=options.verbose,
+            verbose_logging=False,
         )
         if recording_destination is None:
             service = DebuggerService(

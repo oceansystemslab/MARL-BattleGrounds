@@ -9,6 +9,7 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
+    field_validator,
     model_validator,
 )
 
@@ -24,7 +25,7 @@ ACTOR_POV_PROCESSING_DISCLOSURE_V1 = "not_available_in_actor_pov"
 ACTOR_POV_METRIC_REPORT_AVAILABILITY_V1 = "not_available_in_actor_pov"
 
 type ReplayViewModeV1 = Literal["researcher", "pov"]
-type ReplayPresetV1 = Literal["presentation", "analysis", "debug"]
+type ReplayPresetV1 = Literal["presentation", "analysis"]
 type ReplayCommandResultV1 = Literal[
     "applied",
     "duplicate",
@@ -102,6 +103,7 @@ _PublicAgentId = Annotated[
 _Message = Annotated[str, StringConstraints(min_length=1, max_length=2048)]
 _NonNegativeInt = Annotated[int, Field(ge=0)]
 _PositiveInt = Annotated[int, Field(gt=0)]
+_PositiveUnitFloat = Annotated[float, Field(gt=0.0, le=1.0)]
 _GlobalSlot = Annotated[int, Field(ge=0, lt=10)]
 
 
@@ -571,7 +573,7 @@ class _ReplayViewerFrameBaseV1(_ReplayProtocolModel):
     timeline_id: _ScientificId
     cursor: ReplayCursorV1
     preset: ReplayPresetV1
-    verbose: bool
+    verbose: Literal[False] = False
 
     @model_validator(mode="after")
     def _validate_base(self) -> Self:
@@ -621,6 +623,7 @@ class ResearcherReplayViewerFrameV1(_ReplayViewerFrameBaseV1):
     completion: ReplayCompletionBadgeV1
     processing: ReplayProcessingBadgeV1
     show_ranges: bool
+    recorded_ordinary_movement_distance_scale: _PositiveUnitFloat
     projection: ResearcherAnalyzerProjectionV2
 
     @model_validator(mode="after")
@@ -845,6 +848,11 @@ class ReplaySetPovActorCommandV1(_ReplayProtocolModel):
 class ReplaySetPresetCommandV1(_ReplayProtocolModel):
     command_type: Literal["set_preset"] = "set_preset"
     preset: ReplayPresetV1
+
+    @field_validator("preset", mode="before")
+    @classmethod
+    def _canonicalize_legacy_technical_preset(cls, value: object) -> object:
+        return "analysis" if value == "debug" else value
 
 
 class ReplaySetRangesCommandV1(_ReplayProtocolModel):

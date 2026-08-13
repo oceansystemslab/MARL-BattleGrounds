@@ -14,7 +14,7 @@
       "value": "<catalog-duration> Ticks · Damage Effect: <catalog-percent>% more damage dealt (×<catalog-multiplier>) · No positive-damage break rule"
     },
     {
-      "label": "Sorcerer's Aura Field (Mage Damage Amplification Aura)",
+      "label": "Sorcerer’s Empowerment",
       "value": "Radius <catalog-radius> · <catalog-percent>% more damage dealt per recorded emitter · Stacking Multiply Then Clamp · Ceiling ×<catalog-clamp>"
     }
   ]

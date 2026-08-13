@@ -10,7 +10,7 @@ const TIMELINE_KINDS = new Set([
   "actor_pov",
   "shared_obs_source_material",
 ]);
-const PRESETS = new Set(["presentation", "analysis", "debug"]);
+const PRESETS = new Set(["presentation", "analysis"]);
 const COMPLETION_STATES = new Set(["complete", "partial", "interrupted", "failed"]);
 const FAILURE_ORIGINS = new Set(["simulation", "policy", "validation", "capture"]);
 const PROCESSING_STATES = new Set(["succeeded", "failed"]);
@@ -2028,6 +2028,7 @@ function normalizeReplayViewerFrame(value, animateIncoming = false) {
           "completion",
           "processing",
           "show_ranges",
+          "recorded_ordinary_movement_distance_scale",
           "projection",
         ]
       : frame.frame_kind === "actor_pov_replay_viewer"
@@ -2061,7 +2062,7 @@ function normalizeReplayViewerFrame(value, animateIncoming = false) {
     !Number.isInteger(frame.revision) ||
     frame.revision < 0 ||
     !PRESETS.has(frame.preset) ||
-    typeof frame.verbose !== "boolean"
+    frame.verbose !== false
   ) {
     throw new TypeError("Replay viewer frame scalar contract is invalid.");
   }
@@ -2104,6 +2105,15 @@ function normalizeReplayViewerFrame(value, animateIncoming = false) {
     }
     if (frame.view_mode !== "researcher" || typeof frame.show_ranges !== "boolean") {
       throw new TypeError("Researcher replay mode fields are invalid.");
+    }
+    const recordedMovementScale = finiteNumber(
+      frame.recorded_ordinary_movement_distance_scale,
+      "recorded_ordinary_movement_distance_scale",
+    );
+    if (recordedMovementScale <= 0 || recordedMovementScale > 1) {
+      throw new TypeError(
+        "recorded_ordinary_movement_distance_scale must be in (0, 1].",
+      );
     }
     const projectionResult = normalizeResearcherProjection(frame, cursor);
     normalizedProjection = projectionResult.normalized.projection;

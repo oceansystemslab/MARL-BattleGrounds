@@ -51,12 +51,14 @@ from scripts.dev.visual_debugger.replay_service import (
 from tests.evaluation_fixtures import (
     CapturedEvaluationTrajectory,
     captured_evaluation_trajectory,
+    evaluation_env_config,
 )
 
 import marl_battlegrounds.core.env as core_env_module
 import marl_battlegrounds.core.geometry as core_geometry_module
 import marl_battlegrounds.evaluation.capture as evaluation_capture_module
 import marl_battlegrounds.evaluation.events as evaluation_events_module
+from marl_battlegrounds.evaluation.catalog import build_resolved_env_config_v1
 from marl_battlegrounds.evaluation.metrics import (
     CompletionState,
     EvaluationEpisodeCompletionV1,
@@ -156,6 +158,7 @@ class _ServiceCases:
     processing_failed: _ServiceCase
     long: _ServiceCase
     nonzero_focal: _ServiceCase
+    noncanonical_movement_scale: _ServiceCase
 
 
 def _runtime_provenance() -> RuntimeProvenanceV1:
@@ -248,6 +251,27 @@ def _with_nonzero_focal(
     )
 
 
+def _with_movement_scale(
+    trajectory: CapturedEvaluationTrajectory,
+    *,
+    movement_scale: float,
+) -> CapturedEvaluationTrajectory:
+    """Replace only recorded experimental movement-scale provenance."""
+    experimental_config = evaluation_env_config()._replace(
+        ordinary_movement_distance_scale=movement_scale
+    )
+    context_payload = trajectory.context.model_dump(mode="python")
+    context_payload["resolved_env_config"] = build_resolved_env_config_v1(
+        experimental_config
+    )
+    context = EvaluationEpisodeContextV1.model_validate(context_payload)
+    return CapturedEvaluationTrajectory(
+        context=context,
+        frames=trajectory.frames,
+        transitions=trajectory.transitions,
+    )
+
+
 @pytest.fixture(scope="module")
 def service_cases() -> _ServiceCases:
     complete_trajectory = captured_evaluation_trajectory(
@@ -288,6 +312,14 @@ def service_cases() -> _ServiceCases:
             episode_id="service-focal",
         )
     )
+    noncanonical_movement_trajectory = _with_movement_scale(
+        captured_evaluation_trajectory(
+            transition_count=1,
+            expected_horizon=1,
+            episode_id="service-recorded-movement-scale",
+        ),
+        movement_scale=0.375,
+    )
 
     complete = _loaded_case(complete_trajectory, completion_state="complete")
     processing_healthy = _loaded_case(
@@ -317,6 +349,10 @@ def service_cases() -> _ServiceCases:
         ),
         long=_loaded_case(long_trajectory, completion_state="complete"),
         nonzero_focal=_loaded_case(focal_trajectory, completion_state="complete"),
+        noncanonical_movement_scale=_loaded_case(
+            noncanonical_movement_trajectory,
+            completion_state="complete",
+        ),
     )
 
 
@@ -604,6 +640,37 @@ def test_shared_obs_view_is_labelled_source_material_and_never_exports_exact_pov
     assert service.shared_timeline_build_count == 1
 
 
+def test_researcher_frame_preserves_recorded_experimental_movement_scale_only(
+    service_cases: _ServiceCases,
+) -> None:
+    case = service_cases.noncanonical_movement_scale
+    researcher_service = ReplayViewerService(
+        case.bundle,
+        viewer_session_id="recorded-scale-researcher",
+    )
+    pov_service = ReplayViewerService(
+        case.bundle,
+        view_mode="pov",
+        viewer_session_id="recorded-scale-pov",
+    )
+
+    researcher_payload = json.loads(
+        researcher_service.current_frame().model_dump_json()
+    )
+    pov_payload = json.loads(pov_service.current_frame().model_dump_json())
+    recorded_config = case.bundle.replay.header.context.resolved_env_config
+    recorded_scale = recorded_config.ordinary_movement_distance_scale
+
+    assert recorded_scale == 0.375
+    assert (
+        researcher_payload["recorded_ordinary_movement_distance_scale"]
+        == recorded_scale
+    )
+    assert "recorded_ordinary_movement_distance_scale" not in _recursive_keys(
+        pov_payload
+    )
+
+
 def test_nonzero_focal_actor_is_stable_reference_and_selection_is_independent(
     service_cases: _ServiceCases,
 ) -> None:
@@ -848,7 +915,7 @@ def test_presentation_and_audience_changes_do_not_replay_choreography(
     service = ReplayViewerService(service_cases.complete.bundle)
     baseline = service.current_frame().cursor
     commands: tuple[ReplayCommandV1, ...] = (
-        ReplaySetPresetCommandV1(preset="debug"),
+        ReplaySetPresetCommandV1.model_validate({"preset": "debug"}),
         ReplaySetRangesCommandV1(show_ranges=False),
         ReplaySetVerbosityCommandV1(verbose=True),
         ReplaySetPovActorCommandV1(global_slot=1),

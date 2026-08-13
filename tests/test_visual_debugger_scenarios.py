@@ -29,7 +29,10 @@ from tests.visual_debugger_fixtures import (
     submit_fixture_frame,
 )
 
-from marl_battlegrounds.core.config import validate_env_config
+from marl_battlegrounds.core.config import (
+    CANONICAL_PRODUCT_MOVEMENT_SCALE,
+    validate_env_config,
+)
 from marl_battlegrounds.core.env import initialize_scenario_state
 from marl_battlegrounds.core.types import (
     AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_AURA_MULTIPLIER,
@@ -61,6 +64,7 @@ from marl_battlegrounds.core.types import (
 )
 from marl_battlegrounds.evaluation.models import (
     AbilityActivatedEventV1,
+    ActionRejectedEventV1,
     RecipientHealthResolutionEventV1,
     StatusLifecycleEventBaseV1,
 )
@@ -354,6 +358,8 @@ def test_all_scenario_configs_validate_and_initialize_authored_state() -> None:
         "status_stack",
         "team_focus_crossfire",
         "mirrored_ultimates",
+        "death_respawn_cycle",
+        "recovery_refresh_cycle",
     )
     stress_names = (
         "moving_basic_crossfire",
@@ -383,7 +389,7 @@ def test_all_scenario_configs_validate_and_initialize_authored_state() -> None:
         f"{scenario.name:<22} {scenario.mode:<11} {scenario.description}"
         for scenario in STRESS_SCENARIOS.values()
     )
-    assert cycle_scenario_name("mirrored_ultimates", 1) == "arena_5v5"
+    assert cycle_scenario_name("recovery_refresh_cycle", 1) == "arena_5v5"
     assert cycle_scenario_name("charge_convergence", 1) == "trap_lifecycle"
     assert (
         cycle_scenario_name("charge_convergence", 1, include_stress=True)
@@ -399,7 +405,9 @@ def test_all_scenario_configs_validate_and_initialize_authored_state() -> None:
         )
 
         assert config.max_steps == 300
-        assert config.ordinary_movement_distance_scale == 1.0
+        assert (
+            config.ordinary_movement_distance_scale == CANONICAL_PRODUCT_MOVEMENT_SCALE
+        )
         assert config.spawn_shield_duration_steps == 3
         assert config.spawn_shield_movement_speed == 2.0
         assert state is authored_state
@@ -414,12 +422,16 @@ def test_all_scenario_configs_validate_and_initialize_authored_state() -> None:
         shield_facts = info.transition_facts.spawn_shield_facts
         assert not bool(jnp.any(shield_facts.was_active_at_transition_start_by_agent))
         assert not bool(jnp.any(shield_facts.expired_at_transition_end_by_agent))
-        assert bool(
-            jnp.array_equal(
-                state.current_health,
-                config.agent_profile.max_health,
+        if scenario.name not in {
+            "death_respawn_cycle",
+            "recovery_refresh_cycle",
+        }:
+            assert bool(
+                jnp.array_equal(
+                    state.current_health,
+                    config.agent_profile.max_health,
+                )
             )
-        )
 
 
 def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> None:
@@ -600,6 +612,40 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
                 (9.4, 9.0),
                 (8.7, 12.0),
                 (12.0, 11.5),
+            ),
+            "scripted",
+            0,
+        ),
+        "death_respawn_cycle": (
+            (12.0, 10.0),
+            (0, 1, 5),
+            (MAGE_CLASS_ID, HUNTER_CLASS_ID, ROGUE_CLASS_ID),
+            ((7.0, 1.5), (7.0, 3.0), (8.5, 2.25)),
+            "scripted",
+            5,
+        ),
+        "recovery_refresh_cycle": (
+            (14.0, 12.0),
+            (0, 1, 2, 3, 4, 5, 6, 7),
+            (
+                ROGUE_CLASS_ID,
+                ROGUE_CLASS_ID,
+                HUNTER_CLASS_ID,
+                HUNTER_CLASS_ID,
+                MAGE_CLASS_ID,
+                HUNTER_CLASS_ID,
+                PRIEST_CLASS_ID,
+                WARRIOR_CLASS_ID,
+            ),
+            (
+                (6.0, 4.5),
+                (6.0, 5.5),
+                (4.7, 7.0),
+                (5.5, 8.0),
+                (6.5, 7.0),
+                (7.2, 5.0),
+                (11.0, 9.0),
+                (7.5, 7.5),
             ),
             "scripted",
             0,
@@ -826,6 +872,32 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
             ((3, MOVE_EAST, 8, 1), (8, MOVE_EAST, 3, 1)),
             ((4, MOVE_NORTH, 3, 1), (9, MOVE_NORTH, 8, 1)),
         ),
+        "death_respawn_cycle": (
+            ((0, MOVE_STAY, 5, 0), (1, MOVE_STAY, 5, 0)),
+            (),
+            ((5, MOVE_WEST, 0, 1),),
+            ((5, MOVE_WEST, 0, 0),),
+            ((5, MOVE_STAY, 0, 0),),
+            ((5, MOVE_STAY, 0, 0),),
+            ((5, MOVE_STAY, 0, 0),),
+        ),
+        "recovery_refresh_cycle": (
+            (
+                (0, MOVE_STAY, 5, 1),
+                (2, MOVE_STAY, 7, 1),
+                (6, MOVE_STAY, 6, 1),
+            ),
+            (
+                (1, MOVE_STAY, 5, 1),
+                (3, MOVE_STAY, 7, 1),
+                (4, MOVE_STAY, 7, 0),
+            ),
+            (),
+            (),
+            (),
+            (),
+            (),
+        ),
         "moving_basic_crossfire": (
             (
                 (0, MOVE_NORTH, 5, 0),
@@ -926,12 +998,30 @@ def test_every_scenario_frame_has_unique_active_actors_and_targets() -> None:
                     assert active[command.target_global_slot]
 
 
-def test_every_registered_scripted_command_is_legal_and_accepted() -> None:
+def test_every_registered_scripted_command_matches_authored_acceptance() -> None:
+    expected_rejections = {
+        ("death_respawn_cycle", "due-wave-respawn"): (
+            (5, "movement"),
+            (5, "combat_pair"),
+        ),
+        ("death_respawn_cycle", "shielded-movement-and-rejection"): (
+            (5, "combat_pair"),
+        ),
+        ("death_respawn_cycle", "shield-countdown-two-to-one"): ((5, "combat_pair"),),
+        ("death_respawn_cycle", "shield-expiry"): ((5, "combat_pair"),),
+        ("recovery_refresh_cycle", "application-recovery-and-readiness"): (
+            (6, "combat_pair"),
+        ),
+    }
     for scenario in list_scenarios(include_stress=True):
         if not scenario.frames:
             continue
         _, session = _session(scenario.name)
         for frame in scenario.frames:
+            expected_frame_rejections = expected_rejections.get(
+                (scenario.name, frame.label),
+                (),
+            )
             step_before = int(session.state.step_count)
             action = build_scripted_joint_action(session.evaluation_context, frame)
             for command in frame.commands:
@@ -951,19 +1041,33 @@ def test_every_registered_scripted_command_is_legal_and_accepted() -> None:
                     )
                 )
                 assert command.use_ultimate in (0, 1)
-                assert bool(session.action_mask.move_mask[slot, command.move_action])
-                assert bool(
+                move_is_legal = bool(
+                    session.action_mask.move_mask[slot, command.move_action]
+                )
+                combat_pair_is_legal = bool(
                     session.action_mask.select_target_use_ultimate_joint_mask[
                         slot,
                         target_action,
                         command.use_ultimate,
                     ]
                 )
+                assert move_is_legal == (
+                    (slot, "movement") not in expected_frame_rejections
+                )
+                assert combat_pair_is_legal == (
+                    (slot, "combat_pair") not in expected_frame_rejections
+                )
 
             submitted = submit_next_script_frame(session)
             view = submitted.incoming_evaluation_view
             assert view is not None
             acceptance = view.transition.facts.action_acceptance_facts
+            observed_rejections = tuple(
+                (event.actor_global_slot, event.rejection_component)
+                for event in view.transition.events
+                if isinstance(event, ActionRejectedEventV1)
+            )
+            assert observed_rejections == expected_frame_rejections
             assert int(submitted.state.step_count) == step_before + 1
             assert (
                 submitted.next_script_frame_index == session.next_script_frame_index + 1
@@ -978,42 +1082,225 @@ def test_every_registered_scripted_command_is_legal_and_accepted() -> None:
                 strict=True,
             ):
                 np.testing.assert_array_equal(retained_head, expected_head)
-            for accepted_head, expected_head in zip(
-                (
-                    acceptance.accepted_joint_action.move,
-                    acceptance.accepted_joint_action.select_target,
-                    acceptance.accepted_joint_action.use_ultimate,
-                ),
-                action,
-                strict=True,
-            ):
-                np.testing.assert_array_equal(accepted_head, expected_head)
             for command in frame.commands:
                 actor_slot = command.actor_global_slot
                 expected_target = int(action.select_target[actor_slot])
+                move_rejected = (actor_slot, "movement") in expected_frame_rejections
+                combat_rejected = (
+                    actor_slot,
+                    "combat_pair",
+                ) in expected_frame_rejections
                 assert acceptance.accepted_joint_action.move[actor_slot] == (
-                    command.move_action
+                    MOVE_STAY if move_rejected else command.move_action
                 )
                 assert acceptance.accepted_joint_action.select_target[actor_slot] == (
-                    expected_target
+                    0 if combat_rejected else expected_target
                 )
                 assert acceptance.accepted_joint_action.use_ultimate[actor_slot] == (
-                    command.use_ultimate
+                    0 if combat_rejected else command.use_ultimate
                 )
                 assert not (
                     acceptance.submitted_action_tuple_is_out_of_domain_by_actor[
                         actor_slot
                     ]
                 )
-                assert not acceptance.in_domain_move_action_is_rejected_by_actor[
-                    actor_slot
-                ]
-                assert not (
-                    acceptance.in_domain_combat_action_pair_is_rejected_by_actor[
-                        actor_slot
-                    ]
+                assert (
+                    bool(
+                        acceptance.in_domain_move_action_is_rejected_by_actor[
+                            actor_slot
+                        ]
+                    )
+                    == move_rejected
+                )
+                assert (
+                    bool(
+                        acceptance.in_domain_combat_action_pair_is_rejected_by_actor[
+                            actor_slot
+                        ]
+                    )
+                    == combat_rejected
                 )
             session = submitted
+
+
+def test_researcher_scenarios_cover_every_canonical_event_kind() -> None:
+    canonical_event_kinds = {
+        "action_rejected",
+        "ability_activated",
+        "source_damage_output",
+        "source_healing_output",
+        "recipient_health_resolution",
+        "combat_countdown_reset",
+        "health_regenerated",
+        "cooldown_started",
+        "cooldown_ready",
+        "charge_phase_displacement",
+        "ordinary_movement_phase_displacement",
+        "agent_died",
+        "lethal_damage_contribution",
+        "status_aged_to_zero",
+        "status_broken_by_damage",
+        "status_applied",
+        "status_refreshed_or_extended",
+        "status_cleared_by_new_death",
+        "spawn_shield_expired",
+        "respawn_wave_occurred",
+        "agent_respawned",
+    }
+    observed_event_kinds: set[str] = set()
+    for scenario in RESEARCHER_SCENARIOS.values():
+        if not scenario.frames:
+            continue
+        _, session = _session(scenario.name)
+        for _ in scenario.frames:
+            session = submit_next_script_frame(session)
+            view = session.incoming_evaluation_view
+            assert view is not None
+            observed_event_kinds.update(
+                event.event_type for event in view.transition.events
+            )
+
+    assert observed_event_kinds == canonical_event_kinds
+
+
+def test_death_respawn_cycle_reference_trajectory() -> None:
+    _, session = _session("death_respawn_cycle")
+
+    session = submit_next_script_frame(session)
+    first_view = session.incoming_evaluation_view
+    assert first_view is not None
+    assert [
+        event.event_type
+        for event in first_view.transition.events
+        if event.event_type
+        in {
+            "agent_died",
+            "lethal_damage_contribution",
+            "status_cleared_by_new_death",
+        }
+    ] == [
+        "agent_died",
+        "lethal_damage_contribution",
+        "lethal_damage_contribution",
+        "status_cleared_by_new_death",
+        "status_cleared_by_new_death",
+        "status_cleared_by_new_death",
+    ]
+    corpse = next(
+        row for row in _researcher_scene(session).agents if row.global_slot == 5
+    )
+    assert (corpse.life_state, corpse.current_health, corpse.statuses) == (
+        "corpse",
+        0.0,
+        (),
+    )
+
+    session = submit_next_script_frame(session)
+    waiting = next(
+        row for row in _researcher_scene(session).agents if row.global_slot == 5
+    )
+    assert waiting.life_state == "corpse"
+    assert session.incoming_evaluation_view is not None
+    assert session.incoming_evaluation_view.transition.events == ()
+
+    session = submit_next_script_frame(session)
+    respawn_view = session.incoming_evaluation_view
+    assert respawn_view is not None
+    assert tuple(event.event_type for event in respawn_view.transition.events) == (
+        "action_rejected",
+        "action_rejected",
+        "respawn_wave_occurred",
+        "agent_respawned",
+    )
+    respawned = next(
+        row for row in _researcher_scene(session).agents if row.global_slot == 5
+    )
+    assert (
+        respawned.life_state,
+        respawned.current_health,
+        respawned.spawn_shield_remaining,
+        respawned.respawned_on_incoming_transition,
+    ) == ("alive", respawned.max_health, 3, True)
+
+    expected_shield_remaining = (2, 1, 0)
+    for expected_remaining in expected_shield_remaining:
+        session = submit_next_script_frame(session)
+        incoming_view = session.incoming_evaluation_view
+        assert incoming_view is not None
+        shielded = next(
+            row for row in _researcher_scene(session).agents if row.global_slot == 5
+        )
+        assert shielded.spawn_shield_remaining == expected_remaining
+        assert any(
+            event.event_type == "action_rejected"
+            for event in incoming_view.transition.events
+        )
+    incoming_view = session.incoming_evaluation_view
+    assert incoming_view is not None
+    assert any(
+        event.event_type == "spawn_shield_expired"
+        for event in incoming_view.transition.events
+    )
+
+    session = submit_next_script_frame(session)
+    incoming_view = session.incoming_evaluation_view
+    assert incoming_view is not None
+    assert _canonical_ability_signatures(session) == (("basic", 5, 0),)
+    assert not any(
+        event.event_type == "action_rejected"
+        for event in incoming_view.transition.events
+    )
+
+
+def test_recovery_refresh_cycle_reference_trajectory() -> None:
+    _, session = _session("recovery_refresh_cycle")
+
+    session = submit_next_script_frame(session)
+    first_view = session.incoming_evaluation_view
+    assert first_view is not None
+    assert {event.event_type for event in first_view.transition.events}.issuperset(
+        {
+            "action_rejected",
+            "health_regenerated",
+            "cooldown_ready",
+            "status_applied",
+        }
+    )
+    assert _scene_status_durations(session, 5) == {
+        "rogue_poison_stun": 1,
+        "rogue_poison_slow": 5,
+        "rogue_poison_anti_heal": 4,
+    }
+    assert _scene_status_durations(session, 7) == {"hunter_trap_stun": 4}
+
+    session = submit_next_script_frame(session)
+    second_view = session.incoming_evaluation_view
+    assert second_view is not None
+    assert _canonical_status_event_types(
+        session,
+        global_slot=5,
+        status_id="rogue_poison_stun",
+    ) == ("status_aged_to_zero", "status_applied")
+    assert _canonical_status_event_types(
+        session,
+        global_slot=5,
+        status_id="rogue_poison_slow",
+    ) == ("status_applied", "status_refreshed_or_extended")
+    assert _canonical_status_event_types(
+        session,
+        global_slot=7,
+        status_id="hunter_trap_stun",
+    ) == ("status_broken_by_damage", "status_applied")
+
+    for _ in range(5):
+        session = submit_next_script_frame(session)
+    assert _scene_status_ids(session, 5) == ()
+    assert _scene_status_ids(session, 7) == ()
+    assert _canonical_status_event_types(
+        session,
+        global_slot=5,
+        status_id="rogue_poison_slow",
+    ) == ("status_aged_to_zero",)
 
 
 def test_arena_5v5_exact_map_roster_positions_obstacles_and_initial_facts() -> None:

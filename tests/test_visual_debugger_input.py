@@ -32,7 +32,6 @@ from scripts.dev.visual_debugger.protocol import (
     ResetCommandV1,
     RosterSelectionCommandV1,
     ScenarioSwitchCommandV1,
-    SetMovementScaleCommandV1,
     SetPresetCommandV1,
     SetViewCommandV1,
 )
@@ -114,7 +113,6 @@ def _authorized_pov_slots(session: DebuggerSession) -> set[int]:
             ScenarioSwitchCommandV1(scenario_name="basic_support"),
             "scenario_switch",
         ),
-        (SetMovementScaleCommandV1(movement_scale=0.1), "movement_scale"),
         (FinishAndReviewCommandV1(), None),
     ),
 )
@@ -809,24 +807,24 @@ def test_scene_hit_test_uses_only_authorized_agents_and_stable_tie_break() -> No
     assert hit_test_scene_agents((), *first.position) is None
 
 
-def test_pointer_selection_is_server_hit_tested_and_shift_controls_actor() -> None:
+def test_pointer_hit_test_uses_plain_control_and_shift_target() -> None:
     session = _session("arena_5v5")
-    selected = dispatch_command(
+    controlled = dispatch_command(
         session,
         BattlefieldPointerCommandV1(
-            world_x=15.0,
-            world_y=10.0,
+            world_x=3.0,
+            world_y=6.0,
             button="primary",
         ),
         view_mode="researcher",
         preset="analysis",
         include_stress=False,
     )
-    controlled = dispatch_command(
-        selected.session,
+    selected = dispatch_command(
+        controlled.session,
         BattlefieldPointerCommandV1(
-            world_x=3.0,
-            world_y=6.0,
+            world_x=15.0,
+            world_y=10.0,
             button="primary",
             shift_key=True,
         ),
@@ -835,7 +833,7 @@ def test_pointer_selection_is_server_hit_tested_and_shift_controls_actor() -> No
         include_stress=False,
     )
     cleared = dispatch_command(
-        controlled.session,
+        selected.session,
         BattlefieldPointerCommandV1(
             world_x=0.0,
             world_y=0.0,
@@ -846,10 +844,11 @@ def test_pointer_selection_is_server_hit_tested_and_shift_controls_actor() -> No
         include_stress=False,
     )
 
-    assert selected.session.pending_action.selected_global_target_slot == 5
     assert controlled.session.controlled_global_slot == 2
     assert controlled.session.pending_action.selected_global_target_slot is None
-    assert controlled.session.pending_actions[0].selected_global_target_slot == 5
+    assert selected.session.controlled_global_slot == 2
+    assert selected.session.pending_action.selected_global_target_slot == 5
+    assert selected.session.pending_actions[0].selected_global_target_slot is None
     assert cleared.session.pending_action.selected_global_target_slot is None
     assert cleared.session.state is session.state
     assert cleared.session.key is session.key
@@ -859,7 +858,7 @@ def test_pov_pointer_and_roster_cannot_select_hidden_agent() -> None:
     session = _session("arena_5v5")
     assert 5 not in _authorized_pov_slots(session)
 
-    pointer = dispatch_command(
+    plain_pointer = dispatch_command(
         session,
         BattlefieldPointerCommandV1(
             world_x=15.0,
@@ -870,19 +869,36 @@ def test_pov_pointer_and_roster_cannot_select_hidden_agent() -> None:
         preset="analysis",
         include_stress=False,
     )
-    roster = dispatch_command(
+    shifted_pointer = dispatch_command(
         session,
-        RosterSelectionCommandV1(role="target", global_slot=5),
+        BattlefieldPointerCommandV1(
+            world_x=15.0,
+            world_y=10.0,
+            button="primary",
+            shift_key=True,
+        ),
         view_mode="pov",
         preset="analysis",
         include_stress=False,
     )
+    roster_results = tuple(
+        dispatch_command(
+            session,
+            RosterSelectionCommandV1(role=role, global_slot=5),
+            view_mode="pov",
+            preset="analysis",
+            include_stress=False,
+        )
+        for role in ("target", "control")
+    )
 
-    assert pointer.session is session
-    assert not pointer.changed
-    assert roster.session is session
-    assert not roster.changed
-    assert roster.notice == "Agent g5 is unavailable in this view."
+    for pointer in (plain_pointer, shifted_pointer):
+        assert pointer.session is session
+        assert not pointer.changed
+    for roster in roster_results:
+        assert roster.session is session
+        assert not roster.changed
+        assert roster.notice == "Agent g5 is unavailable in this view."
 
 
 def test_entering_pov_clears_hidden_pending_target_without_advancing_epoch() -> None:
@@ -978,58 +994,6 @@ def test_scenario_switch_enforces_stress_authorization() -> None:
     assert allowed.session.run_generation == session.run_generation + 1
 
 
-def test_movement_scale_dispatch_is_researcher_only_and_no_op_aware() -> None:
-    session = _session(controlled_slot=3)
-    scaled = dispatch_command(
-        session,
-        SetMovementScaleCommandV1(movement_scale=0.1),
-        view_mode="researcher",
-        preset="debug",
-        include_stress=False,
-    )
-    duplicate = dispatch_command(
-        scaled.session,
-        SetMovementScaleCommandV1(movement_scale=0.1),
-        view_mode="researcher",
-        preset="debug",
-        include_stress=False,
-    )
-    blocked = dispatch_command(
-        scaled.session,
-        SetMovementScaleCommandV1(movement_scale=0.25),
-        view_mode="pov",
-        preset="presentation",
-        include_stress=False,
-    )
-    restored = dispatch_command(
-        scaled.session,
-        SetMovementScaleCommandV1(movement_scale=None),
-        view_mode="researcher",
-        preset="debug",
-        include_stress=False,
-    )
-
-    assert scaled.handled
-    assert scaled.changed
-    assert scaled.session.config.ordinary_movement_distance_scale == 0.1
-    assert scaled.session.controlled_global_slot == 3
-    assert scaled.view_mode == "researcher"
-    assert scaled.preset == "debug"
-    assert duplicate.handled
-    assert not duplicate.changed
-    assert duplicate.session is scaled.session
-    assert duplicate.notice is not None
-    assert blocked.handled
-    assert not blocked.changed
-    assert blocked.session is scaled.session
-    assert blocked.view_mode == "pov"
-    assert blocked.preset == "presentation"
-    assert blocked.notice is not None
-    assert "researcher view" in blocked.notice
-    assert restored.changed
-    assert restored.session.config.ordinary_movement_distance_scale == 1.0
-
-
 def test_view_preset_reset_and_exit_commands_report_frame_changes_exactly() -> None:
     session = _session()
     same_view = dispatch_command(
@@ -1041,7 +1005,7 @@ def test_view_preset_reset_and_exit_commands_report_frame_changes_exactly() -> N
     )
     preset = dispatch_command(
         session,
-        SetPresetCommandV1(preset="debug"),
+        SetPresetCommandV1.model_validate({"preset": "debug"}),
         view_mode="researcher",
         preset="analysis",
         include_stress=False,
@@ -1062,8 +1026,8 @@ def test_view_preset_reset_and_exit_commands_report_frame_changes_exactly() -> N
     )
 
     assert not same_view.changed
-    assert preset.changed
-    assert preset.preset == "debug"
+    assert not preset.changed
+    assert preset.preset == "analysis"
     assert reset.changed
     assert reset.session.run_generation == session.run_generation + 1
     assert not exit_result.changed

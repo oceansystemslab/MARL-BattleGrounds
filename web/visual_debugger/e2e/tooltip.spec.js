@@ -289,6 +289,104 @@ async function expectDelegatedOwner(page, owner, expectedKind, options = {}) {
   return point;
 }
 
+test("Battlefield Commands follows pointer anchors and uses a centered focus fallback", async ({
+  page,
+}) => {
+  await installFrame(page, withoutIncomingResearcherEvents(crowdedFrame));
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 960, height: 600 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await waitForStablePresentation(page);
+    const battlefield = page.locator("#battlefield");
+
+    for (const region of ["center", "edge"]) {
+      const point = await battlefield.evaluate((surface, requestedRegion) => {
+        const bounds = surface.getBoundingClientRect();
+        const ratios =
+          requestedRegion === "edge"
+            ? [
+                [0.02, 0.04],
+                [0.98, 0.04],
+                [0.02, 0.96],
+                [0.98, 0.96],
+              ]
+            : [
+                [0.5, 0.5],
+                [0.44, 0.5],
+                [0.56, 0.5],
+                [0.5, 0.42],
+                [0.5, 0.58],
+              ];
+        for (const [xRatio, yRatio] of ratios) {
+          const x = bounds.left + bounds.width * xRatio;
+          const y = bounds.top + bounds.height * yRatio;
+          const owner = document
+            .elementsFromPoint(x, y)
+            .map((element) => element.closest("[data-tooltip-owner]"))
+            .find((element) => element instanceof Element);
+          if (owner === surface) {
+            return { x, y };
+          }
+        }
+        throw new Error(`No blank ${requestedRegion} battlefield point is available.`);
+      }, region);
+      await page.mouse.move(point.x, point.y);
+      await expect(page.locator("#visual-tooltip-title")).toHaveText(
+        "Battlefield Commands",
+      );
+      await expectTooltipInsideBattlefield(page);
+      const tooltip = await page.locator("#visual-tooltip").boundingBox();
+      if (tooltip === null) {
+        throw new Error("Battlefield Commands tooltip has no layout bounds.");
+      }
+      const dx = Math.max(
+        tooltip.x - point.x,
+        0,
+        point.x - (tooltip.x + tooltip.width),
+      );
+      const dy = Math.max(
+        tooltip.y - point.y,
+        0,
+        point.y - (tooltip.y + tooltip.height),
+      );
+      expect(Math.hypot(dx, dy)).toBeLessThanOrEqual(24);
+    }
+
+    await page.mouse.move(1, 1);
+    await battlefield.focus();
+    await expect(page.locator("#visual-tooltip-title")).toHaveText(
+      "Battlefield Commands",
+    );
+    const [battlefieldBounds, tooltipBounds] = await Promise.all([
+      battlefield.boundingBox(),
+      page.locator("#visual-tooltip").boundingBox(),
+    ]);
+    expect(battlefieldBounds).not.toBeNull();
+    expect(tooltipBounds).not.toBeNull();
+    const center = {
+      x: (battlefieldBounds?.x ?? 0) + (battlefieldBounds?.width ?? 0) / 2,
+      y: (battlefieldBounds?.y ?? 0) + (battlefieldBounds?.height ?? 0) / 2,
+    };
+    const dx = Math.max(
+      (tooltipBounds?.x ?? 0) - center.x,
+      0,
+      center.x - ((tooltipBounds?.x ?? 0) + (tooltipBounds?.width ?? 0)),
+    );
+    const dy = Math.max(
+      (tooltipBounds?.y ?? 0) - center.y,
+      0,
+      center.y - ((tooltipBounds?.y ?? 0) + (tooltipBounds?.height ?? 0)),
+    );
+    expect(Math.hypot(dx, dy)).toBeLessThanOrEqual(24);
+    await expectTooltipInsideBattlefield(page);
+  }
+});
+
 test("one tooltip arbitrates dense battlefield and keyboard explanations", async ({
   page,
 }) => {
@@ -848,6 +946,9 @@ test("range hits are inspectable and POV explanations retain redaction", async (
   const actionOutcome = page.locator(
     '#event-feed .event-item[data-event-type="own_action_outcome"]',
   );
+  await page.locator("#events-details > summary").click();
+  await expect(page.locator("#events-details")).toHaveAttribute("open", "");
+  await expect(actionOutcome).toBeVisible();
   await actionOutcome.hover();
   await expect(page.locator("#visual-tooltip-details")).not.toContainText(/target/i);
   await expect(page.locator("#visual-tooltip-details")).not.toContainText(/id_5/);

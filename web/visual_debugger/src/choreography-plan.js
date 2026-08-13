@@ -14,23 +14,63 @@ export const CHOREOGRAPHY_PHASES = Object.freeze({
   submissionRelease: 450,
   settleStart: 760,
   v2RejectionStart: 0,
-  v2AbilityStart: 60,
-  v2HealthResolutionStart: 180,
-  v2CountdownAndRegenStart: 250,
-  v2CooldownStart: 290,
-  v2ChargeStart: 350,
-  v2MovementStart: 450,
-  v2DeathStart: 550,
-  v2StatusStart: 630,
-  v2ShieldStart: 720,
-  v2RespawnWaveStart: 780,
-  v2RespawnStart: 830,
+  v2AbilityStart: 0,
+  v2HealthResolutionStart: 420,
+  v2CountdownAndRegenStart: 900,
+  v2CooldownStart: 1220,
+  v2ChargeStart: 1540,
+  v2MovementStart: 2080,
+  v2DeathStart: 2080,
+  v2StatusStart: 2560,
+  v2ShieldStart: 3040,
+  v2RespawnWaveStart: 3520,
+  v2RespawnStart: 4000,
   // Recipient POV deltas expose only adjacent observations, not privileged
   // transition phases. Spatial POV cues therefore share one explicitly
   // non-causal successor-observation phase.
-  povSuccessorObservationStart: 520,
+  povSuccessorObservationStart: 0,
   total: 900,
   reducedTotal: 220,
+});
+
+const STATUS_EVENT_TYPES = new Set([
+  "status_aged_to_zero",
+  "status_broken_by_damage",
+  "status_applied",
+  "status_refreshed_or_extended",
+  "status_cleared_by_new_death",
+]);
+/**
+ * @typedef {"ability" | "rejection" | "health" | "recovery" | "cooldown" | "charge" | "movement" | "death" | "status" | "shield" | "respawn_wave" | "respawn"} ChoreographyFamily
+ * @typedef {Exclude<ChoreographyFamily, "ability" | "rejection">} OutcomeFamily
+ */
+/** @type {ReadonlyArray<OutcomeFamily>} */
+const OUTCOME_FAMILY_ORDER = Object.freeze([
+  "health",
+  "recovery",
+  "cooldown",
+  "charge",
+  "movement",
+  "death",
+  "status",
+  "shield",
+  "respawn_wave",
+  "respawn",
+]);
+const READABLE_OUTCOME_DWELL_MS =
+  CHOREOGRAPHY_PHASES.total - CHOREOGRAPHY_PHASES.outcomeStart;
+/** @type {Readonly<Record<OutcomeFamily, number>>} */
+const FAMILY_DWELL_MS = Object.freeze({
+  health: READABLE_OUTCOME_DWELL_MS,
+  recovery: 320,
+  cooldown: 320,
+  charge: CHOREOGRAPHY_PHASES.total - CHOREOGRAPHY_PHASES.impactStart,
+  movement: 0,
+  death: READABLE_OUTCOME_DWELL_MS,
+  status: READABLE_OUTCOME_DWELL_MS,
+  shield: READABLE_OUTCOME_DWELL_MS,
+  respawn_wave: READABLE_OUTCOME_DWELL_MS,
+  respawn: 620,
 });
 
 const MAX_HEALTH_CUES_PER_RECIPIENT = 3;
@@ -444,7 +484,10 @@ function outcomePlacementOrder(left, right) {
  * @param {Record<string, any>} event
  */
 function lifecyclePlacementPriority(event) {
-  if (event.lifecycle === "trap_broken_and_reapplied") {
+  if (
+    event.lifecycle === "trap_broken_and_reapplied" ||
+    event.lifecycle === "expired_then_reapplied"
+  ) {
     return 0;
   }
   if (event.lifecycle === "trap_broken") {
@@ -981,6 +1024,241 @@ export function isSubmissionCommand(command) {
 }
 
 /**
+ * Compose simultaneous atomic status events without inventing status state.
+ * Recipient slot, catalog channel, and status ID are serialized authority; the
+ * browser only chooses one readable cue for each exact group. Every source
+ * event keeps its own plan row and the primary cue carries all atomic IDs.
+ *
+ * @param {ReadonlyArray<unknown>} rawEvents
+ * @param {string} transitionId
+ */
+function statusPresentationAssignments(rawEvents, transitionId) {
+  /** @type {Map<string, {events: Record<string, any>[], firstIndex: number}>} */
+  const groups = new Map();
+  const seenEventIds = new Set();
+  rawEvents.forEach((rawEvent, index) => {
+    const event = record(rawEvent);
+    const eventType = identifier(event?.event_type);
+    const eventId = identifier(event?.event_id);
+    const recipientSlot = integer(event?.recipient_global_slot);
+    const statusChannel = integer(event?.status_channel);
+    const statusId = identifier(event?.status_id);
+    if (
+      !event ||
+      eventType === null ||
+      !STATUS_EVENT_TYPES.has(eventType) ||
+      eventId === null ||
+      seenEventIds.has(eventId) ||
+      scientificIdentity(event.transition_id) !== transitionId ||
+      recipientSlot === null ||
+      statusChannel === null ||
+      statusId === null
+    ) {
+      return;
+    }
+    seenEventIds.add(eventId);
+    const key = `${recipientSlot}:${statusChannel}:${statusId}`;
+    const group = groups.get(key) ?? { events: [], firstIndex: index };
+    group.events.push(event);
+    groups.set(key, group);
+  });
+
+  /** @type {Map<string, {lane: number, laneCount: number}>} */
+  const lanes = new Map();
+  /** @type {Map<number, Array<[string, {events: Record<string, any>[], firstIndex: number}]>>} */
+  const groupsByRecipient = new Map();
+  for (const [key, group] of groups) {
+    const recipientSlot = integer(group.events[0]?.recipient_global_slot);
+    if (recipientSlot === null) continue;
+    const recipientGroups = groupsByRecipient.get(recipientSlot) ?? [];
+    recipientGroups.push([key, group]);
+    groupsByRecipient.set(recipientSlot, recipientGroups);
+  }
+  for (const recipientGroups of groupsByRecipient.values()) {
+    recipientGroups.sort((left, right) => left[1].firstIndex - right[1].firstIndex);
+    recipientGroups.forEach(([key], lane) => {
+      lanes.set(key, { lane, laneCount: recipientGroups.length });
+    });
+  }
+
+  /** @type {Map<string, Record<string, any>>} */
+  const assignments = new Map();
+  for (const [key, group] of groups) {
+    const appliedEvents = group.events.filter(
+      (event) => event.event_type === "status_applied",
+    );
+    const applied = appliedEvents.at(-1) ?? null;
+    const byType = new Map(
+      group.events.map((event) => [identifier(event.event_type), event]),
+    );
+    const refreshed = byType.get("status_refreshed_or_extended") ?? null;
+    const cleared = byType.get("status_cleared_by_new_death") ?? null;
+    const broken = byType.get("status_broken_by_damage") ?? null;
+    const expired = byType.get("status_aged_to_zero") ?? null;
+    const lifecycle = cleared
+      ? "cleared_by_death"
+      : refreshed
+        ? "refreshed"
+        : broken && applied
+          ? "trap_broken_and_reapplied"
+          : expired && applied
+            ? "expired_then_reapplied"
+            : broken
+              ? "trap_broken"
+              : expired
+                ? "expired"
+                : "applied";
+    const primary =
+      cleared ??
+      refreshed ??
+      (applied && (broken || expired) ? applied : null) ??
+      broken ??
+      expired ??
+      applied;
+    if (!primary) continue;
+    const atomicEventIds = Object.freeze(
+      group.events.map((event) => identifier(event.event_id)).filter(Boolean),
+    );
+    const applicationEventIds = Object.freeze(
+      appliedEvents.map((event) => identifier(event.event_id)).filter(Boolean),
+    );
+    const sourceEvents = Object.freeze([...appliedEvents]);
+    const lane = lanes.get(key) ?? { lane: 0, laneCount: 1 };
+    for (const event of group.events) {
+      const eventId = identifier(event.event_id);
+      if (eventId === null) continue;
+      assignments.set(
+        eventId,
+        Object.freeze({
+          primary: event === primary,
+          lifecycle,
+          atomicEventIds,
+          applicationEventIds,
+          sourceEvents,
+          lane: lane.lane,
+          laneCount: lane.laneCount,
+        }),
+      );
+    }
+  }
+  return assignments;
+}
+
+/** @param {Record<string, any>} event @returns {ChoreographyFamily | null} */
+function choreographyFamily(event) {
+  if (event.kind === "activation") return "ability";
+  if (event.kind === "rejected_action") return "rejection";
+  if (event.kind === "net_health") return "health";
+  if (event.kind === "charge_displacement") return "charge";
+  if (event.kind === "movement_displacement") return "movement";
+  if (event.kind === "status_lifecycle") return "status";
+  if (event.kind !== "semantic_pulse") return null;
+  if (
+    event.cueSemantic === "combat_countdown_reset" ||
+    event.cueSemantic === "health_regenerated"
+  ) {
+    return "recovery";
+  }
+  if (
+    event.cueSemantic === "cooldown_started" ||
+    event.cueSemantic === "cooldown_ready"
+  ) {
+    return "cooldown";
+  }
+  if (event.cueSemantic === "agent_died") return "death";
+  if (event.cueSemantic === "spawn_shield_expired") return "shield";
+  if (event.cueSemantic === "respawn_wave_occurred") return "respawn_wave";
+  if (event.cueSemantic === "agent_respawned") return "respawn";
+  return null;
+}
+
+/**
+ * Allocate only families present in this authorized transition. M5 ability and
+ * outcome anchors remain exact, while every readable outcome gets its own
+ * complete dwell and later M6 lifecycle beats extend the clock in canonical
+ * order. Ordinary movement deliberately owns a zero-duration presentation
+ * slot because its scientific event remains feed-only spatially.
+ *
+ * @param {ReadonlyArray<Record<string, any>>} events
+ */
+function scheduleChoreography(events) {
+  const families = new Set(
+    events
+      .filter((event) => event.spatial || event.kind === "movement_displacement")
+      .map(choreographyFamily)
+      .filter((family) => family !== null),
+  );
+  /** @type {Map<string, {start: number, end: number}>} */
+  const windows = new Map();
+  if (families.has("rejection")) {
+    windows.set("rejection", {
+      start: CHOREOGRAPHY_PHASES.activationStart,
+      end: CHOREOGRAPHY_PHASES.settleStart,
+    });
+  }
+  if (families.has("ability")) {
+    windows.set("ability", {
+      start: CHOREOGRAPHY_PHASES.activationStart,
+      end: CHOREOGRAPHY_PHASES.settleStart,
+    });
+  }
+  const activeOutcomes = OUTCOME_FAMILY_ORDER.filter((family) => families.has(family));
+  let cursor =
+    activeOutcomes.length > 0 && (families.has("ability") || families.has("rejection"))
+      ? CHOREOGRAPHY_PHASES.outcomeStart
+      : 0;
+  for (const family of activeOutcomes) {
+    const duration = FAMILY_DWELL_MS[family];
+    windows.set(family, { start: cursor, end: cursor + duration });
+    cursor += duration;
+  }
+  const total = Math.max(
+    cursor,
+    windows.get("ability")?.end ?? 0,
+    windows.get("rejection")?.end ?? 0,
+  );
+  /** @param {ChoreographyFamily} family */
+  const startFor = (family) => windows.get(family)?.start ?? total;
+  const phases = Object.freeze({
+    ...CHOREOGRAPHY_PHASES,
+    outcomeStart: activeOutcomes.length > 0 ? startFor(activeOutcomes[0]) : total,
+    v2RejectionStart: startFor("rejection"),
+    v2AbilityStart: startFor("ability"),
+    v2HealthResolutionStart: startFor("health"),
+    v2CountdownAndRegenStart: startFor("recovery"),
+    v2CooldownStart: startFor("cooldown"),
+    v2ChargeStart: startFor("charge"),
+    v2MovementStart: startFor("movement"),
+    v2DeathStart: startFor("death"),
+    v2StatusStart: startFor("status"),
+    v2ShieldStart: startFor("shield"),
+    v2RespawnWaveStart: startFor("respawn_wave"),
+    v2RespawnStart: startFor("respawn"),
+    povSuccessorObservationStart: startFor("health"),
+    total,
+    reducedTotal: Math.min(CHOREOGRAPHY_PHASES.reducedTotal, total),
+  });
+  /** @type {Record<string, any>[]} */
+  const scheduledEvents = events.map((event) => {
+    const family = choreographyFamily(event);
+    const window = family === null ? null : windows.get(family);
+    if (!window) return event;
+    return /** @type {Record<string, any>} */ (
+      Object.freeze({
+        ...event,
+        phaseStart: window.start,
+        phaseImpact:
+          family === "ability"
+            ? Math.min(window.start + CHOREOGRAPHY_PHASES.impactStart, window.end)
+            : event.phaseImpact,
+        phaseEnd: window.end,
+      })
+    );
+  });
+  return Object.freeze({ phases, events: Object.freeze(scheduledEvents) });
+}
+
+/**
  * @param {Record<string, any> | null} scene
  * @param {ProjectionSurface | null} surface
  */
@@ -1036,14 +1314,13 @@ export function buildChoreographyPlan(frame, surface = null) {
 
   const radii = radiusBySlot(scene, surface);
   const rawEvents = array(batch.events);
+  const statusAssignments = statusPresentationAssignments(rawEvents, transitionId);
   /** @type {Array<Record<string, any>>} */
   const planned = [];
   /** @type {RouteInput[]} */
   const acceptedRouteInputs = [];
   /** @type {Map<number, number>} */
   const healthLaneCounts = new Map();
-  /** @type {Map<number, number>} */
-  const lifecycleLaneCounts = new Map();
   const seenEventIds = new Set();
   const sceneAgentBySlot = new Map(
     array(scene.agents)
@@ -1318,7 +1595,8 @@ export function buildChoreographyPlan(frame, surface = null) {
             eventType === "charge_phase_displacement"
               ? "charge_phase"
               : "ordinary_movement_phase",
-          spatial: true,
+          spatial: eventType === "charge_phase_displacement",
+          presentationSuppressed: eventType === "ordinary_movement_phase_displacement",
           persistent: eventType === "charge_phase_displacement",
           phaseStart:
             eventType === "charge_phase_displacement"
@@ -1342,32 +1620,37 @@ export function buildChoreographyPlan(frame, surface = null) {
     ) {
       const recipientSlot = integer(event.recipient_global_slot);
       const recipient = project(anchorPoint(event.recipient_anchor), surface);
-      const sourceSlot =
-        eventType === "status_applied" ? integer(event.source_global_slot) : null;
-      const source =
+      const assignment = statusAssignments.get(eventId) ?? null;
+      const sourceEvents = array(assignment?.sourceEvents).map(record);
+      const applicationSources = sourceEvents.map((sourceEvent) => {
+        const applicationEventId = identifier(sourceEvent?.event_id);
+        const sourceSlot = integer(sourceEvent?.source_global_slot);
+        const source = project(anchorPoint(sourceEvent?.source_anchor), surface);
+        return applicationEventId === null || sourceSlot === null || source === null
+          ? null
+          : Object.freeze({
+              eventId: applicationEventId,
+              sourceSlot,
+              sourcePublicAgentId: publicAgentIdForSlot(sourceSlot),
+              source,
+            });
+      });
+      const directApplicationSource =
         eventType === "status_applied"
-          ? project(anchorPoint(event.source_anchor), surface)
+          ? (applicationSources.find((candidate) => candidate?.eventId === eventId) ??
+            null)
           : null;
-      const lifecycleKind =
-        eventType === "status_aged_to_zero"
-          ? "expired"
-          : eventType === "status_broken_by_damage"
-            ? "trap_broken"
-            : eventType === "status_applied"
-              ? "applied"
-              : eventType === "status_refreshed_or_extended"
-                ? "refreshed"
-                : "cleared_by_death";
+      const lifecycleKind = identifier(assignment?.lifecycle);
       if (
         recipientSlot === null ||
         recipient === null ||
-        (eventType === "status_applied" && (sourceSlot === null || source === null))
+        assignment === null ||
+        lifecycleKind === null ||
+        applicationSources.some((source) => source === null)
       ) {
         planned.push(Object.freeze({ ...common, kind: "unknown", spatial: false }));
         continue;
       }
-      const lane = lifecycleLaneCounts.get(recipientSlot) ?? 0;
-      lifecycleLaneCounts.set(recipientSlot, lane + 1);
       const status = resolveVisualToken("status", event.status_id, event);
       const lifecycle = resolveVisualToken("lifecycle", lifecycleKind, event);
       planned.push(
@@ -1381,15 +1664,18 @@ export function buildChoreographyPlan(frame, surface = null) {
           recipientSlot,
           recipientPublicAgentId: publicAgentIdForSlot(recipientSlot),
           recipient,
-          sourceSlot,
-          sourcePublicAgentId: publicAgentIdForSlot(sourceSlot),
-          source,
+          sourceSlot: directApplicationSource?.sourceSlot ?? null,
+          sourcePublicAgentId: directApplicationSource?.sourcePublicAgentId ?? null,
+          source: directApplicationSource?.source ?? null,
+          applicationSources: Object.freeze(applicationSources),
           durationBefore: null,
           durationAfter: null,
-          lane,
-          laneCount: 1,
-          applicationEventIds: Object.freeze([]),
-          spatial: true,
+          lane: assignment.lane,
+          laneCount: assignment.laneCount,
+          atomicEventIds: assignment.atomicEventIds,
+          applicationEventIds: assignment.applicationEventIds,
+          presentationSuppressed: !assignment.primary,
+          spatial: assignment.primary,
           phaseStart: CHOREOGRAPHY_PHASES.v2StatusStart,
           phaseEnd: CHOREOGRAPHY_PHASES.v2ShieldStart,
         }),
@@ -1448,7 +1734,8 @@ export function buildChoreographyPlan(frame, surface = null) {
           start,
           end,
           pathKind: "observed_own_position_change",
-          spatial: true,
+          spatial: false,
+          presentationSuppressed: true,
           persistent: false,
           phaseStart: CHOREOGRAPHY_PHASES.povSuccessorObservationStart,
           phaseEnd: CHOREOGRAPHY_PHASES.total,
@@ -1486,6 +1773,85 @@ export function buildChoreographyPlan(frame, surface = null) {
           outcome: delta < 0 ? "damage" : delta > 0 ? "healing" : "unchanged",
           lane: 0,
           spatial: true,
+          phaseStart: CHOREOGRAPHY_PHASES.povSuccessorObservationStart,
+          phaseEnd: CHOREOGRAPHY_PHASES.total,
+        }),
+      );
+      continue;
+    }
+
+    if (eventType === "own_lifecycle_changed") {
+      const selfActor = record(scene.self_actor);
+      const agentSlot = integer(selfActor?.global_slot);
+      const sceneAgent = sceneAgentBySlot.get(agentSlot);
+      const startActive = event.start_active;
+      const successorActive = event.successor_active;
+      const startAlive = event.start_alive;
+      const successorAlive = event.successor_alive;
+      const startShield = integer(event.start_spawn_shield_remaining_ticks);
+      const successorShield = integer(event.successor_spawn_shield_remaining_ticks);
+      if (
+        scene.audience !== "agent_pov" ||
+        batch.audience !== "agent_pov" ||
+        !selfActor ||
+        agentSlot === null ||
+        !sceneAgent ||
+        identifier(selfActor?.public_agent_id) !== publicAgentIdForSlot(agentSlot) ||
+        typeof startActive !== "boolean" ||
+        typeof successorActive !== "boolean" ||
+        typeof startAlive !== "boolean" ||
+        typeof successorAlive !== "boolean" ||
+        startShield === null ||
+        startShield < 0 ||
+        successorShield === null ||
+        successorShield < 0
+      ) {
+        planned.push(Object.freeze({ ...common, kind: "unknown", spatial: false }));
+        continue;
+      }
+      const cueSemantic =
+        startActive && successorActive && startAlive && !successorAlive
+          ? "agent_died"
+          : startActive &&
+              successorActive &&
+              !startAlive &&
+              successorAlive &&
+              successorShield > 0
+            ? "agent_respawned"
+            : startActive &&
+                successorActive &&
+                startAlive &&
+                successorAlive &&
+                startShield > 0 &&
+                successorShield === 0
+              ? "spawn_shield_expired"
+              : null;
+      if (cueSemantic === null) {
+        planned.push(
+          Object.freeze({
+            ...common,
+            kind: "feed_only",
+            spatial: false,
+          }),
+        );
+        continue;
+      }
+      const anchor = project(point(selfActor.position), surface);
+      planned.push(
+        Object.freeze({
+          ...common,
+          kind: "semantic_pulse",
+          cueSemantic,
+          anchor,
+          agentSlot,
+          agentPublicAgentId: publicAgentIdForSlot(agentSlot),
+          startActive,
+          successorActive,
+          startAlive,
+          successorAlive,
+          startSpawnShieldRemaining: startShield,
+          successorSpawnShieldRemaining: successorShield,
+          spatial: anchor !== null,
           phaseStart: CHOREOGRAPHY_PHASES.povSuccessorObservationStart,
           phaseEnd: CHOREOGRAPHY_PHASES.total,
         }),
@@ -1559,7 +1925,6 @@ export function buildChoreographyPlan(frame, surface = null) {
       eventType === "own_action_outcome" ||
       eventType === "own_status_changed" ||
       eventType === "own_cooldown_changed" ||
-      eventType === "own_lifecycle_changed" ||
       eventType === "visible_body_observation_changed" ||
       eventType === "episode_ended"
     ) {
@@ -1624,9 +1989,10 @@ export function buildChoreographyPlan(frame, surface = null) {
         })
       : event;
   });
-  const spatialEventCount = routedEvents.filter((event) => event.spatial).length;
+  const scheduled = scheduleChoreography(routedEvents);
+  const spatialEventCount = scheduled.events.filter((event) => event.spatial).length;
   /** @type {ReadonlyArray<Record<string, any>>} */
-  const netOutcomeEvents = layoutOutcomeCues(routedEvents, surface, "net_health");
+  const netOutcomeEvents = layoutOutcomeCues(scheduled.events, surface, "net_health");
   /** @type {ReadonlyArray<Record<string, any>>} */
   const ownershipEvents = layoutChargeOwnershipCues(netOutcomeEvents, surface);
   const events = Object.freeze(
@@ -1642,7 +2008,7 @@ export function buildChoreographyPlan(frame, surface = null) {
     fingerprint,
     transitionId,
     simulatorStep,
-    phases: CHOREOGRAPHY_PHASES,
+    phases: scheduled.phases,
     events,
     bounds: Object.freeze({
       nodes: Math.min(events.length * 28 + 2, 512),

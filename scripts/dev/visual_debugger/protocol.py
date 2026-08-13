@@ -14,9 +14,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    StrictFloat,
     StringConstraints,
-    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -31,17 +29,12 @@ from marl_battlegrounds.rendering.scene import (
     ResearcherAnalyzerProjectionV2,
     TargetDisclosure,
 )
-from scripts.dev.visual_debugger.model import (
-    MOVEMENT_SCALE_MAXIMUM,
-    MOVEMENT_SCALE_MINIMUM,
-    MOVEMENT_SCALE_STEP,
-)
 
 PROTOCOL_SCHEMA_VERSION = 1
 LIVE_FRAME_SCHEMA_VERSION = 2
 
 type ViewMode = Literal["researcher", "pov"]
-type Preset = Literal["presentation", "analysis", "debug"]
+type Preset = Literal["presentation", "analysis"]
 type PresentationPreset = Preset
 type PendingSubmissionScope = Literal[
     "joint_turn",
@@ -118,14 +111,6 @@ _MoveAction = Annotated[int, Field(ge=0, lt=NUM_MOVE_ACTIONS)]
 _TargetAction = Annotated[int, Field(ge=0, lt=NUM_TARGET_ACTIONS)]
 _NonNegativeInt = Annotated[int, Field(ge=0)]
 _FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
-_MovementScale = Annotated[
-    StrictFloat,
-    Field(
-        ge=MOVEMENT_SCALE_MINIMUM,
-        le=MOVEMENT_SCALE_MAXIMUM,
-        allow_inf_nan=False,
-    ),
-]
 _PositiveUnitFloat = Annotated[
     float,
     Field(gt=0.0, le=1.0, allow_inf_nan=False),
@@ -196,25 +181,13 @@ class SetPresetCommandV1(_ProtocolModel):
     command_type: Literal["set_preset"] = "set_preset"
     preset: Preset
 
-
-class SetMovementScaleCommandV1(_ProtocolModel):
-    command_type: Literal["set_movement_scale"] = "set_movement_scale"
-    movement_scale: _MovementScale | None
-
-    @field_validator("movement_scale", mode="before")
+    @field_validator("preset", mode="before")
     @classmethod
-    def _validate_input_number(
+    def _canonicalize_legacy_technical_preset(
         cls,
         value: object,
-        info: ValidationInfo,
     ) -> object:
-        if value is None:
-            return value
-        if info.mode == "json" and type(value) is int:
-            return float(value)
-        if type(value) is not float:
-            raise ValueError("movement_scale must be a JSON number or Python float.")
-        return value
+        return "analysis" if value == "debug" else value
 
 
 class ExitCommandV1(_ProtocolModel):
@@ -246,7 +219,7 @@ class SaveAsCommandV1(_ProtocolModel):
 
 
 type RecordingReplacementCommandV1 = Annotated[
-    ResetCommandV1 | ScenarioSwitchCommandV1 | SetMovementScaleCommandV1,
+    ResetCommandV1 | ScenarioSwitchCommandV1,
     Field(discriminator="command_type"),
 ]
 
@@ -265,7 +238,6 @@ type DebuggerCommandV1 = Annotated[
     | ResetCommandV1
     | SetViewCommandV1
     | SetPresetCommandV1
-    | SetMovementScaleCommandV1
     | FinishAndReviewCommandV1
     | ReviewReplayCommandV1
     | RetrySaveCommandV1
@@ -749,12 +721,7 @@ class ScenarioOptionV1(_ProtocolModel):
 
 
 class ScenarioMetadataV1(ScenarioOptionV1):
-    movement_scale_minimum: _PositiveUnitFloat = MOVEMENT_SCALE_MINIMUM
-    movement_scale_maximum: _PositiveUnitFloat = MOVEMENT_SCALE_MAXIMUM
-    movement_scale_step: _PositiveUnitFloat = MOVEMENT_SCALE_STEP
     ordinary_movement_distance_scale: _PositiveUnitFloat
-    scenario_default_movement_scale: _PositiveUnitFloat
-    movement_scale_overridden: bool
     completed_frame_count: _NonNegativeInt
     frame_count: _NonNegativeInt
     next_frame_index: _NonNegativeInt | None
@@ -764,40 +731,8 @@ class ScenarioMetadataV1(ScenarioOptionV1):
 
     @model_validator(mode="after")
     def _validate_frame_cursor(self) -> Self:
-        if (
-            self.movement_scale_minimum,
-            self.movement_scale_maximum,
-            self.movement_scale_step,
-        ) != (
-            MOVEMENT_SCALE_MINIMUM,
-            MOVEMENT_SCALE_MAXIMUM,
-            MOVEMENT_SCALE_STEP,
-        ):
-            raise ValueError(
-                "movement-scale bounds and step must match the authoritative "
-                "debugger contract."
-            )
-        if not (
-            self.movement_scale_minimum
-            <= self.ordinary_movement_distance_scale
-            <= self.movement_scale_maximum
-            and self.movement_scale_minimum
-            <= self.scenario_default_movement_scale
-            <= self.movement_scale_maximum
-        ):
-            raise ValueError(
-                "effective and authored movement scales must remain within "
-                "the advertised movement-scale bounds."
-            )
-        expected_override = (
-            self.ordinary_movement_distance_scale
-            != self.scenario_default_movement_scale
-        )
-        if self.movement_scale_overridden != expected_override:
-            raise ValueError(
-                "movement_scale_overridden must exactly describe effective "
-                "versus authored movement scale."
-            )
+        if self.ordinary_movement_distance_scale != 1.0:
+            raise ValueError("live product movement scale must remain exactly 1.0.")
         if self.completed_frame_count > self.frame_count:
             raise ValueError("completed_frame_count must not exceed frame_count.")
         has_next = self.next_frame_index is not None
@@ -953,7 +888,7 @@ class _LiveDebuggerEnvelopeV2(_ProtocolModel):
     frame_id: _CanonicalScientificId
     simulator_step_count: _NonNegativeInt
     preset: Preset
-    verbose: bool
+    verbose: Literal[False] = False
     terminal: TerminalStateV2
     recording: RecordingStatusV1 | None = None
 

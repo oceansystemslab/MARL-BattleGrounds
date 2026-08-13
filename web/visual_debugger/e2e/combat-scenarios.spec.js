@@ -7,7 +7,8 @@ import {
   CHOREOGRAPHY_ROUTE_ROOT,
   choreographySnapshot,
   installWaapiAutopause,
-  pauseAtLogicalTime,
+  pauseInsideEventWindow,
+  pauseInsideFirstEventWindow,
 } from "./support/choreography.js";
 import { startDebugger, stopDebugger } from "./support/live-debugger.js";
 
@@ -59,6 +60,11 @@ async function loadScenario(page, scenario) {
   await page.goto(debuggerUrl);
   await expect(page.locator("#connection-status")).toHaveText("Online");
 
+  if ((await page.locator("#view-select").inputValue()) !== "researcher") {
+    await page.locator("#view-select").selectOption("researcher");
+    await expect(page.locator("html")).toHaveAttribute("data-audience", "researcher");
+  }
+
   const revisionBefore = Number(await page.locator("#revision-value").textContent());
   if ((await page.locator("#scenario-select").inputValue()) === scenario) {
     await page.getByRole("button", { name: "Reset" }).click();
@@ -77,29 +83,13 @@ async function loadScenario(page, scenario) {
 }
 
 /**
- * @param {import("@playwright/test").Page} page
- * @param {number} rate
- */
-async function setGraphicsSpeed(page, rate) {
-  await page.locator("#graphics-speed-input").evaluate((input, nextRate) => {
-    if (!(input instanceof HTMLInputElement) || input.type !== "range") {
-      throw new Error("Graphics rendering speed input is unavailable.");
-    }
-    input.value = Number(nextRate).toFixed(2);
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-  }, rate);
-  await expect(page.locator("html")).toHaveAttribute("data-motion-rate", String(rate));
-}
-
-/**
  * Submit one scripted frame and seek its shared presentation clock.
  *
  * @param {import("@playwright/test").Page} page
  * @param {number} transitionId
- * @param {number} [logicalMs]
  * @returns {Promise<Record<string, any>>}
  */
-async function advanceAnimatedFrame(page, transitionId, logicalMs = 520) {
+async function advanceScriptedFrame(page, transitionId) {
   const responsePromise = page.waitForResponse(
     (response) =>
       response.request().method() === "POST" && response.url().endsWith("/api/command"),
@@ -111,8 +101,6 @@ async function advanceAnimatedFrame(page, transitionId, logicalMs = 520) {
     new RegExp(`:transition:${transitionId - 1}$`),
     { timeout: 120_000 },
   );
-  await expect(page.locator(CHOREOGRAPHY_ROOT)).toHaveCount(1);
-  await pauseAtLogicalTime(page, logicalMs);
   const payload = await response.json();
   if (
     typeof payload !== "object" ||
@@ -123,6 +111,25 @@ async function advanceAnimatedFrame(page, transitionId, logicalMs = 520) {
     throw new Error("Command response did not contain an authoritative frame.");
   }
   return payload.frame;
+}
+
+/**
+ * Submit one scripted frame and seek its shared presentation clock.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @param {number} transitionId
+ * @param {{eventType?: string, part?: "auto" | "group" | "route", progress?: number}} [window]
+ * @returns {Promise<Record<string, any>>}
+ */
+async function advanceAnimatedFrame(page, transitionId, window = {}) {
+  const frame = await advanceScriptedFrame(page, transitionId);
+  await expect(page.locator(CHOREOGRAPHY_ROOT)).toHaveCount(1);
+  if (window.eventType) {
+    await pauseInsideEventWindow(page, window.eventType, window);
+  } else {
+    await pauseInsideFirstEventWindow(page, window);
+  }
+  return frame;
 }
 
 /**
@@ -534,14 +541,9 @@ test("focus crossfire retriggers events and keeps presentation controls local", 
   await expect(page.locator("html")).toHaveAttribute("data-motion-paused", "true");
   expect(commandPosts.count()).toBe(afterFirstSubmit);
 
-  await pauseAtLogicalTime(page, 520);
-  await setGraphicsSpeed(page, 0.5);
-  await expect(page.locator("html")).toHaveAttribute("data-motion-rate", "0.5");
-  expect(commandPosts.count()).toBe(afterFirstSubmit);
-
-  await page.locator("#battlefield").focus();
-  await page.keyboard.press("n");
-  await expect(page.locator("#notice")).toContainText("still being explained");
+  await pauseInsideEventWindow(page, "recipient_health_resolution");
+  await expect(page.locator("#graphics-speed-input")).toHaveCount(0);
+  await expect(page.locator("html")).not.toHaveAttribute("data-motion-rate", /.+/u);
   expect(commandPosts.count()).toBe(afterFirstSubmit);
 
   const root = page.locator(CHOREOGRAPHY_ROOT);
@@ -872,7 +874,11 @@ test("mirrored Ultimates keep activation identity separate from durable conseque
 
   for (const [index, frame] of frames.entries()) {
     const transitionId = index + 1;
-    const authoritativeFrame = await advanceAnimatedFrame(page, transitionId, 120);
+    const authoritativeFrame = await advanceAnimatedFrame(page, transitionId, {
+      eventType: "ability_activated",
+      part: frame.local ? "group" : "route",
+      progress: 0.2,
+    });
     const activations = page.locator(
       `${CHOREOGRAPHY_ROOT} .combat-effect--activation[data-token-id="${frame.tokenId}"]`,
     );
@@ -916,7 +922,7 @@ test("mirrored Ultimates keep activation identity separate from durable conseque
     if (frame.tokenId === "warrior_charge") {
       // V2 owns Charge displacement as a later, independent phase rather than
       // folding it into the ability-activation route.
-      await pauseAtLogicalTime(page, 400);
+      await pauseInsideEventWindow(page, "charge_phase_displacement");
       await expect(
         page.locator(
           `${CHOREOGRAPHY_ROOT} [data-event-type="charge_phase_displacement"]`,
@@ -954,7 +960,11 @@ test("converging Charge routes reproject and displacement settles without replay
   page,
 }) => {
   await loadScenario(page, "charge_convergence");
-  const chargeFrame = await advanceAnimatedFrame(page, 1, 120);
+  const chargeFrame = await advanceAnimatedFrame(page, 1, {
+    eventType: "ability_activated",
+    part: "route",
+    progress: 0.2,
+  });
   const publicAgentIds = new Map(
     chargeFrame.projection.scene.agents.map(
       /** @param {Record<string, any>} agent */ (agent) => [
@@ -1039,7 +1049,7 @@ test("converging Charge routes reproject and displacement settles without replay
   );
   const humanFacingValues = await page
     .locator(
-      "#battlefield .modifier-cell__value, #roster .roster-fact-token--modifier, .comparison-agent .fact strong, #event-feed .event-item",
+      "#battlefield .modifier-cell__value, #roster .roster-fact-token--modifier, #event-feed .event-item",
     )
     .allTextContents();
   expect(humanFacingValues.every((value) => !/\.\d{3,}/.test(value))).toBe(true);
@@ -1063,7 +1073,7 @@ test("converging Charge routes reproject and displacement settles without replay
 
   // The exact V2 displacement events begin only after the activation route
   // phase, and remain independently addressable by canonical event type.
-  await pauseAtLogicalTime(page, 400);
+  await pauseInsideEventWindow(page, "charge_phase_displacement");
   await expect(
     page.locator(`${CHOREOGRAPHY_ROOT} [data-event-type="charge_phase_displacement"]`),
   ).toHaveCount(3);
@@ -1103,7 +1113,350 @@ test("converging Charge routes reproject and displacement settles without replay
   await expect(page.locator(CHOREOGRAPHY_ROOT)).toHaveCount(0);
 });
 
-test("Trap lifecycle preserves each canonical apply, break, and expiry event", async ({
+test("death and respawn scenario preserves corpse, wave, shield, and first-unshielded truth", async ({
+  page,
+}) => {
+  await loadScenario(page, "death_respawn_cycle");
+
+  const lethal = await advanceAnimatedFrame(page, 1, {
+    eventType: "status_cleared_by_new_death",
+  });
+  await assertCanonicalEventOrder(page, lethal);
+  const lethalEvents = /** @type {Array<Record<string, any>>} */ (
+    lethal.projection.incoming_events.events
+  );
+  expect(
+    lethalEvents
+      .filter((event) =>
+        [
+          "agent_died",
+          "lethal_damage_contribution",
+          "status_cleared_by_new_death",
+        ].includes(event.event_type),
+      )
+      .map((event) => event.event_type),
+  ).toEqual([
+    "agent_died",
+    "lethal_damage_contribution",
+    "lethal_damage_contribution",
+    "status_cleared_by_new_death",
+    "status_cleared_by_new_death",
+    "status_cleared_by_new_death",
+  ]);
+  await expect(
+    page.locator('#battlefield .agent[data-slot="5"][data-alive="false"]'),
+  ).toHaveCount(1);
+  await expect(
+    page.locator(
+      `${CHOREOGRAPHY_ROOT} .combat-effect--semantic-pulse[data-cue-semantic="agent_died"] .combat-semantic-pulse__death-shock`,
+    ),
+  ).toHaveCount(1);
+  const deathClear = page.locator(
+    `${CHOREOGRAPHY_ROOT} .combat-effect--status-lifecycle[data-lifecycle="cleared_by_death"]`,
+  );
+  await expect(deathClear).toHaveCount(3);
+  await deathClear.first().locator(".combat-lifecycle__hit").hover();
+  await expect(page.locator("#visual-tooltip-title")).toHaveText("Cleared on death");
+  await skipIfAvailable(page);
+
+  const corpseWait = await advanceScriptedFrame(page, 2);
+  await assertCanonicalEventOrder(page, corpseWait);
+  expect(corpseWait.projection.incoming_events.events).toEqual([]);
+  await expect(
+    page.locator('#battlefield .agent[data-slot="5"][data-alive="false"]'),
+  ).toHaveCount(1);
+
+  const respawn = await advanceAnimatedFrame(page, 3, {
+    eventType: "agent_respawned",
+  });
+  await assertCanonicalEventOrder(page, respawn);
+  const respawnEvents = /** @type {Array<Record<string, any>>} */ (
+    respawn.projection.incoming_events.events
+  );
+  expect(respawnEvents.map((event) => event.event_type)).toEqual([
+    "action_rejected",
+    "action_rejected",
+    "respawn_wave_occurred",
+    "agent_respawned",
+  ]);
+  const respawnWaves = /** @type {Array<Record<string, any>>} */ (
+    respawn.projection.scene.respawn_waves
+  );
+  const teamTwoWave = respawnWaves.find((wave) => wave.team_id === 2);
+  expect(teamTwoWave).toBeTruthy();
+  await expect(
+    page.locator(
+      `${CHOREOGRAPHY_ROOT} [data-event-type="respawn_wave_occurred"][data-team-id="2"]`,
+    ),
+  ).toHaveCount(1);
+  await expect(
+    page.locator(
+      `${CHOREOGRAPHY_ROOT} [data-event-type="agent_respawned"][data-agent-slot="5"] .combat-semantic-pulse__respawn-reveal`,
+    ),
+  ).toHaveCount(1);
+  const respawned = page.locator('#battlefield .agent[data-slot="5"]');
+  await expect(respawned).toHaveAttribute("data-alive", "true");
+  await expect(respawned).toHaveAttribute("data-spawn-shield-remaining", "3");
+  await expect(respawned.locator(".agent-spawn-shield__ticks")).toHaveText("S3");
+  await expect(respawned).toHaveAttribute(
+    "data-respawned-on-incoming-transition",
+    "true",
+  );
+  await skipIfAvailable(page);
+
+  for (const [transitionId, expectedShield] of [
+    [4, 2],
+    [5, 1],
+  ]) {
+    const shielded = await advanceAnimatedFrame(page, transitionId);
+    await assertCanonicalEventOrder(page, shielded);
+    await expect(respawned).toHaveAttribute(
+      "data-spawn-shield-remaining",
+      String(expectedShield),
+    );
+    await expect(respawned.locator(".agent-spawn-shield__ticks")).toHaveText(
+      `S${expectedShield}`,
+    );
+    const shieldedEvents = /** @type {Array<Record<string, any>>} */ (
+      shielded.projection.incoming_events.events
+    );
+    expect(shieldedEvents.some((event) => event.event_type === "action_rejected")).toBe(
+      true,
+    );
+    await skipIfAvailable(page);
+  }
+
+  const expiry = await advanceAnimatedFrame(page, 6, {
+    eventType: "spawn_shield_expired",
+  });
+  await assertCanonicalEventOrder(page, expiry);
+  await expect(respawned).toHaveAttribute("data-spawn-shield-remaining", "0");
+  await expect(respawned.locator(".agent-spawn-shield")).toHaveAttribute("hidden", "");
+  await expect(
+    page.locator(
+      `${CHOREOGRAPHY_ROOT} [data-event-type="spawn_shield_expired"][data-agent-slot="5"] .combat-semantic-pulse__shield-shell`,
+    ),
+  ).toHaveCount(1);
+  await skipIfAvailable(page);
+
+  const unshielded = await advanceAnimatedFrame(page, 7);
+  await assertCanonicalEventOrder(page, unshielded);
+  const finalEvents = /** @type {Array<Record<string, any>>} */ (
+    unshielded.projection.incoming_events.events
+  );
+  const finalTypes = finalEvents.map((event) => event.event_type);
+  expect(finalTypes).toContain("ability_activated");
+  expect(finalTypes).not.toContain("action_rejected");
+  await expect(
+    page.locator(
+      `${CHOREOGRAPHY_ROOT} .combat-effect--activation[data-source-slot="5"][data-target-slot="0"]`,
+    ),
+  ).toHaveCount(1);
+});
+
+test("death and respawn scenario exposes only the authorized POV lifecycle", async ({
+  page,
+}) => {
+  await loadScenario(page, "death_respawn_cycle");
+  await page.getByRole("button", { name: "Control Agent ID 5" }).click();
+  await page.locator("#view-select").selectOption("pov");
+  await expect(page.locator("html")).toHaveAttribute("data-audience", "agent_pov");
+  await expect(page.locator("#roster .roster-row")).toHaveCount(1);
+  await expect(page.locator('#roster .roster-row[data-slot="5"]')).toHaveCount(1);
+
+  const death = await advanceAnimatedFrame(page, 1, {
+    eventType: "own_lifecycle_changed",
+  });
+  expect(death.frame_kind).toBe("actor_pov_live_debugger");
+  await expect(
+    page.locator(
+      `${CHOREOGRAPHY_ROOT} [data-event-type="own_lifecycle_changed"][data-cue-semantic="agent_died"][data-agent-slot="5"] .combat-semantic-pulse__death-shock`,
+    ),
+  ).toHaveCount(1);
+  await expect(page.locator('#battlefield .agent[data-slot="5"]')).toHaveAttribute(
+    "data-alive",
+    "false",
+  );
+  await expect(
+    page.locator(`${CHOREOGRAPHY_ROOT} [data-agent-slot]:not([data-agent-slot="5"])`),
+  ).toHaveCount(0);
+  await skipIfAvailable(page);
+
+  await advanceScriptedFrame(page, 2);
+  await expect(page.locator('#battlefield .agent[data-slot="5"]')).toHaveAttribute(
+    "data-alive",
+    "false",
+  );
+
+  await advanceAnimatedFrame(page, 3, {
+    eventType: "own_lifecycle_changed",
+  });
+  await expect(
+    page.locator(
+      `${CHOREOGRAPHY_ROOT} [data-event-type="own_lifecycle_changed"][data-cue-semantic="agent_respawned"][data-agent-slot="5"] .combat-semantic-pulse__respawn-reveal`,
+    ),
+  ).toHaveCount(1);
+  const self = page.locator('#battlefield .agent[data-slot="5"]');
+  await expect(self).toHaveAttribute("data-alive", "true");
+  await expect(self).toHaveAttribute("data-spawn-shield-remaining", "3");
+  await skipIfAvailable(page);
+
+  for (const [transitionId, remaining] of [
+    [4, 2],
+    [5, 1],
+  ]) {
+    // Shield countdown truth is durable-only in POV. These frames own no
+    // transient beat and therefore deliberately have no animation to seek.
+    await advanceScriptedFrame(page, transitionId);
+    await expect(self).toHaveAttribute(
+      "data-spawn-shield-remaining",
+      String(remaining),
+    );
+    await expect(page.locator(`${CHOREOGRAPHY_ROOT} [data-cue-semantic]`)).toHaveCount(
+      0,
+    );
+    await skipIfAvailable(page);
+  }
+
+  await advanceAnimatedFrame(page, 6, {
+    eventType: "own_lifecycle_changed",
+  });
+  await expect(self).toHaveAttribute("data-spawn-shield-remaining", "0");
+  await expect(
+    page.locator(
+      `${CHOREOGRAPHY_ROOT} [data-event-type="own_lifecycle_changed"][data-cue-semantic="spawn_shield_expired"][data-agent-slot="5"] .combat-semantic-pulse__shield-shell`,
+    ),
+  ).toHaveCount(1);
+  await expect(
+    page.locator(
+      `${CHOREOGRAPHY_ROOT} [data-source-slot], ${CHOREOGRAPHY_ROOT} [data-target-slot], ${CHOREOGRAPHY_ROOT} [data-recipient-slot]`,
+    ),
+  ).toHaveCount(0);
+});
+
+test("recovery scenario groups refresh, reapplication, break, and eventual expiry without losing atomics", async ({
+  page,
+}) => {
+  await loadScenario(page, "recovery_refresh_cycle");
+
+  const application = await advanceAnimatedFrame(page, 1, {
+    eventType: "status_applied",
+  });
+  await assertCanonicalEventOrder(page, application);
+  const applicationEvents = /** @type {Array<Record<string, any>>} */ (
+    application.projection.incoming_events.events
+  );
+  const applicationTypes = new Set(applicationEvents.map((event) => event.event_type));
+  for (const requiredType of [
+    "action_rejected",
+    "health_regenerated",
+    "cooldown_ready",
+    "status_applied",
+  ]) {
+    expect(applicationTypes.has(requiredType)).toBe(true);
+  }
+  await expect(durableRosterStatus(page, 5, "stun_rogue_poison")).toHaveAttribute(
+    "data-duration",
+    "1",
+  );
+  await expect(durableRosterStatus(page, 5, "slow_rogue_poison")).toHaveAttribute(
+    "data-duration",
+    "5",
+  );
+  await expect(durableRosterStatus(page, 7, "stun_hunter_trap")).toHaveAttribute(
+    "data-duration",
+    "4",
+  );
+  await skipIfAvailable(page);
+
+  const composed = await advanceAnimatedFrame(page, 2, {
+    eventType: "status_applied",
+  });
+  await assertCanonicalEventOrder(page, composed);
+  const composedEvents = /** @type {Array<Record<string, any>>} */ (
+    composed.projection.incoming_events.events
+  );
+  /**
+   * @param {string} statusId
+   * @param {string[]} eventTypes
+   * @param {string} lifecycle
+   * @param {string} title
+   */
+  const assertGroupedCue = async (statusId, eventTypes, lifecycle, title) => {
+    const expectedIds = composedEvents
+      .filter(
+        (event) =>
+          event.status_id === statusId && eventTypes.includes(event.event_type),
+      )
+      .map((event) => event.event_id);
+    expect(expectedIds).toHaveLength(eventTypes.length);
+    const cue = page.locator(
+      `${CHOREOGRAPHY_ROOT} .combat-effect--status-lifecycle[data-lifecycle="${lifecycle}"][data-atomic-event-ids='${JSON.stringify(expectedIds)}']`,
+    );
+    await expect(cue).toHaveCount(1);
+    await cue.hover();
+    await expect(page.locator("#visual-tooltip-title")).toHaveText(title);
+  };
+  await assertGroupedCue(
+    "rogue_poison_stun",
+    ["status_aged_to_zero", "status_applied"],
+    "expired_then_reapplied",
+    "Previous instance expired, then reapplied",
+  );
+  await assertGroupedCue(
+    "rogue_poison_slow",
+    ["status_applied", "status_refreshed_or_extended"],
+    "refreshed",
+    "Refresh/extend",
+  );
+  await assertGroupedCue(
+    "hunter_trap_stun",
+    ["status_broken_by_damage", "status_applied"],
+    "trap_broken_and_reapplied",
+    "Broken, then reapplied",
+  );
+  expect(
+    await page
+      .locator("#event-feed [data-event-id]")
+      .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-event-id"))),
+  ).toEqual(composedEvents.map((event) => event.event_id));
+  await skipIfAvailable(page);
+
+  for (let transitionId = 3; transitionId <= 5; transitionId += 1) {
+    const aging = await advanceAnimatedFrame(page, transitionId);
+    await assertCanonicalEventOrder(page, aging);
+    if (transitionId >= 4) {
+      await expect(
+        page.locator(`${CHOREOGRAPHY_ROOT} .combat-effect--status-lifecycle`),
+      ).toHaveCount(0);
+    }
+    await skipIfAvailable(page);
+  }
+
+  const trapExpiry = await advanceAnimatedFrame(page, 6);
+  await assertCanonicalEventOrder(page, trapExpiry);
+  await expect(
+    page.locator(
+      `${CHOREOGRAPHY_ROOT} [data-event-type="status_aged_to_zero"][data-token-id="stun_hunter_trap"][data-lifecycle="expired"]`,
+    ),
+  ).toHaveCount(1);
+  await expect(durableRosterStatus(page, 7, "stun_hunter_trap")).toHaveCount(0);
+  await skipIfAvailable(page);
+
+  const poisonExpiry = await advanceAnimatedFrame(page, 7);
+  await assertCanonicalEventOrder(page, poisonExpiry);
+  await expect(
+    page.locator(
+      `${CHOREOGRAPHY_ROOT} [data-event-type="status_aged_to_zero"][data-token-id="slow_rogue_poison"][data-lifecycle="expired"]`,
+    ),
+  ).toHaveCount(1);
+  await expect(durableRosterStatus(page, 5, "slow_rogue_poison")).toHaveCount(0);
+  await expect(
+    page.locator('#roster .roster-row[data-slot="5"] .roster-fact-token--status'),
+  ).toHaveCount(0);
+});
+
+test("Freezing Trap lifecycle preserves each canonical apply, break, and expiry event", async ({
   page,
 }) => {
   await loadScenario(page, "trap_lifecycle");
@@ -1157,24 +1510,45 @@ test("Trap lifecycle preserves each canonical apply, break, and expiry event", a
   await assertBoundedChoreography(page);
   await skipIfAvailable(page);
 
-  await advanceAnimatedFrame(page, 4);
-  const broken = page.locator(
-    `${CHOREOGRAPHY_ROOT} .combat-effect--status-lifecycle[data-event-type="status_broken_by_damage"][data-token-id="stun_hunter_trap"]`,
+  const breakAndReapply = await advanceAnimatedFrame(page, 4, {
+    eventType: "status_applied",
+  });
+  await assertCanonicalEventOrder(page, breakAndReapply);
+  const trapEvents = /** @type {Array<Record<string, any>>} */ (
+    breakAndReapply.projection.incoming_events.events
+  ).filter(
+    (event) =>
+      event.status_id === "hunter_trap_stun" &&
+      event.recipient_global_slot === 6 &&
+      (event.event_type === "status_broken_by_damage" ||
+        event.event_type === "status_applied"),
   );
-  const reapplied = page.locator(
-    `${CHOREOGRAPHY_ROOT} .combat-effect--status-lifecycle[data-event-type="status_applied"][data-token-id="stun_hunter_trap"]`,
+  const atomicEventIds = trapEvents.map((event) => event.event_id);
+  const applicationEventIds = trapEvents
+    .filter((event) => event.event_type === "status_applied")
+    .map((event) => event.event_id);
+  expect(atomicEventIds).toHaveLength(2);
+  expect(applicationEventIds).toHaveLength(1);
+  const composed = page.locator(
+    `${CHOREOGRAPHY_ROOT} .combat-effect--status-lifecycle[data-event-type="status_applied"][data-token-id="stun_hunter_trap"][data-lifecycle="trap_broken_and_reapplied"]`,
   );
   await expect(
     page.locator(
       `${CHOREOGRAPHY_ROOT} .combat-effect--activation[data-token-id="hunter_trap"] .combat-impact__semantic--damage`,
     ),
   ).toHaveCount(1);
-  await expect(broken).toHaveCount(1);
-  await expect(reapplied).toHaveCount(1);
-  await expect(broken).toHaveAttribute("data-recipient-slot", "6");
-  await expect(reapplied).toHaveAttribute("data-recipient-slot", "6");
-  await expect(broken).toHaveAttribute("data-application-event-ids", "[]");
-  await expect(reapplied).toHaveAttribute("data-application-event-ids", "[]");
+  await expect(composed).toHaveCount(1);
+  await expect(composed).toHaveAttribute("data-recipient-slot", "6");
+  await expect(composed).toHaveAttribute(
+    "data-atomic-event-ids",
+    JSON.stringify(atomicEventIds),
+  );
+  await expect(composed).toHaveAttribute(
+    "data-application-event-ids",
+    JSON.stringify(applicationEventIds),
+  );
+  await expect(composed.locator(".combat-lifecycle__shard")).toHaveCount(6);
+  await expect(composed.locator(".combat-lifecycle__reapply")).toHaveCount(1);
   await assertBoundedChoreography(page);
   await skipIfAvailable(page);
 
@@ -1203,7 +1577,9 @@ test("maximum status stack keeps nine durable channels and independent source ev
   page,
 }) => {
   await loadScenario(page, "max_status_stack");
-  const statusFrame = await advanceAnimatedFrame(page, 1, 600);
+  const statusFrame = await advanceAnimatedFrame(page, 1, {
+    eventType: "status_applied",
+  });
 
   const expectedTokens = [
     "stun_warrior_charge",
@@ -1319,9 +1695,14 @@ test("maximum status stack keeps nine durable channels and independent source ev
   expect(
     records.every(({ eventId }) => /:transition:0:event:\d{4}$/.test(eventId ?? "")),
   ).toBe(true);
-  // V2 status applications carry their own direct source evidence. They are
-  // never joined back to independent ability events by a guessed identifier.
-  expect(records.every(({ applicationIds }) => applicationIds.length === 0)).toBe(true);
+  // Every application cue carries its own canonical application event ID;
+  // source evidence is never guessed by joining an independent ability row.
+  expect(
+    records.every(
+      ({ applicationIds, eventId }) =>
+        applicationIds.length === 1 && applicationIds[0] === eventId,
+    ),
+  ).toBe(true);
   /** @type {Map<string, number>} */
   const sourceCounts = new Map();
   for (const { sourceSlot } of records) {

@@ -122,7 +122,7 @@ class DebuggerService:
         session: DebuggerSession,
         *,
         view_mode: ViewMode,
-        preset: Preset,
+        preset: Preset | Literal["debug"],
         include_stress: bool,
         session_id: str | None = None,
         recorder: DebuggerReplayRecorderV1 | None = None,
@@ -137,7 +137,7 @@ class DebuggerService:
             sanitize_pov_pending_target(session) if view_mode == "pov" else session
         )
         self._view_mode: ViewMode = view_mode
-        self._preset: Preset = preset
+        self._preset: Preset = "analysis" if preset == "debug" else preset
         self._include_stress = include_stress
         self._session_id = session_id or token_urlsafe(24)
         self._revision = 0
@@ -415,7 +415,7 @@ class DebuggerService:
             pov_global_slot=self._session.controlled_global_slot,
             preset=self._preset,
             show_ranges=self._session.show_ranges,
-            verbose=self._session.verbose_logging,
+            verbose=False,
         )
 
     def _prepare_recording_response(

@@ -7,7 +7,11 @@ import {
   syntheticDebuggerWireFrame,
 } from "../e2e/support/renderer-fixture.js";
 import { extractFrame } from "../src/api.js";
-import { buildChoreographyPlan, transitionEpochKey } from "../src/choreography-plan.js";
+import {
+  buildChoreographyPlan,
+  CHOREOGRAPHY_PHASES,
+  transitionEpochKey,
+} from "../src/choreography-plan.js";
 import {
   liveDebuggerFrameIsScripted,
   liveDebuggerScenarioControlsAvailable,
@@ -581,12 +585,7 @@ function researcherFrame() {
       description: "Interactive arena.",
       mode: "interactive",
       audience: "researcher",
-      movement_scale_minimum: 0.01,
-      movement_scale_maximum: 1,
-      movement_scale_step: 0.01,
       ordinary_movement_distance_scale: 1,
-      scenario_default_movement_scale: 1,
-      movement_scale_overridden: false,
       completed_frame_count: 0,
       frame_count: 0,
       next_frame_index: null,
@@ -1677,8 +1676,23 @@ test("choreography gives every canonical V2 event one explicit disposition", asy
   const shield = byType.get("spawn_shield_expired");
   const wave = byType.get("respawn_wave_occurred");
   const respawn = byType.get("agent_respawned");
+  assert.ok(ability);
+  assert.ok(health);
+  assert.deepEqual(
+    [ability.phaseStart, ability.phaseImpact, ability.phaseEnd],
+    [
+      CHOREOGRAPHY_PHASES.activationStart,
+      CHOREOGRAPHY_PHASES.impactStart,
+      CHOREOGRAPHY_PHASES.settleStart,
+    ],
+  );
+  assert.equal(health.phaseStart, CHOREOGRAPHY_PHASES.outcomeStart);
+  assert.equal(health.phaseEnd - health.phaseStart, 480);
+  assert.ok(
+    ability.phaseImpact < health.phaseStart,
+    "ability impact must land before the readable health outcome begins",
+  );
   for (const [earlier, later] of [
-    [ability, health],
     [health, countdown],
     [countdown, cooldown],
     [cooldown, charge],
@@ -1755,7 +1769,7 @@ function povFrame() {
     incoming_pov_transition_id: povTransitionId,
     view_mode: "pov",
     preset: "analysis",
-    verbose: true,
+    verbose: false,
     projection: {
       scene: {
         schema_version: 1,
@@ -2134,7 +2148,7 @@ test("live presentation authority is exact and audience-scoped", () => {
   const pov = normalizeLiveDebuggerFrameV2(povFrame());
   assert.equal(researcher.show_ranges, true);
   assert.equal(researcher.verbose, false);
-  assert.equal(pov.verbose, true);
+  assert.equal(pov.verbose, false);
   assert.equal(Object.hasOwn(pov, "show_ranges"), false);
 
   for (const field of ["show_ranges", "verbose"]) {
@@ -2171,6 +2185,20 @@ test("live presentation authority is exact and audience-scoped", () => {
       /envelope authority is invalid/u,
     );
   }
+  for (const malformed of [researcherFrame(), povFrame()]) {
+    malformed.verbose = true;
+    assert.throws(
+      () => normalizeLiveDebuggerFrameV2(malformed),
+      /envelope authority is invalid/u,
+    );
+  }
+  for (const malformed of [researcherFrame(), povFrame()]) {
+    malformed.preset = "debug";
+    assert.throws(
+      () => normalizeLiveDebuggerFrameV2(malformed),
+      /envelope authority is invalid/u,
+    );
+  }
 });
 
 test("raw researcher ScenarioMetadata is exact, typed, and never coerced", () => {
@@ -2198,16 +2226,11 @@ test("raw researcher ScenarioMetadata is exact, typed, and never coerced", () =>
     description: null,
     frame_count: 0.5,
     mode: [],
-    movement_scale_maximum: "1",
-    movement_scale_minimum: null,
-    movement_scale_overridden: 0,
-    movement_scale_step: {},
     name: true,
     next_frame_description: [],
     next_frame_index: "0",
     next_frame_label: {},
     ordinary_movement_distance_scale: [1],
-    scenario_default_movement_scale: "1",
     script_complete: 0,
     title: false,
   };
@@ -2226,10 +2249,7 @@ test("raw researcher ScenarioMetadata is exact, typed, and never coerced", () =>
 
   for (const mutation of [
     { completed_frame_count: 1 },
-    { movement_scale_minimum: 0.02 },
-    { movement_scale_maximum: 0.99 },
-    { movement_scale_step: 0.02 },
-    { movement_scale_overridden: true },
+    { ordinary_movement_distance_scale: 0.5 },
     { next_frame_index: 0 },
     { next_frame_label: "Next" },
     { next_frame_description: "Next frame" },

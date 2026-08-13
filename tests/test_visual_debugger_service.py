@@ -37,7 +37,6 @@ from scripts.dev.visual_debugger.protocol import (
     RosterSelectionCommandV1,
     SaveAsCommandV1,
     ScenarioSwitchCommandV1,
-    SetMovementScaleCommandV1,
     SetPresetCommandV1,
     SetViewCommandV1,
     ViewMode,
@@ -383,7 +382,7 @@ def test_live_presentation_commands_publish_authoritative_audience_fields() -> N
     pov = service.apply_command(
         _request(
             "switch-pov",
-            base_revision=2,
+            base_revision=1,
             command=SetViewCommandV1(view_mode="pov"),
         )
     )
@@ -395,10 +394,11 @@ def test_live_presentation_commands_publish_authoritative_audience_fields() -> N
     assert isinstance(verbose.payload, CommandResponseV2)
     assert isinstance(verbose.payload.frame, ResearcherLiveDebuggerFrameV2)
     assert verbose.payload.frame.show_ranges is False
-    assert verbose.payload.frame.verbose is True
+    assert verbose.payload.result == "no_op"
+    assert verbose.payload.frame.verbose is False
     assert isinstance(pov.payload, CommandResponseV2)
     assert isinstance(pov.payload.frame, ActorPovLiveDebuggerFrameV2)
-    assert pov.payload.frame.verbose is True
+    assert pov.payload.frame.verbose is False
     assert "show_ranges" not in pov.payload.frame.model_dump(mode="json")
 
 
@@ -531,55 +531,6 @@ def test_unavailable_browser_draft_is_a_revision_preserving_no_op() -> None:
     assert service.session is initial
     assert result.payload.notice is not None
     assert "canonical no-combat tuple" in result.payload.notice
-
-
-def test_movement_scale_reset_is_idempotent_revisioned_and_never_steps(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    service = _service()
-
-    def forbidden_step(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("movement-scale reset must not call step")
-
-    monkeypatch.setattr(control_module, "step", forbidden_step)
-    request = _request(
-        "scale-once",
-        base_revision=0,
-        command=SetMovementScaleCommandV1(movement_scale=0.1),
-    )
-
-    applied = service.apply_command(request)
-    duplicate = service.apply_command(request)
-    stale = service.apply_command(
-        _request(
-            "stale-scale",
-            base_revision=0,
-            command=SetMovementScaleCommandV1(movement_scale=0.25),
-        )
-    )
-    same_effective = service.apply_command(
-        _request(
-            "same-scale",
-            base_revision=1,
-            command=SetMovementScaleCommandV1(movement_scale=0.1),
-        )
-    )
-
-    assert isinstance(applied.payload, CommandResponseV2)
-    assert isinstance(applied.payload.frame, ResearcherLiveDebuggerFrameV2)
-    assert applied.payload.result == "applied"
-    assert applied.payload.frame.revision == 1
-    assert applied.payload.frame.run_generation == 1
-    assert applied.payload.frame.simulator_step_count == 0
-    assert applied.payload.frame.scenario.ordinary_movement_distance_scale == 0.1
-    assert isinstance(duplicate.payload, CommandResponseV2)
-    assert duplicate.payload.result == "duplicate"
-    assert stale.outcome == "stale_revision"
-    assert isinstance(same_effective.payload, CommandResponseV2)
-    assert same_effective.payload.result == "no_op"
-    assert same_effective.payload.frame.revision == 1
-    assert service.session.run_generation == 1
-    assert int(service.session.state.step_count) == 0
 
 
 def test_entering_pov_clears_a_hidden_pending_target_without_stepping() -> None:
@@ -768,7 +719,7 @@ def test_same_base_concurrent_commands_dispatch_at_most_once(
             "preset-b",
             base_revision=0,
             client_id="client-b",
-            command=SetPresetCommandV1(preset="debug"),
+            command=SetPresetCommandV1(preset="presentation"),
         ),
     )
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -1199,7 +1150,6 @@ def test_recording_restart_fence_and_confirmed_discard_replace_atomically(
         KeyboardCommandV1(key="r"),
         KeyboardCommandV1(key="]"),
         ScenarioSwitchCommandV1(scenario_name="basic_support"),
-        SetMovementScaleCommandV1(movement_scale=0.1),
     ),
 )
 def test_captured_recording_prefix_fences_every_restart_entry_point(
@@ -1747,7 +1697,7 @@ def test_closed_recording_retains_only_exact_presentation_command_semantics(
 
     commands = (
         SetViewCommandV1(view_mode="pov"),
-        SetPresetCommandV1(preset="debug"),
+        SetPresetCommandV1.model_validate({"preset": "debug"}),
         KeyboardCommandV1(key="g"),
         KeyboardCommandV1(key="v"),
         KeyboardCommandV1(key="p"),
@@ -1767,17 +1717,17 @@ def test_closed_recording_retains_only_exact_presentation_command_semantics(
 
     assert [result.result for result in results] == [
         "applied",
+        "no_op",
         "applied",
-        "applied",
-        "applied",
+        "no_op",
         "no_op",
         "no_op",
     ]
     assert service.current_frame().view_mode == "pov"
-    assert service.current_frame().preset == "debug"
+    assert service.current_frame().preset == "analysis"
     assert service.session.show_ranges is False
-    assert service.session.verbose_logging is True
-    assert service.revision == 5
+    assert service.session.verbose_logging is False
+    assert service.revision == 3
     assert service.evaluation_validated_transition_count == 0
     assert recorder.lifecycle == "saved"
     assert service.current_frame().recording == recorder.status

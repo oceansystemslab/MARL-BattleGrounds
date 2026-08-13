@@ -212,8 +212,8 @@ async function expectSettledReplayHandoff(page, audience = "researcher") {
   await expect(page.locator("#replay-timeline")).toBeVisible();
   await expect(page.locator("#replay-timeline")).toBeFocused();
   await expect(page.locator("#replay-frame-slider")).toHaveValue("0");
-  await expect(page.locator("#replay-frame-position")).toContainText("Frame 0 /");
-  await expect(page.locator("#battlefield")).toHaveAttribute("role", "img");
+  await expect(page.locator("#replay-frame-position")).toContainText("Tick 0 /");
+  await expect(page.locator("#battlefield")).toHaveAttribute("role", "group");
   await expect(page.locator("#battlefield")).toHaveAttribute("tabindex", "-1");
   await expect(page.locator("[data-live-only]:not([hidden])")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Submit joint turn" })).toHaveCount(0);
@@ -429,7 +429,7 @@ test("confirmed prefix discard restarts capture and Finish opens settled frame-z
   });
   await expect(page.locator("#reset-button")).toBeEnabled();
   await expect(page.locator("#scenario-select")).toBeEnabled();
-  await expect(page.locator("#movement-scale-input")).toBeEnabled();
+  await expect(page.locator("#movement-scale-input")).toHaveCount(0);
 
   await page.locator("#reset-button").click();
   await expect(page.locator("#recording-discard-dialog")).toBeVisible();
@@ -744,7 +744,7 @@ test("target race remains Online and fenced until Save As recovers cached artifa
   await expect(page.locator("#recording-save-as-button")).toBeEnabled();
   await expect(page.locator("#reset-button")).toBeDisabled();
   await expect(page.locator("#scenario-select")).toBeDisabled();
-  await expect(page.locator("#movement-scale-input")).toBeDisabled();
+  await expect(page.locator("#movement-scale-input")).toHaveCount(0);
   await expect(page.locator("#advance-script-button")).toBeDisabled();
   await expect(page.locator("#view-select")).toBeEnabled();
   await expect(page.locator("#preset-select")).toBeEnabled();
@@ -752,7 +752,7 @@ test("target race remains Online and fenced until Save As recovers cached artifa
   await expect(page.locator("#battlefield")).toHaveAttribute("role", "img");
   await expect(page.locator("#battlefield")).toHaveAttribute("tabindex", "-1");
   await expect(page.locator('[data-key="g"]')).toBeEnabled();
-  await expect(page.locator('[data-key="v"]')).toBeEnabled();
+  await expect(page.locator('[data-key="v"]')).toHaveCount(0);
   await expect(page.locator('[data-key="n"]')).toBeDisabled();
   await expect(page.locator('[data-key="w"]')).toBeDisabled();
   await expect(page.locator("#command-target-select")).toBeDisabled();
@@ -768,7 +768,6 @@ test("target race remains Online and fenced until Save As recovers cached artifa
       "#battlefield",
       "#reset-button",
       "#scenario-select",
-      "#movement-scale-input",
       "#advance-script-button",
       "#command-target-select",
       '[data-key="w"]',
@@ -795,7 +794,6 @@ test("target race remains Online and fenced until Save As recovers cached artifa
       "#view-select",
       "#preset-select",
       '[data-key="g"]',
-      '[data-key="v"]',
       "#exit-button",
     ];
     const allowedFocus = [];
@@ -808,13 +806,7 @@ test("target race remains Online and fenced until Save As recovers cached artifa
     return { allowedFocus, blockedTabLeaks };
   });
   expect(focusFence).toEqual({
-    allowedFocus: [
-      "#view-select",
-      "#preset-select",
-      '[data-key="g"]',
-      '[data-key="v"]',
-      "#exit-button",
-    ],
+    allowedFocus: ["#view-select", "#preset-select", '[data-key="g"]', "#exit-button"],
     blockedTabLeaks: [],
   });
   const failedFrame = await currentFrame(page);

@@ -21,6 +21,35 @@ export const REPLAY_AUTOPLAY_CADENCE_MS = Object.freeze({
 });
 
 /**
+ * Resolve one simulator tick from the joined timeline without ever treating a
+ * transport frame index as scientific time.
+ *
+ * @param {{tickForFrameIndex?: (frameIndex: number) => unknown}} elements
+ * @param {number} frameIndex
+ */
+function simulatorTickForFrameIndex(elements, frameIndex) {
+  if (typeof elements.tickForFrameIndex !== "function") {
+    return null;
+  }
+  const tick = elements.tickForFrameIndex(frameIndex);
+  return Number.isInteger(tick) && Number(tick) >= 0 ? Number(tick) : null;
+}
+
+/**
+ * @param {{tickForFrameIndex?: (frameIndex: number) => unknown}} elements
+ * @param {number} frameIndex
+ * @param {number} finalFrameIndex
+ */
+function replayTickText(elements, frameIndex, finalFrameIndex) {
+  const currentTick = simulatorTickForFrameIndex(elements, frameIndex);
+  const finalTick = simulatorTickForFrameIndex(elements, finalFrameIndex);
+  return Object.freeze({
+    aria: `Tick ${currentTick ?? "—"} of ${finalTick ?? "—"}`,
+    visible: `Tick ${currentTick ?? "—"} / ${finalTick ?? "—"}`,
+  });
+}
+
+/**
  * @param {unknown} value
  * @param {string} name
  */
@@ -37,6 +66,35 @@ function nonNegativeInteger(value, name) {
  */
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Join a transport frame index to its authoritative simulator step. Timeline
+ * order remains transport authority; the returned value is display-only time.
+ *
+ * @param {unknown} rawTimeline
+ * @param {unknown} rawFrameIndex
+ */
+export function replayTimelineSimulatorStep(rawTimeline, rawFrameIndex) {
+  const timeline = isRecord(rawTimeline) ? rawTimeline : null;
+  const frameIndex = Number(rawFrameIndex);
+  if (
+    !Number.isInteger(frameIndex) ||
+    frameIndex < 0 ||
+    !Array.isArray(timeline?.rows)
+  ) {
+    return null;
+  }
+  const row = timeline.rows[frameIndex];
+  if (
+    !isRecord(row) ||
+    row.frame_index !== frameIndex ||
+    !Number.isInteger(row.simulator_step_count) ||
+    row.simulator_step_count < 0
+  ) {
+    return null;
+  }
+  return Number(row.simulator_step_count);
 }
 
 /**
@@ -133,15 +191,24 @@ export function normalizeReplayCommand(value) {
     if (!["presentation", "analysis", "debug"].includes(value.preset)) {
       throw new TypeError("Replay preset is invalid.");
     }
-    return Object.freeze({ command_type: type, preset: value.preset });
+    return Object.freeze({
+      command_type: type,
+      preset: value.preset === "debug" ? "analysis" : value.preset,
+    });
   }
-  if (type === "set_ranges" || type === "set_verbosity") {
-    const key = type === "set_ranges" ? "show_ranges" : "verbose";
-    exactKeys(value, ["command_type", key], "Replay boolean command");
-    if (typeof value[key] !== "boolean") {
-      throw new TypeError(`Replay ${key} must be a boolean.`);
+  if (type === "set_ranges") {
+    exactKeys(value, ["command_type", "show_ranges"], "Replay boolean command");
+    if (typeof value.show_ranges !== "boolean") {
+      throw new TypeError("Replay show_ranges must be a boolean.");
     }
-    return Object.freeze({ command_type: type, [key]: value[key] });
+    return Object.freeze({ command_type: type, show_ranges: value.show_ranges });
+  }
+  if (type === "set_verbosity") {
+    exactKeys(value, ["command_type", "verbose"], "Replay boolean command");
+    if (typeof value.verbose !== "boolean") {
+      throw new TypeError("Replay verbose must be a boolean.");
+    }
+    return Object.freeze({ command_type: type, verbose: false });
   }
   throw new TypeError(`Unknown replay command type ${type}.`);
 }
@@ -524,6 +591,33 @@ export class ReplayPlaybackController {
     return this.#userNavigation("last");
   }
 
+  /**
+   * Seek by a signed number of ticks with one clamped absolute-seek request.
+   * This deliberately does not expand a jump into repeated next/previous calls.
+   *
+   * @param {unknown} tickDelta
+   */
+  jump(tickDelta) {
+    if (!Number.isInteger(tickDelta) || Number(tickDelta) === 0) {
+      return Promise.reject(new TypeError("Replay jump must be a non-zero integer."));
+    }
+    this.pause("user_seek");
+    if (!this.cursor) {
+      return Promise.resolve(false);
+    }
+    const frameIndex = Math.max(
+      0,
+      Math.min(
+        this.cursor.final_frame_index,
+        this.cursor.frame_index + Number(tickDelta),
+      ),
+    );
+    if (frameIndex === this.cursor.frame_index) {
+      return Promise.resolve(false);
+    }
+    return this.#send(replaySeekCommand(frameIndex));
+  }
+
   /** @param {unknown} frameIndex */
   seek(frameIndex) {
     const index = nonNegativeInteger(frameIndex, "frame_index");
@@ -667,7 +761,7 @@ export class ReplayPlaybackController {
 }
 
 /**
- * @param {{key?: string, repeat?: boolean, ctrlKey?: boolean, altKey?: boolean, metaKey?: boolean}} event
+ * @param {{key?: string, repeat?: boolean, shiftKey?: boolean, ctrlKey?: boolean, altKey?: boolean, metaKey?: boolean}} event
  */
 export function replayKeyboardIntent(event) {
   if (event.ctrlKey || event.altKey || event.metaKey) {
@@ -680,10 +774,10 @@ export function replayKeyboardIntent(event) {
     return "last";
   }
   if (event.key === "ArrowLeft") {
-    return "previous";
+    return event.shiftKey ? "back_ten" : "previous";
   }
   if (event.key === "ArrowRight") {
-    return "next";
+    return event.shiftKey ? "forward_ten" : "next";
   }
   if ((event.key === " " || event.key === "Spacebar") && !event.repeat) {
     return "toggle";
@@ -695,12 +789,15 @@ export function replayKeyboardIntent(event) {
  * @param {{
  *   root: HTMLElement,
  *   firstButton: HTMLButtonElement,
+ *   backTenButton: HTMLButtonElement,
  *   previousButton: HTMLButtonElement,
  *   playPauseButton: HTMLButtonElement,
  *   nextButton: HTMLButtonElement,
+ *   forwardTenButton: HTMLButtonElement,
  *   lastButton: HTMLButtonElement,
  *   slider: HTMLInputElement,
  *   position: HTMLOutputElement,
+ *   tickForFrameIndex?: (frameIndex: number) => unknown,
  * }} elements
  * @param {ReplayPlaybackController} controller
  * @param {ReplayClock} [clock]
@@ -728,7 +825,13 @@ export function bindReplayTimelineControls(elements, controller, clock = globalT
     pendingSliderIndex = Number(elements.slider.value);
     controller.pause("user_seek");
     elements.slider.value = String(pendingSliderIndex);
-    elements.position.value = `Frame ${pendingSliderIndex} / ${elements.slider.max}`;
+    const tickText = replayTickText(
+      elements,
+      pendingSliderIndex,
+      Number(elements.slider.max),
+    );
+    elements.slider.setAttribute("aria-valuetext", tickText.aria);
+    elements.position.value = tickText.visible;
     elements.position.textContent = elements.position.value;
     clearSliderTimer();
     sliderTimer = clock.setTimeout(seekSlider, REPLAY_SLIDER_DEBOUNCE_MS);
@@ -752,6 +855,10 @@ export function bindReplayTimelineControls(elements, controller, clock = globalT
     event.preventDefault();
     if (intent === "toggle") {
       controller.toggle();
+    } else if (intent === "back_ten") {
+      void controller.jump(-10);
+    } else if (intent === "forward_ten") {
+      void controller.jump(10);
     } else {
       void controller[intent]();
     }
@@ -759,9 +866,11 @@ export function bindReplayTimelineControls(elements, controller, clock = globalT
   /** @type {Array<[EventTarget, string, EventListener]>} */
   const handlers = [
     [elements.firstButton, "click", () => void controller.first()],
+    [elements.backTenButton, "click", () => void controller.jump(-10)],
     [elements.previousButton, "click", () => void controller.previous()],
     [elements.playPauseButton, "click", () => controller.toggle()],
     [elements.nextButton, "click", () => void controller.next()],
+    [elements.forwardTenButton, "click", () => void controller.jump(10)],
     [elements.lastButton, "click", () => void controller.last()],
     [elements.slider, "input", onSliderInput],
     [elements.slider, "change", onSliderChange],
@@ -782,12 +891,15 @@ export function bindReplayTimelineControls(elements, controller, clock = globalT
 /**
  * @param {{
  *   firstButton: HTMLButtonElement,
+ *   backTenButton: HTMLButtonElement,
  *   previousButton: HTMLButtonElement,
  *   playPauseButton: HTMLButtonElement,
  *   nextButton: HTMLButtonElement,
+ *   forwardTenButton: HTMLButtonElement,
  *   lastButton: HTMLButtonElement,
  *   slider: HTMLInputElement,
  *   position: HTMLOutputElement,
+ *   tickForFrameIndex?: (frameIndex: number) => unknown,
  * }} elements
  * @param {ReturnType<ReplayPlaybackController["snapshot"]>} state
  */
@@ -806,15 +918,15 @@ export function renderReplayTimelineControls(elements, state) {
   elements.slider.step = "1";
   elements.slider.value = String(frameIndex);
   elements.slider.disabled = unavailable;
-  elements.slider.setAttribute(
-    "aria-valuetext",
-    `Frame ${frameIndex} of ${finalFrameIndex}`,
-  );
-  elements.position.value = `Frame ${frameIndex} / ${finalFrameIndex}`;
+  const tickText = replayTickText(elements, frameIndex, finalFrameIndex);
+  elements.slider.setAttribute("aria-valuetext", tickText.aria);
+  elements.position.value = tickText.visible;
   elements.position.textContent = elements.position.value;
   elements.firstButton.disabled = unavailable || state.atStart;
+  elements.backTenButton.disabled = unavailable || state.atStart;
   elements.previousButton.disabled = unavailable || state.atStart;
   elements.nextButton.disabled = unavailable || state.atEnd;
+  elements.forwardTenButton.disabled = unavailable || state.atEnd;
   elements.lastButton.disabled = unavailable || state.atEnd;
   elements.playPauseButton.disabled =
     cursor === null ||

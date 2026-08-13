@@ -5,7 +5,10 @@ import {
   loadRendererFixture,
   syntheticDebuggerPresentationFrame,
 } from "../e2e/support/renderer-fixture.js";
-import { explainChoreographyEvent } from "../src/choreography-painter.js";
+import {
+  explainChoreographyEvent,
+  statusApplicationRoutes,
+} from "../src/choreography-painter.js";
 import {
   authorizationContextKey,
   buildChoreographyPlan,
@@ -147,6 +150,17 @@ test("canonical V2 displacement and rejection selectors own transient color", as
   assert.match(css, /data-event-type="action_rejected"/u);
 });
 
+test("scene removes Technical battlefield branches and owns durable shield hooks", async () => {
+  const source = await readFile(new URL("../src/scene.js", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /debug-protected-zone/u);
+  assert.doesNotMatch(source, /debug-visibility-cue/u);
+  assert.doesNotMatch(source, /preset === "debug"/u);
+  assert.match(source, /agent-spawn-shield__shell/u);
+  assert.match(source, /agent-spawn-shield__ticks/u);
+  assert.match(source, /registerTooltipOwner\(nodes\.shieldRoot, explainSpawnShield/u);
+  assert.match(source, /Spawn Shield, invulnerable/u);
+});
+
 test("canonical fixture gives every V2 event one exact ordered disposition", async () => {
   const { grammar } = await canonicalFrames();
   const plan = buildChoreographyPlan(grammar, surface);
@@ -170,14 +184,29 @@ test("canonical fixture gives every V2 event one exact ordered disposition", asy
   );
 });
 
-test("canonical V2 phases are non-overlapping in causal order", async () => {
+test("canonical V2 phases retain readable M5 windows and extend for M6 beats", async () => {
   const { grammar } = await canonicalFrames();
   const plan = buildChoreographyPlan(grammar, surface);
   assert.ok(plan);
   const byType = new Map(plan.events.map((event) => [event.eventType, event]));
-  const orderedTypes = [
-    "action_rejected",
-    "ability_activated",
+  const rejection = byType.get("action_rejected");
+  const ability = byType.get("ability_activated");
+  assert.ok(rejection);
+  assert.ok(ability);
+  assert.deepEqual(
+    [rejection.phaseStart, rejection.phaseEnd],
+    [CHOREOGRAPHY_PHASES.activationStart, CHOREOGRAPHY_PHASES.settleStart],
+  );
+  assert.deepEqual(
+    [ability.phaseStart, ability.phaseImpact, ability.phaseEnd],
+    [
+      CHOREOGRAPHY_PHASES.activationStart,
+      CHOREOGRAPHY_PHASES.impactStart,
+      CHOREOGRAPHY_PHASES.settleStart,
+    ],
+  );
+
+  const orderedOutcomeTypes = [
     "recipient_health_resolution",
     "combat_countdown_reset",
     "cooldown_started",
@@ -189,18 +218,335 @@ test("canonical V2 phases are non-overlapping in causal order", async () => {
     "respawn_wave_occurred",
     "agent_respawned",
   ];
-  for (let index = 1; index < orderedTypes.length; index += 1) {
-    const previous = byType.get(orderedTypes[index - 1]);
-    const current = byType.get(orderedTypes[index]);
+  for (let index = 1; index < orderedOutcomeTypes.length; index += 1) {
+    const previous = byType.get(orderedOutcomeTypes[index - 1]);
+    const current = byType.get(orderedOutcomeTypes[index]);
     assert.ok(previous);
     assert.ok(current);
     assert.ok(previous.phaseEnd <= current.phaseStart);
   }
-  assert.equal(byType.get("charge_phase_displacement")?.phaseStart, 350);
-  assert.equal(byType.get("charge_phase_displacement")?.persistent, true);
-  assert.equal(byType.get("ordinary_movement_phase_displacement")?.phaseStart, 450);
-  assert.equal(byType.get("ordinary_movement_phase_displacement")?.persistent, false);
-  assert.equal(byType.get("agent_respawned")?.phaseEnd, CHOREOGRAPHY_PHASES.total);
+  for (const type of [
+    "recipient_health_resolution",
+    "charge_phase_displacement",
+    "agent_died",
+    "status_applied",
+    "spawn_shield_expired",
+    "respawn_wave_occurred",
+    "agent_respawned",
+  ]) {
+    const event = byType.get(type);
+    assert.ok(event);
+    assert.ok(event.phaseEnd - event.phaseStart >= 480, `${type} needs readable dwell`);
+  }
+  const charge = byType.get("charge_phase_displacement");
+  assert.equal(charge?.phaseEnd - charge?.phaseStart, 540);
+  assert.equal(charge?.persistent, true);
+  const movement = byType.get("ordinary_movement_phase_displacement");
+  assert.ok(movement);
+  assert.equal(movement.phaseStart, movement.phaseEnd);
+  assert.equal(movement.spatial, false);
+  assert.equal(movement.presentationSuppressed, true);
+  assert.equal(movement.persistent, false);
+  assert.equal(byType.get("agent_respawned")?.phaseEnd, plan.phases.total);
+  assert.ok(plan.phases.total > CHOREOGRAPHY_PHASES.total);
+});
+
+test("absent choreography families reserve no presentation time", async () => {
+  const { grammar } = await canonicalFrames();
+  const sourceEvents = /** @type {Record<string, any>[]} */ (
+    grammar.event_batch.events
+  );
+  /** @param {string[]} eventTypes */
+  const planFor = (eventTypes) =>
+    buildChoreographyPlan(
+      {
+        ...grammar,
+        event_batch: {
+          ...grammar.event_batch,
+          events: sourceEvents.filter((event) => eventTypes.includes(event.event_type)),
+        },
+      },
+      surface,
+    );
+
+  const abilityOnly = planFor(["ability_activated"]);
+  assert.ok(abilityOnly);
+  assert.equal(abilityOnly.phases.total, CHOREOGRAPHY_PHASES.settleStart);
+  assert.ok(
+    abilityOnly.events.every(
+      (event) =>
+        event.phaseStart === CHOREOGRAPHY_PHASES.activationStart &&
+        event.phaseEnd === CHOREOGRAPHY_PHASES.settleStart,
+    ),
+  );
+
+  const healthOnly = planFor(["recipient_health_resolution"]);
+  assert.ok(healthOnly);
+  assert.equal(healthOnly.phases.total, 480);
+  assert.ok(
+    healthOnly.events.every(
+      (event) => event.phaseStart === 0 && event.phaseEnd === 480,
+    ),
+  );
+
+  const movementOnly = planFor(["ordinary_movement_phase_displacement"]);
+  assert.ok(movementOnly);
+  assert.equal(movementOnly.phases.total, 0);
+  assert.equal(movementOnly.events[0]?.spatial, false);
+  assert.equal(movementOnly.events[0]?.presentationSuppressed, true);
+
+  const feedOnly = planFor(["source_damage_output"]);
+  assert.ok(feedOnly);
+  assert.equal(feedOnly.phases.total, 0);
+  assert.equal(feedOnly.events[0]?.kind, "feed_only");
+});
+
+test("status presentation composes serialized atomic events without dropping IDs", async () => {
+  const { grammar } = await canonicalFrames();
+  const sourceEvents = /** @type {Record<string, any>[]} */ (
+    grammar.event_batch.events
+  );
+  const expired = structuredClone(
+    sourceEvents.find((event) => event.event_type === "status_aged_to_zero"),
+  );
+  const broken = structuredClone(
+    sourceEvents.find((event) => event.event_type === "status_broken_by_damage"),
+  );
+  const applied = structuredClone(
+    sourceEvents.find((event) => event.event_type === "status_applied"),
+  );
+  assert.ok(expired);
+  assert.ok(broken);
+  assert.ok(applied);
+
+  /** @param {Record<string, any>} predecessor */
+  const composeWithApplied = (predecessor) => {
+    const alignedPredecessor = /** @type {Record<string, any>} */ ({
+      ...predecessor,
+      recipient_global_slot: applied.recipient_global_slot,
+      recipient_anchor: structuredClone(applied.recipient_anchor),
+      status_channel: applied.status_channel,
+      status_id: applied.status_id,
+    });
+    const events = /** @type {Record<string, any>[]} */ ([alignedPredecessor, applied]);
+    const plan = buildChoreographyPlan(
+      {
+        ...grammar,
+        event_batch: { ...grammar.event_batch, events },
+      },
+      surface,
+    );
+    assert.ok(plan);
+    assert.deepEqual(
+      plan.events.map((event) => event.eventId),
+      events.map((event) => event.event_id),
+    );
+    const first = plan.events[0];
+    const current = plan.events[1];
+    assert.ok(first);
+    assert.ok(current);
+    assert.deepEqual(
+      current.atomicEventIds,
+      events.map((event) => event.event_id),
+    );
+    assert.deepEqual(current.applicationEventIds, [applied.event_id]);
+    assert.deepEqual(first.atomicEventIds, current.atomicEventIds);
+    assert.equal(first.presentationSuppressed, true);
+    assert.equal(first.spatial, false);
+    assert.equal(current.presentationSuppressed, false);
+    assert.equal(current.spatial, true);
+    assert.equal(current.durationBefore, null);
+    assert.equal(current.durationAfter, null);
+    return current;
+  };
+
+  assert.equal(composeWithApplied(expired).lifecycle, "expired_then_reapplied");
+  assert.equal(composeWithApplied(broken).lifecycle, "trap_broken_and_reapplied");
+});
+
+test("status presentation preserves the valid five-source application maximum", async () => {
+  const { grammar } = await canonicalFrames();
+  const maximumFrame = structuredClone(grammar);
+  const sourceEvents = /** @type {Record<string, any>[]} */ (
+    maximumFrame.event_batch.events
+  );
+  const appliedTemplate = structuredClone(
+    sourceEvents.find((event) => event.event_type === "status_applied"),
+  );
+  assert.ok(appliedTemplate);
+  const sourceSlots = [5, 6, 7, 8, 9];
+  const successorAnchors = new Map(
+    maximumFrame.event_batch.agent_phase_trajectories.map(
+      /** @param {Record<string, any>} trajectory */ (trajectory) => [
+        trajectory.global_slot,
+        trajectory.successor,
+      ],
+    ),
+  );
+  const applications = sourceSlots.map((sourceSlot, index) => ({
+    ...structuredClone(appliedTemplate),
+    event_id: `${appliedTemplate.transition_id}:event:maximum-application:${sourceSlot}`,
+    ordinal: appliedTemplate.ordinal + index,
+    source_global_slot: sourceSlot,
+    source_anchor: structuredClone(successorAnchors.get(sourceSlot)),
+    status_channel: 4,
+    status_id: "hunter_trap_stun",
+  }));
+  for (const sourceSlot of sourceSlots) {
+    const sourceAgent = maximumFrame.scene.agents.find(
+      /** @param {Record<string, any>} agent */ (agent) =>
+        agent.global_slot === sourceSlot,
+    );
+    assert.ok(sourceAgent);
+    sourceAgent.class_id = 3;
+  }
+
+  const plan = buildChoreographyPlan(
+    {
+      ...maximumFrame,
+      event_batch: { ...maximumFrame.event_batch, events: applications },
+    },
+    surface,
+  );
+  assert.ok(plan);
+  assert.equal(plan.events.length, sourceSlots.length);
+  const applicationEventIds = applications.map((event) => event.event_id);
+  assert.deepEqual(
+    plan.events.map((event) => event.eventId),
+    applicationEventIds,
+  );
+  assert.equal(
+    plan.events.filter((event) => event.presentationSuppressed !== true).length,
+    1,
+  );
+  for (const [index, event] of plan.events.entries()) {
+    assert.deepEqual(event.atomicEventIds, applicationEventIds);
+    assert.deepEqual(event.applicationEventIds, applicationEventIds);
+    assert.deepEqual(
+      event.applicationSources.map(
+        /** @param {Record<string, any>} source */ (source) => source.eventId,
+      ),
+      applicationEventIds,
+    );
+    assert.deepEqual(
+      event.applicationSources.map(
+        /** @param {Record<string, any>} source */ (source) => source.sourceSlot,
+      ),
+      sourceSlots,
+    );
+    assert.equal(event.sourceSlot, sourceSlots[index]);
+  }
+
+  const primary = plan.events.at(-1);
+  assert.ok(primary);
+  const routes = statusApplicationRoutes(primary);
+  assert.deepEqual(
+    routes.map((route) => route.applicationEventId),
+    applicationEventIds,
+  );
+  assert.deepEqual(
+    routes.map((route) => route.sourceSlot),
+    sourceSlots,
+  );
+  assert.ok(routes.every((route) => route.path.endsWith("L 20 90")));
+  const explanation = explainChoreographyEvent(primary);
+  assert.deepEqual(
+    explanation.rows.map(({ label, value }) => [label, value]),
+    [
+      [
+        "Application Sources",
+        "Agent ID 5; Agent ID 6; Agent ID 7; Agent ID 8; Agent ID 9",
+      ],
+      ["Recipient", "Agent ID 0"],
+    ],
+  );
+});
+
+test("invalid-transition status rows cannot influence a valid atomic cue", async () => {
+  const { grammar } = await canonicalFrames();
+  const sourceEvents = /** @type {Record<string, any>[]} */ (
+    grammar.event_batch.events
+  );
+  const expired = structuredClone(
+    sourceEvents.find((event) => event.event_type === "status_aged_to_zero"),
+  );
+  const applied = structuredClone(
+    sourceEvents.find((event) => event.event_type === "status_applied"),
+  );
+  assert.ok(expired);
+  assert.ok(applied);
+  applied.recipient_global_slot = expired.recipient_global_slot;
+  applied.recipient_anchor = structuredClone(expired.recipient_anchor);
+  applied.status_channel = expired.status_channel;
+  applied.status_id = expired.status_id;
+  applied.transition_id = "different-transition";
+  const plan = buildChoreographyPlan(
+    {
+      ...grammar,
+      event_batch: { ...grammar.event_batch, events: [expired, applied] },
+    },
+    surface,
+  );
+  assert.ok(plan);
+  assert.equal(plan.events[0]?.lifecycle, "expired");
+  assert.deepEqual(plan.events[0]?.atomicEventIds, [expired.event_id]);
+  assert.equal(plan.events[1]?.kind, "unknown");
+});
+
+test("standalone serialized status events keep exact presentation meanings", async () => {
+  const { grammar } = await canonicalFrames();
+  const statusEvents = /** @type {Record<string, any>[]} */ (
+    grammar.event_batch.events.filter(
+      /** @param {Record<string, any>} event */ (event) =>
+        event.event_type.startsWith("status_"),
+    )
+  );
+  const plan = buildChoreographyPlan(
+    {
+      ...grammar,
+      event_batch: { ...grammar.event_batch, events: statusEvents },
+    },
+    surface,
+  );
+  assert.ok(plan);
+  assert.deepEqual(
+    plan.events.map((event) => [event.eventType, event.lifecycle]),
+    [
+      ["status_aged_to_zero", "expired"],
+      ["status_broken_by_damage", "trap_broken"],
+      ["status_applied", "applied"],
+      ["status_refreshed_or_extended", "refreshed"],
+      ["status_cleared_by_new_death", "cleared_by_death"],
+    ],
+  );
+  assert.ok(
+    plan.events.every(
+      (event) =>
+        event.atomicEventIds?.length === 1 &&
+        event.atomicEventIds[0] === event.eventId &&
+        event.phaseStart === 0 &&
+        event.phaseEnd === 480,
+    ),
+  );
+});
+
+test("durable status countdown changes never synthesize browser lifecycle events", async () => {
+  const { grammar } = await canonicalFrames();
+  const countdownOnly = structuredClone(grammar);
+  const statusOwner = countdownOnly.scene.agents.find(
+    /** @param {Record<string, any>} agent */ (agent) =>
+      Array.isArray(agent.statuses) && agent.statuses.length > 0,
+  );
+  assert.ok(statusOwner);
+  statusOwner.statuses[0].remaining_duration = Math.max(
+    0,
+    Number(statusOwner.statuses[0].remaining_duration ?? 1) - 1,
+  );
+  countdownOnly.event_batch.events = [];
+  const plan = buildChoreographyPlan(countdownOnly, surface);
+  assert.ok(plan);
+  assert.deepEqual(plan.events, []);
+  assert.equal(plan.phases.total, 0);
 });
 
 test("route fixture preserves multiplicity and exact V2 event identities", async () => {
@@ -240,7 +586,7 @@ test("crowded fixture retains every health and status cue under pressure", async
   );
 });
 
-test("Hunter Trap uses ordinary target-body route clearance while Charge stays exceptional", async () => {
+test("Freezing Trap uses ordinary target-body route clearance while Charge stays exceptional", async () => {
   const { crowded } = await canonicalFrames();
   const plan = buildChoreographyPlan(crowded, surface);
   assert.ok(plan);
@@ -488,27 +834,171 @@ test("POV planning consumes only recipient-local cue identities", async () => {
       (event) => !Object.hasOwn(event, "sourceGlobalSlot") && !event.targetSlot,
     ),
   );
-  const spatialDeltas = plan.events.filter(
+  const successorDeltas = plan.events.filter(
     (event) =>
       event.eventType === "own_position_changed" ||
       event.eventType === "own_health_changed",
   );
   assert.deepEqual(
-    spatialDeltas.map((event) => event.eventType),
+    successorDeltas.map((event) => event.eventType),
     ["own_position_changed", "own_health_changed"],
   );
-  assert.ok(
-    spatialDeltas.every(
-      (event) =>
-        event.phaseStart === CHOREOGRAPHY_PHASES.povSuccessorObservationStart &&
-        event.phaseEnd === CHOREOGRAPHY_PHASES.total,
-    ),
+  const position = successorDeltas.find(
+    (event) => event.eventType === "own_position_changed",
   );
-  assert.equal(
-    new Set(spatialDeltas.map((event) => event.phaseStart)).size,
-    1,
-    "adjacent POV deltas must not invent a causal order",
+  const health = successorDeltas.find(
+    (event) => event.eventType === "own_health_changed",
   );
+  assert.ok(position);
+  assert.ok(health);
+  assert.equal(position.spatial, false);
+  assert.equal(position.presentationSuppressed, true);
+  assert.equal(position.phaseStart, position.phaseEnd);
+  assert.equal(health.spatial, true);
+  assert.equal(health.phaseStart, 0);
+  assert.equal(health.phaseEnd, plan.phases.total);
+  assert.equal(plan.phases.total, 480);
+});
+
+test("POV self lifecycle edges receive only exact authorized transient meanings", async () => {
+  const { pov } = await canonicalFrames();
+  const transitionId = pov.event_batch.transition_id;
+  /**
+   * @param {string} label
+   * @param {{
+   *   startActive: boolean,
+   *   successorActive: boolean,
+   *   startAlive: boolean,
+   *   successorAlive: boolean,
+   *   startShield: number,
+   *   successorShield: number,
+   * }} lifecycle
+   */
+  const planFor = (label, lifecycle) => {
+    const eventId = `${transitionId}:cue:self-lifecycle:${label}`;
+    const event = {
+      event_id: eventId,
+      event_type: "own_lifecycle_changed",
+      transition_id: transitionId,
+      start_active: lifecycle.startActive,
+      successor_active: lifecycle.successorActive,
+      start_alive: lifecycle.startAlive,
+      successor_alive: lifecycle.successorAlive,
+      start_spawn_shield_remaining_ticks: lifecycle.startShield,
+      successor_spawn_shield_remaining_ticks: lifecycle.successorShield,
+    };
+    const selfActor = {
+      ...pov.scene.self_actor,
+      alive: lifecycle.successorAlive,
+      spawn_shield_remaining: lifecycle.successorShield,
+    };
+    const frame = {
+      ...pov,
+      scene: {
+        ...pov.scene,
+        self_actor: selfActor,
+        agents: [
+          {
+            ...pov.scene.agents[0],
+            alive: lifecycle.successorAlive,
+            spawn_shield_remaining: lifecycle.successorShield,
+          },
+        ],
+      },
+      event_batch: { ...pov.event_batch, events: [event] },
+    };
+    const plan = buildChoreographyPlan(frame, surface);
+    assert.ok(plan);
+    assert.equal(plan.events.length, 1);
+    assert.equal(plan.events[0]?.eventId, eventId);
+    return { event: plan.events[0], plan };
+  };
+
+  const death = planFor("death", {
+    startActive: true,
+    successorActive: true,
+    startAlive: true,
+    successorAlive: false,
+    startShield: 0,
+    successorShield: 0,
+  });
+  assert.equal(death.event.kind, "semantic_pulse");
+  assert.equal(death.event.cueSemantic, "agent_died");
+  assert.deepEqual(death.event.anchor, { x: 30, y: 80 });
+  assert.equal(death.event.agentSlot, pov.scene.self_actor.global_slot);
+  assert.equal(death.event.agentPublicAgentId, pov.scene.self_actor.public_agent_id);
+  assert.equal(death.event.phaseStart, 0);
+  assert.equal(death.event.phaseEnd, 480);
+
+  const respawn = planFor("respawn", {
+    startActive: true,
+    successorActive: true,
+    startAlive: false,
+    successorAlive: true,
+    startShield: 0,
+    successorShield: 3,
+  });
+  assert.equal(respawn.event.kind, "semantic_pulse");
+  assert.equal(respawn.event.cueSemantic, "agent_respawned");
+  assert.deepEqual(respawn.event.anchor, death.event.anchor);
+  assert.equal(respawn.event.successorSpawnShieldRemaining, 3);
+  assert.equal(respawn.event.phaseStart, 0);
+  assert.equal(respawn.event.phaseEnd, 620);
+
+  const shieldExpiry = planFor("shield-expiry", {
+    startActive: true,
+    successorActive: true,
+    startAlive: true,
+    successorAlive: true,
+    startShield: 1,
+    successorShield: 0,
+  });
+  assert.equal(shieldExpiry.event.kind, "semantic_pulse");
+  assert.equal(shieldExpiry.event.cueSemantic, "spawn_shield_expired");
+  assert.deepEqual(shieldExpiry.event.anchor, death.event.anchor);
+  assert.equal(shieldExpiry.event.phaseStart, 0);
+  assert.equal(shieldExpiry.event.phaseEnd, 480);
+
+  const countdown = planFor("shield-countdown", {
+    startActive: true,
+    successorActive: true,
+    startAlive: true,
+    successorAlive: true,
+    startShield: 3,
+    successorShield: 2,
+  });
+  assert.equal(countdown.event.kind, "feed_only");
+  assert.equal(countdown.event.spatial, false);
+  assert.equal(Object.hasOwn(countdown.event, "cueSemantic"), false);
+  assert.equal(countdown.plan.phases.total, 0);
+
+  const missingSelf = {
+    ...pov,
+    scene: {
+      ...pov.scene,
+      self_actor: null,
+    },
+    event_batch: {
+      ...pov.event_batch,
+      events: [
+        {
+          event_id: `${transitionId}:cue:self-lifecycle:missing-self`,
+          event_type: "own_lifecycle_changed",
+          transition_id: transitionId,
+          start_active: true,
+          successor_active: true,
+          start_alive: true,
+          successor_alive: false,
+          start_spawn_shield_remaining_ticks: 0,
+          successor_spawn_shield_remaining_ticks: 0,
+        },
+      ],
+    },
+  };
+  const missingSelfPlan = buildChoreographyPlan(missingSelf, surface);
+  assert.ok(missingSelfPlan);
+  assert.equal(missingSelfPlan.events[0]?.kind, "unknown");
+  assert.equal(missingSelfPlan.events[0]?.spatial, false);
 });
 
 test("numeric transition identities fail closed", async () => {

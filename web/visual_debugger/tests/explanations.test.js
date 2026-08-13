@@ -16,6 +16,7 @@ import {
   explainPovOverflow,
   explainPovStatus,
   explainRange,
+  explainSpawnShield,
   explainStatus,
   explainVisibility,
 } from "../src/explanations.js";
@@ -98,14 +99,14 @@ const STATUS_CASES = Object.freeze([
   [
     "hunter_trap_stun",
     "stun_hunter_trap",
-    "Hunter (Ultimate: Trap) Stun",
-    "A Hunter's Trap incapacitates",
+    "Hunter (Ultimate: Freezing Trap) Stun",
+    "A Hunter's Freezing Trap incapacitates",
   ],
   [
     "rogue_poison_stun",
     "stun_rogue_poison",
-    "Rogue (Ultimate: Poison) Stun",
-    "A Rogue's Poison incapacitates",
+    "Rogue (Ultimate: Crippling Poison) Stun",
+    "A Rogue's Crippling Poison incapacitates",
   ],
   [
     "warrior_charge_slow",
@@ -122,14 +123,14 @@ const STATUS_CASES = Object.freeze([
   [
     "rogue_poison_slow",
     "slow_rogue_poison",
-    "Rogue (Ultimate: Poison) Slow",
-    "A Rogue's poisoned dagger slows",
+    "Rogue (Ultimate: Crippling Poison) Slow",
+    "A Rogue's Crippling Poison slows",
   ],
   [
     "rogue_poison_anti_heal",
     "anti_heal_rogue_poison",
-    "Rogue (Ultimate: Poison) Anti-Heal",
-    "A Rogue's noxious Poison reduces",
+    "Rogue (Ultimate: Crippling Poison) Anti-Heal",
+    "A Rogue's Crippling Poison reduces",
   ],
   [
     "priest_freedom",
@@ -371,7 +372,7 @@ test("aggregate aura modifier is noninterfering with emitter-shaped extras", () 
     RECIPIENT,
   );
   assert.equal(JSON.stringify(first), JSON.stringify(second));
-  assert.equal(first.title, "Sorcerer's Aura");
+  assert.equal(first.title, "Sorcerer’s Empowerment");
   assert.equal(first.accent, "mage");
   assert.equal(rowValue(first, "Aggregate Multiplier"), "×1.23");
   assert.equal(rowValue(first, "Recipient Effect"), "23.46% more damage dealt");
@@ -392,7 +393,7 @@ test("the two aggregate recipient aura cards use their locked qualitative titles
       },
       RECIPIENT,
     ).title,
-    "Sorcerer's Aura",
+    "Sorcerer’s Empowerment",
   );
   assert.equal(
     explainModifier(
@@ -403,7 +404,7 @@ test("the two aggregate recipient aura cards use their locked qualitative titles
       },
       RECIPIENT,
     ).title,
-    "Guardian's Aura",
+    "Guardian’s Barrier",
   );
   assert.equal(
     rowValue(
@@ -421,14 +422,65 @@ test("the two aggregate recipient aura cards use their locked qualitative titles
   );
 });
 
+test("agent presentation suppresses only exact neutral aura modifiers", () => {
+  const descriptor = explainAgent(
+    {
+      ...RECIPIENT,
+      current_health: 100,
+      max_health: 100,
+      effective_movement_speed: 1,
+      ultimate_cooldown_remaining: 0,
+      steps_until_out_of_combat: 0,
+      statuses: [],
+      aura_modifiers: [
+        {
+          aura_id: "mage_damage_amplification",
+          token_id: "mage_amplification",
+          multiplier: 1,
+        },
+        {
+          aura_id: "warrior_damage_mitigation",
+          token_id: "warrior_mitigation",
+          multiplier: 0.999999,
+        },
+      ],
+    },
+    {},
+    classMechanics(5, "Priest"),
+  );
+  assert.equal(
+    sectionRows(descriptor, "Current State").find(
+      (row) => row.label === "Aggregate Aura Modifiers",
+    )?.value,
+    "1",
+  );
+  const effectRows = sectionRows(descriptor, "Current Aura Modifier Details");
+  assert.equal(effectRows.length, 1);
+  assert.match(effectRows[0].label, /Guardian’s Barrier/u);
+  assert.doesNotMatch(fullText(descriptor), /Sorcerer’s Empowerment/u);
+});
+
+test("spawn shield explanation states invulnerability and exact remaining ticks", () => {
+  const descriptor = explainSpawnShield({
+    public_agent_id: "opaque-shielded",
+    spawn_shield_remaining: 3,
+  });
+  assert.equal(descriptor.kind, "status");
+  assert.equal(descriptor.title, "Spawn Shield");
+  assert.equal(rowValue(descriptor, "Protection"), "Invulnerable");
+  assert.equal(rowValue(descriptor, "Remaining"), "3 Ticks");
+  assert.match(descriptor.summary, /invulnerable/u);
+  assert.match(descriptor.summary, /3 Ticks/u);
+});
+
 test("five cooldown cards use exact class names, ultimate names, ticks, and public IDs", () => {
   /** @type {Array<[number, string, string]>} */
   const cases = [
     [1, "Mage", "Burst"],
     [2, "Warrior", "Charge"],
-    [3, "Hunter", "Trap"],
-    [4, "Rogue", "Poison"],
-    [5, "Priest", "Holy Word"],
+    [3, "Hunter", "Freezing Trap"],
+    [4, "Rogue", "Crippling Poison"],
+    [5, "Priest", "Holy Word: Salvation"],
   ];
   for (const [classId, className, ultimateName] of cases) {
     const owner = {
@@ -512,7 +564,7 @@ test("wall and pillar cards retain exact IDs, centers, and shape dimensions", ()
   );
 });
 
-test("aura fields expose exact emitter identity, radius, and per-emitter amount", () => {
+test("aura fields expose exact catalog capability without claiming realized effect", () => {
   /** @type {Array<[Record<string, any>, string]>} */
   const cases = [
     [
@@ -531,7 +583,7 @@ test("aura fields expose exact emitter identity, radius, and per-emitter amount"
         clamp_value: 2,
         center: [1, 2],
       },
-      "Sorcerer's Aura Field (Mage Damage Amplification Aura)",
+      "Sorcerer’s Empowerment",
     ],
     [
       {
@@ -549,7 +601,7 @@ test("aura fields expose exact emitter identity, radius, and per-emitter amount"
         clamp_value: 0.2,
         center: [4, 5],
       },
-      "Guardian's Aura Field (Warrior Damage Mitigation Aura)",
+      "Guardian’s Barrier",
     ],
   ];
   for (const [field, expectedTitle] of cases) {
@@ -569,15 +621,18 @@ test("aura fields expose exact emitter identity, radius, and per-emitter amount"
     );
     assert.equal(rowValue(descriptor, "Radius"), format(field.radius));
     assert.equal(
-      rowValue(descriptor, "Per-emitter Multiplier"),
+      rowValue(descriptor, "Catalog Multiplier"),
       `×${format(field.per_emitter_multiplier)}`,
     );
     assert.equal(
-      rowValue(descriptor, "Per-emitter Effect"),
+      rowValue(descriptor, "Catalog Effect"),
       field.aura_id === "mage_damage_amplification"
         ? "20% more damage dealt per recorded emitter"
         : "20% less damage received per recorded emitter",
     );
+    assert.match(descriptor.summary, /catalog-declared.*may receive/iu);
+    assert.match(descriptor.summary, /exact aggregate modifier.*realized effect/iu);
+    assert.doesNotMatch(descriptor.summary, /allies inside this field have/iu);
   }
   const mismatched = explainAura(
     {
@@ -643,11 +698,11 @@ test("agent full cards show class copy and only positive raw catalog outputs", (
   };
   const descriptor = explainAgent(agent, {}, mechanics);
   const mechanicsRows = sectionRows(descriptor, "Exact Class Mechanics");
-  assert.equal(rowValue(descriptor, "Ultimate Name"), "Holy Word");
+  assert.equal(rowValue(descriptor, "Ultimate Name"), "Holy Word: Salvation");
   assert.equal(rowValue(descriptor, "Ultimate Status"), "Ready");
   assert.equal(
     mechanicsRows.find((row) => row.label === "Ultimate Name")?.value,
-    "Holy Word",
+    "Holy Word: Salvation",
   );
   assert.equal(
     mechanicsRows.some((row) => row.label === "Basic Raw Damage"),
@@ -672,7 +727,7 @@ test("agent full cards show class copy and only positive raw catalog outputs", (
     {},
     mechanics,
   );
-  assert.equal(rowValue(coolingDown, "Ultimate Name"), "Holy Word");
+  assert.equal(rowValue(coolingDown, "Ultimate Name"), "Holy Word: Salvation");
   assert.equal(rowValue(coolingDown, "Ultimate Status"), "On cooldown (3 Ticks)");
 });
 

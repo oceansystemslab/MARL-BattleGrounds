@@ -55,38 +55,8 @@
         <select id="preset-select" aria-label="Presentation preset" disabled>
           <option value="presentation">Presentation</option>
           <option value="analysis">Analysis</option>
-          <option value="debug">Technical</option>
         </select>
       </label>
-      <fieldset class="movement-scale-control" data-live-only>
-        <legend>Movement scale</legend>
-        <div class="movement-scale-control__row">
-          <input
-            id="movement-scale-input"
-            type="range"
-            min="0.01"
-            max="1.00"
-            step="0.01"
-            value="1.00"
-            aria-label="Ordinary movement distance scale"
-            aria-describedby="movement-scale-help"
-            disabled
-          >
-          <output id="movement-scale-value" for="movement-scale-input">1.00</output>
-        </div>
-        <div class="movement-scale-control__actions">
-          <button id="movement-scale-tenth-button" type="button" disabled>
-            0.10
-          </button>
-          <button id="movement-scale-default-button" type="button" disabled>
-            Default
-          </button>
-        </div>
-        <span id="movement-scale-help" class="sr-only">
-          Changing movement scale performs an authoritative reset without
-          advancing the simulator.
-        </span>
-      </fieldset>
       <fieldset class="session-facts" aria-label="Session facts">
         <span>Revision <strong id="revision-value">—</strong></span>
         <span>Step <strong id="step-value">—</strong></span>
@@ -102,21 +72,6 @@
         >
           Pause
         </button>
-        <label class="graphics-speed-control">
-          <span>Graphics rendering speed</span>
-          <span class="graphics-speed-control__row">
-            <input
-              id="graphics-speed-input"
-              type="range"
-              min="0.01"
-              max="2.00"
-              step="0.01"
-              value="1.00"
-              aria-label="Graphics rendering speed"
-            >
-            <output id="graphics-speed-value" for="graphics-speed-input">1.00×</output>
-          </span>
-        </label>
         <button
           id="motion-off-button"
           class="button button--quiet"
@@ -134,7 +89,7 @@
           Skip
         </button>
         <output id="motion-status" class="motion-status" aria-live="polite">
-          Graphics 1.00×
+          Graphics
         </output>
       </fieldset>
       <div class="toolbar-actions">
@@ -265,8 +220,9 @@
       </div>
       <fieldset class="replay-timeline__transport">
         <legend class="sr-only">Replay transport</legend>
-        <button id="replay-first-button" type="button" aria-label="First replay frame">First</button>
-        <button id="replay-previous-button" type="button" aria-label="Previous replay frame">Previous</button>
+        <button id="replay-first-button" type="button" aria-label="First replay tick">First</button>
+        <button id="replay-back-ten-button" type="button" aria-label="Go back ten replay ticks">−10</button>
+        <button id="replay-previous-button" type="button" aria-label="Previous replay tick">−1</button>
         <button
           id="replay-play-pause-button"
           class="button--primary"
@@ -274,10 +230,11 @@
           aria-label="Play replay"
           aria-pressed="false"
         >Play</button>
-        <button id="replay-next-button" type="button" aria-label="Next replay frame">Next</button>
-        <button id="replay-last-button" type="button" aria-label="Last replay frame">Last</button>
+        <button id="replay-next-button" type="button" aria-label="Next replay tick">+1</button>
+        <button id="replay-forward-ten-button" type="button" aria-label="Go forward ten replay ticks">+10</button>
+        <button id="replay-last-button" type="button" aria-label="Last replay tick">Last</button>
         <label class="replay-timeline__slider">
-          <span>Frame</span>
+          <span>Tick</span>
           <input
             id="replay-frame-slider"
             type="range"
@@ -285,12 +242,12 @@
             max="0"
             step="1"
             value="0"
-            aria-label="Replay frame"
+            aria-label="Replay tick"
             disabled
           >
         </label>
         <output id="replay-frame-position" for="replay-frame-slider" aria-live="polite">
-          Frame 0 / 0
+          Tick 0 / 0
         </output>
       </fieldset>
       <fieldset class="replay-timeline__options">
@@ -298,14 +255,11 @@
         <button id="replay-ranges-button" type="button" aria-pressed="false">
           Ranges
         </button>
-        <button id="replay-verbosity-button" type="button" aria-pressed="false">
-          Verbose details
-        </button>
         <button id="replay-clear-reference-button" type="button">
           Clear Reference
         </button>
         <span class="replay-shortcuts">
-          <kbd>Home</kbd>/<kbd>End</kbd> edges · <kbd>←</kbd>/<kbd>→</kbd> step · <kbd>Space</kbd> play
+          <kbd>Home</kbd>/<kbd>End</kbd> edges · <kbd>←</kbd>/<kbd>→</kbd> one · <kbd>Shift</kbd>+<kbd>←</kbd>/<kbd>→</kbd> ten · <kbd>Space</kbd> play
         </span>
       </fieldset>
     </section>
@@ -344,17 +298,17 @@
           are unavailable. Tab behaves normally in the side panel.
         </p>
 
-        <section class="command-deck" aria-label="Debugger commands" data-live-only>
-          <header class="command-deck__header">
-            <div>
-              <p class="command-deck__eyebrow">Joint action composer</p>
-              <h3>Stage, inspect, then submit</h3>
-            </div>
+        <details id="command-deck" class="command-deck" data-live-only open>
+          <summary class="command-deck__header">
+            <span class="command-deck__title-group">
+              <span class="command-deck__eyebrow">Joint action composer</span>
+              <strong class="command-deck__title">Stage, inspect, then submit</strong>
+            </span>
             <span class="command-deck__shortcut">
               <kbd>Enter</kbd>
               commits every staged row
             </span>
-          </header>
+          </summary>
 
           <div class="command-deck__composer">
             <div class="command-group command-group--compose command-group--movement">
@@ -426,7 +380,6 @@
                 </button>
                 <button type="button" data-key="Escape">Clear target</button>
                 <button id="live-ranges-button" type="button" data-key="g" aria-pressed="false">Ranges</button>
-                <button id="live-verbosity-button" type="button" data-key="v" aria-pressed="false">Verbosity</button>
               </div>
             </div>
 
@@ -439,61 +392,42 @@
               </div>
             </div>
           </div>
-        </section>
+        </details>
       </section>
 
       <aside class="hud-panel" aria-label="Analyzer inspector">
-        <section class="hud-section" aria-labelledby="roster-heading">
-          <div class="section-heading">
-            <h2 id="roster-heading">Roster</h2>
+        <details id="roster-details" class="hud-section" open>
+          <summary class="section-heading">
+            <strong id="roster-heading" class="section-title">Roster</strong>
             <span id="roster-count" class="count-badge">0 visible</span>
-          </div>
+          </summary>
           <div id="roster" class="roster">
             <p class="empty-copy">No authorized agents received yet.</p>
           </div>
-        </section>
+        </details>
 
-        <section class="hud-section" aria-labelledby="selection-heading">
-          <h2 id="selection-heading">Controlled and selected</h2>
+        <details id="agent-details" class="hud-section semantic-inspector">
+          <summary><span id="selection-heading">Agent Details</span></summary>
           <div id="selection-card" class="fact-card">
-            <p class="empty-copy">No selection facts received yet.</p>
+            <p class="empty-copy">Select an authorized agent to inspect its details.</p>
           </div>
-        </section>
+        </details>
 
-        <section
-          id="semantic-inspector"
-          class="hud-section semantic-inspector"
-          aria-labelledby="semantic-inspector-heading"
-          hidden
-        >
-          <div class="section-heading">
-            <h2 id="semantic-inspector-heading">Full explanation</h2>
-            <button
-              id="semantic-inspector-close-button"
-              class="button button--quiet"
-              type="button"
-            >
-              Close
-            </button>
-          </div>
-          <div id="semantic-inspector-content" class="semantic-inspector__content"></div>
-        </section>
-
-        <section class="hud-section" aria-labelledby="pending-heading" data-live-only>
-          <div class="section-heading">
-            <h2 id="pending-heading">Pending joint turn</h2>
+        <details id="pending-turn-details" class="hud-section" data-live-only>
+          <summary class="section-heading">
+            <strong id="pending-heading" class="section-title">Pending joint turn</strong>
             <span id="pending-count" class="count-badge">0 actors</span>
-          </div>
+          </summary>
           <p id="pending-scope" class="section-note">
             Waiting for authoritative submission scope.
           </p>
           <article id="pending-card" class="action-card">
             <p class="empty-copy">No pending action.</p>
           </article>
-        </section>
+        </details>
 
-        <section class="hud-section" aria-labelledby="accepted-heading" data-live-only>
-          <h2 id="accepted-heading">Latest transition</h2>
+        <details id="latest-transition-details" class="hud-section" data-live-only>
+          <summary><span id="accepted-heading">Latest transition</span></summary>
           <article id="accepted-card" class="action-card">
             <p class="empty-copy">No transition yet.</p>
           </article>
@@ -503,19 +437,19 @@
             aria-live="polite"
             aria-atomic="true"
           ></p>
-        </section>
+        </details>
 
-        <section class="hud-section" aria-labelledby="events-heading">
-          <div class="section-heading">
-            <h2 id="events-heading">Latest events</h2>
+        <details id="events-details" class="hud-section">
+          <summary class="section-heading">
+            <strong id="events-heading" class="section-title">Latest events</strong>
             <span id="event-count" class="count-badge">0</span>
-          </div>
+          </summary>
           <ol id="event-feed" class="event-feed">
             <li class="empty-copy">No transition events.</li>
           </ol>
-        </section>
+        </details>
 
-        <details id="visual-key" class="hud-section visual-key" data-live-only>
+        <details id="visual-key" class="hud-section visual-key">
           <summary>Visual key</summary>
           <dl class="visual-key__list">
             <dt><span class="key-swatch key-swatch--team-a"></span>Team A</dt>
@@ -544,7 +478,7 @@
           </dl>
         </details>
 
-        <details class="hud-section diagnostics">
+        <details id="technical-frame-details" class="hud-section diagnostics">
           <summary>Technical frame</summary>
           <div id="diagnostics-card" class="diagnostics-card">
             <p class="empty-copy">No frame received.</p>
@@ -579,8 +513,8 @@
         </p>
         <dl class="help-grid" data-live-only>
           <dt>Tab / Shift+Tab</dt><dd>Cycle the controlled actor</dd>
-          <dt>Shift+left click</dt><dd>Control the clicked visible actor</dd>
-          <dt>Left click</dt><dd>Select a visible target</dd>
+          <dt>Left click</dt><dd>Control the clicked authorized actor</dd>
+          <dt>Shift+left click</dt><dd>Select the clicked authorized target</dd>
           <dt>Right click</dt><dd>Clear the target</dd>
           <dt>Escape</dt>
           <dd>Clear the target and leave battlefield focus</dd>
@@ -595,11 +529,9 @@
           </dd>
           <dt>N</dt><dd>Advance the next registered scripted frame only</dd>
           <dt>R</dt><dd>Deterministically reset the scenario</dd>
-          <dt>G / V</dt><dd>Toggle ranges / diagnostic verbosity</dd>
+          <dt>G</dt><dd>Toggle researcher ranges</dd>
           <dt>[ / ]</dt><dd>Previous / next scenario</dd>
           <dt>P</dt><dd>Pause or resume presentation motion</dd>
-          <dt>Graphics rendering speed</dt>
-          <dd>Choose any local explanation speed from 0.01× to 2.00×</dd>
           <dt>Pause / Motion Off / Skip</dt>
           <dd>Pause, disable, or settle the current visual explanation</dd>
         </dl>
@@ -612,8 +544,8 @@
         <p class="help-note" data-live-only>
           Animation, layout, hover, help, and panel state are presentation-only.
           Python remains authoritative for every simulator and legality decision.
-          Normal motion briefly holds only the next Submit/Next-frame input;
-          Skip, reduced motion, and Off release it immediately.
+          Submit settles an active explanation before sending the current draft;
+          reduced motion and Motion Off settle explanations automatically.
         </p>
         <div data-replay-only hidden>
           <p>
@@ -622,11 +554,12 @@
           </p>
           <dl class="help-grid">
             <dt>Home / End</dt><dd>Go to the first / last captured frame</dd>
-            <dt>Left / Right</dt><dd>Go to the previous / next captured frame</dd>
+            <dt>Left / Right</dt><dd>Go to the previous / next captured tick</dd>
+            <dt>Shift+Left / Shift+Right</dt><dd>Seek ten captured ticks with one request</dd>
             <dt>Space</dt><dd>Play or pause serialized replay</dd>
             <dt>Frame slider</dt><dd>Seek after a short debounce</dd>
             <dt>Graphics rendering controls</dt>
-            <dd>Change local explanation speed or disable motion</dd>
+            <dd>Pause, settle, or disable local explanation motion</dd>
           </dl>
           <p class="help-note">
             Autoplay keeps one request in flight and waits for each incoming

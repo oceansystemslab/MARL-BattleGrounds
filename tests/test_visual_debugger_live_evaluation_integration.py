@@ -368,7 +368,7 @@ def test_input_results_distinguish_transition_restart_and_ui_only_changes() -> N
 
     ui_only = dispatch_command(
         initial,
-        SetPresetCommandV1(preset="debug"),
+        SetPresetCommandV1(preset="presentation"),
         view_mode="researcher",
         preset="analysis",
         include_stress=False,

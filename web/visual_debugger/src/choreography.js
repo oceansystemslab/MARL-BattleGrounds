@@ -215,7 +215,10 @@ export class CombatChoreographer {
     this.ledger = options.ledger ?? new ConsumedTransitionLedger();
     this.onStateChange = options.onStateChange ?? (() => {});
     this.motionMode = normalizeMotionMode(options.motionMode ?? "normal");
-    this.playbackRate = boundedPlaybackRate(options.playbackRate ?? 1);
+    // Product choreography has one canonical clock. The optional legacy field
+    // remains accepted at this boundary so old callers do not fail, but it no
+    // longer changes presentation timing.
+    this.playbackRate = 1;
     this.paused = false;
     this.submissionBlocked = false;
     this.logicalTime = 0;
@@ -378,14 +381,8 @@ export class CombatChoreographer {
    * @param {number} rate
    */
   setPlaybackRate(rate) {
-    this.playbackRate = boundedPlaybackRate(rate);
-    for (const animation of this.#allAnimations()) {
-      if (typeof animation.updatePlaybackRate === "function") {
-        animation.updatePlaybackRate(this.playbackRate);
-      } else {
-        animation.playbackRate = this.playbackRate;
-      }
-    }
+    void rate;
+    this.playbackRate = 1;
     this.#publish();
     return this.snapshot();
   }
@@ -713,17 +710,6 @@ function normalizeMotionMode(value) {
     return value;
   }
   throw new RangeError(`unknown motion mode ${String(value)}.`);
-}
-
-/**
- * @param {unknown} value
- */
-function boundedPlaybackRate(value) {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric) || numeric < 0.01 || numeric > 2) {
-    throw new RangeError("playback rate must be finite and between 0.01 and 2.");
-  }
-  return numeric;
 }
 
 /**

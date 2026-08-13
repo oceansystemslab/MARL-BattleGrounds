@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 
+import { finishControllerClock } from "./support/choreography.js";
 import { startDebugger, stopDebugger } from "./support/live-debugger.js";
 import {
   DENSE_BASELINE_MAX_DIFF_PIXEL_RATIO,
@@ -64,6 +65,23 @@ async function currentWireFrame(page) {
 }
 
 /**
+ * Establish the one live interactive authority required by isolated tests.
+ * The serial server deliberately retains audience and scenario between cases.
+ *
+ * @param {import("@playwright/test").Page} page
+ */
+async function installResearcherArena(page) {
+  if ((await page.locator("#view-select").inputValue()) !== "researcher") {
+    await page.locator("#view-select").selectOption("researcher");
+    await expect(page.locator("html")).toHaveAttribute("data-audience", "researcher");
+  }
+  if ((await page.locator("#scenario-select").inputValue()) !== "arena_5v5") {
+    await page.locator("#scenario-select").selectOption("arena_5v5");
+    await expect(page.locator("#scenario-select")).toHaveValue("arena_5v5");
+  }
+}
+
+/**
  * Assert the full V2 transition identity rendered for the current researcher frame.
  *
  * @param {import("@playwright/test").Page} page
@@ -84,6 +102,99 @@ async function expectCurrentResearcherTransition(page, transitionIndex) {
   expect(frame.hud.latest_transition.transition_id).toBe(transitionId);
   await expect(page.locator("#transition-value")).toHaveText(transitionId);
   return transitionId;
+}
+
+/**
+ * Freeze and prove the expanded comprehensive Agent Details panel at one
+ * supported viewport. The visual assertion is downstream of the complete
+ * semantic inventory and explicit layout bounds.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @param {{width: number, height: number}} viewport
+ */
+async function captureAgentDetailsBaseline(page, viewport) {
+  await page.setViewportSize(viewport);
+  await waitForStablePresentation(page);
+
+  const details = page.locator("#agent-details");
+  await expect(details).toBeVisible();
+  await expect(details).toHaveAttribute("open", "");
+  await expect(details.locator(":scope > summary")).toHaveText("Agent Details");
+  for (const fact of [
+    "Identity",
+    "Class Role",
+    "Role",
+    "Strengths",
+    "Limitations",
+    "Teamwork",
+    "Counterplay",
+    "Exact Class Mechanics",
+    "Current State",
+    "Persistent Statuses",
+    "Aggregate Aura Modifiers",
+    "Ultimate Status",
+    "Current legality",
+    "Basic Legality",
+    "Ultimate Legality",
+  ]) {
+    await expect(details).toContainText(fact);
+  }
+  await expect(details.locator(".selected-legality")).toHaveCount(1);
+  await expect(details.locator(".selected-legality__lane")).toHaveCount(2);
+  const layout = await details.evaluate((element) => {
+    const bounds = element.getBoundingClientRect();
+    const card = element.querySelector("#selection-card");
+    const semanticDetails = element.querySelector(".semantic-inspector__details");
+    if (!(card instanceof HTMLElement) || !(semanticDetails instanceof HTMLElement)) {
+      throw new Error("Agent Details semantic layout is unavailable.");
+    }
+    const cardBounds = card.getBoundingClientRect();
+    const semanticBounds = semanticDetails.getBoundingClientRect();
+    const semanticStyle = getComputedStyle(semanticDetails);
+    return {
+      horizontalOverflow: element.scrollWidth - element.clientWidth,
+      semanticColumn: {
+        end: semanticStyle.gridColumnEnd,
+        start: semanticStyle.gridColumnStart,
+        widthRatio: semanticBounds.width / cardBounds.width,
+      },
+      viewportEscape: {
+        left: Math.max(0, -bounds.left),
+        right: Math.max(0, bounds.right - document.documentElement.clientWidth),
+      },
+    };
+  });
+  expect(layout.horizontalOverflow).toBeLessThanOrEqual(1);
+  expect(layout.semanticColumn.start).toBe("1");
+  expect(layout.semanticColumn.end).toBe("-1");
+  expect(layout.semanticColumn.widthRatio).toBeGreaterThan(0.99);
+  expect(layout.viewportEscape).toEqual({ left: 0, right: 0 });
+
+  const hud = page.locator(".hud-panel");
+  await hud.evaluate((element, detailsId) => {
+    const details = element.querySelector(`#${detailsId}`);
+    if (!(details instanceof HTMLElement)) {
+      throw new Error("Agent Details panel is unavailable in the HUD.");
+    }
+    element.scrollTop = details.offsetTop;
+  }, "agent-details");
+  await expect(details.locator(":scope > summary")).toBeInViewport();
+  await expect(details.getByText("Identity", { exact: true })).toBeInViewport();
+  await expect(details.getByText("Class Role", { exact: true })).toBeInViewport();
+  const visibleHud = await hud.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+    scrollTop: element.scrollTop,
+    viewportHeight: document.documentElement.clientHeight,
+  }));
+  expect(visibleHud.scrollTop).toBeGreaterThan(0);
+  expect(visibleHud.scrollHeight).toBeGreaterThan(visibleHud.clientHeight);
+  expect(visibleHud.clientHeight).toBeLessThanOrEqual(visibleHud.viewportHeight);
+
+  await expect(hud).toHaveScreenshot(
+    `agent-details-expanded-${viewport.width}x${viewport.height}.png`,
+    { animations: "disabled" },
+  );
 }
 
 test("battlefield commands preserve UI and simulator revision boundaries", async ({
@@ -219,7 +330,17 @@ test("pointer, roster, toolbar, and command-deck controls use the live service",
 }) => {
   await page.goto(debuggerUrl);
   await expect(page.locator("#connection-status")).toHaveText("Online");
-  let revision = await currentRevision(page);
+  await installResearcherArena(page);
+  const resetRevision = await currentRevision(page);
+  await page.getByRole("button", { name: "Reset" }).click();
+  await expect(page.locator("#revision-value")).toHaveText(String(resetRevision + 1));
+  await expect(page.locator("#step-value")).toHaveText("0");
+  let revision = resetRevision + 1;
+
+  await expect(page.locator("#agent-details")).not.toHaveAttribute("open", "");
+  await page.locator("#battlefield").click({ position: { x: 8, y: 8 } });
+  await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  await expect(page.locator("#agent-details")).not.toHaveAttribute("open", "");
 
   const targetButton = page.getByRole("button", { name: "Target Agent ID 6" });
   await expect(targetButton).toBeVisible();
@@ -249,22 +370,43 @@ test("pointer, roster, toolbar, and command-deck controls use the live service",
   await expect(page.locator("#diagnostics-card")).not.toContainText(
     "candidate_legalities",
   );
-
-  await page.locator("#preset-select").selectOption("debug");
-  revision += 1;
-  await expect(page.locator("#revision-value")).toHaveText(String(revision));
-  await expect(page.locator("#preset-select")).toHaveValue("debug");
-  await expect(page.locator("html")).toHaveAttribute("data-preset", "debug");
+  await expect(page.locator("#agent-details")).toHaveAttribute("open", "");
+  await expect(page.locator("#agent-details")).toContainText("Agent ID 6");
+  for (const fact of [
+    "Identity",
+    "Class Role",
+    "Role",
+    "Strengths",
+    "Limitations",
+    "Teamwork",
+    "Counterplay",
+    "Exact Class Mechanics",
+    "Current State",
+    "Persistent Statuses",
+    "Aggregate Aura Modifiers",
+    "Ultimate Status",
+    "Current legality",
+  ]) {
+    await expect(page.locator("#agent-details")).toContainText(fact);
+  }
+  await expect(page.locator("#preset-select option")).toHaveCount(2);
+  await expect(page.locator('#preset-select option[value="debug"]')).toHaveCount(0);
+  await expect(page.locator("#live-verbosity-button")).toHaveCount(0);
+  await expect(page.locator("#movement-scale-input")).toHaveCount(0);
+  await expect(page.locator("#graphics-speed-input")).toHaveCount(0);
+  await expect(page.locator("html")).toHaveAttribute(
+    "data-preset",
+    /analysis|presentation/,
+  );
   await expect(page.locator("html")).toHaveAttribute("data-audience", "researcher");
-  await expect(page.locator(".candidate-legality-row")).toHaveCount(11);
-  await expect(page.locator("#battlefield .debug-visibility-cue")).toHaveCount(10);
+  await expect(page.locator("#battlefield .debug-visibility-cue")).toHaveCount(0);
+  await expect(page.locator("#battlefield .debug-protected-zone")).toHaveCount(0);
 
   await page.locator("#view-select").selectOption("pov");
   revision += 1;
   await expect(page.locator("#revision-value")).toHaveText(String(revision));
   await expect(page.locator("#view-select")).toHaveValue("pov");
   await expect(page.locator("html")).toHaveAttribute("data-audience", "agent_pov");
-  await expect(page.locator("#battlefield .debug-visibility-cue")).toHaveCount(0);
   const povFrame = await currentWireFrame(page);
   expect(povFrame).toMatchObject({
     schema_version: 2,
@@ -277,42 +419,7 @@ test("pointer, roster, toolbar, and command-deck controls use the live service",
       rows.map((row) => Number(row.getAttribute("data-slot"))).sort((a, b) => a - b),
     );
   expect(povRosterSlots).toEqual([povFrame.projection.scene.self_actor.global_slot]);
-  const povCandidateRows = await page
-    .locator(".candidate-legality-row")
-    .evaluateAll((rows) =>
-      rows.map((row) => ({
-        targetAction: Number(row.getAttribute("data-target-action")),
-        targetLabel:
-          row.querySelector(".candidate-legality-row__target")?.textContent ?? "",
-        hasTargetSlot: row.hasAttribute("data-target-slot"),
-        lane0Available: row.getAttribute("data-lane0-available"),
-        lane1Available: row.getAttribute("data-lane1-available"),
-        basicAvailable: row.getAttribute("data-basic-available"),
-        ultimateAvailable: row.getAttribute("data-ultimate-available"),
-      })),
-    );
-  expect(povCandidateRows).toEqual(
-    povFrame.hud.candidate_legalities.map(
-      /** @param {Record<string, any>} candidate */ (candidate) => {
-        const targetAction = candidate.target.target_action;
-        const publicAgentId = candidate.target.public_agent_id;
-        return {
-          targetAction,
-          targetLabel:
-            targetAction === 0
-              ? "target-none"
-              : typeof publicAgentId === "string"
-                ? `Agent ID ${publicAgentId} (action ${targetAction})`
-                : "undisclosed",
-          hasTargetSlot: false,
-          lane0Available: String(candidate.lane_0_available),
-          lane1Available: String(candidate.lane_1_available),
-          basicAvailable: String(candidate.basic_available),
-          ultimateAvailable: String(candidate.ultimate_available),
-        };
-      },
-    ),
-  );
+  await expect(page.locator(".candidate-legality-row")).toHaveCount(0);
   expect(povRosterSlots).not.toContain(5);
   await expect(
     page.locator('.candidate-legality-row[data-target-slot="5"]'),
@@ -340,25 +447,43 @@ test("pointer, roster, toolbar, and command-deck controls use the live service",
 
   await page.setViewportSize({ width: 960, height: 600 });
   await page
-    .locator('#battlefield .agent[data-slot="2"] .agent-body')
+    .locator('#battlefield .agent[data-slot="7"] .agent-body')
     .click({ modifiers: ["Shift"] });
-  revision += 1;
-  await expect(page.locator("#revision-value")).toHaveText(String(revision));
-  await expect(page.locator('.roster-row[data-controlled="true"]')).toHaveAttribute(
-    "aria-label",
-    /^Agent ID 2,/,
-  );
-
-  await page.locator('#battlefield .agent[data-slot="7"] .agent-body').click();
   revision += 1;
   await expect(page.locator("#revision-value")).toHaveText(String(revision));
   await expect(page.locator('.roster-row[data-selected="true"]')).toHaveAttribute(
     "aria-label",
     /^Agent ID 7,/,
   );
+
+  await page
+    .locator('#battlefield .agent[data-slot="7"] .agent-body')
+    .click({ button: "right" });
+  revision += 1;
+  await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  await expect(page.locator('.roster-row[data-selected="true"]')).toHaveAttribute(
+    "aria-label",
+    /^Agent ID 1,/,
+  );
+  await expect(
+    page.locator('.pending-action-row[data-controlled="true"]'),
+  ).toHaveAttribute("data-target-disclosure", "target_none");
+
+  await page.locator('#battlefield .agent[data-slot="2"] .agent-body').click();
+  revision += 1;
+  await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  await expect(page.locator("#agent-details")).toHaveAttribute("open", "");
+  await expect(page.locator('.roster-row[data-controlled="true"]')).toHaveAttribute(
+    "aria-label",
+    /^Agent ID 2,/,
+  );
+  await expect(page.locator('.roster-row[data-selected="true"]')).toHaveAttribute(
+    "aria-label",
+    /^Agent ID 2,/,
+  );
   await expect(page.locator("#battlefield .legality-pill")).toHaveCount(2);
   await expect(page.locator('#battlefield .legality-dock[data-slot="7"]')).toHaveCount(
-    1,
+    0,
   );
 
   await page.locator("#scenario-select").selectOption("basic_support");
@@ -376,6 +501,27 @@ test("pointer, roster, toolbar, and command-deck controls use the live service",
   await expect(page.locator("#submit-turn-button")).toBeDisabled();
   await expect(page.locator("#advance-script-button")).toBeEnabled();
   await expect(page.locator("#step-value")).toHaveText("0");
+});
+
+test("expanded Agent Details has permanent visual proof at both supported viewports", async ({
+  page,
+}) => {
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await installResearcherArena(page);
+  const resetRevision = await currentRevision(page);
+  await page.getByRole("button", { name: "Reset" }).click();
+  await expect(page.locator("#revision-value")).toHaveText(String(resetRevision + 1));
+  await expect(page.locator("#step-value")).toHaveText("0");
+
+  await page.getByRole("button", { name: "Target Agent ID 6" }).click();
+  await expect(page.locator("#revision-value")).toHaveText(String(resetRevision + 2));
+  await expect(page.locator('.roster-row[data-selected="true"]')).toHaveAttribute(
+    "aria-label",
+    /^Agent ID 6,/,
+  );
+  await captureAgentDetailsBaseline(page, { width: 1440, height: 900 });
+  await captureAgentDetailsBaseline(page, { width: 960, height: 600 });
 });
 
 test("command composer keeps the exact controlled actor visible at both viewports", async ({
@@ -437,139 +583,72 @@ test("command composer keeps the exact controlled actor visible at both viewport
   await page.getByRole("button", { name: "Control Agent ID 1" }).click();
   await expect(controlledActor).toHaveText("Actor · Agent ID 1");
   await assertComposerIdentity({ width: 960, height: 600 }, 1);
-  await page
-    .locator('#battlefield .agent[data-slot="2"] .agent-body')
-    .click({ modifiers: ["Shift"] });
+  await page.locator('#battlefield .agent[data-slot="2"] .agent-body').click();
   await expect(controlledActor).toHaveText("Actor · Agent ID 2");
 });
 
-test("movement scale previews locally and resets one authoritative epoch on commit", async ({
+test("native panels preserve user state within one authority and reset at its boundary", async ({
   page,
 }) => {
   await page.goto(debuggerUrl);
   await expect(page.locator("#connection-status")).toHaveText("Online");
-  let revision = await currentRevision(page);
-  if ((await page.locator("#view-select").inputValue()) !== "researcher") {
-    await page.locator("#view-select").selectOption("researcher");
-    revision += 1;
-    await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  await expect(page.locator("#command-deck")).toHaveAttribute("open", "");
+  await expect(page.locator("#roster-details")).toHaveAttribute("open", "");
+  for (const selector of [
+    "#agent-details",
+    "#pending-turn-details",
+    "#latest-transition-details",
+    "#events-details",
+    "#visual-key",
+    "#technical-frame-details",
+  ]) {
+    await expect(page.locator(selector)).not.toHaveAttribute("open", "");
   }
-  if ((await page.locator("#scenario-select").inputValue()) !== "arena_5v5") {
-    await page.locator("#scenario-select").selectOption("arena_5v5");
-    revision += 1;
-    await expect(page.locator("#revision-value")).toHaveText(String(revision));
-  }
-  const controlledActor = page.locator("#command-controlled-actor");
-  if ((await controlledActor.getAttribute("data-controlled-slot")) !== "0") {
-    await page.getByRole("button", { name: "Control Agent ID 0" }).click();
-    revision += 1;
-    await expect(page.locator("#revision-value")).toHaveText(String(revision));
-    await expect(controlledActor).toHaveAttribute("data-controlled-slot", "0");
-  }
-  await page.locator("#reset-button").click();
-  revision += 1;
-  await expect(page.locator("#revision-value")).toHaveText(String(revision));
-  await expect(page.locator("#step-value")).toHaveText("0");
 
-  await page.getByRole("button", { name: "Move east" }).click();
-  revision += 1;
-  await expect(page.locator("#revision-value")).toHaveText(String(revision));
-  await expect(
-    page.locator('.pending-action-row[data-actor-slot="0"]'),
-  ).toHaveAttribute("data-move-action", "3");
-
-  let movementScaleCommands = 0;
-  await page.route("**/api/command", async (route) => {
-    const payload = route.request().postDataJSON();
-    if (payload?.command?.command_type === "set_movement_scale") {
-      movementScaleCommands += 1;
+  const rosterButton = page.locator("#roster button").first();
+  await rosterButton.focus();
+  await page.locator("#roster-details").evaluate((details) => {
+    if (!(details instanceof HTMLDetailsElement)) {
+      throw new TypeError("Roster disclosure is unavailable.");
     }
-    await route.continue();
+    details.open = false;
   });
+  await expect(page.locator("#roster-details > summary")).toBeFocused();
+  await page.locator("#roster-details > summary").click();
+  await page.locator("#events-details > summary").click();
+  await page.locator("#technical-frame-details > summary").click();
 
-  const scaleInput = page.locator("#movement-scale-input");
-  await scaleInput.evaluate((element) => {
-    const input = /** @type {HTMLInputElement} */ (element);
-    input.value = "0.37";
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-  });
-  await expect(page.locator("#movement-scale-value")).toHaveText("0.37");
-  await expect(page.locator("#revision-value")).toHaveText(String(revision));
-  expect(movementScaleCommands).toBe(0);
+  const revision = await currentRevision(page);
+  await page.locator("#live-ranges-button").click();
+  await expect(page.locator("#revision-value")).toHaveText(String(revision + 1));
+  await expect(page.locator("#roster-details")).toHaveAttribute("open", "");
+  await expect(page.locator("#events-details")).toHaveAttribute("open", "");
+  await expect(page.locator("#technical-frame-details")).toHaveAttribute("open", "");
 
-  await scaleInput.dispatchEvent("change");
-  revision += 1;
-  await expect(page.locator("#revision-value")).toHaveText(String(revision));
-  await expect(page.locator("#movement-scale-value")).toHaveText("0.37");
-  await expect(page.locator("#step-value")).toHaveText("0");
-  await expect(
-    page.locator('.pending-action-row[data-actor-slot="0"]'),
-  ).toHaveAttribute("data-move-action", "0");
-  expect(movementScaleCommands).toBe(1);
-
-  await page.locator("#movement-scale-tenth-button").click();
-  revision += 1;
-  await expect(page.locator("#revision-value")).toHaveText(String(revision));
-  await expect(page.locator("#movement-scale-value")).toHaveText("0.10");
-  await expect(scaleInput).toHaveValue("0.1");
-  expect(
-    await scaleInput.evaluate(
-      (input) => /** @type {HTMLInputElement} */ (input).valueAsNumber,
-    ),
-  ).toBeCloseTo(0.1);
-  await expect(page.locator("#movement-scale-tenth-button")).toBeDisabled();
-  await expect(page.locator("#movement-scale-default-button")).toBeEnabled();
-  await expect(page.locator("#step-value")).toHaveText("0");
-  expect(movementScaleCommands).toBe(2);
-  await page.setViewportSize({ width: 960, height: 600 });
-  await waitForStablePresentation(page);
-  await expect(page.locator(".movement-scale-control")).toHaveScreenshot(
-    "movement-scale-010-override-960x600.png",
+  await page.locator("#view-select").selectOption("pov");
+  await expect(page.locator("html")).toHaveAttribute("data-audience", "agent_pov");
+  await expect(page.locator("#command-deck")).toHaveAttribute("open", "");
+  await expect(page.locator("#roster-details")).toHaveAttribute("open", "");
+  await expect(page.locator("#events-details")).not.toHaveAttribute("open", "");
+  await expect(page.locator("#technical-frame-details")).not.toHaveAttribute(
+    "open",
+    "",
   );
+});
 
-  await page.locator("#reset-button").click();
-  revision += 1;
-  await expect(page.locator("#revision-value")).toHaveText(String(revision));
-  await expect(page.locator("#movement-scale-value")).toHaveText("0.10");
-  await expect(page.locator("#step-value")).toHaveText("0");
-  expect(movementScaleCommands).toBe(2);
-
-  await page.locator("#movement-scale-default-button").click();
-  revision += 1;
-  await expect(page.locator("#revision-value")).toHaveText(String(revision));
-  await expect(page.locator("#movement-scale-value")).toHaveText("1.00");
-  await expect(scaleInput).toHaveValue("1");
-  expect(
-    await scaleInput.evaluate(
-      (input) => /** @type {HTMLInputElement} */ (input).valueAsNumber,
-    ),
-  ).toBe(1);
-  await expect(page.locator("#movement-scale-tenth-button")).toBeEnabled();
-  await expect(page.locator("#movement-scale-default-button")).toBeDisabled();
-  await expect(page.locator("#step-value")).toHaveText("0");
-  expect(movementScaleCommands).toBe(3);
-  await waitForStablePresentation(page);
-  await expect(page.locator(".movement-scale-control")).toHaveScreenshot(
-    "movement-scale-default-restored-960x600.png",
-  );
-
-  // Exercise the original-JSON boundary at the upper slider endpoint. The
-  // browser sends JSON number 1 (not Python float syntax), and the strict
-  // request model must accept it without a resync failure.
-  await scaleInput.press("ArrowLeft");
-  revision += 1;
-  await expect(page.locator("#revision-value")).toHaveText(String(revision));
-  await expect(page.locator("#movement-scale-value")).toHaveText("0.99");
-  expect(movementScaleCommands).toBe(4);
-
-  await scaleInput.press("End");
-  revision += 1;
-  await expect(page.locator("#revision-value")).toHaveText(String(revision));
-  await expect(page.locator("#movement-scale-value")).toHaveText("1.00");
+test("product movement scale is read-only canonical metadata", async ({ page }) => {
+  await page.goto(debuggerUrl);
   await expect(page.locator("#connection-status")).toHaveText("Online");
-  await expect(page.locator("#notice")).not.toContainText("Resync required");
-  expect(movementScaleCommands).toBe(5);
-  await page.unroute("**/api/command");
+  await installResearcherArena(page);
+  const frame = await currentWireFrame(page);
+  expect(frame.scenario.ordinary_movement_distance_scale).toBe(1);
+  expect(frame.scenario.description).toBe(
+    "Interactive LOS, visibility, range, relation, and mask inspection.",
+  );
+  await expect(page.locator("#scenario-description")).toBeEmpty();
+  await expect(page.locator("#movement-scale-input")).toHaveCount(0);
+  await expect(page.locator("#movement-scale-tenth-button")).toHaveCount(0);
+  await expect(page.locator("#movement-scale-default-button")).toHaveCount(0);
 });
 
 test("joint turn drafts survive actor cycling and submit exactly once", async ({
@@ -587,6 +666,13 @@ test("joint turn drafts survive actor cycling and submit exactly once", async ({
   revision += 1;
   await expect(page.locator("#revision-value")).toHaveText(String(revision));
   await expect(page.locator("#step-value")).toHaveText("0");
+  const controlledActor = page.locator("#command-controlled-actor");
+  if ((await controlledActor.getAttribute("data-controlled-slot")) !== "0") {
+    await page.getByRole("button", { name: "Control Agent ID 0" }).click();
+    revision += 1;
+    await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  }
+  await expect(controlledActor).toHaveAttribute("data-controlled-slot", "0");
   await expect(page.locator("#pending-card")).toHaveAttribute(
     "data-submission-scope",
     "joint_turn",
@@ -856,6 +942,137 @@ test("joint turn drafts survive actor cycling and submit exactly once", async ({
   expect(horizontalOverflow).toBeLessThanOrEqual(1);
 });
 
+test("rapid Submit settles active and paused explanations and sends each current draft once", async ({
+  page,
+}) => {
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await installResearcherArena(page);
+  const resetRevision = await currentRevision(page);
+  await page.locator("#reset-button").click();
+  await expect(page.locator("#revision-value")).toHaveText(String(resetRevision + 1));
+
+  let enterCommands = 0;
+  /** @type {number[]} */
+  const enterBaseRevisions = [];
+  await page.route("**/api/command", async (route) => {
+    const payload = route.request().postDataJSON();
+    if (
+      payload?.command?.command_type === "keyboard" &&
+      String(payload.command.key).toLowerCase() === "enter"
+    ) {
+      enterCommands += 1;
+      enterBaseRevisions.push(Number(payload.base_revision));
+    }
+    await route.continue();
+  });
+
+  const battlefield = page.locator("#battlefield");
+  const armRevision = await currentRevision(page);
+  await page.locator("#ultimate-button").click();
+  await expect(page.locator("#revision-value")).toHaveText(String(armRevision + 1));
+  const firstRevision = await currentRevision(page);
+  const firstStep = await currentStep(page);
+  await battlefield.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#revision-value")).toHaveText(String(firstRevision + 1), {
+    timeout: 120_000,
+  });
+  await expect(page.locator("#step-value")).toHaveText(String(firstStep + 1));
+  await expect.poll(() => enterCommands).toBe(1);
+  await expect(page.locator("#motion-pause-button")).toBeEnabled();
+
+  await finishControllerClock(page, "gate");
+  await expect(page.locator("html")).not.toHaveAttribute("data-motion-paused", "true");
+  await expect(page.locator("#motion-skip-button")).toBeEnabled();
+  const activeControlRevision = await currentRevision(page);
+  await page.getByRole("button", { name: "Control Agent ID 4" }).click();
+  await expect(page.locator("#revision-value")).toHaveText(
+    String(activeControlRevision + 1),
+  );
+  const activeDraftRevision = await currentRevision(page);
+  await page.getByRole("button", { name: "Move east", exact: true }).click();
+  await expect(page.locator("#revision-value")).toHaveText(
+    String(activeDraftRevision + 1),
+  );
+  await expect(
+    page.locator('.pending-action-row[data-controlled="true"]'),
+  ).toHaveAttribute("data-move-action", "3");
+  const activeTargetRevision = await currentRevision(page);
+  await page.getByRole("button", { name: "Target Agent ID 3" }).click();
+  await expect(page.locator("#revision-value")).toHaveText(
+    String(activeTargetRevision + 1),
+  );
+  const activeArmRevision = await currentRevision(page);
+  await page.locator("#basic-button").click();
+  await expect(page.locator("#revision-value")).toHaveText(
+    String(activeArmRevision + 1),
+  );
+  const activeRapidRevision = await currentRevision(page);
+  const activeRapidStep = await currentStep(page);
+  await page.locator("#submit-turn-button").evaluate((button) => {
+    if (!(button instanceof HTMLButtonElement)) {
+      throw new TypeError("Submit button is unavailable.");
+    }
+    button.click();
+    button.click();
+  });
+  await expect(page.locator("#revision-value")).toHaveText(
+    String(activeRapidRevision + 1),
+    { timeout: 120_000 },
+  );
+  await expect(page.locator("#step-value")).toHaveText(String(activeRapidStep + 1));
+  await expect.poll(() => enterCommands).toBe(2);
+  await expect(
+    page
+      .locator(
+        '.action-result[data-actor-slot="4"] .action-tuple[data-kind="submitted"] .fact',
+      )
+      .filter({ hasText: "Move action" })
+      .locator("strong"),
+  ).toHaveText("3");
+
+  await page.locator("#motion-pause-button").click();
+  await expect(page.locator("html")).toHaveAttribute("data-motion-paused", "true");
+
+  const draftRevision = await currentRevision(page);
+  await page.getByRole("button", { name: "Move north", exact: true }).click();
+  await expect(page.locator("#revision-value")).toHaveText(String(draftRevision + 1));
+  await expect(
+    page.locator('.pending-action-row[data-controlled="true"]'),
+  ).toHaveAttribute("data-move-action", "1");
+  await expect(page.locator("html")).toHaveAttribute("data-motion-paused", "true");
+
+  const rapidRevision = await currentRevision(page);
+  const rapidStep = await currentStep(page);
+  await page.locator("#submit-turn-button").evaluate((button) => {
+    if (!(button instanceof HTMLButtonElement)) {
+      throw new TypeError("Submit button is unavailable.");
+    }
+    button.click();
+    button.click();
+  });
+  await expect(page.locator("#revision-value")).toHaveText(String(rapidRevision + 1), {
+    timeout: 120_000,
+  });
+  await expect(page.locator("#step-value")).toHaveText(String(rapidStep + 1));
+  await expect.poll(() => enterCommands).toBe(3);
+  expect(enterBaseRevisions).toEqual([
+    firstRevision,
+    activeRapidRevision,
+    rapidRevision,
+  ]);
+  const submittedMove = page
+    .locator(
+      '.action-result[data-actor-slot="4"] .action-tuple[data-kind="submitted"] .fact',
+    )
+    .filter({ hasText: "Move action" })
+    .locator("strong");
+  await expect(submittedMove).toHaveText("1");
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await page.unroute("**/api/command");
+});
+
 test("scripted playback exposes only N and never sends manual submit", async ({
   page,
 }) => {
@@ -927,12 +1144,9 @@ test("a stale tab adopts the latest frame without replaying its command", async 
 
   const ranges = page.locator("#live-ranges-button");
   const staleRanges = stalePage.locator("#live-ranges-button");
-  const verbosity = stalePage.locator("#live-verbosity-button");
   const initialRangesPressed = await ranges.getAttribute("aria-pressed");
-  const initialVerbosityPressed = await verbosity.getAttribute("aria-pressed");
   expect(["true", "false"]).toContain(initialRangesPressed);
-  expect(["true", "false"]).toContain(initialVerbosityPressed);
-  if (initialRangesPressed === null || initialVerbosityPressed === null) {
+  if (initialRangesPressed === null) {
     throw new Error("Live toggle controls did not publish pressed state.");
   }
 
@@ -944,37 +1158,29 @@ test("a stale tab adopts the latest frame without replaying its command", async 
   );
   await expect(staleRanges).toHaveAttribute("aria-pressed", initialRangesPressed);
 
-  await verbosity.click();
+  await staleRanges.click();
   await expect(stalePage.locator("#revision-value")).toHaveText(
     String(baseRevision + 1),
   );
   await expect(stalePage.locator("#notice")).toContainText("stale");
-  await expect(verbosity).toHaveAttribute("aria-pressed", initialVerbosityPressed);
   await expect(staleRanges).toHaveAttribute(
     "aria-pressed",
     initialRangesPressed === "true" ? "false" : "true",
   );
   await expect(page.locator("#revision-value")).toHaveText(String(baseRevision + 1));
 
-  await verbosity.click();
+  await staleRanges.click();
   await expect(stalePage.locator("#revision-value")).toHaveText(
     String(baseRevision + 2),
   );
-  await expect(verbosity).toHaveAttribute(
-    "aria-pressed",
-    initialVerbosityPressed === "true" ? "false" : "true",
-  );
+  await expect(staleRanges).toHaveAttribute("aria-pressed", initialRangesPressed);
 
   await page.reload();
   await expect(page.locator("#connection-status")).toHaveText("Online");
   await expect(page.locator("#revision-value")).toHaveText(String(baseRevision + 2));
   await expect(page.locator("#live-ranges-button")).toHaveAttribute(
     "aria-pressed",
-    initialRangesPressed === "true" ? "false" : "true",
-  );
-  await expect(page.locator("#live-verbosity-button")).toHaveAttribute(
-    "aria-pressed",
-    initialVerbosityPressed === "true" ? "false" : "true",
+    initialRangesPressed,
   );
   await stalePage.close();
 });

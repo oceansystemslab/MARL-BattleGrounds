@@ -12,15 +12,14 @@ import {
   explainPovOverflow,
   explainPovStatus,
   explainRange,
+  explainSpawnShield,
   explainStatus,
-  explainVisibility,
 } from "./explanations.js";
 import { createSvgIcon } from "./icons.js";
 import {
   createViewportTransform,
   layoutRequiredDocks,
   layoutStatusDocks,
-  protectedBodyRect,
 } from "./layout.js";
 import { createRouteGeometry } from "./routes.js";
 import { registerTooltipOwner } from "./tooltip.js";
@@ -81,6 +80,10 @@ export const BATTLEFIELD_LAYER_ORDER = Object.freeze([
  *   classIcon: SVGSVGElement,
  *   classLetter: SVGElement,
  *   deadMark: SVGElement,
+ *   shieldRoot: SVGElement,
+ *   shieldShell: SVGElement,
+ *   shieldChip: SVGElement,
+ *   shieldText: SVGElement,
  *   selectionRoot: SVGElement,
  *   controlledHalo: SVGElement,
  *   selectedReticle: SVGElement,
@@ -371,14 +374,10 @@ export class BattlefieldRenderer {
     const map = createLayer("map", { "aria-hidden": "true" });
     const aura = createLayer("aura", { "aria-hidden": "true" });
     const debugRange = createLayer("debug-range", {
-      "aria-label": "Exact analysis and presentation-layout debug overlays",
+      "aria-label": "Authorized ability and effect ranges",
     });
     this.rangeCues = createLayer("range-cues", { "aria-hidden": "true" });
-    this.visibilityCues = createLayer("visibility-cues");
-    this.protectedZoneCues = createLayer("protected-zone-cues", {
-      "aria-hidden": "true",
-    });
-    debugRange.append(this.rangeCues, this.visibilityCues, this.protectedZoneCues);
+    debugRange.append(this.rangeCues);
     const pendingRoute = createLayer("pending-route", { "aria-hidden": "true" });
     const transientRoute = createLayer("transient-route", {
       "aria-hidden": "true",
@@ -449,9 +448,7 @@ export class BattlefieldRenderer {
     const scene = frameScene(frame);
     const frameRecord = isRecord(frame) ? frame : {};
     const preset =
-      frameRecord.preset === "presentation" ||
-      frameRecord.preset === "analysis" ||
-      frameRecord.preset === "debug"
+      frameRecord.preset === "presentation" || frameRecord.preset === "analysis"
         ? frameRecord.preset
         : "analysis";
     const map = isRecord(scene?.map) ? scene.map : null;
@@ -529,7 +526,9 @@ export class BattlefieldRenderer {
     );
     renderCircleLayer(
       this.layers.aura,
-      asArray(scene.aura_fields),
+      asArray(scene.aura_fields).filter(
+        (field) => isRecord(field) && field.source_alive === true,
+      ),
       "aura-field",
       "token_id",
       transform,
@@ -561,7 +560,6 @@ export class BattlefieldRenderer {
     this.#renderObstacles(map, transform);
     const projectedAgents = this.#renderAgents(scene, transform);
     this.#renderObservedBodies(scene, transform);
-    this.#renderDebugOverlays(scene, projectedAgents, preset === "debug");
     this.#renderStatusDocks(scene, projectedAgents, transform, {
       showLegality: preset !== "presentation",
       showModifiers: scene.audience === "researcher",
@@ -659,8 +657,6 @@ export class BattlefieldRenderer {
     this.layers.map.replaceChildren();
     this.layers.aura.replaceChildren();
     this.rangeCues.replaceChildren();
-    this.visibilityCues.replaceChildren();
-    this.protectedZoneCues.replaceChildren();
     this.layers.pendingRoute.replaceChildren();
     this.layers.obstacle.replaceChildren();
     this.layers.body.replaceChildren();
@@ -1122,146 +1118,6 @@ export class BattlefieldRenderer {
   }
 
   /**
-   * Render only researcher-authorized observer visibility and clearly marked
-   * presentation-layout protected zones in Technical. Neither cue changes bodies
-   * or claims to be simulator geometry.
-   *
-   * @param {JsonRecord} scene
-   * @param {ProjectedAgent[]} projectedAgents
-   * @param {boolean} showDebug
-   */
-  #renderDebugOverlays(scene, projectedAgents, showDebug) {
-    this.visibilityCues.replaceChildren();
-    this.protectedZoneCues.replaceChildren();
-    const transform = this.transform;
-    if (!showDebug || !transform) {
-      return;
-    }
-
-    const protectedZones = projectedAgents.map((agent) => {
-      const bounds = protectedBodyRect(
-        {
-          center: agent.center,
-          radius: agent.radius,
-          controlled: agent.controlled,
-          selected: agent.selected,
-        },
-        {
-          bodyPadding: 4,
-          selectionAllowance: 12,
-        },
-      );
-      return svgElement("rect", {
-        class: "debug-protected-zone",
-        x: bounds.left,
-        y: bounds.top,
-        width: bounds.width,
-        height: bounds.height,
-        rx: 5,
-        "data-zone": "debug-protected",
-        "data-slot": agent.globalSlot,
-      });
-    });
-    const observedProtectedZones = asArray(scene.observed_bodies).flatMap((body) => {
-      if (
-        !isRecord(body) ||
-        (body.relation !== "ally" && body.relation !== "enemy") ||
-        !Number.isInteger(body.observation_row) ||
-        !Array.isArray(body.position) ||
-        body.position.length !== 2 ||
-        body.position.some(
-          (coordinate) =>
-            typeof coordinate !== "number" || !Number.isFinite(coordinate),
-        )
-      ) {
-        return [];
-      }
-      const center = screenPoint(body.position, transform);
-      const bounds = protectedBodyRect(
-        {
-          center,
-          radius: transform.worldLengthToScreen(finiteNumber(body.radius, 0.5)),
-          controlled: false,
-          selected: false,
-        },
-        {
-          bodyPadding: 4,
-          selectionAllowance: 12,
-        },
-      );
-      return [
-        svgElement("rect", {
-          class: "debug-protected-zone",
-          x: bounds.left,
-          y: bounds.top,
-          width: bounds.width,
-          height: bounds.height,
-          rx: 5,
-          "data-zone": "debug-protected",
-          "data-observation-key": `${body.relation}:${body.observation_row}`,
-        }),
-      ];
-    });
-    this.protectedZoneCues.replaceChildren(
-      ...protectedZones,
-      ...observedProtectedZones,
-    );
-
-    if (scene.audience !== "researcher") {
-      return;
-    }
-    const visibilityCues = [];
-    for (const fact of asArray(scene.observer_visibility)) {
-      if (!isRecord(fact) || !Number.isInteger(fact.candidate_global_slot)) {
-        continue;
-      }
-      const agent = projectedAgents.find(
-        ({ globalSlot }) => globalSlot === fact.candidate_global_slot,
-      );
-      if (!agent) {
-        continue;
-      }
-      const visible = Boolean(fact.visible);
-      const group = svgElement("g", {
-        class: "debug-visibility-cue",
-        role: "img",
-        "aria-label": `${agentIdentity(this.agentByGlobalSlot.get(fact.observer_global_slot))} ${visible ? "can" : "cannot"} see ${agentIdentity(agent.agent)}`,
-        "data-zone": "debug-visibility",
-        "data-observer-slot": fact.observer_global_slot,
-        "data-candidate-slot": agent.globalSlot,
-        "data-visible": visible,
-      });
-      const radius = agent.radius + 16;
-      registerTooltipOwner(
-        group,
-        explainVisibility(fact, {
-          observerAgent: this.agentByGlobalSlot.get(fact.observer_global_slot) ?? null,
-          candidateAgent: agent.agent,
-        }),
-      );
-      group.append(
-        svgElement("circle", {
-          class: "debug-visibility-cue__ring",
-          cx: agent.center.x,
-          cy: agent.center.y,
-          r: radius,
-        }),
-        svgElement("text", {
-          class: "debug-visibility-cue__label",
-          x: agent.center.x + radius * 0.72,
-          y: agent.center.y - radius * 0.72,
-        }),
-      );
-      const label = group.lastElementChild;
-      if (label) {
-        label.textContent = visible ? "V" : "H";
-      }
-      visibilityCues.push(group);
-    }
-    this.visibilityCues.replaceChildren(...visibilityCues);
-  }
-
-  /**
    * Render the two exact selected-pair mask values without deriving legality
    * from geometry, cooldowns, class, or any other browser-visible fact.
    *
@@ -1565,7 +1421,13 @@ export class BattlefieldRenderer {
               globalSlot: agent.globalSlot,
               center: agent.center,
               radius: agent.radius,
-              statuses: asArray(agent.agent.modifiers),
+              statuses: asArray(agent.agent.modifiers).filter(
+                (modifier) =>
+                  !isRecord(modifier) ||
+                  typeof modifier.multiplier !== "number" ||
+                  !Number.isFinite(modifier.multiplier) ||
+                  modifier.multiplier !== 1,
+              ),
               controlled: false,
               selected: false,
             })),
@@ -2212,10 +2074,44 @@ export class BattlefieldRenderer {
       class: "agent-dead-mark",
       "aria-hidden": "true",
     });
+    const shieldRoot = svgElement("g", {
+      class: "agent-spawn-shield",
+      role: "img",
+      "data-zone": "spawn-shield",
+    });
+    const shieldShell = svgElement("circle", {
+      class: "agent-spawn-shield__shell",
+      fill: "none",
+      stroke: "#67e8f9",
+      "stroke-width": "2.6",
+      "stroke-dasharray": "5 3",
+      "vector-effect": "non-scaling-stroke",
+    });
+    const shieldChip = svgElement("rect", {
+      class: "agent-spawn-shield__chip",
+      width: 27,
+      height: 16,
+      rx: 6,
+      fill: "rgb(8 13 24 / 94%)",
+      stroke: "#67e8f9",
+      "stroke-width": "1.5",
+      "vector-effect": "non-scaling-stroke",
+    });
+    const shieldText = svgElement("text", {
+      class: "agent-spawn-shield__ticks",
+      fill: "#cffafe",
+      "font-size": "9",
+      "font-weight": "800",
+      "text-anchor": "middle",
+      "dominant-baseline": "central",
+      "pointer-events": "none",
+    });
+    shieldRoot.append(shieldShell, shieldChip, shieldText);
     root.append(
       body,
       teamRing,
       teamMarker,
+      shieldRoot,
       healthTrack,
       health,
       classIcon,
@@ -2246,6 +2142,10 @@ export class BattlefieldRenderer {
       classIcon,
       classLetter,
       deadMark,
+      shieldRoot,
+      shieldShell,
+      shieldChip,
+      shieldText,
       selectionRoot,
       controlledHalo,
       selectedReticle,
@@ -2278,6 +2178,13 @@ export class BattlefieldRenderer {
     nodes.root.dataset.alive = String(Boolean(agent.alive));
     nodes.root.dataset.controlled = String(controlled);
     nodes.root.dataset.selected = String(selected);
+    const spawnShieldRemaining = Number.isInteger(agent.spawn_shield_remaining)
+      ? Number(agent.spawn_shield_remaining)
+      : 0;
+    nodes.root.dataset.spawnShieldRemaining = String(spawnShieldRemaining);
+    nodes.root.dataset.respawnedOnIncomingTransition = String(
+      agent.respawned_on_incoming_transition === true,
+    );
     nodes.root.setAttribute(
       "aria-label",
       [
@@ -2286,6 +2193,9 @@ export class BattlefieldRenderer {
         teamToken.label,
         `health ${formatDisplayNumber(agent.current_health)} of ${formatDisplayNumber(agent.max_health)}`,
         agent.alive ? "alive" : "dead",
+        spawnShieldRemaining > 0
+          ? `Spawn Shield, invulnerable, ${spawnShieldRemaining} ${spawnShieldRemaining === 1 ? "tick" : "ticks"} remaining`
+          : null,
         controlled ? "controlled actor" : null,
         selected ? "selected target" : null,
       ]
@@ -2309,6 +2219,30 @@ export class BattlefieldRenderer {
         `L ${center.x + radius - 7} ${center.y + 4}`,
       ].join(" "),
     });
+    setAttributes(nodes.shieldRoot, {
+      hidden: spawnShieldRemaining > 0 ? null : "",
+      "aria-label":
+        spawnShieldRemaining > 0
+          ? `Spawn Shield, invulnerable, ${spawnShieldRemaining} ${spawnShieldRemaining === 1 ? "tick" : "ticks"} remaining`
+          : "Spawn Shield inactive",
+    });
+    setAttributes(nodes.shieldShell, {
+      cx: center.x,
+      cy: center.y,
+      r: radius + 5,
+    });
+    const shieldChipX = center.x + radius * 0.6;
+    const shieldChipY = center.y - radius - 13;
+    setAttributes(nodes.shieldChip, {
+      x: shieldChipX,
+      y: shieldChipY,
+    });
+    setAttributes(nodes.shieldText, {
+      x: shieldChipX + 13.5,
+      y: shieldChipY + 8,
+    });
+    nodes.shieldText.textContent = `S${spawnShieldRemaining}`;
+    registerTooltipOwner(nodes.shieldRoot, explainSpawnShield(agent));
     setAttributes(nodes.healthTrack, {
       cx: center.x,
       cy: center.y,

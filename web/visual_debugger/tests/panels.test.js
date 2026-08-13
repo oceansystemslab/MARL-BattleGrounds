@@ -3,10 +3,13 @@ import test from "node:test";
 
 import {
   actionTupleCombatLabel,
+  disclosurePanelInitiallyOpen,
   eventDescriptor,
   eventSummary,
+  panelDisclosureAuthorityKey,
   pendingActionDisplayFacts,
   publicAgentIdMap,
+  replayDiagnosticFacts,
   rosterControlDescriptor,
   rosterStatusDurationLabel,
 } from "../src/panels.js";
@@ -20,6 +23,110 @@ const PUBLIC_IDS = new Map([
   [5, "five#five"],
   [7, "seven:semicolon;"],
 ]);
+
+test("native disclosure state resets only at scenario, artifact, or audience boundaries", () => {
+  const live = {
+    viewer_mode: "live",
+    revision: 1,
+    scenario: { name: "arena" },
+    scene: { audience: "researcher", agents: [] },
+  };
+  assert.equal(
+    panelDisclosureAuthorityKey({ ...live, revision: 99, transition_id: "later" }),
+    panelDisclosureAuthorityKey(live),
+  );
+  assert.notEqual(
+    panelDisclosureAuthorityKey({ ...live, scenario: { name: "other" } }),
+    panelDisclosureAuthorityKey(live),
+  );
+
+  const replay = {
+    viewer_mode: "replay",
+    replay_audience: "researcher",
+    cursor: { frame_index: 0 },
+    artifact_summary: {
+      replay_reference: {
+        artifact_id: "artifact-a",
+        canonical_digest_sha256: "digest-a",
+      },
+    },
+    scene: { audience: "researcher", agents: [] },
+  };
+  assert.equal(
+    panelDisclosureAuthorityKey({ ...replay, cursor: { frame_index: 200 } }),
+    panelDisclosureAuthorityKey(replay),
+  );
+  assert.notEqual(
+    panelDisclosureAuthorityKey({
+      ...replay,
+      replay_audience: "actor_pov",
+      pov_global_slot: 0,
+    }),
+    panelDisclosureAuthorityKey(replay),
+  );
+  assert.notEqual(
+    panelDisclosureAuthorityKey({
+      ...replay,
+      artifact_summary: {
+        replay_reference: {
+          artifact_id: "artifact-b",
+          canonical_digest_sha256: "digest-b",
+        },
+      },
+    }),
+    panelDisclosureAuthorityKey(replay),
+  );
+  assert.equal(panelDisclosureAuthorityKey(null), null);
+});
+
+test("native disclosure defaults keep only operational live panels and roster open", () => {
+  assert.equal(disclosurePanelInitiallyOpen("command-deck", false), true);
+  assert.equal(disclosurePanelInitiallyOpen("command-deck", true), false);
+  assert.equal(disclosurePanelInitiallyOpen("roster-details", false), true);
+  assert.equal(disclosurePanelInitiallyOpen("roster-details", true), true);
+  for (const id of [
+    "agent-details",
+    "pending-turn-details",
+    "latest-transition-details",
+    "events-details",
+    "visual-key",
+    "technical-frame-details",
+  ]) {
+    assert.equal(disclosurePanelInitiallyOpen(id, false), false);
+    assert.equal(disclosurePanelInitiallyOpen(id, true), false);
+  }
+  assert.throws(() => disclosurePanelInitiallyOpen("unknown", false), /Unknown/u);
+});
+
+test("replay diagnostics display recorded movement scale only for researchers", () => {
+  const base = {
+    viewer_mode: "replay",
+    frame_kind: "researcher_replay_viewer",
+    timeline_id: "artifact:timeline:researcher",
+    cursor: { cursor_generation: 3, choreography_generation: 4 },
+    artifact_summary: { metric_report_availability: "available" },
+  };
+  const researcher = replayDiagnosticFacts({
+    ...base,
+    replay_audience: "researcher",
+    recorded_ordinary_movement_distance_scale: 0.375,
+  });
+  const pov = replayDiagnosticFacts({
+    ...base,
+    replay_audience: "actor_pov",
+  });
+
+  assert.deepEqual(researcher.at(-1), {
+    label: "Recorded movement scale",
+    value: "0.38",
+  });
+  assert.equal(
+    pov.some((fact) => fact.label === "Recorded movement scale"),
+    false,
+  );
+  assert.equal(Object.isFrozen(researcher), true);
+  assert.deepEqual(replayDiagnosticFacts({ viewer_mode: "live" }), []);
+});
 
 test("roster buttons own audience- and availability-specific control help", () => {
   /** @type {Array<["target" | "control", "live" | "researcher_replay", boolean, string, string, string]>} */
@@ -200,8 +307,8 @@ test("all 21 researcher event kinds use arbitrary public IDs and never slot labe
   );
   assert.match(summaries[0], /Agent ID one\/agent&x/u);
   assert.match(summaries[1], /Agent ID seven:semicolon;/u);
-  assert.match(summaries[2], /Mage aura emitters 2/u);
-  assert.match(summaries[2], /Warrior mitigation emitters 1/u);
+  assert.match(summaries[2], /Sorcerer’s Empowerment emitters 2/u);
+  assert.match(summaries[2], /Guardian’s Barrier emitters 1/u);
   assert.doesNotMatch(summaries[2], /zero:<opaque>|five#five|three\.300/u);
   assert.match(summaries[3], /aura emitter evidence not recorded/u);
 });

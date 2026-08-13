@@ -199,6 +199,7 @@ function plan(epoch, authorization = "researcher", fingerprint = `events-${epoch
  *   ledger?: ConsumedTransitionLedger,
  *   storage?: FakeStorage | null,
  *   motionMode?: "normal" | "reduced" | "off",
+ *   playbackRate?: number,
  * }} [options]
  */
 function harness(options = {}) {
@@ -216,6 +217,7 @@ function harness(options = {}) {
     animationFactory,
     ledger,
     motionMode: options.motionMode ?? "normal",
+    playbackRate: options.playbackRate,
     planBuilder: (frame) =>
       /** @type {Record<string, any> | null | undefined} */ (
         /** @type {any} */ (frame)?.plan
@@ -466,7 +468,7 @@ test("a direct replay refresh settles an in-flight presentation of the same epoc
   assert.equal(controller.snapshot().submissionBlocked, false);
 });
 
-test("pause, rate, Skip, reduced motion, and Off remain presentation-only", async () => {
+test("pause, fixed-rate compatibility, Skip, reduced motion, and Off remain presentation-only", async () => {
   const idle = harness();
   assert.equal(idle.controller.togglePaused().paused, false);
 
@@ -479,9 +481,10 @@ test("pause, rate, Skip, reduced motion, and Off remain presentation-only", asyn
   );
   normal.controller.setPlaybackRate(2);
   assert.equal(
-    normal.animationFactory.created.every(({ playbackRate }) => playbackRate === 2),
+    normal.animationFactory.created.every(({ playbackRate }) => playbackRate === 1),
     true,
   );
+  assert.equal(normal.controller.snapshot().playbackRate, 1);
   normal.controller.togglePaused();
   normal.controller.skip();
   assert.equal(normal.controller.snapshot().submissionBlocked, false);
@@ -505,23 +508,22 @@ test("pause, rate, Skip, reduced motion, and Off remain presentation-only", asyn
   assert.equal(off.controller.snapshot().animationCount, 0);
 });
 
-test("graphics rendering speed accepts only the bounded 0.01 to 2.00 range", () => {
-  const minimum = harness();
-  minimum.controller.setPlaybackRate(0.01);
-  assert.equal(minimum.controller.snapshot().playbackRate, 0.01);
-
-  const maximum = harness();
-  maximum.controller.setPlaybackRate(2);
-  assert.equal(maximum.controller.snapshot().playbackRate, 2);
-
-  for (const invalid of [0, 0.009, 2.001, Number.NaN, Number.POSITIVE_INFINITY]) {
-    const bounded = harness();
-    assert.throws(
-      () => bounded.controller.setPlaybackRate(invalid),
-      /between 0\.01 and 2/,
-    );
-    assert.equal(bounded.controller.snapshot().playbackRate, 1);
+test("legacy graphics-speed requests are canonical fixed-rate no-ops", () => {
+  for (const legacy of [0.01, 0.5, 2, 0, 2.001, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const fixed = harness();
+    assert.doesNotThrow(() => fixed.controller.setPlaybackRate(legacy));
+    assert.equal(fixed.controller.snapshot().playbackRate, 1);
   }
+});
+
+test("legacy constructor playback rate is canonicalized to 1.0", () => {
+  const fixed = harness({ playbackRate: 0.25 });
+  fixed.controller.presentFrame({ plan: plan("fixed-constructor-rate") }, surfaceA);
+  assert.equal(fixed.controller.snapshot().playbackRate, 1);
+  assert.equal(
+    fixed.animationFactory.created.every(({ playbackRate }) => playbackRate === 1),
+    true,
+  );
 });
 
 test("switching an active explanation Off reinstalls the authorized batch until bounded cleanup", async () => {
@@ -571,7 +573,7 @@ test("switching an active explanation Off reinstalls the authorized batch until 
   controller.setMotionMode("normal");
   controller.setPlaybackRate(0.5);
   assert.equal(controller.snapshot().motionMode, "normal");
-  assert.equal(controller.snapshot().playbackRate, 0.5);
+  assert.equal(controller.snapshot().playbackRate, 1);
   assert.equal(
     painter.calls.filter(([kind]) => kind === "install").length,
     installCount,
@@ -584,7 +586,7 @@ test("switching an active explanation Off reinstalls the authorized batch until 
   assert.equal(controller.snapshot().animationCount, 0);
 });
 
-test("numeric playback rates preserve an active reduced-motion explanation", () => {
+test("legacy rate calls preserve an active reduced-motion explanation at 1.0", () => {
   const { animationFactory, controller, painter } = harness({
     motionMode: "reduced",
   });
@@ -595,9 +597,9 @@ test("numeric playback rates preserve an active reduced-motion explanation", () 
   controller.setPlaybackRate(2);
 
   assert.equal(controller.snapshot().motionMode, "reduced");
-  assert.equal(controller.snapshot().playbackRate, 2);
+  assert.equal(controller.snapshot().playbackRate, 1);
   assert.equal(
-    animationFactory.created.every(({ playbackRate }) => playbackRate === 2),
+    animationFactory.created.every(({ playbackRate }) => playbackRate === 1),
     true,
   );
   assert.equal(
