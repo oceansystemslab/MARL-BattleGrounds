@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 
+import { formatDisplayNumber } from "../src/display.js";
 import {
   CHOREOGRAPHY_ROOT,
   installWaapiAutopause,
@@ -7,8 +8,11 @@ import {
 } from "./support/choreography.js";
 import { startDebugger, stopDebugger } from "./support/live-debugger.js";
 import {
+  loadCatalogPropagationFixture,
   loadRendererFixture,
-  syntheticDebuggerFrame,
+  syntheticDebuggerPresentationFrame,
+  syntheticDebuggerWireFrame,
+  syntheticFixturePresentationPair,
 } from "./support/renderer-fixture.js";
 
 /** @type {import("node:child_process").ChildProcess | null} */
@@ -17,22 +21,218 @@ let debuggerUrl = "";
 /** @type {Record<string, any>} */
 let syntheticFrame = {};
 /** @type {Record<string, any>} */
-let syntheticPovFrame = {};
+let syntheticWireFrame = {};
+/** @type {Record<string, any>} */
+let syntheticPovWireFrame = {};
+/** @type {Record<string, any>} */
+let canonicalGrammarFrame = {};
+/** @type {Record<string, any>} */
+let canonicalGrammarWireFrame = {};
+/** @type {Record<string, ReturnType<typeof syntheticFixturePresentationPair>>} */
+let exhaustivePresentationPairs = {};
+/** @type {{live_frame: Record<string, any>, expected: Record<string, number>}} */
+let catalogPropagationFixture = { live_frame: {}, expected: {} };
+
+const CANONICAL_EVENT_V2_KINDS = new Set([
+  "action_rejected",
+  "ability_activated",
+  "source_damage_output",
+  "source_healing_output",
+  "recipient_health_resolution",
+  "combat_countdown_reset",
+  "health_regenerated",
+  "cooldown_started",
+  "cooldown_ready",
+  "charge_phase_displacement",
+  "ordinary_movement_phase_displacement",
+  "agent_died",
+  "lethal_damage_contribution",
+  "status_aged_to_zero",
+  "status_broken_by_damage",
+  "status_applied",
+  "status_refreshed_or_extended",
+  "status_cleared_by_new_death",
+  "spawn_shield_expired",
+  "respawn_wave_occurred",
+  "agent_respawned",
+]);
+
+const ACTOR_POV_CUE_KINDS = new Set([
+  "own_action_outcome",
+  "own_position_changed",
+  "own_health_changed",
+  "own_status_changed",
+  "own_cooldown_changed",
+  "own_lifecycle_changed",
+  "visible_body_observation_changed",
+  "episode_ended",
+]);
+
+const STATUS_TOKEN_IDS = new Set([
+  "slow_warrior_charge",
+  "slow_hunter_basic",
+  "slow_rogue_poison",
+  "stun_warrior_charge",
+  "stun_hunter_trap",
+  "stun_rogue_poison",
+  "anti_heal_rogue_poison",
+  "mage_burst",
+  "priest_freedom",
+]);
+
+const ULTIMATE_TOKEN_BY_CLASS = Object.freeze({
+  hunter: "hunter_trap",
+  mage: "mage_burst",
+  priest: "holy_word",
+  rogue: "rogue_poison",
+  warrior: "warrior_charge",
+});
+
+const ULTIMATE_NAME_BY_CLASS = Object.freeze({
+  hunter: "Trap",
+  mage: "Burst",
+  priest: "Holy Word",
+  rogue: "Poison",
+  warrior: "Charge",
+});
+
+/**
+ * Replace one catalog-owned display fragment while preserving every stable
+ * word around it for the semantic snapshot. A missing or repeated fragment is
+ * evidence drift, not permission to normalize an arbitrary string.
+ *
+ * @param {string | undefined} value
+ * @param {string} fragment
+ * @param {string} placeholder
+ * @param {string} label
+ */
+function replaceCatalogFragmentOnce(value, fragment, placeholder, label) {
+  if (typeof value !== "string") {
+    throw new Error(`${label} has no semantic value to snapshot.`);
+  }
+  const first = value.indexOf(fragment);
+  const repeated = first >= 0 && value.indexOf(fragment, first + fragment.length) >= 0;
+  if (first < 0 || repeated) {
+    throw new Error(
+      `${label} must contain exactly one catalog fragment ${JSON.stringify(fragment)}.`,
+    );
+  }
+  return `${value.slice(0, first)}${placeholder}${value.slice(first + fragment.length)}`;
+}
+
+/**
+ * Keep deliberately extreme synthetic presentation values within the same
+ * serialized mechanics authority that the strict browser boundary validates.
+ *
+ * @param {Record<string, any>} scene
+ * @param {number} agentIndex
+ * @param {number} statusIndex
+ * @param {number} duration
+ */
+function authorizeSyntheticStatusDuration(scene, agentIndex, statusIndex, duration) {
+  const status = scene.agents[agentIndex]?.statuses?.[statusIndex];
+  const mechanic = scene.class_mechanics
+    .flatMap(/** @param {Record<string, any>} row */ (row) => row.status_mechanics)
+    .find(
+      /** @param {Record<string, any>} row */ (row) =>
+        row.status_channel === status?.status_channel,
+    );
+  if (!status || !mechanic) {
+    throw new Error("Synthetic status stress value has no serialized mechanic.");
+  }
+  status.remaining_duration = duration;
+  mechanic.duration_steps = Math.max(mechanic.duration_steps, duration);
+}
+
+/**
+ * @param {Record<string, any>} scene
+ * @param {number} agentIndex
+ * @param {number} ticks
+ */
+function authorizeSyntheticCooldown(scene, agentIndex, ticks) {
+  const agent = scene.agents[agentIndex];
+  const mechanic = scene.class_mechanics.find(
+    /** @param {Record<string, any>} row */
+    (row) => row.class_id === agent?.class_id,
+  );
+  if (!agent || !mechanic) {
+    throw new Error("Synthetic cooldown stress value has no serialized mechanic.");
+  }
+  agent.ultimate_cooldown_remaining = ticks;
+  mechanic.ultimate_cooldown_steps = Math.max(mechanic.ultimate_cooldown_steps, ticks);
+}
+
+/**
+ * @param {Record<string, any>} scene
+ * @param {number} agentIndex
+ * @param {number} modifierIndex
+ * @param {number} multiplier
+ */
+function authorizeSyntheticAuraModifier(scene, agentIndex, modifierIndex, multiplier) {
+  const modifier = scene.agents[agentIndex]?.aura_modifiers?.[modifierIndex];
+  const mechanic = scene.class_mechanics
+    .flatMap(/** @param {Record<string, any>} row */ (row) => row.aura_mechanics)
+    .find(
+      /** @param {Record<string, any>} row */ (row) =>
+        row.aura_id === modifier?.aura_id,
+    );
+  if (!modifier || !mechanic || mechanic.clamp_kind !== "ceiling") {
+    throw new Error("Synthetic aura stress value has no ceiling mechanic.");
+  }
+  modifier.multiplier = multiplier;
+  mechanic.clamp_value = multiplier;
+  for (const field of scene.aura_fields.filter(
+    /** @param {Record<string, any>} row */
+    (row) => row.aura_id === modifier.aura_id,
+  )) {
+    field.clamp_value = multiplier;
+  }
+}
 
 test.beforeAll(async () => {
-  const [started, fixture, povFixture] = await Promise.all([
+  const [
+    started,
+    fixture,
+    povFixture,
+    grammarFixture,
+    vocabularyFixture,
+    mixedFixture,
+    catalogFixture,
+  ] = await Promise.all([
     startDebugger(),
     loadRendererFixture("crowded_teamfight"),
     loadRendererFixture("pov_redaction"),
+    loadRendererFixture("canonical_event_vocabulary"),
+    loadRendererFixture("visual_vocabulary"),
+    loadRendererFixture("mixed_net_zero"),
+    loadCatalogPropagationFixture(),
   ]);
   serverProcess = started.process;
   debuggerUrl = started.url;
-  syntheticFrame = syntheticDebuggerFrame(fixture);
-  syntheticPovFrame = syntheticDebuggerFrame(povFixture);
+  syntheticFrame = syntheticDebuggerPresentationFrame(fixture);
+  syntheticWireFrame = syntheticDebuggerWireFrame(fixture);
+  syntheticPovWireFrame = syntheticDebuggerWireFrame(povFixture);
+  canonicalGrammarFrame = syntheticDebuggerPresentationFrame(grammarFixture);
+  canonicalGrammarWireFrame = syntheticDebuggerWireFrame(grammarFixture);
+  exhaustivePresentationPairs = {
+    crowded: syntheticFixturePresentationPair(fixture),
+    grammar: syntheticFixturePresentationPair(grammarFixture),
+    mixed: syntheticFixturePresentationPair(mixedFixture),
+    pov: syntheticFixturePresentationPair(povFixture),
+    vocabulary: syntheticFixturePresentationPair(vocabularyFixture),
+  };
+  catalogPropagationFixture = catalogFixture;
   expect(syntheticFrame).toMatchObject({
-    schema_version: "renderer_fixture_v1",
-    frame_kind: "synthetic_renderer_fixture",
+    schema_version: 2,
+    frame_kind: "researcher_live_debugger",
   });
+  expect(syntheticWireFrame).not.toHaveProperty("scene");
+  expect(syntheticWireFrame).not.toHaveProperty("event_batch");
+  expect(syntheticWireFrame).not.toHaveProperty("simulator_step");
+  expect(syntheticWireFrame).not.toHaveProperty("transition_id");
+  expect(syntheticFrame).toHaveProperty("scene");
+  expect(syntheticFrame).toHaveProperty("event_batch");
+  expect(syntheticWireFrame.projection).toMatchObject({ schema_version: 2 });
 });
 
 test.afterAll(async () => {
@@ -41,22 +241,523 @@ test.afterAll(async () => {
   await stopDebugger(child);
 });
 
+/**
+ * Install one exact fixture-owned live or replay envelope through the same
+ * `/api/frame` bootstrap used by the application. Replay installation also
+ * requires the exact independently normalized timeline before Online state.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @param {ReturnType<typeof syntheticFixturePresentationPair>} pair
+ * @param {"live" | "replay"} transport
+ * @param {{preset?: "presentation" | "analysis" | "debug"}} [options]
+ */
+async function installPresentationPair(page, pair, transport, options = {}) {
+  const firstInstall = page.url() === "about:blank";
+  await page.unroute("**/api/frame");
+  await page.unroute("**/api/replay/timeline");
+  await page.unroute("**/api/command");
+  if (page.url() !== "about:blank") {
+    await page.evaluate(() => {
+      window.sessionStorage.removeItem(
+        "marl-battlegrounds.visual-debugger.consumed-transitions.v1",
+      );
+    });
+  }
+  const frame = structuredClone(
+    transport === "live" ? pair.liveFrame : pair.replayFrame,
+  );
+  if (options.preset) {
+    frame.preset = options.preset;
+  }
+  let commandRequests = 0;
+  let timelineRequests = 0;
+  await page.route("**/api/frame", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      headers: { "Cache-Control": "no-store" },
+      json: frame,
+      status: 200,
+    });
+  });
+  await page.route("**/api/replay/timeline", async (route) => {
+    timelineRequests += 1;
+    if (transport !== "replay") {
+      await route.abort("blockedbyclient");
+      return;
+    }
+    await route.fulfill({
+      contentType: "application/json",
+      headers: { "Cache-Control": "no-store" },
+      json: pair.replayTimeline,
+      status: 200,
+    });
+  });
+  await page.route("**/api/command", async (route) => {
+    commandRequests += 1;
+    await route.abort("blockedbyclient");
+  });
+
+  if (firstInstall) {
+    await page.goto(debuggerUrl);
+  } else {
+    await page.reload();
+  }
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await expect(page.locator("html")).toHaveAttribute("data-viewer-mode", transport);
+  await expect(page.locator("html")).toHaveAttribute("data-audience", pair.audience);
+  if (transport === "replay") {
+    await expect(page.locator("#replay-timeline")).toBeVisible();
+    expect(timelineRequests).toBe(1);
+  } else {
+    await expect(page.locator("#replay-timeline")).toBeHidden();
+    expect(timelineRequests).toBe(0);
+  }
+  expect(commandRequests).toBe(0);
+  return frame;
+}
+
+/**
+ * @param {import("@playwright/test").Page} page
+ * @param {Array<Record<string, any>>} events
+ */
+async function expectExactFeed(page, events) {
+  await expect(page.locator("#event-feed .event-item")).toHaveCount(events.length);
+  expect(
+    await page.locator("#event-feed .event-item").evaluateAll((items) =>
+      items.map((item) => ({
+        eventId: item.getAttribute("data-event-id"),
+        eventType: item.getAttribute("data-event-type"),
+        semanticOwner: item.hasAttribute("data-tooltip-owner"),
+      })),
+    ),
+  ).toEqual(
+    events.map((event) => ({
+      eventId: event.event_id ?? event.cue_id,
+      eventType: event.event_type ?? event.cue_type,
+      semanticOwner: true,
+    })),
+  );
+}
+
+/** @param {import("@playwright/test").Page} page */
+async function expectNoVisibleLegacySlotLabels(page) {
+  expect(await page.locator("body").innerText()).not.toMatch(/\bid_\d+\b/u);
+  const accessibilityCopy = await page
+    .locator("[aria-label], [aria-description], [title]")
+    .evaluateAll((nodes) =>
+      nodes.flatMap((node) =>
+        ["aria-label", "aria-description", "title"]
+          .map((attribute) => node.getAttribute(attribute))
+          .filter((value) => value !== null),
+      ),
+    );
+  expect(accessibilityCopy.join("\n")).not.toMatch(/\bid_\d+\b/u);
+}
+
+/**
+ * Assert every paintable Event V2 row retains its exact event identity and
+ * every non-Basic surface owns a semantic explanation. Feed-only rows are
+ * deliberately absent from SVG choreography.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @param {Array<Record<string, any>>} events
+ */
+async function expectExactResearcherChoreography(page, events) {
+  const feedOnlyKinds = new Set([
+    "lethal_damage_contribution",
+    "source_damage_output",
+    "source_healing_output",
+  ]);
+  const painted = events.filter(
+    (event) => !feedOnlyKinds.has(String(event.event_type)),
+  );
+  expect(
+    await page.locator(`${CHOREOGRAPHY_ROOT} .combat-effect`).evaluateAll((nodes) =>
+      nodes.map((node) => ({
+        eventId: node.getAttribute("data-event-id"),
+        eventType: node.getAttribute("data-event-type"),
+        semanticOwner: node.hasAttribute("data-tooltip-owner"),
+      })),
+    ),
+  ).toEqual(
+    painted.map((event) => ({
+      eventId: event.event_id,
+      eventType: event.event_type,
+      semanticOwner: !(
+        event.event_type === "ability_activated" && event.ability_component === "basic"
+      ),
+    })),
+  );
+}
+
+/**
+ * A loaded replay bootstrap intentionally settles its incoming transition and
+ * retains only persistent choreography. The feed remains the exhaustive event
+ * record, so this separately proves the settled visual contract.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @param {Array<Record<string, any>>} events
+ */
+async function expectSettledResearcherChoreography(page, events) {
+  const persistent = events.filter(
+    (event) => event.event_type === "charge_phase_displacement",
+  );
+  expect(
+    await page.locator(`${CHOREOGRAPHY_ROOT} .combat-effect`).evaluateAll((nodes) =>
+      nodes.map((node) => ({
+        eventId: node.getAttribute("data-event-id"),
+        eventType: node.getAttribute("data-event-type"),
+        semanticOwner: node.hasAttribute("data-tooltip-owner"),
+      })),
+    ),
+  ).toEqual(
+    persistent.map((event) => ({
+      eventId: event.event_id,
+      eventType: event.event_type,
+      semanticOwner: true,
+    })),
+  );
+}
+
+/**
+ * @param {import("@playwright/test").Page} page
+ * @param {Array<Record<string, any>>} agents
+ */
+async function expectExactResearcherPublicIds(page, agents) {
+  const expected = agents.map((agent) => String(agent.public_agent_id));
+  expect(
+    await page
+      .locator("#battlefield .agent")
+      .evaluateAll((nodes) =>
+        nodes.map(
+          (node) =>
+            node.getAttribute("aria-label")?.match(/^Agent ID ([^,]+)/u)?.[1] ?? null,
+        ),
+      ),
+  ).toEqual(expected);
+  expect(await page.locator("#roster .roster-id").allTextContents()).toEqual(
+    expected.map((publicAgentId) => `Agent ID ${publicAgentId}`),
+  );
+}
+
+test("exhaustive presentation roots survive live and loaded-replay main paths", async ({
+  page,
+}) => {
+  await installWaapiAutopause(page);
+
+  for (const transport of /** @type {Array<"live" | "replay">} */ ([
+    "live",
+    "replay",
+  ])) {
+    const grammar = exhaustivePresentationPairs.grammar;
+    const grammarEvents = /** @type {Array<Record<string, any>>} */ (
+      grammar.liveFrame.projection.incoming_events.events
+    );
+    const grammarScene = grammar.liveFrame.projection.scene;
+    const grammarAgents = /** @type {Array<Record<string, any>>} */ (
+      grammarScene.agents
+    );
+    const respawnWaves = /** @type {Array<Record<string, any>>} */ (
+      grammarScene.respawn_waves
+    );
+    await installPresentationPair(page, grammar, transport);
+    await expectExactFeed(page, grammarEvents);
+    if (transport === "live") {
+      await expectExactResearcherChoreography(page, grammarEvents);
+    } else {
+      await expectSettledResearcherChoreography(page, grammarEvents);
+    }
+    await expectExactResearcherPublicIds(page, grammarAgents);
+    expect(grammarEvents).toHaveLength(23);
+    expect(new Set(grammarEvents.map((event) => event.event_type))).toEqual(
+      CANONICAL_EVENT_V2_KINDS,
+    );
+    expect(grammar.replayTimeline.rows[1].incoming_event_count).toBe(23);
+    expect(new Set(respawnWaves.map((wave) => wave.team_id))).toEqual(new Set([1, 2]));
+    expect(
+      grammarAgents.find((agent) => agent.public_agent_id === "9")
+        ?.spawn_shield_remaining,
+    ).toBe(3);
+    await expect(
+      page.locator('#battlefield .agent[data-slot="6"][data-alive="false"]'),
+    ).toHaveCount(1);
+    if (transport === "live") {
+      for (const eventType of [
+        "action_rejected",
+        "combat_countdown_reset",
+        "health_regenerated",
+        "cooldown_started",
+        "cooldown_ready",
+        "charge_phase_displacement",
+        "ordinary_movement_phase_displacement",
+        "agent_died",
+        "spawn_shield_expired",
+        "respawn_wave_occurred",
+        "agent_respawned",
+      ]) {
+        await expect(
+          page.locator(
+            `${CHOREOGRAPHY_ROOT} .combat-effect[data-event-type="${eventType}"][data-tooltip-owner]`,
+          ),
+        ).toHaveCount(1);
+      }
+    }
+    await expectNoVisibleLegacySlotLabels(page);
+
+    const vocabulary = exhaustivePresentationPairs.vocabulary;
+    const vocabularyEvents = /** @type {Array<Record<string, any>>} */ (
+      vocabulary.liveFrame.projection.incoming_events.events
+    );
+    const vocabularyScene = vocabulary.liveFrame.projection.scene;
+    const vocabularyAgents = /** @type {Array<Record<string, any>>} */ (
+      vocabularyScene.agents
+    );
+    const classMechanics = /** @type {Array<Record<string, any>>} */ (
+      vocabularyScene.class_mechanics
+    );
+    await installPresentationPair(page, vocabulary, transport);
+    await expectExactFeed(page, vocabularyEvents);
+    if (transport === "live") {
+      await expectExactResearcherChoreography(page, vocabularyEvents);
+    } else {
+      await expectSettledResearcherChoreography(page, vocabularyEvents);
+    }
+    await expectExactResearcherPublicIds(page, vocabularyAgents);
+    expect(new Set(vocabularyAgents.map((agent) => agent.class_id))).toEqual(
+      new Set([1, 2, 3, 4, 5]),
+    );
+    expect(
+      new Set(
+        classMechanics.flatMap((mechanics) =>
+          /** @type {Array<Record<string, any>>} */ (mechanics.status_mechanics).map(
+            (status) => status.status_channel,
+          ),
+        ),
+      ),
+    ).toEqual(new Set([0, 1, 2, 3, 4, 5, 6, 7, 8]));
+
+    if (transport === "live") {
+      const basicActivations = page.locator(
+        `${CHOREOGRAPHY_ROOT} .combat-effect--activation[data-token-id="basic_damage"], ${CHOREOGRAPHY_ROOT} .combat-effect--activation[data-token-id="basic_heal"]`,
+      );
+      await expect(basicActivations).toHaveCount(5);
+      expect(
+        await basicActivations.evaluateAll((nodes) =>
+          nodes.every((node) => !node.hasAttribute("data-tooltip-owner")),
+        ),
+      ).toBe(true);
+    }
+    for (const [className, ultimateToken] of Object.entries(ULTIMATE_TOKEN_BY_CLASS)) {
+      if (transport === "live") {
+        const ultimate = page.locator(
+          `${CHOREOGRAPHY_ROOT} .combat-effect--activation[data-token-id="${ultimateToken}"][data-tooltip-owner]`,
+        );
+        await expect(ultimate).toHaveCount(1);
+      }
+      const rosterRow = page
+        .locator(`#roster .roster-row[data-class="${className}"]`)
+        .first();
+      await rosterRow.press("Enter");
+      await expect(page.locator("#semantic-inspector")).toBeVisible();
+      await expect(page.locator("#semantic-inspector-content")).toContainText(
+        "Exact Class Mechanics",
+      );
+      await expect(page.locator("#semantic-inspector-content")).toContainText(
+        "Ultimate Name",
+      );
+      await expect(page.locator("#semantic-inspector-content")).toContainText(
+        ULTIMATE_NAME_BY_CLASS[
+          /** @type {keyof typeof ULTIMATE_NAME_BY_CLASS} */ (className)
+        ],
+      );
+      await page.locator("#semantic-inspector-close-button").click();
+    }
+    expect(
+      new Set(
+        await page
+          .locator("#battlefield .range-ring")
+          .evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-kind"))),
+      ),
+    ).toEqual(new Set(["observation", "basic", "ultimate"]));
+    expect(
+      await page
+        .locator("#battlefield .range-ring-owner")
+        .evaluateAll((nodes) =>
+          nodes.every((node) => node.hasAttribute("data-tooltip-owner")),
+        ),
+    ).toBe(true);
+    expect(
+      new Set(
+        await page
+          .locator("#battlefield .aura-field[data-tooltip-owner]")
+          .evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-token"))),
+      ),
+    ).toEqual(new Set(["mage_amplification", "warrior_mitigation"]));
+    expect(
+      new Set(
+        await page
+          .locator("#battlefield .modifier-cell[data-tooltip-owner]")
+          .evaluateAll((nodes) =>
+            nodes.map((node) => node.getAttribute("data-token-id")),
+          ),
+      ),
+    ).toEqual(new Set(["mage_amplification", "warrior_mitigation"]));
+    await expectNoVisibleLegacySlotLabels(page);
+
+    const crowded = exhaustivePresentationPairs.crowded;
+    const crowdedScene = crowded.liveFrame.projection.scene;
+    const crowdedAgents = /** @type {Array<Record<string, any>>} */ (
+      crowdedScene.agents
+    );
+    await installPresentationPair(page, crowded, transport, {
+      preset: "presentation",
+    });
+    await expect(page.locator("html")).toHaveAttribute("data-preset", "presentation");
+    expect(
+      new Set(
+        crowdedAgents.flatMap((agent) =>
+          /** @type {Array<Record<string, any>>} */ (agent.statuses).map(
+            (status) => status.status_id,
+          ),
+        ),
+      ),
+    ).toEqual(
+      new Set([
+        "warrior_charge_slow",
+        "hunter_basic_slow",
+        "rogue_poison_slow",
+        "warrior_charge_stun",
+        "hunter_trap_stun",
+        "rogue_poison_stun",
+        "rogue_poison_anti_heal",
+        "mage_burst_damage_amplification",
+        "priest_blessing_of_freedom_movement_floor",
+      ]),
+    );
+    const renderedStatusCells = page.locator(
+      "#battlefield .status-cell[data-tooltip-owner]",
+    );
+    await expect(renderedStatusCells).not.toHaveCount(0);
+    expect(
+      new Set(
+        await renderedStatusCells.evaluateAll((nodes) =>
+          nodes.map((node) => node.getAttribute("data-token-id")),
+        ),
+      ),
+    ).toEqual(STATUS_TOKEN_IDS);
+    await expect(
+      page.locator("#battlefield .obstacle[data-tooltip-owner]"),
+    ).toHaveCount(2);
+    expect(
+      new Set(
+        await page
+          .locator("#battlefield .obstacle")
+          .evaluateAll((nodes) =>
+            nodes.map((node) =>
+              node.getAttribute("aria-label")?.split(" ")[0].toLowerCase(),
+            ),
+          ),
+      ),
+    ).toEqual(new Set(["pillar", "wall"]));
+    await expect(page.locator("#battlefield .aura-field")).toHaveCount(
+      crowdedScene.aura_fields.length,
+    );
+    expect(await page.locator("#battlefield .modifier-cell").count()).toBeGreaterThan(
+      0,
+    );
+    await expect(page.locator("#battlefield .status-overflow")).toHaveCount(0);
+    await expectNoVisibleLegacySlotLabels(page);
+
+    const mixed = exhaustivePresentationPairs.mixed;
+    const mixedEvents = /** @type {Array<Record<string, any>>} */ (
+      mixed.liveFrame.projection.incoming_events.events
+    );
+    await installPresentationPair(page, mixed, transport);
+    await expectExactFeed(page, mixedEvents);
+    if (transport === "live") {
+      const zeroNet = page.locator(
+        `${CHOREOGRAPHY_ROOT} .combat-effect--net-health[data-outcome="unchanged"][data-tooltip-owner]`,
+      );
+      await expect(zeroNet).toHaveCount(1);
+      await expect(zeroNet.locator(".combat-net__label")).toHaveText("HP unchanged");
+    } else {
+      await expectSettledResearcherChoreography(page, mixedEvents);
+    }
+    await expect(
+      page.locator(
+        '#event-feed .event-item[data-event-type="recipient_health_resolution"]',
+      ),
+    ).toContainText("+0");
+    await expectNoVisibleLegacySlotLabels(page);
+  }
+
+  for (const transport of /** @type {Array<"live" | "replay">} */ ([
+    "live",
+    "replay",
+  ])) {
+    const pov = exhaustivePresentationPairs.pov;
+    const cues = /** @type {Array<Record<string, any>>} */ (
+      pov.liveFrame.projection.incoming_cues
+    );
+    await installPresentationPair(page, pov, transport);
+    await expectExactFeed(page, cues);
+    expect(cues).toHaveLength(8);
+    expect(new Set(cues.map((cue) => cue.cue_type))).toEqual(ACTOR_POV_CUE_KINDS);
+    expect(pov.replayTimeline.rows[1].incoming_cue_count).toBe(8);
+    expect(pov.replayFrame.projection).not.toHaveProperty("incoming_events");
+    expect(pov.replayFrame.artifact_summary.metric_report_availability).toBe(
+      "not_available_in_actor_pov",
+    );
+    expect(pov.replayFrame.processing_disclosure.disclosure).toBe(
+      "not_available_in_actor_pov",
+    );
+    if (transport === "live") {
+      await expect(page.locator(`${CHOREOGRAPHY_ROOT} .combat-effect`)).toHaveCount(2);
+      await expect(
+        page.locator(
+          `${CHOREOGRAPHY_ROOT} .combat-effect[data-event-type="own_position_changed"][data-tooltip-owner]`,
+        ),
+      ).toHaveCount(1);
+      await expect(
+        page.locator(
+          `${CHOREOGRAPHY_ROOT} .combat-effect[data-event-type="own_health_changed"][data-tooltip-owner]`,
+        ),
+      ).toHaveCount(1);
+    } else {
+      await expect(page.locator(`${CHOREOGRAPHY_ROOT} .combat-effect`)).toHaveCount(0);
+    }
+    await expect(page.locator("#roster .roster-row")).toHaveCount(1);
+    await expect(page.locator("#roster .roster-id")).toHaveText("Agent ID 0");
+    await expect(
+      page.locator(
+        '#battlefield .pov-observed-body[data-observation-key="ally:1"][data-public-agent-id="1"]',
+      ),
+    ).toHaveCount(1);
+    await expect(
+      page.locator('[data-source-slot="5"], [data-target-slot="5"]'),
+    ).toHaveCount(0);
+    await expect(page.locator('#battlefield .agent[data-slot="5"]')).toHaveCount(0);
+    await expectNoVisibleLegacySlotLabels(page);
+  }
+});
+
 test("test-only fixture interception installs an explicitly synthetic scene", async ({
   page,
 }) => {
-  const layoutStressFrame = structuredClone(syntheticFrame);
-  layoutStressFrame.scene.agents[4].modifiers[0].multiplier = 123456.789;
-  layoutStressFrame.scene.agents[0].statuses[0].duration = 123456789;
-  layoutStressFrame.scene.agents[7].statuses.slice(0, 5).forEach(
+  const layoutStressFrame = structuredClone(syntheticWireFrame);
+  const layoutStressScene = layoutStressFrame.projection.scene;
+  authorizeSyntheticAuraModifier(layoutStressScene, 4, 0, 123456.789);
+  authorizeSyntheticStatusDuration(layoutStressScene, 0, 0, 123456789);
+  layoutStressScene.agents[7].statuses.slice(0, 5).forEach(
     /**
-     * @param {Record<string, any>} status
+     * @param {Record<string, any>} _status
      * @param {number} index
      */
-    (status, index) => {
-      status.duration = index + 1;
+    (_status, index) => {
+      authorizeSyntheticStatusDuration(layoutStressScene, 7, index, index + 1);
     },
   );
-  layoutStressFrame.scene.agents[2].ultimate_cooldown = 30;
+  authorizeSyntheticCooldown(layoutStressScene, 2, 30);
   let commandRequests = 0;
   await page.route("**/api/frame", async (route) => {
     await route.fulfill({
@@ -70,7 +771,11 @@ test("test-only fixture interception installs an explicitly synthetic scene", as
     await route.abort("blockedbyclient");
   });
 
-  await page.goto(debuggerUrl);
+  if (page.url() === debuggerUrl) {
+    await page.reload();
+  } else {
+    await page.goto(debuggerUrl);
+  }
 
   await expect(page.locator("#connection-status")).toHaveText("Online");
   const skipPresentation = page.locator("#motion-skip-button");
@@ -135,7 +840,7 @@ test("test-only fixture interception installs an explicitly synthetic scene", as
   await expect(cooldown).toHaveAttribute("data-numeric-layout", "compartments");
   await expect(cooldown).toHaveAttribute(
     "aria-label",
-    /Hunter Trap.*cooldown, 30 ticks remaining, id_2/i,
+    /Accepted Hunter Trap activation cooldown.*30 ticks remaining.*Agent ID 2/i,
   );
   await expect(cooldown.locator(".cooldown-cell__value")).toHaveText("30");
   await expect(cooldown.locator(".cooldown-cell__icon:not([hidden])")).toHaveCount(1);
@@ -290,12 +995,6 @@ test("test-only fixture interception installs an explicitly synthetic scene", as
       kind: dock.getAttribute("class"),
       slot: dock.getAttribute("data-slot"),
     }));
-    const identities = [...battlefield.querySelectorAll(".agent-id-tag")]
-      .filter((tag) => Number.parseFloat(getComputedStyle(tag).opacity) > 0.5)
-      .map((tag) => ({
-        bounds: tag.getBoundingClientRect(),
-        slot: tag.parentElement?.getAttribute("data-slot"),
-      }));
     const violations = [];
     for (const dock of docks) {
       if (dock.collisionFree !== "true") {
@@ -314,13 +1013,6 @@ test("test-only fixture interception installs an explicitly synthetic scene", as
           violations.push(`${dock.kind} id_${dock.slot} overlaps body id_${body.slot}`);
         }
       }
-      for (const identity of identities) {
-        if (intersects(dock.bounds, identity.bounds)) {
-          violations.push(
-            `${dock.kind} id_${dock.slot} overlaps identity id_${identity.slot}`,
-          );
-        }
-      }
     }
     for (let index = 0; index < docks.length; index += 1) {
       for (let other = index + 1; other < docks.length; other += 1) {
@@ -334,13 +1026,9 @@ test("test-only fixture interception installs an explicitly synthetic scene", as
     return violations;
   });
   expect(geometryViolations).toEqual([]);
-  await expect(page.locator("#battlefield path.pending-route")).toHaveAttribute(
-    "data-route-kind",
-    /curve|local_arc/,
-  );
   await expect(page.locator('#battlefield .agent[data-slot="0"]')).toHaveAttribute(
     "aria-label",
-    /id_0, Mage, Team A, health 82 of 100, alive, controlled actor/,
+    /Agent ID 0, Mage, Team A, health 82 of 100, alive, controlled actor/,
   );
   await expect(page.locator('#battlefield .agent[data-slot="7"]')).toHaveAttribute(
     "aria-label",
@@ -589,14 +1277,7 @@ test("test-only fixture interception installs an explicitly synthetic scene", as
   expect(await stressedStatus.evaluate((cell) => getComputedStyle(cell).color)).toBe(
     "rgb(154, 167, 184)",
   );
-  const visibleIdentityTags = await page
-    .locator("#battlefield .agent-id-tag")
-    .evaluateAll(
-      (tags) =>
-        tags.filter((tag) => Number.parseFloat(getComputedStyle(tag).opacity) > 0.5)
-          .length,
-    );
-  expect(visibleIdentityTags).toBeLessThanOrEqual(1);
+  await expect(page.locator("#battlefield .agent-id-tag")).toHaveCount(0);
   expect(
     await page.evaluate(() => document.fonts.check('16px "Atkinson Hyperlegible"')),
   ).toBe(true);
@@ -609,6 +1290,185 @@ test("test-only fixture interception installs an explicitly synthetic scene", as
   expect(commandRequests).toBe(0);
 });
 
+test("serialized mechanics tuning flows through the full semantic inspector", async ({
+  page,
+}) => {
+  const catalogMutationFrame = catalogPropagationFixture.live_frame;
+  const expected = catalogPropagationFixture.expected;
+  const mechanics = catalogMutationFrame.projection.scene.class_mechanics.find(
+    /** @param {Record<string, any>} row */ (row) => row.class_id === 1,
+  );
+  if (!mechanics) {
+    throw new Error("The Python catalog mutation has no Mage mechanics row.");
+  }
+  const burst = mechanics.status_mechanics.find(
+    /** @param {Record<string, any>} row */ (row) =>
+      row.status_id === "mage_burst_damage_amplification",
+  );
+  const mageAura = mechanics.aura_mechanics.find(
+    /** @param {Record<string, any>} row */ (row) =>
+      row.aura_id === "mage_damage_amplification",
+  );
+  if (!burst || !mageAura) {
+    throw new Error(
+      "The Python catalog mutation has no Mage authored status/aura mechanics.",
+    );
+  }
+  expect(mechanics.basic_raw_damage).toBe(expected.basic_raw_damage);
+  expect(burst.duration_steps).toBe(expected.burst_duration_steps);
+  expect(burst.magnitude).toBe(expected.burst_multiplier);
+  expect(mageAura.radius).toBe(expected.aura_radius);
+  expect(mageAura.per_emitter_multiplier).toBe(expected.aura_multiplier);
+
+  await page.route("**/api/frame", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      json: catalogMutationFrame,
+      status: 200,
+    });
+  });
+  await page.route("**/api/command", async (route) => {
+    await route.abort("blockedbyclient");
+  });
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+
+  const mageComparison = page.locator(
+    '.comparison-agent[data-role="controlled"][data-slot="0"]',
+  );
+  await expect(mageComparison).toBeVisible();
+  await mageComparison.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#semantic-inspector")).toBeVisible();
+  const mechanicsSection = page
+    .locator("#semantic-inspector .semantic-explanation__section")
+    .filter({ hasText: "Exact Class Mechanics" });
+  const damageTerm = mechanicsSection.locator("dt", {
+    hasText: "Basic Raw Damage",
+  });
+  await expect(damageTerm).toHaveCount(1);
+  await expect(damageTerm.locator("xpath=following-sibling::dd[1]")).toHaveText(
+    String(expected.basic_raw_damage),
+  );
+  const statusSection = page
+    .locator("#semantic-inspector .semantic-explanation__section")
+    .filter({ hasText: "Authored Status Mechanics" });
+  await expect(statusSection).toContainText(
+    "Mage (Ultimate: Burst) Damage Amplification",
+  );
+  await expect(statusSection).toContainText(`${expected.burst_duration_steps} Ticks`);
+  await expect(statusSection).toContainText(
+    `${Math.round((expected.burst_multiplier - 1) * 100)}% more damage dealt`,
+  );
+  const passiveSection = page
+    .locator("#semantic-inspector .semantic-explanation__section")
+    .filter({ hasText: "Authored Passive Mechanics" });
+  await expect(passiveSection).toContainText("Sorcerer's Aura Field");
+  await expect(passiveSection).toContainText(`Radius ${expected.aura_radius}`);
+  await expect(passiveSection).toContainText(
+    `${Math.round((expected.aura_multiplier - 1) * 100)}% more damage dealt`,
+  );
+
+  const semanticInspector = await page
+    .locator("#semantic-inspector")
+    .evaluate((node) => ({
+      rows: [...node.querySelectorAll("dt")].map((term) => ({
+        label: term.textContent?.trim(),
+        value: term.nextElementSibling?.textContent?.trim(),
+      })),
+      sections: [...node.querySelectorAll("h3")].map((heading) =>
+        heading.textContent?.trim(),
+      ),
+    }));
+  expect(semanticInspector.sections).toContain("Exact Class Mechanics");
+  expect(semanticInspector.rows).toContainEqual({
+    label: "Basic Raw Damage",
+    value: String(expected.basic_raw_damage),
+  });
+  const snapshotLabels = [
+    "Basic Raw Damage",
+    "Mage (Ultimate: Burst) Damage Amplification",
+    "Sorcerer's Aura Field (Mage Damage Amplification Aura)",
+  ];
+  const semanticSnapshot = {
+    sections: semanticInspector.sections.filter((section) =>
+      [
+        "Exact Class Mechanics",
+        "Authored Status Mechanics",
+        "Authored Passive Mechanics",
+      ].includes(section ?? ""),
+    ),
+    rows: semanticInspector.rows.filter((row) =>
+      snapshotLabels.includes(row.label ?? ""),
+    ),
+  };
+  expect(semanticSnapshot.sections).toHaveLength(3);
+  expect(semanticSnapshot.rows).toHaveLength(3);
+  const burstPercent = formatDisplayNumber(
+    Math.abs(expected.burst_multiplier - 1) * 100,
+  );
+  const auraPercent = formatDisplayNumber(Math.abs(expected.aura_multiplier - 1) * 100);
+  const tuningIndependentSnapshot = {
+    sections: semanticSnapshot.sections,
+    rows: semanticSnapshot.rows.map((row) => {
+      if (row.label === "Basic Raw Damage") {
+        return {
+          label: row.label,
+          value: replaceCatalogFragmentOnce(
+            row.value,
+            formatDisplayNumber(expected.basic_raw_damage),
+            "<catalog-number>",
+            row.label,
+          ),
+        };
+      }
+      if (row.label === "Mage (Ultimate: Burst) Damage Amplification") {
+        let value = replaceCatalogFragmentOnce(
+          row.value,
+          `${formatDisplayNumber(expected.burst_duration_steps)} Ticks`,
+          "<catalog-duration> Ticks",
+          row.label,
+        );
+        value = replaceCatalogFragmentOnce(
+          value,
+          `${burstPercent}% more damage dealt`,
+          "<catalog-percent>% more damage dealt",
+          row.label,
+        );
+        value = replaceCatalogFragmentOnce(
+          value,
+          `×${formatDisplayNumber(expected.burst_multiplier)}`,
+          "×<catalog-multiplier>",
+          row.label,
+        );
+        return { label: row.label, value };
+      }
+      let value = replaceCatalogFragmentOnce(
+        row.value,
+        `Radius ${formatDisplayNumber(expected.aura_radius)}`,
+        "Radius <catalog-radius>",
+        row.label ?? "Authored aura mechanics",
+      );
+      value = replaceCatalogFragmentOnce(
+        value,
+        `${auraPercent}% more damage dealt per recorded emitter`,
+        "<catalog-percent>% more damage dealt per recorded emitter",
+        row.label ?? "Authored aura mechanics",
+      );
+      value = replaceCatalogFragmentOnce(
+        value,
+        `×${formatDisplayNumber(mageAura.clamp_value)}`,
+        "×<catalog-clamp>",
+        row.label ?? "Authored aura mechanics",
+      );
+      return { label: row.label, value };
+    }),
+  };
+  expect(`${JSON.stringify(tuningIndependentSnapshot, null, 2)}\n`).toMatchSnapshot(
+    "catalog-mechanics-semantic-snapshot.json",
+  );
+});
+
 test("compact active combat yields analysis decoration and restores it after Skip", async ({
   page,
 }) => {
@@ -618,7 +1478,7 @@ test("compact active combat yields analysis decoration and restores it after Ski
   await page.route("**/api/frame", async (route) => {
     await route.fulfill({
       contentType: "application/json",
-      json: syntheticFrame,
+      json: syntheticWireFrame,
       status: 200,
     });
   });
@@ -670,10 +1530,9 @@ test("compact active combat yields analysis decoration and restores it after Ski
       ),
   ).toBe(true);
 
-  // Suppression is battlefield-only: the authoritative nodes and structured
+  // Suppression is battlefield-only: the settled V2 scene facts and structured
   // inspection surfaces remain present while accepted combat takes priority.
   await expect(page.locator("#battlefield .range-ring")).toHaveCount(3);
-  await expect(page.locator("#battlefield path.pending-route")).toHaveCount(1);
   await expect(
     page.locator("#roster .roster-row .roster-fact-token--status"),
   ).toHaveCount(90);
@@ -719,17 +1578,16 @@ test("compact active combat yields analysis decoration and restores it after Ski
   ).toBe(true);
   await expect(
     page.locator('#battlefield .status-dock[data-slot="0"] .status-overflow'),
-  ).toHaveAttribute("aria-label", /hidden status cues for id_0/i);
+  ).toHaveAttribute("aria-label", /hidden status cues for Agent ID 0/i);
   await expect(page.locator("#battlefield .range-ring")).toHaveCount(3);
-  await expect(page.locator("#battlefield path.pending-route")).toHaveCount(1);
   expect(commandRequests).toBe(0);
 });
 
 test("extreme dock values use a readable visual abbreviation without losing truth", async ({
   page,
 }) => {
-  const extremeFrame = structuredClone(syntheticFrame);
-  extremeFrame.scene.agents[0].statuses[0].duration = 123456789;
+  const extremeFrame = structuredClone(syntheticWireFrame);
+  authorizeSyntheticStatusDuration(extremeFrame.projection.scene, 0, 0, 123456789);
   await page.route("**/api/frame", async (route) => {
     await route.fulfill({
       contentType: "application/json",
@@ -779,11 +1637,9 @@ test("extreme dock values use a readable visual abbreviation without losing trut
 test("required fallback tooltip avoids the inspected agent and its local docks", async ({
   page,
 }) => {
-  const denseRequiredFrame = structuredClone(syntheticFrame);
-  for (const agent of denseRequiredFrame.scene.agents) {
-    agent.position = [8, 6];
-    agent.ultimate_cooldown = 30;
-  }
+  const denseRequiredFrame = structuredClone(
+    syntheticDebuggerWireFrame(await loadRendererFixture("required_dock_fallback")),
+  );
   await page.route("**/api/frame", async (route) => {
     await route.fulfill({
       contentType: "application/json",
@@ -844,25 +1700,9 @@ test("required fallback tooltip avoids the inspected agent and its local docks",
 test("near-dense required truth keeps every compact fallback individually associated", async ({
   page,
 }) => {
-  const denseRequiredFrame = structuredClone(syntheticFrame);
-  const nearDensePositions = [
-    [5.8, 6.65],
-    [6.9, 6.65],
-    [8.0, 6.65],
-    [9.1, 6.65],
-    [10.2, 6.65],
-    [5.8, 5.35],
-    [6.9, 5.35],
-    [10.2, 5.35],
-    [8.0, 5.35],
-    [9.1, 5.35],
-  ];
-  denseRequiredFrame.scenario.description =
-    "SYNTHETIC: near-dense agents demonstrate individually owned compact cooldown fallbacks.";
-  for (const [index, agent] of denseRequiredFrame.scene.agents.entries()) {
-    agent.position = nearDensePositions[index];
-    agent.ultimate_cooldown = 30;
-  }
+  const denseRequiredFrame = structuredClone(
+    syntheticDebuggerWireFrame(await loadRendererFixture("required_dock_fallback")),
+  );
   await page.route("**/api/frame", async (route) => {
     await route.fulfill({
       contentType: "application/json",
@@ -924,11 +1764,14 @@ test("near-dense required truth keeps every compact fallback individually associ
   for (let index = 0; index < (await cooldownFallbacks.count()); index += 1) {
     const fallback = cooldownFallbacks.nth(index);
     await expect(fallback).toHaveAttribute("data-ticks", "30");
-    await expect(fallback).toHaveAttribute("aria-label", /30 ticks remaining/i);
+    await expect(fallback).toHaveAttribute(
+      "aria-label",
+      /Cooldown Remaining: 30 Ticks/i,
+    );
     const slot = await fallback.getAttribute("data-slot");
-    await expect(fallback).toHaveAttribute("data-owner-label", `id_${slot}`);
+    await expect(fallback).toHaveAttribute("data-owner-label", `Agent ID ${slot}`);
     await expect(fallback.locator(".required-dock-fallback__owner")).toHaveText(
-      `id_${slot}`,
+      `Agent ID ${slot}`,
     );
     await expect(fallback.locator(".required-dock-fallback__value")).toHaveText("U30");
   }
@@ -1072,7 +1915,7 @@ test("near-dense required truth keeps every compact fallback individually associ
       ({ endTouchesMarker, nearestStartIsOwner, ownerLabel, slot, startsAtOwner }) =>
         !endTouchesMarker ||
         !nearestStartIsOwner ||
-        ownerLabel !== `id_${slot}` ||
+        ownerLabel !== `Agent ID ${slot}` ||
         !startsAtOwner,
     ),
   ).toEqual([]);
@@ -1081,7 +1924,7 @@ test("near-dense required truth keeps every compact fallback individually associ
   await firstFallback.hover();
   const tooltip = page.locator("#visual-tooltip");
   await expect(tooltip).toBeVisible();
-  await expect(tooltip).toContainText("30 ticks remaining");
+  await expect(tooltip).toContainText(/Cooldown Remaining\s*30 Ticks/);
   await firstFallback.focus();
   expect(
     await firstFallback.evaluate((node) => {
@@ -1110,81 +1953,306 @@ test("near-dense required truth keeps every compact fallback individually associ
   ).toBe("solid 3px");
 });
 
+test("live pending routes use authorized researcher and POV public identities", async ({
+  page,
+}) => {
+  const researcher = structuredClone(syntheticWireFrame);
+  const researcherLegality =
+    researcher.projection.scene.next_decision_selected_legality;
+  const researcherTarget = researcher.projection.scene.agents.find(
+    /** @param {Record<string, any>} agent */
+    (agent) => agent.global_slot === researcherLegality.target_global_slot,
+  );
+  if (
+    !researcherTarget ||
+    researcherLegality.lane_0_available !== true ||
+    researcherLegality.lane_1_available !== false
+  ) {
+    throw new Error(
+      "Synthetic researcher pending-route proof requires its exact selected legality.",
+    );
+  }
+  const researcherPending = {
+    ...researcher.hud.pending_action,
+    target_action: researcherLegality.target_action,
+    armed_lane: 1,
+    arm_origin: "explicit",
+    target: {
+      disclosure: "public",
+      global_slot: researcherTarget.global_slot,
+    },
+    pair_mask_value: false,
+    summary: "STAY + ULTIMATE",
+  };
+  researcher.hud.pending_action = researcherPending;
+  researcher.hud.pending_actions = [researcherPending];
+  const legalResearcher = structuredClone(researcher);
+  const legalResearcherPending = {
+    ...researcherPending,
+    armed_lane: 0,
+    pair_mask_value: true,
+    summary: "STAY + BASIC",
+  };
+  legalResearcher.hud.pending_action = legalResearcherPending;
+  legalResearcher.hud.pending_actions = [legalResearcherPending];
+
+  const pov = structuredClone(syntheticPovWireFrame);
+  const povTarget = pov.projection.scene.visible_bodies[0];
+  const povTargetAction = pov.hud.candidate_legalities.find(
+    /** @param {Record<string, any>} candidate */
+    (candidate) => candidate.target.public_agent_id === povTarget.public_agent_id,
+  ).target.target_action;
+  pov.projection.next_decision_action_mask.select_target[povTargetAction] = true;
+  pov.projection.next_decision_action_mask.select_target_use_ultimate_joint[
+    povTargetAction
+  ] = [true, false];
+  const povCandidate = pov.hud.candidate_legalities.find(
+    /** @param {Record<string, any>} candidate */
+    (candidate) => candidate.target.target_action === povTargetAction,
+  );
+  povCandidate.lane_0_available = true;
+  povCandidate.basic_available = true;
+  pov.hud.pending_action = {
+    ...pov.hud.pending_action,
+    target: {
+      target_action: povTargetAction,
+      public_agent_id: povTarget.public_agent_id,
+    },
+    armed_lane: 0,
+    arm_origin: "explicit",
+    pair_mask_value: true,
+    summary: "STAY + BASIC",
+  };
+
+  let servedFrame = researcher;
+  await page.route("**/api/frame", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      json: servedFrame,
+      status: 200,
+    });
+  });
+  await page.route("**/api/command", async (route) => {
+    await route.abort("blockedbyclient");
+  });
+
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#battlefield .pending-route")).toHaveCount(0);
+
+  servedFrame = legalResearcher;
+  await page.reload();
+  const researcherRoute = page.locator("#battlefield .pending-route");
+  await expect(researcherRoute).toHaveCount(1);
+  await expect(researcherRoute).toHaveAttribute(
+    "data-source-agent-id",
+    legalResearcher.projection.scene.agents.find(
+      /** @param {Record<string, any>} agent */
+      (agent) =>
+        agent.global_slot === legalResearcher.hud.pending_action.actor_global_slot,
+    ).public_agent_id,
+  );
+  await expect(researcherRoute).toHaveAttribute(
+    "data-target-agent-id",
+    researcherTarget.public_agent_id,
+  );
+  await expect(researcherRoute).toHaveAttribute("data-lane", "0");
+  await expect(researcherRoute).toHaveAttribute("data-legal", "true");
+
+  servedFrame = pov;
+  await page.reload();
+  const povRoute = page.locator("#battlefield .pending-route");
+  await expect(povRoute).toHaveCount(1);
+  await expect(povRoute).toHaveAttribute(
+    "data-source-agent-id",
+    pov.projection.scene.self_actor.public_agent_id,
+  );
+  await expect(povRoute).toHaveAttribute(
+    "data-target-agent-id",
+    povTarget.public_agent_id,
+  );
+  await expect(povRoute).not.toHaveAttribute("data-source-slot", /.+/u);
+  await expect(povRoute).not.toHaveAttribute("data-target-slot", /.+/u);
+  await expect(povRoute).toHaveAttribute("data-lane", "0");
+  await expect(povRoute).toHaveAttribute("data-legal", "true");
+  const routePointer = await page
+    .locator("#battlefield .pending-route-hit")
+    .evaluate((path) => {
+      if (!(path instanceof SVGPathElement)) {
+        throw new Error("Pending route hit owner must be an SVG path.");
+      }
+      const matrix = path.getScreenCTM();
+      if (matrix === null) {
+        throw new Error("Pending route has no screen transform.");
+      }
+      const local = path.getPointAtLength(path.getTotalLength() / 2);
+      const screen = new DOMPoint(local.x, local.y).matrixTransform(matrix);
+      return { x: screen.x, y: screen.y };
+    });
+  await page.mouse.move(routePointer.x, routePointer.y);
+  await expect(page.locator("#visual-tooltip-title")).toHaveText("Basic Action Route");
+  await expect(page.locator("#visual-tooltip-details")).toContainText(
+    "Selected Target",
+  );
+  await expect(page.locator("#visual-tooltip-details")).toContainText(
+    `Agent ID ${povTarget.public_agent_id}`,
+  );
+  await expect(page.locator("#visual-tooltip-details")).not.toContainText("id_");
+});
+
+test("canonical V2 death clear is distinct in cue, feed, and accessible copy", async ({
+  page,
+}) => {
+  await installWaapiAutopause(page);
+  await page.route("**/api/frame", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      json: canonicalGrammarWireFrame,
+      status: 200,
+    });
+  });
+  await page.route("**/api/command", async (route) => {
+    await route.abort("blockedbyclient");
+  });
+
+  await page.goto(debuggerUrl);
+  await pauseAtLogicalTime(page, 680);
+
+  const deathClear = page.locator(
+    `${CHOREOGRAPHY_ROOT} .combat-effect[data-event-type="status_cleared_by_new_death"][data-lifecycle="cleared_by_death"]`,
+  );
+  const expiry = page.locator(
+    `${CHOREOGRAPHY_ROOT} .combat-effect[data-event-type="status_aged_to_zero"][data-lifecycle="expired"]`,
+  );
+  const damageBreak = page.locator(
+    `${CHOREOGRAPHY_ROOT} .combat-effect[data-event-type="status_broken_by_damage"][data-lifecycle="trap_broken"]`,
+  );
+  await expect(deathClear).toHaveCount(1);
+  await expect(deathClear.locator(".combat-lifecycle__death-sweep")).toHaveCount(1);
+  await expect(expiry.locator(".combat-lifecycle__death-sweep")).toHaveCount(0);
+  await expect(damageBreak.locator(".combat-lifecycle__death-sweep")).toHaveCount(0);
+  await expect(damageBreak.locator(".combat-lifecycle__shard")).toHaveCount(6);
+
+  const deathClearFeed = page.locator(
+    '#event-feed .event-item[data-event-type="status_cleared_by_new_death"]',
+  );
+  await expect(deathClearFeed).toContainText("cleared by new death");
+  await deathClearFeed.focus();
+  await expect(page.locator("#visual-tooltip")).toBeVisible();
+  await expect(page.locator("#visual-tooltip")).toContainText(
+    /Status Cleared By New Death/u,
+  );
+
+  const rejection = page.locator(
+    `${CHOREOGRAPHY_ROOT} .combat-effect[data-event-type="action_rejected"]`,
+  );
+  const charge = page.locator(
+    `${CHOREOGRAPHY_ROOT} .combat-effect[data-event-type="charge_phase_displacement"]`,
+  );
+  await expect(rejection).toHaveCSS("color", "rgb(251, 113, 133)");
+  await expect(charge).toHaveCSS("color", "rgb(209, 139, 71)");
+  expect(canonicalGrammarFrame.event_batch.events).toHaveLength(23);
+});
+
 test("structured HUD keeps exact roster, intent, and accepted-result facts distinct", async ({
   page,
 }) => {
-  const transitionId = Number(syntheticFrame.transition_id);
+  const transitionId = String(syntheticFrame.transition_id);
+  const sourceEvents = syntheticWireFrame.projection.incoming_events.events;
+  const firstSourceEvent = sourceEvents[0];
+  if (!firstSourceEvent) {
+    throw new Error(
+      "Synthetic crowded fixture requires at least one transition event.",
+    );
+  }
   const rejectedEvent = {
-    event_type: "rejected_action",
-    event_id: "synthetic:crowded_teamfight:rejected-panel-proof",
+    event_type: "action_rejected",
+    event_id: firstSourceEvent.event_id,
     transition_id: transitionId,
+    ordinal: firstSourceEvent.ordinal,
+    phase_rank: 10,
     actor_global_slot: 0,
-    component: "combat",
-    actor_anchor: [6.4, 5.7],
-    target_global_slot: 7,
-    target_anchor: [7.15, 6.15],
-    target_disclosure: "public",
-    lane: 1,
-    movement_mask_value: true,
-    pair_mask_value: false,
+    actor_public_agent_id: "0",
+    actor_configured_active: true,
+    rejection_component: "combat_pair",
+    submitted_move_action: 0,
+    submitted_select_target_action: 8,
+    submitted_use_ultimate_action: 1,
+    actor_anchor: {
+      phase: "transition_start",
+      global_slot: 0,
+      public_agent_id: "0",
+      position:
+        syntheticWireFrame.projection.incoming_events.agent_phase_trajectories.find(
+          /** @param {Record<string, any>} trajectory */
+          (trajectory) => trajectory.global_slot === 0,
+        ).transition_start.position,
+    },
   };
   /** @type {Record<string, any>} */
-  let structuredFrame = {
-    ...syntheticFrame,
-    event_batch: {
-      ...syntheticFrame.event_batch,
-      events: [...syntheticFrame.event_batch.events, rejectedEvent],
-    },
-    hud: {
-      roster_global_slots: syntheticFrame.scene.agents.map(
-        /** @param {{global_slot: number}} agent */ (agent) => agent.global_slot,
-      ),
-      controlled_global_slot: 0,
-      selected_global_slot: 7,
-      pending_action: {
-        label: "PENDING / WILL SUBMIT",
-        actor_global_slot: 0,
-        move_action: 0,
-        target_action: 8,
-        armed_lane: 1,
-        arm_origin: "explicit",
-        target: { disclosure: "public", global_slot: 7 },
-        movement_mask_value: true,
-        pair_mask_value: false,
-        summary: "Stay + Burst → id_7",
-      },
-      latest_transition: {
-        label: "LATEST ACCEPTED RESULT",
-        transition_id: transitionId,
-        submission_kind: "interactive",
-        actors: [
-          {
-            actor_global_slot: 0,
-            submitted: {
-              move_action: 0,
-              target_action: 8,
-              use_ultimate_action: 1,
-              target: { disclosure: "public", global_slot: 7 },
-              summary: "Stay + Burst → id_7",
-            },
-            accepted: {
-              move_action: 0,
-              target_action: 0,
-              use_ultimate_action: 0,
-              target: { disclosure: "target_none", global_slot: null },
-              summary: "Stay + NO COMBAT",
-            },
-            movement_mask_value: true,
-            pair_mask_value: false,
-            movement_accepted: true,
-            combat_result: "rejected",
-          },
-        ],
-      },
-      candidate_legalities: [],
-      diagnostics: [],
-    },
+  let structuredFrame = structuredClone(syntheticWireFrame);
+  structuredFrame.projection.incoming_events.events = [
+    rejectedEvent,
+    ...structuredFrame.projection.incoming_events.events.slice(1),
+  ];
+  structuredFrame.projection.scene.incoming_event_ids =
+    structuredFrame.projection.incoming_events.events.map(
+      /** @param {{event_id: string}} event */ (event) => event.event_id,
+    );
+  const pendingAction = {
+    label: "PENDING / WILL SUBMIT",
+    actor_global_slot: 0,
+    move_action: 0,
+    target_action: 8,
+    armed_lane: 1,
+    arm_origin: "explicit",
+    target: { disclosure: "public", global_slot: 7 },
+    movement_mask_value: true,
+    pair_mask_value: false,
+    summary: "Stay + Burst → Agent ID 7",
   };
+  structuredFrame.hud = {
+    ...structuredFrame.hud,
+    roster_global_slots: syntheticFrame.scene.agents.map(
+      /** @param {{global_slot: number}} agent */ (agent) => agent.global_slot,
+    ),
+    controlled_global_slot: 0,
+    selected_global_slot: 7,
+    pending_submission_scope: "controlled_actor",
+    pending_actions: [pendingAction],
+    pending_action: pendingAction,
+    latest_transition: {
+      label: "LATEST ACCEPTED RESULT",
+      transition_index: 0,
+      transition_id: transitionId,
+      submission_kind: "interactive",
+      actors: [
+        {
+          actor_global_slot: 0,
+          submitted: {
+            move_action: 0,
+            target_action: 8,
+            use_ultimate_action: 1,
+            target: { disclosure: "public", global_slot: 7 },
+            summary: "Stay + Burst → Agent ID 7",
+          },
+          accepted: {
+            move_action: 0,
+            target_action: 0,
+            use_ultimate_action: 0,
+            target: { disclosure: "target_none", global_slot: null },
+            summary: "Stay + NO COMBAT",
+          },
+          movement_mask_value: true,
+          pair_mask_value: false,
+          movement_accepted: true,
+          combat_result: "rejected",
+        },
+      ],
+    },
+    candidate_legalities: [],
+    diagnostics: [],
+  };
+  const structuredEvents = structuredFrame.projection.incoming_events.events;
   await page.route("**/api/frame", async (route) => {
     await route.fulfill({
       contentType: "application/json",
@@ -1206,7 +2274,7 @@ test("structured HUD keeps exact roster, intent, and accepted-result facts disti
     await route.fulfill({
       contentType: "application/json",
       json: {
-        schema_version: 1,
+        schema_version: 2,
         result: "applied",
         frame: structuredFrame,
         notice: null,
@@ -1228,7 +2296,7 @@ test("structured HUD keeps exact roster, intent, and accepted-result facts disti
     /** @param {{global_slot: number}} agent */ (agent) => agent.global_slot === 0,
   );
   if (!agentZero) {
-    throw new Error("Synthetic crowded fixture is missing id_0.");
+    throw new Error("Synthetic crowded fixture is missing global slot 0.");
   }
   await expect(
     page.locator('#roster .roster-row[data-slot="0"] .roster-fact-token--status'),
@@ -1336,18 +2404,30 @@ test("structured HUD keeps exact roster, intent, and accepted-result facts disti
     "data-slot",
     "7",
   );
-  await expect(page.locator(".selected-legality")).toContainText("Basic lane");
-  await expect(page.locator(".selected-legality")).toContainText("Ultimate lane");
+  await expect(
+    page
+      .locator(".selected-legality__lane")
+      .filter({ has: page.getByRole("heading", { name: "Basic Legality" }) })
+      .locator(".semantic-explanation__value"),
+  ).toHaveText("True");
+  await expect(
+    page
+      .locator(".selected-legality__lane")
+      .filter({ has: page.getByRole("heading", { name: "Ultimate Legality" }) })
+      .locator(".semantic-explanation__value"),
+  ).toHaveText("False");
   await expect(page.locator("#pending-card .action-card__label")).toHaveText(
     "PENDING / WILL SUBMIT",
   );
-  await expect(page.locator("#pending-card")).toContainText("Stay + Burst → id_7");
+  await expect(page.locator("#pending-card")).toContainText(
+    "Stay + Burst → Agent ID 7",
+  );
   await expect(page.locator("#accepted-card .action-card__label")).toHaveText(
     "LATEST ACCEPTED RESULT",
   );
   await expect(
     page.locator('#accepted-card .action-tuple[data-kind="submitted"]'),
-  ).toContainText("Stay + Burst → id_7");
+  ).toContainText("Stay + Burst → Agent ID 7");
   await expect(
     page.locator('#accepted-card .action-tuple[data-kind="accepted"]'),
   ).toContainText("Stay + NO COMBAT");
@@ -1357,7 +2437,7 @@ test("structured HUD keeps exact roster, intent, and accepted-result facts disti
     `Transition ${transitionId}`,
   );
   await expect(page.locator("#event-count")).toHaveText(
-    String(structuredFrame.event_batch.events.length),
+    String(structuredEvents.length),
   );
   expect(
     await page.locator("#event-feed .event-item").evaluateAll((items) =>
@@ -1367,7 +2447,7 @@ test("structured HUD keeps exact roster, intent, and accepted-result facts disti
       })),
     ),
   ).toEqual(
-    structuredFrame.event_batch.events.map(
+    structuredEvents.map(
       /** @param {{event_id: string, event_type: string}} event */ (event) => ({
         eventId: event.event_id,
         eventType: event.event_type,
@@ -1375,24 +2455,23 @@ test("structured HUD keeps exact roster, intent, and accepted-result facts disti
     ),
   );
   for (const activation of await page
-    .locator('#event-feed .event-item[data-event-type="accepted_activation"]')
+    .locator('#event-feed .event-item[data-event-type="ability_activated"]')
     .all()) {
     await expect(activation).not.toContainText(/NET|HP|amount/i);
   }
   for (const netHealth of await page
-    .locator('#event-feed .event-item[data-event-type="net_health"]')
+    .locator('#event-feed .event-item[data-event-type="recipient_health_resolution"]')
     .all()) {
-    await expect(netHealth).toContainText("NET");
+    await expect(netHealth).toContainText("Net combat health");
     await expect(netHealth).toHaveAttribute("data-recipient-slot", /\d+/);
     await expect(netHealth).not.toHaveAttribute("data-source-slot", /.+/);
   }
   const rejected = page.locator(
-    '#event-feed .event-item[data-event-type="rejected_action"]',
+    '#event-feed .event-item[data-event-type="action_rejected"]',
   );
   await expect(rejected).toHaveAttribute("data-actor-slot", "0");
-  await expect(rejected).toHaveAttribute("data-target-slot", "7");
-  await expect(rejected).toContainText("movement mask 1");
-  await expect(rejected).toContainText("pair mask 0");
+  await expect(rejected).not.toHaveAttribute("data-target-slot", /.+/);
+  await expect(rejected).toContainText("recorded component Combat Pair");
   await expect(rejected).not.toContainText(/range|cooldown|line of sight|LOS/);
   await expect(page.locator("#visual-key")).toContainText("never a per-source amount");
   await expect(page.locator("#visual-key")).not.toHaveAttribute("open", "");
@@ -1427,27 +2506,18 @@ test("presets omit irrelevant DOM while retaining canonical facts and audience",
   page,
 }) => {
   /** @type {Record<string, any>} */
-  let servedFrame = {
-    ...syntheticFrame,
-    preset: "analysis",
-    scene: {
-      ...syntheticFrame.scene,
-      agents: syntheticFrame.scene.agents.map(
-        /**
-         * @param {Record<string, any>} agent
-         * @param {number} index
-         */
-        (agent, index) => ({
-          ...agent,
-          ultimate_cooldown: index === 2 ? 30 : 0,
-        }),
-      ),
-      selected_legality: {
-        ...syntheticFrame.scene.selected_legality,
-        armed_lane: null,
-        armed_pair_legal: false,
-      },
+  let servedFrame = structuredClone(syntheticWireFrame);
+  servedFrame.preset = "analysis";
+  servedFrame.projection.scene.agents.forEach(
+    /** @param {Record<string, any>} agent */ (agent) => {
+      agent.ultimate_cooldown_remaining = 0;
     },
+  );
+  authorizeSyntheticCooldown(servedFrame.projection.scene, 2, 30);
+  servedFrame.projection.scene.next_decision_selected_legality = {
+    ...servedFrame.projection.scene.next_decision_selected_legality,
+    armed_lane: null,
+    armed_pair_legal: false,
   };
   await page.route("**/api/frame", async (route) => {
     await route.fulfill({
@@ -1470,7 +2540,7 @@ test("presets omit irrelevant DOM while retaining canonical facts and audience",
     await route.fulfill({
       contentType: "application/json",
       json: {
-        schema_version: 1,
+        schema_version: 2,
         result: "applied",
         frame: servedFrame,
         notice: null,
@@ -1488,16 +2558,27 @@ test("presets omit irrelevant DOM while retaining canonical facts and audience",
   await expect(page.locator("#battlefield .agent")).toHaveCount(10);
   expect(await page.locator("#battlefield .status-cell").count()).toBeGreaterThan(0);
   await expect(page.locator("#battlefield .cooldown-cell")).toHaveCount(1);
-  expect(await page.locator("#battlefield .aura-field").count()).toBeGreaterThan(0);
-  expect(await page.locator("#battlefield .range-ring").count()).toBeGreaterThan(0);
-  expect(await page.locator("#battlefield .modifier-cell").count()).toBeGreaterThan(0);
+  const authorizedAuraCount = await page.locator("#battlefield .aura-field").count();
+  const authorizedRangeCount = await page.locator("#battlefield .range-ring").count();
+  const authorizedModifierCount = await page
+    .locator("#battlefield .modifier-cell")
+    .count();
+  expect(authorizedAuraCount).toBeGreaterThan(0);
+  expect(authorizedRangeCount).toBeGreaterThan(0);
+  expect(authorizedModifierCount).toBeGreaterThan(0);
   await expect(page.locator(".selected-legality")).toHaveCount(1);
   await expect(
     page
-      .locator(".selected-legality .fact")
-      .filter({ hasText: "Armed pair" })
-      .locator("strong"),
-  ).toHaveText("Not applicable");
+      .locator(".selected-legality__lane")
+      .filter({ has: page.getByRole("heading", { name: "Basic Legality" }) })
+      .locator(".semantic-explanation__value"),
+  ).toHaveText("True");
+  await expect(
+    page
+      .locator(".selected-legality__lane")
+      .filter({ has: page.getByRole("heading", { name: "Ultimate Legality" }) })
+      .locator(".semantic-explanation__value"),
+  ).toHaveText("False");
   await expect(page.locator("#battlefield .debug-visibility-cue")).toHaveCount(0);
   await expect(page.locator("#battlefield .debug-protected-zone")).toHaveCount(0);
   await expect(page.locator(".candidate-legality-row")).toHaveCount(0);
@@ -1527,9 +2608,15 @@ test("presets omit irrelevant DOM while retaining canonical facts and audience",
   await expect(page.locator("#battlefield .agent")).toHaveCount(10);
   expect(await page.locator("#battlefield .status-cell").count()).toBeGreaterThan(0);
   await expect(page.locator("#battlefield .cooldown-cell")).toHaveCount(1);
-  await expect(page.locator("#battlefield .aura-field")).toHaveCount(0);
-  await expect(page.locator("#battlefield .range-ring")).toHaveCount(0);
-  await expect(page.locator("#battlefield .modifier-cell")).toHaveCount(0);
+  await expect(page.locator("#battlefield .aura-field")).toHaveCount(
+    authorizedAuraCount,
+  );
+  await expect(page.locator("#battlefield .range-ring")).toHaveCount(
+    authorizedRangeCount,
+  );
+  await expect(page.locator("#battlefield .modifier-cell")).toHaveCount(
+    authorizedModifierCount,
+  );
   await expect(page.locator("#battlefield .legality-pill")).toHaveCount(0);
   await expect(page.locator(".selected-legality")).toHaveCount(0);
   await expect(page.locator("#battlefield .debug-visibility-cue")).toHaveCount(0);
@@ -1543,12 +2630,26 @@ test("presets omit irrelevant DOM while retaining canonical facts and audience",
   await expect(page.locator("#pending-card")).toBeVisible();
   await expect(page.locator("#accepted-card")).toBeVisible();
   await expect(page.locator("#event-feed")).toBeVisible();
+
+  await page.locator("#battlefield .aura-field").first().focus();
+  await expect(page.locator("#visual-tooltip")).toHaveAttribute(
+    "data-tooltip-kind",
+    "aura",
+  );
+  await expect(page.locator("#visual-tooltip-title")).toContainText("Aura Field");
+  await page.locator("#battlefield .modifier-cell").first().hover();
+  await expect(page.locator("#visual-tooltip")).toHaveAttribute(
+    "data-tooltip-kind",
+    "modifier",
+  );
+  await expect(page.locator("#visual-tooltip-title")).toContainText("Aura");
 });
 
 test("debug POV omits hidden agents and researcher-only visibility DOM", async ({
   page,
 }) => {
-  const servedFrame = { ...syntheticPovFrame, preset: "debug" };
+  const servedFrame = structuredClone(syntheticPovWireFrame);
+  servedFrame.preset = "debug";
   await page.route("**/api/frame", async (route) => {
     await route.fulfill({
       contentType: "application/json",
@@ -1565,13 +2666,33 @@ test("debug POV omits hidden agents and researcher-only visibility DOM", async (
   await expect(page.locator("html")).toHaveAttribute("data-audience", "agent_pov");
   await expect(page.locator("#audience-badge")).toContainText("AGENT POV");
   await expect(page.locator("#battlefield .agent")).toHaveCount(2);
-  await expect(page.locator("#roster .roster-row")).toHaveCount(2);
+  await expect(page.locator("#battlefield .pov-observed-body")).toHaveCount(1);
+  await expect(page.locator("#roster .roster-row")).toHaveCount(1);
   await expect(page.locator('#battlefield .agent[data-slot="5"]')).toHaveCount(0);
   await expect(page.locator('#roster .roster-row[data-slot="5"]')).toHaveCount(0);
   await expect(page.locator("#battlefield .pending-route")).toHaveCount(0);
   await expect(page.locator("#battlefield .debug-visibility-cue")).toHaveCount(0);
   await expect(page.locator("#battlefield .debug-protected-zone")).toHaveCount(2);
-  await expect(page.locator("body")).not.toContainText("id_5");
+  await expect(page.locator("#scenario-control")).toBeHidden();
+  await expect(page.locator("#scenario-select")).toBeDisabled();
+  await expect(page.locator("#scenario-select")).not.toHaveAttribute("title", /.+/u);
+  await expect(page.locator("#scenario-select")).toHaveAttribute(
+    "data-tooltip-owner",
+    "",
+  );
+  await expect(page.locator("#scenario-select")).toHaveAttribute(
+    "aria-description",
+    "Choose a registered live episode setup.",
+  );
+  await expect(
+    page.locator('#battlefield .agent[data-public-agent-id="5"]'),
+  ).toHaveCount(0);
+  await expect(
+    page.locator('#roster .roster-row[data-public-agent-id="5"]'),
+  ).toHaveCount(0);
+  await expect(
+    page.locator('[data-source-slot="5"], [data-target-slot="5"]'),
+  ).toHaveCount(0);
   expect(
     await page.evaluate(() => {
       const authorized = new Set(

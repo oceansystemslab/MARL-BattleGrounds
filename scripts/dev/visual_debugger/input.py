@@ -2,9 +2,8 @@
 
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from math import isfinite
-
-import numpy as np
+from math import hypot, isfinite
+from typing import Literal
 
 from marl_battlegrounds.core.types import (
     MOVE_EAST,
@@ -17,8 +16,18 @@ from marl_battlegrounds.core.types import (
     MOVE_STAY,
     MOVE_WEST,
 )
-from marl_battlegrounds.rendering.scene import AgentSceneV1
+from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
+from marl_battlegrounds.evaluation.pov import build_actor_pov_current_slice_v1
+from marl_battlegrounds.rendering.evaluation_adapter import (
+    EvaluationScenePresentationStateV1,
+    build_researcher_analyzer_projection_v2,
+)
+from marl_battlegrounds.rendering.pov_scene import (
+    build_actor_pov_analyzer_projection_v1,
+)
+from marl_battlegrounds.rendering.scene import AgentSceneV1, AgentSceneV2
 from scripts.dev.visual_debugger.control import (
+    DebuggerTransitionFailureV1,
     arm_basic,
     arm_ultimate,
     clear_pending_target,
@@ -33,10 +42,12 @@ from scripts.dev.visual_debugger.control import (
     submit_next_script_frame,
     switch_scenario,
 )
-from scripts.dev.visual_debugger.model import DebuggerSession
+from scripts.dev.visual_debugger.model import DebuggerSession, RawContinuationIdentity
 from scripts.dev.visual_debugger.protocol import (
+    ActorPovTargetActionCommandV1,
     BattlefieldPointerCommandV1,
     DebuggerCommandV1,
+    ExitCommandV1,
     KeyboardCommandV1,
     Preset,
     ResetCommandV1,
@@ -52,8 +63,6 @@ from scripts.dev.visual_debugger.scenarios import (
     get_scenario,
     list_scenarios,
 )
-from scripts.dev.visual_debugger.scene_adapter import build_battlefield_scene
-from scripts.dev.visual_debugger.targeting import global_slot_to_target_action
 
 _MOVEMENT_KEYS = {
     "w": MOVE_NORTH,
@@ -70,11 +79,59 @@ _MOVEMENT_KEYS = {
     "arrowright": MOVE_EAST,
     "arrowleft": MOVE_WEST,
 }
+
+type RecordingRestartIntentV1 = Literal[
+    "reset",
+    "scenario_switch",
+    "movement_scale",
+]
+
+
+def recording_restart_intent_v1(
+    session: DebuggerSession,
+    command: DebuggerCommandV1,
+    *,
+    view_mode: ViewMode,
+    include_stress: bool,
+) -> RecordingRestartIntentV1 | None:
+    """Classify an effective episode replacement before dispatch constructs it."""
+    if isinstance(command, KeyboardCommandV1):
+        if command.ctrl_key or command.alt_key or command.meta_key:
+            return None
+        key = normalize_key(command.key, shift_key=command.shift_key)
+        if key == "r":
+            return "reset"
+        if key in ("[", "]"):
+            return "scenario_switch"
+        return None
+    if isinstance(command, ResetCommandV1):
+        return "reset"
+    if isinstance(command, ScenarioSwitchCommandV1):
+        allowed_names = {
+            scenario.name for scenario in list_scenarios(include_stress=include_stress)
+        }
+        if (
+            command.scenario_name in allowed_names
+            and command.scenario_name != session.scenario_name
+        ):
+            return "scenario_switch"
+        return None
+    if isinstance(command, SetMovementScaleCommandV1):
+        if view_mode != "researcher":
+            return None
+        effective_scale = (
+            session.scenario_default_movement_scale
+            if command.movement_scale is None
+            else command.movement_scale
+        )
+        recorded_scale = (
+            session.evaluation_context.resolved_env_config
+        ).ordinary_movement_distance_scale
+        return "movement_scale" if effective_scale != recorded_scale else None
+    return None
+
+
 _SUBMISSION_KEYS = frozenset(("space", "enter", "n"))
-_SHIFT_R_NOTICE = (
-    "Shift+R cooldown clearing is unavailable because no public coherent "
-    "snapshot-rebuild API exists; use R for a full reset."
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,8 +143,50 @@ class InputDispatchResult:
     preset: Preset
     handled: bool
     changed: bool
+    transition_applied: EvaluationTransitionViewV1 | None = None
+    episode_restarted: bool = False
+    raw_continuation_identity: RawContinuationIdentity | None = None
     notice: str | None = None
     shutdown_requested: bool = False
+
+    def __post_init__(self) -> None:
+        transition = self.transition_applied
+        if transition is not None:
+            if type(transition) is not EvaluationTransitionViewV1:
+                raise TypeError("transition_applied must be an exact coherent V1 view.")
+            if self.episode_restarted:
+                raise ValueError(
+                    "one input result cannot both apply a transition and restart."
+                )
+            if not self.changed or self.session.incoming_evaluation_view != transition:
+                raise ValueError(
+                    "transition_applied must identify the candidate session view."
+                )
+        if type(self.episode_restarted) is not bool:
+            raise TypeError("episode_restarted must be a Python bool.")
+        if self.episode_restarted and (
+            not self.changed
+            or self.session.current_evaluation_frame.frame_index != 0
+            or self.session.incoming_evaluation_view is not None
+        ):
+            raise ValueError(
+                "restarted results must expose a fresh frame-zero episode."
+            )
+        has_scientific_marker = transition is not None or self.episode_restarted
+        if has_scientific_marker:
+            if (
+                type(self.raw_continuation_identity) is not RawContinuationIdentity
+                or self.raw_continuation_identity
+                is not self.session.raw_continuation_identity
+            ):
+                raise ValueError(
+                    "transition and restart results must bind the candidate raw "
+                    "continuation identity."
+                )
+        elif self.raw_continuation_identity is not None:
+            raise ValueError(
+                "UI-only results must not carry a raw continuation identity."
+            )
 
 
 def normalize_key(
@@ -98,9 +197,9 @@ def normalize_key(
     """Normalize supported keyboard aliases to debugger commands."""
     if key is None:
         return None
-    if shift_key is None and key == "R":
-        return "shift+r"
     normalized = key.lower()
+    if normalized == "shift+r" or (normalized == "r" and shift_key is True):
+        return None
     if normalized in (
         "shift+tab",
         "backtab",
@@ -124,8 +223,6 @@ def normalize_key(
         return "arrowleft"
     if normalized == "tab" and shift_key:
         return "shift+tab"
-    if normalized in ("r", "shift+r") and (shift_key or normalized == "shift+r"):
-        return "shift+r"
     return normalized
 
 
@@ -136,13 +233,11 @@ def _hit_test_rows(
 ) -> int | None:
     if not isfinite(x) or not isfinite(y):
         return None
-    point = np.asarray((x, y), dtype=np.float32)
     candidates: list[tuple[float, int]] = []
     for global_slot, position, radius, active in rows:
         if not active or radius <= 0:
             continue
-        center = np.asarray(position, dtype=np.float32)
-        normalized_distance = float(np.linalg.norm(point - center) / radius)
+        normalized_distance = hypot(x - position[0], y - position[1]) / radius
         if normalized_distance <= 1.0:
             candidates.append((normalized_distance, global_slot))
     if not candidates:
@@ -151,14 +246,19 @@ def _hit_test_rows(
 
 
 def hit_test_scene_agents(
-    agents: Iterable[AgentSceneV1],
+    agents: Iterable[AgentSceneV1 | AgentSceneV2],
     x: float,
     y: float,
 ) -> int | None:
     """Hit-test only agents authorized in the current serialized scene."""
     return _hit_test_rows(
         (
-            (agent.global_slot, agent.position, agent.radius, agent.active)
+            (
+                agent.global_slot,
+                agent.position,
+                agent.radius,
+                agent.active if isinstance(agent, AgentSceneV1) else True,
+            )
             for agent in agents
         ),
         x,
@@ -171,8 +271,22 @@ def sanitize_pov_pending_target(session: DebuggerSession) -> DebuggerSession:
     target = session.pending_action.selected_global_target_slot
     if target is None:
         return session
-    scene = build_battlefield_scene(session, audience="agent_pov")
-    authorized_slots = {agent.global_slot for agent in scene.agents}
+    slice_ = build_actor_pov_current_slice_v1(
+        session.evaluation_context,
+        session.current_evaluation_frame,
+        global_slot=session.controlled_global_slot,
+        incoming_transition_view=session.incoming_evaluation_view,
+    )
+    projection = build_actor_pov_analyzer_projection_v1(slice_)
+    authorized_public_ids = {
+        projection.scene.self_actor.public_agent_id,
+        *(body.public_agent_id for body in projection.scene.visible_bodies),
+    }
+    authorized_slots = {
+        row.global_slot
+        for row in session.evaluation_context.roster
+        if row.public_agent_id in authorized_public_ids
+    }
     if target in authorized_slots:
         return session
     sanitized = clear_pending_target(session)
@@ -188,6 +302,8 @@ def _result(
     preset: Preset,
     handled: bool,
     changed: bool,
+    transition_applied: EvaluationTransitionViewV1 | None = None,
+    episode_restarted: bool = False,
     notice: str | None = None,
     shutdown_requested: bool = False,
 ) -> InputDispatchResult:
@@ -197,9 +313,45 @@ def _result(
         preset=preset,
         handled=handled,
         changed=changed,
+        transition_applied=transition_applied,
+        episode_restarted=episode_restarted,
+        raw_continuation_identity=(
+            session.raw_continuation_identity
+            if transition_applied is not None or episode_restarted
+            else None
+        ),
         notice=notice,
         shutdown_requested=shutdown_requested,
     )
+
+
+def _applied_transition_result(
+    session: DebuggerSession,
+    *,
+    view_mode: ViewMode,
+    preset: Preset,
+    sanitize_pov: bool = False,
+) -> InputDispatchResult:
+    """Package one captured transition behind the typed validation boundary."""
+    try:
+        packaged_session = (
+            sanitize_pov_pending_target(session) if sanitize_pov else session
+        )
+        return _result(
+            packaged_session,
+            view_mode=view_mode,
+            preset=preset,
+            handled=True,
+            changed=True,
+            transition_applied=packaged_session.incoming_evaluation_view,
+        )
+    except DebuggerTransitionFailureV1:
+        raise
+    except Exception as error:
+        raise DebuggerTransitionFailureV1(
+            "validation",
+            "transition_packaging_failed",
+        ) from error
 
 
 def _pending_edit_result(
@@ -223,12 +375,87 @@ def _pending_edit_result(
 
 
 def _is_terminal(session: DebuggerSession) -> bool:
-    return bool(session.done_flags.terminated) or bool(session.done_flags.truncated)
+    return session.episode_sealed
 
 
 def _terminal_notice(session: DebuggerSession) -> str:
-    reason = "terminated" if bool(session.done_flags.terminated) else "truncated"
+    reason = (
+        "terminated"
+        if session.terminated
+        else "truncated"
+        if session.truncated
+        else "at its declared horizon"
+    )
     return f"Episode is {reason}; reset or switch scenario to continue."
+
+
+def _target_action(
+    session: DebuggerSession,
+    actor_global_slot: int,
+    target_global_slot: int | None,
+) -> int:
+    if target_global_slot is None:
+        return 0
+    catalog = session.evaluation_context.static_mechanics_catalog
+    mapping = catalog.global_recipient_slot_by_actor_and_target_action[
+        actor_global_slot
+    ]
+    try:
+        return mapping.index(target_global_slot)
+    except ValueError as error:
+        raise ValueError("target is absent from the serialized action axis") from error
+
+
+def _authorized_pointer_rows(
+    session: DebuggerSession,
+    *,
+    view_mode: ViewMode,
+) -> tuple[tuple[int, tuple[float, float], float, bool], ...]:
+    if view_mode == "researcher":
+        projection = build_researcher_analyzer_projection_v2(
+            session.evaluation_context,
+            session.current_evaluation_frame,
+            transition_view=session.incoming_evaluation_view,
+            presentation=EvaluationScenePresentationStateV1(
+                controlled_global_slot=session.controlled_global_slot,
+                selected_global_slot=session.controlled_global_slot,
+                show_ranges=session.show_ranges,
+            ),
+            status_source_evidence_state=session.status_source_evidence_state,
+        )
+        return tuple(
+            (agent.global_slot, agent.position, agent.radius, True)
+            for agent in projection.scene.agents
+        )
+    slice_ = build_actor_pov_current_slice_v1(
+        session.evaluation_context,
+        session.current_evaluation_frame,
+        global_slot=session.controlled_global_slot,
+        incoming_transition_view=session.incoming_evaluation_view,
+    )
+    projection = build_actor_pov_analyzer_projection_v1(slice_)
+    slot_by_public_id = {
+        row.public_agent_id: row.global_slot
+        for row in session.evaluation_context.roster
+    }
+    self_actor = projection.scene.self_actor
+    return (
+        (
+            self_actor.global_slot,
+            self_actor.position,
+            self_actor.radius,
+            True,
+        ),
+        *(
+            (
+                slot_by_public_id[body.public_agent_id],
+                body.position,
+                body.radius,
+                True,
+            )
+            for body in projection.scene.visible_bodies
+        ),
+    )
 
 
 def _dispatch_keyboard(
@@ -269,10 +496,9 @@ def _dispatch_keyboard(
     if key in ("tab", "shift+tab"):
         direction = -1 if key == "shift+tab" else 1
         active_slots = tuple(
-            int(slot)
-            for slot in np.flatnonzero(
-                np.asarray(session.config.agent_profile.active_mask, dtype=bool)
-            )
+            row.global_slot
+            for row in session.evaluation_context.roster
+            if row.configured_active
         )
         current_index = active_slots.index(session.controlled_global_slot)
         controlled_slot = active_slots[(current_index + direction) % len(active_slots)]
@@ -322,10 +548,9 @@ def _dispatch_keyboard(
             )
         move_action = _MOVEMENT_KEYS[key]
         if not bool(
-            session.action_mask.move_mask[
-                session.controlled_global_slot,
-                move_action,
-            ]
+            session.current_evaluation_frame.action_mask.move_mask[
+                session.controlled_global_slot
+            ][move_action]
         ):
             return _result(
                 session,
@@ -363,7 +588,8 @@ def _dispatch_keyboard(
             )
         edited = arm_basic(session) if key == "1" else arm_ultimate(session)
         edited_pending = edited.pending_action
-        target_action = global_slot_to_target_action(
+        target_action = _target_action(
+            edited,
             edited.controlled_global_slot,
             edited_pending.selected_global_target_slot,
         )
@@ -380,7 +606,7 @@ def _dispatch_keyboard(
                 ),
             )
         availability = lane_availability(
-            session.action_mask,
+            session.current_evaluation_frame.action_mask,
             session.controlled_global_slot,
             target_action,
             edited_pending.armed_lane,
@@ -417,6 +643,12 @@ def _dispatch_keyboard(
             )
         edited = submit_next_script_frame(session)
         changed = edited is not session
+        if changed:
+            return _applied_transition_result(
+                edited,
+                view_mode=view_mode,
+                preset=preset,
+            )
         notice = (
             _terminal_notice(session)
             if terminal
@@ -439,6 +671,14 @@ def _dispatch_keyboard(
                 (session.controlled_global_slot,) if view_mode == "pov" else None
             ),
         )
+        transition_applied = edited is not session
+        if transition_applied:
+            return _applied_transition_result(
+                edited,
+                view_mode=view_mode,
+                preset=preset,
+                sanitize_pov=view_mode == "pov",
+            )
         if view_mode == "pov":
             edited = sanitize_pov_pending_target(edited)
         changed = edited is not session
@@ -464,15 +704,7 @@ def _dispatch_keyboard(
             preset=preset,
             handled=True,
             changed=True,
-        )
-    if key == "shift+r":
-        return _result(
-            session,
-            view_mode=view_mode,
-            preset=preset,
-            handled=True,
-            changed=False,
-            notice=_SHIFT_R_NOTICE,
+            episode_restarted=True,
         )
     if key == "g":
         return _result(
@@ -506,6 +738,7 @@ def _dispatch_keyboard(
             preset=preset,
             handled=True,
             changed=True,
+            episode_restarted=True,
         )
     return _result(
         session,
@@ -538,12 +771,8 @@ def _dispatch_pointer(
             view_mode=view_mode,
             preset=preset,
         )
-    scene = build_battlefield_scene(
-        session,
-        audience="researcher" if view_mode == "researcher" else "agent_pov",
-    )
-    target = hit_test_scene_agents(
-        scene.agents,
+    target = _hit_test_rows(
+        _authorized_pointer_rows(session, view_mode=view_mode),
         command.world_x,
         command.world_y,
     )
@@ -577,11 +806,10 @@ def _dispatch_roster_selection(
     view_mode: ViewMode,
     preset: Preset,
 ) -> InputDispatchResult:
-    scene = build_battlefield_scene(
-        session,
-        audience="researcher" if view_mode == "researcher" else "agent_pov",
-    )
-    if command.global_slot not in {agent.global_slot for agent in scene.agents}:
+    authorized_slots = {
+        row[0] for row in _authorized_pointer_rows(session, view_mode=view_mode)
+    }
+    if command.global_slot not in authorized_slots:
         return _result(
             session,
             view_mode=view_mode,
@@ -600,6 +828,59 @@ def _dispatch_roster_selection(
     return _pending_edit_result(
         session,
         edited,
+        view_mode=view_mode,
+        preset=preset,
+    )
+
+
+def _dispatch_actor_pov_target_action(
+    session: DebuggerSession,
+    command: ActorPovTargetActionCommandV1,
+    *,
+    view_mode: ViewMode,
+    preset: Preset,
+) -> InputDispatchResult:
+    """Resolve one recipient-relative POV target action on the trusted host."""
+    if view_mode != "pov":
+        return _result(
+            session,
+            view_mode=view_mode,
+            preset=preset,
+            handled=True,
+            changed=False,
+            notice="Actor-relative target selection is available only in POV.",
+        )
+    if command.target_action == 0:
+        return _pending_edit_result(
+            session,
+            clear_pending_target(session),
+            view_mode=view_mode,
+            preset=preset,
+        )
+
+    mapping = session.evaluation_context.static_mechanics_catalog
+    recipients = mapping.global_recipient_slot_by_actor_and_target_action[
+        session.controlled_global_slot
+    ]
+    target_global_slot = recipients[command.target_action]
+    authorized_slots = {
+        row[0] for row in _authorized_pointer_rows(session, view_mode="pov")
+    }
+    if target_global_slot not in authorized_slots:
+        return _result(
+            session,
+            view_mode=view_mode,
+            preset=preset,
+            handled=True,
+            changed=False,
+            notice=(
+                f"Target action {command.target_action} is unavailable in the "
+                "current authorized POV."
+            ),
+        )
+    return _pending_edit_result(
+        session,
+        select_clicked_target(session, target_global_slot),
         view_mode=view_mode,
         preset=preset,
     )
@@ -636,6 +917,13 @@ def dispatch_command(
             view_mode=view_mode,
             preset=preset,
         )
+    if isinstance(command, ActorPovTargetActionCommandV1):
+        return _dispatch_actor_pov_target_action(
+            session,
+            command,
+            view_mode=view_mode,
+            preset=preset,
+        )
     if isinstance(command, ScenarioSwitchCommandV1):
         allowed_names = {
             scenario.name for scenario in list_scenarios(include_stress=include_stress)
@@ -666,6 +954,7 @@ def dispatch_command(
             preset=preset,
             handled=True,
             changed=True,
+            episode_restarted=True,
         )
     if isinstance(command, ResetCommandV1):
         edited = reset_session(session)
@@ -677,6 +966,7 @@ def dispatch_command(
             preset=preset,
             handled=True,
             changed=True,
+            episode_restarted=True,
         )
     if isinstance(command, SetMovementScaleCommandV1):
         if view_mode != "researcher":
@@ -695,6 +985,7 @@ def dispatch_command(
             preset=preset,
             handled=True,
             changed=edited is not session,
+            episode_restarted=edited is not session,
             notice=(
                 "Movement scale is already at the requested effective value."
                 if edited is session
@@ -723,12 +1014,21 @@ def dispatch_command(
             handled=True,
             changed=command.preset != preset,
         )
+    if isinstance(command, ExitCommandV1):
+        return _result(
+            session,
+            view_mode=view_mode,
+            preset=preset,
+            handled=True,
+            changed=False,
+            notice="Debugger shutdown requested.",
+            shutdown_requested=True,
+        )
     return _result(
         session,
         view_mode=view_mode,
         preset=preset,
         handled=True,
         changed=False,
-        notice="Debugger shutdown requested.",
-        shutdown_requested=True,
+        notice="Replay recording is not enabled for this debugger session.",
     )

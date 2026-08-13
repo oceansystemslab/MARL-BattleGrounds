@@ -1,10 +1,14 @@
 """Renderer-independent input dispatch and authorization tests."""
 
 from dataclasses import replace
+from unittest.mock import Mock
 
 import jax.numpy as jnp
 import pytest
+import scripts.dev.visual_debugger.control as control_module
+import scripts.dev.visual_debugger.input as input_module
 from scripts.dev.visual_debugger.control import (
+    DebuggerTransitionFailureV1,
     arm_ultimate,
     create_session,
     select_clicked_target,
@@ -15,11 +19,15 @@ from scripts.dev.visual_debugger.input import (
     dispatch_command,
     hit_test_scene_agents,
     normalize_key,
+    recording_restart_intent_v1,
 )
 from scripts.dev.visual_debugger.model import DebuggerSession
 from scripts.dev.visual_debugger.protocol import (
+    ActorPovTargetActionCommandV1,
     BattlefieldPointerCommandV1,
+    DebuggerCommandV1,
     ExitCommandV1,
+    FinishAndReviewCommandV1,
     KeyboardCommandV1,
     ResetCommandV1,
     RosterSelectionCommandV1,
@@ -29,8 +37,8 @@ from scripts.dev.visual_debugger.protocol import (
     SetViewCommandV1,
 )
 from scripts.dev.visual_debugger.scenarios import get_scenario
-from scripts.dev.visual_debugger.scene_adapter import build_battlefield_scene
 from scripts.dev.visual_debugger.targeting import global_slot_to_target_action
+from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
 from marl_battlegrounds.core.types import (
     MAX_AGENT_SLOTS,
@@ -39,10 +47,17 @@ from marl_battlegrounds.core.types import (
     MOVE_SOUTH,
     MOVE_STAY,
     MOVE_WEST,
-    DoneFlags,
     EnvConfig,
     EnvState,
 )
+from marl_battlegrounds.evaluation.pov import build_actor_pov_current_slice_v1
+from marl_battlegrounds.rendering.evaluation_adapter import (
+    build_researcher_analyzer_projection_v2,
+)
+from marl_battlegrounds.rendering.pov_scene import (
+    build_actor_pov_analyzer_projection_v1,
+)
+from marl_battlegrounds.rendering.scene import AgentSceneV2
 
 
 def _session(
@@ -53,19 +68,96 @@ def _session(
     return create_session(
         get_scenario(name),
         seed=0,
+        evaluation_launch_specification=debugger_test_launch_specification(),
         controlled_global_slot=controlled_slot,
         show_ranges=True,
         verbose_logging=False,
     )
 
 
+def _researcher_agents(session: DebuggerSession) -> tuple[AgentSceneV2, ...]:
+    projection = build_researcher_analyzer_projection_v2(
+        session.evaluation_context,
+        session.current_evaluation_frame,
+        transition_view=session.incoming_evaluation_view,
+        status_source_evidence_state=session.status_source_evidence_state,
+    )
+    return projection.scene.agents
+
+
+def _authorized_pov_slots(session: DebuggerSession) -> set[int]:
+    slice_ = build_actor_pov_current_slice_v1(
+        session.evaluation_context,
+        session.current_evaluation_frame,
+        global_slot=session.controlled_global_slot,
+        incoming_transition_view=session.incoming_evaluation_view,
+    )
+    scene = build_actor_pov_analyzer_projection_v1(slice_).scene
+    authorized_public_ids = {
+        scene.self_actor.public_agent_id,
+        *(body.public_agent_id for body in scene.visible_bodies),
+    }
+    return {
+        row.global_slot
+        for row in session.evaluation_context.roster
+        if row.public_agent_id in authorized_public_ids
+    }
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    (
+        (ResetCommandV1(), "reset"),
+        (KeyboardCommandV1(key="r"), "reset"),
+        (KeyboardCommandV1(key="R", shift_key=True), None),
+        (
+            ScenarioSwitchCommandV1(scenario_name="basic_support"),
+            "scenario_switch",
+        ),
+        (SetMovementScaleCommandV1(movement_scale=0.1), "movement_scale"),
+        (FinishAndReviewCommandV1(), None),
+    ),
+)
+def test_recording_restart_intent_classifies_before_restart_construction(
+    command: DebuggerCommandV1,
+    expected: str | None,
+) -> None:
+    session = _session()
+    assert (
+        recording_restart_intent_v1(
+            session,
+            command,
+            view_mode="researcher",
+            include_stress=False,
+        )
+        == expected
+    )
+
+
+def test_recording_lifecycle_command_is_safe_when_recording_is_disabled() -> None:
+    session = _session()
+    result = dispatch_command(
+        session,
+        FinishAndReviewCommandV1(),
+        view_mode="researcher",
+        preset="analysis",
+        include_stress=False,
+    )
+
+    assert result.session is session
+    assert result.handled
+    assert not result.changed
+    assert result.notice == "Replay recording is not enabled for this debugger session."
+
+
 @pytest.mark.parametrize(
     ("key", "shift_key", "expected"),
     (
         (None, None, None),
-        ("R", None, "shift+r"),
+        ("R", None, "r"),
         ("R", False, "r"),
-        ("r", True, "shift+r"),
+        ("r", True, None),
+        ("shift+r", None, None),
         ("shift+tab", None, "shift+tab"),
         ("backtab", None, "shift+tab"),
         ("iso_left_tab", None, "shift+tab"),
@@ -89,6 +181,33 @@ def test_key_normalization_covers_supported_aliases(
     expected: str | None,
 ) -> None:
     assert normalize_key(key, shift_key=shift_key) == expected
+
+
+def test_shift_r_is_unrecognized_while_ordinary_r_still_resets() -> None:
+    session = _session()
+
+    shifted = dispatch_command(
+        session,
+        KeyboardCommandV1(key="R", shift_key=True),
+        view_mode="researcher",
+        preset="analysis",
+        include_stress=False,
+    )
+    ordinary = dispatch_command(
+        session,
+        KeyboardCommandV1(key="r"),
+        view_mode="researcher",
+        preset="analysis",
+        include_stress=False,
+    )
+
+    assert not shifted.handled
+    assert not shifted.changed
+    assert shifted.session is session
+    assert shifted.notice is None
+    assert ordinary.handled
+    assert ordinary.changed
+    assert ordinary.episode_restarted
 
 
 @pytest.mark.parametrize(
@@ -148,14 +267,26 @@ def test_stay_key_resets_only_the_controlled_actor_draft() -> None:
 
 def test_keyboard_movement_rejects_an_unavailable_current_mask_category() -> None:
     session = _session()
+    actor = session.controlled_global_slot
+    move_rows = [
+        list(row) for row in session.current_evaluation_frame.action_mask.move_mask
+    ]
+    move_rows[actor][MOVE_EAST] = False
+    canonical_mask = session.current_evaluation_frame.action_mask.model_copy(
+        update={"move_mask": tuple(tuple(row) for row in move_rows)}
+    )
     masked = replace(
         session,
         action_mask=session.action_mask._replace(
             move_mask=session.action_mask.move_mask.at[
-                session.controlled_global_slot,
+                actor,
                 MOVE_EAST,
             ].set(False)
         ),
+        current_evaluation_frame=session.current_evaluation_frame.model_copy(
+            update={"action_mask": canonical_mask}
+        ),
+        raw_continuation_identity=None,
     )
 
     result = dispatch_command(
@@ -189,11 +320,30 @@ def test_keyboard_combat_lane_rejects_an_unavailable_exact_pair(
         target_action,
         lane,
     ].set(False)
+    canonical_rows = [
+        [list(lanes) for lanes in actor_rows]
+        for actor_rows in (
+            session.current_evaluation_frame.action_mask.select_target_use_ultimate_joint_mask
+        )
+    ]
+    canonical_rows[session.controlled_global_slot][target_action][lane] = False
+    canonical_mask = session.current_evaluation_frame.action_mask.model_copy(
+        update={
+            "select_target_use_ultimate_joint_mask": tuple(
+                tuple(tuple(lanes) for lanes in actor_rows)
+                for actor_rows in canonical_rows
+            )
+        }
+    )
     masked = replace(
         session,
         action_mask=session.action_mask._replace(
             select_target_use_ultimate_joint_mask=joint_mask
         ),
+        current_evaluation_frame=session.current_evaluation_frame.model_copy(
+            update={"action_mask": canonical_mask}
+        ),
+        raw_continuation_identity=None,
     )
     selected = select_clicked_target(masked, target_slot)
     pending_before = selected.pending_action
@@ -259,6 +409,82 @@ def test_zero_key_stages_explicit_no_combat_without_losing_draft_context() -> No
     assert result.session.pending_action.selected_global_target_slot == 7
     assert result.session.pending_action.armed_lane is None
     assert result.session.pending_action.arm_origin is None
+
+
+def test_actor_pov_target_action_selects_a_currently_visible_recipient() -> None:
+    session = _session("basic_support")
+    result = dispatch_command(
+        session,
+        ActorPovTargetActionCommandV1(target_action=6),
+        view_mode="pov",
+        preset="analysis",
+        include_stress=False,
+    )
+
+    assert result.handled
+    assert result.changed
+    assert result.notice is None
+    assert result.session.pending_action.selected_global_target_slot == 5
+    assert result.transition_applied is None
+
+
+def test_actor_pov_target_action_rejects_hidden_recipient_without_disclosure() -> None:
+    session = _session("basic_support")
+    result = dispatch_command(
+        session,
+        ActorPovTargetActionCommandV1(target_action=8),
+        view_mode="pov",
+        preset="analysis",
+        include_stress=False,
+    )
+
+    assert result.handled
+    assert not result.changed
+    assert result.session is session
+    assert result.notice == (
+        "Target action 8 is unavailable in the current authorized POV."
+    )
+    assert "g7" not in result.notice
+
+
+def test_actor_pov_target_action_zero_clears_the_pending_target() -> None:
+    selected = dispatch_command(
+        _session("basic_support"),
+        ActorPovTargetActionCommandV1(target_action=6),
+        view_mode="pov",
+        preset="analysis",
+        include_stress=False,
+    ).session
+    assert selected.pending_action.selected_global_target_slot == 5
+
+    cleared = dispatch_command(
+        selected,
+        ActorPovTargetActionCommandV1(target_action=0),
+        view_mode="pov",
+        preset="analysis",
+        include_stress=False,
+    )
+
+    assert cleared.handled
+    assert cleared.changed
+    assert cleared.session.pending_action.selected_global_target_slot is None
+    assert cleared.transition_applied is None
+
+
+def test_actor_pov_target_action_is_rejected_in_researcher_mode() -> None:
+    session = _session("basic_support")
+    result = dispatch_command(
+        session,
+        ActorPovTargetActionCommandV1(target_action=6),
+        view_mode="researcher",
+        preset="analysis",
+        include_stress=False,
+    )
+
+    assert result.handled
+    assert not result.changed
+    assert result.session is session
+    assert result.notice == "Actor-relative target selection is available only in POV."
     assert result.session.state is session.state
     assert result.session.action_mask is session.action_mask
     assert result.session.key is session.key
@@ -326,8 +552,54 @@ def test_n_advances_only_scripted_playback() -> None:
     assert interactive_result.notice == "N advances scripted playback only."
     assert scripted_result.changed
     assert int(scripted_result.session.state.step_count) == 1
-    assert scripted_result.session.last_transition is not None
-    assert scripted_result.session.last_transition.submission_kind == "scripted"
+    assert scripted_result.transition_applied is not None
+    assert scripted_result.session.incoming_evaluation_view is (
+        scripted_result.transition_applied
+    )
+    assert scripted_result.session.last_submission_kind == "scripted"
+
+
+def test_applied_transition_packaging_preserves_typed_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failure = DebuggerTransitionFailureV1(
+        "validation",
+        "transition_packaging_failed",
+    )
+
+    def fail_result(*_args: object, **_kwargs: object) -> object:
+        raise failure
+
+    monkeypatch.setattr(input_module, "_result", fail_result)
+
+    with pytest.raises(DebuggerTransitionFailureV1) as caught:
+        dispatch_command(
+            _session(),
+            KeyboardCommandV1(key="Enter"),
+            view_mode="researcher",
+            preset="analysis",
+            include_stress=False,
+        )
+
+    assert caught.value is failure
+
+
+def test_ui_only_pov_sanitizer_failure_remains_outside_transition_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_sanitizer(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("ui-only sanitizer failure")
+
+    monkeypatch.setattr(input_module, "sanitize_pov_pending_target", fail_sanitizer)
+
+    with pytest.raises(RuntimeError, match="ui-only sanitizer failure"):
+        dispatch_command(
+            _session(),
+            SetViewCommandV1(view_mode="pov"),
+            view_mode="researcher",
+            preset="analysis",
+            include_stress=False,
+        )
 
 
 def test_researcher_and_pov_submit_scopes_are_explicit_and_single_step() -> None:
@@ -339,11 +611,14 @@ def test_researcher_and_pov_submit_scopes_are_explicit_and_single_step() -> None
         preset="analysis",
         include_stress=False,
     )
-    researcher_transition = researcher_result.session.last_transition
+    researcher_view = researcher_result.session.incoming_evaluation_view
 
     assert researcher_result.changed
-    assert researcher_transition is not None
-    assert researcher_transition.report_actor_slots == tuple(range(MAX_AGENT_SLOTS))
+    assert researcher_view is not None
+    assert researcher_result.transition_applied is researcher_view
+    assert researcher_result.session.last_report_actor_slots == tuple(
+        range(MAX_AGENT_SLOTS)
+    )
     assert int(researcher_result.session.state.step_count) == 1
 
     pov = set_pending_movement(_session(), MOVE_NORTH)
@@ -357,19 +632,29 @@ def test_researcher_and_pov_submit_scopes_are_explicit_and_single_step() -> None
         preset="analysis",
         include_stress=False,
     )
-    pov_transition = pov_result.session.last_transition
+    pov_view = pov_result.session.incoming_evaluation_view
 
     assert pov_result.changed
-    assert pov_transition is not None
-    assert pov_transition.report_actor_slots == (0,)
-    assert tuple(int(head[0]) for head in pov_transition.submitted_action) == (
+    assert pov_view is not None
+    assert pov_result.transition_applied is pov_view
+    assert pov_result.session.last_report_actor_slots == (0,)
+    submitted_action = (
+        pov_view.transition.facts.action_acceptance_facts.submitted_joint_action
+    )
+    assert (
+        submitted_action.move[0],
+        submitted_action.select_target[0],
+        submitted_action.use_ultimate[0],
+    ) == (
         MOVE_NORTH,
         0,
         0,
     )
     for actor_slot in range(1, MAX_AGENT_SLOTS):
-        assert tuple(
-            int(head[actor_slot]) for head in pov_transition.submitted_action
+        assert (
+            submitted_action.move[actor_slot],
+            submitted_action.select_target[actor_slot],
+            submitted_action.use_ultimate[actor_slot],
         ) == (MOVE_STAY, 0, 0)
     assert int(pov_result.session.state.step_count) == 1
 
@@ -402,14 +687,18 @@ def test_ctrl_alt_and_meta_modified_inputs_are_suppressed() -> None:
 
 
 def test_terminal_blocks_pending_edits_but_keeps_actor_inspection() -> None:
-    session = _session("basic_support")
-    terminal = replace(
-        session,
-        done_flags=DoneFlags(
-            terminated=jnp.asarray(True),
-            truncated=jnp.asarray(False),
-        ),
-    )
+    terminal = _session("basic_support")
+    for _ in range(2):
+        terminal = dispatch_command(
+            terminal,
+            KeyboardCommandV1(key="n"),
+            view_mode="researcher",
+            preset="analysis",
+            include_stress=False,
+        ).session
+    assert terminal.reached_declared_horizon
+    assert not terminal.terminated
+    assert not terminal.truncated
     movement = dispatch_command(
         terminal,
         KeyboardCommandV1(key="d"),
@@ -442,24 +731,80 @@ def test_terminal_blocks_pending_edits_but_keeps_actor_inspection() -> None:
     assert cycled.session.key is terminal.key
 
 
+def test_terminal_pov_submit_sanitizes_draft_without_reusing_incoming_transition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registered = get_scenario("arena_5v5")
+    build_registered_scenario = registered.build_scenario
+
+    def build_one_step_scenario() -> tuple[EnvConfig, EnvState]:
+        config, state = build_registered_scenario()
+        return config._replace(max_steps=1), state
+
+    session = create_session(
+        replace(registered, build_scenario=build_one_step_scenario),
+        seed=0,
+        evaluation_launch_specification=debugger_test_launch_specification(),
+        controlled_global_slot=0,
+        show_ranges=True,
+        verbose_logging=False,
+    )
+    terminal = dispatch_command(
+        session,
+        KeyboardCommandV1(key="Enter"),
+        view_mode="pov",
+        preset="analysis",
+        include_stress=False,
+    ).session
+    assert terminal.reached_declared_horizon
+    hidden_target = min(
+        row.global_slot
+        for row in terminal.evaluation_context.roster
+        if row.configured_active
+        and row.global_slot not in _authorized_pov_slots(terminal)
+    )
+    staged = select_clicked_target(terminal, hidden_target)
+    previous_incoming = staged.incoming_evaluation_view
+    state = staged.state
+    key = staged.key
+    step_spy = Mock(side_effect=AssertionError("terminal submit must not step"))
+    capture_spy = Mock(side_effect=AssertionError("terminal submit must not capture"))
+    monkeypatch.setattr(control_module, "step", step_spy)
+    monkeypatch.setattr(
+        control_module,
+        "capture_evaluation_transition_unit_v1",
+        capture_spy,
+    )
+
+    result = dispatch_command(
+        staged,
+        KeyboardCommandV1(key="Enter"),
+        view_mode="pov",
+        preset="analysis",
+        include_stress=False,
+    )
+
+    assert result.changed
+    assert result.transition_applied is None
+    assert result.session.pending_action.selected_global_target_slot is None
+    assert result.session.incoming_evaluation_view is previous_incoming
+    assert result.session.state is state
+    assert result.session.key is key
+    assert step_spy.call_count == 0
+    assert capture_spy.call_count == 0
+
+
 def test_scene_hit_test_uses_only_authorized_agents_and_stable_tie_break() -> None:
-    scene = build_battlefield_scene(_session("basic_support"), audience="researcher")
-    first = scene.agents[0]
+    agents = _researcher_agents(_session("basic_support"))
+    first = agents[0]
     second = replace(
-        scene.agents[1],
+        agents[1],
         position=first.position,
         radius=first.radius,
     )
 
     assert hit_test_scene_agents((second, first), *first.position) == min(
         first.global_slot, second.global_slot
-    )
-    assert (
-        hit_test_scene_agents(
-            (replace(first, active=False),),
-            *first.position,
-        )
-        is None
     )
     assert hit_test_scene_agents((), *first.position) is None
 
@@ -512,13 +857,7 @@ def test_pointer_selection_is_server_hit_tested_and_shift_controls_actor() -> No
 
 def test_pov_pointer_and_roster_cannot_select_hidden_agent() -> None:
     session = _session("arena_5v5")
-    assert 5 not in {
-        agent.global_slot
-        for agent in build_battlefield_scene(
-            session,
-            audience="agent_pov",
-        ).agents
-    }
+    assert 5 not in _authorized_pov_slots(session)
 
     pointer = dispatch_command(
         session,
@@ -580,14 +919,12 @@ def test_pov_submit_clears_target_that_leaves_successor_visibility() -> None:
     session = create_session(
         replace(registered, build_scenario=build_boundary_scenario),
         seed=0,
+        evaluation_launch_specification=debugger_test_launch_specification(),
         controlled_global_slot=0,
         show_ranges=True,
         verbose_logging=False,
     )
-    assert 5 in {
-        agent.global_slot
-        for agent in build_battlefield_scene(session, audience="agent_pov").agents
-    }
+    assert 5 in _authorized_pov_slots(session)
 
     selected = dispatch_command(
         session,
@@ -612,13 +949,7 @@ def test_pov_submit_clears_target_that_leaves_successor_visibility() -> None:
     )
 
     assert int(submitted.session.state.step_count) == 1
-    assert 5 not in {
-        agent.global_slot
-        for agent in build_battlefield_scene(
-            submitted.session,
-            audience="agent_pov",
-        ).agents
-    }
+    assert 5 not in _authorized_pov_slots(submitted.session)
     assert submitted.session.pending_action.selected_global_target_slot is None
 
 

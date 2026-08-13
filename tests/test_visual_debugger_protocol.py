@@ -7,18 +7,25 @@ from pydantic import ValidationError
 from scripts.dev.visual_debugger.protocol import (
     ActionTupleCardV1,
     ActorActionResultV1,
+    ActorPovTargetActionCommandV1,
     BattlefieldPointerCommandV1,
     CandidateLegalityCardV1,
     CommandRequestV1,
+    ConfirmDiscardAndReplaceCommandV1,
     DebuggerCommandV1,
     ExitCommandV1,
+    FinishAndReviewCommandV1,
     HudFrameV1,
     KeyboardCommandV1,
     LatestTransitionCardV1,
     MovementLegalityCardV1,
     PendingActionCardV1,
+    RecordingStatusV1,
     ResetCommandV1,
+    RetrySaveCommandV1,
+    ReviewReplayCommandV1,
     RosterSelectionCommandV1,
+    SaveAsCommandV1,
     ScenarioMetadataV1,
     ScenarioSwitchCommandV1,
     SetMovementScaleCommandV1,
@@ -104,12 +111,24 @@ def test_hud_movement_legality_requires_exact_canonical_action_rows() -> None:
             shift_key=True,
         ),
         RosterSelectionCommandV1(role="control", global_slot=1),
+        ActorPovTargetActionCommandV1(target_action=6),
         ScenarioSwitchCommandV1(scenario_name="basic_support"),
         ResetCommandV1(),
         SetMovementScaleCommandV1(movement_scale=0.1),
         SetMovementScaleCommandV1(movement_scale=None),
         SetViewCommandV1(view_mode="pov"),
         SetPresetCommandV1(preset="analysis"),
+        FinishAndReviewCommandV1(),
+        ReviewReplayCommandV1(),
+        RetrySaveCommandV1(),
+        SaveAsCommandV1(file_name="a.marlbg-replay.json"),
+        ConfirmDiscardAndReplaceCommandV1(replacement=ResetCommandV1()),
+        ConfirmDiscardAndReplaceCommandV1(
+            replacement=ScenarioSwitchCommandV1(scenario_name="basic_support")
+        ),
+        ConfirmDiscardAndReplaceCommandV1(
+            replacement=SetMovementScaleCommandV1(movement_scale=0.2)
+        ),
         ExitCommandV1(),
     ),
 )
@@ -128,6 +147,80 @@ def test_command_request_round_trips_every_discriminated_variant(
 
     assert decoded == request
     assert json.loads(encoded)["command"]["command_type"] == command.command_type
+
+
+def test_recording_status_enforces_exact_lifecycle_availability() -> None:
+    capturing = RecordingStatusV1(
+        lifecycle="recording",
+        captured_transition_count=0,
+        expected_transition_count=5,
+        restart_fenced=False,
+        finish_available=True,
+        review_available=False,
+        retry_available=False,
+        save_as_available=False,
+        discard_available=False,
+    )
+    failed = RecordingStatusV1(
+        lifecycle="persistence_failed",
+        captured_transition_count=2,
+        expected_transition_count=5,
+        completion_state="partial",
+        completion_reason="user_finish_and_review",
+        restart_fenced=True,
+        finish_available=False,
+        review_available=False,
+        retry_available=True,
+        save_as_available=True,
+        discard_available=False,
+        persistence_error_code="publication_failed",
+    )
+    saved = RecordingStatusV1(
+        lifecycle="saved",
+        captured_transition_count=5,
+        expected_transition_count=5,
+        completion_state="complete",
+        restart_fenced=True,
+        finish_available=False,
+        review_available=True,
+        retry_available=False,
+        save_as_available=False,
+        discard_available=False,
+    )
+
+    assert (
+        RecordingStatusV1.model_validate_json(capturing.model_dump_json()) == capturing
+    )
+    assert RecordingStatusV1.model_validate_json(failed.model_dump_json()) == failed
+    assert RecordingStatusV1.model_validate_json(saved.model_dump_json()) == saved
+
+    for mutation, message in (
+        ({"restart_fenced": True}, "restart_fenced"),
+        ({"retry_available": True}, "availability"),
+        ({"completion_state": "partial"}, "completion state"),
+        ({"persistence_error_code": "publication_failed"}, "persistence_failed"),
+    ):
+        with pytest.raises(ValidationError, match=message):
+            RecordingStatusV1.model_validate(
+                {**capturing.model_dump(mode="python"), **mutation}
+            )
+
+
+@pytest.mark.parametrize(
+    "file_name",
+    (
+        "../escape.marlbg-replay.json",
+        "/tmp/escape.marlbg-replay.json",
+        ".hidden.marlbg-replay.json",
+        "missing.json",
+        "bad name.marlbg-replay.json",
+    ),
+)
+def test_recording_save_as_accepts_only_one_safe_replay_basename(
+    file_name: str,
+) -> None:
+    with pytest.raises(ValidationError):
+        SaveAsCommandV1(file_name=file_name)
 
 
 @pytest.mark.parametrize(
@@ -197,6 +290,55 @@ def test_command_request_rejects_version_type_shape_and_extra_field_drift(
 ) -> None:
     with pytest.raises(ValidationError):
         CommandRequestV1.model_validate(payload)
+
+
+def test_actor_pov_target_action_json_is_strict_bounded_and_global_slot_free() -> None:
+    payload = json.dumps(
+        {
+            "schema_version": 1,
+            "client_id": "client-1",
+            "command_id": "pov-target-1",
+            "base_revision": 0,
+            "command": {
+                "command_type": "actor_pov_target_action",
+                "target_action": 6,
+            },
+        }
+    )
+
+    request = CommandRequestV1.model_validate_json(payload)
+    assert isinstance(request.command, ActorPovTargetActionCommandV1)
+    assert request.command.target_action == 6
+    encoded_command = json.loads(request.model_dump_json())["command"]
+    assert encoded_command == {
+        "command_type": "actor_pov_target_action",
+        "target_action": 6,
+    }
+    assert "global_slot" not in encoded_command
+
+    for invalid_command in (
+        {"command_type": "actor_pov_target_action", "target_action": -1},
+        {"command_type": "actor_pov_target_action", "target_action": 11},
+        {"command_type": "actor_pov_target_action", "target_action": True},
+        {"command_type": "pov_target", "target_action": 6},
+        {
+            "command_type": "actor_pov_target_action",
+            "target_action": 6,
+            "global_slot": 5,
+        },
+    ):
+        with pytest.raises(ValidationError):
+            CommandRequestV1.model_validate_json(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "client_id": "client-1",
+                        "command_id": "pov-target-invalid",
+                        "base_revision": 0,
+                        "command": invalid_command,
+                    }
+                )
+            )
 
 
 @pytest.mark.parametrize("coordinate", (float("nan"), float("inf"), -float("inf")))
@@ -298,6 +440,45 @@ def test_scenario_movement_scale_metadata_enforces_advertised_coherence() -> Non
             ScenarioMetadataV1.model_validate(payload | update)
 
 
+def test_scenario_metadata_json_accepts_integer_and_rejects_coercion() -> None:
+    payload = {
+        "name": "arena_5v5",
+        "title": "Arena",
+        "description": "Interactive arena.",
+        "mode": "interactive",
+        "audience": "researcher",
+        "movement_scale_minimum": 0.01,
+        "movement_scale_maximum": 1,
+        "movement_scale_step": 0.01,
+        "ordinary_movement_distance_scale": 1,
+        "scenario_default_movement_scale": 1,
+        "movement_scale_overridden": False,
+        "completed_frame_count": 0,
+        "frame_count": 0,
+        "next_frame_index": None,
+        "next_frame_label": None,
+        "next_frame_description": None,
+        "script_complete": False,
+    }
+
+    metadata = ScenarioMetadataV1.model_validate_json(json.dumps(payload))
+
+    assert metadata.ordinary_movement_distance_scale == 1.0
+    assert type(metadata.ordinary_movement_distance_scale) is float
+    for invalid in ("1", None, True, [1], {"value": 1}):
+        with pytest.raises(ValidationError):
+            ScenarioMetadataV1.model_validate_json(
+                json.dumps(payload | {"ordinary_movement_distance_scale": invalid})
+            )
+    for mutation in (
+        {"unexpected": True},
+        {"script_complete": None},
+        {"completed_frame_count": False},
+    ):
+        with pytest.raises(ValidationError):
+            ScenarioMetadataV1.model_validate_json(json.dumps(payload | mutation))
+
+
 def test_capability_token_is_not_part_of_the_request_body_schema() -> None:
     schema_text = json.dumps(CommandRequestV1.model_json_schema())
     assert "capability" not in schema_text.lower()
@@ -325,7 +506,7 @@ def test_target_reference_disclosure_is_structural() -> None:
         TargetReferenceV1(disclosure="redacted", global_slot=5)
 
 
-def test_hud_candidate_legality_requires_target_none_roster_and_actor_mapping() -> None:
+def test_hud_candidate_legality_requires_target_none_and_exact_roster() -> None:
     no_target = TargetReferenceV1(
         disclosure="target_none",
         global_slot=None,
@@ -480,23 +661,6 @@ def test_hud_candidate_legality_requires_target_none_roster_and_actor_mapping() 
     assert tuple(
         candidate.target_action for candidate in team_b_hud.candidate_legalities
     ) == (0, 1, 6)
-
-    with pytest.raises(ValidationError, match="actor-relative target mapping"):
-        HudFrameV1(
-            roster_global_slots=(0, 5),
-            controlled_global_slot=5,
-            selected_global_slot=None,
-            pending_submission_scope="controlled_actor",
-            pending_actions=(team_b_pending,),
-            pending_action=team_b_pending,
-            latest_transition=None,
-            movement_legalities=_movement_legalities(),
-            candidate_legalities=(
-                target_none,
-                team_b_self,
-                team_b_team_a_target.model_copy(update={"target_action": 2}),
-            ),
-        )
 
 
 def test_hud_pending_scope_requires_exact_order_alias_and_playback_label() -> None:

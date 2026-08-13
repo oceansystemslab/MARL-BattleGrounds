@@ -11,6 +11,7 @@ from scripts.dev.visual_debugger.targeting import (
     global_slot_to_target_action,
     target_action_to_global_slot,
 )
+from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
 from marl_battlegrounds.core.types import MAX_AGENT_SLOTS, NUM_TARGET_ACTIONS
 
@@ -100,22 +101,22 @@ def test_clicked_global_target_routes_to_expected_recipient_for_both_teams(
     session = create_session(
         scenario,
         seed=0,
+        evaluation_launch_specification=debugger_test_launch_specification(),
         controlled_global_slot=actor_slot,
         show_ranges=False,
         verbose_logging=False,
     )
     session = select_clicked_target(session, target_slot)
     submitted = submit_interactive(session)
-    transition = submitted.last_transition
-    assert transition is not None
-    actor = next(
-        value
-        for value in transition.actor_transitions
-        if value.actor_global_slot == actor_slot
-    )
+    view = submitted.incoming_evaluation_view
+    assert view is not None
+    acceptance = view.transition.facts.action_acceptance_facts
 
-    assert actor.accepted_target_action == expected_target_action
-    assert actor.combat_pair_accepted
-    assert float(submitted.state.current_health[target_slot]) == pytest.approx(
+    assert acceptance.accepted_joint_action.select_target[actor_slot] == (
+        expected_target_action
+    )
+    assert not acceptance.submitted_action_tuple_is_out_of_domain_by_actor[actor_slot]
+    assert not acceptance.in_domain_combat_action_pair_is_rejected_by_actor[actor_slot]
+    assert view.successor_frame.snapshot.current_health[target_slot] == pytest.approx(
         expected_health
     )

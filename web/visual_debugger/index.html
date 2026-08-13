@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
     >
     <meta name="referrer" content="no-referrer">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -30,11 +30,14 @@
         <span id="terminal-badge" class="status-pill status-pill--warning" hidden>
           Terminal
         </span>
+        <span id="recording-badge" class="status-pill status-pill--recording" hidden>
+          Recording
+        </span>
       </div>
     </header>
 
     <section class="session-toolbar" aria-label="Analyzer session">
-      <label>
+      <label id="scenario-control" data-live-only>
         <span>Scenario</span>
         <select id="scenario-select" aria-label="Scenario" disabled>
           <option>Loading…</option>
@@ -52,10 +55,10 @@
         <select id="preset-select" aria-label="Presentation preset" disabled>
           <option value="presentation">Presentation</option>
           <option value="analysis">Analysis</option>
-          <option value="debug">Debug</option>
+          <option value="debug">Technical</option>
         </select>
       </label>
-      <fieldset class="movement-scale-control">
+      <fieldset class="movement-scale-control" data-live-only>
         <legend>Movement scale</legend>
         <div class="movement-scale-control__row">
           <input
@@ -89,8 +92,8 @@
         <span>Step <strong id="step-value">—</strong></span>
         <span>Transition <strong id="transition-value">—</strong></span>
       </fieldset>
-      <fieldset class="motion-controls" aria-label="Presentation motion">
-        <legend class="sr-only">Presentation motion</legend>
+      <fieldset class="motion-controls" aria-label="Graphics rendering controls">
+        <legend class="sr-only">Graphics rendering controls</legend>
         <button
           id="motion-pause-button"
           class="button button--quiet"
@@ -99,12 +102,29 @@
         >
           Pause
         </button>
-        <fieldset class="motion-rate-group" aria-label="Animation speed">
-          <button type="button" data-motion-rate="0.5" aria-pressed="false">0.5×</button>
-          <button type="button" data-motion-rate="1" aria-pressed="true">1×</button>
-          <button type="button" data-motion-rate="2" aria-pressed="false">2×</button>
-          <button type="button" data-motion-rate="off" aria-pressed="false">Off</button>
-        </fieldset>
+        <label class="graphics-speed-control">
+          <span>Graphics rendering speed</span>
+          <span class="graphics-speed-control__row">
+            <input
+              id="graphics-speed-input"
+              type="range"
+              min="0.01"
+              max="2.00"
+              step="0.01"
+              value="1.00"
+              aria-label="Graphics rendering speed"
+            >
+            <output id="graphics-speed-value" for="graphics-speed-input">1.00×</output>
+          </span>
+        </label>
+        <button
+          id="motion-off-button"
+          class="button button--quiet"
+          type="button"
+          aria-pressed="false"
+        >
+          Motion Off
+        </button>
         <button
           id="motion-skip-button"
           class="button button--quiet"
@@ -114,7 +134,7 @@
           Skip
         </button>
         <output id="motion-status" class="motion-status" aria-live="polite">
-          Motion 1×
+          Graphics 1.00×
         </output>
       </fieldset>
       <div class="toolbar-actions">
@@ -128,6 +148,166 @@
           Exit analyzer
         </button>
       </div>
+    </section>
+
+    <section
+      id="recording-panel"
+      class="recording-panel"
+      aria-labelledby="recording-heading"
+      data-live-only
+      hidden
+    >
+      <div class="recording-panel__summary">
+        <div>
+          <p class="eyebrow">Canonical replay capture</p>
+          <h2 id="recording-heading">Replay recording</h2>
+        </div>
+        <dl class="recording-facts">
+          <div>
+            <dt>Lifecycle</dt>
+            <dd id="recording-lifecycle">Unavailable</dd>
+          </div>
+          <div>
+            <dt>Progress</dt>
+            <dd id="recording-progress">0 / 0 transitions</dd>
+          </div>
+          <div>
+            <dt>Completion</dt>
+            <dd id="recording-completion">Capture has not started</dd>
+          </div>
+          <div id="recording-persistence-fact" hidden>
+            <dt>Persistence</dt>
+            <dd id="recording-persistence-error">Unavailable</dd>
+          </div>
+        </dl>
+      </div>
+      <fieldset class="recording-panel__actions">
+        <legend class="sr-only">Replay recording actions</legend>
+        <button
+          id="recording-finish-button"
+          class="button--primary"
+          type="button"
+          hidden
+          disabled
+        >
+          Finish &amp; Review
+        </button>
+        <button
+          id="recording-review-button"
+          class="button--primary"
+          type="button"
+          hidden
+          disabled
+        >
+          Review replay
+        </button>
+        <button id="recording-retry-button" type="button" hidden disabled>
+          Retry save
+        </button>
+        <div id="recording-save-as-control" class="recording-save-as" hidden>
+          <label for="recording-save-as-input">Save As basename</label>
+          <input
+            id="recording-save-as-input"
+            type="text"
+            minlength="20"
+            maxlength="160"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="episode-copy.marlbg-replay.json"
+            aria-describedby="recording-save-as-help"
+            disabled
+          >
+          <button id="recording-save-as-button" type="button" disabled>Save As</button>
+          <span id="recording-save-as-help" class="sr-only">
+            Enter only a filename ending in .marlbg-replay.json. Paths are not accepted.
+          </span>
+        </div>
+      </fieldset>
+      <p id="recording-status-note" class="recording-panel__note" aria-live="polite">
+        Recording authority is supplied by the local Python service.
+      </p>
+    </section>
+
+    <section
+      id="replay-timeline"
+      class="replay-timeline"
+      aria-labelledby="replay-timeline-heading"
+      tabindex="0"
+      hidden
+    >
+      <div class="replay-timeline__summary">
+        <div>
+          <p class="eyebrow">Read-only artifact</p>
+          <h2 id="replay-timeline-heading">Replay timeline</h2>
+        </div>
+        <dl class="replay-badges">
+          <div>
+            <dt>Artifact</dt>
+            <dd id="replay-artifact-reference" tabindex="0">—</dd>
+          </div>
+          <div>
+            <dt>Completion</dt>
+            <dd id="replay-completion-badge">—</dd>
+          </div>
+          <div>
+            <dt>Processing</dt>
+            <dd id="replay-processing-badge">—</dd>
+          </div>
+          <div>
+            <dt>End reason</dt>
+            <dd id="replay-end-reason">—</dd>
+          </div>
+          <div>
+            <dt>Incoming</dt>
+            <dd id="replay-incoming-value">Initial frame</dd>
+          </div>
+        </dl>
+      </div>
+      <fieldset class="replay-timeline__transport">
+        <legend class="sr-only">Replay transport</legend>
+        <button id="replay-first-button" type="button" aria-label="First replay frame">First</button>
+        <button id="replay-previous-button" type="button" aria-label="Previous replay frame">Previous</button>
+        <button
+          id="replay-play-pause-button"
+          class="button--primary"
+          type="button"
+          aria-label="Play replay"
+          aria-pressed="false"
+        >Play</button>
+        <button id="replay-next-button" type="button" aria-label="Next replay frame">Next</button>
+        <button id="replay-last-button" type="button" aria-label="Last replay frame">Last</button>
+        <label class="replay-timeline__slider">
+          <span>Frame</span>
+          <input
+            id="replay-frame-slider"
+            type="range"
+            min="0"
+            max="0"
+            step="1"
+            value="0"
+            aria-label="Replay frame"
+            disabled
+          >
+        </label>
+        <output id="replay-frame-position" for="replay-frame-slider" aria-live="polite">
+          Frame 0 / 0
+        </output>
+      </fieldset>
+      <fieldset class="replay-timeline__options">
+        <legend class="sr-only">Replay presentation options</legend>
+        <button id="replay-ranges-button" type="button" aria-pressed="false">
+          Ranges
+        </button>
+        <button id="replay-verbosity-button" type="button" aria-pressed="false">
+          Verbose details
+        </button>
+        <button id="replay-clear-reference-button" type="button">
+          Clear Reference
+        </button>
+        <span class="replay-shortcuts">
+          <kbd>Home</kbd>/<kbd>End</kbd> edges · <kbd>←</kbd>/<kbd>→</kbd> step · <kbd>Space</kbd> play
+        </span>
+      </fieldset>
     </section>
 
     <div id="notice" class="notice" data-level="info" role="status" hidden></div>
@@ -164,7 +344,7 @@
           are unavailable. Tab behaves normally in the side panel.
         </p>
 
-        <section class="command-deck" aria-label="Debugger commands">
+        <section class="command-deck" aria-label="Debugger commands" data-live-only>
           <header class="command-deck__header">
             <div>
               <p class="command-deck__eyebrow">Joint action composer</p>
@@ -245,8 +425,8 @@
                   Previous actor
                 </button>
                 <button type="button" data-key="Escape">Clear target</button>
-                <button type="button" data-key="g">Ranges</button>
-                <button type="button" data-key="v">Verbosity</button>
+                <button id="live-ranges-button" type="button" data-key="g" aria-pressed="false">Ranges</button>
+                <button id="live-verbosity-button" type="button" data-key="v" aria-pressed="false">Verbosity</button>
               </div>
             </div>
 
@@ -280,7 +460,26 @@
           </div>
         </section>
 
-        <section class="hud-section" aria-labelledby="pending-heading">
+        <section
+          id="semantic-inspector"
+          class="hud-section semantic-inspector"
+          aria-labelledby="semantic-inspector-heading"
+          hidden
+        >
+          <div class="section-heading">
+            <h2 id="semantic-inspector-heading">Full explanation</h2>
+            <button
+              id="semantic-inspector-close-button"
+              class="button button--quiet"
+              type="button"
+            >
+              Close
+            </button>
+          </div>
+          <div id="semantic-inspector-content" class="semantic-inspector__content"></div>
+        </section>
+
+        <section class="hud-section" aria-labelledby="pending-heading" data-live-only>
           <div class="section-heading">
             <h2 id="pending-heading">Pending joint turn</h2>
             <span id="pending-count" class="count-badge">0 actors</span>
@@ -293,7 +492,7 @@
           </article>
         </section>
 
-        <section class="hud-section" aria-labelledby="accepted-heading">
+        <section class="hud-section" aria-labelledby="accepted-heading" data-live-only>
           <h2 id="accepted-heading">Latest transition</h2>
           <article id="accepted-card" class="action-card">
             <p class="empty-copy">No transition yet.</p>
@@ -316,7 +515,7 @@
           </ol>
         </section>
 
-        <details id="visual-key" class="hud-section visual-key">
+        <details id="visual-key" class="hud-section visual-key" data-live-only>
           <summary>Visual key</summary>
           <dl class="visual-key__list">
             <dt><span class="key-swatch key-swatch--team-a"></span>Team A</dt>
@@ -372,13 +571,13 @@
             <p class="eyebrow">Browser controls</p>
             <h2 id="help-heading">Analyzer help</h2>
           </div>
-          <button class="button button--quiet" type="submit" value="close">Close</button>
+          <button id="help-close-button" class="button button--quiet" type="submit" value="close">Close</button>
         </div>
-        <p>
+        <p data-live-only>
           Click the battlefield once to give it command focus. Panel controls
           keep ordinary browser keyboard and Tab behavior.
         </p>
-        <dl class="help-grid">
+        <dl class="help-grid" data-live-only>
           <dt>Tab / Shift+Tab</dt><dd>Cycle the controlled actor</dd>
           <dt>Shift+left click</dt><dd>Control the clicked visible actor</dd>
           <dt>Left click</dt><dd>Select a visible target</dd>
@@ -396,25 +595,82 @@
           </dd>
           <dt>N</dt><dd>Advance the next registered scripted frame only</dd>
           <dt>R</dt><dd>Deterministically reset the scenario</dd>
-          <dt>Shift+R</dt><dd>Explain why cooldown clearing is unavailable</dd>
           <dt>G / V</dt><dd>Toggle ranges / diagnostic verbosity</dd>
           <dt>[ / ]</dt><dd>Previous / next scenario</dd>
           <dt>P</dt><dd>Pause or resume presentation motion</dd>
-          <dt>Motion controls</dt>
-          <dd>Choose 0.5×, 1×, 2×, Off, or Skip the current explanation</dd>
+          <dt>Graphics rendering speed</dt>
+          <dd>Choose any local explanation speed from 0.01× to 2.00×</dd>
+          <dt>Pause / Motion Off / Skip</dt>
+          <dd>Pause, disable, or settle the current visual explanation</dd>
         </dl>
-        <p class="help-note">
+        <p class="help-note" data-live-only>
           Actor drafts persist when you cycle or directly control another
           actor. Scripted scenarios are inspection-only: manual draft and
           Submit controls are unavailable, and N advances the registered
           trajectory.
         </p>
-        <p class="help-note">
+        <p class="help-note" data-live-only>
           Animation, layout, hover, help, and panel state are presentation-only.
           Python remains authoritative for every simulator and legality decision.
           Normal motion briefly holds only the next Submit/Next-frame input;
           Skip, reduced motion, and Off release it immediately.
         </p>
+        <div data-replay-only hidden>
+          <p>
+            This viewer is read-only. Replay transport changes only the selected
+            recorded frame; it cannot submit an action or advance the simulator.
+          </p>
+          <dl class="help-grid">
+            <dt>Home / End</dt><dd>Go to the first / last captured frame</dd>
+            <dt>Left / Right</dt><dd>Go to the previous / next captured frame</dd>
+            <dt>Space</dt><dd>Play or pause serialized replay</dd>
+            <dt>Frame slider</dt><dd>Seek after a short debounce</dd>
+            <dt>Graphics rendering controls</dt>
+            <dd>Change local explanation speed or disable motion</dd>
+          </dl>
+          <p class="help-note">
+            Autoplay keeps one request in flight and waits for each incoming
+            explanation to settle. Seeking, errors, disconnects, hidden tabs,
+            and the captured endpoint pause it.
+          </p>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog
+      id="recording-discard-dialog"
+      class="help-dialog recording-discard-dialog"
+      aria-labelledby="recording-discard-heading"
+      aria-describedby="recording-discard-description"
+      data-live-only
+    >
+      <form method="dialog">
+        <p class="eyebrow">Destructive in-memory action</p>
+        <h2 id="recording-discard-heading">Discard captured prefix?</h2>
+        <p id="recording-discard-description">
+          This replaces the active episode and permanently discards its unpublished
+          in-memory recording prefix. No saved replay file is deleted or overwritten.
+        </p>
+        <p class="recording-discard-dialog__intent">
+          Requested replacement: <strong id="recording-discard-intent">Unavailable</strong>
+        </p>
+        <div class="recording-discard-dialog__actions">
+          <button
+            id="recording-discard-cancel-button"
+            class="button button--quiet"
+            type="submit"
+            value="cancel"
+          >
+            Keep recording
+          </button>
+          <button
+            id="recording-discard-confirm-button"
+            class="button button--danger"
+            type="button"
+          >
+            Discard and replace
+          </button>
+        </div>
       </form>
     </dialog>
 

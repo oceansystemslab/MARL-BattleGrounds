@@ -839,6 +839,26 @@ class EvaluationProcessingFailureV1(EvaluationModel):
             raise ValueError(
                 "processing failure reducer ID and version must appear together"
             )
+        reducer_stage = self.stage in (
+            "reducer_initialize",
+            "reducer_advance",
+            "reducer_finalize",
+        )
+        if reducer_stage and self.reducer_id is None:
+            raise ValueError("reducer failure stages require reducer identity")
+        if not reducer_stage and self.reducer_id is not None:
+            raise ValueError("non-reducer failure stages forbid reducer identity")
+        transition_stage = self.stage in (
+            "transition_validation",
+            "reducer_advance",
+        )
+        if self.stage == "reducer_advance" and self.attempted_transition_index is None:
+            raise ValueError("reducer advance failure requires an attempted index")
+        if not transition_stage and self.attempted_transition_index is not None:
+            raise ValueError(
+                "only transition validation or reducer advance may carry an "
+                "attempted transition index"
+            )
         return self
 
 
@@ -890,10 +910,18 @@ _FAILURE_STAGES_WITHOUT_STATISTICS = frozenset(
 )
 
 
-def _validate_processing_progress(
+def validate_evaluation_processing_progress_v1(
     validated_transition_count: int,
     processing_status: EvaluationProcessingStatusV1,
 ) -> None:
+    """Validate CP3 processed progress against authoritative validated progress."""
+    if type(validated_transition_count) is not int or validated_transition_count < 0:
+        raise ValueError("validated transition count must be a nonnegative integer")
+    _require_stable_nested_model(
+        processing_status,
+        record_name="processing progress status",
+        expected_types=(EvaluationProcessingStatusV1,),
+    )
     processed_transition_count = processing_status.processed_transition_count
     if processed_transition_count > validated_transition_count:
         raise ValueError("processed count cannot exceed validated count")
@@ -918,6 +946,10 @@ def _validate_processing_progress(
             raise ValueError(
                 "reducer advance failure requires exactly one unprocessed "
                 "validated transition"
+            )
+        if failure.attempted_transition_index != processed_transition_count:
+            raise ValueError(
+                "reducer advance attempted index must equal processed progress"
             )
         return
     if processed_transition_count != validated_transition_count:
@@ -1082,7 +1114,7 @@ class RawSufficientStatisticV1(SufficientStatisticDraftV1):
             != self.processing_status.processed_transition_count
         ):
             raise ValueError("raw statistic processed count must match processing")
-        _validate_processing_progress(
+        validate_evaluation_processing_progress_v1(
             self.validated_transition_count,
             self.processing_status,
         )
@@ -1199,7 +1231,7 @@ class EvaluationMetricReportV1(EvaluationModel):
             raise ValueError("metric report completion must join the context episode")
         if self.completion.expected_transition_count != self.context.expected_horizon:
             raise ValueError("metric report completion must use the context horizon")
-        _validate_processing_progress(
+        validate_evaluation_processing_progress_v1(
             self.completion.validated_transition_count,
             self.processing_status,
         )
@@ -1439,6 +1471,7 @@ class EvaluationEpisodeObserverV1:
         "_context",
         "_current_frame",
         "_finalize_attempted",
+        "_finalized_report",
         "_last_transition",
         "_lifecycle_state",
         "_processed_transition_count",
@@ -1480,6 +1513,7 @@ class EvaluationEpisodeObserverV1:
         self._reducers = ordered
         self._lifecycle_state: ObserverLifecycleState = "awaiting_initial"
         self._current_frame: EvaluationFrameV1 | None = None
+        self._finalized_report: EvaluationMetricReportV1 | None = None
         self._finalize_attempted = False
         self._last_transition: EvaluationTransitionV1 | None = None
         self._validated_transition_count = 0
@@ -1503,7 +1537,14 @@ class EvaluationEpisodeObserverV1:
     @property
     def context(self) -> EvaluationEpisodeContextV1:
         """Return the immutable episode context owned by this observer."""
-        return self._context
+        return cast(
+            EvaluationEpisodeContextV1,
+            validate_declared_model_tree(
+                self._context,
+                record_name="observer-owned context",
+                expected_type=EvaluationEpisodeContextV1,
+            ),
+        )
 
     @property
     def lifecycle_state(self) -> ObserverLifecycleState:
@@ -1525,14 +1566,48 @@ class EvaluationEpisodeObserverV1:
         """Return metric-complete frame history, or ``None`` when not retained."""
         if self._retained_frames is None:
             return None
-        return tuple(self._retained_frames)
+        return tuple(
+            cast(
+                EvaluationFrameV1,
+                validate_declared_model_tree(
+                    frame,
+                    record_name="observer-retained frame",
+                    expected_type=EvaluationFrameV1,
+                ),
+            )
+            for frame in self._retained_frames
+        )
 
     @property
     def retained_transitions(self) -> tuple[EvaluationTransitionV1, ...] | None:
         """Return metric-complete transition history, or ``None`` otherwise."""
         if self._retained_transitions is None:
             return None
-        return tuple(self._retained_transitions)
+        return tuple(
+            cast(
+                EvaluationTransitionV1,
+                validate_declared_model_tree(
+                    transition,
+                    record_name="observer-retained transition",
+                    expected_type=EvaluationTransitionV1,
+                ),
+            )
+            for transition in self._retained_transitions
+        )
+
+    @property
+    def finalized_report(self) -> EvaluationMetricReportV1 | None:
+        """Return the exact immutable report committed by finalization, if any."""
+        if self._finalized_report is None:
+            return None
+        return cast(
+            EvaluationMetricReportV1,
+            validate_declared_model_tree(
+                self._finalized_report,
+                record_name="observer-finalized report",
+                expected_type=EvaluationMetricReportV1,
+            ),
+        )
 
     @property
     def reducer_states(self) -> tuple[EvaluationMetricReducerStateV1, ...] | None:
@@ -1917,7 +1992,16 @@ class EvaluationEpisodeObserverV1:
                 processing_status=processing_status,
                 statistics=(),
             )
+        committed_report = cast(
+            EvaluationMetricReportV1,
+            validate_declared_model_tree(
+                report,
+                record_name="observer-finalized report",
+                expected_type=EvaluationMetricReportV1,
+            ),
+        )
         self._lifecycle_state = "finalized"
+        self._finalized_report = committed_report
         return report
 
 
@@ -1967,4 +2051,5 @@ __all__ = [
     "TeamClassStatisticSubjectV1",
     "TeamStatisticSubjectV1",
     "build_evaluation_observer_v1",
+    "validate_evaluation_processing_progress_v1",
 ]

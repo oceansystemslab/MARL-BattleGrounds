@@ -1,11 +1,12 @@
-# Milestone 5 Visual Debugger and Analyzer
+# Visual Debugger and Analyzer
 
-The Milestone 5 Visual Debugger and Analyzer is an explicit-submit research
-tool for
-inspecting battlefield geometry, exact action-mask values, pending actions,
-accepted actions, combat consequences, statuses, and selected-target facts.
-The live application uses a local browser. A stateless Matplotlib snapshot
-remains available for compatibility and headless use.
+The Visual Debugger and Analyzer is a research tool for inspecting battlefield
+geometry, exact action-mask values, canonical transition causes, statuses, and
+audience-authorized actor facts. Its live mode adds explicit-submit controls,
+pending actions, and accepted-action inspection. Its replay mode is strictly
+read-only and traverses a validated recorded artifact without importing or
+running the simulator. A stateless Matplotlib snapshot remains available for
+compatibility and headless use.
 
 ## Authority boundary
 
@@ -15,16 +16,25 @@ Python is the sole authority for:
 - `DebuggerSession`, every active agent's staged action, and scenario state;
 - simulator-command normalization, authorized agent hit testing,
   global/relative target mapping, and exact legality;
-- accepted actions, transition diagnostics, status lifecycle classification,
-  and reset/switch behavior;
-- one submission, one key split, and one `core.step` call.
+- one submission, one key split, and one `core.step` call;
+- the single bundled CP2 capture of each accepted core result, CP3 coherent-view
+  validation, status-source prefix evidence, and reset/switch behavior; and
+- the renderer-neutral `BattlefieldSceneV2`, `VisualEventBatchV2`, researcher
+  projection, exact NoSharedObs POV projection, and labelled SharedObs
+  source-material projection.
 
-The browser owns input capture, pointer-to-world coordinate projection,
+The live browser owns input capture and pointer-to-world coordinate projection.
+Both browser modes own
 responsive layout, SVG/HTML rendering, hover/help/panel state, local
 presentation keys such as `P` and `?`, focus release after Escape, and
-presentation-only animation time. It receives a small allowlisted
-`DebuggerFrameV1`; it never receives raw JAX arrays or recomputes combat,
-visibility, targetability, agent hit testing, or legality.
+presentation-only animation time. Live receives one small audience-specific
+`ResearcherLiveDebuggerFrameV2` or `ActorPovLiveDebuggerFrameV2`; replay
+receives a separate audience-specific read-only viewer frame and timeline. The
+browser never
+receives raw JAX arrays or recomputes combat, visibility, targetability, agent
+hit testing, legality, accepted actions, or event causes. Researcher and POV
+wire roots are structurally distinct, so hiding a researcher field in CSS is
+never used as an authorization boundary.
 
 The live path is:
 
@@ -34,12 +44,16 @@ browser input
   -> Python DebuggerService
   -> shared input/control/targeting helpers
   -> optional single authoritative submit
-  -> allowlisted scene, HUD, and latest event batch
+  -> one CP2 capture and CP3 coherent transition view
+  -> audience-specific Scene/Event V2 projection and HUD
   -> SVG battlefield and HTML inspector
 ```
 
 UI-only activity never calls `step`, splits a key, or restarts an already
-consumed transition animation.
+consumed transition animation. The live service builds and validates the full
+candidate browser frame before its service-owned zero-reducer observer append;
+that append is the final fallible scientific operation before immutable state
+assignment.
 
 ## Launch
 
@@ -66,8 +80,16 @@ Useful invocations:
 ./scripts/dev/run_debug_renderer.sh --scenario team_focus_crossfire
 ./scripts/dev/run_debug_renderer.sh --scenario max_status_stack --include-stress
 ./scripts/dev/run_debug_renderer.sh --controlled-slot 5 --no-ranges
-./scripts/dev/run_debug_renderer.sh --view pov --preset debug
+./scripts/dev/run_debug_renderer.sh --view pov --preset debug  # Technical
 ./scripts/dev/run_debug_renderer.sh --no-open --port 8123
+./scripts/dev/run_debug_renderer.sh \
+  --record-replay recordings/episode.marlbg-replay.json
+./scripts/dev/run_debug_renderer.sh --replay episode.marlbg-replay.json
+./scripts/dev/run_debug_renderer.sh \
+  --replay episode.marlbg-replay.json --frame-index 12 \
+  --view pov --pov-slot 5 --preset analysis
+./scripts/dev/run_debug_renderer.sh \
+  --replay episode.marlbg-replay.json --static --frame-index 12
 ```
 
 ### Options
@@ -82,15 +104,31 @@ Useful invocations:
 | `--no-open` | Print the URL without asking the operating system to open it. |
 | `--port N` | Loopback port; `0` selects an ephemeral port. |
 | `--view researcher\|pov` | Initial authorization mode. Default: `researcher`. |
-| `--preset presentation\|analysis\|debug` | Initial visual-density preset. Default: `analysis`. |
+| `--preset presentation\|analysis\|debug` | Initial visual-density preset. The `debug` wire/CLI value is displayed as **Technical**. Default: `analysis`. |
 | `--verbose` | Enable expanded diagnostics. |
 | `--ranges` / `--no-ranges` | Initially show or hide controlled-actor ranges. |
 | `--static` | Render one Matplotlib reset snapshot; start no server and register no callbacks. |
+| `--record-replay PATH` | Record one live browser episode to a canonical replay plus metric sidecar, then offer read-only review. |
+| `--replay PATH` | Load a validated semantic replay in the read-only browser viewer, or pair it with `--static`. |
+| `--frame-index N` | Select the initial absolute replay frame. Browser default: `0`; required for replay `--static`. |
+| `--pov-slot N` | Select the initial configured-active actor for replay POV authorization. |
 
 Option abbreviations are rejected. Unknown scenarios, invalid ports or
 arguments, and inactive controlled slots exit with code `2`.
-`--no-open`, `--port`, `--view`, and `--preset` are browser-only and have no
-effect on a `--static` snapshot.
+Browser replay accepts only `--frame-index`, `--pov-slot`, `--view`, `--preset`,
+`--ranges`/`--no-ranges`, `--port`, and `--no-open`. Replay static mode is the
+exact combination `--replay PATH --static --frame-index N`; it rejects every
+browser- and live-only option, including an explicitly supplied default. This
+presence-aware matrix prevents a mistyped option from being silently ignored.
+
+Recording is a fourth, live-browser-only launch shape. `--record-replay` accepts
+the ordinary live scenario, seed, controlled-slot, audience, preset, range,
+verbosity, port, and browser-opening options. It rejects `--replay`, `--static`,
+`--frame-index`, `--pov-slot`, and list-only operation, including explicitly
+supplied defaults. The target is preflighted before scenario construction,
+runtime discovery, server bind, or browser open. Its parent must already exist,
+its name must end in `.marlbg-replay.json`, and neither the replay nor an
+incompatible companion target may already exist.
 
 ## Loopback lifecycle and safety
 
@@ -121,6 +159,73 @@ replays a submit.
 Closing the browser tab does not stop Python. Use **Exit analyzer** or `Ctrl-C`
 in the launching terminal.
 
+## Live replay recording and recovery
+
+Create the destination directory, then opt into recording:
+
+```bash
+mkdir -p recordings
+./scripts/dev/run_debug_renderer.sh \
+  --record-replay recordings/episode.marlbg-replay.json
+```
+
+Recording replaces the ordinary diagnostic observer with one retaining,
+metric-complete observer from frame zero. Each accepted simulator step still
+performs exactly one core transition and one canonical CP2 capture; the service
+appends that unit once and performs no replay serialization or filesystem I/O
+between transitions. The local destination and capability token never enter the
+scientific context, replay identity, or either browser audience root.
+
+The compact recording panel is authoritative:
+
+- **Finish & Review** closes an open prefix, publishes the replay and adjacent
+  `.marlbg-metrics.json` report, validates both through the public loader, and
+  changes the same server, origin, capability, and browser page to read-only
+  replay. Review always opens settled at frame zero; the captured tail remains
+  reachable from the timeline.
+- Reaching task termination or the declared horizon closes and saves a complete
+  episode automatically while leaving the live page available. **Review Replay**
+  performs the same frame-zero handoff when the researcher is ready.
+- **Retry save** republishes the exact immutable cached bytes. If publication
+  may already have succeeded, Retry verifies those exact existing replay and
+  report bytes instead of overwriting them.
+- **Save As** accepts only a new safe replay basename in the original resolved
+  parent directory. It cannot select another directory, traverse paths, follow
+  symlinks, or overwrite an existing target.
+- **Exit analyzer** persists an open prefix as interrupted and schedules server
+  shutdown only after saving succeeds. On failure the page remains online,
+  stepping stays fenced, and recovery actions remain available.
+
+At frame zero, Reset, scenario changes, and effective movement-scale changes
+replace the empty retaining draft without writing an artifact. After one or
+more captured transitions, those episode-replacement actions require an
+explicit dialog that names the discarded prefix and replacement intent.
+Cancelling preserves the current recording. Confirming marks the old recorder
+discarded and begins a fresh metric-complete frame-zero episode at the same
+destination. Ordinary draft edits and submissions remain usable while the
+recorder is actively capturing; all scientific controls are fenced after
+finalization or a persistence failure.
+
+Completion truth is not inferred from the UI:
+
+- terminal or declared-horizon capture is `complete` (including a truncation
+  flag that occurs exactly at the declared horizon);
+- early Finish is `partial` with `user_finish_and_review`;
+- browser Exit, `Ctrl-C`, and early environment truncation are `interrupted`
+  with their stable cause;
+- action/policy construction, simulation, canonical capture, and post-capture
+  validation failures are `failed` with their exact CP3 failure origin;
+- metric-reducer processing failure is tracked separately from physical
+  rollout completion and is redacted to an audience-safe reason in actor POV.
+
+`Ctrl-C` runs one lock-serialized graceful close before the loopback server is
+torn down. If ordinary publication fails, it retries the same bytes and then
+attempts a deterministic, no-clobber sibling named
+`<stem>.recovery-<digest-prefix>.marlbg-replay.json`; the terminal prints the
+host-only saved path. A second `Ctrl-C`, `SIGKILL`, power loss, storage failure
+that also prevents the recovery sibling, and browser-tab closure are outside
+the durability guarantee. Closing a tab alone never stops Python.
+
 ## Focus and controls
 
 Keyboard shortcuts apply only while the battlefield SVG has focus. Click the
@@ -141,7 +246,6 @@ inspector retain normal browser keyboard and Tab behavior.
 | `Space` / `Enter` | Submit the staged joint turn in researcher view, or the controlled actor only in agent POV. |
 | `N` | Advance the next registered scripted frame. |
 | `R` | Reset the scenario deterministically. |
-| `Shift+R` | Explain why cooldown-only clearing is unavailable; state is unchanged. |
 | `G` / `V` | Toggle controlled-actor ranges / diagnostic verbosity. |
 | `[` / `]` | Previous / next scenario. |
 | `P` | Pause or resume presentation-only motion. |
@@ -153,8 +257,10 @@ cards, followed by a visually dominant Submit rail. Lower-emphasis
 cycling, target clearing, range and verbosity controls, reset, and scenario
 navigation without competing with turn composition. Each authorized roster row
 also provides **Target** and **Control** buttons. The toolbar provides
-Scenario, View, Preset, Reconnect, Help, Exit, motion pause, `0.5×`, `1×`,
-`2×`, Off, and Skip.
+Scenario, View, Preset, Reconnect, Help, Exit, motion pause, a continuous
+**Graphics rendering speed** control from `0.01×` through `2.00×`, Motion Off,
+and Skip. Graphics rendering speed is presentation-only and never changes the
+authoritative simulator movement scale.
 
 Normal animation briefly gates only the next Submit or scripted-frame command
 during its explanatory phase. Skip, reduced-motion preference, or Off releases
@@ -223,14 +329,33 @@ identities, and endpoints are omitted from the payload rather than hidden with
 CSS. A submitted action may remain visible while its hidden combat result is
 reported as undisclosed.
 
+The controlled row and every disclosed visible-body row retain their exact V1
+status feature vector. The browser decodes only the nine duration columns into
+durable status badges in canonical presentation order. Effect class is fixed by
+the published feature channel; source-agent identity and researcher-only source
+attribution are never reconstructed. Multiplier/fraction columns remain exact
+recipient input but are not mislabelled as additional statuses.
+
+Researcher semantic cards use exact recorded Scene V2 facts. Status cards name
+the class action, duration, magnitude, and every directly recorded source agent;
+the source Team/Class join comes from the same scene roster and empty evidence is
+reported as unavailable rather than guessed. Range, Wall/Pillar, aura-field,
+aura-modifier, and Ultimate-cooldown cards follow the same rule. Recipient aura
+modifiers describe only the recorded aggregate multiplier and never invent a
+nearby emitter. Compact **Now** cards stay bounded at the pointer; explicit
+inspection adds numeric-free role/strength/limitation/teamwork/counterplay
+guidance and exact catalog mechanics to the full inspector. No target-independent
+effective output is reconstructed in JavaScript.
+
 ### Presentation presets
 
-- **Presentation:** durable geometry and semantic events with minimal analysis
-  decoration.
+- **Presentation:** durable geometry, semantic events, exact aura fields, and
+  recipient aura modifiers with minimal analysis decoration. Recorded ranges
+  remain governed by the authoritative Ranges toggle.
 - **Analysis:** default researcher layout with roster, selected facts, event
   feed, selected ranges, and selected legality.
-- **Debug:** privileged visibility, expanded candidate legality, geometry, and
-  technical frame details.
+- **Technical:** privileged visibility, expanded candidate legality, geometry,
+  and technical frame details. The wire/CLI preset identifier remains `debug`.
 
 ## Responsive battlefield and inspector
 
@@ -249,19 +374,25 @@ independently. The primary review viewport is `1440×900`; the minimum supported
 viewport is `960×600`. A stacked convenience layout exists below `960px`, but
 it is outside the supported review contract.
 
-Exact IDs are durable in the roster. Battlefield identity tags appear for
-selection/hover when space permits, avoiding permanent `id_N` clutter.
+Public Agent IDs are durable in the roster and semantic explanations. Internal
+global-slot joins are never presented as agent identity on the battlefield.
 One delegated tooltip explains the highest-priority authorized fact beneath
 the pointer or keyboard focus. Statuses, modifiers, overflow, legality, and
 cooldowns outrank agents; agents outrank event routes, obstacles, ranges, and
-auras. The tooltip switches immediately, stays within the viewport, and cannot
-explain a fact omitted from an agent-POV payload.
+auras. Cards use escaped structured label/value rows and remain inside the
+battlefield or panel that owns the fact. The tooltip switches immediately and
+cannot explain a fact omitted from an agent-POV payload. Explicit inspection
+opens the same normalized descriptor in a persistent full-explanation pane;
+audience changes clear that pane before any reduced view is installed.
 
 ## Visual vocabulary
 
-The [visual acceptance evidence gallery](visual_debugger_visual_evidence.md)
-maps every requested visual rule to its automated proof and
-original-resolution screenshot.
+CI maintains fixed visual-regression baselines for explicitly synthetic combat
+vocabulary and UI-only cases. Real-simulator trajectories instead assert their
+served Scene/event semantics, geometry, and collision invariants without frozen
+pixels, so reasonable catalog tuning does not require image churn. Manual
+original-resolution review captures remain local development artifacts, not
+public documentation.
 
 ### Durable identity and geometry
 
@@ -296,7 +427,7 @@ deterministic north/east/west/south anchors, bounded leader ticks, and overflow
 accounting; the roster always retains complete exact status facts.
 
 At the `960×600` stress limit, a projected battlefield of at most `600×420`
-uses an actor-owned two-line status summary (`id_N` and `+N`) with a mandatory
+uses an actor-owned two-line status summary (public Agent ID and `+N`) with a mandatory
 leader instead of placing a full status matrix beside every body. This applies
 to controlled and selected agents as well as ordinary agents because retaining
 all matrices made ownership ambiguous in dense combat. The exact token list
@@ -340,34 +471,72 @@ but a number never overlaps an icon or escapes its cell.
 | Priest | Rounded directional healing tether terminating in a green plus. | Stronger Holy Word route with green-plus impact and dual healing flare. |
 
 Selection is always the magenta corner reticle; targeting intent is a thin
-pending preview. Ordinary completed Basics and non-Charge Ultimates use
-successor source/recipient anchors so routes agree with displayed bodies.
-Charge activation remains pre-transition and its displacement joins the
-Warrior's pre-position to its successor position. Routes are clipped at body
-radii. Reciprocal routes bend in opposite directions, same-direction
-multiplicity receives stable parallel offsets, close distinct centers preserve
-the actual source-to-recipient bearing, and all accepted activations begin
-together.
+pending preview. Combat, activation, output, health, regeneration, and cooldown
+cues use transition-start anchors. Charge then uses its explicit first-phase
+displacement, ordinary movement uses its separate second-phase displacement,
+and lifecycle/status/shield/wave/respawn cues use their recorded later phase.
+Routes are clipped at body radii. Reciprocal routes bend in opposite directions,
+same-direction multiplicity receives stable parallel offsets, close distinct
+centers preserve the actual source-to-recipient bearing, and all accepted
+activations begin together.
 
 In extremely dense static frames, the event feed is the definitive direction
 and identity fallback; live particles and route markers carry direction more
 clearly than a frozen overlapping screenshot.
 
-## Outcomes, animation, and honest attribution
+## Canonical Scene/Event V2 grammar
 
-Accepted source/target activations and recipient health consequences are
-different facts:
+The live, loaded-replay, and static paths consume the same validated evaluation
+records. `BattlefieldSceneV2` owns durable frame truth: public identities,
+positions, alive/corpse state, health, cooldowns, combat countdowns, statuses,
+spawn pads/shields, wave clocks, class mechanics, aura fields/modifiers, current
+legality, and status-source evidence. `VisualEventBatchV2` owns only the
+incoming transition and preserves every canonical CP2 event ID and order once.
 
-- one activation event/route exists for every exact accepted activation;
-- one recipient-level `NET −N.NN`, `NET +N.NN`, or `HP unchanged` cue reports
-  exact before/after health;
-- no source route carries a fabricated damage or healing amount.
+Status rows retain the evaluation catalog's scientific channel number and
+catalog status ID as an inseparable pair. Renderers present those rows in the
+versioned hard-control, slow, anti-heal, Freedom, then Burst order without
+renumbering the underlying channels.
 
-NET cues place before lifecycle decoration and search deterministic local,
-protected-edge, and whole-viewport candidates. Bodies, status docks, selection
-marks, activation icons, and existing outcome cues are protected regions. If
-no collision-free location exists, the transient node is retained but hidden
-so resize/preset reprojection can reveal it without replaying the event.
+Events are independent facts. The renderer never joins output to activation,
+guesses a Charge target, calls a positive lethal contributor a killer, or
+reconstructs a cause from before/after state:
+
+| Canonical event | Presentation contract |
+| --- | --- |
+| `action_rejected` | Source-actor rejection mark and feed row for the recorded component only. An inactive padded submission remains feed-visible without inventing a body. |
+| `ability_activated` | Independent Basic/Ultimate cue using only its recorded source/recipient payload. |
+| `source_damage_output` | Independent raw/source-modified/modifier/aura detail; never a second net-health number or guessed activation link. |
+| `source_healing_output` | The corresponding independent healing-output detail. |
+| `recipient_health_resolution` | The sole authoritative recipient net-combat-health cue. |
+| `combat_countdown_reset` | Crossed-swords/clock pulse plus the durable countdown. |
+| `health_regenerated` | Regeneration cue distinct from Priest healing. |
+| `cooldown_started` / `cooldown_ready` | Dock start pulse / ready flash. |
+| `charge_phase_displacement` | Exact first displacement segment; no inferred target. |
+| `ordinary_movement_phase_displacement` | Exact second segment, never relabelled voluntary intent. |
+| `agent_died` | Death at the post-displacement position, followed by durable corpse state. |
+| `lethal_damage_contribution` | Positive-contributor detail only; no killer claim or extra projectile. |
+| `status_aged_to_zero` | Neutral expiry/fade. |
+| `status_broken_by_damage` | Distinct recorded shatter. |
+| `status_applied` | Recorded source-to-recipient application cue. |
+| `status_refreshed_or_extended` | Source-less refresh pulse; durable source-agent attribution becomes unknown. |
+| `status_cleared_by_new_death` | Death-clear sweep distinct from expiry. |
+| `spawn_shield_expired` | Shield crack/fade. |
+| `respawn_wave_occurred` | Team clock/feed cue even when no actor respawns. |
+| `agent_respawned` | Pad materialization at the recorded successor position, followed by durable body/shield state. |
+
+Status-source evidence is a pure prefix index. A recorded application supplies
+direct evidence; a source-less refresh clears agent attribution; expiry, break,
+and death-clear remove it; and a nonzero status in frame zero starts with unknown
+source. Random seek and sequential playback therefore settle to the same scene.
+
+Recipient health cues place before lifecycle decoration and search deterministic
+local, protected-edge, and whole-viewport candidates. Durable bodies, status
+docks, and selection marks are always protected regions. Transient cues protect
+only peers in the same authored phase, so non-coexisting evidence does not
+consume later-phase layout capacity. If no collision-free location exists, the
+transient node is retained but hidden so resize/preset reprojection can reveal
+it without replaying the event.
 
 At the `960×600` crowded stress limit, lower-priority lifecycle decoration can
 be suppressed under this explicit policy; exact NET outcomes, durable statuses,
@@ -375,34 +544,31 @@ and the structured event feed retain the authoritative story. This density case
 remains part of final human acceptance rather than being presented as unlimited
 screen capacity.
 
-All accepted activations start in one shared phase; impact and NET cues share
-one impact phase. Ordinary choreography is bounded and uses the latest
-transition only. Hover, help, panel changes, and redraw do not restart it.
+Choreography follows non-overlapping causal phases: transition-start combat,
+Charge, ordinary movement, death, status, then shield/wave/respawn. Ordinary
+choreography is bounded and uses the latest transition only. Hover, help, panel
+changes, reconnect, and redraw do not restart it.
+
+Animated nodes honor those authored phase boundaries exactly. Transient labels
+fade without moving outside their collision-planned geometry; only the exact
+Charge displacement remains as settled transition evidence after its animated
+phase.
 
 ### Charge
 
-Charge shows only the exact public pre-transition source position and successor
-source position. It never reconstructs a private collision-resolved
-intermediate landing or claims a literal continuous physical path. The
-displacement remains through UI-only activity and is replaced by the next
-successful transition, reset, or scenario switch.
+Charge shows only the exact recorded transition-start and post-Charge anchors.
+Ordinary movement begins at that post-Charge anchor and ends at the authoritative
+successor. The renderer never reconstructs a private collision-resolved target
+or a different physical path. The displacement remains through UI-only activity
+and is replaced by the next successful transition, reset, or scenario switch.
 
 ### Trap
 
-Trap lifecycle language remains conservative:
-
-| Public evidence | Classification |
-| --- | --- |
-| `0 -> full` with accepted Trap | Applied |
-| Positive duration `-> full` with accepted Trap | Refreshed/reapplied |
-| `before > 1 -> 0`, no new Trap, accepted positive raw-damage action | Exact break/shatter |
-| `1 -> 0` with accepted damage | Ambiguous end; neutral dissolve, never “break” |
-| `1 -> 0` without damage/application | Natural expiry |
-| Unexpected clear | Unclassified neutral ending |
-| Defensible break plus reapplication | Composite break-and-reapply |
-
-The debugger does not invent a breaker when several damage sources were
-accepted.
+Trap application, source-less refresh, age-to-zero, damage break, and
+death-clear are separate authoritative CP2 variants. The analyzer renders the
+recorded variant and never classifies Trap lifecycle from accepted actions or
+duration deltas. The route terminates at the target body boundary; its durable
+status card remains a separate frame fact.
 
 ## Scenarios
 
@@ -434,10 +600,85 @@ pre-state mask and accepted action.
 
 ### Renderer-only fixtures
 
-`visual_vocabulary`, `crowded_teamfight`, `route_collision`, `mixed_net_zero`,
-`viewport_matrix`, and `pov_redaction` are explicitly synthetic presentation
-fixtures. They are never submitted to the simulator and must not be described
-as valid histories.
+`visual_vocabulary`, `durable_controls`, `crowded_teamfight`,
+`route_collision`, `mixed_net_zero`, `viewport_matrix`,
+`canonical_event_vocabulary`, and `pov_redaction` are explicitly synthetic
+presentation fixtures. Researcher fixtures use exact Scene/Event V2 roots; the
+POV fixture uses its independently recipient-sliced projection. Every fixture
+is wrapped in an exact typed live response root before outbound JSON enters the
+same strict browser normalizer as production. They are never submitted to the
+simulator and must not be described as valid histories.
+
+## Read-only browser replay
+
+Open a canonical replay without starting the simulator:
+
+```bash
+./scripts/dev/run_debug_renderer.sh --replay episode.marlbg-replay.json
+```
+
+The launcher resolves and validates the replay bundle, its completion record,
+processing record, and optional metric sidecar before importing the loopback
+server or asking the operating system to open a browser. Invalid paths,
+symlinks, noncanonical artifacts, out-of-range frames, and unavailable POV
+actors fail before bind/open. A successful replay launch imports neither JAX,
+NumPy, the simulator core, live debugger control, scenarios, nor policies.
+
+Replay uses the same renderer-neutral Scene/Event projection as live analysis,
+but its outer protocol is separate and read-only. The browser fetches an exact
+current frame and a matching audience-owned timeline:
+
+- Researcher frames expose canonical transition IDs, exact event counts,
+  completion and processing badges, durable status-source evidence, and the
+  full researcher projection. Roster selection is labelled **Reference** and
+  controls only inspector/highlight state; it is never a controlled actor or a
+  submission target.
+- Exact NoSharedObs actor POV frames expose only the recipient projection,
+  recipient-local transition/cue IDs, public completion evidence, and a
+  constant statement that processing and metric-report availability are not
+  available in actor POV. Researcher processing truth is never copied into the
+  POV root.
+- SharedObs POV mode is explicitly labelled **source material only**. It shows
+  the recorded base-sensor material and availability joins, never claims a
+  materialized actor input, and never invents an exact SharedObs export.
+
+The timeline controls are **First**, **Previous**, **Play/Pause**, **Next**,
+**Last**, and an absolute frame slider. `Home`/`End`, Left/Right, and Space are
+their keyboard equivalents while the replay timeline has focus. The slider is
+debounced; autoplay keeps exactly one request and one presentation in flight.
+Seeking, a hidden tab, disconnect, error, or the captured endpoint pauses it.
+Motion Off still uses a bounded cadence rather than issuing an unbounded request
+loop.
+
+Only an exact accepted `Next` from frame `k` to `k + 1` may animate the incoming
+recorded explanation. Absolute seeks, backward moves, same-frame seeks,
+audience/preset/range/verbosity changes, duplicate commands, stale responses,
+and reconnects install settled frames. The animation hint belongs to that one
+command response; it is not durable replay state and cannot be recovered from a
+later `GET /api/frame`.
+
+Live scenario, action-composer, submission, reset, movement-scale, and pending
+action controls are hidden and removed from keyboard focus in replay. Replay
+keeps presentation presets, local motion controls, researcher-only ranges and
+Reference selection, recipient switching, verbosity, Reconnect, Help, and
+Exit. Every accepted command is revisioned and idempotent under the same
+single-request loopback safety model as live mode, but none can call `step` or
+mutate the replay artifact.
+
+Useful launches:
+
+```bash
+# Start at a researcher frame without opening the browser automatically.
+./scripts/dev/run_debug_renderer.sh \
+  --replay episode.marlbg-replay.json --frame-index 12 --no-open
+
+# Start in recipient-safe POV for configured-active slot 5.
+./scripts/dev/run_debug_renderer.sh \
+  --replay episode.marlbg-replay.json --view pov --pov-slot 5
+```
+
+Closing the tab does not stop Python. Use **Exit analyzer** or `Ctrl-C` in the
+launching terminal.
 
 ## Static Matplotlib snapshot
 
@@ -457,14 +698,30 @@ The public scene-native `draw_scene_geometry`, `render_scene_geometry`, and
 `redraw_scene_geometry` APIs remain lazy-import and headless-capable.
 Matplotlib does not reproduce browser animation or the live inspector.
 
+Render an exact frame from a canonical replay without importing or running the
+simulator:
+
+```bash
+./scripts/dev/run_debug_renderer.sh \
+  --replay episode.marlbg-replay.json --static --frame-index 12
+```
+
+Replay static mode validates the complete artifact before importing
+Matplotlib, selects frame `N` and its incoming transition `N - 1`, and projects
+the same versioned researcher scene used by other evaluation consumers. Frame
+zero has no incoming transition. Out-of-range indices, noncanonical files, and
+live-only option combinations fail before rendering.
+
 ## Contributor visual checks
 
 Browser source is native JavaScript with strict JSDoc checking and no build
 step. See [quality_gates.md](quality_gates.md) for the impact-based selection
 policy and complete closeout commands.
 
-Curated Playwright baselines use pinned Chromium, bundled fonts, fixed
-viewports/device scale/locale, and a deterministic paused animation clock:
+Curated synthetic/UI Playwright baselines use pinned Chromium, bundled fonts,
+fixed viewports/device scale/locale, and a deterministic paused animation
+clock. Real-simulator cases remain in the same suite as assertion-only visual
+checks whose expected mechanics come from the served frame:
 
 ```bash
 npm run test:visual --prefix web/visual_debugger
@@ -490,6 +747,12 @@ green.
   before binding.
 - **Offline/stale banner:** use Reconnect to fetch current authority; never
   retry a submit by hand unless the latest frame proves it was not applied.
+- **Replay rejected before a URL is printed:** inspect the reported artifact,
+  companion-sidecar, frame-index, or POV-slot validation error. The launcher
+  deliberately does not bind or open a browser after a failed replay load.
+- **Replay controls are disabled:** Previous/Next stop at the captured bounds;
+  Reference and ranges are Researcher-only; action and scenario controls are
+  never available in read-only replay.
 - **First submit is slow:** the first JAX transition may compile; the busy state
   is immediate and no warm-up step is performed.
 - **Static Matplotlib missing:** run `uv sync --extra viz`.
@@ -497,12 +760,21 @@ green.
 
 ## Replay reuse boundary
 
-The reusable boundary is the renderer-neutral scene/event vocabulary, SVG
+The reusable boundary is the renderer-neutral Scene/Event V2 vocabulary, SVG
 painter, layout, animation controller, presets, and accessibility conventions.
-`DebuggerFrameV1`, pending actions, revision/idempotency handling, and the
-loopback command protocol are live-analyzer-only.
+Pending actions and simulator commands are live-analyzer-only. Replay has a
+separate read-only, revisioned, idempotent loopback command protocol. Live
+responses are outbound-only presentation roots: Python constructs them from
+exact typed projections and serializes them, and the browser validates the JSON
+at its single normalization boundary. Inbound commands use strict Pydantic JSON
+validation; durable replay/POV/scenario files use their separate canonical
+loaders and whole-artifact validators.
 
-A future replay product may provide the same scene/event primitives from a
-recorded artifact, but it will own a separate replay envelope, timeline,
-schema-migration, integrity, and export contract. The live analyzer does not
-load or simulate replay data.
+The standard replay owns a separate integrity/export contract and reuses the
+renderer-neutral durable-scene boundary for browser and static frames. The live
+analyzer still owns pending actions and simulator commands; replay never
+simulates them. Interactive replay owns a separate audience-specific read-only
+timeline and outer frame/command envelope rather than reusing either live V2
+frame as artifact authority. Its HTTP coordinator is core-free and receives
+the exact live or replay request model and service through injection, so loading
+the replay viewer cannot transitively import the live simulator stack.

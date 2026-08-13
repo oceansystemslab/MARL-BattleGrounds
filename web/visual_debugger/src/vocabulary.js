@@ -170,9 +170,9 @@ const STATUS_TOKENS = Object.freeze({
   }),
   anti_heal_rogue_poison: token({
     tokenId: "anti_heal_rogue_poison",
-    label: "Anti-heal",
+    label: "Anti-Heal",
     shortLabel: "ANTI",
-    accessibleName: "Rogue Poison anti-heal",
+    accessibleName: "Rogue Poison Anti-Heal",
     glyphKey: "status-anti-heal",
     cssKey: "anti-heal-rogue-poison",
     fallback: "AH",
@@ -284,9 +284,9 @@ const MODIFIER_TOKENS = Object.freeze({
   }),
   rogue_anti_heal: token({
     tokenId: "rogue_anti_heal",
-    label: "Anti-heal modifier",
+    label: "Anti-Heal modifier",
     shortLabel: "ANTI",
-    accessibleName: "Effective Rogue Poison anti-heal modifier",
+    accessibleName: "Effective Rogue Poison Anti-Heal modifier",
     glyphKey: "status-anti-heal",
     cssKey: "rogue-anti-heal",
     fallback: "AH",
@@ -357,6 +357,15 @@ const LIFECYCLE_TOKENS = Object.freeze({
     cssKey: "trap-broken",
     fallback: "X",
   }),
+  cleared_by_death: token({
+    tokenId: "cleared_by_death",
+    label: "Cleared by death",
+    shortLabel: "Death clear",
+    accessibleName: "Status cleared by the recipient's recorded new death",
+    glyphKey: "lifecycle-death-clear",
+    cssKey: "cleared-by-death",
+    fallback: "D",
+  }),
   cleared_unclassified: token({
     tokenId: "cleared_unclassified",
     label: "Status ended",
@@ -375,6 +384,24 @@ const LIFECYCLE_TOKENS = Object.freeze({
     cssKey: "trap-broken-and-reapplied",
     fallback: "X+",
   }),
+});
+
+/**
+ * CP2 catalog IDs are scientific wire identity; status tokens are stable
+ * presentation vocabulary. Keep the translation explicit and version-bound
+ * rather than relying on word order or string rewriting.
+ */
+/** @type {Readonly<Record<string, string>>} */
+const STATUS_TOKEN_BY_CATALOG_ID = Object.freeze({
+  warrior_charge_slow: "slow_warrior_charge",
+  hunter_basic_slow: "slow_hunter_basic",
+  rogue_poison_slow: "slow_rogue_poison",
+  warrior_charge_stun: "stun_warrior_charge",
+  hunter_trap_stun: "stun_hunter_trap",
+  rogue_poison_stun: "stun_rogue_poison",
+  rogue_poison_anti_heal: "anti_heal_rogue_poison",
+  mage_burst_damage_amplification: "mage_burst",
+  priest_blessing_of_freedom_movement_floor: "priest_freedom",
 });
 
 export const CLASS_TOKEN_IDS = Object.freeze([
@@ -423,9 +450,14 @@ export const LIFECYCLE_TOKEN_IDS = Object.freeze([
   "decremented",
   "expired",
   "trap_broken",
+  "cleared_by_death",
   "cleared_unclassified",
   "trap_broken_and_reapplied",
 ]);
+
+export const CATALOG_STATUS_IDS = Object.freeze(
+  Object.keys(STATUS_TOKEN_BY_CATALOG_ID),
+);
 
 /** @type {Readonly<Record<VisualTokenKind, VisualTokenRegistry>>} */
 const TOKEN_REGISTRIES = Object.freeze({
@@ -563,12 +595,29 @@ function withPayloadProse(definition, payload) {
  * @returns {Readonly<VisualToken>}
  */
 export function resolveVisualToken(kind, tokenId, payload) {
-  const normalized = normalizedTokenId(tokenId);
+  const wireId = normalizedTokenId(tokenId);
+  const normalized =
+    kind === "status" && Object.hasOwn(STATUS_TOKEN_BY_CATALOG_ID, wireId)
+      ? STATUS_TOKEN_BY_CATALOG_ID[wireId]
+      : wireId;
   const registry = TOKEN_REGISTRIES[kind];
   const definition = Object.hasOwn(registry, normalized)
     ? registry[normalized]
     : unknownToken(kind, normalized);
   return withPayloadProse(definition, payload);
+}
+
+/**
+ * Return the display token ID for one exact catalog status ID. Unknown future
+ * IDs remain visible and fail through the ordinary unknown-token grammar.
+ *
+ * @param {unknown} statusId
+ */
+export function statusTokenIdFromCatalogId(statusId) {
+  const normalized = normalizedTokenId(statusId);
+  return Object.hasOwn(STATUS_TOKEN_BY_CATALOG_ID, normalized)
+    ? STATUS_TOKEN_BY_CATALOG_ID[normalized]
+    : normalized;
 }
 
 /**

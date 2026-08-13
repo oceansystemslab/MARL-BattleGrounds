@@ -20,11 +20,13 @@ from scripts.dev.visual_debugger.scenarios import get_scenario
 from scripts.dev.visual_debugger.server import (
     DebuggerHTTPServer,
     DebuggerRequestHandler,
+    GracefulCloseResult,
     build_static_manifest,
     create_server,
     serve_browser_debugger,
 )
 from scripts.dev.visual_debugger.service import DebuggerService
+from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _ASSET_ROOT = _REPOSITORY_ROOT / "web" / "visual_debugger"
@@ -35,6 +37,7 @@ def _service() -> DebuggerService:
     session = create_session(
         get_scenario("arena_5v5"),
         seed=0,
+        evaluation_launch_specification=debugger_test_launch_specification(),
         controlled_global_slot=None,
         show_ranges=True,
         verbose_logging=False,
@@ -149,6 +152,8 @@ def test_index_and_allowlisted_assets_use_security_headers(
         ("/", "text/html"),
         ("/styles.css", "text/css"),
         ("/src/main.js", "text/javascript"),
+        ("/src/replay-controls.js", "text/javascript"),
+        ("/src/replay-frame-normalizer.js", "text/javascript"),
         ("/src/explanations.js", "text/javascript"),
         ("/src/tooltip.js", "text/javascript"),
         (
@@ -408,10 +413,10 @@ def test_identical_http_submit_body_is_applied_then_returned_as_duplicate(
     assert duplicate_payload["result"] == "duplicate"
     assert applied_payload["frame"]["revision"] == 1
     assert duplicate_payload["frame"]["revision"] == 1
-    assert applied_payload["frame"]["simulator_step"] == 1
-    assert duplicate_payload["frame"]["simulator_step"] == 1
-    assert applied_payload["frame"]["transition_id"] == 1
-    assert duplicate_payload["frame"]["transition_id"] == 1
+    assert applied_payload["frame"]["simulator_step_count"] == 1
+    assert duplicate_payload["frame"]["simulator_step_count"] == 1
+    assert applied_payload["frame"]["incoming_transition_index"] == 0
+    assert duplicate_payload["frame"]["incoming_transition_index"] == 0
     assert server.debugger_service.revision == 1
     assert int(server.debugger_service.session.state.step_count) == 1
 
@@ -477,10 +482,26 @@ def test_unknown_routes_and_methods_are_not_cors_enabled(
     server, _ = running_server
     missing, _ = _exchange(server, "GET", "/missing")
     options, _ = _exchange(server, "OPTIONS", "/api/command")
+    replay_timeline, _ = _exchange(
+        server,
+        "GET",
+        "/api/replay/timeline",
+        headers=_authorized_headers(),
+    )
+    replay_command, _ = _exchange(
+        server,
+        "POST",
+        "/api/replay/command",
+        body=b"{}",
+        headers=_authorized_headers(**{"Content-Type": "application/json"}),
+    )
 
     assert missing.status == 404
     assert options.status == 405
     assert options.getheader("Access-Control-Allow-Origin") is None
+    assert replay_timeline.status == replay_command.status == 404
+    assert server.coordinator.mode == "live"
+    assert server.debugger_service.revision == 0
 
 
 def test_authenticated_exit_delivers_response_then_stops_server() -> None:
@@ -689,3 +710,85 @@ def test_static_manifest_snapshots_asset_bytes_at_startup(tmp_path: Path) -> Non
     index.write_text("<html>replaced</html>", encoding="utf-8")
 
     assert manifest["/"].body == b"<html>initial</html>"
+
+
+def test_keyboard_interrupt_without_close_hook_preserves_legacy_success(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def interrupt_server(
+        server: DebuggerHTTPServer,
+        *,
+        poll_interval: float,
+    ) -> None:
+        del server, poll_interval
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(DebuggerHTTPServer, "serve_forever", interrupt_server)
+
+    result = serve_browser_debugger(
+        _service(),
+        asset_root=_ASSET_ROOT,
+        port=0,
+        open_browser=False,
+    )
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert "Visual Debugger and Analyzer stopped." in captured.out
+
+
+def test_keyboard_interrupt_invokes_graceful_close_once_under_router_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def interrupt_server(
+        server: DebuggerHTTPServer,
+        *,
+        poll_interval: float,
+    ) -> None:
+        del server, poll_interval
+        raise KeyboardInterrupt
+
+    observed_servers: list[DebuggerHTTPServer] = []
+    real_run_graceful_close = DebuggerHTTPServer.run_graceful_close
+
+    def capture_server_and_close(
+        server: DebuggerHTTPServer,
+        callback: server_module.GracefulCloseCallback,
+    ) -> GracefulCloseResult:
+        observed_servers.append(server)
+        return real_run_graceful_close(server, callback)
+
+    monkeypatch.setattr(DebuggerHTTPServer, "serve_forever", interrupt_server)
+    monkeypatch.setattr(
+        DebuggerHTTPServer,
+        "run_graceful_close",
+        capture_server_and_close,
+    )
+    calls: list[int] = []
+
+    def graceful_close() -> GracefulCloseResult:
+        calls.append(1)
+        server = observed_servers[0]
+        with server.coordinator_router.pinned_snapshot() as nested:
+            assert nested.binding.mode == "live"
+            assert nested is server.coordinator_snapshot()
+        return GracefulCloseResult(
+            exit_code=7,
+            message="synthetic recovery publication failed",
+        )
+
+    result = serve_browser_debugger(
+        _service(),
+        asset_root=_ASSET_ROOT,
+        port=0,
+        open_browser=False,
+        graceful_close=graceful_close,
+    )
+
+    captured = capsys.readouterr()
+    assert result == 7
+    assert calls == [1]
+    assert len(observed_servers) == 1
+    assert "synthetic recovery publication failed" in captured.err

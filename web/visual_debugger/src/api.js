@@ -1,3 +1,12 @@
+import { normalizeLiveDebuggerFrameV2 } from "./frame-normalizer.js";
+import {
+  isReplayViewerFrame,
+  normalizeReplayApiErrorV1,
+  normalizeReplayCommandResponseV1,
+  normalizeReplayTimelineV1,
+  normalizeReplayViewerFrameV1,
+} from "./replay-frame-normalizer.js";
+
 const TOKEN_STORAGE_KEY = "marl-battlegrounds.debugger-token";
 const CLIENT_STORAGE_KEY = "marl-battlegrounds.debugger-client-id";
 const TOKEN_HEADER = "X-MARL-Debugger-Token";
@@ -117,6 +126,76 @@ async function decodeResponse(response) {
 }
 
 /**
+ * Decode one replay HTTP response without ever exposing an unvalidated replay
+ * error body to callers. Non-JSON failures remain transport/protocol errors;
+ * JSON failures must match the exact ReplayApiErrorV1 root.
+ *
+ * @param {Response} response
+ * @returns {Promise<any>}
+ */
+async function decodeReplayResponse(response) {
+  try {
+    return await decodeResponse(response);
+  } catch (error) {
+    if (!(error instanceof DebuggerApiError) || !isRecord(error.payload)) {
+      throw error;
+    }
+    let normalized;
+    try {
+      normalized = normalizeReplayApiErrorV1(error.payload);
+    } catch (protocolError) {
+      throw new DebuggerApiError(
+        protocolError instanceof Error
+          ? `Replay service returned an invalid error envelope: ${protocolError.message}`
+          : "Replay service returned an invalid error envelope.",
+        { status: error.status },
+      );
+    }
+    throw new DebuggerApiError(normalized.message, {
+      status: error.status,
+      payload: normalized,
+    });
+  }
+}
+
+/**
+ * The current-frame route is shared by live and replay launchers. Schema V1
+ * failures are replay-only and must cross the exact replay error boundary;
+ * live Schema V2 failures retain their existing live error handling.
+ *
+ * @param {Response} response
+ * @returns {Promise<any>}
+ */
+async function decodeCurrentFrameResponse(response) {
+  try {
+    return await decodeResponse(response);
+  } catch (error) {
+    if (
+      !(error instanceof DebuggerApiError) ||
+      !isRecord(error.payload) ||
+      error.payload.schema_version !== 1
+    ) {
+      throw error;
+    }
+    let normalized;
+    try {
+      normalized = normalizeReplayApiErrorV1(error.payload);
+    } catch (protocolError) {
+      throw new DebuggerApiError(
+        protocolError instanceof Error
+          ? `Replay service returned an invalid error envelope: ${protocolError.message}`
+          : "Replay service returned an invalid error envelope.",
+        { status: error.status },
+      );
+    }
+    throw new DebuggerApiError(normalized.message, {
+      status: error.status,
+      payload: normalized,
+    });
+  }
+}
+
+/**
  * @param {string | null | undefined} token
  * @returns {Record<string, string>}
  */
@@ -174,13 +253,36 @@ export async function getCurrentFrame(token) {
         : "Could not reach the local debugger service.",
     );
   }
-  return decodeResponse(response);
+  return decodeCurrentFrameResponse(response);
+}
+
+/**
+ * @param {string | null} token
+ * @returns {Promise<any>}
+ */
+export async function getReplayTimeline(token) {
+  let response;
+  try {
+    response = await fetchWithTimeout("/api/replay/timeline", {
+      method: "GET",
+      headers: authorizationHeaders(token),
+      cache: "no-store",
+      credentials: "omit",
+      redirect: "error",
+    });
+  } catch (error) {
+    throw new DebuggerApiError(
+      error instanceof Error
+        ? `Could not load the replay timeline: ${error.message}`
+        : "Could not load the replay timeline.",
+    );
+  }
+  return decodeReplayResponse(response);
 }
 
 /**
  * Send one command exactly once. This function deliberately has no retry path.
- */
-/**
+ *
  * @param {string | null} token
  * @param {unknown} request
  * @returns {Promise<any>}
@@ -210,10 +312,41 @@ export async function postCommand(token, request) {
 }
 
 /**
+ * Send one replay command exactly once. Replay requests have a separate route
+ * and can never enter the live debugger dispatcher.
+ *
+ * @param {string | null} token
+ * @param {unknown} request
+ * @returns {Promise<any>}
+ */
+export async function postReplayCommand(token, request) {
+  let response;
+  try {
+    response = await fetchWithTimeout("/api/replay/command", {
+      method: "POST",
+      headers: {
+        ...authorizationHeaders(token),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(request),
+      cache: "no-store",
+      credentials: "omit",
+      redirect: "error",
+    });
+  } catch (error) {
+    throw new DebuggerApiError(
+      error instanceof Error
+        ? `Replay command outcome is unknown because the connection failed: ${error.message}`
+        : "Replay command outcome is unknown because the connection failed.",
+    );
+  }
+  return decodeReplayResponse(response);
+}
+
+/**
  * Accept the direct frame contract and the response envelopes used by success
  * and stale-client responses.
- */
-/**
+ *
  * @param {unknown} payload
  * @returns {Record<string, any> | null}
  */
@@ -221,22 +354,62 @@ export function extractFrame(payload) {
   if (!isRecord(payload)) {
     return null;
   }
-  for (const candidate of [
-    payload.frame,
-    payload.latest_frame,
-    payload.current_frame,
-  ]) {
+  if (isRecord(payload.frame) && isReplayViewerFrame(payload.frame)) {
+    return normalizeReplayCommandResponseV1(payload).frame;
+  }
+  if (
+    payload.schema_version === 1 &&
+    Object.hasOwn(payload, "result") &&
+    Object.hasOwn(payload, "frame") &&
+    Object.hasOwn(payload, "animate_incoming")
+  ) {
+    return normalizeReplayCommandResponseV1(payload).frame;
+  }
+  if (isRecord(payload.latest_frame) && isReplayViewerFrame(payload.latest_frame)) {
+    return normalizeReplayApiErrorV1(payload).latest_frame;
+  }
+  if (
+    payload.schema_version === 1 &&
+    Object.hasOwn(payload, "error_code") &&
+    Object.hasOwn(payload, "latest_frame")
+  ) {
+    return normalizeReplayApiErrorV1(payload).latest_frame;
+  }
+  if (isReplayViewerFrame(payload)) {
+    return normalizeReplayViewerFrameV1(payload);
+  }
+  const envelopeCandidates = [payload.frame, payload.latest_frame];
+  for (const candidate of envelopeCandidates) {
     if (isRecord(candidate)) {
-      return candidate;
+      if (payload.schema_version !== 2) {
+        throw new TypeError("Debugger response envelope must use schema version 2.");
+      }
+      return normalizeLiveDebuggerFrameV2(candidate);
     }
   }
   if (
     Number.isInteger(payload.revision) &&
-    (isRecord(payload.scene) || isRecord(payload.battlefield_scene))
+    (isRecord(payload.scene) || isRecord(payload.projection))
   ) {
-    return payload;
+    return normalizeLiveDebuggerFrameV2(payload);
   }
   return null;
+}
+
+/**
+ * @param {unknown} payload
+ * @returns {Readonly<Record<string, any>>}
+ */
+export function extractReplayTimeline(payload) {
+  return normalizeReplayTimelineV1(payload);
+}
+
+/**
+ * @param {unknown} payload
+ * @returns {Readonly<Record<string, any>>}
+ */
+export function extractReplayError(payload) {
+  return normalizeReplayApiErrorV1(payload);
 }
 
 /**
@@ -249,9 +422,6 @@ export function extractNotice(payload) {
   }
   if (typeof payload.notice === "string" && payload.notice.trim()) {
     return payload.notice;
-  }
-  if (isRecord(payload.notice) && typeof payload.notice.message === "string") {
-    return payload.notice.message;
   }
   return null;
 }

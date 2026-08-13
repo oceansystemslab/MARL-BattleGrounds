@@ -927,7 +927,10 @@ STRESS_SCENARIOS: dict[str, DebuggerScenario] = {
     "trap_lifecycle": DebuggerScenario(
         name="trap_lifecycle",
         title="Trap lifecycle stress",
-        description="Application, break, reapplication, ambiguous end, and expiry.",
+        description=(
+            "Exact application, damage break, reapplication, and age-to-zero "
+            "status lifecycle."
+        ),
         mode="scripted",
         build_scenario=_trap_lifecycle_scenario,
         frames=_TRAP_LIFECYCLE_FRAMES,

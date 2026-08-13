@@ -2,9 +2,77 @@ import { formatDisplayNumber } from "./display.js";
 import { explainActivation, explainNetHealth } from "./explanations.js";
 import { createSvgIcon } from "./icons.js";
 import { routeMarkerPose } from "./routes.js";
-import { registerTooltipOwner } from "./tooltip.js";
+import { createSemanticDescriptor, registerTooltipOwner } from "./tooltip.js";
 
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
+
+/**
+ * @param {unknown} publicAgentId
+ */
+function formatAgentIdentity(publicAgentId) {
+  return typeof publicAgentId === "string" && publicAgentId.trim()
+    ? `Agent ID ${publicAgentId}`
+    : "Agent ID unavailable";
+}
+
+/**
+ * Build one structured semantic explanation from fields already authorized in
+ * the choreography plan. Internal slots may key DOM records, but never supply
+ * display identity.
+ *
+ * @param {Record<string, any>} event
+ */
+export function explainChoreographyEvent(event) {
+  const title = String(
+    event.lifecycleToken?.label ??
+      event.token?.label ??
+      event.eventType ??
+      "Semantic event",
+  );
+  const rows = [];
+  for (const [label, value] of [
+    ["Actor", event.actorPublicAgentId],
+    ["Source", event.sourcePublicAgentId],
+    ["Recipient", event.recipientPublicAgentId],
+    ["Agent", event.agentPublicAgentId],
+  ]) {
+    if (typeof value === "string" && value.trim()) {
+      rows.push({
+        label,
+        value: formatAgentIdentity(value),
+        metadata: { compact: true, full: true },
+      });
+    }
+  }
+  const semanticOwnerKey = [
+    event.kind,
+    event.eventType,
+    event.tokenId,
+    event.lifecycle,
+    event.actorPublicAgentId,
+    event.sourcePublicAgentId,
+    event.recipientPublicAgentId,
+    event.agentPublicAgentId,
+  ]
+    .filter((value) => typeof value === "string" && value.length > 0)
+    .join(":");
+  return createSemanticDescriptor({
+    kind: "event",
+    id: `semantic-event:${semanticOwnerKey || "unclassified"}`,
+    title,
+    tone: event.kind === "rejected_action" ? "warning" : "information",
+    accent: "none",
+    summary: String(
+      event.lifecycleToken?.accessibleName ??
+        event.token?.accessibleName ??
+        `Authoritative ${String(event.kind ?? "event").replaceAll("_", " ")}`,
+    ),
+    rows,
+    sections: [],
+    metadata: { compact: true, full: true },
+    anchor: "pointer",
+  });
+}
 
 /**
  * @typedef {Record<string, any>} JsonRecord
@@ -245,6 +313,15 @@ export class SvgChoreographyPainter {
     if (typeof event.component === "string") {
       group.dataset.component = event.component;
     }
+    if (typeof event.cueSemantic === "string") {
+      group.dataset.cueSemantic = event.cueSemantic;
+    }
+    if (Number.isInteger(event.teamId)) {
+      group.dataset.teamId = String(event.teamId);
+    }
+    if (Number.isInteger(event.agentSlot)) {
+      group.dataset.agentSlot = String(event.agentSlot);
+    }
     if (typeof event.movementMaskValue === "boolean") {
       group.dataset.movementMaskValue = String(event.movementMaskValue);
     }
@@ -261,7 +338,10 @@ export class SvgChoreographyPainter {
       group.dataset.applicationEventIds = JSON.stringify(event.applicationEventIds);
     }
     const underlay =
-      event.route || event.kind === "charge_displacement"
+      event.route ||
+      event.kind === "charge_displacement" ||
+      event.kind === "movement_displacement" ||
+      (event.kind === "status_lifecycle" && event.source && event.recipient)
         ? svgElement(ownerDocument, "g", {
             class: `combat-route-effect combat-route-effect--${cssIdentifier(event.kind)}`,
             opacity: options.settled || options.motionMode === "off" ? 1 : 0,
@@ -283,12 +363,25 @@ export class SvgChoreographyPainter {
       );
     } else if (event.kind === "net_health") {
       this.#renderNet(ownerDocument, group, event);
-    } else if (event.kind === "charge_displacement") {
+    } else if (
+      event.kind === "charge_displacement" ||
+      event.kind === "movement_displacement"
+    ) {
       this.#renderCharge(ownerDocument, group, underlay, event);
     } else if (event.kind === "status_lifecycle") {
-      this.#renderLifecycle(ownerDocument, group, event, plan, options, animationSpecs);
+      this.#renderLifecycle(
+        ownerDocument,
+        group,
+        underlay,
+        event,
+        plan,
+        options,
+        animationSpecs,
+      );
     } else if (event.kind === "rejected_action") {
       this.#renderRejection(ownerDocument, group, underlay, event);
+    } else if (event.kind === "semantic_pulse") {
+      this.#renderSemanticPulse(ownerDocument, group, event);
     } else {
       return null;
     }
@@ -297,10 +390,15 @@ export class SvgChoreographyPainter {
 
     if (!options.settled && options.motionMode !== "off") {
       const reduced = options.motionMode === "reduced";
-      const phaseStart = reduced ? 0 : (event.phaseStart ?? 0);
-      const phaseEnd = reduced
-        ? Number(plan.phases.reducedTotal ?? 220)
-        : (event.phaseEnd ?? plan.phases.total);
+      const authoredPhaseStart = Number(event.phaseStart ?? 0);
+      const authoredPhaseEnd = Number(event.phaseEnd ?? plan.phases.total);
+      const reducedScale =
+        Number(plan.phases.reducedTotal ?? 220) /
+        Math.max(Number(plan.phases.total ?? 900), 1);
+      const phaseStart = reduced
+        ? authoredPhaseStart * reducedScale
+        : authoredPhaseStart;
+      const phaseEnd = reduced ? authoredPhaseEnd * reducedScale : authoredPhaseEnd;
       const targets = underlay
         ? event.kind === "activation"
           ? [{ element: underlay, part: "route" }]
@@ -312,6 +410,10 @@ export class SvgChoreographyPainter {
       if (underlay && event.kind === "activation") {
         group.setAttribute("opacity", "1");
       }
+      const duration = phaseEnd - phaseStart;
+      if (!(duration > 0)) {
+        return { group, underlay };
+      }
       for (const target of targets) {
         animationSpecs.push(
           animationSpec(
@@ -319,7 +421,7 @@ export class SvgChoreographyPainter {
             eventKeyframes(event, options.motionMode),
             {
               delay: phaseStart,
-              duration: Math.max(120, phaseEnd - phaseStart),
+              duration,
               easing: "ease-out",
               fill: "both",
             },
@@ -380,7 +482,7 @@ export class SvgChoreographyPainter {
           "data-source-slot": event.sourceSlot,
           "data-target-slot": event.targetSlot,
         });
-        const ownershipLabel = `id_${event.sourceSlot} → id_${event.targetSlot}`;
+        const ownershipLabel = `${formatAgentIdentity(event.sourcePublicAgentId)} → ${formatAgentIdentity(event.targetPublicAgentId)}`;
         ownership.append(
           svgElement(ownerDocument, "line", {
             class: "combat-route__ownership-leader",
@@ -415,26 +517,30 @@ export class SvgChoreographyPainter {
         particle.style.offsetPath = `path("${event.route.path}")`;
         particle.style.offsetRotate = "auto";
         underlay.append(particle);
-        animationSpecs.push(
-          animationSpec(
-            particle,
-            [
-              { offsetDistance: "0%", opacity: 0 },
-              { opacity: 1, offset: 0.15 },
-              { offsetDistance: "100%", opacity: 1, offset: 0.86 },
-              { opacity: 0 },
-            ],
-            {
-              delay: Number(plan.phases.travelStart ?? 80),
-              duration: 430,
-              easing: "cubic-bezier(.2,.72,.25,1)",
-              fill: "both",
-            },
-            plan,
-            event,
-            "particle",
-          ),
-        );
+        const particleDelay = Number(event.phaseStart ?? 60) + 20;
+        const particleDuration = Number(event.phaseImpact ?? 160) - particleDelay;
+        if (particleDuration > 0) {
+          animationSpecs.push(
+            animationSpec(
+              particle,
+              [
+                { offsetDistance: "0%", opacity: 0 },
+                { opacity: 1, offset: 0.15 },
+                { offsetDistance: "100%", opacity: 1, offset: 0.86 },
+                { opacity: 0 },
+              ],
+              {
+                delay: particleDelay,
+                duration: particleDuration,
+                easing: "cubic-bezier(.2,.72,.25,1)",
+                fill: "both",
+              },
+              plan,
+              event,
+              "particle",
+            ),
+          );
+        }
       }
       const impact = this.#appendImpact(ownerDocument, group, event.route.end, event);
       this.#animateImpact(impact, event, plan, options, animationSpecs);
@@ -494,6 +600,19 @@ export class SvgChoreographyPainter {
     ) {
       const wave = local.querySelector(".combat-burst__wave--outer");
       if (wave) {
+        const authoredPhaseStart = Number(event.phaseStart ?? 60);
+        const authoredPhaseEnd = Number(event.phaseEnd ?? 180);
+        const reducedScale =
+          Number(plan.phases.reducedTotal ?? 220) /
+          Math.max(Number(plan.phases.total ?? 900), 1);
+        const phaseStart =
+          options.motionMode === "reduced"
+            ? authoredPhaseStart * reducedScale
+            : authoredPhaseStart;
+        const phaseEnd =
+          options.motionMode === "reduced"
+            ? authoredPhaseEnd * reducedScale
+            : authoredPhaseEnd;
         const waveKeyframes =
           options.motionMode === "reduced"
             ? [{ opacity: 0 }, { opacity: 1, offset: 0.25 }, { opacity: 0 }]
@@ -507,10 +626,8 @@ export class SvgChoreographyPainter {
             wave,
             waveKeyframes,
             {
-              duration:
-                options.motionMode === "reduced"
-                  ? Number(plan.phases.reducedTotal ?? 220)
-                  : 550,
+              delay: phaseStart,
+              duration: phaseEnd - phaseStart,
               easing: "ease-out",
               fill: "both",
             },
@@ -635,23 +752,28 @@ export class SvgChoreographyPainter {
       return;
     }
     const reduced = options.motionMode === "reduced";
-    const delay = reduced
-      ? 80
-      : Number(event.phaseImpact ?? plan.phases.impactStart ?? 360);
-    const phaseEnd = reduced
-      ? Number(plan.phases.reducedTotal ?? 220)
-      : Number(event.phaseEnd ?? plan.phases.settleStart ?? 760);
+    const authoredDelay = Number(event.phaseImpact ?? plan.phases.impactStart ?? 360);
+    const authoredPhaseEnd = Number(event.phaseEnd ?? plan.phases.settleStart ?? 760);
+    const reducedScale =
+      Number(plan.phases.reducedTotal ?? 220) /
+      Math.max(Number(plan.phases.total ?? 900), 1);
+    const delay = reduced ? authoredDelay * reducedScale : authoredDelay;
+    const phaseEnd = reduced ? authoredPhaseEnd * reducedScale : authoredPhaseEnd;
+    const duration = phaseEnd - delay;
+    if (!(duration > 0)) {
+      return;
+    }
     const keyframes =
       event.tokenId === "holy_word"
-        ? [{ opacity: 0 }, { opacity: 1, offset: 0.28 }, { opacity: 0.82 }]
-        : [{ opacity: 0 }, { opacity: 1, offset: 0.24 }, { opacity: 0.82 }];
+        ? [{ opacity: 0 }, { opacity: 1, offset: 0.28 }, { opacity: 0 }]
+        : [{ opacity: 0 }, { opacity: 1, offset: 0.24 }, { opacity: 0 }];
     animationSpecs.push(
       animationSpec(
         impact,
         keyframes,
         {
           delay,
-          duration: Math.max(120, phaseEnd - delay),
+          duration,
           easing: "ease-out",
           fill: "both",
         },
@@ -671,28 +793,26 @@ export class SvgChoreographyPainter {
    * @param {JsonRecord} event
    */
   #registerEventExplanation(group, underlay, event) {
+    if (event.tokenId === "basic_damage" || event.tokenId === "basic_heal") {
+      return;
+    }
     const explanation =
       event.kind === "activation"
         ? explainActivation(event)
         : event.kind === "net_health"
           ? explainNetHealth(event)
-          : {
-              kind: "event",
-              id: `event:${event.eventId ?? "unknown"}`,
-              title: String(event.token?.label ?? event.eventType ?? "Semantic event"),
-              details: [
-                `Authoritative ${String(event.kind ?? "event").replaceAll("_", " ")}`,
-              ],
-              anchor: /** @type {const} */ ("pointer"),
-            };
+          : explainChoreographyEvent(event);
     registerTooltipOwner(group, explanation);
     if (underlay) {
-      registerTooltipOwner(underlay, {
-        ...explanation,
-        kind: event.kind === "activation" ? "accepted-route" : explanation.kind,
-        id: `${explanation.id}:route`,
-        anchor: "pointer",
-      });
+      registerTooltipOwner(
+        underlay,
+        createSemanticDescriptor({
+          ...explanation,
+          kind: event.kind === "activation" ? "accepted-route" : explanation.kind,
+          id: `${explanation.id}:route`,
+          anchor: "pointer",
+        }),
+      );
     }
   }
 
@@ -712,7 +832,7 @@ export class SvgChoreographyPainter {
     const recipientLabel = svgElement(ownerDocument, "text", {
       class: "combat-net__recipient",
     });
-    recipientLabel.textContent = `id_${event.recipientSlot}`;
+    recipientLabel.textContent = formatAgentIdentity(event.recipientPublicAgentId);
     group.dataset.netDelta = String(event.netDelta);
     group.dataset.layoutCollisionFree = String(event.cueCollisionFree !== false);
     group.append(
@@ -765,14 +885,31 @@ export class SvgChoreographyPainter {
   /**
    * @param {Document} ownerDocument
    * @param {SVGElement} group
+   * @param {SVGElement | null} underlay
    * @param {JsonRecord} event
    * @param {JsonRecord} plan
    * @param {PainterOptions} options
    * @param {AnimationSpec[]} animationSpecs
    */
-  #renderLifecycle(ownerDocument, group, event, plan, options, animationSpecs) {
+  #renderLifecycle(
+    ownerDocument,
+    group,
+    underlay,
+    event,
+    plan,
+    options,
+    animationSpecs,
+  ) {
     if (!event.recipient) {
       return;
+    }
+    if (underlay && event.source) {
+      underlay.append(
+        svgElement(ownerDocument, "path", {
+          class: "combat-status-source-link",
+          d: `M ${event.source.x} ${event.source.y} L ${event.recipient.x} ${event.recipient.y}`,
+        }),
+      );
     }
     const lifecycle = svgElement(ownerDocument, "g", {
       class: "combat-lifecycle",
@@ -808,6 +945,22 @@ export class SvgChoreographyPainter {
     setAttributes(changeIcon, { x: -6, y: -6, width: 12, height: 12 });
     change.append(changeIcon);
     lifecycle.append(statusIcon, change);
+    if (event.lifecycle === "cleared_by_death") {
+      const sweep = svgElement(ownerDocument, "g", {
+        class: "combat-lifecycle__death-sweep",
+      });
+      sweep.append(
+        svgElement(ownerDocument, "path", {
+          class: "combat-lifecycle__death-sweep-arc",
+          d: "M -23 -8 C -8 -23 10 -23 23 -7",
+        }),
+        svgElement(ownerDocument, "path", {
+          class: "combat-lifecycle__death-sweep-cut",
+          d: "M -22 10 L 22 -10",
+        }),
+      );
+      lifecycle.append(sweep);
+    }
     if (
       event.lifecycle === "trap_broken" ||
       event.lifecycle === "trap_broken_and_reapplied"
@@ -879,6 +1032,111 @@ export class SvgChoreographyPainter {
   }
 
   /**
+   * Render a compact, event-specific pulse at an anchor supplied directly by
+   * the V2 visual adapter (or by the presentation-only team-clock corner).
+   *
+   * @param {Document} ownerDocument
+   * @param {SVGElement} group
+   * @param {JsonRecord} event
+   */
+  #renderSemanticPulse(ownerDocument, group, event) {
+    if (!event.anchor) {
+      return;
+    }
+    const pulse = svgElement(ownerDocument, "g", {
+      class: `combat-semantic-pulse combat-semantic-pulse--${cssIdentifier(event.cueSemantic)}`,
+      "data-semantic": event.cueSemantic,
+    });
+    pulse.append(
+      svgElement(ownerDocument, "circle", {
+        class: "combat-semantic-pulse__ring",
+        r: 19,
+      }),
+      svgElement(ownerDocument, "circle", {
+        class: "combat-semantic-pulse__core",
+        r: 10,
+      }),
+    );
+    if (event.cueSemantic === "combat_countdown_reset") {
+      pulse.append(
+        svgElement(ownerDocument, "path", {
+          class: "combat-semantic-pulse__mark",
+          d: "M -7 -7 L 7 7 M 7 -7 L -7 7 M 0 -11 V -15",
+        }),
+      );
+    } else if (event.cueSemantic === "health_regenerated") {
+      pulse.append(
+        svgElement(ownerDocument, "path", {
+          class: "combat-semantic-pulse__mark",
+          d: "M 0 8 C -9 2 -8 -7 7 -10 C 8 2 5 8 0 8 Z M 0 8 L 5 -5",
+        }),
+      );
+    } else if (
+      event.cueSemantic === "cooldown_started" ||
+      event.cueSemantic === "cooldown_ready"
+    ) {
+      pulse.append(
+        svgElement(ownerDocument, "path", {
+          class: "combat-semantic-pulse__mark",
+          d:
+            event.cueSemantic === "cooldown_ready"
+              ? "M -7 0 L -2 6 L 8 -7"
+              : "M 0 -8 V 0 L 6 4 M -5 -11 H 5",
+        }),
+      );
+    } else if (event.cueSemantic === "agent_died") {
+      pulse.append(
+        svgElement(ownerDocument, "path", {
+          class: "combat-semantic-pulse__mark",
+          d: "M -9 -9 L 9 9 M 9 -9 L -9 9",
+        }),
+      );
+    } else if (event.cueSemantic === "spawn_shield_expired") {
+      pulse.append(
+        svgElement(ownerDocument, "path", {
+          class: "combat-semantic-pulse__mark",
+          d: "M 0 -11 L 9 -7 V 1 C 9 7 5 10 0 13 C -5 10 -9 7 -9 1 V -7 Z M -3 -7 L 2 -1 L -2 3 L 4 9",
+        }),
+      );
+    } else if (event.cueSemantic === "respawn_wave_occurred") {
+      pulse.append(
+        svgElement(ownerDocument, "circle", {
+          class: "combat-semantic-pulse__wave",
+          r: 26,
+        }),
+        svgElement(ownerDocument, "path", {
+          class: "combat-semantic-pulse__mark",
+          d: "M -8 3 C -4 -5 4 -5 8 3 M -5 8 C -2 3 2 3 5 8",
+        }),
+      );
+    } else if (event.cueSemantic === "agent_respawned") {
+      pulse.append(
+        svgElement(ownerDocument, "path", {
+          class: "combat-semantic-pulse__beam",
+          d: "M -9 -25 L -5 12 H 5 L 9 -25 Z",
+        }),
+        svgElement(ownerDocument, "path", {
+          class: "combat-semantic-pulse__mark",
+          d: "M 0 -9 V 9 M -9 0 H 9",
+        }),
+      );
+    }
+    if (Number.isFinite(event.value)) {
+      const value = svgElement(ownerDocument, "text", {
+        class: "combat-semantic-pulse__value",
+        x: 0,
+        y: 29,
+      });
+      value.textContent = `+${formatDisplayNumber(event.value)}`;
+      pulse.append(value);
+    }
+    group.append(pulse);
+    setAttributes(pulse, {
+      transform: `translate(${event.anchor.x} ${event.anchor.y})`,
+    });
+  }
+
+  /**
    * @param {Document} ownerDocument
    * @param {SVGElement} group
    * @param {SVGElement | null} underlay
@@ -916,7 +1174,10 @@ export class SvgChoreographyPainter {
       this.#updateActivationGeometry(group, underlay, event);
     } else if (event.kind === "net_health") {
       this.#updateNetGeometry(group, event);
-    } else if (event.kind === "charge_displacement") {
+    } else if (
+      event.kind === "charge_displacement" ||
+      event.kind === "movement_displacement"
+    ) {
       this.#updateChargeGeometry(group, underlay, event);
     } else if (event.kind === "status_lifecycle") {
       const lifecycle = group.querySelector(".combat-lifecycle");
@@ -930,6 +1191,13 @@ export class SvgChoreographyPainter {
         });
         this.#updateCueLeader(group, event, 21);
       }
+      const sourceLink = underlay?.querySelector(".combat-status-source-link");
+      if (sourceLink && event.source && event.recipient) {
+        sourceLink.setAttribute(
+          "d",
+          `M ${event.source.x} ${event.source.y} L ${event.recipient.x} ${event.recipient.y}`,
+        );
+      }
     } else if (event.kind === "rejected_action") {
       const ring = group.querySelector(".combat-rejection__ring");
       if (ring && event.actor) {
@@ -938,6 +1206,14 @@ export class SvgChoreographyPainter {
       const route = underlay?.querySelector(".combat-rejection__route");
       if (route && event.route) {
         route.setAttribute("d", event.route.path);
+      }
+    } else if (event.kind === "semantic_pulse") {
+      const pulse = group.querySelector(".combat-semantic-pulse");
+      if (pulse && event.anchor) {
+        pulse.setAttribute(
+          "transform",
+          `translate(${event.anchor.x} ${event.anchor.y})`,
+        );
       }
     }
   }
@@ -1311,11 +1587,15 @@ function impactTransform(event, anchor) {
  * @param {Record<string, any>} event
  */
 function phaseFor(event) {
+  if (event.kind === "semantic_pulse") {
+    return String(event.cueSemantic ?? "semantic");
+  }
   if (event.kind === "net_health" || event.kind === "status_lifecycle") {
     return "outcome";
   }
   if (
     event.kind === "charge_displacement" ||
+    event.kind === "movement_displacement" ||
     (event.kind === "activation" && event.presentationKind === "target_only_impact")
   ) {
     return "impact";
@@ -1344,10 +1624,10 @@ function netLabel(delta, outcome) {
 function eventKeyframes(event, motionMode) {
   if (event.kind === "net_health" && motionMode === "normal") {
     return [
-      { opacity: 0, transform: "translateY(6px)" },
-      { opacity: 1, offset: 0.18, transform: "translateY(0)" },
-      { opacity: 1, offset: 0.72, transform: "translateY(-10px)" },
-      { opacity: 0, transform: "translateY(-18px)" },
+      { opacity: 0 },
+      { opacity: 1, offset: 0.18 },
+      { opacity: 1, offset: 0.72 },
+      { opacity: 0 },
     ];
   }
   return [

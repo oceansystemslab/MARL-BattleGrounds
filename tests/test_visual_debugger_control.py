@@ -8,6 +8,7 @@ import jax.numpy as jnp
 import pytest
 import scripts.dev.visual_debugger.control as control
 from scripts.dev.visual_debugger.control import (
+    DebuggerTransitionFailureV1,
     arm_basic,
     arm_ultimate,
     build_interactive_joint_action,
@@ -28,22 +29,21 @@ from scripts.dev.visual_debugger.control import (
     submit_next_script_frame,
     switch_scenario,
 )
+from scripts.dev.visual_debugger.evaluation_bridge import (
+    DebuggerCaptureProfileV1,
+    build_debugger_evaluation_launch_specification_v1,
+)
 from scripts.dev.visual_debugger.model import (
-    AcceptedActivation,
-    ActionRejection,
     ActorCommand,
-    ActorTransition,
     DebuggerScenario,
     DebuggerSession,
     LaneAvailability,
     PendingAction,
     ScenarioFrame,
-    SelectedTargetFacts,
-    StatusTransition,
-    TransitionView,
 )
 from scripts.dev.visual_debugger.scenarios import get_scenario
 from scripts.dev.visual_debugger.targeting import global_slot_to_target_action
+from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
 from marl_battlegrounds.core.types import (
     MAGE_CLASS_ID,
@@ -53,8 +53,8 @@ from marl_battlegrounds.core.types import (
     MOVE_STAY,
     MOVE_WEST,
     Action,
-    DoneFlags,
 )
+from marl_battlegrounds.evaluation.models import ActionMaskV1
 
 
 def _session(
@@ -62,11 +62,23 @@ def _session(
     *,
     controlled_slot: int | None = None,
     verbose: bool = False,
+    capture_profile: DebuggerCaptureProfileV1 = "debug",
 ) -> DebuggerSession:
     scenario = get_scenario(name)
+    default_launch = debugger_test_launch_specification(7)
+    launch = (
+        default_launch
+        if capture_profile == "debug"
+        else build_debugger_evaluation_launch_specification_v1(
+            root_seed=default_launch.root_seed,
+            code_revision=default_launch.code_revision,
+            capture_profile=capture_profile,
+        )
+    )
     return create_session(
         scenario,
         seed=7,
+        evaluation_launch_specification=launch,
         controlled_global_slot=controlled_slot,
         show_ranges=True,
         verbose_logging=verbose,
@@ -115,20 +127,6 @@ def test_every_debugger_structure_has_the_exact_audited_field_schema() -> None:
             "armed_lane",
             "armed_pair_legal",
         ),
-        SelectedTargetFacts: (
-            "controlled_global_slot",
-            "target_global_slot",
-            "target_action",
-            "relation",
-            "center_distance",
-            "has_clear_line_of_sight",
-            "observer_visible",
-            "inside_observation_radius",
-            "inside_basic_radius",
-            "inside_ultimate_radius",
-            "lane_0_available",
-            "lane_1_available",
-        ),
         ActorCommand: (
             "actor_global_slot",
             "move_action",
@@ -146,81 +144,6 @@ def test_every_debugger_structure_has_the_exact_audited_field_schema() -> None:
             "default_controlled_slot",
             "audience",
         ),
-        ActorTransition: (
-            "actor_global_slot",
-            "submitted_move_action",
-            "submitted_target_action",
-            "submitted_use_ultimate",
-            "accepted_move_action",
-            "accepted_target_action",
-            "accepted_use_ultimate",
-            "submitted_tuple_in_domain",
-            "submitted_move_mask_value",
-            "submitted_lane_0_value",
-            "submitted_lane_1_value",
-            "submitted_pair_mask_value",
-            "movement_accepted",
-            "combat_pair_accepted",
-            "position_before",
-            "position_after",
-            "realized_displacement",
-            "health_before",
-            "health_after",
-            "net_health_delta",
-            "cooldown_before",
-            "cooldown_after",
-            "effective_speed_before",
-            "effective_speed_after",
-            "mage_aura_before",
-            "mage_aura_after",
-            "warrior_aura_before",
-            "warrior_aura_after",
-        ),
-        StatusTransition: (
-            "global_slot",
-            "status_kind",
-            "source_class_id",
-            "duration_before",
-            "duration_after",
-            "change",
-        ),
-        AcceptedActivation: (
-            "kind",
-            "source_global_slot",
-            "target_global_slot",
-            "target_action",
-            "use_ultimate",
-        ),
-        ActionRejection: (
-            "actor_global_slot",
-            "component",
-            "submitted_move_action",
-            "submitted_target_action",
-            "submitted_use_ultimate",
-            "movement_mask_value",
-            "pair_mask_value",
-        ),
-        TransitionView: (
-            "scenario_name",
-            "config",
-            "submission_kind",
-            "report_actor_slots",
-            "before_state",
-            "before_observation",
-            "before_action_mask",
-            "submitted_action",
-            "accepted_action",
-            "after_state",
-            "after_observation",
-            "after_action_mask",
-            "reward",
-            "done_flags",
-            "info",
-            "actor_transitions",
-            "status_transitions",
-            "accepted_activations",
-            "rejections",
-        ),
         DebuggerSession: (
             "scenario_name",
             "seed",
@@ -231,15 +154,18 @@ def test_every_debugger_structure_has_the_exact_audited_field_schema() -> None:
             "state",
             "observation",
             "action_mask",
-            "last_reward",
-            "done_flags",
-            "info",
+            "evaluation_context",
+            "current_evaluation_frame",
+            "incoming_evaluation_view",
+            "status_source_evidence_state",
+            "last_submission_kind",
+            "last_report_actor_slots",
             "controlled_global_slot",
             "pending_actions",
             "next_script_frame_index",
-            "last_transition",
             "show_ranges",
             "verbose_logging",
+            "raw_continuation_identity",
         ),
     }
 
@@ -280,11 +206,52 @@ def test_create_session_has_exact_initial_pending_and_epoch_contract() -> None:
         armed_lane=0,
         arm_origin="automatic",
     )
-    assert session.last_reward is None
-    assert session.last_transition is None
+    assert session.current_evaluation_frame.frame_index == 0
+    assert session.current_evaluation_frame.simulator_step_count == 0
+    assert session.incoming_evaluation_view is None
+    assert session.last_submission_kind is None
+    assert session.last_report_actor_slots == ()
     assert session.next_script_frame_index == 0
     assert int(session.state.step_count) == 0
-    assert not bool(session.done_flags.done)
+    assert not session.episode_sealed
+    assert session.evaluation_context.capture_profile == "debug"
+    assert (
+        dict(
+            (row.name, row.value) for row in session.evaluation_context.aggregation_keys
+        )["action_source"]
+        == "manual"
+    )
+
+
+def test_retaining_capture_profile_survives_every_session_replacement() -> None:
+    initial = _session(
+        "basic_support",
+        capture_profile="evaluation_metric_complete",
+    )
+    reset = reset_session(initial)
+    scaled = set_movement_scale(reset, 0.25)
+    switched = switch_scenario(scaled, get_scenario("arena_5v5"))
+
+    sessions = (initial, reset, scaled, switched)
+    assert {candidate.evaluation_context.capture_profile for candidate in sessions} == {
+        "evaluation_metric_complete"
+    }
+    assert {candidate.evaluation_context.identity.run_id for candidate in sessions} == {
+        initial.evaluation_context.identity.run_id
+    }
+    assert tuple(candidate.run_generation for candidate in sessions) == (0, 1, 2, 3)
+    assert all(
+        candidate.current_evaluation_frame.frame_index == 0
+        and candidate.incoming_evaluation_view is None
+        for candidate in sessions
+    )
+    assert tuple(
+        dict(
+            (row.name, row.value)
+            for row in candidate.evaluation_context.aggregation_keys
+        )["action_source"]
+        for candidate in sessions
+    ) == ("scripted", "scripted", "scripted", "manual")
 
 
 def test_session_rejects_invalid_fixed_slot_pending_rows() -> None:
@@ -352,7 +319,7 @@ def test_interactive_action_populates_only_authorized_pending_rows() -> None:
     )
     pending_actions = _replace_pending_row(session, 1, pending)
     action = build_interactive_joint_action(
-        session.config,
+        session.evaluation_context,
         pending_actions,
         actor_global_slots=(1,),
     )
@@ -373,7 +340,7 @@ def test_disarmed_action_retains_target_for_inspection_but_submits_noop() -> Non
         arm_origin=None,
     )
     action = build_interactive_joint_action(
-        session.config,
+        session.evaluation_context,
         _replace_pending_row(session, 0, pending),
         actor_global_slots=(0,),
     )
@@ -391,7 +358,7 @@ def test_interactive_builder_rejects_inactive_pending_target() -> None:
 
     with pytest.raises(ValueError, match="inactive"):
         build_interactive_joint_action(
-            session.config,
+            session.evaluation_context,
             _replace_pending_row(session, 0, pending),
             actor_global_slots=(0,),
         )
@@ -414,7 +381,7 @@ def test_interactive_builder_preserves_all_active_rows_and_neutral_padding() -> 
             if staged.pending_action.armed_lane is None
             else int(
                 build_interactive_joint_action(
-                    staged.config,
+                    staged.evaluation_context,
                     staged.pending_actions,
                     actor_global_slots=(actor_slot,),
                 ).select_target[actor_slot]
@@ -427,7 +394,7 @@ def test_interactive_builder_preserves_all_active_rows_and_neutral_padding() -> 
         )
 
     action = build_interactive_joint_action(
-        staged.config,
+        staged.evaluation_context,
         staged.pending_actions,
         actor_global_slots=active_slots,
     )
@@ -448,7 +415,7 @@ def test_scripted_action_supports_multiple_actor_commands() -> None:
             ActorCommand(7, MOVE_EAST, 2, 1),
         ),
     )
-    action = build_scripted_joint_action(session.config, frame)
+    action = build_scripted_joint_action(session.evaluation_context, frame)
 
     assert tuple(int(head[0]) for head in action) == (MOVE_NORTH, 6, 0)
     assert tuple(int(head[7]) for head in action) == (MOVE_EAST, 8, 1)
@@ -466,9 +433,9 @@ def test_scripted_builder_rejects_inactive_actor_and_target() -> None:
     )
 
     with pytest.raises(ValueError):
-        build_scripted_joint_action(session.config, inactive_actor)
+        build_scripted_joint_action(session.evaluation_context, inactive_actor)
     with pytest.raises(ValueError):
-        build_scripted_joint_action(session.config, inactive_target)
+        build_scripted_joint_action(session.evaluation_context, inactive_target)
 
 
 def test_click_auto_arms_basic_only_when_exact_lane_zero_is_legal() -> None:
@@ -482,11 +449,32 @@ def test_click_auto_arms_basic_only_when_exact_lane_zero_is_legal() -> None:
     legal_joint_mask = session.action_mask.select_target_use_ultimate_joint_mask.at[
         0, target_action, 0
     ].set(True)
+    initial_canonical_mask = session.current_evaluation_frame.action_mask
+    canonical_joint = [
+        [list(lanes) for lanes in actor_rows]
+        for actor_rows in initial_canonical_mask.select_target_use_ultimate_joint_mask
+    ]
+    canonical_select = [list(row) for row in initial_canonical_mask.select_target_mask]
+    canonical_joint[0][target_action][0] = True
+    canonical_select[0][target_action] = True
+    canonical_mask = ActionMaskV1(
+        move_mask=initial_canonical_mask.move_mask,
+        select_target_mask=tuple(tuple(row) for row in canonical_select),
+        use_ultimate_mask=initial_canonical_mask.use_ultimate_mask,
+        select_target_use_ultimate_joint_mask=tuple(
+            tuple(tuple(lanes) for lanes in actor_rows)
+            for actor_rows in canonical_joint
+        ),
+    )
     exact_legal = replace(
         session,
         action_mask=session.action_mask._replace(
             select_target_use_ultimate_joint_mask=legal_joint_mask
         ),
+        current_evaluation_frame=session.current_evaluation_frame.model_copy(
+            update={"action_mask": canonical_mask}
+        ),
+        raw_continuation_identity=None,
     )
     legal = select_clicked_target(exact_legal, 5)
     assert legal.pending_action.selected_global_target_slot == 5
@@ -534,7 +522,7 @@ def test_explicit_no_combat_preserves_draft_context_but_packages_no_combat() -> 
 
     no_combat = select_no_combat(session)
     action = build_interactive_joint_action(
-        no_combat.config,
+        no_combat.evaluation_context,
         no_combat.pending_actions,
         actor_global_slots=(no_combat.controlled_global_slot,),
     )
@@ -636,10 +624,14 @@ def test_submit_joint_action_calls_step_once_and_updates_paired_epoch(
     assert calls[0][1] is session.state
     assert calls[0][2] is session.action_mask
     assert int(submitted.state.step_count) == 1
-    assert submitted.last_transition is not None
-    assert submitted.last_transition.after_state is submitted.state
-    assert submitted.last_transition.after_observation is submitted.observation
-    assert submitted.last_transition.after_action_mask is submitted.action_mask
+    view = submitted.incoming_evaluation_view
+    assert view is not None
+    assert view.start_frame == session.current_evaluation_frame
+    assert view.successor_frame == submitted.current_evaluation_frame
+    assert view.transition.transition_index == 0
+    assert submitted.current_evaluation_frame.simulator_step_count == 1
+    assert submitted.last_submission_kind == "interactive"
+    assert submitted.last_report_actor_slots == (0,)
     assert not bool(jnp.array_equal(submitted.key, session.key))
 
 
@@ -654,7 +646,7 @@ def test_researcher_joint_submit_sends_all_ten_drafts_in_one_step(
             MOVE_EAST if actor_slot % 2 == 0 else MOVE_NORTH,
         )
     expected_action = build_interactive_joint_action(
-        session.config,
+        session.evaluation_context,
         session.pending_actions,
         actor_global_slots=tuple(range(MAX_AGENT_SLOTS)),
     )
@@ -676,12 +668,20 @@ def test_researcher_joint_submit_sends_all_ten_drafts_in_one_step(
     )
     assert int(submitted.state.step_count) == int(session.state.step_count) + 1
     assert not bool(jnp.array_equal(submitted.key, session.key))
-    assert submitted.last_transition is not None
-    assert submitted.last_transition.report_actor_slots == tuple(range(MAX_AGENT_SLOTS))
+    view = submitted.incoming_evaluation_view
+    assert view is not None
+    assert submitted.last_report_actor_slots == tuple(range(MAX_AGENT_SLOTS))
+    submitted_facts = (
+        view.transition.facts.action_acceptance_facts.submitted_joint_action
+    )
     assert all(
-        bool(jnp.array_equal(actual, expected))
+        tuple(actual) == tuple(int(value) for value in expected)
         for actual, expected in zip(
-            submitted.last_transition.submitted_action,
+            (
+                submitted_facts.move,
+                submitted_facts.select_target,
+                submitted_facts.use_ultimate,
+            ),
             expected_action,
             strict=True,
         )
@@ -753,7 +753,10 @@ def test_mage_burst_can_be_explicitly_rearmed_on_cooldown_for_rejection() -> Non
     session = _session("ultimate_showcase", controlled_slot=0)
     session = submit_next_script_frame(session)
     session = submit_next_script_frame(session)
-    assert int(session.state.ultimate_cooldowns[0]) == 30
+    mage_cooldown = session.evaluation_context.static_mechanics_catalog.class_mechanics[
+        MAGE_CLASS_ID
+    ].ultimate_cooldown_steps
+    assert int(session.state.ultimate_cooldowns[0]) == mage_cooldown
 
     armed = arm_ultimate(session)
     assert armed.pending_action.selected_global_target_slot is None
@@ -761,14 +764,14 @@ def test_mage_burst_can_be_explicitly_rearmed_on_cooldown_for_rejection() -> Non
     assert not lane_availability(armed.action_mask, 0, 0, 1).armed_pair_legal
 
     submitted = submit_interactive(armed)
-    transition = submitted.last_transition
-    assert transition is not None
-    actor = next(
-        value for value in transition.actor_transitions if value.actor_global_slot == 0
-    )
-    assert actor.movement_accepted
-    assert not actor.combat_pair_accepted
-    assert (actor.accepted_target_action, actor.accepted_use_ultimate) == (0, 0)
+    view = submitted.incoming_evaluation_view
+    assert view is not None
+    acceptance = view.transition.facts.action_acceptance_facts
+    assert not acceptance.submitted_action_tuple_is_out_of_domain_by_actor[0]
+    assert not acceptance.in_domain_move_action_is_rejected_by_actor[0]
+    assert acceptance.in_domain_combat_action_pair_is_rejected_by_actor[0]
+    assert acceptance.accepted_joint_action.select_target[0] == 0
+    assert acceptance.accepted_joint_action.use_ultimate[0] == 0
     assert submitted.pending_action.armed_lane == 0
     assert submitted.pending_action.arm_origin == "automatic"
 
@@ -792,36 +795,24 @@ def test_successor_illegal_basic_disarms_but_preserves_target() -> None:
     ).armed_pair_legal
 
 
-@pytest.mark.parametrize(
-    ("terminated", "truncated", "reason"),
-    ((True, False, "terminated"), (False, True, "truncated")),
-)
-def test_done_session_rejects_submit_without_key_or_state_change(
-    capsys: pytest.CaptureFixture[str],
-    terminated: bool,
-    truncated: bool,
-    reason: str,
-) -> None:
-    session = _session("arena_5v5")
-    terminal = replace(
-        session,
-        done_flags=DoneFlags(
-            terminated=jnp.asarray(terminated),
-            truncated=jnp.asarray(truncated),
-        ),
-    )
-    result = submit_interactive(terminal)
+def test_declared_horizon_session_rejects_submit_without_key_or_state_change() -> None:
+    session = _session("basic_support")
+    session = submit_next_script_frame(session)
+    sealed = submit_next_script_frame(session)
+    assert sealed.reached_declared_horizon
+    assert not sealed.terminated
+    assert not sealed.truncated
+    key = sealed.key
+    state = sealed.state
 
-    assert result is terminal
-    assert (
-        f"SUBMIT BLOCKED: episode is {reason}; press R or switch scenario."
-        in capsys.readouterr().out
-    )
+    result = submit_interactive(sealed)
+
+    assert result is sealed
+    assert result.state is state
+    assert bool(jnp.array_equal(result.key, key))
 
 
-def test_script_completion_does_not_step_or_split_key(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+def test_script_completion_does_not_step_or_split_key() -> None:
     session = _session("aura_crossfire")
     session = submit_next_script_frame(session)
     key = session.key
@@ -831,7 +822,6 @@ def test_script_completion_does_not_step_or_split_key(
     assert completed is session
     assert completed.state is state
     assert bool(jnp.array_equal(completed.key, key))
-    assert "SCRIPT COMPLETE" in capsys.readouterr().out
 
 
 def test_reset_replays_identical_initial_session_and_clears_history() -> None:
@@ -843,12 +833,22 @@ def test_reset_replays_identical_initial_session_and_clears_history() -> None:
     assert _tree_equal(reset_result.state, initial.state)
     assert _tree_equal(reset_result.observation, initial.observation)
     assert _tree_equal(reset_result.action_mask, initial.action_mask)
-    assert bool(jnp.array_equal(reset_result.key, initial.key))
+    assert not bool(jnp.array_equal(reset_result.key, initial.key))
+    assert (
+        reset_result.evaluation_context.seed_protocol.environment_seed
+        != initial.evaluation_context.seed_protocol.environment_seed
+    )
+    assert (
+        reset_result.evaluation_context.identity.episode_id
+        != initial.evaluation_context.identity.episode_id
+    )
     assert reset_result.controlled_global_slot == 2
     assert reset_result.pending_action == PendingAction()
     assert reset_result.pending_actions == initial.pending_actions
-    assert reset_result.last_transition is None
-    assert reset_result.last_reward is None
+    assert reset_result.incoming_evaluation_view is None
+    assert reset_result.current_evaluation_frame.frame_index == 0
+    assert reset_result.last_submission_kind is None
+    assert reset_result.last_report_actor_slots == ()
     assert reset_result.next_script_frame_index == 0
     assert reset_result.run_generation == initial.run_generation + 1
 
@@ -874,12 +874,15 @@ def test_movement_scale_reset_rebuilds_full_epoch_without_stepping(
     assert scaled.state is not advanced.state
     assert scaled.observation is not advanced.observation
     assert scaled.action_mask is not advanced.action_mask
-    assert scaled.info is not advanced.info
-    assert scaled.last_reward is None
-    assert scaled.last_transition is None
+    assert scaled.current_evaluation_frame is not advanced.current_evaluation_frame
+    assert scaled.current_evaluation_frame.frame_index == 0
+    assert scaled.current_evaluation_frame.simulator_step_count == 0
+    assert scaled.incoming_evaluation_view is None
+    assert scaled.last_submission_kind is None
+    assert scaled.last_report_actor_slots == ()
     assert scaled.next_script_frame_index == 0
-    assert not bool(scaled.done_flags.terminated)
-    assert not bool(scaled.done_flags.truncated)
+    assert not scaled.terminated
+    assert not scaled.truncated
     assert scaled.controlled_global_slot == 2
     assert scaled.show_ranges is False
     assert scaled.verbose_logging is True
@@ -939,7 +942,10 @@ def test_switch_scenario_preserves_seed_and_toggles_but_clears_live_state() -> N
     assert switched.verbose_logging is True
     assert switched.controlled_global_slot == 5
     assert int(switched.state.step_count) == 0
-    assert switched.last_transition is None
+    assert switched.incoming_evaluation_view is None
+    assert switched.current_evaluation_frame.frame_index == 0
+    assert switched.last_submission_kind is None
+    assert switched.last_report_actor_slots == ()
     assert switched.pending_action == PendingAction()
     inactive = PendingAction(armed_lane=None, arm_origin=None)
     assert len(switched.pending_actions) == MAX_AGENT_SLOTS
@@ -965,13 +971,72 @@ def test_submission_rejects_bad_shape_or_dtype_before_stepping(
     bad_action: object,
 ) -> None:
     session = _session("arena_5v5")
-    with pytest.raises(ValueError):
+    with pytest.raises(DebuggerTransitionFailureV1) as raised:
         submit_joint_action(
             session,
             bad_action,  # type: ignore[arg-type]
             submission_kind="interactive",
             report_actor_slots=(0,),
         )
+    assert raised.value.stage == "action_build"
+    assert raised.value.stable_code == "invalid_submitted_action"
+    assert isinstance(raised.value.__cause__, ValueError)
+
+
+@pytest.mark.parametrize(
+    ("boundary", "expected_stage", "expected_code"),
+    (
+        ("interactive_action", "action_build", "interactive_action_build_failed"),
+        ("scripted_action", "action_build", "scripted_action_build_failed"),
+        ("random_split", "simulation", "simulator_step_failed"),
+        ("step", "simulation", "simulator_step_failed"),
+        ("capture", "capture", "transition_capture_failed"),
+        ("coherent_view", "validation", "transition_packaging_failed"),
+        ("status_evidence", "validation", "transition_packaging_failed"),
+    ),
+)
+def test_submission_failures_have_stable_typed_stage_and_preserve_input_epoch(
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+    expected_stage: str,
+    expected_code: str,
+) -> None:
+    scripted = boundary == "scripted_action"
+    session = _session("basic_support" if scripted else "arena_5v5")
+    initial_frame = session.current_evaluation_frame
+    initial_state = session.state
+
+    def fail(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("private injected detail")
+
+    if boundary == "interactive_action":
+        monkeypatch.setattr(control, "build_interactive_joint_action", fail)
+    elif boundary == "scripted_action":
+        monkeypatch.setattr(control, "build_scripted_joint_action", fail)
+    elif boundary == "random_split":
+        monkeypatch.setattr(control.jax.random, "split", fail)
+    elif boundary == "step":
+        monkeypatch.setattr(control, "step", fail)
+    elif boundary == "capture":
+        monkeypatch.setattr(control, "capture_evaluation_transition_unit_v1", fail)
+    elif boundary == "coherent_view":
+        monkeypatch.setattr(control, "EvaluationTransitionViewV1", fail)
+    else:
+        monkeypatch.setattr(control, "advance_status_source_evidence_v2", fail)
+
+    with pytest.raises(DebuggerTransitionFailureV1) as raised:
+        if scripted:
+            submit_next_script_frame(session)
+        else:
+            submit_interactive(session)
+
+    assert raised.value.stage == expected_stage
+    assert raised.value.stable_code == expected_code
+    assert isinstance(raised.value.__cause__, RuntimeError)
+    assert str(raised.value) == f"debugger transition failed during {expected_stage}"
+    assert "private injected detail" not in str(raised.value)
+    assert session.current_evaluation_frame is initial_frame
+    assert session.state is initial_state
 
 
 def test_scenario_contract_rejects_duplicate_frame_actors() -> None:

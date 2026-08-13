@@ -333,8 +333,14 @@ outcome from that structural evidence.
 
 Processing success means that every validated transition was consumed by every
 declared reducer and the final report was validated atomically. Processing
-failure records the stage, stable code, optional reducer identity, attempted
-transition, and diagnostic detail. It does not erase the last validated prefix
+failure records the stage, stable code, stage-governed reducer identity and
+attempted-transition provenance, and diagnostic detail. Reducer initialize,
+advance, and finalize failures require the exact reducer identity/version;
+non-reducer stages forbid one. Reducer advance requires an attempted transition
+index equal to processed progress and leaves validated progress exactly one
+unit ahead. Transition validation may preserve the submitted attempted index as
+diagnostic provenance even when it is malformed or noncontiguous. Other stages
+forbid an attempted index. These rules do not erase the last validated prefix
 or alter already-authored termination/truncation truth. A report exposes both
 validated and processed counts, and no successful report may contain a partial
 subset of reducers or rows. A failure after every validated unit was processed
@@ -524,6 +530,39 @@ continues to require scenario identity. Debug adds no private-state payload.
 
 ## Artifact, replay, and reporting requirements
 
+The normative version-1 replay normal form and its non-circular artifact graph
+are specified in [Standard Evaluation Replay Format](replay_format.md). Replay
+stores the context once plus exact `T + 1` frames and `T` transitions,
+completion, processing status, and a content-addressed metric-report reference.
+The context's schema map remains the exact eight CP2 bindings; replay-envelope
+bindings live in the replay header. Structural model validation alone is not a
+semantic replay-validity claim: every loaded artifact must pass the explicit
+whole-artifact validator over frame zero and all adjacent four-record units.
+
+Canonical replay persistence is local, bounded, and fail-closed. The loader
+accepts only canonical finite UTF-8 JSON in regular nonsymlink files, rejects
+duplicate keys, excessive depth/size, unknown versions, and digest or semantic
+mismatches, and performs no JAX/backend, simulator, policy, capture, or device
+work. Bundle publication writes the content-addressed metric report first and
+the replay last through same-directory durable no-clobber publication. A replay
+is still renderable when a report sidecar is absent, but a present invalid or
+foreign sidecar is an error and metric completeness is never inferred.
+The V1 filesystem backend requires descriptor-relative POSIX no-follow
+operations and fails closed on platforms that cannot keep every path component
+and both bundle publications bound to one opened directory inode.
+
+Scenario and actor-POV companions use the same finite canonical JSON,
+descriptor-bound nonsymlink path walk, size/depth limits, and atomic no-clobber
+publication. A POV save must validate its completed replay reference. A
+scenario save or load must validate both its replay and metric-report evidence
+joins; a structurally valid but foreign record is not accepted as a local
+scenario result.
+
+Rollout completion, evaluation-processing validity, and per-statistic endpoint
+observation remain independent in both live and replay-loaded analysis. A
+processing failure never rewrites a provably complete rollout, and an
+infrastructure prefix never becomes scientific right censoring.
+
 Official results retain enough information to reproduce every reduction:
 
 - resolved configuration and static-mechanics catalog once per episode;
@@ -548,6 +587,15 @@ ally/enemy row mappings cover unit features, visibility, visible action
 history, and own-team/opponent-team local-slot axes in spawn-lifecycle
 observations; the aligned vocabulary names the two lifecycle team-axis
 entries.
+
+An independently shareable NoSharedObs POV artifact copies only the selected
+recipient's rows and the minimal recipient-local forms of those mappings. It
+uses separate submitted-int32 and accepted-category action records so rejected
+out-of-domain intent is preserved rather than normalized. Its local cues may
+describe only changes present in authorized adjacent rows plus own action,
+reward, mask, and done truth. Full replay provenance remains in a separate outer
+reference; privacy equality applies to recipient-content bytes, not to that
+truthful provenance wrapper.
 
 Evaluation frames store base observations and masks once. They do not duplicate
 materialized SharedObs. SharedObs actor inputs remain reproducible from the

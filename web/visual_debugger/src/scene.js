@@ -8,6 +8,9 @@ import {
   explainObstacle,
   explainOverflow,
   explainPendingRoute,
+  explainPovAgent,
+  explainPovOverflow,
+  explainPovStatus,
   explainRange,
   explainStatus,
   explainVisibility,
@@ -18,7 +21,6 @@ import {
   layoutRequiredDocks,
   layoutStatusDocks,
   protectedBodyRect,
-  rectanglesIntersect,
 } from "./layout.js";
 import { createRouteGeometry } from "./routes.js";
 import { registerTooltipOwner } from "./tooltip.js";
@@ -70,16 +72,6 @@ export const BATTLEFIELD_LAYER_ORDER = Object.freeze([
  */
 /**
  * @typedef {{
- *   kind: string,
- *   id: string,
- *   title: string,
- *   details: string[],
- *   anchor: "element" | "pointer",
- * }} TooltipDescriptor
- */
-
-/**
- * @typedef {{
  *   root: SVGElement,
  *   body: SVGElement,
  *   teamRing: SVGElement,
@@ -88,9 +80,6 @@ export const BATTLEFIELD_LAYER_ORDER = Object.freeze([
  *   health: SVGElement,
  *   classIcon: SVGSVGElement,
  *   classLetter: SVGElement,
- *   idTag: SVGElement,
- *   idTagBox: SVGElement,
- *   idTagLabel: SVGElement,
  *   deadMark: SVGElement,
  *   selectionRoot: SVGElement,
  *   controlledHalo: SVGElement,
@@ -156,21 +145,17 @@ function finiteNumber(value, fallback = 0) {
 }
 
 /**
- * @param {number} x
- * @param {number} y
- * @param {number} width
- * @param {number} height
- * @returns {Rectangle}
+ * Format only an already-authorized public identity. Global slots remain
+ * internal join keys and are never promoted to a display fallback.
+ *
+ * @param {unknown} agent
  */
-function rectangle(x, y, width, height) {
-  return {
-    left: x,
-    top: y,
-    right: x + width,
-    bottom: y + height,
-    width,
-    height,
-  };
+function agentIdentity(agent) {
+  return isRecord(agent) &&
+    typeof agent.public_agent_id === "string" &&
+    agent.public_agent_id.trim()
+    ? `Agent ID ${agent.public_agent_id}`
+    : "Agent identity unavailable";
 }
 
 /**
@@ -181,10 +166,7 @@ function frameScene(frame) {
   if (!isRecord(frame)) {
     return null;
   }
-  if (isRecord(frame.scene)) {
-    return frame.scene;
-  }
-  return isRecord(frame.battlefield_scene) ? frame.battlefield_scene : null;
+  return isRecord(frame.scene) ? frame.scene : null;
 }
 
 /**
@@ -261,7 +243,7 @@ function targetReticlePath(centerX, centerY, outerRadius) {
  * @param {"kind" | "token_id"} tokenAttribute
  * @param {ViewportTransform} transform
  * @param {ReadonlyMap<number, string>} [classByGlobalSlot]
- * @param {((record: JsonRecord) => TooltipDescriptor) | null} [explain]
+ * @param {((record: JsonRecord) => Record<string, any>) | null} [explain]
  * @param {boolean} [withStrokeHitRegion]
  */
 function renderCircleLayer(
@@ -289,6 +271,8 @@ function renderCircleLayer(
       cx: center.x,
       cy: center.y,
       r: radius,
+      role: explain === null ? null : "img",
+      tabindex: explain === null ? null : "0",
     });
     if (typeof record[tokenAttribute] === "string") {
       if (tokenAttribute === "kind") {
@@ -312,7 +296,9 @@ function renderCircleLayer(
       continue;
     }
     if (!withStrokeHitRegion) {
-      registerTooltipOwner(circle, explain(record));
+      const descriptor = explain(record);
+      circle.setAttribute("aria-label", descriptor.title);
+      registerTooltipOwner(circle, descriptor);
       circles.push(circle);
       continue;
     }
@@ -334,7 +320,11 @@ function renderCircleLayer(
       hitRegion.dataset.slot = String(record.global_slot);
     }
     owner.append(circle, hitRegion);
-    registerTooltipOwner(owner, explain(record));
+    const descriptor = explain(record);
+    owner.setAttribute("role", "img");
+    owner.setAttribute("tabindex", "0");
+    owner.setAttribute("aria-label", descriptor.title);
+    registerTooltipOwner(owner, descriptor);
     circles.push(owner);
   }
   layer.replaceChildren(...circles);
@@ -373,6 +363,10 @@ export class BattlefieldRenderer {
     });
     this.compactActiveCombatRequested = false;
     this.compactActiveCombat = false;
+    /** @type {ReadonlyMap<number, JsonRecord>} */
+    this.agentByGlobalSlot = new Map();
+    /** @type {ReadonlyMap<number, JsonRecord>} */
+    this.classMechanicsById = new Map();
 
     const map = createLayer("map", { "aria-hidden": "true" });
     const aura = createLayer("aura", { "aria-hidden": "true" });
@@ -423,6 +417,8 @@ export class BattlefieldRenderer {
 
     /** @type {Map<number, AgentNodes>} */
     this.agentNodes = new Map();
+    /** @type {Map<string, SVGElement>} */
+    this.observedBodyNodes = new Map();
 
     battlefield.replaceChildren(
       map,
@@ -519,32 +515,57 @@ export class BattlefieldRenderer {
           classTokenFromId(agent.class_id).cssKey,
         ]),
     );
+    this.agentByGlobalSlot = new Map(
+      asArray(scene.agents)
+        .filter((agent) => isRecord(agent) && Number.isInteger(agent.global_slot))
+        .map((agent) => [Number(agent.global_slot), agent]),
+    );
+    this.classMechanicsById = new Map(
+      asArray(scene.class_mechanics)
+        .filter(
+          (mechanics) => isRecord(mechanics) && Number.isInteger(mechanics.class_id),
+        )
+        .map((mechanics) => [Number(mechanics.class_id), mechanics]),
+    );
     renderCircleLayer(
       this.layers.aura,
-      preset === "presentation" ? [] : asArray(scene.aura_fields),
+      asArray(scene.aura_fields),
       "aura-field",
       "token_id",
       transform,
       new Map(),
-      explainAura,
+      (record) =>
+        explainAura(
+          record,
+          this.agentByGlobalSlot.get(record.source_global_slot) ?? null,
+        ),
     );
     renderCircleLayer(
       this.rangeCues,
-      preset === "presentation" ? [] : asArray(scene.ranges),
+      asArray(scene.ranges),
       "range-ring",
       "kind",
       transform,
       classByGlobalSlot,
-      explainRange,
+      (record) => {
+        const owner = this.agentByGlobalSlot.get(record.global_slot) ?? null;
+        return explainRange(
+          record,
+          owner,
+          owner ? (this.classMechanicsById.get(owner.class_id) ?? null) : null,
+        );
+      },
       true,
     );
     this.#renderPendingRoute(scene, transform);
     this.#renderObstacles(map, transform);
     const projectedAgents = this.#renderAgents(scene, transform);
+    this.#renderObservedBodies(scene, transform);
     this.#renderDebugOverlays(scene, projectedAgents, preset === "debug");
     this.#renderStatusDocks(scene, projectedAgents, transform, {
       showLegality: preset !== "presentation",
-      showModifiers: preset !== "presentation",
+      showModifiers: scene.audience === "researcher",
+      audience: scene.audience,
     });
     this.#applyCompactActiveCombatPolicy();
 
@@ -652,6 +673,9 @@ export class BattlefieldRenderer {
     this.layers.durableStatusModifier.removeAttribute("data-compacted-required-docks");
     this.layers.accessibleLabels.replaceChildren();
     this.agentNodes.clear();
+    this.observedBodyNodes.clear();
+    this.agentByGlobalSlot = new Map();
+    this.classMechanicsById = new Map();
     this.choreographyProtectedRects = Object.freeze([]);
     this.choreographyProtectedRectGroups = Object.freeze({
       base: Object.freeze([]),
@@ -747,20 +771,14 @@ export class BattlefieldRenderer {
     }
     const source = screenPoint(route.source_anchor, transform);
     const target = screenPoint(route.target_anchor, transform);
-    const agents = asArray(scene.agents).filter(isRecord);
-    const sourceAgent = agents.find(
-      (agent) => agent.global_slot === route.source_global_slot,
-    );
-    const targetAgent = agents.find(
-      (agent) => agent.global_slot === route.target_global_slot,
-    );
+    const routeIdentity = `${route.source_public_agent_id ?? "unknown"}:${route.target_public_agent_id ?? "unknown"}`;
     const geometry = createRouteGeometry(
       {
-        eventId: `pending:${route.source_global_slot ?? "unknown"}:${route.target_global_slot ?? "unknown"}:${route.lane ?? "unknown"}`,
+        eventId: `pending:${routeIdentity}:${route.lane ?? "unknown"}`,
         source,
         target,
-        sourceRadius: transform.worldLengthToScreen(finiteNumber(sourceAgent?.radius)),
-        targetRadius: transform.worldLengthToScreen(finiteNumber(targetAgent?.radius)),
+        sourceRadius: transform.worldLengthToScreen(finiteNumber(route.source_radius)),
+        targetRadius: transform.worldLengthToScreen(finiteNumber(route.target_radius)),
         offset: route.lane === 1 ? 12 : -12,
       },
       { viewportBounds: transform.mapBounds },
@@ -772,14 +790,23 @@ export class BattlefieldRenderer {
     const hitPath = svgElement("path", {
       class: "pending-route-hit",
       d: geometry.path,
-      "aria-hidden": "true",
+      role: "img",
+      tabindex: "0",
     });
     path.dataset.lane = String(route.lane ?? 0);
     path.dataset.legal = String(Boolean(route.legal));
-    path.dataset.sourceSlot = String(route.source_global_slot ?? "");
-    path.dataset.targetSlot = String(route.target_global_slot ?? "");
+    path.dataset.sourceAgentId = String(route.source_public_agent_id ?? "");
+    path.dataset.targetAgentId = String(route.target_public_agent_id ?? "");
+    if (Number.isInteger(route.source_global_slot)) {
+      path.dataset.sourceSlot = String(route.source_global_slot);
+    }
+    if (Number.isInteger(route.target_global_slot)) {
+      path.dataset.targetSlot = String(route.target_global_slot);
+    }
     path.dataset.routeKind = geometry.kind;
-    registerTooltipOwner(hitPath, explainPendingRoute(route));
+    const routeDescriptor = explainPendingRoute(route);
+    hitPath.setAttribute("aria-label", routeDescriptor.title);
+    registerTooltipOwner(hitPath, routeDescriptor);
     this.layers.pendingRoute.replaceChildren(path, hitPath);
   }
 
@@ -800,6 +827,8 @@ export class BattlefieldRenderer {
           cx: center.x,
           cy: center.y,
           r: transform.worldLengthToScreen(finiteNumber(obstacle.radius)),
+          role: "img",
+          tabindex: "0",
           "aria-label": `Pillar ${obstacle.obstacle_id ?? ""}`,
         });
         registerTooltipOwner(node, explainObstacle(obstacle));
@@ -815,6 +844,8 @@ export class BattlefieldRenderer {
           width: wallWidth,
           height: wallHeight,
           transform: `rotate(${thetaDegrees} ${center.x} ${center.y})`,
+          role: "img",
+          tabindex: "0",
           "aria-label": `Wall ${obstacle.obstacle_id ?? ""}`,
         });
         registerTooltipOwner(node, explainObstacle(obstacle));
@@ -857,7 +888,17 @@ export class BattlefieldRenderer {
         this.agentNodes.set(slot, nodes);
       }
       this.#updateAgentNodes(nodes, agent, center, radius, controlled, selected);
-      registerTooltipOwner(nodes.root, explainAgent(agent, { controlled, selected }));
+      registerTooltipOwner(
+        nodes.root,
+        scene.audience === "agent_pov"
+          ? explainPovAgent(agent, { controlled, selected })
+          : explainAgent(
+              agent,
+              { controlled, selected },
+              this.classMechanicsById.get(agent.class_id) ?? null,
+              agents,
+            ),
+      );
 
       // Appending an existing child reorders it without replacing its identity.
       this.layers.body.append(nodes.root);
@@ -876,8 +917,213 @@ export class BattlefieldRenderer {
   }
 
   /**
+   * Paint recipient-authorized POV body rows without assigning them simulator
+   * global slots. Their stable browser identity is exactly the disclosed
+   * `(relation, observation_row)` axis key; consequently they expose hover and
+   * keyboard inspection but never become target/control hit regions.
+   *
+   * @param {JsonRecord} scene
+   * @param {ViewportTransform} transform
+   */
+  #renderObservedBodies(scene, transform) {
+    const bodies = asArray(scene.observed_bodies).filter(
+      (body) =>
+        isRecord(body) &&
+        (body.relation === "ally" || body.relation === "enemy") &&
+        Number.isInteger(body.observation_row) &&
+        body.observation_key === `${body.relation}:${body.observation_row}`,
+    );
+    const keys = new Set(bodies.map((body) => String(body.observation_key)));
+    for (const [key, node] of this.observedBodyNodes) {
+      if (!keys.has(key)) {
+        node.remove();
+        this.observedBodyNodes.delete(key);
+      }
+    }
+
+    for (const body of bodies) {
+      const key = String(body.observation_key);
+      const center = screenPoint(body.position, transform);
+      const radius = transform.worldLengthToScreen(finiteNumber(body.radius, 0.5));
+      const classToken = classTokenFromId(body.class_id);
+      const teamToken = teamTokenFromId(body.team_id);
+      let root = this.observedBodyNodes.get(key);
+      if (!root) {
+        root = svgElement("g", {
+          class: "agent pov-observed-body",
+          tabindex: "0",
+          role: "img",
+          "data-observation-key": key,
+        });
+        root.append(
+          svgElement("circle", {
+            class: "agent-body",
+            "data-zone": "observed-body",
+          }),
+          svgElement("circle", {
+            class: "agent-team-ring",
+            "data-zone": "observed-team",
+          }),
+          svgElement("circle", {
+            class: "agent-health-track",
+            "data-zone": "observed-health",
+          }),
+          svgElement("circle", {
+            class: "agent-health",
+            "data-zone": "observed-health",
+            pathLength: 100,
+          }),
+          createSvgIcon(this.battlefield.ownerDocument, classToken.glyphKey, {
+            className: "agent-class-icon",
+          }),
+          svgElement("text", { class: "pov-observed-body__label" }),
+          svgElement("g", {
+            class: "pov-observed-body__statuses",
+            "data-zone": "observed-statuses",
+          }),
+        );
+        this.observedBodyNodes.set(key, root);
+      }
+
+      root.dataset.relation = body.relation;
+      root.dataset.observationRow = String(body.observation_row);
+      root.dataset.publicAgentId = String(body.public_agent_id);
+      root.dataset.team = teamToken.cssKey;
+      root.dataset.class = classToken.cssKey;
+      root.dataset.alive = String(Boolean(body.alive));
+      const statuses = asArray(body.statuses);
+      const statusDescriptions = statuses.map((status) => {
+        const token = resolveVisualToken("status", status.token_id);
+        return `${token.accessibleName}, ${formatDisplayNumber(status.duration)} ticks`;
+      });
+      root.dataset.statusCount = String(statuses.length);
+      root.setAttribute(
+        "aria-label",
+        `${body.relation} observation row ${body.observation_row}, Agent ID ${body.public_agent_id}, ${classToken.label}, life state ${body.alive ? "alive" : "corpse"}, health ${formatDisplayNumber(body.current_health)} of ${formatDisplayNumber(body.max_health)}, effective speed ${formatDisplayNumber(body.effective_movement_speed)}, ${Number(body.steps_until_out_of_combat) > 0 ? `in combat with ${body.steps_until_out_of_combat} ${body.steps_until_out_of_combat === 1 ? "tick" : "ticks"} until out of combat` : "out of combat"}, ${statusDescriptions.length === 0 ? "no persistent statuses" : `statuses ${statusDescriptions.join(", ")}`}`,
+      );
+
+      const healthRadius = Math.max(radius - 4, radius * 0.7);
+      const healthRatio = Math.max(
+        0,
+        Math.min(
+          1,
+          finiteNumber(body.current_health) /
+            Math.max(finiteNumber(body.max_health, 1), Number.EPSILON),
+        ),
+      );
+      const [bodyCircle, teamRing, healthTrack, health, icon, label, statusGroup] =
+        root.children;
+      setAttributes(/** @type {SVGElement} */ (bodyCircle), {
+        cx: center.x,
+        cy: center.y,
+        r: radius,
+      });
+      setAttributes(/** @type {SVGElement} */ (teamRing), {
+        cx: center.x,
+        cy: center.y,
+        r: radius,
+      });
+      setAttributes(/** @type {SVGElement} */ (healthTrack), {
+        cx: center.x,
+        cy: center.y,
+        r: healthRadius,
+      });
+      setAttributes(/** @type {SVGElement} */ (health), {
+        cx: center.x,
+        cy: center.y,
+        r: healthRadius,
+        "stroke-dasharray": `${healthRatio * 100} ${100 - healthRatio * 100}`,
+        transform: `rotate(-90 ${center.x} ${center.y})`,
+      });
+      const iconSize = Math.max(14, Math.min(radius * 0.95, 28));
+      setAttributes(/** @type {SVGElement} */ (icon), {
+        x: center.x - iconSize / 2,
+        y: center.y - iconSize * 0.62,
+        width: iconSize,
+        height: iconSize,
+      });
+      setAttributes(/** @type {SVGElement} */ (label), {
+        x: center.x,
+        y: center.y + radius + 15,
+      });
+      label.textContent = `${body.relation === "ally" ? "ALLY" : "ENEMY"} ${body.observation_row}`;
+      const statusCellWidth = 18;
+      const statusCellHeight = 15;
+      const statusColumns = Math.min(statuses.length, 5);
+      const statusNodes = statuses.map((status, index) => {
+        const token = resolveVisualToken("status", status.token_id);
+        const rowIndex = Math.floor(index / 5);
+        const columnIndex = index % 5;
+        const rowCount = Math.min(5, statuses.length - rowIndex * 5);
+        const x =
+          center.x - (rowCount * statusCellWidth) / 2 + columnIndex * statusCellWidth;
+        const y = center.y - radius - 19 - rowIndex * statusCellHeight;
+        const effectClass = classTokenFromId(status.source_class_id);
+        const cell = svgElement("g", {
+          class: "pov-observed-status",
+          transform: `translate(${x} ${y})`,
+          role: "img",
+          "aria-label": `${token.accessibleName}, duration ${formatDisplayNumber(status.duration)} ticks; source agent identity is not disclosed`,
+          "data-token-id": token.tokenId,
+          "data-duration": status.duration,
+          "data-status-feature-index": status.status_feature_index,
+          "data-effect-class-id": status.source_class_id,
+          "data-effect-class": effectClass.cssKey,
+        });
+        const statusIcon = createSvgIcon(
+          this.battlefield.ownerDocument,
+          token.glyphKey,
+          { className: "pov-observed-status__icon" },
+        );
+        setAttributes(statusIcon, {
+          x: 2,
+          y: 2,
+          width: 8,
+          height: 8,
+        });
+        cell.append(
+          svgElement("rect", {
+            class: "pov-observed-status__box",
+            x: 0,
+            y: 0,
+            width: statusCellWidth - 2,
+            height: statusCellHeight - 1,
+            rx: 3,
+          }),
+          statusIcon,
+          svgElement("text", {
+            class: "pov-observed-status__duration",
+            x: 12,
+            y: 11,
+          }),
+        );
+        const duration = cell.lastElementChild;
+        if (duration) {
+          duration.textContent = formatCompactDisplayNumber(status.duration);
+        }
+        registerTooltipOwner(
+          cell,
+          explainPovStatus(status, {
+            public_agent_id: body.public_agent_id,
+            class_id: body.class_id,
+            team_id: body.team_id,
+          }),
+        );
+        return cell;
+      });
+      statusGroup.replaceChildren(...statusNodes);
+      statusGroup.setAttribute("data-columns", String(statusColumns));
+      registerTooltipOwner(
+        root,
+        explainPovAgent(body, { controlled: false, selected: false }),
+      );
+      this.layers.body.append(root);
+    }
+  }
+
+  /**
    * Render only researcher-authorized observer visibility and clearly marked
-   * presentation-layout protected zones in Debug. Neither cue changes bodies
+   * presentation-layout protected zones in Technical. Neither cue changes bodies
    * or claims to be simulator geometry.
    *
    * @param {JsonRecord} scene
@@ -887,7 +1133,8 @@ export class BattlefieldRenderer {
   #renderDebugOverlays(scene, projectedAgents, showDebug) {
     this.visibilityCues.replaceChildren();
     this.protectedZoneCues.replaceChildren();
-    if (!showDebug) {
+    const transform = this.transform;
+    if (!showDebug || !transform) {
       return;
     }
 
@@ -915,7 +1162,50 @@ export class BattlefieldRenderer {
         "data-slot": agent.globalSlot,
       });
     });
-    this.protectedZoneCues.replaceChildren(...protectedZones);
+    const observedProtectedZones = asArray(scene.observed_bodies).flatMap((body) => {
+      if (
+        !isRecord(body) ||
+        (body.relation !== "ally" && body.relation !== "enemy") ||
+        !Number.isInteger(body.observation_row) ||
+        !Array.isArray(body.position) ||
+        body.position.length !== 2 ||
+        body.position.some(
+          (coordinate) =>
+            typeof coordinate !== "number" || !Number.isFinite(coordinate),
+        )
+      ) {
+        return [];
+      }
+      const center = screenPoint(body.position, transform);
+      const bounds = protectedBodyRect(
+        {
+          center,
+          radius: transform.worldLengthToScreen(finiteNumber(body.radius, 0.5)),
+          controlled: false,
+          selected: false,
+        },
+        {
+          bodyPadding: 4,
+          selectionAllowance: 12,
+        },
+      );
+      return [
+        svgElement("rect", {
+          class: "debug-protected-zone",
+          x: bounds.left,
+          y: bounds.top,
+          width: bounds.width,
+          height: bounds.height,
+          rx: 5,
+          "data-zone": "debug-protected",
+          "data-observation-key": `${body.relation}:${body.observation_row}`,
+        }),
+      ];
+    });
+    this.protectedZoneCues.replaceChildren(
+      ...protectedZones,
+      ...observedProtectedZones,
+    );
 
     if (scene.audience !== "researcher") {
       return;
@@ -935,14 +1225,20 @@ export class BattlefieldRenderer {
       const group = svgElement("g", {
         class: "debug-visibility-cue",
         role: "img",
-        "aria-label": `Observer id_${fact.observer_global_slot} ${visible ? "can" : "cannot"} see id_${agent.globalSlot}`,
+        "aria-label": `${agentIdentity(this.agentByGlobalSlot.get(fact.observer_global_slot))} ${visible ? "can" : "cannot"} see ${agentIdentity(agent.agent)}`,
         "data-zone": "debug-visibility",
         "data-observer-slot": fact.observer_global_slot,
         "data-candidate-slot": agent.globalSlot,
         "data-visible": visible,
       });
       const radius = agent.radius + 16;
-      registerTooltipOwner(group, explainVisibility(fact));
+      registerTooltipOwner(
+        group,
+        explainVisibility(fact, {
+          observerAgent: this.agentByGlobalSlot.get(fact.observer_global_slot) ?? null,
+          candidateAgent: agent.agent,
+        }),
+      );
       group.append(
         svgElement("circle", {
           class: "debug-visibility-cue__ring",
@@ -1023,7 +1319,7 @@ export class BattlefieldRenderer {
     const group = svgElement("g", {
       class: "legality-dock",
       role: "group",
-      "aria-label": `Exact selected-target legality for id_${target.globalSlot}`,
+      "aria-label": `Exact selected-target legality for ${agentIdentity(target.agent)}`,
       "data-zone": "legality",
       "data-slot": target.globalSlot,
       "data-anchor": placement.anchor,
@@ -1064,7 +1360,7 @@ export class BattlefieldRenderer {
       const pill = svgElement("g", {
         class: "legality-pill",
         role: "img",
-        "aria-label": `${lane.name} lane ${lane.available ? "available" : "unavailable"}${armed ? `, armed and ${legality.armed_pair_legal ? "legal" : "illegal"}` : ""} for id_${target.globalSlot}`,
+        "aria-label": `${lane.name} lane ${lane.available ? "available" : "unavailable"}${armed ? `, armed and ${legality.armed_pair_legal ? "legal" : "illegal"}` : ""} for ${agentIdentity(target.agent)}`,
         "data-zone": "legality-pill",
         "data-lane": lane.lane,
         "data-available": lane.available,
@@ -1104,7 +1400,7 @@ export class BattlefieldRenderer {
    * @param {JsonRecord} scene
    * @param {ProjectedAgent[]} projectedAgents
    * @param {ViewportTransform} transform
-   * @param {{showLegality: boolean, showModifiers: boolean}} policy
+   * @param {{showLegality: boolean, showModifiers: boolean, audience: "researcher" | "agent_pov"}} policy
    */
   #renderStatusDocks(scene, projectedAgents, transform, policy) {
     const compactMinimumViewport =
@@ -1122,6 +1418,7 @@ export class BattlefieldRenderer {
         .map((agent) => ({
           layoutKey: `status:${agent.globalSlot}`,
           globalSlot: agent.globalSlot,
+          publicAgentId: agent.agent.public_agent_id,
           statuses: agent.statuses,
           dockOptions: {
             ...STATUS_DOCK_DIMENSIONS,
@@ -1145,10 +1442,12 @@ export class BattlefieldRenderer {
           {
             layoutKey: `cooldown:${agent.globalSlot}`,
             globalSlot: agent.globalSlot,
+            publicAgentId: agent.agent.public_agent_id,
             statuses: Object.freeze([
               Object.freeze({
                 classId: agent.agent.class_id,
                 ticks: Number(ticks),
+                publicAgentId: agent.agent.public_agent_id,
               }),
             ]),
             dockOptions: {
@@ -1248,14 +1547,8 @@ export class BattlefieldRenderer {
     const statusRects = statusLayout.docks.map(({ bounds }) => bounds);
     const cooldownRects = cooldownDocks.map(({ bounds }) => bounds);
     const compactRequiredRects = compactRequiredDocks.map(({ bounds }) => bounds);
-    const identityRects = this.#updateSelectedIdentityLayout(
-      projectedAgents,
-      statusLayout,
-      [...cooldownRects, ...compactRequiredRects],
-    );
     const legalityRects = policy.showLegality
       ? this.#renderSelectedLegality(scene, projectedAgents, transform, [
-          ...identityRects,
           ...statusRects,
           ...cooldownRects,
           ...compactRequiredRects,
@@ -1279,7 +1572,6 @@ export class BattlefieldRenderer {
             viewport: transform.viewportBounds,
             reservedRects: [
               ...statusLayout.protectedBodies.map(({ bounds }) => bounds),
-              ...identityRects,
               ...statusRects,
               ...cooldownRects,
               ...compactRequiredRects,
@@ -1296,16 +1588,26 @@ export class BattlefieldRenderer {
       : { docks: [], suppressedGlobalSlots: [] };
 
     const modifierNodes = modifierLayout.docks.map((placement) =>
-      this.#renderFactDock(placement, "modifier", MODIFIER_DOCK_DIMENSIONS),
+      this.#renderFactDock(
+        placement,
+        "modifier",
+        MODIFIER_DOCK_DIMENSIONS,
+        policy.audience,
+      ),
     );
     const statusNodes = statusLayout.docks.map((placement) =>
-      this.#renderFactDock(placement, "status", STATUS_DOCK_DIMENSIONS),
+      this.#renderFactDock(
+        placement,
+        "status",
+        STATUS_DOCK_DIMENSIONS,
+        policy.audience,
+      ),
     );
     const cooldownNodes = cooldownLayout.docks.map((placement) =>
       this.#renderCooldownDock(placement),
     );
     const compactRequiredNodes = compactRequiredDocks.map((placement) =>
-      this.#renderRequiredDockFallback(placement),
+      this.#renderRequiredDockFallback(placement, policy.audience),
     );
     this.layers.durableStatusModifier.dataset.suppressedStatusSlots =
       statusLayout.suppressedGlobalSlots.join(",");
@@ -1338,7 +1640,6 @@ export class BattlefieldRenderer {
       base: Object.freeze(
         [
           ...statusLayout.protectedBodies.map(({ bounds }) => bounds),
-          ...identityRects,
           ...cooldownRects,
           ...compactRequiredCooldownRects,
           ...modifierLayout.docks.map(({ bounds }) => bounds),
@@ -1423,56 +1724,16 @@ export class BattlefieldRenderer {
   }
 
   /**
-   * Keep a selected battlefield ID tag only when its compact fixed cue does
-   * not collide with higher-priority status truth or any protected body.
-   * The keyed roster remains the always-visible exact identity source.
-   *
-   * @param {ProjectedAgent[]} projectedAgents
-   * @param {ReturnType<typeof layoutStatusDocks>} statusLayout
-   * @param {Rectangle[]} reservedRects
-   * @returns {Rectangle[]}
-   */
-  #updateSelectedIdentityLayout(projectedAgents, statusLayout, reservedRects) {
-    for (const nodes of this.agentNodes.values()) {
-      nodes.idTag.dataset.layoutSuppressed = "false";
-    }
-    /** @type {Rectangle[]} */
-    const visibleBounds = [];
-    for (const agent of projectedAgents.filter(({ selected }) => selected)) {
-      const bounds = rectangle(
-        agent.center.x + agent.radius * 0.45,
-        agent.center.y - agent.radius - 23,
-        44,
-        18,
-      );
-      const collision = [
-        ...statusLayout.docks.map(({ bounds: dockBounds }) => dockBounds),
-        ...reservedRects,
-        ...statusLayout.protectedBodies
-          .filter(({ globalSlot }) => globalSlot !== agent.globalSlot)
-          .map(({ bounds: bodyBounds }) => bodyBounds),
-      ].some((other) => rectanglesIntersect(bounds, other));
-      const nodes = this.agentNodes.get(agent.globalSlot);
-      if (nodes) {
-        nodes.idTag.dataset.layoutSuppressed = String(collision);
-      }
-      if (!collision) {
-        visibleBounds.push(bounds);
-      }
-    }
-    return visibleBounds;
-  }
-
-  /**
    * Render one compact, explicitly associated marker when a complete required
    * dock cannot fit. The marker never discards the authoritative payload:
    * status fallbacks expose every item through the shared overflow explanation,
    * while cooldown fallbacks retain the exact tick count.
    *
    * @param {ReturnType<typeof layoutRequiredDocks>["docks"][number]} placement
+   * @param {"researcher" | "agent_pov"} audience
    * @returns {SVGElement}
    */
-  #renderRequiredDockFallback(placement) {
+  #renderRequiredDockFallback(placement, audience) {
     const isCooldown = placement.layoutKey.startsWith("cooldown:");
     const kind = isCooldown ? "cooldown" : "status";
     const rawItems = placement.hiddenStatuses;
@@ -1481,13 +1742,23 @@ export class BattlefieldRenderer {
       isCooldown && Number.isInteger(firstItem.ticks) && firstItem.ticks > 0
         ? Number(firstItem.ticks)
         : null;
+    const ownerAgent = this.agentByGlobalSlot.get(placement.globalSlot) ?? {};
     const explanation = isCooldown
-      ? explainCooldown({
-          global_slot: placement.globalSlot,
-          class_id: firstItem.classId,
-          ultimate_cooldown: ticks,
-        })
-      : explainOverflow(rawItems, "status", placement.globalSlot);
+      ? explainCooldown(
+          {
+            global_slot: placement.globalSlot,
+            public_agent_id: ownerAgent.public_agent_id,
+            class_id: firstItem.classId,
+            ultimate_cooldown: ticks,
+          },
+          ownerAgent,
+          this.classMechanicsById.get(firstItem.classId) ?? null,
+        )
+      : audience === "agent_pov"
+        ? explainPovOverflow(rawItems, ownerAgent)
+        : explainOverflow(rawItems, "status", ownerAgent, [
+            ...this.agentByGlobalSlot.values(),
+          ]);
     const valueLabel = isCooldown ? `U${ticks ?? "?"}` : `S${placement.hiddenCount}`;
     const group = svgElement("g", {
       class: "required-dock-fallback-dock",
@@ -1512,7 +1783,9 @@ export class BattlefieldRenderer {
       class: "required-dock-fallback",
       role: "img",
       tabindex: "0",
-      "aria-label": `${explanation.title}. ${explanation.details.join(". ")}`,
+      "aria-label": `${explanation.title}. ${explanation.summary}. ${explanation.rows
+        .map((row) => `${row.label}: ${row.value}`)
+        .join(". ")}`,
       "data-zone": isCooldown ? "ultimate-cooldown" : "status-overflow",
       "data-slot": placement.globalSlot,
       "data-layout-key": placement.layoutKey,
@@ -1520,7 +1793,7 @@ export class BattlefieldRenderer {
       "data-hidden-count": placement.hiddenCount,
       "data-ticks": ticks,
       "data-compact-fallback": "true",
-      "data-owner-label": `id_${placement.globalSlot}`,
+      "data-owner-label": agentIdentity(ownerAgent),
     });
     if (isCooldown) {
       cell.dataset.class = classTokenFromId(firstItem.classId).cssKey;
@@ -1536,7 +1809,7 @@ export class BattlefieldRenderer {
       x: placement.bounds.left + placement.bounds.width / 2,
       dy: "-0.34em",
     });
-    ownerLine.textContent = `id_${placement.globalSlot}`;
+    ownerLine.textContent = agentIdentity(ownerAgent);
     const valueLine = svgElement("tspan", {
       class: "required-dock-fallback__value",
       x: placement.bounds.left + placement.bounds.width / 2,
@@ -1576,6 +1849,7 @@ export class BattlefieldRenderer {
       Number.isInteger(item.ticks) && item.ticks > 0 ? Number(item.ticks) : "?";
     const classToken = classTokenFromId(item.classId);
     const token = ultimateTokenFromClassId(item.classId);
+    const ownerAgent = this.agentByGlobalSlot.get(placement.globalSlot) ?? {};
     const group = svgElement("g", {
       class: "cooldown-dock",
       "data-zone": "cooldown-dock",
@@ -1609,7 +1883,7 @@ export class BattlefieldRenderer {
     const cell = svgElement("g", {
       class: "cooldown-cell",
       role: "img",
-      "aria-label": `${token.accessibleName} cooldown, ${accessibleTicks}, id_${placement.globalSlot}`,
+      "aria-label": `${token.accessibleName} cooldown, ${accessibleTicks}, ${agentIdentity(ownerAgent)}`,
       "data-zone": "ultimate-cooldown",
       "data-slot": placement.globalSlot,
       "data-class": classToken.cssKey,
@@ -1659,11 +1933,16 @@ export class BattlefieldRenderer {
     value.textContent = String(ticks);
     registerTooltipOwner(
       cell,
-      explainCooldown({
-        global_slot: placement.globalSlot,
-        class_id: item.classId,
-        ultimate_cooldown: ticks,
-      }),
+      explainCooldown(
+        {
+          global_slot: placement.globalSlot,
+          public_agent_id: ownerAgent.public_agent_id,
+          class_id: item.classId,
+          ultimate_cooldown: ticks,
+        },
+        ownerAgent,
+        this.classMechanicsById.get(item.classId) ?? null,
+      ),
     );
     cell.append(box, iconCompartment, valueCompartment, icon, value);
     group.append(cell);
@@ -1674,9 +1953,11 @@ export class BattlefieldRenderer {
    * @param {ReturnType<typeof layoutStatusDocks>["docks"][number]} placement
    * @param {"status" | "modifier"} kind
    * @param {{cellWidth: number, cellHeight: number, cellGap: number}} dimensions
+   * @param {"researcher" | "agent_pov"} audience
    * @returns {SVGElement}
    */
-  #renderFactDock(placement, kind, dimensions) {
+  #renderFactDock(placement, kind, dimensions, audience) {
+    const ownerAgent = this.agentByGlobalSlot.get(placement.globalSlot) ?? {};
     const group = svgElement("g", {
       class: `${kind}-dock`,
       "data-zone": `${kind}-dock`,
@@ -1706,7 +1987,11 @@ export class BattlefieldRenderer {
 
     for (const [index, rawItem] of placement.visibleStatuses.entries()) {
       const item = isRecord(rawItem) ? rawItem : {};
-      const token = resolveVisualToken(kind, item.token_id, item);
+      const token = resolveVisualToken(
+        kind,
+        item.token_id,
+        audience === "agent_pov" && kind === "status" ? undefined : item,
+      );
       const column = index % placement.columns;
       const row = Math.floor(index / placement.columns);
       const x =
@@ -1737,7 +2022,7 @@ export class BattlefieldRenderer {
       const cell = svgElement("g", {
         class: `${kind}-cell`,
         role: "img",
-        "aria-label": `${token.accessibleName}, ${accessibleValue}, id_${placement.globalSlot}`,
+        "aria-label": `${token.accessibleName}, ${accessibleValue}, ${agentIdentity(ownerAgent)}${audience === "agent_pov" && kind === "status" ? "; source agent identity is not disclosed" : ""}`,
         "data-zone": `${kind}-cell`,
         "data-slot": placement.globalSlot,
         "data-token": token.cssKey,
@@ -1803,8 +2088,10 @@ export class BattlefieldRenderer {
       registerTooltipOwner(
         cell,
         kind === "status"
-          ? explainStatus(item, placement.globalSlot)
-          : explainModifier(item, placement.globalSlot),
+          ? audience === "agent_pov"
+            ? explainPovStatus(item, ownerAgent)
+            : explainStatus(item, ownerAgent, [...this.agentByGlobalSlot.values()])
+          : explainModifier(item, ownerAgent),
       );
       cell.append(box, ...compartments, icon, text);
       group.append(cell);
@@ -1820,7 +2107,11 @@ export class BattlefieldRenderer {
         placement.bounds.top + row * (dimensions.cellHeight + dimensions.cellGap);
       const hiddenLabels = placement.hiddenStatuses.map((rawItem) => {
         const item = isRecord(rawItem) ? rawItem : {};
-        const token = resolveVisualToken(kind, item.token_id, item);
+        const token = resolveVisualToken(
+          kind,
+          item.token_id,
+          audience === "agent_pov" && kind === "status" ? undefined : item,
+        );
         return kind === "status"
           ? `${token.accessibleName}, duration ${item.duration ?? "unknown"}`
           : `${token.accessibleName}, multiplier ${formatDisplayNumber(item.multiplier)}`;
@@ -1828,15 +2119,19 @@ export class BattlefieldRenderer {
       const overflow = svgElement("g", {
         class: `${kind}-overflow`,
         role: "img",
-        "aria-label": `${placement.overflowLabel} hidden ${kind} cues for id_${placement.globalSlot}: ${hiddenLabels.join("; ")}`,
+        "aria-label": `${placement.overflowLabel} hidden ${kind} cues for ${agentIdentity(ownerAgent)}: ${hiddenLabels.join("; ")}${audience === "agent_pov" && kind === "status" ? "; source agent identity is not disclosed" : ""}`,
         "data-zone": `${kind}-overflow`,
         "data-slot": placement.globalSlot,
         "data-hidden-count": placement.hiddenCount,
-        "data-owner-label": `id_${placement.globalSlot}`,
+        "data-owner-label": agentIdentity(ownerAgent),
       });
       registerTooltipOwner(
         overflow,
-        explainOverflow(placement.hiddenStatuses, kind, placement.globalSlot),
+        audience === "agent_pov" && kind === "status"
+          ? explainPovOverflow(placement.hiddenStatuses, ownerAgent)
+          : explainOverflow(placement.hiddenStatuses, kind, ownerAgent, [
+              ...this.agentByGlobalSlot.values(),
+            ]),
       );
       const overflowLabel = svgElement("text", {
         class: `${kind}-overflow__label`,
@@ -1849,7 +2144,7 @@ export class BattlefieldRenderer {
           x: x + dimensions.cellWidth / 2,
           dy: "-0.34em",
         });
-        ownerLine.textContent = `id_${placement.globalSlot}`;
+        ownerLine.textContent = agentIdentity(ownerAgent);
         const countLine = svgElement("tspan", {
           class: "status-overflow__count",
           x: x + dimensions.cellWidth / 2,
@@ -1917,17 +2212,6 @@ export class BattlefieldRenderer {
       class: "agent-dead-mark",
       "aria-hidden": "true",
     });
-    const idTag = svgElement("g", {
-      class: "agent-id-tag",
-      "data-zone": "identity",
-      "aria-hidden": "true",
-    });
-    const idTagBox = svgElement("rect", {
-      class: "agent-id-tag-box",
-      rx: 5,
-    });
-    const idTagLabel = svgElement("text", { class: "agent-id-tag-label" });
-    idTag.append(idTagBox, idTagLabel);
     root.append(
       body,
       teamRing,
@@ -1937,7 +2221,6 @@ export class BattlefieldRenderer {
       classIcon,
       classLetter,
       deadMark,
-      idTag,
     );
 
     const selectionRoot = svgElement("g", {
@@ -1962,9 +2245,6 @@ export class BattlefieldRenderer {
       health,
       classIcon,
       classLetter,
-      idTag,
-      idTagBox,
-      idTagLabel,
       deadMark,
       selectionRoot,
       controlledHalo,
@@ -2001,7 +2281,7 @@ export class BattlefieldRenderer {
     nodes.root.setAttribute(
       "aria-label",
       [
-        `id_${agent.global_slot}`,
+        `Agent ID ${agent.public_agent_id}`,
         classToken.label,
         teamToken.label,
         `health ${formatDisplayNumber(agent.current_health)} of ${formatDisplayNumber(agent.max_health)}`,
@@ -2065,23 +2345,6 @@ export class BattlefieldRenderer {
       y: center.y + Math.min(radius * 0.5, 11) + 2,
     });
     nodes.classLetter.textContent = classToken.fallback;
-
-    const tagWidth = 44;
-    const tagHeight = 18;
-    const tagX = center.x + radius * 0.45;
-    const tagY = center.y - radius - tagHeight - 5;
-    setAttributes(nodes.idTagBox, {
-      x: tagX,
-      y: tagY,
-      width: tagWidth,
-      height: tagHeight,
-      rx: 5,
-    });
-    setAttributes(nodes.idTagLabel, {
-      x: tagX + tagWidth / 2,
-      y: tagY + tagHeight / 2,
-    });
-    nodes.idTagLabel.textContent = `id_${agent.global_slot}`;
 
     const deadOffset = radius * 0.45;
     setAttributes(nodes.deadMark, {

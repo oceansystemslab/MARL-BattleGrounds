@@ -419,3 +419,68 @@ according to its resolved class profile when the countdown permits it.
 Movement is not itself a regeneration blocker. The authoritative transition
 facts preserve countdown resets and actual realized regeneration rather than a
 cumulative recovery metric.
+
+## A10. Standard semantic replay ownership
+
+**Classification:** required artifact-boundary clarification.
+**Supersedes:** any historical wording that treats a raw simulator state,
+renderer frame, or debugger session as the durable replay authority.
+
+Milestone 6 version-1 replay stores the accepted evaluation context once plus
+exactly `T + 1` semantic frames and `T` adjacent transitions, rollout
+completion, independent evaluation-processing status, and a path-free
+content-addressed metric-report reference. It does not store `EnvState`, policy
+state, renderer summaries, local paths, or browser/session authority.
+
+The episode context keeps exactly its eight CP2 schema bindings. The closed
+replay/metric-report envelope has a separate exact binding map in the replay
+header. Downstream scenario and actor-POV companions self-version and carry a
+typed replay reference; their schemas are not retroactively inserted into the
+replay header. A pre-link trajectory-content digest covers the header,
+completion, processing status, frames, and transitions while excluding the
+report reference and replay-level digests. The report artifact references that
+pre-link content; the completed replay references the report artifact; later
+scenario and actor-POV artifacts reference the completed replay. This one-way
+graph prevents content-hash cycles.
+
+Replay validity requires an explicit O(T) semantic pass using the public
+initial-frame and four-record validators. Direct Pydantic revalidation proves
+structure only. Offline analysis and presentation may consume only serialized
+catalog mappings and captured semantic records; they never rerun a simulator
+or recreate mechanics.
+
+Canonical V1 persistence is finite local UTF-8 JSON with exact canonical-byte
+equality after strict model and whole-replay validation. It rejects symlinks,
+nonregular files, duplicate keys, non-finite or oversized/deep inputs, unknown
+versions, and mismatched content references. Publication is atomic and
+no-clobber: the metric-report object is durable before the referencing replay,
+an existing report is reused only when bytes are identical, and replay targets
+are never overwritten. The host loader owns frozen V1 wire dimensions and must
+not import or initialize JAX, a backend, simulator, policy, or capture path.
+The V1 filesystem backend fails closed unless POSIX directory-descriptor and
+no-follow operations can prevent ancestor-symlink races; report reuse
+synchronizes the exact compared file descriptor before a referencing replay is
+published.
+
+Scenario and actor-POV companions use the same bounded canonical JSON and
+descriptor-bound, no-clobber publication contract. Scenario records are valid
+only against their referenced replay and metric-report evidence. Exact
+NoSharedObs POV exports use recipient-sliced schemas and keep submitted int32
+intent distinct from category-bounded accepted actions. Their privacy claim is
+defined over the recipient-content bytes; the outer artifact retains a truthful
+completed-replay reference and may therefore differ when hidden source truth
+differs.
+
+Exact materialized SharedObs export remains unavailable until the Milestone 12
+compositor exists. Milestone 6 may instead project a prominently labelled
+`source_material_only` view containing the selected recipient's recorded base
+sensor row and the recorded recipient-by-source availability inputs. That view
+is not an actor-input artifact and may never be described as the composed
+SharedObs tensor.
+
+Offline presentation consumes these canonical records through a pure,
+renderer-neutral scene projection. It may expose recorded durable state,
+catalog mechanics, actor-relative mappings, and direct event evidence, but it
+must not call simulator, geometry, visibility, masking, policy, or mechanic
+helpers. Researcher and actor-authorized presentation roots remain
+structurally distinct.

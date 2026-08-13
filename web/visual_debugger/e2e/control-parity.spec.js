@@ -1,7 +1,10 @@
 import { expect, test } from "@playwright/test";
 
 import { startDebugger, stopDebugger } from "./support/live-debugger.js";
-import { waitForStablePresentation } from "./support/visual-regression.js";
+import {
+  DENSE_BASELINE_MAX_DIFF_PIXEL_RATIO,
+  waitForStablePresentation,
+} from "./support/visual-regression.js";
 
 /** @type {import("node:child_process").ChildProcess | null} */
 let serverProcess = null;
@@ -33,6 +36,54 @@ async function currentRevision(page) {
  */
 async function currentStep(page) {
   return Number(await page.locator("#step-value").textContent());
+}
+
+/**
+ * Read the authenticated V2 wire frame used by the browser tab.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @returns {Promise<Record<string, any>>}
+ */
+async function currentWireFrame(page) {
+  return page.evaluate(async () => {
+    const token = window.sessionStorage.getItem("marl-battlegrounds.debugger-token");
+    if (!token) {
+      throw new Error("Debugger capability token is unavailable.");
+    }
+    const response = await fetch("/api/frame", {
+      cache: "no-store",
+      credentials: "omit",
+      headers: { "X-MARL-Debugger-Token": token },
+      redirect: "error",
+    });
+    if (!response.ok) {
+      throw new Error(`Frame request failed with HTTP ${response.status}.`);
+    }
+    return response.json();
+  });
+}
+
+/**
+ * Assert the full V2 transition identity rendered for the current researcher frame.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @param {number} transitionIndex
+ * @returns {Promise<string>}
+ */
+async function expectCurrentResearcherTransition(page, transitionIndex) {
+  const frame = await currentWireFrame(page);
+  expect(frame).toMatchObject({
+    schema_version: 2,
+    frame_kind: "researcher_live_debugger",
+    incoming_transition_index: transitionIndex,
+  });
+  const transitionId = `${frame.episode_id}:transition:${transitionIndex}`;
+  expect(frame.incoming_transition_id).toBe(transitionId);
+  expect(frame.projection.scene.incoming_transition_id).toBe(transitionId);
+  expect(frame.projection.incoming_events.transition_id).toBe(transitionId);
+  expect(frame.hud.latest_transition.transition_id).toBe(transitionId);
+  await expect(page.locator("#transition-value")).toHaveText(transitionId);
+  return transitionId;
 }
 
 test("battlefield commands preserve UI and simulator revision boundaries", async ({
@@ -153,12 +204,13 @@ test("battlefield commands preserve UI and simulator revision boundaries", async
     timeout: 120_000,
   });
   await expect(page.locator("#step-value")).toHaveText("1");
-  await expect(page.locator("#transition-value")).toHaveText("1");
+  const transitionId = await expectCurrentResearcherTransition(page, 0);
 
   await page.reload();
   await expect(page.locator("#connection-status")).toHaveText("Online");
   await expect(page.locator("#revision-value")).toHaveText("2");
   await expect(page.locator("#step-value")).toHaveText("1");
+  await expect(page.locator("#transition-value")).toHaveText(transitionId);
   expect(page.url()).not.toContain("token=");
 });
 
@@ -169,7 +221,7 @@ test("pointer, roster, toolbar, and command-deck controls use the live service",
   await expect(page.locator("#connection-status")).toHaveText("Online");
   let revision = await currentRevision(page);
 
-  const targetButton = page.getByRole("button", { name: "Target id_6" });
+  const targetButton = page.getByRole("button", { name: "Target Agent ID 6" });
   await expect(targetButton).toBeVisible();
   await targetButton.evaluate((element) => {
     element.setAttribute("data-retained-probe", "target-6");
@@ -182,15 +234,17 @@ test("pointer, roster, toolbar, and command-deck controls use the live service",
   await expect(targetButton).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator('.roster-row[data-selected="true"]')).toHaveAttribute(
     "aria-label",
-    /^Agent id_6,/,
+    /^Agent ID 6,/,
   );
   await expect(page.locator("#battlefield .legality-pill")).toHaveCount(2);
   await expect(page.locator('#battlefield .legality-dock[data-slot="6"]')).toHaveCount(
     1,
   );
-  await expect(
-    page.locator('#battlefield .agent[data-slot="6"] .agent-id-tag'),
-  ).toHaveCSS("opacity", "1");
+  await expect(page.locator("#battlefield .agent-id-tag")).toHaveCount(0);
+  await expect(page.locator('#battlefield .agent[data-slot="6"]')).toHaveAttribute(
+    "aria-label",
+    /Agent ID 6/,
+  );
   await expect(page.locator(".candidate-legality-row")).toHaveCount(0);
   await expect(page.locator("#diagnostics-card")).not.toContainText(
     "candidate_legalities",
@@ -211,31 +265,54 @@ test("pointer, roster, toolbar, and command-deck controls use the live service",
   await expect(page.locator("#view-select")).toHaveValue("pov");
   await expect(page.locator("html")).toHaveAttribute("data-audience", "agent_pov");
   await expect(page.locator("#battlefield .debug-visibility-cue")).toHaveCount(0);
+  const povFrame = await currentWireFrame(page);
+  expect(povFrame).toMatchObject({
+    schema_version: 2,
+    frame_kind: "actor_pov_live_debugger",
+    view_mode: "pov",
+  });
   const povRosterSlots = await page
     .locator("#roster .roster-row")
     .evaluateAll((rows) =>
       rows.map((row) => Number(row.getAttribute("data-slot"))).sort((a, b) => a - b),
     );
+  expect(povRosterSlots).toEqual([povFrame.projection.scene.self_actor.global_slot]);
   const povCandidateRows = await page
     .locator(".candidate-legality-row")
     .evaluateAll((rows) =>
       rows.map((row) => ({
         targetAction: Number(row.getAttribute("data-target-action")),
-        targetSlot: row.hasAttribute("data-target-slot")
-          ? Number(row.getAttribute("data-target-slot"))
-          : null,
+        targetLabel:
+          row.querySelector(".candidate-legality-row__target")?.textContent ?? "",
+        hasTargetSlot: row.hasAttribute("data-target-slot"),
+        lane0Available: row.getAttribute("data-lane0-available"),
+        lane1Available: row.getAttribute("data-lane1-available"),
+        basicAvailable: row.getAttribute("data-basic-available"),
+        ultimateAvailable: row.getAttribute("data-ultimate-available"),
       })),
     );
-  expect(povCandidateRows).toHaveLength(povRosterSlots.length + 1);
-  expect(
-    povCandidateRows
-      .map(({ targetSlot }) => targetSlot)
-      .filter((slot) => slot !== null)
-      .sort((a, b) => Number(a) - Number(b)),
-  ).toEqual(povRosterSlots);
-  expect(
-    povCandidateRows.filter(({ targetAction }) => targetAction === 0),
-  ).toHaveLength(1);
+  expect(povCandidateRows).toEqual(
+    povFrame.hud.candidate_legalities.map(
+      /** @param {Record<string, any>} candidate */ (candidate) => {
+        const targetAction = candidate.target.target_action;
+        const publicAgentId = candidate.target.public_agent_id;
+        return {
+          targetAction,
+          targetLabel:
+            targetAction === 0
+              ? "target-none"
+              : typeof publicAgentId === "string"
+                ? `Agent ID ${publicAgentId} (action ${targetAction})`
+                : "undisclosed",
+          hasTargetSlot: false,
+          lane0Available: String(candidate.lane_0_available),
+          lane1Available: String(candidate.lane_1_available),
+          basicAvailable: String(candidate.basic_available),
+          ultimateAvailable: String(candidate.ultimate_available),
+        };
+      },
+    ),
+  );
   expect(povRosterSlots).not.toContain(5);
   await expect(
     page.locator('.candidate-legality-row[data-target-slot="5"]'),
@@ -246,7 +323,7 @@ test("pointer, roster, toolbar, and command-deck controls use the live service",
   await expect(page.locator("#revision-value")).toHaveText(String(revision));
   await expect(page.locator("#view-select")).toHaveValue("researcher");
 
-  const controlButton = page.getByRole("button", { name: "Control id_1" });
+  const controlButton = page.getByRole("button", { name: "Control Agent ID 1" });
   await controlButton.evaluate((element) => {
     element.setAttribute("data-retained-probe", "control-1");
   });
@@ -258,7 +335,7 @@ test("pointer, roster, toolbar, and command-deck controls use the live service",
   await expect(controlButton).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator('.roster-row[data-controlled="true"]')).toHaveAttribute(
     "aria-label",
-    /^Agent id_1,/,
+    /^Agent ID 1,/,
   );
 
   await page.setViewportSize({ width: 960, height: 600 });
@@ -269,7 +346,7 @@ test("pointer, roster, toolbar, and command-deck controls use the live service",
   await expect(page.locator("#revision-value")).toHaveText(String(revision));
   await expect(page.locator('.roster-row[data-controlled="true"]')).toHaveAttribute(
     "aria-label",
-    /^Agent id_2,/,
+    /^Agent ID 2,/,
   );
 
   await page.locator('#battlefield .agent[data-slot="7"] .agent-body').click();
@@ -277,7 +354,7 @@ test("pointer, roster, toolbar, and command-deck controls use the live service",
   await expect(page.locator("#revision-value")).toHaveText(String(revision));
   await expect(page.locator('.roster-row[data-selected="true"]')).toHaveAttribute(
     "aria-label",
-    /^Agent id_7,/,
+    /^Agent ID 7,/,
   );
   await expect(page.locator("#battlefield .legality-pill")).toHaveCount(2);
   await expect(page.locator('#battlefield .legality-dock[data-slot="7"]')).toHaveCount(
@@ -324,10 +401,10 @@ test("command composer keeps the exact controlled actor visible at both viewport
           requestAnimationFrame(() => requestAnimationFrame(resolve));
         }),
     );
-    await expect(controlledActor).toHaveText(`Actor · id_${slot}`);
+    await expect(controlledActor).toHaveText(`Actor · Agent ID ${slot}`);
     await expect(controlledActor).toHaveAttribute(
       "aria-label",
-      `Controlled actor id_${slot}`,
+      `Controlled actor Agent ID ${slot}`,
     );
     await expect(controlledActor).toHaveAttribute("data-controlled-slot", String(slot));
     await expect(controlledActor).toBeVisible();
@@ -357,13 +434,13 @@ test("command composer keeps the exact controlled actor visible at both viewport
   };
 
   await assertComposerIdentity({ width: 1440, height: 900 }, 0);
-  await page.getByRole("button", { name: "Control id_1" }).click();
-  await expect(controlledActor).toHaveText("Actor · id_1");
+  await page.getByRole("button", { name: "Control Agent ID 1" }).click();
+  await expect(controlledActor).toHaveText("Actor · Agent ID 1");
   await assertComposerIdentity({ width: 960, height: 600 }, 1);
   await page
     .locator('#battlefield .agent[data-slot="2"] .agent-body')
     .click({ modifiers: ["Shift"] });
-  await expect(controlledActor).toHaveText("Actor · id_2");
+  await expect(controlledActor).toHaveText("Actor · Agent ID 2");
 });
 
 test("movement scale previews locally and resets one authoritative epoch on commit", async ({
@@ -384,7 +461,7 @@ test("movement scale previews locally and resets one authoritative epoch on comm
   }
   const controlledActor = page.locator("#command-controlled-actor");
   if ((await controlledActor.getAttribute("data-controlled-slot")) !== "0") {
-    await page.getByRole("button", { name: "Control id_0" }).click();
+    await page.getByRole("button", { name: "Control Agent ID 0" }).click();
     revision += 1;
     await expect(page.locator("#revision-value")).toHaveText(String(revision));
     await expect(controlledActor).toHaveAttribute("data-controlled-slot", "0");
@@ -475,6 +552,23 @@ test("movement scale previews locally and resets one authoritative epoch on comm
   await expect(page.locator(".movement-scale-control")).toHaveScreenshot(
     "movement-scale-default-restored-960x600.png",
   );
+
+  // Exercise the original-JSON boundary at the upper slider endpoint. The
+  // browser sends JSON number 1 (not Python float syntax), and the strict
+  // request model must accept it without a resync failure.
+  await scaleInput.press("ArrowLeft");
+  revision += 1;
+  await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  await expect(page.locator("#movement-scale-value")).toHaveText("0.99");
+  expect(movementScaleCommands).toBe(4);
+
+  await scaleInput.press("End");
+  revision += 1;
+  await expect(page.locator("#revision-value")).toHaveText(String(revision));
+  await expect(page.locator("#movement-scale-value")).toHaveText("1.00");
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await expect(page.locator("#notice")).not.toContainText("Resync required");
+  expect(movementScaleCommands).toBe(5);
   await page.unroute("**/api/command");
 });
 
@@ -555,7 +649,7 @@ test("joint turn drafts survive actor cycling and submit exactly once", async ({
   await page.locator("#basic-button").hover();
   await page.locator("#basic-button").dispatchEvent("click");
   await expect(page.locator("#notice")).toContainText(
-    "Basic is unavailable for the currently staged target.",
+    "Basic ability is not available this tick.",
   );
   await expect(page.locator("#revision-value")).toHaveText(String(revision));
   await battlefield.focus();
@@ -599,12 +693,18 @@ test("joint turn drafts survive actor cycling and submit exactly once", async ({
   await expect(actor0).toHaveAttribute("data-controlled", "true");
   await expect(actor0).toHaveAttribute("data-move-action", "3");
   await expect(actor0).toHaveAttribute("data-target-slot", "6");
+  await expect(actor0.locator(".pending-action-row__facts")).toContainText(
+    "Target · Agent ID 6 (action 7)",
+  );
   await expect(actor1).toHaveAttribute("data-controlled", "false");
   await expect(actor1).toHaveAttribute("data-move-action", "1");
   await expect(actor1).toHaveAttribute("data-target-slot", "5");
+  await expect(actor1.locator(".pending-action-row__facts")).toContainText(
+    "Target · Agent ID 5 (action 6)",
+  );
 
   for (let actorSlot = 2; actorSlot < 10; actorSlot += 1) {
-    await page.getByRole("button", { name: `Control id_${actorSlot}` }).click();
+    await page.getByRole("button", { name: `Control Agent ID ${actorSlot}` }).click();
     revision += 1;
     await expect(page.locator("#revision-value")).toHaveText(String(revision));
     const movementName = actorSlot < 5 ? "Move east" : "Move west";
@@ -618,7 +718,7 @@ test("joint turn drafts survive actor cycling and submit exactly once", async ({
     ).toHaveAttribute("data-move-action", actorSlot < 5 ? "3" : "4");
   }
 
-  await page.getByRole("button", { name: "Control id_0" }).click();
+  await page.getByRole("button", { name: "Control Agent ID 0" }).click();
   revision += 1;
   await expect(page.locator("#revision-value")).toHaveText(String(revision));
   await expect(page.getByRole("button", { name: "Move east" })).toHaveAttribute(
@@ -630,12 +730,45 @@ test("joint turn drafts survive actor cycling and submit exactly once", async ({
     "aria-pressed",
     "true",
   );
-  const stagedMoves = await page
+  const stagedInventory = await page
     .locator(".pending-action-row")
     .evaluateAll((rows) =>
-      rows.map((row) => Number(row.getAttribute("data-move-action"))),
+      rows.map((row) => ({
+        actorSlot: Number(row.getAttribute("data-actor-slot")),
+        armedLane: row.getAttribute("data-armed-lane"),
+        controlled: row.getAttribute("data-controlled"),
+        moveAction: Number(row.getAttribute("data-move-action")),
+        targetSlot: row.hasAttribute("data-target-slot")
+          ? Number(row.getAttribute("data-target-slot"))
+          : null,
+        facts: [...row.querySelectorAll(".pending-action-chip")].map(
+          (chip) => chip.textContent,
+        ),
+      })),
     );
-  expect(stagedMoves).toEqual([3, 1, 3, 3, 3, 4, 4, 4, 4, 4]);
+  const stagedMoveActions = [3, 1, 3, 3, 3, 4, 4, 4, 4, 4];
+  expect(stagedInventory).toEqual(
+    stagedMoveActions.map((moveAction, actorSlot) => {
+      const targetSlot = actorSlot === 0 ? 6 : actorSlot === 1 ? 5 : null;
+      const targetAction = targetSlot === null ? 0 : targetSlot + 1;
+      const movement = moveAction === 1 ? "North" : moveAction === 3 ? "East" : "West";
+      return {
+        actorSlot,
+        armedLane: actorSlot < 2 ? null : "0",
+        controlled: String(actorSlot === 0),
+        moveAction,
+        targetSlot,
+        facts: [
+          `Movement · ${movement} (${moveAction}) · Available`,
+          targetSlot === null
+            ? "Target · None"
+            : `Target · Agent ID ${targetSlot} (action ${targetAction})`,
+          "Action · No combat",
+          "Legality · Not applicable",
+        ],
+      };
+    }),
+  );
   // The ten exact pending rows exceed the supported viewport height. Move the
   // real authoritative card—not a reconstructed copy—into a labelled, tall
   // review host so every staged tuple is visible in one evidence artifact.
@@ -668,6 +801,7 @@ test("joint turn drafts survive actor cycling and submit exactly once", async ({
   await waitForStablePresentation(page);
   await expect(page.locator("#joint-turn-evidence")).toHaveScreenshot(
     "joint-turn-ten-agent-pending-inventory-1440x1600.png",
+    { maxDiffPixelRatio: DENSE_BASELINE_MAX_DIFF_PIXEL_RATIO },
   );
   await page.evaluate(() => {
     const card = document.querySelector("#pending-card");
@@ -702,9 +836,7 @@ test("joint turn drafts survive actor cycling and submit exactly once", async ({
     { timeout: 120_000 },
   );
   await expect(page.locator("#step-value")).toHaveText(String(beforeSubmitStep + 1));
-  await expect(page.locator("#transition-value")).toHaveText(
-    String(beforeSubmitStep + 1),
-  );
+  const transitionId = await expectCurrentResearcherTransition(page, beforeSubmitStep);
   await expect(page.locator("#accepted-card .action-result")).toHaveCount(10);
   await expect.poll(() => enterCommands).toBe(1);
 
@@ -714,6 +846,7 @@ test("joint turn drafts survive actor cycling and submit exactly once", async ({
     String(beforeSubmitRevision + 1),
   );
   await expect(page.locator("#step-value")).toHaveText(String(beforeSubmitStep + 1));
+  await expect(page.locator("#transition-value")).toHaveText(transitionId);
   await page.unroute("**/api/command");
 
   await page.setViewportSize({ width: 960, height: 600 });
@@ -792,24 +925,57 @@ test("a stale tab adopts the latest frame without replaying its command", async 
   const baseRevision = await currentRevision(page);
   await expect(stalePage.locator("#revision-value")).toHaveText(String(baseRevision));
 
-  await page.getByRole("button", { name: "Ranges" }).click();
-  await expect(page.locator("#revision-value")).toHaveText(String(baseRevision + 1));
+  const ranges = page.locator("#live-ranges-button");
+  const staleRanges = stalePage.locator("#live-ranges-button");
+  const verbosity = stalePage.locator("#live-verbosity-button");
+  const initialRangesPressed = await ranges.getAttribute("aria-pressed");
+  const initialVerbosityPressed = await verbosity.getAttribute("aria-pressed");
+  expect(["true", "false"]).toContain(initialRangesPressed);
+  expect(["true", "false"]).toContain(initialVerbosityPressed);
+  if (initialRangesPressed === null || initialVerbosityPressed === null) {
+    throw new Error("Live toggle controls did not publish pressed state.");
+  }
 
-  await stalePage.getByRole("button", { name: "Verbosity" }).click();
+  await ranges.click();
+  await expect(page.locator("#revision-value")).toHaveText(String(baseRevision + 1));
+  await expect(ranges).toHaveAttribute(
+    "aria-pressed",
+    initialRangesPressed === "true" ? "false" : "true",
+  );
+  await expect(staleRanges).toHaveAttribute("aria-pressed", initialRangesPressed);
+
+  await verbosity.click();
   await expect(stalePage.locator("#revision-value")).toHaveText(
     String(baseRevision + 1),
   );
   await expect(stalePage.locator("#notice")).toContainText("stale");
+  await expect(verbosity).toHaveAttribute("aria-pressed", initialVerbosityPressed);
+  await expect(staleRanges).toHaveAttribute(
+    "aria-pressed",
+    initialRangesPressed === "true" ? "false" : "true",
+  );
   await expect(page.locator("#revision-value")).toHaveText(String(baseRevision + 1));
 
-  await stalePage.getByRole("button", { name: "Verbosity" }).click();
+  await verbosity.click();
   await expect(stalePage.locator("#revision-value")).toHaveText(
     String(baseRevision + 2),
+  );
+  await expect(verbosity).toHaveAttribute(
+    "aria-pressed",
+    initialVerbosityPressed === "true" ? "false" : "true",
   );
 
   await page.reload();
   await expect(page.locator("#connection-status")).toHaveText("Online");
   await expect(page.locator("#revision-value")).toHaveText(String(baseRevision + 2));
+  await expect(page.locator("#live-ranges-button")).toHaveAttribute(
+    "aria-pressed",
+    initialRangesPressed === "true" ? "false" : "true",
+  );
+  await expect(page.locator("#live-verbosity-button")).toHaveAttribute(
+    "aria-pressed",
+    initialVerbosityPressed === "true" ? "false" : "true",
+  );
   await stalePage.close();
 });
 

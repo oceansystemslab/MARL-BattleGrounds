@@ -7,10 +7,10 @@ import json
 from collections.abc import Sequence
 from typing import cast
 
-from marl_battlegrounds.rendering.scene import to_jsonable
 from scripts.dev.visual_debugger.renderer_fixtures import (
     get_renderer_fixture,
     list_renderer_fixtures,
+    renderer_fixture_to_jsonable,
 )
 
 _FIXTURE_NAMES = tuple(fixture.name for fixture in list_renderer_fixtures())
@@ -19,7 +19,7 @@ _FIXTURE_NAMES = tuple(fixture.name for fixture in list_renderer_fixtures())
 def serialize_renderer_fixture(name: str) -> str:
     """Return one exact registered fixture as a JSON document."""
     fixture = get_renderer_fixture(name)
-    return json.dumps(to_jsonable(fixture))
+    return json.dumps(renderer_fixture_to_jsonable(fixture))
 
 
 def build_parser() -> argparse.ArgumentParser:

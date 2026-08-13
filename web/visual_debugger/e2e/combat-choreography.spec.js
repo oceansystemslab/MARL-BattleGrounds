@@ -13,7 +13,7 @@ import {
 import { startDebugger, stopDebugger } from "./support/live-debugger.js";
 import {
   loadRendererFixture,
-  syntheticDebuggerFrame,
+  syntheticDebuggerWireFrame,
 } from "./support/renderer-fixture.js";
 
 /** @type {import("node:child_process").ChildProcess | null} */
@@ -39,9 +39,9 @@ test.beforeAll(async () => {
     ]);
   serverProcess = started.process;
   debuggerUrl = started.url;
-  routeFrame = syntheticDebuggerFrame(routeFixture);
-  mixedFrame = syntheticDebuggerFrame(mixedFixture);
-  crowdedFrame = syntheticDebuggerFrame(crowdedFixture);
+  routeFrame = syntheticDebuggerWireFrame(routeFixture);
+  mixedFrame = syntheticDebuggerWireFrame(mixedFixture);
+  crowdedFrame = syntheticDebuggerWireFrame(crowdedFixture);
   povFixture = loadedPovFixture;
 });
 
@@ -55,16 +55,112 @@ test.afterAll(async () => {
  * @param {Record<string, any>} frame
  */
 function withoutTransition(frame) {
-  return {
-    ...frame,
-    revision: 0,
-    transition_id: null,
-    event_batch: null,
-    hud: {
-      ...frame.hud,
-      latest_transition: null,
-    },
+  const initial = structuredClone(frame);
+  initial.revision = 0;
+  initial.frame_index = 0;
+  initial.frame_id = `${initial.episode_id}:frame:0`;
+  initial.simulator_step_count = 0;
+  initial.hud.latest_transition = null;
+  if (initial.frame_kind === "researcher_live_debugger") {
+    initial.incoming_transition_index = null;
+    initial.incoming_transition_id = null;
+    initial.projection.scene.frame_index = 0;
+    initial.projection.scene.frame_id = initial.frame_id;
+    initial.projection.scene.simulator_step_count = 0;
+    initial.projection.scene.incoming_transition_id = null;
+    initial.projection.scene.incoming_event_ids = [];
+    initial.projection.incoming_events = null;
+    initial.projection.status_source_evidence.frame_index = 0;
+    initial.projection.status_source_evidence.frame_id = initial.frame_id;
+  } else {
+    const publicAgentId = initial.projection.scene.self_actor.public_agent_id;
+    initial.incoming_pov_transition_id = null;
+    initial.projection.scene.frame_index = 0;
+    initial.projection.scene.source_frame_id = initial.frame_id;
+    initial.projection.scene.pov_frame_id = `${initial.episode_id}:actor-pov:${publicAgentId}:frame:0`;
+    initial.projection.scene.simulator_step_count = 0;
+    initial.projection.incoming_transition_id = null;
+    initial.projection.incoming_cues = [];
+  }
+  return initial;
+}
+
+/**
+ * Replace one researcher batch with exact canonical V2 event rows while
+ * retaining its validated transition envelope and phase trajectories.
+ *
+ * @param {Record<string, any>} frame
+ * @param {Array<Record<string, any>>} payloads
+ */
+function withResearcherEvents(frame, payloads) {
+  const next = structuredClone(frame);
+  const batch = next.projection?.incoming_events;
+  if (!batch || typeof batch.transition_id !== "string") {
+    throw new Error("Synthetic researcher frame is missing its V2 event batch.");
+  }
+  const events = payloads.map((payload, ordinal) => ({
+    ...payload,
+    event_id: `${batch.transition_id}:event:${String(ordinal).padStart(4, "0")}`,
+    transition_id: batch.transition_id,
+    ordinal,
+  }));
+  next.projection.incoming_events.events = events;
+  next.projection.scene.incoming_event_ids = events.map((event) => event.event_id);
+  return next;
+}
+
+/**
+ * Replace fixture-owned numeric public IDs at every explicit public-ID field.
+ * Global slots and all simulator facts stay untouched. This deliberately
+ * exercises identity as an opaque external string instead of a slot alias.
+ *
+ * @param {Record<string, any>} frame
+ * @param {readonly string[]} publicIds
+ */
+function withOpaquePublicAgentIds(frame, publicIds) {
+  const next = structuredClone(frame);
+  /** @param {unknown} value */
+  const visit = (value) => {
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (!value || typeof value !== "object") {
+      return;
+    }
+    const candidate = /** @type {Record<string, any>} */ (value);
+    for (const [key, child] of Object.entries(candidate)) {
+      if (
+        key.includes("public_agent_id") &&
+        typeof child === "string" &&
+        Number.isInteger(Number(child)) &&
+        publicIds[Number(child)] !== undefined
+      ) {
+        candidate[key] = publicIds[Number(child)];
+      } else if (key === "public_agent_id_by_global_slot" && Array.isArray(child)) {
+        candidate[key] = [...publicIds];
+      } else {
+        visit(child);
+      }
+    }
   };
+  visit(next);
+  return next;
+}
+
+/**
+ * @param {Record<string, any>} frame
+ * @param {number} globalSlot
+ * @param {"transition_start" | "post_charge" | "successor"} phase
+ */
+function phaseAnchor(frame, globalSlot, phase) {
+  const trajectory = frame.projection?.incoming_events?.agent_phase_trajectories.find(
+    /** @param {Record<string, any>} row */ (row) => row.global_slot === globalSlot,
+  );
+  if (!trajectory?.[phase]) {
+    throw new Error(`Missing ${phase} anchor for synthetic slot ${globalSlot}.`);
+  }
+  return structuredClone(trajectory[phase]);
 }
 
 /**
@@ -95,7 +191,7 @@ async function installSyntheticFlow(page, initial, next) {
     await route.fulfill({
       contentType: "application/json",
       json: {
-        schema_version: 1,
+        schema_version: 2,
         result: "applied",
         frame: flow.current,
         notice: null,
@@ -104,6 +200,81 @@ async function installSyntheticFlow(page, initial, next) {
     });
   });
   return flow;
+}
+
+/**
+ * Find a real hit-test coordinate owned by a retained choreography route.
+ * Broad aura fields may overlap its SVG bounds, so browser-level hover on the
+ * group center is not a truthful interaction probe.
+ *
+ * @param {import("@playwright/test").Locator} owner
+ */
+async function registeredRoutePoint(owner) {
+  return owner.evaluate((element) => {
+    const route = element.querySelector(".combat-route__hit");
+    if (!(route instanceof SVGGeometryElement)) {
+      return null;
+    }
+    const matrix = route.getScreenCTM();
+    const length = route.getTotalLength();
+    if (!matrix || !Number.isFinite(length) || length <= 0) {
+      return null;
+    }
+    let fieldOverlapPoint = null;
+    for (const ratio of [
+      0.04, 0.08, 0.12, 0.18, 0.24, 0.32, 0.4, 0.5, 0.6, 0.68, 0.76, 0.82, 0.88, 0.92,
+      0.96,
+    ]) {
+      const local = route.getPointAtLength(length * ratio);
+      const screen = new DOMPoint(local.x, local.y).matrixTransform(matrix);
+      const owners = [
+        ...new Set(
+          document
+            .elementsFromPoint(screen.x, screen.y)
+            .map((hit) => hit.closest("[data-tooltip-owner]"))
+            .filter(
+              (candidate) =>
+                candidate instanceof Element &&
+                (candidate === element || !candidate.matches("#battlefield")),
+            ),
+        ),
+      ];
+      if (owners.length === 1 && owners[0] === element) {
+        return { x: screen.x, y: screen.y };
+      }
+      if (
+        owners.includes(element) &&
+        owners.every(
+          (candidate) =>
+            candidate instanceof Element &&
+            (candidate === element ||
+              candidate.matches(".aura-field, .range-ring-hit")),
+        )
+      ) {
+        fieldOverlapPoint ??= { x: screen.x, y: screen.y };
+      }
+    }
+    return fieldOverlapPoint;
+  });
+}
+
+/**
+ * Drive the native range input through the same bubbling input event used by
+ * pointer and keyboard interaction. Playwright's text `fill` is intentionally
+ * unsupported for range controls.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @param {number} rate
+ */
+async function setGraphicsSpeed(page, rate) {
+  await page.locator("#graphics-speed-input").evaluate((input, nextRate) => {
+    if (!(input instanceof HTMLInputElement) || input.type !== "range") {
+      throw new Error("Graphics rendering speed input is unavailable.");
+    }
+    input.value = Number(nextRate).toFixed(2);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }, rate);
+  await expect(page.locator("html")).toHaveAttribute("data-motion-rate", String(rate));
 }
 
 test("directional routes share one clock, gate submissions, reproject, and do not replay", async ({
@@ -123,7 +294,7 @@ test("directional routes share one clock, gate submissions, reproject, and do no
   );
 
   await page.goto(debuggerUrl);
-  await page.getByRole("button", { name: "0.5×", exact: true }).click();
+  await setGraphicsSpeed(page, 0.5);
   await page.getByRole("button", { name: "Reset" }).click();
 
   await expect(page.locator(CHOREOGRAPHY_ROOT)).toHaveCount(1);
@@ -149,10 +320,14 @@ test("directional routes share one clock, gate submissions, reproject, and do no
 
   await page.locator("#battlefield").focus();
   await page.keyboard.press("Enter");
-  await expect(page.locator("#notice")).toContainText("still being explained");
+  await expect(page.locator("#notice")).toContainText(
+    "Scripted playback is inspection-only",
+  );
   expect(flow.commands).toHaveLength(1);
 
-  await pauseAtLogicalTime(page, 500);
+  // Sample inside the authored V2 ability phase (60–180 ms). Route and impact
+  // geometry must not depend on later health or successor phases.
+  await pauseAtLogicalTime(page, 165);
   await expect(page.locator("html")).toHaveAttribute("data-motion-paused", "true");
   await expect(page.locator(".combat-effect--activation")).toHaveCount(9);
   await expect(page.locator(".combat-route__path")).toHaveCount(9);
@@ -277,7 +452,7 @@ test("a collision-suppressed NET cue reappears after resize without replay", asy
   await page.goto(debuggerUrl);
   await page.getByRole("button", { name: "Reset" }).click();
   await expect(page.locator(".combat-effect--net-health")).toHaveCount(1);
-  await pauseAtLogicalTime(page, 500);
+  await pauseAtLogicalTime(page, 210);
 
   const root = page.locator(CHOREOGRAPHY_ROOT);
   const net = page.locator(".combat-effect--net-health");
@@ -343,7 +518,7 @@ test("same-size protected-layout changes reproject without replay", async ({
 
   await page.goto(debuggerUrl);
   await page.getByRole("button", { name: "Reset" }).click();
-  await pauseAtLogicalTime(page, 500);
+  await pauseAtLogicalTime(page, 210);
   const root = page.locator(CHOREOGRAPHY_ROOT);
   await root.evaluate((element) => {
     element.setAttribute("data-retained-probe", "protected-layout");
@@ -388,7 +563,7 @@ test("reduced motion preserves damage/heal intent and one recipient NET outcome"
   await page.goto(debuggerUrl);
   await page.getByRole("button", { name: "Reset" }).click();
   await expect(page.locator("html")).toHaveAttribute("data-motion-mode", "reduced");
-  await page.getByRole("button", { name: "2×", exact: true }).click();
+  await setGraphicsSpeed(page, 2);
   await expect(page.locator("html")).toHaveAttribute("data-motion-mode", "reduced");
   await expect(page.locator("html")).toHaveAttribute("data-motion-rate", "2");
   await expect(page.locator("html")).toHaveAttribute(
@@ -401,12 +576,36 @@ test("reduced motion preserves damage/heal intent and one recipient NET outcome"
     ),
   ).toBe(true);
   expect(flow.commands).toHaveLength(1);
-  await pauseAtLogicalTime(page, 140);
+  // Reduced motion preserves V2 causal order on a 220 ms clock: ability cues
+  // paint first, followed by the independently authoritative health result.
+  await pauseAtLogicalTime(page, 30);
 
-  await expect(page.locator(".combat-effect--activation")).toHaveCount(2);
+  const activations = page.locator(".combat-effect--activation");
+  const net = page.locator(".combat-effect--net-health");
+  await expect(activations).toHaveCount(2);
+  await expect(net).toHaveCount(1);
   await expect(page.locator(".combat-route__path")).toHaveCount(2);
   await expect(page.locator(".combat-impact")).toHaveCount(2);
   await expect(page.locator(".combat-route__particle")).toHaveCount(0);
+  expect(
+    await page
+      .locator(".combat-impact")
+      .evaluateAll((nodes) =>
+        nodes.every(
+          (node) => Number.parseFloat(getComputedStyle(node).opacity) <= 0.001,
+        ),
+      ),
+  ).toBe(true);
+  expect(
+    await net.evaluate((node) => Number.parseFloat(getComputedStyle(node).opacity)),
+  ).toBeLessThanOrEqual(0.001);
+  expect(
+    await page
+      .locator(`${CHOREOGRAPHY_ROUTE_ROOT} .combat-route-effect--activation`)
+      .evaluateAll((nodes) =>
+        nodes.every((node) => Number.parseFloat(getComputedStyle(node).opacity) > 0),
+      ),
+  ).toBe(true);
   const routeStyles = await page
     .locator(`${CHOREOGRAPHY_ROUTE_ROOT} .combat-route-effect--activation`)
     .evaluateAll((routes) =>
@@ -431,12 +630,45 @@ test("reduced motion preserves damage/heal intent and one recipient NET outcome"
     basic_damage: { strokeWidth: 2.5, dashed: false },
     basic_heal: { strokeWidth: 3, dashed: true },
   });
-  const net = page.locator(".combat-effect--net-health");
+
+  // The compact impact subphase remains inside the ability interval and ends
+  // before health resolution begins.
+  await pauseAtLogicalTime(page, 42);
+  expect(
+    await page
+      .locator(".combat-impact")
+      .evaluateAll((nodes) =>
+        nodes.every((node) => Number.parseFloat(getComputedStyle(node).opacity) > 0),
+      ),
+  ).toBe(true);
+
+  await pauseAtLogicalTime(page, 52);
   await expect(net).toHaveCount(1);
   await expect(net).toHaveAttribute("data-recipient-slot", "5");
   await expect(net).toHaveAttribute("data-net-delta", "0");
-  await expect(net.locator(".combat-net__recipient")).toHaveText("id_5");
+  await expect(net.locator(".combat-net__recipient")).toHaveText("Agent ID 5");
   await expect(net.locator(".combat-net__label")).toHaveText("HP unchanged");
+  expect(
+    await net.evaluate((node) => Number.parseFloat(getComputedStyle(node).opacity)),
+  ).toBeGreaterThan(0);
+  expect(
+    await page
+      .locator(".combat-impact")
+      .evaluateAll((nodes) =>
+        nodes.every(
+          (node) => Number.parseFloat(getComputedStyle(node).opacity) <= 0.001,
+        ),
+      ),
+  ).toBe(true);
+  expect(
+    await page
+      .locator(`${CHOREOGRAPHY_ROUTE_ROOT} .combat-route-effect--activation`)
+      .evaluateAll((nodes) =>
+        nodes.every(
+          (node) => Number.parseFloat(getComputedStyle(node).opacity) <= 0.001,
+        ),
+      ),
+  ).toBe(true);
   await expect(page.locator(".combat-effect--activation[data-net-delta]")).toHaveCount(
     0,
   );
@@ -446,9 +678,16 @@ test("reduced motion preserves damage/heal intent and one recipient NET outcome"
     ),
   ).toBe(false);
   await assertBoundedChoreography(page);
-  await expect(page).toHaveScreenshot("reduced-motion-mixed-net-1440x900.png", {
-    animations: "allow",
-  });
+  await page.locator("#battlefield").focus();
+  await expect(page.locator("#visual-tooltip")).toHaveAttribute(
+    "data-tooltip-kind",
+    "composite",
+  );
+  await page.mouse.move(0, 0);
+  await expect(page).toHaveScreenshot(
+    "reduced-motion-mixed-net-health-phase-1440x900.png",
+    { animations: "allow" },
+  );
 
   await finishControllerClock(page, "cleanup");
   await expect(page.locator(CHOREOGRAPHY_ROOT)).toHaveAttribute(
@@ -460,42 +699,267 @@ test("reduced motion preserves damage/heal intent and one recipient NET outcome"
   expect(flow.commands).toHaveLength(1);
 });
 
+test("opaque public IDs label choreography while Basic transients own no tooltip", async ({
+  page,
+}) => {
+  await installWaapiAutopause(page);
+  const publicIds = Object.freeze([
+    "zulu",
+    "alpha",
+    "kestrel",
+    "bravo",
+    "ember",
+    "quartz",
+    "delta",
+    "sierra",
+    "nova",
+    "cobalt",
+  ]);
+  const opaqueFrame = withOpaquePublicAgentIds(crowdedFrame, publicIds);
+  opaqueFrame.projection.scene.agents = opaqueFrame.projection.scene.agents.map(
+    /** @param {Record<string, any>} agent */ (agent) => ({
+      ...agent,
+      statuses: [],
+    }),
+  );
+  opaqueFrame.projection.status_source_evidence.active_statuses = [];
+  const flow = await installSyntheticFlow(
+    page,
+    { ...opaqueFrame, revision: 1 },
+    (_command, index) => ({ ...opaqueFrame, revision: index }),
+  );
+
+  await page.goto(debuggerUrl);
+  await pauseAtLogicalTime(page, 680);
+
+  const basicGroups = page.locator(
+    `${CHOREOGRAPHY_ROOT} .combat-effect--activation[data-token-id="basic_damage"], ${CHOREOGRAPHY_ROOT} .combat-effect--activation[data-token-id="basic_heal"]`,
+  );
+  const basicRoutes = page.locator(
+    `${CHOREOGRAPHY_ROUTE_ROOT} .combat-route-effect--activation[data-token-id="basic_damage"], ${CHOREOGRAPHY_ROUTE_ROOT} .combat-route-effect--activation[data-token-id="basic_heal"]`,
+  );
+  await expect(basicGroups).toHaveCount(2);
+  await expect(basicRoutes).toHaveCount(2);
+  expect(
+    await basicGroups.evaluateAll((groups) =>
+      groups.every(
+        (group) =>
+          !group.hasAttribute("data-tooltip-owner") &&
+          !group.querySelector(".combat-impact")?.hasAttribute("data-tooltip-owner"),
+      ),
+    ),
+  ).toBe(true);
+  expect(
+    await basicRoutes.evaluateAll((routes) =>
+      routes.every((route) => !route.hasAttribute("data-tooltip-owner")),
+    ),
+  ).toBe(true);
+
+  const ultimateGroups = page.locator(
+    `${CHOREOGRAPHY_ROOT} .combat-effect--activation:not([data-token-id="basic_damage"]):not([data-token-id="basic_heal"])`,
+  );
+  const ultimateRoutes = page.locator(
+    `${CHOREOGRAPHY_ROUTE_ROOT} .combat-route-effect--activation:not([data-token-id="basic_damage"]):not([data-token-id="basic_heal"])`,
+  );
+  await expect(ultimateGroups).toHaveCount(8);
+  await expect(ultimateRoutes).toHaveCount(8);
+  expect(
+    await ultimateGroups.evaluateAll((groups) =>
+      groups.every((group) => group.hasAttribute("data-tooltip-owner")),
+    ),
+  ).toBe(true);
+  expect(
+    await ultimateRoutes.evaluateAll((routes) =>
+      routes.every((route) => route.hasAttribute("data-tooltip-owner")),
+    ),
+  ).toBe(true);
+  expect(
+    await page
+      .locator(`${CHOREOGRAPHY_ROOT} .combat-effect--net-health`)
+      .evaluateAll((events) =>
+        events.every((event) => event.hasAttribute("data-tooltip-owner")),
+      ),
+  ).toBe(true);
+  expect(
+    await page
+      .locator(`${CHOREOGRAPHY_ROOT} .combat-effect--status-lifecycle`)
+      .evaluateAll((events) =>
+        events.every((event) => event.hasAttribute("data-tooltip-owner")),
+      ),
+  ).toBe(true);
+
+  const chargeLabels = await page
+    .locator(
+      `${CHOREOGRAPHY_ROUTE_ROOT} .combat-route-effect--activation[data-token-id="warrior_charge"] .combat-route__ownership-label`,
+    )
+    .allTextContents();
+  expect(chargeLabels).toEqual([
+    `Agent ID ${publicIds[1]} → Agent ID ${publicIds[6]}`,
+    `Agent ID ${publicIds[6]} → Agent ID ${publicIds[1]}`,
+  ]);
+  const netLabels = await page
+    .locator(`${CHOREOGRAPHY_ROOT} .combat-net__recipient`)
+    .evaluateAll((labels) =>
+      labels.map((label) => ({
+        slot: Number(
+          label.closest("[data-recipient-slot]")?.getAttribute("data-recipient-slot"),
+        ),
+        text: label.textContent,
+      })),
+    );
+  expect(netLabels).toEqual(
+    netLabels.map(({ slot }) => ({ slot, text: `Agent ID ${publicIds[slot]}` })),
+  );
+  expect([...chargeLabels, ...netLabels.map(({ text }) => text)].join(" ")).not.toMatch(
+    /\bid_\d+\b/u,
+  );
+
+  const basicActivationEvents = opaqueFrame.projection.incoming_events.events.filter(
+    /** @param {Record<string, any>} event */ (event) =>
+      event.event_type === "ability_activated" && event.ability_component === "basic",
+  );
+  expect(basicActivationEvents).toHaveLength(2);
+  for (const basicEvent of basicActivationEvents) {
+    const basicFeed = page.locator(
+      `#event-feed [data-event-id="${basicEvent.event_id}"]`,
+    );
+    await expect(basicFeed).toHaveCount(1);
+    await expect(basicFeed).toContainText(
+      `Agent ID ${publicIds[basicEvent.source_global_slot]}`,
+    );
+    await expect(basicFeed).toContainText(
+      `Agent ID ${publicIds[basicEvent.recipient_global_slot]}`,
+    );
+  }
+
+  const appliedEvent = opaqueFrame.projection.incoming_events.events.find(
+    /** @param {Record<string, any>} event */ (event) =>
+      event.event_type === "status_applied" &&
+      Number.isInteger(event.source_global_slot) &&
+      Number.isInteger(event.recipient_global_slot),
+  );
+  expect(appliedEvent).toBeTruthy();
+  const appliedFeed = page.locator(
+    `#event-feed [data-event-id="${appliedEvent.event_id}"]`,
+  );
+  await expect(appliedFeed).toContainText(
+    `Agent ID ${publicIds[appliedEvent.source_global_slot]}`,
+  );
+  await expect(appliedFeed).toContainText(
+    `Agent ID ${publicIds[appliedEvent.recipient_global_slot]}`,
+  );
+  expect(await page.locator("#event-feed").innerText()).not.toMatch(/\bid_\d+\b/u);
+
+  const lifecycleOwner = page.locator(
+    `${CHOREOGRAPHY_ROOT} .combat-effect--status-lifecycle[data-event-id="${appliedEvent.event_id}"]`,
+  );
+  await lifecycleOwner.evaluate((owner) => {
+    owner.setAttribute("tabindex", "0");
+    if (owner instanceof SVGElement && typeof owner.focus === "function") {
+      owner.focus();
+    }
+  });
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#semantic-inspector")).toBeVisible();
+  await expect(page.locator("#semantic-inspector")).toContainText(
+    `Agent ID ${publicIds[appliedEvent.source_global_slot]}`,
+  );
+  await expect(page.locator("#semantic-inspector")).toContainText(
+    `Agent ID ${publicIds[appliedEvent.recipient_global_slot]}`,
+  );
+  await expect(page.locator("#semantic-inspector")).not.toContainText(
+    String(appliedEvent.event_id),
+  );
+  await page.locator("#semantic-inspector-close-button").click();
+
+  const chargeRoute = page
+    .locator(
+      `${CHOREOGRAPHY_ROUTE_ROOT} .combat-route-effect--activation[data-token-id="warrior_charge"]`,
+    )
+    .first();
+  const chargeRoutePoint = await registeredRoutePoint(chargeRoute);
+  expect(chargeRoutePoint).not.toBeNull();
+  await page.mouse.move(chargeRoutePoint?.x ?? 0, chargeRoutePoint?.y ?? 0);
+  await expect(page.locator("#visual-tooltip")).toHaveAttribute(
+    "data-tooltip-kind",
+    "accepted-route",
+  );
+  await expect(page.locator("#visual-tooltip-details")).toContainText(
+    `Agent ID ${publicIds[1]}`,
+  );
+  await expect(page.locator("#visual-tooltip-details")).toContainText(
+    `Agent ID ${publicIds[6]}`,
+  );
+  const eventIds = opaqueFrame.projection.incoming_events.events.map(
+    /** @param {Record<string, any>} event */ (event) => String(event.event_id),
+  );
+  const tooltipSemanticText = await page
+    .locator("#visual-tooltip")
+    .evaluate(
+      (tooltip) =>
+        `${tooltip.textContent ?? ""} ${tooltip.getAttribute("aria-label") ?? ""}`,
+    );
+  expect(
+    eventIds.every(
+      /** @param {string} eventId */ (eventId) =>
+        !tooltipSemanticText.includes(eventId),
+    ),
+  ).toBe(true);
+
+  await page.mouse.click(chargeRoutePoint?.x ?? 0, chargeRoutePoint?.y ?? 0);
+  await expect(page.locator("#semantic-inspector")).toBeVisible();
+  const inspectorSemanticText = await page
+    .locator("#semantic-inspector")
+    .evaluate(
+      (inspector) =>
+        `${inspector.textContent ?? ""} ${inspector.getAttribute("aria-label") ?? ""} ${inspector.getAttribute("aria-labelledby") ?? ""}`,
+    );
+  expect(
+    eventIds.every(
+      /** @param {string} eventId */ (eventId) =>
+        !inspectorSemanticText.includes(eventId),
+    ),
+  ).toBe(true);
+  expect(
+    await page
+      .locator("#visual-tooltip, #semantic-inspector")
+      .evaluateAll((roots) =>
+        roots.every((root) =>
+          [...root.querySelectorAll("*")].every((node) =>
+            [...node.attributes].every(
+              (attribute) =>
+                !attribute.name.includes("event-id") &&
+                !attribute.name.includes("cue-id"),
+            ),
+          ),
+        ),
+      ),
+  ).toBe(true);
+  await assertBoundedChoreography(page);
+  expect(flow.commands).toHaveLength(1);
+  expect(flow.commands[0]).toMatchObject({
+    command_type: "battlefield_pointer",
+    button: "primary",
+  });
+});
+
 test("reduced motion keeps Mage Burst static while preserving its identity", async ({
   page,
 }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
   await installWaapiAutopause(page);
-  const source = /** @type {Record<string, any>[]} */ (routeFrame.scene.agents).find(
-    (agent) => agent.global_slot === 0,
-  );
-  expect(source).toBeTruthy();
-  if (!source) {
-    throw new Error("Synthetic route fixture is missing source id_0.");
-  }
-  const burstFrame = {
-    ...routeFrame,
-    revision: 1,
-    event_batch: {
-      schema_version: 1,
-      transition_id: 1,
-      simulator_step: 1,
-      events: [
-        {
-          event_type: "accepted_activation",
-          event_id: "synthetic:reduced:mage-burst",
-          transition_id: 1,
-          token_id: "mage_burst",
-          source_global_slot: 0,
-          target_global_slot: null,
-          source_anchor: source.position,
-          target_anchor: null,
-          target_disclosure: "target_none",
-          lane: 1,
-          source_class_id: 0,
-        },
-      ],
+  const burstFrame = withResearcherEvents(crowdedFrame, [
+    {
+      event_type: "ability_activated",
+      phase_rank: 20,
+      source_global_slot: 0,
+      ability_component: "ultimate",
+      recipient_global_slot: null,
+      source_anchor: phaseAnchor(crowdedFrame, 0, "transition_start"),
+      recipient_anchor: null,
     },
-  };
+  ]);
+  burstFrame.revision = 1;
   const flow = await installSyntheticFlow(
     page,
     withoutTransition(burstFrame),
@@ -549,7 +1013,7 @@ test("mid-transition Motion Off retains one static batch through bounded cleanup
   await page.getByRole("button", { name: "Reset" }).click();
   await pauseAtLogicalTime(page, 300);
   const animatedSnapshot = await choreographySnapshot(page);
-  await page.getByRole("button", { name: "Off", exact: true }).click();
+  await page.getByRole("button", { name: "Motion Off", exact: true }).click();
 
   await expect(page.locator("html")).toHaveAttribute("data-motion-mode", "off");
   await expect(page.locator("html")).toHaveAttribute("data-motion-paused", "false");
@@ -567,12 +1031,19 @@ test("mid-transition Motion Off retains one static batch through bounded cleanup
     expect.stringMatching(/:cleanup$/),
   ]);
   await assertBoundedChoreography(page);
+  await page.locator("#battlefield").focus();
+  await expect(page.locator("#visual-tooltip")).toHaveAttribute(
+    "data-tooltip-kind",
+    "composite",
+  );
+  await page.mouse.move(0, 0);
   await expect(page).toHaveScreenshot("motion-off-static-route-batch-1440x900.png", {
     animations: "allow",
   });
   expect(flow.commands).toHaveLength(1);
 
-  await page.getByRole("button", { name: "0.5×", exact: true }).click();
+  await setGraphicsSpeed(page, 0.5);
+  await page.getByRole("button", { name: "Motion Off", exact: true }).click();
   await expect(page.locator("html")).toHaveAttribute("data-motion-mode", "normal");
   await expect(page.locator("html")).toHaveAttribute("data-motion-rate", "0.5");
   const restoredPreference = await choreographySnapshot(page);
@@ -592,64 +1063,47 @@ test("rejection and composite Trap lifecycle retain only exact supplied facts", 
   page,
 }) => {
   await installWaapiAutopause(page);
-  const source = mixedFrame.scene.agents.find(
-    /** @param {{global_slot: number}} agent */ (agent) => agent.global_slot === 0,
-  );
-  const target = mixedFrame.scene.agents.find(
-    /** @param {{global_slot: number}} agent */ (agent) => agent.global_slot === 5,
-  );
-  if (!source || !target) {
-    throw new Error("Mixed fixture is missing the synthetic source or target.");
-  }
-  const activationId = "synthetic:composite:activation";
-  const compositeFrame = {
-    ...mixedFrame,
-    event_batch: {
-      ...mixedFrame.event_batch,
-      events: [
-        {
-          event_type: "accepted_activation",
-          event_id: activationId,
-          transition_id: 1,
-          token_id: "hunter_trap",
-          source_global_slot: 0,
-          target_global_slot: 5,
-          source_anchor: source.position,
-          target_anchor: target.position,
-          target_disclosure: "public",
-          lane: 1,
-          source_class_id: 3,
-        },
-        {
-          event_type: "rejected_action",
-          event_id: "synthetic:composite:rejection",
-          transition_id: 1,
-          actor_global_slot: 0,
-          component: "combat",
-          actor_anchor: source.position,
-          target_global_slot: 5,
-          target_anchor: target.position,
-          target_disclosure: "public",
-          lane: 1,
-          movement_mask_value: true,
-          pair_mask_value: false,
-        },
-        {
-          event_type: "status_lifecycle",
-          event_id: "synthetic:composite:lifecycle",
-          transition_id: 1,
-          recipient_global_slot: 5,
-          recipient_anchor: target.position,
-          token_id: "stun_hunter_trap",
-          change: "trap_broken_and_reapplied",
-          duration_before: 2,
-          duration_after: 3,
-          source_class_id: 3,
-          application_event_ids: [activationId],
-        },
-      ],
+  const compositeFrame = withResearcherEvents(mixedFrame, [
+    {
+      event_type: "action_rejected",
+      phase_rank: 10,
+      actor_global_slot: 0,
+      actor_public_agent_id: "0",
+      actor_configured_active: true,
+      rejection_component: "combat_pair",
+      submitted_move_action: 0,
+      submitted_select_target_action: 6,
+      submitted_use_ultimate_action: 1,
+      actor_anchor: phaseAnchor(mixedFrame, 0, "transition_start"),
     },
-  };
+    {
+      event_type: "ability_activated",
+      phase_rank: 20,
+      source_global_slot: 0,
+      ability_component: "ultimate",
+      recipient_global_slot: 5,
+      source_anchor: phaseAnchor(mixedFrame, 0, "transition_start"),
+      recipient_anchor: phaseAnchor(mixedFrame, 5, "transition_start"),
+    },
+    {
+      event_type: "status_broken_by_damage",
+      phase_rank: 100,
+      recipient_global_slot: 5,
+      status_channel: 4,
+      status_id: "hunter_trap_stun",
+      recipient_anchor: phaseAnchor(mixedFrame, 5, "successor"),
+    },
+    {
+      event_type: "status_applied",
+      phase_rank: 100,
+      source_global_slot: 0,
+      recipient_global_slot: 5,
+      status_channel: 4,
+      status_id: "hunter_trap_stun",
+      source_anchor: phaseAnchor(mixedFrame, 0, "successor"),
+      recipient_anchor: phaseAnchor(mixedFrame, 5, "successor"),
+    },
+  ]);
   const flow = await installSyntheticFlow(
     page,
     withoutTransition(compositeFrame),
@@ -658,42 +1112,38 @@ test("rejection and composite Trap lifecycle retain only exact supplied facts", 
 
   await page.goto(debuggerUrl);
   await page.getByRole("button", { name: "Reset" }).click();
-  await pauseAtLogicalTime(page, 500);
+  await pauseAtLogicalTime(page, 680);
 
   const rejection = page.locator(".combat-effect--rejected-action");
   await expect(rejection).toHaveCount(1);
   await expect(rejection).toHaveAttribute("data-actor-slot", "0");
-  await expect(rejection).toHaveAttribute("data-target-slot", "5");
-  await expect(rejection).toHaveAttribute("data-component", "combat");
-  await expect(rejection).toHaveAttribute("data-movement-mask-value", "true");
-  await expect(rejection).toHaveAttribute("data-pair-mask-value", "false");
+  await expect(rejection).not.toHaveAttribute("data-target-slot", /.+/);
+  await expect(rejection).toHaveAttribute("data-component", "combat_pair");
   await expect(rejection.locator(".combat-rejection__ring")).toHaveCount(1);
   await expect(
-    page.locator(
-      `${CHOREOGRAPHY_ROUTE_ROOT} .combat-route-effect--rejected-action .combat-rejection__route`,
-    ),
-  ).toHaveCount(1);
+    page.locator(`${CHOREOGRAPHY_ROUTE_ROOT} .combat-route-effect--rejected-action`),
+  ).toHaveCount(0);
 
-  const lifecycle = page.locator(
-    '.combat-effect--status-lifecycle[data-lifecycle="trap_broken_and_reapplied"]',
+  const broken = page.locator(
+    '.combat-effect--status-lifecycle[data-event-type="status_broken_by_damage"]',
   );
-  await expect(lifecycle).toHaveCount(1);
-  await expect(lifecycle.locator(".combat-lifecycle__shard")).toHaveCount(6);
+  const reapplied = page.locator(
+    '.combat-effect--status-lifecycle[data-event-type="status_applied"]',
+  );
+  await expect(broken).toHaveCount(1);
+  await expect(reapplied).toHaveCount(1);
+  await expect(broken.locator(".combat-lifecycle__shard")).toHaveCount(6);
   await expect(
-    lifecycle.locator('.combat-lifecycle__status-icon[data-icon="status-stun"]'),
+    broken.locator('.combat-lifecycle__status-icon[data-icon="status-stun"]'),
   ).toHaveCount(1);
   await expect(
-    lifecycle.locator(
-      '.combat-lifecycle__change-icon[data-icon="lifecycle-trap-broken-reapplied"]',
-    ),
+    broken.locator('.combat-lifecycle__change-icon[data-icon="lifecycle-trap-broken"]'),
   ).toHaveCount(1);
-  await expect(lifecycle.locator(".combat-lifecycle__reapply")).toHaveCount(1);
-  await expect(lifecycle).toHaveAttribute(
-    "data-application-event-ids",
-    JSON.stringify([activationId]),
-  );
-  await expect(lifecycle).toHaveAttribute("data-duration-before", "2");
-  await expect(lifecycle).toHaveAttribute("data-duration-after", "3");
+  await expect(reapplied.locator(".combat-lifecycle__reapply")).toHaveCount(0);
+  await expect(broken).toHaveAttribute("data-application-event-ids", "[]");
+  await expect(reapplied).toHaveAttribute("data-application-event-ids", "[]");
+  await expect(broken).not.toHaveAttribute("data-duration-before", /.+/);
+  await expect(reapplied).not.toHaveAttribute("data-duration-after", /.+/);
   await assertBoundedChoreography(page);
   expect(flow.commands).toHaveLength(1);
 });
@@ -702,12 +1152,8 @@ test("same-epoch POV switch clears privileged effects before safe redacted rebui
   page,
 }) => {
   await installWaapiAutopause(page);
-  const researcherFrame = syntheticDebuggerFrame({
-    ...povFixture,
-    scene: povFixture.privileged_source_scene,
-    event_batch: povFixture.privileged_source_event_batch,
-  });
-  const safeFrame = syntheticDebuggerFrame(povFixture);
+  const researcherFrame = structuredClone(crowdedFrame);
+  const safeFrame = syntheticDebuggerWireFrame(povFixture);
   const flow = await installSyntheticFlow(
     page,
     withoutTransition(researcherFrame),
@@ -718,17 +1164,13 @@ test("same-epoch POV switch clears privileged effects before safe redacted rebui
       if (command.command_type === "set_view") {
         return { ...safeFrame, revision: 2 };
       }
-      return {
-        ...safeFrame,
-        run_generation: 1,
-        revision: 3,
-      };
+      return { ...safeFrame, revision: 3 };
     },
   );
 
   await page.goto(debuggerUrl);
   await page.getByRole("button", { name: "Reset" }).click();
-  await pauseAtLogicalTime(page, 500);
+  await pauseAtLogicalTime(page, 600);
   const privilegedRoot = page.locator(CHOREOGRAPHY_ROOT);
   await expect(privilegedRoot.locator('[data-target-slot="5"]')).not.toHaveCount(0);
   await privilegedRoot.evaluate((element) => {
@@ -740,69 +1182,62 @@ test("same-epoch POV switch clears privileged effects before safe redacted rebui
   await expect(
     page.locator(`${CHOREOGRAPHY_ROOT}[data-privileged-probe="present"]`),
   ).toHaveCount(0);
-  await expect(page.locator(`${CHOREOGRAPHY_ROOT} .combat-effect`)).toHaveCount(0);
-  expect((await choreographySnapshot(page)).animationIds).toEqual([]);
+  await expect(
+    page.locator(`${CHOREOGRAPHY_ROOT} .combat-effect--activation`),
+  ).toHaveCount(0);
+  await expect(
+    page.locator(`${CHOREOGRAPHY_ROOT} [data-event-type="own_health_changed"]`),
+  ).toHaveCount(1);
+  expect(
+    await page
+      .locator(`${CHOREOGRAPHY_ROOT} .combat-effect`)
+      .evaluateAll((effects) =>
+        effects.every((effect) =>
+          String(effect.getAttribute("data-event-id")).includes(":actor-pov:"),
+        ),
+      ),
+  ).toBe(true);
   await assertTransientSlotsAuthorized(page);
 
-  await page.getByRole("button", { name: "Reset" }).click();
-  await pauseAtLogicalTime(page, 500);
-  const redactedActivation = page.locator(
-    `${CHOREOGRAPHY_ROOT} .combat-effect--activation`,
-  );
-  await expect(redactedActivation).toHaveCount(1);
-  await expect(redactedActivation).toHaveAttribute("data-source-slot", "0");
-  await expect(redactedActivation).not.toHaveAttribute("data-target-slot", /.+/);
   await expect(
-    page.locator(
-      `${CHOREOGRAPHY_ROUTE_ROOT} .combat-route-effect--activation .combat-route__path`,
-    ),
+    page.locator(`${CHOREOGRAPHY_ROOT} .combat-effect--activation`),
   ).toHaveCount(0);
-  await expect(redactedActivation.locator(".combat-local")).toHaveCount(1);
+  await expect(
+    page.locator(`${CHOREOGRAPHY_ROUTE_ROOT} .combat-route-effect--activation`),
+  ).toHaveCount(0);
+  // POV retains the self actor plus one authorized relative visible-body row;
+  // only the self actor is allowed into the identity-bearing roster.
   await expect(page.locator("#battlefield .agent")).toHaveCount(2);
-  await expect(page.locator("#roster .roster-row")).toHaveCount(2);
+  await expect(page.locator("#battlefield .pov-observed-body")).toHaveCount(1);
+  await expect(page.locator("#roster .roster-row")).toHaveCount(1);
+  await expect(page.locator('#battlefield .agent[data-slot="5"]')).toHaveCount(0);
   await expect(page.locator(`${CHOREOGRAPHY_ROOT} [data-target-slot="5"]`)).toHaveCount(
     0,
   );
   await assertTransientSlotsAuthorized(page);
   await assertBoundedChoreography(page);
-  expect(flow.commands).toHaveLength(3);
+  expect(flow.commands).toHaveLength(2);
 });
 
-test("a disclosed POV target with no source anchor renders only at impact phase", async ({
+test("POV bootstrap rejects an impossible split simulator epoch", async ({ page }) => {
+  const splitEpoch = withoutTransition(syntheticDebuggerWireFrame(povFixture));
+  splitEpoch.projection.scene.simulator_step_count = 1;
+  await installSyntheticFlow(page, splitEpoch, () => splitEpoch);
+
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#connection-status")).toHaveText("Resync required");
+  await expect(page.locator("#notice")).toContainText(
+    "POV projection does not join its live frame",
+  );
+  await expect(page.locator("#battlefield .agent")).toHaveCount(0);
+});
+
+test("recipient POV cues never reconstruct a researcher target-only activation", async ({
   page,
 }) => {
   await installWaapiAutopause(page);
-  const safeFrame = syntheticDebuggerFrame(povFixture);
-  const safeAgents = /** @type {Record<string, any>[]} */ (safeFrame.scene.agents);
-  const target = safeAgents.find((agent) => agent.global_slot === 0);
-  expect(target).toBeTruthy();
-  if (!target) {
-    throw new Error("Synthetic POV fixture is missing target id_0.");
-  }
-  const targetOnlyFrame = {
-    ...safeFrame,
-    revision: 1,
-    event_batch: {
-      schema_version: 1,
-      transition_id: 1,
-      simulator_step: 1,
-      events: [
-        {
-          event_type: "accepted_activation",
-          event_id: "synthetic:pov:target-only",
-          transition_id: 1,
-          token_id: "holy_word",
-          source_global_slot: 5,
-          target_global_slot: 0,
-          source_anchor: null,
-          target_anchor: target.position,
-          target_disclosure: "public",
-          lane: 1,
-          source_class_id: 5,
-        },
-      ],
-    },
-  };
+  const safeFrame = syntheticDebuggerWireFrame(povFixture);
+  const targetOnlyFrame = { ...safeFrame, revision: 1 };
   const flow = await installSyntheticFlow(
     page,
     withoutTransition(targetOnlyFrame),
@@ -811,20 +1246,25 @@ test("a disclosed POV target with no source anchor renders only at impact phase"
 
   await page.goto(debuggerUrl);
   await page.getByRole("button", { name: "Reset" }).click();
-  await pauseAtLogicalTime(page, 500);
+  await pauseAtLogicalTime(page, 600);
 
-  const activation = page.locator(`${CHOREOGRAPHY_ROOT} .combat-effect--activation`);
-  await expect(activation).toHaveCount(1);
-  await expect(activation).toHaveAttribute("data-phase", "impact");
-  await expect(activation).toHaveAttribute("data-source-slot", "5");
-  await expect(activation).toHaveAttribute("data-target-slot", "0");
-  await expect(activation.locator(".combat-local")).toHaveCount(0);
-  await expect(activation.locator(".combat-impact--holy-word")).toHaveCount(1);
   await expect(
-    page.locator(
-      `${CHOREOGRAPHY_ROUTE_ROOT} .combat-route-effect--activation[data-event-id="synthetic:pov:target-only"]`,
-    ),
+    page.locator(`${CHOREOGRAPHY_ROOT} .combat-effect--activation`),
   ).toHaveCount(0);
+  await expect(page.locator(`${CHOREOGRAPHY_ROOT} [data-source-slot="5"]`)).toHaveCount(
+    0,
+  );
+  const cueTypes = await page
+    .locator("#event-feed .event-item")
+    .evaluateAll((items) => items.map((item) => item.getAttribute("data-event-type")));
+  expect(
+    cueTypes.every(
+      (type) =>
+        type?.startsWith("own_") ||
+        type === "episode_ended" ||
+        type === "visible_body_observation_changed",
+    ),
+  ).toBe(true);
   await assertBoundedChoreography(page);
   expect(flow.commands).toHaveLength(1);
 });

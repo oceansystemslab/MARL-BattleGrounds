@@ -6,9 +6,10 @@ import json
 import pytest
 import scripts.dev.visual_debugger.export_renderer_fixture as export_module
 from scripts.dev.visual_debugger.export_renderer_fixture import main
-from scripts.dev.visual_debugger.renderer_fixtures import get_renderer_fixture
-
-from marl_battlegrounds.rendering.scene import to_jsonable
+from scripts.dev.visual_debugger.renderer_fixtures import (
+    get_renderer_fixture,
+    renderer_fixture_to_jsonable,
+)
 
 
 def test_export_emits_one_exact_registered_synthetic_payload(
@@ -20,7 +21,10 @@ def test_export_emits_one_exact_registered_synthetic_payload(
 
     captured = capsys.readouterr()
     assert captured.err == ""
-    assert captured.out == f"{json.dumps(to_jsonable(fixture))}\n"
+    assert captured.out == f"{json.dumps(renderer_fixture_to_jsonable(fixture))}\n"
+    payload = json.loads(captured.out)
+    assert payload["live_frame"]["schema_version"] == 2
+    assert payload["live_frame"]["frame_kind"] == "researcher_live_debugger"
 
 
 def test_unknown_fixture_name_is_an_argparse_error(
@@ -43,7 +47,6 @@ def test_exporter_source_has_no_authoritative_or_runtime_dependencies() -> None:
         "ActionMask",
         "DebuggerService",
         "build_debugger_frame",
-        "protocol",
         "server",
         "web/visual_debugger",
     ):
