@@ -7,6 +7,10 @@ from threading import RLock
 from typing import Literal, cast
 
 from marl_battlegrounds.evaluation.metrics import EvaluationEpisodeObserverV1
+from marl_battlegrounds.evaluation.pov import (
+    build_actor_pov_adjacent_transition_slice_v1,
+    build_actor_pov_current_slice_v1,
+)
 from scripts.dev.visual_debugger.control import (
     DebuggerTransitionFailureStageV1,
     DebuggerTransitionFailureV1,
@@ -18,8 +22,16 @@ from scripts.dev.visual_debugger.input import (
     recording_restart_intent_v1,
     sanitize_pov_pending_target,
 )
+from scripts.dev.visual_debugger.live_presentation import (
+    build_live_no_shared_obs_authorized_presentation_v1,
+    build_live_oracle_authorized_presentation_v1,
+)
 from scripts.dev.visual_debugger.model import DebuggerSession
+from scripts.dev.visual_debugger.presentation_protocol import (
+    PresentationResourceResultV1,
+)
 from scripts.dev.visual_debugger.protocol import (
+    ActorPovLiveDebuggerFrameV2,
     ApiErrorV2,
     CommandRequestV1,
     CommandResponseV2,
@@ -31,6 +43,7 @@ from scripts.dev.visual_debugger.protocol import (
     RecordingLifecycleV1,
     RecordingPersistenceErrorCodeV1,
     RecordingStatusV1,
+    ResearcherLiveDebuggerFrameV2,
     RetrySaveCommandV1,
     ReviewReplayCommandV1,
     SaveAsCommandV1,
@@ -122,7 +135,7 @@ class DebuggerService:
         session: DebuggerSession,
         *,
         view_mode: ViewMode,
-        preset: Preset | Literal["debug"],
+        preset: Preset | Literal["technical", "debug"],
         include_stress: bool,
         session_id: str | None = None,
         recorder: DebuggerReplayRecorderV1 | None = None,
@@ -133,11 +146,13 @@ class DebuggerService:
                 "include_stress=True."
             )
             raise ValueError(msg)
+        if preset not in ("presentation", "analysis", "technical", "debug"):
+            raise ValueError("unknown debugger preset")
         self._session = (
             sanitize_pov_pending_target(session) if view_mode == "pov" else session
         )
         self._view_mode: ViewMode = view_mode
-        self._preset: Preset = "analysis" if preset == "debug" else preset
+        self._preset: Preset = "analysis"
         self._include_stress = include_stress
         self._session_id = session_id or token_urlsafe(24)
         self._revision = 0
@@ -367,6 +382,64 @@ class DebuggerService:
         """Return the current coherent frame without mutating the session."""
         with self._lock:
             return self._frame
+
+    def current_presentation(self) -> PresentationResourceResultV1:
+        """Build one authorized presentation from the committed live snapshot."""
+        with self._lock:
+            raw_frame = self._frame
+            expected_frame = self._build_frame()
+            if (
+                type(raw_frame) is not type(expected_frame)
+                or raw_frame != expected_frame
+            ):
+                raise RuntimeError(
+                    "committed live frame diverged from service-owned state."
+                )
+            session = self._session
+            context = session.evaluation_context
+            current = session.current_evaluation_frame
+            incoming = session.incoming_evaluation_view
+            if self._view_mode == "researcher":
+                if type(raw_frame) is not ResearcherLiveDebuggerFrameV2:
+                    raise RuntimeError(
+                        "researcher live service lacks its committed Oracle frame."
+                    )
+                presentation = build_live_oracle_authorized_presentation_v1(
+                    context,
+                    current,
+                    incoming,
+                    raw_frame,
+                )
+            else:
+                if type(raw_frame) is not ActorPovLiveDebuggerFrameV2:
+                    raise RuntimeError(
+                        "POV live service lacks its committed recipient frame."
+                    )
+                recipient = session.controlled_global_slot
+                current_slice = build_actor_pov_current_slice_v1(
+                    context,
+                    current,
+                    global_slot=recipient,
+                    incoming_transition_view=incoming,
+                )
+                carrier = (
+                    None
+                    if incoming is None
+                    else build_actor_pov_adjacent_transition_slice_v1(
+                        incoming,
+                        global_slot=recipient,
+                    )
+                )
+                presentation = build_live_no_shared_obs_authorized_presentation_v1(
+                    current_slice,
+                    carrier,
+                    raw_frame,
+                    public_catalog=context.static_mechanics_catalog,
+                )
+            return PresentationResourceResultV1(
+                outcome="response",
+                payload=presentation,
+            )
 
     def _recording_no_op(
         self,

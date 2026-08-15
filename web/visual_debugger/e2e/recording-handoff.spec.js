@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { expect, test } from "@playwright/test";
-
+import { finishControllerClock } from "./support/choreography.js";
 import {
   createReplayTargetRace,
   metricReportPathForReplay,
@@ -80,6 +80,11 @@ async function openRecording(page, url) {
   await expect(page.locator("#connection-status")).toHaveText("Online", {
     timeout: 30_000,
   });
+  await expect(page).toHaveTitle("MARL-BattleGrounds Combat Debugger");
+  await expect(page.locator("html")).toHaveAttribute(
+    "data-product-kind",
+    "combat_debugger",
+  );
   await expect(page.locator("html")).toHaveAttribute("data-viewer-mode", "live");
   await expect(page.locator("html")).toHaveAttribute(
     "data-recording-lifecycle",
@@ -174,8 +179,8 @@ async function expectRecordingCount(page, count) {
 }
 
 /**
- * Advance the exact registered scripted trajectory once and settle its local
- * presentation without adding a second simulator command.
+ * Submit one live joint turn and settle its local presentation without adding
+ * a second simulator command.
  *
  * @param {import("@playwright/test").Page} page
  * @param {number} expectedCount
@@ -187,13 +192,16 @@ async function captureNextTransition(page, expectedCount) {
       new URL(response.url()).pathname === "/api/command",
     { timeout: 120_000 },
   );
-  await page.locator("#advance-script-button").click();
+  await page.locator("#submit-turn-button").click();
   const response = await responsePromise;
   expect(response.status()).toBe(200);
   const frame = await expectRecordingCount(page, expectedCount);
-  const skip = page.locator("#motion-skip-button");
-  if (await skip.isEnabled()) {
-    await skip.click();
+  const activeChoreography = page.locator(
+    '[data-layer="transient-events"] > .combat-choreography[data-state="active"]',
+  );
+  if ((await activeChoreography.count()) > 0) {
+    await finishControllerClock(page, "cleanup");
+    await expect(activeChoreography).toHaveCount(0);
   }
   return frame;
 }
@@ -208,6 +216,11 @@ async function expectSettledReplayHandoff(page, audience = "researcher") {
   await expect(page.locator("html")).toHaveAttribute("data-viewer-mode", "replay", {
     timeout: 120_000,
   });
+  await expect(page).toHaveTitle("MARL-BattleGrounds Replay Viewer");
+  await expect(page.locator("html")).toHaveAttribute(
+    "data-product-kind",
+    "replay_viewer",
+  );
   await expect(page.locator("#connection-status")).toHaveText("Online");
   await expect(page.locator("#replay-timeline")).toBeVisible();
   await expect(page.locator("#replay-timeline")).toBeFocused();
@@ -217,7 +230,11 @@ async function expectSettledReplayHandoff(page, audience = "researcher") {
   await expect(page.locator("#battlefield")).toHaveAttribute("tabindex", "-1");
   await expect(page.locator("[data-live-only]:not([hidden])")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Submit joint turn" })).toHaveCount(0);
-  await expect(page.locator("#motion-skip-button")).toBeDisabled();
+  await expect(
+    page.locator(
+      "#motion-pause-button, #motion-off-button, #motion-skip-button, #motion-status",
+    ),
+  ).toHaveCount(0);
 
   const [frame, timeline, boundary] = await Promise.all([
     currentFrame(page),
@@ -339,6 +356,18 @@ test("T0 Finish publishes an exact zero-transition partial replay", async ({
 }) => {
   const started = requiredRecording();
   await openRecording(page, started.url);
+  /** @type {string[]} */
+  const handoffRequests = [];
+  page.on("request", (request) => {
+    const path = new URL(request.url()).pathname;
+    if (request.resourceType() === "document") {
+      handoffRequests.push("document");
+    } else if (path === "/bootstrap.js") {
+      handoffRequests.push("bootstrap");
+    } else if (path === "/api/frame") {
+      handoffRequests.push("frame");
+    }
+  });
   const responsePromise = page.waitForResponse(
     (response) =>
       response.request().method() === "POST" &&
@@ -348,20 +377,10 @@ test("T0 Finish publishes an exact zero-transition partial replay", async ({
   await page.locator("#recording-finish-button").click();
   const response = await responsePromise;
   expect(response.status()).toBe(200);
-  expect(await response.json()).toMatchObject({
-    schema_version: 2,
-    result: "applied",
-    frame: {
-      frame_index: 0,
-      recording: {
-        lifecycle: "reviewing",
-        captured_transition_count: 0,
-        completion_state: "partial",
-        completion_reason: "user_finish_and_review",
-      },
-    },
-  });
   const { frame, timeline } = await expectSettledReplayHandoff(page);
+  expect(handoffRequests.slice(0, 3)).toEqual(["document", "bootstrap", "frame"]);
+  expect(handoffRequests.filter((request) => request === "document")).toHaveLength(1);
+  expect(handoffRequests.filter((request) => request === "bootstrap")).toHaveLength(1);
   expect(frame.cursor).toMatchObject({ frame_index: 0, final_frame_index: 0 });
   expect(timeline.rows).toHaveLength(1);
   const { replay } = await expectSavedArtifacts(
@@ -428,13 +447,13 @@ test("confirmed prefix discard restarts capture and Finish opens settled frame-z
     discard_available: true,
   });
   await expect(page.locator("#reset-button")).toBeEnabled();
-  await expect(page.locator("#scenario-select")).toBeEnabled();
+  await expect(page.locator("#scenario-select")).toHaveCount(0);
   await expect(page.locator("#movement-scale-input")).toHaveCount(0);
 
   await page.locator("#reset-button").click();
   await expect(page.locator("#recording-discard-dialog")).toBeVisible();
   await expect(page.locator("#recording-discard-intent")).toHaveText(
-    "Reset the current scenario to a fresh episode",
+    "Reset the current episode",
   );
   await expect(page.locator("#recording-discard-cancel-button")).toBeFocused();
   await expectRecordingCount(page, 1);
@@ -477,17 +496,6 @@ test("confirmed prefix discard restarts capture and Finish opens settled frame-z
   await page.locator("#recording-finish-button").click();
   const response = await finishResponse;
   expect(response.status()).toBe(200);
-  const payload = await response.json();
-  expect(payload).toMatchObject({
-    schema_version: 2,
-    result: "applied",
-    frame: {
-      recording: {
-        lifecycle: "reviewing",
-        captured_transition_count: 1,
-      },
-    },
-  });
   await expectSettledReplayHandoff(page);
   expect(page.url()).toBe(stableUrl);
   expect(
@@ -499,49 +507,6 @@ test("confirmed prefix discard restarts capture and Finish opens settled frame-z
   expectNoBrowserErrors(page);
 });
 
-test("scripted endpoint auto-saves complete capture and Review opens frame zero", async ({
-  page,
-}) => {
-  const started = requiredRecording();
-  await openRecording(page, started.url);
-  await captureNextTransition(page, 1);
-  const endpoint = await captureNextTransition(page, 2);
-  expect(endpoint.recording).toMatchObject({
-    lifecycle: "saved",
-    captured_transition_count: 2,
-    completion_state: "complete",
-    completion_reason: null,
-    finish_available: false,
-    review_available: true,
-  });
-  await expect(page.locator("#connection-status")).toHaveText("Online");
-  await expect(page.locator("#recording-review-button")).toBeEnabled();
-  await expect(page.locator("#recording-finish-button")).toBeHidden();
-  await expect(page.locator("#advance-script-button")).toBeDisabled();
-  const saved = await expectSavedArtifacts(
-    started.replayPath,
-    started.metricReportPath,
-    2,
-  );
-  expect(saved.replay.value.completion).toMatchObject({
-    completion_state: "complete",
-    validated_transition_count: 2,
-    end_or_failure_reason: null,
-  });
-
-  const reviewResponse = page.waitForResponse(
-    (response) =>
-      response.request().method() === "POST" &&
-      new URL(response.url()).pathname === "/api/command",
-    { timeout: 120_000 },
-  );
-  await page.locator("#recording-review-button").click();
-  expect((await reviewResponse).status()).toBe(200);
-  const { frame } = await expectSettledReplayHandoff(page);
-  expect(frame.cursor).toMatchObject({ frame_index: 0, final_frame_index: 2 });
-  expectNoBrowserErrors(page);
-});
-
 test("Exit persists an interrupted prefix before clean process shutdown", async ({
   page,
 }) => {
@@ -549,16 +514,21 @@ test("Exit persists an interrupted prefix before clean process shutdown", async 
   await openRecording(page, started.url);
   await captureOneTransition(page);
   const exitPromise = waitForRecordingDebuggerExit(started.process);
-  const responsePromise = page.waitForResponse(
-    (response) =>
-      response.request().method() === "POST" &&
-      new URL(response.url()).pathname === "/api/command",
-    { timeout: 120_000 },
-  );
+  const responsePromise = page
+    .waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/api/command",
+      { timeout: 120_000 },
+    )
+    .then(async (response) => ({
+      payload: await response.json(),
+      status: response.status(),
+    }));
   await page.locator("#exit-button").click();
   const response = await responsePromise;
-  expect(response.status()).toBe(200);
-  expect(await response.json()).toMatchObject({
+  expect(response.status).toBe(200);
+  expect(response.payload).toMatchObject({
     schema_version: 2,
     result: "shutdown_scheduled",
     frame: {
@@ -625,7 +595,7 @@ test("a second live tab cannot advance after Finish and Reconnect adopts replay"
       new URL(response.url()).pathname === "/api/command",
     { timeout: 120_000 },
   );
-  await stalePage.locator("#advance-script-button").click();
+  await stalePage.locator("#submit-turn-button").click();
   const rejected = await rejectedPromise;
   expect(rejected.status()).toBe(404);
   await expect(stalePage.locator("#connection-status")).toHaveText("Resync required");
@@ -677,13 +647,6 @@ test("actor POV recording and handoff retain exact status and non-disclosure roo
   await page.locator("#recording-finish-button").click();
   const response = await responsePromise;
   expect(response.status()).toBe(200);
-  expect(await response.json()).toMatchObject({
-    frame: {
-      frame_kind: "actor_pov_live_debugger",
-      view_mode: "pov",
-      recording: { lifecycle: "reviewing", captured_transition_count: 1 },
-    },
-  });
   const { frame, timeline } = await expectSettledReplayHandoff(page, "pov");
   expect(frame).toMatchObject({
     artifact_summary: {
@@ -743,17 +706,17 @@ test("target race remains Online and fenced until Save As recovers cached artifa
   await expect(page.locator("#recording-save-as-input")).toBeEnabled();
   await expect(page.locator("#recording-save-as-button")).toBeEnabled();
   await expect(page.locator("#reset-button")).toBeDisabled();
-  await expect(page.locator("#scenario-select")).toBeDisabled();
+  await expect(page.locator("#scenario-select")).toHaveCount(0);
   await expect(page.locator("#movement-scale-input")).toHaveCount(0);
-  await expect(page.locator("#advance-script-button")).toBeDisabled();
+  await expect(page.locator("#advance-script-button")).toHaveCount(0);
   await expect(page.locator("#view-select")).toBeEnabled();
-  await expect(page.locator("#preset-select")).toBeEnabled();
+  await expect(page.locator("#preset-select")).toHaveCount(0);
   await expect(page.locator("#exit-button")).toBeEnabled();
   await expect(page.locator("#battlefield")).toHaveAttribute("role", "img");
   await expect(page.locator("#battlefield")).toHaveAttribute("tabindex", "-1");
   await expect(page.locator('[data-key="g"]')).toBeEnabled();
   await expect(page.locator('[data-key="v"]')).toHaveCount(0);
-  await expect(page.locator('[data-key="n"]')).toBeDisabled();
+  await expect(page.locator('[data-key="n"]')).toHaveCount(0);
   await expect(page.locator('[data-key="w"]')).toBeDisabled();
   await expect(page.locator("#command-target-select")).toBeDisabled();
   const rosterButtons = page.locator("#roster button");
@@ -767,8 +730,6 @@ test("target race remains Online and fenced until Save As recovers cached artifa
     const blockedSelectors = [
       "#battlefield",
       "#reset-button",
-      "#scenario-select",
-      "#advance-script-button",
       "#command-target-select",
       '[data-key="w"]',
       "#roster button",
@@ -790,12 +751,7 @@ test("target race remains Online and fenced until Save As recovers cached artifa
         }
       }
     }
-    const allowedSelectors = [
-      "#view-select",
-      "#preset-select",
-      '[data-key="g"]',
-      "#exit-button",
-    ];
+    const allowedSelectors = ["#view-select", '[data-key="g"]', "#exit-button"];
     const allowedFocus = [];
     for (const selector of allowedSelectors) {
       const element = document.querySelector(selector);
@@ -806,7 +762,7 @@ test("target race remains Online and fenced until Save As recovers cached artifa
     return { allowedFocus, blockedTabLeaks };
   });
   expect(focusFence).toEqual({
-    allowedFocus: ["#view-select", "#preset-select", '[data-key="g"]', "#exit-button"],
+    allowedFocus: ["#view-select", '[data-key="g"]', "#exit-button"],
     blockedTabLeaks: [],
   });
   const failedFrame = await currentFrame(page);

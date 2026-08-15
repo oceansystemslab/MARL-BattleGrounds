@@ -188,12 +188,12 @@ export function normalizeReplayCommand(value) {
   }
   if (type === "set_preset") {
     exactKeys(value, ["command_type", "preset"], "Replay preset command");
-    if (!["presentation", "analysis", "debug"].includes(value.preset)) {
+    if (!["presentation", "analysis", "technical", "debug"].includes(value.preset)) {
       throw new TypeError("Replay preset is invalid.");
     }
     return Object.freeze({
       command_type: type,
-      preset: value.preset === "debug" ? "analysis" : value.preset,
+      preset: "analysis",
     });
   }
   if (type === "set_ranges") {

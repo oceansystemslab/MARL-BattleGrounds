@@ -34,6 +34,7 @@ export function statusApplicationRoutes(event) {
           {
             eventId: event.eventId,
             sourceSlot: event.sourceSlot,
+            sourcePresentationKey: event.sourcePresentationKey,
             sourcePublicAgentId: event.sourcePublicAgentId,
             source: event.source,
           },
@@ -54,6 +55,10 @@ export function statusApplicationRoutes(event) {
       return [
         Object.freeze({
           applicationEventId: candidate.eventId,
+          ...(typeof candidate.sourcePresentationKey === "string" &&
+          candidate.sourcePresentationKey
+            ? { sourcePresentationKey: candidate.sourcePresentationKey }
+            : {}),
           sourceSlot: Number.isInteger(candidate.sourceSlot)
             ? candidate.sourceSlot
             : null,
@@ -116,6 +121,11 @@ export function explainChoreographyEvent(event) {
     event.eventType,
     event.tokenId,
     event.lifecycle,
+    event.actorPresentationKey,
+    event.sourcePresentationKey,
+    ...applicationSources.map((source) => source?.sourcePresentationKey),
+    event.recipientPresentationKey,
+    event.agentPresentationKey,
     event.actorPublicAgentId,
     event.sourcePublicAgentId,
     ...applicationSources.map((source) => source?.sourcePublicAgentId),
@@ -358,6 +368,10 @@ export class SvgChoreographyPainter {
     assignSlot(group, "target", event.targetSlot);
     assignSlot(group, "recipient", event.recipientSlot);
     assignSlot(group, "actor", event.actorSlot);
+    assignPresentationKey(group, "source", event.sourcePresentationKey);
+    assignPresentationKey(group, "target", event.targetPresentationKey);
+    assignPresentationKey(group, "recipient", event.recipientPresentationKey);
+    assignPresentationKey(group, "actor", event.actorPresentationKey);
     if (typeof event.tokenId === "string") {
       group.dataset.tokenId = event.tokenId;
     }
@@ -391,6 +405,7 @@ export class SvgChoreographyPainter {
     if (Number.isInteger(event.agentSlot)) {
       group.dataset.agentSlot = String(event.agentSlot);
     }
+    assignPresentationKey(group, "agent", event.agentPresentationKey);
     if (typeof event.movementMaskValue === "boolean") {
       group.dataset.movementMaskValue = String(event.movementMaskValue);
     }
@@ -541,14 +556,19 @@ export class SvgChoreographyPainter {
       underlay.append(hitPath, path, arrow);
       if (
         event.tokenId === "warrior_charge" &&
-        Number.isInteger(event.sourceSlot) &&
-        Number.isInteger(event.targetSlot)
+        ((Number.isInteger(event.sourceSlot) && Number.isInteger(event.targetSlot)) ||
+          (typeof event.sourcePresentationKey === "string" &&
+            event.sourcePresentationKey &&
+            typeof event.targetPresentationKey === "string" &&
+            event.targetPresentationKey))
       ) {
         const ownership = svgElement(ownerDocument, "g", {
           class: "combat-route__ownership",
           "aria-hidden": "true",
           "data-source-slot": event.sourceSlot,
           "data-target-slot": event.targetSlot,
+          "data-source-presentation-key": event.sourcePresentationKey,
+          "data-target-presentation-key": event.targetPresentationKey,
         });
         const ownershipLabel = `${formatAgentIdentity(event.sourcePublicAgentId)} → ${formatAgentIdentity(event.targetPublicAgentId)}`;
         ownership.append(
@@ -964,6 +984,7 @@ export class SvgChoreographyPainter {
             d: route.path,
             "data-application-event-id": route.applicationEventId,
             "data-source-slot": route.sourceSlot,
+            "data-source-presentation-key": route.sourcePresentationKey,
           }),
         );
       }
@@ -1609,6 +1630,17 @@ function setAttributes(element, attributes) {
 function assignSlot(group, role, value) {
   if (Number.isInteger(value)) {
     group.dataset[`${role}Slot`] = String(value);
+  }
+}
+
+/**
+ * @param {SVGElement} group
+ * @param {string} role
+ * @param {unknown} value
+ */
+function assignPresentationKey(group, role, value) {
+  if (typeof value === "string" && value) {
+    group.dataset[`${role}PresentationKey`] = value;
   }
 }
 

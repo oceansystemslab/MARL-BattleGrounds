@@ -15,6 +15,15 @@ from typing import Annotated, Literal, cast
 
 import pytest
 from pydantic import BaseModel, ConfigDict, Field
+from scripts.dev.visual_debugger.replay_protocol import (
+    ReplayApiErrorV1,
+    ReplayCommandRequestV1,
+    ReplayCommandResponseV1,
+    ReplayNextFrameCommandV1,
+    SharedObsAgentPovReplayTimelineV1,
+    SharedObsAgentPovReplayViewerFrameV1,
+)
+from scripts.dev.visual_debugger.replay_service import ReplayViewerService
 from scripts.dev.visual_debugger.server import (
     LIVE_HTTP_ROUTES,
     REPLAY_HTTP_ROUTES,
@@ -26,6 +35,9 @@ from scripts.dev.visual_debugger.server import (
     create_server,
     serve_browser_debugger,
 )
+from tests.export_visual_debugger_replay_artifacts import export_artifacts
+
+from marl_battlegrounds.evaluation.replay_io import load_replay_bundle_v1
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _ASSET_ROOT = _REPOSITORY_ROOT / "web" / "visual_debugger"
@@ -65,6 +77,26 @@ class _FakeReplayTimeline(_StrictModel):
     timeline_kind: Literal["researcher_replay_timeline"] = "researcher_replay_timeline"
     current_frame_index: Annotated[int, Field(ge=0)]
     frame_indices: tuple[Annotated[int, Field(ge=0)], ...]
+
+
+class _FakeReplayPresentation(_StrictModel):
+    schema_version: Literal[1] = 1
+    presentation_kind: Literal["replay_oracle"] = "replay_oracle"
+    source_revision: Annotated[int, Field(ge=0)]
+    source_frame_index: Annotated[int, Field(ge=0)]
+
+
+class _FakeLivePresentation(_StrictModel):
+    schema_version: Literal[1] = 1
+    presentation_kind: Literal["live_oracle"] = "live_oracle"
+    source_revision: Annotated[int, Field(ge=0)]
+    source_frame_index: Annotated[int, Field(ge=0)]
+
+
+class _FakePresentationError(_StrictModel):
+    schema_version: Literal[1] = 1
+    error_code: Literal["audience_unavailable"] = "audience_unavailable"
+    message: str = Field(min_length=1)
 
 
 class _FakeSeekCommand(_StrictModel):
@@ -141,6 +173,12 @@ class _FakeLiveServiceResult:
     shutdown_requested: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class _FakePresentationResult:
+    outcome: Literal["response", "audience_unavailable"]
+    payload: _FakeReplayPresentation | _FakeLivePresentation | _FakePresentationError
+
+
 class _FakeReplayService:
     """Small transport fake; no production replay or simulator imports."""
 
@@ -149,6 +187,7 @@ class _FakeReplayService:
         self.frame_index = 0
         self.frame_calls = 0
         self.timeline_calls = 0
+        self.presentation_calls = 0
         self.command_calls = 0
         self.cursor_mutations = 0
         self.private_replay = {
@@ -156,6 +195,7 @@ class _FakeReplayService:
             "metric_report": {"secret": 1},
         }
         self._commands: dict[tuple[str, str], str] = {}
+        self.presentation_available = True
 
     def current_frame(self) -> _FakeReplayFrame:
         self.frame_calls += 1
@@ -166,6 +206,36 @@ class _FakeReplayService:
         return _FakeReplayTimeline(
             current_frame_index=self.frame_index,
             frame_indices=(0, 1, 2),
+        )
+
+    def current_presentation(self) -> _FakePresentationResult:
+        self.presentation_calls += 1
+        if not self.presentation_available:
+            return _FakePresentationResult(
+                outcome="audience_unavailable",
+                payload=_FakePresentationError(
+                    message=(
+                        "Authorized presentation is unavailable for the active "
+                        "audience."
+                    )
+                ),
+            )
+        return _FakePresentationResult(
+            outcome="response",
+            payload=_FakeReplayPresentation(
+                source_revision=self.revision,
+                source_frame_index=self.frame_index,
+            ),
+        )
+
+    def current_live_presentation(self) -> _FakePresentationResult:
+        self.presentation_calls += 1
+        return _FakePresentationResult(
+            outcome="response",
+            payload=_FakeLivePresentation(
+                source_revision=self.revision,
+                source_frame_index=self.frame_index,
+            ),
         )
 
     def apply_command(self, request: _FakeReplayRequest) -> _FakeServiceResult:
@@ -245,18 +315,37 @@ class _FakeReplayService:
 class _BlockingLiveService:
     """Transport fake whose selected operation remains inside one request."""
 
-    def __init__(self, *, block_frame_with_error: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        block_frame_with_error: bool = False,
+        block_presentation: bool = False,
+    ) -> None:
         self.block_frame_with_error = block_frame_with_error
+        self.block_presentation = block_presentation
         self.entered = Event()
         self.release = Event()
         self.received_request: _FakeLiveRequest | None = None
         self.on_apply: Callable[[], None] | None = None
+        self.presentation_calls = 0
 
     def current_frame(self) -> _FakeLiveFrame:
         if self.block_frame_with_error:
             self._wait_for_release()
             raise RuntimeError("synthetic live failure")
         return _FakeLiveFrame(revision=0)
+
+    def current_presentation(self) -> _FakePresentationResult:
+        self.presentation_calls += 1
+        if self.block_presentation:
+            self._wait_for_release()
+        return _FakePresentationResult(
+            outcome="response",
+            payload=_FakeLivePresentation(
+                source_revision=0,
+                source_frame_index=0,
+            ),
+        )
 
     def apply_command(self, request: _FakeLiveRequest) -> _FakeLiveServiceResult:
         self.received_request = request
@@ -296,6 +385,7 @@ def _live_coordinator(service: _BlockingLiveService) -> HttpCoordinatorBinding:
         error_factory=_live_error_factory,
         current_frame=service.current_frame,
         apply_command=service.apply_command,
+        current_presentation=service.current_presentation,
     )
 
 
@@ -312,6 +402,11 @@ def _coordinator(
         current_frame=service.current_frame,
         apply_command=service.apply_command,
         current_timeline=(service.current_timeline if mode == "replay" else None),
+        current_presentation=(
+            service.current_presentation
+            if mode == "replay"
+            else service.current_live_presentation
+        ),
     )
 
 
@@ -358,6 +453,18 @@ def _authorized_headers(**extra: str) -> dict[str, str]:
     return {_TOKEN_HEADER: _TOKEN, **extra}
 
 
+def _recursive_keys(value: object) -> set[str]:
+    if isinstance(value, dict):
+        record = cast(dict[str, object], value)
+        return set(record) | {
+            key for child in record.values() for key in _recursive_keys(child)
+        }
+    if isinstance(value, list):
+        sequence = cast(list[object], value)
+        return {key for child in sequence for key in _recursive_keys(child)}
+    return set()
+
+
 def _command_body(
     command_id: str,
     *,
@@ -376,6 +483,24 @@ def _command_body(
     )
 
 
+def test_replay_bootstrap_exposes_only_the_replay_product_identity(
+    running_replay_server: tuple[DebuggerHTTPServer, _FakeReplayService, Thread],
+) -> None:
+    server, service, _ = running_replay_server
+
+    response, body = _exchange(server, "GET", "/bootstrap.js")
+
+    assert response.status == HTTPStatus.OK
+    assert response.getheader("Content-Type") == "text/javascript; charset=utf-8"
+    assert response.getheader("Cache-Control") == "no-store"
+    assert body == (
+        b"globalThis.__MARL_DEBUGGER_BOOTSTRAP__ = Object.freeze("
+        b'{"product_kind":"replay_viewer","schema_version":1});\n'
+    )
+    assert service.frame_calls == 0
+    assert service.timeline_calls == 0
+
+
 def test_server_import_is_core_jax_and_protocol_family_free() -> None:
     code = """
 import sys
@@ -389,10 +514,13 @@ forbidden = (
     'marl_battlegrounds.evaluation.capture',
     'scripts.dev.visual_debugger.control',
     'scripts.dev.visual_debugger.protocol',
+    'scripts.dev.visual_debugger.presentation',
+    'scripts.dev.visual_debugger.presentation_protocol',
     'scripts.dev.visual_debugger.replay_protocol',
     'scripts.dev.visual_debugger.replay_service',
     'scripts.dev.visual_debugger.scenarios',
     'scripts.dev.visual_debugger.service',
+    'marl_battlegrounds.rendering.authorized_presentation',
 )
 loaded = sorted(
     name
@@ -487,6 +615,17 @@ def test_live_request_and_replay_replacement_are_serialized_and_coherent() -> No
             "/api/replay/timeline",
             headers=_authorized_headers(),
         )
+        replay_presentation, replay_presentation_body = _exchange(
+            server,
+            "GET",
+            "/api/presentation/frame",
+            headers=_authorized_headers(),
+        )
+        replay_bootstrap, replay_bootstrap_body = _exchange(
+            server,
+            "GET",
+            "/bootstrap.js",
+        )
         removed_live_route, removed_live_body = _exchange(
             server,
             "POST",
@@ -507,7 +646,20 @@ def test_live_request_and_replay_replacement_are_serialized_and_coherent() -> No
         }
         assert isinstance(live_service.received_request, _FakeLiveRequest)
         assert swap_results == [True]
-        assert replay_frame.status == replay_timeline.status == HTTPStatus.OK
+        assert (
+            replay_frame.status
+            == replay_timeline.status
+            == replay_presentation.status
+            == HTTPStatus.OK
+        )
+        assert json.loads(replay_presentation_body)["presentation_kind"] == (
+            "replay_oracle"
+        )
+        assert replay_bootstrap.status == HTTPStatus.OK
+        assert replay_bootstrap_body == (
+            b"globalThis.__MARL_DEBUGGER_BOOTSTRAP__ = Object.freeze("
+            b'{"product_kind":"replay_viewer","schema_version":1});\n'
+        )
         assert json.loads(replay_frame_body)["schema_version"] == 1
         assert removed_live_route.status == HTTPStatus.NOT_FOUND
         assert json.loads(removed_live_body)["schema_version"] == 1
@@ -520,6 +672,90 @@ def test_live_request_and_replay_replacement_are_serialized_and_coherent() -> No
         assert server.expected_origin == original_origin
         assert server.expected_host == original_host
         assert server.capability_token == original_token
+    finally:
+        live_service.release.set()
+        if server_thread.is_alive():
+            server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)
+        old_request.join(timeout=2)
+        swap_thread.join(timeout=2)
+
+
+def test_in_flight_live_presentation_pins_old_binding_until_replay_cas() -> None:
+    live_service = _BlockingLiveService(block_presentation=True)
+    server = create_server(
+        live_service,
+        asset_root=_ASSET_ROOT,
+        port=0,
+        capability_token=_TOKEN,
+        coordinator=_live_coordinator(live_service),
+    )
+    server_thread = Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    expected = server.coordinator_snapshot()
+    replay_service = _FakeReplayService()
+    replay_binding = _coordinator(replay_service)
+    replacement = HttpCoordinatorReplacement(
+        service=replay_service,
+        binding=replay_binding,
+    )
+    old_responses: list[tuple[HTTPResponse, bytes]] = []
+    old_request = Thread(
+        target=lambda: old_responses.append(
+            _exchange(
+                server,
+                "GET",
+                "/api/presentation/frame",
+                headers=_authorized_headers(),
+            )
+        ),
+        daemon=True,
+    )
+    swap_finished = Event()
+    swap_results: list[bool] = []
+
+    def install_replay() -> None:
+        swap_results.append(
+            server.install_replay_coordinator(
+                expected=expected,
+                replacement=replacement,
+            )
+        )
+        swap_finished.set()
+
+    swap_thread = Thread(target=install_replay, daemon=True)
+    try:
+        old_request.start()
+        assert live_service.entered.wait(timeout=2)
+        swap_thread.start()
+        assert not swap_finished.wait(timeout=0.1)
+
+        live_service.release.set()
+        old_request.join(timeout=2)
+        swap_thread.join(timeout=2)
+        assert not old_request.is_alive()
+        assert not swap_thread.is_alive()
+        assert swap_results == [True]
+
+        old_response, old_body = old_responses[0]
+        assert old_response.status == HTTPStatus.OK
+        assert json.loads(old_body)["presentation_kind"] == "live_oracle"
+        assert live_service.presentation_calls == 1
+
+        next_response, next_body = _exchange(
+            server,
+            "GET",
+            "/api/presentation/frame",
+            headers=_authorized_headers(),
+        )
+        assert next_response.status == HTTPStatus.OK
+        assert json.loads(next_body)["presentation_kind"] == "replay_oracle"
+        assert replay_service.presentation_calls == 1
+        active = server.coordinator_snapshot()
+        assert active.generation == 1
+        assert active.service is replay_service
+        assert active.binding is replay_binding
     finally:
         live_service.release.set()
         if server_thread.is_alive():
@@ -675,7 +911,51 @@ def test_serve_browser_debugger_accepts_router_only_launch(
     )
 
     assert result == 0
-    assert "Visual Debugger and Analyzer stopped." in capsys.readouterr().out
+    assert "MARL-BattleGrounds Replay Viewer stopped." in capsys.readouterr().out
+
+
+def test_shutdown_title_uses_the_active_product_after_live_to_replay_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    live_service = _BlockingLiveService()
+    live_binding = _live_coordinator(live_service)
+    router = HttpCoordinatorRouter(service=live_service, binding=live_binding)
+    replay_service = _FakeReplayService()
+    replacement = HttpCoordinatorReplacement(
+        service=replay_service,
+        binding=_coordinator(replay_service),
+    )
+
+    def install_then_interrupt(
+        server: DebuggerHTTPServer,
+        *,
+        poll_interval: float,
+    ) -> None:
+        del poll_interval
+        assert server.install_replay_coordinator(
+            expected=router.snapshot(),
+            replacement=replacement,
+        )
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        DebuggerHTTPServer,
+        "serve_forever",
+        install_then_interrupt,
+    )
+
+    result = serve_browser_debugger(
+        asset_root=_ASSET_ROOT,
+        port=0,
+        open_browser=False,
+        coordinator_router=router,
+    )
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "MARL-BattleGrounds Combat Debugger: http://127.0.0.1:" in output
+    assert "MARL-BattleGrounds Replay Viewer stopped." in output
 
 
 def test_in_flight_error_uses_the_pinned_protocol_family() -> None:
@@ -823,6 +1103,7 @@ def test_binding_rejects_route_or_timeline_cross_mode_configuration() -> None:
             error_factory=_error_factory,
             current_frame=service.current_frame,
             apply_command=service.apply_command,
+            current_presentation=service.current_presentation,
             current_timeline=service.current_timeline,
         )
     with pytest.raises(ValueError, match="cannot expose a replay timeline"):
@@ -833,6 +1114,7 @@ def test_binding_rejects_route_or_timeline_cross_mode_configuration() -> None:
             error_factory=_error_factory,
             current_frame=service.current_frame,
             apply_command=service.apply_command,
+            current_presentation=service.current_live_presentation,
             current_timeline=service.current_timeline,
         )
     with pytest.raises(ValueError, match="requires a timeline"):
@@ -843,6 +1125,27 @@ def test_binding_rejects_route_or_timeline_cross_mode_configuration() -> None:
             error_factory=_error_factory,
             current_frame=service.current_frame,
             apply_command=service.apply_command,
+            current_presentation=service.current_presentation,
+        )
+    with pytest.raises(TypeError, match="current_presentation"):
+        HttpCoordinatorBinding(  # pyright: ignore[reportCallIssue]
+            mode="replay",
+            routes=REPLAY_HTTP_ROUTES,
+            request_model=_FakeReplayRequest,
+            error_factory=_error_factory,
+            current_frame=service.current_frame,
+            apply_command=service.apply_command,
+            current_timeline=service.current_timeline,
+        )
+    with pytest.raises(TypeError, match="current_presentation must be callable"):
+        HttpCoordinatorBinding(
+            mode="live",
+            routes=LIVE_HTTP_ROUTES,
+            request_model=_FakeReplayRequest,
+            error_factory=_error_factory,
+            current_frame=service.current_frame,
+            apply_command=service.apply_command,
+            current_presentation=None,  # pyright: ignore[reportArgumentType]
         )
     with pytest.raises(ValueError, match="exact HTTP route set"):
         HttpCoordinatorBinding(
@@ -851,15 +1154,17 @@ def test_binding_rejects_route_or_timeline_cross_mode_configuration() -> None:
                 frame="/api/frame",
                 command="/api/replay/command",
                 timeline=None,
+                presentation="/api/presentation/frame",
             ),
             request_model=_FakeReplayRequest,
             error_factory=_error_factory,
             current_frame=service.current_frame,
             apply_command=service.apply_command,
+            current_presentation=service.current_live_presentation,
         )
 
 
-def test_replay_frame_and_timeline_are_authenticated_bounded_models(
+def test_replay_frame_presentation_and_timeline_are_authenticated_bounded_models(
     running_replay_server: tuple[DebuggerHTTPServer, _FakeReplayService, Thread],
 ) -> None:
     server, service, _ = running_replay_server
@@ -868,6 +1173,12 @@ def test_replay_frame_and_timeline_are_authenticated_bounded_models(
         server,
         "GET",
         "/api/frame",
+        headers=_authorized_headers(),
+    )
+    presentation, presentation_body = _exchange(
+        server,
+        "GET",
+        "/api/presentation/frame",
         headers=_authorized_headers(),
     )
     timeline, timeline_body = _exchange(
@@ -879,8 +1190,9 @@ def test_replay_frame_and_timeline_are_authenticated_bounded_models(
 
     assert missing.status == HTTPStatus.UNAUTHORIZED
     assert json.loads(missing_body)["error_code"] == "unauthorized"
-    assert frame.status == timeline.status == HTTPStatus.OK
+    assert frame.status == presentation.status == timeline.status == HTTPStatus.OK
     assert frame.getheader("Cache-Control") == "no-store"
+    assert presentation.getheader("Cache-Control") == "no-store"
     assert timeline.getheader("Cache-Control") == "no-store"
     assert json.loads(frame_body) == {
         "schema_version": 1,
@@ -894,11 +1206,206 @@ def test_replay_frame_and_timeline_are_authenticated_bounded_models(
         "current_frame_index": 0,
         "frame_indices": [0, 1, 2],
     }
-    serialized = frame_body + timeline_body
+    assert json.loads(presentation_body) == {
+        "schema_version": 1,
+        "presentation_kind": "replay_oracle",
+        "source_revision": 0,
+        "source_frame_index": 0,
+    }
+    serialized = frame_body + presentation_body + timeline_body
     assert b"must-never-cross-http" not in serialized
     assert b"hidden_events" not in serialized
     assert b"metric_report" not in serialized
-    assert service.frame_calls == service.timeline_calls == 1
+    assert (
+        service.frame_calls == service.presentation_calls == service.timeline_calls == 1
+    )
+
+
+def test_actual_shared_replay_http_outcomes_are_private_recipient_roots(
+    tmp_path: Path,
+) -> None:
+    artifacts = export_artifacts(tmp_path / "standalone-shared-artifacts")
+    service = ReplayViewerService(
+        load_replay_bundle_v1(
+            Path(artifacts["shared"]),
+            require_metric_report=True,
+        ),
+        view_mode="pov",
+        pov_global_slot=0,
+        viewer_session_id="server-shared-private",
+    )
+    binding = HttpCoordinatorBinding(
+        mode="replay",
+        routes=REPLAY_HTTP_ROUTES,
+        request_model=ReplayCommandRequestV1,
+        error_factory=ReplayApiErrorV1,
+        current_frame=service.current_frame,
+        apply_command=service.apply_command,
+        current_timeline=service.current_timeline,
+        current_presentation=service.current_presentation,
+    )
+    server = create_server(
+        service,
+        asset_root=_ASSET_ROOT,
+        port=0,
+        capability_token=_TOKEN,
+        coordinator=binding,
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    headers = _authorized_headers(**{"Content-Type": "application/json"})
+    request = ReplayCommandRequestV1(
+        client_id="shared-http-client",
+        command_id="shared-next",
+        base_revision=0,
+        command=ReplayNextFrameCommandV1(),
+    )
+    stale_request = ReplayCommandRequestV1(
+        client_id="shared-http-client",
+        command_id="shared-stale",
+        base_revision=0,
+        command=ReplayNextFrameCommandV1(),
+    )
+    try:
+        frame_response, frame_body = _exchange(
+            server,
+            "GET",
+            "/api/frame",
+            headers=_authorized_headers(),
+        )
+        timeline_response, timeline_body = _exchange(
+            server,
+            "GET",
+            "/api/replay/timeline",
+            headers=_authorized_headers(),
+        )
+        applied_response, applied_body = _exchange(
+            server,
+            "POST",
+            "/api/replay/command",
+            body=request.model_dump_json().encode(),
+            headers=headers,
+        )
+        duplicate_response, duplicate_body = _exchange(
+            server,
+            "POST",
+            "/api/replay/command",
+            body=request.model_dump_json().encode(),
+            headers=headers,
+        )
+        stale_response, stale_body = _exchange(
+            server,
+            "POST",
+            "/api/replay/command",
+            body=stale_request.model_dump_json().encode(),
+            headers=headers,
+        )
+    finally:
+        if thread.is_alive():
+            server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert frame_response.status == timeline_response.status == HTTPStatus.OK
+    assert applied_response.status == duplicate_response.status == HTTPStatus.OK
+    assert stale_response.status == HTTPStatus.CONFLICT
+    assert frame_response.getheader("Cache-Control") == "no-store"
+    assert timeline_response.getheader("Cache-Control") == "no-store"
+
+    frame = SharedObsAgentPovReplayViewerFrameV1.model_validate_json(frame_body)
+    timeline = SharedObsAgentPovReplayTimelineV1.model_validate_json(timeline_body)
+    applied = ReplayCommandResponseV1.model_validate_json(applied_body)
+    duplicate = ReplayCommandResponseV1.model_validate_json(duplicate_body)
+    stale = ReplayApiErrorV1.model_validate_json(stale_body)
+    assert type(applied.frame) is SharedObsAgentPovReplayViewerFrameV1
+    assert type(duplicate.frame) is SharedObsAgentPovReplayViewerFrameV1
+    assert type(stale.latest_frame) is SharedObsAgentPovReplayViewerFrameV1
+    assert frame.cursor.frame_index == 0
+    assert timeline.rows[0].recipient_frame_id == frame.recipient_frame_id
+    assert applied.frame.cursor.frame_index == 1
+    assert duplicate.frame == applied.frame
+    assert stale.latest_frame == applied.frame
+
+    bodies = (frame_body, timeline_body, applied_body, duplicate_body, stale_body)
+    forbidden_keys = {
+        "global_slot",
+        "metric_report_availability",
+        "observation_materialization",
+        "processing",
+        "projection",
+        "replay_reference",
+        "selected_global_slot",
+        "source_material_frame_id",
+    }
+    for body in bodies:
+        assert _recursive_keys(json.loads(body)).isdisjoint(forbidden_keys)
+    serialized = b"".join(bodies)
+    assert b"shared_obs_source_material" not in serialized
+    assert b"must-never-cross-http" not in serialized
+
+
+def test_replay_presentation_unavailable_is_typed_and_non_disclosing(
+    running_replay_server: tuple[DebuggerHTTPServer, _FakeReplayService, Thread],
+) -> None:
+    server, service, _ = running_replay_server
+    service.presentation_available = False
+
+    response, body = _exchange(
+        server,
+        "GET",
+        "/api/presentation/frame",
+        headers=_authorized_headers(),
+    )
+
+    assert response.status == HTTPStatus.UNPROCESSABLE_ENTITY
+    assert response.getheader("Cache-Control") == "no-store"
+    assert json.loads(body) == {
+        "schema_version": 1,
+        "error_code": "audience_unavailable",
+        "message": "Authorized presentation is unavailable for the active audience.",
+    }
+    assert b"latest_frame" not in body
+    assert b"must-never-cross-http" not in body
+    assert service.presentation_calls == 1
+    assert service.frame_calls == service.timeline_calls == service.command_calls == 0
+
+
+def test_command_between_raw_and_presentation_gets_creates_detectable_join_race(
+    running_replay_server: tuple[DebuggerHTTPServer, _FakeReplayService, Thread],
+) -> None:
+    server, service, _ = running_replay_server
+    raw_response, raw_body = _exchange(
+        server,
+        "GET",
+        "/api/frame",
+        headers=_authorized_headers(),
+    )
+    command_response, _ = _exchange(
+        server,
+        "POST",
+        "/api/replay/command",
+        body=_command_body("between-gets", base_revision=0, frame_index=1),
+        headers=_authorized_headers(**{"Content-Type": "application/json"}),
+    )
+    presentation_response, presentation_body = _exchange(
+        server,
+        "GET",
+        "/api/presentation/frame",
+        headers=_authorized_headers(),
+    )
+
+    raw = json.loads(raw_body)
+    presentation = json.loads(presentation_body)
+    assert raw_response.status == command_response.status == HTTPStatus.OK
+    assert presentation_response.status == HTTPStatus.OK
+    assert (raw["revision"], raw["frame_index"]) == (0, 0)
+    assert (
+        presentation["source_revision"],
+        presentation["source_frame_index"],
+    ) == (1, 1)
+    assert raw["revision"] != presentation["source_revision"]
+    assert service.frame_calls == service.presentation_calls == 1
+    assert service.command_calls == service.cursor_mutations == 1
 
 
 def test_replay_command_parser_rejects_bad_requests_before_service_entry(
@@ -1036,6 +1543,51 @@ def test_replay_routes_reuse_host_origin_token_and_size_protections(
     assert service.timeline_calls == service.command_calls == 0
 
 
+def test_presentation_get_reuses_auth_origin_query_and_method_boundaries(
+    running_replay_server: tuple[DebuggerHTTPServer, _FakeReplayService, Thread],
+) -> None:
+    server, service, _ = running_replay_server
+
+    unauthorized, _ = _exchange(server, "GET", "/api/presentation/frame")
+    bad_host, _ = _exchange(
+        server,
+        "GET",
+        "/api/presentation/frame",
+        headers=_authorized_headers(Host="example.invalid"),
+    )
+    bad_origin, _ = _exchange(
+        server,
+        "GET",
+        "/api/presentation/frame",
+        headers=_authorized_headers(Origin="null"),
+    )
+    query, _ = _exchange(
+        server,
+        "GET",
+        "/api/presentation/frame?forbidden=1",
+        headers=_authorized_headers(),
+    )
+    post, _ = _exchange(
+        server,
+        "POST",
+        "/api/presentation/frame",
+        body=b"{}",
+        headers=_authorized_headers(**{"Content-Type": "application/json"}),
+    )
+    head, _ = _exchange(
+        server,
+        "HEAD",
+        "/api/presentation/frame",
+        headers=_authorized_headers(),
+    )
+
+    assert unauthorized.status == HTTPStatus.UNAUTHORIZED
+    assert bad_host.status == bad_origin.status == HTTPStatus.FORBIDDEN
+    assert query.status == post.status == HTTPStatus.NOT_FOUND
+    assert head.status == HTTPStatus.METHOD_NOT_ALLOWED
+    assert service.presentation_calls == 0
+
+
 def test_live_and_replay_routes_are_mode_isolated(
     running_replay_server: tuple[DebuggerHTTPServer, _FakeReplayService, Thread],
 ) -> None:
@@ -1078,6 +1630,12 @@ def test_live_and_replay_routes_are_mode_isolated(
             body=b"{}",
             headers=_authorized_headers(**{"Content-Type": "application/json"}),
         )
+        live_presentation, live_presentation_body = _exchange(
+            live_server,
+            "GET",
+            "/api/presentation/frame",
+            headers=_authorized_headers(),
+        )
     finally:
         live_server.shutdown()
         live_server.server_close()
@@ -1086,8 +1644,11 @@ def test_live_and_replay_routes_are_mode_isolated(
     assert replay_live_command.status == HTTPStatus.NOT_FOUND
     assert invented_replay_frame.status == HTTPStatus.NOT_FOUND
     assert replay_timeline.status == replay_command.status == HTTPStatus.NOT_FOUND
+    assert live_presentation.status == HTTPStatus.OK
+    assert json.loads(live_presentation_body)["presentation_kind"] == "live_oracle"
     assert replay_service.command_calls == 0
     assert live_service.timeline_calls == live_service.command_calls == 0
+    assert live_service.presentation_calls == 1
 
 
 def test_replay_exit_response_is_flushed_before_server_shutdown() -> None:

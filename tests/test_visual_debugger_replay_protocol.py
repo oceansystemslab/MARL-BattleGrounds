@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import pytest
 from pydantic import BaseModel, TypeAdapter, ValidationError
@@ -46,6 +49,10 @@ from scripts.dev.visual_debugger.replay_protocol import (
     ResearcherReplayTimelineRowV1,
     ResearcherReplayTimelineV1,
     ResearcherReplayViewerFrameV1,
+    SharedObsAgentPovReplayArtifactSummaryV1,
+    SharedObsAgentPovReplayTimelineRowV1,
+    SharedObsAgentPovReplayTimelineV1,
+    SharedObsAgentPovReplayViewerFrameV1,
     SharedObsSourceMaterialReplayTimelineRowV1,
     SharedObsSourceMaterialReplayTimelineV1,
     SharedObsSourceMaterialReplayViewerFrameV1,
@@ -65,6 +72,18 @@ _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _DIGEST_A = "a" * 64
 _DIGEST_B = "b" * 64
 _DIGEST_C = "c" * 64
+_RESEARCHER_FRAME_V1_SHA256 = (
+    "2ab411b023c56ebaa0b6d7c9d91bc93489991d8ce7ed42314b0707e518e92e08"
+)
+_ACTOR_POV_FRAME_V1_SHA256 = (
+    "7fcd7d38420eec8b1cdcfbc3b28f39882a9ad0ebb455af1caffd741f6b871d01"
+)
+_RESEARCHER_TIMELINE_V1_SHA256 = (
+    "24da90cf1e6c4f9fe28436ddc6ae1461d3378bcfb981feb315d9c57b09fa923a"
+)
+_ACTOR_POV_TIMELINE_V1_SHA256 = (
+    "ccc8851c92d8d23e568b3568909bfdd0bfd546aa4bd3e20422d74feaa5fdd591"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -322,6 +341,54 @@ def _source_material_frame(
     )
 
 
+def _shared_agent_summary(
+    episode_id: str = "episode-timeline",
+    public_agent_id: str = "agent-5",
+    *,
+    expected: int = 1,
+    captured: int = 1,
+) -> SharedObsAgentPovReplayArtifactSummaryV1:
+    return SharedObsAgentPovReplayArtifactSummaryV1(
+        schema_version=1,
+        recipient_replay_id=(
+            f"{episode_id}:shared-obs-visual-union:{public_agent_id}:replay"
+        ),
+        episode_id=episode_id,
+        public_agent_id=public_agent_id,
+        expected_transition_count=expected,
+        captured_transition_count=captured,
+        captured_frame_count=captured + 1,
+    )
+
+
+def _shared_agent_frame() -> SharedObsAgentPovReplayViewerFrameV1:
+    episode_id = "episode-timeline"
+    public_agent_id = "agent-5"
+    return SharedObsAgentPovReplayViewerFrameV1(
+        schema_version=1,
+        frame_kind="shared_obs_agent_pov_replay_viewer",
+        viewer_session_id="viewer-session",
+        revision=7,
+        artifact_summary=_shared_agent_summary(episode_id, public_agent_id),
+        timeline_id=(
+            f"{episode_id}:shared-obs-visual-union:{public_agent_id}:timeline"
+        ),
+        cursor=_cursor(),
+        preset="analysis",
+        verbose=False,
+        view_mode="pov",
+        public_agent_id=public_agent_id,
+        recipient_frame_id=(
+            f"{episode_id}:shared-obs-visual-union:{public_agent_id}:frame:1"
+        ),
+        simulator_step_count=42,
+        incoming_recipient_transition_id=(
+            f"{episode_id}:shared-obs-visual-union:{public_agent_id}:transition:0"
+        ),
+        completion=_pov_completion(episode_id),
+    )
+
+
 def _researcher_timeline() -> ResearcherReplayTimelineV1:
     episode_id = "episode-timeline"
     return ResearcherReplayTimelineV1(
@@ -418,6 +485,44 @@ def _source_timeline() -> SharedObsSourceMaterialReplayTimelineV1:
     )
 
 
+def _shared_agent_timeline() -> SharedObsAgentPovReplayTimelineV1:
+    episode_id = "episode-timeline"
+    public_agent_id = "agent-5"
+    return SharedObsAgentPovReplayTimelineV1(
+        schema_version=1,
+        timeline_kind="shared_obs_agent_pov",
+        timeline_id=(
+            f"{episode_id}:shared-obs-visual-union:{public_agent_id}:timeline"
+        ),
+        artifact_summary=_shared_agent_summary(episode_id, public_agent_id),
+        final_frame_index=1,
+        completion=_pov_completion(episode_id),
+        rows=(
+            SharedObsAgentPovReplayTimelineRowV1(
+                frame_index=0,
+                recipient_frame_id=(
+                    f"{episode_id}:shared-obs-visual-union:{public_agent_id}:frame:0"
+                ),
+                simulator_step_count=41,
+                incoming_recipient_transition_id=None,
+                endpoint_kind="none",
+            ),
+            SharedObsAgentPovReplayTimelineRowV1(
+                frame_index=1,
+                recipient_frame_id=(
+                    f"{episode_id}:shared-obs-visual-union:{public_agent_id}:frame:1"
+                ),
+                simulator_step_count=42,
+                incoming_recipient_transition_id=(
+                    f"{episode_id}:shared-obs-visual-union:"
+                    f"{public_agent_id}:transition:0"
+                ),
+                endpoint_kind="declared_horizon",
+            ),
+        ),
+    )
+
+
 def _json_roundtrip[ModelT: BaseModel](model: ModelT) -> ModelT:
     return type(model).model_validate_json(model.model_dump_json())
 
@@ -439,6 +544,16 @@ def _recursive_keys(value: object) -> set[str]:
         sequence = cast(list[object], value)
         return {key for child in sequence for key in _recursive_keys(child)}
     return set()
+
+
+def _recursive_strings(value: object) -> set[str]:
+    if isinstance(value, dict):
+        record = cast(dict[str, object], value)
+        return {item for child in record.values() for item in _recursive_strings(child)}
+    if isinstance(value, list):
+        sequence = cast(list[object], value)
+        return {item for child in sequence for item in _recursive_strings(child)}
+    return {value} if isinstance(value, str) else set()
 
 
 @pytest.mark.parametrize(
@@ -469,6 +584,18 @@ def test_every_replay_command_strictly_roundtrips(command: ReplayCommandV1) -> N
 
     assert _json_roundtrip(request) == request
     assert request.command is not command or request.command == command
+
+
+@pytest.mark.parametrize(
+    "legacy_preset",
+    ("presentation", "analysis", "technical", "debug"),
+)
+def test_legacy_replay_preset_canonicalizes_to_analysis(
+    legacy_preset: str,
+) -> None:
+    command = ReplaySetPresetCommandV1.model_validate({"preset": legacy_preset})
+
+    assert command.preset == "analysis"
 
 
 @pytest.mark.parametrize(
@@ -526,9 +653,324 @@ def test_scalar_roots_are_frozen_strict_and_roundtrip() -> None:
         )
 
 
+def test_private_shared_models_and_product_unions_strictly_roundtrip() -> None:
+    summary = _shared_agent_summary()
+    timeline = _shared_agent_timeline()
+    row = timeline.rows[1]
+    frame = _shared_agent_frame()
+
+    for model in (summary, row, timeline, frame):
+        assert _json_roundtrip(model) == model
+
+    frame_adapter: TypeAdapter[ReplayViewerFrameV1] = TypeAdapter(ReplayViewerFrameV1)
+    timeline_adapter: TypeAdapter[ReplayTimelineV1] = TypeAdapter(ReplayTimelineV1)
+    assert frame_adapter.validate_json(frame_adapter.dump_json(frame)) == frame
+    assert timeline_adapter.validate_json(timeline_adapter.dump_json(timeline)) == (
+        timeline
+    )
+
+
+def test_private_shared_completion_disclosure_is_fixed_and_generic() -> None:
+    frame_payload = _shared_agent_frame().model_dump(mode="python")
+    frame_payload["artifact_summary"]["expected_transition_count"] = 4
+    frame_payload["completion"].update(
+        {
+            "completion_state": "interrupted",
+            "expected_transition_count": 4,
+            "completion_bases": (),
+            "public_end_or_failure_reason": "captured_prefix",
+        }
+    )
+    partial_frame = SharedObsAgentPovReplayViewerFrameV1.model_validate(frame_payload)
+
+    timeline_payload = _shared_agent_timeline().model_dump(mode="python")
+    timeline_payload["artifact_summary"]["expected_transition_count"] = 4
+    timeline_payload["completion"].update(
+        {
+            "completion_state": "interrupted",
+            "expected_transition_count": 4,
+            "completion_bases": (),
+            "public_end_or_failure_reason": "captured_prefix",
+        }
+    )
+    timeline_payload["rows"][-1]["endpoint_kind"] = "captured_prefix"
+    partial_timeline = SharedObsAgentPovReplayTimelineV1.model_validate(
+        timeline_payload
+    )
+
+    for model, model_type in (
+        (partial_frame, SharedObsAgentPovReplayViewerFrameV1),
+        (partial_timeline, SharedObsAgentPovReplayTimelineV1),
+    ):
+        leaked = model.model_dump(mode="python")
+        leaked["completion"]["public_end_or_failure_reason"] = (
+            "/home/user/policy.exception.json"
+        )
+        with pytest.raises(ValidationError, match="captured_prefix"):
+            model_type.model_validate(leaked)
+
+    for model, model_type in (
+        (_shared_agent_frame(), SharedObsAgentPovReplayViewerFrameV1),
+        (_shared_agent_timeline(), SharedObsAgentPovReplayTimelineV1),
+    ):
+        leaked = model.model_dump(mode="python")
+        leaked["completion"]["public_end_or_failure_reason"] = "captured_prefix"
+        with pytest.raises(ValidationError, match="forbids a public reason"):
+            model_type.model_validate(leaked)
+
+    response_payload: dict[str, Any] = {
+        "schema_version": 1,
+        "result": "no_op",
+        "frame": partial_frame.model_dump(mode="python"),
+        "notice": None,
+        "animate_incoming": False,
+    }
+    response_payload["frame"]["completion"]["public_end_or_failure_reason"] = (
+        "HOST TRACEBACK"
+    )
+    with pytest.raises(ValidationError, match="captured_prefix"):
+        ReplayCommandResponseV1.model_validate(response_payload)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "poison"),
+    (
+        ("schema_version", True),
+        ("schema_version", 1.0),
+        ("verbose", 0),
+        ("verbose", 0.0),
+    ),
+)
+def test_private_shared_frame_rejects_literal_scalar_coercion(
+    field_name: str,
+    poison: object,
+) -> None:
+    payload = _shared_agent_frame().model_dump(mode="python")
+    payload[field_name] = poison
+
+    with pytest.raises(ValidationError, match="exact Python"):
+        SharedObsAgentPovReplayViewerFrameV1.model_validate(payload)
+
+
+def test_private_shared_roots_revalidate_instances_and_forbid_subclasses() -> None:
+    frame = _shared_agent_frame()
+    summary_values: dict[str, Any] = {
+        **frame.artifact_summary.__dict__,
+        "recipient_replay_id": "episode-timeline:replay",
+    }
+    forged_summary = SharedObsAgentPovReplayArtifactSummaryV1.model_construct(
+        **summary_values
+    )
+    frame_values: dict[str, Any] = {
+        **frame.__dict__,
+        "artifact_summary": forged_summary,
+    }
+    forged_frame = SharedObsAgentPovReplayViewerFrameV1.model_construct(**frame_values)
+    with pytest.raises(ValidationError, match="recipient-local"):
+        TypeAdapter(ReplayViewerFrameV1).validate_python(forged_frame)
+    with pytest.raises(ValidationError, match="recipient-local"):
+        ReplayCommandResponseV1(result="no_op", frame=forged_frame)
+
+    forged_cursor = ReplayCursorV1.model_construct(
+        schema_version=True,
+        frame_index=True,
+        final_frame_index=1,
+        cursor_generation=0,
+        choreography_generation=0,
+    )
+    frame_values = {
+        **frame.__dict__,
+        "cursor": forged_cursor,
+        "recipient_frame_id": (
+            "episode-timeline:shared-obs-visual-union:agent-5:frame:True"
+        ),
+    }
+    forged_frame = SharedObsAgentPovReplayViewerFrameV1.model_construct(**frame_values)
+    with pytest.raises(ValidationError, match="exact Python ints"):
+        TypeAdapter(ReplayViewerFrameV1).validate_python(forged_frame)
+
+    completion_values: dict[str, Any] = {
+        **frame.completion.__dict__,
+        "schema_version": True,
+    }
+    forged_completion = ActorPovReplayCompletionBadgeV1.model_construct(
+        **completion_values
+    )
+    frame_values = {**frame.__dict__, "completion": forged_completion}
+    forged_frame = SharedObsAgentPovReplayViewerFrameV1.model_construct(**frame_values)
+    with pytest.raises(ValidationError, match="exact Python ints"):
+        TypeAdapter(ReplayViewerFrameV1).validate_python(forged_frame)
+
+    timeline = _shared_agent_timeline()
+    row_values: dict[str, Any] = {
+        **timeline.rows[0].__dict__,
+        "frame_index": True,
+        "recipient_frame_id": (
+            "episode-timeline:shared-obs-visual-union:agent-5:frame:True"
+        ),
+    }
+    forged_row = SharedObsAgentPovReplayTimelineRowV1.model_construct(**row_values)
+    timeline_values: dict[str, Any] = {
+        **timeline.__dict__,
+        "rows": (forged_row, timeline.rows[1]),
+    }
+    forged_timeline = SharedObsAgentPovReplayTimelineV1.model_construct(
+        **timeline_values
+    )
+    with pytest.raises(ValidationError, match="exact Python ints"):
+        TypeAdapter(ReplayTimelineV1).validate_python(forged_timeline)
+
+    with pytest.raises(TypeError, match="cannot be subclassed"):
+        type(
+            "ForbiddenPrivateFrameSubclass",
+            (SharedObsAgentPovReplayViewerFrameV1,),
+            {},
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    (
+        ({"recipient_replay_id": "episode-timeline:replay"}, "recipient-local"),
+        ({"captured_frame_count": 1}, "T\\+1/T"),
+        (
+            {
+                "captured_transition_count": 2,
+                "captured_frame_count": 3,
+            },
+            "expected horizon",
+        ),
+        ({"schema_version": "1"}, None),
+        ({"expected_transition_count": True}, None),
+        ({"extra": "forbidden"}, None),
+    ),
+)
+def test_private_shared_summary_rejects_identity_count_and_strictness_poison(
+    mutation: dict[str, object],
+    match: str | None,
+) -> None:
+    payload = _shared_agent_summary().model_dump(mode="python")
+    payload.update(mutation)
+
+    with pytest.raises(ValidationError, match=match):
+        SharedObsAgentPovReplayArtifactSummaryV1.model_validate(payload)
+
+
+def test_private_shared_summary_requires_every_declared_field() -> None:
+    model = _shared_agent_summary()
+
+    for field_name in type(model).model_fields:
+        payload = model.model_dump(mode="python")
+        payload.pop(field_name)
+        with pytest.raises(ValidationError, match="Field required"):
+            SharedObsAgentPovReplayArtifactSummaryV1.model_validate(payload)
+
+
+def test_private_shared_timeline_rejects_identity_count_tick_and_endpoint_poison() -> (
+    None
+):
+    timeline = _shared_agent_timeline()
+
+    poisoned_payloads: list[tuple[dict[str, object], str | None]] = []
+
+    wrong_timeline_id = timeline.model_dump(mode="python")
+    wrong_timeline_id["timeline_id"] = "episode-timeline:replay:timeline:researcher"
+    poisoned_payloads.append((wrong_timeline_id, "recipient-local"))
+
+    wrong_final = timeline.model_dump(mode="python")
+    wrong_final["final_frame_index"] = 0
+    poisoned_payloads.append((wrong_final, "captured prefix"))
+
+    wrong_count = timeline.model_dump(mode="python")
+    wrong_count["rows"] = wrong_count["rows"][:1]
+    poisoned_payloads.append((wrong_count, "T\\+1"))
+
+    wrong_frame = timeline.model_dump(mode="python")
+    wrong_frame["rows"][1]["recipient_frame_id"] = "episode-timeline:frame:1"
+    poisoned_payloads.append((wrong_frame, "frame identity"))
+
+    wrong_zero_transition = timeline.model_dump(mode="python")
+    wrong_zero_transition["rows"][0]["incoming_recipient_transition_id"] = (
+        "episode-timeline:transition:0"
+    )
+    poisoned_payloads.append((wrong_zero_transition, "transition identity"))
+
+    wrong_transition = timeline.model_dump(mode="python")
+    wrong_transition["rows"][1]["incoming_recipient_transition_id"] = (
+        "episode-timeline:transition:0"
+    )
+    poisoned_payloads.append((wrong_transition, "transition identity"))
+
+    nonadjacent_tick = timeline.model_dump(mode="python")
+    nonadjacent_tick["rows"][1]["simulator_step_count"] = 43
+    poisoned_payloads.append((nonadjacent_tick, "epochs"))
+
+    early_endpoint = timeline.model_dump(mode="python")
+    early_endpoint["rows"][0]["endpoint_kind"] = "declared_horizon"
+    poisoned_payloads.append((early_endpoint, "endpoint"))
+
+    wrong_endpoint = timeline.model_dump(mode="python")
+    wrong_endpoint["rows"][1]["endpoint_kind"] = "captured_prefix"
+    poisoned_payloads.append((wrong_endpoint, "endpoint"))
+
+    wrong_completion_episode = timeline.model_dump(mode="python")
+    wrong_completion_episode["completion"]["episode_id"] = "other-episode"
+    poisoned_payloads.append((wrong_completion_episode, "completion"))
+
+    wrong_completion_horizon = timeline.model_dump(mode="python")
+    wrong_completion_horizon["completion"]["expected_transition_count"] = 2
+    wrong_completion_horizon["completion"]["completion_state"] = "partial"
+    wrong_completion_horizon["completion"]["completion_bases"] = ()
+    wrong_completion_horizon["completion"]["public_end_or_failure_reason"] = (
+        "captured_prefix"
+    )
+    poisoned_payloads.append((wrong_completion_horizon, "horizon"))
+
+    wrong_completion_count = timeline.model_dump(mode="python")
+    wrong_completion_count["completion"]["captured_transition_count"] = 0
+    wrong_completion_count["completion"]["completion_state"] = "partial"
+    wrong_completion_count["completion"]["completion_bases"] = ()
+    wrong_completion_count["completion"]["public_end_or_failure_reason"] = (
+        "captured_prefix"
+    )
+    poisoned_payloads.append((wrong_completion_count, "captured replay prefix"))
+
+    wrong_kind = timeline.model_dump(mode="python")
+    wrong_kind["timeline_kind"] = "shared_obs_source_material"
+    poisoned_payloads.append((wrong_kind, None))
+
+    coercion = timeline.model_dump(mode="python")
+    coercion["rows"][0]["frame_index"] = "0"
+    poisoned_payloads.append((coercion, None))
+
+    extra = timeline.model_dump(mode="python")
+    extra["selected_global_slot"] = 5
+    poisoned_payloads.append((extra, None))
+
+    for payload, match in poisoned_payloads:
+        with pytest.raises(ValidationError, match=match):
+            SharedObsAgentPovReplayTimelineV1.model_validate(payload)
+
+
+def test_private_shared_timeline_requires_every_root_and_row_field() -> None:
+    timeline = _shared_agent_timeline()
+
+    for field_name in type(timeline).model_fields:
+        payload = timeline.model_dump(mode="python")
+        payload.pop(field_name)
+        with pytest.raises(ValidationError, match="Field required"):
+            SharedObsAgentPovReplayTimelineV1.model_validate(payload)
+
+    for field_name in SharedObsAgentPovReplayTimelineRowV1.model_fields:
+        payload = timeline.model_dump(mode="python")
+        payload["rows"][0].pop(field_name)
+        with pytest.raises(ValidationError, match="Field required"):
+            SharedObsAgentPovReplayTimelineV1.model_validate(payload)
+
+
 @pytest.mark.parametrize(
     "factory",
-    (_researcher_timeline, _pov_timeline, _source_timeline),
+    (_researcher_timeline, _pov_timeline, _shared_agent_timeline),
 )
 def test_each_audience_timeline_strictly_roundtrips_and_discriminates(
     factory: Callable[[], ReplayTimelineV1],
@@ -542,8 +984,173 @@ def test_each_audience_timeline_strictly_roundtrips_and_discriminates(
     assert payload["timeline_kind"] in {
         "researcher",
         "actor_pov",
-        "shared_obs_source_material",
+        "shared_obs_agent_pov",
     }
+
+
+def test_diagnostic_shared_timeline_remains_directly_parseable_but_is_not_product() -> (
+    None
+):
+    diagnostic = _source_timeline()
+    encoded = diagnostic.model_dump_json()
+
+    assert SharedObsSourceMaterialReplayTimelineV1.model_validate_json(encoded) == (
+        diagnostic
+    )
+    with pytest.raises(ValidationError):
+        TypeAdapter(ReplayTimelineV1).validate_json(encoded)
+
+
+def test_private_shared_frame_rejects_identity_epoch_and_strictness_poison() -> None:
+    frame = _shared_agent_frame()
+    poisoned_payloads: list[tuple[dict[str, object], str | None]] = []
+
+    wrong_recipient = frame.model_dump(mode="python")
+    wrong_recipient["public_agent_id"] = "agent-7"
+    poisoned_payloads.append((wrong_recipient, "recipient"))
+
+    wrong_timeline = frame.model_dump(mode="python")
+    wrong_timeline["timeline_id"] = "episode-timeline:replay:timeline:researcher"
+    poisoned_payloads.append((wrong_timeline, "recipient-local"))
+
+    wrong_frame = frame.model_dump(mode="python")
+    wrong_frame["recipient_frame_id"] = "episode-timeline:frame:1"
+    poisoned_payloads.append((wrong_frame, "frame ID"))
+
+    wrong_transition = frame.model_dump(mode="python")
+    wrong_transition["incoming_recipient_transition_id"] = (
+        "episode-timeline:transition:0"
+    )
+    poisoned_payloads.append((wrong_transition, "transition"))
+
+    wrong_cursor = frame.model_dump(mode="python")
+    wrong_cursor["cursor"]["final_frame_index"] = 2
+    poisoned_payloads.append((wrong_cursor, "cursor endpoint"))
+
+    wrong_completion_episode = frame.model_dump(mode="python")
+    wrong_completion_episode["completion"]["episode_id"] = "other-episode"
+    poisoned_payloads.append((wrong_completion_episode, "completion"))
+
+    wrong_completion_horizon = frame.model_dump(mode="python")
+    wrong_completion_horizon["completion"]["expected_transition_count"] = 2
+    wrong_completion_horizon["completion"]["completion_state"] = "partial"
+    wrong_completion_horizon["completion"]["completion_bases"] = ()
+    wrong_completion_horizon["completion"]["public_end_or_failure_reason"] = (
+        "captured_prefix"
+    )
+    poisoned_payloads.append((wrong_completion_horizon, "horizon"))
+
+    wrong_completion_count = frame.model_dump(mode="python")
+    wrong_completion_count["completion"]["captured_transition_count"] = 0
+    wrong_completion_count["completion"]["completion_state"] = "partial"
+    wrong_completion_count["completion"]["completion_bases"] = ()
+    wrong_completion_count["completion"]["public_end_or_failure_reason"] = (
+        "captured_prefix"
+    )
+    poisoned_payloads.append((wrong_completion_count, "captured replay prefix"))
+
+    wrong_kind = frame.model_dump(mode="python")
+    wrong_kind["frame_kind"] = "shared_obs_source_material_replay_viewer"
+    poisoned_payloads.append((wrong_kind, None))
+
+    wrong_preset = frame.model_dump(mode="python")
+    wrong_preset["preset"] = "presentation"
+    poisoned_payloads.append((wrong_preset, None))
+
+    wrong_view = frame.model_dump(mode="python")
+    wrong_view["view_mode"] = "researcher"
+    poisoned_payloads.append((wrong_view, None))
+
+    wrong_verbose = frame.model_dump(mode="python")
+    wrong_verbose["verbose"] = True
+    poisoned_payloads.append((wrong_verbose, None))
+
+    coercion = frame.model_dump(mode="python")
+    coercion["revision"] = "7"
+    poisoned_payloads.append((coercion, None))
+
+    extra = frame.model_dump(mode="python")
+    extra["selected_global_slot"] = 5
+    poisoned_payloads.append((extra, None))
+
+    for payload, match in poisoned_payloads:
+        with pytest.raises(ValidationError, match=match):
+            SharedObsAgentPovReplayViewerFrameV1.model_validate(payload)
+
+
+def test_private_shared_frame_requires_every_declared_field() -> None:
+    frame = _shared_agent_frame()
+
+    for field_name in type(frame).model_fields:
+        payload = frame.model_dump(mode="python")
+        payload.pop(field_name)
+        with pytest.raises(ValidationError, match="Field required"):
+            SharedObsAgentPovReplayViewerFrameV1.model_validate(payload)
+
+
+def test_private_shared_frame_zero_has_no_incoming_recipient_transition() -> None:
+    frame = _shared_agent_frame()
+    payload = frame.model_dump(mode="python")
+    payload["artifact_summary"] = _shared_agent_summary(
+        expected=4,
+        captured=0,
+    ).model_dump(mode="python")
+    payload["cursor"] = ReplayCursorV1(
+        frame_index=0,
+        final_frame_index=0,
+        cursor_generation=0,
+        choreography_generation=0,
+    ).model_dump(mode="python")
+    payload["recipient_frame_id"] = (
+        "episode-timeline:shared-obs-visual-union:agent-5:frame:0"
+    )
+    payload["simulator_step_count"] = 41
+    payload["incoming_recipient_transition_id"] = None
+    payload["completion"] = _pov_completion(
+        "episode-timeline",
+        expected=4,
+        captured=0,
+        state="interrupted",
+    ).model_dump(mode="python")
+
+    initial = SharedObsAgentPovReplayViewerFrameV1.model_validate(payload)
+
+    assert initial.cursor.frame_index == 0
+    assert initial.incoming_recipient_transition_id is None
+
+
+def test_private_shared_timeline_has_exact_prefix_and_dual_done_endpoint() -> None:
+    partial_payload = _shared_agent_timeline().model_dump(mode="python")
+    partial_payload["artifact_summary"] = _shared_agent_summary(
+        expected=4,
+        captured=0,
+    ).model_dump(mode="python")
+    partial_payload["final_frame_index"] = 0
+    partial_payload["completion"] = _pov_completion(
+        "episode-timeline",
+        expected=4,
+        captured=0,
+        state="interrupted",
+    ).model_dump(mode="python")
+    partial_payload["rows"] = partial_payload["rows"][:1]
+    partial_payload["rows"][0]["endpoint_kind"] = "captured_prefix"
+    partial = SharedObsAgentPovReplayTimelineV1.model_validate(partial_payload)
+
+    dual_payload = _shared_agent_timeline().model_dump(mode="python")
+    dual_payload["completion"] = ActorPovReplayCompletionBadgeV1(
+        episode_id="episode-timeline",
+        completion_state="complete",
+        expected_transition_count=1,
+        captured_transition_count=1,
+        terminated=True,
+        truncated=True,
+        completion_bases=("task_terminal", "declared_horizon"),
+    ).model_dump(mode="python")
+    dual_payload["rows"][1]["endpoint_kind"] = "task_terminal_and_declared_horizon"
+    dual = SharedObsAgentPovReplayTimelineV1.model_validate(dual_payload)
+
+    assert partial.rows[-1].endpoint_kind == "captured_prefix"
+    assert dual.rows[-1].endpoint_kind == "task_terminal_and_declared_horizon"
 
 
 def test_timelines_reject_identity_epoch_endpoint_and_privacy_drift() -> None:
@@ -651,11 +1258,13 @@ def test_output_frames_serialize_canonical_audience_specific_envelopes(
         _researcher_frame(projection_cases.researcher),
         _actor_pov_frame(projection_cases.pov),
         _source_material_frame(projection_cases.source_material),
+        _shared_agent_frame(),
     )
     expected_kinds = (
         "researcher_replay_viewer",
         "actor_pov_replay_viewer",
         "shared_obs_source_material_replay_viewer",
+        "shared_obs_agent_pov_replay_viewer",
     )
 
     for frame, expected_kind in zip(frames, expected_kinds, strict=True):
@@ -697,6 +1306,7 @@ def test_recorded_movement_scale_is_strict_researcher_only_replay_truth(
     for hidden_frame in (
         _actor_pov_frame(projection_cases.pov),
         _source_material_frame(projection_cases.source_material),
+        _shared_agent_frame(),
     ):
         hidden_payload = _exact_model_input(hidden_frame)
         hidden_payload["recorded_ordinary_movement_distance_scale"] = 0.375
@@ -851,6 +1461,37 @@ def test_response_owns_transient_animation_intent_only(
         )
 
 
+def test_response_and_error_accept_private_frame_and_reject_diagnostic_frame(
+    projection_cases: _ProjectionCases,
+) -> None:
+    private = _shared_agent_frame()
+    response = ReplayCommandResponseV1(result="duplicate", frame=private)
+    error = ReplayApiErrorV1(
+        error_code="stale_revision",
+        message="The replay cursor changed.",
+        latest_frame=private,
+    )
+
+    assert _json_roundtrip(response) == response
+    assert _json_roundtrip(error) == error
+    assert response.frame is private or response.frame == private
+    assert error.latest_frame is private or error.latest_frame == private
+
+    diagnostic = _source_material_frame(projection_cases.source_material)
+    with pytest.raises(ValidationError):
+        ReplayCommandResponseV1.model_validate(
+            {"result": "duplicate", "frame": diagnostic.model_dump(mode="python")}
+        )
+    with pytest.raises(ValidationError):
+        ReplayApiErrorV1.model_validate(
+            {
+                "error_code": "stale_revision",
+                "message": "The replay cursor changed.",
+                "latest_frame": diagnostic.model_dump(mode="python"),
+            }
+        )
+
+
 def test_frame_zero_cannot_request_incoming_animation(
     projection_cases: _ProjectionCases,
 ) -> None:
@@ -870,7 +1511,7 @@ def test_discriminated_frame_alias_serializes_without_live_protocol_import(
     frames = (
         _researcher_frame(projection_cases.researcher),
         _actor_pov_frame(projection_cases.pov),
-        _source_material_frame(projection_cases.source_material),
+        _shared_agent_frame(),
     )
     adapter: TypeAdapter[ReplayViewerFrameV1] = TypeAdapter(ReplayViewerFrameV1)
 
@@ -878,6 +1519,150 @@ def test_discriminated_frame_alias_serializes_without_live_protocol_import(
         payload = adapter.dump_python(frame, mode="json")
         assert payload["schema_version"] == 1
         assert payload["frame_kind"] == frame.frame_kind
+
+
+def test_diagnostic_shared_frame_remains_directly_parseable_but_is_not_product(
+    projection_cases: _ProjectionCases,
+) -> None:
+    diagnostic = _source_material_frame(projection_cases.source_material)
+    encoded = diagnostic.model_dump_json()
+
+    assert SharedObsSourceMaterialReplayViewerFrameV1.model_validate_json(encoded) == (
+        diagnostic
+    )
+    with pytest.raises(ValidationError):
+        TypeAdapter(ReplayViewerFrameV1).validate_json(encoded)
+
+
+def test_private_shared_roots_have_exact_identity_only_keys_and_values() -> None:
+    frame_payload = json.loads(_shared_agent_frame().model_dump_json())
+    timeline_payload = json.loads(_shared_agent_timeline().model_dump_json())
+    common_nested_keys = {
+        "schema_version",
+        "recipient_replay_id",
+        "episode_id",
+        "public_agent_id",
+        "expected_transition_count",
+        "captured_transition_count",
+        "captured_frame_count",
+        "completion_state",
+        "terminated",
+        "truncated",
+        "completion_bases",
+        "public_end_or_failure_reason",
+    }
+    expected_frame_keys = common_nested_keys | {
+        "frame_kind",
+        "viewer_session_id",
+        "revision",
+        "artifact_summary",
+        "timeline_id",
+        "cursor",
+        "frame_index",
+        "final_frame_index",
+        "cursor_generation",
+        "choreography_generation",
+        "preset",
+        "verbose",
+        "view_mode",
+        "recipient_frame_id",
+        "simulator_step_count",
+        "incoming_recipient_transition_id",
+        "completion",
+    }
+    expected_timeline_keys = common_nested_keys | {
+        "timeline_kind",
+        "timeline_id",
+        "artifact_summary",
+        "final_frame_index",
+        "completion",
+        "rows",
+        "frame_index",
+        "recipient_frame_id",
+        "simulator_step_count",
+        "incoming_recipient_transition_id",
+        "endpoint_kind",
+    }
+
+    assert _recursive_keys(frame_payload) == expected_frame_keys
+    assert _recursive_keys(timeline_payload) == expected_timeline_keys
+
+    all_strings = _recursive_strings(frame_payload) | _recursive_strings(
+        timeline_payload
+    )
+    forbidden_exact_values = {
+        "episode-timeline:replay",
+        "episode-timeline:frame:0",
+        "episode-timeline:frame:1",
+        "episode-timeline:transition:0",
+        _DIGEST_A,
+        _DIGEST_B,
+        _DIGEST_C,
+    }
+    assert all_strings.isdisjoint(forbidden_exact_values)
+    assert all(":shared-obs-source-material:" not in value for value in all_strings)
+    assert all(len(value) != 64 for value in all_strings)
+    assert all("/" not in value and "\\" not in value for value in all_strings)
+    assert all(
+        not any(
+            token in value.lower()
+            for token in ("exception", "traceback", "reducer", "policy", ".json")
+        )
+        for value in all_strings
+    )
+
+
+def test_researcher_and_no_shared_model_dump_bytes_are_frozen(
+    projection_cases: _ProjectionCases,
+) -> None:
+    cases = projection_cases
+    models_and_hashes = (
+        (
+            _researcher_frame(cases.researcher),
+            _RESEARCHER_FRAME_V1_SHA256,
+        ),
+        (_actor_pov_frame(cases.pov), _ACTOR_POV_FRAME_V1_SHA256),
+        (_researcher_timeline(), _RESEARCHER_TIMELINE_V1_SHA256),
+        (_pov_timeline(), _ACTOR_POV_TIMELINE_V1_SHA256),
+    )
+
+    for model, expected_hash in models_and_hashes:
+        actual_hash = hashlib.sha256(model.model_dump_json().encode()).hexdigest()
+        assert actual_hash == expected_hash
+
+
+def test_private_shared_validation_is_frozen_repeatable_and_source_nonmutating() -> (
+    None
+):
+    models_and_adapters: tuple[tuple[BaseModel, TypeAdapter[object]], ...] = (
+        (
+            _shared_agent_summary(),
+            TypeAdapter(SharedObsAgentPovReplayArtifactSummaryV1),
+        ),
+        (
+            _shared_agent_timeline().rows[1],
+            TypeAdapter(SharedObsAgentPovReplayTimelineRowV1),
+        ),
+        (
+            _shared_agent_timeline(),
+            TypeAdapter(SharedObsAgentPovReplayTimelineV1),
+        ),
+        (
+            _shared_agent_frame(),
+            TypeAdapter(SharedObsAgentPovReplayViewerFrameV1),
+        ),
+    )
+
+    for model, adapter in models_and_adapters:
+        payload = model.model_dump(mode="python")
+        snapshot = deepcopy(payload)
+        first = adapter.validate_python(payload)
+        second = adapter.validate_python(payload)
+        assert payload == snapshot
+        assert first == second == model
+        assert model.model_dump_json() == model.model_dump_json()
+        with pytest.raises(ValidationError):
+            setattr(model, next(iter(type(model).model_fields)), "poison")
 
 
 def test_replay_protocol_import_is_core_jax_numpy_and_live_seam_free() -> None:
@@ -901,9 +1686,12 @@ loaded = [
 assert loaded == [], loaded
 print('isolated')
 """
+    environment = os.environ.copy()
+    environment["JAX_PLATFORMS"] = "cuda"
     result = subprocess.run(
         (sys.executable, "-c", code),
         cwd=_REPOSITORY_ROOT,
+        env=environment,
         check=False,
         capture_output=True,
         text=True,

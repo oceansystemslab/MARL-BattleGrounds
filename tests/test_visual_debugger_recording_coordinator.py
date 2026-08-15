@@ -1,7 +1,11 @@
 """Focused same-process recording-to-replay coordinator proofs."""
 
+import json
 import stat
+from http import HTTPStatus
+from http.client import HTTPConnection, HTTPResponse
 from pathlib import Path
+from threading import Thread
 from typing import cast
 from unittest.mock import Mock
 
@@ -11,6 +15,10 @@ from scripts.dev.visual_debugger.control import create_session
 from scripts.dev.visual_debugger.evaluation_bridge import (
     build_debugger_evaluation_launch_specification_v1,
 )
+from scripts.dev.visual_debugger.presentation_protocol import (
+    LiveOracleAuthorizedPresentationFrameV1,
+    ReplayOracleAuthorizedPresentationFrameV1,
+)
 from scripts.dev.visual_debugger.protocol import (
     CommandRequestV1,
     CommandResponseV2,
@@ -18,7 +26,6 @@ from scripts.dev.visual_debugger.protocol import (
     KeyboardCommandV1,
     ResearcherLiveDebuggerFrameV2,
     ReviewReplayCommandV1,
-    RosterSelectionCommandV1,
     SetPresetCommandV1,
 )
 from scripts.dev.visual_debugger.recording import (
@@ -35,13 +42,16 @@ from scripts.dev.visual_debugger.replay_protocol import (
     ReplayLastFrameCommandV1,
     ReplayNextFrameCommandV1,
     ReplaySelectAgentCommandV1,
-    ReplayViewerFrameV1,
     ResearcherReplayTimelineV1,
     ResearcherReplayViewerFrameV1,
+    SharedObsAgentPovReplayTimelineV1,
+    SharedObsAgentPovReplayViewerFrameV1,
 )
 from scripts.dev.visual_debugger.replay_service import ReplayViewerService
 from scripts.dev.visual_debugger.scenarios import get_scenario
+from scripts.dev.visual_debugger.server import DebuggerHTTPServer, create_server
 from scripts.dev.visual_debugger.service import DebuggerService
+from tests.export_visual_debugger_replay_artifacts import export_artifacts
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
 from marl_battlegrounds.evaluation.models import (
@@ -53,6 +63,11 @@ from marl_battlegrounds.evaluation.replay_io import (
     load_replay_bundle_v1,
     preflight_replay_bundle_destination_v1,
 )
+
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+_ASSET_ROOT = _REPOSITORY_ROOT / "web" / "visual_debugger"
+_TOKEN_HEADER = "X-MARL-Debugger-Token"
+_TOKEN = "recording-handoff-capability"
 
 
 def _runtime_provenance() -> RuntimeProvenanceV1:
@@ -78,6 +93,7 @@ def _coordinator_and_recorder(
     tmp_path: Path,
     *,
     scenario_name: str = "arena_5v5",
+    controlled_global_slot: int | None = None,
 ) -> tuple[RecordingDebuggerCoordinator, DebuggerReplayRecorderV1]:
     debug_launch = debugger_test_launch_specification()
     launch = build_debugger_evaluation_launch_specification_v1(
@@ -90,7 +106,7 @@ def _coordinator_and_recorder(
         scenario,
         seed=0,
         evaluation_launch_specification=launch,
-        controlled_global_slot=None,
+        controlled_global_slot=controlled_global_slot,
         show_ranges=True,
         verbose_logging=False,
     )
@@ -149,6 +165,18 @@ def _replay_request(
     )
 
 
+def _authorized_get(
+    server: DebuggerHTTPServer,
+    path: str,
+) -> tuple[HTTPResponse, bytes]:
+    connection = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+    connection.request("GET", path, headers={_TOKEN_HEADER: _TOKEN})
+    response = connection.getresponse()
+    payload = response.read()
+    connection.close()
+    return response, payload
+
+
 def test_presentation_command_keeps_the_exact_live_binding(tmp_path: Path) -> None:
     coordinator = _coordinator(tmp_path)
     initial = coordinator.router.snapshot()
@@ -173,6 +201,15 @@ def test_finish_installs_replay_before_return_and_starts_settled_at_zero(
     tmp_path: Path,
 ) -> None:
     coordinator = _coordinator(tmp_path)
+    live = coordinator.router.snapshot()
+    live_presentation_result = live.binding.current_presentation()
+    assert live_presentation_result.outcome == "response"
+    live_presentation = cast(
+        LiveOracleAuthorizedPresentationFrameV1,
+        live_presentation_result.payload,
+    )
+    assert live_presentation.presentation_kind == "live_oracle"
+    assert live_presentation.source.source_frame_index == 0
 
     result = coordinator.apply_command(
         _live_request(
@@ -189,14 +226,110 @@ def test_finish_installs_replay_before_return_and_starts_settled_at_zero(
     assert result.payload.frame.recording.lifecycle == "reviewing"
     assert replay.generation == 1
     assert replay.binding.mode == "replay"
+    assert replay.binding.product_kind == "replay_viewer"
     frame = replay.binding.current_frame()
-    typed_frame = cast(ReplayViewerFrameV1, frame)
+    typed_frame = cast(ResearcherReplayViewerFrameV1, frame)
     timeline = replay.binding.current_timeline
+    presentation = replay.binding.current_presentation
     assert timeline is not None
+    assert presentation is not None
     assert typed_frame.cursor.frame_index == 0
     assert timeline().timeline_id == typed_frame.timeline_id  # pyright: ignore[reportAttributeAccessIssue]
+    presentation_result = presentation()
+    assert presentation_result.outcome == "response"
+    presentation_frame = cast(
+        ReplayOracleAuthorizedPresentationFrameV1,
+        presentation_result.payload,
+    )
+    assert presentation_frame.source.source_revision == typed_frame.revision
+    assert presentation_frame.source.source_frame_id == typed_frame.frame_id
 
     assert replay.binding.apply_command is not None
+
+
+def test_recording_handoff_http_gets_use_actual_private_shared_roots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator = _coordinator(tmp_path)
+    artifacts = export_artifacts(tmp_path / "handoff-shared-artifacts")
+    shared_viewer = ReplayViewerService(
+        load_replay_bundle_v1(
+            Path(artifacts["shared"]),
+            require_metric_report=True,
+        ),
+        view_mode="pov",
+        pov_global_slot=0,
+        viewer_session_id="recording-handoff-shared-private",
+    )
+
+    def build_shared_handoff(service: DebuggerService) -> ReplayViewerService:
+        assert service is coordinator.service
+        return shared_viewer
+
+    monkeypatch.setattr(
+        DebuggerService,
+        "_build_replay_handoff",
+        build_shared_handoff,
+    )
+    server = create_server(
+        asset_root=_ASSET_ROOT,
+        port=0,
+        capability_token=_TOKEN,
+        coordinator_router=coordinator.router,
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        result = coordinator.apply_command(
+            _live_request(
+                "finish-to-shared-private",
+                base_revision=0,
+                command=FinishAndReviewCommandV1(),
+            )
+        )
+        frame_response, frame_body = _authorized_get(server, "/api/frame")
+        timeline_response, timeline_body = _authorized_get(
+            server,
+            "/api/replay/timeline",
+        )
+    finally:
+        if thread.is_alive():
+            server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    installed = coordinator.router.snapshot()
+    assert result.replay_handoff is shared_viewer
+    assert installed.service is shared_viewer
+    assert installed.binding.current_frame == shared_viewer.current_frame
+    assert installed.binding.current_timeline == shared_viewer.current_timeline
+    assert frame_response.status == timeline_response.status == HTTPStatus.OK
+    assert frame_response.getheader("Cache-Control") == "no-store"
+    assert timeline_response.getheader("Cache-Control") == "no-store"
+
+    frame = SharedObsAgentPovReplayViewerFrameV1.model_validate_json(frame_body)
+    timeline = SharedObsAgentPovReplayTimelineV1.model_validate_json(timeline_body)
+    assert frame.frame_kind == "shared_obs_agent_pov_replay_viewer"
+    assert timeline.timeline_kind == "shared_obs_agent_pov"
+    assert timeline.artifact_summary == frame.artifact_summary
+    assert timeline.rows[0].recipient_frame_id == frame.recipient_frame_id
+    assert frame.cursor.frame_index == 0
+    assert json.loads(frame_body)["public_agent_id"] == frame.public_agent_id
+
+    serialized = frame_body + timeline_body
+    for forbidden_key in (
+        b'"global_slot"',
+        b'"metric_report_availability"',
+        b'"observation_materialization"',
+        b'"processing"',
+        b'"projection"',
+        b'"replay_reference"',
+        b'"selected_global_slot"',
+        b'"source_material_frame_id"',
+    ):
+        assert forbidden_key not in serialized
+    assert b"shared_obs_source_material" not in serialized
 
 
 def test_duplicate_finish_does_not_reinstall_or_advance_router(tmp_path: Path) -> None:
@@ -265,19 +398,11 @@ def test_registered_capture_round_trip_preserves_exact_researcher_presentation(
     coordinator, recorder = _coordinator_and_recorder(
         tmp_path,
         scenario_name="basic_support",
+        controlled_global_slot=2,
     )
-
-    controlled_result = coordinator.apply_command(
-        _live_request(
-            "control-nondefault-priest",
-            base_revision=0,
-            command=RosterSelectionCommandV1(role="control", global_slot=2),
-        )
-    )
-    assert isinstance(controlled_result.payload, CommandResponseV2)
     controlled_live = cast(
         ResearcherLiveDebuggerFrameV2,
-        controlled_result.payload.frame,
+        coordinator.service.current_frame(),
     )
     assert controlled_live.frame_index == 0
     assert coordinator.service.session.controlled_global_slot == 2
@@ -289,14 +414,14 @@ def test_registered_capture_round_trip_preserves_exact_researcher_presentation(
     first_result = coordinator.apply_command(
         _live_request(
             "capture-basic-support-0",
-            base_revision=1,
+            base_revision=0,
             command=KeyboardCommandV1(key="n"),
         )
     )
     endpoint_result = coordinator.apply_command(
         _live_request(
             "capture-basic-support-1",
-            base_revision=2,
+            base_revision=1,
             command=KeyboardCommandV1(key="n"),
         )
     )
@@ -366,7 +491,7 @@ def test_registered_capture_round_trip_preserves_exact_researcher_presentation(
     reviewed_result = coordinator.apply_command(
         _live_request(
             "review-complete-basic-support",
-            base_revision=3,
+            base_revision=2,
             command=ReviewReplayCommandV1(),
         )
     )
@@ -378,6 +503,7 @@ def test_registered_capture_round_trip_preserves_exact_researcher_presentation(
     assert installed.generation == 1
     assert installed.binding.mode == "replay"
     assert installed.binding.apply_command == viewer.apply_command
+    assert installed.binding.current_presentation == viewer.current_presentation
 
     replay_zero = cast(ResearcherReplayViewerFrameV1, viewer.current_frame())
     next_result = viewer.apply_command(
@@ -492,7 +618,7 @@ def test_registered_capture_round_trip_preserves_exact_researcher_presentation(
 
     public_text = "\n".join(
         (
-            controlled_result.payload.model_dump_json(),
+            controlled_live.model_dump_json(),
             endpoint_result.payload.model_dump_json(),
             reviewed_result.payload.model_dump_json(),
             replay_zero.model_dump_json(),

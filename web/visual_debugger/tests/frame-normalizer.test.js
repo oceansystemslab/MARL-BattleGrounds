@@ -2146,6 +2146,8 @@ test("pending routes require exact true staged-pair legality for both audiences"
 test("live presentation authority is exact and audience-scoped", () => {
   const researcher = normalizeLiveDebuggerFrameV2(researcherFrame());
   const pov = normalizeLiveDebuggerFrameV2(povFrame());
+  assert.equal(researcher.preset, "analysis");
+  assert.equal(pov.preset, "analysis");
   assert.equal(researcher.show_ranges, true);
   assert.equal(researcher.verbose, false);
   assert.equal(pov.verbose, false);
@@ -2198,6 +2200,10 @@ test("live presentation authority is exact and audience-scoped", () => {
       () => normalizeLiveDebuggerFrameV2(malformed),
       /envelope authority is invalid/u,
     );
+  }
+  for (const legacy of [researcherFrame(), povFrame()]) {
+    legacy.preset = "presentation";
+    assert.equal(normalizeLiveDebuggerFrameV2(legacy).preset, "analysis");
   }
 });
 

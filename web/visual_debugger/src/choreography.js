@@ -273,8 +273,9 @@ export class CombatChoreographer {
    *
    * @param {unknown} frame
    * @param {ChoreographySurface | null} surface
+   * @param {{animateIncoming?: boolean}} [presentationControl]
    */
-  presentFrame(frame, surface) {
+  presentFrame(frame, surface, presentationControl = {}) {
     const nextPlan = surface ? this.planBuilder(frame, surface) : null;
     if (!nextPlan || !surface) {
       this.clear("absent_scene_or_event_batch");
@@ -289,7 +290,7 @@ export class CombatChoreographer {
     const replayMustSettle =
       isRecord(frame) &&
       frame.viewer_mode === "replay" &&
-      frame.animate_incoming !== true;
+      presentationControl.animateIncoming !== true;
 
     if (sameEpoch && sameAuthorization && sameFingerprint) {
       if (this.surface?.viewportKey !== surface.viewportKey && this.installation) {
@@ -339,10 +340,11 @@ export class CombatChoreographer {
    *
    * @param {unknown} frame
    * @param {ChoreographySurface | null} surface
+   * @param {{animateIncoming?: boolean}} [presentationControl]
    */
-  reproject(frame, surface) {
+  reproject(frame, surface, presentationControl = {}) {
     if (!surface || !this.installation || !this.plan) {
-      return this.presentFrame(frame, surface);
+      return this.presentFrame(frame, surface, presentationControl);
     }
     const nextPlan = this.planBuilder(frame, surface);
     if (
@@ -351,7 +353,7 @@ export class CombatChoreographer {
       nextPlan.authorizationKey !== this.plan.authorizationKey ||
       nextPlan.fingerprint !== this.plan.fingerprint
     ) {
-      return this.presentFrame(frame, surface);
+      return this.presentFrame(frame, surface, presentationControl);
     }
     this.painter.reproject(this.installation, nextPlan, surface);
     this.plan = nextPlan;

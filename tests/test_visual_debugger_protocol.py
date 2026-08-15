@@ -365,7 +365,11 @@ def test_removed_movement_scale_command_is_rejected_at_the_wire_boundary() -> No
         CommandRequestV1.model_validate_json(payload)
 
 
-def test_legacy_technical_preset_canonicalizes_to_analysis() -> None:
+@pytest.mark.parametrize(
+    "legacy_preset",
+    ("presentation", "analysis", "technical", "debug"),
+)
+def test_legacy_preset_canonicalizes_to_analysis(legacy_preset: str) -> None:
     request = CommandRequestV1.model_validate_json(
         json.dumps(
             {
@@ -373,7 +377,10 @@ def test_legacy_technical_preset_canonicalizes_to_analysis() -> None:
                 "client_id": "client-1",
                 "command_id": "legacy-technical",
                 "base_revision": 0,
-                "command": {"command_type": "set_preset", "preset": "debug"},
+                "command": {
+                    "command_type": "set_preset",
+                    "preset": legacy_preset,
+                },
             }
         )
     )

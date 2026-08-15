@@ -484,3 +484,35 @@ catalog mechanics, actor-relative mappings, and direct event evidence, but it
 must not call simulator, geometry, visibility, masking, policy, or mechanic
 helpers. Researcher and actor-authorized presentation roots remain
 structurally distinct.
+
+## A11. SharedObs recorded visual-union presentation
+
+**Classification:** harmless clarification of the rendering and learner-input
+boundary established by A1 and A10.
+**Clarifies:** A1 and A10; the Milestone 6 presentation contract; and the
+conceptual name `shared_obs_recorded_visual_union`.
+
+`shared_obs_recorded_visual_union` names a rendering-only authorized view. Its
+frozen V1 wire literals are `shared_obs_visual_union` for the observation mode
+and `authorized_same_epoch_sensor_source_visual_union` for the construction
+basis. These names describe the same presentation contract; existing V1 wire
+literals are unchanged.
+
+The view keeps the selected recipient's own recorded base-sensor row separate
+and may add only recorded, same-decision-epoch sensor rows from same-team,
+configured-active sources for which the recipient's recorded source
+availability is true. It is an authorized visual union, not a recomputed
+observation: presentation code must not recreate geometry, visibility, line of
+sight, masks, mechanics, or simulator state.
+
+The visual union excludes teammate action masks, prior-action or other history,
+rewards, recurrent or policy state, transition facts, critic input, and hidden
+Oracle state. The diagnostic `source_material_only` view described by A10 is
+not a product Agent-POV presentation root and must not be installed or labelled
+as one.
+
+Neither representation is a materialized SharedObs learner input. Exact
+SharedObs actor-input export remains unavailable until the Milestone 12
+compositor is implemented, performance-tested, and accepted. Presentation and
+replay support therefore do not activate SharedObs training or authorize any
+claim that the composed learner tensor is available.

@@ -28,8 +28,6 @@ let partialViewer = null;
 /** @type {Awaited<ReturnType<typeof startReplayViewer>> | null} */
 let missingMetricViewer = null;
 /** @type {Awaited<ReturnType<typeof startReplayViewer>> | null} */
-let sharedViewer = null;
-/** @type {Awaited<ReturnType<typeof startReplayViewer>> | null} */
 let deathSampleViewer = null;
 /** @type {Awaited<ReturnType<typeof startReplayViewer>> | null} */
 let deathSamplePovViewer = null;
@@ -62,12 +60,6 @@ test.beforeAll(async () => {
       povSlot: 0,
     });
     startedProcesses.push(missingMetricViewer.process);
-    sharedViewer = await startReplayViewer({
-      replayPath: artifacts.shared,
-      view: "pov",
-      povSlot: 0,
-    });
-    startedProcesses.push(sharedViewer.process);
     deathSampleViewer = await startReplayViewer({
       sampleReplay: "death-respawn-shield",
     });
@@ -93,7 +85,6 @@ test.beforeAll(async () => {
     completeViewer = null;
     partialViewer = null;
     missingMetricViewer = null;
-    sharedViewer = null;
     deathSampleViewer = null;
     deathSamplePovViewer = null;
     recoverySampleViewer = null;
@@ -119,7 +110,6 @@ test.afterAll(async () => {
     completeViewer?.process ?? null,
     partialViewer?.process ?? null,
     missingMetricViewer?.process ?? null,
-    sharedViewer?.process ?? null,
     deathSampleViewer?.process ?? null,
     deathSamplePovViewer?.process ?? null,
     recoverySampleViewer?.process ?? null,
@@ -127,7 +117,6 @@ test.afterAll(async () => {
   completeViewer = null;
   partialViewer = null;
   missingMetricViewer = null;
-  sharedViewer = null;
   deathSampleViewer = null;
   deathSamplePovViewer = null;
   recoverySampleViewer = null;
@@ -150,11 +139,8 @@ test.afterAll(async () => {
   }
 });
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {string} url
- */
-async function openReplay(page, url) {
+/** @param {import("@playwright/test").Page} page */
+function captureBrowserErrors(page) {
   if (!browserErrors.has(page)) {
     /** @type {string[]} */
     const errors = [];
@@ -166,6 +152,14 @@ async function openReplay(page, url) {
       }
     });
   }
+}
+
+/**
+ * @param {import("@playwright/test").Page} page
+ * @param {string} url
+ */
+async function openReplay(page, url) {
+  captureBrowserErrors(page);
   await page.goto(url);
   await expect(page.locator("#connection-status")).toHaveText("Online", {
     timeout: 30_000,
@@ -352,6 +346,22 @@ async function installFirstFrame(page) {
 }
 
 /**
+ * Prove the public presentation clock has no active replay animation. Motion
+ * editing controls are intentionally absent from the product shell.
+ *
+ * @param {import("@playwright/test").Page} page
+ */
+async function expectReplayChoreographySettled(page) {
+  await expect(
+    page.locator("#battlefield .combat-choreography[data-state=playing]"),
+  ).toHaveCount(0);
+  await expect(page.locator("html")).toHaveAttribute(
+    "data-submission-blocked",
+    "false",
+  );
+}
+
+/**
  * Seek through the public absolute-seek boundary and prove the browser installs
  * a settled, durable frame rather than replaying transient choreography.
  *
@@ -386,7 +396,7 @@ async function seekReplaySettled(page, frameIndex) {
   });
   await expectReplayFrameIndex(page, frameIndex);
   await waitForStablePresentation(page);
-  await expect(page.locator("#motion-skip-button")).toBeDisabled();
+  await expectReplayChoreographySettled(page);
   await expect(page.locator(".combat-effect, .combat-route-effect")).toHaveCount(0);
   return payload.frame;
 }
@@ -574,7 +584,9 @@ test("canonical complete and partial artifacts join their frame-zero and capture
     await expect(page.locator(selector)).not.toHaveAttribute("open", "");
   }
   await expect(page.locator("#replay-completion-badge")).toHaveText("Complete");
-  await expect(page.locator("#replay-processing-badge")).toHaveText("Succeeded");
+  await expect(page.locator("#replay-processing-badge")).toHaveText(
+    "Authorized replay",
+  );
   await expect(page.locator("#replay-incoming-value")).toHaveText("Initial frame");
   await expect(page.locator("#battlefield")).toHaveAttribute("role", "group");
   await expect(page.locator("#battlefield")).toHaveAttribute("tabindex", "-1");
@@ -757,10 +769,76 @@ test("replay reconnect rejects a valid live frame without crossing the viewer bo
   await page.locator("#reconnect-button").click();
   await expect(page.locator("#connection-status")).toHaveText("Online");
   await expectReplayFrameIndex(page, 0);
-  await expect(page.locator("#motion-skip-button")).toBeDisabled();
+  await expectReplayChoreographySettled(page);
   const recoveredFrame = await currentReplayFrame(page);
   expect(recoveredFrame.frame_id).toBe(installedFrame.frame_id);
   expect(recoveredFrame.timeline_id).toBe(installedTimeline.timeline_id);
+  expectNoBrowserErrors(page);
+});
+
+test("real replay next animates while previous and absolute seek settle", async ({
+  page,
+}) => {
+  const complete = requiredViewer(completeViewer, "complete");
+  await openReplay(page, complete.url);
+  await installFirstFrame(page);
+
+  const playingChoreography = page.locator(
+    '#battlefield [data-layer="transient-events"] > .combat-choreography[data-state="playing"]',
+  );
+  const next = await clickReplayCommand(page, "#replay-next-button");
+  expect(next).toMatchObject({
+    result: "applied",
+    animate_incoming: true,
+    frame: { cursor: { frame_index: 1 } },
+  });
+  await expectReplayFrameIndex(page, 1);
+  await expect(playingChoreography).toHaveCount(1);
+  await expect(page.locator("html")).toHaveAttribute("data-submission-blocked", "true");
+
+  const previous = await clickReplayCommand(page, "#replay-previous-button");
+  expect(previous).toMatchObject({
+    result: "applied",
+    animate_incoming: false,
+    frame: { cursor: { frame_index: 0 } },
+  });
+  await expectReplayFrameIndex(page, 0);
+  await expectReplayChoreographySettled(page);
+
+  const seekRequestPromise = page.waitForRequest(
+    (request) =>
+      request.method() === "POST" &&
+      new URL(request.url()).pathname === "/api/replay/command",
+    { timeout: 30_000 },
+  );
+  const seekResponsePromise = nextReplayResponse(page);
+  await page.locator("#replay-frame-slider").evaluate((element) => {
+    if (!(element instanceof HTMLInputElement)) {
+      throw new TypeError("Replay slider is unavailable.");
+    }
+    element.value = "4";
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  const [seekRequest, seekResponse] = await Promise.all([
+    seekRequestPromise,
+    seekResponsePromise,
+  ]);
+  expect(seekRequest.postDataJSON().command).toEqual({
+    command_type: "absolute_seek",
+    frame_index: 4,
+  });
+  expect(seekResponse.status()).toBe(200);
+  const seek = await seekResponse.json();
+  expect(seek).toMatchObject({
+    result: "applied",
+    animate_incoming: false,
+    frame: { cursor: { frame_index: 4 } },
+  });
+  await expectReplayFrameIndex(page, 4);
+  await expectReplayChoreographySettled(page);
+  await expect(
+    page.locator('#battlefield [data-layer="transient-events"] > .combat-choreography'),
+  ).toHaveAttribute("data-state", "settled");
   expectNoBrowserErrors(page);
 });
 
@@ -787,9 +865,17 @@ test("buttons, slider debounce, keyboard, and researcher Reference preserve exac
     initial.cursor.choreography_generation + 1,
   );
   await expectReplayFrameIndex(page, 1);
-  await expect(page.locator("#events-details")).toHaveAttribute("open", "");
-  await expect(page.locator("#technical-frame-details")).toHaveAttribute("open", "");
-  await expect(page.locator("#motion-skip-button")).toBeEnabled();
+  await expect(page.locator("#events-details")).not.toHaveAttribute("open", "");
+  await expect(page.locator("#technical-frame-details")).not.toHaveAttribute(
+    "open",
+    "",
+  );
+  await expect(
+    page.locator(
+      '#battlefield [data-layer="transient-events"] > .combat-choreography[data-state="playing"]',
+    ),
+  ).toHaveCount(1);
+  await expect(page.locator("html")).toHaveAttribute("data-submission-blocked", "true");
 
   const previous = await clickReplayCommand(page, "#replay-previous-button");
   expect(previous).toMatchObject({
@@ -800,7 +886,13 @@ test("buttons, slider debounce, keyboard, and researcher Reference preserve exac
   expect(previous.frame.cursor.choreography_generation).toBe(
     next.frame.cursor.choreography_generation,
   );
-  await expect(page.locator("#motion-skip-button")).toBeDisabled();
+  await expect(
+    page.locator("#battlefield .combat-choreography[data-state=playing]"),
+  ).toHaveCount(0);
+  await expect(page.locator("html")).toHaveAttribute(
+    "data-submission-blocked",
+    "false",
+  );
 
   const last = await clickReplayCommand(page, "#replay-last-button");
   expect(last).toMatchObject({
@@ -851,7 +943,16 @@ test("buttons, slider debounce, keyboard, and researcher Reference preserve exac
     animate_incoming: false,
     frame: { cursor: { frame_index: 4 } },
   });
-  await expect(page.locator("#motion-skip-button")).toBeDisabled();
+  await expect(
+    page.locator("#battlefield .combat-choreography[data-state=playing]"),
+  ).toHaveCount(0);
+  await expect(page.locator("html")).toHaveAttribute(
+    "data-submission-blocked",
+    "false",
+  );
+  await expect(
+    page.locator('#battlefield [data-layer="transient-events"] > .combat-choreography'),
+  ).toHaveAttribute("data-state", "settled");
 
   /** @type {Record<string, any>[]} */
   const jumpRequests = [];
@@ -1458,7 +1559,7 @@ test("a stale cross-tab command atomically installs the latest audience without 
     "aria-pressed",
     "false",
   );
-  await expect(page.locator("#motion-skip-button")).toBeDisabled();
+  await expectReplayChoreographySettled(page);
   expect(stalePayload.error_code).toBe("stale_revision");
   expect(stalePayload).not.toHaveProperty("animate_incoming");
   expect(matchingTimeline.timeline_id).toBe(stalePayload.latest_frame.timeline_id);
@@ -1526,11 +1627,7 @@ test("a real command-ID conflict installs the validated latest frame without ret
     frame: { cursor: { frame_index: 1 } },
   });
   await expectReplayFrameIndex(page, 1);
-  const skip = page.locator("#motion-skip-button");
-  if (await skip.isEnabled()) {
-    await skip.click();
-  }
-  await expect(skip).toBeDisabled();
+  await expectReplayChoreographySettled(page);
 
   const conflictResponsePromise = page.waitForResponse(
     (response) =>
@@ -1560,7 +1657,7 @@ test("a real command-ID conflict installs the validated latest frame without ret
     "command-ID conflict. Its latest frame was installed; nothing was retried",
   );
   await expectReplayFrameIndex(page, 1);
-  await expect(page.locator("#motion-skip-button")).toBeDisabled();
+  await expectReplayChoreographySettled(page);
   await expect(page.locator("#replay-play-pause-button")).toHaveAttribute(
     "aria-pressed",
     "false",
@@ -1725,13 +1822,12 @@ test("reduced-motion and Motion Off playback use their slower serialized cadence
   await reducedContext.close();
 });
 
-test("exact NoSharedObs POV hides metric/processing truth and SharedObs stays source-material-only", async ({
+test("exact NoSharedObs POV stays stable across artifact-sidecar availability", async ({
   page,
   context,
 }) => {
   const complete = requiredViewer(completeViewer, "complete");
   const missingMetric = requiredViewer(missingMetricViewer, "missing-metric");
-  const shared = requiredViewer(sharedViewer, "shared");
   await openReplay(page, missingMetric.url);
   const [missingFrame, missingTimeline] = await Promise.all([
     currentReplayFrame(page),
@@ -1829,188 +1925,7 @@ test("exact NoSharedObs POV hides metric/processing truth and SharedObs stays so
   expect(availableTimeline).toEqual(missingTimeline);
   expectNoBrowserErrors(availablePage);
   await availablePage.close();
-
-  const sharedPage = await context.newPage();
-  await openReplay(sharedPage, shared.url);
-  const [sharedFrame, sharedTimeline] = await Promise.all([
-    currentReplayFrame(sharedPage),
-    currentReplayTimeline(sharedPage),
-  ]);
-  expect(sharedFrame).toMatchObject({
-    frame_kind: "shared_obs_source_material_replay_viewer",
-    view_mode: "pov",
-    observation_materialization: "source_material_only",
-    selected_global_slot: 0,
-  });
-  expect(sharedTimeline).toMatchObject({
-    timeline_kind: "shared_obs_source_material",
-    timeline_id: sharedFrame.timeline_id,
-    observation_materialization: "source_material_only",
-    selected_global_slot: 0,
-  });
-  const sourceProjection = sharedFrame.projection;
-  /** @type {number[]} */
-  const allyGlobalSlots = sourceProjection.ally_observation_row_global_slot_by_id;
-  /** @type {number[]} */
-  const enemyGlobalSlots = sourceProjection.enemy_observation_row_global_slot_by_id;
-  /** @type {string[]} */
-  const allyPublicIds =
-    sourceProjection.axis_mapping.ally_observation_row_public_agent_id_by_id;
-  /** @type {string[]} */
-  const enemyPublicIds =
-    sourceProjection.axis_mapping.enemy_observation_row_public_agent_id_by_id;
-  expect(allyGlobalSlots).toEqual([0, 1, 2, 3, 4]);
-  expect(enemyGlobalSlots).toEqual([5, 6, 7, 8, 9]);
-  expect(allyPublicIds).toEqual(allyGlobalSlots.map((slot) => `agent-slot-${slot}`));
-  expect(enemyPublicIds).toEqual(enemyGlobalSlots.map((slot) => `agent-slot-${slot}`));
-
-  /** @type {Array<Record<string, any>>} */
-  const availabilityRows = sourceProjection.sensor_source_availability;
-  expect(availabilityRows).toHaveLength(10);
-  expect(availabilityRows.map((row) => row.sensor_source_global_slot)).toEqual([
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
-  ]);
-  for (const row of availabilityRows) {
-    const axisGlobalSlots =
-      row.base_sensor_relation_axis === "ally" ? allyGlobalSlots : enemyGlobalSlots;
-    const axisPublicIds =
-      row.base_sensor_relation_axis === "ally" ? allyPublicIds : enemyPublicIds;
-    expect(row.sensor_source_global_slot).toBe(
-      axisGlobalSlots[row.base_sensor_observation_row],
-    );
-    expect(row.sensor_source_public_agent_id).toBe(
-      axisPublicIds[row.base_sensor_observation_row],
-    );
-  }
-  const selfAvailabilityRows = availabilityRows.filter(
-    (row) => row.relation_to_recipient === "self",
-  );
-  expect(selfAvailabilityRows).toHaveLength(1);
-  expect(selfAvailabilityRows[0]).toMatchObject({
-    sensor_source_global_slot: sharedFrame.selected_global_slot,
-    sensor_source_public_agent_id: sharedFrame.public_agent_id,
-    base_sensor_relation_axis: "ally",
-    base_sensor_observation_row: 0,
-  });
-  expect(sourceProjection.base_sensor_frame).toMatchObject({
-    public_agent_id: sharedFrame.public_agent_id,
-    source_material_frame_id: sharedFrame.source_material_frame_id,
-    source_frame_id: sharedFrame.source_frame_id,
-  });
-  expect(sourceProjection.base_sensor_scene.self_actor).toMatchObject({
-    global_slot: sharedFrame.selected_global_slot,
-    public_agent_id: sharedFrame.public_agent_id,
-  });
-  expect(sourceProjection.exact_actor_input_export_available).toBe(false);
-
-  const forbiddenMaterializedFields = new Set([
-    "actor_input",
-    "composed_actor_input",
-    "materialized_actor_input",
-    "materialized_shared_obs",
-    "materialized_shared_observation",
-    "shared_obs",
-    "shared_obs_actor_input",
-    "shared_observation",
-  ]);
-  /** @type {string[]} */
-  const leakedMaterializedFields = [];
-  const inspectMaterializationBoundary = (
-    /** @type {unknown} */ value,
-    /** @type {string} */ path,
-  ) => {
-    if (Array.isArray(value)) {
-      value.forEach((child, index) => {
-        inspectMaterializationBoundary(child, `${path}[${index}]`);
-      });
-      return;
-    }
-    if (!value || typeof value !== "object") {
-      return;
-    }
-    for (const [key, child] of Object.entries(value)) {
-      const childPath = path ? `${path}.${key}` : key;
-      if (forbiddenMaterializedFields.has(key)) {
-        leakedMaterializedFields.push(childPath);
-      }
-      inspectMaterializationBoundary(child, childPath);
-    }
-  };
-  inspectMaterializationBoundary(sharedFrame, "frame");
-  inspectMaterializationBoundary(sharedTimeline, "timeline");
-  expect(leakedMaterializedFields).toEqual([]);
-  await expect(sharedPage.locator("#scenario-description")).toContainText(
-    "Shared Obs Source Material",
-  );
-
-  const installedSourceDom = {
-    framePosition: await sharedPage.locator("#replay-frame-position").textContent(),
-    revision: await sharedPage.locator("#revision-value").textContent(),
-    view: await sharedPage.locator("#view-select").inputValue(),
-  };
-  let sourceFrameRequestCount = 0;
-  let sourceTimelineRequestCount = 0;
-  /** @type {string | null} */
-  let interceptedSourceFrameId = null;
-  /** @param {import("@playwright/test").Request} request */
-  const recordSourceTimelineRequest = (request) => {
-    if (
-      request.method() === "GET" &&
-      new URL(request.url()).pathname === "/api/replay/timeline"
-    ) {
-      sourceTimelineRequestCount += 1;
-    }
-  };
-  sharedPage.on("request", recordSourceTimelineRequest);
-  await sharedPage.route("**/api/frame", async (route) => {
-    sourceFrameRequestCount += 1;
-    const response = await route.fetch();
-    const payload = await response.json();
-    interceptedSourceFrameId = payload.source_material_frame_id;
-    payload.projection.base_sensor_scene.self_actor.researcher_hidden_truth = {
-      must_not_cross_audience_boundary: true,
-    };
-    await route.fulfill({ response, json: payload });
-  });
-  await sharedPage.locator("#reconnect-button").click();
-  await expect(sharedPage.locator("#connection-status")).toHaveText("Resync required");
-  await expect(sharedPage.locator("#notice")).toHaveAttribute("data-level", "error");
-  await expect(sharedPage.locator("#notice")).toContainText(
-    "unknown or missing fields",
-  );
-  await expect(sharedPage.locator("html")).toHaveAttribute(
-    "data-viewer-mode",
-    "replay",
-  );
-  await expect(sharedPage.locator("#replay-frame-position")).toHaveText(
-    installedSourceDom.framePosition ?? "",
-  );
-  await expect(sharedPage.locator("#revision-value")).toHaveText(
-    installedSourceDom.revision ?? String(sharedFrame.revision),
-  );
-  await expect(sharedPage.locator("#view-select")).toHaveValue(installedSourceDom.view);
-  await expect(sharedPage.locator("#scenario-description")).toContainText(
-    "Shared Obs Source Material",
-  );
-  await expect(sharedPage.locator("[data-live-only]:not([hidden])")).toHaveCount(0);
-  expect(interceptedSourceFrameId).toBe(sharedFrame.source_material_frame_id);
-  expect(sourceFrameRequestCount).toBe(1);
-  expect(sourceTimelineRequestCount).toBe(0);
-
-  await sharedPage.unroute("**/api/frame");
-  sharedPage.off("request", recordSourceTimelineRequest);
-  await sharedPage.locator("#reconnect-button").click();
-  await expect(sharedPage.locator("#connection-status")).toHaveText("Online");
-  await expectReplayFrameIndex(sharedPage, 0);
-  await expect(sharedPage.locator("#motion-skip-button")).toBeDisabled();
-  const recoveredSourceFrame = await currentReplayFrame(sharedPage);
-  expect(recoveredSourceFrame.source_material_frame_id).toBe(
-    sharedFrame.source_material_frame_id,
-  );
-  expect(recoveredSourceFrame.timeline_id).toBe(sharedTimeline.timeline_id);
   expectNoBrowserErrors(page);
-  expectNoBrowserErrors(sharedPage);
-  await sharedPage.close();
 });
 
 test("Actor POV all-surface scan excludes researcher authority and host secrets", async ({
@@ -2032,9 +1947,7 @@ test("Actor POV all-surface scan excludes researcher authority and host secrets"
   const next = await clickReplayCommand(page, "#replay-next-button");
   expect(next.frame.cursor.frame_index).toBe(1);
   await expectReplayFrameIndex(page, 1);
-  if (await page.locator("#motion-skip-button").isEnabled()) {
-    await page.locator("#motion-skip-button").click();
-  }
+  await expectReplayChoreographySettled(page);
   const researcherFrame = await currentReplayFrame(page);
   expect(researcherFrame.frame_kind).toBe("researcher_replay_viewer");
 

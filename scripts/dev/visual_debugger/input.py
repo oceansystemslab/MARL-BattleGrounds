@@ -39,7 +39,6 @@ from scripts.dev.visual_debugger.control import (
     set_pending_movement,
     submit_interactive,
     submit_next_script_frame,
-    switch_scenario,
 )
 from scripts.dev.visual_debugger.model import DebuggerSession, RawContinuationIdentity
 from scripts.dev.visual_debugger.protocol import (
@@ -56,11 +55,7 @@ from scripts.dev.visual_debugger.protocol import (
     SetViewCommandV1,
     ViewMode,
 )
-from scripts.dev.visual_debugger.scenarios import (
-    cycle_scenario_name,
-    get_scenario,
-    list_scenarios,
-)
+from scripts.dev.visual_debugger.scenarios import get_scenario
 
 _MOVEMENT_KEYS = {
     "w": MOVE_NORTH,
@@ -78,10 +73,7 @@ _MOVEMENT_KEYS = {
     "arrowleft": MOVE_WEST,
 }
 
-type RecordingRestartIntentV1 = Literal[
-    "reset",
-    "scenario_switch",
-]
+type RecordingRestartIntentV1 = Literal["reset"]
 
 
 def recording_restart_intent_v1(
@@ -91,32 +83,41 @@ def recording_restart_intent_v1(
     view_mode: ViewMode,
     include_stress: bool,
 ) -> RecordingRestartIntentV1 | None:
-    """Classify an effective episode replacement before dispatch constructs it."""
+    """Classify the sole public episode replacement before dispatch constructs it."""
+    del session, view_mode, include_stress
     if isinstance(command, KeyboardCommandV1):
         if command.ctrl_key or command.alt_key or command.meta_key:
             return None
         key = normalize_key(command.key, shift_key=command.shift_key)
         if key == "r":
             return "reset"
-        if key in ("[", "]"):
-            return "scenario_switch"
         return None
     if isinstance(command, ResetCommandV1):
         return "reset"
-    if isinstance(command, ScenarioSwitchCommandV1):
-        allowed_names = {
-            scenario.name for scenario in list_scenarios(include_stress=include_stress)
-        }
-        if (
-            command.scenario_name in allowed_names
-            and command.scenario_name != session.scenario_name
-        ):
-            return "scenario_switch"
-        return None
     return None
 
 
 _SUBMISSION_KEYS = frozenset(("space", "enter", "n"))
+
+_SCRIPTED_INSPECTION_NOTICE = (
+    "Scripted playback is inspection-only; press N without modifiers to advance "
+    "the registered frame."
+)
+
+
+def _scripted_inspection_command_is_allowed(command: DebuggerCommandV1) -> bool:
+    """Keep scripted playback to its closed advance and presentation surface."""
+    if isinstance(command, KeyboardCommandV1):
+        if (
+            command.shift_key
+            or command.ctrl_key
+            or command.alt_key
+            or command.meta_key
+            or command.repeat
+        ):
+            return False
+        return normalize_key(command.key, shift_key=False) in ("n", "g")
+    return isinstance(command, (SetViewCommandV1, ExitCommandV1))
 
 
 @dataclass(frozen=True, slots=True)
@@ -713,22 +714,13 @@ def _dispatch_keyboard(
             changed=edited is not session,
         )
     if key in ("[", "]"):
-        direction = -1 if key == "[" else 1
-        next_name = cycle_scenario_name(
-            session.scenario_name,
-            direction,
-            include_stress=include_stress,
-        )
-        edited = switch_scenario(session, get_scenario(next_name))
-        if view_mode == "pov":
-            edited = sanitize_pov_pending_target(edited)
         return _result(
-            edited,
+            session,
             view_mode=view_mode,
             preset=preset,
             handled=True,
-            changed=True,
-            episode_restarted=True,
+            changed=False,
+            notice=("Scenario navigation moved to the read-only Replay Viewer."),
         )
     return _result(
         session,
@@ -885,6 +877,16 @@ def dispatch_command(
     include_stress: bool,
 ) -> InputDispatchResult:
     """Apply one validated input without owning RNG or simulator semantics."""
+    scripted_inspection = get_scenario(session.scenario_name).mode == "scripted"
+    if scripted_inspection and not _scripted_inspection_command_is_allowed(command):
+        return _result(
+            session,
+            view_mode=view_mode,
+            preset=preset,
+            handled=True,
+            changed=False,
+            notice=_SCRIPTED_INSPECTION_NOTICE,
+        )
     if isinstance(command, KeyboardCommandV1):
         return _dispatch_keyboard(
             session,
@@ -915,36 +917,13 @@ def dispatch_command(
             preset=preset,
         )
     if isinstance(command, ScenarioSwitchCommandV1):
-        allowed_names = {
-            scenario.name for scenario in list_scenarios(include_stress=include_stress)
-        }
-        if command.scenario_name not in allowed_names:
-            return _result(
-                session,
-                view_mode=view_mode,
-                preset=preset,
-                handled=True,
-                changed=False,
-                notice=f"Scenario {command.scenario_name!r} is unavailable.",
-            )
-        if command.scenario_name == session.scenario_name:
-            return _result(
-                session,
-                view_mode=view_mode,
-                preset=preset,
-                handled=True,
-                changed=False,
-            )
-        edited = switch_scenario(session, get_scenario(command.scenario_name))
-        if view_mode == "pov":
-            edited = sanitize_pov_pending_target(edited)
         return _result(
-            edited,
+            session,
             view_mode=view_mode,
             preset=preset,
             handled=True,
-            changed=True,
-            episode_restarted=True,
+            changed=False,
+            notice=("Scenario switching moved to the read-only Replay Viewer."),
         )
     if isinstance(command, ResetCommandV1):
         edited = reset_session(session)
@@ -961,7 +940,7 @@ def dispatch_command(
     if isinstance(command, SetViewCommandV1):
         edited = (
             sanitize_pov_pending_target(session)
-            if command.view_mode == "pov"
+            if command.view_mode == "pov" and not scripted_inspection
             else session
         )
         changed = command.view_mode != view_mode or edited is not session

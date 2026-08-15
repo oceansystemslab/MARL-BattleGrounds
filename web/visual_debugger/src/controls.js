@@ -10,8 +10,6 @@ const GAME_KEYS = new Set([
   "0",
   "1",
   "2",
-  "[",
-  "]",
   "w",
   "a",
   "s",
@@ -21,10 +19,8 @@ const GAME_KEYS = new Set([
   "z",
   "c",
   "x",
-  "n",
   "r",
   "g",
-  "p",
   "?",
 ]);
 
@@ -37,7 +33,7 @@ const RECORDING_LIFECYCLE_COMMANDS = new Set([
   "exit",
 ]);
 
-const RECORDING_PRESENTATION_KEYS = new Set(["g", "p", "?"]);
+const RECORDING_PRESENTATION_KEYS = new Set(["g", "?"]);
 
 const RECORDING_SAVE_AS_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*\.marlbg-replay\.json$/u;
 
@@ -195,26 +191,7 @@ export function recordingReplacementCommand(frame, command) {
   if (key === "r" && command.shift_key !== true) {
     return Object.freeze({ command_type: "reset" });
   }
-  if (key !== "[" && key !== "]") {
-    return null;
-  }
-  const names = Array.isArray(frame.available_scenarios)
-    ? frame.available_scenarios.flatMap((entry) => {
-        const name = typeof entry === "string" ? entry : entry?.name;
-        return typeof name === "string" ? [name] : [];
-      })
-    : [];
-  const currentName = frame.scenario?.name;
-  const currentIndex = names.indexOf(currentName);
-  if (currentIndex < 0 || names.length < 2) {
-    return null;
-  }
-  const direction = key === "[" ? -1 : 1;
-  const nextIndex = (currentIndex + direction + names.length) % names.length;
-  return Object.freeze({
-    command_type: "scenario_switch",
-    scenario_name: names[nextIndex],
-  });
+  return null;
 }
 
 /**
@@ -344,16 +321,6 @@ export function isDebuggerKey(event) {
 }
 
 /**
- * Presentation pause is local and edge-triggered. Key repeat must never
- * oscillate the controller or leave a future submission gate paused.
- *
- * @param {{key?: string, repeat?: boolean}} event
- */
-export function isPresentationPauseEvent(event) {
-  return event.key?.toLowerCase() === "p" && !event.repeat;
-}
-
-/**
  * @param {SVGSVGElement} svg
  * @param {PointerEvent} event
  * @returns {{x: number, y: number} | null}
@@ -383,7 +350,6 @@ function pointInSvg(svg, event) {
  *     command: Readonly<Record<string, unknown>>,
  *   ) => void,
  *   onHelp: () => void,
- *   onPresentationKey?: (key: "toggle-pause") => void,
  *   onReleaseFocus: () => void,
  *   isInteractive?: () => boolean,
  * }} bindings
@@ -394,7 +360,6 @@ export function bindBattlefieldControls({
   onCommand,
   onPointerCommand = () => {},
   onHelp,
-  onPresentationKey = () => {},
   onReleaseFocus,
   isInteractive = () => true,
 }) {
@@ -409,12 +374,6 @@ export function bindBattlefieldControls({
     event.stopPropagation();
     if (event.key === "?") {
       onHelp();
-      return;
-    }
-    if (event.key.toLowerCase() === "p") {
-      if (isPresentationPauseEvent(event)) {
-        onPresentationKey("toggle-pause");
-      }
       return;
     }
     if (event.key === "Escape") {

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -23,6 +24,14 @@ const PUBLIC_IDS = new Map([
   [5, "five#five"],
   [7, "seven:semicolon;"],
 ]);
+
+test("roster rendering has no legacy compact Presentation branch", async () => {
+  const source = await readFile(new URL("../src/panels.js", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /compactRoster/u);
+  assert.doesNotMatch(source, /dataset\.compact/u);
+  assert.doesNotMatch(source, /frame\?\.preset === "presentation"/u);
+  assert.match(source, /removeAttribute\("data-compact"\)/u);
+});
 
 test("native disclosure state resets only at scenario, artifact, or audience boundaries", () => {
   const live = {

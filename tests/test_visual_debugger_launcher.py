@@ -1,15 +1,23 @@
 """CLI and shell-launcher regression tests, including dependency isolation."""
 
+import argparse
 import os
 import stat
 import subprocess
 import sys
+from collections.abc import Callable
 from importlib.util import find_spec
 from pathlib import Path
 from typing import cast
 
 import pytest
-from scripts.dev.debug_renderer import build_parser, main
+from scripts.dev.debug_renderer import (
+    build_parser as build_debugger_parser,
+)
+from scripts.dev.debug_renderer import (
+    main as debug_main,
+)
+from scripts.dev.replay_viewer import build_parser, main
 from scripts.dev.visual_debugger.evaluation_bridge import (
     DebuggerEvaluationLaunchSpecificationV1,
 )
@@ -25,8 +33,12 @@ from scripts.dev.visual_debugger.scenarios import (
 from scripts.dev.visual_debugger.service import DebuggerService
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-_PYTHON_ENTRYPOINT = _REPOSITORY_ROOT / "scripts" / "dev" / "debug_renderer.py"
-_SHELL_LAUNCHER = _REPOSITORY_ROOT / "scripts" / "dev" / "run_debug_renderer.sh"
+_DEBUGGER_PYTHON_ENTRYPOINT = _REPOSITORY_ROOT / "scripts" / "dev" / "debug_renderer.py"
+_DEBUGGER_SHELL_LAUNCHER = (
+    _REPOSITORY_ROOT / "scripts" / "dev" / "run_debug_renderer.sh"
+)
+_REPLAY_PYTHON_ENTRYPOINT = _REPOSITORY_ROOT / "scripts" / "dev" / "replay_viewer.py"
+_REPLAY_SHELL_LAUNCHER = _REPOSITORY_ROOT / "scripts" / "dev" / "run_replay_viewer.sh"
 _OLD_PYTHON_ENTRYPOINT = (
     _REPOSITORY_ROOT / "scripts" / "dev" / "geometry_debug_renderer.py"
 )
@@ -82,12 +94,10 @@ def _write_valid_replay(tmp_path: Path) -> Path:
     return replay_path
 
 
-def test_parser_exposes_complete_cli_contract() -> None:
-    parser = build_parser()
+def test_debugger_parser_exposes_live_arena_contract_and_hidden_compatibility() -> None:
+    parser = build_debugger_parser()
     args = parser.parse_args(
         (
-            "--scenario",
-            "status_stack",
             "--seed",
             "41",
             "--controlled-slot",
@@ -96,9 +106,8 @@ def test_parser_exposes_complete_cli_contract() -> None:
             "--no-open",
             "--port",
             "8123",
-            "--include-stress",
             "--view",
-            "pov",
+            "researcher",
             "--preset",
             "debug",
             "--verbose",
@@ -106,20 +115,18 @@ def test_parser_exposes_complete_cli_contract() -> None:
         )
     )
 
-    assert args.scenario == "status_stack"
     assert args.seed == 41
     assert args.controlled_slot == 5
     assert args.static
     assert args.no_open
     assert args.port == 8123
-    assert args.include_stress
-    assert args.view == "pov"
+    assert args.view == "researcher"
     assert args.preset == "analysis"
-    assert args.verbose
+    assert args.verbose is False
     assert args.ranges is False
 
 
-def test_parser_exposes_narrow_static_replay_contract() -> None:
+def test_replay_parser_exposes_narrow_static_replay_contract() -> None:
     parser = build_parser()
     args = parser.parse_args(
         (
@@ -138,7 +145,7 @@ def test_parser_exposes_narrow_static_replay_contract() -> None:
     assert not hasattr(args, "ranges")
 
 
-def test_parser_exposes_complete_browser_replay_contract() -> None:
+def test_replay_parser_exposes_complete_browser_replay_contract() -> None:
     parser = build_parser()
     args = parser.parse_args(
         (
@@ -171,14 +178,12 @@ def test_parser_exposes_complete_browser_replay_contract() -> None:
     assert not hasattr(args, "scenario")
 
 
-def test_parser_exposes_opt_in_live_recording_target() -> None:
-    parser = build_parser()
+def test_debugger_parser_exposes_opt_in_live_recording_target() -> None:
+    parser = build_debugger_parser()
     args = parser.parse_args(
         (
             "--record-replay",
             "episode.marlbg-replay.json",
-            "--scenario",
-            "status_stack",
             "--seed",
             "7",
             "--no-open",
@@ -186,41 +191,122 @@ def test_parser_exposes_opt_in_live_recording_target() -> None:
     )
 
     assert args.record_replay == Path("episode.marlbg-replay.json")
-    assert args.scenario == "status_stack"
     assert args.seed == 7
     assert args.no_open
     assert not hasattr(args, "replay")
 
 
-@pytest.mark.parametrize(
-    "conflict",
-    (
-        ("--replay", "other.marlbg-replay.json"),
-        ("--static",),
-        ("--list-scenarios",),
-        ("--frame-index", "0"),
-        ("--pov-slot", "0"),
-    ),
-)
-def test_recording_rejects_replay_static_and_list_only_modes(
-    conflict: tuple[str, ...],
+def test_recording_rejects_static_mode(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     with pytest.raises(SystemExit) as exc_info:
-        main(("--record-replay", "episode.marlbg-replay.json", *conflict))
+        debug_main(("--record-replay", "episode.marlbg-replay.json", "--static"))
 
     assert exc_info.value.code == 2
     assert "--record-replay" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
+    "moved",
+    (
+        ("--replay", "other.marlbg-replay.json"),
+        ("--scenario", "status_stack"),
+        ("--list-scenarios",),
+        ("--list-sample-replays",),
+        ("--frame-index", "0"),
+        ("--pov-slot", "0"),
+    ),
+)
+def test_debugger_rejects_moved_replay_options_with_migration_message(
+    moved: tuple[str, ...],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        debug_main(moved)
+
+    assert exc_info.value.code == 2
+    error = capsys.readouterr().err
+    assert moved[0] in error
+    assert "scripts/dev/run_replay_viewer.sh" in error
+
+
+def test_debugger_rejects_moved_authority_before_runtime_imports() -> None:
+    code = """
+import sys
+from scripts.dev.debug_renderer import main
+
+for argv in (
+    ('--scenario', 'status_stack'),
+    ('--replay', 'episode.marlbg-replay.json'),
+):
+    try:
+        main(argv)
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError('moved option unexpectedly launched')
+
+forbidden = (
+    'jax',
+    'jaxlib',
+    'numpy',
+    'marl_battlegrounds.core',
+    'scripts.dev.visual_debugger',
+)
+loaded = sorted(
+    name
+    for name in sys.modules
+    if any(name == prefix or name.startswith(prefix + '.') for prefix in forbidden)
+)
+assert loaded == [], loaded
+print('moved options rejected before runtime imports')
+"""
+    result = subprocess.run(
+        (sys.executable, "-c", code),
+        cwd=_REPOSITORY_ROOT,
+        env={**os.environ, "JAX_PLATFORMS": "cuda"},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "moved options rejected before runtime imports"
+    assert result.stderr.count("scripts/dev/run_replay_viewer.sh") == 2
+
+
+@pytest.mark.parametrize("parser_factory", (build_debugger_parser, build_parser))
+@pytest.mark.parametrize(
+    ("token", "expected"),
+    (("oracle", "researcher"), ("pov", "pov"), ("researcher", "researcher")),
+)
+def test_view_tokens_canonicalize_without_advertising_legacy_authority(
+    parser_factory: Callable[[], argparse.ArgumentParser],
+    token: str,
+    expected: str,
+) -> None:
+    assert parser_factory().parse_args(("--view", token)).view == expected
+
+
+@pytest.mark.parametrize("parser_factory", (build_debugger_parser, build_parser))
+@pytest.mark.parametrize("token", ("presentation", "analysis", "debug", "technical"))
+def test_legacy_preset_and_verbose_inputs_are_fixed_compatibility_no_ops(
+    parser_factory: Callable[[], argparse.ArgumentParser],
+    token: str,
+) -> None:
+    args = parser_factory().parse_args(("--preset", token, "--verbose"))
+    assert args.preset == "analysis"
+    assert args.verbose is False
+
+
+@pytest.mark.parametrize(
     "argv, message",
     (
-        (("--frame-index", "1"), "--frame-index requires --replay"),
-        (("--pov-slot", "0"), "--pov-slot requires --replay"),
+        (("--frame-index", "1"), "choose exactly one replay artifact"),
+        (("--pov-slot", "0"), "choose exactly one replay artifact"),
         (
             ("--replay", "x.marlbg-replay.json", "--static"),
-            "--frame-index is required with --replay --static",
+            "--frame-index is required with --static",
         ),
     ),
 )
@@ -238,16 +324,10 @@ def test_replay_scoped_options_and_static_frame_requirements(
 @pytest.mark.parametrize(
     ("option", "label"),
     (
-        (("--scenario", "arena_5v5"), "--scenario"),
-        (("--list-scenarios",), "--list-scenarios"),
         (("--include-stress",), "--include-stress"),
         (("--seed", "0"), "--seed"),
-        (("--controlled-slot", "0"), "--controlled-slot"),
         (("--pov-slot", "0"), "--pov-slot"),
         (("--view", "researcher"), "--view"),
-        (("--preset", "analysis"), "--preset"),
-        (("--ranges",), "--ranges/--no-ranges"),
-        (("--no-ranges",), "--ranges/--no-ranges"),
         (("--port", "0"), "--port"),
         (("--no-open",), "--no-open"),
     ),
@@ -277,11 +357,8 @@ def test_static_replay_rejects_every_non_exact_option_even_explicit_defaults(
 @pytest.mark.parametrize(
     ("option", "label"),
     (
-        (("--scenario", "arena_5v5"), "--scenario"),
-        (("--list-scenarios",), "--list-scenarios"),
         (("--include-stress",), "--include-stress"),
         (("--seed", "0"), "--seed"),
-        (("--controlled-slot", "0"), "--controlled-slot"),
     ),
 )
 def test_browser_replay_rejects_live_options_even_explicit_defaults(
@@ -299,7 +376,7 @@ def test_browser_replay_rejects_live_options_even_explicit_defaults(
 def test_replay_static_cli_import_path_is_core_and_jax_free() -> None:
     code = """
 import sys
-from scripts.dev.debug_renderer import build_parser
+from scripts.dev.replay_viewer import build_parser
 parser = build_parser()
 parser.parse_args([
     '--replay', 'episode.marlbg-replay.json',
@@ -315,6 +392,7 @@ print('isolated')
     result = subprocess.run(
         (sys.executable, "-c", code),
         cwd=_REPOSITORY_ROOT,
+        env={**os.environ, "JAX_PLATFORMS": "cuda"},
         check=False,
         capture_output=True,
         text=True,
@@ -362,6 +440,7 @@ def test_exact_static_replay_dispatches_only_the_stateless_adapter(
             "--static",
             "--frame-index",
             "7",
+            "--no-ranges",
         )
     )
 
@@ -369,7 +448,7 @@ def test_exact_static_replay_dispatches_only_the_stateless_adapter(
     assert observed == {
         "replay_path": Path("episode.marlbg-replay.json"),
         "frame_index": 7,
-        "show_ranges": True,
+        "show_ranges": False,
     }
 
 
@@ -399,6 +478,11 @@ def test_browser_replay_loads_resolves_then_injects_exact_server_binding(
 
         def current_timeline(self) -> object:
             raise AssertionError("server should not request a timeline in this test")
+
+        def current_presentation(self) -> object:
+            raise AssertionError(
+                "server should not request a presentation in this test"
+            )
 
         def apply_command(self, request: object) -> object:
             del request
@@ -485,6 +569,7 @@ def test_browser_replay_loads_resolves_then_injects_exact_server_binding(
     assert coordinator.error_factory is ReplayApiErrorV1
     assert coordinator.current_frame == service.current_frame
     assert coordinator.current_timeline == service.current_timeline
+    assert coordinator.current_presentation == service.current_presentation
     assert coordinator.apply_command == service.apply_command
 
 
@@ -531,7 +616,7 @@ def test_invalid_replay_frame_and_pov_fail_before_server_import(
     replay_path = _write_valid_replay(tmp_path)
     code = f"""
 import sys
-from scripts.dev.debug_renderer import main
+from scripts.dev.replay_viewer import main
 
 for argv, message in (
     (
@@ -558,6 +643,7 @@ print('pre-server rejection complete')
     result = subprocess.run(
         (sys.executable, "-c", code),
         cwd=_REPOSITORY_ROOT,
+        env={**os.environ, "JAX_PLATFORMS": "cuda"},
         check=False,
         capture_output=True,
         text=True,
@@ -583,7 +669,7 @@ def fake_serve(service, **_kwargs):
     return 37
 
 server.serve_browser_debugger = fake_serve
-from scripts.dev.debug_renderer import main
+from scripts.dev.replay_viewer import main
 status = main([
     '--replay', {str(replay_path)!r}, '--frame-index', '1',
     '--view', 'pov', '--pov-slot', '5', '--no-open',
@@ -612,6 +698,7 @@ print('isolated replay browser')
     result = subprocess.run(
         (sys.executable, "-c", code),
         cwd=_REPOSITORY_ROOT,
+        env={**os.environ, "JAX_PLATFORMS": "cuda"},
         check=False,
         capture_output=True,
         text=True,
@@ -634,7 +721,7 @@ def fake_serve(service, **_kwargs):
     return 41
 
 server.serve_browser_debugger = fake_serve
-from scripts.dev.debug_renderer import main
+from scripts.dev.replay_viewer import main
 status = main([
     '--sample-replay', {sample_name!r}, '--no-open',
 ])
@@ -662,6 +749,7 @@ print('isolated checked sample browser')
     result = subprocess.run(
         (sys.executable, "-c", code),
         cwd=_REPOSITORY_ROOT,
+        env={**os.environ, "JAX_PLATFORMS": "cuda"},
         check=False,
         capture_output=True,
         text=True,
@@ -672,16 +760,19 @@ print('isolated checked sample browser')
     assert result.stdout.rstrip().endswith("isolated checked sample browser")
 
 
-def test_parser_rejects_abbreviated_options() -> None:
-    parser = build_parser()
+@pytest.mark.parametrize("parser_factory", (build_debugger_parser, build_parser))
+def test_parsers_reject_abbreviated_options(
+    parser_factory: Callable[[], argparse.ArgumentParser],
+) -> None:
+    parser = parser_factory()
     with pytest.raises(SystemExit) as exc_info:
         parser.parse_args(("--stat",))
     assert exc_info.value.code == 2
 
 
-def test_help_contains_every_option_control_inspector_and_scenario() -> None:
+def test_debugger_help_is_live_only_and_hides_legacy_tokens() -> None:
     result = subprocess.run(
-        (sys.executable, str(_PYTHON_ENTRYPOINT), "--help"),
+        (sys.executable, str(_DEBUGGER_PYTHON_ENTRYPOINT), "--help"),
         cwd="/tmp",
         check=False,
         capture_output=True,
@@ -690,21 +781,13 @@ def test_help_contains_every_option_control_inspector_and_scenario() -> None:
 
     assert result.returncode == 0
     for option in (
-        "--scenario",
-        "--replay",
-        "--sample-replay",
-        "--frame-index",
-        "--pov-slot",
-        "--list-scenarios",
-        "--list-sample-replays",
+        "--record-replay",
         "--seed",
         "--controlled-slot",
         "--static",
         "--no-open",
         "--port",
-        "--include-stress",
         "--view",
-        "--preset",
         "--ranges",
         "--no-ranges",
     ):
@@ -718,41 +801,74 @@ def test_help_contains_every_option_control_inspector_and_scenario() -> None:
         "arrow keys",
         "X",
         "Space / Enter",
-        "P",
-        "[ / ]",
-        "Scenario/View/Preset",
         "Reconnect",
     ):
         assert control in result.stdout
     assert "every staged action as one joint turn" in result.stdout
     assert "agent POV: submit only the controlled actor" in result.stdout
-    assert "advance the next registered scripted frame" in result.stdout
     assert "left click            control the clicked authorized actor" in result.stdout
     assert "Shift+left click      select the clicked active target" in result.stdout
+    for inspector in ("SELECTED TARGET", "PENDING ACTION", "TECHNICAL FRAME"):
+        assert inspector in result.stdout
+    for moved_option in (
+        "--scenario",
+        "--replay",
+        "--sample-replay",
+        "--frame-index",
+        "--pov-slot",
+        "--list-scenarios",
+        "--list-sample-replays",
+        "--include-stress",
+    ):
+        assert moved_option not in result.stdout
+    assert "geometry_debug_renderer" not in result.stdout
+    assert "--preset" not in result.stdout
+    assert "--verbose" not in result.stdout
+    assert "researcher" not in result.stdout
+    assert "{oracle,pov}" in result.stdout
+    assert "scripts/dev/run_replay_viewer.sh" in result.stdout
+
+
+def test_replay_help_is_read_only_and_hides_live_and_legacy_tokens() -> None:
+    result = subprocess.run(
+        (sys.executable, str(_REPLAY_PYTHON_ENTRYPOINT), "--help"),
+        cwd="/tmp",
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    for option in (
+        "--replay",
+        "--sample-replay",
+        "--scenario",
+        "--list-scenarios",
+        "--list-sample-replays",
+        "--include-stress",
+        "--frame-index",
+        "--pov-slot",
+        "--view",
+    ):
+        assert option in result.stdout
+    assert "--record-replay" not in result.stdout
+    assert "--controlled-slot" not in result.stdout
+    assert "--preset" not in result.stdout
+    assert "--verbose" not in result.stdout
+    assert "researcher" not in result.stdout
+    assert "{oracle,pov}" in result.stdout
     for replay_control in (
         "First / -10 / -1",
         "Play/Pause / +1 / +10",
         "Tick current / final",
-        "Shift+Left / Right",
     ):
         assert replay_control in result.stdout
-    for inspector in ("SELECTED TARGET", "PENDING ACTION", "TECHNICAL FRAME"):
-        assert inspector in result.stdout
-    for scenario_name in RESEARCHER_SCENARIOS:
-        assert scenario_name in result.stdout
-    for scenario_name in STRESS_SCENARIOS:
-        assert scenario_name not in result.stdout
-    assert "acceptance_lane_lab" not in result.stdout
-    assert "geometry_debug_renderer" not in result.stdout
-    assert "--verbose" not in result.stdout
-    assert "Graphics speed" not in result.stdout
-    assert "{presentation,analysis,debug}" not in result.stdout
 
 
 def test_list_scenarios_is_stable_and_backend_free() -> None:
     code = (
         "import sys; "
-        "from scripts.dev.debug_renderer import main; "
+        "from scripts.dev.replay_viewer import main; "
         "status=main(['--list-scenarios']); "
         "print('STATUS', status); "
         "forbidden=('jax','jaxlib','numpy','marl_battlegrounds.core','matplotlib'); "
@@ -763,6 +879,7 @@ def test_list_scenarios_is_stable_and_backend_free() -> None:
     result = subprocess.run(
         (sys.executable, "-c", code),
         cwd=_REPOSITORY_ROOT,
+        env={**os.environ, "JAX_PLATFORMS": "cuda"},
         check=False,
         capture_output=True,
         text=True,
@@ -771,18 +888,23 @@ def test_list_scenarios_is_stable_and_backend_free() -> None:
     assert result.returncode == 0, result.stderr
     assert "STATUS 0" in result.stdout
     assert "FORBIDDEN []" in result.stdout
-    positions = [result.stdout.index(name) for name in RESEARCHER_SCENARIOS]
+    scripted_names = tuple(
+        name
+        for name, scenario in RESEARCHER_SCENARIOS.items()
+        if scenario.mode == "scripted"
+    )
+    positions = [result.stdout.index(name) for name in scripted_names]
     assert positions == sorted(positions)
     for scenario_name in STRESS_SCENARIOS:
         assert scenario_name not in result.stdout
-    assert "interactive" in result.stdout
+    assert "arena_5v5" not in result.stdout
     assert "scripted" in result.stdout
 
 
 def test_list_scenarios_includes_stress_only_when_explicitly_requested() -> None:
     code = (
         "import sys; "
-        "from scripts.dev.debug_renderer import main; "
+        "from scripts.dev.replay_viewer import main; "
         "status=main(['--list-scenarios', '--include-stress']); "
         "forbidden=('jax','jaxlib','numpy','marl_battlegrounds.core','matplotlib'); "
         "loaded=sorted(n for n in sys.modules if any(n == p or n.startswith(p + '.') "
@@ -793,6 +915,7 @@ def test_list_scenarios_includes_stress_only_when_explicitly_requested() -> None
     result = subprocess.run(
         (sys.executable, "-c", code),
         cwd=_REPOSITORY_ROOT,
+        env={**os.environ, "JAX_PLATFORMS": "cuda"},
         check=False,
         capture_output=True,
         text=True,
@@ -801,14 +924,20 @@ def test_list_scenarios_includes_stress_only_when_explicitly_requested() -> None
     assert result.returncode == 0, result.stderr
     assert "STATUS 0" in result.stdout
     assert "FORBIDDEN []" in result.stdout
-    for scenario_name in (*RESEARCHER_SCENARIOS, *STRESS_SCENARIOS):
+    scripted_names = tuple(
+        name
+        for name, scenario in RESEARCHER_SCENARIOS.items()
+        if scenario.mode == "scripted"
+    )
+    for scenario_name in (*scripted_names, *STRESS_SCENARIOS):
         assert scenario_name in result.stdout
+    assert "arena_5v5" not in result.stdout
 
 
 def test_list_sample_replays_is_stable_and_core_free() -> None:
     code = (
         "import sys; "
-        "from scripts.dev.debug_renderer import main; "
+        "from scripts.dev.replay_viewer import main; "
         "status=main(['--list-sample-replays']); "
         "print('STATUS', status); "
         "print('FORBIDDEN', any(any(n == p or n.startswith(p + '.') "
@@ -818,6 +947,7 @@ def test_list_sample_replays_is_stable_and_core_free() -> None:
     result = subprocess.run(
         (sys.executable, "-c", code),
         cwd=_REPOSITORY_ROOT,
+        env={**os.environ, "JAX_PLATFORMS": "cuda"},
         check=False,
         capture_output=True,
         text=True,
@@ -836,7 +966,7 @@ def test_sample_replay_resolves_integrity_before_standard_replay_dispatch(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    import scripts.dev.debug_renderer as launcher_module
+    import scripts.dev.replay_viewer as launcher_module
     from scripts.dev.visual_debugger import sample_replays as samples_module
 
     events: list[object] = []
@@ -892,6 +1022,11 @@ def test_sample_replay_injects_verified_bundle_without_reopening_source_path(
         def current_timeline(self) -> object:
             raise AssertionError("server should not request a timeline in this test")
 
+        def current_presentation(self) -> object:
+            raise AssertionError(
+                "server should not request a presentation in this test"
+            )
+
         def apply_command(self, request: object) -> object:
             del request
             raise AssertionError("server should not apply a command in this test")
@@ -945,6 +1080,56 @@ def test_sample_replay_injects_verified_bundle_without_reopening_source_path(
     assert observed["open_browser"] is False
 
 
+def test_sample_replay_static_uses_the_verified_in_memory_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.dev.replay_viewer as launcher_module
+    from scripts.dev.visual_debugger import sample_replays as samples_module
+
+    verified_bundle = object()
+    observed: dict[str, object] = {}
+
+    def fake_sample_load(name: str) -> object:
+        del name
+        return verified_bundle
+
+    monkeypatch.setattr(
+        samples_module,
+        "load_verified_sample_replay",
+        fake_sample_load,
+    )
+
+    def fake_static(options: object, bundle: object) -> int:
+        observed["frame_index"] = object.__getattribute__(options, "frame_index")
+        observed["ranges"] = object.__getattribute__(options, "ranges")
+        observed["bundle"] = bundle
+        return 59
+
+    def fail_browser(*_args: object, **_kwargs: object) -> int:
+        raise AssertionError("sample --static must not start the browser server")
+
+    monkeypatch.setattr(launcher_module, "_run_static_loaded_replay", fake_static)
+    monkeypatch.setattr(launcher_module, "_run_browser_replay", fail_browser)
+
+    result = main(
+        (
+            "--sample-replay",
+            SAMPLE_REPLAYS[0].name,
+            "--static",
+            "--frame-index",
+            "2",
+            "--no-ranges",
+        )
+    )
+
+    assert result == 59
+    assert observed == {
+        "frame_index": 2,
+        "ranges": False,
+        "bundle": verified_bundle,
+    }
+
+
 @pytest.mark.parametrize(
     "conflict",
     (
@@ -952,7 +1137,6 @@ def test_sample_replay_injects_verified_bundle_without_reopening_source_path(
         ("--scenario", "arena_5v5"),
         ("--seed", "0"),
         ("--record-replay", "capture.marlbg-replay.json"),
-        ("--static",),
     ),
 )
 def test_sample_replay_rejects_competing_artifact_or_live_authority(
@@ -963,7 +1147,7 @@ def test_sample_replay_rejects_competing_artifact_or_live_authority(
         main(("--sample-replay", SAMPLE_REPLAYS[0].name, *conflict))
 
     assert exc_info.value.code == 2
-    assert "--sample-replay" in capsys.readouterr().err
+    assert capsys.readouterr().err
 
 
 def test_list_sample_replays_rejects_every_launch_option(
@@ -973,7 +1157,8 @@ def test_list_sample_replays_rejects_every_launch_option(
         main(("--list-sample-replays", "--no-open"))
 
     assert exc_info.value.code == 2
-    assert "cannot be combined" in capsys.readouterr().err
+    error = capsys.readouterr().err
+    assert "--no-open is unavailable with --list-sample-replays" in error
 
 
 def test_lazy_rendering_and_debugger_models_are_backend_free() -> None:
@@ -1011,9 +1196,7 @@ def test_missing_matplotlib_is_actionable_and_returns_two(tmp_path: Path) -> Non
     result = subprocess.run(
         (
             sys.executable,
-            str(_PYTHON_ENTRYPOINT),
-            "--scenario",
-            "arena_5v5",
+            str(_DEBUGGER_PYTHON_ENTRYPOINT),
             "--static",
         ),
         cwd=_REPOSITORY_ROOT,
@@ -1034,25 +1217,20 @@ def test_missing_matplotlib_is_actionable_and_returns_two(tmp_path: Path) -> Non
 @pytest.mark.parametrize(
     "argv",
     (
-        ("--scenario", "missing"),
-        ("--scenario", "charge_convergence"),
-        ("--scenario", "arena_5v5", "--controlled-slot", "-1"),
+        ("--controlled-slot", "-1"),
         ("--seed", "not-an-int"),
+        ("--view", "researcher-visible-typo"),
     ),
 )
 def test_invalid_cli_inputs_use_argparse_exit_two(argv: tuple[str, ...]) -> None:
     with pytest.raises(SystemExit) as exc_info:
-        main(argv)
+        debug_main(argv)
     assert exc_info.value.code == 2
 
 
 @pytest.mark.parametrize(
     "argv",
-    (
-        ("--scenario", "missing"),
-        ("--scenario", "charge_convergence"),
-        ("--scenario", "arena_5v5", "--controlled-slot", "-1"),
-    ),
+    (("--controlled-slot", "-1"),),
 )
 def test_semantic_cli_validation_precedes_runtime_dispatch(
     monkeypatch: pytest.MonkeyPatch,
@@ -1068,7 +1246,7 @@ def test_semantic_cli_validation_precedes_runtime_dispatch(
     monkeypatch.setattr(static_module, "run_static_renderer", fail_if_dispatched)
 
     with pytest.raises(SystemExit) as exc_info:
-        main(argv)
+        debug_main(argv)
 
     assert exc_info.value.code == 2
 
@@ -1096,7 +1274,7 @@ def test_browser_default_builds_service_and_forwards_lifecycle_options(
         return 17
 
     monkeypatch.setattr(server_module, "serve_browser_debugger", fake_serve)
-    result = main(
+    result = debug_main(
         (
             "--no-open",
             "--port",
@@ -1165,7 +1343,7 @@ def test_recording_preflights_before_scenario_provenance_session_or_server(
     monkeypatch.setattr(server_module, "serve_browser_debugger", forbidden)
 
     with pytest.raises(SystemExit) as exc_info:
-        main(("--record-replay", str(target), "--no-open"))
+        debug_main(("--record-replay", str(target), "--no-open"))
 
     assert exc_info.value.code == 2
     error = capsys.readouterr().err
@@ -1202,7 +1380,7 @@ def test_recording_runtime_provenance_failure_exits_before_router_or_browser(
     monkeypatch.setattr(server_module.webbrowser, "open", forbidden)
 
     with pytest.raises(SystemExit) as exc_info:
-        main(
+        debug_main(
             (
                 "--record-replay",
                 str(tmp_path / "episode.marlbg-replay.json"),
@@ -1281,12 +1459,10 @@ def test_recording_launch_injects_retaining_recorder_router_and_graceful_close(
     )
     monkeypatch.setattr(server_module, "serve_browser_debugger", fake_serve)
 
-    result = main(
+    result = debug_main(
         (
             "--record-replay",
             str(target),
-            "--scenario",
-            "arena_5v5",
             "--view",
             "pov",
             "--preset",
@@ -1352,11 +1528,9 @@ def test_static_flag_uses_only_the_stateless_snapshot_adapter(
     monkeypatch.setattr(static_module, "run_static_renderer", fake_static)
     monkeypatch.setattr(server_module, "serve_browser_debugger", fail_if_served)
 
-    result = main(
+    result = debug_main(
         (
             "--static",
-            "--scenario",
-            "status_stack",
             "--seed",
             "13",
             "--controlled-slot",
@@ -1367,7 +1541,7 @@ def test_static_flag_uses_only_the_stateless_snapshot_adapter(
     )
 
     assert result == 19
-    assert cast(DebuggerScenario, observed["scenario"]).name == "status_stack"
+    assert cast(DebuggerScenario, observed["scenario"]).name == "arena_5v5"
     assert observed["seed"] == 13
     assert (
         cast(
@@ -1384,22 +1558,29 @@ def test_static_flag_uses_only_the_stateless_snapshot_adapter(
 def test_stress_browser_launch_requires_and_accepts_explicit_opt_in(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import scripts.dev.visual_debugger.server as server_module
+    import scripts.dev.replay_viewer as launcher_module
 
-    def ignore_browser_launch(
-        _service: object,
+    bundle = object()
+
+    def fake_materialize(_options: object) -> object:
+        return bundle
+
+    def fake_replay(
+        _options: object,
         *,
-        asset_root: Path,
-        port: int,
-        open_browser: bool,
+        loaded_bundle: object | None = None,
     ) -> int:
-        del asset_root, port, open_browser
-        return 0
+        return 0 if loaded_bundle is bundle else 1
 
     monkeypatch.setattr(
-        server_module,
-        "serve_browser_debugger",
-        ignore_browser_launch,
+        launcher_module,
+        "_materialize_scripted_bundle",
+        fake_materialize,
+    )
+    monkeypatch.setattr(
+        launcher_module,
+        "_run_browser_replay",
+        fake_replay,
     )
     with pytest.raises(SystemExit) as exc_info:
         main(("--scenario", "charge_convergence"))
@@ -1416,6 +1597,151 @@ def test_stress_browser_launch_requires_and_accepts_explicit_opt_in(
         )
         == 0
     )
+
+
+def test_scripted_scenario_materializes_in_an_isolated_cpu_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.dev.replay_viewer as launcher_module
+
+    from marl_battlegrounds.evaluation import replay_io as replay_io_module
+
+    observed: dict[str, object] = {}
+    bundle = object()
+
+    def fake_subprocess_run(
+        command: list[str],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        observed["command"] = command
+        observed.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    def fake_load(
+        path: Path,
+        *,
+        require_metric_report: bool = False,
+    ) -> object:
+        observed["loaded_path"] = path
+        observed["require_metric_report"] = require_metric_report
+        return bundle
+
+    def fake_browser(
+        options: object,
+        *,
+        loaded_bundle: object | None = None,
+    ) -> int:
+        observed["browser_options"] = options
+        observed["loaded_bundle"] = loaded_bundle
+        return 53
+
+    monkeypatch.setattr(launcher_module.subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(replay_io_module, "load_replay_bundle_v1", fake_load)
+    monkeypatch.setattr(launcher_module, "_run_browser_replay", fake_browser)
+
+    assert main(("--scenario", "basic_support", "--seed", "17", "--no-open")) == 53
+    command = cast(list[str], observed["command"])
+    assert command[:4] == [
+        sys.executable,
+        str(_REPLAY_PYTHON_ENTRYPOINT.resolve()),
+        "--_materialize-scripted-scenario",
+        "basic_support",
+    ]
+    assert command[4:6] == ["--destination", str(observed["loaded_path"])]
+    assert command[6:] == ["--seed", "17"]
+    assert observed["cwd"] == _REPOSITORY_ROOT
+    environment = cast(dict[str, str], observed["env"])
+    assert environment["JAX_PLATFORMS"] == "cpu"
+    assert observed["check"] is False
+    assert observed["capture_output"] is True
+    assert observed["text"] is True
+    assert observed["require_metric_report"] is True
+    assert observed["loaded_bundle"] is bundle
+
+
+def test_real_scripted_materializer_publishes_a_publicly_loadable_bundle(
+    tmp_path: Path,
+) -> None:
+    from marl_battlegrounds.evaluation.replay_io import load_replay_bundle_v1
+
+    destination = tmp_path / "basic-support.marlbg-replay.json"
+    result = subprocess.run(
+        (
+            sys.executable,
+            str(_REPLAY_PYTHON_ENTRYPOINT.resolve()),
+            "--_materialize-scripted-scenario",
+            "basic_support",
+            "--destination",
+            str(destination),
+            "--seed",
+            "23",
+        ),
+        cwd=_REPOSITORY_ROOT,
+        env={**os.environ, "JAX_PLATFORMS": "cpu"},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    bundle = load_replay_bundle_v1(destination, require_metric_report=True)
+    assert bundle.status == "complete"
+    assert bundle.metric_report_artifact is not None
+    assert len(bundle.replay.transitions) == 2
+    assert len(bundle.replay.frames) == 3
+
+
+def test_scripted_scenario_static_renders_the_materialized_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.dev.replay_viewer as launcher_module
+
+    bundle = object()
+    observed: dict[str, object] = {}
+
+    def fake_materialize(options: object) -> object:
+        del options
+        return bundle
+
+    monkeypatch.setattr(
+        launcher_module,
+        "_materialize_scripted_bundle",
+        fake_materialize,
+    )
+
+    def fake_static(options: object, loaded_bundle: object) -> int:
+        observed["frame_index"] = object.__getattribute__(options, "frame_index")
+        observed["seed"] = object.__getattribute__(options, "seed")
+        observed["ranges"] = object.__getattribute__(options, "ranges")
+        observed["bundle"] = loaded_bundle
+        return 61
+
+    def fail_browser(*_args: object, **_kwargs: object) -> int:
+        raise AssertionError("scenario --static must not start the browser server")
+
+    monkeypatch.setattr(launcher_module, "_run_static_loaded_replay", fake_static)
+    monkeypatch.setattr(launcher_module, "_run_browser_replay", fail_browser)
+
+    result = main(
+        (
+            "--scenario",
+            "basic_support",
+            "--seed",
+            "17",
+            "--static",
+            "--frame-index",
+            "3",
+            "--no-ranges",
+        )
+    )
+
+    assert result == 61
+    assert observed == {
+        "frame_index": 3,
+        "seed": 17,
+        "ranges": False,
+        "bundle": bundle,
+    }
 
 
 def _write_fake_uv(
@@ -1437,7 +1763,7 @@ def _write_fake_uv(
     return fake_bin, record
 
 
-def test_launcher_resolves_root_outside_repository_cwd_and_forwards_arguments(
+def test_debugger_launcher_resolves_root_and_forwards_live_arguments(
     tmp_path: Path,
 ) -> None:
     fake_bin, record = _write_fake_uv(tmp_path, exit_code=0)
@@ -1446,9 +1772,7 @@ def test_launcher_resolves_root_outside_repository_cwd_and_forwards_arguments(
     environment["UV_RECORD"] = str(record)
     result = subprocess.run(
         (
-            str(_SHELL_LAUNCHER),
-            "--scenario",
-            "status_stack",
+            str(_DEBUGGER_SHELL_LAUNCHER),
             "--seed",
             "19",
             "--verbose",
@@ -1467,9 +1791,7 @@ def test_launcher_resolves_root_outside_repository_cwd_and_forwards_arguments(
         "--project",
         str(_REPOSITORY_ROOT),
         "python",
-        str(_PYTHON_ENTRYPOINT),
-        "--scenario",
-        "status_stack",
+        str(_DEBUGGER_PYTHON_ENTRYPOINT),
         "--seed",
         "19",
         "--verbose",
@@ -1477,7 +1799,7 @@ def test_launcher_resolves_root_outside_repository_cwd_and_forwards_arguments(
     ]
 
 
-def test_launcher_activates_viz_extra_only_for_static_snapshots(
+def test_debugger_launcher_activates_viz_extra_only_for_static_snapshots(
     tmp_path: Path,
 ) -> None:
     fake_bin, record = _write_fake_uv(tmp_path, exit_code=0)
@@ -1486,7 +1808,7 @@ def test_launcher_activates_viz_extra_only_for_static_snapshots(
     environment["UV_RECORD"] = str(record)
 
     result = subprocess.run(
-        (str(_SHELL_LAUNCHER), "--static", "--scenario", "arena_5v5"),
+        (str(_DEBUGGER_SHELL_LAUNCHER), "--static"),
         cwd=tmp_path,
         env=environment,
         check=False,
@@ -1502,10 +1824,84 @@ def test_launcher_activates_viz_extra_only_for_static_snapshots(
         "--extra",
         "viz",
         "python",
-        str(_PYTHON_ENTRYPOINT),
+        str(_DEBUGGER_PYTHON_ENTRYPOINT),
         "--static",
-        "--scenario",
-        "arena_5v5",
+    ]
+
+
+def test_replay_launcher_resolves_root_and_forwards_replay_arguments(
+    tmp_path: Path,
+) -> None:
+    fake_bin, record = _write_fake_uv(tmp_path, exit_code=0)
+    environment = os.environ.copy()
+    environment["PATH"] = os.pathsep.join((str(fake_bin), "/usr/bin", "/bin"))
+    environment["UV_RECORD"] = str(record)
+
+    result = subprocess.run(
+        (
+            str(_REPLAY_SHELL_LAUNCHER),
+            "--sample-replay",
+            SAMPLE_REPLAYS[0].name,
+            "--no-open",
+        ),
+        cwd=tmp_path,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert record.read_text(encoding="utf-8").splitlines() == [
+        "run",
+        "--project",
+        str(_REPOSITORY_ROOT),
+        "python",
+        str(_REPLAY_PYTHON_ENTRYPOINT),
+        "--sample-replay",
+        SAMPLE_REPLAYS[0].name,
+        "--no-open",
+    ]
+
+
+def test_replay_launcher_activates_viz_extra_for_static_artifacts(
+    tmp_path: Path,
+) -> None:
+    fake_bin, record = _write_fake_uv(tmp_path, exit_code=0)
+    environment = os.environ.copy()
+    environment["PATH"] = os.pathsep.join((str(fake_bin), "/usr/bin", "/bin"))
+    environment["UV_RECORD"] = str(record)
+
+    result = subprocess.run(
+        (
+            str(_REPLAY_SHELL_LAUNCHER),
+            "--replay",
+            "episode.marlbg-replay.json",
+            "--static",
+            "--frame-index",
+            "0",
+        ),
+        cwd=tmp_path,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert record.read_text(encoding="utf-8").splitlines() == [
+        "run",
+        "--project",
+        str(_REPOSITORY_ROOT),
+        "--extra",
+        "viz",
+        "python",
+        str(_REPLAY_PYTHON_ENTRYPOINT),
+        "--replay",
+        "episode.marlbg-replay.json",
+        "--static",
+        "--frame-index",
+        "0",
     ]
 
 
@@ -1520,10 +1916,8 @@ def test_static_cli_completes_with_a_headless_matplotlib_backend() -> None:
     result = subprocess.run(
         (
             sys.executable,
-            str(_PYTHON_ENTRYPOINT),
+            str(_DEBUGGER_PYTHON_ENTRYPOINT),
             "--static",
-            "--scenario",
-            "arena_5v5",
             "--no-ranges",
         ),
         cwd="/tmp",
@@ -1537,13 +1931,17 @@ def test_static_cli_completes_with_a_headless_matplotlib_backend() -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_launcher_propagates_uv_exit_code(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "launcher",
+    (_DEBUGGER_SHELL_LAUNCHER, _REPLAY_SHELL_LAUNCHER),
+)
+def test_launchers_propagate_uv_exit_code(tmp_path: Path, launcher: Path) -> None:
     fake_bin, record = _write_fake_uv(tmp_path, exit_code=23)
     environment = os.environ.copy()
     environment["PATH"] = os.pathsep.join((str(fake_bin), "/usr/bin", "/bin"))
     environment["UV_RECORD"] = str(record)
     result = subprocess.run(
-        (str(_SHELL_LAUNCHER), "--list-scenarios"),
+        (str(launcher), "--help"),
         cwd=tmp_path,
         env=environment,
         check=False,
@@ -1552,11 +1950,18 @@ def test_launcher_propagates_uv_exit_code(tmp_path: Path) -> None:
     assert result.returncode == 23
 
 
-def test_launcher_reports_missing_uv() -> None:
+@pytest.mark.parametrize(
+    ("launcher", "product"),
+    (
+        (_DEBUGGER_SHELL_LAUNCHER, "Combat Debugger"),
+        (_REPLAY_SHELL_LAUNCHER, "Replay Viewer"),
+    ),
+)
+def test_launchers_report_missing_uv(launcher: Path, product: str) -> None:
     environment = os.environ.copy()
     environment["PATH"] = "/usr/bin:/bin"
     result = subprocess.run(
-        ("bash", str(_SHELL_LAUNCHER), "--help"),
+        ("bash", str(launcher), "--help"),
         cwd="/tmp",
         env=environment,
         check=False,
@@ -1565,18 +1970,18 @@ def test_launcher_reports_missing_uv() -> None:
     )
 
     assert result.returncode == 127
-    assert (
-        "error: uv is required to run the Visual Debugger and Analyzer."
-        in result.stderr
-    )
+    assert f"error: uv is required to run the {product}." in result.stderr
 
 
-def test_launcher_is_executable() -> None:
-    assert _SHELL_LAUNCHER.stat().st_mode & stat.S_IXUSR
+def test_launchers_are_executable() -> None:
+    assert _DEBUGGER_SHELL_LAUNCHER.stat().st_mode & stat.S_IXUSR
+    assert _REPLAY_SHELL_LAUNCHER.stat().st_mode & stat.S_IXUSR
 
 
-def test_launcher_rename_has_no_compatibility_wrapper() -> None:
-    assert _PYTHON_ENTRYPOINT.is_file()
-    assert _SHELL_LAUNCHER.is_file()
+def test_launcher_split_has_both_products_and_no_old_compatibility_wrapper() -> None:
+    assert _DEBUGGER_PYTHON_ENTRYPOINT.is_file()
+    assert _DEBUGGER_SHELL_LAUNCHER.is_file()
+    assert _REPLAY_PYTHON_ENTRYPOINT.is_file()
+    assert _REPLAY_SHELL_LAUNCHER.is_file()
     assert not _OLD_PYTHON_ENTRYPOINT.exists()
     assert not _OLD_SHELL_LAUNCHER.exists()

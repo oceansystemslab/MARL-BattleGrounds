@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import secrets
 import sys
 import webbrowser
@@ -51,6 +52,9 @@ _REQUIRED_RUNTIME_ASSET_PATHS = (
     "index.html",
     "styles.css",
     "src/api.js",
+    "src/authorized-presentation-adapter.js",
+    "src/authorized-presentation-normalizer.js",
+    "src/authorized-presentation-schema.js",
     "src/choreography-painter.js",
     "src/choreography-plan.js",
     "src/choreography.js",
@@ -62,6 +66,7 @@ _REQUIRED_RUNTIME_ASSET_PATHS = (
     "src/layout.js",
     "src/main.js",
     "src/panels.js",
+    "src/presentation-install.js",
     "src/replay-controls.js",
     "src/replay-frame-normalizer.js",
     "src/routes.js",
@@ -73,6 +78,17 @@ _REQUIRED_RUNTIME_ASSET_PATHS = (
 )
 
 type DebuggerServerMode = Literal["live", "replay"]
+type DebuggerProductKind = Literal["combat_debugger", "replay_viewer"]
+
+_BOOTSTRAP_ROUTE = "/bootstrap.js"
+_PRODUCT_KIND_BY_MODE: dict[DebuggerServerMode, DebuggerProductKind] = {
+    "live": "combat_debugger",
+    "replay": "replay_viewer",
+}
+_PRODUCT_TITLE_BY_KIND: dict[DebuggerProductKind, str] = {
+    "combat_debugger": "MARL-BattleGrounds Combat Debugger",
+    "replay_viewer": "MARL-BattleGrounds Replay Viewer",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,28 +98,35 @@ class HttpRouteSet:
     frame: str
     command: str
     timeline: str | None
+    presentation: str
 
 
 LIVE_HTTP_ROUTES = HttpRouteSet(
     frame="/api/frame",
     command="/api/command",
     timeline=None,
+    presentation="/api/presentation/frame",
 )
 REPLAY_HTTP_ROUTES = HttpRouteSet(
     frame="/api/frame",
     command="/api/replay/command",
     timeline="/api/replay/timeline",
+    presentation="/api/presentation/frame",
 )
 
 
-class HttpCommandResult(Protocol):
-    """Structural command result shared by live and replay services."""
+class HttpPayloadResult(Protocol):
+    """Structural payload result shared by read and command operations."""
 
     @property
     def outcome(self) -> str: ...
 
     @property
     def payload(self) -> object: ...
+
+
+class HttpCommandResult(HttpPayloadResult, Protocol):
+    """Payload result whose command may request host shutdown."""
 
     @property
     def shutdown_requested(self) -> bool: ...
@@ -112,11 +135,13 @@ class HttpCommandResult(Protocol):
 class _LegacyServiceOperations(Protocol):
     def current_frame(self) -> object: ...
 
+    def current_presentation(self) -> HttpPayloadResult: ...
+
     def apply_command(self, request: BaseModel) -> HttpCommandResult: ...
 
 
-def _default_result_status(result: HttpCommandResult) -> HTTPStatus:
-    """Preserve the established live service-outcome HTTP mapping."""
+def _default_result_status(result: HttpPayloadResult) -> HTTPStatus:
+    """Preserve the established service-outcome HTTP mapping."""
     outcome = _require_string(result.outcome, name="outcome")
     return {
         "invalid_cursor": HTTPStatus.UNPROCESSABLE_ENTITY,
@@ -126,6 +151,16 @@ def _default_result_status(result: HttpCommandResult) -> HTTPStatus:
         "server_shutting_down": HTTPStatus.SERVICE_UNAVAILABLE,
         "service_faulted": HTTPStatus.INTERNAL_SERVER_ERROR,
     }.get(outcome, HTTPStatus.OK)
+
+
+def _presentation_result_status(result: HttpPayloadResult) -> HTTPStatus:
+    """Map the fixed additive presentation-resource outcome contract."""
+    outcome = _require_string(result.outcome, name="outcome")
+    if outcome == "response":
+        return HTTPStatus.OK
+    if outcome == "audience_unavailable":
+        return HTTPStatus.UNPROCESSABLE_ENTITY
+    raise ValueError("Unknown presentation resource outcome.")
 
 
 def _require_string(value: object, *, name: str) -> str:
@@ -156,8 +191,14 @@ class HttpCoordinatorBinding:
     error_factory: Callable[..., object]
     current_frame: Callable[[], object]
     apply_command: Callable[..., HttpCommandResult]
+    current_presentation: Callable[[], HttpPayloadResult]
     current_timeline: Callable[[], object] | None = None
     result_status: Callable[[HttpCommandResult], HTTPStatus] = _default_result_status
+
+    @property
+    def product_kind(self) -> DebuggerProductKind:
+        """Return the public product identity owned by this exact route binding."""
+        return _PRODUCT_KIND_BY_MODE[self.mode]
 
     def __post_init__(self) -> None:
         if self.mode not in ("live", "replay"):
@@ -178,6 +219,7 @@ class HttpCoordinatorBinding:
             "error_factory": self.error_factory,
             "current_frame": self.current_frame,
             "apply_command": self.apply_command,
+            "current_presentation": self.current_presentation,
             "result_status": self.result_status,
         }
         for name, operation in operations.items():
@@ -311,10 +353,16 @@ type GracefulCloseCallback = Callable[[], GracefulCloseResult]
 def _legacy_live_binding(service: object) -> HttpCoordinatorBinding:
     """Derive the existing live wire types without importing their modules here."""
     current_frame = getattr(service, "current_frame", None)
+    current_presentation = getattr(service, "current_presentation", None)
     apply_command = getattr(service, "apply_command", None)
-    if not callable(current_frame) or not callable(apply_command):
+    if (
+        not callable(current_frame)
+        or not callable(current_presentation)
+        or not callable(apply_command)
+    ):
         raise TypeError(
-            "Debugger services require callable current_frame and apply_command."
+            "Debugger services require callable current_frame, current_presentation, "
+            "and apply_command."
         )
 
     try:
@@ -337,6 +385,9 @@ def _legacy_live_binding(service: object) -> HttpCoordinatorBinding:
     def call_current_frame() -> object:
         return typed_service.current_frame()
 
+    def call_current_presentation() -> HttpPayloadResult:
+        return typed_service.current_presentation()
+
     def call_apply_command(request: BaseModel) -> HttpCommandResult:
         return typed_service.apply_command(request)
 
@@ -347,6 +398,7 @@ def _legacy_live_binding(service: object) -> HttpCoordinatorBinding:
         error_factory=create_error,
         current_frame=call_current_frame,
         apply_command=call_apply_command,
+        current_presentation=call_current_presentation,
     )
 
 
@@ -566,6 +618,26 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
         route = self._route(coordinator)
         if route is None or not self._valid_request_origin(coordinator):
             return
+        if route == _BOOTSTRAP_ROUTE:
+            body = (
+                "globalThis.__MARL_DEBUGGER_BOOTSTRAP__ = Object.freeze("
+                + json.dumps(
+                    {
+                        "schema_version": 1,
+                        "product_kind": coordinator.product_kind,
+                    },
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                + ");\n"
+            ).encode("ascii")
+            self._send_bytes(
+                HTTPStatus.OK,
+                body,
+                content_type="text/javascript; charset=utf-8",
+            )
+            return
         if route == coordinator.routes.frame:
             if not self._authenticated(coordinator):
                 return
@@ -576,6 +648,24 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
                 return
             try:
                 self._send_model(HTTPStatus.OK, frame)
+            except BrokenPipeError, ConnectionError, TimeoutError:
+                self.close_connection = True
+            except Exception:
+                self._send_internal_error(coordinator)
+            return
+        presentation_route = coordinator.routes.presentation
+        if route == presentation_route:
+            if not self._authenticated(coordinator):
+                return
+            try:
+                result = coordinator.current_presentation()
+                status = _presentation_result_status(result)
+                payload = result.payload
+            except Exception:
+                self._send_internal_error(coordinator)
+                return
+            try:
+                self._send_model(status, payload)
             except BrokenPipeError, ConnectionError, TimeoutError:
                 self.close_connection = True
             except Exception:
@@ -953,7 +1043,8 @@ def serve_browser_debugger(
     exit_code = 0
     with server:
         url = f"{server.expected_origin}/#token={server.capability_token}"
-        print(f"Visual Debugger and Analyzer: {url}")
+        startup_title = _PRODUCT_TITLE_BY_KIND[server.coordinator.product_kind]
+        print(f"{startup_title}: {url}")
         if open_browser:
             try:
                 opened = webbrowser.open(url)
@@ -971,14 +1062,15 @@ def serve_browser_debugger(
         try:
             server.serve_forever(poll_interval=0.1)
         except KeyboardInterrupt:
+            active_title = _PRODUCT_TITLE_BY_KIND[server.coordinator.product_kind]
             if graceful_close is None:
-                print("Visual Debugger and Analyzer stopped.")
+                print(f"{active_title} stopped.")
             else:
                 try:
                     close_result = server.run_graceful_close(graceful_close)
                 except Exception:
                     print(
-                        "error: Visual Debugger and Analyzer graceful close failed.",
+                        f"error: {active_title} graceful close failed.",
                         file=sys.stderr,
                     )
                     exit_code = 1

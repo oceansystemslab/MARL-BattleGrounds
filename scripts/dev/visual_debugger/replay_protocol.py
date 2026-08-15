@@ -118,6 +118,43 @@ class _ReplayProtocolModel(BaseModel):
     )
 
 
+class _PrivateSharedReplayProtocolModel(_ReplayProtocolModel):
+    """Strict private Shared root that never trusts an existing instance."""
+
+    model_config = ConfigDict(revalidate_instances="always")
+
+    def __init_subclass__(cls) -> None:
+        super().__init_subclass__()
+        if _PrivateSharedReplayProtocolModel not in cls.__bases__:
+            raise TypeError("private Shared replay roots cannot be subclassed.")
+
+
+def _private_exact_int(value: object) -> int:
+    if type(value) is not int:
+        raise ValueError("private Shared integer fields require exact Python ints.")
+    return value
+
+
+def _private_exact_str(value: object) -> str:
+    if type(value) is not str:
+        raise ValueError("private Shared identity fields require exact Python strings.")
+    return value
+
+
+def _private_exact_optional_str(value: object) -> str | None:
+    if value is not None and type(value) is not str:
+        raise ValueError(
+            "private Shared optional identity fields require exact Python strings."
+        )
+    return value
+
+
+def _private_exact_bool(value: object) -> bool:
+    if type(value) is not bool:
+        raise ValueError("private Shared boolean fields require exact Python bools.")
+    return value
+
+
 class ReplayArtifactSummaryV1(_ReplayProtocolModel):
     """Path-free replay provenance and bounded captured-prefix counts."""
 
@@ -140,6 +177,47 @@ class ReplayArtifactSummaryV1(_ReplayProtocolModel):
             raise ValueError("replay summary requires exact T+1/T counts.")
         if self.recorded_transition_count > self.expected_transition_count:
             raise ValueError("recorded transitions cannot exceed the expected horizon.")
+        return self
+
+
+class SharedObsAgentPovReplayArtifactSummaryV1(_PrivateSharedReplayProtocolModel):
+    """Recipient-local SharedObs replay identity and captured-prefix counts."""
+
+    schema_version: Literal[1]
+    recipient_replay_id: _ScientificId
+    episode_id: _ScientificId
+    public_agent_id: _PublicAgentId
+    expected_transition_count: _PositiveInt
+    captured_transition_count: _NonNegativeInt
+    captured_frame_count: _PositiveInt
+
+    _validate_integer_fields = field_validator(
+        "schema_version",
+        "expected_transition_count",
+        "captured_transition_count",
+        "captured_frame_count",
+        mode="before",
+    )(_private_exact_int)
+    _validate_identity_fields = field_validator(
+        "recipient_replay_id",
+        "episode_id",
+        "public_agent_id",
+        mode="before",
+    )(_private_exact_str)
+
+    @model_validator(mode="after")
+    def _validate_summary(self) -> Self:
+        if self.captured_frame_count != self.captured_transition_count + 1:
+            raise ValueError(
+                "SharedObs Agent replay summary requires exact T+1/T counts."
+            )
+        if self.captured_transition_count > self.expected_transition_count:
+            raise ValueError("captured transitions cannot exceed the expected horizon.")
+        expected_replay_id = (
+            f"{self.episode_id}:shared-obs-visual-union:{self.public_agent_id}:replay"
+        )
+        if self.recipient_replay_id != expected_replay_id:
+            raise ValueError("SharedObs Agent replay ID is not recipient-local.")
         return self
 
 
@@ -328,6 +406,62 @@ def _expected_endpoint_kind(
     raise ValueError("complete timeline requires a supported completion basis.")
 
 
+def _validate_shared_agent_completion_disclosure(
+    completion: ActorPovReplayCompletionBadgeV1,
+) -> None:
+    """Keep private Shared transport completion free of failure detail."""
+    public_reason = completion.public_end_or_failure_reason
+    if completion.completion_state == "complete":
+        if public_reason is not None:
+            raise ValueError(
+                "complete SharedObs Agent replay completion forbids a public reason."
+            )
+        return
+    if public_reason != "captured_prefix":
+        raise ValueError(
+            "incomplete SharedObs Agent replay completion must use captured_prefix."
+        )
+
+
+def _validate_private_shared_cursor_root(cursor: ReplayCursorV1) -> None:
+    if type(cursor) is not ReplayCursorV1:
+        raise ValueError("private Shared cursor must use its exact V1 root.")
+    field_names = set(ReplayCursorV1.model_fields)
+    if set(cursor.__dict__) != field_names:
+        raise ValueError("private Shared cursor has a noncanonical runtime shape.")
+    for field_name in field_names:
+        _private_exact_int(getattr(cursor, field_name))
+    ReplayCursorV1.model_validate(
+        {field_name: getattr(cursor, field_name) for field_name in field_names}
+    )
+
+
+def _validate_private_shared_completion_root(
+    completion: ActorPovReplayCompletionBadgeV1,
+) -> None:
+    if type(completion) is not ActorPovReplayCompletionBadgeV1:
+        raise ValueError("private Shared completion must use its exact Agent root.")
+    field_names = set(ActorPovReplayCompletionBadgeV1.model_fields)
+    if set(completion.__dict__) != field_names:
+        raise ValueError("private Shared completion has a noncanonical runtime shape.")
+    _private_exact_int(completion.schema_version)
+    _private_exact_str(completion.episode_id)
+    _private_exact_str(completion.completion_state)
+    _private_exact_int(completion.expected_transition_count)
+    _private_exact_int(completion.captured_transition_count)
+    _private_exact_bool(completion.terminated)
+    _private_exact_bool(completion.truncated)
+    if type(completion.completion_bases) is not tuple or any(
+        type(value) is not str for value in completion.completion_bases
+    ):
+        raise ValueError("private Shared completion bases require exact strings.")
+    _private_exact_optional_str(completion.public_end_or_failure_reason)
+    ActorPovReplayCompletionBadgeV1.model_validate(
+        {field_name: getattr(completion, field_name) for field_name in field_names}
+    )
+    _validate_shared_agent_completion_disclosure(completion)
+
+
 def _validate_completion_summary_join(
     summary: ReplayArtifactSummaryV1,
     completion: ReplayCompletionBadgeV1 | ActorPovReplayCompletionBadgeV1,
@@ -386,6 +520,31 @@ class SharedObsSourceMaterialReplayTimelineRowV1(_ReplayProtocolModel):
     simulator_step_count: _NonNegativeInt
     incoming_transition_id: _ScientificId | None
     endpoint_kind: ReplayTimelineEndpointKindV1 = "none"
+
+
+class SharedObsAgentPovReplayTimelineRowV1(_PrivateSharedReplayProtocolModel):
+    """One identity-only recipient-local SharedObs replay timeline row."""
+
+    frame_index: _NonNegativeInt
+    recipient_frame_id: _ScientificId
+    simulator_step_count: _NonNegativeInt
+    incoming_recipient_transition_id: _ScientificId | None
+    endpoint_kind: ReplayTimelineEndpointKindV1
+
+    _validate_integer_fields = field_validator(
+        "frame_index",
+        "simulator_step_count",
+        mode="before",
+    )(_private_exact_int)
+    _validate_identity_fields = field_validator(
+        "recipient_frame_id",
+        "endpoint_kind",
+        mode="before",
+    )(_private_exact_str)
+    _validate_optional_identity = field_validator(
+        "incoming_recipient_transition_id",
+        mode="before",
+    )(_private_exact_optional_str)
 
 
 class _ReplayTimelineBaseV1(_ReplayProtocolModel):
@@ -557,10 +716,99 @@ class SharedObsSourceMaterialReplayTimelineV1(_ReplayTimelineBaseV1):
         return self
 
 
+class SharedObsAgentPovReplayTimelineV1(_PrivateSharedReplayProtocolModel):
+    """Identity-only SharedObs Agent POV timeline for product transport."""
+
+    schema_version: Literal[1]
+    timeline_kind: Literal["shared_obs_agent_pov"]
+    timeline_id: _ScientificId
+    artifact_summary: SharedObsAgentPovReplayArtifactSummaryV1
+    final_frame_index: _NonNegativeInt
+    completion: ActorPovReplayCompletionBadgeV1
+    rows: tuple[SharedObsAgentPovReplayTimelineRowV1, ...]
+
+    _validate_integer_fields = field_validator(
+        "schema_version",
+        "final_frame_index",
+        mode="before",
+    )(_private_exact_int)
+    _validate_identity_fields = field_validator(
+        "timeline_id",
+        mode="before",
+    )(_private_exact_str)
+
+    @model_validator(mode="after")
+    def _validate_timeline(self) -> Self:
+        summary = self.artifact_summary
+        completion = self.completion
+        if type(summary) is not SharedObsAgentPovReplayArtifactSummaryV1:
+            raise ValueError(
+                "artifact_summary must be the exact SharedObs Agent replay root."
+            )
+        if type(completion) is not ActorPovReplayCompletionBadgeV1:
+            raise ValueError("completion must be the exact Agent POV badge.")
+        _validate_private_shared_completion_root(completion)
+        if self.final_frame_index != summary.captured_transition_count:
+            raise ValueError("timeline endpoint must equal the captured prefix.")
+        if completion.episode_id != summary.episode_id:
+            raise ValueError("timeline completion must join recipient replay identity.")
+        if completion.expected_transition_count != summary.expected_transition_count:
+            raise ValueError("timeline completion horizon must equal replay summary.")
+        if completion.captured_transition_count != summary.captured_transition_count:
+            raise ValueError(
+                "timeline completion must equal the captured replay prefix."
+            )
+        expected_timeline_id = (
+            f"{summary.episode_id}:shared-obs-visual-union:"
+            f"{summary.public_agent_id}:timeline"
+        )
+        if self.timeline_id != expected_timeline_id:
+            raise ValueError("SharedObs Agent timeline ID is not recipient-local.")
+        if len(self.rows) != summary.captured_frame_count:
+            raise ValueError("SharedObs Agent timeline must contain exactly T+1 rows.")
+
+        endpoint = _expected_endpoint_kind(completion)
+        previous_step: int | None = None
+        for index, row in enumerate(self.rows):
+            if type(row) is not SharedObsAgentPovReplayTimelineRowV1:
+                raise ValueError(
+                    "timeline rows must use the exact SharedObs Agent root."
+                )
+            expected_frame_id = (
+                f"{summary.episode_id}:shared-obs-visual-union:"
+                f"{summary.public_agent_id}:frame:{index}"
+            )
+            if row.frame_index != index or row.recipient_frame_id != expected_frame_id:
+                raise ValueError(
+                    "SharedObs Agent frame identity is not recipient-local."
+                )
+            expected_transition_id = (
+                None
+                if index == 0
+                else (
+                    f"{summary.episode_id}:shared-obs-visual-union:"
+                    f"{summary.public_agent_id}:transition:{index - 1}"
+                )
+            )
+            if row.incoming_recipient_transition_id != expected_transition_id:
+                raise ValueError(
+                    "SharedObs Agent transition identity is not recipient-local."
+                )
+            expected_endpoint = endpoint if index == self.final_frame_index else "none"
+            if row.endpoint_kind != expected_endpoint:
+                raise ValueError("SharedObs Agent timeline endpoint marker is invalid.")
+            _validate_adjacent_simulator_step(
+                previous_step=previous_step,
+                current_step=row.simulator_step_count,
+            )
+            previous_step = row.simulator_step_count
+        return self
+
+
 type ReplayTimelineV1 = Annotated[
     ResearcherReplayTimelineV1
     | ActorPovReplayTimelineV1
-    | SharedObsSourceMaterialReplayTimelineV1,
+    | SharedObsAgentPovReplayTimelineV1,
     Field(discriminator="timeline_kind"),
 ]
 
@@ -801,10 +1049,107 @@ class SharedObsSourceMaterialReplayViewerFrameV1(_ReplayViewerFrameBaseV1):
         return self
 
 
+class SharedObsAgentPovReplayViewerFrameV1(_PrivateSharedReplayProtocolModel):
+    """Identity-only SharedObs Agent POV frame for product transport."""
+
+    schema_version: Literal[1]
+    frame_kind: Literal["shared_obs_agent_pov_replay_viewer"]
+    viewer_session_id: _OpaqueId
+    revision: _NonNegativeInt
+    artifact_summary: SharedObsAgentPovReplayArtifactSummaryV1
+    timeline_id: _ScientificId
+    cursor: ReplayCursorV1
+    preset: Literal["analysis"]
+    verbose: Literal[False]
+    view_mode: Literal["pov"]
+    public_agent_id: _PublicAgentId
+    recipient_frame_id: _ScientificId
+    simulator_step_count: _NonNegativeInt
+    incoming_recipient_transition_id: _ScientificId | None
+    completion: ActorPovReplayCompletionBadgeV1
+
+    _validate_integer_fields = field_validator(
+        "schema_version",
+        "revision",
+        "simulator_step_count",
+        mode="before",
+    )(_private_exact_int)
+    _validate_identity_fields = field_validator(
+        "viewer_session_id",
+        "timeline_id",
+        "preset",
+        "view_mode",
+        "public_agent_id",
+        "recipient_frame_id",
+        mode="before",
+    )(_private_exact_str)
+    _validate_optional_identity = field_validator(
+        "incoming_recipient_transition_id",
+        mode="before",
+    )(_private_exact_optional_str)
+    _validate_verbose = field_validator("verbose", mode="before")(_private_exact_bool)
+
+    @model_validator(mode="after")
+    def _validate_frame(self) -> Self:
+        summary = self.artifact_summary
+        cursor = self.cursor
+        completion = self.completion
+        if type(summary) is not SharedObsAgentPovReplayArtifactSummaryV1:
+            raise ValueError(
+                "artifact_summary must be the exact SharedObs Agent replay root."
+            )
+        if type(cursor) is not ReplayCursorV1:
+            raise ValueError("cursor must be the exact replay cursor root.")
+        if type(completion) is not ActorPovReplayCompletionBadgeV1:
+            raise ValueError("completion must be the exact Agent POV badge.")
+        _validate_private_shared_cursor_root(cursor)
+        _validate_private_shared_completion_root(completion)
+        if self.public_agent_id != summary.public_agent_id:
+            raise ValueError(
+                "SharedObs Agent frame recipient must join replay identity."
+            )
+        if cursor.final_frame_index != summary.captured_transition_count:
+            raise ValueError("cursor endpoint must equal the captured prefix.")
+        if completion.episode_id != summary.episode_id:
+            raise ValueError("completion must join recipient replay identity.")
+        if completion.expected_transition_count != summary.expected_transition_count:
+            raise ValueError("completion horizon must equal replay summary.")
+        if completion.captured_transition_count != summary.captured_transition_count:
+            raise ValueError("completion must equal the captured replay prefix.")
+
+        expected_timeline_id = (
+            f"{summary.episode_id}:shared-obs-visual-union:"
+            f"{summary.public_agent_id}:timeline"
+        )
+        if self.timeline_id != expected_timeline_id:
+            raise ValueError(
+                "SharedObs Agent frame timeline ID is not recipient-local."
+            )
+        expected_frame_id = (
+            f"{summary.episode_id}:shared-obs-visual-union:"
+            f"{summary.public_agent_id}:frame:{cursor.frame_index}"
+        )
+        if self.recipient_frame_id != expected_frame_id:
+            raise ValueError("SharedObs Agent frame ID is not recipient-local.")
+        expected_transition_id = (
+            None
+            if cursor.frame_index == 0
+            else (
+                f"{summary.episode_id}:shared-obs-visual-union:"
+                f"{summary.public_agent_id}:transition:{cursor.frame_index - 1}"
+            )
+        )
+        if self.incoming_recipient_transition_id != expected_transition_id:
+            raise ValueError(
+                "incoming SharedObs Agent transition is not recipient-local."
+            )
+        return self
+
+
 type ReplayViewerFrameV1 = Annotated[
     ResearcherReplayViewerFrameV1
     | ActorPovReplayViewerFrameV1
-    | SharedObsSourceMaterialReplayViewerFrameV1,
+    | SharedObsAgentPovReplayViewerFrameV1,
     Field(discriminator="frame_kind"),
 ]
 
@@ -852,7 +1197,11 @@ class ReplaySetPresetCommandV1(_ReplayProtocolModel):
     @field_validator("preset", mode="before")
     @classmethod
     def _canonicalize_legacy_technical_preset(cls, value: object) -> object:
-        return "analysis" if value == "debug" else value
+        return (
+            "analysis"
+            if value in ("presentation", "analysis", "technical", "debug")
+            else value
+        )
 
 
 class ReplaySetRangesCommandV1(_ReplayProtocolModel):
@@ -964,6 +1313,10 @@ __all__ = [
     "ResearcherReplayTimelineRowV1",
     "ResearcherReplayTimelineV1",
     "ResearcherReplayViewerFrameV1",
+    "SharedObsAgentPovReplayArtifactSummaryV1",
+    "SharedObsAgentPovReplayTimelineRowV1",
+    "SharedObsAgentPovReplayTimelineV1",
+    "SharedObsAgentPovReplayViewerFrameV1",
     "SharedObsSourceMaterialReplayTimelineRowV1",
     "SharedObsSourceMaterialReplayTimelineV1",
     "SharedObsSourceMaterialReplayViewerFrameV1",

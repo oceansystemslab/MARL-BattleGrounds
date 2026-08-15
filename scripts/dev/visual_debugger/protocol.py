@@ -19,10 +19,14 @@ from pydantic import (
     model_validator,
 )
 
-from marl_battlegrounds.core.types import (
-    MAX_AGENT_SLOTS,
-    NUM_MOVE_ACTIONS,
-    NUM_TARGET_ACTIONS,
+from marl_battlegrounds.evaluation.wire_shapes import (
+    MAX_AGENT_SLOTS_V1 as MAX_AGENT_SLOTS,
+)
+from marl_battlegrounds.evaluation.wire_shapes import (
+    NUM_MOVE_ACTIONS_V1 as NUM_MOVE_ACTIONS,
+)
+from marl_battlegrounds.evaluation.wire_shapes import (
+    NUM_TARGET_ACTIONS_V1 as NUM_TARGET_ACTIONS,
 )
 from marl_battlegrounds.rendering.pov_scene import ActorPovAnalyzerProjectionV1
 from marl_battlegrounds.rendering.scene import (
@@ -187,7 +191,11 @@ class SetPresetCommandV1(_ProtocolModel):
         cls,
         value: object,
     ) -> object:
-        return "analysis" if value == "debug" else value
+        return (
+            "analysis"
+            if value in ("presentation", "analysis", "technical", "debug")
+            else value
+        )
 
 
 class ExitCommandV1(_ProtocolModel):

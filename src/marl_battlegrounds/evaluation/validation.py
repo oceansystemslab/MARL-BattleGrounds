@@ -263,7 +263,9 @@ def validate_declared_model_tree(
             f"{record_name} must use exact declared root type {expected_type.__name__}"
         )
     try:
-        reconstructed = expected_type.model_validate(model.model_dump(mode="python"))
+        reconstructed = expected_type.model_validate(
+            model.model_dump(mode="python", warnings=False)
+        )
     except ValidationError as error:
         raise ValueError(f"{record_name} fails structural revalidation") from error
     if type(reconstructed) is not expected_type or not _matches_declared_model_tree(
@@ -326,6 +328,23 @@ def _validate_context_joined_frame(
         raise ValueError(f"{record_name} ID is not canonical")
     _validate_frame_information_regime(context, frame)
     _validate_inactive_frame_padding(context, frame)
+
+
+def validate_context_joined_evaluation_frame_v1(
+    context: EvaluationEpisodeContextV1,
+    frame: EvaluationFrameV1,
+) -> None:
+    """Deeply validate one exact frame against its context-owned authority."""
+    validate_declared_model_tree(
+        context,
+        record_name="context",
+        expected_type=EvaluationEpisodeContextV1,
+    )
+    _validate_context_joined_frame(
+        context,
+        frame,
+        record_name="frame",
+    )
 
 
 def validate_initial_evaluation_frame_v1(
@@ -432,6 +451,7 @@ def validate_evaluation_transition_unit_v1(
 
 
 __all__ = [
+    "validate_context_joined_evaluation_frame_v1",
     "validate_evaluation_transition_unit_v1",
     "validate_initial_evaluation_frame_v1",
 ]

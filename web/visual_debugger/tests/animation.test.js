@@ -417,10 +417,10 @@ test("replay animates only response-authorized incoming frames and exposes settl
   settled.controller.presentFrame(
     {
       viewer_mode: "replay",
-      animate_incoming: false,
       plan: plan("replay-direct-get"),
     },
     surfaceA,
+    { animateIncoming: false },
   );
   const settledInstall = settled.painter.calls.find(([kind]) => kind === "install");
   assert.ok(settledInstall);
@@ -432,10 +432,10 @@ test("replay animates only response-authorized incoming frames and exposes settl
   animated.controller.presentFrame(
     {
       viewer_mode: "replay",
-      animate_incoming: true,
       plan: plan("replay-exact-next"),
     },
     surfaceA,
+    { animateIncoming: true },
   );
   assert.ok(animated.controller.snapshot().animationCount > 0);
   let didSettle = false;
@@ -448,24 +448,55 @@ test("replay animates only response-authorized incoming frames and exposes settl
   await presentation;
   assert.equal(didSettle, true);
   assert.equal(animated.controller.snapshot().animationCount, 0);
+
+  const scientificInputCannotAuthorize = harness();
+  scientificInputCannotAuthorize.controller.presentFrame(
+    {
+      viewer_mode: "replay",
+      animate_incoming: true,
+      plan: plan("replay-scientific-input-cannot-authorize"),
+    },
+    surfaceA,
+  );
+  assert.equal(scientificInputCannotAuthorize.controller.snapshot().animationCount, 0);
 });
 
 test("a direct replay refresh settles an in-flight presentation of the same epoch", () => {
   const { controller } = harness();
   const replayPlan = plan("replay-refresh");
-  controller.presentFrame(
-    { viewer_mode: "replay", animate_incoming: true, plan: replayPlan },
-    surfaceA,
-  );
+  controller.presentFrame({ viewer_mode: "replay", plan: replayPlan }, surfaceA, {
+    animateIncoming: true,
+  });
   assert.ok(controller.snapshot().animationCount > 0);
 
-  controller.presentFrame(
-    { viewer_mode: "replay", animate_incoming: false, plan: replayPlan },
-    surfaceA,
-  );
+  controller.presentFrame({ viewer_mode: "replay", plan: replayPlan }, surfaceA, {
+    animateIncoming: false,
+  });
 
   assert.equal(controller.snapshot().animationCount, 0);
   assert.equal(controller.snapshot().submissionBlocked, false);
+});
+
+test("reproject fallbacks preserve explicit replay intent and otherwise fail settled", () => {
+  const animated = harness();
+  animated.controller.reproject(
+    { viewer_mode: "replay", plan: plan("replay-reproject-authorized") },
+    surfaceA,
+    { animateIncoming: true },
+  );
+  assert.ok(animated.controller.snapshot().animationCount > 0);
+
+  const settled = harness();
+  settled.controller.reproject(
+    {
+      viewer_mode: "replay",
+      animate_incoming: true,
+      plan: plan("replay-reproject-default"),
+    },
+    surfaceA,
+  );
+  assert.equal(settled.controller.snapshot().animationCount, 0);
+  assert.equal(settled.controller.snapshot().submissionBlocked, false);
 });
 
 test("pause, fixed-rate compatibility, Skip, reduced motion, and Off remain presentation-only", async () => {

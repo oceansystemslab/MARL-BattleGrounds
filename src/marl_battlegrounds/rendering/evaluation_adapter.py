@@ -91,6 +91,7 @@ from marl_battlegrounds.evaluation.pov import (
     ActorPovSpawnLifecycleV1,
 )
 from marl_battlegrounds.evaluation.validation import (
+    validate_context_joined_evaluation_frame_v1,
     validate_initial_evaluation_frame_v1,
 )
 from marl_battlegrounds.evaluation.wire_shapes import (
@@ -1596,6 +1597,128 @@ def _respawn_waves(
     )
 
 
+def validate_oracle_scene_static_authority_v1(
+    context: EvaluationEpisodeContextV1,
+    scene: BattlefieldSceneV2,
+) -> None:
+    """Check static coherence of already canonical, deeply validated exact roots.
+
+    This predicate does not construct or deep-validate either input. Authority
+    constructors must perform that validation before calling it.
+    """
+    if type(context) is not EvaluationEpisodeContextV1:
+        raise TypeError("context must be the exact EvaluationEpisodeContextV1 root.")
+    if type(scene) is not BattlefieldSceneV2:
+        raise TypeError("scene must be the exact BattlefieldSceneV2 root.")
+    if scene.episode_id != context.identity.episode_id:
+        raise ValueError("Oracle scene episode does not join its context.")
+    if scene.map != _map_scene(context):
+        raise ValueError("Oracle scene map does not equal context static authority.")
+    if scene.class_mechanics != _class_mechanics(context):
+        raise ValueError(
+            "Oracle scene class mechanics do not equal context static authority."
+        )
+    if scene.spawn_pads != _spawn_pads(context):
+        raise ValueError(
+            "Oracle scene spawn pads do not equal context static authority."
+        )
+
+    config = context.resolved_env_config
+    expected_periods = config.team_respawn_wave_period_steps
+    actual_periods = tuple(row.period_steps for row in scene.respawn_waves)
+    if actual_periods != expected_periods:
+        raise ValueError(
+            "Oracle scene respawn periods do not equal context static authority."
+        )
+
+    active_roster = tuple(row for row in context.roster if row.configured_active)
+    if len(scene.agents) != len(active_roster):
+        raise ValueError("Oracle scene roster does not equal context active roster.")
+    catalog = context.static_mechanics_catalog
+    for roster, agent in zip(active_roster, scene.agents, strict=True):
+        slot_mechanics = config.slot_mechanics[roster.global_slot]
+        class_mechanics = catalog.class_mechanics[roster.class_id]
+        if (
+            agent.global_slot != roster.global_slot
+            or agent.public_agent_id != roster.public_agent_id
+            or agent.team_id != roster.configured_team_id
+            or agent.team_local_slot != roster.team_local_slot
+            or agent.class_id != roster.class_id
+            or agent.radius != slot_mechanics.body_radius
+            or agent.max_health != slot_mechanics.maximum_health
+        ):
+            raise ValueError(
+                "Oracle scene agent profile does not equal context static authority."
+            )
+        if (
+            agent.ultimate_cooldown_remaining > class_mechanics.ultimate_cooldown_steps
+            or agent.spawn_shield_remaining > config.spawn_shield_duration_steps
+            or agent.steps_until_out_of_combat
+            > slot_mechanics.out_of_combat_delay_steps
+        ):
+            raise ValueError(
+                "Oracle scene agent counters exceed context static authority."
+            )
+        if agent.spawn_shield_remaining > 0 and (
+            agent.life_state != "alive"
+            or agent.effective_movement_speed != config.spawn_shield_movement_speed
+        ):
+            raise ValueError(
+                "Oracle active spawn shield does not equal context speed authority."
+            )
+        for status in agent.statuses:
+            mechanic = catalog.status_channels[status.status_channel]
+            source_class = catalog.class_mechanics[mechanic.source_class_id]
+            if (
+                status.status_id != mechanic.status_id
+                or status.family != mechanic.family
+                or status.remaining_duration > mechanic.duration_steps
+                or status.source_class_id != mechanic.source_class_id
+                or status.source_class_name != source_class.class_name
+                or status.source_action_component != mechanic.source_action_component
+                or status.magnitude_kind != mechanic.magnitude_kind
+                or status.magnitude != mechanic.magnitude
+                or status.breaks_on_positive_damage
+                != mechanic.breaks_on_positive_damage
+            ):
+                raise ValueError(
+                    "Oracle scene status does not equal context static authority."
+                )
+
+    expected_aura_keys = tuple(
+        (roster.global_slot, aura.aura_id)
+        for roster in active_roster
+        for aura in catalog.aura_mechanics
+        if aura.emitter_class_id == roster.class_id
+    )
+    actual_aura_keys = tuple(
+        (field.source_global_slot, field.aura_id) for field in scene.aura_fields
+    )
+    if actual_aura_keys != expected_aura_keys:
+        raise ValueError(
+            "Oracle scene aura inventory does not equal context static authority."
+        )
+    aura_by_id = {row.aura_id: row for row in catalog.aura_mechanics}
+    for field in scene.aura_fields:
+        roster = context.roster[field.source_global_slot]
+        aura = aura_by_id[field.aura_id]
+        source_class = catalog.class_mechanics[roster.class_id]
+        if (
+            field.source_public_agent_id != roster.public_agent_id
+            or field.source_class_id != roster.class_id
+            or field.source_class_name != source_class.class_name
+            or field.radius != aura.radius
+            or field.beneficiary_relation != aura.beneficiary_relation
+            or field.per_emitter_multiplier != aura.per_emitter_multiplier
+            or field.stacking_rule != aura.stacking_rule
+            or field.clamp_kind != aura.clamp_kind
+            or field.clamp_value != aura.clamp_value
+        ):
+            raise ValueError(
+                "Oracle scene aura field does not equal context static authority."
+            )
+
+
 def _selection_projection(
     context: EvaluationEpisodeContextV1,
     frame: EvaluationFrameV1,
@@ -1762,19 +1885,14 @@ def build_evaluation_battlefield_scene_v2(
     )
 
 
-def build_shared_obs_source_material_projection_v1(
+def _build_shared_obs_source_material_projection_v1(
     context: EvaluationEpisodeContextV1,
     frame: EvaluationFrameV1,
     *,
     selected_global_slot: int,
-    transition_view: EvaluationTransitionViewV1 | None = None,
+    incoming_transition_id: str | None,
 ) -> SharedObsSourceMaterialProjectionV1:
-    """Project labelled base-sensor and availability evidence for SharedObs.
-
-    This full-record researcher aid deliberately does not export or claim the
-    composed actor input.  Exact SharedObs materialization remains unavailable.
-    """
-    canonical_view = _validate_projection_inputs(context, frame, transition_view)
+    """Construct one projection after the caller validates its authority root."""
     if context.execution_information_mode != "shared_obs":
         raise ValueError(
             "SharedObs source-material projection requires a shared_obs episode."
@@ -1861,10 +1979,52 @@ def build_shared_obs_source_material_projection_v1(
         enemy_observation_row_global_slot_by_id=enemy_slots,
         base_sensor_frame=base_sensor_frame,
         base_sensor_scene=base_sensor_scene,
+        incoming_transition_id=incoming_transition_id,
+        sensor_source_availability=tuple(source_rows),
+    )
+
+
+def build_shared_obs_source_material_projection_v1(
+    context: EvaluationEpisodeContextV1,
+    frame: EvaluationFrameV1,
+    *,
+    selected_global_slot: int,
+    transition_view: EvaluationTransitionViewV1 | None = None,
+) -> SharedObsSourceMaterialProjectionV1:
+    """Project labelled base-sensor and availability evidence for SharedObs.
+
+    This full-record researcher aid deliberately does not export or claim the
+    composed actor input.  Exact SharedObs materialization remains unavailable.
+    """
+    canonical_view = _validate_projection_inputs(context, frame, transition_view)
+    return _build_shared_obs_source_material_projection_v1(
+        context,
+        frame,
+        selected_global_slot=selected_global_slot,
         incoming_transition_id=(
             None if canonical_view is None else canonical_view.transition.transition_id
         ),
-        sensor_source_availability=tuple(source_rows),
+    )
+
+
+def build_shared_obs_authority_source_material_projection_v1(
+    context: EvaluationEpisodeContextV1,
+    frame: EvaluationFrameV1,
+    *,
+    selected_global_slot: int,
+) -> SharedObsSourceMaterialProjectionV1:
+    """Build Shared visual-union authority without transition/history input."""
+    validate_context_joined_evaluation_frame_v1(context, frame)
+    incoming_transition_id = (
+        None
+        if frame.frame_index == 0
+        else f"{frame.episode_id}:transition:{frame.frame_index - 1}"
+    )
+    return _build_shared_obs_source_material_projection_v1(
+        context,
+        frame,
+        selected_global_slot=selected_global_slot,
+        incoming_transition_id=incoming_transition_id,
     )
 
 
@@ -2243,8 +2403,10 @@ __all__ = [
     "advance_status_source_evidence_v2",
     "build_evaluation_battlefield_scene_v2",
     "build_researcher_analyzer_projection_v2",
+    "build_shared_obs_authority_source_material_projection_v1",
     "build_shared_obs_source_material_projection_v1",
     "build_status_source_evidence_index_v2",
     "build_visual_event_batch_v2",
     "initialize_status_source_evidence_v2",
+    "validate_oracle_scene_static_authority_v1",
 ]

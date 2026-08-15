@@ -402,6 +402,31 @@ def test_live_presentation_commands_publish_authoritative_audience_fields() -> N
     assert "show_ranges" not in pov.payload.frame.model_dump(mode="json")
 
 
+@pytest.mark.parametrize(
+    "legacy_preset",
+    ("presentation", "analysis", "technical", "debug"),
+)
+def test_live_preset_requests_are_fixed_analysis_no_ops(
+    legacy_preset: str,
+) -> None:
+    service = _service()
+
+    result = service.apply_command(
+        _request(
+            f"legacy-preset-{legacy_preset}",
+            base_revision=0,
+            command=SetPresetCommandV1.model_validate({"preset": legacy_preset}),
+        )
+    )
+
+    assert isinstance(result.payload, CommandResponseV2)
+    assert result.payload.result == "no_op"
+    assert isinstance(result.payload.frame, ResearcherLiveDebuggerFrameV2)
+    assert result.payload.frame.preset == "analysis"
+    assert result.payload.frame.revision == 0
+    assert service.revision == 0
+
+
 def test_shift_r_is_a_host_no_op_and_ordinary_r_remains_a_restart() -> None:
     service = _service()
     initial_session = service.session
@@ -710,16 +735,16 @@ def test_same_base_concurrent_commands_dispatch_at_most_once(
     monkeypatch.setattr(service_module, "dispatch_command", counting_dispatch)
     requests = (
         _request(
-            "preset-a",
+            "view-a",
             base_revision=0,
             client_id="client-a",
-            command=SetPresetCommandV1(preset="presentation"),
+            command=SetViewCommandV1(view_mode="pov"),
         ),
         _request(
-            "preset-b",
+            "view-b",
             base_revision=0,
             client_id="client-b",
-            command=SetPresetCommandV1(preset="presentation"),
+            command=SetViewCommandV1(view_mode="pov"),
         ),
     )
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -1052,6 +1077,48 @@ def test_endpoint_auto_save_installs_saved_status_and_review_handoff(
     assert recorder.lifecycle == "reviewing"
 
 
+def test_scripted_service_fences_hidden_control_edits_before_advancing_once() -> None:
+    service = _service("aura_crossfire")
+    before_session = service.session
+    before_frame = service.current_frame()
+    before_controlled_slot = before_session.controlled_global_slot
+
+    for command_id, command in (
+        ("scripted-hidden-tab", KeyboardCommandV1(key="Tab")),
+        ("scripted-hidden-reset", ResetCommandV1()),
+    ):
+        blocked = service.apply_command(
+            _request(
+                command_id,
+                base_revision=0,
+                command=command,
+            )
+        )
+        assert isinstance(blocked.payload, CommandResponseV2)
+        assert blocked.payload.result == "no_op"
+        assert blocked.payload.frame is before_frame
+        assert blocked.payload.notice is not None
+        assert "inspection-only" in blocked.payload.notice
+        assert service.session is before_session
+        assert service.session.controlled_global_slot == before_controlled_slot
+        assert service.revision == 0
+        assert service.evaluation_validated_transition_count == 0
+
+    advanced = service.apply_command(
+        _request(
+            "scripted-advance",
+            base_revision=0,
+            command=KeyboardCommandV1(key="n"),
+        )
+    )
+
+    assert isinstance(advanced.payload, CommandResponseV2)
+    assert advanced.payload.result == "applied"
+    assert service.revision == 1
+    assert service.session.current_evaluation_frame.frame_index == 1
+    assert service.evaluation_validated_transition_count == 1
+
+
 def test_exact_horizon_truncation_auto_saves_as_complete_declared_horizon(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1143,13 +1210,45 @@ def test_recording_restart_fence_and_confirmed_discard_replace_atomically(
     assert service.evaluation_validated_transition_count == 0
 
 
+def test_scripted_recording_rejects_confirmed_reset_without_discarding_prefix(
+    tmp_path: Path,
+) -> None:
+    service, recorder = _recording_service(tmp_path, "basic_support")
+    first = service.apply_command(
+        _request(
+            "scripted-prefix",
+            base_revision=0,
+            command=KeyboardCommandV1(key="n"),
+        )
+    )
+    assert isinstance(first.payload, CommandResponseV2)
+    before_session = service.session
+    before_frame = service.current_frame()
+
+    blocked = service.apply_command(
+        _request(
+            "scripted-confirmed-reset",
+            base_revision=1,
+            command=ConfirmDiscardAndReplaceCommandV1(replacement=ResetCommandV1()),
+        )
+    )
+
+    assert isinstance(blocked.payload, CommandResponseV2)
+    assert blocked.payload.result == "no_op"
+    assert blocked.payload.frame is before_frame
+    assert blocked.payload.notice is not None
+    assert "inspection-only" in blocked.payload.notice
+    assert service.session is before_session
+    assert service.revision == 1
+    assert recorder.lifecycle == "recording"
+    assert recorder.validated_transition_count == 1
+
+
 @pytest.mark.parametrize(
     "command",
     (
         ResetCommandV1(),
         KeyboardCommandV1(key="r"),
-        KeyboardCommandV1(key="]"),
-        ScenarioSwitchCommandV1(scenario_name="basic_support"),
     ),
 )
 def test_captured_recording_prefix_fences_every_restart_entry_point(
@@ -1177,6 +1276,52 @@ def test_captured_recording_prefix_fences_every_restart_entry_point(
 
     assert isinstance(fenced.payload, CommandResponseV2)
     assert fenced.payload.result == "no_op"
+    assert service.session is prefix_session
+    assert service.revision == 1
+    assert recorder.lifecycle == "recording"
+    assert recorder.validated_transition_count == 1
+
+
+@pytest.mark.parametrize(
+    ("command", "expected_notice"),
+    (
+        (
+            KeyboardCommandV1(key="]"),
+            "Scenario navigation moved to the read-only Replay Viewer.",
+        ),
+        (
+            ScenarioSwitchCommandV1(scenario_name="basic_support"),
+            "Scenario switching moved to the read-only Replay Viewer.",
+        ),
+    ),
+)
+def test_obsolete_scenario_commands_are_no_ops_during_recording(
+    tmp_path: Path,
+    command: object,
+    expected_notice: str,
+) -> None:
+    service, recorder = _recording_service(tmp_path)
+    submitted = service.apply_command(
+        _request(
+            "obsolete-scenario-prefix",
+            base_revision=0,
+            command=KeyboardCommandV1(key="Enter"),
+        )
+    )
+    assert isinstance(submitted.payload, CommandResponseV2)
+    prefix_session = service.session
+
+    ignored = service.apply_command(
+        _request(
+            f"obsolete-scenario-{type(command).__name__}",
+            base_revision=1,
+            command=command,
+        )
+    )
+
+    assert isinstance(ignored.payload, CommandResponseV2)
+    assert ignored.payload.result == "no_op"
+    assert ignored.payload.notice == expected_notice
     assert service.session is prefix_session
     assert service.revision == 1
     assert recorder.lifecycle == "recording"

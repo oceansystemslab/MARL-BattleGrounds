@@ -128,6 +128,13 @@ test("transition identity excludes revision while authorization tracks POV actor
     "agent_pov",
     pov.scene.self_actor.global_slot,
   ]);
+  const rejectedDiagnosticReplay = {
+    ...replayPov,
+    replay_audience: "shared_obs_source_material",
+    selected_global_slot: pov.scene.self_actor.global_slot,
+  };
+  assert.equal(authorizationContextKey(rejectedDiagnosticReplay), null);
+  assert.equal(buildChoreographyPlan(rejectedDiagnosticReplay, surface), null);
   assert.notEqual(authorizationContextKey(grammar), authorizationContextKey(pov));
 });
 
@@ -150,11 +157,19 @@ test("canonical V2 displacement and rejection selectors own transient color", as
   assert.match(css, /data-event-type="action_rejected"/u);
 });
 
-test("scene removes Technical battlefield branches and owns durable shield hooks", async () => {
+test("scene has one Analysis battlefield branch and owns durable shield hooks", async () => {
   const source = await readFile(new URL("../src/scene.js", import.meta.url), "utf8");
   assert.doesNotMatch(source, /debug-protected-zone/u);
   assert.doesNotMatch(source, /debug-visibility-cue/u);
   assert.doesNotMatch(source, /preset === "debug"/u);
+  assert.doesNotMatch(source, /preset !== "presentation"/u);
+  assert.doesNotMatch(source, /scene\.audience_badge/u);
+  assert.match(source, /dataset\.preset = "analysis"/u);
+  assert.match(
+    source,
+    /scene\.audience === "researcher" \? "Oracle View" : "Agent POV"/u,
+  );
+  assert.match(source, /showLegality: true/u);
   assert.match(source, /agent-spawn-shield__shell/u);
   assert.match(source, /agent-spawn-shield__ticks/u);
   assert.match(source, /registerTooltipOwner\(nodes\.shieldRoot, explainSpawnShield/u);

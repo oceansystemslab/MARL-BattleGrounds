@@ -171,8 +171,7 @@ select {
 .toolbar-actions,
 .button-row,
 .section-heading,
-.session-facts,
-.motion-controls {
+.session-facts {
   display: flex;
   align-items: center;
   gap: 0.55rem;
@@ -482,16 +481,6 @@ select {
   background: rgb(34 211 238 / 12%);
 }
 
-.replay-shortcuts {
-  margin-left: auto;
-  color: var(--text-muted);
-  font-size: 0.72rem;
-}
-
-.replay-shortcuts kbd {
-  color: var(--text);
-}
-
 .session-toolbar label {
   display: grid;
   gap: 0.25rem;
@@ -525,31 +514,10 @@ select {
   font-variant-numeric: tabular-nums;
 }
 
-.motion-controls {
-  min-width: max-content;
-  padding: 0;
-  border: 0;
-  margin: 0;
-}
-
-.motion-controls button {
-  min-height: 2rem;
-  padding: 0.35rem 0.55rem;
-  font-size: 0.78rem;
-}
-
-#motion-off-button[aria-pressed="true"],
 #live-ranges-button[aria-pressed="true"] {
   border-color: rgb(34 211 238 / 58%);
   color: #a5f3fc;
   background: rgb(34 211 238 / 12%);
-}
-
-.motion-status {
-  min-width: 5.6rem;
-  color: var(--text-muted);
-  font-size: 0.75rem;
-  text-align: center;
 }
 
 .button--primary {
@@ -1995,29 +1963,6 @@ select {
   text-transform: uppercase;
 }
 
-.command-deck__shortcut {
-  display: inline-flex;
-  align-items: center;
-  flex: none;
-  gap: 0.35rem;
-  color: var(--text-muted);
-  font-size: 0.67rem;
-  white-space: nowrap;
-}
-
-.command-deck__shortcut kbd {
-  min-width: 2.5rem;
-  padding: 0.18rem 0.38rem;
-  border: 1px solid var(--border-bright);
-  border-bottom-width: 2px;
-  border-radius: 0.35rem;
-  color: var(--text);
-  background: var(--surface-raised);
-  font: inherit;
-  font-weight: 800;
-  text-align: center;
-}
-
 .command-deck__composer {
   display: grid;
   grid-template-columns: max-content minmax(0, 1fr);
@@ -2198,12 +2143,6 @@ select {
   letter-spacing: 0.01em;
 }
 
-#advance-script-button {
-  flex: 0 1 9rem;
-  color: var(--text-muted);
-  background: rgb(22 33 52 / 70%);
-}
-
 .command-deck__utilities {
   display: grid;
   gap: 0.18rem;
@@ -2233,7 +2172,7 @@ select {
 }
 
 .command-group--session .command-button-row {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .command-button-row button {
@@ -3039,17 +2978,8 @@ select {
 
   .session-toolbar label,
   .session-toolbar select,
-  .toolbar-actions,
-  .motion-controls {
+  .toolbar-actions {
     width: 100%;
-  }
-
-  .motion-controls {
-    flex-wrap: wrap;
-  }
-
-  .motion-status {
-    margin-left: auto;
   }
 
   .toolbar-actions button {
@@ -3102,11 +3032,6 @@ select {
 
   .replay-timeline__slider {
     grid-column: 1 / -2;
-  }
-
-  .replay-shortcuts {
-    width: 100%;
-    margin-left: 0;
   }
 
   .scenario-description {
@@ -3190,13 +3115,7 @@ select {
     font-size: 0.72rem;
   }
 
-  #scenario-select {
-    width: 10rem;
-    min-width: 10rem;
-  }
-
-  #view-select,
-  #preset-select {
+  #view-select {
     width: 8rem;
     min-width: 8rem;
   }
@@ -3209,21 +3128,6 @@ select {
 
   .session-facts strong {
     font-size: 0.8rem;
-  }
-
-  .motion-controls {
-    gap: 0.3rem;
-  }
-
-  .motion-controls button {
-    min-height: 1.75rem;
-    padding: 0.2rem 0.4rem;
-    font-size: 0.7rem;
-  }
-
-  .motion-status {
-    min-width: 4.5rem;
-    font-size: 0.68rem;
   }
 
   .toolbar-actions {

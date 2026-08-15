@@ -3,13 +3,28 @@ import {
   acquireClientId,
   DebuggerApiError,
   extractFrame,
+  extractJoinedFrame,
   extractNotice,
-  extractReplayTimeline,
-  getCurrentFrame,
+  getCurrentFrameAndPresentation,
+  getCurrentPresentation,
   getReplayTimeline,
   postCommand,
   postReplayCommand,
 } from "./api.js";
+import {
+  authorizedOracleCommandSlotForPresentationKey,
+  authorizedOracleCommandSlotForPublicAgentId,
+  authorizedPresentationAudience,
+  authorizedPresentationInspectionState,
+  authorizedPresentationSceneView,
+  isAuthorizedPresentationFrame,
+} from "./authorized-presentation-adapter.js";
+import {
+  isJoinedTransportAndAuthorizedPresentationV1,
+  isPresentationJoinRace,
+  joinReplayTransportAndTimelineV1,
+  validateReplayTransportContinuityV1,
+} from "./authorized-presentation-normalizer.js";
 import { CombatChoreographer, ConsumedTransitionLedger } from "./choreography.js";
 import { SvgChoreographyPainter } from "./choreography-painter.js";
 import { isSubmissionCommand } from "./choreography-plan.js";
@@ -25,14 +40,11 @@ import {
 } from "./controls.js";
 import { explainAgent, explainLegality } from "./explanations.js";
 import {
-  liveDebuggerFrameIsScripted,
-  liveDebuggerScenarioControlsAvailable,
-} from "./frame-normalizer.js";
-import {
   DebuggerPanels,
   disclosurePanelInitiallyOpen,
   panelDisclosureAuthorityKey,
 } from "./panels.js";
+import { PresentationInstallCoordinator } from "./presentation-install.js";
 import {
   bindReplayTimelineControls,
   ReplayPlaybackController,
@@ -41,10 +53,6 @@ import {
   replayTimelineSimulatorStep,
   validateReplayCommandOutcome,
 } from "./replay-controls.js";
-import {
-  joinReplayFrameAndTimeline,
-  validateReplayFrameContinuity,
-} from "./replay-frame-normalizer.js";
 import { BattlefieldRenderer } from "./scene.js";
 import {
   createSemanticDescriptor,
@@ -66,14 +74,12 @@ function requiredElement(id) {
 }
 
 const elements = {
+  appTitle: requiredElement("app-title"),
   connectionStatus: requiredElement("connection-status"),
   audienceBadge: requiredElement("audience-badge"),
   terminalBadge: requiredElement("terminal-badge"),
   recordingBadge: requiredElement("recording-badge"),
-  scenarioControl: requiredElement("scenario-control"),
-  scenarioSelect: requiredElement("scenario-select"),
   viewSelect: requiredElement("view-select"),
-  presetSelect: requiredElement("preset-select"),
   revisionValue: requiredElement("revision-value"),
   stepValue: requiredElement("step-value"),
   transitionValue: requiredElement("transition-value"),
@@ -116,10 +122,6 @@ const elements = {
   exitButton: requiredElement("exit-button"),
   resetButton: requiredElement("reset-button"),
   liveRangesButton: requiredElement("live-ranges-button"),
-  motionPauseButton: requiredElement("motion-pause-button"),
-  motionSkipButton: requiredElement("motion-skip-button"),
-  motionOffButton: requiredElement("motion-off-button"),
-  motionStatus: requiredElement("motion-status"),
   notice: requiredElement("notice"),
   scenarioDescription: requiredElement("scenario-description"),
   battlefieldShell: requiredElement("battlefield-shell"),
@@ -142,7 +144,8 @@ const elements = {
   basicButton: requiredElement("basic-button"),
   ultimateButton: requiredElement("ultimate-button"),
   submitTurnButton: requiredElement("submit-turn-button"),
-  advanceScriptButton: requiredElement("advance-script-button"),
+  commandCommitTitle: requiredElement("command-commit-title"),
+  commandCommitSummary: requiredElement("command-commit-summary"),
   acceptedCard: requiredElement("accepted-card"),
   acceptedAnnouncement: requiredElement("accepted-announcement"),
   eventFeed: requiredElement("event-feed"),
@@ -152,6 +155,7 @@ const elements = {
   visualTooltipTitle: requiredElement("visual-tooltip-title"),
   visualTooltipDetails: requiredElement("visual-tooltip-details"),
   helpDialog: requiredElement("help-dialog"),
+  helpHeading: requiredElement("help-heading"),
   battlefieldInstructions: requiredElement("battlefield-instructions"),
   liveOnly: /** @type {NodeListOf<HTMLElement>} */ (
     document.querySelectorAll("[data-live-only]")
@@ -170,7 +174,9 @@ const elements = {
  * @type {{
  *   token: string | null,
  *   clientId: string,
+ *   authority: Readonly<Record<string, any>> | null,
  *   frame: Record<string, any> | null,
+ *   presentation: Readonly<Record<string, any>> | null,
  *   timeline: Record<string, any> | null,
  *   busy: boolean,
  *   offline: boolean,
@@ -183,7 +189,9 @@ const elements = {
 const state = {
   token: acquireCapabilityToken(),
   clientId: acquireClientId(),
+  authority: null,
   frame: null,
+  presentation: null,
   timeline: null,
   busy: false,
   offline: false,
@@ -193,11 +201,98 @@ const state = {
   noticeLevel: "info",
 };
 
+const PRODUCT_TITLES = Object.freeze({
+  combat_debugger: "MARL-BattleGrounds Combat Debugger",
+  replay_viewer: "MARL-BattleGrounds Replay Viewer",
+});
+const PRODUCT_HANDOFF_COMMANDS = new Set([
+  "finish_and_review",
+  "review_replay",
+  "save_as",
+]);
+const SCRIPTED_INSPECTION_RECORDING_COMMANDS = new Set([
+  "finish_and_review",
+  "review_replay",
+  "retry_save",
+  "save_as",
+  "confirm_discard_and_replace",
+  "exit",
+]);
+
+class ProductIdentityMismatchError extends Error {}
+class ProductReviewHandoff extends Error {}
+
+/** @type {Readonly<{schema_version: 1, product_kind: "combat_debugger" | "replay_viewer"}> | null} */
+let productIdentity = null;
+/** @type {string | null} */
+let startupProductIdentityError = null;
+
+/**
+ * Install one validated route-owned identity. Startup and the future explicit
+ * recording-review handoff must both cross this boundary; frame facts are not
+ * product-identity authority.
+ *
+ * @param {unknown} rawIdentity
+ */
+function applyProductIdentity(rawIdentity) {
+  if (!isRecord(rawIdentity)) {
+    throw new TypeError("Product bootstrap must be an object.");
+  }
+  const keys = Object.keys(rawIdentity).sort();
+  if (keys.length !== 2 || keys[0] !== "product_kind" || keys[1] !== "schema_version") {
+    throw new TypeError("Product bootstrap has an invalid shape.");
+  }
+  if (rawIdentity.schema_version !== 1) {
+    throw new TypeError("Product bootstrap schema version is unsupported.");
+  }
+  if (
+    rawIdentity.product_kind !== "combat_debugger" &&
+    rawIdentity.product_kind !== "replay_viewer"
+  ) {
+    throw new TypeError("Product bootstrap kind is unsupported.");
+  }
+  productIdentity = Object.freeze({
+    schema_version: 1,
+    product_kind: rawIdentity.product_kind,
+  });
+  const title = PRODUCT_TITLES[productIdentity.product_kind];
+  document.title = title;
+  elements.appTitle.textContent = title;
+  elements.helpHeading.textContent =
+    productIdentity.product_kind === "replay_viewer"
+      ? "Replay Viewer help"
+      : "Combat Debugger help";
+  document.documentElement.dataset.productKind = productIdentity.product_kind;
+}
+
+/** @param {Record<string, any>} frame */
+function assertFrameMatchesProductIdentity(frame) {
+  if (productIdentity === null) {
+    throw new ProductIdentityMismatchError(
+      "No validated product identity is installed.",
+    );
+  }
+  const frameIsReplay = frame.viewer_mode === "replay";
+  const identityIsReplay = productIdentity.product_kind === "replay_viewer";
+  if (frameIsReplay !== identityIsReplay) {
+    throw new ProductIdentityMismatchError(
+      "The authoritative frame does not match this route's product identity.",
+    );
+  }
+}
+
+try {
+  applyProductIdentity(Reflect.get(globalThis, "__MARL_DEBUGGER_BOOTSTRAP__"));
+} catch (error) {
+  startupProductIdentityError =
+    error instanceof Error ? error.message : "Product bootstrap is invalid.";
+}
+
 const CONTROL_HELP = Object.freeze([
   [
     "#battlefield",
     "Battlefield Commands",
-    "Inspect the authoritative scene. In live mode, left click controls an authorized actor, Shift plus left click selects a target, and right click clears the target.",
+    "Inspect the authoritative scene. Researcher live view supports pointer control and targeting; Agent POV bodies remain passive and draft controls own actions.",
     "composite",
   ],
   [
@@ -206,31 +301,10 @@ const CONTROL_HELP = Object.freeze([
     "Use the read-only transport and presentation controls to inspect recorded frames.",
     "composite",
   ],
-  ["#scenario-select", "Scenario", "Choose a registered live episode setup."],
   [
     "#view-select",
     "Audience view",
-    "Switch between researcher and recipient-authorized views.",
-  ],
-  [
-    "#preset-select",
-    "Presentation preset",
-    "Choose Presentation or Analysis rendering.",
-  ],
-  [
-    "#motion-pause-button",
-    "Pause graphics",
-    "Pause or resume only the current visual explanation.",
-  ],
-  [
-    "#motion-off-button",
-    "Motion Off",
-    "Disable or restore animated visual explanations without changing simulator state.",
-  ],
-  [
-    "#motion-skip-button",
-    "Skip explanation",
-    "Settle the current visual explanation immediately.",
+    "Switch between Oracle View and recipient-authorized views.",
   ],
   [
     "#reconnect-button",
@@ -238,7 +312,7 @@ const CONTROL_HELP = Object.freeze([
     "Fetch and atomically install the latest authoritative frame.",
   ],
   ["#help-button", "Help", "Open the keyboard, recording, and replay controls guide."],
-  ["#help-close-button", "Close help", "Close the analyzer help dialog."],
+  ["#help-close-button", "Close help", "Close the product help dialog."],
   ["#exit-button", "Exit", "Ask the local Python service to close safely."],
   [
     "#recording-finish-button",
@@ -314,12 +388,12 @@ const CONTROL_HELP = Object.freeze([
   [
     "#replay-ranges-button",
     "Replay ranges",
-    "Toggle recorded researcher range presentation.",
+    "Toggle recorded Oracle View range presentation.",
   ],
   [
     "#replay-clear-reference-button",
     "Clear Reference",
-    "Clear the researcher inspector highlight; the range anchor is unchanged.",
+    "Clear the Oracle View inspector highlight; the range anchor is unchanged.",
   ],
   [
     "#command-target-select",
@@ -328,18 +402,13 @@ const CONTROL_HELP = Object.freeze([
   ],
   [
     "#submit-turn-button",
-    "Submit joint turn",
-    "Submit the complete staged action through the authoritative Python service.",
-  ],
-  [
-    "#advance-script-button",
-    "Advance scripted frame",
-    "Apply the next registered scripted action only.",
+    "Apply authorized action",
+    "Submit an editable draft or advance an inspection-only scripted frame through the authoritative Python service.",
   ],
   [
     "#live-ranges-button",
     "Ranges",
-    "Toggle server-authored researcher range presentation.",
+    "Toggle server-authored Oracle View range presentation.",
   ],
   [
     "#reset-button",
@@ -359,20 +428,18 @@ const CONTROL_HELP = Object.freeze([
   [
     "[data-key='Tab']:not([data-shift])",
     "Next actor",
-    "Move researcher control to the next active actor.",
+    "Move Oracle View control to the next active actor.",
   ],
   [
     "[data-key='Tab'][data-shift='true']",
     "Previous actor",
-    "Move researcher control to the previous active actor.",
+    "Move Oracle View control to the previous active actor.",
   ],
   [
     "[data-key='Escape']",
     "Clear target",
     "Clear the selected target and leave battlefield command focus.",
   ],
-  ["[data-key='[']", "Previous scenario", "Start the previous registered scenario."],
-  ["[data-key=']']", "Next scenario", "Start the next registered scenario."],
 ]);
 
 const battlefieldRenderer = new BattlefieldRenderer({
@@ -394,7 +461,7 @@ const choreographer = new CombatChoreographer({
   ledger: new ConsumedTransitionLedger({ storage: presentationStorage }),
   motionMode: reducedMotionPreference.matches ? "reduced" : "normal",
   onStateChange: (presentation) => {
-    renderMotionControls();
+    exposePresentationState(presentation);
     renderCommandAvailability();
     syncCompactActiveCombatPriority(presentation);
   },
@@ -462,6 +529,195 @@ let lastBattlefieldSizeKey = "";
 let pendingResizeFrame = null;
 /** @type {Readonly<Record<string, unknown>> | null} */
 let pendingRecordingReplacement = null;
+let productHandoffOutcomeUnknown = false;
+let productHandoffReloadRequested = false;
+
+/**
+ * Make a persistent DOM node unable to resolve a descriptor from the previous
+ * authority. Descriptor values live in a WeakMap; removing the owner marker is
+ * the public lookup fence, while the ARIA fields remove its durable projection.
+ * A later authorized render registers a fresh descriptor on the same node.
+ *
+ * @param {Element} element
+ */
+function clearPresentationTooltipOwner(element) {
+  element.removeAttribute("data-tooltip-owner");
+  element.removeAttribute("data-tooltip-kind");
+  element.removeAttribute("data-tooltip-text");
+  element.removeAttribute("data-tooltip-tone");
+  element.removeAttribute("data-tooltip-accent");
+  element.removeAttribute("aria-description");
+}
+
+/**
+ * Remove every presentation-owned surface synchronously. The raw transport
+ * epoch stays installed for diagnostics and command-outcome accounting until a
+ * complete successor pair is ready; it is never used to keep the battlefield
+ * or scientific panels populated while authority is pending.
+ *
+ * @param {string} reason
+ */
+function clearPresentationAuthority(reason) {
+  state.authority = null;
+  state.presentation = null;
+  disclosureAuthorityKey = null;
+  tooltipController.hide();
+  choreographer.clear(reason);
+  battlefieldRenderer.render(null, { offline: true });
+  panels.render(null, {
+    busy: true,
+    shuttingDown: state.shuttingDown,
+    resyncRequired: state.resyncRequired,
+    offline: true,
+  });
+  elements.pendingCard.removeAttribute("data-submission-scope");
+  elements.pendingCard.removeAttribute("data-inspection-state");
+  elements.pendingCard.removeAttribute("data-pending-count");
+  elements.pendingHeading.textContent = "Inspection unavailable";
+  elements.pendingCount.textContent = "0 actors";
+  elements.pendingScope.textContent = "Waiting for an authorized outgoing inspection.";
+  const pendingLabel = elements.pendingCard.querySelector(".action-card__label");
+  if (pendingLabel) {
+    pendingLabel.textContent = "NO AUTHORIZED INSPECTION";
+  }
+  elements.stepValue.textContent = "—";
+  elements.transitionValue.textContent = "—";
+  elements.audienceBadge.textContent = "View unavailable";
+  elements.audienceBadge.dataset.audience = "unavailable";
+  document.documentElement.dataset.audience = "unavailable";
+  elements.scenarioDescription.textContent = "Waiting for an authorized presentation.";
+  clearPresentationTooltipOwner(elements.replayArtifactReference);
+  elements.replayArtifactReference.textContent =
+    "Unavailable while authority is pending";
+  elements.replayProcessingBadge.textContent = "Unavailable while authority is pending";
+  elements.replayIncomingValue.textContent = "Unavailable while authority is pending";
+  elements.replayRangesButton.disabled = true;
+  elements.replayClearReferenceButton.disabled = true;
+  elements.liveRangesButton.disabled = true;
+  elements.viewSelect.disabled = true;
+  elements.resetButton.disabled = true;
+  elements.exitButton.disabled = true;
+  for (const control of [
+    elements.recordingFinishButton,
+    elements.recordingReviewButton,
+    elements.recordingRetryButton,
+    elements.recordingSaveAsInput,
+    elements.recordingSaveAsButton,
+    elements.recordingDiscardConfirmButton,
+  ]) {
+    control.disabled = true;
+  }
+  if (elements.recordingDiscardDialog.open) {
+    elements.recordingDiscardDialog.close();
+  }
+  pendingRecordingReplacement = null;
+  elements.commandControlledActor.textContent = "Actor · unavailable";
+  elements.commandControlledActor.removeAttribute("aria-label");
+  delete elements.commandControlledActor.dataset.controlledSlot;
+  const emptyTarget = document.createElement("option");
+  emptyTarget.value = "";
+  emptyTarget.textContent = "No authorized targets";
+  elements.commandTargetSelect.replaceChildren(emptyTarget);
+  elements.commandTargetSelect.disabled = true;
+  if (elements.commandDeck) {
+    for (const button of elements.commandDeck.querySelectorAll("button")) {
+      /** @type {HTMLButtonElement} */ (button).disabled = true;
+      if (button.hasAttribute("data-authoritative-available")) {
+        clearPresentationTooltipOwner(button);
+        button.removeAttribute("data-authoritative-available");
+        button.removeAttribute("data-selected");
+        button.setAttribute("aria-disabled", "true");
+        button.setAttribute("aria-pressed", "false");
+      }
+    }
+  }
+  for (const panel of elements.disclosurePanels) {
+    if (panel.id !== "visual-key") {
+      panel.open = false;
+    }
+  }
+  elements.agentDetails.open = false;
+  elements.agentDetails.removeAttribute("data-tone");
+  elements.agentDetails.removeAttribute("data-accent");
+  elements.selectionHeading.textContent = "Agent Details";
+  elements.battlefield.removeAttribute("aria-activedescendant");
+  document.documentElement.dataset.presentationAuthority = "pending";
+}
+
+/**
+ * Install one already-joined, fully prepared authority candidate. The
+ * coordinator guarantees generation freshness; this boundary guarantees the
+ * display root still carries the strict normalizer's unforgeable brand.
+ *
+ * @param {Readonly<Record<string, any>>} joined
+ */
+function installJoinedAuthority(joined) {
+  if (
+    !isJoinedTransportAndAuthorizedPresentationV1(joined) ||
+    !isRecord(joined.transport) ||
+    !isAuthorizedPresentationFrame(joined.presentation) ||
+    (joined.transport.viewer_mode === "replay" && !isRecord(joined.timeline))
+  ) {
+    throw new TypeError("Joined browser authority is incomplete or unbranded.");
+  }
+  assertFrameMatchesProductIdentity(joined.transport);
+  state.authority = joined;
+  state.frame = joined.transport;
+  state.presentation = joined.presentation;
+  state.timeline = isRecord(joined.timeline) ? joined.timeline : null;
+  document.documentElement.dataset.presentationAuthority = "installed";
+}
+
+/**
+ * Complete the transport/presentation pair with its audience-safe replay
+ * timeline before it is eligible for the single install callback. A timeline
+ * race is classified by A/B and therefore enters the same one-GET resync
+ * budget; malformed timeline bytes fail without retry.
+ *
+ * @param {unknown} joined
+ * @param {{
+ *   previousAuthority?: Readonly<Record<string, any>> | null,
+ *   continuityResult?: unknown,
+ * }} options
+ */
+async function prepareJoinedAuthority(
+  joined,
+  { previousAuthority = null, continuityResult = "stale_resync" } = {},
+) {
+  if (!isJoinedTransportAndAuthorizedPresentationV1(joined)) {
+    throw new TypeError(
+      "Browser authority pair is not certified by the join boundary.",
+    );
+  }
+  const certified = /** @type {Readonly<Record<string, any>>} */ (joined);
+  const frame = certified.transport;
+  assertFrameMatchesProductIdentity(frame);
+  if (
+    frame.viewer_mode === "replay" &&
+    previousAuthority?.transport?.viewer_mode === "replay"
+  ) {
+    validateReplayTransportContinuityV1(previousAuthority, certified, continuityResult);
+  }
+  if (frame.viewer_mode !== "replay") {
+    return certified;
+  }
+  const rawTimeline = await getReplayTimeline(state.token);
+  return joinReplayTransportAndTimelineV1(certified, rawTimeline);
+}
+
+const presentationInstallation = new PresentationInstallCoordinator({
+  clear: clearPresentationAuthority,
+  install: installJoinedAuthority,
+  isJoinRace: isPresentationJoinRace,
+});
+
+function reloadForProductHandoff() {
+  if (productHandoffReloadRequested) {
+    return;
+  }
+  productHandoffReloadRequested = true;
+  window.location.reload();
+}
 
 /**
  * @param {unknown} descriptor
@@ -471,16 +727,16 @@ function showSemanticInspector(descriptor, _context) {
   const normalized = createSemanticDescriptor(descriptor);
   if (
     isReplayMode() &&
-    state.frame?.replay_audience !== "researcher" &&
+    authorizedPresentationAudience(state.presentation) !== "researcher" &&
     normalized.kind === "agent"
   ) {
-    const ownerSlot = Number(
-      _context.owner.closest("[data-slot]")?.getAttribute("data-slot"),
-    );
-    const selfSlot = Number(
-      state.frame?.pov_global_slot ?? state.frame?.selected_global_slot,
-    );
-    if (!Number.isInteger(ownerSlot) || ownerSlot !== selfSlot) {
+    const ownerKey = _context.owner
+      .closest("[data-presentation-key]")
+      ?.getAttribute("data-presentation-key");
+    if (
+      typeof ownerKey !== "string" ||
+      ownerKey !== state.presentation?.recipient_presentation_key
+    ) {
       return;
     }
   }
@@ -526,14 +782,11 @@ function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-const SUPPRESSED_BROWSER_SCENARIO_DESCRIPTION =
-  "Interactive LOS, visibility, range, relation, and mask inspection.";
-
 /** @type {string | null} */
 let disclosureAuthorityKey = null;
 
 function syncDisclosurePanels() {
-  const key = panelDisclosureAuthorityKey(state.frame);
+  const key = panelDisclosureAuthorityKey(state.presentation);
   if (key === null || key === disclosureAuthorityKey) {
     return;
   }
@@ -550,6 +803,97 @@ function openAgentDetails() {
 
 function isReplayMode() {
   return state.frame?.viewer_mode === "replay";
+}
+
+/**
+ * Carry replay animation intent beside, never inside, the authorized scientific
+ * presentation. Only the currently installed branded pair may authorize a
+ * transient replay of its incoming transition.
+ *
+ * @param {unknown} presentation
+ * @returns {{animateIncoming: boolean}}
+ */
+function installedChoreographyControl(presentation) {
+  const authority = state.authority;
+  return {
+    animateIncoming:
+      isAuthorizedPresentationFrame(presentation) &&
+      isJoinedTransportAndAuthorizedPresentationV1(authority) &&
+      authority.presentation === presentation &&
+      authority.transport === state.frame &&
+      authority.transport.viewer_mode === "replay" &&
+      authority.transport.animate_incoming === true,
+  };
+}
+
+function installedAuthorityIsCoherent() {
+  const authority = state.authority;
+  return (
+    isJoinedTransportAndAuthorizedPresentationV1(authority) &&
+    authority.transport === state.frame &&
+    authority.presentation === state.presentation
+  );
+}
+
+/**
+ * Recognize only the installed branded scripted-live pair. Every passive
+ * interaction fence shares this one predicate so raw transport metadata or an
+ * unjoined presentation can never activate scripted controls.
+ */
+function liveScriptedInspectionOnly() {
+  return (
+    installedAuthorityIsCoherent() &&
+    (state.frame?.frame_kind === "researcher_live_debugger" ||
+      state.frame?.frame_kind === "actor_pov_live_debugger") &&
+    authorizedPresentationInspectionState(state.presentation).state_kind ===
+      "live_scripted"
+  );
+}
+
+/** @param {Record<string, unknown>} command */
+function allowedDuringLiveScriptedInspection(command) {
+  if (command.command_type === "set_view") {
+    return true;
+  }
+  if (SCRIPTED_INSPECTION_RECORDING_COMMANDS.has(String(command.command_type))) {
+    return recordingCommandDecision(state.frame ?? {}, command).action === "allow";
+  }
+  if (
+    command.command_type !== "keyboard" ||
+    (command.key !== "n" && command.key !== "g")
+  ) {
+    return false;
+  }
+  return (
+    command.shift_key === false &&
+    command.ctrl_key === false &&
+    command.alt_key === false &&
+    command.meta_key === false &&
+    command.repeat === false
+  );
+}
+
+/**
+ * Select the presentation variant's authorized incoming-transition identity.
+ * Frame zero has no latest-events branch and therefore no incoming identity.
+ *
+ * @param {unknown} presentation
+ * @returns {string | null}
+ */
+function authorizedIncomingTransitionId(presentation) {
+  if (
+    !isAuthorizedPresentationFrame(presentation) ||
+    !isRecord(presentation.latest_events)
+  ) {
+    return null;
+  }
+  const incomingTransitionId =
+    authorizedPresentationAudience(presentation) === "researcher"
+      ? presentation.latest_events.incoming_transition_id
+      : presentation.latest_events.incoming_recipient_transition_id;
+  return typeof incomingTransitionId === "string" && incomingTransitionId.length > 0
+    ? incomingTransitionId
+    : null;
 }
 
 function recordingStatus() {
@@ -570,9 +914,23 @@ function recordingRestartControlsBlocked() {
   );
 }
 
+const SCRIPTED_BATTLEFIELD_LABEL =
+  "Inspection-only scripted battlefield. Use Advance scripted frame for the next authorized step.";
+const SCRIPTED_BATTLEFIELD_INSTRUCTIONS =
+  "Scripted live view is inspection-only. Battlefield bodies are passive and cannot submit actions. Use the single Advance scripted frame button to apply the next authorized script step; it is disabled when the script is complete.";
+
+function applyScriptedBattlefieldBoundaryCopy() {
+  elements.battlefield.setAttribute("role", "img");
+  elements.battlefield.tabIndex = -1;
+  elements.battlefield.setAttribute("aria-label", SCRIPTED_BATTLEFIELD_LABEL);
+  elements.battlefieldInstructions.textContent = SCRIPTED_BATTLEFIELD_INSTRUCTIONS;
+}
+
 function renderViewerBoundary() {
   const replay = isReplayMode();
   const scientificFenced = recordingScientificControlsFenced();
+  const audience = authorizedPresentationAudience(state.presentation);
+  const scriptedInspection = liveScriptedInspectionOnly();
   document.documentElement.dataset.viewerMode = replay ? "replay" : "live";
   for (const element of elements.liveOnly) {
     element.toggleAttribute("hidden", replay);
@@ -581,75 +939,89 @@ function renderViewerBoundary() {
     element.toggleAttribute("hidden", !replay);
   }
   elements.replayTimeline.toggleAttribute("hidden", !replay);
-  elements.battlefield.setAttribute(
-    "role",
-    replay ? "group" : scientificFenced ? "img" : "application",
-  );
-  elements.battlefield.tabIndex = replay || scientificFenced ? -1 : 0;
-  elements.battlefield.setAttribute(
-    "aria-label",
-    replay
-      ? "Read-only replay battlefield snapshot. Authorized agents can be inspected."
+  if (scriptedInspection && !scientificFenced) {
+    applyScriptedBattlefieldBoundaryCopy();
+  } else {
+    elements.battlefield.setAttribute(
+      "role",
+      replay ? "group" : scientificFenced ? "img" : "application",
+    );
+    elements.battlefield.tabIndex = replay || scientificFenced ? -1 : 0;
+    elements.battlefield.setAttribute(
+      "aria-label",
+      replay
+        ? "Read-only replay battlefield snapshot. Authorized agents can be inspected."
+        : scientificFenced
+          ? "Read-only recording closeout battlefield snapshot."
+          : "Interactive battlefield. Press Help for keyboard controls.",
+    );
+    elements.battlefieldInstructions.textContent = replay
+      ? "Replay transport changes only the selected recorded frame. Activate an authorized agent to inspect it; the battlefield cannot submit actions or advance the simulator."
       : scientificFenced
-        ? "Read-only recording closeout battlefield snapshot."
-        : "Interactive battlefield. Press Help for keyboard controls.",
-  );
-  elements.battlefieldInstructions.textContent = replay
-    ? "Replay transport changes only the selected recorded frame. Activate an authorized agent to inspect it; the battlefield cannot submit actions or advance the simulator."
-    : scientificFenced
-      ? "Recording closeout has fenced simulator and pending-action controls. Presentation, recovery, review, and Exit controls remain available."
-      : "The battlefield owns debugger keyboard commands while it has focus. Left click controls an authorized actor, Shift plus left click selects an authorized target, and right click clears the target. Tab and Shift Tab cycle controlled actors here. Escape clears the target and moves focus to the command deck, or to Help while commands are unavailable. Tab behaves normally in the side panel.";
+        ? "Recording closeout has fenced simulator and pending-action controls. Presentation, recovery, review, and Exit controls remain available."
+        : audience === "agent_pov"
+          ? "Agent POV bodies are inspectable and passive; they cannot change control or submit actions. Use the command draft controls or battlefield keyboard shortcuts to prepare actions. Escape moves focus to the command deck, or to Help while commands are unavailable. Tab behaves normally in the side panel."
+          : "The battlefield owns debugger keyboard commands while it has focus. Left click controls an authorized actor, Shift plus left click selects an authorized target, and right click clears the target. Tab and Shift Tab cycle controlled actors here. Escape clears the target and moves focus to the command deck, or to Help while commands are unavailable. Tab behaves normally in the side panel.";
+  }
   elements.selectionHeading.textContent = "Agent Details";
 }
 
 function renderReplayMetadata() {
   const frame = state.frame;
+  const presentation = state.presentation;
   if (!isReplayMode() || !frame) {
     return;
   }
-  const reference = isRecord(frame.artifact_summary?.replay_reference)
-    ? frame.artifact_summary.replay_reference
-    : {};
+  const presentationInstalled = isAuthorizedPresentationFrame(presentation);
+  const source =
+    presentationInstalled && isRecord(presentation.source) ? presentation.source : {};
   const completion = isRecord(frame.completion) ? frame.completion : {};
-  const processing = isRecord(frame.processing) ? frame.processing : {};
-  const scene = frameScene(frame);
   elements.replayArtifactReference.textContent = String(
-    reference.artifact_id ?? "Unavailable",
+    presentationInstalled
+      ? (source.source_artifact_id ?? "Unavailable in this audience")
+      : "Unavailable while authority is pending",
   );
   elements.replayArtifactReference.removeAttribute("title");
-  registerTooltipOwner(
-    elements.replayArtifactReference,
-    createSemanticDescriptor({
-      kind: "control",
-      id: "replay-artifact-reference",
-      title: "Replay artifact",
-      tone: "information",
-      accent: "none",
-      summary: "Canonical identity for the loaded immutable replay artifact.",
-      rows: [
-        {
-          label: "Artifact",
-          value: String(reference.artifact_id ?? "Unavailable"),
-          metadata: { compact: true, full: true },
-        },
-        {
-          label: "Canonical digest",
-          value: String(reference.canonical_digest_sha256 ?? "Unavailable"),
-          metadata: { compact: false, full: true },
-        },
-      ],
-      sections: [],
-      metadata: { compact: true, full: true },
-      anchor: "element",
-    }),
-  );
+  if (presentationInstalled) {
+    registerTooltipOwner(
+      elements.replayArtifactReference,
+      createSemanticDescriptor({
+        kind: "control",
+        id: "replay-artifact-reference",
+        title: "Replay artifact",
+        tone: "information",
+        accent: "none",
+        summary: "Canonical identity for the loaded immutable replay artifact.",
+        rows: [
+          {
+            label: "Artifact",
+            value: String(source.source_artifact_id ?? "Unavailable in this audience"),
+            metadata: { compact: true, full: true },
+          },
+          {
+            label: "Canonical digest",
+            value: String(
+              source.source_artifact_digest_sha256 ?? "Unavailable in this audience",
+            ),
+            metadata: { compact: false, full: true },
+          },
+        ],
+        sections: [],
+        metadata: { compact: true, full: true },
+        anchor: "element",
+      }),
+    );
+  } else {
+    clearPresentationTooltipOwner(elements.replayArtifactReference);
+  }
   elements.replayCompletionBadge.textContent = humanize(
     completion.completion_state ?? "unavailable",
   );
-  elements.replayProcessingBadge.textContent =
-    processing.disclosure === "not_available_in_actor_pov"
+  elements.replayProcessingBadge.textContent = !presentationInstalled
+    ? "Unavailable while authority is pending"
+    : authorizedPresentationAudience(presentation) !== "researcher"
       ? "Not available in actor POV"
-      : humanize(processing.status ?? "unavailable");
+      : "Authorized replay";
   elements.replayEndReason.textContent = String(
     completion.public_end_or_failure_reason ??
       completion.end_or_failure_reason ??
@@ -657,22 +1029,23 @@ function renderReplayMetadata() {
         ? asArray(completion.completion_bases).map(humanize).join(" + ")
         : "Captured prefix"),
   );
-  elements.replayIncomingValue.textContent = frame.transition_id
-    ? String(frame.transition_id)
-    : "Initial frame";
+  const incomingTransitionId = authorizedIncomingTransitionId(presentation);
+  elements.replayIncomingValue.textContent = !presentationInstalled
+    ? "Unavailable while authority is pending"
+    : incomingTransitionId
+      ? String(incomingTransitionId)
+      : "Initial frame";
   elements.replayRangesButton.setAttribute(
     "aria-pressed",
     String(frame.show_ranges === true),
   );
   elements.replayRangesButton.disabled =
-    state.busy || frame.replay_audience !== "researcher";
-  const selectedSlot = isRecord(scene?.selection)
-    ? scene.selection.selected_global_slot
-    : null;
+    state.busy || authorizedPresentationAudience(presentation) !== "researcher";
+  const inspection = authorizedPresentationInspectionState(presentation).inspection;
   elements.replayClearReferenceButton.disabled =
     state.busy ||
-    frame.replay_audience !== "researcher" ||
-    !Number.isInteger(selectedSlot);
+    authorizedPresentationAudience(presentation) !== "researcher" ||
+    !isRecord(inspection);
   renderReplayTimelineControls(replayTimelineElements, replayPlayback.snapshot());
 }
 
@@ -739,7 +1112,7 @@ function renderRecordingControls() {
 
   elements.recordingStatusNote.textContent =
     recording.lifecycle === "recording" && recording.discard_available === true
-      ? "Capture is active. Reset and scenario changes require confirmation because they replace this recorded prefix."
+      ? "Capture is active. Reset requires confirmation because it replaces this recorded prefix."
       : recording.lifecycle === "recording"
         ? "Capture is active. Scientific controls remain authoritative in Python."
         : recording.lifecycle === "persistence_failed"
@@ -774,38 +1147,6 @@ function integer(value, fallback = 0) {
 }
 
 /**
- * @param {unknown} frame
- * @returns {Record<string, any> | null}
- */
-function frameScene(frame) {
-  if (!isRecord(frame)) {
-    return null;
-  }
-  return isRecord(frame.scene) ? frame.scene : null;
-}
-
-/**
- * Resolve front-facing identity only from the currently authorized scene.
- * Global slots remain internal join keys and are never presented as identities.
- *
- * @param {Record<string, any> | null} frame
- * @param {unknown} globalSlot
- * @returns {string | null}
- */
-function publicAgentIdForSlot(frame, globalSlot) {
-  if (!Number.isInteger(globalSlot)) {
-    return null;
-  }
-  const agent = asArray(frameScene(frame)?.agents).find(
-    (candidate) =>
-      isRecord(candidate) && Number(candidate.global_slot) === Number(globalSlot),
-  );
-  return typeof agent?.public_agent_id === "string" && agent.public_agent_id.length > 0
-    ? agent.public_agent_id
-    : null;
-}
-
-/**
  * @param {unknown} publicAgentId
  * @returns {string}
  */
@@ -813,40 +1154,6 @@ function agentIdentity(publicAgentId) {
   return typeof publicAgentId === "string" && publicAgentId.length > 0
     ? `Agent ID ${publicAgentId}`
     : "Agent unavailable";
-}
-
-/**
- * @param {unknown} frame
- * @returns {Record<string, any>}
- */
-function scenarioRecord(frame) {
-  return isRecord(frame) && isRecord(frame.scenario) ? frame.scenario : {};
-}
-
-/**
- * @param {unknown} frame
- */
-function scenarioName(frame) {
-  const scenario = scenarioRecord(frame);
-  const record = isRecord(frame) ? frame : {};
-  return typeof scenario.name === "string"
-    ? scenario.name
-    : typeof record.scenario_name === "string"
-      ? record.scenario_name
-      : "";
-}
-
-/**
- * @param {unknown} frame
- */
-function scenarioDescription(frame) {
-  const scenario = scenarioRecord(frame);
-  const record = isRecord(frame) ? frame : {};
-  return typeof scenario.description === "string"
-    ? scenario.description
-    : typeof record.scenario_description === "string"
-      ? record.scenario_description
-      : "Authoritative debugger frame received.";
 }
 
 /**
@@ -892,7 +1199,7 @@ const DRAFT_KEYS = new Set([
 
 /**
  * @param {Record<string, unknown>} command
- * @returns {"draft" | "interactive-submit" | "script-advance" | null}
+ * @returns {"draft" | "interactive-submit" | null}
  */
 function commandRole(command) {
   if (command.command_type !== "keyboard" || typeof command.key !== "string") {
@@ -905,7 +1212,7 @@ function commandRole(command) {
   if (key === "enter" || key === "return" || key === " " || key === "spacebar") {
     return "interactive-submit";
   }
-  return key === "n" ? "script-advance" : null;
+  return null;
 }
 
 /**
@@ -920,31 +1227,10 @@ function modeAvailability(command, frame) {
   if (!role) {
     return { allowed: true, notice: null };
   }
-  const scenario = scenarioRecord(frame);
-  const scripted = liveDebuggerFrameIsScripted(frame);
   if (isTerminal(frame)) {
     return {
       allowed: false,
-      notice: "The episode is terminal; reset or switch scenario to continue.",
-    };
-  }
-  if (scripted && role !== "script-advance") {
-    return {
-      allowed: false,
-      notice:
-        "Scripted playback is inspection-only. Press N to advance the registered frame.",
-    };
-  }
-  if (!scripted && role === "script-advance") {
-    return {
-      allowed: false,
-      notice: "N advances scripted playback only.",
-    };
-  }
-  if (scripted && role === "script-advance" && scenario.script_complete === true) {
-    return {
-      allowed: false,
-      notice: "The scripted trajectory is complete; reset or switch scenario.",
+      notice: "The episode is terminal; reset to continue.",
     };
   }
   return { allowed: true, notice: null };
@@ -963,6 +1249,17 @@ function setNotice(message, level = "info") {
   state.noticeLevel = level;
 }
 
+/** @param {ProductIdentityMismatchError} error */
+function failClosedProductIdentity(error) {
+  state.frame = null;
+  state.timeline = null;
+  clearPresentationAuthority("product_identity_mismatch");
+  state.offline = true;
+  state.resyncRequired = true;
+  replayPlayback.setConnected(false);
+  setNotice(error.message, "error");
+}
+
 /**
  * @param {unknown} value
  */
@@ -973,21 +1270,19 @@ function humanize(value) {
 }
 
 /**
- * @template {keyof HTMLElementTagNameMap} K
- * @param {K} tagName
- * @param {string | null} className
- * @param {string | null} text
- * @returns {HTMLElementTagNameMap[K]}
+ * Translate internal audience discriminators into public product language.
+ * Raw values remain available to authorization and replay normalization only.
+ *
+ * @param {unknown} value
  */
-function htmlElement(tagName, className = null, text = null) {
-  const element = document.createElement(tagName);
-  if (className) {
-    element.className = className;
+function publicAudienceLabel(value) {
+  if (value === "researcher") {
+    return "Oracle View";
   }
-  if (text !== null) {
-    element.textContent = text;
+  if (value === "actor_pov" || value === "agent_pov" || value === "pov") {
+    return "Agent POV";
   }
-  return element;
+  return "View unavailable";
 }
 
 function renderConnection() {
@@ -1020,7 +1315,7 @@ function renderConnection() {
 
 function renderSessionToolbar() {
   const frame = state.frame;
-  const scene = frameScene(frame);
+  const presentation = state.presentation;
   renderViewerBoundary();
   const replay = isReplayMode();
   const disabled =
@@ -1028,31 +1323,19 @@ function renderSessionToolbar() {
   const restartControlsBlocked = recordingRestartControlsBlocked();
 
   elements.revisionValue.textContent = frame ? String(frame.revision ?? "—") : "—";
-  elements.stepValue.textContent = frame
-    ? String(frame.simulator_step ?? frame.step ?? "—")
+  elements.stepValue.textContent = presentation
+    ? String(presentation.simulator_step_count ?? "—")
     : "—";
-  elements.transitionValue.textContent = frame
-    ? String(frame.transition_id ?? "—")
+  const incomingTransition = authorizedIncomingTransitionId(presentation);
+  elements.transitionValue.textContent = incomingTransition
+    ? String(incomingTransition)
     : "—";
 
-  elements.audienceBadge.textContent =
-    typeof scene?.audience_badge === "string"
-      ? scene.audience_badge
-      : typeof frame?.view_mode === "string"
-        ? humanize(frame.view_mode)
-        : "View unavailable";
-  elements.audienceBadge.dataset.audience =
-    scene?.audience === "researcher" || scene?.audience === "agent_pov"
-      ? scene.audience
-      : "unavailable";
+  const audience = authorizedPresentationAudience(presentation) ?? "unavailable";
+  elements.audienceBadge.textContent = publicAudienceLabel(audience);
+  elements.audienceBadge.dataset.audience = audience;
   document.documentElement.dataset.audience = elements.audienceBadge.dataset.audience;
-  const visiblePreset =
-    frame?.preset === "presentation"
-      ? "presentation"
-      : frame?.preset === "analysis"
-        ? "analysis"
-        : "unavailable";
-  document.documentElement.dataset.preset = visiblePreset;
+  document.documentElement.dataset.preset = "analysis";
 
   const terminal = isTerminal(frame);
   elements.terminalBadge.hidden = !terminal;
@@ -1075,44 +1358,36 @@ function renderSessionToolbar() {
       : "Terminal";
   }
 
-  elements.scenarioDescription.textContent = frame
+  elements.scenarioDescription.textContent = presentation
     ? replay
-      ? `${humanize(frame.replay_audience ?? "replay")} · recorded frame ${frame.cursor?.frame_index ?? "—"} of ${frame.cursor?.final_frame_index ?? "—"}`
-      : scenarioDescription(frame) === SUPPRESSED_BROWSER_SCENARIO_DESCRIPTION
-        ? ""
-        : scenarioDescription(frame)
+      ? `${publicAudienceLabel(authorizedPresentationAudience(presentation))} · recorded frame ${frame?.cursor?.frame_index ?? "—"} of ${frame?.cursor?.final_frame_index ?? "—"}`
+      : `${publicAudienceLabel(authorizedPresentationAudience(presentation))} · authorized live presentation`
     : "Waiting for the Python debugger service.";
 
-  renderScenarioOptions(frame);
   const viewMode = frame?.view_mode === "agent_pov" ? "pov" : frame?.view_mode;
   if (typeof viewMode === "string") {
     elements.viewSelect.value = viewMode;
   }
-  if (visiblePreset !== "unavailable") {
-    elements.presetSelect.value = visiblePreset;
-  }
-  const scenarioControlsAvailable =
-    !replay && (!state.frame || liveDebuggerScenarioControlsAvailable(state.frame));
-  elements.scenarioControl.toggleAttribute("hidden", !scenarioControlsAvailable);
-  elements.scenarioSelect.disabled =
-    disabled || restartControlsBlocked || !scenarioControlsAvailable;
-  elements.scenarioSelect.setAttribute(
-    "aria-disabled",
-    String(disabled || restartControlsBlocked || !scenarioControlsAvailable),
-  );
-  elements.scenarioSelect.removeAttribute("title");
   elements.viewSelect.disabled = disabled;
-  elements.presetSelect.disabled = disabled;
-  elements.reconnectButton.disabled = state.busy || state.shuttingDown;
+  elements.reconnectButton.disabled =
+    state.busy || state.shuttingDown || productIdentity === null;
   elements.exitButton.disabled = disabled;
-  elements.exitButton.textContent = replay ? "Exit replay viewer" : "Exit analyzer";
-  elements.resetButton.disabled = disabled || restartControlsBlocked;
-  const researcherLive = !replay && frame?.view_mode === "researcher";
+  elements.exitButton.textContent =
+    productIdentity?.product_kind === "replay_viewer"
+      ? "Exit replay viewer"
+      : productIdentity?.product_kind === "combat_debugger"
+        ? "Exit combat debugger"
+        : "Exit";
+  elements.resetButton.disabled =
+    disabled || restartControlsBlocked || liveScriptedInspectionOnly();
+  const researcherLive =
+    !replay && authorizedPresentationAudience(presentation) === "researcher";
   elements.liveRangesButton.hidden = !researcherLive;
   elements.liveRangesButton.setAttribute(
     "aria-pressed",
     String(researcherLive && frame?.show_ranges === true),
   );
+  elements.liveRangesButton.disabled = disabled || !researcherLive;
   renderRecordingControls();
   renderReplayMetadata();
   renderCommandAvailability();
@@ -1173,66 +1448,51 @@ function setAuthoritativeAvailability(
 }
 
 /**
- * @param {Record<string, any>} hud
- * @param {number} targetAction
- * @returns {Record<string, any> | null}
- */
-function candidateLegality(hud, targetAction) {
-  return (
-    asArray(hud.candidate_legalities).find((candidate) => {
-      if (!isRecord(candidate)) {
-        return false;
-      }
-      const candidateTarget = isRecord(candidate.target) ? candidate.target : null;
-      return (
-        Number(candidateTarget?.target_action ?? candidate.target_action) ===
-        targetAction
-      );
-    }) ?? null
-  );
-}
-
-/**
- * Rebuild target choices from the current controlled actor's authorized rows.
- * The select is a view over Python facts, never a client-owned pending model.
+ * Rebuild target choices from the exact authorized decision mask. Oracle
+ * command slots come only from the validated presentation identity directory;
+ * Agent POV uses its recipient-local target-action axis and never gains a slot.
  *
- * @param {Record<string, any>} hud
- * @param {Record<string, any>} pending
- * @param {Record<string, any> | null} frame
+ * @param {Readonly<Record<string, any>>} presentation
+ * @param {Readonly<Record<string, any>>} inspection
  */
-function renderCommandTargets(hud, pending, frame) {
-  const pov = frame?.frame_kind === "actor_pov_live_debugger";
-  const candidates = asArray(hud.candidate_legalities).filter(isRecord);
-  const pendingTarget = isRecord(pending.target) ? pending.target : {};
-  const selectedSlot = pendingTarget.global_slot;
-  const selectedTargetAction = Number(
-    pendingTarget.target_action ?? pending.target_action,
-  );
+function renderCommandTargets(presentation, inspection) {
+  const mask = isRecord(inspection.decision_mask) ? inspection.decision_mask : {};
+  const action = isRecord(inspection.draft_action) ? inspection.draft_action : {};
+  const selectedTargetAction = Number(action.target_action);
+  const audience = authorizedPresentationAudience(presentation);
   const fragment = document.createDocumentFragment();
-  for (const candidate of candidates) {
-    const target = isRecord(candidate.target) ? candidate.target : {};
+  for (const target of asArray(mask.target_actions).filter(isRecord)) {
+    const targetAction = Number(target.target_action);
+    if (!Number.isInteger(targetAction)) {
+      continue;
+    }
+    const pairMask = asArray(mask.target_use_ultimate_joint_mask)[targetAction];
     const option = document.createElement("option");
-    const basic = candidate.basic_available === true ? "B ✓" : "B ×";
-    const ultimate = candidate.ultimate_available === true ? "U ✓" : "U ×";
-    if (pov && Number.isInteger(target.target_action)) {
-      option.value = `pov-target-action:${target.target_action}`;
-      option.textContent = `${agentIdentity(target.public_agent_id)} · action ${target.target_action} · ${basic} · ${ultimate}`;
-      option.selected = Number(target.target_action) === selectedTargetAction;
-    } else if (target.disclosure === "public" && Number.isInteger(target.global_slot)) {
-      const publicAgentId = publicAgentIdForSlot(frame, target.global_slot);
-      if (publicAgentId === null) {
+    const basic = asArray(pairMask)[0] === true ? "B ✓" : "B ×";
+    const ultimate = asArray(pairMask)[1] === true ? "U ✓" : "U ×";
+    if (target.target_kind === "no_target") {
+      option.value = "";
+      option.textContent = `${target.display_name ?? "No target"} · ${basic} · ${ultimate}`;
+    } else if (audience === "agent_pov") {
+      option.value = `pov-target-action:${targetAction}`;
+      option.textContent = `${agentIdentity(target.target_public_agent_id)} · action ${targetAction} · ${basic} · ${ultimate}`;
+    } else if (audience === "researcher") {
+      const commandSlot = authorizedOracleCommandSlotForPublicAgentId(
+        presentation,
+        target.target_public_agent_id,
+      );
+      if (!Number.isInteger(commandSlot)) {
         continue;
       }
-      option.value = String(target.global_slot);
-      option.textContent = `${agentIdentity(publicAgentId)} · ${basic} · ${ultimate}`;
-      option.selected = Number(target.global_slot) === Number(selectedSlot);
-    } else if (target.disclosure === "target_none") {
-      option.value = "";
-      option.textContent = `No target · ${basic} · ${ultimate}`;
-      option.selected = selectedSlot === null || selectedSlot === undefined;
+      option.value = String(commandSlot);
+      option.textContent = `${agentIdentity(target.target_public_agent_id)} · ${basic} · ${ultimate}`;
     } else {
       continue;
     }
+    if (typeof target.target_presentation_key === "string") {
+      option.dataset.presentationKey = target.target_presentation_key;
+    }
+    option.selected = targetAction === selectedTargetAction;
     fragment.append(option);
   }
   if (fragment.childNodes.length === 0) {
@@ -1245,16 +1505,18 @@ function renderCommandTargets(hud, pending, frame) {
 }
 
 /**
- * @param {Record<string, any>} hud
- * @param {Record<string, any> | null} frame
+ * Render live command facts only from the authorized editable-draft branch.
+ *
+ * @param {Readonly<Record<string, any>>} presentation
  */
-function renderDraftState(hud, frame) {
-  const pending = isRecord(hud.pending_action) ? hud.pending_action : {};
-  const pov = frame?.frame_kind === "actor_pov_live_debugger";
-  const controlledSlot = Number(hud.controlled_global_slot);
-  const controlledPublicAgentId = pov
-    ? hud.controlled_public_agent_id
-    : publicAgentIdForSlot(frame, controlledSlot);
+function renderDraftState(presentation) {
+  const inspectionState = authorizedPresentationInspectionState(presentation);
+  const inspection = isRecord(inspectionState.inspection)
+    ? inspectionState.inspection
+    : {};
+  const mask = isRecord(inspection.decision_mask) ? inspection.decision_mask : {};
+  const pending = isRecord(inspection.draft_action) ? inspection.draft_action : {};
+  const controlledPublicAgentId = inspection.actor_public_agent_id;
   const controlledIdentity =
     typeof controlledPublicAgentId === "string"
       ? agentIdentity(controlledPublicAgentId)
@@ -1268,23 +1530,23 @@ function renderDraftState(hud, frame) {
       ? `Controlled actor ${controlledIdentity}`
       : "Controlled actor unavailable",
   );
-  elements.commandControlledActor.dataset.controlledSlot = Number.isInteger(
-    controlledSlot,
-  )
-    ? String(controlledSlot)
-    : "";
-  const pendingMove = Number(pending.move_action);
-  const movementRows = new Map(
-    asArray(hud.movement_legalities)
-      .filter(isRecord)
-      .map((row) => [Number(row.move_action), row.available]),
+  const controlledSlot = authorizedOracleCommandSlotForPresentationKey(
+    presentation,
+    inspection.actor_presentation_key,
   );
+  if (Number.isInteger(controlledSlot)) {
+    elements.commandControlledActor.dataset.controlledSlot = String(controlledSlot);
+  } else {
+    delete elements.commandControlledActor.dataset.controlledSlot;
+  }
+  const pendingMove = Number(pending.move_action);
+  const movementMask = asArray(mask.movement_action_mask);
   const movementButtons = /** @type {NodeListOf<HTMLButtonElement>} */ (
     elements.commandDeck?.querySelectorAll("button[data-move-action]") ?? []
   );
   for (const button of movementButtons) {
     const moveAction = Number(button.dataset.moveAction);
-    const available = movementRows.get(moveAction);
+    const available = movementMask[moveAction];
     setDraftSelection(button, moveAction === pendingMove);
     setAuthoritativeAvailability(
       button,
@@ -1295,18 +1557,22 @@ function renderDraftState(hud, frame) {
     );
   }
 
-  renderCommandTargets(hud, pending, frame);
-  const pendingTarget = isRecord(pending.target) ? pending.target : {};
-  const rawTargetAction = pendingTarget.target_action ?? pending.target_action;
-  const targetAction = Number.isInteger(rawTargetAction) ? Number(rawTargetAction) : 0;
-  const candidate = candidateLegality(hud, targetAction);
-  const basicAvailable = candidate?.basic_available === true;
-  const ultimateAvailable = candidate?.ultimate_available === true;
+  renderCommandTargets(presentation, inspection);
+  const targetAction = Number.isInteger(pending.target_action)
+    ? Number(pending.target_action)
+    : 0;
+  const pairMask = asArray(mask.target_use_ultimate_joint_mask)[targetAction];
+  const basicAvailable = asArray(pairMask)[0] === true;
+  const ultimateAvailable = asArray(pairMask)[1] === true;
   const noCombatSelected =
-    pending.armed_lane === null || (pending.armed_lane === 0 && targetAction === 0);
+    pending.armed_lane === "none" ||
+    (pending.armed_lane === "basic" && targetAction === 0);
   setDraftSelection(elements.noCombatButton, noCombatSelected);
-  setDraftSelection(elements.basicButton, pending.armed_lane === 0 && targetAction > 0);
-  setDraftSelection(elements.ultimateButton, pending.armed_lane === 1);
+  setDraftSelection(
+    elements.basicButton,
+    pending.armed_lane === "basic" && targetAction > 0,
+  );
+  setDraftSelection(elements.ultimateButton, pending.armed_lane === "ultimate");
   setAuthoritativeAvailability(
     elements.noCombatButton,
     true,
@@ -1327,13 +1593,31 @@ function renderDraftState(hud, frame) {
 }
 
 function renderCommandAvailability() {
+  const presentation = state.presentation;
+  const inspectionState = authorizedPresentationInspectionState(presentation);
+  const editableDraft = inspectionState.state_kind === "live_editable";
+  const scriptedAdvance = liveScriptedInspectionOnly();
   const disabled =
     state.busy ||
     !state.frame ||
+    !isAuthorizedPresentationFrame(presentation) ||
+    !installedAuthorityIsCoherent() ||
     state.shuttingDown ||
     state.resyncRequired ||
     state.offline;
   const scientificFenced = recordingScientificControlsFenced();
+  elements.submitTurnButton.dataset.key = scriptedAdvance ? "n" : "Enter";
+  elements.submitTurnButton.textContent = scriptedAdvance
+    ? "Advance scripted frame"
+    : inspectionState.submission_scope === "controlled_actor"
+      ? "Submit controlled actor"
+      : "Submit joint turn";
+  elements.commandCommitTitle.textContent = scriptedAdvance
+    ? "Advance the registered script"
+    : "Submit the staged joint turn";
+  elements.commandCommitSummary.textContent = scriptedAdvance
+    ? "One authoritative scripted transition"
+    : "One authoritative transition";
   if (isReplayMode()) {
     elements.commandTargetSelect.disabled = true;
     if (elements.commandDeck) {
@@ -1343,21 +1627,18 @@ function renderCommandAvailability() {
     }
     return;
   }
-  const scenario = scenarioRecord(state.frame);
-  const scripted = liveDebuggerFrameIsScripted(state.frame);
-  const hud = isRecord(state.frame?.hud) ? state.frame.hud : {};
-  renderDraftState(hud, state.frame);
+  if (editableDraft && presentation) {
+    renderDraftState(presentation);
+  } else {
+    elements.commandControlledActor.textContent = "Actor · unavailable";
+    delete elements.commandControlledActor.dataset.controlledSlot;
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "No authorized targets";
+    elements.commandTargetSelect.replaceChildren(option);
+  }
   elements.commandTargetSelect.disabled =
-    disabled || scientificFenced || scripted || isTerminal(state.frame);
-  elements.submitTurnButton.textContent = scripted
-    ? "Manual submit unavailable"
-    : hud.pending_submission_scope === "controlled_actor"
-      ? "Submit controlled actor"
-      : "Submit joint turn";
-  elements.advanceScriptButton.textContent =
-    scripted && scenario.script_complete === true
-      ? "Script complete"
-      : "Advance scripted frame";
+    disabled || !editableDraft || scientificFenced || isTerminal(state.frame);
   if (elements.commandDeck) {
     const buttons = /** @type {NodeListOf<HTMLButtonElement>} */ (
       elements.commandDeck.querySelectorAll("button[data-key]")
@@ -1368,123 +1649,53 @@ function renderCommandAvailability() {
       });
       const mode = modeAvailability(command, state.frame);
       const recordingDecision = recordingCommandDecision(state.frame ?? {}, command);
+      const enabledByInspection =
+        editableDraft || (scriptedAdvance && button === elements.submitTurnButton);
       button.disabled =
-        disabled || recordingDecision.action === "block" || !mode.allowed;
+        disabled ||
+        scientificFenced ||
+        !enabledByInspection ||
+        (scriptedAdvance && isTerminal(state.frame)) ||
+        recordingDecision.action === "block" ||
+        !mode.allowed;
     }
   }
 }
 
-function togglePresentationPause() {
-  const presentation = choreographer.snapshot();
-  if (
-    state.shuttingDown ||
-    presentation.motionMode === "off" ||
-    presentation.animationCount === 0
-  ) {
-    return;
-  }
-  choreographer.togglePaused();
-}
-
-function renderMotionControls() {
-  const presentation = choreographer.snapshot();
-  const hasActiveClock = presentation.animationCount > 0;
-  const presentationDisabled = state.shuttingDown;
-
+/**
+ * Preserve presentation state for diagnostics and deterministic E2E waits
+ * without exposing motion-editing controls in the product shell.
+ *
+ * @param {ReturnType<CombatChoreographer["snapshot"]>} presentation
+ */
+function exposePresentationState(presentation) {
   document.documentElement.dataset.motionMode = presentation.motionMode;
   document.documentElement.dataset.motionPaused = String(presentation.paused);
   document.documentElement.dataset.submissionBlocked = String(
     presentation.submissionBlocked,
   );
-
-  elements.motionPauseButton.disabled =
-    presentationDisabled || presentation.motionMode === "off" || !hasActiveClock;
-  elements.motionPauseButton.setAttribute("aria-pressed", String(presentation.paused));
-  elements.motionPauseButton.textContent = presentation.paused ? "Resume" : "Pause";
-  elements.motionSkipButton.disabled =
-    presentationDisabled || (!hasActiveClock && !presentation.submissionBlocked);
-  elements.motionOffButton.disabled = presentationDisabled;
-  elements.motionOffButton.setAttribute(
-    "aria-pressed",
-    String(presentation.motionMode === "off"),
-  );
-  if (presentation.motionMode === "off") {
-    elements.motionStatus.textContent = "Motion off";
-    return;
-  }
-  const prefix =
-    presentation.motionMode === "reduced"
-      ? "Reduced motion"
-      : presentation.paused
-        ? "Paused"
-        : presentation.submissionBlocked
-          ? "Explaining"
-          : "Graphics";
-  elements.motionStatus.textContent = prefix;
-}
-
-/**
- * @param {Record<string, any> | null} frame
- */
-function renderScenarioOptions(frame) {
-  const currentName = scenarioName(frame);
-  const available = asArray(frame?.available_scenarios);
-  const normalized = available
-    .map((entry) => {
-      if (typeof entry === "string") {
-        return { name: entry, title: entry };
-      }
-      if (isRecord(entry) && typeof entry.name === "string") {
-        return {
-          name: entry.name,
-          title:
-            typeof entry.title === "string" && entry.title.trim()
-              ? entry.title
-              : entry.name,
-        };
-      }
-      return null;
-    })
-    .filter((entry) => entry !== null);
-
-  if (currentName && !normalized.some((entry) => entry.name === currentName)) {
-    normalized.unshift({ name: currentName, title: currentName });
-  }
-
-  elements.scenarioSelect.replaceChildren();
-  if (normalized.length === 0) {
-    const option = htmlElement("option", null, frame ? "No scenarios" : "Loading…");
-    option.value = "";
-    elements.scenarioSelect.append(option);
-    return;
-  }
-  for (const entry of normalized) {
-    const option = htmlElement("option", null, entry.title);
-    option.value = entry.name;
-    option.selected = entry.name === currentName;
-    elements.scenarioSelect.append(option);
-  }
 }
 
 function applyReplayReferenceSemantics() {
-  if (state.frame?.replay_audience !== "researcher") {
+  const presentation = state.presentation;
+  if (authorizedPresentationAudience(presentation) !== "researcher") {
     return;
   }
-  const scene = frameScene(state.frame);
-  const selectedSlot = isRecord(scene?.selection)
-    ? scene.selection.selected_global_slot
+  const scene = authorizedPresentationSceneView(presentation);
+  const selectedKey = isRecord(scene?.selection)
+    ? scene.selection.inspection_owner_presentation_key
     : null;
-  if (!Number.isInteger(selectedSlot)) {
+  if (typeof selectedKey !== "string") {
     return;
   }
   const reference = elements.battlefield.querySelector(
-    `.agent[data-slot="${selectedSlot}"]`,
+    `.agent[data-presentation-key="${CSS.escape(selectedKey)}"]`,
   );
   if (!(reference instanceof Element)) {
     return;
   }
   const agent = asArray(scene?.agents).find(
-    (candidate) => isRecord(candidate) && candidate.global_slot === selectedSlot,
+    (candidate) => isRecord(candidate) && candidate.presentation_key === selectedKey,
   );
   if (!isRecord(agent) || typeof agent.public_agent_id !== "string") {
     return;
@@ -1520,25 +1731,30 @@ function replayAgentActivation(target) {
   if (!isReplayMode() || !(target instanceof Element)) {
     return null;
   }
-  const element = target.closest(".agent[data-slot]");
+  const element = target.closest(".agent[data-presentation-key]");
   if (!(element instanceof SVGElement)) {
     return null;
   }
-  const slot = Number(element.dataset.slot);
-  const agent = asArray(frameScene(state.frame)?.agents).find(
-    (candidate) => isRecord(candidate) && Number(candidate.global_slot) === slot,
+  const presentationKey = element.dataset.presentationKey;
+  const presentation = state.presentation;
+  const agent = asArray(authorizedPresentationSceneView(presentation)?.agents).find(
+    (candidate) =>
+      isRecord(candidate) && candidate.presentation_key === presentationKey,
   );
-  if (!Number.isInteger(slot) || !isRecord(agent)) {
+  if (typeof presentationKey !== "string" || !isRecord(agent)) {
     return null;
   }
-  if (state.frame?.replay_audience === "researcher") {
-    return { element, slot, agent, researcher: true };
+  if (authorizedPresentationAudience(presentation) === "researcher") {
+    const commandSlot = authorizedOracleCommandSlotForPresentationKey(
+      presentation,
+      presentationKey,
+    );
+    return Number.isInteger(commandSlot)
+      ? { element, presentationKey, commandSlot, agent, researcher: true }
+      : null;
   }
-  const selfSlot = Number(
-    state.frame?.pov_global_slot ?? state.frame?.selected_global_slot,
-  );
-  return Number.isInteger(selfSlot) && slot === selfSlot
-    ? { element, slot, agent, researcher: false }
+  return presentationKey === presentation?.recipient_presentation_key
+    ? { element, presentationKey, commandSlot: null, agent, researcher: false }
     : null;
 }
 
@@ -1546,10 +1762,12 @@ function installReplayAgentActivation() {
   if (!isReplayMode()) {
     return;
   }
-  const scene = frameScene(state.frame);
+  const scene = authorizedPresentationSceneView(state.presentation);
   const agents = asArray(scene?.agents);
   const selection = isRecord(scene?.selection) ? scene.selection : {};
-  for (const element of elements.battlefield.querySelectorAll(".agent[data-slot]")) {
+  for (const element of elements.battlefield.querySelectorAll(
+    ".agent[data-presentation-key]",
+  )) {
     const activation = replayAgentActivation(element);
     if (activation === null) {
       element.removeAttribute("tabindex");
@@ -1574,8 +1792,9 @@ function installReplayAgentActivation() {
         activation.agent,
         {
           audience: activation.researcher ? "researcher" : "agent_pov",
-          controlled: selection.controlled_global_slot === activation.slot,
-          selected: selection.selected_global_slot === activation.slot,
+          controlled:
+            selection.controlled_presentation_key === activation.presentationKey,
+          selected: selection.selected_presentation_key === activation.presentationKey,
         },
         isRecord(classMechanics) ? classMechanics : null,
         agents,
@@ -1594,21 +1813,32 @@ function activateReplayAgent(target) {
   if (activation.researcher) {
     void dispatchReplayCommand({
       command_type: "select_agent",
-      selected_global_slot: activation.slot,
+      selected_global_slot: activation.commandSlot,
     });
   }
   return true;
 }
 
 function render() {
+  const presentationFrame = state.presentation;
   renderConnection();
   renderSessionToolbar();
   syncDisclosurePanels();
-  battlefieldRenderer.render(state.frame, { offline: state.offline });
+  battlefieldRenderer.render(presentationFrame, {
+    offline: state.offline,
+    showRanges: state.frame?.show_ranges === true,
+  });
+  if (liveScriptedInspectionOnly() && !recordingScientificControlsFenced()) {
+    applyScriptedBattlefieldBoundaryCopy();
+  }
   installReplayAgentActivation();
   applyReplayReferenceSemantics();
   try {
-    choreographer.presentFrame(state.frame, battlefieldRenderer.choreographySurface());
+    choreographer.presentFrame(
+      presentationFrame,
+      battlefieldRenderer.choreographySurface(),
+      installedChoreographyControl(presentationFrame),
+    );
   } catch (error) {
     choreographer.clear("presentation_error");
     setNotice(
@@ -1620,9 +1850,12 @@ function render() {
     renderConnection();
   }
   lastBattlefieldSizeKey = battlefieldSizeKey();
-  panels.render(state.frame, {
+  panels.render(presentationFrame, {
     busy: state.busy,
-    shuttingDown: state.shuttingDown || recordingScientificControlsFenced(),
+    shuttingDown:
+      state.shuttingDown ||
+      recordingScientificControlsFenced() ||
+      liveScriptedInspectionOnly(),
     resyncRequired: state.resyncRequired,
     offline: state.offline,
   });
@@ -1642,11 +1875,15 @@ function syncCompactActiveCombatPriority(presentation) {
   const changed = battlefieldRenderer.setCompactActiveCombat(
     presentation.active && presentation.animationCount > 0,
   );
-  if (!changed || !presentation.active || !state.frame) {
+  if (!changed || !presentation.active || !state.presentation) {
     return;
   }
   try {
-    choreographer.reproject(state.frame, battlefieldRenderer.choreographySurface());
+    choreographer.reproject(
+      state.presentation,
+      battlefieldRenderer.choreographySurface(),
+      installedChoreographyControl(state.presentation),
+    );
   } catch (error) {
     setNotice(
       error instanceof Error
@@ -1673,9 +1910,20 @@ function scheduleBattlefieldResize() {
       return;
     }
     lastBattlefieldSizeKey = sizeKey;
-    battlefieldRenderer.render(state.frame, { offline: state.offline });
+    const presentationFrame = state.presentation;
+    battlefieldRenderer.render(presentationFrame, {
+      offline: state.offline,
+      showRanges: state.frame?.show_ranges === true,
+    });
+    if (liveScriptedInspectionOnly() && !recordingScientificControlsFenced()) {
+      applyScriptedBattlefieldBoundaryCopy();
+    }
     try {
-      choreographer.reproject(state.frame, battlefieldRenderer.choreographySurface());
+      choreographer.reproject(
+        presentationFrame,
+        battlefieldRenderer.choreographySurface(),
+        installedChoreographyControl(presentationFrame),
+      );
     } catch (error) {
       choreographer.clear("resize_projection_error");
       setNotice(
@@ -1706,7 +1954,7 @@ function commandRequest(command) {
 /** @param {Readonly<Record<string, unknown>>} replacement */
 function recordingReplacementLabel(replacement) {
   if (replacement.command_type === "reset") {
-    return "Reset the current scenario to a fresh episode";
+    return "Reset the current episode";
   }
   if (replacement.command_type === "scenario_switch") {
     return `Switch to scenario ${String(replacement.scenario_name)}`;
@@ -1717,6 +1965,12 @@ function recordingReplacementLabel(replacement) {
 /** @param {Readonly<Record<string, unknown>>} replacement */
 function requestRecordingDiscardConfirmation(replacement) {
   pendingRecordingReplacement = replacement;
+  elements.recordingDiscardConfirmButton.disabled =
+    state.busy ||
+    state.shuttingDown ||
+    state.resyncRequired ||
+    state.offline ||
+    !isAuthorizedPresentationFrame(state.presentation);
   renderSessionToolbar();
   elements.recordingDiscardIntent.textContent = recordingReplacementLabel(replacement);
   if (!elements.recordingDiscardDialog.open) {
@@ -1733,7 +1987,7 @@ function requestRecordingDiscardConfirmation(replacement) {
  * @param {Readonly<Record<string, any>>} command
  */
 async function sendReplayCommand(command) {
-  if (!isReplayMode() || !state.frame) {
+  if (!isReplayMode() || !state.frame || !state.presentation) {
     throw new DebuggerApiError("Replay controls require an installed replay frame.");
   }
   if (state.busy || state.shuttingDown) {
@@ -1744,48 +1998,98 @@ async function sendReplayCommand(command) {
   }
   state.busy = true;
   setNotice("Waiting for the read-only replay response…", "info");
-  render();
+  const previousAuthority = state.authority;
+  const previousFrame = state.frame;
+  const previousCursor = previousFrame.cursor;
+  const request = replayCommandRequest({
+    clientId: state.clientId,
+    commandId: window.crypto.randomUUID(),
+    baseRevision: currentRevision(),
+    command,
+  });
+  /** @type {{current: {kind: "success" | "stale", payload: any} | null}} */
+  const commandOutcome = { current: null };
   try {
-    const previousFrame = state.frame;
-    const previousCursor = previousFrame.cursor;
-    const request = replayCommandRequest({
-      clientId: state.clientId,
-      commandId: window.crypto.randomUUID(),
-      baseRevision: currentRevision(),
-      command,
+    const installPromise = presentationInstallation.installFromCommand({
+      reason:
+        command.command_type === "set_view" || command.command_type === "set_pov_actor"
+          ? "replay_audience_change"
+          : "replay_command",
+      sendCommand: async () => {
+        try {
+          const payload = await postReplayCommand(state.token, request);
+          commandOutcome.current = { kind: "success", payload };
+          return commandOutcome.current;
+        } catch (error) {
+          if (error instanceof DebuggerApiError && error.status === 409) {
+            commandOutcome.current = { kind: "stale", payload: error.payload };
+            return commandOutcome.current;
+          }
+          throw error;
+        }
+      },
+      joinCommandResult: async (outcome) => {
+        const joined = await extractJoinedFrame(
+          outcome.payload,
+          await getCurrentPresentation(state.token),
+        );
+        if (joined === null) {
+          throw new TypeError("Replay response has no joinable transport candidate.");
+        }
+        if (joined.transport.viewer_mode !== "replay") {
+          throw new DebuggerApiError(
+            "Replay response did not contain replay transport authority.",
+          );
+        }
+        if (outcome.kind === "success") {
+          validateReplayCommandOutcome(
+            request.command,
+            outcome.payload,
+            previousCursor,
+          );
+        }
+        return prepareJoinedAuthority(joined, {
+          previousAuthority,
+          continuityResult:
+            outcome.kind === "success" ? outcome.payload.result : "stale_resync",
+        });
+      },
+      getJoined: async () =>
+        prepareJoinedAuthority(await getCurrentFrameAndPresentation(state.token), {
+          previousAuthority,
+          continuityResult: "stale_resync",
+        }),
     });
-    const payload = await postReplayCommand(state.token, request);
-    const frame = extractFrame(payload);
-    if (frame?.viewer_mode !== "replay") {
-      throw new DebuggerApiError("Replay response did not contain a replay frame.");
+    render();
+    const installOutcome = await installPromise;
+    if (installOutcome.status === "superseded") {
+      throw new DebuggerApiError(
+        "Replay response was superseded by a newer authority request.",
+      );
     }
-    validateReplayFrameContinuity(previousFrame, frame, payload.result);
-    validateReplayCommandOutcome(request.command, payload, previousCursor);
-    let timeline = state.timeline;
-    if (
-      frame.timeline_id !== previousFrame.timeline_id ||
-      timeline?.timeline_id !== frame.timeline_id
-    ) {
-      timeline = extractReplayTimeline(await getReplayTimeline(state.token));
-    }
-    if (!timeline) {
-      throw new TypeError("Replay response has no audience timeline candidate.");
-    }
-    const joinedTimeline = joinReplayFrameAndTimeline(frame, timeline);
-    state.frame = frame;
-    state.timeline = joinedTimeline;
     state.offline = false;
     state.resyncRequired = false;
     replayPlayback.setConnected(true);
+    const payload = commandOutcome.current?.payload;
+    const stale = commandOutcome.current?.kind === "stale";
     const notice = extractNotice(payload);
     setNotice(
-      notice ??
-        (payload?.result === "duplicate"
-          ? "Duplicate replay command recognized; it was not applied again."
-          : payload?.result === "no_op"
-            ? "Replay already matched that request."
-            : "Read-only replay frame updated."),
-      payload?.result === "duplicate" || payload?.result === "no_op"
+      stale
+        ? payload?.error_code === "command_id_conflict"
+          ? "The replay service rejected a command-ID conflict. Its coherent latest pair was installed; the command was not retried."
+          : "This replay tab was stale. Its coherent latest pair was installed; the command was not retried."
+        : installOutcome.resynchronized
+          ? "The command completed once, its mixed presentation candidate was discarded, and one fresh GET pair was installed."
+          : (notice ??
+            (payload?.result === "duplicate"
+              ? "Duplicate replay command recognized; it was not applied again."
+              : payload?.result === "no_op"
+                ? "Replay already matched that request."
+                : "Read-only replay frame updated.")),
+      stale ||
+        installOutcome.resynchronized ||
+        payload?.result === "duplicate" ||
+        payload?.result === "no_op"
         ? "warning"
         : "success",
     );
@@ -1793,61 +2097,26 @@ async function sendReplayCommand(command) {
       state.shuttingDown = true;
       setNotice("Exit accepted. The local replay viewer is shutting down.", "info");
     }
-    return payload;
+    return stale || installOutcome.resynchronized
+      ? Object.freeze({ handled_resync: true, frame: state.frame })
+      : payload;
   } catch (error) {
-    let replayError = null;
-    if (error instanceof DebuggerApiError && isRecord(error.payload)) {
-      // postReplayCommand's decode boundary has already strictly normalized
-      // this envelope. Its latest frame is an internal settled replay frame,
-      // not raw wire data, so it must never cross the raw normalizer twice.
-      replayError = error.payload;
+    if (error instanceof ProductIdentityMismatchError) {
+      failClosedProductIdentity(error);
+      throw error;
     }
-    if (error instanceof DebuggerApiError && error.status === 409) {
-      const latest = replayError?.latest_frame ?? null;
-      if (latest?.viewer_mode !== "replay") {
-        state.offline = false;
-        state.resyncRequired = true;
-        replayPlayback.setConnected(false);
-        setNotice(
-          "The replay service reported stale state without a valid latest frame. Reconnect is required.",
-          "error",
-        );
-        throw error;
-      }
-      try {
-        validateReplayFrameContinuity(state.frame, latest, "stale_resync");
-        const latestTimeline = joinReplayFrameAndTimeline(
-          latest,
-          extractReplayTimeline(await getReplayTimeline(state.token)),
-        );
-        state.frame = latest;
-        state.timeline = latestTimeline;
-      } catch (candidateError) {
-        state.offline = false;
-        state.resyncRequired = true;
-        replayPlayback.setConnected(false);
-        setNotice(
-          candidateError instanceof Error
-            ? `The stale replay candidate failed validation: ${candidateError.message}`
-            : "The stale replay candidate failed validation.",
-          "error",
-        );
-        throw candidateError;
-      }
-      state.offline = false;
-      state.resyncRequired = false;
-      replayPlayback.setConnected(true);
-      const errorCode = replayError?.error_code ?? null;
+    const payload = commandOutcome.current?.payload;
+    if (commandResponseSchedulesShutdown(request.command, payload)) {
+      state.shuttingDown = true;
       setNotice(
-        errorCode === "command_id_conflict"
-          ? "The replay service rejected a command-ID conflict. Its latest frame was installed; nothing was retried."
-          : "This replay tab was stale. The latest frame was installed; the command was not retried.",
-        "warning",
+        "Exit was accepted, but no coherent successor presentation was installed while the local replay viewer shuts down.",
+        "info",
       );
-      return Object.freeze({ handled_resync: true, frame: latest });
     } else {
       const status = error instanceof DebuggerApiError ? error.status : 0;
-      state.offline = status === 0 || status === 401 || status === 403;
+      state.offline =
+        error instanceof DebuggerApiError &&
+        (status === 0 || status === 401 || status === 403);
       state.resyncRequired = true;
       replayPlayback.setConnected(false);
       setNotice(
@@ -1869,7 +2138,7 @@ async function sendReplayCommand(command) {
 /** @param {Readonly<Record<string, any>>} command */
 async function dispatchReplayCommand(command) {
   if (
-    state.frame?.replay_audience !== "researcher" &&
+    authorizedPresentationAudience(state.presentation) !== "researcher" &&
     (command.command_type === "select_agent" || command.command_type === "set_ranges")
   ) {
     setNotice(
@@ -1882,8 +2151,7 @@ async function dispatchReplayCommand(command) {
   replayPlayback.pause("user_command");
   try {
     const payload = await sendReplayCommand(command);
-    const frame =
-      payload?.handled_resync === true ? payload.frame : extractFrame(payload);
+    const frame = state.frame;
     if (frame) {
       replayPlayback.installCursor(frame.cursor);
     }
@@ -1946,12 +2214,42 @@ async function dispatchCommand(command) {
     renderConnection();
     return;
   }
-  if (!state.frame) {
+  if (!state.frame || !state.presentation) {
     setNotice(
-      "No authoritative frame is available. Reconnect before sending commands.",
+      "No coherent transport/presentation pair is available. Reconnect before sending commands.",
       "error",
     );
     renderConnection();
+    return;
+  }
+  if (liveScriptedInspectionOnly() && !allowedDuringLiveScriptedInspection(command)) {
+    setNotice(
+      "Scripted live view is inspection-only. Use Advance scripted frame for the next authorized step.",
+      "warning",
+    );
+    renderConnection();
+    renderCommandAvailability();
+    return;
+  }
+  if (
+    command.command_type === "battlefield_pointer" &&
+    authorizedPresentationAudience(state.presentation) !== "researcher"
+  ) {
+    setNotice(
+      "Battlefield bodies are passive in Agent POV. Use the authorized draft controls.",
+      "warning",
+    );
+    renderConnection();
+    return;
+  }
+  const mode = modeAvailability(command, state.frame);
+  if (!mode.allowed) {
+    setNotice(
+      mode.notice ?? "That command is unavailable in the current mode.",
+      "warning",
+    );
+    renderConnection();
+    renderCommandAvailability();
     return;
   }
   const recordingDecision = recordingCommandDecision(state.frame, command);
@@ -1971,16 +2269,6 @@ async function dispatchCommand(command) {
     }
     return;
   }
-  const mode = modeAvailability(command, state.frame);
-  if (!mode.allowed) {
-    setNotice(
-      mode.notice ?? "That command is unavailable in the current mode.",
-      "warning",
-    );
-    renderConnection();
-    renderCommandAvailability();
-    return;
-  }
   if (
     isSubmissionCommand(command) &&
     presentationRequiresSubmissionSettle(choreographer.snapshot())
@@ -1993,52 +2281,110 @@ async function dispatchCommand(command) {
   state.busy = true;
   state.offline = false;
   setNotice("Waiting for the authoritative Python response…", "info");
-  render();
-
   let reviewHandoff = false;
+  const previousAuthority = state.authority;
+  const request = commandRequest(command);
+  /** @type {{current: {kind: "success" | "stale", payload: any} | null}} */
+  const commandOutcome = { current: null };
   try {
-    const payload = await postCommand(state.token, commandRequest(command));
-    const frame = extractFrame(payload);
-    if (!frame) {
-      throw new DebuggerApiError("Command response did not contain a debugger frame.");
+    const installPromise = presentationInstallation.installFromCommand({
+      reason:
+        command.command_type === "set_view" ? "live_audience_change" : "live_command",
+      sendCommand: async () => {
+        try {
+          const payload = await postCommand(state.token, request);
+          commandOutcome.current = { kind: "success", payload };
+          return commandOutcome.current;
+        } catch (error) {
+          if (error instanceof DebuggerApiError && error.status === 409) {
+            commandOutcome.current = { kind: "stale", payload: error.payload };
+            return commandOutcome.current;
+          }
+          throw error;
+        }
+      },
+      joinCommandResult: async (outcome) => {
+        const transportCandidate = extractFrame(outcome.payload);
+        if (transportCandidate && recordingReviewHandoffRequired(transportCandidate)) {
+          reviewHandoff = true;
+          throw new ProductReviewHandoff(
+            "Recording review handoff requires a route reload.",
+          );
+        }
+        const joined = await extractJoinedFrame(
+          outcome.payload,
+          await getCurrentPresentation(state.token),
+        );
+        if (joined === null) {
+          throw new TypeError("Live response has no joinable transport candidate.");
+        }
+        return prepareJoinedAuthority(joined, {
+          previousAuthority,
+          continuityResult: "stale_resync",
+        });
+      },
+      getJoined: async () =>
+        prepareJoinedAuthority(await getCurrentFrameAndPresentation(state.token), {
+          previousAuthority,
+          continuityResult: "stale_resync",
+        }),
+    });
+    render();
+    const installOutcome = await installPromise;
+    if (installOutcome.status === "superseded") {
+      return;
     }
-    state.frame = frame;
-    state.timeline = null;
     state.offline = false;
     state.resyncRequired = false;
-    reviewHandoff = recordingReviewHandoffRequired(frame);
+    const payload = commandOutcome.current?.payload;
+    const stale = commandOutcome.current?.kind === "stale";
     const notice = extractNotice(payload);
     setNotice(
-      notice ??
-        (payload?.result === "duplicate"
-          ? "Duplicate command recognized; it was not applied again."
-          : "Authoritative frame updated."),
-      payload?.result === "duplicate" ? "warning" : "success",
+      stale
+        ? payload?.error_code === "command_id_conflict"
+          ? "The service rejected a command-ID conflict. Its coherent latest pair was installed; the command was not retried."
+          : "This tab was stale. Its coherent latest pair was installed; the command was not retried."
+        : installOutcome.resynchronized
+          ? "The command completed once, its mixed presentation candidate was discarded, and one fresh GET pair was installed."
+          : (notice ??
+            (payload?.result === "duplicate"
+              ? "Duplicate command recognized; it was not applied again."
+              : "Authoritative frame updated.")),
+      stale || installOutcome.resynchronized || payload?.result === "duplicate"
+        ? "warning"
+        : "success",
     );
     if (commandResponseSchedulesShutdown(command, payload)) {
       state.shuttingDown = true;
-      setNotice("Exit accepted. The local analyzer server is shutting down.", "info");
+      setNotice("Exit accepted. The local product server is shutting down.", "info");
     }
   } catch (error) {
-    if (error instanceof DebuggerApiError && error.status === 409) {
-      const latest = extractFrame(error.payload);
-      if (latest) {
-        state.frame = latest;
-        state.timeline = null;
-        reviewHandoff = recordingReviewHandoffRequired(latest);
-      }
+    if (error instanceof ProductReviewHandoff) {
       state.offline = false;
       state.resyncRequired = false;
-      const errorCode = isRecord(error.payload) ? error.payload.error_code : null;
-      setNotice(
-        errorCode === "command_id_conflict"
-          ? "The service rejected a command-ID conflict. The latest frame was installed and nothing was retried."
-          : "This tab was stale. The latest frame was installed; the command was not retried.",
-        "warning",
-      );
+      setNotice("Recording review accepted. Opening the replay route…", "info");
+    } else if (error instanceof ProductIdentityMismatchError) {
+      failClosedProductIdentity(error);
     } else {
       const status = error instanceof DebuggerApiError ? error.status : 0;
-      state.offline = status === 0 || status === 401 || status === 403;
+      const payload = commandOutcome.current?.payload;
+      if (commandResponseSchedulesShutdown(command, payload)) {
+        state.shuttingDown = true;
+        setNotice(
+          "Exit was accepted, but no coherent successor presentation was installed while the local product server shuts down.",
+          "info",
+        );
+        return;
+      }
+      if (
+        (status === 0 && PRODUCT_HANDOFF_COMMANDS.has(String(command.command_type))) ||
+        (status === 404 && productIdentity?.product_kind === "combat_debugger")
+      ) {
+        productHandoffOutcomeUnknown = true;
+      }
+      state.offline =
+        error instanceof DebuggerApiError &&
+        (status === 0 || status === 401 || status === 403);
       state.resyncRequired = true;
       setNotice(
         status === 401 || status === 403
@@ -2051,15 +2397,31 @@ async function dispatchCommand(command) {
     }
   } finally {
     state.busy = false;
-    render();
+    if (!reviewHandoff || state.shuttingDown || state.resyncRequired) {
+      render();
+    }
   }
   if (reviewHandoff && !state.shuttingDown && !state.resyncRequired) {
-    await loadCurrentFrame({ reviewHandoff: true });
+    reloadForProductHandoff();
   }
 }
 
 /** @param {{reviewHandoff?: boolean}} options */
 async function loadCurrentFrame({ reviewHandoff = false } = {}) {
+  if (reviewHandoff) {
+    reloadForProductHandoff();
+    return;
+  }
+  if (productIdentity === null) {
+    state.offline = true;
+    state.resyncRequired = true;
+    setNotice(
+      `Startup blocked: ${startupProductIdentityError ?? "Product bootstrap is unavailable."} Reopen the exact URL printed by the Python launcher.`,
+      "error",
+    );
+    render();
+    return;
+  }
   if (state.busy || state.shuttingDown) {
     return;
   }
@@ -2067,53 +2429,30 @@ async function loadCurrentFrame({ reviewHandoff = false } = {}) {
   if (isReplayMode()) {
     replayPlayback.pause("reconnect");
   }
-  setNotice(
-    reviewHandoff
-      ? "Opening the publicly verified replay in this local session…"
-      : "Fetching the current authoritative frame…",
-    "info",
-  );
-  renderConnection();
+  setNotice("Fetching the current transport and authorized presentation…", "info");
   const previousFrame = state.frame;
+  const previousAuthority = state.authority;
   let focusReplayTimeline = false;
   try {
-    const payload = await getCurrentFrame(state.token);
-    const frame = extractFrame(payload);
-    if (!frame) {
-      throw new DebuggerApiError("Frame response did not contain a debugger frame.");
+    const installPromise = presentationInstallation.installFromGet({
+      reason: previousFrame === null ? "initial_authority" : "reconnect_authority",
+      getJoined: async () =>
+        prepareJoinedAuthority(await getCurrentFrameAndPresentation(state.token), {
+          previousAuthority,
+          continuityResult: "stale_resync",
+        }),
+    });
+    render();
+    const outcome = await installPromise;
+    if (outcome.status === "superseded") {
+      return;
     }
-    if (state.frame?.viewer_mode === "replay" && frame.viewer_mode !== "replay") {
-      throw new DebuggerApiError(
-        "A replay viewer cannot reconnect to a live debugger frame. Reopen the replay URL to resynchronize.",
-      );
-    }
-    if (reviewHandoff && frame.viewer_mode !== "replay") {
-      throw new DebuggerApiError(
-        "Replay review was accepted, but the read-only router is not available yet. Reconnect to complete the handoff.",
-      );
-    }
-    if (reviewHandoff && (!isRecord(frame.cursor) || frame.cursor.frame_index !== 0)) {
-      throw new DebuggerApiError(
-        "Replay review did not open at recorded frame zero. Reconnect before reviewing the artifact.",
-      );
-    }
-    let timeline = null;
-    if (frame.viewer_mode === "replay") {
-      if (state.frame?.viewer_mode === "replay") {
-        validateReplayFrameContinuity(state.frame, frame, "stale_resync");
-      }
-      timeline = joinReplayFrameAndTimeline(
-        frame,
-        extractReplayTimeline(await getReplayTimeline(state.token)),
-      );
-    }
+    const frame = outcome.joined.transport;
     focusReplayTimeline =
       frame.viewer_mode === "replay" && previousFrame?.viewer_mode !== "replay";
     if (focusReplayTimeline) {
       choreographer.clear("replay_handoff");
     }
-    state.frame = frame;
-    state.timeline = timeline;
     if (frame.viewer_mode === "replay") {
       replayPlayback.installCursor(frame.cursor);
       replayPlayback.setConnected(true);
@@ -2121,13 +2460,17 @@ async function loadCurrentFrame({ reviewHandoff = false } = {}) {
     state.offline = false;
     state.resyncRequired = false;
     setNotice(
-      extractNotice(payload) ??
-        (focusReplayTimeline
+      outcome.resynchronized
+        ? "A mixed authority GET was discarded; one fresh pair was installed."
+        : focusReplayTimeline
           ? "Read-only replay review is ready."
-          : "Connected to the local analyzer."),
+          : "Connected to the local product service.",
       "success",
     );
   } catch (error) {
+    if (error instanceof ProductIdentityMismatchError) {
+      failClosedProductIdentity(error);
+    }
     const status = error instanceof DebuggerApiError ? error.status : 0;
     state.offline = status === 0 || status === 401 || status === 403;
     state.resyncRequired = true;
@@ -2138,7 +2481,7 @@ async function loadCurrentFrame({ reviewHandoff = false } = {}) {
       status === 401 || status === 403
         ? "Debugger capability is invalid. Reopen the exact URL printed by the Python launcher."
         : error instanceof Error
-          ? error.message
+          ? `${error.message} Reconnect to request one fresh authority pair.`
           : "Could not load debugger frame.",
       "error",
     );
@@ -2159,18 +2502,20 @@ bindBattlefieldControls({
     if (
       command.button === "primary" &&
       target instanceof Element &&
-      target.closest(".agent[data-slot]") !== null
+      target.closest(".agent[data-presentation-key]") !== null
     ) {
       openAgentDetails();
     }
   },
-  onPresentationKey: (command) => {
-    if (command === "toggle-pause") {
-      togglePresentationPause();
-    }
-  },
   onHelp: () => elements.helpDialog.showModal(),
-  isInteractive: () => !isReplayMode() && !recordingScientificControlsFenced(),
+  isInteractive: () =>
+    !isReplayMode() &&
+    isAuthorizedPresentationFrame(state.presentation) &&
+    !liveScriptedInspectionOnly() &&
+    !state.busy &&
+    !state.resyncRequired &&
+    !state.offline &&
+    !recordingScientificControlsFenced(),
   onReleaseFocus: () => {
     const firstCommand = /** @type {HTMLButtonElement | null} */ (
       elements.commandDeck?.querySelector("button:not([disabled])") ?? null
@@ -2199,32 +2544,10 @@ elements.battlefield.addEventListener(
   },
 );
 
-elements.scenarioSelect.addEventListener("change", () => {
-  if (!elements.scenarioSelect.value) {
-    return;
-  }
-  dispatchCommand({
-    command_type: "scenario_switch",
-    scenario_name: elements.scenarioSelect.value,
-  });
-});
-
 elements.viewSelect.addEventListener("change", () => {
   const command = {
     command_type: "set_view",
     view_mode: elements.viewSelect.value,
-  };
-  if (isReplayMode()) {
-    void dispatchReplayCommand(command);
-  } else {
-    void dispatchCommand(command);
-  }
-});
-
-elements.presetSelect.addEventListener("change", () => {
-  const command = {
-    command_type: "set_preset",
-    preset: elements.presetSelect.value,
   };
   if (isReplayMode()) {
     void dispatchReplayCommand(command);
@@ -2239,7 +2562,7 @@ elements.resetButton.addEventListener("click", () => {
 
 elements.commandTargetSelect.addEventListener("change", () => {
   const command = targetSelectionCommand(elements.commandTargetSelect.value, {
-    actorPov: state.frame?.frame_kind === "actor_pov_live_debugger",
+    actorPov: authorizedPresentationAudience(state.presentation) === "agent_pov",
   });
   if (!command) {
     return;
@@ -2321,45 +2644,42 @@ elements.exitButton.addEventListener("click", () => {
   }
 });
 
-elements.reconnectButton.addEventListener("click", loadCurrentFrame);
+elements.reconnectButton.addEventListener("click", () => {
+  if (productHandoffOutcomeUnknown) {
+    reloadForProductHandoff();
+    return;
+  }
+  void loadCurrentFrame();
+});
 
 elements.helpButton.addEventListener("click", () => {
   elements.helpDialog.showModal();
 });
 
-elements.motionPauseButton.addEventListener("click", () => {
-  togglePresentationPause();
-});
-
-elements.motionSkipButton.addEventListener("click", () => {
-  choreographer.skip();
-});
-
-elements.motionOffButton.addEventListener("click", () => {
-  const current = choreographer.snapshot().motionMode;
-  choreographer.setMotionMode(
-    current === "off"
-      ? reducedMotionPreference.matches
-        ? "reduced"
-        : "normal"
-      : "off",
-  );
-});
-
 bindReplayTimelineControls(replayTimelineElements, replayPlayback);
 
 elements.replayRangesButton.addEventListener("click", () => {
-  if (!isReplayMode() || state.frame?.replay_audience !== "researcher") {
+  if (
+    !isReplayMode() ||
+    authorizedPresentationAudience(state.presentation) !== "researcher"
+  ) {
+    return;
+  }
+  const frame = state.frame;
+  if (!frame) {
     return;
   }
   void dispatchReplayCommand({
     command_type: "set_ranges",
-    show_ranges: state.frame.show_ranges !== true,
+    show_ranges: frame.show_ranges !== true,
   });
 });
 
 elements.replayClearReferenceButton.addEventListener("click", () => {
-  if (!isReplayMode() || state.frame?.replay_audience !== "researcher") {
+  if (
+    !isReplayMode() ||
+    authorizedPresentationAudience(state.presentation) !== "researcher"
+  ) {
     return;
   }
   void dispatchReplayCommand({
@@ -2419,5 +2739,15 @@ for (const panel of elements.disclosurePanels) {
 }
 
 registerControlHelp();
-render();
-loadCurrentFrame();
+if (productIdentity === null) {
+  state.offline = true;
+  state.resyncRequired = true;
+  setNotice(
+    `Startup blocked: ${startupProductIdentityError ?? "Product bootstrap is unavailable."} Reopen the exact URL printed by the Python launcher.`,
+    "error",
+  );
+  render();
+} else {
+  render();
+  void loadCurrentFrame();
+}

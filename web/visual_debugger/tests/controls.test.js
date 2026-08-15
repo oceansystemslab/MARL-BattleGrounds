@@ -4,7 +4,6 @@ import test from "node:test";
 import {
   commandResponseSchedulesShutdown,
   isDebuggerKey,
-  isPresentationPauseEvent,
   keyboardCommand,
   presentationRequiresSubmissionSettle,
   recordingCommandDecision,
@@ -70,9 +69,7 @@ test("Submit settlement covers gated, post-gate active, and paused explanations"
 
 test("debugger key capture leaves modified browser shortcuts native", () => {
   assert.equal(isDebuggerKey({ key: "r" }), true);
-  assert.equal(isDebuggerKey({ key: "p" }), true);
   assert.equal(isDebuggerKey({ key: "v" }), false);
-  assert.equal(isDebuggerKey({ key: "P", shiftKey: true }), true);
   assert.equal(isDebuggerKey({ key: "x" }), true);
   assert.equal(isDebuggerKey({ key: "X" }), true);
   assert.equal(isDebuggerKey({ key: "0" }), true);
@@ -82,13 +79,9 @@ test("debugger key capture leaves modified browser shortcuts native", () => {
   assert.equal(isDebuggerKey({ key: "w", metaKey: true }), false);
   assert.equal(isDebuggerKey({ key: "ArrowLeft", altKey: true }), false);
   assert.equal(isDebuggerKey({ key: "F5" }), false);
-});
-
-test("presentation pause is edge-triggered and ignores key repeat", () => {
-  assert.equal(isPresentationPauseEvent({ key: "p" }), true);
-  assert.equal(isPresentationPauseEvent({ key: "P", repeat: false }), true);
-  assert.equal(isPresentationPauseEvent({ key: "p", repeat: true }), false);
-  assert.equal(isPresentationPauseEvent({ key: "Enter" }), false);
+  for (const retiredKey of ["n", "N", "[", "]", "p", "P"]) {
+    assert.equal(isDebuggerKey({ key: retiredKey }), false);
+  }
 });
 
 test("target selection keeps researcher and actor-POV identity domains separate", () => {
@@ -147,21 +140,36 @@ function recordingFrame({ lifecycle = "recording", captured = 1 } = {}) {
   };
 }
 
-test("recording restart resolution canonicalizes direct and keyboard replacements", () => {
+test("recording restart resolution retains direct compatibility without scenario keys", () => {
   const frame = recordingFrame();
   assert.deepEqual(recordingReplacementCommand(frame, { command_type: "reset" }), {
     command_type: "reset",
   });
-  assert.deepEqual(recordingReplacementCommand(frame, keyboardCommand("[")), {
-    command_type: "scenario_switch",
-    scenario_name: "charlie",
-  });
-  assert.deepEqual(recordingReplacementCommand(frame, keyboardCommand("]")), {
-    command_type: "scenario_switch",
-    scenario_name: "bravo",
+  assert.deepEqual(
+    recordingReplacementCommand(frame, {
+      command_type: "scenario_switch",
+      scenario_name: "bravo",
+    }),
+    {
+      command_type: "scenario_switch",
+      scenario_name: "bravo",
+    },
+  );
+  assert.equal(recordingReplacementCommand(frame, keyboardCommand("[")), null);
+  assert.equal(recordingReplacementCommand(frame, keyboardCommand("]")), null);
+  assert.equal(recordingReplacementCommand(frame, keyboardCommand("n")), null);
+  assert.deepEqual(recordingReplacementCommand(frame, keyboardCommand("r")), {
+    command_type: "reset",
   });
   assert.equal(
     recordingReplacementCommand(frame, keyboardCommand("R", { shiftKey: true })),
+    null,
+  );
+  assert.equal(
+    recordingReplacementCommand(frame, {
+      command_type: "scenario_switch",
+      scenario_name: "missing",
+    }),
     null,
   );
 });

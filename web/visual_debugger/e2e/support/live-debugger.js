@@ -5,6 +5,23 @@ import { fileURLToPath } from "node:url";
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const REPOSITORY_ROOT = resolve(HERE, "../../../..");
 export const DEBUGGER_STOP_TIMEOUT_MS = 5_000;
+export const COMBAT_DEBUGGER_ENTRYPOINT = "scripts/dev/debug_renderer.py";
+export const SCRIPTED_DEBUGGER_HARNESS =
+  "tests/visual_debugger_scripted_browser_harness.py";
+
+/** @param {string[]} extraArgs */
+export function combatDebuggerArguments(extraArgs = []) {
+  return [
+    "run",
+    "python",
+    "-u",
+    COMBAT_DEBUGGER_ENTRYPOINT,
+    "--no-open",
+    "--port",
+    "0",
+    ...extraArgs,
+  ];
+}
 
 /**
  * Node keeps exitCode null when a child exits because of a signal, so both
@@ -49,28 +66,45 @@ function waitForExit(child, timeoutMs) {
  *   url: string,
  * }>}
  */
-export function startDebugger({ scenario = "arena_5v5", extraArgs = [] } = {}) {
-  return new Promise((resolveUrl, reject) => {
-    const child = spawn(
-      "uv",
-      [
-        "run",
-        "python",
-        "-u",
-        "scripts/dev/debug_renderer.py",
-        "--no-open",
-        "--port",
-        "0",
-        "--scenario",
-        scenario,
-        ...extraArgs,
-      ],
-      {
-        cwd: REPOSITORY_ROOT,
-        env: process.env,
-        stdio: ["ignore", "pipe", "pipe"],
-      },
+export function startDebugger({ scenario, extraArgs = [] } = {}) {
+  if (scenario !== undefined && scenario !== "arena_5v5") {
+    throw new TypeError(
+      "Scripted demonstrations must be launched through the Replay Viewer support.",
     );
+  }
+  return startDebuggerProcess(combatDebuggerArguments(extraArgs));
+}
+
+/**
+ * Start the fixed one-frame scripted DebuggerService used only by browser
+ * causal tests. This bypasses neither the real HTTP server nor service logic,
+ * and deliberately adds no scenario option to the public launcher.
+ */
+export function startScriptedDebugger() {
+  return startDebuggerProcess([
+    "run",
+    "python",
+    "-u",
+    SCRIPTED_DEBUGGER_HARNESS,
+    "--port",
+    "0",
+  ]);
+}
+
+/**
+ * @param {string[]} arguments_
+ * @returns {Promise<{
+ *   process: import("node:child_process").ChildProcess,
+ *   url: string,
+ * }>}
+ */
+function startDebuggerProcess(arguments_) {
+  return new Promise((resolveUrl, reject) => {
+    const child = spawn("uv", arguments_, {
+      cwd: REPOSITORY_ROOT,
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
     let settled = false;
     let stdout = "";
     let stderr = "";
@@ -95,7 +129,7 @@ export function startDebugger({ scenario = "arena_5v5", extraArgs = [] } = {}) {
     child.stdout?.on("data", (chunk) => {
       stdout += String(chunk);
       const match = stdout.match(
-        /Visual Debugger and Analyzer: (http:\/\/127\.0\.0\.1:\d+\/#token=[A-Za-z0-9_-]+)/,
+        /MARL-BattleGrounds Combat Debugger: (http:\/\/127\.0\.0\.1:\d+\/#token=[A-Za-z0-9_-]+)/,
       );
       if (!match || settled) {
         return;

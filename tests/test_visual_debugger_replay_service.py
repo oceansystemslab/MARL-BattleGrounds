@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import subprocess
 import sys
@@ -11,13 +12,24 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import Barrier
 from types import SimpleNamespace
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import jax
 import pytest
 import scripts.dev.visual_debugger.control as live_control_module
 import scripts.dev.visual_debugger.replay_service as replay_service_module
 import scripts.dev.visual_debugger.static_renderer as static_renderer_module
+from scripts.dev.visual_debugger.presentation import (
+    build_replay_no_shared_obs_authorized_presentation_v1,
+    build_replay_shared_obs_authorized_presentation_v1,
+)
+from scripts.dev.visual_debugger.presentation_protocol import (
+    PRESENTATION_AUDIENCE_UNAVAILABLE_MESSAGE,
+    PresentationApiErrorV1,
+    ReplayNoSharedObsAuthorizedPresentationFrameV1,
+    ReplayOracleAuthorizedPresentationFrameV1,
+    ReplaySharedObsAuthorizedPresentationFrameV1,
+)
 from scripts.dev.visual_debugger.replay_protocol import (
     ACTOR_POV_METRIC_REPORT_AVAILABILITY_V1,
     ACTOR_POV_PROCESSING_DISCLOSURE_V1,
@@ -28,6 +40,7 @@ from scripts.dev.visual_debugger.replay_protocol import (
     ReplayCommandRequestV1,
     ReplayCommandResponseV1,
     ReplayCommandV1,
+    ReplayCursorV1,
     ReplayExitCommandV1,
     ReplayFirstFrameCommandV1,
     ReplayLastFrameCommandV1,
@@ -41,10 +54,11 @@ from scripts.dev.visual_debugger.replay_protocol import (
     ReplaySetViewCommandV1,
     ResearcherReplayTimelineV1,
     ResearcherReplayViewerFrameV1,
-    SharedObsSourceMaterialReplayTimelineV1,
-    SharedObsSourceMaterialReplayViewerFrameV1,
+    SharedObsAgentPovReplayTimelineV1,
+    SharedObsAgentPovReplayViewerFrameV1,
 )
 from scripts.dev.visual_debugger.replay_service import (
+    PresentationResourceResultV1,
     ReplayServiceCommandResultV1,
     ReplayViewerService,
 )
@@ -58,6 +72,7 @@ import marl_battlegrounds.core.env as core_env_module
 import marl_battlegrounds.core.geometry as core_geometry_module
 import marl_battlegrounds.evaluation.capture as evaluation_capture_module
 import marl_battlegrounds.evaluation.events as evaluation_events_module
+import marl_battlegrounds.rendering.evaluation_adapter as evaluation_adapter_module
 from marl_battlegrounds.evaluation.catalog import build_resolved_env_config_v1
 from marl_battlegrounds.evaluation.metrics import (
     CompletionState,
@@ -76,8 +91,10 @@ from marl_battlegrounds.evaluation.models import (
     EvaluationEpisodeContextV1,
     EvaluationFrameV1,
     EvaluationTransitionV1,
+    JointActionV1,
     canonical_json_bytes,
 )
+from marl_battlegrounds.evaluation.pov import export_actor_pov_replay_v1
 from marl_battlegrounds.evaluation.replay import (
     ReplayBundleV1,
     RuntimeProvenanceV1,
@@ -87,6 +104,14 @@ from marl_battlegrounds.evaluation.replay_io import (
     LoadedReplayBundleV1,
     load_replay_bundle_v1,
     save_replay_bundle_v1,
+)
+from marl_battlegrounds.rendering.evaluation_adapter import (
+    SharedObsSourceMaterialProjectionV1,
+    build_shared_obs_authority_source_material_projection_v1,
+)
+from marl_battlegrounds.rendering.pov_scene import (
+    ActorPovAnalyzerProjectionV1,
+    build_actor_pov_projection_index_v1,
 )
 from marl_battlegrounds.rendering.scene import (
     BattlefieldSceneV2,
@@ -159,6 +184,25 @@ class _ServiceCases:
     long: _ServiceCase
     nonzero_focal: _ServiceCase
     noncanonical_movement_scale: _ServiceCase
+
+
+type _ReplayPresentationFrame = (
+    ReplayOracleAuthorizedPresentationFrameV1
+    | ReplayNoSharedObsAuthorizedPresentationFrameV1
+    | ReplaySharedObsAuthorizedPresentationFrameV1
+)
+
+
+class _PoisonActorPovAnalyzerProjectionV1(ActorPovAnalyzerProjectionV1):
+    """Exact-field subtype used to prove the selective projection fence."""
+
+
+class _PoisonReplayCursorV1(ReplayCursorV1):
+    """No-extra subtype used to prove exact cursor ownership."""
+
+
+class _PoisonActorPovReplayViewerFrameV1(ActorPovReplayViewerFrameV1):
+    """No-extra subtype used to prove the exact raw-frame boundary."""
 
 
 def _runtime_provenance() -> RuntimeProvenanceV1:
@@ -290,8 +334,8 @@ def service_cases() -> _ServiceCases:
         episode_id="service-zero",
     )
     shared_trajectory = captured_evaluation_trajectory(
-        transition_count=1,
-        expected_horizon=1,
+        transition_count=2,
+        expected_horizon=2,
         execution_information_mode="shared_obs",
         episode_id="service-shared",
     )
@@ -403,6 +447,18 @@ def _error(result: ReplayServiceCommandResultV1) -> ReplayApiErrorV1:
     return result.payload
 
 
+def _presentation_response(
+    result: PresentationResourceResultV1,
+) -> _ReplayPresentationFrame:
+    assert result.outcome == "response"
+    assert type(result.payload) in {
+        ReplayOracleAuthorizedPresentationFrameV1,
+        ReplayNoSharedObsAuthorizedPresentationFrameV1,
+        ReplaySharedObsAuthorizedPresentationFrameV1,
+    }
+    return cast(_ReplayPresentationFrame, result.payload)
+
+
 def _recursive_keys(value: object) -> set[str]:
     if isinstance(value, dict):
         record = cast(dict[str, object], value)
@@ -413,6 +469,2056 @@ def _recursive_keys(value: object) -> set[str]:
         sequence = cast(list[object], value)
         return {key for child in sequence for key in _recursive_keys(child)}
     return set()
+
+
+def _recursive_string_values(value: object) -> set[str]:
+    if type(value) is str:
+        return {value}
+    if isinstance(value, dict):
+        record = cast(dict[str, object], value)
+        return {
+            string
+            for child in record.values()
+            for string in _recursive_string_values(child)
+        }
+    if isinstance(value, list):
+        sequence = cast(list[object], value)
+        return {
+            string for child in sequence for string in _recursive_string_values(child)
+        }
+    return set()
+
+
+def _shared_authority_sources(
+    case: _ServiceCase,
+    *,
+    frame_index: int,
+    recipient_global_slot: int,
+) -> tuple[
+    SharedObsSourceMaterialProjectionV1,
+    tuple[SharedObsSourceMaterialProjectionV1, ...],
+]:
+    context = case.bundle.replay.header.context
+    frame = case.bundle.replay.frames[frame_index]
+
+    def build(global_slot: int) -> SharedObsSourceMaterialProjectionV1:
+        return build_shared_obs_authority_source_material_projection_v1(
+            context,
+            frame,
+            selected_global_slot=global_slot,
+        )
+
+    return (
+        build(recipient_global_slot),
+        tuple(
+            build(row.global_slot)
+            for row in context.roster
+            if row.configured_active and row.global_slot != recipient_global_slot
+        ),
+    )
+
+
+def _shared_presentation_for_raw(
+    case: _ServiceCase,
+    raw: SharedObsAgentPovReplayViewerFrameV1,
+    *,
+    recipient_global_slot: int,
+) -> ReplaySharedObsAuthorizedPresentationFrameV1:
+    frame_index = raw.cursor.frame_index
+    current_recipient, current_nonrecipient = _shared_authority_sources(
+        case,
+        frame_index=frame_index,
+        recipient_global_slot=recipient_global_slot,
+    )
+    if frame_index == 0:
+        previous_recipient = None
+        previous_nonrecipient: tuple[SharedObsSourceMaterialProjectionV1, ...] = ()
+        incoming_transition = None
+    else:
+        previous_recipient, previous_nonrecipient = _shared_authority_sources(
+            case,
+            frame_index=frame_index - 1,
+            recipient_global_slot=recipient_global_slot,
+        )
+        incoming_transition = case.bundle.replay.transitions[frame_index - 1]
+    outgoing_transition = (
+        None
+        if frame_index == len(case.bundle.replay.transitions)
+        else case.bundle.replay.transitions[frame_index]
+    )
+    return build_replay_shared_obs_authorized_presentation_v1(
+        raw,
+        public_catalog=case.bundle.replay.header.context.static_mechanics_catalog,
+        source_authority_epoch=raw.revision,
+        authorized_recipient_global_slot=recipient_global_slot,
+        current_recipient_source_material=current_recipient,
+        current_active_nonrecipient_source_material=current_nonrecipient,
+        previous_recipient_source_material=previous_recipient,
+        previous_active_nonrecipient_source_material=previous_nonrecipient,
+        incoming_transition=incoming_transition,
+        outgoing_transition=outgoing_transition,
+    )
+
+
+def _presentation_service(
+    cases: _ServiceCases,
+    audience: Literal["oracle", "no_shared_obs", "shared_obs"],
+    *,
+    viewer_session_id: str,
+    frame_index: int = 1,
+) -> ReplayViewerService:
+    case = cases.shared if audience == "shared_obs" else cases.complete
+    return ReplayViewerService(
+        case.bundle,
+        initial_frame_index=frame_index,
+        view_mode="researcher" if audience == "oracle" else "pov",
+        pov_global_slot=0,
+        viewer_session_id=viewer_session_id,
+    )
+
+
+def _service_read_only_snapshot(service: ReplayViewerService) -> tuple[object, ...]:
+    raw = service.current_frame()
+    timeline = cast(SharedObsAgentPovReplayTimelineV1, service.current_timeline())
+    command_records = cast(
+        dict[object, object],
+        object.__getattribute__(service, "_command_records"),
+    )
+    pov_cache = cast(
+        dict[int, object],
+        object.__getattribute__(service, "_pov_cache"),
+    )
+    shared_cache = cast(
+        dict[int, object],
+        object.__getattribute__(service, "_shared_timeline_cache"),
+    )
+    return (
+        id(raw),
+        raw.model_dump_json(warnings=False),
+        id(timeline),
+        timeline.model_dump_json(),
+        service.revision,
+        object.__getattribute__(service, "_frame_index"),
+        object.__getattribute__(service, "_cursor_generation"),
+        object.__getattribute__(service, "_choreography_generation"),
+        object.__getattribute__(service, "_view_mode"),
+        object.__getattribute__(service, "_inspection_global_slot"),
+        object.__getattribute__(service, "_pov_global_slot"),
+        object.__getattribute__(service, "_preset"),
+        object.__getattribute__(service, "_show_ranges"),
+        object.__getattribute__(service, "_verbose"),
+        service.shutting_down,
+        service.faulted,
+        id(command_records),
+        tuple(command_records.items()),
+        id(pov_cache),
+        tuple((key, id(value), value) for key, value in pov_cache.items()),
+        id(shared_cache),
+        tuple((key, id(value), value) for key, value in shared_cache.items()),
+    )
+
+
+@pytest.mark.parametrize(
+    (
+        "frame_index",
+        "selected_global_slot",
+        "expected_incoming_index",
+        "expected_outgoing_index",
+    ),
+    (
+        (0, 1, None, 0),
+        (1, 1, 0, 1),
+        (2, 1, 1, None),
+        (1, None, 0, None),
+    ),
+)
+def test_current_presentation_uses_committed_oracle_epochs_only(
+    service_cases: _ServiceCases,
+    frame_index: int,
+    selected_global_slot: int | None,
+    expected_incoming_index: int | None,
+    expected_outgoing_index: int | None,
+) -> None:
+    service = ReplayViewerService(
+        service_cases.complete.bundle,
+        initial_frame_index=frame_index,
+        selected_global_slot=selected_global_slot,
+        viewer_session_id=f"presentation-epoch-{frame_index}-{selected_global_slot}",
+    )
+    raw = cast(ResearcherReplayViewerFrameV1, service.current_frame())
+
+    result = service.current_presentation()
+
+    assert result.outcome == "response"
+    assert type(result.payload) is ReplayOracleAuthorizedPresentationFrameV1
+    presentation = result.payload
+    source = presentation.source
+    assert source.source_session_id == raw.viewer_session_id
+    assert source.source_revision == raw.revision == service.revision
+    assert source.source_authority_epoch == raw.revision
+    assert source.source_frame_index == raw.cursor.frame_index == frame_index
+    assert source.source_final_frame_index == raw.cursor.final_frame_index
+    assert source.source_frame_id == raw.frame_id
+    assert source.source_simulator_step_count == raw.simulator_step_count
+    assert source.source_cursor_generation == raw.cursor.cursor_generation
+    assert source.source_choreography_generation == raw.cursor.choreography_generation
+    if expected_incoming_index is None:
+        assert presentation.incoming_summary is None
+    else:
+        assert presentation.incoming_summary is not None
+        assert (
+            presentation.incoming_summary.incoming_transition_index
+            == expected_incoming_index
+        )
+    if expected_outgoing_index is None:
+        assert presentation.outgoing_inspection is None
+    else:
+        assert presentation.outgoing_inspection is not None
+        assert (
+            presentation.outgoing_inspection.outgoing_transition_index
+            == expected_outgoing_index
+        )
+
+
+@pytest.mark.parametrize("audience", ("oracle", "no_shared_obs", "shared_obs"))
+@pytest.mark.parametrize("drift", ("session", "revision", "frame", "final"))
+def test_presentation_rejects_stale_committed_raw_snapshot_without_mutation(
+    service_cases: _ServiceCases,
+    audience: Literal["oracle", "no_shared_obs", "shared_obs"],
+    drift: Literal["session", "revision", "frame", "final"],
+) -> None:
+    session_id = f"committed-snapshot-{audience}"
+    service = _presentation_service(
+        service_cases,
+        audience,
+        viewer_session_id=session_id,
+    )
+    raw = service.current_frame()
+    if drift == "session":
+        donor = _presentation_service(
+            service_cases,
+            audience,
+            viewer_session_id=f"{session_id}-other",
+        )
+        poisoned = donor.current_frame()
+    elif drift == "revision":
+        donor = _presentation_service(
+            service_cases,
+            audience,
+            viewer_session_id=session_id,
+        )
+        if audience == "oracle":
+            _response(
+                _apply(
+                    donor,
+                    ReplaySelectAgentCommandV1(selected_global_slot=1),
+                    command_id="advance-donor-revision",
+                )
+            )
+        else:
+            _response(
+                _apply(
+                    donor,
+                    ReplaySetPovActorCommandV1(global_slot=1),
+                    command_id="advance-donor-revision",
+                )
+            )
+        assert donor.revision == 1
+        poisoned = donor.current_frame()
+    elif drift == "frame":
+        donor = _presentation_service(
+            service_cases,
+            audience,
+            viewer_session_id=session_id,
+            frame_index=0,
+        )
+        poisoned = donor.current_frame()
+    else:
+        poisoned_cursor = raw.cursor.model_copy(
+            update={"final_frame_index": raw.cursor.final_frame_index + 1}
+        )
+        poisoned = raw.model_copy(update={"cursor": poisoned_cursor})
+    object.__setattr__(service, "_frame", poisoned)
+    before = _service_read_only_snapshot(service)
+
+    with pytest.raises(RuntimeError, match="does not join service state"):
+        service.current_presentation()
+
+    assert _service_read_only_snapshot(service) == before
+
+
+@pytest.mark.parametrize("generation", ("cursor_generation", "choreography_generation"))
+def test_oracle_presentation_rejects_stale_committed_generations_without_mutation(
+    service_cases: _ServiceCases,
+    generation: Literal["cursor_generation", "choreography_generation"],
+) -> None:
+    service = _presentation_service(
+        service_cases,
+        "oracle",
+        viewer_session_id=f"oracle-stale-{generation}",
+    )
+    raw = cast(ResearcherReplayViewerFrameV1, service.current_frame())
+    cursor = raw.cursor.model_copy(
+        update={generation: getattr(raw.cursor, generation) + 1}
+    )
+    object.__setattr__(service, "_frame", raw.model_copy(update={"cursor": cursor}))
+    before = _service_read_only_snapshot(service)
+
+    with pytest.raises(RuntimeError, match="cursor generations are stale"):
+        service.current_presentation()
+
+    assert _service_read_only_snapshot(service) == before
+
+
+@pytest.mark.parametrize(
+    "provenance_drift",
+    (
+        "artifact_summary",
+        "timeline_id",
+        "movement_value",
+        "movement_type",
+        "ranges_value",
+        "ranges_type",
+    ),
+)
+def test_oracle_presentation_rejects_forged_provenance_without_mutation(
+    service_cases: _ServiceCases,
+    provenance_drift: Literal[
+        "artifact_summary",
+        "timeline_id",
+        "movement_value",
+        "movement_type",
+        "ranges_value",
+        "ranges_type",
+    ],
+) -> None:
+    service = _presentation_service(
+        service_cases,
+        "oracle",
+        viewer_session_id=f"oracle-provenance-{provenance_drift}",
+    )
+    raw = cast(ResearcherReplayViewerFrameV1, service.current_frame())
+    if provenance_drift == "artifact_summary":
+        reference = raw.artifact_summary.replay_reference.model_copy(
+            update={
+                "trajectory_content_digest_sha256": "f" * 64,
+                "canonical_digest_sha256": "e" * 64,
+            }
+        )
+        poison = raw.model_copy(
+            update={
+                "artifact_summary": raw.artifact_summary.model_copy(
+                    update={"replay_reference": reference}
+                )
+            }
+        )
+    elif provenance_drift == "timeline_id":
+        poison = raw.model_copy(update={"timeline_id": "forged-timeline"})
+    elif provenance_drift == "movement_value":
+        poison = raw.model_copy(
+            update={"recorded_ordinary_movement_distance_scale": 0.777}
+        )
+    elif provenance_drift == "movement_type":
+        poison = raw.model_copy(update={"recorded_ordinary_movement_distance_scale": 1})
+    elif provenance_drift == "ranges_value":
+        assert raw.show_ranges
+        poison = raw.model_copy(update={"show_ranges": False})
+    else:
+        poison = raw.model_copy(update={"show_ranges": 1})
+    object.__setattr__(service, "_frame", poison)
+    before = _service_read_only_snapshot(service)
+
+    with pytest.raises(RuntimeError, match="provenance does not join"):
+        service.current_presentation()
+
+    assert _service_read_only_snapshot(service) == before
+
+
+@pytest.mark.parametrize(
+    "projection_drift",
+    ("selection", "ranges", "reference", "armed_lane"),
+)
+def test_oracle_presentation_rejects_projection_state_drift_without_mutation(
+    service_cases: _ServiceCases,
+    projection_drift: Literal["selection", "ranges", "reference", "armed_lane"],
+) -> None:
+    session_id = f"oracle-projection-{projection_drift}"
+    service = ReplayViewerService(
+        service_cases.complete.bundle,
+        initial_frame_index=1,
+        viewer_session_id=session_id,
+    )
+    if projection_drift == "selection":
+        donor = ReplayViewerService(
+            service_cases.complete.bundle,
+            initial_frame_index=1,
+            selected_global_slot=1,
+            viewer_session_id=session_id,
+        )
+    elif projection_drift == "ranges":
+        donor = ReplayViewerService(
+            service_cases.complete.bundle,
+            initial_frame_index=1,
+            show_ranges=False,
+            viewer_session_id=session_id,
+        )
+    elif projection_drift == "reference":
+        donor = ReplayViewerService(
+            service_cases.complete.bundle,
+            initial_frame_index=1,
+            reference_global_slot=1,
+            viewer_session_id=session_id,
+        )
+    else:
+        donor = ReplayViewerService(
+            service_cases.complete.bundle,
+            initial_frame_index=1,
+            selected_global_slot=1,
+            armed_lane=1,
+            viewer_session_id=session_id,
+        )
+    raw = cast(ResearcherReplayViewerFrameV1, service.current_frame())
+    donor_raw = cast(ResearcherReplayViewerFrameV1, donor.current_frame())
+    assert donor_raw.projection != raw.projection
+    object.__setattr__(
+        service,
+        "_frame",
+        raw.model_copy(update={"projection": donor_raw.projection}),
+    )
+    before = _service_read_only_snapshot(service)
+
+    with pytest.raises(RuntimeError, match="provenance does not join"):
+        service.current_presentation()
+
+    assert _service_read_only_snapshot(service) == before
+
+
+@pytest.mark.parametrize("audience", ("no_shared_obs", "shared_obs"))
+def test_agent_presentation_ignores_committed_cursor_generations(
+    service_cases: _ServiceCases,
+    audience: Literal["no_shared_obs", "shared_obs"],
+) -> None:
+    service = _presentation_service(
+        service_cases,
+        audience,
+        viewer_session_id=f"agent-diagnostic-generations-{audience}",
+    )
+    baseline = service.current_presentation()
+    raw = service.current_frame()
+    cursor = raw.cursor.model_copy(
+        update={
+            "cursor_generation": raw.cursor.cursor_generation + 17,
+            "choreography_generation": raw.cursor.choreography_generation + 9,
+        }
+    )
+    object.__setattr__(service, "_frame", raw.model_copy(update={"cursor": cursor}))
+    before = _service_read_only_snapshot(service)
+
+    mutated = service.current_presentation()
+
+    assert mutated == baseline
+    assert mutated.payload.model_dump_json() == baseline.payload.model_dump_json()
+    assert _service_read_only_snapshot(service) == before
+
+
+def test_current_presentation_is_read_only_and_does_not_stale_a_command(
+    service_cases: _ServiceCases,
+) -> None:
+    service = ReplayViewerService(
+        service_cases.complete.bundle,
+        selected_global_slot=1,
+        viewer_session_id="presentation-read-only",
+    )
+    raw = service.current_frame()
+    timeline = service.current_timeline()
+    raw_bytes = raw.model_dump_json()
+    timeline_bytes = timeline.model_dump_json()
+    revision = service.revision
+    prepared_command = _request(
+        service,
+        ReplayNextFrameCommandV1(),
+        command_id="prepared-before-presentation-get",
+    )
+
+    first = service.current_presentation()
+    second = service.current_presentation()
+
+    assert first == second
+    assert service.current_frame() is raw
+    assert service.current_frame().model_dump_json() == raw_bytes
+    assert service.current_timeline() is timeline
+    assert service.current_timeline().model_dump_json() == timeline_bytes
+    assert service.revision == revision == 0
+    assert service.command_cache_size == 0
+    assert service.pov_index_build_count == 0
+    assert service.shared_timeline_build_count == 0
+
+    response = _response(service.apply_command(prepared_command))
+    assert response.result == "applied"
+    assert response.frame.revision == 1
+    assert response.frame.cursor.frame_index == 1
+    assert service.command_cache_size == 1
+
+
+@pytest.mark.parametrize("audience", ("oracle", "no_shared_obs", "shared_obs"))
+def test_all_presentation_getters_are_fully_read_only_and_keep_prepared_command(
+    service_cases: _ServiceCases,
+    audience: Literal["oracle", "no_shared_obs", "shared_obs"],
+) -> None:
+    service = _presentation_service(
+        service_cases,
+        audience,
+        viewer_session_id=f"read-only-all-{audience}",
+        frame_index=0,
+    )
+    before = _service_read_only_snapshot(service)
+    prepared = _request(
+        service,
+        ReplayNextFrameCommandV1(),
+        command_id=f"prepared-{audience}",
+    )
+
+    first = service.current_presentation()
+    middle = _service_read_only_snapshot(service)
+    second = service.current_presentation()
+
+    assert first == second
+    assert first.payload.model_dump_json() == second.payload.model_dump_json()
+    assert before == middle == _service_read_only_snapshot(service)
+    response = _response(service.apply_command(prepared))
+    assert response.result == "applied"
+    assert response.frame.revision == 1
+    assert response.frame.cursor.frame_index == 1
+
+
+@pytest.mark.parametrize("audience", ("oracle", "no_shared_obs", "shared_obs"))
+def test_command_between_presentation_gets_yields_two_coherent_roots(
+    service_cases: _ServiceCases,
+    audience: Literal["oracle", "no_shared_obs", "shared_obs"],
+) -> None:
+    service = _presentation_service(
+        service_cases,
+        audience,
+        viewer_session_id=f"between-get-{audience}",
+        frame_index=0,
+    )
+
+    before = service.current_presentation()
+    response = _response(
+        _apply(
+            service,
+            ReplayNextFrameCommandV1(),
+            command_id=f"between-get-next-{audience}",
+        )
+    )
+    after = service.current_presentation()
+
+    assert before.outcome == after.outcome == "response"
+    before_frame = _presentation_response(before)
+    after_frame = _presentation_response(after)
+    assert before_frame.source.source_revision == 0
+    assert before_frame.source.source_frame_index == 0
+    assert after_frame.source.source_revision == response.frame.revision == 1
+    assert (
+        after_frame.source.source_frame_index == response.frame.cursor.frame_index == 1
+    )
+    assert before_frame.latest_events is None
+    assert before_frame.latest_transition is None
+    assert after_frame.latest_events is not None
+    assert after_frame.latest_transition is not None
+    assert after_frame.latest_transition.incoming_transition_index == 0
+    if audience == "oracle":
+        assert type(after_frame) is ReplayOracleAuthorizedPresentationFrameV1
+    elif audience == "no_shared_obs":
+        assert type(after_frame) is ReplayNoSharedObsAuthorizedPresentationFrameV1
+    else:
+        assert type(after_frame) is ReplaySharedObsAuthorizedPresentationFrameV1
+
+
+@pytest.mark.parametrize("audience", ("oracle", "no_shared_obs", "shared_obs"))
+def test_concurrent_presentation_get_and_command_never_mix_epochs(
+    service_cases: _ServiceCases,
+    audience: Literal["oracle", "no_shared_obs", "shared_obs"],
+) -> None:
+    service = _presentation_service(
+        service_cases,
+        audience,
+        viewer_session_id=f"concurrent-get-{audience}",
+        frame_index=0,
+    )
+    request = _request(
+        service,
+        ReplayNextFrameCommandV1(),
+        command_id=f"concurrent-next-{audience}",
+    )
+    barrier = Barrier(2)
+
+    def get_presentation() -> PresentationResourceResultV1:
+        barrier.wait()
+        return service.current_presentation()
+
+    def apply_next() -> ReplayServiceCommandResultV1:
+        barrier.wait()
+        return service.apply_command(request)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        get_future = executor.submit(get_presentation)
+        command_future = executor.submit(apply_next)
+        raced = get_future.result()
+        command = command_future.result()
+
+    assert command.outcome == "response"
+    command_frame = _response(command).frame
+    assert command_frame.revision == 1
+    assert command_frame.cursor.frame_index == 1
+    assert raced.outcome == "response"
+    raced_frame = _presentation_response(raced)
+    raced_pair = (
+        raced_frame.source.source_revision,
+        raced_frame.source.source_frame_index,
+    )
+    assert raced_pair in {(0, 0), (1, 1)}
+    current = _presentation_response(service.current_presentation())
+    assert (
+        current.source.source_revision,
+        current.source.source_frame_index,
+    ) == (1, 1)
+
+
+@pytest.mark.parametrize(
+    ("audience", "expected_builder"),
+    (
+        ("oracle", "build_replay_oracle_authorized_presentation_v1"),
+        ("no_shared_obs", "build_replay_no_shared_obs_authorized_presentation_v1"),
+        ("shared_obs", "build_replay_shared_obs_authorized_presentation_v1"),
+    ),
+)
+def test_presentation_dispatch_calls_only_the_exact_authority_packager(
+    service_cases: _ServiceCases,
+    monkeypatch: pytest.MonkeyPatch,
+    audience: Literal["oracle", "no_shared_obs", "shared_obs"],
+    expected_builder: str,
+) -> None:
+    service = _presentation_service(
+        service_cases,
+        audience,
+        viewer_session_id=f"exact-dispatch-{audience}",
+    )
+    calls: list[str] = []
+
+    class DispatchProbeError(RuntimeError):
+        pass
+
+    def probe(name: str) -> Callable[..., object]:
+        def fail(*args: object, **kwargs: object) -> object:
+            del args, kwargs
+            calls.append(name)
+            raise DispatchProbeError(name)
+
+        return fail
+
+    for name in (
+        "build_replay_oracle_authorized_presentation_v1",
+        "build_replay_no_shared_obs_authorized_presentation_v1",
+        "build_replay_shared_obs_authorized_presentation_v1",
+    ):
+        monkeypatch.setattr(replay_service_module, name, probe(name))
+
+    with pytest.raises(DispatchProbeError, match=expected_builder):
+        service.current_presentation()
+
+    assert calls == [expected_builder]
+
+
+@pytest.mark.parametrize("audience", ("oracle", "no_shared_obs", "shared_obs"))
+@pytest.mark.parametrize("state_field", ("_shutting_down", "_faulted"))
+def test_presentation_get_preserves_existing_terminal_service_state(
+    service_cases: _ServiceCases,
+    audience: Literal["oracle", "no_shared_obs", "shared_obs"],
+    state_field: Literal["_shutting_down", "_faulted"],
+) -> None:
+    service = _presentation_service(
+        service_cases,
+        audience,
+        viewer_session_id=f"terminal-state-{audience}-{state_field}",
+    )
+    object.__setattr__(service, state_field, True)
+    before = _service_read_only_snapshot(service)
+
+    result = service.current_presentation()
+
+    assert result.outcome == "response"
+    assert _service_read_only_snapshot(service) == before
+
+
+@pytest.mark.parametrize(
+    ("audience", "donor_audience", "error_fragment"),
+    (
+        ("oracle", "no_shared_obs", "Oracle replay view"),
+        ("no_shared_obs", "shared_obs", "NoSharedObs replay view"),
+        ("shared_obs", "oracle", "SharedObs replay view"),
+    ),
+)
+def test_presentation_rejects_wrong_committed_product_root_without_fallback(
+    service_cases: _ServiceCases,
+    audience: Literal["oracle", "no_shared_obs", "shared_obs"],
+    donor_audience: Literal["oracle", "no_shared_obs", "shared_obs"],
+    error_fragment: str,
+) -> None:
+    session_id = f"wrong-product-{audience}"
+    service = _presentation_service(
+        service_cases,
+        audience,
+        viewer_session_id=session_id,
+    )
+    donor = _presentation_service(
+        service_cases,
+        donor_audience,
+        viewer_session_id=session_id,
+    )
+    object.__setattr__(service, "_frame", donor.current_frame())
+    before = _service_read_only_snapshot(service)
+
+    with pytest.raises(RuntimeError, match=error_fragment):
+        service.current_presentation()
+
+    assert _service_read_only_snapshot(service) == before
+
+
+@pytest.mark.parametrize("frame_index", (0, 1, 2))
+@pytest.mark.parametrize("pov_global_slot", (0, 5))
+def test_current_presentation_no_shared_uses_fixed_recipient_epochs(
+    service_cases: _ServiceCases,
+    frame_index: int,
+    pov_global_slot: int,
+) -> None:
+    service = ReplayViewerService(
+        service_cases.complete.bundle,
+        initial_frame_index=frame_index,
+        view_mode="pov",
+        pov_global_slot=pov_global_slot,
+        selected_global_slot=(1 if pov_global_slot == 0 else 6),
+        viewer_session_id=f"presentation-no-shared-{frame_index}-{pov_global_slot}",
+    )
+    raw = cast(ActorPovReplayViewerFrameV1, service.current_frame())
+    raw_bytes = raw.model_dump_json()
+    cache_count = service.pov_index_build_count
+
+    first = service.current_presentation()
+    second = service.current_presentation()
+
+    assert first.outcome == second.outcome == "response"
+    assert type(first.payload) is ReplayNoSharedObsAuthorizedPresentationFrameV1
+    assert first.payload == second.payload
+    assert first.payload.model_dump_json() == second.payload.model_dump_json()
+    presentation = first.payload
+    assert presentation.source.source_revision == raw.revision == service.revision
+    assert presentation.source.source_authority_epoch == raw.revision
+    assert presentation.source.source_frame_index == frame_index
+    assert presentation.source.source_final_frame_index == 2
+    assert presentation.source.source_recipient_public_agent_id == raw.public_agent_id
+    assert presentation.current_endpoint.parts.recipient_public_agent_id == (
+        raw.public_agent_id
+    )
+    assert presentation.current_endpoint.action_axis.owner_public_agent_id == (
+        raw.public_agent_id
+    )
+    mask = presentation.current_endpoint.parts.next_decision_action_mask
+    assert len(mask.move) == 9
+    assert len(mask.select_target) == 11
+    assert len(mask.use_ultimate) == 2
+    assert len(mask.select_target_use_ultimate_joint) == 11
+    assert all(len(row) == 2 for row in mask.select_target_use_ultimate_joint)
+    if frame_index == 0:
+        assert presentation.latest_events is None
+        assert presentation.latest_transition is None
+    else:
+        assert presentation.latest_events is not None
+        assert presentation.latest_transition is not None
+        assert presentation.latest_events.incoming_transition_index == frame_index - 1
+        assert (
+            presentation.latest_transition.incoming_transition_index == frame_index - 1
+        )
+    if frame_index == 2:
+        assert presentation.replay_inspection is None
+    else:
+        assert presentation.replay_inspection is not None
+        assert presentation.replay_inspection.outgoing_transition_index == frame_index
+    assert service.current_frame() is raw
+    assert service.current_frame().model_dump_json() == raw_bytes
+    assert service.pov_index_build_count == cache_count == 1
+    assert service.command_cache_size == 0
+
+
+def test_no_shared_packager_ignores_every_forbidden_raw_diagnostic_branch(
+    service_cases: _ServiceCases,
+) -> None:
+    service = ReplayViewerService(
+        service_cases.complete.bundle,
+        initial_frame_index=1,
+        view_mode="pov",
+        pov_global_slot=0,
+        viewer_session_id="no-shared-selective-raw",
+    )
+    raw = cast(ActorPovReplayViewerFrameV1, service.current_frame())
+    content = export_actor_pov_replay_v1(
+        service_cases.complete.bundle.replay,
+        global_slot=0,
+    ).content
+    index = build_actor_pov_projection_index_v1(content)
+    baseline = build_replay_no_shared_obs_authorized_presentation_v1(
+        index,
+        raw,
+        public_catalog=(
+            service_cases.complete.bundle.replay.header.context.static_mechanics_catalog
+        ),
+        source_authority_epoch=raw.revision,
+    )
+    diagnostic_cursor = raw.cursor.model_copy(
+        update={
+            "cursor_generation": raw.cursor.cursor_generation + 17,
+            "choreography_generation": raw.cursor.choreography_generation + 9,
+        }
+    )
+    diagnostic_raw = raw.model_copy(
+        update={
+            "artifact_summary": SimpleNamespace(forbidden="artifact"),
+            "timeline_id": "forbidden-diagnostic-timeline",
+            "cursor": diagnostic_cursor,
+            "preset": "technical",
+            "verbose": True,
+            "pov_global_slot": 9,
+            "completion": SimpleNamespace(forbidden="completion"),
+            "processing_disclosure": SimpleNamespace(forbidden="processing"),
+        }
+    )
+
+    mutated = build_replay_no_shared_obs_authorized_presentation_v1(
+        index,
+        diagnostic_raw,
+        public_catalog=(
+            service_cases.complete.bundle.replay.header.context.static_mechanics_catalog
+        ),
+        source_authority_epoch=raw.revision,
+    )
+
+    assert mutated == baseline
+    assert mutated.model_dump_json() == baseline.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    ("field_name", "poison"),
+    (
+        ("schema_version", True),
+        ("frame_kind", "researcher_replay_viewer"),
+        ("view_mode", "researcher"),
+        ("viewer_session_id", ""),
+        ("revision", True),
+        ("public_agent_id", ""),
+        ("pov_frame_id", ""),
+        ("pov_frame_id", "wrong-local-frame"),
+        ("simulator_step_count", True),
+        ("simulator_step_count", 999),
+    ),
+)
+def test_no_shared_packager_rejects_poisoned_used_raw_headers(
+    service_cases: _ServiceCases,
+    field_name: str,
+    poison: object,
+) -> None:
+    service = ReplayViewerService(
+        service_cases.complete.bundle,
+        initial_frame_index=1,
+        view_mode="pov",
+        pov_global_slot=0,
+        viewer_session_id="no-shared-used-header",
+    )
+    raw = cast(ActorPovReplayViewerFrameV1, service.current_frame())
+    index = build_actor_pov_projection_index_v1(
+        export_actor_pov_replay_v1(
+            service_cases.complete.bundle.replay,
+            global_slot=0,
+        ).content
+    )
+    poisoned = raw.model_copy(update={field_name: poison})
+
+    with pytest.raises((TypeError, ValueError)):
+        build_replay_no_shared_obs_authorized_presentation_v1(
+            index,
+            poisoned,
+            public_catalog=(
+                service_cases.complete.bundle.replay.header.context.static_mechanics_catalog
+            ),
+            source_authority_epoch=raw.revision,
+        )
+
+
+def test_no_shared_packager_rejects_cursor_and_projection_runtime_poisons(
+    service_cases: _ServiceCases,
+) -> None:
+    service = ReplayViewerService(
+        service_cases.complete.bundle,
+        initial_frame_index=1,
+        view_mode="pov",
+        pov_global_slot=0,
+        viewer_session_id="no-shared-runtime-poison",
+    )
+    raw = cast(ActorPovReplayViewerFrameV1, service.current_frame())
+    index = build_actor_pov_projection_index_v1(
+        export_actor_pov_replay_v1(
+            service_cases.complete.bundle.replay,
+            global_slot=0,
+        ).content
+    )
+    cursor_bool = cast(Any, raw.cursor).model_construct(
+        **{
+            **raw.cursor.model_dump(mode="python"),
+            "frame_index": True,
+        }
+    )
+    cursor_final_bool = cast(Any, raw.cursor).model_construct(
+        **{
+            **raw.cursor.model_dump(mode="python"),
+            "final_frame_index": True,
+        }
+    )
+    cursor_subclass = _PoisonReplayCursorV1.model_validate_json(
+        raw.cursor.model_dump_json()
+    )
+    projection = raw.projection
+    projection_subclass = _PoisonActorPovAnalyzerProjectionV1(
+        scene=projection.scene,
+        next_decision_action_mask=projection.next_decision_action_mask,
+        incoming_transition_id=projection.incoming_transition_id,
+        incoming_cues=projection.incoming_cues,
+    )
+    poisoned_roots = (
+        raw.model_copy(update={"cursor": cursor_bool}),
+        raw.model_copy(update={"cursor": cursor_final_bool}),
+        raw.model_copy(update={"cursor": cursor_subclass}),
+        raw.model_copy(update={"projection": projection_subclass}),
+        raw.model_copy(update={"projection": SimpleNamespace()}),
+        _PoisonActorPovReplayViewerFrameV1.model_validate_json(raw.model_dump_json()),
+    )
+
+    for poisoned in poisoned_roots:
+        with pytest.raises((TypeError, ValueError)):
+            build_replay_no_shared_obs_authorized_presentation_v1(
+                index,
+                poisoned,
+                public_catalog=(
+                    service_cases.complete.bundle.replay.header.context.static_mechanics_catalog
+                ),
+                source_authority_epoch=raw.revision,
+            )
+
+
+def test_no_shared_presentation_cache_miss_fails_closed_without_get_mutation(
+    service_cases: _ServiceCases,
+) -> None:
+    service = ReplayViewerService(
+        service_cases.complete.bundle,
+        view_mode="pov",
+        pov_global_slot=0,
+        viewer_session_id="no-shared-cache-miss",
+    )
+    raw = service.current_frame()
+    raw_bytes = raw.model_dump_json()
+    cache = cast(
+        dict[int, object],
+        object.__getattribute__(service, "_pov_cache"),
+    )
+    cache.clear()
+
+    with pytest.raises(RuntimeError, match="no POV cache entry"):
+        service.current_presentation()
+
+    assert service.current_frame() is raw
+    assert service.current_frame().model_dump_json() == raw_bytes
+    assert service.pov_index_build_count == 0
+    assert service.revision == 0
+    assert service.command_cache_size == 0
+
+
+def test_no_shared_presentation_rejects_cross_recipient_cache_entry(
+    service_cases: _ServiceCases,
+) -> None:
+    recipient_zero = ReplayViewerService(
+        service_cases.complete.bundle,
+        view_mode="pov",
+        pov_global_slot=0,
+        viewer_session_id="no-shared-cache-recipient-zero",
+    )
+    recipient_five = ReplayViewerService(
+        service_cases.complete.bundle,
+        view_mode="pov",
+        pov_global_slot=5,
+        viewer_session_id="no-shared-cache-recipient-five",
+    )
+    cache_zero = cast(
+        dict[int, object],
+        object.__getattribute__(recipient_zero, "_pov_cache"),
+    )
+    cache_five = cast(
+        dict[int, object],
+        object.__getattribute__(recipient_five, "_pov_cache"),
+    )
+    cache_zero[0] = cache_five[5]
+
+    with pytest.raises(RuntimeError, match="does not join the fixed POV recipient"):
+        recipient_zero.current_presentation()
+
+    assert cache_zero[0] is cache_five[5]
+    assert recipient_zero.pov_index_build_count == 1
+    assert recipient_zero.revision == 0
+
+
+def test_agent_presentation_is_independent_of_researcher_inspection_state(
+    service_cases: _ServiceCases,
+) -> None:
+    services = tuple(
+        ReplayViewerService(
+            service_cases.complete.bundle,
+            view_mode="pov",
+            selected_global_slot=inspection_slot,
+            pov_global_slot=0,
+            viewer_session_id="fixed-pov-inspection-independence",
+        )
+        for inspection_slot in (1, 6)
+    )
+
+    raw_frames = tuple(service.current_frame() for service in services)
+    presentations = tuple(service.current_presentation() for service in services)
+
+    assert raw_frames[0].model_dump_json() == raw_frames[1].model_dump_json()
+    assert presentations[0].outcome == presentations[1].outcome == "response"
+    assert presentations[0].payload.model_dump_json() == (
+        presentations[1].payload.model_dump_json()
+    )
+
+
+@pytest.mark.parametrize("frame_index", (0, 1, 2))
+@pytest.mark.parametrize("pov_global_slot", (0, 5))
+def test_current_presentation_shared_uses_fixed_recipient_epochs(
+    service_cases: _ServiceCases,
+    frame_index: int,
+    pov_global_slot: int,
+) -> None:
+    service = ReplayViewerService(
+        service_cases.shared.bundle,
+        initial_frame_index=frame_index,
+        view_mode="pov",
+        pov_global_slot=pov_global_slot,
+        selected_global_slot=(1 if pov_global_slot == 0 else 6),
+        viewer_session_id=f"presentation-shared-{frame_index}-{pov_global_slot}",
+    )
+    raw = cast(SharedObsAgentPovReplayViewerFrameV1, service.current_frame())
+    raw_bytes = raw.model_dump_json()
+    timeline = cast(SharedObsAgentPovReplayTimelineV1, service.current_timeline())
+    timeline_bytes = timeline.model_dump_json()
+    cache_counts = (
+        service.pov_index_build_count,
+        service.shared_timeline_build_count,
+    )
+
+    first = service.current_presentation()
+    second = service.current_presentation()
+
+    assert first.outcome == second.outcome == "response"
+    assert type(first.payload) is ReplaySharedObsAuthorizedPresentationFrameV1
+    assert first.payload == second.payload
+    assert first.payload.model_dump_json() == second.payload.model_dump_json()
+    presentation = first.payload
+    prefix = (
+        f"{raw.artifact_summary.episode_id}:shared-obs-visual-union:"
+        f"{raw.public_agent_id}"
+    )
+    expected_incoming_id = (
+        None if frame_index == 0 else f"{prefix}:transition:{frame_index - 1}"
+    )
+    assert raw.frame_kind == "shared_obs_agent_pov_replay_viewer"
+    assert raw.artifact_summary.recipient_replay_id == f"{prefix}:replay"
+    assert raw.timeline_id == timeline.timeline_id == f"{prefix}:timeline"
+    assert raw.recipient_frame_id == f"{prefix}:frame:{frame_index}"
+    assert raw.incoming_recipient_transition_id == expected_incoming_id
+    assert timeline.timeline_kind == "shared_obs_agent_pov"
+    assert timeline.artifact_summary == raw.artifact_summary
+    assert timeline.completion == raw.completion
+    assert timeline.rows[frame_index].recipient_frame_id == raw.recipient_frame_id
+    assert (
+        timeline.rows[frame_index].incoming_recipient_transition_id
+        == expected_incoming_id
+    )
+    assert presentation.source.source_revision == raw.revision == service.revision
+    assert presentation.source.source_authority_epoch == raw.revision
+    assert presentation.source.source_frame_index == frame_index
+    assert presentation.source.source_final_frame_index == 2
+    assert presentation.source.source_recipient_public_agent_id == raw.public_agent_id
+    assert presentation.current_endpoint.parts.recipient_public_agent_id == (
+        raw.public_agent_id
+    )
+    assert presentation.current_endpoint.action_axis.owner_public_agent_id == (
+        raw.public_agent_id
+    )
+    assert presentation.authority.exact_actor_input_export_available is False
+    mask = presentation.current_endpoint.parts.next_decision_action_mask
+    assert len(mask.move) == 9
+    assert len(mask.select_target) == 11
+    assert len(mask.use_ultimate) == 2
+    assert len(mask.select_target_use_ultimate_joint) == 11
+    assert all(len(row) == 2 for row in mask.select_target_use_ultimate_joint)
+    if frame_index == 0:
+        assert presentation.latest_events is None
+        assert presentation.latest_transition is None
+    else:
+        assert presentation.latest_events is not None
+        assert presentation.latest_transition is not None
+        assert presentation.latest_events.incoming_transition_index == frame_index - 1
+        assert (
+            presentation.latest_transition.incoming_transition_index == frame_index - 1
+        )
+    if frame_index == 2:
+        assert presentation.replay_inspection is None
+    else:
+        assert presentation.replay_inspection is not None
+        assert presentation.replay_inspection.outgoing_transition_index == frame_index
+        assert presentation.replay_inspection.actor_public_agent_id == (
+            raw.public_agent_id
+        )
+    assert service.current_frame() is raw
+    assert service.current_frame().model_dump_json() == raw_bytes
+    assert service.current_timeline() is timeline
+    assert service.current_timeline().model_dump_json() == timeline_bytes
+    assert (
+        (
+            service.pov_index_build_count,
+            service.shared_timeline_build_count,
+        )
+        == cache_counts
+        == (0, 1)
+    )
+    assert service.command_cache_size == 0
+
+
+def test_shared_raw_product_contains_only_private_transport_identity(
+    service_cases: _ServiceCases,
+) -> None:
+    service = ReplayViewerService(
+        service_cases.shared.bundle,
+        initial_frame_index=1,
+        view_mode="pov",
+        pov_global_slot=0,
+        viewer_session_id="shared-selective-raw",
+    )
+    raw = cast(SharedObsAgentPovReplayViewerFrameV1, service.current_frame())
+    timeline = cast(SharedObsAgentPovReplayTimelineV1, service.current_timeline())
+    frame_payload = json.loads(raw.model_dump_json())
+    timeline_payload = json.loads(timeline.model_dump_json())
+    forbidden = {
+        "replay_reference",
+        "artifact_id",
+        "metric_report_availability",
+        "processing",
+        "processing_disclosure",
+        "selected_global_slot",
+        "pov_global_slot",
+        "global_slot",
+        "source_material_frame_id",
+        "source_frame_id",
+        "observation_materialization",
+        "projection",
+        "scene",
+        "action_mask",
+        "events",
+        "reward",
+    }
+
+    assert _recursive_keys(frame_payload).isdisjoint(forbidden)
+    assert _recursive_keys(timeline_payload).isdisjoint(forbidden)
+    all_keys = _recursive_keys(frame_payload) | _recursive_keys(timeline_payload)
+    for key in all_keys:
+        assert "global_slot" not in key
+        assert "digest" not in key
+        assert "metric" not in key
+        assert "processing" not in key
+        assert "reward" not in key
+        assert "event" not in key
+    forbidden_values = {
+        raw.artifact_summary.episode_id + ":replay",
+        *(frame.frame_id for frame in service_cases.shared.bundle.replay.frames),
+        *(
+            transition.transition_id
+            for transition in service_cases.shared.bundle.replay.transitions
+        ),
+        service_cases.shared.bundle.replay.header.context_digest_sha256,
+        service_cases.shared.bundle.replay.trajectory_content_digest_sha256,
+        service_cases.shared.bundle.replay.canonical_digest_sha256,
+    }
+    all_strings = _recursive_string_values(frame_payload) | _recursive_string_values(
+        timeline_payload
+    )
+    assert not (all_strings & forbidden_values)
+    assert not any(":shared-obs-source-material:" in value for value in all_strings)
+    assert raw.frame_kind == "shared_obs_agent_pov_replay_viewer"
+    assert timeline.timeline_kind == "shared_obs_agent_pov"
+    assert raw.artifact_summary == timeline.artifact_summary
+    assert raw.public_agent_id == raw.artifact_summary.public_agent_id
+    assert raw.recipient_frame_id.endswith(":frame:1")
+    assert raw.incoming_recipient_transition_id is not None
+    assert raw.completion.public_end_or_failure_reason is None
+    assert service.current_presentation().outcome == "response"
+
+
+def test_shared_command_and_error_envelopes_return_only_the_private_root(
+    service_cases: _ServiceCases,
+) -> None:
+    service = ReplayViewerService(
+        service_cases.shared.bundle,
+        initial_frame_index=0,
+        view_mode="pov",
+        pov_global_slot=5,
+        viewer_session_id="shared-private-command-envelope",
+    )
+    request = _request(
+        service,
+        ReplayNextFrameCommandV1(),
+        command_id="shared-private-next",
+    )
+
+    applied = _response(service.apply_command(request))
+    duplicate = _response(service.apply_command(request))
+    stale = _error(
+        _apply(
+            service,
+            ReplayNextFrameCommandV1(),
+            command_id="shared-private-stale",
+            base_revision=0,
+        )
+    )
+
+    assert type(applied.frame) is SharedObsAgentPovReplayViewerFrameV1
+    assert type(duplicate.frame) is SharedObsAgentPovReplayViewerFrameV1
+    assert type(stale.latest_frame) is SharedObsAgentPovReplayViewerFrameV1
+    assert duplicate.frame == applied.frame
+    assert stale.latest_frame == applied.frame
+    for envelope in (applied, duplicate, stale):
+        payload = json.loads(envelope.model_dump_json())
+        keys = _recursive_keys(payload)
+        assert "projection" not in keys
+        assert "replay_reference" not in keys
+        assert "selected_global_slot" not in keys
+        assert "global_slot" not in keys
+        assert "processing" not in keys
+
+
+def test_shared_raw_bytes_ignore_metric_and_processing_truth(
+    service_cases: _ServiceCases,
+) -> None:
+    case = service_cases.shared
+    missing_metric = LoadedReplayBundleV1(
+        replay=case.bundle.replay,
+        metric_report_artifact=None,
+        status="metric_report_missing",
+    )
+    failure = service_cases.processing_failed.report.processing_status.failure
+    assert failure is not None
+    failed_processing = EvaluationProcessingStatusV1(
+        status="failed",
+        processed_transition_count=len(case.bundle.replay.transitions),
+        failure=failure,
+    )
+    failed_bundle = LoadedReplayBundleV1(
+        replay=case.bundle.replay.model_copy(
+            update={"processing_status": failed_processing}
+        ),
+        metric_report_artifact=case.bundle.metric_report_artifact,
+        status=case.bundle.status,
+    )
+    services = tuple(
+        ReplayViewerService(
+            bundle,
+            initial_frame_index=1,
+            view_mode="pov",
+            pov_global_slot=0,
+            viewer_session_id="shared-hidden-metadata-noninterference",
+        )
+        for bundle in (case.bundle, missing_metric, failed_bundle)
+    )
+
+    assert len({service.current_frame().model_dump_json() for service in services}) == 1
+    assert (
+        len({service.current_timeline().model_dump_json() for service in services}) == 1
+    )
+    assert (
+        len(
+            {
+                service.current_presentation().payload.model_dump_json()
+                for service in services
+            }
+        )
+        == 1
+    )
+
+
+def test_shared_packager_binds_private_raw_identity_to_authority_sources(
+    service_cases: _ServiceCases,
+) -> None:
+    service = ReplayViewerService(
+        service_cases.shared.bundle,
+        initial_frame_index=1,
+        view_mode="pov",
+        pov_global_slot=0,
+        viewer_session_id="shared-shadow-join",
+    )
+    raw = cast(SharedObsAgentPovReplayViewerFrameV1, service.current_frame())
+    other_recipient = ReplayViewerService(
+        service_cases.shared.bundle,
+        initial_frame_index=1,
+        view_mode="pov",
+        pov_global_slot=5,
+        viewer_session_id="shared-shadow-join",
+    )
+    other_raw = cast(
+        SharedObsAgentPovReplayViewerFrameV1,
+        other_recipient.current_frame(),
+    )
+    with pytest.raises(ValueError, match="does not join authorized"):
+        _shared_presentation_for_raw(
+            service_cases.shared,
+            other_raw,
+            recipient_global_slot=0,
+        )
+
+    current_zero, nonrecipient_zero = _shared_authority_sources(
+        service_cases.shared,
+        frame_index=0,
+        recipient_global_slot=0,
+    )
+    with pytest.raises(ValueError, match="does not join authorized"):
+        build_replay_shared_obs_authorized_presentation_v1(
+            raw,
+            public_catalog=(
+                service_cases.shared.bundle.replay.header.context.static_mechanics_catalog
+            ),
+            source_authority_epoch=raw.revision,
+            authorized_recipient_global_slot=0,
+            current_recipient_source_material=current_zero,
+            current_active_nonrecipient_source_material=nonrecipient_zero,
+            previous_recipient_source_material=current_zero,
+            previous_active_nonrecipient_source_material=nonrecipient_zero,
+            incoming_transition=service_cases.shared.bundle.replay.transitions[0],
+            outgoing_transition=service_cases.shared.bundle.replay.transitions[1],
+        )
+
+    object.__setattr__(service, "_frame", other_raw)
+    before = _service_read_only_snapshot(service)
+    with pytest.raises(RuntimeError, match="transport identity"):
+        service.current_presentation()
+    assert _service_read_only_snapshot(service) == before
+
+
+@pytest.mark.parametrize(
+    ("field_name", "poison"),
+    (
+        ("schema_version", True),
+        ("frame_kind", "actor_pov_replay_viewer"),
+        ("view_mode", "researcher"),
+        ("preset", "technical"),
+        ("verbose", True),
+        ("viewer_session_id", ""),
+        ("revision", True),
+        ("public_agent_id", ""),
+        ("recipient_frame_id", ""),
+        ("recipient_frame_id", "wrong-local-frame"),
+        ("timeline_id", "wrong-local-timeline"),
+        ("incoming_recipient_transition_id", "wrong-local-transition"),
+        ("artifact_summary", SimpleNamespace(forbidden="artifact")),
+        ("completion", SimpleNamespace(forbidden="completion")),
+        ("simulator_step_count", True),
+        ("simulator_step_count", 999),
+    ),
+)
+def test_shared_packager_rejects_poisoned_used_raw_headers(
+    service_cases: _ServiceCases,
+    field_name: str,
+    poison: object,
+) -> None:
+    service = ReplayViewerService(
+        service_cases.shared.bundle,
+        initial_frame_index=1,
+        view_mode="pov",
+        pov_global_slot=0,
+        viewer_session_id="shared-used-header",
+    )
+    raw = cast(SharedObsAgentPovReplayViewerFrameV1, service.current_frame())
+    poisoned = raw.model_copy(update={field_name: poison})
+
+    with pytest.raises((TypeError, ValueError)):
+        _shared_presentation_for_raw(
+            service_cases.shared,
+            poisoned,
+            recipient_global_slot=0,
+        )
+
+
+@pytest.mark.parametrize("schema_version", (True, 2))
+def test_agent_packagers_reject_poisoned_cursor_schema_version(
+    service_cases: _ServiceCases,
+    schema_version: object,
+) -> None:
+    no_shared_service = ReplayViewerService(
+        service_cases.complete.bundle,
+        initial_frame_index=1,
+        view_mode="pov",
+        pov_global_slot=0,
+        viewer_session_id="agent-cursor-version-no-shared",
+    )
+    no_shared_raw = cast(
+        ActorPovReplayViewerFrameV1,
+        no_shared_service.current_frame(),
+    )
+    no_shared_index = build_actor_pov_projection_index_v1(
+        export_actor_pov_replay_v1(
+            service_cases.complete.bundle.replay,
+            global_slot=0,
+        ).content
+    )
+    no_shared_cursor = no_shared_raw.cursor.model_copy(
+        update={"schema_version": schema_version}
+    )
+    with pytest.raises(ValueError, match="wire identity"):
+        build_replay_no_shared_obs_authorized_presentation_v1(
+            no_shared_index,
+            no_shared_raw.model_copy(update={"cursor": no_shared_cursor}),
+            public_catalog=(
+                service_cases.complete.bundle.replay.header.context.static_mechanics_catalog
+            ),
+            source_authority_epoch=no_shared_raw.revision,
+        )
+
+    shared_service = ReplayViewerService(
+        service_cases.shared.bundle,
+        initial_frame_index=1,
+        view_mode="pov",
+        pov_global_slot=0,
+        viewer_session_id="agent-cursor-version-shared",
+    )
+    shared_raw = cast(
+        SharedObsAgentPovReplayViewerFrameV1,
+        shared_service.current_frame(),
+    )
+    shared_cursor = shared_raw.cursor.model_copy(
+        update={"schema_version": schema_version}
+    )
+    with pytest.raises(ValueError, match="wire identity"):
+        _shared_presentation_for_raw(
+            service_cases.shared,
+            shared_raw.model_copy(update={"cursor": shared_cursor}),
+            recipient_global_slot=0,
+        )
+
+
+def test_shared_getter_uses_only_transition_free_active_source_factory(
+    service_cases: _ServiceCases,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def reject_diagnostic_factory(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise AssertionError("raw Shared product called the diagnostic factory")
+
+    monkeypatch.setattr(
+        evaluation_adapter_module,
+        "build_shared_obs_source_material_projection_v1",
+        reject_diagnostic_factory,
+    )
+    service = ReplayViewerService(
+        service_cases.shared.bundle,
+        initial_frame_index=1,
+        view_mode="pov",
+        pov_global_slot=5,
+        viewer_session_id="shared-transition-free-getter",
+    )
+    raw = service.current_frame()
+    raw_bytes = raw.model_dump_json()
+    original = (
+        replay_service_module.build_shared_obs_authority_source_material_projection_v1
+    )
+    calls: list[tuple[int, int]] = []
+
+    def capture_authority_source(
+        context: EvaluationEpisodeContextV1,
+        frame: EvaluationFrameV1,
+        *,
+        selected_global_slot: int,
+    ) -> SharedObsSourceMaterialProjectionV1:
+        calls.append((frame.frame_index, selected_global_slot))
+        return original(
+            context,
+            frame,
+            selected_global_slot=selected_global_slot,
+        )
+
+    monkeypatch.setattr(
+        replay_service_module,
+        "build_shared_obs_authority_source_material_projection_v1",
+        capture_authority_source,
+    )
+
+    result = service.current_presentation()
+
+    assert result.outcome == "response"
+    assert type(result.payload) is ReplaySharedObsAuthorizedPresentationFrameV1
+    active_slots = tuple(
+        row.global_slot
+        for row in service_cases.shared.bundle.replay.header.context.roster
+        if row.configured_active
+    )
+    per_epoch = (5, *(slot for slot in active_slots if slot != 5))
+    assert calls == [
+        *((1, slot) for slot in per_epoch),
+        *((0, slot) for slot in per_epoch),
+    ]
+    assert service.current_frame() is raw
+    assert service.current_frame().model_dump_json() == raw_bytes
+    assert service.pov_index_build_count == 0
+    assert service.shared_timeline_build_count == 1
+
+
+def test_shared_presentation_is_independent_of_researcher_inspection_state(
+    service_cases: _ServiceCases,
+) -> None:
+    services = tuple(
+        ReplayViewerService(
+            service_cases.shared.bundle,
+            initial_frame_index=1,
+            view_mode="pov",
+            selected_global_slot=inspection_slot,
+            pov_global_slot=0,
+            viewer_session_id="shared-fixed-pov-inspection-independence",
+        )
+        for inspection_slot in (1, 6)
+    )
+
+    raw_frames = tuple(service.current_frame() for service in services)
+    presentations = tuple(service.current_presentation() for service in services)
+
+    assert raw_frames[0].model_dump_json() == raw_frames[1].model_dump_json()
+    assert presentations[0].outcome == presentations[1].outcome == "response"
+    assert presentations[0].payload.model_dump_json() == (
+        presentations[1].payload.model_dump_json()
+    )
+
+
+def test_shared_packager_ignores_forbidden_transition_branches(
+    service_cases: _ServiceCases,
+) -> None:
+    case = service_cases.shared
+    service = ReplayViewerService(
+        case.bundle,
+        initial_frame_index=1,
+        view_mode="pov",
+        pov_global_slot=0,
+        viewer_session_id="shared-selective-transitions",
+    )
+    raw = cast(SharedObsAgentPovReplayViewerFrameV1, service.current_frame())
+    current_recipient, current_nonrecipient = _shared_authority_sources(
+        case,
+        frame_index=1,
+        recipient_global_slot=0,
+    )
+    previous_recipient, previous_nonrecipient = _shared_authority_sources(
+        case,
+        frame_index=0,
+        recipient_global_slot=0,
+    )
+    incoming = case.bundle.replay.transitions[0]
+    outgoing = case.bundle.replay.transitions[1]
+
+    def poison_hidden_rows(
+        transition: EvaluationTransitionV1,
+    ) -> EvaluationTransitionV1:
+        acceptance = transition.facts.action_acceptance_facts
+
+        def poison_joint(joint: JointActionV1) -> JointActionV1:
+            move = cast(list[object], list(joint.move))
+            target = cast(list[object], list(joint.select_target))
+            ultimate = cast(list[object], list(joint.use_ultimate))
+            move[1] = "forbidden-other-move"
+            target[1] = "forbidden-other-target"
+            ultimate[1] = "forbidden-other-ultimate"
+            return joint.model_copy(
+                update={
+                    "move": tuple(move),
+                    "select_target": tuple(target),
+                    "use_ultimate": tuple(ultimate),
+                }
+            )
+
+        poisoned_acceptance = acceptance.model_copy(
+            update={
+                "submitted_joint_action": poison_joint(
+                    acceptance.submitted_joint_action
+                ),
+                "accepted_joint_action": poison_joint(acceptance.accepted_joint_action),
+                "submitted_action_tuple_is_out_of_domain_by_actor": ["forbidden"],
+                "in_domain_move_action_is_rejected_by_actor": ["forbidden"],
+                "in_domain_combat_action_pair_is_rejected_by_actor": ["forbidden"],
+            }
+        )
+        poisoned_facts = transition.facts.model_copy(
+            update={
+                "action_acceptance_facts": poisoned_acceptance,
+                "combat_transition_facts": SimpleNamespace(forbidden="combat"),
+                "death_facts": SimpleNamespace(forbidden="death"),
+                "spawn_shield_facts": SimpleNamespace(forbidden="shield"),
+                "respawn_facts": SimpleNamespace(forbidden="respawn"),
+                "regeneration_facts": SimpleNamespace(forbidden="regeneration"),
+                "physical_facts": SimpleNamespace(forbidden="physical"),
+                "aura_facts": SimpleNamespace(forbidden="aura"),
+                "status_lifecycle_facts": SimpleNamespace(forbidden="status"),
+            }
+        )
+        return transition.model_copy(
+            update={
+                "facts": poisoned_facts,
+                "events": ["forbidden-event"],
+                "canonical_reward_by_agent": ["forbidden-reward"],
+                "canonical_reward_by_team": ["forbidden-team-reward"],
+                "terminated": "forbidden-termination",
+                "truncated": "forbidden-truncation",
+                "owning_task_end_reason": SimpleNamespace(forbidden="history"),
+            }
+        )
+
+    baseline = build_replay_shared_obs_authorized_presentation_v1(
+        raw,
+        public_catalog=case.bundle.replay.header.context.static_mechanics_catalog,
+        source_authority_epoch=raw.revision,
+        authorized_recipient_global_slot=0,
+        current_recipient_source_material=current_recipient,
+        current_active_nonrecipient_source_material=current_nonrecipient,
+        previous_recipient_source_material=previous_recipient,
+        previous_active_nonrecipient_source_material=previous_nonrecipient,
+        incoming_transition=incoming,
+        outgoing_transition=outgoing,
+    )
+    mutated = build_replay_shared_obs_authorized_presentation_v1(
+        raw,
+        public_catalog=case.bundle.replay.header.context.static_mechanics_catalog,
+        source_authority_epoch=raw.revision,
+        authorized_recipient_global_slot=0,
+        current_recipient_source_material=current_recipient,
+        current_active_nonrecipient_source_material=current_nonrecipient,
+        previous_recipient_source_material=previous_recipient,
+        previous_active_nonrecipient_source_material=previous_nonrecipient,
+        incoming_transition=poison_hidden_rows(incoming),
+        outgoing_transition=poison_hidden_rows(outgoing),
+    )
+
+    assert mutated == baseline
+    assert mutated.model_dump_json() == baseline.model_dump_json()
+
+
+def test_shared_packager_ignores_contributor_non_authority_and_unavailable_payloads(
+    service_cases: _ServiceCases,
+) -> None:
+    case = service_cases.shared
+    service = ReplayViewerService(
+        case.bundle,
+        initial_frame_index=1,
+        view_mode="pov",
+        pov_global_slot=0,
+        viewer_session_id="shared-selective-contributors",
+    )
+    raw = cast(SharedObsAgentPovReplayViewerFrameV1, service.current_frame())
+    current_recipient, current_nonrecipient = _shared_authority_sources(
+        case,
+        frame_index=1,
+        recipient_global_slot=0,
+    )
+    previous_recipient, previous_nonrecipient = _shared_authority_sources(
+        case,
+        frame_index=0,
+        recipient_global_slot=0,
+    )
+
+    unavailable_ids = {
+        row.sensor_source_public_agent_id
+        for row in current_recipient.sensor_source_availability
+        if not row.recorded_available
+    }
+
+    def poison_contributors(
+        contributors: tuple[SharedObsSourceMaterialProjectionV1, ...],
+    ) -> tuple[SharedObsSourceMaterialProjectionV1, ...]:
+        poisoned_rows: list[SharedObsSourceMaterialProjectionV1] = []
+        for contributor in contributors:
+            poisoned = copy.deepcopy(contributor)
+            object.__setattr__(poisoned, "incoming_transition_id", "forbidden")
+            object.__setattr__(
+                poisoned.base_sensor_frame,
+                "action_mask",
+                SimpleNamespace(forbidden="mask"),
+            )
+            object.__setattr__(
+                poisoned.base_sensor_frame,
+                "spawn_lifecycle",
+                SimpleNamespace(forbidden="lifecycle"),
+            )
+            object.__setattr__(
+                poisoned.base_sensor_frame,
+                "previous_timestep_actions",
+                SimpleNamespace(forbidden="history"),
+            )
+            object.__setattr__(
+                poisoned.base_sensor_frame,
+                "objective_features",
+                [],
+            )
+            object.__setattr__(
+                poisoned.base_sensor_scene,
+                "map",
+                SimpleNamespace(forbidden="map"),
+            )
+            if poisoned.base_sensor_frame.public_agent_id in unavailable_ids:
+                object.__setattr__(
+                    poisoned.base_sensor_frame,
+                    "self_features",
+                    ("forbidden-unavailable-payload",),
+                )
+            poisoned_rows.append(poisoned)
+        return tuple(poisoned_rows)
+
+    baseline = build_replay_shared_obs_authorized_presentation_v1(
+        raw,
+        public_catalog=case.bundle.replay.header.context.static_mechanics_catalog,
+        source_authority_epoch=raw.revision,
+        authorized_recipient_global_slot=0,
+        current_recipient_source_material=current_recipient,
+        current_active_nonrecipient_source_material=current_nonrecipient,
+        previous_recipient_source_material=previous_recipient,
+        previous_active_nonrecipient_source_material=previous_nonrecipient,
+        incoming_transition=case.bundle.replay.transitions[0],
+        outgoing_transition=case.bundle.replay.transitions[1],
+    )
+    mutated = build_replay_shared_obs_authorized_presentation_v1(
+        raw,
+        public_catalog=case.bundle.replay.header.context.static_mechanics_catalog,
+        source_authority_epoch=raw.revision,
+        authorized_recipient_global_slot=0,
+        current_recipient_source_material=current_recipient,
+        current_active_nonrecipient_source_material=poison_contributors(
+            current_nonrecipient
+        ),
+        previous_recipient_source_material=previous_recipient,
+        previous_active_nonrecipient_source_material=poison_contributors(
+            previous_nonrecipient
+        ),
+        incoming_transition=case.bundle.replay.transitions[0],
+        outgoing_transition=case.bundle.replay.transitions[1],
+    )
+
+    assert unavailable_ids
+    assert mutated == baseline
+    assert mutated.model_dump_json() == baseline.model_dump_json()
+
+
+@pytest.mark.parametrize("wrong_credential", (True, -1, 10, 1, 5))
+def test_shared_packager_rejects_nonfixed_recipient_credentials(
+    service_cases: _ServiceCases,
+    wrong_credential: object,
+) -> None:
+    case = service_cases.shared
+    service = ReplayViewerService(
+        case.bundle,
+        initial_frame_index=1,
+        view_mode="pov",
+        pov_global_slot=0,
+        viewer_session_id="shared-fixed-credential",
+    )
+    raw = cast(SharedObsAgentPovReplayViewerFrameV1, service.current_frame())
+    current_recipient, current_nonrecipient = _shared_authority_sources(
+        case,
+        frame_index=1,
+        recipient_global_slot=0,
+    )
+    previous_recipient, previous_nonrecipient = _shared_authority_sources(
+        case,
+        frame_index=0,
+        recipient_global_slot=0,
+    )
+
+    with pytest.raises(ValueError):
+        build_replay_shared_obs_authorized_presentation_v1(
+            raw,
+            public_catalog=case.bundle.replay.header.context.static_mechanics_catalog,
+            source_authority_epoch=raw.revision,
+            authorized_recipient_global_slot=cast(int, wrong_credential),
+            current_recipient_source_material=current_recipient,
+            current_active_nonrecipient_source_material=current_nonrecipient,
+            previous_recipient_source_material=previous_recipient,
+            previous_active_nonrecipient_source_material=previous_nonrecipient,
+            incoming_transition=case.bundle.replay.transitions[0],
+            outgoing_transition=case.bundle.replay.transitions[1],
+        )
+
+
+@pytest.mark.parametrize(
+    ("audience", "pov_global_slot"),
+    (
+        ("no_shared_obs", 0),
+        ("no_shared_obs", 5),
+        ("shared_obs", 0),
+        ("shared_obs", 5),
+    ),
+)
+def test_agent_presentations_exclude_privileged_fields_and_canonical_values(
+    service_cases: _ServiceCases,
+    audience: Literal["no_shared_obs", "shared_obs"],
+    pov_global_slot: int,
+) -> None:
+    case = (
+        service_cases.complete if audience == "no_shared_obs" else service_cases.shared
+    )
+    service = ReplayViewerService(
+        case.bundle,
+        initial_frame_index=1,
+        view_mode="pov",
+        pov_global_slot=pov_global_slot,
+        viewer_session_id=f"agent-privacy-{audience}-{pov_global_slot}",
+    )
+    raw = service.current_frame()
+    payload = service.current_presentation().payload.model_dump(mode="json")
+    keys = _recursive_keys(payload)
+    strings = _recursive_string_values(payload)
+    replay = case.bundle.replay
+    metric = replay.metric_report_reference
+    forbidden_values = {
+        replay.artifact_id,
+        replay.canonical_digest_sha256,
+        replay.trajectory_content_digest_sha256,
+        replay.header.header_id,
+        replay.header.context_digest_sha256,
+        replay.header.first_frame_id,
+        replay.header.last_frame_id,
+        raw.timeline_id,
+        metric.report_artifact_id,
+        metric.metric_report_id,
+        metric.trajectory_content_digest_sha256,
+        metric.canonical_digest_sha256,
+        *(frame.frame_id for frame in replay.frames),
+        *(transition.transition_id for transition in replay.transitions),
+        *(transition.start_frame_id for transition in replay.transitions),
+        *(transition.successor_frame_id for transition in replay.transitions),
+        *(
+            event.event_id
+            for transition in replay.transitions
+            for event in transition.events
+        ),
+    }
+
+    assert not (strings & forbidden_values)
+    for key in keys:
+        assert "global_slot" not in key
+        assert "artifact" not in key
+        assert "timeline" not in key
+        assert "metric" not in key
+        assert "completion" not in key
+        assert "processing" not in key
+        assert "canonical_" not in key
+        assert key not in {"cursor_generation", "choreography_generation"}
+        if "digest" in key:
+            assert key in {
+                "authorized_endpoint_digest_sha256",
+                "source_authorized_endpoint_digest_sha256",
+            }
+
+
+def test_shared_packager_rejects_source_tuple_and_epoch_swaps(
+    service_cases: _ServiceCases,
+) -> None:
+    case = service_cases.shared
+    service = ReplayViewerService(
+        case.bundle,
+        initial_frame_index=1,
+        view_mode="pov",
+        pov_global_slot=0,
+        viewer_session_id="shared-source-swap",
+    )
+    raw = cast(SharedObsAgentPovReplayViewerFrameV1, service.current_frame())
+    current_recipient, current_nonrecipient = _shared_authority_sources(
+        case,
+        frame_index=1,
+        recipient_global_slot=0,
+    )
+    previous_recipient, previous_nonrecipient = _shared_authority_sources(
+        case,
+        frame_index=0,
+        recipient_global_slot=0,
+    )
+
+    def build(
+        *,
+        source_authority_epoch: int = 0,
+        current_recipient_source_material: SharedObsSourceMaterialProjectionV1 = (
+            current_recipient
+        ),
+        current_active_nonrecipient_source_material: tuple[
+            SharedObsSourceMaterialProjectionV1, ...
+        ] = current_nonrecipient,
+        previous_recipient_source_material: SharedObsSourceMaterialProjectionV1 = (
+            previous_recipient
+        ),
+        previous_active_nonrecipient_source_material: tuple[
+            SharedObsSourceMaterialProjectionV1, ...
+        ] = previous_nonrecipient,
+        incoming_transition: EvaluationTransitionV1 = case.bundle.replay.transitions[0],
+        outgoing_transition: EvaluationTransitionV1 = case.bundle.replay.transitions[1],
+    ) -> ReplaySharedObsAuthorizedPresentationFrameV1:
+        return build_replay_shared_obs_authorized_presentation_v1(
+            raw,
+            public_catalog=case.bundle.replay.header.context.static_mechanics_catalog,
+            source_authority_epoch=source_authority_epoch,
+            authorized_recipient_global_slot=0,
+            current_recipient_source_material=current_recipient_source_material,
+            current_active_nonrecipient_source_material=(
+                current_active_nonrecipient_source_material
+            ),
+            previous_recipient_source_material=previous_recipient_source_material,
+            previous_active_nonrecipient_source_material=(
+                previous_active_nonrecipient_source_material
+            ),
+            incoming_transition=incoming_transition,
+            outgoing_transition=outgoing_transition,
+        )
+
+    baseline = build()
+    assert type(baseline) is ReplaySharedObsAuthorizedPresentationFrameV1
+    with pytest.raises(ValueError):
+        build(current_active_nonrecipient_source_material=current_nonrecipient[:-1])
+    with pytest.raises(ValueError):
+        build(
+            current_active_nonrecipient_source_material=(
+                *current_nonrecipient,
+                current_nonrecipient[0],
+            )
+        )
+    with pytest.raises(ValueError):
+        build(
+            previous_recipient_source_material=current_recipient,
+            previous_active_nonrecipient_source_material=current_nonrecipient,
+        )
+    with pytest.raises(ValueError):
+        build(incoming_transition=case.bundle.replay.transitions[1])
+    with pytest.raises(ValueError):
+        build(outgoing_transition=case.bundle.replay.transitions[0])
+    with pytest.raises(ValueError):
+        build(source_authority_epoch=1)
+
+    wrong_recipient, wrong_nonrecipient = _shared_authority_sources(
+        case,
+        frame_index=1,
+        recipient_global_slot=1,
+    )
+    with pytest.raises(ValueError):
+        build(
+            current_recipient_source_material=wrong_recipient,
+            current_active_nonrecipient_source_material=wrong_nonrecipient,
+        )
+
+
+def test_shared_packager_changes_for_valid_recipient_authorized_mask_mutation(
+    service_cases: _ServiceCases,
+) -> None:
+    case = service_cases.shared
+    service = ReplayViewerService(
+        case.bundle,
+        initial_frame_index=1,
+        view_mode="pov",
+        pov_global_slot=0,
+        viewer_session_id="shared-recipient-authorized-change",
+    )
+    raw = cast(SharedObsAgentPovReplayViewerFrameV1, service.current_frame())
+    current_recipient, current_nonrecipient = _shared_authority_sources(
+        case,
+        frame_index=1,
+        recipient_global_slot=0,
+    )
+    previous_recipient, previous_nonrecipient = _shared_authority_sources(
+        case,
+        frame_index=0,
+        recipient_global_slot=0,
+    )
+    baseline = _shared_presentation_for_raw(
+        case,
+        raw,
+        recipient_global_slot=0,
+    )
+    accepted_move = case.bundle.replay.transitions[
+        1
+    ].facts.action_acceptance_facts.accepted_joint_action.move[0]
+    changed_move = (accepted_move + 1) % 9
+    assert changed_move != accepted_move
+
+    changed_recipient = copy.deepcopy(current_recipient)
+    original_mask = current_recipient.base_sensor_frame.action_mask
+    toggled_move = list(original_mask.move)
+    toggled_move[changed_move] = not toggled_move[changed_move]
+    changed_mask = original_mask.model_copy(update={"move": tuple(toggled_move)})
+    object.__setattr__(
+        changed_recipient.base_sensor_frame,
+        "action_mask",
+        changed_mask,
+    )
+    mutated = build_replay_shared_obs_authorized_presentation_v1(
+        raw,
+        public_catalog=case.bundle.replay.header.context.static_mechanics_catalog,
+        source_authority_epoch=raw.revision,
+        authorized_recipient_global_slot=0,
+        current_recipient_source_material=changed_recipient,
+        current_active_nonrecipient_source_material=current_nonrecipient,
+        previous_recipient_source_material=previous_recipient,
+        previous_active_nonrecipient_source_material=previous_nonrecipient,
+        incoming_transition=case.bundle.replay.transitions[0],
+        outgoing_transition=case.bundle.replay.transitions[1],
+    )
+
+    assert mutated != baseline
+    assert mutated.model_dump_json() != baseline.model_dump_json()
+    assert (
+        mutated.current_endpoint.parts.next_decision_action_mask.move[changed_move]
+        is toggled_move[changed_move]
+    )
+
+
+def test_presentation_resource_result_requires_exact_outcome_payload_pair(
+    service_cases: _ServiceCases,
+) -> None:
+    service = ReplayViewerService(
+        service_cases.complete.bundle,
+        selected_global_slot=1,
+        viewer_session_id="presentation-result-contract",
+    )
+    frame = service.current_presentation().payload
+    assert type(frame) is ReplayOracleAuthorizedPresentationFrameV1
+    error = PresentationApiErrorV1(
+        schema_version=1,
+        error_code="audience_unavailable",
+        message=PRESENTATION_AUDIENCE_UNAVAILABLE_MESSAGE,
+    )
+
+    with pytest.raises(TypeError, match="authorized frame root"):
+        PresentationResourceResultV1(outcome="response", payload=error)
+    with pytest.raises(TypeError, match="API error root"):
+        PresentationResourceResultV1(
+            outcome="audience_unavailable",
+            payload=frame,
+        )
+    with pytest.raises(ValueError, match="unknown presentation resource outcome"):
+        PresentationResourceResultV1(
+            outcome=cast(Literal["response", "audience_unavailable"], "invalid"),
+            payload=error,
+        )
 
 
 @pytest.mark.parametrize("invalid_session_id", ("", "   ", 7))
@@ -601,7 +2707,7 @@ def test_exact_pov_processing_failure_disclosure_is_constant_and_content_stable(
     assert healthy_timeline == failed_timeline
 
 
-def test_shared_obs_view_is_labelled_source_material_and_never_exports_exact_pov(
+def test_shared_obs_raw_view_is_private_identity_only_and_never_exports_exact_pov(
     service_cases: _ServiceCases,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -626,17 +2732,22 @@ def test_shared_obs_view_is_labelled_source_material_and_never_exports_exact_pov
     timeline = service.current_timeline()
     payload = json.loads(frame.model_dump_json())
 
-    assert isinstance(frame, SharedObsSourceMaterialReplayViewerFrameV1)
-    assert isinstance(timeline, SharedObsSourceMaterialReplayTimelineV1)
-    assert frame.observation_materialization == "source_material_only"
-    assert timeline.observation_materialization == "source_material_only"
-    assert (
-        frame.projection.base_sensor_frame.observation_materialization
-        == "source_material_only"
-    )
-    assert frame.projection.base_sensor_frame.public_agent_id == frame.public_agent_id
-    assert "pov_frame_id" not in _recursive_keys(payload)
-    assert "processing_disclosure" not in _recursive_keys(payload)
+    assert isinstance(frame, SharedObsAgentPovReplayViewerFrameV1)
+    assert isinstance(timeline, SharedObsAgentPovReplayTimelineV1)
+    assert frame.frame_kind == "shared_obs_agent_pov_replay_viewer"
+    assert timeline.timeline_kind == "shared_obs_agent_pov"
+    assert frame.artifact_summary == timeline.artifact_summary
+    assert frame.artifact_summary.public_agent_id == frame.public_agent_id
+    assert frame.recipient_frame_id.endswith(":frame:1")
+    assert frame.incoming_recipient_transition_id is not None
+    keys = _recursive_keys(payload)
+    assert "pov_frame_id" not in keys
+    assert "processing_disclosure" not in keys
+    assert "projection" not in keys
+    assert "selected_global_slot" not in keys
+    assert "source_material_frame_id" not in keys
+    assert "replay_reference" not in keys
+    assert service.current_presentation().outcome == "response"
     assert service.shared_timeline_build_count == 1
 
 
@@ -944,6 +3055,30 @@ def test_presentation_and_audience_changes_do_not_replay_choreography(
     )
     assert no_op.result == "no_op"
     assert no_op.frame.revision == service.revision
+
+
+@pytest.mark.parametrize(
+    "legacy_preset",
+    ("presentation", "analysis", "technical", "debug"),
+)
+def test_replay_preset_requests_are_fixed_analysis_no_ops(
+    service_cases: _ServiceCases,
+    legacy_preset: str,
+) -> None:
+    service = ReplayViewerService(service_cases.complete.bundle)
+
+    response = _response(
+        _apply(
+            service,
+            ReplaySetPresetCommandV1.model_validate({"preset": legacy_preset}),
+            command_id=f"legacy-preset-{legacy_preset}",
+        )
+    )
+
+    assert response.result == "no_op"
+    assert response.frame.preset == "analysis"
+    assert response.frame.revision == 0
+    assert service.revision == 0
 
 
 def test_researcher_only_commands_reject_in_pov_without_active_slot_oracle(

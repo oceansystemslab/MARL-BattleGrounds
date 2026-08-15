@@ -1,3 +1,13 @@
+import {
+  authorizedPresentationAudience,
+  authorizedPresentationIdentityRows,
+  authorizedPresentationIncomingRows,
+  authorizedPresentationInspectionState,
+  authorizedPresentationSceneView,
+  authorizedPresentationTechnicalFacts,
+  authorizedPresentationTransitionRows,
+  isAuthorizedPresentationFrame,
+} from "./authorized-presentation-adapter.js";
 import { formatCompactDisplayNumber, formatDisplayNumber } from "./display.js";
 import {
   explainAgent,
@@ -144,6 +154,15 @@ export function panelDisclosureAuthorityKey(rawFrame) {
   const frame = isRecord(rawFrame) ? rawFrame : null;
   if (frame === null) {
     return null;
+  }
+  if (isAuthorizedPresentationFrame(frame)) {
+    return [
+      frame.viewer_mode,
+      frame.session_id,
+      frame.episode_id,
+      frame.presentation_kind,
+      frame.recipient_presentation_key ?? "researcher",
+    ].join(":");
   }
   const scene = frameScene(frame);
   const replay = frame.viewer_mode === "replay";
@@ -1121,7 +1140,7 @@ export class DebuggerPanels {
     this.eventCount = eventCount;
     this.diagnosticsCard = diagnosticsCard;
     this.onCommand = onCommand;
-    /** @type {Map<number, RosterRow>} */
+    /** @type {Map<number | string, RosterRow>} */
     this.rosterRows = new Map();
     /** @type {Map<number, RosterTeamGroup>} */
     this.rosterTeamGroups = new Map();
@@ -1235,11 +1254,371 @@ export class DebuggerPanels {
   }
 
   /**
+   * Create one presentation-keyed roster row. Agent POV rows deliberately
+   * receive no command listener or slot-bearing data. Oracle command slots
+   * remain confined to the two command buttons.
+   *
+   * @param {ReturnType<typeof authorizedPresentationIdentityRows>[number]} identity
+   * @returns {RosterRow}
+   */
+  createAuthorizedRosterRow(identity) {
+    const element = htmlElement("article", "roster-row");
+    element.tabIndex = 0;
+    element.dataset.presentationKey = identity.presentation_key;
+    const summary = htmlElement("div");
+    const identityContainer = htmlElement("div", "roster-identity");
+    const identityId = htmlElement("span", "roster-id");
+    const identityClass = htmlElement("span", "roster-class");
+    identityContainer.append(identityId, identityClass);
+    const health = htmlElement("div", "roster-health");
+    const statuses = htmlElement("div", "roster-fact-list roster-statuses");
+    statuses.setAttribute("aria-label", "Persistent statuses");
+    const modifiers = htmlElement("div", "roster-fact-list roster-modifiers");
+    modifiers.setAttribute("aria-label", "Exact effective modifiers");
+    summary.append(identityContainer, health, statuses, modifiers);
+
+    const actions = htmlElement("div", "roster-actions");
+    const targetButton = htmlElement("button", null, "Target");
+    targetButton.type = "button";
+    targetButton.dataset.role = "target";
+    const controlButton = htmlElement("button", null, "Control");
+    controlButton.type = "button";
+    controlButton.dataset.role = "control";
+    if (Number.isInteger(identity.command_global_slot)) {
+      const commandSlot = Number(identity.command_global_slot);
+      targetButton.dataset.commandSlot = String(commandSlot);
+      controlButton.dataset.commandSlot = String(commandSlot);
+      targetButton.addEventListener("click", () => {
+        void this.onCommand({
+          command_type: "roster_selection",
+          role: "target",
+          global_slot: commandSlot,
+        });
+      });
+      controlButton.addEventListener("click", () => {
+        void this.onCommand({
+          command_type: "roster_selection",
+          role: "control",
+          global_slot: commandSlot,
+        });
+      });
+    } else {
+      targetButton.hidden = true;
+      controlButton.hidden = true;
+      targetButton.disabled = true;
+      controlButton.disabled = true;
+    }
+    actions.append(targetButton, controlButton);
+    element.append(summary, actions);
+    return {
+      element,
+      identityId,
+      identityClass,
+      health,
+      statuses,
+      modifiers,
+      targetButton,
+      controlButton,
+    };
+  }
+
+  /**
+   * @param {Record<string, any>} presentation
+   * @param {boolean} disabled
+   */
+  renderAuthorizedRoster(presentation, disabled) {
+    const audience = authorizedPresentationAudience(presentation);
+    const identities = authorizedPresentationIdentityRows(presentation);
+    const scene = authorizedPresentationSceneView(presentation);
+    const mechanicsByClassId = new Map(
+      asArray(scene?.class_mechanics)
+        .filter(
+          (mechanics) => isRecord(mechanics) && Number.isInteger(mechanics.class_id),
+        )
+        .map((mechanics) => [Number(mechanics.class_id), mechanics]),
+    );
+    const sourceAgents =
+      audience === "researcher" ? identities.map(({ agent }) => agent) : [];
+    const activeKeys = new Set(identities.map(({ display_key }) => display_key));
+    for (const [key, row] of this.rosterRows) {
+      if (typeof key !== "string" || !activeKeys.has(key)) {
+        row.element.remove();
+        this.rosterRows.delete(key);
+      }
+    }
+
+    this.roster.removeAttribute("data-compact");
+    this.rosterCount.textContent = `${identities.length} visible`;
+    /** @type {Map<number, HTMLElement[]>} */
+    const desiredByTeam = new Map();
+    for (const identity of identities) {
+      const agent = agentForPresentation(
+        isRecord(scene)
+          ? (asArray(scene.agents).find(
+              (candidate) =>
+                isRecord(candidate) &&
+                candidate.presentation_key === identity.presentation_key,
+            ) ?? identity.agent)
+          : identity.agent,
+      );
+      let row = this.rosterRows.get(identity.display_key);
+      if (!row) {
+        row = this.createAuthorizedRosterRow(identity);
+        this.rosterRows.set(identity.display_key, row);
+      }
+      const publicId = String(agent.public_agent_id);
+      const classToken = classTokenFromId(agent.class_id);
+      const teamToken = teamTokenFromId(agent.team_id);
+      row.element.dataset.presentationKey = String(agent.presentation_key);
+      row.element.dataset.teamId = String(agent.team_id);
+      row.element.dataset.classId = String(agent.class_id);
+      row.element.dataset.team = teamToken.cssKey;
+      row.element.dataset.class = classToken.cssKey;
+      row.element.setAttribute(
+        "aria-label",
+        `Agent ID ${publicId}, ${classToken.label}, ${teamToken.label}`,
+      );
+      registerTooltipOwner(
+        row.element,
+        audience === "researcher"
+          ? explainAgent(
+              agent,
+              { controlled: false, selected: false },
+              mechanicsByClassId.get(Number(agent.class_id)) ?? null,
+              sourceAgents,
+            )
+          : explainPovAgent(agent, {
+              controlled:
+                agent.presentation_key === presentation.recipient_presentation_key,
+              selected: false,
+            }),
+      );
+      row.identityId.textContent = `Agent ID ${publicId}`;
+      row.identityClass.textContent = `${classToken.label} · ${teamToken.label}`;
+      row.health.textContent =
+        `HP ${formatDisplayNumber(agent.current_health)} / ${formatDisplayNumber(agent.max_health ?? agent.maximum_health)}` +
+        ` · cooldown ${agent.ultimate_cooldown_remaining ?? "—"}`;
+      renderFactTokens(
+        row.statuses,
+        asArray(agent.statuses),
+        "status",
+        "No persistent statuses",
+        agent,
+        sourceAgents,
+        audience ?? "agent_pov",
+      );
+      renderFactTokens(
+        row.modifiers,
+        audience === "researcher"
+          ? asArray(agent.modifiers ?? agent.aura_modifiers)
+          : [],
+        "modifier",
+        audience === "researcher"
+          ? "No effective modifiers"
+          : "Effective modifiers unavailable",
+        agent,
+        sourceAgents,
+        audience ?? "agent_pov",
+      );
+
+      const commandable = Number.isInteger(identity.command_global_slot);
+      const replay = presentation.viewer_mode === "replay";
+      row.targetButton.hidden = !commandable;
+      row.controlButton.hidden = !commandable;
+      row.targetButton.disabled = disabled || !commandable;
+      row.controlButton.disabled = disabled || !commandable;
+      row.targetButton.textContent = replay ? "Reference" : "Target";
+      row.controlButton.textContent = replay ? "POV actor" : "Control";
+      const desired = desiredByTeam.get(Number(agent.team_id)) ?? [];
+      desired.push(row.element);
+      desiredByTeam.set(Number(agent.team_id), desired);
+      this.ensureRosterTeamGroup(Number(agent.team_id));
+    }
+    for (const [teamId, group] of this.rosterTeamGroups) {
+      const desired = desiredByTeam.get(teamId) ?? [];
+      group.count.textContent = `${desired.length} authorized`;
+      this.reconcileChildren(group.rows, desired.length > 0 ? desired : [group.empty]);
+    }
+  }
+
+  /** @param {Record<string, any>} presentation */
+  renderAuthorizedInspector(presentation) {
+    const scene = authorizedPresentationSceneView(presentation);
+    const inspectionState = authorizedPresentationInspectionState(presentation);
+    const inspection = inspectionState.inspection;
+    const audience = authorizedPresentationAudience(presentation);
+    const agents = asArray(scene?.agents).filter(isRecord);
+    const primary =
+      (inspection &&
+        agents.find(
+          (agent) => agent.presentation_key === inspection.actor_presentation_key,
+        )) ||
+      agents.find(
+        (agent) => agent.presentation_key === presentation.recipient_presentation_key,
+      ) ||
+      null;
+    this.selectionCard.replaceChildren();
+    if (primary === null) {
+      this.selectionCard.append(
+        htmlElement("p", "empty-copy", "No authorized agent details are available."),
+      );
+    } else {
+      renderSemanticInspector(
+        this.selectionCard,
+        audience === "researcher"
+          ? explainAgent(primary, {}, null, agents)
+          : explainPovAgent(primary, {
+              controlled: presentation.viewer_mode === "live",
+            }),
+      );
+    }
+
+    if (inspectionState.submission_scope === null) {
+      this.pendingCard.removeAttribute("data-submission-scope");
+    } else {
+      this.pendingCard.dataset.submissionScope = inspectionState.submission_scope;
+    }
+    this.pendingCard.dataset.inspectionState = inspectionState.state_kind;
+    this.pendingHeading.textContent = {
+      live_editable: "Pending authorized draft",
+      live_scripted: "Scripted playback inspection",
+      replay_outgoing: "Recorded outgoing inspection",
+      replay_none: "No outgoing inspection",
+      unavailable: "Inspection unavailable",
+    }[inspectionState.state_kind];
+    this.pendingCount.textContent = inspection ? "1 actor" : "0 actors";
+    this.pendingScope.textContent =
+      inspectionState.state_kind === "live_scripted"
+        ? "This live frame advances registered scripted actions and has no editable draft."
+        : inspection
+          ? "This panel shows only the separately authorized outgoing inspection."
+          : "No outgoing inspection is authorized at this replay frame.";
+    const action =
+      inspection?.inspection_kind === "live_draft_action"
+        ? inspection.draft_action
+        : inspection?.inspection_kind === "replay_recorded_outgoing_action"
+          ? inspection.accepted_action
+          : null;
+    this.pendingLabel.textContent =
+      action === null || inspection === null
+        ? "NO OUTGOING INSPECTION"
+        : `${inspection.actor_public_agent_id} · move ${action.move_action} · target ${action.target_action} · ${inspection.inspection_kind === "live_draft_action" ? action.armed_lane : inspection.combat_lane}`;
+    this.pendingList.replaceChildren(
+      htmlElement(
+        "li",
+        action === null ? "empty-copy" : "pending-action-row",
+        action === null
+          ? "No pending action."
+          : "Settled range, target, and legality overlays use this outgoing branch only.",
+      ),
+    );
+
+    const transitionRows = authorizedPresentationTransitionRows(presentation);
+    this.acceptedCard.replaceChildren();
+    this.acceptedCard.removeAttribute("data-transition-id");
+    if (transitionRows.length === 0) {
+      this.acceptedCard.append(
+        htmlElement("p", "empty-copy", "No incoming Submitted / Accepted row."),
+      );
+      this.acceptedAnnouncement.textContent = "";
+    } else {
+      if (typeof presentation.latest_transition?.incoming_transition_id === "string") {
+        this.acceptedCard.dataset.transitionId =
+          presentation.latest_transition.incoming_transition_id;
+      }
+      const list = htmlElement("ol", "accepted-action-list");
+      for (const transition of transitionRows) {
+        const item = htmlElement("li", "accepted-action-row");
+        item.dataset.presentationKey = String(transition.actor_presentation_key);
+        const submitted = transition.submitted_action;
+        const accepted = transition.accepted_action;
+        item.textContent =
+          `Agent ID ${transition.actor_public_agent_id} · Submitted ${submitted.move_action}/${submitted.target_action}/${submitted.use_ultimate_action}` +
+          ` · Accepted ${accepted.move_action}/${accepted.target_action}/${accepted.use_ultimate_action}`;
+        list.append(item);
+      }
+      this.acceptedCard.append(list);
+      this.acceptedAnnouncement.textContent = `${transitionRows.length} incoming action ${transitionRows.length === 1 ? "row" : "rows"}.`;
+    }
+
+    const facts = authorizedPresentationTechnicalFacts(presentation);
+    this.diagnosticsCard.replaceChildren();
+    for (const fact of facts) {
+      addFact(this.diagnosticsCard, humanize(fact.label), fact.value ?? "None");
+    }
+  }
+
+  /** @param {Record<string, any>} presentation */
+  renderAuthorizedEvents(presentation) {
+    const rows = authorizedPresentationIncomingRows(presentation);
+    this.eventCount.textContent = String(rows.length);
+    const activeIds = new Set(rows.map(({ id }) => id));
+    for (const [eventId, row] of this.eventRows) {
+      if (!activeIds.has(eventId)) {
+        row.remove();
+        this.eventRows.delete(eventId);
+      }
+    }
+    if (rows.length === 0) {
+      this.reconcileChildren(this.eventFeed, [this.emptyEvents]);
+      return;
+    }
+    const desired = rows.map((event, ordinal) => {
+      let item = this.eventRows.get(event.id);
+      if (!item) {
+        item = htmlElement("li", "event-item");
+        item.tabIndex = 0;
+        this.eventRows.set(event.id, item);
+      }
+      item.dataset.eventId = event.id;
+      item.dataset.eventType = event.kind;
+      item.dataset.eventVocabulary = event.vocabulary;
+      const prefix =
+        event.vocabulary === "observation_delta"
+          ? "Observation delta"
+          : event.vocabulary === "recipient_cue"
+            ? "Recipient cue"
+            : "Incoming event";
+      item.textContent = `${prefix} · ${humanize(event.kind)}`;
+      registerTooltipOwner(
+        item,
+        createSemanticDescriptor({
+          kind: event.vocabulary,
+          id: `${presentation.session_id}:${event.id}`,
+          title: `${prefix} ${ordinal + 1}`,
+          tone: "information",
+          accent: "none",
+          summary:
+            event.vocabulary === "observation_delta"
+              ? "A recipient-authorized observation change; no simulator cause is asserted."
+              : "An exact incoming presentation fact.",
+          rows: [
+            {
+              label: "Kind",
+              value: humanize(event.kind),
+              metadata: { compact: true, full: true },
+            },
+            {
+              label: "Identity",
+              value: event.id,
+              metadata: { compact: true, full: true },
+            },
+          ],
+          sections: [],
+          metadata: { compact: true, full: true },
+          anchor: "element",
+        }),
+      );
+      return item;
+    });
+    this.reconcileChildren(this.eventFeed, desired);
+  }
+
+  /**
    * @param {RosterRow} row
    * @param {Record<string, any>} agent
    * @param {Record<string, any>} selection
    * @param {boolean} disabled
-   * @param {boolean} compact
    * @param {string | null} replayAudience
    * @param {Record<string, any> | null} classMechanics
    * @param {ReadonlyArray<unknown>} sourceAgents
@@ -1250,7 +1629,6 @@ export class DebuggerPanels {
     agent,
     selection,
     disabled,
-    compact,
     replayAudience,
     classMechanics,
     sourceAgents,
@@ -1279,7 +1657,6 @@ export class DebuggerPanels {
     row.element.dataset.reference = String(
       replayAudience === "researcher" && globalSlot === selection.selected_global_slot,
     );
-    row.element.dataset.compact = String(compact);
     registerTooltipOwner(
       row.element,
       audience === "agent_pov"
@@ -1314,36 +1691,29 @@ export class DebuggerPanels {
       `HP ${formatDisplayNumber(agent.current_health)} / ${formatDisplayNumber(agent.max_health)}` +
       ` · cooldown ${agent.ultimate_cooldown_remaining ?? agent.ultimate_cooldown ?? "—"}`;
 
-    row.statuses.hidden = compact;
-    row.modifiers.hidden = compact;
-    if (compact) {
-      row.statuses.replaceChildren();
-      row.modifiers.replaceChildren();
-    } else {
-      renderFactTokens(
-        row.statuses,
-        asArray(agent.statuses),
-        "status",
-        "No persistent statuses",
-        agent,
-        sourceAgents,
-        audience,
-      );
-      const modifiersAvailable =
-        audience === "researcher" &&
-        Array.isArray(agent.modifiers ?? agent.aura_modifiers);
-      renderFactTokens(
-        row.modifiers,
-        modifiersAvailable ? (agent.modifiers ?? agent.aura_modifiers) : [],
-        "modifier",
-        modifiersAvailable
-          ? "No effective modifiers"
-          : "Effective modifiers unavailable",
-        agent,
-        sourceAgents,
-        audience,
-      );
-    }
+    row.statuses.hidden = false;
+    row.modifiers.hidden = false;
+    renderFactTokens(
+      row.statuses,
+      asArray(agent.statuses),
+      "status",
+      "No persistent statuses",
+      agent,
+      sourceAgents,
+      audience,
+    );
+    const modifiersAvailable =
+      audience === "researcher" &&
+      Array.isArray(agent.modifiers ?? agent.aura_modifiers);
+    renderFactTokens(
+      row.modifiers,
+      modifiersAvailable ? (agent.modifiers ?? agent.aura_modifiers) : [],
+      "modifier",
+      modifiersAvailable ? "No effective modifiers" : "Effective modifiers unavailable",
+      agent,
+      sourceAgents,
+      audience,
+    );
 
     const researcherReplay = replayAudience === "researcher";
     const replayIdentityOnly = replayAudience !== null && !researcherReplay;
@@ -1431,9 +1801,8 @@ export class DebuggerPanels {
    * @param {Record<string, any> | null} frame
    * @param {boolean} disabled
    * @param {boolean} retainDisabledFocus
-   * @param {boolean} compact
    */
-  renderRoster(frame, disabled, retainDisabledFocus, compact) {
+  renderRoster(frame, disabled, retainDisabledFocus) {
     const scene = frameScene(frame);
     const agents = asArray(scene?.agents)
       .filter((agent) => isRecord(agent) && Number.isInteger(agent.global_slot))
@@ -1468,11 +1837,11 @@ export class DebuggerPanels {
       };
     }
 
-    this.roster.dataset.compact = String(compact);
+    this.roster.removeAttribute("data-compact");
     this.rosterCount.textContent = `${agents.length} visible`;
     const activeSlots = new Set(agents.map((agent) => Number(agent.global_slot)));
     for (const [globalSlot, row] of this.rosterRows) {
-      if (!activeSlots.has(globalSlot)) {
+      if (typeof globalSlot !== "number" || !activeSlots.has(globalSlot)) {
         row.element.remove();
         this.rosterRows.delete(globalSlot);
       }
@@ -1493,7 +1862,6 @@ export class DebuggerPanels {
         agent,
         selection,
         disabled || povIdentityOnly,
-        compact,
         replayAudience,
         mechanicsByClassId.get(Number(agent.class_id)) ?? null,
         sourceAgents,
@@ -1551,13 +1919,11 @@ export class DebuggerPanels {
     ) {
       const identity = hud.controlled_public_agent_id;
       this.pendingHeading.textContent =
-        scope === "scripted_playback"
-          ? "Scripted playback"
-          : "Pending controlled actor";
+        scope === "scripted_playback" ? "Inspection only" : "Pending controlled actor";
       this.pendingCount.textContent = "1 actor";
       this.pendingScope.textContent =
         scope === "scripted_playback"
-          ? "Inspection only. Press N to advance the registered scripted trajectory."
+          ? "This legacy scripted frame is read-only."
           : "Only this recipient-authorized actor action will be submitted.";
       this.pendingCard.dataset.submissionScope = scope;
       this.pendingCard.dataset.pendingCount = "1";
@@ -1589,13 +1955,12 @@ export class DebuggerPanels {
         "Every listed active actor will be packaged into one authoritative transition.",
       controlled_actor:
         "Only the controlled actor will be submitted from this agent-POV frame.",
-      scripted_playback:
-        "Inspection only. Press N to advance the registered scripted trajectory.",
+      scripted_playback: "This legacy scripted frame is read-only.",
     };
     const heading = {
       joint_turn: "Pending joint turn",
       controlled_actor: "Pending controlled actor",
-      scripted_playback: "Scripted playback",
+      scripted_playback: "Inspection only",
     };
 
     this.pendingHeading.textContent = heading[scope];
@@ -1611,9 +1976,7 @@ export class DebuggerPanels {
       ) ?? pendingActions[0];
     this.pendingLabel.textContent = String(
       controlledPending?.label ??
-        (scope === "scripted_playback"
-          ? "PLAYBACK / INSPECTION ONLY"
-          : "PENDING / WILL SUBMIT"),
+        (scope === "scripted_playback" ? "INSPECTION ONLY" : "PENDING / WILL SUBMIT"),
     );
 
     const activeSlots = new Set(
@@ -1897,9 +2260,14 @@ export class DebuggerPanels {
         interactionState.resyncRequired ||
         interactionState.offline,
     );
-    const compactRoster = frame?.preset === "presentation";
+    if (isAuthorizedPresentationFrame(frame)) {
+      this.renderAuthorizedRoster(frame, disabled);
+      this.renderAuthorizedInspector(frame);
+      this.renderAuthorizedEvents(frame);
+      return;
+    }
     const resolver = publicAgentIdMap(frame);
-    this.renderRoster(frame, disabled, Boolean(interactionState.busy), compactRoster);
+    this.renderRoster(frame, disabled, Boolean(interactionState.busy));
     this.renderInspector(frame, resolver);
     this.renderEvents(frame, resolver);
   }

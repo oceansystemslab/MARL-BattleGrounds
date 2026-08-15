@@ -199,10 +199,12 @@ test("cursor and replay command constructors reject malformed authority inputs",
     }),
     { command_type: "select_agent", selected_global_slot: null },
   );
-  assert.deepEqual(
-    normalizeReplayCommand({ command_type: "set_preset", preset: "debug" }),
-    { command_type: "set_preset", preset: "analysis" },
-  );
+  for (const preset of ["presentation", "analysis", "technical", "debug"]) {
+    assert.deepEqual(normalizeReplayCommand({ command_type: "set_preset", preset }), {
+      command_type: "set_preset",
+      preset: "analysis",
+    });
+  }
   assert.deepEqual(
     normalizeReplayCommand({ command_type: "set_verbosity", verbose: true }),
     { command_type: "set_verbosity", verbose: false },

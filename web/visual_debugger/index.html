@@ -8,8 +8,9 @@
     >
     <meta name="referrer" content="no-referrer">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>MARL-BattleGrounds Visual Debugger and Analyzer</title>
+    <title>MARL-BattleGrounds</title>
     <link rel="stylesheet" href="/styles.css">
+    <script src="/bootstrap.js"></script>
     <script type="module" src="/src/main.js"></script>
   </head>
   <body>
@@ -18,7 +19,7 @@
     <header class="app-header">
       <div class="brand">
         <p class="eyebrow">MARL-BattleGrounds</p>
-        <h1>Visual Debugger and Analyzer</h1>
+        <h1 id="app-title">MARL-BattleGrounds</h1>
       </div>
       <div class="header-status" aria-live="polite">
         <span id="connection-status" class="status-pill" data-state="loading">
@@ -36,61 +37,18 @@
       </div>
     </header>
 
-    <section class="session-toolbar" aria-label="Analyzer session">
-      <label id="scenario-control" data-live-only>
-        <span>Scenario</span>
-        <select id="scenario-select" aria-label="Scenario" disabled>
-          <option>Loading…</option>
-        </select>
-      </label>
+    <section class="session-toolbar" aria-label="Session controls">
       <label>
         <span>View</span>
         <select id="view-select" aria-label="View mode" disabled>
-          <option value="researcher">Researcher</option>
+          <option value="researcher">Oracle View</option>
           <option value="pov">Agent POV</option>
-        </select>
-      </label>
-      <label>
-        <span>Preset</span>
-        <select id="preset-select" aria-label="Presentation preset" disabled>
-          <option value="presentation">Presentation</option>
-          <option value="analysis">Analysis</option>
         </select>
       </label>
       <fieldset class="session-facts" aria-label="Session facts">
         <span>Revision <strong id="revision-value">—</strong></span>
         <span>Step <strong id="step-value">—</strong></span>
         <span>Transition <strong id="transition-value">—</strong></span>
-      </fieldset>
-      <fieldset class="motion-controls" aria-label="Graphics rendering controls">
-        <legend class="sr-only">Graphics rendering controls</legend>
-        <button
-          id="motion-pause-button"
-          class="button button--quiet"
-          type="button"
-          aria-pressed="false"
-        >
-          Pause
-        </button>
-        <button
-          id="motion-off-button"
-          class="button button--quiet"
-          type="button"
-          aria-pressed="false"
-        >
-          Motion Off
-        </button>
-        <button
-          id="motion-skip-button"
-          class="button button--quiet"
-          type="button"
-          disabled
-        >
-          Skip
-        </button>
-        <output id="motion-status" class="motion-status" aria-live="polite">
-          Graphics
-        </output>
       </fieldset>
       <div class="toolbar-actions">
         <button id="reconnect-button" class="button button--quiet" type="button">
@@ -100,7 +58,7 @@
           Help
         </button>
         <button id="exit-button" class="button button--danger" type="button" disabled>
-          Exit analyzer
+          Exit
         </button>
       </div>
     </section>
@@ -258,9 +216,6 @@
         <button id="replay-clear-reference-button" type="button">
           Clear Reference
         </button>
-        <span class="replay-shortcuts">
-          <kbd>Home</kbd>/<kbd>End</kbd> edges · <kbd>←</kbd>/<kbd>→</kbd> one · <kbd>Shift</kbd>+<kbd>←</kbd>/<kbd>→</kbd> ten · <kbd>Space</kbd> play
-        </span>
       </fieldset>
     </section>
 
@@ -288,7 +243,7 @@
             aria-describedby="battlefield-instructions"
           ></svg>
           <p id="battlefield-empty" class="battlefield-empty">
-            Connecting to the local analyzer service…
+            Connecting to the local product service…
           </p>
         </div>
         <p id="battlefield-instructions" class="sr-only">
@@ -303,10 +258,6 @@
             <span class="command-deck__title-group">
               <span class="command-deck__eyebrow">Joint action composer</span>
               <strong class="command-deck__title">Stage, inspect, then submit</strong>
-            </span>
-            <span class="command-deck__shortcut">
-              <kbd>Enter</kbd>
-              commits every staged row
             </span>
           </summary>
 
@@ -359,14 +310,13 @@
           <div class="command-commit">
             <div class="command-commit__copy">
               <span>Commit</span>
-              <strong>Submit the staged joint turn</strong>
-              <small>One authoritative transition</small>
+              <strong id="command-commit-title">Submit the staged joint turn</strong>
+              <small id="command-commit-summary">One authoritative transition</small>
             </div>
             <div class="command-commit__actions">
               <button id="submit-turn-button" type="button" data-key="Enter" data-command-role="interactive-submit" class="button--primary">
                 Submit joint turn
               </button>
-              <button id="advance-script-button" type="button" data-key="n" data-command-role="script-advance">Advance scripted frame</button>
             </div>
           </div>
 
@@ -387,15 +337,13 @@
               <h4>Session</h4>
               <div class="button-row command-button-row">
                 <button id="reset-button" type="button">Reset</button>
-                <button type="button" data-key="[">Previous scenario</button>
-                <button type="button" data-key="]">Next scenario</button>
               </div>
             </div>
           </div>
         </details>
       </section>
 
-      <aside class="hud-panel" aria-label="Analyzer inspector">
+      <aside class="hud-panel" aria-label="Inspector">
         <details id="roster-details" class="hud-section" open>
           <summary class="section-heading">
             <strong id="roster-heading" class="section-title">Roster</strong>
@@ -503,7 +451,7 @@
         <div class="section-heading">
           <div>
             <p class="eyebrow">Browser controls</p>
-            <h2 id="help-heading">Analyzer help</h2>
+            <h2 id="help-heading">Controls and help</h2>
           </div>
           <button id="help-close-button" class="button button--quiet" type="submit" value="close">Close</button>
         </div>
@@ -524,28 +472,21 @@
           <dt>0 / 1 / 2</dt><dd>Stage no combat / Basic / Ultimate</dd>
           <dt>Space / Enter</dt>
           <dd>
-            Submit every staged actor in researcher view, or only the
+            Submit every staged actor in Oracle View, or only the
             controlled actor in agent POV
           </dd>
-          <dt>N</dt><dd>Advance the next registered scripted frame only</dd>
-          <dt>R</dt><dd>Deterministically reset the scenario</dd>
-          <dt>G</dt><dd>Toggle researcher ranges</dd>
-          <dt>[ / ]</dt><dd>Previous / next scenario</dd>
-          <dt>P</dt><dd>Pause or resume presentation motion</dd>
-          <dt>Pause / Motion Off / Skip</dt>
-          <dd>Pause, disable, or settle the current visual explanation</dd>
+          <dt>R</dt><dd>Deterministically reset the episode</dd>
+          <dt>G</dt><dd>Toggle Oracle View ranges</dd>
         </dl>
         <p class="help-note" data-live-only>
           Actor drafts persist when you cycle or directly control another
-          actor. Scripted scenarios are inspection-only: manual draft and
-          Submit controls are unavailable, and N advances the registered
-          trajectory.
+          actor.
         </p>
         <p class="help-note" data-live-only>
           Animation, layout, hover, help, and panel state are presentation-only.
           Python remains authoritative for every simulator and legality decision.
           Submit settles an active explanation before sending the current draft;
-          reduced motion and Motion Off settle explanations automatically.
+          the operating system's reduced-motion preference is honored automatically.
         </p>
         <div data-replay-only hidden>
           <p>
@@ -558,8 +499,6 @@
             <dt>Shift+Left / Shift+Right</dt><dd>Seek ten captured ticks with one request</dd>
             <dt>Space</dt><dd>Play or pause serialized replay</dd>
             <dt>Frame slider</dt><dd>Seek after a short debounce</dd>
-            <dt>Graphics rendering controls</dt>
-            <dd>Pause, settle, or disable local explanation motion</dd>
           </dl>
           <p class="help-note">
             Autoplay keeps one request in flight and waits for each incoming
@@ -609,7 +548,7 @@
 
     <noscript>
       <p class="noscript">
-        This local analyzer needs JavaScript to display authoritative Python
+        This local product needs JavaScript to display authoritative Python
         frames. It does not simulate in the browser.
       </p>
     </noscript>

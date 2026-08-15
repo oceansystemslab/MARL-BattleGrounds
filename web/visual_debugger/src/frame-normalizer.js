@@ -5193,7 +5193,7 @@ export function normalizeLiveDebuggerFrameV2(value) {
     frame_index: frame.frame_index,
     frame_id: frame.frame_id,
     simulator_step_count: frame.simulator_step_count,
-    preset: frame.preset,
+    preset: "analysis",
     verbose: frame.verbose,
     terminal,
     recording,

@@ -1,5 +1,9 @@
 import { formatCompactDisplayNumber, formatDisplayNumber } from "./display.js";
 import {
+  authorizedPresentationSceneView,
+  isAuthorizedPresentationFrame,
+} from "./authorized-presentation-adapter.js";
+import {
   explainAgent,
   explainAura,
   explainCooldown,
@@ -106,7 +110,10 @@ export const BATTLEFIELD_LAYER_ORDER = Object.freeze([
  * }} ChoreographySurface
  * @typedef {{
  *   agent: JsonRecord,
- *   globalSlot: number,
+ *   identityKey: number | string,
+ *   layoutSlot: number,
+ *   globalSlot: number | null,
+ *   presentationKey: string | null,
  *   center: {x: number, y: number},
  *   radius: number,
  *   controlled: boolean,
@@ -169,7 +176,71 @@ function frameScene(frame) {
   if (!isRecord(frame)) {
     return null;
   }
+  if (isAuthorizedPresentationFrame(frame)) {
+    return authorizedPresentationSceneView(frame);
+  }
   return isRecord(frame.scene) ? frame.scene : null;
+}
+
+/**
+ * @param {JsonRecord} agent
+ * @returns {number | string | null}
+ */
+function agentDisplayIdentity(agent) {
+  if (typeof agent.display_key === "string" && agent.display_key.length > 0) {
+    return agent.display_key;
+  }
+  return Number.isInteger(agent.global_slot) ? Number(agent.global_slot) : null;
+}
+
+/** @param {JsonRecord} agent @param {number} fallback */
+function agentLayoutSlot(agent, fallback) {
+  return Number.isInteger(agent.global_slot) ? Number(agent.global_slot) : fallback;
+}
+
+/**
+ * Add only the identity actually carried by the accepted display row.
+ *
+ * @param {SVGElement} element
+ * @param {JsonRecord} record
+ */
+function setDisplayIdentityData(element, record) {
+  if (
+    typeof record.presentation_key === "string" &&
+    record.presentation_key.length > 0
+  ) {
+    element.dataset.presentationKey = record.presentation_key;
+    element.removeAttribute("data-slot");
+  } else if (Number.isInteger(record.global_slot)) {
+    element.dataset.slot = String(record.global_slot);
+    element.removeAttribute("data-presentation-key");
+  }
+}
+
+/** @param {JsonRecord} record */
+function displayIdentityAttributes(record) {
+  return typeof record.presentation_key === "string"
+    ? { "data-presentation-key": record.presentation_key }
+    : Number.isInteger(record.global_slot)
+      ? { "data-slot": record.global_slot }
+      : {};
+}
+
+/**
+ * Build tooltip input with the accepted display identity only. A layout slot
+ * may position a body, but it never becomes an Agent POV global-slot fact.
+ *
+ * @param {JsonRecord} agent
+ */
+function displayIdentityRecord(agent) {
+  return {
+    ...(typeof agent.presentation_key === "string"
+      ? { presentation_key: agent.presentation_key }
+      : Number.isInteger(agent.global_slot)
+        ? { global_slot: agent.global_slot }
+        : {}),
+    public_agent_id: agent.public_agent_id,
+  };
 }
 
 /**
@@ -245,7 +316,7 @@ function targetReticlePath(centerX, centerY, outerRadius) {
  * @param {string} className
  * @param {"kind" | "token_id"} tokenAttribute
  * @param {ViewportTransform} transform
- * @param {ReadonlyMap<number, string>} [classByGlobalSlot]
+ * @param {ReadonlyMap<number | string, string>} [classByIdentity]
  * @param {((record: JsonRecord) => Record<string, any>) | null} [explain]
  * @param {boolean} [withStrokeHitRegion]
  */
@@ -255,7 +326,7 @@ function renderCircleLayer(
   className,
   tokenAttribute,
   transform,
-  classByGlobalSlot = new Map(),
+  classByIdentity = new Map(),
   explain = null,
   withStrokeHitRegion = false,
 ) {
@@ -284,15 +355,20 @@ function renderCircleLayer(
         circle.dataset.token = record[tokenAttribute];
       }
     }
-    if (Number.isInteger(record.global_slot)) {
-      circle.dataset.slot = String(record.global_slot);
-      const classKey = classByGlobalSlot.get(record.global_slot);
-      if (classKey) {
-        circle.dataset.class = classKey;
-      }
+    setDisplayIdentityData(circle, record);
+    const identity =
+      typeof record.presentation_key === "string"
+        ? record.presentation_key
+        : record.global_slot;
+    const classKey = classByIdentity.get(identity);
+    if (classKey) {
+      circle.dataset.class = classKey;
     }
     if (Number.isInteger(record.source_global_slot)) {
       circle.dataset.sourceSlot = String(record.source_global_slot);
+    }
+    if (typeof record.source_presentation_key === "string") {
+      circle.dataset.sourcePresentationKey = record.source_presentation_key;
     }
     if (explain === null) {
       circles.push(circle);
@@ -319,9 +395,7 @@ function renderCircleLayer(
       hitRegion.dataset[tokenAttribute === "kind" ? "kind" : "token"] =
         record[tokenAttribute];
     }
-    if (Number.isInteger(record.global_slot)) {
-      hitRegion.dataset.slot = String(record.global_slot);
-    }
+    setDisplayIdentityData(hitRegion, record);
     owner.append(circle, hitRegion);
     const descriptor = explain(record);
     owner.setAttribute("role", "img");
@@ -368,6 +442,10 @@ export class BattlefieldRenderer {
     this.compactActiveCombat = false;
     /** @type {ReadonlyMap<number, JsonRecord>} */
     this.agentByGlobalSlot = new Map();
+    /** @type {ReadonlyMap<string, JsonRecord>} */
+    this.agentByPresentationKey = new Map();
+    /** @type {ReadonlyMap<number, JsonRecord>} */
+    this.agentByLayoutSlot = new Map();
     /** @type {ReadonlyMap<number, JsonRecord>} */
     this.classMechanicsById = new Map();
 
@@ -414,7 +492,7 @@ export class BattlefieldRenderer {
       accessibleLabels,
     };
 
-    /** @type {Map<number, AgentNodes>} */
+    /** @type {Map<number | string, AgentNodes>} */
     this.agentNodes = new Map();
     /** @type {Map<string, SVGElement>} */
     this.observedBodyNodes = new Map();
@@ -441,16 +519,11 @@ export class BattlefieldRenderer {
    * Paint the durable facts in a debugger frame.
    *
    * @param {unknown} frame
-   * @param {{offline?: boolean}} [options]
+   * @param {{offline?: boolean, showRanges?: boolean}} [options]
    * @returns {boolean} Whether the frame contained a paintable scene.
    */
   render(frame, options = {}) {
     const scene = frameScene(frame);
-    const frameRecord = isRecord(frame) ? frame : {};
-    const preset =
-      frameRecord.preset === "presentation" || frameRecord.preset === "analysis"
-        ? frameRecord.preset
-        : "analysis";
     const map = isRecord(scene?.map) ? scene.map : null;
     const width = finiteNumber(map?.width);
     const height = finiteNumber(map?.height);
@@ -495,20 +568,23 @@ export class BattlefieldRenderer {
     });
     this.transform = transform;
     this.battlefield.setAttribute("viewBox", `0 0 ${viewportWidth} ${viewportHeight}`);
-    this.battlefield.dataset.preset = preset;
+    this.battlefield.dataset.preset = "analysis";
     this.battlefield.dataset.audience = scene.audience;
+    const audienceLabel = scene.audience === "researcher" ? "Oracle View" : "Agent POV";
     this.battlefield.setAttribute(
       "aria-label",
-      `${scene.audience_badge ?? "Debugger"} battlefield, ${width} by ${height}.`,
+      `${audienceLabel} battlefield, ${width} by ${height}.`,
     );
     this.empty.hidden = true;
 
     this.#renderMap(transform.mapBounds);
-    const classByGlobalSlot = new Map(
+    const classByIdentity = new Map(
       asArray(scene.agents)
-        .filter((agent) => isRecord(agent) && Number.isInteger(agent.global_slot))
+        .filter((agent) => isRecord(agent) && agentDisplayIdentity(agent) !== null)
         .map((agent) => [
-          Number(agent.global_slot),
+          typeof agent.presentation_key === "string"
+            ? agent.presentation_key
+            : Number(agent.global_slot),
           classTokenFromId(agent.class_id).cssKey,
         ]),
     );
@@ -516,6 +592,13 @@ export class BattlefieldRenderer {
       asArray(scene.agents)
         .filter((agent) => isRecord(agent) && Number.isInteger(agent.global_slot))
         .map((agent) => [Number(agent.global_slot), agent]),
+    );
+    this.agentByPresentationKey = new Map(
+      asArray(scene.agents)
+        .filter(
+          (agent) => isRecord(agent) && typeof agent.presentation_key === "string",
+        )
+        .map((agent) => [String(agent.presentation_key), agent]),
     );
     this.classMechanicsById = new Map(
       asArray(scene.class_mechanics)
@@ -536,18 +619,23 @@ export class BattlefieldRenderer {
       (record) =>
         explainAura(
           record,
-          this.agentByGlobalSlot.get(record.source_global_slot) ?? null,
+          (typeof record.source_presentation_key === "string"
+            ? this.agentByPresentationKey.get(record.source_presentation_key)
+            : this.agentByGlobalSlot.get(record.source_global_slot)) ?? null,
         ),
     );
     renderCircleLayer(
       this.rangeCues,
-      asArray(scene.ranges),
+      options.showRanges === false ? [] : asArray(scene.ranges),
       "range-ring",
       "kind",
       transform,
-      classByGlobalSlot,
+      classByIdentity,
       (record) => {
-        const owner = this.agentByGlobalSlot.get(record.global_slot) ?? null;
+        const owner =
+          (typeof record.presentation_key === "string"
+            ? this.agentByPresentationKey.get(record.presentation_key)
+            : this.agentByGlobalSlot.get(record.global_slot)) ?? null;
         return explainRange(
           record,
           owner,
@@ -559,9 +647,12 @@ export class BattlefieldRenderer {
     this.#renderPendingRoute(scene, transform);
     this.#renderObstacles(map, transform);
     const projectedAgents = this.#renderAgents(scene, transform);
+    this.agentByLayoutSlot = new Map(
+      projectedAgents.map((projected) => [projected.layoutSlot, projected.agent]),
+    );
     this.#renderObservedBodies(scene, transform);
     this.#renderStatusDocks(scene, projectedAgents, transform, {
-      showLegality: preset !== "presentation",
+      showLegality: true,
       showModifiers: scene.audience === "researcher",
       audience: scene.audience,
     });
@@ -667,10 +758,24 @@ export class BattlefieldRenderer {
     this.layers.durableStatusModifier.removeAttribute("data-suppressed-cooldown-slots");
     this.layers.durableStatusModifier.removeAttribute("data-suppressed-modifier-slots");
     this.layers.durableStatusModifier.removeAttribute("data-compacted-required-docks");
+    this.layers.durableStatusModifier.removeAttribute(
+      "data-suppressed-status-presentation-keys",
+    );
+    this.layers.durableStatusModifier.removeAttribute(
+      "data-suppressed-cooldown-presentation-keys",
+    );
+    this.layers.durableStatusModifier.removeAttribute(
+      "data-suppressed-modifier-presentation-keys",
+    );
+    this.layers.durableStatusModifier.removeAttribute(
+      "data-compacted-required-presentations",
+    );
     this.layers.accessibleLabels.replaceChildren();
     this.agentNodes.clear();
     this.observedBodyNodes.clear();
     this.agentByGlobalSlot = new Map();
+    this.agentByPresentationKey = new Map();
+    this.agentByLayoutSlot = new Map();
     this.classMechanicsById = new Map();
     this.choreographyProtectedRects = Object.freeze([]);
     this.choreographyProtectedRectGroups = Object.freeze({
@@ -799,6 +904,12 @@ export class BattlefieldRenderer {
     if (Number.isInteger(route.target_global_slot)) {
       path.dataset.targetSlot = String(route.target_global_slot);
     }
+    if (typeof route.source_presentation_key === "string") {
+      path.dataset.sourcePresentationKey = route.source_presentation_key;
+    }
+    if (typeof route.target_presentation_key === "string") {
+      path.dataset.targetPresentationKey = route.target_presentation_key;
+    }
     path.dataset.routeKind = geometry.kind;
     const routeDescriptor = explainPendingRoute(route);
     hitPath.setAttribute("aria-label", routeDescriptor.title);
@@ -858,30 +969,45 @@ export class BattlefieldRenderer {
    */
   #renderAgents(scene, transform) {
     const agents = asArray(scene.agents).filter(
-      (agent) => isRecord(agent) && Number.isInteger(agent.global_slot),
+      (agent) => isRecord(agent) && agentDisplayIdentity(agent) !== null,
     );
-    const nextSlots = new Set(agents.map((agent) => Number(agent.global_slot)));
-    for (const [slot, nodes] of this.agentNodes) {
-      if (!nextSlots.has(slot)) {
+    const nextIdentities = new Set(agents.map(agentDisplayIdentity));
+    for (const [identityKey, nodes] of this.agentNodes) {
+      if (!nextIdentities.has(identityKey)) {
         nodes.root.remove();
         nodes.selectionRoot.remove();
-        this.agentNodes.delete(slot);
+        this.agentNodes.delete(identityKey);
       }
     }
 
     const selection = isRecord(scene.selection) ? scene.selection : {};
     /** @type {ProjectedAgent[]} */
     const projectedAgents = [];
-    for (const agent of agents) {
-      const slot = Number(agent.global_slot);
-      const controlled = slot === selection.controlled_global_slot;
-      const selected = slot === selection.selected_global_slot;
+    for (const [index, agent] of agents.entries()) {
+      const identityKey = agentDisplayIdentity(agent);
+      if (identityKey === null) {
+        continue;
+      }
+      const globalSlot = Number.isInteger(agent.global_slot)
+        ? Number(agent.global_slot)
+        : null;
+      const presentationKey =
+        typeof agent.presentation_key === "string" ? agent.presentation_key : null;
+      const layoutSlot = agentLayoutSlot(agent, index);
+      const controlled =
+        globalSlot !== null
+          ? globalSlot === selection.controlled_global_slot
+          : presentationKey === selection.controlled_presentation_key;
+      const selected =
+        globalSlot !== null
+          ? globalSlot === selection.selected_global_slot
+          : presentationKey === selection.selected_presentation_key;
       const center = screenPoint(agent.position, transform);
       const radius = transform.worldLengthToScreen(finiteNumber(agent.radius, 0.5));
-      let nodes = this.agentNodes.get(slot);
+      let nodes = this.agentNodes.get(identityKey);
       if (!nodes) {
-        nodes = this.#createAgentNodes(slot);
-        this.agentNodes.set(slot, nodes);
+        nodes = this.#createAgentNodes(agent);
+        this.agentNodes.set(identityKey, nodes);
       }
       this.#updateAgentNodes(nodes, agent, center, radius, controlled, selected);
       registerTooltipOwner(
@@ -901,7 +1027,10 @@ export class BattlefieldRenderer {
       this.selectionCues.append(nodes.selectionRoot);
       projectedAgents.push({
         agent,
-        globalSlot: slot,
+        identityKey,
+        layoutSlot,
+        globalSlot,
+        presentationKey,
         center,
         radius,
         controlled,
@@ -1133,8 +1262,10 @@ export class BattlefieldRenderer {
     if (!legality) {
       return [];
     }
-    const target = projectedAgents.find(
-      ({ globalSlot }) => globalSlot === legality.target_global_slot,
+    const target = projectedAgents.find(({ globalSlot, presentationKey }) =>
+      typeof legality.target_presentation_key === "string"
+        ? presentationKey === legality.target_presentation_key
+        : globalSlot === legality.target_global_slot,
     );
     if (!target) {
       return [];
@@ -1143,15 +1274,15 @@ export class BattlefieldRenderer {
     const layout = layoutStatusDocks(
       {
         agents: projectedAgents.map((agent) => ({
-          globalSlot: agent.globalSlot,
+          globalSlot: agent.layoutSlot,
           center: agent.center,
           radius: agent.radius,
           statuses:
-            agent.globalSlot === target.globalSlot
+            agent.layoutSlot === target.layoutSlot
               ? Object.freeze(["basic", "ultimate"])
               : Object.freeze([]),
           controlled: agent.controlled,
-          selected: agent.selected || agent.globalSlot === legality.target_global_slot,
+          selected: agent.selected || agent.layoutSlot === target.layoutSlot,
         })),
         viewport: transform.viewportBounds,
         reservedRects,
@@ -1164,13 +1295,22 @@ export class BattlefieldRenderer {
       },
     );
     const placement = layout.docks.find(
-      ({ globalSlot }) => globalSlot === target.globalSlot,
+      ({ globalSlot }) => globalSlot === target.layoutSlot,
     );
     if (!placement) {
-      this.legalityCues.dataset.suppressedSlot = String(target.globalSlot);
+      if (target.globalSlot !== null) {
+        this.legalityCues.removeAttribute("data-suppressed-presentation-key");
+        this.legalityCues.dataset.suppressedSlot = String(target.globalSlot);
+      } else {
+        this.legalityCues.removeAttribute("data-suppressed-slot");
+        this.legalityCues.dataset.suppressedPresentationKey = String(
+          target.presentationKey,
+        );
+      }
       return [];
     }
     this.legalityCues.removeAttribute("data-suppressed-slot");
+    this.legalityCues.removeAttribute("data-suppressed-presentation-key");
 
     const group = svgElement("g", {
       class: "legality-dock",
@@ -1178,6 +1318,7 @@ export class BattlefieldRenderer {
       "aria-label": `Exact selected-target legality for ${agentIdentity(target.agent)}`,
       "data-zone": "legality",
       "data-slot": target.globalSlot,
+      "data-presentation-key": target.presentationKey,
       "data-anchor": placement.anchor,
       "data-collision-free": placement.collisionFree,
     });
@@ -1266,14 +1407,14 @@ export class BattlefieldRenderer {
         .filter(
           (agent) => agent.statuses.length > 0 && (agent.controlled || agent.selected),
         )
-        .map(({ globalSlot }) => globalSlot),
+        .map(({ layoutSlot }) => layoutSlot),
     );
     const requiredDockRequests = [
       ...projectedAgents
-        .filter(({ globalSlot }) => requiredStatusSlots.has(globalSlot))
+        .filter(({ layoutSlot }) => requiredStatusSlots.has(layoutSlot))
         .map((agent) => ({
-          layoutKey: `status:${agent.globalSlot}`,
-          globalSlot: agent.globalSlot,
+          layoutKey: `status:${agent.layoutSlot}`,
+          globalSlot: agent.layoutSlot,
           publicAgentId: agent.agent.public_agent_id,
           statuses: agent.statuses,
           dockOptions: {
@@ -1296,8 +1437,8 @@ export class BattlefieldRenderer {
         }
         return [
           {
-            layoutKey: `cooldown:${agent.globalSlot}`,
-            globalSlot: agent.globalSlot,
+            layoutKey: `cooldown:${agent.layoutSlot}`,
+            globalSlot: agent.layoutSlot,
             publicAgentId: agent.agent.public_agent_id,
             statuses: Object.freeze([
               Object.freeze({
@@ -1324,7 +1465,7 @@ export class BattlefieldRenderer {
     const requiredDockLayout = layoutRequiredDocks(
       {
         agents: projectedAgents.map((agent) => ({
-          globalSlot: agent.globalSlot,
+          globalSlot: agent.layoutSlot,
           center: agent.center,
           radius: agent.radius,
           statuses: Object.freeze([]),
@@ -1355,10 +1496,10 @@ export class BattlefieldRenderer {
     const optionalStatusLayout = layoutStatusDocks(
       {
         agents: projectedAgents.map((agent) => ({
-          globalSlot: agent.globalSlot,
+          globalSlot: agent.layoutSlot,
           center: agent.center,
           radius: agent.radius,
-          statuses: requiredStatusSlots.has(agent.globalSlot)
+          statuses: requiredStatusSlots.has(agent.layoutSlot)
             ? Object.freeze([])
             : agent.statuses,
           controlled: agent.controlled,
@@ -1413,12 +1554,13 @@ export class BattlefieldRenderer {
     if (!policy.showLegality) {
       this.legalityCues.replaceChildren();
       this.legalityCues.removeAttribute("data-suppressed-slot");
+      this.legalityCues.removeAttribute("data-suppressed-presentation-key");
     }
     const modifierLayout = policy.showModifiers
       ? layoutStatusDocks(
           {
             agents: projectedAgents.map((agent) => ({
-              globalSlot: agent.globalSlot,
+              globalSlot: agent.layoutSlot,
               center: agent.center,
               radius: agent.radius,
               statuses: asArray(agent.agent.modifiers).filter(
@@ -1471,19 +1613,78 @@ export class BattlefieldRenderer {
     const compactRequiredNodes = compactRequiredDocks.map((placement) =>
       this.#renderRequiredDockFallback(placement, policy.audience),
     );
-    this.layers.durableStatusModifier.dataset.suppressedStatusSlots =
-      statusLayout.suppressedGlobalSlots.join(",");
-    this.layers.durableStatusModifier.dataset.suppressedCooldownSlots =
-      cooldownLayout.suppressedGlobalSlots.join(",");
-    this.layers.durableStatusModifier.dataset.compactedRequiredDocks =
-      requiredDockLayout.compactedLayoutKeys.join(",");
-    if (policy.showModifiers) {
-      this.layers.durableStatusModifier.dataset.suppressedModifierSlots =
-        modifierLayout.suppressedGlobalSlots.join(",");
-    } else {
+    const usesPresentationKeys = projectedAgents.some(
+      ({ presentationKey }) => presentationKey !== null,
+    );
+    const presentationKeysForLayoutSlots = (
+      /** @type {ReadonlyArray<number>} */ slots,
+    ) =>
+      slots.flatMap((layoutSlot) => {
+        const key = this.agentByLayoutSlot.get(layoutSlot)?.presentation_key;
+        return typeof key === "string" ? [key] : [];
+      });
+    if (usesPresentationKeys) {
+      this.layers.durableStatusModifier.removeAttribute("data-suppressed-status-slots");
+      this.layers.durableStatusModifier.removeAttribute(
+        "data-suppressed-cooldown-slots",
+      );
       this.layers.durableStatusModifier.removeAttribute(
         "data-suppressed-modifier-slots",
       );
+      this.layers.durableStatusModifier.removeAttribute(
+        "data-compacted-required-docks",
+      );
+      this.layers.durableStatusModifier.dataset.suppressedStatusPresentationKeys =
+        presentationKeysForLayoutSlots(statusLayout.suppressedGlobalSlots).join(",");
+      this.layers.durableStatusModifier.dataset.suppressedCooldownPresentationKeys =
+        presentationKeysForLayoutSlots(cooldownLayout.suppressedGlobalSlots).join(",");
+      if (policy.showModifiers) {
+        this.layers.durableStatusModifier.dataset.suppressedModifierPresentationKeys =
+          presentationKeysForLayoutSlots(modifierLayout.suppressedGlobalSlots).join(
+            ",",
+          );
+      } else {
+        this.layers.durableStatusModifier.removeAttribute(
+          "data-suppressed-modifier-presentation-keys",
+        );
+      }
+      this.layers.durableStatusModifier.dataset.compactedRequiredPresentations =
+        requiredDockLayout.compactedLayoutKeys
+          .flatMap((layoutKey) => {
+            const [kind, rawLayoutSlot] = layoutKey.split(":");
+            const key = this.agentByLayoutSlot.get(
+              Number(rawLayoutSlot),
+            )?.presentation_key;
+            return typeof key === "string" ? [`${kind}:${key}`] : [];
+          })
+          .join(",");
+    } else {
+      this.layers.durableStatusModifier.removeAttribute(
+        "data-suppressed-status-presentation-keys",
+      );
+      this.layers.durableStatusModifier.removeAttribute(
+        "data-suppressed-cooldown-presentation-keys",
+      );
+      this.layers.durableStatusModifier.removeAttribute(
+        "data-suppressed-modifier-presentation-keys",
+      );
+      this.layers.durableStatusModifier.removeAttribute(
+        "data-compacted-required-presentations",
+      );
+      this.layers.durableStatusModifier.dataset.suppressedStatusSlots =
+        statusLayout.suppressedGlobalSlots.join(",");
+      this.layers.durableStatusModifier.dataset.suppressedCooldownSlots =
+        cooldownLayout.suppressedGlobalSlots.join(",");
+      this.layers.durableStatusModifier.dataset.compactedRequiredDocks =
+        requiredDockLayout.compactedLayoutKeys.join(",");
+      if (policy.showModifiers) {
+        this.layers.durableStatusModifier.dataset.suppressedModifierSlots =
+          modifierLayout.suppressedGlobalSlots.join(",");
+      } else {
+        this.layers.durableStatusModifier.removeAttribute(
+          "data-suppressed-modifier-slots",
+        );
+      }
     }
     this.layers.durableStatusModifier.replaceChildren(
       ...modifierNodes,
@@ -1604,12 +1805,11 @@ export class BattlefieldRenderer {
       isCooldown && Number.isInteger(firstItem.ticks) && firstItem.ticks > 0
         ? Number(firstItem.ticks)
         : null;
-    const ownerAgent = this.agentByGlobalSlot.get(placement.globalSlot) ?? {};
+    const ownerAgent = this.agentByLayoutSlot.get(placement.globalSlot) ?? {};
     const explanation = isCooldown
       ? explainCooldown(
           {
-            global_slot: placement.globalSlot,
-            public_agent_id: ownerAgent.public_agent_id,
+            ...displayIdentityRecord(ownerAgent),
             class_id: firstItem.classId,
             ultimate_cooldown: ticks,
           },
@@ -1619,14 +1819,15 @@ export class BattlefieldRenderer {
       : audience === "agent_pov"
         ? explainPovOverflow(rawItems, ownerAgent)
         : explainOverflow(rawItems, "status", ownerAgent, [
-            ...this.agentByGlobalSlot.values(),
+            ...this.agentByLayoutSlot.values(),
           ]);
     const valueLabel = isCooldown ? `U${ticks ?? "?"}` : `S${placement.hiddenCount}`;
     const group = svgElement("g", {
       class: "required-dock-fallback-dock",
       "data-zone": "required-dock-fallback-dock",
-      "data-slot": placement.globalSlot,
-      "data-layout-key": placement.layoutKey,
+      ...displayIdentityAttributes(ownerAgent),
+      "data-layout-key":
+        typeof ownerAgent.presentation_key === "string" ? null : placement.layoutKey,
       "data-kind": kind,
       "data-anchor": placement.anchor,
       "data-collision-free": placement.collisionFree,
@@ -1649,7 +1850,7 @@ export class BattlefieldRenderer {
         .map((row) => `${row.label}: ${row.value}`)
         .join(". ")}`,
       "data-zone": isCooldown ? "ultimate-cooldown" : "status-overflow",
-      "data-slot": placement.globalSlot,
+      ...displayIdentityAttributes(ownerAgent),
       "data-layout-key": placement.layoutKey,
       "data-kind": kind,
       "data-hidden-count": placement.hiddenCount,
@@ -1711,11 +1912,11 @@ export class BattlefieldRenderer {
       Number.isInteger(item.ticks) && item.ticks > 0 ? Number(item.ticks) : "?";
     const classToken = classTokenFromId(item.classId);
     const token = ultimateTokenFromClassId(item.classId);
-    const ownerAgent = this.agentByGlobalSlot.get(placement.globalSlot) ?? {};
+    const ownerAgent = this.agentByLayoutSlot.get(placement.globalSlot) ?? {};
     const group = svgElement("g", {
       class: "cooldown-dock",
       "data-zone": "cooldown-dock",
-      "data-slot": placement.globalSlot,
+      ...displayIdentityAttributes(ownerAgent),
       "data-class": classToken.cssKey,
       "data-anchor": placement.anchor,
       "data-expanded": placement.expanded,
@@ -1747,7 +1948,7 @@ export class BattlefieldRenderer {
       role: "img",
       "aria-label": `${token.accessibleName} cooldown, ${accessibleTicks}, ${agentIdentity(ownerAgent)}`,
       "data-zone": "ultimate-cooldown",
-      "data-slot": placement.globalSlot,
+      ...displayIdentityAttributes(ownerAgent),
       "data-class": classToken.cssKey,
       "data-token": token.cssKey,
       "data-token-id": token.tokenId,
@@ -1797,8 +1998,7 @@ export class BattlefieldRenderer {
       cell,
       explainCooldown(
         {
-          global_slot: placement.globalSlot,
-          public_agent_id: ownerAgent.public_agent_id,
+          ...displayIdentityRecord(ownerAgent),
           class_id: item.classId,
           ultimate_cooldown: ticks,
         },
@@ -1819,11 +2019,11 @@ export class BattlefieldRenderer {
    * @returns {SVGElement}
    */
   #renderFactDock(placement, kind, dimensions, audience) {
-    const ownerAgent = this.agentByGlobalSlot.get(placement.globalSlot) ?? {};
+    const ownerAgent = this.agentByLayoutSlot.get(placement.globalSlot) ?? {};
     const group = svgElement("g", {
       class: `${kind}-dock`,
       "data-zone": `${kind}-dock`,
-      "data-slot": placement.globalSlot,
+      ...displayIdentityAttributes(ownerAgent),
       "data-anchor": placement.anchor,
       "data-expanded": placement.expanded,
       "data-collision-free": placement.collisionFree,
@@ -1886,7 +2086,7 @@ export class BattlefieldRenderer {
         role: "img",
         "aria-label": `${token.accessibleName}, ${accessibleValue}, ${agentIdentity(ownerAgent)}${audience === "agent_pov" && kind === "status" ? "; source agent identity is not disclosed" : ""}`,
         "data-zone": `${kind}-cell`,
-        "data-slot": placement.globalSlot,
+        ...displayIdentityAttributes(ownerAgent),
         "data-token": token.cssKey,
         "data-token-id": token.tokenId,
         "data-index": index,
@@ -1952,7 +2152,7 @@ export class BattlefieldRenderer {
         kind === "status"
           ? audience === "agent_pov"
             ? explainPovStatus(item, ownerAgent)
-            : explainStatus(item, ownerAgent, [...this.agentByGlobalSlot.values()])
+            : explainStatus(item, ownerAgent, [...this.agentByLayoutSlot.values()])
           : explainModifier(item, ownerAgent),
       );
       cell.append(box, ...compartments, icon, text);
@@ -1983,7 +2183,7 @@ export class BattlefieldRenderer {
         role: "img",
         "aria-label": `${placement.overflowLabel} hidden ${kind} cues for ${agentIdentity(ownerAgent)}: ${hiddenLabels.join("; ")}${audience === "agent_pov" && kind === "status" ? "; source agent identity is not disclosed" : ""}`,
         "data-zone": `${kind}-overflow`,
-        "data-slot": placement.globalSlot,
+        ...displayIdentityAttributes(ownerAgent),
         "data-hidden-count": placement.hiddenCount,
         "data-owner-label": agentIdentity(ownerAgent),
       });
@@ -1992,7 +2192,7 @@ export class BattlefieldRenderer {
         audience === "agent_pov" && kind === "status"
           ? explainPovOverflow(placement.hiddenStatuses, ownerAgent)
           : explainOverflow(placement.hiddenStatuses, kind, ownerAgent, [
-              ...this.agentByGlobalSlot.values(),
+              ...this.agentByLayoutSlot.values(),
             ]),
       );
       const overflowLabel = svgElement("text", {
@@ -2034,15 +2234,15 @@ export class BattlefieldRenderer {
   }
 
   /**
-   * @param {number} slot
+   * @param {JsonRecord} agent
    * @returns {AgentNodes}
    */
-  #createAgentNodes(slot) {
+  #createAgentNodes(agent) {
     const root = svgElement("g", {
       class: "agent",
       tabindex: "-1",
       role: "img",
-      "data-slot": slot,
+      ...displayIdentityAttributes(agent),
     });
     const body = svgElement("circle", {
       class: "agent-body",
@@ -2121,7 +2321,7 @@ export class BattlefieldRenderer {
 
     const selectionRoot = svgElement("g", {
       class: "agent-selection",
-      "data-slot": slot,
+      ...displayIdentityAttributes(agent),
       "data-zone": "selection",
       "aria-hidden": "true",
     });

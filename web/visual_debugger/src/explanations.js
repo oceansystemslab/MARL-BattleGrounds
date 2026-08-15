@@ -92,6 +92,18 @@ function isNeutralAuraModifier(modifier) {
   return finiteNumber(modifier.multiplier) === 1;
 }
 
+/** @param {JsonRecord} record */
+function semanticIdentity(record) {
+  return (
+    text(record.presentation_key) ??
+    (integer(record.global_slot) === null
+      ? null
+      : String(integer(record.global_slot))) ??
+    text(record.public_agent_id) ??
+    "unknown"
+  );
+}
+
 /** @param {unknown} value */
 function point(value) {
   return Array.isArray(value) &&
@@ -257,7 +269,8 @@ export function explainAgent(
   const teamToken = teamTokenFromId(agent.team_id, agent);
   const publicIdentity = publicAgentLabel(agent.public_agent_id);
   const currentHealth = finiteNumber(agent.current_health);
-  const maxHealth = finiteNumber(agent.max_health);
+  const maxHealth =
+    finiteNumber(agent.max_health) ?? finiteNumber(agent.maximum_health);
   const effectiveSpeed =
     finiteNumber(agent.effective_movement_speed) ?? finiteNumber(agent.effective_speed);
   const cooldown =
@@ -385,7 +398,7 @@ export function explainAgent(
   );
   return descriptor(
     "agent",
-    `agent:${integer(agent.global_slot) ?? text(agent.public_agent_id) ?? "unknown"}`,
+    `agent:${semanticIdentity(agent)}`,
     `${publicIdentity} · Now`,
     `${classToken.label} on ${teamToken.label}; exact current normalized state.`,
     nowRows,
@@ -408,23 +421,24 @@ export function explainAgent(
 export function explainPovAgent(rawAgent, selection = {}) {
   const input = isRecord(rawAgent) ? rawAgent : {};
   const statuses = records(input.statuses).map((status) => ({
-    token_id: status.token_id,
-    duration: status.duration,
+    token_id: status.token_id ?? status.status_id,
+    duration: status.duration ?? status.remaining_duration,
     status_feature_index: status.status_feature_index,
     source_class_id: status.source_class_id,
     source_evidence: status.source_evidence,
   }));
   const reduced = {
+    presentation_key: input.presentation_key,
     public_agent_id: input.public_agent_id,
     team_id: input.team_id,
     class_id: input.class_id,
     current_health: input.current_health,
-    max_health: input.max_health,
+    max_health: input.max_health ?? input.maximum_health,
     effective_movement_speed: input.effective_movement_speed,
     ultimate_cooldown_remaining: input.ultimate_cooldown_remaining,
     steps_until_out_of_combat: input.steps_until_out_of_combat,
     spawn_shield_remaining: input.spawn_shield_remaining,
-    alive: input.alive,
+    alive: input.alive ?? input.life_state === "alive",
     statuses,
   };
   return explainAgent(
@@ -453,7 +467,7 @@ export function explainSpawnShield(rawAgent) {
   const active = remaining !== null && remaining > 0;
   return descriptor(
     "status",
-    `spawn-shield:${text(agent.public_agent_id) ?? "unknown"}`,
+    `spawn-shield:${text(agent.presentation_key) ?? text(agent.public_agent_id) ?? "unknown"}`,
     "Spawn Shield",
     active
       ? `This agent is invulnerable while the spawn shield remains active; ${tickCount(remaining)} remain.`
@@ -647,10 +661,11 @@ function addPositiveOutput(rows, label, value) {
  * researcher-only extras on the input are deliberately unreachable.
  *
  * @param {unknown} rawStatus
- * @param {unknown} [_rawRecipient]
+ * @param {unknown} [rawRecipient]
  */
-export function explainPovStatus(rawStatus, _rawRecipient = {}) {
+export function explainPovStatus(rawStatus, rawRecipient = {}) {
   const input = isRecord(rawStatus) ? rawStatus : {};
+  const recipient = isRecord(rawRecipient) ? rawRecipient : {};
   const reduced = {
     token_id: input.token_id,
     duration: input.duration,
@@ -662,7 +677,9 @@ export function explainPovStatus(rawStatus, _rawRecipient = {}) {
   const profile = statusPresentation(token.tokenId);
   return descriptor(
     "status",
-    `pov-status:${integer(reduced.status_feature_index) ?? token.tokenId}`,
+    typeof recipient.presentation_key === "string"
+      ? `pov-status:${recipient.presentation_key}:${integer(reduced.status_feature_index) ?? token.tokenId}`
+      : `pov-status:${integer(reduced.status_feature_index) ?? token.tokenId}`,
     profile.title,
     `${profile.effect} Source agent identity is not disclosed.`,
     [
@@ -730,7 +747,7 @@ export function explainStatus(rawStatus, rawRecipient = {}, rawSourceAgents = []
     magnitude === null ? "" : ` Exact effect: ${magnitude.value}.`;
   return descriptor(
     "status",
-    `status:${integer(recipient.global_slot) ?? text(recipient.public_agent_id) ?? "unknown"}:${integer(status.status_channel) ?? token.tokenId}`,
+    `status:${semanticIdentity(recipient)}:${integer(status.status_channel) ?? token.tokenId}`,
     profile.title,
     `${profile.effect}${magnitudeSummary}${breakSummary}`,
     magnitudeRows,
@@ -751,19 +768,25 @@ function joinStatusSources(status, rawSourceAgents) {
   const roster = records(rawSourceAgents);
   const seen = new Set();
   const joined = [];
-  for (const evidence of records(status.direct_source_evidence)) {
+  for (const evidence of records(
+    status.direct_sources ?? status.direct_source_evidence,
+  )) {
+    const presentationKey = text(evidence.source_presentation_key);
     const slot = integer(evidence.source_global_slot);
     const publicId = text(evidence.source_public_agent_id);
-    if (slot === null || publicId === null) {
+    if ((presentationKey === null && slot === null) || publicId === null) {
       continue;
     }
-    const key = `${slot}\u0000${publicId}`;
+    const key = `${presentationKey ?? slot}\u0000${publicId}`;
     if (seen.has(key)) {
       continue;
     }
     const source = roster.find(
       (agent) =>
-        integer(agent.global_slot) === slot && text(agent.public_agent_id) === publicId,
+        (presentationKey === null
+          ? integer(agent.global_slot) === slot
+          : text(agent.presentation_key) === presentationKey) &&
+        text(agent.public_agent_id) === publicId,
     );
     if (source === undefined) {
       continue;
@@ -791,7 +814,7 @@ export function explainModifier(rawModifier, rawRecipient = {}) {
   const effect = auraEffectPresentation(presentation, multiplier, "recipient");
   return descriptor(
     "modifier",
-    `modifier:${integer(recipient.global_slot) ?? text(recipient.public_agent_id) ?? "unknown"}:${token.tokenId}`,
+    `modifier:${semanticIdentity(recipient)}:${token.tokenId}`,
     presentation.recipientTitle,
     `This recipient has ${effect} from the exact aggregate aura multiplier.`,
     [
@@ -841,7 +864,7 @@ export function explainOverflow(
   });
   return descriptor(
     `${kind}-overflow`,
-    `${kind}-overflow:${integer(recipient.global_slot) ?? text(recipient.public_agent_id) ?? "unknown"}`,
+    `${kind}-overflow:${semanticIdentity(recipient)}`,
     `${items.length} Hidden ${kind === "status" ? "Statuses" : "Modifiers"}`,
     `Every hidden ${kind} remains available in canonical display order.`,
     rows.length === 0 ? [row("Hidden Facts", "None")] : rows,
@@ -861,6 +884,7 @@ export function explainOverflow(
 export function explainPovOverflow(rawItems, rawRecipient = {}) {
   const inputRecipient = isRecord(rawRecipient) ? rawRecipient : {};
   const recipient = {
+    presentation_key: inputRecipient.presentation_key,
     public_agent_id: inputRecipient.public_agent_id,
   };
   const items = Array.isArray(rawItems) ? rawItems : [];
@@ -874,7 +898,9 @@ export function explainPovOverflow(rawItems, rawRecipient = {}) {
   });
   return descriptor(
     "status-overflow",
-    `pov-status-overflow:${text(recipient.public_agent_id) ?? "unknown"}`,
+    typeof recipient.presentation_key === "string"
+      ? `pov-status-overflow:${recipient.presentation_key}`
+      : `pov-status-overflow:${text(recipient.public_agent_id) ?? "unknown"}`,
     `${items.length} Hidden ${items.length === 1 ? "Status" : "Statuses"}`,
     "Every hidden status remains available in canonical display order. Source agent identity is not disclosed.",
     rows.length === 0 ? [row("Hidden Facts", "None")] : rows,
@@ -901,7 +927,7 @@ export function explainCooldown(rawRecord, rawOwner = null, rawClassMechanics = 
     integer(owner.ultimate_cooldown);
   return descriptor(
     "cooldown",
-    `cooldown:${integer(owner.global_slot) ?? text(owner.public_agent_id) ?? "unknown"}`,
+    `cooldown:${semanticIdentity(owner)}`,
     `${classToken.label} Ultimate: ${profile.ultimateName} Cooldown`,
     ticks === 0
       ? `${profile.ultimateName} is ready.`
@@ -925,13 +951,16 @@ export function explainCooldown(rawRecord, rawOwner = null, rawClassMechanics = 
 export function explainAura(rawField, rawSourceAgent = null) {
   const field = isRecord(rawField) ? rawField : {};
   const candidateSource = isRecord(rawSourceAgent) ? rawSourceAgent : null;
+  const fieldPresentationKey = text(field.source_presentation_key);
   const fieldSlot = integer(field.source_global_slot);
   const fieldPublicId = text(field.source_public_agent_id);
   const sourceAgent =
     candidateSource !== null &&
-    fieldSlot !== null &&
+    (fieldPresentationKey !== null || fieldSlot !== null) &&
     fieldPublicId !== null &&
-    integer(candidateSource.global_slot) === fieldSlot &&
+    (fieldPresentationKey === null
+      ? integer(candidateSource.global_slot) === fieldSlot
+      : text(candidateSource.presentation_key) === fieldPresentationKey) &&
     text(candidateSource.public_agent_id) === fieldPublicId
       ? candidateSource
       : null;
@@ -942,7 +971,7 @@ export function explainAura(rawField, rawSourceAgent = null) {
   const sourcePublicId = sourceAgent?.public_agent_id;
   return descriptor(
     "aura",
-    `aura:${integer(field.source_global_slot) ?? text(sourcePublicId) ?? "unknown"}:${token.tokenId}`,
+    `aura:${fieldPresentationKey ?? integer(field.source_global_slot) ?? text(sourcePublicId) ?? "unknown"}:${token.tokenId}`,
     presentation.fieldTitle,
     `Catalog-declared same-team aura capability: allies within this recorded radius may receive ${effect}. Consult each recipient's exact aggregate modifier for realized effect.`,
     [
@@ -994,11 +1023,14 @@ const RANGE_PURPOSE = Object.freeze({
 export function explainRange(rawRange, rawOwner = null, rawClassMechanics = null) {
   const range = isRecord(rawRange) ? rawRange : {};
   const candidateOwner = isRecord(rawOwner) ? rawOwner : null;
+  const rangePresentationKey = text(range.presentation_key);
   const rangeSlot = integer(range.global_slot);
   const owner =
     candidateOwner !== null &&
-    rangeSlot !== null &&
-    integer(candidateOwner.global_slot) === rangeSlot &&
+    (rangePresentationKey !== null || rangeSlot !== null) &&
+    (rangePresentationKey === null
+      ? integer(candidateOwner.global_slot) === rangeSlot
+      : text(candidateOwner.presentation_key) === rangePresentationKey) &&
     text(candidateOwner.public_agent_id) !== null
       ? candidateOwner
       : {};
@@ -1012,7 +1044,7 @@ export function explainRange(rawRange, rawOwner = null, rawClassMechanics = null
   const kind = text(range.kind) ?? "unknown";
   return descriptor(
     `range-${kind}`,
-    `range:${integer(range.global_slot) ?? text(owner.public_agent_id) ?? "unknown"}:${kind}`,
+    `range:${rangePresentationKey ?? integer(range.global_slot) ?? text(owner.public_agent_id) ?? "unknown"}:${kind}`,
     `${humanize(kind)} Range`,
     RANGE_PURPOSE[/** @type {keyof typeof RANGE_PURPOSE} */ (kind)] ??
       "Shows an exact normalized range radius.",
@@ -1074,7 +1106,7 @@ export function explainVisibility(rawFact, context = {}) {
     "visibility",
     `visibility:${integer(fact.observer_global_slot) ?? "unknown"}:${integer(fact.candidate_global_slot) ?? "unknown"}`,
     "Observer Visibility",
-    "Privileged researcher diagnostic copied from the normalized scene.",
+    "Oracle View visibility diagnostic copied from the normalized scene.",
     [
       row("Observer", publicAgentLabel(observer.public_agent_id)),
       row("Candidate", publicAgentLabel(candidate.public_agent_id)),
@@ -1099,7 +1131,9 @@ export function explainLegality(rawLegality, lane) {
   }
   return descriptor(
     "legality",
-    `legality:${lane}:${rawAvailable}`,
+    text(legality.target_presentation_key) === null
+      ? `legality:${lane}:${rawAvailable}`
+      : `legality:${legality.target_presentation_key}:${lane}:${rawAvailable}`,
     `${laneName} Legality`,
     `${laneName} ability is ${rawAvailable ? "" : "not "}available this tick.`,
     [row("Status", rawAvailable ? "True" : "False")],
@@ -1115,7 +1149,7 @@ export function explainPendingRoute(rawRoute) {
   const laneName = lane === 0 ? "Basic" : lane === 1 ? "Ultimate" : "Action";
   return descriptor(
     "pending-route",
-    `pending:${text(route.source_public_agent_id) ?? "unknown"}:${text(route.target_public_agent_id) ?? "unknown"}:${lane ?? "unknown"}`,
+    `pending:${text(route.source_presentation_key) ?? text(route.source_public_agent_id) ?? "unknown"}:${text(route.target_presentation_key) ?? text(route.target_public_agent_id) ?? "unknown"}:${lane ?? "unknown"}`,
     `${laneName} Action Route`,
     "Currently selected action intent; no physical path is implied.",
     [
@@ -1141,7 +1175,7 @@ export function explainActivation(rawEvent) {
     event.targetDisclosure === "redacted" || event.target_disclosure === "redacted";
   return descriptor(
     "activation",
-    `activation:${token.tokenId}:${text(source) ?? "source-unavailable"}:${text(target) ?? (redacted ? "target-redacted" : "source-local")}`,
+    `activation:${token.tokenId}:${text(event.sourcePresentationKey ?? event.source_presentation_key) ?? text(source) ?? "source-unavailable"}:${text(event.targetPresentationKey ?? event.target_presentation_key) ?? text(target) ?? (redacted ? "target-redacted" : "source-local")}`,
     token.label,
     token.accessibleName,
     [
@@ -1167,7 +1201,7 @@ export function explainNetHealth(rawEvent) {
   const delta = finiteNumber(event.netDelta ?? event.net_delta);
   return descriptor(
     "impact",
-    `net:${text(event.recipientPublicAgentId ?? event.recipient_public_agent_id) ?? "recipient-unavailable"}:${text(event.outcome) ?? "outcome-unavailable"}`,
+    `net:${text(event.recipientPresentationKey ?? event.recipient_presentation_key) ?? text(event.recipientPublicAgentId ?? event.recipient_public_agent_id) ?? "recipient-unavailable"}:${text(event.outcome) ?? "outcome-unavailable"}`,
     `Recipient NET ${humanize(event.outcome)}`,
     "Recipient-level before/after outcome; not source attribution.",
     [

@@ -1,4 +1,10 @@
-import { layoutRouteSet, routeMarkerPose } from "./routes.js";
+import {
+  authorizedPresentationAudience,
+  authorizedPresentationIncomingRows,
+  authorizedPresentationSceneView,
+  isAuthorizedPresentationFrame,
+} from "./authorized-presentation-adapter.js";
+import { createRouteGeometry, layoutRouteSet, routeMarkerPose } from "./routes.js";
 import {
   activationImpactSemantic,
   classTokenFromId,
@@ -941,6 +947,13 @@ export function transitionEpochKey(frame) {
 export function authorizationContextKey(frame) {
   const candidate = record(frame);
   const scene = frameScene(frame);
+  if (
+    candidate?.viewer_mode === "replay" &&
+    candidate.replay_audience !== "researcher" &&
+    candidate.replay_audience !== "actor_pov"
+  ) {
+    return null;
+  }
   const sessionId = identifier(candidate?.session_id);
   const runGeneration = integer(candidate?.run_generation);
   const audience =
@@ -954,9 +967,7 @@ export function authorizationContextKey(frame) {
     candidate?.viewer_mode === "replay"
       ? candidate.replay_audience === "actor_pov"
         ? integer(candidate.pov_global_slot)
-        : candidate.replay_audience === "shared_obs_source_material"
-          ? integer(candidate.selected_global_slot)
-          : null
+        : null
       : null;
   const controlled =
     audience === "agent_pov"
@@ -1280,6 +1291,386 @@ function radiusBySlot(scene, surface) {
   return radii;
 }
 
+/** @param {unknown} rawAnchor @param {ProjectionSurface | null} surface */
+function authorizedAnchor(rawAnchor, surface) {
+  const anchor = record(rawAnchor);
+  return anchor ? project(point(anchor.position), surface) : null;
+}
+
+/**
+ * Build choreography strictly from the normalized presentation's Latest
+ * Events branch. Outgoing inspection is intentionally outside this function.
+ * Shared observation deltas retain noncausal feed-only vocabulary.
+ *
+ * @param {Record<string, any>} presentation
+ * @param {ProjectionSurface | null} surface
+ * @returns {Readonly<ChoreographyPlan> | null}
+ */
+function buildAuthorizedPresentationChoreographyPlan(presentation, surface) {
+  const latest = record(presentation.latest_events);
+  const scene = authorizedPresentationSceneView(presentation);
+  if (!latest || !scene) {
+    return null;
+  }
+  const transitionId =
+    scientificIdentity(latest.incoming_transition_id) ??
+    scientificIdentity(latest.incoming_recipient_transition_id);
+  const simulatorStep =
+    integer(latest.incoming_successor_simulator_step_count) ??
+    integer(presentation.simulator_step_count);
+  if (transitionId === null || simulatorStep === null) {
+    return null;
+  }
+  const rows = authorizedPresentationIncomingRows(presentation);
+  const audience = authorizedPresentationAudience(presentation);
+  /** @type {Map<string, Record<string, any>>} */
+  const sceneByKey = new Map();
+  for (const candidate of array(scene.agents)) {
+    const agent = record(candidate);
+    if (agent && typeof agent.presentation_key === "string") {
+      sceneByKey.set(agent.presentation_key, agent);
+    }
+  }
+  /** @type {Record<string, any>[]} */
+  const planned = [];
+  const healthLaneByKey = new Map();
+  const statusLaneByKey = new Map();
+  for (const row of rows) {
+    const event = row.payload;
+    const common = {
+      eventId: row.id,
+      eventType: row.kind,
+      transitionId,
+      authorityVocabulary: row.vocabulary,
+    };
+    if (row.vocabulary === "observation_delta") {
+      planned.push(
+        Object.freeze({
+          ...common,
+          kind: "feed_only",
+          spatial: false,
+          noncausal: true,
+        }),
+      );
+      continue;
+    }
+    if (row.vocabulary === "recipient_cue") {
+      const recipientKey = presentation.recipient_presentation_key;
+      const recipientAgent = sceneByKey.get(recipientKey);
+      const recipient = project(point(recipientAgent?.position), surface);
+      if (
+        row.kind === "own_health_changed" &&
+        recipient &&
+        finiteNumber(event.start_health) !== null &&
+        finiteNumber(event.successor_health) !== null
+      ) {
+        const healthBefore = Number(event.start_health);
+        const healthAfter = Number(event.successor_health);
+        const delta = healthAfter - healthBefore;
+        planned.push(
+          Object.freeze({
+            ...common,
+            kind: "net_health",
+            recipientPresentationKey: recipientKey,
+            recipientPublicAgentId: presentation.recipient_public_agent_id,
+            recipient,
+            netDelta: delta,
+            healthBefore,
+            healthAfter,
+            outcome: delta < 0 ? "damage" : delta > 0 ? "healing" : "unchanged",
+            lane: 0,
+            spatial: true,
+            noncausal: true,
+            presentationKind: "successor_observation",
+            phaseStart: CHOREOGRAPHY_PHASES.povSuccessorObservationStart,
+            phaseEnd: CHOREOGRAPHY_PHASES.total,
+          }),
+        );
+      } else {
+        planned.push(
+          Object.freeze({
+            ...common,
+            kind: "feed_only",
+            spatial: false,
+            noncausal: true,
+          }),
+        );
+      }
+      continue;
+    }
+
+    const sourceAnchor = record(event.source_anchor);
+    const recipientAnchor = record(event.recipient_anchor);
+    const agentAnchor = record(event.agent_anchor);
+    if (row.kind === "ability_activated" && sourceAnchor) {
+      const sourceKey = identifier(sourceAnchor.presentation_key);
+      const targetKey = identifier(recipientAnchor?.presentation_key);
+      const source = authorizedAnchor(sourceAnchor, surface);
+      const target = authorizedAnchor(recipientAnchor, surface);
+      const sourceAgent = sourceKey === null ? null : sceneByKey.get(sourceKey);
+      if (sourceKey === null || source === null || !sourceAgent) {
+        planned.push(Object.freeze({ ...common, kind: "unknown", spatial: false }));
+        continue;
+      }
+      const component = event.ability_component;
+      const token =
+        component === "ultimate"
+          ? ultimateTokenFromClassId(sourceAgent.class_id, event)
+          : resolveVisualToken(
+              "activation",
+              sourceAgent.class_id === 5 ? "basic_heal" : "basic_damage",
+              event,
+            );
+      const targetAgent = targetKey === null ? null : sceneByKey.get(targetKey);
+      const route =
+        target && targetAgent
+          ? createRouteGeometry(
+              {
+                eventId: row.id,
+                source,
+                target,
+                sourceRadius: surface?.worldLengthToScreen(sourceAgent.radius) ?? 0,
+                targetRadius: surface?.worldLengthToScreen(targetAgent.radius) ?? 0,
+              },
+              surface?.viewportBounds ? { viewportBounds: surface.viewportBounds } : {},
+            )
+          : null;
+      planned.push(
+        Object.freeze({
+          ...common,
+          kind: "activation",
+          tokenId: token.tokenId,
+          token,
+          impactSemantic: activationImpactSemantic(token.tokenId),
+          lane: component === "ultimate" ? 1 : 0,
+          sourcePresentationKey: sourceKey,
+          sourcePublicAgentId: sourceAnchor.public_agent_id,
+          sourceClassId: sourceAgent.class_id,
+          sourceClass: classTokenFromId(sourceAgent.class_id),
+          targetPresentationKey: targetKey,
+          targetPublicAgentId: recipientAnchor?.public_agent_id ?? null,
+          targetDisclosure: targetKey === null ? "target_none" : "public",
+          source,
+          target,
+          route,
+          spatial: true,
+          presentationKind: route ? "routed" : "source_local",
+          phaseStart: CHOREOGRAPHY_PHASES.v2AbilityStart,
+          phaseImpact: CHOREOGRAPHY_PHASES.v2HealthResolutionStart - 20,
+          phaseEnd: CHOREOGRAPHY_PHASES.v2HealthResolutionStart,
+        }),
+      );
+      continue;
+    }
+    if (row.kind === "recipient_health_resolution" && recipientAnchor) {
+      const recipientKey = identifier(recipientAnchor.presentation_key);
+      const recipient = authorizedAnchor(recipientAnchor, surface);
+      const before = finiteNumber(event.transition_start_health);
+      const after = finiteNumber(event.health_after_combat_resolution);
+      const delta = finiteNumber(event.realized_net_health_change);
+      if (
+        recipientKey === null ||
+        !recipient ||
+        before === null ||
+        after === null ||
+        delta === null
+      ) {
+        planned.push(Object.freeze({ ...common, kind: "unknown", spatial: false }));
+        continue;
+      }
+      const lane = healthLaneByKey.get(recipientKey) ?? 0;
+      healthLaneByKey.set(recipientKey, lane + 1);
+      planned.push(
+        Object.freeze({
+          ...common,
+          kind: "net_health",
+          recipientPresentationKey: recipientKey,
+          recipientPublicAgentId: recipientAnchor.public_agent_id,
+          recipient,
+          netDelta: delta,
+          healthBefore: before,
+          healthAfter: after,
+          outcome: delta < 0 ? "damage" : delta > 0 ? "healing" : "unchanged",
+          lane,
+          spatial: lane < MAX_HEALTH_CUES_PER_RECIPIENT,
+          phaseStart: CHOREOGRAPHY_PHASES.v2HealthResolutionStart,
+          phaseEnd: CHOREOGRAPHY_PHASES.v2CountdownAndRegenStart,
+        }),
+      );
+      continue;
+    }
+    if (row.kind === "charge_phase_displacement") {
+      const startAnchor = record(event.start_anchor);
+      const endAnchor = record(event.end_anchor);
+      const key = identifier(startAnchor?.presentation_key);
+      const start = authorizedAnchor(startAnchor, surface);
+      const end = authorizedAnchor(endAnchor, surface);
+      planned.push(
+        key && start && end
+          ? Object.freeze({
+              ...common,
+              kind: "charge_displacement",
+              sourcePresentationKey: key,
+              sourcePublicAgentId: startAnchor?.public_agent_id,
+              targetPresentationKey: null,
+              start,
+              end,
+              pathKind: "charge_phase",
+              spatial: true,
+              persistent: true,
+              phaseStart: CHOREOGRAPHY_PHASES.v2ChargeStart,
+              phaseEnd: CHOREOGRAPHY_PHASES.v2MovementStart,
+            })
+          : Object.freeze({ ...common, kind: "unknown", spatial: false }),
+      );
+      continue;
+    }
+    if (STATUS_EVENT_TYPES.has(row.kind) && recipientAnchor) {
+      const recipientKey = identifier(recipientAnchor.presentation_key);
+      const recipient = authorizedAnchor(recipientAnchor, surface);
+      const source = authorizedAnchor(sourceAnchor, surface);
+      if (!recipientKey || !recipient) {
+        planned.push(Object.freeze({ ...common, kind: "unknown", spatial: false }));
+        continue;
+      }
+      const lane = statusLaneByKey.get(recipientKey) ?? 0;
+      statusLaneByKey.set(recipientKey, lane + 1);
+      const lifecycleId = {
+        status_aged_to_zero: "expired",
+        status_broken_by_damage: "trap_broken",
+        status_applied: "applied",
+        status_refreshed_or_extended: "refreshed",
+        status_cleared_by_new_death: "cleared_by_death",
+      }[row.kind];
+      planned.push(
+        Object.freeze({
+          ...common,
+          kind: "status_lifecycle",
+          tokenId: event.status_id,
+          token: resolveVisualToken("status", event.status_id, event),
+          lifecycle: lifecycleId,
+          lifecycleToken: resolveVisualToken("lifecycle", lifecycleId, event),
+          recipientPresentationKey: recipientKey,
+          recipientPublicAgentId: recipientAnchor.public_agent_id,
+          recipient,
+          sourcePresentationKey: sourceAnchor?.presentation_key ?? null,
+          sourcePublicAgentId: sourceAnchor?.public_agent_id ?? null,
+          source,
+          applicationSources:
+            source && sourceAnchor
+              ? Object.freeze([
+                  Object.freeze({
+                    eventId: row.id,
+                    sourcePresentationKey: sourceAnchor.presentation_key,
+                    sourcePublicAgentId: sourceAnchor.public_agent_id,
+                    source,
+                  }),
+                ])
+              : Object.freeze([]),
+          lane,
+          laneCount: 1,
+          atomicEventIds: Object.freeze([row.id]),
+          applicationEventIds: source ? Object.freeze([row.id]) : Object.freeze([]),
+          spatial: true,
+          phaseStart: CHOREOGRAPHY_PHASES.v2StatusStart,
+          phaseEnd: CHOREOGRAPHY_PHASES.v2ShieldStart,
+        }),
+      );
+      continue;
+    }
+    if (row.kind === "action_rejected") {
+      const actorAnchor = record(event.actor_anchor);
+      const actor = authorizedAnchor(actorAnchor, surface);
+      planned.push(
+        Object.freeze({
+          ...common,
+          kind: "rejected_action",
+          actorPresentationKey: actorAnchor?.presentation_key ?? null,
+          actorPublicAgentId:
+            actorAnchor?.public_agent_id ??
+            event.actor_identity?.public_agent_id ??
+            null,
+          actor,
+          target: null,
+          component: event.rejection_component,
+          route: null,
+          spatial: actor !== null,
+          phaseStart: CHOREOGRAPHY_PHASES.v2RejectionStart,
+          phaseEnd: CHOREOGRAPHY_PHASES.v2AbilityStart,
+        }),
+      );
+      continue;
+    }
+    if (
+      [
+        "combat_countdown_reset",
+        "health_regenerated",
+        "cooldown_started",
+        "cooldown_ready",
+        "agent_died",
+        "spawn_shield_expired",
+        "agent_respawned",
+      ].includes(row.kind)
+    ) {
+      const anchor = agentAnchor ?? recipientAnchor;
+      planned.push(
+        Object.freeze({
+          ...common,
+          kind: "semantic_pulse",
+          cueSemantic: row.kind,
+          anchor: authorizedAnchor(anchor, surface),
+          agentPresentationKey: anchor?.presentation_key ?? null,
+          agentPublicAgentId: anchor?.public_agent_id ?? null,
+          value:
+            row.kind === "health_regenerated"
+              ? finiteNumber(event.actual_health_regenerated)
+              : null,
+          spatial: anchor !== null,
+          phaseStart: CHOREOGRAPHY_PHASES.v2CountdownAndRegenStart,
+          phaseEnd: CHOREOGRAPHY_PHASES.total,
+        }),
+      );
+      continue;
+    }
+    planned.push(
+      Object.freeze({
+        ...common,
+        kind: "feed_only",
+        spatial: false,
+        noncausal: audience === "agent_pov",
+      }),
+    );
+  }
+  const scheduled = scheduleChoreography(planned);
+  const netEvents = layoutOutcomeCues(scheduled.events, surface, "net_health");
+  const events = Object.freeze(
+    layoutOutcomeCues(netEvents, surface, "status_lifecycle").map((event) =>
+      Object.isFrozen(event) ? event : Object.freeze(event),
+    ),
+  );
+  const spatialEventCount = events.filter((event) => event.spatial).length;
+  const persistentEventCount = events.filter((event) => event.persistent).length;
+  return Object.freeze({
+    epochKey: JSON.stringify([presentation.session_id, transitionId]),
+    authorizationKey: JSON.stringify([
+      presentation.session_id,
+      presentation.authority_epoch,
+      presentation.presentation_kind,
+      presentation.recipient_presentation_key,
+    ]),
+    fingerprint: `${events.length}:${hashText(JSON.stringify(rows.map(({ payload }) => payload)))}`,
+    transitionId,
+    simulatorStep,
+    phases: scheduled.phases,
+    events,
+    bounds: Object.freeze({
+      nodes: Math.min(events.length * 28 + 2, 512),
+      animations: Math.min(spatialEventCount * 3 + 2, 512),
+      persistentNodes: Math.min(persistentEventCount * 6, 64),
+    }),
+  });
+}
+
 /**
  * Build one immutable presentation plan from the already-authorized latest
  * scene/event batch. No simulator fact is derived here.
@@ -1289,6 +1680,9 @@ function radiusBySlot(scene, surface) {
  * @returns {Readonly<ChoreographyPlan> | null}
  */
 export function buildChoreographyPlan(frame, surface = null) {
+  if (isAuthorizedPresentationFrame(frame)) {
+    return buildAuthorizedPresentationChoreographyPlan(frame, surface);
+  }
   const candidate = record(frame);
   const scene = frameScene(frame);
   const batch = frameEventBatch(frame);
