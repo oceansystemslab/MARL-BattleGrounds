@@ -122,13 +122,18 @@ npm run install:browser --prefix web/visual_debugger
 scripts/dev/check_frontend.sh
 ```
 
-The frontend script runs format check, lint, typecheck, unit tests, and the
-complete Playwright E2E/visual suite. It does not install dependencies or update
-snapshots. Run it from the exact frozen commit candidate. When a changed helper
-spawns a package manager, interpreter, generated-artifact exporter, or browser,
-also exercise that path once from a clean worktree with cold local environment
-state; a warm developer environment can suppress first-run output and setup
-behavior that CI will encounter.
+With no arguments, the frontend script runs format check, lint, typecheck, unit
+tests, and the complete Playwright E2E/visual suite. CI uses `--static-only` once
+and distributes the same complete browser inventory across four isolated
+`--e2e-only --shard=N/4` jobs. Each shard retains one worker and file-local
+ordering; the matrix reduces wall time without weakening assertions or sharing
+service state. Required CI does not retry deterministic failures, and every
+browser shard has a 30-minute job ceiling. The script does not install
+dependencies or update snapshots. Run it from the exact frozen commit
+candidate. When a changed helper spawns a package manager, interpreter,
+generated-artifact exporter, or browser, also exercise that path once from a
+clean worktree with cold local environment state; a warm developer environment
+can suppress first-run output and setup behavior that CI will encounter.
 
 If a later fix occurs, rerun only the affected gate:
 

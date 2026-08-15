@@ -10,8 +10,36 @@ if ! command -v npm >/dev/null 2>&1; then
   exit 127
 fi
 
-npm run format:check --prefix "${FRONTEND_ROOT}"
-npm run lint --prefix "${FRONTEND_ROOT}"
-npm run typecheck --prefix "${FRONTEND_ROOT}"
-npm run test:unit --prefix "${FRONTEND_ROOT}"
-npm run test:e2e --prefix "${FRONTEND_ROOT}"
+run_static() {
+  npm run format:check --prefix "${FRONTEND_ROOT}"
+  npm run lint --prefix "${FRONTEND_ROOT}"
+  npm run typecheck --prefix "${FRONTEND_ROOT}"
+  npm run test:unit --prefix "${FRONTEND_ROOT}"
+}
+
+run_e2e() {
+  npm run test:e2e --prefix "${FRONTEND_ROOT}" -- "$@"
+}
+
+case "${1:-}" in
+  "")
+    run_static
+    run_e2e
+    ;;
+  --static-only)
+    shift
+    if (( $# != 0 )); then
+      echo "error: --static-only does not accept additional arguments." >&2
+      exit 2
+    fi
+    run_static
+    ;;
+  --e2e-only)
+    shift
+    run_e2e "$@"
+    ;;
+  *)
+    echo "usage: scripts/dev/check_frontend.sh [--static-only | --e2e-only [playwright arguments...]]" >&2
+    exit 2
+    ;;
+esac

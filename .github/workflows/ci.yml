@@ -41,9 +41,50 @@ jobs:
       - name: Run type checker
         run: uv run pyright
 
-  frontend-gates:
-    name: Frontend and browser gates
+  frontend-static-gates:
+    name: Frontend static gates
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          version: "0.11.16"
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install
+
+      - name: Sync Python environment
+        run: uv sync --locked --extra dev
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: web/visual_debugger/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: web/visual_debugger
+        run: npm ci
+
+      - name: Run frontend static gates
+        run: scripts/dev/check_frontend.sh --static-only
+
+  frontend-browser-gates:
+    name: Browser gates (${{ matrix.shard }}/4)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        shard: [1, 2, 3, 4]
 
     steps:
       - name: Check out repository
@@ -76,14 +117,35 @@ jobs:
         working-directory: web/visual_debugger
         run: npx playwright install --with-deps chromium
 
-      - name: Run frontend and browser gates
-        run: scripts/dev/check_frontend.sh
+      - name: Run browser shard
+        timeout-minutes: 25
+        run: scripts/dev/check_frontend.sh --e2e-only --shard=${{ matrix.shard }}/4
 
       - name: Upload browser failure artifacts
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: visual-debugger-browser-failures
+          name: visual-debugger-browser-failures-${{ matrix.shard }}-of-4
           path: web/visual_debugger/test-results
           if-no-files-found: ignore
           retention-days: 7
+
+  frontend-gates:
+    name: Frontend and browser gates
+    if: always()
+    needs:
+      - frontend-static-gates
+      - frontend-browser-gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Confirm frontend gates passed
+        env:
+          STATIC_RESULT: ${{ needs.frontend-static-gates.result }}
+          BROWSER_RESULT: ${{ needs.frontend-browser-gates.result }}
+        run: |
+          if [[ "${STATIC_RESULT}" != "success" || "${BROWSER_RESULT}" != "success" ]]; then
+            echo "Frontend static or browser shard gates failed."
+            exit 1
+          fi
