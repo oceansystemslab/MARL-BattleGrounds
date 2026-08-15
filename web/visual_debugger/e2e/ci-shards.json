@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "shards": [
+    ["authorized-presentation-install.spec.js"],
+    ["authorized-presentation-renderer.spec.js"],
+    ["control-parity.spec.js"],
+    ["recording-handoff.spec.js"],
+    ["replay-viewer.spec.js"],
+    ["resize.spec.js"],
+    ["scripted-live-advance.spec.js"],
+    ["server-lifecycle.spec.js"]
+  ]
+}

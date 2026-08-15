@@ -17,11 +17,13 @@ export default defineConfig({
   reporter: "line",
   outputDir: "test-results",
   use: {
+    actionTimeout: 10_000,
     browserName: "chromium",
     colorScheme: "dark",
     deviceScaleFactor: 1,
     headless: true,
     locale: "en-GB",
+    navigationTimeout: 30_000,
     reducedMotion: "no-preference",
     screenshot: "only-on-failure",
     viewport: { width: 1440, height: 900 },
