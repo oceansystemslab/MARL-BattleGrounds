@@ -3,6 +3,40 @@
 Use the smallest check that can disprove the change being made. A green command
 is not rerun until a later edit creates a plausible impact path to it.
 
+## Lean validation contract
+
+Excellence and efficiency are complementary requirements. Every review, test,
+or audit must answer a distinct question that could change an engineering
+decision. Do not add ceremony merely to increase the volume of evidence.
+
+- Define each checkpoint by one observable user or system outcome.
+- During implementation, run one focused regression and one adjacent
+  compatibility check. Run the literal CI gate once, after the candidate is
+  frozen.
+- Use one independent reviewer at the checkpoint boundary. Do not commission
+  overlapping audits, repeat hash freezes, or rerun unchanged evidence.
+- Stop a broad gate at its first actionable failure when possible. Diagnose and
+  repair that failure before spending time on the remainder.
+- Do not call a checkpoint complete or push it until the exact applicable CI
+  commands pass on the bytes being pushed.
+- Prefer a smaller proof with a precise failure signal over a larger proof that
+  obscures failures or consumes time without covering a new risk.
+
+Evaluate every product checkpoint against the four North Stars, briefly and
+concretely:
+
+- **Researcher Usability:** can a researcher understand and complete the public
+  task without misleading controls or hidden prerequisites?
+- **Sample Efficiency:** does the policy receive the necessary authorized,
+  same-epoch information without avoidable ambiguity or noise?
+- **Tactical Depth:** are all advertised and unmasked decisions meaningful,
+  reachable, and strategically distinct?
+- **Software Engineering:** is the result correct, maintainable, reproducible,
+  and validated with the least costly sufficient evidence?
+
+Efficiency is part of the Software Engineering North Star. Duplicate proof and
+unbounded serialized test time are process defects, not signs of rigor.
+
 ## Development selection
 
 | Change | Smallest justified proof |

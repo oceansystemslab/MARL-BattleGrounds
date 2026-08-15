@@ -148,7 +148,7 @@ class DebuggerService:
             raise ValueError(msg)
         if preset not in ("presentation", "analysis", "technical", "debug"):
             raise ValueError("unknown debugger preset")
-        self._session = (
+        self._session: DebuggerSession = (
             sanitize_pov_pending_target(session) if view_mode == "pov" else session
         )
         self._view_mode: ViewMode = view_mode

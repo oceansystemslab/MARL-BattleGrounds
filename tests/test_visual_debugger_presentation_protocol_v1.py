@@ -3288,9 +3288,7 @@ def test_live_inspection_envelope_rejects_stale_run_and_revision(
     rebound["live_inspection"]["source_run_generation"] = stale["source"][
         "source_run_generation"
     ]
-    rebound["live_inspection"]["source_revision"] = stale["source"][
-        "source_revision"
-    ]
+    rebound["live_inspection"]["source_revision"] = stale["source"]["source_revision"]
     rebound["live_inspection"]["source_authority_epoch"] = stale["source"][
         "source_authority_epoch"
     ]
