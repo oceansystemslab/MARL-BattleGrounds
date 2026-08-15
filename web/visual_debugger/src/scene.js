@@ -1,8 +1,8 @@
-import { formatCompactDisplayNumber, formatDisplayNumber } from "./display.js";
 import {
   authorizedPresentationSceneView,
   isAuthorizedPresentationFrame,
 } from "./authorized-presentation-adapter.js";
+import { formatCompactDisplayNumber, formatDisplayNumber } from "./display.js";
 import {
   explainAgent,
   explainAura,
@@ -170,14 +170,15 @@ function agentIdentity(agent) {
 
 /**
  * @param {unknown} frame
+ * @param {string | null | undefined} [localInspectedPresentationKey]
  * @returns {JsonRecord | null}
  */
-function frameScene(frame) {
+function frameScene(frame, localInspectedPresentationKey = undefined) {
   if (!isRecord(frame)) {
     return null;
   }
   if (isAuthorizedPresentationFrame(frame)) {
-    return authorizedPresentationSceneView(frame);
+    return authorizedPresentationSceneView(frame, localInspectedPresentationKey);
   }
   return isRecord(frame.scene) ? frame.scene : null;
 }
@@ -463,7 +464,7 @@ export class BattlefieldRenderer {
     const obstacle = createLayer("obstacle", { "aria-label": "Map obstacles" });
     const body = createLayer("body", { "aria-label": "Authorized agents" });
     const selectionLegality = createLayer("selection-legality", {
-      "aria-label": "Selection and exact selected-target legality",
+      "aria-label": "Selection and exact actor-owned legality",
     });
     this.selectionCues = createLayer("selection-cues", {
       "aria-hidden": "true",
@@ -519,11 +520,15 @@ export class BattlefieldRenderer {
    * Paint the durable facts in a debugger frame.
    *
    * @param {unknown} frame
-   * @param {{offline?: boolean, showRanges?: boolean}} [options]
+   * @param {{
+   *   offline?: boolean,
+   *   showRanges?: boolean,
+   *   localInspectedPresentationKey?: string | null,
+   * }} [options]
    * @returns {boolean} Whether the frame contained a paintable scene.
    */
   render(frame, options = {}) {
-    const scene = frameScene(frame);
+    const scene = frameScene(frame, options.localInspectedPresentationKey);
     const map = isRecord(scene?.map) ? scene.map : null;
     const width = finiteNumber(map?.width);
     const height = finiteNumber(map?.height);
@@ -1262,12 +1267,23 @@ export class BattlefieldRenderer {
     if (!legality) {
       return [];
     }
-    const target = projectedAgents.find(({ globalSlot, presentationKey }) =>
-      typeof legality.target_presentation_key === "string"
-        ? presentationKey === legality.target_presentation_key
-        : globalSlot === legality.target_global_slot,
+    const hasCertifiedOwner =
+      typeof legality.owner_presentation_key === "string" ||
+      Number.isInteger(legality.owner_global_slot);
+    const owner = projectedAgents.find(({ globalSlot, presentationKey }) =>
+      typeof legality.owner_presentation_key === "string"
+        ? presentationKey === legality.owner_presentation_key
+        : Number.isInteger(legality.owner_global_slot)
+          ? globalSlot === legality.owner_global_slot
+          : typeof legality.target_presentation_key === "string"
+            ? presentationKey === legality.target_presentation_key
+            : globalSlot === legality.target_global_slot,
     );
-    if (!target) {
+    if (
+      !owner ||
+      (hasCertifiedOwner &&
+        legality.owner_public_agent_id !== owner.agent.public_agent_id)
+    ) {
       return [];
     }
 
@@ -1278,11 +1294,11 @@ export class BattlefieldRenderer {
           center: agent.center,
           radius: agent.radius,
           statuses:
-            agent.layoutSlot === target.layoutSlot
+            agent.layoutSlot === owner.layoutSlot
               ? Object.freeze(["basic", "ultimate"])
               : Object.freeze([]),
           controlled: agent.controlled,
-          selected: agent.selected || agent.layoutSlot === target.layoutSlot,
+          selected: agent.selected || agent.layoutSlot === owner.layoutSlot,
         })),
         viewport: transform.viewportBounds,
         reservedRects,
@@ -1295,16 +1311,16 @@ export class BattlefieldRenderer {
       },
     );
     const placement = layout.docks.find(
-      ({ globalSlot }) => globalSlot === target.layoutSlot,
+      ({ globalSlot }) => globalSlot === owner.layoutSlot,
     );
     if (!placement) {
-      if (target.globalSlot !== null) {
+      if (owner.globalSlot !== null) {
         this.legalityCues.removeAttribute("data-suppressed-presentation-key");
-        this.legalityCues.dataset.suppressedSlot = String(target.globalSlot);
+        this.legalityCues.dataset.suppressedSlot = String(owner.globalSlot);
       } else {
         this.legalityCues.removeAttribute("data-suppressed-slot");
         this.legalityCues.dataset.suppressedPresentationKey = String(
-          target.presentationKey,
+          owner.presentationKey,
         );
       }
       return [];
@@ -1315,10 +1331,10 @@ export class BattlefieldRenderer {
     const group = svgElement("g", {
       class: "legality-dock",
       role: "group",
-      "aria-label": `Exact selected-target legality for ${agentIdentity(target.agent)}`,
+      "aria-label": `Exact actor-owned legality for ${agentIdentity(owner.agent)}`,
       "data-zone": "legality",
-      "data-slot": target.globalSlot,
-      "data-presentation-key": target.presentationKey,
+      "data-slot": owner.globalSlot,
+      "data-presentation-key": owner.presentationKey,
       "data-anchor": placement.anchor,
       "data-collision-free": placement.collisionFree,
     });
@@ -1357,7 +1373,7 @@ export class BattlefieldRenderer {
       const pill = svgElement("g", {
         class: "legality-pill",
         role: "img",
-        "aria-label": `${lane.name} lane ${lane.available ? "available" : "unavailable"}${armed ? `, armed and ${legality.armed_pair_legal ? "legal" : "illegal"}` : ""} for ${agentIdentity(target.agent)}`,
+        "aria-label": `${lane.name} lane ${lane.available ? "available" : "unavailable"}${armed ? `, armed and ${legality.armed_pair_legal ? "legal" : "illegal"}` : ""} for ${agentIdentity(owner.agent)}`,
         "data-zone": "legality-pill",
         "data-lane": lane.lane,
         "data-available": lane.available,

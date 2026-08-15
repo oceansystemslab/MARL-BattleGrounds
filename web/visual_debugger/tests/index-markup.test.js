@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const indexUrl = new URL("../index.html", import.meta.url);
+const stylesUrl = new URL("../styles.css", import.meta.url);
 const productionSourceUrls = [
   new URL("../src/controls.js", import.meta.url),
   new URL("../src/main.js", import.meta.url),
@@ -10,6 +11,69 @@ const productionSourceUrls = [
   new URL("../src/explanations.js", import.meta.url),
   new URL("../src/panels.js", import.meta.url),
 ];
+
+/**
+ * @param {string} markup
+ * @param {string} id
+ * @param {string} tagName
+ */
+function elementBody(markup, id, tagName) {
+  const match = markup.match(
+    new RegExp(`<${tagName}\\b[^>]*\\bid="${id}"[^>]*>([\\s\\S]*?)</${tagName}>`, "u"),
+  );
+  assert.ok(match, `#${id} must be a <${tagName}> element.`);
+  return match[1];
+}
+
+/**
+ * Return a direct stable disclosure body and prove it follows the native
+ * summary without interposing another container.
+ *
+ * @param {string} markup
+ * @param {string} panelId
+ */
+function disclosureBody(markup, panelId) {
+  const details = elementBody(markup, panelId, "details");
+  const bodyId = `${panelId}-body`;
+  const directWrappers = [
+    ...details.matchAll(
+      new RegExp(
+        `</summary>\\s*<div\\b(?=[^>]*\\bid="${bodyId}")(?=[^>]*\\bdata-disclosure-body="${panelId}")[^>]*>`,
+        "gu",
+      ),
+    ),
+  ];
+  assert.match(details, /^\s*<summary\b/u, `#${panelId} summary must remain direct.`);
+  assert.equal(
+    directWrappers.length,
+    1,
+    `#${panelId} must have exactly one direct stable disclosure body.`,
+  );
+
+  const wrapper = directWrappers[0];
+  const wrapperStart = wrapper.index + wrapper[0].lastIndexOf("<div");
+  const divTag = /<\/?div\b[^>]*>/giu;
+  divTag.lastIndex = wrapperStart;
+  const opening = divTag.exec(details);
+  assert.ok(opening, `#${bodyId} must be a div.`);
+
+  let depth = 1;
+  for (let tag = divTag.exec(details); tag; tag = divTag.exec(details)) {
+    depth += tag[0].startsWith("</") ? -1 : 1;
+    if (depth === 0) {
+      return details.slice(opening.index + opening[0].length, tag.index);
+    }
+  }
+  assert.fail(`#${bodyId} must close.`);
+}
+
+/** @param {string} markup */
+function textContent(markup) {
+  return markup
+    .replace(/<[^>]+>/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
 
 test("static debugger IDs are unique", async () => {
   const markup = await readFile(indexUrl, "utf8");
@@ -30,6 +94,47 @@ test("every native disclosure has one named phrasing-content summary", async () 
       /<(?:address|article|aside|div|dl|fieldset|footer|form|h[1-6]|header|main|nav|ol|p|section|table|ul)\b/iu,
     );
     assert.notEqual(content.replace(/<[^>]+>/gu, "").trim(), "");
+  }
+});
+
+test("every CP3 disclosure keeps its scientific content in one stable direct body", async () => {
+  const markup = await readFile(indexUrl, "utf8");
+  const panels = {
+    "command-deck": [
+      "command-controlled-actor",
+      "stay-button",
+      "command-target-select",
+      "no-combat-button",
+      "basic-button",
+      "ultimate-button",
+      "command-commit-title",
+      "command-commit-summary",
+      "submit-turn-button",
+      "reset-button",
+    ],
+    "roster-details": ["roster"],
+    "agent-details": ["selection-card"],
+    "pending-turn-details": ["pending-scope", "pending-card"],
+    "latest-transition-details": ["accepted-card", "accepted-announcement"],
+    "events-details": ["event-feed"],
+    "visual-key": ["live-visual-key", "replay-visual-key"],
+    "technical-frame-details": ["diagnostics-card"],
+  };
+
+  for (const [panelId, contentIds] of Object.entries(panels)) {
+    const body = disclosureBody(markup, panelId);
+    for (const contentId of contentIds) {
+      assert.match(
+        body,
+        new RegExp(`\\bid="${contentId}"`, "u"),
+        `#${contentId} must stay inside #${panelId}-body.`,
+      );
+      assert.equal(
+        [...markup.matchAll(new RegExp(`\\bid="${contentId}"`, "gu"))].length,
+        1,
+        `#${contentId} must remain unique.`,
+      );
+    }
   }
 });
 
@@ -86,4 +191,66 @@ test("browser production paths omit retired navigation and privileged display co
       /Privileged researcher|Press N|PLAYBACK \/ INSPECTION ONLY/u,
     );
   }
+});
+
+test("battlefield support owns visible instructions, product controls, and minimal keys", async () => {
+  const [markup, styles] = await Promise.all([
+    readFile(indexUrl, "utf8"),
+    readFile(stylesUrl, "utf8"),
+  ]);
+  const battlefieldShellStart = markup.indexOf('id="battlefield-shell"');
+  const supportStart = markup.indexOf('<div class="battlefield-support">');
+  const commandDeckStart = markup.indexOf('<details id="command-deck"');
+  assert.notEqual(battlefieldShellStart, -1);
+  assert.ok(battlefieldShellStart < supportStart);
+  assert.ok(supportStart < commandDeckStart);
+
+  assert.match(
+    markup,
+    /id="battlefield"[\s\S]*?aria-describedby="battlefield-instructions"/u,
+  );
+  assert.match(
+    markup,
+    /id="battlefield"[\s\S]*?role="img"[\s\S]*?tabindex="-1"[\s\S]*?aria-label="Battlefield unavailable until product identity is validated\."/u,
+  );
+  assert.doesNotMatch(
+    markup,
+    /id="battlefield"[\s\S]*?aria-label="Interactive battlefield/u,
+  );
+  assert.match(
+    markup,
+    /id="battlefield-instructions" class="battlefield-instructions"/u,
+  );
+  assert.match(markup, /Product-specific Battlefield instructions are loading\./u);
+  assert.doesNotMatch(markup, /id="battlefield-instructions"[^>]*class="[^"]*sr-only/u);
+
+  const utilities = elementBody(markup, "battlefield-utilities", "fieldset");
+  for (const id of [
+    "live-ranges-button",
+    "replay-ranges-button",
+    "replay-clear-reference-button",
+  ]) {
+    assert.match(utilities, new RegExp(`id="${id}"`, "u"));
+    assert.equal([...markup.matchAll(new RegExp(`id="${id}"`, "gu"))].length, 1);
+  }
+  assert.match(utilities, />Clear Selection<\/button>/u);
+  assert.doesNotMatch(markup, /Clear Reference/u);
+
+  /** @param {string} id */
+  const labels = (id) =>
+    [...elementBody(markup, id, "dl").matchAll(/<dt>([\s\S]*?)<\/dt>/gu)].map((match) =>
+      textContent(match[1]),
+    );
+  assert.deepEqual(labels("live-visual-key"), [
+    "Team A",
+    "Team B",
+    "Controlled",
+    "Selected target",
+  ]);
+  assert.deepEqual(labels("replay-visual-key"), ["Team A", "Team B", "Selected agent"]);
+
+  assert.match(
+    styles,
+    /html:not\(\[data-product-kind\]\) \[data-live-only\],[\s\S]*html:not\(\[data-product-kind\]\) \[data-replay-only\],[\s\S]*html:not\(\[data-product-kind\]\) #battlefield-instructions,[\s\S]*html\[data-product-kind="combat_debugger"\] \[data-replay-only\],[\s\S]*html\[data-product-kind="replay_viewer"\] \[data-live-only\]/u,
+  );
 });

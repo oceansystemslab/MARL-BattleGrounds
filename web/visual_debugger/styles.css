@@ -55,6 +55,19 @@ html body [hidden] {
   display: none;
 }
 
+/*
+ * Product-specific controls stay absent until the synchronous bootstrap has
+ * been validated by main.js. The product attribute then remains a CSS-level
+ * defense against a stale or pending frame exposing the opposite product IA.
+ */
+html:not([data-product-kind]) [data-live-only],
+html:not([data-product-kind]) [data-replay-only],
+html:not([data-product-kind]) #battlefield-instructions,
+html[data-product-kind="combat_debugger"] [data-replay-only],
+html[data-product-kind="replay_viewer"] [data-live-only] {
+  display: none;
+}
+
 html {
   min-width: 20rem;
   background: var(--background);
@@ -382,15 +395,13 @@ select {
 
 .replay-timeline__summary,
 .replay-timeline__transport,
-.replay-timeline__options,
 .replay-badges {
   display: flex;
   align-items: center;
   gap: 0.55rem;
 }
 
-.replay-timeline__transport,
-.replay-timeline__options {
+.replay-timeline__transport {
   min-inline-size: 0;
   padding: 0;
   border: 0;
@@ -471,16 +482,6 @@ select {
   text-align: end;
 }
 
-.replay-timeline__options {
-  flex-wrap: wrap;
-}
-
-.replay-timeline__options button[aria-pressed="true"] {
-  border-color: rgb(34 211 238 / 58%);
-  color: #a5f3fc;
-  background: rgb(34 211 238 / 12%);
-}
-
 .session-toolbar label {
   display: grid;
   gap: 0.25rem;
@@ -512,12 +513,6 @@ select {
   color: var(--text);
   font-size: 0.95rem;
   font-variant-numeric: tabular-nums;
-}
-
-#live-ranges-button[aria-pressed="true"] {
-  border-color: rgb(34 211 238 / 58%);
-  color: #a5f3fc;
-  background: rgb(34 211 238 / 12%);
 }
 
 .button--primary {
@@ -693,6 +688,45 @@ select {
   text-align: center;
   transform: translate(-50%, -50%);
   pointer-events: none;
+}
+
+.battlefield-support {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.55rem 0.8rem;
+  align-items: start;
+  margin-top: 0.45rem;
+}
+
+.battlefield-instructions {
+  max-width: 68rem;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+.battlefield-utilities {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.4rem;
+  min-inline-size: 0;
+  padding: 0;
+  border: 0;
+  margin: 0;
+}
+
+.battlefield-utilities button {
+  min-height: 1.85rem;
+  padding: 0.28rem 0.55rem;
+  font-size: 0.7rem;
+}
+
+.battlefield-utilities button[aria-pressed="true"] {
+  border-color: rgb(34 211 238 / 58%);
+  color: #a5f3fc;
+  background: rgb(34 211 238 / 12%);
 }
 
 #visual-tooltip.visual-tooltip {
@@ -1939,6 +1973,23 @@ select {
   content: "▾";
 }
 
+.disclosure-body {
+  min-width: 0;
+  max-width: 100%;
+  max-height: min(20rem, 30vh);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior-block: contain;
+  scrollbar-color: var(--border-bright) transparent;
+  scrollbar-gutter: stable;
+  scroll-padding-block: 0.45rem;
+}
+
+.command-deck__body {
+  display: grid;
+  gap: 0.5rem;
+}
+
 .command-deck__title,
 .command-group h4 {
   margin: 0;
@@ -2164,7 +2215,7 @@ select {
 }
 
 .command-group--inspect .command-button-row {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .command-group--session {
@@ -2228,10 +2279,6 @@ select {
   display: grid;
   align-content: start;
   gap: 0.7rem;
-  max-height: calc(100vh - 9.5rem);
-  overflow: auto;
-  contain: paint;
-  scrollbar-color: var(--border-bright) transparent;
 }
 
 .hud-section {
@@ -2348,6 +2395,35 @@ select {
   box-shadow: inset 0 0 0 1px var(--target);
 }
 
+.roster-row--authorized {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.roster-primary-action {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  padding: 0.16rem;
+  border-color: transparent;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+}
+
+.roster-primary-action:hover:not(:disabled) {
+  border-color: var(--border-bright);
+  background: rgb(255 255 255 / 3%);
+}
+
+.roster-primary-action__summary {
+  display: grid;
+  min-width: 0;
+}
+
+.roster-row__facts {
+  min-width: 0;
+}
+
 .roster-identity {
   display: flex;
   align-items: baseline;
@@ -2356,6 +2432,26 @@ select {
 
 .roster-id {
   font-weight: 800;
+}
+
+.roster-id[data-class="mage"] {
+  color: var(--class-mage);
+}
+
+.roster-id[data-class="warrior"] {
+  color: var(--class-warrior);
+}
+
+.roster-id[data-class="hunter"] {
+  color: var(--class-hunter);
+}
+
+.roster-id[data-class="rogue"] {
+  color: var(--class-rogue);
+}
+
+.roster-id[data-class="priest"] {
+  color: var(--class-priest);
 }
 
 .roster-class,
@@ -2475,12 +2571,14 @@ select {
   grid-column: 1 / -1;
 }
 
+.selected-outgoing-target h3,
 .selected-legality h3,
 .action-result h3,
 .action-tuple h4 {
   margin: 0;
 }
 
+.selected-outgoing-target h3,
 .selected-legality h3,
 .action-result h3 {
   font-size: 0.78rem;
@@ -2494,6 +2592,7 @@ select {
   text-transform: uppercase;
 }
 
+.selected-outgoing-target,
 .selected-legality {
   display: grid;
   grid-column: 1 / -1;
@@ -2796,54 +2895,6 @@ select {
   border-radius: 0;
 }
 
-.key-swatch--basic {
-  color: var(--basic);
-}
-
-.key-swatch--ultimate {
-  color: var(--ultimate);
-}
-
-.key-swatch--net {
-  color: var(--success);
-  border-radius: 0.15rem;
-}
-
-.key-range {
-  display: inline-block;
-  width: 1.5rem;
-  height: 0.18rem;
-  background: currentColor;
-}
-
-.key-range--observation {
-  color: var(--text);
-  mask: repeating-linear-gradient(to right, #000 0 2px, transparent 2px 6px);
-}
-
-.key-range--basic {
-  background: linear-gradient(
-    to right,
-    var(--class-mage),
-    var(--class-warrior),
-    var(--class-hunter),
-    var(--class-rogue),
-    var(--class-priest)
-  );
-  mask: repeating-linear-gradient(to right, #000 0 7px, transparent 7px 11px);
-}
-
-.key-range--ultimate {
-  color: var(--ultimate);
-  mask: repeating-linear-gradient(
-    to right,
-    #000 0 8px,
-    transparent 8px 12px,
-    #000 12px 14px,
-    transparent 14px 18px
-  );
-}
-
 .empty-copy {
   margin: 0;
   color: var(--text-muted);
@@ -2949,12 +3000,6 @@ select {
     grid-template-columns: 1fr;
   }
 
-  .hud-panel {
-    max-height: min(65vh, 42rem);
-    overflow: auto;
-    overscroll-behavior: contain;
-  }
-
   .battlefield,
   .battlefield-shell {
     min-height: 24rem;
@@ -2966,6 +3011,13 @@ select {
 }
 
 @media (max-width: 42rem) {
+  .battlefield-support {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .battlefield-utilities {
+    justify-content: flex-start;
+  }
   .app-header,
   .panel-heading {
     align-items: flex-start;
@@ -3167,10 +3219,6 @@ select {
     font-size: 0.72rem;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  .hud-panel {
-    max-height: calc(100vh - 12rem);
   }
 
   .command-deck {

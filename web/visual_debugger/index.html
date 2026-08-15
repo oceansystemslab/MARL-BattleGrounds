@@ -208,15 +208,6 @@
           Tick 0 / 0
         </output>
       </fieldset>
-      <fieldset class="replay-timeline__options">
-        <legend class="sr-only">Replay presentation options</legend>
-        <button id="replay-ranges-button" type="button" aria-pressed="false">
-          Ranges
-        </button>
-        <button id="replay-clear-reference-button" type="button">
-          Clear Reference
-        </button>
-      </fieldset>
     </section>
 
     <div id="notice" class="notice" data-level="info" role="status" hidden></div>
@@ -237,21 +228,47 @@
           <svg
             id="battlefield"
             class="battlefield"
-            role="application"
-            tabindex="0"
-            aria-label="Interactive battlefield. Press Help for keyboard controls."
+            role="img"
+            tabindex="-1"
+            aria-label="Battlefield unavailable until product identity is validated."
             aria-describedby="battlefield-instructions"
           ></svg>
           <p id="battlefield-empty" class="battlefield-empty">
             Connecting to the local product service…
           </p>
         </div>
-        <p id="battlefield-instructions" class="sr-only">
-          The battlefield owns debugger keyboard commands while it has focus.
-          Tab and Shift Tab cycle controlled actors here. Escape clears the
-          target and moves focus to the command deck, or to Help while commands
-          are unavailable. Tab behaves normally in the side panel.
-        </p>
+        <div class="battlefield-support">
+          <p id="battlefield-instructions" class="battlefield-instructions">
+            Product-specific Battlefield instructions are loading.
+          </p>
+          <fieldset
+            id="battlefield-utilities"
+            class="battlefield-utilities"
+            aria-label="Battlefield presentation controls"
+          >
+            <legend class="sr-only">Battlefield presentation controls</legend>
+            <button
+              id="live-ranges-button"
+              type="button"
+              data-live-only
+              data-key="g"
+              aria-pressed="false"
+            >Ranges</button>
+            <button
+              id="replay-ranges-button"
+              type="button"
+              data-replay-only
+              aria-pressed="false"
+              hidden
+            >Ranges</button>
+            <button
+              id="replay-clear-reference-button"
+              type="button"
+              data-replay-only
+              hidden
+            >Clear Selection</button>
+          </fieldset>
+        </div>
 
         <details id="command-deck" class="command-deck" data-live-only open>
           <summary class="command-deck__header">
@@ -261,82 +278,87 @@
             </span>
           </summary>
 
-          <div class="command-deck__composer">
-            <div class="command-group command-group--compose command-group--movement">
-              <div class="command-group__heading">
-                <span class="command-step" aria-hidden="true">01</span>
-                <div>
-                  <h4>Movement</h4>
-                  <p id="command-controlled-actor" aria-live="polite">
-                    Actor · unavailable
-                  </p>
+          <div
+            id="command-deck-body"
+            class="disclosure-body command-deck__body"
+            data-disclosure-body="command-deck"
+          >
+            <div class="command-deck__composer">
+              <div class="command-group command-group--compose command-group--movement">
+                <div class="command-group__heading">
+                  <span class="command-step" aria-hidden="true">01</span>
+                  <div>
+                    <h4>Movement</h4>
+                    <p id="command-controlled-actor" aria-live="polite">
+                      Actor · unavailable
+                    </p>
+                  </div>
+                </div>
+                <div class="movement-grid">
+                  <button type="button" data-key="q" data-move-action="6" data-command-role="draft" aria-label="Move northwest">↖</button>
+                  <button type="button" data-key="w" data-move-action="1" data-command-role="draft" aria-label="Move north">↑</button>
+                  <button type="button" data-key="e" data-move-action="5" data-command-role="draft" aria-label="Move northeast">↗</button>
+                  <button type="button" data-key="a" data-move-action="4" data-command-role="draft" aria-label="Move west">←</button>
+                  <button id="stay-button" type="button" data-key="x" data-move-action="0" data-command-role="draft" aria-label="Stay">•</button>
+                  <button type="button" data-key="d" data-move-action="3" data-command-role="draft" aria-label="Move east">→</button>
+                  <button type="button" data-key="z" data-move-action="8" data-command-role="draft" aria-label="Move southwest">↙</button>
+                  <button type="button" data-key="s" data-move-action="2" data-command-role="draft" aria-label="Move south">↓</button>
+                  <button type="button" data-key="c" data-move-action="7" data-command-role="draft" aria-label="Move southeast">↘</button>
                 </div>
               </div>
-              <div class="movement-grid">
-                <button type="button" data-key="q" data-move-action="6" data-command-role="draft" aria-label="Move northwest">↖</button>
-                <button type="button" data-key="w" data-move-action="1" data-command-role="draft" aria-label="Move north">↑</button>
-                <button type="button" data-key="e" data-move-action="5" data-command-role="draft" aria-label="Move northeast">↗</button>
-                <button type="button" data-key="a" data-move-action="4" data-command-role="draft" aria-label="Move west">←</button>
-                <button id="stay-button" type="button" data-key="x" data-move-action="0" data-command-role="draft" aria-label="Stay">•</button>
-                <button type="button" data-key="d" data-move-action="3" data-command-role="draft" aria-label="Move east">→</button>
-                <button type="button" data-key="z" data-move-action="8" data-command-role="draft" aria-label="Move southwest">↙</button>
-                <button type="button" data-key="s" data-move-action="2" data-command-role="draft" aria-label="Move south">↓</button>
-                <button type="button" data-key="c" data-move-action="7" data-command-role="draft" aria-label="Move southeast">↘</button>
-              </div>
-            </div>
 
-            <div class="command-group command-group--compose command-group--action">
-              <div class="command-group__heading">
-                <span class="command-step" aria-hidden="true">02</span>
-                <div>
-                  <h4>Action</h4>
-                  <p>Target and combat lane</p>
+              <div class="command-group command-group--compose command-group--action">
+                <div class="command-group__heading">
+                  <span class="command-step" aria-hidden="true">02</span>
+                  <div>
+                    <h4>Action</h4>
+                    <p>Target and combat lane</p>
+                  </div>
+                </div>
+                <label class="command-target">
+                  <span>Target</span>
+                  <select id="command-target-select" aria-label="Pending target">
+                    <option value="">No target</option>
+                  </select>
+                </label>
+                <div class="button-row command-choice-row">
+                  <button id="no-combat-button" type="button" data-key="0" data-command-role="draft" aria-pressed="false">No combat</button>
+                  <button id="basic-button" type="button" data-key="1" data-command-role="draft" aria-pressed="false">Arm Basic</button>
+                  <button id="ultimate-button" type="button" data-key="2" data-command-role="draft" aria-pressed="false">Arm Ultimate</button>
                 </div>
               </div>
-              <label class="command-target">
-                <span>Target</span>
-                <select id="command-target-select" aria-label="Pending target">
-                  <option value="">No target</option>
-                </select>
-              </label>
-              <div class="button-row command-choice-row">
-                <button id="no-combat-button" type="button" data-key="0" data-command-role="draft" aria-pressed="false">No combat</button>
-                <button id="basic-button" type="button" data-key="1" data-command-role="draft" aria-pressed="false">Arm Basic</button>
-                <button id="ultimate-button" type="button" data-key="2" data-command-role="draft" aria-pressed="false">Arm Ultimate</button>
+            </div>
+
+            <div class="command-commit">
+              <div class="command-commit__copy">
+                <span>Commit</span>
+                <strong id="command-commit-title">Submit the staged joint turn</strong>
+                <small id="command-commit-summary">One authoritative transition</small>
               </div>
-            </div>
-          </div>
-
-          <div class="command-commit">
-            <div class="command-commit__copy">
-              <span>Commit</span>
-              <strong id="command-commit-title">Submit the staged joint turn</strong>
-              <small id="command-commit-summary">One authoritative transition</small>
-            </div>
-            <div class="command-commit__actions">
-              <button id="submit-turn-button" type="button" data-key="Enter" data-command-role="interactive-submit" class="button--primary">
-                Submit joint turn
-              </button>
-            </div>
-          </div>
-
-          <div class="command-deck__utilities">
-            <div class="command-group command-group--utility command-group--inspect">
-              <h4>Inspect</h4>
-              <div class="button-row command-button-row">
-                <button type="button" data-key="Tab">Next actor</button>
-                <button type="button" data-key="Tab" data-shift="true">
-                  Previous actor
+              <div class="command-commit__actions">
+                <button id="submit-turn-button" type="button" data-key="Enter" data-command-role="interactive-submit" class="button--primary">
+                  Submit joint turn
                 </button>
-                <button type="button" data-key="Escape">Clear target</button>
-                <button id="live-ranges-button" type="button" data-key="g" aria-pressed="false">Ranges</button>
               </div>
             </div>
 
-            <div class="command-group command-group--utility command-group--session">
-              <h4>Session</h4>
-              <div class="button-row command-button-row">
-                <button id="reset-button" type="button">Reset</button>
+            <div class="command-deck__utilities">
+              <div class="command-group command-group--utility command-group--inspect">
+                <h4>Inspect</h4>
+                <div class="button-row command-button-row">
+                  <button type="button" data-key="Tab">Next actor</button>
+                  <button type="button" data-key="Tab" data-shift="true">
+                    Previous actor
+                  </button>
+                  <button type="button" data-key="Escape">Clear target</button>
+                </div>
+              </div>
+
+              <div class="command-group command-group--utility command-group--session">
+                <h4>Session</h4>
+                <div class="button-row command-button-row">
+                  <button id="reset-button" type="button">Reset</button>
+                </div>
               </div>
             </div>
           </div>
@@ -349,15 +371,19 @@
             <strong id="roster-heading" class="section-title">Roster</strong>
             <span id="roster-count" class="count-badge">0 visible</span>
           </summary>
-          <div id="roster" class="roster">
-            <p class="empty-copy">No authorized agents received yet.</p>
+          <div id="roster-details-body" class="disclosure-body" data-disclosure-body="roster-details">
+            <div id="roster" class="roster">
+              <p class="empty-copy">No authorized agents received yet.</p>
+            </div>
           </div>
         </details>
 
         <details id="agent-details" class="hud-section semantic-inspector">
-          <summary><span id="selection-heading">Agent Details</span></summary>
-          <div id="selection-card" class="fact-card">
-            <p class="empty-copy">Select an authorized agent to inspect its details.</p>
+          <summary><span id="selection-heading">Comprehensive Agent Details</span></summary>
+          <div id="agent-details-body" class="disclosure-body" data-disclosure-body="agent-details">
+            <div id="selection-card" class="fact-card">
+              <p class="empty-copy">Select an authorized agent to inspect its details.</p>
+            </div>
           </div>
         </details>
 
@@ -366,25 +392,37 @@
             <strong id="pending-heading" class="section-title">Pending joint turn</strong>
             <span id="pending-count" class="count-badge">0 actors</span>
           </summary>
-          <p id="pending-scope" class="section-note">
-            Waiting for authoritative submission scope.
-          </p>
-          <article id="pending-card" class="action-card">
-            <p class="empty-copy">No pending action.</p>
-          </article>
+          <div
+            id="pending-turn-details-body"
+            class="disclosure-body"
+            data-disclosure-body="pending-turn-details"
+          >
+            <p id="pending-scope" class="section-note">
+              Waiting for authoritative submission scope.
+            </p>
+            <article id="pending-card" class="action-card">
+              <p class="empty-copy">No pending action.</p>
+            </article>
+          </div>
         </details>
 
         <details id="latest-transition-details" class="hud-section" data-live-only>
           <summary><span id="accepted-heading">Latest transition</span></summary>
-          <article id="accepted-card" class="action-card">
-            <p class="empty-copy">No transition yet.</p>
-          </article>
-          <p
-            id="accepted-announcement"
-            class="sr-only"
-            aria-live="polite"
-            aria-atomic="true"
-          ></p>
+          <div
+            id="latest-transition-details-body"
+            class="disclosure-body"
+            data-disclosure-body="latest-transition-details"
+          >
+            <article id="accepted-card" class="action-card">
+              <p class="empty-copy">No transition yet.</p>
+            </article>
+            <p
+              id="accepted-announcement"
+              class="sr-only"
+              aria-live="polite"
+              aria-atomic="true"
+            ></p>
+          </div>
         </details>
 
         <details id="events-details" class="hud-section">
@@ -392,44 +430,47 @@
             <strong id="events-heading" class="section-title">Latest events</strong>
             <span id="event-count" class="count-badge">0</span>
           </summary>
-          <ol id="event-feed" class="event-feed">
-            <li class="empty-copy">No transition events.</li>
-          </ol>
+          <div id="events-details-body" class="disclosure-body" data-disclosure-body="events-details">
+            <ol id="event-feed" class="event-feed">
+              <li class="empty-copy">No transition events.</li>
+            </ol>
+          </div>
         </details>
 
         <details id="visual-key" class="hud-section visual-key">
           <summary>Visual key</summary>
-          <dl class="visual-key__list">
-            <dt><span class="key-swatch key-swatch--team-a"></span>Team A</dt>
-            <dd>Blue solid perimeter</dd>
-            <dt><span class="key-swatch key-swatch--team-b"></span>Team B</dt>
-            <dd>Red solid perimeter with right-edge chevron</dd>
-            <dt><span class="key-swatch key-swatch--controlled"></span>Controlled</dt>
-            <dd>Bright outer halo</dd>
-            <dt><span class="key-swatch key-swatch--selected"></span>Selected</dt>
-            <dd>Magenta corner reticle</dd>
-            <dt><span class="key-range key-range--observation"></span>Observation</dt>
-            <dd>White dotted range</dd>
-            <dt><span class="key-range key-range--basic"></span>Basic range</dt>
-            <dd>Class-colored dashed range</dd>
-            <dt><span class="key-range key-range--ultimate"></span>Ultimate range</dt>
-            <dd>Purple dash-dot range</dd>
-            <dt><span class="key-swatch key-swatch--basic"></span>0/B</dt>
-            <dd>Exact Basic-lane availability</dd>
-            <dt><span class="key-swatch key-swatch--ultimate"></span>1/U</dt>
-            <dd>Exact Ultimate-lane availability</dd>
-            <dt><span class="key-swatch key-swatch--net"></span>NET</dt>
-            <dd>
-              One recipient-level before/after health outcome; never a
-              per-source amount
-            </dd>
-          </dl>
+          <div id="visual-key-body" class="disclosure-body" data-disclosure-body="visual-key">
+            <dl id="live-visual-key" class="visual-key__list" data-live-only>
+              <dt><span class="key-swatch key-swatch--team-a"></span>Team A</dt>
+              <dd>Blue solid perimeter</dd>
+              <dt><span class="key-swatch key-swatch--team-b"></span>Team B</dt>
+              <dd>Red solid perimeter with right-edge chevron</dd>
+              <dt><span class="key-swatch key-swatch--controlled"></span>Controlled</dt>
+              <dd>Bright outer halo</dd>
+              <dt><span class="key-swatch key-swatch--selected"></span>Selected target</dt>
+              <dd>Magenta corner reticle</dd>
+            </dl>
+            <dl id="replay-visual-key" class="visual-key__list" data-replay-only hidden>
+              <dt><span class="key-swatch key-swatch--team-a"></span>Team A</dt>
+              <dd>Blue solid perimeter</dd>
+              <dt><span class="key-swatch key-swatch--team-b"></span>Team B</dt>
+              <dd>Red solid perimeter with right-edge chevron</dd>
+              <dt><span class="key-swatch key-swatch--selected"></span>Selected agent</dt>
+              <dd>Magenta corner reticle</dd>
+            </dl>
+          </div>
         </details>
 
         <details id="technical-frame-details" class="hud-section diagnostics">
           <summary>Technical frame</summary>
-          <div id="diagnostics-card" class="diagnostics-card">
-            <p class="empty-copy">No frame received.</p>
+          <div
+            id="technical-frame-details-body"
+            class="disclosure-body"
+            data-disclosure-body="technical-frame-details"
+          >
+            <div id="diagnostics-card" class="diagnostics-card">
+              <p class="empty-copy">No frame received.</p>
+            </div>
           </div>
         </details>
       </aside>
@@ -455,32 +496,68 @@
           </div>
           <button id="help-close-button" class="button button--quiet" type="submit" value="close">Close</button>
         </div>
-        <p data-live-only>
-          Click the battlefield once to give it command focus. Panel controls
-          keep ordinary browser keyboard and Tab behavior.
-        </p>
-        <dl class="help-grid" data-live-only>
-          <dt>Tab / Shift+Tab</dt><dd>Cycle the controlled actor</dd>
-          <dt>Left click</dt><dd>Control the clicked authorized actor</dd>
-          <dt>Shift+left click</dt><dd>Select the clicked authorized target</dd>
-          <dt>Right click</dt><dd>Clear the target</dd>
-          <dt>Escape</dt>
-          <dd>Clear the target and leave battlefield focus</dd>
-          <dt>WASD / QEZC</dt><dd>Choose movement for the controlled actor</dd>
-          <dt>Arrow keys</dt><dd>Cardinal movement aliases</dd>
-          <dt>X</dt><dd>Set the controlled actor to Stay</dd>
-          <dt>0 / 1 / 2</dt><dd>Stage no combat / Basic / Ultimate</dd>
-          <dt>Space / Enter</dt>
-          <dd>
-            Submit every staged actor in Oracle View, or only the
-            controlled actor in agent POV
-          </dd>
-          <dt>R</dt><dd>Deterministically reset the episode</dd>
-          <dt>G</dt><dd>Toggle Oracle View ranges</dd>
-        </dl>
-        <p class="help-note" data-live-only>
-          Actor drafts persist when you cycle or directly control another
-          actor.
+        <div data-live-only data-live-help-mode="oracle" hidden>
+          <p>
+            Click the battlefield once to give it command focus. Panel controls
+            keep ordinary browser keyboard and Tab behavior.
+          </p>
+          <dl class="help-grid">
+            <dt>Tab / Shift+Tab</dt><dd>Cycle the controlled actor</dd>
+            <dt>Left click</dt><dd>Control the clicked authorized actor</dd>
+            <dt>Shift+left click</dt><dd>Select the clicked authorized target</dd>
+            <dt>Right click</dt><dd>Clear the target</dd>
+            <dt>Escape</dt>
+            <dd>Clear the target and leave battlefield focus</dd>
+            <dt>WASD / QEZC</dt><dd>Choose movement for the controlled actor</dd>
+            <dt>Arrow keys</dt><dd>Cardinal movement aliases</dd>
+            <dt>X</dt><dd>Set the controlled actor to Stay</dd>
+            <dt>0 / 1 / 2</dt><dd>Stage no combat / Basic / Ultimate</dd>
+            <dt>Space / Enter</dt><dd>Submit every staged actor</dd>
+            <dt>R</dt><dd>Deterministically reset the episode</dd>
+            <dt>G</dt><dd>Toggle Oracle View ranges</dd>
+          </dl>
+          <p class="help-note">
+            Actor drafts persist when you cycle or directly control another
+            actor.
+          </p>
+        </div>
+        <div data-live-only data-live-help-mode="agent" hidden>
+          <p>
+            Click the battlefield once to give the fixed recipient's draft
+            keyboard focus. Ordinary Tab and Shift+Tab move browser focus.
+          </p>
+          <dl class="help-grid">
+            <dt>Agent body or roster row</dt>
+            <dd>Inspect an authorized actor locally without changing the recipient</dd>
+            <dt>WASD / QEZC</dt><dd>Choose movement for the fixed recipient</dd>
+            <dt>Arrow keys</dt><dd>Cardinal movement aliases</dd>
+            <dt>X</dt><dd>Set the fixed recipient to Stay</dd>
+            <dt>0 / 1 / 2</dt><dd>Stage no combat / Basic / Ultimate</dd>
+            <dt>Space / Enter</dt><dd>Submit only the fixed recipient</dd>
+            <dt>R</dt><dd>Deterministically reset the episode</dd>
+            <dt>G</dt><dd>Toggle locally authorized ranges without a command</dd>
+          </dl>
+          <p class="help-note">
+            Inspection and range visibility are local preferences. They never
+            change the fixed recipient or the authoritative simulator state.
+          </p>
+        </div>
+        <div data-live-only data-live-help-mode="scripted" hidden>
+          <p>
+            Scripted live view is inspection-only. Ordinary Tab and Shift+Tab
+            move browser focus.
+          </p>
+          <dl class="help-grid">
+            <dt>Agent body or roster row</dt>
+            <dd>Inspect an authorized actor locally</dd>
+            <dt>Advance scripted frame</dt>
+            <dd>Apply exactly one registered scripted transition</dd>
+            <dt>Ranges</dt><dd>Change presentation-only range visibility</dd>
+          </dl>
+        </div>
+        <p data-live-only data-live-help-mode="unavailable" hidden>
+          Live controls are unavailable until one coherent authorized frame is
+          installed.
         </p>
         <p class="help-note" data-live-only>
           Animation, layout, hover, help, and panel state are presentation-only.

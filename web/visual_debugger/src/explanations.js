@@ -248,7 +248,7 @@ function descriptor(kind, id, title, summary, rows, sections = [], options = {})
 
 /**
  * @param {unknown} rawAgent
- * @param {{controlled?: boolean, selected?: boolean, reference?: boolean, audience?: string}} [selection]
+ * @param {{controlled?: boolean, selected?: boolean, reference?: boolean, inspected?: boolean, audience?: string}} [selection]
  * @param {unknown} [rawClassMechanics]
  * @param {ReadonlyArray<unknown>} [rawSourceAgents]
  * @returns {SemanticDescriptor}
@@ -322,6 +322,9 @@ export function explainAgent(
   }
   if (selection.reference) {
     nowRows.push(row("Selection", "Reference"));
+  }
+  if (selection.inspected) {
+    nowRows.push(row("Selection", "Inspected agent"));
   }
 
   const fullSections = [];
@@ -415,7 +418,7 @@ export function explainAgent(
  * researcher mechanics or arbitrary extra fields cannot affect the result.
  *
  * @param {unknown} rawAgent
- * @param {{controlled?: boolean, selected?: boolean}} [selection]
+ * @param {{controlled?: boolean, selected?: boolean, inspected?: boolean}} [selection]
  * @returns {SemanticDescriptor}
  */
 export function explainPovAgent(rawAgent, selection = {}) {
@@ -446,6 +449,7 @@ export function explainPovAgent(rawAgent, selection = {}) {
     {
       controlled: selection.controlled,
       selected: selection.selected,
+      inspected: selection.inspected,
       audience: "reduced_agent_pov",
     },
     null,
@@ -1010,7 +1014,7 @@ export function explainAura(rawField, rawSourceAgent = null) {
 }
 
 const RANGE_PURPOSE = Object.freeze({
-  observation: "Shows the exact radius used for the recorded observation range.",
+  observation: "Shows the exact authorized Observation radius.",
   basic: "Shows the exact radius for the class's Basic interaction.",
   ultimate: "Shows the exact radius for the class's Ultimate interaction.",
 });
@@ -1151,10 +1155,10 @@ export function explainPendingRoute(rawRoute) {
     "pending-route",
     `pending:${text(route.source_presentation_key) ?? text(route.source_public_agent_id) ?? "unknown"}:${text(route.target_presentation_key) ?? text(route.target_public_agent_id) ?? "unknown"}:${lane ?? "unknown"}`,
     `${laneName} Action Route`,
-    "Currently selected action intent; no physical path is implied.",
+    "Authorized action route; no physical path is implied.",
     [
       row("Source", publicAgentLabel(route.source_public_agent_id)),
-      row("Selected Target", publicAgentLabel(route.target_public_agent_id)),
+      row("Target", publicAgentLabel(route.target_public_agent_id)),
     ],
     [],
     { tone: "information", anchor: "pointer" },

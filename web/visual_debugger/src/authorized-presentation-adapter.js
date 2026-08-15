@@ -48,6 +48,83 @@ export function authorizedPresentationAudience(value) {
 }
 
 /**
+ * @typedef {readonly [
+ *   string,
+ *   string,
+ *   string,
+ *   string,
+ *   string,
+ *   string | null,
+ *   string | null,
+ *   string | null,
+ *   string | null,
+ * ]} AuthorizedPresentationPreferenceTuple
+ */
+
+/**
+ * Project the exact authority identity that scopes inert browser preferences.
+ * Scientific refresh epochs are deliberately absent. The structured tuple is
+ * retained beside its canonical JSON encoding so callers never need a
+ * delimiter-based key.
+ *
+ * @param {unknown} value
+ * @returns {Readonly<{
+ *   tuple: AuthorizedPresentationPreferenceTuple,
+ *   serialized: string,
+ * }> | null}
+ */
+export function authorizedPresentationPreferenceKey(value) {
+  if (!isAuthorizedPresentationFrame(value)) {
+    return null;
+  }
+  const tuple = /** @type {AuthorizedPresentationPreferenceTuple} */ (
+    Object.freeze([
+      value.product_kind,
+      value.source.source_session_id,
+      value.source.episode_id,
+      value.presentation_kind,
+      value.authority.authority_kind,
+      value.authority.observation_mode ?? null,
+      value.source.source_artifact_id ?? null,
+      value.authority.recipient_public_agent_id ?? null,
+      value.authority.recipient_presentation_key ?? null,
+    ])
+  );
+  return Object.freeze({ tuple, serialized: JSON.stringify(tuple) });
+}
+
+/**
+ * Compare only well-formed structured preference keys. Rechecking each
+ * canonical encoding prevents a caller-supplied stale string from overriding
+ * the tuple fields that define the authority boundary.
+ *
+ * @param {unknown} left
+ * @param {unknown} right
+ * @returns {boolean}
+ */
+export function sameAuthorizedPresentationPreferenceKey(left, right) {
+  if (!isRecord(left) || !isRecord(right)) {
+    return false;
+  }
+  const leftTuple = left.tuple;
+  const rightTuple = right.tuple;
+  if (
+    !Array.isArray(leftTuple) ||
+    !Array.isArray(rightTuple) ||
+    leftTuple.length !== 9 ||
+    rightTuple.length !== 9 ||
+    typeof left.serialized !== "string" ||
+    typeof right.serialized !== "string" ||
+    left.serialized !== JSON.stringify(leftTuple) ||
+    right.serialized !== JSON.stringify(rightTuple) ||
+    left.serialized !== right.serialized
+  ) {
+    return false;
+  }
+  return leftTuple.every((entry, index) => Object.is(entry, rightTuple[index]));
+}
+
+/**
  * Scope one opaque Python-owned presentation key to its installed browser
  * authority. The returned string is an internal map key only; it is never a
  * simulator slot or a command capability.
@@ -332,14 +409,171 @@ export function authorizedPresentationInspection(value) {
 }
 
 /**
+ * Project the exact actor-owned legality row from one already-certified
+ * outgoing inspection. This helper does not authorize input; the production
+ * caller invokes it only after the five-leaf presentation brand has passed.
+ * Keeping the projection pure makes the target-disclosure/lane cross-product
+ * testable without forging a presentation root.
+ *
+ * @param {unknown} rawDecisionMask
+ * @param {unknown} rawOwner
+ * @param {unknown} rawTarget
+ * @param {unknown} rawLaneName
+ * @returns {Readonly<Record<string, any>> | null}
+ */
+export function projectCertifiedInspectionLegality(
+  rawDecisionMask,
+  rawOwner,
+  rawTarget,
+  rawLaneName,
+) {
+  const decisionMask = isRecord(rawDecisionMask) ? rawDecisionMask : null;
+  const owner = isRecord(rawOwner) ? rawOwner : null;
+  const target = isRecord(rawTarget) ? rawTarget : null;
+  const targetAction =
+    target !== null && Number.isInteger(target.target_action)
+      ? Number(target.target_action)
+      : null;
+  const certifiedTarget =
+    decisionMask !== null && targetAction !== null
+      ? decisionMask.target_actions?.[targetAction]
+      : null;
+  const pairRow =
+    decisionMask !== null && targetAction !== null
+      ? decisionMask.target_use_ultimate_joint_mask?.[targetAction]
+      : null;
+  if (
+    decisionMask === null ||
+    owner === null ||
+    target === null ||
+    typeof owner.presentation_key !== "string" ||
+    typeof owner.public_agent_id !== "string" ||
+    decisionMask.owner_presentation_key !== owner.presentation_key ||
+    decisionMask.owner_public_agent_id !== owner.public_agent_id ||
+    targetAction === null ||
+    !isRecord(certifiedTarget) ||
+    certifiedTarget.target_action !== targetAction ||
+    certifiedTarget.target_kind !== target.target_kind ||
+    certifiedTarget.display_name !== target.display_name ||
+    !Array.isArray(pairRow) ||
+    pairRow.length !== 2 ||
+    typeof pairRow[0] !== "boolean" ||
+    typeof pairRow[1] !== "boolean" ||
+    !["no_target", "visible_authorized_agent", "axis_only_authorized_agent"].includes(
+      target.target_kind,
+    ) ||
+    typeof rawLaneName !== "string" ||
+    !["none", "basic", "ultimate"].includes(rawLaneName) ||
+    (target.target_kind === "visible_authorized_agent" &&
+      (certifiedTarget.target_presentation_key !== target.target_presentation_key ||
+        certifiedTarget.target_public_agent_id !== target.target_public_agent_id ||
+        !Array.isArray(certifiedTarget.target_anchor) ||
+        !Array.isArray(target.target_anchor) ||
+        certifiedTarget.target_anchor.length !== target.target_anchor.length ||
+        certifiedTarget.target_anchor.some(
+          (coordinate, index) => coordinate !== target.target_anchor[index],
+        ))) ||
+    (target.target_kind === "axis_only_authorized_agent" &&
+      certifiedTarget.target_public_agent_id !== target.target_public_agent_id)
+  ) {
+    return null;
+  }
+  const lane = rawLaneName === "basic" ? 0 : rawLaneName === "ultimate" ? 1 : null;
+  return Object.freeze({
+    owner_presentation_key: owner.presentation_key,
+    owner_public_agent_id: owner.public_agent_id,
+    target_action: targetAction,
+    target_kind: target.target_kind,
+    target_display_name:
+      typeof target.display_name === "string" ? target.display_name : null,
+    target_presentation_key:
+      target.target_kind === "visible_authorized_agent" &&
+      typeof target.target_presentation_key === "string"
+        ? target.target_presentation_key
+        : null,
+    target_public_agent_id:
+      target.target_kind !== "no_target" &&
+      typeof target.target_public_agent_id === "string"
+        ? target.target_public_agent_id
+        : null,
+    lane_0_available: pairRow[0],
+    lane_1_available: pairRow[1],
+    armed_lane: lane,
+    armed_pair_legal: lane === null ? null : pairRow[lane],
+  });
+}
+
+/**
+ * Project one visible-target route from already-certified inspection facts.
+ * No-target and axis-only disclosures deliberately have no drawable route.
+ *
+ * @param {unknown} rawInspection
+ * @param {unknown} rawOwner
+ * @param {unknown} rawTargetAgent
+ * @param {unknown} rawTarget
+ * @param {unknown} rawLegality
+ * @returns {Readonly<Record<string, any>> | null}
+ */
+export function projectCertifiedInspectionRoute(
+  rawInspection,
+  rawOwner,
+  rawTargetAgent,
+  rawTarget,
+  rawLegality,
+) {
+  const inspection = isRecord(rawInspection) ? rawInspection : null;
+  const owner = isRecord(rawOwner) ? rawOwner : null;
+  const targetAgent = isRecord(rawTargetAgent) ? rawTargetAgent : null;
+  const target = isRecord(rawTarget) ? rawTarget : null;
+  const legality = isRecord(rawLegality) ? rawLegality : null;
+  if (
+    inspection === null ||
+    owner === null ||
+    targetAgent === null ||
+    target === null ||
+    legality === null ||
+    target.target_kind !== "visible_authorized_agent" ||
+    target.target_presentation_key !== targetAgent.presentation_key ||
+    target.target_public_agent_id !== targetAgent.public_agent_id ||
+    legality.owner_presentation_key !== owner.presentation_key ||
+    legality.owner_public_agent_id !== owner.public_agent_id ||
+    legality.target_presentation_key !== targetAgent.presentation_key ||
+    legality.target_public_agent_id !== targetAgent.public_agent_id ||
+    legality.target_action !== target.target_action ||
+    !Array.isArray(inspection.actor_anchor) ||
+    !Array.isArray(target.target_anchor) ||
+    (legality.armed_lane !== 0 && legality.armed_lane !== 1) ||
+    typeof legality.armed_pair_legal !== "boolean"
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    source_presentation_key: owner.presentation_key,
+    source_public_agent_id: owner.public_agent_id,
+    source_anchor: inspection.actor_anchor,
+    source_radius: owner.radius,
+    target_presentation_key: targetAgent.presentation_key,
+    target_public_agent_id: targetAgent.public_agent_id,
+    target_anchor: target.target_anchor,
+    target_radius: targetAgent.radius,
+    lane: legality.armed_lane,
+    legal: legality.armed_pair_legal,
+  });
+}
+
+/**
  * Adapt exact authorized scene/inspection field names to the retained visual
  * components. Every numeric or categorical fact is copied from one accepted
  * presentation branch. This view adds no global slot and no command field.
  *
  * @param {unknown} value
+ * @param {string | null | undefined} [localInspectedPresentationKey]
  * @returns {Readonly<Record<string, any>> | null}
  */
-export function authorizedPresentationSceneView(value) {
+export function authorizedPresentationSceneView(
+  value,
+  localInspectedPresentationKey = undefined,
+) {
   if (!isAuthorizedPresentationFrame(value)) {
     return null;
   }
@@ -350,11 +584,46 @@ export function authorizedPresentationSceneView(value) {
       .filter((agent) => agent !== null),
   );
   const agentByKey = new Map(agents.map((agent) => [agent.presentation_key, agent]));
-  const inspection = presentationInspection(value);
-  const ownerKey =
+  const inspectionState = authorizedPresentationInspectionState(value);
+  const inspection = inspectionState.inspection;
+  const inspectionOwnerKey =
     inspection && typeof inspection.actor_presentation_key === "string"
       ? inspection.actor_presentation_key
       : null;
+  const inspectionOwnerPublicId =
+    inspection && typeof inspection.actor_public_agent_id === "string"
+      ? inspection.actor_public_agent_id
+      : null;
+  const axisOwnerKey =
+    value.viewer_mode === "replay" &&
+    isRecord(value.action_axis) &&
+    typeof value.action_axis.owner_presentation_key === "string"
+      ? value.action_axis.owner_presentation_key
+      : null;
+  const axisOwnerPublicId =
+    value.viewer_mode === "replay" &&
+    isRecord(value.action_axis) &&
+    typeof value.action_axis.owner_public_agent_id === "string"
+      ? value.action_axis.owner_public_agent_id
+      : null;
+  const ownerCandidateKey = inspectionOwnerKey ?? axisOwnerKey;
+  const ownerCandidatePublicId = inspectionOwnerPublicId ?? axisOwnerPublicId;
+  const ownerCandidate =
+    ownerCandidateKey === null ? null : (agentByKey.get(ownerCandidateKey) ?? null);
+  const actor =
+    ownerCandidate !== null && ownerCandidate.public_agent_id === ownerCandidatePublicId
+      ? ownerCandidate
+      : null;
+  const ownerKey = actor?.presentation_key ?? null;
+  const hasLocalInspection =
+    localInspectedPresentationKey !== undefined &&
+    (audience === "agent_pov" || inspectionState.state_kind === "live_scripted");
+  const inspectedActor = hasLocalInspection
+    ? typeof localInspectedPresentationKey === "string"
+      ? (agentByKey.get(localInspectedPresentationKey) ?? null)
+      : null
+    : actor;
+  const inspectedOwnerKey = inspectedActor?.presentation_key ?? null;
   const target =
     inspection &&
     isRecord(
@@ -372,8 +641,7 @@ export function authorizedPresentationSceneView(value) {
     typeof target.target_presentation_key === "string"
       ? target.target_presentation_key
       : null;
-  const actor = ownerKey === null ? null : (agentByKey.get(ownerKey) ?? null);
-  const selected = targetKey === null ? null : (agentByKey.get(targetKey) ?? null);
+  const targetAgent = targetKey === null ? null : (agentByKey.get(targetKey) ?? null);
   const decisionMask =
     inspection && isRecord(inspection.decision_mask) ? inspection.decision_mask : null;
   const action =
@@ -386,65 +654,50 @@ export function authorizedPresentationSceneView(value) {
     inspection?.inspection_kind === "live_draft_action"
       ? action?.armed_lane
       : inspection?.combat_lane;
-  const lane = laneName === "basic" ? 0 : laneName === "ultimate" ? 1 : null;
-  const targetAction = Number.isInteger(target?.target_action)
-    ? Number(target.target_action)
+  const actionOwnerLegality =
+    inspection && actor && decisionMask && target
+      ? projectCertifiedInspectionLegality(decisionMask, actor, target, laneName)
+      : null;
+  const actionOwnerRoute = projectCertifiedInspectionRoute(
+    inspection,
+    actor,
+    targetAgent,
+    target,
+    actionOwnerLegality,
+  );
+  const inspectedOwnerOwnsOutgoingAction =
+    !hasLocalInspection ||
+    (actor !== null &&
+      inspectedActor !== null &&
+      inspectedActor.presentation_key === actor.presentation_key &&
+      inspectedActor.public_agent_id === actor.public_agent_id);
+  const selectedLegality = inspectedOwnerOwnsOutgoingAction
+    ? actionOwnerLegality
     : null;
-  const pairMask =
-    decisionMask && targetAction !== null && lane !== null
-      ? decisionMask.target_use_ultimate_joint_mask?.[targetAction]?.[lane]
-      : null;
-  const routeLegal =
-    inspection?.inspection_kind === "live_draft_action"
-      ? inspection.draft_legality?.combat_pair_is_legal
-      : inspection?.inspection_kind === "replay_recorded_outgoing_action"
-        ? true
-        : null;
-  const pendingRoute =
-    inspection && actor && selected && target && lane !== null
-      ? Object.freeze({
-          source_presentation_key: actor.presentation_key,
-          source_public_agent_id: actor.public_agent_id,
-          source_anchor: inspection.actor_anchor,
-          source_radius: actor.radius,
-          target_presentation_key: selected.presentation_key,
-          target_public_agent_id: selected.public_agent_id,
-          target_anchor: target.target_anchor,
-          target_radius: selected.radius,
-          lane,
-          legal: routeLegal,
-        })
-      : null;
+  const pendingRoute = inspectedOwnerOwnsOutgoingAction ? actionOwnerRoute : null;
   const ranges =
-    actor === null || inspection === null
+    inspectedActor === null
       ? Object.freeze([])
       : Object.freeze(
           [
-            ["basic", actor.basic_interaction_radius],
-            ["ultimate", actor.ultimate_interaction_radius],
+            ["observation", inspectedActor.observation_radius],
+            ["basic", inspectedActor.basic_interaction_radius],
+            ["ultimate", inspectedActor.ultimate_interaction_radius],
           ].map(([kind, radius]) =>
             Object.freeze({
               kind,
-              presentation_key: actor.presentation_key,
-              public_agent_id: actor.public_agent_id,
-              center: inspection.actor_anchor,
+              presentation_key: inspectedActor.presentation_key,
+              public_agent_id: inspectedActor.public_agent_id,
+              center: inspectedActor.position,
               radius,
             }),
           ),
         );
-  const selectedLegality =
-    selected && decisionMask && targetAction !== null
-      ? Object.freeze({
-          target_presentation_key: selected.presentation_key,
-          target_public_agent_id: selected.public_agent_id,
-          lane_0_available:
-            decisionMask.target_use_ultimate_joint_mask[targetAction][0],
-          lane_1_available:
-            decisionMask.target_use_ultimate_joint_mask[targetAction][1],
-          armed_lane: lane,
-          armed_pair_legal: pairMask,
-        })
-      : null;
+  const selectedKey = hasLocalInspection
+    ? inspectedOwnerKey
+    : value.viewer_mode === "replay"
+      ? ownerKey
+      : targetKey;
 
   return Object.freeze({
     audience,
@@ -461,8 +714,8 @@ export function authorizedPresentationSceneView(value) {
     respawn_waves: value.scene.respawn_waves,
     selection: Object.freeze({
       controlled_presentation_key: value.viewer_mode === "live" ? ownerKey : null,
-      inspection_owner_presentation_key: ownerKey,
-      selected_presentation_key: targetKey,
+      inspection_owner_presentation_key: inspectedOwnerKey,
+      selected_presentation_key: selectedKey,
     }),
     ranges,
     pending_route: pendingRoute,

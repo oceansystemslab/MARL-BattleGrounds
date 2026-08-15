@@ -364,7 +364,7 @@ export function bindBattlefieldControls({
   isInteractive = () => true,
 }) {
   battlefield.addEventListener("keydown", async (event) => {
-    if (!isInteractive()) {
+    if (!isInteractive() || event.target !== battlefield) {
       return;
     }
     if (!isDebuggerKey(event)) {

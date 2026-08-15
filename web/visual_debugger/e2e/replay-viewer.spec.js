@@ -401,10 +401,32 @@ test("canonical complete and partial artifacts join their frame-zero and capture
     "replay-forward-ten-button",
     "replay-last-button",
   ]);
+  await expect(
+    page.locator("#battlefield-utilities > #replay-ranges-button"),
+  ).toHaveCount(1);
+  await expect(
+    page.locator("#battlefield-utilities > #replay-clear-reference-button"),
+  ).toHaveCount(1);
+  await expect(page.locator("#replay-clear-reference-button")).toHaveText(
+    "Clear Selection",
+  );
+  await expect(page.locator("#replay-timeline #replay-ranges-button")).toHaveCount(0);
+  await expect(
+    page.locator("#replay-timeline #replay-clear-reference-button"),
+  ).toHaveCount(0);
+  await expect(page.locator("#battlefield-shell #replay-ranges-button")).toHaveCount(0);
+  await expect(page.locator("#replay-visual-key > dt")).toHaveText([
+    "Team A",
+    "Team B",
+    "Selected agent",
+  ]);
+  await expect(page.locator("#live-visual-key")).toHaveAttribute("hidden", "");
+  await expect(page.locator("#replay-visual-key")).not.toHaveAttribute("hidden", "");
   await expect(page.locator("#roster-details")).toHaveAttribute("open", "");
+  await expect(page.locator("#events-details")).toHaveAttribute("open", "");
+  await expect(page.locator("#event-feed .event-item")).toHaveCount(0);
   for (const selector of [
     "#agent-details",
-    "#events-details",
     "#visual-key",
     "#technical-frame-details",
   ]) {
@@ -957,7 +979,7 @@ test("Actor POV all-surface scan excludes researcher authority and host secrets"
   ).filter((value) => typeof value === "string");
   expect(researcherEventIds.length).toBeGreaterThan(0);
 
-  const selfRoster = page.locator("#roster .roster-row").first();
+  const selfRoster = page.locator("#roster .roster-primary-action").first();
   await expect(selfRoster).toBeVisible();
   await selfRoster.hover();
   await expect(page.locator("#visual-tooltip")).toBeVisible();
@@ -971,7 +993,9 @@ test("Actor POV all-surface scan excludes researcher authority and host secrets"
     ),
   }));
   const selfAgent = page.locator("#battlefield .agent").first();
-  await expect(page.locator('#battlefield .agent[role="button"]')).toHaveCount(1);
+  await expect(page.locator('#battlefield .agent[role="button"]')).toHaveCount(
+    await page.locator("#battlefield .agent").count(),
+  );
   await expect(selfAgent).toHaveAttribute("role", "button");
   await expect(selfAgent).toHaveAttribute("tabindex", "0");
   expect(await selfAgent.getAttribute("data-slot")).toBeNull();

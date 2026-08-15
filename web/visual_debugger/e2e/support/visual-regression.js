@@ -28,7 +28,9 @@ export const DENSE_BASELINE_MAX_DIFF_PIXEL_RATIO = 0.00105;
  * in the delegated semantic-help registry. Hidden mode/dialog controls are
  * intentionally audited only when their owning surface becomes visible. A
  * registered local ancestor may own an SVG focus child; battlefield/timeline
- * composites never excuse an otherwise unregistered descendant control.
+ * composites never excuse an otherwise unregistered descendant control. A
+ * focusable surface may instead use `aria-describedby` when at least one
+ * referenced element exists and contains nonempty text.
  *
  * @param {import("@playwright/test").Page} page
  */
@@ -52,6 +54,20 @@ export async function expectVisibleInteractiveHelpInventory(page) {
           return null;
         }
         return owner;
+      };
+      /** @param {Element} element */
+      const describedByTarget = (element) => {
+        const ids = (element.getAttribute("aria-describedby") ?? "")
+          .trim()
+          .split(/\s+/u)
+          .filter(Boolean);
+        for (const id of ids) {
+          const target = element.ownerDocument.getElementById(id);
+          if (target !== null && (target.textContent ?? "").trim().length > 0) {
+            return target;
+          }
+        }
+        return null;
       };
       const visible = elements.filter((element) => {
         if (!(element instanceof Element)) return false;
@@ -79,7 +95,10 @@ export async function expectVisibleInteractiveHelpInventory(page) {
           )
           .map(label),
         missing: operational
-          .filter((element) => localHelpOwner(element) === null)
+          .filter(
+            (element) =>
+              localHelpOwner(element) === null && describedByTarget(element) === null,
+          )
           .map(label),
         missingDescriptions: operational
           .filter((element) => {
@@ -100,6 +119,15 @@ export async function expectVisibleInteractiveHelpInventory(page) {
         registered: operational
           .filter((element) => localHelpOwner(element) !== null)
           .map(label),
+        describedBy: operational
+          .filter(
+            (element) =>
+              localHelpOwner(element) === null && describedByTarget(element) !== null,
+          )
+          .map((element) => ({
+            label: label(element),
+            targetId: describedByTarget(element)?.id ?? "",
+          })),
         nativeDisclosures: nativeDisclosures.map((element) => ({
           detailsId:
             element.parentElement instanceof HTMLDetailsElement

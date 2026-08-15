@@ -646,9 +646,14 @@ test("target race remains Online and fenced until Save As recovers cached artifa
   await expect(page.locator("#view-select")).toBeEnabled();
   await expect(page.locator("#preset-select")).toHaveCount(0);
   await expect(page.locator("#exit-button")).toBeEnabled();
-  await expect(page.locator("#battlefield")).toHaveAttribute("role", "img");
+  const oracleCloseoutLabel =
+    "Read-only live battlefield. Scientific facts can be inspected; simulator and actor activation controls are unavailable.";
+  await expect(page.getByRole("group", { name: oracleCloseoutLabel })).toBeVisible();
   await expect(page.locator("#battlefield")).toHaveAttribute("tabindex", "-1");
-  await expect(page.locator('[data-key="g"]')).toBeDisabled();
+  await expect(page.locator("#battlefield-instructions")).toHaveText(
+    "Scientific tooltip facts remain inspectable. Live simulator and actor activation controls are unavailable while recording is closing, the session is offline or resynchronizing, or the frame is terminal.",
+  );
+  await expect(page.locator('[data-key="g"]')).toBeEnabled();
   await expect(page.locator('[data-key="v"]')).toHaveCount(0);
   await expect(page.locator('[data-key="n"]')).toHaveCount(0);
   await expect(page.locator('[data-key="w"]')).toBeDisabled();
@@ -660,12 +665,37 @@ test("target race remains Online and fenced until Save As recovers cached artifa
       buttons.every((button) => button instanceof HTMLButtonElement && button.disabled),
     ),
   ).toBe(true);
+  const scientificOwner = page
+    .locator('#battlefield [data-tooltip-owner][tabindex="0"]')
+    .first();
+  await expect(scientificOwner).toBeVisible();
+  /** @type {unknown[]} */
+  const scientificOwnerRequests = [];
+  /** @param {import("@playwright/test").Request} request */
+  const recordScientificOwnerRequest = (request) => {
+    if (
+      request.method() === "POST" &&
+      ["/api/command", "/api/replay/command"].includes(new URL(request.url()).pathname)
+    ) {
+      scientificOwnerRequests.push(request.postDataJSON());
+    }
+  };
+  page.on("request", recordScientificOwnerRequest);
+  await scientificOwner.focus();
+  await scientificOwner.press("Enter");
+  await page.evaluate(
+    () =>
+      new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)),
+      ),
+  );
+  page.off("request", recordScientificOwnerRequest);
+  expect(scientificOwnerRequests).toEqual([]);
   const focusFence = await page.evaluate(() => {
     const blockedSelectors = [
       "#battlefield",
       "#reset-button",
       "#command-target-select",
-      '[data-key="g"]',
       '[data-key="w"]',
       "#roster button",
     ];
@@ -686,7 +716,7 @@ test("target race remains Online and fenced until Save As recovers cached artifa
         }
       }
     }
-    const allowedSelectors = ["#view-select", "#exit-button"];
+    const allowedSelectors = ["#view-select", '[data-key="g"]', "#exit-button"];
     const allowedFocus = [];
     for (const selector of allowedSelectors) {
       const element = document.querySelector(selector);
@@ -697,9 +727,47 @@ test("target race remains Online and fenced until Save As recovers cached artifa
     return { allowedFocus, blockedTabLeaks };
   });
   expect(focusFence).toEqual({
-    allowedFocus: ["#view-select", "#exit-button"],
+    allowedFocus: ["#view-select", '[data-key="g"]', "#exit-button"],
     blockedTabLeaks: [],
   });
+
+  await page.locator("#view-select").selectOption("pov");
+  await expect(page.locator("html")).toHaveAttribute("data-audience", "agent_pov");
+  const agentCloseoutLabel =
+    "Agent POV recording closeout battlefield. Authorized bodies can be inspected; simulator controls are unavailable.";
+  await expect(page.getByRole("group", { name: agentCloseoutLabel })).toBeVisible();
+  await expect(page.locator("#battlefield")).toHaveAttribute("tabindex", "-1");
+  await expect(page.locator("#battlefield-instructions")).toHaveText(
+    "Agent POV keeps one fixed recipient. Activate an authorized visible body to inspect current facts; recording closeout has fenced simulator and pending-action controls.",
+  );
+  const agentCloseoutBodies = page.locator("#battlefield .agent[role='button']");
+  await expect.poll(() => agentCloseoutBodies.count()).toBeGreaterThan(0);
+  const agentCloseoutRows = page.locator("#roster .roster-primary-action");
+  await expect.poll(() => agentCloseoutRows.count()).toBeGreaterThan(1);
+  /** @type {unknown[]} */
+  const localActivationRequests = [];
+  /** @param {import("@playwright/test").Request} request */
+  const recordLocalActivation = (request) => {
+    if (
+      request.method() === "POST" &&
+      ["/api/command", "/api/replay/command"].includes(new URL(request.url()).pathname)
+    ) {
+      localActivationRequests.push(request.postDataJSON());
+    }
+  };
+  page.on("request", recordLocalActivation);
+  await agentCloseoutRows.nth(1).click();
+  await expect(agentCloseoutRows.nth(1)).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("#agent-details")).toHaveAttribute("open", "");
+  await page.evaluate(
+    () =>
+      new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)),
+      ),
+  );
+  page.off("request", recordLocalActivation);
+  expect(localActivationRequests).toEqual([]);
+
   const failedFrame = await currentFrame(page);
   expect(failedFrame.recording).toMatchObject({
     lifecycle: "persistence_failed",
@@ -741,7 +809,7 @@ test("target race remains Online and fenced until Save As recovers cached artifa
   const recoveredMetricPath = metricReportPathForReplay(recoveredReplayPath);
   await page.locator("#recording-save-as-input").fill(recoveredName);
   await page.locator("#recording-save-as-button").click();
-  await expectSettledReplayHandoff(page);
+  await expectSettledReplayHandoff(page, "pov");
   await expectSavedArtifacts(recoveredReplayPath, recoveredMetricPath, 1);
   expect(await readFile(started.replayPath)).toEqual(Buffer.from(sentinel));
   expectNoBrowserErrors(page);

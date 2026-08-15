@@ -16,8 +16,10 @@ import {
   authorizedOracleCommandSlotForPublicAgentId,
   authorizedPresentationAudience,
   authorizedPresentationInspectionState,
+  authorizedPresentationPreferenceKey,
   authorizedPresentationSceneView,
   isAuthorizedPresentationFrame,
+  sameAuthorizedPresentationPreferenceKey,
 } from "./authorized-presentation-adapter.js";
 import {
   isJoinedTransportAndAuthorizedPresentationV1,
@@ -40,9 +42,10 @@ import {
 } from "./controls.js";
 import { explainAgent, explainLegality } from "./explanations.js";
 import {
+  authorizedInspectorView,
   DebuggerPanels,
   disclosurePanelInitiallyOpen,
-  panelDisclosureAuthorityKey,
+  renderSemanticInspector,
 } from "./panels.js";
 import { PresentationInstallCoordinator } from "./presentation-install.js";
 import {
@@ -58,7 +61,6 @@ import {
   createSemanticDescriptor,
   createTooltipController,
   registerTooltipOwner,
-  renderSemanticDescriptor,
 } from "./tooltip.js";
 
 /**
@@ -132,6 +134,7 @@ const elements = {
   roster: requiredElement("roster"),
   rosterCount: requiredElement("roster-count"),
   agentDetails: requiredElement("agent-details"),
+  visualKey: requiredElement("visual-key"),
   selectionCard: requiredElement("selection-card"),
   selectionHeading: requiredElement("selection-heading"),
   pendingHeading: requiredElement("pending-heading"),
@@ -160,13 +163,11 @@ const elements = {
   liveOnly: /** @type {NodeListOf<HTMLElement>} */ (
     document.querySelectorAll("[data-live-only]")
   ),
+  liveHelpModes: /** @type {NodeListOf<HTMLElement>} */ (
+    document.querySelectorAll("[data-live-help-mode]")
+  ),
   replayOnly: /** @type {NodeListOf<HTMLElement>} */ (
     document.querySelectorAll("[data-replay-only]")
-  ),
-  disclosurePanels: /** @type {NodeListOf<HTMLDetailsElement>} */ (
-    document.querySelectorAll(
-      "details.command-deck, #roster-details, #agent-details, #pending-turn-details, #latest-transition-details, #events-details, #visual-key, #technical-frame-details",
-    )
   ),
 };
 
@@ -200,6 +201,53 @@ const state = {
   notice: null,
   noticeLevel: "info",
 };
+
+const SCIENTIFIC_DISCLOSURE_BODY_IDS = Object.freeze({
+  "command-deck": "command-deck-body",
+  "roster-details": "roster-details-body",
+  "agent-details": "agent-details-body",
+  "pending-turn-details": "pending-turn-details-body",
+  "latest-transition-details": "latest-transition-details-body",
+  "events-details": "events-details-body",
+  "technical-frame-details": "technical-frame-details-body",
+});
+
+const scientificDisclosures = Object.freeze(
+  Object.entries(SCIENTIFIC_DISCLOSURE_BODY_IDS).map(([panelId, bodyId]) => {
+    const panel = requiredElement(panelId);
+    const body = requiredElement(bodyId);
+    if (!(panel instanceof HTMLDetailsElement) || !(body instanceof HTMLElement)) {
+      throw new TypeError(`Scientific disclosure ${panelId} has invalid markup.`);
+    }
+    return Object.freeze({ panelId, panel, body });
+  }),
+);
+
+/**
+ * The only retained scientific preference record. This is deliberately one
+ * active record rather than a cache keyed by authority: crossing A -> B
+ * replaces A, so a later B -> A boundary receives fresh defaults.
+ *
+ * @type {{
+ *   authorityKey: Readonly<{tuple: readonly unknown[], serialized: string}>,
+ *   disclosures: Record<string, {open: boolean, scrollTop: number}>,
+ *   agentDetailsAutoOpenAllowed: boolean,
+ *   primaryFocus: null | {surface: "roster" | "battlefield", presentationKey: string},
+ *   localInspection: {owned: false} | {owned: true, presentationKey: string | null},
+ *   localRanges: {owned: false} | {owned: true, visible: boolean},
+ * } | null}
+ */
+let activePresentationPreference = null;
+
+let presentationPreferenceGeneration = 0;
+let presentationPreferenceNeedsContentRender = false;
+/** @type {number | null} */
+let pendingPresentationPreferenceRestoreFrame = null;
+/** @type {Element | null} */
+let pendingPrimaryFocusRestoreAnchor = null;
+
+/** @type {WeakMap<HTMLDetailsElement, Readonly<{open: boolean}>>} */
+const expectedDisclosureToggles = new WeakMap();
 
 const PRODUCT_TITLES = Object.freeze({
   combat_debugger: "MARL-BattleGrounds Combat Debugger",
@@ -289,12 +337,6 @@ try {
 }
 
 const CONTROL_HELP = Object.freeze([
-  [
-    "#battlefield",
-    "Battlefield Commands",
-    "Inspect the authoritative scene. Researcher live view supports pointer control and targeting; Agent POV bodies remain passive and draft controls own actions.",
-    "composite",
-  ],
   [
     "#replay-timeline",
     "Replay timeline",
@@ -386,16 +428,6 @@ const CONTROL_HELP = Object.freeze([
     "Seek to an exact captured tick after a short debounce.",
   ],
   [
-    "#replay-ranges-button",
-    "Replay ranges",
-    "Toggle recorded Oracle View range presentation.",
-  ],
-  [
-    "#replay-clear-reference-button",
-    "Clear Reference",
-    "Clear the Oracle View inspector highlight; the range anchor is unchanged.",
-  ],
-  [
     "#command-target-select",
     "Selected target",
     "Stage an authorized target for the controlled actor.",
@@ -404,11 +436,6 @@ const CONTROL_HELP = Object.freeze([
     "#submit-turn-button",
     "Apply authorized action",
     "Submit an editable draft or advance an inspection-only scripted frame through the authoritative Python service.",
-  ],
-  [
-    "#live-ranges-button",
-    "Ranges",
-    "Toggle server-authored Oracle View range presentation.",
   ],
   [
     "#reset-button",
@@ -424,16 +451,6 @@ const CONTROL_HELP = Object.freeze([
     ".diagnostics > summary",
     "Technical frame",
     "Inspect authorized wire and diagnostic details.",
-  ],
-  [
-    "[data-key='Tab']:not([data-shift])",
-    "Next actor",
-    "Move Oracle View control to the next active actor.",
-  ],
-  [
-    "[data-key='Tab'][data-shift='true']",
-    "Previous actor",
-    "Move Oracle View control to the previous active actor.",
   ],
   [
     "[data-key='Escape']",
@@ -558,9 +575,10 @@ function clearPresentationTooltipOwner(element) {
  * @param {string} reason
  */
 function clearPresentationAuthority(reason) {
+  savePresentationPreferenceBeforeClear();
+  enterPendingPresentationPreferenceState();
   state.authority = null;
   state.presentation = null;
-  disclosureAuthorityKey = null;
   tooltipController.hide();
   choreographer.clear(reason);
   battlefieldRenderer.render(null, { offline: true });
@@ -631,15 +649,9 @@ function clearPresentationAuthority(reason) {
       }
     }
   }
-  for (const panel of elements.disclosurePanels) {
-    if (panel.id !== "visual-key") {
-      panel.open = false;
-    }
-  }
-  elements.agentDetails.open = false;
   elements.agentDetails.removeAttribute("data-tone");
   elements.agentDetails.removeAttribute("data-accent");
-  elements.selectionHeading.textContent = "Agent Details";
+  elements.selectionHeading.textContent = AUTHORIZED_INSPECTOR_TITLE;
   elements.battlefield.removeAttribute("aria-activedescendant");
   document.documentElement.dataset.presentationAuthority = "pending";
 }
@@ -661,10 +673,16 @@ function installJoinedAuthority(joined) {
     throw new TypeError("Joined browser authority is incomplete or unbranded.");
   }
   assertFrameMatchesProductIdentity(joined.transport);
+  const preferenceKey = authorizedPresentationPreferenceKey(joined.presentation);
+  if (preferenceKey === null) {
+    throw new TypeError("Authorized presentation has no certified preference key.");
+  }
+  installActivePresentationPreference(joined.presentation, preferenceKey);
   state.authority = joined;
   state.frame = joined.transport;
   state.presentation = joined.presentation;
   state.timeline = isRecord(joined.timeline) ? joined.timeline : null;
+  presentationPreferenceNeedsContentRender = true;
   document.documentElement.dataset.presentationAuthority = "installed";
 }
 
@@ -711,6 +729,23 @@ const presentationInstallation = new PresentationInstallCoordinator({
   isJoinRace: isPresentationJoinRace,
 });
 
+const AUTHORIZED_INSPECTOR_TITLE = "Comprehensive Agent Details";
+
+function applyAuthorizedInspectorChrome() {
+  const inspector = authorizedInspectorView(
+    state.presentation,
+    installedLocalInspectedPresentationKey(state.presentation),
+  );
+  elements.selectionHeading.textContent =
+    inspector?.title ?? AUTHORIZED_INSPECTOR_TITLE;
+  elements.agentDetails.removeAttribute("data-tone");
+  if (typeof inspector?.owner_class_accent === "string") {
+    elements.agentDetails.dataset.accent = inspector.owner_class_accent;
+  } else {
+    elements.agentDetails.removeAttribute("data-accent");
+  }
+}
+
 function reloadForProductHandoff() {
   if (productHandoffReloadRequested) {
     return;
@@ -724,6 +759,9 @@ function reloadForProductHandoff() {
  * @param {{owner: Element, trigger: Element | null}} _context
  */
 function showSemanticInspector(descriptor, _context) {
+  if (installedActivePresentationPreference(state.presentation) === null) {
+    return;
+  }
   const normalized = createSemanticDescriptor(descriptor);
   if (
     isReplayMode() &&
@@ -733,42 +771,116 @@ function showSemanticInspector(descriptor, _context) {
     const ownerKey = _context.owner
       .closest("[data-presentation-key]")
       ?.getAttribute("data-presentation-key");
-    if (
-      typeof ownerKey !== "string" ||
-      ownerKey !== state.presentation?.recipient_presentation_key
-    ) {
+    const scene = installedAuthorizedPresentationSceneView(state.presentation);
+    const inspectedKey = isRecord(scene?.selection)
+      ? scene.selection.inspection_owner_presentation_key
+      : null;
+    if (typeof ownerKey !== "string" || ownerKey !== inspectedKey) {
       return;
     }
   }
-  renderSemanticDescriptor({
-    descriptor: normalized,
-    title: elements.selectionHeading,
-    details: elements.selectionCard,
-    surface: "full",
-  });
-  elements.agentDetails.dataset.tone = normalized.tone;
-  elements.agentDetails.dataset.accent = normalized.accent;
-  elements.agentDetails.open = true;
+  renderSemanticInspector(elements.selectionCard, normalized);
+  applyAuthorizedInspectorChrome();
+  openAgentDetails();
 }
 
 function registerControlHelp() {
   for (const [selector, title, summary, kind = "control"] of CONTROL_HELP) {
     for (const control of document.querySelectorAll(selector)) {
-      registerTooltipOwner(
+      registerControlHelpOwner(control, selector, title, summary, kind);
+    }
+  }
+}
+
+/**
+ * @param {Element} control
+ * @param {string} selector
+ * @param {string} title
+ * @param {string} summary
+ * @param {string} [kind]
+ */
+function registerControlHelpOwner(control, selector, title, summary, kind = "control") {
+  registerTooltipOwner(
+    control,
+    createSemanticDescriptor({
+      kind,
+      id: `control:${selector}:${title}`,
+      title,
+      tone: "information",
+      accent: "none",
+      summary,
+      rows: [],
+      sections: [],
+      metadata: { compact: true, full: false },
+      anchor: selector === "#battlefield" ? "pointer" : "element",
+    }),
+    { inspectable: false },
+  );
+}
+
+function registerAuthorityAwareUtilityHelp() {
+  const presentation = state.presentation;
+  const installed =
+    isAuthorizedPresentationFrame(presentation) && installedAuthorityIsCoherent();
+  const audience = installed ? authorizedPresentationAudience(presentation) : null;
+  const agentPov = audience === "agent_pov";
+  const researcher = audience === "researcher";
+  registerControlHelpOwner(
+    elements.liveRangesButton,
+    "#live-ranges-button",
+    "Ranges",
+    agentPov
+      ? "Show or hide locally authorized range overlays. This sends no command and does not change the fixed recipient."
+      : researcher
+        ? "Toggle server-authored Oracle View range presentation."
+        : "Range presentation is unavailable until one coherent authorized live frame is installed.",
+  );
+  registerControlHelpOwner(
+    elements.replayRangesButton,
+    "#replay-ranges-button",
+    "Replay ranges",
+    agentPov
+      ? "Show or hide locally authorized inspected-agent range overlays. This sends no replay command and does not change the fixed recipient."
+      : researcher
+        ? "Toggle recorded Oracle View range presentation."
+        : "Replay range presentation is unavailable until one coherent authorized frame is installed.",
+  );
+  registerControlHelpOwner(
+    elements.replayClearReferenceButton,
+    "#replay-clear-reference-button",
+    "Clear Selection",
+    agentPov
+      ? "Clear the local inspected-agent highlight, details, and ranges. This sends no replay command and does not change the fixed recipient."
+      : researcher
+        ? "Clear the selected Oracle View agent and its inspection highlight."
+        : "Selection cannot be cleared until one coherent authorized replay frame is installed.",
+  );
+  for (const [selector, title, oracleSummary] of [
+    [
+      "[data-key='Tab']:not([data-shift])",
+      "Next actor",
+      "Move Oracle View control to the next active actor.",
+    ],
+    [
+      "[data-key='Tab'][data-shift='true']",
+      "Previous actor",
+      "Move Oracle View control to the previous active actor.",
+    ],
+  ]) {
+    for (const control of document.querySelectorAll(selector)) {
+      const oracleActorCyclingAvailable =
+        researcher && control instanceof HTMLButtonElement && !control.disabled;
+      registerControlHelpOwner(
         control,
-        createSemanticDescriptor({
-          kind,
-          id: `control:${selector}:${title}`,
-          title,
-          tone: "information",
-          accent: "none",
-          summary,
-          rows: [],
-          sections: [],
-          metadata: { compact: true, full: false },
-          anchor: selector === "#battlefield" ? "pointer" : "element",
-        }),
-        { inspectable: false },
+        selector,
+        title,
+        agentPov
+          ? "Actor cycling is unavailable in Agent POV. Tab and Shift+Tab keep native browser focus and never change the fixed recipient."
+          : oracleActorCyclingAvailable
+            ? oracleSummary
+            : researcher
+              ? "Actor cycling is unavailable in the current Oracle View state. Tab and Shift+Tab retain native browser focus navigation."
+              : "Actor cycling is unavailable until one coherent authorized live frame is installed.",
       );
     }
   }
@@ -782,27 +894,361 @@ function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** @type {string | null} */
-let disclosureAuthorityKey = null;
-
-function syncDisclosurePanels() {
-  const key = panelDisclosureAuthorityKey(state.presentation);
-  if (key === null || key === disclosureAuthorityKey) {
+function cancelPendingPresentationPreferenceRestore() {
+  if (pendingPresentationPreferenceRestoreFrame === null) {
     return;
   }
-  disclosureAuthorityKey = key;
-  const replay = isReplayMode();
-  for (const panel of elements.disclosurePanels) {
-    panel.open = disclosurePanelInitiallyOpen(panel.id, replay);
+  window.cancelAnimationFrame(pendingPresentationPreferenceRestoreFrame);
+  pendingPresentationPreferenceRestoreFrame = null;
+}
+
+/**
+ * Native details toggle events are task-queued and may coalesce. Record the
+ * expected final state before assigning `.open`; a synchronous boolean would
+ * be cleared before the browser delivers the event.
+ *
+ * @param {HTMLDetailsElement} panel
+ * @param {boolean} open
+ */
+function setProgrammaticDisclosureOpen(panel, open) {
+  if (panel.open === open) {
+    return;
   }
+  expectedDisclosureToggles.set(panel, Object.freeze({ open }));
+  panel.open = open;
+}
+
+/** @param {boolean} available */
+function setScientificDisclosureAvailability(available) {
+  for (const { panel, body } of scientificDisclosures) {
+    const summary = panel.querySelector(":scope > summary");
+    if (!available) {
+      setProgrammaticDisclosureOpen(panel, false);
+      panel.setAttribute("inert", "");
+      body.setAttribute("inert", "");
+      if (summary instanceof HTMLElement) {
+        summary.setAttribute("aria-disabled", "true");
+        summary.setAttribute("tabindex", "-1");
+      }
+      continue;
+    }
+    panel.removeAttribute("inert");
+    body.removeAttribute("inert");
+    if (summary instanceof HTMLElement) {
+      summary.removeAttribute("aria-disabled");
+      summary.removeAttribute("tabindex");
+    }
+  }
+}
+
+/**
+ * @param {unknown} presentation
+ * @returns {typeof activePresentationPreference}
+ */
+function installedActivePresentationPreference(presentation) {
+  if (
+    activePresentationPreference === null ||
+    !isAuthorizedPresentationFrame(presentation) ||
+    !installedAuthorityIsCoherent() ||
+    state.presentation !== presentation
+  ) {
+    return null;
+  }
+  const installedKey = authorizedPresentationPreferenceKey(presentation);
+  return installedKey !== null &&
+    sameAuthorizedPresentationPreferenceKey(
+      activePresentationPreference.authorityKey,
+      installedKey,
+    )
+    ? activePresentationPreference
+    : null;
+}
+
+/**
+ * @param {Readonly<Record<string, any>>} presentation
+ * @param {Readonly<{tuple: readonly unknown[], serialized: string}>} authorityKey
+ * @returns {NonNullable<typeof activePresentationPreference>}
+ */
+function defaultPresentationPreference(presentation, authorityKey) {
+  /** @type {Record<string, {open: boolean, scrollTop: number}>} */
+  const disclosures = {};
+  const replay = presentation.product_kind === "replay_viewer";
+  for (const { panelId } of scientificDisclosures) {
+    disclosures[panelId] = {
+      open: disclosurePanelInitiallyOpen(panelId, replay),
+      scrollTop: 0,
+    };
+  }
+  const audience = authorizedPresentationAudience(presentation);
+  const ownsLocalInspection =
+    audience === "agent_pov" ||
+    authorizedPresentationInspectionState(presentation).state_kind === "live_scripted";
+  const recipientKey =
+    audience === "agent_pov" ? presentation.authority.recipient_presentation_key : null;
+  const inspectedPresentationKey =
+    typeof recipientKey === "string" &&
+    authorizedAgentForPresentationKey(presentation, recipientKey) !== null
+      ? recipientKey
+      : null;
+  return {
+    authorityKey,
+    disclosures,
+    agentDetailsAutoOpenAllowed: true,
+    primaryFocus: null,
+    localInspection: ownsLocalInspection
+      ? { owned: true, presentationKey: inspectedPresentationKey }
+      : { owned: false },
+    localRanges: ownsLocalInspection
+      ? { owned: true, visible: true }
+      : { owned: false },
+  };
+}
+
+/**
+ * Re-resolve retained opaque keys exclusively through the new certified scene.
+ * A disappeared local selection becomes explicit null and never falls back to
+ * the recipient merely because the authority tuple is unchanged.
+ *
+ * @param {NonNullable<typeof activePresentationPreference>} preference
+ * @param {Readonly<Record<string, any>>} presentation
+ */
+function reconcilePresentationPreference(preference, presentation) {
+  if (
+    preference.localInspection.owned &&
+    preference.localInspection.presentationKey !== null &&
+    authorizedAgentForPresentationKey(
+      presentation,
+      preference.localInspection.presentationKey,
+    ) === null
+  ) {
+    preference.localInspection.presentationKey = null;
+    preference.disclosures["agent-details"].open = false;
+  }
+  if (
+    preference.primaryFocus !== null &&
+    authorizedAgentForPresentationKey(
+      presentation,
+      preference.primaryFocus.presentationKey,
+    ) === null
+  ) {
+    preference.primaryFocus = null;
+  }
+}
+
+/**
+ * @param {Readonly<Record<string, any>>} presentation
+ * @param {Readonly<{tuple: readonly unknown[], serialized: string}>} authorityKey
+ */
+function installActivePresentationPreference(presentation, authorityKey) {
+  presentationPreferenceGeneration += 1;
+  cancelPendingPresentationPreferenceRestore();
+  if (
+    activePresentationPreference === null ||
+    !sameAuthorizedPresentationPreferenceKey(
+      activePresentationPreference.authorityKey,
+      authorityKey,
+    )
+  ) {
+    activePresentationPreference = defaultPresentationPreference(
+      presentation,
+      authorityKey,
+    );
+  } else {
+    reconcilePresentationPreference(activePresentationPreference, presentation);
+  }
+}
+
+/**
+ * @param {Readonly<Record<string, any>>} presentation
+ * @returns {null | {surface: "roster" | "battlefield", presentationKey: string}}
+ */
+function focusedAuthorizedPrimaryAction(presentation) {
+  const active = document.activeElement;
+  if (!(active instanceof Element)) {
+    return null;
+  }
+  const rosterAction = active.closest(
+    "#roster .roster-primary-action[data-presentation-key]",
+  );
+  const battlefieldAction = active.closest(
+    "#battlefield .agent[data-presentation-key]",
+  );
+  const action = rosterAction ?? battlefieldAction;
+  const presentationKey = action?.getAttribute("data-presentation-key");
+  if (
+    typeof presentationKey !== "string" ||
+    authorizedAgentForPresentationKey(presentation, presentationKey) === null
+  ) {
+    return null;
+  }
+  return {
+    surface: rosterAction !== null ? "roster" : "battlefield",
+    presentationKey,
+  };
+}
+
+/**
+ * @param {NonNullable<typeof activePresentationPreference>} preference
+ * @param {Readonly<Record<string, any>>} presentation
+ */
+function capturePresentationPreference(preference, presentation) {
+  for (const { panelId, panel, body } of scientificDisclosures) {
+    const saved = preference.disclosures[panelId];
+    const expected = expectedDisclosureToggles.get(panel);
+    const userClosedBeforeToggle =
+      saved?.open === true && !panel.open && expected?.open !== false;
+    if (panelId === "agent-details" && userClosedBeforeToggle) {
+      preference.agentDetailsAutoOpenAllowed = false;
+    }
+    preference.disclosures[panelId] = {
+      open: panel.open,
+      scrollTop:
+        panel.open || userClosedBeforeToggle ? body.scrollTop : (saved?.scrollTop ?? 0),
+    };
+  }
+  preference.primaryFocus = focusedAuthorizedPrimaryAction(presentation);
+}
+
+function savePresentationPreferenceBeforeClear() {
+  const presentation = state.presentation;
+  const preference = installedActivePresentationPreference(presentation);
+  if (preference === null || !isAuthorizedPresentationFrame(presentation)) {
+    return;
+  }
+  capturePresentationPreference(preference, presentation);
+  const active = document.activeElement;
+  const presentationOwnedFocus =
+    active instanceof Element &&
+    (elements.battlefield.contains(active) ||
+      scientificDisclosures.some(({ panel }) => panel.contains(active)));
+  if (!presentationOwnedFocus) {
+    pendingPrimaryFocusRestoreAnchor = null;
+    return;
+  }
+  elements.helpButton.focus({ preventScroll: true });
+  pendingPrimaryFocusRestoreAnchor =
+    preference.primaryFocus === null ? null : elements.helpButton;
+}
+
+function enterPendingPresentationPreferenceState() {
+  presentationPreferenceGeneration += 1;
+  presentationPreferenceNeedsContentRender = false;
+  cancelPendingPresentationPreferenceRestore();
+  setScientificDisclosureAvailability(false);
+}
+
+function capturePresentationPreferenceBeforeRender() {
+  if (
+    presentationPreferenceNeedsContentRender ||
+    pendingPresentationPreferenceRestoreFrame !== null
+  ) {
+    return;
+  }
+  const presentation = state.presentation;
+  const preference = installedActivePresentationPreference(presentation);
+  if (preference === null || !isAuthorizedPresentationFrame(presentation)) {
+    return;
+  }
+  capturePresentationPreference(preference, presentation);
+  pendingPrimaryFocusRestoreAnchor =
+    preference.primaryFocus === null ? null : document.activeElement;
+}
+
+/**
+ * @param {NonNullable<typeof activePresentationPreference>} preference
+ */
+function schedulePresentationPreferenceRestore(preference) {
+  cancelPendingPresentationPreferenceRestore();
+  const generation = presentationPreferenceGeneration;
+  const authorityKey = preference.authorityKey;
+  pendingPresentationPreferenceRestoreFrame = window.requestAnimationFrame(() => {
+    pendingPresentationPreferenceRestoreFrame = null;
+    const installed = installedActivePresentationPreference(state.presentation);
+    if (
+      generation !== presentationPreferenceGeneration ||
+      installed === null ||
+      !sameAuthorizedPresentationPreferenceKey(installed.authorityKey, authorityKey)
+    ) {
+      return;
+    }
+    for (const { panelId, panel, body } of scientificDisclosures) {
+      const saved = installed.disclosures[panelId];
+      if (panel.open && saved?.open === true) {
+        body.scrollTop = saved.scrollTop;
+      }
+    }
+    const focus = installed.primaryFocus;
+    const anchor = pendingPrimaryFocusRestoreAnchor;
+    pendingPrimaryFocusRestoreAnchor = null;
+    if (focus === null || anchor === null) {
+      return;
+    }
+    const active = document.activeElement;
+    const focusWasNotMovedByUser =
+      active === anchor || (!anchor.isConnected && active === document.body);
+    if (
+      !focusWasNotMovedByUser ||
+      authorizedAgentForPresentationKey(state.presentation, focus.presentationKey) ===
+        null
+    ) {
+      return;
+    }
+    const root = focus.surface === "roster" ? elements.roster : elements.battlefield;
+    const selector =
+      focus.surface === "roster"
+        ? `.roster-primary-action[data-presentation-key="${CSS.escape(focus.presentationKey)}"]`
+        : `.agent[data-presentation-key="${CSS.escape(focus.presentationKey)}"]`;
+    const target = root.querySelector(selector);
+    if (
+      !(target instanceof HTMLElement || target instanceof SVGElement) ||
+      target.getAttribute("aria-disabled") === "true" ||
+      target.getAttribute("tabindex") === "-1" ||
+      (target instanceof HTMLButtonElement && target.disabled)
+    ) {
+      return;
+    }
+    target.focus({ preventScroll: true });
+  });
+}
+
+function restorePresentationPreferenceAfterRender() {
+  const preference = installedActivePresentationPreference(state.presentation);
+  if (preference === null) {
+    setScientificDisclosureAvailability(false);
+    return;
+  }
+  setScientificDisclosureAvailability(true);
+  for (const { panelId, panel } of scientificDisclosures) {
+    setProgrammaticDisclosureOpen(
+      panel,
+      preference.disclosures[panelId]?.open === true,
+    );
+  }
+  presentationPreferenceNeedsContentRender = false;
+  schedulePresentationPreferenceRestore(preference);
 }
 
 function openAgentDetails() {
-  elements.agentDetails.open = true;
+  const preference = installedActivePresentationPreference(state.presentation);
+  if (preference === null || !preference.agentDetailsAutoOpenAllowed) {
+    return false;
+  }
+  preference.disclosures["agent-details"].open = true;
+  setProgrammaticDisclosureOpen(elements.agentDetails, true);
+  return true;
+}
+
+function closeAgentDetailsWithoutLatching() {
+  const preference = installedActivePresentationPreference(state.presentation);
+  if (preference === null) {
+    return;
+  }
+  preference.disclosures["agent-details"].open = false;
+  setProgrammaticDisclosureOpen(elements.agentDetails, false);
 }
 
 function isReplayMode() {
-  return state.frame?.viewer_mode === "replay";
+  return productIdentity?.product_kind === "replay_viewer";
 }
 
 /**
@@ -833,6 +1279,117 @@ function installedAuthorityIsCoherent() {
     authority.transport === state.frame &&
     authority.presentation === state.presentation
   );
+}
+
+/**
+ * Resolve an opaque presentation key only through the certified scene that is
+ * installed now. DOM order, raw slots, and a previous presentation are never
+ * identity authority.
+ *
+ * @param {unknown} presentation
+ * @param {unknown} presentationKey
+ * @returns {Readonly<Record<string, any>> | null}
+ */
+function authorizedAgentForPresentationKey(presentation, presentationKey) {
+  if (
+    !isAuthorizedPresentationFrame(presentation) ||
+    typeof presentationKey !== "string"
+  ) {
+    return null;
+  }
+  return (
+    asArray(authorizedPresentationSceneView(presentation)?.agents).find(
+      (candidate) =>
+        isRecord(candidate) && candidate.presentation_key === presentationKey,
+    ) ?? null
+  );
+}
+
+/**
+ * @param {unknown} presentation
+ * @returns {Readonly<{
+ *   inspectedPresentationKey: string | null,
+ *   rangesVisible: boolean,
+ * }> | null}
+ */
+function installedLocalPresentationPreference(presentation) {
+  if (!isAuthorizedPresentationFrame(presentation)) {
+    return null;
+  }
+  const preference = installedActivePresentationPreference(presentation);
+  return preference?.localInspection.owned && preference.localRanges.owned
+    ? Object.freeze({
+        inspectedPresentationKey: preference.localInspection.presentationKey,
+        rangesVisible: preference.localRanges.visible,
+      })
+    : null;
+}
+
+/**
+ * Undefined preserves the accepted Oracle view; null is Agent POV's explicit
+ * no-selection state.
+ *
+ * @param {unknown} presentation
+ * @returns {string | null | undefined}
+ */
+function installedLocalInspectedPresentationKey(presentation) {
+  return installedLocalPresentationPreference(presentation)?.inspectedPresentationKey;
+}
+
+/** @param {unknown} presentation */
+function installedAuthorizedPresentationSceneView(presentation) {
+  return authorizedPresentationSceneView(
+    presentation,
+    installedLocalInspectedPresentationKey(presentation),
+  );
+}
+
+/**
+ * Update only the active authority's inert local selection. A stale or
+ * disappeared key is rejected without falling back to the recipient or
+ * retaining old facts.
+ *
+ * @param {string | null} presentationKey
+ * @returns {boolean}
+ */
+function setLocalInspectedPresentationKey(presentationKey) {
+  const presentation = state.presentation;
+  const preference = installedActivePresentationPreference(presentation);
+  if (
+    preference === null ||
+    !preference.localInspection.owned ||
+    (presentationKey !== null &&
+      authorizedAgentForPresentationKey(presentation, presentationKey) === null)
+  ) {
+    return false;
+  }
+  preference.localInspection.presentationKey = presentationKey;
+  return true;
+}
+
+/** @returns {boolean} */
+function toggleAgentLocalRanges() {
+  const preference = installedActivePresentationPreference(state.presentation);
+  if (preference === null || !preference.localRanges.owned) {
+    return false;
+  }
+  preference.localRanges.visible = !preference.localRanges.visible;
+  return true;
+}
+
+/** @param {unknown} presentation */
+function installedPresentationRangesVisible(presentation) {
+  if (
+    !isAuthorizedPresentationFrame(presentation) ||
+    !installedAuthorityIsCoherent() ||
+    state.presentation !== presentation
+  ) {
+    return false;
+  }
+  const localPreference = installedLocalPresentationPreference(presentation);
+  return authorizedPresentationAudience(presentation) === "researcher"
+    ? state.frame?.show_ranges === true
+    : localPreference?.rangesVisible === true;
 }
 
 /**
@@ -915,22 +1472,143 @@ function recordingRestartControlsBlocked() {
 }
 
 const SCRIPTED_BATTLEFIELD_LABEL =
-  "Inspection-only scripted battlefield. Use Advance scripted frame for the next authorized step.";
+  "Inspection-only scripted battlefield. Authorized bodies can be inspected; use Advance scripted frame for the next authorized step.";
 const SCRIPTED_BATTLEFIELD_INSTRUCTIONS =
-  "Scripted live view is inspection-only. Battlefield bodies are passive and cannot submit actions. Use the single Advance scripted frame button to apply the next authorized script step; it is disabled when the script is complete.";
+  "Scripted live view is inspection-only. Activate an authorized body to inspect current facts; use Advance scripted frame for the next authorized step.";
+const FENCED_LIVE_BATTLEFIELD_LABEL =
+  "Read-only live battlefield. Simulator and actor activation controls are unavailable.";
+const FENCED_LIVE_BATTLEFIELD_INSTRUCTIONS =
+  "Live battlefield interaction is unavailable while authority is pending, offline, resynchronizing, shutting down, or terminal.";
+const READ_ONLY_LIVE_SCIENTIFIC_LABEL =
+  "Read-only live battlefield. Scientific facts can be inspected; simulator and actor activation controls are unavailable.";
+const READ_ONLY_LIVE_SCIENTIFIC_INSTRUCTIONS =
+  "Scientific tooltip facts remain inspectable. Live simulator and actor activation controls are unavailable while recording is closing, the session is offline or resynchronizing, or the frame is terminal.";
+const AGENT_CLOSEOUT_BATTLEFIELD_LABEL =
+  "Agent POV recording closeout battlefield. Authorized bodies can be inspected; simulator controls are unavailable.";
+const AGENT_CLOSEOUT_BATTLEFIELD_INSTRUCTIONS =
+  "Agent POV keeps one fixed recipient. Activate an authorized visible body to inspect current facts; recording closeout has fenced simulator and pending-action controls.";
+const TERMINAL_REPLAY_BATTLEFIELD_LABEL =
+  "Read-only terminal replay battlefield snapshot. Agent inspection controls are unavailable.";
+const TERMINAL_REPLAY_BATTLEFIELD_INSTRUCTIONS =
+  "This replay frame is terminal. Agent inspection controls are unavailable; use the timeline to review another frame.";
 
-function applyScriptedBattlefieldBoundaryCopy() {
-  elements.battlefield.setAttribute("role", "img");
-  elements.battlefield.tabIndex = -1;
-  elements.battlefield.setAttribute("aria-label", SCRIPTED_BATTLEFIELD_LABEL);
-  elements.battlefieldInstructions.textContent = SCRIPTED_BATTLEFIELD_INSTRUCTIONS;
+function liveBattlefieldCommandsInteractive() {
+  return (
+    !isReplayMode() &&
+    isAuthorizedPresentationFrame(state.presentation) &&
+    installedAuthorityIsCoherent() &&
+    !liveScriptedInspectionOnly() &&
+    !isTerminal(state.frame) &&
+    !state.busy &&
+    !state.shuttingDown &&
+    !state.resyncRequired &&
+    !state.offline &&
+    !recordingScientificControlsFenced()
+  );
+}
+
+function scriptedBattlefieldLocallyActionable() {
+  return (
+    liveScriptedInspectionOnly() &&
+    !isTerminal(state.frame) &&
+    !state.busy &&
+    !state.shuttingDown &&
+    !state.resyncRequired &&
+    !state.offline &&
+    !recordingScientificControlsFenced()
+  );
+}
+
+function liveAgentCloseoutInspectionActionable() {
+  return (
+    !isReplayMode() &&
+    authorizedPresentationAudience(state.presentation) === "agent_pov" &&
+    isAuthorizedPresentationFrame(state.presentation) &&
+    installedAuthorityIsCoherent() &&
+    recordingScientificControlsFenced() &&
+    !isTerminal(state.frame) &&
+    !state.busy &&
+    !state.shuttingDown &&
+    !state.resyncRequired &&
+    !state.offline
+  );
+}
+
+function installedLiveScientificInspectionAvailable() {
+  return (
+    !isReplayMode() &&
+    isAuthorizedPresentationFrame(state.presentation) &&
+    installedAuthorityIsCoherent()
+  );
+}
+
+function applyBattlefieldBoundaryCopy() {
+  const replay = isReplayMode();
+  const terminal = isTerminal(state.frame);
+  const scientificFenced = recordingScientificControlsFenced();
+  const audience = authorizedPresentationAudience(state.presentation);
+  const scriptedInspection = scriptedBattlefieldLocallyActionable();
+  const agentCloseoutInspection = liveAgentCloseoutInspectionActionable();
+  const liveInteractive = liveBattlefieldCommandsInteractive();
+  if (scriptedInspection && !scientificFenced) {
+    elements.battlefield.setAttribute("role", "group");
+    elements.battlefield.tabIndex = -1;
+    elements.battlefield.setAttribute("aria-label", SCRIPTED_BATTLEFIELD_LABEL);
+    elements.battlefieldInstructions.textContent = SCRIPTED_BATTLEFIELD_INSTRUCTIONS;
+  } else if (agentCloseoutInspection) {
+    elements.battlefield.setAttribute("role", "group");
+    elements.battlefield.tabIndex = -1;
+    elements.battlefield.setAttribute("aria-label", AGENT_CLOSEOUT_BATTLEFIELD_LABEL);
+    elements.battlefieldInstructions.textContent =
+      AGENT_CLOSEOUT_BATTLEFIELD_INSTRUCTIONS;
+  } else if (replay) {
+    elements.battlefield.setAttribute("role", "group");
+    elements.battlefield.tabIndex = -1;
+    elements.battlefield.setAttribute(
+      "aria-label",
+      terminal
+        ? TERMINAL_REPLAY_BATTLEFIELD_LABEL
+        : "Read-only replay battlefield snapshot. Authorized agents can be inspected.",
+    );
+    elements.battlefieldInstructions.textContent = terminal
+      ? TERMINAL_REPLAY_BATTLEFIELD_INSTRUCTIONS
+      : audience === "agent_pov"
+        ? "Replay Agent POV is read-only and keeps one fixed recipient. Activate an authorized visible body to inspect current facts; the replay authority does not change."
+        : "Replay is read-only. Activate an authorized agent to inspect current facts and its recorded outgoing action; use the timeline to change frames.";
+  } else if (liveInteractive) {
+    elements.battlefield.setAttribute("role", "application");
+    elements.battlefield.tabIndex = 0;
+    elements.battlefield.setAttribute(
+      "aria-label",
+      "Interactive battlefield. Press Help for keyboard controls.",
+    );
+    elements.battlefieldInstructions.textContent =
+      audience === "agent_pov"
+        ? "Live Agent POV keeps one fixed recipient. Bodies are passive inspection targets; use the authorized draft controls to prepare that recipient's action."
+        : "Live Oracle View is interactive. Activate an authorized actor to control it; Shift-click selects an authorized target; right-click clears the target. Battlefield keyboard commands apply only while this surface has focus.";
+  } else if (installedLiveScientificInspectionAvailable()) {
+    elements.battlefield.setAttribute("role", "group");
+    elements.battlefield.tabIndex = -1;
+    elements.battlefield.setAttribute("aria-label", READ_ONLY_LIVE_SCIENTIFIC_LABEL);
+    elements.battlefieldInstructions.textContent =
+      READ_ONLY_LIVE_SCIENTIFIC_INSTRUCTIONS;
+  } else {
+    elements.battlefield.setAttribute("role", "img");
+    elements.battlefield.tabIndex = -1;
+    elements.battlefield.setAttribute(
+      "aria-label",
+      scientificFenced
+        ? "Read-only recording closeout battlefield snapshot."
+        : FENCED_LIVE_BATTLEFIELD_LABEL,
+    );
+    elements.battlefieldInstructions.textContent = scientificFenced
+      ? "Recording closeout has fenced simulator and pending-action controls. Presentation, recovery, review, and Exit controls remain available."
+      : FENCED_LIVE_BATTLEFIELD_INSTRUCTIONS;
+  }
 }
 
 function renderViewerBoundary() {
   const replay = isReplayMode();
-  const scientificFenced = recordingScientificControlsFenced();
-  const audience = authorizedPresentationAudience(state.presentation);
-  const scriptedInspection = liveScriptedInspectionOnly();
   document.documentElement.dataset.viewerMode = replay ? "replay" : "live";
   for (const element of elements.liveOnly) {
     element.toggleAttribute("hidden", replay);
@@ -938,32 +1616,26 @@ function renderViewerBoundary() {
   for (const element of elements.replayOnly) {
     element.toggleAttribute("hidden", !replay);
   }
-  elements.replayTimeline.toggleAttribute("hidden", !replay);
-  if (scriptedInspection && !scientificFenced) {
-    applyScriptedBattlefieldBoundaryCopy();
-  } else {
-    elements.battlefield.setAttribute(
-      "role",
-      replay ? "group" : scientificFenced ? "img" : "application",
-    );
-    elements.battlefield.tabIndex = replay || scientificFenced ? -1 : 0;
-    elements.battlefield.setAttribute(
-      "aria-label",
-      replay
-        ? "Read-only replay battlefield snapshot. Authorized agents can be inspected."
-        : scientificFenced
-          ? "Read-only recording closeout battlefield snapshot."
-          : "Interactive battlefield. Press Help for keyboard controls.",
-    );
-    elements.battlefieldInstructions.textContent = replay
-      ? "Replay transport changes only the selected recorded frame. Activate an authorized agent to inspect it; the battlefield cannot submit actions or advance the simulator."
-      : scientificFenced
-        ? "Recording closeout has fenced simulator and pending-action controls. Presentation, recovery, review, and Exit controls remain available."
+  const inspectionState = authorizedPresentationInspectionState(state.presentation);
+  const audience = authorizedPresentationAudience(state.presentation);
+  const liveHelpMode = !isAuthorizedPresentationFrame(state.presentation)
+    ? "unavailable"
+    : inspectionState.state_kind === "live_scripted"
+      ? "scripted"
+      : audience === "researcher"
+        ? "oracle"
         : audience === "agent_pov"
-          ? "Agent POV bodies are inspectable and passive; they cannot change control or submit actions. Use the command draft controls or battlefield keyboard shortcuts to prepare actions. Escape moves focus to the command deck, or to Help while commands are unavailable. Tab behaves normally in the side panel."
-          : "The battlefield owns debugger keyboard commands while it has focus. Left click controls an authorized actor, Shift plus left click selects an authorized target, and right click clears the target. Tab and Shift Tab cycle controlled actors here. Escape clears the target and moves focus to the command deck, or to Help while commands are unavailable. Tab behaves normally in the side panel.";
+          ? "agent"
+          : "unavailable";
+  for (const element of elements.liveHelpModes) {
+    element.toggleAttribute(
+      "hidden",
+      replay || element.dataset.liveHelpMode !== liveHelpMode,
+    );
   }
-  elements.selectionHeading.textContent = "Agent Details";
+  elements.replayTimeline.toggleAttribute("hidden", !replay);
+  applyBattlefieldBoundaryCopy();
+  applyAuthorizedInspectorChrome();
 }
 
 function renderReplayMetadata() {
@@ -1037,15 +1709,20 @@ function renderReplayMetadata() {
       : "Initial frame";
   elements.replayRangesButton.setAttribute(
     "aria-pressed",
-    String(frame.show_ranges === true),
+    String(installedPresentationRangesVisible(presentation)),
   );
   elements.replayRangesButton.disabled =
-    state.busy || authorizedPresentationAudience(presentation) !== "researcher";
-  const inspection = authorizedPresentationInspectionState(presentation).inspection;
+    state.busy || state.shuttingDown || state.resyncRequired || state.offline;
+  const scene = installedAuthorizedPresentationSceneView(presentation);
+  const selectedOwnerKey = isRecord(scene?.selection)
+    ? scene.selection.inspection_owner_presentation_key
+    : null;
   elements.replayClearReferenceButton.disabled =
     state.busy ||
-    authorizedPresentationAudience(presentation) !== "researcher" ||
-    !isRecord(inspection);
+    state.shuttingDown ||
+    state.resyncRequired ||
+    state.offline ||
+    typeof selectedOwnerKey !== "string";
   renderReplayTimelineControls(replayTimelineElements, replayPlayback.snapshot());
 }
 
@@ -1380,17 +2057,20 @@ function renderSessionToolbar() {
         : "Exit";
   elements.resetButton.disabled =
     disabled || restartControlsBlocked || liveScriptedInspectionOnly();
-  const researcherLive =
-    !replay && authorizedPresentationAudience(presentation) === "researcher";
-  elements.liveRangesButton.hidden = !researcherLive;
+  const authorizedLive =
+    !replay &&
+    (authorizedPresentationAudience(presentation) === "researcher" ||
+      authorizedPresentationAudience(presentation) === "agent_pov");
+  elements.liveRangesButton.hidden = !authorizedLive;
   elements.liveRangesButton.setAttribute(
     "aria-pressed",
-    String(researcherLive && frame?.show_ranges === true),
+    String(authorizedLive && installedPresentationRangesVisible(presentation)),
   );
-  elements.liveRangesButton.disabled = disabled || !researcherLive;
+  elements.liveRangesButton.disabled = disabled || !authorizedLive;
   renderRecordingControls();
   renderReplayMetadata();
   renderCommandAvailability();
+  registerAuthorityAwareUtilityHelp();
 }
 
 /**
@@ -1597,6 +2277,8 @@ function renderCommandAvailability() {
   const inspectionState = authorizedPresentationInspectionState(presentation);
   const editableDraft = inspectionState.state_kind === "live_editable";
   const scriptedAdvance = liveScriptedInspectionOnly();
+  const fixedAgentRecipient =
+    authorizedPresentationAudience(presentation) === "agent_pov";
   const disabled =
     state.busy ||
     !state.frame ||
@@ -1655,6 +2337,7 @@ function renderCommandAvailability() {
         disabled ||
         scientificFenced ||
         !enabledByInspection ||
+        (fixedAgentRecipient && button.dataset.key === "Tab") ||
         (scriptedAdvance && isTerminal(state.frame)) ||
         recordingDecision.action === "block" ||
         !mode.allowed;
@@ -1677,11 +2360,14 @@ function exposePresentationState(presentation) {
 }
 
 function applyReplayReferenceSemantics() {
+  if (!isReplayMode()) {
+    return;
+  }
   const presentation = state.presentation;
   if (authorizedPresentationAudience(presentation) !== "researcher") {
     return;
   }
-  const scene = authorizedPresentationSceneView(presentation);
+  const scene = installedAuthorizedPresentationSceneView(presentation);
   const selectedKey = isRecord(scene?.selection)
     ? scene.selection.inspection_owner_presentation_key
     : null;
@@ -1717,121 +2403,215 @@ function applyReplayReferenceSemantics() {
       isRecord(classMechanics) ? classMechanics : null,
       asArray(scene?.agents),
     ),
+    { inspectable: false },
   );
 }
 
 /**
- * Return an authorized replay-inspection target from the current rendered SVG.
- * Researcher replay may inspect every authorized scene agent; recipient replay
- * exposes activation only for its own recorded actor.
+ * Resolve one opaque key to the only action authorized by the installed
+ * product/audience. The returned effect is a browser decision, never a value
+ * supplied by a DOM data-role or raw slot.
  *
- * @param {unknown} target
+ * @param {unknown} presentationKey
+ * @returns {Readonly<Record<string, any>> | null}
  */
-function replayAgentActivation(target) {
-  if (!isReplayMode() || !(target instanceof Element)) {
+function authorizedAgentActivation(presentationKey) {
+  const presentation = state.presentation;
+  if (
+    typeof presentationKey !== "string" ||
+    !isAuthorizedPresentationFrame(presentation) ||
+    !installedAuthorityIsCoherent() ||
+    state.busy ||
+    state.shuttingDown ||
+    state.resyncRequired ||
+    state.offline ||
+    isTerminal(state.frame)
+  ) {
+    return null;
+  }
+  const agent = authorizedAgentForPresentationKey(presentation, presentationKey);
+  if (agent === null) {
+    return null;
+  }
+  const audience = authorizedPresentationAudience(presentation);
+  const inspectionState = authorizedPresentationInspectionState(presentation);
+  if (audience === "researcher" && recordingScientificControlsFenced()) {
+    return null;
+  }
+  if (audience === "agent_pov" || inspectionState.state_kind === "live_scripted") {
+    return Object.freeze({
+      effect: "local_inspection",
+      presentationKey,
+      agent,
+      audience,
+    });
+  }
+  if (audience !== "researcher") {
+    return null;
+  }
+  const commandSlot = authorizedOracleCommandSlotForPresentationKey(
+    presentation,
+    presentationKey,
+  );
+  if (!Number.isInteger(commandSlot)) {
+    return null;
+  }
+  if (isReplayMode()) {
+    return Object.freeze({
+      effect: "replay_select",
+      presentationKey,
+      commandSlot,
+      agent,
+      audience,
+    });
+  }
+  return inspectionState.state_kind === "live_editable"
+    ? Object.freeze({
+        effect: "live_control",
+        presentationKey,
+        commandSlot,
+        agent,
+        audience,
+      })
+    : null;
+}
+
+/** @param {unknown} target */
+function authorizedAgentActivationFromTarget(target) {
+  if (!(target instanceof Element)) {
     return null;
   }
   const element = target.closest(".agent[data-presentation-key]");
   if (!(element instanceof SVGElement)) {
     return null;
   }
-  const presentationKey = element.dataset.presentationKey;
-  const presentation = state.presentation;
-  const agent = asArray(authorizedPresentationSceneView(presentation)?.agents).find(
-    (candidate) =>
-      isRecord(candidate) && candidate.presentation_key === presentationKey,
-  );
-  if (typeof presentationKey !== "string" || !isRecord(agent)) {
+  const nestedTooltipOwner = target.closest("[data-tooltip-owner]");
+  if (nestedTooltipOwner !== null && nestedTooltipOwner !== element) {
     return null;
   }
-  if (authorizedPresentationAudience(presentation) === "researcher") {
-    const commandSlot = authorizedOracleCommandSlotForPresentationKey(
-      presentation,
-      presentationKey,
-    );
-    return Number.isInteger(commandSlot)
-      ? { element, presentationKey, commandSlot, agent, researcher: true }
-      : null;
-  }
-  return presentationKey === presentation?.recipient_presentation_key
-    ? { element, presentationKey, commandSlot: null, agent, researcher: false }
-    : null;
+  const activation = authorizedAgentActivation(element.dataset.presentationKey);
+  return activation === null
+    ? null
+    : Object.freeze({
+        ...activation,
+        presentationKey: String(activation.presentationKey),
+        element,
+      });
 }
 
-function installReplayAgentActivation() {
-  if (!isReplayMode()) {
-    return;
-  }
-  const scene = authorizedPresentationSceneView(state.presentation);
+function installAuthorizedAgentActivation() {
+  const presentation = state.presentation;
+  const scene = installedAuthorizedPresentationSceneView(presentation);
   const agents = asArray(scene?.agents);
   const selection = isRecord(scene?.selection) ? scene.selection : {};
+  const audience = authorizedPresentationAudience(presentation);
+  const researcher = audience === "researcher";
+  const localInspection =
+    audience === "agent_pov" ||
+    authorizedPresentationInspectionState(presentation).state_kind === "live_scripted";
   for (const element of elements.battlefield.querySelectorAll(
     ".agent[data-presentation-key]",
   )) {
-    const activation = replayAgentActivation(element);
-    if (activation === null) {
-      element.removeAttribute("tabindex");
-      element.removeAttribute("role");
-      element.removeAttribute("aria-description");
+    const presentationKey = element.dataset.presentationKey;
+    const agent = agents.find(
+      (candidate) =>
+        isRecord(candidate) && candidate.presentation_key === presentationKey,
+    );
+    if (!isRecord(agent)) {
+      element.setAttribute("role", "img");
+      element.setAttribute("tabindex", "-1");
       continue;
     }
-    element.setAttribute("tabindex", "0");
-    element.setAttribute("role", "button");
-    const identity = agentIdentity(activation.agent.public_agent_id);
-    element.setAttribute(
-      "aria-label",
-      `${identity}. Activate to open authorized Agent Details${activation.researcher ? " and set replay Reference" : ""}.`,
-    );
     const classMechanics = asArray(scene?.class_mechanics).find(
-      (candidate) =>
-        isRecord(candidate) && candidate.class_id === activation.agent.class_id,
+      (candidate) => isRecord(candidate) && candidate.class_id === agent.class_id,
     );
+    const activation = authorizedAgentActivation(presentationKey);
+    if (activation === null) {
+      element.setAttribute("role", "img");
+      element.setAttribute("tabindex", "-1");
+    } else {
+      element.setAttribute("tabindex", "0");
+      element.setAttribute("role", "button");
+      const identity = agentIdentity(agent.public_agent_id);
+      element.setAttribute(
+        "aria-label",
+        activation.effect === "live_control"
+          ? `${identity}. Control and inspect this authorized agent.`
+          : `${identity}. Inspect this authorized agent.`,
+      );
+    }
     registerTooltipOwner(
       element,
       explainAgent(
-        activation.agent,
+        agent,
         {
-          audience: activation.researcher ? "researcher" : "agent_pov",
-          controlled:
-            selection.controlled_presentation_key === activation.presentationKey,
-          selected: selection.selected_presentation_key === activation.presentationKey,
+          audience: researcher ? "researcher" : "agent_pov",
+          controlled: selection.controlled_presentation_key === presentationKey,
+          selected:
+            researcher &&
+            !localInspection &&
+            selection.selected_presentation_key === presentationKey,
+          inspected:
+            localInspection && selection.selected_presentation_key === presentationKey,
         },
         isRecord(classMechanics) ? classMechanics : null,
         agents,
       ),
+      { inspectable: false },
     );
   }
 }
 
-/** @param {unknown} target */
-function activateReplayAgent(target) {
-  const activation = replayAgentActivation(target);
+/**
+ * Apply the already-resolved single effect. Local Agent state is installed
+ * before rendering; Oracle waits for the server successor and never receives
+ * an optimistic scientific selection.
+ *
+ * @param {string} presentationKey
+ * @returns {boolean}
+ */
+function activateAuthorizedAgent(presentationKey) {
+  const activation = authorizedAgentActivation(presentationKey);
   if (activation === null) {
     return false;
   }
+  if (activation.effect === "local_inspection") {
+    if (!setLocalInspectedPresentationKey(presentationKey)) {
+      return false;
+    }
+    render();
+    openAgentDetails();
+    return true;
+  }
   openAgentDetails();
-  if (activation.researcher) {
+  if (activation.effect === "replay_select") {
     void dispatchReplayCommand({
       command_type: "select_agent",
       selected_global_slot: activation.commandSlot,
+    });
+  } else if (activation.effect === "live_control") {
+    void dispatchCommand({
+      command_type: "roster_selection",
+      role: "control",
+      global_slot: activation.commandSlot,
     });
   }
   return true;
 }
 
 function render() {
+  capturePresentationPreferenceBeforeRender();
   const presentationFrame = state.presentation;
   renderConnection();
   renderSessionToolbar();
-  syncDisclosurePanels();
   battlefieldRenderer.render(presentationFrame, {
     offline: state.offline,
-    showRanges: state.frame?.show_ranges === true,
+    showRanges: installedPresentationRangesVisible(presentationFrame),
+    localInspectedPresentationKey:
+      installedLocalInspectedPresentationKey(presentationFrame),
   });
-  if (liveScriptedInspectionOnly() && !recordingScientificControlsFenced()) {
-    applyScriptedBattlefieldBoundaryCopy();
-  }
-  installReplayAgentActivation();
+  applyBattlefieldBoundaryCopy();
+  installAuthorizedAgentActivation();
   applyReplayReferenceSemantics();
   try {
     choreographer.presentFrame(
@@ -1852,14 +2632,18 @@ function render() {
   lastBattlefieldSizeKey = battlefieldSizeKey();
   panels.render(presentationFrame, {
     busy: state.busy,
-    shuttingDown:
-      state.shuttingDown ||
-      recordingScientificControlsFenced() ||
-      liveScriptedInspectionOnly(),
+    shuttingDown: state.shuttingDown,
     resyncRequired: state.resyncRequired,
     offline: state.offline,
+    activationDisabled:
+      isTerminal(state.frame) ||
+      (authorizedPresentationAudience(presentationFrame) === "researcher" &&
+        recordingScientificControlsFenced()),
+    localInspectedPresentationKey:
+      installedLocalInspectedPresentationKey(presentationFrame),
   });
   tooltipController.refresh();
+  restorePresentationPreferenceAfterRender();
 }
 
 /**
@@ -1910,14 +2694,17 @@ function scheduleBattlefieldResize() {
       return;
     }
     lastBattlefieldSizeKey = sizeKey;
+    capturePresentationPreferenceBeforeRender();
     const presentationFrame = state.presentation;
     battlefieldRenderer.render(presentationFrame, {
       offline: state.offline,
-      showRanges: state.frame?.show_ranges === true,
+      showRanges: installedPresentationRangesVisible(presentationFrame),
+      localInspectedPresentationKey:
+        installedLocalInspectedPresentationKey(presentationFrame),
     });
-    if (liveScriptedInspectionOnly() && !recordingScientificControlsFenced()) {
-      applyScriptedBattlefieldBoundaryCopy();
-    }
+    applyBattlefieldBoundaryCopy();
+    installAuthorizedAgentActivation();
+    applyReplayReferenceSemantics();
     try {
       choreographer.reproject(
         presentationFrame,
@@ -1935,6 +2722,7 @@ function scheduleBattlefieldResize() {
       renderConnection();
     }
     tooltipController.refresh();
+    restorePresentationPreferenceAfterRender();
   });
 }
 
@@ -2012,7 +2800,7 @@ async function sendReplayCommand(command) {
   try {
     const installPromise = presentationInstallation.installFromCommand({
       reason:
-        command.command_type === "set_view" || command.command_type === "set_pov_actor"
+        command.command_type === "set_view"
           ? "replay_audience_change"
           : "replay_command",
       sendCommand: async () => {
@@ -2164,6 +2952,13 @@ async function dispatchReplayCommand(command) {
 /** @param {Record<string, unknown>} command */
 function dispatchPanelCommand(command) {
   if (
+    command.command_type === "activate_authorized_agent" &&
+    typeof command.presentation_key === "string"
+  ) {
+    activateAuthorizedAgent(command.presentation_key);
+    return Promise.resolve(null);
+  }
+  if (
     command.command_type === "roster_selection" &&
     Number.isInteger(command.global_slot)
   ) {
@@ -2175,12 +2970,6 @@ function dispatchPanelCommand(command) {
       return dispatchReplayCommand({
         command_type: "select_agent",
         selected_global_slot: command.global_slot,
-      });
-    }
-    if (command.role === "control") {
-      return dispatchReplayCommand({
-        command_type: "set_pov_actor",
-        global_slot: command.global_slot,
       });
     }
   }
@@ -2221,6 +3010,28 @@ async function dispatchCommand(command) {
     );
     renderConnection();
     return;
+  }
+  if (
+    command.command_type === "keyboard" &&
+    typeof command.key === "string" &&
+    authorizedPresentationAudience(state.presentation) === "agent_pov"
+  ) {
+    if (command.key === "Tab") {
+      return;
+    }
+    if (command.key.toLowerCase() === "g") {
+      if (
+        command.shift_key === false &&
+        command.ctrl_key === false &&
+        command.alt_key === false &&
+        command.meta_key === false &&
+        command.repeat === false &&
+        toggleAgentLocalRanges()
+      ) {
+        render();
+      }
+      return;
+    }
   }
   if (liveScriptedInspectionOnly() && !allowedDuringLiveScriptedInspection(command)) {
     setNotice(
@@ -2508,14 +3319,7 @@ bindBattlefieldControls({
     }
   },
   onHelp: () => elements.helpDialog.showModal(),
-  isInteractive: () =>
-    !isReplayMode() &&
-    isAuthorizedPresentationFrame(state.presentation) &&
-    !liveScriptedInspectionOnly() &&
-    !state.busy &&
-    !state.resyncRequired &&
-    !state.offline &&
-    !recordingScientificControlsFenced(),
+  isInteractive: liveBattlefieldCommandsInteractive,
   onReleaseFocus: () => {
     const firstCommand = /** @type {HTMLButtonElement | null} */ (
       elements.commandDeck?.querySelector("button:not([disabled])") ?? null
@@ -2525,23 +3329,71 @@ bindBattlefieldControls({
   },
 });
 
-elements.battlefield.addEventListener("click", (/** @type {MouseEvent} */ event) => {
-  if (event.button === 0 && activateReplayAgent(event.target)) {
+elements.battlefield.addEventListener(
+  "pointerdown",
+  (/** @type {PointerEvent} */ event) => {
+    if (event.target instanceof Element) {
+      const tooltipOwner = event.target.closest("[data-tooltip-owner]");
+      const agent = event.target.closest(".agent[data-presentation-key]");
+      if (tooltipOwner !== null && tooltipOwner !== agent) {
+        event.stopImmediatePropagation();
+        return;
+      }
+    }
+    if (
+      event.button !== 0 ||
+      event.shiftKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.altKey
+    ) {
+      return;
+    }
+    const activation = authorizedAgentActivationFromTarget(event.target);
+    if (activation === null) {
+      return;
+    }
     event.preventDefault();
-  }
-});
+    event.stopImmediatePropagation();
+    activation.element.focus({ preventScroll: true });
+    activateAuthorizedAgent(activation.presentationKey);
+  },
+  true,
+);
 
 elements.battlefield.addEventListener(
   "keydown",
   (/** @type {KeyboardEvent} */ event) => {
     if (
-      (event.key === "Enter" || event.key === " ") &&
-      activateReplayAgent(event.target)
+      event.key === "Tab" &&
+      event.target === elements.battlefield &&
+      authorizedPresentationAudience(state.presentation) === "agent_pov"
     ) {
+      // Preserve native forward/backward focus navigation while preventing the
+      // fixed Agent POV recipient from being cycled through the live service.
+      event.stopImmediatePropagation();
+      return;
+    }
+    if (event.key !== "Enter" && event.key !== " ") {
+      return;
+    }
+    if (event.target instanceof Element) {
+      const tooltipOwner = event.target.closest("[data-tooltip-owner]");
+      const agent = event.target.closest(".agent[data-presentation-key]");
+      if (tooltipOwner !== null && tooltipOwner !== agent) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        return;
+      }
+    }
+    const activation = authorizedAgentActivationFromTarget(event.target);
+    if (activation !== null) {
       event.preventDefault();
-      event.stopPropagation();
+      event.stopImmediatePropagation();
+      activateAuthorizedAgent(activation.presentationKey);
     }
   },
+  true,
 );
 
 elements.viewSelect.addEventListener("change", () => {
@@ -2659,10 +3511,16 @@ elements.helpButton.addEventListener("click", () => {
 bindReplayTimelineControls(replayTimelineElements, replayPlayback);
 
 elements.replayRangesButton.addEventListener("click", () => {
-  if (
-    !isReplayMode() ||
-    authorizedPresentationAudience(state.presentation) !== "researcher"
-  ) {
+  if (!isReplayMode() || elements.replayRangesButton.disabled) {
+    return;
+  }
+  if (authorizedPresentationAudience(state.presentation) === "agent_pov") {
+    if (toggleAgentLocalRanges()) {
+      render();
+    }
+    return;
+  }
+  if (authorizedPresentationAudience(state.presentation) !== "researcher") {
     return;
   }
   const frame = state.frame;
@@ -2676,16 +3534,40 @@ elements.replayRangesButton.addEventListener("click", () => {
 });
 
 elements.replayClearReferenceButton.addEventListener("click", () => {
-  if (
-    !isReplayMode() ||
-    authorizedPresentationAudience(state.presentation) !== "researcher"
-  ) {
+  if (!isReplayMode() || elements.replayClearReferenceButton.disabled) {
+    return;
+  }
+  if (authorizedPresentationAudience(state.presentation) === "agent_pov") {
+    if (setLocalInspectedPresentationKey(null)) {
+      closeAgentDetailsWithoutLatching();
+      render();
+      elements.battlefield.removeAttribute("aria-activedescendant");
+    }
+    return;
+  }
+  if (authorizedPresentationAudience(state.presentation) !== "researcher") {
     return;
   }
   void dispatchReplayCommand({
     command_type: "select_agent",
     selected_global_slot: null,
   });
+});
+
+elements.liveRangesButton.addEventListener("click", () => {
+  if (isReplayMode() || elements.liveRangesButton.disabled) {
+    return;
+  }
+  if (authorizedPresentationAudience(state.presentation) === "agent_pov") {
+    if (toggleAgentLocalRanges()) {
+      render();
+    }
+    return;
+  }
+  if (authorizedPresentationAudience(state.presentation) !== "researcher") {
+    return;
+  }
+  void dispatchCommand(keyboardCommand("g"));
 });
 
 document.addEventListener("visibilitychange", () => {
@@ -2720,10 +3602,57 @@ const battlefieldResizeObserver = new ResizeObserver(scheduleBattlefieldResize);
 battlefieldResizeObserver.observe(elements.battlefieldShell);
 replayPlayback.setHidden(document.hidden);
 
-for (const panel of elements.disclosurePanels) {
-  panel.addEventListener("toggle", () => {
-    if (panel.open) {
+for (const { panelId, panel, body } of scientificDisclosures) {
+  /** @param {Event} event */
+  const blockPendingSummaryActivation = (event) => {
+    const summary = panel.querySelector(":scope > summary");
+    if (
+      !(event.target instanceof Element) ||
+      !(summary instanceof Element) ||
+      (event.target !== summary && !summary.contains(event.target))
+    ) {
       return;
+    }
+    if (installedActivePresentationPreference(state.presentation) !== null) {
+      expectedDisclosureToggles.delete(panel);
+      return;
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  };
+  panel.addEventListener("click", blockPendingSummaryActivation, true);
+  panel.addEventListener(
+    "keydown",
+    (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        blockPendingSummaryActivation(event);
+      }
+    },
+    true,
+  );
+  panel.addEventListener("toggle", () => {
+    const expected = expectedDisclosureToggles.get(panel);
+    if (expected?.open === panel.open) {
+      expectedDisclosureToggles.delete(panel);
+      return;
+    }
+    expectedDisclosureToggles.delete(panel);
+    const preference = installedActivePresentationPreference(state.presentation);
+    if (preference === null) {
+      setProgrammaticDisclosureOpen(panel, false);
+      return;
+    }
+    const saved = preference.disclosures[panelId];
+    preference.disclosures[panelId] = {
+      open: panel.open,
+      scrollTop: panel.open ? (saved?.scrollTop ?? 0) : body.scrollTop,
+    };
+    if (panel.open) {
+      body.scrollTop = preference.disclosures[panelId].scrollTop;
+      return;
+    }
+    if (panelId === "agent-details") {
+      preference.agentDetailsAutoOpenAllowed = false;
     }
     const active = document.activeElement;
     const summary = panel.querySelector(":scope > summary");
@@ -2737,6 +3666,22 @@ for (const panel of elements.disclosurePanels) {
     }
   });
 }
+
+elements.visualKey.addEventListener("toggle", () => {
+  if (elements.visualKey.open) {
+    return;
+  }
+  const active = document.activeElement;
+  const summary = elements.visualKey.querySelector(":scope > summary");
+  if (
+    active instanceof Element &&
+    active !== summary &&
+    elements.visualKey.contains(active) &&
+    summary instanceof HTMLElement
+  ) {
+    summary.focus({ preventScroll: true });
+  }
+});
 
 registerControlHelp();
 if (productIdentity === null) {

@@ -505,7 +505,7 @@ test("five cooldown cards use exact class names, ultimate names, ticks, and publ
 
 test("three range cards explain purpose, exact radius, and joined owner identity", () => {
   for (const [kind, summaryFragment] of [
-    ["observation", "observation range"],
+    ["observation", "authorized Observation radius"],
     ["basic", "Basic interaction"],
     ["ultimate", "Ultimate interaction"],
   ]) {
@@ -870,6 +870,23 @@ test("POV agent builder is byte-noninterfering with researcher-only extras", () 
   assert.doesNotMatch(fullText(descriptor), /secret|×9|99/u);
 });
 
+test("POV inspected-agent vocabulary never relabels the owner as a target", () => {
+  const descriptor = explainPovAgent(
+    {
+      ...RECIPIENT,
+      presentation_key: "pov_recipient",
+      current_health: 50,
+      max_health: 100,
+      effective_movement_speed: 1.25,
+      ultimate_cooldown_remaining: 0,
+      statuses: [],
+    },
+    { inspected: true },
+  );
+  assert.equal(rowValue(descriptor, "Selection"), "Inspected agent");
+  assert.doesNotMatch(fullText(descriptor), /Selected target|Reference/u);
+});
+
 test("POV status overflow is byte-noninterfering and discloses no source identity", () => {
   const authorized = [
     {
@@ -997,7 +1014,7 @@ test("legality is locked to exact True/False and one exact sentence", () => {
   assert.throws(() => explainLegality({ lane_0_available: 1 }, 0), /exact boolean/u);
 });
 
-test("pending route exposes only exact Source and Selected Target public IDs", () => {
+test("action route uses epoch-neutral copy and exact Source and Target public IDs", () => {
   const descriptor = explainPendingRoute({
     source_global_slot: 1,
     target_global_slot: 7,
@@ -1011,15 +1028,16 @@ test("pending route exposes only exact Source and Selected Target public IDs", (
   assert.equal(descriptor.title, "Ultimate Action Route");
   assert.equal(
     descriptor.summary,
-    "Currently selected action intent; no physical path is implied.",
+    "Authorized action route; no physical path is implied.",
   );
   assert.deepEqual(
     descriptor.rows.map(({ label, value }) => [label, value]),
     [
       ["Source", "Agent ID source::<x>"],
-      ["Selected Target", "Agent ID target&y"],
+      ["Target", "Agent ID target&y"],
     ],
   );
+  assert.doesNotMatch(fullText(descriptor), /currently selected|Selected Target/iu);
   assert.doesNotMatch(
     fullText(descriptor),
     /source_global_slot|target_global_slot|legal|source_anchor|target_anchor|\[1|\[8/u,

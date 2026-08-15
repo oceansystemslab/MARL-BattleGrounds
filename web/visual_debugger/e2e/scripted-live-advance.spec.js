@@ -82,12 +82,12 @@ test("scripted live Submit advances once, installs T0, and seals at completion",
   await expect(submit).toBeEnabled();
   await expect(page.locator("#battlefield")).toHaveAttribute(
     "aria-label",
-    "Inspection-only scripted battlefield. Use Advance scripted frame for the next authorized step.",
+    "Inspection-only scripted battlefield. Authorized bodies can be inspected; use Advance scripted frame for the next authorized step.",
   );
-  await expect(page.locator("#battlefield")).toHaveAttribute("role", "img");
+  await expect(page.locator("#battlefield")).toHaveAttribute("role", "group");
   await expect(page.locator("#battlefield")).toHaveAttribute("tabindex", "-1");
   await expect(page.locator("#battlefield-instructions")).toHaveText(
-    "Scripted live view is inspection-only. Battlefield bodies are passive and cannot submit actions. Use the single Advance scripted frame button to apply the next authorized script step; it is disabled when the script is complete.",
+    "Scripted live view is inspection-only. Activate an authorized body to inspect current facts; use Advance scripted frame for the next authorized step.",
   );
   await expect(page.locator("#command-commit-title")).toHaveText(
     "Advance the registered script",
@@ -129,49 +129,122 @@ test("scripted live Submit advances once, installs T0, and seals at completion",
   ]);
 
   const rosterRows = page.locator("#roster .roster-row");
-  const rosterTargets = page.locator(
-    '#roster button[data-role="target"]:not([hidden])',
-  );
-  const rosterControls = page.locator(
-    '#roster button[data-role="control"]:not([hidden])',
-  );
+  const rosterActions = page.locator("#roster .roster-primary-action");
   expect(await rosterRows.count()).toBeGreaterThan(0);
-  await expect(rosterRows.first()).toHaveAttribute("tabindex", "0");
-  expect(await rosterTargets.count()).toBeGreaterThan(0);
-  expect(await rosterControls.count()).toBeGreaterThan(0);
-  await expect(rosterTargets.first()).toBeDisabled();
-  await expect(rosterControls.first()).toBeDisabled();
+  await expect(rosterRows.first()).not.toHaveAttribute("tabindex", /.+/u);
+  await expect(rosterActions).toHaveCount(await rosterRows.count());
+  await expect(
+    page.getByRole("group", {
+      name: "Inspection-only scripted battlefield. Authorized bodies can be inspected; use Advance scripted frame for the next authorized step.",
+    }),
+  ).toHaveCount(1);
+  await expect(page.locator('#battlefield .agent[role="button"]')).toHaveCount(
+    await rosterRows.count(),
+  );
+  await expect(
+    page.locator("#roster .roster-actions, #roster [data-role]"),
+  ).toHaveCount(0);
+  await expect(rosterActions.first()).toBeEnabled();
+  await expect(rosterActions.first()).toHaveAttribute(
+    "aria-label",
+    /Inspect Agent ID/u,
+  );
+  await expect(rosterActions.first()).not.toHaveAttribute(
+    "aria-label",
+    /Control|Target|Reference|POV actor/u,
+  );
 
   /** @type {import("@playwright/test").Request[]} */
   const commandPosts = [];
   page.on("request", (request) => {
     if (
       request.method() === "POST" &&
-      new URL(request.url()).pathname === "/api/command"
+      ["/api/command", "/api/replay/command"].includes(new URL(request.url()).pathname)
     ) {
       commandPosts.push(request);
     }
   });
 
   const baselineFrame = await authenticatedGet(page, "/api/frame");
-  await page.locator(".agent[data-presentation-key]").first().click({ force: true });
+  expect(await rosterActions.count()).toBeGreaterThan(1);
+  const localAction = rosterActions.nth(1);
+  const localKey = await localAction.getAttribute("data-presentation-key");
+  const localIdentity = (await localAction.getAttribute("aria-label"))?.replace(
+    /^Inspect /u,
+    "",
+  );
+  expect(typeof localKey).toBe("string");
+  expect(typeof localIdentity).toBe("string");
+  await localAction.click();
+  await expect(page.locator("#selection-card")).toContainText(String(localIdentity));
+  await expect(localAction).toHaveAttribute("aria-pressed", "true");
+  await localAction.focus();
+  const scrollBeforeSpace = await page.evaluate(() => window.scrollY);
+  await localAction.press("Enter");
+  await localAction.press(" ");
+  expect(await page.evaluate(() => window.scrollY)).toBe(scrollBeforeSpace);
+  const localBody = page.locator(`.agent[data-presentation-key="${localKey}"]`);
+  await expect(localBody).toHaveAttribute("data-selected", "true");
+  await expect(page.locator("#battlefield .range-ring-owner")).toHaveCount(3);
+  await localBody.click();
+  await localBody.focus();
+  await localBody.press("Enter");
+  await localBody.press(" ");
+  const localFactChip = page
+    .locator(
+      `#roster .roster-row[data-presentation-key="${localKey}"] .roster-fact-token[data-tooltip-owner]`,
+    )
+    .first();
+  await expect(localFactChip).toBeVisible();
+  const selectionBeforeFactInspection = await page
+    .locator('#battlefield .agent[data-selected="true"]')
+    .evaluateAll((agents) =>
+      agents.map((agent) => agent.getAttribute("data-presentation-key")),
+    );
+  const pressedRowsBeforeFactInspection = await rosterActions.evaluateAll((buttons) =>
+    buttons.map((button) => button.getAttribute("aria-pressed")),
+  );
+  await localFactChip.hover();
+  await expect(page.locator("#visual-tooltip")).toBeVisible();
+  await localFactChip.click();
+  const factTitle = await page.locator("#visual-tooltip-title").textContent();
+  expect(factTitle).not.toBeNull();
+  await expect(page.locator("#selection-card")).toContainText(String(factTitle));
+  expect(
+    await page
+      .locator('#battlefield .agent[data-selected="true"]')
+      .evaluateAll((agents) =>
+        agents.map((agent) => agent.getAttribute("data-presentation-key")),
+      ),
+  ).toEqual(selectionBeforeFactInspection);
+  expect(
+    await rosterActions.evaluateAll((buttons) =>
+      buttons.map((button) => button.getAttribute("aria-pressed")),
+    ),
+  ).toEqual(pressedRowsBeforeFactInspection);
   await page.locator("#battlefield").evaluate((battlefield) => {
     battlefield.dispatchEvent(
       new KeyboardEvent("keydown", { bubbles: true, key: "Tab" }),
     );
   });
-  for (const button of [rosterTargets.first(), rosterControls.first()]) {
-    await button.evaluate((element) => {
-      element.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
+  const actorCycleButtons = page.locator('#command-deck button[data-key="Tab"]');
+  await expect(actorCycleButtons).toHaveCount(2);
+  for (const button of await actorCycleButtons.all()) {
+    await expect(button).toBeDisabled();
+    await expect(button).toHaveAttribute(
+      "aria-description",
+      /Actor cycling is unavailable in the current Oracle View state.*native browser focus navigation/,
+    );
   }
-  await page
-    .locator('#command-deck button[data-key="Tab"]')
-    .first()
-    .evaluate((button) => {
-      button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-  await page.waitForTimeout(150);
+  await actorCycleButtons.first().evaluate((button) => {
+    button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  await page.evaluate(
+    () =>
+      new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)),
+      ),
+  );
   expect(commandPosts).toHaveLength(0);
   const frameAfterPassiveInputs = await authenticatedGet(page, "/api/frame");
   expect(frameAfterPassiveInputs.revision).toBe(baselineFrame.revision);
@@ -188,12 +261,12 @@ test("scripted live Submit advances once, installs T0, and seals at completion",
   );
   await expect(page.locator("#battlefield")).toHaveAttribute(
     "aria-label",
-    "Inspection-only scripted battlefield. Use Advance scripted frame for the next authorized step.",
+    "Inspection-only scripted battlefield. Authorized bodies can be inspected; use Advance scripted frame for the next authorized step.",
   );
-  await expect(page.locator("#battlefield")).toHaveAttribute("role", "img");
+  await expect(page.locator("#battlefield")).toHaveAttribute("role", "group");
   await expect(page.locator("#battlefield")).toHaveAttribute("tabindex", "-1");
   await expect(page.locator("#battlefield-instructions")).toHaveText(
-    "Scripted live view is inspection-only. Battlefield bodies are passive and cannot submit actions. Use the single Advance scripted frame button to apply the next authorized script step; it is disabled when the script is complete.",
+    "Scripted live view is inspection-only. Activate an authorized body to inspect current facts; use Advance scripted frame for the next authorized step.",
   );
 
   const responsePromise = page.waitForResponse(
@@ -256,6 +329,46 @@ test("scripted live Submit advances once, installs T0, and seals at completion",
   await expect(submit).toHaveText("Advance scripted frame");
   await expect(submit).toHaveAttribute("data-key", "n");
   await expect(submit).toBeDisabled();
+  expect(
+    await page
+      .locator("#roster .roster-primary-action")
+      .evaluateAll((buttons) =>
+        buttons.every(
+          (button) => button instanceof HTMLButtonElement && button.disabled,
+        ),
+      ),
+  ).toBe(true);
+  await expect(page.locator("#battlefield")).toHaveAttribute("role", "group");
+  await expect(page.locator("#battlefield")).toHaveAttribute("tabindex", "-1");
+  await expect(page.locator("#battlefield")).toHaveAttribute(
+    "aria-label",
+    "Read-only live battlefield. Scientific facts can be inspected; simulator and actor activation controls are unavailable.",
+  );
+  await expect(page.locator("#battlefield-instructions")).toHaveText(
+    "Scientific tooltip facts remain inspectable. Live simulator and actor activation controls are unavailable while recording is closing, the session is offline or resynchronizing, or the frame is terminal.",
+  );
+  expect(
+    await page
+      .locator("#battlefield .agent")
+      .evaluateAll((agents) =>
+        agents.every(
+          (agent) =>
+            agent.getAttribute("role") === "img" &&
+            agent.getAttribute("tabindex") === "-1",
+        ),
+      ),
+  ).toBe(true);
+  const terminalDetails = page.locator("#agent-details");
+  if ((await terminalDetails.getAttribute("open")) !== null) {
+    await page.locator("#agent-details > summary").click();
+  }
+  await page.locator("#battlefield .agent").first().click({ force: true });
+  await page
+    .locator("#battlefield .agent")
+    .first()
+    .dispatchEvent("keydown", { key: "Enter" });
+  await expect(terminalDetails).not.toHaveAttribute("open", "");
+  expect(commandPosts).toHaveLength(1);
   await expect(page.locator("#command-commit-title")).toHaveText(
     "Advance the registered script",
   );

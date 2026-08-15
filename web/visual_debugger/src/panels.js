@@ -50,6 +50,8 @@ import { classTokenFromId, resolveVisualToken, teamTokenFromId } from "./vocabul
  *   shuttingDown?: boolean,
  *   resyncRequired?: boolean,
  *   offline?: boolean,
+ *   activationDisabled?: boolean,
+ *   localInspectedPresentationKey?: string | null,
  * }} PanelInteractionState
  */
 
@@ -64,6 +66,18 @@ import { classTokenFromId, resolveVisualToken, teamTokenFromId } from "./vocabul
  *   targetButton: HTMLButtonElement,
  *   controlButton: HTMLButtonElement,
  * }} RosterRow
+ */
+
+/**
+ * @typedef {{
+ *   element: HTMLElement,
+ *   primaryButton: HTMLButtonElement,
+ *   identityId: HTMLElement,
+ *   identityClass: HTMLElement,
+ *   health: HTMLElement,
+ *   statuses: HTMLElement,
+ *   modifiers: HTMLElement,
+ * }} AuthorizedRosterRow
  */
 
 /**
@@ -144,52 +158,6 @@ export const DISCLOSURE_PANEL_IDS = Object.freeze([
 ]);
 
 /**
- * Build the disclosure reset epoch without revisions, transition IDs, or
- * replay cursors. Ordinary authoritative refreshes therefore preserve native
- * details state; only scenario/artifact or audience authority changes reset it.
- *
- * @param {unknown} rawFrame
- */
-export function panelDisclosureAuthorityKey(rawFrame) {
-  const frame = isRecord(rawFrame) ? rawFrame : null;
-  if (frame === null) {
-    return null;
-  }
-  if (isAuthorizedPresentationFrame(frame)) {
-    return [
-      frame.viewer_mode,
-      frame.session_id,
-      frame.episode_id,
-      frame.presentation_kind,
-      frame.recipient_presentation_key ?? "researcher",
-    ].join(":");
-  }
-  const scene = frameScene(frame);
-  const replay = frame.viewer_mode === "replay";
-  const reference = isRecord(frame.artifact_summary?.replay_reference)
-    ? frame.artifact_summary.replay_reference
-    : {};
-  const scenario = isRecord(frame.scenario) ? frame.scenario : {};
-  const episode = replay
-    ? (reference.canonical_digest_sha256 ??
-      reference.artifact_id ??
-      frame.timeline_id ??
-      "unknown-artifact")
-    : (scenario.name ?? frame.scenario_name ?? "unknown-scenario");
-  const audience =
-    frame.replay_audience ?? scene?.audience ?? frame.view_mode ?? "unknown-audience";
-  const recipient =
-    audience === "researcher"
-      ? "researcher"
-      : (frame.pov_global_slot ??
-        frame.selected_global_slot ??
-        frame.public_agent_id ??
-        asArray(scene?.agents)[0]?.public_agent_id ??
-        "recipient");
-  return `${replay ? "replay" : "live"}:${episode}:${audience}:${recipient}`;
-}
-
-/**
  * @param {string} panelId
  * @param {boolean} replay
  */
@@ -197,7 +165,11 @@ export function disclosurePanelInitiallyOpen(panelId, replay) {
   if (!DISCLOSURE_PANEL_IDS.includes(panelId)) {
     throw new RangeError(`Unknown disclosure panel ${panelId}.`);
   }
-  return panelId === "roster-details" || (!replay && panelId === "command-deck");
+  return (
+    panelId === "roster-details" ||
+    panelId === "events-details" ||
+    (!replay && panelId === "command-deck")
+  );
 }
 
 /**
@@ -372,6 +344,169 @@ function semanticPanelCard(descriptor, className) {
   card.append(title, details);
   renderSemanticDescriptor({ descriptor, title, details, surface: "full" });
   return card;
+}
+
+/**
+ * Build the separate outgoing-target disclosure from an already-certified
+ * legality projection. This helper is not an authorization boundary; its
+ * production caller supplies only the legality joined from a branded
+ * presentation.
+ *
+ * @param {unknown} rawLegality
+ * @returns {ReturnType<typeof createSemanticDescriptor> | null}
+ */
+export function authorizedOutgoingTargetDescriptor(rawLegality) {
+  const legality = isRecord(rawLegality) ? rawLegality : null;
+  if (
+    legality === null ||
+    typeof legality.owner_presentation_key !== "string" ||
+    typeof legality.owner_public_agent_id !== "string" ||
+    !Number.isInteger(legality.target_action) ||
+    typeof legality.target_display_name !== "string" ||
+    !["no_target", "visible_authorized_agent", "axis_only_authorized_agent"].includes(
+      legality.target_kind,
+    ) ||
+    (legality.target_kind === "no_target" &&
+      (legality.target_presentation_key !== null ||
+        legality.target_public_agent_id !== null)) ||
+    (legality.target_kind === "visible_authorized_agent" &&
+      (typeof legality.target_presentation_key !== "string" ||
+        typeof legality.target_public_agent_id !== "string")) ||
+    (legality.target_kind === "axis_only_authorized_agent" &&
+      (legality.target_presentation_key !== null ||
+        typeof legality.target_public_agent_id !== "string"))
+  ) {
+    return null;
+  }
+  const targetIdentity =
+    legality.target_kind === "no_target"
+      ? "No target"
+      : `Agent ID ${legality.target_public_agent_id}`;
+  return createSemanticDescriptor({
+    kind: "action",
+    id: `outgoing-target:${legality.owner_presentation_key}:${legality.target_action}:${legality.target_kind}`,
+    title: "Outgoing target",
+    tone: "information",
+    accent: "none",
+    summary:
+      "This target disclosure belongs to the separately authorized outgoing action.",
+    rows: [
+      {
+        label: "Disclosure",
+        value: humanize(legality.target_kind),
+        metadata: { compact: true, full: true },
+      },
+      {
+        label: "Target",
+        value: targetIdentity,
+        metadata: { compact: true, full: true },
+      },
+      {
+        label: "Authorized label",
+        value: legality.target_display_name,
+        metadata: { compact: true, full: true },
+      },
+    ],
+    sections: [],
+    metadata: { compact: true, full: true },
+    anchor: "element",
+  });
+}
+
+/**
+ * Project the authorized Agent Details surface without consulting raw
+ * transport, outgoing target identity, or recipient fallbacks. The selected
+ * actor owns current details; its separately certified outgoing mask row owns
+ * Basic and Ultimate legality even when the target has no visible body.
+ *
+ * @param {unknown} presentation
+ * @param {string | null | undefined} [localInspectedPresentationKey]
+ * @returns {Readonly<Record<string, any>> | null}
+ */
+export function authorizedInspectorView(
+  presentation,
+  localInspectedPresentationKey = undefined,
+) {
+  if (!isAuthorizedPresentationFrame(presentation)) {
+    return null;
+  }
+  const scene = authorizedPresentationSceneView(
+    presentation,
+    localInspectedPresentationKey,
+  );
+  const audience = authorizedPresentationAudience(presentation);
+  if (scene === null || (audience !== "researcher" && audience !== "agent_pov")) {
+    return null;
+  }
+
+  const agents = asArray(scene.agents).filter(isRecord);
+  const selection = isRecord(scene.selection) ? scene.selection : {};
+  const ownerKey =
+    typeof selection.inspection_owner_presentation_key === "string"
+      ? selection.inspection_owner_presentation_key
+      : null;
+  const owner =
+    ownerKey === null
+      ? null
+      : (agents.find((agent) => agent.presentation_key === ownerKey) ?? null);
+  const candidateLegality = isRecord(scene.selected_legality)
+    ? scene.selected_legality
+    : null;
+  const joinedLegality =
+    owner !== null &&
+    candidateLegality !== null &&
+    candidateLegality.owner_presentation_key === owner.presentation_key &&
+    candidateLegality.owner_public_agent_id === owner.public_agent_id
+      ? candidateLegality
+      : null;
+  const outgoingTargetDescriptor =
+    joinedLegality === null || presentation.viewer_mode !== "replay"
+      ? null
+      : authorizedOutgoingTargetDescriptor(joinedLegality);
+  const legality =
+    presentation.viewer_mode === "replay" && outgoingTargetDescriptor === null
+      ? null
+      : joinedLegality;
+  const ownerDescriptor =
+    owner === null
+      ? null
+      : audience === "researcher"
+        ? explainAgent(owner, {}, null, agents)
+        : explainPovAgent(owner, {
+            controlled:
+              selection.controlled_presentation_key === owner.presentation_key,
+          });
+  const ownerClassAccent =
+    owner === null ? null : classTokenFromId(owner.class_id).cssKey;
+  const legalityCards =
+    legality === null || owner === null
+      ? Object.freeze([])
+      : Object.freeze(
+          /** @type {const} */ ([0, 1]).map((lane) => {
+            const laneName = lane === 0 ? "Basic" : "Ultimate";
+            const heading = `${laneName} Legality · Agent ID ${owner.public_agent_id}`;
+            const explanation = explainLegality(legality, lane);
+            return Object.freeze({
+              lane,
+              heading,
+              descriptor: createSemanticDescriptor({
+                ...explanation,
+                id: `legality:${owner.presentation_key}:${lane}:${lane === 0 ? legality.lane_0_available : legality.lane_1_available}`,
+                title: heading,
+              }),
+            });
+          }),
+        );
+
+  return Object.freeze({
+    title: "Comprehensive Agent Details",
+    owner,
+    owner_descriptor: ownerDescriptor,
+    owner_class_accent: ownerClassAccent,
+    legality,
+    outgoing_target_descriptor: outgoingTargetDescriptor,
+    legality_cards: legalityCards,
+  });
 }
 
 /**
@@ -1140,7 +1275,7 @@ export class DebuggerPanels {
     this.eventCount = eventCount;
     this.diagnosticsCard = diagnosticsCard;
     this.onCommand = onCommand;
-    /** @type {Map<number | string, RosterRow>} */
+    /** @type {Map<number | string, RosterRow | AuthorizedRosterRow>} */
     this.rosterRows = new Map();
     /** @type {Map<number, RosterTeamGroup>} */
     this.rosterTeamGroups = new Map();
@@ -1254,82 +1389,71 @@ export class DebuggerPanels {
   }
 
   /**
-   * Create one presentation-keyed roster row. Agent POV rows deliberately
-   * receive no command listener or slot-bearing data. Oracle command slots
-   * remain confined to the two command buttons.
+   * Create one presentation-keyed native action. Scientific fact chips remain
+   * siblings of the button so their independent tooltip interactions cannot
+   * trigger agent activation. Main resolves the opaque key against the current
+   * installed authority before choosing any local or network effect.
    *
    * @param {ReturnType<typeof authorizedPresentationIdentityRows>[number]} identity
-   * @returns {RosterRow}
+   * @returns {AuthorizedRosterRow}
    */
   createAuthorizedRosterRow(identity) {
-    const element = htmlElement("article", "roster-row");
-    element.tabIndex = 0;
+    const element = htmlElement("article", "roster-row roster-row--authorized");
     element.dataset.presentationKey = identity.presentation_key;
-    const summary = htmlElement("div");
-    const identityContainer = htmlElement("div", "roster-identity");
+    const primaryButton = htmlElement("button", "roster-primary-action");
+    primaryButton.type = "button";
+    primaryButton.dataset.action = "activate-agent";
+    primaryButton.dataset.presentationKey = identity.presentation_key;
+    const summary = htmlElement("span", "roster-primary-action__summary");
+    const identityContainer = htmlElement("span", "roster-identity");
     const identityId = htmlElement("span", "roster-id");
     const identityClass = htmlElement("span", "roster-class");
     identityContainer.append(identityId, identityClass);
-    const health = htmlElement("div", "roster-health");
+    const health = htmlElement("span", "roster-health");
+    summary.append(identityContainer, health);
+    primaryButton.append(summary);
+    primaryButton.addEventListener("click", () => {
+      void this.onCommand({
+        command_type: "activate_authorized_agent",
+        presentation_key: identity.presentation_key,
+      });
+    });
+
+    const facts = htmlElement("div", "roster-row__facts");
     const statuses = htmlElement("div", "roster-fact-list roster-statuses");
     statuses.setAttribute("aria-label", "Persistent statuses");
     const modifiers = htmlElement("div", "roster-fact-list roster-modifiers");
     modifiers.setAttribute("aria-label", "Exact effective modifiers");
-    summary.append(identityContainer, health, statuses, modifiers);
-
-    const actions = htmlElement("div", "roster-actions");
-    const targetButton = htmlElement("button", null, "Target");
-    targetButton.type = "button";
-    targetButton.dataset.role = "target";
-    const controlButton = htmlElement("button", null, "Control");
-    controlButton.type = "button";
-    controlButton.dataset.role = "control";
-    if (Number.isInteger(identity.command_global_slot)) {
-      const commandSlot = Number(identity.command_global_slot);
-      targetButton.dataset.commandSlot = String(commandSlot);
-      controlButton.dataset.commandSlot = String(commandSlot);
-      targetButton.addEventListener("click", () => {
-        void this.onCommand({
-          command_type: "roster_selection",
-          role: "target",
-          global_slot: commandSlot,
-        });
-      });
-      controlButton.addEventListener("click", () => {
-        void this.onCommand({
-          command_type: "roster_selection",
-          role: "control",
-          global_slot: commandSlot,
-        });
-      });
-    } else {
-      targetButton.hidden = true;
-      controlButton.hidden = true;
-      targetButton.disabled = true;
-      controlButton.disabled = true;
-    }
-    actions.append(targetButton, controlButton);
-    element.append(summary, actions);
+    facts.append(statuses, modifiers);
+    element.append(primaryButton, facts);
     return {
       element,
+      primaryButton,
       identityId,
       identityClass,
       health,
       statuses,
       modifiers,
-      targetButton,
-      controlButton,
     };
   }
 
   /**
    * @param {Record<string, any>} presentation
    * @param {boolean} disabled
+   * @param {string | null | undefined} [localInspectedPresentationKey]
    */
-  renderAuthorizedRoster(presentation, disabled) {
+  renderAuthorizedRoster(
+    presentation,
+    disabled,
+    localInspectedPresentationKey = undefined,
+  ) {
     const audience = authorizedPresentationAudience(presentation);
     const identities = authorizedPresentationIdentityRows(presentation);
-    const scene = authorizedPresentationSceneView(presentation);
+    const scene = authorizedPresentationSceneView(
+      presentation,
+      localInspectedPresentationKey,
+    );
+    const selection = isRecord(scene?.selection) ? scene.selection : {};
     const mechanicsByClassId = new Map(
       asArray(scene?.class_mechanics)
         .filter(
@@ -1361,8 +1485,11 @@ export class DebuggerPanels {
             ) ?? identity.agent)
           : identity.agent,
       );
-      let row = this.rosterRows.get(identity.display_key);
+      const candidateRow = this.rosterRows.get(identity.display_key);
+      let row =
+        candidateRow && "primaryButton" in candidateRow ? candidateRow : undefined;
       if (!row) {
+        candidateRow?.element.remove();
         row = this.createAuthorizedRosterRow(identity);
         this.rosterRows.set(identity.display_key, row);
       }
@@ -1373,17 +1500,29 @@ export class DebuggerPanels {
       row.element.dataset.teamId = String(agent.team_id);
       row.element.dataset.classId = String(agent.class_id);
       row.element.dataset.team = teamToken.cssKey;
-      row.element.dataset.class = classToken.cssKey;
+      row.element.removeAttribute("data-class");
+      row.identityId.dataset.class = classToken.cssKey;
       row.element.setAttribute(
         "aria-label",
         `Agent ID ${publicId}, ${classToken.label}, ${teamToken.label}`,
       );
       registerTooltipOwner(
-        row.element,
+        row.primaryButton,
         audience === "researcher"
           ? explainAgent(
               agent,
-              { controlled: false, selected: false },
+              {
+                controlled:
+                  selection.controlled_presentation_key === agent.presentation_key,
+                selected:
+                  presentation.viewer_mode === "live"
+                    ? selection.selected_presentation_key === agent.presentation_key
+                    : false,
+                reference:
+                  presentation.viewer_mode === "replay" &&
+                  selection.inspection_owner_presentation_key ===
+                    agent.presentation_key,
+              },
               mechanicsByClassId.get(Number(agent.class_id)) ?? null,
               sourceAgents,
             )
@@ -1391,7 +1530,24 @@ export class DebuggerPanels {
               controlled:
                 agent.presentation_key === presentation.recipient_presentation_key,
               selected: false,
+              inspected:
+                selection.inspection_owner_presentation_key === agent.presentation_key,
             }),
+      );
+      row.primaryButton.dataset.presentationKey = String(agent.presentation_key);
+      row.primaryButton.disabled = disabled;
+      const inspected =
+        selection.inspection_owner_presentation_key === agent.presentation_key;
+      row.primaryButton.setAttribute("aria-pressed", String(inspected));
+      row.element.dataset.selected = String(inspected);
+      row.primaryButton.setAttribute(
+        "aria-label",
+        audience === "researcher" &&
+          presentation.viewer_mode === "live" &&
+          authorizedPresentationInspectionState(presentation).state_kind ===
+            "live_editable"
+          ? `Control and inspect Agent ID ${publicId}`
+          : `Inspect Agent ID ${publicId}`,
       );
       row.identityId.textContent = `Agent ID ${publicId}`;
       row.identityClass.textContent = `${classToken.label} · ${teamToken.label}`;
@@ -1420,15 +1576,6 @@ export class DebuggerPanels {
         sourceAgents,
         audience ?? "agent_pov",
       );
-
-      const commandable = Number.isInteger(identity.command_global_slot);
-      const replay = presentation.viewer_mode === "replay";
-      row.targetButton.hidden = !commandable;
-      row.controlButton.hidden = !commandable;
-      row.targetButton.disabled = disabled || !commandable;
-      row.controlButton.disabled = disabled || !commandable;
-      row.targetButton.textContent = replay ? "Reference" : "Target";
-      row.controlButton.textContent = replay ? "POV actor" : "Control";
       const desired = desiredByTeam.get(Number(agent.team_id)) ?? [];
       desired.push(row.element);
       desiredByTeam.set(Number(agent.team_id), desired);
@@ -1441,36 +1588,53 @@ export class DebuggerPanels {
     }
   }
 
-  /** @param {Record<string, any>} presentation */
-  renderAuthorizedInspector(presentation) {
-    const scene = authorizedPresentationSceneView(presentation);
+  /**
+   * @param {Record<string, any>} presentation
+   * @param {string | null | undefined} [localInspectedPresentationKey]
+   */
+  renderAuthorizedInspector(presentation, localInspectedPresentationKey = undefined) {
+    const inspector = authorizedInspectorView(
+      presentation,
+      localInspectedPresentationKey,
+    );
     const inspectionState = authorizedPresentationInspectionState(presentation);
     const inspection = inspectionState.inspection;
-    const audience = authorizedPresentationAudience(presentation);
-    const agents = asArray(scene?.agents).filter(isRecord);
-    const primary =
-      (inspection &&
-        agents.find(
-          (agent) => agent.presentation_key === inspection.actor_presentation_key,
-        )) ||
-      agents.find(
-        (agent) => agent.presentation_key === presentation.recipient_presentation_key,
-      ) ||
-      null;
     this.selectionCard.replaceChildren();
-    if (primary === null) {
+    if (inspector === null || inspector.owner_descriptor === null) {
       this.selectionCard.append(
         htmlElement("p", "empty-copy", "No authorized agent details are available."),
       );
     } else {
-      renderSemanticInspector(
-        this.selectionCard,
-        audience === "researcher"
-          ? explainAgent(primary, {}, null, agents)
-          : explainPovAgent(primary, {
-              controlled: presentation.viewer_mode === "live",
-            }),
-      );
+      renderSemanticInspector(this.selectionCard, inspector.owner_descriptor);
+      if (
+        inspector.outgoing_target_descriptor !== null &&
+        inspector.legality !== null
+      ) {
+        const outgoingTarget = semanticPanelCard(
+          inspector.outgoing_target_descriptor,
+          "selected-outgoing-target",
+        );
+        outgoingTarget.dataset.targetKind = inspector.legality.target_kind;
+        outgoingTarget.setAttribute(
+          "aria-label",
+          `Outgoing target disclosure for Agent ID ${inspector.owner.public_agent_id}`,
+        );
+        this.selectionCard.append(outgoingTarget);
+      }
+      if (inspector.legality_cards.length > 0) {
+        const selectedLegality = htmlElement("section", "selected-legality");
+        selectedLegality.setAttribute(
+          "aria-label",
+          `Exact actor-owned Basic and Ultimate legality for Agent ID ${inspector.owner.public_agent_id}`,
+        );
+        selectedLegality.append(htmlElement("h3", null, "Current legality"));
+        const facts = htmlElement("div", "selected-legality__facts");
+        for (const card of inspector.legality_cards) {
+          facts.append(semanticPanelCard(card.descriptor, "selected-legality__lane"));
+        }
+        selectedLegality.append(facts);
+        this.selectionCard.append(selectedLegality);
+      }
     }
 
     if (inspectionState.submission_scope === null) {
@@ -1490,9 +1654,13 @@ export class DebuggerPanels {
     this.pendingScope.textContent =
       inspectionState.state_kind === "live_scripted"
         ? "This live frame advances registered scripted actions and has no editable draft."
-        : inspection
-          ? "This panel shows only the separately authorized outgoing inspection."
-          : "No outgoing inspection is authorized at this replay frame.";
+        : inspectionState.state_kind === "live_editable"
+          ? "This panel shows only the authorized pending draft for the next submission."
+          : inspectionState.state_kind === "replay_outgoing"
+            ? "This panel shows only the separately authorized recorded outgoing action."
+            : inspectionState.state_kind === "replay_none"
+              ? "No outgoing inspection is authorized at this replay frame."
+              : "Inspection is unavailable for this frame.";
     const action =
       inspection?.inspection_kind === "live_draft_action"
         ? inspection.draft_action
@@ -1509,7 +1677,9 @@ export class DebuggerPanels {
         action === null ? "empty-copy" : "pending-action-row",
         action === null
           ? "No pending action."
-          : "Settled range, target, and legality overlays use this outgoing branch only.",
+          : inspectionState.state_kind === "live_editable"
+            ? "Draft range, target, and legality overlays use this pending branch only."
+            : "Recorded range, target, and legality overlays use this outgoing branch only.",
       ),
     );
 
@@ -1852,8 +2022,11 @@ export class DebuggerPanels {
     for (const agent of agents) {
       const globalSlot = Number(agent.global_slot);
       const teamId = Number(agent.team_id);
-      let row = this.rosterRows.get(globalSlot);
+      const candidateRow = this.rosterRows.get(globalSlot);
+      let row =
+        candidateRow && "targetButton" in candidateRow ? candidateRow : undefined;
       if (!row) {
+        candidateRow?.element.remove();
         row = this.createRosterRow(globalSlot);
         this.rosterRows.set(globalSlot, row);
       }
@@ -1880,7 +2053,8 @@ export class DebuggerPanels {
     }
 
     if (this.pendingRosterFocus) {
-      const row = this.rosterRows.get(this.pendingRosterFocus.slot);
+      const candidateRow = this.rosterRows.get(this.pendingRosterFocus.slot);
+      const row = candidateRow && "targetButton" in candidateRow ? candidateRow : null;
       const control =
         this.pendingRosterFocus.role === "target"
           ? row?.targetButton
@@ -2258,11 +2432,19 @@ export class DebuggerPanels {
       interactionState.busy ||
         interactionState.shuttingDown ||
         interactionState.resyncRequired ||
-        interactionState.offline,
+        interactionState.offline ||
+        interactionState.activationDisabled,
     );
     if (isAuthorizedPresentationFrame(frame)) {
-      this.renderAuthorizedRoster(frame, disabled);
-      this.renderAuthorizedInspector(frame);
+      this.renderAuthorizedRoster(
+        frame,
+        disabled,
+        interactionState.localInspectedPresentationKey,
+      );
+      this.renderAuthorizedInspector(
+        frame,
+        interactionState.localInspectedPresentationKey,
+      );
       this.renderAuthorizedEvents(frame);
       return;
     }

@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { startDebugger, stopDebugger } from "./support/live-debugger.js";
+import { startReplayViewer } from "./support/replay-viewer.js";
 
 /** @type {import("node:child_process").ChildProcess | null} */
 let serverProcess = null;
@@ -76,6 +77,203 @@ async function responsiveSnapshot(page) {
   });
 }
 
+/**
+ * Prove that real disclosure bodies, rather than the shared HUD or document,
+ * own vertical scrolling at one supported viewport.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @param {{width: number, height: number}} viewport
+ */
+async function expectIndependentDisclosureLayout(page, viewport) {
+  await page.setViewportSize(viewport);
+  await settleResponsiveLayout(page);
+  await expect(page.locator(".session-toolbar")).toBeVisible();
+
+  const initial = await page.evaluate(() => {
+    const toolbar = document.querySelector(".session-toolbar");
+    const roster = document.querySelector("#roster-details-body");
+    const command = document.querySelector("#command-deck-body");
+    const hud = document.querySelector(".hud-panel");
+    if (
+      !(toolbar instanceof HTMLElement) ||
+      !(roster instanceof HTMLElement) ||
+      !(command instanceof HTMLElement) ||
+      !(hud instanceof HTMLElement)
+    ) {
+      throw new Error("Independent disclosure layout targets are unavailable.");
+    }
+    const toolbarBounds = toolbar.getBoundingClientRect();
+    return {
+      commandClientHeight: command.clientHeight,
+      commandOverflowY: getComputedStyle(command).overflowY,
+      commandScrollHeight: command.scrollHeight,
+      commandScrollTop: command.scrollTop,
+      documentClientWidth: document.documentElement.clientWidth,
+      documentScrollTop: document.scrollingElement?.scrollTop ?? -1,
+      documentScrollWidth: document.documentElement.scrollWidth,
+      hudScrollTop: hud.scrollTop,
+      rosterClientHeight: roster.clientHeight,
+      rosterOverflowY: getComputedStyle(roster).overflowY,
+      rosterScrollHeight: roster.scrollHeight,
+      toolbarBottom: toolbarBounds.bottom,
+      toolbarLeft: toolbarBounds.left,
+      toolbarRight: toolbarBounds.right,
+      toolbarTop: toolbarBounds.top,
+    };
+  });
+  expect(initial.toolbarTop).toBeGreaterThanOrEqual(0);
+  expect(initial.toolbarLeft).toBeGreaterThanOrEqual(0);
+  expect(initial.toolbarRight).toBeLessThanOrEqual(viewport.width);
+  expect(initial.toolbarBottom).toBeLessThanOrEqual(viewport.height);
+  expect(initial.rosterOverflowY).toBe("auto");
+  expect(initial.commandOverflowY).toBe("auto");
+  expect(initial.rosterScrollHeight).toBeGreaterThan(initial.rosterClientHeight);
+  expect(initial.commandScrollHeight).toBeGreaterThan(initial.commandClientHeight);
+  expect(initial.documentScrollWidth).toBeLessThanOrEqual(initial.documentClientWidth);
+
+  const rosterBody = page.locator("#roster-details-body");
+  await rosterBody.evaluate((body) => {
+    body.scrollTop = Math.min(48, body.scrollHeight - body.clientHeight);
+  });
+  const independentlyScrolled = await page.evaluate(() => {
+    const roster = document.querySelector("#roster-details-body");
+    const command = document.querySelector("#command-deck-body");
+    const hud = document.querySelector(".hud-panel");
+    if (
+      !(roster instanceof HTMLElement) ||
+      !(command instanceof HTMLElement) ||
+      !(hud instanceof HTMLElement)
+    ) {
+      throw new Error("Disclosure scroll targets disappeared.");
+    }
+    return {
+      commandScrollTop: command.scrollTop,
+      documentScrollTop: document.scrollingElement?.scrollTop ?? -1,
+      hudScrollTop: hud.scrollTop,
+      rosterScrollTop: roster.scrollTop,
+    };
+  });
+  expect(independentlyScrolled.rosterScrollTop).toBeGreaterThan(0);
+  expect(independentlyScrolled.commandScrollTop).toBe(initial.commandScrollTop);
+  expect(independentlyScrolled.hudScrollTop).toBe(initial.hudScrollTop);
+  expect(independentlyScrolled.documentScrollTop).toBe(initial.documentScrollTop);
+
+  await rosterBody.evaluate((body) => {
+    body.scrollTop = body.scrollHeight;
+  });
+  const rosterBoundary = await rosterBody.evaluate((body) => body.scrollTop);
+  await rosterBody.hover();
+  await page.mouse.wheel(0, 600);
+  await settleResponsiveLayout(page);
+  expect(await rosterBody.evaluate((body) => body.scrollTop)).toBe(rosterBoundary);
+  expect(
+    await page.locator("#command-deck-body").evaluate((body) => body.scrollTop),
+  ).toBe(initial.commandScrollTop);
+  expect(await page.locator(".hud-panel").evaluate((hud) => hud.scrollTop)).toBe(
+    initial.hudScrollTop,
+  );
+  expect(await page.evaluate(() => document.scrollingElement?.scrollTop ?? -1)).toBe(
+    initial.documentScrollTop,
+  );
+
+  const lastRosterAction = page
+    .locator("#roster .roster-primary-action:visible")
+    .last();
+  await lastRosterAction.focus();
+  await expect(lastRosterAction).toBeFocused();
+  const focusedBounds = await page.evaluate(() => {
+    const body = document.querySelector("#roster-details-body");
+    const active = document.activeElement;
+    if (!(body instanceof HTMLElement) || !(active instanceof HTMLElement)) {
+      throw new Error("Focused roster action is unavailable.");
+    }
+    const bodyBounds = body.getBoundingClientRect();
+    const activeBounds = active.getBoundingClientRect();
+    return {
+      activeBottom: activeBounds.bottom,
+      activeTop: activeBounds.top,
+      bodyBottom: bodyBounds.bottom,
+      bodyTop: bodyBounds.top,
+    };
+  });
+  expect(focusedBounds.activeTop).toBeGreaterThanOrEqual(focusedBounds.bodyTop - 1);
+  expect(focusedBounds.activeBottom).toBeLessThanOrEqual(focusedBounds.bodyBottom + 1);
+
+  const followingTopBefore = await page
+    .locator("#agent-details")
+    .evaluate((panel) => panel.getBoundingClientRect().top);
+  await page.locator("#roster-details").evaluate((panel) => {
+    if (!(panel instanceof HTMLDetailsElement)) {
+      throw new TypeError("Roster disclosure is unavailable.");
+    }
+    panel.open = false;
+  });
+  await expect(page.locator("#roster-details > summary")).toBeFocused();
+  await settleResponsiveLayout(page);
+  expect(
+    await page
+      .locator("#agent-details")
+      .evaluate((panel) => panel.getBoundingClientRect().top),
+  ).toBeLessThan(followingTopBefore);
+  const documentScrollBeforeSpace = await page.evaluate(
+    () => document.scrollingElement?.scrollTop ?? -1,
+  );
+  await page.locator("#roster-details > summary").press("Space");
+  await expect(page.locator("#roster-details")).toHaveAttribute("open", "");
+  expect(await page.evaluate(() => document.scrollingElement?.scrollTop ?? -1)).toBe(
+    documentScrollBeforeSpace,
+  );
+  await settleResponsiveLayout(page);
+
+  const containment = await page.evaluate(() => {
+    const visibleSections = [...document.querySelectorAll(".hud-panel > details")]
+      .filter((panel) => panel.getClientRects().length > 0)
+      .map((panel) => panel.getBoundingClientRect())
+      .sort((left, right) => left.top - right.top);
+    const bodies = [...document.querySelectorAll("details[open] > .disclosure-body")]
+      .filter((body) => body.getClientRects().length > 0)
+      .map((body) => {
+        const owner = body.parentElement;
+        if (!(owner instanceof HTMLDetailsElement)) {
+          throw new Error("Disclosure body lost its owning details element.");
+        }
+        const bodyBounds = body.getBoundingClientRect();
+        const ownerBounds = owner.getBoundingClientRect();
+        return {
+          bodyLeft: bodyBounds.left,
+          bodyRight: bodyBounds.right,
+          bodyScrollWidth: body.scrollWidth,
+          bodyClientWidth: body.clientWidth,
+          ownerLeft: ownerBounds.left,
+          ownerRight: ownerBounds.right,
+          ownerTop: ownerBounds.top,
+          ownerBottom: ownerBounds.bottom,
+          bodyTop: bodyBounds.top,
+          bodyBottom: bodyBounds.bottom,
+        };
+      });
+    return {
+      bodies,
+      sections: visibleSections.map((bounds) => ({
+        bottom: bounds.bottom,
+        top: bounds.top,
+      })),
+    };
+  });
+  for (let index = 1; index < containment.sections.length; index += 1) {
+    expect(containment.sections[index].top).toBeGreaterThanOrEqual(
+      containment.sections[index - 1].bottom - 1,
+    );
+  }
+  for (const bounds of containment.bodies) {
+    expect(bounds.bodyTop).toBeGreaterThanOrEqual(bounds.ownerTop - 1);
+    expect(bounds.bodyBottom).toBeLessThanOrEqual(bounds.ownerBottom + 1);
+    expect(bounds.bodyLeft).toBeGreaterThanOrEqual(bounds.ownerLeft - 1);
+    expect(bounds.bodyRight).toBeLessThanOrEqual(bounds.ownerRight + 1);
+    expect(bounds.bodyScrollWidth).toBeLessThanOrEqual(bounds.bodyClientWidth + 1);
+  }
+}
+
 test("supported resize preserves real installed authority at 960px", async ({
   page,
 }) => {
@@ -122,9 +320,7 @@ test("supported resize preserves real installed authority at 960px", async ({
     Math.abs(initial.viewBoxHeight - initial.battlefieldClientHeight),
   ).toBeLessThan(1);
 
-  const focusedControl = page
-    .locator('#roster button[data-role="control"]:visible')
-    .first();
+  const focusedControl = page.locator("#roster .roster-primary-action:visible").first();
   await expect(focusedControl).toBeEnabled();
   await focusedControl.focus();
   await expect(focusedControl).toBeFocused();
@@ -161,4 +357,68 @@ test("supported resize preserves real installed authority at 960px", async ({
   await expect(page.locator("#revision-value")).toHaveText(revisionBefore ?? "");
   await expect(focusedControl).toBeFocused();
   expect(commandRequests).toBe(0);
+});
+
+test("disclosure bodies scroll independently at both supported viewports", async ({
+  page,
+}) => {
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await expect(page.locator("html")).toHaveAttribute(
+    "data-presentation-authority",
+    "installed",
+  );
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 960, height: 600 },
+  ]) {
+    await expectIndependentDisclosureLayout(page, viewport);
+  }
+
+  const replay = await startReplayViewer({
+    sampleReplay: "death-respawn-shield",
+  });
+  try {
+    for (const viewport of [
+      { width: 1440, height: 900 },
+      { width: 960, height: 600 },
+    ]) {
+      await page.setViewportSize(viewport);
+      await page.goto(replay.url);
+      await expect(page.locator("#connection-status")).toHaveText("Online");
+      await expect(page.locator("html")).toHaveAttribute(
+        "data-presentation-authority",
+        "installed",
+      );
+      await settleResponsiveLayout(page);
+      await expect(page.locator(".replay-timeline__transport")).toBeVisible();
+      const transport = await page
+        .locator(".replay-timeline__transport")
+        .evaluate((element) => {
+          const bounds = element.getBoundingClientRect();
+          return {
+            bottom: bounds.bottom,
+            clientWidth: element.clientWidth,
+            left: bounds.left,
+            right: bounds.right,
+            scrollWidth: element.scrollWidth,
+            top: bounds.top,
+          };
+        });
+      expect(transport.top).toBeGreaterThanOrEqual(0);
+      expect(transport.left).toBeGreaterThanOrEqual(0);
+      expect(transport.right).toBeLessThanOrEqual(viewport.width);
+      expect(transport.bottom).toBeLessThanOrEqual(viewport.height);
+      expect(transport.scrollWidth).toBeLessThanOrEqual(transport.clientWidth + 1);
+      expect(
+        await page.evaluate(
+          () =>
+            document.documentElement.scrollWidth <=
+            document.documentElement.clientWidth,
+        ),
+      ).toBe(true);
+    }
+  } finally {
+    await stopDebugger(replay.process);
+  }
 });

@@ -4,6 +4,20 @@ import test from "node:test";
 
 const mainUrl = new URL("../src/main.js", import.meta.url);
 const indexUrl = new URL("../index.html", import.meta.url);
+const controlsUrl = new URL("../src/controls.js", import.meta.url);
+
+/**
+ * @param {string} source
+ * @param {string} earlier
+ * @param {string} later
+ */
+function assertSourceOrder(source, earlier, later) {
+  const earlierIndex = source.indexOf(earlier);
+  const laterIndex = source.indexOf(later);
+  assert.notEqual(earlierIndex, -1, `missing earlier source marker: ${earlier}`);
+  assert.notEqual(laterIndex, -1, `missing later source marker: ${later}`);
+  assert.ok(earlierIndex < laterIndex, `${earlier} must precede ${later}`);
+}
 
 test("main keeps raw transport and certified presentation authority separate", async () => {
   const source = await readFile(mainUrl, "utf8");
@@ -30,17 +44,17 @@ test("main keeps raw transport and certified presentation authority separate", a
 
 test("main has one branded state install boundary and no legacy half installs", async () => {
   const source = await readFile(mainUrl, "utf8");
-  const frameAssignments = [...source.matchAll(/state\.frame\s*=\s*([^;]+);/gu)].map(
-    (match) => match[1].trim(),
-  );
+  const frameAssignments = [
+    ...source.matchAll(/state\.frame\s*=(?!=)\s*([^;]+);/gu),
+  ].map((match) => match[1].trim());
   const timelineAssignments = [
-    ...source.matchAll(/state\.timeline\s*=\s*([^;]+);/gu),
+    ...source.matchAll(/state\.timeline\s*=(?!=)\s*([^;]+);/gu),
   ].map((match) => match[1].trim());
   const presentationAssignments = [
-    ...source.matchAll(/state\.presentation\s*=\s*([^;]+);/gu),
+    ...source.matchAll(/state\.presentation\s*=(?!=)\s*([^;]+);/gu),
   ].map((match) => match[1].trim());
   const authorityAssignments = [
-    ...source.matchAll(/state\.authority\s*=\s*([^;]+);/gu),
+    ...source.matchAll(/state\.authority\s*=(?!=)\s*([^;]+);/gu),
   ].map((match) => match[1].trim());
 
   assert.deepEqual(frameAssignments, ["joined.transport", "null"]);
@@ -54,6 +68,25 @@ test("main has one branded state install boundary and no legacy half installs", 
   assert.match(source, /isAuthorizedPresentationFrame\(joined\.presentation\)/u);
   assert.match(source, /validateReplayTransportContinuityV1\(/u);
   assert.doesNotMatch(source, /validateReplayFrameContinuity/u);
+});
+
+test("main derives product shell mode only from validated route identity", async () => {
+  const source = await readFile(mainUrl, "utf8");
+  const helperStart = source.indexOf("function isReplayMode()");
+  const helperEnd = source.indexOf("/**", helperStart);
+
+  assert.notEqual(helperStart, -1);
+  assert.notEqual(helperEnd, -1);
+  const helperSource = source.slice(helperStart, helperEnd);
+  assert.match(helperSource, /productIdentity\?\.product_kind === "replay_viewer"/u);
+  assert.doesNotMatch(helperSource, /state\.frame|viewer_mode/u);
+
+  assert.match(source, /function assertFrameMatchesProductIdentity\(frame\)/u);
+  assert.match(source, /const frameIsReplay = frame\.viewer_mode === "replay";/u);
+  assert.match(
+    source,
+    /const identityIsReplay = productIdentity\.product_kind === "replay_viewer";/u,
+  );
 });
 
 test("main clears presentation before requests and delegates bounded retry policy", async () => {
@@ -91,7 +124,7 @@ test("main clears presentation before requests and delegates bounded retry polic
     source,
     /elements\.recordingReviewButton,[\s\S]*elements\.recordingSaveAsButton,/u,
   );
-  assert.match(source, /elements\.agentDetails\.open = false;/u);
+  assert.match(source, /enterPendingPresentationPreferenceState\(\);/u);
   assert.match(
     source,
     /elements\.battlefield\.removeAttribute\("aria-activedescendant"\);/u,
@@ -110,6 +143,184 @@ test("main clears presentation before requests and delegates bounded retry polic
   );
 });
 
+test("main scopes one non-caching preference record to the certified authority tuple", async () => {
+  const source = await readFile(mainUrl, "utf8");
+  const controllerStart = source.indexOf("let activePresentationPreference = null;");
+  const controllerEnd = source.indexOf("function isReplayMode()", controllerStart);
+  const controller = source.slice(controllerStart, controllerEnd);
+  const installStart = source.indexOf("function installJoinedAuthority(joined)");
+  const installEnd = source.indexOf(
+    "async function prepareJoinedAuthority(",
+    installStart,
+  );
+  const install = source.slice(installStart, installEnd);
+
+  assert.notEqual(controllerStart, -1);
+  assert.notEqual(controllerEnd, -1);
+  assert.notEqual(installStart, -1);
+  assert.notEqual(installEnd, -1);
+  assert.doesNotMatch(controller, /\bnew Map\s*\(/u);
+  assert.match(
+    install,
+    /authorizedPresentationPreferenceKey\(joined\.presentation\)[\s\S]*installActivePresentationPreference\(joined\.presentation, preferenceKey\)/u,
+  );
+  assert.match(controller, /sameAuthorizedPresentationPreferenceKey\(/u);
+  assert.match(
+    controller,
+    /activePresentationPreference = defaultPresentationPreference\(/u,
+  );
+  assert.doesNotMatch(source, /localPresentationPreference|disclosureAuthorityKey/u);
+});
+
+test("main saves before pending close and restores only after coherent content render", async () => {
+  const source = await readFile(mainUrl, "utf8");
+  const clearStart = source.indexOf("function clearPresentationAuthority(reason)");
+  const clearEnd = source.indexOf(
+    "function installJoinedAuthority(joined)",
+    clearStart,
+  );
+  const clear = source.slice(clearStart, clearEnd);
+  const pendingStart = source.indexOf(
+    "function enterPendingPresentationPreferenceState()",
+  );
+  const pendingEnd = source.indexOf(
+    "function capturePresentationPreferenceBeforeRender()",
+    pendingStart,
+  );
+  const pending = source.slice(pendingStart, pendingEnd);
+  const renderStart = source.indexOf("function render()");
+  const renderEnd = source.indexOf(
+    "function syncCompactActiveCombatPriority(",
+    renderStart,
+  );
+  const render = source.slice(renderStart, renderEnd);
+
+  assertSourceOrder(
+    clear,
+    "savePresentationPreferenceBeforeClear();",
+    "enterPendingPresentationPreferenceState();",
+  );
+  assertSourceOrder(
+    clear,
+    "enterPendingPresentationPreferenceState();",
+    "state.authority = null;",
+  );
+  assert.match(pending, /setScientificDisclosureAvailability\(false\);/u);
+  assertSourceOrder(
+    render,
+    "battlefieldRenderer.render(presentationFrame,",
+    "restorePresentationPreferenceAfterRender();",
+  );
+  assertSourceOrder(
+    render,
+    "panels.render(presentationFrame,",
+    "restorePresentationPreferenceAfterRender();",
+  );
+  assertSourceOrder(
+    render,
+    "tooltipController.refresh();",
+    "restorePresentationPreferenceAfterRender();",
+  );
+});
+
+test("main distinguishes delayed programmatic details toggles from user intent", async () => {
+  const source = await readFile(mainUrl, "utf8");
+  const setterStart = source.indexOf("function setProgrammaticDisclosureOpen(");
+  const setterEnd = source.indexOf(
+    "function setScientificDisclosureAvailability(",
+    setterStart,
+  );
+  const setter = source.slice(setterStart, setterEnd);
+  const captureStart = source.indexOf("function capturePresentationPreference(");
+  const captureEnd = source.indexOf(
+    "function savePresentationPreferenceBeforeClear()",
+    captureStart,
+  );
+  const capture = source.slice(captureStart, captureEnd);
+
+  assert.match(source, /const expectedDisclosureToggles = new WeakMap\(\);/u);
+  assertSourceOrder(
+    setter,
+    "expectedDisclosureToggles.set(panel",
+    "panel.open = open;",
+  );
+  assert.match(
+    source,
+    /installedActivePresentationPreference\(state\.presentation\) !== null[\s\S]*expectedDisclosureToggles\.delete\(panel\);/u,
+  );
+  assert.match(capture, /const userClosedBeforeToggle =/u);
+  assert.match(capture, /expected\?\.open !== false/u);
+  assert.match(capture, /preference\.agentDetailsAutoOpenAllowed = false;/u);
+  assert.match(
+    capture,
+    /panel\.open \|\| userClosedBeforeToggle[\s\S]*body\.scrollTop/u,
+  );
+  assert.equal(
+    [...source.matchAll(/schedulePresentationPreferenceRestore\(preference\)/gu)]
+      .length,
+    2,
+  );
+  assert.match(
+    source,
+    /if \(panel\.open\) \{\s*body\.scrollTop = preference\.disclosures\[panelId\]\.scrollTop;/u,
+  );
+  assert.doesNotMatch(source, /elements\.agentDetails\.open\s*=/u);
+});
+
+test("main shares the Agent Details latch and rejects stale local keys and focus", async () => {
+  const source = await readFile(mainUrl, "utf8");
+  const showStart = source.indexOf("function showSemanticInspector(");
+  const showEnd = source.indexOf("function registerControlHelp()", showStart);
+  const show = source.slice(showStart, showEnd);
+  const openStart = source.indexOf("function openAgentDetails()");
+  const openEnd = source.indexOf(
+    "function closeAgentDetailsWithoutLatching()",
+    openStart,
+  );
+  const open = source.slice(openStart, openEnd);
+  const reconcileStart = source.indexOf("function reconcilePresentationPreference(");
+  const reconcileEnd = source.indexOf(
+    "function installActivePresentationPreference(",
+    reconcileStart,
+  );
+  const reconcile = source.slice(reconcileStart, reconcileEnd);
+  const activationStart = source.indexOf("function activateAuthorizedAgent(");
+  const activationEnd = source.indexOf("function render()", activationStart);
+  const activation = source.slice(activationStart, activationEnd);
+  const restoreStart = source.indexOf(
+    "function schedulePresentationPreferenceRestore(",
+  );
+  const restoreEnd = source.indexOf(
+    "function restorePresentationPreferenceAfterRender()",
+    restoreStart,
+  );
+  const restore = source.slice(restoreStart, restoreEnd);
+
+  assert.match(show, /openAgentDetails\(\);/u);
+  assert.match(activation, /openAgentDetails\(\);/u);
+  assert.match(open, /!preference\.agentDetailsAutoOpenAllowed/u);
+  assert.match(reconcile, /preference\.localInspection\.presentationKey = null;/u);
+  assert.match(reconcile, /preference\.disclosures\["agent-details"\]\.open = false;/u);
+  assert.match(reconcile, /preference\.primaryFocus = null;/u);
+  assert.doesNotMatch(reconcile, /recipient/u);
+  assert.match(
+    restore,
+    /generation !== presentationPreferenceGeneration[\s\S]*sameAuthorizedPresentationPreferenceKey\(installed\.authorityKey, authorityKey\)/u,
+  );
+  assert.match(restore, /CSS\.escape\(focus\.presentationKey\)/u);
+  assert.match(restore, /focusWasNotMovedByUser/u);
+});
+
+test("main excludes the global Visual Key from scientific preference and inert state", async () => {
+  const source = await readFile(mainUrl, "utf8");
+  const idsStart = source.indexOf("const SCIENTIFIC_DISCLOSURE_BODY_IDS");
+  const idsEnd = source.indexOf("const scientificDisclosures", idsStart);
+  const scientificIds = source.slice(idsStart, idsEnd);
+
+  assert.doesNotMatch(scientificIds, /visual-key/u);
+  assert.match(source, /elements\.visualKey\.addEventListener\("toggle"/u);
+});
+
 test("main rejects battlefield pointer commands unless Oracle authority is installed", async () => {
   const source = await readFile(mainUrl, "utf8");
   const dispatchStart = source.indexOf("async function dispatchCommand(command)");
@@ -125,10 +336,95 @@ test("main rejects battlefield pointer commands unless Oracle authority is insta
     dispatchSource,
     /command\.command_type === "battlefield_pointer"[\s\S]*authorizedPresentationAudience\(state\.presentation\) !== "researcher"[\s\S]*return;/u,
   );
-  assert.ok(
-    dispatchSource.indexOf('command.command_type === "battlefield_pointer"') <
-      dispatchSource.indexOf("const mode = modeAvailability(command, state.frame)"),
+  assertSourceOrder(
+    dispatchSource,
+    'command.command_type === "battlefield_pointer"',
+    "const mode = modeAvailability(command, state.frame)",
   );
+});
+
+test("main resolves one certified agent activation to one Oracle command or Agent-local effect", async () => {
+  const source = await readFile(mainUrl, "utf8");
+  const resolverStart = source.indexOf("function authorizedAgentActivation(");
+  const resolverEnd = source.indexOf(
+    "function authorizedAgentActivationFromTarget(",
+    resolverStart,
+  );
+  const panelStart = source.indexOf("function dispatchPanelCommand(");
+  const panelEnd = source.indexOf(
+    "async function dispatchCommand(command)",
+    panelStart,
+  );
+
+  assert.notEqual(resolverStart, -1);
+  assert.notEqual(resolverEnd, -1);
+  assert.notEqual(panelStart, -1);
+  assert.notEqual(panelEnd, -1);
+  const resolver = source.slice(resolverStart, resolverEnd);
+  const panel = source.slice(panelStart, panelEnd);
+  assert.match(resolver, /installedAuthorityIsCoherent\(\)/u);
+  assert.match(resolver, /authorizedAgentForPresentationKey\(/u);
+  assert.match(
+    resolver,
+    /state\.busy[\s\S]*state\.resyncRequired[\s\S]*state\.offline/u,
+  );
+  assert.match(resolver, /isTerminal\(state\.frame\)/u);
+  assert.match(
+    resolver,
+    /audience === "agent_pov" \|\| inspectionState\.state_kind === "live_scripted"/u,
+  );
+  assert.match(resolver, /effect: "local_inspection"/u);
+  assert.match(resolver, /effect: "replay_select"/u);
+  assert.match(resolver, /effect: "live_control"/u);
+  assert.match(
+    panel,
+    /command\.command_type === "activate_authorized_agent"[\s\S]*activateAuthorizedAgent\(command\.presentation_key\)/u,
+  );
+  assert.doesNotMatch(source, /set_pov_actor/u);
+  assert.match(
+    source,
+    /setLocalInspectedPresentationKey\(presentationKey\)[\s\S]*render\(\);/u,
+  );
+  assert.match(
+    source,
+    /"pointerdown"[\s\S]*authorizedAgentActivationFromTarget\(event\.target\)[\s\S]*stopImmediatePropagation\(\)[\s\S]*true,/u,
+  );
+  assert.match(
+    source,
+    /event\.key !== "Enter" && event\.key !== " "[\s\S]*activateAuthorizedAgent\(activation\.presentationKey\)/u,
+  );
+});
+
+test("battlefield delegation leaves nested scientific owners and terminal frames inert", async () => {
+  const [mainSource, controlsSource] = await Promise.all([
+    readFile(mainUrl, "utf8"),
+    readFile(controlsUrl, "utf8"),
+  ]);
+  const installStart = mainSource.indexOf(
+    "function installAuthorizedAgentActivation()",
+  );
+  const installEnd = mainSource.indexOf(
+    "/**\n * Apply the already-resolved single effect.",
+    installStart,
+  );
+  const installSource = mainSource.slice(installStart, installEnd);
+
+  assert.match(
+    controlsSource,
+    /if \(!isInteractive\(\) \|\| event\.target !== battlefield\) \{\s*return;/u,
+  );
+  assert.match(
+    mainSource,
+    /function liveBattlefieldCommandsInteractive\(\)[\s\S]*!isTerminal\(state\.frame\)/u,
+  );
+  assert.match(mainSource, /isInteractive: liveBattlefieldCommandsInteractive/u);
+  assert.match(
+    mainSource,
+    /const tooltipOwner = event\.target\.closest\("\[data-tooltip-owner\]"\);[\s\S]*tooltipOwner !== agent[\s\S]*stopImmediatePropagation\(\)/u,
+  );
+  assert.notEqual(installStart, -1);
+  assert.notEqual(installEnd, -1);
+  assert.match(installSource, /\{ inspectable: false \}/u);
 });
 
 test("main carries replay animation intent only beside the installed presentation", async () => {
@@ -167,6 +463,71 @@ test("main carries replay animation intent only beside the installed presentatio
   );
 });
 
+test("main renders ranges and inspector chrome only from installed presentation authority", async () => {
+  const source = await readFile(mainUrl, "utf8");
+  const visibilityStart = source.indexOf(
+    "function installedPresentationRangesVisible(",
+  );
+  const visibilityEnd = source.indexOf(
+    "function liveScriptedInspectionOnly()",
+    visibilityStart,
+  );
+  const inspectorStart = source.indexOf("function applyAuthorizedInspectorChrome()");
+  const inspectorEnd = source.indexOf(
+    "function reloadForProductHandoff()",
+    inspectorStart,
+  );
+  const replayReferenceStart = source.indexOf(
+    "function applyReplayReferenceSemantics()",
+  );
+  const replayReferenceEnd = source.indexOf(
+    "function authorizedAgentActivation(",
+    replayReferenceStart,
+  );
+
+  assert.notEqual(visibilityStart, -1);
+  assert.notEqual(visibilityEnd, -1);
+  assert.notEqual(inspectorStart, -1);
+  assert.notEqual(inspectorEnd, -1);
+  assert.notEqual(replayReferenceStart, -1);
+  assert.notEqual(replayReferenceEnd, -1);
+  const visibilitySource = source.slice(visibilityStart, visibilityEnd);
+  const inspectorSource = source.slice(inspectorStart, inspectorEnd);
+  const replayReferenceSource = source.slice(replayReferenceStart, replayReferenceEnd);
+  assert.match(visibilitySource, /isAuthorizedPresentationFrame\(presentation\)/u);
+  assert.match(visibilitySource, /installedAuthorityIsCoherent\(\)/u);
+  assert.match(visibilitySource, /state\.presentation !== presentation/u);
+  assert.match(
+    visibilitySource,
+    /authorizedPresentationAudience\(presentation\) === "researcher"[\s\S]*state\.frame\?\.show_ranges === true[\s\S]*localPreference\?\.rangesVisible === true/u,
+  );
+  assert.equal(
+    [
+      ...source.matchAll(
+        /showRanges: installedPresentationRangesVisible\(presentationFrame\)/gu,
+      ),
+    ].length,
+    2,
+  );
+  assert.match(
+    inspectorSource,
+    /authorizedInspectorView\(\s*state\.presentation,\s*installedLocalInspectedPresentationKey\(state\.presentation\),\s*\)/u,
+  );
+  assert.match(inspectorSource, /AUTHORIZED_INSPECTOR_TITLE/u);
+  assert.match(inspectorSource, /inspector\.owner_class_accent/u);
+  assert.match(
+    source,
+    /renderSemanticInspector\(elements\.selectionCard, normalized\);\s*applyAuthorizedInspectorChrome\(\);/u,
+  );
+  assert.doesNotMatch(source, /selectionHeading\.textContent = "Agent Details"/u);
+  assert.match(replayReferenceSource, /if \(!isReplayMode\(\)\) \{\s*return;/u);
+  assert.equal(
+    [...source.matchAll(/installAuthorizedAgentActivation\(\);/gu)].length,
+    2,
+  );
+  assert.equal([...source.matchAll(/applyReplayReferenceSemantics\(\);/gu)].length, 2);
+});
+
 test("main selects incoming transition IDs from the exact presentation variant", async () => {
   const source = await readFile(mainUrl, "utf8");
   const helperStart = source.indexOf("function authorizedIncomingTransitionId(");
@@ -189,7 +550,7 @@ test("main selects incoming transition IDs from the exact presentation variant",
 
 test("main describes Agent bodies as passive while preserving researcher guidance", async () => {
   const source = await readFile(mainUrl, "utf8");
-  const boundaryStart = source.indexOf("function renderViewerBoundary()");
+  const boundaryStart = source.indexOf("function applyBattlefieldBoundaryCopy()");
   const boundaryEnd = source.indexOf("function renderReplayMetadata()", boundaryStart);
 
   assert.notEqual(boundaryStart, -1);
@@ -198,16 +559,62 @@ test("main describes Agent bodies as passive while preserving researcher guidanc
   assert.match(boundarySource, /audience === "agent_pov"/u);
   assert.match(
     boundarySource,
-    /Agent POV bodies are inspectable and passive; they cannot change control or submit actions\./u,
+    /Live Agent POV keeps one fixed recipient\. Bodies are passive inspection targets; use the authorized draft controls to prepare that recipient's action\./u,
   );
   assert.match(
     boundarySource,
-    /Left click controls an authorized actor, Shift plus left click selects an authorized target, and right click clears the target\./u,
+    /Live Oracle View is interactive\. Activate an authorized actor to control it; Shift-click selects an authorized target; right-click clears the target\. Battlefield keyboard commands apply only while this surface has focus\./u,
+  );
+  assert.match(
+    boundarySource,
+    /Replay is read-only\. Activate an authorized agent to inspect current facts and its recorded outgoing action; use the timeline to change frames\./u,
+  );
+  assert.match(
+    boundarySource,
+    /Replay Agent POV is read-only and keeps one fixed recipient\. Activate an authorized visible body to inspect current facts; the replay authority does not change\./u,
   );
   assert.match(
     source,
-    /Researcher live view supports pointer control and targeting; Agent POV bodies remain passive and draft controls own actions\./u,
+    /Scripted live view is inspection-only\. Activate an authorized body to inspect current facts; use Advance scripted frame for the next authorized step\./u,
   );
+  assert.match(
+    source,
+    /function liveAgentCloseoutInspectionActionable\(\)[\s\S]*authorizedPresentationAudience\(state\.presentation\) === "agent_pov"[\s\S]*recordingScientificControlsFenced\(\)/u,
+  );
+  assert.match(
+    source,
+    /function installedLiveScientificInspectionAvailable\(\)[\s\S]*isAuthorizedPresentationFrame\(state\.presentation\)[\s\S]*installedAuthorityIsCoherent\(\)/u,
+  );
+  assert.match(
+    source,
+    /READ_ONLY_LIVE_SCIENTIFIC_LABEL[\s\S]*Scientific facts can be inspected/u,
+  );
+  assert.match(
+    source,
+    /This replay frame is terminal\. Agent inspection controls are unavailable; use the timeline to review another frame\./u,
+  );
+});
+
+test("main leaves the battlefield to visible instructions rather than a tooltip owner", async () => {
+  const source = await readFile(mainUrl, "utf8");
+  const helpStart = source.indexOf("const CONTROL_HELP = Object.freeze([");
+  const helpEnd = source.indexOf("]);", helpStart);
+  const utilityStart = source.indexOf("function registerAuthorityAwareUtilityHelp()");
+  const utilityEnd = source.indexOf("function isRecord(value)", utilityStart);
+
+  assert.notEqual(helpStart, -1);
+  assert.notEqual(helpEnd, -1);
+  assert.notEqual(utilityStart, -1);
+  assert.notEqual(utilityEnd, -1);
+  const helpSource = source.slice(helpStart, helpEnd);
+  const utilitySource = source.slice(utilityStart, utilityEnd);
+  assert.doesNotMatch(helpSource, /#battlefield/u);
+  assert.doesNotMatch(helpSource, /Battlefield Commands/u);
+  assert.match(utilitySource, /#live-ranges-button/u);
+  assert.match(utilitySource, /#replay-ranges-button/u);
+  assert.match(utilitySource, /#replay-clear-reference-button/u);
+  assert.match(utilitySource, /sends no (?:replay )?command/u);
+  assert.match(utilitySource, /Oracle View range presentation/u);
 });
 
 test("main reuses only Submit for coherent scripted-live advancement", async () => {
@@ -305,35 +712,42 @@ test("main reuses only Submit for coherent scripted-live advancement", async () 
   );
   assert.match(
     source,
-    /Inspection-only scripted battlefield\. Use Advance scripted frame for the next authorized step\./u,
+    /Inspection-only scripted battlefield\. Authorized bodies can be inspected; use Advance scripted frame for the next authorized step\./u,
   );
   assert.match(
     source,
-    /Scripted live view is inspection-only\. Battlefield bodies are passive and cannot submit actions\. Use the single Advance scripted frame button/u,
+    /Scripted live view is inspection-only\. Activate an authorized body to inspect current facts; use Advance scripted frame for the next authorized step\./u,
   );
   assert.match(
     source,
-    /elements\.battlefield\.setAttribute\("role", "img"\);[\s\S]*elements\.battlefield\.tabIndex = -1;/u,
+    /elements\.battlefield\.setAttribute\("role", "group"\);[\s\S]*elements\.battlefield\.tabIndex = -1;/u,
   );
   assert.equal(
-    [...source.matchAll(/\n\s*applyScriptedBattlefieldBoundaryCopy\(\);/gu)].length,
+    [...source.matchAll(/\n\s*applyBattlefieldBoundaryCopy\(\);/gu)].length,
     3,
   );
+  assert.match(source, /shuttingDown:\s*state\.shuttingDown,/u);
   assert.match(
     source,
-    /shuttingDown:\s*state\.shuttingDown \|\|\s*recordingScientificControlsFenced\(\) \|\|\s*liveScriptedInspectionOnly\(\)/u,
+    /activationDisabled:[\s\S]*isTerminal\(state\.frame\)[\s\S]*authorizedPresentationAudience\(presentationFrame\) === "researcher"[\s\S]*recordingScientificControlsFenced\(\)/u,
+  );
+  assert.match(source, /isInteractive: liveBattlefieldCommandsInteractive/u);
+  assert.match(
+    source,
+    /function liveBattlefieldCommandsInteractive\(\)[\s\S]*installedAuthorityIsCoherent\(\)[\s\S]*!isTerminal\(state\.frame\)[\s\S]*!state\.shuttingDown/u,
   );
   assert.match(
     source,
-    /isInteractive: \(\) =>[\s\S]*!isReplayMode\(\)[\s\S]*!liveScriptedInspectionOnly\(\)/u,
+    /FENCED_LIVE_BATTLEFIELD_LABEL[\s\S]*Read-only live battlefield/u,
   );
   assert.match(
     dispatchSource,
     /liveScriptedInspectionOnly\(\) &&\s*!allowedDuringLiveScriptedInspection\(command\)[\s\S]*Use Advance scripted frame[\s\S]*return;/u,
   );
-  assert.ok(
-    dispatchSource.indexOf("!allowedDuringLiveScriptedInspection(command)") <
-      dispatchSource.indexOf("const mode = modeAvailability(command, state.frame)"),
+  assertSourceOrder(
+    dispatchSource,
+    "!allowedDuringLiveScriptedInspection(command)",
+    "const mode = modeAvailability(command, state.frame)",
   );
   assert.match(
     source,
