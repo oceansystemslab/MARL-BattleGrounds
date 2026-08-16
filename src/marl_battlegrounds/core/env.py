@@ -71,7 +71,12 @@ from marl_battlegrounds.core.types import (
     CONTEXT_FEATURE_ALLY_TEAM_SIZE,
     CONTEXT_FEATURE_CURRENT_TIMESTEP,
     CONTEXT_FEATURE_ENEMY_TEAM_SIZE,
+    CONTEXT_FEATURE_IS_CTF,
+    CONTEXT_FEATURE_IS_TDM,
     CONTEXT_FEATURE_MAP_HEIGHT,
+    CONTEXT_FEATURE_TDM_ALLY_SCORE,
+    CONTEXT_FEATURE_TDM_ENEMY_SCORE,
+    CONTEXT_FEATURE_TDM_SCORE_THRESHOLD,
     CONTEXT_FEATURES,
     HUNTER_CLASS_ID,
     MAGE_CLASS_ID,
@@ -86,11 +91,14 @@ from marl_battlegrounds.core.types import (
     NUM_SLOW_CHANNELS,
     NUM_STUN_CHANNELS,
     NUM_TARGET_ACTIONS,
+    NUM_TASKS,
     NUM_TEAMS,
     NUM_ULTIMATE_ACTIONS,
     OBJECTIVE_FEATURES,
     OBSTACLE_FEATURES,
     PRIEST_CLASS_ID,
+    REWARD_FOR_LOSING,
+    REWARD_FOR_WINNING,
     ROGUE_CLASS_ID,
     SLOW_CHANNEL_HUNTER_BASIC,
     SLOW_CHANNEL_ROGUE_POISON,
@@ -98,6 +106,13 @@ from marl_battlegrounds.core.types import (
     STUN_CHANNEL_HUNTER_TRAP,
     STUN_CHANNEL_ROGUE_POISON,
     STUN_CHANNEL_WARRIOR_CHARGE,
+    TASK_MODE_CTF,
+    TASK_MODE_KOTH,
+    TASK_MODE_OUTCOME_DRAW,
+    TASK_MODE_OUTCOME_ONGOING,
+    TASK_MODE_OUTCOME_TEAM_A_WIN,
+    TASK_MODE_OUTCOME_TEAM_B_WIN,
+    TASK_MODE_TDM,
     TEAM_A_ID,
     TEAM_B_ID,
     UNIT_FEATURES,
@@ -121,6 +136,7 @@ from marl_battlegrounds.core.types import (
     SpawnLifecycleObservation,
     SpawnShieldTransitionFacts,
     StatusLifecycleTransitionFacts,
+    TeamDeathmatchTransitionFacts,
     TransitionFacts,
 )
 
@@ -584,6 +600,37 @@ def _build_context_features(state: EnvState, config: EnvConfig) -> Array:
         TEAM_B_START:TEAM_B_END,
         CONTEXT_FEATURE_ALLY_TEAM_SIZE : CONTEXT_FEATURE_ENEMY_TEAM_SIZE + 1,
     ].set(jnp.asarray([team_b_ally_team_size, team_b_enemy_team_size]))
+
+    # Expose the selected fixed task mode without introducing a string payload.
+    context_features = context_features.at[
+        :,
+        CONTEXT_FEATURE_IS_TDM : CONTEXT_FEATURE_IS_CTF + 1,
+    ].set(
+        jnp.asarray(
+            (
+                config.task_mode == TASK_MODE_TDM,
+                config.task_mode == TASK_MODE_KOTH,
+                config.task_mode == TASK_MODE_CTF,
+            ),
+            dtype=jnp.bool_,
+        )
+    )
+
+    # Team Deathmatch scores are actor-relative: allies precede enemies.
+    context_features = context_features.at[
+        TEAM_A_START:TEAM_A_END,
+        CONTEXT_FEATURE_TDM_ALLY_SCORE : CONTEXT_FEATURE_TDM_ENEMY_SCORE + 1,
+    ].set(state.team_deathmatch_scores)
+
+    context_features = context_features.at[
+        TEAM_B_START:TEAM_B_END,
+        CONTEXT_FEATURE_TDM_ALLY_SCORE : CONTEXT_FEATURE_TDM_ENEMY_SCORE + 1,
+    ].set(jnp.flip(state.team_deathmatch_scores))
+
+    # The configured Team Deathmatch threshold is globally public.
+    context_features = context_features.at[:, CONTEXT_FEATURE_TDM_SCORE_THRESHOLD].set(
+        config.team_deathmatch_score_threshold
+    )
 
     # Global episode facts are policy inputs only for configured actor slots.
     context_features = jnp.where(
@@ -2742,6 +2789,10 @@ def _build_canonical_no_transition_info_object(initial_state: EnvState) -> Info:
         ),
     )
 
+    reset_team_deathmatch_facts = TeamDeathmatchTransitionFacts(
+        outcome=jnp.asarray(TASK_MODE_OUTCOME_ONGOING, dtype=jnp.int32)
+    )
+
     reset_transition_facts = TransitionFacts(
         has_transition=jnp.asarray(False),
         transition_start_step_count=jnp.asarray(-1, dtype=jnp.int32),
@@ -2754,6 +2805,7 @@ def _build_canonical_no_transition_info_object(initial_state: EnvState) -> Info:
         physical_facts=reset_physical_facts,
         aura_facts=reset_aura_facts,
         status_lifecycle_facts=reset_status_lifecycle_facts,
+        team_deathmatch_facts=reset_team_deathmatch_facts,
     )
 
     return Info(transition_facts=reset_transition_facts)
@@ -2932,6 +2984,171 @@ def _compute_health_after_out_of_combat_health_regeneration(
     )
 
 
+def _handle_team_deathmatch_outcome_and_rewards(
+    next_state: EnvState, config: EnvConfig
+) -> tuple[Reward, DoneFlags, Array]:
+    """Resolve TDM completion, shared outcome, and one sparse reward pulse."""
+
+    team_a_score = next_state.team_deathmatch_scores[TEAM_A_ID - 1]
+    team_b_score = next_state.team_deathmatch_scores[TEAM_B_ID - 1]
+    points_needed_to_win = config.team_deathmatch_score_threshold
+
+    episode_has_truncated = next_state.step_count >= config.max_steps
+    episode_has_terminated = jnp.logical_or(
+        team_a_score >= points_needed_to_win, team_b_score >= points_needed_to_win
+    )
+
+    team_a_wins = jnp.logical_and(
+        team_a_score >= points_needed_to_win, team_a_score > team_b_score
+    )
+
+    team_b_wins = jnp.logical_and(
+        team_b_score >= points_needed_to_win, team_b_score > team_a_score
+    )
+
+    neither_team_has_won = jnp.logical_and(~team_a_wins, ~team_b_wins)
+
+    episode_is_complete = jnp.logical_or(episode_has_truncated, episode_has_terminated)
+
+    # Horizon expiry without a threshold winner is a draw. A simultaneous
+    # threshold tie is also a draw, including when threshold and horizon coincide.
+    teams_draw = jnp.logical_or(
+        jnp.logical_and(neither_team_has_won, episode_has_truncated),
+        jnp.logical_and(
+            jnp.logical_and(
+                team_b_score >= points_needed_to_win, team_b_score == team_a_score
+            ),
+            episode_is_complete,
+        ),
+    )
+
+    # Accumulate one categorical result from mutually exclusive predicates.
+    outcome = jnp.where(
+        team_a_wins, TASK_MODE_OUTCOME_TEAM_A_WIN, TASK_MODE_OUTCOME_ONGOING
+    )
+
+    outcome = jnp.where(team_b_wins, TASK_MODE_OUTCOME_TEAM_B_WIN, outcome)
+    outcome = jnp.where(teams_draw, TASK_MODE_OUTCOME_DRAW, outcome)
+    # If no predicate is true, the task is still ongoing.
+
+    task_outcomes = jnp.zeros((NUM_TASKS + 1,), dtype=jnp.int32)
+    task_outcomes = task_outcomes.at[TASK_MODE_TDM].set(outcome)
+
+    done_flags = DoneFlags(
+        terminated=episode_has_terminated,
+        truncated=episode_has_truncated,
+    )
+
+    outcome_branches = [
+        _handle_task_rewards_ongoing,
+        _handle_task_rewards_team_a_win,
+        _handle_task_rewards_team_b_win,
+        _handle_task_rewards_draw,
+    ]
+
+    rewards = cast(
+        Reward,
+        jax.lax.switch(outcome, outcome_branches, config),
+    )
+
+    return rewards, done_flags, task_outcomes
+
+
+def _canonical_no_outcome_and_rewards(
+    next_state: EnvState, config: EnvConfig
+) -> tuple[Reward, DoneFlags, Array]:
+    """Return neutral task output while retaining ordinary horizon truncation."""
+    reward = Reward(rewards=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32))
+    done_flags = DoneFlags(
+        terminated=jnp.asarray(False, dtype=jnp.bool_),
+        truncated=jnp.asarray(
+            next_state.step_count >= config.max_steps, dtype=jnp.bool_
+        ),
+    )
+    outcome = jnp.zeros((NUM_TASKS + 1,), dtype=jnp.int32)
+    return reward, done_flags, outcome
+
+
+def _handle_no_task_outcome_and_rewards(
+    next_state: EnvState, config: EnvConfig
+) -> tuple[Reward, DoneFlags, Array]:
+    """Return canonical neutral-mode task output."""
+    return _canonical_no_outcome_and_rewards(next_state, config)
+
+
+def _handle_capture_the_flag_outcome_and_rewards(
+    next_state: EnvState, config: EnvConfig
+) -> tuple[Reward, DoneFlags, Array]:
+    """Reserve the fixed Capture the Flag branch until that task is implemented."""
+    return _canonical_no_outcome_and_rewards(next_state, config)
+
+
+def _handle_king_of_the_hill_outcome_and_rewards(
+    next_state: EnvState, config: EnvConfig
+) -> tuple[Reward, DoneFlags, Array]:
+    """Reserve the fixed King of the Hill branch until that task is implemented."""
+    return _canonical_no_outcome_and_rewards(next_state, config)
+
+
+def _handle_task_rewards_ongoing(config: EnvConfig) -> Reward:
+    """Return zero reward for an ongoing task transition."""
+    del config
+    return Reward(rewards=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32))
+
+
+def _handle_task_rewards_draw(config: EnvConfig) -> Reward:
+    """Return the canonical zero reward for a drawn task."""
+    del config
+    return Reward(rewards=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32))
+
+
+def _handle_task_rewards_team_a_win(config: EnvConfig) -> Reward:
+    """Broadcast Team A's terminal result over configured roster slots."""
+    zero_vector = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32)
+    incomplete_reward_vector = zero_vector.at[TEAM_A_START:TEAM_A_END].set(
+        REWARD_FOR_WINNING
+    )
+    complete_reward_vector = incomplete_reward_vector.at[TEAM_B_START:TEAM_B_END].set(
+        REWARD_FOR_LOSING
+    )
+    return Reward(rewards=config.agent_profile.active_mask * complete_reward_vector)
+
+
+def _handle_task_rewards_team_b_win(config: EnvConfig) -> Reward:
+    """Broadcast Team B's terminal result over configured roster slots."""
+    zero_vector = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32)
+    incomplete_reward_vector = zero_vector.at[TEAM_B_START:TEAM_B_END].set(
+        REWARD_FOR_WINNING
+    )
+    complete_reward_vector = incomplete_reward_vector.at[TEAM_A_START:TEAM_A_END].set(
+        REWARD_FOR_LOSING
+    )
+    return Reward(rewards=config.agent_profile.active_mask * complete_reward_vector)
+
+
+def _compute_next_team_deathmatch_scores(
+    current_scores: Array, new_deaths: Array
+) -> Array:
+    """Add one opposing-team point for each authoritative new recipient death."""
+
+    team_a_deaths = jnp.sum(new_deaths[TEAM_A_START:TEAM_A_END], dtype=jnp.int32)
+    team_b_deaths = jnp.sum(new_deaths[TEAM_B_START:TEAM_B_END], dtype=jnp.int32)
+
+    return jnp.asarray(
+        (
+            current_scores[TEAM_A_ID - 1] + team_b_deaths,
+            current_scores[TEAM_B_ID - 1] + team_a_deaths,
+        ),
+        dtype=jnp.int32,
+    )
+
+
+def _not_team_deathmatch(current_scores: Array, new_deaths: Array) -> Array:
+    """Return canonical zero TDM scores for every non-TDM task branch."""
+    del current_scores, new_deaths
+    return jnp.zeros((NUM_TEAMS,), dtype=jnp.int32)
+
+
 # Public ---
 
 
@@ -2973,6 +3190,7 @@ def reset(
     )
 
     initial_state = EnvState(
+        team_deathmatch_scores=jnp.zeros((NUM_TEAMS,), dtype=jnp.int32),
         step_count=jnp.array(0, dtype=jnp.int32),
         agent_positions=active_team_spawn_pad_positions.astype(jnp.float32),
         alive_mask=config.agent_profile.active_mask,
@@ -3217,7 +3435,26 @@ def step(
         ),
     )
 
+    spawn_shield_facts = SpawnShieldTransitionFacts(
+        was_active_at_transition_start_by_agent=current_state.spawn_shield_durations
+        > 0,
+        expired_at_transition_end_by_agent=jnp.logical_and(
+            current_state.spawn_shield_durations == 1, next_alive_mask
+        ),
+    )
+    next_team_deathmatch_scores = cast(
+        Array,
+        jax.lax.cond(
+            config.task_mode == TASK_MODE_TDM,
+            _compute_next_team_deathmatch_scores,
+            _not_team_deathmatch,
+            current_state.team_deathmatch_scores,
+            death_facts.is_newly_dead_by_recipient,
+        ),
+    )
+
     next_state = EnvState(
+        team_deathmatch_scores=next_team_deathmatch_scores,
         step_count=current_state.step_count + 1,
         agent_positions=next_agent_positions,
         alive_mask=next_alive_mask,
@@ -3242,18 +3479,20 @@ def step(
         next_state, config
     )
 
-    rewards = Reward(rewards=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32))
+    task_branches = [
+        _handle_no_task_outcome_and_rewards,
+        _handle_team_deathmatch_outcome_and_rewards,
+        _handle_king_of_the_hill_outcome_and_rewards,
+        _handle_capture_the_flag_outcome_and_rewards,
+    ]
 
-    done_flags = DoneFlags(
-        terminated=jnp.array(False),
-        truncated=jnp.array(next_state.step_count >= config.max_steps),
-    )
-
-    spawn_shield_facts = SpawnShieldTransitionFacts(
-        was_active_at_transition_start_by_agent=current_state.spawn_shield_durations
-        > 0,
-        expired_at_transition_end_by_agent=jnp.logical_and(
-            current_state.spawn_shield_durations == 1, next_alive_mask
+    rewards, done_flags, task_outcomes = cast(
+        tuple[Reward, DoneFlags, Array],
+        jax.lax.switch(
+            config.task_mode,
+            task_branches,
+            next_state,
+            config,
         ),
     )
 
@@ -3269,6 +3508,9 @@ def step(
         physical_facts=physical_facts,
         aura_facts=combat_aura_aggregation_result.aura_facts,
         status_lifecycle_facts=combat_status_aggregation_result.status_lifecycle_facts,
+        team_deathmatch_facts=TeamDeathmatchTransitionFacts(
+            outcome=task_outcomes[TASK_MODE_TDM]
+        ),
     )
 
     info = Info(

@@ -144,6 +144,8 @@ def _scenario(
         _default_positions(team_sizes) if positions is None else positions
     )
     config = EnvConfig(
+        task_mode=0,
+        team_deathmatch_score_threshold=0,
         max_steps=max_steps,
         map_width=20.0,
         map_height=12.0,

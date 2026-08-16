@@ -31,11 +31,29 @@ from marl_battlegrounds.evaluation.models import (
     StatusBrokenByDamageEventV1,
     StatusClearedByNewDeathEventV1,
     StatusRefreshedOrExtendedEventV1,
+    TeamDeathmatchCompletedEventV1,
+    TeamDeathmatchScoreChangedEventV1,
     TransitionFactsV1,
 )
 
 _NULL_RECIPIENT_SORT_INDEX = 10
 _MAGE_BURST_STATUS_CHANNEL = 7
+_TEAM_DEATHMATCH_TASK_MODE = 1
+_OUTCOME_ONGOING = 0
+_OUTCOME_TEAM_A_WIN = 1
+_OUTCOME_TEAM_B_WIN = 2
+_OUTCOME_DRAW = 3
+
+
+@dataclass(frozen=True, slots=True)
+class _TeamDeathmatchAuthorityV1:
+    """Validated task authority joined across one adjacent transition."""
+
+    score_increments: tuple[int, int]
+    outcome: int
+    threshold_reached: bool
+    horizon_reached: bool
+    completion_basis: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -776,6 +794,168 @@ def _append_respawn_candidates(
         )
 
 
+def _derive_team_deathmatch_authority_v1(
+    context: EvaluationEpisodeContextV1,
+    start_frame: EvaluationFrameV1,
+    facts: TransitionFactsV1,
+    successor_frame: EvaluationFrameV1,
+) -> _TeamDeathmatchAuthorityV1:
+    """Join TDM score, death, outcome, topology, and horizon authority."""
+    task_mode = context.resolved_env_config.task_mode
+    start_scores = start_frame.snapshot.team_deathmatch_scores
+    successor_scores = successor_frame.snapshot.team_deathmatch_scores
+    outcome = facts.team_deathmatch_facts.outcome
+
+    if task_mode != _TEAM_DEATHMATCH_TASK_MODE:
+        if start_scores != (0, 0) or successor_scores != (0, 0):
+            raise ValueError("non-Team-Deathmatch snapshots require zero team scores")
+        if outcome != _OUTCOME_ONGOING:
+            raise ValueError("non-Team-Deathmatch facts require an ongoing TDM outcome")
+        if (
+            start_frame.simulator_step_count
+            >= context.resolved_env_config.maximum_episode_steps
+        ):
+            raise ValueError("task-neutral transitions cannot start after completion")
+        return _TeamDeathmatchAuthorityV1(
+            score_increments=(0, 0),
+            outcome=_OUTCOME_ONGOING,
+            threshold_reached=False,
+            horizon_reached=(
+                successor_frame.simulator_step_count
+                >= context.resolved_env_config.maximum_episode_steps
+            ),
+            completion_basis=None,
+        )
+
+    score_threshold = context.resolved_env_config.team_deathmatch_score_threshold
+    if (
+        start_frame.simulator_step_count
+        >= context.resolved_env_config.maximum_episode_steps
+        or any(score >= score_threshold for score in start_scores)
+    ):
+        raise ValueError("Team Deathmatch transitions cannot start after completion")
+
+    expected_score_increments = [0, 0]
+    for is_newly_dead, roster_row in zip(
+        facts.death_facts.is_newly_dead_by_recipient,
+        context.roster,
+        strict=True,
+    ):
+        if not is_newly_dead or not roster_row.configured_active:
+            continue
+        if roster_row.configured_team_id == 1:
+            expected_score_increments[1] += 1
+        elif roster_row.configured_team_id == 2:
+            expected_score_increments[0] += 1
+        else:
+            raise ValueError("configured active TDM roster slots require team 1 or 2")
+
+    actual_score_increments = tuple(
+        successor_score - start_score
+        for start_score, successor_score in zip(
+            start_scores,
+            successor_scores,
+            strict=True,
+        )
+    )
+    if actual_score_increments != tuple(expected_score_increments):
+        raise ValueError(
+            "Team Deathmatch score edges must equal newly dead configured opponents"
+        )
+
+    threshold_reached = any(score >= score_threshold for score in successor_scores)
+    horizon_reached = (
+        successor_frame.simulator_step_count
+        >= context.resolved_env_config.maximum_episode_steps
+    )
+    if threshold_reached:
+        if successor_scores[0] > successor_scores[1]:
+            expected_outcome = _OUTCOME_TEAM_A_WIN
+        elif successor_scores[1] > successor_scores[0]:
+            expected_outcome = _OUTCOME_TEAM_B_WIN
+        else:
+            expected_outcome = _OUTCOME_DRAW
+    elif horizon_reached:
+        expected_outcome = _OUTCOME_DRAW
+    else:
+        expected_outcome = _OUTCOME_ONGOING
+    if outcome != expected_outcome:
+        raise ValueError(
+            "Team Deathmatch outcome fact conflicts with successor score authority"
+        )
+
+    completion_basis: str | None = None
+    if threshold_reached and horizon_reached:
+        completion_basis = "score_threshold_at_horizon"
+    elif threshold_reached:
+        completion_basis = "score_threshold"
+    elif horizon_reached:
+        completion_basis = "horizon"
+    return _TeamDeathmatchAuthorityV1(
+        score_increments=cast(tuple[int, int], actual_score_increments),
+        outcome=outcome,
+        threshold_reached=threshold_reached,
+        horizon_reached=horizon_reached,
+        completion_basis=completion_basis,
+    )
+
+
+def _append_team_deathmatch_candidates(
+    candidates: list[_EventCandidate],
+    context: EvaluationEpisodeContextV1,
+    start_frame: EvaluationFrameV1,
+    facts: TransitionFactsV1,
+    successor_frame: EvaluationFrameV1,
+) -> None:
+    """Emit authoritative score edges followed by the sole completion event."""
+    authority = _derive_team_deathmatch_authority_v1(
+        context,
+        start_frame,
+        facts,
+        successor_frame,
+    )
+    for team_index, score_increment in enumerate(authority.score_increments):
+        if score_increment <= 0:
+            continue
+        _append_candidate(
+            candidates,
+            phase_rank=130,
+            primary_slot_or_team_index=team_index,
+            model_type=TeamDeathmatchScoreChangedEventV1,
+            payload={
+                "team_index": team_index,
+                "team_id": team_index + 1,
+                "score_increment": score_increment,
+                "previous_score": (
+                    start_frame.snapshot.team_deathmatch_scores[team_index]
+                ),
+                "successor_score": (
+                    successor_frame.snapshot.team_deathmatch_scores[team_index]
+                ),
+            },
+        )
+
+    if authority.outcome == _OUTCOME_ONGOING:
+        return
+    outcome_name_by_value = {
+        _OUTCOME_TEAM_A_WIN: "team_a_win",
+        _OUTCOME_TEAM_B_WIN: "team_b_win",
+        _OUTCOME_DRAW: "draw",
+    }
+    if authority.completion_basis is None:
+        raise ValueError("terminal Team Deathmatch outcome requires a completion basis")
+    _append_candidate(
+        candidates,
+        phase_rank=140,
+        primary_slot_or_team_index=0,
+        model_type=TeamDeathmatchCompletedEventV1,
+        payload={
+            "outcome": outcome_name_by_value[authority.outcome],
+            "completion_basis": authority.completion_basis,
+        },
+    )
+
+
 def decode_evaluation_events_v1(
     context: EvaluationEpisodeContextV1,
     start_frame: EvaluationFrameV1,
@@ -794,6 +974,13 @@ def decode_evaluation_events_v1(
     _append_death_candidates(candidates, facts)
     _append_status_candidates(candidates, context, facts)
     _append_respawn_candidates(candidates, context, facts, successor_frame)
+    _append_team_deathmatch_candidates(
+        candidates,
+        context,
+        start_frame,
+        facts,
+        successor_frame,
+    )
 
     candidates.sort(key=lambda candidate: candidate.sort_key)
     transition_id = (

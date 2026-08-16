@@ -254,6 +254,8 @@ def _config(
         dtype=jnp.float32,
     )
     return EnvConfig(
+        task_mode=0,
+        team_deathmatch_score_threshold=0,
         max_steps=max_steps,
         map_width=20.0,
         map_height=12.0,
@@ -391,6 +393,9 @@ def _zero_observation() -> Observation:
 
 def _assert_state_contract(state: EnvState) -> None:
     """Assert the EnvState shape and dtype contract."""
+    assert state.team_deathmatch_scores.shape == (NUM_TEAMS,)
+    assert state.team_deathmatch_scores.dtype == jnp.int32
+
     assert state.step_count.shape == ()
     assert state.step_count.dtype == jnp.int32
 
@@ -730,6 +735,8 @@ def test_env_config_stores_static_episode_settings() -> None:
     obstacles = _sample_obstacles()
     env_config = _config(team_size=5, max_steps=10000, obstacles=obstacles)
 
+    assert env_config.task_mode == 0
+    assert env_config.team_deathmatch_score_threshold == 0
     assert env_config.max_steps == 10000
     assert env_config.map_width == 20.0
     assert env_config.map_height == 12.0
@@ -778,6 +785,7 @@ def test_env_config_stores_static_episode_settings() -> None:
 
 def test_env_state_stores_slot_aligned_arrays() -> None:
     env_state = EnvState(
+        team_deathmatch_scores=jnp.zeros((NUM_TEAMS,), dtype=jnp.int32),
         step_count=jnp.array(1, dtype=jnp.int32),
         agent_positions=jnp.zeros(
             shape=(MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS), dtype=jnp.float32

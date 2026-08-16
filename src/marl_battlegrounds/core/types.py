@@ -52,6 +52,24 @@ MAX_OBJECTIVE_SLOTS = 8
 OBJECTIVE_FEATURES = 12
 CONTEXT_FEATURES = 19
 
+# Fixed numeric task modes keep the traced simulator free of strings and registries.
+NUM_TASKS = 3
+TASK_MODE_NEUTRAL = 0
+TASK_MODE_TDM = 1
+TASK_MODE_KOTH = 2
+TASK_MODE_CTF = 3
+
+# Task outcomes are shared semantics across every battleground mode.
+TASK_MODE_OUTCOME_ONGOING = 0
+TASK_MODE_OUTCOME_TEAM_A_WIN = 1
+TASK_MODE_OUTCOME_TEAM_B_WIN = 2
+TASK_MODE_OUTCOME_DRAW = 3
+
+# Canonical sparse task rewards.
+REWARD_FOR_WINNING = 1
+REWARD_FOR_LOSING = -1
+REWARD_FOR_DRAWING = 0
+
 # Context exposes raw simulator and task facts. Canonical learner-facing
 # normalization belongs to the later versioned observation-preprocessing layer.
 # Mode-specific score and threshold fields are temporary schema reservations;
@@ -62,19 +80,19 @@ CONTEXT_FEATURE_MAP_WIDTH = 2
 CONTEXT_FEATURE_MAP_HEIGHT = 3
 CONTEXT_FEATURE_ALLY_TEAM_SIZE = 4
 CONTEXT_FEATURE_ENEMY_TEAM_SIZE = 5
-CONTEXT_FEATURE_IS_TEAM_DEATHMATCH = 6
-CONTEXT_FEATURE_IS_KING_OF_THE_HILL = 7
-CONTEXT_FEATURE_IS_CAPTURE_THE_FLAG = 8
+CONTEXT_FEATURE_IS_TDM = 6
+CONTEXT_FEATURE_IS_KOTH = 7
+CONTEXT_FEATURE_IS_CTF = 8
 CONTEXT_FEATURE_ACTIVE_OBJECTIVE_COUNT = 9
-CONTEXT_FEATURE_TEAM_DEATHMATCH_ALLY_SCORE = 10
-CONTEXT_FEATURE_TEAM_DEATHMATCH_ENEMY_SCORE = 11
-CONTEXT_FEATURE_KING_OF_THE_HILL_ALLY_SCORE = 12
-CONTEXT_FEATURE_KING_OF_THE_HILL_ENEMY_SCORE = 13
-CONTEXT_FEATURE_CAPTURE_THE_FLAG_ALLY_CAPTURE_COUNT = 14
-CONTEXT_FEATURE_CAPTURE_THE_FLAG_ENEMY_CAPTURE_COUNT = 15
-CONTEXT_FEATURE_TEAM_DEATHMATCH_SCORE_THRESHOLD = 16
-CONTEXT_FEATURE_KING_OF_THE_HILL_SCORE_THRESHOLD = 17
-CONTEXT_FEATURE_CAPTURE_THE_FLAG_CAPTURE_THRESHOLD = 18
+CONTEXT_FEATURE_TDM_ALLY_SCORE = 10
+CONTEXT_FEATURE_TDM_ENEMY_SCORE = 11
+CONTEXT_FEATURE_KOTH_ALLY_SCORE = 12
+CONTEXT_FEATURE_KOTH_ENEMY_SCORE = 13
+CONTEXT_FEATURE_CTF_ALLY_CAPTURE_COUNT = 14
+CONTEXT_FEATURE_CTF_ENEMY_CAPTURE_COUNT = 15
+CONTEXT_FEATURE_TDM_SCORE_THRESHOLD = 16
+CONTEXT_FEATURE_KOTH_SCORE_THRESHOLD = 17
+CONTEXT_FEATURE_CTF_CAPTURE_THRESHOLD = 18
 
 # Self rows and unit-candidate rows use one shared agent-feature schema.
 # self_features exists only for convenient actor conditioning; ally/enemy unit
@@ -211,8 +229,12 @@ class EnvConfig(NamedTuple):
     Spawn-shield duration and movement speed remain episode-static rules.
     Team respawn-wave periods are immutable public clocks whose current
     countdowns live in ``EnvState``.
+    ``task_mode`` selects one fixed JAX task branch, while the Team Deathmatch
+    threshold remains an exact host-validated integer episode rule.
     """
 
+    task_mode: int
+    team_deathmatch_score_threshold: int
     max_steps: int
     map_width: float
     map_height: float
@@ -236,8 +258,11 @@ class EnvState(NamedTuple):
     duplicate active flag. Team respawn-wave countdowns store one public clock
     per team without duplicating eligibility or queue state. The scalar validity
     leaf distinguishes reset from a real neutral action.
+    Team Deathmatch scores use the fixed order ``[Team A, Team B]`` and remain
+    integral so simultaneous deaths can update both totals without attribution.
     """
 
+    team_deathmatch_scores: Array  # (NUM_TEAMS,)
     step_count: Array
     agent_positions: Array
     alive_mask: Array
@@ -349,7 +374,7 @@ class Observation(NamedTuple):
 class Reward(NamedTuple):
     """Slot-aligned scalar rewards emitted by the core simulator."""
 
-    rewards: Array
+    rewards: Array  # (MAX_AGENT_SLOTS,)
 
 
 class DoneFlags(NamedTuple):
@@ -462,6 +487,16 @@ class StatusLifecycleTransitionFacts(NamedTuple):
     cleared_by_new_death_by_recipient_and_status_channel: Array  # (MAX_AGENT_SLOTS, 9)
 
 
+class TeamDeathmatchTransitionFacts(NamedTuple):
+    """Task outcome authored by one Team Deathmatch transition.
+
+    The scalar uses the shared task-outcome encoding: ongoing ``0``, Team A
+    win ``1``, Team B win ``2``, or draw ``3``.
+    """
+
+    outcome: Array
+
+
 class TransitionFacts(NamedTuple):
     """Fixed-shape authoritative facts for one reset or environment transition."""
 
@@ -476,6 +511,7 @@ class TransitionFacts(NamedTuple):
     physical_facts: PhysicalTransitionFacts
     aura_facts: AuraTransitionFacts
     status_lifecycle_facts: StatusLifecycleTransitionFacts
+    team_deathmatch_facts: TeamDeathmatchTransitionFacts
 
 
 class Info(NamedTuple):

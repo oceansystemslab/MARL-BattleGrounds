@@ -91,6 +91,8 @@ from marl_battlegrounds.rendering.scene import (
     StatusSceneV2,
     StatusSourceChannelEvidenceV2,
     StatusSourceEvidenceStateV2,
+    TeamDeathmatchCompletedEventV2,
+    TeamDeathmatchScoreChangedEventV2,
     UltimateTargetModeV2,
     VisualAgentAnchorV2,
     VisualAgentPhaseTrajectoryV2,
@@ -1170,6 +1172,40 @@ def _event_from_spec(
             realized_successor_position=successor[slot],
             agent_anchor=_anchor(agents, successor, slot, "successor"),
         )
+    if event_type == "team_deathmatch_score_changed":
+        team_index = cast(Literal[0, 1], spec["team_index"])
+        team_id = team_index + 1
+        previous_score = cast(int, spec.get("previous_score", 0))
+        score_increment = cast(int, spec.get("score_increment", 1))
+        return TeamDeathmatchScoreChangedEventV2(
+            **common,
+            team_index=team_index,
+            team_id=team_id,
+            score_increment=score_increment,
+            previous_score=previous_score,
+            successor_score=previous_score + score_increment,
+            team_anchor=VisualTeamAnchorV2(
+                phase="successor",
+                team_index=team_index,
+                team_id=team_id,
+            ),
+        )
+    if event_type == "team_deathmatch_completed":
+        return TeamDeathmatchCompletedEventV2(
+            **common,
+            outcome=cast(
+                Literal["team_a_win", "team_b_win", "draw"],
+                spec.get("outcome", "team_a_win"),
+            ),
+            completion_basis=cast(
+                Literal[
+                    "score_threshold",
+                    "horizon",
+                    "score_threshold_at_horizon",
+                ],
+                spec.get("completion_basis", "score_threshold"),
+            ),
+        )
     raise AssertionError(f"unsupported synthetic V2 event: {event_type}.")
 
 
@@ -1954,6 +1990,17 @@ _GRAMMAR_SPECS = tuple(
         {"event_type": "spawn_shield_expired", "agent": 0},
         {"event_type": "respawn_wave_occurred", "team_index": 1},
         {"event_type": "agent_respawned", "agent": 9},
+        {
+            "event_type": "team_deathmatch_score_changed",
+            "team_index": 0,
+            "previous_score": 2,
+            "score_increment": 1,
+        },
+        {
+            "event_type": "team_deathmatch_completed",
+            "outcome": "team_a_win",
+            "completion_basis": "score_threshold_at_horizon",
+        },
     )
 )
 _GRAMMAR_BATCH = _batch(

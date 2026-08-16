@@ -20,6 +20,8 @@ from scripts.dev.visual_debugger.recording import (
 from tests.evaluation_fixtures import (
     CapturedEvaluationTrajectory,
     captured_evaluation_trajectory,
+    captured_team_deathmatch_threshold_trajectory,
+    evaluation_env_config,
 )
 
 from marl_battlegrounds.evaluation.metrics import (
@@ -35,7 +37,6 @@ from marl_battlegrounds.evaluation.models import (
     AggregationKeyV1,
     EvaluationEpisodeContextV1,
     EvaluationFrameV1,
-    EvaluationTransitionV1,
 )
 from marl_battlegrounds.evaluation.replay import (
     ReplayBundleV1,
@@ -133,6 +134,7 @@ def _trajectory(
     expected_horizon: int,
     episode_id: str = "recording-episode",
     action_source_kind: DebuggerActionSourceKindV1 = "manual",
+    maximum_episode_steps: int = 100,
 ) -> CapturedEvaluationTrajectory:
     return captured_evaluation_trajectory(
         transition_count=transition_count,
@@ -142,6 +144,7 @@ def _trajectory(
         aggregation_keys=(
             AggregationKeyV1(name="action_source", value=action_source_kind),
         ),
+        config=evaluation_env_config(max_steps=maximum_episode_steps),
     )
 
 
@@ -176,23 +179,6 @@ def _append_all(
         strict=True,
     ):
         recorder.append(transition, frame)
-
-
-def _with_done(
-    transition: EvaluationTransitionV1,
-    *,
-    terminated: bool = False,
-    truncated: bool = False,
-    reason: str,
-) -> EvaluationTransitionV1:
-    return EvaluationTransitionV1.model_validate(
-        {
-            **transition.model_dump(mode="python"),
-            "terminated": terminated,
-            "truncated": truncated,
-            "owning_task_end_reason": reason,
-        }
-    )
 
 
 def test_recording_specification_is_frozen_content_addressed_and_path_free(
@@ -336,17 +322,12 @@ def test_finish_and_review_saves_exact_zero_or_nonzero_prefix(
 
 
 def test_terminal_and_horizon_endpoints_finalize_complete(tmp_path: Path) -> None:
-    terminal_trajectory = _trajectory(
-        transition_count=1,
-        expected_horizon=3,
+    terminal_trajectory = captured_team_deathmatch_threshold_trajectory(
         episode_id="terminal-recording",
+        aggregation_keys=(AggregationKeyV1(name="action_source", value="manual"),),
     )
     terminal_recorder = _recorder(tmp_path, terminal_trajectory, stem="terminal")
-    terminal = _with_done(
-        terminal_trajectory.transitions[0],
-        terminated=True,
-        reason="objective_complete",
-    )
+    terminal = terminal_trajectory.transitions[0]
     preview = terminal_recorder.preview_status_after_append_v1(terminal)
     assert preview.lifecycle == "sealed"
     assert preview.completion_state == "complete"
@@ -357,13 +338,14 @@ def test_terminal_and_horizon_endpoints_finalize_complete(tmp_path: Path) -> Non
     assert terminal_bundle is not None
     assert terminal_bundle.replay.completion.completion_bases == ("task_terminal",)
     assert terminal_bundle.replay.completion.end_or_failure_reason == (
-        "objective_complete"
+        "team_deathmatch_score_threshold"
     )
 
     horizon_trajectory = _trajectory(
         transition_count=2,
         expected_horizon=2,
         episode_id="horizon-recording",
+        maximum_episode_steps=2,
     )
     horizon_recorder = _recorder(tmp_path, horizon_trajectory, stem="horizon")
     _append_all(horizon_recorder, horizon_trajectory)
@@ -372,30 +354,7 @@ def test_terminal_and_horizon_endpoints_finalize_complete(tmp_path: Path) -> Non
     horizon_bundle = horizon_recorder.bundle
     assert horizon_bundle is not None
     assert horizon_bundle.replay.completion.completion_bases == ("declared_horizon",)
-
-
-def test_early_truncation_is_interrupted_and_preserves_authoritative_reason(
-    tmp_path: Path,
-) -> None:
-    trajectory = _trajectory(transition_count=1, expected_horizon=3)
-    recorder = _recorder(tmp_path, trajectory)
-    truncated = _with_done(
-        trajectory.transitions[0],
-        truncated=True,
-        reason="external_limit",
-    )
-
-    preview = recorder.preview_status_after_append_v1(truncated)
-    assert preview.completion_state == "interrupted"
-    assert preview.completion_reason == "external_limit"
-    recorder.append(truncated, trajectory.frames[1])
-    assert recorder.finalize_and_save("truncation") == "saved"
-    bundle = recorder.bundle
-    assert bundle is not None
-    completion = bundle.replay.completion
-    assert completion.completion_state == "interrupted"
-    assert completion.truncated is True
-    assert completion.end_or_failure_reason == "external_limit"
+    assert horizon_bundle.replay.completion.truncated is True
 
 
 def test_truncation_at_exact_horizon_remains_complete_with_declared_basis(
@@ -405,13 +364,12 @@ def test_truncation_at_exact_horizon_remains_complete_with_declared_basis(
         transition_count=1,
         expected_horizon=1,
         episode_id="horizon-truncation-recording",
+        maximum_episode_steps=1,
     )
     recorder = _recorder(tmp_path, trajectory, stem="horizon-truncation")
-    truncated = _with_done(
-        trajectory.transitions[0],
-        truncated=True,
-        reason="time_limit_at_horizon",
-    )
+    truncated = trajectory.transitions[0]
+    assert truncated.truncated is True
+    assert truncated.owning_task_end_reason is None
 
     preview = recorder.preview_status_after_append_v1(truncated)
     assert preview.completion_state == "complete"
@@ -424,7 +382,7 @@ def test_truncation_at_exact_horizon_remains_complete_with_declared_basis(
     assert completion.completion_state == "complete"
     assert completion.truncated is True
     assert completion.completion_bases == ("declared_horizon",)
-    assert completion.end_or_failure_reason == "time_limit_at_horizon"
+    assert completion.end_or_failure_reason is None
 
 
 @pytest.mark.parametrize(

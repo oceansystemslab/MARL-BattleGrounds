@@ -32,6 +32,7 @@ from marl_battlegrounds.core.types import (
     MOVE_STAY,
     NEUTRAL_CLASS_ID,
     OBSTACLE_FEATURES,
+    TASK_MODE_NEUTRAL,
     EnvConfig,
 )
 from marl_battlegrounds.evaluation.catalog import build_code_revision_v1
@@ -97,6 +98,8 @@ def rejection_lane_scenario() -> DebuggerScenario:
     positions = positions.at[0].set(jnp.asarray((3.0, 6.0), dtype=jnp.float32))
     positions = positions.at[5].set(jnp.asarray((7.0, 6.0), dtype=jnp.float32))
     config = EnvConfig(
+        task_mode=TASK_MODE_NEUTRAL,
+        team_deathmatch_score_threshold=0,
         max_steps=20,
         map_width=12.0,
         map_height=12.0,

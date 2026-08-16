@@ -226,6 +226,8 @@ def _deterministic_config(
         dtype=jnp.float32,
     )
     return EnvConfig(
+        task_mode=0,
+        team_deathmatch_score_threshold=0,
         max_steps=max_steps,
         map_width=map_width,
         map_height=map_height,
@@ -334,6 +336,7 @@ def _state_with_single_active_alive_agent(
     )
     config = config._replace(agent_profile=profile)
     state = EnvState(
+        team_deathmatch_scores=jnp.zeros((NUM_TEAMS,), dtype=jnp.int32),
         step_count=jnp.array(step_count, dtype=jnp.int32),
         agent_positions=_agent_positions_array_with_rows((0, position)),
         alive_mask=active_mask,
@@ -414,6 +417,7 @@ def _state_with_two_agents(
     )
     config = config._replace(agent_profile=profile)
     state = EnvState(
+        team_deathmatch_scores=jnp.zeros((NUM_TEAMS,), dtype=jnp.int32),
         step_count=jnp.array(step_count, dtype=jnp.int32),
         agent_positions=_agent_positions_array_with_rows(
             (0, agent_a_position),
@@ -1480,6 +1484,7 @@ def test_active_alive_overlapping_agents_separate_in_free_space(
     )
 
     state = EnvState(
+        team_deathmatch_scores=jnp.zeros((NUM_TEAMS,), dtype=jnp.int32),
         step_count=jnp.array(0, dtype=jnp.int32),
         agent_positions=_agent_positions_array_with_rows(
             (0, agent_a_position),
@@ -1815,6 +1820,7 @@ def test_expiring_spawn_shield_rejects_charge_but_preserves_movement() -> None:
     blocker_start = jnp.asarray((6.0, 6.0), dtype=jnp.float32)
     target_start = jnp.asarray((7.0, 6.0), dtype=jnp.float32)
     state = EnvState(
+        team_deathmatch_scores=jnp.zeros((NUM_TEAMS,), dtype=jnp.int32),
         step_count=jnp.asarray(0, dtype=jnp.int32),
         agent_positions=_agent_positions_array_with_rows(
             (0, charger_start),

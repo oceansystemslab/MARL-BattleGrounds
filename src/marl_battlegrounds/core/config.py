@@ -58,6 +58,10 @@ from marl_battlegrounds.core.types import (
     OBSTACLE_FEATURES,
     OBSTACLE_TYPE_PILLAR,
     OBSTACLE_TYPE_WALL,
+    TASK_MODE_CTF,
+    TASK_MODE_KOTH,
+    TASK_MODE_NEUTRAL,
+    TASK_MODE_TDM,
     TEAM_A_ID,
     TEAM_B_ID,
     EnvConfig,
@@ -68,6 +72,9 @@ from marl_battlegrounds.core.types import (
 _INT32_MAX = int(np.iinfo(np.int32).max)
 _FLOAT32_MAX = float(np.finfo(np.float32).max)
 _MAX_EXACT_FLOAT32_INTEGER = 2**24
+_MAX_TEAM_DEATHMATCH_SCORE_THRESHOLD = _MAX_EXACT_FLOAT32_INTEGER - (
+    MAX_AGENTS_PER_TEAM - 1
+)
 
 
 def resolve_agent_profile(
@@ -586,6 +593,43 @@ def validate_env_config(config: EnvConfig) -> None:
     if type(config) is not EnvConfig:
         raise TypeError(f"config must be an EnvConfig, not {type(config).__name__}.")
 
+    if type(config.task_mode) is not int:
+        raise TypeError(
+            f"task_mode must be an int, not {type(config.task_mode).__name__}."
+        )
+    if config.task_mode in (TASK_MODE_KOTH, TASK_MODE_CTF):
+        raise ValueError(
+            f"task_mode {config.task_mode} is reserved but is not implemented."
+        )
+    if config.task_mode not in (TASK_MODE_NEUTRAL, TASK_MODE_TDM):
+        raise ValueError(
+            "task_mode must identify an available mode: "
+            f"{TASK_MODE_NEUTRAL} (neutral) or {TASK_MODE_TDM} "
+            f"(Team Deathmatch), not {config.task_mode}."
+        )
+
+    if type(config.team_deathmatch_score_threshold) is not int:
+        raise TypeError(
+            "team_deathmatch_score_threshold must be an int, not "
+            f"{type(config.team_deathmatch_score_threshold).__name__}."
+        )
+    if config.task_mode == TASK_MODE_NEUTRAL:
+        if config.team_deathmatch_score_threshold != 0:
+            raise ValueError(
+                "team_deathmatch_score_threshold must be zero in neutral mode, "
+                f"not {config.team_deathmatch_score_threshold}."
+            )
+    elif not (
+        1
+        <= config.team_deathmatch_score_threshold
+        <= _MAX_TEAM_DEATHMATCH_SCORE_THRESHOLD
+    ):
+        raise ValueError(
+            "team_deathmatch_score_threshold must be in "
+            f"[1, {_MAX_TEAM_DEATHMATCH_SCORE_THRESHOLD}] in Team Deathmatch, "
+            f"not {config.team_deathmatch_score_threshold}."
+        )
+
     if type(config.max_steps) is not int:
         raise TypeError(
             f"max_steps must be an int, not {type(config.max_steps).__name__}."
@@ -687,6 +731,15 @@ def validate_env_config(config: EnvConfig) -> None:
         recovery_delay_catalog=recovery_delay_catalog,
         recovery_regeneration_fraction_catalog=(recovery_regeneration_fraction_catalog),
     )
+    if config.task_mode == TASK_MODE_TDM:
+        host_active_mask = np.asarray(profile.active_mask)
+        team_a_has_active_member = bool(np.any(host_active_mask[:MAX_AGENTS_PER_TEAM]))
+        team_b_has_active_member = bool(np.any(host_active_mask[MAX_AGENTS_PER_TEAM:]))
+        if not team_a_has_active_member or not team_b_has_active_member:
+            raise ValueError(
+                "Team Deathmatch requires at least one configured active member "
+                "on each team."
+            )
     _validate_team_spawn_pad_positions(
         config.team_spawn_pad_positions,
         map_width=config.map_width,
@@ -828,6 +881,12 @@ def validate_env_state(config: EnvConfig, state: EnvState) -> None:
     if type(state) is not EnvState:
         raise TypeError(f"state must be an EnvState, not {type(state).__name__}.")
 
+    team_deathmatch_scores = _require_jax_array(
+        state.team_deathmatch_scores,
+        field_name="team_deathmatch_scores",
+        expected_shape=(NUM_TEAMS,),
+        expected_dtype=jnp.int32,
+    )
     step_count = _require_jax_array(
         state.step_count,
         field_name="step_count",
@@ -936,6 +995,24 @@ def validate_env_state(config: EnvConfig, state: EnvState) -> None:
 
     if int(np.asarray(step_count)) < 0:
         raise ValueError("step_count must be nonnegative.")
+
+    host_team_deathmatch_scores = np.asarray(team_deathmatch_scores)
+    if bool(np.any(host_team_deathmatch_scores < 0)):
+        raise ValueError("team_deathmatch_scores must contain only nonnegative values.")
+    if config.task_mode == TASK_MODE_NEUTRAL:
+        if bool(np.any(host_team_deathmatch_scores != 0)):
+            raise ValueError(
+                "team_deathmatch_scores must be exactly zero in neutral mode."
+            )
+    else:
+        maximum_reachable_score = (
+            config.team_deathmatch_score_threshold + MAX_AGENTS_PER_TEAM - 1
+        )
+        if bool(np.any(host_team_deathmatch_scores > maximum_reachable_score)):
+            raise ValueError(
+                "team_deathmatch_scores must not exceed the reachable terminal "
+                f"bound {maximum_reachable_score}."
+            )
 
     configured_active = np.asarray(config.agent_profile.active_mask)
     host_alive = np.asarray(alive_mask)
@@ -1146,6 +1223,22 @@ def validate_scenario_initial_state(config: EnvConfig, state: EnvState) -> None:
     permissive so externally supplied mask provenance can still be inspected.
     """
     validate_env_state(config, state)
+
+    if config.task_mode == TASK_MODE_TDM:
+        if int(np.asarray(state.step_count)) >= config.max_steps:
+            raise ValueError(
+                "Team Deathmatch scenario step_count must be strictly below max_steps."
+            )
+        if bool(
+            np.any(
+                np.asarray(state.team_deathmatch_scores)
+                >= config.team_deathmatch_score_threshold
+            )
+        ):
+            raise ValueError(
+                "Team Deathmatch scenario scores must be strictly below the score "
+                "threshold."
+            )
 
     if bool(np.asarray(state.has_previous_timestep_joint_action)):
         shielded_slots = np.asarray(state.spawn_shield_durations) > 0

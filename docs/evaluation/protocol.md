@@ -191,6 +191,14 @@ Win/draw/loss is one multinomial endpoint. Apply the same operation to the
 three mutually exclusive indicator components; do not present three unrelated
 binomial experiments.
 
+For Team Deathmatch, only reaching the configured score threshold can author a
+win. If neither team reaches it by the horizon, the task authors a draw even
+when terminal scores differ. A simultaneous double crossing compares complete
+successor scores, with equality drawing. Reports preserve terminal score
+differential as descriptive evidence and preserve the completion basis as
+`score_threshold`, `horizon`, or `score_threshold_at_horizon`; they never infer
+the result from score differential, reward, or done flags.
+
 ### Opportunity rates and shares
 
 For a numerator `n` and genuine-opportunity denominator `d`, average the raw
@@ -313,7 +321,8 @@ but no tactical metric.
 - **Complete:** the task emitted an authoritative terminal outcome or the
   declared evaluation horizon was reached. The completion basis remains
   explicit. Truncation is preserved separately and does not by itself make a
-  task outcome observed.
+  task outcome observed. Team Deathmatch horizon completion is an explicit
+  authoritative draw, not an outcome inferred from truncation.
 - **Partial:** an intentional stop preserved a valid gap-free prefix without
   completing the declared rollout.
 - **Interrupted:** an external interruption preserved a valid gap-free prefix.
@@ -642,7 +651,7 @@ the context, transition-start frame, transition, and successor frame. It
 checks adjacency, identity, lossless core-recipient `-1`/JSON `null`
 normalization with `has_recipient` agreement, padding, catalog joins, and exact
 equality with a newly decoded canonical event tuple. The discriminated V1 event
-union has exactly 21 atomic variants. At rank 90, `AgentDiedEventV1` records the
+union has exactly 23 atomic variants. At rank 90, `AgentDiedEventV1` records the
 newly dead recipient before one `LethalDamageContributionEventV1` per ordered
 authoritative positive source; contributor records are not killer, last-hit,
 or complete historical credit. Aura attachments identify direct
@@ -652,6 +661,11 @@ team_index, -1, wave_subtype, neutral_source)` and realized respawns by `(120,
 configured_team_index, agent_global_slot, respawn_subtype, neutral_source)`.
 Therefore each team's wave precedes its realized agents and team groups cannot
 interleave.
+At rank 130, `TeamDeathmatchScoreChangedEventV1` records one positive
+authoritative score edge with previous and successor values. At rank 140,
+`TeamDeathmatchCompletedEventV1` records the authoritative win/draw/loss and
+completion basis. Live and replay consumers preserve both event payloads
+without reconstructing score or outcome.
 Pydantic serialization/revalidation alone proves structural roundtrip, not
 semantic trajectory validity.
 

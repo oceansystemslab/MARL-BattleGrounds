@@ -56,6 +56,8 @@ def _config(
         dtype=jnp.float32,
     )
     return EnvConfig(
+        task_mode=0,
+        team_deathmatch_score_threshold=0,
         max_steps=max_steps,
         map_width=map_width,
         map_height=map_height,
@@ -217,7 +219,7 @@ def test_step_exposes_successor_timestep_without_normalization_or_clipping() -> 
     )
     observed_timesteps: list[float] = []
     observed_truncations: list[bool] = []
-    for step_index in range(1, 4):
+    for step_index in range(1, 3):
         state, observation, _, done_flags, action_mask, _ = step(
             config,
             state,
@@ -234,9 +236,9 @@ def test_step_exposes_successor_timestep_without_normalization_or_clipping() -> 
         )
         observed_truncations.append(bool(done_flags.truncated))
 
-    assert observed_timesteps == [1.0, 2.0, 3.0]
-    assert observed_truncations == [False, True, True]
-    assert state.step_count == 3
+    assert observed_timesteps == [1.0, 2.0]
+    assert observed_truncations == [False, True]
+    assert state.step_count == 2
 
 
 def test_context_is_stable_under_jit_and_scanned_rollout() -> None:
@@ -273,7 +275,7 @@ def test_context_is_stable_under_jit_and_scanned_rollout() -> None:
     ) -> tuple[tuple[EnvState, ActionMask], tuple[Array, Array]]:
         return jax.lax.scan(_scan_step, (state, action_mask), keys)
 
-    keys = jax.random.split(jax.random.key(8), 6)
+    keys = jax.random.split(jax.random.key(8), 5)
     eager_rollout = _rollout(initial_state, initial_mask, keys)
     compiled_rollout = cast(
         tuple[tuple[EnvState, ActionMask], tuple[Array, Array]],
@@ -282,13 +284,13 @@ def test_context_is_stable_under_jit_and_scanned_rollout() -> None:
     eager_context_history, eager_truncation_history = eager_rollout[1]
     compiled_context_history, compiled_truncation_history = compiled_rollout[1]
 
-    assert eager_context_history.shape == (6, MAX_AGENT_SLOTS, CONTEXT_FEATURES)
+    assert eager_context_history.shape == (5, MAX_AGENT_SLOTS, CONTEXT_FEATURES)
     assert bool(jnp.array_equal(eager_context_history, compiled_context_history))
     assert bool(jnp.array_equal(eager_truncation_history, compiled_truncation_history))
     assert bool(
         jnp.array_equal(
             eager_context_history[:, 0, core_types.CONTEXT_FEATURE_CURRENT_TIMESTEP],
-            jnp.arange(1, 7, dtype=jnp.float32),
+            jnp.arange(1, 6, dtype=jnp.float32),
         )
     )
     assert bool(
@@ -300,6 +302,6 @@ def test_context_is_stable_under_jit_and_scanned_rollout() -> None:
     assert bool(
         jnp.array_equal(
             eager_truncation_history,
-            jnp.asarray((False, False, False, False, True, True)),
+            jnp.asarray((False, False, False, False, True)),
         )
     )

@@ -77,12 +77,15 @@ facts. Evaluation rewards are explicitly `canonical_reward_by_agent` and,
 when task-authored, `canonical_reward_by_team`; shaped or auxiliary rewards do
 not enter these fields.
 
-The discriminated V1 event union has exactly 21 atomic variants. Newly dead
+The discriminated V1 event union has exactly 23 atomic variants. Newly dead
 recipient truth belongs to `AgentDiedEventV1`; each authoritative positive damage
 source on that lethal transition receives a separate
 `LethalDamageContributionEventV1`. Death sorts before its contribution records
 at phase rank 90. A contribution is not a killer, last hit, or complete
-historical elimination attribution.
+historical elimination attribution. `TeamDeathmatchScoreChangedEventV1` records
+each authoritative positive team-score edge at rank 130, and
+`TeamDeathmatchCompletedEventV1` records the authoritative result and completion
+basis at rank 140.
 
 Rank-120 ordering uses family-specific coordinates: team waves sort by `(120,
 team_index, -1, wave_subtype, neutral_source)` and realized agent respawns by
@@ -306,15 +309,16 @@ incomplete and must be reported as such. See the
 
 | ID | Question and sufficient statistic | Role / surface | Direction | Readiness / owner |
 | --- | --- | --- | --- | --- |
-| `marlbg.task.outcome_distribution.v1` | How often did the team win, draw, or lose? Preserve the three mutually exclusive counts and total eligible games. | `primary_confirmatory` / `primary_team` | win higher, loss lower; one multinomial endpoint | `requires_future_task_authority` / task |
-| `marlbg.task.terminal_score_differential.v1` | By how much did the team lead at the terminal frame? Preserve `team_score - opponent_score` per complete episode. | `primary_confirmatory` / `primary_team` | higher | `requires_future_task_authority` / task |
-| `marlbg.task.evaluation_return.v1` | What canonical evaluation reward did the team/agent receive? Preserve the unshaped episode return and reward-mode identity. | `key_secondary` / `advanced` | task-defined | `requires_future_task_authority` / task |
+| `marlbg.task.outcome_distribution.v1` | How often did the team win, draw, or lose? Preserve the three mutually exclusive counts and total eligible games. | `primary_confirmatory` / `primary_team` | win higher, loss lower; one multinomial endpoint | `derivable_now` / host evaluation |
+| `marlbg.task.terminal_score_differential.v1` | By how much did the team lead at the terminal frame? Preserve `team_score - opponent_score` per complete episode. | `primary_confirmatory` / `primary_team` | higher | `derivable_now` / host evaluation |
+| `marlbg.task.evaluation_return.v1` | What canonical evaluation reward did the team/agent receive? Preserve the unshaped episode return and reward-mode identity. | `key_secondary` / `advanced` | task-defined | `derivable_now` / host evaluation |
 | `marlbg.task.episode_length.v1` | How many valid transitions occurred before completion? Preserve transition count and end reason. | `exploratory_descriptive` / `advanced` | descriptive | `derivable_now` / host evaluation |
 | `marlbg.artifact.completion.v1` | Was the rollout complete, partial, interrupted, or failed, and did host processing succeed? Preserve completion basis, validated/processed prefix lengths, processing failure, and end/failure reason. | `diagnostic_qc` / `none` | descriptive | `derivable_now` / host evaluation |
 
-Outcome rows are complete-only. A missing outcome, failed run, truncation, or
+Outcome rows are complete-only. A missing outcome, failed run, or
 right-censored endpoint never silently becomes a draw, loss, zero, or excluded
-row.
+row. Truncation alone does not imply a result; Team Deathmatch is the explicit
+exception where an authoritative horizon completion event supplies a draw.
 
 ### Combat output and exposure
 
@@ -423,19 +427,29 @@ Time dead, death-to-respawn duration, life duration, wave size, countdown
 history, and recovery timing remain available as lifecycle diagnostics when a
 named analysis needs them. They do not enter the primary tactical scorecard.
 
-## Future task-owned metrics
+## Future and pending task-owned metrics
 
-These dispositions are stable, but the rows remain inactive until their task
-milestone defines authoritative state and edge semantics.
+These dispositions are stable, but each row remains inactive until its named
+activation dependency exists. Team Deathmatch score/outcome authority now
+exists; its compact evaluation reducers remain pending evaluation integration.
 
 ### Team Deathmatch
 
 | ID | Required definition | Role / surface | Activation dependency |
 | --- | --- | --- | --- |
-| `candidate.tdm.elimination_differential` | Team enemy deaths minus allied deaths under the task's official scoring eligibility. Omit if mathematically identical to terminal score differential. | `primary_confirmatory` / primary team | M7 score/outcome facts |
-| `candidate.tdm.team_wipe_count` | Task-defined transitions or intervals where every eligible opposing agent is dead; preserve respawn-wave context. | `exploratory_descriptive` / advanced | M7 task semantics |
+| `candidate.tdm.team_wipe_count` | Task-defined transitions or intervals where every eligible opposing agent is dead; preserve respawn-wave context. | `exploratory_descriptive` / advanced | separate research activation with exact interval semantics |
 
 TDM does not create killer ownership, K/D, or generic teamfight victories.
+Elimination differential is omitted because official TDM scoring makes it
+mathematically identical to terminal score differential. Team-wipe count stays
+inactive until a separate research need justifies exact interval semantics.
+
+TDM is threshold-victory: reaching the configured threshold is the only route
+to a win. If neither team reaches it by the horizon, the authoritative outcome
+is a draw regardless of terminal score differential. If both teams cross on
+one simultaneous transition, the complete successor scores decide the result;
+an equal score draws. Terminal score differential remains descriptive evidence,
+not an alternative horizon winner rule.
 
 ### Three-hill King of the Hill
 

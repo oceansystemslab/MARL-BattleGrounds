@@ -4,13 +4,24 @@ from typing import cast
 
 from pydantic import ValidationError
 
-from marl_battlegrounds.evaluation.events import decode_evaluation_events_v1
+from marl_battlegrounds.evaluation.events import (
+    _derive_team_deathmatch_authority_v1,  # pyright: ignore[reportPrivateUsage]
+    decode_evaluation_events_v1,
+)
 from marl_battlegrounds.evaluation.models import (
     EvaluationEpisodeContextV1,
     EvaluationFrameV1,
     EvaluationModel,
     EvaluationTransitionV1,
+    TransitionFactsV1,
 )
+
+# These are frozen V1 wire-column coordinates, duplicated intentionally so
+# replay validation remains host-only and never imports JAX-backed core types.
+_CONTEXT_FEATURE_CURRENT_TIMESTEP_V1 = 0
+_CONTEXT_FEATURE_EPISODE_HORIZON_V1 = 1
+_CONTEXT_FEATURE_IS_TDM_V1 = 6
+_CONTEXT_FEATURE_TDM_SCORE_THRESHOLD_V1 = 16
 
 
 def _is_canonical_neutral(value: object) -> bool:
@@ -306,6 +317,124 @@ def _validate_frame_information_regime(
                 )
 
 
+def _validate_task_context_projection(
+    context: EvaluationEpisodeContextV1,
+    frame: EvaluationFrameV1,
+) -> None:
+    """Reconcile every policy-visible task fact with snapshot/config authority."""
+    config = context.resolved_env_config
+    scores = frame.snapshot.team_deathmatch_scores
+    is_team_deathmatch = config.task_mode == 1
+    for global_slot, (roster_row, context_row) in enumerate(
+        zip(context.roster, frame.base_observation.context_features, strict=True)
+    ):
+        if not roster_row.configured_active:
+            _require_inactive_slot_neutral(
+                context_row,
+                global_slot=global_slot,
+                field_name="base_observation.context_features",
+            )
+            continue
+
+        if context_row[_CONTEXT_FEATURE_CURRENT_TIMESTEP_V1] != float(
+            frame.simulator_step_count
+        ):
+            raise ValueError("policy context timestep must match the snapshot epoch")
+        if context_row[_CONTEXT_FEATURE_EPISODE_HORIZON_V1] != float(
+            config.maximum_episode_steps
+        ):
+            raise ValueError("policy context horizon must match resolved configuration")
+
+        expected_task_slice = (
+            1.0 if is_team_deathmatch else 0.0,
+            0.0,
+            0.0,
+            0.0,
+            float(scores[roster_row.configured_team_id - 1]),
+            float(scores[2 - roster_row.configured_team_id]),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            float(config.team_deathmatch_score_threshold),
+            0.0,
+            0.0,
+        )
+        actual_task_slice = context_row[
+            _CONTEXT_FEATURE_IS_TDM_V1 : _CONTEXT_FEATURE_TDM_SCORE_THRESHOLD_V1 + 3
+        ]
+        if actual_task_slice != expected_task_slice:
+            raise ValueError(
+                "policy context task mode, scores, or threshold conflicts with "
+                "resolved task authority"
+            )
+
+
+def _derive_and_validate_team_deathmatch_authority_v1(
+    context: EvaluationEpisodeContextV1,
+    start_frame: EvaluationFrameV1,
+    facts: TransitionFactsV1,
+    successor_frame: EvaluationFrameV1,
+    canonical_reward_by_agent: tuple[float, ...],
+    terminated: bool,
+    truncated: bool,
+) -> tuple[tuple[float, float] | None, str | None]:
+    """Derive TDM reward and done metadata from joined core authority."""
+    authority = _derive_team_deathmatch_authority_v1(
+        context,
+        start_frame,
+        facts,
+        successor_frame,
+    )
+    if context.resolved_env_config.task_mode != 1:
+        if any(reward != 0.0 for reward in canonical_reward_by_agent):
+            raise ValueError("task-neutral canonical reward must remain zero")
+        if terminated:
+            raise ValueError("task-neutral transitions cannot terminate")
+        if truncated != authority.horizon_reached:
+            raise ValueError(
+                "task-neutral truncation must equal resolved horizon completion"
+            )
+        return None, None
+
+    if terminated != authority.threshold_reached:
+        raise ValueError("Team Deathmatch terminated must equal threshold completion")
+    if truncated != authority.horizon_reached:
+        raise ValueError("Team Deathmatch truncated must equal horizon completion")
+
+    reward_by_team_by_outcome = {
+        0: (0.0, 0.0),
+        1: (1.0, -1.0),
+        2: (-1.0, 1.0),
+        3: (0.0, 0.0),
+    }
+    canonical_reward_by_team = reward_by_team_by_outcome[authority.outcome]
+    expected_reward_by_agent = tuple(
+        (
+            canonical_reward_by_team[roster_row.configured_team_id - 1]
+            if roster_row.configured_active
+            else 0.0
+        )
+        for roster_row in context.roster
+    )
+    if canonical_reward_by_agent != expected_reward_by_agent:
+        raise ValueError(
+            "per-agent canonical TDM reward must match configured team membership"
+        )
+
+    end_reason_by_basis = {
+        "score_threshold": "team_deathmatch_score_threshold",
+        "horizon": "team_deathmatch_horizon",
+        "score_threshold_at_horizon": ("team_deathmatch_score_threshold_at_horizon"),
+    }
+    owning_task_end_reason = (
+        None
+        if authority.completion_basis is None
+        else end_reason_by_basis[authority.completion_basis]
+    )
+    return canonical_reward_by_team, owning_task_end_reason
+
+
 def _validate_context_joined_frame(
     context: EvaluationEpisodeContextV1,
     frame: EvaluationFrameV1,
@@ -324,8 +453,16 @@ def _validate_context_joined_frame(
     expected_frame_id = f"{episode_id}:frame:{frame.frame_index}"
     if frame.frame_id != expected_frame_id:
         raise ValueError(f"{record_name} ID is not canonical")
+    if (
+        context.resolved_env_config.task_mode != 1
+        and frame.snapshot.team_deathmatch_scores != (0, 0)
+    ):
+        raise ValueError(
+            f"{record_name} must keep Team Deathmatch scores zero outside TDM"
+        )
     _validate_frame_information_regime(context, frame)
     _validate_inactive_frame_padding(context, frame)
+    _validate_task_context_projection(context, frame)
 
 
 def validate_initial_evaluation_frame_v1(
@@ -335,8 +472,10 @@ def validate_initial_evaluation_frame_v1(
     """Validate the context-joined artifact frame at capture index zero.
 
     The artifact index and ID are canonicalized independently of the simulator
-    epoch. Scenario and resumed-state capture may therefore begin at any
-    nonnegative ``simulator_step_count`` accepted by ``EvaluationFrameV1``.
+    epoch. Scenario and resumed-state capture may begin at a nonnegative
+    ``simulator_step_count`` accepted by ``EvaluationFrameV1``. Team Deathmatch
+    additionally joins the declared artifact-transition count to the remaining
+    simulator horizon.
     """
     validate_declared_model_tree(
         context,
@@ -353,6 +492,21 @@ def validate_initial_evaluation_frame_v1(
     expected_frame_id = f"{context.identity.episode_id}:frame:0"
     if initial_frame.frame_id != expected_frame_id:
         raise ValueError("initial frame ID must identify artifact frame zero")
+    config = context.resolved_env_config
+    if config.task_mode == 1:
+        if initial_frame.simulator_step_count >= config.maximum_episode_steps or any(
+            score >= config.team_deathmatch_score_threshold
+            for score in initial_frame.snapshot.team_deathmatch_scores
+        ):
+            raise ValueError("initial Team Deathmatch frame must be preterminal")
+        if (
+            initial_frame.simulator_step_count + context.expected_horizon
+            != config.maximum_episode_steps
+        ):
+            raise ValueError(
+                "Team Deathmatch expected_horizon must equal the remaining "
+                "simulator transitions"
+            )
 
 
 def validate_evaluation_transition_unit_v1(
@@ -364,9 +518,9 @@ def validate_evaluation_transition_unit_v1(
     """Validate one context/start/transition/successor semantic unit.
 
     Validation reconstructs identifiers from trusted fields, checks both
-    simulator and artifact adjacency, revalidates each strict record, and
-    re-decodes the complete canonical event sequence. It deliberately does not
-    reconstruct simulator rules or infer optional team rewards.
+    simulator and artifact adjacency, revalidates each strict record, re-decodes
+    the complete canonical event sequence, and reconciles task-owned score,
+    result, reward, completion flags, and end-reason authority.
     """
     validate_declared_model_tree(
         context,
@@ -420,6 +574,26 @@ def validate_evaluation_transition_unit_v1(
         raise ValueError("successor simulator step must be start step plus one")
 
     _validate_inactive_fact_padding(context, transition)
+
+    expected_team_reward, expected_end_reason = (
+        _derive_and_validate_team_deathmatch_authority_v1(
+            context,
+            start_frame,
+            transition.facts,
+            successor_frame,
+            transition.canonical_reward_by_agent,
+            transition.terminated,
+            transition.truncated,
+        )
+    )
+    if transition.canonical_reward_by_team != expected_team_reward:
+        raise ValueError(
+            "canonical_reward_by_team must equal task-derived reward authority"
+        )
+    if transition.owning_task_end_reason != expected_end_reason:
+        raise ValueError(
+            "owning_task_end_reason must equal task-derived completion authority"
+        )
 
     expected_events = decode_evaluation_events_v1(
         context,

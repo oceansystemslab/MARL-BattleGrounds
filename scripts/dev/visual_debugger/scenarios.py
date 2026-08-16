@@ -128,6 +128,8 @@ def _scenario(
         )
 
     config = EnvConfig(
+        task_mode=0,
+        team_deathmatch_score_threshold=0,
         max_steps=_MAX_STEPS,
         map_width=map_width,
         map_height=map_height,

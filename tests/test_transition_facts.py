@@ -43,6 +43,7 @@ from marl_battlegrounds.core.types import (
     STUN_CHANNEL_HUNTER_TRAP,
     STUN_CHANNEL_ROGUE_POISON,
     STUN_CHANNEL_WARRIOR_CHARGE,
+    TASK_MODE_OUTCOME_ONGOING,
     WARRIOR_CLASS_ID,
     Action,
     ActionAcceptanceFacts,
@@ -61,6 +62,7 @@ from marl_battlegrounds.core.types import (
     Reward,
     SpawnShieldTransitionFacts,
     StatusLifecycleTransitionFacts,
+    TeamDeathmatchTransitionFacts,
     TransitionFacts,
 )
 
@@ -70,8 +72,8 @@ _TEAM_B_INDEX = 1
 _TARGET_NONE = 0
 _SELF_TARGET = 1
 _FIRST_ENEMY_TARGET = 1 + MAX_AGENTS_PER_TEAM
-_TRANSITION_FACT_LEAF_COUNT = 46
-_TRANSITION_FACT_RAW_BYTES = 1_657
+_TRANSITION_FACT_LEAF_COUNT = 47
+_TRANSITION_FACT_RAW_BYTES = 1_661
 
 _STATUS_CHANNEL_INDEX_BY_NAME = {
     "warrior-charge-slow": SLOW_CHANNEL_WARRIOR_CHARGE,
@@ -146,6 +148,8 @@ def _scenario(
         _default_positions(team_sizes) if positions is None else positions
     )
     config = EnvConfig(
+        task_mode=0,
+        team_deathmatch_score_threshold=0,
         max_steps=100,
         map_width=20.0,
         map_height=12.0,
@@ -432,6 +436,8 @@ def _assert_batched_cp1_fact_shapes(
             _NUM_STATUS_LIFECYCLE_CHANNELS,
         )
         assert cause_matrix.dtype == jnp.bool_
+    assert facts.team_deathmatch_facts.outcome.shape == (batch_size,)
+    assert facts.team_deathmatch_facts.outcome.dtype == jnp.int32
 
 
 def _assert_empty_combat_effect_facts(
@@ -628,6 +634,7 @@ def test_reset_scenario_and_real_step_share_the_exact_static_fact_schema() -> No
         "broken_by_damage_by_recipient_and_status_channel",
         "cleared_by_new_death_by_recipient_and_status_channel",
     )
+    assert TeamDeathmatchTransitionFacts._fields == ("outcome",)
     assert TransitionFacts._fields == (
         "has_transition",
         "transition_start_step_count",
@@ -640,6 +647,7 @@ def test_reset_scenario_and_real_step_share_the_exact_static_fact_schema() -> No
         "physical_facts",
         "aura_facts",
         "status_lifecycle_facts",
+        "team_deathmatch_facts",
     )
     assert Info._fields == ("transition_facts",)
     assert tuple(_STATUS_CHANNEL_INDEX_BY_NAME.values()) == tuple(
@@ -675,6 +683,9 @@ def test_reset_scenario_and_real_step_share_the_exact_static_fact_schema() -> No
     _assert_empty_physical_facts(reset_facts.physical_facts)
     _assert_empty_aura_facts(reset_facts.aura_facts)
     _assert_empty_status_lifecycle_facts(reset_facts.status_lifecycle_facts)
+    assert reset_facts.team_deathmatch_facts.outcome.shape == ()
+    assert reset_facts.team_deathmatch_facts.outcome.dtype == jnp.int32
+    assert int(reset_facts.team_deathmatch_facts.outcome) == TASK_MODE_OUTCOME_ONGOING
 
     leaves = jax.tree_util.tree_leaves(reset_facts)
     assert len(leaves) == _TRANSITION_FACT_LEAF_COUNT
@@ -720,6 +731,7 @@ def test_reset_scenario_and_real_step_share_the_exact_static_fact_schema() -> No
     _assert_empty_physical_facts(neutral_facts.physical_facts)
     _assert_empty_aura_facts(neutral_facts.aura_facts)
     _assert_empty_status_lifecycle_facts(neutral_facts.status_lifecycle_facts)
+    assert int(neutral_facts.team_deathmatch_facts.outcome) == TASK_MODE_OUTCOME_ONGOING
 
 
 @pytest.mark.parametrize(

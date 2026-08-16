@@ -132,7 +132,7 @@ def test_canonical_event_vocabulary_draws_every_event_row_exactly_once() -> None
         assert event_gids == tuple(
             f"scene:v2:event:{event.event_id}" for event in fixture.event_batch.events
         )
-        assert len(event_gids) == len(fixture.event_batch.events) == 23
+        assert len(event_gids) == len(fixture.event_batch.events) == 25
         labels = tuple(
             artist.get_text()
             for artist in _texts(result)

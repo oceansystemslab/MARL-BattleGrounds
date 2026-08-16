@@ -22,6 +22,8 @@ const RESEARCHER_EVENT_TYPES_V2 = new Set([
   "spawn_shield_expired",
   "respawn_wave_occurred",
   "agent_respawned",
+  "team_deathmatch_score_changed",
+  "team_deathmatch_completed",
 ]);
 
 const POV_CUE_TYPES_V1 = new Set([
@@ -1110,6 +1112,15 @@ const RESEARCHER_EVENT_SUFFIX_KEYS_V2 = Object.freeze({
     "realized_successor_position",
     "team_id",
   ]),
+  team_deathmatch_score_changed: Object.freeze([
+    "previous_score",
+    "score_increment",
+    "successor_score",
+    "team_anchor",
+    "team_id",
+    "team_index",
+  ]),
+  team_deathmatch_completed: Object.freeze(["completion_basis", "outcome"]),
 });
 const RESEARCHER_EVENT_PHASE_RANK_V2 = Object.freeze({
   action_rejected: 10,
@@ -1133,6 +1144,8 @@ const RESEARCHER_EVENT_PHASE_RANK_V2 = Object.freeze({
   spawn_shield_expired: 110,
   respawn_wave_occurred: 120,
   agent_respawned: 120,
+  team_deathmatch_score_changed: 130,
+  team_deathmatch_completed: 140,
 });
 
 /**
@@ -3317,6 +3330,57 @@ function normalizeResearcherEvent(
         !researcherPointsEqual(anchor.position, position)
       ) {
         throw new TypeError("Researcher respawn event identity is invalid.");
+      }
+      break;
+    }
+    case "team_deathmatch_score_changed": {
+      const teamIndex = requireInteger(
+        normalized.team_index,
+        "Researcher Team Deathmatch scoring-team index",
+      );
+      const teamId = requireInteger(
+        normalized.team_id,
+        "Researcher Team Deathmatch scoring-team ID",
+        1,
+      );
+      const scoreIncrement = requireResearcherSignedInt32(
+        normalized.score_increment,
+        "Researcher Team Deathmatch score increment",
+      );
+      const previousScore = requireResearcherSignedInt32(
+        normalized.previous_score,
+        "Researcher Team Deathmatch previous score",
+      );
+      const successorScore = requireResearcherSignedInt32(
+        normalized.successor_score,
+        "Researcher Team Deathmatch successor score",
+      );
+      const teamAnchor = requireRecord(
+        normalized.team_anchor,
+        "Researcher Team Deathmatch team anchor is invalid.",
+      );
+      if (
+        teamIndex > 1 ||
+        teamId !== teamIndex + 1 ||
+        scoreIncrement <= 0 ||
+        previousScore < 0 ||
+        successorScore !== previousScore + scoreIncrement ||
+        teamAnchor.phase !== "successor" ||
+        teamAnchor.team_index !== teamIndex ||
+        teamAnchor.team_id !== teamId
+      ) {
+        throw new TypeError("Researcher Team Deathmatch score event is incoherent.");
+      }
+      break;
+    }
+    case "team_deathmatch_completed": {
+      if (
+        !["team_a_win", "team_b_win", "draw"].includes(normalized.outcome) ||
+        !["score_threshold", "horizon", "score_threshold_at_horizon"].includes(
+          normalized.completion_basis,
+        )
+      ) {
+        throw new TypeError("Researcher Team Deathmatch completion event is invalid.");
       }
       break;
     }
