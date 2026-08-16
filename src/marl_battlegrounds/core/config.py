@@ -1,6 +1,7 @@
 """Host-facing configuration, fixed-slot profile, and state validation."""
 
 import math
+from typing import Final
 
 import jax.numpy as jnp
 import numpy as np
@@ -75,6 +76,11 @@ _MAX_EXACT_FLOAT32_INTEGER = 2**24
 _MAX_TEAM_DEATHMATCH_SCORE_THRESHOLD = _MAX_EXACT_FLOAT32_INTEGER - (
     MAX_AGENTS_PER_TEAM - 1
 )
+
+# Product entry points share one movement calibration. Generic ``EnvConfig``
+# construction deliberately retains the full validated ``(0.0, 1.0]`` domain
+# for explicit experiments and contract tests.
+CANONICAL_PRODUCT_MOVEMENT_SCALE: Final[float] = 1.0
 
 
 def resolve_agent_profile(
@@ -747,6 +753,23 @@ def validate_env_config(config: EnvConfig) -> None:
         obstacles=obstacles,
         profile=profile,
     )
+
+
+def validate_product_env_config(config: EnvConfig) -> None:
+    """Validate a complete product configuration and its movement authority.
+
+    Explicit experiments may continue to use :func:`validate_env_config` with
+    any movement scale in its generic domain. Product factories and sessions
+    must call this stricter boundary so presentation or construction code
+    cannot silently change policy-relevant movement dynamics.
+    """
+    validate_env_config(config)
+    if config.ordinary_movement_distance_scale != CANONICAL_PRODUCT_MOVEMENT_SCALE:
+        raise ValueError(
+            "product ordinary_movement_distance_scale must equal "
+            f"{CANONICAL_PRODUCT_MOVEMENT_SCALE}, not "
+            f"{config.ordinary_movement_distance_scale}."
+        )
 
 
 def _validate_state_positions(
