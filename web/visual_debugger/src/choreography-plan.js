@@ -1561,7 +1561,9 @@ export function buildChoreographyPlan(frame, surface = null) {
       eventType === "own_cooldown_changed" ||
       eventType === "own_lifecycle_changed" ||
       eventType === "visible_body_observation_changed" ||
-      eventType === "episode_ended"
+      eventType === "episode_ended" ||
+      eventType === "team_deathmatch_score_changed" ||
+      eventType === "team_deathmatch_completed"
     ) {
       planned.push(
         Object.freeze({

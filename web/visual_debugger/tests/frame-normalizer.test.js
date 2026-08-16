@@ -41,6 +41,8 @@ const phaseRankByEventType = Object.freeze({
   spawn_shield_expired: 110,
   respawn_wave_occurred: 120,
   agent_respawned: 120,
+  team_deathmatch_score_changed: 130,
+  team_deathmatch_completed: 140,
 });
 
 /** @param {any} event */
@@ -347,6 +349,20 @@ function v2Events() {
       team_id: 1,
       realized_successor_position: [2, 1],
       agent_anchor: successorZero,
+    },
+    {
+      event_type: "team_deathmatch_score_changed",
+      team_index: 0,
+      team_id: 1,
+      score_increment: 2,
+      previous_score: 3,
+      successor_score: 5,
+      team_anchor: { phase: "successor", team_index: 0, team_id: 1 },
+    },
+    {
+      event_type: "team_deathmatch_completed",
+      outcome: "team_a_win",
+      completion_basis: "score_threshold_at_horizon",
     },
   ];
   return payloads.map((payload, ordinal) => ({
@@ -1312,6 +1328,20 @@ test("Python-exported researcher fixtures reject event and scene semantic drift"
       },
     ],
     [
+      "Team Deathmatch score arithmetic drift",
+      eventFrame,
+      /** @param {any} frame */ (frame) => {
+        event(frame, "team_deathmatch_score_changed").successor_score += 1;
+      },
+    ],
+    [
+      "Team Deathmatch completion-basis drift",
+      eventFrame,
+      /** @param {any} frame */ (frame) => {
+        event(frame, "team_deathmatch_completed").completion_basis = "score_decision";
+      },
+    ],
+    [
       "status presentation order",
       crowdedFrame,
       /** @param {any} frame */ (frame) => {
@@ -1601,7 +1631,7 @@ test("choreography gives every canonical V2 event one explicit disposition", asy
   });
   assert.ok(plan);
   assert.equal(plan.transitionId, frame.incoming_transition_id);
-  assert.equal(plan.events.length, 23);
+  assert.equal(plan.events.length, 25);
   assert.deepEqual(
     plan.events.map(({ eventId }) => eventId),
     frame.event_batch.events.map(eventId),
@@ -1628,8 +1658,14 @@ test("choreography gives every canonical V2 event one explicit disposition", asy
     )?.kind,
     "movement_displacement",
   );
-
   const byType = new Map(plan.events.map((event) => [event.eventType, event]));
+  for (const eventType of [
+    "team_deathmatch_score_changed",
+    "team_deathmatch_completed",
+  ]) {
+    assert.equal(byType.get(eventType)?.kind, "feed_only", eventType);
+    assert.equal(byType.get(eventType)?.spatial, false, eventType);
+  }
   for (const eventType of [
     "combat_countdown_reset",
     "health_regenerated",

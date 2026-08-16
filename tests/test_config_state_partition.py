@@ -52,6 +52,7 @@ from marl_battlegrounds.core.types import (
 )
 
 _FINAL_STATE_FIELDS = (
+    "team_deathmatch_scores",
     "step_count",
     "agent_positions",
     "alive_mask",
@@ -115,6 +116,8 @@ def _config(
         dtype=jnp.float32,
     ).reshape(2, MAX_AGENTS_PER_TEAM, ENVIRONMENT_DIMENSIONS)
     return EnvConfig(
+        task_mode=0,
+        team_deathmatch_score_threshold=0,
         max_steps=1000,
         map_width=20.0,
         map_height=12.0,
@@ -170,6 +173,13 @@ def test_reset_initializes_dynamic_state_from_resolved_profile() -> None:
         0.0,
     )
     assert bool(jnp.array_equal(state.agent_positions, expected_reset_positions))
+    assert state.team_deathmatch_scores.dtype == jnp.int32
+    assert bool(
+        jnp.array_equal(
+            state.team_deathmatch_scores,
+            jnp.zeros((NUM_TEAMS,), dtype=jnp.int32),
+        )
+    )
     assert state.alive_mask.dtype == jnp.bool_
     assert bool(jnp.array_equal(state.alive_mask, profile.active_mask))
     assert bool(jnp.array_equal(state.current_health, profile.max_health))

@@ -103,6 +103,8 @@ def _target_scenario(actor_class_id: int = MAGE_CLASS_ID) -> tuple[EnvConfig, En
         jnp.asarray((6.0, 2.0), dtype=jnp.float32)
     )
     config = EnvConfig(
+        task_mode=0,
+        team_deathmatch_score_threshold=0,
         max_steps=100,
         map_width=20.0,
         map_height=12.0,

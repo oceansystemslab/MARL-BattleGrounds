@@ -61,6 +61,8 @@ from marl_battlegrounds.core.types import (
     OBSTACLE_TYPE_WALL,
     PRIEST_CLASS_ID,
     ROGUE_CLASS_ID,
+    TASK_MODE_NEUTRAL,
+    TASK_MODE_TDM,
     WARRIOR_CLASS_ID,
     Action,
     EnvConfig,
@@ -76,6 +78,7 @@ _CANONICAL_TEAM_CLASSES = (
 )
 
 _STATE_ARRAY_FIELDS = (
+    ("team_deathmatch_scores", (NUM_TEAMS,), jnp.int32),
     ("step_count", (), jnp.int32),
     (
         "agent_positions",
@@ -159,6 +162,8 @@ def _wall(
 def _valid_config(
     *,
     team_sizes: tuple[int, int] = (5, 5),
+    task_mode: int = TASK_MODE_NEUTRAL,
+    team_deathmatch_score_threshold: int = 0,
     obstacles: Array | None = None,
 ) -> EnvConfig:
     """Build a deterministic catalog-valid config for state validation."""
@@ -186,6 +191,8 @@ def _valid_config(
         dtype=jnp.float32,
     ).reshape(2, MAX_AGENTS_PER_TEAM, ENVIRONMENT_DIMENSIONS)
     return EnvConfig(
+        task_mode=task_mode,
+        team_deathmatch_score_threshold=team_deathmatch_score_threshold,
         max_steps=100,
         map_width=30.0,
         map_height=20.0,
@@ -350,6 +357,115 @@ def test_step_count_must_be_nonnegative() -> None:
         validate_env_state(
             config,
             state._replace(step_count=jnp.asarray(-1, dtype=jnp.int32)),
+        )
+
+
+def test_neutral_mode_requires_canonical_zero_team_deathmatch_scores() -> None:
+    config, state = _valid_state()
+
+    with pytest.raises(ValueError, match="exactly zero in neutral mode"):
+        validate_env_state(
+            config,
+            state._replace(team_deathmatch_scores=jnp.asarray((1, 0), dtype=jnp.int32)),
+        )
+
+
+def test_team_deathmatch_scores_must_be_nonnegative() -> None:
+    config = _valid_config(
+        task_mode=TASK_MODE_TDM,
+        team_deathmatch_score_threshold=7,
+    )
+    state, _, _, _ = reset(config, jax.random.key(0))
+
+    with pytest.raises(ValueError, match="only nonnegative"):
+        validate_env_state(
+            config,
+            state._replace(
+                team_deathmatch_scores=jnp.asarray((-1, 0), dtype=jnp.int32)
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "scores",
+    ((0, 0), (6, 2), (11, 11)),
+    ids=("reset", "preterminal", "maximum-terminal-overshoot"),
+)
+def test_team_deathmatch_runtime_scores_accept_reachable_values(
+    scores: tuple[int, int],
+) -> None:
+    config = _valid_config(
+        task_mode=TASK_MODE_TDM,
+        team_deathmatch_score_threshold=7,
+    )
+    state, _, _, _ = reset(config, jax.random.key(0))
+    state = state._replace(team_deathmatch_scores=jnp.asarray(scores, dtype=jnp.int32))
+
+    assert validate_env_state(config, state) is None
+
+
+@pytest.mark.parametrize("scores", ((12, 0), (0, 12)))
+def test_team_deathmatch_runtime_scores_reject_unreachable_overshoot(
+    scores: tuple[int, int],
+) -> None:
+    config = _valid_config(
+        task_mode=TASK_MODE_TDM,
+        team_deathmatch_score_threshold=7,
+    )
+    state, _, _, _ = reset(config, jax.random.key(0))
+
+    with pytest.raises(ValueError, match="reachable terminal bound 11"):
+        validate_env_state(
+            config,
+            state._replace(team_deathmatch_scores=jnp.asarray(scores, dtype=jnp.int32)),
+        )
+
+
+def test_team_deathmatch_scenario_scores_must_be_preterminal() -> None:
+    config = _valid_config(
+        task_mode=TASK_MODE_TDM,
+        team_deathmatch_score_threshold=7,
+    )
+    state, _, _, _ = reset(config, jax.random.key(0))
+
+    preterminal_state = state._replace(
+        team_deathmatch_scores=jnp.asarray((6, 6), dtype=jnp.int32)
+    )
+    assert validate_scenario_initial_state(config, preterminal_state) is None
+
+    for terminal_scores in ((7, 0), (0, 7), (7, 7), (11, 2)):
+        with pytest.raises(ValueError, match="strictly below"):
+            validate_scenario_initial_state(
+                config,
+                state._replace(
+                    team_deathmatch_scores=jnp.asarray(
+                        terminal_scores,
+                        dtype=jnp.int32,
+                    )
+                ),
+            )
+
+
+def test_team_deathmatch_scenario_step_count_must_precede_horizon() -> None:
+    config = _valid_config(
+        task_mode=TASK_MODE_TDM,
+        team_deathmatch_score_threshold=7,
+    )
+    state, _, _, _ = reset(config, jax.random.key(0))
+
+    assert (
+        validate_scenario_initial_state(
+            config,
+            state._replace(
+                step_count=jnp.asarray(config.max_steps - 1, dtype=jnp.int32)
+            ),
+        )
+        is None
+    )
+    with pytest.raises(ValueError, match="step_count must be strictly below"):
+        validate_scenario_initial_state(
+            config,
+            state._replace(step_count=jnp.asarray(config.max_steps, dtype=jnp.int32)),
         )
 
 

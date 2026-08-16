@@ -46,6 +46,7 @@ from marl_battlegrounds.core.types import (
     NUM_SLOW_CHANNELS,
     NUM_STUN_CHANNELS,
     NUM_TARGET_ACTIONS,
+    NUM_TEAMS,
     NUM_ULTIMATE_ACTIONS,
     OBSTACLE_FEATURE_ACTIVE,
     OBSTACLE_FEATURE_HEIGHT,
@@ -266,6 +267,8 @@ def _deterministic_config(
         dtype=jnp.float32,
     )
     return EnvConfig(
+        task_mode=0,
+        team_deathmatch_score_threshold=0,
         max_steps=max_steps,
         map_width=map_width,
         map_height=map_height,
@@ -474,6 +477,7 @@ def _state_two_versus_two_game(
     config = config._replace(agent_profile=profile)
 
     state = EnvState(
+        team_deathmatch_scores=jnp.zeros((NUM_TEAMS,), dtype=jnp.int32),
         step_count=jnp.array(step_count, dtype=jnp.int32),
         agent_positions=_agent_positions_array_with_rows(
             (agent_a_index, agent_a_position),

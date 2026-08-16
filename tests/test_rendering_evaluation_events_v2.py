@@ -45,6 +45,8 @@ from marl_battlegrounds.evaluation.models import (
     StatusBrokenByDamageEventV1,
     StatusClearedByNewDeathEventV1,
     StatusRefreshedOrExtendedEventV1,
+    TeamDeathmatchCompletedEventV1,
+    TeamDeathmatchScoreChangedEventV1,
 )
 from marl_battlegrounds.rendering.evaluation_adapter import (
     _project_visual_event_v2,  # pyright: ignore[reportPrivateUsage]
@@ -58,6 +60,8 @@ from marl_battlegrounds.rendering.scene import (
     EVENT_V2_SCHEMA_VERSION,
     ActionRejectedEventV2,
     OrdinaryMovementPhaseDisplacementEventV2,
+    TeamDeathmatchCompletedEventV2,
+    TeamDeathmatchScoreChangedEventV2,
     VisualAgentAnchorV2,
     VisualAgentPhaseTrajectoryV2,
     VisualEventBatchV2,
@@ -86,6 +90,8 @@ _ALL_EVENT_TYPES = (
     "spawn_shield_expired",
     "respawn_wave_occurred",
     "agent_respawned",
+    "team_deathmatch_score_changed",
+    "team_deathmatch_completed",
 )
 
 
@@ -294,6 +300,23 @@ def _all_canonical_events() -> tuple[EvaluationEventV1, ...]:
                 "realized_successor_position": (6.0, 1.0),
             },
         ),
+        (
+            TeamDeathmatchScoreChangedEventV1,
+            {
+                "team_index": 0,
+                "team_id": 1,
+                "score_increment": 2,
+                "previous_score": 3,
+                "successor_score": 5,
+            },
+        ),
+        (
+            TeamDeathmatchCompletedEventV1,
+            {
+                "outcome": "team_a_win",
+                "completion_basis": "score_threshold_at_horizon",
+            },
+        ),
     )
     return tuple(
         _canonical_event(event_type, ordinal, **payload)
@@ -371,14 +394,14 @@ def _all_event_batch() -> tuple[VisualEventBatchV2, tuple[EvaluationEventV1, ...
     )
 
 
-def test_all_21_canonical_events_project_independently_with_direct_payloads() -> None:
+def test_all_23_canonical_events_project_independently_with_direct_payloads() -> None:
     batch, source_events = _all_event_batch()
 
     assert tuple(event.event_type for event in batch.events) == _ALL_EVENT_TYPES
     assert tuple(event.event_id for event in batch.events) == tuple(
         event.event_id for event in source_events
     )
-    assert len({type(event) for event in batch.events}) == 21
+    assert len({type(event) for event in batch.events}) == 23
     for source, projected in zip(source_events, batch.events, strict=True):
         for field_name in type(source).model_fields:
             if field_name in {"schema_id", "schema_version"}:
@@ -390,6 +413,28 @@ def test_all_21_canonical_events_project_independently_with_direct_payloads() ->
     assert inactive_rejection.actor_public_agent_id == "agent-slot-3"
     assert not inactive_rejection.actor_configured_active
     assert inactive_rejection.actor_anchor is None
+
+    score_change = cast(TeamDeathmatchScoreChangedEventV2, batch.events[-2])
+    assert score_change.team_anchor.phase == "successor"
+    assert score_change.team_anchor.team_index == score_change.team_index
+    completion = cast(TeamDeathmatchCompletedEventV2, batch.events[-1])
+    assert completion.outcome == "team_a_win"
+    assert completion.completion_basis == "score_threshold_at_horizon"
+
+
+def test_team_deathmatch_visual_events_reject_semantic_payload_drift() -> None:
+    batch, _ = _all_event_batch()
+    score_change = cast(TeamDeathmatchScoreChangedEventV2, batch.events[-2])
+    completion = cast(TeamDeathmatchCompletedEventV2, batch.events[-1])
+
+    with pytest.raises(ValueError, match="successor score"):
+        replace(score_change, successor_score=score_change.successor_score + 1)
+    with pytest.raises(ValueError, match="team join"):
+        replace(score_change, team_id=2)
+    with pytest.raises(ValueError, match="completion outcome"):
+        replace(completion, outcome="ongoing")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="completion basis"):
+        replace(completion, completion_basis="score_decision")  # type: ignore[arg-type]
 
 
 def test_phase_displacement_anchors_accept_float32_rounding_only() -> None:

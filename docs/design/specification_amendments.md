@@ -120,8 +120,10 @@ boundary:
 - A core recipient sentinel of `-1` normalizes to JSON `null`, agrees with the
   corresponding `has_recipient` flag in both directions, and reverses
   losslessly.
-- Sparse events form an exactly 21-variant discriminated V1 union derived from
-  facts and adjacent frames. `AgentDiedEventV1` records the newly dead recipient;
+- Sparse events form an exactly 23-variant discriminated V1 union derived from
+  facts and adjacent frames. The one-time Milestone 7 pre-alpha expansion adds
+  authoritative Team Deathmatch score-change and completion variants at phase
+  ranks 130 and 140. `AgentDiedEventV1` records the newly dead recipient;
   one `LethalDamageContributionEventV1` separately records each authoritative
   positive source contribution on that lethal transition. Rank 90 orders the
   death event before its contribution events. Neither record claims a killer,
@@ -379,7 +381,9 @@ leaves / 760 raw bytes:
 - two `bool (10, 10)` aura emitter/beneficiary coverage relations; and
 - four `bool (10, 9)` independent status-lifecycle cause matrices.
 
-The resulting target is **46 leaves / 1,657 raw bytes**.
+The resulting Milestone 6 target was **46 leaves / 1,657 raw bytes**. The
+approved Milestone 7 pre-alpha expansion in A11 adds one scalar `int32` task
+outcome leaf, so the current target is **47 leaves / 1,661 raw bytes**.
 
 Cooldown start is already the accepted Ultimate action. Cooldown readiness is
 the positive-to-zero change between adjacent semantic frames. Deriving either
@@ -484,3 +488,62 @@ catalog mechanics, actor-relative mappings, and direct event evidence, but it
 must not call simulator, geometry, visibility, masking, policy, or mechanic
 helpers. Researcher and actor-authorized presentation roots remain
 structurally distinct.
+
+## A11. Team Deathmatch outcome and pre-alpha V1 schema expansion
+
+**Classification:** accepted task-semantic and pre-alpha schema amendment.
+**Supersedes:** Sections 2.3.6 and 2.8.2 where they award a Team Deathmatch
+score-decision win at the maximum horizon, plus A2's former 21-event closure
+and any V1 wording that forbids this explicitly approved pre-alpha expansion.
+
+Team Deathmatch is a threshold-victory task. Each newly dead configured Team A
+recipient increments Team B's score once, and vice versa. Contributor,
+killer, and last-hit identity never affect scoring. Both score increments from
+one simultaneous transition are applied before result selection. If either
+complete successor score reaches the configured threshold, the higher score
+wins and equal scores draw. If neither team reaches the threshold by the final
+allowed action, the authoritative result is a draw regardless of score
+differential. Threshold completion sets `terminated`; the horizon sets
+`truncated`; both flags remain true when the two bases coincide.
+
+The canonical terminal reward is team-shared and sparse: Team A win is
+`[+1, -1]` by team, Team B win is `[-1, +1]`, and draw or ongoing play is
+`[0, 0]`. Every configured active teammate receives its team's terminal value
+even when dead; inactive padded slots remain zero. Callers stop or reset after
+completion. The core API does not add a terminal latch or an absorbing
+post-completion transition.
+
+The categorical result encoding is shared task vocabulary rather than
+Team-Deathmatch-specific vocabulary: `0` is ongoing, `1` is a Team A win, `2`
+is a Team B win, and `3` is a draw. Core task selection is one fixed numeric
+`jax.lax.switch` over the four known v1 mode slots: neutral, Team Deathmatch,
+King of the Hill, and Capture the Flag. KoTH and CTF branches remain canonical
+neutral placeholders and host validation rejects both modes until their own
+milestones implement them. This fixed dispatch is not a task registry, plugin
+system, generic objective framework, or authorization to add speculative KoTH
+or CTF state and dynamics.
+
+Milestone 7 performs one approved in-place expansion of the unreleased V1
+evaluation and replay models. Resolved configuration records add numeric task
+mode and Team Deathmatch threshold, analysis snapshots add the two
+authoritative team scores, and transition facts add the task outcome. The
+event union expands from 21 to exactly 23 variants:
+
+- `team_deathmatch_score_changed`, phase rank 130, records the zero-based team
+  index, public team ID, positive score increment, previous score, and
+  successor score; and
+- `team_deathmatch_completed`, phase rank 140, records the authoritative
+  Team A win, Team B win, or draw plus `score_threshold`, `horizon`, or
+  `score_threshold_at_horizon` completion basis.
+
+Score events follow lifecycle events and precede the completion event. Host
+capture derives them from adjacent authoritative snapshots and core facts; it
+does not rerun combat or infer an outcome from reward. The renderer-neutral
+Scene/Event V2 and browser transports preserve both events losslessly without
+adding Milestone 7 presentation behavior.
+
+Existing development artifacts and fixtures are disposable and are
+regenerated under the expanded V1 contract. There is no V2 alias, legacy
+loader, optional fallback, dual-schema root, or compatibility shim. After the
+alpha schema freeze, any incompatible wire change requires a version bump and
+an explicit migration policy rather than another in-place mutation.

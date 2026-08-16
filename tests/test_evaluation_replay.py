@@ -9,9 +9,14 @@ from pydantic import ConfigDict, PrivateAttr, ValidationError
 from tests.evaluation_fixtures import (
     CapturedEvaluationTrajectory,
     captured_evaluation_trajectory,
+    captured_resumed_team_deathmatch_horizon_trajectory,
+    captured_team_deathmatch_threshold_trajectory,
+    evaluation_env_config,
     mage_target_none_ultimate_action,
 )
 
+from marl_battlegrounds.core.types import CONTEXT_FEATURE_CURRENT_TIMESTEP
+from marl_battlegrounds.evaluation.events import decode_evaluation_events_v1
 from marl_battlegrounds.evaluation.metrics import (
     CompletionState,
     EvaluationEpisodeCompletionV1,
@@ -282,31 +287,6 @@ def _rebuild_report_artifact(
     )
 
 
-def _replace_tail_done(
-    trajectory: CapturedEvaluationTrajectory,
-    *,
-    terminated: bool,
-    truncated: bool,
-    reason: str,
-) -> CapturedEvaluationTrajectory:
-    if not trajectory.transitions:
-        raise ValueError("a done transition requires a nonempty trajectory")
-    tail = trajectory.transitions[-1]
-    replacement = EvaluationTransitionV1.model_validate(
-        {
-            **tail.model_dump(mode="python"),
-            "terminated": terminated,
-            "truncated": truncated,
-            "owning_task_end_reason": reason,
-        }
-    )
-    return CapturedEvaluationTrajectory(
-        context=trajectory.context,
-        frames=trajectory.frames,
-        transitions=(*trajectory.transitions[:-1], replacement),
-    )
-
-
 def _with_recomputed_digests(
     artifact: ReplayArtifactV1,
     *,
@@ -351,6 +331,29 @@ def _with_recomputed_digests(
         {
             **artifact_payload,
             "canonical_digest_sha256": canonical_digest_sha256(artifact_payload),
+        }
+    )
+
+
+def _with_simulator_epoch(
+    frame: EvaluationFrameV1,
+    context: EvaluationEpisodeContextV1,
+    simulator_step_count: int,
+) -> EvaluationFrameV1:
+    """Shift one frame while preserving its public timestep projection."""
+    context_rows = [list(row) for row in frame.base_observation.context_features]
+    for global_slot, roster_row in enumerate(context.roster):
+        if roster_row.configured_active:
+            context_rows[global_slot][CONTEXT_FEATURE_CURRENT_TIMESTEP] = float(
+                simulator_step_count
+            )
+    base_observation = frame.base_observation.model_copy(
+        update={"context_features": tuple(tuple(row) for row in context_rows)}
+    )
+    return frame.model_copy(
+        update={
+            "simulator_step_count": simulator_step_count,
+            "base_observation": base_observation,
         }
     )
 
@@ -510,44 +513,57 @@ def test_replay_preserves_terminal_and_truncated_tail_truth(
     runtime_provenance: RuntimeProvenanceV1,
 ) -> None:
     """Tail done flags, authoritative end reason, and completion stay aligned."""
-    terminal_trajectory = _replace_tail_done(
-        captured_evaluation_trajectory(
-            transition_count=1,
-            expected_horizon=2,
-        ),
-        terminated=True,
-        truncated=False,
-        reason="objective_complete",
+    terminal_trajectory = captured_team_deathmatch_threshold_trajectory()
+    horizon_trajectory = captured_evaluation_trajectory(
+        transition_count=1,
+        expected_horizon=1,
+        config=evaluation_env_config(max_steps=1),
     )
-    interrupted_trajectory = _replace_tail_done(
-        captured_evaluation_trajectory(
-            transition_count=1,
-            expected_horizon=2,
-        ),
-        terminated=False,
-        truncated=True,
-        reason="runner_shutdown",
-    )
-
     terminal = _build_bundle(
         terminal_trajectory,
         runtime_provenance,
         completion_state="complete",
     ).replay
-    interrupted = _build_bundle(
-        interrupted_trajectory,
+    horizon = _build_bundle(
+        horizon_trajectory,
         runtime_provenance,
-        completion_state="interrupted",
+        completion_state="complete",
     ).replay
 
     assert terminal.completion.terminated is True
     assert terminal.completion.truncated is False
     assert terminal.completion.completion_bases == ("task_terminal",)
-    assert terminal.completion.end_or_failure_reason == "objective_complete"
-    assert interrupted.completion.terminated is False
-    assert interrupted.completion.truncated is True
-    assert interrupted.completion.completion_bases == ()
-    assert interrupted.completion.end_or_failure_reason == "runner_shutdown"
+    assert (
+        terminal.completion.end_or_failure_reason == "team_deathmatch_score_threshold"
+    )
+    assert horizon.completion.terminated is False
+    assert horizon.completion.truncated is True
+    assert horizon.completion.completion_bases == ("declared_horizon",)
+    assert horizon.completion.end_or_failure_reason is None
+
+
+def test_resumed_tdm_replay_completes_after_its_remaining_horizon(
+    runtime_provenance: RuntimeProvenanceV1,
+) -> None:
+    trajectory = captured_resumed_team_deathmatch_horizon_trajectory()
+
+    bundle = _build_bundle(
+        trajectory,
+        runtime_provenance,
+        completion_state="complete",
+    )
+
+    replay = bundle.replay
+    assert replay.frames[0].simulator_step_count == 1
+    assert replay.frames[0].snapshot.team_deathmatch_scores == (2, 1)
+    assert len(replay.transitions) == replay.header.context.expected_horizon == 2
+    assert replay.frames[-1].simulator_step_count == 3
+    assert replay.transitions[-1].facts.team_deathmatch_facts.outcome == 3
+    assert replay.transitions[-1].canonical_reward_by_team == (0.0, 0.0)
+    assert replay.completion.terminated is False
+    assert replay.completion.truncated is True
+    assert replay.completion.completion_bases == ("declared_horizon",)
+    assert replay.completion.end_or_failure_reason == "team_deathmatch_horizon"
 
 
 def test_replay_indices_epochs_counts_and_identifiers_are_canonical(
@@ -599,8 +615,10 @@ def test_replay_allows_artifact_epoch_zero_to_start_later_in_simulator_time(
         transition_count=0,
         expected_horizon=2,
     )
-    shifted_initial = trajectory.frames[0].model_copy(
-        update={"simulator_step_count": 17}
+    shifted_initial = _with_simulator_epoch(
+        trajectory.frames[0],
+        trajectory.context,
+        17,
     )
     shifted = CapturedEvaluationTrajectory(
         context=trajectory.context,
@@ -833,10 +851,10 @@ def test_replay_rejects_nonadjacent_simulator_epochs(
     complete_bundle: ReplayBundleV1,
 ) -> None:
     replay = complete_bundle.replay
-    gapped_successor = replay.frames[1].model_copy(
-        update={
-            "simulator_step_count": replay.frames[0].simulator_step_count + 2,
-        }
+    gapped_successor = _with_simulator_epoch(
+        replay.frames[1],
+        replay.header.context,
+        replay.frames[0].simulator_step_count + 2,
     )
     mutated = _with_recomputed_digests(
         replay,
@@ -875,18 +893,28 @@ def test_replay_rejects_cross_episode_records(
 
 def test_replay_rejects_continuation_after_done_transition(
     complete_bundle: ReplayBundleV1,
+    runtime_provenance: RuntimeProvenanceV1,
 ) -> None:
-    replay = complete_bundle.replay
-    first = EvaluationTransitionV1.model_validate(
-        {
-            **replay.transitions[0].model_dump(mode="python"),
-            "terminated": True,
-            "owning_task_end_reason": "premature_terminal",
+    terminal = _build_bundle(
+        captured_team_deathmatch_threshold_trajectory(),
+        runtime_provenance,
+        completion_state="complete",
+    ).replay
+    header = terminal.header.model_copy(
+        update={
+            "recorded_transition_count": 2,
+            "recorded_frame_count": 3,
+            "last_frame_id": f"{terminal.header.context.identity.episode_id}:frame:2",
         }
     )
     mutated = _with_recomputed_digests(
-        replay,
-        transitions=(first, replay.transitions[1]),
+        terminal,
+        header=header,
+        frames=(*terminal.frames, complete_bundle.replay.frames[2]),
+        transitions=(
+            terminal.transitions[0],
+            complete_bundle.replay.transitions[1],
+        ),
     )
 
     with pytest.raises(ValueError, match="cannot continue after a done transition"):
@@ -928,7 +956,7 @@ def test_replay_rejects_completion_done_flag_mismatch(
 ) -> None:
     base_trajectory = captured_evaluation_trajectory(
         transition_count=1,
-        expected_horizon=2,
+        expected_horizon=100,
     )
     base = _build_bundle(
         base_trajectory,
@@ -937,12 +965,7 @@ def test_replay_rejects_completion_done_flag_mismatch(
         end_or_failure_reason="prefix",
     ).replay
     terminal = _build_bundle(
-        _replace_tail_done(
-            base_trajectory,
-            terminated=True,
-            truncated=False,
-            reason="objective_complete",
-        ),
+        captured_team_deathmatch_threshold_trajectory(),
         runtime_provenance,
         completion_state="complete",
     ).replay
@@ -959,15 +982,7 @@ def test_replay_rejects_completion_reason_mismatch(
     runtime_provenance: RuntimeProvenanceV1,
 ) -> None:
     terminal = _build_bundle(
-        _replace_tail_done(
-            captured_evaluation_trajectory(
-                transition_count=1,
-                expected_horizon=2,
-            ),
-            terminated=True,
-            truncated=False,
-            reason="objective_complete",
-        ),
+        captured_team_deathmatch_threshold_trajectory(),
         runtime_provenance,
         completion_state="complete",
     ).replay
@@ -986,21 +1001,19 @@ def test_replay_rejects_completion_reason_mismatch(
         validate_replay_artifact_v1(mutated)
 
 
-def test_replay_preserves_partial_label_for_non_shutdown_truncation(
+def test_replay_preserves_partial_label_for_pre_horizon_prefix(
     runtime_provenance: RuntimeProvenanceV1,
 ) -> None:
-    trajectory = _replace_tail_done(
-        captured_evaluation_trajectory(
-            transition_count=1,
-            expected_horizon=2,
-        ),
-        terminated=False,
-        truncated=True,
-        reason="external_time_limit",
+    trajectory = captured_evaluation_trajectory(
+        transition_count=1,
+        expected_horizon=2,
     )
     observer = build_evaluation_observer_v1(trajectory.context)
     _feed_observer(observer, trajectory)
-    report = observer.finalize(completion_state="partial")
+    report = observer.finalize(
+        completion_state="partial",
+        end_or_failure_reason="external_time_limit",
+    )
 
     replay = build_replay_artifact_v1(
         observer,
@@ -1009,7 +1022,7 @@ def test_replay_preserves_partial_label_for_non_shutdown_truncation(
     )
 
     assert replay.completion.completion_state == "partial"
-    assert replay.completion.truncated is True
+    assert replay.completion.truncated is False
     assert replay.completion.end_or_failure_reason == "external_time_limit"
 
 
@@ -1406,24 +1419,19 @@ def test_metric_sidecar_cross_validator_rejects_wrong_report_completion(
     complete_bundle: ReplayBundleV1,
     runtime_provenance: RuntimeProvenanceV1,
 ) -> None:
-    base_trajectory = captured_evaluation_trajectory(
-        transition_count=2,
-        expected_horizon=2,
-    )
-    terminal = _build_bundle(
-        _replace_tail_done(
-            base_trajectory,
-            terminated=True,
-            truncated=False,
-            reason="objective_complete",
+    partial_prefix = _build_bundle(
+        captured_evaluation_trajectory(
+            transition_count=1,
+            expected_horizon=2,
         ),
         runtime_provenance,
-        completion_state="complete",
+        completion_state="partial",
+        end_or_failure_reason="short_prefix",
     )
     base_artifact = complete_bundle.metric_report_artifact
     mutated = _rebuild_report_artifact(
         base_artifact,
-        report=terminal.metric_report_artifact.report,
+        report=partial_prefix.metric_report_artifact.report,
     )
 
     with pytest.raises(ValueError):
@@ -1589,8 +1597,10 @@ def test_trajectory_digest_covers_every_owned_semantic_domain(
         processing_status=changed_processing,
     )
     shifted_frames = tuple(
-        frame.model_copy(
-            update={"simulator_step_count": frame.simulator_step_count + 10}
+        _with_simulator_epoch(
+            frame,
+            base.header.context,
+            frame.simulator_step_count + 10,
         )
         for frame in base.frames
     )
@@ -1614,14 +1624,33 @@ def test_trajectory_digest_covers_every_owned_semantic_domain(
         frames=shifted_frames,
         transitions=shifted_transitions,
     )
-    changed_rewards = (
-        base.transitions[0].canonical_reward_by_agent[0] + 1.0,
-        *base.transitions[0].canonical_reward_by_agent[1:],
+    base_transition = base.transitions[0]
+    base_acceptance = base_transition.facts.action_acceptance_facts
+    changed_submitted_action = base_acceptance.submitted_joint_action.model_copy(
+        update={"move": (-1, *base_acceptance.submitted_joint_action.move[1:])}
+    )
+    changed_acceptance = base_acceptance.model_copy(
+        update={
+            "submitted_joint_action": changed_submitted_action,
+            "submitted_action_tuple_is_out_of_domain_by_actor": (
+                True,
+                *base_acceptance.submitted_action_tuple_is_out_of_domain_by_actor[1:],
+            ),
+        }
+    )
+    changed_facts = base_transition.facts.model_copy(
+        update={"action_acceptance_facts": changed_acceptance}
     )
     changed_transition = EvaluationTransitionV1.model_validate(
         {
-            **base.transitions[0].model_dump(mode="python"),
-            "canonical_reward_by_agent": changed_rewards,
+            **base_transition.model_dump(mode="python"),
+            "facts": changed_facts,
+            "events": decode_evaluation_events_v1(
+                base.header.context,
+                base.frames[0],
+                changed_facts,
+                base.frames[1],
+            ),
         }
     )
     transition_variant = _with_recomputed_digests(

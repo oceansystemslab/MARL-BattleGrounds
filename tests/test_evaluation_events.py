@@ -8,7 +8,7 @@ from collections.abc import Iterable
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
-from tests.evaluation_fixtures import evaluation_context
+from tests.evaluation_fixtures import evaluation_context, evaluation_env_config
 
 from marl_battlegrounds.evaluation.events import decode_evaluation_events_v1
 from marl_battlegrounds.evaluation.models import (
@@ -34,6 +34,9 @@ from marl_battlegrounds.evaluation.models import (
     SpawnShieldTransitionFactsV1,
     StatusAppliedEventV1,
     StatusLifecycleTransitionFactsV1,
+    TeamDeathmatchCompletedEventV1,
+    TeamDeathmatchScoreChangedEventV1,
+    TeamDeathmatchTransitionFactsV1,
     TransitionFactsV1,
 )
 
@@ -99,11 +102,13 @@ def _snapshot(
     current_health: tuple[float, ...] = _HEALTH_100,
     ultimate_cooldowns: tuple[int, ...] = _ZERO_INT_10,
     agent_positions: tuple[tuple[float, float], ...] | None = None,
+    team_deathmatch_scores: tuple[int, int] = (0, 0),
 ) -> GlobalAnalysisSnapshotV1:
     """Build the validated dynamic subset consumed by the event decoder."""
     if agent_positions is None:
         agent_positions = tuple((float(slot), 0.0) for slot in range(10))
     return GlobalAnalysisSnapshotV1(
+        team_deathmatch_scores=team_deathmatch_scores,
         alive_mask=alive_mask,
         agent_positions=agent_positions,
         current_health=current_health,
@@ -225,6 +230,7 @@ def _neutral_facts(*, transition_start_step_count: int = 7) -> TransitionFactsV1
             broken_by_damage_by_recipient_and_status_channel=(_FALSE_STATUS_MATRIX),
             cleared_by_new_death_by_recipient_and_status_channel=(_FALSE_STATUS_MATRIX),
         ),
+        team_deathmatch_facts=TeamDeathmatchTransitionFactsV1(outcome=0),
     )
 
 
@@ -286,7 +292,7 @@ def _representative_multi_event_transition() -> EvaluationTransitionV1:
         facts=facts,
         events=events,
         canonical_reward_by_agent=_ZERO_FLOAT_10,
-        canonical_reward_by_team=(0.0, 0.0),
+        canonical_reward_by_team=None,
         terminated=False,
         truncated=False,
         owning_task_end_reason=None,
@@ -295,6 +301,167 @@ def _representative_multi_event_transition() -> EvaluationTransitionV1:
 
 def test_neutral_real_transition_decodes_to_no_events() -> None:
     assert _decode(_neutral_facts()) == ()
+
+
+def test_event_union_contains_exactly_23_strict_variants() -> None:
+    schema = _EVENT_ADAPTER.json_schema()
+
+    assert len(schema["oneOf"]) == 23
+
+
+def test_team_deathmatch_decodes_bilateral_score_edges_and_threshold_result() -> None:
+    context = evaluation_context(
+        config=evaluation_env_config(
+            task_mode=1,
+            team_deathmatch_score_threshold=3,
+        )
+    )
+    newly_dead = _replace_item(_FALSE_10, 0, True)
+    newly_dead = _replace_item(newly_dead, 5, True)
+    newly_dead = _replace_item(newly_dead, 6, True)
+    facts = _neutral_facts().model_copy(
+        update={
+            "death_facts": _neutral_facts().death_facts.model_copy(
+                update={"is_newly_dead_by_recipient": newly_dead}
+            ),
+            "team_deathmatch_facts": TeamDeathmatchTransitionFactsV1(outcome=1),
+        }
+    )
+
+    events = _decode(
+        facts,
+        context=context,
+        start_snapshot=_snapshot(team_deathmatch_scores=(2, 2)),
+        successor_snapshot=_snapshot(team_deathmatch_scores=(4, 3)),
+    )
+
+    task_events = tuple(
+        event
+        for event in events
+        if isinstance(
+            event,
+            (TeamDeathmatchScoreChangedEventV1, TeamDeathmatchCompletedEventV1),
+        )
+    )
+    assert task_events == (
+        TeamDeathmatchScoreChangedEventV1(
+            transition_id="episode-001:transition:3",
+            ordinal=3,
+            event_id="episode-001:transition:3:event:0003",
+            team_index=0,
+            team_id=1,
+            score_increment=2,
+            previous_score=2,
+            successor_score=4,
+        ),
+        TeamDeathmatchScoreChangedEventV1(
+            transition_id="episode-001:transition:3",
+            ordinal=4,
+            event_id="episode-001:transition:3:event:0004",
+            team_index=1,
+            team_id=2,
+            score_increment=1,
+            previous_score=2,
+            successor_score=3,
+        ),
+        TeamDeathmatchCompletedEventV1(
+            transition_id="episode-001:transition:3",
+            ordinal=5,
+            event_id="episode-001:transition:3:event:0005",
+            outcome="team_a_win",
+            completion_basis="score_threshold",
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("start_scores", "successor_scores", "outcome", "completion_basis"),
+    (
+        ((2, 1), (2, 1), 3, "horizon"),
+        ((2, 2), (3, 3), 3, "score_threshold_at_horizon"),
+    ),
+)
+def test_team_deathmatch_horizon_and_threshold_at_horizon_are_explicit(
+    start_scores: tuple[int, int],
+    successor_scores: tuple[int, int],
+    outcome: int,
+    completion_basis: str,
+) -> None:
+    threshold = 3 if completion_basis == "score_threshold_at_horizon" else 10
+    context = evaluation_context(
+        config=evaluation_env_config(
+            task_mode=1,
+            team_deathmatch_score_threshold=threshold,
+            max_steps=8,
+        ),
+        expected_horizon=8,
+    )
+    newly_dead = _FALSE_10
+    if successor_scores != start_scores:
+        newly_dead = _replace_item(newly_dead, 0, True)
+        newly_dead = _replace_item(newly_dead, 5, True)
+    base_facts = _neutral_facts()
+    facts = base_facts.model_copy(
+        update={
+            "death_facts": base_facts.death_facts.model_copy(
+                update={"is_newly_dead_by_recipient": newly_dead}
+            ),
+            "team_deathmatch_facts": TeamDeathmatchTransitionFactsV1(outcome=outcome),
+        }
+    )
+
+    events = _decode(
+        facts,
+        context=context,
+        start_snapshot=_snapshot(team_deathmatch_scores=start_scores),
+        successor_snapshot=_snapshot(team_deathmatch_scores=successor_scores),
+    )
+
+    completion = next(
+        event for event in events if isinstance(event, TeamDeathmatchCompletedEventV1)
+    )
+    assert completion.outcome == "draw"
+    assert completion.completion_basis == completion_basis
+
+
+def test_team_deathmatch_decoder_rejects_score_edges_not_authored_by_deaths() -> None:
+    context = evaluation_context(
+        config=evaluation_env_config(
+            task_mode=1,
+            team_deathmatch_score_threshold=5,
+        )
+    )
+
+    with pytest.raises(ValueError, match="score edges"):
+        _decode(
+            _neutral_facts(),
+            context=context,
+            start_snapshot=_snapshot(team_deathmatch_scores=(0, 0)),
+            successor_snapshot=_snapshot(team_deathmatch_scores=(1, 0)),
+        )
+
+
+def test_team_deathmatch_score_event_rejects_incoherent_team_or_score_join() -> None:
+    payload: dict[str, object] = {
+        "transition_id": "episode-001:transition:0",
+        "ordinal": 0,
+        "event_id": "episode-001:transition:0:event:0000",
+        "team_index": 0,
+        "team_id": 1,
+        "score_increment": 2,
+        "previous_score": 3,
+        "successor_score": 5,
+    }
+
+    assert (
+        TeamDeathmatchScoreChangedEventV1.model_validate(payload).successor_score == 5
+    )
+    with pytest.raises(ValidationError, match="team_id"):
+        TeamDeathmatchScoreChangedEventV1.model_validate({**payload, "team_id": 2})
+    with pytest.raises(ValidationError, match="successor_score"):
+        TeamDeathmatchScoreChangedEventV1.model_validate(
+            {**payload, "successor_score": 4}
+        )
 
 
 def test_representative_multi_event_transition_round_trips_json() -> None:

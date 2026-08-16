@@ -22,6 +22,18 @@ and source revision. Its `schema_versions` tuple remains exactly the eight CP2
 roots. Replay-specific schema bindings live in `ReplayArtifactHeaderV1` and do
 not mutate that historical V1 contract.
 
+Milestone 7 makes one approved in-place expansion of the unreleased pre-alpha
+V1 evaluation/replay models. Resolved configuration now carries numeric task
+mode and Team Deathmatch score threshold, analysis frames carry authoritative
+team scores, and transition facts carry the task outcome. The discriminated V1
+event union has exactly 23 variants: `TeamDeathmatchScoreChangedEventV1` at rank
+130 records each positive score edge, and `TeamDeathmatchCompletedEventV1` at
+rank 140 records the result and one of `score_threshold`, `horizon`, or
+`score_threshold_at_horizon`. Existing development artifacts and fixtures are
+disposable and must be regenerated. There is no legacy loader, optional
+fallback, compatibility shim, or parallel V2 model family. After the alpha
+schema freeze, any incompatible wire change requires a schema-version bump.
+
 The standard replay never contains raw `EnvState`, PRNG keys, policy logits or
 hidden state, optimizer state, learner batches, renderer summaries, local file
 paths, browser capability tokens, or private debugger state. Loading and
@@ -112,6 +124,10 @@ explicit O(T) semantic pass that:
 
 `iter_replay_transition_views_v1` exposes the same coherent views consumed by
 live CP3 reducers. It does not construct alternative facts or event links.
+Score-change and completion events remain direct projections of adjacent
+authoritative frames and task facts; replay never derives them from deaths,
+reward, or done flags. The renderer and web transport preserve these events
+losslessly and add no second scoring or outcome path.
 
 Replay construction accepts only a finalized
 `EvaluationEpisodeObserverV1` and its exact `EvaluationMetricReportV1`.
@@ -133,6 +149,15 @@ truncation is preserved as transition-tail truth; its partial, interrupted, or
 failed classification remains runner/report-authored and replay validation does
 not infer it. Exact-horizon and task-terminal evidence remain separate
 completion bases and may coexist.
+
+Team Deathmatch is threshold-victory. If neither team reaches the configured
+threshold by the horizon, the authoritative result is a draw regardless of
+terminal score differential. If both teams cross on one simultaneous
+transition, complete successor scores decide the result and equality draws.
+Threshold completion sets termination, horizon completion sets truncation, and
+both truths are preserved on coincidence. A completed transition carries the
+matching authoritative completion event, and replay rejects every subsequent
+transition.
 
 ## Scenario and POV companions
 

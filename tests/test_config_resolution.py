@@ -262,6 +262,8 @@ def test_env_config_packages_only_the_resolved_profile_for_roster_facts() -> Non
         jnp.asarray((3, 3), dtype=jnp.int32),
     )
     config = EnvConfig(
+        task_mode=0,
+        team_deathmatch_score_threshold=0,
         max_steps=1000,
         map_width=20.0,
         map_height=12.0,

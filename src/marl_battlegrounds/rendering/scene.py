@@ -2418,6 +2418,73 @@ class AgentRespawnedEventV2(CanonicalVisualEventBaseV2):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class TeamDeathmatchScoreChangedEventV2(CanonicalVisualEventBaseV2):
+    """One authoritative team-score change after lifecycle resolution."""
+
+    event_type: Literal["team_deathmatch_score_changed"] = field(
+        default="team_deathmatch_score_changed", init=False
+    )
+    phase_rank: Literal[130] = field(default=130, init=False)
+    team_index: Literal[0, 1]
+    team_id: Literal[1, 2]
+    score_increment: int
+    previous_score: int
+    successor_score: int
+    team_anchor: VisualTeamAnchorV2
+
+    def __post_init__(self) -> None:
+        CanonicalVisualEventBaseV2.__post_init__(self)
+        _require_python_int(self.team_index, name="team_index", minimum=0)
+        _require_python_int(self.team_id, name="team_id", minimum=1)
+        if self.team_index not in (0, 1) or self.team_id != self.team_index + 1:
+            raise ValueError("Team Deathmatch score event has an invalid team join.")
+        for name in ("score_increment", "previous_score", "successor_score"):
+            _require_int32(cast(int, getattr(self, name)), name=name)
+        if self.score_increment <= 0 or self.previous_score < 0:
+            raise ValueError(
+                "Team Deathmatch score events require a positive increment and "
+                "nonnegative previous score."
+            )
+        if self.successor_score != self.previous_score + self.score_increment:
+            raise ValueError(
+                "Team Deathmatch successor score must equal previous score plus "
+                "the recorded increment."
+            )
+        if (
+            type(self.team_anchor) is not VisualTeamAnchorV2
+            or self.team_anchor.phase != "successor"
+            or self.team_anchor.team_index != self.team_index
+            or self.team_anchor.team_id != self.team_id
+        ):
+            raise ValueError("team_anchor must join the successor scoring team.")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TeamDeathmatchCompletedEventV2(CanonicalVisualEventBaseV2):
+    """One authoritative Team Deathmatch result and its completion basis."""
+
+    event_type: Literal["team_deathmatch_completed"] = field(
+        default="team_deathmatch_completed", init=False
+    )
+    phase_rank: Literal[140] = field(default=140, init=False)
+    outcome: Literal["team_a_win", "team_b_win", "draw"]
+    completion_basis: Literal[
+        "score_threshold", "horizon", "score_threshold_at_horizon"
+    ]
+
+    def __post_init__(self) -> None:
+        CanonicalVisualEventBaseV2.__post_init__(self)
+        if self.outcome not in ("team_a_win", "team_b_win", "draw"):
+            raise ValueError("Team Deathmatch completion outcome is invalid.")
+        if self.completion_basis not in (
+            "score_threshold",
+            "horizon",
+            "score_threshold_at_horizon",
+        ):
+            raise ValueError("Team Deathmatch completion basis is invalid.")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class VisualAgentPhaseTrajectoryV2:
     """One actor's explicit start, post-Charge, and successor anchors."""
 
@@ -2468,6 +2535,8 @@ type VisualEventV2 = (
     | SpawnShieldExpiredEventV2
     | RespawnWaveOccurredEventV2
     | AgentRespawnedEventV2
+    | TeamDeathmatchScoreChangedEventV2
+    | TeamDeathmatchCompletedEventV2
 )
 
 _VISUAL_EVENT_V2_TYPES: tuple[type[object], ...] = (
@@ -2492,6 +2561,8 @@ _VISUAL_EVENT_V2_TYPES: tuple[type[object], ...] = (
     SpawnShieldExpiredEventV2,
     RespawnWaveOccurredEventV2,
     AgentRespawnedEventV2,
+    TeamDeathmatchScoreChangedEventV2,
+    TeamDeathmatchCompletedEventV2,
 )
 
 

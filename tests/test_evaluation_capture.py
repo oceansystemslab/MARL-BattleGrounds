@@ -18,8 +18,16 @@ from tests.evaluation_fixtures import evaluation_context, evaluation_env_config
 import marl_battlegrounds.evaluation.capture as capture_module
 from marl_battlegrounds.core.env import reset, step
 from marl_battlegrounds.core.types import (
+    CONTEXT_FEATURE_CURRENT_TIMESTEP,
+    CONTEXT_FEATURE_EPISODE_HORIZON,
+    CONTEXT_FEATURE_IS_TDM,
+    CONTEXT_FEATURE_TDM_ALLY_SCORE,
+    CONTEXT_FEATURE_TDM_ENEMY_SCORE,
+    CONTEXT_FEATURE_TDM_SCORE_THRESHOLD,
     MAX_AGENT_SLOTS,
     NUM_MOVE_ACTIONS,
+    TASK_MODE_OUTCOME_TEAM_A_WIN,
+    TASK_MODE_TDM,
     Action,
     ActionMask,
     DoneFlags,
@@ -45,10 +53,13 @@ from marl_battlegrounds.evaluation.models import (
     EvaluationTransitionV1,
     ExecutionInformationMode,
     StatusAppliedEventV1,
+    TeamDeathmatchCompletedEventV1,
+    TeamDeathmatchScoreChangedEventV1,
     TransitionFactsV1,
 )
 from marl_battlegrounds.evaluation.validation import (
     validate_evaluation_transition_unit_v1,
+    validate_initial_evaluation_frame_v1,
 )
 
 
@@ -97,11 +108,16 @@ def _step_sources(
     execution_information_mode: ExecutionInformationMode = "no_shared_obs",
     *,
     action: Action | None = None,
+    config: EnvConfig | None = None,
 ) -> _StepSources:
-    config = evaluation_env_config()
-    context = evaluation_context(execution_information_mode=execution_information_mode)
+    resolved_config = evaluation_env_config() if config is None else config
+    context = evaluation_context(
+        execution_information_mode=execution_information_mode,
+        expected_horizon=resolved_config.max_steps,
+        config=resolved_config,
+    )
     start_state, start_observation, start_action_mask, reset_info = reset(
-        config,
+        resolved_config,
         jax.random.PRNGKey(0),
     )
     availability = (
@@ -124,7 +140,7 @@ def _step_sources(
         successor_action_mask,
         step_info,
     ) = step(
-        config,
+        resolved_config,
         start_state,
         start_action_mask,
         _neutral_action() if action is None else action,
@@ -132,7 +148,7 @@ def _step_sources(
     )
     return _StepSources(
         context=context,
-        config=config,
+        config=resolved_config,
         start_state=start_state,
         start_observation=start_observation,
         start_action_mask=start_action_mask,
@@ -213,6 +229,70 @@ def _replace_submitted_move(
     return facts._replace(
         action_acceptance_facts=acceptance._replace(submitted_joint_action=submitted)
     )
+
+
+def _team_a_threshold_payload(
+    sources: _StepSources,
+) -> tuple[EnvState, Observation, TransitionFacts, Reward, DoneFlags]:
+    """Author one internally coherent TDM threshold transition for host tests."""
+    team_b_recipient = 5
+    successor_state = sources.successor_state._replace(
+        team_deathmatch_scores=jnp.asarray((1, 0), dtype=jnp.int32),
+        alive_mask=sources.successor_state.alive_mask.at[team_b_recipient].set(False),
+        current_health=(
+            sources.successor_state.current_health.at[team_b_recipient].set(0.0)
+        ),
+    )
+    team_ids = sources.config.agent_profile.team_ids
+    active_mask = sources.config.agent_profile.active_mask
+    team_a_active = jnp.logical_and(active_mask, team_ids == 1)
+    team_b_active = jnp.logical_and(active_mask, team_ids == 2)
+    context_features = sources.successor_observation.context_features
+    context_features = context_features.at[:, CONTEXT_FEATURE_TDM_ALLY_SCORE].set(
+        jnp.where(
+            team_a_active,
+            1.0,
+            context_features[:, CONTEXT_FEATURE_TDM_ALLY_SCORE],
+        )
+    )
+    context_features = context_features.at[:, CONTEXT_FEATURE_TDM_ENEMY_SCORE].set(
+        jnp.where(
+            team_b_active,
+            1.0,
+            context_features[:, CONTEXT_FEATURE_TDM_ENEMY_SCORE],
+        )
+    )
+    successor_observation = sources.successor_observation._replace(
+        context_features=context_features
+    )
+    transition_facts = sources.step_info.transition_facts._replace(
+        death_facts=sources.step_info.transition_facts.death_facts._replace(
+            is_newly_dead_by_recipient=(
+                sources.step_info.transition_facts.death_facts.is_newly_dead_by_recipient.at[
+                    team_b_recipient
+                ].set(True)
+            )
+        ),
+        team_deathmatch_facts=(
+            sources.step_info.transition_facts.team_deathmatch_facts._replace(
+                outcome=jnp.asarray(
+                    TASK_MODE_OUTCOME_TEAM_A_WIN,
+                    dtype=jnp.int32,
+                )
+            )
+        ),
+    )
+    reward = Reward(
+        rewards=jnp.asarray(
+            (1.0, 1.0, 1.0, 0.0, 0.0, -1.0, -1.0, 0.0, 0.0, 0.0),
+            dtype=jnp.float32,
+        )
+    )
+    done_flags = DoneFlags(
+        terminated=jnp.asarray(True, dtype=jnp.bool_),
+        truncated=sources.done_flags.truncated,
+    )
+    return successor_state, successor_observation, transition_facts, reward, done_flags
 
 
 def test_initial_capture_performs_one_complete_transfer_before_normalization(
@@ -368,6 +448,7 @@ def test_shared_availability_rejects_every_forbidden_axis_class(
         ("observation_dtype", TypeError),
         ("observation_nonfinite", ValueError),
         ("state_category", ValueError),
+        ("state_task_score", ValueError),
         ("mask_dtype", TypeError),
     ),
 )
@@ -398,6 +479,10 @@ def test_frame_capture_strictly_rejects_malformed_sources(
             previous_timestep_move_actions=(
                 state.previous_timestep_move_actions.at[0].set(NUM_MOVE_ACTIONS)
             )
+        )
+    elif invalid_source == "state_task_score":
+        state = state._replace(
+            team_deathmatch_scores=jnp.asarray((1, 0), dtype=jnp.int32)
         )
     else:
         action_mask = action_mask._replace(
@@ -439,12 +524,12 @@ def test_core_does_no_evaluation_work_when_capture_is_not_called(
     assert transfers == 0
 
 
-def test_fact_normalization_accounts_for_all_46_leaves_and_is_lossless() -> None:
+def test_fact_normalization_accounts_for_all_47_leaves_and_is_lossless() -> None:
     host_facts = _host_facts()
     leaves = jax.tree_util.tree_leaves(host_facts)
-    assert len(leaves) == 46
+    assert len(leaves) == 47
     assert all(type(leaf) is np.ndarray for leaf in leaves)
-    assert sum(cast(NDArray[np.generic], leaf).nbytes for leaf in leaves) == 1657
+    assert sum(cast(NDArray[np.generic], leaf).nbytes for leaf in leaves) == 1661
 
     normalized = normalize_transition_facts_v1(host_facts)
     json_roundtrip = TransitionFactsV1.model_validate_json(normalized.model_dump_json())
@@ -702,14 +787,14 @@ def test_transition_capture_uses_one_transfer_and_validates_real_trajectory(
 
     assert len(transferred_bundles) == 1
     bundle = cast(tuple[object, ...], transferred_bundles[0])
-    assert len(bundle) == 8
+    assert len(bundle) == 7
     assert bundle[0] is sources.successor_state
     assert bundle[1] is sources.successor_observation
     assert bundle[2] is sources.successor_action_mask
     assert bundle[3] is sources.step_info.transition_facts
     assert bundle[4] is sources.reward
     assert bundle[5] is sources.done_flags
-    assert bundle[6:] == (None, None)
+    assert bundle[6:] == (None,)
     assert validated_units == (
         [
             (
@@ -847,7 +932,7 @@ def test_four_record_validation_survives_json_and_rejects_cross_record_drift() -
             "simulator_step_count": successor_frame.simulator_step_count + 1,
         }
     )
-    with pytest.raises(ValueError, match="successor simulator step"):
+    with pytest.raises(ValueError, match="policy context timestep"):
         validate_evaluation_transition_unit_v1(
             sources.context,
             sources.start_frame,
@@ -1068,10 +1153,9 @@ def test_four_record_validation_rejects_inactive_dynamic_padding_drift() -> None
         )
 
 
-def test_transition_capture_preserves_shared_availability_and_team_reward() -> None:
+def test_transition_capture_preserves_shared_availability_and_neutral_reward() -> None:
     sources = _step_sources("shared_obs")
     availability = _valid_shared_availability(sources.context)
-    team_reward = jnp.asarray((1.25, -1.25), dtype=jnp.float32)
     transition, successor_frame = capture_evaluation_transition_unit_v1(
         sources.context,
         sources.start_frame,
@@ -1081,13 +1165,12 @@ def test_transition_capture_preserves_shared_availability_and_team_reward() -> N
         sources.step_info.transition_facts,
         sources.reward,
         sources.done_flags,
-        canonical_reward_by_team=team_reward,
         successor_shared_obs_information_availability_by_recipient_and_sensor_source=(
             availability
         ),
     )
 
-    assert transition.canonical_reward_by_team == (1.25, -1.25)
+    assert transition.canonical_reward_by_team is None
     assert (
         successor_frame.shared_obs_information_availability_by_recipient_and_sensor_source
         == tuple(tuple(bool(value) for value in row) for row in availability.tolist())
@@ -1103,6 +1186,426 @@ def test_transition_capture_preserves_shared_availability_and_team_reward() -> N
             sources.step_info.transition_facts,
             sources.reward,
             sources.done_flags,
+        )
+
+
+@pytest.mark.parametrize(
+    ("maximum_episode_steps", "expected_truncated"),
+    ((2, False), (1, True)),
+)
+def test_neutral_capture_uses_zero_reward_and_horizon_only_done(
+    maximum_episode_steps: int,
+    expected_truncated: bool,
+) -> None:
+    sources = _step_sources(
+        config=evaluation_env_config(max_steps=maximum_episode_steps)
+    )
+
+    transition, _successor_frame = capture_evaluation_transition_unit_v1(
+        sources.context,
+        sources.start_frame,
+        sources.successor_state,
+        sources.successor_observation,
+        sources.successor_action_mask,
+        sources.step_info.transition_facts,
+        sources.reward,
+        sources.done_flags,
+    )
+
+    assert transition.canonical_reward_by_agent == (0.0,) * MAX_AGENT_SLOTS
+    assert transition.canonical_reward_by_team is None
+    assert transition.terminated is False
+    assert transition.truncated is expected_truncated
+    assert transition.owning_task_end_reason is None
+
+
+def test_neutral_transition_validation_rejects_reward_done_and_reason_drift() -> None:
+    early_sources = _step_sources(config=evaluation_env_config(max_steps=2))
+    early_transition, early_successor = capture_evaluation_transition_unit_v1(
+        early_sources.context,
+        early_sources.start_frame,
+        early_sources.successor_state,
+        early_sources.successor_observation,
+        early_sources.successor_action_mask,
+        early_sources.step_info.transition_facts,
+        early_sources.reward,
+        early_sources.done_flags,
+    )
+    horizon_sources = _step_sources(config=evaluation_env_config(max_steps=1))
+    horizon_transition, horizon_successor = capture_evaluation_transition_unit_v1(
+        horizon_sources.context,
+        horizon_sources.start_frame,
+        horizon_sources.successor_state,
+        horizon_sources.successor_observation,
+        horizon_sources.successor_action_mask,
+        horizon_sources.step_info.transition_facts,
+        horizon_sources.reward,
+        horizon_sources.done_flags,
+    )
+    nonzero_rewards = (1.0, *((0.0,) * (MAX_AGENT_SLOTS - 1)))
+    invalid_cases = (
+        (
+            early_sources,
+            early_transition.model_copy(
+                update={"canonical_reward_by_agent": nonzero_rewards}
+            ),
+            early_successor,
+            "canonical reward",
+        ),
+        (
+            early_sources,
+            early_transition.model_copy(update={"terminated": True}),
+            early_successor,
+            "cannot terminate",
+        ),
+        (
+            early_sources,
+            early_transition.model_copy(update={"truncated": True}),
+            early_successor,
+            "truncation",
+        ),
+        (
+            horizon_sources,
+            horizon_transition.model_copy(update={"truncated": False}),
+            horizon_successor,
+            "truncation",
+        ),
+        (
+            horizon_sources,
+            horizon_transition.model_copy(
+                update={"owning_task_end_reason": "neutral_horizon"}
+            ),
+            horizon_successor,
+            "completion authority",
+        ),
+    )
+    for sources, transition, successor_frame, expected_message in invalid_cases:
+        with pytest.raises(ValueError, match=expected_message):
+            validate_evaluation_transition_unit_v1(
+                sources.context,
+                sources.start_frame,
+                transition,
+                successor_frame,
+            )
+
+
+def test_neutral_transition_validation_rejects_a_start_at_the_horizon() -> None:
+    sources = _step_sources(config=evaluation_env_config(max_steps=1))
+    transition, successor_frame = capture_evaluation_transition_unit_v1(
+        sources.context,
+        sources.start_frame,
+        sources.successor_state,
+        sources.successor_observation,
+        sources.successor_action_mask,
+        sources.step_info.transition_facts,
+        sources.reward,
+        sources.done_flags,
+    )
+
+    def shift_frame_epoch(frame: EvaluationFrameV1, epoch: int) -> EvaluationFrameV1:
+        rows = [list(row) for row in frame.base_observation.context_features]
+        for global_slot, roster_row in enumerate(sources.context.roster):
+            if roster_row.configured_active:
+                rows[global_slot][CONTEXT_FEATURE_CURRENT_TIMESTEP] = float(epoch)
+        base_observation = frame.base_observation.model_copy(
+            update={"context_features": tuple(tuple(row) for row in rows)}
+        )
+        return frame.model_copy(
+            update={
+                "simulator_step_count": epoch,
+                "base_observation": base_observation,
+            }
+        )
+
+    start_at_horizon = shift_frame_epoch(sources.start_frame, 1)
+    successor_after_horizon = shift_frame_epoch(successor_frame, 2)
+    facts = transition.facts.model_copy(update={"transition_start_step_count": 1})
+    transition_after_horizon = transition.model_copy(update={"facts": facts})
+
+    with pytest.raises(ValueError, match="cannot start after completion"):
+        validate_evaluation_transition_unit_v1(
+            sources.context,
+            start_at_horizon,
+            transition_after_horizon,
+            successor_after_horizon,
+        )
+
+
+@pytest.mark.parametrize(
+    ("max_steps", "expected_basis", "expected_end_reason", "expected_truncated"),
+    (
+        (100, "score_threshold", "team_deathmatch_score_threshold", False),
+        (
+            1,
+            "score_threshold_at_horizon",
+            "team_deathmatch_score_threshold_at_horizon",
+            True,
+        ),
+    ),
+)
+def test_transition_capture_derives_tdm_threshold_reward_and_completion(
+    max_steps: int,
+    expected_basis: str,
+    expected_end_reason: str,
+    expected_truncated: bool,
+) -> None:
+    config = evaluation_env_config(
+        task_mode=TASK_MODE_TDM,
+        team_deathmatch_score_threshold=1,
+        max_steps=max_steps,
+    )
+    sources = _step_sources(config=config)
+    successor_state, successor_observation, facts, reward, done_flags = (
+        _team_a_threshold_payload(sources)
+    )
+
+    transition, successor_frame = capture_evaluation_transition_unit_v1(
+        sources.context,
+        sources.start_frame,
+        successor_state,
+        successor_observation,
+        sources.successor_action_mask,
+        facts,
+        reward,
+        done_flags,
+    )
+
+    assert successor_frame.snapshot.team_deathmatch_scores == (1, 0)
+    assert successor_frame.snapshot.alive_mask[5] is False
+    team_a_context = successor_frame.base_observation.context_features[0]
+    team_b_dead_context = successor_frame.base_observation.context_features[5]
+    assert (
+        team_a_context[CONTEXT_FEATURE_TDM_ALLY_SCORE],
+        team_a_context[CONTEXT_FEATURE_TDM_ENEMY_SCORE],
+    ) == (1.0, 0.0)
+    assert (
+        team_b_dead_context[CONTEXT_FEATURE_TDM_ALLY_SCORE],
+        team_b_dead_context[CONTEXT_FEATURE_TDM_ENEMY_SCORE],
+    ) == (0.0, 1.0)
+    assert successor_frame.base_observation.context_features[3] == (0.0,) * 19
+    assert transition.canonical_reward_by_team == (1.0, -1.0)
+    assert transition.canonical_reward_by_agent == (
+        1.0,
+        1.0,
+        1.0,
+        0.0,
+        0.0,
+        -1.0,
+        -1.0,
+        0.0,
+        0.0,
+        0.0,
+    )
+    assert transition.terminated is True
+    assert transition.truncated is expected_truncated
+    assert transition.owning_task_end_reason == expected_end_reason
+    assert tuple(event.event_type for event in transition.events) == (
+        "agent_died",
+        "team_deathmatch_score_changed",
+        "team_deathmatch_completed",
+    )
+    score_event = cast(TeamDeathmatchScoreChangedEventV1, transition.events[-2])
+    completion_event = cast(TeamDeathmatchCompletedEventV1, transition.events[-1])
+    assert (score_event.team_index, score_event.score_increment) == (0, 1)
+    assert completion_event.outcome == "team_a_win"
+    assert completion_event.completion_basis == expected_basis
+
+
+def test_transition_validation_rejects_policy_context_task_authority_drift() -> None:
+    config = evaluation_env_config(
+        task_mode=TASK_MODE_TDM,
+        team_deathmatch_score_threshold=1,
+    )
+    sources = _step_sources(config=config)
+    successor_state, successor_observation, facts, reward, done_flags = (
+        _team_a_threshold_payload(sources)
+    )
+    transition, successor_frame = capture_evaluation_transition_unit_v1(
+        sources.context,
+        sources.start_frame,
+        successor_state,
+        successor_observation,
+        sources.successor_action_mask,
+        facts,
+        reward,
+        done_flags,
+    )
+    drift_cases = (
+        (0, CONTEXT_FEATURE_CURRENT_TIMESTEP, 99.0),
+        (0, CONTEXT_FEATURE_EPISODE_HORIZON, 99.0),
+        (0, CONTEXT_FEATURE_IS_TDM, 0.0),
+        (0, CONTEXT_FEATURE_TDM_ALLY_SCORE, 0.0),
+        (5, CONTEXT_FEATURE_TDM_ENEMY_SCORE, 0.0),
+        (0, CONTEXT_FEATURE_TDM_SCORE_THRESHOLD, 2.0),
+        (3, CONTEXT_FEATURE_IS_TDM, 1.0),
+    )
+
+    for global_slot, column, value in drift_cases:
+        rows = [list(row) for row in successor_frame.base_observation.context_features]
+        rows[global_slot][column] = value
+        base_observation = successor_frame.base_observation.model_copy(
+            update={"context_features": tuple(tuple(row) for row in rows)}
+        )
+        drifted_frame = successor_frame.model_copy(
+            update={"base_observation": base_observation}
+        )
+        with pytest.raises(ValueError, match=r"policy context|inactive slot"):
+            validate_evaluation_transition_unit_v1(
+                sources.context,
+                sources.start_frame,
+                transition,
+                drifted_frame,
+            )
+
+
+@pytest.mark.parametrize("completion_kind", ("threshold", "horizon"))
+def test_initial_tdm_capture_validation_rejects_completed_state(
+    completion_kind: str,
+) -> None:
+    config = evaluation_env_config(
+        task_mode=TASK_MODE_TDM,
+        team_deathmatch_score_threshold=5,
+    )
+    context = evaluation_context(config=config)
+    state, observation, action_mask, _info = reset(config, jax.random.PRNGKey(0))
+    initial_frame = capture_initial_evaluation_frame_v1(
+        context,
+        state,
+        observation,
+        action_mask,
+    )
+    rows = [list(row) for row in initial_frame.base_observation.context_features]
+    snapshot = initial_frame.snapshot
+    simulator_step_count = initial_frame.simulator_step_count
+    if completion_kind == "threshold":
+        snapshot = snapshot.model_copy(update={"team_deathmatch_scores": (5, 0)})
+        for global_slot, roster_row in enumerate(context.roster):
+            if not roster_row.configured_active:
+                continue
+            if roster_row.configured_team_id == 1:
+                rows[global_slot][CONTEXT_FEATURE_TDM_ALLY_SCORE] = 5.0
+            else:
+                rows[global_slot][CONTEXT_FEATURE_TDM_ENEMY_SCORE] = 5.0
+    else:
+        simulator_step_count = config.max_steps
+        for global_slot, roster_row in enumerate(context.roster):
+            if roster_row.configured_active:
+                rows[global_slot][CONTEXT_FEATURE_CURRENT_TIMESTEP] = float(
+                    config.max_steps
+                )
+    base_observation = initial_frame.base_observation.model_copy(
+        update={"context_features": tuple(tuple(row) for row in rows)}
+    )
+    completed_frame = initial_frame.model_copy(
+        update={
+            "simulator_step_count": simulator_step_count,
+            "snapshot": snapshot,
+            "base_observation": base_observation,
+        }
+    )
+
+    with pytest.raises(ValueError, match="preterminal"):
+        validate_initial_evaluation_frame_v1(context, completed_frame)
+
+
+def test_initial_tdm_capture_requires_the_remaining_artifact_horizon() -> None:
+    config = evaluation_env_config(
+        task_mode=TASK_MODE_TDM,
+        team_deathmatch_score_threshold=5,
+        max_steps=5,
+    )
+    context = evaluation_context(config=config, expected_horizon=4)
+    state, observation, action_mask, _info = reset(config, jax.random.PRNGKey(0))
+
+    with pytest.raises(ValueError, match="remaining simulator transitions"):
+        capture_initial_evaluation_frame_v1(
+            context,
+            state,
+            observation,
+            action_mask,
+        )
+
+
+def test_transition_capture_derives_horizon_draw_without_score_comparison() -> None:
+    config = evaluation_env_config(
+        task_mode=TASK_MODE_TDM,
+        team_deathmatch_score_threshold=10,
+        max_steps=1,
+    )
+    sources = _step_sources(config=config)
+
+    transition, _successor_frame = capture_evaluation_transition_unit_v1(
+        sources.context,
+        sources.start_frame,
+        sources.successor_state,
+        sources.successor_observation,
+        sources.successor_action_mask,
+        sources.step_info.transition_facts,
+        sources.reward,
+        sources.done_flags,
+    )
+
+    assert transition.canonical_reward_by_team == (0.0, 0.0)
+    assert transition.terminated is False
+    assert transition.truncated is True
+    assert transition.owning_task_end_reason == "team_deathmatch_horizon"
+    assert len(transition.events) == 1
+    completion_event = cast(TeamDeathmatchCompletedEventV1, transition.events[0])
+    assert completion_event.outcome == "draw"
+    assert completion_event.completion_basis == "horizon"
+
+
+def test_transition_capture_rejects_caller_inconsistent_tdm_reward_and_done() -> None:
+    config = evaluation_env_config(
+        task_mode=TASK_MODE_TDM,
+        team_deathmatch_score_threshold=1,
+    )
+    sources = _step_sources(config=config)
+    successor_state, successor_observation, facts, _reward, done_flags = (
+        _team_a_threshold_payload(sources)
+    )
+
+    with pytest.raises(ValueError, match="per-agent canonical TDM reward"):
+        capture_evaluation_transition_unit_v1(
+            sources.context,
+            sources.start_frame,
+            successor_state,
+            successor_observation,
+            sources.successor_action_mask,
+            facts,
+            Reward(rewards=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32)),
+            done_flags,
+        )
+
+    with pytest.raises(ValueError, match="terminated"):
+        capture_evaluation_transition_unit_v1(
+            sources.context,
+            sources.start_frame,
+            successor_state,
+            successor_observation,
+            sources.successor_action_mask,
+            facts,
+            Reward(
+                rewards=jnp.asarray(
+                    (
+                        1.0,
+                        1.0,
+                        1.0,
+                        0.0,
+                        0.0,
+                        -1.0,
+                        -1.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                    ),
+                    dtype=jnp.float32,
+                )
+            ),
+            DoneFlags(
+                terminated=jnp.asarray(False, dtype=jnp.bool_),
+                truncated=jnp.asarray(False, dtype=jnp.bool_),
+            ),
         )
 
 
@@ -1134,15 +1637,8 @@ def test_transition_capture_rejects_initialization_facts_and_malformed_rewards()
             sources.done_flags,
         )
 
-    with pytest.raises(TypeError, match="canonical_reward_by_team"):
-        capture_evaluation_transition_unit_v1(
-            sources.context,
-            sources.start_frame,
-            sources.successor_state,
-            sources.successor_observation,
-            sources.successor_action_mask,
-            sources.step_info.transition_facts,
-            sources.reward,
-            sources.done_flags,
-            canonical_reward_by_team=jnp.zeros((2,), dtype=jnp.int32),
-        )
+    parameter_names = inspect.signature(
+        capture_evaluation_transition_unit_v1
+    ).parameters
+    assert "canonical_reward_by_team" not in parameter_names
+    assert "owning_task_end_reason" not in parameter_names

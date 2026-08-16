@@ -29,6 +29,8 @@ const EVENT_V2_KINDS = new Set([
   "spawn_shield_expired",
   "respawn_wave_occurred",
   "agent_respawned",
+  "team_deathmatch_score_changed",
+  "team_deathmatch_completed",
 ]);
 
 const POV_CUE_KINDS = new Set([
@@ -99,9 +101,9 @@ test("researcher fixture pairs own the exhaustive accepted vocabulary", async ()
   const events = /** @type {Array<Record<string, any>>} */ (
     grammar.liveFrame.projection.incoming_events.events
   );
-  assert.equal(events.length, 23);
+  assert.equal(events.length, 25);
   assert.deepEqual(new Set(events.map((event) => event.event_type)), EVENT_V2_KINDS);
-  assert.equal(grammar.replayTimeline.rows[1].incoming_event_count, 23);
+  assert.equal(grammar.replayTimeline.rows[1].incoming_event_count, 25);
 
   const vocabularyScene = vocabulary.liveFrame.projection.scene;
   const vocabularyAgents = /** @type {Array<Record<string, any>>} */ (

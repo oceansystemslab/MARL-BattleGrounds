@@ -54,6 +54,9 @@ from marl_battlegrounds.core.types import (
     StatusLifecycleTransitionFacts as CoreStatusLifecycleTransitionFacts,
 )
 from marl_battlegrounds.core.types import (
+    TeamDeathmatchTransitionFacts as CoreTeamDeathmatchTransitionFacts,
+)
+from marl_battlegrounds.core.types import (
     TransitionFacts as CoreTransitionFacts,
 )
 from marl_battlegrounds.evaluation.catalog import (
@@ -92,6 +95,7 @@ from marl_battlegrounds.evaluation.models import (
     SpawnShieldTransitionFactsV1,
     StaticMechanicsCatalogV1,
     StatusLifecycleTransitionFactsV1,
+    TeamDeathmatchTransitionFactsV1,
     TransitionFactsV1,
     VersionedIdentityV1,
     canonical_digest_sha256,
@@ -140,6 +144,7 @@ def _filled_tuple(shape: tuple[int, ...], value: object) -> object:
 def _valid_snapshot() -> GlobalAnalysisSnapshotV1:
     zeros_10 = cast(tuple[int, ...], _filled_tuple((10,), 0))
     return GlobalAnalysisSnapshotV1(
+        team_deathmatch_scores=(0, 0),
         alive_mask=cast(tuple[bool, ...], _filled_tuple((10,), False)),
         agent_positions=cast(
             tuple[tuple[float, ...], ...], _filled_tuple((10, 2), 0.0)
@@ -352,6 +357,7 @@ def _valid_transition_facts(*, has_transition: bool = True) -> TransitionFactsV1
                 tuple[tuple[bool, ...], ...], _filled_tuple((10, 9), False)
             ),
         ),
+        team_deathmatch_facts=TeamDeathmatchTransitionFactsV1(outcome=0),
     )
 
 
@@ -560,7 +566,7 @@ def test_package_exports_only_the_approved_step_6_3_public_functions() -> None:
 
 
 def test_transition_fact_models_mirror_every_core_subtree_and_leaf_name() -> None:
-    """Keep the host schema losslessly aligned with the 46-leaf core payload."""
+    """Keep the host schema losslessly aligned with the 47-leaf core payload."""
     root_fields = tuple(TransitionFactsV1.model_fields)
     assert root_fields[2:] == CoreTransitionFacts._fields
 
@@ -575,6 +581,7 @@ def test_transition_fact_models_mirror_every_core_subtree_and_leaf_name() -> Non
         (PhysicalTransitionFactsV1, CorePhysicalTransitionFacts),
         (AuraTransitionFactsV1, CoreAuraTransitionFacts),
         (StatusLifecycleTransitionFactsV1, CoreStatusLifecycleTransitionFacts),
+        (TeamDeathmatchTransitionFactsV1, CoreTeamDeathmatchTransitionFacts),
     )
     for host_model, core_named_tuple in field_contracts:
         assert tuple(host_model.model_fields) == core_named_tuple._fields
@@ -602,6 +609,75 @@ def test_resolved_config_has_own_sensitive_digest_and_roundtrips() -> None:
     assert (
         ResolvedEnvConfigV1.model_validate_json(resolved.model_dump_json()) == resolved
     )
+
+
+def test_resolved_config_enforces_exact_task_mode_and_threshold_contract() -> None:
+    neutral = build_resolved_env_config_v1(evaluation_env_config())
+    team_deathmatch = build_resolved_env_config_v1(
+        evaluation_env_config(
+            task_mode=1,
+            team_deathmatch_score_threshold=25,
+        )
+    )
+
+    assert (neutral.task_mode, neutral.team_deathmatch_score_threshold) == (0, 0)
+    assert (
+        team_deathmatch.task_mode,
+        team_deathmatch.team_deathmatch_score_threshold,
+    ) == (1, 25)
+    assert team_deathmatch.canonical_digest_sha256 != neutral.canonical_digest_sha256
+
+    invalid_contracts = (
+        {"task_mode": 0, "team_deathmatch_score_threshold": 1},
+        {"task_mode": 1, "team_deathmatch_score_threshold": 0},
+        {"task_mode": 1, "team_deathmatch_score_threshold": 2**24 - 3},
+        {"task_mode": 2, "team_deathmatch_score_threshold": 0},
+        {"task_mode": 3, "team_deathmatch_score_threshold": 0},
+    )
+    for changes in invalid_contracts:
+        payload = neutral.model_dump(mode="python")
+        payload.update(changes)
+        payload["canonical_digest_sha256"] = canonical_digest_sha256(
+            payload,
+            exclude={"canonical_digest_sha256"},
+        )
+        with pytest.raises(ValidationError):
+            ResolvedEnvConfigV1.model_validate(payload)
+
+
+def test_team_deathmatch_context_accepts_a_remaining_artifact_horizon() -> None:
+    config = evaluation_env_config(
+        task_mode=1,
+        team_deathmatch_score_threshold=5,
+    )
+
+    assert evaluation_context(config=config).expected_horizon == config.max_steps
+    assert (
+        evaluation_context(
+            config=config,
+            expected_horizon=config.max_steps - 1,
+        ).expected_horizon
+        == config.max_steps - 1
+    )
+    with pytest.raises(ValidationError, match="maximum_episode_steps"):
+        evaluation_context(config=config, expected_horizon=config.max_steps + 1)
+
+
+def test_team_deathmatch_context_requires_an_active_member_on_each_team() -> None:
+    neutral_context = evaluation_context(
+        config=evaluation_env_config(team_sizes=(3, 0))
+    )
+    payload = neutral_context.model_dump(mode="python")
+    resolved_config = payload["resolved_env_config"]
+    resolved_config["task_mode"] = 1
+    resolved_config["team_deathmatch_score_threshold"] = 5
+    resolved_config["canonical_digest_sha256"] = canonical_digest_sha256(
+        resolved_config,
+        exclude={"canonical_digest_sha256"},
+    )
+
+    with pytest.raises(ValidationError, match="active member on each team"):
+        EvaluationEpisodeContextV1.model_validate(payload)
 
 
 @pytest.mark.parametrize(
@@ -804,6 +880,7 @@ def test_snapshot_observation_mask_and_frame_roundtrip_without_array_objects() -
     assert set(frame.snapshot.__class__.model_fields) == {
         "schema_id",
         "schema_version",
+        "team_deathmatch_scores",
         "alive_mask",
         "agent_positions",
         "current_health",
@@ -834,6 +911,16 @@ def test_dynamic_models_reject_python_lists_wrong_shapes_and_mask_drift() -> Non
         tuple[tuple[int, ...], ...], _filled_tuple((10, 2), 0)
     )
     with pytest.raises(ValidationError, match="slow_durations"):
+        GlobalAnalysisSnapshotV1.model_validate(snapshot_payload)
+
+    snapshot_payload = _valid_snapshot().model_dump(mode="python")
+    snapshot_payload["team_deathmatch_scores"] = (0, 0, 0)
+    with pytest.raises(ValidationError, match="team_deathmatch_scores"):
+        GlobalAnalysisSnapshotV1.model_validate(snapshot_payload)
+
+    snapshot_payload = _valid_snapshot().model_dump(mode="python")
+    snapshot_payload["team_deathmatch_scores"] = (0, -1)
+    with pytest.raises(ValidationError, match="team_deathmatch_scores"):
         GlobalAnalysisSnapshotV1.model_validate(snapshot_payload)
 
     mask_payload = _valid_action_mask().model_dump(mode="python")

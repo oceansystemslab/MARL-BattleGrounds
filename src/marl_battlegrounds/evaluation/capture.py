@@ -43,6 +43,7 @@ from marl_battlegrounds.core.types import (
     SpawnLifecycleObservation,
     SpawnShieldTransitionFacts,
     StatusLifecycleTransitionFacts,
+    TeamDeathmatchTransitionFacts,
     TransitionFacts,
 )
 from marl_battlegrounds.evaluation.events import decode_evaluation_events_v1
@@ -65,11 +66,14 @@ from marl_battlegrounds.evaluation.models import (
     SpawnLifecycleObservationV1,
     SpawnShieldTransitionFactsV1,
     StatusLifecycleTransitionFactsV1,
+    TeamDeathmatchTransitionFactsV1,
     TransitionFactsV1,
 )
 from marl_battlegrounds.evaluation.validation import (
+    _derive_and_validate_team_deathmatch_authority_v1,  # pyright: ignore[reportPrivateUsage]
     _validate_frame_information_regime,  # pyright: ignore[reportPrivateUsage]
     validate_evaluation_transition_unit_v1,
+    validate_initial_evaluation_frame_v1,
 )
 
 _BOOL_DTYPE = np.dtype(np.bool_)
@@ -172,6 +176,12 @@ def _normalize_snapshot_v1(state: EnvState) -> tuple[int, GlobalAnalysisSnapshot
         raise ValueError("state.step_count must be nonnegative")
 
     payload: dict[str, object] = {
+        "team_deathmatch_scores": _array_payload(
+            state.team_deathmatch_scores,
+            name="state.team_deathmatch_scores",
+            shape=(NUM_TEAMS,),
+            dtype=_INT32_DTYPE,
+        ),
         "alive_mask": _array_payload(
             state.alive_mask,
             name="state.alive_mask",
@@ -638,6 +648,7 @@ def _normalize_simple_fact_model(
         | PhysicalTransitionFactsV1
         | AuraTransitionFactsV1
         | StatusLifecycleTransitionFactsV1
+        | TeamDeathmatchTransitionFactsV1
     ],
     specs: tuple[tuple[str, tuple[int, ...], np.dtype[np.generic], bool], ...],
 ) -> (
@@ -648,6 +659,7 @@ def _normalize_simple_fact_model(
     | PhysicalTransitionFactsV1
     | AuraTransitionFactsV1
     | StatusLifecycleTransitionFactsV1
+    | TeamDeathmatchTransitionFactsV1
 ):
     _require_exact_type(source, source_type, name=source_name)
     payload = {
@@ -668,7 +680,7 @@ def normalize_transition_facts_v1(source: TransitionFacts) -> TransitionFactsV1:
 
     The caller must pass the exact ``TransitionFacts`` returned by an outer
     bundled :func:`jax.device_get`. Live JAX/device leaves are rejected so a
-    future transition-capture function cannot accidentally perform 46 implicit
+    future transition-capture function cannot accidentally perform 47 implicit
     transfers while walking this tree.
     """
     _require_exact_type(source, TransitionFacts, name="transition_facts")
@@ -834,6 +846,16 @@ def normalize_transition_facts_v1(source: TransitionFacts) -> TransitionFactsV1:
             ),
         ),
     )
+    team_deathmatch = cast(
+        TeamDeathmatchTransitionFactsV1,
+        _normalize_simple_fact_model(
+            source.team_deathmatch_facts,
+            source_type=TeamDeathmatchTransitionFacts,
+            source_name="team_deathmatch_facts",
+            model_type=TeamDeathmatchTransitionFactsV1,
+            specs=(("outcome", (), _INT32_DTYPE, False),),
+        ),
+    )
 
     return TransitionFactsV1.model_validate(
         {
@@ -852,6 +874,7 @@ def normalize_transition_facts_v1(source: TransitionFacts) -> TransitionFactsV1:
             "physical_facts": physical,
             "aura_facts": aura,
             "status_lifecycle_facts": status_lifecycle,
+            "team_deathmatch_facts": team_deathmatch,
         }
     )
 
@@ -920,7 +943,7 @@ def capture_initial_evaluation_frame_v1(
             )
         ),
     )
-    return _build_evaluation_frame_v1_from_host(
+    frame = _build_evaluation_frame_v1_from_host(
         context,
         frame_index=0,
         state=host_state,
@@ -930,6 +953,8 @@ def capture_initial_evaluation_frame_v1(
             host_availability
         ),
     )
+    validate_initial_evaluation_frame_v1(context, frame)
+    return frame
 
 
 def _normalize_reward_v1(source: Reward) -> object:
@@ -976,11 +1001,9 @@ def capture_evaluation_transition_unit_v1(
     canonical_reward: Reward,
     done_flags: DoneFlags,
     *,
-    canonical_reward_by_team: object | None = None,
     successor_shared_obs_information_availability_by_recipient_and_sensor_source: (
         object | None
     ) = None,
-    owning_task_end_reason: str | None = None,
 ) -> tuple[EvaluationTransitionV1, EvaluationFrameV1]:
     """Capture one adjacent transition unit through one bundled device transfer."""
     _require_exact_type(context, EvaluationEpisodeContextV1, name="context")
@@ -992,7 +1015,6 @@ def capture_evaluation_transition_unit_v1(
         host_transition_facts,
         host_canonical_reward,
         host_done_flags,
-        host_canonical_reward_by_team,
         host_successor_availability,
     ) = cast(
         tuple[
@@ -1003,7 +1025,6 @@ def capture_evaluation_transition_unit_v1(
             Reward,
             DoneFlags,
             object | None,
-            object | None,
         ],
         jax.device_get(
             (
@@ -1013,7 +1034,6 @@ def capture_evaluation_transition_unit_v1(
                 transition_facts,
                 canonical_reward,
                 done_flags,
-                canonical_reward_by_team,
                 successor_shared_obs_information_availability_by_recipient_and_sensor_source,
             )
         ),
@@ -1032,16 +1052,22 @@ def capture_evaluation_transition_unit_v1(
     facts = normalize_transition_facts_v1(host_transition_facts)
     if not facts.has_transition:
         raise ValueError("evaluation transition capture rejects initialization facts")
-    canonical_reward_by_team_payload: object | None = None
-    if host_canonical_reward_by_team is not None:
-        canonical_reward_by_team_payload = _array_payload(
-            host_canonical_reward_by_team,
-            name="canonical_reward_by_team",
-            shape=(NUM_TEAMS,),
-            dtype=_FLOAT32_DTYPE,
-            finite=True,
-        )
+    canonical_reward_by_agent = cast(
+        tuple[float, ...],
+        _normalize_reward_v1(host_canonical_reward),
+    )
     terminated, truncated = _normalize_done_flags_v1(host_done_flags)
+    canonical_reward_by_team, owning_task_end_reason = (
+        _derive_and_validate_team_deathmatch_authority_v1(
+            context,
+            start_frame,
+            facts,
+            successor_frame,
+            canonical_reward_by_agent,
+            terminated,
+            truncated,
+        )
+    )
     transition_index = start_frame.frame_index
     episode_id = context.identity.episode_id
     transition_id = f"{episode_id}:transition:{transition_index}"
@@ -1060,8 +1086,8 @@ def capture_evaluation_transition_unit_v1(
             "successor_frame_id": successor_frame.frame_id,
             "facts": facts,
             "events": events,
-            "canonical_reward_by_agent": _normalize_reward_v1(host_canonical_reward),
-            "canonical_reward_by_team": canonical_reward_by_team_payload,
+            "canonical_reward_by_agent": canonical_reward_by_agent,
+            "canonical_reward_by_team": canonical_reward_by_team,
             "terminated": terminated,
             "truncated": truncated,
             "owning_task_end_reason": owning_task_end_reason,
@@ -1177,6 +1203,7 @@ def _reconstruct_transition_facts(  # pyright: ignore[reportUnusedFunction]
     physical = source.physical_facts
     aura = source.aura_facts
     lifecycle = source.status_lifecycle_facts
+    team_deathmatch = source.team_deathmatch_facts
     return TransitionFacts(
         has_transition=jnp.asarray(source.has_transition, dtype=jnp.bool_),
         transition_start_step_count=jnp.asarray(
@@ -1248,6 +1275,9 @@ def _reconstruct_transition_facts(  # pyright: ignore[reportUnusedFunction]
                 lifecycle.cleared_by_new_death_by_recipient_and_status_channel,
                 dtype=jnp.bool_,
             ),
+        ),
+        team_deathmatch_facts=TeamDeathmatchTransitionFacts(
+            outcome=jnp.asarray(team_deathmatch.outcome, dtype=jnp.int32),
         ),
     )
 

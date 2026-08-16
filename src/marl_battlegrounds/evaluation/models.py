@@ -509,6 +509,8 @@ class ResolvedEnvConfigV1(EvaluationModel):
     )
     schema_version: Literal[1] = RESOLVED_ENV_CONFIG_SCHEMA_VERSION
     canonical_digest_sha256: _Sha256Hex
+    task_mode: Literal[0, 1]
+    team_deathmatch_score_threshold: Annotated[int, Field(ge=0, le=2**24 - 4)]
     maximum_episode_steps: Annotated[int, Field(gt=0, le=2**24)]
     map_width: _PositiveFloat
     map_height: _PositiveFloat
@@ -534,6 +536,13 @@ class ResolvedEnvConfigV1(EvaluationModel):
 
     @model_validator(mode="after")
     def _validate_resolved_config(self) -> ResolvedEnvConfigV1:
+        if self.task_mode == 1:
+            if self.team_deathmatch_score_threshold == 0:
+                raise ValueError("Team Deathmatch requires a positive score threshold")
+        elif self.team_deathmatch_score_threshold != 0:
+            raise ValueError(
+                "non-Team-Deathmatch modes require a zero Team Deathmatch threshold"
+            )
         if tuple(row.obstacle_slot for row in self.obstacle_slots) != tuple(
             range(MAX_OBSTACLE_SLOTS)
         ):
@@ -777,6 +786,16 @@ def _validate_context_rows(context: EvaluationEpisodeContextV1) -> None:
         if actual_profile != expected_profile:
             raise ValueError("roster profile disagrees with mechanics catalog")
 
+    if context.resolved_env_config.task_mode == 1:
+        active_team_ids = {
+            row.configured_team_id for row in context.roster if row.configured_active
+        }
+        if active_team_ids != {1, 2}:
+            raise ValueError(
+                "Team Deathmatch context requires at least one configured active "
+                "member on each team"
+            )
+
 
 def _validate_context_seeds(context: EvaluationEpisodeContextV1) -> None:
     active_roles = {
@@ -843,6 +862,7 @@ class GlobalAnalysisSnapshotV1(EvaluationModel):
         GLOBAL_ANALYSIS_SNAPSHOT_SCHEMA_ID
     )
     schema_version: Literal[1] = GLOBAL_ANALYSIS_SNAPSHOT_SCHEMA_VERSION
+    team_deathmatch_scores: _NonNegativeIntegerVector
     alive_mask: _BooleanVector
     agent_positions: _FloatMatrix
     current_health: _NonNegativeFloatVector
@@ -887,6 +907,11 @@ class GlobalAnalysisSnapshotV1(EvaluationModel):
                 (MAX_AGENT_SLOTS,),
                 field_name=field_name,
             )
+        _require_tuple_shape(
+            self.team_deathmatch_scores,
+            (NUM_TEAMS,),
+            field_name="team_deathmatch_scores",
+        )
         _require_tuple_shape(
             self.agent_positions,
             (MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS),
@@ -1370,6 +1395,12 @@ class StatusLifecycleTransitionFactsV1(EvaluationModel):
         return self
 
 
+class TeamDeathmatchTransitionFactsV1(EvaluationModel):
+    """Task-authored categorical outcome for one Team Deathmatch transition."""
+
+    outcome: Annotated[int, Field(ge=0, le=3)]
+
+
 class TransitionFactsV1(EvaluationModel):
     """Lossless normalized facts for a real transition or initialization."""
 
@@ -1388,6 +1419,7 @@ class TransitionFactsV1(EvaluationModel):
     physical_facts: PhysicalTransitionFactsV1
     aura_facts: AuraTransitionFactsV1
     status_lifecycle_facts: StatusLifecycleTransitionFactsV1
+    team_deathmatch_facts: TeamDeathmatchTransitionFactsV1
 
     @model_validator(mode="after")
     def _validate_transition_step_sentinel(self) -> TransitionFactsV1:
@@ -1637,6 +1669,43 @@ class AgentRespawnedEventV1(EvaluationEventBaseV1):
     realized_successor_position: tuple[_FiniteFloat, _FiniteFloat]
 
 
+class TeamDeathmatchScoreChangedEventV1(EvaluationEventBaseV1):
+    """One authoritative positive team-score edge between adjacent frames."""
+
+    event_type: Literal["team_deathmatch_score_changed"] = (
+        "team_deathmatch_score_changed"
+    )
+    phase_rank: Literal[130] = 130
+    team_index: Literal[0, 1]
+    team_id: Literal[1, 2]
+    score_increment: _PositiveInt
+    previous_score: _NonNegativeInt
+    successor_score: _NonNegativeInt
+
+    @model_validator(mode="after")
+    def _validate_score_edge(self) -> TeamDeathmatchScoreChangedEventV1:
+        if self.team_id != self.team_index + 1:
+            raise ValueError("team_id must match the zero-based team_index")
+        if self.successor_score != self.previous_score + self.score_increment:
+            raise ValueError(
+                "successor_score must equal previous_score plus score_increment"
+            )
+        return self
+
+
+class TeamDeathmatchCompletedEventV1(EvaluationEventBaseV1):
+    """One authoritative Team Deathmatch result and completion basis."""
+
+    event_type: Literal["team_deathmatch_completed"] = "team_deathmatch_completed"
+    phase_rank: Literal[140] = 140
+    outcome: Literal["team_a_win", "team_b_win", "draw"]
+    completion_basis: Literal[
+        "score_threshold",
+        "horizon",
+        "score_threshold_at_horizon",
+    ]
+
+
 type EvaluationEventV1 = Annotated[
     ActionRejectedEventV1
     | AbilityActivatedEventV1
@@ -1658,7 +1727,9 @@ type EvaluationEventV1 = Annotated[
     | StatusClearedByNewDeathEventV1
     | SpawnShieldExpiredEventV1
     | RespawnWaveOccurredEventV1
-    | AgentRespawnedEventV1,
+    | AgentRespawnedEventV1
+    | TeamDeathmatchScoreChangedEventV1
+    | TeamDeathmatchCompletedEventV1,
     Field(discriminator="event_type"),
 ]
 
@@ -1804,6 +1875,9 @@ __all__ = [
     "StatusLifecycleTransitionFactsV1",
     "StatusMechanicV1",
     "StatusRefreshedOrExtendedEventV1",
+    "TeamDeathmatchCompletedEventV1",
+    "TeamDeathmatchScoreChangedEventV1",
+    "TeamDeathmatchTransitionFactsV1",
     "TransitionFactsV1",
     "VersionedIdentityV1",
     "canonical_digest_sha256",

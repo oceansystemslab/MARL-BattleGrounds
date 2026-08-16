@@ -9,6 +9,8 @@ import numpy as np
 from marl_battlegrounds.core.config import resolve_agent_profile
 from marl_battlegrounds.core.env import reset, step
 from marl_battlegrounds.core.types import (
+    CONTEXT_FEATURE_TDM_ALLY_SCORE,
+    CONTEXT_FEATURE_TDM_ENEMY_SCORE,
     HUNTER_CLASS_ID,
     MAGE_CLASS_ID,
     MAX_AGENT_SLOTS,
@@ -17,9 +19,14 @@ from marl_battlegrounds.core.types import (
     OBSTACLE_FEATURES,
     PRIEST_CLASS_ID,
     ROGUE_CLASS_ID,
+    TASK_MODE_NEUTRAL,
+    TASK_MODE_OUTCOME_TEAM_A_WIN,
+    TASK_MODE_TDM,
     WARRIOR_CLASS_ID,
     Action,
+    DoneFlags,
     EnvConfig,
+    Reward,
 )
 from marl_battlegrounds.evaluation.capture import (
     capture_evaluation_transition_unit_v1,
@@ -55,6 +62,9 @@ _DIGEST_C = "3" * 64
 def evaluation_env_config(
     *,
     team_sizes: tuple[int, int] = (3, 2),
+    task_mode: int = TASK_MODE_NEUTRAL,
+    team_deathmatch_score_threshold: int = 0,
+    max_steps: int = 100,
 ) -> EnvConfig:
     """Return one asymmetric, padded, duplicate-class-valid configuration."""
     requested_classes = jnp.asarray(
@@ -93,7 +103,9 @@ def evaluation_env_config(
         axis=0,
     )
     return EnvConfig(
-        max_steps=100,
+        task_mode=task_mode,
+        team_deathmatch_score_threshold=team_deathmatch_score_threshold,
+        max_steps=max_steps,
         map_width=20.0,
         map_height=12.0,
         obstacles=jnp.zeros(
@@ -221,9 +233,21 @@ def evaluation_context(
     expected_horizon: int = 100,
     aggregation_keys: tuple[AggregationKeyV1, ...] | None = None,
     episode_id: str = "episode-001",
+    config: EnvConfig | None = None,
 ) -> EvaluationEpisodeContextV1:
     """Build a complete valid episode context through the public constructor."""
-    config = evaluation_env_config()
+    resolved_config = evaluation_env_config() if config is None else config
+    active_mask = tuple(
+        bool(value) for value in np.asarray(resolved_config.agent_profile.active_mask)
+    )
+    seed_protocol = evaluation_seed_protocol(with_scenario=with_scenario)
+    seed_updates: dict[str, int | str] = {}
+    if sum(active_mask[:MAX_AGENTS_PER_TEAM]) <= 1:
+        seed_updates["cooperative_partner_seed"] = "not_applicable"
+    if not any(active_mask[MAX_AGENTS_PER_TEAM:]):
+        seed_updates["adversarial_opponent_seed"] = "not_applicable"
+    if seed_updates:
+        seed_protocol = seed_protocol.model_copy(update=seed_updates)
     return build_evaluation_episode_context_v1(
         identity=evaluation_episode_identity(
             with_scenario=with_scenario,
@@ -241,12 +265,12 @@ def evaluation_context(
             )
         ),
         expected_horizon=expected_horizon,
-        config=config,
+        config=resolved_config,
         public_agent_id_by_global_slot=tuple(
             f"{public_agent_id_prefix}-{slot}" for slot in range(MAX_AGENT_SLOTS)
         ),
-        policy_assignments=policy_assignments(config),
-        seed_protocol=evaluation_seed_protocol(with_scenario=with_scenario),
+        policy_assignments=policy_assignments(resolved_config),
+        seed_protocol=seed_protocol,
         capture_profile=(
             capture_profile
             if capture_profile is not None
@@ -334,16 +358,17 @@ def captured_evaluation_trajectory(
     episode_id: str = "episode-001",
     aggregation_keys: tuple[AggregationKeyV1, ...] | None = None,
     actions: tuple[Action, ...] | None = None,
+    config: EnvConfig | None = None,
 ) -> CapturedEvaluationTrajectory:
     """Capture a deterministic trajectory through public reset, step, and CP2 APIs."""
     if transition_count < 0:
         raise ValueError("transition_count must be nonnegative")
-    if transition_count > 100:
+    resolved_config = evaluation_env_config() if config is None else config
+    if transition_count > resolved_config.max_steps:
         raise ValueError("transition_count cannot exceed the fixture config horizon")
     if actions is not None and len(actions) != transition_count:
         raise ValueError("actions must contain exactly one joint action per transition")
 
-    config = evaluation_env_config()
     context = evaluation_context(
         execution_information_mode=execution_information_mode,
         with_scenario=with_scenario,
@@ -351,9 +376,10 @@ def captured_evaluation_trajectory(
         expected_horizon=expected_horizon,
         aggregation_keys=aggregation_keys,
         episode_id=episode_id,
+        config=resolved_config,
     )
     state, observation, action_mask, _reset_info = reset(
-        config,
+        resolved_config,
         jax.random.PRNGKey(0),
     )
     availability = (
@@ -379,7 +405,7 @@ def captured_evaluation_trajectory(
             action_mask,
             info,
         ) = step(
-            config,
+            resolved_config,
             state,
             action_mask,
             neutral_action() if actions is None else actions[transition_index],
@@ -408,9 +434,215 @@ def captured_evaluation_trajectory(
     )
 
 
+def captured_team_deathmatch_threshold_trajectory(
+    *,
+    at_horizon: bool = False,
+    episode_id: str = "episode-001",
+    aggregation_keys: tuple[AggregationKeyV1, ...] | None = None,
+) -> CapturedEvaluationTrajectory:
+    """Capture one authoritative Team A threshold win for host-side tests."""
+    maximum_episode_steps = 1 if at_horizon else 100
+    config = evaluation_env_config(
+        task_mode=TASK_MODE_TDM,
+        team_deathmatch_score_threshold=1,
+        max_steps=maximum_episode_steps,
+    )
+    context = evaluation_context(
+        expected_horizon=maximum_episode_steps,
+        episode_id=episode_id,
+        aggregation_keys=aggregation_keys,
+        config=config,
+    )
+    start_state, start_observation, start_action_mask, _reset_info = reset(
+        config,
+        jax.random.PRNGKey(0),
+    )
+    start_frame = capture_initial_evaluation_frame_v1(
+        context,
+        start_state,
+        start_observation,
+        start_action_mask,
+    )
+    (
+        successor_state,
+        successor_observation,
+        _canonical_reward,
+        horizon_done_flags,
+        successor_action_mask,
+        step_info,
+    ) = step(
+        config,
+        start_state,
+        start_action_mask,
+        neutral_action(),
+        jax.random.PRNGKey(1),
+    )
+
+    team_b_recipient = MAX_AGENTS_PER_TEAM
+    successor_state = successor_state._replace(
+        team_deathmatch_scores=jnp.asarray((1, 0), dtype=jnp.int32),
+        alive_mask=successor_state.alive_mask.at[team_b_recipient].set(False),
+        current_health=successor_state.current_health.at[team_b_recipient].set(0.0),
+    )
+    team_a_active = jnp.logical_and(
+        config.agent_profile.active_mask,
+        config.agent_profile.team_ids == 1,
+    )
+    team_b_active = jnp.logical_and(
+        config.agent_profile.active_mask,
+        config.agent_profile.team_ids == 2,
+    )
+    context_features = successor_observation.context_features
+    context_features = context_features.at[:, CONTEXT_FEATURE_TDM_ALLY_SCORE].set(
+        jnp.where(
+            team_a_active,
+            1.0,
+            context_features[:, CONTEXT_FEATURE_TDM_ALLY_SCORE],
+        )
+    )
+    context_features = context_features.at[:, CONTEXT_FEATURE_TDM_ENEMY_SCORE].set(
+        jnp.where(
+            team_b_active,
+            1.0,
+            context_features[:, CONTEXT_FEATURE_TDM_ENEMY_SCORE],
+        )
+    )
+    successor_observation = successor_observation._replace(
+        context_features=context_features
+    )
+    transition_facts = step_info.transition_facts._replace(
+        death_facts=step_info.transition_facts.death_facts._replace(
+            is_newly_dead_by_recipient=(
+                step_info.transition_facts.death_facts.is_newly_dead_by_recipient.at[
+                    team_b_recipient
+                ].set(True)
+            )
+        ),
+        team_deathmatch_facts=(
+            step_info.transition_facts.team_deathmatch_facts._replace(
+                outcome=jnp.asarray(
+                    TASK_MODE_OUTCOME_TEAM_A_WIN,
+                    dtype=jnp.int32,
+                )
+            )
+        ),
+    )
+    reward = Reward(
+        rewards=jnp.asarray(
+            (1.0, 1.0, 1.0, 0.0, 0.0, -1.0, -1.0, 0.0, 0.0, 0.0),
+            dtype=jnp.float32,
+        )
+    )
+    done_flags = DoneFlags(
+        terminated=jnp.asarray(True, dtype=jnp.bool_),
+        truncated=horizon_done_flags.truncated,
+    )
+    transition, successor_frame = capture_evaluation_transition_unit_v1(
+        context,
+        start_frame,
+        successor_state,
+        successor_observation,
+        successor_action_mask,
+        transition_facts,
+        reward,
+        done_flags,
+    )
+    return CapturedEvaluationTrajectory(
+        context=context,
+        frames=(start_frame, successor_frame),
+        transitions=(transition,),
+    )
+
+
+def captured_resumed_team_deathmatch_horizon_trajectory() -> (
+    CapturedEvaluationTrajectory
+):
+    """Capture a resumed unequal-score TDM prefix through its horizon draw."""
+    config = evaluation_env_config(
+        task_mode=TASK_MODE_TDM,
+        team_deathmatch_score_threshold=10,
+        max_steps=3,
+    )
+    context = evaluation_context(
+        expected_horizon=2,
+        config=config,
+    )
+    state, observation, action_mask, _reset_info = reset(
+        config,
+        jax.random.PRNGKey(0),
+    )
+    state, observation, _reward, _done, action_mask, _step_info = step(
+        config,
+        state,
+        action_mask,
+        neutral_action(),
+        jax.random.PRNGKey(1),
+    )
+    state = state._replace(team_deathmatch_scores=jnp.asarray((2, 1), dtype=jnp.int32))
+    team_a_active = jnp.logical_and(
+        config.agent_profile.active_mask,
+        config.agent_profile.team_ids == 1,
+    )
+    team_b_active = jnp.logical_and(
+        config.agent_profile.active_mask,
+        config.agent_profile.team_ids == 2,
+    )
+    context_features = observation.context_features
+    context_features = context_features.at[:, CONTEXT_FEATURE_TDM_ALLY_SCORE].set(
+        jnp.where(
+            team_a_active,
+            2.0,
+            jnp.where(team_b_active, 1.0, 0.0),
+        )
+    )
+    context_features = context_features.at[:, CONTEXT_FEATURE_TDM_ENEMY_SCORE].set(
+        jnp.where(
+            team_a_active,
+            1.0,
+            jnp.where(team_b_active, 2.0, 0.0),
+        )
+    )
+    observation = observation._replace(context_features=context_features)
+    current_frame = capture_initial_evaluation_frame_v1(
+        context,
+        state,
+        observation,
+        action_mask,
+    )
+    frames = [current_frame]
+    transitions: list[EvaluationTransitionV1] = []
+    for transition_index in range(context.expected_horizon):
+        state, observation, reward, done, action_mask, info = step(
+            config,
+            state,
+            action_mask,
+            neutral_action(),
+            jax.random.PRNGKey(transition_index + 2),
+        )
+        transition, current_frame = capture_evaluation_transition_unit_v1(
+            context,
+            current_frame,
+            state,
+            observation,
+            action_mask,
+            info.transition_facts,
+            reward,
+            done,
+        )
+        transitions.append(transition)
+        frames.append(current_frame)
+    return CapturedEvaluationTrajectory(
+        context=context,
+        frames=tuple(frames),
+        transitions=tuple(transitions),
+    )
+
+
 __all__ = [
     "CapturedEvaluationTrajectory",
     "captured_evaluation_trajectory",
+    "captured_resumed_team_deathmatch_horizon_trajectory",
+    "captured_team_deathmatch_threshold_trajectory",
     "content_identity",
     "evaluation_context",
     "evaluation_env_config",

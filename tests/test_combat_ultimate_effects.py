@@ -45,6 +45,7 @@ from marl_battlegrounds.core.types import (
     NUM_CLASSES,
     NUM_SLOW_CHANNELS,
     NUM_STUN_CHANNELS,
+    NUM_TEAMS,
     OBSTACLE_FEATURE_ACTIVE,
     OBSTACLE_FEATURE_RADIUS,
     OBSTACLE_FEATURE_TYPE,
@@ -151,6 +152,8 @@ def _scenario(
         ),
     )
     config = EnvConfig(
+        task_mode=0,
+        team_deathmatch_score_threshold=0,
         max_steps=100,
         map_width=20.0,
         map_height=12.0,
@@ -165,6 +168,7 @@ def _scenario(
         team_respawn_wave_period_step_count=jnp.asarray((5, 5), dtype=jnp.int32),
     )
     state = EnvState(
+        team_deathmatch_scores=jnp.zeros((NUM_TEAMS,), dtype=jnp.int32),
         step_count=jnp.array(0, dtype=jnp.int32),
         agent_positions=(
             _default_positions(team_sizes) if positions is None else positions

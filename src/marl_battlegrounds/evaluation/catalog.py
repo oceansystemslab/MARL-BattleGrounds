@@ -419,6 +419,8 @@ def build_resolved_env_config_v1(config: EnvConfig) -> ResolvedEnvConfigV1:
     payload: dict[str, object] = {
         "schema_id": RESOLVED_ENV_CONFIG_SCHEMA_ID,
         "schema_version": RESOLVED_ENV_CONFIG_SCHEMA_VERSION,
+        "task_mode": config.task_mode,
+        "team_deathmatch_score_threshold": (config.team_deathmatch_score_threshold),
         "maximum_episode_steps": config.max_steps,
         "map_width": float(config.map_width),
         "map_height": float(config.map_height),

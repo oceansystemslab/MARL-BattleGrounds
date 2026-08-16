@@ -252,7 +252,7 @@ def test_one_core_step_has_one_bundled_host_transfer_and_ui_only_has_none(
     assert submitted.transition_applied is not None
     assert len(transferred_bundles) == 1
     assert isinstance(transferred_bundles[0], tuple)
-    assert len(cast(tuple[object, ...], transferred_bundles[0])) == 8
+    assert len(cast(tuple[object, ...], transferred_bundles[0])) == 7
 
 
 def test_interactive_submit_passes_context_to_action_builder_and_config_to_core_step(

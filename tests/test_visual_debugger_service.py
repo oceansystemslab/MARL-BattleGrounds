@@ -51,7 +51,7 @@ from scripts.dev.visual_debugger.scenarios import get_scenario
 from scripts.dev.visual_debugger.service import DebuggerService
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
-from marl_battlegrounds.core.types import DoneFlags, EnvConfig, EnvState
+from marl_battlegrounds.core.types import EnvConfig, EnvState
 from marl_battlegrounds.evaluation.metrics import (
     EvaluationEpisodeCompletionV1,
     EvaluationMetricReducerStateV1,
@@ -207,6 +207,7 @@ def _recording_service(
     *,
     reducers: tuple[EvaluationMetricReducerV1, ...] = (),
     view_mode: ViewMode = "researcher",
+    maximum_episode_steps: int | None = None,
 ) -> tuple[DebuggerService, DebuggerReplayRecorderV1]:
     debug_launch = debugger_test_launch_specification()
     launch = build_debugger_evaluation_launch_specification_v1(
@@ -215,6 +216,14 @@ def _recording_service(
         capture_profile="evaluation_metric_complete",
     )
     scenario = get_scenario(scenario_name)
+    if maximum_episode_steps is not None:
+        build_registered_scenario = scenario.build_scenario
+
+        def build_scenario_with_horizon() -> tuple[EnvConfig, EnvState]:
+            config, state = build_registered_scenario()
+            return config._replace(max_steps=maximum_episode_steps), state
+
+        scenario = replace(scenario, build_scenario=build_scenario_with_horizon)
     session = create_session(
         scenario,
         seed=0,
@@ -1103,29 +1112,12 @@ def test_endpoint_auto_save_installs_saved_status_and_review_handoff(
 
 def test_exact_horizon_truncation_auto_saves_as_complete_declared_horizon(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    service, recorder = _recording_service(tmp_path, "basic_support")
-    actual_step = control_module.step
-    calls = 0
-
-    def truncate_at_horizon(*args: object, **kwargs: object) -> object:
-        nonlocal calls
-        calls += 1
-        result = actual_step(*args, **kwargs)  # type: ignore[arg-type]
-        if calls != 2:
-            return result
-        state, observation, reward, done, mask, info = result
-        return (
-            state,
-            observation,
-            reward,
-            DoneFlags(terminated=done.terminated, truncated=jnp.asarray(True)),
-            mask,
-            info,
-        )
-
-    monkeypatch.setattr(control_module, "step", truncate_at_horizon)
+    service, recorder = _recording_service(
+        tmp_path,
+        "basic_support",
+        maximum_episode_steps=2,
+    )
     first = service.apply_command(
         _request(
             "horizon-truncate-0", base_revision=0, command=KeyboardCommandV1(key="n")

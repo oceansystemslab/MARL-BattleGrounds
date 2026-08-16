@@ -42,6 +42,10 @@ from marl_battlegrounds.core.types import (
     OBSTACLE_FEATURES,
     OBSTACLE_TYPE_PILLAR,
     OBSTACLE_TYPE_WALL,
+    TASK_MODE_CTF,
+    TASK_MODE_KOTH,
+    TASK_MODE_NEUTRAL,
+    TASK_MODE_TDM,
     TEAM_A_ID,
     Action,
     ActionMask,
@@ -106,6 +110,8 @@ def _spawn_pad_positions() -> Array:
 def _valid_config(
     *,
     team_sizes: tuple[int, int] = (2, 2),
+    task_mode: int = TASK_MODE_NEUTRAL,
+    team_deathmatch_score_threshold: int = 0,
     obstacles: Array | None = None,
     spawn_pad_positions: Array | None = None,
     spawn_shield_duration_steps: int = 3,
@@ -117,6 +123,8 @@ def _valid_config(
         jnp.asarray(team_sizes, dtype=jnp.int32),
     )
     return EnvConfig(
+        task_mode=task_mode,
+        team_deathmatch_score_threshold=team_deathmatch_score_threshold,
         max_steps=100,
         map_width=12.0,
         map_height=8.0,
@@ -188,6 +196,8 @@ def _wall_local_to_world(obstacle: Array, local_center: tuple[float, float]) -> 
 
 def test_validation_inventory_covers_current_public_schemas() -> None:
     assert EnvConfig._fields == (
+        "task_mode",
+        "team_deathmatch_score_threshold",
         "max_steps",
         "map_width",
         "map_height",
@@ -230,6 +240,110 @@ def test_validator_rejects_wrong_top_level_and_profile_types() -> None:
     with pytest.raises(TypeError, match="agent_profile"):
         validate_env_config(
             _replace_config(_valid_config(), agent_profile=cast(Any, ()))
+        )
+
+
+@pytest.mark.parametrize(
+    "task_mode",
+    (True, False, 0.0, np.int32(0), jnp.asarray(0), "0"),
+    ids=("true", "false", "float", "numpy-int", "jax-scalar", "string"),
+)
+def test_task_mode_requires_an_exact_python_integer(task_mode: object) -> None:
+    with pytest.raises(TypeError, match="task_mode must be an int"):
+        validate_env_config(_replace_config(_valid_config(), task_mode=task_mode))
+
+
+@pytest.mark.parametrize(
+    "task_mode",
+    (TASK_MODE_KOTH, TASK_MODE_CTF),
+    ids=("king-of-the-hill", "capture-the-flag"),
+)
+def test_reserved_task_modes_remain_unavailable(task_mode: int) -> None:
+    with pytest.raises(ValueError, match="reserved but is not implemented"):
+        validate_env_config(_replace_config(_valid_config(), task_mode=task_mode))
+
+
+@pytest.mark.parametrize("task_mode", (-1, 4, 99))
+def test_unknown_task_modes_are_rejected(task_mode: int) -> None:
+    with pytest.raises(ValueError, match="available mode"):
+        validate_env_config(_replace_config(_valid_config(), task_mode=task_mode))
+
+
+@pytest.mark.parametrize(
+    "threshold",
+    (True, False, 1.0, np.int32(1), jnp.asarray(1), "1"),
+    ids=("true", "false", "float", "numpy-int", "jax-scalar", "string"),
+)
+def test_team_deathmatch_threshold_requires_an_exact_python_integer(
+    threshold: object,
+) -> None:
+    with pytest.raises(
+        TypeError,
+        match="team_deathmatch_score_threshold must be an int",
+    ):
+        validate_env_config(
+            _replace_config(
+                _valid_config(),
+                team_deathmatch_score_threshold=threshold,
+            )
+        )
+
+
+@pytest.mark.parametrize("threshold", (-1, 1))
+def test_neutral_mode_requires_zero_team_deathmatch_threshold(
+    threshold: int,
+) -> None:
+    with pytest.raises(ValueError, match="must be zero in neutral mode"):
+        validate_env_config(_valid_config(team_deathmatch_score_threshold=threshold))
+
+
+@pytest.mark.parametrize(
+    "threshold",
+    (1, 2**24 - 4),
+    ids=("minimum", "maximum-exact-context-value"),
+)
+def test_team_deathmatch_threshold_accepts_its_complete_domain(
+    threshold: int,
+) -> None:
+    assert (
+        validate_env_config(
+            _valid_config(
+                task_mode=TASK_MODE_TDM,
+                team_deathmatch_score_threshold=threshold,
+            )
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("threshold", (-1, 0, 2**24 - 3))
+def test_team_deathmatch_threshold_rejects_values_outside_its_domain(
+    threshold: int,
+) -> None:
+    with pytest.raises(ValueError, match="must be in"):
+        validate_env_config(
+            _valid_config(
+                task_mode=TASK_MODE_TDM,
+                team_deathmatch_score_threshold=threshold,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "team_sizes",
+    ((0, 0), (0, 1), (1, 0)),
+    ids=("both-empty", "team-a-empty", "team-b-empty"),
+)
+def test_team_deathmatch_requires_one_active_member_per_team(
+    team_sizes: tuple[int, int],
+) -> None:
+    with pytest.raises(ValueError, match="at least one configured active member"):
+        validate_env_config(
+            _valid_config(
+                team_sizes=team_sizes,
+                task_mode=TASK_MODE_TDM,
+                team_deathmatch_score_threshold=1,
+            )
         )
 
 
@@ -1173,6 +1287,8 @@ def test_bounds_pillar_wall_and_agent_tangency_are_legal() -> None:
     positions = positions.at[0, 0].set(jnp.asarray((0.5, 0.5), dtype=jnp.float32))
     positions = positions.at[0, 1].set(jnp.asarray((1.5, 0.5), dtype=jnp.float32))
     config = EnvConfig(
+        task_mode=0,
+        team_deathmatch_score_threshold=0,
         max_steps=10,
         map_width=12.0,
         map_height=8.0,

@@ -76,6 +76,8 @@ CANONICAL_EVENT_TYPES = (
     "spawn_shield_expired",
     "respawn_wave_occurred",
     "agent_respawned",
+    "team_deathmatch_score_changed",
+    "team_deathmatch_completed",
 )
 
 
@@ -213,7 +215,7 @@ def test_exhaustive_fixture_matrix_owns_every_accepted_presentation_variant() ->
     assert set(event.event_type for event in grammar.event_batch.events) == set(
         CANONICAL_EVENT_TYPES
     )
-    assert len(grammar.event_batch.events) == 23
+    assert len(grammar.event_batch.events) == 25
 
     assert type(vocabulary.scene) is BattlefieldSceneV2
     assert {agent.class_id for agent in vocabulary.scene.agents} == {

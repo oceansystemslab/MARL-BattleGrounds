@@ -84,6 +84,12 @@ from marl_battlegrounds.evaluation.models import (
 from marl_battlegrounds.evaluation.models import (
     StatusRefreshedOrExtendedEventV1 as Cp2StatusRefreshedEventV1,
 )
+from marl_battlegrounds.evaluation.models import (
+    TeamDeathmatchCompletedEventV1 as EvaluationTeamDeathmatchCompletedEventV1,
+)
+from marl_battlegrounds.evaluation.models import (
+    TeamDeathmatchScoreChangedEventV1 as EvaluationTeamDeathmatchScoreChangedEventV1,
+)
 from marl_battlegrounds.evaluation.pov import (
     ActorPovActionMaskV1,
     ActorPovAxisMappingV1,
@@ -186,6 +192,8 @@ from marl_battlegrounds.rendering.scene import (
     StatusSourceEvidenceIndexV2,
     StatusSourceEvidenceSceneV2,
     StatusSourceEvidenceStateV2,
+    TeamDeathmatchCompletedEventV2,
+    TeamDeathmatchScoreChangedEventV2,
     VisualAgentAnchorV2,
     VisualAgentPhaseTrajectoryV2,
     VisualEventBatchV2,
@@ -2147,6 +2155,26 @@ def _project_visual_event_v2(
             team_id=event.team_id,
             realized_successor_position=event.realized_successor_position,
             agent_anchor=anchor(event.agent_global_slot, "successor"),
+        )
+    if type(event) is EvaluationTeamDeathmatchScoreChangedEventV1:
+        return TeamDeathmatchScoreChangedEventV2(
+            **identity,
+            team_index=event.team_index,
+            team_id=event.team_id,
+            score_increment=event.score_increment,
+            previous_score=event.previous_score,
+            successor_score=event.successor_score,
+            team_anchor=VisualTeamAnchorV2(
+                phase="successor",
+                team_index=event.team_index,
+                team_id=event.team_id,
+            ),
+        )
+    if type(event) is EvaluationTeamDeathmatchCompletedEventV1:
+        return TeamDeathmatchCompletedEventV2(
+            **identity,
+            outcome=event.outcome,
+            completion_basis=event.completion_basis,
         )
     raise TypeError(f"unsupported canonical event type: {type(event).__name__}.")
 

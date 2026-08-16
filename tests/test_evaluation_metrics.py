@@ -16,6 +16,8 @@ from pydantic import ConfigDict, PrivateAttr, ValidationError
 from tests.evaluation_fixtures import (
     CapturedEvaluationTrajectory,
     captured_evaluation_trajectory,
+    captured_team_deathmatch_threshold_trajectory,
+    evaluation_env_config,
     mage_target_none_ultimate_action,
 )
 
@@ -24,6 +26,7 @@ import marl_battlegrounds.evaluation as evaluation_package
 import marl_battlegrounds.evaluation.capture as capture_module
 import marl_battlegrounds.evaluation.metrics as metrics_module
 import marl_battlegrounds.evaluation.validation as validation_module
+from marl_battlegrounds.core.types import CONTEXT_FEATURE_CURRENT_TIMESTEP
 from marl_battlegrounds.evaluation.metrics import (
     AgentPairStatisticSubjectV1,
     AgentStatisticSubjectV1,
@@ -1226,7 +1229,21 @@ def test_observer_rejects_adversarial_mutable_context_subtype() -> None:
 def test_initial_validator_accepts_public_capture_at_nonzero_simulator_epoch() -> None:
     """Artifact frame zero is independent of the simulator's starting epoch."""
     trajectory = captured_evaluation_trajectory(transition_count=0)
-    initial_frame = trajectory.frames[0].model_copy(update={"simulator_step_count": 17})
+    context_rows = [
+        list(row) for row in trajectory.frames[0].base_observation.context_features
+    ]
+    for global_slot, roster_row in enumerate(trajectory.context.roster):
+        if roster_row.configured_active:
+            context_rows[global_slot][CONTEXT_FEATURE_CURRENT_TIMESTEP] = 17.0
+    base_observation = trajectory.frames[0].base_observation.model_copy(
+        update={"context_features": tuple(tuple(row) for row in context_rows)}
+    )
+    initial_frame = trajectory.frames[0].model_copy(
+        update={
+            "simulator_step_count": 17,
+            "base_observation": base_observation,
+        }
+    )
 
     validate_initial_evaluation_frame_v1(trajectory.context, initial_frame)
 
@@ -1983,73 +2000,60 @@ def test_noncomplete_rollout_metadata_is_not_invented_or_contradictory(
 
 
 @pytest.mark.parametrize(
-    ("expected_horizon", "expected_bases"),
+    ("at_horizon", "expected_bases"),
     (
-        (2, ("task_terminal",)),
-        (1, ("task_terminal", "declared_horizon")),
+        (False, ("task_terminal",)),
+        (True, ("task_terminal", "declared_horizon")),
     ),
 )
 def test_task_terminal_completion_preserves_authoritative_reason_and_bases(
-    expected_horizon: int,
+    at_horizon: bool,
     expected_bases: tuple[str, ...],
 ) -> None:
     """Terminal evidence and horizon evidence remain independent and canonical."""
-    trajectory = captured_evaluation_trajectory(
-        transition_count=1,
-        expected_horizon=expected_horizon,
-    )
-    terminal_transition = EvaluationTransitionV1.model_validate(
-        {
-            **trajectory.transitions[0].model_dump(mode="python"),
-            "terminated": True,
-            "owning_task_end_reason": "objective_complete",
-        }
-    )
+    trajectory = captured_team_deathmatch_threshold_trajectory(at_horizon=at_horizon)
     observer = build_evaluation_observer_v1(
         trajectory.context,
         reducers=(_Reducer(),),
     )
     observer.start(trajectory.frames[0])
-    observer.append(terminal_transition, trajectory.frames[1])
+    observer.append(trajectory.transitions[0], trajectory.frames[1])
 
     report = observer.finalize(completion_state="complete")
 
     assert report.completion.terminated is True
-    assert report.completion.truncated is False
+    assert report.completion.truncated is at_horizon
     assert report.completion.completion_bases == expected_bases
-    assert report.completion.end_or_failure_reason == "objective_complete"
+    expected_reason = (
+        "team_deathmatch_score_threshold_at_horizon"
+        if at_horizon
+        else "team_deathmatch_score_threshold"
+    )
+    assert report.completion.end_or_failure_reason == expected_reason
     assert report.processing_status.status == "succeeded"
 
 
-def test_short_truncated_rollout_is_noncomplete_but_still_fully_processed() -> None:
-    """Truncation seals input without pretending the declared horizon was met."""
+def test_neutral_horizon_truncation_is_complete_and_fully_processed() -> None:
+    """Neutral truncation is valid exactly at its resolved episode horizon."""
     trajectory = captured_evaluation_trajectory(
         transition_count=1,
-        expected_horizon=2,
-    )
-    truncated_transition = EvaluationTransitionV1.model_validate(
-        {
-            **trajectory.transitions[0].model_dump(mode="python"),
-            "truncated": True,
-            "owning_task_end_reason": "external_limit",
-        }
+        expected_horizon=1,
+        config=evaluation_env_config(max_steps=1),
     )
     observer = build_evaluation_observer_v1(
         trajectory.context,
         reducers=(_Reducer(),),
     )
     observer.start(trajectory.frames[0])
-    observer.append(truncated_transition, trajectory.frames[1])
+    observer.append(trajectory.transitions[0], trajectory.frames[1])
 
-    report = observer.finalize(
-        completion_state="partial",
-    )
+    report = observer.finalize(completion_state="complete")
 
-    assert report.completion.completion_state == "partial"
+    assert report.completion.completion_state == "complete"
     assert report.completion.terminated is False
     assert report.completion.truncated is True
-    assert report.completion.completion_bases == ()
-    assert report.completion.end_or_failure_reason == "external_limit"
+    assert report.completion.completion_bases == ("declared_horizon",)
+    assert report.completion.end_or_failure_reason is None
     assert report.processing_status.status == "succeeded"
     assert report.processing_status.processed_transition_count == 1
 
@@ -2551,20 +2555,10 @@ def test_endpoint_claim_requiring_completion_fails_on_partial_rollout(
 
 def test_authoritative_transition_end_reason_rejects_completion_disagreement() -> None:
     """CP3 may preserve but never rewrite a CP2 owning-task end reason."""
-    trajectory = captured_evaluation_trajectory(
-        transition_count=1,
-        expected_horizon=2,
-    )
-    truncated_transition = EvaluationTransitionV1.model_validate(
-        {
-            **trajectory.transitions[0].model_dump(mode="python"),
-            "truncated": True,
-            "owning_task_end_reason": "external_limit",
-        }
-    )
+    trajectory = captured_team_deathmatch_threshold_trajectory()
     observer = build_evaluation_observer_v1(trajectory.context)
     observer.start(trajectory.frames[0])
-    observer.append(truncated_transition, trajectory.frames[1])
+    observer.append(trajectory.transitions[0], trajectory.frames[1])
 
     with pytest.raises(ValueError, match="authoritative task end reason"):
         observer.finalize(
@@ -3193,21 +3187,10 @@ def test_package_exports_the_complete_cp3_public_seam() -> None:
 
 def test_simultaneous_terminal_truncation_at_horizon_preserves_all_truth() -> None:
     """Done flags and completion bases are recorded without collapsing evidence."""
-    trajectory = captured_evaluation_trajectory(
-        transition_count=1,
-        expected_horizon=1,
-    )
-    done_transition = EvaluationTransitionV1.model_validate(
-        {
-            **trajectory.transitions[0].model_dump(mode="python"),
-            "terminated": True,
-            "truncated": True,
-            "owning_task_end_reason": "simultaneous_done",
-        }
-    )
+    trajectory = captured_team_deathmatch_threshold_trajectory(at_horizon=True)
     observer = build_evaluation_observer_v1(trajectory.context)
     observer.start(trajectory.frames[0])
-    observer.append(done_transition, trajectory.frames[1])
+    observer.append(trajectory.transitions[0], trajectory.frames[1])
 
     report = observer.finalize(completion_state="complete")
 
@@ -3217,7 +3200,10 @@ def test_simultaneous_terminal_truncation_at_horizon_preserves_all_truth() -> No
         "task_terminal",
         "declared_horizon",
     )
-    assert report.completion.end_or_failure_reason == "simultaneous_done"
+    assert (
+        report.completion.end_or_failure_reason
+        == "team_deathmatch_score_threshold_at_horizon"
+    )
 
 
 def test_processing_gap_downgrades_complete_only_statistic_not_completion(
