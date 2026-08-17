@@ -1,4 +1,4 @@
-"""Generate exact Python-owned browser fixtures for CP2.7 tests only."""
+"""Generate exact Python-owned authorized-presentation browser fixtures."""
 
 # pyright: reportPrivateUsage=false
 
@@ -6,10 +6,16 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from dataclasses import fields, replace
 from pathlib import Path
 from typing import Protocol, cast
 
 from scripts.dev.visual_debugger.control import create_session
+from scripts.dev.visual_debugger.presentation_protocol import (
+    LiveOracleAuthorizedPresentationFrameV1,
+    LiveOraclePresentationSourceIdentityV1,
+    _seal_oracle_authorized_current_endpoint_v1,
+)
 from scripts.dev.visual_debugger.replay_service import ReplayViewerService
 from scripts.dev.visual_debugger.scenarios import get_scenario
 from scripts.dev.visual_debugger.service import DebuggerService
@@ -33,6 +39,14 @@ from tests.test_visual_debugger_replay_service import (
 )
 from tests.test_visual_debugger_service import _service
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
+
+from marl_battlegrounds.rendering.authorized_presentation import (
+    AuthorizedBattlefieldSceneV1,
+    AuthorizedClassMechanicsV1,
+    AuthorizedClassMechanicsV2,
+    AuthorizedSpawnShieldMechanicsAvailableV1,
+    AuthorizedSpawnShieldMechanicsAvailableV2,
+)
 
 
 class _WrappedFixture0[T](Protocol):
@@ -73,6 +87,67 @@ def _pair(service: DebuggerService | ReplayViewerService) -> dict[str, object]:
     if isinstance(service, ReplayViewerService):
         pair["timeline"] = service.current_timeline().model_dump(mode="json")
     return pair
+
+
+def _legacy_v1_scene(
+    scene: AuthorizedBattlefieldSceneV1,
+) -> AuthorizedBattlefieldSceneV1:
+    """Downgrade only the two additive nested contracts through V1 models."""
+    shield = scene.spawn_shield_mechanics
+    if type(shield) is not AuthorizedSpawnShieldMechanicsAvailableV2:
+        raise RuntimeError("canonical fixture requires available Spawn Shield V2")
+    legacy_class_rows: list[AuthorizedClassMechanicsV1] = []
+    for row in scene.class_mechanics:
+        if type(row) is not AuthorizedClassMechanicsV2:
+            raise RuntimeError("canonical fixture requires class mechanics V2")
+        legacy_class_rows.append(
+            AuthorizedClassMechanicsV1(
+                **{
+                    field.name: getattr(row, field.name)
+                    for field in fields(AuthorizedClassMechanicsV1)
+                }
+            )
+        )
+    return replace(
+        scene,
+        class_mechanics=tuple(legacy_class_rows),
+        spawn_shield_mechanics=AuthorizedSpawnShieldMechanicsAvailableV1(
+            availability_kind="available",
+            configured_duration_steps=shield.configured_duration_steps,
+            movement_speed=shield.movement_speed,
+        ),
+    )
+
+
+def _legacy_v1_compatibility_presentation(
+    frame: LiveOracleAuthorizedPresentationFrameV1,
+) -> LiveOracleAuthorizedPresentationFrameV1:
+    """Construct and reseal one authoritative full-frame legacy V1 case."""
+    endpoint = frame.current_endpoint
+    legacy_endpoint = _seal_oracle_authorized_current_endpoint_v1(
+        episode_id=endpoint.episode_id,
+        frame_index=endpoint.frame_index,
+        frame_id=endpoint.frame_id,
+        simulator_step_count=endpoint.simulator_step_count,
+        scene=_legacy_v1_scene(endpoint.scene),
+        identity_directory=endpoint.identity_directory,
+        action_axis=endpoint.action_axis,
+    )
+    source_values = {
+        name: getattr(frame.source, name)
+        for name in LiveOraclePresentationSourceIdentityV1.model_fields
+    }
+    source_values["source_authorized_endpoint_digest_sha256"] = (
+        legacy_endpoint.authorized_endpoint_digest_sha256
+    )
+    legacy_source = LiveOraclePresentationSourceIdentityV1(**source_values)
+    frame_values = {
+        name: getattr(frame, name)
+        for name in LiveOracleAuthorizedPresentationFrameV1.model_fields
+    }
+    frame_values["source"] = legacy_source
+    frame_values["current_endpoint"] = legacy_endpoint
+    return LiveOracleAuthorizedPresentationFrameV1(**frame_values)
 
 
 def render_fixture() -> str:
@@ -184,6 +259,11 @@ def render_fixture() -> str:
         "continuity_pairs": continuity_pairs,
         "state_cases": {
             name: frame.model_dump(mode="json") for name, frame in state_cases.items()
+        },
+        "compatibility_cases": {
+            "legacy_v1": _legacy_v1_compatibility_presentation(
+                frames.live_oracle
+            ).model_dump(mode="json")
         },
     }
     return json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True) + "\n"

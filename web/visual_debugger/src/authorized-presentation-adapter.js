@@ -1,3 +1,4 @@
+import { exactAuthorizedAgentIdentityV1 } from "./agent-identity.js";
 import { isNormalizedAuthorizedPresentationFrameV1 } from "./authorized-presentation-normalizer.js";
 
 /**
@@ -779,17 +780,133 @@ export function authorizedPresentationTransitionRows(value) {
   ) {
     return Object.freeze([]);
   }
-  return Object.freeze([...value.latest_transition.action_rows]);
+  const identityByPresentationKey = new Map(
+    authorizedPresentationIdentityRows(value).map((identity) => [
+      identity.presentation_key,
+      identity,
+    ]),
+  );
+  const rows = [];
+  for (const rawRow of value.latest_transition.action_rows) {
+    const identity = isRecord(rawRow)
+      ? identityByPresentationKey.get(rawRow.actor_presentation_key)
+      : null;
+    const actorIdentity = exactAuthorizedAgentIdentityV1(identity?.agent);
+    if (
+      !isRecord(rawRow) ||
+      identity === null ||
+      identity === undefined ||
+      actorIdentity === null ||
+      actorIdentity.presentationKey !== rawRow.actor_presentation_key ||
+      actorIdentity.publicAgentId !== rawRow.actor_public_agent_id ||
+      identity.public_agent_id !== rawRow.actor_public_agent_id ||
+      !isRecord(rawRow.submitted_action) ||
+      !isRecord(rawRow.accepted_action)
+    ) {
+      return Object.freeze([]);
+    }
+    const submittedAction = Object.freeze({
+      move_action: rawRow.submitted_action.move_action,
+      target_action: rawRow.submitted_action.target_action,
+      use_ultimate_action: rawRow.submitted_action.use_ultimate_action,
+    });
+    const acceptedAction = Object.freeze({
+      move_action: rawRow.accepted_action.move_action,
+      target_action: rawRow.accepted_action.target_action,
+      use_ultimate_action: rawRow.accepted_action.use_ultimate_action,
+    });
+    if (
+      !Object.values(submittedAction).every(Number.isInteger) ||
+      !Object.values(acceptedAction).every(Number.isInteger)
+    ) {
+      return Object.freeze([]);
+    }
+    rows.push(
+      Object.freeze({
+        actor_title: actorIdentity.title,
+        actor_accent: actorIdentity.accent,
+        submitted_action: submittedAction,
+        accepted_action: acceptedAction,
+      }),
+    );
+  }
+  return Object.freeze(rows);
 }
+
+const TECHNICAL_FACT_SPECIFICATIONS = Object.freeze({
+  live_oracle: Object.freeze({
+    technicalKind: "live_oracle_technical_frame",
+    rows: Object.freeze([
+      Object.freeze(["frame", "Frame", "evaluation_frame_index"]),
+      Object.freeze(["simulator_step", "Simulator step", "simulator_step_count"]),
+    ]),
+  }),
+  live_no_shared_obs_agent_pov: Object.freeze({
+    technicalKind: "live_no_shared_obs_technical_frame",
+    rows: Object.freeze([
+      Object.freeze(["frame", "Frame", "recipient_frame_index"]),
+      Object.freeze(["simulator_step", "Simulator step", "simulator_step_count"]),
+    ]),
+  }),
+  replay_oracle: Object.freeze({
+    technicalKind: "replay_oracle_technical_frame",
+    rows: Object.freeze([
+      Object.freeze(["frame", "Frame", "frame_index"]),
+      Object.freeze(["simulator_step", "Simulator step", "simulator_step_count"]),
+      Object.freeze([
+        "ordinary_movement_distance_scale",
+        "Ordinary movement distance scale",
+        "recorded_ordinary_movement_distance_scale",
+      ]),
+    ]),
+  }),
+  replay_no_shared_obs_agent_pov: Object.freeze({
+    technicalKind: "replay_no_shared_obs_technical_frame",
+    rows: Object.freeze([
+      Object.freeze(["frame", "Frame", "frame_index"]),
+      Object.freeze(["simulator_step", "Simulator step", "simulator_step_count"]),
+    ]),
+  }),
+  replay_shared_obs_agent_pov: Object.freeze({
+    technicalKind: "replay_shared_obs_technical_frame",
+    rows: Object.freeze([
+      Object.freeze(["frame", "Frame", "frame_index"]),
+      Object.freeze(["simulator_step", "Simulator step", "simulator_step_count"]),
+    ]),
+  }),
+});
 
 /** @param {unknown} value */
 export function authorizedPresentationTechnicalFacts(value) {
   if (!isAuthorizedPresentationFrame(value) || !isRecord(value.technical_frame)) {
     return Object.freeze([]);
   }
-  return Object.freeze(
-    Object.entries(value.technical_frame).map(([label, factValue]) =>
-      Object.freeze({ label, value: factValue }),
-    ),
-  );
+  const presentationKind = value.presentation_kind;
+  if (
+    typeof presentationKind !== "string" ||
+    !Object.hasOwn(TECHNICAL_FACT_SPECIFICATIONS, presentationKind)
+  ) {
+    return Object.freeze([]);
+  }
+  const specification =
+    TECHNICAL_FACT_SPECIFICATIONS[
+      /** @type {keyof typeof TECHNICAL_FACT_SPECIFICATIONS} */ (presentationKind)
+    ];
+  const technicalFrame = value.technical_frame;
+  if (technicalFrame.technical_kind !== specification.technicalKind) {
+    return Object.freeze([]);
+  }
+  const rows = [];
+  for (const [id, label, field] of specification.rows) {
+    const factValue = technicalFrame[field];
+    const valid =
+      id === "ordinary_movement_distance_scale"
+        ? typeof factValue === "number" && Number.isFinite(factValue)
+        : Number.isInteger(factValue) && factValue >= 0;
+    if (!valid) {
+      return Object.freeze([]);
+    }
+    rows.push(Object.freeze({ id, label, value: factValue }));
+  }
+  return Object.freeze(rows);
 }

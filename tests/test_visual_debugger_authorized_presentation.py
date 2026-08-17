@@ -9,7 +9,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import cast
 
@@ -62,6 +62,12 @@ from marl_battlegrounds.rendering.authorized_pov_scene import (
 )
 from marl_battlegrounds.rendering.authorized_presentation import (
     AuthorizedBattlefieldSceneV1,
+    AuthorizedClassDocumentationProfileAvailableV1,
+    AuthorizedClassDocumentationProfileUnavailableV1,
+    AuthorizedClassMechanicsV1,
+    AuthorizedClassMechanicsV2,
+    AuthorizedSpawnShieldMechanicsAvailableV1,
+    AuthorizedSpawnShieldMechanicsAvailableV2,
     ReplayIncomingActionRejectedEventV1,
     ReplayIncomingAuthorizedAgentIdentityV1,
     ReplayOraclePresentationPartsV1,
@@ -547,13 +553,180 @@ def test_neutral_scene_uses_stable_opaque_keys_and_omits_legacy_roots(
     assert "observer_visibility" not in json.dumps(payload["current_endpoint"]["scene"])
     assert "ranges" not in json.dumps(payload["current_endpoint"]["scene"])
     shield = earlier.current_scene.spawn_shield_mechanics
-    assert shield.availability_kind == "available"
+    assert type(shield) is AuthorizedSpawnShieldMechanicsAvailableV2
+    assert shield.availability_kind == "available_v2"
     assert shield.configured_duration_steps == (
         oracle_cases.trajectory.context.resolved_env_config.spawn_shield_duration_steps
     )
     assert shield.movement_speed == (
         oracle_cases.trajectory.context.resolved_env_config.spawn_shield_movement_speed
     )
+    assert (
+        shield.protection_effect,
+        shield.visibility_effect,
+        shield.targetability_effect,
+        shield.action_scope,
+        shield.aura_effect,
+        shield.agent_collision_effect,
+        shield.ordinary_application_mechanism,
+    ) == (
+        "invulnerable",
+        "concealed_from_opponents",
+        "untargetable",
+        "movement_only",
+        "excluded_as_emitter_and_beneficiary",
+        "phased_until_expiring_endpoint_rejoin",
+        "end_of_transition_respawn_lifecycle",
+    )
+    assert all(
+        type(row) is AuthorizedClassMechanicsV2
+        and row.mechanics_version == 2
+        and type(row.documentation_profile)
+        is AuthorizedClassDocumentationProfileAvailableV1
+        for row in earlier.current_scene.class_mechanics
+    )
+
+
+def test_scene_accepts_all_legacy_v1_rows_but_rejects_mixed_or_discordant_v2(
+    oracle_cases: _OracleCases,
+) -> None:
+    scene = _presentation(oracle_cases, 3).current_scene
+    shield = scene.spawn_shield_mechanics
+    assert type(shield) is AuthorizedSpawnShieldMechanicsAvailableV2
+    legacy_rows = tuple(
+        AuthorizedClassMechanicsV1(
+            **{
+                field.name: getattr(row, field.name)
+                for field in fields(AuthorizedClassMechanicsV1)
+            }
+        )
+        for row in scene.class_mechanics
+    )
+    legacy = replace(
+        scene,
+        class_mechanics=legacy_rows,
+        spawn_shield_mechanics=AuthorizedSpawnShieldMechanicsAvailableV1(
+            availability_kind="available",
+            configured_duration_steps=shield.configured_duration_steps,
+            movement_speed=shield.movement_speed,
+        ),
+    )
+    adapter = TypeAdapter(AuthorizedBattlefieldSceneV1)
+    parsed = adapter.validate_json(adapter.dump_json(legacy))
+    assert all(
+        type(row) is AuthorizedClassMechanicsV1 for row in parsed.class_mechanics
+    )
+    assert type(parsed.spawn_shield_mechanics) is (
+        AuthorizedSpawnShieldMechanicsAvailableV1
+    )
+
+    with pytest.raises(ValueError, match="cannot mix V1 and V2"):
+        replace(
+            scene,
+            class_mechanics=(legacy_rows[0], *scene.class_mechanics[1:]),
+        )
+
+    first = cast(AuthorizedClassMechanicsV2, scene.class_mechanics[0])
+    unavailable = AuthorizedClassDocumentationProfileUnavailableV1(
+        availability_kind="unavailable"
+    )
+    with pytest.raises(ValueError, match="share one documentation profile"):
+        replace(
+            scene,
+            class_mechanics=(
+                replace(first, documentation_profile=unavailable),
+                *scene.class_mechanics[1:],
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("path", "replacement", "message"),
+    (
+        (
+            ("spawn_shield_mechanics", "protection_effect"),
+            "damage_reduction",
+            "literal_error",
+        ),
+        (
+            ("spawn_shield_mechanics", "unexpected"),
+            True,
+            "unexpected_keyword_argument",
+        ),
+        (
+            ("spawn_shield_mechanics", "configured_duration_steps"),
+            "3",
+            "int_type",
+        ),
+        (
+            ("class_mechanics", 0, "mechanics_version"),
+            1,
+            "literal_error",
+        ),
+        (
+            ("class_mechanics", 0, "unexpected"),
+            True,
+            "unexpected_keyword_argument",
+        ),
+        (
+            ("class_mechanics", 0, "documentation_profile", "profile_id"),
+            "unknown.profile",
+            "literal_error",
+        ),
+        (
+            ("class_mechanics", 0, "documentation_profile", "unexpected"),
+            True,
+            "unexpected_keyword_argument",
+        ),
+    ),
+)
+def test_v2_nested_contracts_fail_closed_on_wrong_literals_and_extras(
+    oracle_cases: _OracleCases,
+    path: tuple[str | int, ...],
+    replacement: object,
+    message: str,
+) -> None:
+    payload = _presentation(oracle_cases, 3).current_scene
+    adapter = TypeAdapter(AuthorizedBattlefieldSceneV1)
+    mutable = adapter.dump_python(payload, mode="json")
+    target: object = mutable
+    for segment in path[:-1]:
+        if isinstance(segment, str):
+            target = cast(dict[str, object], target)[segment]
+        else:
+            target = cast(list[object], target)[segment]
+    cast(dict[str, object], target)[cast(str, path[-1])] = replacement
+    with pytest.raises(ValidationError, match=message):
+        adapter.validate_json(json.dumps(mutable))
+
+
+@pytest.mark.parametrize(
+    ("container_path", "required_field"),
+    (
+        (("spawn_shield_mechanics",), "action_scope"),
+        (("class_mechanics", 0), "mechanics_version"),
+        (("class_mechanics", 0, "documentation_profile"), "profile_id"),
+    ),
+)
+def test_v2_nested_contracts_have_no_implicit_required_defaults(
+    oracle_cases: _OracleCases,
+    container_path: tuple[str | int, ...],
+    required_field: str,
+) -> None:
+    adapter = TypeAdapter(AuthorizedBattlefieldSceneV1)
+    mutable = adapter.dump_python(
+        _presentation(oracle_cases, 3).current_scene,
+        mode="json",
+    )
+    target: object = mutable
+    for segment in container_path:
+        if isinstance(segment, str):
+            target = cast(dict[str, object], target)[segment]
+        else:
+            target = cast(list[object], target)[segment]
+    cast(dict[str, object], target).pop(required_field)
+    with pytest.raises(ValidationError, match="missing"):
+        adapter.validate_json(json.dumps(mutable))
 
 
 @pytest.mark.parametrize(

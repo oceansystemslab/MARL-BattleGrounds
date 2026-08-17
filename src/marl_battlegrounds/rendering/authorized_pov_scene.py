@@ -41,14 +41,16 @@ from marl_battlegrounds.rendering.authorized_presentation import (
     AuthorizedAuraModifierV1,
     AuthorizedBattlefieldSceneV1,
     AuthorizedClassAuraMechanicV1,
-    AuthorizedClassMechanicsV1,
+    AuthorizedClassDocumentationProfileV1,
+    AuthorizedClassMechanicsV2,
     AuthorizedClassStatusMechanicV1,
     AuthorizedMapV1,
     AuthorizedObstacleV1,
     AuthorizedRespawnWaveV1,
     AuthorizedSpawnPadV1,
-    AuthorizedSpawnShieldMechanicsAvailableV1,
+    AuthorizedSpawnShieldMechanicsAvailableV2,
     AuthorizedStatusV1,
+    authorized_class_documentation_profile_v1,
 )
 from marl_battlegrounds.rendering.evaluation_adapter import (
     SHARED_OBS_SOURCE_MATERIAL_PROJECTION_SCHEMA_VERSION,
@@ -1083,12 +1085,14 @@ def _row_aura_mechanic(
 def _class_mechanics(
     decoded: DecodedAgentFeatureRowV1,
     catalog: StaticMechanicsCatalogV1,
-) -> AuthorizedClassMechanicsV1:
+    *,
+    documentation_profile: AuthorizedClassDocumentationProfileV1,
+) -> AuthorizedClassMechanicsV2:
     if not 1 <= decoded.class_id <= 5:
         raise ValueError("authorized POV class ID must be in the V1 range 1..5.")
     class_catalog = catalog.class_mechanics[decoded.class_id]
     _validate_row_against_class_catalog(decoded, class_catalog, catalog)
-    return AuthorizedClassMechanicsV1(
+    return AuthorizedClassMechanicsV2(
         class_id=decoded.class_id,
         class_name=class_catalog.class_name,
         maximum_health=class_catalog.maximum_health,
@@ -1118,6 +1122,8 @@ def _class_mechanics(
             for aura in catalog.aura_mechanics
             if aura.emitter_class_id == decoded.class_id
         ),
+        mechanics_version=2,
+        documentation_profile=documentation_profile,
     )
 
 
@@ -1433,6 +1439,7 @@ def build_no_shared_obs_authorized_scene_v1(
     """Build one NoSharedObs scene from recipient-authorized recorded rows."""
     _require_text(authority_session_id, name="authority_session_id")
     catalog = _validated_catalog(public_catalog)
+    documentation_profile = authorized_class_documentation_profile_v1(catalog)
     validated_source = _validated_source(source)
     selection = _select_source(validated_source, frame_index=frame_index)
     frame = selection.frame
@@ -1538,9 +1545,13 @@ def build_no_shared_obs_authorized_scene_v1(
         )
         seen_public_ids.add(body.public_agent_id)
 
-    mechanics_by_class: dict[int, AuthorizedClassMechanicsV1] = {}
+    mechanics_by_class: dict[int, AuthorizedClassMechanicsV2] = {}
     for row in authorized_rows:
-        mechanics = _class_mechanics(row.decoded, catalog)
+        mechanics = _class_mechanics(
+            row.decoded,
+            catalog,
+            documentation_profile=documentation_profile,
+        )
         previous = mechanics_by_class.setdefault(row.decoded.class_id, mechanics)
         if previous != mechanics:
             raise ValueError(
@@ -1643,10 +1654,17 @@ def build_no_shared_obs_authorized_scene_v1(
         class_mechanics=tuple(
             mechanics_by_class[class_id] for class_id in sorted(mechanics_by_class)
         ),
-        spawn_shield_mechanics=AuthorizedSpawnShieldMechanicsAvailableV1(
-            availability_kind="available",
+        spawn_shield_mechanics=AuthorizedSpawnShieldMechanicsAvailableV2(
+            availability_kind="available_v2",
             configured_duration_steps=lifecycle.spawn_shield_configured_duration,
             movement_speed=lifecycle.spawn_shield_speed,
+            protection_effect="invulnerable",
+            visibility_effect="concealed_from_opponents",
+            targetability_effect="untargetable",
+            action_scope="movement_only",
+            aura_effect="excluded_as_emitter_and_beneficiary",
+            agent_collision_effect="phased_until_expiring_endpoint_rejoin",
+            ordinary_application_mechanism=("end_of_transition_respawn_lifecycle"),
         ),
         spawn_pads=tuple(spawn_pads),
         respawn_waves=respawn_waves,
@@ -1680,6 +1698,7 @@ def build_shared_obs_authorized_scene_v1(
     """Build one fixed-recipient visual union from recorded SharedObs rows."""
     _require_text(authority_session_id, name="authority_session_id")
     catalog = _validated_catalog(public_catalog)
+    documentation_profile = authorized_class_documentation_profile_v1(catalog)
     (
         topology_rows,
         topology_by_global_slot,
@@ -1830,9 +1849,13 @@ def build_shared_obs_authorized_scene_v1(
         tuple(contributions)
     )
 
-    mechanics_by_class: dict[int, AuthorizedClassMechanicsV1] = {}
+    mechanics_by_class: dict[int, AuthorizedClassMechanicsV2] = {}
     for row in authorized_rows:
-        mechanics = _class_mechanics(row.decoded, catalog)
+        mechanics = _class_mechanics(
+            row.decoded,
+            catalog,
+            documentation_profile=documentation_profile,
+        )
         previous = mechanics_by_class.setdefault(row.decoded.class_id, mechanics)
         if previous != mechanics:
             raise ValueError(
@@ -1958,10 +1981,17 @@ def build_shared_obs_authorized_scene_v1(
         class_mechanics=tuple(
             mechanics_by_class[class_id] for class_id in sorted(mechanics_by_class)
         ),
-        spawn_shield_mechanics=AuthorizedSpawnShieldMechanicsAvailableV1(
-            availability_kind="available",
+        spawn_shield_mechanics=AuthorizedSpawnShieldMechanicsAvailableV2(
+            availability_kind="available_v2",
             configured_duration_steps=lifecycle.spawn_shield_configured_duration,
             movement_speed=lifecycle.spawn_shield_speed,
+            protection_effect="invulnerable",
+            visibility_effect="concealed_from_opponents",
+            targetability_effect="untargetable",
+            action_scope="movement_only",
+            aura_effect="excluded_as_emitter_and_beneficiary",
+            agent_collision_effect="phased_until_expiring_endpoint_rejoin",
+            ordinary_application_mechanism=("end_of_transition_respawn_lifecycle"),
         ),
         spawn_pads=tuple(spawn_pads),
         respawn_waves=respawn_waves,

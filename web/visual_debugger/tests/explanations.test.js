@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  canonicalAgentIdentity,
+  createSpawnShieldView,
   explainActivation,
   explainAgent,
   explainAura,
@@ -18,6 +20,7 @@ import {
   explainRange,
   explainSpawnShield,
   explainStatus,
+  explainTechnicalFact,
   explainVisibility,
 } from "../src/explanations.js";
 import { createSemanticDescriptor, projectSemanticDescriptor } from "../src/tooltip.js";
@@ -28,17 +31,29 @@ const RECIPIENT = Object.freeze({
   team_id: 2,
   class_id: 5,
 });
+const AUTHORIZED_RECIPIENT = Object.freeze({
+  ...RECIPIENT,
+  presentation_key: "recipient:p5",
+});
 const SOURCE_A = Object.freeze({
   global_slot: 1,
+  presentation_key: "source:h3",
   public_agent_id: "alpha/9001",
   team_id: 1,
   class_id: 3,
+  class_name: "Hunter",
 });
 const SOURCE_B = Object.freeze({
   global_slot: 7,
+  presentation_key: "source:r4",
   public_agent_id: "beta.17",
   team_id: 2,
   class_id: 4,
+  class_name: "Rogue",
+});
+const SOURCE_REFERENCE_A = Object.freeze({
+  source_presentation_key: "source:h3",
+  source_public_agent_id: "alpha/9001",
 });
 
 /** @param {ReturnType<typeof createSemanticDescriptor>} descriptor @param {string} label */
@@ -46,13 +61,6 @@ function rowValue(descriptor, label) {
   const found = descriptor.rows.find((row) => row.label === label);
   assert.ok(found, `missing row ${label}`);
   return found.value;
-}
-
-/** @param {ReturnType<typeof createSemanticDescriptor>} descriptor @param {string} title */
-function sectionRows(descriptor, title) {
-  const found = descriptor.sections.find((section) => section.title === title);
-  assert.ok(found, `missing section ${title}`);
-  return found.rows;
 }
 
 /** @param {ReturnType<typeof createSemanticDescriptor>} descriptor */
@@ -72,461 +80,909 @@ test("all semantic descriptors and nested projections are recursively immutable"
       effective_movement_speed: 0.333,
       ultimate_cooldown_remaining: 3,
       steps_until_out_of_combat: 2,
-      statuses: [],
-      aura_modifiers: [],
+      statuses: [{ secret: "not a compact fact" }],
+      aura_modifiers: [{ secret: "not a compact fact" }],
     },
-    { controlled: true },
-    classMechanics(1, "Mage"),
+    { audience: "researcher" },
   );
   assert.equal(Object.isFrozen(descriptor), true);
   assert.equal(Object.isFrozen(descriptor.rows), true);
   assert.equal(Object.isFrozen(descriptor.rows[0]), true);
   assert.equal(Object.isFrozen(descriptor.rows[0].metadata), true);
   assert.equal(Object.isFrozen(descriptor.sections), true);
-  assert.equal(Object.isFrozen(descriptor.sections[0].rows), true);
-  assert.equal(rowValue(descriptor, "Identity"), "Agent ID arbitrary-public-id");
+  assert.equal(descriptor.summary, null);
+  assert.equal(descriptor.title, "Agent ID arbitrary-public-id · Mage · Team B");
+  assert.deepEqual(
+    descriptor.rows.map((row) => row.label),
+    [
+      "Health",
+      "Effective Speed",
+      "Ultimate Status",
+      "Combat Status",
+      "Steps until OOC",
+    ],
+  );
   assert.equal(rowValue(descriptor, "Effective Speed"), "0.33");
-  assert.doesNotMatch(fullText(descriptor), /id_8/u);
+  assert.equal(rowValue(descriptor, "Combat Status"), "IC");
+  assert.doesNotMatch(fullText(descriptor), /id_8|not a compact fact/u);
+});
+
+test("Technical Frame and replay operational help use the exact finite vocabulary", () => {
+  const expected = {
+    completion: [
+      "Completion",
+      "How the captured rollout ended. Rollout completion is independent of host-side processing success.",
+    ],
+    processing: [
+      "Processing",
+      "Whether host-side evaluation output was produced successfully. Processing does not change how the rollout ended.",
+    ],
+    frame: [
+      "Frame",
+      "The zero-based authorized frame index represented by this presentation.",
+    ],
+    simulator_step: [
+      "Simulator step",
+      "The simulator decision step represented by this authorized frame.",
+    ],
+    ordinary_movement_distance_scale: [
+      "Ordinary movement distance scale",
+      "The recorded multiplier applied to ordinary voluntary movement distance. Spawn Shield uses its separately authorized absolute movement speed.",
+    ],
+  };
+  for (const [factId, [title, summary]] of Object.entries(expected)) {
+    const descriptor = explainTechnicalFact(factId);
+    const compact = projectSemanticDescriptor(descriptor, "compact");
+    assert.equal(compact.title, title);
+    assert.equal(compact.summary, summary);
+    assert.deepEqual(compact.rows, []);
+    assert.deepEqual(compact.sections, []);
+    assert.equal(Object.isFrozen(descriptor), true);
+  }
+  assert.throws(() => explainTechnicalFact("revision"), /Unknown Technical Frame/u);
+});
+
+test("canonical agent identity covers every class and team without slot fallback", () => {
+  const classes = [
+    [1, "Mage", "mage"],
+    [2, "Warrior", "warrior"],
+    [3, "Hunter", "hunter"],
+    [4, "Rogue", "rogue"],
+    [5, "Priest", "priest"],
+  ];
+  const teams = [
+    [1, "Team A"],
+    [2, "Team B"],
+  ];
+  for (const [classId, classLabel, accent] of classes) {
+    for (const [teamId, teamLabel] of teams) {
+      const publicId = `opaque-${classId}-${teamId}`;
+      const identity = canonicalAgentIdentity({
+        public_agent_id: publicId,
+        class_id: classId,
+        team_id: teamId,
+        global_slot: 700 + Number(classId),
+        presentation_key: `private-slot-${classId}`,
+      });
+      assert.deepEqual(identity, {
+        title: `Agent ID ${publicId} · ${classLabel} · ${teamLabel}`,
+        publicIdentity: `Agent ID ${publicId}`,
+        classLabel,
+        teamLabel,
+        accent,
+      });
+      assert.equal(Object.isFrozen(identity), true);
+      assert.doesNotMatch(identity.title, /private-slot|70[1-5]/u);
+    }
+  }
+
+  for (const malformed of [
+    null,
+    {},
+    {
+      public_agent_id: null,
+      class_id: 99,
+      team_id: 99,
+      global_slot: 42,
+      presentation_key: "secret-slot-42",
+    },
+    {
+      public_agent_id: null,
+      class_id: "1",
+      team_id: "2",
+      global_slot: 42,
+      presentation_key: "secret-slot-42",
+    },
+  ]) {
+    const identity = canonicalAgentIdentity(malformed);
+    assert.equal(identity.title, "Agent ID unavailable · Unknown · Unknown");
+    assert.equal(identity.accent, "none");
+    assert.doesNotMatch(JSON.stringify(identity), /42|secret|slot/u);
+  }
+
+  for (const malformedPublicId of [" padded-id ", "line\nbreak", "x".repeat(513)]) {
+    assert.deepEqual(
+      canonicalAgentIdentity({
+        public_agent_id: malformedPublicId,
+        class_id: 1,
+        team_id: 1,
+      }),
+      {
+        title: "Agent ID unavailable · Mage · Team A",
+        publicIdentity: "Agent ID unavailable",
+        classLabel: "Mage",
+        teamLabel: "Team A",
+        accent: "mage",
+      },
+    );
+  }
+});
+
+test("compact agent facts have one exact in-combat and out-of-combat allowlist", () => {
+  const forbiddenLabels = new Set([
+    "Identity",
+    "Class",
+    "Team",
+    "Ultimate Name",
+    "Spawn Shield",
+    "Selection",
+    "Reference",
+    "Controlled",
+    "Inspected",
+    "Now",
+    "Life State",
+    "Persistent Statuses",
+    "Aggregate Aura Modifiers",
+  ]);
+  for (const classId of [1, 2, 3, 4, 5]) {
+    for (const inCombat of [false, true]) {
+      const descriptor = explainAgent(
+        {
+          public_agent_id: `agent-${classId}`,
+          class_id: classId,
+          team_id: classId % 2 === 0 ? 2 : 1,
+          current_health: 55,
+          max_health: 100,
+          effective_movement_speed: 1.25,
+          ultimate_cooldown_remaining: classId - 1,
+          steps_until_out_of_combat: inCombat ? 2 : 0,
+          spawn_shield_remaining: 9,
+          statuses: [{ secret_status: "forbidden-status" }],
+          aura_modifiers: [{ secret_aura: "forbidden-aura" }],
+          life_state: "forbidden-life-state",
+          selected: true,
+        },
+        {
+          audience: "researcher",
+          controlled: true,
+          selected: true,
+          reference: true,
+          inspected: true,
+        },
+      );
+      assert.equal(descriptor.summary, null);
+      assert.deepEqual(
+        descriptor.rows.map((row) => row.label),
+        inCombat
+          ? [
+              "Health",
+              "Effective Speed",
+              "Ultimate Status",
+              "Combat Status",
+              "Steps until OOC",
+            ]
+          : ["Health", "Effective Speed", "Ultimate Status", "Combat Status"],
+      );
+      assert.equal(rowValue(descriptor, "Health"), "55 / 100");
+      assert.equal(rowValue(descriptor, "Effective Speed"), "1.25");
+      assert.equal(
+        rowValue(descriptor, "Ultimate Status"),
+        classId === 1
+          ? "Ready"
+          : `On cooldown (${classId - 1} ${classId === 2 ? "Tick" : "Ticks"})`,
+      );
+      assert.equal(rowValue(descriptor, "Combat Status"), inCombat ? "IC" : "OOC");
+      if (inCombat) {
+        assert.equal(rowValue(descriptor, "Steps until OOC"), "2 Ticks");
+      }
+      assert.equal(descriptor.sections.length, 0);
+      assert.equal(
+        descriptor.rows.some((row) => forbiddenLabels.has(row.label)),
+        false,
+      );
+      assert.doesNotMatch(
+        JSON.stringify(descriptor),
+        /forbidden-|spawn.shield|ultimate name|selection|reference|controlled|inspected|now/iu,
+      );
+    }
+  }
 });
 
 const STATUS_CASES = Object.freeze([
-  [
-    "warrior_charge_stun",
-    "stun_warrior_charge",
-    "Warrior (Ultimate: Charge) Stun",
-    "A Warrior's concussive Charge incapacitates",
-  ],
-  [
-    "hunter_trap_stun",
-    "stun_hunter_trap",
-    "Hunter (Ultimate: Freezing Trap) Stun",
-    "A Hunter's Freezing Trap incapacitates",
-  ],
-  [
-    "rogue_poison_stun",
-    "stun_rogue_poison",
-    "Rogue (Ultimate: Crippling Poison) Stun",
-    "A Rogue's Crippling Poison incapacitates",
-  ],
-  [
-    "warrior_charge_slow",
-    "slow_warrior_charge",
-    "Warrior (Ultimate: Charge) Slow",
-    "A Warrior's concussive Charge slows",
-  ],
-  [
-    "hunter_basic_slow",
-    "slow_hunter_basic",
-    "Hunter (Basic: Attack) Slow",
-    "A Hunter's serrated arrows slow",
-  ],
-  [
-    "rogue_poison_slow",
-    "slow_rogue_poison",
-    "Rogue (Ultimate: Crippling Poison) Slow",
-    "A Rogue's Crippling Poison slows",
-  ],
-  [
-    "rogue_poison_anti_heal",
-    "anti_heal_rogue_poison",
-    "Rogue (Ultimate: Crippling Poison) Anti-Heal",
-    "A Rogue's Crippling Poison reduces",
-  ],
-  [
-    "priest_freedom",
-    "priest_freedom",
-    "Priest (Basic: Heal) Freedom",
-    "A Priest's healing uplifts",
-  ],
-  [
-    "mage_burst",
-    "mage_burst",
-    "Mage (Ultimate: Burst) Damage Amplification",
-    "Burst fills this Mage",
-  ],
+  {
+    statusId: "priest_blessing_of_freedom_movement_floor",
+    title: "Priest (Basic: Heal): Blessing of Freedom",
+    effect:
+      "Freedom is applied when a Priest heals a same-team target, including itself where same-team targeting permits it. It prevents slow effects from reducing this agent's ordinary movement below the authorized floor; it does not override stun.",
+    magnitudeKind: "movement_floor",
+    magnitude: 0.85,
+    magnitudeLabel: "Movement Floor",
+    magnitudeValue: "85% of base movement speed (×0.85)",
+    duration: 1,
+  },
+  {
+    statusId: "rogue_poison_stun",
+    title: "Rogue (Ultimate: Crippling Poison): Stun",
+    effect:
+      "A Rogue's Crippling Poison prevents this agent's voluntary movement and combat for its duration. Physics may still displace the body.",
+    magnitudeKind: "none",
+    magnitude: null,
+    magnitudeLabel: null,
+    magnitudeValue: null,
+    duration: 1,
+  },
+  {
+    statusId: "rogue_poison_slow",
+    title: "Rogue (Ultimate: Crippling Poison): Slow",
+    effect: "A Rogue's Crippling Poison slows this agent's movement for its duration.",
+    magnitudeKind: "movement_multiplier",
+    magnitude: 0.5,
+    magnitudeLabel: "Movement Effect",
+    magnitudeValue: "50% slower (×0.5)",
+    duration: 5,
+  },
+  {
+    statusId: "rogue_poison_anti_heal",
+    title: "Rogue (Ultimate: Crippling Poison): Anti-Heal",
+    effect:
+      "A Rogue's Crippling Poison reduces incoming healing and out-of-combat regeneration for its duration.",
+    magnitudeKind: "healing_multiplier",
+    magnitude: 0.5,
+    magnitudeLabel: "Healing Effect",
+    magnitudeValue: "50% less healing received (×0.5)",
+    duration: 4,
+  },
+  {
+    statusId: "hunter_basic_slow",
+    title: "Hunter (Basic: Attack): Slow",
+    effect: "A Hunter's Serrated Arrows slow this agent's movement for their duration.",
+    magnitudeKind: "movement_multiplier",
+    magnitude: 0.85,
+    magnitudeLabel: "Movement Effect",
+    magnitudeValue: "15% slower (×0.85)",
+    duration: 1,
+  },
+  {
+    statusId: "hunter_trap_stun",
+    title: "Hunter (Ultimate: Freezing Trap): Stun",
+    effect:
+      "A Hunter's Freezing Trap prevents this agent's voluntary movement and combat for its duration. Physics may still displace the body.",
+    magnitudeKind: "none",
+    magnitude: null,
+    magnitudeLabel: null,
+    magnitudeValue: null,
+    duration: 4,
+  },
+  {
+    statusId: "mage_burst_damage_amplification",
+    title: "Mage (Ultimate: Burst): Damage Amplification",
+    effect:
+      "This Mage's Burst increases its outgoing damage for the authorized duration.",
+    magnitudeKind: "damage_multiplier",
+    magnitude: 1.5,
+    magnitudeLabel: "Damage Amplification Effect",
+    magnitudeValue: "50% more damage dealt (×1.5)",
+    duration: 5,
+  },
+  {
+    statusId: "warrior_charge_slow",
+    title: "Warrior (Ultimate: Charge): Slow",
+    effect:
+      "A Warrior's concussive Charge slows this agent's movement for its duration.",
+    magnitudeKind: "movement_multiplier",
+    magnitude: 0.5,
+    magnitudeLabel: "Movement Effect",
+    magnitudeValue: "50% slower (×0.5)",
+    duration: 5,
+  },
+  {
+    statusId: "warrior_charge_stun",
+    title: "Warrior (Ultimate: Charge): Stun",
+    effect:
+      "A Warrior's concussive Charge prevents this agent's voluntary movement and combat for its duration. Physics may still displace the body.",
+    magnitudeKind: "none",
+    magnitude: null,
+    magnitudeLabel: null,
+    magnitudeValue: null,
+    duration: 1,
+  },
 ]);
 
-test("all nine status channels use stable prose and exact normalized quantities", () => {
-  for (const [statusId, tokenId, expectedTitle, expectedEffect] of STATUS_CASES) {
-    const descriptor = explainStatus(
+/**
+ * @param {(typeof STATUS_CASES)[number]} statusCase
+ * @param {Record<string, unknown>} [overrides]
+ */
+function durableStatus(statusCase, overrides = {}) {
+  return {
+    status_channel: STATUS_CASES.indexOf(statusCase),
+    status_id: statusCase.statusId,
+    configured_duration_steps: statusCase.duration,
+    remaining_duration: Math.max(1, statusCase.duration - 1),
+    magnitude_kind: statusCase.magnitudeKind,
+    magnitude: statusCase.magnitude,
+    breaks_on_positive_damage: statusCase.statusId === "hunter_trap_stun",
+    direct_sources: [SOURCE_REFERENCE_A],
+    ...overrides,
+  };
+}
+
+test("all nine durable statuses preserve exact facts across audience and source states", () => {
+  for (const statusCase of STATUS_CASES) {
+    const status = durableStatus(statusCase);
+    const researcher = explainStatus(status, RECIPIENT, [SOURCE_A, SOURCE_B]);
+    const absent = explainStatus({ ...status, direct_sources: [] }, RECIPIENT, [
+      SOURCE_A,
+      SOURCE_B,
+    ]);
+    const pov = explainPovStatus(
       {
-        status_channel: STATUS_CASES.findIndex((row) => row[0] === statusId),
-        status_id: statusId,
-        token_id: tokenId,
-        source_class_id: 3,
-        source_class_name: "Hunter",
-        source_action_component: "basic",
-        remaining_duration: 123456789,
-        magnitude_kind: tokenId.includes("stun") ? "none" : "movement_multiplier",
-        magnitude: tokenId.includes("stun") ? null : 0.876543,
-        breaks_on_positive_damage: tokenId.includes("stun"),
-        direct_source_evidence: [],
+        ...status,
+        direct_sources: [
+          {
+            source_global_slot: 999,
+            source_public_agent_id: "must-not-be-read",
+          },
+        ],
       },
       RECIPIENT,
-      [SOURCE_A, SOURCE_B],
     );
-    assert.equal(descriptor.title, expectedTitle);
-    assert.equal(descriptor.summary.includes(expectedEffect), true);
-    assert.match(descriptor.summary, /while the status remains/u);
-    assert.match(
-      descriptor.summary,
-      /positive-damage break rule|recorded positive damage/u,
-    );
-    assert.equal(rowValue(descriptor, "Duration"), "123456789 Ticks");
+
+    assert.equal(researcher.title, statusCase.title);
+    assert.equal(researcher.summary, statusCase.effect);
+    assert.equal(absent.title, statusCase.title);
+    assert.equal(absent.summary, statusCase.effect);
+    assert.equal(pov.title, statusCase.title);
+    assert.equal(pov.summary, statusCase.effect);
     assert.equal(
-      descriptor.rows.some((row) => row.label === "Recipient"),
-      false,
+      rowValue(researcher, "Effect Duration"),
+      `${statusCase.duration} ${statusCase.duration === 1 ? "Tick" : "Ticks"}`,
     );
     assert.equal(
-      sectionRows(descriptor, "Direct Source")[0].value,
-      "Source agent not recorded.",
+      rowValue(researcher, "Duration Remaining"),
+      `${Math.max(1, statusCase.duration - 1)} ${Math.max(1, statusCase.duration - 1) === 1 ? "Tick" : "Ticks"}`,
     );
+    if (statusCase.magnitudeLabel === null) {
+      assert.equal(
+        researcher.rows.some((row) =>
+          [
+            "Movement Effect",
+            "Healing Effect",
+            "Damage Amplification Effect",
+            "Movement Floor",
+          ].includes(row.label),
+        ),
+        false,
+      );
+    } else {
+      assert.equal(
+        rowValue(researcher, statusCase.magnitudeLabel),
+        statusCase.magnitudeValue,
+      );
+    }
+    assert.equal(
+      rowValue(researcher, "Source"),
+      "Agent ID alpha/9001 · Hunter · Team A",
+    );
+    assert.equal(rowValue(absent, "Source"), "Unavailable in this artifact");
+    assert.equal(rowValue(pov, "Source"), "Not disclosed in Agent POV");
     assert.deepEqual(
-      projectSemanticDescriptor(descriptor, "compact").sections[0].rows.map(
-        (row) => row.value,
-      ),
-      ["Source agent not recorded."],
+      researcher.rows.filter((row) => row.label !== "Source"),
+      pov.rows.filter((row) => row.label !== "Source"),
     );
+    assert.deepEqual(researcher.sections, []);
+    assert.deepEqual(pov.sections, []);
+
+    const hasBreak = statusCase.statusId === "hunter_trap_stun";
+    assert.equal(
+      researcher.rows.some((row) => row.label === "Break Rule"),
+      hasBreak,
+    );
+    if (hasBreak) {
+      assert.equal(
+        rowValue(researcher, "Break Rule"),
+        "Ends when this agent receives positive raw damage",
+      );
+    } else {
+      const forged = explainStatus(
+        durableStatus(statusCase, { breaks_on_positive_damage: true }),
+        RECIPIENT,
+        [SOURCE_A],
+      );
+      assert.equal(
+        forged.rows.some((row) => row.label === "Break Rule"),
+        false,
+      );
+    }
   }
 });
 
-test("status sources require exact same-scene slot and public-ID joins", () => {
-  const descriptor = explainStatus(
-    researcherStatus({
-      direct_source_evidence: [
+test("status source integration authorizes only exact presentation-key and public-ID joins", () => {
+  const statusCase = STATUS_CASES.find(
+    (candidate) => candidate.statusId === "hunter_basic_slow",
+  );
+  assert.ok(statusCase);
+  const exact = explainStatus(durableStatus(statusCase), RECIPIENT, [SOURCE_A]);
+  const wrongKey = explainStatus(
+    durableStatus(statusCase, {
+      direct_sources: [
         {
-          source_global_slot: 1,
-          source_public_agent_id: "alpha/9001",
-          event_id: "event:first",
-        },
-        {
-          source_global_slot: 1,
-          source_public_agent_id: "alpha/9001",
-          event_id: "event:repeat",
-        },
-        {
-          source_global_slot: 7,
-          source_public_agent_id: "beta.17",
-          event_id: "event:second-source",
-        },
-        {
-          source_global_slot: 1,
-          source_public_agent_id: "wrong-id",
-          event_id: "event:mismatch",
-        },
-        {
-          source_global_slot: 4,
-          source_public_agent_id: "not-in-roster",
-          event_id: "event:unjoined",
+          source_presentation_key: "wrong-key",
+          source_public_agent_id: SOURCE_A.public_agent_id,
         },
       ],
     }),
     RECIPIENT,
-    [SOURCE_A, SOURCE_B],
+    [SOURCE_A],
   );
-  assert.deepEqual(
-    sectionRows(descriptor, "Direct Source").map((row) => row.value),
-    ["Agent ID alpha/9001 · Team A · Hunter", "Agent ID beta.17 · Team B · Rogue"],
-  );
-  assert.deepEqual(
-    projectSemanticDescriptor(descriptor, "compact").sections[0].rows.map(
-      (row) => row.value,
-    ),
-    ["Agent ID alpha/9001 · Team A · Hunter", "Agent ID beta.17 · Team B · Rogue"],
-  );
-  const serialized = fullText(descriptor);
-  assert.doesNotMatch(serialized, /event:first|event:repeat|event:second-source/u);
-  assert.doesNotMatch(serialized, /wrong-id|not-in-roster/u);
-});
-
-test("status source display preserves upstream first-occurrence order", () => {
-  const descriptor = explainStatus(
-    researcherStatus({
-      direct_source_evidence: [
+  const slotFallback = explainStatus(
+    durableStatus(statusCase, {
+      direct_sources: [
         {
-          source_global_slot: 7,
-          source_public_agent_id: "beta.17",
-          event_id: "canonical-a",
-        },
-        {
-          source_global_slot: 1,
-          source_public_agent_id: "alpha/9001",
-          event_id: "canonical-b",
+          source_global_slot: SOURCE_A.global_slot,
+          source_public_agent_id: SOURCE_A.public_agent_id,
         },
       ],
     }),
     RECIPIENT,
-    [SOURCE_A, SOURCE_B],
+    [SOURCE_A],
   );
-  assert.deepEqual(
-    sectionRows(descriptor, "Direct Source").map((row) => row.value),
-    ["Agent ID beta.17 · Team B · Rogue", "Agent ID alpha/9001 · Team A · Hunter"],
+
+  assert.equal(rowValue(exact, "Source"), "Agent ID alpha/9001 · Hunter · Team A");
+  assert.equal(rowValue(wrongKey, "Source"), "Unavailable in this artifact");
+  assert.equal(rowValue(slotFallback, "Source"), "Unavailable in this artifact");
+  assert.doesNotMatch(fullText(slotFallback), /global.slot|id_1/u);
+});
+
+test("Freezing Trap refresh and reapplication preserve configured duration and exact break copy", () => {
+  const trap = STATUS_CASES.find(
+    (candidate) => candidate.statusId === "hunter_trap_stun",
+  );
+  assert.ok(trap);
+  for (const remaining of [1, 2, 4]) {
+    const descriptor = explainStatus(
+      durableStatus(trap, { remaining_duration: remaining }),
+      RECIPIENT,
+      [SOURCE_A],
+    );
+    assert.equal(rowValue(descriptor, "Effect Duration"), "4 Ticks");
+    assert.equal(
+      rowValue(descriptor, "Duration Remaining"),
+      `${remaining} ${remaining === 1 ? "Tick" : "Ticks"}`,
+    );
+    assert.equal(
+      rowValue(descriptor, "Break Rule"),
+      "Ends when this agent receives positive raw damage",
+    );
+  }
+  const noBreak = explainStatus(
+    durableStatus(trap, { breaks_on_positive_damage: false }),
+    RECIPIENT,
+    [SOURCE_A],
+  );
+  assert.equal(
+    noBreak.rows.some((row) => row.label === "Break Rule"),
+    false,
   );
 });
 
-test("POV status builder accepts only reduced fields and never widens researcher data", () => {
-  const malicious = {
-    token_id: "slow_hunter_basic",
-    duration: 3,
-    status_feature_index: 16,
-    source_class_id: 3,
-    source_evidence: "effect_channel_only",
-    magnitude: 0.001,
-    magnitude_kind: "movement_multiplier",
-    breaks_on_positive_damage: true,
-    direct_source_evidence: [
-      {
-        source_global_slot: 1,
-        source_public_agent_id: "secret-source",
-        event_id: "secret-event",
-      },
-    ],
-    source_action_component: "basic",
-    label: "SECRET STATUS LABEL",
-    short_label: "SECRET SHORT LABEL",
-    accessible_name: "SECRET ACCESSIBLE LABEL",
-  };
-  const direct = explainPovStatus(malicious, RECIPIENT);
-  const serialized = fullText(direct);
-  assert.equal(rowValue(direct, "Source"), "Source agent identity is not disclosed.");
-  assert.match(direct.summary, /Source agent identity is not disclosed\./u);
+test("POV status preserves effect facts while leaving source payloads unread", () => {
+  const statusCase = STATUS_CASES.find(
+    (candidate) => candidate.statusId === "hunter_basic_slow",
+  );
+  assert.ok(statusCase);
+  let sourceReads = 0;
+  /** @type {unknown[]} */
+  const hiddenSources = [];
+  Object.defineProperty(hiddenSources, "0", {
+    enumerable: true,
+    get() {
+      sourceReads += 1;
+      return SOURCE_REFERENCE_A;
+    },
+  });
+  hiddenSources.length = 1;
+  const descriptor = explainPovStatus(
+    durableStatus(statusCase, { direct_sources: hiddenSources }),
+    RECIPIENT,
+  );
+
+  assert.equal(rowValue(descriptor, "Movement Effect"), "15% slower (×0.85)");
+  assert.equal(rowValue(descriptor, "Effect Duration"), "1 Tick");
+  assert.equal(rowValue(descriptor, "Duration Remaining"), "1 Tick");
+  assert.equal(rowValue(descriptor, "Source"), "Not disclosed in Agent POV");
+  assert.equal(sourceReads, 0);
+});
+
+test("durable status cards exclude superseded, inferred, and forbidden copy", () => {
+  const serialized = STATUS_CASES.map((statusCase) =>
+    fullText(explainStatus(durableStatus(statusCase), RECIPIENT, [SOURCE_A])),
+  ).join("\n");
   assert.doesNotMatch(
     serialized,
-    /0\.001|secret-source|secret-event|secret status|secret short|secret accessible|break|magnitude|source action|source class/iu,
+    /incapacitat|preventing action|while the status remains|recipient takes recorded|No positive-damage|Source agent not recorded|Direct Source|source.global.slot|event.id|source.action.component/iu,
   );
   assert.equal(
-    projectSemanticDescriptor(direct, "compact").rows.some(
-      (row) => row.label === "Recipient",
-    ),
-    false,
+    [...serialized.matchAll(/Ends when this agent receives positive raw damage/gu)]
+      .length,
+    1,
   );
 });
 
-test("researcher status magnitudes render exact wire-authored percentages by kind", () => {
-  /** @type {Array<[string, number, string, string]>} */
+test("aggregate aura cards use exact copy, one effect row, and no source", () => {
   const cases = [
-    ["movement_multiplier", 0.731, "Movement Effect", "26.9% slower (×0.73)"],
-    [
-      "healing_multiplier",
-      0.623,
-      "Healing Effect",
-      "37.7% less healing received (×0.62)",
-    ],
-    ["damage_multiplier", 1.417, "Damage Effect", "41.7% more damage dealt (×1.42)"],
-    ["movement_floor", 0.843, "Movement Floor", "84.3% of base movement speed (×0.84)"],
+    {
+      aura_id: "mage_damage_amplification",
+      token_id: "mage_amplification",
+      multiplier: 1.23456,
+      title: "Sorcerer's Empowerment · Mage Damage Amplification Aura",
+      summary: "This agent benefits from authorized Mage aura coverage.",
+      label: "Aggregated Damage Amplification Effect",
+      value: "23.46% more damage dealt",
+      accent: "mage",
+    },
+    {
+      aura_id: "warrior_damage_mitigation",
+      token_id: "warrior_mitigation",
+      multiplier: 0.763,
+      title: "Guardian's Barrier · Warrior Damage Mitigation Aura",
+      summary: "This agent benefits from authorized Warrior aura coverage.",
+      label: "Aggregated Damage Mitigation Effect",
+      value: "23.7% less damage received",
+      accent: "warrior",
+    },
   ];
-  for (const [magnitudeKind, magnitude, expectedLabel, expectedValue] of cases) {
-    const descriptor = explainStatus(
-      researcherStatus({ magnitude_kind: magnitudeKind, magnitude }),
-      RECIPIENT,
-      [],
+  for (const auraCase of cases) {
+    const baseline = explainModifier(auraCase, AUTHORIZED_RECIPIENT);
+    const injected = explainModifier(
+      {
+        ...auraCase,
+        emitter_global_slots: [1, 7, 999],
+        source_presentation_key: "secret-source",
+        source_public_agent_id: "secret-public-id",
+        nearest_emitter: { position: [999, -42] },
+      },
+      AUTHORIZED_RECIPIENT,
     );
-    assert.equal(rowValue(descriptor, expectedLabel), expectedValue);
-    assert.equal(descriptor.summary.includes(expectedValue), true);
-    assert.match(
-      projectSemanticDescriptor(descriptor, "compact")
-        .rows.map((row) => row.value)
-        .join(" "),
-      /%/u,
+    assert.ok(baseline);
+    assert.ok(injected);
+    assert.equal(JSON.stringify(injected), JSON.stringify(baseline));
+    assert.equal(baseline.title, auraCase.title);
+    assert.equal(baseline.summary, auraCase.summary);
+    assert.equal(baseline.accent, auraCase.accent);
+    assert.deepEqual(
+      baseline.rows.map(({ label, value }) => [label, value]),
+      [[auraCase.label, auraCase.value]],
     );
+    assert.deepEqual(baseline.sections, []);
+    assert.doesNotMatch(fullText(baseline), /Source|emitter|secret/iu);
   }
+});
 
-  const stun = explainStatus(
-    researcherStatus({
-      token_id: "stun_hunter_trap",
-      magnitude_kind: "none",
-      magnitude: null,
+test("aggregate aura cards require one exact authorized recipient identity", () => {
+  const modifier = {
+    aura_id: "mage_damage_amplification",
+    token_id: "mage_amplification",
+    multiplier: 1.15,
+  };
+  assert.equal(explainModifier(modifier, {}), null);
+  assert.equal(
+    explainModifier(modifier, {
+      global_slot: 8,
+      public_agent_id: "recipient:<unsafe>&42",
+      class_id: 5,
+      team_id: 2,
     }),
-    RECIPIENT,
-    [],
+    null,
   );
-  assert.equal(
-    stun.rows.some((row) => row.label.includes("Magnitude")),
-    false,
-  );
-  assert.equal(
-    stun.rows.some((row) => row.value.includes("%")),
-    false,
-  );
-});
 
-test("aggregate aura modifier is noninterfering with emitter-shaped extras", () => {
-  const first = explainModifier(
-    {
-      aura_id: "mage_damage_amplification",
-      token_id: "mage_amplification",
-      multiplier: 1.23456,
-      emitter_global_slots: [1, 7],
-      nearest_emitter: { public_agent_id: "alpha/9001", position: [0, 0] },
+  let classReads = 0;
+  const accessorRecipient = {
+    presentation_key: AUTHORIZED_RECIPIENT.presentation_key,
+    public_agent_id: AUTHORIZED_RECIPIENT.public_agent_id,
+    team_id: AUTHORIZED_RECIPIENT.team_id,
+  };
+  Object.defineProperty(accessorRecipient, "class_id", {
+    enumerable: true,
+    get() {
+      classReads += 1;
+      return AUTHORIZED_RECIPIENT.class_id;
     },
-    RECIPIENT,
-  );
-  const second = explainModifier(
-    {
-      aura_id: "mage_damage_amplification",
-      token_id: "mage_amplification",
-      multiplier: 1.23456,
-      emitter_global_slots: [99],
-      nearest_emitter: { public_agent_id: "different", position: [999, -42] },
+  });
+  assert.equal(explainModifier(modifier, accessorRecipient), null);
+  assert.equal(classReads, 0);
+
+  const hostileRecipient = new Proxy(AUTHORIZED_RECIPIENT, {
+    getOwnPropertyDescriptor() {
+      throw new Error("recipient identity must fail closed");
     },
-    RECIPIENT,
-  );
-  assert.equal(JSON.stringify(first), JSON.stringify(second));
-  assert.equal(first.title, "Sorcerer’s Empowerment");
-  assert.equal(first.accent, "mage");
-  assert.equal(rowValue(first, "Aggregate Multiplier"), "×1.23");
-  assert.equal(rowValue(first, "Recipient Effect"), "23.46% more damage dealt");
-  assert.equal(
-    first.summary,
-    "This recipient has 23.46% more damage dealt from the exact aggregate aura multiplier.",
-  );
-  assert.match(fullText(first), /emitter identity is not recorded/u);
+  });
+  assert.equal(explainModifier(modifier, hostileRecipient), null);
 });
 
-test("the two aggregate recipient aura cards use their locked qualitative titles", () => {
-  assert.equal(
-    explainModifier(
-      {
-        aura_id: "mage_damage_amplification",
-        token_id: "mage_amplification",
-        multiplier: 1.2,
-      },
-      RECIPIENT,
-    ).title,
-    "Sorcerer’s Empowerment",
-  );
-  assert.equal(
-    explainModifier(
-      {
-        aura_id: "warrior_damage_mitigation",
-        token_id: "warrior_mitigation",
-        multiplier: 0.8,
-      },
-      RECIPIENT,
-    ).title,
-    "Guardian’s Barrier",
-  );
-  assert.equal(
-    rowValue(
-      explainModifier(
-        {
-          aura_id: "warrior_damage_mitigation",
-          token_id: "warrior_mitigation",
-          multiplier: 0.763,
-        },
-        RECIPIENT,
-      ),
-      "Recipient Effect",
-    ),
-    "23.7% less damage received",
-  );
-});
-
-test("agent presentation suppresses only exact neutral aura modifiers", () => {
-  const descriptor = explainAgent(
+test("spawn shield view is exact across V1/V2/unavailable and every audience", () => {
+  const v2Summary =
+    "While the spawn shield is active, this agent is protected, concealed from opponents, untargetable, excluded from aura effects, and limited to movement. It phases through agents until body collision resumes at the endpoint of its expiring transition.";
+  const v2Mechanics = {
+    availability_kind: "available_v2",
+    configured_duration_steps: 3,
+    movement_speed: 2,
+    protection_effect: "invulnerable",
+    visibility_effect: "concealed_from_opponents",
+    targetability_effect: "untargetable",
+    action_scope: "movement_only",
+    aura_effect: "excluded_as_emitter_and_beneficiary",
+    agent_collision_effect: "phased_until_expiring_endpoint_rejoin",
+    ordinary_application_mechanism: "end_of_transition_respawn_lifecycle",
+  };
+  const audiences = ["Oracle", "NoShared", "Shared"];
+  const variants = [
     {
-      ...RECIPIENT,
-      current_health: 100,
-      max_health: 100,
-      effective_movement_speed: 1,
-      ultimate_cooldown_remaining: 0,
-      steps_until_out_of_combat: 0,
-      statuses: [],
-      aura_modifiers: [
-        {
-          aura_id: "mage_damage_amplification",
-          token_id: "mage_amplification",
-          multiplier: 1,
-        },
-        {
-          aura_id: "warrior_damage_mitigation",
-          token_id: "warrior_mitigation",
-          multiplier: 0.999999,
-        },
+      name: "V2",
+      mechanics: v2Mechanics,
+      summary: v2Summary,
+      rows: /** @param {string} owner */ (owner) => [
+        ["Protection Effect", "Invulnerable"],
+        ["Movement Speed", "2"],
+        ["Visibility Effect", "Concealed from opponents"],
+        ["Targetability Effect", "Untargetable"],
+        ["Action Effect", "Movement only"],
+        ["Aura Effect", "Excluded as emitter and beneficiary"],
+        ["Agent Collision Effect", "Phased until expiring endpoint rejoin"],
+        ["Effect Duration", "3 Ticks"],
+        ["Duration Remaining", "3 Ticks"],
+        ["Owner", owner],
+        ["Source", "Not recorded"],
+        ["Ordinary Application", "End-of-transition respawn lifecycle"],
       ],
     },
-    {},
-    classMechanics(5, "Priest"),
-  );
-  assert.equal(
-    sectionRows(descriptor, "Current State").find(
-      (row) => row.label === "Aggregate Aura Modifiers",
-    )?.value,
-    "1",
-  );
-  const effectRows = sectionRows(descriptor, "Current Aura Modifier Details");
-  assert.equal(effectRows.length, 1);
-  assert.match(effectRows[0].label, /Guardian’s Barrier/u);
-  assert.doesNotMatch(fullText(descriptor), /Sorcerer’s Empowerment/u);
-});
-
-test("spawn shield explanation states invulnerability and exact remaining ticks", () => {
-  const descriptor = explainSpawnShield({
-    public_agent_id: "opaque-shielded",
-    spawn_shield_remaining: 3,
-  });
-  assert.equal(descriptor.kind, "status");
-  assert.equal(descriptor.title, "Spawn Shield");
-  assert.equal(rowValue(descriptor, "Protection"), "Invulnerable");
-  assert.equal(rowValue(descriptor, "Remaining"), "3 Ticks");
-  assert.match(descriptor.summary, /invulnerable/u);
-  assert.match(descriptor.summary, /3 Ticks/u);
-});
-
-test("five cooldown cards use exact class names, ultimate names, ticks, and public IDs", () => {
-  /** @type {Array<[number, string, string]>} */
-  const cases = [
-    [1, "Mage", "Burst"],
-    [2, "Warrior", "Charge"],
-    [3, "Hunter", "Freezing Trap"],
-    [4, "Rogue", "Crippling Poison"],
-    [5, "Priest", "Holy Word: Salvation"],
+    {
+      name: "V1",
+      mechanics: {
+        availability_kind: "available",
+        configured_duration_steps: 3,
+        movement_speed: 2,
+      },
+      summary: null,
+      rows: /** @param {string} owner */ (owner) => [
+        ["Movement Speed", "2"],
+        ["Effect Duration", "3 Ticks"],
+        ["Duration Remaining", "3 Ticks"],
+        ["Owner", owner],
+        ["Source", "Not recorded"],
+      ],
+    },
+    {
+      name: "unavailable",
+      mechanics: { availability_kind: "unavailable" },
+      summary: null,
+      rows: /** @param {string} owner */ (owner) => [
+        ["Duration Remaining", "3 Ticks"],
+        ["Owner", owner],
+        ["Source", "Not recorded"],
+      ],
+    },
   ];
-  for (const [classId, className, ultimateName] of cases) {
+
+  for (const audience of audiences) {
+    const publicAgentId = `${audience.toLowerCase()}-shielded`;
+    const agent = {
+      presentation_key: `${audience.toLowerCase()}:shielded`,
+      public_agent_id: publicAgentId,
+      class_id: 1,
+      team_id: 1,
+      spawn_shield_remaining: 3,
+      audience_sentinel: audience,
+    };
+    const owner = `Agent ID ${publicAgentId} · Mage · Team A`;
+    for (const variant of variants) {
+      const view = createSpawnShieldView(agent, variant.mechanics);
+      const descriptor = view.descriptor;
+      assert.equal(Object.isFrozen(view), true, `${audience}/${variant.name}`);
+      assert.equal(view.active, true, `${audience}/${variant.name}`);
+      assert.equal(view.badgeText, "S3", `${audience}/${variant.name}`);
+      assert.equal(view.remainingTicks, 3, `${audience}/${variant.name}`);
+      assert.equal(
+        view.rootAriaLabel,
+        "Spawn Shield active, 3 ticks remaining",
+        `${audience}/${variant.name}`,
+      );
+      assert.equal(view.shieldAriaLabel, "Spawn Shield");
+      assert.equal(descriptor.kind, "status");
+      assert.equal(descriptor.title, "Spawn Shield");
+      assert.equal(descriptor.summary, variant.summary, `${audience}/${variant.name}`);
+      assert.deepEqual(
+        descriptor.rows.map(({ label, value }) => [label, value]),
+        variant.rows(owner),
+        `${audience}/${variant.name}`,
+      );
+      assert.equal(
+        JSON.stringify(explainSpawnShield(agent, variant.mechanics)),
+        JSON.stringify(descriptor),
+      );
+      assert.doesNotMatch(fullText(descriptor), /audience_sentinel/u);
+      if (variant.name !== "V2") {
+        assert.doesNotMatch(
+          fullText(descriptor),
+          /Invulnerable|Concealed|Untargetable|Movement only|Aura Effect|Collision|Ordinary Application/u,
+          `${audience}/${variant.name}`,
+        );
+      }
+    }
+  }
+});
+
+test("malformed spawn shield mechanics fail closed without invoking accessors", () => {
+  const agent = {
+    presentation_key: "shield:malformed",
+    public_agent_id: "malformed-shielded",
+    class_id: 2,
+    team_id: 2,
+    spawn_shield_remaining: 1,
+  };
+  const unavailable = createSpawnShieldView(agent, {
+    availability_kind: "unavailable",
+  }).descriptor;
+  let accessorReads = 0;
+  const accessor = {};
+  Object.defineProperty(accessor, "availability_kind", {
+    enumerable: true,
+    get() {
+      accessorReads += 1;
+      return "available_v2";
+    },
+  });
+  const extraV2 = {
+    availability_kind: "available_v2",
+    configured_duration_steps: 3,
+    movement_speed: 2,
+    protection_effect: "invulnerable",
+    visibility_effect: "concealed_from_opponents",
+    targetability_effect: "untargetable",
+    action_scope: "movement_only",
+    aura_effect: "excluded_as_emitter_and_beneficiary",
+    agent_collision_effect: "phased_until_expiring_endpoint_rejoin",
+    ordinary_application_mechanism: "end_of_transition_respawn_lifecycle",
+    browser_invented_claim: true,
+  };
+  const hostileV2 = new Proxy(extraV2, {
+    ownKeys() {
+      throw new Error("must fail closed");
+    },
+  });
+  for (const malformed of [null, accessor, extraV2, hostileV2]) {
+    assert.equal(
+      JSON.stringify(createSpawnShieldView(agent, malformed).descriptor),
+      JSON.stringify(unavailable),
+    );
+  }
+  assert.equal(accessorReads, 0);
+});
+
+test("five cooldown cards use canonical owners, Ultimate tokens, and exact rows", () => {
+  /** @type {Array<[number, string, string, string]>} */
+  const cases = [
+    [1, "Mage", "mage", "Burst"],
+    [2, "Warrior", "warrior", "Charge"],
+    [3, "Hunter", "hunter", "Freezing Trap"],
+    [4, "Rogue", "rogue", "Crippling Poison"],
+    [5, "Priest", "priest", "Holy Word: Salvation"],
+  ];
+  for (const [classId, className, accent, ultimateName] of cases) {
     const owner = {
-      global_slot: classId,
+      presentation_key: `cooldown:${classId}`,
       public_agent_id: `opaque-${classId * 17}`,
       class_id: classId,
-      ultimate_cooldown_remaining: classId - 1,
+      team_id: classId % 2 === 0 ? 2 : 1,
     };
+    const ticks = classId - 1;
     const descriptor = explainCooldown(
+      {
+        presentation_key: owner.presentation_key,
+        public_agent_id: owner.public_agent_id,
+        ultimate_cooldown_remaining: ticks,
+        current_health: 999,
+      },
       owner,
-      owner,
-      classMechanics(classId, className),
     );
-    assert.equal(descriptor.title, `${className} Ultimate: ${ultimateName} Cooldown`);
-    assert.equal(rowValue(descriptor, "Source"), `Agent ID opaque-${classId * 17}`);
-    assert.equal(
-      rowValue(descriptor, "Cooldown Remaining"),
-      `${classId - 1} ${classId === 2 ? "Tick" : "Ticks"}`,
+    assert.ok(descriptor);
+    const team = owner.team_id === 1 ? "Team A" : "Team B";
+    const canonical = `Agent ID ${owner.public_agent_id} · ${className} · ${team}`;
+    assert.equal(descriptor.title, `${ultimateName} Cooldown · ${canonical}`);
+    assert.equal(descriptor.summary, null);
+    assert.equal(descriptor.accent, accent);
+    assert.deepEqual(
+      descriptor.rows.map(({ label, value }) => [label, value]),
+      ticks === 0
+        ? [
+            ["Ultimate Status", "Ready"],
+            ["Source", canonical],
+          ]
+        : [
+            ["Remaining Cooldown", `${ticks} ${ticks === 1 ? "Tick" : "Ticks"}`],
+            ["Source", canonical],
+          ],
     );
   }
+  assert.equal(
+    explainCooldown(
+      {
+        presentation_key: "wrong",
+        public_agent_id: AUTHORIZED_RECIPIENT.public_agent_id,
+        ultimate_cooldown_remaining: 1,
+      },
+      AUTHORIZED_RECIPIENT,
+    ),
+    null,
+  );
 });
 
-test("three range cards explain purpose, exact radius, and joined owner identity", () => {
-  for (const [kind, summaryFragment] of [
-    ["observation", "authorized Observation radius"],
-    ["basic", "Basic interaction"],
-    ["ultimate", "Ultimate interaction"],
+test("three range cards require exact owner joins and exact four-row copy", () => {
+  for (const [kind, title] of [
+    ["observation", "Observation Range"],
+    [
+      "basic",
+      `Basic Range · Agent ID ${AUTHORIZED_RECIPIENT.public_agent_id} · Priest · Team B`,
+    ],
+    [
+      "ultimate",
+      `Ultimate Range · Agent ID ${AUTHORIZED_RECIPIENT.public_agent_id} · Priest · Team B`,
+    ],
   ]) {
     const descriptor = explainRange(
-      { global_slot: 8, kind, radius: Math.PI },
-      RECIPIENT,
-      classMechanics(5, "Priest"),
+      {
+        presentation_key: AUTHORIZED_RECIPIENT.presentation_key,
+        public_agent_id: AUTHORIZED_RECIPIENT.public_agent_id,
+        kind,
+        radius: Math.PI,
+      },
+      AUTHORIZED_RECIPIENT,
     );
-    assert.equal(rowValue(descriptor, "Radius"), "3.14");
-    assert.equal(rowValue(descriptor, "Owner ID"), "Agent ID recipient:<unsafe>&42");
-    assert.match(descriptor.summary, new RegExp(summaryFragment, "u"));
+    assert.ok(descriptor);
+    assert.equal(descriptor.title, title);
+    assert.equal(descriptor.summary, null);
+    assert.equal(descriptor.accent, "priest");
+    assert.deepEqual(
+      descriptor.rows.map(({ label, value }) => [label, value]),
+      [
+        ["Radius", "3.14"],
+        ["Owner ID", `Agent ID ${AUTHORIZED_RECIPIENT.public_agent_id}`],
+        ["Team", "Team B"],
+        ["Class", "Priest"],
+      ],
+    );
   }
 
-  const mismatchedOwner = explainRange(
-    { global_slot: 999, kind: "basic", radius: 2.5 },
-    RECIPIENT,
-    classMechanics(5, "Priest"),
-  );
-  assert.equal(rowValue(mismatchedOwner, "Owner ID"), "Agent ID unavailable");
-  assert.equal(rowValue(mismatchedOwner, "Class"), "Unknown");
-  assert.doesNotMatch(fullText(mismatchedOwner), /recipient:<unsafe>&42|Priest/u);
+  for (const malformed of [
+    {
+      presentation_key: "wrong",
+      public_agent_id: AUTHORIZED_RECIPIENT.public_agent_id,
+      kind: "basic",
+      radius: 2.5,
+    },
+    {
+      presentation_key: AUTHORIZED_RECIPIENT.presentation_key,
+      public_agent_id: "wrong",
+      kind: "ultimate",
+      radius: 2.5,
+    },
+    {
+      global_slot: 8,
+      kind: "observation",
+      radius: 2.5,
+    },
+  ]) {
+    assert.equal(explainRange(malformed, AUTHORIZED_RECIPIENT), null);
+  }
 });
 
 test("wall and pillar cards retain exact IDs, centers, and shape dimensions", () => {
@@ -564,247 +1020,364 @@ test("wall and pillar cards retain exact IDs, centers, and shape dimensions", ()
   );
 });
 
-test("aura fields expose exact catalog capability without claiming realized effect", () => {
-  /** @type {Array<[Record<string, any>, string]>} */
+test("aura fields use exact copy and key-plus-public-ID source joins only", () => {
   const cases = [
-    [
-      {
-        aura_id: "mage_damage_amplification",
-        token_id: "mage_amplification",
-        source_global_slot: 1,
-        source_public_agent_id: "alpha/9001",
-        source_class_id: 1,
-        source_class_name: "Mage",
-        radius: 4.567,
-        per_emitter_multiplier: 1.2,
-        beneficiary_relation: "same_team",
-        stacking_rule: "multiply_then_clamp",
-        clamp_kind: "ceiling",
-        clamp_value: 2,
-        center: [1, 2],
-      },
-      "Sorcerer’s Empowerment",
-    ],
-    [
-      {
-        aura_id: "warrior_damage_mitigation",
-        token_id: "warrior_mitigation",
-        source_global_slot: 7,
-        source_public_agent_id: "beta.17",
-        source_class_id: 2,
-        source_class_name: "Warrior",
-        radius: 3,
-        per_emitter_multiplier: 0.8,
-        beneficiary_relation: "same_team",
-        stacking_rule: "multiply_then_clamp",
-        clamp_kind: "floor",
-        clamp_value: 0.2,
-        center: [4, 5],
-      },
-      "Guardian’s Barrier",
-    ],
-  ];
-  for (const [field, expectedTitle] of cases) {
-    const source = field.source_global_slot === 1 ? SOURCE_A : SOURCE_B;
-    const descriptor = explainAura(field, {
-      ...source,
-      class_id: field.source_class_id,
-    });
-    assert.equal(descriptor.title, expectedTitle);
-    assert.equal(
-      descriptor.accent,
-      field.aura_id === "mage_damage_amplification" ? "mage" : "warrior",
-    );
-    assert.equal(
-      rowValue(descriptor, "Source ID"),
-      `Agent ID ${field.source_public_agent_id}`,
-    );
-    assert.equal(rowValue(descriptor, "Radius"), format(field.radius));
-    assert.equal(
-      rowValue(descriptor, "Catalog Multiplier"),
-      `×${format(field.per_emitter_multiplier)}`,
-    );
-    assert.equal(
-      rowValue(descriptor, "Catalog Effect"),
-      field.aura_id === "mage_damage_amplification"
-        ? "20% more damage dealt per recorded emitter"
-        : "20% less damage received per recorded emitter",
-    );
-    assert.match(descriptor.summary, /catalog-declared.*may receive/iu);
-    assert.match(descriptor.summary, /exact aggregate modifier.*realized effect/iu);
-    assert.doesNotMatch(descriptor.summary, /allies inside this field have/iu);
-  }
-  const mismatched = explainAura(
     {
       aura_id: "mage_damage_amplification",
       token_id: "mage_amplification",
-      source_global_slot: 1,
-      source_public_agent_id: "alpha/9001",
-      radius: 3,
-      per_emitter_multiplier: 1.2,
+      owner: {
+        presentation_key: "aura:mage",
+        public_agent_id: "mage/alpha",
+        class_id: 1,
+        team_id: 1,
+      },
+      radius: 4.567,
+      multiplier: 1.2,
+      title: "Sorcerer's Empowerment · Mage Damage Amplification Aura",
+      summary:
+        "This Mage radiates arcane magic, amplifying outgoing damage for eligible unshielded same-team agents in its radius, including itself.",
+      label: "Damage Amplification Effect",
+      value: "20% more damage dealt per emitter",
+      accent: "mage",
     },
-    { ...SOURCE_A, public_agent_id: "wrong-agent", class_id: 1 },
-  );
-  assert.equal(rowValue(mismatched, "Source ID"), "Agent ID unavailable");
-  assert.equal(rowValue(mismatched, "Source Class"), "Unavailable");
-  assert.doesNotMatch(fullText(mismatched), /wrong-agent/u);
+    {
+      aura_id: "warrior_damage_mitigation",
+      token_id: "warrior_mitigation",
+      owner: {
+        presentation_key: "aura:warrior",
+        public_agent_id: "warrior/beta",
+        class_id: 2,
+        team_id: 2,
+      },
+      radius: 3,
+      multiplier: 0.8,
+      title: "Guardian's Barrier · Warrior Damage Mitigation Aura",
+      summary:
+        "This Warrior emanates a defensive aura, mitigating incoming damage for eligible unshielded same-team agents in its radius, including itself.",
+      label: "Damage Mitigation Effect",
+      value: "20% less damage received per emitter",
+      accent: "warrior",
+    },
+  ];
+  for (const auraCase of cases) {
+    const field = {
+      aura_id: auraCase.aura_id,
+      token_id: auraCase.token_id,
+      source_presentation_key: auraCase.owner.presentation_key,
+      source_public_agent_id: auraCase.owner.public_agent_id,
+      radius: auraCase.radius,
+      per_emitter_multiplier: auraCase.multiplier,
+      source_global_slot: 999,
+      source_class_id: 999,
+      beneficiary_relation: "browser-must-not-infer",
+      center: [999, -42],
+    };
+    const descriptor = explainAura(field, auraCase.owner);
+    assert.ok(descriptor);
+    assert.equal(descriptor.title, auraCase.title);
+    assert.equal(descriptor.summary, auraCase.summary);
+    assert.equal(descriptor.accent, auraCase.accent);
+    assert.deepEqual(
+      descriptor.rows.map(({ label, value }) => [label, value]),
+      [
+        [auraCase.label, auraCase.value],
+        ["Effect Radius", format(auraCase.radius)],
+        [
+          "Source",
+          `Agent ID ${auraCase.owner.public_agent_id} · ${auraCase.accent === "mage" ? "Mage · Team A" : "Warrior · Team B"}`,
+        ],
+      ],
+    );
+    assert.deepEqual(descriptor.sections, []);
 
-  for (const malformedField of [
-    {
-      token_id: "mage_amplification",
-      source_public_agent_id: "alpha/9001",
-      radius: 3,
-      per_emitter_multiplier: 1.2,
-    },
-    {
-      token_id: "mage_amplification",
-      source_global_slot: "1",
-      source_public_agent_id: "alpha/9001",
-      radius: 3,
-      per_emitter_multiplier: 1.2,
-    },
-    {
-      token_id: "mage_amplification",
-      source_global_slot: 1,
-      radius: 3,
-      per_emitter_multiplier: 1.2,
-    },
-  ]) {
-    const malformed = explainAura(malformedField, { ...SOURCE_A, class_id: 1 });
-    assert.equal(rowValue(malformed, "Source ID"), "Agent ID unavailable");
-    assert.equal(rowValue(malformed, "Source Class"), "Unavailable");
-    assert.doesNotMatch(fullText(malformed), /alpha\/9001/u);
+    const injected = explainAura(
+      {
+        ...field,
+        source_global_slot: -1,
+        source_class_id: -1,
+        source_class_name: "Secret",
+        eligible_recipient_slots: [1, 2, 3],
+        proximity_result: true,
+      },
+      auraCase.owner,
+    );
+    assert.equal(JSON.stringify(injected), JSON.stringify(descriptor));
+
+    const mismatched = explainAura(
+      { ...field, source_public_agent_id: "wrong-public-id" },
+      auraCase.owner,
+    );
+    assert.ok(mismatched);
+    assert.equal(rowValue(mismatched, "Source"), "Unavailable in this artifact");
+    assert.doesNotMatch(fullText(mismatched), /wrong-public-id/u);
   }
 });
 
-test("agent full cards show class copy and only positive raw catalog outputs", () => {
-  const agent = {
-    ...RECIPIENT,
-    current_health: 55,
-    max_health: 101,
-    effective_movement_speed: 1.25,
-    ultimate_cooldown_remaining: 0,
-    steps_until_out_of_combat: 0,
-    life_state: "alive",
-    statuses: [{}],
-    aura_modifiers: [{}, {}],
-  };
-  const mechanics = {
-    ...classMechanics(5, "Priest"),
-    basic_raw_damage: 0,
-    basic_raw_healing: 11,
-    ultimate_raw_damage: 0,
-    ultimate_raw_healing: 29,
-  };
-  const descriptor = explainAgent(agent, {}, mechanics);
-  const mechanicsRows = sectionRows(descriptor, "Exact Class Mechanics");
-  assert.equal(rowValue(descriptor, "Ultimate Name"), "Holy Word: Salvation");
-  assert.equal(rowValue(descriptor, "Ultimate Status"), "Ready");
-  assert.equal(
-    mechanicsRows.find((row) => row.label === "Ultimate Name")?.value,
-    "Holy Word: Salvation",
+test("Agent POV aura attribution is source-inert and redacts before hidden reads", () => {
+  let hiddenSourceReads = 0;
+  const rawField = new Proxy(
+    {
+      aura_id: "mage_damage_amplification",
+      token_id: "mage_amplification",
+      radius: 2,
+      per_emitter_multiplier: 1.15,
+      source_presentation_key: "hidden:presentation:key",
+      source_public_agent_id: "hidden-public-id",
+    },
+    {
+      get(target, key, receiver) {
+        if (key === "source_presentation_key" || key === "source_public_agent_id") {
+          hiddenSourceReads += 1;
+          throw new Error("Agent POV must not read hidden aura source values");
+        }
+        return Reflect.get(target, key, receiver);
+      },
+      getOwnPropertyDescriptor(target, key) {
+        if (key === "source_presentation_key" || key === "source_public_agent_id") {
+          hiddenSourceReads += 1;
+          throw new Error("Agent POV must not inspect hidden aura source descriptors");
+        }
+        return Reflect.getOwnPropertyDescriptor(target, key);
+      },
+      ownKeys() {
+        hiddenSourceReads += 1;
+        throw new Error("Agent POV must not enumerate the hidden aura source record");
+      },
+    },
   );
-  assert.equal(
-    mechanicsRows.some((row) => row.label === "Basic Raw Damage"),
-    false,
+  const hiddenSourceAgent = new Proxy(
+    {
+      presentation_key: "hidden:presentation:key",
+      public_agent_id: "hidden-public-id",
+      class_id: 1,
+      team_id: 1,
+    },
+    {
+      get() {
+        hiddenSourceReads += 1;
+        throw new Error("Agent POV must not read the hidden source agent");
+      },
+      getOwnPropertyDescriptor() {
+        hiddenSourceReads += 1;
+        throw new Error("Agent POV must not inspect the hidden source agent");
+      },
+      ownKeys() {
+        hiddenSourceReads += 1;
+        throw new Error("Agent POV must not enumerate the hidden source agent");
+      },
+    },
   );
-  assert.equal(
-    mechanicsRows.some((row) => row.label === "Ultimate Raw Damage"),
-    false,
-  );
-  assert.equal(
-    mechanicsRows.find((row) => row.label === "Basic Raw Healing")?.value,
-    "11",
-  );
-  assert.match(
-    fullText(descriptor),
-    /Role|Strengths|Limitations|Teamwork|Counterplay/u,
-  );
-  assert.match(fullText(descriptor), /Out of combat/u);
 
-  const coolingDown = explainAgent(
-    { ...agent, ultimate_cooldown_remaining: 3 },
-    {},
-    mechanics,
+  const descriptor = explainAura(rawField, hiddenSourceAgent, "agent_pov");
+  assert.ok(descriptor);
+  assert.equal(rowValue(descriptor, "Source"), "Not disclosed in Agent POV");
+  assert.equal(descriptor.id, "aura:agent-pov:mage_amplification");
+  assert.doesNotMatch(
+    fullText(descriptor),
+    /hidden-public-id|hidden:presentation:key/u,
   );
-  assert.equal(rowValue(coolingDown, "Ultimate Name"), "Holy Word: Salvation");
-  assert.equal(rowValue(coolingDown, "Ultimate Status"), "On cooldown (3 Ticks)");
+  assert.equal(hiddenSourceReads, 0);
 });
 
-test("agent full cards retain exact authored and realized status and aura facts", () => {
-  const mechanics = {
-    ...classMechanics(1, "Mage"),
-    status_mechanics: [
-      {
-        status_channel: 7,
-        status_id: "mage_burst_damage_amplification",
-        source_action_component: "ultimate",
-        duration_steps: 7,
-        magnitude_kind: "damage_multiplier",
-        magnitude: 1.73,
-        breaks_on_positive_damage: false,
-      },
-    ],
-    aura_mechanics: [
-      {
-        aura_id: "mage_damage_amplification",
-        radius: 4.75,
-        per_emitter_multiplier: 1.17,
-        stacking_rule: "multiply_then_clamp",
-        clamp_kind: "ceiling",
-        clamp_value: 1.5,
-      },
-    ],
+test("C2 helpers snapshot every consumed field and fail closed on accessors", () => {
+  let sourceAccessorReads = 0;
+  const accessorField = {
+    aura_id: "mage_damage_amplification",
+    token_id: "mage_amplification",
+    radius: 3,
+    per_emitter_multiplier: 1.2,
   };
-  const realized = researcherStatus({
-    status_channel: 7,
-    status_id: "mage_burst_damage_amplification",
-    token_id: "mage_burst",
-    source_class_id: 1,
-    source_class_name: "Mage",
-    source_action_component: "ultimate",
-    remaining_duration: 3,
-    magnitude_kind: "damage_multiplier",
-    magnitude: 1.5,
-    direct_source_evidence: [
-      {
-        source_global_slot: SOURCE_A.global_slot,
-        source_public_agent_id: SOURCE_A.public_agent_id,
-        event_id: "technical-event",
+  Object.defineProperties(accessorField, {
+    source_presentation_key: {
+      enumerable: true,
+      get() {
+        sourceAccessorReads += 1;
+        return "aura:mage";
       },
-    ],
-  });
-  const descriptor = explainAgent(
-    {
-      ...RECIPIENT,
-      current_health: 50,
-      max_health: 100,
-      effective_movement_speed: 1,
-      ultimate_cooldown_remaining: 0,
-      statuses: [realized],
-      aura_modifiers: [{ aura_id: "mage_damage_amplification", multiplier: 1.17 }],
     },
+    source_public_agent_id: {
+      enumerable: true,
+      get() {
+        sourceAccessorReads += 1;
+        return "mage/alpha";
+      },
+    },
+  });
+  const owner = {
+    presentation_key: "aura:mage",
+    public_agent_id: "mage/alpha",
+    class_id: 1,
+    team_id: 1,
+  };
+  const descriptor = explainAura(accessorField, owner);
+  assert.ok(descriptor);
+  assert.equal(sourceAccessorReads, 0);
+  assert.equal(rowValue(descriptor, "Source"), "Unavailable in this artifact");
+
+  let scalarReads = 0;
+  const auraRadiusAccessor = {
+    aura_id: "mage_damage_amplification",
+    token_id: "mage_amplification",
+    per_emitter_multiplier: 1.15,
+    source_presentation_key: owner.presentation_key,
+    source_public_agent_id: owner.public_agent_id,
+  };
+  Object.defineProperty(auraRadiusAccessor, "radius", {
+    enumerable: true,
+    get() {
+      scalarReads += 1;
+      throw new Error("aura radius getter must remain unread");
+    },
+  });
+  const radiusDescriptor = explainAura(auraRadiusAccessor, owner);
+  assert.ok(radiusDescriptor);
+  assert.equal(rowValue(radiusDescriptor, "Effect Radius"), "Unavailable");
+
+  const aggregateMultiplierAccessor = {
+    aura_id: "mage_damage_amplification",
+    token_id: "mage_amplification",
+  };
+  Object.defineProperty(aggregateMultiplierAccessor, "multiplier", {
+    enumerable: true,
+    get() {
+      scalarReads += 1;
+      throw new Error("aggregate multiplier getter must remain unread");
+    },
+  });
+  const aggregateDescriptor = explainModifier(
+    aggregateMultiplierAccessor,
+    AUTHORIZED_RECIPIENT,
+  );
+  assert.ok(aggregateDescriptor);
+  assert.equal(
+    rowValue(aggregateDescriptor, "Aggregated Damage Amplification Effect"),
+    "Effect unavailable",
+  );
+
+  const cooldownAccessor = {
+    presentation_key: owner.presentation_key,
+    public_agent_id: owner.public_agent_id,
+  };
+  for (const key of ["ultimate_cooldown_remaining", "ultimate_cooldown"]) {
+    Object.defineProperty(cooldownAccessor, key, {
+      enumerable: true,
+      get() {
+        scalarReads += 1;
+        throw new Error("cooldown getter must remain unread");
+      },
+    });
+  }
+  assert.equal(explainCooldown(cooldownAccessor, owner), null);
+
+  const rangeRadiusAccessor = {
+    presentation_key: owner.presentation_key,
+    public_agent_id: owner.public_agent_id,
+    kind: "basic",
+  };
+  Object.defineProperty(rangeRadiusAccessor, "radius", {
+    enumerable: true,
+    get() {
+      scalarReads += 1;
+      throw new Error("range radius getter must remain unread");
+    },
+  });
+  assert.equal(explainRange(rangeRadiusAccessor, owner), null);
+
+  const legalityAccessor = {
+    owner_presentation_key: owner.presentation_key,
+    owner_public_agent_id: owner.public_agent_id,
+    lane_1_available: true,
+  };
+  Object.defineProperty(legalityAccessor, "lane_0_available", {
+    enumerable: true,
+    get() {
+      scalarReads += 1;
+      throw new Error("legality getter must remain unread");
+    },
+  });
+  assert.equal(explainLegality(legalityAccessor, 0, owner), null);
+  const untouchedOtherLane = explainLegality(legalityAccessor, 1, owner);
+  assert.ok(untouchedOtherLane);
+  assert.equal(rowValue(untouchedOtherLane, "Status"), "True");
+  assert.equal(scalarReads, 0);
+
+  let vocabularyReads = 0;
+  const auraVocabularyAccessor = {
+    token_id: "mage_amplification",
+    radius: 2,
+    per_emitter_multiplier: 1.15,
+    source_presentation_key: owner.presentation_key,
+    source_public_agent_id: owner.public_agent_id,
+  };
+  Object.defineProperty(auraVocabularyAccessor, "aura_id", {
+    enumerable: true,
+    get() {
+      vocabularyReads += 1;
+      throw new Error("aura vocabulary getter must remain unread");
+    },
+  });
+  assert.doesNotThrow(() => explainAura(auraVocabularyAccessor, owner));
+
+  const rangeKindAccessor = {
+    presentation_key: owner.presentation_key,
+    public_agent_id: owner.public_agent_id,
+    radius: 2,
+  };
+  Object.defineProperty(rangeKindAccessor, "kind", {
+    enumerable: true,
+    get() {
+      vocabularyReads += 1;
+      throw new Error("range kind getter must remain unread");
+    },
+  });
+  assert.equal(explainRange(rangeKindAccessor, owner), null);
+
+  const classAccessorOwner = {
+    presentation_key: owner.presentation_key,
+    public_agent_id: owner.public_agent_id,
+    team_id: owner.team_id,
+  };
+  Object.defineProperty(classAccessorOwner, "class_id", {
+    enumerable: true,
+    get() {
+      vocabularyReads += 1;
+      throw new Error("class getter must remain unread");
+    },
+  });
+  assert.equal(
+    explainCooldown(
+      {
+        presentation_key: owner.presentation_key,
+        public_agent_id: owner.public_agent_id,
+        ultimate_cooldown: 1,
+      },
+      classAccessorOwner,
+    ),
+    null,
+  );
+  assert.equal(vocabularyReads, 0);
+});
+
+test("C2 helpers absorb hostile scientific-record proxy traps", () => {
+  const owner = {
+    presentation_key: "hostile:owner",
+    public_agent_id: "owner/hostile",
+    class_id: 1,
+    team_id: 1,
+  };
+  const throwingRecord = new Proxy(
     {},
-    mechanics,
-    [SOURCE_A],
+    {
+      getOwnPropertyDescriptor() {
+        throw new Error("scientific record must fail closed");
+      },
+    },
   );
-  assert.match(
-    sectionRows(descriptor, "Authored Status Mechanics")[0].value,
-    /7 Ticks.*73% more damage dealt/u,
-  );
-  assert.match(
-    sectionRows(descriptor, "Authored Passive Mechanics")[0].value,
-    /Radius 4\.75.*17% more damage dealt/u,
-  );
-  assert.match(
-    sectionRows(descriptor, "Current Status Details")[0].value,
-    /3 Ticks.*Agent ID alpha\/9001/u,
-  );
-  assert.match(
-    sectionRows(descriptor, "Current Aura Modifier Details")[0].value,
-    /17% more damage dealt/u,
-  );
-  assert.doesNotMatch(fullText(descriptor), /technical-event/u);
+  assert.equal(explainAura(throwingRecord, owner), null);
+  assert.equal(explainModifier(throwingRecord, AUTHORIZED_RECIPIENT), null);
+  assert.equal(explainCooldown(throwingRecord, owner), null);
+  assert.equal(explainRange(throwingRecord, owner), null);
+  assert.equal(explainLegality(throwingRecord, 0, owner), null);
 });
 
 test("POV agent builder is byte-noninterfering with researcher-only extras", () => {
@@ -815,7 +1388,6 @@ test("POV agent builder is byte-noninterfering with researcher-only extras", () 
     effective_movement_speed: 1.25,
     ultimate_cooldown_remaining: 2,
     steps_until_out_of_combat: 2,
-    alive: false,
     statuses: [
       {
         token_id: "slow_hunter_basic",
@@ -826,7 +1398,10 @@ test("POV agent builder is byte-noninterfering with researcher-only extras", () 
       },
     ],
   };
-  const direct = explainPovAgent(authorized, { controlled: true });
+  const direct = explainPovAgent(authorized, {
+    controlled: true,
+    inspected: true,
+  });
   const descriptor = explainAgent(
     {
       ...authorized,
@@ -836,82 +1411,53 @@ test("POV agent builder is byte-noninterfering with researcher-only extras", () 
       direct_source_evidence: [{ source_public_agent_id: "secret" }],
       life_state: "SECRET_RESEARCHER_STATE",
     },
-    { audience: "agent_pov", controlled: true },
-    { ...classMechanics(5, "Priest"), secret_formula: "do-not-display" },
+    {
+      audience: "agent_pov",
+      controlled: true,
+      selected: true,
+      reference: true,
+      inspected: true,
+    },
   );
   assert.equal(JSON.stringify(descriptor), JSON.stringify(direct));
-  assert.equal(
-    descriptor.sections.some((section) => section.title === "Exact Class Mechanics"),
-    false,
+  assert.equal(descriptor.summary, null);
+  assert.deepEqual(
+    descriptor.rows.map((row) => row.label),
+    [
+      "Health",
+      "Effective Speed",
+      "Ultimate Status",
+      "Combat Status",
+      "Steps until OOC",
+    ],
   );
-  assert.doesNotMatch(fullText(descriptor), /secret_formula|Raw Damage|Raw Healing/u);
   assert.equal(rowValue(descriptor, "Effective Speed"), "1.25");
   assert.equal(rowValue(descriptor, "Ultimate Status"), "On cooldown (2 Ticks)");
-  assert.equal(
-    sectionRows(descriptor, "Current State").find((row) => row.label === "Life State")
-      ?.value,
-    "Corpse",
+  assert.equal(rowValue(descriptor, "Combat Status"), "IC");
+  assert.equal(rowValue(descriptor, "Steps until OOC"), "2 Ticks");
+  assert.equal(descriptor.sections.length, 0);
+  assert.doesNotMatch(
+    fullText(descriptor),
+    /secret|\u00d79|99|selection|selected target|reference|controlled|inspected|current status details|source agent/iu,
   );
-  assert.match(
-    sectionRows(descriptor, "Current State").find((row) => row.label === "Combat State")
-      ?.value ?? "",
-    /2 Ticks/u,
-  );
-  assert.equal(
-    sectionRows(descriptor, "Current State").find(
-      (row) => row.label === "Aggregate Aura Modifiers",
-    )?.value,
-    "Unavailable",
-  );
-  assert.match(
-    sectionRows(descriptor, "Current Status Details")[0].value,
-    /Duration: 3 Ticks.*Source agent identity is not disclosed\./u,
-  );
-  assert.doesNotMatch(fullText(descriptor), /secret|×9|99/u);
-});
-
-test("POV inspected-agent vocabulary never relabels the owner as a target", () => {
-  const descriptor = explainPovAgent(
-    {
-      ...RECIPIENT,
-      presentation_key: "pov_recipient",
-      current_health: 50,
-      max_health: 100,
-      effective_movement_speed: 1.25,
-      ultimate_cooldown_remaining: 0,
-      statuses: [],
-    },
-    { inspected: true },
-  );
-  assert.equal(rowValue(descriptor, "Selection"), "Inspected agent");
-  assert.doesNotMatch(fullText(descriptor), /Selected target|Reference/u);
 });
 
 test("POV status overflow is byte-noninterfering and discloses no source identity", () => {
-  const authorized = [
-    {
-      token_id: "slow_hunter_basic",
-      duration: 3,
-      status_feature_index: 16,
-      source_class_id: 3,
-      source_evidence: "effect_channel_only",
-    },
-    {
-      token_id: "stun_rogue_poison",
-      duration: 5,
-      status_feature_index: 23,
-      source_class_id: 4,
-      source_evidence: "effect_channel_only",
-    },
-  ];
+  const hunterSlow = STATUS_CASES.find(
+    (candidate) => candidate.statusId === "hunter_basic_slow",
+  );
+  const rogueStun = STATUS_CASES.find(
+    (candidate) => candidate.statusId === "rogue_poison_stun",
+  );
+  assert.ok(hunterSlow);
+  assert.ok(rogueStun);
+  const authorized = [durableStatus(hunterSlow), durableStatus(rogueStun)];
   const baseline = explainPovOverflow(authorized, RECIPIENT);
   const injected = explainPovOverflow(
     authorized.map((status) => ({
       ...status,
-      magnitude: 0.001,
-      breaks_on_positive_damage: true,
       source_public_agent_id: "secret-overflow-source",
-      direct_source_evidence: [{ event_id: "secret-overflow-event" }],
+      direct_sources: [{ event_id: "secret-overflow-event" }],
       accessible_name: "secret-overflow-accessible-name",
     })),
     { ...RECIPIENT, global_slot: 999, life_state: "secret" },
@@ -919,61 +1465,16 @@ test("POV status overflow is byte-noninterfering and discloses no source identit
   assert.equal(JSON.stringify(injected), JSON.stringify(baseline));
   assert.equal(baseline.title, "2 Hidden Statuses");
   assert.equal(baseline.rows.length, 2);
-  assert.match(fullText(baseline), /Source agent identity is not disclosed\./u);
+  assert.match(fullText(baseline), /Source not disclosed in Agent POV\./u);
   assert.doesNotMatch(
     fullText(injected),
-    /secret-overflow-source|secret-overflow-event|secret-overflow-accessible-name|0\.001|break/iu,
+    /secret-overflow-source|secret-overflow-event|secret-overflow-accessible-name/iu,
   );
-});
-
-test("researcher agent status composition stays full when modifiers are unavailable", () => {
-  const descriptor = explainAgent(
-    {
-      ...RECIPIENT,
-      current_health: 75,
-      max_health: 100,
-      effective_movement_speed: 1,
-      ultimate_cooldown_remaining: 0,
-      life_state: "alive",
-      steps_until_out_of_combat: 1,
-      statuses: [
-        researcherStatus({
-          direct_source_evidence: [
-            {
-              source_global_slot: SOURCE_A.global_slot,
-              source_public_agent_id: SOURCE_A.public_agent_id,
-              event_id: "private-event-id",
-            },
-          ],
-        }),
-      ],
-    },
-    {},
-    null,
-    [SOURCE_A],
-  );
-  assert.equal(
-    sectionRows(descriptor, "Current State").find(
-      (row) => row.label === "Aggregate Aura Modifiers",
-    )?.value,
-    "Unavailable",
-  );
-  assert.match(
-    sectionRows(descriptor, "Current Status Details")[0].value,
-    /Agent ID alpha\/9001 · Team A · Hunter/u,
-  );
-  assert.doesNotMatch(fullText(descriptor), /private-event-id/u);
 });
 
 test("researcher status explanation ignores an injected POV discriminator", () => {
   const status = researcherStatus({
-    direct_source_evidence: [
-      {
-        source_global_slot: SOURCE_A.global_slot,
-        source_public_agent_id: SOURCE_A.public_agent_id,
-        event_id: "technical-only",
-      },
-    ],
+    direct_sources: [SOURCE_REFERENCE_A],
   });
   const baseline = explainStatus(status, RECIPIENT, [SOURCE_A]);
   const injected = explainStatus(
@@ -985,7 +1486,13 @@ test("researcher status explanation ignores an injected POV discriminator", () =
   assert.match(fullText(injected), /Source.*alpha\/9001|Damage|Duration/u);
 });
 
-test("legality is locked to exact True/False and one exact sentence", () => {
+test("legality is owner-bound, class-accented, and Status-only", () => {
+  const owner = {
+    presentation_key: "legality:owner",
+    public_agent_id: "owner/42",
+    class_id: 4,
+    team_id: 2,
+  };
   /** @type {Array<[0 | 1, boolean, string]>} */
   const cases = [
     [0, true, "Basic"],
@@ -994,6 +1501,8 @@ test("legality is locked to exact True/False and one exact sentence", () => {
   for (const [lane, available, laneName] of cases) {
     const descriptor = explainLegality(
       {
+        owner_presentation_key: owner.presentation_key,
+        owner_public_agent_id: owner.public_agent_id,
         target_global_slot: 99,
         lane_0_available: lane === 0 ? available : false,
         lane_1_available: lane === 1 ? available : true,
@@ -1002,16 +1511,44 @@ test("legality is locked to exact True/False and one exact sentence", () => {
         python_mask: "secret",
       },
       lane,
+      owner,
     );
-    assert.equal(descriptor.title, `${laneName} Legality`);
+    assert.ok(descriptor);
+    assert.equal(descriptor.title, `${laneName} Legality · Agent ID owner/42`);
+    assert.equal(descriptor.summary, null);
+    assert.equal(descriptor.accent, "rogue");
     assert.equal(rowValue(descriptor, "Status"), available ? "True" : "False");
-    assert.equal(
-      descriptor.summary,
-      `${laneName} ability is ${available ? "" : "not "}available this tick.`,
+    assert.deepEqual(
+      descriptor.rows.map((row) => row.label),
+      ["Status"],
     );
     assert.doesNotMatch(fullText(descriptor), /mask|armed|pair|target|Python|99/iu);
   }
-  assert.throws(() => explainLegality({ lane_0_available: 1 }, 0), /exact boolean/u);
+  assert.equal(explainLegality({ lane_0_available: true }, 0, owner), null);
+  assert.equal(
+    explainLegality(
+      {
+        owner_presentation_key: owner.presentation_key,
+        owner_public_agent_id: "wrong",
+        lane_0_available: true,
+      },
+      0,
+      owner,
+    ),
+    null,
+  );
+  assert.equal(
+    explainLegality(
+      {
+        owner_presentation_key: owner.presentation_key,
+        owner_public_agent_id: owner.public_agent_id,
+        lane_0_available: 1,
+      },
+      0,
+      owner,
+    ),
+    null,
+  );
 });
 
 test("action route uses epoch-neutral copy and exact Source and Target public IDs", () => {
@@ -1085,19 +1622,18 @@ test("visibility and attribution builders never manufacture slot identities", ()
 });
 
 test("overflow projects every hidden semantic item without slot-derived identity", () => {
+  const trap = STATUS_CASES.find(
+    (candidate) => candidate.statusId === "hunter_trap_stun",
+  );
+  assert.ok(trap);
   const descriptor = explainOverflow(
     [
       researcherStatus({
+        configured_duration_steps: 9,
         remaining_duration: 7,
-        direct_source_evidence: [
-          {
-            source_global_slot: 1,
-            source_public_agent_id: "alpha/9001",
-            event_id: "must-not-enter-overflow",
-          },
-        ],
+        direct_sources: [SOURCE_REFERENCE_A],
       }),
-      researcherStatus({ token_id: "stun_hunter_trap", remaining_duration: 4 }),
+      durableStatus(trap, { direct_sources: [] }),
     ],
     "status",
     RECIPIENT,
@@ -1105,56 +1641,28 @@ test("overflow projects every hidden semantic item without slot-derived identity
   );
   assert.equal(descriptor.rows.length, 2);
   assert.equal(descriptor.title, "2 Hidden Statuses");
-  assert.match(descriptor.rows[0].value, /Duration: 7 Ticks/u);
+  assert.match(descriptor.rows[0].value, /Effect Duration: 9 Ticks/u);
+  assert.match(descriptor.rows[0].value, /Duration Remaining: 7 Ticks/u);
   assert.match(
     descriptor.rows[0].value,
-    /Source: Agent ID alpha\/9001 · Team A · Hunter/u,
+    /Source: Agent ID alpha\/9001 · Hunter · Team A/u,
   );
-  assert.match(descriptor.rows[1].value, /Duration: 4 Ticks/u);
-  assert.match(descriptor.rows[1].value, /Source agent not recorded\./u);
-  assert.doesNotMatch(fullText(descriptor), /id_8|must-not-enter-overflow/u);
+  assert.match(descriptor.rows[1].value, /Duration Remaining: 3 Ticks/u);
+  assert.match(descriptor.rows[1].value, /Source: Unavailable in this artifact/u);
+  assert.doesNotMatch(fullText(descriptor), /id_8|global.slot/u);
 });
 
 function researcherStatus(overrides = {}) {
   return {
-    status_channel: 4,
+    status_channel: 1,
     status_id: "hunter_basic_slow",
-    token_id: "slow_hunter_basic",
-    source_class_id: 3,
-    source_class_name: "Hunter",
-    source_action_component: "basic",
+    configured_duration_steps: 5,
     remaining_duration: 2,
     magnitude_kind: "movement_multiplier",
     magnitude: 0.8,
     breaks_on_positive_damage: false,
-    direct_source_evidence: [],
+    direct_sources: [],
     ...overrides,
-  };
-}
-
-/** @param {number} classId @param {string} className */
-function classMechanics(classId, className) {
-  return {
-    class_id: classId,
-    class_name: className,
-    maximum_health: 100,
-    body_radius: 0.5,
-    base_movement_speed: 1,
-    observation_radius: 6,
-    basic_target_mode: classId === 5 ? "ally" : "enemy",
-    basic_interaction_radius: 3,
-    basic_raw_damage: classId === 5 ? 0 : 10,
-    basic_raw_healing: classId === 5 ? 10 : 0,
-    ultimate_target_mode:
-      classId === 1 ? "target_none" : classId === 5 ? "ally" : "enemy",
-    ultimate_interaction_radius: 4,
-    ultimate_cooldown_steps: 5,
-    ultimate_raw_damage: classId === 5 ? 0 : 15,
-    ultimate_raw_healing: classId === 5 ? 20 : 0,
-    out_of_combat_delay_steps: 3,
-    out_of_combat_health_regeneration_fraction_per_step: 0.05,
-    status_mechanics: [],
-    aura_mechanics: [],
   };
 }
 

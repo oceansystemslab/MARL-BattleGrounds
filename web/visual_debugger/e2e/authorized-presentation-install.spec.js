@@ -1,6 +1,15 @@
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { isAbsolute, join, resolve } from "node:path";
+
 import { expect, test } from "@playwright/test";
 
-import { startDebugger, stopDebugger } from "./support/live-debugger.js";
+import {
+  REPOSITORY_ROOT,
+  startDebugger,
+  stopDebugger,
+} from "./support/live-debugger.js";
 import {
   exportReplayArtifacts,
   removeReplayArtifacts,
@@ -8,6 +17,52 @@ import {
 } from "./support/replay-viewer.js";
 
 test.describe.configure({ mode: "serial" });
+
+const CP4_E_CAPTURE_FILENAMES = Object.freeze([
+  "live-oracle-1440x900.png",
+  "live-no-shared-agent-960x600.png",
+  "replay-oracle-960x600.png",
+  "replay-shared-agent-1440x900.png",
+]);
+const CP4_E_OWNER_PATHS = Object.freeze([
+  "web/visual_debugger/e2e/authorized-presentation-install.spec.js",
+  "web/visual_debugger/e2e/authorized-presentation-renderer.spec.js",
+  "web/visual_debugger/index.html",
+  "web/visual_debugger/src/authorized-presentation-adapter.js",
+  "web/visual_debugger/src/authorized-presentation-schema.js",
+  "web/visual_debugger/src/explanations.js",
+  "web/visual_debugger/src/main.js",
+  "web/visual_debugger/src/panels.js",
+  "web/visual_debugger/src/scene.js",
+  "web/visual_debugger/src/tooltip.js",
+  "web/visual_debugger/tests/fixtures/authorized-presentations-v1.json",
+]);
+const requestedCaptureDirectory = process.env.MARL_CP4_E_CAPTURE_DIR?.trim() || null;
+const cp4ECaptureDirectory =
+  requestedCaptureDirectory === null ? null : resolve(requestedCaptureDirectory);
+if (
+  requestedCaptureDirectory !== null &&
+  (!isAbsolute(requestedCaptureDirectory) ||
+    cp4ECaptureDirectory === null ||
+    !cp4ECaptureDirectory.startsWith("/tmp/m6-cp4-e-") ||
+    cp4ECaptureDirectory === "/tmp/m6-cp4-e-")
+) {
+  throw new TypeError(
+    "MARL_CP4_E_CAPTURE_DIR must resolve to a uniquely named /tmp/m6-cp4-e-* directory.",
+  );
+}
+const cp4C3ShieldOnly = process.env.MARL_CP4_C3_SHIELD_ONLY === "1";
+
+/** @type {Array<Record<string, unknown>>} */
+const cp4ENativeCaptures = [];
+/** @type {WeakMap<import("@playwright/test").Page, Array<Record<string, unknown>>>} */
+const evidenceRequests = new WeakMap();
+/** @type {WeakMap<import("@playwright/test").Page, number>} */
+const evidenceRequestOffsets = new WeakMap();
+/** @type {string[]} */
+const cp4EBrowserErrors = [];
+/** @type {Array<Record<string, unknown>>} */
+const cp4ENetworkFailures = [];
 
 /** @type {Awaited<ReturnType<typeof exportReplayArtifacts>> | null} */
 let artifacts = null;
@@ -24,27 +79,39 @@ let deathReplay = null;
 const browserErrors = new WeakMap();
 
 test.beforeAll(async () => {
-  artifacts = await exportReplayArtifacts();
   /** @type {import("node:child_process").ChildProcess[]} */
   const startedProcesses = [];
   try {
-    liveDebugger = await startDebugger();
-    startedProcesses.push(liveDebugger.process);
-    noSharedReplay = await startReplayViewer({ replayPath: artifacts.complete });
-    startedProcesses.push(noSharedReplay.process);
-    sharedReplay = await startReplayViewer({
-      replayPath: artifacts.shared,
-      view: "pov",
-      povSlot: 0,
-    });
-    startedProcesses.push(sharedReplay.process);
-    deathReplay = await startReplayViewer({
-      sampleReplay: "death-respawn-shield",
-    });
-    startedProcesses.push(deathReplay.process);
+    if (cp4C3ShieldOnly) {
+      deathReplay = await startReplayViewer({
+        sampleReplay: "death-respawn-shield",
+      });
+      startedProcesses.push(deathReplay.process);
+    } else {
+      artifacts = await exportReplayArtifacts();
+      liveDebugger = await startDebugger();
+      startedProcesses.push(liveDebugger.process);
+      noSharedReplay = await startReplayViewer({ replayPath: artifacts.complete });
+      startedProcesses.push(noSharedReplay.process);
+      sharedReplay = await startReplayViewer({
+        replayPath: artifacts.shared,
+        view: "pov",
+        povSlot: 0,
+      });
+      startedProcesses.push(sharedReplay.process);
+      if (cp4ECaptureDirectory === null) {
+        deathReplay = await startReplayViewer({
+          sampleReplay: "death-respawn-shield",
+        });
+        startedProcesses.push(deathReplay.process);
+      }
+    }
+    if (cp4ECaptureDirectory !== null) {
+      await mkdir(cp4ECaptureDirectory, { recursive: false });
+    }
   } catch (error) {
     await Promise.allSettled(startedProcesses.map((child) => stopDebugger(child)));
-    await removeReplayArtifacts(artifacts.outputDirectory);
+    await removeReplayArtifacts(artifacts?.outputDirectory);
     artifacts = null;
     throw error;
   }
@@ -73,6 +140,13 @@ test.afterAll(async () => {
     cleanupErrors.push(error);
   }
   artifacts = null;
+  if (cp4ECaptureDirectory !== null) {
+    try {
+      await writeCp4EEvidenceReport(cp4ECaptureDirectory);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
   if (cleanupErrors.length > 0) {
     throw new AggregateError(
       cleanupErrors,
@@ -94,6 +168,575 @@ function captureBrowserErrors(page) {
     if (message.type() === "error") {
       errors.push(`console: ${message.text()}`);
     }
+  });
+  if (cp4ECaptureDirectory !== null) {
+    page.on("pageerror", (error) =>
+      cp4EBrowserErrors.push(`pageerror: ${error.message}`),
+    );
+    page.on("console", (message) => {
+      if (message.type() === "error") {
+        cp4EBrowserErrors.push(`console: ${message.text()}`);
+      }
+    });
+    page.on("requestfailed", (request) => {
+      cp4ENetworkFailures.push({
+        kind: "requestfailed",
+        method: request.method(),
+        path: new URL(request.url()).pathname,
+        error: request.failure()?.errorText ?? "unknown",
+      });
+    });
+    page.on("response", (response) => {
+      if (!response.ok()) {
+        cp4ENetworkFailures.push({
+          kind: "response",
+          method: response.request().method(),
+          path: new URL(response.url()).pathname,
+          status: response.status(),
+        });
+      }
+    });
+    /** @type {Array<Record<string, unknown>>} */
+    const requests = [];
+    evidenceRequests.set(page, requests);
+    evidenceRequestOffsets.set(page, 0);
+    page.on("request", (request) => {
+      const path = new URL(request.url()).pathname;
+      if (!path.startsWith("/api/")) {
+        return;
+      }
+      let command = null;
+      if (request.method() === "POST") {
+        try {
+          command = request.postDataJSON()?.command ?? null;
+        } catch {
+          command = null;
+        }
+      }
+      requests.push({ method: request.method(), path, command });
+    });
+  }
+}
+
+/** @param {string} path */
+async function sha256File(path) {
+  return createHash("sha256")
+    .update(await readFile(path))
+    .digest("hex");
+}
+
+/** @param {string} captureDirectory */
+async function writeCp4EEvidenceReport(captureDirectory) {
+  expect(cp4ENativeCaptures.map(({ filename }) => filename)).toEqual(
+    CP4_E_CAPTURE_FILENAMES,
+  );
+  expect(cp4EBrowserErrors).toEqual([]);
+  expect(cp4ENetworkFailures).toEqual([]);
+  /** @type {Record<string, string>} */
+  const captureHashes = {};
+  for (const filename of CP4_E_CAPTURE_FILENAMES) {
+    captureHashes[filename] = await sha256File(join(captureDirectory, filename));
+  }
+  /** @type {Record<string, string>} */
+  const ownerHashes = {};
+  for (const path of CP4_E_OWNER_PATHS) {
+    ownerHashes[path] = await sha256File(join(REPOSITORY_ROOT, path));
+  }
+  const report = {
+    schema: "marl-battlegrounds.cp4-e-native-evidence.v1",
+    checkpoint: "CP4-E",
+    generated_at_utc: new Date().toISOString(),
+    repository_root: REPOSITORY_ROOT,
+    git_head: execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: REPOSITORY_ROOT,
+      encoding: "utf8",
+    }).trim(),
+    git_head_tree: execFileSync("git", ["rev-parse", "HEAD^{tree}"], {
+      cwd: REPOSITORY_ROOT,
+      encoding: "utf8",
+    }).trim(),
+    runtime: {
+      node: process.version,
+      platform: process.platform,
+      architecture: process.arch,
+      user_agent: cp4ENativeCaptures[0]?.user_agent ?? null,
+    },
+    service_inventory: [
+      "real live Combat Debugger",
+      "real complete Oracle replay",
+      "real SharedObs Agent POV replay",
+    ],
+    capture_inventory: [...CP4_E_CAPTURE_FILENAMES],
+    capture_sha256: captureHashes,
+    owner_sha256: ownerHashes,
+    captures: cp4ENativeCaptures,
+    browser_errors: cp4EBrowserErrors,
+    network_failures: cp4ENetworkFailures,
+  };
+  await writeFile(
+    join(captureDirectory, "cp4-e-native-evidence.json"),
+    `${JSON.stringify(report, null, 2)}\n`,
+    { encoding: "utf8", flag: "wx" },
+  );
+}
+
+/** @type {Readonly<Record<number, Readonly<{label: string, accent: string}>>>} */
+const EXPECTED_AGENT_CLASSES = Object.freeze({
+  1: Object.freeze({ label: "Mage", accent: "mage" }),
+  2: Object.freeze({ label: "Warrior", accent: "warrior" }),
+  3: Object.freeze({ label: "Hunter", accent: "hunter" }),
+  4: Object.freeze({ label: "Rogue", accent: "rogue" }),
+  5: Object.freeze({ label: "Priest", accent: "priest" }),
+});
+/** @type {Readonly<Record<number, string>>} */
+const EXPECTED_AGENT_TEAMS = Object.freeze({ 1: "Team A", 2: "Team B" });
+
+/** @param {Record<string, any>} agent */
+function expectedAgentIdentity(agent) {
+  const classIdentity = EXPECTED_AGENT_CLASSES[agent.class_id];
+  const teamLabel = EXPECTED_AGENT_TEAMS[agent.team_id];
+  expect(classIdentity).toBeTruthy();
+  expect(teamLabel).toBeTruthy();
+  expect(typeof agent.public_agent_id).toBe("string");
+  return {
+    title: `Agent ID ${agent.public_agent_id} · ${classIdentity.label} · ${teamLabel}`,
+    accent: classIdentity.accent,
+  };
+}
+
+/**
+ * Prove the compact agent card is current-fact-only and cannot replace the
+ * persistent certified class-documentation card.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @param {Record<string, any>} agent
+ * @param {unknown} persistentCardBefore
+ */
+async function expectCompactAgentTooltip(page, agent, persistentCardBefore) {
+  const identity = expectedAgentIdentity(agent);
+  const expectedLabels = [
+    "Health",
+    "Effective Speed",
+    "Ultimate Status",
+    "Combat Status",
+    ...(agent.steps_until_out_of_combat > 0 ? ["Steps until OOC"] : []),
+  ];
+  await expect(page.locator("#visual-tooltip")).toBeVisible();
+  await expect(page.locator("#visual-tooltip-title")).toHaveText(identity.title);
+  await expect(page.locator("#visual-tooltip")).toHaveAttribute(
+    "data-tooltip-accent",
+    identity.accent,
+  );
+  await expect(
+    page.locator("#visual-tooltip .semantic-explanation__summary"),
+  ).toHaveCount(0);
+  await expect(page.locator("#visual-tooltip .semantic-explanation__label")).toHaveText(
+    expectedLabels,
+  );
+  await expect(
+    page.locator("#visual-tooltip .semantic-explanation__value").nth(3),
+  ).toHaveText(agent.steps_until_out_of_combat > 0 ? "IC" : "OOC");
+  const tooltipText = await page.locator("#visual-tooltip").innerText();
+  for (const forbidden of [
+    "Ultimate Name",
+    "Controlled actor",
+    "Selected target",
+    "Reference",
+    "Inspected agent",
+    "Current effect",
+    "Spawn Shield",
+    "Now",
+  ]) {
+    expect(tooltipText).not.toContain(forbidden);
+  }
+  expect(await page.locator("#selection-card").evaluate((node) => node.innerHTML)).toBe(
+    persistentCardBefore,
+  );
+}
+
+/**
+ * @param {import("@playwright/test").Page} page
+ * @param {Record<string, any>} agent
+ */
+async function expectCertifiedDocumentationCard(page, agent) {
+  const identity = expectedAgentIdentity(agent);
+  await expect(page.locator("#selection-card > .sr-only")).toHaveText(identity.title);
+  await expect(
+    page.locator("#selection-card .semantic-explanation__heading"),
+  ).toHaveText(["Class Overview", "Authored Tactical Guide", "Class Mechanics"]);
+  await expect(
+    page.locator(
+      "#selection-card > .semantic-inspector__details > .semantic-explanation__summary",
+    ),
+  ).toHaveCount(0);
+  await expect(page.locator("#selection-card .selected-outgoing-target")).toHaveCount(
+    0,
+  );
+  await expect(page.locator("#selection-card .selected-legality")).toHaveCount(0);
+  const forbiddenLabels = [
+    "Health",
+    "Effective Speed",
+    "Ultimate Status",
+    "Combat Status",
+    "Steps until OOC",
+  ];
+  for (const label of forbiddenLabels) {
+    await expect(
+      page.locator("#selection-card .semantic-explanation__label", {
+        hasText: new RegExp(`^${label}$`, "u"),
+      }),
+    ).toHaveCount(0);
+  }
+}
+
+/** @param {import("@playwright/test").Page} page */
+async function expectRetiredMetadataAbsent(page) {
+  await expect(page.locator("#revision-value")).toHaveCount(0);
+  await expect(page.locator("#replay-incoming-value")).toHaveCount(0);
+  await expect(page.locator("#transition-value")).toHaveCount(1);
+}
+
+const TECHNICAL_HELP = Object.freeze({
+  frame: Object.freeze({
+    label: "Frame",
+    summary: "The zero-based authorized frame index represented by this presentation.",
+  }),
+  simulator_step: Object.freeze({
+    label: "Simulator step",
+    summary: "The simulator decision step represented by this authorized frame.",
+  }),
+  ordinary_movement_distance_scale: Object.freeze({
+    label: "Ordinary movement distance scale",
+    summary:
+      "The recorded multiplier applied to ordinary voluntary movement distance. Spawn Shield uses its separately authorized absolute movement speed.",
+  }),
+});
+
+/**
+ * @param {import("@playwright/test").Page} page
+ * @param {Record<string, any>} presentation
+ */
+async function expectTechnicalFrameDom(page, presentation) {
+  const technical = presentation.technical_frame;
+  const technicalDetailsWasOpen =
+    (await page.locator("#technical-frame-details").getAttribute("open")) === "";
+  if (!technicalDetailsWasOpen) {
+    await openDetails(page, ["#technical-frame-details"]);
+  }
+  /** @type {Record<string, Array<[keyof typeof TECHNICAL_HELP, string]>>} */
+  const specifications = {
+    live_oracle: [
+      ["frame", "evaluation_frame_index"],
+      ["simulator_step", "simulator_step_count"],
+    ],
+    live_no_shared_obs_agent_pov: [
+      ["frame", "recipient_frame_index"],
+      ["simulator_step", "simulator_step_count"],
+    ],
+    replay_oracle: [
+      ["frame", "frame_index"],
+      ["simulator_step", "simulator_step_count"],
+      ["ordinary_movement_distance_scale", "recorded_ordinary_movement_distance_scale"],
+    ],
+    replay_no_shared_obs_agent_pov: [
+      ["frame", "frame_index"],
+      ["simulator_step", "simulator_step_count"],
+    ],
+    replay_shared_obs_agent_pov: [
+      ["frame", "frame_index"],
+      ["simulator_step", "simulator_step_count"],
+    ],
+  };
+  const expected = specifications[presentation.presentation_kind];
+  if (!expected) {
+    throw new TypeError(
+      `Unsupported Technical Frame presentation kind ${String(presentation.presentation_kind)}.`,
+    );
+  }
+  const facts = page.locator("#diagnostics-card .fact[data-technical-fact]");
+  await expect(facts).toHaveCount(expected.length);
+  expect(
+    await facts.evaluateAll((nodes) =>
+      nodes.map((node) => ({
+        id: node.getAttribute("data-technical-fact"),
+        label: node.querySelector("span")?.textContent,
+        value: node.querySelector("strong")?.textContent,
+        tabindex: node.getAttribute("tabindex"),
+      })),
+    ),
+  ).toEqual(
+    expected.map(([id, field]) => ({
+      id,
+      label: TECHNICAL_HELP[id].label,
+      value: String(technical[field]),
+      tabindex: "0",
+    })),
+  );
+  for (const [id] of expected) {
+    const owner = page.locator(`#diagnostics-card .fact[data-technical-fact="${id}"]`);
+    await page.mouse.move(1, 1);
+    await owner.focus();
+    await expect(page.locator("#visual-tooltip-title")).toHaveText(
+      TECHNICAL_HELP[id].label,
+    );
+    await expect(
+      page.locator("#visual-tooltip .semantic-explanation__summary"),
+    ).toHaveText(TECHNICAL_HELP[id].summary);
+  }
+  if (presentation.product_kind === "replay_viewer") {
+    for (const [selector, title, summary] of [
+      [
+        "#replay-completion-badge",
+        "Completion",
+        "How the captured rollout ended. Rollout completion is independent of host-side processing success.",
+      ],
+      [
+        "#replay-processing-badge",
+        "Processing",
+        "Whether host-side evaluation output was produced successfully. Processing does not change how the rollout ended.",
+      ],
+    ]) {
+      const owner = page.locator(selector);
+      await expect(owner).toHaveAttribute("tabindex", "0");
+      await page.mouse.move(1, 1);
+      await owner.focus();
+      await expect(page.locator("#visual-tooltip-title")).toHaveText(title);
+      await expect(
+        page.locator("#visual-tooltip .semantic-explanation__summary"),
+      ).toHaveText(summary);
+    }
+  }
+  if (!technicalDetailsWasOpen) {
+    await closeDetails(page, ["#technical-frame-details"]);
+  }
+}
+
+/**
+ * @param {import("@playwright/test").Page} page
+ * @param {Record<string, any>} presentation
+ */
+async function expectLatestTransitionDom(page, presentation) {
+  const rawRows = presentation.latest_transition?.action_rows ?? [];
+  const rows = page.locator("#accepted-card .accepted-action-row");
+  await expect(rows).toHaveCount(rawRows.length);
+  await expect(page.locator("#accepted-card")).not.toHaveAttribute(
+    "data-transition-id",
+    /.+/u,
+  );
+  await expect(
+    page.locator("#accepted-card .accepted-action-row[data-presentation-key]"),
+  ).toHaveCount(0);
+  if (rawRows.length === 0) {
+    expect((await page.locator("#accepted-card").textContent())?.trim()).toBe("");
+    return;
+  }
+  const scene =
+    presentation.current_endpoint.scene ?? presentation.current_endpoint.parts?.scene;
+  expect(Array.isArray(scene?.agents)).toBe(true);
+  for (const [index, row] of rawRows.entries()) {
+    const identity = scene.agents.find(
+      (/** @type {Record<string, any>} */ candidate) =>
+        candidate.presentation_key === row.actor_presentation_key &&
+        candidate.public_agent_id === row.actor_public_agent_id,
+    );
+    expect(identity).toBeTruthy();
+    const expectedIdentity = expectedAgentIdentity(identity);
+    const rendered = rows.nth(index);
+    await expect(rendered.locator(".accepted-action-row__title")).toHaveText(
+      expectedIdentity.title,
+    );
+    await expect(rendered.locator(".accepted-action-row__title")).toHaveAttribute(
+      "data-class",
+      expectedIdentity.accent,
+    );
+    await expect(rendered.locator(".accepted-action-tuple")).toHaveCount(2);
+    await expect(rendered.locator(".accepted-action-tuple > h4")).toHaveText([
+      "Submitted",
+      "Accepted",
+    ]);
+    expect(
+      await rendered
+        .locator(".accepted-action-tuple")
+        .evaluateAll((tuples) =>
+          tuples.map((tuple) => tuple.getAttribute("data-kind")),
+        ),
+    ).toEqual(["submitted", "accepted"]);
+    const tupleText = (/** @type {Record<string, any>} */ action) =>
+      `Move ${action.move_action} · Target ${action.target_action} · Ultimate ${action.use_ultimate_action}`;
+    await expect(rendered.locator(".accepted-action-tuple__value")).toHaveText([
+      tupleText(row.submitted_action),
+      tupleText(row.accepted_action),
+    ]);
+  }
+}
+
+/** @param {import("@playwright/test").Page} page @param {string[]} selectors */
+async function openDetails(page, selectors) {
+  for (const selector of selectors) {
+    const details = page.locator(selector);
+    if ((await details.getAttribute("open")) !== "") {
+      await details.locator(":scope > summary").click();
+    }
+    await expect(details).toHaveAttribute("open", "");
+  }
+}
+
+/** @param {import("@playwright/test").Page} page @param {string[]} selectors */
+async function closeDetails(page, selectors) {
+  for (const selector of selectors) {
+    const details = page.locator(selector);
+    if ((await details.getAttribute("open")) === "") {
+      await details.locator(":scope > summary").click();
+    }
+    await expect(details).not.toHaveAttribute("open", "");
+  }
+}
+
+/**
+ * Restore the retained trajectory's native baseline after one screenshot-only
+ * viewport and disclosure state.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @param {string[]} openedDetails
+ */
+async function cleanupAfterCp4ECapture(page, openedDetails) {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await closeDetails(page, openedDetails);
+  await page.evaluate(() => {
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
+  });
+  await page.mouse.move(1, 1);
+  await page.evaluate(() => window.scrollTo(0, 0));
+}
+
+/**
+ * Capture one prescribed native state only when the CP4-E evidence run opts in.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @param {{filename: string, width: number, height: number, presentation: Record<string, any>, selectedAgent: Record<string, any>}} options
+ */
+async function captureCp4ENativeState(page, options) {
+  if (cp4ECaptureDirectory === null) {
+    return;
+  }
+  expect(CP4_E_CAPTURE_FILENAMES).toContain(options.filename);
+  expect(cp4ENativeCaptures.some(({ filename }) => filename === options.filename)).toBe(
+    false,
+  );
+  await page.setViewportSize({ width: options.width, height: options.height });
+  await page.evaluate(async () => {
+    await document.fonts.ready;
+    await new Promise((resolveAnimation) =>
+      requestAnimationFrame(() => requestAnimationFrame(resolveAnimation)),
+    );
+  });
+  await expect(page.locator("html")).toHaveAttribute(
+    "data-presentation-authority",
+    "installed",
+  );
+  const selectedIdentity = expectedAgentIdentity(options.selectedAgent);
+  await page
+    .locator(
+      `#battlefield .agent[data-presentation-key="${options.selectedAgent.presentation_key}"]`,
+    )
+    .hover();
+  await expect(page.locator("#visual-tooltip-title")).toHaveText(
+    selectedIdentity.title,
+  );
+  const trace = await page.evaluate(() => {
+    const values = (/** @type {string} */ selector) =>
+      [...document.querySelectorAll(selector)].map((node) => node.textContent?.trim());
+    const rectangle = (/** @type {string} */ selector) => {
+      const node = document.querySelector(selector);
+      if (!(node instanceof Element)) return null;
+      const bounds = node.getBoundingClientRect();
+      return {
+        x: bounds.x,
+        y: bounds.y,
+        width: bounds.width,
+        height: bounds.height,
+        right: bounds.right,
+        bottom: bounds.bottom,
+      };
+    };
+    const documentElement = document.documentElement;
+    return {
+      product_kind: documentElement.getAttribute("data-product-kind"),
+      viewer_mode: documentElement.getAttribute("data-viewer-mode"),
+      authority: documentElement.getAttribute("data-presentation-authority"),
+      viewport: { width: innerWidth, height: innerHeight },
+      horizontal_overflow:
+        documentElement.scrollWidth > documentElement.clientWidth ||
+        document.body.scrollWidth > document.body.clientWidth,
+      rectangles: {
+        document: {
+          client_width: documentElement.clientWidth,
+          client_height: documentElement.clientHeight,
+          scroll_width: documentElement.scrollWidth,
+          scroll_height: documentElement.scrollHeight,
+        },
+        body: rectangle("body"),
+        workspace: rectangle(".workspace"),
+        battlefield_shell: rectangle("#battlefield-shell"),
+        battlefield: rectangle("#battlefield"),
+        inspector: rectangle(".hud-panel"),
+        tooltip: rectangle("#visual-tooltip"),
+      },
+      open_details: [...document.querySelectorAll("details[open]")].map(
+        (node) => node.id,
+      ),
+      documentation_title:
+        document.querySelector("#selection-card > .sr-only")?.textContent ?? null,
+      documentation_sections: values("#selection-card .semantic-explanation__heading"),
+      pending_heading: document.querySelector("#pending-heading")?.textContent ?? null,
+      latest_transition_titles: values(".accepted-action-row__title"),
+      latest_transition_tuples: values(".accepted-action-tuple__value"),
+      technical_facts: [...document.querySelectorAll("[data-technical-fact]")].map(
+        (node) => ({
+          id: node.getAttribute("data-technical-fact"),
+          text: node.textContent?.trim(),
+        }),
+      ),
+      tooltip: {
+        kind: document
+          .querySelector("#visual-tooltip")
+          ?.getAttribute("data-tooltip-kind"),
+        accent: document
+          .querySelector("#visual-tooltip")
+          ?.getAttribute("data-tooltip-accent"),
+        title: document.querySelector("#visual-tooltip-title")?.textContent ?? null,
+        labels: values("#visual-tooltip .semantic-explanation__label"),
+        values: values("#visual-tooltip .semantic-explanation__value"),
+      },
+      retired_roots: {
+        revision: document.querySelectorAll("#revision-value").length,
+        replay_incoming: document.querySelectorAll("#replay-incoming-value").length,
+      },
+      user_agent: navigator.userAgent,
+    };
+  });
+  expect(trace.viewport).toEqual({ width: options.width, height: options.height });
+  expect(trace.horizontal_overflow).toBe(false);
+  expect(trace.retired_roots).toEqual({ revision: 0, replay_incoming: 0 });
+  expect(trace.documentation_title).toBe(selectedIdentity.title);
+  const allRequests = evidenceRequests.get(page) ?? [];
+  const requestOffset = evidenceRequestOffsets.get(page) ?? 0;
+  const requestDelta = allRequests.slice(requestOffset);
+  evidenceRequestOffsets.set(page, allRequests.length);
+  const outputPath = join(cp4ECaptureDirectory, options.filename);
+  await page.screenshot({ path: outputPath, fullPage: false, animations: "disabled" });
+  cp4ENativeCaptures.push({
+    filename: options.filename,
+    presentation_kind: options.presentation.presentation_kind,
+    selected_canonical_identity: selectedIdentity,
+    source_frame_index: options.presentation.source.source_frame_index,
+    simulator_step: options.presentation.technical_frame.simulator_step_count,
+    ...trace,
+    api_request_delta: requestDelta,
+    post_command_delta: requestDelta.filter(({ method }) => method === "POST"),
+    browser_errors: [...(browserErrors.get(page) ?? [])],
   });
 }
 
@@ -178,10 +821,17 @@ async function openProductWithHeldInitialPresentation(page, url, mode, productKi
           .map((element) => element.id || element.className),
       );
     expect(visibleOppositeRoots).toEqual([]);
+    await expect(page.locator("#battlefield")).toHaveAttribute("role", "img");
+    await expect(page.locator("#battlefield")).toHaveAttribute("tabindex", "-1");
+    await expect(page.locator("#battlefield")).toHaveAttribute(
+      "aria-label",
+      "Read-only live battlefield. Simulator and actor activation controls are unavailable.",
+    );
+    await expect(page.locator("#battlefield-instructions")).toHaveText(
+      "Live battlefield interaction is unavailable while authority is pending, offline, resynchronizing, shutting down, or terminal.",
+    );
 
     if (productKind === "replay_viewer") {
-      await expect(page.locator("#battlefield")).toHaveAttribute("role", "group");
-      await expect(page.locator("#battlefield")).toHaveAttribute("tabindex", "-1");
       await expect(page.locator("#replay-timeline")).toBeVisible();
       await expect(page.locator("#replay-ranges-button")).toBeVisible();
       await expect(page.locator("#replay-ranges-button")).toBeDisabled();
@@ -196,12 +846,7 @@ async function openProductWithHeldInitialPresentation(page, url, mode, productKi
             ),
           ),
       ).toBe(true);
-      await expect(page.locator("#battlefield-instructions")).toHaveText(
-        "Replay is read-only. Activate an authorized agent to inspect current facts and its recorded outgoing action; use the timeline to change frames.",
-      );
     } else {
-      await expect(page.locator("#battlefield")).toHaveAttribute("role", "img");
-      await expect(page.locator("#battlefield")).toHaveAttribute("tabindex", "-1");
       await expect(page.locator("#command-deck")).toBeVisible();
       await expect(page.locator("#live-ranges-button")).toBeDisabled();
       expect(
@@ -213,9 +858,6 @@ async function openProductWithHeldInitialPresentation(page, url, mode, productKi
             ),
           ),
       ).toBe(true);
-      await expect(page.locator("#battlefield-instructions")).toHaveText(
-        "Live battlefield interaction is unavailable while authority is pending, offline, resynchronizing, shutting down, or terminal.",
-      );
     }
   } finally {
     releasePresentation();
@@ -227,7 +869,7 @@ async function openProductWithHeldInitialPresentation(page, url, mode, productKi
 
 /**
  * Prove one replay utility activation emits one exact command and installs the
- * response's successor revision before this helper returns.
+ * response's joined successor presentation before this helper returns.
  *
  * @param {import("@playwright/test").Page} page
  * @param {string} selector
@@ -253,13 +895,17 @@ async function expectSingleReplayUtilityCommand(page, selector, expectedCommand)
         new URL(response.url()).pathname === "/api/replay/command",
       { timeout: 30_000 },
     );
+    const presentationPromise = page.waitForResponse(
+      (response) =>
+        response.request().method() === "GET" &&
+        new URL(response.url()).pathname === "/api/presentation/frame",
+      { timeout: 30_000 },
+    );
     await page.locator(selector).click();
     const response = await responsePromise;
     expect(response.status()).toBe(200);
     responsePayload = await response.json();
-    await expect(page.locator("#revision-value")).toHaveText(
-      String(responsePayload.frame.revision),
-    );
+    expect((await presentationPromise).status()).toBe(200);
     await expect(page.locator("html")).toHaveAttribute(
       "data-presentation-authority",
       "installed",
@@ -516,9 +1162,9 @@ async function expectInstalledLeaf(page, transportKind, presentationKind) {
 }
 
 /**
- * Prove both metadata surfaces use the installed presentation variant's exact
- * incoming-transition identity. The authoritative frame-zero representation
- * has no latest-events branch.
+ * Prove the retained session fact uses the installed presentation variant's
+ * exact incoming-transition identity. The authoritative frame-zero
+ * representation has no latest-events branch.
  *
  * @param {import("@playwright/test").Page} page
  * @param {Record<string, any>} presentation
@@ -539,11 +1185,6 @@ async function expectAuthorizedIncomingTransitionDom(page, presentation) {
     expect(expected.length).toBeGreaterThan(0);
   }
   await expect(page.locator("#transition-value")).toHaveText(expected ?? "—");
-  if (presentation.viewer_mode === "replay") {
-    await expect(page.locator("#replay-incoming-value")).toHaveText(
-      expected ?? "Initial frame",
-    );
-  }
 }
 
 /**
@@ -590,10 +1231,8 @@ async function expectReplayInspectionDom(page, presentation) {
       "No authorized agent details are available.",
     );
     await expect(page.locator('[data-layer="debug-range"] .range-ring')).toHaveCount(0);
-    await expect(page.locator("#selection-card .selected-legality__lane")).toHaveCount(
-      0,
-    );
-    await expect(page.locator("#selection-card .selected-outgoing-target")).toHaveCount(
+    await expect(page.locator("#pending-card .selected-legality__lane")).toHaveCount(0);
+    await expect(page.locator("#pending-card .selected-outgoing-target")).toHaveCount(
       0,
     );
     await expect(page.locator("#battlefield .legality-dock")).toHaveCount(0);
@@ -612,9 +1251,7 @@ async function expectReplayInspectionDom(page, presentation) {
     "data-accent",
     String(classAccent),
   );
-  await expect(page.locator("#selection-card")).toContainText(
-    `Agent ID ${owner.public_agent_id}`,
-  );
+  await expectCertifiedDocumentationCard(page, owner);
   const expectedRangeKinds = [
     ["observation", owner.observation_radius],
     ["basic", owner.basic_interaction_radius],
@@ -637,12 +1274,10 @@ async function expectReplayInspectionDom(page, presentation) {
   );
 
   if (inspection === null) {
-    await expect(page.locator("#selection-card .selected-outgoing-target")).toHaveCount(
+    await expect(page.locator("#pending-card .selected-outgoing-target")).toHaveCount(
       0,
     );
-    await expect(page.locator("#selection-card .selected-legality__lane")).toHaveCount(
-      0,
-    );
+    await expect(page.locator("#pending-card .selected-legality__lane")).toHaveCount(0);
     await expect(page.locator("#battlefield .legality-dock")).toHaveCount(0);
     await expect(page.locator("#battlefield .pending-route")).toHaveCount(0);
     return;
@@ -651,7 +1286,7 @@ async function expectReplayInspectionDom(page, presentation) {
   const targetAction = inspection.accepted_action.target_action;
   const exactRow =
     inspection.decision_mask.target_use_ultimate_joint_mask[targetAction];
-  const outgoingTarget = page.locator("#selection-card .selected-outgoing-target");
+  const outgoingTarget = page.locator("#pending-card .selected-outgoing-target");
   await expect(outgoingTarget).toHaveCount(1);
   await expect(outgoingTarget).toHaveAttribute(
     "data-target-kind",
@@ -663,7 +1298,7 @@ async function expectReplayInspectionDom(page, presentation) {
       ? "No target"
       : `Agent ID ${inspection.accepted_target.target_public_agent_id}`,
   );
-  await expect(page.locator("#selection-card .selected-legality__lane h3")).toHaveText([
+  await expect(page.locator("#pending-card .selected-legality__lane h3")).toHaveText([
     `Basic Legality · Agent ID ${owner.public_agent_id}`,
     `Ultimate Legality · Agent ID ${owner.public_agent_id}`,
   ]);
@@ -1038,12 +1673,49 @@ test("all five real service leaves install and live authority clears atomically"
     liveOracle.presentation.current_endpoint.scene.agents[0].presentation_key;
   const controlledAgent = page.locator('#battlefield .agent[data-controlled="true"]');
   await expect(controlledAgent).toHaveCount(1);
+  const controlledKey = await controlledAgent.getAttribute("data-presentation-key");
+  const controlledAgentFacts =
+    liveOracle.presentation.current_endpoint.scene.agents.find(
+      (/** @type {Record<string, any>} */ agent) =>
+        agent.presentation_key === controlledKey,
+    );
+  expect(controlledAgentFacts).toBeTruthy();
+  await expectCertifiedDocumentationCard(page, controlledAgentFacts);
+  const liveOracleDocumentationBefore = await page
+    .locator("#selection-card")
+    .evaluate((node) => node.innerHTML);
   await controlledAgent.hover();
-  await expect(page.locator("#visual-tooltip")).toBeVisible();
-  await expect(page.locator("#visual-tooltip")).toContainText("Controlled actor");
-  await expect(page.locator("#visual-tooltip")).not.toContainText("Reference");
-  await page.locator("#agent-details > summary").click();
-  await expect(page.locator("#agent-details")).toHaveAttribute("open", "");
+  await expectCompactAgentTooltip(
+    page,
+    controlledAgentFacts,
+    liveOracleDocumentationBefore,
+  );
+  await expectTechnicalFrameDom(page, liveOracle.presentation);
+  await expectLatestTransitionDom(page, liveOracle.presentation);
+  await expectRetiredMetadataAbsent(page);
+  await openDetails(page, [
+    "#agent-details",
+    "#latest-transition-details",
+    "#technical-frame-details",
+  ]);
+  await controlledAgent.hover();
+  await expectCompactAgentTooltip(
+    page,
+    controlledAgentFacts,
+    liveOracleDocumentationBefore,
+  );
+  await captureCp4ENativeState(page, {
+    filename: "live-oracle-1440x900.png",
+    width: 1440,
+    height: 900,
+    presentation: liveOracle.presentation,
+    selectedAgent: controlledAgentFacts,
+  });
+  await cleanupAfterCp4ECapture(page, [
+    "#agent-details",
+    "#latest-transition-details",
+    "#technical-frame-details",
+  ]);
   const installedScientificBytes = JSON.stringify(await authorityDomSnapshot(page));
   expect(installedScientificBytes).toContain(oldScientificSentinel);
   expect(installedScientificBytes).toContain(oldPresentationKey);
@@ -1081,6 +1753,9 @@ test("all five real service leaves install and live authority clears atomically"
     "actor_pov_live_debugger",
     "live_no_shared_obs_agent_pov",
   );
+  await expectTechnicalFrameDom(page, liveAgent.presentation);
+  await expectLatestTransitionDom(page, liveAgent.presentation);
+  await expectRetiredMetadataAbsent(page);
   await expectAgentAuthoritySurface(page, liveAgent.presentation, [oldPresentationKey]);
   await expect(page.locator("#battlefield")).not.toHaveAttribute(
     "aria-description",
@@ -1136,6 +1811,7 @@ test("all five real service leaves install and live authority clears atomically"
   const passiveRowButton = page.locator(
     `#roster .roster-primary-action[data-presentation-key="${passiveAgentKey}"]`,
   );
+  await page.setViewportSize({ width: 960, height: 600 });
   await expectNativeAgentActivationMatrix(page, {
     body: passiveAgentBody,
     row: passiveRowButton,
@@ -1144,9 +1820,12 @@ test("all five real service leaves install and live authority clears atomically"
   });
   await expect(passiveAgentBody).toHaveAttribute("data-selected", "true");
   await expect(passiveRowButton).toHaveAttribute("aria-pressed", "true");
-  await expect(page.locator("#selection-card")).toContainText(
-    `Agent ID ${passiveAgent.public_agent_id}`,
-  );
+  await expectCertifiedDocumentationCard(page, passiveAgent);
+  const liveAgentDocumentationBefore = await page
+    .locator("#selection-card")
+    .evaluate((node) => node.innerHTML);
+  await passiveAgentBody.hover();
+  await expectCompactAgentTooltip(page, passiveAgent, liveAgentDocumentationBefore);
   expect(
     await page.locator('[data-layer="debug-range"] .range-ring').evaluateAll((ranges) =>
       ranges.map((range) => ({
@@ -1159,11 +1838,28 @@ test("all five real service leaves install and live authority clears atomically"
     { kind: "basic", owner: passiveAgentKey },
     { kind: "ultimate", owner: passiveAgentKey },
   ]);
-  await expect(page.locator("#selection-card .selected-legality__lane")).toHaveCount(0);
-  await expect(page.locator("#selection-card .selected-outgoing-target")).toHaveCount(
-    0,
-  );
+  await expect(page.locator("#pending-card .selected-legality__lane")).toHaveCount(0);
+  await expect(page.locator("#pending-card .selected-outgoing-target")).toHaveCount(0);
   await expect(page.locator("#battlefield .pending-route")).toHaveCount(0);
+  await openDetails(page, [
+    "#agent-details",
+    "#latest-transition-details",
+    "#technical-frame-details",
+  ]);
+  await passiveAgentBody.hover();
+  await expectCompactAgentTooltip(page, passiveAgent, liveAgentDocumentationBefore);
+  await captureCp4ENativeState(page, {
+    filename: "live-no-shared-agent-960x600.png",
+    width: 960,
+    height: 600,
+    presentation: liveAgent.presentation,
+    selectedAgent: passiveAgent,
+  });
+  await cleanupAfterCp4ECapture(page, [
+    "#agent-details",
+    "#latest-transition-details",
+    "#technical-frame-details",
+  ]);
   await expectAgentAuthoritySurface(page, liveAgent.presentation, [oldPresentationKey]);
   const recipientBody = page.locator(
     `#battlefield .agent[data-presentation-key="${agentRecipientKey}"]`,
@@ -1418,6 +2114,9 @@ test("all five real service leaves install and live authority clears atomically"
     "researcher_replay_viewer",
     "replay_oracle",
   );
+  await expectTechnicalFrameDom(page, replayOracle.presentation);
+  await expectLatestTransitionDom(page, replayOracle.presentation);
+  await expectRetiredMetadataAbsent(page);
   await expect(page.locator("#events-details")).toHaveAttribute("open", "");
   await expect(page.locator("#event-feed .event-item")).toHaveCount(0);
   await expect(page.locator("#battlefield-instructions")).toHaveText(
@@ -1484,9 +2183,15 @@ test("all five real service leaves install and live authority clears atomically"
   await expect(page.locator("#replay-clear-reference-button")).toBeEnabled();
   const replayOracleSelected = await authenticatedGet(page, "/api/presentation/frame");
   await expectReplayInspectionDom(page, replayOracleSelected);
+  const replayOracleDocumentationBefore = await page
+    .locator("#selection-card")
+    .evaluate((node) => node.innerHTML);
   await page.locator('#battlefield .agent[data-selected="true"]').hover();
-  await expect(page.locator("#visual-tooltip")).toContainText("Reference");
-  await expect(page.locator("#visual-tooltip")).not.toContainText("Controlled actor");
+  await expectCompactAgentTooltip(
+    page,
+    replaySelectedAgent,
+    replayOracleDocumentationBefore,
+  );
 
   await expectAuthorizedIncomingTransitionDom(page, replayOracle.presentation);
   expect(replayOracle.presentation.latest_events).toBeNull();
@@ -1535,13 +2240,59 @@ test("all five real service leaves install and live authority clears atomically"
   expect(replayOracleMiddle.presentation_kind).toBe("replay_oracle");
   await expectAuthorizedIncomingTransitionDom(page, replayOracleMiddle);
   await expectReplayInspectionDom(page, replayOracleMiddle);
+  await expectTechnicalFrameDom(page, replayOracleMiddle);
+  await expectLatestTransitionDom(page, replayOracleMiddle);
+  await expectRetiredMetadataAbsent(page);
   expect(replayOracleMiddle.latest_events.incoming_transition_id).toBe(
     await page.locator("#transition-value").textContent(),
   );
+  const replayOracleMiddleScene = replayOracleMiddle.current_endpoint.scene;
+  const replayOracleMiddleOwner = replayOracleMiddleScene.agents.find(
+    (/** @type {Record<string, any>} */ agent) =>
+      agent.presentation_key ===
+        replayOracleMiddle.replay_inspection.actor_presentation_key &&
+      agent.public_agent_id ===
+        replayOracleMiddle.replay_inspection.actor_public_agent_id,
+  );
+  expect(replayOracleMiddleOwner).toBeTruthy();
+  const replayOracleMiddleDocumentation = await page
+    .locator("#selection-card")
+    .evaluate((node) => node.innerHTML);
+  await openDetails(page, [
+    "#agent-details",
+    "#pending-turn-details",
+    "#latest-transition-details",
+    "#technical-frame-details",
+  ]);
+  await page
+    .locator(
+      `#battlefield .agent[data-presentation-key="${replayOracleMiddleOwner.presentation_key}"]`,
+    )
+    .hover();
+  await expectCompactAgentTooltip(
+    page,
+    replayOracleMiddleOwner,
+    replayOracleMiddleDocumentation,
+  );
+  await captureCp4ENativeState(page, {
+    filename: "replay-oracle-960x600.png",
+    width: 960,
+    height: 600,
+    presentation: replayOracleMiddle,
+    selectedAgent: replayOracleMiddleOwner,
+  });
+  await cleanupAfterCp4ECapture(page, [
+    "#agent-details",
+    "#pending-turn-details",
+    "#latest-transition-details",
+    "#technical-frame-details",
+  ]);
   await seekReplay(page, replayOracle.presentation.source.source_final_frame_index);
   const replayOracleFinal = await authenticatedGet(page, "/api/presentation/frame");
   expect(replayOracleFinal.replay_inspection).toBeNull();
   await expectReplayInspectionDom(page, replayOracleFinal);
+  await expectTechnicalFrameDom(page, replayOracleFinal);
+  await expectLatestTransitionDom(page, replayOracleFinal);
   await expectTerminalAgentActivationInert(page);
   const nextShowRanges = replayOracle.transport.show_ranges !== true;
   await expectSingleReplayUtilityCommand(page, "#replay-ranges-button", {
@@ -1580,10 +2331,32 @@ test("all five real service leaves install and live authority clears atomically"
   );
   await expectAgentAuthoritySurface(page, replayAgent.presentation, oracleOnlyValues);
   await expectReplayInspectionDom(page, replayAgent.presentation);
-  await page.locator('#battlefield .agent[data-selected="true"]').hover();
-  await expect(page.locator("#visual-tooltip")).toContainText("Inspected agent");
-  await expect(page.locator("#visual-tooltip")).not.toContainText("Selected target");
-  await expect(page.locator("#visual-tooltip")).not.toContainText("Reference");
+  await expectTechnicalFrameDom(page, replayAgent.presentation);
+  await expectLatestTransitionDom(page, replayAgent.presentation);
+  await expectRetiredMetadataAbsent(page);
+  const replayAgentSelectedBody = page.locator(
+    '#battlefield .agent[data-selected="true"]',
+  );
+  const replayAgentSelectedKey = await replayAgentSelectedBody.getAttribute(
+    "data-presentation-key",
+  );
+  const replayAgentInitialScene =
+    replayAgent.presentation.current_endpoint.scene ??
+    replayAgent.presentation.current_endpoint.parts?.scene;
+  const replayAgentSelected = replayAgentInitialScene.agents.find(
+    (/** @type {Record<string, any>} */ agent) =>
+      agent.presentation_key === replayAgentSelectedKey,
+  );
+  expect(replayAgentSelected).toBeTruthy();
+  const replayAgentInitialDocumentation = await page
+    .locator("#selection-card")
+    .evaluate((node) => node.innerHTML);
+  await replayAgentSelectedBody.hover();
+  await expectCompactAgentTooltip(
+    page,
+    replayAgentSelected,
+    replayAgentInitialDocumentation,
+  );
   await expect(page.locator("#battlefield-instructions")).toHaveText(
     "Replay Agent POV is read-only and keeps one fixed recipient. Activate an authorized visible body to inspect current facts; the replay authority does not change.",
   );
@@ -1619,13 +2392,9 @@ test("all five real service leaves install and live authority clears atomically"
   });
   await expect(replayAgentLocalBody).toHaveAttribute("data-selected", "true");
   await expect(replayAgentLocalRow).toHaveAttribute("aria-pressed", "true");
-  await expect(page.locator("#selection-card")).toContainText(
-    `Agent ID ${replayAgentLocal.public_agent_id}`,
-  );
-  await expect(page.locator("#selection-card .selected-legality__lane")).toHaveCount(0);
-  await expect(page.locator("#selection-card .selected-outgoing-target")).toHaveCount(
-    0,
-  );
+  await expectCertifiedDocumentationCard(page, replayAgentLocal);
+  await expect(page.locator("#pending-card .selected-legality__lane")).toHaveCount(0);
+  await expect(page.locator("#pending-card .selected-outgoing-target")).toHaveCount(0);
   await expect(page.locator("#battlefield .pending-route")).toHaveCount(0);
   expect(
     await page.locator('[data-layer="debug-range"] .range-ring').evaluateAll((ranges) =>
@@ -1682,6 +2451,8 @@ test("all five real service leaves install and live authority clears atomically"
     expect(presentation.source.source_frame_index).toBe(frameIndex);
     await expectAuthorizedIncomingTransitionDom(page, presentation);
     await expectReplayInspectionDom(page, presentation);
+    await expectTechnicalFrameDom(page, presentation);
+    await expectLatestTransitionDom(page, presentation);
     expect(presentation.latest_events.incoming_recipient_transition_id).toBe(
       await page.locator("#transition-value").textContent(),
     );
@@ -1692,7 +2463,7 @@ test("all five real service leaves install and live authority clears atomically"
   expect(browserErrors.get(page) ?? []).toEqual([]);
 });
 
-test("real Shared replay installs frame zero, middle, final, then rejects retired diagnostics", async ({
+test("real Shared replay installs frame zero, middle, final, then rejects a forged raw root", async ({
   page,
 }) => {
   if (!sharedReplay) {
@@ -1722,6 +2493,9 @@ test("real Shared replay installs frame zero, middle, final, then rejects retire
     await expectAgentAuthoritySurface(page, leaf.presentation, [], frameIndex < 2);
     await expectAuthorizedIncomingTransitionDom(page, leaf.presentation);
     await expectReplayInspectionDom(page, leaf.presentation);
+    await expectTechnicalFrameDom(page, leaf.presentation);
+    await expectLatestTransitionDom(page, leaf.presentation);
+    await expectRetiredMetadataAbsent(page);
     if (frameIndex === 0) {
       await expect(page.locator("#events-details")).toHaveAttribute("open", "");
       await expect(page.locator("#event-feed .event-item")).toHaveCount(0);
@@ -1749,15 +2523,13 @@ test("real Shared replay installs frame zero, middle, final, then rejects retire
       });
       await expect(localBody).toHaveAttribute("data-selected", "true");
       await expect(localRow).toHaveAttribute("aria-pressed", "true");
-      await expect(page.locator("#selection-card")).toContainText(
-        `Agent ID ${localAgent.public_agent_id}`,
+      await expectCertifiedDocumentationCard(page, localAgent);
+      await expect(page.locator("#pending-card .selected-legality__lane")).toHaveCount(
+        0,
       );
-      await expect(
-        page.locator("#selection-card .selected-legality__lane"),
-      ).toHaveCount(0);
-      await expect(
-        page.locator("#selection-card .selected-outgoing-target"),
-      ).toHaveCount(0);
+      await expect(page.locator("#pending-card .selected-outgoing-target")).toHaveCount(
+        0,
+      );
       await expect(page.locator("#battlefield .pending-route")).toHaveCount(0);
       expect(
         await page
@@ -1817,6 +2589,47 @@ test("real Shared replay installs frame zero, middle, final, then rejects retire
       const afterLocalActions = await authenticatedGet(page, "/api/presentation/frame");
       expect(afterLocalActions.authority.recipient_presentation_key).toBe(recipientKey);
     }
+    if (frameIndex === 1) {
+      const scene =
+        leaf.presentation.current_endpoint.scene ??
+        leaf.presentation.current_endpoint.parts?.scene;
+      const owner = scene.agents.find(
+        (/** @type {Record<string, any>} */ agent) =>
+          agent.presentation_key ===
+            leaf.presentation.replay_inspection.actor_presentation_key &&
+          agent.public_agent_id ===
+            leaf.presentation.replay_inspection.actor_public_agent_id,
+      );
+      expect(owner).toBeTruthy();
+      const documentationBefore = await page
+        .locator("#selection-card")
+        .evaluate((node) => node.innerHTML);
+      await openDetails(page, [
+        "#agent-details",
+        "#pending-turn-details",
+        "#latest-transition-details",
+        "#technical-frame-details",
+      ]);
+      await page
+        .locator(
+          `#battlefield .agent[data-presentation-key="${owner.presentation_key}"]`,
+        )
+        .hover();
+      await expectCompactAgentTooltip(page, owner, documentationBefore);
+      await captureCp4ENativeState(page, {
+        filename: "replay-shared-agent-1440x900.png",
+        width: 1440,
+        height: 900,
+        presentation: leaf.presentation,
+        selectedAgent: owner,
+      });
+      await cleanupAfterCp4ECapture(page, [
+        "#agent-details",
+        "#pending-turn-details",
+        "#latest-transition-details",
+        "#technical-frame-details",
+      ]);
+    }
     if (frameIndex === 2) {
       await expectTerminalAgentActivationInert(page);
     }
@@ -1842,10 +2655,14 @@ test("real Shared replay installs frame zero, middle, final, then rejects retire
   await expect(page.locator("#accepted-card .accepted-action-row")).toHaveCount(
     middlePresentation.latest_transition.action_rows.length,
   );
-  await expect(page.locator("#accepted-card")).toHaveAttribute(
+  await expect(page.locator("#accepted-card")).not.toHaveAttribute(
     "data-transition-id",
-    middlePresentation.latest_transition.incoming_transition_id,
+    /.+/u,
   );
+  await expect(
+    page.locator("#accepted-card .accepted-action-row[data-presentation-key]"),
+  ).toHaveCount(0);
+  await expectLatestTransitionDom(page, middlePresentation);
 
   let frameRequestCount = 0;
   let presentationRequestCount = 0;
@@ -1884,6 +2701,15 @@ test("real Shared replay installs frame zero, middle, final, then rejects retire
   );
   expect(frameRequestCount).toBe(1);
   expect(presentationRequestCount).toBe(1);
+  const middleScene =
+    middlePresentation.current_endpoint.scene ??
+    middlePresentation.current_endpoint.parts?.scene;
+  const middleSentinel = `Agent ID ${middleScene.agents[0].public_agent_id}`;
+  await expectPendingAuthorityIsEmpty(
+    page,
+    middleSentinel,
+    middleScene.agents[0].presentation_key,
+  );
   await expect(page.locator("[data-presentation-key]")).toHaveCount(0);
   await expect(page.locator("#replay-timeline")).toBeVisible();
   await expect(page.locator("#replay-artifact-reference")).toHaveText(
@@ -1951,5 +2777,156 @@ test("real death and respawn keep one opaque Oracle body identity", async ({
     "data-spawn-shield-remaining",
     "3",
   );
+  expect(respawn.current_endpoint.scene.spawn_shield_mechanics.availability_kind).toBe(
+    "available_v2",
+  );
+
+  const shield = page.locator(
+    `.agent-spawn-shield[data-presentation-key="${subject.presentation_key}"]`,
+  );
+  await expect(page.locator(subjectSelector)).toHaveAttribute("role", "button");
+  await expect(page.locator(subjectSelector)).toHaveAttribute("tabindex", "0");
+  expect(
+    await page.locator(subjectSelector).evaluate((agent, presentationKey) => {
+      const shieldNode = document.querySelector(
+        `.agent-spawn-shield[data-presentation-key="${CSS.escape(String(presentationKey))}"]`,
+      );
+      return {
+        contains: shieldNode instanceof Element && agent.contains(shieldNode),
+        sameParent:
+          shieldNode instanceof Element &&
+          agent.parentElement === shieldNode.parentElement,
+      };
+    }, subject.presentation_key),
+  ).toEqual({ contains: false, sameParent: true });
+  await expect(shield).toBeVisible();
+  await expect(shield).toHaveAttribute("tabindex", "0");
+  await expect(shield).toHaveAttribute("aria-label", "Spawn Shield");
+  await expect(shield).toHaveAttribute(
+    "aria-description",
+    "While the spawn shield is active, this agent is protected, concealed from opponents, untargetable, excluded from aura effects, and limited to movement. It phases through agents until body collision resumes at the endpoint of its expiring transition.",
+  );
+  expect(await page.locator(subjectSelector).getAttribute("aria-label")).not.toMatch(
+    /Spawn Shield|invulnerable|concealed|untargetable/iu,
+  );
+
+  await expectZeroCommandInteraction(page, () => shield.focus());
+  await expect(shield).toBeFocused();
+  await expectZeroCommandInteraction(page, () => shield.press("Enter"));
+  await expectZeroCommandInteraction(page, () => shield.press(" "));
+  await expectZeroCommandInteraction(page, () =>
+    shield.locator(".agent-spawn-shield__chip").click(),
+  );
+  await shield.focus();
+  await expect(page.locator("#visual-tooltip")).toBeVisible();
+  await expect(page.locator("#visual-tooltip-title")).toHaveText("Spawn Shield");
+  await expect(
+    page.locator("#visual-tooltip .semantic-explanation__summary"),
+  ).toHaveText(
+    "While the spawn shield is active, this agent is protected, concealed from opponents, untargetable, excluded from aura effects, and limited to movement. It phases through agents until body collision resumes at the endpoint of its expiring transition.",
+  );
+  await expect(page.locator("#visual-tooltip .semantic-explanation__label")).toHaveText(
+    [
+      "Protection Effect",
+      "Movement Speed",
+      "Visibility Effect",
+      "Targetability Effect",
+      "Action Effect",
+      "Aura Effect",
+      "Agent Collision Effect",
+      "Effect Duration",
+      "Duration Remaining",
+      "Owner",
+      "Source",
+      "Ordinary Application",
+    ],
+  );
+  await expect(page.locator("#visual-tooltip .semantic-explanation__value")).toHaveText(
+    [
+      "Invulnerable",
+      "2",
+      "Concealed from opponents",
+      "Untargetable",
+      "Movement only",
+      "Excluded as emitter and beneficiary",
+      "Phased until expiring endpoint rejoin",
+      "3 Ticks",
+      "3 Ticks",
+      "Agent ID 5 · Rogue · Team B",
+      "Not recorded",
+      "End-of-transition respawn lifecycle",
+    ],
+  );
+  const shieldStyles = await shield.evaluate((root) => {
+    const shell = root.querySelector(".agent-spawn-shield__shell");
+    const chip = root.querySelector(".agent-spawn-shield__chip");
+    const ticks = root.querySelector(".agent-spawn-shield__ticks");
+    if (!(shell instanceof SVGElement) || !(chip instanceof SVGElement)) {
+      throw new TypeError("Spawn Shield shell or chip is unavailable.");
+    }
+    if (!(ticks instanceof SVGElement)) {
+      throw new TypeError("Spawn Shield tick label is unavailable.");
+    }
+    return {
+      chipFill: getComputedStyle(chip).fill,
+      chipStroke: getComputedStyle(chip).stroke,
+      shellStroke: getComputedStyle(shell).stroke,
+      tickFill: getComputedStyle(ticks).fill,
+    };
+  });
+  expect(shieldStyles).toEqual({
+    chipFill: "rgb(0, 0, 0)",
+    chipStroke: "rgb(255, 255, 255)",
+    shellStroke: "rgb(255, 255, 255)",
+    tickFill: "rgb(255, 255, 255)",
+  });
+  for (const [frameIndex, remaining] of [
+    [3, 3],
+    [4, 2],
+    [5, 1],
+    [6, 0],
+  ]) {
+    if (frameIndex !== 3) {
+      await seekReplay(page, frameIndex);
+    }
+    const presentation =
+      frameIndex === 3
+        ? respawn
+        : await authenticatedGet(page, "/api/presentation/frame");
+    const currentSubject = presentation.current_endpoint.scene.agents.find(
+      (/** @type {Record<string, any>} */ agent) => agent.public_agent_id === "5",
+    );
+    expect(currentSubject.presentation_key).toBe(subject.presentation_key);
+    expect(currentSubject.spawn_shield_remaining).toBe(remaining);
+    await expect(page.locator(subjectSelector)).toHaveAttribute(
+      "data-spawn-shield-remaining",
+      String(remaining),
+    );
+    await expect(shield.locator(".agent-spawn-shield__ticks")).toHaveText(
+      `S${remaining}`,
+    );
+    if (remaining > 0) {
+      await expect(shield).toBeVisible();
+      await expect(shield).toHaveAttribute("tabindex", "0");
+    } else {
+      await expect(shield).toBeHidden();
+      await expect(shield).toHaveAttribute("hidden", "");
+      await expect(shield).toHaveAttribute("tabindex", "-1");
+      await expect(shield).not.toHaveAttribute("data-tooltip-owner", "");
+      await expect(shield).not.toHaveAttribute("aria-describedby", /./u);
+      await expect(shield).not.toHaveAttribute("aria-description", /./u);
+      await expect(shield).not.toBeFocused();
+      await expect(page.locator("#visual-tooltip")).not.toHaveAttribute(
+        "data-tooltip-kind",
+        "status",
+      );
+      await expect(page.locator("#visual-tooltip-title")).not.toHaveText(
+        "Spawn Shield",
+      );
+      expect(
+        await page.locator(subjectSelector).getAttribute("aria-label"),
+      ).not.toMatch(/Spawn Shield/u);
+    }
+  }
   expect(browserErrors.get(page) ?? []).toEqual([]);
 });

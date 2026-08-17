@@ -70,7 +70,7 @@ from marl_battlegrounds.rendering.authorized_pov_scene import (
 )
 from marl_battlegrounds.rendering.authorized_presentation import (
     AuthorizedAgentV1,
-    AuthorizedSpawnShieldMechanicsAvailableV1,
+    AuthorizedSpawnShieldMechanicsAvailableV2,
 )
 from marl_battlegrounds.rendering.evaluation_adapter import (
     SharedObsSourceMaterialProjectionV1,
@@ -1631,7 +1631,7 @@ def test_shared_static_scene_poison_rejects_and_dynamic_controls_remain_allowed(
     scene = shared_start.scene
     changed_map = replace(scene, map=replace(scene.map, width=scene.map.width + 1.0))
     shield_mechanics = scene.spawn_shield_mechanics
-    assert type(shield_mechanics) is AuthorizedSpawnShieldMechanicsAvailableV1
+    assert type(shield_mechanics) is AuthorizedSpawnShieldMechanicsAvailableV2
     changed_shield = replace(
         scene,
         spawn_shield_mechanics=replace(

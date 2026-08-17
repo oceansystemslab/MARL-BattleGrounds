@@ -1,4 +1,4 @@
-"""Deterministic browser-contract regeneration proofs for CP2.7."""
+"""Deterministic authorized-presentation browser-contract regeneration proofs."""
 
 # pyright: reportPrivateUsage=false
 
@@ -50,17 +50,28 @@ def test_generated_browser_schema_and_five_leaf_fixture_are_exact() -> None:
         "replay_no_shared_obs_agent_pov",
         "replay_shared_obs_agent_pov",
     }
+    assert set(payload["compatibility_cases"]) == {"legacy_v1"}
     presentation_roots = [
         *payload["presentations"].values(),
         *(pair["presentation"] for pair in payload["pairs"].values()),
         *(pair["presentation"] for pair in payload["continuity_pairs"].values()),
         *payload["state_cases"].values(),
+        *payload["compatibility_cases"].values(),
     ]
     for root in presentation_roots:
         validated = _AUTHORIZED_PRESENTATION_FRAME_ADAPTER.validate_json(
             json.dumps(root, ensure_ascii=True, separators=(",", ":"))
         )
         assert validated.model_dump(mode="json") == root
+
+    legacy_scene = payload["compatibility_cases"]["legacy_v1"]["current_endpoint"][
+        "scene"
+    ]
+    assert all(
+        "mechanics_version" not in row and "documentation_profile" not in row
+        for row in legacy_scene["class_mechanics"]
+    )
+    assert legacy_scene["spawn_shield_mechanics"]["availability_kind"] == ("available")
 
 
 def test_schema_compaction_and_keyword_universe_are_fail_closed() -> None:

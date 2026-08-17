@@ -40,6 +40,13 @@ function clone(value) {
   return structuredClone(value);
 }
 
+/** @param {Record<string, any>} presentation */
+function presentationScene(presentation) {
+  return (
+    presentation.current_endpoint.scene ?? presentation.current_endpoint.parts.scene
+  );
+}
+
 /** @param {unknown} value */
 function assertRecursivelyFrozen(value) {
   if (!value || typeof value !== "object") return;
@@ -167,6 +174,193 @@ test("all five exact Python presentation leaves normalize repeatably and freeze"
     assertRecursivelyFrozen(normalized);
   }
   assertRecursivelyFrozen(AUTHORIZED_PRESENTATION_SCHEMA_V1);
+});
+
+test("Python-certified V2 class and shield mechanics project exactly and freeze", async () => {
+  const expectedProfile = {
+    availability_kind: "available",
+    profile_id: "marl_battlegrounds.class_documentation.canonical_v1",
+  };
+  for (const kind of kinds) {
+    const sourceScene = presentationScene(fixture.presentations[kind]);
+    const normalized = await normalizeAuthorizedPresentationFrameV1(
+      fixture.presentations[kind],
+    );
+    assert.deepEqual(normalized.scene.class_mechanics, sourceScene.class_mechanics);
+    assert.deepEqual(
+      normalized.scene.spawn_shield_mechanics,
+      sourceScene.spawn_shield_mechanics,
+    );
+    for (const row of normalized.scene.class_mechanics) {
+      assert.equal(row.mechanics_version, 2);
+      assert.deepEqual(row.documentation_profile, expectedProfile);
+    }
+    assert.deepEqual(normalized.scene.spawn_shield_mechanics, {
+      availability_kind: "available_v2",
+      configured_duration_steps:
+        sourceScene.spawn_shield_mechanics.configured_duration_steps,
+      movement_speed: sourceScene.spawn_shield_mechanics.movement_speed,
+      protection_effect: "invulnerable",
+      visibility_effect: "concealed_from_opponents",
+      targetability_effect: "untargetable",
+      action_scope: "movement_only",
+      aura_effect: "excluded_as_emitter_and_beneficiary",
+      agent_collision_effect: "phased_until_expiring_endpoint_rejoin",
+      ordinary_application_mechanism: "end_of_transition_respawn_lifecycle",
+    });
+    assertRecursivelyFrozen(normalized.scene.class_mechanics);
+    assertRecursivelyFrozen(normalized.scene.spawn_shield_mechanics);
+  }
+});
+
+test("legacy V1 class and shield mechanics remain exact and gain no V2 claims", async () => {
+  const legacy = fixture.compatibility_cases.legacy_v1;
+  const normalized = await normalizeAuthorizedPresentationFrameV1(legacy);
+  const sourceScene = presentationScene(legacy);
+  assert.deepEqual(normalized.scene.class_mechanics, sourceScene.class_mechanics);
+  assert.deepEqual(
+    normalized.scene.spawn_shield_mechanics,
+    sourceScene.spawn_shield_mechanics,
+  );
+  assert.equal(
+    normalized.scene.class_mechanics.every(
+      (/** @type {Record<string, any>} */ row) =>
+        !Object.hasOwn(row, "mechanics_version") &&
+        !Object.hasOwn(row, "documentation_profile"),
+    ),
+    true,
+  );
+  assert.deepEqual(Object.keys(normalized.scene.spawn_shield_mechanics).sort(), [
+    "availability_kind",
+    "configured_duration_steps",
+    "movement_speed",
+  ]);
+  assert.equal(normalized.scene.spawn_shield_mechanics.availability_kind, "available");
+  assertRecursivelyFrozen(normalized);
+});
+
+test("V2 class and shield mechanics reject missing, extra, and coerced fields", async () => {
+  const base = fixture.presentations.replay_oracle;
+  const cases = [];
+  const shieldPath =
+    "Authorized presentation frame.current_endpoint.scene.spawn_shield_mechanics";
+  const classPath =
+    "Authorized presentation frame.current_endpoint.scene.class_mechanics[0]";
+
+  const missingShield = clone(base);
+  delete presentationScene(missingShield).spawn_shield_mechanics.action_scope;
+  cases.push({
+    label: "missing required V2 shield field",
+    poisoned: missingShield,
+    message: `${shieldPath}.action_scope is required.`,
+  });
+
+  const extraShield = clone(base);
+  presentationScene(extraShield).spawn_shield_mechanics.derived_comparison = "faster";
+  cases.push({
+    label: "extra V2 shield field",
+    poisoned: extraShield,
+    message: `${shieldPath} contains an unknown field.`,
+  });
+
+  const coercedShield = clone(base);
+  presentationScene(coercedShield).spawn_shield_mechanics.configured_duration_steps =
+    "3";
+  cases.push({
+    label: "coerced V2 shield integer",
+    poisoned: coercedShield,
+    message: `${shieldPath}.configured_duration_steps must be a safe integer.`,
+  });
+
+  const missingClassVersion = clone(base);
+  delete presentationScene(missingClassVersion).class_mechanics[0].mechanics_version;
+  cases.push({
+    label: "missing required V2 class version",
+    poisoned: missingClassVersion,
+    message: `${classPath} does not match any allowed strict variant.`,
+  });
+
+  const extraClass = clone(base);
+  presentationScene(extraClass).class_mechanics[0].comparative_rank = 1;
+  cases.push({
+    label: "extra V2 class field",
+    poisoned: extraClass,
+    message: `${classPath} does not match any allowed strict variant.`,
+  });
+
+  const coercedClassVersion = clone(base);
+  presentationScene(coercedClassVersion).class_mechanics[0].mechanics_version = "2";
+  cases.push({
+    label: "coerced V2 class version",
+    poisoned: coercedClassVersion,
+    message: `${classPath} does not match any allowed strict variant.`,
+  });
+
+  const missingProfileId = clone(base);
+  delete presentationScene(missingProfileId).class_mechanics[0].documentation_profile
+    .profile_id;
+  cases.push({
+    label: "missing required documentation profile ID",
+    poisoned: missingProfileId,
+    message: `${classPath} does not match any allowed strict variant.`,
+  });
+
+  const extraProfile = clone(base);
+  presentationScene(extraProfile).class_mechanics[0].documentation_profile.extra = true;
+  cases.push({
+    label: "extra documentation profile field",
+    poisoned: extraProfile,
+    message: `${classPath} does not match any allowed strict variant.`,
+  });
+
+  const coercedProfileId = clone(base);
+  presentationScene(
+    coercedProfileId,
+  ).class_mechanics[0].documentation_profile.profile_id = true;
+  cases.push({
+    label: "coerced documentation profile ID",
+    poisoned: coercedProfileId,
+    message: `${classPath} does not match any allowed strict variant.`,
+  });
+
+  for (const { label, poisoned, message } of cases) {
+    await assert.rejects(
+      normalizeAuthorizedPresentationFrameV1(poisoned),
+      { name: "TypeError", message },
+      label,
+    );
+  }
+});
+
+test("class mechanics reject mixed versions and discordant V2 profile decisions", async () => {
+  const base = fixture.presentations.replay_oracle;
+
+  const mixed = clone(base);
+  const legacyRow = presentationScene(mixed).class_mechanics[0];
+  delete legacyRow.mechanics_version;
+  delete legacyRow.documentation_profile;
+  await assert.rejects(
+    normalizeAuthorizedPresentationFrameV1(mixed),
+    /Scene class mechanics must be entirely V1 or entirely V2\./u,
+  );
+
+  const discordant = clone(base);
+  presentationScene(discordant).class_mechanics[0].documentation_profile = {
+    availability_kind: "unavailable",
+  };
+  await assert.rejects(
+    normalizeAuthorizedPresentationFrameV1(discordant),
+    /Scene V2 class mechanics must share one documentation profile\./u,
+  );
+});
+
+test("V2 spawn shield retains configured duration and speed validation", async () => {
+  const poisoned = clone(fixture.presentations.replay_oracle);
+  presentationScene(poisoned).spawn_shield_mechanics.movement_speed = 0;
+  await assert.rejects(
+    normalizeAuthorizedPresentationFrameV1(poisoned),
+    /Scene spawn-shield remaining duration exceeds configuration\./u,
+  );
 });
 
 test("closed roots reject missing, extra, coercion, discriminator, and nonfinite poison", async () => {

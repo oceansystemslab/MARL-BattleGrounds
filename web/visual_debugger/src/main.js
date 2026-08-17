@@ -40,7 +40,7 @@ import {
   recordingSaveAsCommand,
   targetSelectionCommand,
 } from "./controls.js";
-import { explainAgent, explainLegality } from "./explanations.js";
+import { explainAgent, explainLegality, explainTechnicalFact } from "./explanations.js";
 import {
   authorizedInspectorView,
   DebuggerPanels,
@@ -56,6 +56,10 @@ import {
   replayTimelineSimulatorStep,
   validateReplayCommandOutcome,
 } from "./replay-controls.js";
+import {
+  pendingPresentationSurfaceView,
+  resolveInstalledPresentationAuthorityV1,
+} from "./presentation-authority-view.js";
 import { BattlefieldRenderer } from "./scene.js";
 import {
   createSemanticDescriptor,
@@ -82,7 +86,6 @@ const elements = {
   terminalBadge: requiredElement("terminal-badge"),
   recordingBadge: requiredElement("recording-badge"),
   viewSelect: requiredElement("view-select"),
-  revisionValue: requiredElement("revision-value"),
   stepValue: requiredElement("step-value"),
   transitionValue: requiredElement("transition-value"),
   recordingPanel: requiredElement("recording-panel"),
@@ -107,7 +110,6 @@ const elements = {
   replayCompletionBadge: requiredElement("replay-completion-badge"),
   replayProcessingBadge: requiredElement("replay-processing-badge"),
   replayEndReason: requiredElement("replay-end-reason"),
-  replayIncomingValue: requiredElement("replay-incoming-value"),
   replayFirstButton: requiredElement("replay-first-button"),
   replayBackTenButton: requiredElement("replay-back-ten-button"),
   replayPreviousButton: requiredElement("replay-previous-button"),
@@ -496,7 +498,9 @@ const replayTimelineElements = {
   slider: elements.replayFrameSlider,
   position: elements.replayFramePosition,
   tickForFrameIndex: (/** @type {number} */ frameIndex) =>
-    replayTimelineSimulatorStep(state.timeline, frameIndex),
+    installedPresentationAuthority() === null
+      ? null
+      : replayTimelineSimulatorStep(state.timeline, frameIndex),
 };
 
 const replayPlayback = new ReplayPlaybackController({
@@ -504,7 +508,11 @@ const replayPlayback = new ReplayPlaybackController({
   waitForPresentation: () => choreographer.whenSettled(),
   getMotionMode: () => choreographer.snapshot().motionMode,
   onStateChange: (playback) => {
-    renderReplayTimelineControls(replayTimelineElements, playback);
+    const timeline =
+      installedPresentationAuthority() === null
+        ? pendingPresentationSurfaceView(playback).replay.timeline
+        : playback;
+    renderReplayTimelineControls(replayTimelineElements, timeline);
   },
   onError: (error) => {
     if (!state.notice || state.noticeLevel !== "error") {
@@ -567,6 +575,62 @@ function clearPresentationTooltipOwner(element) {
 }
 
 /**
+ * Reapply the same fail-closed operational chrome at synchronous clear time
+ * and on every later render until one coherent branded pair is installed.
+ * The retained transport is protocol bookkeeping only.
+ */
+function renderPendingPresentationChrome() {
+  const pending = pendingPresentationSurfaceView(replayPlayback.snapshot());
+  clearPresentationTooltipOwner(elements.replayArtifactReference);
+  clearPresentationTooltipOwner(elements.replayCompletionBadge);
+  clearPresentationTooltipOwner(elements.replayProcessingBadge);
+  elements.replayArtifactReference.removeAttribute("title");
+  elements.replayArtifactReference.textContent = pending.replay.artifactReference;
+  elements.replayCompletionBadge.textContent = pending.replay.completion;
+  elements.replayProcessingBadge.textContent = pending.replay.processing;
+  elements.replayEndReason.textContent = pending.replay.endReason;
+  elements.replayRangesButton.setAttribute("aria-pressed", "false");
+  elements.replayRangesButton.disabled = true;
+  elements.replayClearReferenceButton.disabled = true;
+  renderReplayTimelineControls(replayTimelineElements, pending.replay.timeline);
+
+  elements.terminalBadge.hidden = pending.terminal.hidden;
+  elements.terminalBadge.textContent = pending.terminal.text;
+  elements.viewSelect.value = pending.viewMode;
+  elements.viewSelect.disabled = true;
+  elements.scenarioDescription.textContent = pending.scenarioDescription;
+
+  elements.recordingPanel.toggleAttribute("hidden", pending.recording.hidden);
+  elements.recordingBadge.toggleAttribute("hidden", pending.recording.hidden);
+  elements.recordingBadge.textContent = pending.recording.badgeText;
+  delete elements.recordingBadge.dataset.lifecycle;
+  delete document.documentElement.dataset.recordingLifecycle;
+  elements.recordingLifecycle.textContent = pending.recording.lifecycle;
+  elements.recordingProgress.textContent = pending.recording.progress;
+  elements.recordingCompletion.textContent = pending.recording.completion;
+  elements.recordingPersistenceFact.toggleAttribute("hidden", true);
+  elements.recordingPersistenceError.textContent = pending.recording.persistence;
+  elements.recordingStatusNote.textContent = pending.recording.status;
+  for (const control of [
+    elements.recordingFinishButton,
+    elements.recordingReviewButton,
+    elements.recordingRetryButton,
+  ]) {
+    control.toggleAttribute("hidden", true);
+    control.disabled = true;
+  }
+  elements.recordingSaveAsControl.toggleAttribute("hidden", true);
+  elements.recordingSaveAsInput.disabled = true;
+  elements.recordingSaveAsButton.disabled = true;
+  elements.recordingDiscardIntent.textContent = pending.recording.status;
+  elements.recordingDiscardConfirmButton.disabled = true;
+  if (elements.recordingDiscardDialog.open) {
+    elements.recordingDiscardDialog.close();
+  }
+  pendingRecordingReplacement = null;
+}
+
+/**
  * Remove every presentation-owned surface synchronously. The raw transport
  * epoch stays installed for diagnostics and command-outcome accounting until a
  * complete successor pair is ready; it is never used to keep the battlefield
@@ -603,16 +667,8 @@ function clearPresentationAuthority(reason) {
   elements.audienceBadge.textContent = "View unavailable";
   elements.audienceBadge.dataset.audience = "unavailable";
   document.documentElement.dataset.audience = "unavailable";
-  elements.scenarioDescription.textContent = "Waiting for an authorized presentation.";
-  clearPresentationTooltipOwner(elements.replayArtifactReference);
-  elements.replayArtifactReference.textContent =
-    "Unavailable while authority is pending";
-  elements.replayProcessingBadge.textContent = "Unavailable while authority is pending";
-  elements.replayIncomingValue.textContent = "Unavailable while authority is pending";
-  elements.replayRangesButton.disabled = true;
-  elements.replayClearReferenceButton.disabled = true;
+  renderPendingPresentationChrome();
   elements.liveRangesButton.disabled = true;
-  elements.viewSelect.disabled = true;
   elements.resetButton.disabled = true;
   elements.exitButton.disabled = true;
   for (const control of [
@@ -755,20 +811,47 @@ function reloadForProductHandoff() {
 }
 
 /**
- * @param {unknown} descriptor
- * @param {{owner: Element, trigger: Element | null}} _context
+ * Recognize only an installed authorized compact agent activation owner. This
+ * is the central authority fence behind each owner's non-inspectable tooltip
+ * registration; other scientific owners retain generic full inspection.
+ *
+ * @param {Element} owner
  */
-function showSemanticInspector(descriptor, _context) {
+function isAuthorizedCompactAgentOwner(owner) {
+  const presentation = state.presentation;
+  if (
+    !isAuthorizedPresentationFrame(presentation) ||
+    !installedAuthorityIsCoherent() ||
+    (!owner.matches(".agent[data-presentation-key]") &&
+      !owner.matches('[data-action="activate-agent"][data-presentation-key]'))
+  ) {
+    return false;
+  }
+  const presentationKey = owner.getAttribute("data-presentation-key");
+  return (
+    typeof presentationKey === "string" &&
+    authorizedAgentForPresentationKey(presentation, presentationKey) !== null
+  );
+}
+
+/**
+ * @param {unknown} descriptor
+ * @param {{owner: Element, trigger: Element | null}} context
+ */
+function showSemanticInspector(descriptor, context) {
   if (installedActivePresentationPreference(state.presentation) === null) {
     return;
   }
   const normalized = createSemanticDescriptor(descriptor);
+  if (normalized.kind === "agent" && isAuthorizedCompactAgentOwner(context.owner)) {
+    return;
+  }
   if (
     isReplayMode() &&
     authorizedPresentationAudience(state.presentation) !== "researcher" &&
     normalized.kind === "agent"
   ) {
-    const ownerKey = _context.owner
+    const ownerKey = context.owner
       .closest("[data-presentation-key]")
       ?.getAttribute("data-presentation-key");
     const scene = installedAuthorizedPresentationSceneView(state.presentation);
@@ -1272,13 +1355,16 @@ function installedChoreographyControl(presentation) {
   };
 }
 
-function installedAuthorityIsCoherent() {
-  const authority = state.authority;
-  return (
-    isJoinedTransportAndAuthorizedPresentationV1(authority) &&
-    authority.transport === state.frame &&
-    authority.presentation === state.presentation
+function installedPresentationAuthority() {
+  return resolveInstalledPresentationAuthorityV1(
+    state.authority,
+    state.frame,
+    state.presentation,
   );
+}
+
+function installedAuthorityIsCoherent() {
+  return installedPresentationAuthority() !== null;
 }
 
 /**
@@ -1454,7 +1540,8 @@ function authorizedIncomingTransitionId(presentation) {
 }
 
 function recordingStatus() {
-  return isRecord(state.frame?.recording) ? state.frame.recording : null;
+  const frame = installedPresentationAuthority()?.transport;
+  return isRecord(frame?.recording) ? frame.recording : null;
 }
 
 function recordingScientificControlsFenced() {
@@ -1543,14 +1630,20 @@ function installedLiveScientificInspectionAvailable() {
 }
 
 function applyBattlefieldBoundaryCopy() {
+  const installed = installedPresentationAuthority();
   const replay = isReplayMode();
-  const terminal = isTerminal(state.frame);
+  const terminal = installed !== null && isTerminal(installed.transport);
   const scientificFenced = recordingScientificControlsFenced();
-  const audience = authorizedPresentationAudience(state.presentation);
+  const audience = authorizedPresentationAudience(installed?.presentation);
   const scriptedInspection = scriptedBattlefieldLocallyActionable();
   const agentCloseoutInspection = liveAgentCloseoutInspectionActionable();
   const liveInteractive = liveBattlefieldCommandsInteractive();
-  if (scriptedInspection && !scientificFenced) {
+  if (installed === null) {
+    elements.battlefield.setAttribute("role", "img");
+    elements.battlefield.tabIndex = -1;
+    elements.battlefield.setAttribute("aria-label", FENCED_LIVE_BATTLEFIELD_LABEL);
+    elements.battlefieldInstructions.textContent = FENCED_LIVE_BATTLEFIELD_INSTRUCTIONS;
+  } else if (scriptedInspection && !scientificFenced) {
     elements.battlefield.setAttribute("role", "group");
     elements.battlefield.tabIndex = -1;
     elements.battlefield.setAttribute("aria-label", SCRIPTED_BATTLEFIELD_LABEL);
@@ -1638,62 +1731,67 @@ function renderViewerBoundary() {
   applyAuthorizedInspectorChrome();
 }
 
-function renderReplayMetadata() {
-  const frame = state.frame;
-  const presentation = state.presentation;
-  if (!isReplayMode() || !frame) {
+/** @param {ReturnType<typeof installedPresentationAuthority>} installed */
+function renderReplayMetadata(installed) {
+  if (!isReplayMode()) {
     return;
   }
-  const presentationInstalled = isAuthorizedPresentationFrame(presentation);
-  const source =
-    presentationInstalled && isRecord(presentation.source) ? presentation.source : {};
+  if (installed === null) {
+    return;
+  }
+  const frame = installed.transport;
+  const presentation = installed.presentation;
+  const source = isRecord(presentation.source) ? presentation.source : {};
   const completion = isRecord(frame.completion) ? frame.completion : {};
   elements.replayArtifactReference.textContent = String(
-    presentationInstalled
-      ? (source.source_artifact_id ?? "Unavailable in this audience")
-      : "Unavailable while authority is pending",
+    source.source_artifact_id ?? "Unavailable in this audience",
   );
   elements.replayArtifactReference.removeAttribute("title");
-  if (presentationInstalled) {
-    registerTooltipOwner(
-      elements.replayArtifactReference,
-      createSemanticDescriptor({
-        kind: "control",
-        id: "replay-artifact-reference",
-        title: "Replay artifact",
-        tone: "information",
-        accent: "none",
-        summary: "Canonical identity for the loaded immutable replay artifact.",
-        rows: [
-          {
-            label: "Artifact",
-            value: String(source.source_artifact_id ?? "Unavailable in this audience"),
-            metadata: { compact: true, full: true },
-          },
-          {
-            label: "Canonical digest",
-            value: String(
-              source.source_artifact_digest_sha256 ?? "Unavailable in this audience",
-            ),
-            metadata: { compact: false, full: true },
-          },
-        ],
-        sections: [],
-        metadata: { compact: true, full: true },
-        anchor: "element",
-      }),
-    );
-  } else {
-    clearPresentationTooltipOwner(elements.replayArtifactReference);
-  }
+  registerTooltipOwner(
+    elements.replayArtifactReference,
+    createSemanticDescriptor({
+      kind: "control",
+      id: "replay-artifact-reference",
+      title: "Replay artifact",
+      tone: "information",
+      accent: "none",
+      summary: "Canonical identity for the loaded immutable replay artifact.",
+      rows: [
+        {
+          label: "Artifact",
+          value: String(source.source_artifact_id ?? "Unavailable in this audience"),
+          metadata: { compact: true, full: true },
+        },
+        {
+          label: "Canonical digest",
+          value: String(
+            source.source_artifact_digest_sha256 ?? "Unavailable in this audience",
+          ),
+          metadata: { compact: false, full: true },
+        },
+      ],
+      sections: [],
+      metadata: { compact: true, full: true },
+      anchor: "element",
+    }),
+  );
   elements.replayCompletionBadge.textContent = humanize(
     completion.completion_state ?? "unavailable",
   );
-  elements.replayProcessingBadge.textContent = !presentationInstalled
-    ? "Unavailable while authority is pending"
-    : authorizedPresentationAudience(presentation) !== "researcher"
+  elements.replayProcessingBadge.textContent =
+    authorizedPresentationAudience(presentation) !== "researcher"
       ? "Not available in actor POV"
       : "Authorized replay";
+  registerTooltipOwner(
+    elements.replayCompletionBadge,
+    explainTechnicalFact("completion"),
+    { inspectable: false },
+  );
+  registerTooltipOwner(
+    elements.replayProcessingBadge,
+    explainTechnicalFact("processing"),
+    { inspectable: false },
+  );
   elements.replayEndReason.textContent = String(
     completion.public_end_or_failure_reason ??
       completion.end_or_failure_reason ??
@@ -1701,12 +1799,6 @@ function renderReplayMetadata() {
         ? asArray(completion.completion_bases).map(humanize).join(" + ")
         : "Captured prefix"),
   );
-  const incomingTransitionId = authorizedIncomingTransitionId(presentation);
-  elements.replayIncomingValue.textContent = !presentationInstalled
-    ? "Unavailable while authority is pending"
-    : incomingTransitionId
-      ? String(incomingTransitionId)
-      : "Initial frame";
   elements.replayRangesButton.setAttribute(
     "aria-pressed",
     String(installedPresentationRangesVisible(presentation)),
@@ -1733,7 +1825,11 @@ const recordingPersistenceLabels = Object.freeze({
   verification_failed: "Publication verification failed",
 });
 
-function renderRecordingControls() {
+/** @param {ReturnType<typeof installedPresentationAuthority>} installed */
+function renderRecordingControls(installed) {
+  if (installed === null) {
+    return;
+  }
   const recording = recordingStatus();
   const unavailable = isReplayMode() || recording === null;
   elements.recordingPanel.toggleAttribute("hidden", unavailable);
@@ -1990,16 +2086,19 @@ function renderConnection() {
   elements.battlefieldShell.setAttribute("aria-busy", String(state.busy));
 }
 
-function renderSessionToolbar() {
-  const frame = state.frame;
-  const presentation = state.presentation;
+/** @param {ReturnType<typeof installedPresentationAuthority>} [installed] */
+function renderSessionToolbar(installed = installedPresentationAuthority()) {
+  const frame = installed?.transport ?? null;
+  const presentation = installed?.presentation ?? null;
   renderViewerBoundary();
+  if (installed === null) {
+    renderPendingPresentationChrome();
+  }
   const replay = isReplayMode();
   const disabled =
     state.busy || !frame || state.shuttingDown || state.resyncRequired || state.offline;
   const restartControlsBlocked = recordingRestartControlsBlocked();
 
-  elements.revisionValue.textContent = frame ? String(frame.revision ?? "—") : "—";
   elements.stepValue.textContent = presentation
     ? String(presentation.simulator_step_count ?? "—")
     : "—";
@@ -2014,7 +2113,7 @@ function renderSessionToolbar() {
   document.documentElement.dataset.audience = elements.audienceBadge.dataset.audience;
   document.documentElement.dataset.preset = "analysis";
 
-  const terminal = isTerminal(frame);
+  const terminal = frame !== null && isTerminal(frame);
   elements.terminalBadge.hidden = !terminal;
   if (terminal && replay) {
     const completion = isRecord(frame?.completion) ? frame.completion : {};
@@ -2039,11 +2138,13 @@ function renderSessionToolbar() {
     ? replay
       ? `${publicAudienceLabel(authorizedPresentationAudience(presentation))} · recorded frame ${frame?.cursor?.frame_index ?? "—"} of ${frame?.cursor?.final_frame_index ?? "—"}`
       : `${publicAudienceLabel(authorizedPresentationAudience(presentation))} · authorized live presentation`
-    : "Waiting for the Python debugger service.";
+    : "Waiting for an authorized presentation.";
 
   const viewMode = frame?.view_mode === "agent_pov" ? "pov" : frame?.view_mode;
   if (typeof viewMode === "string") {
     elements.viewSelect.value = viewMode;
+  } else {
+    elements.viewSelect.value = "";
   }
   elements.viewSelect.disabled = disabled;
   elements.reconnectButton.disabled =
@@ -2067,8 +2168,8 @@ function renderSessionToolbar() {
     String(authorizedLive && installedPresentationRangesVisible(presentation)),
   );
   elements.liveRangesButton.disabled = disabled || !authorizedLive;
-  renderRecordingControls();
-  renderReplayMetadata();
+  renderRecordingControls(installed);
+  renderReplayMetadata(installed);
   renderCommandAvailability();
   registerAuthorityAwareUtilityHelp();
 }
@@ -2125,6 +2226,19 @@ function setAuthoritativeAvailability(
       anchor: "element",
     },
   );
+}
+
+/**
+ * Fail closed when a command lane has no exact authorized owner. The generic
+ * control-help fallback is intentionally bypassed because legality is an
+ * owner-bound scientific fact.
+ *
+ * @param {HTMLButtonElement} button
+ */
+function clearOwnerBoundLegalityAvailability(button) {
+  button.setAttribute("aria-disabled", "true");
+  button.dataset.authoritativeAvailable = "false";
+  clearPresentationTooltipOwner(button);
 }
 
 /**
@@ -2196,7 +2310,16 @@ function renderDraftState(presentation) {
     : {};
   const mask = isRecord(inspection.decision_mask) ? inspection.decision_mask : {};
   const pending = isRecord(inspection.draft_action) ? inspection.draft_action : {};
-  const controlledPublicAgentId = inspection.actor_public_agent_id;
+  const controlledCandidate = authorizedAgentForPresentationKey(
+    presentation,
+    inspection.actor_presentation_key,
+  );
+  const controlledOwner =
+    controlledCandidate !== null &&
+    controlledCandidate.public_agent_id === inspection.actor_public_agent_id
+      ? controlledCandidate
+      : null;
+  const controlledPublicAgentId = controlledOwner?.public_agent_id;
   const controlledIdentity =
     typeof controlledPublicAgentId === "string"
       ? agentIdentity(controlledPublicAgentId)
@@ -2210,10 +2333,13 @@ function renderDraftState(presentation) {
       ? `Controlled actor ${controlledIdentity}`
       : "Controlled actor unavailable",
   );
-  const controlledSlot = authorizedOracleCommandSlotForPresentationKey(
-    presentation,
-    inspection.actor_presentation_key,
-  );
+  const controlledSlot =
+    controlledOwner === null
+      ? null
+      : authorizedOracleCommandSlotForPresentationKey(
+          presentation,
+          controlledOwner.presentation_key,
+        );
   if (Number.isInteger(controlledSlot)) {
     elements.commandControlledActor.dataset.controlledSlot = String(controlledSlot);
   } else {
@@ -2258,18 +2384,39 @@ function renderDraftState(presentation) {
     true,
     "No combat is always a valid staged choice; movement can still be submitted.",
   );
-  setAuthoritativeAvailability(
-    elements.basicButton,
-    basicAvailable,
-    `Basic ability is ${basicAvailable ? "" : "not "}available this tick.`,
-    explainLegality({ lane_0_available: basicAvailable }, 0),
-  );
-  setAuthoritativeAvailability(
-    elements.ultimateButton,
-    ultimateAvailable,
-    `Ultimate ability is ${ultimateAvailable ? "" : "not "}available this tick.`,
-    explainLegality({ lane_1_available: ultimateAvailable }, 1),
-  );
+  const legality =
+    controlledOwner === null
+      ? null
+      : {
+          owner_presentation_key: controlledOwner.presentation_key,
+          owner_public_agent_id: controlledOwner.public_agent_id,
+          lane_0_available: basicAvailable,
+          lane_1_available: ultimateAvailable,
+        };
+  const basicLegality =
+    legality === null ? null : explainLegality(legality, 0, controlledOwner);
+  const ultimateLegality =
+    legality === null ? null : explainLegality(legality, 1, controlledOwner);
+  if (basicLegality === null) {
+    clearOwnerBoundLegalityAvailability(elements.basicButton);
+  } else {
+    setAuthoritativeAvailability(
+      elements.basicButton,
+      basicAvailable,
+      `Basic ability is ${basicAvailable ? "" : "not "}available this tick.`,
+      basicLegality,
+    );
+  }
+  if (ultimateLegality === null) {
+    clearOwnerBoundLegalityAvailability(elements.ultimateButton);
+  } else {
+    setAuthoritativeAvailability(
+      elements.ultimateButton,
+      ultimateAvailable,
+      `Ultimate ability is ${ultimateAvailable ? "" : "not "}available this tick.`,
+      ultimateLegality,
+    );
+  }
 }
 
 function renderCommandAvailability() {
@@ -2387,24 +2534,14 @@ function applyReplayReferenceSemantics() {
     return;
   }
   const publicAgentId = agent.public_agent_id;
-  const classMechanics = asArray(scene?.class_mechanics).find(
-    (candidate) => isRecord(candidate) && candidate.class_id === agent.class_id,
-  );
   const ariaLabel = reference.getAttribute("aria-label") ?? `Agent ID ${publicAgentId}`;
   reference.setAttribute(
     "aria-label",
     ariaLabel.replace(/selected target/giu, "Reference"),
   );
-  registerTooltipOwner(
-    reference,
-    explainAgent(
-      agent,
-      { reference: true, audience: "researcher" },
-      isRecord(classMechanics) ? classMechanics : null,
-      asArray(scene?.agents),
-    ),
-    { inspectable: false },
-  );
+  registerTooltipOwner(reference, explainAgent(agent, { audience: "researcher" }), {
+    inspectable: false,
+  });
 }
 
 /**
@@ -2503,12 +2640,7 @@ function installAuthorizedAgentActivation() {
   const presentation = state.presentation;
   const scene = installedAuthorizedPresentationSceneView(presentation);
   const agents = asArray(scene?.agents);
-  const selection = isRecord(scene?.selection) ? scene.selection : {};
   const audience = authorizedPresentationAudience(presentation);
-  const researcher = audience === "researcher";
-  const localInspection =
-    audience === "agent_pov" ||
-    authorizedPresentationInspectionState(presentation).state_kind === "live_scripted";
   for (const element of elements.battlefield.querySelectorAll(
     ".agent[data-presentation-key]",
   )) {
@@ -2522,9 +2654,6 @@ function installAuthorizedAgentActivation() {
       element.setAttribute("tabindex", "-1");
       continue;
     }
-    const classMechanics = asArray(scene?.class_mechanics).find(
-      (candidate) => isRecord(candidate) && candidate.class_id === agent.class_id,
-    );
     const activation = authorizedAgentActivation(presentationKey);
     if (activation === null) {
       element.setAttribute("role", "img");
@@ -2542,21 +2671,7 @@ function installAuthorizedAgentActivation() {
     }
     registerTooltipOwner(
       element,
-      explainAgent(
-        agent,
-        {
-          audience: researcher ? "researcher" : "agent_pov",
-          controlled: selection.controlled_presentation_key === presentationKey,
-          selected:
-            researcher &&
-            !localInspection &&
-            selection.selected_presentation_key === presentationKey,
-          inspected:
-            localInspection && selection.selected_presentation_key === presentationKey,
-        },
-        isRecord(classMechanics) ? classMechanics : null,
-        agents,
-      ),
+      explainAgent(agent, { audience: audience ?? "agent_pov" }),
       { inspectable: false },
     );
   }
@@ -2601,9 +2716,11 @@ function activateAuthorizedAgent(presentationKey) {
 
 function render() {
   capturePresentationPreferenceBeforeRender();
-  const presentationFrame = state.presentation;
+  const installed = installedPresentationAuthority();
+  const presentationFrame = installed?.presentation ?? null;
+  const transportFrame = installed?.transport ?? null;
   renderConnection();
-  renderSessionToolbar();
+  renderSessionToolbar(installed);
   battlefieldRenderer.render(presentationFrame, {
     offline: state.offline,
     showRanges: installedPresentationRangesVisible(presentationFrame),
@@ -2636,7 +2753,7 @@ function render() {
     resyncRequired: state.resyncRequired,
     offline: state.offline,
     activationDisabled:
-      isTerminal(state.frame) ||
+      (transportFrame !== null && isTerminal(transportFrame)) ||
       (authorizedPresentationAudience(presentationFrame) === "researcher" &&
         recordingScientificControlsFenced()),
     localInspectedPresentationKey:

@@ -3,21 +3,14 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { normalizeAuthorizedPresentationFrameV1 } from "../src/authorized-presentation-normalizer.js";
+import { explainClassDocumentation } from "../src/explanations.js";
 import {
-  actionTupleCombatLabel,
   authorizedInspectorView,
   authorizedOutgoingTargetDescriptor,
   DebuggerPanels,
   disclosurePanelInitiallyOpen,
-  eventDescriptor,
-  eventSummary,
-  pendingActionDisplayFacts,
-  publicAgentIdMap,
-  replayDiagnosticFacts,
-  rosterControlDescriptor,
   rosterStatusDurationLabel,
 } from "../src/panels.js";
-import { projectSemanticDescriptor, semanticDescriptorText } from "../src/tooltip.js";
 
 const authorizedFixture = JSON.parse(
   await readFile(
@@ -37,6 +30,13 @@ async function normalizedPresentation(kind) {
 async function normalizedStateCase(kind) {
   return await normalizeAuthorizedPresentationFrameV1(
     authorizedFixture.state_cases[kind],
+  );
+}
+
+/** @param {string} kind */
+async function normalizedCompatibilityCase(kind) {
+  return await normalizeAuthorizedPresentationFrameV1(
+    authorizedFixture.compatibility_cases[kind],
   );
 }
 
@@ -192,14 +192,14 @@ function semanticRowValue(descriptor, label) {
   return found.value;
 }
 
-const PUBLIC_IDS = new Map([
-  [0, "zero:<opaque>"],
-  [1, "one/agent&x"],
-  [3, "three.300"],
-  [4, "four four"],
-  [5, "five#five"],
-  [7, "seven:semicolon;"],
-]);
+/** @param {Record<string, any>} descriptor @param {string} title */
+function semanticSection(descriptor, title) {
+  const found = descriptor.sections.find(
+    (/** @type {Record<string, any>} */ section) => section.title === title,
+  );
+  assert.ok(found, `missing semantic section ${title}`);
+  return found;
+}
 
 test("authorized inspector rejects raw and forged presentation roots", async () => {
   const raw = authorizedFixture.presentations.replay_oracle;
@@ -213,13 +213,14 @@ test("authorized inspector rejects raw and forged presentation roots", async () 
 
 test("authorized replay inspector keeps current owner separate from outgoing target", async () => {
   const cases = [
-    ["replay_oracle", "researcher"],
-    ["replay_no_shared_obs_agent_pov", "agent_pov"],
-    ["replay_shared_obs_agent_pov", "agent_pov"],
+    "replay_oracle",
+    "replay_no_shared_obs_agent_pov",
+    "replay_shared_obs_agent_pov",
   ];
   const legalityDescriptorIds = new Set();
+  const documentationBytes = new Set();
 
-  for (const [kind, audience] of cases) {
+  for (const kind of cases) {
     const presentation = await normalizedPresentation(kind);
     const inspector = authorizedInspectorView(presentation);
     assert.ok(inspector);
@@ -232,7 +233,56 @@ test("authorized replay inspector keeps current owner separate from outgoing tar
       inspector.owner.public_agent_id,
       presentation.inspection.actor_public_agent_id,
     );
-    assert.equal(inspector.owner_descriptor.title, "Agent ID agent-slot-0 · Now");
+    assert.equal(
+      inspector.owner_descriptor.title,
+      "Agent ID agent-slot-0 · Mage · Team A",
+    );
+    assert.equal(inspector.owner_descriptor.summary, null);
+    assert.deepEqual(inspector.owner_descriptor.rows, []);
+    assert.deepEqual(
+      inspector.owner_descriptor.sections.map(
+        (/** @type {Record<string, any>} */ section) => section.title,
+      ),
+      ["Class Overview", "Authored Tactical Guide", "Class Mechanics"],
+    );
+    assert.equal(
+      semanticSection(inspector.owner_descriptor, "Class Overview").summary,
+      "The Mage is a fragile backline damage dealer that creates explosive ranged-damage windows with Burst and relies on allied protection to operate.",
+    );
+    assert.deepEqual(
+      semanticSection(inspector.owner_descriptor, "Authored Tactical Guide").rows.map(
+        (/** @type {Record<string, any>} */ row) => row.label,
+      ),
+      ["Role", "Primary Strength", "Primary Weakness", "Counters", "Countered By"],
+    );
+    assert.deepEqual(
+      semanticSection(inspector.owner_descriptor, "Class Mechanics").rows.map(
+        (/** @type {Record<string, any>} */ row) => row.label,
+      ),
+      [
+        "Maximum Health",
+        "Body Radius",
+        "Base Movement Speed",
+        "Observation Radius",
+        "Basic Target",
+        "Basic Ability Radius",
+        "Basic Raw Damage",
+        "Out-of-combat Delay",
+        "Out-of-combat Regeneration",
+        "Ultimate Name",
+        "Ultimate Description",
+        "Ultimate Target",
+        "Ultimate Radius",
+        "Ultimate Cooldown",
+        "Passive Name",
+        "Passive Description",
+      ],
+    );
+    assert.doesNotMatch(
+      JSON.stringify(inspector.owner_descriptor),
+      /Current Health|Effective Speed|Ultimate Status|Combat Status|Steps until OOC|Selection|Target legality|Transition/iu,
+    );
+    documentationBytes.add(JSON.stringify(inspector.owner_descriptor));
     assert.equal(inspector.owner_class_accent, "mage");
     assert.equal(
       inspector.legality.owner_presentation_key,
@@ -291,26 +341,15 @@ test("authorized replay inspector keeps current owner separate from outgoing tar
     )) {
       assert.equal(card.descriptor.title, card.heading);
       assert.equal(card.descriptor.id.includes(inspector.owner.presentation_key), true);
+      assert.equal(card.descriptor.summary, null);
+      assert.equal(card.descriptor.accent, "mage");
+      assert.deepEqual(
+        card.descriptor.rows.map((/** @type {Record<string, any>} */ row) => row.label),
+        ["Status"],
+      );
+      assert.deepEqual(card.descriptor.sections, []);
       legalityDescriptorIds.add(card.descriptor.id);
       assert.equal(Object.isFrozen(card.descriptor), true);
-    }
-    const auraAvailability = inspector.owner_descriptor.sections
-      .flatMap((/** @type {Record<string, any>} */ section) => section.rows)
-      .find(
-        (/** @type {Record<string, any>} */ row) =>
-          row.label === "Aggregate Aura Modifiers",
-      )?.value;
-    if (audience === "researcher") {
-      assert.notEqual(auraAvailability, "Unavailable");
-    } else {
-      assert.equal(auraAvailability, "Unavailable");
-      assert.equal(
-        inspector.owner_descriptor.sections.some(
-          (/** @type {Record<string, any>} */ section) =>
-            section.title === "Exact Class Mechanics",
-        ),
-        false,
-      );
     }
     assert.equal(Object.isFrozen(inspector), true);
     assert.equal(Object.isFrozen(inspector.legality_cards), true);
@@ -322,6 +361,225 @@ test("authorized replay inspector keeps current owner separate from outgoing tar
     );
   }
   assert.equal(legalityDescriptorIds.size, 6);
+  assert.equal(documentationBytes.size, 1);
+});
+
+test("all five certified class cards use the exact documentation section contract", () => {
+  const scene = authorizedFixture.presentations.replay_oracle.current_endpoint.scene;
+  const expectedClasses = new Map([
+    [1, "Mage"],
+    [2, "Warrior"],
+    [3, "Hunter"],
+    [4, "Rogue"],
+    [5, "Priest"],
+  ]);
+  const expectedDescriptions = new Map([
+    [
+      1,
+      [
+        "For 5 Ticks, Burst multiplies this Mage's outgoing damage by a factor of 1.5 (50% more damage dealt), beginning with the successor decision.",
+        "An eligible unshielded Mage emits Sorcerer's Empowerment. Eligible unshielded same-team agents within a radius of 2, including the Mage, receive a 15% outgoing-damage increase per recorded emitter; overlapping emitters multiply up to 1.32.",
+      ],
+    ],
+    [
+      2,
+      [
+        "Charge moves the Warrior toward an enemy target during the Charge phase before ordinary movement. The accepted ultimate also applies 20 raw damage before source and recipient damage modifiers, 1 Tick of stun, and a 50% movement reduction (×0.5) for 5 Ticks.",
+        "An eligible unshielded Warrior emits Guardian's Barrier. Eligible unshielded same-team agents within a radius of 2, including the Warrior, receive a 15% incoming-damage reduction per recorded emitter; overlapping emitters multiply down to 0.72.",
+      ],
+    ],
+    [
+      3,
+      [
+        "Freezing Trap applies 10 raw damage to an enemy target before source and recipient damage modifiers and applies a stun for 4 Ticks. Accepted positive raw damage ends an existing trap before any same-transition reapplication.",
+        "Every accepted Hunter basic applies Serrated Arrows for 1 Tick, imposing a 15% movement reduction (×0.85). Later accepted Hunter basics refresh the remaining duration.",
+      ],
+    ],
+    [
+      4,
+      [
+        "Crippling Poison applies 36 raw damage to an enemy target before source and recipient damage modifiers, a stun for 1 Tick, a 50% movement reduction (×0.5) for 5 Ticks, and a 50% reduction (×0.5) to incoming healing and out-of-combat regeneration for 4 Ticks.",
+        "This Rogue's base movement speed of 1.3 is the highest in the certified profile. After 3 Ticks without combat participation, it becomes eligible for the displayed Out-of-combat Regeneration on each transition tick.",
+      ],
+    ],
+    [
+      5,
+      [
+        "Holy Word: Salvation applies 200 raw healing to a same-team target before recipient healing modifiers and maximum-health clamping.",
+        "Every accepted Priest basic applies Blessing of Freedom to its same-team target, including the Priest where same-team targeting permits it, for 1 Tick. Freedom limits how far slow effects can reduce ordinary movement, using a floor of 85% of base movement speed (×0.85); it does not override stun.",
+      ],
+    ],
+  ]);
+  for (const [classId, className] of expectedClasses) {
+    const owner = scene.agents.find(
+      (/** @type {Record<string, any>} */ agent) => agent.class_id === classId,
+    );
+    const mechanics = scene.class_mechanics.find(
+      (/** @type {Record<string, any>} */ row) => row.class_id === classId,
+    );
+    assert.ok(owner);
+    assert.ok(mechanics);
+    const descriptor = explainClassDocumentation(owner, mechanics);
+    assert.ok(descriptor);
+    assert.equal(
+      descriptor.title,
+      `Agent ID ${owner.public_agent_id} · ${className} · ${owner.team_id === 1 ? "Team A" : "Team B"}`,
+    );
+    assert.equal(descriptor.summary, null);
+    assert.deepEqual(
+      descriptor.sections.map((section) => section.title),
+      ["Class Overview", "Authored Tactical Guide", "Class Mechanics"],
+    );
+    assert.equal(semanticSection(descriptor, "Authored Tactical Guide").rows.length, 5);
+    const mechanicsRows = semanticSection(descriptor, "Class Mechanics").rows;
+    const mechanicsLabels = mechanicsRows.map(
+      (/** @type {Record<string, any>} */ row) => row.label,
+    );
+    for (const label of [
+      "Maximum Health",
+      "Body Radius",
+      "Base Movement Speed",
+      "Observation Radius",
+      "Basic Target",
+      "Basic Ability Radius",
+      "Out-of-combat Delay",
+      "Out-of-combat Regeneration",
+      "Ultimate Name",
+      "Ultimate Description",
+      "Ultimate Target",
+      "Ultimate Radius",
+      "Ultimate Cooldown",
+      "Passive Name",
+      "Passive Description",
+    ]) {
+      assert.equal(mechanicsLabels.includes(label), true, `${className}: ${label}`);
+    }
+    const descriptions = expectedDescriptions.get(classId);
+    assert.ok(descriptions);
+    assert.equal(
+      mechanicsRows.find(
+        (/** @type {Record<string, any>} */ row) =>
+          row.label === "Ultimate Description",
+      )?.value,
+      descriptions[0],
+    );
+    assert.equal(
+      mechanicsRows.find(
+        (/** @type {Record<string, any>} */ row) => row.label === "Passive Description",
+      )?.value,
+      descriptions[1],
+    );
+    assert.doesNotMatch(JSON.stringify(descriptor), /\{\{|Unavailable/u);
+    assert.equal(Object.isFrozen(descriptor), true);
+  }
+});
+
+test("class documentation fails closed for unavailable, V1, missing, and mismatched joins", async () => {
+  const scene = authorizedFixture.presentations.replay_oracle.current_endpoint.scene;
+  const owner = scene.agents.find(
+    (/** @type {Record<string, any>} */ agent) => agent.class_id === 1,
+  );
+  const mechanics = scene.class_mechanics.find(
+    (/** @type {Record<string, any>} */ row) => row.class_id === 1,
+  );
+  assert.ok(owner);
+  assert.ok(mechanics);
+
+  const mechanicsOnlyCases = [
+    {
+      ...mechanics,
+      documentation_profile: { availability_kind: "unavailable" },
+    },
+    {
+      ...mechanics,
+      documentation_profile: {
+        availability_kind: "available",
+        profile_id: "future-profile",
+      },
+    },
+    {
+      ...mechanics,
+      status_mechanics: mechanics.status_mechanics.filter(
+        (/** @type {Record<string, any>} */ status) =>
+          status.status_id !== "mage_burst_damage_amplification",
+      ),
+    },
+  ];
+  const legacyMechanics = { ...mechanics };
+  delete legacyMechanics.mechanics_version;
+  delete legacyMechanics.documentation_profile;
+  mechanicsOnlyCases.push(legacyMechanics);
+
+  for (const candidate of mechanicsOnlyCases) {
+    const descriptor = explainClassDocumentation(owner, candidate);
+    assert.ok(descriptor);
+    assert.deepEqual(
+      descriptor.sections.map((section) => section.title),
+      ["Class Mechanics"],
+    );
+    assert.doesNotMatch(
+      JSON.stringify(descriptor),
+      /Unavailable|Class Overview|Authored Tactical Guide|Ultimate Name|Ultimate Description|Passive Name|Passive Description/u,
+    );
+  }
+
+  assert.equal(explainClassDocumentation({ ...owner, class_id: 2 }, mechanics), null);
+  assert.equal(
+    explainClassDocumentation(owner, { ...mechanics, class_name: "Warrior" }),
+    null,
+  );
+  assert.equal(explainClassDocumentation(owner, null), null);
+
+  const legacyPresentation = await normalizedCompatibilityCase("legacy_v1");
+  const legacyInspector = authorizedInspectorView(legacyPresentation);
+  assert.ok(legacyInspector?.owner_descriptor);
+  assert.deepEqual(
+    legacyInspector.owner_descriptor.sections.map(
+      (/** @type {Record<string, any>} */ section) => section.title,
+    ),
+    ["Class Mechanics"],
+  );
+});
+
+test("current and action state are byte-inert to certified class documentation", () => {
+  const scene = authorizedFixture.presentations.replay_oracle.current_endpoint.scene;
+  const owner = scene.agents.find(
+    (/** @type {Record<string, any>} */ agent) => agent.class_id === 4,
+  );
+  const mechanics = scene.class_mechanics.find(
+    (/** @type {Record<string, any>} */ row) => row.class_id === 4,
+  );
+  assert.ok(owner);
+  assert.ok(mechanics);
+  const baseline = explainClassDocumentation(owner, mechanics);
+  const injected = explainClassDocumentation(
+    {
+      ...owner,
+      current_health: -999,
+      ultimate_cooldown_remaining: 999,
+      statuses: [{ secret: "current-status" }],
+      aura_modifiers: [{ secret: "current-aura" }],
+      selected: true,
+      target: "secret-target",
+      legality: "secret-legality",
+      transition: "secret-transition",
+    },
+    {
+      ...mechanics,
+      current_health: -999,
+      ultimate_cooldown_remaining: 999,
+      statuses: [{ secret: "current-status" }],
+      selection: "secret-selection",
+      target: "secret-target",
+      legality: "secret-legality",
+      transition: "secret-transition",
+    },
+  );
+  assert.equal(JSON.stringify(injected), JSON.stringify(baseline));
+  assert.doesNotMatch(
+    JSON.stringify(injected),
+    /current-|secret-|999|Selection|Target legality/iu,
+  );
 });
 
 test("authorized replay inspector retains final selected owner without outgoing legality", async () => {
@@ -341,7 +599,10 @@ test("authorized replay inspector retains final selected owner without outgoing 
       inspector.owner.public_agent_id,
       presentation.action_axis.owner_public_agent_id,
     );
-    assert.equal(inspector.owner_descriptor.title, "Agent ID agent-slot-0 · Now");
+    assert.equal(
+      inspector.owner_descriptor.title,
+      "Agent ID agent-slot-0 · Mage · Team A",
+    );
     assert.equal(inspector.owner_class_accent, "mage");
     assert.equal(inspector.legality, null);
     assert.equal(inspector.outgoing_target_descriptor, null);
@@ -383,19 +644,26 @@ test("authorized roster exposes one native key-only action with isolated fact ow
 
   try {
     const roster = binding();
+    const selectionCard = binding();
+    const pendingCard = binding();
+    const diagnosticsCard = binding();
+    const acceptedCard = binding();
+    const acceptedAnnouncement = binding();
+    const eventFeed = binding();
+    const eventCount = binding();
     const panels = new DebuggerPanels({
       roster,
       rosterCount: binding(),
-      selectionCard: binding(),
+      selectionCard,
       pendingHeading: binding(),
       pendingCount: binding(),
       pendingScope: binding(),
-      pendingCard: binding(),
-      acceptedCard: binding(),
-      acceptedAnnouncement: binding(),
-      eventFeed: binding(),
-      eventCount: binding(),
-      diagnosticsCard: binding(),
+      pendingCard,
+      acceptedCard,
+      acceptedAnnouncement,
+      eventFeed,
+      eventCount,
+      diagnosticsCard,
       onCommand: (command) => {
         commands.push(command);
       },
@@ -475,6 +743,44 @@ test("authorized roster exposes one native key-only action with isolated fact ow
     assert.equal(commands.length, 1);
 
     const replayAgent = await normalizedPresentation("replay_no_shared_obs_agent_pov");
+    panels.renderAuthorizedInspector(replayAgent);
+    const replayAgentTechnicalOwners = dom
+      .descendants(diagnosticsCard)
+      .filter((node) => Object.hasOwn(node.dataset, "technicalFact"));
+    assert.deepEqual(
+      replayAgentTechnicalOwners.map((owner) => owner.dataset.technicalFact),
+      ["frame", "simulator_step"],
+    );
+    assert.equal(
+      replayAgentTechnicalOwners.every(
+        (owner) => owner.tabIndex === 0 && owner.hasAttribute("data-tooltip-owner"),
+      ),
+      true,
+    );
+    assert.match(
+      dom.textTree(selectionCard),
+      /Class Overview.*Authored Tactical Guide.*Class Mechanics/u,
+    );
+    assert.equal(
+      dom
+        .descendants(selectionCard)
+        .some((node) =>
+          ["selected-outgoing-target", "selected-legality"].includes(node.className),
+        ),
+      false,
+    );
+    assert.equal(
+      dom
+        .descendants(pendingCard)
+        .some((node) => node.className === "selected-outgoing-target"),
+      true,
+    );
+    assert.equal(
+      dom
+        .descendants(pendingCard)
+        .some((node) => node.className === "selected-legality"),
+      true,
+    );
     panels.renderAuthorizedRoster(replayAgent, false);
     const agentRows = /** @type {Record<string, any>[]} */ (
       [...panels.rosterRows.values()].filter(
@@ -502,6 +808,77 @@ test("authorized roster exposes one native key-only action with isolated fact ow
     const commandCount = commands.length;
     agentRows[0].primaryButton.click();
     assert.equal(commands.length, commandCount);
+
+    const replayOracle = await normalizedPresentation("replay_oracle");
+    panels.renderAuthorizedInspector(replayOracle);
+    assert.deepEqual(
+      dom
+        .descendants(diagnosticsCard)
+        .filter((node) => Object.hasOwn(node.dataset, "technicalFact"))
+        .map((owner) => owner.dataset.technicalFact),
+      ["frame", "simulator_step", "ordinary_movement_distance_scale"],
+    );
+    const transitionRows = dom
+      .descendants(acceptedCard)
+      .filter((node) => node.className === "accepted-action-row");
+    assert.equal(transitionRows.length, 5);
+    assert.equal(
+      transitionRows.every((row) => {
+        const text = dom.textTree(row);
+        return (
+          /Agent ID .+ · (?:Mage|Warrior|Hunter|Rogue|Priest) · Team [AB]/u.test(
+            text,
+          ) &&
+          text.includes("Submitted") &&
+          text.includes("Accepted") &&
+          !/(?:mask|combat result|submission|revision|generation|transition)/iu.test(
+            text.replace("Submitted", ""),
+          )
+        );
+      }),
+      true,
+    );
+    assert.equal(
+      transitionRows.every((row) => {
+        const titles = dom
+          .descendants(row)
+          .filter((node) => node.className === "accepted-action-row__title");
+        return (
+          titles.length === 1 &&
+          ["mage", "warrior", "hunter", "rogue", "priest"].includes(
+            titles[0].dataset.class,
+          ) &&
+          !Object.hasOwn(row.dataset, "presentationKey") &&
+          !Object.hasOwn(row.dataset, "transitionId")
+        );
+      }),
+      true,
+    );
+    assert.equal(Object.hasOwn(acceptedCard.dataset, "transitionId"), false);
+
+    const frameZero = await normalizedStateCase("replay_oracle_frame_zero");
+    panels.render(frameZero);
+    assert.equal(acceptedCard.children.length, 0);
+    assert.equal(acceptedAnnouncement.textContent, "");
+
+    panels.render(replayOracle);
+    assert.notEqual(panels.rosterRows.size, 0);
+    panels.render({ ...replayOracle });
+    assert.equal(panels.rosterRows.size, 0);
+    assert.equal(acceptedCard.children.length, 0);
+    assert.equal(acceptedAnnouncement.textContent, "");
+    assert.equal(eventCount.textContent, "0");
+    assert.doesNotMatch(
+      [
+        dom.textTree(roster),
+        dom.textTree(selectionCard),
+        dom.textTree(pendingCard),
+        dom.textTree(acceptedCard),
+        dom.textTree(eventFeed),
+        dom.textTree(diagnosticsCard),
+      ].join(" "),
+      /Submitted|Accepted|Technical Frame.*\d|Observation delta|Incoming event/u,
+    );
   } finally {
     if (documentDescriptor === undefined) {
       Reflect.deleteProperty(globalThis, "document");
@@ -563,12 +940,49 @@ test("authorized outgoing target descriptor preserves all three disclosure kinds
   );
 });
 
-test("roster rendering has no legacy compact Presentation branch", async () => {
-  const source = await readFile(new URL("../src/panels.js", import.meta.url), "utf8");
-  assert.doesNotMatch(source, /compactRoster/u);
-  assert.doesNotMatch(source, /dataset\.compact/u);
-  assert.doesNotMatch(source, /frame\?\.preset === "presentation"/u);
-  assert.match(source, /removeAttribute\("data-compact"\)/u);
+test("panel source has one branded render path and no raw fallbacks", async () => {
+  const [source, styles] = await Promise.all([
+    readFile(new URL("../src/panels.js", import.meta.url), "utf8"),
+    readFile(new URL("../styles.css", import.meta.url), "utf8"),
+  ]);
+  for (const forbidden of [
+    "compactRoster",
+    "data-compact",
+    "frameScene",
+    "frameEvents",
+    "publicAgentIdMap",
+    "rosterControlDescriptor",
+    "pendingActionDisplayFacts",
+    "actionTupleCombatLabel",
+    "eventSummary",
+    "eventDescriptor",
+    "replayDiagnosticFacts",
+    "createRosterRow",
+    "updateRosterRow",
+    "renderRoster",
+    "renderPendingPlan",
+    "renderDiagnostics",
+  ]) {
+    assert.equal(source.includes(forbidden), false, forbidden);
+  }
+  assert.match(
+    source,
+    /if \(isAuthorizedPresentationFrame\(frame\)\)[\s\S]*this\.renderAuthorizedEvents\(frame\);\s*return;\s*\}\s*this\.renderUnavailable\(\);/u,
+  );
+  for (const forbiddenSelector of [
+    ".roster-actions",
+    ".action-result",
+    ".action-tuple",
+    ".pending-action-row__",
+    ".pending-action-chip",
+    ".diagnostic-fact",
+    "#accepted-card .action-card__label",
+    ".pending-action-row:focus-visible",
+    ".roster-row:focus-visible",
+    ".event-item strong",
+  ]) {
+    assert.equal(styles.includes(forbiddenSelector), false, forbiddenSelector);
+  }
 });
 
 test("authorized inspector copy separates live draft and replay outgoing epochs", async () => {
@@ -600,385 +1014,8 @@ test("native disclosure defaults open operational live panels, roster, and event
   assert.throws(() => disclosurePanelInitiallyOpen("unknown", false), /Unknown/u);
 });
 
-test("replay diagnostics display recorded movement scale only for researchers", () => {
-  const base = {
-    viewer_mode: "replay",
-    frame_kind: "researcher_replay_viewer",
-    timeline_id: "artifact:timeline:researcher",
-    cursor: { cursor_generation: 3, choreography_generation: 4 },
-    artifact_summary: { metric_report_availability: "available" },
-  };
-  const researcher = replayDiagnosticFacts({
-    ...base,
-    replay_audience: "researcher",
-    recorded_ordinary_movement_distance_scale: 0.375,
-  });
-  const pov = replayDiagnosticFacts({
-    ...base,
-    replay_audience: "actor_pov",
-  });
-
-  assert.deepEqual(researcher.at(-1), {
-    label: "Recorded movement scale",
-    value: "0.38",
-  });
-  assert.equal(
-    pov.some((fact) => fact.label === "Recorded movement scale"),
-    false,
-  );
-  assert.equal(Object.isFrozen(researcher), true);
-  assert.deepEqual(replayDiagnosticFacts({ viewer_mode: "live" }), []);
-});
-
-test("roster buttons own audience- and availability-specific control help", () => {
-  /** @type {Array<["target" | "control", "live" | "researcher_replay", boolean, string, string, string]>} */
-  const cases = [
-    ["target", "live", false, "Target", "staged action", "Available"],
-    ["control", "live", true, "Control", "currently unavailable", "Unavailable"],
-    [
-      "target",
-      "researcher_replay",
-      false,
-      "Reference",
-      "does not change the immutable range anchor",
-      "Available",
-    ],
-    ["control", "researcher_replay", false, "POV actor", "point of view", "Available"],
-  ];
-  for (const [role, mode, disabled, title, copy, availability] of cases) {
-    const descriptor = rosterControlDescriptor(
-      role,
-      "arbitrary:<agent>&7",
-      mode,
-      disabled,
-    );
-    assert.equal(descriptor.title, title);
-    assert.match(descriptor.summary, new RegExp(copy, "u"));
-    assert.equal(descriptor.rows[0].value, "Agent ID arbitrary:<agent>&7");
-    assert.equal(descriptor.rows[1].value, availability);
-    assert.equal(descriptor.metadata.full, false);
-  }
-  assert.throws(
-    () => rosterControlDescriptor("target", "agent", "live", /** @type {never} */ (1)),
-    /boolean/u,
-  );
-});
-
-test("same-root public-ID map joins scene and batch and fails closed on conflicts", () => {
-  const joined = publicAgentIdMap({
-    scene: {
-      agents: [
-        { global_slot: 1, public_agent_id: "one/agent&x" },
-        { global_slot: 7, public_agent_id: "seven:semicolon;" },
-        { global_slot: "4", public_agent_id: "coerced-slot-must-not-join" },
-      ],
-    },
-    event_batch: {
-      public_agent_id_by_global_slot: ["zero:<opaque>", "one/agent&x", "batch-two"],
-    },
-  });
-  assert.deepEqual(
-    [...joined],
-    [
-      [1, "one/agent&x"],
-      [7, "seven:semicolon;"],
-      [0, "zero:<opaque>"],
-      [2, "batch-two"],
-    ],
-  );
-  assert.equal(joined.has(4), false);
-
-  const conflict = publicAgentIdMap({
-    scene: { agents: [{ global_slot: 1, public_agent_id: "scene-one" }] },
-    event_batch: {
-      public_agent_id_by_global_slot: ["zero", "different-one"],
-    },
-  });
-  assert.equal(conflict.has(1), false);
-  assert.equal(conflict.get(0), "zero");
-});
-
-test("all 21 researcher event kinds use arbitrary public IDs and never slot labels", () => {
-  const events = [
-    {
-      event_type: "action_rejected",
-      actor_global_slot: 1,
-      rejection_component: "movement",
-    },
-    {
-      event_type: "ability_activated",
-      source_global_slot: 1,
-      recipient_global_slot: 7,
-      ability_component: "warrior_charge",
-    },
-    {
-      event_type: "source_damage_output",
-      source_global_slot: 1,
-      raw_damage_output: 10,
-      source_modified_damage_output: 12,
-      recipient_damage_modifier: 0.8,
-      mage_damage_aura_covering_emitter_global_slots: [0, 5],
-      warrior_mitigation_aura_covering_emitter_global_slots: [3],
-    },
-    {
-      event_type: "source_healing_output",
-      source_global_slot: 4,
-      raw_healing_output: 10,
-      source_modified_healing_output: 11,
-      recipient_healing_modifier: 1,
-    },
-    {
-      event_type: "recipient_health_resolution",
-      recipient_global_slot: 7,
-      realized_net_health_change: -3,
-      transition_start_health: 10,
-      health_after_combat_resolution: 7,
-    },
-    { event_type: "combat_countdown_reset", agent_global_slot: 1 },
-    {
-      event_type: "health_regenerated",
-      agent_global_slot: 3,
-      actual_health_regenerated: 1.25,
-    },
-    { event_type: "cooldown_started", agent_global_slot: 4 },
-    { event_type: "cooldown_ready", agent_global_slot: 5 },
-    {
-      event_type: "charge_phase_displacement",
-      agent_global_slot: 1,
-      start_anchor: { position: [1, 2] },
-      end_anchor: { position: [3, 4] },
-    },
-    {
-      event_type: "ordinary_movement_phase_displacement",
-      agent_global_slot: 7,
-      start_anchor: { position: [4, 5] },
-      end_anchor: { position: [6, 7] },
-    },
-    { event_type: "agent_died", recipient_global_slot: 7 },
-    {
-      event_type: "lethal_damage_contribution",
-      source_global_slot: 1,
-      recipient_global_slot: 7,
-      attributed_death_damage: 4.5,
-    },
-    {
-      event_type: "status_aged_to_zero",
-      recipient_global_slot: 7,
-      status_id: "hunter_basic_slow",
-    },
-    {
-      event_type: "status_broken_by_damage",
-      recipient_global_slot: 7,
-      status_id: "warrior_charge_stun",
-    },
-    {
-      event_type: "status_applied",
-      source_global_slot: 1,
-      recipient_global_slot: 7,
-      status_id: "rogue_poison_slow",
-    },
-    {
-      event_type: "status_refreshed_or_extended",
-      recipient_global_slot: 7,
-      status_id: "mage_burst",
-    },
-    {
-      event_type: "status_cleared_by_new_death",
-      recipient_global_slot: 7,
-      status_id: "priest_freedom",
-    },
-    { event_type: "spawn_shield_expired", agent_global_slot: 3 },
-    { event_type: "respawn_wave_occurred", team_id: 2 },
-    {
-      event_type: "agent_respawned",
-      agent_global_slot: 5,
-      realized_successor_position: [8, 9],
-    },
-  ];
-  assert.equal(events.length, 21);
-  const summaries = events.map((event) => eventSummary(event, PUBLIC_IDS));
-  assert.equal(
-    summaries.every((summary) => !summary.includes("id_")),
-    true,
-  );
-  assert.equal(
-    summaries
-      .filter((_, index) => index !== 19)
-      .every((summary) => !summary.includes("Agent ID unavailable")),
-    true,
-  );
-  assert.match(summaries[0], /Agent ID one\/agent&x/u);
-  assert.match(summaries[1], /Agent ID seven:semicolon;/u);
-  assert.match(summaries[2], /Sorcerer’s Empowerment emitters 2/u);
-  assert.match(summaries[2], /Guardian’s Barrier emitters 1/u);
-  assert.doesNotMatch(summaries[2], /zero:<opaque>|five#five|three\.300/u);
-  assert.match(summaries[3], /aura emitter evidence not recorded/u);
-});
-
-test("missing event joins fail closed instead of deriving a public ID from a slot", () => {
-  const summary = eventSummary(
-    { event_type: "agent_died", recipient_global_slot: 999 },
-    PUBLIC_IDS,
-  );
-  assert.equal(summary, "Agent died · Agent ID unavailable");
-  assert.doesNotMatch(summary, /999|id_/u);
-});
-
-test("event semantic descriptor and accessible text never consume canonical event IDs", () => {
-  const technicalEventId = "event:canonical:<private>&9001";
-  const event = {
-    event_id: technicalEventId,
-    event_type: "status_applied",
-    status_id: "rogue_poison_slow",
-    source_global_slot: 1,
-    recipient_global_slot: 7,
-  };
-  const descriptor = eventDescriptor(event, 4, PUBLIC_IDS);
-  const serialized = JSON.stringify(descriptor);
-  const compactAccessibleText = semanticDescriptorText(
-    projectSemanticDescriptor(descriptor, "compact"),
-  ).join(" ");
-  const fullAccessibleText = semanticDescriptorText(
-    projectSemanticDescriptor(descriptor, "full"),
-  ).join(" ");
-
-  assert.equal(descriptor.id, "event:status_applied:4");
-  assert.doesNotMatch(serialized, /event:canonical:<private>&9001/u);
-  assert.doesNotMatch(compactAccessibleText, /event:canonical:<private>&9001/u);
-  assert.doesNotMatch(fullAccessibleText, /event:canonical:<private>&9001/u);
-  assert.match(compactAccessibleText, /Agent ID one\/agent&x/u);
-  assert.match(fullAccessibleText, /Agent ID seven:semicolon;/u);
-  assert.throws(() => eventDescriptor(event, -1, PUBLIC_IDS), /non-negative integer/u);
-});
-
 test("roster duration labels abbreviate only the human-facing extreme value", () => {
   assert.equal(rosterStatusDurationLabel(5), "5");
   assert.equal(rosterStatusDurationLabel(123456789), "123M");
   assert.equal(rosterStatusDurationLabel(null), "?");
-});
-
-test("pending no-combat copy hides transport vocabulary without dropping facts", () => {
-  const facts = pendingActionDisplayFacts({
-    move_action: 0,
-    movement_mask_value: true,
-    target_action: 0,
-    target: { disclosure: "target_none", global_slot: null },
-    armed_lane: 0,
-    pair_mask_value: null,
-  });
-
-  assert.deepEqual(facts, {
-    movement: "Movement · Stay (0) · Available",
-    target: "Target · None",
-    action: "Action · No combat",
-    legality: "Legality · Not applicable",
-  });
-  assert.doesNotMatch(Object.values(facts).join(" "), /target-none|Lane 0\/B/u);
-  assert.equal(Object.isFrozen(facts), true);
-});
-
-test("pending combat copy requires the same-root resolver for its public target", () => {
-  const pending = {
-    move_action: 5,
-    movement_mask_value: false,
-    target_action: 3,
-    target: { disclosure: "public", global_slot: 7, target_action: 3 },
-    armed_lane: 1,
-    pair_mask_value: false,
-  };
-  assert.deepEqual(pendingActionDisplayFacts(pending, PUBLIC_IDS), {
-    movement: "Movement · Northeast (5) · Unavailable",
-    target: "Target · Agent ID seven:semicolon; (action 3)",
-    action: "Action · Ultimate (1/U)",
-    legality: "Legality · Unavailable",
-  });
-  assert.equal(
-    pendingActionDisplayFacts(pending).target,
-    "Target · Agent ID unavailable",
-  );
-});
-
-test("pending combat copy retains the envelope target action", () => {
-  const facts = pendingActionDisplayFacts(
-    {
-      move_action: 3,
-      movement_mask_value: true,
-      target_action: 6,
-      target: { disclosure: "public", global_slot: 6 },
-      armed_lane: null,
-      pair_mask_value: null,
-    },
-    new Map([[6, "opaque-six"]]),
-  );
-  assert.equal(facts.target, "Target · Agent ID opaque-six (action 6)");
-  assert.doesNotMatch(facts.target, /unavailable|id_6/u);
-});
-
-test("pending public ID and slot must agree when both are supplied", () => {
-  const facts = pendingActionDisplayFacts(
-    {
-      move_action: 0,
-      movement_mask_value: true,
-      target: {
-        disclosure: "public",
-        global_slot: 7,
-        target_action: 3,
-        public_agent_id: "mismatched-public-id",
-      },
-      armed_lane: 0,
-      pair_mask_value: true,
-    },
-    PUBLIC_IDS,
-  );
-  assert.equal(facts.target, "Target · Agent ID unavailable");
-  assert.doesNotMatch(JSON.stringify(facts), /mismatched-public-id|id_7/u);
-});
-
-test("pending target-none retains an explicitly armed source-local Ultimate", () => {
-  assert.deepEqual(
-    pendingActionDisplayFacts({
-      move_action: 0,
-      movement_mask_value: true,
-      target: { target_action: 0, public_agent_id: null },
-      armed_lane: 1,
-      pair_mask_value: true,
-    }),
-    {
-      movement: "Movement · Stay (0) · Available",
-      target: "Target · None",
-      action: "Action · Ultimate (1/U)",
-      legality: "Legality · Available",
-    },
-  );
-});
-
-test("actor-POV action tuples recognize the recipient-local no-target action", () => {
-  assert.equal(
-    actionTupleCombatLabel({
-      target: { target_action: 0, public_agent_id: null },
-      use_ultimate_action: 0,
-    }),
-    "No combat",
-  );
-  assert.equal(
-    actionTupleCombatLabel({
-      target: { target_action: 3, public_agent_id: "visible-target" },
-      use_ultimate_action: 0,
-    }),
-    "0/B · Basic",
-  );
-  assert.equal(
-    actionTupleCombatLabel({
-      target: { target_action: 3, public_agent_id: "visible-target" },
-      use_ultimate_action: 1,
-    }),
-    "1/U · Ultimate",
-  );
-  assert.equal(
-    actionTupleCombatLabel({
-      target: { target_action: 0, public_agent_id: null },
-      use_ultimate_action: 1,
-    }),
-    "1/U · Ultimate",
-  );
 });

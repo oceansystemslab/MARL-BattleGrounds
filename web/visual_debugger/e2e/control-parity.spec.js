@@ -32,14 +32,6 @@ test.afterAll(async () => {
  * @param {import("@playwright/test").Page} page
  * @returns {Promise<number>}
  */
-async function currentRevision(page) {
-  return Number(await page.locator("#revision-value").textContent());
-}
-
-/**
- * @param {import("@playwright/test").Page} page
- * @returns {Promise<number>}
- */
 async function currentStep(page) {
   return Number(await page.locator("#step-value").textContent());
 }
@@ -216,9 +208,7 @@ test("authorized draft edit and rapid Submit install exactly one successor", asy
   const selectedMovement = page.locator(
     `#command-deck button[data-move-action=${JSON.stringify(movementAction)}]`,
   );
-  const editRevision = await currentRevision(page);
   await movement.click();
-  await expect(page.locator("#revision-value")).toHaveText(String(editRevision + 1));
   await expect(page.locator("html")).toHaveAttribute(
     "data-presentation-authority",
     "installed",
@@ -227,7 +217,6 @@ test("authorized draft edit and rapid Submit install exactly one successor", asy
   await expect(draftLabel).not.toHaveText(draftBefore);
   await expect.poll(() => commands.length).toBe(1);
 
-  const successorRevision = await currentRevision(page);
   const successorStep = await currentStep(page);
   const transitionBefore = await page.locator("#transition-value").textContent();
   await page.locator("#submit-turn-button").evaluate((button) => {
@@ -237,11 +226,9 @@ test("authorized draft edit and rapid Submit install exactly one successor", asy
     button.click();
     button.click();
   });
-  await expect(page.locator("#revision-value")).toHaveText(
-    String(successorRevision + 1),
-    { timeout: 120_000 },
-  );
-  await expect(page.locator("#step-value")).toHaveText(String(successorStep + 1));
+  await expect(page.locator("#step-value")).toHaveText(String(successorStep + 1), {
+    timeout: 120_000,
+  });
   await expect.poll(() => commands.length).toBe(2);
   expect(
     commands.filter(
@@ -255,9 +242,9 @@ test("authorized draft edit and rapid Submit install exactly one successor", asy
   expect(transitionId).not.toBeNull();
   expect(transitionId).not.toBe("—");
   expect(transitionId).not.toBe(transitionBefore);
-  await expect(page.locator("#accepted-card")).toHaveAttribute(
+  await expect(page.locator("#accepted-card")).not.toHaveAttribute(
     "data-transition-id",
-    transitionId ?? "",
+    /.+/u,
   );
   await expect(page.locator("#accepted-card .accepted-action-row")).not.toHaveCount(0);
   await expect(page.locator("#accepted-card")).toContainText("Submitted");
@@ -286,9 +273,6 @@ test("a stale tab adopts the latest ranges state without replaying its command",
     "data-presentation-authority",
     "installed",
   );
-  const baseRevision = await currentRevision(page);
-  await expect(stalePage.locator("#revision-value")).toHaveText(String(baseRevision));
-
   const ranges = page.locator("#live-ranges-button");
   const staleRanges = stalePage.locator("#live-ranges-button");
   const initialRangesPressed = await ranges.getAttribute("aria-pressed");
@@ -298,7 +282,6 @@ test("a stale tab adopts the latest ranges state without replaying its command",
   }
 
   await ranges.click();
-  await expect(page.locator("#revision-value")).toHaveText(String(baseRevision + 1));
   await expect(ranges).toHaveAttribute(
     "aria-pressed",
     initialRangesPressed === "true" ? "false" : "true",
@@ -306,25 +289,16 @@ test("a stale tab adopts the latest ranges state without replaying its command",
   await expect(staleRanges).toHaveAttribute("aria-pressed", initialRangesPressed);
 
   await staleRanges.click();
-  await expect(stalePage.locator("#revision-value")).toHaveText(
-    String(baseRevision + 1),
-  );
   await expect(stalePage.locator("#notice")).toContainText("stale");
   await expect(staleRanges).toHaveAttribute(
     "aria-pressed",
     initialRangesPressed === "true" ? "false" : "true",
   );
-  await expect(page.locator("#revision-value")).toHaveText(String(baseRevision + 1));
-
   await staleRanges.click();
-  await expect(stalePage.locator("#revision-value")).toHaveText(
-    String(baseRevision + 2),
-  );
   await expect(staleRanges).toHaveAttribute("aria-pressed", initialRangesPressed);
 
   await page.reload();
   await expect(page.locator("#connection-status")).toHaveText("Online");
-  await expect(page.locator("#revision-value")).toHaveText(String(baseRevision + 2));
   await expect(page.locator("#live-ranges-button")).toHaveAttribute(
     "aria-pressed",
     initialRangesPressed,
@@ -345,7 +319,6 @@ test("a lost applied response requires GET resync and never replays submit", asy
     "data-inspection-state",
     "live_editable",
   );
-  const baseRevision = await currentRevision(page);
   const baseStep = await currentStep(page);
   let interceptedCommands = 0;
   let appliedStatus = 0;
@@ -371,13 +344,17 @@ test("a lost applied response requires GET resync and never replays submit", asy
     "data-presentation-authority",
     "installed",
   );
-  await expect(page.locator("#revision-value")).toHaveText(String(baseRevision + 1));
   await expect(page.locator("#step-value")).toHaveText(String(baseStep + 1));
   await expect.poll(() => interceptedCommands).toBe(1);
   await page.unroute("**/api/command");
 
-  await page.locator("#live-ranges-button").click();
-  await expect(page.locator("#revision-value")).toHaveText(String(baseRevision + 2));
+  const ranges = page.locator("#live-ranges-button");
+  const rangesBefore = await ranges.getAttribute("aria-pressed");
+  await ranges.click();
+  await expect(ranges).toHaveAttribute(
+    "aria-pressed",
+    rangesBefore === "true" ? "false" : "true",
+  );
   await expect(page.locator("#step-value")).toHaveText(String(baseStep + 1));
 });
 
@@ -401,7 +378,6 @@ test("native panels preserve user state only within exact authority", async ({
     )
     .first();
   await expect(firstActivation).toBeVisible();
-  const firstRevision = await currentRevision(page);
   const firstCommand = page.waitForResponse(
     (response) =>
       response.request().method() === "POST" &&
@@ -409,15 +385,13 @@ test("native panels preserve user state only within exact authority", async ({
   );
   await firstActivation.press("Enter");
   expect((await firstCommand).status()).toBe(200);
-  await expect(page.locator("#revision-value")).toHaveText(String(firstRevision + 1));
   await expect(page.locator("#agent-details")).toHaveAttribute("open", "");
 
   await setDisclosureOpen(page, "#agent-details", false);
   const ranges = page.locator("#live-ranges-button");
   if ((await ranges.getAttribute("aria-pressed")) !== "true") {
-    const rangeRevision = await currentRevision(page);
     await ranges.click();
-    await expect(page.locator("#revision-value")).toHaveText(String(rangeRevision + 1));
+    await expect(ranges).toHaveAttribute("aria-pressed", "true");
   }
   await expect(page.locator("#battlefield .range-ring-owner").first()).toBeVisible();
   await page.locator("#battlefield .range-ring-owner").first().dispatchEvent("click");

@@ -46,7 +46,6 @@
         </select>
       </label>
       <fieldset class="session-facts" aria-label="Session facts">
-        <span>Revision <strong id="revision-value">—</strong></span>
         <span>Step <strong id="step-value">—</strong></span>
         <span>Transition <strong id="transition-value">—</strong></span>
       </fieldset>
@@ -160,19 +159,15 @@
           </div>
           <div>
             <dt>Completion</dt>
-            <dd id="replay-completion-badge">—</dd>
+            <dd id="replay-completion-badge" tabindex="0">—</dd>
           </div>
           <div>
             <dt>Processing</dt>
-            <dd id="replay-processing-badge">—</dd>
+            <dd id="replay-processing-badge" tabindex="0">—</dd>
           </div>
           <div>
             <dt>End reason</dt>
             <dd id="replay-end-reason">—</dd>
-          </div>
-          <div>
-            <dt>Incoming</dt>
-            <dd id="replay-incoming-value">Initial frame</dd>
           </div>
         </dl>
       </div>
@@ -387,7 +382,7 @@
           </div>
         </details>
 
-        <details id="pending-turn-details" class="hud-section" data-live-only>
+        <details id="pending-turn-details" class="hud-section">
           <summary class="section-heading">
             <strong id="pending-heading" class="section-title">Pending joint turn</strong>
             <span id="pending-count" class="count-badge">0 actors</span>
@@ -406,7 +401,7 @@
           </div>
         </details>
 
-        <details id="latest-transition-details" class="hud-section" data-live-only>
+        <details id="latest-transition-details" class="hud-section">
           <summary><span id="accepted-heading">Latest transition</span></summary>
           <div
             id="latest-transition-details-body"

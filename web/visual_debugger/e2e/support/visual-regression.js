@@ -178,19 +178,28 @@ export function trackCommandPosts(page) {
 
 /**
  * @param {import("@playwright/test").Page} page
+ * @param {() => Promise<unknown>} activate
  */
-async function currentRevision(page) {
-  return Number(await page.locator("#revision-value").textContent());
-}
-
-/**
- * @param {import("@playwright/test").Page} page
- * @param {number} previous
- */
-async function expectRevisionAdvance(page, previous) {
-  await expect
-    .poll(() => currentRevision(page), { timeout: 120_000 })
-    .toBeGreaterThan(previous);
+async function activateAndWaitForJoinedLiveAuthority(page, activate) {
+  const commandResponse = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname === "/api/command",
+    { timeout: 120_000 },
+  );
+  const presentationResponse = page.waitForResponse(
+    (response) =>
+      response.request().method() === "GET" &&
+      new URL(response.url()).pathname === "/api/presentation/frame",
+    { timeout: 120_000 },
+  );
+  await activate();
+  expect((await commandResponse).status()).toBe(200);
+  expect((await presentationResponse).status()).toBe(200);
+  await expect(page.locator("html")).toHaveAttribute(
+    "data-presentation-authority",
+    "installed",
+  );
   await expect(page.locator("#connection-status")).toHaveText("Online");
 }
 
@@ -204,9 +213,7 @@ async function selectAuthoritativeValue(page, selector, value) {
   if ((await control.inputValue()) === value) {
     return;
   }
-  const revisionBefore = await currentRevision(page);
-  await control.selectOption(value);
-  await expectRevisionAdvance(page, revisionBefore);
+  await activateAndWaitForJoinedLiveAuthority(page, () => control.selectOption(value));
   await expect(control).toHaveValue(value);
 }
 
@@ -235,13 +242,13 @@ export async function loadLiveVisualCase(
   await page.goto(debuggerUrl);
   await expect(page.locator("#connection-status")).toHaveText("Online");
 
-  const revisionBefore = await currentRevision(page);
-  if ((await page.locator("#scenario-select").inputValue()) === scenario) {
-    await page.getByRole("button", { name: "Reset" }).click();
-  } else {
-    await page.locator("#scenario-select").selectOption(scenario);
-  }
-  await expectRevisionAdvance(page, revisionBefore);
+  await activateAndWaitForJoinedLiveAuthority(page, async () => {
+    if ((await page.locator("#scenario-select").inputValue()) === scenario) {
+      await page.getByRole("button", { name: "Reset" }).click();
+    } else {
+      await page.locator("#scenario-select").selectOption(scenario);
+    }
+  });
   await expect(page.locator("#scenario-select")).toHaveValue(scenario);
   await expect(page.locator("#step-value")).toHaveText("0");
   await expect(page.locator("#transition-value")).toHaveText("—");
@@ -355,8 +362,6 @@ export async function assertFrameIdentity(page, expected) {
     expected.view === "pov" ? "agent_pov" : "researcher",
   );
   await expect(page.locator("html")).toHaveAttribute("data-preset", expected.preset);
-  const revision = await currentRevision(page);
-  expect(Number.isInteger(revision) && revision >= 0).toBe(true);
 }
 
 /**
@@ -1043,8 +1048,6 @@ export async function assertStablePresentationFrame(
     lifecycleIds: expectedSuppressedLifecycleIds,
   });
   await assertVisibleDecimalPrecision(page);
-  const revision = await currentRevision(page);
-  expect(Number.isInteger(revision) && revision >= 0).toBe(true);
   return commandCountBeforePresentation;
 }
 

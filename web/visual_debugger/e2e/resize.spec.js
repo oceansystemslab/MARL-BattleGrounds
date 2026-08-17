@@ -311,7 +311,8 @@ test("supported resize preserves real installed authority at 960px", async ({
   expect(
     agentKeysBefore.every((key) => typeof key === "string" && key.length > 0),
   ).toBe(true);
-  const revisionBefore = await page.locator("#revision-value").textContent();
+  const stepBefore = await page.locator("#step-value").textContent();
+  const transitionBefore = await page.locator("#transition-value").textContent();
   const initial = await responsiveSnapshot(page);
   expect(Math.abs(initial.viewBoxWidth - initial.battlefieldClientWidth)).toBeLessThan(
     1,
@@ -354,7 +355,8 @@ test("supported resize preserves real installed authority at 960px", async ({
         agents.map((agent) => agent.getAttribute("data-presentation-key")),
       ),
   ).toEqual(agentKeysBefore);
-  await expect(page.locator("#revision-value")).toHaveText(revisionBefore ?? "");
+  await expect(page.locator("#step-value")).toHaveText(stepBefore ?? "");
+  await expect(page.locator("#transition-value")).toHaveText(transitionBefore ?? "");
   await expect(focusedControl).toBeFocused();
   expect(commandRequests).toBe(0);
 });

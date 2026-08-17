@@ -22,6 +22,7 @@ from pydantic_core import PydanticSerializationError
 from marl_battlegrounds.evaluation.models import (
     EvaluationEpisodeContextV1,
     EvaluationTransitionV1,
+    StaticMechanicsCatalogV1,
 )
 from marl_battlegrounds.evaluation.wire_shapes import (
     NUM_MOVE_ACTIONS_V1,
@@ -152,6 +153,244 @@ _AURA_SOURCE_CLASS_BY_ID_V1 = {
     "mage_damage_amplification": 1,
     "warrior_damage_mitigation": 2,
 }
+AUTHORIZED_CLASS_DOCUMENTATION_CATALOG_FINGERPRINT_V1 = (
+    "7e5306209ecc91f34b0dee0b23d0e0049deb142e8a3c8877aff168597c6462a6"
+)
+AUTHORIZED_CLASS_DOCUMENTATION_PROFILE_ID_V1 = (
+    "marl_battlegrounds.class_documentation.canonical_v1"
+)
+
+_CANONICAL_CLASS_DOCUMENTATION_ROWS_V1: tuple[tuple[object, ...], ...] = (
+    (
+        1,
+        "Mage",
+        80.0,
+        0.5,
+        1.0,
+        6.0,
+        "enemy",
+        3.0,
+        13.0,
+        0.0,
+        "target_none",
+        0.0,
+        30,
+        0.0,
+        0.0,
+        5,
+        0.03999999910593033,
+    ),
+    (
+        2,
+        "Warrior",
+        200.0,
+        0.5,
+        1.0,
+        6.0,
+        "enemy",
+        1.5,
+        8.0,
+        0.0,
+        "enemy",
+        5.75,
+        30,
+        20.0,
+        0.0,
+        5,
+        0.03999999910593033,
+    ),
+    (
+        3,
+        "Hunter",
+        100.0,
+        0.5,
+        1.0,
+        6.5,
+        "enemy",
+        3.5,
+        6.0,
+        0.0,
+        "enemy",
+        3.0,
+        30,
+        10.0,
+        0.0,
+        5,
+        0.03999999910593033,
+    ),
+    (
+        4,
+        "Rogue",
+        100.0,
+        0.5,
+        1.2999999523162842,
+        6.0,
+        "enemy",
+        1.5,
+        12.0,
+        0.0,
+        "enemy",
+        1.5,
+        30,
+        36.0,
+        0.0,
+        3,
+        0.03999999910593033,
+    ),
+    (
+        5,
+        "Priest",
+        100.0,
+        0.5,
+        1.0,
+        6.0,
+        "ally",
+        3.0,
+        0.0,
+        8.0,
+        "ally",
+        5.75,
+        30,
+        0.0,
+        200.0,
+        5,
+        0.03999999910593033,
+    ),
+)
+
+_CANONICAL_STATUS_DOCUMENTATION_ROWS_V1: tuple[tuple[object, ...], ...] = (
+    (
+        0,
+        "warrior_charge_slow",
+        "slow",
+        2,
+        "ultimate",
+        5,
+        "movement_multiplier",
+        0.5,
+        "maximum_remaining_duration",
+        False,
+    ),
+    (
+        1,
+        "hunter_basic_slow",
+        "slow",
+        3,
+        "basic",
+        1,
+        "movement_multiplier",
+        0.85,
+        "maximum_remaining_duration",
+        False,
+    ),
+    (
+        2,
+        "rogue_poison_slow",
+        "slow",
+        4,
+        "ultimate",
+        5,
+        "movement_multiplier",
+        0.5,
+        "maximum_remaining_duration",
+        False,
+    ),
+    (
+        3,
+        "warrior_charge_stun",
+        "stun",
+        2,
+        "ultimate",
+        1,
+        "none",
+        None,
+        "maximum_remaining_duration",
+        False,
+    ),
+    (
+        4,
+        "hunter_trap_stun",
+        "stun",
+        3,
+        "ultimate",
+        4,
+        "none",
+        None,
+        "maximum_remaining_duration",
+        True,
+    ),
+    (
+        5,
+        "rogue_poison_stun",
+        "stun",
+        4,
+        "ultimate",
+        1,
+        "none",
+        None,
+        "maximum_remaining_duration",
+        False,
+    ),
+    (
+        6,
+        "rogue_poison_anti_heal",
+        "anti_heal",
+        4,
+        "ultimate",
+        4,
+        "healing_multiplier",
+        0.5,
+        "maximum_remaining_duration",
+        False,
+    ),
+    (
+        7,
+        "mage_burst_damage_amplification",
+        "damage_amplification",
+        1,
+        "ultimate",
+        5,
+        "damage_multiplier",
+        1.5,
+        "maximum_remaining_duration",
+        False,
+    ),
+    (
+        8,
+        "priest_blessing_of_freedom_movement_floor",
+        "movement_floor",
+        5,
+        "basic",
+        1,
+        "movement_floor",
+        0.85,
+        "maximum_remaining_duration",
+        False,
+    ),
+)
+
+_CANONICAL_AURA_DOCUMENTATION_ROWS_V1: tuple[tuple[object, ...], ...] = (
+    (
+        "mage_damage_amplification",
+        1,
+        "same_team",
+        2.0,
+        1.15,
+        "multiply_then_clamp",
+        "ceiling",
+        1.3224999999999998,
+    ),
+    (
+        "warrior_damage_mitigation",
+        2,
+        "same_team",
+        2.0,
+        0.85,
+        "multiply_then_clamp",
+        "floor",
+        0.7224999999999999,
+    ),
+)
 
 
 def _require_python_int(value: int, *, name: str, minimum: int = 0) -> None:
@@ -495,6 +734,194 @@ class AuthorizedClassMechanicsV1:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class AuthorizedClassDocumentationProfileAvailableV1:
+    """Certification that canonical class guide copy is exact for this catalog."""
+
+    __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+
+    availability_kind: Literal["available"]
+    profile_id: Literal["marl_battlegrounds.class_documentation.canonical_v1"]
+
+    def __post_init__(self) -> None:
+        if self.availability_kind != "available":
+            raise ValueError("unknown available class-documentation discriminator.")
+        if self.profile_id != AUTHORIZED_CLASS_DOCUMENTATION_PROFILE_ID_V1:
+            raise ValueError("unknown class-documentation profile identity.")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AuthorizedClassDocumentationProfileUnavailableV1:
+    """Fail-closed denial of canonical class guide copy for this catalog."""
+
+    __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+
+    availability_kind: Literal["unavailable"]
+
+    def __post_init__(self) -> None:
+        if self.availability_kind != "unavailable":
+            raise ValueError("unknown unavailable class-documentation discriminator.")
+
+
+type AuthorizedClassDocumentationProfileV1 = Annotated[
+    AuthorizedClassDocumentationProfileAvailableV1
+    | AuthorizedClassDocumentationProfileUnavailableV1,
+    Field(discriminator="availability_kind"),
+]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AuthorizedClassMechanicsV2(AuthorizedClassMechanicsV1):
+    """Exact class mechanics plus one catalog-certified documentation profile."""
+
+    mechanics_version: Literal[2]
+    documentation_profile: AuthorizedClassDocumentationProfileV1
+
+    def __post_init__(self) -> None:
+        AuthorizedClassMechanicsV1.__post_init__(self)
+        if self.mechanics_version != 2:
+            raise ValueError("unknown authorized class mechanics version.")
+        if type(self.documentation_profile) not in (
+            AuthorizedClassDocumentationProfileAvailableV1,
+            AuthorizedClassDocumentationProfileUnavailableV1,
+        ):
+            raise ValueError("documentation_profile must use an exact variant.")
+
+
+type AuthorizedClassMechanics = AuthorizedClassMechanicsV1 | AuthorizedClassMechanicsV2
+
+
+def _catalog_has_complete_class_documentation_profile_v1(
+    catalog: StaticMechanicsCatalogV1,
+) -> bool:
+    class_rows = tuple(
+        (
+            row.class_id,
+            row.class_name,
+            row.maximum_health,
+            row.body_radius,
+            row.base_movement_speed,
+            row.observation_radius,
+            row.basic_target_mode,
+            row.basic_interaction_radius,
+            row.basic_raw_damage,
+            row.basic_raw_healing,
+            row.ultimate_target_mode,
+            row.ultimate_interaction_radius,
+            row.ultimate_cooldown_steps,
+            row.ultimate_raw_damage,
+            row.ultimate_raw_healing,
+            row.out_of_combat_delay_steps,
+            row.out_of_combat_health_regeneration_fraction_per_step,
+        )
+        for row in catalog.class_mechanics[1:]
+    )
+    status_rows = tuple(
+        (
+            row.status_channel_id,
+            row.status_id,
+            row.family,
+            row.source_class_id,
+            row.source_action_component,
+            row.duration_steps,
+            row.magnitude_kind,
+            row.magnitude,
+            row.application_update,
+            row.breaks_on_positive_damage,
+        )
+        for row in catalog.status_channels
+    )
+    aura_rows = tuple(
+        (
+            row.aura_id,
+            row.emitter_class_id,
+            row.beneficiary_relation,
+            row.radius,
+            row.per_emitter_multiplier,
+            row.stacking_rule,
+            row.clamp_kind,
+            row.clamp_value,
+        )
+        for row in catalog.aura_mechanics
+    )
+    if (
+        catalog.class_name_by_id
+        != ("Neutral", "Mage", "Warrior", "Hunter", "Rogue", "Priest")
+        or catalog.health_unit != "hit_points"
+        or catalog.spatial_unit != "world_units"
+        or catalog.duration_unit != "transition_ticks"
+        or catalog.global_slow_floor != 0.2
+        or class_rows != _CANONICAL_CLASS_DOCUMENTATION_ROWS_V1
+        or status_rows != _CANONICAL_STATUS_DOCUMENTATION_ROWS_V1
+        or aura_rows != _CANONICAL_AURA_DOCUMENTATION_ROWS_V1
+    ):
+        return False
+
+    by_id = {row.class_id: row for row in catalog.class_mechanics[1:]}
+    positive_basic_damage = sorted(
+        (row.basic_raw_damage, row.class_id)
+        for row in by_id.values()
+        if row.basic_raw_damage > 0.0
+    )
+    stun_duration_by_class = {
+        row.source_class_id: row.duration_steps
+        for row in catalog.status_channels
+        if row.family == "stun"
+    }
+    return (
+        max(by_id.values(), key=lambda row: row.basic_raw_damage).class_id == 1
+        and sum(
+            row.basic_raw_damage == by_id[1].basic_raw_damage for row in by_id.values()
+        )
+        == 1
+        and min(by_id.values(), key=lambda row: row.maximum_health).class_id == 1
+        and sum(row.maximum_health == by_id[1].maximum_health for row in by_id.values())
+        == 1
+        and max(by_id.values(), key=lambda row: row.maximum_health).class_id == 2
+        and positive_basic_damage[1][1] == 2
+        and max(by_id.values(), key=lambda row: row.base_movement_speed).class_id == 4
+        and sum(
+            row.base_movement_speed == by_id[4].base_movement_speed
+            for row in by_id.values()
+        )
+        == 1
+        and max(stun_duration_by_class, key=stun_duration_by_class.__getitem__) == 3
+        and positive_basic_damage[0][1] == 3
+        and by_id[5].basic_raw_healing > 0.0
+        and by_id[5].ultimate_raw_healing > 0.0
+        and by_id[5].basic_raw_damage == 0.0
+        and by_id[5].ultimate_raw_damage == 0.0
+        and all(
+            row.basic_raw_healing == 0.0 and row.ultimate_raw_healing == 0.0
+            for class_id, row in by_id.items()
+            if class_id != 5
+        )
+    )
+
+
+def authorized_class_documentation_profile_v1(
+    catalog: StaticMechanicsCatalogV1,
+) -> AuthorizedClassDocumentationProfileV1:
+    """Certify the one frozen catalog profile; fail closed for historical peers."""
+    if type(catalog) is not StaticMechanicsCatalogV1:
+        raise TypeError("catalog must be the exact StaticMechanicsCatalogV1 root.")
+    validated = StaticMechanicsCatalogV1.model_validate(
+        catalog.model_dump(mode="python")
+    )
+    if (
+        validated.canonical_digest_sha256
+        == AUTHORIZED_CLASS_DOCUMENTATION_CATALOG_FINGERPRINT_V1
+        and _catalog_has_complete_class_documentation_profile_v1(validated)
+    ):
+        return AuthorizedClassDocumentationProfileAvailableV1(
+            availability_kind="available",
+            profile_id=AUTHORIZED_CLASS_DOCUMENTATION_PROFILE_ID_V1,
+        )
+    return AuthorizedClassDocumentationProfileUnavailableV1(
+        availability_kind="unavailable"
+    )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class AuthorizedRespawnWaveV1:
     """One strict current team lifecycle countdown."""
 
@@ -539,6 +966,55 @@ class AuthorizedSpawnShieldMechanicsAvailableV1:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class AuthorizedSpawnShieldMechanicsAvailableV2:
+    """Exact public Spawn Shield semantics for canonical documentation copy."""
+
+    __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+
+    availability_kind: Literal["available_v2"]
+    configured_duration_steps: int
+    movement_speed: float
+    protection_effect: Literal["invulnerable"]
+    visibility_effect: Literal["concealed_from_opponents"]
+    targetability_effect: Literal["untargetable"]
+    action_scope: Literal["movement_only"]
+    aura_effect: Literal["excluded_as_emitter_and_beneficiary"]
+    agent_collision_effect: Literal["phased_until_expiring_endpoint_rejoin"]
+    ordinary_application_mechanism: Literal["end_of_transition_respawn_lifecycle"]
+
+    def __post_init__(self) -> None:
+        if self.availability_kind != "available_v2":
+            raise ValueError("unknown V2 spawn-shield discriminator.")
+        _require_python_int(
+            self.configured_duration_steps,
+            name="configured_duration_steps",
+        )
+        _require_finite(self.movement_speed, name="movement_speed", minimum=0.0)
+        if self.movement_speed <= 0.0:
+            raise ValueError("spawn-shield movement speed must be positive.")
+        expected = (
+            "invulnerable",
+            "concealed_from_opponents",
+            "untargetable",
+            "movement_only",
+            "excluded_as_emitter_and_beneficiary",
+            "phased_until_expiring_endpoint_rejoin",
+            "end_of_transition_respawn_lifecycle",
+        )
+        actual = (
+            self.protection_effect,
+            self.visibility_effect,
+            self.targetability_effect,
+            self.action_scope,
+            self.aura_effect,
+            self.agent_collision_effect,
+            self.ordinary_application_mechanism,
+        )
+        if actual != expected:
+            raise ValueError("spawn-shield documentation semantics are not canonical.")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class AuthorizedSpawnShieldMechanicsUnavailableV1:
     """Explicit absence of recorded spawn-shield configuration facts."""
 
@@ -553,6 +1029,13 @@ class AuthorizedSpawnShieldMechanicsUnavailableV1:
 
 type AuthorizedSpawnShieldMechanicsV1 = Annotated[
     AuthorizedSpawnShieldMechanicsAvailableV1
+    | AuthorizedSpawnShieldMechanicsUnavailableV1,
+    Field(discriminator="availability_kind"),
+]
+
+type AuthorizedSpawnShieldMechanics = Annotated[
+    AuthorizedSpawnShieldMechanicsAvailableV1
+    | AuthorizedSpawnShieldMechanicsAvailableV2
     | AuthorizedSpawnShieldMechanicsUnavailableV1,
     Field(discriminator="availability_kind"),
 ]
@@ -869,8 +1352,8 @@ class AuthorizedBattlefieldSceneV1:
     map: AuthorizedMapV1
     agents: tuple[AuthorizedAgentV1, ...]
     aura_fields: tuple[AuthorizedAuraFieldV1, ...]
-    class_mechanics: tuple[AuthorizedClassMechanicsV1, ...]
-    spawn_shield_mechanics: AuthorizedSpawnShieldMechanicsV1
+    class_mechanics: tuple[AuthorizedClassMechanics, ...]
+    spawn_shield_mechanics: AuthorizedSpawnShieldMechanics
     spawn_pads: tuple[AuthorizedSpawnPadV1, ...]
     respawn_waves: tuple[AuthorizedRespawnWaveV1, ...]
 
@@ -885,13 +1368,26 @@ class AuthorizedBattlefieldSceneV1:
             name="aura_fields",
             item_type=AuthorizedAuraFieldV1,
         )
-        _require_exact_tuple(
-            self.class_mechanics,
-            name="class_mechanics",
-            item_type=AuthorizedClassMechanicsV1,
-        )
+        if type(self.class_mechanics) is not tuple or any(
+            type(row) not in (AuthorizedClassMechanicsV1, AuthorizedClassMechanicsV2)
+            for row in self.class_mechanics
+        ):
+            raise ValueError("class_mechanics must contain exact V1 or V2 rows.")
+        mechanics_versions = {type(row) for row in self.class_mechanics}
+        if len(mechanics_versions) > 1:
+            raise ValueError("class_mechanics cannot mix V1 and V2 rows.")
+        if mechanics_versions == {AuthorizedClassMechanicsV2}:
+            profiles = {
+                cast(AuthorizedClassMechanicsV2, row).documentation_profile
+                for row in self.class_mechanics
+            }
+            if len(profiles) > 1:
+                raise ValueError(
+                    "V2 class mechanics must share one documentation profile."
+                )
         if type(self.spawn_shield_mechanics) not in (
             AuthorizedSpawnShieldMechanicsAvailableV1,
+            AuthorizedSpawnShieldMechanicsAvailableV2,
             AuthorizedSpawnShieldMechanicsUnavailableV1,
         ):
             raise ValueError("spawn_shield_mechanics must use an exact variant.")
@@ -1091,11 +1587,16 @@ class AuthorizedBattlefieldSceneV1:
                 or pad.spawn_shield_remaining != assigned.spawn_shield_remaining
             ):
                 raise ValueError("spawn pad must join its authorized assignee.")
-        if (
-            type(self.spawn_shield_mechanics)
-            is AuthorizedSpawnShieldMechanicsAvailableV1
+        if type(self.spawn_shield_mechanics) in (
+            AuthorizedSpawnShieldMechanicsAvailableV1,
+            AuthorizedSpawnShieldMechanicsAvailableV2,
         ):
-            configured_duration = self.spawn_shield_mechanics.configured_duration_steps
+            available_shield = cast(
+                AuthorizedSpawnShieldMechanicsAvailableV1
+                | AuthorizedSpawnShieldMechanicsAvailableV2,
+                self.spawn_shield_mechanics,
+            )
+            configured_duration = available_shield.configured_duration_steps
             if any(
                 row.spawn_shield_remaining > configured_duration for row in self.agents
             ) or any(
@@ -2345,8 +2846,10 @@ def _authorized_class_aura_mechanic(
 
 def _authorized_class_mechanics(
     mechanics: ClassMechanicsSceneV2,
-) -> AuthorizedClassMechanicsV1:
-    return AuthorizedClassMechanicsV1(
+    *,
+    documentation_profile: AuthorizedClassDocumentationProfileV1,
+) -> AuthorizedClassMechanicsV2:
+    return AuthorizedClassMechanicsV2(
         class_id=mechanics.class_id,
         class_name=mechanics.class_name,
         maximum_health=mechanics.maximum_health,
@@ -2372,6 +2875,8 @@ def _authorized_class_mechanics(
         aura_mechanics=tuple(
             _authorized_class_aura_mechanic(row) for row in mechanics.aura_mechanics
         ),
+        mechanics_version=2,
+        documentation_profile=documentation_profile,
     )
 
 
@@ -2532,6 +3037,9 @@ def _authorized_scene(
     if any(agent.class_id not in mechanics_by_class for agent in scene.agents):
         raise ValueError("each Oracle agent must join ordered class mechanics.")
     represented_class_ids = {row.class_id for row in scene.agents}
+    documentation_profile = authorized_class_documentation_profile_v1(
+        context.static_mechanics_catalog
+    )
     status_mechanics_by_channel = {
         status.status_channel: status
         for mechanics in scene.class_mechanics
@@ -2595,18 +3103,28 @@ def _authorized_scene(
             agents=agents,
             aura_fields=tuple(aura_fields),
             class_mechanics=tuple(
-                _authorized_class_mechanics(row)
+                _authorized_class_mechanics(
+                    row,
+                    documentation_profile=documentation_profile,
+                )
                 for row in scene.class_mechanics
                 if row.class_id in represented_class_ids
             ),
-            spawn_shield_mechanics=AuthorizedSpawnShieldMechanicsAvailableV1(
-                availability_kind="available",
+            spawn_shield_mechanics=AuthorizedSpawnShieldMechanicsAvailableV2(
+                availability_kind="available_v2",
                 configured_duration_steps=(
                     context.resolved_env_config.spawn_shield_duration_steps
                 ),
                 movement_speed=(
                     context.resolved_env_config.spawn_shield_movement_speed
                 ),
+                protection_effect="invulnerable",
+                visibility_effect="concealed_from_opponents",
+                targetability_effect="untargetable",
+                action_scope="movement_only",
+                aura_effect="excluded_as_emitter_and_beneficiary",
+                agent_collision_effect=("phased_until_expiring_endpoint_rejoin"),
+                ordinary_application_mechanism=("end_of_transition_respawn_lifecycle"),
             ),
             spawn_pads=tuple(spawn_pads),
             respawn_waves=tuple(
@@ -3385,6 +3903,8 @@ def build_replay_oracle_presentation_parts_v1(
 
 
 __all__ = [
+    "AUTHORIZED_CLASS_DOCUMENTATION_CATALOG_FINGERPRINT_V1",
+    "AUTHORIZED_CLASS_DOCUMENTATION_PROFILE_ID_V1",
     "AUTHORIZED_PRESENTATION_SCHEMA_VERSION",
     "AcceptedActionTupleV1",
     "AuthorizedAgentV1",
@@ -3393,13 +3913,20 @@ __all__ = [
     "AuthorizedAuraModifierV1",
     "AuthorizedBattlefieldSceneV1",
     "AuthorizedClassAuraMechanicV1",
+    "AuthorizedClassDocumentationProfileAvailableV1",
+    "AuthorizedClassDocumentationProfileUnavailableV1",
+    "AuthorizedClassDocumentationProfileV1",
+    "AuthorizedClassMechanics",
     "AuthorizedClassMechanicsV1",
+    "AuthorizedClassMechanicsV2",
     "AuthorizedClassStatusMechanicV1",
     "AuthorizedMapV1",
     "AuthorizedObstacleV1",
     "AuthorizedRespawnWaveV1",
     "AuthorizedSpawnPadV1",
+    "AuthorizedSpawnShieldMechanics",
     "AuthorizedSpawnShieldMechanicsAvailableV1",
+    "AuthorizedSpawnShieldMechanicsAvailableV2",
     "AuthorizedSpawnShieldMechanicsUnavailableV1",
     "AuthorizedSpawnShieldMechanicsV1",
     "AuthorizedStatusSourceV1",
@@ -3441,6 +3968,7 @@ __all__ = [
     "ReplayOraclePresentationPartsV1",
     "ReplayOutgoingInspectionV1",
     "SubmittedActionTupleV1",
+    "authorized_class_documentation_profile_v1",
     "build_oracle_authorized_scene_v1",
     "build_replay_oracle_presentation_parts_v1",
     "oracle_presentation_key_v1",

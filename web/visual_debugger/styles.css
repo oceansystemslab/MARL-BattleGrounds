@@ -107,8 +107,6 @@ button:focus-visible,
 select:focus-visible,
 summary:focus-visible,
 .battlefield:focus-visible,
-.roster-row:focus-visible,
-.pending-action-row:focus-visible,
 [data-tooltip-owner][tabindex="0"]:focus-visible {
   outline: 3px solid rgb(34 211 238 / 62%);
   outline-offset: 2px;
@@ -2374,21 +2372,8 @@ select {
   background: #0b1220;
 }
 
-.roster[data-compact="true"] .roster-row {
-  padding-block: 0.4rem;
-}
-
-.roster[data-compact="true"] .roster-actions button {
-  min-height: 1.9rem;
-  padding-block: 0.25rem;
-}
-
 .roster-row[data-team="team-b"] {
   border-left-color: var(--team-b);
-}
-
-.roster-row[data-controlled="true"] {
-  border-color: var(--accent);
 }
 
 .roster-row[data-selected="true"] {
@@ -2539,23 +2524,6 @@ select {
   background: transparent;
 }
 
-.roster-actions {
-  display: grid;
-  align-content: center;
-  gap: 0.25rem;
-}
-
-.roster-actions button {
-  min-height: 1.7rem;
-  padding: 0.2rem 0.45rem;
-  font-size: 0.7rem;
-}
-
-.roster-actions button[aria-pressed="true"] {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 18%, var(--surface-raised));
-}
-
 .fact-card {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2572,23 +2540,14 @@ select {
 }
 
 .selected-outgoing-target h3,
-.selected-legality h3,
-.action-result h3,
-.action-tuple h4 {
+.selected-legality h3 {
   margin: 0;
 }
 
 .selected-outgoing-target h3,
-.selected-legality h3,
-.action-result h3 {
+.selected-legality h3 {
   font-size: 0.78rem;
   letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.action-tuple h4 {
-  color: var(--text-muted);
-  font-size: 0.68rem;
   text-transform: uppercase;
 }
 
@@ -2603,9 +2562,7 @@ select {
   background: #0b1220;
 }
 
-.selected-legality__facts,
-.action-card__facts,
-.action-tuple__facts {
+.selected-legality__facts {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.4rem;
@@ -2651,12 +2608,80 @@ select {
   letter-spacing: 0.08em;
 }
 
-#accepted-card .action-card__label {
-  color: var(--success);
+.accepted-action-list {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
-.action-tuple__summary {
+.accepted-action-row {
+  display: grid;
+  gap: 0.45rem;
+  min-width: 0;
+  padding: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+  background: #0b1220;
+}
+
+.accepted-action-row__title,
+.accepted-action-tuple h4,
+.accepted-action-tuple__value {
   margin: 0;
+}
+
+.accepted-action-row__title {
+  font-size: 0.8rem;
+}
+
+.accepted-action-row__title[data-class="mage"] {
+  color: var(--class-mage);
+}
+
+.accepted-action-row__title[data-class="warrior"] {
+  color: var(--class-warrior);
+}
+
+.accepted-action-row__title[data-class="hunter"] {
+  color: var(--class-hunter);
+}
+
+.accepted-action-row__title[data-class="rogue"] {
+  color: var(--class-rogue);
+}
+
+.accepted-action-row__title[data-class="priest"] {
+  color: var(--class-priest);
+}
+
+.accepted-action-row__comparison {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.4rem;
+}
+
+.accepted-action-tuple {
+  min-width: 0;
+  padding: 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+}
+
+.accepted-action-tuple[data-kind="accepted"] {
+  border-color: color-mix(in srgb, var(--success) 55%, var(--border));
+}
+
+.accepted-action-tuple h4 {
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+}
+
+.accepted-action-tuple__value {
+  margin-top: 0.2rem;
+  font-size: 0.78rem;
   overflow-wrap: anywhere;
 }
 
@@ -2686,114 +2711,10 @@ select {
   background: #0b1220;
 }
 
-.pending-action-row[data-controlled="true"] {
-  border-color: var(--accent);
-  box-shadow: inset 3px 0 0 var(--accent);
-}
-
-.pending-action-row__heading,
-.pending-action-row__facts {
-  display: flex;
-  min-width: 0;
-  gap: 0.35rem;
-}
-
-.pending-action-row__heading {
-  align-items: center;
-  justify-content: space-between;
-}
-
-.pending-action-row__state,
-.pending-action-chip {
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  color: var(--text-muted);
-  font-size: 0.68rem;
-}
-
-.pending-action-row__state {
-  flex: 0 0 auto;
-  padding: 0.15rem 0.4rem;
-}
-
-.pending-action-row[data-controlled="true"] .pending-action-row__state {
-  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
-  color: var(--text);
-}
-
-.pending-action-row__summary {
-  min-width: 0;
-  margin: 0;
-  font-size: 0.82rem;
-  font-weight: 700;
-  overflow-wrap: anywhere;
-}
-
-.pending-action-row__facts {
-  flex-wrap: wrap;
-}
-
-.pending-action-chip {
-  max-width: 100%;
-  padding: 0.15rem 0.35rem;
-  overflow-wrap: anywhere;
-}
-
-.action-result {
-  display: grid;
-  gap: 0.5rem;
-  padding-top: 0.55rem;
-  border-top: 1px solid var(--border);
-}
-
-.action-result[data-combat-result="rejected"] {
-  border-top-color: var(--danger);
-}
-
-.action-result__comparison {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.45rem;
-}
-
-.action-tuple {
-  display: grid;
-  gap: 0.35rem;
-  min-width: 0;
-  padding: 0.45rem;
-  border: 1px solid var(--border);
-  border-radius: 0.4rem;
-  background: #0b1220;
-}
-
-.action-tuple[data-kind="accepted"] {
-  border-color: color-mix(in srgb, var(--success) 55%, var(--border));
-}
-
 .diagnostics-card {
   display: grid;
   gap: 0.35rem;
   margin-top: 0.55rem;
-}
-
-.diagnostic-fact {
-  display: flex;
-  justify-content: space-between;
-  gap: 0.6rem;
-  padding: 0.42rem 0.5rem;
-  border: 1px solid var(--border);
-  border-radius: 0.4rem;
-  background: #0b1220;
-  font-size: 0.72rem;
-}
-
-.diagnostic-fact span {
-  color: var(--text-muted);
-}
-
-.diagnostic-fact strong {
-  text-align: right;
-  overflow-wrap: anywhere;
 }
 
 .event-feed {
@@ -2811,10 +2732,6 @@ select {
   color: #cbd5e1;
   background: #0b1220;
   font-size: 0.76rem;
-}
-
-.event-item strong {
-  color: var(--text);
 }
 
 .visual-key summary,

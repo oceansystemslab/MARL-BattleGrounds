@@ -1847,6 +1847,24 @@ function validateAuthorizedScene(scene) {
   if (!structurallyEqual(mechanicsIds, representedClassIds)) {
     invalid("Scene class mechanics must exactly equal represented class order.");
   }
+  const mechanicsVersions = new Set(
+    classMechanics.map((mechanics) => (mechanics.mechanics_version === 2 ? 2 : 1)),
+  );
+  if (mechanicsVersions.size > 1) {
+    invalid("Scene class mechanics must be entirely V1 or entirely V2.");
+  }
+  if (
+    mechanicsVersions.has(2) &&
+    classMechanics.some(
+      (mechanics) =>
+        !structurallyEqual(
+          mechanics.documentation_profile,
+          classMechanics[0].documentation_profile,
+        ),
+    )
+  ) {
+    invalid("Scene V2 class mechanics must share one documentation profile.");
+  }
 
   const mechanicsById = new Map();
   const statusMechanicsByChannel = new Map();
@@ -2107,7 +2125,10 @@ function validateAuthorizedScene(scene) {
       }
     }
   }
-  if (scene.spawn_shield_mechanics.availability_kind === "available") {
+  if (
+    scene.spawn_shield_mechanics.availability_kind === "available" ||
+    scene.spawn_shield_mechanics.availability_kind === "available_v2"
+  ) {
     const duration = scene.spawn_shield_mechanics.configured_duration_steps;
     if (
       duration < 0 ||

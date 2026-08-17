@@ -436,7 +436,6 @@ test("canonical complete and partial artifacts join their frame-zero and capture
   await expect(page.locator("#replay-processing-badge")).toHaveText(
     "Authorized replay",
   );
-  await expect(page.locator("#replay-incoming-value")).toHaveText("Initial frame");
   await expect(page.locator("#battlefield")).toHaveAttribute("role", "group");
   await expect(page.locator("#battlefield")).toHaveAttribute("tabindex", "-1");
   const researcherHelp = await expectVisibleInteractiveHelpInventory(page);
@@ -563,7 +562,6 @@ test("replay reconnect rejects a valid live frame without crossing the viewer bo
   });
   const installedDom = {
     framePosition: await page.locator("#replay-frame-position").textContent(),
-    revision: await page.locator("#revision-value").textContent(),
     view: await page.locator("#view-select").inputValue(),
   };
 
@@ -603,9 +601,6 @@ test("replay reconnect rejects a valid live frame without crossing the viewer bo
   );
   await expect(page.locator("#replay-frame-position")).toHaveText(
     installedDom.framePosition ?? "",
-  );
-  await expect(page.locator("#revision-value")).toHaveText(
-    installedDom.revision ?? String(installedFrame.revision),
   );
   await expect(page.locator("#view-select")).toHaveValue(installedDom.view);
   await expect(page.locator("[data-live-only]:not([hidden])")).toHaveCount(0);

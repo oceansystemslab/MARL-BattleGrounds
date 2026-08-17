@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Iterator
 from dataclasses import asdict
 from pathlib import Path
 from struct import pack, unpack
@@ -40,7 +41,13 @@ from marl_battlegrounds.rendering.authorized_pov_scene import (
     pov_presentation_key_v1,
 )
 from marl_battlegrounds.rendering.authorized_presentation import (
+    AUTHORIZED_CLASS_DOCUMENTATION_CATALOG_FINGERPRINT_V1,
     AuthorizedBattlefieldSceneV1,
+    AuthorizedClassDocumentationProfileAvailableV1,
+    AuthorizedClassDocumentationProfileUnavailableV1,
+    AuthorizedClassMechanicsV2,
+    AuthorizedSpawnShieldMechanicsAvailableV2,
+    authorized_class_documentation_profile_v1,
 )
 from marl_battlegrounds.rendering.pov_scene import (
     build_actor_pov_analyzer_projection_v1,
@@ -170,6 +177,169 @@ def _catalog_with_unrepresented_hunter_damage(
     class_rows[3] = {**class_rows[3], "basic_raw_damage": value}
     payload["class_mechanics"] = tuple(class_rows)
     return _catalog_from_payload(payload)
+
+
+def _valid_documentation_catalog_leaf_mutations(
+    catalog: StaticMechanicsCatalogV1,
+) -> Iterator[tuple[str, StaticMechanicsCatalogV1]]:
+    """Yield every valid historical mutation of a documented mutable leaf."""
+    payload = catalog.model_dump(mode="python")
+    payload["global_slow_floor"] = catalog.global_slow_floor + 0.01
+    yield "global_slow_floor", _catalog_from_payload(payload)
+
+    class_float_fields = (
+        "maximum_health",
+        "body_radius",
+        "base_movement_speed",
+        "observation_radius",
+        "basic_interaction_radius",
+        "basic_raw_damage",
+        "basic_raw_healing",
+        "ultimate_interaction_radius",
+        "ultimate_raw_damage",
+        "ultimate_raw_healing",
+        "out_of_combat_health_regeneration_fraction_per_step",
+    )
+    for index, row in enumerate(catalog.class_mechanics):
+        for field_name in (
+            "class_name",
+            *class_float_fields,
+            "basic_target_mode",
+            "ultimate_target_mode",
+            "ultimate_cooldown_steps",
+            "out_of_combat_delay_steps",
+        ):
+            payload = catalog.model_dump(mode="python")
+            rows = list(cast(tuple[dict[str, object], ...], payload["class_mechanics"]))
+            changed = dict(rows[index])
+            if field_name == "class_name":
+                historical_name = f"{row.class_name} Historical"
+                value: object = historical_name
+                class_names = list(cast(tuple[str, ...], payload["class_name_by_id"]))
+                class_names[index] = historical_name
+                payload["class_name_by_id"] = tuple(class_names)
+            elif field_name == "basic_target_mode":
+                value = "ally" if row.basic_target_mode != "ally" else "enemy"
+            elif field_name == "ultimate_target_mode":
+                value = "ally" if row.ultimate_target_mode != "ally" else "enemy"
+            elif field_name in (
+                "ultimate_cooldown_steps",
+                "out_of_combat_delay_steps",
+            ):
+                value = cast(int, getattr(row, field_name)) + 1
+            else:
+                value = cast(float, getattr(row, field_name)) + 0.01
+            changed[field_name] = value
+            rows[index] = changed
+            payload["class_mechanics"] = tuple(rows)
+            yield (
+                f"class_mechanics[{index}].{field_name}",
+                _catalog_from_payload(payload),
+            )
+
+    for index, row in enumerate(catalog.status_channels):
+        for field_name in (
+            "status_id",
+            "family",
+            "source_class_id",
+            "source_action_component",
+            "duration_steps",
+            "magnitude_kind",
+            "magnitude",
+            "breaks_on_positive_damage",
+        ):
+            payload = catalog.model_dump(mode="python")
+            rows = list(cast(tuple[dict[str, object], ...], payload["status_channels"]))
+            changed = dict(rows[index])
+            if field_name == "status_id":
+                changed[field_name] = f"{row.status_id}_historical"
+            elif field_name == "family":
+                changed[field_name] = (
+                    "anti_heal" if row.family != "anti_heal" else "slow"
+                )
+            elif field_name == "source_class_id":
+                changed[field_name] = row.source_class_id % 5 + 1
+            elif field_name == "source_action_component":
+                changed[field_name] = (
+                    "basic" if row.source_action_component == "ultimate" else "ultimate"
+                )
+            elif field_name == "duration_steps":
+                changed[field_name] = row.duration_steps + 1
+            elif field_name == "magnitude_kind":
+                if row.magnitude_kind == "none":
+                    changed[field_name] = "movement_multiplier"
+                    changed["magnitude"] = 0.73
+                else:
+                    changed[field_name] = "none"
+                    changed["magnitude"] = None
+            elif field_name == "magnitude":
+                if row.magnitude is None:
+                    # A null magnitude is coupled to the literal `none` kind, so
+                    # the smallest valid historical mutation changes both leaves.
+                    changed["magnitude_kind"] = "movement_multiplier"
+                    changed[field_name] = 0.74
+                else:
+                    changed[field_name] = row.magnitude + 0.01
+            else:
+                changed[field_name] = not row.breaks_on_positive_damage
+            rows[index] = changed
+            payload["status_channels"] = tuple(rows)
+            yield (
+                f"status_channels[{index}].{field_name}",
+                _catalog_from_payload(payload),
+            )
+
+    for index, row in enumerate(catalog.aura_mechanics):
+        for field_name in (
+            "emitter_class_id",
+            "radius",
+            "per_emitter_multiplier",
+            "clamp_kind",
+            "clamp_value",
+        ):
+            payload = catalog.model_dump(mode="python")
+            rows = list(cast(tuple[dict[str, object], ...], payload["aura_mechanics"]))
+            changed = dict(rows[index])
+            if field_name == "emitter_class_id":
+                changed[field_name] = row.emitter_class_id % 5 + 1
+            elif field_name == "clamp_kind":
+                changed[field_name] = (
+                    "floor" if row.clamp_kind == "ceiling" else "ceiling"
+                )
+            else:
+                changed[field_name] = cast(float, getattr(row, field_name)) + 0.01
+            rows[index] = changed
+            payload["aura_mechanics"] = tuple(rows)
+            yield (
+                f"aura_mechanics[{index}].{field_name}",
+                _catalog_from_payload(payload),
+            )
+
+
+def _invalid_immutable_documentation_catalog_leaf_payloads(
+    catalog: StaticMechanicsCatalogV1,
+) -> Iterator[tuple[str, dict[str, object]]]:
+    """Yield literal-only or fixed-axis facts that have no valid historical peer."""
+    for field_name in ("health_unit", "spatial_unit", "duration_unit"):
+        payload = catalog.model_dump(mode="python")
+        payload[field_name] = "historical_unit"
+        yield field_name, payload
+
+    for section, index, field_name, value in (
+        ("class_mechanics", 1, "class_id", 2),
+        ("status_channels", 0, "status_channel_id", 1),
+        ("status_channels", 0, "application_update", "replace_duration"),
+        ("aura_mechanics", 0, "aura_id", "historical_aura"),
+        ("aura_mechanics", 0, "beneficiary_relation", "opponents"),
+        ("aura_mechanics", 0, "stacking_rule", "add_then_clamp"),
+    ):
+        payload = catalog.model_dump(mode="python")
+        rows = list(cast(tuple[dict[str, object], ...], payload[section]))
+        changed = dict(rows[index])
+        changed[field_name] = value
+        rows[index] = changed
+        payload[section] = tuple(rows)
+        yield f"{section}[{index}].{field_name}", payload
 
 
 def _scene_bytes(parts: NoSharedObsAuthorizedScenePartsV1) -> bytes:
@@ -1133,7 +1303,8 @@ def test_recipient_shield_lifecycle_and_action_mask_flow_without_substitution(
     )
     assert parts.next_decision_action_mask == action_mask
     shield = parts.scene.spawn_shield_mechanics
-    assert shield.availability_kind == "available"
+    assert type(shield) is AuthorizedSpawnShieldMechanicsAvailableV2
+    assert shield.availability_kind == "available_v2"
     assert shield.configured_duration_steps == 7
     assert shield.movement_speed == 2.75
     assert parts.scene.agents[0].spawn_shield_remaining == 5
@@ -1233,26 +1404,72 @@ def test_visible_class_outside_v1_domain_raises_value_error_not_index_error(
         )
 
 
-def test_unrepresented_class_catalog_mechanics_are_scene_byte_inert(
+def test_catalog_profile_certification_fails_closed_for_resealed_mutations(
     no_shared_trajectory: CapturedEvaluationTrajectory,
 ) -> None:
+    catalog = no_shared_trajectory.context.static_mechanics_catalog
+    assert catalog.canonical_digest_sha256 == (
+        AUTHORIZED_CLASS_DOCUMENTATION_CATALOG_FINGERPRINT_V1
+    )
+    available = authorized_class_documentation_profile_v1(catalog)
+    assert type(available) is AuthorizedClassDocumentationProfileAvailableV1
+
+    mutation_labels: set[str] = set()
+    for label, changed_catalog in _valid_documentation_catalog_leaf_mutations(catalog):
+        mutation_labels.add(label)
+        assert changed_catalog.canonical_digest_sha256 != (
+            AUTHORIZED_CLASS_DOCUMENTATION_CATALOG_FINGERPRINT_V1
+        ), label
+        assert type(authorized_class_documentation_profile_v1(changed_catalog)) is (
+            AuthorizedClassDocumentationProfileUnavailableV1
+        ), label
+    assert len(mutation_labels) == 1 + 6 * 16 + 9 * 8 + 2 * 5
+
+    # These remaining documented leaves are exact Literals or fixed ordered
+    # axes. They cannot form a valid historical catalog, so revalidation—not
+    # the profile selector—must reject even a correctly resealed payload.
+    immutable_labels: set[str] = set()
+    for (
+        label,
+        invalid_payload,
+    ) in _invalid_immutable_documentation_catalog_leaf_payloads(catalog):
+        immutable_labels.add(label)
+        invalid_payload["canonical_digest_sha256"] = canonical_digest_sha256(
+            invalid_payload,
+            exclude={"canonical_digest_sha256"},
+        )
+        with pytest.raises(ValidationError):
+            StaticMechanicsCatalogV1.model_validate(invalid_payload)
+    assert len(immutable_labels) == 9
+
     source = _current_slice(no_shared_trajectory, global_slot=0)
     original = build_no_shared_obs_authorized_scene_v1(
         source,
-        public_catalog=no_shared_trajectory.context.static_mechanics_catalog,
+        public_catalog=catalog,
         authority_session_id="unrepresented-session",
     )
     assert 3 not in {row.class_id for row in original.scene.class_mechanics}
-    changed_catalog = _catalog_with_unrepresented_hunter_damage(
-        no_shared_trajectory.context.static_mechanics_catalog,
-        123.25,
-    )
+    changed_catalog = _catalog_with_unrepresented_hunter_damage(catalog, 123.25)
     changed = build_no_shared_obs_authorized_scene_v1(
         source,
         public_catalog=changed_catalog,
         authority_session_id="unrepresented-session",
     )
-    assert _scene_bytes(changed) == _scene_bytes(original)
+    assert all(
+        type(row) is AuthorizedClassMechanicsV2
+        and type(row.documentation_profile)
+        is AuthorizedClassDocumentationProfileAvailableV1
+        for row in original.scene.class_mechanics
+    )
+    assert all(
+        type(row) is AuthorizedClassMechanicsV2
+        and type(row.documentation_profile)
+        is AuthorizedClassDocumentationProfileUnavailableV1
+        for row in changed.scene.class_mechanics
+    )
+    assert type(original.scene.spawn_shield_mechanics) is (
+        AuthorizedSpawnShieldMechanicsAvailableV2
+    )
 
 
 def test_per_slot_profile_overrides_remain_agent_facts_not_class_documentation(

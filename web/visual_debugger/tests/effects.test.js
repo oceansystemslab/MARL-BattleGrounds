@@ -172,8 +172,11 @@ test("scene has one Analysis battlefield branch and owns durable shield hooks", 
   assert.match(source, /showLegality: true/u);
   assert.match(source, /agent-spawn-shield__shell/u);
   assert.match(source, /agent-spawn-shield__ticks/u);
-  assert.match(source, /registerTooltipOwner\(nodes\.shieldRoot, explainSpawnShield/u);
-  assert.match(source, /Spawn Shield, invulnerable/u);
+  assert.match(source, /createSpawnShieldView\(agent, spawnShieldMechanics\)/u);
+  assert.match(
+    source,
+    /registerTooltipOwner\(nodes\.shieldRoot, spawnShieldView\.descriptor\)/u,
+  );
 });
 
 test("canonical fixture gives every V2 event one exact ordered disposition", async () => {

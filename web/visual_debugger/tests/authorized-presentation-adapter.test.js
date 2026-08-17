@@ -49,6 +49,11 @@ async function normalized(kind) {
   return await normalizeAuthorizedPresentationFrameV1(fixture.presentations[kind]);
 }
 
+/** @param {keyof typeof fixture.state_cases} kind */
+async function normalizedState(kind) {
+  return await normalizeAuthorizedPresentationFrameV1(fixture.state_cases[kind]);
+}
+
 /** @param {keyof typeof fixture.pairs} kind */
 async function normalizedPairPresentation(kind) {
   return await normalizeAuthorizedPresentationFrameV1(fixture.pairs[kind].presentation);
@@ -367,6 +372,10 @@ test("scene adapter preserves exact mask and owner-centered settled overlays", a
     const scene = authorizedPresentationSceneView(frame);
     assert.ok(inspection);
     assert.ok(scene);
+    assert.equal(scene.class_mechanics, frame.scene.class_mechanics);
+    assert.equal(scene.spawn_shield_mechanics, frame.scene.spawn_shield_mechanics);
+    assertRecursivelyFrozen(scene.class_mechanics);
+    assertRecursivelyFrozen(scene.spawn_shield_mechanics);
     assert.equal(
       scene.agents.every(
         (/** @type {Record<string, any>} */ agent) =>
@@ -870,15 +879,176 @@ test("Latest Events, Submitted/Accepted, Technical Frame, and inspection stay di
     true,
   );
   assert.equal(transition.length, 1);
-  assert.equal(transition[0], frame.latest_transition.action_rows[0]);
+  assert.deepEqual(Object.keys(transition[0]), [
+    "actor_title",
+    "actor_accent",
+    "submitted_action",
+    "accepted_action",
+  ]);
+  assert.match(
+    transition[0].actor_title,
+    /^Agent ID .+ · (?:Mage|Warrior|Hunter|Rogue|Priest) · Team [AB]$/u,
+  );
+  assert.notEqual(
+    transition[0].submitted_action,
+    frame.latest_transition.action_rows[0].submitted_action,
+  );
+  assert.notEqual(
+    transition[0].accepted_action,
+    frame.latest_transition.action_rows[0].accepted_action,
+  );
   assert.equal(inspection, frame.inspection);
   assert.deepEqual(
-    technical.map(({ label }) => label),
-    Object.keys(frame.technical_frame),
+    technical.map(({ id, label, value }) => [id, label, value]),
+    [
+      ["frame", "Frame", 1],
+      ["simulator_step", "Simulator step", 1],
+    ],
   );
   assert.equal(
     incoming.some(({ payload }) => payload === inspection),
     false,
+  );
+});
+
+test("Latest Transition is exact for all five leaves and empty at frame zero", async () => {
+  const laterCases = [
+    ["live_oracle", 5],
+    ["live_no_shared_obs_agent_pov", 1],
+    ["replay_oracle", 5],
+    ["replay_no_shared_obs_agent_pov", 1],
+    ["replay_shared_obs_agent_pov", 1],
+  ];
+  const exactKeys = [
+    "actor_title",
+    "actor_accent",
+    "submitted_action",
+    "accepted_action",
+  ];
+  for (const [kind, expectedCount] of laterCases) {
+    const rows = authorizedPresentationTransitionRows(
+      await normalized(/** @type {keyof typeof fixture.presentations} */ (kind)),
+    );
+    assert.equal(rows.length, expectedCount, String(kind));
+    for (const row of rows) {
+      assert.deepEqual(Object.keys(row), exactKeys, String(kind));
+      assert.match(
+        row.actor_title,
+        /^Agent ID .+ · (?:Mage|Warrior|Hunter|Rogue|Priest) · Team [AB]$/u,
+      );
+      assert.match(row.actor_accent, /^(?:mage|warrior|hunter|rogue|priest)$/u);
+      assert.equal(Object.isFrozen(row.submitted_action), true);
+      assert.equal(Object.isFrozen(row.accepted_action), true);
+      assert.deepEqual(Object.keys(row.submitted_action), [
+        "move_action",
+        "target_action",
+        "use_ultimate_action",
+      ]);
+      assert.deepEqual(Object.keys(row.accepted_action), [
+        "move_action",
+        "target_action",
+        "use_ultimate_action",
+      ]);
+    }
+    const serialized = JSON.stringify(rows);
+    for (const forbidden of [
+      "mask",
+      "movement_accepted",
+      "combat_result",
+      "submission_kind",
+      "revision",
+      "generation",
+      "transition_id",
+      "presentation_key",
+      "public_agent_id",
+      "target_action_recipient_public_agent_id_by_id",
+    ]) {
+      assert.equal(serialized.includes(forbidden), false, `${kind}: ${forbidden}`);
+    }
+  }
+
+  for (const kind of [
+    "live_oracle_frame_zero",
+    "live_no_shared_frame_zero",
+    "replay_oracle_frame_zero",
+    "replay_no_shared_frame_zero",
+    "replay_shared_frame_zero",
+  ]) {
+    assert.deepEqual(
+      authorizedPresentationTransitionRows(
+        await normalizedState(/** @type {keyof typeof fixture.state_cases} */ (kind)),
+      ),
+      [],
+      String(kind),
+    );
+  }
+});
+
+test("Technical Frame projects the exact five-leaf CP4 allowlist", async () => {
+  const cases = [
+    [
+      "live_oracle",
+      [
+        ["frame", "Frame", 1],
+        ["simulator_step", "Simulator step", 1],
+      ],
+    ],
+    [
+      "live_no_shared_obs_agent_pov",
+      [
+        ["frame", "Frame", 1],
+        ["simulator_step", "Simulator step", 1],
+      ],
+    ],
+    [
+      "replay_oracle",
+      [
+        ["frame", "Frame", 1],
+        ["simulator_step", "Simulator step", 1],
+        ["ordinary_movement_distance_scale", "Ordinary movement distance scale", 1],
+      ],
+    ],
+    [
+      "replay_no_shared_obs_agent_pov",
+      [
+        ["frame", "Frame", 1],
+        ["simulator_step", "Simulator step", 1],
+      ],
+    ],
+    [
+      "replay_shared_obs_agent_pov",
+      [
+        ["frame", "Frame", 1],
+        ["simulator_step", "Simulator step", 1],
+      ],
+    ],
+  ];
+  for (const [kind, expected] of cases) {
+    const facts = authorizedPresentationTechnicalFacts(
+      await normalized(/** @type {keyof typeof fixture.presentations} */ (kind)),
+    );
+    assert.deepEqual(
+      facts.map(({ id, label, value }) => [id, label, value]),
+      expected,
+      String(kind),
+    );
+    assertRecursivelyFrozen(facts);
+    const serialized = JSON.stringify(facts);
+    for (const forbidden of [
+      "technical_kind",
+      "episode_id",
+      "incoming_transition_id",
+      "incoming_recipient_transition_id",
+      "artifact_digest_prefix",
+      "revision",
+      "generation",
+    ]) {
+      assert.equal(serialized.includes(forbidden), false, `${kind}: ${forbidden}`);
+    }
+  }
+  assert.deepEqual(
+    authorizedPresentationTechnicalFacts(fixture.presentations.replay_oracle),
+    [],
   );
 });
 
@@ -1020,16 +1190,27 @@ test("tooltip owner identities cannot be reused across presentation sessions", a
     explainOverflow([status], "status", second).id,
   );
   assert.notEqual(explainSpawnShield(first).id, explainSpawnShield(second).id);
-  assert.notEqual(
-    explainLegality(
-      { target_presentation_key: first.presentation_key, lane_0_available: true },
-      0,
-    ).id,
-    explainLegality(
-      { target_presentation_key: second.presentation_key, lane_0_available: true },
-      0,
-    ).id,
+  const firstLegality = explainLegality(
+    {
+      owner_presentation_key: first.presentation_key,
+      owner_public_agent_id: first.public_agent_id,
+      lane_0_available: true,
+    },
+    0,
+    first,
   );
+  const secondLegality = explainLegality(
+    {
+      owner_presentation_key: second.presentation_key,
+      owner_public_agent_id: second.public_agent_id,
+      lane_0_available: true,
+    },
+    0,
+    second,
+  );
+  assert.ok(firstLegality);
+  assert.ok(secondLegality);
+  assert.notEqual(firstLegality.id, secondLegality.id);
   assert.notEqual(
     explainPendingRoute({
       source_presentation_key: first.presentation_key,

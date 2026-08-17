@@ -138,6 +138,21 @@ test("every CP3 disclosure keeps its scientific content in one stable direct bod
   }
 });
 
+test("current, outgoing, and latest-transition surfaces remain available in both products", async () => {
+  const markup = await readFile(indexUrl, "utf8");
+  const pendingOpeningTag = markup.match(
+    /<details\b[^>]*\bid="pending-turn-details"[^>]*>/u,
+  );
+  assert.ok(pendingOpeningTag);
+  assert.doesNotMatch(pendingOpeningTag[0], /\bdata-live-only\b/u);
+  const latestTransitionOpeningTag = markup.match(
+    /<details\b[^>]*\bid="latest-transition-details"[^>]*>/u,
+  );
+  assert.ok(latestTransitionOpeningTag);
+  assert.doesNotMatch(latestTransitionOpeningTag[0], /\bdata-live-only\b/u);
+  assert.doesNotMatch(latestTransitionOpeningTag[0], /\bdata-replay-only\b/u);
+});
+
 test("product shell loads strict identity before the module and omits retired controls", async () => {
   const markup = await readFile(indexUrl, "utf8");
 
@@ -159,6 +174,8 @@ test("product shell loads strict identity before the module and omits retired co
     "motion-skip-button",
     "motion-status",
     "advance-script-button",
+    "revision-value",
+    "replay-incoming-value",
   ]) {
     assert.doesNotMatch(markup, new RegExp(`id="${retiredId}"`, "u"));
   }
@@ -166,6 +183,13 @@ test("product shell loads strict identity before the module and omits retired co
   assert.doesNotMatch(markup, /command-deck__shortcut/u);
   assert.doesNotMatch(markup, /<dt>(?:N|P|\[ \/ \])<\/dt>/u);
   assert.doesNotMatch(markup, /Previous scenario|Next scenario|Motion Off/u);
+  for (const id of ["replay-completion-badge", "replay-processing-badge"]) {
+    assert.match(
+      markup,
+      new RegExp(`<dd\\b(?=[^>]*\\bid="${id}")(?=[^>]*\\btabindex="0")[^>]*>`, "u"),
+    );
+  }
+  assert.doesNotMatch(markup, /<dt>Incoming<\/dt>|>Revision\s*</u);
 });
 
 test("browser production paths omit retired navigation and privileged display copy", async () => {

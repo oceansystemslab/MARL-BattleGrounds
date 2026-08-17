@@ -9,12 +9,13 @@ import {
   projectSemanticDescriptor,
   registerTooltipOwner,
   renderSemanticDescriptor,
+  semanticDescriptorText,
 } from "../src/tooltip.js";
 
 /**
  * @param {string} kind
  * @param {string} id
- * @param {{title?: string, summary?: string, anchor?: "element" | "pointer", tone?: string, accent?: string, rows?: unknown[], sections?: unknown[]}} [overrides]
+ * @param {{title?: string, summary?: string | null, anchor?: "element" | "pointer", tone?: string, accent?: string, rows?: unknown[], sections?: unknown[]}} [overrides]
  */
 function semanticDescriptor(kind, id, overrides = {}) {
   return createSemanticDescriptor({
@@ -23,7 +24,7 @@ function semanticDescriptor(kind, id, overrides = {}) {
     title: overrides.title ?? id,
     tone: overrides.tone ?? "neutral",
     accent: overrides.accent ?? "none",
-    summary: overrides.summary ?? `${id} summary`,
+    summary: overrides.summary === null ? null : (overrides.summary ?? `${id} summary`),
     rows: overrides.rows ?? [],
     sections: overrides.sections ?? [],
     metadata: { compact: true, full: true },
@@ -368,6 +369,172 @@ test("descriptor validation is exact while tone and accent values fail closed", 
       `${key} must reject an undefined value even when its key is present`,
     );
   }
+});
+
+test("nullable summaries require a visible row and fail closed after surface filtering", () => {
+  const base = {
+    kind: "range-observation",
+    id: "observation-range",
+    title: "Observation Range",
+    tone: "information",
+    accent: "hunter",
+    summary: null,
+    rows: [
+      {
+        label: "Radius",
+        value: "9 m",
+        metadata: { compact: true, full: true },
+      },
+    ],
+    sections: [],
+    metadata: { compact: true, full: true },
+    anchor: "element",
+  };
+  const descriptor = createSemanticDescriptor(base);
+  assert.equal(descriptor.summary, null);
+  assert.deepEqual(
+    semanticDescriptorText(projectSemanticDescriptor(descriptor, "compact")),
+    ["Observation Range", "Radius: 9 m"],
+  );
+  assert.deepEqual(
+    semanticDescriptorText(projectSemanticDescriptor(descriptor, "full")),
+    ["Observation Range", "Radius: 9 m"],
+  );
+
+  assert.throws(
+    () => createSemanticDescriptor({ ...base, rows: [] }),
+    /at least one semantic row is visible/u,
+  );
+  assert.throws(
+    () =>
+      createSemanticDescriptor({
+        ...base,
+        rows: [
+          {
+            ...base.rows[0],
+            metadata: { compact: false, full: false },
+          },
+        ],
+      }),
+    /at least one semantic row is visible/u,
+  );
+  assert.throws(
+    () => createSemanticDescriptor({ ...base, title: " " }),
+    /descriptor\.title must be a non-empty string/u,
+  );
+  assert.throws(
+    () => createSemanticDescriptor({ ...base, summary: "" }),
+    /descriptor\.summary must be a non-empty string/u,
+  );
+  assert.throws(
+    () => createSemanticDescriptor({ ...base, summary: undefined }),
+    /descriptor\.summary must be a non-empty string/u,
+  );
+
+  const compactOnly = createSemanticDescriptor({
+    ...base,
+    id: "compact-only-observation-range",
+    rows: [
+      {
+        ...base.rows[0],
+        metadata: { compact: true, full: false },
+      },
+    ],
+  });
+  assert.deepEqual(
+    semanticDescriptorText(projectSemanticDescriptor(compactOnly, "compact")),
+    ["Observation Range", "Radius: 9 m"],
+  );
+  assert.throws(
+    () => projectSemanticDescriptor(compactOnly, "full"),
+    /full projection contains at least one semantic row/u,
+  );
+});
+
+test("nullable-summary rendering omits its summary block and preserves accessible text", () => {
+  const descriptor = createSemanticDescriptor({
+    kind: "range-observation",
+    id: "rendered-observation-range",
+    title: "Observation Range",
+    tone: "information",
+    accent: "hunter",
+    summary: null,
+    rows: [
+      {
+        label: "Radius",
+        value: "9 m",
+        metadata: { compact: true, full: true },
+      },
+    ],
+    sections: [],
+    metadata: { compact: true, full: true },
+    anchor: "element",
+  });
+  const dom = fakeDom();
+  const title = dom.node("h2");
+  const details = dom.node("div");
+  renderSemanticDescriptor({
+    descriptor,
+    title: /** @type {HTMLElement} */ (/** @type {unknown} */ (title)),
+    details: /** @type {HTMLElement} */ (/** @type {unknown} */ (details)),
+    surface: "compact",
+  });
+  assert.equal(title.textContent, "Observation Range");
+  assert.deepEqual(dom.createdTags, ["dl", "dt", "dd"]);
+  assert.equal(dom.textTree(details), "Radius\n9 m");
+  assert.doesNotMatch(dom.textTree(details), /null/u);
+
+  const fallbackDocument = /** @type {Document} */ (
+    /** @type {unknown} */ ({ defaultView: null, documentElement: {} })
+  );
+  const fallbackTitle = fakeElement(fallbackDocument, {
+    left: 0,
+    top: 0,
+    right: 0,
+    bottom: 0,
+    width: 0,
+    height: 0,
+  });
+  const fallbackDetails = fakeElement(fallbackDocument, {
+    left: 0,
+    top: 0,
+    right: 0,
+    bottom: 0,
+    width: 0,
+    height: 0,
+  });
+  renderSemanticDescriptor({
+    descriptor,
+    title: fallbackTitle.element,
+    details: fallbackDetails.element,
+    surface: "compact",
+  });
+  assert.equal(fallbackTitle.element.textContent, "Observation Range");
+  assert.equal(fallbackDetails.element.textContent, "Observation Range\nRadius: 9 m");
+  assert.doesNotMatch(fallbackDetails.element.textContent, /null/u);
+
+  const owner = fakeElement(
+    /** @type {Document} */ (/** @type {unknown} */ (dom.ownerDocument)),
+    { left: 0, top: 0, right: 10, bottom: 10, width: 10, height: 10 },
+  );
+  Object.defineProperty(owner.element, "tagName", { value: "BUTTON" });
+  registerTooltipOwner(owner.element, descriptor);
+  assert.equal(
+    owner.attributes.get("aria-description"),
+    "Observation Range · Radius: 9 m",
+  );
+  assert.doesNotMatch(owner.attributes.get("aria-description") ?? "", /null/u);
+
+  const existing = semanticDescriptor("status", "existing-summary", {
+    title: "Existing title",
+    summary: "Existing summary",
+  });
+  assert.deepEqual(
+    semanticDescriptorText(projectSemanticDescriptor(existing, "compact")),
+    ["Existing summary"],
+  );
+  registerTooltipOwner(owner.element, existing);
+  assert.equal(owner.attributes.get("aria-description"), "Existing summary");
 });
 
 test("compact and full projections preserve descriptor order without recomputation", () => {
@@ -976,7 +1143,7 @@ test("delegated inspection reuses the registered descriptor and preserves native
     summary: "Now",
   });
   registerTooltipOwner(owner.element, descriptor);
-  /** @type {Array<{received: ReturnType<typeof createSemanticDescriptor>, context: Readonly<{owner: Element, trigger: Element | null}>}>} */
+  /** @type {Array<{received: object, context: Readonly<{owner: Element, trigger: Element | null}>}>} */
   const calls = [];
   const controller = createTooltipController({
     root: /** @type {HTMLElement} */ (/** @type {unknown} */ (harness.root)),
@@ -1020,7 +1187,7 @@ test("delegated inspection reuses the registered descriptor and preserves native
   }
 });
 
-test("inspectable false disables full inspection without disabling compact hover", () => {
+test("inspectable false preserves pointer, focus, and keyboard help without replacing persistent details", () => {
   const harness = controllerHarness();
   const owner = fakeElement(harness.ownerDocument, {
     left: 40,
@@ -1036,6 +1203,7 @@ test("inspectable false disables full inspection without disabling compact hover
     { inspectable: false },
   );
   let inspections = 0;
+  let persistentDetails = "Certified class documentation";
   const controller = createTooltipController({
     root: /** @type {HTMLElement} */ (/** @type {unknown} */ (harness.root)),
     tooltip: harness.tooltip.element,
@@ -1043,15 +1211,58 @@ test("inspectable false disables full inspection without disabling compact hover
     details: harness.details.element,
     onInspect() {
       inspections += 1;
+      persistentDetails = "Overwritten by compact help";
     },
   });
   try {
     harness.setHitElements([owner.element]);
     dispatchPointerMove(harness.rootTarget, 60, 60);
     assert.equal(harness.tooltip.element.hidden, false);
+    assert.equal(harness.title.element.textContent, "hover-only");
+    dispatchFocus(harness.rootTarget, "focusin", owner.element);
+    assert.equal(harness.tooltip.element.hidden, false);
+    assert.equal(harness.title.element.textContent, "hover-only");
+    const enter = dispatchAction(harness.rootTarget, "keydown", owner.element, "Enter");
+    const space = dispatchAction(harness.rootTarget, "keydown", owner.element, " ");
+    assert.equal(enter.defaultPrevented, false);
+    assert.equal(space.defaultPrevented, false);
     assert.equal(controller.inspect(owner.element), false);
     dispatchAction(harness.rootTarget, "click", owner.element);
     assert.equal(inspections, 0);
+    assert.equal(persistentDetails, "Certified class documentation");
+  } finally {
+    controller.destroy();
+  }
+});
+
+test("status, aura, range, and legality owners remain fully inspectable", () => {
+  const harness = controllerHarness();
+  const owner = fakeElement(harness.ownerDocument, {
+    left: 40,
+    top: 40,
+    right: 100,
+    bottom: 90,
+    width: 60,
+    height: 50,
+  });
+  /** @type {object[]} */
+  const inspected = [];
+  const controller = createTooltipController({
+    root: /** @type {HTMLElement} */ (/** @type {unknown} */ (harness.root)),
+    tooltip: harness.tooltip.element,
+    title: harness.title.element,
+    details: harness.details.element,
+    onInspect(descriptor) {
+      inspected.push(descriptor);
+    },
+  });
+  try {
+    for (const kind of ["status", "aura", "range", "legality"]) {
+      const descriptor = semanticDescriptor(kind, `inspect-${kind}`);
+      registerTooltipOwner(owner.element, descriptor);
+      assert.equal(controller.inspect(owner.element), true);
+      assert.equal(inspected.at(-1), descriptor);
+    }
   } finally {
     controller.destroy();
   }

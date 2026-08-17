@@ -318,9 +318,9 @@ test("scripted live Submit advances once, installs T0, and seals at completion",
   expect(transitionId.length).toBeGreaterThan(0);
   expect(presentation.latest_transition.incoming_transition_id).toBe(transitionId);
   await expect(page.locator("#transition-value")).toHaveText(transitionId);
-  await expect(page.locator("#accepted-card")).toHaveAttribute(
+  await expect(page.locator("#accepted-card")).not.toHaveAttribute(
     "data-transition-id",
-    transitionId,
+    /.+/u,
   );
   await expect(page.locator("#accepted-card .accepted-action-row")).toHaveCount(
     presentation.latest_transition.action_rows.length,

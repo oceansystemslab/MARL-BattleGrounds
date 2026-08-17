@@ -1,9 +1,14 @@
-import { formatDisplayNumber } from "./display.js";
 import {
-  auraPresentation,
-  classPresentation,
-  statusPresentation,
-} from "./semantic-vocabulary.js";
+  canonicalAgentIdentity,
+  exactAuthorizedAgentIdentityV1,
+} from "./agent-identity.js";
+import {
+  requiredClassDocumentationValueNamesV1,
+  resolveClassDocumentationV1,
+} from "./class-documentation.js";
+import { formatDisplayNumber } from "./display.js";
+import { auraPresentation, statusPresentation } from "./semantic-vocabulary.js";
+import { authorizedSourceAttributionV1 } from "./source-attribution.js";
 import {
   createSemanticDescriptor,
   projectSemanticDescriptor,
@@ -12,8 +17,8 @@ import {
 import {
   classTokenFromId,
   resolveVisualToken,
-  statusTokenIdFromCatalogId,
   teamTokenFromId,
+  ultimateTokenFromClassId,
 } from "./vocabulary.js";
 
 /**
@@ -28,14 +33,139 @@ import {
 const COMPACT_AND_FULL = Object.freeze({ compact: true, full: true });
 const FULL_ONLY = Object.freeze({ compact: false, full: true });
 
+const TECHNICAL_FACT_HELP = Object.freeze({
+  completion: Object.freeze({
+    title: "Completion",
+    summary:
+      "How the captured rollout ended. Rollout completion is independent of host-side processing success.",
+  }),
+  processing: Object.freeze({
+    title: "Processing",
+    summary:
+      "Whether host-side evaluation output was produced successfully. Processing does not change how the rollout ended.",
+  }),
+  frame: Object.freeze({
+    title: "Frame",
+    summary: "The zero-based authorized frame index represented by this presentation.",
+  }),
+  simulator_step: Object.freeze({
+    title: "Simulator step",
+    summary: "The simulator decision step represented by this authorized frame.",
+  }),
+  ordinary_movement_distance_scale: Object.freeze({
+    title: "Ordinary movement distance scale",
+    summary:
+      "The recorded multiplier applied to ordinary voluntary movement distance. Spawn Shield uses its separately authorized absolute movement speed.",
+  }),
+});
+
+export { canonicalAgentIdentity } from "./agent-identity.js";
+
+/**
+ * Return finite help for one installed operational or Technical Frame fact.
+ * Values stay on their owning visible nodes; this descriptor contains only
+ * durable explanatory copy and therefore cannot disclose a hidden completion
+ * reason, processing error, path, or transport generation.
+ *
+ * @param {unknown} factId
+ */
+export function explainTechnicalFact(factId) {
+  const key = typeof factId === "string" ? factId : "";
+  if (!Object.hasOwn(TECHNICAL_FACT_HELP, key)) {
+    throw new RangeError(`Unknown Technical Frame fact ${key || "<empty>"}.`);
+  }
+  const help =
+    TECHNICAL_FACT_HELP[/** @type {keyof typeof TECHNICAL_FACT_HELP} */ (key)];
+  return createSemanticDescriptor({
+    kind: "technical-help",
+    id: `technical-help:${key}`,
+    title: help.title,
+    tone: "information",
+    accent: "none",
+    summary: help.summary,
+    rows: [],
+    sections: [],
+    metadata: COMPACT_AND_FULL,
+    anchor: "element",
+  });
+}
+
 /** @param {unknown} value @returns {value is JsonRecord} */
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** @param {unknown} value @returns {JsonRecord[]} */
-function records(value) {
-  return Array.isArray(value) ? value.filter(isRecord) : [];
+/**
+ * Snapshot only named own enumerable data properties. Accessors are treated as
+ * unavailable, and a hostile Proxy fails closed without exposing a trap error
+ * to the tooltip or inspector consumer.
+ *
+ * @param {unknown} value
+ * @param {readonly string[]} keys
+ * @returns {Readonly<Record<string, unknown>> | null}
+ */
+function snapshotOwnDataFields(value, keys) {
+  try {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return null;
+    }
+    /** @type {Record<string, unknown>} */
+    const snapshot = Object.create(null);
+    for (const key of keys) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (
+        descriptor === undefined ||
+        !descriptor.enumerable ||
+        !Object.hasOwn(descriptor, "value")
+      ) {
+        snapshot[key] = undefined;
+        continue;
+      }
+      snapshot[key] = descriptor.value;
+    }
+    return Object.freeze(snapshot);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Snapshot one exact plain-data record without invoking accessors. This is the
+ * fail-closed boundary for mechanics discriminators: missing, extra, symbolic,
+ * inherited, accessor-backed, and hostile Proxy fields are all unavailable.
+ *
+ * @param {unknown} value
+ * @param {readonly string[]} keys
+ * @returns {Readonly<Record<string, unknown>> | null}
+ */
+function snapshotExactOwnDataFields(value, keys) {
+  try {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return null;
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return null;
+    const actualKeys = Reflect.ownKeys(value);
+    if (
+      actualKeys.length !== keys.length ||
+      actualKeys.some((key) => typeof key !== "string" || !keys.includes(key))
+    ) {
+      return null;
+    }
+    /** @type {Record<string, unknown>} */
+    const snapshot = Object.create(null);
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    for (const key of keys) {
+      const field = descriptors[key];
+      if (!field?.enumerable || !Object.hasOwn(field, "value")) {
+        return null;
+      }
+      snapshot[key] = field.value;
+    }
+    return Object.freeze(snapshot);
+  } catch {
+    return null;
+  }
 }
 
 /** @param {unknown} value */
@@ -80,18 +210,6 @@ function tickCount(value) {
   return count === null ? "Unavailable" : `${count} ${count === 1 ? "Tick" : "Ticks"}`;
 }
 
-/**
- * Neutral aggregate aura rows are serialized scientific truth, but they do not
- * describe an active visual effect. Suppress only the exact multiplicative
- * identity at presentation boundaries; near-neutral recorded values remain
- * visible without tolerance or rounding.
- *
- * @param {JsonRecord} modifier
- */
-function isNeutralAuraModifier(modifier) {
-  return finiteNumber(modifier.multiplier) === 1;
-}
-
 /** @param {JsonRecord} record */
 function semanticIdentity(record) {
   return (
@@ -102,6 +220,33 @@ function semanticIdentity(record) {
     text(record.public_agent_id) ??
     "unknown"
   );
+}
+
+/**
+ * Join one scientific record to one complete authorized scene identity using
+ * only its opaque presentation key and public ID. Slots, class guesses, DOM
+ * order, and raw-object fallback identity are deliberately excluded.
+ *
+ * @param {unknown} reference
+ * @param {unknown} owner
+ * @param {"" | "source_" | "owner_"} prefix
+ * @returns {ReturnType<typeof exactAuthorizedAgentIdentityV1>}
+ */
+function exactJoinedAuthorizedIdentity(reference, owner, prefix) {
+  const identity = exactAuthorizedAgentIdentityV1(owner);
+  if (identity === null) return null;
+  const fields = snapshotOwnDataFields(reference, [
+    `${prefix}presentation_key`,
+    `${prefix}public_agent_id`,
+  ]);
+  if (
+    fields === null ||
+    fields[`${prefix}presentation_key`] !== identity.presentationKey ||
+    fields[`${prefix}public_agent_id`] !== identity.publicAgentId
+  ) {
+    return null;
+  }
+  return identity;
 }
 
 /** @param {unknown} value */
@@ -139,7 +284,7 @@ function auraEffectPresentation(presentation, multiplier, scope) {
     return "Effect unavailable";
   }
   const difference = `${formatDisplayNumber(Math.abs(exact - 1) * 100)}%`;
-  const sourceScope = scope === "field" ? " per recorded emitter" : "";
+  const sourceScope = scope === "field" ? " per emitter" : "";
   if (presentation.effectKind === "damage_dealt") {
     return `${difference} ${exact >= 1 ? "more" : "less"} damage dealt${sourceScope}`;
   }
@@ -184,7 +329,7 @@ function statusMagnitudePresentation(magnitudeKind, magnitude) {
   }
   if (kind === "damage_multiplier") {
     return {
-      label: "Damage Effect",
+      label: "Damage Amplification Effect",
       value:
         exact >= 1
           ? `${absolutePercent} more damage dealt (×${formatDisplayNumber(exact)})`
@@ -226,7 +371,7 @@ function section(title, rows, summary = null, metadata = FULL_ONLY) {
  * @param {string} kind
  * @param {string} id
  * @param {string} title
- * @param {string} summary
+ * @param {string | null} summary
  * @param {Array<ReturnType<typeof row>>} rows
  * @param {Array<ReturnType<typeof section>>} [sections]
  * @param {{tone?: string, accent?: string, anchor?: "element" | "pointer"}} [options]
@@ -249,25 +394,14 @@ function descriptor(kind, id, title, summary, rows, sections = [], options = {})
 /**
  * @param {unknown} rawAgent
  * @param {{controlled?: boolean, selected?: boolean, reference?: boolean, inspected?: boolean, audience?: string}} [selection]
- * @param {unknown} [rawClassMechanics]
- * @param {ReadonlyArray<unknown>} [rawSourceAgents]
  * @returns {SemanticDescriptor}
  */
-export function explainAgent(
-  rawAgent,
-  selection = {},
-  rawClassMechanics = null,
-  rawSourceAgents = [],
-) {
+export function explainAgent(rawAgent, selection = {}) {
   if (selection.audience === "agent_pov") {
     return explainPovAgent(rawAgent, selection);
   }
-  const reducedAudience = selection.audience === "reduced_agent_pov";
   const agent = isRecord(rawAgent) ? rawAgent : {};
-  const mechanics = isRecord(rawClassMechanics) ? rawClassMechanics : null;
-  const classToken = classTokenFromId(agent.class_id, mechanics ?? agent);
-  const teamToken = teamTokenFromId(agent.team_id, agent);
-  const publicIdentity = publicAgentLabel(agent.public_agent_id);
+  const identity = canonicalAgentIdentity(agent);
   const currentHealth = finiteNumber(agent.current_health);
   const maxHealth =
     finiteNumber(agent.max_health) ?? finiteNumber(agent.maximum_health);
@@ -275,17 +409,8 @@ export function explainAgent(
     finiteNumber(agent.effective_movement_speed) ?? finiteNumber(agent.effective_speed);
   const cooldown =
     integer(agent.ultimate_cooldown_remaining) ?? integer(agent.ultimate_cooldown);
-  const profile = classPresentation(mechanics?.class_name ?? classToken.label);
-  const statuses = records(agent.statuses);
-  const modifiers = records(agent.aura_modifiers ?? agent.modifiers).filter(
-    (modifier) => !isNeutralAuraModifier(modifier),
-  );
-  const modifiersAvailable = Array.isArray(agent.aura_modifiers ?? agent.modifiers);
-  const spawnShieldRemaining = integer(agent.spawn_shield_remaining);
-  const nowRows = [
-    row("Identity", publicIdentity),
-    row("Class", classToken.label),
-    row("Team", teamToken.label),
+  const combatCountdown = integer(agent.steps_until_out_of_combat);
+  const currentRows = [
     row(
       "Health",
       currentHealth === null || maxHealth === null
@@ -296,7 +421,6 @@ export function explainAgent(
       "Effective Speed",
       effectiveSpeed === null ? "Unavailable" : formatDisplayNumber(effectiveSpeed),
     ),
-    row("Ultimate Name", profile.ultimateName),
     row(
       "Ultimate Status",
       cooldown === null
@@ -306,109 +430,23 @@ export function explainAgent(
           : `On cooldown (${tickCount(cooldown)})`,
     ),
     row(
-      "Spawn Shield",
-      spawnShieldRemaining === null
-        ? "Unavailable"
-        : spawnShieldRemaining > 0
-          ? `Invulnerable · ${tickCount(spawnShieldRemaining)} remaining`
-          : "Inactive",
+      "Combat Status",
+      combatCountdown === null ? "Unavailable" : combatCountdown > 0 ? "IC" : "OOC",
     ),
   ];
-  if (selection.controlled) {
-    nowRows.push(row("Selection", "Controlled actor"));
+  if (combatCountdown !== null && combatCountdown > 0) {
+    currentRows.push(row("Steps until OOC", tickCount(combatCountdown)));
   }
-  if (selection.selected) {
-    nowRows.push(row("Selection", "Selected target"));
-  }
-  if (selection.reference) {
-    nowRows.push(row("Selection", "Reference"));
-  }
-  if (selection.inspected) {
-    nowRows.push(row("Selection", "Inspected agent"));
-  }
-
-  const fullSections = [];
-  if (!reducedAudience && mechanics !== null) {
-    fullSections.push(
-      section(
-        "Class Role",
-        [
-          row("Role", profile.role, FULL_ONLY),
-          row("Strengths", profile.strengths, FULL_ONLY),
-          row("Limitations", profile.limitations, FULL_ONLY),
-          row("Teamwork", profile.teamwork, FULL_ONLY),
-          row("Counterplay", profile.counterplay, FULL_ONLY),
-        ],
-        null,
-      ),
-      section("Exact Class Mechanics", classMechanicsRows(mechanics), null),
-      ...classAuthoredMechanicSections(mechanics),
-    );
-  }
-
-  const combatCountdown = integer(agent.steps_until_out_of_combat);
-  const regenFraction = finiteNumber(
-    mechanics?.out_of_combat_health_regeneration_fraction_per_step,
-  );
-  fullSections.push(
-    section(
-      "Current State",
-      [
-        row(
-          "Life State",
-          text(agent.life_state) !== null
-            ? humanize(agent.life_state)
-            : typeof agent.alive === "boolean"
-              ? agent.alive
-                ? "Alive"
-                : "Corpse"
-              : "Unavailable",
-          FULL_ONLY,
-        ),
-        row(
-          "Combat State",
-          combatCountdown === null
-            ? "Unavailable"
-            : combatCountdown > 0
-              ? `In combat; ${tickCount(combatCountdown)} until out of combat`
-              : "Out of combat",
-          FULL_ONLY,
-        ),
-        row(
-          "Out-of-combat Regeneration",
-          regenFraction === null
-            ? "Unavailable"
-            : `${formatDisplayNumber(regenFraction * 100)}% of maximum health per Tick`,
-          FULL_ONLY,
-        ),
-        row("Persistent Statuses", String(statuses.length), FULL_ONLY),
-        row(
-          "Aggregate Aura Modifiers",
-          modifiersAvailable ? String(modifiers.length) : "Unavailable",
-          FULL_ONLY,
-        ),
-      ],
-      null,
-    ),
-    ...currentEffectSections(
-      agent,
-      statuses,
-      modifiers,
-      modifiersAvailable,
-      rawSourceAgents,
-      reducedAudience ? "agent_pov" : "researcher",
-    ),
-  );
   return descriptor(
     "agent",
     `agent:${semanticIdentity(agent)}`,
-    `${publicIdentity} · Now`,
-    `${classToken.label} on ${teamToken.label}; exact current normalized state.`,
-    nowRows,
-    fullSections,
+    identity.title,
+    null,
+    currentRows,
+    [],
     {
       tone: currentHealth === 0 ? "warning" : "information",
-      accent: classAccent(agent.class_id),
+      accent: identity.accent,
     },
   );
 }
@@ -418,18 +456,11 @@ export function explainAgent(
  * researcher mechanics or arbitrary extra fields cannot affect the result.
  *
  * @param {unknown} rawAgent
- * @param {{controlled?: boolean, selected?: boolean, inspected?: boolean}} [selection]
+ * @param {Record<string, unknown>} [_selection]
  * @returns {SemanticDescriptor}
  */
-export function explainPovAgent(rawAgent, selection = {}) {
+export function explainPovAgent(rawAgent, _selection = {}) {
   const input = isRecord(rawAgent) ? rawAgent : {};
-  const statuses = records(input.statuses).map((status) => ({
-    token_id: status.token_id ?? status.status_id,
-    duration: status.duration ?? status.remaining_duration,
-    status_feature_index: status.status_feature_index,
-    source_class_id: status.source_class_id,
-    source_evidence: status.source_evidence,
-  }));
   const reduced = {
     presentation_key: input.presentation_key,
     public_agent_id: input.public_agent_id,
@@ -440,267 +471,639 @@ export function explainPovAgent(rawAgent, selection = {}) {
     effective_movement_speed: input.effective_movement_speed,
     ultimate_cooldown_remaining: input.ultimate_cooldown_remaining,
     steps_until_out_of_combat: input.steps_until_out_of_combat,
-    spawn_shield_remaining: input.spawn_shield_remaining,
-    alive: input.alive ?? input.life_state === "alive",
-    statuses,
   };
-  return explainAgent(
-    reduced,
-    {
-      controlled: selection.controlled,
-      selected: selection.selected,
-      inspected: selection.inspected,
-      audience: "reduced_agent_pov",
-    },
-    null,
-  );
+  return explainAgent(reduced, { audience: "reduced_agent_pov" });
+}
+
+const SPAWN_SHIELD_V1_KEYS = Object.freeze([
+  "availability_kind",
+  "configured_duration_steps",
+  "movement_speed",
+]);
+const SPAWN_SHIELD_V2_KEYS = Object.freeze([
+  ...SPAWN_SHIELD_V1_KEYS,
+  "protection_effect",
+  "visibility_effect",
+  "targetability_effect",
+  "action_scope",
+  "aura_effect",
+  "agent_collision_effect",
+  "ordinary_application_mechanism",
+]);
+const SPAWN_SHIELD_UNAVAILABLE_KEYS = Object.freeze(["availability_kind"]);
+const SPAWN_SHIELD_V2_SUMMARY =
+  "While the spawn shield is active, this agent is protected, concealed from opponents, untargetable, excluded from aura effects, and limited to movement. It phases through agents until body collision resumes at the endpoint of its expiring transition.";
+
+/**
+ * @param {unknown} rawMechanics
+ * @returns {Readonly<{kind: "v1" | "v2" | "unavailable", values: Readonly<Record<string, unknown>> | null}>}
+ */
+function exactSpawnShieldMechanics(rawMechanics) {
+  const discriminator = snapshotOwnDataFields(rawMechanics, ["availability_kind"]);
+  if (discriminator?.availability_kind === "available") {
+    const values = snapshotExactOwnDataFields(rawMechanics, SPAWN_SHIELD_V1_KEYS);
+    if (
+      values !== null &&
+      Number.isSafeInteger(values.configured_duration_steps) &&
+      Number(values.configured_duration_steps) >= 0 &&
+      finiteNumber(values.movement_speed) !== null &&
+      Number(values.movement_speed) > 0
+    ) {
+      return Object.freeze({ kind: /** @type {const} */ ("v1"), values });
+    }
+  }
+  if (discriminator?.availability_kind === "available_v2") {
+    const values = snapshotExactOwnDataFields(rawMechanics, SPAWN_SHIELD_V2_KEYS);
+    if (
+      values !== null &&
+      Number.isSafeInteger(values.configured_duration_steps) &&
+      Number(values.configured_duration_steps) >= 0 &&
+      finiteNumber(values.movement_speed) !== null &&
+      Number(values.movement_speed) > 0 &&
+      values.protection_effect === "invulnerable" &&
+      values.visibility_effect === "concealed_from_opponents" &&
+      values.targetability_effect === "untargetable" &&
+      values.action_scope === "movement_only" &&
+      values.aura_effect === "excluded_as_emitter_and_beneficiary" &&
+      values.agent_collision_effect === "phased_until_expiring_endpoint_rejoin" &&
+      values.ordinary_application_mechanism === "end_of_transition_respawn_lifecycle"
+    ) {
+      return Object.freeze({ kind: /** @type {const} */ ("v2"), values });
+    }
+  }
+  if (discriminator?.availability_kind === "unavailable") {
+    const values = snapshotExactOwnDataFields(
+      rawMechanics,
+      SPAWN_SHIELD_UNAVAILABLE_KEYS,
+    );
+    if (values !== null) {
+      return Object.freeze({ kind: /** @type {const} */ ("unavailable"), values });
+    }
+  }
+  return Object.freeze({
+    kind: /** @type {const} */ ("unavailable"),
+    values: null,
+  });
 }
 
 /**
- * Explain the exact lifecycle input used by the durable cyan shell. This
- * builder copies only agent identity and the serialized shield countdown, so
- * the same descriptor is safe for researcher agents and the authorized POV
- * self row.
+ * Build the single mechanics-discriminated Spawn Shield view consumed by the
+ * renderer. V2 alone unlocks categorical semantics; V1 carries only recorded
+ * numeric/current facts, and unavailable or malformed mechanics fail closed.
  *
  * @param {unknown} rawAgent
- * @returns {SemanticDescriptor}
+ * @param {unknown} rawMechanics
+ * @returns {Readonly<{
+ *   active: boolean,
+ *   badgeText: string,
+ *   descriptor: SemanticDescriptor,
+ *   remainingTicks: number,
+ *   rootAriaLabel: string | null,
+ *   shieldAriaLabel: string,
+ * }>}
  */
-export function explainSpawnShield(rawAgent) {
-  const agent = isRecord(rawAgent) ? rawAgent : {};
-  const remaining = integer(agent.spawn_shield_remaining);
-  const active = remaining !== null && remaining > 0;
-  return descriptor(
+export function createSpawnShieldView(rawAgent, rawMechanics) {
+  const identity = exactAuthorizedAgentIdentityV1(rawAgent);
+  const agentFields = snapshotOwnDataFields(rawAgent, ["spawn_shield_remaining"]);
+  const recordedRemaining = integer(agentFields?.spawn_shield_remaining);
+  const remaining =
+    recordedRemaining !== null && recordedRemaining >= 0 ? recordedRemaining : null;
+  const remainingTicks = remaining ?? 0;
+  const active = remainingTicks > 0;
+  const mechanics = exactSpawnShieldMechanics(rawMechanics);
+  const owner = identity?.title ?? "Unavailable";
+  const currentRows = [
+    row(
+      "Duration Remaining",
+      remaining === null ? "Unavailable" : tickCount(remaining),
+    ),
+    row("Owner", owner),
+    row("Source", "Not recorded"),
+  ];
+  let summary = null;
+  let rows = currentRows;
+  if (mechanics.kind === "v1" && mechanics.values !== null) {
+    rows = [
+      row("Movement Speed", formatDisplayNumber(mechanics.values.movement_speed)),
+      row("Effect Duration", tickCount(mechanics.values.configured_duration_steps)),
+      ...currentRows,
+    ];
+  } else if (mechanics.kind === "v2" && mechanics.values !== null) {
+    summary = SPAWN_SHIELD_V2_SUMMARY;
+    rows = [
+      row("Protection Effect", "Invulnerable"),
+      row("Movement Speed", formatDisplayNumber(mechanics.values.movement_speed)),
+      row("Visibility Effect", "Concealed from opponents"),
+      row("Targetability Effect", "Untargetable"),
+      row("Action Effect", "Movement only"),
+      row("Aura Effect", "Excluded as emitter and beneficiary"),
+      row("Agent Collision Effect", "Phased until expiring endpoint rejoin"),
+      row("Effect Duration", tickCount(mechanics.values.configured_duration_steps)),
+      ...currentRows,
+      row("Ordinary Application", "End-of-transition respawn lifecycle"),
+    ];
+  }
+  const explanation = descriptor(
     "status",
-    `spawn-shield:${text(agent.presentation_key) ?? text(agent.public_agent_id) ?? "unknown"}`,
+    `spawn-shield:${identity?.presentationKey ?? "unavailable"}`,
     "Spawn Shield",
-    active
-      ? `This agent is invulnerable while the spawn shield remains active; ${tickCount(remaining)} remain.`
-      : "The spawn shield is inactive.",
-    [
-      row("Agent", publicAgentLabel(agent.public_agent_id)),
-      row("Protection", active ? "Invulnerable" : "Inactive"),
-      row("Remaining", remaining === null ? "Unavailable" : tickCount(remaining)),
-    ],
+    summary,
+    rows,
     [],
     { tone: active ? "positive" : "neutral", accent: "none" },
   );
+  return Object.freeze({
+    active,
+    badgeText: `S${remainingTicks}`,
+    descriptor: explanation,
+    remainingTicks,
+    rootAriaLabel: active
+      ? `Spawn Shield active, ${remainingTicks} ${remainingTicks === 1 ? "tick" : "ticks"} remaining`
+      : null,
+    shieldAriaLabel: explanation.title,
+  });
 }
 
-/** @param {unknown} classId */
-function classAccent(classId) {
-  const accent = classTokenFromId(classId).cssKey;
-  return ["mage", "warrior", "hunter", "rogue", "priest"].includes(accent)
-    ? accent
-    : "none";
+/**
+ * @param {unknown} rawAgent
+ * @param {unknown} [rawMechanics]
+ * @returns {SemanticDescriptor}
+ */
+export function explainSpawnShield(rawAgent, rawMechanics) {
+  return createSpawnShieldView(rawAgent, rawMechanics).descriptor;
 }
 
-/** @param {JsonRecord} mechanics */
-function classMechanicsRows(mechanics) {
-  const profile = classPresentation(mechanics.class_name);
-  const rows = [
-    row("Maximum Health", exactNumber(mechanics.maximum_health), FULL_ONLY),
-    row("Body Radius", exactNumber(mechanics.body_radius), FULL_ONLY),
-    row("Base Movement Speed", exactNumber(mechanics.base_movement_speed), FULL_ONLY),
-    row("Observation Radius", exactNumber(mechanics.observation_radius), FULL_ONLY),
-    row("Basic Target", humanize(mechanics.basic_target_mode), FULL_ONLY),
-    row("Basic Radius", exactNumber(mechanics.basic_interaction_radius), FULL_ONLY),
-    row("Ultimate Name", profile.ultimateName, FULL_ONLY),
-  ];
-  addPositiveOutput(rows, "Basic Raw Damage", mechanics.basic_raw_damage);
-  addPositiveOutput(rows, "Basic Raw Healing", mechanics.basic_raw_healing);
-  rows.push(
-    row("Ultimate Target", humanize(mechanics.ultimate_target_mode), FULL_ONLY),
-    row(
-      "Ultimate Radius",
-      exactNumber(mechanics.ultimate_interaction_radius),
-      FULL_ONLY,
-    ),
-    row(
-      "Ultimate Catalog Cooldown",
-      tickCount(mechanics.ultimate_cooldown_steps),
-      FULL_ONLY,
-    ),
+/** @param {unknown} value */
+function formattedMechanicNumber(value) {
+  const exact = finiteNumber(value);
+  return exact === null ? null : formatDisplayNumber(exact);
+}
+
+/** @param {string} prefix @param {unknown} value */
+function prefixedMechanicNumber(prefix, value) {
+  const formatted = formattedMechanicNumber(value);
+  return formatted === null ? null : `${prefix}${formatted}`;
+}
+
+/** @param {unknown} value */
+function formattedMechanicTicks(value) {
+  const exact = integer(value);
+  return exact === null ? null : tickCount(exact);
+}
+
+/**
+ * @param {unknown} rawItems
+ * @param {string} field
+ * @param {string} expected
+ * @returns {JsonRecord | null}
+ */
+function exactNestedMechanic(rawItems, field, expected) {
+  if (!Array.isArray(rawItems) || !rawItems.every(isRecord)) return null;
+  const matches = rawItems.filter((item) => item[field] === expected);
+  return matches.length === 1 ? matches[0] : null;
+}
+
+/**
+ * @param {JsonRecord} mechanics
+ * @param {string} statusId
+ * @param {string} magnitudeKind
+ */
+function formattedStatusMechanicEffect(mechanics, statusId, magnitudeKind) {
+  const status = exactNestedMechanic(mechanics.status_mechanics, "status_id", statusId);
+  if (status?.magnitude_kind !== magnitudeKind) return null;
+  const magnitude = finiteNumber(status.magnitude);
+  if (magnitude === null) return null;
+  const difference = `${formatDisplayNumber(Math.abs(1 - magnitude) * 100)}%`;
+  const multiplier = `×${formatDisplayNumber(magnitude)}`;
+  if (magnitudeKind === "damage_multiplier") {
+    return `a factor of ${formatDisplayNumber(magnitude)} (${difference} ${magnitude >= 1 ? "more" : "less"} damage dealt)`;
+  }
+  if (magnitudeKind === "movement_multiplier") {
+    return `a ${difference} movement ${magnitude <= 1 ? "reduction" : "increase"} (${multiplier})`;
+  }
+  if (magnitudeKind === "healing_multiplier") {
+    return `a ${difference} ${magnitude <= 1 ? "reduction" : "increase"} (${multiplier})`;
+  }
+  if (magnitudeKind === "movement_floor") {
+    return `a floor of ${formatDisplayNumber(magnitude * 100)}% of base movement speed (${multiplier})`;
+  }
+  return null;
+}
+
+/**
+ * @param {JsonRecord} mechanics
+ * @param {string} statusId
+ */
+function formattedStatusMechanicDuration(mechanics, statusId) {
+  const status = exactNestedMechanic(mechanics.status_mechanics, "status_id", statusId);
+  return status === null ? null : formattedMechanicTicks(status.duration_steps);
+}
+
+/**
+ * @param {JsonRecord} mechanics
+ * @param {string} auraId
+ */
+function exactAuraMechanic(mechanics, auraId) {
+  return exactNestedMechanic(mechanics.aura_mechanics, "aura_id", auraId);
+}
+
+/**
+ * @param {{effectKind: string}} presentation
+ * @param {unknown} multiplier
+ */
+function formattedAuraDocumentationEffect(presentation, multiplier) {
+  const exact = finiteNumber(multiplier);
+  if (exact === null) return null;
+  const difference = `${formatDisplayNumber(Math.abs(1 - exact) * 100)}%`;
+  if (presentation.effectKind === "damage_dealt") {
+    return `a ${difference} outgoing-damage ${exact >= 1 ? "increase" : "reduction"} per recorded emitter`;
+  }
+  if (presentation.effectKind === "damage_received") {
+    return `a ${difference} incoming-damage ${exact <= 1 ? "reduction" : "increase"} per recorded emitter`;
+  }
+  return null;
+}
+
+/**
+ * Build only the named, preformatted values consumed by one certified authored
+ * guide. Missing nested mechanics remain null and can never become an
+ * `Unavailable` interpolation.
+ *
+ * @param {JsonRecord} mechanics
+ * @returns {Record<string, string> | null}
+ */
+function classDocumentationValueMap(mechanics) {
+  const classId = integer(mechanics.class_id);
+  /** @type {Array<[string, string | null]> | null} */
+  let entries = null;
+  if (classId === 1) {
+    const aura = exactAuraMechanic(mechanics, "mage_damage_amplification");
+    const auraMultiplier =
+      aura === null ? null : finiteNumber(aura.per_emitter_multiplier);
+    entries = [
+      [
+        "burstDuration",
+        formattedStatusMechanicDuration(mechanics, "mage_burst_damage_amplification"),
+      ],
+      [
+        "burstDamageEffect",
+        formattedStatusMechanicEffect(
+          mechanics,
+          "mage_burst_damage_amplification",
+          "damage_multiplier",
+        ),
+      ],
+      [
+        "auraRadius",
+        aura === null ? null : prefixedMechanicNumber("a radius of ", aura.radius),
+      ],
+      [
+        "perEmitterDamageAmplificationEffect",
+        auraMultiplier === null
+          ? null
+          : formattedAuraDocumentationEffect(
+              auraPresentation("mage_damage_amplification"),
+              auraMultiplier,
+            ),
+      ],
+      [
+        "damageAmplificationCeiling",
+        aura === null ? null : formattedMechanicNumber(aura.clamp_value),
+      ],
+    ];
+  } else if (classId === 2) {
+    const aura = exactAuraMechanic(mechanics, "warrior_damage_mitigation");
+    const auraMultiplier =
+      aura === null ? null : finiteNumber(aura.per_emitter_multiplier);
+    entries = [
+      ["ultimateRawDamage", formattedMechanicNumber(mechanics.ultimate_raw_damage)],
+      [
+        "chargeStunDuration",
+        formattedStatusMechanicDuration(mechanics, "warrior_charge_stun"),
+      ],
+      [
+        "chargeSlowEffect",
+        formattedStatusMechanicEffect(
+          mechanics,
+          "warrior_charge_slow",
+          "movement_multiplier",
+        ),
+      ],
+      [
+        "chargeSlowDuration",
+        formattedStatusMechanicDuration(mechanics, "warrior_charge_slow"),
+      ],
+      [
+        "auraRadius",
+        aura === null ? null : prefixedMechanicNumber("a radius of ", aura.radius),
+      ],
+      [
+        "perEmitterDamageMitigationEffect",
+        auraMultiplier === null
+          ? null
+          : formattedAuraDocumentationEffect(
+              auraPresentation("warrior_damage_mitigation"),
+              auraMultiplier,
+            ),
+      ],
+      [
+        "damageMitigationFloor",
+        aura === null ? null : formattedMechanicNumber(aura.clamp_value),
+      ],
+    ];
+  } else if (classId === 3) {
+    entries = [
+      ["ultimateRawDamage", formattedMechanicNumber(mechanics.ultimate_raw_damage)],
+      [
+        "trapStunDuration",
+        formattedStatusMechanicDuration(mechanics, "hunter_trap_stun"),
+      ],
+      [
+        "hunterBasicSlowDuration",
+        formattedStatusMechanicDuration(mechanics, "hunter_basic_slow"),
+      ],
+      [
+        "hunterBasicMovementEffect",
+        formattedStatusMechanicEffect(
+          mechanics,
+          "hunter_basic_slow",
+          "movement_multiplier",
+        ),
+      ],
+    ];
+  } else if (classId === 4) {
+    entries = [
+      ["ultimateRawDamage", formattedMechanicNumber(mechanics.ultimate_raw_damage)],
+      [
+        "poisonStunDuration",
+        formattedStatusMechanicDuration(mechanics, "rogue_poison_stun"),
+      ],
+      [
+        "poisonSlowEffect",
+        formattedStatusMechanicEffect(
+          mechanics,
+          "rogue_poison_slow",
+          "movement_multiplier",
+        ),
+      ],
+      [
+        "poisonSlowDuration",
+        formattedStatusMechanicDuration(mechanics, "rogue_poison_slow"),
+      ],
+      [
+        "poisonAntiHealEffect",
+        formattedStatusMechanicEffect(
+          mechanics,
+          "rogue_poison_anti_heal",
+          "healing_multiplier",
+        ),
+      ],
+      [
+        "poisonAntiHealDuration",
+        formattedStatusMechanicDuration(mechanics, "rogue_poison_anti_heal"),
+      ],
+      [
+        "baseMovementSpeed",
+        prefixedMechanicNumber(
+          "base movement speed of ",
+          mechanics.base_movement_speed,
+        ),
+      ],
+      ["outOfCombatDelay", formattedMechanicTicks(mechanics.out_of_combat_delay_steps)],
+    ];
+  } else if (classId === 5) {
+    entries = [
+      ["ultimateRawHealing", formattedMechanicNumber(mechanics.ultimate_raw_healing)],
+      [
+        "freedomDuration",
+        formattedStatusMechanicDuration(
+          mechanics,
+          "priest_blessing_of_freedom_movement_floor",
+        ),
+      ],
+      [
+        "freedomMovementFloor",
+        formattedStatusMechanicEffect(
+          mechanics,
+          "priest_blessing_of_freedom_movement_floor",
+          "movement_floor",
+        ),
+      ],
+    ];
+  }
+  if (
+    entries === null ||
+    entries.some(
+      ([, value]) =>
+        typeof value !== "string" ||
+        value.length === 0 ||
+        /\bunavailable\b/iu.test(value),
+    )
+  ) {
+    return null;
+  }
+  return Object.fromEntries(/** @type {Array<[string, string]>} */ (entries));
+}
+
+/**
+ * @param {JsonRecord} mechanics
+ * @returns {Array<ReturnType<typeof row>> | null}
+ */
+function documentationMechanicsRows(mechanics) {
+  const classId = integer(mechanics.class_id);
+  const classToken = classTokenFromId(classId);
+  const maximumHealth = formattedMechanicNumber(mechanics.maximum_health);
+  const bodyRadius = formattedMechanicNumber(mechanics.body_radius);
+  const baseMovementSpeed = formattedMechanicNumber(mechanics.base_movement_speed);
+  const observationRadius = formattedMechanicNumber(mechanics.observation_radius);
+  const basicRadius = formattedMechanicNumber(mechanics.basic_interaction_radius);
+  const basicDamage = finiteNumber(mechanics.basic_raw_damage);
+  const basicHealing = finiteNumber(mechanics.basic_raw_healing);
+  const outOfCombatDelay = formattedMechanicTicks(mechanics.out_of_combat_delay_steps);
+  const regeneration = finiteNumber(
+    mechanics.out_of_combat_health_regeneration_fraction_per_step,
   );
-  addPositiveOutput(rows, "Ultimate Raw Damage", mechanics.ultimate_raw_damage);
-  addPositiveOutput(rows, "Ultimate Raw Healing", mechanics.ultimate_raw_healing);
+  const ultimateRadius = formattedMechanicNumber(mechanics.ultimate_interaction_radius);
+  const ultimateCooldown = formattedMechanicTicks(mechanics.ultimate_cooldown_steps);
+  const ultimateDamage = finiteNumber(mechanics.ultimate_raw_damage);
+  const ultimateHealing = finiteNumber(mechanics.ultimate_raw_healing);
+  const basicTarget = text(mechanics.basic_target_mode);
+  const ultimateTarget = text(mechanics.ultimate_target_mode);
+  const validBasicTargets = ["unavailable", "ally", "enemy"];
+  const validUltimateTargets = ["unavailable", "target_none", "ally", "enemy"];
+  if (
+    classToken.label === "Unknown" ||
+    text(mechanics.class_name) !== classToken.label ||
+    [
+      maximumHealth,
+      bodyRadius,
+      baseMovementSpeed,
+      observationRadius,
+      basicRadius,
+      outOfCombatDelay,
+      ultimateRadius,
+      ultimateCooldown,
+    ].some((value) => value === null) ||
+    [basicDamage, basicHealing, regeneration, ultimateDamage, ultimateHealing].some(
+      (value) => value === null,
+    ) ||
+    basicTarget === null ||
+    !validBasicTargets.includes(basicTarget) ||
+    ultimateTarget === null ||
+    !validUltimateTargets.includes(ultimateTarget)
+  ) {
+    return null;
+  }
+  const rows = [
+    row("Maximum Health", maximumHealth, FULL_ONLY),
+    row("Body Radius", bodyRadius, FULL_ONLY),
+    row("Base Movement Speed", baseMovementSpeed, FULL_ONLY),
+    row("Observation Radius", observationRadius, FULL_ONLY),
+    row("Basic Target", humanize(basicTarget), FULL_ONLY),
+    row("Basic Ability Radius", basicRadius, FULL_ONLY),
+  ];
+  if (/** @type {number} */ (basicDamage) > 0) {
+    rows.push(row("Basic Raw Damage", basicDamage, FULL_ONLY));
+  }
+  if (/** @type {number} */ (basicHealing) > 0) {
+    rows.push(row("Basic Raw Healing", basicHealing, FULL_ONLY));
+  }
   rows.push(
-    row(
-      "Out-of-combat Delay",
-      tickCount(mechanics.out_of_combat_delay_steps),
-      FULL_ONLY,
-    ),
+    row("Out-of-combat Delay", outOfCombatDelay, FULL_ONLY),
     row(
       "Out-of-combat Regeneration",
-      finiteNumber(mechanics.out_of_combat_health_regeneration_fraction_per_step) ===
-        null
-        ? "Unavailable"
-        : `${formatDisplayNumber(mechanics.out_of_combat_health_regeneration_fraction_per_step * 100)}% of maximum health per Tick`,
+      `${formatDisplayNumber(/** @type {number} */ (regeneration) * 100)}% of maximum health per Tick`,
       FULL_ONLY,
     ),
   );
   return rows;
 }
 
-/** @param {JsonRecord} mechanics */
-function classAuthoredMechanicSections(mechanics) {
-  const statusMechanics = records(mechanics.status_mechanics);
-  const auraMechanics = records(mechanics.aura_mechanics);
-  const sections = [];
-  if (statusMechanics.length > 0) {
-    const rows = [];
-    for (const status of statusMechanics) {
-      const token = statusPresentation(
-        status.token_id ?? statusTokenIdFromCatalogId(status.status_id),
-      );
-      const magnitude = statusMagnitudePresentation(
-        status.magnitude_kind,
-        status.magnitude,
-      );
-      const values = [`${tickCount(status.duration_steps)}`];
-      if (magnitude !== null) values.push(`${magnitude.label}: ${magnitude.value}`);
-      values.push(
-        status.breaks_on_positive_damage === true
-          ? "Breaks on recorded positive damage"
-          : "No positive-damage break rule",
-      );
-      rows.push(row(token.title, values.join(" · "), FULL_ONLY));
-    }
-    sections.push(section("Authored Status Mechanics", rows));
+/**
+ * Build the persistent class-documentation card from one exact owner/mechanics
+ * join. Current agent state is deliberately unreachable. V1 and unavailable
+ * profiles retain payload mechanics but receive no current authored copy.
+ *
+ * @param {unknown} rawOwner
+ * @param {unknown} rawClassMechanics
+ * @returns {SemanticDescriptor | null}
+ */
+export function explainClassDocumentation(rawOwner, rawClassMechanics) {
+  if (!isRecord(rawOwner) || !isRecord(rawClassMechanics)) return null;
+  const owner = rawOwner;
+  const mechanics = rawClassMechanics;
+  const publicId = text(owner.public_agent_id);
+  const classId = integer(owner.class_id);
+  const classToken = classTokenFromId(classId);
+  const teamToken = teamTokenFromId(owner.team_id);
+  if (
+    publicId === null ||
+    classToken.label === "Unknown" ||
+    teamToken.label === "Unknown" ||
+    text(owner.class_name) !== classToken.label ||
+    integer(mechanics.class_id) !== classId ||
+    text(mechanics.class_name) !== classToken.label ||
+    (mechanics.mechanics_version !== undefined && mechanics.mechanics_version !== 2)
+  ) {
+    return null;
   }
-  if (auraMechanics.length > 0) {
-    const rows = [];
-    for (const aura of auraMechanics) {
-      const presentation = auraPresentation(aura.aura_id);
-      const fieldEffect = auraEffectPresentation(
-        presentation,
-        finiteNumber(aura.per_emitter_multiplier),
-        "field",
-      );
-      rows.push(
-        row(
-          presentation.fieldTitle,
-          [
-            `Radius ${formatDisplayNumber(aura.radius)}`,
-            fieldEffect,
-            `Stacking ${humanize(aura.stacking_rule)}`,
-            `${humanize(aura.clamp_kind)} ×${formatDisplayNumber(aura.clamp_value)}`,
-          ].join(" · "),
-          FULL_ONLY,
+  const mechanicsRows = documentationMechanicsRows(mechanics);
+  if (mechanicsRows === null) return null;
+
+  let authored = null;
+  if (mechanics.mechanics_version === 2) {
+    const requiredNames = requiredClassDocumentationValueNamesV1(
+      mechanics.documentation_profile,
+      classId,
+    );
+    if (requiredNames !== null) {
+      const valueMap = classDocumentationValueMap(mechanics);
+      if (
+        valueMap !== null &&
+        Object.keys(valueMap).length === requiredNames.length &&
+        requiredNames.every((name) => typeof valueMap[name] === "string")
+      ) {
+        authored = resolveClassDocumentationV1(
+          mechanics.documentation_profile,
+          classId,
+          Object.fromEntries(requiredNames.map((name) => [name, valueMap[name]])),
+        );
+      }
+    }
+  }
+
+  const completeMechanicsRows = [...mechanicsRows];
+  if (authored !== null) {
+    completeMechanicsRows.push(
+      row("Ultimate Name", authored.ultimate.name, FULL_ONLY),
+      row("Ultimate Description", authored.ultimate.description, FULL_ONLY),
+    );
+  }
+  completeMechanicsRows.push(
+    row("Ultimate Target", humanize(mechanics.ultimate_target_mode), FULL_ONLY),
+    row(
+      "Ultimate Radius",
+      formattedMechanicNumber(mechanics.ultimate_interaction_radius),
+      FULL_ONLY,
+    ),
+    row(
+      "Ultimate Cooldown",
+      formattedMechanicTicks(mechanics.ultimate_cooldown_steps),
+      FULL_ONLY,
+    ),
+  );
+  if (/** @type {number} */ (finiteNumber(mechanics.ultimate_raw_damage)) > 0) {
+    completeMechanicsRows.push(
+      row("Ultimate Raw Damage", mechanics.ultimate_raw_damage, FULL_ONLY),
+    );
+  }
+  if (/** @type {number} */ (finiteNumber(mechanics.ultimate_raw_healing)) > 0) {
+    completeMechanicsRows.push(
+      row("Ultimate Raw Healing", mechanics.ultimate_raw_healing, FULL_ONLY),
+    );
+  }
+  if (authored !== null) {
+    completeMechanicsRows.push(
+      row("Passive Name", authored.passive.name, FULL_ONLY),
+      row("Passive Description", authored.passive.description, FULL_ONLY),
+    );
+  }
+  const sections = [];
+  if (authored !== null) {
+    sections.push(
+      section("Class Overview", [], authored.overview),
+      section(
+        "Authored Tactical Guide",
+        authored.tacticalGuideRows.map((guideRow) =>
+          row(guideRow.label, guideRow.value, FULL_ONLY),
         ),
-      );
-    }
-    sections.push(section("Authored Passive Mechanics", rows));
+      ),
+    );
   }
-  return sections;
-}
-
-/**
- * Compose full-only realized effects from the same agent/root. The compact card
- * remains bounded; every nested fact reuses the canonical status/modifier
- * explainer rather than recalculating it.
- *
- * @param {JsonRecord} agent
- * @param {JsonRecord[]} statuses
- * @param {JsonRecord[]} modifiers
- * @param {boolean} modifiersAvailable
- * @param {ReadonlyArray<unknown>} sourceAgents
- * @param {"researcher" | "agent_pov"} audience
- */
-function currentEffectSections(
-  agent,
-  statuses,
-  modifiers,
-  modifiersAvailable,
-  sourceAgents,
-  audience,
-) {
-  const sections = [];
-  if (statuses.length > 0) {
-    const rows = statuses.map((status, index) => {
-      const explanation =
-        audience === "agent_pov"
-          ? explainPovStatus(status, agent)
-          : explainStatus(status, agent, sourceAgents);
-      const full = projectSemanticDescriptor(explanation, "full");
-      return row(
-        `${index + 1}. ${explanation.title}`,
-        semanticDescriptorText(full).join(" · "),
-        FULL_ONLY,
-      );
-    });
-    sections.push(section("Current Status Details", rows));
-  }
-  if (modifiersAvailable && audience === "researcher") {
-    const rows =
-      modifiers.length === 0
-        ? [row("Modifiers", "None", FULL_ONLY)]
-        : modifiers.map((modifier, index) => {
-            const explanation = explainModifier(modifier, agent);
-            const full = projectSemanticDescriptor(explanation, "full");
-            return row(
-              `${index + 1}. ${explanation.title}`,
-              semanticDescriptorText(full).join(" · "),
-              FULL_ONLY,
-            );
-          });
-    sections.push(section("Current Aura Modifier Details", rows));
-  }
-  return sections;
-}
-
-/**
- * @param {Array<ReturnType<typeof row>>} rows
- * @param {string} label
- * @param {unknown} value
- */
-function addPositiveOutput(rows, label, value) {
-  const exact = finiteNumber(value);
-  if (exact !== null && exact > 0) {
-    rows.push(row(label, formatDisplayNumber(exact), FULL_ONLY));
-  }
-}
-
-/**
- * Recipient-authorized POV status explanation. Only reduced fields are copied;
- * researcher-only extras on the input are deliberately unreachable.
- *
- * @param {unknown} rawStatus
- * @param {unknown} [rawRecipient]
- */
-export function explainPovStatus(rawStatus, rawRecipient = {}) {
-  const input = isRecord(rawStatus) ? rawStatus : {};
-  const recipient = isRecord(rawRecipient) ? rawRecipient : {};
-  const reduced = {
-    token_id: input.token_id,
-    duration: input.duration,
-    status_feature_index: input.status_feature_index,
-    source_class_id: input.source_class_id,
-    source_evidence: input.source_evidence,
-  };
-  const token = resolveVisualToken("status", reduced.token_id, reduced);
-  const profile = statusPresentation(token.tokenId);
+  sections.push(section("Class Mechanics", completeMechanicsRows));
+  const identity = canonicalAgentIdentity(owner);
   return descriptor(
-    "status",
-    typeof recipient.presentation_key === "string"
-      ? `pov-status:${recipient.presentation_key}:${integer(reduced.status_feature_index) ?? token.tokenId}`
-      : `pov-status:${integer(reduced.status_feature_index) ?? token.tokenId}`,
-    profile.title,
-    `${profile.effect} Source agent identity is not disclosed.`,
-    [
-      row("Duration", tickCount(reduced.duration)),
-      row("Source", "Source agent identity is not disclosed."),
-    ],
+    "agent",
+    `class-documentation:${publicId}`,
+    identity.title,
+    null,
     [],
-    { tone: "information", accent: profile.accent },
+    sections,
+    { tone: "information", accent: identity.accent },
   );
 }
 
 /**
+ * Shared durable-status card. Audience changes only B3 source disclosure; the
+ * configured duration, remaining duration, magnitude, and trap break fact are
+ * copied from the same authorized status record.
+ *
  * @param {unknown} rawStatus
- * @param {unknown} [rawRecipient]
- * @param {ReadonlyArray<unknown>} [rawSourceAgents]
+ * @param {unknown} rawRecipient
+ * @param {ReadonlyArray<unknown>} rawSourceAgents
+ * @param {"researcher" | "agent_pov"} audience
  */
-export function explainStatus(rawStatus, rawRecipient = {}, rawSourceAgents = []) {
+function explainDurableStatus(rawStatus, rawRecipient, rawSourceAgents, audience) {
   const status = isRecord(rawStatus) ? rawStatus : {};
   const recipient = isRecord(rawRecipient) ? rawRecipient : {};
   const token = resolveVisualToken(
@@ -709,96 +1112,64 @@ export function explainStatus(rawStatus, rawRecipient = {}, rawSourceAgents = []
     status,
   );
   const profile = statusPresentation(token.tokenId);
-  const duration = integer(status.remaining_duration) ?? integer(status.duration);
-  const magnitude = statusMagnitudePresentation(
-    status.magnitude_kind,
-    status.magnitude,
-  );
-  const magnitudeRows = [
-    row("Duration", duration === null ? "Unavailable" : tickCount(duration)),
-  ];
+  const configuredDuration = integer(status.configured_duration_steps);
+  const remainingDuration = integer(status.remaining_duration);
+  const magnitude =
+    profile.magnitudeKind === status.magnitude_kind
+      ? statusMagnitudePresentation(status.magnitude_kind, status.magnitude)
+      : null;
+  const rows = [];
   if (magnitude !== null) {
-    magnitudeRows.push(row(magnitude.label, magnitude.value));
+    rows.push(row(magnitude.label, magnitude.value));
   }
-  if (typeof status.breaks_on_positive_damage === "boolean") {
-    magnitudeRows.push(
-      row(
-        "Break Rule",
-        status.breaks_on_positive_damage
-          ? "Ends when the recipient takes recorded positive damage."
-          : "No positive-damage break rule is recorded.",
-      ),
-    );
+  rows.push(
+    row(
+      "Effect Duration",
+      configuredDuration === null ? "Unavailable" : tickCount(configuredDuration),
+    ),
+    row(
+      "Duration Remaining",
+      remainingDuration === null ? "Unavailable" : tickCount(remainingDuration),
+    ),
+  );
+  if (profile.positiveDamageBreak && status.breaks_on_positive_damage === true) {
+    rows.push(row("Break Rule", "Ends when this agent receives positive raw damage"));
   }
-
-  const joinedSources = joinStatusSources(status, rawSourceAgents);
-  const sourceRows =
-    joinedSources.length === 0
-      ? [row("Source", "Source agent not recorded.")]
-      : joinedSources.map((source) =>
-          row(
-            "Source",
-            `${publicAgentLabel(source.public_agent_id)} · ${teamTokenFromId(source.team_id, source).label} · ${classTokenFromId(source.class_id, source).label}`,
-          ),
-        );
-  const breakSummary =
-    typeof status.breaks_on_positive_damage !== "boolean"
-      ? ""
-      : status.breaks_on_positive_damage
-        ? " It ends when the recipient takes recorded positive damage."
-        : " No positive-damage break rule is recorded.";
-  const magnitudeSummary =
-    magnitude === null ? "" : ` Exact effect: ${magnitude.value}.`;
+  const source = authorizedSourceAttributionV1({
+    attribution_kind: "direct",
+    audience,
+    direct_sources: status.direct_sources,
+    authorized_agents: rawSourceAgents,
+  });
+  if (source !== null) {
+    rows.push(row(source.label, source.value));
+  }
   return descriptor(
     "status",
     `status:${semanticIdentity(recipient)}:${integer(status.status_channel) ?? token.tokenId}`,
     profile.title,
-    `${profile.effect}${magnitudeSummary}${breakSummary}`,
-    magnitudeRows,
-    [section("Direct Source", sourceRows, null, COMPACT_AND_FULL)],
+    profile.effect,
+    rows,
+    [],
     { tone: "information", accent: profile.accent },
   );
 }
 
 /**
- * Preserve upstream evidence order. Authorize a display source only when both
- * slot and public ID match one row in the supplied same-scene roster. Repeated
- * event evidence from the same exact agent collapses for presentation only.
- *
- * @param {JsonRecord} status
- * @param {ReadonlyArray<unknown>} rawSourceAgents
+ * @param {unknown} rawStatus
+ * @param {unknown} [rawRecipient]
  */
-function joinStatusSources(status, rawSourceAgents) {
-  const roster = records(rawSourceAgents);
-  const seen = new Set();
-  const joined = [];
-  for (const evidence of records(
-    status.direct_sources ?? status.direct_source_evidence,
-  )) {
-    const presentationKey = text(evidence.source_presentation_key);
-    const slot = integer(evidence.source_global_slot);
-    const publicId = text(evidence.source_public_agent_id);
-    if ((presentationKey === null && slot === null) || publicId === null) {
-      continue;
-    }
-    const key = `${presentationKey ?? slot}\u0000${publicId}`;
-    if (seen.has(key)) {
-      continue;
-    }
-    const source = roster.find(
-      (agent) =>
-        (presentationKey === null
-          ? integer(agent.global_slot) === slot
-          : text(agent.presentation_key) === presentationKey) &&
-        text(agent.public_agent_id) === publicId,
-    );
-    if (source === undefined) {
-      continue;
-    }
-    seen.add(key);
-    joined.push(source);
-  }
-  return joined;
+export function explainPovStatus(rawStatus, rawRecipient = {}) {
+  return explainDurableStatus(rawStatus, rawRecipient, [], "agent_pov");
+}
+
+/**
+ * @param {unknown} rawStatus
+ * @param {unknown} [rawRecipient]
+ * @param {ReadonlyArray<unknown>} [rawSourceAgents]
+ */
+export function explainStatus(rawStatus, rawRecipient = {}, rawSourceAgents = []) {
+  return explainDurableStatus(rawStatus, rawRecipient, rawSourceAgents, "researcher");
 }
 
 /**
@@ -806,8 +1177,23 @@ function joinStatusSources(status, rawSourceAgents) {
  * @param {unknown} [rawRecipient]
  */
 export function explainModifier(rawModifier, rawRecipient = {}) {
-  const modifier = isRecord(rawModifier) ? rawModifier : {};
-  const recipient = isRecord(rawRecipient) ? rawRecipient : {};
+  const recipientIdentity = exactAuthorizedAgentIdentityV1(rawRecipient);
+  if (recipientIdentity === null) {
+    return null;
+  }
+  const modifier = snapshotOwnDataFields(rawModifier, [
+    "token_id",
+    "aura_id",
+    "multiplier",
+    "label",
+    "short_label",
+    "shortLabel",
+    "accessible_name",
+    "accessibleName",
+  ]);
+  if (modifier === null) {
+    return null;
+  }
   const token = resolveVisualToken(
     "modifier",
     modifier.token_id ?? modifier.aura_id,
@@ -818,25 +1204,11 @@ export function explainModifier(rawModifier, rawRecipient = {}) {
   const effect = auraEffectPresentation(presentation, multiplier, "recipient");
   return descriptor(
     "modifier",
-    `modifier:${semanticIdentity(recipient)}:${token.tokenId}`,
+    `modifier:${recipientIdentity.presentationKey}:${token.tokenId}`,
     presentation.recipientTitle,
-    `This recipient has ${effect} from the exact aggregate aura multiplier.`,
-    [
-      row(
-        "Aggregate Multiplier",
-        multiplier === null ? "Unavailable" : `×${formatDisplayNumber(multiplier)}`,
-      ),
-      row("Recipient Effect", effect),
-    ],
-    [
-      section("Source Scope", [
-        row(
-          "Source",
-          "Aggregate modifier; emitter identity is not recorded.",
-          FULL_ONLY,
-        ),
-      ]),
-    ],
+    presentation.aggregateEffect,
+    [row(presentation.aggregateEffectLabel, effect)],
+    [],
     { tone: "information", accent: presentation.accent },
   );
 }
@@ -860,6 +1232,9 @@ export function explainOverflow(
       kind === "status"
         ? explainStatus(item, recipient, rawSourceAgents)
         : explainModifier(item, recipient);
+    if (explanation === null) {
+      return row(`Hidden ${index + 1}`, "Unavailable");
+    }
     const compact = projectSemanticDescriptor(explanation, "compact");
     return row(
       `Hidden ${index + 1}`,
@@ -906,7 +1281,7 @@ export function explainPovOverflow(rawItems, rawRecipient = {}) {
       ? `pov-status-overflow:${recipient.presentation_key}`
       : `pov-status-overflow:${text(recipient.public_agent_id) ?? "unknown"}`,
     `${items.length} Hidden ${items.length === 1 ? "Status" : "Statuses"}`,
-    "Every hidden status remains available in canonical display order. Source agent identity is not disclosed.",
+    "Every hidden status remains available in canonical display order. Source not disclosed in Agent POV.",
     rows.length === 0 ? [row("Hidden Facts", "None")] : rows,
     [],
     { tone: "neutral" },
@@ -916,34 +1291,44 @@ export function explainPovOverflow(rawItems, rawRecipient = {}) {
 /**
  * @param {unknown} rawRecord
  * @param {unknown} [rawOwner]
- * @param {unknown} [rawClassMechanics]
+ * @returns {SemanticDescriptor | null}
  */
-export function explainCooldown(rawRecord, rawOwner = null, rawClassMechanics = null) {
-  const record = isRecord(rawRecord) ? rawRecord : {};
-  const owner = isRecord(rawOwner) ? rawOwner : record;
-  const mechanics = isRecord(rawClassMechanics) ? rawClassMechanics : {};
-  const classToken = classTokenFromId(owner.class_id ?? record.class_id, mechanics);
-  const profile = classPresentation(mechanics.class_name ?? classToken.label);
+export function explainCooldown(rawRecord, rawOwner = null) {
+  const record = snapshotOwnDataFields(rawRecord, [
+    "presentation_key",
+    "public_agent_id",
+    "ultimate_cooldown_remaining",
+    "ultimate_cooldown",
+  ]);
+  const owner = snapshotOwnDataFields(rawOwner, ["class_id"]);
+  if (record === null || owner === null) {
+    return null;
+  }
+  const identity = exactJoinedAuthorizedIdentity(record, rawOwner, "");
+  if (identity === null) {
+    return null;
+  }
   const ticks =
-    integer(record.ultimate_cooldown_remaining) ??
-    integer(record.ultimate_cooldown) ??
-    integer(owner.ultimate_cooldown_remaining) ??
-    integer(owner.ultimate_cooldown);
+    integer(record.ultimate_cooldown_remaining) ?? integer(record.ultimate_cooldown);
+  if (ticks === null || ticks < 0) {
+    return null;
+  }
+  const ultimate = ultimateTokenFromClassId(owner.class_id);
   return descriptor(
     "cooldown",
-    `cooldown:${semanticIdentity(owner)}`,
-    `${classToken.label} Ultimate: ${profile.ultimateName} Cooldown`,
-    ticks === 0
-      ? `${profile.ultimateName} is ready.`
-      : `Exact current cooldown remaining for ${profile.ultimateName}.`,
+    `cooldown:${identity.presentationKey}`,
+    `${ultimate.label} Cooldown · ${identity.title}`,
+    null,
     [
-      row("Cooldown Remaining", ticks === null ? "Unavailable" : tickCount(ticks)),
-      row("Source", publicAgentLabel(owner.public_agent_id)),
+      ticks === 0
+        ? row("Ultimate Status", "Ready")
+        : row("Remaining Cooldown", tickCount(ticks)),
+      row("Source", identity.title),
     ],
     [],
     {
       tone: ticks === 0 ? "positive" : "information",
-      accent: classAccent(owner.class_id ?? record.class_id),
+      accent: identity.accent,
     },
   );
 }
@@ -951,60 +1336,76 @@ export function explainCooldown(rawRecord, rawOwner = null, rawClassMechanics = 
 /**
  * @param {unknown} rawField
  * @param {unknown} [rawSourceAgent]
+ * @param {"researcher" | "agent_pov"} [audience]
+ * @returns {SemanticDescriptor | null}
  */
-export function explainAura(rawField, rawSourceAgent = null) {
-  const field = isRecord(rawField) ? rawField : {};
-  const candidateSource = isRecord(rawSourceAgent) ? rawSourceAgent : null;
-  const fieldPresentationKey = text(field.source_presentation_key);
-  const fieldSlot = integer(field.source_global_slot);
-  const fieldPublicId = text(field.source_public_agent_id);
-  const sourceAgent =
-    candidateSource !== null &&
-    (fieldPresentationKey !== null || fieldSlot !== null) &&
-    fieldPublicId !== null &&
-    (fieldPresentationKey === null
-      ? integer(candidateSource.global_slot) === fieldSlot
-      : text(candidateSource.presentation_key) === fieldPresentationKey) &&
-    text(candidateSource.public_agent_id) === fieldPublicId
-      ? candidateSource
-      : null;
+export function explainAura(rawField, rawSourceAgent = null, audience = "researcher") {
+  if (audience !== "researcher" && audience !== "agent_pov") {
+    return null;
+  }
+  const field = snapshotOwnDataFields(rawField, [
+    "token_id",
+    "aura_id",
+    "per_emitter_multiplier",
+    "radius",
+    "label",
+    "short_label",
+    "shortLabel",
+    "accessible_name",
+    "accessibleName",
+  ]);
+  if (field === null) {
+    return null;
+  }
   const token = resolveVisualToken("modifier", field.token_id ?? field.aura_id, field);
   const presentation = auraPresentation(field.aura_id ?? field.token_id);
+  const sourceIdentity =
+    audience === "researcher"
+      ? exactJoinedAuthorizedIdentity(rawField, rawSourceAgent, "source_")
+      : null;
+  const source =
+    audience === "researcher" &&
+    sourceIdentity !== null &&
+    sourceIdentity.accent === presentation.accent
+      ? rawSourceAgent
+      : null;
+  const attribution =
+    audience === "agent_pov"
+      ? authorizedSourceAttributionV1({
+          attribution_kind: "direct",
+          audience: "agent_pov",
+          direct_sources: [rawField],
+          authorized_agents: [rawSourceAgent],
+        })
+      : authorizedSourceAttributionV1({
+          attribution_kind: "direct",
+          audience: "researcher",
+          direct_sources: [
+            {
+              source_presentation_key: sourceIdentity?.presentationKey ?? null,
+              source_public_agent_id: sourceIdentity?.publicAgentId ?? null,
+            },
+          ],
+          authorized_agents: source === null ? [] : [source],
+        });
   const multiplier = finiteNumber(field.per_emitter_multiplier);
   const effect = auraEffectPresentation(presentation, multiplier, "field");
-  const sourcePublicId = sourceAgent?.public_agent_id;
   return descriptor(
     "aura",
-    `aura:${fieldPresentationKey ?? integer(field.source_global_slot) ?? text(sourcePublicId) ?? "unknown"}:${token.tokenId}`,
+    audience === "agent_pov"
+      ? `aura:agent-pov:${token.tokenId}`
+      : `aura:${sourceIdentity?.presentationKey ?? "unavailable"}:${token.tokenId}`,
     presentation.fieldTitle,
-    `Catalog-declared same-team aura capability: allies within this recorded radius may receive ${effect}. Consult each recipient's exact aggregate modifier for realized effect.`,
+    presentation.fieldEffect,
     [
-      row("Source ID", publicAgentLabel(sourcePublicId)),
+      row(presentation.fieldEffectLabel, effect),
+      row("Effect Radius", exactNumber(field.radius)),
       row(
-        "Source Class",
-        sourceAgent === null
-          ? "Unavailable"
-          : classTokenFromId(sourceAgent.class_id, sourceAgent).label,
+        attribution?.label ?? "Source",
+        attribution?.value ?? "Unavailable in this artifact",
       ),
-      row("Radius", exactNumber(field.radius)),
-      row(
-        "Catalog Multiplier",
-        multiplier === null ? "Unavailable" : `×${formatDisplayNumber(multiplier)}`,
-      ),
-      row("Catalog Effect", effect),
     ],
-    [
-      section("Field Contract", [
-        row("Beneficiary", humanize(field.beneficiary_relation), FULL_ONLY),
-        row("Stacking", humanize(field.stacking_rule), FULL_ONLY),
-        row(
-          "Clamp",
-          `${humanize(field.clamp_kind)} ${exactNumber(field.clamp_value)}`,
-          FULL_ONLY,
-        ),
-        row("Center", point(field.center), FULL_ONLY),
-      ]),
-    ],
+    [],
     {
       tone: "information",
       accent: presentation.accent,
@@ -1013,58 +1414,50 @@ export function explainAura(rawField, rawSourceAgent = null) {
   );
 }
 
-const RANGE_PURPOSE = Object.freeze({
-  observation: "Shows the exact authorized Observation radius.",
-  basic: "Shows the exact radius for the class's Basic interaction.",
-  ultimate: "Shows the exact radius for the class's Ultimate interaction.",
-});
-
 /**
  * @param {unknown} rawRange
  * @param {unknown} [rawOwner]
- * @param {unknown} [rawClassMechanics]
+ * @returns {SemanticDescriptor | null}
  */
-export function explainRange(rawRange, rawOwner = null, rawClassMechanics = null) {
-  const range = isRecord(rawRange) ? rawRange : {};
-  const candidateOwner = isRecord(rawOwner) ? rawOwner : null;
-  const rangePresentationKey = text(range.presentation_key);
-  const rangeSlot = integer(range.global_slot);
-  const owner =
-    candidateOwner !== null &&
-    (rangePresentationKey !== null || rangeSlot !== null) &&
-    (rangePresentationKey === null
-      ? integer(candidateOwner.global_slot) === rangeSlot
-      : text(candidateOwner.presentation_key) === rangePresentationKey) &&
-    text(candidateOwner.public_agent_id) !== null
-      ? candidateOwner
-      : {};
-  const candidateMechanics = isRecord(rawClassMechanics) ? rawClassMechanics : null;
-  const mechanics =
-    candidateMechanics !== null &&
-    integer(candidateMechanics.class_id) !== null &&
-    integer(candidateMechanics.class_id) === integer(owner.class_id)
-      ? candidateMechanics
-      : {};
-  const kind = text(range.kind) ?? "unknown";
+export function explainRange(rawRange, rawOwner = null) {
+  const range = snapshotOwnDataFields(rawRange, [
+    "presentation_key",
+    "public_agent_id",
+    "kind",
+    "radius",
+  ]);
+  if (range === null) {
+    return null;
+  }
+  const identity = exactJoinedAuthorizedIdentity(range, rawOwner, "");
+  if (identity === null) {
+    return null;
+  }
+  const kind = text(range.kind);
+  const radius = finiteNumber(range.radius);
+  if (!["observation", "basic", "ultimate"].includes(kind ?? "") || radius === null) {
+    return null;
+  }
+  const rangeKind = /** @type {"observation" | "basic" | "ultimate"} */ (kind);
+  const title =
+    rangeKind === "observation"
+      ? "Observation Range"
+      : `${rangeKind === "basic" ? "Basic" : "Ultimate"} Range · ${identity.title}`;
   return descriptor(
-    `range-${kind}`,
-    `range:${rangePresentationKey ?? integer(range.global_slot) ?? text(owner.public_agent_id) ?? "unknown"}:${kind}`,
-    `${humanize(kind)} Range`,
-    RANGE_PURPOSE[/** @type {keyof typeof RANGE_PURPOSE} */ (kind)] ??
-      "Shows an exact normalized range radius.",
+    `range-${rangeKind}`,
+    `range:${identity.presentationKey}:${rangeKind}`,
+    title,
+    null,
     [
-      row("Radius", exactNumber(range.radius)),
-      row("Owner ID", publicAgentLabel(owner.public_agent_id)),
-      row("Team", teamTokenFromId(owner.team_id, owner).label),
-      row(
-        "Class",
-        text(mechanics.class_name) ?? classTokenFromId(owner.class_id, owner).label,
-      ),
+      row("Radius", formatDisplayNumber(radius)),
+      row("Owner ID", identity.publicIdentity),
+      row("Team", identity.teamLabel),
+      row("Class", identity.classLabel),
     ],
     [],
     {
       tone: "information",
-      accent: classAccent(owner.class_id),
+      accent: identity.accent,
       anchor: "pointer",
     },
   );
@@ -1124,25 +1517,39 @@ export function explainVisibility(rawFact, context = {}) {
 /**
  * @param {unknown} rawLegality
  * @param {0 | 1} lane
+ * @param {unknown} rawOwner
+ * @returns {SemanticDescriptor | null}
  */
-export function explainLegality(rawLegality, lane) {
-  const legality = isRecord(rawLegality) ? rawLegality : {};
+export function explainLegality(rawLegality, lane, rawOwner) {
+  if (lane !== 0 && lane !== 1) {
+    return null;
+  }
+  const laneProperty = lane === 0 ? "lane_0_available" : "lane_1_available";
+  const legality = snapshotOwnDataFields(rawLegality, [
+    "owner_presentation_key",
+    "owner_public_agent_id",
+    laneProperty,
+  ]);
+  if (legality === null) {
+    return null;
+  }
+  const identity = exactJoinedAuthorizedIdentity(legality, rawOwner, "owner_");
+  if (identity === null) {
+    return null;
+  }
   const laneName = lane === 0 ? "Basic" : "Ultimate";
-  const rawAvailable =
-    lane === 0 ? legality.lane_0_available : legality.lane_1_available;
+  const rawAvailable = legality[laneProperty];
   if (typeof rawAvailable !== "boolean") {
-    throw new TypeError(`${laneName} legality must be an exact boolean.`);
+    return null;
   }
   return descriptor(
     "legality",
-    text(legality.target_presentation_key) === null
-      ? `legality:${lane}:${rawAvailable}`
-      : `legality:${legality.target_presentation_key}:${lane}:${rawAvailable}`,
-    `${laneName} Legality`,
-    `${laneName} ability is ${rawAvailable ? "" : "not "}available this tick.`,
+    `legality:${identity.presentationKey}:${lane}:${rawAvailable}`,
+    `${laneName} Legality · ${identity.publicIdentity}`,
+    null,
     [row("Status", rawAvailable ? "True" : "False")],
     [],
-    { tone: rawAvailable ? "positive" : "warning" },
+    { tone: rawAvailable ? "positive" : "warning", accent: identity.accent },
   );
 }
 

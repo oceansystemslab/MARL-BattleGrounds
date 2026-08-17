@@ -5,8 +5,6 @@ import { dirname, extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "@playwright/test";
 
-import { loadRendererFixture } from "./support/renderer-fixture.js";
-
 const WEB_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SOURCE_ROOT = resolve(WEB_ROOT, "src");
 const fixture = JSON.parse(
@@ -173,6 +171,272 @@ test("Agent DOM identity remains opaque and raw options cannot mint ranges", asy
   ).toBe(true);
   expect(visible.bodySlots).toEqual(Array(visible.bodyCount).fill(null));
   expect(visible.slotAttributes).toEqual([]);
+});
+
+test("raw and forged researcher-looking scenes render unavailable and clear accepted paint", async ({
+  page,
+}) => {
+  await page.goto(origin);
+  const result = await page.evaluate(async (rawPresentation) => {
+    const moduleRoot = "/src";
+    const { normalizeAuthorizedPresentationFrameV1 } = await import(
+      `${moduleRoot}/authorized-presentation-normalizer.js`
+    );
+    const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+    const { authorizedPresentationSceneView } = await import(
+      `${moduleRoot}/authorized-presentation-adapter.js`
+    );
+    const presentation = await normalizeAuthorizedPresentationFrameV1(rawPresentation);
+    const authorizedScene = authorizedPresentationSceneView(presentation);
+    const battlefield = document.querySelector("#battlefield");
+    const empty = document.querySelector("#empty");
+    if (
+      authorizedScene === null ||
+      !(battlefield instanceof SVGSVGElement) ||
+      !(empty instanceof HTMLElement)
+    ) {
+      throw new Error("Raw authority-fence test surface is unavailable.");
+    }
+    const renderer = new BattlefieldRenderer({ battlefield, empty });
+    if (!renderer.render(presentation, { showRanges: true })) {
+      throw new Error("The accepted control frame did not paint.");
+    }
+    const acceptedCounts = {
+      agents: battlefield.querySelectorAll(".agent").length,
+      auras: battlefield.querySelectorAll(".aura-field").length,
+    };
+    const candidates = [
+      { candidate_kind: "raw_scene_envelope", scene: structuredClone(authorizedScene) },
+      structuredClone(presentation),
+    ];
+    const rejected = candidates.map((candidate) => {
+      const painted = renderer.render(candidate, { showRanges: true });
+      return {
+        painted,
+        agents: battlefield.querySelectorAll(".agent").length,
+        auras: battlefield.querySelectorAll(".aura-field").length,
+        audience: battlefield.getAttribute("data-audience"),
+        preset: battlefield.getAttribute("data-preset"),
+        viewBox: battlefield.getAttribute("viewBox"),
+        emptyHidden: empty.hidden,
+        emptyText: empty.textContent,
+      };
+    });
+    return { acceptedCounts, rejected };
+  }, fixture.presentations.replay_oracle);
+
+  expect(result.acceptedCounts.agents).toBeGreaterThan(0);
+  expect(result.acceptedCounts.auras).toBeGreaterThan(0);
+  expect(result.rejected).toEqual([
+    {
+      painted: false,
+      agents: 0,
+      auras: 0,
+      audience: null,
+      preset: null,
+      viewBox: null,
+      emptyHidden: false,
+      emptyText: "No authorized battlefield scene was returned.",
+    },
+    {
+      painted: false,
+      agents: 0,
+      auras: 0,
+      audience: null,
+      preset: null,
+      viewBox: null,
+      emptyHidden: false,
+      emptyText: "No authorized battlefield scene was returned.",
+    },
+  ]);
+});
+
+test("all three normalized Agent POV leaves keep hidden aura sources byte-inert", async ({
+  page,
+}) => {
+  const leafNames = [
+    "live_no_shared_obs_agent_pov",
+    "replay_no_shared_obs_agent_pov",
+    "replay_shared_obs_agent_pov",
+  ];
+  const renderings = [];
+  for (const leafName of leafNames) {
+    const raw = fixture.presentations[leafName];
+    await page.goto(origin);
+    const installed = await page.evaluate(async (rawPresentation) => {
+      const moduleRoot = "/src";
+      const { normalizeAuthorizedPresentationFrameV1 } = await import(
+        `${moduleRoot}/authorized-presentation-normalizer.js`
+      );
+      const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+      const { createTooltipController } = await import(`${moduleRoot}/tooltip.js`);
+      const presentation =
+        await normalizeAuthorizedPresentationFrameV1(rawPresentation);
+      const battlefield = document.querySelector("#battlefield");
+      const empty = document.querySelector("#empty");
+      const tooltip = document.querySelector("#visual-tooltip");
+      const title = document.querySelector("#visual-tooltip-title");
+      const details = document.querySelector("#visual-tooltip-details");
+      if (
+        !(battlefield instanceof SVGSVGElement) ||
+        !(empty instanceof HTMLElement) ||
+        !(tooltip instanceof HTMLElement) ||
+        !(title instanceof HTMLElement) ||
+        !(details instanceof HTMLElement)
+      ) {
+        throw new Error("Agent POV aura tooltip surface is unavailable.");
+      }
+      const renderer = new BattlefieldRenderer({ battlefield, empty });
+      const painted = renderer.render(presentation, { showRanges: true });
+      const controller = createTooltipController({
+        root: document.body,
+        tooltip,
+        title,
+        details,
+      });
+      const rawScene = rawPresentation.current_endpoint?.parts?.scene;
+      const rawAuraFields = Array.isArray(rawScene?.aura_fields)
+        ? rawScene.aura_fields
+        : [];
+      const auraOwners = Array.from(
+        battlefield.querySelectorAll(
+          '[data-layer="aura"] .aura-field[data-tooltip-owner]',
+        ),
+      );
+      const tooltipBytes = auraOwners.map((owner) => {
+        if (!(owner instanceof SVGElement)) {
+          throw new Error("Agent POV aura owner is not an SVG element.");
+        }
+        owner.focus();
+        return JSON.stringify({
+          title: title.textContent,
+          details: details.innerHTML,
+          text: details.textContent,
+        });
+      });
+      const auraMarkup = auraOwners.map((owner) => owner.outerHTML);
+      controller.destroy();
+      return {
+        auraCount: auraOwners.length,
+        audience: battlefield.dataset.audience,
+        painted,
+        hiddenSourceKeys: rawAuraFields.map(
+          (/** @type {Record<string, any>} */ field) => field.source_presentation_key,
+        ),
+        sourceAttributeCount: battlefield.querySelectorAll(
+          '[data-layer="aura"] [data-source-presentation-key]',
+        ).length,
+        auraMarkup,
+        tooltipBytes,
+      };
+    }, raw);
+    expect(installed.auraCount).toBe(2);
+    expect(installed.audience).toBe("agent_pov");
+    expect(installed.painted).toBe(true);
+    expect(installed.sourceAttributeCount).toBe(0);
+    expect(installed.hiddenSourceKeys).toHaveLength(2);
+    expect(new Set(installed.hiddenSourceKeys).size).toBe(2);
+    for (const hiddenSourceKey of installed.hiddenSourceKeys) {
+      expect(typeof hiddenSourceKey).toBe("string");
+      expect(installed.auraMarkup.join("\n")).not.toContain(hiddenSourceKey);
+      expect(installed.tooltipBytes.join("\n")).not.toContain(hiddenSourceKey);
+    }
+    expect(installed.tooltipBytes).toHaveLength(2);
+    for (const tooltipBytes of installed.tooltipBytes) {
+      expect(tooltipBytes).toContain("Source");
+      expect(tooltipBytes).toContain("Not disclosed in Agent POV");
+      expect(tooltipBytes).not.toContain("agent-slot-");
+    }
+    renderings.push(installed);
+  }
+
+  const allHiddenSourceKeys = renderings.flatMap(
+    (rendering) => rendering.hiddenSourceKeys,
+  );
+  expect(new Set(allHiddenSourceKeys).size).toBe(allHiddenSourceKeys.length);
+  expect(renderings[1].hiddenSourceKeys).not.toEqual(renderings[0].hiddenSourceKeys);
+  expect(renderings[2].hiddenSourceKeys).not.toEqual(renderings[0].hiddenSourceKeys);
+  expect(renderings[1].auraMarkup).toEqual(renderings[0].auraMarkup);
+  expect(renderings[2].auraMarkup).toEqual(renderings[0].auraMarkup);
+  expect(renderings[1].tooltipBytes).toEqual(renderings[0].tooltipBytes);
+  expect(renderings[2].tooltipBytes).toEqual(renderings[0].tooltipBytes);
+});
+
+test("Oracle aura attribution remains exact in the tooltip and absent from aura DOM keys", async ({
+  page,
+}) => {
+  await page.goto(origin);
+  const result = await page.evaluate(async (rawPresentation) => {
+    const moduleRoot = "/src";
+    const { normalizeAuthorizedPresentationFrameV1 } = await import(
+      `${moduleRoot}/authorized-presentation-normalizer.js`
+    );
+    const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+    const { createTooltipController } = await import(`${moduleRoot}/tooltip.js`);
+    const presentation = await normalizeAuthorizedPresentationFrameV1(rawPresentation);
+    const battlefield = document.querySelector("#battlefield");
+    const empty = document.querySelector("#empty");
+    const tooltip = document.querySelector("#visual-tooltip");
+    const title = document.querySelector("#visual-tooltip-title");
+    const details = document.querySelector("#visual-tooltip-details");
+    if (
+      !(battlefield instanceof SVGSVGElement) ||
+      !(empty instanceof HTMLElement) ||
+      !(tooltip instanceof HTMLElement) ||
+      !(title instanceof HTMLElement) ||
+      !(details instanceof HTMLElement)
+    ) {
+      throw new Error("Oracle aura tooltip surface is unavailable.");
+    }
+    const renderer = new BattlefieldRenderer({ battlefield, empty });
+    const painted = renderer.render(presentation, { showRanges: true });
+    const controller = createTooltipController({
+      root: document.body,
+      tooltip,
+      title,
+      details,
+    });
+    const auraOwners = Array.from(
+      battlefield.querySelectorAll(
+        '[data-layer="aura"] .aura-field[data-tooltip-owner]',
+      ),
+    );
+    const firstAura = auraOwners[0];
+    if (!(firstAura instanceof SVGElement)) {
+      throw new Error("Oracle aura owner is unavailable.");
+    }
+    firstAura.focus();
+    const labels = Array.from(
+      details.querySelectorAll(".semantic-explanation__label"),
+      (node) => node.textContent,
+    );
+    const values = Array.from(
+      details.querySelectorAll(".semantic-explanation__value"),
+      (node) => node.textContent,
+    );
+    const auraMarkup = auraOwners.map((owner) => owner.outerHTML);
+    controller.destroy();
+    return {
+      painted,
+      audience: battlefield.dataset.audience,
+      auraCount: auraOwners.length,
+      sourceAttributeCount: battlefield.querySelectorAll(
+        '[data-layer="aura"] [data-source-presentation-key]',
+      ).length,
+      auraMarkup,
+      labels,
+      values,
+    };
+  }, fixture.presentations.replay_oracle);
+
+  expect(result.painted).toBe(true);
+  expect(result.audience).toBe("researcher");
+  expect(result.auraCount).toBe(2);
+  expect(result.sourceAttributeCount).toBe(0);
+  expect(result.auraMarkup.join("\n")).not.toContain("data-source-presentation-key");
+  const sourceIndex = result.labels.indexOf("Source");
+  expect(sourceIndex).toBeGreaterThanOrEqual(0);
+  expect(result.values[sourceIndex]).toBe("Agent ID agent-slot-0 · Mage · Team A");
 });
 
 test("incoming choreography paints presentation-key metadata and no slots", async ({
@@ -376,82 +640,4 @@ test("agent wins real SVG hit arbitration over an overlapping accepted route", a
     "data-tooltip-kind",
     "agent",
   );
-});
-
-test("compact required cooldown docks retain geometry and owner association", async ({
-  page,
-}) => {
-  const rendererFixture = await loadRendererFixture("required_dock_fallback");
-  await page.goto(origin);
-  const result = await page.evaluate(async (rawFrame) => {
-    const moduleRoot = "/src";
-    const { normalizeLiveDebuggerFrameV2 } = await import(
-      `${moduleRoot}/frame-normalizer.js`
-    );
-    const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
-    const battlefield = document.querySelector("#battlefield");
-    const empty = document.querySelector("#empty");
-    if (!(battlefield instanceof SVGSVGElement) || !(empty instanceof HTMLElement)) {
-      throw new Error("Synthetic renderer component surface is unavailable.");
-    }
-    battlefield.style.width = "600px";
-    battlefield.style.height = "420px";
-    const renderer = new BattlefieldRenderer({ battlefield, empty });
-    const painted = renderer.render(normalizeLiveDebuggerFrameV2(rawFrame), {
-      showRanges: true,
-    });
-    await document.fonts.ready;
-    await new Promise((resolveFrame) =>
-      requestAnimationFrame(() => requestAnimationFrame(resolveFrame)),
-    );
-    const battlefieldBounds = battlefield.getBoundingClientRect();
-    const layer = battlefield.querySelector('[data-layer="durable-status-modifier"]');
-    const rows = [
-      ...battlefield.querySelectorAll('.required-dock-fallback[data-kind="cooldown"]'),
-    ].map((cell) => {
-      const bounds = cell.getBoundingClientRect();
-      const layoutKey = cell.getAttribute("data-layout-key") ?? "";
-      const slot = Number(layoutKey.split(":")[1]);
-      const owner = battlefield.querySelector(`.agent[data-slot="${slot}"]`);
-      return {
-        ariaLabel: cell.getAttribute("aria-label"),
-        collisionFree: cell.parentElement?.getAttribute("data-collision-free"),
-        inside:
-          bounds.width > 0 &&
-          bounds.height > 0 &&
-          bounds.left >= battlefieldBounds.left &&
-          bounds.top >= battlefieldBounds.top &&
-          bounds.right <= battlefieldBounds.right &&
-          bounds.bottom <= battlefieldBounds.bottom,
-        layoutKey,
-        ownerExists: owner instanceof SVGElement,
-        ownerLabel: cell.getAttribute("data-owner-label"),
-        text: cell.textContent,
-        ticks: cell.getAttribute("data-ticks"),
-      };
-    });
-    return {
-      compacted: layer?.getAttribute("data-compacted-required-docks") ?? "",
-      painted,
-      rows,
-    };
-  }, rendererFixture.live_frame);
-
-  expect(result.painted).toBe(true);
-  expect(result.rows.length).toBeGreaterThan(0);
-  expect(new Set(result.rows.map(({ layoutKey }) => layoutKey)).size).toBe(
-    result.rows.length,
-  );
-  for (const row of result.rows) {
-    const slot = row.layoutKey.split(":")[1];
-    expect(result.compacted.split(",")).toContain(row.layoutKey);
-    expect(row.collisionFree).toBe("true");
-    expect(row.inside).toBe(true);
-    expect(row.ownerExists).toBe(true);
-    expect(row.ownerLabel).toBe(`Agent ID ${slot}`);
-    expect(row.ticks).toBe("30");
-    expect(row.text).toContain(`Agent ID ${slot}`);
-    expect(row.text).toContain("U30");
-    expect(row.ariaLabel).toMatch(/Cooldown Remaining.*30 Ticks/iu);
-  }
 });
