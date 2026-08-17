@@ -15,7 +15,6 @@ from typing import Any, Literal, cast
 
 import pytest
 from pydantic import BaseModel, TypeAdapter, ValidationError
-from scripts.dev.visual_debugger.renderer_fixtures import get_renderer_fixture
 from scripts.dev.visual_debugger.replay_protocol import (
     ACTOR_POV_METRIC_REPORT_AVAILABILITY_V1,
     ACTOR_POV_PROCESSING_DISCLOSURE_V1,
@@ -57,15 +56,25 @@ from scripts.dev.visual_debugger.replay_protocol import (
     SharedObsSourceMaterialReplayTimelineV1,
     SharedObsSourceMaterialReplayViewerFrameV1,
 )
-from tests.evaluation_fixtures import captured_evaluation_trajectory
+from tests.evaluation_fixtures import (
+    captured_evaluation_trajectory,
+    mage_target_none_ultimate_action,
+)
 
 from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
+from marl_battlegrounds.evaluation.pov import build_actor_pov_current_slice_v1
 from marl_battlegrounds.evaluation.replay import ReplayArtifactReferenceV1
 from marl_battlegrounds.rendering.evaluation_adapter import (
+    EvaluationScenePresentationStateV1,
     SharedObsSourceMaterialProjectionV1,
+    build_researcher_analyzer_projection_v2,
     build_shared_obs_source_material_projection_v1,
+    build_status_source_evidence_index_v2,
 )
-from marl_battlegrounds.rendering.pov_scene import ActorPovAnalyzerProjectionV1
+from marl_battlegrounds.rendering.pov_scene import (
+    ActorPovAnalyzerProjectionV1,
+    build_actor_pov_analyzer_projection_v1,
+)
 from marl_battlegrounds.rendering.scene import ResearcherAnalyzerProjectionV2
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -73,10 +82,10 @@ _DIGEST_A = "a" * 64
 _DIGEST_B = "b" * 64
 _DIGEST_C = "c" * 64
 _RESEARCHER_FRAME_V1_SHA256 = (
-    "2ab411b023c56ebaa0b6d7c9d91bc93489991d8ce7ed42314b0707e518e92e08"
+    "3e7896f916ea88882786eaf7b965cc1d76bf5df373b248aa9acd90c03e716c0a"
 )
 _ACTOR_POV_FRAME_V1_SHA256 = (
-    "7fcd7d38420eec8b1cdcfbc3b28f39882a9ad0ebb455af1caffd741f6b871d01"
+    "187841dd953ccb43c53eb80fe2b1a446641b866d53ee202f3f4309f736bdd8d5"
 )
 _RESEARCHER_TIMELINE_V1_SHA256 = (
     "24da90cf1e6c4f9fe28436ddc6ae1461d3378bcfb981feb315d9c57b09fa923a"
@@ -96,22 +105,10 @@ class _ProjectionCases:
 
 @pytest.fixture(scope="module")
 def projection_cases() -> _ProjectionCases:
-    researcher = cast(
-        ResearcherAnalyzerProjectionV2,
-        get_renderer_fixture("canonical_event_vocabulary").live_frame.projection,
-    )
-    researcher_initial = cast(
-        ResearcherAnalyzerProjectionV2,
-        get_renderer_fixture("durable_controls").live_frame.projection,
-    )
-    pov = cast(
-        ActorPovAnalyzerProjectionV1,
-        get_renderer_fixture("pov_redaction").live_frame.projection,
-    )
     trajectory = captured_evaluation_trajectory(
         transition_count=1,
         expected_horizon=1,
-        execution_information_mode="shared_obs",
+        actions=(mage_target_none_ultimate_action(),),
     )
     incoming = EvaluationTransitionViewV1(
         context=trajectory.context,
@@ -119,11 +116,53 @@ def projection_cases() -> _ProjectionCases:
         transition=trajectory.transitions[0],
         successor_frame=trajectory.frames[1],
     )
-    source_material = build_shared_obs_source_material_projection_v1(
+    status_index = build_status_source_evidence_index_v2(
+        trajectory.context,
+        trajectory.frames,
+        trajectory.transitions,
+    )
+    presentation = EvaluationScenePresentationStateV1(
+        controlled_global_slot=0,
+        selected_global_slot=5,
+        show_ranges=True,
+    )
+    researcher = build_researcher_analyzer_projection_v2(
         trajectory.context,
         trajectory.frames[1],
-        selected_global_slot=5,
         transition_view=incoming,
+        presentation=presentation,
+        status_source_evidence_state=status_index.state_for_frame(1),
+    )
+    researcher_initial = build_researcher_analyzer_projection_v2(
+        trajectory.context,
+        trajectory.frames[0],
+        presentation=presentation,
+        status_source_evidence_state=status_index.state_for_frame(0),
+    )
+    pov = build_actor_pov_analyzer_projection_v1(
+        build_actor_pov_current_slice_v1(
+            trajectory.context,
+            trajectory.frames[1],
+            global_slot=0,
+            incoming_transition_view=incoming,
+        )
+    )
+    shared_trajectory = captured_evaluation_trajectory(
+        transition_count=1,
+        expected_horizon=1,
+        execution_information_mode="shared_obs",
+    )
+    shared_incoming = EvaluationTransitionViewV1(
+        context=shared_trajectory.context,
+        start_frame=shared_trajectory.frames[0],
+        transition=shared_trajectory.transitions[0],
+        successor_frame=shared_trajectory.frames[1],
+    )
+    source_material = build_shared_obs_source_material_projection_v1(
+        shared_trajectory.context,
+        shared_trajectory.frames[1],
+        selected_global_slot=5,
+        transition_view=shared_incoming,
     )
     return _ProjectionCases(
         researcher=researcher,

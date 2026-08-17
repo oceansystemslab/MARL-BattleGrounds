@@ -21,10 +21,7 @@ import {
   scopedPresentationKey,
 } from "../src/authorized-presentation-adapter.js";
 import { normalizeAuthorizedPresentationFrameV1 } from "../src/authorized-presentation-normalizer.js";
-import {
-  explainChoreographyEvent,
-  statusApplicationRoutes,
-} from "../src/choreography-painter.js";
+import { explainChoreographyEvent } from "../src/choreography-painter.js";
 import { buildChoreographyPlan } from "../src/choreography-plan.js";
 import {
   explainActivation,
@@ -109,6 +106,135 @@ const surface = Object.freeze({
   }),
   protectedRects: Object.freeze([]),
 });
+
+/** @type {Readonly<Record<string, number>>} */
+const ORACLE_EVENT_PHASE_RANK = Object.freeze({
+  action_rejected: 10,
+  ability_activated: 20,
+  recipient_health_resolution: 40,
+  combat_countdown_reset: 50,
+  health_regenerated: 50,
+  cooldown_started: 60,
+  cooldown_ready: 60,
+  charge_phase_displacement: 70,
+  ordinary_movement_phase_displacement: 80,
+  agent_died: 90,
+  status_aged_to_zero: 100,
+  status_broken_by_damage: 100,
+  status_applied: 100,
+  status_refreshed_or_extended: 100,
+  status_cleared_by_new_death: 100,
+  spawn_shield_expired: 110,
+  respawn_wave_occurred: 120,
+  agent_respawned: 120,
+});
+
+const ORACLE_STATUS_ID_BY_CHANNEL = Object.freeze([
+  "warrior_charge_slow",
+  "hunter_basic_slow",
+  "rogue_poison_slow",
+  "warrior_charge_stun",
+  "hunter_trap_stun",
+  "rogue_poison_stun",
+  "rogue_poison_anti_heal",
+  "mage_burst_damage_amplification",
+  "priest_blessing_of_freedom_movement_floor",
+]);
+
+/** @param {Record<string, any>} raw @param {number} classId */
+function oracleTrajectoryForClass(raw, classId) {
+  const agent = raw.current_endpoint.scene.agents.find(
+    (/** @type {Record<string, any>} */ candidate) => candidate.class_id === classId,
+  );
+  assert.ok(agent, `missing class ${classId} scene agent`);
+  const trajectory = raw.latest_events.agent_phase_trajectories.find(
+    (/** @type {Record<string, any>} */ candidate) =>
+      candidate.agent_presentation_key === agent.presentation_key,
+  );
+  assert.ok(trajectory, `missing class ${classId} trajectory`);
+  return trajectory;
+}
+
+/**
+ * Give every represented class distinct start/post-Charge/successor points
+ * without changing the digest-owned current endpoint.
+ */
+function movingOracleRaw() {
+  const raw = structuredClone(fixture.presentations.replay_oracle);
+  const startsByClass = new Map([
+    [1, [2.6, 1.2]],
+    [2, [2.7, 3.4]],
+    [3, [17.4, 1.2]],
+    [4, [17.3, 3.4]],
+    [5, [2.8, 5.7]],
+  ]);
+  const postChargeByClass = new Map([
+    [1, [2.1, 1.35]],
+    [2, [2.2, 3.55]],
+    [3, [17.9, 1.35]],
+    [4, [17.8, 3.55]],
+    [5, [2.2, 5.85]],
+  ]);
+  for (const agent of raw.current_endpoint.scene.agents) {
+    const trajectory = oracleTrajectoryForClass(raw, agent.class_id);
+    trajectory.transition_start.position = startsByClass.get(agent.class_id);
+    trajectory.post_charge.position = postChargeByClass.get(agent.class_id);
+  }
+  return raw;
+}
+
+/** @param {Record<string, any>} raw @param {number} classId @param {string} phase */
+function oracleAnchor(raw, classId, phase) {
+  return structuredClone(oracleTrajectoryForClass(raw, classId)[phase]);
+}
+
+/** @param {Record<string, any>} raw @param {Record<string, any>[]} events */
+function installOracleEvents(raw, events) {
+  const transitionId = raw.latest_events.incoming_transition_id;
+  raw.latest_events.events = events.map(
+    (/** @type {Record<string, any>} */ event, ordinal) => ({
+      ...event,
+      event_id: `${transitionId}:event:${String(ordinal).padStart(4, "0")}`,
+      ordinal,
+      phase_rank: ORACLE_EVENT_PHASE_RANK[event.event_kind],
+    }),
+  );
+  raw.latest_events.event_count = raw.latest_events.events.length;
+  raw.latest_events.ordered_event_ids = raw.latest_events.events.map(
+    (/** @type {Record<string, any>} */ event) => event.event_id,
+  );
+  raw.latest_events.ordered_event_kinds = raw.latest_events.events.map(
+    (/** @type {Record<string, any>} */ event) => event.event_kind,
+  );
+  return raw;
+}
+
+/** @param {Record<string, any>} raw @param {number} classId @param {string} phase */
+function projectedTrajectoryPoint(raw, classId, phase) {
+  const [x, y] = oracleTrajectoryForClass(raw, classId)[phase].position;
+  return { x: x * 10, y: y * 10 };
+}
+
+/**
+ * @param {Record<string, any>} raw
+ * @param {string} kind
+ * @param {{channel?: number, recipientClass?: number, sourceClass?: number}} [options]
+ */
+function oracleStatusEvent(raw, kind, options = {}) {
+  const channel = options.channel ?? 4;
+  const event = {
+    event_kind: kind,
+    recipient_anchor: oracleAnchor(raw, options.recipientClass ?? 2, "successor"),
+    status_channel: channel,
+    status_id: ORACLE_STATUS_ID_BY_CHANNEL[channel],
+  };
+  return kind === "status_applied"
+    ? {
+        ...event,
+        source_anchor: oracleAnchor(raw, options.sourceClass ?? 3, "successor"),
+      }
+    : event;
+}
 
 test("only unforgeably normalized roots enter the presentation adapter", async () => {
   const raw = fixture.presentations.replay_shared_obs_agent_pov;
@@ -1136,15 +1262,814 @@ test("Latest Events alone schedule opaque-key choreography", async () => {
   );
 });
 
-test("painter metadata retains opaque keys without inventing slots", async () => {
+test("Oracle choreography exact-joins moving trajectories and presents successor endpoints", async () => {
+  const raw = movingOracleRaw();
+  installOracleEvents(raw, [
+    {
+      event_kind: "ability_activated",
+      ability_component: "ultimate",
+      source_anchor: oracleAnchor(raw, 1, "transition_start"),
+      recipient_anchor: null,
+    },
+    {
+      event_kind: "ability_activated",
+      ability_component: "basic",
+      source_anchor: oracleAnchor(raw, 2, "transition_start"),
+      recipient_anchor: oracleAnchor(raw, 3, "transition_start"),
+    },
+    {
+      event_kind: "ability_activated",
+      ability_component: "basic",
+      source_anchor: oracleAnchor(raw, 5, "transition_start"),
+      recipient_anchor: oracleAnchor(raw, 2, "transition_start"),
+    },
+    {
+      event_kind: "ability_activated",
+      ability_component: "basic",
+      source_anchor: oracleAnchor(raw, 3, "transition_start"),
+      recipient_anchor: oracleAnchor(raw, 1, "transition_start"),
+    },
+    {
+      event_kind: "ability_activated",
+      ability_component: "ultimate",
+      source_anchor: oracleAnchor(raw, 4, "transition_start"),
+      recipient_anchor: oracleAnchor(raw, 5, "transition_start"),
+    },
+    {
+      event_kind: "ability_activated",
+      ability_component: "ultimate",
+      source_anchor: oracleAnchor(raw, 2, "transition_start"),
+      recipient_anchor: oracleAnchor(raw, 4, "transition_start"),
+    },
+    {
+      event_kind: "recipient_health_resolution",
+      recipient_anchor: oracleAnchor(raw, 3, "transition_start"),
+      transition_start_health: 100,
+      total_effective_damage: 7,
+      total_effective_healing: 0,
+      health_after_combat_resolution: 93,
+      realized_net_health_change: -7,
+    },
+    {
+      event_kind: "health_regenerated",
+      agent_anchor: oracleAnchor(raw, 4, "transition_start"),
+      actual_health_regenerated: 3,
+    },
+    {
+      event_kind: "cooldown_started",
+      agent_anchor: oracleAnchor(raw, 1, "transition_start"),
+    },
+    {
+      event_kind: "cooldown_ready",
+      agent_anchor: oracleAnchor(raw, 5, "transition_start"),
+    },
+    {
+      event_kind: "charge_phase_displacement",
+      realized_displacement: [
+        oracleTrajectoryForClass(raw, 2).post_charge.position[0] -
+          oracleTrajectoryForClass(raw, 2).transition_start.position[0],
+        oracleTrajectoryForClass(raw, 2).post_charge.position[1] -
+          oracleTrajectoryForClass(raw, 2).transition_start.position[1],
+      ],
+      start_anchor: oracleAnchor(raw, 2, "transition_start"),
+      end_anchor: oracleAnchor(raw, 2, "post_charge"),
+    },
+    {
+      event_kind: "ordinary_movement_phase_displacement",
+      realized_displacement: [
+        oracleTrajectoryForClass(raw, 2).successor.position[0] -
+          oracleTrajectoryForClass(raw, 2).post_charge.position[0],
+        oracleTrajectoryForClass(raw, 2).successor.position[1] -
+          oracleTrajectoryForClass(raw, 2).post_charge.position[1],
+      ],
+      start_anchor: oracleAnchor(raw, 2, "post_charge"),
+      end_anchor: oracleAnchor(raw, 2, "successor"),
+    },
+  ]);
+  const frame = await normalizeAuthorizedPresentationFrameV1(raw);
+  const serializedBefore = JSON.stringify(frame);
+  const incomingRows = authorizedPresentationIncomingRows(frame);
+  const plan = buildChoreographyPlan(frame, surface);
+  assert.ok(plan);
+  assert.equal(JSON.stringify(frame), serializedBefore);
+  assert.equal(plan.events.length, raw.latest_events.event_count);
+  assert.deepEqual(
+    plan.events.map((event) => event.eventId),
+    incomingRows.map((row) => row.id),
+  );
+  assert.deepEqual(
+    plan.events.map((event) => event.eventType),
+    incomingRows.map((row) => row.kind),
+  );
+
+  /** @type {ReadonlyArray<readonly [number, number, number | null, string]>} */
+  const abilityCases = [
+    [0, 1, null, "mage_burst"],
+    [1, 2, 3, "basic_damage"],
+    [2, 5, 2, "basic_heal"],
+    [3, 3, 1, "basic_damage"],
+    [4, 4, 5, "rogue_poison"],
+  ];
+  for (const [eventIndex, sourceClass, targetClass, tokenId] of abilityCases) {
+    const plannedEvent = /** @type {Record<string, any>} */ (plan.events[eventIndex]);
+    const sourceTrajectory = oracleTrajectoryForClass(raw, sourceClass);
+    assert.equal(plannedEvent.kind, "activation");
+    assert.equal(plannedEvent.tokenId, tokenId);
+    assert.equal(
+      plannedEvent.sourcePresentationKey,
+      sourceTrajectory.agent_presentation_key,
+    );
+    assert.equal(
+      plannedEvent.sourcePublicAgentId,
+      sourceTrajectory.agent_public_agent_id,
+    );
+    assert.deepEqual(
+      plannedEvent.source,
+      projectedTrajectoryPoint(raw, sourceClass, "successor"),
+    );
+    if (targetClass === null) {
+      assert.equal(plannedEvent.targetPresentationKey, null);
+      assert.equal(plannedEvent.targetPublicAgentId, null);
+      assert.equal(plannedEvent.target, null);
+      assert.equal(plannedEvent.route, null);
+      assert.equal(plannedEvent.presentationKind, "source_local");
+    } else {
+      const targetTrajectory = oracleTrajectoryForClass(raw, targetClass);
+      assert.equal(
+        plannedEvent.targetPresentationKey,
+        targetTrajectory.agent_presentation_key,
+      );
+      assert.equal(
+        plannedEvent.targetPublicAgentId,
+        targetTrajectory.agent_public_agent_id,
+      );
+      assert.deepEqual(
+        plannedEvent.target,
+        projectedTrajectoryPoint(raw, targetClass, "successor"),
+      );
+      assert.ok(plannedEvent.route);
+      assert.equal(plannedEvent.presentationKind, "routed");
+    }
+  }
+
+  const chargeActivation = plan.events[5];
+  assert.equal(chargeActivation.tokenId, "warrior_charge");
+  assert.deepEqual(
+    chargeActivation.source,
+    projectedTrajectoryPoint(raw, 2, "transition_start"),
+  );
+  assert.deepEqual(
+    chargeActivation.target,
+    projectedTrajectoryPoint(raw, 4, "transition_start"),
+  );
+
+  const health = plan.events[6];
+  assert.equal(health.kind, "net_health");
+  assert.deepEqual(health.recipient, projectedTrajectoryPoint(raw, 3, "successor"));
+  assert.equal(
+    health.recipientPresentationKey,
+    oracleTrajectoryForClass(raw, 3).agent_presentation_key,
+  );
+  assert.equal(
+    health.recipientPublicAgentId,
+    oracleTrajectoryForClass(raw, 3).agent_public_agent_id,
+  );
+
+  const regeneration = plan.events[7];
+  const regenerationTrajectory = oracleTrajectoryForClass(raw, 4);
+  assert.equal(regeneration.kind, "regeneration");
+  assert.equal(regeneration.cueSemantic, "health_regenerated");
+  assert.equal(regeneration.value, 3);
+  assert.deepEqual(
+    regeneration.recipient,
+    projectedTrajectoryPoint(raw, 4, "successor"),
+  );
+  assert.equal(
+    regeneration.agentPresentationKey,
+    regenerationTrajectory.agent_presentation_key,
+  );
+  assert.equal(
+    regeneration.agentPublicAgentId,
+    regenerationTrajectory.agent_public_agent_id,
+  );
+
+  /** @type {ReadonlyArray<readonly [number, number, string]>} */
+  const successorPulseCases = [
+    [8, 1, "cooldown_started"],
+    [9, 5, "cooldown_ready"],
+  ];
+  for (const [eventIndex, classId, cueSemantic] of successorPulseCases) {
+    const plannedEvent = /** @type {Record<string, any>} */ (plan.events[eventIndex]);
+    const trajectory = oracleTrajectoryForClass(raw, classId);
+    assert.equal(plannedEvent.kind, "semantic_pulse");
+    assert.equal(plannedEvent.cueSemantic, cueSemantic);
+    assert.deepEqual(
+      plannedEvent.anchor,
+      projectedTrajectoryPoint(raw, classId, "successor"),
+    );
+    assert.equal(plannedEvent.agentPresentationKey, trajectory.agent_presentation_key);
+    assert.equal(plannedEvent.agentPublicAgentId, trajectory.agent_public_agent_id);
+  }
+
+  const charge = plan.events[10];
+  assert.equal(charge.kind, "charge_displacement");
+  assert.deepEqual(charge.start, projectedTrajectoryPoint(raw, 2, "transition_start"));
+  assert.deepEqual(charge.end, projectedTrajectoryPoint(raw, 2, "successor"));
+  assert.notDeepEqual(charge.end, projectedTrajectoryPoint(raw, 2, "post_charge"));
+  assert.equal(
+    charge.sourcePresentationKey,
+    oracleTrajectoryForClass(raw, 2).agent_presentation_key,
+  );
+  assert.equal(
+    charge.sourcePublicAgentId,
+    oracleTrajectoryForClass(raw, 2).agent_public_agent_id,
+  );
+
+  const movement = plan.events[11];
+  assert.equal(movement.eventType, "ordinary_movement_phase_displacement");
+  assert.equal(movement.kind, "feed_only");
+  assert.equal(movement.spatial, false);
+  assert.equal(Object.hasOwn(movement, "start"), false);
+  assert.equal(Object.hasOwn(movement, "end"), false);
+  assert.deepEqual(
+    raw.latest_events.ordered_event_ids,
+    plan.events.map(({ eventId }) => eventId),
+  );
+  assert.deepEqual(
+    raw.latest_events.ordered_event_kinds,
+    plan.events.map(({ eventType }) => eventType),
+  );
+});
+
+test("combat reset stays feed-only while successor regeneration cues pack deterministically", async () => {
+  const resetRaw = movingOracleRaw();
+  installOracleEvents(resetRaw, [
+    {
+      event_kind: "combat_countdown_reset",
+      agent_anchor: oracleAnchor(resetRaw, 1, "transition_start"),
+    },
+  ]);
+  const resetFrame = await normalizeAuthorizedPresentationFrameV1(resetRaw);
+  const resetPlan = buildChoreographyPlan(resetFrame, surface);
+  assert.ok(resetPlan);
+  assert.equal(resetPlan.events.length, 1);
+  assert.equal(resetPlan.events[0].eventId, resetRaw.latest_events.events[0].event_id);
+  assert.equal(resetPlan.events[0].eventType, "combat_countdown_reset");
+  assert.equal(resetPlan.events[0].kind, "feed_only");
+  assert.equal(resetPlan.events[0].spatial, false);
+  assert.equal(Object.hasOwn(resetPlan.events[0], "cueSemantic"), false);
+  assert.equal(Object.hasOwn(resetPlan.events[0], "anchor"), false);
+  assert.equal(resetPlan.phases.total, 0);
+
+  const raw = movingOracleRaw();
+  installOracleEvents(raw, [
+    {
+      event_kind: "recipient_health_resolution",
+      recipient_anchor: oracleAnchor(raw, 4, "transition_start"),
+      transition_start_health: 100,
+      total_effective_damage: 5,
+      total_effective_healing: 0,
+      health_after_combat_resolution: 95,
+      realized_net_health_change: -5,
+    },
+    {
+      event_kind: "health_regenerated",
+      agent_anchor: oracleAnchor(raw, 1, "transition_start"),
+      actual_health_regenerated: 4,
+    },
+    {
+      event_kind: "health_regenerated",
+      agent_anchor: oracleAnchor(raw, 2, "transition_start"),
+      actual_health_regenerated: 2,
+    },
+    {
+      event_kind: "health_regenerated",
+      agent_anchor: oracleAnchor(raw, 5, "transition_start"),
+      actual_health_regenerated: 1,
+    },
+    oracleStatusEvent(raw, "status_applied", {
+      recipientClass: 4,
+      sourceClass: 3,
+    }),
+  ]);
+  const frame = await normalizeAuthorizedPresentationFrameV1(raw);
+  const protectedRect = Object.freeze({
+    left: 0,
+    top: 0,
+    right: 100,
+    bottom: 100,
+    width: 100,
+    height: 100,
+  });
+  const packedSurface = Object.freeze({
+    ...surface,
+    protectedRects: Object.freeze([protectedRect]),
+  });
+  const plan = buildChoreographyPlan(frame, packedSurface);
+  const repeated = buildChoreographyPlan(frame, packedSurface);
+  assert.ok(plan);
+  assert.ok(repeated);
+  const regenerations = plan.events.filter((event) => event.kind === "regeneration");
+  const repeatedRegenerations = repeated.events.filter(
+    (event) => event.kind === "regeneration",
+  );
+  assert.equal(regenerations.length, 3);
+  assert.deepEqual(
+    regenerations.map(({ cue, cueBounds }) => ({ cue, cueBounds })),
+    repeatedRegenerations.map(({ cue, cueBounds }) => ({ cue, cueBounds })),
+  );
+  assert.deepEqual(
+    regenerations.map(({ value }) => value),
+    [4, 2, 1],
+  );
+  assert.deepEqual(
+    regenerations.map(({ recipient }) => recipient),
+    [1, 2, 5].map((classId) => projectedTrajectoryPoint(raw, classId, "successor")),
+  );
+  assert.equal(
+    regenerations.every(
+      (event) =>
+        event.spatial === true &&
+        event.cueCollisionFree === true &&
+        event.spatialDisposition === "rendered" &&
+        event.cue !== null &&
+        event.cueBounds !== null,
+    ),
+    true,
+  );
+  const intersectionArea = (
+    /** @type {Record<string, number>} */ left,
+    /** @type {Record<string, number>} */ right,
+  ) =>
+    Math.max(0, Math.min(left.right, right.right) - Math.max(left.left, right.left)) *
+    Math.max(0, Math.min(left.bottom, right.bottom) - Math.max(left.top, right.top));
+  for (const [index, event] of regenerations.entries()) {
+    assert.equal(intersectionArea(event.cueBounds, protectedRect), 0);
+    for (const prior of regenerations.slice(0, index)) {
+      assert.equal(intersectionArea(event.cueBounds, prior.cueBounds), 0);
+    }
+  }
+  const health = plan.events.find((event) => event.kind === "net_health");
+  const status = plan.events.find((event) => event.kind === "status_lifecycle");
+  assert.ok(health);
+  assert.ok(status);
+  assert.ok(health.phaseEnd <= regenerations[0].phaseStart);
+  assert.equal(
+    regenerations.every(
+      (event) =>
+        event.phaseStart === regenerations[0].phaseStart &&
+        event.phaseEnd === regenerations[0].phaseEnd,
+    ),
+    true,
+  );
+  assert.ok(regenerations[0].phaseEnd <= status.phaseStart);
+});
+
+test("Oracle lifecycle cues retain successor and strict team-anchor authority", async () => {
+  const raw = movingOracleRaw();
+  const deathAnchor = oracleAnchor(raw, 4, "successor");
+  const shieldAnchor = oracleAnchor(raw, 1, "successor");
+  const respawnAnchor = oracleAnchor(raw, 3, "successor");
+  installOracleEvents(raw, [
+    {
+      event_kind: "agent_died",
+      recipient_anchor: deathAnchor,
+    },
+    {
+      event_kind: "spawn_shield_expired",
+      agent_anchor: shieldAnchor,
+    },
+    {
+      event_kind: "respawn_wave_occurred",
+      team_anchor: { phase: "successor", team_index: 0, team_id: 1 },
+    },
+    {
+      event_kind: "respawn_wave_occurred",
+      team_anchor: { phase: "successor", team_index: 1, team_id: 2 },
+    },
+    {
+      event_kind: "agent_respawned",
+      agent_anchor: respawnAnchor,
+      team_id: 2,
+      realized_successor_position: structuredClone(respawnAnchor.position),
+    },
+  ]);
+  const frame = await normalizeAuthorizedPresentationFrameV1(raw);
+  const serializedBefore = JSON.stringify(frame);
+  const rows = authorizedPresentationIncomingRows(frame);
+  const rowsBefore = JSON.stringify(rows);
+  const plan = buildChoreographyPlan(frame, surface);
+  assert.ok(plan);
+  assert.equal(JSON.stringify(frame), serializedBefore);
+  assert.equal(JSON.stringify(authorizedPresentationIncomingRows(frame)), rowsBefore);
+  assert.deepEqual(
+    plan.events.map(({ eventId, eventType }) => [eventId, eventType]),
+    rows.map(({ id, kind }) => [id, kind]),
+  );
+
+  const death = plan.events[0];
+  assert.equal(death.kind, "semantic_pulse");
+  assert.equal(death.cueSemantic, "agent_died");
+  assert.equal(death.persistent, true);
+  assert.deepEqual(death.anchor, projectedTrajectoryPoint(raw, 4, "successor"));
+  assert.equal(death.agentPresentationKey, deathAnchor.presentation_key);
+  assert.equal(death.agentPublicAgentId, deathAnchor.public_agent_id);
+
+  const shield = plan.events[1];
+  assert.equal(shield.kind, "semantic_pulse");
+  assert.equal(shield.cueSemantic, "spawn_shield_expired");
+  assert.equal(shield.persistent, false);
+  assert.deepEqual(shield.anchor, projectedTrajectoryPoint(raw, 1, "successor"));
+  assert.equal(shield.agentPresentationKey, shieldAnchor.presentation_key);
+  assert.equal(shield.agentPublicAgentId, shieldAnchor.public_agent_id);
+
+  const waves = plan.events.slice(2, 4);
+  assert.deepEqual(
+    waves.map(
+      ({ cueSemantic, teamIndex, teamId, teamSide, label, anchor, persistent }) => ({
+        cueSemantic,
+        teamIndex,
+        teamId,
+        teamSide,
+        label,
+        anchor,
+        persistent,
+      }),
+    ),
+    [
+      {
+        cueSemantic: "respawn_wave_occurred",
+        teamIndex: 0,
+        teamId: 1,
+        teamSide: "left",
+        label: "RESPAWNING · TEAM A",
+        anchor: { x: 112, y: 24 },
+        persistent: true,
+      },
+      {
+        cueSemantic: "respawn_wave_occurred",
+        teamIndex: 1,
+        teamId: 2,
+        teamSide: "right",
+        label: "RESPAWNING · TEAM B",
+        anchor: { x: 528, y: 24 },
+        persistent: true,
+      },
+    ],
+  );
+  assert.ok(waves.every((wave) => !Object.hasOwn(wave, "agentPresentationKey")));
+  assert.equal(waves[0].phaseStart, waves[1].phaseStart);
+  assert.equal(waves[0].phaseEnd, waves[1].phaseEnd);
+
+  const respawn = plan.events[4];
+  assert.equal(respawn.kind, "semantic_pulse");
+  assert.equal(respawn.cueSemantic, "agent_respawned");
+  assert.equal(respawn.persistent, true);
+  assert.deepEqual(respawn.anchor, projectedTrajectoryPoint(raw, 3, "successor"));
+  assert.equal(respawn.agentPresentationKey, respawnAnchor.presentation_key);
+  assert.equal(respawn.agentPublicAgentId, respawnAnchor.public_agent_id);
+  assert.equal(respawn.phaseEnd, plan.phases.total);
+  assert.equal(plan.bounds.persistentNodes, 24);
+});
+
+test("NoShared and Shared authorized clocks never synthesize a respawn wave", async () => {
+  for (const kind of [
+    "replay_no_shared_obs_agent_pov",
+    "replay_shared_obs_agent_pov",
+  ]) {
+    const frame = await normalized(kind);
+    const serializedBefore = JSON.stringify(frame);
+    const plan = buildChoreographyPlan(frame, surface);
+    assert.ok(plan, kind);
+    assert.equal(JSON.stringify(frame), serializedBefore, kind);
+    assert.equal(
+      plan.events.some(
+        (event) =>
+          event.eventType === "respawn_wave_occurred" ||
+          event.cueSemantic === "respawn_wave_occurred",
+      ),
+      false,
+      kind,
+    );
+    assert.ok(
+      plan.events.every(
+        (event) =>
+          event.authorityVocabulary === "recipient_cue" ||
+          event.authorityVocabulary === "observation_delta",
+      ),
+      kind,
+    );
+  }
+});
+
+test("rejection stays at its serialized transition-start anchor", async () => {
+  const raw = structuredClone(fixture.state_cases.replay_oracle_final_selected);
+  const rejection = raw.latest_events.events[0];
+  const trajectory = raw.latest_events.agent_phase_trajectories.find(
+    (/** @type {Record<string, any>} */ candidate) =>
+      candidate.agent_presentation_key === rejection.actor_anchor.presentation_key,
+  );
+  assert.ok(trajectory);
+  trajectory.transition_start.position = [3.2, 3.1];
+  rejection.actor_anchor = structuredClone(trajectory.transition_start);
+  const frame = await normalizeAuthorizedPresentationFrameV1(raw);
+  const serializedBefore = JSON.stringify(frame);
+  const plan = buildChoreographyPlan(frame, surface);
+  assert.ok(plan);
+  assert.equal(JSON.stringify(frame), serializedBefore);
+  assert.equal(plan.events.length, 1);
+  assert.equal(plan.events[0].eventId, rejection.event_id);
+  assert.equal(plan.events[0].kind, "rejected_action");
+  assert.deepEqual(plan.events[0].actor, { x: 32, y: 31 });
+  assert.notDeepEqual(plan.events[0].actor, {
+    x: trajectory.successor.position[0] * 10,
+    y: trajectory.successor.position[1] * 10,
+  });
+});
+
+test("missing, duplicate, phase-discordant, and identity-discordant trajectories fail closed", async () => {
+  /** @type {ReadonlyArray<readonly [string, (raw: Record<string, any>) => void]>} */
+  const mutations = [
+    [
+      "missing",
+      (raw) => {
+        raw.latest_events.agent_phase_trajectories.pop();
+      },
+    ],
+    [
+      "duplicate",
+      (raw) =>
+        raw.latest_events.agent_phase_trajectories.push(
+          structuredClone(raw.latest_events.agent_phase_trajectories[0]),
+        ),
+    ],
+    [
+      "phase discordant",
+      (raw) => {
+        raw.latest_events.agent_phase_trajectories[0].transition_start.phase =
+          "successor";
+      },
+    ],
+    [
+      "identity discordant",
+      (raw) => {
+        raw.latest_events.agent_phase_trajectories[0].transition_start.public_agent_id =
+          "unique-discordant-public-agent";
+      },
+    ],
+  ];
+  for (const [label, mutate] of mutations) {
+    const raw = structuredClone(fixture.presentations.replay_oracle);
+    mutate(raw);
+    await assert.rejects(normalizeAuthorizedPresentationFrameV1(raw), TypeError, label);
+  }
+});
+
+test("Oracle status compositor applies exact precedence and preserves every atomic identity", async () => {
+  const cases = [
+    {
+      label: "apply",
+      kinds: ["status_applied"],
+      lifecycle: "applied",
+      primaryIndex: 0,
+    },
+    {
+      label: "multiple apply",
+      kinds: ["status_applied", "status_applied"],
+      lifecycle: "applied",
+      primaryIndex: 0,
+    },
+    {
+      label: "refresh",
+      kinds: ["status_refreshed_or_extended"],
+      lifecycle: "refreshed",
+      primaryIndex: 0,
+    },
+    {
+      label: "refresh plus apply",
+      kinds: ["status_applied", "status_refreshed_or_extended"],
+      lifecycle: "refreshed",
+      primaryIndex: 1,
+    },
+    {
+      label: "break",
+      kinds: ["status_broken_by_damage"],
+      lifecycle: "trap_broken",
+      primaryIndex: 0,
+    },
+    {
+      label: "break plus apply",
+      kinds: ["status_broken_by_damage", "status_applied"],
+      lifecycle: "trap_broken_and_reapplied",
+      primaryIndex: 1,
+    },
+    {
+      label: "age",
+      kinds: ["status_aged_to_zero"],
+      lifecycle: "expired",
+      primaryIndex: 0,
+    },
+    {
+      label: "age plus apply",
+      kinds: ["status_aged_to_zero", "status_applied"],
+      lifecycle: "reapplied",
+      primaryIndex: 1,
+    },
+    {
+      label: "death clear precedence",
+      kinds: ["status_aged_to_zero", "status_applied", "status_cleared_by_new_death"],
+      lifecycle: "cleared_by_death",
+      primaryIndex: 2,
+    },
+  ];
+
+  for (const expected of cases) {
+    const raw = structuredClone(fixture.presentations.replay_oracle);
+    const events = expected.kinds.map((kind, index) =>
+      oracleStatusEvent(raw, kind, {
+        sourceClass: expected.label === "multiple apply" ? [3, 5][index] : 3,
+      }),
+    );
+    installOracleEvents(raw, events);
+    const frame = await normalizeAuthorizedPresentationFrameV1(raw);
+    const serializedBefore = JSON.stringify(frame);
+    const incomingRows = authorizedPresentationIncomingRows(frame);
+    const incomingRowsBefore = JSON.stringify(incomingRows);
+    const plan = buildChoreographyPlan(frame, surface);
+    assert.ok(plan, expected.label);
+    assert.equal(JSON.stringify(frame), serializedBefore, expected.label);
+    assert.equal(
+      JSON.stringify(authorizedPresentationIncomingRows(frame)),
+      incomingRowsBefore,
+      expected.label,
+    );
+    const atomicEventIds = incomingRows.map(({ id }) => id);
+    const applicationRows = incomingRows.filter(
+      ({ kind }) => kind === "status_applied",
+    );
+    const expectedApplicationSources = applicationRows.map(({ id, payload }) => ({
+      eventId: id,
+      sourcePresentationKey: payload.source_anchor.presentation_key,
+      sourcePublicAgentId: payload.source_anchor.public_agent_id,
+    }));
+    assert.equal(plan.events.length, 1, expected.label);
+    assert.equal(plan.bounds.nodes, 30, expected.label);
+    const [lifecycle] = plan.events;
+    assert.deepEqual(
+      [lifecycle.eventId, lifecycle.eventType],
+      [atomicEventIds[expected.primaryIndex], incomingRows[expected.primaryIndex].kind],
+      expected.label,
+    );
+    assert.equal(lifecycle.kind, "status_lifecycle", expected.label);
+    assert.equal(lifecycle.lifecycle, expected.lifecycle, expected.label);
+    assert.deepEqual(lifecycle.atomicEventIds, atomicEventIds, expected.label);
+    assert.deepEqual(
+      lifecycle.applicationEventIds,
+      applicationRows.map(({ id }) => id),
+      expected.label,
+    );
+    assert.deepEqual(
+      lifecycle.applicationSources,
+      expectedApplicationSources,
+      expected.label,
+    );
+    assert.equal(lifecycle.presentationSuppressed, false, expected.label);
+    assert.equal(lifecycle.spatial, true, expected.label);
+    assert.ok(
+      lifecycle.applicationSources.every(
+        (/** @type {Record<string, any>} */ source) =>
+          typeof source.sourcePresentationKey === "string" &&
+          typeof source.sourcePublicAgentId === "string" &&
+          !Object.hasOwn(source, "source") &&
+          !Object.hasOwn(source, "sourceSlot"),
+      ),
+      expected.label,
+    );
+    if (expectedApplicationSources.length > 0) {
+      const sourceRow = explainChoreographyEvent(lifecycle).rows.find(
+        (/** @type {Record<string, any>} */ row) =>
+          row.label ===
+          (expectedApplicationSources.length === 1 ? "Source" : "Application Sources"),
+      );
+      assert.deepEqual(
+        sourceRow,
+        {
+          label:
+            expectedApplicationSources.length === 1 ? "Source" : "Application Sources",
+          value: expectedApplicationSources
+            .map(({ sourcePublicAgentId }) => `Agent ID ${sourcePublicAgentId}`)
+            .join("; "),
+          metadata: { compact: true, full: true },
+        },
+        expected.label,
+      );
+    }
+    assertRecursivelyFrozen(lifecycle);
+    if (expected.lifecycle === "reapplied") {
+      assert.equal(lifecycle.lifecycleToken.label, "Reapplied");
+      assert.equal(lifecycle.lifecycleToken.accessibleName, "Status reapplied");
+      assert.equal(lifecycle.lifecycleToken.glyphKey, "lifecycle-applied");
+      assert.doesNotMatch(JSON.stringify(lifecycle.lifecycleToken), /expir/iu);
+    }
+  }
+});
+
+test("status groups keep first-atomic plan and layout order when precedence favors a later group", async () => {
+  const raw = structuredClone(fixture.presentations.replay_oracle);
+  const events = [
+    oracleStatusEvent(raw, "status_applied", { channel: 8, sourceClass: 5 }),
+    oracleStatusEvent(raw, "status_aged_to_zero", { channel: 4 }),
+    oracleStatusEvent(raw, "status_applied", { channel: 4 }),
+    oracleStatusEvent(raw, "status_applied", { channel: 0 }),
+    oracleStatusEvent(raw, "status_applied", { channel: 1 }),
+  ];
+  installOracleEvents(raw, events);
+  const frame = await normalizeAuthorizedPresentationFrameV1(raw);
+  const incomingRows = authorizedPresentationIncomingRows(frame);
+  const serializedBefore = JSON.stringify(frame);
+  const incomingRowsBefore = JSON.stringify(incomingRows);
+  const layoutSurface = Object.freeze({
+    ...surface,
+    /** @param {readonly [number, number] | {x: number, y: number}} point */
+    worldToScreen: (point) => ({
+      x: ("x" in point ? Number(point.x) : Number(point[0])) * 10 + 200,
+      y: ("y" in point ? Number(point.y) : Number(point[1])) * 10 + 160,
+    }),
+  });
+  const plan = buildChoreographyPlan(frame, layoutSurface);
+  assert.ok(plan);
+  assert.equal(JSON.stringify(frame), serializedBefore);
+  assert.equal(
+    JSON.stringify(authorizedPresentationIncomingRows(frame)),
+    incomingRowsBefore,
+  );
+  assert.equal(plan.events.length, 4);
+  assert.equal(plan.bounds.nodes, 114);
+  assert.deepEqual(
+    plan.events.map(({ eventId }) => eventId),
+    [incomingRows[0].id, incomingRows[2].id, incomingRows[3].id, incomingRows[4].id],
+  );
+  assert.deepEqual(
+    plan.events.map(({ lane, laneCount, statusLayoutOrder }) => [
+      lane,
+      laneCount,
+      statusLayoutOrder,
+    ]),
+    [
+      [0, 4, 0],
+      [1, 4, 1],
+      [2, 4, 3],
+      [3, 4, 4],
+    ],
+  );
+  assert.deepEqual(plan.events[0].atomicEventIds, [incomingRows[0].id]);
+  assert.deepEqual(plan.events[1].atomicEventIds, [
+    incomingRows[1].id,
+    incomingRows[2].id,
+  ]);
+  assert.equal(plan.events[0].lifecycle, "applied");
+  assert.equal(plan.events[1].lifecycle, "reapplied");
+  const earlierApply = plan.events[0];
+  const laterReapplication = plan.events[1];
+  assert.ok(earlierApply.cue);
+  assert.ok(laterReapplication.cue);
+  assert.ok(Math.abs(earlierApply.cue.x - earlierApply.recipient.x) < 1e-9);
+  assert.ok(Math.abs(earlierApply.recipient.y - earlierApply.cue.y - 42) < 1e-9);
+  assert.equal(
+    Math.abs(laterReapplication.cue.x - (laterReapplication.recipient.x + 42)) < 1e-9 &&
+      Math.abs(laterReapplication.cue.y - laterReapplication.recipient.y) < 1e-9,
+    false,
+  );
+});
+
+test("durable current status without an atomic status event creates no lifecycle cue", async () => {
+  const raw = structuredClone(fixture.presentations.replay_oracle);
+  installOracleEvents(raw, []);
+  const frame = await normalizeAuthorizedPresentationFrameV1(raw);
+  assert.ok(
+    authorizedPresentationSceneView(frame)?.agents.some(
+      (/** @type {Record<string, any>} */ agent) =>
+        Array.isArray(agent.statuses) && agent.statuses.length > 0,
+    ),
+  );
+  const plan = buildChoreographyPlan(frame, surface);
+  assert.ok(plan);
+  assert.deepEqual(plan.events, []);
+  assert.equal(plan.phases.total, 0);
+});
+
+test("lifecycle metadata retains opaque keys without inventing source routes", async () => {
   const oracle = await normalized("replay_oracle");
   const plan = buildChoreographyPlan(oracle, surface);
   const lifecycle = plan?.events.find(({ kind }) => kind === "status_lifecycle");
   assert.ok(lifecycle);
-  const routes = statusApplicationRoutes(lifecycle);
-  assert.equal(routes.length, 1);
-  assert.equal(routes[0].sourcePresentationKey, lifecycle.sourcePresentationKey);
-  assert.equal(routes[0].sourceSlot, null);
+  assert.equal(lifecycle.applicationSources.length, 1);
+  assert.equal(
+    lifecycle.applicationSources[0].sourcePresentationKey,
+    lifecycle.sourcePresentationKey,
+  );
+  assert.equal(Object.hasOwn(lifecycle.applicationSources[0], "source"), false);
+  assert.equal(Object.hasOwn(lifecycle.applicationSources[0], "sourceSlot"), false);
 
   const samePublicIdentity = {
     kind: "net_health",

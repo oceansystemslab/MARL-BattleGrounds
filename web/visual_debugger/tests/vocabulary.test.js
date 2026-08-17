@@ -56,7 +56,7 @@ const EXPECTED_LIFECYCLE = [
   "cleared_by_death",
   "cleared_unclassified",
   "trap_broken_and_reapplied",
-  "expired_then_reapplied",
+  "reapplied",
 ];
 const EXPECTED_CATALOG_STATUS_MAP = Object.freeze({
   warrior_charge_slow: "slow_warrior_charge",
@@ -113,6 +113,34 @@ test("death clear is distinct from natural expiry and damage break", () => {
   assert.notEqual(deathClear.glyphKey, damageBreak.glyphKey);
   assert.notEqual(deathClear.cssKey, expired.cssKey);
   assert.notEqual(deathClear.cssKey, damageBreak.cssKey);
+});
+
+test("status compositor outcomes use the exact locked lifecycle vocabulary", () => {
+  const labels = Object.freeze({
+    applied: "Applied",
+    refreshed: "Refreshed",
+    trap_broken_and_reapplied: "Broken, then reapplied",
+    reapplied: "Reapplied",
+    trap_broken: "Broken",
+    expired: "Expired",
+    cleared_by_death: "Cleared on death",
+  });
+  for (const [tokenId, label] of Object.entries(labels)) {
+    assert.equal(resolveVisualToken("lifecycle", tokenId).label, label, tokenId);
+  }
+  for (const [tokenId, shortLabel] of [
+    ["applied", "Applied"],
+    ["refreshed", "Refreshed"],
+    ["expired", "Expired"],
+  ]) {
+    const lifecycle = resolveVisualToken("lifecycle", tokenId);
+    assert.equal(lifecycle.shortLabel, shortLabel, tokenId);
+  }
+  const reapplied = resolveVisualToken("lifecycle", "reapplied");
+  assert.equal(reapplied.shortLabel, "Reapplied");
+  assert.equal(reapplied.accessibleName, "Status reapplied");
+  assert.equal(reapplied.glyphKey, "lifecycle-applied");
+  assert.doesNotMatch(JSON.stringify(reapplied), /expir/iu);
 });
 
 test("product vocabulary uses the locked exact ability and aura names", () => {
@@ -202,6 +230,20 @@ test("class glyphs use the canonical Hunter bow and Priest medic cross", () => {
         stroke: "none",
       },
     ],
+  );
+});
+
+test("durable in-combat state uses the allowlisted crossed-swords glyph", () => {
+  const inCombat = iconDefinition("combat-in-progress");
+  assert.equal(KNOWN_GLYPH_KEYS.includes("combat-in-progress"), true);
+  assert.equal(inCombat.glyphKey, "combat-in-progress");
+  assert.deepEqual(
+    inCombat.primitives.map((primitive) => primitive.tag),
+    ["path", "path"],
+  );
+  assert.deepEqual(
+    inCombat.primitives.map((primitive) => primitive.attributes.d),
+    ["M4 3 15 14M13 16l3-3 4 4-3 3Z", "M20 3 9 14M11 16l-3-3-4 4 3 3Z"],
   );
 });
 

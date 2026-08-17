@@ -4,7 +4,7 @@ import {
   authorizedPresentationSceneView,
   isAuthorizedPresentationFrame,
 } from "./authorized-presentation-adapter.js";
-import { createRouteGeometry, layoutRouteSet, routeMarkerPose } from "./routes.js";
+import { createRouteGeometry } from "./routes.js";
 import {
   activationImpactSemantic,
   classTokenFromId,
@@ -84,15 +84,10 @@ const OUTCOME_CUE_CLEARANCE = 2;
 const OUTCOME_CUE_GRID_COLUMNS = 48;
 const OUTCOME_CUE_GRID_ROWS = 36;
 const OUTCOME_CUE_TARGET_STEP = 8;
-const TRANSIENT_ICON_CLEARANCE = Object.freeze({ width: 24, height: 24 });
-const CHARGE_OWNERSHIP_CUE_DIMENSIONS = Object.freeze({ width: 72, height: 22 });
-const CHARGE_OWNERSHIP_ROUTE_PROGRESS = Object.freeze([0.18, 0.32, 0.5, 0.68, 0.82]);
-const CHARGE_OWNERSHIP_NORMAL_OFFSETS = Object.freeze([0, 16, -16, 32, -32, 48, -48]);
-const BASIC_TARGET_ENDPOINT_GAP = 12;
-const CHARGE_TARGET_ENDPOINT_GAP = 18;
 const NET_CUE_DIMENSIONS = Object.freeze({ width: 88, height: 36 });
 const UNCHANGED_NET_CUE_DIMENSIONS = Object.freeze({ width: 102, height: 36 });
 const LIFECYCLE_CUE_DIMENSIONS = Object.freeze({ width: 52, height: 52 });
+const REGENERATION_CUE_DIMENSIONS = Object.freeze({ width: 64, height: 44 });
 
 /**
  * @typedef {{
@@ -116,18 +111,6 @@ const LIFECYCLE_CUE_DIMENSIONS = Object.freeze({ width: 52, height: 52 });
  *     height: number,
  *   }>,
  * }} ProjectionSurface
- * @typedef {{
- *   eventId: string,
- *   sourceGlobalSlot: number,
- *   targetGlobalSlot: number,
- *   tokenId?: string,
- *   source: {x: number, y: number},
- *   target: {x: number, y: number},
- *   sourceRadius: number,
- *   targetRadius: number,
- *   targetEndpointGap?: number,
- *   prioritizeTargetClearance?: boolean,
- * }} RouteInput
  * @typedef {Record<string, any> & {
  *   events: ReadonlyArray<Record<string, any>>,
  * }} ChoreographyPlan
@@ -208,14 +191,6 @@ function point(value) {
 }
 
 /**
- * @param {unknown} value
- * @returns {readonly [number, number] | null}
- */
-function anchorPoint(value) {
-  return point(record(value)?.position) ?? point(value);
-}
-
-/**
  * Place a non-spatial team clock cue in a stable presentation corner. The
  * position is UI layout only; team identity comes directly from the event.
  *
@@ -227,9 +202,10 @@ function teamClockPoint(teamId, surface) {
   if (!bounds || (teamId !== 1 && teamId !== 2)) {
     return null;
   }
+  const horizontalInset = Math.min(112, Math.max(76, Number(bounds.width) * 0.2));
   return Object.freeze({
-    x: teamId === 1 ? bounds.left + 28 : bounds.right - 28,
-    y: bounds.top + 28,
+    x: teamId === 1 ? bounds.left + horizontalInset : bounds.right - horizontalInset,
+    y: bounds.top + 24,
   });
 }
 
@@ -258,7 +234,7 @@ function project(world, surface) {
  *
  * @param {ReadonlyArray<Record<string, any>>} events
  * @param {ProjectionSurface | null} surface
- * @param {"net_health" | "status_lifecycle"} eventKind
+ * @param {"net_health" | "status_lifecycle" | "regeneration"} eventKind
  */
 function layoutOutcomeCues(events, surface, eventKind) {
   const viewport = normalizedRectangle(surface?.viewportBounds);
@@ -281,7 +257,9 @@ function layoutOutcomeCues(events, surface, eventKind) {
         ? event.outcome === "unchanged"
           ? UNCHANGED_NET_CUE_DIMENSIONS
           : NET_CUE_DIMENSIONS
-        : LIFECYCLE_CUE_DIMENSIONS;
+        : event.kind === "regeneration"
+          ? REGENERATION_CUE_DIMENSIONS
+          : LIFECYCLE_CUE_DIMENSIONS;
     const selected =
       selectCueCandidate(
         localCueCandidates(
@@ -327,144 +305,6 @@ function layoutOutcomeCues(events, surface, eventKind) {
 }
 
 /**
- * Place each public Charge ownership pill outside durable geometry and every
- * other ownership pill. Route-adjacent positions preserve immediate visual
- * association; the bounded whole-map fallback is retained for unusually dense
- * layouts and remains associated through the route anchor stored with the cue.
- *
- * Only same-phase activation iconography reserves transient screen space here.
- * Earlier/later NET and lifecycle phases cannot collide with these labels and
- * therefore do not reduce their bounded placement capacity.
- *
- * @param {ReadonlyArray<Record<string, any>>} events
- * @param {ProjectionSurface | null} surface
- */
-function layoutChargeOwnershipCues(events, surface) {
-  const viewport = normalizedRectangle(surface?.viewportBounds);
-  if (!viewport) {
-    return events;
-  }
-  const occupied = array(surface?.protectedRects)
-    .map(normalizedRectangle)
-    .filter((bounds) => bounds !== null)
-    .map((bounds) => expandCueBounds(bounds, OUTCOME_CUE_CLEARANCE));
-  occupied.push(
-    ...activationIconBounds(events).map((bounds) =>
-      expandCueBounds(bounds, OUTCOME_CUE_CLEARANCE),
-    ),
-  );
-  /** @type {Map<Record<string, any>, Record<string, any>>} */
-  const placed = new Map();
-  const charges = events
-    .filter(
-      (event) =>
-        event.spatial &&
-        event.kind === "activation" &&
-        event.tokenId === "warrior_charge" &&
-        event.route,
-    )
-    .sort(
-      (left, right) =>
-        Number(left.sourceSlot) - Number(right.sourceSlot) ||
-        Number(left.targetSlot) - Number(right.targetSlot) ||
-        String(left.eventId).localeCompare(String(right.eventId)),
-    );
-  for (const event of charges) {
-    const selected =
-      selectCueCandidate(
-        chargeOwnershipRouteCandidates(event.route, viewport),
-        occupied,
-      ) ??
-      selectCueCandidate(
-        chargeOwnershipViewportCandidates(event.route, viewport),
-        occupied,
-      );
-    if (!selected) {
-      placed.set(
-        event,
-        Object.freeze({
-          ...event,
-          ownershipAnchor: null,
-          ownershipBounds: null,
-          ownershipCue: null,
-          ownershipCueCollisionFree: false,
-          ownershipCueSuppressionReason: "no_collision_free_position",
-          ownershipSpatialDisposition: "suppressed_collision",
-        }),
-      );
-      continue;
-    }
-    occupied.push(expandCueBounds(selected.bounds, OUTCOME_CUE_CLEARANCE));
-    placed.set(
-      event,
-      Object.freeze({
-        ...event,
-        ownershipAnchor: selected.anchor,
-        ownershipBounds: selected.bounds,
-        ownershipCue: selected.center,
-        ownershipCueCollisionFree: true,
-        ownershipSpatialDisposition: "rendered",
-      }),
-    );
-  }
-  return events.map((event) => placed.get(event) ?? event);
-}
-
-/**
- * @param {Parameters<typeof routeMarkerPose>[0]} route
- * @param {Record<string, number>} viewport
- */
-function chargeOwnershipRouteCandidates(route, viewport) {
-  const candidates = [];
-  const candidateKeys = new Set();
-  for (const offset of CHARGE_OWNERSHIP_NORMAL_OFFSETS) {
-    for (const progress of CHARGE_OWNERSHIP_ROUTE_PROGRESS) {
-      const anchor = routeMarkerPose(route, progress);
-      const radians = (anchor.degrees * Math.PI) / 180;
-      const raw = {
-        x: anchor.x - Math.sin(radians) * offset,
-        y: anchor.y + Math.cos(radians) * offset,
-      };
-      const center = clampCueCenter(raw, CHARGE_OWNERSHIP_CUE_DIMENSIONS, viewport);
-      if (!center) {
-        continue;
-      }
-      const key = `${center.x.toFixed(6)}:${center.y.toFixed(6)}`;
-      if (candidateKeys.has(key)) {
-        continue;
-      }
-      candidateKeys.add(key);
-      candidates.push(
-        Object.freeze({
-          anchor: Object.freeze({ x: anchor.x, y: anchor.y }),
-          center,
-          bounds: cueBounds(center, CHARGE_OWNERSHIP_CUE_DIMENSIONS),
-          displacement: Math.hypot(center.x - anchor.x, center.y - anchor.y),
-        }),
-      );
-    }
-  }
-  return candidates;
-}
-
-/**
- * @param {Parameters<typeof routeMarkerPose>[0]} route
- * @param {Record<string, number>} viewport
- */
-function chargeOwnershipViewportCandidates(route, viewport) {
-  const anchor = routeMarkerPose(route, 0.5);
-  const routeAnchor = Object.freeze({ x: anchor.x, y: anchor.y });
-  return viewportCueCenters(CHARGE_OWNERSHIP_CUE_DIMENSIONS, viewport).map((center) =>
-    Object.freeze({
-      anchor: routeAnchor,
-      center,
-      bounds: cueBounds(center, CHARGE_OWNERSHIP_CUE_DIMENSIONS),
-      displacement: Math.hypot(center.x - routeAnchor.x, center.y - routeAnchor.y),
-    }),
-  );
-}
-
-/**
  * Exact ending classifications outrank generic applications within the
  * lifecycle tier. NET cues are handled in an earlier layout pass. Returned
  * event order remains untouched.
@@ -477,6 +317,16 @@ function outcomePlacementOrder(left, right) {
     (left.kind === "net_health" ? 0 : 1) - (right.kind === "net_health" ? 0 : 1);
   if (kindDifference !== 0) {
     return kindDifference;
+  }
+  const statusLayoutDifference =
+    left.kind === "status_lifecycle" &&
+    right.kind === "status_lifecycle" &&
+    Number.isInteger(left.statusLayoutOrder) &&
+    Number.isInteger(right.statusLayoutOrder)
+      ? Number(left.statusLayoutOrder) - Number(right.statusLayoutOrder)
+      : 0;
+  if (statusLayoutDifference !== 0) {
+    return statusLayoutDifference;
   }
   return (
     lifecyclePlacementPriority(left) - lifecyclePlacementPriority(right) ||
@@ -492,7 +342,7 @@ function outcomePlacementOrder(left, right) {
 function lifecyclePlacementPriority(event) {
   if (
     event.lifecycle === "trap_broken_and_reapplied" ||
-    event.lifecycle === "expired_then_reapplied"
+    event.lifecycle === "reapplied"
   ) {
     return 0;
   }
@@ -507,26 +357,6 @@ function lifecyclePlacementPriority(event) {
     return 2;
   }
   return 3;
-}
-
-/**
- * Reserve the fixed icon at every spatial activation source/impact. Routes
- * remain free to cross the map; only semantic iconography blocks numeric and
- * lifecycle cue placement.
- *
- * @param {ReadonlyArray<Record<string, any>>} events
- */
-function activationIconBounds(events) {
-  return events.flatMap((event) => {
-    if (!event.spatial || event.kind !== "activation") {
-      return [];
-    }
-    const center =
-      event.presentationKind === "source_local"
-        ? event.source
-        : (event.route?.end ?? event.target);
-    return center ? [cueBounds(center, TRANSIENT_ICON_CLEARANCE)] : [];
-  });
 }
 
 /**
@@ -896,111 +726,6 @@ function rectangleIntersectionArea(first, second) {
 }
 
 /**
- * @param {unknown} frame
- * @returns {Record<string, any> | null}
- */
-function frameScene(frame) {
-  const candidate = record(frame);
-  if (!candidate) {
-    return null;
-  }
-  return record(candidate.scene);
-}
-
-/**
- * @param {unknown} frame
- * @returns {Record<string, any> | null}
- */
-export function frameEventBatch(frame) {
-  const candidate = record(frame);
-  if (!candidate) {
-    return null;
-  }
-  return record(candidate.event_batch);
-}
-
-/**
- * @param {unknown} frame
- * @returns {string | null}
- */
-export function transitionEpochKey(frame) {
-  const candidate = record(frame);
-  const batch = frameEventBatch(frame);
-  const sessionId = identifier(candidate?.session_id);
-  const runGeneration = integer(candidate?.run_generation);
-  const transitionId = scientificIdentity(
-    candidate?.incoming_transition_id ??
-      candidate?.incoming_pov_transition_id ??
-      batch?.transition_id ??
-      candidate?.transition_id,
-  );
-  if (sessionId === null || runGeneration === null || transitionId === null) {
-    return null;
-  }
-  return JSON.stringify([sessionId, runGeneration, transitionId]);
-}
-
-/**
- * @param {unknown} frame
- * @returns {string | null}
- */
-export function authorizationContextKey(frame) {
-  const candidate = record(frame);
-  const scene = frameScene(frame);
-  if (
-    candidate?.viewer_mode === "replay" &&
-    candidate.replay_audience !== "researcher" &&
-    candidate.replay_audience !== "actor_pov"
-  ) {
-    return null;
-  }
-  const sessionId = identifier(candidate?.session_id);
-  const runGeneration = integer(candidate?.run_generation);
-  const audience =
-    scene?.audience === "researcher" || scene?.audience === "agent_pov"
-      ? scene.audience
-      : null;
-  if (audience === null) {
-    return null;
-  }
-  const replayActor =
-    candidate?.viewer_mode === "replay"
-      ? candidate.replay_audience === "actor_pov"
-        ? integer(candidate.pov_global_slot)
-        : null
-      : null;
-  const controlled =
-    audience === "agent_pov"
-      ? (replayActor ?? integer(record(scene?.selection)?.controlled_global_slot))
-      : null;
-  if (
-    sessionId === null ||
-    runGeneration === null ||
-    (audience === "agent_pov" && controlled === null)
-  ) {
-    return null;
-  }
-  return JSON.stringify([sessionId, runGeneration, audience, controlled]);
-}
-
-/**
- * @param {unknown} frame
- * @returns {string | null}
- */
-export function eventFingerprint(frame) {
-  const batch = frameEventBatch(frame);
-  if (!batch) {
-    return null;
-  }
-  const events = array(batch.events);
-  const eventIds = events.map((event) => identifier(record(event)?.event_id));
-  if (eventIds.some((eventId) => eventId === null)) {
-    return null;
-  }
-  return `${events.length}:${hashText(JSON.stringify(events))}`;
-}
-
-/**
  * Deterministic non-cryptographic content identity for an already-authorized
  * event batch. The hash is presentation state, not a trust boundary.
  *
@@ -1034,142 +759,16 @@ export function isSubmissionCommand(command) {
   return normalized === "space" || normalized === "enter" || normalized === "n";
 }
 
-/**
- * Compose simultaneous atomic status events without inventing status state.
- * Recipient slot, catalog channel, and status ID are serialized authority; the
- * browser only chooses one readable cue for each exact group. Every source
- * event keeps its own plan row and the primary cue carries all atomic IDs.
- *
- * @param {ReadonlyArray<unknown>} rawEvents
- * @param {string} transitionId
- */
-function statusPresentationAssignments(rawEvents, transitionId) {
-  /** @type {Map<string, {events: Record<string, any>[], firstIndex: number}>} */
-  const groups = new Map();
-  const seenEventIds = new Set();
-  rawEvents.forEach((rawEvent, index) => {
-    const event = record(rawEvent);
-    const eventType = identifier(event?.event_type);
-    const eventId = identifier(event?.event_id);
-    const recipientSlot = integer(event?.recipient_global_slot);
-    const statusChannel = integer(event?.status_channel);
-    const statusId = identifier(event?.status_id);
-    if (
-      !event ||
-      eventType === null ||
-      !STATUS_EVENT_TYPES.has(eventType) ||
-      eventId === null ||
-      seenEventIds.has(eventId) ||
-      scientificIdentity(event.transition_id) !== transitionId ||
-      recipientSlot === null ||
-      statusChannel === null ||
-      statusId === null
-    ) {
-      return;
-    }
-    seenEventIds.add(eventId);
-    const key = `${recipientSlot}:${statusChannel}:${statusId}`;
-    const group = groups.get(key) ?? { events: [], firstIndex: index };
-    group.events.push(event);
-    groups.set(key, group);
-  });
-
-  /** @type {Map<string, {lane: number, laneCount: number}>} */
-  const lanes = new Map();
-  /** @type {Map<number, Array<[string, {events: Record<string, any>[], firstIndex: number}]>>} */
-  const groupsByRecipient = new Map();
-  for (const [key, group] of groups) {
-    const recipientSlot = integer(group.events[0]?.recipient_global_slot);
-    if (recipientSlot === null) continue;
-    const recipientGroups = groupsByRecipient.get(recipientSlot) ?? [];
-    recipientGroups.push([key, group]);
-    groupsByRecipient.set(recipientSlot, recipientGroups);
-  }
-  for (const recipientGroups of groupsByRecipient.values()) {
-    recipientGroups.sort((left, right) => left[1].firstIndex - right[1].firstIndex);
-    recipientGroups.forEach(([key], lane) => {
-      lanes.set(key, { lane, laneCount: recipientGroups.length });
-    });
-  }
-
-  /** @type {Map<string, Record<string, any>>} */
-  const assignments = new Map();
-  for (const [key, group] of groups) {
-    const appliedEvents = group.events.filter(
-      (event) => event.event_type === "status_applied",
-    );
-    const applied = appliedEvents.at(-1) ?? null;
-    const byType = new Map(
-      group.events.map((event) => [identifier(event.event_type), event]),
-    );
-    const refreshed = byType.get("status_refreshed_or_extended") ?? null;
-    const cleared = byType.get("status_cleared_by_new_death") ?? null;
-    const broken = byType.get("status_broken_by_damage") ?? null;
-    const expired = byType.get("status_aged_to_zero") ?? null;
-    const lifecycle = cleared
-      ? "cleared_by_death"
-      : refreshed
-        ? "refreshed"
-        : broken && applied
-          ? "trap_broken_and_reapplied"
-          : expired && applied
-            ? "expired_then_reapplied"
-            : broken
-              ? "trap_broken"
-              : expired
-                ? "expired"
-                : "applied";
-    const primary =
-      cleared ??
-      refreshed ??
-      (applied && (broken || expired) ? applied : null) ??
-      broken ??
-      expired ??
-      applied;
-    if (!primary) continue;
-    const atomicEventIds = Object.freeze(
-      group.events.map((event) => identifier(event.event_id)).filter(Boolean),
-    );
-    const applicationEventIds = Object.freeze(
-      appliedEvents.map((event) => identifier(event.event_id)).filter(Boolean),
-    );
-    const sourceEvents = Object.freeze([...appliedEvents]);
-    const lane = lanes.get(key) ?? { lane: 0, laneCount: 1 };
-    for (const event of group.events) {
-      const eventId = identifier(event.event_id);
-      if (eventId === null) continue;
-      assignments.set(
-        eventId,
-        Object.freeze({
-          primary: event === primary,
-          lifecycle,
-          atomicEventIds,
-          applicationEventIds,
-          sourceEvents,
-          lane: lane.lane,
-          laneCount: lane.laneCount,
-        }),
-      );
-    }
-  }
-  return assignments;
-}
-
 /** @param {Record<string, any>} event @returns {ChoreographyFamily | null} */
 function choreographyFamily(event) {
   if (event.kind === "activation") return "ability";
   if (event.kind === "rejected_action") return "rejection";
   if (event.kind === "net_health") return "health";
+  if (event.kind === "regeneration") return "recovery";
   if (event.kind === "charge_displacement") return "charge";
   if (event.kind === "movement_displacement") return "movement";
   if (event.kind === "status_lifecycle") return "status";
   if (event.kind !== "semantic_pulse") return null;
-  if (
-    event.cueSemantic === "combat_countdown_reset" ||
-    event.cueSemantic === "health_regenerated"
-  ) {
-    return "recovery";
-  }
   if (
     event.cueSemantic === "cooldown_started" ||
     event.cueSemantic === "cooldown_ready"
@@ -1269,32 +868,383 @@ function scheduleChoreography(events) {
   return Object.freeze({ phases, events: Object.freeze(scheduledEvents) });
 }
 
-/**
- * @param {Record<string, any> | null} scene
- * @param {ProjectionSurface | null} surface
- */
-function radiusBySlot(scene, surface) {
-  /** @type {Map<number, number>} */
-  const radii = new Map();
-  if (!surface) {
-    return radii;
-  }
-  for (const rawAgent of array(scene?.agents)) {
-    const agent = record(rawAgent);
-    const slot = integer(agent?.global_slot);
-    const radius = finiteNumber(agent?.radius);
-    if (slot === null || radius === null || radius < 0) {
-      continue;
-    }
-    radii.set(slot, surface.worldLengthToScreen(radius));
-  }
-  return radii;
-}
-
 /** @param {unknown} rawAnchor @param {ProjectionSurface | null} surface */
 function authorizedAnchor(rawAnchor, surface) {
   const anchor = record(rawAnchor);
   return anchor ? project(point(anchor.position), surface) : null;
+}
+
+/**
+ * Consume only the certified successor-phase neutral team anchor. It carries
+ * no world position: left/right placement is presentation geometry derived
+ * from its exact two-team identity and the current authorized viewport.
+ *
+ * @param {unknown} rawAnchor
+ * @param {ProjectionSurface | null} surface
+ */
+function authorizedTeamWaveAnchor(rawAnchor, surface) {
+  const teamAnchor = record(rawAnchor);
+  const teamIndex = integer(teamAnchor?.team_index);
+  const teamId = integer(teamAnchor?.team_id);
+  if (
+    teamAnchor?.phase !== "successor" ||
+    (teamIndex !== 0 && teamIndex !== 1) ||
+    teamId !== teamIndex + 1
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    teamIndex,
+    teamId,
+    teamSide: teamIndex === 0 ? "left" : "right",
+    label: `RESPAWNING · TEAM ${teamIndex === 0 ? "A" : "B"}`,
+    anchor: teamClockPoint(teamId, surface),
+  });
+}
+
+/**
+ * Require exact point equality without using a scene position as trajectory
+ * authority. The scene comparison below is only a coherence check: the
+ * serialized successor trajectory remains the endpoint source.
+ *
+ * @param {unknown} left
+ * @param {unknown} right
+ */
+function sameAuthorizedPoint(left, right) {
+  const leftPoint = point(left);
+  const rightPoint = point(right);
+  return (
+    leftPoint !== null &&
+    rightPoint !== null &&
+    leftPoint[0] === rightPoint[0] &&
+    leftPoint[1] === rightPoint[1]
+  );
+}
+
+/**
+ * Validate the Oracle trajectory identity graph once. Keys are opaque and
+ * every public identity must be one-to-one across the trajectory and scene.
+ *
+ * @param {Record<string, any>} latest
+ * @param {Map<string, Record<string, any>>} sceneByKey
+ * @returns {Map<string, Record<string, any>> | null}
+ */
+function authorizedTrajectoryMap(latest, sceneByKey) {
+  if (!Array.isArray(latest.agent_phase_trajectories)) {
+    return null;
+  }
+  const trajectories = latest.agent_phase_trajectories;
+  if (trajectories.length !== sceneByKey.size) {
+    return null;
+  }
+  /** @type {Map<string, Record<string, any>>} */
+  const byKey = new Map();
+  const publicIds = new Set();
+  for (const candidate of trajectories) {
+    const trajectory = record(candidate);
+    const key = identifier(trajectory?.agent_presentation_key);
+    const publicId = identifier(trajectory?.agent_public_agent_id);
+    if (
+      !trajectory ||
+      key === null ||
+      publicId === null ||
+      byKey.has(key) ||
+      publicIds.has(publicId)
+    ) {
+      return null;
+    }
+    const sceneAgent = sceneByKey.get(key);
+    if (!sceneAgent || identifier(sceneAgent.public_agent_id) !== publicId) {
+      return null;
+    }
+    for (const phase of ["transition_start", "post_charge", "successor"]) {
+      const anchor = record(trajectory[phase]);
+      if (
+        !anchor ||
+        anchor.phase !== phase ||
+        identifier(anchor.presentation_key) !== key ||
+        identifier(anchor.public_agent_id) !== publicId ||
+        point(anchor.position) === null
+      ) {
+        return null;
+      }
+    }
+    if (!sameAuthorizedPoint(trajectory.successor.position, sceneAgent.position)) {
+      return null;
+    }
+    byKey.set(key, trajectory);
+    publicIds.add(publicId);
+  }
+  return byKey;
+}
+
+/**
+ * Exact-join one serialized event anchor to its phase trajectory. A key match
+ * alone is insufficient: public identity, phase, and point must all agree.
+ *
+ * @param {Map<string, Record<string, any>>} trajectories
+ * @param {unknown} rawAnchor
+ * @param {"transition_start" | "post_charge" | "successor"} phase
+ * @returns {Record<string, any> | null}
+ */
+function trajectoryForAuthorizedAnchor(trajectories, rawAnchor, phase) {
+  const anchor = record(rawAnchor);
+  const key = identifier(anchor?.presentation_key);
+  const publicId = identifier(anchor?.public_agent_id);
+  const trajectory = key === null ? null : (trajectories.get(key) ?? null);
+  const trajectoryAnchor = record(trajectory?.[phase]);
+  if (
+    !anchor ||
+    key === null ||
+    publicId === null ||
+    anchor.phase !== phase ||
+    !trajectory ||
+    identifier(trajectory.agent_public_agent_id) !== publicId ||
+    !trajectoryAnchor ||
+    !sameAuthorizedPoint(anchor.position, trajectoryAnchor.position)
+  ) {
+    return null;
+  }
+  return trajectory;
+}
+
+/**
+ * @typedef {{
+ *   row: Readonly<Record<string, any>>,
+ *   event: Readonly<Record<string, any>>,
+ *   applicationSource: Readonly<Record<string, any>> | null,
+ * }} AuthorizedStatusAtom
+ * @typedef {{
+ *   atoms: AuthorizedStatusAtom[],
+ *   firstIndex: number,
+ *   recipient: Readonly<{x: number, y: number}>,
+ *   recipientPresentationKey: string,
+ *   recipientPublicAgentId: string,
+ * }} AuthorizedStatusGroup
+ */
+
+/**
+ * Compose exactly one display row per authorized status group while retaining
+ * every serialized atomic and application identity as ordered metadata. The
+ * normalized Latest Events rows remain separate and unchanged outside this
+ * presentation-only plan.
+ *
+ * @param {ReadonlyArray<Readonly<{
+ *   id: string,
+ *   kind: string,
+ *   vocabulary: "event" | "recipient_cue" | "observation_delta",
+ *   payload: Readonly<Record<string, any>>,
+ * }>>} rows
+ * @param {string} transitionId
+ * @param {Map<string, Record<string, any>>} sceneByKey
+ * @param {Map<string, Record<string, any>> | null} trajectories
+ * @param {ProjectionSurface | null} surface
+ * @returns {Map<string, Readonly<Record<string, any>>> | null}
+ */
+function authorizedStatusCompositions(
+  rows,
+  transitionId,
+  sceneByKey,
+  trajectories,
+  surface,
+) {
+  /** @type {Map<string, AuthorizedStatusGroup>} */
+  const groups = new Map();
+  const seenEventIds = new Set();
+  let statusRowCount = 0;
+  for (const [index, row] of rows.entries()) {
+    if (!STATUS_EVENT_TYPES.has(row.kind)) {
+      continue;
+    }
+    statusRowCount += 1;
+    const event = record(row.payload);
+    const eventId = identifier(event?.event_id);
+    const eventKind = identifier(event?.event_kind);
+    const recipientAnchor = record(event?.recipient_anchor);
+    const recipientKey = identifier(recipientAnchor?.presentation_key);
+    const statusChannel = integer(event?.status_channel);
+    const statusId = identifier(event?.status_id);
+    if (
+      trajectories === null ||
+      row.vocabulary !== "event" ||
+      !event ||
+      eventId !== row.id ||
+      eventKind !== row.kind ||
+      seenEventIds.has(row.id) ||
+      recipientKey === null ||
+      statusChannel === null ||
+      statusId === null
+    ) {
+      return null;
+    }
+    const recipientTrajectory = trajectoryForAuthorizedAnchor(
+      trajectories,
+      recipientAnchor,
+      "successor",
+    );
+    const recipientAgent = sceneByKey.get(recipientKey);
+    const recipient = authorizedAnchor(recipientTrajectory?.successor, surface);
+    if (
+      recipientTrajectory === null ||
+      !recipientAgent ||
+      identifier(recipientAgent.public_agent_id) !==
+        identifier(recipientTrajectory.agent_public_agent_id) ||
+      recipient === null
+    ) {
+      return null;
+    }
+    /** @type {Readonly<Record<string, any>> | null} */
+    let applicationSource = null;
+    if (row.kind === "status_applied") {
+      const sourceAnchor = record(event.source_anchor);
+      const sourceKey = identifier(sourceAnchor?.presentation_key);
+      const sourceTrajectory = trajectoryForAuthorizedAnchor(
+        trajectories,
+        sourceAnchor,
+        "successor",
+      );
+      const sourceAgent = sourceKey === null ? null : sceneByKey.get(sourceKey);
+      if (
+        sourceKey === null ||
+        sourceTrajectory === null ||
+        !sourceAgent ||
+        identifier(sourceAgent.public_agent_id) !==
+          identifier(sourceTrajectory.agent_public_agent_id)
+      ) {
+        return null;
+      }
+      applicationSource = Object.freeze({
+        eventId: row.id,
+        sourcePresentationKey: sourceKey,
+        sourcePublicAgentId: sourceTrajectory.agent_public_agent_id,
+      });
+    }
+    seenEventIds.add(row.id);
+    const key = JSON.stringify([transitionId, recipientKey, statusChannel, statusId]);
+    /** @type {AuthorizedStatusGroup} */
+    const group = groups.get(key) ?? {
+      atoms: [],
+      firstIndex: index,
+      recipient,
+      recipientPresentationKey: recipientKey,
+      recipientPublicAgentId: recipientTrajectory.agent_public_agent_id,
+    };
+    if (
+      group.recipientPresentationKey !== recipientKey ||
+      group.recipientPublicAgentId !== recipientTrajectory.agent_public_agent_id ||
+      group.recipient.x !== recipient.x ||
+      group.recipient.y !== recipient.y
+    ) {
+      return null;
+    }
+    group.atoms.push(
+      Object.freeze({
+        row,
+        event,
+        applicationSource,
+      }),
+    );
+    groups.set(key, group);
+  }
+  if (statusRowCount === 0) {
+    return new Map();
+  }
+
+  /** @type {Map<string, {lane: number, laneCount: number}>} */
+  const lanes = new Map();
+  /** @type {Map<string, Array<[string, any]>>} */
+  const groupsByRecipient = new Map();
+  for (const [key, group] of groups) {
+    const recipientGroups = groupsByRecipient.get(group.recipientPresentationKey) ?? [];
+    recipientGroups.push([key, group]);
+    groupsByRecipient.set(group.recipientPresentationKey, recipientGroups);
+  }
+  for (const recipientGroups of groupsByRecipient.values()) {
+    recipientGroups.sort((left, right) => left[1].firstIndex - right[1].firstIndex);
+    recipientGroups.forEach(([key], lane) => {
+      lanes.set(key, { lane, laneCount: recipientGroups.length });
+    });
+  }
+
+  /** @type {Map<string, Readonly<Record<string, any>>>} */
+  const compositions = new Map();
+  for (const [key, group] of groups) {
+    /** @param {string} kind */
+    const first = (kind) => group.atoms.find(({ row }) => row.kind === kind) ?? null;
+    const cleared = first("status_cleared_by_new_death");
+    const refreshed = first("status_refreshed_or_extended");
+    const broken = first("status_broken_by_damage");
+    const aged = first("status_aged_to_zero");
+    const applications = group.atoms.filter(({ row }) => row.kind === "status_applied");
+    const applied = applications.at(0) ?? null;
+    const lifecycleId = cleared
+      ? "cleared_by_death"
+      : refreshed
+        ? "refreshed"
+        : broken && applied
+          ? "trap_broken_and_reapplied"
+          : aged && applied
+            ? "reapplied"
+            : broken
+              ? "trap_broken"
+              : aged
+                ? "expired"
+                : "applied";
+    const primary =
+      cleared ??
+      refreshed ??
+      (applied && (broken || aged) ? applied : null) ??
+      broken ??
+      aged ??
+      applied;
+    if (primary === null) {
+      return null;
+    }
+    const atomicEventIds = Object.freeze(group.atoms.map(({ row }) => row.id));
+    const applicationEventIds = Object.freeze(applications.map(({ row }) => row.id));
+    const applicationSources = Object.freeze(
+      applications.map(({ applicationSource }) => applicationSource),
+    );
+    if (applicationSources.some((source) => source === null)) {
+      return null;
+    }
+    const lane = lanes.get(key) ?? { lane: 0, laneCount: 1 };
+    const status = resolveVisualToken("status", primary.event.status_id, primary.event);
+    const lifecycle = resolveVisualToken("lifecycle", lifecycleId, primary.event);
+    const directApplicationSource = primary.applicationSource;
+    const composition = Object.freeze({
+      eventId: primary.row.id,
+      eventType: primary.row.kind,
+      transitionId,
+      authorityVocabulary: primary.row.vocabulary,
+      kind: "status_lifecycle",
+      tokenId: status.tokenId,
+      token: status,
+      lifecycle: lifecycle.tokenId,
+      lifecycleToken: lifecycle,
+      recipientPresentationKey: group.recipientPresentationKey,
+      recipientPublicAgentId: group.recipientPublicAgentId,
+      recipient: group.recipient,
+      sourcePresentationKey: directApplicationSource?.sourcePresentationKey ?? null,
+      sourcePublicAgentId: directApplicationSource?.sourcePublicAgentId ?? null,
+      applicationSources,
+      durationBefore: null,
+      durationAfter: null,
+      lane: lane.lane,
+      laneCount: lane.laneCount,
+      statusLayoutOrder: group.firstIndex,
+      atomicEventIds,
+      applicationEventIds,
+      presentationSuppressed: false,
+      spatial: true,
+      phaseStart: CHOREOGRAPHY_PHASES.v2StatusStart,
+      phaseEnd: CHOREOGRAPHY_PHASES.v2ShieldStart,
+    });
+    for (const atom of group.atoms) {
+      compositions.set(atom.row.id, composition);
+    }
+  }
+  return compositions;
 }
 
 /**
@@ -1325,16 +1275,42 @@ function buildAuthorizedPresentationChoreographyPlan(presentation, surface) {
   const audience = authorizedPresentationAudience(presentation);
   /** @type {Map<string, Record<string, any>>} */
   const sceneByKey = new Map();
+  const scenePublicIds = new Set();
   for (const candidate of array(scene.agents)) {
     const agent = record(candidate);
-    if (agent && typeof agent.presentation_key === "string") {
-      sceneByKey.set(agent.presentation_key, agent);
+    const key = identifier(agent?.presentation_key);
+    const publicId = identifier(agent?.public_agent_id);
+    if (
+      !agent ||
+      key === null ||
+      publicId === null ||
+      sceneByKey.has(key) ||
+      scenePublicIds.has(publicId)
+    ) {
+      return null;
     }
+    sceneByKey.set(key, agent);
+    scenePublicIds.add(publicId);
+  }
+  const trajectories =
+    audience === "researcher" ? authorizedTrajectoryMap(latest, sceneByKey) : null;
+  if (audience === "researcher" && trajectories === null) {
+    return null;
+  }
+  const statusCompositions = authorizedStatusCompositions(
+    rows,
+    transitionId,
+    sceneByKey,
+    trajectories,
+    surface,
+  );
+  if (statusCompositions === null) {
+    return null;
   }
   /** @type {Record<string, any>[]} */
   const planned = [];
+  const plannedStatusCompositions = new Set();
   const healthLaneByKey = new Map();
-  const statusLaneByKey = new Map();
   for (const row of rows) {
     const event = row.payload;
     const common = {
@@ -1399,18 +1375,54 @@ function buildAuthorizedPresentationChoreographyPlan(presentation, surface) {
       continue;
     }
 
+    if (STATUS_EVENT_TYPES.has(row.kind)) {
+      const composition = statusCompositions.get(row.id);
+      if (!composition) {
+        return null;
+      }
+      if (!plannedStatusCompositions.has(composition)) {
+        planned.push(composition);
+        plannedStatusCompositions.add(composition);
+      }
+      continue;
+    }
+
     const sourceAnchor = record(event.source_anchor);
     const recipientAnchor = record(event.recipient_anchor);
     const agentAnchor = record(event.agent_anchor);
-    if (row.kind === "ability_activated" && sourceAnchor) {
-      const sourceKey = identifier(sourceAnchor.presentation_key);
+    if (row.kind === "ability_activated") {
+      if (trajectories === null) {
+        return null;
+      }
+      const sourceTrajectory = trajectoryForAuthorizedAnchor(
+        trajectories,
+        sourceAnchor,
+        "transition_start",
+      );
+      const targetTrajectory =
+        recipientAnchor === null
+          ? null
+          : trajectoryForAuthorizedAnchor(
+              trajectories,
+              recipientAnchor,
+              "transition_start",
+            );
+      const sourceKey = identifier(sourceAnchor?.presentation_key);
       const targetKey = identifier(recipientAnchor?.presentation_key);
-      const source = authorizedAnchor(sourceAnchor, surface);
-      const target = authorizedAnchor(recipientAnchor, surface);
+      if (
+        sourceTrajectory === null ||
+        (recipientAnchor !== null && targetTrajectory === null)
+      ) {
+        return null;
+      }
       const sourceAgent = sourceKey === null ? null : sceneByKey.get(sourceKey);
-      if (sourceKey === null || source === null || !sourceAgent) {
-        planned.push(Object.freeze({ ...common, kind: "unknown", spatial: false }));
-        continue;
+      if (
+        sourceKey === null ||
+        !sourceAgent ||
+        identifier(sourceAgent.public_agent_id) !==
+          identifier(sourceTrajectory.agent_public_agent_id)
+      ) {
+        return null;
       }
       const component = event.ability_component;
       const token =
@@ -1422,6 +1434,22 @@ function buildAuthorizedPresentationChoreographyPlan(presentation, surface) {
               event,
             );
       const targetAgent = targetKey === null ? null : sceneByKey.get(targetKey);
+      if (
+        (targetKey === null) !== (targetTrajectory === null) ||
+        (targetKey !== null &&
+          (!targetAgent ||
+            identifier(targetAgent.public_agent_id) !==
+              identifier(targetTrajectory?.agent_public_agent_id)))
+      ) {
+        return null;
+      }
+      const endpointPhase =
+        token.tokenId === "warrior_charge" ? "transition_start" : "successor";
+      const source = authorizedAnchor(sourceTrajectory[endpointPhase], surface);
+      const target = authorizedAnchor(targetTrajectory?.[endpointPhase], surface);
+      if (source === null || (targetTrajectory !== null && target === null)) {
+        return null;
+      }
       const route =
         target && targetAgent
           ? createRouteGeometry(
@@ -1444,11 +1472,11 @@ function buildAuthorizedPresentationChoreographyPlan(presentation, surface) {
           impactSemantic: activationImpactSemantic(token.tokenId),
           lane: component === "ultimate" ? 1 : 0,
           sourcePresentationKey: sourceKey,
-          sourcePublicAgentId: sourceAnchor.public_agent_id,
+          sourcePublicAgentId: sourceTrajectory.agent_public_agent_id,
           sourceClassId: sourceAgent.class_id,
           sourceClass: classTokenFromId(sourceAgent.class_id),
           targetPresentationKey: targetKey,
-          targetPublicAgentId: recipientAnchor?.public_agent_id ?? null,
+          targetPublicAgentId: targetTrajectory?.agent_public_agent_id ?? null,
           targetDisclosure: targetKey === null ? "target_none" : "public",
           source,
           target,
@@ -1462,21 +1490,29 @@ function buildAuthorizedPresentationChoreographyPlan(presentation, surface) {
       );
       continue;
     }
-    if (row.kind === "recipient_health_resolution" && recipientAnchor) {
-      const recipientKey = identifier(recipientAnchor.presentation_key);
-      const recipient = authorizedAnchor(recipientAnchor, surface);
+    if (row.kind === "recipient_health_resolution") {
+      if (trajectories === null) {
+        return null;
+      }
+      const recipientTrajectory = trajectoryForAuthorizedAnchor(
+        trajectories,
+        recipientAnchor,
+        "transition_start",
+      );
+      const recipientKey = identifier(recipientAnchor?.presentation_key);
+      const recipient = authorizedAnchor(recipientTrajectory?.successor, surface);
       const before = finiteNumber(event.transition_start_health);
       const after = finiteNumber(event.health_after_combat_resolution);
       const delta = finiteNumber(event.realized_net_health_change);
       if (
+        recipientTrajectory === null ||
         recipientKey === null ||
         !recipient ||
         before === null ||
         after === null ||
         delta === null
       ) {
-        planned.push(Object.freeze({ ...common, kind: "unknown", spatial: false }));
-        continue;
+        return null;
       }
       const lane = healthLaneByKey.get(recipientKey) ?? 0;
       healthLaneByKey.set(recipientKey, lane + 1);
@@ -1485,7 +1521,7 @@ function buildAuthorizedPresentationChoreographyPlan(presentation, surface) {
           ...common,
           kind: "net_health",
           recipientPresentationKey: recipientKey,
-          recipientPublicAgentId: recipientAnchor.public_agent_id,
+          recipientPublicAgentId: recipientTrajectory.agent_public_agent_id,
           recipient,
           netDelta: delta,
           healthBefore: before,
@@ -1500,80 +1536,73 @@ function buildAuthorizedPresentationChoreographyPlan(presentation, surface) {
       continue;
     }
     if (row.kind === "charge_phase_displacement") {
+      if (trajectories === null) {
+        return null;
+      }
       const startAnchor = record(event.start_anchor);
       const endAnchor = record(event.end_anchor);
-      const key = identifier(startAnchor?.presentation_key);
-      const start = authorizedAnchor(startAnchor, surface);
-      const end = authorizedAnchor(endAnchor, surface);
-      planned.push(
-        key && start && end
-          ? Object.freeze({
-              ...common,
-              kind: "charge_displacement",
-              sourcePresentationKey: key,
-              sourcePublicAgentId: startAnchor?.public_agent_id,
-              targetPresentationKey: null,
-              start,
-              end,
-              pathKind: "charge_phase",
-              spatial: true,
-              persistent: true,
-              phaseStart: CHOREOGRAPHY_PHASES.v2ChargeStart,
-              phaseEnd: CHOREOGRAPHY_PHASES.v2MovementStart,
-            })
-          : Object.freeze({ ...common, kind: "unknown", spatial: false }),
+      const trajectory = trajectoryForAuthorizedAnchor(
+        trajectories,
+        startAnchor,
+        "transition_start",
       );
-      continue;
-    }
-    if (STATUS_EVENT_TYPES.has(row.kind) && recipientAnchor) {
-      const recipientKey = identifier(recipientAnchor.presentation_key);
-      const recipient = authorizedAnchor(recipientAnchor, surface);
-      const source = authorizedAnchor(sourceAnchor, surface);
-      if (!recipientKey || !recipient) {
-        planned.push(Object.freeze({ ...common, kind: "unknown", spatial: false }));
-        continue;
+      const endTrajectory = trajectoryForAuthorizedAnchor(
+        trajectories,
+        endAnchor,
+        "post_charge",
+      );
+      const key = identifier(startAnchor?.presentation_key);
+      const start = authorizedAnchor(trajectory?.transition_start, surface);
+      const end = authorizedAnchor(trajectory?.successor, surface);
+      if (
+        trajectory === null ||
+        endTrajectory !== trajectory ||
+        key === null ||
+        start === null ||
+        end === null
+      ) {
+        return null;
       }
-      const lane = statusLaneByKey.get(recipientKey) ?? 0;
-      statusLaneByKey.set(recipientKey, lane + 1);
-      const lifecycleId = {
-        status_aged_to_zero: "expired",
-        status_broken_by_damage: "trap_broken",
-        status_applied: "applied",
-        status_refreshed_or_extended: "refreshed",
-        status_cleared_by_new_death: "cleared_by_death",
-      }[row.kind];
       planned.push(
         Object.freeze({
           ...common,
-          kind: "status_lifecycle",
-          tokenId: event.status_id,
-          token: resolveVisualToken("status", event.status_id, event),
-          lifecycle: lifecycleId,
-          lifecycleToken: resolveVisualToken("lifecycle", lifecycleId, event),
-          recipientPresentationKey: recipientKey,
-          recipientPublicAgentId: recipientAnchor.public_agent_id,
-          recipient,
-          sourcePresentationKey: sourceAnchor?.presentation_key ?? null,
-          sourcePublicAgentId: sourceAnchor?.public_agent_id ?? null,
-          source,
-          applicationSources:
-            source && sourceAnchor
-              ? Object.freeze([
-                  Object.freeze({
-                    eventId: row.id,
-                    sourcePresentationKey: sourceAnchor.presentation_key,
-                    sourcePublicAgentId: sourceAnchor.public_agent_id,
-                    source,
-                  }),
-                ])
-              : Object.freeze([]),
-          lane,
-          laneCount: 1,
-          atomicEventIds: Object.freeze([row.id]),
-          applicationEventIds: source ? Object.freeze([row.id]) : Object.freeze([]),
+          kind: "charge_displacement",
+          sourcePresentationKey: key,
+          sourcePublicAgentId: trajectory.agent_public_agent_id,
+          targetPresentationKey: null,
+          start,
+          end,
+          pathKind: "charge_phase",
           spatial: true,
-          phaseStart: CHOREOGRAPHY_PHASES.v2StatusStart,
-          phaseEnd: CHOREOGRAPHY_PHASES.v2ShieldStart,
+          persistent: true,
+          phaseStart: CHOREOGRAPHY_PHASES.v2ChargeStart,
+          phaseEnd: CHOREOGRAPHY_PHASES.v2MovementStart,
+        }),
+      );
+      continue;
+    }
+    if (row.kind === "ordinary_movement_phase_displacement") {
+      if (trajectories === null) {
+        return null;
+      }
+      const trajectory = trajectoryForAuthorizedAnchor(
+        trajectories,
+        event.start_anchor,
+        "post_charge",
+      );
+      const endTrajectory = trajectoryForAuthorizedAnchor(
+        trajectories,
+        event.end_anchor,
+        "successor",
+      );
+      if (trajectory === null || endTrajectory !== trajectory) {
+        return null;
+      }
+      planned.push(
+        Object.freeze({
+          ...common,
+          kind: "feed_only",
+          spatial: false,
         }),
       );
       continue;
@@ -1601,9 +1630,41 @@ function buildAuthorizedPresentationChoreographyPlan(presentation, surface) {
       );
       continue;
     }
+    if (row.kind === "combat_countdown_reset") {
+      planned.push(
+        Object.freeze({
+          ...common,
+          kind: "feed_only",
+          spatial: false,
+        }),
+      );
+      continue;
+    }
+    if (row.kind === "respawn_wave_occurred") {
+      const wave = authorizedTeamWaveAnchor(event.team_anchor, surface);
+      if (wave === null) {
+        return null;
+      }
+      planned.push(
+        Object.freeze({
+          ...common,
+          kind: "semantic_pulse",
+          cueSemantic: row.kind,
+          anchor: wave.anchor,
+          teamIndex: wave.teamIndex,
+          teamId: wave.teamId,
+          teamSide: wave.teamSide,
+          label: wave.label,
+          spatial: wave.anchor !== null,
+          persistent: true,
+          phaseStart: CHOREOGRAPHY_PHASES.v2RespawnWaveStart,
+          phaseEnd: CHOREOGRAPHY_PHASES.v2RespawnStart,
+        }),
+      );
+      continue;
+    }
     if (
       [
-        "combat_countdown_reset",
         "health_regenerated",
         "cooldown_started",
         "cooldown_ready",
@@ -1613,19 +1674,43 @@ function buildAuthorizedPresentationChoreographyPlan(presentation, surface) {
       ].includes(row.kind)
     ) {
       const anchor = agentAnchor ?? recipientAnchor;
+      let presentationAnchor = anchor;
+      if (
+        row.kind === "health_regenerated" ||
+        row.kind === "cooldown_started" ||
+        row.kind === "cooldown_ready"
+      ) {
+        if (trajectories === null) {
+          return null;
+        }
+        const trajectory = trajectoryForAuthorizedAnchor(
+          trajectories,
+          agentAnchor,
+          "transition_start",
+        );
+        if (trajectory === null) {
+          return null;
+        }
+        presentationAnchor = trajectory.successor;
+      }
       planned.push(
         Object.freeze({
           ...common,
-          kind: "semantic_pulse",
+          kind: row.kind === "health_regenerated" ? "regeneration" : "semantic_pulse",
           cueSemantic: row.kind,
-          anchor: authorizedAnchor(anchor, surface),
-          agentPresentationKey: anchor?.presentation_key ?? null,
-          agentPublicAgentId: anchor?.public_agent_id ?? null,
+          anchor: authorizedAnchor(presentationAnchor, surface),
+          recipient:
+            row.kind === "health_regenerated"
+              ? authorizedAnchor(presentationAnchor, surface)
+              : null,
+          agentPresentationKey: presentationAnchor?.presentation_key ?? null,
+          agentPublicAgentId: presentationAnchor?.public_agent_id ?? null,
           value:
             row.kind === "health_regenerated"
               ? finiteNumber(event.actual_health_regenerated)
               : null,
-          spatial: anchor !== null,
+          persistent: row.kind === "agent_died" || row.kind === "agent_respawned",
+          spatial: presentationAnchor !== null,
           phaseStart: CHOREOGRAPHY_PHASES.v2CountdownAndRegenStart,
           phaseEnd: CHOREOGRAPHY_PHASES.total,
         }),
@@ -1643,8 +1728,9 @@ function buildAuthorizedPresentationChoreographyPlan(presentation, surface) {
   }
   const scheduled = scheduleChoreography(planned);
   const netEvents = layoutOutcomeCues(scheduled.events, surface, "net_health");
+  const statusEvents = layoutOutcomeCues(netEvents, surface, "status_lifecycle");
   const events = Object.freeze(
-    layoutOutcomeCues(netEvents, surface, "status_lifecycle").map((event) =>
+    layoutOutcomeCues(statusEvents, surface, "regeneration").map((event) =>
       Object.isFrozen(event) ? event : Object.freeze(event),
     ),
   );
@@ -1683,731 +1769,5 @@ export function buildChoreographyPlan(frame, surface = null) {
   if (isAuthorizedPresentationFrame(frame)) {
     return buildAuthorizedPresentationChoreographyPlan(frame, surface);
   }
-  const candidate = record(frame);
-  const scene = frameScene(frame);
-  const batch = frameEventBatch(frame);
-  const epochKey = transitionEpochKey(frame);
-  const authorizationKey = authorizationContextKey(frame);
-  const fingerprint = eventFingerprint(frame);
-  if (
-    !candidate ||
-    !scene ||
-    !batch ||
-    epochKey === null ||
-    authorizationKey === null ||
-    fingerprint === null
-  ) {
-    return null;
-  }
-
-  const transitionId = scientificIdentity(batch.transition_id);
-  const simulatorStep = integer(batch.simulator_step);
-  if (transitionId === null || simulatorStep === null) {
-    return null;
-  }
-
-  const radii = radiusBySlot(scene, surface);
-  const rawEvents = array(batch.events);
-  const statusAssignments = statusPresentationAssignments(rawEvents, transitionId);
-  /** @type {Array<Record<string, any>>} */
-  const planned = [];
-  /** @type {RouteInput[]} */
-  const acceptedRouteInputs = [];
-  /** @type {Map<number, number>} */
-  const healthLaneCounts = new Map();
-  const seenEventIds = new Set();
-  const sceneAgentBySlot = new Map(
-    array(scene.agents)
-      .map(record)
-      .filter((agent) => agent && integer(agent.global_slot) !== null)
-      .map((agent) => {
-        const row = /** @type {Record<string, any>} */ (agent);
-        return [integer(row.global_slot), row];
-      }),
-  );
-  const publicAgentIds = array(batch.public_agent_id_by_global_slot);
-  /**
-   * Event roles and their phase anchors are one semantic identity join. A slot
-   * may remain internal, but it must never select a different public identity
-   * than the exact authorized anchor carried by the same batch.
-   *
-   * @param {Record<string, any>} event
-   * @param {string} slotField
-   * @param {readonly string[]} anchorFields
-   * @param {string | null} publicIdField
-   */
-  const eventRoleIdentityMatches = (
-    event,
-    slotField,
-    anchorFields,
-    publicIdField = null,
-  ) => {
-    const slot = integer(event[slotField]);
-    const expectedPublicAgentId =
-      slot === null ? null : identifier(publicAgentIds[slot]);
-    if (
-      publicIdField !== null &&
-      Object.hasOwn(event, publicIdField) &&
-      (slot === null || identifier(event[publicIdField]) !== expectedPublicAgentId)
-    ) {
-      return false;
-    }
-    for (const anchorField of anchorFields) {
-      if (!Object.hasOwn(event, anchorField) || event[anchorField] === null) {
-        continue;
-      }
-      const anchor = record(event[anchorField]);
-      if (
-        slot === null ||
-        !anchor ||
-        integer(anchor.global_slot) !== slot ||
-        identifier(anchor.public_agent_id) !== expectedPublicAgentId
-      ) {
-        return false;
-      }
-    }
-    return true;
-  };
-  /** @param {Record<string, any>} event */
-  const researcherEventIdentityMatches = (event) =>
-    eventRoleIdentityMatches(
-      event,
-      "actor_global_slot",
-      ["actor_anchor"],
-      "actor_public_agent_id",
-    ) &&
-    eventRoleIdentityMatches(event, "source_global_slot", ["source_anchor"]) &&
-    eventRoleIdentityMatches(event, "recipient_global_slot", ["recipient_anchor"]) &&
-    eventRoleIdentityMatches(event, "agent_global_slot", [
-      "agent_anchor",
-      "start_anchor",
-      "end_anchor",
-    ]);
-  if (
-    scene.audience === "researcher" &&
-    (publicAgentIds.length === 0 ||
-      [...sceneAgentBySlot].some(
-        ([slot, agent]) =>
-          slot === null ||
-          identifier(publicAgentIds[slot]) === null ||
-          identifier(publicAgentIds[slot]) !== identifier(agent.public_agent_id),
-      ) ||
-      rawEvents.some(
-        (rawEvent) =>
-          !record(rawEvent) ||
-          !researcherEventIdentityMatches(
-            /** @type {Record<string, any>} */ (record(rawEvent)),
-          ),
-      ) ||
-      array(batch.agent_phase_trajectories).some((rawTrajectory) => {
-        const trajectory = record(rawTrajectory);
-        if (!trajectory) {
-          return true;
-        }
-        const slot = integer(trajectory.global_slot);
-        const expectedPublicAgentId =
-          slot === null ? null : identifier(publicAgentIds[slot]);
-        return ["transition_start", "post_charge", "successor"].some((phase) => {
-          const anchor = record(trajectory[phase]);
-          return (
-            anchor !== null &&
-            (slot === null ||
-              integer(anchor.global_slot) !== slot ||
-              identifier(anchor.public_agent_id) !== expectedPublicAgentId)
-          );
-        });
-      }))
-  ) {
-    return null;
-  }
-  /**
-   * Resolve display identity only from the same authorized scene/event roots.
-   * Actor POV event batches intentionally omit the researcher roster, so their
-   * self identity falls back to the exact recipient-sliced scene actor.
-   *
-   * @param {number | null} slot
-   * @returns {string | null}
-   */
-  const publicAgentIdForSlot = (slot) => {
-    const sceneAgent = slot === null ? null : sceneAgentBySlot.get(slot);
-    if (slot === null || !sceneAgent) {
-      return null;
-    }
-    return scene.audience === "researcher"
-      ? identifier(publicAgentIds[slot])
-      : identifier(sceneAgent.public_agent_id);
-  };
-
-  for (const rawEvent of rawEvents) {
-    const event = record(rawEvent);
-    const eventId = identifier(event?.event_id);
-    const eventType = identifier(event?.event_type);
-    if (!event || eventId === null || eventType === null || seenEventIds.has(eventId)) {
-      continue;
-    }
-    seenEventIds.add(eventId);
-    const common = {
-      eventId,
-      eventType,
-      transitionId,
-    };
-    if (scientificIdentity(event.transition_id) !== transitionId) {
-      planned.push(Object.freeze({ ...common, kind: "unknown", spatial: false }));
-      continue;
-    }
-
-    if (eventType === "ability_activated") {
-      const sourceSlot = integer(event.source_global_slot);
-      const recipientSlot = integer(event.recipient_global_slot);
-      const component = identifier(event.ability_component);
-      const sourceClassId = integer(sceneAgentBySlot.get(sourceSlot)?.class_id);
-      const source = project(anchorPoint(event.source_anchor), surface);
-      const recipient = project(anchorPoint(event.recipient_anchor), surface);
-      if (
-        sourceSlot === null ||
-        (component !== "basic" && component !== "ultimate") ||
-        source === null ||
-        (recipientSlot === null) !== (recipient === null)
-      ) {
-        planned.push(Object.freeze({ ...common, kind: "unknown", spatial: false }));
-        continue;
-      }
-      const token =
-        component === "ultimate"
-          ? ultimateTokenFromClassId(sourceClassId, event)
-          : resolveVisualToken(
-              "activation",
-              sourceClassId === 5 ? "basic_heal" : "basic_damage",
-              event,
-            );
-      const sourceClass = classTokenFromId(sourceClassId);
-      const routed = recipientSlot !== null && recipient !== null;
-      if (routed) {
-        acceptedRouteInputs.push({
-          eventId,
-          sourceGlobalSlot: sourceSlot,
-          targetGlobalSlot: recipientSlot,
-          tokenId: token.tokenId,
-          source,
-          target: recipient,
-          sourceRadius: radii.get(sourceSlot) ?? 0,
-          targetRadius: radii.get(recipientSlot) ?? 0,
-          targetEndpointGap:
-            token.tokenId === "warrior_charge" ? CHARGE_TARGET_ENDPOINT_GAP : undefined,
-        });
-      }
-      planned.push(
-        Object.freeze({
-          ...common,
-          kind: "activation",
-          tokenId: token.tokenId,
-          token,
-          impactSemantic: activationImpactSemantic(token.tokenId),
-          lane: component === "basic" ? 0 : 1,
-          sourceSlot,
-          sourcePublicAgentId: publicAgentIdForSlot(sourceSlot),
-          sourceClassId,
-          sourceClass,
-          targetSlot: recipientSlot,
-          targetPublicAgentId: publicAgentIdForSlot(recipientSlot),
-          targetDisclosure: recipientSlot === null ? "target_none" : "public",
-          source,
-          target: recipient,
-          route: null,
-          spatial: true,
-          presentationKind: routed ? "routed" : "source_local",
-          phaseStart: CHOREOGRAPHY_PHASES.v2AbilityStart,
-          phaseImpact: CHOREOGRAPHY_PHASES.v2HealthResolutionStart - 20,
-          phaseEnd: CHOREOGRAPHY_PHASES.v2HealthResolutionStart,
-        }),
-      );
-      continue;
-    }
-
-    if (eventType === "recipient_health_resolution") {
-      const recipientSlot = integer(event.recipient_global_slot);
-      const delta = finiteNumber(event.realized_net_health_change);
-      const healthBefore = finiteNumber(event.transition_start_health);
-      const healthAfter = finiteNumber(event.health_after_combat_resolution);
-      if (
-        recipientSlot === null ||
-        delta === null ||
-        healthBefore === null ||
-        healthAfter === null ||
-        Math.abs(healthAfter - healthBefore - delta) > 1e-5
-      ) {
-        planned.push(Object.freeze({ ...common, kind: "unknown", spatial: false }));
-        continue;
-      }
-      const lane = healthLaneCounts.get(recipientSlot) ?? 0;
-      healthLaneCounts.set(recipientSlot, lane + 1);
-      const recipient = project(anchorPoint(event.recipient_anchor), surface);
-      planned.push(
-        Object.freeze({
-          ...common,
-          kind: "net_health",
-          recipientSlot,
-          recipientPublicAgentId: publicAgentIdForSlot(recipientSlot),
-          recipient,
-          netDelta: delta,
-          healthBefore,
-          healthAfter,
-          outcome: delta < 0 ? "damage" : delta > 0 ? "healing" : "unchanged",
-          lane,
-          spatial: recipient !== null && lane < MAX_HEALTH_CUES_PER_RECIPIENT,
-          phaseStart: CHOREOGRAPHY_PHASES.v2HealthResolutionStart,
-          phaseEnd: CHOREOGRAPHY_PHASES.v2CountdownAndRegenStart,
-        }),
-      );
-      continue;
-    }
-
-    if (
-      eventType === "charge_phase_displacement" ||
-      eventType === "ordinary_movement_phase_displacement"
-    ) {
-      const agentSlot = integer(event.agent_global_slot);
-      const start = project(anchorPoint(event.start_anchor), surface);
-      const end = project(anchorPoint(event.end_anchor), surface);
-      if (agentSlot === null || start === null || end === null) {
-        planned.push(Object.freeze({ ...common, kind: "unknown", spatial: false }));
-        continue;
-      }
-      planned.push(
-        Object.freeze({
-          ...common,
-          kind:
-            eventType === "charge_phase_displacement"
-              ? "charge_displacement"
-              : "movement_displacement",
-          sourceSlot: agentSlot,
-          sourcePublicAgentId: publicAgentIdForSlot(agentSlot),
-          targetSlot: null,
-          start,
-          end,
-          pathKind:
-            eventType === "charge_phase_displacement"
-              ? "charge_phase"
-              : "ordinary_movement_phase",
-          spatial: eventType === "charge_phase_displacement",
-          presentationSuppressed: eventType === "ordinary_movement_phase_displacement",
-          persistent: eventType === "charge_phase_displacement",
-          phaseStart:
-            eventType === "charge_phase_displacement"
-              ? CHOREOGRAPHY_PHASES.v2ChargeStart
-              : CHOREOGRAPHY_PHASES.v2MovementStart,
-          phaseEnd:
-            eventType === "charge_phase_displacement"
-              ? CHOREOGRAPHY_PHASES.v2MovementStart
-              : CHOREOGRAPHY_PHASES.v2DeathStart,
-        }),
-      );
-      continue;
-    }
-
-    if (
-      eventType === "status_aged_to_zero" ||
-      eventType === "status_broken_by_damage" ||
-      eventType === "status_applied" ||
-      eventType === "status_refreshed_or_extended" ||
-      eventType === "status_cleared_by_new_death"
-    ) {
-      const recipientSlot = integer(event.recipient_global_slot);
-      const recipient = project(anchorPoint(event.recipient_anchor), surface);
-      const assignment = statusAssignments.get(eventId) ?? null;
-      const sourceEvents = array(assignment?.sourceEvents).map(record);
-      const applicationSources = sourceEvents.map((sourceEvent) => {
-        const applicationEventId = identifier(sourceEvent?.event_id);
-        const sourceSlot = integer(sourceEvent?.source_global_slot);
-        const source = project(anchorPoint(sourceEvent?.source_anchor), surface);
-        return applicationEventId === null || sourceSlot === null || source === null
-          ? null
-          : Object.freeze({
-              eventId: applicationEventId,
-              sourceSlot,
-              sourcePublicAgentId: publicAgentIdForSlot(sourceSlot),
-              source,
-            });
-      });
-      const directApplicationSource =
-        eventType === "status_applied"
-          ? (applicationSources.find((candidate) => candidate?.eventId === eventId) ??
-            null)
-          : null;
-      const lifecycleKind = identifier(assignment?.lifecycle);
-      if (
-        recipientSlot === null ||
-        recipient === null ||
-        assignment === null ||
-        lifecycleKind === null ||
-        applicationSources.some((source) => source === null)
-      ) {
-        planned.push(Object.freeze({ ...common, kind: "unknown", spatial: false }));
-        continue;
-      }
-      const status = resolveVisualToken("status", event.status_id, event);
-      const lifecycle = resolveVisualToken("lifecycle", lifecycleKind, event);
-      planned.push(
-        Object.freeze({
-          ...common,
-          kind: "status_lifecycle",
-          tokenId: status.tokenId,
-          token: status,
-          lifecycle: lifecycle.tokenId,
-          lifecycleToken: lifecycle,
-          recipientSlot,
-          recipientPublicAgentId: publicAgentIdForSlot(recipientSlot),
-          recipient,
-          sourceSlot: directApplicationSource?.sourceSlot ?? null,
-          sourcePublicAgentId: directApplicationSource?.sourcePublicAgentId ?? null,
-          source: directApplicationSource?.source ?? null,
-          applicationSources: Object.freeze(applicationSources),
-          durationBefore: null,
-          durationAfter: null,
-          lane: assignment.lane,
-          laneCount: assignment.laneCount,
-          atomicEventIds: assignment.atomicEventIds,
-          applicationEventIds: assignment.applicationEventIds,
-          presentationSuppressed: !assignment.primary,
-          spatial: assignment.primary,
-          phaseStart: CHOREOGRAPHY_PHASES.v2StatusStart,
-          phaseEnd: CHOREOGRAPHY_PHASES.v2ShieldStart,
-        }),
-      );
-      continue;
-    }
-
-    if (eventType === "action_rejected") {
-      const actorSlot = integer(event.actor_global_slot);
-      const component = identifier(event.rejection_component);
-      const actor = project(anchorPoint(event.actor_anchor), surface);
-      if (
-        actorSlot === null ||
-        (component !== "domain" &&
-          component !== "movement" &&
-          component !== "combat_pair")
-      ) {
-        planned.push(Object.freeze({ ...common, kind: "unknown", spatial: false }));
-        continue;
-      }
-      planned.push(
-        Object.freeze({
-          ...common,
-          kind: "rejected_action",
-          actorSlot,
-          actorPublicAgentId: publicAgentIdForSlot(actorSlot),
-          targetSlot: null,
-          actor,
-          target: null,
-          component,
-          route: null,
-          spatial: actor !== null,
-          phaseStart: CHOREOGRAPHY_PHASES.v2RejectionStart,
-          phaseEnd: CHOREOGRAPHY_PHASES.v2AbilityStart,
-        }),
-      );
-      continue;
-    }
-
-    if (eventType === "own_position_changed") {
-      const start = project(point(event.start_position), surface);
-      const end = project(point(event.successor_position), surface);
-      if (start === null || end === null) {
-        planned.push(Object.freeze({ ...common, kind: "unknown", spatial: false }));
-        continue;
-      }
-      planned.push(
-        Object.freeze({
-          ...common,
-          kind: "movement_displacement",
-          sourceSlot: integer(scene.selection?.controlled_global_slot),
-          sourcePublicAgentId: publicAgentIdForSlot(
-            integer(scene.selection?.controlled_global_slot),
-          ),
-          targetSlot: null,
-          start,
-          end,
-          pathKind: "observed_own_position_change",
-          spatial: false,
-          presentationSuppressed: true,
-          persistent: false,
-          phaseStart: CHOREOGRAPHY_PHASES.povSuccessorObservationStart,
-          phaseEnd: CHOREOGRAPHY_PHASES.total,
-        }),
-      );
-      continue;
-    }
-
-    if (eventType === "own_health_changed") {
-      const recipientSlot = integer(scene.selection?.controlled_global_slot);
-      const healthBefore = finiteNumber(event.start_health);
-      const healthAfter = finiteNumber(event.successor_health);
-      const recipientAgent = sceneAgentBySlot.get(recipientSlot);
-      const recipient = project(point(recipientAgent?.position), surface);
-      if (
-        recipientSlot === null ||
-        healthBefore === null ||
-        healthAfter === null ||
-        recipient === null
-      ) {
-        planned.push(Object.freeze({ ...common, kind: "unknown", spatial: false }));
-        continue;
-      }
-      const delta = healthAfter - healthBefore;
-      planned.push(
-        Object.freeze({
-          ...common,
-          kind: "net_health",
-          recipientSlot,
-          recipientPublicAgentId: publicAgentIdForSlot(recipientSlot),
-          recipient,
-          netDelta: delta,
-          healthBefore,
-          healthAfter,
-          outcome: delta < 0 ? "damage" : delta > 0 ? "healing" : "unchanged",
-          lane: 0,
-          spatial: true,
-          phaseStart: CHOREOGRAPHY_PHASES.povSuccessorObservationStart,
-          phaseEnd: CHOREOGRAPHY_PHASES.total,
-        }),
-      );
-      continue;
-    }
-
-    if (eventType === "own_lifecycle_changed") {
-      const selfActor = record(scene.self_actor);
-      const agentSlot = integer(selfActor?.global_slot);
-      const sceneAgent = sceneAgentBySlot.get(agentSlot);
-      const startActive = event.start_active;
-      const successorActive = event.successor_active;
-      const startAlive = event.start_alive;
-      const successorAlive = event.successor_alive;
-      const startShield = integer(event.start_spawn_shield_remaining_ticks);
-      const successorShield = integer(event.successor_spawn_shield_remaining_ticks);
-      if (
-        scene.audience !== "agent_pov" ||
-        batch.audience !== "agent_pov" ||
-        !selfActor ||
-        agentSlot === null ||
-        !sceneAgent ||
-        identifier(selfActor?.public_agent_id) !== publicAgentIdForSlot(agentSlot) ||
-        typeof startActive !== "boolean" ||
-        typeof successorActive !== "boolean" ||
-        typeof startAlive !== "boolean" ||
-        typeof successorAlive !== "boolean" ||
-        startShield === null ||
-        startShield < 0 ||
-        successorShield === null ||
-        successorShield < 0
-      ) {
-        planned.push(Object.freeze({ ...common, kind: "unknown", spatial: false }));
-        continue;
-      }
-      const cueSemantic =
-        startActive && successorActive && startAlive && !successorAlive
-          ? "agent_died"
-          : startActive &&
-              successorActive &&
-              !startAlive &&
-              successorAlive &&
-              successorShield > 0
-            ? "agent_respawned"
-            : startActive &&
-                successorActive &&
-                startAlive &&
-                successorAlive &&
-                startShield > 0 &&
-                successorShield === 0
-              ? "spawn_shield_expired"
-              : null;
-      if (cueSemantic === null) {
-        planned.push(
-          Object.freeze({
-            ...common,
-            kind: "feed_only",
-            spatial: false,
-          }),
-        );
-        continue;
-      }
-      const anchor = project(point(selfActor.position), surface);
-      planned.push(
-        Object.freeze({
-          ...common,
-          kind: "semantic_pulse",
-          cueSemantic,
-          anchor,
-          agentSlot,
-          agentPublicAgentId: publicAgentIdForSlot(agentSlot),
-          startActive,
-          successorActive,
-          startAlive,
-          successorAlive,
-          startSpawnShieldRemaining: startShield,
-          successorSpawnShieldRemaining: successorShield,
-          spatial: anchor !== null,
-          phaseStart: CHOREOGRAPHY_PHASES.povSuccessorObservationStart,
-          phaseEnd: CHOREOGRAPHY_PHASES.total,
-        }),
-      );
-      continue;
-    }
-
-    if (
-      eventType === "combat_countdown_reset" ||
-      eventType === "health_regenerated" ||
-      eventType === "cooldown_started" ||
-      eventType === "cooldown_ready" ||
-      eventType === "agent_died" ||
-      eventType === "spawn_shield_expired" ||
-      eventType === "respawn_wave_occurred" ||
-      eventType === "agent_respawned"
-    ) {
-      const agentSlot = integer(event.agent_global_slot ?? event.recipient_global_slot);
-      const teamId = integer(event.team_id);
-      const eventAnchor =
-        eventType === "respawn_wave_occurred"
-          ? teamClockPoint(teamId, surface)
-          : project(anchorPoint(event.agent_anchor ?? event.recipient_anchor), surface);
-      planned.push(
-        Object.freeze({
-          ...common,
-          kind: "semantic_pulse",
-          cueSemantic: eventType,
-          anchor: eventAnchor,
-          agentSlot,
-          agentPublicAgentId: publicAgentIdForSlot(agentSlot),
-          teamId,
-          value:
-            eventType === "health_regenerated"
-              ? finiteNumber(event.actual_health_regenerated)
-              : null,
-          spatial: eventAnchor !== null,
-          phaseStart:
-            eventType === "combat_countdown_reset" || eventType === "health_regenerated"
-              ? CHOREOGRAPHY_PHASES.v2CountdownAndRegenStart
-              : eventType === "cooldown_started" || eventType === "cooldown_ready"
-                ? CHOREOGRAPHY_PHASES.v2CooldownStart
-                : eventType === "agent_died"
-                  ? CHOREOGRAPHY_PHASES.v2DeathStart
-                  : eventType === "spawn_shield_expired"
-                    ? CHOREOGRAPHY_PHASES.v2ShieldStart
-                    : eventType === "respawn_wave_occurred"
-                      ? CHOREOGRAPHY_PHASES.v2RespawnWaveStart
-                      : CHOREOGRAPHY_PHASES.v2RespawnStart,
-          phaseEnd:
-            eventType === "combat_countdown_reset" || eventType === "health_regenerated"
-              ? CHOREOGRAPHY_PHASES.v2CooldownStart
-              : eventType === "cooldown_started" || eventType === "cooldown_ready"
-                ? CHOREOGRAPHY_PHASES.v2ChargeStart
-                : eventType === "agent_died"
-                  ? CHOREOGRAPHY_PHASES.v2StatusStart
-                  : eventType === "spawn_shield_expired"
-                    ? CHOREOGRAPHY_PHASES.v2RespawnWaveStart
-                    : eventType === "respawn_wave_occurred"
-                      ? CHOREOGRAPHY_PHASES.v2RespawnStart
-                      : CHOREOGRAPHY_PHASES.total,
-        }),
-      );
-      continue;
-    }
-
-    if (
-      eventType === "source_damage_output" ||
-      eventType === "source_healing_output" ||
-      eventType === "lethal_damage_contribution" ||
-      eventType === "own_action_outcome" ||
-      eventType === "own_status_changed" ||
-      eventType === "own_cooldown_changed" ||
-      eventType === "visible_body_observation_changed" ||
-      eventType === "episode_ended"
-    ) {
-      planned.push(
-        Object.freeze({
-          ...common,
-          kind: "feed_only",
-          spatial: false,
-        }),
-      );
-      continue;
-    }
-
-    planned.push(
-      Object.freeze({
-        ...common,
-        kind: "unknown",
-        spatial: false,
-      }),
-    );
-  }
-
-  const routeLayoutOptions = surface?.viewportBounds
-    ? { viewportBounds: surface.viewportBounds }
-    : {};
-  const acceptedTargetCounts = new Map();
-  for (const input of acceptedRouteInputs) {
-    acceptedTargetCounts.set(
-      input.targetGlobalSlot,
-      (acceptedTargetCounts.get(input.targetGlobalSlot) ?? 0) + 1,
-    );
-  }
-  const acceptedLayoutInputs = acceptedRouteInputs.map((input) => ({
-    ...input,
-    targetEndpointGap:
-      (input.tokenId === "basic_damage" || input.tokenId === "basic_heal") &&
-      (acceptedTargetCounts.get(input.targetGlobalSlot) ?? 0) >= 4
-        ? BASIC_TARGET_ENDPOINT_GAP
-        : input.targetEndpointGap,
-    prioritizeTargetClearance:
-      (input.tokenId === "basic_damage" || input.tokenId === "basic_heal") &&
-      (acceptedTargetCounts.get(input.targetGlobalSlot) ?? 0) >= 4,
-  }));
-  const acceptedRoutes = new Map(
-    layoutRouteSet(acceptedLayoutInputs, routeLayoutOptions).map((route) => [
-      route.eventId,
-      route,
-    ]),
-  );
-  /** @type {Record<string, any>[]} */
-  const routedEvents = planned.map((event) => {
-    const route =
-      event.kind === "activation" ? acceptedRoutes.get(event.eventId) : undefined;
-    return route
-      ? Object.freeze({
-          ...event,
-          route,
-          routeMultiplicity:
-            event.kind === "activation" && event.targetSlot !== null
-              ? (acceptedTargetCounts.get(event.targetSlot) ?? 1)
-              : 1,
-        })
-      : event;
-  });
-  const scheduled = scheduleChoreography(routedEvents);
-  const spatialEventCount = scheduled.events.filter((event) => event.spatial).length;
-  /** @type {ReadonlyArray<Record<string, any>>} */
-  const netOutcomeEvents = layoutOutcomeCues(scheduled.events, surface, "net_health");
-  /** @type {ReadonlyArray<Record<string, any>>} */
-  const ownershipEvents = layoutChargeOwnershipCues(netOutcomeEvents, surface);
-  const events = Object.freeze(
-    layoutOutcomeCues(ownershipEvents, surface, "status_lifecycle").map((event) =>
-      Object.isFrozen(event) ? event : Object.freeze(event),
-    ),
-  );
-  const persistentEventCount = events.filter((event) => event.persistent).length;
-
-  return Object.freeze({
-    epochKey,
-    authorizationKey,
-    fingerprint,
-    transitionId,
-    simulatorStep,
-    phases: scheduled.phases,
-    events,
-    bounds: Object.freeze({
-      nodes: Math.min(events.length * 28 + 2, 512),
-      animations: Math.min(spatialEventCount * 3 + 2, 512),
-      persistentNodes: Math.min(persistentEventCount * 6, 64),
-    }),
-  });
+  return null;
 }

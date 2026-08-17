@@ -1,8 +1,6 @@
+import { readFileSync } from "node:fs";
+
 import { expect, test } from "@playwright/test";
-import {
-  loadRendererFixture,
-  syntheticDebuggerWireFrame,
-} from "./support/renderer-fixture.js";
 import {
   currentReplayFrame,
   currentReplayTimeline,
@@ -36,9 +34,13 @@ test.beforeAll(async () => {
   /** @type {import("node:child_process").ChildProcess[]} */
   const startedProcesses = [];
   try {
-    liveFrameCandidate = syntheticDebuggerWireFrame(
-      await loadRendererFixture("crowded_teamfight"),
+    const fixture = JSON.parse(
+      readFileSync(
+        new URL("../tests/fixtures/authorized-presentations-v1.json", import.meta.url),
+        "utf8",
+      ),
     );
+    liveFrameCandidate = structuredClone(fixture.pairs.live_oracle.transport);
     completeViewer = await startReplayViewer({ replayPath: artifacts.complete });
     startedProcesses.push(completeViewer.process);
     partialViewer = await startReplayViewer({

@@ -2,27 +2,66 @@
 
 import re
 from collections.abc import Callable, Iterable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from importlib import import_module
 from typing import Protocol, cast
 
 import pytest
-from scripts.dev.visual_debugger.renderer_fixtures import (
-    RendererFixtureV2,
-    get_renderer_fixture,
-)
+from scripts.dev.visual_debugger.control import create_session, submit_next_script_frame
+from scripts.dev.visual_debugger.scenarios import get_scenario
+from tests.evaluation_fixtures import captured_evaluation_trajectory
+from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
+from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
+from marl_battlegrounds.evaluation.pov import build_actor_pov_current_slice_v1
 from marl_battlegrounds.rendering import (
     RenderResult,
     SceneRenderOptions,
     redraw_scene_geometry,
     render_scene_geometry,
 )
-from marl_battlegrounds.rendering.scene import BattlefieldSceneV2
+from marl_battlegrounds.rendering.evaluation_adapter import (
+    EvaluationScenePresentationStateV1,
+    build_researcher_analyzer_projection_v2,
+)
+from marl_battlegrounds.rendering.pov_scene import (
+    ActorPovAnalyzerProjectionV1,
+    build_actor_pov_analyzer_projection_v1,
+)
+from marl_battlegrounds.rendering.scene import (
+    BattlefieldSceneV2,
+    ResearcherAnalyzerProjectionV2,
+)
 from marl_battlegrounds.rendering.scene_geometry import (
     _aura_color,  # pyright: ignore[reportPrivateUsage]
 )
 from marl_battlegrounds.rendering.vocabulary import class_token_from_id
+
+_CANONICAL_EVENT_TYPES = frozenset(
+    {
+        "action_rejected",
+        "ability_activated",
+        "source_damage_output",
+        "source_healing_output",
+        "recipient_health_resolution",
+        "combat_countdown_reset",
+        "health_regenerated",
+        "cooldown_started",
+        "cooldown_ready",
+        "charge_phase_displacement",
+        "ordinary_movement_phase_displacement",
+        "agent_died",
+        "lethal_damage_contribution",
+        "status_aged_to_zero",
+        "status_broken_by_damage",
+        "status_applied",
+        "status_refreshed_or_extended",
+        "status_cleared_by_new_death",
+        "spawn_shield_expired",
+        "respawn_wave_occurred",
+        "agent_respawned",
+    }
+)
 
 
 class _ArtistLike(Protocol):
@@ -51,6 +90,83 @@ class _AxesLike(Protocol):
     texts: list[_TextLike]
 
 
+@dataclass(frozen=True, slots=True)
+class _ProductionPainterCases:
+    researcher: ResearcherAnalyzerProjectionV2
+    vocabulary: tuple[ResearcherAnalyzerProjectionV2, ...]
+    pov: ActorPovAnalyzerProjectionV1
+
+
+@pytest.fixture(scope="module")
+def production_painter_cases() -> _ProductionPainterCases:
+    def scenario_projections(
+        name: str,
+        selected_frame_indexes: frozenset[int],
+    ) -> tuple[ResearcherAnalyzerProjectionV2, ...]:
+        scenario = get_scenario(name)
+        session = create_session(
+            scenario,
+            seed=0,
+            evaluation_launch_specification=debugger_test_launch_specification(),
+            controlled_global_slot=0,
+            show_ranges=True,
+            verbose_logging=False,
+        )
+        projections: list[ResearcherAnalyzerProjectionV2] = []
+        for frame_index in range(len(scenario.frames)):
+            session = submit_next_script_frame(session)
+            if frame_index not in selected_frame_indexes:
+                continue
+            projections.append(
+                build_researcher_analyzer_projection_v2(
+                    session.evaluation_context,
+                    session.current_evaluation_frame,
+                    transition_view=session.incoming_evaluation_view,
+                    presentation=EvaluationScenePresentationStateV1(
+                        controlled_global_slot=0,
+                        selected_global_slot=5,
+                        show_ranges=True,
+                    ),
+                    status_source_evidence_state=(session.status_source_evidence_state),
+                )
+            )
+        if len(projections) != len(selected_frame_indexes):
+            raise AssertionError("selected production scenario frame is unavailable")
+        return tuple(projections)
+
+    moving = scenario_projections("moving_basic_crossfire", frozenset({0}))
+    vocabulary = (
+        *moving,
+        *scenario_projections("recovery_refresh_cycle", frozenset({0, 1})),
+        *scenario_projections("charge_convergence", frozenset({0})),
+        *scenario_projections("death_respawn_cycle", frozenset({0, 2, 5})),
+    )
+
+    trajectory = captured_evaluation_trajectory(
+        transition_count=1,
+        expected_horizon=1,
+    )
+    incoming = EvaluationTransitionViewV1(
+        context=trajectory.context,
+        start_frame=trajectory.frames[0],
+        transition=trajectory.transitions[0],
+        successor_frame=trajectory.frames[1],
+    )
+    pov = build_actor_pov_analyzer_projection_v1(
+        build_actor_pov_current_slice_v1(
+            trajectory.context,
+            trajectory.frames[1],
+            global_slot=0,
+            incoming_transition_view=incoming,
+        )
+    )
+    return _ProductionPainterCases(
+        researcher=moving[0],
+        vocabulary=vocabulary,
+        pov=pov,
+    )
+
+
 def _skip_if_matplotlib_unavailable() -> None:
     pytest.importorskip("matplotlib.pyplot")
 
@@ -75,84 +191,102 @@ def _texts(result: RenderResult) -> tuple[_TextLike, ...]:
     return tuple(cast(_AxesLike, result.axes).texts)
 
 
-def _render_fixture(
-    name: str,
+def _render_projection(
+    projection: object,
     *,
     options: SceneRenderOptions | None = None,
-) -> tuple[RendererFixtureV2, RenderResult]:
+) -> RenderResult:
     _skip_if_matplotlib_unavailable()
-    fixture = get_renderer_fixture(name)
-    if (
-        fixture.audience != "researcher"
-        or type(fixture.scene) is not BattlefieldSceneV2
-    ):
-        raise ValueError("the static painter accepts researcher V2 fixtures only")
-    result = render_scene_geometry(
-        fixture.scene,
-        event_batch=fixture.event_batch,
+    if type(projection) is not ResearcherAnalyzerProjectionV2:
+        raise ValueError("the static painter accepts researcher V2 projections only")
+    return render_scene_geometry(
+        projection.scene,
+        event_batch=projection.incoming_events,
         options=options,
     )
-    return fixture, result
 
 
-def test_crowded_v2_scene_preserves_agents_statuses_and_event_multiplicity() -> None:
-    fixture, result = _render_fixture("crowded_teamfight")
+def test_production_v2_scene_preserves_agents_statuses_and_event_multiplicity(
+    production_painter_cases: _ProductionPainterCases,
+) -> None:
+    projection = production_painter_cases.researcher
+    result = _render_projection(projection)
     try:
-        assert type(fixture.scene) is BattlefieldSceneV2
+        scene = projection.scene
+        assert type(scene) is BattlefieldSceneV2
         gids = _gids(result)
         assert {gid for gid in gids if gid.endswith(":body")} == {
-            f"scene:v2:agent:{agent.public_agent_id}:body"
-            for agent in fixture.scene.agents
+            f"scene:v2:agent:{agent.public_agent_id}:body" for agent in scene.agents
         }
-        first_agent = fixture.scene.agents[0]
-        assert tuple(
-            gid for gid in gids if gid.startswith("scene:v2:agent:0:status:")
-        ) == tuple(
-            f"scene:v2:agent:0:status:{status.status_id}"
-            for status in first_agent.statuses
-        )
-        assert fixture.event_batch is not None
+        assert any(agent.statuses for agent in scene.agents)
+        for agent in scene.agents:
+            assert tuple(
+                gid
+                for gid in gids
+                if gid.startswith(f"scene:v2:agent:{agent.public_agent_id}:status:")
+            ) == tuple(
+                f"scene:v2:agent:{agent.public_agent_id}:status:{status.status_id}"
+                for status in agent.statuses
+            )
+        event_batch = projection.incoming_events
+        assert event_batch is not None
         event_gids = tuple(gid for gid in gids if gid.startswith("scene:v2:event:"))
         assert event_gids == tuple(
-            f"scene:v2:event:{event.event_id}" for event in fixture.event_batch.events
+            f"scene:v2:event:{event.event_id}" for event in event_batch.events
         )
-        assert len(event_gids) == len(set(event_gids)) == 32
+        assert len(event_gids) == len(set(event_gids)) == len(event_batch.events)
+        assert len(event_gids) >= 50
         assert "scene:audience:researcher" in gids
     finally:
         _close(result)
 
 
-def test_canonical_event_vocabulary_draws_every_event_row_exactly_once() -> None:
-    fixture, result = _render_fixture("canonical_event_vocabulary")
-    try:
-        assert fixture.event_batch is not None
-        event_gids = tuple(
-            gid for gid in _gids(result) if gid.startswith("scene:v2:event:")
-        )
-        assert event_gids == tuple(
-            f"scene:v2:event:{event.event_id}" for event in fixture.event_batch.events
-        )
-        assert len(event_gids) == len(fixture.event_batch.events) == 23
-        labels = tuple(
-            artist.get_text()
-            for artist in _texts(result)
-            if (artist.get_gid() or "").startswith("scene:v2:event:")
-        )
-        assert labels == tuple(
-            event.event_type.replace("_", " ").upper()
-            for event in fixture.event_batch.events
-        )
-    finally:
-        _close(result)
+def test_production_event_batch_draws_every_event_row_exactly_once(
+    production_painter_cases: _ProductionPainterCases,
+) -> None:
+    rendered_event_types: set[str] = set()
+    for projection in production_painter_cases.vocabulary:
+        result = _render_projection(projection)
+        try:
+            event_batch = projection.incoming_events
+            assert event_batch is not None
+            assert event_batch.events
+            event_gids = tuple(
+                gid for gid in _gids(result) if gid.startswith("scene:v2:event:")
+            )
+            assert event_gids == tuple(
+                f"scene:v2:event:{event.event_id}" for event in event_batch.events
+            )
+            assert len(event_gids) == len(event_batch.events)
+            assert len(event_gids) == len(set(event_gids))
+            labels = tuple(
+                artist.get_text()
+                for artist in _texts(result)
+                if (artist.get_gid() or "").startswith("scene:v2:event:")
+            )
+            assert labels == tuple(
+                event.event_type.replace("_", " ").upper()
+                for event in event_batch.events
+            )
+            rendered_event_types.update(
+                event.event_type for event in event_batch.events
+            )
+        finally:
+            _close(result)
+    assert rendered_event_types == _CANONICAL_EVENT_TYPES
 
 
-def test_visual_vocabulary_static_evidence_keeps_v2_scene_grammar() -> None:
-    fixture, result = _render_fixture(
-        "visual_vocabulary",
+def test_visual_vocabulary_static_evidence_keeps_v2_scene_grammar(
+    production_painter_cases: _ProductionPainterCases,
+) -> None:
+    projection = production_painter_cases.researcher
+    result = _render_projection(
+        projection,
         options=SceneRenderOptions(show_agent_ids=True),
     )
     try:
-        assert type(fixture.scene) is BattlefieldSceneV2
+        scene = projection.scene
+        assert type(scene) is BattlefieldSceneV2
         gids = _gids(result)
         by_gid = {
             gid: artist
@@ -163,66 +297,75 @@ def test_visual_vocabulary_static_evidence_keeps_v2_scene_grammar() -> None:
             cast(
                 _TextLike, by_gid[f"scene:v2:agent:{agent.public_agent_id}:class"]
             ).get_text()
-            for agent in fixture.scene.agents
+            for agent in scene.agents
         ) == tuple(
-            class_token_from_id(agent.class_id).fallback
-            for agent in fixture.scene.agents
+            class_token_from_id(agent.class_id).fallback for agent in scene.agents
         )
         assert "scene:v2:selection:controlled:0" in gids
         assert "scene:v2:selection:target:5" in gids
         assert {
-            "scene:v2:aura:0:mage_damage_amplification",
-            "scene:v2:aura:1:warrior_damage_mitigation",
+            f"scene:v2:range:{row.global_slot}:{row.kind}"
+            for row in scene.ranges
+            if row.radius > 0.0
         }.issubset(gids)
         assert {
-            f"scene:v2:range:{row.global_slot}:{row.kind}"
-            for row in fixture.scene.ranges
+            f"scene:v2:aura:{row.source_public_agent_id}:{row.aura_id}"
+            for row in scene.aura_fields
         }.issubset(gids)
-        assert fixture.event_batch is not None
+        event_batch = projection.incoming_events
+        assert event_batch is not None
         assert len([gid for gid in gids if gid.startswith("scene:v2:event:")]) == len(
-            fixture.event_batch.events
+            event_batch.events
         )
     finally:
         _close(result)
 
 
-def test_mixed_zero_net_keeps_each_canonical_event_without_joining() -> None:
-    fixture, result = _render_fixture("mixed_net_zero")
+def test_production_event_labels_keep_each_canonical_event_without_joining(
+    production_painter_cases: _ProductionPainterCases,
+) -> None:
+    projection = production_painter_cases.researcher
+    result = _render_projection(projection)
     try:
-        assert fixture.event_batch is not None
+        event_batch = projection.incoming_events
+        assert event_batch is not None
         event_labels = {
             artist.get_gid(): artist.get_text()
             for artist in _texts(result)
             if (artist.get_gid() or "").startswith("scene:v2:event:")
         }
         assert tuple(event_labels) == tuple(
-            f"scene:v2:event:{event.event_id}" for event in fixture.event_batch.events
+            f"scene:v2:event:{event.event_id}" for event in event_batch.events
         )
-        assert tuple(event_labels.values()) == (
-            "ABILITY ACTIVATED",
-            "ABILITY ACTIVATED",
-            "RECIPIENT HEALTH RESOLUTION",
+        assert tuple(event_labels.values()) == tuple(
+            event.event_type.replace("_", " ").upper() for event in event_batch.events
         )
+        assert len(event_labels) == len(event_batch.events)
     finally:
         _close(result)
 
 
-def test_pov_fixture_is_not_routed_through_privileged_static_painter() -> None:
-    fixture = get_renderer_fixture("pov_redaction")
-    assert fixture.audience == "agent_pov"
-    with pytest.raises(ValueError, match="researcher V2"):
-        _render_fixture("pov_redaction")
+def test_pov_projection_is_not_routed_through_privileged_static_painter(
+    production_painter_cases: _ProductionPainterCases,
+) -> None:
+    projection = production_painter_cases.pov
+    assert "AGENT POV" in projection.scene.audience_badge
+    with pytest.raises(ValueError, match="researcher V2 projections"):
+        _render_projection(projection)
 
 
-def test_redraw_reuses_result_and_recreates_deterministic_semantic_ids() -> None:
-    fixture, result = _render_fixture("mixed_net_zero")
+def test_redraw_reuses_result_and_recreates_deterministic_semantic_ids(
+    production_painter_cases: _ProductionPainterCases,
+) -> None:
+    projection = production_painter_cases.researcher
+    result = _render_projection(projection)
     try:
-        assert type(fixture.scene) is BattlefieldSceneV2
+        assert type(projection.scene) is BattlefieldSceneV2
         initial_gids = _gids(result)
         redrawn = redraw_scene_geometry(
-            fixture.scene,
+            projection.scene,
             result,
-            event_batch=fixture.event_batch,
+            event_batch=projection.incoming_events,
         )
         assert redrawn is result
         assert _gids(redrawn) == initial_gids
@@ -230,9 +373,12 @@ def test_redraw_reuses_result_and_recreates_deterministic_semantic_ids() -> None
         _close(result)
 
 
-def test_render_options_remove_optional_clutter_without_hiding_bodies() -> None:
-    fixture, result = _render_fixture(
-        "crowded_teamfight",
+def test_render_options_remove_optional_clutter_without_hiding_bodies(
+    production_painter_cases: _ProductionPainterCases,
+) -> None:
+    projection = production_painter_cases.researcher
+    result = _render_projection(
+        projection,
         options=SceneRenderOptions(
             show_agent_ids=False,
             show_ranges=False,
@@ -243,7 +389,7 @@ def test_render_options_remove_optional_clutter_without_hiding_bodies() -> None:
         ),
     )
     try:
-        assert type(fixture.scene) is BattlefieldSceneV2
+        assert type(projection.scene) is BattlefieldSceneV2
         gids = _gids(result)
         absent_prefixes: Iterable[str] = (
             "scene:v2:range:",
@@ -256,29 +402,32 @@ def test_render_options_remove_optional_clutter_without_hiding_bodies() -> None:
         assert all(":aura:" not in gid for gid in gids if ":agent:" in gid)
         assert {gid for gid in gids if gid.endswith(":body")} == {
             f"scene:v2:agent:{agent.public_agent_id}:body"
-            for agent in fixture.scene.agents
+            for agent in projection.scene.agents
         }
     finally:
         _close(result)
 
 
-def test_human_visible_v2_float_labels_never_exceed_two_decimals() -> None:
+def test_human_visible_v2_float_labels_never_exceed_two_decimals(
+    production_painter_cases: _ProductionPainterCases,
+) -> None:
     _skip_if_matplotlib_unavailable()
-    fixture = get_renderer_fixture("crowded_teamfight")
-    assert type(fixture.scene) is BattlefieldSceneV2
-    first_agent = fixture.scene.agents[0]
+    projection = production_painter_cases.researcher
+    assert type(projection.scene) is BattlefieldSceneV2
+    first_agent = projection.scene.agents[0]
+    assert first_agent.aura_modifiers
     first_modifier = replace(first_agent.aura_modifiers[0], multiplier=1.234567)
     scene = replace(
-        fixture.scene,
+        projection.scene,
         agents=(
             replace(
                 first_agent,
                 aura_modifiers=(first_modifier, *first_agent.aura_modifiers[1:]),
             ),
-            *fixture.scene.agents[1:],
+            *projection.scene.agents[1:],
         ),
     )
-    result = render_scene_geometry(scene, event_batch=fixture.event_batch)
+    result = render_scene_geometry(scene, event_batch=projection.incoming_events)
     try:
         visible_text = {
             artist.get_gid(): artist.get_text() for artist in _texts(result)

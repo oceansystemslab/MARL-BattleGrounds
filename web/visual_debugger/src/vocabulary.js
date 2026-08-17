@@ -314,8 +314,8 @@ const MODIFIER_TOKENS = Object.freeze({
 const LIFECYCLE_TOKENS = Object.freeze({
   applied: token({
     tokenId: "applied",
-    label: "Apply",
-    shortLabel: "Apply",
+    label: "Applied",
+    shortLabel: "Applied",
     accessibleName: "Status applied",
     glyphKey: "lifecycle-applied",
     cssKey: "applied",
@@ -323,8 +323,8 @@ const LIFECYCLE_TOKENS = Object.freeze({
   }),
   refreshed: token({
     tokenId: "refreshed",
-    label: "Refresh/extend",
-    shortLabel: "Refresh",
+    label: "Refreshed",
+    shortLabel: "Refreshed",
     accessibleName: "Status refreshed or extended",
     glyphKey: "lifecycle-refreshed",
     cssKey: "refreshed",
@@ -341,8 +341,8 @@ const LIFECYCLE_TOKENS = Object.freeze({
   }),
   expired: token({
     tokenId: "expired",
-    label: "Expire",
-    shortLabel: "Expire",
+    label: "Expired",
+    shortLabel: "Expired",
     accessibleName: "Status expired naturally",
     glyphKey: "lifecycle-expired",
     cssKey: "expired",
@@ -384,14 +384,14 @@ const LIFECYCLE_TOKENS = Object.freeze({
     cssKey: "trap-broken-and-reapplied",
     fallback: "X+",
   }),
-  expired_then_reapplied: token({
-    tokenId: "expired_then_reapplied",
-    label: "Previous instance expired, then reapplied",
-    shortLabel: "Expire+",
-    accessibleName: "Previous status instance expired, then was reapplied",
-    glyphKey: "lifecycle-expired",
-    cssKey: "expired-then-reapplied",
-    fallback: "E+",
+  reapplied: token({
+    tokenId: "reapplied",
+    label: "Reapplied",
+    shortLabel: "Reapplied",
+    accessibleName: "Status reapplied",
+    glyphKey: "lifecycle-applied",
+    cssKey: "reapplied",
+    fallback: "+",
   }),
 });
 
@@ -462,7 +462,7 @@ export const LIFECYCLE_TOKEN_IDS = Object.freeze([
   "cleared_by_death",
   "cleared_unclassified",
   "trap_broken_and_reapplied",
-  "expired_then_reapplied",
+  "reapplied",
 ]);
 
 export const CATALOG_STATUS_IDS = Object.freeze(

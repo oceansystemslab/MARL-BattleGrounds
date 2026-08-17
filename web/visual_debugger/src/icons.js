@@ -201,6 +201,10 @@ const ICONS = Object.freeze({
     primitive("path", { d: "m4 19 5-7-2-2 5-6-1 7 3 2-5 7 1-6Z" }),
     primitive("path", { d: "M19 12v8M15 16h8" }),
   ]),
+  "combat-in-progress": icon("combat-in-progress", [
+    primitive("path", { d: "M4 3 15 14M13 16l3-3 4 4-3 3Z" }),
+    primitive("path", { d: "M20 3 9 14M11 16l-3-3-4 4 3 3Z" }),
+  ]),
   unknown: icon("unknown", [
     primitive("path", {
       d: "M8.8 8.3a3.4 3.4 0 1 1 5.8 2.4c-1.7 1.4-2.6 2-2.6 4",

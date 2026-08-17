@@ -2,10 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  authorizationContextKey,
-  transitionEpochKey,
-} from "../src/choreography-plan.js";
-import {
   isReplayViewerFrame,
   joinReplayFrameAndTimeline,
   normalizeReplayApiErrorV1,
@@ -1254,8 +1250,9 @@ test("viewer launch identity isolates equal replay epochs across sessions", () =
   assert.equal(first.timeline_id, second.timeline_id);
   assert.equal(first.transition_id, second.transition_id);
   assert.equal(first.run_generation, second.run_generation);
-  assert.notEqual(transitionEpochKey(first), transitionEpochKey(second));
-  assert.notEqual(authorizationContextKey(first), authorizationContextKey(second));
+  assert.notEqual(first.viewer_session_id, second.viewer_session_id);
+  assert.equal(first.viewer_session_id, "viewer-session");
+  assert.equal(second.viewer_session_id, "viewer-session-restarted");
 });
 
 test("replay frames reject cross-audience and response-only fields", () => {

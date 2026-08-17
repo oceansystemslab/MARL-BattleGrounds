@@ -2,10 +2,6 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
-  loadRendererFixture,
-  syntheticDebuggerWireFrame,
-} from "../e2e/support/renderer-fixture.js";
-import {
   DebuggerApiError,
   extractFrame,
   extractJoinedFrame,
@@ -195,10 +191,8 @@ test("extractFrame enforces the exact replay error envelope even without a lates
   );
 });
 
-test("live V2 and replay V1 error envelopes retain separate frame boundaries", async () => {
-  const liveFrame = syntheticDebuggerWireFrame(
-    await loadRendererFixture("canonical_event_vocabulary"),
-  );
+test("live V2 and replay V1 error envelopes retain separate frame boundaries", () => {
+  const liveFrame = clone(presentationFixture.pairs.live_oracle.transport);
   const liveLatest = extractFrame({
     schema_version: 2,
     error_code: "stale_revision",

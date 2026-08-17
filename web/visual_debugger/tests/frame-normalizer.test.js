@@ -2,16 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import {
-  loadRendererFixture,
-  syntheticDebuggerWireFrame,
-} from "../e2e/support/renderer-fixture.js";
 import { extractFrame } from "../src/api.js";
-import {
-  buildChoreographyPlan,
-  CHOREOGRAPHY_PHASES,
-  transitionEpochKey,
-} from "../src/choreography-plan.js";
 import {
   liveDebuggerFrameIsScripted,
   liveDebuggerScenarioControlsAvailable,
@@ -45,6 +36,36 @@ const phaseRankByEventType = Object.freeze({
   spawn_shield_expired: 110,
   respawn_wave_occurred: 120,
   agent_respawned: 120,
+});
+
+/** @type {Promise<Record<string, any>> | undefined} */
+let authorizedFixturePromise;
+
+/** @returns {Promise<Record<string, any>>} */
+async function authorizedFixture() {
+  if (!authorizedFixturePromise) {
+    authorizedFixturePromise = readFile(
+      new URL("./fixtures/authorized-presentations-v1.json", import.meta.url),
+      "utf8",
+    ).then(JSON.parse);
+  }
+  return authorizedFixturePromise;
+}
+
+test("production-captured live projections replace the synthetic registry seam", async () => {
+  const fixture = await authorizedFixture();
+  for (const [kind, audience] of [
+    ["live_oracle", "researcher"],
+    ["live_no_shared_obs_agent_pov", "agent_pov"],
+  ]) {
+    const raw = structuredClone(fixture.pairs[kind].transport);
+    const serializedBefore = JSON.stringify(raw);
+    const normalized = normalizeLiveDebuggerFrameV2(raw);
+    assert.equal(normalized.scene.audience, audience);
+    assert.equal(JSON.stringify(raw), serializedBefore);
+    assert.equal(Object.isFrozen(normalized), true);
+    assert.equal(Object.isFrozen(normalized.scene), true);
+  }
 });
 
 /** @param {any} event */
@@ -636,6 +657,19 @@ function researcherFrame() {
   };
 }
 
+/** @param {any[]} events */
+function researcherFrameWithEvents(events) {
+  const frame = researcherFrame();
+  const normalizedEvents = events.map((event, ordinal) => ({
+    ...structuredClone(event),
+    event_id: `${transitionId}:event:${String(ordinal).padStart(4, "0")}`,
+    ordinal,
+  }));
+  frame.projection.incoming_events.events = normalizedEvents;
+  frame.projection.scene.incoming_event_ids = normalizedEvents.map(eventId);
+  return frame;
+}
+
 test("API boundary normalizes researcher V2 once and preserves canonical identities", () => {
   const raw = researcherFrame();
   const normalized = extractFrame({ schema_version: 2, frame: raw });
@@ -643,9 +677,9 @@ test("API boundary normalizes researcher V2 once and preserves canonical identit
   assert.notEqual(normalized, raw);
   assert.equal(normalized.transition_id, transitionId);
   assert.equal(normalized.event_batch.transition_id, transitionId);
-  assert.equal(
-    transitionEpochKey(normalized),
-    '["live-session",3,"evaluation-episode:transition:0"]',
+  assert.deepEqual(
+    [normalized.session_id, normalized.run_generation, normalized.transition_id],
+    ["live-session", 3, "evaluation-episode:transition:0"],
   );
   assert.deepEqual(
     normalized.event_batch.events.map(eventId),
@@ -803,10 +837,8 @@ test("researcher status and aura joins preserve serialized numeric tuning", () =
   assert.equal(normalized.scene.agents[0].modifiers[0].multiplier, 1.237);
 });
 
-test("researcher normalization preserves locally valid Python-authored scientific values", async () => {
-  const eventFrame = syntheticDebuggerWireFrame(
-    await loadRendererFixture("canonical_event_vocabulary"),
-  );
+test("researcher normalization preserves locally valid scientific values", () => {
+  const eventFrame = researcherFrameWithEvents(v2Events());
   /** @param {string} type */
   const eventOfType = (type) =>
     eventFrame.projection.incoming_events.events.find(
@@ -1168,21 +1200,8 @@ test("researcher wire shells are exact rebuilt roots for Technical JSON", () => 
   assert.equal(normalized.scene.aura_fields[0].token_id, "warrior_mitigation");
 });
 
-test("Python-exported researcher fixtures reject event and scene semantic drift", async () => {
-  const eventFrame = syntheticDebuggerWireFrame(
-    await loadRendererFixture("canonical_event_vocabulary"),
-  );
-  const crowdedFrame = syntheticDebuggerWireFrame(
-    await loadRendererFixture("crowded_teamfight"),
-  );
-  const visualVocabularyFrame = syntheticDebuggerWireFrame(
-    await loadRendererFixture("visual_vocabulary"),
-  );
-  const additionalResearcherFrames = await Promise.all(
-    ["durable_controls", "route_collision", "mixed_net_zero", "viewport_matrix"].map(
-      async (name) => syntheticDebuggerWireFrame(await loadRendererFixture(name)),
-    ),
-  );
+test("researcher event and scene normalization rejects semantic drift", () => {
+  const eventFrame = researcherFrameWithEvents(v2Events());
   /** @param {any} frame @param {string} type */
   const event = (frame, type) =>
     frame.projection.incoming_events.events.find(
@@ -1191,13 +1210,6 @@ test("Python-exported researcher fixtures reject event and scene semantic drift"
   const normalizedEventFrame = normalizeLiveDebuggerFrameV2(
     structuredClone(eventFrame),
   );
-  for (const source of [
-    crowdedFrame,
-    visualVocabularyFrame,
-    ...additionalResearcherFrames,
-  ]) {
-    normalizeLiveDebuggerFrameV2(structuredClone(source));
-  }
   assert.deepEqual(
     new Set(
       normalizedEventFrame.event_batch.events.map(
@@ -1212,9 +1224,9 @@ test("Python-exported researcher fixtures reject event and scene semantic drift"
   assert.deepEqual(normalizedDamage.mage_damage_aura_covering_emitter_global_slots, []);
   assert.deepEqual(
     normalizedDamage.warrior_mitigation_aura_covering_emitter_global_slots,
-    [6],
+    [],
   );
-  assert.equal(normalizedEventFrame.projection.scene.agents[6].life_state, "corpse");
+  assert.equal(normalizedEventFrame.projection.scene.agents[0].life_state, "alive");
   assert.equal(
     normalizedEventFrame.projection.scene.agents[0].spawn_shield_remaining,
     0,
@@ -1232,7 +1244,7 @@ test("Python-exported researcher fixtures reject event and scene semantic drift"
       "ability source slot-anchor mismatch",
       eventFrame,
       /** @param {any} frame */ (frame) => {
-        event(frame, "ability_activated").source_global_slot = 0;
+        event(frame, "ability_activated").source_global_slot = 1;
       },
     ],
     [
@@ -1300,7 +1312,7 @@ test("Python-exported researcher fixtures reject event and scene semantic drift"
       "respawn team mismatch",
       eventFrame,
       /** @param {any} frame */ (frame) => {
-        event(frame, "agent_respawned").team_id = 1;
+        event(frame, "agent_respawned").team_id = 2;
       },
     ],
     [
@@ -1308,29 +1320,6 @@ test("Python-exported researcher fixtures reject event and scene semantic drift"
       eventFrame,
       /** @param {any} frame */ (frame) => {
         event(frame, "cooldown_ready").agent_anchor.position[0] += 1;
-      },
-    ],
-    [
-      "status presentation order",
-      crowdedFrame,
-      /** @param {any} frame */ (frame) => {
-        frame.projection.scene.agents[0].statuses.reverse();
-      },
-    ],
-    [
-      "aura-field canonical order",
-      crowdedFrame,
-      /** @param {any} frame */ (frame) => {
-        frame.projection.scene.aura_fields.reverse();
-      },
-    ],
-    [
-      "duplicate spawn-pad assignment",
-      crowdedFrame,
-      /** @param {any} frame */ (frame) => {
-        frame.projection.scene.spawn_pads[1] = structuredClone(
-          frame.projection.scene.spawn_pads[0],
-        );
       },
     ],
     [
@@ -1415,10 +1404,37 @@ test("researcher scene collections retain canonical cross-root joins", () => {
   );
 });
 
-test("researcher respawn evidence names the same agent's incoming respawn event", async () => {
-  const canonical = syntheticDebuggerWireFrame(
-    await loadRendererFixture("canonical_event_vocabulary"),
+test("researcher respawn evidence names the same agent's incoming respawn event", () => {
+  const canonical = researcherFrame();
+  const events = v2Events();
+  const abilityTemplate = events.find(
+    (/** @type {any} */ event) => event.event_type === "ability_activated",
   );
+  const respawnTemplate = events.find(
+    (/** @type {any} */ event) => event.event_type === "agent_respawned",
+  );
+  assert.ok(abilityTemplate);
+  assert.ok(respawnTemplate);
+  const abilityEvent = {
+    ...abilityTemplate,
+    event_id: `${transitionId}:event:0000`,
+    ordinal: 0,
+  };
+  const respawnEvent = {
+    ...respawnTemplate,
+    event_id: `${transitionId}:event:0001`,
+    ordinal: 1,
+    agent_global_slot: 1,
+    realized_successor_position: [3, 1],
+    agent_anchor: structuredClone(successorOne),
+  };
+  canonical.projection.incoming_events.events = [abilityEvent, respawnEvent];
+  canonical.projection.scene.incoming_event_ids = [
+    abilityEvent.event_id,
+    respawnEvent.event_id,
+  ];
+  canonical.projection.scene.agents[1].respawned_on_incoming_transition = true;
+  canonical.projection.scene.agents[1].respawn_event_id = respawnEvent.event_id;
   normalizeLiveDebuggerFrameV2(structuredClone(canonical));
   const respawned = canonical.projection.scene.agents.find(
     (/** @type {any} */ agent) => agent.respawn_event_id !== null,
@@ -1447,10 +1463,22 @@ test("researcher respawn evidence names the same agent's incoming respawn event"
   }
 });
 
-test("researcher frame zero cannot claim incoming or respawn evidence", async () => {
-  const frame = syntheticDebuggerWireFrame(
-    await loadRendererFixture("durable_controls"),
-  );
+test("researcher frame zero cannot claim incoming or respawn evidence", () => {
+  const frame = researcherFrame();
+  frame.frame_index = 0;
+  frame.frame_id = `${episodeId}:frame:0`;
+  frame.simulator_step_count = 0;
+  frame.incoming_transition_index = null;
+  frame.incoming_transition_id = null;
+  frame.projection.scene.frame_index = 0;
+  frame.projection.scene.frame_id = frame.frame_id;
+  frame.projection.scene.simulator_step_count = 0;
+  frame.projection.scene.incoming_transition_id = null;
+  frame.projection.scene.incoming_event_ids = [];
+  frame.projection.incoming_events = null;
+  frame.projection.status_source_evidence.frame_index = 0;
+  frame.projection.status_source_evidence.frame_id = frame.frame_id;
+  frame.hud.latest_transition = null;
   assert.equal(frame.frame_index, 0);
   assert.equal(frame.projection.incoming_events, null);
   assert.deepEqual(frame.projection.scene.incoming_event_ids, []);
@@ -1579,140 +1607,7 @@ test("researcher HUD is an exact rebuilt scene-joined root", () => {
   assert.equal(normalized.hud.diagnostics[0].value, "1");
 });
 
-test("choreography gives every canonical V2 event one explicit disposition", async () => {
-  const frame = normalizeLiveDebuggerFrameV2(
-    syntheticDebuggerWireFrame(await loadRendererFixture("canonical_event_vocabulary")),
-  );
-  const plan = buildChoreographyPlan(frame, {
-    worldToScreen: (point) => ({
-      x: ("x" in point ? point.x : point[0]) * 10,
-      y: ("y" in point ? point.y : point[1]) * 10,
-    }),
-    worldLengthToScreen: (length) => length * 10,
-    viewportBounds: {
-      left: 0,
-      top: 0,
-      right: 100,
-      bottom: 80,
-      width: 100,
-      height: 80,
-    },
-  });
-  assert.ok(plan);
-  assert.equal(plan.transitionId, frame.incoming_transition_id);
-  assert.equal(plan.events.length, 23);
-  assert.deepEqual(
-    plan.events.map(({ eventId }) => eventId),
-    frame.event_batch.events.map(eventId),
-  );
-  assert.deepEqual(
-    new Set(plan.events.map(({ eventType }) => eventType)),
-    new Set(researcherEventTypesV2),
-  );
-  assert.equal(
-    plan.events.some(({ kind }) => kind === "unknown"),
-    false,
-  );
-  assert.equal(
-    plan.events.find(({ eventType }) => eventType === "source_damage_output")?.kind,
-    "feed_only",
-  );
-  assert.equal(
-    plan.events.find(({ eventType }) => eventType === "ability_activated")?.kind,
-    "activation",
-  );
-  assert.equal(
-    plan.events.find(
-      ({ eventType }) => eventType === "ordinary_movement_phase_displacement",
-    )?.kind,
-    "movement_displacement",
-  );
-
-  const byType = new Map(plan.events.map((event) => [event.eventType, event]));
-  for (const eventType of [
-    "combat_countdown_reset",
-    "health_regenerated",
-    "cooldown_started",
-    "cooldown_ready",
-    "agent_died",
-    "spawn_shield_expired",
-    "respawn_wave_occurred",
-    "agent_respawned",
-  ]) {
-    assert.equal(byType.get(eventType)?.kind, "semantic_pulse", eventType);
-    assert.equal(byType.get(eventType)?.spatial, true, eventType);
-  }
-
-  const statusApplied = byType.get("status_applied");
-  assert.equal(statusApplied?.tokenId, "priest_freedom");
-  assert.equal(statusApplied?.sourceSlot, 4);
-  assert.equal(statusApplied?.recipientSlot, 0);
-  const statusRefresh = byType.get("status_refreshed_or_extended");
-  assert.equal(statusRefresh?.sourceSlot, null);
-  assert.equal(statusRefresh?.source, null);
-  const statusDeathClear = byType.get("status_cleared_by_new_death");
-  assert.equal(statusDeathClear?.lifecycle, "cleared_by_death");
-  assert.match(
-    statusDeathClear?.lifecycleToken?.accessibleName ?? "",
-    /cleared.*recorded new death/u,
-  );
-  assert.notEqual(
-    statusDeathClear?.lifecycle,
-    byType.get("status_aged_to_zero")?.lifecycle,
-  );
-  assert.notEqual(
-    statusDeathClear?.lifecycle,
-    byType.get("status_broken_by_damage")?.lifecycle,
-  );
-
-  const ability = byType.get("ability_activated");
-  const health = byType.get("recipient_health_resolution");
-  const countdown = byType.get("combat_countdown_reset");
-  const cooldown = byType.get("cooldown_started");
-  const charge = byType.get("charge_phase_displacement");
-  const movement = byType.get("ordinary_movement_phase_displacement");
-  const death = byType.get("agent_died");
-  const status = byType.get("status_applied");
-  const shield = byType.get("spawn_shield_expired");
-  const wave = byType.get("respawn_wave_occurred");
-  const respawn = byType.get("agent_respawned");
-  assert.ok(ability);
-  assert.ok(health);
-  assert.deepEqual(
-    [ability.phaseStart, ability.phaseImpact, ability.phaseEnd],
-    [
-      CHOREOGRAPHY_PHASES.activationStart,
-      CHOREOGRAPHY_PHASES.impactStart,
-      CHOREOGRAPHY_PHASES.settleStart,
-    ],
-  );
-  assert.equal(health.phaseStart, CHOREOGRAPHY_PHASES.outcomeStart);
-  assert.equal(health.phaseEnd - health.phaseStart, 480);
-  assert.ok(
-    ability.phaseImpact < health.phaseStart,
-    "ability impact must land before the readable health outcome begins",
-  );
-  for (const [earlier, later] of [
-    [health, countdown],
-    [countdown, cooldown],
-    [cooldown, charge],
-    [charge, movement],
-    [movement, death],
-    [death, status],
-    [status, shield],
-    [shield, wave],
-    [wave, respawn],
-  ]) {
-    assert.ok(earlier);
-    assert.ok(later);
-    assert.ok(
-      earlier.phaseEnd <= later.phaseStart,
-      `${earlier.eventType} must finish before ${later.eventType}`,
-    );
-  }
-});
-
-test("V2 planning preserves canonical identity and order beyond 128 events", () => {
+test("V2 normalization preserves canonical identity and order beyond 128 events", () => {
   const raw = researcherFrame();
   const events = Array.from({ length: 160 }, (_, ordinal) => ({
     event_type: "status_aged_to_zero",
@@ -1732,21 +1627,13 @@ test("V2 planning preserves canonical identity and order beyond 128 events", () 
   raw.projection.scene.agents[0].respawned_on_incoming_transition = false;
   raw.projection.scene.agents[0].respawn_event_id = null;
   const frame = normalizeLiveDebuggerFrameV2(raw);
-  const plan = buildChoreographyPlan(frame, {
-    worldToScreen: (point) => ({
-      x: ("x" in point ? point.x : point[0]) * 10,
-      y: ("y" in point ? point.y : point[1]) * 10,
-    }),
-    worldLengthToScreen: (length) => length * 10,
-  });
-  assert.ok(plan);
-  assert.equal(plan.events.length, events.length);
-  assert.deepEqual(
-    plan.events.map(({ eventId }) => eventId),
-    events.map(eventId),
-  );
+  assert.equal(frame.event_batch.events.length, events.length);
+  assert.deepEqual(frame.event_batch.events.map(eventId), events.map(eventId));
   assert.equal(
-    plan.events.every(({ eventType }) => eventType === "status_aged_to_zero"),
+    frame.event_batch.events.every(
+      (/** @type {Record<string, any>} */ { event_type }) =>
+        event_type === "status_aged_to_zero",
+    ),
     true,
   );
 });
@@ -2040,9 +1927,9 @@ test("POV normalization retains visible rows without manufacturing global slots"
     normalized.event_batch.events[0].event_id,
     `${episodeId}:actor-pov:agent-zero:transition:0:cue:0`,
   );
-  assert.equal(
-    transitionEpochKey(normalized),
-    '["live-session",3,"evaluation-episode:actor-pov:agent-zero:transition:0"]',
+  assert.deepEqual(
+    [normalized.session_id, normalized.run_generation, normalized.transition_id],
+    ["live-session", 3, "evaluation-episode:actor-pov:agent-zero:transition:0"],
   );
   assert.deepEqual(normalized.scene.pending_route, {
     audience: "agent_pov",

@@ -4,7 +4,11 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 
 import { expect, test } from "@playwright/test";
-
+import {
+  CHOREOGRAPHY_ROOT,
+  finishControllerClock,
+  installWaapiAutopause,
+} from "./support/choreography.js";
 import {
   REPOSITORY_ROOT,
   startDebugger,
@@ -52,6 +56,22 @@ if (
   );
 }
 const cp4C3ShieldOnly = process.env.MARL_CP4_C3_SHIELD_ONLY === "1";
+const CP5_C_SLICE_TEST_TITLE =
+  "real moving crossfire and recovery replay expose durable IC and packed +4 regeneration";
+const cp5CSliceOnly = process.env.MARL_CP5_C_SLICE_ONLY === "1";
+const CP5_SLICE_5_TEST_TITLE =
+  "six real scientific trajectories preserve public causality and hidden-root privacy";
+const cp5Slice5Only = process.env.MARL_CP5_SLICE_5_ONLY === "1";
+const isolatedCp5Proof = cp5CSliceOnly || cp5Slice5Only;
+const CP5_SLICE_5_REPLAY_HASHES = Object.freeze({
+  "death-respawn-shield.marlbg-replay.json":
+    "639da4f49eb1dca01f200ca0c8ebf1eb3fc2b94fbc4408802f6ddb71085346ee",
+  "manifest.json": "9223d504fdf8c18c18a3adb0856fa95ea8cef1852e0d146b1648ed2285751809",
+  "mirrored-five-class-ultimates.marlbg-replay.json":
+    "7645afc39f9001a7268cfec43df47c93157042fcbac9296723f4284445682f5d",
+  "recovery-status-lifecycle.marlbg-replay.json":
+    "d17308b7681a65f88a8055b3a6bbdc887529104173896fe8bf64587197af7431",
+});
 
 /** @type {Array<Record<string, unknown>>} */
 const cp4ENativeCaptures = [];
@@ -79,6 +99,9 @@ let deathReplay = null;
 const browserErrors = new WeakMap();
 
 test.beforeAll(async () => {
+  if (isolatedCp5Proof) {
+    return;
+  }
   /** @type {import("node:child_process").ChildProcess[]} */
   const startedProcesses = [];
   try {
@@ -118,6 +141,20 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
+  if (isolatedCp5Proof) {
+    if (
+      artifacts !== null ||
+      liveDebugger !== null ||
+      noSharedReplay !== null ||
+      sharedReplay !== null ||
+      deathReplay !== null
+    ) {
+      throw new Error(
+        "Isolated CP5 proof mode must not start shared legacy presentation services or artifact export.",
+      );
+    }
+    return;
+  }
   const processes = [
     liveDebugger?.process ?? null,
     noSharedReplay?.process ?? null,
@@ -153,6 +190,17 @@ test.afterAll(async () => {
       "Authorized-presentation E2E cleanup failed.",
     );
   }
+});
+
+test.beforeEach(({ browserName: _browserName }, testInfo) => {
+  test.skip(
+    cp5CSliceOnly && testInfo.title !== CP5_C_SLICE_TEST_TITLE,
+    "CP5 Slice C-only mode permits only its self-contained two-service proof.",
+  );
+  test.skip(
+    cp5Slice5Only && testInfo.title !== CP5_SLICE_5_TEST_TITLE,
+    "CP5 Slice 5-only mode permits only its self-contained causal/privacy proof.",
+  );
 });
 
 /** @param {import("@playwright/test").Page} page */
@@ -223,6 +271,312 @@ async function sha256File(path) {
   return createHash("sha256")
     .update(await readFile(path))
     .digest("hex");
+}
+
+async function cp5Slice5CheckedReplaySnapshot() {
+  /** @type {Record<string, {bytes: Buffer, sha256: string}>} */
+  const snapshot = {};
+  for (const [fileName, expectedSha256] of Object.entries(CP5_SLICE_5_REPLAY_HASHES)) {
+    const path = join(REPOSITORY_ROOT, "examples", "replays", "v1", fileName);
+    const bytes = await readFile(path);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    expect(sha256, fileName).toBe(expectedSha256);
+    snapshot[fileName] = { bytes, sha256 };
+  }
+  return snapshot;
+}
+
+/**
+ * Read the exact authorized response body so hidden raw-transport mutations
+ * can be proved byte-inert rather than merely object-equal.
+ *
+ * @param {import("@playwright/test").Page} page
+ */
+async function cp5Slice5PresentationBody(page) {
+  return page.evaluate(async () => {
+    const token = window.sessionStorage.getItem("marl-battlegrounds.debugger-token");
+    if (!token) {
+      throw new Error("Debugger capability token is unavailable.");
+    }
+    const response = await fetch("/api/presentation/frame", {
+      cache: "no-store",
+      credentials: "omit",
+      headers: { "X-MARL-Debugger-Token": token },
+      redirect: "error",
+    });
+    if (!response.ok) {
+      throw new Error(`/api/presentation/frame failed with HTTP ${response.status}.`);
+    }
+    return response.text();
+  });
+}
+
+/**
+ * Project one real authorized response through the pure planner and collect
+ * only stable semantic DOM state from the installed product.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @param {Record<string, any>} rawPresentation
+ */
+async function cp5Slice5PlanAndDomSignature(page, rawPresentation) {
+  return page.evaluate(async (raw) => {
+    const moduleRoot = "/src";
+    const { normalizeAuthorizedPresentationFrameV1 } = await import(
+      `${moduleRoot}/authorized-presentation-normalizer.js`
+    );
+    const { buildChoreographyPlan } = await import(
+      `${moduleRoot}/choreography-plan.js`
+    );
+    const { authorizedPresentationIncomingRows } = await import(
+      `${moduleRoot}/authorized-presentation-adapter.js`
+    );
+    const presentation = await normalizeAuthorizedPresentationFrameV1(raw);
+    const serializedBefore = JSON.stringify(presentation);
+    const surface = Object.freeze({
+      /** @param {Record<string, any> | number[]} point */
+      worldToScreen: (point) => {
+        const x = Array.isArray(point) ? point[0] : point.x;
+        const y = Array.isArray(point) ? point[1] : point.y;
+        return { x: Number(x) * 10, y: Number(y) * 10 };
+      },
+      /** @param {number} length */
+      worldLengthToScreen: (length) => Number(length) * 10,
+      viewportBounds: Object.freeze({
+        left: 0,
+        top: 0,
+        right: 4096,
+        bottom: 4096,
+        width: 4096,
+        height: 4096,
+      }),
+      protectedRects: Object.freeze([]),
+    });
+    const incomingRows = /** @type {Array<Record<string, any>>} */ (
+      authorizedPresentationIncomingRows(presentation)
+    );
+    const plan = buildChoreographyPlan(presentation, surface);
+    if (!plan && incomingRows.length > 0) {
+      throw new Error("Real authorized incoming rows produced no choreography plan.");
+    }
+    const planEvents =
+      plan === null ? [] : /** @type {Array<Record<string, any>>} */ (plan.events);
+    const orderedEventIds = incomingRows.map(({ id }) => id);
+    const plannedAtomicIds = planEvents.flatMap((event) =>
+      Array.isArray(event.atomicEventIds) ? event.atomicEventIds : [event.eventId],
+    );
+    if (JSON.stringify(plannedAtomicIds) !== JSON.stringify(orderedEventIds)) {
+      throw new Error("Authorized plan lost, duplicated, or reordered an incoming ID.");
+    }
+    const eventRows = [...document.querySelectorAll("#event-feed .event-item")].map(
+      (row) => ({
+        id: row.getAttribute("data-event-id"),
+        type: row.getAttribute("data-event-type"),
+        vocabulary: row.getAttribute("data-event-vocabulary"),
+      }),
+    );
+    if (
+      JSON.stringify(eventRows.map(({ id }) => id)) !== JSON.stringify(orderedEventIds)
+    ) {
+      throw new Error("Installed Latest Events DOM differs from authorized ID order.");
+    }
+    const statusLifecycles = [];
+    for (const effect of document.querySelectorAll(
+      ".combat-effect--status-lifecycle[data-tooltip-owner]",
+    )) {
+      const hit = effect.querySelector(".combat-lifecycle__hit");
+      if (!(hit instanceof SVGElement)) {
+        throw new Error("Installed status lifecycle lost its hit target.");
+      }
+      hit.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+      await new Promise((resolveFrame) => requestAnimationFrame(resolveFrame));
+      statusLifecycles.push({
+        id: effect.getAttribute("data-event-id"),
+        type: effect.getAttribute("data-event-type"),
+        tokenId: effect.getAttribute("data-token-id"),
+        lifecycle: effect.getAttribute("data-lifecycle"),
+        persistent: effect.getAttribute("data-persistent") === "true",
+        atomicEventIds: JSON.parse(
+          effect.getAttribute("data-atomic-event-ids") ?? "null",
+        ),
+        applicationEventIds: JSON.parse(
+          effect.getAttribute("data-application-event-ids") ?? "null",
+        ),
+        tooltipKind:
+          document
+            .querySelector("#visual-tooltip")
+            ?.getAttribute("data-tooltip-kind") ?? null,
+        tooltipTitle:
+          document.querySelector("#visual-tooltip-title")?.textContent ?? null,
+        tooltipSummary:
+          document.querySelector("#visual-tooltip .semantic-explanation__summary")
+            ?.textContent ?? null,
+      });
+      hit.dispatchEvent(
+        new FocusEvent("focusout", { bubbles: true, relatedTarget: null }),
+      );
+    }
+    return {
+      inputUnchanged: JSON.stringify(presentation) === serializedBefore,
+      plan: {
+        authorizationKey: plan?.authorizationKey ?? null,
+        epochKey: plan?.epochKey ?? null,
+        fingerprint: plan?.fingerprint ?? null,
+        transitionId: plan?.transitionId ?? null,
+        events: planEvents.map((event) => ({
+          eventId: event.eventId,
+          eventType: event.eventType,
+          transitionId: event.transitionId,
+          authorityVocabulary: event.authorityVocabulary,
+          kind: event.kind,
+          spatial: event.spatial,
+          presentationSuppressed: event.presentationSuppressed ?? false,
+          persistent: event.persistent ?? false,
+          tokenId: event.tokenId ?? null,
+          lifecycle: event.lifecycle ?? null,
+          lifecycleLabel: event.lifecycleToken?.label ?? null,
+          lifecycleAccessibleName: event.lifecycleToken?.accessibleName ?? null,
+          atomicEventIds: event.atomicEventIds ?? null,
+          applicationEventIds: event.applicationEventIds ?? null,
+          sourcePresentationKey: event.sourcePresentationKey ?? null,
+          sourcePublicAgentId: event.sourcePublicAgentId ?? null,
+          targetPresentationKey: event.targetPresentationKey ?? null,
+          targetPublicAgentId: event.targetPublicAgentId ?? null,
+          recipientPresentationKey: event.recipientPresentationKey ?? null,
+          recipientPublicAgentId: event.recipientPublicAgentId ?? null,
+          agentPresentationKey: event.agentPresentationKey ?? null,
+          agentPublicAgentId: event.agentPublicAgentId ?? null,
+          source: event.source ?? null,
+          target: event.target ?? null,
+          start: event.start ?? null,
+          end: event.end ?? null,
+          route: event.route ?? null,
+        })),
+      },
+      dom: {
+        authority: document.documentElement.dataset.presentationAuthority ?? null,
+        eventRows,
+        agents: [...document.querySelectorAll("#battlefield .agent")].map((agent) => ({
+          key: agent.getAttribute("data-presentation-key"),
+          alive: agent.getAttribute("data-alive"),
+          shield: agent.getAttribute("data-spawn-shield-remaining"),
+          statuses: [...agent.querySelectorAll(".status-cell")].map((status) => ({
+            token: status.getAttribute("data-token-id"),
+            duration: status.getAttribute("data-duration"),
+          })),
+        })),
+        effects: [...document.querySelectorAll(".combat-effect")].map((effect) => ({
+          id: effect.getAttribute("data-event-id"),
+          type: effect.getAttribute("data-event-type"),
+          persistent: effect.getAttribute("data-persistent") === "true",
+          sourceKey: effect.getAttribute("data-source-presentation-key"),
+          targetKey: effect.getAttribute("data-target-presentation-key"),
+          recipientKey: effect.getAttribute("data-recipient-presentation-key"),
+          agentKey: effect.getAttribute("data-agent-presentation-key"),
+        })),
+        statusLifecycles,
+        routes: [
+          ...document.querySelectorAll(".combat-choreography-routes [data-event-id]"),
+        ].map((route) => ({
+          id: route.getAttribute("data-event-id"),
+          type: route.getAttribute("data-event-type"),
+          persistent: route.getAttribute("data-persistent") === "true",
+          sourceKey: route.getAttribute("data-source-presentation-key"),
+          targetKey: route.getAttribute("data-target-presentation-key"),
+          recipientKey: route.getAttribute("data-recipient-presentation-key"),
+          agentKey: route.getAttribute("data-agent-presentation-key"),
+        })),
+        transition: document.querySelector("#transition-value")?.textContent ?? null,
+      },
+    };
+  }, rawPresentation);
+}
+
+/**
+ * Reinstall one real leaf with a schema-valid private raw transport mutation.
+ * The certified presentation response is deliberately left untouched.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @param {string} productUrl
+ * @param {string} expectedPresentationKind
+ */
+async function cp5Slice5AssertHiddenTransportNoninterference(
+  page,
+  productUrl,
+  expectedPresentationKind,
+) {
+  await page.goto("about:blank");
+  await openProduct(page, productUrl, "replay");
+  const baselineTransport = await authenticatedGet(page, "/api/frame");
+  const baselinePresentationBody = await cp5Slice5PresentationBody(page);
+  const baselinePresentation = JSON.parse(baselinePresentationBody);
+  expect(baselinePresentation.presentation_kind).toBe(expectedPresentationKind);
+  const baselineSignature = await cp5Slice5PlanAndDomSignature(
+    page,
+    baselinePresentation,
+  );
+  expect(baselineSignature.inputUnchanged).toBe(true);
+
+  await page.goto("about:blank");
+  let mutationCount = 0;
+  await page.route("**/api/frame", async (route) => {
+    const response = await route.fetch();
+    const transport = await response.json();
+    if (expectedPresentationKind === "replay_oracle") {
+      transport.processing = {
+        ...transport.processing,
+        status: "failed",
+        failure_stage: "lifecycle",
+        failure_code: "cp5_hidden_transport_probe",
+        attempted_transition_index: null,
+      };
+    } else {
+      transport.cursor = {
+        ...transport.cursor,
+        cursor_generation: transport.cursor.cursor_generation + 1,
+      };
+    }
+    mutationCount += 1;
+    await route.fulfill({ response, json: transport });
+  });
+  try {
+    await openProduct(page, productUrl, "replay");
+    const mutatedTransport = await authenticatedGet(page, "/api/frame");
+    const mutatedPresentationBody = await cp5Slice5PresentationBody(page);
+    const mutatedPresentation = JSON.parse(mutatedPresentationBody);
+    if (expectedPresentationKind === "replay_oracle") {
+      expect(mutatedTransport.processing).toEqual({
+        ...baselineTransport.processing,
+        status: "failed",
+        failure_stage: "lifecycle",
+        failure_code: "cp5_hidden_transport_probe",
+        attempted_transition_index: null,
+      });
+      expect({
+        ...mutatedTransport,
+        processing: baselineTransport.processing,
+      }).toEqual(baselineTransport);
+    } else {
+      expect(mutatedTransport.cursor.cursor_generation).toBe(
+        baselineTransport.cursor.cursor_generation + 1,
+      );
+      expect({
+        ...mutatedTransport,
+        cursor: baselineTransport.cursor,
+      }).toEqual(baselineTransport);
+    }
+    expect(mutatedPresentationBody).toBe(baselinePresentationBody);
+    expect(mutatedPresentation.presentation_kind).toBe(expectedPresentationKind);
+    const mutatedSignature = await cp5Slice5PlanAndDomSignature(
+      page,
+      mutatedPresentation,
+    );
+    expect(mutatedSignature).toEqual(baselineSignature);
+  } finally {
+    await page.unroute("**/api/frame");
+  }
+  expect(mutationCount).toBeGreaterThan(0);
+  await page.goto("about:blank");
+  await openProduct(page, productUrl, "replay");
 }
 
 /** @param {string} captureDirectory */
@@ -2463,6 +2817,2605 @@ test("all five real service leaves install and live authority clears atomically"
   expect(browserErrors.get(page) ?? []).toEqual([]);
 });
 
+test(CP5_C_SLICE_TEST_TITLE, async ({ page }) => {
+  test.skip(
+    cp4C3ShieldOnly || cp4ECaptureDirectory !== null,
+    "CP5 Slice C real-service proof is outside bounded CP4 capture modes.",
+  );
+  /** @type {Awaited<ReturnType<typeof startReplayViewer>> | null} */
+  let movingReplay = null;
+  /** @type {Awaited<ReturnType<typeof startReplayViewer>> | null} */
+  let recoveryReplay = null;
+  /** @type {unknown} */
+  let testError = null;
+  try {
+    movingReplay = await startReplayViewer({
+      scenario: "moving_basic_crossfire",
+      includeStress: true,
+    });
+    recoveryReplay = await startReplayViewer({
+      sampleReplay: "recovery-status-lifecycle",
+    });
+
+    const combatMatrixViewports = [
+      { width: 800, height: 600 },
+      { width: 1200, height: 800 },
+      { width: 1600, height: 1000 },
+    ];
+    const classTokenById = new Map([
+      [1, "mage"],
+      [2, "warrior"],
+      [3, "hunter"],
+      [4, "rogue"],
+      [5, "priest"],
+    ]);
+    /**
+     * @param {Record<string, any>} presentation
+     * @param {string} frameLabel
+     */
+    const expectCombatIdentityMatrix = async (presentation, frameLabel) => {
+      const authorizedAgents = /** @type {Record<string, any>[]} */ (
+        presentation.current_endpoint.scene.agents
+      );
+      const authorizedByKey = new Map(
+        authorizedAgents.map((agent) => [agent.presentation_key, agent]),
+      );
+      expect(authorizedByKey.size, `${frameLabel}: authorized identities`).toBe(
+        authorizedAgents.length,
+      );
+      expect(
+        new Set(authorizedAgents.map(({ class_id }) => class_id)),
+        `${frameLabel}: all five classes`,
+      ).toEqual(new Set([1, 2, 3, 4, 5]));
+
+      const passes = [];
+      for (const viewport of [...combatMatrixViewports, combatMatrixViewports[0]]) {
+        await page.setViewportSize(viewport);
+        await page.locator("#battlefield").evaluate(async (battlefield) => {
+          if (!(battlefield instanceof SVGSVGElement)) {
+            throw new TypeError("Authorized battlefield is unavailable.");
+          }
+          await new Promise((resolveFrame) =>
+            requestAnimationFrame(() => resolveFrame(undefined)),
+          );
+          await new Promise((resolveFrame) =>
+            requestAnimationFrame(() => resolveFrame(undefined)),
+          );
+        });
+        await expect(page.locator("#battlefield .agent")).toHaveCount(
+          authorizedAgents.length,
+        );
+        const pass = await page.locator("#battlefield").evaluate((battlefield) => {
+          const states = Array.from(battlefield.querySelectorAll(".agent"))
+            .map((agent) => {
+              const body = agent.querySelector(".agent-body");
+              const classIcon = agent.querySelector(".agent-class-icon");
+              const combatIcon = agent.querySelector(".agent-combat-state-icon");
+              if (
+                !(body instanceof SVGCircleElement) ||
+                !(classIcon instanceof SVGSVGElement) ||
+                !(combatIcon instanceof SVGSVGElement)
+              ) {
+                throw new TypeError("Authorized identity geometry is unavailable.");
+              }
+              const bodyCenter = Number(body.getAttribute("cx"));
+              const classX = Number(classIcon.getAttribute("x"));
+              const classWidth = Number(classIcon.getAttribute("width"));
+              const combatX = Number(combatIcon.getAttribute("x"));
+              const combatWidth = Number(combatIcon.getAttribute("width"));
+              return {
+                presentationKey: agent.getAttribute("data-presentation-key"),
+                classToken: agent.getAttribute("data-class"),
+                projectedRadius: Number(body.getAttribute("r")),
+                status: agent.getAttribute("data-combat-status"),
+                countdown: Number(agent.getAttribute("data-steps-until-out-of-combat")),
+                ariaLabel: agent.getAttribute("aria-label"),
+                ariaDescription: agent.getAttribute("aria-description"),
+                rootRole: agent.getAttribute("role"),
+                rootTabIndex: agent.getAttribute("tabindex"),
+                rootOwnsTooltip: agent.hasAttribute("data-tooltip-owner"),
+                descendantIdentityOwnerCount: agent.querySelectorAll(
+                  "[data-presentation-key]",
+                ).length,
+                descendantTooltipOwnerCount:
+                  agent.querySelectorAll("[data-tooltip-owner]").length,
+                descendantHitOwnerCount: agent.querySelectorAll(
+                  '[role="button"], [tabindex="0"]',
+                ).length,
+                identityPartsResolveToRoot: [body, classIcon, combatIcon].every(
+                  (part) => part.closest(".agent") === agent,
+                ),
+                classPointerEvents: getComputedStyle(classIcon).pointerEvents,
+                iconCount: agent.querySelectorAll(".agent-combat-state-icon").length,
+                combatGlyph: combatIcon.getAttribute("data-icon"),
+                combatColor: getComputedStyle(combatIcon).color,
+                combatAriaHidden: combatIcon.getAttribute("aria-hidden"),
+                combatFocusable: combatIcon.getAttribute("focusable"),
+                combatRole: combatIcon.getAttribute("role"),
+                combatOwnsTooltip: combatIcon.hasAttribute("data-tooltip-owner"),
+                combatPointerEvents: getComputedStyle(combatIcon).pointerEvents,
+                combatHidden: combatIcon.hasAttribute("hidden"),
+                classCentered: Math.abs(classX + classWidth / 2 - bodyCenter) < 0.001,
+                combinedCentered:
+                  Math.abs((classX + combatX + combatWidth) / 2 - bodyCenter) < 0.001,
+                nonOverlapping: classX + classWidth <= combatX,
+              };
+            })
+            .sort((left, right) =>
+              String(left.presentationKey).localeCompare(String(right.presentationKey)),
+            );
+          return {
+            surface: `${battlefield.clientWidth}x${battlefield.clientHeight}`,
+            states,
+          };
+        });
+        passes.push(pass);
+      }
+
+      expect(
+        new Set(passes.slice(0, 3).map(({ surface }) => surface)).size,
+        `${frameLabel}: distinct rendered surfaces`,
+      ).toBe(3);
+      expect(passes[3], `${frameLabel}: repeated render`).toEqual(passes[0]);
+      for (const presentationKey of authorizedByKey.keys()) {
+        expect(
+          new Set(
+            passes
+              .slice(0, 3)
+              .flatMap(({ states }) =>
+                states
+                  .filter((state) => state.presentationKey === presentationKey)
+                  .map(({ projectedRadius }) => projectedRadius.toFixed(6)),
+              ),
+          ).size,
+          `${frameLabel}: ${presentationKey} representative radii`,
+        ).toBe(3);
+      }
+
+      for (const { surface, states } of passes.slice(0, 3)) {
+        expect(states, `${frameLabel} at ${surface}: DOM identities`).toHaveLength(
+          authorizedAgents.length,
+        );
+        expect(
+          new Set(states.map(({ presentationKey }) => presentationKey)),
+          `${frameLabel} at ${surface}: exact identity join`,
+        ).toEqual(new Set(authorizedByKey.keys()));
+        for (const state of states) {
+          const authorized = authorizedByKey.get(state.presentationKey);
+          expect(
+            authorized,
+            `${frameLabel} at ${surface}: ${state.presentationKey} is authorized`,
+          ).toBeTruthy();
+          if (!authorized) {
+            throw new Error("Rendered agent is absent from the authorized scene.");
+          }
+          const inCombat = authorized.steps_until_out_of_combat > 0;
+          const status = inCombat ? "IC" : "OOC";
+          expect(state.classToken).toBe(classTokenById.get(authorized.class_id));
+          expect(state.countdown).toBe(authorized.steps_until_out_of_combat);
+          expect(state.status).toBe(status);
+          expect(state.combatHidden).toBe(!inCombat);
+          expect(state.iconCount).toBe(1);
+          expect(state.combatGlyph).toBe("combat-in-progress");
+          expect(state.combatColor).toBe("rgb(255, 255, 255)");
+          expect(state.combatAriaHidden).toBe("true");
+          expect(state.combatFocusable).toBe("false");
+          expect(state.combatRole).toBeNull();
+          expect(state.combatOwnsTooltip).toBe(false);
+          expect(state.classPointerEvents).toBe("none");
+          expect(state.combatPointerEvents).toBe("none");
+          expect(state.rootOwnsTooltip).toBe(true);
+          expect(["button", "img"]).toContain(state.rootRole);
+          expect(["0", "-1"]).toContain(state.rootTabIndex);
+          expect(state.descendantIdentityOwnerCount).toBe(0);
+          expect(state.descendantTooltipOwnerCount).toBe(0);
+          expect(state.descendantHitOwnerCount).toBe(0);
+          expect(state.identityPartsResolveToRoot).toBe(true);
+          if (inCombat) {
+            expect(state.combinedCentered).toBe(true);
+            expect(state.nonOverlapping).toBe(true);
+          } else {
+            expect(state.classCentered).toBe(true);
+          }
+          const accessibleStatus =
+            state.ariaDescription?.includes(`Combat Status: ${status}`) === true ||
+            state.ariaLabel?.includes(`combat status ${status}`) === true;
+          expect(accessibleStatus).toBe(true);
+          if (inCombat) {
+            const countdownLabel = `${authorized.steps_until_out_of_combat} ${authorized.steps_until_out_of_combat === 1 ? "Tick" : "Ticks"}`;
+            const accessibleCountdown =
+              state.ariaDescription?.includes(`Steps until OOC: ${countdownLabel}`) ===
+                true ||
+              state.ariaLabel?.includes(
+                `steps until OOC ${authorized.steps_until_out_of_combat}`,
+              ) === true;
+            expect(accessibleCountdown).toBe(true);
+          }
+        }
+      }
+      return passes.slice(0, 3);
+    };
+
+    await openProduct(page, movingReplay.url, "replay");
+    const movingFrameZero = await expectInstalledLeaf(
+      page,
+      "researcher_replay_viewer",
+      "replay_oracle",
+    );
+    const frameZeroAgents = /** @type {Record<string, any>[]} */ (
+      movingFrameZero.presentation.current_endpoint.scene.agents
+    );
+    expect(new Set(frameZeroAgents.map(({ class_id }) => class_id))).toEqual(
+      new Set([1, 2, 3, 4, 5]),
+    );
+    expect(
+      frameZeroAgents.every(
+        ({ steps_until_out_of_combat }) => steps_until_out_of_combat === 0,
+      ),
+    ).toBe(true);
+    await expectCombatIdentityMatrix(movingFrameZero.presentation, "moving frame zero");
+    await expect(page.locator("#battlefield .agent")).toHaveCount(10);
+    await expect(
+      page.locator("#battlefield .agent-combat-state-icon[hidden]"),
+    ).toHaveCount(10);
+    const frameZeroStates = await page
+      .locator("#battlefield .agent")
+      .evaluateAll((agents) =>
+        agents.map((agent) => ({
+          status: agent.getAttribute("data-combat-status"),
+          countdown: agent.getAttribute("data-steps-until-out-of-combat"),
+          ariaLabel: agent.getAttribute("aria-label"),
+          ariaDescription: agent.getAttribute("aria-description"),
+        })),
+      );
+    for (const state of frameZeroStates) {
+      expect(state.status).toBe("OOC");
+      expect(state.countdown).toBe("0");
+      expect(state.ariaLabel).toContain("Inspect this authorized agent.");
+      expect(state.ariaDescription).toContain("Combat Status: OOC");
+    }
+
+    await seekReplay(page, 1);
+    const movingFrameOne = await authenticatedGet(page, "/api/presentation/frame");
+    const frameOneAgents = /** @type {Record<string, any>[]} */ (
+      movingFrameOne.current_endpoint.scene.agents
+    );
+    expect(new Set(frameOneAgents.map(({ class_id }) => class_id))).toEqual(
+      new Set([1, 2, 3, 4, 5]),
+    );
+    const frameOneInCombatAgents = frameOneAgents.filter(
+      ({ steps_until_out_of_combat }) => steps_until_out_of_combat > 0,
+    );
+    const frameOneOutOfCombatAgents = frameOneAgents.filter(
+      ({ steps_until_out_of_combat }) => steps_until_out_of_combat === 0,
+    );
+    expect(new Set(frameOneInCombatAgents.map(({ class_id }) => class_id))).toEqual(
+      new Set([1, 2, 3, 4]),
+    );
+    expect(new Set(frameOneOutOfCombatAgents.map(({ class_id }) => class_id))).toEqual(
+      new Set([5]),
+    );
+    await expectCombatIdentityMatrix(movingFrameOne, "moving frame one");
+    await expect(
+      page.locator("#battlefield .agent-combat-state-icon:not([hidden])"),
+    ).toHaveCount(frameOneInCombatAgents.length);
+    const frameOneStates = await page
+      .locator("#battlefield .agent")
+      .evaluateAll((agents) =>
+        agents.map((agent) => {
+          const icon = agent.querySelector(".agent-combat-state-icon");
+          const classIcon = agent.querySelector(".agent-class-icon");
+          const body = agent.querySelector(".agent-body");
+          if (
+            !(icon instanceof SVGSVGElement) ||
+            !(classIcon instanceof SVGSVGElement) ||
+            !(body instanceof SVGCircleElement)
+          ) {
+            throw new Error("Rendered IC identity glyphs are unavailable.");
+          }
+          const classX = Number(classIcon.getAttribute("x"));
+          const classWidth = Number(classIcon.getAttribute("width"));
+          const combatX = Number(icon.getAttribute("x"));
+          const combatWidth = Number(icon.getAttribute("width"));
+          const bodyCenter = Number(body.getAttribute("cx"));
+          return {
+            presentationKey: agent.getAttribute("data-presentation-key"),
+            status: agent.getAttribute("data-combat-status"),
+            countdown: Number(agent.getAttribute("data-steps-until-out-of-combat")),
+            ariaLabel: agent.getAttribute("aria-label"),
+            ariaDescription: agent.getAttribute("aria-description"),
+            glyph: icon.getAttribute("data-icon"),
+            color: getComputedStyle(icon).color,
+            ariaHidden: icon.getAttribute("aria-hidden"),
+            role: icon.getAttribute("role"),
+            hidden: icon.hasAttribute("hidden"),
+            ownsTooltip: icon.hasAttribute("data-tooltip-owner"),
+            combinedCentered:
+              Math.abs((classX + combatX + combatWidth) / 2 - bodyCenter) < 0.001,
+            nonOverlapping: classX + classWidth <= combatX,
+          };
+        }),
+      );
+    for (const state of frameOneStates) {
+      const authorized = frameOneAgents.find(
+        ({ presentation_key }) => presentation_key === state.presentationKey,
+      );
+      expect(authorized).toBeTruthy();
+      if (!authorized) {
+        throw new Error(
+          "Rendered IC agent is absent from the authorized current scene.",
+        );
+      }
+      expect(state.countdown).toBe(authorized.steps_until_out_of_combat);
+      expect(state.ariaLabel).toContain("Inspect this authorized agent.");
+      expect(state.glyph).toBe("combat-in-progress");
+      expect(state.color).toBe("rgb(255, 255, 255)");
+      expect(state.ariaHidden).toBe("true");
+      expect(state.role).toBeNull();
+      expect(state.ownsTooltip).toBe(false);
+      if (authorized.steps_until_out_of_combat > 0) {
+        expect(state.status).toBe("IC");
+        expect(state.ariaDescription).toContain("Combat Status: IC");
+        expect(state.ariaDescription).toContain(
+          `Steps until OOC: ${authorized.steps_until_out_of_combat} ${authorized.steps_until_out_of_combat === 1 ? "Tick" : "Ticks"}`,
+        );
+        expect(state.hidden).toBe(false);
+        expect(state.combinedCentered).toBe(true);
+        expect(state.nonOverlapping).toBe(true);
+      } else {
+        expect(state.status).toBe("OOC");
+        expect(state.ariaDescription).toContain("Combat Status: OOC");
+        expect(state.hidden).toBe(true);
+      }
+    }
+    expect(browserErrors.get(page) ?? []).toEqual([]);
+
+    const movingFinalFrameIndex =
+      movingFrameZero.presentation.source.source_final_frame_index;
+    expect(movingFinalFrameIndex).toBeGreaterThan(1);
+    await seekReplay(page, movingFinalFrameIndex);
+    const movingFinal = await authenticatedGet(page, "/api/presentation/frame");
+    const finalAgents = /** @type {Record<string, any>[]} */ (
+      movingFinal.current_endpoint.scene.agents
+    );
+    const finalPriests = finalAgents.filter(({ class_id }) => class_id === 5);
+    expect(finalPriests).toHaveLength(2);
+    expect(
+      finalPriests.every(
+        ({ steps_until_out_of_combat }) => steps_until_out_of_combat > 0,
+      ),
+    ).toBe(true);
+    await expectCombatIdentityMatrix(movingFinal, "moving final frame");
+    const renderedPriests = await page
+      .locator('#battlefield .agent[data-class="priest"]')
+      .evaluateAll((agents) =>
+        agents.map((agent) => ({
+          presentationKey: agent.getAttribute("data-presentation-key"),
+          status: agent.getAttribute("data-combat-status"),
+          countdown: Number(agent.getAttribute("data-steps-until-out-of-combat")),
+          ariaLabel: agent.getAttribute("aria-label"),
+          ariaDescription: agent.getAttribute("aria-description"),
+          iconHidden:
+            agent.querySelector(".agent-combat-state-icon")?.hasAttribute("hidden") ??
+            null,
+        })),
+      );
+    expect(renderedPriests).toHaveLength(2);
+    for (const state of renderedPriests) {
+      const authorized = finalPriests.find(
+        ({ presentation_key }) => presentation_key === state.presentationKey,
+      );
+      expect(authorized).toBeTruthy();
+      if (!authorized) {
+        throw new Error(
+          "Rendered Priest is absent from the authorized final moving scene.",
+        );
+      }
+      expect(state.status).toBe("IC");
+      expect(state.countdown).toBe(authorized.steps_until_out_of_combat);
+      expect(state.ariaLabel).toContain(
+        `combat status IC, steps until OOC ${authorized.steps_until_out_of_combat}`,
+      );
+      expect(state.ariaDescription).toBeNull();
+      expect(state.iconHidden).toBe(false);
+    }
+    expect(browserErrors.get(page) ?? []).toEqual([]);
+
+    await openProduct(page, recoveryReplay.url, "replay");
+    const recoveryFrameZero = await expectInstalledLeaf(
+      page,
+      "researcher_replay_viewer",
+      "replay_oracle",
+    );
+    expect(recoveryFrameZero.presentation.source.source_frame_index).toBe(0);
+    /** @type {import("@playwright/test").Request[]} */
+    const recoveryCommands = [];
+    const recordRecoveryCommand = (
+      /** @type {import("@playwright/test").Request} */ request,
+    ) => {
+      if (
+        request.method() === "POST" &&
+        new URL(request.url()).pathname === "/api/replay/command"
+      ) {
+        recoveryCommands.push(request);
+      }
+    };
+    const play = page.locator("#replay-play-pause-button");
+    const regeneration = page.locator(".combat-effect--regeneration");
+    page.on("request", recordRecoveryCommand);
+    let recoveryCommandPayload;
+    let regenerationDom;
+    try {
+      const responsePromise = page.waitForResponse(
+        (response) =>
+          response.request().method() === "POST" &&
+          new URL(response.url()).pathname === "/api/replay/command",
+        { timeout: 30_000 },
+      );
+      await play.click();
+      await expect(play).toHaveAttribute("aria-label", "Pause replay");
+      const response = await responsePromise;
+      expect(response.status()).toBe(200);
+      recoveryCommandPayload = await response.json();
+      expect(recoveryCommandPayload).toMatchObject({
+        result: "applied",
+        animate_incoming: true,
+        frame: { cursor: { frame_index: 1 } },
+      });
+      await expect(regeneration).toHaveCount(1);
+      regenerationDom = await regeneration.evaluate((effect) => {
+        const eventId = effect.getAttribute("data-event-id");
+        return {
+          eventId,
+          dataValue: effect.getAttribute("data-value"),
+          valueText:
+            effect.querySelector(".combat-regeneration__value")?.textContent ?? null,
+          plusLineCount: effect.querySelectorAll(".combat-regeneration__plus > line")
+            .length,
+          onionCount: effect.querySelectorAll(
+            ".combat-semantic-pulse__ring, .combat-semantic-pulse__core",
+          ).length,
+          sourceAttributeCount: Array.from(effect.attributes).filter((attribute) =>
+            attribute.name.includes("source"),
+          ).length,
+          resetEffectCount: document.querySelectorAll(
+            '.combat-effect[data-event-type="combat_countdown_reset"]',
+          ).length,
+          resetPulseCount: document.querySelectorAll(
+            ".combat-semantic-pulse--combat-countdown-reset",
+          ).length,
+          routeCount: Array.from(
+            document.querySelectorAll(".combat-choreography-routes [data-event-id]"),
+          ).filter((route) => route.getAttribute("data-event-id") === eventId).length,
+        };
+      });
+    } finally {
+      if ((await play.getAttribute("aria-pressed")) === "true") {
+        await play.click();
+      }
+      page.off("request", recordRecoveryCommand);
+    }
+    await expect(play).toHaveAttribute("aria-label", "Play replay");
+    expect(recoveryCommands).toHaveLength(1);
+    expect(recoveryCommands[0].postDataJSON().command).toEqual({
+      command_type: "next_frame",
+    });
+    const recoveryFrameOne = await authenticatedGet(page, "/api/presentation/frame");
+    const incoming = /** @type {Record<string, any>[]} */ (
+      recoveryFrameOne.latest_events.events
+    );
+    const resetEvents = incoming.filter(
+      ({ event_kind }) => event_kind === "combat_countdown_reset",
+    );
+    const regenerationEvents = incoming.filter(
+      ({ event_kind }) => event_kind === "health_regenerated",
+    );
+    expect(resetEvents).toHaveLength(4);
+    expect(regenerationEvents).toHaveLength(1);
+    expect(regenerationEvents[0].actual_health_regenerated).toBe(4);
+    await expect(
+      page.locator('#event-feed .event-item[data-event-type="combat_countdown_reset"]'),
+    ).toHaveCount(4);
+    await expect(
+      page.locator('#event-feed .event-item[data-event-type="health_regenerated"]'),
+    ).toHaveCount(1);
+    expect(regenerationDom).toEqual({
+      eventId: regenerationEvents[0].event_id,
+      dataValue: "4",
+      valueText: "+4",
+      plusLineCount: 2,
+      onionCount: 0,
+      sourceAttributeCount: 0,
+      resetEffectCount: 0,
+      resetPulseCount: 0,
+      routeCount: 0,
+    });
+    expect(browserErrors.get(page) ?? []).toEqual([]);
+  } catch (error) {
+    testError = error;
+  }
+  const cleanup = await Promise.allSettled([
+    stopDebugger(movingReplay?.process ?? null),
+    stopDebugger(recoveryReplay?.process ?? null),
+  ]);
+  const cleanupErrors = cleanup.flatMap((result) =>
+    result.status === "rejected" ? [result.reason] : [],
+  );
+  if (testError !== null || cleanupErrors.length > 0) {
+    throw new AggregateError(
+      [...(testError === null ? [] : [testError]), ...cleanupErrors],
+      "CP5 Slice C real-service proof or cleanup failed.",
+    );
+  }
+});
+
+test(CP5_SLICE_5_TEST_TITLE, async ({ page }) => {
+  test.skip(
+    cp4C3ShieldOnly || cp4ECaptureDirectory !== null,
+    "CP5 Slice 5 causal/privacy proof is outside bounded CP4 capture modes.",
+  );
+  test.setTimeout(900_000);
+  await installWaapiAutopause(page);
+  const checkedReplayBytesBefore = await cp5Slice5CheckedReplaySnapshot();
+
+  /** @type {Readonly<Record<string, number>>} */
+  const phaseRankByKind = Object.freeze({
+    action_rejected: 10,
+    ability_activated: 20,
+    source_damage_output: 30,
+    source_healing_output: 30,
+    recipient_health_resolution: 40,
+    combat_countdown_reset: 50,
+    health_regenerated: 50,
+    cooldown_started: 60,
+    cooldown_ready: 60,
+    charge_phase_displacement: 70,
+    ordinary_movement_phase_displacement: 80,
+    agent_died: 90,
+    lethal_damage_contribution: 90,
+    status_aged_to_zero: 100,
+    status_broken_by_damage: 100,
+    status_applied: 100,
+    status_refreshed_or_extended: 100,
+    status_cleared_by_new_death: 100,
+    spawn_shield_expired: 110,
+    respawn_wave_occurred: 120,
+    agent_respawned: 120,
+  });
+  const neutral = Object.freeze({
+    move_action: 0,
+    target_action: 0,
+    use_ultimate_action: 0,
+  });
+  /** @param {number[][]} submitted @param {number[][] | null} [accepted] */
+  const transition = (submitted, accepted = null) => ({
+    submitted,
+    accepted: accepted ?? submitted,
+  });
+  const basics = [
+    ["basic", 0, 5],
+    ["basic", 1, 6],
+    ["basic", 2, 7],
+    ["basic", 3, 8],
+    ["basic", 4, 0],
+    ["basic", 5, 0],
+    ["basic", 6, 1],
+    ["basic", 7, 2],
+    ["basic", 8, 3],
+    ["basic", 9, 5],
+  ];
+  const contracts = [
+    {
+      name: "moving_basic_crossfire",
+      includeStress: true,
+      selectedSlot: 0,
+      actions: [
+        transition([
+          [0, 1, 6, 0],
+          [1, 3, 7, 0],
+          [2, 1, 8, 0],
+          [3, 3, 9, 0],
+          [4, 1, 1, 0],
+          [5, 1, 6, 0],
+          [6, 3, 7, 0],
+          [7, 1, 8, 0],
+          [8, 3, 9, 0],
+          [9, 1, 1, 0],
+        ]),
+        transition([
+          [0, 2, 6, 0],
+          [1, 4, 7, 0],
+          [2, 2, 8, 0],
+          [3, 4, 9, 0],
+          [4, 2, 1, 0],
+          [5, 2, 6, 0],
+          [6, 4, 7, 0],
+          [7, 2, 8, 0],
+          [8, 4, 9, 0],
+          [9, 2, 1, 0],
+        ]),
+      ],
+      abilities: [basics, basics],
+      tokens: [
+        [
+          "basic_damage",
+          "basic_damage",
+          "basic_damage",
+          "basic_damage",
+          "basic_heal",
+          "basic_damage",
+          "basic_damage",
+          "basic_damage",
+          "basic_damage",
+          "basic_heal",
+        ],
+        [
+          "basic_damage",
+          "basic_damage",
+          "basic_damage",
+          "basic_damage",
+          "basic_heal",
+          "basic_damage",
+          "basic_damage",
+          "basic_damage",
+          "basic_damage",
+          "basic_heal",
+        ],
+      ],
+    },
+    {
+      name: "mirrored_ultimates",
+      selectedSlot: 0,
+      actions: [
+        transition([
+          [0, 1, 0, 1],
+          [5, 1, 0, 1],
+        ]),
+        transition([
+          [1, 0, 7, 1],
+          [6, 0, 7, 1],
+        ]),
+        transition([
+          [2, 1, 8, 1],
+          [7, 1, 8, 1],
+        ]),
+        transition([
+          [3, 3, 9, 1],
+          [8, 3, 9, 1],
+        ]),
+        transition([
+          [4, 1, 4, 1],
+          [9, 1, 4, 1],
+        ]),
+      ],
+      abilities: [
+        [
+          ["ultimate", 0, null],
+          ["ultimate", 5, null],
+        ],
+        [
+          ["ultimate", 1, 6],
+          ["ultimate", 6, 1],
+        ],
+        [
+          ["ultimate", 2, 7],
+          ["ultimate", 7, 2],
+        ],
+        [
+          ["ultimate", 3, 8],
+          ["ultimate", 8, 3],
+        ],
+        [
+          ["ultimate", 4, 3],
+          ["ultimate", 9, 8],
+        ],
+      ],
+      tokens: [
+        ["mage_burst", "mage_burst"],
+        ["warrior_charge", "warrior_charge"],
+        ["hunter_trap", "hunter_trap"],
+        ["rogue_poison", "rogue_poison"],
+        ["holy_word", "holy_word"],
+      ],
+    },
+    {
+      name: "charge_convergence",
+      includeStress: true,
+      selectedSlot: 0,
+      actions: [
+        transition([
+          [0, 0, 6, 1],
+          [1, 0, 6, 1],
+          [5, 0, 6, 1],
+        ]),
+      ],
+      abilities: [
+        [
+          ["ultimate", 0, 5],
+          ["ultimate", 1, 5],
+          ["ultimate", 5, 0],
+        ],
+      ],
+      tokens: [["warrior_charge", "warrior_charge", "warrior_charge"]],
+    },
+    {
+      name: "trap_lifecycle",
+      includeStress: true,
+      selectedSlot: 0,
+      actions: [
+        transition([
+          [0, 0, 6, 1],
+          [1, 0, 7, 1],
+          [2, 0, 8, 1],
+          [3, 0, 9, 1],
+        ]),
+        transition([[0, 0, 6, 0]]),
+        transition([]),
+        transition([[4, 0, 7, 1]]),
+        transition([[2, 0, 8, 0]]),
+      ],
+      abilities: [
+        [
+          ["ultimate", 0, 5],
+          ["ultimate", 1, 6],
+          ["ultimate", 2, 7],
+          ["ultimate", 3, 8],
+        ],
+        [["basic", 0, 5]],
+        [],
+        [["ultimate", 4, 6]],
+        [["basic", 2, 7]],
+      ],
+      tokens: [
+        ["hunter_trap", "hunter_trap", "hunter_trap", "hunter_trap"],
+        ["basic_damage"],
+        [],
+        ["hunter_trap"],
+        ["basic_damage"],
+      ],
+      statuses: [
+        [
+          ["status_applied", 5, "hunter_trap_stun"],
+          ["status_applied", 6, "hunter_trap_stun"],
+          ["status_applied", 7, "hunter_trap_stun"],
+          ["status_applied", 8, "hunter_trap_stun"],
+        ],
+        [
+          ["status_applied", 5, "hunter_basic_slow"],
+          ["status_broken_by_damage", 5, "hunter_trap_stun"],
+        ],
+        [["status_aged_to_zero", 5, "hunter_basic_slow"]],
+        [
+          ["status_broken_by_damage", 6, "hunter_trap_stun"],
+          ["status_applied", 6, "hunter_trap_stun"],
+        ],
+        [
+          ["status_applied", 7, "hunter_basic_slow"],
+          ["status_aged_to_zero", 7, "hunter_trap_stun"],
+          ["status_aged_to_zero", 8, "hunter_trap_stun"],
+        ],
+      ],
+    },
+    {
+      name: "recovery_refresh_cycle",
+      selectedSlot: 0,
+      povSlot: 5,
+      povFirst: true,
+      actions: [
+        transition(
+          [
+            [0, 0, 6, 1],
+            [2, 0, 8, 1],
+            [6, 0, 2, 1],
+          ],
+          [
+            [0, 0, 6, 1],
+            [2, 0, 8, 1],
+          ],
+        ),
+        transition([
+          [1, 0, 6, 1],
+          [3, 0, 8, 1],
+          [4, 0, 8, 0],
+        ]),
+        transition([]),
+        transition([]),
+        transition([]),
+        transition([]),
+        transition([]),
+      ],
+      abilities: [
+        [
+          ["ultimate", 0, 5],
+          ["ultimate", 2, 7],
+        ],
+        [
+          ["ultimate", 1, 5],
+          ["ultimate", 3, 7],
+          ["basic", 4, 7],
+        ],
+        [],
+        [],
+        [],
+        [],
+        [],
+      ],
+      tokens: [
+        ["rogue_poison", "hunter_trap"],
+        ["rogue_poison", "hunter_trap", "basic_damage"],
+        [],
+        [],
+        [],
+        [],
+        [],
+      ],
+      statuses: [
+        [
+          ["status_applied", 5, "rogue_poison_slow"],
+          ["status_applied", 5, "rogue_poison_stun"],
+          ["status_applied", 5, "rogue_poison_anti_heal"],
+          ["status_applied", 7, "hunter_trap_stun"],
+        ],
+        [
+          ["status_applied", 5, "rogue_poison_slow"],
+          ["status_refreshed_or_extended", 5, "rogue_poison_slow"],
+          ["status_aged_to_zero", 5, "rogue_poison_stun"],
+          ["status_applied", 5, "rogue_poison_stun"],
+          ["status_applied", 5, "rogue_poison_anti_heal"],
+          ["status_refreshed_or_extended", 5, "rogue_poison_anti_heal"],
+          ["status_broken_by_damage", 7, "hunter_trap_stun"],
+          ["status_applied", 7, "hunter_trap_stun"],
+        ],
+        [["status_aged_to_zero", 5, "rogue_poison_stun"]],
+        [],
+        [],
+        [
+          ["status_aged_to_zero", 5, "rogue_poison_anti_heal"],
+          ["status_aged_to_zero", 7, "hunter_trap_stun"],
+        ],
+        [["status_aged_to_zero", 5, "rogue_poison_slow"]],
+      ],
+    },
+    {
+      name: "death_respawn_cycle",
+      selectedSlot: 5,
+      actions: [
+        transition([
+          [0, 0, 6, 0],
+          [1, 0, 6, 0],
+        ]),
+        transition([]),
+        transition([[5, 4, 6, 1]], []),
+        transition([[5, 4, 6, 0]], [[5, 4, 0, 0]]),
+        transition([[5, 0, 6, 0]], []),
+        transition([[5, 0, 6, 0]], []),
+        transition([[5, 0, 6, 0]]),
+      ],
+      abilities: [
+        [
+          ["basic", 0, 5],
+          ["basic", 1, 5],
+        ],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [["basic", 5, 0]],
+      ],
+      tokens: [["basic_damage", "basic_damage"], [], [], [], [], [], ["basic_damage"]],
+      statuses: [
+        [
+          ["status_cleared_by_new_death", 5, "warrior_charge_slow"],
+          ["status_applied", 5, "hunter_basic_slow"],
+          ["status_cleared_by_new_death", 5, "hunter_basic_slow"],
+          ["status_broken_by_damage", 5, "hunter_trap_stun"],
+          ["status_cleared_by_new_death", 5, "rogue_poison_anti_heal"],
+        ],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+      ],
+      lifecycleKinds: [
+        ["agent_died", "lethal_damage_contribution", "lethal_damage_contribution"],
+        [],
+        [
+          "action_rejected",
+          "action_rejected",
+          "respawn_wave_occurred",
+          "agent_respawned",
+        ],
+        ["action_rejected"],
+        ["action_rejected", "respawn_wave_occurred"],
+        ["action_rejected", "spawn_shield_expired"],
+        [],
+      ],
+    },
+  ];
+
+  /** @param {Record<string, any>} presentation */
+  const slotDirectory = (presentation) =>
+    new Map(
+      /** @type {Record<string, any>[]} */ (
+        presentation.current_endpoint.identity_directory.identities
+      ).map((identity) => [
+        identity.public_agent_id,
+        (identity.team_id - 1) * 5 + identity.team_local_slot,
+      ]),
+    );
+  /** @param {Record<string, any>} presentation */
+  const activeOracleSlots = (presentation) =>
+    new Set(
+      /** @type {Record<string, any>[]} */ (
+        presentation.current_endpoint.identity_directory.identities
+      )
+        .filter(({ configured_active }) => configured_active)
+        .map(({ team_id, team_local_slot }) => (team_id - 1) * 5 + team_local_slot),
+    );
+  /** @param {Record<string, any>} presentation */
+  const oracleSceneAgents = (presentation) =>
+    /** @type {Record<string, any>[]} */ (presentation.current_endpoint.scene.agents);
+  /** @param {Record<string, any>} signature */
+  const signaturePlanEvents = (signature) =>
+    /** @type {Record<string, any>[]} */ (signature.plan.events);
+  /**
+   * Prove the exact product-installed effect and route surface against a
+   * scenario-owned list whose IDs, vocabulary, and endpoint slots were
+   * extracted independently from the real registered trajectory.
+   *
+   * Row shape: ordinal, type, source slot, target slot, recipient slot,
+   * agent slot, persistent.
+   *
+   * @param {{presentation: Record<string, any>, signature: Record<string, any>}} frame
+   * @param {string} label
+   * @param {Array<[number, string, number | null, number | null, number | null, number | null, boolean?]>} effectRows
+   * @param {number[]} routeOrdinals
+   */
+  const expectExactInstalledSurface = (frame, label, effectRows, routeOrdinals) => {
+    const { presentation, signature } = frame;
+    const transitionId = presentation.latest_events?.incoming_transition_id;
+    if (typeof transitionId !== "string") {
+      throw new Error(`${label} has no incoming transition ID.`);
+    }
+    const slots = slotDirectory(presentation);
+    const keysBySlot = new Map(
+      oracleSceneAgents(presentation).map((agent) => [
+        slots.get(agent.public_agent_id),
+        agent.presentation_key,
+      ]),
+    );
+    /** @param {number | null} slot */
+    const keyForSlot = (slot) => {
+      if (slot === null) {
+        return null;
+      }
+      const key = keysBySlot.get(slot);
+      if (typeof key !== "string") {
+        throw new Error(`${label} lost authorized endpoint slot ${slot}.`);
+      }
+      return key;
+    };
+    const expectedEffects = effectRows.map(
+      ([
+        ordinal,
+        type,
+        sourceSlot,
+        targetSlot,
+        recipientSlot,
+        agentSlot,
+        persistent = false,
+      ]) => ({
+        id: `${transitionId}:event:${String(ordinal).padStart(4, "0")}`,
+        type,
+        persistent,
+        sourceKey: keyForSlot(sourceSlot),
+        targetKey: keyForSlot(targetSlot),
+        recipientKey: keyForSlot(recipientSlot),
+        agentKey: keyForSlot(agentSlot),
+      }),
+    );
+    expect(signature.dom.effects, `${label} exact installed effects`).toEqual(
+      expectedEffects,
+    );
+
+    const planById = new Map(
+      signaturePlanEvents(signature).map((event) => [event.eventId, event]),
+    );
+    const expectedPlanSurface = expectedEffects.map((expected) => {
+      const planned = planById.get(expected.id);
+      if (!planned) {
+        throw new Error(`${label} lost planned event ${expected.id}.`);
+      }
+      return {
+        id: planned.eventId,
+        type: planned.eventType,
+        persistent: planned.persistent,
+        sourceKey: planned.sourcePresentationKey,
+        targetKey: planned.targetPresentationKey,
+        recipientKey: planned.recipientPresentationKey,
+        agentKey: planned.agentPresentationKey,
+      };
+    });
+    expect(expectedPlanSurface, `${label} exact plan-to-DOM effects`).toEqual(
+      expectedEffects,
+    );
+
+    const expectedByOrdinal = new Map(
+      effectRows.map((row, index) => [row[0], expectedEffects[index]]),
+    );
+    const expectedRoutes = routeOrdinals.map((ordinal) => {
+      const expected = expectedByOrdinal.get(ordinal);
+      if (!expected) {
+        throw new Error(`${label} route ordinal ${ordinal} has no expected effect.`);
+      }
+      return expected;
+    });
+    expect(signature.dom.routes, `${label} exact installed routes`).toEqual(
+      expectedRoutes,
+    );
+    for (const expected of expectedRoutes) {
+      const planned = planById.get(expected.id);
+      if (!planned) {
+        throw new Error(`${label} lost planned route ${expected.id}.`);
+      }
+      expect(
+        planned.route !== null || planned.kind === "charge_displacement",
+        `${label} ${expected.id} remains route-owned`,
+      ).toBe(true);
+    }
+  };
+  /** @param {number[]} row */
+  const tupleFromRow = (row) => ({
+    move_action: row[1],
+    target_action: row[2],
+    use_ultimate_action: row[3],
+  });
+  /** @param {number[][]} rows */
+  const tuplesBySlot = (rows) =>
+    new Map(rows.map((row) => [row[0], tupleFromRow(row)]));
+  /** @param {Record<string, any>} event @param {Map<string, number>} slots */
+  const eventRecipientSlot = (event, slots) =>
+    slots.get(event.recipient_anchor?.public_agent_id) ?? null;
+  /** @param {Record<string, any>} event @param {Map<string, number>} slots */
+  const eventSourceSlot = (event, slots) =>
+    slots.get(event.source_anchor?.public_agent_id) ??
+    slots.get(event.agent_anchor?.public_agent_id) ??
+    slots.get(event.start_anchor?.public_agent_id) ??
+    null;
+  /** @param {number} length @param {number[]} trueIndices */
+  const indexedMask = (length, trueIndices) =>
+    Array.from({ length }, (_, index) => trueIndices.includes(index));
+  /** @param {number[][]} trueCells */
+  const jointMask = (trueCells) =>
+    Array.from({ length: 11 }, (_, target) =>
+      Array.from({ length: 2 }, (_, lane) =>
+        trueCells.some(
+          ([trueTarget, trueLane]) => trueTarget === target && trueLane === lane,
+        ),
+      ),
+    );
+  /** @param {Record<string, any>} inspection */
+  const inspectedMask = (inspection) => ({
+    move: inspection.decision_mask.movement_action_mask,
+    select_target: inspection.decision_mask.target_action_mask,
+    use_ultimate: inspection.decision_mask.use_ultimate_action_mask,
+    select_target_use_ultimate_joint:
+      inspection.decision_mask.target_use_ultimate_joint_mask,
+  });
+
+  /**
+   * Select every named acting owner at the real predecessor, prove its exact
+   * tuple against that epoch's mask, then join it to the successor action row.
+   *
+   * @param {string} contractName
+   * @param {number} frameIndex
+   * @param {Array<Record<string, any>>} expectations
+   */
+  const proveOutgoingOwnerSet = async (contractName, frameIndex, expectations) => {
+    if (
+      (await page.locator("#replay-frame-slider").inputValue()) !== String(frameIndex)
+    ) {
+      await seekReplay(page, frameIndex);
+    }
+    /** @type {Array<Record<string, any>>} */
+    const outgoing = [];
+    for (const expected of expectations) {
+      const before = await authenticatedGet(page, "/api/presentation/frame");
+      const identity = /** @type {Record<string, any>[]} */ (
+        before.current_endpoint.identity_directory.identities
+      ).find(
+        ({ team_id, team_local_slot }) =>
+          (team_id - 1) * 5 + team_local_slot === expected.slot,
+      );
+      const agent = oracleSceneAgents(before).find(
+        ({ public_agent_id }) => public_agent_id === identity?.public_agent_id,
+      );
+      if (!identity || !agent) {
+        throw new Error(`${contractName} F${frameIndex} g${expected.slot} is absent.`);
+      }
+      const responsePromise = page.waitForResponse(
+        (response) =>
+          response.request().method() === "POST" &&
+          new URL(response.url()).pathname === "/api/replay/command",
+      );
+      await page
+        .locator(
+          `#roster .roster-primary-action[data-presentation-key="${agent.presentation_key}"]`,
+        )
+        .click();
+      expect((await responsePromise).status()).toBe(200);
+      await expect(
+        page.locator(
+          `#battlefield .agent[data-presentation-key="${agent.presentation_key}"]`,
+        ),
+      ).toHaveAttribute("data-selected", "true");
+      const selected = await authenticatedGet(page, "/api/presentation/frame");
+      const inspection = selected.replay_inspection;
+      expect(inspection.outgoing_transition_index).toBe(frameIndex);
+      expect(inspection.actor_public_agent_id).toBe(identity.public_agent_id);
+      expect(inspection.submitted_action).toEqual(expected.submitted);
+      expect(inspection.accepted_action).toEqual(expected.accepted);
+      expect(inspectedMask(inspection)).toEqual(expected.mask);
+      const submitted = inspection.submitted_action;
+      const accepted = inspection.accepted_action;
+      expect(inspection.decision_mask.movement_action_mask[accepted.move_action]).toBe(
+        true,
+      );
+      expect(
+        inspection.decision_mask.target_use_ultimate_joint_mask[accepted.target_action][
+          accepted.use_ultimate_action
+        ],
+      ).toBe(true);
+      expect(inspection.decision_mask.movement_action_mask[submitted.move_action]).toBe(
+        expected.submittedMoveLegal,
+      );
+      expect(
+        inspection.decision_mask.target_use_ultimate_joint_mask[
+          submitted.target_action
+        ][submitted.use_ultimate_action],
+      ).toBe(expected.submittedPairLegal);
+      outgoing.push({
+        actorPublicAgentId: identity.public_agent_id,
+        submitted,
+        accepted,
+        reference: inspection.transition_reference,
+      });
+    }
+    await seekReplay(page, frameIndex + 1);
+    const successor = await authenticatedGet(page, "/api/presentation/frame");
+    for (const expected of outgoing) {
+      expect(successor.latest_events.incoming_transition_id).toBe(
+        expected.reference.transition_id,
+      );
+      expect(successor.latest_events.incoming_start_frame_id).toBe(
+        expected.reference.start_frame_id,
+      );
+      expect(successor.latest_events.incoming_successor_frame_id).toBe(
+        expected.reference.successor_frame_id,
+      );
+      const row = /** @type {Record<string, any>[]} */ (
+        successor.latest_transition.action_rows
+      ).find(
+        ({ actor_public_agent_id }) =>
+          actor_public_agent_id === expected.actorPublicAgentId,
+      );
+      if (!row) {
+        throw new Error(`${contractName} successor lost an acting-owner row.`);
+      }
+      expect(row.submitted_action).toEqual(expected.submitted);
+      expect(row.accepted_action).toEqual(expected.accepted);
+    }
+  };
+
+  /** @param {number} frameIndex */
+  const advanceWithIncomingChoreography = async (frameIndex) => {
+    const next = page.locator("#replay-next-button");
+    if (await next.isDisabled()) {
+      await finishControllerClock(page, "cleanup");
+      await expect(next).toBeEnabled();
+    }
+    const responsePromise = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/api/replay/command",
+      { timeout: 30_000 },
+    );
+    await next.click();
+    const response = await responsePromise;
+    expect(response.status()).toBe(200);
+    expect(await response.json()).toMatchObject({
+      result: "applied",
+      animate_incoming: true,
+      frame: { cursor: { frame_index: frameIndex } },
+    });
+    await expect(page.locator("#replay-frame-slider")).toHaveValue(String(frameIndex));
+    await expect(page.locator("html")).toHaveAttribute(
+      "data-presentation-authority",
+      "installed",
+    );
+  };
+
+  /**
+   * @param {string} productUrl
+   * @param {Record<string, any>} contract
+   */
+  const proveOracleTrajectory = async (productUrl, contract) => {
+    if (!contract.povFirst) {
+      await page.goto("about:blank");
+      await openProduct(page, productUrl, "replay");
+    }
+    const bootstrap = await authenticatedGet(page, "/api/presentation/frame");
+    const selectedIdentity = /** @type {Record<string, any>[]} */ (
+      bootstrap.current_endpoint.identity_directory.identities
+    ).find(
+      (identity) =>
+        (identity.team_id - 1) * 5 + identity.team_local_slot === contract.selectedSlot,
+    );
+    const selectedAgent = oracleSceneAgents(bootstrap).find(
+      (agent) => agent.public_agent_id === selectedIdentity?.public_agent_id,
+    );
+    if (!selectedIdentity || !selectedAgent) {
+      throw new Error(`${contract.name} default inspection owner is unavailable.`);
+    }
+    const selectionResponse = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/api/replay/command",
+    );
+    await page
+      .locator(
+        `#roster .roster-primary-action[data-presentation-key="${selectedAgent.presentation_key}"]`,
+      )
+      .click();
+    expect((await selectionResponse).status()).toBe(200);
+    await expect(
+      page.locator(
+        `#battlefield .agent[data-presentation-key="${selectedAgent.presentation_key}"]`,
+      ),
+    ).toHaveAttribute("data-selected", "true");
+    /** @type {Array<{presentation: Record<string, any>, signature: Record<string, any>}>} */
+    const frames = [];
+    for (let frameIndex = 0; frameIndex <= contract.actions.length; frameIndex += 1) {
+      if (frameIndex > 0) {
+        await advanceWithIncomingChoreography(frameIndex);
+      }
+      const presentationBody = await cp5Slice5PresentationBody(page);
+      const presentation = JSON.parse(presentationBody);
+      expect(presentation.presentation_kind, `${contract.name} F${frameIndex}`).toBe(
+        "replay_oracle",
+      );
+      expect(presentation.source.source_frame_index).toBe(frameIndex);
+      expect(presentation.source.source_final_frame_index).toBe(
+        contract.actions.length,
+      );
+      expect(presentation.current_endpoint.frame_index).toBe(frameIndex);
+      expect(presentation.current_endpoint.frame_id).toBe(
+        presentation.source.source_frame_id,
+      );
+      if (frameIndex > 0) {
+        const incomingTransitionId = presentation.latest_events.incoming_transition_id;
+        await expect
+          .poll(() => page.locator(CHOREOGRAPHY_ROOT).getAttribute("data-epoch-key"))
+          .toContain(incomingTransitionId);
+      }
+      const signature = await cp5Slice5PlanAndDomSignature(page, presentation);
+      expect(signature.inputUnchanged).toBe(true);
+      const slots = slotDirectory(presentation);
+      const activeSlots = activeOracleSlots(presentation);
+
+      if (frameIndex === 0) {
+        expect(presentation.latest_events).toBeNull();
+        expect(presentation.latest_transition).toBeNull();
+      } else {
+        const previous = frames[frameIndex - 1].presentation.replay_inspection;
+        const incoming = presentation.latest_events;
+        const latest = presentation.latest_transition;
+        const incomingEvents = /** @type {Record<string, any>[]} */ (incoming.events);
+        const actionRows = /** @type {Record<string, any>[]} */ (latest.action_rows);
+        expect(previous).not.toBeNull();
+        expect(incoming.incoming_transition_id).toBe(
+          previous.transition_reference.transition_id,
+        );
+        expect(incoming.incoming_start_frame_id).toBe(
+          previous.transition_reference.start_frame_id,
+        );
+        expect(incoming.incoming_successor_frame_id).toBe(
+          previous.transition_reference.successor_frame_id,
+        );
+        expect(latest.incoming_transition_id).toBe(incoming.incoming_transition_id);
+        expect(latest.incoming_start_frame_id).toBe(incoming.incoming_start_frame_id);
+        expect(latest.incoming_successor_frame_id).toBe(
+          incoming.incoming_successor_frame_id,
+        );
+        expect(incoming.event_count).toBe(incomingEvents.length);
+        expect(incoming.ordered_event_ids).toEqual(
+          incomingEvents.map(({ event_id }) => event_id),
+        );
+        expect(incoming.ordered_event_kinds).toEqual(
+          incomingEvents.map(({ event_kind }) => event_kind),
+        );
+        for (const [ordinal, event] of incomingEvents.entries()) {
+          expect(event.ordinal).toBe(ordinal);
+          expect(event.phase_rank).toBe(phaseRankByKind[event.event_kind]);
+          expect(event.event_id).toBe(
+            `${incoming.incoming_transition_id}:event:${String(ordinal).padStart(4, "0")}`,
+          );
+        }
+        expect(incomingEvents.map(({ phase_rank }) => phase_rank)).toEqual(
+          [...incomingEvents.map(({ phase_rank }) => phase_rank)].sort(
+            (left, right) => left - right,
+          ),
+        );
+        const expectedFeedRows = incomingEvents.map((event) => ({
+          id: event.event_id,
+          type: event.event_kind,
+          vocabulary: "event",
+        }));
+        expect(signature.dom.eventRows).toEqual(expectedFeedRows);
+        expect(signature.dom.transition).toBe(incoming.incoming_transition_id);
+        expect(signature.plan.transitionId).toBe(incoming.incoming_transition_id);
+        const planEvents = signaturePlanEvents(signature);
+        const incomingKindById = new Map(
+          incomingEvents.map((event) => [event.event_id, event.event_kind]),
+        );
+        for (const event of planEvents) {
+          expect(event.transitionId).toBe(incoming.incoming_transition_id);
+          expect(event.authorityVocabulary).toBe("event");
+          expect(incomingKindById.get(event.eventId)).toBe(event.eventType);
+          for (const atomicEventId of event.atomicEventIds ?? [event.eventId]) {
+            expect(incomingKindById.has(atomicEventId)).toBe(true);
+          }
+        }
+        const planById = new Map(planEvents.map((event) => [event.eventId, event]));
+        expect(new Set(signature.dom.effects.map(({ id }) => id)).size).toBe(
+          signature.dom.effects.length,
+        );
+        for (const effect of signature.dom.effects) {
+          const planned = planById.get(effect.id);
+          if (!planned) {
+            throw new Error(`${contract.name} installed unknown effect ${effect.id}.`);
+          }
+          expect(effect.type).toBe(planned.eventType);
+          expect(effect.persistent).toBe(planned.persistent);
+          expect(effect.sourceKey).toBe(planned.sourcePresentationKey);
+          expect(effect.targetKey).toBe(planned.targetPresentationKey);
+          expect(effect.recipientKey).toBe(planned.recipientPresentationKey);
+          expect(effect.agentKey).toBe(planned.agentPresentationKey);
+        }
+        expect(new Set(signature.dom.routes.map(({ id }) => id)).size).toBe(
+          signature.dom.routes.length,
+        );
+        for (const route of signature.dom.routes) {
+          const planned = planById.get(route.id);
+          if (!planned) {
+            throw new Error(`${contract.name} installed unknown route ${route.id}.`);
+          }
+          expect(planned.route !== null || planned.kind === "charge_displacement").toBe(
+            true,
+          );
+          expect(route.type).toBe(planned.eventType);
+          expect(route.persistent).toBe(planned.persistent);
+          expect(route.sourceKey).toBe(planned.sourcePresentationKey);
+          expect(route.targetKey).toBe(planned.targetPresentationKey);
+          expect(route.recipientKey).toBe(planned.recipientPresentationKey);
+          expect(route.agentKey).toBe(planned.agentPresentationKey);
+          expect(signature.dom.effects.some(({ id }) => id === route.id)).toBe(true);
+        }
+
+        const expected = contract.actions[frameIndex - 1];
+        const submitted = tuplesBySlot(expected.submitted);
+        const accepted = tuplesBySlot(expected.accepted);
+        expect(actionRows).toHaveLength(activeSlots.size);
+        expect(
+          new Set(actionRows.map((row) => slots.get(row.actor_public_agent_id))),
+        ).toEqual(activeSlots);
+        for (const row of actionRows) {
+          const slot = slots.get(row.actor_public_agent_id);
+          expect(
+            row.submitted_action,
+            `${contract.name} T${frameIndex - 1} g${slot}`,
+          ).toEqual(submitted.get(slot) ?? neutral);
+          expect(
+            row.accepted_action,
+            `${contract.name} T${frameIndex - 1} g${slot}`,
+          ).toEqual(accepted.get(slot) ?? neutral);
+        }
+        const previousSlot = slotDirectory(frames[frameIndex - 1].presentation).get(
+          previous.actor_public_agent_id,
+        );
+        expect(previousSlot).toBe(contract.selectedSlot);
+        expect(previous.submitted_action).toEqual(
+          submitted.get(contract.selectedSlot) ?? neutral,
+        );
+        expect(previous.accepted_action).toEqual(
+          accepted.get(contract.selectedSlot) ?? neutral,
+        );
+        const previousRow = actionRows.find(
+          (row) => row.actor_public_agent_id === previous.actor_public_agent_id,
+        );
+        if (!previousRow) {
+          throw new Error(`${contract.name} lost its selected incoming action row.`);
+        }
+        expect(previousRow.submitted_action).toEqual(previous.submitted_action);
+        expect(previousRow.accepted_action).toEqual(previous.accepted_action);
+
+        const abilities = incomingEvents
+          .filter(({ event_kind }) => event_kind === "ability_activated")
+          .map((event) => [
+            event.ability_component,
+            slots.get(event.source_anchor.public_agent_id),
+            eventRecipientSlot(event, slots),
+          ]);
+        expect(abilities, `${contract.name} T${frameIndex - 1} abilities`).toEqual(
+          contract.abilities[frameIndex - 1],
+        );
+        expect(
+          signaturePlanEvents(signature)
+            .filter(({ kind }) => kind === "activation")
+            .map(({ tokenId }) => tokenId),
+          `${contract.name} T${frameIndex - 1} tokens`,
+        ).toEqual(contract.tokens[frameIndex - 1]);
+        if (contract.statuses) {
+          const statuses = incomingEvents
+            .filter(({ event_kind }) => event_kind.startsWith("status_"))
+            .map((event) => [
+              event.event_kind,
+              eventRecipientSlot(event, slots),
+              event.status_id,
+            ]);
+          expect(statuses, `${contract.name} T${frameIndex - 1} statuses`).toEqual(
+            contract.statuses[frameIndex - 1],
+          );
+        }
+        if (contract.lifecycleKinds) {
+          const lifecycleKinds = incomingEvents
+            .map(({ event_kind }) => event_kind)
+            .filter((kind) =>
+              new Set([
+                "action_rejected",
+                "agent_died",
+                "lethal_damage_contribution",
+                "respawn_wave_occurred",
+                "agent_respawned",
+                "spawn_shield_expired",
+              ]).has(kind),
+            );
+          expect(lifecycleKinds).toEqual(contract.lifecycleKinds[frameIndex - 1]);
+        }
+      }
+
+      const inspection = presentation.replay_inspection;
+      if (frameIndex === contract.actions.length) {
+        expect(inspection).toBeNull();
+      } else {
+        expect(inspection.outgoing_transition_index).toBe(frameIndex);
+        expect(inspection.current_simulator_step_count).toBe(
+          presentation.current_endpoint.simulator_step_count,
+        );
+        expect(inspection.decision_mask.movement_action_mask).toHaveLength(9);
+        expect(inspection.decision_mask.target_action_mask).toHaveLength(11);
+        expect(inspection.decision_mask.use_ultimate_action_mask).toHaveLength(2);
+        expect(inspection.decision_mask.target_use_ultimate_joint_mask).toHaveLength(
+          11,
+        );
+        expect(
+          /** @type {boolean[][]} */ (
+            inspection.decision_mask.target_use_ultimate_joint_mask
+          ).every((row) => row.length === 2),
+        ).toBe(true);
+      }
+      frames.push({ presentation, signature });
+    }
+    if (contract.actions.length > 0) {
+      await finishControllerClock(page, "cleanup");
+    }
+    return frames;
+  };
+
+  const controllableMask = Object.freeze({
+    move: [true, true, true, true, true, true, true, true, true],
+    select_target: [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+    ],
+    use_ultimate: [true, true],
+    select_target_use_ultimate_joint: [
+      [true, false],
+      [false, false],
+      [false, false],
+      [false, false],
+      [false, false],
+      [false, false],
+      [true, true],
+      [true, true],
+      [true, false],
+      [true, false],
+      [true, true],
+    ],
+  });
+  const stunnedMask = Object.freeze({
+    move: [true, false, false, false, false, false, false, false, false],
+    select_target: [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+    ],
+    use_ultimate: [true, false],
+    select_target_use_ultimate_joint: [
+      [true, false],
+      [false, false],
+      [false, false],
+      [false, false],
+      [false, false],
+      [false, false],
+      [false, false],
+      [false, false],
+      [false, false],
+      [false, false],
+      [false, false],
+    ],
+  });
+  /** @param {string} productUrl */
+  const proveDurationOnePov = async (productUrl) => {
+    await page.goto("about:blank");
+    await openProduct(page, productUrl, "replay");
+    for (let frameIndex = 0; frameIndex <= 3; frameIndex += 1) {
+      if (frameIndex > 0) {
+        await seekReplay(page, frameIndex);
+      }
+      const presentation = await authenticatedGet(page, "/api/presentation/frame");
+      expect(presentation.presentation_kind).toBe("replay_no_shared_obs_agent_pov");
+      expect(presentation.authority.recipient_public_agent_id).toBe("5");
+      const expected =
+        frameIndex === 1 || frameIndex === 2 ? stunnedMask : controllableMask;
+      const mask = presentation.current_endpoint.parts.next_decision_action_mask;
+      expect({
+        move: mask.move,
+        select_target: mask.select_target,
+        use_ultimate: mask.use_ultimate,
+        select_target_use_ultimate_joint: mask.select_target_use_ultimate_joint,
+      }).toEqual(expected);
+      expect({
+        move: presentation.replay_inspection.decision_mask.movement_action_mask,
+        select_target: presentation.replay_inspection.decision_mask.target_action_mask,
+        use_ultimate:
+          presentation.replay_inspection.decision_mask.use_ultimate_action_mask,
+        select_target_use_ultimate_joint:
+          presentation.replay_inspection.decision_mask.target_use_ultimate_joint_mask,
+      }).toEqual(expected);
+      expect(presentation.replay_inspection.submitted_action).toEqual(neutral);
+      expect(presentation.replay_inspection.accepted_action).toEqual(neutral);
+      expect(presentation.replay_inspection.decision_mask.movement_action_mask[0]).toBe(
+        true,
+      );
+      expect(
+        presentation.replay_inspection.decision_mask
+          .target_use_ultimate_joint_mask[0][0],
+      ).toBe(true);
+      if (frameIndex === 1 || frameIndex === 2) {
+        expect(
+          presentation.replay_inspection.decision_mask.movement_action_mask[1],
+        ).toBe(false);
+        expect(
+          presentation.replay_inspection.decision_mask
+            .target_use_ultimate_joint_mask[6][1],
+        ).toBe(false);
+      }
+      const self = /** @type {Record<string, any>[]} */ (
+        presentation.current_endpoint.parts.scene.agents
+      ).find((agent) => agent.relation === "self");
+      if (!self) {
+        throw new Error("Recovery POV lost its fixed self row.");
+      }
+      expect(
+        /** @type {Record<string, any>[]} */ (self.statuses).some(
+          ({ status_id }) => status_id === "rogue_poison_stun",
+        ),
+      ).toBe(frameIndex === 1 || frameIndex === 2);
+      expect(
+        /** @type {Record<string, any>[] | undefined} */ (
+          presentation.latest_events?.cues
+        )?.some(({ cue_type }) => cue_type === "respawn_wave_occurred") ?? false,
+      ).toBe(false);
+    }
+  };
+
+  /** @type {Awaited<ReturnType<typeof startReplayViewer>> | null} */
+  let activeReplay = null;
+  /** @type {Awaited<ReturnType<typeof exportReplayArtifacts>> | null} */
+  let sliceArtifacts = null;
+  /** @type {unknown} */
+  let testError = null;
+  try {
+    for (const contract of contracts) {
+      activeReplay = await startReplayViewer({
+        scenario: contract.name,
+        includeStress: contract.includeStress === true,
+        ...(contract.povSlot === undefined ? {} : { povSlot: contract.povSlot }),
+        ...(contract.povFirst ? { view: "pov" } : {}),
+      });
+      if (contract.povFirst) {
+        await proveDurationOnePov(activeReplay.url);
+        await seekReplay(page, 1);
+        await cp5Slice5AssertHiddenTransportNoninterference(
+          page,
+          activeReplay.url,
+          "replay_no_shared_obs_agent_pov",
+        );
+        await seekReplay(page, 0);
+        const researcherResponse = page.waitForResponse(
+          (response) =>
+            response.request().method() === "POST" &&
+            new URL(response.url()).pathname === "/api/replay/command",
+          { timeout: 30_000 },
+        );
+        await page.locator("#view-select").selectOption("researcher");
+        expect((await researcherResponse).status()).toBe(200);
+        await expect(page.locator("#view-select")).toHaveValue("researcher");
+        await expect(page.locator("html")).toHaveAttribute(
+          "data-audience",
+          "researcher",
+        );
+      }
+      const frames = await proveOracleTrajectory(activeReplay.url, contract);
+      if (contract.name === "moving_basic_crossfire") {
+        const expectedOutputs = [
+          [
+            ["source_damage_output", 0, 5, 13, 14.949999809265137],
+            ["source_damage_output", 1, 6, 8, 8],
+            ["source_damage_output", 2, 7, 6, 6.899999618530273],
+            ["source_damage_output", 3, 8, 12, 12],
+            ["source_healing_output", 4, 0, 8, 8],
+            ["source_damage_output", 5, 0, 13, 14.949999809265137],
+            ["source_damage_output", 6, 1, 8, 8],
+            ["source_damage_output", 7, 2, 6, 6.899999618530273],
+            ["source_damage_output", 8, 3, 12, 12],
+            ["source_healing_output", 9, 5, 8, 8],
+          ],
+          [
+            ["source_damage_output", 0, 5, 13, 14.949999809265137],
+            ["source_damage_output", 1, 6, 8, 8],
+            ["source_damage_output", 2, 7, 6, 6.899999618530273],
+            ["source_damage_output", 3, 8, 12, 12],
+            ["source_healing_output", 4, 0, 8, 8],
+            ["source_damage_output", 5, 0, 13, 14.949999809265137],
+            ["source_damage_output", 6, 1, 8, 9.199999809265137],
+            ["source_damage_output", 7, 2, 6, 6.899999618530273],
+            ["source_damage_output", 8, 3, 12, 12],
+            ["source_healing_output", 9, 5, 8, 8],
+          ],
+        ];
+        const expectedHealth = [
+          [
+            [0, 80, 14.949999809265137, 8, 73.05000305175781],
+            [1, 200, 6.800000190734863, 0, 193.1999969482422],
+            [2, 100, 6.899999618530273, 0, 93.0999984741211],
+            [3, 100, 12, 0, 88],
+            [5, 80, 14.949999809265137, 8, 73.05000305175781],
+            [6, 200, 6.800000190734863, 0, 193.1999969482422],
+            [7, 100, 6.899999618530273, 0, 93.0999984741211],
+            [8, 100, 12, 0, 88],
+          ],
+          [
+            [0, 73.05000305175781, 14.949999809265137, 8, 66.10000610351562],
+            [1, 193.1999969482422, 7.820000171661377, 0, 185.37998962402344],
+            [2, 93.0999984741211, 5.864999771118164, 0, 87.23500061035156],
+            [3, 88, 12, 0, 76],
+            [5, 73.05000305175781, 12.707500457763672, 8, 68.34249877929688],
+            [6, 193.1999969482422, 6.800000190734863, 0, 186.39999389648438],
+            [7, 93.0999984741211, 6.899999618530273, 0, 86.19999694824219],
+            [8, 88, 12, 0, 76],
+          ],
+        ];
+        expectExactInstalledSurface(
+          frames[1],
+          "moving Basic F1",
+          [
+            [0, "ability_activated", 0, 5, null, null],
+            [1, "ability_activated", 1, 6, null, null],
+            [2, "ability_activated", 2, 7, null, null],
+            [3, "ability_activated", 3, 8, null, null],
+            [4, "ability_activated", 4, 0, null, null],
+            [5, "ability_activated", 5, 0, null, null],
+            [6, "ability_activated", 6, 1, null, null],
+            [7, "ability_activated", 7, 2, null, null],
+            [8, "ability_activated", 8, 3, null, null],
+            [9, "ability_activated", 9, 5, null, null],
+            [20, "recipient_health_resolution", null, null, 0, null],
+            [21, "recipient_health_resolution", null, null, 1, null],
+            [22, "recipient_health_resolution", null, null, 2, null],
+            [23, "recipient_health_resolution", null, null, 3, null],
+            [24, "recipient_health_resolution", null, null, 5, null],
+            [25, "recipient_health_resolution", null, null, 6, null],
+            [26, "recipient_health_resolution", null, null, 7, null],
+            [27, "recipient_health_resolution", null, null, 8, null],
+            [46, "status_applied", 4, null, 0, null],
+            [47, "status_applied", 7, null, 2, null],
+            [48, "status_applied", 9, null, 5, null],
+            [49, "status_applied", 2, null, 7, null],
+          ],
+          [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+        );
+        for (let frameIndex = 1; frameIndex <= 2; frameIndex += 1) {
+          const previous = frames[frameIndex - 1].presentation;
+          const current = frames[frameIndex].presentation;
+          const previousSlots = slotDirectory(previous);
+          const currentSlots = slotDirectory(current);
+          const incomingEvents = /** @type {Record<string, any>[]} */ (
+            current.latest_events.events
+          );
+          expect(
+            incomingEvents
+              .filter(({ event_kind }) =>
+                ["source_damage_output", "source_healing_output"].includes(event_kind),
+              )
+              .map((event) => [
+                event.event_kind,
+                eventSourceSlot(event, currentSlots),
+                eventRecipientSlot(event, currentSlots),
+                event.raw_damage_output ?? event.raw_healing_output,
+                event.source_modified_damage_output ??
+                  event.source_modified_healing_output,
+              ]),
+            `moving Basic T${frameIndex - 1} source output rows`,
+          ).toEqual(expectedOutputs[frameIndex - 1]);
+          expect(
+            incomingEvents
+              .filter(({ event_kind }) => event_kind === "recipient_health_resolution")
+              .map((event) => [
+                eventRecipientSlot(event, currentSlots),
+                event.transition_start_health,
+                event.total_effective_damage,
+                event.total_effective_healing,
+                event.health_after_combat_resolution,
+              ]),
+            `moving Basic T${frameIndex - 1} recipient health rows`,
+          ).toEqual(expectedHealth[frameIndex - 1]);
+          const currentAgents = new Map(
+            oracleSceneAgents(current).map((agent) => [
+              currentSlots.get(agent.public_agent_id),
+              agent,
+            ]),
+          );
+          const previousAgents = new Map(
+            oracleSceneAgents(previous).map((agent) => [
+              previousSlots.get(agent.public_agent_id),
+              agent,
+            ]),
+          );
+          for (const slot of currentAgents.keys()) {
+            const currentAgent = currentAgents.get(slot);
+            const previousAgent = previousAgents.get(slot);
+            if (!currentAgent || !previousAgent) {
+              throw new Error(`Moving Basic g${slot} lost its scene join.`);
+            }
+            expect(currentAgent.position).not.toEqual(previousAgent.position);
+          }
+          for (const event of signaturePlanEvents(frames[frameIndex].signature).filter(
+            ({ kind }) => kind === "activation",
+          )) {
+            const source = currentAgents.get(
+              currentSlots.get(event.sourcePublicAgentId),
+            );
+            const target = currentAgents.get(
+              currentSlots.get(event.targetPublicAgentId),
+            );
+            if (!source || !target) {
+              throw new Error("Moving Basic plan lost an authorized endpoint.");
+            }
+            expect(event.source).toEqual({
+              x: source.position[0] * 10,
+              y: source.position[1] * 10,
+            });
+            expect(event.target).toEqual({
+              x: target.position[0] * 10,
+              y: target.position[1] * 10,
+            });
+          }
+        }
+      }
+      if (contract.name === "mirrored_ultimates") {
+        const burstEvents = /** @type {Record<string, any>[]} */ (
+          frames[1].presentation.latest_events.events
+        );
+        const burstSlots = slotDirectory(frames[1].presentation);
+        expect(
+          burstEvents
+            .filter(({ event_kind }) => event_kind === "status_applied")
+            .map((event) => [
+              eventSourceSlot(event, burstSlots),
+              eventRecipientSlot(event, burstSlots),
+              event.status_id,
+            ]),
+        ).toEqual([
+          [0, 0, "mage_burst_damage_amplification"],
+          [5, 5, "mage_burst_damage_amplification"],
+        ]);
+        expect(
+          burstEvents.filter(({ event_kind }) =>
+            [
+              "source_damage_output",
+              "source_healing_output",
+              "recipient_health_resolution",
+            ].includes(event_kind),
+          ),
+          "Burst is a source-local status application, not an immediate health event",
+        ).toEqual([]);
+        expectExactInstalledSurface(
+          frames[1],
+          "mirrored Burst F1",
+          [
+            [0, "ability_activated", 0, null, null, null],
+            [1, "ability_activated", 5, null, null, null],
+            [2, "cooldown_started", null, null, null, 0],
+            [3, "cooldown_started", null, null, null, 5],
+            [6, "status_applied", 0, null, 0, null],
+            [7, "status_applied", 5, null, 5, null],
+          ],
+          [],
+        );
+        const fullMove = indexedMask(9, [0, 1, 2, 3, 4, 5, 6, 7, 8]);
+        /** @param {number[]} targetIndices @param {number[][]} jointCells */
+        const legalMask = (targetIndices, jointCells) => ({
+          move: fullMove,
+          select_target: indexedMask(11, targetIndices),
+          use_ultimate: [true, true],
+          select_target_use_ultimate_joint: jointMask(jointCells),
+        });
+        const mirroredLegality = [
+          {
+            frameIndex: 0,
+            cases: [0, 5].map((slot) => ({
+              slot,
+              submitted: tupleFromRow([slot, 1, 0, 1]),
+              accepted: tupleFromRow([slot, 1, 0, 1]),
+              mask: legalMask(
+                [0],
+                [
+                  [0, 0],
+                  [0, 1],
+                ],
+              ),
+              submittedMoveLegal: true,
+              submittedPairLegal: true,
+            })),
+          },
+          {
+            frameIndex: 1,
+            cases: [1, 6].map((slot) => ({
+              slot,
+              submitted: tupleFromRow([slot, 0, 7, 1]),
+              accepted: tupleFromRow([slot, 0, 7, 1]),
+              mask: legalMask(
+                [0, 7, 8],
+                [
+                  [0, 0],
+                  [7, 1],
+                  [8, 1],
+                ],
+              ),
+              submittedMoveLegal: true,
+              submittedPairLegal: true,
+            })),
+          },
+          {
+            frameIndex: 2,
+            cases: [2, 7].map((slot) => ({
+              slot,
+              submitted: tupleFromRow([slot, 1, 8, 1]),
+              accepted: tupleFromRow([slot, 1, 8, 1]),
+              mask: legalMask(
+                [0, 8],
+                [
+                  [0, 0],
+                  [8, 0],
+                  [8, 1],
+                ],
+              ),
+              submittedMoveLegal: true,
+              submittedPairLegal: true,
+            })),
+          },
+          {
+            frameIndex: 3,
+            cases: [3, 8].map((slot) => ({
+              slot,
+              submitted: tupleFromRow([slot, 3, 9, 1]),
+              accepted: tupleFromRow([slot, 3, 9, 1]),
+              mask: legalMask(
+                [0, 9],
+                [
+                  [0, 0],
+                  [9, 0],
+                  [9, 1],
+                ],
+              ),
+              submittedMoveLegal: true,
+              submittedPairLegal: true,
+            })),
+          },
+          {
+            frameIndex: 4,
+            cases: [
+              {
+                slot: 4,
+                mask: legalMask(
+                  [0, 3, 4, 5],
+                  [
+                    [0, 0],
+                    [3, 1],
+                    [4, 1],
+                    [5, 0],
+                    [5, 1],
+                  ],
+                ),
+              },
+              {
+                slot: 9,
+                mask: legalMask(
+                  [0, 3, 4, 5],
+                  [
+                    [0, 0],
+                    [3, 1],
+                    [4, 0],
+                    [4, 1],
+                    [5, 0],
+                    [5, 1],
+                  ],
+                ),
+              },
+            ].map(({ slot, mask }) => ({
+              slot,
+              submitted: tupleFromRow([slot, 1, 4, 1]),
+              accepted: tupleFromRow([slot, 1, 4, 1]),
+              mask,
+              submittedMoveLegal: true,
+              submittedPairLegal: true,
+            })),
+          },
+        ];
+        for (const { frameIndex, cases } of mirroredLegality) {
+          await proveOutgoingOwnerSet(contract.name, frameIndex, cases);
+        }
+      }
+      if (contract.name === "charge_convergence") {
+        const start = frames[0].presentation;
+        const successor = frames[1].presentation;
+        const startSlots = slotDirectory(start);
+        const successorSlots = slotDirectory(successor);
+        const incomingEvents = /** @type {Record<string, any>[]} */ (
+          successor.latest_events.events
+        );
+        expect(
+          incomingEvents
+            .filter(({ event_kind }) => event_kind === "source_damage_output")
+            .map((event) => [
+              eventSourceSlot(event, successorSlots),
+              eventRecipientSlot(event, successorSlots),
+              event.raw_damage_output,
+              event.source_modified_damage_output,
+            ]),
+          "Charge source output rows",
+        ).toEqual([
+          [0, 5, 20, 20],
+          [1, 5, 20, 20],
+          [5, 0, 20, 20],
+        ]);
+        expect(
+          incomingEvents
+            .filter(({ event_kind }) => event_kind === "recipient_health_resolution")
+            .map((event) => [
+              eventRecipientSlot(event, successorSlots),
+              event.transition_start_health,
+              event.total_effective_damage,
+              event.total_effective_healing,
+              event.health_after_combat_resolution,
+            ]),
+          "Charge recipient health rows",
+        ).toEqual([
+          [0, 200, 17, 0, 183],
+          [5, 200, 34, 0, 166],
+        ]);
+        expect(
+          incomingEvents
+            .filter(({ event_kind }) => event_kind === "charge_phase_displacement")
+            .map((event) => [
+              eventSourceSlot(event, successorSlots),
+              event.realized_displacement,
+            ]),
+          "Charge displacement rows retain acting-agent identity",
+        ).toEqual([
+          [0, [4.071523189544678, 1.5]],
+          [1, [4.071523189544678, -1.5]],
+          [5, [-4.071523189544678, -1.6286091804504395]],
+        ]);
+        expectExactInstalledSurface(
+          frames[1],
+          "Charge convergence F1",
+          [
+            [0, "ability_activated", 0, 5, null, null],
+            [1, "ability_activated", 1, 5, null, null],
+            [2, "ability_activated", 5, 0, null, null],
+            [6, "recipient_health_resolution", null, null, 0, null],
+            [7, "recipient_health_resolution", null, null, 5, null],
+            [11, "cooldown_started", null, null, null, 0],
+            [12, "cooldown_started", null, null, null, 1],
+            [13, "cooldown_started", null, null, null, 5],
+            [14, "charge_phase_displacement", 0, null, null, null, true],
+            [15, "charge_phase_displacement", 1, null, null, null, true],
+            [16, "charge_phase_displacement", 5, null, null, null, true],
+            [17, "status_applied", 5, null, 0, null],
+            [18, "status_applied", 5, null, 0, null],
+            [19, "status_applied", 0, null, 5, null],
+            [21, "status_applied", 0, null, 5, null],
+          ],
+          [0, 1, 2, 14, 15, 16],
+        );
+        const startAgents = new Map(
+          oracleSceneAgents(start).map((agent) => [
+            startSlots.get(agent.public_agent_id),
+            agent,
+          ]),
+        );
+        const successorAgents = new Map(
+          oracleSceneAgents(successor).map((agent) => [
+            successorSlots.get(agent.public_agent_id),
+            agent,
+          ]),
+        );
+        for (const event of signaturePlanEvents(frames[1].signature).filter(
+          ({ kind }) => kind === "activation",
+        )) {
+          const sourceSlot = successorSlots.get(event.sourcePublicAgentId);
+          const targetSlot = successorSlots.get(event.targetPublicAgentId);
+          const startSource = startAgents.get(sourceSlot);
+          const startTarget = startAgents.get(targetSlot);
+          const successorSource = successorAgents.get(sourceSlot);
+          if (!startSource || !startTarget || !successorSource) {
+            throw new Error("Charge plan lost an authorized endpoint.");
+          }
+          expect(successorSource.position).not.toEqual(startSource.position);
+          expect(event.source).toEqual({
+            x: startSource.position[0] * 10,
+            y: startSource.position[1] * 10,
+          });
+          expect(event.target).toEqual({
+            x: startTarget.position[0] * 10,
+            y: startTarget.position[1] * 10,
+          });
+          expect(event.route).not.toBeNull();
+        }
+        expect(
+          signaturePlanEvents(frames[1].signature)
+            .filter(({ kind }) => kind === "charge_displacement")
+            .map((event) => [
+              successorSlots.get(event.sourcePublicAgentId),
+              event.start,
+              event.end,
+            ]),
+          "Charge plan joins exact transition-start and successor endpoints",
+        ).toEqual([
+          [0, { x: 30, y: 40 }, { x: 70.71523189544678, y: 55 }],
+          [1, { x: 30, y: 80 }, { x: 70.71523189544678, y: 65 }],
+          [5, { x: 80, y: 60 }, { x: 39.28476810455322, y: 43.713908195495605 }],
+        ]);
+      }
+      if (contract.name === "recovery_refresh_cycle") {
+        await seekReplay(page, 1);
+        await cp5Slice5AssertHiddenTransportNoninterference(
+          page,
+          activeReplay.url,
+          "replay_oracle",
+        );
+        const expectedStatuses = [
+          {},
+          {
+            5: {
+              rogue_poison_stun: 1,
+              rogue_poison_slow: 5,
+              rogue_poison_anti_heal: 4,
+            },
+            7: { hunter_trap_stun: 4 },
+          },
+          {
+            5: {
+              rogue_poison_stun: 1,
+              rogue_poison_slow: 5,
+              rogue_poison_anti_heal: 4,
+            },
+            7: { hunter_trap_stun: 4 },
+          },
+          {
+            5: { rogue_poison_slow: 4, rogue_poison_anti_heal: 3 },
+            7: { hunter_trap_stun: 3 },
+          },
+          {
+            5: { rogue_poison_slow: 3, rogue_poison_anti_heal: 2 },
+            7: { hunter_trap_stun: 2 },
+          },
+          {
+            5: { rogue_poison_slow: 2, rogue_poison_anti_heal: 1 },
+            7: { hunter_trap_stun: 1 },
+          },
+          { 5: { rogue_poison_slow: 1 } },
+          {},
+        ];
+        for (const [frameIndex, frame] of frames.entries()) {
+          const slots = slotDirectory(frame.presentation);
+          /** @type {Record<string, Record<string, number>>} */
+          const actual = {};
+          for (const agent of oracleSceneAgents(frame.presentation)) {
+            if (agent.statuses.length > 0) {
+              actual[String(slots.get(agent.public_agent_id))] = Object.fromEntries(
+                /** @type {Record<string, any>[]} */ (agent.statuses).map(
+                  ({ status_id, remaining_duration }) => [
+                    status_id,
+                    remaining_duration,
+                  ],
+                ),
+              );
+            }
+          }
+          expect(actual, `recovery F${frameIndex} duration 0/1/many`).toEqual(
+            expectedStatuses[frameIndex],
+          );
+        }
+        /**
+         * @param {number} frameIndex
+         * @param {number} primaryOrdinal
+         * @param {string} eventType
+         * @param {string} tokenId
+         * @param {string} lifecycle
+         * @param {string} lifecycleLabel
+         * @param {string} lifecycleAccessibleName
+         * @param {number[]} atomicOrdinals
+         * @param {number[]} applicationOrdinals
+         */
+        const lifecycleEvent = (
+          frameIndex,
+          primaryOrdinal,
+          eventType,
+          tokenId,
+          lifecycle,
+          lifecycleLabel,
+          lifecycleAccessibleName,
+          atomicOrdinals,
+          applicationOrdinals,
+        ) => {
+          const transitionId =
+            frames[frameIndex].presentation.latest_events.incoming_transition_id;
+          /** @param {number} ordinal */
+          const eventId = (ordinal) =>
+            `${transitionId}:event:${String(ordinal).padStart(4, "0")}`;
+          return {
+            eventId: eventId(primaryOrdinal),
+            eventType,
+            tokenId,
+            lifecycle,
+            lifecycleLabel,
+            lifecycleAccessibleName,
+            atomicEventIds: atomicOrdinals.map(eventId),
+            applicationEventIds: applicationOrdinals.map(eventId),
+          };
+        };
+        const expectedLifecycleByFrame = [
+          [],
+          [
+            lifecycleEvent(
+              1,
+              15,
+              "status_applied",
+              "slow_rogue_poison",
+              "applied",
+              "Applied",
+              "Status applied",
+              [15],
+              [15],
+            ),
+            lifecycleEvent(
+              1,
+              16,
+              "status_applied",
+              "stun_rogue_poison",
+              "applied",
+              "Applied",
+              "Status applied",
+              [16],
+              [16],
+            ),
+            lifecycleEvent(
+              1,
+              17,
+              "status_applied",
+              "anti_heal_rogue_poison",
+              "applied",
+              "Applied",
+              "Status applied",
+              [17],
+              [17],
+            ),
+            lifecycleEvent(
+              1,
+              18,
+              "status_applied",
+              "stun_hunter_trap",
+              "applied",
+              "Applied",
+              "Status applied",
+              [18],
+              [18],
+            ),
+          ],
+          [
+            lifecycleEvent(
+              2,
+              17,
+              "status_refreshed_or_extended",
+              "slow_rogue_poison",
+              "refreshed",
+              "Refreshed",
+              "Status refreshed or extended",
+              [16, 17],
+              [16],
+            ),
+            lifecycleEvent(
+              2,
+              19,
+              "status_applied",
+              "stun_rogue_poison",
+              "reapplied",
+              "Reapplied",
+              "Status reapplied",
+              [18, 19],
+              [19],
+            ),
+            lifecycleEvent(
+              2,
+              21,
+              "status_refreshed_or_extended",
+              "anti_heal_rogue_poison",
+              "refreshed",
+              "Refreshed",
+              "Status refreshed or extended",
+              [20, 21],
+              [20],
+            ),
+            lifecycleEvent(
+              2,
+              23,
+              "status_applied",
+              "stun_hunter_trap",
+              "trap_broken_and_reapplied",
+              "Broken, then reapplied",
+              "Freezing Trap was broken, then reapplied",
+              [22, 23],
+              [23],
+            ),
+          ],
+          [
+            lifecycleEvent(
+              3,
+              1,
+              "status_aged_to_zero",
+              "stun_rogue_poison",
+              "expired",
+              "Expired",
+              "Status expired naturally",
+              [1],
+              [],
+            ),
+          ],
+          [],
+          [],
+          [
+            lifecycleEvent(
+              6,
+              1,
+              "status_aged_to_zero",
+              "anti_heal_rogue_poison",
+              "expired",
+              "Expired",
+              "Status expired naturally",
+              [1],
+              [],
+            ),
+            lifecycleEvent(
+              6,
+              2,
+              "status_aged_to_zero",
+              "stun_hunter_trap",
+              "expired",
+              "Expired",
+              "Status expired naturally",
+              [2],
+              [],
+            ),
+          ],
+          [
+            lifecycleEvent(
+              7,
+              1,
+              "status_aged_to_zero",
+              "slow_rogue_poison",
+              "expired",
+              "Expired",
+              "Status expired naturally",
+              [1],
+              [],
+            ),
+          ],
+        ];
+        const expectedLifecycleOwnerSlotsByFrame = [
+          [],
+          [
+            [0, 5],
+            [0, 5],
+            [0, 5],
+            [2, 7],
+          ],
+          [
+            [null, 5],
+            [1, 5],
+            [null, 5],
+            [3, 7],
+          ],
+          [[null, 5]],
+          [],
+          [],
+          [
+            [null, 5],
+            [null, 7],
+          ],
+          [[null, 5]],
+        ];
+        for (const [frameIndex, frame] of frames.entries()) {
+          const expectedLifecycle = expectedLifecycleByFrame[frameIndex];
+          if (expectedLifecycle.length > 0) {
+            expect(
+              frame.signature.dom.statusLifecycles.length,
+              `recovery F${frameIndex} installs lifecycle DOM`,
+            ).toBeGreaterThan(0);
+          }
+          expect(
+            signaturePlanEvents(frame.signature)
+              .filter(({ kind }) => kind === "status_lifecycle")
+              .map(
+                ({
+                  eventId,
+                  eventType,
+                  tokenId,
+                  lifecycle,
+                  lifecycleLabel,
+                  lifecycleAccessibleName,
+                  atomicEventIds,
+                  applicationEventIds,
+                }) => ({
+                  eventId,
+                  eventType,
+                  tokenId,
+                  lifecycle,
+                  lifecycleLabel,
+                  lifecycleAccessibleName,
+                  atomicEventIds,
+                  applicationEventIds,
+                }),
+              ),
+            `recovery F${frameIndex} plan lifecycle`,
+          ).toEqual(expectedLifecycle);
+          expect(
+            frame.signature.dom.statusLifecycles,
+            `recovery F${frameIndex} installed lifecycle DOM/copy`,
+          ).toEqual(
+            expectedLifecycle.map((event) => ({
+              id: event.eventId,
+              type: event.eventType,
+              tokenId: event.tokenId,
+              lifecycle: event.lifecycle,
+              persistent: false,
+              atomicEventIds: event.atomicEventIds,
+              applicationEventIds: event.applicationEventIds,
+              tooltipKind: "event",
+              tooltipTitle: event.lifecycleLabel,
+              tooltipSummary: event.lifecycleAccessibleName,
+            })),
+          );
+          const frameSlots = slotDirectory(frame.presentation);
+          const frameKeysBySlot = new Map(
+            oracleSceneAgents(frame.presentation).map((agent) => [
+              frameSlots.get(agent.public_agent_id),
+              agent.presentation_key,
+            ]),
+          );
+          const lifecycleEffectsById = new Map(
+            /** @type {Record<string, any>[]} */ (frame.signature.dom.effects).map(
+              (effect) => [effect.id, effect],
+            ),
+          );
+          expect(
+            expectedLifecycle.map(({ eventId }) => {
+              const effect = lifecycleEffectsById.get(eventId);
+              if (!effect) {
+                throw new Error(
+                  `recovery F${frameIndex} lost lifecycle owner ${eventId}.`,
+                );
+              }
+              return {
+                id: effect.id,
+                sourceKey: effect.sourceKey,
+                recipientKey: effect.recipientKey,
+              };
+            }),
+            `recovery F${frameIndex} authorized lifecycle owners`,
+          ).toEqual(
+            expectedLifecycleOwnerSlotsByFrame[frameIndex].map(
+              ([sourceSlot, recipientSlot], index) => ({
+                id: expectedLifecycle[index].eventId,
+                sourceKey: sourceSlot === null ? null : frameKeysBySlot.get(sourceSlot),
+                recipientKey: frameKeysBySlot.get(recipientSlot),
+              }),
+            ),
+          );
+        }
+        const fullMove = indexedMask(9, [0, 1, 2, 3, 4, 5, 6, 7, 8]);
+        await proveOutgoingOwnerSet(contract.name, 0, [
+          {
+            slot: 6,
+            submitted: tupleFromRow([6, 0, 2, 1]),
+            accepted: neutral,
+            mask: {
+              move: fullMove,
+              select_target: indexedMask(11, [0, 2]),
+              use_ultimate: [true, false],
+              select_target_use_ultimate_joint: jointMask([
+                [0, 0],
+                [2, 0],
+              ]),
+            },
+            submittedMoveLegal: true,
+            submittedPairLegal: false,
+          },
+        ]);
+        await proveOutgoingOwnerSet(contract.name, 1, [
+          {
+            slot: 5,
+            submitted: neutral,
+            accepted: neutral,
+            mask: stunnedMask,
+            submittedMoveLegal: true,
+            submittedPairLegal: true,
+          },
+        ]);
+      }
+      if (contract.name === "death_respawn_cycle") {
+        const fullMove = indexedMask(9, [0, 1, 2, 3, 4, 5, 6, 7, 8]);
+        const noOpMask = {
+          move: indexedMask(9, [0]),
+          select_target: indexedMask(11, [0]),
+          use_ultimate: [true, false],
+          select_target_use_ultimate_joint: jointMask([[0, 0]]),
+        };
+        await proveOutgoingOwnerSet(contract.name, 2, [
+          {
+            slot: 5,
+            submitted: tupleFromRow([5, 4, 6, 1]),
+            accepted: neutral,
+            mask: noOpMask,
+            submittedMoveLegal: false,
+            submittedPairLegal: false,
+          },
+        ]);
+        await proveOutgoingOwnerSet(contract.name, 3, [
+          {
+            slot: 5,
+            submitted: tupleFromRow([5, 4, 6, 0]),
+            accepted: tupleFromRow([5, 4, 0, 0]),
+            mask: {
+              move: fullMove,
+              select_target: indexedMask(11, [0]),
+              use_ultimate: [true, false],
+              select_target_use_ultimate_joint: jointMask([[0, 0]]),
+            },
+            submittedMoveLegal: true,
+            submittedPairLegal: false,
+          },
+        ]);
+        await proveOutgoingOwnerSet(contract.name, 6, [
+          {
+            slot: 5,
+            submitted: tupleFromRow([5, 0, 6, 0]),
+            accepted: tupleFromRow([5, 0, 6, 0]),
+            mask: {
+              move: fullMove,
+              select_target: indexedMask(11, [0, 6]),
+              use_ultimate: [true, true],
+              select_target_use_ultimate_joint: jointMask([
+                [0, 0],
+                [6, 0],
+                [6, 1],
+              ]),
+            },
+            submittedMoveLegal: true,
+            submittedPairLegal: true,
+          },
+        ]);
+      }
+      await stopDebugger(activeReplay.process);
+      activeReplay = null;
+    }
+
+    sliceArtifacts = await exportReplayArtifacts();
+    activeReplay = await startReplayViewer({
+      replayPath: sliceArtifacts.shared,
+      view: "pov",
+      povSlot: 0,
+    });
+    await page.goto("about:blank");
+    await openProduct(page, activeReplay.url, "replay");
+    await seekReplay(page, 1);
+    const shared = await authenticatedGet(page, "/api/presentation/frame");
+    expect(shared.presentation_kind).toBe("replay_shared_obs_agent_pov");
+    expect(
+      /** @type {Record<string, any>[]} */ (shared.latest_events.deltas).some(
+        ({ delta_kind }) => delta_kind === "respawn_wave_occurred",
+      ),
+    ).toBe(false);
+    await cp5Slice5AssertHiddenTransportNoninterference(
+      page,
+      activeReplay.url,
+      "replay_shared_obs_agent_pov",
+    );
+    await stopDebugger(activeReplay.process);
+    activeReplay = null;
+    await removeReplayArtifacts(sliceArtifacts.outputDirectory);
+    sliceArtifacts = null;
+
+    const checkedReplayBytesAfter = await cp5Slice5CheckedReplaySnapshot();
+    expect(Object.keys(checkedReplayBytesAfter)).toEqual(
+      Object.keys(checkedReplayBytesBefore),
+    );
+    for (const [fileName, before] of Object.entries(checkedReplayBytesBefore)) {
+      expect(checkedReplayBytesAfter[fileName].sha256).toBe(before.sha256);
+      expect(checkedReplayBytesAfter[fileName].bytes.equals(before.bytes)).toBe(true);
+    }
+    expect(browserErrors.get(page) ?? []).toEqual([]);
+  } catch (error) {
+    testError = error;
+  }
+  const cleanup = await Promise.allSettled([
+    stopDebugger(activeReplay?.process ?? null),
+    removeReplayArtifacts(sliceArtifacts?.outputDirectory),
+  ]);
+  const cleanupErrors = cleanup.flatMap((result) =>
+    result.status === "rejected" ? [result.reason] : [],
+  );
+  if (testError !== null || cleanupErrors.length > 0) {
+    throw new AggregateError(
+      [...(testError === null ? [] : [testError]), ...cleanupErrors],
+      "CP5 Slice 5 public causal/privacy proof or cleanup failed.",
+    );
+  }
+});
+
 test("real Shared replay installs frame zero, middle, final, then rejects a forged raw root", async ({
   page,
 }) => {
@@ -2929,4 +5882,342 @@ test("real death and respawn keep one opaque Oracle body identity", async ({
     }
   }
   expect(browserErrors.get(page) ?? []).toEqual([]);
+});
+
+test("real death cycle retains truthful outward lifecycle cues at both review viewports", async ({
+  page,
+}) => {
+  if (!deathReplay) {
+    throw new Error("Death replay service is unavailable.");
+  }
+  for (const viewport of [
+    { width: 960, height: 600 },
+    { width: 1440, height: 900 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await page.goto("about:blank");
+    await openProduct(page, deathReplay.url, "replay");
+    await seekReplay(page, 0);
+    const initial = await authenticatedGet(page, "/api/presentation/frame");
+    expect(initial.source.source_frame_index).toBe(0);
+    expect(initial.source.source_final_frame_index).toBe(7);
+    expect(initial.latest_events).toBeNull();
+    const subject = initial.current_endpoint.scene.agents.find(
+      (/** @type {Record<string, any>} */ agent) => agent.public_agent_id === "5",
+    );
+    if (!subject) {
+      throw new Error("Death replay subject is absent from frame zero.");
+    }
+    const subjectSelector = `.agent[data-presentation-key="${subject.presentation_key}"]`;
+    await expect(page.locator(".combat-lifecycle-ring")).toHaveCount(0);
+    await expect(page.locator(".combat-respawn-wave")).toHaveCount(0);
+
+    await seekReplay(page, 1);
+    const deathFrame = await authenticatedGet(page, "/api/presentation/frame");
+    const deathEvents = /** @type {Record<string, any>[]} */ (
+      deathFrame.latest_events.events
+    );
+    expect(deathFrame.latest_events.ordered_event_ids).toEqual(
+      deathEvents.map(({ event_id }) => event_id),
+    );
+    const deathEvent = deathEvents.find(
+      ({ event_kind }) => event_kind === "agent_died",
+    );
+    if (!deathEvent) {
+      throw new Error("Authorized death event is unavailable.");
+    }
+    const deathEffect = page.locator('.combat-effect[data-event-type="agent_died"]');
+    await expect(deathEffect).toHaveCount(1);
+    await expect(deathEffect).toHaveAttribute("data-event-id", deathEvent.event_id);
+    await expect(deathEffect).toHaveAttribute("data-persistent", "true");
+    await expect(deathEffect).toHaveAttribute("data-settled", "true");
+    await expect(page.locator(subjectSelector)).toHaveAttribute("data-alive", "false");
+    const deathGeometry = await deathEffect.evaluate((effect, selector) => {
+      const ringGroup = effect.querySelector(".combat-lifecycle-ring--death");
+      const ring = effect.querySelector(".combat-lifecycle-ring__ring");
+      const body = document.querySelector(`${selector} .agent-body`);
+      if (
+        !(ringGroup instanceof SVGGraphicsElement) ||
+        !(ring instanceof SVGCircleElement) ||
+        !(body instanceof SVGCircleElement)
+      ) {
+        throw new Error("Settled death geometry is unavailable.");
+      }
+      const matrix = ringGroup.getCTM();
+      const bodyMatrix = body.getCTM();
+      if (matrix === null || bodyMatrix === null) {
+        throw new Error("Settled death transform is unavailable.");
+      }
+      const bodyCenter = new DOMPoint(
+        body.cx.baseVal.value,
+        body.cy.baseVal.value,
+      ).matrixTransform(bodyMatrix);
+      return {
+        color: getComputedStyle(ringGroup).color,
+        radius: ring.getAttribute("r"),
+        center: [matrix.e, matrix.f],
+        bodyCenter: [bodyCenter.x, bodyCenter.y],
+      };
+    }, subjectSelector);
+    expect(deathGeometry.color).toBe("rgb(251, 113, 133)");
+    expect(deathGeometry.radius).toBe("32");
+    expect(deathGeometry.center[0]).toBeCloseTo(deathGeometry.bodyCenter[0], 5);
+    expect(deathGeometry.center[1]).toBeCloseTo(deathGeometry.bodyCenter[1], 5);
+
+    await seekReplay(page, 2);
+    const waitFrame = await authenticatedGet(page, "/api/presentation/frame");
+    expect(waitFrame.latest_events.events).toEqual([]);
+    await expect(page.locator(subjectSelector)).toHaveAttribute("data-alive", "false");
+    await expect(page.locator(".combat-lifecycle-ring")).toHaveCount(0);
+    await expect(page.locator(".combat-respawn-wave")).toHaveCount(0);
+
+    await seekReplay(page, 3);
+    const respawnFrame = await authenticatedGet(page, "/api/presentation/frame");
+    const respawnEvents = /** @type {Record<string, any>[]} */ (
+      respawnFrame.latest_events.events
+    );
+    expect(respawnFrame.latest_events.ordered_event_ids).toEqual(
+      respawnEvents.map(({ event_id }) => event_id),
+    );
+    expect(respawnEvents.map(({ event_kind }) => event_kind)).toEqual([
+      "action_rejected",
+      "action_rejected",
+      "respawn_wave_occurred",
+      "agent_respawned",
+    ]);
+    const waveEvent = respawnEvents[2];
+    const respawnEvent = respawnEvents[3];
+    const waveEffect = page.locator(
+      '.combat-effect[data-event-type="respawn_wave_occurred"]',
+    );
+    const wave = waveEffect.locator(".combat-respawn-wave");
+    await expect(waveEffect).toHaveCount(1);
+    await expect(waveEffect).toHaveAttribute("data-event-id", waveEvent.event_id);
+    await expect(waveEffect).toHaveAttribute("data-persistent", "true");
+    await expect(waveEffect).toHaveAttribute("data-settled", "true");
+    await expect(waveEffect).toHaveAttribute("data-team-index", "1");
+    await expect(waveEffect).toHaveAttribute("data-team-id", "2");
+    await expect(waveEffect).toHaveAttribute("data-team-side", "right");
+    await expect(wave.locator(".combat-respawn-wave__label")).toHaveText(
+      "RESPAWNING · TEAM B",
+    );
+    const waveGeometry = await wave.evaluate((node) => {
+      const map = document.querySelector(".map-boundary");
+      const label = node.querySelector(".combat-respawn-wave__label");
+      if (!(map instanceof SVGGraphicsElement) || !(label instanceof SVGTextElement)) {
+        throw new Error("Settled wave geometry is unavailable.");
+      }
+      const waveBounds = node.getBoundingClientRect();
+      const mapBounds = map.getBoundingClientRect();
+      return {
+        color: getComputedStyle(node).color,
+        label: label.textContent,
+        withinMap:
+          waveBounds.left >= mapBounds.left &&
+          waveBounds.top >= mapBounds.top &&
+          waveBounds.right <= mapBounds.right &&
+          waveBounds.bottom <= mapBounds.bottom,
+        rightSided:
+          waveBounds.left + waveBounds.width / 2 > mapBounds.left + mapBounds.width / 2,
+        childTooltipOwners: node.querySelectorAll("[data-tooltip-owner]").length,
+      };
+    });
+    expect(waveGeometry).toEqual({
+      color: "rgb(240, 90, 103)",
+      label: "RESPAWNING · TEAM B",
+      withinMap: true,
+      rightSided: true,
+      childTooltipOwners: 0,
+    });
+
+    const respawnEffect = page.locator(
+      '.combat-effect[data-event-type="agent_respawned"]',
+    );
+    await expect(respawnEffect).toHaveCount(1);
+    await expect(respawnEffect).toHaveAttribute("data-event-id", respawnEvent.event_id);
+    await expect(respawnEffect).toHaveAttribute("data-persistent", "true");
+    await expect(respawnEffect).toHaveAttribute("data-settled", "true");
+    await expect(page.locator(subjectSelector)).toHaveAttribute("data-alive", "true");
+    await expect(page.locator(subjectSelector)).toHaveAttribute(
+      "data-spawn-shield-remaining",
+      "3",
+    );
+    const respawnGeometry = await respawnEffect.evaluate((effect, selector) => {
+      const ringGroup = effect.querySelector(".combat-lifecycle-ring--resurrection");
+      const ring = effect.querySelector(".combat-lifecycle-ring__ring");
+      const body = document.querySelector(`${selector} .agent-body`);
+      if (
+        !(ringGroup instanceof SVGGraphicsElement) ||
+        !(ring instanceof SVGCircleElement) ||
+        !(body instanceof SVGCircleElement)
+      ) {
+        throw new Error("Settled resurrection geometry is unavailable.");
+      }
+      const matrix = ringGroup.getCTM();
+      const bodyMatrix = body.getCTM();
+      if (matrix === null || bodyMatrix === null) {
+        throw new Error("Settled resurrection transform is unavailable.");
+      }
+      const bodyCenter = new DOMPoint(
+        body.cx.baseVal.value,
+        body.cy.baseVal.value,
+      ).matrixTransform(bodyMatrix);
+      return {
+        color: getComputedStyle(ringGroup).color,
+        radius: ring.getAttribute("r"),
+        center: [matrix.e, matrix.f],
+        bodyCenter: [bodyCenter.x, bodyCenter.y],
+      };
+    }, subjectSelector);
+    expect(respawnGeometry.color).toBe("rgb(255, 255, 255)");
+    expect(respawnGeometry.radius).toBe("32");
+    expect(respawnGeometry.center[0]).toBeCloseTo(respawnGeometry.bodyCenter[0], 5);
+    expect(respawnGeometry.center[1]).toBeCloseTo(respawnGeometry.bodyCenter[1], 5);
+    const shield = page.locator(
+      `.agent-spawn-shield[data-presentation-key="${subject.presentation_key}"]`,
+    );
+    const shieldStyles = await shield.evaluate((root) => {
+      const shell = root.querySelector(".agent-spawn-shield__shell");
+      const chip = root.querySelector(".agent-spawn-shield__chip");
+      const ticks = root.querySelector(".agent-spawn-shield__ticks");
+      if (
+        !(shell instanceof SVGElement) ||
+        !(chip instanceof SVGElement) ||
+        !(ticks instanceof SVGElement)
+      ) {
+        throw new Error("Spawn Shield styling is unavailable.");
+      }
+      return {
+        chipFill: getComputedStyle(chip).fill,
+        chipStroke: getComputedStyle(chip).stroke,
+        shellStroke: getComputedStyle(shell).stroke,
+        tickFill: getComputedStyle(ticks).fill,
+      };
+    });
+    expect(shieldStyles).toEqual({
+      chipFill: "rgb(0, 0, 0)",
+      chipStroke: "rgb(255, 255, 255)",
+      shellStroke: "rgb(255, 255, 255)",
+      tickFill: "rgb(255, 255, 255)",
+    });
+
+    await seekReplay(page, 4);
+    const shieldFrame = await authenticatedGet(page, "/api/presentation/frame");
+    const shieldedSubject = shieldFrame.current_endpoint.scene.agents.find(
+      (/** @type {Record<string, any>} */ agent) => agent.public_agent_id === "5",
+    );
+    expect(shieldedSubject.spawn_shield_remaining).toBe(2);
+    await expect(page.locator(subjectSelector)).toHaveAttribute(
+      "data-spawn-shield-remaining",
+      "2",
+    );
+    await expect(page.locator(".combat-lifecycle-ring")).toHaveCount(0);
+    await expect(page.locator(".combat-respawn-wave")).toHaveCount(0);
+
+    await seekReplay(page, 5);
+    const teamAFrame = await authenticatedGet(page, "/api/presentation/frame");
+    const teamAEvents = /** @type {Record<string, any>[]} */ (
+      teamAFrame.latest_events.events
+    );
+    expect(teamAFrame.latest_events.ordered_event_ids).toEqual(
+      teamAEvents.map(({ event_id }) => event_id),
+    );
+    expect(teamAEvents.map(({ event_kind }) => event_kind)).toEqual([
+      "action_rejected",
+      "respawn_wave_occurred",
+    ]);
+    const teamAWaveEvent = teamAEvents[1];
+    const teamAWaveEffect = page.locator(
+      '.combat-effect[data-event-type="respawn_wave_occurred"]',
+    );
+    const teamAWave = teamAWaveEffect.locator(".combat-respawn-wave");
+    await expect(teamAWaveEffect).toHaveCount(1);
+    await expect(teamAWaveEffect).toHaveAttribute(
+      "data-event-id",
+      teamAWaveEvent.event_id,
+    );
+    await expect(teamAWaveEffect).toHaveAttribute("data-persistent", "true");
+    await expect(teamAWaveEffect).toHaveAttribute("data-settled", "true");
+    await expect(teamAWaveEffect).toHaveAttribute("data-team-index", "0");
+    await expect(teamAWaveEffect).toHaveAttribute("data-team-id", "1");
+    await expect(teamAWaveEffect).toHaveAttribute("data-team-side", "left");
+    await expect(teamAWave.locator(".combat-respawn-wave__label")).toHaveText(
+      "RESPAWNING · TEAM A",
+    );
+    const teamAGeometry = await teamAWave.evaluate((node) => {
+      const map = document.querySelector(".map-boundary");
+      const label = node.querySelector(".combat-respawn-wave__label");
+      if (!(map instanceof SVGGraphicsElement) || !(label instanceof SVGTextElement)) {
+        throw new Error("Settled Team A wave geometry is unavailable.");
+      }
+      const waveBounds = node.getBoundingClientRect();
+      const mapBounds = map.getBoundingClientRect();
+      return {
+        color: getComputedStyle(node).color,
+        label: label.textContent,
+        withinMap:
+          waveBounds.left >= mapBounds.left &&
+          waveBounds.top >= mapBounds.top &&
+          waveBounds.right <= mapBounds.right &&
+          waveBounds.bottom <= mapBounds.bottom,
+        leftSided:
+          waveBounds.left + waveBounds.width / 2 < mapBounds.left + mapBounds.width / 2,
+        childTooltipOwners: node.querySelectorAll("[data-tooltip-owner]").length,
+      };
+    });
+    expect(teamAGeometry).toEqual({
+      color: "rgb(59, 130, 246)",
+      label: "RESPAWNING · TEAM A",
+      withinMap: true,
+      leftSided: true,
+      childTooltipOwners: 0,
+    });
+    const teamASubject = teamAFrame.current_endpoint.scene.agents.find(
+      (/** @type {Record<string, any>} */ agent) => agent.public_agent_id === "5",
+    );
+    expect(teamASubject.spawn_shield_remaining).toBe(1);
+    await expect(page.locator(subjectSelector)).toHaveAttribute(
+      "data-spawn-shield-remaining",
+      "1",
+    );
+    await expect(page.locator(".combat-lifecycle-ring")).toHaveCount(0);
+
+    await seekReplay(page, 6);
+    const expiryFrame = await authenticatedGet(page, "/api/presentation/frame");
+    const expiryEvents = /** @type {Record<string, any>[]} */ (
+      expiryFrame.latest_events.events
+    );
+    expect(
+      expiryEvents.some(({ event_kind }) => event_kind === "spawn_shield_expired"),
+    ).toBe(true);
+    const expiredSubject = expiryFrame.current_endpoint.scene.agents.find(
+      (/** @type {Record<string, any>} */ agent) => agent.public_agent_id === "5",
+    );
+    expect(expiredSubject.spawn_shield_remaining).toBe(0);
+    await expect(shield).toBeHidden();
+    await expect(
+      page.locator('.combat-effect[data-event-type="spawn_shield_expired"]'),
+    ).toHaveCount(0);
+    await expect(page.locator(".combat-lifecycle-ring")).toHaveCount(0);
+    await expect(page.locator(".combat-respawn-wave")).toHaveCount(0);
+
+    await seekReplay(page, 7);
+    const unshieldedFrame = await authenticatedGet(page, "/api/presentation/frame");
+    const unshieldedEvents = /** @type {Record<string, any>[]} */ (
+      unshieldedFrame.latest_events.events
+    );
+    const abilities = unshieldedEvents.filter(
+      ({ event_kind }) => event_kind === "ability_activated",
+    );
+    expect(abilities).toHaveLength(1);
+    expect(abilities[0].ability_component).toBe("basic");
+    expect(abilities[0].source_anchor.public_agent_id).toBe("5");
+    expect(abilities[0].recipient_anchor.public_agent_id).toBe("0");
+    expect(
+      unshieldedEvents.some(({ event_kind }) => event_kind === "action_rejected"),
+    ).toBe(false);
+    await expect(page.locator(".combat-lifecycle-ring")).toHaveCount(0);
+    await expect(page.locator(".combat-respawn-wave")).toHaveCount(0);
+    expect(browserErrors.get(page) ?? []).toEqual([]);
+  }
 });

@@ -1245,6 +1245,46 @@ select {
   opacity: 0.82;
 }
 
+.combat-regeneration {
+  color: var(--success);
+}
+
+.combat-regeneration__hit {
+  fill: transparent;
+  stroke: none;
+  pointer-events: fill;
+}
+
+.combat-regeneration__pulse {
+  fill: rgb(8 15 29 / 82%);
+  stroke: currentColor;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.combat-regeneration__plus {
+  filter: drop-shadow(0 0 3px currentColor);
+}
+
+.combat-regeneration__value {
+  fill: currentColor;
+  stroke: rgb(8 13 24 / 90%);
+  stroke-width: 2.5;
+  paint-order: stroke fill;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 850;
+  text-anchor: middle;
+  dominant-baseline: central;
+}
+
+.combat-regeneration__recipient-anchor {
+  fill: currentColor;
+  stroke: var(--battlefield);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+
 .combat-effect[data-outcome="unchanged"] {
   color: var(--text);
 }
@@ -1356,14 +1396,6 @@ select {
   stroke-dasharray: 2 3;
 }
 
-.combat-status-source-link {
-  fill: none;
-  stroke: rgb(167 139 250 / 74%);
-  stroke-width: 2;
-  stroke-dasharray: 4 4;
-  vector-effect: non-scaling-stroke;
-}
-
 .combat-semantic-pulse {
   color: var(--accent);
 }
@@ -1376,9 +1408,7 @@ select {
 
 .combat-semantic-pulse__ring,
 .combat-semantic-pulse__core,
-.combat-semantic-pulse__wave,
-.combat-semantic-pulse__mark,
-.combat-semantic-pulse__beam {
+.combat-semantic-pulse__mark {
   fill: none;
   stroke: currentColor;
   stroke-linecap: round;
@@ -1397,14 +1427,6 @@ select {
   opacity: 0.92;
 }
 
-.combat-semantic-pulse__wave {
-  opacity: 0.48;
-}
-
-.combat-semantic-pulse__beam {
-  fill: rgb(125 211 252 / 12%);
-}
-
 .combat-semantic-pulse__value {
   fill: currentColor;
   font-family: var(--font-mono);
@@ -1413,22 +1435,63 @@ select {
   text-anchor: middle;
 }
 
-.combat-semantic-pulse--health-regenerated,
-.combat-semantic-pulse--cooldown-ready,
-.combat-semantic-pulse--agent-respawned {
+.combat-semantic-pulse--cooldown-ready {
   color: var(--success);
-}
-
-.combat-semantic-pulse--agent-died {
-  color: var(--danger);
 }
 
 .combat-semantic-pulse--spawn-shield-expired {
   color: #7dd3fc;
 }
 
-.combat-semantic-pulse--respawn-wave-occurred {
-  color: var(--warning);
+.combat-lifecycle-ring--death {
+  color: var(--danger);
+}
+
+.combat-lifecycle-ring--resurrection {
+  color: #fff;
+}
+
+.combat-lifecycle-ring__hit {
+  fill: transparent;
+  stroke: none;
+  pointer-events: fill;
+}
+
+.combat-lifecycle-ring__ring {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 4;
+  vector-effect: non-scaling-stroke;
+}
+
+.combat-respawn-wave {
+  color: var(--text);
+}
+
+.combat-respawn-wave--team-a {
+  color: var(--team-a);
+}
+
+.combat-respawn-wave--team-b {
+  color: var(--team-b);
+}
+
+.combat-respawn-wave__panel {
+  fill: rgb(8 15 29 / 94%);
+  stroke: currentColor;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.combat-respawn-wave__label {
+  fill: currentColor;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  dominant-baseline: central;
+  text-anchor: middle;
+  pointer-events: none;
 }
 
 .agent {
@@ -1596,6 +1659,17 @@ select {
   overflow: visible;
   color: currentColor;
   pointer-events: none;
+}
+
+.agent-combat-state-icon {
+  overflow: visible;
+  color: #fff;
+  filter: drop-shadow(0 0 2px rgb(8 13 24 / 95%));
+  pointer-events: none;
+}
+
+.agent-combat-state-icon[hidden] {
+  display: none;
 }
 
 .agent-class-letter {

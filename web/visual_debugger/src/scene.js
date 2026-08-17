@@ -82,6 +82,7 @@ export const BATTLEFIELD_LAYER_ORDER = Object.freeze([
  *   healthTrack: SVGElement,
  *   health: SVGElement,
  *   classIcon: SVGSVGElement,
+ *   combatStateIcon: SVGSVGElement,
  *   classLetter: SVGElement,
  *   deadMark: SVGElement,
  *   shieldRoot: SVGElement,
@@ -2291,6 +2292,12 @@ export class BattlefieldRenderer {
     const classIcon = createSvgIcon(this.battlefield.ownerDocument, "unknown", {
       className: "agent-class-icon",
     });
+    const combatStateIcon = createSvgIcon(
+      this.battlefield.ownerDocument,
+      "combat-in-progress",
+      { className: "agent-combat-state-icon" },
+    );
+    combatStateIcon.setAttribute("hidden", "");
     const classLetter = svgElement("text", { class: "agent-class-letter" });
     const deadMark = svgElement("path", {
       class: "agent-dead-mark",
@@ -2337,6 +2344,7 @@ export class BattlefieldRenderer {
       healthTrack,
       health,
       classIcon,
+      combatStateIcon,
       classLetter,
       deadMark,
     );
@@ -2362,6 +2370,7 @@ export class BattlefieldRenderer {
       healthTrack,
       health,
       classIcon,
+      combatStateIcon,
       classLetter,
       deadMark,
       shieldRoot,
@@ -2403,12 +2412,20 @@ export class BattlefieldRenderer {
           Math.max(finiteNumber(agent.max_health, 1), Number.EPSILON),
       ),
     );
+    const stepsUntilOutOfCombat =
+      Number.isInteger(agent.steps_until_out_of_combat) &&
+      agent.steps_until_out_of_combat >= 0
+        ? Number(agent.steps_until_out_of_combat)
+        : 0;
+    const inCombat = stepsUntilOutOfCombat > 0;
 
     nodes.root.dataset.team = teamToken.cssKey;
     nodes.root.dataset.class = classToken.cssKey;
     nodes.root.dataset.alive = String(Boolean(agent.alive));
     nodes.root.dataset.controlled = String(controlled);
     nodes.root.dataset.selected = String(selected);
+    nodes.root.dataset.combatStatus = inCombat ? "IC" : "OOC";
+    nodes.root.dataset.stepsUntilOutOfCombat = String(stepsUntilOutOfCombat);
     const spawnShieldView = createSpawnShieldView(agent, spawnShieldMechanics);
     const spawnShieldRemaining = spawnShieldView.remainingTicks;
     if (
@@ -2429,6 +2446,9 @@ export class BattlefieldRenderer {
         teamToken.label,
         `health ${formatDisplayNumber(agent.current_health)} of ${formatDisplayNumber(agent.max_health)}`,
         agent.alive ? "alive" : "dead",
+        inCombat
+          ? `combat status IC, steps until OOC ${stepsUntilOutOfCombat}`
+          : "combat status OOC",
         spawnShieldView.rootAriaLabel,
         controlled ? "controlled actor" : null,
         selected ? "selected target" : null,
@@ -2507,11 +2527,24 @@ export class BattlefieldRenderer {
       nodes.classIcon = replacement;
     }
     const iconSize = Math.max(14, Math.min(radius * 0.95, 28));
+    const combatIconSize = Math.max(8, Math.min(radius * 0.42, 12));
+    const combatIconGap = Math.max(1, Math.min(radius * 0.12, 3));
+    const identityGlyphWidth =
+      iconSize + (inCombat ? combatIconGap + combatIconSize : 0);
+    const classIconX = center.x - identityGlyphWidth / 2;
+    const identityGlyphCenterY = center.y - iconSize * 0.12;
     setAttributes(nodes.classIcon, {
-      x: center.x - iconSize / 2,
+      x: classIconX,
       y: center.y - iconSize * 0.62,
       width: iconSize,
       height: iconSize,
+    });
+    setAttributes(nodes.combatStateIcon, {
+      x: classIconX + iconSize + combatIconGap,
+      y: identityGlyphCenterY - combatIconSize / 2,
+      width: combatIconSize,
+      height: combatIconSize,
+      hidden: inCombat ? null : "",
     });
     setAttributes(nodes.classLetter, {
       x: center.x,
