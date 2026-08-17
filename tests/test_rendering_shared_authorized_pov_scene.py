@@ -37,6 +37,11 @@ from marl_battlegrounds.rendering.authorized_pov_scene import (
     build_no_shared_obs_authorized_scene_v1,
     build_shared_obs_authorized_scene_v1,
 )
+from marl_battlegrounds.rendering.authorized_presentation import (
+    AuthorizedClassDocumentationProfileAvailableV1,
+    AuthorizedClassDocumentationProfileUnavailableV1,
+    AuthorizedClassMechanicsV2,
+)
 from marl_battlegrounds.rendering.evaluation_adapter import (
     SharedObsSourceMaterialProjectionV1,
     build_shared_obs_source_material_projection_v1,
@@ -1199,7 +1204,7 @@ def test_authorized_aura_fields_hidden_emitter_noncoupling_and_neutral_omission(
     )
 
 
-def test_catalog_unrepresented_inert_and_represented_clamp_sensitive(
+def test_catalog_unrepresented_revokes_profile_and_represented_clamp_sensitive(
     shared_case: _SharedCase,
 ) -> None:
     catalog = shared_case.trajectory.context.static_mechanics_catalog
@@ -1214,8 +1219,44 @@ def test_catalog_unrepresented_inert_and_represented_clamp_sensitive(
     class_rows[3] = hunter
     unrepresented_payload["class_mechanics"] = tuple(class_rows)
     unrepresented = _catalog_from_payload(unrepresented_payload)
-    inert = _build(shared_case, 0, catalog=unrepresented)
-    assert _canonical_bytes(inert) == _canonical_bytes(baseline)
+    profile_revoked = _build(shared_case, 0, catalog=unrepresented)
+
+    assert 3 not in {row.class_id for row in baseline.scene.class_mechanics}
+    baseline_mechanics = tuple(
+        cast(AuthorizedClassMechanicsV2, row) for row in baseline.scene.class_mechanics
+    )
+    revoked_mechanics = tuple(
+        cast(AuthorizedClassMechanicsV2, row)
+        for row in profile_revoked.scene.class_mechanics
+    )
+    assert all(
+        type(row.documentation_profile)
+        is AuthorizedClassDocumentationProfileAvailableV1
+        for row in baseline_mechanics
+    )
+    assert all(
+        type(row.documentation_profile)
+        is AuthorizedClassDocumentationProfileUnavailableV1
+        for row in revoked_mechanics
+    )
+    baseline_profile_by_class = {
+        row.class_id: row.documentation_profile for row in baseline_mechanics
+    }
+    restored_profile = replace(
+        profile_revoked,
+        scene=replace(
+            profile_revoked.scene,
+            class_mechanics=tuple(
+                replace(
+                    row,
+                    documentation_profile=baseline_profile_by_class[row.class_id],
+                )
+                for row in revoked_mechanics
+            ),
+        ),
+    )
+    assert _canonical_bytes(profile_revoked) != _canonical_bytes(baseline)
+    assert _canonical_bytes(restored_profile) == _canonical_bytes(baseline)
 
     represented_payload = catalog.model_dump(mode="python")
     aura_rows = list(

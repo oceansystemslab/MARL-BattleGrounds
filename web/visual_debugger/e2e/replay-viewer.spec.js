@@ -599,13 +599,16 @@ test("replay reconnect rejects a valid live frame without crossing the viewer bo
   await expect(page.locator("#replay-artifact-reference")).toHaveText(
     "Unavailable while authority is pending",
   );
-  await expect(page.locator("#replay-frame-position")).toHaveText(
-    installedDom.framePosition ?? "",
-  );
-  await expect(page.locator("#view-select")).toHaveValue(installedDom.view);
+  await expect(page.locator("#replay-frame-position")).toHaveText("Tick — / —");
+  await expect(page.locator("#view-select")).toHaveValue("");
+  await expect(page.locator("#view-select")).toBeDisabled();
   await expect(page.locator("[data-live-only]:not([hidden])")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Submit joint turn" })).toHaveCount(0);
-  await expect(page.locator("#battlefield")).toHaveAttribute("role", "group");
+  await expect(page.locator("#battlefield")).toHaveAttribute("role", "img");
+  await expect(page.locator("#battlefield")).toHaveAttribute(
+    "aria-label",
+    "Read-only live battlefield. Simulator and actor activation controls are unavailable.",
+  );
   await expect(page.locator("#battlefield")).toHaveAttribute("tabindex", "-1");
   expect(frameRequestCount).toBe(2);
   expect(timelineRequestCount).toBe(0);
@@ -615,6 +618,12 @@ test("replay reconnect rejects a valid live frame without crossing the viewer bo
   await page.locator("#reconnect-button").click();
   await expect(page.locator("#connection-status")).toHaveText("Online");
   await expectReplayFrameIndex(page, 0);
+  await expect(page.locator("#replay-frame-position")).toHaveText(
+    installedDom.framePosition ?? "",
+  );
+  await expect(page.locator("#view-select")).toHaveValue(installedDom.view);
+  await expect(page.locator("#view-select")).toBeEnabled();
+  await expect(page.locator("#battlefield")).toHaveAttribute("role", "group");
   await expectReplayChoreographySettled(page);
   const recoveredFrame = await currentReplayFrame(page);
   expect(recoveredFrame.frame_id).toBe(installedFrame.frame_id);
@@ -650,6 +659,7 @@ test("real replay next animates while previous and absolute seek settle", async 
   });
   await expectReplayFrameIndex(page, 0);
   await expectReplayChoreographySettled(page);
+  await expect(page.locator("#replay-frame-slider")).toBeEnabled();
 
   const seekRequestPromise = page.waitForRequest(
     (request) =>
@@ -1046,13 +1056,21 @@ test("Actor POV all-surface scan excludes researcher authority and host secrets"
         element.getAttribute("aria-description") ?? "",
       ])
       .join("\n");
+    const technicalRoot = requiredRoot("#diagnostics-card");
     return {
       normalText: document.body.innerText,
       visibleAttributes,
       descriptorText,
       feed: snapshot(requiredRoot("#event-feed")),
       inspector: snapshot(requiredRoot("#agent-details")),
-      technical: snapshot(requiredRoot("#diagnostics-card")),
+      technical: snapshot(technicalRoot),
+      technicalFacts: [
+        ...technicalRoot.querySelectorAll(".fact[data-technical-fact]"),
+      ].map((node) => ({
+        id: node.getAttribute("data-technical-fact"),
+        label: node.querySelector("span")?.textContent ?? "",
+        value: node.querySelector("strong")?.textContent ?? "",
+      })),
       technicalJson: [...document.querySelectorAll(".technical-json")].map(
         (node) => node.textContent ?? "",
       ),
@@ -1137,7 +1155,20 @@ test("Actor POV all-surface scan excludes researcher authority and host secrets"
   ]) {
     expect(actorKeys.has(researcherOnlyKey), researcherOnlyKey).toBe(false);
   }
-  expect(surfaces.technical.text).toContain("replay_no_shared_obs_technical_frame");
+  expect(surfaces.technicalFacts).toEqual([
+    {
+      id: "frame",
+      label: "Frame",
+      value: String(povFrame.cursor.frame_index),
+    },
+    {
+      id: "simulator_step",
+      label: "Simulator step",
+      value: String(povFrame.simulator_step_count),
+    },
+  ]);
+  expect(completeSurfaceBytes).not.toContain("technical_kind");
+  expect(completeSurfaceBytes).not.toContain("replay_no_shared_obs_technical_frame");
   expect(surfaces.normalText).toContain("Agent POV");
   expect(completeSurfaceBytes).not.toContain("actor_pov_replay_viewer");
   expect(surfaces.technicalJson).toEqual([]);
