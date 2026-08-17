@@ -108,7 +108,10 @@ test("main clears presentation before requests and delegates bounded retry polic
   );
   assert.match(source, /state\.presentation = null;/u);
   assert.match(source, /state\.authority = null;/u);
-  assert.match(source, /battlefieldRenderer\.render\(null, \{ offline: true \}\);/u);
+  assert.match(
+    source,
+    /battlefieldRenderer\.render\(null,\s*\{\s*offline: true,\s*visualFilterState,\s*\}\);/u,
+  );
   assert.match(source, /panels\.render\(null,/u);
   assert.match(source, /tooltipController\.hide\(\);/u);
   assert.match(source, /choreographer\.clear\(reason\);/u);
@@ -718,7 +721,7 @@ test("main carries replay animation intent only beside the installed presentatio
   assert.doesNotMatch(helperSource, /presentation\.animate_incoming/u);
   assert.match(
     source,
-    /choreographer\.presentFrame\(\s*presentationFrame,\s*battlefieldRenderer\.choreographySurface\(\),\s*installedChoreographyControl\(presentationFrame\),\s*\)/u,
+    /choreographer\.presentFrame\(\s*presentationFrame,\s*battlefieldRenderer\.choreographySurface\(\),\s*installedChoreographyControl\(presentationFrame,\s*visualFilterSnapshot\),\s*\)/u,
   );
   assert.equal(
     [

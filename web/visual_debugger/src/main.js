@@ -47,6 +47,10 @@ import {
   disclosurePanelInitiallyOpen,
   renderSemanticInspector,
 } from "./panels.js";
+import {
+  pendingPresentationSurfaceView,
+  resolveInstalledPresentationAuthorityV1,
+} from "./presentation-authority-view.js";
 import { PresentationInstallCoordinator } from "./presentation-install.js";
 import {
   bindReplayTimelineControls,
@@ -56,16 +60,18 @@ import {
   replayTimelineSimulatorStep,
   validateReplayCommandOutcome,
 } from "./replay-controls.js";
-import {
-  pendingPresentationSurfaceView,
-  resolveInstalledPresentationAuthorityV1,
-} from "./presentation-authority-view.js";
 import { BattlefieldRenderer } from "./scene.js";
 import {
   createSemanticDescriptor,
   createTooltipController,
   registerTooltipOwner,
 } from "./tooltip.js";
+import {
+  DEFAULT_VISUAL_FILTER_STATE,
+  isVisualFilterEnabled,
+  reduceVisualFilterState,
+  VISUAL_FILTER_REGISTRY,
+} from "./visual-filters.js";
 
 /**
  * @param {string} id
@@ -127,6 +133,7 @@ const elements = {
   resetButton: requiredElement("reset-button"),
   liveRangesButton: requiredElement("live-ranges-button"),
   notice: requiredElement("notice"),
+  workspace: requiredElement("workspace"),
   scenarioDescription: requiredElement("scenario-description"),
   battlefieldShell: requiredElement("battlefield-shell"),
   battlefield: requiredElement("battlefield"),
@@ -136,6 +143,10 @@ const elements = {
   roster: requiredElement("roster"),
   rosterCount: requiredElement("roster-count"),
   agentDetails: requiredElement("agent-details"),
+  visualFilters: requiredElement("visual-filters"),
+  visualFilterOptions: requiredElement("visual-filter-options"),
+  visualFilterCount: requiredElement("visual-filter-count"),
+  restoreAllVisualFiltersButton: requiredElement("restore-all-visual-filters-button"),
   visualKey: requiredElement("visual-key"),
   selectionCard: requiredElement("selection-card"),
   selectionHeading: requiredElement("selection-heading"),
@@ -172,6 +183,56 @@ const elements = {
     document.querySelectorAll("[data-replay-only]")
   ),
 };
+
+const EXPECTED_VISUAL_FILTER_COUNT = 24;
+
+/**
+ * Build the fixed page-local filter surface from the shared paint registry.
+ * Replacing the empty markup container also prevents browser form restoration
+ * from overriding the all-enabled state on a genuine document load.
+ */
+function installVisualFilterControls() {
+  const registeredIds = VISUAL_FILTER_REGISTRY.map(({ id }) => id);
+  if (
+    registeredIds.length !== EXPECTED_VISUAL_FILTER_COUNT ||
+    new Set(registeredIds).size !== EXPECTED_VISUAL_FILTER_COUNT
+  ) {
+    throw new TypeError(
+      `Visual Filters requires exactly ${EXPECTED_VISUAL_FILTER_COUNT} unique entries.`,
+    );
+  }
+  const fragment = document.createDocumentFragment();
+  for (const { id, label, defaultEnabled } of VISUAL_FILTER_REGISTRY) {
+    const enabled = isVisualFilterEnabled(DEFAULT_VISUAL_FILTER_STATE, id);
+    if (enabled !== defaultEnabled) {
+      throw new TypeError(`Visual filter ${id} disagrees with the default state.`);
+    }
+    const option = document.createElement("label");
+    option.className = "visual-filters__option";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.id = `visual-filter-${id.replaceAll("_", "-")}`;
+    input.value = id;
+    input.dataset.visualFilterId = id;
+    input.setAttribute("autocomplete", "off");
+    input.setAttribute("aria-describedby", "visual-filters-help");
+    input.defaultChecked = enabled;
+    input.checked = enabled;
+    const text = document.createElement("span");
+    text.textContent = label;
+    option.append(input, text);
+    fragment.append(option);
+  }
+  elements.visualFilterOptions.replaceChildren(fragment);
+}
+
+/**
+ * Page-lifetime presentation state. It is replaced atomically, never stored,
+ * and deliberately survives transport, authority, audience, and episode
+ * changes until the document itself reloads.
+ */
+let visualFilterState = DEFAULT_VISUAL_FILTER_STATE;
+installVisualFilterControls();
 
 /**
  * @type {{
@@ -247,6 +308,8 @@ let presentationPreferenceNeedsContentRender = false;
 let pendingPresentationPreferenceRestoreFrame = null;
 /** @type {Element | null} */
 let pendingPrimaryFocusRestoreAnchor = null;
+/** @type {string | null} */
+let workspaceMinimumHeightBeforeAuthorityInstall = null;
 
 /** @type {WeakMap<HTMLDetailsElement, Readonly<{open: boolean}>>} */
 const expectedDisclosureToggles = new WeakMap();
@@ -450,6 +513,16 @@ const CONTROL_HELP = Object.freeze([
     "Explain the non-color visual grammar used on the battlefield.",
   ],
   [
+    "#visual-filters > summary",
+    "Visual Filters",
+    "Show or hide individual battlefield presentation layers without changing scientific authority.",
+  ],
+  [
+    "#restore-all-visual-filters-button",
+    "Restore All",
+    "Turn on all 24 local visual filters. The separate Ranges control is unchanged.",
+  ],
+  [
     ".diagnostics > summary",
     "Technical frame",
     "Inspect authorized wire and diagnostic details.",
@@ -639,13 +712,17 @@ function renderPendingPresentationChrome() {
  * @param {string} reason
  */
 function clearPresentationAuthority(reason) {
+  holdWorkspaceHeightDuringAuthorityInstall();
   savePresentationPreferenceBeforeClear();
   enterPendingPresentationPreferenceState();
   state.authority = null;
   state.presentation = null;
   tooltipController.hide();
   choreographer.clear(reason);
-  battlefieldRenderer.render(null, { offline: true });
+  battlefieldRenderer.render(null, {
+    offline: true,
+    visualFilterState,
+  });
   panels.render(null, {
     busy: true,
     shuttingDown: state.shuttingDown,
@@ -710,6 +787,38 @@ function clearPresentationAuthority(reason) {
   elements.selectionHeading.textContent = AUTHORIZED_INSPECTOR_TITLE;
   elements.battlefield.removeAttribute("aria-activedescendant");
   document.documentElement.dataset.presentationAuthority = "pending";
+}
+
+/**
+ * Keep the two-column workspace from collapsing while an authoritative
+ * command synchronously clears its old scientific content. Without this
+ * temporary layout floor, a focused native roster button near the document
+ * boundary can move the page when the pending state removes HUD rows.
+ */
+function holdWorkspaceHeightDuringAuthorityInstall() {
+  if (workspaceMinimumHeightBeforeAuthorityInstall !== null) {
+    return;
+  }
+  const height = elements.workspace.getBoundingClientRect().height;
+  if (!Number.isFinite(height) || height <= 0) {
+    return;
+  }
+  workspaceMinimumHeightBeforeAuthorityInstall = elements.workspace.style.minHeight;
+  elements.workspace.style.minHeight = `${Math.ceil(height)}px`;
+}
+
+/** Release the temporary pending-authority layout floor. */
+function releaseWorkspaceHeightAfterAuthorityInstall() {
+  if (workspaceMinimumHeightBeforeAuthorityInstall === null) {
+    return;
+  }
+  const previous = workspaceMinimumHeightBeforeAuthorityInstall;
+  workspaceMinimumHeightBeforeAuthorityInstall = null;
+  if (previous.length === 0) {
+    elements.workspace.style.removeProperty("min-height");
+  } else {
+    elements.workspace.style.minHeight = previous;
+  }
 }
 
 /**
@@ -1254,43 +1363,47 @@ function schedulePresentationPreferenceRestore(preference) {
     ) {
       return;
     }
-    for (const { panelId, panel, body } of scientificDisclosures) {
-      const saved = installed.disclosures[panelId];
-      if (panel.open && saved?.open === true) {
-        body.scrollTop = saved.scrollTop;
+    try {
+      for (const { panelId, panel, body } of scientificDisclosures) {
+        const saved = installed.disclosures[panelId];
+        if (panel.open && saved?.open === true) {
+          body.scrollTop = saved.scrollTop;
+        }
       }
+      const focus = installed.primaryFocus;
+      const anchor = pendingPrimaryFocusRestoreAnchor;
+      pendingPrimaryFocusRestoreAnchor = null;
+      if (focus === null || anchor === null) {
+        return;
+      }
+      const active = document.activeElement;
+      const focusWasNotMovedByUser =
+        active === anchor || (!anchor.isConnected && active === document.body);
+      if (
+        !focusWasNotMovedByUser ||
+        authorizedAgentForPresentationKey(state.presentation, focus.presentationKey) ===
+          null
+      ) {
+        return;
+      }
+      const root = focus.surface === "roster" ? elements.roster : elements.battlefield;
+      const selector =
+        focus.surface === "roster"
+          ? `.roster-primary-action[data-presentation-key="${CSS.escape(focus.presentationKey)}"]`
+          : `.agent[data-presentation-key="${CSS.escape(focus.presentationKey)}"]`;
+      const target = root.querySelector(selector);
+      if (
+        !(target instanceof HTMLElement || target instanceof SVGElement) ||
+        target.getAttribute("aria-disabled") === "true" ||
+        target.getAttribute("tabindex") === "-1" ||
+        (target instanceof HTMLButtonElement && target.disabled)
+      ) {
+        return;
+      }
+      target.focus({ preventScroll: true });
+    } finally {
+      releaseWorkspaceHeightAfterAuthorityInstall();
     }
-    const focus = installed.primaryFocus;
-    const anchor = pendingPrimaryFocusRestoreAnchor;
-    pendingPrimaryFocusRestoreAnchor = null;
-    if (focus === null || anchor === null) {
-      return;
-    }
-    const active = document.activeElement;
-    const focusWasNotMovedByUser =
-      active === anchor || (!anchor.isConnected && active === document.body);
-    if (
-      !focusWasNotMovedByUser ||
-      authorizedAgentForPresentationKey(state.presentation, focus.presentationKey) ===
-        null
-    ) {
-      return;
-    }
-    const root = focus.surface === "roster" ? elements.roster : elements.battlefield;
-    const selector =
-      focus.surface === "roster"
-        ? `.roster-primary-action[data-presentation-key="${CSS.escape(focus.presentationKey)}"]`
-        : `.agent[data-presentation-key="${CSS.escape(focus.presentationKey)}"]`;
-    const target = root.querySelector(selector);
-    if (
-      !(target instanceof HTMLElement || target instanceof SVGElement) ||
-      target.getAttribute("aria-disabled") === "true" ||
-      target.getAttribute("tabindex") === "-1" ||
-      (target instanceof HTMLButtonElement && target.disabled)
-    ) {
-      return;
-    }
-    target.focus({ preventScroll: true });
   });
 }
 
@@ -1298,6 +1411,9 @@ function restorePresentationPreferenceAfterRender() {
   const preference = installedActivePresentationPreference(state.presentation);
   if (preference === null) {
     setScientificDisclosureAvailability(false);
+    if (!state.busy) {
+      releaseWorkspaceHeightAfterAuthorityInstall();
+    }
     return;
   }
   setScientificDisclosureAvailability(true);
@@ -1334,17 +1450,65 @@ function isReplayMode() {
   return productIdentity?.product_kind === "replay_viewer";
 }
 
+/** @param {typeof visualFilterState} snapshot */
+function renderVisualFilterControls(snapshot) {
+  const inputs = /** @type {NodeListOf<HTMLInputElement>} */ (
+    elements.visualFilterOptions.querySelectorAll(
+      'input[type="checkbox"][data-visual-filter-id]',
+    )
+  );
+  if (inputs.length !== EXPECTED_VISUAL_FILTER_COUNT) {
+    throw new TypeError(
+      `Visual Filters requires exactly ${EXPECTED_VISUAL_FILTER_COUNT} checkboxes.`,
+    );
+  }
+  let enabledCount = 0;
+  for (const input of inputs) {
+    const enabled = isVisualFilterEnabled(snapshot, input.dataset.visualFilterId);
+    input.checked = enabled;
+    enabledCount += enabled ? 1 : 0;
+  }
+  elements.visualFilterCount.textContent = `${enabledCount} enabled`;
+  elements.restoreAllVisualFiltersButton.disabled =
+    enabledCount === EXPECTED_VISUAL_FILTER_COUNT;
+}
+
+/**
+ * Replace the whole local snapshot before exposing it to either painter. Replay
+ * playback is paused locally so the selected tick cannot advance underneath a
+ * presentation-only filter change.
+ *
+ * @param {unknown} action
+ * @returns {boolean} Whether the local snapshot changed.
+ */
+function applyVisualFilterAction(action) {
+  const next = reduceVisualFilterState(visualFilterState, action);
+  if (next === visualFilterState) {
+    return false;
+  }
+  visualFilterState = next;
+  if (isReplayMode()) {
+    replayPlayback.pause("visual_filter_changed");
+  }
+  render();
+  return true;
+}
+
 /**
  * Carry replay animation intent beside, never inside, the authorized scientific
  * presentation. Only the currently installed branded pair may authorize a
  * transient replay of its incoming transition.
  *
  * @param {unknown} presentation
- * @returns {{animateIncoming: boolean}}
+ * @param {typeof visualFilterState} visualFilters
+ * @returns {Readonly<{
+ *   animateIncoming: boolean,
+ *   visualFilters: typeof visualFilterState,
+ * }>}
  */
-function installedChoreographyControl(presentation) {
+function installedChoreographyControl(presentation, visualFilters) {
   const authority = state.authority;
-  return {
+  return Object.freeze({
     animateIncoming:
       isAuthorizedPresentationFrame(presentation) &&
       isJoinedTransportAndAuthorizedPresentationV1(authority) &&
@@ -1352,7 +1516,8 @@ function installedChoreographyControl(presentation) {
       authority.transport === state.frame &&
       authority.transport.viewer_mode === "replay" &&
       authority.transport.animate_incoming === true,
-  };
+    visualFilters,
+  });
 }
 
 function installedPresentationAuthority() {
@@ -2719,6 +2884,8 @@ function render() {
   const installed = installedPresentationAuthority();
   const presentationFrame = installed?.presentation ?? null;
   const transportFrame = installed?.transport ?? null;
+  const visualFilterSnapshot = visualFilterState;
+  renderVisualFilterControls(visualFilterSnapshot);
   renderConnection();
   renderSessionToolbar(installed);
   battlefieldRenderer.render(presentationFrame, {
@@ -2726,6 +2893,7 @@ function render() {
     showRanges: installedPresentationRangesVisible(presentationFrame),
     localInspectedPresentationKey:
       installedLocalInspectedPresentationKey(presentationFrame),
+    visualFilterState: visualFilterSnapshot,
   });
   applyBattlefieldBoundaryCopy();
   installAuthorizedAgentActivation();
@@ -2734,7 +2902,7 @@ function render() {
     choreographer.presentFrame(
       presentationFrame,
       battlefieldRenderer.choreographySurface(),
-      installedChoreographyControl(presentationFrame),
+      installedChoreographyControl(presentationFrame, visualFilterSnapshot),
     );
   } catch (error) {
     choreographer.clear("presentation_error");
@@ -2779,11 +2947,12 @@ function syncCompactActiveCombatPriority(presentation) {
   if (!changed || !presentation.active || !state.presentation) {
     return;
   }
+  const visualFilterSnapshot = visualFilterState;
   try {
     choreographer.reproject(
       state.presentation,
       battlefieldRenderer.choreographySurface(),
-      installedChoreographyControl(state.presentation),
+      installedChoreographyControl(state.presentation, visualFilterSnapshot),
     );
   } catch (error) {
     setNotice(
@@ -2813,11 +2982,13 @@ function scheduleBattlefieldResize() {
     lastBattlefieldSizeKey = sizeKey;
     capturePresentationPreferenceBeforeRender();
     const presentationFrame = state.presentation;
+    const visualFilterSnapshot = visualFilterState;
     battlefieldRenderer.render(presentationFrame, {
       offline: state.offline,
       showRanges: installedPresentationRangesVisible(presentationFrame),
       localInspectedPresentationKey:
         installedLocalInspectedPresentationKey(presentationFrame),
+      visualFilterState: visualFilterSnapshot,
     });
     applyBattlefieldBoundaryCopy();
     installAuthorizedAgentActivation();
@@ -2826,7 +2997,7 @@ function scheduleBattlefieldResize() {
       choreographer.reproject(
         presentationFrame,
         battlefieldRenderer.choreographySurface(),
-        installedChoreographyControl(presentationFrame),
+        installedChoreographyControl(presentationFrame, visualFilterSnapshot),
       );
     } catch (error) {
       choreographer.clear("resize_projection_error");
@@ -3627,6 +3798,29 @@ elements.helpButton.addEventListener("click", () => {
 
 bindReplayTimelineControls(replayTimelineElements, replayPlayback);
 
+/** @param {Event} event */
+const handleVisualFilterChange = (event) => {
+  const input = event.target;
+  if (
+    !(input instanceof HTMLInputElement) ||
+    input.type !== "checkbox" ||
+    !input.dataset.visualFilterId
+  ) {
+    return;
+  }
+  applyVisualFilterAction({
+    type: "set",
+    filterId: input.dataset.visualFilterId,
+    enabled: input.checked,
+  });
+};
+
+elements.visualFilterOptions.addEventListener("change", handleVisualFilterChange);
+
+elements.restoreAllVisualFiltersButton.addEventListener("click", () => {
+  applyVisualFilterAction({ type: "restore_all" });
+});
+
 elements.replayRangesButton.addEventListener("click", () => {
   if (!isReplayMode() || elements.replayRangesButton.disabled) {
     return;
@@ -3783,6 +3977,22 @@ for (const { panelId, panel, body } of scientificDisclosures) {
     }
   });
 }
+
+elements.visualFilters.addEventListener("toggle", () => {
+  if (elements.visualFilters.open) {
+    return;
+  }
+  const active = document.activeElement;
+  const summary = elements.visualFilters.querySelector(":scope > summary");
+  if (
+    active instanceof Element &&
+    active !== summary &&
+    elements.visualFilters.contains(active) &&
+    summary instanceof HTMLElement
+  ) {
+    summary.focus({ preventScroll: true });
+  }
+});
 
 elements.visualKey.addEventListener("toggle", () => {
   if (elements.visualKey.open) {

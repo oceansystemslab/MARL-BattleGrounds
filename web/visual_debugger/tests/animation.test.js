@@ -91,6 +91,7 @@ class FakePainter {
    * @param {{
    *   settled: boolean,
    *   persistentOnly: boolean,
+   *   retainTransientOnSettle?: boolean,
    *   motionMode: "normal" | "reduced" | "off",
    * }} options
    */
@@ -173,13 +174,20 @@ class FakeStorage {
  * @param {string} epoch
  * @param {string} [authorization]
  * @param {string} [fingerprint]
+ * @param {string} [paintKey]
  * @returns {Record<string, any>}
  */
-function plan(epoch, authorization = "researcher", fingerprint = `events-${epoch}`) {
+function plan(
+  epoch,
+  authorization = "researcher",
+  fingerprint = `events-${epoch}`,
+  paintKey = "visual-filters-v1:all-on",
+) {
   return {
     epochKey: epoch,
     authorizationKey: authorization,
     fingerprint,
+    paintKey,
     phases: {
       submissionRelease: 450,
       reducedTotal: 220,
@@ -281,6 +289,30 @@ test("same transition renders once and resize reprojects without replay", async 
   assert.equal(controller.snapshot().submissionBlocked, false);
 });
 
+test("presentation controls forward the same visual-filter state to planning", () => {
+  const painter = new FakePainter();
+  const visualFilters = Object.freeze({ synthetic_filter: false });
+  /** @type {Array<[string | undefined, Record<string, boolean> | undefined]>} */
+  const received = [];
+  const controller = new CombatChoreographer({
+    painter,
+    animationFactory: new FakeAnimationFactory(),
+    planBuilder(frame, surface, filters) {
+      received.push([surface?.viewportKey, filters]);
+      return /** @type {any} */ (frame).plan;
+    },
+  });
+  const current = plan("epoch-filter-forwarding");
+
+  controller.presentFrame({ plan: current }, surfaceA, { visualFilters });
+  controller.reproject({ plan: current }, surfaceB, { visualFilters });
+
+  assert.deepEqual(received, [
+    [surfaceA.viewportKey, visualFilters],
+    [surfaceB.viewportKey, visualFilters],
+  ]);
+});
+
 test("reprojection clears before rebuilding changed event disclosure", () => {
   const { controller, painter } = harness();
   controller.presentFrame(
@@ -315,6 +347,104 @@ test("authorization change clears before settled safe rebuild without replay", (
   assert.equal(animationFactory.created.length, createdCount);
   assert.equal(controller.snapshot().authorizationKey, "pov-0");
   assert.equal(controller.snapshot().submissionBlocked, false);
+});
+
+test("live paint-only changes settle locally without replay or ledger mutation", () => {
+  const { animationFactory, controller, ledger, painter } = harness();
+  const originalRecord = ledger.record.bind(ledger);
+  let recordCount = 0;
+  ledger.record = (epochKey, fingerprint) => {
+    recordCount += 1;
+    originalRecord(epochKey, fingerprint);
+  };
+  const allOn = plan(
+    "epoch-paint-live",
+    "researcher",
+    "scientific-events",
+    "paint-all-on",
+  );
+  const filtered = plan(
+    "epoch-paint-live",
+    "researcher",
+    "scientific-events",
+    "paint-filtered",
+  );
+  controller.presentFrame({ plan: allOn }, surfaceA);
+  const createdCount = animationFactory.created.length;
+  const recordedCount = recordCount;
+
+  for (const nextPlan of [filtered, allOn]) {
+    const callCount = painter.calls.length;
+    controller.presentFrame({ plan: nextPlan }, surfaceA);
+    assert.deepEqual(
+      painter.calls.slice(callCount).map(([kind]) => kind),
+      ["clear", "install", "settle"],
+    );
+    const install = painter.calls.at(-2);
+    assert.deepEqual(install?.[3], {
+      motionMode: "normal",
+      settled: true,
+      persistentOnly: true,
+    });
+    assert.equal(animationFactory.created.length, createdCount);
+    assert.equal(recordCount, recordedCount);
+    assert.equal(ledger.fingerprintFor(allOn.epochKey), allOn.fingerprint);
+    assert.equal(controller.snapshot().paintKey, nextPlan.paintKey);
+    assert.equal(controller.snapshot().animationCount, 0);
+    assert.equal(controller.snapshot().submissionBlocked, false);
+  }
+});
+
+test("replay paint-only changes pause and reinstall the current static summary", () => {
+  const { animationFactory, controller, ledger, painter } = harness();
+  const originalRecord = ledger.record.bind(ledger);
+  let recordCount = 0;
+  ledger.record = (epochKey, fingerprint) => {
+    recordCount += 1;
+    originalRecord(epochKey, fingerprint);
+  };
+  const allOn = plan(
+    "epoch-paint-replay",
+    "researcher",
+    "scientific-events",
+    "paint-all-on",
+  );
+  const filtered = plan(
+    "epoch-paint-replay",
+    "researcher",
+    "scientific-events",
+    "paint-filtered",
+  );
+  controller.presentFrame({ viewer_mode: "replay", plan: allOn }, surfaceA, {
+    animateIncoming: true,
+  });
+  const createdCount = animationFactory.created.length;
+  const recordedCount = recordCount;
+
+  for (const nextPlan of [filtered, allOn]) {
+    const callCount = painter.calls.length;
+    controller.presentFrame({ viewer_mode: "replay", plan: nextPlan }, surfaceA, {
+      animateIncoming: true,
+    });
+    assert.deepEqual(
+      painter.calls.slice(callCount).map(([kind]) => kind),
+      ["clear", "install", "settle"],
+    );
+    const install = painter.calls.at(-2);
+    assert.deepEqual(install?.[3], {
+      motionMode: "normal",
+      settled: true,
+      persistentOnly: false,
+      retainTransientOnSettle: true,
+    });
+    assert.equal(animationFactory.created.length, createdCount);
+    assert.equal(recordCount, recordedCount);
+    assert.equal(ledger.fingerprintFor(allOn.epochKey), allOn.fingerprint);
+    assert.equal(controller.snapshot().paintKey, nextPlan.paintKey);
+    assert.equal(controller.snapshot().paused, true);
+    assert.equal(controller.snapshot().animationCount, 0);
+    assert.equal(controller.snapshot().submissionBlocked, false);
+  }
 });
 
 test("new transitions replace once and absent batches clear", () => {
@@ -589,6 +719,7 @@ test("switching an active explanation Off reinstalls the authorized batch until 
     epochKey: "epoch-mid-off",
     authorizationKey: "researcher",
     fingerprint: "authorized-events",
+    paintKey: "visual-filters-v1:all-on",
     logicalTime: 0,
     motionMode: "off",
     paused: false,

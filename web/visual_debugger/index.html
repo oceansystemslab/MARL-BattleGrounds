@@ -207,7 +207,7 @@
 
     <div id="notice" class="notice" data-level="info" role="status" hidden></div>
 
-    <main class="workspace">
+    <main id="workspace" class="workspace">
       <section class="battlefield-panel" aria-labelledby="battlefield-heading">
         <div class="panel-heading">
           <div>
@@ -429,6 +429,32 @@
             <ol id="event-feed" class="event-feed">
               <li class="empty-copy">No transition events.</li>
             </ol>
+          </div>
+        </details>
+
+        <details id="visual-filters" class="hud-section visual-filters">
+          <summary class="section-heading">
+            <strong class="section-title">Visual Filters</strong>
+            <span id="visual-filter-count" class="count-badge">24 enabled</span>
+          </summary>
+          <div
+            id="visual-filters-body"
+            class="disclosure-body"
+            data-disclosure-body="visual-filters"
+          >
+            <p id="visual-filters-help" class="section-note">
+              These browser-local filters change battlefield presentation only.
+              Ranges and scientific data remain unchanged.
+            </p>
+            <fieldset class="visual-filters__fieldset">
+              <legend class="sr-only">Battlefield visual filters</legend>
+              <div id="visual-filter-options" class="visual-filters__options"></div>
+            </fieldset>
+            <div class="visual-filters__actions">
+              <button id="restore-all-visual-filters-button" type="button" disabled>
+                Restore All
+              </button>
+            </div>
           </div>
         </details>
 

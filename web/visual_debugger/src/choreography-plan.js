@@ -6,6 +6,11 @@ import {
 } from "./authorized-presentation-adapter.js";
 import { createRouteGeometry } from "./routes.js";
 import {
+  DEFAULT_VISUAL_FILTER_STATE,
+  isVisualPaintPartEnabled,
+  visualFilterPaintKey,
+} from "./visual-filters.js";
+import {
   activationImpactSemantic,
   classTokenFromId,
   resolveVisualToken,
@@ -84,10 +89,13 @@ const OUTCOME_CUE_CLEARANCE = 2;
 const OUTCOME_CUE_GRID_COLUMNS = 48;
 const OUTCOME_CUE_GRID_ROWS = 36;
 const OUTCOME_CUE_TARGET_STEP = 8;
-const NET_CUE_DIMENSIONS = Object.freeze({ width: 88, height: 36 });
-const UNCHANGED_NET_CUE_DIMENSIONS = Object.freeze({ width: 102, height: 36 });
-const LIFECYCLE_CUE_DIMENSIONS = Object.freeze({ width: 52, height: 52 });
-const REGENERATION_CUE_DIMENSIONS = Object.freeze({ width: 64, height: 44 });
+const NET_EFFECT_CUE_RECTANGLE = centeredCueRectangle(48, 36);
+const NET_TEXT_CUE_RECTANGLE = centeredCueRectangle(88, 36);
+const UNCHANGED_NET_TEXT_CUE_RECTANGLE = centeredCueRectangle(102, 36);
+const LIFECYCLE_BREAK_CUE_RECTANGLE = centeredCueRectangle(52, 52);
+const LIFECYCLE_REAPPLICATION_CUE_RECTANGLE = centeredCueRectangle(42, 42);
+const REGENERATION_EFFECT_CUE_RECTANGLE = centeredCueRectangle(48, 44);
+const REGENERATION_TEXT_CUE_RECTANGLE = centeredCueRectangle(64, 18);
 
 /**
  * @typedef {{
@@ -237,6 +245,12 @@ function project(world, surface) {
  * @param {"net_health" | "status_lifecycle" | "regeneration"} eventKind
  */
 function layoutOutcomeCues(events, surface, eventKind) {
+  const outcomes = events
+    .filter((event) => event.spatial && event.recipient && event.kind === eventKind)
+    .sort(outcomePlacementOrder);
+  if (outcomes.length === 0) {
+    return events;
+  }
   const viewport = normalizedRectangle(surface?.viewportBounds);
   if (!viewport) {
     return events;
@@ -248,18 +262,8 @@ function layoutOutcomeCues(events, surface, eventKind) {
   /** @type {Map<Record<string, any>, Record<string, any>>} */
   const placed = new Map();
 
-  const outcomes = events
-    .filter((event) => event.spatial && event.recipient && event.kind === eventKind)
-    .sort(outcomePlacementOrder);
   for (const event of outcomes) {
-    const dimensions =
-      event.kind === "net_health"
-        ? event.outcome === "unchanged"
-          ? UNCHANGED_NET_CUE_DIMENSIONS
-          : NET_CUE_DIMENSIONS
-        : event.kind === "regeneration"
-          ? REGENERATION_CUE_DIMENSIONS
-          : LIFECYCLE_CUE_DIMENSIONS;
+    const dimensions = paintedOutcomeCueDimensions(event);
     const selected =
       selectCueCandidate(
         localCueCandidates(
@@ -302,6 +306,73 @@ function layoutOutcomeCues(events, surface, eventKind) {
     );
   }
   return events.map((event) => placed.get(event) ?? event);
+}
+
+/**
+ * Size collision reservations from the paint parts that survived the local
+ * filter. A disabled sibling may not enlarge or displace the remaining cue.
+ * Plans predating visual filters retain the CP5 all-on dimensions.
+ *
+ * @param {Record<string, any>} event
+ */
+function paintedOutcomeCueDimensions(event) {
+  const parts = event.paintParts;
+  /** @param {string} part */
+  const enabled = (part) => !parts || parts[part] === true;
+  /** @type {Readonly<Record<string, number>>[]} */
+  const rectangles = [];
+  if (event.kind === "net_health") {
+    if (enabled("effect")) {
+      rectangles.push(NET_EFFECT_CUE_RECTANGLE);
+    }
+    if (enabled("battleText") || enabled("recipientText")) {
+      rectangles.push(
+        event.outcome === "unchanged"
+          ? UNCHANGED_NET_TEXT_CUE_RECTANGLE
+          : NET_TEXT_CUE_RECTANGLE,
+      );
+    }
+  } else if (event.kind === "regeneration") {
+    if (enabled("effect")) {
+      rectangles.push(REGENERATION_EFFECT_CUE_RECTANGLE);
+    }
+    if (enabled("battleText")) {
+      rectangles.push(REGENERATION_TEXT_CUE_RECTANGLE);
+    }
+  } else {
+    if (enabled("effect") || enabled("break")) {
+      rectangles.push(LIFECYCLE_BREAK_CUE_RECTANGLE);
+    }
+    if (enabled("reapplication")) {
+      rectangles.push(LIFECYCLE_REAPPLICATION_CUE_RECTANGLE);
+    }
+  }
+  return unionCueRectangles(rectangles);
+}
+
+/** @param {number} width @param {number} height */
+function centeredCueRectangle(width, height) {
+  return Object.freeze({
+    left: -width / 2,
+    top: -height / 2,
+    right: width / 2,
+    bottom: height / 2,
+  });
+}
+
+/** @param {ReadonlyArray<Readonly<Record<string, number>>>} rectangles */
+function unionCueRectangles(rectangles) {
+  if (rectangles.length === 0) {
+    return Object.freeze({ width: 0, height: 0 });
+  }
+  return Object.freeze({
+    width:
+      Math.max(...rectangles.map(({ right }) => right)) -
+      Math.min(...rectangles.map(({ left }) => left)),
+    height:
+      Math.max(...rectangles.map(({ bottom }) => bottom)) -
+      Math.min(...rectangles.map(({ top }) => top)),
+  });
 }
 
 /**
@@ -783,6 +854,176 @@ function choreographyFamily(event) {
 }
 
 /**
+ * Resolve the independently owned visual parts of one authorized event. Rows
+ * without a transient paint registration remain untouched: they still carry
+ * feed/atomic identity, but never enter the paint registry by accident.
+ *
+ * @param {Record<string, any>} event
+ * @param {Record<string, boolean>} visualFilters
+ * @returns {Readonly<Record<string, boolean>> | null}
+ */
+function authorizedPaintParts(event, visualFilters) {
+  /** @param {Record<string, string>} tag */
+  const enabled = (tag) => isVisualPaintPartEnabled(visualFilters, tag);
+  if (event.kind === "rejected_action") {
+    return Object.freeze({
+      effect: enabled({
+        surface: "transient",
+        kind: "rejected_action_feedback",
+      }),
+    });
+  }
+  if (event.kind === "activation") {
+    const ability = enabled({
+      surface: "transient",
+      kind: "activation",
+      component: event.component,
+      part: "ability",
+    });
+    const semantic =
+      event.impactSemantic === "damage" || event.impactSemantic === "healing"
+        ? enabled({
+            surface: "transient",
+            kind: "activation",
+            semantic: event.impactSemantic,
+            part: "semantic",
+          })
+        : false;
+    return Object.freeze({ ability, semantic });
+  }
+  if (event.kind === "net_health") {
+    const effect =
+      event.outcome === "damage" || event.outcome === "healing"
+        ? enabled({
+            surface: "transient",
+            kind: "net_health",
+            outcome: event.outcome,
+            part: "effect",
+          })
+        : false;
+    return Object.freeze({
+      effect,
+      battleText: enabled({
+        surface: "transient",
+        kind: "net_health",
+        outcome: event.outcome,
+        part: "battle_text",
+      }),
+      recipientText: enabled({
+        surface: "transient",
+        kind: "net_health",
+        outcome: event.outcome,
+        part: "recipient_text",
+      }),
+    });
+  }
+  if (event.kind === "regeneration") {
+    return Object.freeze({
+      effect: enabled({
+        surface: "transient",
+        kind: "regeneration",
+        part: "effect",
+      }),
+      battleText: enabled({
+        surface: "transient",
+        kind: "regeneration",
+        part: "battle_text",
+      }),
+    });
+  }
+  if (event.kind === "charge_displacement") {
+    return Object.freeze({
+      effect: enabled({ surface: "transient", kind: "charge_movement" }),
+    });
+  }
+  if (event.kind === "status_lifecycle") {
+    if (event.lifecycle === "trap_broken_and_reapplied") {
+      return Object.freeze({
+        break: enabled({
+          surface: "transient",
+          kind: "status_lifecycle",
+          lifecycle: event.lifecycle,
+          part: "break",
+        }),
+        reapplication: enabled({
+          surface: "transient",
+          kind: "status_lifecycle",
+          lifecycle: event.lifecycle,
+          part: "reapplication",
+        }),
+      });
+    }
+    return Object.freeze({
+      effect: enabled({
+        surface: "transient",
+        kind: "status_lifecycle",
+        lifecycle: event.lifecycle,
+        part: "effect",
+      }),
+    });
+  }
+  if (event.kind !== "semantic_pulse") {
+    return null;
+  }
+  /** @type {Record<string, string> | null} */
+  const tag =
+    event.cueSemantic === "cooldown_started"
+      ? { surface: "transient", kind: "cooldown", semantic: "started" }
+      : event.cueSemantic === "cooldown_ready"
+        ? { surface: "transient", kind: "cooldown", semantic: "ready" }
+        : event.cueSemantic === "agent_died"
+          ? { surface: "transient", kind: "death_effect" }
+          : event.cueSemantic === "respawn_wave_occurred"
+            ? { surface: "transient", kind: "respawn_wave" }
+            : event.cueSemantic === "agent_respawned"
+              ? { surface: "transient", kind: "resurrection_effect" }
+              : event.cueSemantic === "spawn_shield_expired"
+                ? { surface: "transient", kind: "spawn_shield_expiry" }
+                : null;
+  return tag === null ? null : Object.freeze({ effect: enabled(tag) });
+}
+
+/**
+ * Classify one registered transient before any presentation geometry exists.
+ *
+ * @param {Record<string, any>} event
+ * @param {Record<string, boolean>} visualFilters
+ */
+function authorizedPaintDecision(event, visualFilters) {
+  const paintParts = authorizedPaintParts(event, visualFilters);
+  return paintParts === null
+    ? null
+    : Object.freeze({
+        paintParts,
+        enabled: Object.values(paintParts).some((part) => part === true),
+      });
+}
+
+/**
+ * Apply browser-local paint policy without deleting or rewriting any authorized
+ * row identity. A fully disabled event remains inspectable in plan order but is
+ * made non-spatial before phase allocation and collision layout.
+ *
+ * @param {ReadonlyArray<Record<string, any>>} events
+ * @param {Record<string, boolean>} visualFilters
+ */
+function applyAuthorizedVisualFilters(events, visualFilters) {
+  return events.map((event) => {
+    const paintParts = event.paintParts ?? authorizedPaintParts(event, visualFilters);
+    if (paintParts === null) {
+      return event;
+    }
+    const enabled = Object.values(paintParts).some((part) => part === true);
+    return Object.freeze({
+      ...event,
+      paintParts,
+      presentationSuppressed: !enabled,
+      spatial: Boolean(event.spatial && enabled),
+    });
+  });
+}
+
+/**
  * Allocate only families present in this authorized transition. M5 ability and
  * outcome anchors remain exact, while every readable outcome gets its own
  * complete dwell and later M6 lifecycle beats extend the clock in canonical
@@ -868,21 +1109,23 @@ function scheduleChoreography(events) {
   return Object.freeze({ phases, events: Object.freeze(scheduledEvents) });
 }
 
+/** @param {unknown} rawAnchor */
+function authorizedWorldPoint(rawAnchor) {
+  const anchor = record(rawAnchor);
+  return anchor ? point(anchor.position) : null;
+}
+
 /** @param {unknown} rawAnchor @param {ProjectionSurface | null} surface */
 function authorizedAnchor(rawAnchor, surface) {
-  const anchor = record(rawAnchor);
-  return anchor ? project(point(anchor.position), surface) : null;
+  return project(authorizedWorldPoint(rawAnchor), surface);
 }
 
 /**
- * Consume only the certified successor-phase neutral team anchor. It carries
- * no world position: left/right placement is presentation geometry derived
- * from its exact two-team identity and the current authorized viewport.
+ * Validate the serialized team anchor without constructing viewport geometry.
  *
  * @param {unknown} rawAnchor
- * @param {ProjectionSurface | null} surface
  */
-function authorizedTeamWaveAnchor(rawAnchor, surface) {
+function authorizedTeamWaveIdentity(rawAnchor) {
   const teamAnchor = record(rawAnchor);
   const teamIndex = integer(teamAnchor?.team_index);
   const teamId = integer(teamAnchor?.team_id);
@@ -898,7 +1141,6 @@ function authorizedTeamWaveAnchor(rawAnchor, surface) {
     teamId,
     teamSide: teamIndex === 0 ? "left" : "right",
     label: `RESPAWNING · TEAM ${teamIndex === 0 ? "A" : "B"}`,
-    anchor: teamClockPoint(teamId, surface),
   });
 }
 
@@ -1017,11 +1259,55 @@ function trajectoryForAuthorizedAnchor(trajectories, rawAnchor, phase) {
  * @typedef {{
  *   atoms: AuthorizedStatusAtom[],
  *   firstIndex: number,
- *   recipient: Readonly<{x: number, y: number}>,
+ *   recipientAnchor: Readonly<Record<string, any>>,
  *   recipientPresentationKey: string,
  *   recipientPublicAgentId: string,
  * }} AuthorizedStatusGroup
  */
+
+/**
+ * Resolve composition semantics from already validated status atomics without
+ * constructing any screen-space geometry.
+ *
+ * @param {AuthorizedStatusGroup} group
+ */
+function authorizedStatusSelection(group) {
+  /** @param {string} kind */
+  const first = (kind) => group.atoms.find(({ row }) => row.kind === kind) ?? null;
+  const cleared = first("status_cleared_by_new_death");
+  const refreshed = first("status_refreshed_or_extended");
+  const broken = first("status_broken_by_damage");
+  const aged = first("status_aged_to_zero");
+  const applications = group.atoms.filter(({ row }) => row.kind === "status_applied");
+  const applied = applications.at(0) ?? null;
+  const lifecycleId = cleared
+    ? "cleared_by_death"
+    : refreshed
+      ? "refreshed"
+      : broken && applied
+        ? "trap_broken_and_reapplied"
+        : aged && applied
+          ? "reapplied"
+          : broken
+            ? "trap_broken"
+            : aged
+              ? "expired"
+              : "applied";
+  const primary =
+    cleared ??
+    refreshed ??
+    (applied && (broken || aged) ? applied : null) ??
+    broken ??
+    aged ??
+    applied;
+  return primary === null
+    ? null
+    : Object.freeze({
+        applications: Object.freeze(applications),
+        lifecycleId,
+        primary,
+      });
+}
 
 /**
  * Compose exactly one display row per authorized status group while retaining
@@ -1039,6 +1325,7 @@ function trajectoryForAuthorizedAnchor(trajectories, rawAnchor, phase) {
  * @param {Map<string, Record<string, any>>} sceneByKey
  * @param {Map<string, Record<string, any>> | null} trajectories
  * @param {ProjectionSurface | null} surface
+ * @param {Record<string, boolean>} visualFilters
  * @returns {Map<string, Readonly<Record<string, any>>> | null}
  */
 function authorizedStatusCompositions(
@@ -1047,6 +1334,7 @@ function authorizedStatusCompositions(
   sceneByKey,
   trajectories,
   surface,
+  visualFilters,
 ) {
   /** @type {Map<string, AuthorizedStatusGroup>} */
   const groups = new Map();
@@ -1083,13 +1371,13 @@ function authorizedStatusCompositions(
       "successor",
     );
     const recipientAgent = sceneByKey.get(recipientKey);
-    const recipient = authorizedAnchor(recipientTrajectory?.successor, surface);
+    const recipientWorld = authorizedWorldPoint(recipientTrajectory?.successor);
     if (
       recipientTrajectory === null ||
       !recipientAgent ||
       identifier(recipientAgent.public_agent_id) !==
         identifier(recipientTrajectory.agent_public_agent_id) ||
-      recipient === null
+      recipientWorld === null
     ) {
       return null;
     }
@@ -1125,15 +1413,17 @@ function authorizedStatusCompositions(
     const group = groups.get(key) ?? {
       atoms: [],
       firstIndex: index,
-      recipient,
+      recipientAnchor: recipientTrajectory.successor,
       recipientPresentationKey: recipientKey,
       recipientPublicAgentId: recipientTrajectory.agent_public_agent_id,
     };
     if (
       group.recipientPresentationKey !== recipientKey ||
       group.recipientPublicAgentId !== recipientTrajectory.agent_public_agent_id ||
-      group.recipient.x !== recipient.x ||
-      group.recipient.y !== recipient.y
+      !sameAuthorizedPoint(
+        group.recipientAnchor.position,
+        recipientTrajectory.successor.position,
+      )
     ) {
       return null;
     }
@@ -1150,11 +1440,41 @@ function authorizedStatusCompositions(
     return new Map();
   }
 
+  /** @type {Map<string, Readonly<Record<string, any>>>} */
+  const presentationByKey = new Map();
+  for (const [key, group] of groups) {
+    const selection = authorizedStatusSelection(group);
+    if (selection === null) {
+      return null;
+    }
+    const paintParts = authorizedPaintParts(
+      {
+        kind: "status_lifecycle",
+        lifecycle: selection.lifecycleId,
+      },
+      visualFilters,
+    );
+    if (paintParts === null) {
+      return null;
+    }
+    presentationByKey.set(
+      key,
+      Object.freeze({
+        ...selection,
+        paintParts,
+        enabled: Object.values(paintParts).some((part) => part === true),
+      }),
+    );
+  }
+
   /** @type {Map<string, {lane: number, laneCount: number}>} */
   const lanes = new Map();
   /** @type {Map<string, Array<[string, any]>>} */
   const groupsByRecipient = new Map();
   for (const [key, group] of groups) {
+    if (presentationByKey.get(key)?.enabled !== true) {
+      continue;
+    }
     const recipientGroups = groupsByRecipient.get(group.recipientPresentationKey) ?? [];
     recipientGroups.push([key, group]);
     groupsByRecipient.set(group.recipientPresentationKey, recipientGroups);
@@ -1169,37 +1489,19 @@ function authorizedStatusCompositions(
   /** @type {Map<string, Readonly<Record<string, any>>>} */
   const compositions = new Map();
   for (const [key, group] of groups) {
-    /** @param {string} kind */
-    const first = (kind) => group.atoms.find(({ row }) => row.kind === kind) ?? null;
-    const cleared = first("status_cleared_by_new_death");
-    const refreshed = first("status_refreshed_or_extended");
-    const broken = first("status_broken_by_damage");
-    const aged = first("status_aged_to_zero");
-    const applications = group.atoms.filter(({ row }) => row.kind === "status_applied");
-    const applied = applications.at(0) ?? null;
-    const lifecycleId = cleared
-      ? "cleared_by_death"
-      : refreshed
-        ? "refreshed"
-        : broken && applied
-          ? "trap_broken_and_reapplied"
-          : aged && applied
-            ? "reapplied"
-            : broken
-              ? "trap_broken"
-              : aged
-                ? "expired"
-                : "applied";
-    const primary =
-      cleared ??
-      refreshed ??
-      (applied && (broken || aged) ? applied : null) ??
-      broken ??
-      aged ??
-      applied;
-    if (primary === null) {
+    const presentation = presentationByKey.get(key);
+    if (!presentation) {
       return null;
     }
+    const applications = /** @type {ReadonlyArray<AuthorizedStatusAtom>} */ (
+      presentation.applications
+    );
+    const lifecycleId = /** @type {string} */ (presentation.lifecycleId);
+    const primary = /** @type {AuthorizedStatusAtom} */ (presentation.primary);
+    const paintParts = /** @type {Readonly<Record<string, boolean>>} */ (
+      presentation.paintParts
+    );
+    const enabled = presentation.enabled === true;
     const atomicEventIds = Object.freeze(group.atoms.map(({ row }) => row.id));
     const applicationEventIds = Object.freeze(applications.map(({ row }) => row.id));
     const applicationSources = Object.freeze(
@@ -1208,10 +1510,14 @@ function authorizedStatusCompositions(
     if (applicationSources.some((source) => source === null)) {
       return null;
     }
-    const lane = lanes.get(key) ?? { lane: 0, laneCount: 1 };
+    const lane = lanes.get(key) ?? { lane: 0, laneCount: 0 };
     const status = resolveVisualToken("status", primary.event.status_id, primary.event);
     const lifecycle = resolveVisualToken("lifecycle", lifecycleId, primary.event);
     const directApplicationSource = primary.applicationSource;
+    const recipient = enabled ? authorizedAnchor(group.recipientAnchor, surface) : null;
+    if (enabled && recipient === null) {
+      return null;
+    }
     const composition = Object.freeze({
       eventId: primary.row.id,
       eventType: primary.row.kind,
@@ -1224,19 +1530,20 @@ function authorizedStatusCompositions(
       lifecycleToken: lifecycle,
       recipientPresentationKey: group.recipientPresentationKey,
       recipientPublicAgentId: group.recipientPublicAgentId,
-      recipient: group.recipient,
+      recipient,
       sourcePresentationKey: directApplicationSource?.sourcePresentationKey ?? null,
       sourcePublicAgentId: directApplicationSource?.sourcePublicAgentId ?? null,
       applicationSources,
       durationBefore: null,
       durationAfter: null,
-      lane: lane.lane,
-      laneCount: lane.laneCount,
+      lane: enabled ? lane.lane : null,
+      laneCount: enabled ? lane.laneCount : 0,
       statusLayoutOrder: group.firstIndex,
       atomicEventIds,
       applicationEventIds,
-      presentationSuppressed: false,
-      spatial: true,
+      paintParts,
+      presentationSuppressed: !enabled,
+      spatial: enabled,
       phaseStart: CHOREOGRAPHY_PHASES.v2StatusStart,
       phaseEnd: CHOREOGRAPHY_PHASES.v2ShieldStart,
     });
@@ -1254,9 +1561,14 @@ function authorizedStatusCompositions(
  *
  * @param {Record<string, any>} presentation
  * @param {ProjectionSurface | null} surface
+ * @param {Record<string, boolean>} visualFilters
  * @returns {Readonly<ChoreographyPlan> | null}
  */
-function buildAuthorizedPresentationChoreographyPlan(presentation, surface) {
+function buildAuthorizedPresentationChoreographyPlan(
+  presentation,
+  surface,
+  visualFilters,
+) {
   const latest = record(presentation.latest_events);
   const scene = authorizedPresentationSceneView(presentation);
   if (!latest || !scene) {
@@ -1303,6 +1615,7 @@ function buildAuthorizedPresentationChoreographyPlan(presentation, surface) {
     sceneByKey,
     trajectories,
     surface,
+    visualFilters,
   );
   if (statusCompositions === null) {
     return null;
@@ -1333,16 +1646,38 @@ function buildAuthorizedPresentationChoreographyPlan(presentation, surface) {
     if (row.vocabulary === "recipient_cue") {
       const recipientKey = presentation.recipient_presentation_key;
       const recipientAgent = sceneByKey.get(recipientKey);
-      const recipient = project(point(recipientAgent?.position), surface);
+      const recipientWorld = point(recipientAgent?.position);
+      const healthBefore = finiteNumber(event.start_health);
+      const healthAfter = finiteNumber(event.successor_health);
       if (
         row.kind === "own_health_changed" &&
-        recipient &&
-        finiteNumber(event.start_health) !== null &&
-        finiteNumber(event.successor_health) !== null
+        recipientWorld &&
+        healthBefore !== null &&
+        healthAfter !== null
       ) {
-        const healthBefore = Number(event.start_health);
-        const healthAfter = Number(event.successor_health);
         const delta = healthAfter - healthBefore;
+        const outcome = delta < 0 ? "damage" : delta > 0 ? "healing" : "unchanged";
+        const paintDecision = authorizedPaintDecision(
+          { kind: "net_health", outcome },
+          visualFilters,
+        );
+        if (paintDecision === null) {
+          return null;
+        }
+        const recipient = paintDecision.enabled
+          ? project(recipientWorld, surface)
+          : null;
+        if (paintDecision.enabled && recipient === null) {
+          planned.push(
+            Object.freeze({
+              ...common,
+              kind: "feed_only",
+              spatial: false,
+              noncausal: true,
+            }),
+          );
+          continue;
+        }
         planned.push(
           Object.freeze({
             ...common,
@@ -1353,9 +1688,11 @@ function buildAuthorizedPresentationChoreographyPlan(presentation, surface) {
             netDelta: delta,
             healthBefore,
             healthAfter,
-            outcome: delta < 0 ? "damage" : delta > 0 ? "healing" : "unchanged",
-            lane: 0,
-            spatial: true,
+            outcome,
+            lane: paintDecision.enabled ? 0 : null,
+            paintParts: paintDecision.paintParts,
+            presentationSuppressed: !paintDecision.enabled,
+            spatial: paintDecision.enabled,
             noncausal: true,
             presentationKind: "successor_observation",
             phaseStart: CHOREOGRAPHY_PHASES.povSuccessorObservationStart,
@@ -1433,6 +1770,16 @@ function buildAuthorizedPresentationChoreographyPlan(presentation, surface) {
               sourceAgent.class_id === 5 ? "basic_heal" : "basic_damage",
               event,
             );
+      const impactSemantic = activationImpactSemantic(token.tokenId);
+      const paintParts = authorizedPaintParts(
+        { kind: "activation", component, impactSemantic },
+        visualFilters,
+      );
+      if (paintParts === null) {
+        return null;
+      }
+      const abilityEnabled = paintParts.ability === true;
+      const semanticEnabled = paintParts.semantic === true;
       const targetAgent = targetKey === null ? null : sceneByKey.get(targetKey);
       if (
         (targetKey === null) !== (targetTrajectory === null) ||
@@ -1445,13 +1792,25 @@ function buildAuthorizedPresentationChoreographyPlan(presentation, surface) {
       }
       const endpointPhase =
         token.tokenId === "warrior_charge" ? "transition_start" : "successor";
-      const source = authorizedAnchor(sourceTrajectory[endpointPhase], surface);
-      const target = authorizedAnchor(targetTrajectory?.[endpointPhase], surface);
-      if (source === null || (targetTrajectory !== null && target === null)) {
+      const authorizedSource = abilityEnabled
+        ? authorizedAnchor(sourceTrajectory[endpointPhase], surface)
+        : null;
+      const authorizedTarget =
+        abilityEnabled || semanticEnabled
+          ? authorizedAnchor(targetTrajectory?.[endpointPhase], surface)
+          : null;
+      if (
+        (abilityEnabled && authorizedSource === null) ||
+        ((abilityEnabled || semanticEnabled) &&
+          targetTrajectory !== null &&
+          authorizedTarget === null)
+      ) {
         return null;
       }
+      const source = authorizedSource;
+      const target = authorizedTarget;
       const route =
-        target && targetAgent
+        abilityEnabled && source && target && targetAgent
           ? createRouteGeometry(
               {
                 eventId: row.id,
@@ -1467,9 +1826,10 @@ function buildAuthorizedPresentationChoreographyPlan(presentation, surface) {
         Object.freeze({
           ...common,
           kind: "activation",
+          component,
           tokenId: token.tokenId,
           token,
-          impactSemantic: activationImpactSemantic(token.tokenId),
+          impactSemantic,
           lane: component === "ultimate" ? 1 : 0,
           sourcePresentationKey: sourceKey,
           sourcePublicAgentId: sourceTrajectory.agent_public_agent_id,
@@ -1481,8 +1841,14 @@ function buildAuthorizedPresentationChoreographyPlan(presentation, surface) {
           source,
           target,
           route,
-          spatial: true,
-          presentationKind: route ? "routed" : "source_local",
+          paintParts,
+          spatial:
+            (abilityEnabled && source !== null) || (semanticEnabled && target !== null),
+          presentationKind: route
+            ? "routed"
+            : !abilityEnabled && semanticEnabled && target
+              ? "target_only_impact"
+              : "source_local",
           phaseStart: CHOREOGRAPHY_PHASES.v2AbilityStart,
           phaseImpact: CHOREOGRAPHY_PHASES.v2HealthResolutionStart - 20,
           phaseEnd: CHOREOGRAPHY_PHASES.v2HealthResolutionStart,
@@ -1500,22 +1866,38 @@ function buildAuthorizedPresentationChoreographyPlan(presentation, surface) {
         "transition_start",
       );
       const recipientKey = identifier(recipientAnchor?.presentation_key);
-      const recipient = authorizedAnchor(recipientTrajectory?.successor, surface);
       const before = finiteNumber(event.transition_start_health);
       const after = finiteNumber(event.health_after_combat_resolution);
       const delta = finiteNumber(event.realized_net_health_change);
+      const recipientWorld = authorizedWorldPoint(recipientTrajectory?.successor);
       if (
         recipientTrajectory === null ||
         recipientKey === null ||
-        !recipient ||
+        recipientWorld === null ||
         before === null ||
         after === null ||
         delta === null
       ) {
         return null;
       }
-      const lane = healthLaneByKey.get(recipientKey) ?? 0;
-      healthLaneByKey.set(recipientKey, lane + 1);
+      const outcome = delta < 0 ? "damage" : delta > 0 ? "healing" : "unchanged";
+      const paintDecision = authorizedPaintDecision(
+        { kind: "net_health", outcome },
+        visualFilters,
+      );
+      if (paintDecision === null) {
+        return null;
+      }
+      const recipient = paintDecision.enabled ? project(recipientWorld, surface) : null;
+      if (paintDecision.enabled && recipient === null) {
+        return null;
+      }
+      const lane = paintDecision.enabled
+        ? (healthLaneByKey.get(recipientKey) ?? 0)
+        : null;
+      if (lane !== null) {
+        healthLaneByKey.set(recipientKey, lane + 1);
+      }
       planned.push(
         Object.freeze({
           ...common,
@@ -1526,9 +1908,11 @@ function buildAuthorizedPresentationChoreographyPlan(presentation, surface) {
           netDelta: delta,
           healthBefore: before,
           healthAfter: after,
-          outcome: delta < 0 ? "damage" : delta > 0 ? "healing" : "unchanged",
+          outcome,
           lane,
-          spatial: lane < MAX_HEALTH_CUES_PER_RECIPIENT,
+          paintParts: paintDecision.paintParts,
+          presentationSuppressed: !paintDecision.enabled,
+          spatial: lane !== null && lane < MAX_HEALTH_CUES_PER_RECIPIENT,
           phaseStart: CHOREOGRAPHY_PHASES.v2HealthResolutionStart,
           phaseEnd: CHOREOGRAPHY_PHASES.v2CountdownAndRegenStart,
         }),
@@ -1552,15 +1936,27 @@ function buildAuthorizedPresentationChoreographyPlan(presentation, surface) {
         "post_charge",
       );
       const key = identifier(startAnchor?.presentation_key);
-      const start = authorizedAnchor(trajectory?.transition_start, surface);
-      const end = authorizedAnchor(trajectory?.successor, surface);
+      const startWorld = authorizedWorldPoint(trajectory?.transition_start);
+      const endWorld = authorizedWorldPoint(trajectory?.successor);
       if (
         trajectory === null ||
         endTrajectory !== trajectory ||
         key === null ||
-        start === null ||
-        end === null
+        startWorld === null ||
+        endWorld === null
       ) {
+        return null;
+      }
+      const paintDecision = authorizedPaintDecision(
+        { kind: "charge_displacement" },
+        visualFilters,
+      );
+      if (paintDecision === null) {
+        return null;
+      }
+      const start = paintDecision.enabled ? project(startWorld, surface) : null;
+      const end = paintDecision.enabled ? project(endWorld, surface) : null;
+      if (paintDecision.enabled && (start === null || end === null)) {
         return null;
       }
       planned.push(
@@ -1573,8 +1969,10 @@ function buildAuthorizedPresentationChoreographyPlan(presentation, surface) {
           start,
           end,
           pathKind: "charge_phase",
-          spatial: true,
-          persistent: true,
+          paintParts: paintDecision.paintParts,
+          presentationSuppressed: !paintDecision.enabled,
+          spatial: paintDecision.enabled,
+          persistent: paintDecision.enabled,
           phaseStart: CHOREOGRAPHY_PHASES.v2ChargeStart,
           phaseEnd: CHOREOGRAPHY_PHASES.v2MovementStart,
         }),
@@ -1609,7 +2007,29 @@ function buildAuthorizedPresentationChoreographyPlan(presentation, surface) {
     }
     if (row.kind === "action_rejected") {
       const actorAnchor = record(event.actor_anchor);
-      const actor = authorizedAnchor(actorAnchor, surface);
+      const actorTrajectory =
+        trajectories === null
+          ? null
+          : trajectoryForAuthorizedAnchor(
+              trajectories,
+              actorAnchor,
+              "transition_start",
+            );
+      const actorWorld = authorizedWorldPoint(actorAnchor);
+      if (actorWorld === null || (trajectories !== null && actorTrajectory === null)) {
+        return null;
+      }
+      const paintDecision = authorizedPaintDecision(
+        { kind: "rejected_action" },
+        visualFilters,
+      );
+      if (paintDecision === null) {
+        return null;
+      }
+      const actor = paintDecision.enabled ? project(actorWorld, surface) : null;
+      if (paintDecision.enabled && actor === null) {
+        return null;
+      }
       planned.push(
         Object.freeze({
           ...common,
@@ -1623,7 +2043,9 @@ function buildAuthorizedPresentationChoreographyPlan(presentation, surface) {
           target: null,
           component: event.rejection_component,
           route: null,
-          spatial: actor !== null,
+          paintParts: paintDecision.paintParts,
+          presentationSuppressed: !paintDecision.enabled,
+          spatial: paintDecision.enabled,
           phaseStart: CHOREOGRAPHY_PHASES.v2RejectionStart,
           phaseEnd: CHOREOGRAPHY_PHASES.v2AbilityStart,
         }),
@@ -1641,22 +2063,31 @@ function buildAuthorizedPresentationChoreographyPlan(presentation, surface) {
       continue;
     }
     if (row.kind === "respawn_wave_occurred") {
-      const wave = authorizedTeamWaveAnchor(event.team_anchor, surface);
-      if (wave === null) {
+      const waveIdentity = authorizedTeamWaveIdentity(event.team_anchor);
+      const paintDecision = authorizedPaintDecision(
+        { kind: "semantic_pulse", cueSemantic: row.kind },
+        visualFilters,
+      );
+      if (waveIdentity === null || paintDecision === null) {
         return null;
       }
+      const anchor = paintDecision.enabled
+        ? teamClockPoint(waveIdentity.teamId, surface)
+        : null;
       planned.push(
         Object.freeze({
           ...common,
           kind: "semantic_pulse",
           cueSemantic: row.kind,
-          anchor: wave.anchor,
-          teamIndex: wave.teamIndex,
-          teamId: wave.teamId,
-          teamSide: wave.teamSide,
-          label: wave.label,
-          spatial: wave.anchor !== null,
-          persistent: true,
+          anchor,
+          teamIndex: waveIdentity.teamIndex,
+          teamId: waveIdentity.teamId,
+          teamSide: waveIdentity.teamSide,
+          label: waveIdentity.label,
+          paintParts: paintDecision.paintParts,
+          presentationSuppressed: !paintDecision.enabled,
+          spatial: paintDecision.enabled && anchor !== null,
+          persistent: paintDecision.enabled,
           phaseStart: CHOREOGRAPHY_PHASES.v2RespawnWaveStart,
           phaseEnd: CHOREOGRAPHY_PHASES.v2RespawnStart,
         }),
@@ -1692,25 +2123,52 @@ function buildAuthorizedPresentationChoreographyPlan(presentation, surface) {
           return null;
         }
         presentationAnchor = trajectory.successor;
+      } else if (trajectories !== null) {
+        const trajectory = trajectoryForAuthorizedAnchor(
+          trajectories,
+          anchor,
+          "successor",
+        );
+        if (trajectory === null) {
+          return null;
+        }
+        presentationAnchor = trajectory.successor;
+      }
+      const kind =
+        row.kind === "health_regenerated" ? "regeneration" : "semantic_pulse";
+      const paintDecision = authorizedPaintDecision(
+        { kind, cueSemantic: row.kind },
+        visualFilters,
+      );
+      const presentationWorld = authorizedWorldPoint(presentationAnchor);
+      if (paintDecision === null || presentationWorld === null) {
+        return null;
+      }
+      const projectedAnchor = paintDecision.enabled
+        ? project(presentationWorld, surface)
+        : null;
+      if (paintDecision.enabled && projectedAnchor === null) {
+        return null;
       }
       planned.push(
         Object.freeze({
           ...common,
-          kind: row.kind === "health_regenerated" ? "regeneration" : "semantic_pulse",
+          kind,
           cueSemantic: row.kind,
-          anchor: authorizedAnchor(presentationAnchor, surface),
-          recipient:
-            row.kind === "health_regenerated"
-              ? authorizedAnchor(presentationAnchor, surface)
-              : null,
+          anchor: projectedAnchor,
+          recipient: row.kind === "health_regenerated" ? projectedAnchor : null,
           agentPresentationKey: presentationAnchor?.presentation_key ?? null,
           agentPublicAgentId: presentationAnchor?.public_agent_id ?? null,
           value:
             row.kind === "health_regenerated"
               ? finiteNumber(event.actual_health_regenerated)
               : null,
-          persistent: row.kind === "agent_died" || row.kind === "agent_respawned",
-          spatial: presentationAnchor !== null,
+          paintParts: paintDecision.paintParts,
+          presentationSuppressed: !paintDecision.enabled,
+          persistent:
+            paintDecision.enabled &&
+            (row.kind === "agent_died" || row.kind === "agent_respawned"),
+          spatial: paintDecision.enabled,
           phaseStart: CHOREOGRAPHY_PHASES.v2CountdownAndRegenStart,
           phaseEnd: CHOREOGRAPHY_PHASES.total,
         }),
@@ -1726,7 +2184,8 @@ function buildAuthorizedPresentationChoreographyPlan(presentation, surface) {
       }),
     );
   }
-  const scheduled = scheduleChoreography(planned);
+  const paintFiltered = applyAuthorizedVisualFilters(planned, visualFilters);
+  const scheduled = scheduleChoreography(paintFiltered);
   const netEvents = layoutOutcomeCues(scheduled.events, surface, "net_health");
   const statusEvents = layoutOutcomeCues(netEvents, surface, "status_lifecycle");
   const events = Object.freeze(
@@ -1735,7 +2194,9 @@ function buildAuthorizedPresentationChoreographyPlan(presentation, surface) {
     ),
   );
   const spatialEventCount = events.filter((event) => event.spatial).length;
-  const persistentEventCount = events.filter((event) => event.persistent).length;
+  const persistentEventCount = events.filter(
+    (event) => event.spatial && event.persistent,
+  ).length;
   return Object.freeze({
     epochKey: JSON.stringify([presentation.session_id, transitionId]),
     authorizationKey: JSON.stringify([
@@ -1745,6 +2206,7 @@ function buildAuthorizedPresentationChoreographyPlan(presentation, surface) {
       presentation.recipient_presentation_key,
     ]),
     fingerprint: `${events.length}:${hashText(JSON.stringify(rows.map(({ payload }) => payload)))}`,
+    paintKey: visualFilterPaintKey(visualFilters),
     transitionId,
     simulatorStep,
     phases: scheduled.phases,
@@ -1763,11 +2225,16 @@ function buildAuthorizedPresentationChoreographyPlan(presentation, surface) {
  *
  * @param {unknown} frame
  * @param {ProjectionSurface | null} surface
+ * @param {Record<string, boolean>} visualFilters
  * @returns {Readonly<ChoreographyPlan> | null}
  */
-export function buildChoreographyPlan(frame, surface = null) {
+export function buildChoreographyPlan(
+  frame,
+  surface = null,
+  visualFilters = DEFAULT_VISUAL_FILTER_STATE,
+) {
   if (isAuthorizedPresentationFrame(frame)) {
-    return buildAuthorizedPresentationChoreographyPlan(frame, surface);
+    return buildAuthorizedPresentationChoreographyPlan(frame, surface, visualFilters);
   }
   return null;
 }

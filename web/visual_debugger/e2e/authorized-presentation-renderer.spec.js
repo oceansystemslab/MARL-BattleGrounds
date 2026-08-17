@@ -251,6 +251,325 @@ test("raw and forged researcher-looking scenes render unavailable and clear acce
   ]);
 });
 
+test("durable visual filters remove owned paint and restore stable battlefield identity", async ({
+  page,
+}) => {
+  await page.goto(origin);
+  const result = await page.evaluate(
+    async ({ oracleRaw, povRaw }) => {
+      const moduleRoot = "/src";
+      const { normalizeAuthorizedPresentationFrameV1 } = await import(
+        `${moduleRoot}/authorized-presentation-normalizer.js`
+      );
+      const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+      const { DEFAULT_VISUAL_FILTER_STATE, setVisualFilterEnabled } = await import(
+        `${moduleRoot}/visual-filters.js`
+      );
+      const battlefield = document.querySelector("#battlefield");
+      const empty = document.querySelector("#empty");
+      if (!(battlefield instanceof SVGSVGElement) || !(empty instanceof HTMLElement)) {
+        throw new Error("Durable visual-filter test surface is unavailable.");
+      }
+      const presentation = await normalizeAuthorizedPresentationFrameV1(oracleRaw);
+      const povPresentation = await normalizeAuthorizedPresentationFrameV1(povRaw);
+      const presentationBytes = JSON.stringify(presentation);
+      const povPresentationBytes = JSON.stringify(povPresentation);
+      const renderer = new BattlefieldRenderer({ battlefield, empty });
+      const filterCases = [
+        {
+          filterId: "aura_fields",
+          ownerSelector: ".aura-field",
+          ownsTooltip: true,
+          reservesLayout: false,
+          layoutAttribute: null,
+        },
+        {
+          filterId: "aura_modifier_badges",
+          ownerSelector: ".modifier-cell, .modifier-overflow",
+          ownsTooltip: true,
+          reservesLayout: true,
+          layoutAttribute: "data-suppressed-modifier-presentation-keys",
+        },
+        {
+          filterId: "duration_status_badges",
+          ownerSelector:
+            '.status-cell, .status-overflow, .required-dock-fallback[data-kind="status"], .pov-observed-status',
+          ownsTooltip: true,
+          reservesLayout: true,
+          layoutAttribute: "data-suppressed-status-presentation-keys",
+        },
+        {
+          filterId: "spawn_shield",
+          ownerSelector: ".agent-spawn-shield",
+          ownsTooltip: false,
+          reservesLayout: false,
+          layoutAttribute: null,
+        },
+        {
+          filterId: "combat_status_icon",
+          ownerSelector: ".agent-combat-state-icon",
+          ownsTooltip: false,
+          reservesLayout: false,
+          layoutAttribute: null,
+        },
+        {
+          filterId: "cooldown_effects",
+          ownerSelector:
+            '.cooldown-cell, .required-dock-fallback[data-kind="cooldown"]',
+          ownsTooltip: true,
+          reservesLayout: true,
+          layoutAttribute: "data-suppressed-cooldown-presentation-keys",
+        },
+      ];
+      const viewports = [
+        { width: 720, height: 480 },
+        { width: 1080, height: 720 },
+      ];
+      const rows = [];
+      const coreSelectors = [
+        ".map-boundary",
+        ".obstacle",
+        ".agent",
+        ".agent-body",
+        ".agent-health",
+        ".agent-team-ring",
+        ".agent-class-icon",
+        ".agent-dead-mark",
+        ".agent-selection",
+      ];
+      /**
+       * @param {{left: number, top: number, right: number, bottom: number}} bounds
+       */
+      const protectedRectangleKey = ({ left, top, right, bottom }) =>
+        [left, top, right, bottom].map((value) => value.toFixed(3)).join(",");
+      const protectedKey = () =>
+        (renderer.choreographySurface()?.protectedRects ?? [])
+          .map(protectedRectangleKey)
+          .join(";");
+      const coreCounts = () =>
+        Object.fromEntries(
+          coreSelectors.map((selector) => [
+            selector,
+            battlefield.querySelectorAll(selector).length,
+          ]),
+        );
+      /** @param {string} ownerSelector */
+      const ownedSnapshot = (ownerSelector) => {
+        const owners = Array.from(battlefield.querySelectorAll(ownerSelector));
+        return {
+          count: owners.length,
+          tooltipOwnerCount: owners.filter((owner) =>
+            owner.hasAttribute("data-tooltip-owner"),
+          ).length,
+          ariaOwnerCount: owners.filter(
+            (owner) =>
+              owner.hasAttribute("aria-label") ||
+              owner.hasAttribute("aria-hidden") ||
+              owner.hasAttribute("role"),
+          ).length,
+        };
+      };
+
+      for (const viewport of viewports) {
+        battlefield.style.width = `${viewport.width}px`;
+        battlefield.style.height = `${viewport.height}px`;
+        renderer.render(presentation, { showRanges: true });
+        const defaultAllOnMarkup = battlefield.outerHTML;
+        renderer.render(presentation, {
+          showRanges: true,
+          visualFilterState: DEFAULT_VISUAL_FILTER_STATE,
+        });
+        const explicitAllOnMatchesDefault =
+          battlefield.outerHTML === defaultAllOnMarkup;
+        const originalRoot = battlefield;
+        const originalAgent = battlefield.querySelector(".agent");
+        const originalBodyHit = originalAgent?.querySelector(".agent-body") ?? null;
+        if (!(originalAgent instanceof SVGElement) || !originalBodyHit) {
+          throw new Error("Stable agent identity surface is unavailable.");
+        }
+        const baselineCoreCounts = coreCounts();
+
+        for (const filterCase of filterCases) {
+          const baselineOwned = ownedSnapshot(filterCase.ownerSelector);
+          const baselineProtectedKey = protectedKey();
+          const baselineAgentAria = originalAgent.getAttribute("aria-label") ?? "";
+          const durableLayer = battlefield.querySelector(
+            '[data-layer="durable-status-modifier"]',
+          );
+          const baselineLayoutAttribute =
+            filterCase.layoutAttribute === null
+              ? null
+              : durableLayer?.hasAttribute(filterCase.layoutAttribute) === true;
+          const disabledState = setVisualFilterEnabled(
+            DEFAULT_VISUAL_FILTER_STATE,
+            filterCase.filterId,
+            false,
+          );
+          renderer.render(presentation, {
+            showRanges: true,
+            visualFilterState: disabledState,
+          });
+          const disabledOwned = ownedSnapshot(filterCase.ownerSelector);
+          const disabledProtectedKey = protectedKey();
+          const disabledAgentAria = originalAgent.getAttribute("aria-label") ?? "";
+          const disabledLayoutAttribute =
+            filterCase.layoutAttribute === null
+              ? null
+              : durableLayer?.hasAttribute(filterCase.layoutAttribute) === true;
+          const disabledCoreCounts = coreCounts();
+          const disabledIdentityStable =
+            battlefield === originalRoot &&
+            originalAgent.isConnected &&
+            originalBodyHit.isConnected &&
+            battlefield.contains(originalAgent) &&
+            originalAgent.querySelector(".agent-body") === originalBodyHit;
+          const disabledAgentAccessible =
+            originalAgent.getAttribute("role") === "img" &&
+            originalAgent.hasAttribute("data-tooltip-owner") &&
+            disabledAgentAria.length > 0;
+
+          renderer.render(presentation, {
+            showRanges: true,
+            visualFilterState: DEFAULT_VISUAL_FILTER_STATE,
+          });
+          const restoredOwned = ownedSnapshot(filterCase.ownerSelector);
+          const restoredProtectedKey = protectedKey();
+          const restoredAgentAria = originalAgent.getAttribute("aria-label") ?? "";
+          rows.push({
+            viewport: `${viewport.width}x${viewport.height}`,
+            ...filterCase,
+            explicitAllOnMatchesDefault,
+            baselineOwned,
+            baselineProtectedKey,
+            baselineAgentAria,
+            baselineLayoutAttribute,
+            baselineCoreCounts,
+            disabledOwned,
+            disabledProtectedKey,
+            disabledAgentAria,
+            disabledLayoutAttribute,
+            disabledCoreCounts,
+            disabledIdentityStable,
+            disabledAgentAccessible,
+            restoredOwned,
+            restoredProtectedKey,
+            restoredAgentAria,
+            restoredIdentityStable:
+              battlefield === originalRoot &&
+              originalAgent.isConnected &&
+              originalAgent.querySelector(".agent-body") === originalBodyHit,
+          });
+        }
+      }
+      const povStatusRows = [];
+      const statusOwnerSelector =
+        '.status-cell, .status-overflow, .required-dock-fallback[data-kind="status"], .pov-observed-status';
+      for (const viewport of viewports) {
+        battlefield.style.width = `${viewport.width}px`;
+        battlefield.style.height = `${viewport.height}px`;
+        renderer.render(povPresentation, {
+          showRanges: true,
+          visualFilterState: DEFAULT_VISUAL_FILTER_STATE,
+        });
+        const originalAgent = battlefield.querySelector(".agent");
+        const originalBodyHit = originalAgent?.querySelector(".agent-body") ?? null;
+        if (!(originalAgent instanceof SVGElement) || !originalBodyHit) {
+          throw new Error("Agent POV status identity surface is unavailable.");
+        }
+        const baselineOwned = ownedSnapshot(statusOwnerSelector);
+        renderer.render(povPresentation, {
+          showRanges: true,
+          visualFilterState: setVisualFilterEnabled(
+            DEFAULT_VISUAL_FILTER_STATE,
+            "duration_status_badges",
+            false,
+          ),
+        });
+        const disabledOwned = ownedSnapshot(statusOwnerSelector);
+        const disabledIdentityStable =
+          originalAgent.isConnected &&
+          originalAgent.querySelector(".agent-body") === originalBodyHit &&
+          originalAgent.getAttribute("role") === "img" &&
+          originalAgent.hasAttribute("data-tooltip-owner") &&
+          (originalAgent.getAttribute("aria-label") ?? "").length > 0;
+        renderer.render(povPresentation, {
+          showRanges: true,
+          visualFilterState: DEFAULT_VISUAL_FILTER_STATE,
+        });
+        povStatusRows.push({
+          viewport: `${viewport.width}x${viewport.height}`,
+          audience: battlefield.getAttribute("data-audience"),
+          baselineOwned,
+          disabledOwned,
+          restoredOwned: ownedSnapshot(statusOwnerSelector),
+          disabledIdentityStable,
+        });
+      }
+      return {
+        presentationUnchanged:
+          JSON.stringify(presentation) === presentationBytes &&
+          JSON.stringify(povPresentation) === povPresentationBytes,
+        stateFrozen: Object.isFrozen(DEFAULT_VISUAL_FILTER_STATE),
+        rows,
+        povStatusRows,
+      };
+    },
+    {
+      oracleRaw: fixture.state_cases.replay_oracle_final_selected,
+      povRaw: fixture.state_cases.replay_shared_final,
+    },
+  );
+
+  expect(result.presentationUnchanged).toBe(true);
+  expect(result.stateFrozen).toBe(true);
+  expect(result.rows).toHaveLength(12);
+  for (const row of result.rows) {
+    expect(row.explicitAllOnMatchesDefault, row.viewport).toBe(true);
+    expect(row.baselineOwned.count, `${row.viewport} ${row.filterId}`).toBeGreaterThan(
+      0,
+    );
+    expect(row.baselineOwned.ariaOwnerCount, row.filterId).toBeGreaterThan(0);
+    if (row.ownsTooltip) {
+      expect(row.baselineOwned.tooltipOwnerCount, row.filterId).toBeGreaterThan(0);
+    }
+    expect(row.disabledOwned).toEqual({
+      count: 0,
+      tooltipOwnerCount: 0,
+      ariaOwnerCount: 0,
+    });
+    expect(row.disabledCoreCounts).toEqual(row.baselineCoreCounts);
+    expect(row.disabledIdentityStable).toBe(true);
+    expect(row.disabledAgentAccessible).toBe(true);
+    expect(row.restoredOwned).toEqual(row.baselineOwned);
+    expect(row.restoredProtectedKey).toBe(row.baselineProtectedKey);
+    expect(row.restoredIdentityStable).toBe(true);
+    if (row.reservesLayout) {
+      expect(row.disabledProtectedKey, row.filterId).not.toBe(row.baselineProtectedKey);
+      expect(row.baselineLayoutAttribute, row.filterId).toBe(true);
+      expect(row.disabledLayoutAttribute, row.filterId).toBe(false);
+    }
+    if (row.filterId === "combat_status_icon") {
+      expect(row.baselineAgentAria).toContain("combat status");
+      expect(row.disabledAgentAria).not.toContain("combat status");
+      expect(row.restoredAgentAria).toContain("combat status");
+    }
+  }
+  expect(result.povStatusRows).toHaveLength(2);
+  for (const row of result.povStatusRows) {
+    expect(row.audience).toBe("agent_pov");
+    expect(row.baselineOwned.count, row.viewport).toBeGreaterThan(0);
+    expect(row.baselineOwned.tooltipOwnerCount, row.viewport).toBeGreaterThan(0);
+    expect(row.baselineOwned.ariaOwnerCount, row.viewport).toBeGreaterThan(0);
+    expect(row.disabledOwned).toEqual({
+      count: 0,
+      tooltipOwnerCount: 0,
+      ariaOwnerCount: 0,
+    });
+    expect(row.restoredOwned).toEqual(row.baselineOwned);
+    expect(row.disabledIdentityStable).toBe(true);
+  }
+});
+
 test("all three normalized Agent POV leaves keep hidden aura sources byte-inert", async ({
   page,
 }) => {
@@ -1127,6 +1446,7 @@ test("authorized multi-application status paints one route-free lifecycle", asyn
     hit.dispatchEvent(
       new PointerEvent("pointermove", {
         bubbles: true,
+        composed: true,
         clientX: hitBounds.left + hitBounds.width / 2,
         clientY: hitBounds.top + hitBounds.height / 2,
         pointerType: "mouse",

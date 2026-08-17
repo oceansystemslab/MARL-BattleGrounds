@@ -28,6 +28,10 @@ import {
 import { createRouteGeometry } from "./routes.js";
 import { registerTooltipOwner } from "./tooltip.js";
 import {
+  DEFAULT_VISUAL_FILTER_STATE,
+  isVisualPaintPartEnabled,
+} from "./visual-filters.js";
+import {
   classTokenFromId,
   resolveVisualToken,
   teamTokenFromId,
@@ -54,6 +58,30 @@ const LEGALITY_DOCK_DIMENSIONS = Object.freeze({
   cellWidth: 30,
   cellHeight: 18,
   cellGap: 3,
+});
+const DURABLE_VISUAL_PAINT_PARTS = Object.freeze({
+  auraFields: Object.freeze({ surface: "durable", kind: "aura_field" }),
+  auraModifierBadges: Object.freeze({
+    surface: "durable",
+    kind: "aura_modifier_badge",
+  }),
+  durationStatusBadges: Object.freeze({
+    surface: "durable",
+    kind: "duration_status_badge",
+  }),
+  povDurationStatusBadges: Object.freeze({
+    surface: "durable",
+    kind: "pov_duration_status_badge",
+  }),
+  spawnShield: Object.freeze({ surface: "durable", kind: "spawn_shield" }),
+  combatStatusIcon: Object.freeze({
+    surface: "durable",
+    kind: "combat_status_icon",
+  }),
+  cooldownBadges: Object.freeze({
+    surface: "durable",
+    kind: "cooldown_badge",
+  }),
 });
 
 export const BATTLEFIELD_LAYER_ORDER = Object.freeze([
@@ -82,13 +110,13 @@ export const BATTLEFIELD_LAYER_ORDER = Object.freeze([
  *   healthTrack: SVGElement,
  *   health: SVGElement,
  *   classIcon: SVGSVGElement,
- *   combatStateIcon: SVGSVGElement,
+ *   combatStateIcon: SVGSVGElement | null,
  *   classLetter: SVGElement,
  *   deadMark: SVGElement,
- *   shieldRoot: SVGElement,
- *   shieldShell: SVGElement,
- *   shieldChip: SVGElement,
- *   shieldText: SVGElement,
+ *   shieldRoot: SVGElement | null,
+ *   shieldShell: SVGElement | null,
+ *   shieldChip: SVGElement | null,
+ *   shieldText: SVGElement | null,
  *   selectionRoot: SVGElement,
  *   controlledHalo: SVGElement,
  *   selectedReticle: SVGElement,
@@ -129,6 +157,15 @@ export const BATTLEFIELD_LAYER_ORDER = Object.freeze([
  *   width: number,
  *   height: number,
  * }} Rectangle
+ * @typedef {{
+ *   showAuraFields: boolean,
+ *   showAuraModifierBadges: boolean,
+ *   showDurationStatusBadges: boolean,
+ *   showPovDurationStatusBadges: boolean,
+ *   showSpawnShield: boolean,
+ *   showCombatStatusIcon: boolean,
+ *   showCooldownBadges: boolean,
+ * }} DurableVisualPolicy
  */
 
 /**
@@ -145,6 +182,47 @@ function isRecord(value) {
  */
 function asArray(value) {
   return Array.isArray(value) ? value : [];
+}
+
+/**
+ * Resolve browser-local paint policy without copying or changing the accepted
+ * presentation. The visual-filter module owns validation and exact registry
+ * classification.
+ *
+ * @param {unknown} state
+ * @returns {Readonly<DurableVisualPolicy>}
+ */
+function durableVisualPolicy(state) {
+  return Object.freeze({
+    showAuraFields: isVisualPaintPartEnabled(
+      state,
+      DURABLE_VISUAL_PAINT_PARTS.auraFields,
+    ),
+    showAuraModifierBadges: isVisualPaintPartEnabled(
+      state,
+      DURABLE_VISUAL_PAINT_PARTS.auraModifierBadges,
+    ),
+    showDurationStatusBadges: isVisualPaintPartEnabled(
+      state,
+      DURABLE_VISUAL_PAINT_PARTS.durationStatusBadges,
+    ),
+    showPovDurationStatusBadges: isVisualPaintPartEnabled(
+      state,
+      DURABLE_VISUAL_PAINT_PARTS.povDurationStatusBadges,
+    ),
+    showSpawnShield: isVisualPaintPartEnabled(
+      state,
+      DURABLE_VISUAL_PAINT_PARTS.spawnShield,
+    ),
+    showCombatStatusIcon: isVisualPaintPartEnabled(
+      state,
+      DURABLE_VISUAL_PAINT_PARTS.combatStatusIcon,
+    ),
+    showCooldownBadges: isVisualPaintPartEnabled(
+      state,
+      DURABLE_VISUAL_PAINT_PARTS.cooldownBadges,
+    ),
+  });
 }
 
 /**
@@ -538,10 +616,16 @@ export class BattlefieldRenderer {
    *   offline?: boolean,
    *   showRanges?: boolean,
    *   localInspectedPresentationKey?: string | null,
+   *   visualFilterState?: Readonly<Record<string, boolean>>,
    * }} [options]
    * @returns {boolean} Whether the frame contained a paintable scene.
    */
   render(frame, options = {}) {
+    const visualFilterState =
+      options.visualFilterState === undefined
+        ? DEFAULT_VISUAL_FILTER_STATE
+        : options.visualFilterState;
+    const visualPolicy = durableVisualPolicy(visualFilterState);
     const scene = frameScene(frame, options.localInspectedPresentationKey);
     const map = isRecord(scene?.map) ? scene.map : null;
     const width = finiteNumber(map?.width);
@@ -616,9 +700,11 @@ export class BattlefieldRenderer {
     );
     renderCircleLayer(
       this.layers.aura,
-      asArray(scene.aura_fields).filter(
-        (field) => isRecord(field) && field.source_alive === true,
-      ),
+      visualPolicy.showAuraFields
+        ? asArray(scene.aura_fields).filter(
+            (field) => isRecord(field) && field.source_alive === true,
+          )
+        : [],
       "aura-field",
       "token_id",
       transform,
@@ -656,14 +742,21 @@ export class BattlefieldRenderer {
     );
     this.#renderPendingRoute(scene, transform);
     this.#renderObstacles(map, transform);
-    const projectedAgents = this.#renderAgents(scene, transform);
+    const projectedAgents = this.#renderAgents(scene, transform, visualPolicy);
     this.agentByLayoutSlot = new Map(
       projectedAgents.map((projected) => [projected.layoutSlot, projected.agent]),
     );
-    this.#renderObservedBodies(scene, transform);
+    this.#renderObservedBodies(
+      scene,
+      transform,
+      visualPolicy.showPovDurationStatusBadges,
+    );
     this.#renderStatusDocks(scene, projectedAgents, transform, {
       showLegality: true,
-      showModifiers: scene.audience === "researcher",
+      showModifiers:
+        scene.audience === "researcher" && visualPolicy.showAuraModifierBadges,
+      showStatuses: visualPolicy.showDurationStatusBadges,
+      showCooldowns: visualPolicy.showCooldownBadges,
       audience: scene.audience,
     });
     this.#applyCompactActiveCombatPolicy();
@@ -973,9 +1066,10 @@ export class BattlefieldRenderer {
   /**
    * @param {JsonRecord} scene
    * @param {ViewportTransform} transform
+   * @param {Readonly<DurableVisualPolicy>} visualPolicy
    * @returns {ProjectedAgent[]}
    */
-  #renderAgents(scene, transform) {
+  #renderAgents(scene, transform, visualPolicy) {
     const agents = asArray(scene.agents).filter(
       (agent) => isRecord(agent) && agentDisplayIdentity(agent) !== null,
     );
@@ -983,7 +1077,7 @@ export class BattlefieldRenderer {
     for (const [identityKey, nodes] of this.agentNodes) {
       if (!nextIdentities.has(identityKey)) {
         nodes.root.remove();
-        nodes.shieldRoot.remove();
+        nodes.shieldRoot?.remove();
         nodes.selectionRoot.remove();
         this.agentNodes.delete(identityKey);
       }
@@ -1015,7 +1109,7 @@ export class BattlefieldRenderer {
       const radius = transform.worldLengthToScreen(finiteNumber(agent.radius, 0.5));
       let nodes = this.agentNodes.get(identityKey);
       if (!nodes) {
-        nodes = this.#createAgentNodes(agent);
+        nodes = this.#createAgentNodes(agent, visualPolicy);
         this.agentNodes.set(identityKey, nodes);
       }
       this.#updateAgentNodes(
@@ -1026,6 +1120,7 @@ export class BattlefieldRenderer {
         radius,
         controlled,
         selected,
+        visualPolicy,
       );
       registerTooltipOwner(
         nodes.root,
@@ -1035,7 +1130,12 @@ export class BattlefieldRenderer {
       );
 
       // Appending an existing child reorders it without replacing its identity.
-      this.layers.body.append(nodes.root, nodes.shieldRoot);
+      this.layers.body.append(nodes.root);
+      if (visualPolicy.showSpawnShield && nodes.shieldRoot !== null) {
+        this.layers.body.append(nodes.shieldRoot);
+      } else {
+        nodes.shieldRoot?.remove();
+      }
       this.selectionCues.append(nodes.selectionRoot);
       projectedAgents.push({
         agent,
@@ -1061,8 +1161,9 @@ export class BattlefieldRenderer {
    *
    * @param {JsonRecord} scene
    * @param {ViewportTransform} transform
+   * @param {boolean} showDurationStatusBadges
    */
-  #renderObservedBodies(scene, transform) {
+  #renderObservedBodies(scene, transform, showDurationStatusBadges) {
     const bodies = asArray(scene.observed_bodies).filter(
       (body) =>
         isRecord(body) &&
@@ -1129,14 +1230,32 @@ export class BattlefieldRenderer {
       root.dataset.class = classToken.cssKey;
       root.dataset.alive = String(Boolean(body.alive));
       const statuses = asArray(body.statuses);
-      const statusDescriptions = statuses.map((status) => {
+      const paintedStatuses = showDurationStatusBadges ? statuses : [];
+      const statusDescriptions = paintedStatuses.map((status) => {
         const token = resolveVisualToken("status", status.token_id);
         return `${token.accessibleName}, ${formatDisplayNumber(status.duration)} ticks`;
       });
       root.dataset.statusCount = String(statuses.length);
       root.setAttribute(
         "aria-label",
-        `${body.relation} observation row ${body.observation_row}, Agent ID ${body.public_agent_id}, ${classToken.label}, life state ${body.alive ? "alive" : "corpse"}, health ${formatDisplayNumber(body.current_health)} of ${formatDisplayNumber(body.max_health)}, effective speed ${formatDisplayNumber(body.effective_movement_speed)}, ${Number(body.steps_until_out_of_combat) > 0 ? `in combat with ${body.steps_until_out_of_combat} ${body.steps_until_out_of_combat === 1 ? "tick" : "ticks"} until out of combat` : "out of combat"}, ${statusDescriptions.length === 0 ? "no persistent statuses" : `statuses ${statusDescriptions.join(", ")}`}`,
+        [
+          `${body.relation} observation row ${body.observation_row}`,
+          `Agent ID ${body.public_agent_id}`,
+          classToken.label,
+          `life state ${body.alive ? "alive" : "corpse"}`,
+          `health ${formatDisplayNumber(body.current_health)} of ${formatDisplayNumber(body.max_health)}`,
+          `effective speed ${formatDisplayNumber(body.effective_movement_speed)}`,
+          Number(body.steps_until_out_of_combat) > 0
+            ? `in combat with ${body.steps_until_out_of_combat} ${body.steps_until_out_of_combat === 1 ? "tick" : "ticks"} until out of combat`
+            : "out of combat",
+          showDurationStatusBadges
+            ? statusDescriptions.length === 0
+              ? "no persistent statuses"
+              : `statuses ${statusDescriptions.join(", ")}`
+            : null,
+        ]
+          .filter((part) => part !== null)
+          .join(", "),
       );
 
       const healthRadius = Math.max(radius - 4, radius * 0.7);
@@ -1186,12 +1305,12 @@ export class BattlefieldRenderer {
       label.textContent = `${body.relation === "ally" ? "ALLY" : "ENEMY"} ${body.observation_row}`;
       const statusCellWidth = 18;
       const statusCellHeight = 15;
-      const statusColumns = Math.min(statuses.length, 5);
-      const statusNodes = statuses.map((status, index) => {
+      const statusColumns = Math.min(paintedStatuses.length, 5);
+      const statusNodes = paintedStatuses.map((status, index) => {
         const token = resolveVisualToken("status", status.token_id);
         const rowIndex = Math.floor(index / 5);
         const columnIndex = index % 5;
-        const rowCount = Math.min(5, statuses.length - rowIndex * 5);
+        const rowCount = Math.min(5, paintedStatuses.length - rowIndex * 5);
         const x =
           center.x - (rowCount * statusCellWidth) / 2 + columnIndex * statusCellWidth;
         const y = center.y - radius - 19 - rowIndex * statusCellHeight;
@@ -1249,7 +1368,11 @@ export class BattlefieldRenderer {
         return cell;
       });
       statusGroup.replaceChildren(...statusNodes);
-      statusGroup.setAttribute("data-columns", String(statusColumns));
+      if (showDurationStatusBadges) {
+        statusGroup.setAttribute("data-columns", String(statusColumns));
+      } else {
+        statusGroup.removeAttribute("data-columns");
+      }
       registerTooltipOwner(
         root,
         explainPovAgent(body, { controlled: false, selected: false }),
@@ -1419,17 +1542,26 @@ export class BattlefieldRenderer {
    * @param {JsonRecord} scene
    * @param {ProjectedAgent[]} projectedAgents
    * @param {ViewportTransform} transform
-   * @param {{showLegality: boolean, showModifiers: boolean, audience: "researcher" | "agent_pov"}} policy
+   * @param {{
+   *   showLegality: boolean,
+   *   showModifiers: boolean,
+   *   showStatuses: boolean,
+   *   showCooldowns: boolean,
+   *   audience: "researcher" | "agent_pov",
+   * }} policy
    */
   #renderStatusDocks(scene, projectedAgents, transform, policy) {
     const compactMinimumViewport =
       transform.viewportBounds.width <= 600 && transform.viewportBounds.height <= 420;
     const requiredStatusSlots = new Set(
-      projectedAgents
-        .filter(
-          (agent) => agent.statuses.length > 0 && (agent.controlled || agent.selected),
-        )
-        .map(({ layoutSlot }) => layoutSlot),
+      policy.showStatuses
+        ? projectedAgents
+            .filter(
+              (agent) =>
+                agent.statuses.length > 0 && (agent.controlled || agent.selected),
+            )
+            .map(({ layoutSlot }) => layoutSlot)
+        : [],
     );
     const requiredDockRequests = [
       ...projectedAgents
@@ -1454,7 +1586,7 @@ export class BattlefieldRenderer {
         })),
       ...projectedAgents.flatMap((agent) => {
         const ticks = agent.agent.ultimate_cooldown;
-        if (!Number.isInteger(ticks) || Number(ticks) <= 0) {
+        if (!policy.showCooldowns || !Number.isInteger(ticks) || Number(ticks) <= 0) {
           return [];
         }
         return [
@@ -1521,9 +1653,10 @@ export class BattlefieldRenderer {
           globalSlot: agent.layoutSlot,
           center: agent.center,
           radius: agent.radius,
-          statuses: requiredStatusSlots.has(agent.layoutSlot)
-            ? Object.freeze([])
-            : agent.statuses,
+          statuses:
+            policy.showStatuses && !requiredStatusSlots.has(agent.layoutSlot)
+              ? agent.statuses
+              : Object.freeze([]),
           controlled: agent.controlled,
           selected: agent.selected,
         })),
@@ -1656,10 +1789,24 @@ export class BattlefieldRenderer {
       this.layers.durableStatusModifier.removeAttribute(
         "data-compacted-required-docks",
       );
-      this.layers.durableStatusModifier.dataset.suppressedStatusPresentationKeys =
-        presentationKeysForLayoutSlots(statusLayout.suppressedGlobalSlots).join(",");
-      this.layers.durableStatusModifier.dataset.suppressedCooldownPresentationKeys =
-        presentationKeysForLayoutSlots(cooldownLayout.suppressedGlobalSlots).join(",");
+      if (policy.showStatuses) {
+        this.layers.durableStatusModifier.dataset.suppressedStatusPresentationKeys =
+          presentationKeysForLayoutSlots(statusLayout.suppressedGlobalSlots).join(",");
+      } else {
+        this.layers.durableStatusModifier.removeAttribute(
+          "data-suppressed-status-presentation-keys",
+        );
+      }
+      if (policy.showCooldowns) {
+        this.layers.durableStatusModifier.dataset.suppressedCooldownPresentationKeys =
+          presentationKeysForLayoutSlots(cooldownLayout.suppressedGlobalSlots).join(
+            ",",
+          );
+      } else {
+        this.layers.durableStatusModifier.removeAttribute(
+          "data-suppressed-cooldown-presentation-keys",
+        );
+      }
       if (policy.showModifiers) {
         this.layers.durableStatusModifier.dataset.suppressedModifierPresentationKeys =
           presentationKeysForLayoutSlots(modifierLayout.suppressedGlobalSlots).join(
@@ -1693,10 +1840,22 @@ export class BattlefieldRenderer {
       this.layers.durableStatusModifier.removeAttribute(
         "data-compacted-required-presentations",
       );
-      this.layers.durableStatusModifier.dataset.suppressedStatusSlots =
-        statusLayout.suppressedGlobalSlots.join(",");
-      this.layers.durableStatusModifier.dataset.suppressedCooldownSlots =
-        cooldownLayout.suppressedGlobalSlots.join(",");
+      if (policy.showStatuses) {
+        this.layers.durableStatusModifier.dataset.suppressedStatusSlots =
+          statusLayout.suppressedGlobalSlots.join(",");
+      } else {
+        this.layers.durableStatusModifier.removeAttribute(
+          "data-suppressed-status-slots",
+        );
+      }
+      if (policy.showCooldowns) {
+        this.layers.durableStatusModifier.dataset.suppressedCooldownSlots =
+          cooldownLayout.suppressedGlobalSlots.join(",");
+      } else {
+        this.layers.durableStatusModifier.removeAttribute(
+          "data-suppressed-cooldown-slots",
+        );
+      }
       this.layers.durableStatusModifier.dataset.compactedRequiredDocks =
         requiredDockLayout.compactedLayoutKeys.join(",");
       if (policy.showModifiers) {
@@ -2256,11 +2415,68 @@ export class BattlefieldRenderer {
     return group;
   }
 
+  /** @returns {SVGSVGElement} */
+  #createCombatStateIcon() {
+    const icon = createSvgIcon(this.battlefield.ownerDocument, "combat-in-progress", {
+      className: "agent-combat-state-icon",
+    });
+    icon.setAttribute("hidden", "");
+    return icon;
+  }
+
   /**
    * @param {JsonRecord} agent
+   * @returns {{
+   *   root: SVGElement,
+   *   shell: SVGElement,
+   *   chip: SVGElement,
+   *   text: SVGElement,
+   * }}
+   */
+  #createSpawnShieldNodes(agent) {
+    const root = svgElement("g", {
+      class: "agent-spawn-shield",
+      role: "img",
+      "data-zone": "spawn-shield",
+      ...displayIdentityAttributes(agent),
+    });
+    const shell = svgElement("circle", {
+      class: "agent-spawn-shield__shell",
+      fill: "none",
+      stroke: "#fff",
+      "stroke-width": "2.6",
+      "stroke-dasharray": "5 3",
+      "vector-effect": "non-scaling-stroke",
+    });
+    const chip = svgElement("rect", {
+      class: "agent-spawn-shield__chip",
+      width: 27,
+      height: 16,
+      rx: 6,
+      fill: "#000",
+      stroke: "#fff",
+      "stroke-width": "1.5",
+      "vector-effect": "non-scaling-stroke",
+    });
+    const text = svgElement("text", {
+      class: "agent-spawn-shield__ticks",
+      fill: "#fff",
+      "font-size": "9",
+      "font-weight": "800",
+      "text-anchor": "middle",
+      "dominant-baseline": "central",
+      "pointer-events": "none",
+    });
+    root.append(shell, chip, text);
+    return { root, shell, chip, text };
+  }
+
+  /**
+   * @param {JsonRecord} agent
+   * @param {Readonly<DurableVisualPolicy>} visualPolicy
    * @returns {AgentNodes}
    */
-  #createAgentNodes(agent) {
+  #createAgentNodes(agent, visualPolicy) {
     const root = svgElement("g", {
       class: "agent",
       tabindex: "-1",
@@ -2292,51 +2508,17 @@ export class BattlefieldRenderer {
     const classIcon = createSvgIcon(this.battlefield.ownerDocument, "unknown", {
       className: "agent-class-icon",
     });
-    const combatStateIcon = createSvgIcon(
-      this.battlefield.ownerDocument,
-      "combat-in-progress",
-      { className: "agent-combat-state-icon" },
-    );
-    combatStateIcon.setAttribute("hidden", "");
+    const combatStateIcon = visualPolicy.showCombatStatusIcon
+      ? this.#createCombatStateIcon()
+      : null;
     const classLetter = svgElement("text", { class: "agent-class-letter" });
     const deadMark = svgElement("path", {
       class: "agent-dead-mark",
       "aria-hidden": "true",
     });
-    const shieldRoot = svgElement("g", {
-      class: "agent-spawn-shield",
-      role: "img",
-      "data-zone": "spawn-shield",
-      ...displayIdentityAttributes(agent),
-    });
-    const shieldShell = svgElement("circle", {
-      class: "agent-spawn-shield__shell",
-      fill: "none",
-      stroke: "#fff",
-      "stroke-width": "2.6",
-      "stroke-dasharray": "5 3",
-      "vector-effect": "non-scaling-stroke",
-    });
-    const shieldChip = svgElement("rect", {
-      class: "agent-spawn-shield__chip",
-      width: 27,
-      height: 16,
-      rx: 6,
-      fill: "#000",
-      stroke: "#fff",
-      "stroke-width": "1.5",
-      "vector-effect": "non-scaling-stroke",
-    });
-    const shieldText = svgElement("text", {
-      class: "agent-spawn-shield__ticks",
-      fill: "#fff",
-      "font-size": "9",
-      "font-weight": "800",
-      "text-anchor": "middle",
-      "dominant-baseline": "central",
-      "pointer-events": "none",
-    });
-    shieldRoot.append(shieldShell, shieldChip, shieldText);
+    const shieldNodes = visualPolicy.showSpawnShield
+      ? this.#createSpawnShieldNodes(agent)
+      : null;
     root.append(
       body,
       teamRing,
@@ -2344,7 +2526,7 @@ export class BattlefieldRenderer {
       healthTrack,
       health,
       classIcon,
-      combatStateIcon,
+      ...(combatStateIcon === null ? [] : [combatStateIcon]),
       classLetter,
       deadMark,
     );
@@ -2373,10 +2555,10 @@ export class BattlefieldRenderer {
       combatStateIcon,
       classLetter,
       deadMark,
-      shieldRoot,
-      shieldShell,
-      shieldChip,
-      shieldText,
+      shieldRoot: shieldNodes?.root ?? null,
+      shieldShell: shieldNodes?.shell ?? null,
+      shieldChip: shieldNodes?.chip ?? null,
+      shieldText: shieldNodes?.text ?? null,
       selectionRoot,
       controlledHalo,
       selectedReticle,
@@ -2391,6 +2573,7 @@ export class BattlefieldRenderer {
    * @param {number} radius
    * @param {boolean} controlled
    * @param {boolean} selected
+   * @param {Readonly<DurableVisualPolicy>} visualPolicy
    */
   #updateAgentNodes(
     nodes,
@@ -2400,9 +2583,20 @@ export class BattlefieldRenderer {
     radius,
     controlled,
     selected,
+    visualPolicy,
   ) {
     const classToken = classTokenFromId(agent.class_id);
     const teamToken = teamTokenFromId(agent.team_id);
+    if (visualPolicy.showCombatStatusIcon && nodes.combatStateIcon === null) {
+      nodes.combatStateIcon = this.#createCombatStateIcon();
+    }
+    if (visualPolicy.showSpawnShield && nodes.shieldRoot === null) {
+      const shieldNodes = this.#createSpawnShieldNodes(agent);
+      nodes.shieldRoot = shieldNodes.root;
+      nodes.shieldShell = shieldNodes.shell;
+      nodes.shieldChip = shieldNodes.chip;
+      nodes.shieldText = shieldNodes.text;
+    }
     const healthRadius = Math.max(radius - 4, radius * 0.7);
     const healthRatio = Math.max(
       0,
@@ -2426,10 +2620,15 @@ export class BattlefieldRenderer {
     nodes.root.dataset.selected = String(selected);
     nodes.root.dataset.combatStatus = inCombat ? "IC" : "OOC";
     nodes.root.dataset.stepsUntilOutOfCombat = String(stepsUntilOutOfCombat);
-    const spawnShieldView = createSpawnShieldView(agent, spawnShieldMechanics);
-    const spawnShieldRemaining = spawnShieldView.remainingTicks;
+    const spawnShieldView = visualPolicy.showSpawnShield
+      ? createSpawnShieldView(agent, spawnShieldMechanics)
+      : null;
+    const spawnShieldRemaining = Number.isInteger(agent.spawn_shield_remaining)
+      ? Math.max(0, Number(agent.spawn_shield_remaining))
+      : 0;
     if (
-      !spawnShieldView.active &&
+      (!visualPolicy.showSpawnShield || spawnShieldView?.active !== true) &&
+      nodes.shieldRoot !== null &&
       nodes.shieldRoot.ownerDocument.activeElement === nodes.shieldRoot
     ) {
       nodes.shieldRoot.blur();
@@ -2446,10 +2645,12 @@ export class BattlefieldRenderer {
         teamToken.label,
         `health ${formatDisplayNumber(agent.current_health)} of ${formatDisplayNumber(agent.max_health)}`,
         agent.alive ? "alive" : "dead",
-        inCombat
-          ? `combat status IC, steps until OOC ${stepsUntilOutOfCombat}`
-          : "combat status OOC",
-        spawnShieldView.rootAriaLabel,
+        visualPolicy.showCombatStatusIcon
+          ? inCombat
+            ? `combat status IC, steps until OOC ${stepsUntilOutOfCombat}`
+            : "combat status OOC"
+          : null,
+        spawnShieldView?.rootAriaLabel ?? null,
         controlled ? "controlled actor" : null,
         selected ? "selected target" : null,
       ]
@@ -2473,34 +2674,42 @@ export class BattlefieldRenderer {
         `L ${center.x + radius - 7} ${center.y + 4}`,
       ].join(" "),
     });
-    setAttributes(nodes.shieldRoot, {
-      hidden: spawnShieldView.active ? null : "",
-      tabindex: spawnShieldView.active ? "0" : "-1",
-      "aria-label": spawnShieldView.shieldAriaLabel,
-    });
-    setAttributes(nodes.shieldShell, {
-      cx: center.x,
-      cy: center.y,
-      r: radius + 5,
-    });
-    const shieldChipX = center.x + radius * 0.6;
-    const shieldChipY = center.y - radius - 13;
-    setAttributes(nodes.shieldChip, {
-      x: shieldChipX,
-      y: shieldChipY,
-    });
-    setAttributes(nodes.shieldText, {
-      x: shieldChipX + 13.5,
-      y: shieldChipY + 8,
-    });
-    nodes.shieldText.textContent = spawnShieldView.badgeText;
-    if (spawnShieldView.active) {
-      nodes.shieldRoot.removeAttribute("aria-description");
-      registerTooltipOwner(nodes.shieldRoot, spawnShieldView.descriptor);
-    } else {
-      nodes.shieldRoot.removeAttribute("data-tooltip-owner");
-      nodes.shieldRoot.removeAttribute("aria-describedby");
-      nodes.shieldRoot.removeAttribute("aria-description");
+    if (
+      spawnShieldView !== null &&
+      nodes.shieldRoot !== null &&
+      nodes.shieldShell !== null &&
+      nodes.shieldChip !== null &&
+      nodes.shieldText !== null
+    ) {
+      setAttributes(nodes.shieldRoot, {
+        hidden: spawnShieldView.active ? null : "",
+        tabindex: spawnShieldView.active ? "0" : "-1",
+        "aria-label": spawnShieldView.shieldAriaLabel,
+      });
+      setAttributes(nodes.shieldShell, {
+        cx: center.x,
+        cy: center.y,
+        r: radius + 5,
+      });
+      const shieldChipX = center.x + radius * 0.6;
+      const shieldChipY = center.y - radius - 13;
+      setAttributes(nodes.shieldChip, {
+        x: shieldChipX,
+        y: shieldChipY,
+      });
+      setAttributes(nodes.shieldText, {
+        x: shieldChipX + 13.5,
+        y: shieldChipY + 8,
+      });
+      nodes.shieldText.textContent = spawnShieldView.badgeText;
+      if (spawnShieldView.active) {
+        nodes.shieldRoot.removeAttribute("aria-description");
+        registerTooltipOwner(nodes.shieldRoot, spawnShieldView.descriptor);
+      } else {
+        nodes.shieldRoot.removeAttribute("data-tooltip-owner");
+        nodes.shieldRoot.removeAttribute("aria-describedby");
+        nodes.shieldRoot.removeAttribute("aria-description");
+      }
     }
     setAttributes(nodes.healthTrack, {
       cx: center.x,
@@ -2530,7 +2739,10 @@ export class BattlefieldRenderer {
     const combatIconSize = Math.max(8, Math.min(radius * 0.42, 12));
     const combatIconGap = Math.max(1, Math.min(radius * 0.12, 3));
     const identityGlyphWidth =
-      iconSize + (inCombat ? combatIconGap + combatIconSize : 0);
+      iconSize +
+      (visualPolicy.showCombatStatusIcon && inCombat
+        ? combatIconGap + combatIconSize
+        : 0);
     const classIconX = center.x - identityGlyphWidth / 2;
     const identityGlyphCenterY = center.y - iconSize * 0.12;
     setAttributes(nodes.classIcon, {
@@ -2539,13 +2751,24 @@ export class BattlefieldRenderer {
       width: iconSize,
       height: iconSize,
     });
-    setAttributes(nodes.combatStateIcon, {
-      x: classIconX + iconSize + combatIconGap,
-      y: identityGlyphCenterY - combatIconSize / 2,
-      width: combatIconSize,
-      height: combatIconSize,
-      hidden: inCombat ? null : "",
-    });
+    if (visualPolicy.showCombatStatusIcon) {
+      const combatStateIcon = nodes.combatStateIcon;
+      if (combatStateIcon === null) {
+        throw new Error("Combat status icon policy was enabled without an icon.");
+      }
+      if (combatStateIcon.parentNode !== nodes.root) {
+        nodes.classLetter.before(combatStateIcon);
+      }
+      setAttributes(combatStateIcon, {
+        x: classIconX + iconSize + combatIconGap,
+        y: identityGlyphCenterY - combatIconSize / 2,
+        width: combatIconSize,
+        height: combatIconSize,
+        hidden: inCombat ? null : "",
+      });
+    } else {
+      nodes.combatStateIcon?.remove();
+    }
     setAttributes(nodes.classLetter, {
       x: center.x,
       y: center.y + Math.min(radius * 0.5, 11) + 2,

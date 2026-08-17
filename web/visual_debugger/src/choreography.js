@@ -184,6 +184,7 @@ export class CombatChoreographer {
    *         motionMode: MotionMode,
    *         settled: boolean,
    *         persistentOnly: boolean,
+   *         retainTransientOnSettle?: boolean,
    *       },
    *     ) => ChoreographyInstallation,
    *     clear: (installation: any, reason: string) => void,
@@ -197,6 +198,7 @@ export class CombatChoreographer {
    *   planBuilder?: (
    *     frame: unknown,
    *     surface: ChoreographySurface | null,
+   *     visualFilters?: Record<string, boolean>,
    *   ) => Record<string, any> | null,
    *   animationFactory?: AnimationFactory,
    *   ledger?: ConsumedTransitionLedger,
@@ -246,6 +248,7 @@ export class CombatChoreographer {
       epochKey: this.plan?.epochKey ?? null,
       authorizationKey: this.plan?.authorizationKey ?? null,
       fingerprint: this.plan?.fingerprint ?? null,
+      paintKey: this.plan?.paintKey ?? null,
       logicalTime: this.logicalTime,
       motionMode: this.motionMode,
       paused: this.paused,
@@ -273,10 +276,15 @@ export class CombatChoreographer {
    *
    * @param {unknown} frame
    * @param {ChoreographySurface | null} surface
-   * @param {{animateIncoming?: boolean}} [presentationControl]
+   * @param {{
+   *   animateIncoming?: boolean,
+   *   visualFilters?: Record<string, boolean>,
+   * }} [presentationControl]
    */
   presentFrame(frame, surface, presentationControl = {}) {
-    const nextPlan = surface ? this.planBuilder(frame, surface) : null;
+    const nextPlan = surface
+      ? this.planBuilder(frame, surface, presentationControl.visualFilters)
+      : null;
     if (!nextPlan || !surface) {
       this.clear("absent_scene_or_event_batch");
       return this.snapshot();
@@ -287,12 +295,13 @@ export class CombatChoreographer {
     const sameAuthorization =
       currentPlan?.authorizationKey === nextPlan.authorizationKey;
     const sameFingerprint = currentPlan?.fingerprint === nextPlan.fingerprint;
+    const samePaint = currentPlan?.paintKey === nextPlan.paintKey;
     const replayMustSettle =
       isRecord(frame) &&
       frame.viewer_mode === "replay" &&
       presentationControl.animateIncoming !== true;
 
-    if (sameEpoch && sameAuthorization && sameFingerprint) {
+    if (sameEpoch && sameAuthorization && sameFingerprint && samePaint) {
       if (this.surface?.viewportKey !== surface.viewportKey && this.installation) {
         this.painter.reproject(this.installation, nextPlan, surface);
       }
@@ -301,6 +310,26 @@ export class CombatChoreographer {
       if (replayMustSettle && !this.#isSettled()) {
         return this.skip();
       }
+      this.#publish();
+      return this.snapshot();
+    }
+
+    if (sameEpoch && sameAuthorization && sameFingerprint && !samePaint) {
+      const replayPaintChange = isRecord(frame) && frame.viewer_mode === "replay";
+      // Paint controls are local presentation state. Rebuild the same replay
+      // epoch as a static, paused summary; live mode settles the current
+      // explanation and applies transient paint changes only to future epochs.
+      if (replayPaintChange) {
+        this.paused = true;
+      }
+      this.#clearOwned("visual_filters_changed");
+      this.plan = nextPlan;
+      this.surface = surface;
+      this.#install(nextPlan, surface, {
+        settled: true,
+        persistentOnly: !replayPaintChange,
+        retainTransientOnSettle: replayPaintChange,
+      });
       this.#publish();
       return this.snapshot();
     }
@@ -340,18 +369,26 @@ export class CombatChoreographer {
    *
    * @param {unknown} frame
    * @param {ChoreographySurface | null} surface
-   * @param {{animateIncoming?: boolean}} [presentationControl]
+   * @param {{
+   *   animateIncoming?: boolean,
+   *   visualFilters?: Record<string, boolean>,
+   * }} [presentationControl]
    */
   reproject(frame, surface, presentationControl = {}) {
     if (!surface || !this.installation || !this.plan) {
       return this.presentFrame(frame, surface, presentationControl);
     }
-    const nextPlan = this.planBuilder(frame, surface);
+    const nextPlan = this.planBuilder(
+      frame,
+      surface,
+      presentationControl.visualFilters,
+    );
     if (
       !nextPlan ||
       nextPlan.epochKey !== this.plan.epochKey ||
       nextPlan.authorizationKey !== this.plan.authorizationKey ||
-      nextPlan.fingerprint !== this.plan.fingerprint
+      nextPlan.fingerprint !== this.plan.fingerprint ||
+      nextPlan.paintKey !== this.plan.paintKey
     ) {
       return this.presentFrame(frame, surface, presentationControl);
     }
@@ -461,16 +498,30 @@ export class CombatChoreographer {
   /**
    * @param {Record<string, any>} plan
    * @param {ChoreographySurface} surface
-   * @param {{settled: boolean, persistentOnly: boolean}} options
+   * @param {{
+   *   settled: boolean,
+   *   persistentOnly: boolean,
+   *   retainTransientOnSettle?: boolean,
+   * }} options
    */
   #install(plan, surface, options) {
     const persistentOnly = Boolean(options.persistentOnly);
     const settled = Boolean(options.settled);
-    const installation = this.painter.install(plan, surface, {
+    /** @type {{
+     *   motionMode: MotionMode,
+     *   settled: boolean,
+     *   persistentOnly: boolean,
+     *   retainTransientOnSettle?: boolean,
+     * }} */
+    const painterOptions = {
       motionMode: this.motionMode,
       settled,
       persistentOnly,
-    });
+    };
+    if (options.retainTransientOnSettle === true) {
+      painterOptions.retainTransientOnSettle = true;
+    }
+    const installation = this.painter.install(plan, surface, painterOptions);
     const nodeCount = nonNegativeInteger(installation.nodeCount ?? 0, "nodeCount");
     const animationSpecs = Array.isArray(installation.animationSpecs)
       ? installation.animationSpecs
