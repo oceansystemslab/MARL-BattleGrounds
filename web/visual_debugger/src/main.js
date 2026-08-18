@@ -125,6 +125,8 @@ const elements = {
   replayLastButton: requiredElement("replay-last-button"),
   replayFrameSlider: requiredElement("replay-frame-slider"),
   replayFramePosition: requiredElement("replay-frame-position"),
+  replayPlaybackRate: requiredElement("replay-playback-rate"),
+  replayTransportStatus: requiredElement("replay-transport-status"),
   replayRangesButton: requiredElement("replay-ranges-button"),
   replayClearReferenceButton: requiredElement("replay-clear-reference-button"),
   reconnectButton: requiredElement("reconnect-button"),
@@ -304,6 +306,8 @@ let activePresentationPreference = null;
 
 let presentationPreferenceGeneration = 0;
 let presentationPreferenceNeedsContentRender = false;
+let consumedReplayRestartGeneration = -1;
+let suppressPlaybackStateRender = false;
 /** @type {number | null} */
 let pendingPresentationPreferenceRestoreFrame = null;
 /** @type {Element | null} */
@@ -456,7 +460,7 @@ const CONTROL_HELP = Object.freeze([
     "Discard and replace",
     "Confirm permanent loss of the unpublished prefix and start its named replacement.",
   ],
-  ["#replay-first-button", "First replay tick", "Seek to settled replay tick zero."],
+  ["#replay-first-button", "Start replay tick", "Seek to settled replay tick zero."],
   [
     "#replay-back-ten-button",
     "Back ten ticks",
@@ -482,15 +486,16 @@ const CONTROL_HELP = Object.freeze([
     "Forward ten ticks",
     "Seek ten ticks forward with one clamped request.",
   ],
-  [
-    "#replay-last-button",
-    "Last replay tick",
-    "Seek to the end of the captured prefix.",
-  ],
+  ["#replay-last-button", "End replay tick", "Seek to the end of the captured prefix."],
   [
     "#replay-frame-slider",
     "Replay tick",
-    "Seek to an exact captured tick after a short debounce.",
+    "Preview locally without a request, then commit one exact captured-tick seek.",
+  ],
+  [
+    "#replay-playback-rate",
+    "Replay playback speed",
+    "Scale the complete replay presentation clock without changing artifact authority.",
   ],
   [
     "#command-target-select",
@@ -560,6 +565,8 @@ const choreographer = new CombatChoreographer({
 
 const replayTimelineElements = {
   root: elements.replayTimeline,
+  keyboardTarget: document,
+  keyboardEnabled: () => installedPresentationAuthority() !== null,
   firstButton: elements.replayFirstButton,
   backTenButton: elements.replayBackTenButton,
   previousButton: elements.replayPreviousButton,
@@ -569,22 +576,40 @@ const replayTimelineElements = {
   lastButton: elements.replayLastButton,
   slider: elements.replayFrameSlider,
   position: elements.replayFramePosition,
+  rateSelect: elements.replayPlaybackRate,
+  status: elements.replayTransportStatus,
   tickForFrameIndex: (/** @type {number} */ frameIndex) =>
     installedPresentationAuthority() === null
       ? null
       : replayTimelineSimulatorStep(state.timeline, frameIndex),
+  incomingTransitionForFrameIndex: (/** @type {number} */ frameIndex) => {
+    const installed = installedPresentationAuthority();
+    if (installed === null || installed.transport.cursor?.frame_index !== frameIndex) {
+      return null;
+    }
+    return authorizedIncomingTransitionId(installed.presentation);
+  },
 };
 
 const replayPlayback = new ReplayPlaybackController({
-  request: sendReplayCommand,
+  request: sendReplayTransportCommand,
   waitForPresentation: () => choreographer.whenSettled(),
   getMotionMode: () => choreographer.snapshot().motionMode,
   onStateChange: (playback) => {
+    choreographer.setPlaybackRate(playback.playbackRate);
     const timeline =
       installedPresentationAuthority() === null
         ? pendingPresentationSurfaceView(playback).replay.timeline
         : playback;
     renderReplayTimelineControls(replayTimelineElements, timeline);
+    if (
+      installedPresentationAuthority() !== null &&
+      !state.busy &&
+      !suppressPlaybackStateRender &&
+      playback.transportState !== "ADVANCING"
+    ) {
+      render();
+    }
   },
   onError: (error) => {
     if (!state.notice || state.noticeLevel !== "error") {
@@ -1500,12 +1525,18 @@ function applyVisualFilterAction(action) {
  *
  * @param {unknown} presentation
  * @param {typeof visualFilterState} visualFilters
+ * @param {{consumeAnimatedRestart?: boolean}} [options]
  * @returns {Readonly<{
  *   renderPolicy: "live_once" | "replay_animated" | "replay_static",
  *   visualFilters: typeof visualFilterState,
+ *   restartAnimated?: true,
  * }>}
  */
-function installedChoreographyControl(presentation, visualFilters) {
+function installedChoreographyControl(
+  presentation,
+  visualFilters,
+  { consumeAnimatedRestart = false } = {},
+) {
   const authority = state.authority;
   const coherentInstalledPair =
     isAuthorizedPresentationFrame(presentation) &&
@@ -1516,14 +1547,47 @@ function installedChoreographyControl(presentation, visualFilters) {
     coherentInstalledPair &&
     isReplayMode() &&
     authority.transport.viewer_mode === "replay";
+  if (!replayInstalled) {
+    return Object.freeze({
+      renderPolicy: "live_once",
+      visualFilters,
+    });
+  }
+
+  const playback = replayPlayback.snapshot();
+  const intent = playback.presentationIntent;
+  const currentIntent =
+    isRecord(intent) &&
+    replayCursorsMatch(playback.cursor, authority.transport.cursor) &&
+    playback.transportState !== "OFFLINE";
+  const renderPolicy = currentIntent ? intent.renderPolicy : "replay_static";
+  const restartAnimated =
+    consumeAnimatedRestart &&
+    renderPolicy === "replay_animated" &&
+    intent?.restartAnimated === true &&
+    intent.generation > consumedReplayRestartGeneration;
+  if (restartAnimated) {
+    consumedReplayRestartGeneration = intent.generation;
+  }
   return Object.freeze({
-    renderPolicy: replayInstalled
-      ? authority.transport.animate_incoming === true
-        ? "replay_animated"
-        : "replay_static"
-      : "live_once",
+    renderPolicy,
     visualFilters,
+    ...(restartAnimated ? { restartAnimated: true } : {}),
   });
+}
+
+/** @param {unknown} left @param {unknown} right */
+function replayCursorsMatch(left, right) {
+  if (!isRecord(left) || !isRecord(right)) {
+    return false;
+  }
+  return (
+    left.schema_version === right.schema_version &&
+    left.frame_index === right.frame_index &&
+    left.final_frame_index === right.final_frame_index &&
+    left.cursor_generation === right.cursor_generation &&
+    left.choreography_generation === right.choreography_generation
+  );
 }
 
 function installedPresentationAuthority() {
@@ -2890,6 +2954,16 @@ function activateAuthorizedAgent(presentationKey) {
   return true;
 }
 
+/** @param {string} reason */
+function pauseReplayAfterPresentationFailure(reason) {
+  suppressPlaybackStateRender = true;
+  try {
+    replayPlayback.pause(reason);
+  } finally {
+    suppressPlaybackStateRender = false;
+  }
+}
+
 function render() {
   capturePresentationPreferenceBeforeRender();
   const installed = installedPresentationAuthority();
@@ -2899,6 +2973,7 @@ function render() {
   const choreographyControl = installedChoreographyControl(
     presentationFrame,
     visualFilterSnapshot,
+    { consumeAnimatedRestart: true },
   );
   renderVisualFilterControls(visualFilterSnapshot);
   renderConnection();
@@ -2921,6 +2996,7 @@ function render() {
       choreographyControl,
     );
   } catch (error) {
+    pauseReplayAfterPresentationFailure("presentation_error");
     choreographer.clear("presentation_error");
     setNotice(
       error instanceof Error
@@ -2987,6 +3063,7 @@ function scheduleBattlefieldResize() {
         choreographyControl,
       );
     } catch (error) {
+      pauseReplayAfterPresentationFailure("resize_projection_error");
       choreographer.clear("resize_projection_error");
       setNotice(
         error instanceof Error
@@ -3048,8 +3125,9 @@ function requestRecordingDiscardConfirmation(replacement) {
  * before resolving so presentation settling can begin immediately.
  *
  * @param {Readonly<Record<string, any>>} command
+ * @param {{deferFinalRender?: boolean}} [options]
  */
-async function sendReplayCommand(command) {
+async function sendReplayCommand(command, { deferFinalRender = false } = {}) {
   if (!isReplayMode() || !state.frame || !state.presentation) {
     throw new DebuggerApiError("Replay controls require an installed replay frame.");
   }
@@ -3194,8 +3272,20 @@ async function sendReplayCommand(command) {
     throw error;
   } finally {
     state.busy = false;
-    render();
+    if (!deferFinalRender || state.resyncRequired || state.shuttingDown) {
+      render();
+    }
   }
+}
+
+/**
+ * Let the playback controller validate and publish its successor intent before
+ * the newly installed authority receives its first non-pending render.
+ *
+ * @param {Readonly<Record<string, any>>} command
+ */
+function sendReplayTransportCommand(command) {
+  return sendReplayCommand(command, { deferFinalRender: true });
 }
 
 /** @param {Readonly<Record<string, any>>} command */

@@ -173,7 +173,7 @@
       </div>
       <fieldset class="replay-timeline__transport">
         <legend class="sr-only">Replay transport</legend>
-        <button id="replay-first-button" type="button" aria-label="First replay tick">First</button>
+        <button id="replay-first-button" type="button" aria-label="Start replay tick">Start</button>
         <button id="replay-back-ten-button" type="button" aria-label="Go back ten replay ticks">−10</button>
         <button id="replay-previous-button" type="button" aria-label="Previous replay tick">−1</button>
         <button
@@ -185,7 +185,7 @@
         >Play</button>
         <button id="replay-next-button" type="button" aria-label="Next replay tick">+1</button>
         <button id="replay-forward-ten-button" type="button" aria-label="Go forward ten replay ticks">+10</button>
-        <button id="replay-last-button" type="button" aria-label="Last replay tick">Last</button>
+        <button id="replay-last-button" type="button" aria-label="End replay tick">End</button>
         <label class="replay-timeline__slider">
           <span>Tick</span>
           <input
@@ -201,6 +201,22 @@
         </label>
         <output id="replay-frame-position" for="replay-frame-slider" aria-live="polite">
           Tick 0 / 0
+        </output>
+        <label class="replay-timeline__rate">
+          <span>Speed</span>
+          <select id="replay-playback-rate" aria-label="Replay playback speed">
+            <option value="0.25">0.25×</option>
+            <option value="0.5">0.50×</option>
+            <option value="0.75">0.75×</option>
+            <option value="1" selected>1.00×</option>
+            <option value="1.25">1.25×</option>
+            <option value="1.5">1.50×</option>
+            <option value="1.75">1.75×</option>
+            <option value="2">2.00×</option>
+          </select>
+        </label>
+        <output id="replay-transport-status" aria-live="polite">
+          Frame — / — · Tick — / — · 1.00× · OFFLINE
         </output>
       </fieldset>
     </section>
@@ -592,16 +608,16 @@
             recorded frame; it cannot submit an action or advance the simulator.
           </p>
           <dl class="help-grid">
-            <dt>Home / End</dt><dd>Go to the first / last captured frame</dd>
             <dt>Left / Right</dt><dd>Go to the previous / next captured tick</dd>
-            <dt>Shift+Left / Shift+Right</dt><dd>Seek ten captured ticks with one request</dd>
             <dt>Space</dt><dd>Play or pause serialized replay</dd>
-            <dt>Frame slider</dt><dd>Seek after a short debounce</dd>
+            <dt>Frame slider</dt><dd>Preview without a request; commit one exact seek</dd>
+            <dt>Playback speed</dt><dd>Scale the complete replay presentation clock</dd>
           </dl>
           <p class="help-note">
-            Autoplay keeps one request in flight and waits for each incoming
-            explanation to settle. Seeking, errors, disconnects, hidden tabs,
-            and the captured endpoint pause it.
+            Start, −10, −1, +1, +10, End, and committed slider seeks show
+            one complete static transition summary. Play restarts the displayed
+            incoming transition at logical time zero, waits for its scaled
+            presentation to settle, and then continues with one request in flight.
           </p>
         </div>
       </form>

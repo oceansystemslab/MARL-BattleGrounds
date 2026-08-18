@@ -211,8 +211,16 @@ test("clear then pending render cannot republish retained Oracle or successor PO
     null,
   );
   const pending = pendingPresentationSurfaceView({
+    transportState: "PLAYING",
+    generation: 41,
+    presentationIntent: {
+      generation: 17,
+      renderPolicy: "replay_animated",
+      restartAnimated: true,
+    },
     connected: true,
     hidden: false,
+    playbackRate: 1.75,
     cursor: {
       schema_version: 1,
       frame_index: 7,
@@ -245,10 +253,14 @@ test("clear then pending render cannot republish retained Oracle or successor PO
   assert.deepEqual(pending.terminal, { hidden: true, text: "Terminal" });
   assert.equal(pending.viewMode, "");
   assert.equal(pending.replay.timeline.cursor, null);
+  assert.equal(pending.replay.timeline.transportState, "OFFLINE");
+  assert.equal(pending.replay.timeline.generation, 0);
+  assert.equal(pending.replay.timeline.presentationIntent, null);
   assert.equal(pending.replay.timeline.connected, false);
+  assert.equal(pending.replay.timeline.playbackRate, 1.75);
   assert.equal(pending.replay.timeline.playing, false);
-  assert.equal(pending.replay.timeline.requestPending, true);
-  assert.equal(pending.replay.timeline.presentationPending, true);
+  assert.equal(pending.replay.timeline.requestPending, false);
+  assert.equal(pending.replay.timeline.presentationPending, false);
 
   runtimeState.frame = pov.transport;
   runtimeState.presentation = pov.presentation;
@@ -694,17 +706,22 @@ test("battlefield delegation leaves nested scientific owners and terminal frames
   assert.match(installSource, /\{ inspectable: false \}/u);
 });
 
-test("main carries replay animation intent only beside the installed presentation", async () => {
+test("main derives replay animation only from the current controller intent", async () => {
   const source = await readFile(mainUrl, "utf8");
   const helperStart = source.indexOf("function installedChoreographyControl(");
   const helperEnd = source.indexOf(
-    "function authorizedIncomingTransitionId(",
+    "function installedPresentationAuthority()",
     helperStart,
   );
+  const resizeStart = source.indexOf("function scheduleBattlefieldResize()");
+  const resizeEnd = source.indexOf("function commandRequest(", resizeStart);
 
   assert.notEqual(helperStart, -1);
   assert.notEqual(helperEnd, -1);
+  assert.notEqual(resizeStart, -1);
+  assert.notEqual(resizeEnd, -1);
   const helperSource = source.slice(helperStart, helperEnd);
+  const resizeSource = source.slice(resizeStart, resizeEnd);
   assert.match(
     helperSource,
     /isJoinedTransportAndAuthorizedPresentationV1\(authority\)/u,
@@ -713,12 +730,17 @@ test("main carries replay animation intent only beside the installed presentatio
   assert.match(helperSource, /authority\.transport === state\.frame/u);
   assert.match(
     helperSource,
-    /authority\.transport\.viewer_mode === "replay"[\s\S]*authority\.transport\.animate_incoming === true/u,
+    /authority\.transport\.viewer_mode === "replay"[\s\S]*replayPlayback\.snapshot\(\)[\s\S]*replayCursorsMatch\(playback\.cursor, authority\.transport\.cursor\)/u,
   );
-  assert.doesNotMatch(helperSource, /presentation\.animate_incoming/u);
+  assert.match(helperSource, /playback\.transportState !== "OFFLINE"/u);
+  assert.match(
+    helperSource,
+    /intent\.generation > consumedReplayRestartGeneration[\s\S]*consumedReplayRestartGeneration = intent\.generation/u,
+  );
+  assert.doesNotMatch(helperSource, /animate_incoming/u);
   assert.match(
     source,
-    /const choreographyControl = installedChoreographyControl\(\s*presentationFrame,\s*visualFilterSnapshot,?\s*\);[\s\S]*choreographer\.presentFrame\(\s*presentationFrame,\s*battlefieldRenderer\.choreographySurface\(\),\s*choreographyControl,?\s*\)/u,
+    /const choreographyControl = installedChoreographyControl\(\s*presentationFrame,\s*visualFilterSnapshot,\s*\{ consumeAnimatedRestart: true \},?\s*\);[\s\S]*choreographer\.presentFrame\(\s*presentationFrame,\s*battlefieldRenderer\.choreographySurface\(\),\s*choreographyControl,?\s*\)/u,
   );
   assert.equal(
     [...source.matchAll(/const choreographyControl = installedChoreographyControl\(/gu)]
@@ -728,6 +750,87 @@ test("main carries replay animation intent only beside the installed presentatio
   assert.match(
     source,
     /choreographer\.reproject\(\s*presentationFrame,\s*battlefieldRenderer\.choreographySurface\(\),\s*choreographyControl,?\s*\)/u,
+  );
+  assert.doesNotMatch(resizeSource, /consumeAnimatedRestart/u);
+  assert.match(
+    source,
+    /incomingTransitionForFrameIndex:[\s\S]*installed\.transport\.cursor\?\.frame_index !== frameIndex[\s\S]*return authorizedIncomingTransitionId\(installed\.presentation\);/u,
+  );
+  assert.doesNotMatch(
+    source.slice(
+      source.indexOf("incomingTransitionForFrameIndex:"),
+      source.indexOf(
+        "const replayPlayback",
+        source.indexOf("incomingTransitionForFrameIndex:"),
+      ),
+    ),
+    /previousTick|currentTick|\u2192/u,
+  );
+});
+
+test("playback controller owns the first installed-successor render", async () => {
+  const source = await readFile(mainUrl, "utf8");
+  const controllerStart = source.indexOf(
+    "const replayPlayback = new ReplayPlaybackController(",
+  );
+  const controllerEnd = source.indexOf(
+    "const panels = new DebuggerPanels(",
+    controllerStart,
+  );
+  const sendStart = source.indexOf("async function sendReplayCommand(");
+  const sendEnd = source.indexOf("async function dispatchReplayCommand(", sendStart);
+  const dispatchEnd = source.indexOf("function dispatchPanelCommand(", sendEnd);
+
+  for (const boundary of [
+    controllerStart,
+    controllerEnd,
+    sendStart,
+    sendEnd,
+    dispatchEnd,
+  ]) {
+    assert.notEqual(boundary, -1);
+  }
+  const controllerSource = source.slice(controllerStart, controllerEnd);
+  const sendSource = source.slice(sendStart, sendEnd);
+  const dispatchSource = source.slice(sendEnd, dispatchEnd);
+
+  assert.match(controllerSource, /request: sendReplayTransportCommand/u);
+  assert.match(
+    controllerSource,
+    /!state\.busy[\s\S]*!suppressPlaybackStateRender[\s\S]*playback\.transportState !== "ADVANCING"[\s\S]*render\(\);/u,
+  );
+  assert.match(
+    source,
+    /keyboardEnabled: \(\) => installedPresentationAuthority\(\) !== null/u,
+  );
+  assert.match(
+    sendSource,
+    /function sendReplayTransportCommand\(command\) \{\s*return sendReplayCommand\(command, \{ deferFinalRender: true \}\);/u,
+  );
+  assert.match(
+    sendSource,
+    /async function sendReplayCommand\(command, \{ deferFinalRender = false \} = \{\}\)/u,
+  );
+  assert.match(
+    sendSource,
+    /finally \{\s*state\.busy = false;\s*if \(!deferFinalRender \|\| state\.resyncRequired \|\| state\.shuttingDown\) \{\s*render\(\);/u,
+  );
+  assert.match(dispatchSource, /const payload = await sendReplayCommand\(command\);/u);
+  assert.doesNotMatch(dispatchSource, /deferFinalRender/u);
+  assert.equal([...source.matchAll(/deferFinalRender: true/gu)].length, 1);
+  assert.match(
+    source,
+    /function pauseReplayAfterPresentationFailure\(reason\)[\s\S]*suppressPlaybackStateRender = true;[\s\S]*replayPlayback\.pause\(reason\);[\s\S]*suppressPlaybackStateRender = false;/u,
+  );
+  assertSourceOrder(
+    source,
+    'pauseReplayAfterPresentationFailure("presentation_error")',
+    'choreographer.clear("presentation_error")',
+  );
+  assertSourceOrder(
+    source,
+    'pauseReplayAfterPresentationFailure("resize_projection_error")',
+    'choreographer.clear("resize_projection_error")',
   );
 });
 

@@ -2,6 +2,7 @@ import {
   isJoinedTransportAndAuthorizedPresentationV1,
   isNormalizedAuthorizedPresentationFrameV1,
 } from "./authorized-presentation-normalizer.js";
+import { REPLAY_PLAYBACK_RATES } from "./replay-controls.js";
 
 export const PENDING_PRESENTATION_COPY = "Unavailable while authority is pending";
 
@@ -43,13 +44,17 @@ export function resolveInstalledPresentationAuthorityV1(
 
 /**
  * Produce the exact fail-closed chrome contract used both at synchronous clear
- * time and during every pending render. The replay snapshot is copied only to
- * preserve its inert presentation settings; cursor, connection, playback, and
- * request capability are deliberately reset.
+ * time and during every pending render. No authority, cursor, continuation, or
+ * preview field from the previous transport snapshot is copied into the
+ * pending timeline. The validated playback rate is a page-local presentation
+ * preference and remains inert while transport is offline.
  *
  * @param {ReturnType<import("./replay-controls.js").ReplayPlaybackController["snapshot"]>} replaySnapshot
  */
 export function pendingPresentationSurfaceView(replaySnapshot) {
+  const playbackRate = REPLAY_PLAYBACK_RATES.includes(replaySnapshot.playbackRate)
+    ? replaySnapshot.playbackRate
+    : 1;
   return Object.freeze({
     presentation: null,
     transport: null,
@@ -62,12 +67,15 @@ export function pendingPresentationSurfaceView(replaySnapshot) {
       processing: PENDING_PRESENTATION_COPY,
       endReason: PENDING_PRESENTATION_COPY,
       timeline: Object.freeze({
-        ...replaySnapshot,
+        transportState: "OFFLINE",
+        generation: 0,
+        presentationIntent: null,
         cursor: null,
         connected: false,
         hidden: true,
-        requestPending: true,
-        presentationPending: true,
+        playbackRate,
+        requestPending: false,
+        presentationPending: false,
         playing: false,
         pauseReason: "presentation_pending",
         atStart: true,

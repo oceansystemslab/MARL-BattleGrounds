@@ -182,7 +182,7 @@ async function pressReplayCommand(page, key) {
     timeout: 30_000,
   });
   const responsePromise = nextReplayResponse(page);
-  await page.locator("#replay-timeline").focus();
+  await page.locator("#battlefield").focus();
   await page.keyboard.press(key);
   const response = await responsePromise;
   expect(response.status()).toBe(200);
@@ -238,7 +238,11 @@ function expectResearcherJoin(frame, timeline, frameIndex) {
 async function installFirstFrame(page) {
   const slider = page.locator("#replay-frame-slider");
   if ((await slider.inputValue()) !== "0") {
-    await pressReplayCommand(page, "Home");
+    const result = await clickReplayCommand(page, "#replay-first-button");
+    expect(result).toMatchObject({
+      animate_incoming: false,
+      frame: { cursor: { frame_index: 0 } },
+    });
   }
   await expectReplayFrameIndex(page, 0);
 }
@@ -282,13 +286,13 @@ async function captureReplayTransportBaseline(page, viewport) {
       })),
     ),
   ).toEqual([
-    { id: "replay-first-button", label: "First" },
+    { id: "replay-first-button", label: "Start" },
     { id: "replay-back-ten-button", label: "−10" },
     { id: "replay-previous-button", label: "−1" },
     { id: "replay-play-pause-button", label: "Play" },
     { id: "replay-next-button", label: "+1" },
     { id: "replay-forward-ten-button", label: "+10" },
-    { id: "replay-last-button", label: "Last" },
+    { id: "replay-last-button", label: "End" },
   ]);
   await expect(page.locator("#replay-frame-slider")).toHaveAttribute("min", "0");
   await expect(page.locator("#replay-frame-slider")).toHaveAttribute("max", "5");
@@ -298,10 +302,6 @@ async function captureReplayTransportBaseline(page, viewport) {
     "#replay-first-button",
     "#replay-back-ten-button",
     "#replay-previous-button",
-  ]) {
-    await expect(page.locator(selector)).toBeDisabled();
-  }
-  for (const selector of [
     "#replay-play-pause-button",
     "#replay-next-button",
     "#replay-forward-ten-button",
@@ -314,6 +314,20 @@ async function captureReplayTransportBaseline(page, viewport) {
     "false",
   );
   await expect(page.locator("#replay-frame-position")).toHaveText("Tick 0 / 5");
+  await expect(page.locator("#replay-playback-rate")).toHaveValue("1");
+  await expect(page.locator("#replay-playback-rate option")).toHaveText([
+    "0.25×",
+    "0.50×",
+    "0.75×",
+    "1.00×",
+    "1.25×",
+    "1.50×",
+    "1.75×",
+    "2.00×",
+  ]);
+  await expect(page.locator("#replay-transport-status")).toHaveText(
+    "Frame 0 / 5 · Tick 0 / 5 · 1.00× · SETTLED",
+  );
   const layout = await transport.evaluate((element) => ({
     horizontalOverflow: element.scrollWidth - element.clientWidth,
     viewportEscape: {
@@ -633,43 +647,67 @@ test("replay reconnect rejects a valid live frame without crossing the viewer bo
   expectNoBrowserErrors(page);
 });
 
-test("real replay next animates while previous and absolute seek settle", async ({
+test("one replay transport trajectory keeps static seeks, playback, rates, and races coherent", async ({
   page,
 }) => {
   const complete = requiredViewer(completeViewer, "complete");
   await openReplay(page, complete.url);
   await installFirstFrame(page);
 
-  const playingChoreography = page.locator(
-    '#battlefield [data-layer="transient-events"] > .combat-choreography[data-state="playing"]',
-  );
+  /** @type {Record<string, any>[]} */
+  const replayPosts = [];
+  /** @param {import("@playwright/test").Request} request */
+  const recordReplayPost = (request) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname === "/api/replay/command"
+    ) {
+      replayPosts.push(request.postDataJSON());
+    }
+  };
+  page.on("request", recordReplayPost);
+
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 960, height: 600 },
+  ]) {
+    await page.setViewportSize(viewport);
+    const transport = page.locator("#replay-timeline .replay-timeline__transport");
+    const bounds = await transport.evaluate((element) => ({
+      horizontalOverflow: element.scrollWidth - element.clientWidth,
+      left: element.getBoundingClientRect().left,
+      right: element.getBoundingClientRect().right,
+      viewportWidth: document.documentElement.clientWidth,
+    }));
+    expect(bounds.horizontalOverflow, JSON.stringify(viewport)).toBeLessThanOrEqual(1);
+    expect(bounds.left, JSON.stringify(viewport)).toBeGreaterThanOrEqual(0);
+    expect(bounds.right, JSON.stringify(viewport)).toBeLessThanOrEqual(
+      bounds.viewportWidth,
+    );
+  }
+
   const next = await clickReplayCommand(page, "#replay-next-button");
   expect(next).toMatchObject({
     result: "applied",
-    animate_incoming: true,
+    animate_incoming: false,
     frame: { cursor: { frame_index: 1 } },
   });
-  await expectReplayFrameIndex(page, 1);
-  await expect(playingChoreography).toHaveCount(1);
-  await expect(page.locator("html")).toHaveAttribute("data-submission-blocked", "true");
-
-  const previous = await clickReplayCommand(page, "#replay-previous-button");
-  expect(previous).toMatchObject({
-    result: "applied",
-    animate_incoming: false,
-    frame: { cursor: { frame_index: 0 } },
+  expect(replayPosts.at(-1)?.command).toEqual({
+    command_type: "absolute_seek",
+    frame_index: 1,
   });
-  await expectReplayFrameIndex(page, 0);
+  await expectReplayFrameIndex(page, 1);
   await expectReplayChoreographySettled(page);
-  await expect(page.locator("#replay-frame-slider")).toBeEnabled();
-
-  const seekRequestPromise = page.waitForRequest(
-    (request) =>
-      request.method() === "POST" &&
-      new URL(request.url()).pathname === "/api/replay/command",
-    { timeout: 30_000 },
+  const frameOne = await currentReplayFrame(page);
+  await expect(page.locator("#replay-transport-status")).toHaveText(
+    `Frame 1 / 5 · Tick 1 / 5 · Incoming transition ${frameOne.incoming_transition_id} · 1.00× · SETTLED`,
   );
-  const seekResponsePromise = nextReplayResponse(page);
+
+  const postsBeforePreview = replayPosts.length;
+  const statusBeforePreview = await page
+    .locator("#replay-transport-status")
+    .textContent();
+  const battlefieldBeforePreview = await page.locator("#battlefield").innerHTML();
   await page.locator("#replay-frame-slider").evaluate((element) => {
     if (!(element instanceof HTMLInputElement)) {
       throw new TypeError("Replay slider is unavailable.");
@@ -677,15 +715,25 @@ test("real replay next animates while previous and absolute seek settle", async 
     element.value = "4";
     element.dispatchEvent(new Event("input", { bubbles: true }));
   });
-  const [seekRequest, seekResponse] = await Promise.all([
-    seekRequestPromise,
-    seekResponsePromise,
-  ]);
-  expect(seekRequest.postDataJSON().command).toEqual({
+  expect(replayPosts).toHaveLength(postsBeforePreview);
+  await expect(page.locator("#replay-frame-position")).toHaveText("Tick 4 / 5");
+  await expect(page.locator("#replay-transport-status")).toHaveText(
+    statusBeforePreview ?? "",
+  );
+  expect(await page.locator("#battlefield").innerHTML()).toBe(battlefieldBeforePreview);
+  await expect(page.locator("html")).toHaveAttribute(
+    "data-presentation-authority",
+    "installed",
+  );
+
+  const seekResponsePromise = nextReplayResponse(page);
+  await page.locator("#replay-frame-slider").dispatchEvent("change");
+  const seekResponse = await seekResponsePromise;
+  expect(seekResponse.status()).toBe(200);
+  expect(replayPosts.at(-1)?.command).toEqual({
     command_type: "absolute_seek",
     frame_index: 4,
   });
-  expect(seekResponse.status()).toBe(200);
   const seek = await seekResponse.json();
   expect(seek).toMatchObject({
     result: "applied",
@@ -694,9 +742,128 @@ test("real replay next animates while previous and absolute seek settle", async 
   });
   await expectReplayFrameIndex(page, 4);
   await expectReplayChoreographySettled(page);
-  await expect(
-    page.locator('#battlefield [data-layer="transient-events"] > .combat-choreography'),
-  ).toHaveAttribute("data-state", "settled");
+  const frameFour = await currentReplayFrame(page);
+
+  const postsBeforeRate = replayPosts.length;
+  await page.locator("#replay-playback-rate").selectOption("2");
+  expect(replayPosts).toHaveLength(postsBeforeRate);
+  await expect(page.locator("#replay-transport-status")).toHaveText(
+    `Frame 4 / 5 · Tick 4 / 5 · Incoming transition ${frameFour.incoming_transition_id} · 2.00× · SETTLED`,
+  );
+
+  await page.locator("#battlefield").focus();
+  await page.keyboard.press("Shift+ArrowLeft");
+  expect(replayPosts).toHaveLength(postsBeforeRate);
+  await page.locator("#replay-playback-rate").focus();
+  await page.keyboard.press("ArrowLeft");
+  expect(replayPosts).toHaveLength(postsBeforeRate);
+  await page.locator("#replay-playback-rate").selectOption("2");
+
+  const keyboardPrevious = await pressReplayCommand(page, "ArrowLeft");
+  expect(keyboardPrevious).toMatchObject({
+    animate_incoming: false,
+    frame: { cursor: { frame_index: 3 } },
+  });
+  expect(replayPosts.at(-1)?.command).toEqual({
+    command_type: "absolute_seek",
+    frame_index: 3,
+  });
+  await expectReplayFrameIndex(page, 3);
+
+  await clickReplayCommand(page, "#replay-first-button");
+  await clickReplayCommand(page, "#replay-next-button");
+  await expectReplayFrameIndex(page, 1);
+
+  const postsBeforePausedReplay = replayPosts.length;
+  await page.locator("#replay-play-pause-button").click();
+  await expect(page.locator("#replay-transport-status")).toHaveText(
+    `Frame 1 / 5 · Tick 1 / 5 · Incoming transition ${frameOne.incoming_transition_id} · 2.00× · PLAYING`,
+  );
+  await page.locator("#replay-play-pause-button").click();
+  expect(replayPosts).toHaveLength(postsBeforePausedReplay);
+  await expectReplayChoreographySettled(page);
+  await expect(page.locator("#replay-transport-status")).toContainText(
+    "2.00× · SETTLED",
+  );
+
+  await page.route("**/api/replay/command", async (route) => {
+    await delay(250);
+    await route.continue();
+  });
+  const continuedRequestPromise = page.waitForRequest(
+    (request) =>
+      request.method() === "POST" &&
+      new URL(request.url()).pathname === "/api/replay/command",
+    { timeout: 30_000 },
+  );
+  const continuedResponsePromise = nextReplayResponse(page);
+  await page.locator("#replay-play-pause-button").click();
+  const continuedRequest = await continuedRequestPromise;
+  expect(continuedRequest.postDataJSON().command).toEqual({
+    command_type: "next_frame",
+  });
+  const cancellationFilter = page.locator('input[data-visual-filter-id="aura_fields"]');
+  await cancellationFilter.evaluate((element) => {
+    if (!(element instanceof HTMLInputElement)) {
+      throw new TypeError("Visual filter input is unavailable.");
+    }
+    element.checked = false;
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  const continuedResponse = await continuedResponsePromise;
+  await page.unroute("**/api/replay/command");
+  expect((await continuedResponse.json()).frame.cursor.frame_index).toBe(2);
+  expect(replayPosts.at(-1)?.command).toEqual({ command_type: "next_frame" });
+  await expectReplayFrameIndex(page, 2);
+  await expectReplayChoreographySettled(page);
+  await expect(page.locator("#replay-transport-status")).toContainText(
+    "2.00× · SETTLED",
+  );
+  await cancellationFilter.evaluate((element) => {
+    if (!(element instanceof HTMLInputElement)) {
+      throw new TypeError("Visual filter input is unavailable.");
+    }
+    element.checked = true;
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+
+  await page.route("**/api/replay/command", async (route) => {
+    await delay(250);
+    await route.continue();
+  });
+  const postsBeforeRace = replayPosts.length;
+  const endResponsePromise = nextReplayResponse(page);
+  await page.locator("#replay-last-button").click();
+  await page.locator("#battlefield").focus();
+  await page.keyboard.press("ArrowLeft");
+  expect((await endResponsePromise).status()).toBe(200);
+  await page.unroute("**/api/replay/command");
+  expect(replayPosts).toHaveLength(postsBeforeRace + 1);
+  expect(replayPosts.at(-1)?.command).toEqual({
+    command_type: "absolute_seek",
+    frame_index: 5,
+  });
+  await expectReplayFrameIndex(page, 5);
+  await expectReplayChoreographySettled(page);
+
+  const postsBeforeFinalReplay = replayPosts.length;
+  await page.locator("#replay-play-pause-button").click();
+  await expect(page.locator("#replay-transport-status")).toContainText(
+    "2.00× · PLAYING",
+  );
+  await expect(page.locator("#replay-transport-status")).toContainText(
+    "2.00× · SETTLED",
+    { timeout: 30_000 },
+  );
+  expect(replayPosts).toHaveLength(postsBeforeFinalReplay);
+  await expect(page.locator("#replay-play-pause-button")).toBeEnabled();
+
+  await page.locator("#reconnect-button").click();
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await expectReplayFrameIndex(page, 5);
+  await expect(page.locator("#replay-playback-rate")).toHaveValue("2");
+  expect(replayPosts).toHaveLength(postsBeforeFinalReplay);
+  page.off("request", recordReplayPost);
   expectNoBrowserErrors(page);
 });
 
@@ -793,6 +960,9 @@ test("accessible playback pauses on hidden/error/endpoint and keeps one request 
   const timeline = page.locator("#replay-timeline");
   const play = page.locator("#replay-play-pause-button");
 
+  await clickReplayCommand(page, "#replay-next-button");
+  await expectReplayFrameIndex(page, 1);
+
   await timeline.focus();
   await page.keyboard.press("Space");
   await expect(play).toHaveAttribute("aria-label", "Pause replay");
@@ -816,10 +986,17 @@ test("accessible playback pauses on hidden/error/endpoint and keeps one request 
     document.dispatchEvent(new Event("visibilitychange"));
   });
 
+  await clickReplayCommand(page, "#replay-first-button");
+  await expectReplayFrameIndex(page, 0);
+
   await page.route("**/api/replay/command", async (route) => {
-    await route.abort("connectionfailed");
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: "{",
+    });
   });
-  await play.click();
+  await page.locator("#replay-next-button").click();
   await expect(page.locator("#connection-status")).toHaveText("Resync required", {
     timeout: 10_000,
   });
@@ -857,7 +1034,7 @@ test("accessible playback pauses on hidden/error/endpoint and keeps one request 
   await expectReplayFrameIndex(page, 5);
   await expect(play).toHaveAttribute("aria-label", "Play replay");
   await expect(play).toHaveAttribute("aria-pressed", "false");
-  await expect(play).toBeDisabled();
+  await expect(play).toBeEnabled();
   await expect(page.locator("#terminal-badge")).toHaveText("Declared horizon");
   await page.unroute("**/api/replay/command");
 
@@ -868,9 +1045,7 @@ test("accessible playback pauses on hidden/error/endpoint and keeps one request 
   );
   expect(playbackResponses).toHaveLength(5);
   expect(playbackResponses.every((response) => response.animate_incoming)).toBe(true);
-  expect(browserErrors.get(page) ?? []).toEqual([
-    "console: Failed to load resource: net::ERR_CONNECTION_FAILED",
-  ]);
+  expectNoBrowserErrors(page);
 });
 
 test("Actor POV all-surface scan excludes researcher authority and host secrets", async ({

@@ -6,12 +6,16 @@ import { CombatChoreographer, ConsumedTransitionLedger } from "../src/choreograp
 class FakeAnimation {
   /**
    * @param {string} id
+   * @param {KeyframeAnimationOptions} [timing]
    */
-  constructor(id) {
+  constructor(id, timing = {}) {
     this.id = id;
     this.currentTime = 0;
     this.playbackRate = 1;
     this.playState = "running";
+    this.delay = Number(timing.delay ?? 0);
+    this.duration = Number(timing.duration ?? 0);
+    this.endDelay = Number(timing.endDelay ?? 0);
     this.finished = new Promise((resolve, reject) => {
       this.resolveFinished = resolve;
       this.rejectFinished = reject;
@@ -35,7 +39,7 @@ class FakeAnimation {
 
   finish() {
     this.playState = "finished";
-    this.currentTime = 900;
+    this.currentTime = this.delay + this.duration + this.endDelay;
     this.resolveFinished(this);
   }
 
@@ -52,21 +56,21 @@ class FakeAnimationFactory {
   }
 
   /**
-   * @param {{id: string}} spec
+   * @param {{id: string, options: KeyframeAnimationOptions}} spec
    */
   create(spec) {
-    const animation = new FakeAnimation(spec.id);
+    const animation = new FakeAnimation(spec.id, spec.options);
     this.created.push(animation);
     return animation;
   }
 
   /**
    * @param {Element} _element
-   * @param {number} _duration
+   * @param {number} duration
    * @param {string} id
    */
-  createClock(_element, _duration, id) {
-    const animation = new FakeAnimation(id);
+  createClock(_element, duration, id) {
+    const animation = new FakeAnimation(id, { duration });
     this.created.push(animation);
     return animation;
   }
@@ -690,6 +694,97 @@ test("a direct replay refresh settles an in-flight presentation of the same epoc
   assert.equal(controller.snapshot().submissionBlocked, false);
 });
 
+test("an explicit same-identity replay restart bypasses sticky static exactly at the presentation seam", async () => {
+  let lookupCount = 0;
+  let recordCount = 0;
+  const forbiddenReplayLedger = /** @type {any} */ ({
+    fingerprintFor() {
+      lookupCount += 1;
+      throw new Error("replay consulted the consumed ledger");
+    },
+    record() {
+      recordCount += 1;
+      throw new Error("replay mutated the consumed ledger");
+    },
+  });
+  const { animationFactory, controller, painter } = harness({
+    ledger: forbiddenReplayLedger,
+  });
+  const replayPlan = plan("replay-current-restart");
+
+  controller.presentFrame({ viewer_mode: "replay", plan: replayPlan }, surfaceA, {
+    renderPolicy: "replay_static",
+  });
+  controller.presentFrame({ viewer_mode: "replay", plan: replayPlan }, surfaceA, {
+    renderPolicy: "replay_animated",
+  });
+  assert.equal(controller.snapshot().renderPolicy, "replay_static");
+  assert.equal(controller.snapshot().animationCount, 0);
+
+  controller.presentFrame({ viewer_mode: "replay", plan: replayPlan }, surfaceA, {
+    renderPolicy: "replay_animated",
+    restartAnimated: true,
+  });
+  assert.equal(controller.snapshot().renderPolicy, "replay_animated");
+  assert.ok(controller.snapshot().animationCount > 0);
+  const createdCount = animationFactory.created.length;
+  const installCount = painter.calls.filter(([kind]) => kind === "install").length;
+
+  controller.presentFrame({ viewer_mode: "replay", plan: replayPlan }, surfaceA, {
+    renderPolicy: "replay_animated",
+  });
+  assert.equal(animationFactory.created.length, createdCount);
+  assert.equal(
+    painter.calls.filter(([kind]) => kind === "install").length,
+    installCount,
+  );
+
+  const obsoleteAnimations = [...animationFactory.created];
+  controller.presentFrame({ viewer_mode: "replay", plan: replayPlan }, surfaceA, {
+    renderPolicy: "replay_static",
+  });
+  assert.equal(controller.snapshot().renderPolicy, "replay_static");
+  assert.equal(controller.snapshot().animationCount, 0);
+  assert.equal(
+    obsoleteAnimations.every(({ playState }) => playState === "idle"),
+    true,
+  );
+  obsoleteAnimations.find(({ id }) => id.endsWith(":cleanup"))?.finish();
+  await Promise.resolve();
+  assert.equal(controller.snapshot().renderPolicy, "replay_static");
+  assert.equal(controller.snapshot().animationCount, 0);
+  assert.equal(lookupCount, 0);
+  assert.equal(recordCount, 0);
+});
+
+test("replay restart intent cannot cross paint, disclosure, or authorization identity", () => {
+  const original = plan(
+    "replay-restart-fence",
+    "researcher",
+    "full-events",
+    "paint-all",
+  );
+  const changedPlans = [
+    plan("replay-restart-fence", "researcher", "full-events", "paint-filtered"),
+    plan("replay-restart-fence", "researcher", "redacted-events", "paint-all"),
+    plan("replay-restart-fence", "pov-0", "pov-events", "paint-all"),
+  ];
+
+  for (const changed of changedPlans) {
+    const { animationFactory, controller } = harness();
+    controller.presentFrame({ viewer_mode: "replay", plan: original }, surfaceA, {
+      renderPolicy: "replay_static",
+    });
+    controller.presentFrame({ viewer_mode: "replay", plan: changed }, surfaceA, {
+      renderPolicy: "replay_animated",
+      restartAnimated: true,
+    });
+    assert.equal(controller.snapshot().renderPolicy, "replay_static");
+    assert.equal(controller.snapshot().animationCount, 0);
+    assert.equal(animationFactory.created.length, 0);
+  }
+});
+
 test("reproject fallbacks preserve explicit replay intent and otherwise fail settled", () => {
   const animated = harness();
   animated.controller.reproject(
@@ -713,23 +808,35 @@ test("reproject fallbacks preserve explicit replay intent and otherwise fail set
   assert.equal(settled.controller.snapshot().submissionBlocked, false);
 });
 
-test("pause, fixed-rate compatibility, Skip, reduced motion, and Off remain presentation-only", async () => {
+test("pause, whole-clock rate changes, Skip, reduced motion, and Off remain presentation-only", async () => {
   const idle = harness();
   assert.equal(idle.controller.togglePaused().paused, false);
 
   const normal = harness();
   normal.controller.presentFrame({ plan: plan("epoch-1") }, surfaceA);
   normal.controller.togglePaused();
+  const animationReferences = [...normal.animationFactory.created];
+  normal.animationFactory.created.forEach((animation, index) => {
+    animation.currentTime = 120 + index;
+  });
+  const animationTimes = normal.animationFactory.created.map(
+    ({ currentTime }) => currentTime,
+  );
   assert.equal(
     normal.animationFactory.created.every(({ playState }) => playState === "paused"),
     true,
   );
   normal.controller.setPlaybackRate(2);
   assert.equal(
-    normal.animationFactory.created.every(({ playbackRate }) => playbackRate === 1),
+    normal.animationFactory.created.every(({ playbackRate }) => playbackRate === 2),
     true,
   );
-  assert.equal(normal.controller.snapshot().playbackRate, 1);
+  assert.deepEqual(normal.animationFactory.created, animationReferences);
+  assert.deepEqual(
+    normal.animationFactory.created.map(({ currentTime }) => currentTime),
+    animationTimes,
+  );
+  assert.equal(normal.controller.snapshot().playbackRate, 2);
   normal.controller.togglePaused();
   normal.controller.skip();
   assert.equal(normal.controller.snapshot().submissionBlocked, false);
@@ -753,22 +860,130 @@ test("pause, fixed-rate compatibility, Skip, reduced motion, and Off remain pres
   assert.equal(off.controller.snapshot().animationCount, 0);
 });
 
-test("legacy graphics-speed requests are canonical fixed-rate no-ops", () => {
-  for (const legacy of [0.01, 0.5, 2, 0, 2.001, Number.NaN, Number.POSITIVE_INFINITY]) {
-    const fixed = harness();
-    assert.doesNotThrow(() => fixed.controller.setPlaybackRate(legacy));
-    assert.equal(fixed.controller.snapshot().playbackRate, 1);
+test("all eight rates scale current and future effect, gate, cleanup, and hold clocks", () => {
+  for (const rate of [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2]) {
+    const current = harness();
+    current.controller.presentFrame(
+      { viewer_mode: "replay", plan: plan(`current-rate-${rate}`) },
+      surfaceA,
+      { renderPolicy: "replay_animated" },
+    );
+    const currentAnimations = [...current.animationFactory.created];
+    current.controller.setPlaybackRate(rate);
+    assert.equal(current.controller.snapshot().playbackRate, rate);
+    assert.deepEqual(current.animationFactory.created, currentAnimations);
+    assert.equal(
+      current.animationFactory.created.every(
+        ({ playbackRate }) => playbackRate === rate,
+      ),
+      true,
+    );
+    assert.equal(current.animationFactory.find(":gate")?.playbackRate, rate);
+    assert.equal(current.animationFactory.find(":cleanup")?.playbackRate, rate);
+    assert.equal(current.animationFactory.find(":cleanup")?.duration, 1_500);
+    assert.equal(
+      Number(current.animationFactory.find(":cleanup")?.duration) / rate,
+      1_500 / rate,
+    );
+
+    const future = harness({ playbackRate: rate });
+    future.controller.presentFrame(
+      { viewer_mode: "replay", plan: plan(`future-rate-${rate}`) },
+      surfaceA,
+      { renderPolicy: "replay_animated" },
+    );
+    assert.equal(future.controller.snapshot().playbackRate, rate);
+    assert.equal(
+      future.animationFactory.created.every(
+        ({ playbackRate }) => playbackRate === rate,
+      ),
+      true,
+    );
   }
 });
 
-test("legacy constructor playback rate is canonicalized to 1.0", () => {
-  const fixed = harness({ playbackRate: 0.25 });
-  fixed.controller.presentFrame({ plan: plan("fixed-constructor-rate") }, surfaceA);
-  assert.equal(fixed.controller.snapshot().playbackRate, 1);
-  assert.equal(
-    fixed.animationFactory.created.every(({ playbackRate }) => playbackRate === 1),
-    true,
+test("replay terminal hold is clock-owned, live timing is unchanged, and empty plans have no dwell", () => {
+  const ordinaryPlan = plan("ordinary-replay-hold");
+  ordinaryPlan.phases.total = 1_200;
+  const replay = harness();
+  replay.controller.presentFrame(
+    { viewer_mode: "replay", plan: ordinaryPlan },
+    surfaceA,
+    { renderPolicy: "replay_animated" },
   );
+  assert.equal(replay.animationFactory.find(":cleanup")?.duration, 1_800);
+  assert.equal(replay.animationFactory.find(":gate")?.duration, 450);
+  const replayCleanup = replay.animationFactory.find(":cleanup");
+  assert.ok(replayCleanup);
+  replayCleanup.currentTime = 1_650;
+  replay.controller.setPlaybackRate(1.5);
+  assert.equal(replay.controller.snapshot().logicalTime, 1_200);
+  assert.equal(replayCleanup.currentTime, 1_650);
+  assert.equal(replayCleanup.playbackRate, 1.5);
+
+  const live = harness();
+  live.controller.presentFrame({ plan: ordinaryPlan }, surfaceA);
+  assert.equal(live.animationFactory.find(":cleanup")?.duration, 1_200);
+
+  const reduced = harness({ motionMode: "reduced" });
+  reduced.controller.presentFrame(
+    { viewer_mode: "replay", plan: ordinaryPlan },
+    surfaceA,
+    { renderPolicy: "replay_animated" },
+  );
+  assert.equal(reduced.animationFactory.find(":cleanup")?.duration, 820);
+  assert.equal(reduced.animationFactory.find(":gate"), undefined);
+
+  const densePlan = plan("dense-replay-hold");
+  densePlan.phases.total = 2_400;
+  const dense = harness();
+  dense.controller.presentFrame({ viewer_mode: "replay", plan: densePlan }, surfaceA, {
+    renderPolicy: "replay_animated",
+  });
+  assert.equal(dense.animationFactory.find(":cleanup")?.duration, 3_000);
+
+  const emptyPlan = plan("empty-replay-family");
+  emptyPlan.animationSpecCount = 0;
+  const empty = harness();
+  empty.controller.presentFrame({ viewer_mode: "replay", plan: emptyPlan }, surfaceA, {
+    renderPolicy: "replay_animated",
+  });
+  assert.equal(empty.animationFactory.created.length, 0);
+  assert.equal(empty.controller.snapshot().animationCount, 0);
+});
+
+test("unsupported playback rates fail closed without changing an active clock", () => {
+  const fixed = harness();
+  fixed.controller.presentFrame(
+    { viewer_mode: "replay", plan: plan("invalid-rate") },
+    surfaceA,
+    { renderPolicy: "replay_animated" },
+  );
+  const animations = [...fixed.animationFactory.created];
+  for (const invalid of [
+    0,
+    0.1,
+    0.3,
+    2.25,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    "1",
+  ]) {
+    assert.throws(
+      () => fixed.controller.setPlaybackRate(/** @type {any} */ (invalid)),
+      /playback rate must be one of/u,
+    );
+    assert.equal(fixed.controller.snapshot().playbackRate, 1);
+    assert.deepEqual(fixed.animationFactory.created, animations);
+    assert.equal(
+      fixed.animationFactory.created.every(({ playbackRate }) => playbackRate === 1),
+      true,
+    );
+    assert.throws(
+      () => harness({ playbackRate: /** @type {any} */ (invalid) }),
+      /playback rate must be one of/u,
+    );
+  }
 });
 
 test("switching an active explanation Off reinstalls the authorized batch until bounded cleanup", async () => {
@@ -821,7 +1036,11 @@ test("switching an active explanation Off reinstalls the authorized batch until 
   controller.setMotionMode("normal");
   controller.setPlaybackRate(0.5);
   assert.equal(controller.snapshot().motionMode, "normal");
-  assert.equal(controller.snapshot().playbackRate, 1);
+  assert.equal(controller.snapshot().playbackRate, 0.5);
+  assert.equal(
+    offAnimations.every(({ playbackRate }) => playbackRate === 0.5),
+    true,
+  );
   assert.equal(
     painter.calls.filter(([kind]) => kind === "install").length,
     installCount,
@@ -834,7 +1053,7 @@ test("switching an active explanation Off reinstalls the authorized batch until 
   assert.equal(controller.snapshot().animationCount, 0);
 });
 
-test("legacy rate calls preserve an active reduced-motion explanation at 1.0", () => {
+test("whole-clock rate changes preserve an active reduced-motion explanation", () => {
   const { animationFactory, controller, painter } = harness({
     motionMode: "reduced",
   });
@@ -845,9 +1064,9 @@ test("legacy rate calls preserve an active reduced-motion explanation at 1.0", (
   controller.setPlaybackRate(2);
 
   assert.equal(controller.snapshot().motionMode, "reduced");
-  assert.equal(controller.snapshot().playbackRate, 1);
+  assert.equal(controller.snapshot().playbackRate, 2);
   assert.equal(
-    animationFactory.created.every(({ playbackRate }) => playbackRate === 1),
+    animationFactory.created.every(({ playbackRate }) => playbackRate === 2),
     true,
   );
   assert.equal(

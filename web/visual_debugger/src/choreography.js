@@ -3,6 +3,10 @@ import { buildChoreographyPlan } from "./choreography-plan.js";
 const DEFAULT_LEDGER_KEY = "marl-battlegrounds.visual-debugger.consumed-transitions.v1";
 const DEFAULT_LEDGER_LIMIT = 256;
 const MAX_ACTIVE_ANIMATIONS = 512;
+const REPLAY_TERMINAL_HOLD_MS = 600;
+const SUPPORTED_PLAYBACK_RATES = Object.freeze([
+  0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2,
+]);
 
 /**
  * @typedef {"normal" | "reduced" | "off"} MotionMode
@@ -220,10 +224,7 @@ export class CombatChoreographer {
     this.ledger = options.ledger ?? new ConsumedTransitionLedger();
     this.onStateChange = options.onStateChange ?? (() => {});
     this.motionMode = normalizeMotionMode(options.motionMode ?? "normal");
-    // Product choreography has one canonical clock. The optional legacy field
-    // remains accepted at this boundary so old callers do not fail, but it no
-    // longer changes presentation timing.
-    this.playbackRate = 1;
+    this.playbackRate = normalizePlaybackRate(options.playbackRate ?? 1);
     this.paused = false;
     this.submissionBlocked = false;
     this.logicalTime = 0;
@@ -285,6 +286,7 @@ export class CombatChoreographer {
    * @param {{
    *   renderPolicy?: RenderPolicy,
    *   visualFilters?: Record<string, boolean>,
+   *   restartAnimated?: boolean,
    * }} [presentationControl]
    */
   presentFrame(frame, surface, presentationControl = {}) {
@@ -317,10 +319,19 @@ export class CombatChoreographer {
       sameFingerprint &&
       !samePaint &&
       isReplayPolicy(initialPolicy);
+    const explicitSamePlanReplayRestart =
+      presentationControl.restartAnimated === true &&
+      sameEpoch &&
+      sameAuthorization &&
+      sameFingerprint &&
+      samePaint &&
+      this.renderPolicy === "replay_static" &&
+      requestedPolicy === "replay_animated";
     const stickyStatic =
       sameEpoch &&
       this.renderPolicy === "replay_static" &&
-      requestedPolicy === "replay_animated";
+      requestedPolicy === "replay_animated" &&
+      !explicitSamePlanReplayRestart;
     const nextPolicy =
       replayPaintChange || stickyStatic ? "replay_static" : initialPolicy;
     if (nextPolicy !== initialPolicy) {
@@ -479,8 +490,15 @@ export class CombatChoreographer {
    * @param {number} rate
    */
   setPlaybackRate(rate) {
-    void rate;
-    this.playbackRate = 1;
+    const nextRate = normalizePlaybackRate(rate);
+    if (nextRate === this.playbackRate) {
+      return this.snapshot();
+    }
+    this.#captureLogicalTime();
+    this.playbackRate = nextRate;
+    for (const animation of this.#allAnimations()) {
+      applyPlaybackRate(animation, nextRate);
+    }
     this.#publish();
     return this.snapshot();
   }
@@ -673,10 +691,13 @@ export class CombatChoreographer {
       return;
     }
 
-    const duration =
+    const authoredDuration =
       this.motionMode === "reduced"
         ? Number(plan.phases?.reducedTotal ?? 0)
         : Number(plan.phases?.total ?? 0);
+    const duration =
+      authoredDuration +
+      (options.renderPolicy === "replay_animated" ? REPLAY_TERMINAL_HOLD_MS : 0);
     /** @type {AnimationHandle[]} */
     const createdAnimations = [];
     /** @type {AnimationHandle | null} */
@@ -720,11 +741,7 @@ export class CombatChoreographer {
     this.gateClock = gateClock;
     this.submissionBlocked = this.motionMode === "normal";
     for (const animation of this.#allAnimations()) {
-      if (typeof animation.updatePlaybackRate === "function") {
-        animation.updatePlaybackRate(this.playbackRate);
-      } else {
-        animation.playbackRate = this.playbackRate;
-      }
+      applyPlaybackRate(animation, this.playbackRate);
       if (this.paused) {
         animation.pause();
       }
@@ -776,7 +793,10 @@ export class CombatChoreographer {
     const candidate =
       this.cleanupClock?.currentTime ?? this.gateClock?.currentTime ?? this.logicalTime;
     if (typeof candidate === "number" && Number.isFinite(candidate)) {
-      this.logicalTime = candidate;
+      const authoredTotal = Number(this.plan?.phases?.total ?? candidate);
+      this.logicalTime = Number.isFinite(authoredTotal)
+        ? Math.min(Math.max(candidate, 0), Math.max(authoredTotal, 0))
+        : candidate;
     }
   }
 
@@ -895,6 +915,29 @@ function normalizeMotionMode(value) {
     return value;
   }
   throw new RangeError(`unknown motion mode ${String(value)}.`);
+}
+
+/** @param {unknown} value */
+function normalizePlaybackRate(value) {
+  if (
+    typeof value !== "number" ||
+    !Number.isFinite(value) ||
+    !SUPPORTED_PLAYBACK_RATES.includes(value)
+  ) {
+    throw new RangeError(
+      "playback rate must be one of 0.25, 0.50, 0.75, 1.00, 1.25, 1.50, 1.75, or 2.00.",
+    );
+  }
+  return value;
+}
+
+/** @param {AnimationHandle} animation @param {number} rate */
+function applyPlaybackRate(animation, rate) {
+  if (typeof animation.updatePlaybackRate === "function") {
+    animation.updatePlaybackRate(rate);
+  } else {
+    animation.playbackRate = rate;
+  }
 }
 
 /**

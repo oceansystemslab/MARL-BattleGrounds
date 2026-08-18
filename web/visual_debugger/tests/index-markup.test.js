@@ -192,6 +192,53 @@ test("product shell loads strict identity before the module and omits retired co
   assert.doesNotMatch(markup, /<dt>Incoming<\/dt>|>Revision\s*</u);
 });
 
+test("replay transport exposes the exact CP8 controls, rates, and truthful help", async () => {
+  const [markup, styles] = await Promise.all([
+    readFile(indexUrl, "utf8"),
+    readFile(stylesUrl, "utf8"),
+  ]);
+  assert.match(
+    markup,
+    /id="replay-first-button"[^>]*aria-label="Start replay tick"[^>]*>Start<\/button>/u,
+  );
+  assert.match(
+    markup,
+    /id="replay-last-button"[^>]*aria-label="End replay tick"[^>]*>End<\/button>/u,
+  );
+  const rateOptions = elementBody(markup, "replay-playback-rate", "select");
+  assert.deepEqual(
+    [
+      ...rateOptions.matchAll(
+        /<option value="([^"]+)"(?: selected)?>([^<]+)<\/option>/gu,
+      ),
+    ].map(([, value, label]) => [value, label]),
+    [
+      ["0.25", "0.25×"],
+      ["0.5", "0.50×"],
+      ["0.75", "0.75×"],
+      ["1", "1.00×"],
+      ["1.25", "1.25×"],
+      ["1.5", "1.50×"],
+      ["1.75", "1.75×"],
+      ["2", "2.00×"],
+    ],
+  );
+  assert.match(markup, /id="replay-transport-status"[^>]*aria-live="polite"/u);
+  assert.match(
+    markup,
+    /Frame slider<\/dt><dd>Preview without a request; commit one exact seek<\/dd>/u,
+  );
+  assert.match(
+    markup,
+    /Playback speed<\/dt><dd>Scale the complete replay presentation clock<\/dd>/u,
+  );
+  assert.doesNotMatch(markup, /Home \/ End|Shift\+Left|Shift\+Right|short debounce/u);
+  assert.match(
+    styles,
+    /@media \(max-width: 70rem\)[\s\S]*\.replay-timeline__transport\s*\{\s*grid-template-columns: repeat\(7, minmax\(0, 1fr\)\);/u,
+  );
+});
+
 test("browser production paths omit retired navigation and privileged display copy", async () => {
   const [controls, main, scene, explanations, panels] = await Promise.all(
     productionSourceUrls.map((url) => readFile(url, "utf8")),

@@ -20,6 +20,17 @@ export const REPLAY_AUTOPLAY_CADENCE_MS = Object.freeze({
   off: 1_000,
 });
 
+export const REPLAY_PLAYBACK_RATES = Object.freeze([
+  0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2,
+]);
+
+export const REPLAY_TRANSPORT_STATES = Object.freeze({
+  OFFLINE: "OFFLINE",
+  SETTLED: "SETTLED",
+  PLAYING: "PLAYING",
+  ADVANCING: "ADVANCING",
+});
+
 /**
  * Resolve one simulator tick from the joined timeline without ever treating a
  * transport frame index as scientific time.
@@ -58,6 +69,20 @@ function nonNegativeInteger(value, name) {
     throw new TypeError(`${name} must be a non-negative integer.`);
   }
   return Number(value);
+}
+
+/** @param {unknown} value */
+function replayPlaybackRate(value) {
+  if (
+    typeof value !== "number" ||
+    !Number.isFinite(value) ||
+    !REPLAY_PLAYBACK_RATES.includes(value)
+  ) {
+    throw new RangeError(
+      "Replay playback rate must be one of 0.25, 0.50, 0.75, 1.00, 1.25, 1.50, 1.75, or 2.00.",
+    );
+  }
+  return value;
 }
 
 /**
@@ -436,19 +461,9 @@ export function validateReplayCommandOutcome(command, result, previous) {
 }
 
 /**
- * @param {unknown} value
- * @returns {"normal" | "reduced" | "off"}
- */
-function motionMode(value) {
-  if (value === "normal" || value === "reduced" || value === "off") {
-    return value;
-  }
-  throw new RangeError(`Unknown replay motion mode ${String(value)}.`);
-}
-
-/**
- * Serialized replay playback. It owns only cursor requests and pacing; the
- * server remains authoritative for every accepted cursor and generation.
+ * Serialized replay playback. The four transport states are the only mutable
+ * state-machine authority; compatibility booleans in `snapshot()` are derived
+ * from them and the one active request transaction.
  */
 export class ReplayPlaybackController {
   /**
@@ -456,9 +471,9 @@ export class ReplayPlaybackController {
    *   request: (command: Readonly<Record<string, any>>) => Promise<unknown>,
    *   waitForPresentation?: () => Promise<unknown>,
    *   getMotionMode?: () => "normal" | "reduced" | "off",
+   *   playbackRate?: number,
    *   onStateChange?: (state: ReturnType<ReplayPlaybackController["snapshot"]>) => void,
    *   onError?: (error: unknown) => void,
-   *   clock?: ReplayClock,
    * }} options
    */
   constructor(options) {
@@ -467,31 +482,42 @@ export class ReplayPlaybackController {
     }
     this.request = options.request;
     this.waitForPresentation = options.waitForPresentation ?? (() => Promise.resolve());
-    this.getMotionMode = options.getMotionMode ?? (() => "normal");
+    void options.getMotionMode;
     this.onStateChange = options.onStateChange ?? (() => {});
     this.onError = options.onError ?? (() => {});
-    this.clock = options.clock ?? globalThis;
     /** @type {ReturnType<typeof normalizeReplayCursor> | null} */
     this.cursor = null;
-    this.playing = false;
-    this.requestPending = false;
-    this.presentationPending = false;
-    this.connected = true;
+    /** @type {"OFFLINE" | "SETTLED" | "PLAYING" | "ADVANCING"} */
+    this.transportState = REPLAY_TRANSPORT_STATES.OFFLINE;
+    this.connected = false;
     this.hidden = false;
-    this.pauseReason = null;
-    /** @type {any} */
-    this.timer = null;
+    this.playbackRate = replayPlaybackRate(options.playbackRate ?? 1);
+    /** @type {string | null} */
+    this.pauseReason = "offline";
+    this.generation = 0;
+    this.authorityGeneration = 0;
+    this.presentationGeneration = 0;
+    /** @type {Readonly<{generation: number, renderPolicy: "replay_static" | "replay_animated", restartAnimated: boolean}> | null} */
+    this.presentationIntent = null;
+    /** @type {{generation: number, authorityGeneration: number, playback: boolean} | null} */
+    this.activeRequest = null;
     this.disposed = false;
   }
 
   snapshot() {
+    const playing = this.#playbackIsActive();
+    const requestPending = this.transportState === REPLAY_TRANSPORT_STATES.ADVANCING;
     return Object.freeze({
+      transportState: this.transportState,
+      generation: this.generation,
+      presentationIntent: this.presentationIntent,
       cursor: this.cursor,
-      playing: this.playing,
-      requestPending: this.requestPending,
-      presentationPending: this.presentationPending,
+      playing,
+      requestPending,
+      presentationPending: false,
       connected: this.connected,
       hidden: this.hidden,
+      playbackRate: this.playbackRate,
       pauseReason: this.pauseReason,
       atStart: this.cursor === null || this.cursor.frame_index === 0,
       atEnd:
@@ -502,23 +528,54 @@ export class ReplayPlaybackController {
 
   /** @param {unknown} value */
   installCursor(value) {
+    this.authorityGeneration += 1;
+    this.generation += 1;
+    this.activeRequest = null;
     this.cursor = normalizeReplayCursor(value);
-    if (this.playing && this.cursor.frame_index === this.cursor.final_frame_index) {
-      this.pause("endpoint");
-    } else {
-      this.#publish();
-    }
+    this.pauseReason = null;
+    this.transportState = this.connected
+      ? REPLAY_TRANSPORT_STATES.SETTLED
+      : REPLAY_TRANSPORT_STATES.OFFLINE;
+    this.#setPresentationIntent("replay_static", false);
+    this.#publish();
     return this.snapshot();
   }
 
   /** @param {boolean} connected */
   setConnected(connected) {
-    this.connected = Boolean(connected);
-    if (!this.connected) {
-      this.pause("disconnect");
-    } else {
-      this.#publish();
+    if (!connected) {
+      return this.setAuthorityPending("disconnect");
     }
+    if (this.connected) {
+      this.#publish();
+      return this.snapshot();
+    }
+    this.connected = true;
+    this.transportState = this.cursor
+      ? REPLAY_TRANSPORT_STATES.SETTLED
+      : REPLAY_TRANSPORT_STATES.OFFLINE;
+    this.pauseReason = this.cursor ? null : "offline";
+    this.#publish();
+    return this.snapshot();
+  }
+
+  /**
+   * Fence every callback owned by the old joined authority and remove its
+   * cursor immediately. A later connection signal cannot settle transport
+   * until a coherent cursor has also been installed.
+   *
+   * @param {string} reason
+   */
+  setAuthorityPending(reason = "presentation_pending") {
+    this.authorityGeneration += 1;
+    this.generation += 1;
+    this.connected = false;
+    this.cursor = null;
+    this.activeRequest = null;
+    this.transportState = REPLAY_TRANSPORT_STATES.OFFLINE;
+    this.pauseReason = reason;
+    this.presentationIntent = null;
+    this.#publish();
     return this.snapshot();
   }
 
@@ -533,33 +590,62 @@ export class ReplayPlaybackController {
     return this.snapshot();
   }
 
+  /**
+   * Change presentation speed without changing transport authority, cursor,
+   * request ownership, or the active presentation intent.
+   *
+   * @param {unknown} rate
+   */
+  setPlaybackRate(rate) {
+    const nextRate = replayPlaybackRate(rate);
+    if (nextRate === this.playbackRate) {
+      return this.snapshot();
+    }
+    this.playbackRate = nextRate;
+    this.#publish();
+    return this.snapshot();
+  }
+
   play() {
     if (
       this.disposed ||
       !this.cursor ||
       !this.connected ||
       this.hidden ||
-      this.cursor.frame_index >= this.cursor.final_frame_index
+      this.transportState === REPLAY_TRANSPORT_STATES.OFFLINE
     ) {
-      this.pause(
-        this.cursor?.frame_index === this.cursor?.final_frame_index
-          ? "endpoint"
-          : "unavailable",
-      );
+      this.pause("unavailable");
       return false;
     }
-    if (this.playing) {
+    if (this.#playbackIsActive()) {
       return true;
     }
-    this.playing = true;
+    if (this.transportState === REPLAY_TRANSPORT_STATES.ADVANCING) {
+      return false;
+    }
+    if (this.cursor.final_frame_index === 0) {
+      this.pause("endpoint");
+      return false;
+    }
+    this.generation += 1;
     this.pauseReason = null;
-    this.#scheduleAutoplay();
-    this.#publish();
+    const generation = this.generation;
+    if (this.cursor.frame_index === 0) {
+      this.transportState = REPLAY_TRANSPORT_STATES.ADVANCING;
+      this.#setPresentationIntent("replay_animated", false);
+      this.#publish();
+      void this.#sendCommand(replayNavigationCommand("next"), generation, true);
+    } else {
+      this.transportState = REPLAY_TRANSPORT_STATES.PLAYING;
+      this.#setPresentationIntent("replay_animated", true);
+      this.#publish();
+      void this.#waitForPlaybackCompletion(generation, this.cursor);
+    }
     return true;
   }
 
   toggle() {
-    if (this.playing) {
+    if (this.#playbackIsActive()) {
       this.pause("user_pause");
       return false;
     }
@@ -568,9 +654,16 @@ export class ReplayPlaybackController {
 
   /** @param {string} reason */
   pause(reason = "user_pause") {
-    this.playing = false;
+    this.generation += 1;
     this.pauseReason = reason;
-    this.#clearTimer();
+    if (this.transportState === REPLAY_TRANSPORT_STATES.PLAYING) {
+      this.transportState = this.connected
+        ? REPLAY_TRANSPORT_STATES.SETTLED
+        : REPLAY_TRANSPORT_STATES.OFFLINE;
+    }
+    if (this.cursor) {
+      this.#setPresentationIntent("replay_static", false);
+    }
     this.#publish();
     return this.snapshot();
   }
@@ -601,158 +694,222 @@ export class ReplayPlaybackController {
     if (!Number.isInteger(tickDelta) || Number(tickDelta) === 0) {
       return Promise.reject(new TypeError("Replay jump must be a non-zero integer."));
     }
-    this.pause("user_seek");
-    if (!this.cursor) {
-      return Promise.resolve(false);
-    }
-    const frameIndex = Math.max(
-      0,
-      Math.min(
-        this.cursor.final_frame_index,
-        this.cursor.frame_index + Number(tickDelta),
-      ),
+    const frameIndex = this.cursor?.frame_index;
+    return this.#navigateTo(
+      frameIndex === undefined ? undefined : frameIndex + Number(tickDelta),
     );
-    if (frameIndex === this.cursor.frame_index) {
-      return Promise.resolve(false);
-    }
-    return this.#send(replaySeekCommand(frameIndex));
   }
 
   /** @param {unknown} frameIndex */
   seek(frameIndex) {
     const index = nonNegativeInteger(frameIndex, "frame_index");
-    this.pause("user_seek");
-    if (!this.cursor || index > this.cursor.final_frame_index) {
-      return Promise.reject(new RangeError("Replay seek is outside the timeline."));
-    }
-    return this.#send(replaySeekCommand(index));
+    return this.#navigateTo(index);
   }
 
   dispose() {
     this.disposed = true;
-    this.pause("disposed");
+    this.setAuthorityPending("disposed");
   }
 
   /** @param {"first" | "previous" | "next" | "last"} intent */
   #userNavigation(intent) {
-    this.pause("user_seek");
-    if (!this.cursor) {
-      return Promise.resolve(false);
-    }
-    if (
-      (intent === "first" || intent === "previous") &&
-      this.cursor.frame_index === 0
-    ) {
-      return Promise.resolve(false);
-    }
-    if (
-      (intent === "next" || intent === "last") &&
-      this.cursor.frame_index === this.cursor.final_frame_index
-    ) {
-      return Promise.resolve(false);
-    }
-    return this.#send(replayNavigationCommand(intent));
+    const frameIndex = this.cursor?.frame_index;
+    const destination =
+      intent === "first"
+        ? 0
+        : intent === "previous"
+          ? frameIndex === undefined
+            ? undefined
+            : frameIndex - 1
+          : intent === "next"
+            ? frameIndex === undefined
+              ? undefined
+              : frameIndex + 1
+            : this.cursor?.final_frame_index;
+    return this.#navigateTo(destination);
   }
 
-  #scheduleAutoplay() {
+  /** @param {unknown} destination */
+  #navigateTo(destination) {
     if (
-      !this.playing ||
-      this.timer !== null ||
-      this.requestPending ||
-      this.presentationPending ||
+      this.disposed ||
+      this.transportState === REPLAY_TRANSPORT_STATES.ADVANCING ||
       !this.cursor ||
       !this.connected ||
-      this.hidden ||
-      this.disposed
+      this.hidden
     ) {
-      return;
+      return Promise.resolve(false);
     }
-    const delay = REPLAY_AUTOPLAY_CADENCE_MS[motionMode(this.getMotionMode())];
-    this.timer = this.clock.setTimeout(() => {
-      this.timer = null;
-      void this.#autoplayNext();
-    }, delay);
+    const numericDestination = Number(destination);
+    if (!Number.isFinite(numericDestination)) {
+      return Promise.resolve(false);
+    }
+    const frameIndex = Math.max(
+      0,
+      Math.min(this.cursor.final_frame_index, Math.trunc(numericDestination)),
+    );
+    this.generation += 1;
+    const generation = this.generation;
+    this.pauseReason = "user_seek";
+    this.transportState = REPLAY_TRANSPORT_STATES.ADVANCING;
+    this.#setPresentationIntent("replay_static", false);
+    this.#publish();
+    return this.#sendCommand(replaySeekCommand(frameIndex), generation, false);
   }
 
-  async #autoplayNext() {
-    if (!this.playing || !this.cursor) {
+  /**
+   * Continue only from the choreography completion signal for the exact
+   * presentation generation that entered PLAYING.
+   *
+   * @param {number} generation
+   * @param {ReturnType<typeof normalizeReplayCursor>} cursor
+   */
+  async #waitForPlaybackCompletion(generation, cursor) {
+    try {
+      await this.waitForPresentation();
+    } catch (error) {
+      if (generation === this.generation) {
+        this.generation += 1;
+        this.transportState = this.connected
+          ? REPLAY_TRANSPORT_STATES.SETTLED
+          : REPLAY_TRANSPORT_STATES.OFFLINE;
+        this.pauseReason = "error";
+        this.#setPresentationIntent("replay_static", false);
+        this.#publish();
+        this.onError(error);
+      }
       return false;
     }
-    if (this.cursor.frame_index >= this.cursor.final_frame_index) {
-      this.pause("endpoint");
+    if (
+      generation !== this.generation ||
+      this.transportState !== REPLAY_TRANSPORT_STATES.PLAYING ||
+      this.cursor !== cursor ||
+      this.hidden ||
+      !this.connected
+    ) {
       return false;
     }
-    const moved = await this.#send(replayNavigationCommand("next"));
-    if (moved && this.playing) {
-      this.#scheduleAutoplay();
+    if (cursor.frame_index === cursor.final_frame_index) {
+      this.generation += 1;
+      this.transportState = REPLAY_TRANSPORT_STATES.SETTLED;
+      this.pauseReason = "endpoint";
+      this.#setPresentationIntent("replay_static", false);
       this.#publish();
+      return false;
     }
-    return moved;
+    this.transportState = REPLAY_TRANSPORT_STATES.ADVANCING;
+    this.#setPresentationIntent("replay_animated", false);
+    this.#publish();
+    return this.#sendCommand(replayNavigationCommand("next"), generation, true);
   }
 
   /**
    * @param {Readonly<Record<string, any>>} command
+   * @param {number} generation
+   * @param {boolean} playback
    */
-  async #send(command) {
-    if (
-      this.disposed ||
-      this.requestPending ||
-      this.presentationPending ||
-      !this.connected ||
-      this.hidden
-    ) {
+  async #sendCommand(command, generation, playback) {
+    if (this.activeRequest !== null || !this.cursor) {
       return false;
     }
     const previous = this.cursor;
-    if (!previous) {
-      return false;
-    }
-    this.requestPending = true;
-    this.#publish();
+    const transaction = {
+      generation,
+      authorityGeneration: this.authorityGeneration,
+      playback,
+    };
+    this.activeRequest = transaction;
     try {
       const result = await this.request(command);
+      if (
+        this.activeRequest !== transaction ||
+        transaction.authorityGeneration !== this.authorityGeneration ||
+        !this.connected ||
+        this.disposed
+      ) {
+        return false;
+      }
       if (isRecord(result) && result.handled_resync === true) {
-        this.cursor = cursorFromResult(result);
-        this.requestPending = false;
-        this.presentationPending = false;
-        this.pause("resync");
+        const resynchronized = cursorFromResult(result);
+        this.activeRequest = null;
+        this.cursor = resynchronized;
+        this.generation += 1;
+        this.transportState = REPLAY_TRANSPORT_STATES.SETTLED;
+        this.pauseReason = "resync";
+        this.#setPresentationIntent("replay_static", false);
+        this.#publish();
         return false;
       }
       const next = cursorFromResult(result);
       validateReplayCommandOutcome(command, result, previous);
+      this.activeRequest = null;
       this.cursor = next;
       if (isRecord(result) && result.result === "duplicate") {
-        this.requestPending = false;
-        this.presentationPending = false;
-        this.pause("resync");
+        this.generation += 1;
+        this.transportState = REPLAY_TRANSPORT_STATES.SETTLED;
+        this.pauseReason = "resync";
+        this.#setPresentationIntent("replay_static", false);
+        this.#publish();
         return false;
       }
-      this.requestPending = false;
-      this.presentationPending = true;
-      this.#publish();
-      await this.waitForPresentation();
-      this.presentationPending = false;
-      if (next.frame_index === next.final_frame_index) {
-        this.pause("endpoint");
+      if (
+        playback &&
+        generation === this.generation &&
+        !this.hidden &&
+        this.connected
+      ) {
+        this.transportState = REPLAY_TRANSPORT_STATES.PLAYING;
+        this.pauseReason = null;
+        this.#publish();
+        void this.#waitForPlaybackCompletion(generation, next);
       } else {
+        this.transportState = REPLAY_TRANSPORT_STATES.SETTLED;
+        if (this.presentationIntent?.renderPolicy !== "replay_static") {
+          this.#setPresentationIntent("replay_static", false);
+        }
         this.#publish();
       }
       return true;
     } catch (error) {
-      this.requestPending = false;
-      this.presentationPending = false;
-      this.pause("error");
-      this.onError(error);
+      if (
+        this.activeRequest === transaction &&
+        transaction.authorityGeneration === this.authorityGeneration
+      ) {
+        this.activeRequest = null;
+        this.generation += 1;
+        this.transportState = this.connected
+          ? REPLAY_TRANSPORT_STATES.SETTLED
+          : REPLAY_TRANSPORT_STATES.OFFLINE;
+        this.pauseReason = "error";
+        if (this.cursor) {
+          this.#setPresentationIntent("replay_static", false);
+        }
+        this.#publish();
+        this.onError(error);
+      }
       return false;
     }
   }
 
-  #clearTimer() {
-    if (this.timer === null) {
-      return;
-    }
-    this.clock.clearTimeout(this.timer);
-    this.timer = null;
+  #playbackIsActive() {
+    return (
+      this.transportState === REPLAY_TRANSPORT_STATES.PLAYING ||
+      (this.transportState === REPLAY_TRANSPORT_STATES.ADVANCING &&
+        this.presentationIntent?.renderPolicy === "replay_animated")
+    );
+  }
+
+  /**
+   * @param {"replay_static" | "replay_animated"} renderPolicy
+   * @param {boolean} restartAnimated
+   */
+  #setPresentationIntent(renderPolicy, restartAnimated) {
+    this.presentationGeneration += 1;
+    this.presentationIntent = Object.freeze({
+      generation: this.presentationGeneration,
+      renderPolicy,
+      restartAnimated,
+    });
   }
 
   #publish() {
@@ -764,23 +921,16 @@ export class ReplayPlaybackController {
  * @param {{key?: string, repeat?: boolean, shiftKey?: boolean, ctrlKey?: boolean, altKey?: boolean, metaKey?: boolean}} event
  */
 export function replayKeyboardIntent(event) {
-  if (event.ctrlKey || event.altKey || event.metaKey) {
-    return null;
-  }
-  if (event.key === "Home") {
-    return "first";
-  }
-  if (event.key === "End") {
-    return "last";
-  }
-  if (event.key === "ArrowLeft") {
-    return event.shiftKey ? "back_ten" : "previous";
-  }
-  if (event.key === "ArrowRight") {
-    return event.shiftKey ? "forward_ten" : "next";
-  }
-  if ((event.key === " " || event.key === "Spacebar") && !event.repeat) {
-    return "toggle";
+  if (!event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
+    if (event.key === "ArrowLeft") {
+      return "previous";
+    }
+    if (event.key === "ArrowRight") {
+      return "next";
+    }
+    if (event.key === " " && !event.repeat) {
+      return "toggle";
+    }
   }
   return null;
 }
@@ -788,6 +938,8 @@ export function replayKeyboardIntent(event) {
 /**
  * @param {{
  *   root: HTMLElement,
+ *   keyboardTarget: EventTarget,
+ *   keyboardEnabled: () => boolean,
  *   firstButton: HTMLButtonElement,
  *   backTenButton: HTMLButtonElement,
  *   previousButton: HTMLButtonElement,
@@ -797,54 +949,60 @@ export function replayKeyboardIntent(event) {
  *   lastButton: HTMLButtonElement,
  *   slider: HTMLInputElement,
  *   position: HTMLOutputElement,
+ *   rateSelect: HTMLSelectElement,
+ *   status: HTMLOutputElement,
  *   tickForFrameIndex?: (frameIndex: number) => unknown,
+ *   incomingTransitionForFrameIndex?: (frameIndex: number) => unknown,
  * }} elements
  * @param {ReplayPlaybackController} controller
  * @param {ReplayClock} [clock]
  */
 export function bindReplayTimelineControls(elements, controller, clock = globalThis) {
-  /** @type {any} */
-  let sliderTimer = null;
-  /** @type {number | null} */
-  let pendingSliderIndex = null;
-  const clearSliderTimer = () => {
-    if (sliderTimer !== null) {
-      clock.clearTimeout(sliderTimer);
-      sliderTimer = null;
-    }
-  };
+  void clock;
   const seekSlider = () => {
-    const intendedIndex = pendingSliderIndex;
-    pendingSliderIndex = null;
-    clearSliderTimer();
-    if (intendedIndex !== null) {
+    const intendedIndex = Number(elements.slider.value);
+    if (Number.isInteger(intendedIndex)) {
       void controller.seek(intendedIndex);
     }
   };
   const onSliderInput = () => {
-    pendingSliderIndex = Number(elements.slider.value);
-    controller.pause("user_seek");
-    elements.slider.value = String(pendingSliderIndex);
+    const previewIndex = Number(elements.slider.value);
+    elements.slider.value = String(previewIndex);
     const tickText = replayTickText(
       elements,
-      pendingSliderIndex,
+      previewIndex,
       Number(elements.slider.max),
     );
     elements.slider.setAttribute("aria-valuetext", tickText.aria);
     elements.position.value = tickText.visible;
     elements.position.textContent = elements.position.value;
-    clearSliderTimer();
-    sliderTimer = clock.setTimeout(seekSlider, REPLAY_SLIDER_DEBOUNCE_MS);
   };
   const onSliderChange = () => seekSlider();
+  const onRateChange = () => {
+    controller.setPlaybackRate(Number(elements.rateSelect.value));
+  };
   /** @param {Event} event */
   const onKeyDown = (event) => {
+    const state = controller.snapshot();
+    if (
+      elements.root.hidden ||
+      !elements.keyboardEnabled() ||
+      state.transportState === REPLAY_TRANSPORT_STATES.OFFLINE ||
+      state.cursor === null ||
+      state.hidden
+    ) {
+      return;
+    }
     const keyboardEvent = /** @type {KeyboardEvent} */ (event);
     const target = event.target;
     if (
       target instanceof Element &&
-      (target.matches("button, input, select, textarea, a[href]") ||
-        target.getAttribute("contenteditable") === "true")
+      (target.closest?.(
+        'button, input, select, textarea, a[href], summary, dialog, [contenteditable]:not([contenteditable="false"]), [role="button"], [role="slider"], [role="textbox"], [role="combobox"], [role="spinbutton"], [role="menuitem"]',
+      ) ??
+        target.matches(
+          'button, input, select, textarea, a[href], summary, dialog, [contenteditable]:not([contenteditable="false"]), [role="button"], [role="slider"], [role="textbox"], [role="combobox"], [role="spinbutton"], [role="menuitem"]',
+        ))
     ) {
       return;
     }
@@ -855,10 +1013,6 @@ export function bindReplayTimelineControls(elements, controller, clock = globalT
     event.preventDefault();
     if (intent === "toggle") {
       controller.toggle();
-    } else if (intent === "back_ten") {
-      void controller.jump(-10);
-    } else if (intent === "forward_ten") {
-      void controller.jump(10);
     } else {
       void controller[intent]();
     }
@@ -874,14 +1028,13 @@ export function bindReplayTimelineControls(elements, controller, clock = globalT
     [elements.lastButton, "click", () => void controller.last()],
     [elements.slider, "input", onSliderInput],
     [elements.slider, "change", onSliderChange],
-    [elements.root, "keydown", onKeyDown],
+    [elements.rateSelect, "change", onRateChange],
+    [elements.keyboardTarget, "keydown", onKeyDown],
   ];
   for (const [target, type, handler] of handlers) {
     target.addEventListener(type, handler);
   }
   return () => {
-    pendingSliderIndex = null;
-    clearSliderTimer();
     for (const [target, type, handler] of handlers) {
       target.removeEventListener(type, handler);
     }
@@ -899,7 +1052,10 @@ export function bindReplayTimelineControls(elements, controller, clock = globalT
  *   lastButton: HTMLButtonElement,
  *   slider: HTMLInputElement,
  *   position: HTMLOutputElement,
+ *   rateSelect: HTMLSelectElement,
+ *   status: HTMLOutputElement,
  *   tickForFrameIndex?: (frameIndex: number) => unknown,
+ *   incomingTransitionForFrameIndex?: (frameIndex: number) => unknown,
  * }} elements
  * @param {ReturnType<ReplayPlaybackController["snapshot"]>} state
  */
@@ -907,10 +1063,9 @@ export function renderReplayTimelineControls(elements, state) {
   const cursor = state.cursor;
   const unavailable =
     cursor === null ||
-    !state.connected ||
+    state.transportState === REPLAY_TRANSPORT_STATES.OFFLINE ||
     state.hidden ||
-    state.requestPending ||
-    state.presentationPending;
+    state.transportState === REPLAY_TRANSPORT_STATES.ADVANCING;
   const frameIndex = cursor?.frame_index ?? 0;
   const finalFrameIndex = cursor?.final_frame_index ?? 0;
   elements.slider.min = "0";
@@ -922,18 +1077,38 @@ export function renderReplayTimelineControls(elements, state) {
   elements.slider.setAttribute("aria-valuetext", tickText.aria);
   elements.position.value = tickText.visible;
   elements.position.textContent = elements.position.value;
-  elements.firstButton.disabled = unavailable || state.atStart;
-  elements.backTenButton.disabled = unavailable || state.atStart;
-  elements.previousButton.disabled = unavailable || state.atStart;
-  elements.nextButton.disabled = unavailable || state.atEnd;
-  elements.forwardTenButton.disabled = unavailable || state.atEnd;
-  elements.lastButton.disabled = unavailable || state.atEnd;
+  elements.rateSelect.value = String(state.playbackRate);
+  elements.rateSelect.disabled =
+    cursor === null ||
+    state.transportState === REPLAY_TRANSPORT_STATES.OFFLINE ||
+    state.hidden;
+  const incomingTransition =
+    cursor !== null && typeof elements.incomingTransitionForFrameIndex === "function"
+      ? elements.incomingTransitionForFrameIndex(frameIndex)
+      : null;
+  const statusParts = [
+    cursor === null ? "Frame — / —" : `Frame ${frameIndex} / ${finalFrameIndex}`,
+    tickText.visible,
+    ...(typeof incomingTransition === "string" && incomingTransition.length > 0
+      ? [`Incoming transition ${incomingTransition}`]
+      : []),
+    `${state.playbackRate.toFixed(2)}×`,
+    state.transportState,
+  ];
+  elements.status.value = statusParts.join(" · ");
+  elements.status.textContent = elements.status.value;
+  elements.firstButton.disabled = unavailable;
+  elements.backTenButton.disabled = unavailable;
+  elements.previousButton.disabled = unavailable;
+  elements.nextButton.disabled = unavailable;
+  elements.forwardTenButton.disabled = unavailable;
+  elements.lastButton.disabled = unavailable;
   elements.playPauseButton.disabled =
     cursor === null ||
-    !state.connected ||
+    state.transportState === REPLAY_TRANSPORT_STATES.OFFLINE ||
     state.hidden ||
-    ((state.requestPending || state.presentationPending) && !state.playing) ||
-    (state.atEnd && !state.playing);
+    (state.transportState === REPLAY_TRANSPORT_STATES.ADVANCING && !state.playing) ||
+    (cursor.final_frame_index === 0 && !state.playing);
   elements.playPauseButton.textContent = state.playing ? "Pause" : "Play";
   elements.playPauseButton.setAttribute("aria-pressed", String(state.playing));
   elements.playPauseButton.setAttribute(

@@ -6,6 +6,8 @@ import {
   normalizeReplayCommand,
   normalizeReplayCursor,
   REPLAY_AUTOPLAY_CADENCE_MS,
+  REPLAY_PLAYBACK_RATES,
+  REPLAY_TRANSPORT_STATES,
   ReplayPlaybackController,
   renderReplayTimelineControls,
   replayCommandRequest,
@@ -18,49 +20,31 @@ import {
   validateReplayCursorTransition,
 } from "../src/replay-controls.js";
 
-class FakeClock {
-  constructor() {
-    this.now = 0;
-    this.nextId = 1;
-    /** @type {Map<number, {at: number, callback: () => void | Promise<void>}>} */
-    this.timers = new Map();
-  }
+function deferred() {
+  /** @type {(value?: any) => void} */
+  let resolve = () => {};
+  /** @type {(reason?: any) => void} */
+  let reject = () => {};
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
 
-  /**
-   * @param {() => void | Promise<void>} callback
-   * @param {number} delay
-   */
-  setTimeout = (callback, delay) => {
-    const id = this.nextId;
-    this.nextId += 1;
-    this.timers.set(id, { at: this.now + Number(delay), callback });
-    return id;
-  };
+async function flushMicrotasks() {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+}
 
-  /** @param {number} id */
-  clearTimeout = (id) => {
-    this.timers.delete(id);
-  };
-
-  /** @param {number} milliseconds */
-  async advance(milliseconds) {
-    const target = this.now + milliseconds;
-    while (true) {
-      const due = [...this.timers.entries()]
-        .filter(([, timer]) => timer.at <= target)
-        .sort((left, right) => left[1].at - right[1].at)[0];
-      if (!due) {
-        break;
-      }
-      const [id, timer] = due;
-      this.timers.delete(id);
-      this.now = timer.at;
-      await timer.callback();
-      await Promise.resolve();
-    }
-    this.now = target;
-    await Promise.resolve();
-  }
+/**
+ * @param {ReplayPlaybackController} controller
+ * @param {ReturnType<typeof cursor>} value
+ */
+function installConnected(controller, value) {
+  controller.setConnected(true);
+  controller.installCursor(value);
 }
 
 class FakeElement {
@@ -75,6 +59,7 @@ class FakeElement {
     this.step = "";
     this.textContent = "";
     this.interactive = false;
+    this.hidden = false;
   }
 
   /** @param {string} type @param {(event: any) => void} handler */
@@ -122,6 +107,8 @@ function controlElements(
 ) {
   return {
     root: new FakeElement(),
+    keyboardTarget: new FakeElement(),
+    keyboardEnabled: () => true,
     firstButton: new FakeElement(),
     backTenButton: new FakeElement(),
     previousButton: new FakeElement(),
@@ -131,7 +118,11 @@ function controlElements(
     lastButton: new FakeElement(),
     slider: new FakeElement(),
     position: new FakeElement(),
+    rateSelect: new FakeElement(),
+    status: new FakeElement(),
     tickForFrameIndex,
+    incomingTransitionForFrameIndex: (/** @type {number} */ frameIndex) =>
+      frameIndex === 0 ? null : `episode:test:transition:${frameIndex - 1}`,
   };
 }
 
@@ -238,73 +229,114 @@ test("cursor and replay command constructors reject malformed authority inputs",
 });
 
 test("keyboard intent is bounded to unmodified replay navigation and edge-triggered play", () => {
-  assert.equal(replayKeyboardIntent({ key: "Home" }), "first");
-  assert.equal(replayKeyboardIntent({ key: "End" }), "last");
+  assert.equal(replayKeyboardIntent({ key: "Home" }), null);
+  assert.equal(replayKeyboardIntent({ key: "End" }), null);
   assert.equal(replayKeyboardIntent({ key: "ArrowLeft" }), "previous");
   assert.equal(replayKeyboardIntent({ key: "ArrowRight" }), "next");
-  assert.equal(replayKeyboardIntent({ key: "ArrowLeft", shiftKey: true }), "back_ten");
-  assert.equal(
-    replayKeyboardIntent({ key: "ArrowRight", shiftKey: true }),
-    "forward_ten",
-  );
+  assert.equal(replayKeyboardIntent({ key: "ArrowLeft", shiftKey: true }), null);
+  assert.equal(replayKeyboardIntent({ key: "ArrowRight", shiftKey: true }), null);
   assert.equal(replayKeyboardIntent({ key: " ", repeat: false }), "toggle");
   assert.equal(replayKeyboardIntent({ key: " ", repeat: true }), null);
+  assert.equal(replayKeyboardIntent({ key: "Spacebar", repeat: false }), null);
   assert.equal(replayKeyboardIntent({ key: "ArrowRight", ctrlKey: true }), null);
   assert.equal(replayKeyboardIntent({ key: "n" }), null);
 });
 
-test("timeline binding debounces slider seeks and preserves native control keys", async () => {
+test("timeline binding previews slider input without a request and commits once", async () => {
   const originalElement = Object.getOwnPropertyDescriptor(globalThis, "Element");
   Object.defineProperty(globalThis, "Element", {
     configurable: true,
     value: FakeElement,
   });
-  const clock = new FakeClock();
   /** @type {Array<Record<string, any>>} */
   const commands = [];
   const elements = controlElements();
   const controller = new ReplayPlaybackController({
-    clock,
     onStateChange: (state) => {
       renderReplayTimelineControls(/** @type {any} */ (elements), state);
     },
     request: async (command) => {
       commands.push(command);
       return {
-        cursor: cursor(Number(command.frame_index ?? 0), 3, {
-          cursor: 1,
-          choreography: 0,
-        }),
+        frame: {
+          cursor: cursor(Number(command.frame_index ?? 0), 3, {
+            cursor: commands.length,
+            choreography: 0,
+          }),
+        },
       };
     },
   });
-  controller.installCursor(cursor(0));
+  installConnected(controller, cursor(0));
   elements.slider.value = "2";
   elements.slider.max = "3";
   elements.playPauseButton.interactive = true;
-  const unbind = bindReplayTimelineControls(
-    /** @type {any} */ (elements),
-    controller,
-    clock,
-  );
+  const unbind = bindReplayTimelineControls(/** @type {any} */ (elements), controller);
 
   try {
     elements.slider.dispatch("input");
-    assert.equal(controller.snapshot().pauseReason, "user_seek");
+    assert.equal(controller.snapshot().pauseReason, null);
     assert.equal(elements.slider.value, "2");
     assert.equal(elements.position.textContent, "Tick 2 / 3");
-    await clock.advance(159);
     assert.deepEqual(commands, []);
-    await clock.advance(1);
-    await Promise.resolve();
+    elements.slider.dispatch("change");
+    await flushMicrotasks();
     assert.deepEqual(commands, [replaySeekCommand(2)]);
 
-    elements.root.dispatch("keydown", {
+    elements.slider.value = "3";
+    elements.slider.dispatch("input");
+    assert.equal(elements.position.textContent, "Tick 3 / 3");
+    renderReplayTimelineControls(/** @type {any} */ (elements), controller.snapshot());
+    assert.equal(elements.slider.value, "2");
+    elements.slider.dispatch("change");
+    await flushMicrotasks();
+    assert.deepEqual(commands, [replaySeekCommand(2), replaySeekCommand(2)]);
+
+    elements.rateSelect.value = "1.75";
+    elements.rateSelect.dispatch("change");
+    assert.equal(controller.snapshot().playbackRate, 1.75);
+    assert.deepEqual(commands, [replaySeekCommand(2), replaySeekCommand(2)]);
+    assert.match(elements.status.textContent, /1\.75× · SETTLED$/u);
+
+    elements.keyboardTarget.dispatch("keydown", {
       key: " ",
       repeat: false,
       target: elements.playPauseButton,
     });
     assert.equal(controller.snapshot().playing, false);
+    elements.keyboardTarget.dispatch("keydown", {
+      key: "ArrowRight",
+      shiftKey: true,
+      target: elements.root,
+    });
+    assert.equal(commands.length, 2);
+    elements.keyboardTarget.dispatch("keydown", {
+      key: "ArrowRight",
+      target: elements.root,
+    });
+    await flushMicrotasks();
+    assert.deepEqual(commands.at(-1), replaySeekCommand(3));
+    assert.equal(commands.length, 3);
+    elements.root.hidden = true;
+    elements.keyboardTarget.dispatch("keydown", {
+      key: "ArrowRight",
+      target: elements.root,
+    });
+    assert.equal(commands.length, 3);
+    elements.root.hidden = false;
+    elements.keyboardEnabled = () => false;
+    elements.keyboardTarget.dispatch("keydown", {
+      key: "ArrowLeft",
+      target: elements.root,
+    });
+    assert.equal(commands.length, 3);
+    elements.keyboardEnabled = () => true;
+    controller.setAuthorityPending("disconnect");
+    elements.keyboardTarget.dispatch("keydown", {
+      key: "ArrowLeft",
+      target: elements.root,
+    });
+    assert.equal(commands.length, 3);
   } finally {
     unbind();
     if (originalElement) {
@@ -318,12 +350,16 @@ test("timeline binding debounces slider seeks and preserves native control keys"
 test("timeline rendering publishes bounded controls and accessible cursor text", () => {
   const elements = controlElements();
   renderReplayTimelineControls(/** @type {any} */ (elements), {
+    transportState: REPLAY_TRANSPORT_STATES.SETTLED,
+    generation: 1,
+    presentationIntent: null,
     cursor: cursor(2, 3),
     playing: false,
     requestPending: false,
     presentationPending: false,
     connected: true,
     hidden: false,
+    playbackRate: 1,
     pauseReason: null,
     atStart: false,
     atEnd: false,
@@ -332,6 +368,11 @@ test("timeline rendering publishes bounded controls and accessible cursor text",
   assert.equal(elements.slider.max, "3");
   assert.equal(elements.slider.getAttribute("aria-valuetext"), "Tick 2 of 3");
   assert.equal(elements.position.textContent, "Tick 2 / 3");
+  assert.equal(elements.rateSelect.value, "1");
+  assert.equal(
+    elements.status.textContent,
+    "Frame 2 / 3 · Tick 2 / 3 · Incoming transition episode:test:transition:1 · 1.00× · SETTLED",
+  );
   assert.equal(elements.backTenButton.disabled, false);
   assert.equal(elements.previousButton.disabled, false);
   assert.equal(elements.nextButton.disabled, false);
@@ -350,12 +391,16 @@ test("timeline labels use nonzero simulator ticks while slider seeks frame indic
     replayTimelineSimulatorStep(timeline, frameIndex),
   );
   renderReplayTimelineControls(/** @type {any} */ (elements), {
+    transportState: REPLAY_TRANSPORT_STATES.SETTLED,
+    generation: 1,
+    presentationIntent: null,
     cursor: cursor(2, 3),
     playing: false,
     requestPending: false,
     presentationPending: false,
     connected: true,
     hidden: false,
+    playbackRate: 1,
     pauseReason: null,
     atStart: false,
     atEnd: false,
@@ -364,6 +409,10 @@ test("timeline labels use nonzero simulator ticks while slider seeks frame indic
   assert.equal(elements.slider.max, "3");
   assert.equal(elements.slider.getAttribute("aria-valuetext"), "Tick 42 of 43");
   assert.equal(elements.position.textContent, "Tick 42 / 43");
+  assert.equal(
+    elements.status.textContent,
+    "Frame 2 / 3 · Tick 42 / 43 · Incoming transition episode:test:transition:1 · 1.00× · SETTLED",
+  );
   assert.equal(replayTimelineSimulatorStep(timeline, 2), 42);
   assert.equal(replayTimelineSimulatorStep(timeline, 4), null);
   assert.equal(
@@ -494,8 +543,7 @@ test("an interleaved duplicate installs settled authority without retry or anima
     },
     onError: (error) => errors.push(error),
   });
-  controller.installCursor(previous);
-  controller.play();
+  installConnected(controller, previous);
   assert.equal(await controller.next(), false);
   assert.equal(requests.length, 1);
   assert.equal(presentations, 0);
@@ -505,7 +553,7 @@ test("an interleaved duplicate installs settled authority without retry or anima
   assert.equal(controller.snapshot().pauseReason, "resync");
 });
 
-test("explicit navigation pauses autoplay and serializes one request", async () => {
+test("explicit navigation is first-wins while one absolute seek is advancing", async () => {
   /** @type {Array<Record<string, any>>} */
   const commands = [];
   /** @type {(value: unknown) => void} */
@@ -521,33 +569,39 @@ test("explicit navigation pauses autoplay and serializes one request", async () 
       return requestPending;
     },
   });
-  controller.installCursor(cursor(1));
-  controller.play();
+  installConnected(controller, cursor(1));
   const first = controller.next();
   const second = await controller.last();
   assert.equal(controller.snapshot().playing, false);
+  assert.equal(controller.snapshot().transportState, REPLAY_TRANSPORT_STATES.ADVANCING);
   assert.equal(controller.snapshot().pauseReason, "user_seek");
   assert.equal(second, false);
-  assert.deepEqual(commands, [replayNavigationCommand("next")]);
-  resolveRequest({ frame: { cursor: cursor(2) } });
+  assert.deepEqual(commands, [replaySeekCommand(2)]);
+  resolveRequest({ frame: { cursor: cursor(2, 3, { cursor: 2, choreography: 1 }) } });
   assert.equal(await first, true);
   assert.equal(controller.snapshot().cursor?.frame_index, 2);
+  assert.equal(controller.snapshot().transportState, REPLAY_TRANSPORT_STATES.SETTLED);
 });
 
-test("same-frame absolute seek is sent while out-of-range seek is rejected locally", async () => {
+test("same-frame and out-of-range destinations each send one clamped absolute seek", async () => {
   /** @type {Array<Record<string, any>>} */
   const commands = [];
+  let authoritative = cursor(1, 3, { cursor: 7, choreography: 2 });
   const controller = new ReplayPlaybackController({
     request: async (command) => {
       commands.push(command);
-      return { frame: { cursor: cursor(1, 3, { cursor: 8, choreography: 2 }) } };
+      authoritative = cursor(Number(command.frame_index), 3, {
+        cursor: authoritative.cursor_generation + 1,
+        choreography: authoritative.choreography_generation,
+      });
+      return { frame: { cursor: authoritative } };
     },
   });
-  controller.installCursor(cursor(1, 3, { cursor: 7, choreography: 2 }));
+  installConnected(controller, authoritative);
   assert.equal(await controller.seek(1), true);
   assert.deepEqual(commands, [replaySeekCommand(1)]);
-  await assert.rejects(controller.seek(4), /outside/u);
-  assert.equal(commands.length, 1);
+  assert.equal(await controller.seek(4), true);
+  assert.deepEqual(commands, [replaySeekCommand(1), replaySeekCommand(3)]);
 });
 
 test("ten-tick jumps clamp and send one absolute seek instead of repeated requests", async () => {
@@ -564,7 +618,7 @@ test("ten-tick jumps clamp and send one absolute seek instead of repeated reques
       return { frame: { cursor: authoritative } };
     },
   });
-  controller.installCursor(authoritative);
+  installConnected(controller, authoritative);
 
   assert.equal(await controller.jump(-10), true);
   assert.deepEqual(commands, [replaySeekCommand(2)]);
@@ -575,138 +629,213 @@ test("ten-tick jumps clamp and send one absolute seek instead of repeated reques
     cursor: authoritative.cursor_generation,
     choreography: authoritative.choreography_generation,
   });
-  controller.installCursor(authoritative);
+  installConnected(controller, authoritative);
   assert.equal(await controller.jump(10), true);
   assert.deepEqual(commands.at(-1), replaySeekCommand(25));
   assert.equal(commands.length, 3);
-  assert.equal(await controller.jump(10), false);
-  assert.equal(commands.length, 3);
+  assert.equal(await controller.jump(10), true);
+  assert.deepEqual(commands.at(-1), replaySeekCommand(25));
+  assert.equal(commands.length, 4);
   await assert.rejects(controller.jump(0), /non-zero integer/u);
 });
 
-test("autoplay waits for both response and presentation before scheduling another request", async () => {
-  const clock = new FakeClock();
-  /** @type {Array<Record<string, any>>} */
-  const commands = [];
-  let frameIndex = 0;
-  /** @type {() => void} */
-  let releasePresentation = () => {
-    throw new Error("Presentation resolver was not installed.");
-  };
-  /** @type {Promise<void>} */
-  let presentation = new Promise((resolve) => {
-    releasePresentation = resolve;
+test("controller starts offline and reconnect settles only after a coherent cursor install", () => {
+  const controller = new ReplayPlaybackController({ request: async () => null });
+  assert.equal(controller.snapshot().transportState, REPLAY_TRANSPORT_STATES.OFFLINE);
+  assert.equal(controller.snapshot().cursor, null);
+
+  controller.setConnected(true);
+  assert.equal(controller.snapshot().transportState, REPLAY_TRANSPORT_STATES.OFFLINE);
+  controller.installCursor(cursor(1));
+  assert.equal(controller.snapshot().transportState, REPLAY_TRANSPORT_STATES.SETTLED);
+
+  controller.setAuthorityPending();
+  assert.equal(controller.snapshot().transportState, REPLAY_TRANSPORT_STATES.OFFLINE);
+  assert.equal(controller.snapshot().cursor, null);
+  assert.equal(controller.snapshot().presentationIntent, null);
+  controller.setConnected(true);
+  assert.equal(controller.snapshot().transportState, REPLAY_TRANSPORT_STATES.OFFLINE);
+  controller.installCursor(cursor(2));
+  assert.equal(controller.snapshot().transportState, REPLAY_TRANSPORT_STATES.SETTLED);
+
+  assert.deepEqual(REPLAY_AUTOPLAY_CADENCE_MS, {
+    normal: 500,
+    reduced: 750,
+    off: 1_000,
   });
+});
+
+test("playback rate is exact controller state and never changes transport authority", () => {
+  /** @type {unknown[]} */
+  const requests = [];
+  /** @type {Array<ReturnType<ReplayPlaybackController["snapshot"]>>} */
+  const publications = [];
   const controller = new ReplayPlaybackController({
-    clock,
-    getMotionMode: () => "normal",
+    playbackRate: 0.5,
     request: async (command) => {
-      commands.push(command);
-      frameIndex += 1;
-      return { frame: { cursor: cursor(frameIndex) } };
+      requests.push(command);
+      return null;
     },
-    waitForPresentation: () => presentation,
+    onStateChange: (state) => publications.push(state),
   });
-  controller.installCursor(cursor(0));
-  assert.equal(controller.play(), true);
-  await clock.advance(REPLAY_AUTOPLAY_CADENCE_MS.normal);
-  assert.equal(commands.length, 1);
-  assert.equal(controller.snapshot().presentationPending, true);
-  await clock.advance(REPLAY_AUTOPLAY_CADENCE_MS.normal * 5);
-  assert.equal(commands.length, 1);
-  releasePresentation();
-  await Promise.resolve();
-  await Promise.resolve();
-  presentation = Promise.resolve();
-  await clock.advance(REPLAY_AUTOPLAY_CADENCE_MS.normal);
-  assert.equal(commands.length, 2);
-  assert.deepEqual(commands, [
-    replayNavigationCommand("next"),
-    replayNavigationCommand("next"),
+  installConnected(controller, cursor(1, 3));
+  const baseline = controller.snapshot();
+  const baselinePublicationCount = publications.length;
+
+  assert.deepEqual(REPLAY_PLAYBACK_RATES, [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2]);
+  assert.equal(Object.isFrozen(REPLAY_PLAYBACK_RATES), true);
+  assert.equal(baseline.playbackRate, 0.5);
+
+  controller.setPlaybackRate(0.5);
+  assert.equal(publications.length, baselinePublicationCount);
+  for (const rate of REPLAY_PLAYBACK_RATES) {
+    const before = controller.snapshot();
+    const after = controller.setPlaybackRate(rate);
+    assert.equal(after.playbackRate, rate);
+    assert.equal(after.transportState, before.transportState);
+    assert.equal(after.generation, before.generation);
+    assert.equal(after.cursor, before.cursor);
+    assert.equal(after.presentationIntent, before.presentationIntent);
+    assert.equal(after.pauseReason, before.pauseReason);
+    assert.equal(after.requestPending, false);
+  }
+  assert.deepEqual(requests, []);
+
+  const accepted = controller.snapshot();
+  for (const invalid of [
+    0,
+    0.1,
+    0.3,
+    2.25,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    "1",
+  ]) {
+    assert.throws(
+      () => controller.setPlaybackRate(/** @type {any} */ (invalid)),
+      /Replay playback rate must be one of/u,
+    );
+    assert.equal(controller.snapshot().playbackRate, accepted.playbackRate);
+    assert.equal(controller.snapshot().generation, accepted.generation);
+    assert.equal(controller.snapshot().cursor, accepted.cursor);
+  }
+  assert.throws(
+    () =>
+      new ReplayPlaybackController({
+        playbackRate: 1.1,
+        request: async () => null,
+      }),
+    /Replay playback rate must be one of/u,
+  );
+});
+
+test("every named navigation control sends one clamped absolute seek", async () => {
+  /** @type {Array<Record<string, any>>} */
+  const requests = [];
+  let authoritative = cursor(2, 4, { cursor: 10, choreography: 3 });
+  const controller = new ReplayPlaybackController({
+    request: async (command) => {
+      requests.push(command);
+      authoritative = cursor(Number(command.frame_index), 4, {
+        cursor: authoritative.cursor_generation + 1,
+        choreography: authoritative.choreography_generation,
+      });
+      return { frame: { cursor: authoritative } };
+    },
+  });
+  installConnected(controller, authoritative);
+
+  await controller.first();
+  await controller.previous();
+  await controller.next();
+  await controller.last();
+
+  assert.deepEqual(requests, [
+    replaySeekCommand(0),
+    replaySeekCommand(0),
+    replaySeekCommand(1),
+    replaySeekCommand(4),
   ]);
 });
 
-test("motion off autoplay retains a bounded human-visible cadence", async () => {
-  const clock = new FakeClock();
-  let requests = 0;
+test("Play at frame zero advances privately, animates the successor, then settles", async () => {
+  const presentation = deferred();
+  /** @type {Array<Record<string, any>>} */
+  const requests = [];
   const controller = new ReplayPlaybackController({
-    clock,
-    getMotionMode: () => "off",
-    request: async () => {
-      requests += 1;
-      return { frame: { cursor: cursor(requests, 4) } };
+    request: async (command) => {
+      requests.push(command);
+      return { frame: { cursor: cursor(1, 1, { cursor: 1, choreography: 1 }) } };
     },
+    waitForPresentation: () => presentation.promise,
   });
-  controller.installCursor(cursor(0, 4));
-  controller.play();
-  await clock.advance(REPLAY_AUTOPLAY_CADENCE_MS.off - 1);
-  assert.equal(requests, 0);
-  await clock.advance(1);
-  assert.equal(requests, 1);
-  await clock.advance(REPLAY_AUTOPLAY_CADENCE_MS.off - 1);
-  assert.equal(requests, 1);
-  await clock.advance(1);
-  assert.equal(requests, 2);
-});
-
-test("autoplay pauses at endpoint and never spins a tight loop", async () => {
-  const clock = new FakeClock();
-  let requests = 0;
-  const controller = new ReplayPlaybackController({
-    clock,
-    request: async () => {
-      requests += 1;
-      return { frame: { cursor: cursor(1, 1) } };
-    },
+  installConnected(controller, cursor(0, 1));
+  assert.equal(controller.play(), true);
+  assert.equal(controller.snapshot().transportState, REPLAY_TRANSPORT_STATES.ADVANCING);
+  assert.deepEqual(requests, [replayNavigationCommand("next")]);
+  await flushMicrotasks();
+  assert.equal(controller.snapshot().transportState, REPLAY_TRANSPORT_STATES.PLAYING);
+  assert.deepEqual(controller.snapshot().presentationIntent, {
+    generation: 2,
+    renderPolicy: "replay_animated",
+    restartAnimated: false,
   });
-  controller.installCursor(cursor(0, 1));
-  controller.play();
-  await clock.advance(REPLAY_AUTOPLAY_CADENCE_MS.normal * 20);
-  assert.equal(requests, 1);
+  presentation.resolve();
+  await flushMicrotasks();
+  assert.equal(controller.snapshot().transportState, REPLAY_TRANSPORT_STATES.SETTLED);
   assert.equal(controller.snapshot().playing, false);
   assert.equal(controller.snapshot().pauseReason, "endpoint");
-  assert.equal(clock.timers.size, 0);
+  assert.equal(requests.length, 1);
 });
 
-test("disconnect, hidden page, and request errors stop autoplay", async () => {
-  for (const stop of ["disconnect", "hidden", "error"]) {
-    const clock = new FakeClock();
+test("Pause, filters, and hidden state invalidate a current replay generation", async () => {
+  for (const stop of ["user_pause", "visual_filter_changed", "hidden"]) {
+    const presentation = deferred();
     let requests = 0;
     const controller = new ReplayPlaybackController({
-      clock,
       request: async () => {
         requests += 1;
-        throw new Error("synthetic failure");
+        return { frame: { cursor: cursor(2, 3) } };
       },
+      waitForPresentation: () => presentation.promise,
     });
-    controller.installCursor(cursor(0));
-    controller.play();
-    if (stop === "disconnect") {
-      controller.setConnected(false);
-    } else if (stop === "hidden") {
+    installConnected(controller, cursor(1, 3));
+    assert.equal(controller.play(), true);
+    assert.equal(controller.snapshot().transportState, REPLAY_TRANSPORT_STATES.PLAYING);
+    assert.equal(controller.snapshot().presentationIntent?.restartAnimated, true);
+    if (stop === "hidden") {
       controller.setHidden(true);
     } else {
-      await clock.advance(REPLAY_AUTOPLAY_CADENCE_MS.normal);
+      controller.pause(stop);
     }
-    await clock.advance(REPLAY_AUTOPLAY_CADENCE_MS.normal * 3);
-    assert.equal(controller.snapshot().playing, false);
+    assert.equal(controller.snapshot().transportState, REPLAY_TRANSPORT_STATES.SETTLED);
+    assert.equal(
+      controller.snapshot().presentationIntent?.renderPolicy,
+      "replay_static",
+    );
+    presentation.resolve();
+    await flushMicrotasks();
+    assert.equal(requests, 0);
     assert.equal(controller.snapshot().pauseReason, stop);
-    assert.equal(requests, stop === "error" ? 1 : 0);
   }
 });
 
-test("autoplay rejects a non-next authoritative cursor and pauses", async () => {
-  const clock = new FakeClock();
+test("play-owned navigation rejects an incoherent private-next response", async () => {
+  /** @type {Array<Record<string, any>>} */
+  const requests = [];
   /** @type {unknown[]} */
   const errors = [];
   const controller = new ReplayPlaybackController({
-    clock,
-    request: async () => ({ frame: { cursor: cursor(2, 3) } }),
+    request: async (command) => {
+      requests.push(command);
+      return { frame: { cursor: cursor(2, 3) } };
+    },
     onError: (error) => errors.push(error),
   });
-  controller.installCursor(cursor(0));
+  installConnected(controller, cursor(0));
   controller.play();
-  await clock.advance(REPLAY_AUTOPLAY_CADENCE_MS.normal);
+  await flushMicrotasks();
+  assert.deepEqual(requests, [replayNavigationCommand("next")]);
   assert.equal(controller.snapshot().playing, false);
   assert.equal(controller.snapshot().pauseReason, "error");
   assert.match(String(errors[0]), /cursor generation/u);
@@ -727,12 +856,128 @@ test("a validated stale resync installs its cursor without retry, animation, or 
     },
     onError: (error) => errors.push(error),
   });
-  controller.installCursor(cursor(1, 3, { cursor: 7, choreography: 2 }));
+  installConnected(controller, cursor(1, 3, { cursor: 7, choreography: 2 }));
 
   assert.equal(await controller.next(), false);
-  assert.deepEqual(requests, [replayNavigationCommand("next")]);
+  assert.deepEqual(requests, [replaySeekCommand(2)]);
   assert.equal(controller.snapshot().cursor?.frame_index, 2);
   assert.equal(controller.snapshot().pauseReason, "resync");
   assert.equal(controller.snapshot().playing, false);
   assert.deepEqual(errors, []);
+});
+
+test("Pause during a play-owned request settles the arriving successor without continuation", async () => {
+  const response = deferred();
+  /** @type {Array<Record<string, any>>} */
+  const requests = [];
+  let presentations = 0;
+  const controller = new ReplayPlaybackController({
+    request: async (command) => {
+      requests.push(command);
+      return response.promise;
+    },
+    waitForPresentation: async () => {
+      presentations += 1;
+    },
+  });
+  installConnected(controller, cursor(0));
+
+  assert.equal(controller.play(), true);
+  assert.equal(controller.snapshot().transportState, REPLAY_TRANSPORT_STATES.ADVANCING);
+  assert.equal(controller.snapshot().playing, true);
+  controller.pause("user_pause");
+  assert.equal(controller.snapshot().transportState, REPLAY_TRANSPORT_STATES.ADVANCING);
+  assert.equal(controller.snapshot().playing, false);
+  assert.equal(controller.snapshot().presentationIntent?.renderPolicy, "replay_static");
+  assert.equal(await controller.next(), false);
+  assert.deepEqual(requests, [replayNavigationCommand("next")]);
+
+  response.resolve({
+    frame: { cursor: cursor(1, 3, { cursor: 1, choreography: 1 }) },
+  });
+  await flushMicrotasks();
+  assert.equal(controller.snapshot().transportState, REPLAY_TRANSPORT_STATES.SETTLED);
+  assert.equal(controller.snapshot().cursor?.frame_index, 1);
+  assert.equal(controller.snapshot().playing, false);
+  assert.equal(presentations, 0);
+  assert.equal(requests.length, 1);
+});
+
+test("authority replacement fences a late request result and cannot revive playback", async () => {
+  const response = deferred();
+  const controller = new ReplayPlaybackController({
+    request: async () => response.promise,
+  });
+  installConnected(controller, cursor(1));
+  const advancing = controller.next();
+  controller.setAuthorityPending("presentation_pending");
+  controller.setConnected(true);
+
+  response.resolve({ frame: { cursor: cursor(2) } });
+  assert.equal(await advancing, false);
+  assert.equal(controller.snapshot().transportState, REPLAY_TRANSPORT_STATES.OFFLINE);
+  assert.equal(controller.snapshot().cursor, null);
+  assert.equal(controller.snapshot().presentationIntent, null);
+});
+
+test("Play replays middle and final incoming transitions before any continuation", async () => {
+  const currentPresentation = deferred();
+  const successorPresentation = deferred();
+  const presentations = [currentPresentation, successorPresentation];
+  let presentationIndex = 0;
+  /** @type {Array<Record<string, any>>} */
+  const requests = [];
+  const controller = new ReplayPlaybackController({
+    request: async (command) => {
+      requests.push(command);
+      return {
+        frame: {
+          cursor: cursor(2, 3, { cursor: 2, choreography: 2 }),
+        },
+      };
+    },
+    waitForPresentation: () => presentations[presentationIndex++].promise,
+  });
+  installConnected(controller, cursor(1, 3));
+
+  assert.equal(controller.play(), true);
+  assert.equal(controller.snapshot().transportState, REPLAY_TRANSPORT_STATES.PLAYING);
+  assert.equal(controller.snapshot().presentationIntent?.restartAnimated, true);
+  assert.deepEqual(requests, []);
+  currentPresentation.resolve();
+  await flushMicrotasks();
+  assert.deepEqual(requests, [replayNavigationCommand("next")]);
+  assert.equal(controller.snapshot().cursor?.frame_index, 2);
+  assert.equal(controller.snapshot().transportState, REPLAY_TRANSPORT_STATES.PLAYING);
+  assert.equal(controller.snapshot().presentationIntent?.restartAnimated, false);
+  controller.pause();
+  successorPresentation.resolve();
+  await flushMicrotasks();
+  assert.equal(requests.length, 1);
+
+  const finalPresentation = deferred();
+  const finalController = new ReplayPlaybackController({
+    request: async () => {
+      throw new Error("Final-frame replay must not request another cursor.");
+    },
+    waitForPresentation: () => finalPresentation.promise,
+  });
+  installConnected(finalController, cursor(3, 3));
+  assert.equal(finalController.play(), true);
+  assert.equal(finalController.snapshot().presentationIntent?.restartAnimated, true);
+  finalPresentation.resolve();
+  await flushMicrotasks();
+  assert.equal(
+    finalController.snapshot().transportState,
+    REPLAY_TRANSPORT_STATES.SETTLED,
+  );
+  assert.equal(finalController.snapshot().pauseReason, "endpoint");
+
+  const emptyController = new ReplayPlaybackController({ request: async () => null });
+  installConnected(emptyController, cursor(0, 0));
+  assert.equal(emptyController.play(), false);
+  assert.equal(
+    emptyController.snapshot().transportState,
+    REPLAY_TRANSPORT_STATES.SETTLED,
+  );
 });

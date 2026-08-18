@@ -4,11 +4,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 
 import { expect, test } from "@playwright/test";
-import {
-  CHOREOGRAPHY_ROOT,
-  finishControllerClock,
-  installWaapiAutopause,
-} from "./support/choreography.js";
+import { CHOREOGRAPHY_ROOT, installWaapiAutopause } from "./support/choreography.js";
 import {
   REPOSITORY_ROOT,
   startDebugger,
@@ -1864,6 +1860,7 @@ async function seekReplay(page, frameIndex) {
     }
     element.value = String(value);
     element.dispatchEvent(new Event("input", { bubbles: true }));
+    element.dispatchEvent(new Event("change", { bubbles: true }));
   }, frameIndex);
   const response = await responsePromise;
   expect(response.status()).toBe(200);
@@ -3261,7 +3258,7 @@ test(CP5_C_SLICE_TEST_TITLE, async ({ page }) => {
       recoveryCommandPayload = await response.json();
       expect(recoveryCommandPayload).toMatchObject({
         result: "applied",
-        animate_incoming: true,
+        animate_incoming: false,
         frame: { cursor: { frame_index: 1 } },
       });
       await expect(regeneration).toHaveCount(1);
@@ -3297,7 +3294,8 @@ test(CP5_C_SLICE_TEST_TITLE, async ({ page }) => {
     await expect(play).toHaveAttribute("aria-label", "Play replay");
     expect(recoveryCommands).toHaveLength(1);
     expect(recoveryCommands[0].postDataJSON().command).toEqual({
-      command_type: "next_frame",
+      command_type: "absolute_seek",
+      frame_index: 1,
     });
     const recoveryFrameOne = await authenticatedGet(page, "/api/presentation/frame");
     const incoming = /** @type {Record<string, any>[]} */ (
@@ -4010,12 +4008,8 @@ test(CP5_SLICE_5_TEST_TITLE, async ({ page }) => {
   };
 
   /** @param {number} frameIndex */
-  const advanceWithIncomingChoreography = async (frameIndex) => {
+  const advanceToStaticChoreographySummary = async (frameIndex) => {
     const next = page.locator("#replay-next-button");
-    if (await next.isDisabled()) {
-      await finishControllerClock(page, "cleanup");
-      await expect(next).toBeEnabled();
-    }
     const responsePromise = page.waitForResponse(
       (response) =>
         response.request().method() === "POST" &&
@@ -4025,9 +4019,13 @@ test(CP5_SLICE_5_TEST_TITLE, async ({ page }) => {
     await next.click();
     const response = await responsePromise;
     expect(response.status()).toBe(200);
+    expect(response.request().postDataJSON().command).toEqual({
+      command_type: "absolute_seek",
+      frame_index: frameIndex,
+    });
     expect(await response.json()).toMatchObject({
       result: "applied",
-      animate_incoming: true,
+      animate_incoming: false,
       frame: { cursor: { frame_index: frameIndex } },
     });
     await expect(page.locator("#replay-frame-slider")).toHaveValue(String(frameIndex));
@@ -4079,7 +4077,7 @@ test(CP5_SLICE_5_TEST_TITLE, async ({ page }) => {
     const frames = [];
     for (let frameIndex = 0; frameIndex <= contract.actions.length; frameIndex += 1) {
       if (frameIndex > 0) {
-        await advanceWithIncomingChoreography(frameIndex);
+        await advanceToStaticChoreographySummary(frameIndex);
       }
       const presentationBody = await cp5Slice5PresentationBody(page);
       const presentation = JSON.parse(presentationBody);
@@ -4307,9 +4305,6 @@ test(CP5_SLICE_5_TEST_TITLE, async ({ page }) => {
         ).toBe(true);
       }
       frames.push({ presentation, signature });
-    }
-    if (contract.actions.length > 0) {
-      await finishControllerClock(page, "cleanup");
     }
     return frames;
   };
