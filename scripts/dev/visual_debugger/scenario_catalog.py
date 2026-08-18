@@ -65,6 +65,16 @@ RESEARCHER_SCENARIO_CATALOG: tuple[ScenarioCatalogEntry, ...] = (
         audience="researcher",
     ),
     ScenarioCatalogEntry(
+        name="stacked_team_auras",
+        title="Stacked team auras",
+        description=(
+            "Two same-team Mage and Warrior emitters stack on reciprocal Basics."
+        ),
+        mode="scripted",
+        default_controlled_slot=4,
+        audience="researcher",
+    ),
+    ScenarioCatalogEntry(
         name="status_stack",
         title="Status composition and lifecycle",
         description="Scripted stacked control, mitigation, break, and movement.",

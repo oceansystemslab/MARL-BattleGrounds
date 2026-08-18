@@ -223,17 +223,17 @@ def _basic_support_scenario() -> tuple[EnvConfig, EnvState]:
         NEUTRAL_CLASS_ID,
     )
     return _scenario(
-        map_width=14.0,
+        map_width=18.0,
         map_height=12.0,
         team_sizes=(3, 3),
         class_ids=roster,
         active_positions={
-            0: (4.0, 3.0),
-            1: (4.0, 6.0),
-            2: (4.0, 9.0),
-            5: (7.0, 3.0),
-            6: (7.0, 6.0),
-            7: (7.0, 9.0),
+            0: (6.0, 3.0),
+            1: (6.0, 6.0),
+            2: (6.0, 9.0),
+            5: (9.0, 3.0),
+            6: (9.0, 6.0),
+            7: (9.0, 9.0),
         },
     )
 
@@ -252,21 +252,21 @@ def _ultimate_showcase_scenario() -> tuple[EnvConfig, EnvState]:
         PRIEST_CLASS_ID,
     )
     return _scenario(
-        map_width=16.0,
+        map_width=18.0,
         map_height=12.0,
         team_sizes=(5, 5),
         class_ids=roster,
         active_positions={
-            0: (3.0, 2.0),
-            1: (5.0, 5.0),
-            2: (5.0, 8.0),
-            3: (8.0, 5.0),
-            4: (3.0, 10.0),
-            5: (7.0, 6.0),
-            6: (8.0, 8.0),
-            7: (10.0, 3.0),
-            8: (12.0, 8.0),
-            9: (13.0, 10.0),
+            0: (4.0, 2.0),
+            1: (6.0, 5.0),
+            2: (6.0, 8.0),
+            3: (9.0, 5.0),
+            4: (4.0, 10.0),
+            5: (8.0, 6.0),
+            6: (9.0, 8.0),
+            7: (11.0, 3.0),
+            8: (13.0, 8.0),
+            9: (14.0, 10.0),
         },
     )
 
@@ -285,17 +285,50 @@ def _aura_crossfire_scenario() -> tuple[EnvConfig, EnvState]:
         NEUTRAL_CLASS_ID,
     )
     return _scenario(
-        map_width=14.0,
+        map_width=18.0,
         map_height=12.0,
         team_sizes=(3, 3),
         class_ids=roster,
         active_positions={
-            0: (4.0, 5.0),
-            1: (4.0, 7.0),
-            2: (5.5, 6.0),
-            5: (10.0, 5.0),
-            6: (10.0, 7.0),
-            7: (8.5, 6.0),
+            0: (6.0, 5.0),
+            1: (6.0, 7.0),
+            2: (7.5, 6.0),
+            5: (12.0, 5.0),
+            6: (12.0, 7.0),
+            7: (10.5, 6.0),
+        },
+    )
+
+
+def _stacked_team_auras_scenario() -> tuple[EnvConfig, EnvState]:
+    roster = (
+        MAGE_CLASS_ID,
+        MAGE_CLASS_ID,
+        WARRIOR_CLASS_ID,
+        WARRIOR_CLASS_ID,
+        HUNTER_CLASS_ID,
+        MAGE_CLASS_ID,
+        MAGE_CLASS_ID,
+        WARRIOR_CLASS_ID,
+        WARRIOR_CLASS_ID,
+        HUNTER_CLASS_ID,
+    )
+    return _scenario(
+        map_width=18.0,
+        map_height=12.0,
+        team_sizes=(5, 5),
+        class_ids=roster,
+        active_positions={
+            0: (6.0, 5.0),
+            1: (6.0, 7.0),
+            2: (7.5, 4.5),
+            3: (7.5, 7.5),
+            4: (7.5, 6.0),
+            5: (12.0, 5.0),
+            6: (12.0, 7.0),
+            7: (10.5, 4.5),
+            8: (10.5, 7.5),
+            9: (10.5, 6.0),
         },
     )
 
@@ -314,16 +347,16 @@ def _status_stack_scenario() -> tuple[EnvConfig, EnvState]:
         NEUTRAL_CLASS_ID,
     )
     return _scenario(
-        map_width=14.0,
+        map_width=18.0,
         map_height=12.0,
         team_sizes=(3, 2),
         class_ids=roster,
         active_positions={
-            0: (3.0, 6.0),
-            1: (5.5, 4.4),
-            2: (8.0, 5.0),
-            5: (8.0, 6.0),
-            6: (8.0, 8.0),
+            0: (5.0, 6.0),
+            1: (7.5, 4.4),
+            2: (10.0, 5.0),
+            5: (10.0, 6.0),
+            6: (10.0, 8.0),
         },
     )
 
@@ -342,19 +375,19 @@ def _team_focus_crossfire_scenario() -> tuple[EnvConfig, EnvState]:
         NEUTRAL_CLASS_ID,
     )
     return _scenario(
-        map_width=16.0,
+        map_width=18.0,
         map_height=12.0,
         team_sizes=(4, 4),
         class_ids=roster,
         active_positions={
-            0: (6.0, 6.0),
-            1: (7.0, 5.0),
-            2: (8.0, 3.0),
-            3: (8.0, 4.6),
-            5: (8.0, 6.0),
-            6: (10.5, 6.0),
-            7: (9.8, 8.0),
-            8: (6.2, 8.0),
+            0: (7.0, 6.0),
+            1: (8.0, 5.0),
+            2: (9.0, 3.0),
+            3: (9.0, 4.6),
+            5: (9.0, 6.0),
+            6: (11.5, 6.0),
+            7: (10.8, 8.0),
+            8: (7.2, 8.0),
         },
     )
 
@@ -406,20 +439,20 @@ def _mirrored_ultimates_scenario() -> tuple[EnvConfig, EnvState]:
     )
     return _scenario(
         map_width=18.0,
-        map_height=14.0,
+        map_height=12.0,
         team_sizes=(5, 5),
         class_ids=roster,
         active_positions={
-            0: (3.0, 2.0),
-            1: (6.0, 5.0),
-            2: (6.6, 9.0),
-            3: (7.3, 12.0),
-            4: (4.0, 11.5),
-            5: (15.0, 2.0),
-            6: (10.0, 5.0),
-            7: (9.4, 9.0),
-            8: (8.7, 12.0),
-            9: (12.0, 11.5),
+            0: (3.0, 1.0),
+            1: (6.0, 4.0),
+            2: (6.6, 8.0),
+            3: (7.3, 11.0),
+            4: (4.0, 10.5),
+            5: (15.0, 1.0),
+            6: (10.0, 4.0),
+            7: (9.4, 8.0),
+            8: (8.7, 11.0),
+            9: (12.0, 10.5),
         },
     )
 
@@ -560,14 +593,14 @@ def _death_respawn_cycle_scenario() -> tuple[EnvConfig, EnvState]:
         NEUTRAL_CLASS_ID,
     )
     config, state = _scenario(
-        map_width=12.0,
-        map_height=10.0,
+        map_width=18.0,
+        map_height=12.0,
         team_sizes=(2, 1),
         class_ids=roster,
         active_positions={
-            0: (7.0, 1.5),
-            1: (7.0, 3.0),
-            5: (8.5, 2.25),
+            0: (13.0, 1.5),
+            1: (13.0, 3.0),
+            5: (14.5, 2.25),
         },
     )
     return config, state._replace(
@@ -602,19 +635,19 @@ def _recovery_refresh_cycle_scenario() -> tuple[EnvConfig, EnvState]:
         NEUTRAL_CLASS_ID,
     )
     config, state = _scenario(
-        map_width=14.0,
+        map_width=18.0,
         map_height=12.0,
         team_sizes=(5, 3),
         class_ids=roster,
         active_positions={
-            0: (6.0, 4.5),
-            1: (6.0, 5.5),
-            2: (4.7, 7.0),
-            3: (5.5, 8.0),
-            4: (6.5, 7.0),
-            5: (7.2, 5.0),
-            6: (11.0, 9.0),
-            7: (7.5, 7.5),
+            0: (8.0, 4.5),
+            1: (8.0, 5.5),
+            2: (6.7, 7.0),
+            3: (7.5, 8.0),
+            4: (8.5, 7.0),
+            5: (9.2, 5.0),
+            6: (13.0, 9.0),
+            7: (9.5, 7.5),
         },
     )
     return config, state._replace(
@@ -676,6 +709,17 @@ _AURA_CROSSFIRE_FRAMES = (
         (
             ActorCommand(2, MOVE_STAY, 7, 0),
             ActorCommand(7, MOVE_STAY, 2, 0),
+        ),
+    ),
+)
+
+_STACKED_TEAM_AURAS_FRAMES = (
+    ScenarioFrame(
+        "reciprocal-stacked-aura-basics",
+        "Both Hunters fire through two same-team Mage and Warrior emitters.",
+        (
+            ActorCommand(4, MOVE_STAY, 9, 0),
+            ActorCommand(9, MOVE_STAY, 4, 0),
         ),
     ),
 )
@@ -1017,6 +1061,11 @@ RESEARCHER_SCENARIOS: dict[str, DebuggerScenario] = {
         "aura_crossfire",
         build_scenario=_aura_crossfire_scenario,
         frames=_AURA_CROSSFIRE_FRAMES,
+    ),
+    "stacked_team_auras": _registered_scenario(
+        "stacked_team_auras",
+        build_scenario=_stacked_team_auras_scenario,
+        frames=_STACKED_TEAM_AURAS_FRAMES,
     ),
     "status_stack": _registered_scenario(
         "status_stack",

@@ -443,12 +443,12 @@ def test_checked_mirrored_sample_uses_context_target_axis_and_current_anchors() 
         outgoing.submitted_action.use_ultimate_action,
     ) == (0, 7, 1)
     assert outgoing.actor_public_agent_id == "1"
-    assert outgoing.actor_anchor == (6.0, 5.0)
+    assert outgoing.actor_anchor == (6.0, 4.0)
     assert type(outgoing.accepted_target) is AuthorizedVisibleTargetActionV1
     assert outgoing.accepted_target.target_public_agent_id == "6"
-    assert outgoing.accepted_target.target_anchor == (10.0, 5.0)
-    assert trajectory.frames[2].snapshot.agent_positions[1] == (9.0, 5.0)
-    assert trajectory.frames[2].snapshot.agent_positions[6] == (7.0, 5.0)
+    assert outgoing.accepted_target.target_anchor == (10.0, 4.0)
+    assert trajectory.frames[2].snapshot.agent_positions[1] == (9.0, 4.0)
+    assert trajectory.frames[2].snapshot.agent_positions[6] == (7.0, 4.0)
 
 
 def test_checked_recovery_sample_projects_status_durations() -> None:

@@ -66,6 +66,7 @@ from marl_battlegrounds.evaluation.models import (
     AbilityActivatedEventV1,
     ActionRejectedEventV1,
     RecipientHealthResolutionEventV1,
+    SourceDamageOutputEventV1,
     StatusLifecycleEventBaseV1,
 )
 from marl_battlegrounds.rendering.evaluation_adapter import (
@@ -355,6 +356,7 @@ def test_all_scenario_configs_validate_and_initialize_authored_state() -> None:
         "basic_support",
         "ultimate_showcase",
         "aura_crossfire",
+        "stacked_team_auras",
         "status_stack",
         "team_focus_crossfire",
         "mirrored_ultimates",
@@ -467,7 +469,7 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
             0,
         ),
         "basic_support": (
-            (14.0, 12.0),
+            (18.0, 12.0),
             (0, 1, 2, 5, 6, 7),
             (
                 MAGE_CLASS_ID,
@@ -478,18 +480,18 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
                 HUNTER_CLASS_ID,
             ),
             (
-                (4.0, 3.0),
-                (4.0, 6.0),
-                (4.0, 9.0),
-                (7.0, 3.0),
-                (7.0, 6.0),
-                (7.0, 9.0),
+                (6.0, 3.0),
+                (6.0, 6.0),
+                (6.0, 9.0),
+                (9.0, 3.0),
+                (9.0, 6.0),
+                (9.0, 9.0),
             ),
             "scripted",
             0,
         ),
         "ultimate_showcase": (
-            (16.0, 12.0),
+            (18.0, 12.0),
             tuple(range(10)),
             (
                 MAGE_CLASS_ID,
@@ -504,22 +506,22 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
                 PRIEST_CLASS_ID,
             ),
             (
-                (3.0, 2.0),
-                (5.0, 5.0),
-                (5.0, 8.0),
-                (8.0, 5.0),
-                (3.0, 10.0),
-                (7.0, 6.0),
-                (8.0, 8.0),
-                (10.0, 3.0),
-                (12.0, 8.0),
-                (13.0, 10.0),
+                (4.0, 2.0),
+                (6.0, 5.0),
+                (6.0, 8.0),
+                (9.0, 5.0),
+                (4.0, 10.0),
+                (8.0, 6.0),
+                (9.0, 8.0),
+                (11.0, 3.0),
+                (13.0, 8.0),
+                (14.0, 10.0),
             ),
             "scripted",
             0,
         ),
         "aura_crossfire": (
-            (14.0, 12.0),
+            (18.0, 12.0),
             (0, 1, 2, 5, 6, 7),
             (
                 MAGE_CLASS_ID,
@@ -530,18 +532,48 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
                 HUNTER_CLASS_ID,
             ),
             (
-                (4.0, 5.0),
-                (4.0, 7.0),
-                (5.5, 6.0),
-                (10.0, 5.0),
-                (10.0, 7.0),
-                (8.5, 6.0),
+                (6.0, 5.0),
+                (6.0, 7.0),
+                (7.5, 6.0),
+                (12.0, 5.0),
+                (12.0, 7.0),
+                (10.5, 6.0),
             ),
             "scripted",
             2,
         ),
+        "stacked_team_auras": (
+            (18.0, 12.0),
+            tuple(range(10)),
+            (
+                MAGE_CLASS_ID,
+                MAGE_CLASS_ID,
+                WARRIOR_CLASS_ID,
+                WARRIOR_CLASS_ID,
+                HUNTER_CLASS_ID,
+                MAGE_CLASS_ID,
+                MAGE_CLASS_ID,
+                WARRIOR_CLASS_ID,
+                WARRIOR_CLASS_ID,
+                HUNTER_CLASS_ID,
+            ),
+            (
+                (6.0, 5.0),
+                (6.0, 7.0),
+                (7.5, 4.5),
+                (7.5, 7.5),
+                (7.5, 6.0),
+                (12.0, 5.0),
+                (12.0, 7.0),
+                (10.5, 4.5),
+                (10.5, 7.5),
+                (10.5, 6.0),
+            ),
+            "scripted",
+            4,
+        ),
         "status_stack": (
-            (14.0, 12.0),
+            (18.0, 12.0),
             (0, 1, 2, 5, 6),
             (
                 WARRIOR_CLASS_ID,
@@ -551,17 +583,17 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
                 PRIEST_CLASS_ID,
             ),
             (
-                (3.0, 6.0),
-                (5.5, 4.4),
-                (8.0, 5.0),
-                (8.0, 6.0),
-                (8.0, 8.0),
+                (5.0, 6.0),
+                (7.5, 4.4),
+                (10.0, 5.0),
+                (10.0, 6.0),
+                (10.0, 8.0),
             ),
             "scripted",
             5,
         ),
         "team_focus_crossfire": (
-            (16.0, 12.0),
+            (18.0, 12.0),
             (0, 1, 2, 3, 5, 6, 7, 8),
             (
                 MAGE_CLASS_ID,
@@ -574,20 +606,20 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
                 PRIEST_CLASS_ID,
             ),
             (
-                (6.0, 6.0),
-                (7.0, 5.0),
-                (8.0, 3.0),
-                (8.0, 4.6),
-                (8.0, 6.0),
-                (10.5, 6.0),
-                (9.8, 8.0),
-                (6.2, 8.0),
+                (7.0, 6.0),
+                (8.0, 5.0),
+                (9.0, 3.0),
+                (9.0, 4.6),
+                (9.0, 6.0),
+                (11.5, 6.0),
+                (10.8, 8.0),
+                (7.2, 8.0),
             ),
             "scripted",
             2,
         ),
         "mirrored_ultimates": (
-            (18.0, 14.0),
+            (18.0, 12.0),
             tuple(range(10)),
             (
                 MAGE_CLASS_ID,
@@ -602,30 +634,30 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
                 PRIEST_CLASS_ID,
             ),
             (
-                (3.0, 2.0),
-                (6.0, 5.0),
-                (6.6, 9.0),
-                (7.3, 12.0),
-                (4.0, 11.5),
-                (15.0, 2.0),
-                (10.0, 5.0),
-                (9.4, 9.0),
-                (8.7, 12.0),
-                (12.0, 11.5),
+                (3.0, 1.0),
+                (6.0, 4.0),
+                (6.6, 8.0),
+                (7.3, 11.0),
+                (4.0, 10.5),
+                (15.0, 1.0),
+                (10.0, 4.0),
+                (9.4, 8.0),
+                (8.7, 11.0),
+                (12.0, 10.5),
             ),
             "scripted",
             0,
         ),
         "death_respawn_cycle": (
-            (12.0, 10.0),
+            (18.0, 12.0),
             (0, 1, 5),
             (MAGE_CLASS_ID, HUNTER_CLASS_ID, ROGUE_CLASS_ID),
-            ((7.0, 1.5), (7.0, 3.0), (8.5, 2.25)),
+            ((13.0, 1.5), (13.0, 3.0), (14.5, 2.25)),
             "scripted",
             5,
         ),
         "recovery_refresh_cycle": (
-            (14.0, 12.0),
+            (18.0, 12.0),
             (0, 1, 2, 3, 4, 5, 6, 7),
             (
                 ROGUE_CLASS_ID,
@@ -638,14 +670,14 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
                 WARRIOR_CLASS_ID,
             ),
             (
-                (6.0, 4.5),
-                (6.0, 5.5),
-                (4.7, 7.0),
-                (5.5, 8.0),
-                (6.5, 7.0),
-                (7.2, 5.0),
-                (11.0, 9.0),
-                (7.5, 7.5),
+                (8.0, 4.5),
+                (8.0, 5.5),
+                (6.7, 7.0),
+                (7.5, 8.0),
+                (8.5, 7.0),
+                (9.2, 5.0),
+                (13.0, 9.0),
+                (9.5, 7.5),
             ),
             "scripted",
             0,
@@ -821,6 +853,7 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
             ((2, MOVE_STAY, 6, 0),),
         ),
         "aura_crossfire": (((2, MOVE_STAY, 7, 0), (7, MOVE_STAY, 2, 0)),),
+        "stacked_team_auras": (((4, MOVE_STAY, 9, 0), (9, MOVE_STAY, 4, 0)),),
         "status_stack": (
             (
                 (0, MOVE_NORTH, 5, 1),
@@ -1547,6 +1580,161 @@ def test_aura_crossfire_reference_trajectory() -> None:
             _catalog_status_duration(session, "hunter_basic_slow"),
         ),
     )
+
+
+def test_stacked_team_auras_reference_trajectory() -> None:
+    _, session = _session("stacked_team_auras")
+    mage_per_emitter = _catalog_aura_multiplier(
+        session,
+        "mage_damage_amplification",
+    )
+    warrior_per_emitter = _catalog_aura_multiplier(
+        session,
+        "warrior_damage_mitigation",
+    )
+    assert mage_per_emitter == pytest.approx(1.15)
+    assert warrior_per_emitter == pytest.approx(0.85)
+    expected_mage_aggregate = mage_per_emitter**2
+    expected_warrior_aggregate = warrior_per_emitter**2
+    assert expected_mage_aggregate == pytest.approx(1.3225)
+    assert expected_warrior_aggregate == pytest.approx(0.7225)
+    expected_mage_by_slot = (
+        expected_mage_aggregate,
+        expected_mage_aggregate,
+        mage_per_emitter,
+        mage_per_emitter,
+        expected_mage_aggregate,
+        expected_mage_aggregate,
+        expected_mage_aggregate,
+        mage_per_emitter,
+        mage_per_emitter,
+        expected_mage_aggregate,
+    )
+    expected_warrior_by_slot = (
+        warrior_per_emitter,
+        warrior_per_emitter,
+        warrior_per_emitter,
+        warrior_per_emitter,
+        expected_warrior_aggregate,
+        warrior_per_emitter,
+        warrior_per_emitter,
+        warrior_per_emitter,
+        warrior_per_emitter,
+        expected_warrior_aggregate,
+    )
+    self_features = np.asarray(session.observation.self_features)
+    np.testing.assert_allclose(
+        self_features[
+            :,
+            AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_AURA_MULTIPLIER,
+        ],
+        expected_mage_by_slot,
+    )
+    np.testing.assert_allclose(
+        self_features[
+            :,
+            AGENT_FEATURE_DAMAGE_MITIGATION_WARRIOR_AURA_MULTIPLIER,
+        ],
+        expected_warrior_by_slot,
+    )
+    np.testing.assert_allclose(
+        self_features[
+            [4, 9],
+            AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_AURA_MULTIPLIER,
+        ],
+        expected_mage_aggregate,
+    )
+    np.testing.assert_allclose(
+        self_features[
+            [4, 9],
+            AGENT_FEATURE_DAMAGE_MITIGATION_WARRIOR_AURA_MULTIPLIER,
+        ],
+        expected_warrior_aggregate,
+    )
+    assert np.all(
+        self_features[
+            :,
+            AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_AURA_MULTIPLIER,
+        ]
+        != 1.0
+    )
+    assert np.all(
+        self_features[
+            :,
+            AGENT_FEATURE_DAMAGE_MITIGATION_WARRIOR_AURA_MULTIPLIER,
+        ]
+        != 1.0
+    )
+
+    scene = _researcher_scene(session)
+    assert tuple(
+        (field.source_global_slot, field.aura_id) for field in scene.aura_fields
+    ) == (
+        (0, "mage_damage_amplification"),
+        (1, "mage_damage_amplification"),
+        (2, "warrior_damage_mitigation"),
+        (3, "warrior_damage_mitigation"),
+        (5, "mage_damage_amplification"),
+        (6, "mage_damage_amplification"),
+        (7, "warrior_damage_mitigation"),
+        (8, "warrior_damage_mitigation"),
+    )
+    for agent in scene.agents:
+        modifiers = {row.aura_id: row for row in agent.aura_modifiers}
+        assert tuple(modifiers) == (
+            "mage_damage_amplification",
+            "warrior_damage_mitigation",
+        )
+        assert all(row.multiplier != 1.0 for row in modifiers.values())
+        assert all(not hasattr(row, "source_global_slot") for row in modifiers.values())
+        assert modifiers["mage_damage_amplification"].multiplier == pytest.approx(
+            expected_mage_by_slot[agent.global_slot]
+        )
+        assert modifiers["warrior_damage_mitigation"].multiplier == pytest.approx(
+            expected_warrior_by_slot[agent.global_slot]
+        )
+        if agent.global_slot in (4, 9):
+            assert modifiers["mage_damage_amplification"].multiplier == pytest.approx(
+                expected_mage_aggregate
+            )
+            assert modifiers["warrior_damage_mitigation"].multiplier == pytest.approx(
+                expected_warrior_aggregate
+            )
+
+    session = submit_next_script_frame(session)
+    _assert_health_matches_researcher_scene(session, (4, 9))
+    assert _canonical_ability_signatures(session) == (
+        ("basic", 4, 9),
+        ("basic", 9, 4),
+    )
+    view = session.incoming_evaluation_view
+    assert view is not None
+    damage_events = tuple(
+        event
+        for event in view.transition.events
+        if isinstance(event, SourceDamageOutputEventV1)
+    )
+    assert tuple(
+        (
+            event.source_global_slot,
+            event.recipient_global_slot,
+            event.mage_damage_aura_covering_emitter_global_slots,
+            event.warrior_mitigation_aura_covering_emitter_global_slots,
+        )
+        for event in damage_events
+    ) == (
+        (4, 9, (0, 1), (7, 8)),
+        (9, 4, (5, 6), (2, 3)),
+    )
+    for event in damage_events:
+        assert event.source_modified_damage_output == pytest.approx(
+            event.raw_damage_output * expected_mage_aggregate
+        )
+        assert event.recipient_damage_modifier == pytest.approx(
+            expected_warrior_aggregate
+        )
+    assert "hunter_basic_slow" in _scene_status_ids(session, 4)
+    assert "hunter_basic_slow" in _scene_status_ids(session, 9)
 
 
 def test_status_stack_reference_trajectory() -> None:

@@ -7920,6 +7920,13 @@
           },
           {
             "audience": "researcher",
+            "description": "Two same-team Mage and Warrior emitters stack on reciprocal Basics.",
+            "mode": "scripted",
+            "name": "stacked_team_auras",
+            "title": "Stacked team auras"
+          },
+          {
+            "audience": "researcher",
             "description": "Scripted stacked control, mitigation, break, and movement.",
             "mode": "scripted",
             "name": "status_stack",

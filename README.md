@@ -5,108 +5,84 @@ heterogeneous adversarial multi-agent reinforcement learning.
 
 The project is currently under development.
 
-## Development Visual Debugger and Analyzer
+## Combat Debugger
 
-Open the deterministic, evaluation-backed Visual Debugger and Analyzer in a
-local browser:
+Use the Combat Debugger for manual work in the live 18×12 `arena_5v5`
+laboratory:
 
 ```bash
 ./scripts/dev/run_debug_renderer.sh
 ```
 
-Python owns the simulator, session, legality, commands, canonical CP2/CP3
-capture, and transitions. It returns a structurally separate, audience-specific
-V2 live frame; the browser constructs the SVG/HTML presentation and
-presentation-only motion without inferring simulator truth.
-The launcher always prints a loopback URL and also attempts to open it
-automatically. Running the analyzer requires neither Node.js nor npm.
+It provides staged simultaneous actions, exact legality, Oracle and authorized
+agent-POV views, browser-local visual filters, and optional replay recording.
+The product always uses the fixed Analysis presentation and does not host
+scripted demonstrations or existing replay artifacts.
 
-Open a validated semantic replay in the same read-only browser analyzer:
+Record one manual episode to a canonical replay and adjacent metric sidecar:
 
 ```bash
-./scripts/dev/run_debug_renderer.sh --replay episode.marlbg-replay.json
-```
-
-Three checked-in demonstration episodes can be listed and opened without
-locating an artifact path:
-
-```bash
-./scripts/dev/run_debug_renderer.sh --list-sample-replays
-./scripts/dev/run_debug_renderer.sh --sample-replay death-respawn-shield
-```
-
-Sample headers retain the actual generating source/runtime provenance, while
-the launcher explicitly identifies them as unofficial presentation demos—not
-benchmarks or source/host attestations.
-
-Replay mode validates the complete artifact before opening a server, exposes an
-audience-specific timeline, and never imports or runs the simulator. Use
-`--frame-index`, `--view pov`, and `--pov-slot` to choose the initial recorded
-frame and recipient-safe view.
-
-Live debugger scenarios use one canonical product movement scale (`1.00`). The
-browser does not edit it; replay preserves the recorded scale as read-only
-scientific truth. Presentation and Analysis are the visible presets, while
-authorized concise diagnostics remain available in the collapsible Technical
-Frame panel.
-
-On the live battlefield, primary click changes the controlled actor,
-Shift+primary click selects a target, and right click clears that target. In a
-researcher replay, activating an authorized agent changes the read-only
-reference; Actor POV remains limited to its authorized self. Replay transport
-provides First, −10, −1, Play/Pause, +1, +10, Last, a frame slider, and an
-authoritative tick label. The Command Deck and right-side information modules
-use native collapsible panels, including a comprehensive Agent Details card.
-
-Readable presentation cues preserve the canonical event feed while composing
-status refresh/reapplication, spawn-shield lifetime, death, and respawn for
-inspection. User-facing class vocabulary is consistent across live and replay:
-Burst, Charge, Freezing Trap, Crippling Poison, Holy Word: Salvation,
-Sorcerer’s Empowerment, and Guardian’s Barrier.
-
-Record one live browser episode and review the saved result without leaving the
-page:
-
-```bash
+mkdir -p recordings
 ./scripts/dev/run_debug_renderer.sh \
   --record-replay recordings/episode.marlbg-replay.json
 ```
 
-The destination parent must already exist and the replay target must be absent.
-Python retains one canonical evaluation trajectory in memory, performs no
-per-transition file writes, and publishes the replay plus its adjacent metric
-sidecar only when the episode closes. **Finish & Review** saves an open prefix
-and switches the same loopback page, capability, and server process to settled
-read-only replay at frame zero. Terminal or declared-horizon episodes save
-automatically and expose **Review Replay**. Save failures remain online with
-bounded Retry and basename-only Save As recovery; `Ctrl-C` attempts the same
-durable closeout before the server exits.
+See the [Combat Debugger guide](docs/dev/combat_debugger.md) for launch
+options, input, authority, recording/recovery, static reset snapshots, visual
+filters, and troubleshooting.
 
-For a one-frame Matplotlib snapshot instead:
+## Replay Viewer
+
+Use the separate read-only Replay Viewer for immutable artifacts, checked
+samples, and materialized scripted demonstrations:
 
 ```bash
-uv sync --extra viz
-./scripts/dev/run_debug_renderer.sh --static
+./scripts/dev/run_replay_viewer.sh --replay episode.marlbg-replay.json
+./scripts/dev/run_replay_viewer.sh --list-sample-replays
+./scripts/dev/run_replay_viewer.sh --sample-replay death-respawn-shield
+./scripts/dev/run_replay_viewer.sh --list-scenarios
+./scripts/dev/run_replay_viewer.sh --scenario stacked_team_auras
 ```
 
-A validated semantic replay can be rendered at an exact recorded frame without
-starting the simulator or a browser:
+The viewer validates or materializes one complete replay bundle before opening
+the browser. It offers settled exact-frame summaries, serialized playback,
+eight whole-clock rates, 24 local visual filters, provenance-bearing PNG
+export, and Oracle-only metric download. It cannot stage or submit simulator
+actions.
+
+See the [Replay Viewer guide](docs/dev/replay_viewer.md) for artifact selection,
+sample provenance, scenario isolation, transport and keyboard behavior,
+audience boundaries, export, static rendering, and troubleshooting. If you
+used the historical combined command surface, start with the concise
+[browser-tools migration page](docs/dev/visual_debugger.md).
+
+Both browser products use tracked native HTML, CSS, SVG, and JavaScript served
+by base Python dependencies. Researchers need neither Node.js nor npm. The
+browser installs only Python-authorized presentation data; the rendering-only
+SharedObs visual-union boundary is recorded in
+[specification amendment A11](docs/design/specification_amendments.md#a11-sharedobs-recorded-visual-union-presentation).
+
+## Static snapshots
+
+The optional `viz` dependency is activated automatically by either shell
+launcher when `--static` is present:
 
 ```bash
-./scripts/dev/run_debug_renderer.sh \
+# One manual arena reset snapshot.
+./scripts/dev/run_debug_renderer.sh --static
+
+# One exact frame from an immutable replay.
+./scripts/dev/run_replay_viewer.sh \
   --replay episode.marlbg-replay.json --static --frame-index 0
 ```
 
-See the [Visual Debugger and Analyzer guide](docs/dev/visual_debugger.md) for
-controls, joint-turn planning, view authorization, scenarios, replay/static
-rendering, recording/recovery, visual semantics, troubleshooting, and
-contributor checks.
+Static rendering starts no browser server. Install the optional dependency
+explicitly for direct Python use with `uv sync --extra viz`.
 
 ## Design and evaluation
 
 - [Specification amendments](docs/design/specification_amendments.md) record
-  proposed departures from the original design document and state their
-  activation status.
+  accepted departures and clarifications relative to the original design.
 - [Evaluation metric specification](docs/evaluation/metric_specification.md)
   defines metric meanings, attribution limits, scorecard surfaces, and
   candidate dispositions.
@@ -114,8 +90,10 @@ contributor checks.
   aggregation, inference, cross-play, scenarios, failure handling, and
   information-regime reporting.
 - [Standard replay format](docs/evaluation/replay_format.md) defines the
-  versioned semantic replay normal form, content-addressed companion artifacts,
-  whole-artifact validation boundary, and canonical bounded local persistence.
+  versioned semantic replay normal form, whole-artifact validation boundary,
+  companion artifacts, and canonical bounded local persistence.
+- [Dependency policy](docs/dev/dependency_policy.md) separates researcher
+  runtime requirements from optional and contributor-only tooling.
 
 ## Author
 

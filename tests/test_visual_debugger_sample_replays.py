@@ -39,6 +39,31 @@ _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _GENERATOR_SCRIPT = (
     _REPOSITORY_ROOT / "scripts" / "dev" / "generate_visual_debugger_sample_replays.py"
 )
+_PRE_M7_EVENT_KIND_UNION = frozenset(
+    {
+        "ability_activated",
+        "action_rejected",
+        "agent_died",
+        "agent_respawned",
+        "charge_phase_displacement",
+        "combat_countdown_reset",
+        "cooldown_ready",
+        "cooldown_started",
+        "health_regenerated",
+        "lethal_damage_contribution",
+        "ordinary_movement_phase_displacement",
+        "recipient_health_resolution",
+        "respawn_wave_occurred",
+        "source_damage_output",
+        "source_healing_output",
+        "spawn_shield_expired",
+        "status_aged_to_zero",
+        "status_applied",
+        "status_broken_by_damage",
+        "status_cleared_by_new_death",
+        "status_refreshed_or_extended",
+    }
+)
 _CONTROLLED_PROVENANCE_GENERATION_CHILD = r"""
 import json
 import sys
@@ -274,6 +299,29 @@ def test_real_generator_is_byte_stable_and_publicly_reloadable(
         assert loaded.replay.header.runtime_provenance == expected_runtime
         assert expected_runtime.backend == "cpu"
         assert not expected_runtime.policy_execution_included
+
+
+def test_fresh_samples_use_exact_researcher_geometry_and_event_union(
+    generated_sample_directories: tuple[Path, Path],
+) -> None:
+    first, _second = generated_sample_directories
+    assert len(_file_bytes_by_name(first)) == 7
+
+    observed_event_kinds: set[str] = set()
+    for sample in SAMPLE_REPLAYS:
+        loaded = load_verified_sample_replay(sample.name, directory=first)
+        resolved_config = loaded.replay.header.context.resolved_env_config
+        assert (resolved_config.map_width, resolved_config.map_height) == (
+            18.0,
+            12.0,
+        )
+        observed_event_kinds.update(
+            event.event_type
+            for transition in loaded.replay.transitions
+            for event in transition.events
+        )
+
+    assert observed_event_kinds == _PRE_M7_EVENT_KIND_UNION
 
 
 def test_checked_samples_match_fresh_cpu_generation_scientific_truth(

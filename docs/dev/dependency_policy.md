@@ -11,38 +11,50 @@ environment.
 
 | Group | Purpose |
 | --- | --- |
-| Base | JAX environment, arrays, validation, and the live loopback Visual Debugger and Analyzer. |
+| Base | JAX environment, arrays, validation, and the two native browser products: the live Combat Debugger and read-only Replay Viewer. |
 | `cuda13` | CUDA 13 JAX execution. |
-| `training` | Learner/optimizer/checkpoint tooling. |
+| `training` | Learner, optimizer, and checkpoint tooling. |
 | `interop` | Gymnasium and PettingZoo adapters. |
-| `viz` | Optional Matplotlib static/headless figure export. |
+| `viz` | Optional Matplotlib adapters for static/headless Combat Debugger snapshots and Replay Viewer frames. |
 | `dev` | Pytest, Ruff, Pyright, and pre-commit. |
 
-The live Visual Debugger and Analyzer uses base Python dependencies and a
-modern browser.
-The shell launcher activates `viz` only for `--static`. Python CI installs
-`dev+viz` so supported static painter behavior is exercised rather than
-skipped.
+The [Combat Debugger](combat_debugger.md) and
+[Replay Viewer](replay_viewer.md) share base Python dependencies and the
+tracked native browser renderer. The replay launcher remains import-light for
+listing and existing-artifact validation; scripted scenario materialization
+runs separately on CPU before the immutable bundle enters the viewer.
+
+Both shell launchers activate `viz` only when `--static` is present. Python CI
+installs `dev+viz` so supported static-painter behavior is exercised rather
+than skipped.
 
 Change `pyproject.toml` and `uv.lock` together. Use locked syncs in CI and
-closeout gates. Do not add visualization or debugger behavior to the simulator
-core to avoid an optional dependency.
+closeout gates. Do not move debugger, viewer, or visualization behavior into
+the simulator core to avoid an optional dependency.
 
-## Browser runtime
+## Native browser runtime
 
-The tracked runtime is native HTML, CSS, SVG, and JavaScript modules served by
-the Python standard-library HTTP server. There is:
+Both products serve the same tracked HTML, CSS, SVG, WOFF2, and JavaScript
+modules through Python's standard-library HTTP server. Product identity and
+route authority remain separate: the Combat Debugger receives live manual
+commands, while the Replay Viewer receives read-only artifact navigation and
+authorized export/metric operations.
 
-- no transpilation or generated bundle;
+There is:
+
+- no transpilation or generated application bundle;
 - no runtime package manager;
-- no framework, state-store, WebSocket, or animation library;
-- no external network asset;
+- no framework, state store, WebSocket, or animation library;
+- no external network asset; and
 - no Node.js requirement for researchers.
 
 The browser uses native DOM/SVG rendering, pointer coordinate projection,
-presentation hover, and the Web Animations API. Python owns authorized agent
-hit testing; Python/Pydantic owns command/frame validation and simulator
-authority.
+presentation hover, and the Web Animations API. Python owns authorized hit
+testing, command/frame validation, simulator authority, replay validation,
+audience projection, and metric authorization. The SharedObs recorded visual
+union remains a rendering-only contract under
+[specification amendment A11](../design/specification_amendments.md#a11-sharedobs-recorded-visual-union-presentation),
+not a browser-reconstructed or materialized learner input.
 
 ## Frontend contributor tooling
 
@@ -52,11 +64,11 @@ authority.
 | Tool | Role | Runtime impact | License family |
 | --- | --- | --- | --- |
 | TypeScript | Strict no-emit checking of JavaScript/JSDoc | None | Apache-2.0 |
-| Biome | JavaScript/CSS/HTML/JSON format and lint | None | MIT or Apache-2.0 |
+| Biome | JavaScript/CSS/HTML/JSON formatting and lint | None | MIT or Apache-2.0 |
 | Playwright Test | Real-browser behavior and visual regression | None | Apache-2.0 |
 | `@types/node` | Contributor type declarations | None | MIT |
 
-Install with:
+Install contributor tooling with:
 
 ```bash
 npm ci --prefix web/visual_debugger
@@ -65,14 +77,14 @@ npm run install:browser --prefix web/visual_debugger
 
 Commit `package.json` and `package-lock.json` together when the frontend
 toolchain changes. Do not hand-edit the lockfile. Node dependencies must remain
-development-only unless a separately approved architecture revision establishes
-a browser build/runtime need.
+development-only unless a separately approved architecture revision
+establishes a browser build/runtime need.
 
 ## Bundled font
 
-The browser tracks Atkinson Hyperlegible Regular and Bold WOFF2 files for
-readability and deterministic screenshots. The exact license and provenance
-files live beside them:
+The native browser tracks Atkinson Hyperlegible Regular and Bold WOFF2 files
+for readability, deterministic screenshots, and self-contained Replay Viewer
+PNG export. Exact license and provenance files live beside them:
 
 ```text
 web/visual_debugger/assets/fonts/OFL.txt
@@ -91,5 +103,5 @@ explicit allowlist and contain no remote fetch.
   ignored.
 - Keep individual tracked visual baselines below the repository's file-size
   policy.
-- Run only the checks invalidated by a dependency update, followed by the
+- Run impact-selected checks after a dependency change, followed by the
   complete closeout gate once the assembled change stops moving.

@@ -2,11 +2,11 @@
   "demo_provenance": {
     "benchmark_eligible": false,
     "code_revision": {
-      "commit_sha": "7f261abfc4e93c8bfbb2c390497e38977d7146ac",
-      "dirty_patch_digest": "6bd63b678fb78ef0aa996f8150d0c4c3eb4d2a72b8f339539ea342073951f828",
+      "commit_sha": "2f4454426d5e87ce099f2960c4c27ae397483939",
+      "dirty_patch_digest": "55a984965d9bf25af5845554cd1b759ce6da665ce065344939a741f58f6c83c1",
       "is_dirty": true,
       "package_version": "0.0.0",
-      "source_tree_digest": "2a5e8a2736dd945c337cbba559c008b1bfc1aca7159db955bb4e43b6e93709ec"
+      "source_tree_digest": "633d7b3c7db4b7efe229ec2d2713d32934e66d3319bb4d248d6b3ec94859a2db"
     },
     "host_attestation": false,
     "notice": "Deterministic unofficial presentation demo; not a benchmark, policy evaluation, source-tree attestation, or host attestation.",
@@ -59,15 +59,15 @@
       ],
       "frame_count": 8,
       "metric_report": {
-        "byte_length": 22333,
+        "byte_length": 22335,
         "file": "death-respawn-shield.marlbg-metrics.json",
-        "sha256": "00155860321efd4b9f40dde4bd9093a12fe1921b6ac9348a17634c29c5552211"
+        "sha256": "d40f64010e32596ef85bd8017f8e03eb3481aebc330df62962756982647342b5"
       },
       "name": "death-respawn-shield",
       "replay": {
-        "byte_length": 539300,
+        "byte_length": 539451,
         "file": "death-respawn-shield.marlbg-replay.json",
-        "sha256": "639da4f49eb1dca01f200ca0c8ebf1eb3fc2b94fbc4408802f6ddb71085346ee"
+        "sha256": "a4341f6caec2673af5ef1094df9c395f2a8a796216bdcf7794e8b3c6bb4b056f"
       },
       "seed": 0,
       "source_scenario": "death_respawn_cycle",
@@ -95,13 +95,13 @@
       "metric_report": {
         "byte_length": 25218,
         "file": "recovery-status-lifecycle.marlbg-metrics.json",
-        "sha256": "3448dabc7d77c9d35de74b79c3fc40fe6631bc8eaac21ab60386715a83f1c7f8"
+        "sha256": "7a104384e2f2c7b8fe945c65134e28d802edfb7de3e713d55faf9e10b6c651a5"
       },
       "name": "recovery-status-lifecycle",
       "replay": {
         "byte_length": 577991,
         "file": "recovery-status-lifecycle.marlbg-replay.json",
-        "sha256": "d17308b7681a65f88a8055b3a6bbdc887529104173896fe8bf64587197af7431"
+        "sha256": "e058f246bbbc073338f49d6fe9a2f59905cec153cd3587016bfc71fe8cda137d"
       },
       "seed": 0,
       "source_scenario": "recovery_refresh_cycle",
@@ -127,13 +127,13 @@
       "metric_report": {
         "byte_length": 26359,
         "file": "mirrored-five-class-ultimates.marlbg-metrics.json",
-        "sha256": "69e4ff58b6dc6a5c51672a32c2edc126acf6ee218a22eb87db6b00b6180f8ca7"
+        "sha256": "9683c4c0c49804472b40888e7ba7e6c600d7beac3cc8de5436e15cd7cc0f28b4"
       },
       "name": "mirrored-five-class-ultimates",
       "replay": {
-        "byte_length": 452334,
+        "byte_length": 452274,
         "file": "mirrored-five-class-ultimates.marlbg-replay.json",
-        "sha256": "7645afc39f9001a7268cfec43df47c93157042fcbac9296723f4284445682f5d"
+        "sha256": "83cb9ad38bfc198d887df0203a8f40c7a0485cd934b6d12ffffca522f5a3fc02"
       },
       "seed": 0,
       "source_scenario": "mirrored_ultimates",
