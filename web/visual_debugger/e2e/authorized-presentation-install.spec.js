@@ -3221,6 +3221,8 @@ test(CP5_C_SLICE_TEST_TITLE, async ({ page }) => {
     }
     expect(browserErrors.get(page) ?? []).toEqual([]);
 
+    await page.setViewportSize({ width: 960, height: 600 });
+    await installWaapiAutopause(page);
     await openProduct(page, recoveryReplay.url, "replay");
     const recoveryFrameZero = await expectInstalledLeaf(
       page,
@@ -3241,6 +3243,7 @@ test(CP5_C_SLICE_TEST_TITLE, async ({ page }) => {
       }
     };
     const play = page.locator("#replay-play-pause-button");
+    const next = page.locator("#replay-next-button");
     const regeneration = page.locator(".combat-effect--regeneration");
     page.on("request", recordRecoveryCommand);
     let recoveryCommandPayload;
@@ -3252,8 +3255,7 @@ test(CP5_C_SLICE_TEST_TITLE, async ({ page }) => {
           new URL(response.url()).pathname === "/api/replay/command",
         { timeout: 30_000 },
       );
-      await play.click();
-      await expect(play).toHaveAttribute("aria-label", "Pause replay");
+      await next.click();
       const response = await responsePromise;
       expect(response.status()).toBe(200);
       recoveryCommandPayload = await response.json();
@@ -3290,9 +3292,6 @@ test(CP5_C_SLICE_TEST_TITLE, async ({ page }) => {
         };
       });
     } finally {
-      if ((await play.getAttribute("aria-pressed")) === "true") {
-        await play.click();
-      }
       page.off("request", recordRecoveryCommand);
     }
     await expect(play).toHaveAttribute("aria-label", "Play replay");
@@ -5932,22 +5931,48 @@ test("real death cycle retains truthful outward lifecycle cues at both review vi
     await expect(deathEffect).toHaveAttribute("data-persistent", "true");
     await expect(deathEffect).toHaveAttribute("data-settled", "true");
     await expect(page.locator(subjectSelector)).toHaveAttribute("data-alive", "false");
+    const deathRing = deathEffect.locator(".combat-lifecycle-ring--death");
+    await expect(deathRing).toHaveAttribute(
+      "data-layout-key",
+      JSON.stringify(["event", deathEvent.event_id, "cue"]),
+    );
+    await expect(deathRing).toHaveAttribute("data-layout-collision-free", "true");
     const deathGeometry = await deathEffect.evaluate((effect, selector) => {
       const ringGroup = effect.querySelector(".combat-lifecycle-ring--death");
       const ring = effect.querySelector(".combat-lifecycle-ring__ring");
+      const leader = effect.querySelector(".combat-cue__leader--semantic");
       const body = document.querySelector(`${selector} .agent-body`);
       if (
         !(ringGroup instanceof SVGGraphicsElement) ||
         !(ring instanceof SVGCircleElement) ||
+        !(leader instanceof SVGGraphicsElement) ||
         !(body instanceof SVGCircleElement)
       ) {
         throw new Error("Settled death geometry is unavailable.");
       }
-      const matrix = ringGroup.getCTM();
-      const bodyMatrix = body.getCTM();
-      if (matrix === null || bodyMatrix === null) {
+      const leaderPoints = JSON.parse(
+        leader.getAttribute("data-leader-points") ?? "null",
+      );
+      if (
+        !Array.isArray(leaderPoints) ||
+        leaderPoints.length < 2 ||
+        !leaderPoints.every(
+          (point) => Number.isFinite(point?.x) && Number.isFinite(point?.y),
+        )
+      ) {
+        throw new Error("Settled death leader geometry is unavailable.");
+      }
+      const matrix = ringGroup.getScreenCTM();
+      const leaderMatrix = leader.getScreenCTM();
+      const bodyMatrix = body.getScreenCTM();
+      if (matrix === null || leaderMatrix === null || bodyMatrix === null) {
         throw new Error("Settled death transform is unavailable.");
       }
+      const center = new DOMPoint(0, 0).matrixTransform(matrix);
+      const leaderStart = new DOMPoint(
+        leaderPoints[0].x,
+        leaderPoints[0].y,
+      ).matrixTransform(leaderMatrix);
       const bodyCenter = new DOMPoint(
         body.cx.baseVal.value,
         body.cy.baseVal.value,
@@ -5955,14 +5980,20 @@ test("real death cycle retains truthful outward lifecycle cues at both review vi
       return {
         color: getComputedStyle(ringGroup).color,
         radius: ring.getAttribute("r"),
-        center: [matrix.e, matrix.f],
+        center: [center.x, center.y],
+        leaderStart: [leaderStart.x, leaderStart.y],
         bodyCenter: [bodyCenter.x, bodyCenter.y],
       };
     }, subjectSelector);
     expect(deathGeometry.color).toBe("rgb(251, 113, 133)");
     expect(deathGeometry.radius).toBe("32");
-    expect(deathGeometry.center[0]).toBeCloseTo(deathGeometry.bodyCenter[0], 5);
-    expect(deathGeometry.center[1]).toBeCloseTo(deathGeometry.bodyCenter[1], 5);
+    expect(deathGeometry.center.every(Number.isFinite)).toBe(true);
+    expect(
+      Math.abs(deathGeometry.leaderStart[0] - deathGeometry.bodyCenter[0]),
+    ).toBeLessThanOrEqual(0.001);
+    expect(
+      Math.abs(deathGeometry.leaderStart[1] - deathGeometry.bodyCenter[1]),
+    ).toBeLessThanOrEqual(0.001);
 
     await seekReplay(page, 2);
     const waitFrame = await authenticatedGet(page, "/api/presentation/frame");
@@ -6042,22 +6073,48 @@ test("real death cycle retains truthful outward lifecycle cues at both review vi
       "data-spawn-shield-remaining",
       "3",
     );
+    const respawnRing = respawnEffect.locator(".combat-lifecycle-ring--resurrection");
+    await expect(respawnRing).toHaveAttribute(
+      "data-layout-key",
+      JSON.stringify(["event", respawnEvent.event_id, "cue"]),
+    );
+    await expect(respawnRing).toHaveAttribute("data-layout-collision-free", "true");
     const respawnGeometry = await respawnEffect.evaluate((effect, selector) => {
       const ringGroup = effect.querySelector(".combat-lifecycle-ring--resurrection");
       const ring = effect.querySelector(".combat-lifecycle-ring__ring");
+      const leader = effect.querySelector(".combat-cue__leader--semantic");
       const body = document.querySelector(`${selector} .agent-body`);
       if (
         !(ringGroup instanceof SVGGraphicsElement) ||
         !(ring instanceof SVGCircleElement) ||
+        !(leader instanceof SVGGraphicsElement) ||
         !(body instanceof SVGCircleElement)
       ) {
         throw new Error("Settled resurrection geometry is unavailable.");
       }
-      const matrix = ringGroup.getCTM();
-      const bodyMatrix = body.getCTM();
-      if (matrix === null || bodyMatrix === null) {
+      const leaderPoints = JSON.parse(
+        leader.getAttribute("data-leader-points") ?? "null",
+      );
+      if (
+        !Array.isArray(leaderPoints) ||
+        leaderPoints.length < 2 ||
+        !leaderPoints.every(
+          (point) => Number.isFinite(point?.x) && Number.isFinite(point?.y),
+        )
+      ) {
+        throw new Error("Settled resurrection leader geometry is unavailable.");
+      }
+      const matrix = ringGroup.getScreenCTM();
+      const leaderMatrix = leader.getScreenCTM();
+      const bodyMatrix = body.getScreenCTM();
+      if (matrix === null || leaderMatrix === null || bodyMatrix === null) {
         throw new Error("Settled resurrection transform is unavailable.");
       }
+      const center = new DOMPoint(0, 0).matrixTransform(matrix);
+      const leaderStart = new DOMPoint(
+        leaderPoints[0].x,
+        leaderPoints[0].y,
+      ).matrixTransform(leaderMatrix);
       const bodyCenter = new DOMPoint(
         body.cx.baseVal.value,
         body.cy.baseVal.value,
@@ -6065,14 +6122,20 @@ test("real death cycle retains truthful outward lifecycle cues at both review vi
       return {
         color: getComputedStyle(ringGroup).color,
         radius: ring.getAttribute("r"),
-        center: [matrix.e, matrix.f],
+        center: [center.x, center.y],
+        leaderStart: [leaderStart.x, leaderStart.y],
         bodyCenter: [bodyCenter.x, bodyCenter.y],
       };
     }, subjectSelector);
     expect(respawnGeometry.color).toBe("rgb(255, 255, 255)");
     expect(respawnGeometry.radius).toBe("32");
-    expect(respawnGeometry.center[0]).toBeCloseTo(respawnGeometry.bodyCenter[0], 5);
-    expect(respawnGeometry.center[1]).toBeCloseTo(respawnGeometry.bodyCenter[1], 5);
+    expect(respawnGeometry.center.every(Number.isFinite)).toBe(true);
+    expect(
+      Math.abs(respawnGeometry.leaderStart[0] - respawnGeometry.bodyCenter[0]),
+    ).toBeLessThanOrEqual(0.001);
+    expect(
+      Math.abs(respawnGeometry.leaderStart[1] - respawnGeometry.bodyCenter[1]),
+    ).toBeLessThanOrEqual(0.001);
     const shield = page.locator(
       `.agent-spawn-shield[data-presentation-key="${subject.presentation_key}"]`,
     );
@@ -6190,14 +6253,36 @@ test("real death cycle retains truthful outward lifecycle cues at both review vi
     expect(
       expiryEvents.some(({ event_kind }) => event_kind === "spawn_shield_expired"),
     ).toBe(true);
+    const expiryEvent = expiryEvents.find(
+      ({ event_kind }) => event_kind === "spawn_shield_expired",
+    );
+    if (!expiryEvent) {
+      throw new Error("Authorized Spawn Shield expiry event is unavailable.");
+    }
     const expiredSubject = expiryFrame.current_endpoint.scene.agents.find(
       (/** @type {Record<string, any>} */ agent) => agent.public_agent_id === "5",
     );
     expect(expiredSubject.spawn_shield_remaining).toBe(0);
     await expect(shield).toBeHidden();
-    await expect(
-      page.locator('.combat-effect[data-event-type="spawn_shield_expired"]'),
-    ).toHaveCount(0);
+    const expiryEffect = page.locator(
+      '.combat-effect[data-event-type="spawn_shield_expired"]',
+    );
+    await expect(expiryEffect).toHaveCount(1);
+    await expect(expiryEffect).toHaveAttribute("data-event-id", expiryEvent.event_id);
+    expect(await expiryEffect.getAttribute("data-persistent")).toBeNull();
+    await expect(expiryEffect).toHaveAttribute("data-settled", "true");
+    const expiryPulse = expiryEffect.locator(
+      ".combat-semantic-pulse--spawn-shield-expired",
+    );
+    await expect(expiryPulse).toHaveAttribute(
+      "data-layout-key",
+      JSON.stringify(["event", expiryEvent.event_id, "cue"]),
+    );
+    await expect(expiryPulse).toHaveAttribute(
+      "data-layout-disposition",
+      "perimeter_callout",
+    );
+    await expect(expiryPulse).toHaveAttribute("data-layout-collision-free", "true");
     await expect(page.locator(".combat-lifecycle-ring")).toHaveCount(0);
     await expect(page.locator(".combat-respawn-wave")).toHaveCount(0);
 
@@ -6216,6 +6301,7 @@ test("real death cycle retains truthful outward lifecycle cues at both review vi
     expect(
       unshieldedEvents.some(({ event_kind }) => event_kind === "action_rejected"),
     ).toBe(false);
+    await expect(expiryEffect).toHaveCount(0);
     await expect(page.locator(".combat-lifecycle-ring")).toHaveCount(0);
     await expect(page.locator(".combat-respawn-wave")).toHaveCount(0);
     expect(browserErrors.get(page) ?? []).toEqual([]);

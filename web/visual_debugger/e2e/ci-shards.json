@@ -7,7 +7,7 @@
     ["recording-handoff.spec.js"],
     ["replay-viewer.spec.js"],
     ["resize.spec.js"],
-    ["scripted-live-advance.spec.js"],
+    ["scripted-live-advance.spec.js", "replay-static-summary.spec.js"],
     ["server-lifecycle.spec.js", "visual-filters.spec.js"]
   ]
 }

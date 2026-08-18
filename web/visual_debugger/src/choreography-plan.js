@@ -4,7 +4,7 @@ import {
   authorizedPresentationSceneView,
   isAuthorizedPresentationFrame,
 } from "./authorized-presentation-adapter.js";
-import { createRouteGeometry } from "./routes.js";
+import { layoutCrossPhaseOccupancy } from "./layout.js";
 import {
   DEFAULT_VISUAL_FILTER_STATE,
   isVisualPaintPartEnabled,
@@ -84,18 +84,71 @@ const FAMILY_DWELL_MS = Object.freeze({
   respawn: 620,
 });
 
-const MAX_HEALTH_CUES_PER_RECIPIENT = 3;
-const OUTCOME_CUE_CLEARANCE = 2;
-const OUTCOME_CUE_GRID_COLUMNS = 48;
-const OUTCOME_CUE_GRID_ROWS = 36;
-const OUTCOME_CUE_TARGET_STEP = 8;
+/**
+ * Shared allocator/painter geometry in presentation pixels. Stroke-inclusive
+ * radii and flare extents deliberately fit inside their paired frozen
+ * footprint; route padding excludes transparent hit targets and underpainting.
+ */
+export const CHOREOGRAPHY_PAINT_FOOTPRINTS = Object.freeze({
+  activation: Object.freeze({
+    basic_damage: Object.freeze({ width: 44, height: 44 }),
+    basic_heal: Object.freeze({ width: 44, height: 44 }),
+    holy_word: Object.freeze({ width: 56, height: 56, flareExtent: 27 }),
+    hunter_trap: Object.freeze({ width: 27, height: 27, flareExtent: 25 }),
+    rogue_poison: Object.freeze({ width: 48, height: 48 }),
+    warrior_charge: Object.freeze({
+      width: 32.16,
+      height: 27.52,
+      flareExtent: 26,
+    }),
+    mage_burst: Object.freeze({ width: 70, height: 70, flareExtent: 34 }),
+    local: Object.freeze({ width: 48, height: 48 }),
+  }),
+  rejection: Object.freeze({ width: 52, height: 52, ringRadius: 24 }),
+  lifecycleReapplication: Object.freeze({
+    width: 45,
+    height: 45,
+    ringRadius: 21,
+  }),
+  chargeDisplacement: Object.freeze({
+    start: Object.freeze({ width: 10, height: 10, radius: 4 }),
+    end: Object.freeze({ width: 12, height: 12, radius: 5 }),
+  }),
+  chargeOwnership: Object.freeze({ width: 72, height: 22, labelLength: 60 }),
+  respawnWave: Object.freeze({
+    width: 152,
+    height: 32,
+    panelWidth: 150,
+    panelHeight: 30,
+  }),
+  route: Object.freeze({
+    // The standard activation envelope is the animated r3 particle plus its
+    // 3px glow and 1px clearance. Holy Word alone needs 8px for its r4 particle
+    // and 4px glow (and its 5px route stroke plus 5px glow spans 7.5px).
+    activationPathPadding: Object.freeze({ default: 7, holy_word: 8 }),
+    rejectionPathPadding: 1,
+    chargePathPadding: 1.5,
+    activationMarkerPadding: 17,
+    activationCompactMarkerPadding: 8,
+    chargeMarkerPadding: 14,
+  }),
+});
+
 const NET_EFFECT_CUE_RECTANGLE = centeredCueRectangle(48, 36);
 const NET_TEXT_CUE_RECTANGLE = centeredCueRectangle(88, 36);
 const UNCHANGED_NET_TEXT_CUE_RECTANGLE = centeredCueRectangle(102, 36);
 const LIFECYCLE_BREAK_CUE_RECTANGLE = centeredCueRectangle(52, 52);
-const LIFECYCLE_REAPPLICATION_CUE_RECTANGLE = centeredCueRectangle(42, 42);
-const REGENERATION_EFFECT_CUE_RECTANGLE = centeredCueRectangle(48, 44);
-const REGENERATION_TEXT_CUE_RECTANGLE = centeredCueRectangle(64, 18);
+const LIFECYCLE_REAPPLICATION_CUE_RECTANGLE = centeredCueRectangle(
+  CHOREOGRAPHY_PAINT_FOOTPRINTS.lifecycleReapplication.width,
+  CHOREOGRAPHY_PAINT_FOOTPRINTS.lifecycleReapplication.height,
+);
+const REGENERATION_EFFECT_CUE_RECTANGLE = centeredCueRectangle(48, 48);
+const REGENERATION_TEXT_CUE_RECTANGLE = Object.freeze({
+  left: -32,
+  top: 16,
+  right: 32,
+  bottom: 34,
+});
 
 /**
  * @typedef {{
@@ -110,14 +163,7 @@ const REGENERATION_TEXT_CUE_RECTANGLE = centeredCueRectangle(64, 18);
  *     width: number,
  *     height: number,
  *   },
- *   protectedRects?: ReadonlyArray<{
- *     left: number,
- *     top: number,
- *     right: number,
- *     bottom: number,
- *     width: number,
- *     height: number,
- *   }>,
+ *   protectedRects?: ReadonlyArray<Record<string, any>>,
  * }} ProjectionSurface
  * @typedef {Record<string, any> & {
  *   events: ReadonlyArray<Record<string, any>>,
@@ -234,81 +280,6 @@ function project(world, surface) {
 }
 
 /**
- * Place one priority class of recipient-level cue in deterministic screen-space
- * lanes outside durable protected rectangles and already placed cues from the
- * same authored phase. Non-coexisting transient phases do not consume one
- * another's screen-space capacity. This is presentation geometry only; it
- * never changes or derives an event fact.
- *
- * @param {ReadonlyArray<Record<string, any>>} events
- * @param {ProjectionSurface | null} surface
- * @param {"net_health" | "status_lifecycle" | "regeneration"} eventKind
- */
-function layoutOutcomeCues(events, surface, eventKind) {
-  const outcomes = events
-    .filter((event) => event.spatial && event.recipient && event.kind === eventKind)
-    .sort(outcomePlacementOrder);
-  if (outcomes.length === 0) {
-    return events;
-  }
-  const viewport = normalizedRectangle(surface?.viewportBounds);
-  if (!viewport) {
-    return events;
-  }
-  const occupied = array(surface?.protectedRects)
-    .map(normalizedRectangle)
-    .filter((bounds) => bounds !== null)
-    .map((bounds) => expandCueBounds(bounds, OUTCOME_CUE_CLEARANCE));
-  /** @type {Map<Record<string, any>, Record<string, any>>} */
-  const placed = new Map();
-
-  for (const event of outcomes) {
-    const dimensions = paintedOutcomeCueDimensions(event);
-    const selected =
-      selectCueCandidate(
-        localCueCandidates(
-          event,
-          dimensions,
-          viewport,
-          eventKind === "net_health" && outcomes.length === 1,
-        ),
-        occupied,
-      ) ??
-      selectCueCandidate(
-        criticalEdgeCueCandidates(event, dimensions, viewport, occupied),
-        occupied,
-      ) ??
-      selectCueCandidate(viewportCueCandidates(event, dimensions, viewport), occupied);
-    if (!selected) {
-      placed.set(
-        event,
-        Object.freeze({
-          ...event,
-          cue: null,
-          cueBounds: null,
-          cueCollisionFree: false,
-          cueSuppressionReason: "no_collision_free_position",
-          spatialDisposition: "suppressed_collision",
-        }),
-      );
-      continue;
-    }
-    occupied.push(expandCueBounds(selected.bounds, OUTCOME_CUE_CLEARANCE));
-    placed.set(
-      event,
-      Object.freeze({
-        ...event,
-        cue: selected.center,
-        cueBounds: selected.bounds,
-        cueCollisionFree: true,
-        spatialDisposition: "rendered",
-      }),
-    );
-  }
-  return events.map((event) => placed.get(event) ?? event);
-}
-
-/**
  * Size collision reservations from the paint parts that survived the local
  * filter. A disabled sibling may not enlarge or displace the remaining cue.
  * Plans predating visual filters retain the CP5 all-on dimensions.
@@ -365,393 +336,32 @@ function unionCueRectangles(rectangles) {
   if (rectangles.length === 0) {
     return Object.freeze({ width: 0, height: 0 });
   }
+  const horizontalExtent = Math.max(
+    ...rectangles.flatMap(({ left, right }) => [Math.abs(left), Math.abs(right)]),
+  );
+  const verticalExtent = Math.max(
+    ...rectangles.flatMap(({ top, bottom }) => [Math.abs(top), Math.abs(bottom)]),
+  );
   return Object.freeze({
-    width:
-      Math.max(...rectangles.map(({ right }) => right)) -
-      Math.min(...rectangles.map(({ left }) => left)),
-    height:
-      Math.max(...rectangles.map(({ bottom }) => bottom)) -
-      Math.min(...rectangles.map(({ top }) => top)),
+    width: horizontalExtent * 2,
+    height: verticalExtent * 2,
   });
 }
 
 /**
- * Exact ending classifications outrank generic applications within the
- * lifecycle tier. NET cues are handled in an earlier layout pass. Returned
- * event order remains untouched.
+ * Give every layout-owned fragment a collision-safe identity without changing
+ * the authorized event identity carried by the plan row.
  *
- * @param {Record<string, any>} left
- * @param {Record<string, any>} right
+ * @param {unknown} eventId
+ * @param {string} role
  */
-function outcomePlacementOrder(left, right) {
-  const kindDifference =
-    (left.kind === "net_health" ? 0 : 1) - (right.kind === "net_health" ? 0 : 1);
-  if (kindDifference !== 0) {
-    return kindDifference;
-  }
-  const statusLayoutDifference =
-    left.kind === "status_lifecycle" &&
-    right.kind === "status_lifecycle" &&
-    Number.isInteger(left.statusLayoutOrder) &&
-    Number.isInteger(right.statusLayoutOrder)
-      ? Number(left.statusLayoutOrder) - Number(right.statusLayoutOrder)
-      : 0;
-  if (statusLayoutDifference !== 0) {
-    return statusLayoutDifference;
-  }
-  return (
-    lifecyclePlacementPriority(left) - lifecyclePlacementPriority(right) ||
-    Number(left.recipientSlot) - Number(right.recipientSlot) ||
-    Number(left.lane ?? 0) - Number(right.lane ?? 0) ||
-    String(left.eventId).localeCompare(String(right.eventId))
-  );
-}
-
-/**
- * @param {Record<string, any>} event
- */
-function lifecyclePlacementPriority(event) {
-  if (
-    event.lifecycle === "trap_broken_and_reapplied" ||
-    event.lifecycle === "reapplied"
-  ) {
-    return 0;
-  }
-  if (event.lifecycle === "trap_broken") {
-    return 1;
-  }
-  if (
-    event.lifecycle === "expired" ||
-    event.lifecycle === "cleared_by_death" ||
-    event.lifecycle === "cleared_unclassified"
-  ) {
-    return 2;
-  }
-  return 3;
-}
-
-/**
- * @param {Record<string, any>} event
- * @param {{width: number, height: number}} dimensions
- * @param {Record<string, number>} viewport
- */
-function localCueCandidates(event, dimensions, viewport, isolatedNet = false) {
-  const recipient = event.recipient;
-  const baseAngle =
-    event.kind === "status_lifecycle"
-      ? -Math.PI / 2 +
-        (Math.PI * 2 * Number(event.lane ?? 0)) /
-          Math.max(1, Number(event.laneCount ?? 1))
-      : -Math.PI / 2;
-  const angleOffsets =
-    event.kind === "net_health"
-      ? isolatedNet
-        ? [0, -Math.PI / 4, Math.PI / 4, -Math.PI / 2, Math.PI / 2]
-        : [0, -Math.PI / 4, Math.PI / 4, Math.PI, -Math.PI / 2, Math.PI / 2]
-      : [
-          0,
-          Math.PI / 6,
-          -Math.PI / 6,
-          Math.PI / 3,
-          -Math.PI / 3,
-          Math.PI / 2,
-          -Math.PI / 2,
-          (Math.PI * 2) / 3,
-          (-Math.PI * 2) / 3,
-          Math.PI,
-        ];
-  const radii =
-    event.kind === "net_health"
-      ? isolatedNet
-        ? [44, 64, 84, 108, 132, 156]
-        : [44, 64, 84, 108]
-      : [42, 60, 78, 96, 118, 140];
-  const candidates = [];
-  const candidateKeys = new Set();
-  for (const radius of radii) {
-    for (const offset of angleOffsets) {
-      const raw = {
-        x: recipient.x + Math.cos(baseAngle + offset) * radius,
-        y: recipient.y + Math.sin(baseAngle + offset) * radius,
-      };
-      const center = clampCueCenter(raw, dimensions, viewport);
-      if (!center) {
-        continue;
-      }
-      const key = `${center.x}:${center.y}`;
-      if (candidateKeys.has(key)) {
-        continue;
-      }
-      candidateKeys.add(key);
-      candidates.push(
-        Object.freeze({
-          center,
-          bounds: cueBounds(center, dimensions),
-          displacement: Math.hypot(center.x - recipient.x, center.y - recipient.y),
-        }),
-      );
-    }
-  }
-  return candidates;
-}
-
-/**
- * @param {Record<string, any>} event
- * @param {{width: number, height: number}} dimensions
- * @param {Record<string, number>} viewport
- */
-function viewportCueCandidates(event, dimensions, viewport) {
-  return viewportCueCenters(dimensions, viewport).map((center) =>
-    Object.freeze({
-      center,
-      bounds: cueBounds(center, dimensions),
-      displacement: Math.hypot(
-        center.x - event.recipient.x,
-        center.y - event.recipient.y,
-      ),
-    }),
-  );
-}
-
-/**
- * Test the finite set of centers at which a cue sits exactly beside an
- * occupied edge. A regular lattice can step over a narrow valid corridor;
- * these critical coordinates find it without an unbounded pixel search.
- *
- * @param {Record<string, any>} event
- * @param {{width: number, height: number}} dimensions
- * @param {Record<string, number>} viewport
- * @param {ReadonlyArray<Record<string, number>>} occupied
- */
-function criticalEdgeCueCandidates(event, dimensions, viewport, occupied) {
-  const limits = cueCenterLimits(dimensions, viewport);
-  if (!limits) {
-    return [];
-  }
-  const horizontal = dimensions.width / 2;
-  const vertical = dimensions.height / 2;
-  const horizontalPositions = boundedCriticalAxisPositions(
-    [
-      limits.minimumX,
-      limits.maximumX,
-      event.recipient.x,
-      ...occupied.flatMap((bounds) => [
-        bounds.left - horizontal,
-        bounds.right + horizontal,
-      ]),
-    ],
-    limits.minimumX,
-    limits.maximumX,
-    event.recipient.x,
-    OUTCOME_CUE_GRID_COLUMNS,
-  );
-  const verticalPositions = boundedCriticalAxisPositions(
-    [
-      limits.minimumY,
-      limits.maximumY,
-      event.recipient.y,
-      ...occupied.flatMap((bounds) => [
-        bounds.top - vertical,
-        bounds.bottom + vertical,
-      ]),
-    ],
-    limits.minimumY,
-    limits.maximumY,
-    event.recipient.y,
-    OUTCOME_CUE_GRID_ROWS,
-  );
-  return verticalPositions.flatMap((y) =>
-    horizontalPositions.map((x) =>
-      Object.freeze({
-        center: Object.freeze({ x, y }),
-        bounds: cueBounds({ x, y }, dimensions),
-        displacement: Math.hypot(x - event.recipient.x, y - event.recipient.y),
-      }),
-    ),
-  );
-}
-
-/**
- * Keep edge-driven search bounded while retaining both viewport rails and the
- * positions nearest the recipient. Coordinates are presentation pixels.
- *
- * @param {ReadonlyArray<number>} candidates
- * @param {number} minimum
- * @param {number} maximum
- * @param {number} focus
- * @param {number} maximumCount
- */
-function boundedCriticalAxisPositions(
-  candidates,
-  minimum,
-  maximum,
-  focus,
-  maximumCount,
-) {
-  const unique = new Map();
-  for (const candidate of candidates) {
-    if (
-      !Number.isFinite(candidate) ||
-      candidate < minimum - Number.EPSILON ||
-      candidate > maximum + Number.EPSILON
-    ) {
-      continue;
-    }
-    const bounded = Math.max(minimum, Math.min(maximum, candidate));
-    unique.set(bounded.toFixed(6), bounded);
-  }
-  const rails = [minimum, maximum].filter(
-    (value, index, values) => values.indexOf(value) === index,
-  );
-  const railKeys = new Set(rails.map((value) => value.toFixed(6)));
-  const nearest = [...unique.entries()]
-    .filter(([key]) => !railKeys.has(key))
-    .map(([, value]) => value)
-    .sort(
-      (left, right) => Math.abs(left - focus) - Math.abs(right - focus) || left - right,
-    )
-    .slice(0, Math.max(0, maximumCount - rails.length));
-  return [...rails, ...nearest];
-}
-
-/**
- * @param {ReadonlyArray<Record<string, any>>} candidates
- * @param {ReadonlyArray<Record<string, number>>} occupied
- */
-function selectCueCandidate(candidates, occupied) {
-  let selected = null;
-  let selectedDisplacement = Number.POSITIVE_INFINITY;
-  for (const candidate of candidates) {
-    if (
-      candidate.displacement >= selectedDisplacement ||
-      occupied.some((bounds) => rectangleIntersectionArea(candidate.bounds, bounds) > 0)
-    ) {
-      continue;
-    }
-    selected = candidate;
-    selectedDisplacement = candidate.displacement;
-  }
-  return selected;
-}
-
-/**
- * @param {{x: number, y: number}} center
- * @param {{width: number, height: number}} dimensions
- */
-function cueBounds(center, dimensions) {
-  return Object.freeze({
-    left: center.x - dimensions.width / 2,
-    top: center.y - dimensions.height / 2,
-    right: center.x + dimensions.width / 2,
-    bottom: center.y + dimensions.height / 2,
-    width: dimensions.width,
-    height: dimensions.height,
-  });
-}
-
-/**
- * @param {Record<string, number>} bounds
- * @param {number} clearance
- */
-function expandCueBounds(bounds, clearance) {
-  return Object.freeze({
-    left: bounds.left - clearance,
-    top: bounds.top - clearance,
-    right: bounds.right + clearance,
-    bottom: bounds.bottom + clearance,
-    width: bounds.width + clearance * 2,
-    height: bounds.height + clearance * 2,
-  });
-}
-
-/**
- * Deterministic whole-map fallback for dense scenes whose collision-free
- * location lies beyond the recipient-local radial candidates.
- *
- * @param {{width: number, height: number}} dimensions
- * @param {Record<string, number>} viewport
- */
-function viewportCueCenters(dimensions, viewport) {
-  const limits = cueCenterLimits(dimensions, viewport);
-  if (!limits) {
-    return [];
-  }
-  const horizontalPositions = cueAxisPositions(
-    limits.minimumX,
-    limits.maximumX,
-    OUTCOME_CUE_GRID_COLUMNS,
-  );
-  const verticalPositions = cueAxisPositions(
-    limits.minimumY,
-    limits.maximumY,
-    OUTCOME_CUE_GRID_ROWS,
-  );
-  return verticalPositions.flatMap((y) =>
-    horizontalPositions.map((x) => Object.freeze({ x, y })),
-  );
-}
-
-/**
- * @param {number} minimum
- * @param {number} maximum
- * @param {number} maximumCount
- */
-function cueAxisPositions(minimum, maximum, maximumCount) {
-  const span = maximum - minimum;
-  if (span <= Number.EPSILON) {
-    return [minimum];
-  }
-  const count = Math.min(
-    maximumCount,
-    Math.max(2, Math.floor(span / OUTCOME_CUE_TARGET_STEP) + 1),
-  );
-  return Array.from(
-    { length: count },
-    (_, index) => minimum + (span * index) / (count - 1),
-  );
-}
-
-/**
- * @param {{x: number, y: number}} center
- * @param {{width: number, height: number}} dimensions
- * @param {Record<string, number>} viewport
- */
-function clampCueCenter(center, dimensions, viewport) {
-  const limits = cueCenterLimits(dimensions, viewport);
-  if (!limits) {
-    return null;
-  }
-  return Object.freeze({
-    x: Math.max(limits.minimumX, Math.min(limits.maximumX, center.x)),
-    y: Math.max(limits.minimumY, Math.min(limits.maximumY, center.y)),
-  });
-}
-
-/**
- * @param {{width: number, height: number}} dimensions
- * @param {Record<string, number>} viewport
- */
-function cueCenterLimits(dimensions, viewport) {
-  const horizontal = dimensions.width / 2 + 4;
-  const vertical = dimensions.height / 2 + 4;
-  const minimumX = viewport.left + horizontal;
-  const maximumX = viewport.right - horizontal;
-  const minimumY = viewport.top + vertical;
-  const maximumY = viewport.bottom - vertical;
-  if (maximumX < minimumX || maximumY < minimumY) {
-    return null;
-  }
-  return Object.freeze({
-    minimumX,
-    maximumX,
-    minimumY,
-    maximumY,
-  });
+function crossPhaseLayoutKey(eventId, role) {
+  return JSON.stringify(["event", String(eventId), role]);
 }
 
 /**
  * @param {unknown} value
- * @returns {Record<string, number> | null}
+ * @returns {{left: number, top: number, right: number, bottom: number, width: number, height: number} | null}
  */
 function normalizedRectangle(value) {
   const bounds = record(value);
@@ -783,16 +393,433 @@ function normalizedRectangle(value) {
 }
 
 /**
- * @param {Record<string, number>} first
- * @param {Record<string, number>} second
+ * Accept the named scene contract while keeping older test/adapter surfaces
+ * deterministic until their callers migrate. The allocator itself still sees
+ * only explicit, stable keys.
+ *
+ * @param {ProjectionSurface | null} surface
  */
-function rectangleIntersectionArea(first, second) {
+function crossPhaseProtectedRects(surface) {
+  return Object.freeze(
+    array(surface?.protectedRects).map((candidate, index) => {
+      const region = record(candidate);
+      const bounds = normalizedRectangle(region?.bounds ?? region);
+      if (!region || !bounds) {
+        throw new TypeError(`protectedRects[${index}] must contain valid bounds.`);
+      }
+      return Object.freeze({
+        layoutKey:
+          identifier(region.layoutKey) ?? JSON.stringify(["legacy-protected", index]),
+        bounds,
+      });
+    }),
+  );
+}
+
+/**
+ * Route endpoints may enter only the durable body regions that explicitly own
+ * those endpoints. No containment or nearest-body inference is permitted.
+ *
+ * @param {ProjectionSurface | null} surface
+ * @param {string | null | undefined} ownerPresentationKey
+ */
+function protectedBodyKeys(surface, ownerPresentationKey) {
+  if (!ownerPresentationKey) {
+    return [];
+  }
+  return array(surface?.protectedRects).flatMap((candidate) => {
+    const region = record(candidate);
+    const key = identifier(region?.layoutKey);
+    return region?.protectedKind === "body" &&
+      region.ownerPresentationKey === ownerPresentationKey &&
+      key !== null
+      ? [key]
+      : [];
+  });
+}
+
+/**
+ * Resolve an endpoint role to one exact durable body identity. Multiple body
+ * regions for one presentation owner are ambiguous and must never be guessed.
+ *
+ * @param {ProjectionSurface | null} surface
+ * @param {string | null | undefined} ownerPresentationKey
+ */
+function protectedBodyKey(surface, ownerPresentationKey) {
+  const keys = protectedBodyKeys(surface, ownerPresentationKey);
+  if (keys.length > 1) {
+    throw new RangeError(
+      `presentation owner ${ownerPresentationKey} has multiple protected bodies.`,
+    );
+  }
+  return keys[0] ?? null;
+}
+
+/** @param {Record<string, any>} event */
+function activationCueDimensions(event) {
+  if (!event.target) {
+    return event.tokenId === "mage_burst"
+      ? CHOREOGRAPHY_PAINT_FOOTPRINTS.activation.mage_burst
+      : CHOREOGRAPHY_PAINT_FOOTPRINTS.activation.local;
+  }
+  if (event.paintParts?.ability !== true) {
+    const semanticSize =
+      event.tokenId === "hunter_trap"
+        ? 16
+        : event.tokenId === "warrior_charge"
+          ? 18
+          : 24;
+    return Object.freeze({ width: semanticSize, height: semanticSize });
+  }
+  const tokenId = /** @type {keyof typeof CHOREOGRAPHY_PAINT_FOOTPRINTS.activation} */ (
+    event.tokenId
+  );
   return (
-    Math.max(
-      0,
-      Math.min(first.right, second.right) - Math.max(first.left, second.left),
-    ) *
-    Math.max(0, Math.min(first.bottom, second.bottom) - Math.max(first.top, second.top))
+    CHOREOGRAPHY_PAINT_FOOTPRINTS.activation[tokenId] ??
+    CHOREOGRAPHY_PAINT_FOOTPRINTS.activation.rogue_poison
+  );
+}
+
+/** @param {Record<string, any>} event */
+function semanticPulseCueDimensions(event) {
+  if (event.cueSemantic === "respawn_wave_occurred") {
+    return CHOREOGRAPHY_PAINT_FOOTPRINTS.respawnWave;
+  }
+  if (event.cueSemantic === "agent_died" || event.cueSemantic === "agent_respawned") {
+    return Object.freeze({ width: 68, height: 68 });
+  }
+  return Object.freeze({ width: 62, height: 62 });
+}
+
+/**
+ * @param {ProjectionSurface | null} surface
+ * @param {Map<string, Record<string, any>>} sceneByKey
+ * @param {string | null | undefined} presentationKey
+ */
+function projectedAgentRadius(surface, sceneByKey, presentationKey) {
+  const radius = finiteNumber(sceneByKey.get(presentationKey ?? "")?.radius);
+  if (radius === null || !surface) {
+    return 0;
+  }
+  const projected = surface.worldLengthToScreen(radius);
+  return Number.isFinite(projected) ? Number(projected) : 0;
+}
+
+/**
+ * Run one filter-first reservation pass for every surviving information-bearing
+ * fragment, then attach allocator-owned geometry without changing event order
+ * or scientific anchors.
+ *
+ * @param {ReadonlyArray<Record<string, any>>} events
+ * @param {ProjectionSurface | null} surface
+ * @param {Map<string, Record<string, any>>} sceneByKey
+ * @returns {ReadonlyArray<Record<string, any>> | null}
+ */
+function layoutCrossPhaseEvents(events, surface, sceneByKey) {
+  /** @type {Record<string, any>[]} */
+  const requests = [];
+  /** @type {Map<string, Record<string, any>>} */
+  const bindings = new Map();
+  /** @type {Record<string, any>[]} */
+  const patches = events.map(() => ({}));
+
+  /**
+   * @param {number} eventIndex
+   * @param {string} role
+   * @param {number} roleOrder
+   * @param {Record<string, any>} request
+   * @param {Record<string, any>} [binding]
+   */
+  const add = (eventIndex, role, roleOrder, request, binding = {}) => {
+    const layoutKey = crossPhaseLayoutKey(events[eventIndex].eventId, role);
+    requests.push(
+      Object.freeze({
+        layoutKey,
+        priority: request.kind === "route" ? 1 : 0,
+        stableOrder: eventIndex * 4 + roleOrder,
+        ...request,
+      }),
+    );
+    bindings.set(layoutKey, Object.freeze({ eventIndex, role, ...binding }));
+  };
+
+  for (const [eventIndex, event] of events.entries()) {
+    if (!event.spatial) {
+      continue;
+    }
+    if (event.kind === "activation") {
+      const dimensions = activationCueDimensions(event);
+      if (event.target) {
+        add(eventIndex, "impact", 0, {
+          kind: "recipient_cue",
+          anchor: event.target,
+          anchorRadius: 60,
+          recipientKey: event.targetPresentationKey ?? event.eventId,
+          allowProtectedKeys:
+            event.endpointPhase === "successor"
+              ? protectedBodyKeys(surface, event.targetPresentationKey)
+              : [],
+          ...dimensions,
+        });
+      } else if (event.source && event.paintParts?.ability === true) {
+        add(eventIndex, "source", 0, {
+          kind: "perimeter_callout",
+          anchor: event.source,
+          recipientKey: event.sourcePresentationKey ?? event.eventId,
+          allowProtectedKeys: protectedBodyKeys(surface, event.sourcePresentationKey),
+          ...dimensions,
+        });
+      }
+      if (
+        event.paintParts?.ability === true &&
+        event.source &&
+        event.target &&
+        event.targetPresentationKey
+      ) {
+        const sourceRadius = projectedAgentRadius(
+          surface,
+          sceneByKey,
+          event.sourcePresentationKey,
+        );
+        const targetRadius = projectedAgentRadius(
+          surface,
+          sceneByKey,
+          event.targetPresentationKey,
+        );
+        // Scene body regions describe the current successor endpoint. They may
+        // own successor-anchored routes, but never historical Charge activation
+        // endpoints from transition_start.
+        const successorAnchored = event.endpointPhase === "successor";
+        const sourceProtectedKey = successorAnchored
+          ? protectedBodyKey(surface, event.sourcePresentationKey)
+          : null;
+        const targetProtectedKey = successorAnchored
+          ? protectedBodyKey(surface, event.targetPresentationKey)
+          : null;
+        const allowProtectedKeys = [sourceProtectedKey, targetProtectedKey].filter(
+          (key) => key !== null,
+        );
+        const pairKey = JSON.stringify([
+          event.sourcePresentationKey,
+          event.targetPresentationKey,
+        ]);
+        add(
+          eventIndex,
+          "route",
+          2,
+          {
+            kind: "route",
+            source: event.source,
+            target: event.target,
+            sourceRadius: sourceProtectedKey === null ? 0 : sourceRadius,
+            targetRadius: targetProtectedKey === null ? 0 : targetRadius,
+            sourceEndpointGap: sourceProtectedKey === null ? 0 : 3,
+            targetEndpointGap: targetProtectedKey === null ? 0 : 3,
+            pathPadding:
+              event.tokenId === "holy_word"
+                ? CHOREOGRAPHY_PAINT_FOOTPRINTS.route.activationPathPadding.holy_word
+                : CHOREOGRAPHY_PAINT_FOOTPRINTS.route.activationPathPadding.default,
+            markerPadding: CHOREOGRAPHY_PAINT_FOOTPRINTS.route.activationMarkerPadding,
+            compactMarkerPadding:
+              CHOREOGRAPHY_PAINT_FOOTPRINTS.route.activationCompactMarkerPadding,
+            markerProgress: event.tokenId === "warrior_charge" ? 0.42 : undefined,
+            allowProtectedKeys: [...new Set(allowProtectedKeys)],
+            sourceProtectedKey: sourceProtectedKey ?? undefined,
+            targetProtectedKey: targetProtectedKey ?? undefined,
+          },
+          { pairKey },
+        );
+        if (event.tokenId === "warrior_charge") {
+          const ownershipAnchor = Object.freeze({
+            x: (event.source.x + event.target.x) / 2,
+            y: (event.source.y + event.target.y) / 2,
+          });
+          patches[eventIndex].ownershipAnchor = ownershipAnchor;
+          add(eventIndex, "ownership", 1, {
+            kind: "perimeter_callout",
+            anchor: ownershipAnchor,
+            recipientKey: pairKey,
+            width: CHOREOGRAPHY_PAINT_FOOTPRINTS.chargeOwnership.width,
+            height: CHOREOGRAPHY_PAINT_FOOTPRINTS.chargeOwnership.height,
+          });
+        }
+      }
+      continue;
+    }
+    if (
+      event.kind === "net_health" ||
+      event.kind === "regeneration" ||
+      event.kind === "status_lifecycle"
+    ) {
+      const dimensions = paintedOutcomeCueDimensions(event);
+      const recipientPresentationKey =
+        event.kind === "regeneration"
+          ? event.agentPresentationKey
+          : event.recipientPresentationKey;
+      add(eventIndex, "cue", 0, {
+        kind: "recipient_cue",
+        anchor: event.recipient,
+        anchorRadius: 60,
+        recipientKey: recipientPresentationKey ?? event.eventId,
+        allowProtectedKeys: protectedBodyKeys(surface, recipientPresentationKey),
+        ...dimensions,
+      });
+      continue;
+    }
+    if (event.kind === "rejected_action") {
+      add(eventIndex, "cue", 0, {
+        kind: "perimeter_callout",
+        anchor: event.actor,
+        recipientKey: event.actorPresentationKey ?? event.eventId,
+        allowProtectedKeys: protectedBodyKeys(surface, event.actorPresentationKey),
+        width: CHOREOGRAPHY_PAINT_FOOTPRINTS.rejection.width,
+        height: CHOREOGRAPHY_PAINT_FOOTPRINTS.rejection.height,
+      });
+      continue;
+    }
+    if (event.kind === "semantic_pulse") {
+      add(eventIndex, "cue", 0, {
+        kind: "perimeter_callout",
+        anchor: event.anchor,
+        recipientKey:
+          event.agentPresentationKey ??
+          (event.teamId ? `team:${event.teamId}` : event.eventId),
+        allowProtectedKeys: protectedBodyKeys(surface, event.agentPresentationKey),
+        ...semanticPulseCueDimensions(event),
+      });
+      continue;
+    }
+    if (event.kind === "charge_displacement") {
+      const targetProtectedKey = protectedBodyKey(surface, event.sourcePresentationKey);
+      const targetRadius = projectedAgentRadius(
+        surface,
+        sceneByKey,
+        event.sourcePresentationKey,
+      );
+      add(eventIndex, "start", 0, {
+        kind: "recipient_cue",
+        anchor: event.start,
+        anchorRadius: 20,
+        recipientKey: `${event.sourcePresentationKey}:charge`,
+        allowProtectedKeys: [],
+        width: CHOREOGRAPHY_PAINT_FOOTPRINTS.chargeDisplacement.start.width,
+        height: CHOREOGRAPHY_PAINT_FOOTPRINTS.chargeDisplacement.start.height,
+      });
+      add(eventIndex, "end", 1, {
+        kind: "recipient_cue",
+        anchor: event.end,
+        anchorRadius: 20,
+        recipientKey: `${event.sourcePresentationKey}:charge`,
+        allowProtectedKeys: protectedBodyKeys(surface, event.sourcePresentationKey),
+        width: CHOREOGRAPHY_PAINT_FOOTPRINTS.chargeDisplacement.end.width,
+        height: CHOREOGRAPHY_PAINT_FOOTPRINTS.chargeDisplacement.end.height,
+      });
+      const pairKey = JSON.stringify([
+        event.sourcePresentationKey,
+        event.start,
+        event.end,
+      ]);
+      add(
+        eventIndex,
+        "route",
+        2,
+        {
+          kind: "route",
+          source: event.start,
+          target: event.end,
+          sourceRadius: 0,
+          targetRadius: targetProtectedKey === null ? 0 : targetRadius,
+          sourceEndpointGap: 0,
+          targetEndpointGap: targetProtectedKey === null ? 0 : 3,
+          pathPadding: CHOREOGRAPHY_PAINT_FOOTPRINTS.route.chargePathPadding,
+          markerPadding: CHOREOGRAPHY_PAINT_FOOTPRINTS.route.chargeMarkerPadding,
+          markerProgress: 0.76,
+          allowProtectedKeys: targetProtectedKey === null ? [] : [targetProtectedKey],
+          targetProtectedKey: targetProtectedKey ?? undefined,
+        },
+        { pairKey },
+      );
+    }
+  }
+
+  if (requests.length === 0) {
+    return Object.freeze(events.map((event) => event));
+  }
+  if (!surface?.viewportBounds) {
+    return null;
+  }
+  const layout = layoutCrossPhaseOccupancy(
+    /** @type {any} */ ({
+      viewport: surface.viewportBounds,
+      protectedRects: crossPhaseProtectedRects(surface),
+      requests,
+    }),
+  );
+  const routeMultiplicity = new Map();
+  for (const binding of bindings.values()) {
+    if (binding.role === "route") {
+      routeMultiplicity.set(
+        binding.pairKey,
+        (routeMultiplicity.get(binding.pairKey) ?? 0) + 1,
+      );
+    }
+  }
+  const placements = /** @type {ReadonlyArray<Record<string, any>>} */ (
+    layout.placements
+  );
+  for (const placement of placements) {
+    const binding = bindings.get(placement.layoutKey);
+    if (!binding) {
+      throw new Error(`missing cross-phase binding ${placement.layoutKey}.`);
+    }
+    const patch = patches[binding.eventIndex];
+    if (binding.role === "route") {
+      Object.assign(patch, {
+        route: placement,
+        routeLayoutKey: placement.layoutKey,
+        routeLane: placement.lane,
+        routeBridgeGaps: placement.bridgeGaps,
+        routeMultiplicity: routeMultiplicity.get(binding.pairKey) ?? 1,
+      });
+      continue;
+    }
+    const cuePatch = {
+      [`${binding.role}Cue`]: placement.center,
+      [`${binding.role}Bounds`]: placement.bounds,
+      [`${binding.role}Leader`]: placement.leader,
+      [`${binding.role}Disposition`]: placement.disposition,
+      [`${binding.role}CueCollisionFree`]: placement.collisionFree,
+      [`${binding.role}LayoutKey`]: placement.layoutKey,
+    };
+    if (binding.role === "cue") {
+      Object.assign(patch, {
+        cue: placement.center,
+        cueBounds: placement.bounds,
+        cueLeader: placement.leader,
+        cueDisposition: placement.disposition,
+        cueCollisionFree: placement.collisionFree,
+        cueLayoutKey: placement.layoutKey,
+        spatialDisposition: "rendered",
+      });
+    } else if (binding.role === "start" || binding.role === "end") {
+      Object.assign(patch, {
+        [`${binding.role}Cue`]: placement.center,
+        [`${binding.role}CueBounds`]: placement.bounds,
+        [`${binding.role}CueLeader`]: placement.leader,
+        [`${binding.role}CueDisposition`]: placement.disposition,
+        [`${binding.role}CueCollisionFree`]: placement.collisionFree,
+        [`${binding.role}CueLayoutKey`]: placement.layoutKey,
+      });
+    } else if (binding.role === "ownership") {
+      Object.assign(patch, cuePatch, {
+        ownershipSpatialDisposition: "rendered",
+      });
+    } else {
+      Object.assign(patch, cuePatch);
+    }
+  }
+  return Object.freeze(
+    events.map((event, index) => Object.freeze({ ...event, ...patches[index] })),
   );
 }
 
@@ -1809,19 +1836,7 @@ function buildAuthorizedPresentationChoreographyPlan(
       }
       const source = authorizedSource;
       const target = authorizedTarget;
-      const route =
-        abilityEnabled && source && target && targetAgent
-          ? createRouteGeometry(
-              {
-                eventId: row.id,
-                source,
-                target,
-                sourceRadius: surface?.worldLengthToScreen(sourceAgent.radius) ?? 0,
-                targetRadius: surface?.worldLengthToScreen(targetAgent.radius) ?? 0,
-              },
-              surface?.viewportBounds ? { viewportBounds: surface.viewportBounds } : {},
-            )
-          : null;
+      const routed = Boolean(abilityEnabled && source && target && targetAgent);
       planned.push(
         Object.freeze({
           ...common,
@@ -1840,11 +1855,12 @@ function buildAuthorizedPresentationChoreographyPlan(
           targetDisclosure: targetKey === null ? "target_none" : "public",
           source,
           target,
-          route,
+          endpointPhase,
+          route: null,
           paintParts,
           spatial:
             (abilityEnabled && source !== null) || (semanticEnabled && target !== null),
-          presentationKind: route
+          presentationKind: routed
             ? "routed"
             : !abilityEnabled && semanticEnabled && target
               ? "target_only_impact"
@@ -1912,7 +1928,7 @@ function buildAuthorizedPresentationChoreographyPlan(
           lane,
           paintParts: paintDecision.paintParts,
           presentationSuppressed: !paintDecision.enabled,
-          spatial: lane !== null && lane < MAX_HEALTH_CUES_PER_RECIPIENT,
+          spatial: lane !== null,
           phaseStart: CHOREOGRAPHY_PHASES.v2HealthResolutionStart,
           phaseEnd: CHOREOGRAPHY_PHASES.v2CountdownAndRegenStart,
         }),
@@ -2185,18 +2201,17 @@ function buildAuthorizedPresentationChoreographyPlan(
     );
   }
   const paintFiltered = applyAuthorizedVisualFilters(planned, visualFilters);
-  const scheduled = scheduleChoreography(paintFiltered);
-  const netEvents = layoutOutcomeCues(scheduled.events, surface, "net_health");
-  const statusEvents = layoutOutcomeCues(netEvents, surface, "status_lifecycle");
-  const events = Object.freeze(
-    layoutOutcomeCues(statusEvents, surface, "regeneration").map((event) =>
-      Object.isFrozen(event) ? event : Object.freeze(event),
-    ),
-  );
+  const laidOut = layoutCrossPhaseEvents(paintFiltered, surface, sceneByKey);
+  if (laidOut === null) {
+    return null;
+  }
+  const scheduled = scheduleChoreography(laidOut);
+  const events = scheduled.events;
   const spatialEventCount = events.filter((event) => event.spatial).length;
-  const persistentEventCount = events.filter(
-    (event) => event.spatial && event.persistent,
-  ).length;
+  const persistentNodeUpperBound = events.reduce(
+    (count, event) => count + persistentEventNodeUpperBound(event),
+    0,
+  );
   return Object.freeze({
     epochKey: JSON.stringify([presentation.session_id, transitionId]),
     authorizationKey: JSON.stringify([
@@ -2214,9 +2229,35 @@ function buildAuthorizedPresentationChoreographyPlan(
     bounds: Object.freeze({
       nodes: Math.min(events.length * 28 + 2, 512),
       animations: Math.min(spatialEventCount * 3 + 2, 512),
-      persistentNodes: Math.min(persistentEventCount * 6, 64),
+      persistentNodes: Math.min(persistentNodeUpperBound, 512),
     }),
   });
+}
+
+/**
+ * Mirror the painter's maximum retained SVG shape for each planner-authored
+ * persistent event kind. Charge owns two roots, five foreground descendants,
+ * two route paths, and one backplate for every allocator-authored crossing.
+ * Persistent lifecycle and team-wave pulses own at most five nodes each.
+ *
+ * @param {Record<string, any>} event
+ */
+function persistentEventNodeUpperBound(event) {
+  if (!event.spatial || !event.persistent) {
+    return 0;
+  }
+  if (event.kind === "charge_displacement") {
+    const bridgeCount = Array.isArray(event.route?.bridgeGaps)
+      ? event.route.bridgeGaps.length
+      : 0;
+    return 9 + bridgeCount;
+  }
+  if (event.kind === "semantic_pulse") {
+    return 5;
+  }
+  throw new RangeError(
+    `unsupported persistent choreography event kind ${String(event.kind)}.`,
+  );
 }
 
 /**

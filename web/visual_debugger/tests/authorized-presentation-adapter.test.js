@@ -1484,6 +1484,8 @@ test("Oracle choreography exact-joins moving trajectories and presents successor
     charge.sourcePublicAgentId,
     oracleTrajectoryForClass(raw, 2).agent_public_agent_id,
   );
+  assert.ok(Array.isArray(charge.route?.bridgeGaps));
+  assert.equal(plan.bounds.persistentNodes, 9 + charge.route.bridgeGaps.length);
 
   const movement = plan.events[11];
   assert.equal(movement.eventType, "ordinary_movement_phase_displacement");
@@ -1498,6 +1500,163 @@ test("Oracle choreography exact-joins moving trajectories and presents successor
   assert.deepEqual(
     raw.latest_events.ordered_event_kinds,
     plan.events.map(({ eventType }) => eventType),
+  );
+});
+
+test("moving Warrior Charge activation does not claim successor body ownership", async () => {
+  const raw = movingOracleRaw();
+  oracleTrajectoryForClass(raw, 2).transition_start.position = [3.2, 3.4];
+  oracleTrajectoryForClass(raw, 4).transition_start.position = [16.8, 3.4];
+  installOracleEvents(raw, [
+    {
+      event_kind: "ability_activated",
+      ability_component: "ultimate",
+      source_anchor: oracleAnchor(raw, 2, "transition_start"),
+      recipient_anchor: oracleAnchor(raw, 4, "transition_start"),
+    },
+  ]);
+  /** @param {number} classId */
+  const successorBody = (classId) => {
+    const agent = raw.current_endpoint.scene.agents.find(
+      (/** @type {Record<string, any>} */ candidate) => candidate.class_id === classId,
+    );
+    assert.ok(agent);
+    const center = projectedTrajectoryPoint(raw, classId, "successor");
+    const extent = Number(agent.radius) * 10 + 3;
+    return Object.freeze({
+      layoutKey: `body:successor:${classId}`,
+      protectedKind: "body",
+      ownerPresentationKey: agent.presentation_key,
+      bounds: Object.freeze({
+        left: center.x - extent,
+        top: center.y - extent,
+        right: center.x + extent,
+        bottom: center.y + extent,
+        width: extent * 2,
+        height: extent * 2,
+      }),
+    });
+  };
+  const successorBodies = Object.freeze([successorBody(2), successorBody(4)]);
+  const movingSurface = Object.freeze({
+    ...surface,
+    protectedRects: Object.freeze([
+      ...successorBodies,
+      Object.freeze({
+        layoutKey: "durable:route-wall-top",
+        bounds: Object.freeze({
+          left: 120,
+          top: 0,
+          right: 145,
+          bottom: 30,
+          width: 25,
+          height: 30,
+        }),
+      }),
+      Object.freeze({
+        layoutKey: "durable:route-wall-bottom",
+        bounds: Object.freeze({
+          left: 120,
+          top: 38,
+          right: 145,
+          bottom: 200,
+          width: 25,
+          height: 162,
+        }),
+      }),
+    ]),
+  });
+  const frame = await normalizeAuthorizedPresentationFrameV1(raw);
+  const unobstructedPlan = buildChoreographyPlan(frame, surface);
+  assert.ok(unobstructedPlan);
+  const unobstructedActivation = unobstructedPlan.events[0];
+  const plan = buildChoreographyPlan(frame, movingSurface);
+  assert.ok(plan);
+  const activation = plan.events[0];
+  const startSource = projectedTrajectoryPoint(raw, 2, "transition_start");
+  const startTarget = projectedTrajectoryPoint(raw, 4, "transition_start");
+
+  assert.equal(activation.tokenId, "warrior_charge");
+  assert.equal(activation.endpointPhase, "transition_start");
+  assert.notDeepEqual(startSource, projectedTrajectoryPoint(raw, 2, "successor"));
+  assert.notDeepEqual(startTarget, projectedTrajectoryPoint(raw, 4, "successor"));
+  assert.equal(unobstructedActivation.route?.kind, "curve");
+  assert.deepEqual(unobstructedActivation.route?.start, startSource);
+  assert.deepEqual(unobstructedActivation.route?.end, startTarget);
+  assert.deepEqual(activation.source, startSource);
+  assert.deepEqual(activation.target, startTarget);
+  assert.equal(activation.route?.kind, "polyline");
+  assert.deepEqual(activation.route?.start, startSource);
+  assert.deepEqual(activation.route?.end, startTarget);
+});
+
+test("Charge displacement owns only its serialized successor endpoint body", async () => {
+  const raw = movingOracleRaw();
+  const trajectory = oracleTrajectoryForClass(raw, 2);
+  installOracleEvents(raw, [
+    {
+      event_kind: "charge_phase_displacement",
+      realized_displacement: [
+        trajectory.post_charge.position[0] - trajectory.transition_start.position[0],
+        trajectory.post_charge.position[1] - trajectory.transition_start.position[1],
+      ],
+      start_anchor: oracleAnchor(raw, 2, "transition_start"),
+      end_anchor: oracleAnchor(raw, 2, "post_charge"),
+    },
+  ]);
+  const sourceAgent = raw.current_endpoint.scene.agents.find(
+    (/** @type {Record<string, any>} */ candidate) => candidate.class_id === 2,
+  );
+  assert.ok(sourceAgent);
+  const scientificStart = projectedTrajectoryPoint(raw, 2, "transition_start");
+  const scientificEnd = projectedTrajectoryPoint(raw, 2, "successor");
+  const protectedExtent = Number(sourceAgent.radius) * 10 + 4;
+  const targetBounds = Object.freeze({
+    left: scientificEnd.x - protectedExtent,
+    top: scientificEnd.y - protectedExtent,
+    right: scientificEnd.x + protectedExtent,
+    bottom: scientificEnd.y + protectedExtent,
+    width: protectedExtent * 2,
+    height: protectedExtent * 2,
+  });
+  const targetProtectedKey = "durable:charge-successor-body";
+  const roleSurface = Object.freeze({
+    ...surface,
+    protectedRects: Object.freeze([
+      Object.freeze({
+        layoutKey: targetProtectedKey,
+        protectedKind: "body",
+        ownerPresentationKey: sourceAgent.presentation_key,
+        bounds: targetBounds,
+      }),
+    ]),
+  });
+  const frame = await normalizeAuthorizedPresentationFrameV1(raw);
+  const plan = buildChoreographyPlan(frame, roleSurface);
+  assert.ok(plan);
+  const displacement = plan.events[0];
+
+  assert.equal(displacement.kind, "charge_displacement");
+  assert.deepEqual(displacement.start, scientificStart);
+  assert.deepEqual(displacement.end, scientificEnd);
+  assert.ok(displacement.route);
+  assert.deepEqual(displacement.route.start, scientificStart);
+  assert.notDeepEqual(displacement.route.end, scientificEnd);
+  assert.equal(
+    displacement.route.end.x >= targetBounds.left - 1e-9 &&
+      displacement.route.end.x <= targetBounds.right + 1e-9 &&
+      displacement.route.end.y >= targetBounds.top - 1e-9 &&
+      displacement.route.end.y <= targetBounds.bottom + 1e-9,
+    true,
+  );
+  assert.ok(
+    Math.abs(
+      Math.hypot(
+        displacement.route.end.x - scientificEnd.x,
+        displacement.route.end.y - scientificEnd.y,
+      ) -
+        (Number(sourceAgent.radius) * 10 + 3),
+    ) <= 1e-9,
   );
 });
 
@@ -1555,9 +1714,9 @@ test("combat reset stays feed-only while successor regeneration cues pack determ
   const frame = await normalizeAuthorizedPresentationFrameV1(raw);
   const protectedRect = Object.freeze({
     left: 0,
-    top: 0,
+    top: 100,
     right: 100,
-    bottom: 100,
+    bottom: 200,
     width: 100,
     height: 100,
   });
@@ -1623,6 +1782,47 @@ test("combat reset stays feed-only while successor regeneration cues pack determ
     true,
   );
   assert.ok(regenerations[0].phaseEnd <= status.phaseStart);
+});
+
+test("regeneration cue leaders allow only their exact protected agent body", async () => {
+  const raw = movingOracleRaw();
+  installOracleEvents(raw, [
+    {
+      event_kind: "health_regenerated",
+      agent_anchor: oracleAnchor(raw, 4, "transition_start"),
+      actual_health_regenerated: 4,
+    },
+  ]);
+  const frame = await normalizeAuthorizedPresentationFrameV1(raw);
+  const trajectory = oracleTrajectoryForClass(raw, 4);
+  const anchor = projectedTrajectoryPoint(raw, 4, "successor");
+  const bodyBounds = Object.freeze({
+    left: anchor.x - 17,
+    top: anchor.y - 17,
+    right: anchor.x + 17,
+    bottom: anchor.y + 17,
+    width: 34,
+    height: 34,
+  });
+  const protectedSurface = Object.freeze({
+    ...surface,
+    protectedRects: Object.freeze([
+      Object.freeze({
+        layoutKey: JSON.stringify(["body", trajectory.agent_presentation_key]),
+        protectedKind: "body",
+        ownerPresentationKey: trajectory.agent_presentation_key,
+        bounds: bodyBounds,
+      }),
+    ]),
+  });
+
+  const plan = buildChoreographyPlan(frame, protectedSurface);
+  assert.ok(plan);
+  const regeneration = plan.events.find((event) => event.kind === "regeneration");
+  assert.ok(regeneration);
+  assert.deepEqual(regeneration.recipient, anchor);
+  assert.deepEqual(regeneration.cueLeader?.start, anchor);
+  assert.equal(regeneration.cueCollisionFree, true);
 });
 
 test("Oracle lifecycle cues retain successor and strict team-anchor authority", async () => {
@@ -1729,7 +1929,7 @@ test("Oracle lifecycle cues retain successor and strict team-anchor authority", 
   assert.equal(respawn.agentPresentationKey, respawnAnchor.presentation_key);
   assert.equal(respawn.agentPublicAgentId, respawnAnchor.public_agent_id);
   assert.equal(respawn.phaseEnd, plan.phases.total);
-  assert.equal(plan.bounds.persistentNodes, 24);
+  assert.equal(plan.bounds.persistentNodes, 20);
 });
 
 test("NoShared and Shared authorized clocks never synthesize a respawn wave", async () => {
@@ -1974,7 +2174,7 @@ test("Oracle status compositor applies exact precedence and preserves every atom
   }
 });
 
-test("status groups keep first-atomic plan and layout order when precedence favors a later group", async () => {
+test("status groups keep first-atomic plan order and receive collision-safe global layout when precedence favors a later group", async () => {
   const raw = structuredClone(fixture.presentations.replay_oracle);
   const events = [
     oracleStatusEvent(raw, "status_applied", { channel: 8, sourceClass: 5 }),
@@ -2033,13 +2233,32 @@ test("status groups keep first-atomic plan and layout order when precedence favo
   const laterReapplication = plan.events[1];
   assert.ok(earlierApply.cue);
   assert.ok(laterReapplication.cue);
-  assert.ok(Math.abs(earlierApply.cue.x - earlierApply.recipient.x) < 1e-9);
-  assert.ok(Math.abs(earlierApply.recipient.y - earlierApply.cue.y - 42) < 1e-9);
+  assert.ok(earlierApply.cueBounds);
+  assert.ok(laterReapplication.cueBounds);
+  assert.equal(earlierApply.cueCollisionFree, true);
+  assert.equal(laterReapplication.cueCollisionFree, true);
   assert.equal(
-    Math.abs(laterReapplication.cue.x - (laterReapplication.recipient.x + 42)) < 1e-9 &&
-      Math.abs(laterReapplication.cue.y - laterReapplication.recipient.y) < 1e-9,
-    false,
+    earlierApply.cueLayoutKey,
+    JSON.stringify(["event", incomingRows[0].id, "cue"]),
   );
+  assert.equal(
+    laterReapplication.cueLayoutKey,
+    JSON.stringify(["event", incomingRows[2].id, "cue"]),
+  );
+  const cueDistance = (/** @type {Record<string, any>} */ event) =>
+    Math.hypot(event.cue.x - event.recipient.x, event.cue.y - event.recipient.y);
+  assert.ok(cueDistance(earlierApply) < cueDistance(laterReapplication));
+  const overlapWidth = Math.max(
+    0,
+    Math.min(earlierApply.cueBounds.right, laterReapplication.cueBounds.right) -
+      Math.max(earlierApply.cueBounds.left, laterReapplication.cueBounds.left),
+  );
+  const overlapHeight = Math.max(
+    0,
+    Math.min(earlierApply.cueBounds.bottom, laterReapplication.cueBounds.bottom) -
+      Math.max(earlierApply.cueBounds.top, laterReapplication.cueBounds.top),
+  );
+  assert.equal(overlapWidth * overlapHeight, 0);
 });
 
 test("durable current status without an atomic status event creates no lifecycle cue", async () => {

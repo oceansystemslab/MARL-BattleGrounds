@@ -93,6 +93,7 @@ class FakePainter {
    *   persistentOnly: boolean,
    *   retainTransientOnSettle?: boolean,
    *   motionMode: "normal" | "reduced" | "off",
+   *   renderPolicy: "live_once" | "replay_animated" | "replay_static",
    * }} options
    */
   install(plan, surface, options) {
@@ -292,24 +293,34 @@ test("same transition renders once and resize reprojects without replay", async 
 test("presentation controls forward the same visual-filter state to planning", () => {
   const painter = new FakePainter();
   const visualFilters = Object.freeze({ synthetic_filter: false });
-  /** @type {Array<[string | undefined, Record<string, boolean> | undefined]>} */
+  /** @type {Array<[
+   *   string | undefined,
+   *   Record<string, boolean> | undefined,
+   *   string | undefined,
+   * ]>} */
   const received = [];
   const controller = new CombatChoreographer({
     painter,
     animationFactory: new FakeAnimationFactory(),
-    planBuilder(frame, surface, filters) {
-      received.push([surface?.viewportKey, filters]);
+    planBuilder(frame, surface, filters, renderPolicy) {
+      received.push([surface?.viewportKey, filters, renderPolicy]);
       return /** @type {any} */ (frame).plan;
     },
   });
   const current = plan("epoch-filter-forwarding");
 
-  controller.presentFrame({ plan: current }, surfaceA, { visualFilters });
-  controller.reproject({ plan: current }, surfaceB, { visualFilters });
+  controller.presentFrame({ plan: current }, surfaceA, {
+    renderPolicy: "live_once",
+    visualFilters,
+  });
+  controller.reproject({ plan: current }, surfaceB, {
+    renderPolicy: "live_once",
+    visualFilters,
+  });
 
   assert.deepEqual(received, [
-    [surfaceA.viewportKey, visualFilters],
-    [surfaceB.viewportKey, visualFilters],
+    [surfaceA.viewportKey, visualFilters, "live_once"],
+    [surfaceB.viewportKey, visualFilters, "live_once"],
   ]);
 });
 
@@ -383,6 +394,7 @@ test("live paint-only changes settle locally without replay or ledger mutation",
     const install = painter.calls.at(-2);
     assert.deepEqual(install?.[3], {
       motionMode: "normal",
+      renderPolicy: "live_once",
       settled: true,
       persistentOnly: true,
     });
@@ -416,7 +428,7 @@ test("replay paint-only changes pause and reinstall the current static summary",
     "paint-filtered",
   );
   controller.presentFrame({ viewer_mode: "replay", plan: allOn }, surfaceA, {
-    animateIncoming: true,
+    renderPolicy: "replay_animated",
   });
   const createdCount = animationFactory.created.length;
   const recordedCount = recordCount;
@@ -424,7 +436,7 @@ test("replay paint-only changes pause and reinstall the current static summary",
   for (const nextPlan of [filtered, allOn]) {
     const callCount = painter.calls.length;
     controller.presentFrame({ viewer_mode: "replay", plan: nextPlan }, surfaceA, {
-      animateIncoming: true,
+      renderPolicy: "replay_animated",
     });
     assert.deepEqual(
       painter.calls.slice(callCount).map(([kind]) => kind),
@@ -433,18 +445,27 @@ test("replay paint-only changes pause and reinstall the current static summary",
     const install = painter.calls.at(-2);
     assert.deepEqual(install?.[3], {
       motionMode: "normal",
+      renderPolicy: "replay_static",
       settled: true,
       persistentOnly: false,
       retainTransientOnSettle: true,
     });
     assert.equal(animationFactory.created.length, createdCount);
     assert.equal(recordCount, recordedCount);
-    assert.equal(ledger.fingerprintFor(allOn.epochKey), allOn.fingerprint);
+    assert.equal(ledger.fingerprintFor(allOn.epochKey), null);
     assert.equal(controller.snapshot().paintKey, nextPlan.paintKey);
     assert.equal(controller.snapshot().paused, true);
     assert.equal(controller.snapshot().animationCount, 0);
     assert.equal(controller.snapshot().submissionBlocked, false);
   }
+  controller.presentFrame(
+    { viewer_mode: "replay", plan: plan("epoch-paint-replay-next") },
+    surfaceA,
+    { renderPolicy: "replay_animated" },
+  );
+  assert.equal(controller.snapshot().renderPolicy, "replay_animated");
+  assert.equal(controller.snapshot().paused, false);
+  assert.ok(controller.snapshot().animationCount > 0);
 });
 
 test("new transitions replace once and absent batches clear", () => {
@@ -550,7 +571,7 @@ test("replay animates only response-authorized incoming frames and exposes settl
       plan: plan("replay-direct-get"),
     },
     surfaceA,
-    { animateIncoming: false },
+    { renderPolicy: "replay_static" },
   );
   const settledInstall = settled.painter.calls.find(([kind]) => kind === "install");
   assert.ok(settledInstall);
@@ -565,7 +586,7 @@ test("replay animates only response-authorized incoming frames and exposes settl
       plan: plan("replay-exact-next"),
     },
     surfaceA,
-    { animateIncoming: true },
+    { renderPolicy: "replay_animated" },
   );
   assert.ok(animated.controller.snapshot().animationCount > 0);
   let didSettle = false;
@@ -587,20 +608,82 @@ test("replay animates only response-authorized incoming frames and exposes settl
       plan: plan("replay-scientific-input-cannot-authorize"),
     },
     surfaceA,
+    { renderPolicy: "replay_static" },
   );
   assert.equal(scientificInputCannotAuthorize.controller.snapshot().animationCount, 0);
+});
+
+test("explicit replay policies bypass consumption and static uses zero clocks", () => {
+  let lookupCount = 0;
+  let recordCount = 0;
+  const forbiddenReplayLedger = /** @type {any} */ ({
+    fingerprintFor() {
+      lookupCount += 1;
+      throw new Error("replay consulted the consumed ledger");
+    },
+    record() {
+      recordCount += 1;
+      throw new Error("replay mutated the consumed ledger");
+    },
+  });
+
+  const animated = harness({ ledger: forbiddenReplayLedger });
+  animated.controller.presentFrame({ plan: plan("policy-replay-animated") }, surfaceA, {
+    renderPolicy: "replay_animated",
+  });
+  assert.equal(animated.controller.snapshot().renderPolicy, "replay_animated");
+  assert.ok(animated.controller.snapshot().animationCount > 0);
+  assert.deepEqual(animated.painter.calls[0]?.[3], {
+    motionMode: "normal",
+    renderPolicy: "replay_animated",
+    settled: false,
+    persistentOnly: false,
+  });
+
+  const staticSummary = harness({ ledger: forbiddenReplayLedger });
+  staticSummary.controller.presentFrame(
+    { plan: plan("policy-replay-static") },
+    surfaceA,
+    { renderPolicy: "replay_static" },
+  );
+  const firstInstallCount = staticSummary.painter.calls.filter(
+    ([kind]) => kind === "install",
+  ).length;
+  staticSummary.controller.presentFrame(
+    { plan: plan("policy-replay-static") },
+    surfaceA,
+    { renderPolicy: "replay_static" },
+  );
+  assert.deepEqual(staticSummary.painter.calls[0]?.[3], {
+    motionMode: "normal",
+    renderPolicy: "replay_static",
+    settled: true,
+    persistentOnly: false,
+    retainTransientOnSettle: true,
+  });
+  assert.equal(staticSummary.animationFactory.created.length, 0);
+  assert.equal(
+    staticSummary.painter.calls.filter(([kind]) => kind === "install").length,
+    firstInstallCount,
+  );
+  assert.equal(staticSummary.controller.snapshot().logicalTime, 0);
+  assert.equal(staticSummary.controller.snapshot().animationCount, 0);
+  assert.equal(staticSummary.controller.snapshot().renderPolicy, "replay_static");
+  assert.equal(staticSummary.controller.snapshot().paused, true);
+  assert.equal(lookupCount, 0);
+  assert.equal(recordCount, 0);
 });
 
 test("a direct replay refresh settles an in-flight presentation of the same epoch", () => {
   const { controller } = harness();
   const replayPlan = plan("replay-refresh");
   controller.presentFrame({ viewer_mode: "replay", plan: replayPlan }, surfaceA, {
-    animateIncoming: true,
+    renderPolicy: "replay_animated",
   });
   assert.ok(controller.snapshot().animationCount > 0);
 
   controller.presentFrame({ viewer_mode: "replay", plan: replayPlan }, surfaceA, {
-    animateIncoming: false,
+    renderPolicy: "replay_static",
   });
 
   assert.equal(controller.snapshot().animationCount, 0);
@@ -612,7 +695,7 @@ test("reproject fallbacks preserve explicit replay intent and otherwise fail set
   animated.controller.reproject(
     { viewer_mode: "replay", plan: plan("replay-reproject-authorized") },
     surfaceA,
-    { animateIncoming: true },
+    { renderPolicy: "replay_animated" },
   );
   assert.ok(animated.controller.snapshot().animationCount > 0);
 
@@ -624,6 +707,7 @@ test("reproject fallbacks preserve explicit replay intent and otherwise fail set
       plan: plan("replay-reproject-default"),
     },
     surfaceA,
+    { renderPolicy: "replay_static" },
   );
   assert.equal(settled.controller.snapshot().animationCount, 0);
   assert.equal(settled.controller.snapshot().submissionBlocked, false);
@@ -704,6 +788,7 @@ test("switching an active explanation Off reinstalls the authorized batch until 
       surfaceA.viewportKey,
       {
         motionMode: "off",
+        renderPolicy: "live_once",
         settled: false,
         persistentOnly: false,
       },
@@ -720,6 +805,7 @@ test("switching an active explanation Off reinstalls the authorized batch until 
     authorizationKey: "researcher",
     fingerprint: "authorized-events",
     paintKey: "visual-filters-v1:all-on",
+    renderPolicy: "live_once",
     logicalTime: 0,
     motionMode: "off",
     paused: false,

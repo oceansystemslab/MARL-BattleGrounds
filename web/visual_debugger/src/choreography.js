@@ -6,6 +6,7 @@ const MAX_ACTIVE_ANIMATIONS = 512;
 
 /**
  * @typedef {"normal" | "reduced" | "off"} MotionMode
+ * @typedef {"live_once" | "replay_animated" | "replay_static"} RenderPolicy
  * @typedef {{
  *   element: Element,
  *   keyframes: Keyframe[] | PropertyIndexedKeyframes,
@@ -182,6 +183,7 @@ export class CombatChoreographer {
    *       surface: ChoreographySurface,
    *       options: {
    *         motionMode: MotionMode,
+   *         renderPolicy: RenderPolicy,
    *         settled: boolean,
    *         persistentOnly: boolean,
    *         retainTransientOnSettle?: boolean,
@@ -199,6 +201,7 @@ export class CombatChoreographer {
    *     frame: unknown,
    *     surface: ChoreographySurface | null,
    *     visualFilters?: Record<string, boolean>,
+   *     renderPolicy?: RenderPolicy,
    *   ) => Record<string, any> | null,
    *   animationFactory?: AnimationFactory,
    *   ledger?: ConsumedTransitionLedger,
@@ -227,6 +230,8 @@ export class CombatChoreographer {
     this.generation = 0;
     /** @type {Record<string, any> | null} */
     this.plan = null;
+    /** @type {RenderPolicy | null} */
+    this.renderPolicy = null;
     /** @type {ChoreographySurface | null} */
     this.surface = null;
     /** @type {ChoreographyInstallation | null} */
@@ -249,6 +254,7 @@ export class CombatChoreographer {
       authorizationKey: this.plan?.authorizationKey ?? null,
       fingerprint: this.plan?.fingerprint ?? null,
       paintKey: this.plan?.paintKey ?? null,
+      renderPolicy: this.renderPolicy,
       logicalTime: this.logicalTime,
       motionMode: this.motionMode,
       paused: this.paused,
@@ -277,13 +283,22 @@ export class CombatChoreographer {
    * @param {unknown} frame
    * @param {ChoreographySurface | null} surface
    * @param {{
-   *   animateIncoming?: boolean,
+   *   renderPolicy?: RenderPolicy,
    *   visualFilters?: Record<string, boolean>,
    * }} [presentationControl]
    */
   presentFrame(frame, surface, presentationControl = {}) {
-    const nextPlan = surface
-      ? this.planBuilder(frame, surface, presentationControl.visualFilters)
+    const requestedPolicy = normalizeRenderPolicy(
+      presentationControl.renderPolicy ?? "live_once",
+    );
+    const initialPolicy = requestedPolicy;
+    let nextPlan = surface
+      ? this.planBuilder(
+          frame,
+          surface,
+          presentationControl.visualFilters,
+          initialPolicy,
+        )
       : null;
     if (!nextPlan || !surface) {
       this.clear("absent_scene_or_event_batch");
@@ -296,40 +311,58 @@ export class CombatChoreographer {
       currentPlan?.authorizationKey === nextPlan.authorizationKey;
     const sameFingerprint = currentPlan?.fingerprint === nextPlan.fingerprint;
     const samePaint = currentPlan?.paintKey === nextPlan.paintKey;
-    const replayMustSettle =
-      isRecord(frame) &&
-      frame.viewer_mode === "replay" &&
-      presentationControl.animateIncoming !== true;
+    const replayPaintChange =
+      sameEpoch &&
+      sameAuthorization &&
+      sameFingerprint &&
+      !samePaint &&
+      isReplayPolicy(initialPolicy);
+    const stickyStatic =
+      sameEpoch &&
+      this.renderPolicy === "replay_static" &&
+      requestedPolicy === "replay_animated";
+    const nextPolicy =
+      replayPaintChange || stickyStatic ? "replay_static" : initialPolicy;
+    if (nextPolicy !== initialPolicy) {
+      const policyPlan = this.planBuilder(
+        frame,
+        surface,
+        presentationControl.visualFilters,
+        nextPolicy,
+      );
+      if (!samePlanIdentity(nextPlan, policyPlan)) {
+        throw new Error("render policy changed the authorized plan identity.");
+      }
+      nextPlan = policyPlan;
+    }
+    const samePolicy = this.renderPolicy === nextPolicy;
 
-    if (sameEpoch && sameAuthorization && sameFingerprint && samePaint) {
+    if (sameEpoch && sameAuthorization && sameFingerprint && samePaint && samePolicy) {
       if (this.surface?.viewportKey !== surface.viewportKey && this.installation) {
         this.painter.reproject(this.installation, nextPlan, surface);
       }
       this.plan = nextPlan;
       this.surface = surface;
-      if (replayMustSettle && !this.#isSettled()) {
-        return this.skip();
-      }
       this.#publish();
       return this.snapshot();
     }
 
     if (sameEpoch && sameAuthorization && sameFingerprint && !samePaint) {
-      const replayPaintChange = isRecord(frame) && frame.viewer_mode === "replay";
-      // Paint controls are local presentation state. Rebuild the same replay
-      // epoch as a static, paused summary; live mode settles the current
-      // explanation and applies transient paint changes only to future epochs.
-      if (replayPaintChange) {
-        this.paused = true;
-      }
       this.#clearOwned("visual_filters_changed");
       this.plan = nextPlan;
       this.surface = surface;
-      this.#install(nextPlan, surface, {
-        settled: true,
-        persistentOnly: !replayPaintChange,
-        retainTransientOnSettle: replayPaintChange,
+      this.#installForPolicy(nextPlan, surface, nextPolicy, {
+        liveSafeRebuild: true,
       });
+      this.#publish();
+      return this.snapshot();
+    }
+
+    if (sameEpoch && sameAuthorization && sameFingerprint && !samePolicy) {
+      this.#clearOwned("render_policy_changed");
+      this.plan = nextPlan;
+      this.surface = surface;
+      this.#installForPolicy(nextPlan, surface, nextPolicy);
       this.#publish();
       return this.snapshot();
     }
@@ -339,25 +372,26 @@ export class CombatChoreographer {
       this.#clearOwned("authorization_or_disclosure_changed");
       this.plan = nextPlan;
       this.surface = surface;
-      this.#install(nextPlan, surface, {
-        settled: true,
-        persistentOnly: true,
+      this.#installForPolicy(nextPlan, surface, nextPolicy, {
+        liveSafeRebuild: true,
       });
-      this.ledger.record(nextPlan.epochKey, nextPlan.fingerprint);
+      if (nextPolicy === "live_once") {
+        this.ledger.record(nextPlan.epochKey, nextPlan.fingerprint);
+      }
       this.#publish();
       return this.snapshot();
     }
 
-    const consumedFingerprint = this.ledger.fingerprintFor(nextPlan.epochKey);
+    const consumedFingerprint =
+      nextPolicy === "live_once" ? this.ledger.fingerprintFor(nextPlan.epochKey) : null;
     const alreadyConsumed = consumedFingerprint !== null;
     this.#clearOwned("new_transition");
     this.plan = nextPlan;
     this.surface = surface;
-    this.#install(nextPlan, surface, {
-      settled: alreadyConsumed || replayMustSettle,
-      persistentOnly: alreadyConsumed || replayMustSettle,
+    this.#installForPolicy(nextPlan, surface, nextPolicy, {
+      liveSafeRebuild: alreadyConsumed,
     });
-    if (consumedFingerprint !== nextPlan.fingerprint) {
+    if (nextPolicy === "live_once" && consumedFingerprint !== nextPlan.fingerprint) {
       this.ledger.record(nextPlan.epochKey, nextPlan.fingerprint);
     }
     this.#publish();
@@ -370,7 +404,7 @@ export class CombatChoreographer {
    * @param {unknown} frame
    * @param {ChoreographySurface | null} surface
    * @param {{
-   *   animateIncoming?: boolean,
+   *   renderPolicy?: RenderPolicy,
    *   visualFilters?: Record<string, boolean>,
    * }} [presentationControl]
    */
@@ -378,10 +412,14 @@ export class CombatChoreographer {
     if (!surface || !this.installation || !this.plan) {
       return this.presentFrame(frame, surface, presentationControl);
     }
-    const nextPlan = this.planBuilder(
+    const requestedPolicy = normalizeRenderPolicy(
+      presentationControl.renderPolicy ?? "live_once",
+    );
+    let nextPlan = this.planBuilder(
       frame,
       surface,
       presentationControl.visualFilters,
+      requestedPolicy,
     );
     if (
       !nextPlan ||
@@ -391,6 +429,27 @@ export class CombatChoreographer {
       nextPlan.paintKey !== this.plan.paintKey
     ) {
       return this.presentFrame(frame, surface, presentationControl);
+    }
+    const nextPolicy =
+      this.renderPolicy === "replay_static" && requestedPolicy === "replay_animated"
+        ? "replay_static"
+        : requestedPolicy;
+    if (nextPolicy !== this.renderPolicy) {
+      return this.presentFrame(frame, surface, {
+        ...presentationControl,
+        renderPolicy: nextPolicy,
+      });
+    }
+    if (nextPolicy !== requestedPolicy) {
+      nextPlan = this.planBuilder(
+        frame,
+        surface,
+        presentationControl.visualFilters,
+        nextPolicy,
+      );
+      if (!samePlanIdentity(this.plan, nextPlan)) {
+        return this.presentFrame(frame, surface, presentationControl);
+      }
     }
     this.painter.reproject(this.installation, nextPlan, surface);
     this.plan = nextPlan;
@@ -448,6 +507,7 @@ export class CombatChoreographer {
       this.paused = false;
       this.#clearOwned("motion_disabled_static_reinstall");
       this.#install(plan, surface, {
+        renderPolicy: this.renderPolicy ?? "live_once",
         settled: false,
         persistentOnly: false,
       });
@@ -485,6 +545,7 @@ export class CombatChoreographer {
   clear(reason = "explicit_clear") {
     this.#clearOwned(reason);
     this.plan = null;
+    this.renderPolicy = null;
     this.surface = null;
     this.logicalTime = 0;
     this.#publish();
@@ -498,7 +559,35 @@ export class CombatChoreographer {
   /**
    * @param {Record<string, any>} plan
    * @param {ChoreographySurface} surface
+   * @param {RenderPolicy} renderPolicy
+   * @param {{liveSafeRebuild?: boolean}} [options]
+   */
+  #installForPolicy(plan, surface, renderPolicy, options = {}) {
+    if (renderPolicy === "replay_static") {
+      this.paused = true;
+      this.#install(plan, surface, {
+        renderPolicy,
+        settled: true,
+        persistentOnly: false,
+        retainTransientOnSettle: true,
+      });
+      return;
+    }
+    this.paused = false;
+    const liveSafeRebuild =
+      renderPolicy === "live_once" && options.liveSafeRebuild === true;
+    this.#install(plan, surface, {
+      renderPolicy,
+      settled: liveSafeRebuild,
+      persistentOnly: liveSafeRebuild,
+    });
+  }
+
+  /**
+   * @param {Record<string, any>} plan
+   * @param {ChoreographySurface} surface
    * @param {{
+   *   renderPolicy: RenderPolicy,
    *   settled: boolean,
    *   persistentOnly: boolean,
    *   retainTransientOnSettle?: boolean,
@@ -509,12 +598,14 @@ export class CombatChoreographer {
     const settled = Boolean(options.settled);
     /** @type {{
      *   motionMode: MotionMode,
+     *   renderPolicy: RenderPolicy,
      *   settled: boolean,
      *   persistentOnly: boolean,
      *   retainTransientOnSettle?: boolean,
      * }} */
     const painterOptions = {
       motionMode: this.motionMode,
+      renderPolicy: options.renderPolicy,
       settled,
       persistentOnly,
     };
@@ -563,7 +654,13 @@ export class CombatChoreographer {
       throw new RangeError("choreography painter exceeded the animation bound.");
     }
     this.installation = installation;
-    this.logicalTime = settled ? Number(plan.phases?.total ?? 0) : 0;
+    this.renderPolicy = options.renderPolicy;
+    this.logicalTime =
+      options.renderPolicy === "replay_static"
+        ? 0
+        : settled
+          ? Number(plan.phases?.total ?? 0)
+          : 0;
     if (settled || persistentOnly) {
       this.painter.settle(installation);
       this.submissionBlocked = false;
@@ -723,6 +820,41 @@ export class CombatChoreographer {
  */
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * @param {unknown} value
+ * @returns {RenderPolicy}
+ */
+function normalizeRenderPolicy(value) {
+  if (
+    value === "live_once" ||
+    value === "replay_animated" ||
+    value === "replay_static"
+  ) {
+    return value;
+  }
+  throw new RangeError(`unknown render policy ${String(value)}.`);
+}
+
+/** @param {RenderPolicy} policy */
+function isReplayPolicy(policy) {
+  return policy === "replay_animated" || policy === "replay_static";
+}
+
+/**
+ * @param {Record<string, any>} first
+ * @param {unknown} second
+ * @returns {second is Record<string, any>}
+ */
+function samePlanIdentity(first, second) {
+  return (
+    isRecord(second) &&
+    second.epochKey === first.epochKey &&
+    second.authorizationKey === first.authorizationKey &&
+    second.fingerprint === first.fingerprint &&
+    second.paintKey === first.paintKey
+  );
 }
 
 /**

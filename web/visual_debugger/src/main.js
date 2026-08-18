@@ -555,7 +555,6 @@ const choreographer = new CombatChoreographer({
   onStateChange: (presentation) => {
     exposePresentationState(presentation);
     renderCommandAvailability();
-    syncCompactActiveCombatPriority(presentation);
   },
 });
 
@@ -1495,27 +1494,34 @@ function applyVisualFilterAction(action) {
 }
 
 /**
- * Carry replay animation intent beside, never inside, the authorized scientific
- * presentation. Only the currently installed branded pair may authorize a
- * transient replay of its incoming transition.
+ * Derive the presentation-only choreography policy from the coherent installed
+ * product and transport pair. Scientific presentation data never selects how
+ * its own events animate.
  *
  * @param {unknown} presentation
  * @param {typeof visualFilterState} visualFilters
  * @returns {Readonly<{
- *   animateIncoming: boolean,
+ *   renderPolicy: "live_once" | "replay_animated" | "replay_static",
  *   visualFilters: typeof visualFilterState,
  * }>}
  */
 function installedChoreographyControl(presentation, visualFilters) {
   const authority = state.authority;
+  const coherentInstalledPair =
+    isAuthorizedPresentationFrame(presentation) &&
+    isJoinedTransportAndAuthorizedPresentationV1(authority) &&
+    authority.presentation === presentation &&
+    authority.transport === state.frame;
+  const replayInstalled =
+    coherentInstalledPair &&
+    isReplayMode() &&
+    authority.transport.viewer_mode === "replay";
   return Object.freeze({
-    animateIncoming:
-      isAuthorizedPresentationFrame(presentation) &&
-      isJoinedTransportAndAuthorizedPresentationV1(authority) &&
-      authority.presentation === presentation &&
-      authority.transport === state.frame &&
-      authority.transport.viewer_mode === "replay" &&
-      authority.transport.animate_incoming === true,
+    renderPolicy: replayInstalled
+      ? authority.transport.animate_incoming === true
+        ? "replay_animated"
+        : "replay_static"
+      : "live_once",
     visualFilters,
   });
 }
@@ -2666,6 +2672,11 @@ function renderCommandAvailability() {
 function exposePresentationState(presentation) {
   document.documentElement.dataset.motionMode = presentation.motionMode;
   document.documentElement.dataset.motionPaused = String(presentation.paused);
+  if (presentation.renderPolicy === null) {
+    document.documentElement.removeAttribute("data-render-policy");
+  } else {
+    document.documentElement.dataset.renderPolicy = presentation.renderPolicy;
+  }
   document.documentElement.dataset.submissionBlocked = String(
     presentation.submissionBlocked,
   );
@@ -2885,6 +2896,10 @@ function render() {
   const presentationFrame = installed?.presentation ?? null;
   const transportFrame = installed?.transport ?? null;
   const visualFilterSnapshot = visualFilterState;
+  const choreographyControl = installedChoreographyControl(
+    presentationFrame,
+    visualFilterSnapshot,
+  );
   renderVisualFilterControls(visualFilterSnapshot);
   renderConnection();
   renderSessionToolbar(installed);
@@ -2894,6 +2909,7 @@ function render() {
     localInspectedPresentationKey:
       installedLocalInspectedPresentationKey(presentationFrame),
     visualFilterState: visualFilterSnapshot,
+    renderPolicy: choreographyControl.renderPolicy,
   });
   applyBattlefieldBoundaryCopy();
   installAuthorizedAgentActivation();
@@ -2902,7 +2918,7 @@ function render() {
     choreographer.presentFrame(
       presentationFrame,
       battlefieldRenderer.choreographySurface(),
-      installedChoreographyControl(presentationFrame, visualFilterSnapshot),
+      choreographyControl,
     );
   } catch (error) {
     choreographer.clear("presentation_error");
@@ -2931,40 +2947,6 @@ function render() {
   restorePresentationPreferenceAfterRender();
 }
 
-/**
- * On the supported minimum battlefield, accepted combat truth temporarily
- * outranks analysis decoration. The choreography controller remains the only
- * presentation clock; this adapter merely mirrors its active-animation state
- * into the durable SVG renderer and reprojects retained effects when the set of
- * protected rectangles changes.
- *
- * @param {ReturnType<CombatChoreographer["snapshot"]>} presentation
- */
-function syncCompactActiveCombatPriority(presentation) {
-  const changed = battlefieldRenderer.setCompactActiveCombat(
-    presentation.active && presentation.animationCount > 0,
-  );
-  if (!changed || !presentation.active || !state.presentation) {
-    return;
-  }
-  const visualFilterSnapshot = visualFilterState;
-  try {
-    choreographer.reproject(
-      state.presentation,
-      battlefieldRenderer.choreographySurface(),
-      installedChoreographyControl(state.presentation, visualFilterSnapshot),
-    );
-  } catch (error) {
-    setNotice(
-      error instanceof Error
-        ? `Compact combat presentation failed to reproject: ${error.message}`
-        : "Compact combat presentation failed to reproject.",
-      "error",
-    );
-    renderConnection();
-  }
-}
-
 function battlefieldSizeKey() {
   return `${Math.round(elements.battlefield.clientWidth)}x${Math.round(elements.battlefield.clientHeight)}`;
 }
@@ -2983,12 +2965,17 @@ function scheduleBattlefieldResize() {
     capturePresentationPreferenceBeforeRender();
     const presentationFrame = state.presentation;
     const visualFilterSnapshot = visualFilterState;
+    const choreographyControl = installedChoreographyControl(
+      presentationFrame,
+      visualFilterSnapshot,
+    );
     battlefieldRenderer.render(presentationFrame, {
       offline: state.offline,
       showRanges: installedPresentationRangesVisible(presentationFrame),
       localInspectedPresentationKey:
         installedLocalInspectedPresentationKey(presentationFrame),
       visualFilterState: visualFilterSnapshot,
+      renderPolicy: choreographyControl.renderPolicy,
     });
     applyBattlefieldBoundaryCopy();
     installAuthorizedAgentActivation();
@@ -2997,7 +2984,7 @@ function scheduleBattlefieldResize() {
       choreographer.reproject(
         presentationFrame,
         battlefieldRenderer.choreographySurface(),
-        installedChoreographyControl(presentationFrame, visualFilterSnapshot),
+        choreographyControl,
       );
     } catch (error) {
       choreographer.clear("resize_projection_error");

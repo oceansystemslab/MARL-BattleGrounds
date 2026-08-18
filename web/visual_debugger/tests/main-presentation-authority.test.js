@@ -281,10 +281,7 @@ test("clear then pending render cannot republish retained Oracle or successor PO
   const toolbarStart = source.indexOf("function renderSessionToolbar(");
   const toolbarEnd = source.indexOf("function setDraftSelection(", toolbarStart);
   const renderStart = source.indexOf("function render()");
-  const renderEnd = source.indexOf(
-    "function syncCompactActiveCombatPriority(",
-    renderStart,
-  );
+  const renderEnd = source.indexOf("function battlefieldSizeKey()", renderStart);
   const boundaryStart = source.indexOf("function applyBattlefieldBoundaryCopy()");
   const boundaryEnd = source.indexOf("function renderViewerBoundary()", boundaryStart);
   for (const boundary of [
@@ -721,15 +718,16 @@ test("main carries replay animation intent only beside the installed presentatio
   assert.doesNotMatch(helperSource, /presentation\.animate_incoming/u);
   assert.match(
     source,
-    /choreographer\.presentFrame\(\s*presentationFrame,\s*battlefieldRenderer\.choreographySurface\(\),\s*installedChoreographyControl\(presentationFrame,\s*visualFilterSnapshot\),\s*\)/u,
+    /const choreographyControl = installedChoreographyControl\(\s*presentationFrame,\s*visualFilterSnapshot,?\s*\);[\s\S]*choreographer\.presentFrame\(\s*presentationFrame,\s*battlefieldRenderer\.choreographySurface\(\),\s*choreographyControl,?\s*\)/u,
   );
   assert.equal(
-    [
-      ...source.matchAll(
-        /choreographer\.reproject\([\s\S]*?installedChoreographyControl\(/gu,
-      ),
-    ].length,
+    [...source.matchAll(/const choreographyControl = installedChoreographyControl\(/gu)]
+      .length,
     2,
+  );
+  assert.match(
+    source,
+    /choreographer\.reproject\(\s*presentationFrame,\s*battlefieldRenderer\.choreographySurface\(\),\s*choreographyControl,?\s*\)/u,
   );
 });
 

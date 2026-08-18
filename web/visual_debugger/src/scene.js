@@ -131,7 +131,7 @@ export const BATTLEFIELD_LAYER_ORDER = Object.freeze([
  *   ownerDocument: Document,
  *   viewportKey: string,
  *   viewportBounds: Rectangle,
- *   protectedRects: ReadonlyArray<Rectangle>,
+ *   protectedRects: ReadonlyArray<ProtectedRegion>,
  *   worldToScreen: (
  *     point: {x: number, y: number} | readonly [number, number],
  *   ) => {x: number, y: number},
@@ -157,6 +157,12 @@ export const BATTLEFIELD_LAYER_ORDER = Object.freeze([
  *   width: number,
  *   height: number,
  * }} Rectangle
+ * @typedef {Rectangle & {
+ *   layoutKey: string,
+ *   bounds: Rectangle,
+ *   protectedKind: "body" | "status" | "cooldown" | "modifier" | "legality",
+ *   ownerPresentationKey: string | null,
+ * }} ProtectedRegion
  * @typedef {{
  *   showAuraFields: boolean,
  *   showAuraModifierBadges: boolean,
@@ -174,6 +180,40 @@ export const BATTLEFIELD_LAYER_ORDER = Object.freeze([
  */
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Publish one durable obstacle with a stable semantic identity. Top-level
+ * coordinates remain available to older surface consumers during migration;
+ * the cross-phase allocator consumes the explicit nested bounds.
+ *
+ * @param {"body" | "status" | "cooldown" | "modifier" | "legality"} protectedKind
+ * @param {string} ownerIdentity
+ * @param {Rectangle} bounds
+ * @param {string | null} ownerPresentationKey
+ * @param {string} [placementIdentity]
+ * @returns {ProtectedRegion}
+ */
+function choreographyProtectedRegion(
+  protectedKind,
+  ownerIdentity,
+  bounds,
+  ownerPresentationKey,
+  placementIdentity = ownerIdentity,
+) {
+  const frozenBounds = Object.freeze({ ...bounds });
+  return Object.freeze({
+    layoutKey: JSON.stringify([
+      "durable",
+      protectedKind,
+      ownerIdentity,
+      placementIdentity,
+    ]),
+    bounds: frozenBounds,
+    ...frozenBounds,
+    protectedKind,
+    ownerPresentationKey,
+  });
 }
 
 /**
@@ -523,20 +563,18 @@ export class BattlefieldRenderer {
     this.empty = empty;
     /** @type {ViewportTransform | null} */
     this.transform = null;
-    /** @type {ReadonlyArray<Rectangle>} */
+    /** @type {ReadonlyArray<ProtectedRegion>} */
     this.choreographyProtectedRects = Object.freeze([]);
     /** @type {Readonly<{
-     *   base: ReadonlyArray<Rectangle>,
-     *   legality: ReadonlyArray<Rectangle>,
-     *   status: ReadonlyArray<Rectangle>,
+     *   base: ReadonlyArray<ProtectedRegion>,
+     *   legality: ReadonlyArray<ProtectedRegion>,
+     *   status: ReadonlyArray<ProtectedRegion>,
      * }>} */
     this.choreographyProtectedRectGroups = Object.freeze({
       base: Object.freeze([]),
       legality: Object.freeze([]),
       status: Object.freeze([]),
     });
-    this.compactActiveCombatRequested = false;
-    this.compactActiveCombat = false;
     /** @type {ReadonlyMap<string, JsonRecord>} */
     this.agentByPresentationKey = new Map();
     /** @type {ReadonlyMap<number, JsonRecord>} */
@@ -551,7 +589,7 @@ export class BattlefieldRenderer {
     debugRange.append(this.rangeCues);
     const pendingRoute = createLayer("pending-route", { "aria-hidden": "true" });
     const transientRoute = createLayer("transient-route", {
-      "aria-hidden": "true",
+      "aria-label": "Authorized combat event routes",
     });
     const obstacle = createLayer("obstacle", { "aria-label": "Map obstacles" });
     const body = createLayer("body", { "aria-label": "Authorized agents" });
@@ -567,7 +605,7 @@ export class BattlefieldRenderer {
       "aria-label": "Durable status, cooldown, and modifier cues",
     });
     const transientEvents = createLayer("transient-events", {
-      "aria-hidden": "true",
+      "aria-label": "Authorized combat event summaries",
     });
     const accessibleLabels = createLayer("accessible-labels");
 
@@ -617,6 +655,7 @@ export class BattlefieldRenderer {
    *   showRanges?: boolean,
    *   localInspectedPresentationKey?: string | null,
    *   visualFilterState?: Readonly<Record<string, boolean>>,
+   *   renderPolicy?: "live_once" | "replay_animated" | "replay_static",
    * }} [options]
    * @returns {boolean} Whether the frame contained a paintable scene.
    */
@@ -642,6 +681,7 @@ export class BattlefieldRenderer {
       this.battlefield.removeAttribute("viewBox");
       this.battlefield.removeAttribute("data-preset");
       this.battlefield.removeAttribute("data-audience");
+      this.battlefield.removeAttribute("data-render-policy");
       this.battlefield.setAttribute(
         "aria-label",
         "Battlefield unavailable; no authorized scene was returned.",
@@ -673,6 +713,11 @@ export class BattlefieldRenderer {
     this.battlefield.setAttribute("viewBox", `0 0 ${viewportWidth} ${viewportHeight}`);
     this.battlefield.dataset.preset = "analysis";
     this.battlefield.dataset.audience = scene.audience;
+    if (options.renderPolicy === undefined) {
+      this.battlefield.removeAttribute("data-render-policy");
+    } else {
+      this.battlefield.dataset.renderPolicy = options.renderPolicy;
+    }
     const audienceLabel = scene.audience === "researcher" ? "Oracle View" : "Agent POV";
     this.battlefield.setAttribute(
       "aria-label",
@@ -759,24 +804,23 @@ export class BattlefieldRenderer {
       showCooldowns: visualPolicy.showCooldownBadges,
       audience: scene.audience,
     });
-    this.#applyCompactActiveCombatPolicy();
+    this.#refreshChoreographyProtectedRects();
 
     this.layers.accessibleLabels.replaceChildren();
     return true;
   }
 
   /**
-   * Prioritize accepted combat truth while a compact battlefield is actively
-   * presenting transient events. Suppressed SVG owners remain in the DOM with
-   * their complete authorized metadata; only their battlefield paint and
-   * choreography collision reservation change.
+   * Compatibility seam retained for callers predating cross-phase occupancy.
+   * Durable scientific facts are never suppressed; the allocator now reserves
+   * their named regions at every supported viewport.
    *
-   * @param {boolean} active
+   * @param {boolean} _active
    * @returns {boolean} Whether the effective compact-active state changed.
    */
-  setCompactActiveCombat(active) {
-    this.compactActiveCombatRequested = Boolean(active);
-    return this.#applyCompactActiveCombatPolicy();
+  setCompactActiveCombat(_active) {
+    this.#refreshChoreographyProtectedRects();
+    return false;
   }
 
   /**
@@ -813,9 +857,15 @@ export class BattlefieldRenderer {
       return null;
     }
     const protectedLayoutKey = this.choreographyProtectedRects
-      .map((bounds) =>
-        [bounds.left, bounds.top, bounds.right, bounds.bottom]
+      .map((region) =>
+        [
+          region.bounds.left,
+          region.bounds.top,
+          region.bounds.right,
+          region.bounds.bottom,
+        ]
           .map((value) => Number(value).toFixed(3))
+          .concat(region.layoutKey)
           .join(","),
       )
       .join(";");
@@ -884,64 +934,18 @@ export class BattlefieldRenderer {
       legality: Object.freeze([]),
       status: Object.freeze([]),
     });
-    this.compactActiveCombat = false;
-    this.battlefield.dataset.compactActiveCombat = "false";
-    this.battlefield.removeAttribute("data-compact-active-suppressed-facts");
     this.transform = null;
-  }
-
-  /**
-   * @returns {boolean}
-   */
-  #applyCompactActiveCombatPolicy() {
-    const transform = this.transform;
-    const nextActive = Boolean(
-      this.compactActiveCombatRequested &&
-        transform &&
-        transform.viewportBounds.width <= 600 &&
-        transform.viewportBounds.height <= 420,
-    );
-    const changed = nextActive !== this.compactActiveCombat;
-    this.compactActiveCombat = nextActive;
-    this.battlefield.dataset.compactActiveCombat = String(nextActive);
-    if (nextActive) {
-      this.battlefield.dataset.compactActiveSuppressedFacts =
-        "ranges,pending-route,selected-legality,status-summaries";
-    } else {
-      this.battlefield.removeAttribute("data-compact-active-suppressed-facts");
-    }
-
-    const suppressedOwners = [
-      this.rangeCues,
-      this.layers.pendingRoute,
-      this.legalityCues,
-      ...this.layers.durableStatusModifier.querySelectorAll(
-        '.status-dock, .required-dock-fallback-dock[data-kind="status"]',
-      ),
-    ];
-    for (const owner of suppressedOwners) {
-      if (!(owner instanceof SVGElement)) {
-        continue;
-      }
-      owner.dataset.compactActiveSuppressed = String(nextActive);
-      if (nextActive) {
-        owner.setAttribute("aria-hidden", "true");
-      } else if (owner !== this.rangeCues && owner !== this.layers.pendingRoute) {
-        owner.removeAttribute("aria-hidden");
-      }
-    }
-    this.#refreshChoreographyProtectedRects();
-    return changed;
   }
 
   #refreshChoreographyProtectedRects() {
     const groups = this.choreographyProtectedRectGroups;
     this.choreographyProtectedRects = Object.freeze(
-      [
-        ...groups.base,
-        ...(this.compactActiveCombat ? [] : groups.status),
-        ...(this.compactActiveCombat ? [] : groups.legality),
-      ].map((bounds) => Object.freeze({ ...bounds })),
+      [...groups.base, ...groups.status, ...groups.legality].map((region) =>
+        Object.freeze({
+          ...region,
+          bounds: Object.freeze({ ...region.bounds }),
+        }),
+      ),
     );
   }
 
@@ -1389,7 +1393,7 @@ export class BattlefieldRenderer {
    * @param {ProjectedAgent[]} projectedAgents
    * @param {ViewportTransform} transform
    * @param {Rectangle[]} reservedRects
-   * @returns {Rectangle[]}
+   * @returns {ProtectedRegion[]}
    */
   #renderSelectedLegality(scene, projectedAgents, transform, reservedRects) {
     this.legalityCues.replaceChildren();
@@ -1532,7 +1536,17 @@ export class BattlefieldRenderer {
       group.append(pill);
     }
     this.legalityCues.replaceChildren(group);
-    return [placement.bounds];
+    const ownerPresentationKey =
+      typeof owner.presentationKey === "string" ? owner.presentationKey : null;
+    const ownerIdentity = ownerPresentationKey ?? `slot:${owner.layoutSlot}`;
+    return [
+      choreographyProtectedRegion(
+        "legality",
+        ownerIdentity,
+        placement.bounds,
+        ownerPresentationKey,
+      ),
+    ];
   }
 
   /**
@@ -1874,29 +1888,75 @@ export class BattlefieldRenderer {
       ...statusNodes,
     );
     this.#resolveNumericDockCellContent();
-    const compactRequiredStatusRects = compactRequiredDocks
+    /** @param {number} globalSlot */
+    const protectedOwner = (globalSlot) => {
+      const key = this.agentByLayoutSlot.get(globalSlot)?.presentation_key;
+      const ownerPresentationKey = typeof key === "string" ? key : null;
+      return Object.freeze({
+        ownerPresentationKey,
+        ownerIdentity: ownerPresentationKey ?? `slot:${globalSlot}`,
+      });
+    };
+    /**
+     * @param {"body" | "status" | "cooldown" | "modifier"} kind
+     * @param {number} globalSlot
+     * @param {Rectangle} bounds
+     * @param {string} placementIdentity
+     */
+    const protectedDock = (kind, globalSlot, bounds, placementIdentity) => {
+      const owner = protectedOwner(globalSlot);
+      return choreographyProtectedRegion(
+        kind,
+        owner.ownerIdentity,
+        bounds,
+        owner.ownerPresentationKey,
+        placementIdentity,
+      );
+    };
+    const bodyProtectedRegions = statusLayout.protectedBodies.map(
+      ({ globalSlot, bounds }) =>
+        protectedDock("body", globalSlot, bounds, `body:${globalSlot}`),
+    );
+    const cooldownProtectedRegions = cooldownDocks.map(
+      ({ globalSlot, bounds, layoutKey }) =>
+        protectedDock("cooldown", globalSlot, bounds, layoutKey),
+    );
+    const compactRequiredStatusRegions = compactRequiredDocks
       .filter(({ layoutKey }) => layoutKey.startsWith("status:"))
-      .map(({ bounds }) => bounds);
-    const compactRequiredCooldownRects = compactRequiredDocks
+      .map(({ globalSlot, bounds, layoutKey }) =>
+        protectedDock("status", globalSlot, bounds, `compact:${layoutKey}`),
+      );
+    const compactRequiredCooldownRegions = compactRequiredDocks
       .filter(({ layoutKey }) => layoutKey.startsWith("cooldown:"))
-      .map(({ bounds }) => bounds);
+      .map(({ globalSlot, bounds, layoutKey }) =>
+        protectedDock("cooldown", globalSlot, bounds, `compact:${layoutKey}`),
+      );
+    const modifierProtectedRegions = modifierLayout.docks.map(
+      ({ globalSlot, bounds }) =>
+        protectedDock("modifier", globalSlot, bounds, `modifier:${globalSlot}`),
+    );
+    const statusProtectedRegions = statusLayout.docks.map((placement) =>
+      protectedDock(
+        "status",
+        placement.globalSlot,
+        placement.bounds,
+        "layoutKey" in placement && typeof placement.layoutKey === "string"
+          ? placement.layoutKey
+          : `status:${placement.globalSlot}`,
+      ),
+    );
     this.choreographyProtectedRectGroups = Object.freeze({
-      base: Object.freeze(
-        [
-          ...statusLayout.protectedBodies.map(({ bounds }) => bounds),
-          ...cooldownRects,
-          ...compactRequiredCooldownRects,
-          ...modifierLayout.docks.map(({ bounds }) => bounds),
-        ].map((bounds) => Object.freeze({ ...bounds })),
-      ),
-      legality: Object.freeze(
-        legalityRects.map((bounds) => Object.freeze({ ...bounds })),
-      ),
-      status: Object.freeze(
-        [...statusRects, ...compactRequiredStatusRects].map((bounds) =>
-          Object.freeze({ ...bounds }),
-        ),
-      ),
+      base: Object.freeze([
+        ...bodyProtectedRegions,
+        ...cooldownProtectedRegions,
+        ...compactRequiredCooldownRegions,
+        ...modifierProtectedRegions,
+      ]),
+      legality: Object.freeze(legalityRects),
+      status: Object.freeze([
+        ...statusProtectedRegions,
+        ...compactRequiredStatusRegions,
+      ]),
     });
     this.#refreshChoreographyProtectedRects();
   }

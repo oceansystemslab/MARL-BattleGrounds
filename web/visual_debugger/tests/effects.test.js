@@ -5,6 +5,7 @@ import { normalizeAuthorizedPresentationFrameV1 } from "../src/authorized-presen
 import { explainChoreographyEvent } from "../src/choreography-painter.js";
 import {
   buildChoreographyPlan,
+  CHOREOGRAPHY_PAINT_FOOTPRINTS,
   isSubmissionCommand,
 } from "../src/choreography-plan.js";
 import {
@@ -49,10 +50,10 @@ const surface = {
   viewportBounds: {
     left: 0,
     top: 0,
-    right: 200,
-    bottom: 120,
-    width: 200,
-    height: 120,
+    right: 800,
+    bottom: 600,
+    width: 800,
+    height: 600,
   },
   protectedRects: [],
 };
@@ -86,12 +87,34 @@ test("strict authorized fixture preserves exact choreography identity", async ()
   const serializedBefore = JSON.stringify(presentation);
   const plan = buildChoreographyPlan(presentation, surface);
   assert.ok(plan);
+  assert.deepEqual(buildChoreographyPlan(presentation, surface), plan);
   assert.equal(plan.transitionId, rawPresentation.latest_events.incoming_transition_id);
   assert.deepEqual(
     plan.events.flatMap((event) => event.atomicEventIds ?? [event.eventId]),
     rawPresentation.latest_events.ordered_event_ids,
   );
   assert.equal(JSON.stringify(presentation), serializedBefore);
+  assert.equal(
+    plan.events.some(
+      (event) =>
+        event.cueSuppressionReason ||
+        event.spatialDisposition === "suppressed_collision",
+    ),
+    false,
+  );
+  for (const event of plan.events.filter((candidate) => candidate.spatial)) {
+    if (event.kind === "activation") {
+      assert.ok(event.impactCue ?? event.sourceCue, event.eventId);
+      if (event.paintParts.ability && event.target) {
+        assert.ok(event.route, event.eventId);
+        assert.ok(Array.isArray(event.route.bridgeGaps), event.eventId);
+      }
+    } else {
+      assert.ok(event.cue, event.eventId);
+      assert.equal(event.cueCollisionFree, true, event.eventId);
+      assert.ok(event.cueBounds && event.cueLeader, event.eventId);
+    }
+  }
   assert.equal(buildChoreographyPlan(rawPresentation, surface), null);
   assert.equal(buildChoreographyPlan({ ...presentation }, surface), null);
   assert.equal(
@@ -587,6 +610,8 @@ test("activation ability and semantic paint parts are independently filterable",
   assert.equal(semanticOnly.event.source, null);
   assert.equal(semanticOnly.event.route, null);
   assert.ok(semanticOnly.event.target);
+  assert.ok(semanticOnly.event.impactCue && semanticOnly.event.impactBounds);
+  assert.deepEqual(semanticOnly.event.impactLeader.start, semanticOnly.event.target);
 
   const routeOnly = projectedActivation("healing_effects");
   assert.deepEqual([routeOnly.pointProjections, routeOnly.lengthProjections], [2, 2]);
@@ -594,6 +619,8 @@ test("activation ability and semantic paint parts are independently filterable",
   assert.ok(routeOnly.event.source);
   assert.ok(routeOnly.event.target);
   assert.ok(routeOnly.event.route);
+  assert.ok(routeOnly.event.impactCue && routeOnly.event.impactBounds);
+  assert.ok(Array.isArray(routeOnly.event.route.bridgeGaps));
 
   const fullySuppressed = projectedActivation(
     "basic_ability_effects",
@@ -606,6 +633,7 @@ test("activation ability and semantic paint parts are independently filterable",
   assert.equal(fullySuppressed.event.source, null);
   assert.equal(fullySuppressed.event.target, null);
   assert.equal(fullySuppressed.event.route, null);
+  assert.equal(fullySuppressed.event.impactCue ?? null, null);
 });
 
 test("transition identity excludes revision while authorization tracks POV actor", async () => {
@@ -673,6 +701,42 @@ test("canonical V2 displacement and rejection selectors own transient color", as
   assert.match(css, /data-event-type="action_rejected"/u);
 });
 
+test("activation arrows prefer full paint before an explicit compact fallback", async () => {
+  const [painter, css] = await Promise.all([
+    readFile(new URL("../src/choreography-painter.js", import.meta.url), "utf8"),
+    readFile(new URL("../styles.css", import.meta.url), "utf8"),
+  ]);
+  const activationArrowRule = css.match(/\.combat-route__arrow\s*\{[^}]*\}/u)?.[0];
+  const compactArrowRule = css.match(
+    /\.combat-route__arrow\[data-marker-variant="compact"\]\s*\{[^}]*\}/u,
+  )?.[0];
+  const chargeArrowRule = css.match(/\.combat-charge__direction\s*\{[^}]*\}/u)?.[0];
+  const activationParticleRule = css.match(
+    /\.combat-route__particle\s*\{[^}]*\}/u,
+  )?.[0];
+  const holyParticleRule = css.match(
+    /\.combat-route-effect\[data-token-id="holy_word"\] \.combat-route__particle\s*\{[^}]*\}/u,
+  )?.[0];
+
+  assert.equal(CHOREOGRAPHY_PAINT_FOOTPRINTS.route.activationMarkerPadding, 17);
+  assert.equal(CHOREOGRAPHY_PAINT_FOOTPRINTS.route.activationCompactMarkerPadding, 8);
+  assert.equal(CHOREOGRAPHY_PAINT_FOOTPRINTS.route.chargeMarkerPadding, 14);
+  assert.equal(CHOREOGRAPHY_PAINT_FOOTPRINTS.route.activationPathPadding.default, 7);
+  assert.equal(CHOREOGRAPHY_PAINT_FOOTPRINTS.route.activationPathPadding.holy_word, 8);
+  assert.match(painter, /d: "M -11 -6 L 2 0 L -11 6 L -7 0 Z"/u);
+  assert.match(painter, /M -6 -3 L 2 0 L -6 3 L -4 0 Z/u);
+  assert.ok(activationArrowRule);
+  assert.match(activationArrowRule, /drop-shadow\(0 0 3px currentColor\)/u);
+  assert.ok(compactArrowRule);
+  assert.match(compactArrowRule, /filter: none/u);
+  assert.ok(chargeArrowRule);
+  assert.match(chargeArrowRule, /drop-shadow\(0 0 3px currentColor\)/u);
+  assert.ok(activationParticleRule);
+  assert.match(activationParticleRule, /drop-shadow\(0 0 3px currentColor\)/u);
+  assert.ok(holyParticleRule);
+  assert.match(holyParticleRule, /drop-shadow\(0 0 4px currentColor\)/u);
+});
+
 test("scene has one Analysis battlefield branch and owns durable shield hooks", async () => {
   const source = await readFile(new URL("../src/scene.js", import.meta.url), "utf8");
   assert.doesNotMatch(source, /debug-protected-zone/u);
@@ -693,6 +757,10 @@ test("scene has one Analysis battlefield branch and owns durable shield hooks", 
   assert.match(source, /combat status IC, steps until OOC/u);
   assert.match(source, /combat status OOC/u);
   assert.match(source, /createSpawnShieldView\(agent, spawnShieldMechanics\)/u);
+  assert.match(source, /layoutKey: JSON\.stringify\(/u);
+  assert.match(source, /bounds: frozenBounds/u);
+  assert.match(source, /protectedKind/u);
+  assert.match(source, /ownerPresentationKey/u);
   assert.match(
     source,
     /registerTooltipOwner\(nodes\.shieldRoot, spawnShieldView\.descriptor\)/u,
@@ -711,7 +779,7 @@ test("authorized regeneration owns a packed plus cue instead of the generic onio
   );
   assert.match(
     planSource,
-    /layoutOutcomeCues\(statusEvents, surface, "regeneration"\)/u,
+    /layoutCrossPhaseEvents\(paintFiltered, surface, sceneByKey\)/u,
   );
   assert.match(painterSource, /combat-regeneration__plus/u);
   assert.match(painterSource, /combat-regeneration__value/u);
@@ -836,28 +904,28 @@ test("NET and regeneration effects remain independent from scrolling battle text
     if (disabled.length === 0) {
       assert.deepEqual(
         {
-          width: regeneration.cueBounds?.width,
-          height: regeneration.cueBounds?.height,
+          width: Math.round(regeneration.cueBounds?.width ?? 0),
+          height: Math.round(regeneration.cueBounds?.height ?? 0),
         },
-        { width: 64, height: 44 },
+        { width: 64, height: 68 },
       );
     }
     if (disabled.length === 1 && disabled[0] === "scrolling_battle_text") {
       assert.deepEqual(
         {
-          width: regeneration.cueBounds?.width,
-          height: regeneration.cueBounds?.height,
+          width: Math.round(regeneration.cueBounds?.width ?? 0),
+          height: Math.round(regeneration.cueBounds?.height ?? 0),
         },
-        { width: 48, height: 44 },
+        { width: 48, height: 48 },
       );
     }
     if (disabled.length === 1 && disabled[0] === "regeneration_effects") {
       assert.deepEqual(
         {
-          width: regeneration.cueBounds?.width,
-          height: regeneration.cueBounds?.height,
+          width: Math.round(regeneration.cueBounds?.width ?? 0),
+          height: Math.round(regeneration.cueBounds?.height ?? 0),
         },
-        { width: 64, height: 18 },
+        { width: 64, height: 68 },
       );
     }
     if (suppressed) {
@@ -961,8 +1029,8 @@ test("authorized break plus application is one Reapplied plan row without changi
   assert.equal(plan.events[0]?.lifecycleToken.label, "Broken, then reapplied");
   assert.deepEqual(
     {
-      width: plan.events[0]?.cueBounds?.width,
-      height: plan.events[0]?.cueBounds?.height,
+      width: Math.round(plan.events[0]?.cueBounds?.width ?? 0),
+      height: Math.round(plan.events[0]?.cueBounds?.height ?? 0),
     },
     { width: 52, height: 52 },
   );
@@ -1028,8 +1096,8 @@ test("authorized break plus application is one Reapplied plan row without changi
   assert.doesNotMatch(JSON.stringify(breakExplanation), /reappl|status_applied/iu);
   assert.deepEqual(
     {
-      width: breakOnly.events[0].cueBounds?.width,
-      height: breakOnly.events[0].cueBounds?.height,
+      width: Math.round(breakOnly.events[0].cueBounds?.width ?? 0),
+      height: Math.round(breakOnly.events[0].cueBounds?.height ?? 0),
     },
     { width: 52, height: 52 },
   );
@@ -1041,10 +1109,10 @@ test("authorized break plus application is one Reapplied plan row without changi
   assert.doesNotMatch(JSON.stringify(reapplicationExplanation), /broken/iu);
   assert.deepEqual(
     {
-      width: reapplicationOnly.events[0].cueBounds?.width,
-      height: reapplicationOnly.events[0].cueBounds?.height,
+      width: Math.round(reapplicationOnly.events[0].cueBounds?.width ?? 0),
+      height: Math.round(reapplicationOnly.events[0].cueBounds?.height ?? 0),
     },
-    { width: 42, height: 42 },
+    { width: 45, height: 45 },
   );
 });
 
@@ -1101,14 +1169,7 @@ test("authorized Trap and Charge routes retain exact public endpoint owners", as
       surface.worldToScreen(targetTrajectory.successor.position),
     );
     assert.ok(event.route);
-    assert.ok(
-      Math.abs(
-        Math.hypot(
-          event.route.end.x - event.target.x,
-          event.route.end.y - event.target.y,
-        ) - 8,
-      ) < 1e-9,
-    );
+    assert.deepEqual(event.route.end, event.target);
   }
 });
 
