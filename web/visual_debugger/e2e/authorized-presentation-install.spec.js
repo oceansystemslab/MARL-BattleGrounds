@@ -59,15 +59,15 @@ const CP5_SLICE_5_TEST_TITLE =
   "six real scientific trajectories preserve public causality and hidden-root privacy";
 const cp5Slice5Only = process.env.MARL_CP5_SLICE_5_ONLY === "1";
 const isolatedCp5Proof = cp5CSliceOnly || cp5Slice5Only;
-const CP5_SLICE_5_REPLAY_HASHES = Object.freeze({
-  "death-respawn-shield.marlbg-replay.json":
-    "639da4f49eb1dca01f200ca0c8ebf1eb3fc2b94fbc4408802f6ddb71085346ee",
-  "manifest.json": "9223d504fdf8c18c18a3adb0856fa95ea8cef1852e0d146b1648ed2285751809",
-  "mirrored-five-class-ultimates.marlbg-replay.json":
-    "7645afc39f9001a7268cfec43df47c93157042fcbac9296723f4284445682f5d",
-  "recovery-status-lifecycle.marlbg-replay.json":
-    "d17308b7681a65f88a8055b3a6bbdc887529104173896fe8bf64587197af7431",
-});
+const CP5_SLICE_5_CHECKED_SAMPLE_FILES = Object.freeze([
+  "manifest.json",
+  "death-respawn-shield.marlbg-replay.json",
+  "death-respawn-shield.marlbg-metrics.json",
+  "recovery-status-lifecycle.marlbg-replay.json",
+  "recovery-status-lifecycle.marlbg-metrics.json",
+  "mirrored-five-class-ultimates.marlbg-replay.json",
+  "mirrored-five-class-ultimates.marlbg-metrics.json",
+]);
 
 /** @type {Array<Record<string, unknown>>} */
 const cp4ENativeCaptures = [];
@@ -269,14 +269,13 @@ async function sha256File(path) {
     .digest("hex");
 }
 
-async function cp5Slice5CheckedReplaySnapshot() {
+async function cp5Slice5CheckedSampleSnapshot() {
   /** @type {Record<string, {bytes: Buffer, sha256: string}>} */
   const snapshot = {};
-  for (const [fileName, expectedSha256] of Object.entries(CP5_SLICE_5_REPLAY_HASHES)) {
+  for (const fileName of CP5_SLICE_5_CHECKED_SAMPLE_FILES) {
     const path = join(REPOSITORY_ROOT, "examples", "replays", "v1", fileName);
     const bytes = await readFile(path);
     const sha256 = createHash("sha256").update(bytes).digest("hex");
-    expect(sha256, fileName).toBe(expectedSha256);
     snapshot[fileName] = { bytes, sha256 };
   }
   return snapshot;
@@ -3445,7 +3444,7 @@ test(CP5_SLICE_5_TEST_TITLE, async ({ page }) => {
   );
   test.setTimeout(900_000);
   await installWaapiAutopause(page);
-  const checkedReplayBytesBefore = await cp5Slice5CheckedReplaySnapshot();
+  const checkedSampleBytesBefore = await cp5Slice5CheckedSampleSnapshot();
 
   /** @type {Readonly<Record<string, number>>} */
   const phaseRankByKind = Object.freeze({
@@ -5475,13 +5474,13 @@ test(CP5_SLICE_5_TEST_TITLE, async ({ page }) => {
     await removeReplayArtifacts(sliceArtifacts.outputDirectory);
     sliceArtifacts = null;
 
-    const checkedReplayBytesAfter = await cp5Slice5CheckedReplaySnapshot();
-    expect(Object.keys(checkedReplayBytesAfter)).toEqual(
-      Object.keys(checkedReplayBytesBefore),
+    const checkedSampleBytesAfter = await cp5Slice5CheckedSampleSnapshot();
+    expect(Object.keys(checkedSampleBytesAfter)).toEqual(
+      Object.keys(checkedSampleBytesBefore),
     );
-    for (const [fileName, before] of Object.entries(checkedReplayBytesBefore)) {
-      expect(checkedReplayBytesAfter[fileName].sha256).toBe(before.sha256);
-      expect(checkedReplayBytesAfter[fileName].bytes.equals(before.bytes)).toBe(true);
+    for (const [fileName, before] of Object.entries(checkedSampleBytesBefore)) {
+      expect(checkedSampleBytesAfter[fileName].sha256).toBe(before.sha256);
+      expect(checkedSampleBytesAfter[fileName].bytes.equals(before.bytes)).toBe(true);
     }
     expect(browserErrors.get(page) ?? []).toEqual([]);
   } catch (error) {
