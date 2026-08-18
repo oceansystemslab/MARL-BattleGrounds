@@ -2372,6 +2372,11 @@ test("Actor POV all-surface scan excludes researcher authority and host secrets"
       label: "Simulator step",
       value: String(povFrame.simulator_step_count),
     },
+    {
+      id: "incoming_transition",
+      label: "Incoming transition",
+      value: povFrame.incoming_pov_transition_id,
+    },
   ]);
   expect(completeSurfaceBytes).not.toContain("technical_kind");
   expect(completeSurfaceBytes).not.toContain("replay_no_shared_obs_technical_frame");
