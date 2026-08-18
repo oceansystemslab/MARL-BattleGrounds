@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import OrderedDict
 from dataclasses import dataclass
 from secrets import token_urlsafe
@@ -18,7 +19,10 @@ from marl_battlegrounds.evaluation.pov import (
     export_actor_pov_replay_v1,
 )
 from marl_battlegrounds.evaluation.replay import ReplayArtifactReferenceV1
-from marl_battlegrounds.evaluation.replay_io import LoadedReplayBundleV1
+from marl_battlegrounds.evaluation.replay_io import (
+    LoadedReplayBundleV1,
+    canonical_metric_report_artifact_json_bytes_v1,
+)
 from marl_battlegrounds.rendering.evaluation_adapter import (
     EvaluationScenePresentationStateV1,
     SharedObsSourceMaterialProjectionV1,
@@ -80,6 +84,7 @@ from scripts.dev.visual_debugger.replay_protocol import (
 )
 
 _COMMAND_RECORD_LIMIT = 256
+_METRIC_REPORT_SUFFIX = ".marlbg-metrics.json"
 
 type ReplayServiceOutcomeV1 = Literal[
     "response",
@@ -89,6 +94,12 @@ type ReplayServiceOutcomeV1 = Literal[
     "command_id_conflict",
     "server_shutting_down",
     "service_faulted",
+]
+
+type ReplayMetricReportOutcomeV1 = Literal[
+    "available",
+    "missing",
+    "forbidden",
 ]
 
 
@@ -102,6 +113,29 @@ class ReplayServiceCommandResultV1:
 
 
 @dataclass(frozen=True, slots=True)
+class ReplayMetricReportResultV1:
+    """One transport-neutral canonical metric-report retrieval result."""
+
+    outcome: ReplayMetricReportOutcomeV1
+    payload: bytes | None
+    filename: str | None
+
+    def __post_init__(self) -> None:
+        if self.outcome not in ("available", "missing", "forbidden"):
+            raise ValueError("unknown replay metric-report outcome")
+        if self.outcome == "available":
+            if type(self.payload) is not bytes:
+                raise TypeError("available metric report requires immutable bytes")
+            if type(self.filename) is not str or not self.filename:
+                raise TypeError("available metric report requires a filename")
+            return
+        if self.payload is not None or self.filename is not None:
+            raise ValueError(
+                "unavailable metric report cannot carry bytes or a filename"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class _CommandRecord:
     fingerprint: str
     shutdown_requested: bool
@@ -112,6 +146,16 @@ class _PovCacheEntry:
     artifact: ActorPovReplayArtifactV1
     projection_index: ActorPovProjectionIndexV1
     timeline: ActorPovReplayTimelineV1
+
+
+def _safe_metric_report_filename(episode_id: str) -> str:
+    """Return the bounded attachment basename derived from one episode ID."""
+    if type(episode_id) is not str:
+        raise TypeError("episode_id must be a string")
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", episode_id).strip("._-")
+    stem = stem[:96].strip("._-")
+    stem = stem.replace(_METRIC_REPORT_SUFFIX, "-").strip("._-") or "replay"
+    return f"{stem}{_METRIC_REPORT_SUFFIX}"
 
 
 def _replay_reference(bundle: LoadedReplayBundleV1) -> ReplayArtifactReferenceV1:
@@ -384,6 +428,30 @@ class ReplayViewerService:
     def current_frame(self) -> ReplayViewerFrameV1:
         with self._lock:
             return self._frame
+
+    def current_metric_report(self) -> ReplayMetricReportResultV1:
+        """Return canonical metric bytes only for the locked Oracle authority."""
+        with self._lock:
+            if self._view_mode != "researcher":
+                return ReplayMetricReportResultV1(
+                    outcome="forbidden",
+                    payload=None,
+                    filename=None,
+                )
+            artifact = self._bundle.metric_report_artifact
+            if artifact is None:
+                return ReplayMetricReportResultV1(
+                    outcome="missing",
+                    payload=None,
+                    filename=None,
+                )
+            return ReplayMetricReportResultV1(
+                outcome="available",
+                payload=canonical_metric_report_artifact_json_bytes_v1(artifact),
+                filename=_safe_metric_report_filename(
+                    self._context.identity.episode_id
+                ),
+            )
 
     def current_presentation(self) -> PresentationResourceResultV1:
         """Build the authorized resource from one committed replay snapshot."""

@@ -747,6 +747,15 @@ async function expectRetiredMetadataAbsent(page) {
 }
 
 const TECHNICAL_HELP = Object.freeze({
+  episode: Object.freeze({
+    label: "Episode",
+    summary: "Identifies the authorized live episode represented by this frame.",
+  }),
+  artifact_digest_prefix: Object.freeze({
+    label: "Artifact digest prefix",
+    summary:
+      "These 12 hexadecimal characters locate the canonical Oracle replay without displaying its full hash.",
+  }),
   frame: Object.freeze({
     label: "Frame",
     summary: "The zero-based authorized frame index represented by this presentation.",
@@ -755,12 +764,38 @@ const TECHNICAL_HELP = Object.freeze({
     label: "Simulator step",
     summary: "The simulator decision step represented by this authorized frame.",
   }),
+  incoming_transition: Object.freeze({
+    label: "Incoming transition",
+    summary:
+      "Identifies the authorized transition that produced this displayed frame. The initial frame has no incoming transition.",
+  }),
   ordinary_movement_distance_scale: Object.freeze({
     label: "Ordinary movement distance scale",
     summary:
       "The recorded multiplier applied to ordinary voluntary movement distance. Spawn Shield uses its separately authorized absolute movement speed.",
   }),
 });
+
+const FORBIDDEN_TECHNICAL_FACT_IDS = Object.freeze([
+  "technical_kind",
+  "session",
+  "revision",
+  "generation",
+  "cursor_generation",
+  "choreography_generation",
+  "artifact_id",
+  "artifact_digest",
+  "context_digest",
+  "trajectory_digest",
+  "timeline",
+  "processing",
+  "completion",
+  "metrics",
+  "metric_report",
+  "path",
+  "global_slot",
+  "presentation_key",
+]);
 
 /**
  * @param {import("@playwright/test").Page} page
@@ -776,32 +811,51 @@ async function expectTechnicalFrameDom(page, presentation) {
   /** @type {Record<string, Array<[keyof typeof TECHNICAL_HELP, string]>>} */
   const specifications = {
     live_oracle: [
+      ["episode", "episode_id"],
       ["frame", "evaluation_frame_index"],
       ["simulator_step", "simulator_step_count"],
+      ["incoming_transition", "incoming_transition_id"],
     ],
     live_no_shared_obs_agent_pov: [
+      ["episode", "episode_id"],
       ["frame", "recipient_frame_index"],
       ["simulator_step", "simulator_step_count"],
+      ["incoming_transition", "incoming_recipient_transition_id"],
     ],
     replay_oracle: [
+      ["artifact_digest_prefix", "artifact_digest_prefix"],
       ["frame", "frame_index"],
       ["simulator_step", "simulator_step_count"],
+      ["incoming_transition", "incoming_transition_id"],
       ["ordinary_movement_distance_scale", "recorded_ordinary_movement_distance_scale"],
     ],
     replay_no_shared_obs_agent_pov: [
       ["frame", "frame_index"],
       ["simulator_step", "simulator_step_count"],
+      ["incoming_transition", "incoming_recipient_transition_id"],
     ],
     replay_shared_obs_agent_pov: [
       ["frame", "frame_index"],
       ["simulator_step", "simulator_step_count"],
+      ["incoming_transition", "incoming_recipient_transition_id"],
     ],
   };
-  const expected = specifications[presentation.presentation_kind];
-  if (!expected) {
+  const specification = specifications[presentation.presentation_kind];
+  if (!specification) {
     throw new TypeError(
       `Unsupported Technical Frame presentation kind ${String(presentation.presentation_kind)}.`,
     );
+  }
+  const expected = specification.filter(([, field]) => technical[field] !== null);
+  const frameField = specification.find(([id]) => id === "frame")?.[1];
+  const incomingField = specification.find(([id]) => id === "incoming_transition")?.[1];
+  if (frameField === undefined || incomingField === undefined) {
+    throw new TypeError("Technical Frame proof is missing its epoch fields.");
+  }
+  if (technical[frameField] === 0) {
+    expect(technical[incomingField]).toBeNull();
+  } else {
+    expect(technical[incomingField]).toEqual(expect.any(String));
   }
   const facts = page.locator("#diagnostics-card .fact[data-technical-fact]");
   await expect(facts).toHaveCount(expected.length);
@@ -822,8 +876,44 @@ async function expectTechnicalFrameDom(page, presentation) {
       tabindex: "0",
     })),
   );
+  for (const forbiddenId of FORBIDDEN_TECHNICAL_FACT_IDS) {
+    await expect(
+      page.locator(`#diagnostics-card .fact[data-technical-fact="${forbiddenId}"]`),
+    ).toHaveCount(0);
+  }
+  const technicalText = await page.locator("#diagnostics-card").innerText();
+  expect(technicalText).not.toContain(String(technical.technical_kind));
+  for (const sourceField of [
+    "source_session_id",
+    "source_artifact_id",
+    "source_artifact_digest_sha256",
+    "source_trajectory_content_digest_sha256",
+    "source_context_digest_sha256",
+    "source_timeline_id",
+  ]) {
+    const value = presentation.source?.[sourceField];
+    if (typeof value === "string" && value.length > 0) {
+      expect(technicalText).not.toContain(value);
+    }
+  }
+  const scene =
+    presentation.current_endpoint?.scene ??
+    presentation.current_endpoint?.parts?.scene ??
+    null;
+  const forbiddenPresentationKey = scene?.agents?.[0]?.presentation_key;
+  if (typeof forbiddenPresentationKey === "string") {
+    expect(technicalText).not.toContain(forbiddenPresentationKey);
+  }
   for (const [id] of expected) {
     const owner = page.locator(`#diagnostics-card .fact[data-technical-fact="${id}"]`);
+    await expect(owner).toHaveAttribute("aria-description", TECHNICAL_HELP[id].summary);
+    await owner.hover();
+    await expect(page.locator("#visual-tooltip-title")).toHaveText(
+      TECHNICAL_HELP[id].label,
+    );
+    await expect(
+      page.locator("#visual-tooltip .semantic-explanation__summary"),
+    ).toHaveText(TECHNICAL_HELP[id].summary);
     await page.mouse.move(1, 1);
     await owner.focus();
     await expect(page.locator("#visual-tooltip-title")).toHaveText(
@@ -2333,6 +2423,7 @@ test("all five real service leaves install and live authority clears atomically"
   expect(agentPresentationAfterKeyboard.authority.recipient_presentation_key).toBe(
     agentRecipientKey,
   );
+  await expectTechnicalFrameDom(page, agentPresentationAfterKeyboard);
 
   await page.locator("#view-select").selectOption("researcher");
   const restoredOracle = await expectInstalledLeaf(
@@ -2340,6 +2431,7 @@ test("all five real service leaves install and live authority clears atomically"
     "researcher_live_debugger",
     "live_oracle",
   );
+  await expectTechnicalFrameDom(page, restoredOracle.presentation);
   const oracleBody = page.locator("#battlefield .agent").first();
   const oracleKey = await oracleBody.getAttribute("data-presentation-key");
   const oracleAgent = restoredOracle.presentation.current_endpoint.scene.agents.find(

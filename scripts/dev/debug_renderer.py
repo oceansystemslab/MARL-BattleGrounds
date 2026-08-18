@@ -72,7 +72,9 @@ browser controls:
 live selected-target inspector:
   SELECTED TARGET        identity, relation, distance, and public geometry
   PENDING ACTION         movement, ability, target, and exact lane legality
-  TECHNICAL FRAME        raw actor/target indices and same-epoch mask values
+  TECHNICAL FRAME        exact authority-safe facts permitted by the active leaf:
+                         Episode or Artifact digest prefix; Frame; Simulator step;
+                         conditional Incoming transition; replay-only movement scale
 
 The Combat Debugger always opens the manual arena in fixed Analysis
 presentation. Replay artifacts and scripted demonstrations now use:

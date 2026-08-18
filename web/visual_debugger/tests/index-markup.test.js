@@ -239,6 +239,49 @@ test("replay transport exposes the exact CP8 controls, rates, and truthful help"
   );
 });
 
+test("replay artifact actions are accessible, fail closed, and CSP compatible", async () => {
+  const [markup, styles] = await Promise.all([
+    readFile(indexUrl, "utf8"),
+    readFile(stylesUrl, "utf8"),
+  ]);
+  const actions = elementBody(markup, "replay-artifact-actions", "fieldset");
+  const opening = markup.match(
+    /<fieldset\b(?=[^>]*\bid="replay-artifact-actions")(?=[^>]*\bdata-replay-only)(?=[^>]*\bhidden)[^>]*>/u,
+  );
+  assert.ok(opening);
+  for (const [id, label, helpId] of [
+    ["replay-export-png-button", "Export PNG", "replay-export-png-help"],
+    [
+      "replay-download-metrics-button",
+      "Download Metrics",
+      "replay-download-metrics-help",
+    ],
+  ]) {
+    assert.match(
+      actions,
+      new RegExp(
+        `<button\\b(?=[^>]*\\bid="${id}")(?=[^>]*\\bdisabled)(?=[^>]*\\baria-describedby="${helpId}")[^>]*>${label}</button>`,
+        "u",
+      ),
+    );
+    assert.equal([...markup.matchAll(new RegExp(`\\bid="${id}"`, "gu"))].length, 1);
+    assert.match(actions, new RegExp(`\\bid="${helpId}"`, "u"));
+  }
+  assert.match(
+    markup,
+    /Content-Security-Policy[\s\S]*img-src 'self' data:;[\s\S]*font-src 'self'/u,
+  );
+  assert.doesNotMatch(markup, /img-src[^;]*blob:/u);
+  assert.match(
+    styles,
+    /\.replay-artifact-actions\s*\{[\s\S]*justify-content: flex-end;[\s\S]*border: 0;/u,
+  );
+  assert.match(
+    styles,
+    /@media \(max-width: 42rem\)[\s\S]*\.replay-artifact-actions\s*\{\s*justify-content: flex-start;/u,
+  );
+});
+
 test("browser production paths omit retired navigation and privileged display copy", async () => {
   const [controls, main, scene, explanations, panels] = await Promise.all(
     productionSourceUrls.map((url) => readFile(url, "utf8")),

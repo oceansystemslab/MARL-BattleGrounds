@@ -202,6 +202,7 @@ def test_finish_installs_replay_before_return_and_starts_settled_at_zero(
 ) -> None:
     coordinator = _coordinator(tmp_path)
     live = coordinator.router.snapshot()
+    assert live.binding.current_metric_report is None
     live_presentation_result = live.binding.current_presentation()
     assert live_presentation_result.outcome == "response"
     live_presentation = cast(
@@ -231,8 +232,11 @@ def test_finish_installs_replay_before_return_and_starts_settled_at_zero(
     typed_frame = cast(ResearcherReplayViewerFrameV1, frame)
     timeline = replay.binding.current_timeline
     presentation = replay.binding.current_presentation
+    metric_report = replay.binding.current_metric_report
     assert timeline is not None
     assert presentation is not None
+    assert metric_report is not None
+    assert metric_report == replay.service.current_metric_report  # pyright: ignore[reportAttributeAccessIssue]
     assert typed_frame.cursor.frame_index == 0
     assert timeline().timeline_id == typed_frame.timeline_id  # pyright: ignore[reportAttributeAccessIssue]
     presentation_result = presentation()
@@ -243,6 +247,11 @@ def test_finish_installs_replay_before_return_and_starts_settled_at_zero(
     )
     assert presentation_frame.source.source_revision == typed_frame.revision
     assert presentation_frame.source.source_frame_id == typed_frame.frame_id
+    metric_result = metric_report()
+    assert metric_result.outcome == "available"
+    assert metric_result.payload
+    assert metric_result.filename is not None
+    assert metric_result.filename.endswith(".marlbg-metrics.json")
 
     assert replay.binding.apply_command is not None
 
@@ -293,6 +302,10 @@ def test_recording_handoff_http_gets_use_actual_private_shared_roots(
             server,
             "/api/replay/timeline",
         )
+        metric_response, metric_body = _authorized_get(
+            server,
+            "/api/replay/metric-report",
+        )
     finally:
         if thread.is_alive():
             server.shutdown()
@@ -304,7 +317,17 @@ def test_recording_handoff_http_gets_use_actual_private_shared_roots(
     assert installed.service is shared_viewer
     assert installed.binding.current_frame == shared_viewer.current_frame
     assert installed.binding.current_timeline == shared_viewer.current_timeline
+    assert (
+        installed.binding.current_metric_report == shared_viewer.current_metric_report
+    )
     assert frame_response.status == timeline_response.status == HTTPStatus.OK
+    assert metric_response.status == HTTPStatus.FORBIDDEN
+    assert json.loads(metric_body) == {
+        "schema_version": 1,
+        "error_code": "audience_unavailable",
+        "message": "Metric reports are available only in Oracle View.",
+        "latest_frame": None,
+    }
     assert frame_response.getheader("Cache-Control") == "no-store"
     assert timeline_response.getheader("Cache-Control") == "no-store"
 
@@ -504,6 +527,7 @@ def test_registered_capture_round_trip_preserves_exact_researcher_presentation(
     assert installed.binding.mode == "replay"
     assert installed.binding.apply_command == viewer.apply_command
     assert installed.binding.current_presentation == viewer.current_presentation
+    assert installed.binding.current_metric_report == viewer.current_metric_report
 
     replay_zero = cast(ResearcherReplayViewerFrameV1, viewer.current_frame())
     next_result = viewer.apply_command(

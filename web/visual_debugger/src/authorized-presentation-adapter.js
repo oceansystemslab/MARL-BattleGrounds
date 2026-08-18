@@ -833,80 +833,210 @@ export function authorizedPresentationTransitionRows(value) {
   return Object.freeze(rows);
 }
 
+/** @typedef {"nonnegative_integer" | "positive_finite_number" | "scientific_id" | "optional_scientific_id" | "sha256_prefix"} TechnicalFactValueKind */
+/** @typedef {readonly [string, string, string, TechnicalFactValueKind]} TechnicalFactSpecification */
+
+const TECHNICAL_FIELD_UNAVAILABLE = Symbol("technical-field-unavailable");
+const SCIENTIFIC_ID_PATTERN = /^[-A-Za-z0-9_.:/+]+$/u;
+const SHA256_PREFIX_PATTERN = /^[0-9a-f]{12}$/u;
+
+/**
+ * @param {string} id
+ * @param {string} label
+ * @param {string} field
+ * @param {TechnicalFactValueKind} valueKind
+ * @returns {TechnicalFactSpecification}
+ */
+function technicalFactSpecification(id, label, field, valueKind) {
+  return Object.freeze([id, label, field, valueKind]);
+}
+
 const TECHNICAL_FACT_SPECIFICATIONS = Object.freeze({
-  live_oracle: Object.freeze({
-    technicalKind: "live_oracle_technical_frame",
-    rows: Object.freeze([
-      Object.freeze(["frame", "Frame", "evaluation_frame_index"]),
-      Object.freeze(["simulator_step", "Simulator step", "simulator_step_count"]),
-    ]),
-  }),
-  live_no_shared_obs_agent_pov: Object.freeze({
-    technicalKind: "live_no_shared_obs_technical_frame",
-    rows: Object.freeze([
-      Object.freeze(["frame", "Frame", "recipient_frame_index"]),
-      Object.freeze(["simulator_step", "Simulator step", "simulator_step_count"]),
-    ]),
-  }),
-  replay_oracle: Object.freeze({
-    technicalKind: "replay_oracle_technical_frame",
-    rows: Object.freeze([
-      Object.freeze(["frame", "Frame", "frame_index"]),
-      Object.freeze(["simulator_step", "Simulator step", "simulator_step_count"]),
-      Object.freeze([
-        "ordinary_movement_distance_scale",
-        "Ordinary movement distance scale",
-        "recorded_ordinary_movement_distance_scale",
-      ]),
-    ]),
-  }),
-  replay_no_shared_obs_agent_pov: Object.freeze({
-    technicalKind: "replay_no_shared_obs_technical_frame",
-    rows: Object.freeze([
-      Object.freeze(["frame", "Frame", "frame_index"]),
-      Object.freeze(["simulator_step", "Simulator step", "simulator_step_count"]),
-    ]),
-  }),
-  replay_shared_obs_agent_pov: Object.freeze({
-    technicalKind: "replay_shared_obs_technical_frame",
-    rows: Object.freeze([
-      Object.freeze(["frame", "Frame", "frame_index"]),
-      Object.freeze(["simulator_step", "Simulator step", "simulator_step_count"]),
-    ]),
-  }),
+  live_oracle_technical_frame: Object.freeze([
+    technicalFactSpecification("episode", "Episode", "episode_id", "scientific_id"),
+    technicalFactSpecification(
+      "frame",
+      "Frame",
+      "evaluation_frame_index",
+      "nonnegative_integer",
+    ),
+    technicalFactSpecification(
+      "simulator_step",
+      "Simulator step",
+      "simulator_step_count",
+      "nonnegative_integer",
+    ),
+    technicalFactSpecification(
+      "incoming_transition",
+      "Incoming transition",
+      "incoming_transition_id",
+      "optional_scientific_id",
+    ),
+  ]),
+  live_no_shared_obs_technical_frame: Object.freeze([
+    technicalFactSpecification("episode", "Episode", "episode_id", "scientific_id"),
+    technicalFactSpecification(
+      "frame",
+      "Frame",
+      "recipient_frame_index",
+      "nonnegative_integer",
+    ),
+    technicalFactSpecification(
+      "simulator_step",
+      "Simulator step",
+      "simulator_step_count",
+      "nonnegative_integer",
+    ),
+    technicalFactSpecification(
+      "incoming_transition",
+      "Incoming transition",
+      "incoming_recipient_transition_id",
+      "optional_scientific_id",
+    ),
+  ]),
+  replay_oracle_technical_frame: Object.freeze([
+    technicalFactSpecification(
+      "artifact_digest_prefix",
+      "Artifact digest prefix",
+      "artifact_digest_prefix",
+      "sha256_prefix",
+    ),
+    technicalFactSpecification("frame", "Frame", "frame_index", "nonnegative_integer"),
+    technicalFactSpecification(
+      "simulator_step",
+      "Simulator step",
+      "simulator_step_count",
+      "nonnegative_integer",
+    ),
+    technicalFactSpecification(
+      "incoming_transition",
+      "Incoming transition",
+      "incoming_transition_id",
+      "optional_scientific_id",
+    ),
+    technicalFactSpecification(
+      "ordinary_movement_distance_scale",
+      "Ordinary movement distance scale",
+      "recorded_ordinary_movement_distance_scale",
+      "positive_finite_number",
+    ),
+  ]),
+  replay_no_shared_obs_technical_frame: Object.freeze([
+    technicalFactSpecification("frame", "Frame", "frame_index", "nonnegative_integer"),
+    technicalFactSpecification(
+      "simulator_step",
+      "Simulator step",
+      "simulator_step_count",
+      "nonnegative_integer",
+    ),
+    technicalFactSpecification(
+      "incoming_transition",
+      "Incoming transition",
+      "incoming_recipient_transition_id",
+      "optional_scientific_id",
+    ),
+  ]),
+  replay_shared_obs_technical_frame: Object.freeze([
+    technicalFactSpecification("frame", "Frame", "frame_index", "nonnegative_integer"),
+    technicalFactSpecification(
+      "simulator_step",
+      "Simulator step",
+      "simulator_step_count",
+      "nonnegative_integer",
+    ),
+    technicalFactSpecification(
+      "incoming_transition",
+      "Incoming transition",
+      "incoming_recipient_transition_id",
+      "optional_scientific_id",
+    ),
+  ]),
 });
+
+/**
+ * Read one finite, own, enumerable data field without invoking an accessor.
+ * The normalized root already rejects extras; this adapter deliberately never
+ * enumerates the Technical Frame or consults a broader source as fallback.
+ *
+ * @param {Record<string, any>} value
+ * @param {string} field
+ */
+function technicalFrameDataValue(value, field) {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, field);
+    return descriptor?.enumerable === true && Object.hasOwn(descriptor, "value")
+      ? descriptor.value
+      : TECHNICAL_FIELD_UNAVAILABLE;
+  } catch {
+    return TECHNICAL_FIELD_UNAVAILABLE;
+  }
+}
+
+/** @param {unknown} value */
+function isScientificId(value) {
+  return (
+    typeof value === "string" &&
+    value.length >= 1 &&
+    value.length <= 512 &&
+    SCIENTIFIC_ID_PATTERN.test(value)
+  );
+}
+
+/**
+ * @param {TechnicalFactValueKind} valueKind
+ * @param {unknown} value
+ */
+function isTechnicalFactValue(valueKind, value) {
+  if (valueKind === "nonnegative_integer") {
+    return Number.isInteger(value) && Number(value) >= 0;
+  }
+  if (valueKind === "positive_finite_number") {
+    return typeof value === "number" && Number.isFinite(value) && value > 0;
+  }
+  if (valueKind === "scientific_id") {
+    return isScientificId(value);
+  }
+  if (valueKind === "optional_scientific_id") {
+    return value === null || isScientificId(value);
+  }
+  return typeof value === "string" && SHA256_PREFIX_PATTERN.test(value);
+}
 
 /** @param {unknown} value */
 export function authorizedPresentationTechnicalFacts(value) {
-  if (!isAuthorizedPresentationFrame(value) || !isRecord(value.technical_frame)) {
+  if (!isAuthorizedPresentationFrame(value)) {
     return Object.freeze([]);
   }
-  const presentationKind = value.presentation_kind;
+  const technicalFrame = technicalFrameDataValue(value, "technical_frame");
+  if (technicalFrame === TECHNICAL_FIELD_UNAVAILABLE || !isRecord(technicalFrame)) {
+    return Object.freeze([]);
+  }
+  const technicalKind = technicalFrameDataValue(technicalFrame, "technical_kind");
   if (
-    typeof presentationKind !== "string" ||
-    !Object.hasOwn(TECHNICAL_FACT_SPECIFICATIONS, presentationKind)
+    typeof technicalKind !== "string" ||
+    !Object.hasOwn(TECHNICAL_FACT_SPECIFICATIONS, technicalKind)
   ) {
     return Object.freeze([]);
   }
   const specification =
     TECHNICAL_FACT_SPECIFICATIONS[
-      /** @type {keyof typeof TECHNICAL_FACT_SPECIFICATIONS} */ (presentationKind)
+      /** @type {keyof typeof TECHNICAL_FACT_SPECIFICATIONS} */ (technicalKind)
     ];
-  const technicalFrame = value.technical_frame;
-  if (technicalFrame.technical_kind !== specification.technicalKind) {
-    return Object.freeze([]);
-  }
-  const rows = [];
-  for (const [id, label, field] of specification.rows) {
-    const factValue = technicalFrame[field];
-    const valid =
-      id === "ordinary_movement_distance_scale"
-        ? typeof factValue === "number" && Number.isFinite(factValue)
-        : Number.isInteger(factValue) && factValue >= 0;
-    if (!valid) {
+  /** @type {Array<readonly [string, string, unknown]>} */
+  const snapshot = [];
+  for (const [id, label, field, valueKind] of specification) {
+    const factValue = technicalFrameDataValue(technicalFrame, field);
+    if (
+      factValue === TECHNICAL_FIELD_UNAVAILABLE ||
+      !isTechnicalFactValue(valueKind, factValue)
+    ) {
       return Object.freeze([]);
     }
-    rows.push(Object.freeze({ id, label, value: factValue }));
+    snapshot.push(Object.freeze([id, label, factValue]));
   }
-  return Object.freeze(rows);
+  return Object.freeze(
+    snapshot
+      .filter(([, , factValue]) => factValue !== null)
+      .map(([id, label, factValue]) => Object.freeze({ id, label, value: factValue })),
+  );
 }

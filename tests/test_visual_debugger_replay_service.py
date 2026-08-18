@@ -8,9 +8,10 @@ import subprocess
 import sys
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Event
 from types import SimpleNamespace
 from typing import Any, Literal, cast
 
@@ -59,6 +60,7 @@ from scripts.dev.visual_debugger.replay_protocol import (
 )
 from scripts.dev.visual_debugger.replay_service import (
     PresentationResourceResultV1,
+    ReplayMetricReportResultV1,
     ReplayServiceCommandResultV1,
     ReplayViewerService,
 )
@@ -102,6 +104,7 @@ from marl_battlegrounds.evaluation.replay import (
 )
 from marl_battlegrounds.evaluation.replay_io import (
     LoadedReplayBundleV1,
+    canonical_metric_report_artifact_json_bytes_v1,
     load_replay_bundle_v1,
     save_replay_bundle_v1,
 )
@@ -615,6 +618,243 @@ def _service_read_only_snapshot(service: ReplayViewerService) -> tuple[object, .
         tuple((key, id(value), value) for key, value in pov_cache.items()),
         id(shared_cache),
         tuple((key, id(value), value) for key, value in shared_cache.items()),
+    )
+
+
+@pytest.mark.parametrize(
+    ("outcome", "payload", "filename", "exception"),
+    (
+        ("available", None, "safe.marlbg-metrics.json", TypeError),
+        ("available", bytearray(b"{}"), "safe.marlbg-metrics.json", TypeError),
+        ("available", b"{}", None, TypeError),
+        ("missing", b"{}", None, ValueError),
+        ("missing", None, "safe.marlbg-metrics.json", ValueError),
+        ("forbidden", b"{}", "safe.marlbg-metrics.json", ValueError),
+        ("unknown", None, None, ValueError),
+    ),
+)
+def test_metric_report_result_rejects_invalid_outcome_cross_products(
+    outcome: object,
+    payload: object,
+    filename: object,
+    exception: type[Exception],
+) -> None:
+    with pytest.raises(exception):
+        ReplayMetricReportResultV1(
+            outcome=cast(Any, outcome),
+            payload=cast(Any, payload),
+            filename=cast(Any, filename),
+        )
+
+
+@pytest.mark.parametrize(
+    ("episode_id", "expected"),
+    (
+        ("safe.episode_1-test", "safe.episode_1-test.marlbg-metrics.json"),
+        ("../report\\name;\r\n", "report-name.marlbg-metrics.json"),
+        ("...___---", "replay.marlbg-metrics.json"),
+        ("épisode", "pisode.marlbg-metrics.json"),
+        (
+            "safe.marlbg-metrics.json",
+            "safe.marlbg-metrics.json",
+        ),
+        (
+            "safe.marlbg-metrics.json.marlbg-metrics.json",
+            "safe.marlbg-metrics.json",
+        ),
+        (
+            "safe.marlbg-metrics.json.tail",
+            "safe-.tail.marlbg-metrics.json",
+        ),
+        (
+            "x" * 100,
+            f"{'x' * 96}.marlbg-metrics.json",
+        ),
+    ),
+)
+def test_metric_report_filename_sanitizer_is_bounded_ascii_and_path_free(
+    episode_id: str,
+    expected: str,
+) -> None:
+    filename = replay_service_module._safe_metric_report_filename(  # pyright: ignore[reportPrivateUsage]
+        episode_id
+    )
+
+    assert filename == expected
+    assert filename.isascii()
+    assert all(character not in filename for character in '/\\\r\n";')
+    suffix = ".marlbg-metrics.json"
+    assert filename.endswith(suffix)
+    assert suffix not in filename.removesuffix(suffix)
+
+
+def test_current_metric_report_returns_exact_canonical_bytes_without_mutation(
+    service_cases: _ServiceCases,
+) -> None:
+    service = ReplayViewerService(
+        service_cases.complete.bundle,
+        viewer_session_id="metric-report-canonical",
+    )
+    raw = service.current_frame()
+    timeline = service.current_timeline()
+    presentation = service.current_presentation()
+    before = (
+        service.revision,
+        service.command_cache_size,
+        service.pov_index_build_count,
+        service.shared_timeline_build_count,
+    )
+
+    first = service.current_metric_report()
+    second = service.current_metric_report()
+
+    artifact = service_cases.complete.bundle.metric_report_artifact
+    assert artifact is not None
+    assert (
+        first
+        == second
+        == ReplayMetricReportResultV1(
+            outcome="available",
+            payload=canonical_metric_report_artifact_json_bytes_v1(artifact),
+            filename="service-complete.marlbg-metrics.json",
+        )
+    )
+    assert service.current_frame() is raw
+    assert service.current_timeline() is timeline
+    assert service.current_presentation() == presentation
+    assert (
+        service.revision,
+        service.command_cache_size,
+        service.pov_index_build_count,
+        service.shared_timeline_build_count,
+    ) == before
+
+
+def test_current_metric_report_distinguishes_missing_only_in_oracle(
+    service_cases: _ServiceCases,
+) -> None:
+    missing = ReplayViewerService(
+        service_cases.metric_missing.bundle,
+        viewer_session_id="metric-report-missing",
+    )
+    no_shared_available = ReplayViewerService(
+        service_cases.complete.bundle,
+        view_mode="pov",
+        pov_global_slot=0,
+        viewer_session_id="metric-report-no-shared-available",
+    )
+    no_shared_missing = ReplayViewerService(
+        service_cases.metric_missing.bundle,
+        view_mode="pov",
+        pov_global_slot=0,
+        viewer_session_id="metric-report-no-shared-missing",
+    )
+    shared_available = ReplayViewerService(
+        service_cases.shared.bundle,
+        view_mode="pov",
+        pov_global_slot=0,
+        viewer_session_id="metric-report-shared-available",
+    )
+    shared_missing_bundle = LoadedReplayBundleV1(
+        replay=service_cases.shared.bundle.replay,
+        metric_report_artifact=None,
+        status="metric_report_missing",
+    )
+    shared_missing = ReplayViewerService(
+        shared_missing_bundle,
+        view_mode="pov",
+        pov_global_slot=0,
+        viewer_session_id="metric-report-shared-missing",
+    )
+
+    assert missing.current_metric_report() == ReplayMetricReportResultV1(
+        outcome="missing",
+        payload=None,
+        filename=None,
+    )
+    denials = tuple(
+        service.current_metric_report()
+        for service in (
+            no_shared_available,
+            no_shared_missing,
+            shared_available,
+            shared_missing,
+        )
+    )
+    assert denials == (ReplayMetricReportResultV1("forbidden", None, None),) * 4
+
+
+def test_agent_metric_denial_occurs_before_sidecar_access(
+    service_cases: _ServiceCases,
+) -> None:
+    class PoisonBundle:
+        @property
+        def metric_report_artifact(self) -> object:
+            raise AssertionError("Agent POV must not inspect metric sidecar presence")
+
+    service = ReplayViewerService(
+        service_cases.complete.bundle,
+        view_mode="pov",
+        pov_global_slot=0,
+        viewer_session_id="metric-report-poison",
+    )
+    object.__setattr__(service, "_bundle", PoisonBundle())
+
+    assert service.current_metric_report() == ReplayMetricReportResultV1(
+        outcome="forbidden",
+        payload=None,
+        filename=None,
+    )
+
+
+def test_metric_report_view_switch_and_sidecar_read_share_one_lock_epoch(
+    service_cases: _ServiceCases,
+) -> None:
+    entered = Event()
+    release = Event()
+    command_started = Event()
+    artifact = service_cases.complete.bundle.metric_report_artifact
+    assert artifact is not None
+
+    class BlockingBundle:
+        @property
+        def metric_report_artifact(self) -> object:
+            entered.set()
+            if not release.wait(timeout=5):
+                raise RuntimeError("metric sidecar read was not released")
+            return artifact
+
+    service = ReplayViewerService(
+        service_cases.complete.bundle,
+        viewer_session_id="metric-report-view-race",
+    )
+    object.__setattr__(service, "_bundle", BlockingBundle())
+
+    def switch_to_pov() -> ReplayServiceCommandResultV1:
+        command_started.set()
+        return _apply(
+            service,
+            ReplaySetViewCommandV1(view_mode="pov"),
+            command_id="metric-report-view-race",
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        metric_future = executor.submit(service.current_metric_report)
+        assert entered.wait(timeout=2)
+        command_future = executor.submit(switch_to_pov)
+        assert command_started.wait(timeout=2)
+        with pytest.raises(FutureTimeoutError):
+            command_future.result(timeout=0.1)
+        release.set()
+        metric_result = metric_future.result(timeout=2)
+        command_result = command_future.result(timeout=2)
+
+    assert metric_result.outcome == "available"
+    assert _response(command_result).frame.view_mode == "pov"
+    assert service.current_metric_report() == ReplayMetricReportResultV1(
+        outcome="forbidden",
+        payload=None,
+        filename=None,
     )
 
 

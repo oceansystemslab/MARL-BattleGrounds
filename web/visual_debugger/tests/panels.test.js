@@ -3,7 +3,10 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { normalizeAuthorizedPresentationFrameV1 } from "../src/authorized-presentation-normalizer.js";
-import { explainClassDocumentation } from "../src/explanations.js";
+import {
+  explainClassDocumentation,
+  explainTechnicalFact,
+} from "../src/explanations.js";
 import {
   authorizedInspectorView,
   authorizedOutgoingTargetDescriptor,
@@ -56,6 +59,7 @@ function rosterDomHarness() {
   function createNode(tagName) {
     const attributes = new Map();
     const listeners = new Map();
+    let tabIndex = tagName.toLowerCase() === "button" ? 0 : -1;
     /** @type {any[]} */
     const children = [];
     Object.defineProperty(children, "item", {
@@ -72,7 +76,6 @@ function rosterDomHarness() {
       children,
       disabled: false,
       hidden: false,
-      tabIndex: tagName.toLowerCase() === "button" ? 0 : -1,
       type: "",
       getBoundingClientRect() {
         return { left: 0, top: 0, right: 1, bottom: 1, width: 1, height: 1 };
@@ -158,6 +161,17 @@ function rosterDomHarness() {
         }
       },
     };
+    Object.defineProperty(node, "tabIndex", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        return tabIndex;
+      },
+      set(value) {
+        tabIndex = Number(value);
+        attributes.set("tabindex", String(tabIndex));
+      },
+    });
     listenerRegistry.set(node, listeners);
     return node;
   }
@@ -744,19 +758,6 @@ test("authorized roster exposes one native key-only action with isolated fact ow
 
     const replayAgent = await normalizedPresentation("replay_no_shared_obs_agent_pov");
     panels.renderAuthorizedInspector(replayAgent);
-    const replayAgentTechnicalOwners = dom
-      .descendants(diagnosticsCard)
-      .filter((node) => Object.hasOwn(node.dataset, "technicalFact"));
-    assert.deepEqual(
-      replayAgentTechnicalOwners.map((owner) => owner.dataset.technicalFact),
-      ["frame", "simulator_step"],
-    );
-    assert.equal(
-      replayAgentTechnicalOwners.every(
-        (owner) => owner.tabIndex === 0 && owner.hasAttribute("data-tooltip-owner"),
-      ),
-      true,
-    );
     assert.match(
       dom.textTree(selectionCard),
       /Class Overview.*Authored Tactical Guide.*Class Mechanics/u,
@@ -809,15 +810,85 @@ test("authorized roster exposes one native key-only action with isolated fact ow
     agentRows[0].primaryButton.click();
     assert.equal(commands.length, commandCount);
 
+    const technicalCases = [
+      [
+        "presentation",
+        "live_oracle",
+        ["episode", "frame", "simulator_step", "incoming_transition"],
+      ],
+      [
+        "presentation",
+        "live_no_shared_obs_agent_pov",
+        ["episode", "frame", "simulator_step", "incoming_transition"],
+      ],
+      [
+        "presentation",
+        "replay_oracle",
+        [
+          "artifact_digest_prefix",
+          "frame",
+          "simulator_step",
+          "incoming_transition",
+          "ordinary_movement_distance_scale",
+        ],
+      ],
+      [
+        "presentation",
+        "replay_no_shared_obs_agent_pov",
+        ["frame", "simulator_step", "incoming_transition"],
+      ],
+      [
+        "presentation",
+        "replay_shared_obs_agent_pov",
+        ["frame", "simulator_step", "incoming_transition"],
+      ],
+      ["state", "live_oracle_frame_zero", ["episode", "frame", "simulator_step"]],
+      ["state", "live_no_shared_frame_zero", ["episode", "frame", "simulator_step"]],
+      [
+        "state",
+        "replay_oracle_frame_zero",
+        [
+          "artifact_digest_prefix",
+          "frame",
+          "simulator_step",
+          "ordinary_movement_distance_scale",
+        ],
+      ],
+      ["state", "replay_no_shared_frame_zero", ["frame", "simulator_step"]],
+      ["state", "replay_shared_frame_zero", ["frame", "simulator_step"]],
+    ];
+    for (const [source, kind, expectedFactIds] of technicalCases) {
+      const presentation =
+        source === "presentation"
+          ? await normalizedPresentation(String(kind))
+          : await normalizedStateCase(String(kind));
+      panels.renderAuthorizedInspector(presentation);
+      const owners = dom
+        .descendants(diagnosticsCard)
+        .filter((node) => Object.hasOwn(node.dataset, "technicalFact"));
+      assert.deepEqual(
+        owners.map((owner) => owner.dataset.technicalFact),
+        expectedFactIds,
+        String(kind),
+      );
+      assert.equal(
+        owners.every((owner) => {
+          const help = explainTechnicalFact(owner.dataset.technicalFact);
+          return (
+            owner.tabIndex === 0 &&
+            owner.hasAttribute("data-tooltip-owner") &&
+            owner.getAttribute("aria-description") === help.summary &&
+            dom.textTree(owner).trim().length > 0 &&
+            !/undefined|null/u.test(dom.textTree(owner))
+          );
+        }),
+        true,
+        String(kind),
+      );
+    }
+
     const replayOracle = await normalizedPresentation("replay_oracle");
     panels.renderAuthorizedInspector(replayOracle);
-    assert.deepEqual(
-      dom
-        .descendants(diagnosticsCard)
-        .filter((node) => Object.hasOwn(node.dataset, "technicalFact"))
-        .map((owner) => owner.dataset.technicalFact),
-      ["frame", "simulator_step", "ordinary_movement_distance_scale"],
-    );
     const transitionRows = dom
       .descendants(acceptedCard)
       .filter((node) => node.className === "accepted-action-row");

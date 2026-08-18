@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import subprocess
 import sys
 from collections.abc import Callable, Iterator
@@ -35,9 +36,19 @@ from scripts.dev.visual_debugger.server import (
     create_server,
     serve_browser_debugger,
 )
+from tests.evaluation_fixtures import captured_evaluation_trajectory
 from tests.export_visual_debugger_replay_artifacts import export_artifacts
 
-from marl_battlegrounds.evaluation.replay_io import load_replay_bundle_v1
+from marl_battlegrounds.evaluation.metrics import build_evaluation_observer_v1
+from marl_battlegrounds.evaluation.replay import (
+    RuntimeProvenanceV1,
+    build_replay_bundle_v1,
+)
+from marl_battlegrounds.evaluation.replay_io import (
+    LoadedReplayBundleV1,
+    canonical_metric_report_artifact_json_bytes_v1,
+    load_replay_bundle_v1,
+)
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _ASSET_ROOT = _REPOSITORY_ROOT / "web" / "visual_debugger"
@@ -179,6 +190,13 @@ class _FakePresentationResult:
     payload: _FakeReplayPresentation | _FakeLivePresentation | _FakePresentationError
 
 
+@dataclass(frozen=True, slots=True)
+class _FakeMetricReportResult:
+    outcome: str
+    payload: bytes | None
+    filename: str | None
+
+
 class _FakeReplayService:
     """Small transport fake; no production replay or simulator imports."""
 
@@ -188,6 +206,7 @@ class _FakeReplayService:
         self.frame_calls = 0
         self.timeline_calls = 0
         self.presentation_calls = 0
+        self.metric_report_calls = 0
         self.command_calls = 0
         self.cursor_mutations = 0
         self.private_replay = {
@@ -196,6 +215,11 @@ class _FakeReplayService:
         }
         self._commands: dict[tuple[str, str], str] = {}
         self.presentation_available = True
+        self.metric_report_result: object = _FakeMetricReportResult(
+            outcome="available",
+            payload=b'{"canonical":true}',
+            filename="fake-replay.marlbg-metrics.json",
+        )
 
     def current_frame(self) -> _FakeReplayFrame:
         self.frame_calls += 1
@@ -237,6 +261,10 @@ class _FakeReplayService:
                 source_frame_index=self.frame_index,
             ),
         )
+
+    def current_metric_report(self) -> _FakeMetricReportResult:
+        self.metric_report_calls += 1
+        return cast(_FakeMetricReportResult, self.metric_report_result)
 
     def apply_command(self, request: _FakeReplayRequest) -> _FakeServiceResult:
         self.command_calls += 1
@@ -407,6 +435,9 @@ def _coordinator(
             if mode == "replay"
             else service.current_live_presentation
         ),
+        current_metric_report=(
+            service.current_metric_report if mode == "replay" else None
+        ),
     )
 
 
@@ -449,8 +480,33 @@ def _exchange(
     return response, payload
 
 
+def _raw_exchange(server: DebuggerHTTPServer, request: bytes) -> bytes:
+    with socket.create_connection(
+        ("127.0.0.1", server.server_port),
+        timeout=5,
+    ) as connection:
+        connection.settimeout(5)
+        connection.sendall(request)
+        chunks: list[bytes] = []
+        while True:
+            chunk = connection.recv(64 * 1024)
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+
+
 def _authorized_headers(**extra: str) -> dict[str, str]:
     return {_TOKEN_HEADER: _TOKEN, **extra}
+
+
+def _stable_headers(response: HTTPResponse) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        sorted(
+            (name.lower(), value)
+            for name, value in response.getheaders()
+            if name.lower() != "date"
+        )
+    )
 
 
 def _recursive_keys(value: object) -> set[str]:
@@ -483,6 +539,88 @@ def _command_body(
     )
 
 
+def _real_loaded_bundle(
+    *,
+    episode_id: str,
+    execution_information_mode: Literal["no_shared_obs", "shared_obs"],
+) -> LoadedReplayBundleV1:
+    trajectory = captured_evaluation_trajectory(
+        transition_count=1,
+        expected_horizon=1,
+        execution_information_mode=execution_information_mode,
+        episode_id=episode_id,
+    )
+    observer = build_evaluation_observer_v1(trajectory.context)
+    observer.start(trajectory.frames[0])
+    observer.append(trajectory.transitions[0], trajectory.frames[1])
+    report = observer.finalize(completion_state="complete")
+    bundle = build_replay_bundle_v1(
+        observer,
+        report,
+        runtime_provenance=RuntimeProvenanceV1(
+            python_version="3.14.0",
+            package_version="0.0.0",
+            jax_version="0.7.0",
+            jaxlib_version="0.7.0",
+            numpy_version="2.3.0",
+            pydantic_version="2.11.0",
+            platform="linux",
+            machine="x86_64",
+            backend="cpu",
+            device="generic-cpu",
+            precision="float32",
+            environment_count=1,
+            batch_shape=(1,),
+            policy_execution_included=False,
+        ),
+    )
+    return LoadedReplayBundleV1(
+        replay=bundle.replay,
+        metric_report_artifact=bundle.metric_report_artifact,
+        status="complete",
+    )
+
+
+def _real_replay_binding(service: ReplayViewerService) -> HttpCoordinatorBinding:
+    return HttpCoordinatorBinding(
+        mode="replay",
+        routes=REPLAY_HTTP_ROUTES,
+        request_model=ReplayCommandRequestV1,
+        error_factory=ReplayApiErrorV1,
+        current_frame=service.current_frame,
+        apply_command=service.apply_command,
+        current_timeline=service.current_timeline,
+        current_presentation=service.current_presentation,
+        current_metric_report=service.current_metric_report,
+    )
+
+
+def _real_metric_exchange(
+    service: ReplayViewerService,
+) -> tuple[HTTPResponse, bytes]:
+    server = create_server(
+        service,
+        asset_root=_ASSET_ROOT,
+        port=0,
+        capability_token=_TOKEN,
+        coordinator=_real_replay_binding(service),
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        return _exchange(
+            server,
+            "GET",
+            "/api/replay/metric-report",
+            headers=_authorized_headers(),
+        )
+    finally:
+        if thread.is_alive():
+            server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
 def test_replay_bootstrap_exposes_only_the_replay_product_identity(
     running_replay_server: tuple[DebuggerHTTPServer, _FakeReplayService, Thread],
 ) -> None:
@@ -499,6 +637,335 @@ def test_replay_bootstrap_exposes_only_the_replay_product_identity(
     )
     assert service.frame_calls == 0
     assert service.timeline_calls == 0
+
+
+def test_replay_metric_report_preserves_exact_bytes_and_attachment_headers(
+    running_replay_server: tuple[DebuggerHTTPServer, _FakeReplayService, Thread],
+) -> None:
+    server, service, _ = running_replay_server
+
+    response, body = _exchange(
+        server,
+        "GET",
+        "/api/replay/metric-report",
+        headers=_authorized_headers(),
+    )
+
+    assert response.status == HTTPStatus.OK
+    assert response.getheader("Content-Type") == "application/json; charset=utf-8"
+    assert response.getheader("Content-Length") == str(len(b'{"canonical":true}'))
+    assert response.getheader("Cache-Control") == "no-store"
+    assert response.getheader("Content-Disposition") == (
+        'attachment; filename="fake-replay.marlbg-metrics.json"'
+    )
+    assert body == b'{"canonical":true}'
+    assert service.metric_report_calls == 1
+    assert service.frame_calls == service.timeline_calls == service.command_calls == 0
+
+
+def test_replay_metric_missing_uses_the_exact_non_disclosing_envelope(
+    running_replay_server: tuple[DebuggerHTTPServer, _FakeReplayService, Thread],
+) -> None:
+    server, service, _ = running_replay_server
+    service.metric_report_result = _FakeMetricReportResult("missing", None, None)
+
+    missing, missing_body = _exchange(
+        server,
+        "GET",
+        "/api/replay/metric-report",
+        headers=_authorized_headers(),
+    )
+
+    assert missing.status == HTTPStatus.NOT_FOUND
+    assert json.loads(missing_body) == {
+        "schema_version": 1,
+        "error_code": "not_found",
+        "message": "No metric report is available for this replay.",
+        "latest_frame": None,
+    }
+
+
+def test_real_agent_metric_denials_are_constant_across_mode_and_presence() -> None:
+    no_shared = _real_loaded_bundle(
+        episode_id="privacy-no-shared",
+        execution_information_mode="no_shared_obs",
+    )
+    shared = _real_loaded_bundle(
+        episode_id="privacy-shared",
+        execution_information_mode="shared_obs",
+    )
+    cases = (
+        no_shared,
+        LoadedReplayBundleV1(
+            replay=no_shared.replay,
+            metric_report_artifact=None,
+            status="metric_report_missing",
+        ),
+        shared,
+        LoadedReplayBundleV1(
+            replay=shared.replay,
+            metric_report_artifact=None,
+            status="metric_report_missing",
+        ),
+    )
+    services = tuple(
+        ReplayViewerService(
+            bundle,
+            view_mode="pov",
+            pov_global_slot=0,
+            viewer_session_id=f"real-agent-metric-denial-{index}",
+        )
+        for index, bundle in enumerate(cases)
+    )
+
+    denials = tuple(_real_metric_exchange(service) for service in services)
+
+    first_response, first_body = denials[0]
+    assert json.loads(first_body) == {
+        "schema_version": 1,
+        "error_code": "audience_unavailable",
+        "message": "Metric reports are available only in Oracle View.",
+        "latest_frame": None,
+    }
+    assert all(response.status == HTTPStatus.FORBIDDEN for response, _ in denials)
+    assert all(body == first_body for _, body in denials)
+    assert all(
+        _stable_headers(response) == _stable_headers(first_response)
+        for response, _ in denials
+    )
+    assert all(
+        response.getheader("Content-Disposition") is None for response, _ in denials
+    )
+    assert tuple(service.revision for service in services) == (0, 0, 0, 0)
+
+
+def test_real_service_reserved_suffix_metric_download_is_repeatable() -> None:
+    loaded = _real_loaded_bundle(
+        episode_id="safe.marlbg-metrics.json",
+        execution_information_mode="no_shared_obs",
+    )
+    artifact = loaded.metric_report_artifact
+    assert artifact is not None
+    service = ReplayViewerService(
+        loaded,
+        viewer_session_id="reserved-suffix-http-regression",
+    )
+    server = create_server(
+        service,
+        asset_root=_ASSET_ROOT,
+        port=0,
+        capability_token=_TOKEN,
+        coordinator=_real_replay_binding(service),
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        first = _exchange(
+            server,
+            "GET",
+            "/api/replay/metric-report",
+            headers=_authorized_headers(),
+        )
+        second = _exchange(
+            server,
+            "GET",
+            "/api/replay/metric-report",
+            headers=_authorized_headers(),
+        )
+    finally:
+        if thread.is_alive():
+            server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    expected = canonical_metric_report_artifact_json_bytes_v1(artifact)
+    first_response, first_body = first
+    second_response, second_body = second
+    assert first_response.status == second_response.status == HTTPStatus.OK
+    assert first_body == second_body == expected
+    assert first_response.getheader("Content-Disposition") == (
+        'attachment; filename="safe.marlbg-metrics.json"'
+    )
+    assert second_response.getheader("Content-Disposition") == (
+        first_response.getheader("Content-Disposition")
+    )
+    assert _stable_headers(first_response) == _stable_headers(second_response)
+    assert service.revision == 0
+
+
+def test_metric_route_checks_origin_and_token_before_callback(
+    running_replay_server: tuple[DebuggerHTTPServer, _FakeReplayService, Thread],
+) -> None:
+    server, service, _ = running_replay_server
+
+    responses = (
+        _exchange(server, "GET", "/api/replay/metric-report")[0],
+        _exchange(
+            server,
+            "GET",
+            "/api/replay/metric-report",
+            headers={_TOKEN_HEADER: "wrong"},
+        )[0],
+        _exchange(
+            server,
+            "GET",
+            "/api/replay/metric-report",
+            headers={"Host": "example.test"},
+        )[0],
+        _exchange(
+            server,
+            "GET",
+            "/api/replay/metric-report",
+            headers=_authorized_headers(Host="example.test"),
+        )[0],
+        _exchange(
+            server,
+            "GET",
+            "/api/replay/metric-report",
+            headers=_authorized_headers(Origin="null"),
+        )[0],
+        _exchange(
+            server,
+            "GET",
+            "/api/replay/metric-report",
+            headers=_authorized_headers(**{"Sec-Fetch-Site": "cross-site"}),
+        )[0],
+    )
+
+    assert tuple(response.status for response in responses) == (
+        HTTPStatus.UNAUTHORIZED,
+        HTTPStatus.UNAUTHORIZED,
+        HTTPStatus.FORBIDDEN,
+        HTTPStatus.FORBIDDEN,
+        HTTPStatus.FORBIDDEN,
+        HTTPStatus.FORBIDDEN,
+    )
+    assert service.metric_report_calls == 0
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        "/api/replay/metric-report?",
+        "/api/replay/metric-report#",
+        "/api/replay/metric-report?download=1",
+        "/api/replay/metric-report#fragment",
+        "/api/replay/metric-report?download=1#fragment",
+    ),
+)
+def test_metric_route_rejects_every_raw_query_or_fragment_target(
+    running_replay_server: tuple[DebuggerHTTPServer, _FakeReplayService, Thread],
+    path: str,
+) -> None:
+    server, service, _ = running_replay_server
+
+    response, body = _exchange(
+        server,
+        "GET",
+        path,
+        headers=_authorized_headers(),
+    )
+
+    assert response.status == HTTPStatus.NOT_FOUND
+    assert json.loads(body)["error_code"] == "not_found"
+    assert service.metric_report_calls == 0
+
+
+def test_metric_route_rejects_absolute_form_raw_target_before_callback(
+    running_replay_server: tuple[DebuggerHTTPServer, _FakeReplayService, Thread],
+) -> None:
+    server, service, _ = running_replay_server
+    raw_target = f"http://{server.expected_host}/api/replay/metric-report"
+    response = _raw_exchange(
+        server,
+        (
+            f"GET {raw_target} HTTP/1.1\r\n"
+            f"Host: {server.expected_host}\r\n"
+            f"{_TOKEN_HEADER}: {_TOKEN}\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+        ).encode("ascii"),
+    )
+
+    _, _, body = response.partition(b"\r\n\r\n")
+    assert response.startswith(b"HTTP/1.1 404 ")
+    assert json.loads(body)["error_code"] == "not_found"
+    assert service.metric_report_calls == 0
+
+
+def test_authenticated_metric_post_is_method_not_allowed_without_callback(
+    running_replay_server: tuple[DebuggerHTTPServer, _FakeReplayService, Thread],
+) -> None:
+    server, service, _ = running_replay_server
+
+    unauthorized, _ = _exchange(server, "POST", "/api/replay/metric-report")
+    response, body = _exchange(
+        server,
+        "POST",
+        "/api/replay/metric-report",
+        headers=_authorized_headers(),
+    )
+
+    assert unauthorized.status == HTTPStatus.UNAUTHORIZED
+    assert response.status == HTTPStatus.METHOD_NOT_ALLOWED
+    assert json.loads(body)["error_code"] == "method_not_allowed"
+    assert service.metric_report_calls == 0
+
+
+@pytest.mark.parametrize(
+    "forged",
+    (
+        object(),
+        _FakeMetricReportResult("unknown", None, None),
+        _FakeMetricReportResult(
+            "available",
+            cast(bytes, bytearray(b"{}")),
+            "safe.marlbg-metrics.json",
+        ),
+        _FakeMetricReportResult("available", b"{}", "../unsafe.marlbg-metrics.json"),
+        _FakeMetricReportResult("available", b"{}", "unsafe\\path.marlbg-metrics.json"),
+        _FakeMetricReportResult(
+            "available",
+            b"{}",
+            "unsafe\r\nX-Forged-Header:true.marlbg-metrics.json",
+        ),
+        _FakeMetricReportResult("available", b"{}", 'unsafe".marlbg-metrics.json'),
+        _FakeMetricReportResult("available", b"{}", "unsafe;.marlbg-metrics.json"),
+        _FakeMetricReportResult("available", b"{}", "é.marlbg-metrics.json"),
+        _FakeMetricReportResult("available", b"{}", "unsafe.json"),
+        _FakeMetricReportResult(
+            "available",
+            b"{}",
+            "unsafe.marlbg-metrics.json.marlbg-metrics.json",
+        ),
+        _FakeMetricReportResult("available", b"{}", "unsafe.marlbg-metrics.json.evil"),
+        _FakeMetricReportResult("missing", b"{}", None),
+        _FakeMetricReportResult("forbidden", None, "unsafe.marlbg-metrics.json"),
+    ),
+)
+def test_forged_metric_results_fail_generically_before_attachment_headers(
+    running_replay_server: tuple[DebuggerHTTPServer, _FakeReplayService, Thread],
+    forged: object,
+) -> None:
+    server, service, _ = running_replay_server
+    service.metric_report_result = forged
+
+    response, body = _exchange(
+        server,
+        "GET",
+        "/api/replay/metric-report",
+        headers=_authorized_headers(),
+    )
+
+    assert response.status == HTTPStatus.INTERNAL_SERVER_ERROR
+    assert response.getheader("Content-Disposition") is None
+    assert json.loads(body) == {
+        "schema_version": 1,
+        "error_code": "internal_error",
+        "message": "The debugger could not process this request.",
+        "latest_frame": None,
+    }
+    assert service.metric_report_calls == 1
 
 
 def test_server_import_is_core_jax_and_protocol_family_free() -> None:
@@ -555,6 +1022,12 @@ def test_live_request_and_replay_replacement_are_serialized_and_coherent() -> No
     original_origin = server.expected_origin
     original_host = server.expected_host
     original_token = server.capability_token
+    live_metric, live_metric_body = _exchange(
+        server,
+        "GET",
+        "/api/replay/metric-report",
+        headers=_authorized_headers(),
+    )
     old_responses: list[tuple[HTTPResponse, bytes]] = []
     old_request = Thread(
         target=lambda: old_responses.append(
@@ -621,6 +1094,12 @@ def test_live_request_and_replay_replacement_are_serialized_and_coherent() -> No
             "/api/presentation/frame",
             headers=_authorized_headers(),
         )
+        replay_metric, replay_metric_body = _exchange(
+            server,
+            "GET",
+            "/api/replay/metric-report",
+            headers=_authorized_headers(),
+        )
         replay_bootstrap, replay_bootstrap_body = _exchange(
             server,
             "GET",
@@ -635,6 +1114,8 @@ def test_live_request_and_replay_replacement_are_serialized_and_coherent() -> No
         )
 
         assert old_response.status == HTTPStatus.OK
+        assert live_metric.status == HTTPStatus.NOT_FOUND
+        assert json.loads(live_metric_body)["error_code"] == "not_found"
         assert json.loads(old_body) == {
             "schema_version": 2,
             "result": "applied",
@@ -652,6 +1133,9 @@ def test_live_request_and_replay_replacement_are_serialized_and_coherent() -> No
             == replay_presentation.status
             == HTTPStatus.OK
         )
+        assert replay_metric.status == HTTPStatus.OK
+        assert replay_metric_body == b'{"canonical":true}'
+        assert replay_service.metric_report_calls == 1
         assert json.loads(replay_presentation_body)["presentation_kind"] == (
             "replay_oracle"
         )
@@ -1105,6 +1589,7 @@ def test_binding_rejects_route_or_timeline_cross_mode_configuration() -> None:
             apply_command=service.apply_command,
             current_presentation=service.current_presentation,
             current_timeline=service.current_timeline,
+            current_metric_report=service.current_metric_report,
         )
     with pytest.raises(ValueError, match="cannot expose a replay timeline"):
         HttpCoordinatorBinding(
@@ -1126,6 +1611,29 @@ def test_binding_rejects_route_or_timeline_cross_mode_configuration() -> None:
             current_frame=service.current_frame,
             apply_command=service.apply_command,
             current_presentation=service.current_presentation,
+            current_metric_report=service.current_metric_report,
+        )
+    with pytest.raises(ValueError, match="requires a metric-report"):
+        HttpCoordinatorBinding(
+            mode="replay",
+            routes=REPLAY_HTTP_ROUTES,
+            request_model=_FakeReplayRequest,
+            error_factory=_error_factory,
+            current_frame=service.current_frame,
+            apply_command=service.apply_command,
+            current_presentation=service.current_presentation,
+            current_timeline=service.current_timeline,
+        )
+    with pytest.raises(ValueError, match="cannot expose replay metrics"):
+        HttpCoordinatorBinding(
+            mode="live",
+            routes=LIVE_HTTP_ROUTES,
+            request_model=_FakeReplayRequest,
+            error_factory=_error_factory,
+            current_frame=service.current_frame,
+            apply_command=service.apply_command,
+            current_presentation=service.current_live_presentation,
+            current_metric_report=service.current_metric_report,
         )
     with pytest.raises(TypeError, match="current_presentation"):
         HttpCoordinatorBinding(  # pyright: ignore[reportCallIssue]
@@ -1155,6 +1663,7 @@ def test_binding_rejects_route_or_timeline_cross_mode_configuration() -> None:
                 command="/api/replay/command",
                 timeline=None,
                 presentation="/api/presentation/frame",
+                metric_report=None,
             ),
             request_model=_FakeReplayRequest,
             error_factory=_error_factory,
@@ -1243,6 +1752,7 @@ def test_actual_shared_replay_http_outcomes_are_private_recipient_roots(
         apply_command=service.apply_command,
         current_timeline=service.current_timeline,
         current_presentation=service.current_presentation,
+        current_metric_report=service.current_metric_report,
     )
     server = create_server(
         service,

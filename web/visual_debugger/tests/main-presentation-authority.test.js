@@ -29,6 +29,25 @@ function assertSourceOrder(source, earlier, later) {
   assert.ok(earlierIndex < laterIndex, `${earlier} must precede ${later}`);
 }
 
+/**
+ * Import one dependency-free pure helper directly from the production source
+ * without evaluating the browser module's DOM bootstrap.
+ *
+ * @param {string} source
+ * @param {string} name
+ * @param {string} nextName
+ */
+async function importPureMainHelper(source, name, nextName) {
+  const start = source.indexOf(`function ${name}(`);
+  const end = source.indexOf(`function ${nextName}(`, start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const moduleSource = `export ${source.slice(start, end)}`;
+  return import(
+    `data:text/javascript;charset=utf-8,${encodeURIComponent(moduleSource)}`
+  );
+}
+
 test("main keeps raw transport and certified presentation authority separate", async () => {
   const source = await readFile(mainUrl, "utf8");
 
@@ -765,6 +784,224 @@ test("main derives replay animation only from the current controller intent", as
       ),
     ),
     /previousTick|currentTick|\u2192/u,
+  );
+});
+
+test("replay artifact capabilities cross CP8 state and audience without sidecar input", async () => {
+  const source = await readFile(mainUrl, "utf8");
+  const module = await importPureMainHelper(
+    source,
+    "replayArtifactActionCapabilities",
+    "replayBattlefieldReady",
+  );
+  const capabilities = module.replayArtifactActionCapabilities;
+  const base = {
+    replayProduct: true,
+    coherentAuthority: true,
+    audience: "researcher",
+    transportState: "SETTLED",
+    connected: true,
+    hidden: false,
+    playing: false,
+    requestPending: false,
+    presentationPending: false,
+    renderPolicy: "replay_static",
+    cursorMatches: true,
+    operationallyBlocked: false,
+    actionPending: false,
+    battlefieldReady: true,
+  };
+
+  assert.deepEqual(
+    { ...capabilities(base) },
+    {
+      exportPng: true,
+      downloadMetrics: true,
+    },
+  );
+  const oracleMissing = {
+    ...base,
+    metricReportAvailability: "missing",
+  };
+  assert.equal(capabilities(oracleMissing).downloadMetrics, true);
+  assert.deepEqual(
+    { ...capabilities({ ...base, audience: "agent_pov" }) },
+    { exportPng: true, downloadMetrics: false },
+  );
+  for (const transportState of ["OFFLINE", "PLAYING", "ADVANCING"]) {
+    assert.deepEqual(
+      { ...capabilities({ ...base, transportState }) },
+      { exportPng: false, downloadMetrics: false },
+    );
+  }
+  for (const override of [
+    { replayProduct: false },
+    { coherentAuthority: false },
+    { audience: null },
+    { connected: false },
+    { hidden: true },
+    { playing: true },
+    { requestPending: true },
+    { presentationPending: true },
+    { renderPolicy: "replay_animated" },
+    { cursorMatches: false },
+    { operationallyBlocked: true },
+    { actionPending: true },
+  ]) {
+    assert.deepEqual(
+      { ...capabilities({ ...base, ...override }) },
+      { exportPng: false, downloadMetrics: false },
+    );
+  }
+  assert.deepEqual(
+    { ...capabilities({ ...base, battlefieldReady: false }) },
+    { exportPng: false, downloadMetrics: true },
+  );
+  const helperStart = source.indexOf("function replayArtifactActionCapabilities(");
+  const helperEnd = source.indexOf("function replayBattlefieldReady()", helperStart);
+  const helperSource = source.slice(helperStart, helperEnd);
+  assert.doesNotMatch(helperSource, /sidecar|metric.*(?:present|missing|available)/iu);
+});
+
+test("replay artifact actions snapshot once, fence every await, and never drive transport", async () => {
+  const source = await readFile(mainUrl, "utf8");
+  const exportStart = source.indexOf("async function exportReplayBattlefieldPng()");
+  const exportEnd = source.indexOf(
+    "async function downloadReplayMetricReport()",
+    exportStart,
+  );
+  const metricEnd = source.indexOf(
+    "/**\n * Recognize only the installed branded scripted-live pair.",
+    exportEnd,
+  );
+  const metricErrorStart = source.indexOf("function replayMetricDownloadError(");
+  const metricErrorEnd = exportStart;
+  const clearStart = source.indexOf("function clearPresentationAuthority(reason)");
+  const clearEnd = source.indexOf(
+    "function holdWorkspaceHeightDuringAuthorityInstall()",
+    clearStart,
+  );
+  const filterStart = source.indexOf("function applyVisualFilterAction(action)");
+  const filterEnd = source.indexOf(
+    "function installedChoreographyControl(",
+    filterStart,
+  );
+  const localStart = source.indexOf("function setLocalInspectedPresentationKey(");
+  const localEnd = source.indexOf(
+    "function installedPresentationRangesVisible(",
+    localStart,
+  );
+  for (const boundary of [
+    exportStart,
+    exportEnd,
+    metricEnd,
+    clearStart,
+    clearEnd,
+    filterStart,
+    filterEnd,
+    localStart,
+    localEnd,
+    metricErrorStart,
+    metricErrorEnd,
+  ]) {
+    assert.notEqual(boundary, -1);
+  }
+  const exportSource = source.slice(exportStart, exportEnd);
+  const metricSource = source.slice(exportEnd, metricEnd);
+  const metricErrorSource = source.slice(metricErrorStart, metricErrorEnd);
+  const clearSource = source.slice(clearStart, clearEnd);
+  const filterSource = source.slice(filterStart, filterEnd);
+  const localSource = source.slice(localStart, localEnd);
+
+  assert.match(
+    source,
+    /currentReplayArtifactActionCapabilities\(installed\)[\s\S]*isJoinedTransportAndAuthorizedPresentationV1\(authority\)[\s\S]*authority\.transport !== installed\.transport[\s\S]*authority\.presentation !== installed\.presentation/u,
+  );
+  assert.match(
+    exportSource,
+    /await captureReplayBattlefieldPngV1\(\{[\s\S]*battlefield: elements\.battlefield,[\s\S]*installedAuthority: transaction\.authority,[\s\S]*isCurrent: \(\) => replayArtifactActionIsCurrent\(transaction\),[\s\S]*localInspectedPresentationKey: transaction\.localInspectedPresentationKey,[\s\S]*visualFilters: transaction\.visualFilters,/u,
+  );
+  assertSourceOrder(
+    exportSource,
+    "await captureReplayBattlefieldPngV1({",
+    "if (!replayArtifactActionIsCurrent(transaction))",
+  );
+  assertSourceOrder(
+    metricSource,
+    "await getReplayMetricReport(state.token)",
+    "if (!replayArtifactActionIsCurrent(transaction))",
+  );
+  assertSourceOrder(
+    metricSource,
+    "await getReplayMetricReport(state.token)",
+    "downloadReplayArtifact(",
+  );
+  assert.equal(
+    [...metricSource.matchAll(/getReplayMetricReport\(state\.token\)/gu)].length,
+    1,
+  );
+  for (const actionSource of [exportSource, metricSource]) {
+    assert.doesNotMatch(
+      actionSource,
+      /postReplayCommand|getCurrentFrame|getCurrentPresentation|getReplayTimeline|sendReplayCommand|dispatchReplayCommand|replayPlayback\.(?:play|pause|seek|next|previous|first|last)|\brender\(\)/u,
+    );
+  }
+  assert.match(
+    metricSource,
+    /new Blob\(\[report\.bytes\], \{ type: "application\/json; charset=utf-8" \}\)/u,
+  );
+  const metricCatchStart = metricSource.indexOf("} catch (error) {");
+  const metricFinallyStart = metricSource.indexOf("} finally {", metricCatchStart);
+  assert.notEqual(metricCatchStart, -1);
+  assert.notEqual(metricFinallyStart, -1);
+  assert.doesNotMatch(
+    metricSource.slice(metricCatchStart, metricFinallyStart),
+    /downloadReplayArtifact\(/u,
+  );
+  assert.match(
+    metricErrorSource,
+    /error instanceof DebuggerApiError && error\.status === 404[\s\S]*No metric report is available for this replay\.[\s\S]*level: "warning"/u,
+  );
+  assert.match(clearSource, /invalidateReplayArtifactAction\(\);/u);
+  assert.match(
+    filterSource,
+    /invalidateReplayArtifactAction\(\);[\s\S]*visualFilterState = next;/u,
+  );
+  assert.equal(
+    [...localSource.matchAll(/invalidateReplayArtifactAction\(\);/gu)].length,
+    2,
+  );
+  assert.match(
+    source,
+    /onStateChange: \(playback\) => \{[\s\S]*playback\.generation !== replayArtifactActionTransaction\.playbackGeneration[\s\S]*invalidateReplayArtifactAction\(\);/u,
+  );
+  assert.match(
+    source,
+    /replayArtifactActionIsCurrent\(transaction\)[\s\S]*state\.authority !== transaction\.authority[\s\S]*installed\.transport !== transaction\.transport[\s\S]*installed\.presentation !== transaction\.presentation/u,
+  );
+  assert.match(
+    source,
+    /function reconcilePresentationPreference\([\s\S]*invalidateReplayArtifactAction\(\);[\s\S]*preference\.localInspection\.presentationKey = null;/u,
+  );
+  assert.match(
+    source,
+    /async function sendReplayCommand\([\s\S]*invalidateReplayArtifactAction\(\);[\s\S]*state\.busy = true;/u,
+  );
+  assert.match(
+    source,
+    /async function dispatchReplayCommand\([\s\S]*invalidateReplayArtifactAction\(\);[\s\S]*replayPlayback\.pause\("user_command"\);/u,
+  );
+  assert.match(
+    source,
+    /async function loadCurrentFrame\([\s\S]*invalidateReplayArtifactAction\(\);[\s\S]*replayPlayback\.pause\("reconnect"\);/u,
+  );
+  assert.match(
+    source,
+    /elements\.exitButton\.addEventListener\("click", \(\) => \{\s*invalidateReplayArtifactAction\(\);[\s\S]*dispatchReplayCommand\(\{ command_type: "exit" \}\)/u,
+  );
+  assert.match(
+    source,
+    /elements\.reconnectButton\.addEventListener\("click", \(\) => \{\s*invalidateReplayArtifactAction\(\);[\s\S]*loadCurrentFrame\(\)/u,
   );
 });
 

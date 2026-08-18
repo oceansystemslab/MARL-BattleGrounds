@@ -171,6 +171,33 @@
           </div>
         </dl>
       </div>
+      <fieldset
+        id="replay-artifact-actions"
+        class="replay-artifact-actions"
+        aria-label="Replay artifact actions"
+        data-replay-only
+        hidden
+      >
+        <legend class="sr-only">Replay artifact actions</legend>
+        <button
+          id="replay-export-png-button"
+          type="button"
+          aria-describedby="replay-export-png-help"
+          disabled
+        >Export PNG</button>
+        <span id="replay-export-png-help" class="sr-only">
+          Export the settled battlefield alone at twice its displayed resolution.
+        </span>
+        <button
+          id="replay-download-metrics-button"
+          type="button"
+          aria-describedby="replay-download-metrics-help"
+          disabled
+        >Download Metrics</button>
+        <span id="replay-download-metrics-help" class="sr-only">
+          Download the canonical metric report in Oracle View.
+        </span>
+      </fieldset>
       <fieldset class="replay-timeline__transport">
         <legend class="sr-only">Replay transport</legend>
         <button id="replay-first-button" type="button" aria-label="Start replay tick">Start</button>

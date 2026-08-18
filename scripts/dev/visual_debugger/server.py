@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import sys
 import webbrowser
@@ -16,13 +17,16 @@ from pathlib import Path
 from socket import socket
 from threading import Event, Lock, RLock, Thread
 from typing import Any, Literal, Protocol, cast, get_args
-from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ValidationError
 
 _TOKEN_HEADER = "X-MARL-Debugger-Token"
 _MAX_COMMAND_BODY_BYTES = 64 * 1024
 _CLIENT_SOCKET_TIMEOUT_SECONDS = 2.0
+_METRIC_REPORT_ROUTE = "/api/replay/metric-report"
+_METRIC_REPORT_SUFFIX = ".marlbg-metrics.json"
+_METRIC_REPORT_CONTENT_TYPE = "application/json; charset=utf-8"
+_SAFE_METRIC_REPORT_STEM = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}")
 _SECURITY_HEADERS = {
     "Cache-Control": "no-store",
     "Content-Security-Policy": (
@@ -68,6 +72,7 @@ _REQUIRED_RUNTIME_ASSET_PATHS = (
     "src/panels.js",
     "src/presentation-install.js",
     "src/replay-controls.js",
+    "src/replay-export.js",
     "src/replay-frame-normalizer.js",
     "src/routes.js",
     "src/scene.js",
@@ -99,6 +104,7 @@ class HttpRouteSet:
     command: str
     timeline: str | None
     presentation: str
+    metric_report: str | None
 
 
 LIVE_HTTP_ROUTES = HttpRouteSet(
@@ -106,12 +112,14 @@ LIVE_HTTP_ROUTES = HttpRouteSet(
     command="/api/command",
     timeline=None,
     presentation="/api/presentation/frame",
+    metric_report=None,
 )
 REPLAY_HTTP_ROUTES = HttpRouteSet(
     frame="/api/frame",
     command="/api/replay/command",
     timeline="/api/replay/timeline",
     presentation="/api/presentation/frame",
+    metric_report=_METRIC_REPORT_ROUTE,
 )
 
 
@@ -130,6 +138,19 @@ class HttpCommandResult(HttpPayloadResult, Protocol):
 
     @property
     def shutdown_requested(self) -> bool: ...
+
+
+class HttpMetricReportResult(Protocol):
+    """Structural result for one canonical replay metric artifact."""
+
+    @property
+    def outcome(self) -> str: ...
+
+    @property
+    def payload(self) -> bytes | None: ...
+
+    @property
+    def filename(self) -> str | None: ...
 
 
 class _LegacyServiceOperations(Protocol):
@@ -181,6 +202,70 @@ def _require_http_status(value: object) -> HTTPStatus:
     return value
 
 
+def _validate_metric_report_filename(filename: object) -> str:
+    """Validate the complete ASCII attachment basename at the HTTP boundary."""
+    if type(filename) is not str or not filename.isascii():
+        raise TypeError("Metric report filename must be an ASCII string.")
+    if not filename.endswith(_METRIC_REPORT_SUFFIX):
+        raise ValueError("Metric report filename has the wrong suffix.")
+    if filename.count(_METRIC_REPORT_SUFFIX) != 1:
+        raise ValueError("Metric report filename contains an injected suffix.")
+    stem = filename.removesuffix(_METRIC_REPORT_SUFFIX)
+    if (
+        _SAFE_METRIC_REPORT_STEM.fullmatch(stem) is None
+        or stem.strip("._-") != stem
+        or stem in (".", "..")
+    ):
+        raise ValueError("Metric report filename is not a safe basename.")
+    return filename
+
+
+def _validate_metric_report_result(
+    result: object,
+) -> tuple[Literal["available", "missing", "forbidden"], bytes | None, str | None]:
+    """Validate a structural service result before any HTTP response bytes."""
+    typed_result = cast(HttpMetricReportResult, result)
+    outcome = typed_result.outcome
+    payload = typed_result.payload
+    filename = typed_result.filename
+    if type(outcome) is not str or outcome not in (
+        "available",
+        "missing",
+        "forbidden",
+    ):
+        raise ValueError("Unknown metric report outcome.")
+    if outcome == "available":
+        if type(payload) is not bytes:
+            raise TypeError("Available metric report payload must be immutable bytes.")
+        return outcome, payload, _validate_metric_report_filename(filename)
+    if payload is not None or filename is not None:
+        raise ValueError("Unavailable metric report cannot carry response data.")
+    return outcome, None, None
+
+
+def _validate_response_headers(
+    headers: tuple[tuple[str, str], ...],
+) -> tuple[tuple[str, str], ...]:
+    """Validate the finite optional response-header surface before status write."""
+    if type(headers) is not tuple:
+        raise TypeError("Optional response headers must be an immutable tuple.")
+    seen: set[str] = set()
+    for header in headers:
+        if type(header) is not tuple or len(header) != 2:
+            raise TypeError("Each optional response header must be an exact pair.")
+        name, value = header
+        if type(name) is not str or type(value) is not str:
+            raise TypeError(
+                "Optional response header names and values must be strings."
+            )
+        if name != "Content-Disposition" or name in seen:
+            raise ValueError("Optional response header is not allowlisted.")
+        if not value.isascii() or "\r" in value or "\n" in value:
+            raise ValueError("Optional response header value is unsafe.")
+        seen.add(name)
+    return headers
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class HttpCoordinatorBinding:
     """Injected protocol and service operations for one isolated server mode."""
@@ -193,6 +278,7 @@ class HttpCoordinatorBinding:
     apply_command: Callable[..., HttpCommandResult]
     current_presentation: Callable[[], HttpPayloadResult]
     current_timeline: Callable[[], object] | None = None
+    current_metric_report: Callable[[], HttpMetricReportResult] | None = None
     result_status: Callable[[HttpCommandResult], HTTPStatus] = _default_result_status
 
     @property
@@ -229,6 +315,10 @@ class HttpCoordinatorBinding:
             raise ValueError("live debugger mode cannot expose a replay timeline.")
         if self.mode == "replay" and not callable(self.current_timeline):
             raise ValueError("replay debugger mode requires a timeline operation.")
+        if self.mode == "live" and self.current_metric_report is not None:
+            raise ValueError("live debugger mode cannot expose replay metrics.")
+        if self.mode == "replay" and not callable(self.current_metric_report):
+            raise ValueError("replay debugger mode requires a metric-report operation.")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -399,6 +489,7 @@ def _legacy_live_binding(service: object) -> HttpCoordinatorBinding:
         current_frame=call_current_frame,
         apply_command=call_apply_command,
         current_presentation=call_current_presentation,
+        current_metric_report=None,
     )
 
 
@@ -671,6 +762,57 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
             except Exception:
                 self._send_internal_error(coordinator)
             return
+        metric_report_route = coordinator.routes.metric_report
+        if metric_report_route is not None and route == metric_report_route:
+            if not self._authenticated(coordinator):
+                return
+            current_metric_report = coordinator.current_metric_report
+            if current_metric_report is None:
+                self._send_internal_error(coordinator)
+                return
+            try:
+                outcome, payload, filename = _validate_metric_report_result(
+                    current_metric_report()
+                )
+            except Exception:
+                self._send_internal_error(coordinator)
+                return
+            if outcome == "missing":
+                self._send_api_error(
+                    coordinator,
+                    HTTPStatus.NOT_FOUND,
+                    error_code="not_found",
+                    message="No metric report is available for this replay.",
+                )
+                return
+            if outcome == "forbidden":
+                self._send_api_error(
+                    coordinator,
+                    HTTPStatus.FORBIDDEN,
+                    error_code="audience_unavailable",
+                    message="Metric reports are available only in Oracle View.",
+                )
+                return
+            if payload is None or filename is None:
+                self._send_internal_error(coordinator)
+                return
+            try:
+                self._send_bytes(
+                    HTTPStatus.OK,
+                    payload,
+                    content_type=_METRIC_REPORT_CONTENT_TYPE,
+                    response_headers=(
+                        (
+                            "Content-Disposition",
+                            f'attachment; filename="{filename}"',
+                        ),
+                    ),
+                )
+            except BrokenPipeError, ConnectionError, TimeoutError:
+                self.close_connection = True
+            except Exception:
+                self._send_internal_error(coordinator)
+            return
         if route == coordinator.routes.timeline:
             if not self._authenticated(coordinator):
                 return
@@ -708,6 +850,17 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
     def _handle_post(self, coordinator: HttpCoordinatorBinding) -> None:
         route = self._route(coordinator)
         if route is None or not self._valid_request_origin(coordinator):
+            return
+        metric_report_route = coordinator.routes.metric_report
+        if metric_report_route is not None and route == metric_report_route:
+            if not self._authenticated(coordinator):
+                return
+            self._send_api_error(
+                coordinator,
+                HTTPStatus.METHOD_NOT_ALLOWED,
+                error_code="method_not_allowed",
+                message="Method is not supported by this debugger.",
+            )
             return
         if route != coordinator.routes.command:
             self._send_api_error(
@@ -795,8 +948,13 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
             )
 
     def _route(self, coordinator: HttpCoordinatorBinding) -> str | None:
-        parsed = urlsplit(self.path)
-        if parsed.query or parsed.fragment:
+        raw_target = self.path
+        if (
+            not raw_target.startswith("/")
+            or raw_target.startswith("//")
+            or "?" in raw_target
+            or "#" in raw_target
+        ):
             self._send_api_error(
                 coordinator,
                 HTTPStatus.NOT_FOUND,
@@ -804,7 +962,7 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
                 message="No such debugger route.",
             )
             return None
-        return parsed.path
+        return raw_target
 
     def _valid_request_origin(self, coordinator: HttpCoordinatorBinding) -> bool:
         hosts = self.headers.get_all("Host", [])
@@ -963,12 +1121,16 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
         body: bytes,
         *,
         content_type: str,
+        response_headers: tuple[tuple[str, str], ...] = (),
     ) -> None:
+        validated_headers = _validate_response_headers(response_headers)
         self.close_connection = True
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Connection", "close")
+        for name, value in validated_headers:
+            self.send_header(name, value)
         for name, value in _SECURITY_HEADERS.items():
             self.send_header(name, value)
         self.end_headers()

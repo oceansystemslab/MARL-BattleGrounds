@@ -34,6 +34,20 @@ const COMPACT_AND_FULL = Object.freeze({ compact: true, full: true });
 const FULL_ONLY = Object.freeze({ compact: false, full: true });
 
 const TECHNICAL_FACT_HELP = Object.freeze({
+  episode: Object.freeze({
+    title: "Episode",
+    summary: "Identifies the authorized live episode represented by this frame.",
+  }),
+  artifact_digest_prefix: Object.freeze({
+    title: "Artifact digest prefix",
+    summary:
+      "These 12 hexadecimal characters locate the canonical Oracle replay without displaying its full hash.",
+  }),
+  incoming_transition: Object.freeze({
+    title: "Incoming transition",
+    summary:
+      "Identifies the authorized transition that produced this displayed frame. The initial frame has no incoming transition.",
+  }),
   completion: Object.freeze({
     title: "Completion",
     summary:

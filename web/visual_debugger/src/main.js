@@ -7,6 +7,7 @@ import {
   extractNotice,
   getCurrentFrameAndPresentation,
   getCurrentPresentation,
+  getReplayMetricReport,
   getReplayTimeline,
   postCommand,
   postReplayCommand,
@@ -60,6 +61,7 @@ import {
   replayTimelineSimulatorStep,
   validateReplayCommandOutcome,
 } from "./replay-controls.js";
+import { captureReplayBattlefieldPngV1 } from "./replay-export.js";
 import { BattlefieldRenderer } from "./scene.js";
 import {
   createSemanticDescriptor,
@@ -127,6 +129,9 @@ const elements = {
   replayFramePosition: requiredElement("replay-frame-position"),
   replayPlaybackRate: requiredElement("replay-playback-rate"),
   replayTransportStatus: requiredElement("replay-transport-status"),
+  replayArtifactActions: requiredElement("replay-artifact-actions"),
+  replayExportPngButton: requiredElement("replay-export-png-button"),
+  replayDownloadMetricsButton: requiredElement("replay-download-metrics-button"),
   replayRangesButton: requiredElement("replay-ranges-button"),
   replayClearReferenceButton: requiredElement("replay-clear-reference-button"),
   reconnectButton: requiredElement("reconnect-button"),
@@ -266,6 +271,24 @@ const state = {
   notice: null,
   noticeLevel: "info",
 };
+
+/**
+ * One page-local read-only artifact transaction. It is an async ownership
+ * fence, not replay transport state, and is invalidated synchronously whenever
+ * installed presentation authority is cleared.
+ *
+ * @type {Readonly<{
+ *   kind: "export_png" | "download_metrics",
+ *   authority: Readonly<Record<string, any>>,
+ *   transport: Readonly<Record<string, any>>,
+ *   presentation: Readonly<Record<string, any>>,
+ *   playbackGeneration: number,
+ *   localInspectedPresentationKey: string | null,
+ *   showRanges: boolean,
+ *   visualFilters: typeof visualFilterState,
+ * }> | null}
+ */
+let replayArtifactActionTransaction = null;
 
 const SCIENTIFIC_DISCLOSURE_BODY_IDS = Object.freeze({
   "command-deck": "command-deck-body",
@@ -596,12 +619,19 @@ const replayPlayback = new ReplayPlaybackController({
   waitForPresentation: () => choreographer.whenSettled(),
   getMotionMode: () => choreographer.snapshot().motionMode,
   onStateChange: (playback) => {
+    if (
+      replayArtifactActionTransaction !== null &&
+      playback.generation !== replayArtifactActionTransaction.playbackGeneration
+    ) {
+      invalidateReplayArtifactAction();
+    }
     choreographer.setPlaybackRate(playback.playbackRate);
     const timeline =
       installedPresentationAuthority() === null
         ? pendingPresentationSurfaceView(playback).replay.timeline
         : playback;
     renderReplayTimelineControls(replayTimelineElements, timeline);
+    renderReplayArtifactActions(installedPresentationAuthority());
     if (
       installedPresentationAuthority() !== null &&
       !state.busy &&
@@ -690,6 +720,7 @@ function renderPendingPresentationChrome() {
   elements.replayRangesButton.disabled = true;
   elements.replayClearReferenceButton.disabled = true;
   renderReplayTimelineControls(replayTimelineElements, pending.replay.timeline);
+  renderReplayArtifactActions(null);
 
   elements.terminalBadge.hidden = pending.terminal.hidden;
   elements.terminalBadge.textContent = pending.terminal.text;
@@ -736,6 +767,7 @@ function renderPendingPresentationChrome() {
  * @param {string} reason
  */
 function clearPresentationAuthority(reason) {
+  invalidateReplayArtifactAction();
   holdWorkspaceHeightDuringAuthorityInstall();
   savePresentationPreferenceBeforeClear();
   enterPendingPresentationPreferenceState();
@@ -1237,6 +1269,7 @@ function reconcilePresentationPreference(preference, presentation) {
       preference.localInspection.presentationKey,
     ) === null
   ) {
+    invalidateReplayArtifactAction();
     preference.localInspection.presentationKey = null;
     preference.disclosures["agent-details"].open = false;
   }
@@ -1510,6 +1543,7 @@ function applyVisualFilterAction(action) {
   if (next === visualFilterState) {
     return false;
   }
+  invalidateReplayArtifactAction();
   visualFilterState = next;
   if (isReplayMode()) {
     replayPlayback.pause("visual_filter_changed");
@@ -1684,6 +1718,7 @@ function setLocalInspectedPresentationKey(presentationKey) {
   ) {
     return false;
   }
+  invalidateReplayArtifactAction();
   preference.localInspection.presentationKey = presentationKey;
   return true;
 }
@@ -1694,6 +1729,7 @@ function toggleAgentLocalRanges() {
   if (preference === null || !preference.localRanges.owned) {
     return false;
   }
+  invalidateReplayArtifactAction();
   preference.localRanges.visible = !preference.localRanges.visible;
   return true;
 }
@@ -1711,6 +1747,320 @@ function installedPresentationRangesVisible(presentation) {
   return authorizedPresentationAudience(presentation) === "researcher"
     ? state.frame?.show_ranges === true
     : localPreference?.rangesVisible === true;
+}
+
+/**
+ * Project the exact public capability state from one coherent authority and
+ * one CP8 controller snapshot. Metric availability is deliberately absent:
+ * Agent POV is rejected from audience alone, before any sidecar request.
+ *
+ * @param {{
+ *   replayProduct: boolean,
+ *   coherentAuthority: boolean,
+ *   audience: string | null,
+ *   transportState: string,
+ *   connected: boolean,
+ *   hidden: boolean,
+ *   playing: boolean,
+ *   requestPending: boolean,
+ *   presentationPending: boolean,
+ *   renderPolicy: string | null,
+ *   cursorMatches: boolean,
+ *   operationallyBlocked: boolean,
+ *   actionPending: boolean,
+ *   battlefieldReady: boolean,
+ * }} input
+ */
+function replayArtifactActionCapabilities(input) {
+  const settled =
+    input.replayProduct &&
+    input.coherentAuthority &&
+    (input.audience === "researcher" || input.audience === "agent_pov") &&
+    input.transportState === "SETTLED" &&
+    input.connected &&
+    !input.hidden &&
+    !input.playing &&
+    !input.requestPending &&
+    !input.presentationPending &&
+    input.renderPolicy === "replay_static" &&
+    input.cursorMatches &&
+    !input.operationallyBlocked &&
+    !input.actionPending;
+  return Object.freeze({
+    exportPng: settled && input.battlefieldReady,
+    downloadMetrics: settled && input.audience === "researcher",
+  });
+}
+
+function replayBattlefieldReady() {
+  return (
+    elements.battlefield.id === "battlefield" &&
+    elements.battlefield.dataset.renderPolicy === "replay_static" &&
+    elements.battlefieldShell.getAttribute("aria-busy") === "false" &&
+    Number.isInteger(elements.battlefield.clientWidth) &&
+    elements.battlefield.clientWidth > 0 &&
+    Number.isInteger(elements.battlefield.clientHeight) &&
+    elements.battlefield.clientHeight > 0
+  );
+}
+
+/**
+ * @param {ReturnType<typeof installedPresentationAuthority>} installed
+ * @param {{ignoreActionPending?: boolean}} [options]
+ */
+function currentReplayArtifactActionCapabilities(
+  installed,
+  { ignoreActionPending = false } = {},
+) {
+  const playback = replayPlayback.snapshot();
+  return replayArtifactActionCapabilities({
+    replayProduct: isReplayMode(),
+    coherentAuthority: installed !== null,
+    audience:
+      installed === null
+        ? null
+        : (authorizedPresentationAudience(installed.presentation) ?? null),
+    transportState: playback.transportState,
+    connected: playback.connected,
+    hidden: playback.hidden,
+    playing: playback.playing,
+    requestPending: playback.requestPending,
+    presentationPending: playback.presentationPending,
+    renderPolicy: playback.presentationIntent?.renderPolicy ?? null,
+    cursorMatches:
+      installed !== null &&
+      replayCursorsMatch(playback.cursor, installed.transport.cursor),
+    operationallyBlocked:
+      state.busy || state.shuttingDown || state.resyncRequired || state.offline,
+    actionPending: !ignoreActionPending && replayArtifactActionTransaction !== null,
+    battlefieldReady: replayBattlefieldReady(),
+  });
+}
+
+/** @param {ReturnType<typeof installedPresentationAuthority>} installed */
+function renderReplayArtifactActions(installed) {
+  const capabilities = currentReplayArtifactActionCapabilities(installed);
+  const pending = replayArtifactActionTransaction;
+  elements.replayExportPngButton.disabled = !capabilities.exportPng;
+  elements.replayDownloadMetricsButton.disabled = !capabilities.downloadMetrics;
+  elements.replayExportPngButton.setAttribute(
+    "aria-busy",
+    String(pending?.kind === "export_png"),
+  );
+  elements.replayDownloadMetricsButton.setAttribute(
+    "aria-busy",
+    String(pending?.kind === "download_metrics"),
+  );
+}
+
+/**
+ * Capture one exact action epoch before any asynchronous export or GET work.
+ *
+ * @param {"export_png" | "download_metrics"} kind
+ */
+function beginReplayArtifactAction(kind) {
+  if (replayArtifactActionTransaction !== null) {
+    return null;
+  }
+  const installed = installedPresentationAuthority();
+  const capabilities = currentReplayArtifactActionCapabilities(installed);
+  if (
+    installed === null ||
+    (kind === "export_png" ? !capabilities.exportPng : !capabilities.downloadMetrics)
+  ) {
+    return null;
+  }
+  const authority = state.authority;
+  if (
+    !isJoinedTransportAndAuthorizedPresentationV1(authority) ||
+    authority.transport !== installed.transport ||
+    authority.presentation !== installed.presentation
+  ) {
+    return null;
+  }
+  const localInspectedPresentationKey =
+    installedLocalInspectedPresentationKey(installed.presentation) ?? null;
+  const transaction = Object.freeze({
+    kind,
+    authority,
+    transport: installed.transport,
+    presentation: installed.presentation,
+    playbackGeneration: replayPlayback.snapshot().generation,
+    localInspectedPresentationKey,
+    showRanges: installedPresentationRangesVisible(installed.presentation),
+    visualFilters: visualFilterState,
+  });
+  replayArtifactActionTransaction = transaction;
+  renderReplayArtifactActions(installed);
+  return transaction;
+}
+
+/**
+ * @param {NonNullable<typeof replayArtifactActionTransaction>} transaction
+ */
+function replayArtifactActionIsCurrent(transaction) {
+  if (replayArtifactActionTransaction !== transaction) {
+    return false;
+  }
+  const installed = installedPresentationAuthority();
+  if (
+    installed === null ||
+    state.authority !== transaction.authority ||
+    installed.transport !== transaction.transport ||
+    installed.presentation !== transaction.presentation
+  ) {
+    return false;
+  }
+  const capabilities = currentReplayArtifactActionCapabilities(installed, {
+    ignoreActionPending: true,
+  });
+  if (
+    replayPlayback.snapshot().generation !== transaction.playbackGeneration ||
+    (transaction.kind === "export_png"
+      ? !capabilities.exportPng
+      : !capabilities.downloadMetrics)
+  ) {
+    return false;
+  }
+  if (transaction.kind === "export_png") {
+    return (
+      visualFilterState === transaction.visualFilters &&
+      (installedLocalInspectedPresentationKey(installed.presentation) ?? null) ===
+        transaction.localInspectedPresentationKey &&
+      installedPresentationRangesVisible(installed.presentation) ===
+        transaction.showRanges
+    );
+  }
+  return true;
+}
+
+/** @param {NonNullable<typeof replayArtifactActionTransaction>} transaction */
+function finishReplayArtifactAction(transaction) {
+  if (replayArtifactActionTransaction !== transaction) {
+    return;
+  }
+  replayArtifactActionTransaction = null;
+  renderReplayArtifactActions(installedPresentationAuthority());
+}
+
+function invalidateReplayArtifactAction() {
+  replayArtifactActionTransaction = null;
+}
+
+/** @param {Blob} blob @param {string} filename */
+function downloadReplayArtifact(blob, filename) {
+  if (
+    !(blob instanceof Blob) ||
+    typeof filename !== "string" ||
+    filename.length < 1 ||
+    filename.length > 240 ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(filename)
+  ) {
+    throw new TypeError("Replay download artifact is invalid.");
+  }
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    const anchor = document.createElement("a");
+    anchor.href = objectUrl;
+    anchor.download = filename;
+    anchor.rel = "noopener";
+    anchor.click();
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
+/** @param {unknown} error */
+function replayMetricDownloadError(error) {
+  if (error instanceof DebuggerApiError && error.status === 404) {
+    return Object.freeze({
+      message: "No metric report is available for this replay.",
+      level: "warning",
+    });
+  }
+  if (error instanceof DebuggerApiError && error.status === 403) {
+    return Object.freeze({
+      message: "Metric reports are available only in Oracle View.",
+      level: "warning",
+    });
+  }
+  return Object.freeze({
+    message:
+      error instanceof Error
+        ? `Metric download failed: ${error.message}`
+        : "Metric download failed.",
+    level: "error",
+  });
+}
+
+async function exportReplayBattlefieldPng() {
+  const transaction = beginReplayArtifactAction("export_png");
+  if (transaction === null) {
+    return;
+  }
+  try {
+    const playback = replayPlayback.snapshot();
+    const artifact = await captureReplayBattlefieldPngV1({
+      battlefield: elements.battlefield,
+      installedAuthority: transaction.authority,
+      isCurrent: () => replayArtifactActionIsCurrent(transaction),
+      transportState: playback.transportState,
+      renderPolicy: playback.presentationIntent?.renderPolicy ?? null,
+      showRanges: transaction.showRanges,
+      localInspectedPresentationKey: transaction.localInspectedPresentationKey,
+      visualFilters: transaction.visualFilters,
+    });
+    if (!replayArtifactActionIsCurrent(transaction)) {
+      return;
+    }
+    if (artifact.schemaVersion !== 1 || artifact.blob.type !== "image/png") {
+      throw new TypeError("Replay PNG builder returned an invalid artifact.");
+    }
+    downloadReplayArtifact(artifact.blob, artifact.filename);
+    setNotice(`Exported ${artifact.filename}.`, "success");
+    renderConnection();
+  } catch (error) {
+    if (!replayArtifactActionIsCurrent(transaction)) {
+      return;
+    }
+    setNotice(
+      error instanceof Error
+        ? `PNG export failed: ${error.message}`
+        : "PNG export failed.",
+      "error",
+    );
+    renderConnection();
+  } finally {
+    finishReplayArtifactAction(transaction);
+  }
+}
+
+async function downloadReplayMetricReport() {
+  const transaction = beginReplayArtifactAction("download_metrics");
+  if (transaction === null) {
+    return;
+  }
+  try {
+    const report = await getReplayMetricReport(state.token);
+    if (!replayArtifactActionIsCurrent(transaction)) {
+      return;
+    }
+    downloadReplayArtifact(
+      new Blob([report.bytes], { type: "application/json; charset=utf-8" }),
+      report.filename,
+    );
+    setNotice(`Downloaded ${report.filename}.`, "success");
+    renderConnection();
+  } catch (error) {
+    if (!replayArtifactActionIsCurrent(transaction)) {
+      return;
+    }
+    const failure = replayMetricDownloadError(error);
+    setNotice(failure.message, failure.level);
+    renderConnection();
+  } finally {
+    finishReplayArtifactAction(transaction);
+  }
 }
 
 /**
@@ -3006,6 +3356,7 @@ function render() {
     );
     renderConnection();
   }
+  renderReplayArtifactActions(installed);
   lastBattlefieldSizeKey = battlefieldSizeKey();
   panels.render(presentationFrame, {
     busy: state.busy,
@@ -3073,6 +3424,7 @@ function scheduleBattlefieldResize() {
       );
       renderConnection();
     }
+    renderReplayArtifactActions(installedPresentationAuthority());
     tooltipController.refresh();
     restorePresentationPreferenceAfterRender();
   });
@@ -3137,6 +3489,7 @@ async function sendReplayCommand(command, { deferFinalRender = false } = {}) {
   if (state.resyncRequired || state.offline) {
     throw new DebuggerApiError("Reconnect before sending another replay command.");
   }
+  invalidateReplayArtifactAction();
   state.busy = true;
   setNotice("Waiting for the read-only replay response…", "info");
   const previousAuthority = state.authority;
@@ -3301,6 +3654,7 @@ async function dispatchReplayCommand(command) {
     renderConnection();
     return null;
   }
+  invalidateReplayArtifactAction();
   replayPlayback.pause("user_command");
   try {
     const payload = await sendReplayCommand(command);
@@ -3601,6 +3955,7 @@ async function loadCurrentFrame({ reviewHandoff = false } = {}) {
   if (state.busy || state.shuttingDown) {
     return;
   }
+  invalidateReplayArtifactAction();
   state.busy = true;
   if (isReplayMode()) {
     replayPlayback.pause("reconnect");
@@ -3854,6 +4209,7 @@ elements.recordingDiscardConfirmButton.addEventListener("click", () => {
 });
 
 elements.exitButton.addEventListener("click", () => {
+  invalidateReplayArtifactAction();
   if (isReplayMode()) {
     void dispatchReplayCommand({ command_type: "exit" });
   } else {
@@ -3862,6 +4218,7 @@ elements.exitButton.addEventListener("click", () => {
 });
 
 elements.reconnectButton.addEventListener("click", () => {
+  invalidateReplayArtifactAction();
   if (productHandoffOutcomeUnknown) {
     reloadForProductHandoff();
     return;
@@ -3896,6 +4253,14 @@ elements.visualFilterOptions.addEventListener("change", handleVisualFilterChange
 
 elements.restoreAllVisualFiltersButton.addEventListener("click", () => {
   applyVisualFilterAction({ type: "restore_all" });
+});
+
+elements.replayExportPngButton.addEventListener("click", () => {
+  void exportReplayBattlefieldPng();
+});
+
+elements.replayDownloadMetricsButton.addEventListener("click", () => {
+  void downloadReplayMetricReport();
 });
 
 elements.replayRangesButton.addEventListener("click", () => {

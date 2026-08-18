@@ -158,6 +158,7 @@ def test_index_and_allowlisted_assets_use_security_headers(
         ("/src/authorized-presentation-schema.js", "text/javascript"),
         ("/src/presentation-install.js", "text/javascript"),
         ("/src/replay-controls.js", "text/javascript"),
+        ("/src/replay-export.js", "text/javascript"),
         ("/src/replay-frame-normalizer.js", "text/javascript"),
         ("/src/explanations.js", "text/javascript"),
         ("/src/tooltip.js", "text/javascript"),
@@ -222,6 +223,23 @@ def test_frame_api_requires_token_and_never_mutates_service(
     assert accepted.status == 200
     assert json.loads(accepted_body)["revision"] == 0
     assert server.debugger_service.session is initial
+
+
+def test_live_mode_does_not_expose_the_replay_metric_route(
+    running_server: tuple[DebuggerHTTPServer, Thread],
+) -> None:
+    server, _ = running_server
+
+    response, body = _exchange(
+        server,
+        "GET",
+        "/api/replay/metric-report",
+        headers=_authorized_headers(),
+    )
+
+    assert response.status == HTTPStatus.NOT_FOUND
+    assert json.loads(body)["error_code"] == "not_found"
+    assert server.coordinator.current_metric_report is None
 
 
 def test_host_origin_and_cross_site_requests_are_rejected(
@@ -651,6 +669,7 @@ def test_unexpected_service_failure_returns_generic_internal_error(
         Path("src") / "display.js",
         Path("src") / "explanations.js",
         Path("src") / "presentation-install.js",
+        Path("src") / "replay-export.js",
         Path("src") / "tooltip.js",
         Path("assets") / "fonts" / "AtkinsonHyperlegible-Regular.woff2",
     ),
@@ -662,6 +681,7 @@ def test_unexpected_service_failure_returns_generic_internal_error(
         "display-module",
         "explanations-module",
         "presentation-install-module",
+        "replay-export-module",
         "tooltip-module",
         "font",
     ),

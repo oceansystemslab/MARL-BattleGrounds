@@ -393,10 +393,25 @@ select {
 
 .replay-timeline__summary,
 .replay-timeline__transport,
+.replay-artifact-actions,
 .replay-badges {
   display: flex;
   align-items: center;
   gap: 0.55rem;
+}
+
+.replay-artifact-actions {
+  justify-content: flex-end;
+  min-inline-size: 0;
+  padding: 0;
+  border: 0;
+  margin: 0;
+}
+
+.replay-artifact-actions button {
+  min-height: 2rem;
+  padding: 0.32rem 0.7rem;
+  font-size: 0.75rem;
 }
 
 .replay-timeline__transport {
@@ -3164,6 +3179,10 @@ select {
   .replay-timeline__summary {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .replay-artifact-actions {
+    justify-content: flex-start;
   }
 
   .recording-panel__summary {

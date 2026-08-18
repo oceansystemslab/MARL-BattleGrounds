@@ -23,6 +23,7 @@ type _ViewMode = Literal["researcher", "pov"]
 
 _DEBUGGER_LAUNCHER = "scripts/dev/run_debug_renderer.sh"
 _PRIVATE_MATERIALIZE_OPTION = "--_materialize-scripted-scenario"
+_RATE_SUFFIX = "\N{MULTIPLICATION SIGN}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,7 +47,7 @@ class _LaunchOptions:
     supplied: frozenset[str]
 
 
-_EPILOG = """\
+_EPILOG = f"""\
 artifact selection (choose exactly one):
   --replay PATH          open one validated replay artifact
   --sample-replay NAME  open one checked-in verified sample
@@ -55,9 +56,19 @@ artifact selection (choose exactly one):
   --list-sample-replays list checked-in sample launch names
 
 read-only replay controls:
-  First / -10 / -1      seek backward with one clamped absolute request
-  Play/Pause / +1 / +10 serialize playback or seek forward exactly once
-  Last / frame slider   seek to an absolute captured frame
+  Start / End           seek to the first / final captured frame
+  -10 / -1 / +1 / +10  issue one clamped absolute seek
+  Play / Pause          run serialized replay with one request in flight
+  frame slider          preview without a request; commit one exact seek
+  Left / Right / Space  unmodified document shortcuts: previous / next /
+                        play or pause
+  playback rates        0.25{_RATE_SUFFIX} / 0.50{_RATE_SUFFIX} /
+                        0.75{_RATE_SUFFIX} / 1.00{_RATE_SUFFIX} /
+                        1.25{_RATE_SUFFIX} / 1.50{_RATE_SUFFIX} /
+                        1.75{_RATE_SUFFIX} / 2.00{_RATE_SUFFIX}
+                        scale the complete presentation clock
+  Export PNG            export the settled battlefield with replay provenance
+  Download Metrics      Oracle-only canonical metric-report download
   Tick current / final  show the exact captured cursor and terminal tick
 
 The Replay Viewer is read-only and always uses fixed Analysis presentation.
@@ -357,6 +368,7 @@ def _run_browser_replay(
         apply_command=service.apply_command,
         current_timeline=service.current_timeline,
         current_presentation=service.current_presentation,
+        current_metric_report=service.current_metric_report,
     )
     return serve_browser_debugger(
         service,

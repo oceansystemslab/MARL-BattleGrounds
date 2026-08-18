@@ -41,6 +41,7 @@ class RecordingDebuggerCoordinator:
             current_frame=service.current_frame,
             apply_command=self.apply_command,
             current_presentation=service.current_presentation,
+            current_metric_report=None,
         )
         self._router = HttpCoordinatorRouter(
             service=service,
@@ -75,6 +76,7 @@ class RecordingDebuggerCoordinator:
             apply_command=handoff.apply_command,
             current_timeline=handoff.current_timeline,
             current_presentation=handoff.current_presentation,
+            current_metric_report=handoff.current_metric_report,
         )
         expected = self._router.snapshot()
         if (

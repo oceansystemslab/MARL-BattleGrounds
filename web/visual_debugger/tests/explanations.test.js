@@ -109,6 +109,18 @@ test("all semantic descriptors and nested projections are recursively immutable"
 
 test("Technical Frame and replay operational help use the exact finite vocabulary", () => {
   const expected = {
+    episode: [
+      "Episode",
+      "Identifies the authorized live episode represented by this frame.",
+    ],
+    artifact_digest_prefix: [
+      "Artifact digest prefix",
+      "These 12 hexadecimal characters locate the canonical Oracle replay without displaying its full hash.",
+    ],
+    incoming_transition: [
+      "Incoming transition",
+      "Identifies the authorized transition that produced this displayed frame. The initial frame has no incoming transition.",
+    ],
     completion: [
       "Completion",
       "How the captured rollout ended. Rollout completion is independent of host-side processing success.",

@@ -1029,6 +1029,11 @@ test("Latest Events, Submitted/Accepted, Technical Frame, and inspection stay di
     [
       ["frame", "Frame", 1],
       ["simulator_step", "Simulator step", 1],
+      [
+        "incoming_transition",
+        "Incoming transition",
+        "episode-001:shared-obs-visual-union:agent-slot-0:transition:0",
+      ],
     ],
   );
   assert.equal(
@@ -1110,27 +1115,37 @@ test("Latest Transition is exact for all five leaves and empty at frame zero", a
   }
 });
 
-test("Technical Frame projects the exact five-leaf CP4 allowlist", async () => {
+test("Technical Frame projects the exact final five-leaf allowlist atomically", async () => {
   const cases = [
     [
       "live_oracle",
       [
+        ["episode", "Episode", "episode-001"],
         ["frame", "Frame", 1],
         ["simulator_step", "Simulator step", 1],
+        ["incoming_transition", "Incoming transition", "episode-001:transition:0"],
       ],
     ],
     [
       "live_no_shared_obs_agent_pov",
       [
+        ["episode", "Episode", "episode-001"],
         ["frame", "Frame", 1],
         ["simulator_step", "Simulator step", 1],
+        [
+          "incoming_transition",
+          "Incoming transition",
+          "episode-001:actor-pov:agent-slot-0:transition:0",
+        ],
       ],
     ],
     [
       "replay_oracle",
       [
+        ["artifact_digest_prefix", "Artifact digest prefix", "cccccccccccc"],
         ["frame", "Frame", 1],
         ["simulator_step", "Simulator step", 1],
+        ["incoming_transition", "Incoming transition", "episode-001:transition:0"],
         ["ordinary_movement_distance_scale", "Ordinary movement distance scale", 1],
       ],
     ],
@@ -1139,6 +1154,11 @@ test("Technical Frame projects the exact five-leaf CP4 allowlist", async () => {
       [
         ["frame", "Frame", 1],
         ["simulator_step", "Simulator step", 1],
+        [
+          "incoming_transition",
+          "Incoming transition",
+          "episode-001:actor-pov:agent-slot-0:transition:0",
+        ],
       ],
     ],
     [
@@ -1146,36 +1166,158 @@ test("Technical Frame projects the exact five-leaf CP4 allowlist", async () => {
       [
         ["frame", "Frame", 1],
         ["simulator_step", "Simulator step", 1],
+        [
+          "incoming_transition",
+          "Incoming transition",
+          "episode-001:shared-obs-visual-union:agent-slot-0:transition:0",
+        ],
       ],
     ],
   ];
   for (const [kind, expected] of cases) {
-    const facts = authorizedPresentationTechnicalFacts(
-      await normalized(/** @type {keyof typeof fixture.presentations} */ (kind)),
+    const frame = await normalized(
+      /** @type {keyof typeof fixture.presentations} */ (kind),
     );
+    const before = JSON.stringify(frame);
+    const facts = authorizedPresentationTechnicalFacts(frame);
     assert.deepEqual(
       facts.map(({ id, label, value }) => [id, label, value]),
       expected,
       String(kind),
     );
+    assert.equal(JSON.stringify(frame), before, String(kind));
     assertRecursivelyFrozen(facts);
+    assert.equal(
+      facts.every(
+        (fact) =>
+          Object.keys(fact).length === 3 &&
+          Object.keys(fact).every(
+            (key, index) => key === ["id", "label", "value"][index],
+          ),
+      ),
+      true,
+      String(kind),
+    );
     const serialized = JSON.stringify(facts);
     for (const forbidden of [
       "technical_kind",
       "episode_id",
       "incoming_transition_id",
       "incoming_recipient_transition_id",
-      "artifact_digest_prefix",
+      "evaluation_frame_index",
+      "recipient_frame_index",
+      "simulator_step_count",
+      "recorded_ordinary_movement_distance_scale",
       "revision",
       "generation",
+      "timeline_id",
+      "session_id",
+      "presentation_key",
+      "global_slot",
     ]) {
-      assert.equal(serialized.includes(forbidden), false, `${kind}: ${forbidden}`);
+      assert.equal(
+        serialized.includes(`"${forbidden}"`),
+        false,
+        `${kind}: ${forbidden}`,
+      );
     }
   }
+
+  const frameZeroCases = [
+    [
+      "live_oracle_frame_zero",
+      [
+        ["episode", "Episode", "episode-001"],
+        ["frame", "Frame", 0],
+        ["simulator_step", "Simulator step", 0],
+      ],
+    ],
+    [
+      "live_no_shared_frame_zero",
+      [
+        ["episode", "Episode", "episode-001"],
+        ["frame", "Frame", 0],
+        ["simulator_step", "Simulator step", 0],
+      ],
+    ],
+    [
+      "replay_oracle_frame_zero",
+      [
+        ["artifact_digest_prefix", "Artifact digest prefix", "cccccccccccc"],
+        ["frame", "Frame", 0],
+        ["simulator_step", "Simulator step", 0],
+        ["ordinary_movement_distance_scale", "Ordinary movement distance scale", 1],
+      ],
+    ],
+    [
+      "replay_no_shared_frame_zero",
+      [
+        ["frame", "Frame", 0],
+        ["simulator_step", "Simulator step", 0],
+      ],
+    ],
+    [
+      "replay_shared_frame_zero",
+      [
+        ["frame", "Frame", 0],
+        ["simulator_step", "Simulator step", 0],
+      ],
+    ],
+  ];
+  for (const [kind, expected] of frameZeroCases) {
+    const facts = authorizedPresentationTechnicalFacts(
+      await normalizedState(/** @type {keyof typeof fixture.state_cases} */ (kind)),
+    );
+    assert.deepEqual(
+      facts.map(({ id, label, value }) => [id, label, value]),
+      expected,
+      String(kind),
+    );
+    assert.equal(
+      facts.some(({ id }) => id === "incoming_transition"),
+      false,
+    );
+    assertRecursivelyFrozen(facts);
+  }
+
+  const normalizedOracle = await normalized("replay_oracle");
   assert.deepEqual(
     authorizedPresentationTechnicalFacts(fixture.presentations.replay_oracle),
     [],
   );
+  assert.deepEqual(
+    authorizedPresentationTechnicalFacts(Object.freeze({ ...normalizedOracle })),
+    [],
+  );
+  let accessorReads = 0;
+  const accessorRoot = structuredClone(fixture.presentations.replay_oracle);
+  Object.defineProperty(accessorRoot, "technical_frame", {
+    enumerable: true,
+    get() {
+      accessorReads += 1;
+      throw new Error("untrusted Technical Frame accessor was read");
+    },
+  });
+  assert.deepEqual(authorizedPresentationTechnicalFacts(accessorRoot), []);
+  assert.equal(accessorReads, 0);
+
+  for (const technicalFrame of [
+    { ...normalizedOracle.technical_frame, technical_kind: "forbidden_technical" },
+    { ...normalizedOracle.technical_frame, artifact_digest_prefix: "ABCDEF012345" },
+    { ...normalizedOracle.technical_frame, incoming_transition_id: "" },
+    { ...normalizedOracle.technical_frame, frame_index: -1 },
+    {
+      ...normalizedOracle.technical_frame,
+      recorded_ordinary_movement_distance_scale: 0,
+    },
+  ]) {
+    assert.deepEqual(
+      authorizedPresentationTechnicalFacts(
+        Object.freeze({ ...normalizedOracle, technical_frame: technicalFrame }),
+      ),
+      [],
+    );
+  }
 });
 
 test("live scope and replay inspection states remain exact", async () => {

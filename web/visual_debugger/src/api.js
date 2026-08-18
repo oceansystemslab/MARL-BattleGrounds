@@ -16,6 +16,9 @@ const TOKEN_STORAGE_KEY = "marl-battlegrounds.debugger-token";
 const CLIENT_STORAGE_KEY = "marl-battlegrounds.debugger-client-id";
 const TOKEN_HEADER = "X-MARL-Debugger-Token";
 const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
+const REPLAY_METRIC_REPORT_ROUTE = "/api/replay/metric-report";
+const REPLAY_METRIC_REPORT_CONTENT_TYPE = "application/json; charset=utf-8";
+const REPLAY_METRIC_REPORT_SUFFIX = ".marlbg-metrics.json";
 const UNJOINED_SHARED_REPLAY_FRAME_KINDS = new Set([
   "shared_obs_source_material_replay_viewer",
   "shared_obs_agent_pov_replay_viewer",
@@ -348,6 +351,118 @@ async function fetchWithTimeout(path, options) {
   } finally {
     window.clearTimeout(timeoutId);
   }
+}
+
+/**
+ * Validate the complete attachment basename independently of the Python
+ * service. The browser never guesses a filename from response content.
+ *
+ * @param {Response} response
+ * @returns {string}
+ */
+function replayMetricReportFilename(response) {
+  const contentType = response.headers.get("content-type");
+  const cacheControl = response.headers.get("cache-control");
+  const disposition = response.headers.get("content-disposition");
+  if (
+    contentType !== REPLAY_METRIC_REPORT_CONTENT_TYPE ||
+    cacheControl !== "no-store" ||
+    typeof disposition !== "string"
+  ) {
+    throw new DebuggerApiError(
+      "Replay metric report returned invalid download headers.",
+      { status: response.status },
+    );
+  }
+  const match = /^attachment; filename="([\x20-\x7e]+)"$/u.exec(disposition);
+  const filename = match?.[1] ?? null;
+  if (
+    filename === null ||
+    !filename.endsWith(REPLAY_METRIC_REPORT_SUFFIX) ||
+    filename.split(REPLAY_METRIC_REPORT_SUFFIX).length !== 2
+  ) {
+    throw new DebuggerApiError(
+      "Replay metric report returned an invalid attachment filename.",
+      { status: response.status },
+    );
+  }
+  const stem = filename.slice(0, -REPLAY_METRIC_REPORT_SUFFIX.length);
+  if (
+    stem.length < 1 ||
+    stem.length > 96 ||
+    !/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u.test(stem)
+  ) {
+    throw new DebuggerApiError(
+      "Replay metric report returned an invalid attachment filename.",
+      { status: response.status },
+    );
+  }
+  return filename;
+}
+
+/**
+ * Download the already-authorized canonical metric artifact exactly once.
+ * Success remains raw bytes; failures cross the strict Replay API envelope.
+ *
+ * @param {string | null} token
+ * @returns {Promise<Readonly<{bytes: ArrayBuffer, filename: string}>>}
+ */
+export async function getReplayMetricReport(token) {
+  let response;
+  try {
+    response = await fetchWithTimeout(REPLAY_METRIC_REPORT_ROUTE, {
+      method: "GET",
+      headers: authorizationHeaders(token),
+      cache: "no-store",
+      credentials: "omit",
+      redirect: "error",
+    });
+  } catch (error) {
+    throw new DebuggerApiError(
+      error instanceof Error
+        ? `Could not download the replay metric report: ${error.message}`
+        : "Could not download the replay metric report.",
+    );
+  }
+  if (!response.ok) {
+    await decodeReplayResponse(response);
+    throw new DebuggerApiError("Replay metric report request failed.", {
+      status: response.status,
+    });
+  }
+  if (response.status !== 200) {
+    throw new DebuggerApiError(
+      "Replay metric report returned an unexpected success status.",
+      { status: response.status },
+    );
+  }
+  const filename = replayMetricReportFilename(response);
+  const contentLength = response.headers.get("content-length");
+  if (
+    typeof contentLength !== "string" ||
+    !/^(?:0|[1-9][0-9]*)$/u.test(contentLength) ||
+    !Number.isSafeInteger(Number(contentLength))
+  ) {
+    throw new DebuggerApiError(
+      "Replay metric report returned an invalid content length.",
+      { status: response.status },
+    );
+  }
+  let bytes;
+  try {
+    bytes = await response.arrayBuffer();
+  } catch {
+    throw new DebuggerApiError("Replay metric report bytes could not be read.", {
+      status: response.status,
+    });
+  }
+  if (!(bytes instanceof ArrayBuffer) || bytes.byteLength !== Number(contentLength)) {
+    throw new DebuggerApiError(
+      "Replay metric report byte length disagrees with its response headers.",
+      { status: response.status },
+    );
+  }
+  return Object.freeze({ bytes, filename });
 }
 
 /**

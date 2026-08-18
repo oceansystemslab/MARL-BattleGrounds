@@ -484,6 +484,11 @@ def test_browser_replay_loads_resolves_then_injects_exact_server_binding(
                 "server should not request a presentation in this test"
             )
 
+        def current_metric_report(self) -> object:
+            raise AssertionError(
+                "server should not request a metric report in this test"
+            )
+
         def apply_command(self, request: object) -> object:
             del request
             raise AssertionError("server should not apply a command in this test")
@@ -570,6 +575,7 @@ def test_browser_replay_loads_resolves_then_injects_exact_server_binding(
     assert coordinator.current_frame == service.current_frame
     assert coordinator.current_timeline == service.current_timeline
     assert coordinator.current_presentation == service.current_presentation
+    assert coordinator.current_metric_report == service.current_metric_report
     assert coordinator.apply_command == service.apply_command
 
 
@@ -810,6 +816,17 @@ def test_debugger_help_is_live_only_and_hides_legacy_tokens() -> None:
     assert "Shift+left click      select the clicked active target" in result.stdout
     for inspector in ("SELECTED TARGET", "PENDING ACTION", "TECHNICAL FRAME"):
         assert inspector in result.stdout
+    assert "exact authority-safe facts permitted by the active leaf" in result.stdout
+    for technical_fact in (
+        "Episode or Artifact digest prefix",
+        "Frame",
+        "Simulator step",
+        "conditional Incoming transition",
+        "replay-only movement scale",
+    ):
+        assert technical_fact in result.stdout
+    assert "raw actor/target indices" not in result.stdout
+    assert "same-epoch mask values" not in result.stdout
     for moved_option in (
         "--scenario",
         "--replay",
@@ -858,11 +875,35 @@ def test_replay_help_is_read_only_and_hides_live_and_legacy_tokens() -> None:
     assert "researcher" not in result.stdout
     assert "{oracle,pov}" in result.stdout
     for replay_control in (
-        "First / -10 / -1",
-        "Play/Pause / +1 / +10",
+        "Start / End",
+        "-10 / -1 / +1 / +10",
+        "Play / Pause",
+        "run serialized replay with one request in flight",
+        "frame slider",
+        "preview without a request; commit one exact seek",
+        "Left / Right / Space",
+        "unmodified document shortcuts: previous / next /",
+        "play or pause",
+        "Export PNG",
+        "Download Metrics",
+        "Oracle-only canonical metric-report download",
         "Tick current / final",
     ):
         assert replay_control in result.stdout
+    multiplication_sign = "\N{MULTIPLICATION SIGN}"
+    for playback_rate in (
+        "0.25",
+        "0.50",
+        "0.75",
+        "1.00",
+        "1.25",
+        "1.50",
+        "1.75",
+        "2.00",
+    ):
+        assert f"{playback_rate}{multiplication_sign}" in result.stdout
+    assert "First / -10 / -1" not in result.stdout
+    assert "Last / frame slider" not in result.stdout
 
 
 def test_list_scenarios_is_stable_and_backend_free() -> None:
@@ -1025,6 +1066,11 @@ def test_sample_replay_injects_verified_bundle_without_reopening_source_path(
         def current_presentation(self) -> object:
             raise AssertionError(
                 "server should not request a presentation in this test"
+            )
+
+        def current_metric_report(self) -> object:
+            raise AssertionError(
+                "server should not request a metric report in this test"
             )
 
         def apply_command(self, request: object) -> object:
