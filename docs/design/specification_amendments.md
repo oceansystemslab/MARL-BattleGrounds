@@ -13,7 +13,7 @@ They deliberately favor the four project North Stars: researcher-centricity,
 low sample complexity, meaningful tactical and strategic team behavior, and
 professional MARL/software engineering.
 
-## A1. Evaluation information regimes
+## A1. Actor execution-information regimes
 
 **Classification:** risky, accepted design drift.
 **Supersedes:** R20; Sections 2.4, 2.4.1, 2.4.8, 2.4.11, 2.6.18, 2.8.5,
@@ -38,8 +38,9 @@ communication mechanism of its own.
 
 The canonical implementation boundary is:
 
-- `execution_information_mode` is the extensible learner-side setting whose
-  current values are `shared_obs` and `no_shared_obs`;
+- `execution_information_mode` is the extensible actor-side setting whose
+  current values are `shared_obs` and `no_shared_obs`; each learned checkpoint
+  fixes exactly one value;
 - a command-line Boolean may be a convenience alias, but is not the canonical
   persisted representation;
 - simulator state, dynamics, rewards, action semantics, base observations, and
@@ -68,14 +69,23 @@ losslessly derivable from those observations, `execution_information_mode`,
 and the actor-input projection version. They do not persist a second copy of
 materialized SharedObs tensors.
 
-The Milestone 6 V1 frame schema supports both information regimes without
-implementing the future compositor. Its availability field is an optional,
-explicit Boolean matrix with axes
+The Milestone 6 V1 frame schema supports either information regime without
+implementing the future compositor. `EvaluationEpisodeContextV1` records one
+episode-wide `execution_information_mode` and one actor-input projection, so
+every configured active policy assignment in a V1 episode is homogeneous in
+those contracts. The current V1 schema is immutable: it cannot truthfully
+represent SharedObs and NoSharedObs assignments in the same episode. Such
+mixed execution is ineligible for official evaluation, scenario, replay, or
+metric output until the Milestone 10 V2 contract in A12 exists.
+
+The V1 availability field is an optional, explicit Boolean matrix with axes
 `(recipient_global_slot, sensor_source_global_slot)` and shape `(10, 10)`.
 Conditional validation requires that matrix for `shared_obs` and forbids it
 for `no_shared_obs`. Its diagonal, cross-team cells, inactive-recipient rows,
 and inactive-source columns are false. Neither regime stores a materialized
-SharedObs tensor.
+SharedObs tensor. SharedObs-versus-NoSharedObs and the reverse assignment are
+future directional strata, not values to pool with each other or with either
+homogeneous regime.
 
 ## A2. Metric architecture and simulator cost
 
@@ -94,13 +104,19 @@ MARL-BattleGrounds uses three deliberately separate data planes:
    statistics, optimizer state, runtime timing, and optional reward-shaping
    components.
 
+These are payload, authority, and cost boundaries inside one lifecycle; they
+are not separate regime-specific runners, trainers, evaluators, RNG paths,
+action-realization paths, or metric systems. A12 defines the common Milestone
+10–12 spine and the narrow seams at which actor information may differ.
+
 Milestone 6 CP2 normalizes those planes through the following accepted host
 boundary:
 
 - `EvaluationEpisodeContextV1` owns the roster's fixed-slot identity/topology
   fields and the resolved configuration's per-slot body radius, movement,
   interaction ranges, maximum health, and recovery mechanics. It also owns
-  policy, catalog, seed, `execution_information_mode`, `actor_projection`,
+  policy, catalog, seed, one episode-wide homogeneous
+  `execution_information_mode`, one compatible `actor_projection`,
   `critic_information_regime`, `canonical_reward_mode`,
   `shaping_configuration`, and code provenance. It carries exactly ten
   discriminated policy-assignment rows; inactive slots use an explicit
@@ -337,10 +353,17 @@ In particular:
 three/five-seed target or leave “standard error or confidence interval”
 unspecified.
 
-Evaluation episodes estimate one trained checkpoint. Independent training
-seeds—not episodes, teams, agents, deaths, or repeated matches—are the default
-experimental units for algorithm-level claims. Results aggregate in this
-order:
+Evaluation episodes estimate one trained checkpoint. Each learned checkpoint
+is fixed to one `execution_information_mode`, actor-input projection version,
+and compatible compiled actor front end. Compatibility validation must reject
+a mismatch before compilation, device allocation, or execution. An explicitly
+declared cross-regime transfer or out-of-distribution study is a separate
+estimand and may not reinterpret the source checkpoint as native to the
+destination regime.
+
+Independent training seeds—not episodes, teams, agents, deaths, or repeated
+matches—are the default experimental units for algorithm-level claims. Results
+aggregate in this order:
 
 1. episodes within one homogeneous training-seed/evaluation cell;
 2. evaluation cells under frozen predeclared weights;
@@ -365,6 +388,14 @@ failure/missingness policy.
 Learning/sample-efficiency results report both environment transitions and
 active-agent decision transitions, plus wall-clock/compute provenance. A 1v1
 and a 5v5 environment transition do not represent equal agent experience.
+
+Under the immutable V1 evaluation contract, every cell is also homogeneous in
+the episode-wide execution-information mode and compatible actor projection.
+Mixed-regime execution is ineligible until Milestone 10 introduces the V2
+per-active-slot provenance contract in A12. After that contract exists,
+SharedObs-versus-NoSharedObs and NoSharedObs-versus-SharedObs are distinct
+assignment directions, each requiring task-appropriate side swaps. They are
+never pooled with each other or with homogeneous-regime cells.
 
 ## A8. Milestone 6 Step 5 fact budget
 
@@ -543,7 +574,93 @@ Scene/Event V2 and browser transports preserve both events losslessly without
 adding Milestone 7 presentation behavior.
 
 Existing development artifacts and fixtures are disposable and are
-regenerated under the expanded V1 contract. There is no V2 alias, legacy
-loader, optional fallback, dual-schema root, or compatibility shim. After the
-alpha schema freeze, any incompatible wire change requires a version bump and
-an explicit migration policy rather than another in-place mutation.
+regenerated under the expanded V1 contract. For this approved pre-freeze
+in-place expansion, there is no V2 alias, legacy loader, optional fallback,
+dual-schema root, or compatibility shim. After the alpha schema freeze, any
+incompatible wire change—including the mixed-regime contract required below—
+requires a version bump and an explicit migration policy rather than another
+in-place mutation.
+
+## A12. Common Milestone 10–12 policy pipeline spine
+
+**Classification:** required policy, training, and evaluation architecture
+clarification.
+**Supersedes:** Sections 2.12.13–2.12.18, 2.13.4–2.13.5, 2.15.7,
+2.15.10–2.15.11, and 4.3.10–4.3.12, plus Appendices A.12, A.15, and A.16,
+wherever they permit separate execution-regime pipelines, mutable checkpoint
+regimes, mixed-regime V1 provenance, or duplicated lifecycle ownership.
+
+Milestones 10–12 extend one common policy-to-transition pipeline spine:
+
+```text
+direct or curriculum episode specification
+  -> versioned policy assignments and seed schedule
+  -> reset, base observations, and exact action masks
+  -> selected authorized-input composition and learner projection
+  -> regime-compatible compiled actor front end
+  -> shared exact-mask action realization and one joint-action assembler
+  -> core step and common rollout/batch/update/checkpoint lifecycle
+  -> the same policy/scenario/capture/replay/metric lifecycle
+```
+
+Execution-information regimes may differ only at these explicit seams:
+
+1. authorized-input composition;
+2. learner-input projection and the compatible compiled actor front end;
+3. checkpoint compatibility validation;
+4. separately measured compute and resource cost; and
+5. manifest, evaluation-cell, and report stratum.
+
+Regime selection does not authorize a second policy-specification resolver,
+environment or scenario runner, trainer or update loop, evaluator, RNG
+protocol, mask consumer, legal-action realization, joint-action assembler,
+capture path, replay format, or metric implementation. SharedObs and
+NoSharedObs therefore share lifecycle and semantic ownership even when their
+actor inputs and compatible compiled front ends differ.
+
+Milestone 10 owns the common versioned policy-assignment, runner, scenario,
+capture, replay, and failure-semantics integration. Milestone 11 owns
+deterministic curriculum selection that emits ordinary episode and policy
+specifications into that same spine; curriculum is not a second trainer or
+rollout path. Milestone 12 owns the SharedObs compositor, versioned learner
+projections, compatible compiled actor front ends, and their integration with
+the common update and checkpoint lifecycle. These ownership boundaries create
+extension seams, not parallel products.
+
+Every learned checkpoint declares exactly one `execution_information_mode`,
+one actor-input projection version, and one compatible compiled actor-front-end
+contract. Standard compatibility validation rejects incompatible combinations
+before compilation, device allocation, or execution. Cross-regime
+initialization is permitted only as an explicitly declared transfer or
+out-of-distribution intervention with separate provenance and reporting; it
+does not make one checkpoint switch regimes in place.
+
+The current `EvaluationEpisodeContextV1` and its replay family are homogeneous
+and immutable: their single episode-wide `execution_information_mode` and
+`actor_projection` apply to every configured active policy assignment. A
+runtime may not label a mixed SharedObs/NoSharedObs match as a valid V1 episode,
+even if it can mechanically produce a joint action. Such a match is ineligible
+for official evaluation, controlled-scenario evidence, replay publication, and
+metric reporting.
+
+Mixed-regime execution is deferred to a Milestone 10 V2 contract. V2 must add
+per-active-slot execution-information and actor-projection provenance, preserve
+the availability authority required to reconstruct every recipient's input,
+and feed the same common runner, action, capture, replay, and metric lifecycle.
+It must not mutate or reinterpret V1. Its recipient-by-source availability
+matrix may be absent only when every configured active assignment is
+NoSharedObs. When the matrix is present, every NoSharedObs or inactive-recipient
+row is all false; diagonal, cross-team, and inactive-source entries are also
+false. The matrix is the exact same-epoch authority used by input composition
+and capture, not a replay-side reconstruction. A homogeneous/mixed episode
+profile is derived from the configured-active per-slot assignments; it is not
+a second editable authority. An explicit V1-to-V2 migration may copy V1's
+episode-wide mode and projection to each configured-active V2 slot, mark
+inactive slots not applicable, and preserve compatible recorded availability,
+but it can produce only a homogeneous V2 profile. It fails if required
+versioned provenance cannot be established, gives the migrated V2 artifact a
+new identity, and never mutates V1 bytes or digests. After V2 exists, focal
+SharedObs versus opponent NoSharedObs and focal NoSharedObs versus opponent
+SharedObs are separate directional cells with task-appropriate side swaps.
+Neither direction is pooled with the other or with homogeneous SharedObs or
+NoSharedObs results.

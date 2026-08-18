@@ -194,12 +194,49 @@ weighting, comparison, or inferential changes increment the suite or manifest
 version instead. These are documentation contracts in the current milestone,
 not a request for a universal production registry.
 
+### Execution-information assignment profiles
+
+Execution information is directional matchup provenance, not one fungible
+match label. Every result identifies the focal subject's execution-information
+regime, the cooperative-partner execution-regime profile, and the
+adversarial-opponent execution-regime profile in addition to the existing
+side/role and policy coordinates. A profile retains the configured-active
+fixed-slot assignments needed to distinguish a homogeneous team from a
+heterogeneous one; an inactive slot remains not applicable rather than
+acquiring a regime. The episode's homogeneous/mixed profile is derived from
+those configured-active assignment records; it is not an independently
+editable metric or manifest coordinate.
+
+`EvaluationEpisodeContextV1` has one episode-global
+`execution_information_mode` and one episode-global `actor_projection`.
+Consequently, the current V1 evaluation/replay contract represents only
+homogeneous execution-information episodes. It cannot truthfully encode a
+SharedObs team against a NoSharedObs team, or any other mixed per-slot
+assignment, by overloading the global mode, the policy ID, or false
+availability rows.
+
+An explicit V1-to-V2 migration can only replicate the episode-global V1
+mode/projection pair across configured-active slots, mark inactive slots not
+applicable, and yield a homogeneous V2 assignment profile. It never manufactures
+a mixed profile or changes the original V1 artifact's identity or digest.
+
+Future mixed-regime suites keep assignment direction explicit. SharedObs focal
+subjects against NoSharedObs opponents and NoSharedObs focal subjects against
+SharedObs opponents are separate cells, as are their configured-side
+assignments. Results may be combined only by a suite/manifest estimator that
+declares the pairing and frozen weights, retains both component directions,
+and verifies the applicable side-swap symmetry. They are never pooled merely
+because they came from the same physical matchup or use the same metric
+formula. This additional provenance changes suite, manifest, and result
+coordinates; it does not change any metric formula or metric ID in this
+document.
+
 ## Presentation budgets
 
 ### Primary team card
 
-Each task and `execution_information_mode` receives at most four endpoint
-blocks; this is a ceiling, not a quota:
+Each task and declared execution-information assignment profile receives at
+most four endpoint blocks; this is a ceiling, not a quota:
 
 1. win/draw/loss as one outcome distribution;
 2. terminal canonical score differential;
@@ -625,6 +662,9 @@ Before a metric becomes active, its owner must provide:
 
 - hand-constructed neutral, positive, negative, and zero-opportunity traces;
 - team-swap and side-swap invariance where applicable;
+- for any future suite using mixed-regime assignments, both assignment
+  directions on both configured sides, with component cells retained and
+  side-swap equality checked where the suite claims that symmetry;
 - complete/partial/interrupted/failed rollout tests plus independent observed,
   right-censored, competing-event, unavailable, and not-applicable endpoint
   tests where relevant;
