@@ -210,6 +210,14 @@ horizon, measurements, violations, predicate identity, and partial-result
 policy before rollout. Scenario records reference the completed replay and
 metric report and carry supplied results. Their validators join evidence and
 identities; they never execute a metric formula or success predicate.
+
+`ResolvedScenarioSpecificationV2` additionally freezes the promoted layout and
+authored-initial-condition identities, exact fixed-slot roster and role
+template, resolved configuration, one ordered matched seed schedule, and one
+stable compiled initial-state digest. That compiled digest covers only a tagged
+projection of simulator step count plus `GlobalAnalysisSnapshotV1`; the record's
+full frame-zero digest remains separate attempt-specific replay evidence.
+
 Every `right_censored` scenario result requires a censor-aware definition and a
 complete declared-horizon replay, independently of whether its estimate is
 `defined` or `insufficient_data`. A `competing_event` endpoint likewise
@@ -272,8 +280,12 @@ surface is:
   `load_actor_pov_replay_artifact_v1` for source-validated, independently
   shareable POV companions; and
 - `save_scenario_evaluation_record_v1` and
-  `load_scenario_evaluation_record_v1` for scenario records whose replay and
-  metric-report evidence joins are mandatory.
+  `load_scenario_evaluation_record_v1` for historical V1 scenario records whose
+  replay and metric-report evidence joins are mandatory; and
+- `save_scenario_evaluation_record_v2` and
+  `load_scenario_evaluation_record_v2` for the versioned fixed-slot companion,
+  plus `validate_official_scenario_evaluation_record_v2` for the mandatory
+  core-aware product and curated-state acceptance gate.
 
 The filename pair is derived locally, never serialized:
 
@@ -298,13 +310,18 @@ canonical reserialization in that order.
 Only existing local directories and regular nonsymlink files participate.
 URLs, symlinks in any path component, archives, compression, pickle, dynamic
 imports, implicit directory creation, and network resolution are outside the
-contract. Replay loading imports no JAX, backend, simulator, policy, capture,
-or device-transfer path. Evaluation-owned V1 wire dimensions are frozen for
-artifact decoding and checked against the current core dimensions in ordinary
-tests; changing them requires an explicit schema migration. The V1 filesystem
-backend requires POSIX directory-descriptor and no-follow support so every
-component and final operation remain bound to one opened directory inode; it
-fails closed with `unsupported_platform` when those guarantees are unavailable.
+contract. Replay and companion loading import no JAX, backend, simulator,
+policy, capture, or device-transfer path. V2 scenario loading therefore
+establishes canonical bytes and replay/report/scenario evidence joins but does
+not by itself confer official status. Official consumers must subsequently call
+`validate_official_scenario_evaluation_record_v2`, whose deliberately separate
+host boundary rehydrates and checks the carried configuration and curated state
+against current core authorities. Evaluation-owned V1 wire dimensions are
+frozen for artifact decoding and checked against the current core dimensions in
+ordinary tests; changing them requires an explicit schema migration. The V1
+filesystem backend requires POSIX directory-descriptor and no-follow support so
+every component and final operation remain bound to one opened directory inode;
+it fails closed with `unsupported_platform` when those guarantees are unavailable.
 
 Saving writes each member to a same-directory temporary file, flushes and
 `fsync`s it, then publishes by atomic no-clobber hard link and `fsync`s the

@@ -191,6 +191,14 @@ configuration, roster, configured-active slots, role template, schedule, or
 realized coordinate. Scenario identity plus a subset check over role names is
 insufficient.
 
+The M7 V2 companion keeps semantic authored-content identity, compiled initial
+state, and attempt replay evidence distinct. The specification digest binds the
+promoted authored-initial-condition identity to a stable digest of simulator
+step count plus the dynamic global snapshot. Each record separately binds the
+complete frame-zero digest, including attempt identity and derived policy
+material. This prevents an attempt-specific frame hash from masquerading as the
+stable authored-state identity while still proving the exact captured frame.
+
 No training distribution is inferred from an evaluation suite or scenario.
 Locked evaluation and scenario maps, seeds, opponents, initial states, and
 other held-out material are ineligible for policy or curriculum updates.
@@ -778,6 +786,14 @@ publication. A POV save must validate its completed replay reference. A
 scenario save or load must validate both its replay and metric-report evidence
 joins; a structurally valid but foreign record is not accepted as a local
 scenario result.
+
+Canonical V2 scenario loading and saving remain JAX-free and establish artifact
+and evidence validity, not official product acceptance. An official consumer
+must additionally invoke `validate_official_scenario_evaluation_record_v2`.
+That separately named host gate rehydrates the exact carried configuration and
+initial state and applies the current core product and curated-state validators.
+No mutable draft, filename, or successful transport round trip can substitute
+for that gate.
 
 Rollout completion, evaluation-processing validity, and per-statistic endpoint
 observation remain independent in both live and replay-loaded analysis. A

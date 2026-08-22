@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Literal
 
+import jax.numpy as jnp
 import numpy as np
+from jax import Array
 
 from marl_battlegrounds.core.axis_mappings import (
     GLOBAL_RECIPIENT_SLOT_BY_ACTOR_AND_TARGET_ACTION,
@@ -55,7 +57,11 @@ from marl_battlegrounds.core.combat import (
     WARRIOR_DAMAGE_MITIGATION_AURA_MULTIPLIER_FLOOR,
     WARRIOR_DAMAGE_MITIGATION_AURA_RADIUS,
 )
-from marl_battlegrounds.core.config import validate_env_config
+from marl_battlegrounds.core.config import (
+    validate_env_config,
+    validate_product_env_config,
+    validate_scenario_initial_state,
+)
 from marl_battlegrounds.core.types import (
     MAX_AGENT_SLOTS,
     MAX_AGENTS_PER_TEAM,
@@ -70,7 +76,10 @@ from marl_battlegrounds.core.types import (
     OBSTACLE_FEATURE_WIDTH,
     OBSTACLE_FEATURE_X,
     OBSTACLE_FEATURE_Y,
+    OBSTACLE_FEATURES,
     EnvConfig,
+    EnvState,
+    ResolvedAgentProfile,
 )
 from marl_battlegrounds.evaluation.models import (
     CATALOG_SCHEMA_ID,
@@ -86,6 +95,7 @@ from marl_battlegrounds.evaluation.models import (
     ContentAddressedIdentityV1,
     EvaluationEpisodeContextV1,
     EvaluationEpisodeIdentityV1,
+    EvaluationFrameV1,
     EvaluationSeedProtocolV1,
     ExecutionInformationMode,
     PolicyAssignmentSlotV1,
@@ -561,6 +571,277 @@ def build_evaluation_episode_context_v1(
         shaping_configuration=shaping_configuration,
         code_revision=code_revision,
     )
+
+
+_INT32_MIN = int(np.iinfo(np.int32).min)
+_INT32_MAX = int(np.iinfo(np.int32).max)
+
+
+def _wire_int32_array(value: object, *, field_name: str) -> Array:
+    """Build one explicit JAX int32 array without silently narrowing wire data."""
+    object_values = np.asarray(value, dtype=object)
+    for item in object_values.flat:
+        if type(item) is not int:
+            raise TypeError(f"{field_name} must contain only exact integers")
+        integer = int(item)
+        if not _INT32_MIN <= integer <= _INT32_MAX:
+            raise ValueError(f"{field_name} must be representable as int32")
+    return jnp.asarray(np.asarray(value, dtype=np.int32), dtype=jnp.int32)
+
+
+def _wire_float32_array(value: object, *, field_name: str) -> Array:
+    """Build one explicit JAX float32 array after a lossless narrowing check."""
+    host_values = np.asarray(value, dtype=np.float64)
+    if not bool(np.all(np.isfinite(host_values))):
+        raise ValueError(f"{field_name} must contain only finite values")
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        narrowed = host_values.astype(np.float32)
+    if not bool(np.all(np.isfinite(narrowed))) or not np.array_equal(
+        host_values,
+        narrowed.astype(np.float64),
+    ):
+        raise ValueError(f"{field_name} must be losslessly representable as float32")
+    return jnp.asarray(narrowed, dtype=jnp.float32)
+
+
+def _validate_official_scenario_context_v2(  # pyright: ignore[reportUnusedFunction]
+    context: EvaluationEpisodeContextV1,
+    initial_frame: EvaluationFrameV1,
+) -> None:
+    """Enforce live product/config/state parity for one loaded V2 scenario."""
+    if type(context) is not EvaluationEpisodeContextV1:
+        raise TypeError(
+            "context must be an EvaluationEpisodeContextV1, not "
+            f"{type(context).__name__}"
+        )
+    if type(initial_frame) is not EvaluationFrameV1:
+        raise TypeError(
+            "initial_frame must be an EvaluationFrameV1, not "
+            f"{type(initial_frame).__name__}"
+        )
+    if initial_frame.episode_id != context.identity.episode_id:
+        raise ValueError("initial frame episode identity must match context")
+    if initial_frame.frame_index != 0:
+        raise ValueError("official scenario initial_frame must have frame_index zero")
+
+    live_catalog = build_static_mechanics_catalog_v1()
+    if context.static_mechanics_catalog != live_catalog:
+        raise ValueError("loaded context mechanics catalog disagrees with live catalog")
+
+    resolved = context.resolved_env_config
+    roster = context.roster
+    mechanics = resolved.slot_mechanics
+
+    class_ids = _wire_int32_array(
+        tuple(row.class_id for row in roster),
+        field_name="context.roster.class_id",
+    )
+    team_ids = _wire_int32_array(
+        tuple(row.configured_team_id for row in roster),
+        field_name="context.roster.configured_team_id",
+    )
+    active_mask = jnp.asarray(
+        np.asarray(tuple(row.configured_active for row in roster), dtype=np.bool_),
+        dtype=jnp.bool_,
+    )
+    profile = ResolvedAgentProfile(
+        class_ids=class_ids,
+        team_ids=team_ids,
+        active_mask=active_mask,
+        agent_radii=_wire_float32_array(
+            tuple(row.body_radius for row in mechanics),
+            field_name="resolved_env_config.slot_mechanics.body_radius",
+        ),
+        base_movement_speeds=_wire_float32_array(
+            tuple(row.base_movement_speed for row in mechanics),
+            field_name="resolved_env_config.slot_mechanics.base_movement_speed",
+        ),
+        observation_radii=_wire_float32_array(
+            tuple(row.observation_radius for row in mechanics),
+            field_name="resolved_env_config.slot_mechanics.observation_radius",
+        ),
+        basic_interaction_radii=_wire_float32_array(
+            tuple(row.basic_interaction_radius for row in mechanics),
+            field_name="resolved_env_config.slot_mechanics.basic_interaction_radius",
+        ),
+        ultimate_interaction_radii=_wire_float32_array(
+            tuple(row.ultimate_interaction_radius for row in mechanics),
+            field_name="resolved_env_config.slot_mechanics.ultimate_interaction_radius",
+        ),
+        max_health=_wire_float32_array(
+            tuple(row.maximum_health for row in mechanics),
+            field_name="resolved_env_config.slot_mechanics.maximum_health",
+        ),
+        out_of_combat_delay_steps=_wire_int32_array(
+            tuple(row.out_of_combat_delay_steps for row in mechanics),
+            field_name="resolved_env_config.slot_mechanics.out_of_combat_delay_steps",
+        ),
+        out_of_combat_health_regen_fraction_per_step=_wire_float32_array(
+            tuple(
+                row.out_of_combat_health_regeneration_fraction_per_step
+                for row in mechanics
+            ),
+            field_name=(
+                "resolved_env_config.slot_mechanics."
+                "out_of_combat_health_regeneration_fraction_per_step"
+            ),
+        ),
+    )
+
+    obstacle_type_ids = tuple(row.obstacle_type_id for row in resolved.obstacle_slots)
+    _wire_int32_array(
+        obstacle_type_ids,
+        field_name="resolved_env_config.obstacle_slots.obstacle_type_id",
+    )
+    obstacle_rows = tuple(
+        (
+            row.obstacle_type_id,
+            row.x,
+            row.y,
+            row.radius,
+            row.width,
+            row.height,
+            row.theta,
+            1.0 if row.is_active else 0.0,
+        )
+        for row in resolved.obstacle_slots
+    )
+    obstacles = _wire_float32_array(
+        obstacle_rows,
+        field_name="resolved_env_config.obstacle_slots",
+    )
+    if np.shape(obstacles) != (MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES):
+        raise AssertionError("resolved obstacle projection changed fixed shape")
+
+    for field_name, value in (
+        ("resolved_env_config.task_mode", resolved.task_mode),
+        (
+            "resolved_env_config.team_deathmatch_score_threshold",
+            resolved.team_deathmatch_score_threshold,
+        ),
+        (
+            "resolved_env_config.maximum_episode_steps",
+            resolved.maximum_episode_steps,
+        ),
+        (
+            "resolved_env_config.spawn_shield_duration_steps",
+            resolved.spawn_shield_duration_steps,
+        ),
+    ):
+        _wire_int32_array(value, field_name=field_name)
+    config = EnvConfig(
+        task_mode=resolved.task_mode,
+        team_deathmatch_score_threshold=resolved.team_deathmatch_score_threshold,
+        max_steps=resolved.maximum_episode_steps,
+        map_width=resolved.map_width,
+        map_height=resolved.map_height,
+        obstacles=obstacles,
+        agent_profile=profile,
+        ordinary_movement_distance_scale=resolved.ordinary_movement_distance_scale,
+        team_spawn_pad_positions=_wire_float32_array(
+            resolved.team_spawn_pad_positions,
+            field_name="resolved_env_config.team_spawn_pad_positions",
+        ),
+        spawn_shield_duration_steps=resolved.spawn_shield_duration_steps,
+        spawn_shield_movement_speed=resolved.spawn_shield_movement_speed,
+        team_respawn_wave_period_step_count=_wire_int32_array(
+            resolved.team_respawn_wave_period_steps,
+            field_name="resolved_env_config.team_respawn_wave_period_steps",
+        ),
+    )
+    validate_product_env_config(config)
+
+    reprojected_config = build_resolved_env_config_v1(config)
+    if reprojected_config != resolved:
+        raise ValueError("loaded resolved config does not exactly reproject")
+    public_agent_ids = tuple(row.public_agent_id for row in roster)
+    if build_roster_v1(config, public_agent_ids) != roster:
+        raise ValueError("loaded roster does not exactly reproject")
+
+    snapshot = initial_frame.snapshot
+    initial_state = EnvState(
+        team_deathmatch_scores=_wire_int32_array(
+            snapshot.team_deathmatch_scores,
+            field_name="initial_frame.snapshot.team_deathmatch_scores",
+        ),
+        step_count=_wire_int32_array(
+            initial_frame.simulator_step_count,
+            field_name="initial_frame.simulator_step_count",
+        ),
+        agent_positions=_wire_float32_array(
+            snapshot.agent_positions,
+            field_name="initial_frame.snapshot.agent_positions",
+        ),
+        alive_mask=jnp.asarray(
+            np.asarray(snapshot.alive_mask, dtype=np.bool_),
+            dtype=jnp.bool_,
+        ),
+        current_health=_wire_float32_array(
+            snapshot.current_health,
+            field_name="initial_frame.snapshot.current_health",
+        ),
+        ultimate_cooldowns=_wire_int32_array(
+            snapshot.ultimate_cooldowns,
+            field_name="initial_frame.snapshot.ultimate_cooldowns",
+        ),
+        slow_durations=_wire_int32_array(
+            snapshot.slow_durations,
+            field_name="initial_frame.snapshot.slow_durations",
+        ),
+        stun_durations=_wire_int32_array(
+            snapshot.stun_durations,
+            field_name="initial_frame.snapshot.stun_durations",
+        ),
+        rogue_poison_anti_heal_durations=_wire_int32_array(
+            snapshot.rogue_poison_anti_heal_durations,
+            field_name="initial_frame.snapshot.rogue_poison_anti_heal_durations",
+        ),
+        mage_burst_damage_amplification_durations=_wire_int32_array(
+            snapshot.mage_burst_damage_amplification_durations,
+            field_name=(
+                "initial_frame.snapshot.mage_burst_damage_amplification_durations"
+            ),
+        ),
+        priest_blessing_of_freedom_slow_floor_durations=_wire_int32_array(
+            snapshot.priest_blessing_of_freedom_slow_floor_durations,
+            field_name=(
+                "initial_frame.snapshot.priest_blessing_of_freedom_slow_floor_durations"
+            ),
+        ),
+        team_respawn_wave_countdowns=_wire_int32_array(
+            snapshot.team_respawn_wave_countdowns,
+            field_name="initial_frame.snapshot.team_respawn_wave_countdowns",
+        ),
+        spawn_shield_durations=_wire_int32_array(
+            snapshot.spawn_shield_durations,
+            field_name="initial_frame.snapshot.spawn_shield_durations",
+        ),
+        steps_until_out_of_combat=_wire_int32_array(
+            snapshot.steps_until_out_of_combat,
+            field_name="initial_frame.snapshot.steps_until_out_of_combat",
+        ),
+        previous_timestep_move_actions=_wire_int32_array(
+            snapshot.previous_timestep_move_actions,
+            field_name="initial_frame.snapshot.previous_timestep_move_actions",
+        ),
+        previous_timestep_select_target_actions=_wire_int32_array(
+            snapshot.previous_timestep_select_target_actions,
+            field_name=(
+                "initial_frame.snapshot.previous_timestep_select_target_actions"
+            ),
+        ),
+        previous_timestep_use_ultimate_actions=_wire_int32_array(
+            snapshot.previous_timestep_use_ultimate_actions,
+            field_name=(
+                "initial_frame.snapshot.previous_timestep_use_ultimate_actions"
+            ),
+        ),
+        has_previous_timestep_joint_action=jnp.asarray(
+            snapshot.has_previous_timestep_joint_action,
+            dtype=jnp.bool_,
+        ),
+    )
+    validate_scenario_initial_state(config, initial_state)
 
 
 __all__ = [
