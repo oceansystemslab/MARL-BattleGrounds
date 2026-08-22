@@ -387,6 +387,10 @@ def _zero_observation() -> Observation:
                 (MAX_AGENT_SLOTS, NUM_TEAMS, MAX_AGENTS_PER_TEAM),
                 dtype=bool,
             ),
+            class_ids_by_agent_by_team=jnp.zeros(
+                (MAX_AGENT_SLOTS, NUM_TEAMS, MAX_AGENTS_PER_TEAM),
+                dtype=jnp.int32,
+            ),
         ),
     )
 
@@ -556,6 +560,12 @@ def _assert_observation_contract(observation: Observation) -> None:
         MAX_AGENTS_PER_TEAM,
     )
     assert observation.spawn_lifecycle.alive_mask_by_agent_by_team.dtype == bool
+    assert observation.spawn_lifecycle.class_ids_by_agent_by_team.shape == (
+        MAX_AGENT_SLOTS,
+        NUM_TEAMS,
+        MAX_AGENTS_PER_TEAM,
+    )
+    assert observation.spawn_lifecycle.class_ids_by_agent_by_team.dtype == jnp.int32
 
     assert "ally_targetability_mask" not in Observation._fields
     assert "enemy_targetability_mask" not in Observation._fields
@@ -857,6 +867,7 @@ def test_observation_stores_structured_families() -> None:
         "respawn_wave_countdowns_by_agent_by_team",
         "active_mask_by_agent_by_team",
         "alive_mask_by_agent_by_team",
+        "class_ids_by_agent_by_team",
     )
 
 

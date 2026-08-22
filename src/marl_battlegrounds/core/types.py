@@ -327,8 +327,9 @@ class SpawnLifecycleObservation(NamedTuple):
     """Actor-relative public spawn, shield, roster, and respawn-clock truth.
 
     Team A observers receive Team A before Team B; Team B observers receive
-    Team B before Team A. Configured inactive observer rows remain canonical
-    zeros across every leaf.
+    Team B before Team A. Configured class-to-slot rows remain public through
+    occlusion, death, shielding, and respawn. Configured inactive observer rows
+    remain canonical zeros across every leaf.
     """
 
     spawn_pad_positions_by_agent_by_team: (
@@ -347,6 +348,9 @@ class SpawnLifecycleObservation(NamedTuple):
         Array  # (MAX_AGENT_SLOTS, NUM_TEAMS, MAX_AGENTS_PER_TEAM)
     )
     alive_mask_by_agent_by_team: (
+        Array  # (MAX_AGENT_SLOTS, NUM_TEAMS, MAX_AGENTS_PER_TEAM)
+    )
+    class_ids_by_agent_by_team: (
         Array  # (MAX_AGENT_SLOTS, NUM_TEAMS, MAX_AGENTS_PER_TEAM)
     )
 

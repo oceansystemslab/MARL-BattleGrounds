@@ -1297,6 +1297,9 @@ def test_spawn_shield_conceals_only_opponents_and_preserves_self_and_ally_rows()
 
     assert not bool(observation.enemy_visibility_mask[0, 0])
     _assert_unit_feature_row_is_zero(observation.enemy_unit_features[0, 0])
+    assert int(observation.spawn_lifecycle.class_ids_by_agent_by_team[0, 1, 0]) == int(
+        config.agent_profile.class_ids[shielded_slot]
+    )
     assert bool(observation.enemy_visibility_mask[shielded_slot, 0])
 
 
@@ -1608,6 +1611,14 @@ def test_los_blocked_candidate_rows_are_fully_zero() -> None:
     _assert_unit_feature_row_is_zero(
         observation.enemy_unit_features[MAX_AGENTS_PER_TEAM, 0]
     )
+    assert int(observation.spawn_lifecycle.class_ids_by_agent_by_team[0, 1, 0]) == int(
+        config.agent_profile.class_ids[MAX_AGENTS_PER_TEAM]
+    )
+    assert int(
+        observation.spawn_lifecycle.class_ids_by_agent_by_team[
+            MAX_AGENTS_PER_TEAM, 1, 0
+        ]
+    ) == int(config.agent_profile.class_ids[0])
 
 
 def test_out_of_radius_candidate_rows_are_fully_zero() -> None:

@@ -172,6 +172,11 @@ def _shape_checking_slot_policy(
         NUM_TEAMS,
         MAX_AGENTS_PER_TEAM,
     )
+    assert spawn_lifecycle.class_ids_by_agent_by_team.shape == (
+        NUM_TEAMS,
+        MAX_AGENTS_PER_TEAM,
+    )
+    assert spawn_lifecycle.class_ids_by_agent_by_team.dtype == jnp.int32
 
     assert action_mask.move_mask.shape == (NUM_MOVE_ACTIONS,)
     assert action_mask.select_target_mask.shape == (NUM_TARGET_ACTIONS,)
@@ -192,7 +197,7 @@ def _shape_checking_slot_policy(
         assert leaf.dtype == jnp.bool_
 
     return ActorAction(
-        move=observation.self_features[0].astype(jnp.int32),
+        move=spawn_lifecycle.class_ids_by_agent_by_team[0, 0],
         select_target=action_mask.move_mask[0].astype(jnp.int32),
         use_ultimate=jax.random.bits(key, (), dtype=jnp.uint32).astype(jnp.int32),
     )

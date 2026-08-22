@@ -4,6 +4,14 @@ from importlib import import_module
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from marl_battlegrounds.evaluation.actor_projection import (
+        NO_SHARED_OBS_ACTOR_PROJECTION_ID,
+        NO_SHARED_OBS_ACTOR_PROJECTION_V2,
+        NO_SHARED_OBS_ACTOR_PROJECTION_VERSION,
+        reconstruct_actor_class_ids_by_team_v2,
+        reconstruct_class_ids_by_agent_by_team_v2,
+        validate_class_ids_by_agent_by_team_against_context_v1,
+    )
     from marl_battlegrounds.evaluation.capture import (
         capture_evaluation_transition_unit_v1,
         capture_initial_evaluation_frame_v1,
@@ -216,6 +224,17 @@ def _register_lazy_exports(module_name: str, names: tuple[str, ...]) -> None:
         _LAZY_EXPORT_MODULE_BY_NAME[name] = module_name
 
 
+_register_lazy_exports(
+    "marl_battlegrounds.evaluation.actor_projection",
+    (
+        "NO_SHARED_OBS_ACTOR_PROJECTION_ID",
+        "NO_SHARED_OBS_ACTOR_PROJECTION_V2",
+        "NO_SHARED_OBS_ACTOR_PROJECTION_VERSION",
+        "reconstruct_actor_class_ids_by_team_v2",
+        "reconstruct_class_ids_by_agent_by_team_v2",
+        "validate_class_ids_by_agent_by_team_against_context_v1",
+    ),
+)
 _register_lazy_exports(
     "marl_battlegrounds.evaluation.capture",
     (
@@ -457,6 +476,9 @@ __all__ = [
     "DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1",
     "DEFAULT_MAX_REPLAY_JSON_DEPTH_V1",
     "METRIC_REPORT_FILE_SUFFIX_V1",
+    "NO_SHARED_OBS_ACTOR_PROJECTION_ID",
+    "NO_SHARED_OBS_ACTOR_PROJECTION_V2",
+    "NO_SHARED_OBS_ACTOR_PROJECTION_VERSION",
     "REPLAY_FILE_SUFFIX_V1",
     "SCENARIO_FILE_SUFFIX_V1",
     "AbilityActivatedEventV1",
@@ -620,12 +642,15 @@ __all__ = [
     "load_replay_bundle_v1",
     "load_scenario_evaluation_record_v1",
     "normalize_transition_facts_v1",
+    "reconstruct_actor_class_ids_by_team_v2",
+    "reconstruct_class_ids_by_agent_by_team_v2",
     "save_actor_pov_replay_artifact_v1",
     "save_replay_bundle_v1",
     "save_scenario_evaluation_record_v1",
     "validate_actor_pov_replay_against_replay_v1",
     "validate_actor_pov_replay_artifact_v1",
     "validate_actor_pov_replay_content_v1",
+    "validate_class_ids_by_agent_by_team_against_context_v1",
     "validate_evaluation_processing_progress_v1",
     "validate_evaluation_transition_unit_v1",
     "validate_initial_evaluation_frame_v1",

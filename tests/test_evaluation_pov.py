@@ -14,6 +14,9 @@ from tests.evaluation_fixtures import (
 )
 
 from marl_battlegrounds.core.types import Action
+from marl_battlegrounds.evaluation.actor_projection import (
+    NO_SHARED_OBS_ACTOR_PROJECTION_V2,
+)
 from marl_battlegrounds.evaluation.metrics import build_evaluation_observer_v1
 from marl_battlegrounds.evaluation.models import (
     BaseObservationV1,
@@ -398,6 +401,23 @@ def test_exact_shared_obs_export_fails_closed() -> None:
     )
     replay = _build_replay(shared)
     with pytest.raises(ValueError, match="unavailable for shared_obs"):
+        export_actor_pov_replay_v1(replay, global_slot=0)
+
+
+def test_actor_pov_replay_v1_rejects_actor_projection_v2(
+    trajectory: CapturedEvaluationTrajectory,
+) -> None:
+    """POV V1 export cannot serialize the class metadata added by projection V2."""
+    projection_v2_trajectory = CapturedEvaluationTrajectory(
+        context=trajectory.context.model_copy(
+            update={"actor_projection": NO_SHARED_OBS_ACTOR_PROJECTION_V2}
+        ),
+        frames=trajectory.frames,
+        transitions=trajectory.transitions,
+    )
+    replay = _build_replay(projection_v2_trajectory)
+
+    with pytest.raises(ValueError, match="projection version 1"):
         export_actor_pov_replay_v1(replay, global_slot=0)
 
 

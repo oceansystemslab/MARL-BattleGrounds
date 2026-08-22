@@ -48,6 +48,7 @@ def test_evaluation_v1_wire_shapes_match_current_core_contract() -> None:
 @pytest.mark.parametrize(
     "module_name",
     (
+        "marl_battlegrounds.evaluation.actor_projection",
         "marl_battlegrounds.evaluation.replay",
         "marl_battlegrounds.evaluation.replay_io",
         "marl_battlegrounds.evaluation.pov",

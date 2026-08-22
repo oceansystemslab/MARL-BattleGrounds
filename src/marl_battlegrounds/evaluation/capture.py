@@ -46,6 +46,9 @@ from marl_battlegrounds.core.types import (
     TeamDeathmatchTransitionFacts,
     TransitionFacts,
 )
+from marl_battlegrounds.evaluation.actor_projection import (
+    validate_class_ids_by_agent_by_team_against_context_v1,
+)
 from marl_battlegrounds.evaluation.events import decode_evaluation_events_v1
 from marl_battlegrounds.evaluation.models import (
     ActionAcceptanceFactsV1,
@@ -336,12 +339,21 @@ def _normalize_previous_action_observation_v1(
 
 def _normalize_spawn_lifecycle_observation_v1(
     source: SpawnLifecycleObservation,
+    context: EvaluationEpisodeContextV1,
 ) -> SpawnLifecycleObservationV1:
     _require_exact_type(
         source,
         SpawnLifecycleObservation,
         name="observation.spawn_lifecycle",
     )
+    class_ids = _array_payload(
+        source.class_ids_by_agent_by_team,
+        name="observation.spawn_lifecycle.class_ids_by_agent_by_team",
+        shape=(MAX_AGENT_SLOTS, NUM_TEAMS, MAX_AGENTS_PER_TEAM),
+        dtype=_INT32_DTYPE,
+    )
+    validate_class_ids_by_agent_by_team_against_context_v1(context, class_ids)
+
     specs = (
         (
             "spawn_pad_positions_by_agent_by_team",
@@ -402,10 +414,15 @@ def _normalize_spawn_lifecycle_observation_v1(
         )
         for field_name, shape, dtype, finite in specs
     }
+    # V1 bytes remain immutable; the validated class map is reconstructed from
+    # the episode roster by actor projection V2 rather than serialized here.
     return SpawnLifecycleObservationV1.model_validate(payload)
 
 
-def _normalize_base_observation_v1(source: Observation) -> BaseObservationV1:
+def _normalize_base_observation_v1(
+    source: Observation,
+    context: EvaluationEpisodeContextV1,
+) -> BaseObservationV1:
     _require_exact_type(source, Observation, name="observation")
     specs = (
         ("self_features", (MAX_AGENT_SLOTS, SELF_FEATURES), _FLOAT32_DTYPE, True),
@@ -466,7 +483,8 @@ def _normalize_base_observation_v1(source: Observation) -> BaseObservationV1:
         source.previous_timestep_actions
     )
     payload["spawn_lifecycle"] = _normalize_spawn_lifecycle_observation_v1(
-        source.spawn_lifecycle
+        source.spawn_lifecycle,
+        context,
     )
     return BaseObservationV1.model_validate(payload)
 
@@ -910,7 +928,7 @@ def _build_evaluation_frame_v1_from_host(
             "frame_id": f"{episode_id}:frame:{frame_index}",
             "simulator_step_count": simulator_step_count,
             "snapshot": snapshot,
-            "base_observation": _normalize_base_observation_v1(observation),
+            "base_observation": _normalize_base_observation_v1(observation, context),
             "action_mask": _normalize_action_mask_v1(action_mask),
             "shared_obs_information_availability_by_recipient_and_sensor_source": (
                 availability_payload
