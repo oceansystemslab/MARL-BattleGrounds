@@ -49,8 +49,9 @@ An `EvaluationSuiteV1`-equivalent declaration freezes:
   is represented by one homogeneous episode-wide pair;
 - critic-information regime, canonical reward mode, and shaping configuration;
 - primary, secondary, exploratory, and diagnostic metric IDs;
-- layouts/maps, scenarios, rosters/compositions, cooperative partners,
-  adversarial opponents, sides, roles, and their joint target weights;
+- promoted content-addressed layouts/maps and authored initial conditions,
+  scenarios, rosters/compositions, cooperative partners, adversarial
+  opponents, sides, roles, and their joint target weights;
 - task/scenario configuration and static-mechanics catalog versions;
 - completion, retry, censoring, artifact-retention, and replay policies; and
 - the population to which results are intended to generalize.
@@ -150,9 +151,10 @@ training-map distribution and training seed schedule. Researchers may replace
 that default with any distribution over structurally valid episode
 configurations. An optional curriculum is a checkpointable, stateful selector
 over the same contract; its benchmark 1v1–5v5 path uses explicitly approved,
-handpicked rosters rather than an exhaustive composition grid. Training-map
-identities and the exact curriculum roster, map, weight, retention, opponent,
-and transition choices remain future Milestone 11 decisions.
+handpicked rosters rather than an exhaustive composition grid. Map identities
+selected into the training distribution and the exact curriculum roster, map,
+weight, retention, opponent, and transition choices remain future Milestone 11
+decisions.
 
 An evaluation suite owns a frozen population of resolved configurations and
 assignments. A scenario owns its resolved episode configuration, explicit
@@ -163,6 +165,16 @@ coordinate. Binding policy A to Team A and policy B to Team B, or binding
 policies per slot, fills the scenario's frozen roles; it cannot replace the
 roster or any other scenario-owned condition.
 
+Development scene-authoring drafts are mutable design inputs, not evaluation
+artifacts. A candidate becomes eligible for selection only after host-side
+normalization, product/scenario validation, content addressing, and an
+owner-approved promotion that assigns its permanent identity and version.
+Official evaluation and scenario records reference those promoted
+content-addressed layout and authored-initial-condition identities and join
+them independently to the resolved configuration and realized initial state. A
+filename, browser export, mutable draft ID, or successful preview is not an
+admissible identity or validity proof.
+
 The current `ResolvedScenarioSpecificationV1` does not yet bind an explicit
 fixed-slot roster, exact role template, or matched schedule identity and
 membership rule. Its resolved-config digest contains no roster rows, and
@@ -171,10 +183,13 @@ schedule. Before an M7 scenario can be accepted as official, C2 must version
 that contract, validate exact roster/role joins to
 `EvaluationEpisodeContextV1`, prove that each realized seed record occupies
 exactly one declared schedule coordinate, and enforce the core structural and
-product config invariants on loaded context. It must reject any policy binding
-that changes the resolved configuration, roster, configured-active slots, role
-template, schedule, or realized coordinate. Scenario identity plus a subset
-check over role names is insufficient.
+product config invariants on loaded context. The versioned specification must
+also freeze and join the promoted content-addressed layout and authored initial
+condition independently from the resolved-config digest. It must reject any
+policy binding that changes the layout, initial condition, resolved
+configuration, roster, configured-active slots, role template, schedule, or
+realized coordinate. Scenario identity plus a subset check over role names is
+insufficient.
 
 No training distribution is inferred from an evaluation suite or scenario.
 Locked evaluation and scenario maps, seeds, opponents, initial states, and
@@ -201,14 +216,17 @@ and manifest/report stratum may differ by execution-information regime. A
 regime must not select a separate runner, trainer, evaluator, scenario
 lifecycle, RNG protocol, action realization, capture path, replay path, or
 metric implementation. Milestone 10 owns the versioned episode and
-policy-assignment contracts, seed-schedule schema and named derivation
-protocol, evaluation/scenario host runner,
-capture/replay, and failure-semantics integration. Milestone 11 feeds direct,
-custom-distribution, or curriculum training selections into the common
-training spine. Milestone 12 consumes those selections through the common JAX
-rollout/update path and owns the regime-specific compositor, learner
+policy-assignment contracts, semantic-asset promotion adapters, seed-schedule
+schema and named derivation protocol, evaluation/scenario host runner,
+capture/replay, and failure-semantics integration. Milestone 11 selects
+promoted partition-neutral maps into direct, custom-distribution, or
+curriculum training populations and feeds their resolved specifications into
+the common training spine. Milestone 12 consumes those selections through the
+common JAX rollout/update path and owns the regime-specific compositor, learner
 projections, compiled actor front ends, and trainer/checkpoint integration; it
-does not own a roster catalog or training-selection policy.
+does not own a roster catalog, training-selection policy, promotion boundary,
+or mutable development-draft loader. M12 rejects held-out evaluation/scenario
+assets before training execution.
 
 Every learned checkpoint is fixed to one `execution_information_mode`, one
 actor-input projection version, and one compatible compiled actor-front-end
@@ -423,9 +441,18 @@ results.
 
 ## Selection, splits, and leakage control
 
-Training, development, validation, and locked-test maps, layouts, opponents,
-partners, scenarios, and seeds are disjoint wherever the intended claim is
-generalization. The manifest identifies every overlap that is intentional.
+Map/layout, opponent, partner, scenario, and seed selections assigned to
+training, development, validation, and locked-test partitions are disjoint
+wherever the intended claim is generalization. The manifest identifies every
+overlap that is intentional.
+
+Map assets themselves are partition-neutral. Training, development,
+validation, official/custom evaluation, controlled-scenario, and locked-test
+membership belongs to the selecting distribution, suite, scenario, or
+experiment manifest rather than to a split field, filename, or directory in
+the map document. Mutable development drafts are ineligible for every such
+population; manifests may reference only owner-promoted, versioned,
+content-addressed assets or their resolved contract representations.
 
 An official evaluation suite or scenario is never a default training
 distribution. Assets designated locked for evaluation or scenario evidence
@@ -568,6 +595,7 @@ Context-sensitive tactical claims use controlled quantitative scenarios rather
 than episode-wide proxies. Each versioned scenario freezes:
 
 - the behavioral hypothesis and eligible policy roles;
+- promoted content-addressed layout and authored-initial-condition identities;
 - its resolved episode configuration and exact fixed-slot roster;
 - initial state, role template, opponent or scripted pressure, horizon, and
   matched seed schedule;
@@ -891,14 +919,20 @@ Before a suite is used for an official claim, verify:
     `BLOCKED` verdict;
 12. official/custom ownership and canonical-condition status remain separate
     and appear truthfully in every report;
-13. each accepted scenario exactly joins resolved configuration, explicit
+13. each accepted scenario exactly joins promoted content-addressed layout and
+    authored-initial-condition identities, resolved configuration, explicit
     roster, configured-active slots, fixed-slot role template, stable matched
     seed schedule, one unique realized schedule coordinate, horizon, initial
     state, and endpoints; loaded context passes core structural/product parity,
-    and policy binding cannot replace those facts; and
+    mutable drafts and unpromoted candidates are rejected, and policy binding
+    cannot replace those facts; and
 14. the permissive standard-layout factory accepts every structurally valid
     roster while the canonical factory resolves exactly the frozen mirrored
     five-class 5v5 evaluation configuration.
+
+Partition status in this audit comes from the owning distribution, suite,
+scenario, or experiment manifest. It must never be inferred from a map asset's
+filename, directory, mutable draft identity, or authoring history.
 
 Any unresolved Tier-1 semantic, leakage, attribution, or pseudoreplication
 finding blocks an official benchmark claim.

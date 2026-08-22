@@ -958,3 +958,102 @@ curriculum commitment, test count, acceptance criterion, or implied default.
 Any future proposal to ship that grid as a benchmark-owned training preset or
 official evaluation suite requires a new tracked amendment and explicit
 scientific approval.
+
+## A16. Development scene authoring and asset-promotion boundary
+
+**Classification:** required experiment-architecture clarification.
+**Clarifies:** Sections 2.3.1, 2.3.6, 2.8.3-2.8.4, 2.9, 2.12.6-2.12.7,
+and 4.3.7; Amendment A15; and the future Milestone 8-12 handoffs.
+**Activation:** this amendment authorizes only development-time authoring,
+validation, and content identity. It does not activate King of the Hill or
+Capture the Flag configuration, state, observations, transitions, collision,
+scoring, reward, or policy behavior.
+
+MARL-BattleGrounds may provide one local, developer-only scene-authoring tool
+for expressing map and controlled-scenario designs precisely. The tool is a
+development communication and validation surface, not a researcher-facing
+trainer, evaluation runner, scenario host, task registry, or second simulator.
+Its browser or presentation layer never owns catalog mechanics, simulator
+truth, or JAX arrays. Authoritative compilation and validation remain host-side
+and reuse the existing catalog, configuration, reset, and curated-state
+authorities.
+
+Map and scenario authoring are separate semantic concerns. A map owns reusable
+static spatial inputs: dimensions, blocking walls and pillars, the exact five
+respawn-pad centers for each team, and development annotations for future
+objective regions. A scenario references one map and adds ordered Team A and
+Team B fixed-slot rosters, initial agent centers, episode rules, sparse
+curated-state overrides, roles, schedule, horizon, and endpoints as required by
+its owning scenario contract. Duplicate classes and asymmetric
+one-to-five-agent rosters remain structurally legal; omitted team-local rows
+resolve to inactive fixed-shape padding.
+
+Development authoring has three deliberately different lifecycle stages:
+
+1. A **mutable development draft** preserves editable semantic intent. The
+   working names `DevMapDraftV1` and `DevScenarioDraftV1` are explicitly
+   non-public and do not pre-approve permanent M10 or M11 type names.
+2. A **validated candidate** contains normalized semantic content with its own
+   content digest. Its immutable candidate record separately binds that digest
+   to versioned compile and validation evidence produced by current product
+   authorities. It is not thereby official, canonical, training, validation,
+   evaluation, or locked-test material.
+3. An **owner-promoted asset** retains that inherent semantic content digest
+   and receives the durable public identity, version, and approval record
+   assigned by its owning future contract. Evaluation suites, experiment
+   manifests, scenarios, or M11 training distributions then select it and
+   assign its use.
+
+Mutable drafts are never direct production inputs to training, validation,
+official evaluation, or scenario-evaluation pipelines. Future consumers load
+owner-promoted semantic assets or the common resolved episode/scenario
+contracts. They may subsume the development compiler or retain a thin adapter,
+but they must not trust browser state, filenames, mutable draft IDs, or a
+parallel development loader as scientific authority.
+
+Maps are partition-neutral. A map document does not declare itself `training`,
+`development`, `validation`, `evaluation`, `locked-test`, `official`, or
+`canonical`. Those classifications, weights, and leakage constraints belong to
+the selecting distribution, suite, scenario, or experiment manifest. Reusing a
+map across populations is therefore an explicit manifest decision rather than
+a property inferred from its filename or authoring history.
+
+The first authoring boundary exposes only authored facts. Agent class, team and
+fixed team-local slot, initial center, alive state, current health, remaining
+cooldown, named status durations, spawn-shield duration, out-of-combat
+countdown, team scores, timestep, and respawn-wave clocks may be curated within
+their existing validation contracts. Body radius, movement speed, observation
+and interaction ranges, maximum health, recovery mechanics, damage, healing,
+cooldown maxima, and status magnitudes remain catalog-derived and read-only.
+Previous-action history remains the canonical neutral initialization and is
+not an ordinary first-version authoring control.
+
+The authoritative development path is semantic draft parsing, immutable
+profile resolution, padded configuration construction, ordinary reset defaults,
+sparse curated-state overlay, product and scenario validation, and normalized
+content identity. Map resizing never silently moves authored content; geometry
+that becomes invalid remains invalid until the author corrects it. The exact
+frontend package, reuse boundary, endpoints, persistence paths, canvas
+mechanics, components, wire shapes, and detailed proofs remain deferred until
+the accepted replay-viewer foundation has been integrated.
+
+Future-objective geometry is annotation-only until its task milestone owns the
+complete semantics. King of the Hill annotations carry hill center and radius.
+Capture the Flag carries exactly one static `CTF Team Base` per team: the base
+center is that team's flag-home point, and the circle at that center is that
+team's capture zone. One geometry record therefore serves both spatial roles
+without duplicating coordinates. Pickup radius, dynamic home/carried/dropped
+flag state, current flag position, carrier identity, return timing, capture
+eligibility, observations, and transition ordering remain separate Milestone 9
+decisions. Neither hills nor CTF bases enter current Team Deathmatch
+`EnvConfig`, `EnvState`, observations, collision, policy inputs, transitions,
+scoring, or reward authority.
+
+The bounded M7 C2 scenario precedent must anticipate promoted authored content
+without depending on development draft schemas. Its resolved scenario version
+independently freezes and joins a content-addressed layout identity, a
+content-addressed authored-initial-condition identity, the resolved
+configuration digest, explicit fixed-slot roster and role template, matched
+seed schedule and realized coordinate, horizon, and scenario identity. M10
+must later subsume or explicitly version this precedent when it defines the
+permanent shared contracts and promotion adapters.
