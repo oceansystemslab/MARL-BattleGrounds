@@ -533,7 +533,7 @@ test("a second live tab cannot advance after Finish and Reconnect adopts replay"
   const rejected = await rejectedPromise;
   expect(rejected.status()).toBe(404);
   await expect(stalePage.locator("#connection-status")).toHaveText("Resync required");
-  await expect(stalePage.locator("#step-value")).toHaveText("—");
+  await expect(stalePage.locator("#step-value")).toHaveText("0");
 
   await stalePage.locator("#reconnect-button").click();
   const { frame } = await expectSettledReplayHandoff(stalePage);

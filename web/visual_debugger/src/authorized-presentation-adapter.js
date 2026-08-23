@@ -345,6 +345,39 @@ function statusView(rawStatus) {
 }
 
 /**
+ * Project the authorized combat countdown into the browser's durable-status
+ * presentation without changing the scientific status schema.
+ *
+ * The production caller invokes this pure projection only after the containing
+ * presentation has passed the five-leaf authority brand.
+ *
+ * @param {unknown} rawAgent
+ * @returns {Readonly<Record<string, any>> | null}
+ */
+export function projectCertifiedInCombatDurationStatus(rawAgent) {
+  if (!isRecord(rawAgent)) {
+    return null;
+  }
+  const remainingDuration = rawAgent.steps_until_out_of_combat;
+  const configuredDuration = rawAgent.out_of_combat_delay_steps;
+  if (
+    !Number.isInteger(remainingDuration) ||
+    remainingDuration <= 0 ||
+    !Number.isInteger(configuredDuration) ||
+    configuredDuration < remainingDuration
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    status_id: "in_combat",
+    token_id: "in_combat",
+    configured_duration_steps: configuredDuration,
+    remaining_duration: remainingDuration,
+    duration: remainingDuration,
+  });
+}
+
+/**
  * @param {unknown} rawModifier
  * @returns {Readonly<Record<string, any>> | null}
  */
@@ -368,17 +401,20 @@ function agentView(rawAgent, presentation) {
   if (displayKey === null) {
     return null;
   }
+  const durableStatuses = (Array.isArray(rawAgent.statuses) ? rawAgent.statuses : [])
+    .map(statusView)
+    .filter((status) => status !== null);
+  const inCombatStatus = projectCertifiedInCombatDurationStatus(rawAgent);
+  if (inCombatStatus !== null) {
+    durableStatuses.push(inCombatStatus);
+  }
   return Object.freeze({
     ...rawAgent,
     display_key: displayKey,
     alive: rawAgent.life_state === "alive",
     max_health: rawAgent.maximum_health,
     ultimate_cooldown: rawAgent.ultimate_cooldown_remaining,
-    statuses: Object.freeze(
-      (Array.isArray(rawAgent.statuses) ? rawAgent.statuses : [])
-        .map(statusView)
-        .filter((status) => status !== null),
-    ),
+    statuses: Object.freeze(durableStatuses),
     modifiers: Object.freeze(
       (Array.isArray(rawAgent.aura_modifiers) ? rawAgent.aura_modifiers : [])
         .map(modifierView)

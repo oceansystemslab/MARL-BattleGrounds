@@ -2,11 +2,11 @@
   "demo_provenance": {
     "benchmark_eligible": false,
     "code_revision": {
-      "commit_sha": "b462cb559cbe5a471a0cb3230e91a977eaaae038",
-      "dirty_patch_digest": "ed5377a67a8479dead5ce5a791b7852457b7a7fd648bc4503d3508227b57f00e",
+      "commit_sha": "50ef9bb9936a2a7800f1c1b92ab9c7ecdd483ed5",
+      "dirty_patch_digest": "37fe008972831a0a0631a20eeb14af55063c95d9cd48bb327f52369f7da8e831",
       "is_dirty": true,
       "package_version": "0.0.0",
-      "source_tree_digest": "2d468350b869193bd93878f16db44f603e9b50ceb2565e8cffce4b970cff0f5d"
+      "source_tree_digest": "5374017b7c1a413f4de6562c2d7154be764adb3ff9bbebf1bc4623c20c0cc8c4"
     },
     "host_attestation": false,
     "notice": "Deterministic unofficial presentation demo; not a benchmark, policy evaluation, source-tree attestation, or host attestation.",
@@ -45,6 +45,7 @@
         "ability_activated",
         "action_rejected",
         "agent_died",
+        "agent_left_combat",
         "agent_respawned",
         "combat_countdown_reset",
         "lethal_damage_contribution",
@@ -61,13 +62,13 @@
       "metric_report": {
         "byte_length": 22335,
         "file": "death-respawn-shield.marlbg-metrics.json",
-        "sha256": "9e470119ae3f17964a1d87f446ca476a9e9d8d15be9af0b26a1e53a16f47bebc"
+        "sha256": "d1f9a4fd5aa4db2b28dcadcb1d9c4f6dab887b65f117419d2c0d32ef2ace7cde"
       },
       "name": "death-respawn-shield",
       "replay": {
-        "byte_length": 539451,
+        "byte_length": 540223,
         "file": "death-respawn-shield.marlbg-replay.json",
-        "sha256": "ec908c43112b33d2292850d55202a4b1bf8b79bec97ae4ecdc79d0c1d6157fa9"
+        "sha256": "375d5cb67e8bd7405fe265ab8fbf32093d4ffdce2c18e346720249479f1db07d"
       },
       "seed": 0,
       "source_scenario": "death_respawn_cycle",
@@ -79,6 +80,7 @@
       "event_kind_coverage": [
         "ability_activated",
         "action_rejected",
+        "agent_left_combat",
         "combat_countdown_reset",
         "cooldown_ready",
         "cooldown_started",
@@ -95,13 +97,13 @@
       "metric_report": {
         "byte_length": 25218,
         "file": "recovery-status-lifecycle.marlbg-metrics.json",
-        "sha256": "2c8fa244ed355b8dc91370e0a70b36411646215516c22d93d1a50d1453ec429c"
+        "sha256": "881caa916e51ce8ee4f5a67c3937eef347d98f2680066edbbc4832ccd17589b2"
       },
       "name": "recovery-status-lifecycle",
       "replay": {
-        "byte_length": 577991,
+        "byte_length": 580693,
         "file": "recovery-status-lifecycle.marlbg-replay.json",
-        "sha256": "55eff37da69e39b57adf60e74caad34e2bbb1d0473587643f17c7656913a7943"
+        "sha256": "baaa663b52951b737d6cd7a01957e7b8d1568dec9e8bd9fe65a2599a58091672"
       },
       "seed": 0,
       "source_scenario": "recovery_refresh_cycle",
@@ -127,13 +129,13 @@
       "metric_report": {
         "byte_length": 26359,
         "file": "mirrored-five-class-ultimates.marlbg-metrics.json",
-        "sha256": "d8c5af0a4803fe1d163e62c1defc74467c54ec5fea3d4f7b8ee9486fd07c69c4"
+        "sha256": "49bb2a22c6ba185a9eb23f4bee442dcd39b412e1d36d4e62840b02b362279938"
       },
       "name": "mirrored-five-class-ultimates",
       "replay": {
         "byte_length": 452274,
         "file": "mirrored-five-class-ultimates.marlbg-replay.json",
-        "sha256": "03c82b8282ac235d1bd5d8e5a70e865d7a8c347c54fc689845779f5088808af0"
+        "sha256": "f47c5cc6693d7baa6db49807a1e848939558728c195de580d346cac7383ae3be"
       },
       "seed": 0,
       "source_scenario": "mirrored_ultimates",

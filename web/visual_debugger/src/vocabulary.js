@@ -114,6 +114,15 @@ const TEAM_TOKENS = Object.freeze({
 });
 
 const STATUS_TOKENS = Object.freeze({
+  in_combat: token({
+    tokenId: "in_combat",
+    label: "In combat",
+    shortLabel: "COMBAT",
+    accessibleName: "In combat",
+    glyphKey: "combat-in-progress",
+    cssKey: "in-combat",
+    fallback: "C",
+  }),
   stun_warrior_charge: token({
     tokenId: "stun_warrior_charge",
     label: "Charge stun",
@@ -413,6 +422,16 @@ const STATUS_TOKEN_BY_CATALOG_ID = Object.freeze({
   priest_blessing_of_freedom_movement_floor: "priest_freedom",
 });
 
+/**
+ * Authorized aura IDs retain their catalog identity on the wire. Translate
+ * only at the display-vocabulary boundary, just like catalog status IDs.
+ */
+/** @type {Readonly<Record<string, string>>} */
+const MODIFIER_TOKEN_BY_CATALOG_AURA_ID = Object.freeze({
+  mage_damage_amplification: "mage_amplification",
+  warrior_damage_mitigation: "warrior_mitigation",
+});
+
 export const CLASS_TOKEN_IDS = Object.freeze([
   "mage",
   "warrior",
@@ -609,7 +628,9 @@ export function resolveVisualToken(kind, tokenId, payload) {
   const normalized =
     kind === "status" && Object.hasOwn(STATUS_TOKEN_BY_CATALOG_ID, wireId)
       ? STATUS_TOKEN_BY_CATALOG_ID[wireId]
-      : wireId;
+      : kind === "modifier" && Object.hasOwn(MODIFIER_TOKEN_BY_CATALOG_AURA_ID, wireId)
+        ? MODIFIER_TOKEN_BY_CATALOG_AURA_ID[wireId]
+        : wireId;
   const registry = TOKEN_REGISTRIES[kind];
   const definition = Object.hasOwn(registry, normalized)
     ? registry[normalized]

@@ -20,7 +20,6 @@ const EXPECTED_FILTERS = Object.freeze([
   ["aura_modifier_badges", "Aura Modifier Badges"],
   ["duration_status_badges", "Duration Status Badges"],
   ["spawn_shield", "Spawn Shield"],
-  ["combat_status_icon", "Combat Status Icon"],
   ["rejected_action_feedback", "Rejected Action Feedback"],
   ["basic_ability_effects", "Basic Ability Effects"],
   ["ultimate_ability_effects", "Ultimate Ability Effects"],
@@ -42,7 +41,7 @@ const EXPECTED_FILTERS = Object.freeze([
   ["scrolling_battle_text", "Scrolling Battle Text"],
 ]);
 
-test("locked registry exposes exactly 24 ordered all-on filters", () => {
+test("locked registry exposes exactly 23 ordered all-on filters", () => {
   assert.deepEqual(
     VISUAL_FILTER_REGISTRY.map(({ id, label }) => [id, label]),
     EXPECTED_FILTERS,
@@ -51,7 +50,7 @@ test("locked registry exposes exactly 24 ordered all-on filters", () => {
     VISUAL_FILTER_IDS,
     EXPECTED_FILTERS.map(([id]) => id),
   );
-  assert.equal(new Set(VISUAL_FILTER_IDS).size, 24);
+  assert.equal(new Set(VISUAL_FILTER_IDS).size, 23);
   assert.equal(
     VISUAL_FILTER_REGISTRY.every(({ defaultEnabled }) => defaultEnabled),
     true,
@@ -120,9 +119,9 @@ test("state validation and paint-key serialization are strict and deterministic"
   );
   assert.equal(
     visualFilterPaintKey(DEFAULT_VISUAL_FILTER_STATE),
-    `visual-filters-v1:${"1".repeat(24)}`,
+    `visual-filters-v1:${"1".repeat(23)}`,
   );
-  assert.equal(visualFilterPaintKey(disabled), `visual-filters-v1:0${"1".repeat(22)}0`);
+  assert.equal(visualFilterPaintKey(disabled), `visual-filters-v1:0${"1".repeat(21)}0`);
   assert.equal(
     visualFilterPaintKey(Object.fromEntries([...Object.entries(disabled)].reverse())),
     visualFilterPaintKey(disabled),

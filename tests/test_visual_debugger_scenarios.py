@@ -1163,6 +1163,7 @@ def test_researcher_scenarios_cover_every_canonical_event_kind() -> None:
         "source_damage_output",
         "source_healing_output",
         "recipient_health_resolution",
+        "agent_left_combat",
         "combat_countdown_reset",
         "health_regenerated",
         "cooldown_started",

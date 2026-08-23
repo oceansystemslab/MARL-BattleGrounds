@@ -983,14 +983,7 @@ export function bindReplayTimelineControls(elements, controller, clock = globalT
   };
   /** @param {Event} event */
   const onKeyDown = (event) => {
-    const state = controller.snapshot();
-    if (
-      elements.root.hidden ||
-      !elements.keyboardEnabled() ||
-      state.transportState === REPLAY_TRANSPORT_STATES.OFFLINE ||
-      state.cursor === null ||
-      state.hidden
-    ) {
+    if (elements.root.hidden) {
       return;
     }
     const keyboardEvent = /** @type {KeyboardEvent} */ (event);
@@ -1003,6 +996,24 @@ export function bindReplayTimelineControls(elements, controller, clock = globalT
         target.matches(
           'button, input, select, textarea, a[href], summary, dialog, [contenteditable]:not([contenteditable="false"]), [role="button"], [role="slider"], [role="textbox"], [role="combobox"], [role="spinbutton"], [role="menuitem"]',
         ))
+    ) {
+      return;
+    }
+    const ownsSpaceDefault =
+      keyboardEvent.key === " " &&
+      !keyboardEvent.shiftKey &&
+      !keyboardEvent.ctrlKey &&
+      !keyboardEvent.altKey &&
+      !keyboardEvent.metaKey;
+    if (ownsSpaceDefault) {
+      event.preventDefault();
+    }
+    const state = controller.snapshot();
+    if (
+      !elements.keyboardEnabled() ||
+      state.transportState === REPLAY_TRANSPORT_STATES.OFFLINE ||
+      state.cursor === null ||
+      state.hidden
     ) {
       return;
     }

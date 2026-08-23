@@ -119,17 +119,51 @@ async function expectExactDisclosureDefaults(page, { frameZeroEvents = false } =
 
 /**
  * @param {import("@playwright/test").Page} page
- * @param {string} previousPresentationKey
+ * @returns {Promise<Readonly<Record<string, boolean>>>}
  */
-async function expectPendingDisclosureAuthority(page, previousPresentationKey) {
+async function disclosureOpenState(page) {
+  /** @type {Record<string, boolean>} */
+  const result = {};
+  for (const selector of SCIENTIFIC_DISCLOSURES) {
+    result[selector] = (await page.locator(selector).getAttribute("open")) !== null;
+  }
+  return Object.freeze(result);
+}
+
+/**
+ * @param {import("@playwright/test").Page} page
+ * @param {string} previousPresentationKey
+ * @param {Readonly<Record<string, boolean>>} expectedDisclosureOpen
+ */
+async function expectRetainedDisclosureAuthority(
+  page,
+  previousPresentationKey,
+  expectedDisclosureOpen,
+) {
   await expect(page.locator("html")).toHaveAttribute(
     "data-presentation-authority",
-    "pending",
+    "retained",
   );
+  await expect(page.locator("#connection-status")).toHaveText("Command in flight");
+  await expect(page.locator("#battlefield-shell")).toHaveAttribute("aria-busy", "true");
+  await expect(page.locator("#scenario-description")).toContainText("Last confirmed");
+  await expect(page.locator("#scenario-description")).toContainText("update pending");
+  await expect(page.locator("#battlefield-empty")).toBeHidden();
+  await expect(
+    page.locator(
+      `#battlefield .agent[data-presentation-key="${previousPresentationKey}"]`,
+    ),
+  ).toHaveCount(1);
+  await expect(page.locator("#submit-turn-button")).toBeDisabled();
+  await expect(page.locator("#command-target-select")).toBeDisabled();
+  await expect(page.locator("#view-select")).toBeDisabled();
   for (const selector of SCIENTIFIC_DISCLOSURES) {
     const disclosure = page.locator(selector);
-    await expect(disclosure).not.toHaveAttribute("open", "");
     await expect(disclosure).toHaveAttribute("inert", "");
+    await expect(disclosure.locator(":scope > [data-disclosure-body]")).toHaveAttribute(
+      "inert",
+      "",
+    );
     await expect(disclosure.locator(":scope > summary")).toHaveAttribute(
       "aria-disabled",
       "true",
@@ -138,24 +172,10 @@ async function expectPendingDisclosureAuthority(page, previousPresentationKey) {
       "tabindex",
       "-1",
     );
+    expect((await disclosure.getAttribute("open")) !== null).toBe(
+      expectedDisclosureOpen[selector],
+    );
   }
-  await expect(page.locator("[data-presentation-key]")).toHaveCount(0);
-  await expect(page.locator("[data-authoritative-available]")).toHaveCount(0);
-  await expect(page.locator("#battlefield [data-tooltip-owner]")).toHaveCount(0);
-  await expect(page.locator("#roster [data-tooltip-owner]")).toHaveCount(0);
-  expect(
-    await page
-      .locator("body")
-      .evaluate(
-        (body, oldKey) => !body.innerHTML.includes(String(oldKey)),
-        previousPresentationKey,
-      ),
-  ).toBe(true);
-  expect(
-    await page.evaluate(
-      () => document.activeElement?.closest("[data-presentation-key]") === null,
-    ),
-  ).toBe(true);
 }
 
 test("authorized draft edit and rapid Submit install exactly one successor", async ({
@@ -219,13 +239,58 @@ test("authorized draft edit and rapid Submit install exactly one successor", asy
 
   const successorStep = await currentStep(page);
   const transitionBefore = await page.locator("#transition-value").textContent();
-  await page.locator("#submit-turn-button").evaluate((button) => {
-    if (!(button instanceof HTMLButtonElement)) {
-      throw new TypeError("Submit button is unavailable.");
-    }
-    button.click();
-    button.click();
-  });
+  const retainedPresentationKey = await page
+    .locator("#battlefield .agent[data-presentation-key]")
+    .first()
+    .getAttribute("data-presentation-key");
+  if (retainedPresentationKey === null) {
+    throw new Error("Installed battlefield has no presentation key.");
+  }
+  const retainedDisclosureOpen = await disclosureOpenState(page);
+  const heldSubmitPresentation = await holdNextPresentation(page);
+  try {
+    await page.locator("#submit-turn-button").evaluate((button) => {
+      if (!(button instanceof HTMLButtonElement)) {
+        throw new TypeError("Submit button is unavailable.");
+      }
+      button.click();
+      button.click();
+    });
+    await heldSubmitPresentation.held;
+    await expectRetainedDisclosureAuthority(
+      page,
+      retainedPresentationKey,
+      retainedDisclosureOpen,
+    );
+    await page.locator("#submit-turn-button").evaluate((button) => {
+      if (!(button instanceof HTMLButtonElement)) {
+        throw new TypeError("Submit button is unavailable.");
+      }
+      button.click();
+    });
+    await page
+      .locator(
+        `#roster .roster-primary-action[data-presentation-key="${retainedPresentationKey}"]`,
+      )
+      .evaluate((button) => {
+        if (!(button instanceof HTMLButtonElement)) {
+          throw new TypeError("Retained roster action is unavailable.");
+        }
+        button.click();
+      });
+    await page
+      .locator(
+        `#battlefield .agent[data-presentation-key="${retainedPresentationKey}"]`,
+      )
+      .dispatchEvent("pointerdown", { button: 0 });
+    await page.locator("#battlefield").focus();
+    await page.keyboard.press("w");
+    await expect.poll(() => commands.length).toBe(2);
+    heldSubmitPresentation.release();
+  } finally {
+    heldSubmitPresentation.release();
+    await heldSubmitPresentation.dispose();
+  }
   await expect(page.locator("#step-value")).toHaveText(String(successorStep + 1), {
     timeout: 120_000,
   });
@@ -253,6 +318,380 @@ test("authorized draft edit and rapid Submit install exactly one successor", asy
     "data-presentation-authority",
     "installed",
   );
+  await page.unroute("**/api/command");
+});
+
+test("pointer draft keeps battlefield focus and queues one Enter exactly once", async ({
+  page,
+}) => {
+  /** @type {Record<string, any>[]} */
+  const requests = [];
+  await page.route("**/api/command", async (route) => {
+    requests.push(route.request().postDataJSON());
+    await route.continue();
+  });
+
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  const baseStep = await currentStep(page);
+  const battlefield = page.locator("#battlefield");
+  const movement = page
+    .locator(
+      '#command-deck button[data-move-action][aria-disabled="false"]:not([aria-pressed="true"])',
+    )
+    .first();
+  await expect(movement).toBeVisible();
+
+  const heldDraftPresentation = await holdNextPresentation(page);
+  let heldSubmitPresentation = null;
+  try {
+    await movement.click();
+    await heldDraftPresentation.held;
+    await expect(page.locator("#connection-status")).toHaveText("Command in flight");
+    await expect(battlefield).toBeFocused();
+    await expect.poll(() => requests.length).toBe(1);
+
+    await page.keyboard.press("Enter");
+    await battlefield.dispatchEvent("keydown", {
+      key: "Enter",
+      repeat: true,
+    });
+    await expect.poll(() => requests.length).toBe(1);
+    await expect(page.locator("#connection-status")).toHaveText("Submit queued");
+
+    heldSubmitPresentation = await holdNextPresentation(page);
+    heldDraftPresentation.release();
+    await heldSubmitPresentation.held;
+    await expect.poll(() => requests.length).toBe(2);
+    await expect(page.locator("#connection-status")).toHaveText("Command in flight");
+    await expect(battlefield).toBeFocused();
+    await page.keyboard.press("Enter");
+    await battlefield.dispatchEvent("keydown", {
+      key: "Enter",
+      repeat: true,
+    });
+    await expect.poll(() => requests.length).toBe(2);
+
+    expect(requests[0].command).toMatchObject({ command_type: "keyboard" });
+    expect(String(requests[0].command.key).toLowerCase()).not.toBe("enter");
+    expect(requests[1].command).toEqual({
+      command_type: "keyboard",
+      key: "Enter",
+      shift_key: false,
+      ctrl_key: false,
+      alt_key: false,
+      meta_key: false,
+      repeat: false,
+    });
+    expect(requests[1].command_id).not.toBe(requests[0].command_id);
+    expect(requests[1].base_revision).toBe(requests[0].base_revision + 1);
+    heldSubmitPresentation.release();
+  } finally {
+    heldDraftPresentation.release();
+    await heldDraftPresentation.dispose();
+    heldSubmitPresentation?.release();
+    await heldSubmitPresentation?.dispose();
+  }
+
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await expect(page.locator("#step-value")).toHaveText(String(baseStep + 1), {
+    timeout: 120_000,
+  });
+  await expect.poll(() => requests.length).toBe(2);
+  await expect(battlefield).toBeFocused();
+
+  const keyboardMovementCandidate = page
+    .locator(
+      '#command-deck button[data-move-action][aria-disabled="false"]:not([aria-pressed="true"])',
+    )
+    .first();
+  const keyboardMovementAction =
+    await keyboardMovementCandidate.getAttribute("data-move-action");
+  if (keyboardMovementAction === null) {
+    throw new Error("Keyboard movement control has no stable action identity.");
+  }
+  const keyboardMovement = page.locator(
+    `#command-deck button[data-move-action=${JSON.stringify(keyboardMovementAction)}]`,
+  );
+  const keyboardDraftResponse = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname === "/api/command",
+  );
+  const heldKeyboardPresentation = await holdNextPresentation(page);
+  try {
+    await keyboardMovement.press("Enter");
+    await heldKeyboardPresentation.held;
+    expect((await keyboardDraftResponse).status()).toBe(200);
+    await expect(page.locator("#connection-status")).toHaveText("Command in flight");
+    await expect(battlefield).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect.poll(() => requests.length).toBe(3);
+    heldKeyboardPresentation.release();
+  } finally {
+    heldKeyboardPresentation.release();
+    await heldKeyboardPresentation.dispose();
+  }
+  await expect.poll(() => requests.length).toBe(3);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await expect(keyboardMovement).toBeFocused();
+  expect(String(requests[2].command.key).toLowerCase()).not.toBe("enter");
+  await expect(page.locator("#step-value")).toHaveText(String(baseStep + 1));
+  await page.unroute("**/api/command");
+});
+
+test("Enter follows a coherent idempotent draft exactly once", async ({ page }) => {
+  /** @type {Record<string, any>[]} */
+  const requests = [];
+  await page.route("**/api/command", async (route) => {
+    requests.push(route.request().postDataJSON());
+    await route.continue();
+  });
+
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  const baseStep = await currentStep(page);
+  const battlefield = page.locator("#battlefield");
+  const selectedMovement = page
+    .locator(
+      '#command-deck button[data-move-action][aria-disabled="false"][aria-pressed="true"]',
+    )
+    .first();
+  await expect(selectedMovement).toBeVisible();
+  const heldNoOpPresentation = await holdNextPresentation(page);
+  try {
+    await selectedMovement.click();
+    await heldNoOpPresentation.held;
+    await expect(page.locator("#connection-status")).toHaveText("Command in flight");
+    await expect(battlefield).toBeFocused();
+    await page.keyboard.press("Enter");
+    await page.keyboard.press("Enter");
+    await expect.poll(() => requests.length).toBe(1);
+    heldNoOpPresentation.release();
+  } finally {
+    heldNoOpPresentation.release();
+    await heldNoOpPresentation.dispose();
+  }
+
+  await expect.poll(() => requests.length).toBe(2);
+  expect(String(requests[0].command.key).toLowerCase()).not.toBe("enter");
+  expect(String(requests[1].command.key).toLowerCase()).toBe("enter");
+  expect(requests[1].command_id).not.toBe(requests[0].command_id);
+  expect(requests[1].base_revision).toBe(requests[0].base_revision);
+  await expect(page.locator("#step-value")).toHaveText(String(baseStep + 1), {
+    timeout: 120_000,
+  });
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await expect(battlefield).toBeFocused();
+  await page.unroute("**/api/command");
+});
+
+test("target selection preserves pointer Submit and keyboard-native focus", async ({
+  page,
+}) => {
+  /** @type {Record<string, any>[]} */
+  const requests = [];
+  await page.route("**/api/command", async (route) => {
+    requests.push(route.request().postDataJSON());
+    await route.continue();
+  });
+
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  const baseStep = await currentStep(page);
+  const battlefield = page.locator("#battlefield");
+  const targetSelect = page.locator("#command-target-select");
+  const pointerTarget = await targetSelect.evaluate((select) => {
+    if (!(select instanceof HTMLSelectElement)) {
+      throw new TypeError("Target control is unavailable.");
+    }
+    return [...select.options].find(
+      (option) => !option.disabled && option.value !== select.value,
+    )?.value;
+  });
+  if (pointerTarget === undefined) {
+    throw new Error("Target control has no alternative authorized option.");
+  }
+
+  const heldPointerPresentation = await holdNextPresentation(page);
+  try {
+    await targetSelect.focus();
+    await targetSelect.dispatchEvent("pointerdown", {
+      button: 0,
+      pointerType: "mouse",
+    });
+    await targetSelect.selectOption(pointerTarget);
+    await heldPointerPresentation.held;
+    await expect(page.locator("#connection-status")).toHaveText("Command in flight");
+    await expect(battlefield).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect.poll(() => requests.length).toBe(1);
+    heldPointerPresentation.release();
+  } finally {
+    heldPointerPresentation.release();
+    await heldPointerPresentation.dispose();
+  }
+
+  await expect.poll(() => requests.length).toBe(2);
+  expect(requests[0].command).toMatchObject({
+    command_type: "roster_selection",
+    role: "target",
+  });
+  expect(String(requests[1].command.key).toLowerCase()).toBe("enter");
+  await expect(page.locator("#step-value")).toHaveText(String(baseStep + 1), {
+    timeout: 120_000,
+  });
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await expect(battlefield).toBeFocused();
+
+  const keyboardDirection = await targetSelect.evaluate((select) => {
+    if (!(select instanceof HTMLSelectElement)) {
+      throw new TypeError("Target control is unavailable.");
+    }
+    const enabled = [...select.options].filter((option) => !option.disabled);
+    const currentIndex = enabled.findIndex((option) => option.value === select.value);
+    if (enabled.length < 2 || currentIndex < 0) {
+      throw new Error("Target control has no keyboard alternative.");
+    }
+    return currentIndex < enabled.length - 1 ? "ArrowDown" : "ArrowUp";
+  });
+  const heldKeyboardPresentation = await holdNextPresentation(page);
+  try {
+    await targetSelect.focus();
+    await page.keyboard.press(keyboardDirection);
+    await heldKeyboardPresentation.held;
+    await expect(page.locator("#connection-status")).toHaveText("Command in flight");
+    await expect(battlefield).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect.poll(() => requests.length).toBe(3);
+    heldKeyboardPresentation.release();
+  } finally {
+    heldKeyboardPresentation.release();
+    await heldKeyboardPresentation.dispose();
+  }
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await expect.poll(() => requests.length).toBe(3);
+  expect(requests[2].command.command_type).not.toBe("keyboard");
+  await expect(targetSelect).toBeFocused();
+  await expect(page.locator("#step-value")).toHaveText(String(baseStep + 1));
+  await page.unroute("**/api/command");
+});
+
+test("WASD followed immediately by Enter submits the installed draft once", async ({
+  page,
+}) => {
+  /** @type {Record<string, any>[]} */
+  const requests = [];
+  await page.route("**/api/command", async (route) => {
+    requests.push(route.request().postDataJSON());
+    await route.continue();
+  });
+
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  const baseStep = await currentStep(page);
+  const battlefield = page.locator("#battlefield");
+  await battlefield.focus();
+  const heldDraftPresentation = await holdNextPresentation(page);
+  try {
+    await page.keyboard.press("w");
+    await heldDraftPresentation.held;
+    await expect(page.locator("#connection-status")).toHaveText("Command in flight");
+    await page.keyboard.press("Enter");
+    await expect.poll(() => requests.length).toBe(1);
+    heldDraftPresentation.release();
+  } finally {
+    heldDraftPresentation.release();
+    await heldDraftPresentation.dispose();
+  }
+
+  await expect.poll(() => requests.length).toBe(2);
+  expect(String(requests[0].command.key).toLowerCase()).toBe("w");
+  expect(String(requests[1].command.key).toLowerCase()).toBe("enter");
+  expect(requests[1].command_id).not.toBe(requests[0].command_id);
+  expect(requests[1].base_revision).toBe(requests[0].base_revision + 1);
+  await expect(page.locator("#step-value")).toHaveText(String(baseStep + 1), {
+    timeout: 120_000,
+  });
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await expect(battlefield).toBeFocused();
+  await page.unroute("**/api/command");
+});
+
+test("battlefield Space submits once and consumes busy repeats without scrolling", async ({
+  page,
+}) => {
+  /** @type {Record<string, any>[]} */
+  const commands = [];
+  await page.route("**/api/command", async (route) => {
+    const payload = route.request().postDataJSON();
+    commands.push(payload?.command ?? {});
+    await route.continue();
+  });
+
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  const stepBefore = await currentStep(page);
+  const battlefield = page.locator("#battlefield");
+  await battlefield.focus();
+  const scrollBeforeSpace = await page.evaluate(() => {
+    window.scrollTo(0, 0);
+    return window.scrollY;
+  });
+  const heldPresentation = await holdNextPresentation(page);
+  try {
+    await page.keyboard.press("Space");
+    await heldPresentation.held;
+    await expect(page.locator("html")).toHaveAttribute(
+      "data-presentation-authority",
+      "retained",
+    );
+    await expect(page.locator("#connection-status")).toHaveText("Command in flight");
+    await expect(battlefield).toBeFocused();
+    await expect.poll(() => commands.length).toBe(1);
+    expect(commands[0]).toEqual({
+      command_type: "keyboard",
+      key: " ",
+      shift_key: false,
+      ctrl_key: false,
+      alt_key: false,
+      meta_key: false,
+      repeat: false,
+    });
+
+    await page.keyboard.press("Space");
+    await page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          window.requestAnimationFrame(() => {
+            window.requestAnimationFrame(resolve);
+          });
+        }),
+    );
+    expect(await page.evaluate(() => window.scrollY)).toBe(scrollBeforeSpace);
+    await expect(battlefield).toBeFocused();
+    await expect.poll(() => commands.length).toBe(1);
+    heldPresentation.release();
+  } finally {
+    heldPresentation.release();
+    await heldPresentation.dispose();
+  }
+
+  await expect(page.locator("#step-value")).toHaveText(String(stepBefore + 1), {
+    timeout: 120_000,
+  });
+  await expect(page.locator("html")).toHaveAttribute(
+    "data-presentation-authority",
+    "installed",
+  );
+  await expect.poll(() => commands.length).toBe(1);
+
+  const helpButton = page.locator("#help-button");
+  await helpButton.focus();
+  await page.keyboard.press("Space");
+  await expect(page.locator("#help-dialog")).toHaveAttribute("open", "");
+  await expect.poll(() => commands.length).toBe(1);
+  await page.locator("#help-close-button").click();
   await page.unroute("**/api/command");
 });
 
@@ -333,6 +772,18 @@ test("a lost applied response requires GET resync and never replays submit", asy
   await battlefield.focus();
   await page.keyboard.press("Enter");
   await expect(page.locator("#connection-status")).toHaveText("Resync required");
+  await expect(page.locator("html")).toHaveAttribute(
+    "data-presentation-authority",
+    "retained",
+  );
+  await expect(page.locator("#battlefield-empty")).toBeHidden();
+  await expect(
+    page.locator("#battlefield .agent[data-presentation-key]"),
+  ).not.toHaveCount(0);
+  await expect(page.locator("#scenario-description")).toContainText("Last confirmed");
+  await expect(page.locator("#scenario-description")).toContainText(
+    "reconnect required",
+  );
   await expect.poll(() => appliedStatus).toBe(200);
   await battlefield.focus();
   await page.keyboard.press("Enter");
@@ -356,6 +807,115 @@ test("a lost applied response requires GET resync and never replays submit", asy
     rangesBefore === "true" ? "false" : "true",
   );
   await expect(page.locator("#step-value")).toHaveText(String(baseStep + 1));
+});
+
+test("a command authorization failure clears the retained battlefield", async ({
+  page,
+}) => {
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  const retainedPresentationKey = await page
+    .locator("#battlefield .agent[data-presentation-key]")
+    .first()
+    .getAttribute("data-presentation-key");
+  if (retainedPresentationKey === null) {
+    throw new Error("Installed battlefield has no presentation key.");
+  }
+  let markCommandHeld = () => {};
+  let releaseCommand = () => {};
+  const commandHeld = new Promise((resolve) => {
+    markCommandHeld = () => resolve(undefined);
+  });
+  const commandRelease = new Promise((resolve) => {
+    releaseCommand = () => resolve(undefined);
+  });
+  let interceptedCommands = 0;
+  await page.route("**/api/command", async (route) => {
+    interceptedCommands += 1;
+    markCommandHeld();
+    await commandRelease;
+    await route.fulfill({
+      status: 403,
+      contentType: "application/json",
+      body: JSON.stringify({ message: "Denied by browser regression proof." }),
+    });
+  });
+
+  try {
+    await page.locator("#battlefield").focus();
+    await page.keyboard.press("w");
+    await commandHeld;
+    await expect(page.locator("#connection-status")).toHaveText("Command in flight");
+    await page.keyboard.press("Enter");
+  } finally {
+    releaseCommand();
+  }
+  await expect(page.locator("#connection-status")).toHaveText("Resync required");
+  await expect.poll(() => interceptedCommands).toBe(1);
+  await expect(page.locator("html")).toHaveAttribute(
+    "data-presentation-authority",
+    "pending",
+  );
+  await expect(page.locator("#battlefield .agent")).toHaveCount(0);
+  await expect(
+    page.locator(`[data-presentation-key="${retainedPresentationKey}"]`),
+  ).toHaveCount(0);
+  await expect(page.locator("#battlefield-empty")).toBeVisible();
+  await page.unroute("**/api/command");
+});
+
+test("an accepted Exit cannot retain a scene after sidecar authorization fails", async ({
+  page,
+}) => {
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  const currentFrame = await page.evaluate(async () => {
+    const token = window.sessionStorage.getItem("marl-battlegrounds.debugger-token");
+    const response = await window.fetch("/api/frame", {
+      headers: { "X-MARL-Debugger-Token": token ?? "" },
+    });
+    if (!response.ok) {
+      throw new Error(`Could not obtain the live frame: HTTP ${response.status}.`);
+    }
+    return response.json();
+  });
+  await page.route(
+    "**/api/command",
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          schema_version: 2,
+          result: "shutdown_scheduled",
+          frame: currentFrame,
+        }),
+      });
+    },
+    { times: 1 },
+  );
+  await page.route(
+    "**/api/presentation/frame",
+    async (route) => {
+      await route.fulfill({
+        status: 403,
+        contentType: "application/json",
+        body: JSON.stringify({ message: "Presentation capability denied." }),
+      });
+    },
+    { times: 1 },
+  );
+
+  await page.locator("#exit-button").click();
+  await expect(page.locator("#connection-status")).toHaveText("Shutting down");
+  await expect(page.locator("html")).toHaveAttribute(
+    "data-presentation-authority",
+    "pending",
+  );
+  await expect(page.locator("#battlefield .agent")).toHaveCount(0);
+  await expect(page.locator("#battlefield-empty")).toBeVisible();
+  await page.unroute("**/api/command");
+  await page.unroute("**/api/presentation/frame");
 });
 
 test("native panels preserve user state only within exact authority", async ({
@@ -422,6 +982,7 @@ test("native panels preserve user state only within exact authority", async ({
   }
   await focusedAction.focus();
   savedScrollTop = await rosterBody.evaluate((body) => body.scrollTop);
+  const commandDisclosureOpen = await disclosureOpenState(page);
 
   /** @type {import("@playwright/test").Request[]} */
   const commandRequests = [];
@@ -440,7 +1001,11 @@ test("native panels preserve user state only within exact authority", async ({
   try {
     await focusedAction.press("Enter");
     await heldCommandPresentation.held;
-    await expectPendingDisclosureAuthority(page, focusedPresentationKey);
+    await expectRetainedDisclosureAuthority(
+      page,
+      focusedPresentationKey,
+      commandDisclosureOpen,
+    );
     heldCommandPresentation.release();
     await expect(page.locator("html")).toHaveAttribute(
       "data-presentation-authority",
@@ -475,6 +1040,7 @@ test("native panels preserve user state only within exact authority", async ({
     )
     .toEqual({ surface: "roster", presentationKey: focusedPresentationKey });
 
+  const refreshDisclosureOpen = await disclosureOpenState(page);
   const heldRefresh = await holdNextPresentation(page);
   try {
     await page.locator("#reconnect-button").evaluate((button) => {
@@ -484,7 +1050,11 @@ test("native panels preserve user state only within exact authority", async ({
       button.click();
     });
     await heldRefresh.held;
-    await expectPendingDisclosureAuthority(page, focusedPresentationKey);
+    await expectRetainedDisclosureAuthority(
+      page,
+      focusedPresentationKey,
+      refreshDisclosureOpen,
+    );
     await page.locator("#help-button").click();
     await expect(page.locator("#help-dialog")).toHaveAttribute("open", "");
     heldRefresh.release();

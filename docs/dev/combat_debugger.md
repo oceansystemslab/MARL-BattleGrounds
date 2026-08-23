@@ -118,38 +118,39 @@ exact lane legality. The live Technical Frame is allowlisted by authority:
 Episode, Frame, Simulator step, and conditional Incoming transition. The
 initial frame has no incoming-transition row.
 
-Visual Filters contains exactly 24 independently controlled paint families,
+Visual Filters contains exactly 23 independently controlled paint families,
 all enabled by default:
 
 1. Aura Fields
 2. Aura Modifier Badges
 3. Duration Status Badges
 4. Spawn Shield
-5. Combat Status Icon
-6. Rejected Action Feedback
-7. Basic Ability Effects
-8. Ultimate Ability Effects
-9. Damage Effects
-10. Healing Effects
-11. Regeneration Effects
-12. Cooldown Effects
-13. Charge Movement
-14. Status Application
-15. Status Reapplication
-16. Status Refresh/Extension
-17. Natural Status Expiry
-18. Freezing Trap Break
-19. Status Clear on Death
-20. Death Effects
-21. Respawn Wave
-22. Resurrection Effects
-23. Spawn-Shield Expiry
-24. Scrolling Battle Text
+5. Rejected Action Feedback
+6. Basic Ability Effects
+7. Ultimate Ability Effects
+8. Damage Effects
+9. Healing Effects
+10. Regeneration Effects
+11. Cooldown Effects
+12. Charge Movement
+13. Status Application
+14. Status Reapplication
+15. Status Refresh/Extension
+16. Natural Status Expiry
+17. Freezing Trap Break
+18. Status Clear on Death
+19. Death Effects
+20. Respawn Wave
+21. Resurrection Effects
+22. Spawn-Shield Expiry
+23. Scrolling Battle Text
+
+Duration Status Badges includes the white crossed-swords **In combat** countdown.
 
 These switches affect browser paint, accessible descriptions belonging to that
 paint, and nothing else. They do not redact source data, change simulator
 state, alter the Latest Events feed, or replace the separate Ranges control.
-**Restore All** enables all 24.
+**Restore All** enables all 23.
 
 ## Recording and recovery
 

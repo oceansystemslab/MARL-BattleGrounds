@@ -6,30 +6,39 @@
 export class PresentationInstallCoordinator {
   /**
    * @param {{
-   *   clear: (reason: string) => void,
+   *   onAttemptBegin: (
+   *     reason: string,
+   *     pendingPolicy: "retain_last_authorized" | "clear",
+   *   ) => void,
    *   install: (joined: Readonly<Record<string, any>>) => void,
    *   isJoinRace: (error: unknown) => boolean,
    * }} options
    */
-  constructor({ clear, install, isJoinRace }) {
+  constructor({ onAttemptBegin, install, isJoinRace }) {
     if (
-      typeof clear !== "function" ||
+      typeof onAttemptBegin !== "function" ||
       typeof install !== "function" ||
       typeof isJoinRace !== "function"
     ) {
       throw new TypeError("Presentation installation callbacks are required.");
     }
-    this.clear = clear;
+    this.onAttemptBegin = onAttemptBegin;
     this.install = install;
     this.isJoinRace = isJoinRace;
     this.generation = 0;
   }
 
-  /** @param {string} reason */
-  begin(reason) {
+  /**
+   * @param {string} reason
+   * @param {"retain_last_authorized" | "clear"} pendingPolicy
+   */
+  begin(reason, pendingPolicy) {
+    if (pendingPolicy !== "retain_last_authorized" && pendingPolicy !== "clear") {
+      throw new TypeError("A valid presentation pending policy is required.");
+    }
     this.generation += 1;
     const generation = this.generation;
-    this.clear(reason);
+    this.onAttemptBegin(reason, pendingPolicy);
     return generation;
   }
 
@@ -42,13 +51,17 @@ export class PresentationInstallCoordinator {
    * Install one GET pair, allowing exactly one fresh GET-only resynchronization
    * when the supplied identity join classifies the first attempt as a race.
    *
-   * @param {{reason: string, getJoined: () => Promise<Readonly<Record<string, any>>>}} options
+   * @param {{
+   *   reason: string,
+   *   pendingPolicy: "retain_last_authorized" | "clear",
+   *   getJoined: () => Promise<Readonly<Record<string, any>>>,
+   * }} options
    */
-  async installFromGet({ reason, getJoined }) {
+  async installFromGet({ reason, pendingPolicy, getJoined }) {
     if (typeof getJoined !== "function") {
       throw new TypeError("A joined GET callback is required.");
     }
-    const generation = this.begin(reason);
+    const generation = this.begin(reason, pendingPolicy);
     try {
       let resynchronized = false;
       let joined;
@@ -88,12 +101,19 @@ export class PresentationInstallCoordinator {
    *
    * @param {{
    *   reason: string,
+   *   pendingPolicy: "retain_last_authorized" | "clear",
    *   sendCommand: () => Promise<any>,
    *   joinCommandResult: (commandResult: any) => Promise<Readonly<Record<string, any>>>,
    *   getJoined: () => Promise<Readonly<Record<string, any>>>,
    * }} options
    */
-  async installFromCommand({ reason, sendCommand, joinCommandResult, getJoined }) {
+  async installFromCommand({
+    reason,
+    pendingPolicy,
+    sendCommand,
+    joinCommandResult,
+    getJoined,
+  }) {
     if (
       typeof sendCommand !== "function" ||
       typeof joinCommandResult !== "function" ||
@@ -101,7 +121,7 @@ export class PresentationInstallCoordinator {
     ) {
       throw new TypeError("Command installation callbacks are required.");
     }
-    const generation = this.begin(reason);
+    const generation = this.begin(reason, pendingPolicy);
     try {
       const commandResult = await sendCommand();
       if (!this.isCurrent(generation)) {

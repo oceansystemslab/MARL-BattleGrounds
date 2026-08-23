@@ -35,6 +35,7 @@ _ALL_EVENT_KINDS_V2 = (
     "source_healing_output",
     "recipient_health_resolution",
     "combat_countdown_reset",
+    "agent_left_combat",
     "health_regenerated",
     "cooldown_started",
     "cooldown_ready",
@@ -128,6 +129,7 @@ def _direct_fields(kind: str) -> tuple[str, ...]:
             "realized_net_health_change",
         ),
         "combat_countdown_reset": (),
+        "agent_left_combat": (),
         "health_regenerated": ("actual_health_regenerated",),
         "cooldown_started": (),
         "cooldown_ready": (),
@@ -146,7 +148,7 @@ def _direct_fields(kind: str) -> tuple[str, ...]:
     }[kind]
 
 
-def test_all_21_events_project_one_to_one_without_internal_slot_axes() -> None:
+def test_all_22_events_project_one_to_one_without_internal_slot_axes() -> None:
     batch, _ = _all_event_batch()
     raw_before = json.dumps(asdict(batch), sort_keys=True, separators=(",", ":"))
     keys = _key_by_slot(batch.agent_phase_trajectories)
@@ -157,13 +159,13 @@ def test_all_21_events_project_one_to_one_without_internal_slot_axes() -> None:
 
     assert tuple(event.event_type for event in batch.events) == _ALL_EVENT_KINDS_V2
     assert summary.ordered_event_kinds == _ALL_EVENT_KINDS_V2
-    assert summary.event_count == 21
-    assert len({type(event) for event in summary.events}) == 21
+    assert summary.event_count == 22
+    assert len({type(event) for event in summary.events}) == 22
     assert summary.ordered_event_ids == tuple(event.event_id for event in batch.events)
     assert summary.ordered_event_kinds == tuple(
         event.event_type for event in batch.events
     )
-    assert tuple(event.ordinal for event in summary.events) == tuple(range(21))
+    assert tuple(event.ordinal for event in summary.events) == tuple(range(22))
     assert tuple(event.phase_rank for event in summary.events) == tuple(
         event.phase_rank for event in batch.events
     )
@@ -278,6 +280,7 @@ def test_all_21_events_project_one_to_one_without_internal_slot_axes() -> None:
             _assert_anchor(neutral.recipient_anchor, raw.recipient_anchor, keys)
         elif kind in {
             "combat_countdown_reset",
+            "agent_left_combat",
             "health_regenerated",
             "cooldown_started",
             "cooldown_ready",
@@ -431,7 +434,7 @@ def test_neutral_summary_json_is_strict_and_contains_no_internal_slot_axis() -> 
                 cast(dict[str, object], discriminator)["mapping"],
             )
         )
-        == 21
+        == 22
     )
     identity_union = cast(dict[str, object], schema["$defs"])[
         "ReplayIncomingAgentIdentityV1"
@@ -460,6 +463,16 @@ def test_strict_summary_fences_inventory_and_every_event_anchor_to_trajectory() 
     emitter["events"][2]["mage_damage_aura_covering_emitters"][0]["phase"] = "successor"
     with pytest.raises(ValidationError, match="transition_start"):
         adapter.validate_json(json.dumps(emitter))
+
+    expiration = json.loads(adapter.dump_json(summary))
+    left_combat = next(
+        event
+        for event in expiration["events"]
+        if event["event_kind"] == "agent_left_combat"
+    )
+    left_combat["agent_anchor"]["phase"] = "transition_start"
+    with pytest.raises(ValidationError, match="successor"):
+        adapter.validate_json(json.dumps(expiration))
 
     trajectory = json.loads(adapter.dump_json(summary))
     trajectory["agent_phase_trajectories"][0]["successor"]["public_agent_id"] = (

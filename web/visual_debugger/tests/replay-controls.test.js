@@ -92,12 +92,16 @@ class FakeElement {
   dispatch(type, event = {}) {
     const fullEvent = {
       target: this,
-      preventDefault() {},
+      defaultPrevented: false,
+      preventDefault() {
+        this.defaultPrevented = true;
+      },
       ...event,
     };
     for (const handler of this.handlers.get(type) ?? []) {
       handler(fullEvent);
     }
+    return fullEvent;
   }
 }
 
@@ -240,6 +244,64 @@ test("keyboard intent is bounded to unmodified replay navigation and edge-trigge
   assert.equal(replayKeyboardIntent({ key: "Spacebar", repeat: false }), null);
   assert.equal(replayKeyboardIntent({ key: "ArrowRight", ctrlKey: true }), null);
   assert.equal(replayKeyboardIntent({ key: "n" }), null);
+});
+
+test("replay-owned Space suppresses scroll without repeating toggles or stealing native controls", () => {
+  const originalElement = Object.getOwnPropertyDescriptor(globalThis, "Element");
+  Object.defineProperty(globalThis, "Element", {
+    configurable: true,
+    value: FakeElement,
+  });
+  const elements = controlElements();
+  const controller = new ReplayPlaybackController({
+    onStateChange: () => {},
+    request: async () => ({ frame: { cursor: cursor(0) } }),
+  });
+  installConnected(controller, cursor(0));
+  const unbind = bindReplayTimelineControls(/** @type {any} */ (elements), controller);
+
+  try {
+    const firstSpace = elements.keyboardTarget.dispatch("keydown", {
+      key: " ",
+      repeat: false,
+      target: elements.root,
+    });
+    assert.equal(firstSpace.defaultPrevented, true);
+    assert.equal(controller.snapshot().playing, true);
+
+    const repeatedSpace = elements.keyboardTarget.dispatch("keydown", {
+      key: " ",
+      repeat: true,
+      target: elements.root,
+    });
+    assert.equal(repeatedSpace.defaultPrevented, true);
+    assert.equal(controller.snapshot().playing, true);
+
+    elements.keyboardEnabled = () => false;
+    const fencedSpace = elements.keyboardTarget.dispatch("keydown", {
+      key: " ",
+      repeat: false,
+      target: elements.root,
+    });
+    assert.equal(fencedSpace.defaultPrevented, true);
+    assert.equal(controller.snapshot().playing, true);
+
+    elements.playPauseButton.interactive = true;
+    const nativeSpace = elements.keyboardTarget.dispatch("keydown", {
+      key: " ",
+      repeat: false,
+      target: elements.playPauseButton,
+    });
+    assert.equal(nativeSpace.defaultPrevented, false);
+    assert.equal(controller.snapshot().playing, true);
+  } finally {
+    unbind();
+    if (originalElement) {
+      Object.defineProperty(globalThis, "Element", originalElement);
+    } else {
+      Reflect.deleteProperty(globalThis, "Element");
+    }
+  }
 });
 
 test("timeline binding previews slider input without a request and commits once", async () => {

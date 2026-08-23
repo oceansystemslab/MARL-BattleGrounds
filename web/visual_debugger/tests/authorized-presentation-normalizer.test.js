@@ -176,6 +176,31 @@ test("all five exact Python presentation leaves normalize repeatably and freeze"
   assertRecursivelyFrozen(AUTHORIZED_PRESENTATION_SCHEMA_V1);
 });
 
+test("Oracle incoming left-combat events require a successor anchor", async () => {
+  const candidate = clone(fixture.presentations.replay_oracle);
+  const summary = candidate.latest_events;
+  const replaced = summary.events[2];
+  summary.events[2] = {
+    event_id: replaced.event_id,
+    ordinal: replaced.ordinal,
+    phase_rank: 50,
+    event_kind: "agent_left_combat",
+    agent_anchor: clone(summary.agent_phase_trajectories[0].successor),
+  };
+  summary.ordered_event_kinds[2] = "agent_left_combat";
+
+  const normalized = await normalizeAuthorizedPresentationFrameV1(candidate);
+  assert.equal(normalized.latest_events.events[2].event_kind, "agent_left_combat");
+  assert.equal(normalized.latest_events.events[2].agent_anchor.phase, "successor");
+
+  const wrongPhase = clone(candidate);
+  wrongPhase.latest_events.events[2].agent_anchor.phase = "transition_start";
+  await assert.rejects(
+    normalizeAuthorizedPresentationFrameV1(wrongPhase),
+    /trajectory anchor/u,
+  );
+});
+
 test("Python-certified V2 class and shield mechanics project exactly and freeze", async () => {
   const expectedProfile = {
     availability_kind: "available",

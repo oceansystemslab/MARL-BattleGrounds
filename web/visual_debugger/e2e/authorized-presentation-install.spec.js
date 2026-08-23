@@ -668,7 +668,7 @@ async function expectCompactAgentTooltip(page, agent, persistentCardBefore) {
     "Effective Speed",
     "Ultimate Status",
     "Combat Status",
-    ...(agent.steps_until_out_of_combat > 0 ? ["Steps until OOC"] : []),
+    ...(agent.steps_until_out_of_combat > 0 ? ["Steps until out of combat"] : []),
   ];
   await expect(page.locator("#visual-tooltip")).toBeVisible();
   await expect(page.locator("#visual-tooltip-title")).toHaveText(identity.title);
@@ -684,7 +684,7 @@ async function expectCompactAgentTooltip(page, agent, persistentCardBefore) {
   );
   await expect(
     page.locator("#visual-tooltip .semantic-explanation__value").nth(3),
-  ).toHaveText(agent.steps_until_out_of_combat > 0 ? "IC" : "OOC");
+  ).toHaveText(agent.steps_until_out_of_combat > 0 ? "In combat" : "Out of combat");
   const tooltipText = await page.locator("#visual-tooltip").innerText();
   for (const forbidden of [
     "Ultimate Name",
@@ -727,7 +727,7 @@ async function expectCertifiedDocumentationCard(page, agent) {
     "Effective Speed",
     "Ultimate Status",
     "Combat Status",
-    "Steps until OOC",
+    "Steps until out of combat",
   ];
   for (const label of forbiddenLabels) {
     await expect(
@@ -1437,6 +1437,17 @@ async function expectZeroCommandInteraction(page, activate) {
     page.off("request", record);
   }
   expect(requests).toEqual([]);
+}
+
+/**
+ * Pointer activation restores the debugger's battlefield-owned command focus
+ * and never exposes the oversized SVG-agent focus outline.
+ *
+ * @param {import("@playwright/test").Page} page
+ */
+async function expectBattlefieldRootCommandFocus(page) {
+  await expect(page.locator("#battlefield")).toBeFocused();
+  await expect(page.locator("#battlefield .agent:focus-visible")).toHaveCount(0);
 }
 
 /**
@@ -2391,30 +2402,30 @@ test("all five real service leaves install and live authority clears atomically"
   expect(agentPresentationAfterClick.authority.recipient_presentation_key).toBe(
     agentRecipientKey,
   );
-  const agentKeyboardRequest = page.waitForRequest(
-    (request) =>
-      request.method() === "POST" && new URL(request.url()).pathname === "/api/command",
+  await expectZeroCommandInteraction(page, () => passiveAgentBody.click());
+  await expectBattlefieldRootCommandFocus(page);
+  const agentStepBeforeW = await page.locator("#step-value").innerText();
+  await expect(
+    page.locator('#command-deck button[data-move-action="1"]'),
+  ).toBeEnabled();
+  await expectSingleActivationCommand(
+    page,
+    "/api/command",
+    () => page.keyboard.press("w"),
+    {
+      command_type: "keyboard",
+      key: "w",
+      shift_key: false,
+      ctrl_key: false,
+      alt_key: false,
+      meta_key: false,
+      repeat: false,
+    },
   );
-  const agentKeyboardResponse = page.waitForResponse(
-    (response) =>
-      response.request().method() === "POST" &&
-      new URL(response.url()).pathname === "/api/command",
-  );
-  await page.locator("#battlefield").focus();
-  await page.keyboard.press("x");
-  const [keyboardRequest, keyboardResponse] = await Promise.all([
-    agentKeyboardRequest,
-    agentKeyboardResponse,
-  ]);
-  expect(keyboardRequest.postDataJSON().command).toMatchObject({
-    command_type: "keyboard",
-    key: "x",
-  });
-  expect(keyboardResponse.status()).toBe(200);
-  await expect(page.locator("html")).toHaveAttribute(
-    "data-presentation-authority",
-    "installed",
-  );
+  await expect(
+    page.locator('#command-deck button[data-move-action="1"]'),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("#step-value")).toHaveText(agentStepBeforeW);
   const agentPresentationAfterKeyboard = await authenticatedGet(
     page,
     "/api/presentation/frame",
@@ -2431,8 +2442,16 @@ test("all five real service leaves install and live authority clears atomically"
     "live_oracle",
   );
   await expectTechnicalFrameDom(page, restoredOracle.presentation);
-  const oracleBody = page.locator("#battlefield .agent").first();
-  const oracleKey = await oracleBody.getAttribute("data-presentation-key");
+  const oracleCandidate = page
+    .locator('#battlefield .agent:not([data-controlled="true"])')
+    .first();
+  const oracleKey = await oracleCandidate.getAttribute("data-presentation-key");
+  if (oracleKey === null) {
+    throw new Error("Oracle activation candidate has no presentation key.");
+  }
+  const oracleBody = page.locator(
+    `#battlefield .agent[data-presentation-key="${oracleKey}"]`,
+  );
   const oracleAgent = restoredOracle.presentation.current_endpoint.scene.agents.find(
     (/** @type {Record<string, any>} */ agent) => agent.presentation_key === oracleKey,
   );
@@ -2456,6 +2475,101 @@ test("all five real service leaves install and live authority clears atomically"
     path: "/api/command",
     command: expectedOracleActivation,
   });
+  const oracleStepBeforePointerSelections = await page
+    .locator("#step-value")
+    .innerText();
+  const pointerAgents = restoredOracle.presentation.current_endpoint.scene.agents.slice(
+    0,
+    3,
+  );
+  for (const pointerAgent of pointerAgents) {
+    const pointerIdentity =
+      restoredOracle.presentation.current_endpoint.identity_directory.identities.find(
+        (/** @type {Record<string, any>} */ identity) =>
+          identity.public_agent_id === pointerAgent.public_agent_id,
+      );
+    if (!pointerIdentity) {
+      throw new Error("Oracle pointer candidate has no authorized identity row.");
+    }
+    const pointerSlot =
+      (pointerIdentity.team_id - 1) * 5 + pointerIdentity.team_local_slot;
+    const pointerBody = page.locator(
+      `#battlefield .agent[data-presentation-key="${pointerAgent.presentation_key}"]`,
+    );
+    await expectSingleActivationCommand(
+      page,
+      "/api/command",
+      () => pointerBody.click(),
+      {
+        command_type: "roster_selection",
+        role: "control",
+        global_slot: pointerSlot,
+      },
+    );
+    await expectBattlefieldRootCommandFocus(page);
+    await expect(pointerBody).toHaveAttribute("data-controlled", "true");
+    await expect(page.locator("#step-value")).toHaveText(
+      oracleStepBeforePointerSelections,
+    );
+  }
+  const oracleStepBeforeW = oracleStepBeforePointerSelections;
+  await expect(
+    page.locator('#command-deck button[data-move-action="1"]'),
+  ).toBeEnabled();
+  await expectSingleActivationCommand(
+    page,
+    "/api/command",
+    () => page.keyboard.press("w"),
+    {
+      command_type: "keyboard",
+      key: "w",
+      shift_key: false,
+      ctrl_key: false,
+      alt_key: false,
+      meta_key: false,
+      repeat: false,
+    },
+  );
+  await expect(
+    page.locator('#command-deck button[data-move-action="1"]'),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("#step-value")).toHaveText(oracleStepBeforeW);
+  const modifierTokens = await page
+    .locator("#battlefield .modifier-cell")
+    .evaluateAll((cells) =>
+      [
+        ...new Set(
+          cells.map((cell) => {
+            const icon = cell.querySelector(".modifier-cell__icon");
+            return JSON.stringify({
+              tokenId: cell.getAttribute("data-token-id"),
+              token: cell.getAttribute("data-token"),
+              glyph: icon?.getAttribute("data-icon") ?? null,
+            });
+          }),
+        ),
+      ]
+        .map((value) => JSON.parse(value))
+        .sort((left, right) => left.tokenId.localeCompare(right.tokenId)),
+    );
+  expect(modifierTokens).toEqual([
+    {
+      tokenId: "mage_amplification",
+      token: "mage-amplification",
+      glyph: "modifier-amplification",
+    },
+    {
+      tokenId: "warrior_mitigation",
+      token: "warrior-mitigation",
+      glyph: "modifier-mitigation",
+    },
+  ]);
+  await expect(
+    page.locator('#battlefield .modifier-cell[data-token="unknown"]'),
+  ).toHaveCount(0);
+  await expect(
+    page.locator('#battlefield .modifier-cell__icon[data-icon="unknown"]'),
+  ).toHaveCount(0);
   const beforeScientificOwnerInput = await authenticatedGet(page, "/api/frame");
   const selectedKeysBeforeScientificOwnerInput = await page
     .locator('#battlefield .agent[data-selected="true"]')
@@ -2922,7 +3036,7 @@ test(CP5_C_SLICE_TEST_TITLE, async ({ page }) => {
       includeStress: true,
     });
     recoveryReplay = await startReplayViewer({
-      sampleReplay: "recovery-status-lifecycle",
+      scenario: "recovery_refresh_cycle",
     });
 
     const combatMatrixViewports = [
@@ -2978,21 +3092,30 @@ test(CP5_C_SLICE_TEST_TITLE, async ({ page }) => {
             .map((agent) => {
               const body = agent.querySelector(".agent-body");
               const classIcon = agent.querySelector(".agent-class-icon");
-              const combatIcon = agent.querySelector(".agent-combat-state-icon");
+              const presentationKey = agent.getAttribute("data-presentation-key");
+              const inCombatStatusCells =
+                presentationKey === null
+                  ? []
+                  : Array.from(
+                      battlefield.querySelectorAll(
+                        `.status-cell[data-token-id="in_combat"][data-presentation-key="${CSS.escape(presentationKey)}"]`,
+                      ),
+                    );
+              const inCombatStatus = inCombatStatusCells[0] ?? null;
+              const inCombatIcon = inCombatStatus?.querySelector(".status-cell__icon");
+              const inCombatValue =
+                inCombatStatus?.querySelector(".status-cell__value");
               if (
                 !(body instanceof SVGCircleElement) ||
-                !(classIcon instanceof SVGSVGElement) ||
-                !(combatIcon instanceof SVGSVGElement)
+                !(classIcon instanceof SVGSVGElement)
               ) {
                 throw new TypeError("Authorized identity geometry is unavailable.");
               }
               const bodyCenter = Number(body.getAttribute("cx"));
               const classX = Number(classIcon.getAttribute("x"));
               const classWidth = Number(classIcon.getAttribute("width"));
-              const combatX = Number(combatIcon.getAttribute("x"));
-              const combatWidth = Number(combatIcon.getAttribute("width"));
               return {
-                presentationKey: agent.getAttribute("data-presentation-key"),
+                presentationKey,
                 classToken: agent.getAttribute("data-class"),
                 projectedRadius: Number(body.getAttribute("r")),
                 status: agent.getAttribute("data-combat-status"),
@@ -3010,23 +3133,29 @@ test(CP5_C_SLICE_TEST_TITLE, async ({ page }) => {
                 descendantHitOwnerCount: agent.querySelectorAll(
                   '[role="button"], [tabindex="0"]',
                 ).length,
-                identityPartsResolveToRoot: [body, classIcon, combatIcon].every(
+                identityPartsResolveToRoot: [body, classIcon].every(
                   (part) => part.closest(".agent") === agent,
                 ),
                 classPointerEvents: getComputedStyle(classIcon).pointerEvents,
-                iconCount: agent.querySelectorAll(".agent-combat-state-icon").length,
-                combatGlyph: combatIcon.getAttribute("data-icon"),
-                combatColor: getComputedStyle(combatIcon).color,
-                combatAriaHidden: combatIcon.getAttribute("aria-hidden"),
-                combatFocusable: combatIcon.getAttribute("focusable"),
-                combatRole: combatIcon.getAttribute("role"),
-                combatOwnsTooltip: combatIcon.hasAttribute("data-tooltip-owner"),
-                combatPointerEvents: getComputedStyle(combatIcon).pointerEvents,
-                combatHidden: combatIcon.hasAttribute("hidden"),
+                dedicatedCombatIconCount: agent.querySelectorAll(
+                  ".agent-combat-state-icon",
+                ).length,
                 classCentered: Math.abs(classX + classWidth / 2 - bodyCenter) < 0.001,
-                combinedCentered:
-                  Math.abs((classX + combatX + combatWidth) / 2 - bodyCenter) < 0.001,
-                nonOverlapping: classX + classWidth <= combatX,
+                inCombatStatusCount: inCombatStatusCells.length,
+                inCombatDuration:
+                  inCombatStatus === null
+                    ? null
+                    : Number(inCombatStatus.getAttribute("data-duration")),
+                inCombatVisibleValue: inCombatValue?.textContent ?? null,
+                inCombatGlyph: inCombatIcon?.getAttribute("data-icon") ?? null,
+                inCombatColor:
+                  inCombatStatus === null
+                    ? null
+                    : getComputedStyle(inCombatStatus).color,
+                inCombatAriaLabel: inCombatStatus?.getAttribute("aria-label") ?? null,
+                inCombatRole: inCombatStatus?.getAttribute("role") ?? null,
+                inCombatOwnsTooltip:
+                  inCombatStatus?.hasAttribute("data-tooltip-owner") ?? false,
               };
             })
             .sort((left, right) =>
@@ -3082,16 +3211,9 @@ test(CP5_C_SLICE_TEST_TITLE, async ({ page }) => {
           expect(state.classToken).toBe(classTokenById.get(authorized.class_id));
           expect(state.countdown).toBe(authorized.steps_until_out_of_combat);
           expect(state.status).toBe(status);
-          expect(state.combatHidden).toBe(!inCombat);
-          expect(state.iconCount).toBe(1);
-          expect(state.combatGlyph).toBe("combat-in-progress");
-          expect(state.combatColor).toBe("rgb(255, 255, 255)");
-          expect(state.combatAriaHidden).toBe("true");
-          expect(state.combatFocusable).toBe("false");
-          expect(state.combatRole).toBeNull();
-          expect(state.combatOwnsTooltip).toBe(false);
+          expect(state.dedicatedCombatIconCount).toBe(0);
+          expect(state.classCentered).toBe(true);
           expect(state.classPointerEvents).toBe("none");
-          expect(state.combatPointerEvents).toBe("none");
           expect(state.rootOwnsTooltip).toBe(true);
           expect(["button", "img"]).toContain(state.rootRole);
           expect(["0", "-1"]).toContain(state.rootTabIndex);
@@ -3099,25 +3221,30 @@ test(CP5_C_SLICE_TEST_TITLE, async ({ page }) => {
           expect(state.descendantTooltipOwnerCount).toBe(0);
           expect(state.descendantHitOwnerCount).toBe(0);
           expect(state.identityPartsResolveToRoot).toBe(true);
+          expect(state.ariaLabel).not.toMatch(/combat|steps until out/iu);
           if (inCombat) {
-            expect(state.combinedCentered).toBe(true);
-            expect(state.nonOverlapping).toBe(true);
+            expect(state.inCombatStatusCount).toBe(1);
+            expect(state.inCombatDuration).toBe(authorized.steps_until_out_of_combat);
+            expect(state.inCombatVisibleValue).toBe(
+              String(authorized.steps_until_out_of_combat),
+            );
+            expect(state.inCombatGlyph).toBe("combat-in-progress");
+            expect(state.inCombatColor).toBe("rgb(255, 255, 255)");
+            expect(state.inCombatRole).toBe("img");
+            expect(state.inCombatOwnsTooltip).toBe(true);
+            expect(state.inCombatAriaLabel).toContain("In combat");
+            expect(state.inCombatAriaLabel).toContain(
+              `duration ${authorized.steps_until_out_of_combat}`,
+            );
           } else {
-            expect(state.classCentered).toBe(true);
-          }
-          const accessibleStatus =
-            state.ariaDescription?.includes(`Combat Status: ${status}`) === true ||
-            state.ariaLabel?.includes(`combat status ${status}`) === true;
-          expect(accessibleStatus).toBe(true);
-          if (inCombat) {
-            const countdownLabel = `${authorized.steps_until_out_of_combat} ${authorized.steps_until_out_of_combat === 1 ? "Tick" : "Ticks"}`;
-            const accessibleCountdown =
-              state.ariaDescription?.includes(`Steps until OOC: ${countdownLabel}`) ===
-                true ||
-              state.ariaLabel?.includes(
-                `steps until OOC ${authorized.steps_until_out_of_combat}`,
-              ) === true;
-            expect(accessibleCountdown).toBe(true);
+            expect(state.inCombatStatusCount).toBe(0);
+            expect(state.inCombatDuration).toBeNull();
+            expect(state.inCombatVisibleValue).toBeNull();
+            expect(state.inCombatGlyph).toBeNull();
+            expect(state.inCombatColor).toBeNull();
+            expect(state.inCombatAriaLabel).toBeNull();
+            expect(state.inCombatRole).toBeNull();
+            expect(state.inCombatOwnsTooltip).toBe(false);
           }
         }
       }
@@ -3143,9 +3270,10 @@ test(CP5_C_SLICE_TEST_TITLE, async ({ page }) => {
     ).toBe(true);
     await expectCombatIdentityMatrix(movingFrameZero.presentation, "moving frame zero");
     await expect(page.locator("#battlefield .agent")).toHaveCount(10);
+    await expect(page.locator("#battlefield .agent-combat-state-icon")).toHaveCount(0);
     await expect(
-      page.locator("#battlefield .agent-combat-state-icon[hidden]"),
-    ).toHaveCount(10);
+      page.locator('#battlefield .status-cell[data-token-id="in_combat"]'),
+    ).toHaveCount(0);
     const frameZeroStates = await page
       .locator("#battlefield .agent")
       .evaluateAll((agents) =>
@@ -3160,7 +3288,7 @@ test(CP5_C_SLICE_TEST_TITLE, async ({ page }) => {
       expect(state.status).toBe("OOC");
       expect(state.countdown).toBe("0");
       expect(state.ariaLabel).toContain("Inspect this authorized agent.");
-      expect(state.ariaDescription).toContain("Combat Status: OOC");
+      expect(state.ariaLabel).not.toMatch(/combat|steps until out/iu);
     }
 
     await seekReplay(page, 1);
@@ -3184,43 +3312,44 @@ test(CP5_C_SLICE_TEST_TITLE, async ({ page }) => {
       new Set([5]),
     );
     await expectCombatIdentityMatrix(movingFrameOne, "moving frame one");
+    await expect(page.locator("#battlefield .agent-combat-state-icon")).toHaveCount(0);
     await expect(
-      page.locator("#battlefield .agent-combat-state-icon:not([hidden])"),
+      page.locator('#battlefield .status-cell[data-token-id="in_combat"]'),
     ).toHaveCount(frameOneInCombatAgents.length);
     const frameOneStates = await page
       .locator("#battlefield .agent")
       .evaluateAll((agents) =>
         agents.map((agent) => {
-          const icon = agent.querySelector(".agent-combat-state-icon");
-          const classIcon = agent.querySelector(".agent-class-icon");
-          const body = agent.querySelector(".agent-body");
-          if (
-            !(icon instanceof SVGSVGElement) ||
-            !(classIcon instanceof SVGSVGElement) ||
-            !(body instanceof SVGCircleElement)
-          ) {
-            throw new Error("Rendered IC identity glyphs are unavailable.");
-          }
-          const classX = Number(classIcon.getAttribute("x"));
-          const classWidth = Number(classIcon.getAttribute("width"));
-          const combatX = Number(icon.getAttribute("x"));
-          const combatWidth = Number(icon.getAttribute("width"));
-          const bodyCenter = Number(body.getAttribute("cx"));
+          const presentationKey = agent.getAttribute("data-presentation-key");
+          const statusCells =
+            presentationKey === null
+              ? []
+              : Array.from(
+                  document.querySelectorAll(
+                    `#battlefield .status-cell[data-token-id="in_combat"][data-presentation-key="${CSS.escape(presentationKey)}"]`,
+                  ),
+                );
+          const statusCell = statusCells[0] ?? null;
+          const icon = statusCell?.querySelector(".status-cell__icon");
+          const value = statusCell?.querySelector(".status-cell__value");
           return {
-            presentationKey: agent.getAttribute("data-presentation-key"),
+            presentationKey,
             status: agent.getAttribute("data-combat-status"),
             countdown: Number(agent.getAttribute("data-steps-until-out-of-combat")),
-            ariaLabel: agent.getAttribute("aria-label"),
-            ariaDescription: agent.getAttribute("aria-description"),
-            glyph: icon.getAttribute("data-icon"),
-            color: getComputedStyle(icon).color,
-            ariaHidden: icon.getAttribute("aria-hidden"),
-            role: icon.getAttribute("role"),
-            hidden: icon.hasAttribute("hidden"),
-            ownsTooltip: icon.hasAttribute("data-tooltip-owner"),
-            combinedCentered:
-              Math.abs((classX + combatX + combatWidth) / 2 - bodyCenter) < 0.001,
-            nonOverlapping: classX + classWidth <= combatX,
+            rootAriaLabel: agent.getAttribute("aria-label"),
+            dedicatedCombatIconCount: agent.querySelectorAll(".agent-combat-state-icon")
+              .length,
+            inCombatStatusCount: statusCells.length,
+            duration:
+              statusCell === null
+                ? null
+                : Number(statusCell.getAttribute("data-duration")),
+            visibleValue: value?.textContent ?? null,
+            glyph: icon?.getAttribute("data-icon") ?? null,
+            color: statusCell === null ? null : getComputedStyle(statusCell).color,
+            role: statusCell?.getAttribute("role") ?? null,
+            inCombatAriaLabel: statusCell?.getAttribute("aria-label") ?? null,
+            ownsTooltip: statusCell?.hasAttribute("data-tooltip-owner") ?? false,
           };
         }),
       );
@@ -3235,25 +3364,31 @@ test(CP5_C_SLICE_TEST_TITLE, async ({ page }) => {
         );
       }
       expect(state.countdown).toBe(authorized.steps_until_out_of_combat);
-      expect(state.ariaLabel).toContain("Inspect this authorized agent.");
-      expect(state.glyph).toBe("combat-in-progress");
-      expect(state.color).toBe("rgb(255, 255, 255)");
-      expect(state.ariaHidden).toBe("true");
-      expect(state.role).toBeNull();
-      expect(state.ownsTooltip).toBe(false);
+      expect(state.dedicatedCombatIconCount).toBe(0);
+      expect(state.rootAriaLabel).not.toMatch(/combat|steps until out/iu);
       if (authorized.steps_until_out_of_combat > 0) {
         expect(state.status).toBe("IC");
-        expect(state.ariaDescription).toContain("Combat Status: IC");
-        expect(state.ariaDescription).toContain(
-          `Steps until OOC: ${authorized.steps_until_out_of_combat} ${authorized.steps_until_out_of_combat === 1 ? "Tick" : "Ticks"}`,
+        expect(state.inCombatStatusCount).toBe(1);
+        expect(state.duration).toBe(authorized.steps_until_out_of_combat);
+        expect(state.visibleValue).toBe(String(authorized.steps_until_out_of_combat));
+        expect(state.glyph).toBe("combat-in-progress");
+        expect(state.color).toBe("rgb(255, 255, 255)");
+        expect(state.role).toBe("img");
+        expect(state.inCombatAriaLabel).toContain("In combat");
+        expect(state.inCombatAriaLabel).toContain(
+          `duration ${authorized.steps_until_out_of_combat}`,
         );
-        expect(state.hidden).toBe(false);
-        expect(state.combinedCentered).toBe(true);
-        expect(state.nonOverlapping).toBe(true);
+        expect(state.ownsTooltip).toBe(true);
       } else {
         expect(state.status).toBe("OOC");
-        expect(state.ariaDescription).toContain("Combat Status: OOC");
-        expect(state.hidden).toBe(true);
+        expect(state.inCombatStatusCount).toBe(0);
+        expect(state.duration).toBeNull();
+        expect(state.visibleValue).toBeNull();
+        expect(state.glyph).toBeNull();
+        expect(state.color).toBeNull();
+        expect(state.role).toBeNull();
+        expect(state.inCombatAriaLabel).toBeNull();
+        expect(state.ownsTooltip).toBe(false);
       }
     }
     expect(browserErrors.get(page) ?? []).toEqual([]);
@@ -3277,16 +3412,40 @@ test(CP5_C_SLICE_TEST_TITLE, async ({ page }) => {
     const renderedPriests = await page
       .locator('#battlefield .agent[data-class="priest"]')
       .evaluateAll((agents) =>
-        agents.map((agent) => ({
-          presentationKey: agent.getAttribute("data-presentation-key"),
-          status: agent.getAttribute("data-combat-status"),
-          countdown: Number(agent.getAttribute("data-steps-until-out-of-combat")),
-          ariaLabel: agent.getAttribute("aria-label"),
-          ariaDescription: agent.getAttribute("aria-description"),
-          iconHidden:
-            agent.querySelector(".agent-combat-state-icon")?.hasAttribute("hidden") ??
-            null,
-        })),
+        agents.map((agent) => {
+          const presentationKey = agent.getAttribute("data-presentation-key");
+          const statusCells =
+            presentationKey === null
+              ? []
+              : Array.from(
+                  document.querySelectorAll(
+                    `#battlefield .status-cell[data-token-id="in_combat"][data-presentation-key="${CSS.escape(presentationKey)}"]`,
+                  ),
+                );
+          const statusCell = statusCells[0] ?? null;
+          return {
+            presentationKey,
+            status: agent.getAttribute("data-combat-status"),
+            countdown: Number(agent.getAttribute("data-steps-until-out-of-combat")),
+            rootAriaLabel: agent.getAttribute("aria-label"),
+            dedicatedCombatIconCount: agent.querySelectorAll(".agent-combat-state-icon")
+              .length,
+            inCombatStatusCount: statusCells.length,
+            duration:
+              statusCell === null
+                ? null
+                : Number(statusCell.getAttribute("data-duration")),
+            visibleValue:
+              statusCell?.querySelector(".status-cell__value")?.textContent ?? null,
+            glyph:
+              statusCell
+                ?.querySelector(".status-cell__icon")
+                ?.getAttribute("data-icon") ?? null,
+            color: statusCell === null ? null : getComputedStyle(statusCell).color,
+            inCombatAriaLabel: statusCell?.getAttribute("aria-label") ?? null,
+            ownsTooltip: statusCell?.hasAttribute("data-tooltip-owner") ?? false,
+          };
+        }),
       );
     expect(renderedPriests).toHaveLength(2);
     for (const state of renderedPriests) {
@@ -3301,11 +3460,18 @@ test(CP5_C_SLICE_TEST_TITLE, async ({ page }) => {
       }
       expect(state.status).toBe("IC");
       expect(state.countdown).toBe(authorized.steps_until_out_of_combat);
-      expect(state.ariaLabel).toContain(
-        `combat status IC, steps until OOC ${authorized.steps_until_out_of_combat}`,
+      expect(state.rootAriaLabel).not.toMatch(/combat|steps until out/iu);
+      expect(state.dedicatedCombatIconCount).toBe(0);
+      expect(state.inCombatStatusCount).toBe(1);
+      expect(state.duration).toBe(authorized.steps_until_out_of_combat);
+      expect(state.visibleValue).toBe(String(authorized.steps_until_out_of_combat));
+      expect(state.glyph).toBe("combat-in-progress");
+      expect(state.color).toBe("rgb(255, 255, 255)");
+      expect(state.inCombatAriaLabel).toContain("In combat");
+      expect(state.inCombatAriaLabel).toContain(
+        `duration ${authorized.steps_until_out_of_combat}`,
       );
-      expect(state.ariaDescription).toBeNull();
-      expect(state.iconHidden).toBe(false);
+      expect(state.ownsTooltip).toBe(true);
     }
     expect(browserErrors.get(page) ?? []).toEqual([]);
 
@@ -3418,6 +3584,103 @@ test(CP5_C_SLICE_TEST_TITLE, async ({ page }) => {
       resetPulseCount: 0,
       routeCount: 0,
     });
+
+    /** @type {{frameIndex: number, presentation: Record<string, any>, event: Record<string, any>} | null} */
+    let leftCombatFinding = null;
+    const recoveryFinalFrameIndex =
+      recoveryFrameZero.presentation.source.source_final_frame_index;
+    expect(recoveryFinalFrameIndex).toBeGreaterThan(1);
+    for (let frameIndex = 2; frameIndex <= recoveryFinalFrameIndex; frameIndex += 1) {
+      await seekReplay(page, frameIndex);
+      const presentation = await authenticatedGet(page, "/api/presentation/frame");
+      expect(presentation.source.source_frame_index).toBe(frameIndex);
+      const leftCombatEvent = /** @type {Record<string, any>[]} */ (
+        presentation.latest_events.events
+      ).find(({ event_kind }) => event_kind === "agent_left_combat");
+      if (leftCombatEvent) {
+        leftCombatFinding = { frameIndex, presentation, event: leftCombatEvent };
+        break;
+      }
+    }
+    expect(leftCombatFinding).not.toBeNull();
+    if (leftCombatFinding === null) {
+      throw new Error(
+        "Recovery trajectory produced no real agent-left-combat transition.",
+      );
+    }
+    expect(leftCombatFinding.presentation.source.source_frame_index).toBe(
+      leftCombatFinding.frameIndex,
+    );
+
+    const expirationOwner = page.locator(
+      `.combat-effect--status-lifecycle[data-event-id="${leftCombatFinding.event.event_id}"][data-event-type="agent_left_combat"][data-token-id="in_combat"][data-lifecycle="expired"]`,
+    );
+    await expect(expirationOwner).toHaveCount(1);
+    const expirationDom = await expirationOwner.evaluate(async (effect) => {
+      const hit = effect.querySelector(".combat-lifecycle__hit");
+      const icon = effect.querySelector(".combat-lifecycle__status-icon");
+      if (!(hit instanceof SVGElement) || !(icon instanceof SVGElement)) {
+        throw new Error("In-combat expiration lost its lifecycle paint.");
+      }
+      hit.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+      await new Promise((resolveFrame) => requestAnimationFrame(resolveFrame));
+      return {
+        ariaLabel: effect.getAttribute("aria-label"),
+        role: effect.getAttribute("role"),
+        glyph: icon.getAttribute("data-icon"),
+        color: getComputedStyle(icon).color,
+        durationBefore: effect.getAttribute("data-duration-before"),
+        durationAfter: effect.getAttribute("data-duration-after"),
+        atomicEventIds: JSON.parse(
+          effect.getAttribute("data-atomic-event-ids") ?? "null",
+        ),
+        applicationEventIds: JSON.parse(
+          effect.getAttribute("data-application-event-ids") ?? "null",
+        ),
+        reapplicationPaintCount: effect.querySelectorAll(".combat-lifecycle__reapply")
+          .length,
+        otherInCombatLifecyclePaintCount: document.querySelectorAll(
+          '.combat-effect--status-lifecycle[data-token-id="in_combat"]:not([data-lifecycle="expired"])',
+        ).length,
+        resetEffectCount: document.querySelectorAll(
+          '.combat-effect[data-event-type="combat_countdown_reset"]',
+        ).length,
+        resetPulseCount: document.querySelectorAll(
+          ".combat-semantic-pulse--combat-countdown-reset",
+        ).length,
+        tooltipTitle:
+          document.querySelector("#visual-tooltip-title")?.textContent ?? null,
+        tooltipSummary:
+          document.querySelector("#visual-tooltip .semantic-explanation__summary")
+            ?.textContent ?? null,
+      };
+    });
+    expect(expirationDom).toEqual({
+      ariaLabel: "Expired",
+      role: "img",
+      glyph: "combat-in-progress",
+      color: "rgb(255, 255, 255)",
+      durationBefore: "1",
+      durationAfter: "0",
+      atomicEventIds: [leftCombatFinding.event.event_id],
+      applicationEventIds: [],
+      reapplicationPaintCount: 0,
+      otherInCombatLifecyclePaintCount: 0,
+      resetEffectCount: 0,
+      resetPulseCount: 0,
+      tooltipTitle: "Expired",
+      tooltipSummary: "Status expired naturally",
+    });
+    expect(
+      `${expirationDom.ariaLabel} ${expirationDom.tooltipTitle} ${expirationDom.tooltipSummary}`,
+    ).not.toMatch(/_|semantic pulse/iu);
+
+    const expirationFeedRow = page.locator(
+      `#event-feed .event-item[data-event-id="${leftCombatFinding.event.event_id}"][data-event-type="agent_left_combat"]`,
+    );
+    await expect(expirationFeedRow).toHaveCount(1);
+    await expect(expirationFeedRow).toHaveText("Incoming event · Agent Left Combat");
+    expect(await expirationFeedRow.textContent()).not.toMatch(/_|semantic pulse/iu);
     expect(browserErrors.get(page) ?? []).toEqual([]);
   } catch (error) {
     testError = error;
@@ -3453,6 +3716,7 @@ test(CP5_SLICE_5_TEST_TITLE, async ({ page }) => {
     source_damage_output: 30,
     source_healing_output: 30,
     recipient_health_resolution: 40,
+    agent_left_combat: 50,
     combat_countdown_reset: 50,
     health_regenerated: 50,
     cooldown_started: 60,
@@ -4990,20 +5254,45 @@ test(CP5_SLICE_5_TEST_TITLE, async ({ page }) => {
           });
           expect(event.route).not.toBeNull();
         }
+        const trajectoriesByPublicId = new Map(
+          successor.latest_events.agent_phase_trajectories.map(
+            (/** @type {Record<string, any>} */ trajectory) => [
+              trajectory.agent_public_agent_id,
+              trajectory,
+            ],
+          ),
+        );
+        const chargePlan = signaturePlanEvents(frames[1].signature).filter(
+          ({ kind }) => kind === "charge_displacement",
+        );
         expect(
-          signaturePlanEvents(frames[1].signature)
-            .filter(({ kind }) => kind === "charge_displacement")
-            .map((event) => [
-              successorSlots.get(event.sourcePublicAgentId),
-              event.start,
-              event.end,
-            ]),
-          "Charge plan joins exact transition-start and successor endpoints",
+          chargePlan.map((event) => [
+            successorSlots.get(event.sourcePublicAgentId),
+            event.start,
+            event.end,
+            event.route,
+          ]),
+          "Charge plan joins exact transition-start and post-Charge endpoints",
         ).toEqual([
-          [0, { x: 30, y: 40 }, { x: 70.71523189544678, y: 55 }],
-          [1, { x: 30, y: 80 }, { x: 70.71523189544678, y: 65 }],
-          [5, { x: 80, y: 60 }, { x: 39.28476810455322, y: 43.713908195495605 }],
+          [0, { x: 30, y: 40 }, { x: 70.71523189544678, y: 55 }, null],
+          [1, { x: 30, y: 80 }, { x: 70.71523189544678, y: 65 }, null],
+          [5, { x: 80, y: 60 }, { x: 39.28476810455322, y: 43.713908195495605 }, null],
         ]);
+        for (const event of chargePlan) {
+          const trajectory = trajectoriesByPublicId.get(event.sourcePublicAgentId);
+          if (!trajectory) {
+            throw new Error("Charge plan lost its authorized trajectory.");
+          }
+          expect(event.start).toEqual({
+            x: trajectory.transition_start.position[0] * 10,
+            y: trajectory.transition_start.position[1] * 10,
+          });
+          expect(event.end).toEqual({
+            x: trajectory.post_charge.position[0] * 10,
+            y: trajectory.post_charge.position[1] * 10,
+          });
+          expect(event.route).toBeNull();
+        }
       }
       if (contract.name === "recovery_refresh_cycle") {
         await seekReplay(page, 1);
@@ -5154,12 +5443,12 @@ test(CP5_SLICE_5_TEST_TITLE, async ({ page }) => {
           [
             lifecycleEvent(
               2,
-              17,
-              "status_refreshed_or_extended",
+              16,
+              "status_applied",
               "slow_rogue_poison",
-              "refreshed",
-              "Refreshed",
-              "Status refreshed or extended",
+              "applied",
+              "Applied",
+              "Status applied",
               [16, 17],
               [16],
             ),
@@ -5176,12 +5465,12 @@ test(CP5_SLICE_5_TEST_TITLE, async ({ page }) => {
             ),
             lifecycleEvent(
               2,
-              21,
-              "status_refreshed_or_extended",
+              20,
+              "status_applied",
               "anti_heal_rogue_poison",
-              "refreshed",
-              "Refreshed",
-              "Status refreshed or extended",
+              "applied",
+              "Applied",
+              "Status applied",
               [20, 21],
               [20],
             ),
@@ -5210,42 +5499,121 @@ test(CP5_SLICE_5_TEST_TITLE, async ({ page }) => {
               [],
             ),
           ],
-          [],
-          [],
           [
             lifecycleEvent(
-              6,
-              1,
-              "status_aged_to_zero",
-              "anti_heal_rogue_poison",
+              4,
+              0,
+              "agent_left_combat",
+              "in_combat",
               "expired",
               "Expired",
               "Status expired naturally",
-              [1],
+              [0],
+              [],
+            ),
+          ],
+          [
+            lifecycleEvent(
+              5,
+              0,
+              "agent_left_combat",
+              "in_combat",
+              "expired",
+              "Expired",
+              "Status expired naturally",
+              [0],
+              [],
+            ),
+          ],
+          [
+            lifecycleEvent(
+              6,
+              0,
+              "agent_left_combat",
+              "in_combat",
+              "expired",
+              "Expired",
+              "Status expired naturally",
+              [0],
               [],
             ),
             lifecycleEvent(
               6,
               2,
               "status_aged_to_zero",
-              "stun_hunter_trap",
+              "anti_heal_rogue_poison",
               "expired",
               "Expired",
               "Status expired naturally",
               [2],
               [],
             ),
+            lifecycleEvent(
+              6,
+              3,
+              "status_aged_to_zero",
+              "stun_hunter_trap",
+              "expired",
+              "Expired",
+              "Status expired naturally",
+              [3],
+              [],
+            ),
           ],
           [
             lifecycleEvent(
               7,
+              0,
+              "agent_left_combat",
+              "in_combat",
+              "expired",
+              "Expired",
+              "Status expired naturally",
+              [0],
+              [],
+            ),
+            lifecycleEvent(
+              7,
               1,
+              "agent_left_combat",
+              "in_combat",
+              "expired",
+              "Expired",
+              "Status expired naturally",
+              [1],
+              [],
+            ),
+            lifecycleEvent(
+              7,
+              2,
+              "agent_left_combat",
+              "in_combat",
+              "expired",
+              "Expired",
+              "Status expired naturally",
+              [2],
+              [],
+            ),
+            lifecycleEvent(
+              7,
+              4,
+              "agent_left_combat",
+              "in_combat",
+              "expired",
+              "Expired",
+              "Status expired naturally",
+              [4],
+              [],
+            ),
+            lifecycleEvent(
+              7,
+              5,
               "status_aged_to_zero",
               "slow_rogue_poison",
               "expired",
               "Expired",
               "Status expired naturally",
-              [1],
+              [5],
               [],
             ),
           ],
@@ -5259,19 +5627,26 @@ test(CP5_SLICE_5_TEST_TITLE, async ({ page }) => {
             [2, 7],
           ],
           [
-            [null, 5],
             [1, 5],
-            [null, 5],
+            [1, 5],
+            [1, 5],
             [3, 7],
           ],
           [[null, 5]],
-          [],
-          [],
+          [[null, 0]],
+          [[null, 1]],
           [
+            [null, 2],
             [null, 5],
             [null, 7],
           ],
-          [[null, 5]],
+          [
+            [null, 3],
+            [null, 4],
+            [null, 5],
+            [null, 7],
+            [null, 5],
+          ],
         ];
         for (const [frameIndex, frame] of frames.entries()) {
           const expectedLifecycle = expectedLifecycleByFrame[frameIndex];
@@ -5307,6 +5682,24 @@ test(CP5_SLICE_5_TEST_TITLE, async ({ page }) => {
               ),
             `recovery F${frameIndex} plan lifecycle`,
           ).toEqual(expectedLifecycle);
+          if (frameIndex === 2) {
+            const refreshEventIds = frame.presentation.latest_events.events
+              .filter(
+                (/** @type {Record<string, any>} */ { event_kind }) =>
+                  event_kind === "status_refreshed_or_extended",
+              )
+              .map((/** @type {Record<string, any>} */ { event_id }) => event_id);
+            expect(refreshEventIds).toHaveLength(2);
+            expect(
+              expectedLifecycle.flatMap(({ atomicEventIds }) => atomicEventIds),
+            ).toEqual(expect.arrayContaining(refreshEventIds));
+            expect(
+              frame.signature.dom.statusLifecycles.filter(
+                (/** @type {Record<string, any>} */ { type }) =>
+                  type === "status_refreshed_or_extended",
+              ),
+            ).toEqual([]);
+          }
           expect(
             frame.signature.dom.statusLifecycles,
             `recovery F${frameIndex} installed lifecycle DOM/copy`,
@@ -6018,68 +6411,71 @@ test("real death cycle retains truthful outward lifecycle cues at both review vi
     await expect(deathEffect).toHaveAttribute("data-settled", "true");
     await expect(page.locator(subjectSelector)).toHaveAttribute("data-alive", "false");
     const deathRing = deathEffect.locator(".combat-lifecycle-ring--death");
-    await expect(deathRing).toHaveAttribute(
-      "data-layout-key",
-      JSON.stringify(["event", deathEvent.event_id, "cue"]),
-    );
-    await expect(deathRing).toHaveAttribute("data-layout-collision-free", "true");
+    expect(
+      await deathRing.evaluate((node) =>
+        Array.from(node.attributes, ({ name }) => name).filter((name) =>
+          name.startsWith("data-layout-"),
+        ),
+      ),
+    ).toEqual([]);
+    await expect(deathEffect.locator(".combat-cue__leader--semantic")).toHaveCount(0);
     const deathGeometry = await deathEffect.evaluate((effect, selector) => {
       const ringGroup = effect.querySelector(".combat-lifecycle-ring--death");
       const ring = effect.querySelector(".combat-lifecycle-ring__ring");
-      const leader = effect.querySelector(".combat-cue__leader--semantic");
+      const hit = effect.querySelector(".combat-lifecycle-ring__hit");
       const body = document.querySelector(`${selector} .agent-body`);
       if (
         !(ringGroup instanceof SVGGraphicsElement) ||
         !(ring instanceof SVGCircleElement) ||
-        !(leader instanceof SVGGraphicsElement) ||
+        !(hit instanceof SVGCircleElement) ||
         !(body instanceof SVGCircleElement)
       ) {
         throw new Error("Settled death geometry is unavailable.");
       }
-      const leaderPoints = JSON.parse(
-        leader.getAttribute("data-leader-points") ?? "null",
-      );
-      if (
-        !Array.isArray(leaderPoints) ||
-        leaderPoints.length < 2 ||
-        !leaderPoints.every(
-          (point) => Number.isFinite(point?.x) && Number.isFinite(point?.y),
-        )
-      ) {
-        throw new Error("Settled death leader geometry is unavailable.");
-      }
       const matrix = ringGroup.getScreenCTM();
-      const leaderMatrix = leader.getScreenCTM();
       const bodyMatrix = body.getScreenCTM();
-      if (matrix === null || leaderMatrix === null || bodyMatrix === null) {
+      if (matrix === null || bodyMatrix === null) {
         throw new Error("Settled death transform is unavailable.");
       }
       const center = new DOMPoint(0, 0).matrixTransform(matrix);
-      const leaderStart = new DOMPoint(
-        leaderPoints[0].x,
-        leaderPoints[0].y,
-      ).matrixTransform(leaderMatrix);
       const bodyCenter = new DOMPoint(
         body.cx.baseVal.value,
         body.cy.baseVal.value,
       ).matrixTransform(bodyMatrix);
+      const centerElements = document.elementsFromPoint(bodyCenter.x, bodyCenter.y);
       return {
         color: getComputedStyle(ringGroup).color,
         radius: ring.getAttribute("r"),
+        strokeOpacity: getComputedStyle(ring).strokeOpacity,
+        hitPointerEvents: getComputedStyle(hit).pointerEvents,
+        hitFill: getComputedStyle(hit).fill,
+        hitOwnsBodyCenter: centerElements.includes(hit),
         center: [center.x, center.y],
-        leaderStart: [leaderStart.x, leaderStart.y],
         bodyCenter: [bodyCenter.x, bodyCenter.y],
       };
     }, subjectSelector);
     expect(deathGeometry.color).toBe("rgb(251, 113, 133)");
     expect(deathGeometry.radius).toBe("32");
+    expect(deathGeometry.strokeOpacity).toBe("0.5");
+    expect(deathGeometry.hitPointerEvents).toBe("stroke");
+    expect(deathGeometry.hitFill).toBe("none");
+    expect(deathGeometry.hitOwnsBodyCenter).toBe(false);
     expect(deathGeometry.center.every(Number.isFinite)).toBe(true);
     expect(
-      Math.abs(deathGeometry.leaderStart[0] - deathGeometry.bodyCenter[0]),
+      Math.abs(deathGeometry.center[0] - deathGeometry.bodyCenter[0]),
     ).toBeLessThanOrEqual(0.001);
     expect(
-      Math.abs(deathGeometry.leaderStart[1] - deathGeometry.bodyCenter[1]),
+      Math.abs(deathGeometry.center[1] - deathGeometry.bodyCenter[1]),
     ).toBeLessThanOrEqual(0.001);
+    await expect(deathEffect).toHaveAttribute("aria-label", "Agent died");
+    await deathEffect.focus();
+    await expect(page.locator("#visual-tooltip-title")).toHaveText("Agent died");
+    await expect(
+      page.locator("#visual-tooltip .semantic-explanation__summary"),
+    ).toHaveText("This agent died on the incoming transition.");
+    expect(await deathEffect.getAttribute("aria-label")).not.toMatch(
+      /_|semantic pulse/iu,
+    );
 
     await seekReplay(page, 2);
     const waitFrame = await authenticatedGet(page, "/api/presentation/frame");
@@ -6115,9 +6511,23 @@ test("real death cycle retains truthful outward lifecycle cues at both review vi
     await expect(waveEffect).toHaveAttribute("data-team-index", "1");
     await expect(waveEffect).toHaveAttribute("data-team-id", "2");
     await expect(waveEffect).toHaveAttribute("data-team-side", "right");
-    await expect(wave.locator(".combat-respawn-wave__label")).toHaveText(
-      "RESPAWNING · TEAM B",
+    await expect(wave).toHaveAttribute(
+      "data-layout-key",
+      JSON.stringify(["event", waveEvent.event_id, "cue"]),
     );
+    await expect(wave).toHaveAttribute("data-layout-disposition", "perimeter_callout");
+    await expect(wave).toHaveAttribute("data-layout-collision-free", "true");
+    await expect(wave.locator(".combat-respawn-wave__label")).toHaveText(
+      "EVENT: Team B Respawn",
+    );
+    await expect(waveEffect).toHaveAttribute("aria-label", "EVENT: Team B Respawn");
+    await waveEffect.focus();
+    await expect(page.locator("#visual-tooltip-title")).toHaveText(
+      "EVENT: Team B Respawn",
+    );
+    await expect(
+      page.locator("#visual-tooltip .semantic-explanation__summary"),
+    ).toHaveText("This team respawn occurred on the incoming transition.");
     const waveGeometry = await wave.evaluate((node) => {
       const map = document.querySelector(".map-boundary");
       const label = node.querySelector(".combat-respawn-wave__label");
@@ -6141,7 +6551,7 @@ test("real death cycle retains truthful outward lifecycle cues at both review vi
     });
     expect(waveGeometry).toEqual({
       color: "rgb(240, 90, 103)",
-      label: "RESPAWNING · TEAM B",
+      label: "EVENT: Team B Respawn",
       withinMap: true,
       rightSided: true,
       childTooltipOwners: 0,
@@ -6160,68 +6570,71 @@ test("real death cycle retains truthful outward lifecycle cues at both review vi
       "3",
     );
     const respawnRing = respawnEffect.locator(".combat-lifecycle-ring--resurrection");
-    await expect(respawnRing).toHaveAttribute(
-      "data-layout-key",
-      JSON.stringify(["event", respawnEvent.event_id, "cue"]),
-    );
-    await expect(respawnRing).toHaveAttribute("data-layout-collision-free", "true");
+    expect(
+      await respawnRing.evaluate((node) =>
+        Array.from(node.attributes, ({ name }) => name).filter((name) =>
+          name.startsWith("data-layout-"),
+        ),
+      ),
+    ).toEqual([]);
+    await expect(respawnEffect.locator(".combat-cue__leader--semantic")).toHaveCount(0);
     const respawnGeometry = await respawnEffect.evaluate((effect, selector) => {
       const ringGroup = effect.querySelector(".combat-lifecycle-ring--resurrection");
       const ring = effect.querySelector(".combat-lifecycle-ring__ring");
-      const leader = effect.querySelector(".combat-cue__leader--semantic");
+      const hit = effect.querySelector(".combat-lifecycle-ring__hit");
       const body = document.querySelector(`${selector} .agent-body`);
       if (
         !(ringGroup instanceof SVGGraphicsElement) ||
         !(ring instanceof SVGCircleElement) ||
-        !(leader instanceof SVGGraphicsElement) ||
+        !(hit instanceof SVGCircleElement) ||
         !(body instanceof SVGCircleElement)
       ) {
         throw new Error("Settled resurrection geometry is unavailable.");
       }
-      const leaderPoints = JSON.parse(
-        leader.getAttribute("data-leader-points") ?? "null",
-      );
-      if (
-        !Array.isArray(leaderPoints) ||
-        leaderPoints.length < 2 ||
-        !leaderPoints.every(
-          (point) => Number.isFinite(point?.x) && Number.isFinite(point?.y),
-        )
-      ) {
-        throw new Error("Settled resurrection leader geometry is unavailable.");
-      }
       const matrix = ringGroup.getScreenCTM();
-      const leaderMatrix = leader.getScreenCTM();
       const bodyMatrix = body.getScreenCTM();
-      if (matrix === null || leaderMatrix === null || bodyMatrix === null) {
+      if (matrix === null || bodyMatrix === null) {
         throw new Error("Settled resurrection transform is unavailable.");
       }
       const center = new DOMPoint(0, 0).matrixTransform(matrix);
-      const leaderStart = new DOMPoint(
-        leaderPoints[0].x,
-        leaderPoints[0].y,
-      ).matrixTransform(leaderMatrix);
       const bodyCenter = new DOMPoint(
         body.cx.baseVal.value,
         body.cy.baseVal.value,
       ).matrixTransform(bodyMatrix);
+      const centerElements = document.elementsFromPoint(bodyCenter.x, bodyCenter.y);
       return {
         color: getComputedStyle(ringGroup).color,
         radius: ring.getAttribute("r"),
+        strokeOpacity: getComputedStyle(ring).strokeOpacity,
+        hitPointerEvents: getComputedStyle(hit).pointerEvents,
+        hitFill: getComputedStyle(hit).fill,
+        hitOwnsBodyCenter: centerElements.includes(hit),
         center: [center.x, center.y],
-        leaderStart: [leaderStart.x, leaderStart.y],
         bodyCenter: [bodyCenter.x, bodyCenter.y],
       };
     }, subjectSelector);
     expect(respawnGeometry.color).toBe("rgb(255, 255, 255)");
     expect(respawnGeometry.radius).toBe("32");
+    expect(respawnGeometry.strokeOpacity).toBe("0.5");
+    expect(respawnGeometry.hitPointerEvents).toBe("stroke");
+    expect(respawnGeometry.hitFill).toBe("none");
+    expect(respawnGeometry.hitOwnsBodyCenter).toBe(false);
     expect(respawnGeometry.center.every(Number.isFinite)).toBe(true);
     expect(
-      Math.abs(respawnGeometry.leaderStart[0] - respawnGeometry.bodyCenter[0]),
+      Math.abs(respawnGeometry.center[0] - respawnGeometry.bodyCenter[0]),
     ).toBeLessThanOrEqual(0.001);
     expect(
-      Math.abs(respawnGeometry.leaderStart[1] - respawnGeometry.bodyCenter[1]),
+      Math.abs(respawnGeometry.center[1] - respawnGeometry.bodyCenter[1]),
     ).toBeLessThanOrEqual(0.001);
+    await expect(respawnEffect).toHaveAttribute("aria-label", "Agent respawned");
+    await respawnEffect.focus();
+    await expect(page.locator("#visual-tooltip-title")).toHaveText("Agent respawned");
+    await expect(
+      page.locator("#visual-tooltip .semantic-explanation__summary"),
+    ).toHaveText("This agent respawned on the incoming transition.");
+    expect(await respawnEffect.getAttribute("aria-label")).not.toMatch(
+      /_|semantic pulse/iu,
+    );
     const shield = page.locator(
       `.agent-spawn-shield[data-presentation-key="${subject.presentation_key}"]`,
     );
@@ -6290,9 +6703,29 @@ test("real death cycle retains truthful outward lifecycle cues at both review vi
     await expect(teamAWaveEffect).toHaveAttribute("data-team-index", "0");
     await expect(teamAWaveEffect).toHaveAttribute("data-team-id", "1");
     await expect(teamAWaveEffect).toHaveAttribute("data-team-side", "left");
-    await expect(teamAWave.locator(".combat-respawn-wave__label")).toHaveText(
-      "RESPAWNING · TEAM A",
+    await expect(teamAWave).toHaveAttribute(
+      "data-layout-key",
+      JSON.stringify(["event", teamAWaveEvent.event_id, "cue"]),
     );
+    await expect(teamAWave).toHaveAttribute(
+      "data-layout-disposition",
+      "perimeter_callout",
+    );
+    await expect(teamAWave).toHaveAttribute("data-layout-collision-free", "true");
+    await expect(teamAWave.locator(".combat-respawn-wave__label")).toHaveText(
+      "EVENT: Team A Respawn",
+    );
+    await expect(teamAWaveEffect).toHaveAttribute(
+      "aria-label",
+      "EVENT: Team A Respawn",
+    );
+    await teamAWaveEffect.focus();
+    await expect(page.locator("#visual-tooltip-title")).toHaveText(
+      "EVENT: Team A Respawn",
+    );
+    await expect(
+      page.locator("#visual-tooltip .semantic-explanation__summary"),
+    ).toHaveText("This team respawn occurred on the incoming transition.");
     const teamAGeometry = await teamAWave.evaluate((node) => {
       const map = document.querySelector(".map-boundary");
       const label = node.querySelector(".combat-respawn-wave__label");
@@ -6316,7 +6749,7 @@ test("real death cycle retains truthful outward lifecycle cues at both review vi
     });
     expect(teamAGeometry).toEqual({
       color: "rgb(59, 130, 246)",
-      label: "RESPAWNING · TEAM A",
+      label: "EVENT: Team A Respawn",
       withinMap: true,
       leftSided: true,
       childTooltipOwners: 0,

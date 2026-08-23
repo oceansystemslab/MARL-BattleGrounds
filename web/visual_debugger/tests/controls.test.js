@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  bindBattlefieldControls,
   commandResponseSchedulesShutdown,
   isDebuggerKey,
   keyboardCommand,
@@ -12,6 +13,23 @@ import {
   recordingSaveAsCommand,
   targetSelectionCommand,
 } from "../src/controls.js";
+
+/**
+ * @param {string} key
+ * @param {{repeat?: boolean, ctrlKey?: boolean}} [options]
+ */
+function cancelableKeydown(key, { repeat = false, ctrlKey = false } = {}) {
+  const event = new Event("keydown", { bubbles: true, cancelable: true });
+  Object.defineProperties(event, {
+    key: { value: key },
+    repeat: { value: repeat },
+    shiftKey: { value: false },
+    ctrlKey: { value: ctrlKey },
+    altKey: { value: false },
+    metaKey: { value: false },
+  });
+  return event;
+}
 
 test("keyboardCommand forwards raw key and modifier state without semantics", () => {
   assert.deepEqual(
@@ -82,6 +100,67 @@ test("debugger key capture leaves modified browser shortcuts native", () => {
   for (const retiredKey of ["n", "N", "[", "]", "p", "P"]) {
     assert.equal(isDebuggerKey({ key: retiredKey }), false);
   }
+});
+
+test("battlefield-owned Space and accepted fenced Enter never become browser defaults", () => {
+  const battlefield = new EventTarget();
+  let interactive = false;
+  let ownFencedEnter = true;
+  /** @type {Record<string, unknown>[]} */
+  const commands = [];
+  /** @type {Record<string, unknown>[]} */
+  const fencedEnterCommands = [];
+  bindBattlefieldControls({
+    battlefield: /** @type {any} */ (battlefield),
+    toWorldPoint: () => null,
+    onCommand: (command) => {
+      commands.push(command);
+    },
+    onHelp: () => {},
+    onReleaseFocus: () => {},
+    isInteractive: () => interactive,
+    onFencedEnter: (command) => {
+      fencedEnterCommands.push(command);
+      return ownFencedEnter;
+    },
+  });
+
+  const fencedSpace = cancelableKeydown(" ", { repeat: true });
+  battlefield.dispatchEvent(fencedSpace);
+  assert.equal(fencedSpace.defaultPrevented, true);
+  assert.deepEqual(commands, []);
+
+  const fencedEnter = cancelableKeydown("Enter");
+  battlefield.dispatchEvent(fencedEnter);
+  assert.equal(fencedEnter.defaultPrevented, true);
+  assert.deepEqual(fencedEnterCommands, [keyboardCommand("Enter")]);
+  assert.deepEqual(commands, []);
+
+  const fencedRepeatEnter = cancelableKeydown("Enter", { repeat: true });
+  battlefield.dispatchEvent(fencedRepeatEnter);
+  assert.equal(fencedRepeatEnter.defaultPrevented, true);
+  assert.deepEqual(fencedEnterCommands, [
+    keyboardCommand("Enter"),
+    keyboardCommand("Enter", { repeat: true }),
+  ]);
+  assert.deepEqual(commands, []);
+
+  ownFencedEnter = false;
+  const nativeFencedEnter = cancelableKeydown("Enter");
+  battlefield.dispatchEvent(nativeFencedEnter);
+  assert.equal(nativeFencedEnter.defaultPrevented, false);
+  assert.deepEqual(commands, []);
+
+  interactive = true;
+  const ownedSpace = cancelableKeydown(" ");
+  battlefield.dispatchEvent(ownedSpace);
+  assert.equal(ownedSpace.defaultPrevented, true);
+  assert.deepEqual(commands, [keyboardCommand(" ")]);
+
+  const modifiedSpace = cancelableKeydown(" ", { ctrlKey: true });
+  battlefield.dispatchEvent(modifiedSpace);
+  assert.equal(modifiedSpace.defaultPrevented, false);
+  assert.deepEqual(commands, [keyboardCommand(" ")]);
 });
 
 test("target selection keeps researcher and actor-POV identity domains separate", () => {

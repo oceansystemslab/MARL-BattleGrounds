@@ -1441,6 +1441,10 @@ select {
   color: var(--text-muted);
 }
 
+.combat-effect[data-token-id="in_combat"] {
+  color: #fff;
+}
+
 .combat-effect[data-lifecycle="cleared_by_death"] {
   color: var(--danger);
 }
@@ -1515,14 +1519,16 @@ select {
 }
 
 .combat-lifecycle-ring__hit {
-  fill: transparent;
-  stroke: none;
-  pointer-events: fill;
+  fill: none;
+  stroke: transparent;
+  stroke-width: 8;
+  pointer-events: stroke;
 }
 
 .combat-lifecycle-ring__ring {
   fill: none;
   stroke: currentColor;
+  stroke-opacity: 0.5;
   stroke-width: 4;
   vector-effect: non-scaling-stroke;
 }
@@ -1724,17 +1730,6 @@ select {
   pointer-events: none;
 }
 
-.agent-combat-state-icon {
-  overflow: visible;
-  color: #fff;
-  filter: drop-shadow(0 0 2px rgb(8 13 24 / 95%));
-  pointer-events: none;
-}
-
-.agent-combat-state-icon[hidden] {
-  display: none;
-}
-
 .agent-class-letter {
   fill: var(--text);
   font-size: 10px;
@@ -1918,6 +1913,11 @@ select {
 
 .status-cell[data-source-class="priest"] {
   color: var(--class-priest);
+}
+
+.status-cell[data-token-id="in_combat"],
+.pov-observed-status[data-token-id="in_combat"] {
+  color: #fff;
 }
 
 .modifier-cell {

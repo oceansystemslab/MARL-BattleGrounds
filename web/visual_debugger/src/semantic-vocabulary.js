@@ -7,6 +7,12 @@
  */
 
 const STATUS_PRESENTATION = Object.freeze({
+  in_combat: statusProfile(
+    "In combat",
+    "Shows how many transitions remain before this agent leaves combat. Participating in combat restarts the duration.",
+    "none",
+    "none",
+  ),
   stun_warrior_charge: statusProfile(
     "Warrior (Ultimate: Charge): Stun",
     "A Warrior's concussive Charge prevents this agent's voluntary movement and combat for its duration. Physics may still displace the body.",
@@ -93,7 +99,7 @@ const AURA_ID_ALIASES = Object.freeze({
 /**
  * @param {string} title
  * @param {string} effect
- * @param {"mage" | "warrior" | "hunter" | "rogue" | "priest"} accent
+ * @param {"mage" | "warrior" | "hunter" | "rogue" | "priest" | "none"} accent
  * @param {"none" | "movement_multiplier" | "healing_multiplier" | "damage_multiplier" | "movement_floor"} magnitudeKind
  * @param {boolean} [positiveDamageBreak]
  */

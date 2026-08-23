@@ -118,12 +118,59 @@ test("main derives product shell mode only from validated route identity", async
   );
 });
 
-test("main clears presentation before requests and delegates bounded retry policy", async () => {
+test("main applies explicit retain-or-clear policy before bounded installation", async () => {
   const source = await readFile(mainUrl, "utf8");
+  const beginStart = source.indexOf("function beginPresentationAuthorityAttempt(");
+  const beginEnd = source.indexOf("/**\n * Keep the two-column workspace", beginStart);
+
+  assert.notEqual(beginStart, -1);
+  assert.notEqual(beginEnd, -1);
+  const beginSource = source.slice(beginStart, beginEnd);
 
   assert.match(
     source,
-    /new PresentationInstallCoordinator\(\{[\s\S]*clear: clearPresentationAuthority,[\s\S]*install: installJoinedAuthority,[\s\S]*isJoinRace: isPresentationJoinRace,/u,
+    /new PresentationInstallCoordinator\(\{[\s\S]*onAttemptBegin: beginPresentationAuthorityAttempt,[\s\S]*install: installJoinedAuthority,[\s\S]*isJoinRace: isPresentationJoinRace,/u,
+  );
+  assert.match(
+    beginSource,
+    /pendingPolicy === "retain_last_authorized" &&[\s\S]*installedPresentationAuthority\(\) !== null[\s\S]*presentationAuthority = "retained"[\s\S]*return;/u,
+  );
+  assert.match(beginSource, /clearPresentationAuthority\(reason\);/u);
+  assert.doesNotMatch(
+    beginSource,
+    /state\.(?:authority|frame|presentation|timeline)\s*=/u,
+  );
+  assert.match(
+    source,
+    /command\.command_type === "set_view" \? "clear" : "retain_last_authorized"/u,
+  );
+  assert.match(
+    source,
+    /const retainLastAuthorized = installedPresentationAuthority\(\) !== null;[\s\S]*pendingPolicy: retainLastAuthorized \? "retain_last_authorized" : "clear"/u,
+  );
+  const replayCommandStart = source.indexOf("async function sendReplayCommand(");
+  const replayCommandEnd = source.indexOf(
+    "async function dispatchReplayCommand(",
+    replayCommandStart,
+  );
+  const liveCommandStart = source.indexOf("async function dispatchCommand(");
+  const liveCommandEnd = source.indexOf(
+    "async function loadCurrentFrame(",
+    liveCommandStart,
+  );
+  assert.notEqual(replayCommandStart, -1);
+  assert.notEqual(replayCommandEnd, -1);
+  assert.notEqual(liveCommandStart, -1);
+  assert.notEqual(liveCommandEnd, -1);
+  const replayCommandSource = source.slice(replayCommandStart, replayCommandEnd);
+  const liveCommandSource = source.slice(liveCommandStart, liveCommandEnd);
+  assert.match(
+    replayCommandSource,
+    /const status = error instanceof DebuggerApiError \? error\.status : 0;[\s\S]*isPresentationJoinRace\(error\)[\s\S]*clearPresentationAuthority\("replay_presentation_identity_mismatch"\)[\s\S]*status === 401 \|\| status === 403[\s\S]*clearPresentationAuthority\("replay_authorization_failure"\)[\s\S]*commandResponseSchedulesShutdown\(request\.command, payload\)/u,
+  );
+  assert.match(
+    liveCommandSource,
+    /const status = error instanceof DebuggerApiError \? error\.status : 0;[\s\S]*isPresentationJoinRace\(error\)[\s\S]*clearPresentationAuthority\("live_presentation_identity_mismatch"\)[\s\S]*status === 401 \|\| status === 403[\s\S]*clearPresentationAuthority\("live_authorization_failure"\)[\s\S]*commandResponseSchedulesShutdown\(command, payload\)/u,
   );
   assert.match(source, /state\.presentation = null;/u);
   assert.match(source, /state\.authority = null;/u);
@@ -539,7 +586,7 @@ test("main excludes the global Visual Key from scientific preference and inert s
 
 test("main rejects battlefield pointer commands unless Oracle authority is installed", async () => {
   const source = await readFile(mainUrl, "utf8");
-  const dispatchStart = source.indexOf("async function dispatchCommand(command)");
+  const dispatchStart = source.indexOf("async function dispatchCommand(");
   const dispatchEnd = source.indexOf(
     "/** @param {{reviewHandoff?: boolean}} options */",
     dispatchStart,
@@ -567,10 +614,7 @@ test("main resolves one certified agent activation to one Oracle command or Agen
     resolverStart,
   );
   const panelStart = source.indexOf("function dispatchPanelCommand(");
-  const panelEnd = source.indexOf(
-    "async function dispatchCommand(command)",
-    panelStart,
-  );
+  const panelEnd = source.indexOf("async function dispatchCommand(", panelStart);
 
   assert.notEqual(resolverStart, -1);
   assert.notEqual(resolverEnd, -1);
@@ -605,6 +649,11 @@ test("main resolves one certified agent activation to one Oracle command or Agen
     source,
     /"pointerdown"[\s\S]*authorizedAgentActivationFromTarget\(event\.target\)[\s\S]*stopImmediatePropagation\(\)[\s\S]*true,/u,
   );
+  assert.match(
+    source,
+    /elements\.battlefield\.focus\(\{ preventScroll: true \}\);[\s\S]*activateAuthorizedAgent\(activation\.presentationKey\);/u,
+  );
+  assert.doesNotMatch(source, /activation\.element\.focus\(/u);
   assert.match(
     source,
     /event\.key !== "Enter" && event\.key !== " "[\s\S]*activateAuthorizedAgent\(activation\.presentationKey\)/u,
@@ -709,7 +758,11 @@ test("battlefield delegation leaves nested scientific owners and terminal frames
 
   assert.match(
     controlsSource,
-    /if \(!isInteractive\(\) \|\| event\.target !== battlefield\) \{\s*return;/u,
+    /if \(event\.target !== battlefield \|\| !isDebuggerKey\(event\)\) \{\s*return;/u,
+  );
+  assert.match(
+    controlsSource,
+    /if \(!isInteractive\(\)\) \{[\s\S]*?if \(event\.key === " "\) \{[\s\S]*?event\.preventDefault\(\);[\s\S]*?return;/u,
   );
   assert.match(
     mainSource,
@@ -1254,7 +1307,7 @@ test("main reuses only Submit for coherent scripted-live advancement", async () 
     "function exposePresentationState(",
     availabilityStart,
   );
-  const dispatchStart = source.indexOf("async function dispatchCommand(command)");
+  const dispatchStart = source.indexOf("async function dispatchCommand(");
   const dispatchEnd = source.indexOf(
     "/** @param {{reviewHandoff?: boolean}} options */",
     dispatchStart,

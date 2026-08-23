@@ -22,6 +22,9 @@ from marl_battlegrounds.evaluation.models import (
     AgentDiedEventV1 as EvaluationAgentDiedEventV1,
 )
 from marl_battlegrounds.evaluation.models import (
+    AgentLeftCombatEventV1 as EvaluationAgentLeftCombatEventV1,
+)
+from marl_battlegrounds.evaluation.models import (
     AgentRespawnedEventV1 as EvaluationAgentRespawnedEventV1,
 )
 from marl_battlegrounds.evaluation.models import (
@@ -147,6 +150,7 @@ from marl_battlegrounds.rendering.scene import (
     AbilityActivatedEventV2,
     ActionRejectedEventV2,
     AgentDiedEventV2,
+    AgentLeftCombatEventV2,
     AgentRespawnedEventV2,
     AgentSceneV2,
     AuraFieldSceneV2,
@@ -2190,6 +2194,12 @@ def _project_visual_event_v2(
             **identity,
             agent_global_slot=event.agent_global_slot,
             agent_anchor=anchor(event.agent_global_slot, "transition_start"),
+        )
+    if type(event) is EvaluationAgentLeftCombatEventV1:
+        return AgentLeftCombatEventV2(
+            **identity,
+            agent_global_slot=event.agent_global_slot,
+            agent_anchor=anchor(event.agent_global_slot, "successor"),
         )
     if type(event) is EvaluationHealthRegeneratedEventV1:
         return HealthRegeneratedEventV2(

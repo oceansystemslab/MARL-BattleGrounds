@@ -44,6 +44,7 @@ _PRE_M7_EVENT_KIND_UNION = frozenset(
         "ability_activated",
         "action_rejected",
         "agent_died",
+        "agent_left_combat",
         "agent_respawned",
         "charge_phase_displacement",
         "combat_countdown_reset",

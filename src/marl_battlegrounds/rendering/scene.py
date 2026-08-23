@@ -2073,6 +2073,26 @@ class CombatCountdownResetEventV2(CanonicalVisualEventBaseV2):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class AgentLeftCombatEventV2(CanonicalVisualEventBaseV2):
+    event_type: Literal["agent_left_combat"] = field(
+        default="agent_left_combat", init=False
+    )
+    phase_rank: Literal[50] = field(default=50, init=False)
+    agent_global_slot: int
+    agent_anchor: VisualAgentAnchorV2
+
+    def __post_init__(self) -> None:
+        CanonicalVisualEventBaseV2.__post_init__(self)
+        _require_slot(self.agent_global_slot, name="agent_global_slot")
+        _require_agent_anchor(
+            self.agent_anchor,
+            name="agent_anchor",
+            phase="successor",
+            global_slot=self.agent_global_slot,
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class HealthRegeneratedEventV2(CanonicalVisualEventBaseV2):
     event_type: Literal["health_regenerated"] = field(
         default="health_regenerated", init=False
@@ -2453,6 +2473,7 @@ type VisualEventV2 = (
     | SourceHealingOutputEventV2
     | RecipientHealthResolutionEventV2
     | CombatCountdownResetEventV2
+    | AgentLeftCombatEventV2
     | HealthRegeneratedEventV2
     | CooldownStartedEventV2
     | CooldownReadyEventV2
@@ -2477,6 +2498,7 @@ _VISUAL_EVENT_V2_TYPES: tuple[type[object], ...] = (
     SourceHealingOutputEventV2,
     RecipientHealthResolutionEventV2,
     CombatCountdownResetEventV2,
+    AgentLeftCombatEventV2,
     HealthRegeneratedEventV2,
     CooldownStartedEventV2,
     CooldownReadyEventV2,

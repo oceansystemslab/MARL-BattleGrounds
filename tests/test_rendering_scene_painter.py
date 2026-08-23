@@ -45,6 +45,7 @@ _CANONICAL_EVENT_TYPES = frozenset(
         "source_healing_output",
         "recipient_health_resolution",
         "combat_countdown_reset",
+        "agent_left_combat",
         "health_regenerated",
         "cooldown_started",
         "cooldown_ready",

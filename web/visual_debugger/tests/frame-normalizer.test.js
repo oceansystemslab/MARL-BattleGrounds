@@ -21,6 +21,7 @@ const phaseRankByEventType = Object.freeze({
   source_healing_output: 30,
   recipient_health_resolution: 40,
   combat_countdown_reset: 50,
+  agent_left_combat: 50,
   health_regenerated: 50,
   cooldown_started: 60,
   cooldown_ready: 60,
@@ -274,6 +275,11 @@ function v2Events() {
       event_type: "combat_countdown_reset",
       agent_global_slot: 0,
       agent_anchor: startZero,
+    },
+    {
+      event_type: "agent_left_combat",
+      agent_global_slot: 0,
+      agent_anchor: successorZero,
     },
     {
       event_type: "health_regenerated",
@@ -1252,6 +1258,13 @@ test("researcher event and scene normalization rejects semantic drift", () => {
       eventFrame,
       /** @param {any} frame */ (frame) => {
         event(frame, "ability_activated").source_anchor.phase = "successor";
+      },
+    ],
+    [
+      "left-combat anchor is not successor-bound",
+      eventFrame,
+      /** @param {any} frame */ (frame) => {
+        event(frame, "agent_left_combat").agent_anchor.phase = "transition_start";
       },
     ],
     [

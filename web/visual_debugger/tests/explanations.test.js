@@ -99,11 +99,11 @@ test("all semantic descriptors and nested projections are recursively immutable"
       "Effective Speed",
       "Ultimate Status",
       "Combat Status",
-      "Steps until OOC",
+      "Steps until out of combat",
     ],
   );
   assert.equal(rowValue(descriptor, "Effective Speed"), "0.33");
-  assert.equal(rowValue(descriptor, "Combat Status"), "IC");
+  assert.equal(rowValue(descriptor, "Combat Status"), "In combat");
   assert.doesNotMatch(fullText(descriptor), /id_8|not a compact fact/u);
 });
 
@@ -281,7 +281,7 @@ test("compact agent facts have one exact in-combat and out-of-combat allowlist",
               "Effective Speed",
               "Ultimate Status",
               "Combat Status",
-              "Steps until OOC",
+              "Steps until out of combat",
             ]
           : ["Health", "Effective Speed", "Ultimate Status", "Combat Status"],
       );
@@ -293,9 +293,12 @@ test("compact agent facts have one exact in-combat and out-of-combat allowlist",
           ? "Ready"
           : `On cooldown (${classId - 1} ${classId === 2 ? "Tick" : "Ticks"})`,
       );
-      assert.equal(rowValue(descriptor, "Combat Status"), inCombat ? "IC" : "OOC");
+      assert.equal(
+        rowValue(descriptor, "Combat Status"),
+        inCombat ? "In combat" : "Out of combat",
+      );
       if (inCombat) {
-        assert.equal(rowValue(descriptor, "Steps until OOC"), "2 Ticks");
+        assert.equal(rowValue(descriptor, "Steps until out of combat"), "2 Ticks");
       }
       assert.equal(descriptor.sections.length, 0);
       assert.equal(
@@ -1440,13 +1443,13 @@ test("POV agent builder is byte-noninterfering with researcher-only extras", () 
       "Effective Speed",
       "Ultimate Status",
       "Combat Status",
-      "Steps until OOC",
+      "Steps until out of combat",
     ],
   );
   assert.equal(rowValue(descriptor, "Effective Speed"), "1.25");
   assert.equal(rowValue(descriptor, "Ultimate Status"), "On cooldown (2 Ticks)");
-  assert.equal(rowValue(descriptor, "Combat Status"), "IC");
-  assert.equal(rowValue(descriptor, "Steps until OOC"), "2 Ticks");
+  assert.equal(rowValue(descriptor, "Combat Status"), "In combat");
+  assert.equal(rowValue(descriptor, "Steps until out of combat"), "2 Ticks");
   assert.equal(descriptor.sections.length, 0);
   assert.doesNotMatch(
     fullText(descriptor),

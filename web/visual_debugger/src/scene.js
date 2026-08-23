@@ -74,10 +74,6 @@ const DURABLE_VISUAL_PAINT_PARTS = Object.freeze({
     kind: "pov_duration_status_badge",
   }),
   spawnShield: Object.freeze({ surface: "durable", kind: "spawn_shield" }),
-  combatStatusIcon: Object.freeze({
-    surface: "durable",
-    kind: "combat_status_icon",
-  }),
   cooldownBadges: Object.freeze({
     surface: "durable",
     kind: "cooldown_badge",
@@ -110,7 +106,6 @@ export const BATTLEFIELD_LAYER_ORDER = Object.freeze([
  *   healthTrack: SVGElement,
  *   health: SVGElement,
  *   classIcon: SVGSVGElement,
- *   combatStateIcon: SVGSVGElement | null,
  *   classLetter: SVGElement,
  *   deadMark: SVGElement,
  *   shieldRoot: SVGElement | null,
@@ -169,7 +164,6 @@ export const BATTLEFIELD_LAYER_ORDER = Object.freeze([
  *   showDurationStatusBadges: boolean,
  *   showPovDurationStatusBadges: boolean,
  *   showSpawnShield: boolean,
- *   showCombatStatusIcon: boolean,
  *   showCooldownBadges: boolean,
  * }} DurableVisualPolicy
  */
@@ -253,10 +247,6 @@ function durableVisualPolicy(state) {
     showSpawnShield: isVisualPaintPartEnabled(
       state,
       DURABLE_VISUAL_PAINT_PARTS.spawnShield,
-    ),
-    showCombatStatusIcon: isVisualPaintPartEnabled(
-      state,
-      DURABLE_VISUAL_PAINT_PARTS.combatStatusIcon,
     ),
     showCooldownBadges: isVisualPaintPartEnabled(
       state,
@@ -1249,9 +1239,6 @@ export class BattlefieldRenderer {
           `life state ${body.alive ? "alive" : "corpse"}`,
           `health ${formatDisplayNumber(body.current_health)} of ${formatDisplayNumber(body.max_health)}`,
           `effective speed ${formatDisplayNumber(body.effective_movement_speed)}`,
-          Number(body.steps_until_out_of_combat) > 0
-            ? `in combat with ${body.steps_until_out_of_combat} ${body.steps_until_out_of_combat === 1 ? "tick" : "ticks"} until out of combat`
-            : "out of combat",
           showDurationStatusBadges
             ? statusDescriptions.length === 0
               ? "no persistent statuses"
@@ -2475,15 +2462,6 @@ export class BattlefieldRenderer {
     return group;
   }
 
-  /** @returns {SVGSVGElement} */
-  #createCombatStateIcon() {
-    const icon = createSvgIcon(this.battlefield.ownerDocument, "combat-in-progress", {
-      className: "agent-combat-state-icon",
-    });
-    icon.setAttribute("hidden", "");
-    return icon;
-  }
-
   /**
    * @param {JsonRecord} agent
    * @returns {{
@@ -2568,9 +2546,6 @@ export class BattlefieldRenderer {
     const classIcon = createSvgIcon(this.battlefield.ownerDocument, "unknown", {
       className: "agent-class-icon",
     });
-    const combatStateIcon = visualPolicy.showCombatStatusIcon
-      ? this.#createCombatStateIcon()
-      : null;
     const classLetter = svgElement("text", { class: "agent-class-letter" });
     const deadMark = svgElement("path", {
       class: "agent-dead-mark",
@@ -2586,7 +2561,6 @@ export class BattlefieldRenderer {
       healthTrack,
       health,
       classIcon,
-      ...(combatStateIcon === null ? [] : [combatStateIcon]),
       classLetter,
       deadMark,
     );
@@ -2612,7 +2586,6 @@ export class BattlefieldRenderer {
       healthTrack,
       health,
       classIcon,
-      combatStateIcon,
       classLetter,
       deadMark,
       shieldRoot: shieldNodes?.root ?? null,
@@ -2647,9 +2620,6 @@ export class BattlefieldRenderer {
   ) {
     const classToken = classTokenFromId(agent.class_id);
     const teamToken = teamTokenFromId(agent.team_id);
-    if (visualPolicy.showCombatStatusIcon && nodes.combatStateIcon === null) {
-      nodes.combatStateIcon = this.#createCombatStateIcon();
-    }
     if (visualPolicy.showSpawnShield && nodes.shieldRoot === null) {
       const shieldNodes = this.#createSpawnShieldNodes(agent);
       nodes.shieldRoot = shieldNodes.root;
@@ -2705,11 +2675,6 @@ export class BattlefieldRenderer {
         teamToken.label,
         `health ${formatDisplayNumber(agent.current_health)} of ${formatDisplayNumber(agent.max_health)}`,
         agent.alive ? "alive" : "dead",
-        visualPolicy.showCombatStatusIcon
-          ? inCombat
-            ? `combat status IC, steps until OOC ${stepsUntilOutOfCombat}`
-            : "combat status OOC"
-          : null,
         spawnShieldView?.rootAriaLabel ?? null,
         controlled ? "controlled actor" : null,
         selected ? "selected target" : null,
@@ -2796,39 +2761,12 @@ export class BattlefieldRenderer {
       nodes.classIcon = replacement;
     }
     const iconSize = Math.max(14, Math.min(radius * 0.95, 28));
-    const combatIconSize = Math.max(8, Math.min(radius * 0.42, 12));
-    const combatIconGap = Math.max(1, Math.min(radius * 0.12, 3));
-    const identityGlyphWidth =
-      iconSize +
-      (visualPolicy.showCombatStatusIcon && inCombat
-        ? combatIconGap + combatIconSize
-        : 0);
-    const classIconX = center.x - identityGlyphWidth / 2;
-    const identityGlyphCenterY = center.y - iconSize * 0.12;
     setAttributes(nodes.classIcon, {
-      x: classIconX,
+      x: center.x - iconSize / 2,
       y: center.y - iconSize * 0.62,
       width: iconSize,
       height: iconSize,
     });
-    if (visualPolicy.showCombatStatusIcon) {
-      const combatStateIcon = nodes.combatStateIcon;
-      if (combatStateIcon === null) {
-        throw new Error("Combat status icon policy was enabled without an icon.");
-      }
-      if (combatStateIcon.parentNode !== nodes.root) {
-        nodes.classLetter.before(combatStateIcon);
-      }
-      setAttributes(combatStateIcon, {
-        x: classIconX + iconSize + combatIconGap,
-        y: identityGlyphCenterY - combatIconSize / 2,
-        width: combatIconSize,
-        height: combatIconSize,
-        hidden: inCombat ? null : "",
-      });
-    } else {
-      nodes.combatStateIcon?.remove();
-    }
     setAttributes(nodes.classLetter, {
       x: center.x,
       y: center.y + Math.min(radius * 0.5, 11) + 2,

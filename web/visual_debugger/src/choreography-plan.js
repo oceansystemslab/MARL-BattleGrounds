@@ -5,6 +5,7 @@ import {
   isAuthorizedPresentationFrame,
 } from "./authorized-presentation-adapter.js";
 import { layoutCrossPhaseOccupancy } from "./layout.js";
+import { createRouteGeometry } from "./routes.js";
 import {
   DEFAULT_VISUAL_FILTER_STATE,
   isVisualPaintPartEnabled,
@@ -506,9 +507,10 @@ function projectedAgentRadius(surface, sceneByKey, presentationKey) {
 }
 
 /**
- * Run one filter-first reservation pass for every surviving information-bearing
+ * Run one filter-first reservation pass for every surviving collision-managed
  * fragment, then attach allocator-owned geometry without changing event order
- * or scientific anchors.
+ * or scientific anchors. Activation impacts deliberately stay on their direct
+ * route/target anchor rather than entering this foreground allocator.
  *
  * @param {ReadonlyArray<Record<string, any>>} events
  * @param {ProjectionSurface | null} surface
@@ -522,6 +524,8 @@ function layoutCrossPhaseEvents(events, surface, sceneByKey) {
   const bindings = new Map();
   /** @type {Record<string, any>[]} */
   const patches = events.map(() => ({}));
+  /** @type {Map<number, string>} */
+  const activationUnderlayPairByEvent = new Map();
 
   /**
    * @param {number} eventIndex
@@ -547,21 +551,14 @@ function layoutCrossPhaseEvents(events, surface, sceneByKey) {
     if (!event.spatial) {
       continue;
     }
+    if (event.kind === "charge_displacement") {
+      // This scientific phase displacement owns its exact endpoints and is
+      // always painted as one direct transition-start to post-Charge segment.
+      continue;
+    }
     if (event.kind === "activation") {
-      const dimensions = activationCueDimensions(event);
-      if (event.target) {
-        add(eventIndex, "impact", 0, {
-          kind: "recipient_cue",
-          anchor: event.target,
-          anchorRadius: 60,
-          recipientKey: event.targetPresentationKey ?? event.eventId,
-          allowProtectedKeys:
-            event.endpointPhase === "successor"
-              ? protectedBodyKeys(surface, event.targetPresentationKey)
-              : [],
-          ...dimensions,
-        });
-      } else if (event.source && event.paintParts?.ability === true) {
+      if (!event.target && event.source && event.paintParts?.ability === true) {
+        const dimensions = activationCueDimensions(event);
         add(eventIndex, "source", 0, {
           kind: "perimeter_callout",
           anchor: event.source,
@@ -586,9 +583,9 @@ function layoutCrossPhaseEvents(events, surface, sceneByKey) {
           sceneByKey,
           event.targetPresentationKey,
         );
-        // Scene body regions describe the current successor endpoint. They may
-        // own successor-anchored routes, but never historical Charge activation
-        // endpoints from transition_start.
+        // Scene body regions describe the current successor endpoint. Their
+        // radii still clip a successor-anchored underlay to the owning bodies,
+        // but they never claim historical Charge endpoints from transition_start.
         const successorAnchored = event.endpointPhase === "successor";
         const sourceProtectedKey = successorAnchored
           ? protectedBodyKey(surface, event.sourcePresentationKey)
@@ -596,39 +593,47 @@ function layoutCrossPhaseEvents(events, surface, sceneByKey) {
         const targetProtectedKey = successorAnchored
           ? protectedBodyKey(surface, event.targetPresentationKey)
           : null;
-        const allowProtectedKeys = [sourceProtectedKey, targetProtectedKey].filter(
-          (key) => key !== null,
-        );
         const pairKey = JSON.stringify([
           event.sourcePresentationKey,
           event.targetPresentationKey,
         ]);
-        add(
-          eventIndex,
-          "route",
-          2,
-          {
-            kind: "route",
-            source: event.source,
-            target: event.target,
-            sourceRadius: sourceProtectedKey === null ? 0 : sourceRadius,
-            targetRadius: targetProtectedKey === null ? 0 : targetRadius,
-            sourceEndpointGap: sourceProtectedKey === null ? 0 : 3,
-            targetEndpointGap: targetProtectedKey === null ? 0 : 3,
-            pathPadding:
-              event.tokenId === "holy_word"
-                ? CHOREOGRAPHY_PAINT_FOOTPRINTS.route.activationPathPadding.holy_word
-                : CHOREOGRAPHY_PAINT_FOOTPRINTS.route.activationPathPadding.default,
-            markerPadding: CHOREOGRAPHY_PAINT_FOOTPRINTS.route.activationMarkerPadding,
-            compactMarkerPadding:
-              CHOREOGRAPHY_PAINT_FOOTPRINTS.route.activationCompactMarkerPadding,
-            markerProgress: event.tokenId === "warrior_charge" ? 0.42 : undefined,
-            allowProtectedKeys: [...new Set(allowProtectedKeys)],
-            sourceProtectedKey: sourceProtectedKey ?? undefined,
-            targetProtectedKey: targetProtectedKey ?? undefined,
-          },
-          { pairKey },
-        );
+        if (!surface?.viewportBounds) {
+          return null;
+        }
+        // Accepted Basic/Ultimate trajectories are deliberately coincident
+        // underlays. Their presence communicates the activation; their impact
+        // meets this direct route endpoint while status and realized
+        // displacement cues stay in the foreground allocator above.
+        const routeLayoutKey = crossPhaseLayoutKey(event.eventId, "route");
+        const route = Object.freeze({
+          layoutKey: routeLayoutKey,
+          priority: 1,
+          stableOrder: eventIndex * 4 + 2,
+          lane: 0,
+          bridgeGaps: Object.freeze([]),
+          ...createRouteGeometry(
+            {
+              eventId: event.eventId,
+              source: event.source,
+              target: event.target,
+              sourceRadius: sourceProtectedKey === null ? 0 : sourceRadius,
+              targetRadius: targetProtectedKey === null ? 0 : targetRadius,
+              sourceEndpointGap: sourceProtectedKey === null ? 0 : 3,
+              targetEndpointGap: targetProtectedKey === null ? 0 : 3,
+            },
+            {
+              viewportBounds: surface.viewportBounds,
+              markerProgress: event.tokenId === "warrior_charge" ? 0.42 : undefined,
+            },
+          ),
+        });
+        Object.assign(patches[eventIndex], {
+          route,
+          routeLayoutKey,
+          routeLane: 0,
+          routeBridgeGaps: route.bridgeGaps,
+        });
+        activationUnderlayPairByEvent.set(eventIndex, pairKey);
         if (event.tokenId === "warrior_charge") {
           const ownershipAnchor = Object.freeze({
             x: (event.source.x + event.target.x) / 2,
@@ -678,6 +683,14 @@ function layoutCrossPhaseEvents(events, surface, sceneByKey) {
       continue;
     }
     if (event.kind === "semantic_pulse") {
+      if (
+        event.cueSemantic === "agent_died" ||
+        event.cueSemantic === "agent_respawned"
+      ) {
+        // Lifecycle rings valence their exact authorized body anchor. They are
+        // not callouts and therefore never enter collision allocation.
+        continue;
+      }
       add(eventIndex, "cue", 0, {
         kind: "perimeter_callout",
         anchor: event.anchor,
@@ -687,63 +700,25 @@ function layoutCrossPhaseEvents(events, surface, sceneByKey) {
         allowProtectedKeys: protectedBodyKeys(surface, event.agentPresentationKey),
         ...semanticPulseCueDimensions(event),
       });
-      continue;
-    }
-    if (event.kind === "charge_displacement") {
-      const targetProtectedKey = protectedBodyKey(surface, event.sourcePresentationKey);
-      const targetRadius = projectedAgentRadius(
-        surface,
-        sceneByKey,
-        event.sourcePresentationKey,
-      );
-      add(eventIndex, "start", 0, {
-        kind: "recipient_cue",
-        anchor: event.start,
-        anchorRadius: 20,
-        recipientKey: `${event.sourcePresentationKey}:charge`,
-        allowProtectedKeys: [],
-        width: CHOREOGRAPHY_PAINT_FOOTPRINTS.chargeDisplacement.start.width,
-        height: CHOREOGRAPHY_PAINT_FOOTPRINTS.chargeDisplacement.start.height,
-      });
-      add(eventIndex, "end", 1, {
-        kind: "recipient_cue",
-        anchor: event.end,
-        anchorRadius: 20,
-        recipientKey: `${event.sourcePresentationKey}:charge`,
-        allowProtectedKeys: protectedBodyKeys(surface, event.sourcePresentationKey),
-        width: CHOREOGRAPHY_PAINT_FOOTPRINTS.chargeDisplacement.end.width,
-        height: CHOREOGRAPHY_PAINT_FOOTPRINTS.chargeDisplacement.end.height,
-      });
-      const pairKey = JSON.stringify([
-        event.sourcePresentationKey,
-        event.start,
-        event.end,
-      ]);
-      add(
-        eventIndex,
-        "route",
-        2,
-        {
-          kind: "route",
-          source: event.start,
-          target: event.end,
-          sourceRadius: 0,
-          targetRadius: targetProtectedKey === null ? 0 : targetRadius,
-          sourceEndpointGap: 0,
-          targetEndpointGap: targetProtectedKey === null ? 0 : 3,
-          pathPadding: CHOREOGRAPHY_PAINT_FOOTPRINTS.route.chargePathPadding,
-          markerPadding: CHOREOGRAPHY_PAINT_FOOTPRINTS.route.chargeMarkerPadding,
-          markerProgress: 0.76,
-          allowProtectedKeys: targetProtectedKey === null ? [] : [targetProtectedKey],
-          targetProtectedKey: targetProtectedKey ?? undefined,
-        },
-        { pairKey },
-      );
     }
   }
 
+  const activationUnderlayMultiplicity = new Map();
+  for (const pairKey of activationUnderlayPairByEvent.values()) {
+    activationUnderlayMultiplicity.set(
+      pairKey,
+      (activationUnderlayMultiplicity.get(pairKey) ?? 0) + 1,
+    );
+  }
+  for (const [eventIndex, pairKey] of activationUnderlayPairByEvent) {
+    patches[eventIndex].routeMultiplicity =
+      activationUnderlayMultiplicity.get(pairKey) ?? 1;
+  }
+
   if (requests.length === 0) {
-    return Object.freeze(events.map((event) => event));
+    return Object.freeze(
+      events.map((event, index) => Object.freeze({ ...event, ...patches[index] })),
+    );
   }
   if (!surface?.viewportBounds) {
     return null;
@@ -865,7 +840,9 @@ function choreographyFamily(event) {
   if (event.kind === "regeneration") return "recovery";
   if (event.kind === "charge_displacement") return "charge";
   if (event.kind === "movement_displacement") return "movement";
-  if (event.kind === "status_lifecycle") return "status";
+  if (event.kind === "status_lifecycle") {
+    return event.eventType === "agent_left_combat" ? "recovery" : "status";
+  }
   if (event.kind !== "semantic_pulse") return null;
   if (
     event.cueSemantic === "cooldown_started" ||
@@ -964,6 +941,9 @@ function authorizedPaintParts(event, visualFilters) {
     });
   }
   if (event.kind === "status_lifecycle") {
+    if (event.lifecycle === "refreshed") {
+      return Object.freeze({ effect: false });
+    }
     if (event.lifecycle === "trap_broken_and_reapplied") {
       return Object.freeze({
         break: enabled({
@@ -1167,7 +1147,7 @@ function authorizedTeamWaveIdentity(rawAnchor) {
     teamIndex,
     teamId,
     teamSide: teamIndex === 0 ? "left" : "right",
-    label: `RESPAWNING · TEAM ${teamIndex === 0 ? "A" : "B"}`,
+    label: `EVENT: Team ${teamIndex === 0 ? "A" : "B"} Respawn`,
   });
 }
 
@@ -1309,24 +1289,24 @@ function authorizedStatusSelection(group) {
   const applied = applications.at(0) ?? null;
   const lifecycleId = cleared
     ? "cleared_by_death"
-    : refreshed
-      ? "refreshed"
-      : broken && applied
-        ? "trap_broken_and_reapplied"
-        : aged && applied
-          ? "reapplied"
-          : broken
-            ? "trap_broken"
-            : aged
-              ? "expired"
-              : "applied";
+    : broken && applied
+      ? "trap_broken_and_reapplied"
+      : aged && applied
+        ? "reapplied"
+        : broken
+          ? "trap_broken"
+          : aged
+            ? "expired"
+            : applied
+              ? "applied"
+              : "refreshed";
   const primary =
     cleared ??
-    refreshed ??
     (applied && (broken || aged) ? applied : null) ??
     broken ??
     aged ??
-    applied;
+    applied ??
+    refreshed;
   return primary === null
     ? null
     : Object.freeze({
@@ -1953,7 +1933,7 @@ function buildAuthorizedPresentationChoreographyPlan(
       );
       const key = identifier(startAnchor?.presentation_key);
       const startWorld = authorizedWorldPoint(trajectory?.transition_start);
-      const endWorld = authorizedWorldPoint(trajectory?.successor);
+      const endWorld = authorizedWorldPoint(endTrajectory?.post_charge);
       if (
         trajectory === null ||
         endTrajectory !== trajectory ||
@@ -2064,6 +2044,63 @@ function buildAuthorizedPresentationChoreographyPlan(
           spatial: paintDecision.enabled,
           phaseStart: CHOREOGRAPHY_PHASES.v2RejectionStart,
           phaseEnd: CHOREOGRAPHY_PHASES.v2AbilityStart,
+        }),
+      );
+      continue;
+    }
+    if (row.kind === "agent_left_combat") {
+      if (trajectories === null) {
+        return null;
+      }
+      const trajectory = trajectoryForAuthorizedAnchor(
+        trajectories,
+        agentAnchor,
+        "successor",
+      );
+      const recipientWorld = authorizedWorldPoint(trajectory?.successor);
+      if (trajectory === null || recipientWorld === null) {
+        return null;
+      }
+      const paintParts = authorizedPaintParts(
+        { kind: "status_lifecycle", lifecycle: "expired" },
+        visualFilters,
+      );
+      if (paintParts === null) {
+        return null;
+      }
+      const enabled = Object.values(paintParts).some((part) => part === true);
+      const recipient = enabled ? project(recipientWorld, surface) : null;
+      if (enabled && recipient === null) {
+        return null;
+      }
+      const status = resolveVisualToken("status", "in_combat", event);
+      const lifecycle = resolveVisualToken("lifecycle", "expired", event);
+      planned.push(
+        Object.freeze({
+          ...common,
+          kind: "status_lifecycle",
+          tokenId: status.tokenId,
+          token: status,
+          lifecycle: lifecycle.tokenId,
+          lifecycleToken: lifecycle,
+          recipientPresentationKey: trajectory.agent_presentation_key,
+          recipientPublicAgentId: trajectory.agent_public_agent_id,
+          recipient,
+          sourcePresentationKey: null,
+          sourcePublicAgentId: null,
+          applicationSources: Object.freeze([]),
+          durationBefore: 1,
+          durationAfter: 0,
+          lane: enabled ? 0 : null,
+          laneCount: enabled ? 1 : 0,
+          statusLayoutOrder: row.payload.ordinal,
+          atomicEventIds: Object.freeze([row.id]),
+          applicationEventIds: Object.freeze([]),
+          paintParts,
+          presentationSuppressed: !enabled,
+          spatial: enabled,
+          phaseStart: CHOREOGRAPHY_PHASES.v2StatusStart,
+          phaseEnd: CHOREOGRAPHY_PHASES.v2ShieldStart,
         }),
       );
       continue;

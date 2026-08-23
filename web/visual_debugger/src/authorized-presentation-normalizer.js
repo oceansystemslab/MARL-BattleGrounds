@@ -189,6 +189,7 @@ const ORACLE_EVENT_PHASE_RANK = Object.freeze({
   source_healing_output: 30,
   recipient_health_resolution: 40,
   combat_countdown_reset: 50,
+  agent_left_combat: 50,
   health_regenerated: 50,
   cooldown_started: 60,
   cooldown_ready: 60,
@@ -1157,6 +1158,9 @@ function oracleEventAnchors(event) {
     case "cooldown_started":
     case "cooldown_ready":
       add("agent_anchor", "transition_start");
+      break;
+    case "agent_left_combat":
+      add("agent_anchor", "successor");
       break;
     case "charge_phase_displacement":
       add("start_anchor", "transition_start");

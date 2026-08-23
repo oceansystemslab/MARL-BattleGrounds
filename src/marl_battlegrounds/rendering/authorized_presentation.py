@@ -36,6 +36,7 @@ from marl_battlegrounds.rendering.scene import (
     AbilityActivatedEventV2,
     ActionRejectedEventV2,
     AgentDiedEventV2,
+    AgentLeftCombatEventV2,
     AgentRespawnedEventV2,
     AgentSceneV2,
     AuraRecipientModifierSceneV2,
@@ -99,6 +100,7 @@ type ReplayIncomingEventKindV1 = Literal[
     "source_healing_output",
     "recipient_health_resolution",
     "combat_countdown_reset",
+    "agent_left_combat",
     "health_regenerated",
     "cooldown_started",
     "cooldown_ready",
@@ -124,6 +126,7 @@ _REPLAY_INCOMING_EVENT_KINDS_V1 = frozenset(
         "source_healing_output",
         "recipient_health_resolution",
         "combat_countdown_reset",
+        "agent_left_combat",
         "health_regenerated",
         "cooldown_started",
         "cooldown_ready",
@@ -1983,6 +1986,24 @@ class ReplayIncomingCombatCountdownResetEventV1(_ReplayIncomingEventBaseV1):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class ReplayIncomingAgentLeftCombatEventV1(_ReplayIncomingEventBaseV1):
+    event_kind: Literal["agent_left_combat"]
+    agent_anchor: ReplayIncomingAgentAnchorV1
+
+    def __post_init__(self) -> None:
+        self._validate_base(
+            event_kind=self.event_kind,
+            expected_kind="agent_left_combat",
+            expected_phase_rank=50,
+        )
+        _require_incoming_anchor(
+            self.agent_anchor,
+            name="agent_anchor",
+            phase="successor",
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayIncomingHealthRegeneratedEventV1(_ReplayIncomingEventBaseV1):
     event_kind: Literal["health_regenerated"]
     agent_anchor: ReplayIncomingAgentAnchorV1
@@ -2327,6 +2348,7 @@ type ReplayIncomingEventV1 = Annotated[
     | ReplayIncomingSourceHealingOutputEventV1
     | ReplayIncomingRecipientHealthResolutionEventV1
     | ReplayIncomingCombatCountdownResetEventV1
+    | ReplayIncomingAgentLeftCombatEventV1
     | ReplayIncomingHealthRegeneratedEventV1
     | ReplayIncomingCooldownStartedEventV1
     | ReplayIncomingCooldownReadyEventV1
@@ -2353,6 +2375,7 @@ _REPLAY_INCOMING_EVENT_TYPES_V1: tuple[type[object], ...] = (
     ReplayIncomingSourceHealingOutputEventV1,
     ReplayIncomingRecipientHealthResolutionEventV1,
     ReplayIncomingCombatCountdownResetEventV1,
+    ReplayIncomingAgentLeftCombatEventV1,
     ReplayIncomingHealthRegeneratedEventV1,
     ReplayIncomingCooldownStartedEventV1,
     ReplayIncomingCooldownReadyEventV1,
@@ -2404,6 +2427,7 @@ def _incoming_event_agent_anchors(
         return (event.recipient_anchor,)
     if type(event) in (
         ReplayIncomingCombatCountdownResetEventV1,
+        ReplayIncomingAgentLeftCombatEventV1,
         ReplayIncomingHealthRegeneratedEventV1,
         ReplayIncomingCooldownStartedEventV1,
         ReplayIncomingCooldownReadyEventV1,
@@ -2412,6 +2436,7 @@ def _incoming_event_agent_anchors(
     ):
         agent_event = cast(
             ReplayIncomingCombatCountdownResetEventV1
+            | ReplayIncomingAgentLeftCombatEventV1
             | ReplayIncomingHealthRegeneratedEventV1
             | ReplayIncomingCooldownStartedEventV1
             | ReplayIncomingCooldownReadyEventV1
@@ -3438,6 +3463,17 @@ def _replay_incoming_event(
                 key_by_internal_slot=key_by_internal_slot,
             ),
         )
+    if type(event) is AgentLeftCombatEventV2:
+        return ReplayIncomingAgentLeftCombatEventV1(
+            event_id=event.event_id,
+            ordinal=event.ordinal,
+            phase_rank=event.phase_rank,
+            event_kind=event.event_type,
+            agent_anchor=_replay_incoming_anchor(
+                event.agent_anchor,
+                key_by_internal_slot=key_by_internal_slot,
+            ),
+        )
     if type(event) is HealthRegeneratedEventV2:
         return ReplayIncomingHealthRegeneratedEventV1(
             event_id=event.event_id,
@@ -3939,6 +3975,7 @@ __all__ = [
     "ReplayIncomingAgentAnchorV1",
     "ReplayIncomingAgentDiedEventV1",
     "ReplayIncomingAgentIdentityV1",
+    "ReplayIncomingAgentLeftCombatEventV1",
     "ReplayIncomingAgentPhaseTrajectoryV1",
     "ReplayIncomingAgentRespawnedEventV1",
     "ReplayIncomingAnchorPhaseV1",

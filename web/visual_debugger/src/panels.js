@@ -367,6 +367,31 @@ function humanize(value) {
 }
 
 /**
+ * Return the exact researcher-facing label for an authorized team respawn.
+ * Invalid payloads remain unavailable instead of guessing a team identity.
+ *
+ * @param {Record<string, any>} event
+ */
+function respawnWaveEventLabel(event) {
+  if (event.kind !== "respawn_wave_occurred") {
+    return null;
+  }
+  const teamAnchor = isRecord(event.payload?.team_anchor)
+    ? event.payload.team_anchor
+    : null;
+  const teamIndex = teamAnchor?.team_index;
+  const teamId = teamAnchor?.team_id;
+  if (
+    teamAnchor?.phase !== "successor" ||
+    (teamIndex !== 0 && teamIndex !== 1) ||
+    teamId !== teamIndex + 1
+  ) {
+    return null;
+  }
+  return `EVENT: Team ${teamIndex === 0 ? "A" : "B"} Respawn`;
+}
+
+/**
  * @template {keyof HTMLElementTagNameMap} K
  * @param {K} tagName
  * @param {string | null} className
@@ -957,23 +982,27 @@ export class DebuggerPanels {
           : event.vocabulary === "recipient_cue"
             ? "Recipient cue"
             : "Incoming event";
-      item.textContent = `${prefix} · ${humanize(event.kind)}`;
+      const respawnLabel = respawnWaveEventLabel(event);
+      const readableKind = respawnLabel ?? humanize(event.kind);
+      item.textContent = respawnLabel ?? `${prefix} · ${readableKind}`;
       registerTooltipOwner(
         item,
         createSemanticDescriptor({
           kind: event.vocabulary,
           id: `${presentation.session_id}:${event.id}`,
-          title: `${prefix} ${ordinal + 1}`,
+          title: respawnLabel ?? `${prefix} ${ordinal + 1}`,
           tone: "information",
           accent: "none",
           summary:
-            event.vocabulary === "observation_delta"
-              ? "A recipient-authorized observation change; no simulator cause is asserted."
-              : "An exact incoming presentation fact.",
+            respawnLabel !== null
+              ? "This team respawn occurred on the incoming transition."
+              : event.vocabulary === "observation_delta"
+                ? "A recipient-authorized observation change; no simulator cause is asserted."
+                : "An exact incoming presentation fact.",
           rows: [
             {
               label: "Kind",
-              value: humanize(event.kind),
+              value: readableKind,
               metadata: { compact: true, full: true },
             },
             {

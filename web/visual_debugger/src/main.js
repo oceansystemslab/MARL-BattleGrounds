@@ -191,7 +191,7 @@ const elements = {
   ),
 };
 
-const EXPECTED_VISUAL_FILTER_COUNT = 24;
+const EXPECTED_VISUAL_FILTER_COUNT = 23;
 
 /**
  * Build the fixed page-local filter surface from the shared paint registry.
@@ -271,6 +271,18 @@ const state = {
   notice: null,
   noticeLevel: "info",
 };
+
+/**
+ * One live request may retain one fresh Enter intent while a coherent draft
+ * response is installed. This is page-local latency state, not simulator,
+ * action, or replay state.
+ *
+ * @type {{
+ *   allowsDeferredSubmit: boolean,
+ *   deferredSubmit: Readonly<Record<string, unknown>> | null,
+ * } | null}
+ */
+let activeLiveCommandTransaction = null;
 
 /**
  * One page-local read-only artifact transaction. It is an async ownership
@@ -548,7 +560,7 @@ const CONTROL_HELP = Object.freeze([
   [
     "#restore-all-visual-filters-button",
     "Restore All",
-    "Turn on all 24 local visual filters. The separate Ranges control is unchanged.",
+    "Turn on all 23 local visual filters. The separate Ranges control is unchanged.",
   ],
   [
     ".diagnostics > summary",
@@ -846,6 +858,28 @@ function clearPresentationAuthority(reason) {
 }
 
 /**
+ * Begin one authority request under an explicit visual pending policy.
+ * Ordinary same-authority work keeps only the last complete certified pair;
+ * audience changes clear synchronously, and later identity failures fail
+ * closed before the next render.
+ *
+ * @param {string} reason
+ * @param {"retain_last_authorized" | "clear"} pendingPolicy
+ */
+function beginPresentationAuthorityAttempt(reason, pendingPolicy) {
+  if (
+    pendingPolicy === "retain_last_authorized" &&
+    installedPresentationAuthority() !== null
+  ) {
+    retainPresentationPreferenceAcrossBusyRender();
+    tooltipController.hide();
+    document.documentElement.dataset.presentationAuthority = "retained";
+    return;
+  }
+  clearPresentationAuthority(reason);
+}
+
+/**
  * Keep the two-column workspace from collapsing while an authoritative
  * command synchronously clears its old scientific content. Without this
  * temporary layout floor, a focused native roster button near the document
@@ -945,7 +979,7 @@ async function prepareJoinedAuthority(
 }
 
 const presentationInstallation = new PresentationInstallCoordinator({
-  clear: clearPresentationAuthority,
+  onAttemptBegin: beginPresentationAuthorityAttempt,
   install: installJoinedAuthority,
   isJoinRace: isPresentationJoinRace,
 });
@@ -1166,12 +1200,17 @@ function setProgrammaticDisclosureOpen(panel, open) {
   panel.open = open;
 }
 
-/** @param {boolean} available */
-function setScientificDisclosureAvailability(available) {
+/**
+ * @param {boolean} available
+ * @param {{preserveOpen?: boolean}} [options]
+ */
+function setScientificDisclosureAvailability(available, { preserveOpen = false } = {}) {
   for (const { panel, body } of scientificDisclosures) {
     const summary = panel.querySelector(":scope > summary");
     if (!available) {
-      setProgrammaticDisclosureOpen(panel, false);
+      if (!preserveOpen) {
+        setProgrammaticDisclosureOpen(panel, false);
+      }
       panel.setAttribute("inert", "");
       body.setAttribute("inert", "");
       if (summary instanceof HTMLElement) {
@@ -1404,6 +1443,28 @@ function capturePresentationPreferenceBeforeRender() {
 }
 
 /**
+ * Preserve the exact keyboard-owned primary action while a same-authority
+ * request repaints the retained scene into its inert busy state. The eventual
+ * complete successor (or retained failure state) restores that focus only if
+ * the user has not moved it elsewhere in the meantime.
+ */
+function retainPresentationPreferenceAcrossBusyRender() {
+  const presentation = state.presentation;
+  const preference = installedActivePresentationPreference(presentation);
+  if (preference === null || !isAuthorizedPresentationFrame(presentation)) {
+    return;
+  }
+  capturePresentationPreference(preference, presentation);
+  if (preference.primaryFocus === null) {
+    pendingPrimaryFocusRestoreAnchor = null;
+  } else {
+    elements.helpButton.focus({ preventScroll: true });
+    pendingPrimaryFocusRestoreAnchor = elements.helpButton;
+  }
+  presentationPreferenceNeedsContentRender = true;
+}
+
+/**
  * @param {NonNullable<typeof activePresentationPreference>} preference
  */
 function schedulePresentationPreferenceRestore(preference) {
@@ -1471,6 +1532,10 @@ function restorePresentationPreferenceAfterRender() {
     if (!state.busy) {
       releaseWorkspaceHeightAfterAuthorityInstall();
     }
+    return;
+  }
+  if (state.busy) {
+    setScientificDisclosureAvailability(false, { preserveOpen: true });
     return;
   }
   setScientificDisclosureAvailability(true);
@@ -2555,6 +2620,72 @@ const DRAFT_KEYS = new Set([
   "2",
 ]);
 
+const DEFERRED_SUBMIT_PREPARATION_COMMAND_TYPES = new Set([
+  "battlefield_pointer",
+  "roster_selection",
+  "actor_pov_target_action",
+]);
+
+/** @param {Record<string, unknown>} command */
+function commandPreparesDeferredSubmit(command) {
+  if (DEFERRED_SUBMIT_PREPARATION_COMMAND_TYPES.has(String(command.command_type))) {
+    return true;
+  }
+  if (command.command_type !== "keyboard" || typeof command.key !== "string") {
+    return false;
+  }
+  const key = command.key.toLowerCase();
+  return DRAFT_KEYS.has(key) || key === "tab" || key === "escape";
+}
+
+/** @param {Record<string, unknown>} command */
+function isFreshUnmodifiedEnter(command) {
+  return (
+    command.command_type === "keyboard" &&
+    typeof command.key === "string" &&
+    command.key.toLowerCase() === "enter" &&
+    command.shift_key === false &&
+    command.ctrl_key === false &&
+    command.alt_key === false &&
+    command.meta_key === false &&
+    command.repeat === false
+  );
+}
+
+/**
+ * Consume live Enter while a request owns the battlefield. Only one fresh,
+ * unmodified edge may be retained, and only behind a draft-preparation
+ * transaction. Replay and every non-request fence retain native Enter.
+ *
+ * @param {Record<string, unknown>} command
+ */
+function retainFencedEnter(command) {
+  const transaction = activeLiveCommandTransaction;
+  if (
+    isReplayMode() ||
+    !state.busy ||
+    transaction === null ||
+    state.shuttingDown ||
+    state.resyncRequired ||
+    state.offline
+  ) {
+    return false;
+  }
+  if (
+    transaction.allowsDeferredSubmit &&
+    transaction.deferredSubmit === null &&
+    isFreshUnmodifiedEnter(command)
+  ) {
+    transaction.deferredSubmit = Object.freeze({ ...command });
+    setNotice(
+      "Submit queued; waiting for the staged action to be installed first…",
+      "info",
+    );
+    renderConnection();
+  }
+  return true;
+}
+
 /**
  * @param {Record<string, unknown>} command
  * @returns {"draft" | "interactive-submit" | null}
@@ -2650,7 +2781,9 @@ function renderConnection() {
     label = "Shutting down";
     status = "busy";
   } else if (state.busy) {
-    label = "Command in flight";
+    label = activeLiveCommandTransaction?.deferredSubmit
+      ? "Submit queued"
+      : "Command in flight";
     status = "busy";
   } else if (state.resyncRequired) {
     label = "Resync required";
@@ -2719,10 +2852,21 @@ function renderSessionToolbar(installed = installedPresentationAuthority()) {
       : "Terminal";
   }
 
+  const retainedAuthority =
+    document.documentElement.dataset.presentationAuthority === "retained";
+  const retainedState = state.shuttingDown
+    ? "session shutting down"
+    : state.busy
+      ? "update pending"
+      : "reconnect required";
   elements.scenarioDescription.textContent = presentation
-    ? replay
-      ? `${publicAudienceLabel(authorizedPresentationAudience(presentation))} · recorded frame ${frame?.cursor?.frame_index ?? "—"} of ${frame?.cursor?.final_frame_index ?? "—"}`
-      : `${publicAudienceLabel(authorizedPresentationAudience(presentation))} · authorized live presentation`
+    ? retainedAuthority
+      ? replay
+        ? `Last confirmed ${publicAudienceLabel(authorizedPresentationAudience(presentation))} recorded frame ${frame?.cursor?.frame_index ?? "—"} of ${frame?.cursor?.final_frame_index ?? "—"} · ${retainedState}`
+        : `Last confirmed ${publicAudienceLabel(authorizedPresentationAudience(presentation))} battlefield · ${retainedState}`
+      : replay
+        ? `${publicAudienceLabel(authorizedPresentationAudience(presentation))} · recorded frame ${frame?.cursor?.frame_index ?? "—"} of ${frame?.cursor?.final_frame_index ?? "—"}`
+        : `${publicAudienceLabel(authorizedPresentationAudience(presentation))} · authorized live presentation`
     : "Waiting for an authorized presentation.";
 
   const viewMode = frame?.view_mode === "agent_pov" ? "pov" : frame?.view_mode;
@@ -3509,6 +3653,8 @@ async function sendReplayCommand(command, { deferFinalRender = false } = {}) {
         command.command_type === "set_view"
           ? "replay_audience_change"
           : "replay_command",
+      pendingPolicy:
+        command.command_type === "set_view" ? "clear" : "retain_last_authorized",
       sendCommand: async () => {
         try {
           const payload = await postReplayCommand(state.token, request);
@@ -3599,6 +3745,12 @@ async function sendReplayCommand(command, { deferFinalRender = false } = {}) {
       failClosedProductIdentity(error);
       throw error;
     }
+    const status = error instanceof DebuggerApiError ? error.status : 0;
+    if (isPresentationJoinRace(error)) {
+      clearPresentationAuthority("replay_presentation_identity_mismatch");
+    } else if (status === 401 || status === 403) {
+      clearPresentationAuthority("replay_authorization_failure");
+    }
     const payload = commandOutcome.current?.payload;
     if (commandResponseSchedulesShutdown(request.command, payload)) {
       state.shuttingDown = true;
@@ -3607,7 +3759,6 @@ async function sendReplayCommand(command, { deferFinalRender = false } = {}) {
         "info",
       );
     } else {
-      const status = error instanceof DebuggerApiError ? error.status : 0;
       state.offline =
         error instanceof DebuggerApiError &&
         (status === 0 || status === 401 || status === 403);
@@ -3702,8 +3853,9 @@ function dispatchPanelCommand(command) {
 
 /**
  * @param {Record<string, unknown>} command
+ * @param {{allowDeferredSubmit?: boolean}} options
  */
-async function dispatchCommand(command) {
+async function dispatchCommand(command, { allowDeferredSubmit = true } = {}) {
   if (isReplayMode()) {
     setNotice("Live debugger commands are unavailable in read-only replay.", "warning");
     renderConnection();
@@ -3808,10 +3960,21 @@ async function dispatchCommand(command) {
     choreographer.skip();
   }
 
+  /** @type {{
+   *   allowsDeferredSubmit: boolean,
+   *   deferredSubmit: Readonly<Record<string, unknown>> | null,
+   * }} */
+  const liveCommandTransaction = {
+    allowsDeferredSubmit: allowDeferredSubmit && commandPreparesDeferredSubmit(command),
+    deferredSubmit: null,
+  };
+  activeLiveCommandTransaction = liveCommandTransaction;
   state.busy = true;
   state.offline = false;
   setNotice("Waiting for the authoritative Python response…", "info");
   let reviewHandoff = false;
+  /** @type {Readonly<Record<string, unknown>> | null} */
+  let deferredSubmitToDispatch = null;
   const previousAuthority = state.authority;
   const request = commandRequest(command);
   /** @type {{current: {kind: "success" | "stale", payload: any} | null}} */
@@ -3820,6 +3983,8 @@ async function dispatchCommand(command) {
     const installPromise = presentationInstallation.installFromCommand({
       reason:
         command.command_type === "set_view" ? "live_audience_change" : "live_command",
+      pendingPolicy:
+        command.command_type === "set_view" ? "clear" : "retain_last_authorized",
       sendCommand: async () => {
         try {
           const payload = await postCommand(state.token, request);
@@ -3888,6 +4053,21 @@ async function dispatchCommand(command) {
       state.shuttingDown = true;
       setNotice("Exit accepted. The local product server is shutting down.", "info");
     }
+    if (
+      liveCommandTransaction.allowsDeferredSubmit &&
+      liveCommandTransaction.deferredSubmit !== null &&
+      !stale &&
+      !installOutcome.resynchronized &&
+      (payload?.result === "applied" || payload?.result === "no_op") &&
+      !state.shuttingDown &&
+      !state.resyncRequired &&
+      !state.offline &&
+      isAuthorizedPresentationFrame(state.presentation) &&
+      installedAuthorityIsCoherent() &&
+      !isTerminal(state.frame)
+    ) {
+      deferredSubmitToDispatch = liveCommandTransaction.deferredSubmit;
+    }
   } catch (error) {
     if (error instanceof ProductReviewHandoff) {
       state.offline = false;
@@ -3898,6 +4078,11 @@ async function dispatchCommand(command) {
     } else {
       const status = error instanceof DebuggerApiError ? error.status : 0;
       const payload = commandOutcome.current?.payload;
+      if (isPresentationJoinRace(error)) {
+        clearPresentationAuthority("live_presentation_identity_mismatch");
+      } else if (status === 401 || status === 403) {
+        clearPresentationAuthority("live_authorization_failure");
+      }
       if (commandResponseSchedulesShutdown(command, payload)) {
         state.shuttingDown = true;
         setNotice(
@@ -3927,12 +4112,19 @@ async function dispatchCommand(command) {
     }
   } finally {
     state.busy = false;
+    if (activeLiveCommandTransaction === liveCommandTransaction) {
+      activeLiveCommandTransaction = null;
+    }
     if (!reviewHandoff || state.shuttingDown || state.resyncRequired) {
       render();
     }
   }
   if (reviewHandoff && !state.shuttingDown && !state.resyncRequired) {
     reloadForProductHandoff();
+    return;
+  }
+  if (deferredSubmitToDispatch !== null) {
+    await dispatchCommand(deferredSubmitToDispatch);
   }
 }
 
@@ -3963,10 +4155,12 @@ async function loadCurrentFrame({ reviewHandoff = false } = {}) {
   setNotice("Fetching the current transport and authorized presentation…", "info");
   const previousFrame = state.frame;
   const previousAuthority = state.authority;
+  const retainLastAuthorized = installedPresentationAuthority() !== null;
   let focusReplayTimeline = false;
   try {
     const installPromise = presentationInstallation.installFromGet({
       reason: previousFrame === null ? "initial_authority" : "reconnect_authority",
+      pendingPolicy: retainLastAuthorized ? "retain_last_authorized" : "clear",
       getJoined: async () =>
         prepareJoinedAuthority(await getCurrentFrameAndPresentation(state.token), {
           previousAuthority,
@@ -4003,6 +4197,13 @@ async function loadCurrentFrame({ reviewHandoff = false } = {}) {
       failClosedProductIdentity(error);
     }
     const status = error instanceof DebuggerApiError ? error.status : 0;
+    if (error instanceof TypeError) {
+      clearPresentationAuthority("reconnect_invalid_presentation_identity");
+    } else if (isPresentationJoinRace(error)) {
+      clearPresentationAuthority("reconnect_presentation_identity_mismatch");
+    } else if (status === 401 || status === 403) {
+      clearPresentationAuthority("reconnect_authorization_failure");
+    }
     state.offline = status === 0 || status === 401 || status === 403;
     state.resyncRequired = true;
     if (isReplayMode()) {
@@ -4025,6 +4226,40 @@ async function loadCurrentFrame({ reviewHandoff = false } = {}) {
   }
 }
 
+/**
+ * Move pointer-originated draft flow back to the battlefield while preserving
+ * native keyboard-control ownership across the serialized request. Keyboard
+ * activation uses the battlefield only as a safe temporary focus anchor and
+ * may not turn a second Enter into Submit.
+ *
+ * @param {Record<string, unknown>} command
+ * @param {{
+ *   restoreFocusTo?: HTMLElement | null,
+ *   allowDeferredSubmit?: boolean,
+ * }} options
+ */
+function dispatchCommandFromDraftControl(
+  command,
+  { restoreFocusTo = null, allowDeferredSubmit = true } = {},
+) {
+  elements.battlefield.focus({ preventScroll: true });
+  const completion = dispatchCommand(command, { allowDeferredSubmit });
+  if (restoreFocusTo === null) {
+    void completion;
+    return;
+  }
+  void completion.finally(() => {
+    if (
+      document.activeElement === elements.battlefield &&
+      restoreFocusTo.isConnected &&
+      !restoreFocusTo.matches(":disabled") &&
+      restoreFocusTo.getAttribute("aria-disabled") !== "true"
+    ) {
+      restoreFocusTo.focus({ preventScroll: true });
+    }
+  });
+}
+
 bindBattlefieldControls({
   battlefield: elements.battlefield,
   toWorldPoint: (point) => battlefieldRenderer.toWorldPoint(point),
@@ -4040,6 +4275,7 @@ bindBattlefieldControls({
   },
   onHelp: () => elements.helpDialog.showModal(),
   isInteractive: liveBattlefieldCommandsInteractive,
+  onFencedEnter: retainFencedEnter,
   onReleaseFocus: () => {
     const firstCommand = /** @type {HTMLButtonElement | null} */ (
       elements.commandDeck?.querySelector("button:not([disabled])") ?? null
@@ -4075,7 +4311,7 @@ elements.battlefield.addEventListener(
     }
     event.preventDefault();
     event.stopImmediatePropagation();
-    activation.element.focus({ preventScroll: true });
+    elements.battlefield.focus({ preventScroll: true });
     activateAuthorizedAgent(activation.presentationKey);
   },
   true,
@@ -4132,14 +4368,30 @@ elements.resetButton.addEventListener("click", () => {
   dispatchCommand({ command_type: "reset" });
 });
 
+/** @type {"pointer" | "keyboard" | null} */
+let commandTargetSelectionModality = null;
+elements.commandTargetSelect.addEventListener("pointerdown", () => {
+  commandTargetSelectionModality = "pointer";
+});
+elements.commandTargetSelect.addEventListener("pointercancel", () => {
+  commandTargetSelectionModality = null;
+});
+elements.commandTargetSelect.addEventListener("keydown", () => {
+  commandTargetSelectionModality = "keyboard";
+});
 elements.commandTargetSelect.addEventListener("change", () => {
+  const pointerOriginated = commandTargetSelectionModality === "pointer";
+  commandTargetSelectionModality = null;
   const command = targetSelectionCommand(elements.commandTargetSelect.value, {
     actorPov: authorizedPresentationAudience(state.presentation) === "agent_pov",
   });
   if (!command) {
     return;
   }
-  dispatchCommand(command);
+  dispatchCommandFromDraftControl(command, {
+    restoreFocusTo: pointerOriginated ? null : elements.commandTargetSelect,
+    allowDeferredSubmit: pointerOriginated,
+  });
 });
 
 elements.recordingFinishButton.addEventListener("click", () => {
@@ -4332,7 +4584,7 @@ if (elements.commandDeck) {
     elements.commandDeck.querySelectorAll("button[data-key]")
   );
   for (const button of buttons) {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", (event) => {
       if (button.getAttribute("aria-disabled") === "true") {
         setNotice(
           button.dataset.tooltipText ??
@@ -4342,10 +4594,15 @@ if (elements.commandDeck) {
         renderConnection();
         return;
       }
-      dispatchCommand(
+      const restoreKeyboardFocus = event.detail === 0;
+      dispatchCommandFromDraftControl(
         keyboardCommand(button.dataset.key ?? "", {
           shiftKey: button.dataset.shift === "true",
         }),
+        {
+          restoreFocusTo: restoreKeyboardFocus ? button : null,
+          allowDeferredSubmit: !restoreKeyboardFocus,
+        },
       );
     });
   }

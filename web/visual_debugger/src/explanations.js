@@ -445,11 +445,15 @@ export function explainAgent(rawAgent, selection = {}) {
     ),
     row(
       "Combat Status",
-      combatCountdown === null ? "Unavailable" : combatCountdown > 0 ? "IC" : "OOC",
+      combatCountdown === null
+        ? "Unavailable"
+        : combatCountdown > 0
+          ? "In combat"
+          : "Out of combat",
     ),
   ];
   if (combatCountdown !== null && combatCountdown > 0) {
-    currentRows.push(row("Steps until OOC", tickCount(combatCountdown)));
+    currentRows.push(row("Steps until out of combat", tickCount(combatCountdown)));
   }
   return descriptor(
     "agent",

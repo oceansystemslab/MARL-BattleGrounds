@@ -294,7 +294,7 @@ test("authorized replay inspector keeps current owner separate from outgoing tar
     );
     assert.doesNotMatch(
       JSON.stringify(inspector.owner_descriptor),
-      /Current Health|Effective Speed|Ultimate Status|Combat Status|Steps until OOC|Selection|Target legality|Transition/iu,
+      /Current Health|Effective Speed|Ultimate Status|Combat Status|Steps until out of combat|Selection|Target legality|Transition/iu,
     );
     documentationBytes.add(JSON.stringify(inspector.owner_descriptor));
     assert.equal(inspector.owner_class_accent, "mage");
@@ -643,6 +643,84 @@ test("authorized replay inspector leaves final unselected details absent", async
   assert.equal(inspector.legality, null);
   assert.equal(inspector.outgoing_target_descriptor, null);
   assert.deepEqual(inspector.legality_cards, []);
+});
+
+test("authorized team respawns use exact researcher-facing event copy", async () => {
+  const raw = structuredClone(authorizedFixture.presentations.replay_oracle);
+  const transitionId = raw.latest_events.incoming_transition_id;
+  raw.latest_events.events = [0, 1].map((teamIndex, ordinal) => ({
+    event_kind: "respawn_wave_occurred",
+    event_id: `${transitionId}:event:${String(ordinal).padStart(4, "0")}`,
+    ordinal,
+    phase_rank: 120,
+    team_anchor: {
+      phase: "successor",
+      team_index: teamIndex,
+      team_id: teamIndex + 1,
+    },
+  }));
+  raw.latest_events.event_count = raw.latest_events.events.length;
+  raw.latest_events.ordered_event_ids = raw.latest_events.events.map(
+    (/** @type {Record<string, any>} */ event) => event.event_id,
+  );
+  raw.latest_events.ordered_event_kinds = raw.latest_events.events.map(
+    (/** @type {Record<string, any>} */ event) => event.event_kind,
+  );
+  const presentation = await normalizeAuthorizedPresentationFrameV1(raw);
+  const dom = rosterDomHarness();
+  const binding = () => dom.createNode("div");
+  const documentDescriptor = Object.getOwnPropertyDescriptor(globalThis, "document");
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: dom.ownerDocument,
+  });
+
+  try {
+    const eventFeed = binding();
+    const panels = new DebuggerPanels({
+      roster: binding(),
+      rosterCount: binding(),
+      selectionCard: binding(),
+      pendingHeading: binding(),
+      pendingCount: binding(),
+      pendingScope: binding(),
+      pendingCard: binding(),
+      acceptedCard: binding(),
+      acceptedAnnouncement: binding(),
+      eventFeed,
+      eventCount: binding(),
+      diagnosticsCard: binding(),
+      onCommand: () => {},
+    });
+    panels.renderAuthorizedEvents(presentation);
+    assert.deepEqual(
+      eventFeed.children.map((/** @type {any} */ row) => row.textContent),
+      ["EVENT: Team A Respawn", "EVENT: Team B Respawn"],
+    );
+    assert.equal(
+      eventFeed.children.every(
+        (/** @type {any} */ row) =>
+          row.getAttribute("aria-description") ===
+          "This team respawn occurred on the incoming transition.",
+      ),
+      true,
+    );
+    assert.doesNotMatch(
+      eventFeed.children
+        .map(
+          (/** @type {any} */ row) =>
+            `${row.textContent} ${row.getAttribute("aria-description")}`,
+        )
+        .join(" "),
+      /respawn_wave_occurred|semantic pulse|authoritative semantic/iu,
+    );
+  } finally {
+    if (documentDescriptor === undefined) {
+      Reflect.deleteProperty(globalThis, "document");
+    } else {
+      Object.defineProperty(globalThis, "document", documentDescriptor);
+    }
+  }
 });
 
 test("authorized roster exposes one native key-only action with isolated fact owners", async () => {

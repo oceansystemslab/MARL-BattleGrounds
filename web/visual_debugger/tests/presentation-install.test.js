@@ -25,34 +25,39 @@ function deferred() {
 }
 
 function harness() {
-  /** @type {string[]} */
-  const clears = [];
+  /** @type {{reason: string, pendingPolicy: string}[]} */
+  const begins = [];
   /** @type {Readonly<Record<string, any>>[]} */
   const installs = [];
   const coordinator = new PresentationInstallCoordinator({
-    clear: (reason) => clears.push(reason),
+    onAttemptBegin: (reason, pendingPolicy) => begins.push({ reason, pendingPolicy }),
     install: (joined) => installs.push(joined),
     isJoinRace: (error) => error instanceof JoinRaceError,
   });
-  return { clears, coordinator, installs };
+  return { begins, coordinator, installs };
 }
 
 test("a newer authority generation discards an older completed GET pair", async () => {
-  const { clears, coordinator, installs } = harness();
+  const { begins, coordinator, installs } = harness();
   const oldAttempt = deferred();
   const current = Object.freeze({ transport: { revision: 2 }, presentation: {} });
   const oldPromise = coordinator.installFromGet({
     reason: "initial",
+    pendingPolicy: "clear",
     getJoined: () => oldAttempt.promise,
   });
   const currentResult = await coordinator.installFromGet({
     reason: "recipient_change",
+    pendingPolicy: "clear",
     getJoined: async () => current,
   });
   oldAttempt.resolve(Object.freeze({ transport: { revision: 1 }, presentation: {} }));
   const oldResult = await oldPromise;
 
-  assert.deepEqual(clears, ["initial", "recipient_change"]);
+  assert.deepEqual(begins, [
+    { reason: "initial", pendingPolicy: "clear" },
+    { reason: "recipient_change", pendingPolicy: "clear" },
+  ]);
   assert.equal(currentResult.status, "installed");
   assert.equal(oldResult.status, "superseded");
   assert.deepEqual(installs, [current]);
@@ -64,6 +69,7 @@ test("a GET join race performs one fresh GET and installs only its pair", async 
   let gets = 0;
   const result = await coordinator.installFromGet({
     reason: "reconnect",
+    pendingPolicy: "retain_last_authorized",
     getJoined: async () => {
       gets += 1;
       if (gets === 1) {
@@ -88,6 +94,7 @@ test("a second GET join race fails closed without a third attempt", async () => 
   await assert.rejects(
     coordinator.installFromGet({
       reason: "reconnect",
+      pendingPolicy: "retain_last_authorized",
       getJoined: async () => {
         gets += 1;
         throw new JoinRaceError(`mixed revision ${gets}`);
@@ -106,6 +113,7 @@ test("a command join race resynchronizes with GET and never retries the command"
   let gets = 0;
   const result = await coordinator.installFromCommand({
     reason: "replay_command",
+    pendingPolicy: "retain_last_authorized",
     sendCommand: async () => {
       commands += 1;
       return Object.freeze({ result: "applied", frame: { revision: 3 } });
@@ -137,6 +145,7 @@ test("a newer generation discards an older command response before joining it", 
   let resyncGets = 0;
   const oldPromise = coordinator.installFromCommand({
     reason: "live_command",
+    pendingPolicy: "retain_last_authorized",
     sendCommand: () => oldCommand.promise,
     joinCommandResult: async () => {
       commandJoins += 1;
@@ -149,6 +158,7 @@ test("a newer generation discards an older command response before joining it", 
   });
   await coordinator.installFromGet({
     reason: "recipient_change",
+    pendingPolicy: "clear",
     getJoined: async () => current,
   });
   oldCommand.resolve(Object.freeze({ result: "applied" }));
@@ -170,6 +180,7 @@ test("a newer generation discards an old command's pending GET without exposing 
   let gets = 0;
   const oldPromise = coordinator.installFromCommand({
     reason: "live_command",
+    pendingPolicy: "retain_last_authorized",
     sendCommand: async () => {
       commands += 1;
       return commandResult;
@@ -186,6 +197,7 @@ test("a newer generation discards an old command's pending GET without exposing 
   await oldGetStarted.promise;
   await coordinator.installFromGet({
     reason: "recipient_change",
+    pendingPolicy: "clear",
     getJoined: async () => current,
   });
   oldGet.resolve(Object.freeze({ transport: { revision: 9 }, presentation: {} }));
@@ -204,6 +216,7 @@ test("a command race followed by a raced GET fails without a second GET or comma
   await assert.rejects(
     coordinator.installFromCommand({
       reason: "replay_command",
+      pendingPolicy: "retain_last_authorized",
       sendCommand: async () => {
         commands += 1;
         return Object.freeze({ result: "applied" });
@@ -224,13 +237,14 @@ test("a command race followed by a raced GET fails without a second GET or comma
   assert.deepEqual(installs, []);
 });
 
-test("non-race command failures clear authority without command or GET retry", async () => {
-  const { clears, coordinator, installs } = harness();
+test("non-race command failures begin once without command or GET retry", async () => {
+  const { begins, coordinator, installs } = harness();
   let commands = 0;
   let gets = 0;
   await assert.rejects(
     coordinator.installFromCommand({
       reason: "live_command",
+      pendingPolicy: "retain_last_authorized",
       sendCommand: async () => {
         commands += 1;
         return Object.freeze({ result: "applied" });
@@ -245,8 +259,47 @@ test("non-race command failures clear authority without command or GET retry", a
     }),
     /invalid presentation payload/u,
   );
-  assert.deepEqual(clears, ["live_command"]);
+  assert.deepEqual(begins, [
+    { reason: "live_command", pendingPolicy: "retain_last_authorized" },
+  ]);
   assert.equal(commands, 1);
   assert.equal(gets, 0);
+  assert.deepEqual(installs, []);
+});
+
+test("missing or invalid pending policy fails before callbacks and network work", async () => {
+  const { begins, coordinator, installs } = harness();
+  let gets = 0;
+  let commands = 0;
+
+  await assert.rejects(
+    // @ts-expect-error Runtime validation must reject an omitted policy.
+    coordinator.installFromGet({
+      reason: "reconnect",
+      getJoined: async () => {
+        gets += 1;
+        return Object.freeze({});
+      },
+    }),
+    /valid presentation pending policy/u,
+  );
+  await assert.rejects(
+    coordinator.installFromCommand({
+      reason: "live_command",
+      // @ts-expect-error Runtime validation must reject an unknown policy.
+      pendingPolicy: "retain_previous",
+      sendCommand: async () => {
+        commands += 1;
+        return Object.freeze({});
+      },
+      joinCommandResult: async () => Object.freeze({}),
+      getJoined: async () => Object.freeze({}),
+    }),
+    /valid presentation pending policy/u,
+  );
+
+  assert.equal(gets, 0);
+  assert.equal(commands, 0);
+  assert.deepEqual(begins, []);
   assert.deepEqual(installs, []);
 });

@@ -17,7 +17,6 @@ const FILTERS = Object.freeze([
   ["aura_modifier_badges", "Aura Modifier Badges"],
   ["duration_status_badges", "Duration Status Badges"],
   ["spawn_shield", "Spawn Shield"],
-  ["combat_status_icon", "Combat Status Icon"],
   ["rejected_action_feedback", "Rejected Action Feedback"],
   ["basic_ability_effects", "Basic Ability Effects"],
   ["ultimate_ability_effects", "Ultimate Ability Effects"],
@@ -549,7 +548,7 @@ async function disableEveryFilter(page, apiRequests) {
           }
         }
       }),
-    { label: "disabling all 24 filters" },
+    { label: "disabling all 23 filters" },
   );
 }
 
@@ -566,7 +565,6 @@ async function expectAllPaintAbsentWithoutDwell(page) {
         '#battlefield .required-dock-fallback[data-kind="status"]',
         "#battlefield .pov-observed-status",
         "#battlefield .agent-spawn-shield",
-        "#battlefield .agent-combat-state-icon",
         "#battlefield .cooldown-cell",
         '#battlefield .required-dock-fallback[data-kind="cooldown"]',
         "#battlefield .combat-effect",
@@ -597,12 +595,12 @@ async function expectAllPaintAbsentWithoutDwell(page) {
   expect(state.roots).toEqual([
     {
       state: "settled",
-      paintKey: `visual-filters-v1:${"0".repeat(24)}`,
+      paintKey: `visual-filters-v1:${"0".repeat(23)}`,
       childCount: 0,
     },
     {
       state: "settled",
-      paintKey: `visual-filters-v1:${"0".repeat(24)}`,
+      paintKey: `visual-filters-v1:${"0".repeat(23)}`,
       childCount: 0,
     },
   ]);
@@ -873,7 +871,7 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
     await restoredChoreographyRoots.evaluateAll((roots) =>
       roots.map((root) => root.getAttribute("data-paint-key")),
     ),
-  ).toEqual(Array(2).fill(`visual-filters-v1:${"1".repeat(24)}`));
+  ).toEqual(Array(2).fill(`visual-filters-v1:${"1".repeat(23)}`));
 
   await setFilter(page, apiRequests, "aura_fields", false, "pre-reload replay aura");
   await page.reload();

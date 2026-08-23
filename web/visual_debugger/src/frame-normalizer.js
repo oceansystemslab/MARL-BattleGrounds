@@ -7,6 +7,7 @@ const RESEARCHER_EVENT_TYPES_V2 = new Set([
   "source_healing_output",
   "recipient_health_resolution",
   "combat_countdown_reset",
+  "agent_left_combat",
   "health_regenerated",
   "cooldown_started",
   "cooldown_ready",
@@ -1019,6 +1020,7 @@ const RESEARCHER_EVENT_SUFFIX_KEYS_V2 = Object.freeze({
     "transition_start_health",
   ]),
   combat_countdown_reset: Object.freeze(["agent_anchor", "agent_global_slot"]),
+  agent_left_combat: Object.freeze(["agent_anchor", "agent_global_slot"]),
   health_regenerated: Object.freeze([
     "actual_health_regenerated",
     "agent_anchor",
@@ -1094,6 +1096,7 @@ const RESEARCHER_EVENT_PHASE_RANK_V2 = Object.freeze({
   source_healing_output: 30,
   recipient_health_resolution: 40,
   combat_countdown_reset: 50,
+  agent_left_combat: 50,
   health_regenerated: 50,
   cooldown_started: 60,
   cooldown_ready: 60,
@@ -3175,6 +3178,11 @@ function normalizeResearcherEvent(
     case "cooldown_ready": {
       const agentSlot = eventSlot("agent_global_slot");
       eventAnchor("agent_anchor", agentSlot, "transition_start");
+      break;
+    }
+    case "agent_left_combat": {
+      const agentSlot = eventSlot("agent_global_slot");
+      eventAnchor("agent_anchor", agentSlot, "successor");
       break;
     }
     case "health_regenerated": {

@@ -41,7 +41,6 @@ const CP9_VISUAL_FILTER_IDS = Object.freeze([
   "aura_modifier_badges",
   "duration_status_badges",
   "spawn_shield",
-  "combat_status_icon",
   "rejected_action_feedback",
   "basic_ability_effects",
   "ultimate_ability_effects",
@@ -1074,7 +1073,7 @@ async function restoreAllReplayVisualFilters(page) {
   if (await restore.isEnabled()) {
     await restore.click();
   }
-  await expect(page.locator("#visual-filter-count")).toHaveText("24 enabled");
+  await expect(page.locator("#visual-filter-count")).toHaveText("23 enabled");
 }
 
 /**
@@ -1113,7 +1112,7 @@ async function installRepresentativeReplayPresentationState(page, options = {}) 
     await expect(input).toBeChecked();
     await input.uncheck();
   }
-  await expect(page.locator("#visual-filter-count")).toHaveText("21 enabled");
+  await expect(page.locator("#visual-filter-count")).toHaveText("20 enabled");
   if (options.proveVisibleUltimate === true) {
     await expect(ultimateEffects).toHaveCount(0);
     expect(
@@ -1227,7 +1226,7 @@ async function proveReplayLeafExports(page, options) {
     label: `${options.label} 960x600 all-on`,
   });
   expect(Object.values(allOn.provenance.presentation.visual_filters)).toEqual(
-    Array.from({ length: 24 }, () => true),
+    Array.from({ length: 23 }, () => true),
   );
 
   const laterFrame = await clickReplayCommand(page, "#replay-next-button");
@@ -1992,12 +1991,37 @@ test("accessible playback pauses on hidden/error/endpoint and keeps one request 
   await clickReplayCommand(page, "#replay-next-button");
   await expectReplayFrameIndex(page, 1);
 
-  await timeline.focus();
-  await page.keyboard.press("Space");
+  await page.locator("#battlefield").focus();
+  await expect(page.locator("#battlefield")).toBeFocused();
+  const scrollBeforeRepeatedSpace = await page.evaluate(() => {
+    window.scrollTo(0, 0);
+    return window.scrollY;
+  });
+  await page.keyboard.down("Space");
   await expect(play).toHaveAttribute("aria-label", "Pause replay");
   await expect(play).toHaveAttribute("aria-pressed", "true");
+  await page.keyboard.down("Space");
+  await page.evaluate(
+    () =>
+      new Promise((resolve) => {
+        window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(resolve);
+        });
+      }),
+  );
+  expect(await page.evaluate(() => window.scrollY)).toBe(scrollBeforeRepeatedSpace);
+  await expect(play).toHaveAttribute("aria-pressed", "true");
+  await page.keyboard.up("Space");
   await page.keyboard.press("Space");
   await expect(play).toHaveAttribute("aria-label", "Play replay");
+  await expect(play).toHaveAttribute("aria-pressed", "false");
+
+  await play.focus();
+  const scrollBeforeNativeSpace = await page.evaluate(() => window.scrollY);
+  await page.keyboard.press("Space");
+  await expect(play).toHaveAttribute("aria-pressed", "true");
+  expect(await page.evaluate(() => window.scrollY)).toBe(scrollBeforeNativeSpace);
+  await page.keyboard.press("Space");
   await expect(play).toHaveAttribute("aria-pressed", "false");
 
   await timeline.focus();
@@ -2211,10 +2235,33 @@ test("Actor POV all-surface scan excludes researcher authority and host secrets"
   await expect(selfAgent).toHaveAttribute("tabindex", "0");
   expect(await selfAgent.getAttribute("data-slot")).toBeNull();
   await expect(selfAgent).toHaveAttribute("data-presentation-key", /.+/u);
+  let enterReplayCommandCount = 0;
+  const countEnterReplayCommands = (
+    /** @type {import("@playwright/test").Request} */ request,
+  ) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname === "/api/replay/command"
+    ) {
+      enterReplayCommandCount += 1;
+    }
+  };
+  page.on("request", countEnterReplayCommands);
   await selfAgent.focus();
   await page.keyboard.press("Enter");
   await expect(page.locator("#agent-details")).toHaveAttribute("open", "");
   await expect(page.locator("#event-feed .event-item")).not.toHaveCount(0);
+  await page.evaluate(
+    () =>
+      new Promise((resolve) => {
+        window.requestAnimationFrame(() => window.requestAnimationFrame(resolve));
+      }),
+  );
+  expect(enterReplayCommandCount).toBe(0);
+  expect((await currentReplayFrame(page)).cursor.frame_index).toBe(
+    povFrame.cursor.frame_index,
+  );
+  page.off("request", countEnterReplayCommands);
 
   const surfaces = await page.evaluate(() => {
     /** @param {Element} element */

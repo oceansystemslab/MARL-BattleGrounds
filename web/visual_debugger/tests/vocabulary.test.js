@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { iconDefinition, KNOWN_GLYPH_KEYS } from "../src/icons.js";
+import { statusPresentation } from "../src/semantic-vocabulary.js";
 import {
   ACTIVATION_TOKEN_IDS,
   activationImpactSemantic,
@@ -69,6 +70,10 @@ const EXPECTED_CATALOG_STATUS_MAP = Object.freeze({
   mage_burst_damage_amplification: "mage_burst",
   priest_blessing_of_freedom_movement_floor: "priest_freedom",
 });
+const EXPECTED_CATALOG_AURA_MODIFIER_MAP = Object.freeze({
+  mage_damage_amplification: "mage_amplification",
+  warrior_damage_mitigation: "warrior_mitigation",
+});
 
 test("display registries cover every current stable semantic token", () => {
   assert.deepEqual(CLASS_TOKEN_IDS, EXPECTED_CLASSES);
@@ -100,6 +105,24 @@ test("display registries cover every current stable semantic token", () => {
       assert.ok(Object.isFrozen(definition));
     }
   }
+});
+
+test("durable in-combat status keeps the existing white crossed-swords identity", () => {
+  const definition = resolveVisualToken("status", "in_combat");
+  const presentation = statusPresentation("in_combat");
+  assert.equal(definition.tokenId, "in_combat");
+  assert.equal(definition.label, "In combat");
+  assert.equal(definition.accessibleName, "In combat");
+  assert.equal(definition.glyphKey, "combat-in-progress");
+  assert.equal(definition.cssKey, "in-combat");
+  assert.equal(iconDefinition(definition.glyphKey).glyphKey, "combat-in-progress");
+  assert.equal(presentation.title, "In combat");
+  assert.match(
+    presentation.effect,
+    /transitions remain before this agent leaves combat/u,
+  );
+  assert.equal(presentation.accent, "none");
+  assert.equal(presentation.magnitudeKind, "none");
 });
 
 test("death clear is distinct from natural expiry and damage break", () => {
@@ -176,6 +199,18 @@ test("every CP2 catalog status resolves through an explicit presentation mapping
     "future_catalog_status",
   );
   assert.equal(resolveVisualToken("status", "future_catalog_status").cssKey, "unknown");
+});
+
+test("every catalog aura resolves through an explicit modifier mapping", () => {
+  for (const [catalogId, tokenId] of Object.entries(
+    EXPECTED_CATALOG_AURA_MODIFIER_MAP,
+  )) {
+    const definition = resolveVisualToken("modifier", catalogId);
+    assert.equal(definition.tokenId, tokenId);
+    assert.notEqual(definition.cssKey, "unknown");
+    assert.notEqual(definition.glyphKey, "unknown");
+    assert.notEqual(iconDefinition(definition.glyphKey).glyphKey, "unknown");
+  }
 });
 
 test("numeric class and team identities map only to display vocabulary", () => {
@@ -338,6 +373,12 @@ test("unknown and malformed IDs use a stable non-injecting fallback", () => {
   assert.equal(future.glyphKey, "unknown");
   assert.equal(future.cssKey, "unknown");
   assert.equal(future.fallback, "?");
+
+  const futureModifier = resolveVisualToken("modifier", "future/aura:hover");
+  assert.equal(futureModifier.tokenId, "future/aura:hover");
+  assert.equal(futureModifier.glyphKey, "unknown");
+  assert.equal(futureModifier.cssKey, "unknown");
+  assert.equal(futureModifier.fallback, "?");
 
   assert.equal(resolveVisualToken("status", null).tokenId, "unknown");
   assert.equal(resolveVisualToken("status", "__proto__").cssKey, "unknown");

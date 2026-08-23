@@ -23,6 +23,11 @@ const CROSS_PHASE_ROUTE_SAMPLES = 32;
 const CROSS_PHASE_ROUTE_GRAPH_MARGIN = 1;
 const CROSS_PHASE_ROUTE_GRAPH_NODE_LIMIT = 384;
 const CROSS_PHASE_LEADER_STROKE_PADDING = 1;
+const CROSS_PHASE_RECIPIENT_COMPACTION_RADIAL_OFFSET = 4;
+const CROSS_PHASE_RECIPIENT_COMPACTION_RADIAL_STEP = 8;
+const CROSS_PHASE_RECIPIENT_COMPACTION_ANGLE_OFFSET_DEGREES = 4;
+const CROSS_PHASE_RECIPIENT_COMPACTION_ANGLE_STEP_DEGREES = 12;
+const CROSS_PHASE_RECIPIENT_REFINEMENT_ANGLE_OFFSET_DEGREES = 10;
 
 export const DEFAULT_CROSS_PHASE_LAYOUT_OPTIONS = Object.freeze({
   clearance: 3,
@@ -695,13 +700,16 @@ export function layoutCrossPhaseOccupancy(input, options = {}) {
     layoutKey,
     anchor,
   }));
+  const cueRequestByKey = new Map(
+    cueRequests.map((request) => [request.layoutKey, request]),
+  );
   for (const request of cueRequests) {
     const recipientKey = request.recipientKey;
     const stackIndex = recipientCounts.get(recipientKey) ?? 0;
     recipientCounts.set(recipientKey, stackIndex + 1);
     const localCandidates =
       request.kind === "recipient_cue"
-        ? crossPhaseRecipientCandidates(request, viewport, stackIndex, resolved)
+        ? crossPhaseRecipientCandidates(request, viewport, resolved)
         : [];
     const allowed = new Set(request.allowProtectedKeys);
     const leaderBlockers = [
@@ -758,6 +766,122 @@ export function layoutCrossPhaseOccupancy(input, options = {}) {
         collisionFree: true,
       }),
     );
+  }
+
+  // The greedy pass above is the total, proven-feasible allocation. Compact
+  // only after every cue owns a valid placement, and treat every other final
+  // cue as immutable so a visual improvement can never starve a later fact.
+  // A second angular phase is reserved for cues still beyond their first outer
+  // ring; nearby cues do not pay for refinement they cannot visibly need.
+  for (const compactAngleOffsetDegrees of [
+    CROSS_PHASE_RECIPIENT_COMPACTION_ANGLE_OFFSET_DEGREES,
+    CROSS_PHASE_RECIPIENT_REFINEMENT_ANGLE_OFFSET_DEGREES,
+  ]) {
+    for (let index = cuePlacements.length - 1; index >= 0; index -= 1) {
+      const current = cuePlacements[index];
+      const request = cueRequestByKey.get(current.layoutKey);
+      if (request?.kind !== "recipient_cue") {
+        continue;
+      }
+      const currentDistance = Math.hypot(
+        current.center.x - request.anchor.x,
+        current.center.y - request.anchor.y,
+      );
+      const firstOuterRingDistance =
+        request.anchorRadius +
+        resolved.cueGap +
+        Math.hypot(request.width, request.height) / 2 +
+        Math.max(request.width, request.height) +
+        resolved.stackGap;
+      if (
+        compactAngleOffsetDegrees ===
+          CROSS_PHASE_RECIPIENT_REFINEMENT_ANGLE_OFFSET_DEGREES &&
+        currentDistance <= firstOuterRingDistance + EPSILON
+      ) {
+        continue;
+      }
+      const compactCandidates = crossPhaseRecipientCandidates(
+        request,
+        viewport,
+        resolved,
+        currentDistance,
+        compactAngleOffsetDegrees,
+      );
+      if (compactCandidates.length === 0) {
+        continue;
+      }
+      const otherPlacements = cuePlacements.filter(
+        (_placement, placementIndex) => placementIndex !== index,
+      );
+      const compactOccupied = [
+        ...protectedRegions.map(({ bounds }) =>
+          expandRectangle(bounds, resolved.clearance),
+        ),
+        ...otherPlacements.map(({ bounds }) =>
+          expandRectangle(bounds, resolved.clearance),
+        ),
+      ];
+      const allowed = new Set(request.allowProtectedKeys);
+      const leaderBlockers = [
+        ...protectedRegions
+          .filter(({ layoutKey }) => !allowed.has(layoutKey))
+          .map(({ bounds }) => bounds),
+        ...otherPlacements.map(({ bounds }) => bounds),
+      ];
+      const otherLeaders = otherPlacements.map(({ leader }) => leader.points);
+      const currentLeaderLength = cuePolylineLength(current.leader.points);
+      const currentLeaderSegments = current.leader.points.length - 1;
+      /** @type {{candidate: CrossPhaseCueCandidate, leader: Record<string, any>} | null} */
+      let replacement = null;
+      for (const candidate of compactCandidates) {
+        const distance = Math.hypot(
+          candidate.center.x - request.anchor.x,
+          candidate.center.y - request.anchor.y,
+        );
+        if (distance >= currentDistance - EPSILON) {
+          continue;
+        }
+        const selected = firstFreeCueCandidate(
+          [candidate],
+          compactOccupied,
+          request.anchor,
+          leaderBlockers,
+          otherLeaders,
+          cueAnchors,
+          request.layoutKey,
+          viewport,
+          request.allowProtectedKeys.length === 0,
+        );
+        if (selected === null) {
+          continue;
+        }
+        const leaderLength = cuePolylineLength(selected.leader.points);
+        if (
+          leaderLength > currentLeaderLength + EPSILON ||
+          selected.leader.points.length - 1 > currentLeaderSegments
+        ) {
+          continue;
+        }
+        // Candidates are ordered nearest-first. The first valid replacement is
+        // already a strict center-distance improvement and cannot worsen its
+        // leader, so scanning equivalent angles would add latency without
+        // strengthening the placement contract.
+        replacement = {
+          candidate: selected.candidate,
+          leader: selected.leader,
+        };
+        break;
+      }
+      if (replacement !== null) {
+        cuePlacements[index] = Object.freeze({
+          ...current,
+          disposition: "recipient_stack",
+          center: replacement.candidate.center,
+          bounds: replacement.candidate.bounds,
+          leader: replacement.leader,
+        });
+      }
+    }
   }
 
   const routeSeeds = crossPhaseRouteSeeds(routeRequests, resolved.routeLaneSpacing);
@@ -1340,11 +1464,18 @@ function cueCandidate(center, width, height) {
 /**
  * @param {NormalizedCrossPhaseCueRequest} request
  * @param {Rectangle} viewport
- * @param {number} stackIndex
  * @param {ReturnType<typeof resolveCrossPhaseOptions>} options
+ * @param {number | null} [compactBeforeDistance]
+ * @param {number} [compactAngleOffsetDegrees]
  * @returns {ReadonlyArray<CrossPhaseCueCandidate>}
  */
-function crossPhaseRecipientCandidates(request, viewport, stackIndex, options) {
+function crossPhaseRecipientCandidates(
+  request,
+  viewport,
+  options,
+  compactBeforeDistance = null,
+  compactAngleOffsetDegrees = CROSS_PHASE_RECIPIENT_COMPACTION_ANGLE_OFFSET_DEGREES,
+) {
   const halfDiagonal = Math.hypot(request.width, request.height) / 2;
   const base = request.anchorRadius + options.cueGap + halfDiagonal;
   const stackStep = Math.max(request.width, request.height) + options.stackGap;
@@ -1357,12 +1488,58 @@ function crossPhaseRecipientCandidates(request, viewport, stackIndex, options) {
     [-Math.SQRT1_2, -Math.SQRT1_2],
     [Math.SQRT1_2, Math.SQRT1_2],
     [-Math.SQRT1_2, Math.SQRT1_2],
+    ...(compactBeforeDistance === null
+      ? []
+      : Array.from({ length: 30 }, (_, index) => index).map((index) => {
+          const degrees =
+            compactAngleOffsetDegrees +
+            index * CROSS_PHASE_RECIPIENT_COMPACTION_ANGLE_STEP_DEGREES;
+          const radians = (degrees * Math.PI) / 180;
+          return [Math.cos(radians), Math.sin(radians)];
+        })),
   ];
+  const distances =
+    compactBeforeDistance === null
+      ? Array.from({ length: 8 }, (_, ring) => base + ring * stackStep)
+      : (() => {
+          const maximumDistance = Math.min(
+            compactBeforeDistance,
+            base + 7 * stackStep + EPSILON,
+          );
+          const radialStep = Math.min(
+            stackStep,
+            CROSS_PHASE_RECIPIENT_COMPACTION_RADIAL_STEP,
+          );
+          const compactDistances = [base];
+          for (
+            let distance =
+              base +
+              Math.min(radialStep, CROSS_PHASE_RECIPIENT_COMPACTION_RADIAL_OFFSET);
+            distance < maximumDistance - EPSILON;
+            distance += radialStep
+          ) {
+            compactDistances.push(distance);
+          }
+          for (let ring = 0; ring < 8; ring += 1) {
+            const distance = base + ring * stackStep;
+            if (
+              distance < maximumDistance - EPSILON &&
+              !compactDistances.some(
+                (candidate) => Math.abs(candidate - distance) <= EPSILON,
+              )
+            ) {
+              compactDistances.push(distance);
+            }
+          }
+          return compactDistances.sort((first, second) => first - second);
+        })();
   /** @type {CrossPhaseCueCandidate[]} */
   const candidates = [];
   const seen = new Set();
-  for (let ring = 0; ring < 8; ring += 1) {
-    const distance = base + (ring + stackIndex) * stackStep;
+  for (const distance of distances) {
+    // Earlier cues already occupy their chosen rectangles. Starting every cue
+    // at the nearest ring lets actual collisions—not ordinal position—decide
+    // when a farther placement is necessary.
     for (const [dx, dy] of directions) {
       const candidate = cueCandidate(
         {
@@ -1428,7 +1605,8 @@ function crossPhasePerimeterCandidates(request, viewport, occupied) {
           viewport.bottom - second.bounds.bottom,
         );
         return (
-          firstPerimeter - secondPerimeter ||
+          // The perimeter is a bounded fallback inventory, not a visual goal.
+          // Prefer the valid fallback closest to the authorized event anchor.
           Math.hypot(
             firstCenter.x - request.anchor.x,
             firstCenter.y - request.anchor.y,
@@ -1437,6 +1615,7 @@ function crossPhasePerimeterCandidates(request, viewport, occupied) {
               secondCenter.x - request.anchor.x,
               secondCenter.y - request.anchor.y,
             ) ||
+          firstPerimeter - secondPerimeter ||
           first.bounds.top - second.bounds.top ||
           first.bounds.left - second.bounds.left
         );
@@ -1534,6 +1713,18 @@ function cueLeader(anchor, bounds) {
     points: Object.freeze([anchor, end]),
     path: `M ${numberKey(anchor.x)} ${numberKey(anchor.y)} L ${numberKey(end.x)} ${numberKey(end.y)}`,
   });
+}
+
+/** @param {ReadonlyArray<Point>} points */
+function cuePolylineLength(points) {
+  let length = 0;
+  for (let index = 1; index < points.length; index += 1) {
+    length += Math.hypot(
+      points[index].x - points[index - 1].x,
+      points[index].y - points[index - 1].y,
+    );
+  }
+  return length;
 }
 
 /**

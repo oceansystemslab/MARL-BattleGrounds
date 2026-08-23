@@ -1142,7 +1142,7 @@ test("paused replay installs a complete deterministic static summary at both sup
     const filtered = await staticDomSignature(page);
     expect(filtered.atomicIds).toEqual(filteredExpected.spatialIds);
     expect(filtered.layoutKeys).toEqual(filteredExpected.layoutKeys);
-    expect(filtered.layoutKeys.length).toBeLessThan(allOn.layoutKeys.length);
+    expect(filtered.layoutKeys).toEqual(allOn.layoutKeys);
     expect(filtered.rootState[0]).toMatchObject({
       authorizationKey: allOnExpected.authorizationKey,
       epochKey: allOnExpected.epochKey,

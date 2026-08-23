@@ -928,6 +928,317 @@ test("cross-phase occupancy filters first and is invariant to input order", () =
   }
 });
 
+test("cross-phase recipient cues reuse every safe nearby direction without ordinal displacement", () => {
+  const anchor = Object.freeze({ x: 300, y: 200 });
+  const protectedRects = [
+    {
+      layoutKey: "body:recipient",
+      bounds: testRectangle(277, 177, 323, 223),
+    },
+  ];
+  const requests = Array.from({ length: 9 }, (_, index) => ({
+    layoutKey: `cue:${String(index).padStart(2, "0")}`,
+    kind: /** @type {const} */ ("recipient_cue"),
+    stableOrder: index,
+    anchor,
+    anchorRadius: 60,
+    recipientKey: "agent:recipient",
+    allowProtectedKeys: ["body:recipient"],
+    width: 42,
+    height: 18,
+  }));
+  const forward = layoutCrossPhaseOccupancy({
+    viewport: VIEWPORT,
+    protectedRects,
+    requests,
+  });
+  const reversed = layoutCrossPhaseOccupancy({
+    viewport: VIEWPORT,
+    protectedRects: [...protectedRects].reverse(),
+    requests: [...requests].reverse(),
+  });
+  const centerDistance = (/** @type {Record<string, any>} */ cue) =>
+    Math.hypot(cue.center.x - anchor.x, cue.center.y - anchor.y);
+  const nearestDistance =
+    requests[0].anchorRadius +
+    8 +
+    Math.hypot(requests[0].width, requests[0].height) / 2;
+
+  assert.deepEqual(forward, reversed);
+  assert.deepEqual(
+    forward.cuePlacements.map(({ stackIndex }) => stackIndex),
+    [0, 1, 2, 3, 4, 5, 6, 7, 8],
+  );
+  for (const cue of forward.cuePlacements) {
+    assertClose(centerDistance(cue), nearestDistance);
+    assert.equal(cue.disposition, "recipient_stack");
+    assert.equal(viewportOverflow(cue.bounds, VIEWPORT), 0);
+  }
+  for (const [index, cue] of forward.cuePlacements.entries()) {
+    for (const other of forward.cuePlacements.slice(index + 1)) {
+      assert.equal(rectanglesIntersect(cue.bounds, other.bounds), false);
+    }
+  }
+});
+
+test("cross-phase compaction uses a free interstitial angle without starving the sealed layout", () => {
+  const anchor = Object.freeze({ x: 300, y: 200 });
+  const width = 10;
+  const height = 10;
+  const anchorRadius = 20;
+  const nearestDistance = anchorRadius + 8 + Math.hypot(width, height) / 2;
+  const stackStep = Math.max(width, height) + 5;
+  const coarseDirections = [
+    [0, -1],
+    [1, 0],
+    [-1, 0],
+    [0, 1],
+    [Math.SQRT1_2, -Math.SQRT1_2],
+    [-Math.SQRT1_2, -Math.SQRT1_2],
+    [Math.SQRT1_2, Math.SQRT1_2],
+    [-Math.SQRT1_2, Math.SQRT1_2],
+  ];
+  const protectedRects = [nearestDistance, nearestDistance + stackStep].flatMap(
+    (distance, ring) =>
+      coarseDirections.map(([dx, dy], index) => {
+        const center = {
+          x: anchor.x + dx * distance,
+          y: anchor.y + dy * distance,
+        };
+        return {
+          layoutKey: `blocker:coarse:${ring}:${index}`,
+          bounds: testRectangle(center.x - 1, center.y - 1, center.x + 1, center.y + 1),
+        };
+      }),
+  );
+  const request = {
+    layoutKey: "cue:interstitial",
+    kind: /** @type {const} */ ("recipient_cue"),
+    stableOrder: 0,
+    anchor,
+    anchorRadius,
+    width,
+    height,
+  };
+  const forward = layoutCrossPhaseOccupancy({
+    viewport: VIEWPORT,
+    protectedRects,
+    requests: [request],
+  });
+  const reversed = layoutCrossPhaseOccupancy({
+    viewport: VIEWPORT,
+    protectedRects: [...protectedRects].reverse(),
+    requests: [request],
+  });
+  const cue = forward.cuePlacements[0];
+
+  assert.deepEqual(forward, reversed);
+  assertClose(
+    Math.hypot(cue.center.x - anchor.x, cue.center.y - anchor.y),
+    nearestDistance,
+  );
+  assert.equal(forward.cuePlacements.length, 1);
+  assert.equal(cue.stackIndex, 0);
+  assert.equal(cue.disposition, "recipient_stack");
+  assert.equal(cue.collisionFree, true);
+  assert.equal(
+    coarseDirections.some(
+      ([dx, dy]) =>
+        Math.hypot(
+          cue.center.x - (anchor.x + dx * nearestDistance),
+          cue.center.y - (anchor.y + dy * nearestDistance),
+        ) <= 1e-6,
+    ),
+    false,
+  );
+  for (const region of forward.protectedRegions) {
+    assert.equal(rectanglesIntersect(cue.bounds, region.bounds), false);
+  }
+});
+
+test("cross-phase compaction uses a free radial interstice inside the first outer ring", () => {
+  const anchor = Object.freeze({ x: 300, y: 200 });
+  const width = 10;
+  const height = 10;
+  const anchorRadius = 20;
+  const nearestDistance = anchorRadius + 8 + Math.hypot(width, height) / 2;
+  const stackStep = Math.max(width, height) + 5;
+  const directions = [
+    [0, -1],
+    [1, 0],
+    [-1, 0],
+    [0, 1],
+    [Math.SQRT1_2, -Math.SQRT1_2],
+    [-Math.SQRT1_2, -Math.SQRT1_2],
+    [Math.SQRT1_2, Math.SQRT1_2],
+    [-Math.SQRT1_2, Math.SQRT1_2],
+    ...Array.from({ length: 30 }, (_, index) => {
+      const radians = ((4 + index * 12) * Math.PI) / 180;
+      return [Math.cos(radians), Math.sin(radians)];
+    }),
+  ];
+  const protectedRects = directions.map(([dx, dy], index) => {
+    const center = {
+      x: anchor.x + dx * nearestDistance,
+      y: anchor.y + dy * nearestDistance,
+    };
+    return {
+      layoutKey: `blocker:nearest:${index}`,
+      bounds: testRectangle(center.x - 1, center.y - 1, center.x + 1, center.y + 1),
+    };
+  });
+  const result = layoutCrossPhaseOccupancy({
+    viewport: VIEWPORT,
+    protectedRects,
+    requests: [
+      {
+        layoutKey: "cue:radial-interstice",
+        kind: "recipient_cue",
+        stableOrder: 0,
+        anchor,
+        anchorRadius,
+        width,
+        height,
+      },
+    ],
+  });
+  const cue = result.cuePlacements[0];
+  const distance = Math.hypot(cue.center.x - anchor.x, cue.center.y - anchor.y);
+
+  assert.ok(distance > nearestDistance);
+  assert.ok(distance < nearestDistance + stackStep);
+  assert.equal(cue.disposition, "recipient_stack");
+  assert.equal(cue.collisionFree, true);
+  for (const region of result.protectedRegions) {
+    assert.equal(rectanglesIntersect(cue.bounds, region.bounds), false);
+  }
+});
+
+test("cross-phase compaction refines a still-far cue between primary angular spokes", () => {
+  const anchor = Object.freeze({ x: 300, y: 200 });
+  const width = 1;
+  const height = 1;
+  const anchorRadius = 60;
+  const nearestDistance = anchorRadius + 8 + Math.hypot(width, height) / 2;
+  const stackStep = Math.max(width, height) + 5;
+  const primaryDirections = [
+    [0, -1],
+    [1, 0],
+    [-1, 0],
+    [0, 1],
+    [Math.SQRT1_2, -Math.SQRT1_2],
+    [-Math.SQRT1_2, -Math.SQRT1_2],
+    [Math.SQRT1_2, Math.SQRT1_2],
+    [-Math.SQRT1_2, Math.SQRT1_2],
+    ...Array.from({ length: 30 }, (_, index) => {
+      const radians = ((4 + index * 12) * Math.PI) / 180;
+      return [Math.cos(radians), Math.sin(radians)];
+    }),
+  ];
+  const protectedRects = [
+    nearestDistance,
+    nearestDistance + 4,
+    nearestDistance + stackStep,
+  ].flatMap((distance, ring) =>
+    primaryDirections.map(([dx, dy], index) => {
+      const center = {
+        x: anchor.x + dx * distance,
+        y: anchor.y + dy * distance,
+      };
+      return {
+        layoutKey: `blocker:primary:${ring}:${index}`,
+        bounds: testRectangle(
+          center.x - 0.05,
+          center.y - 0.05,
+          center.x + 0.05,
+          center.y + 0.05,
+        ),
+      };
+    }),
+  );
+  const result = layoutCrossPhaseOccupancy({
+    viewport: VIEWPORT,
+    protectedRects,
+    requests: [
+      {
+        layoutKey: "cue:angular-refinement",
+        kind: "recipient_cue",
+        stableOrder: 0,
+        anchor,
+        anchorRadius,
+        allowProtectedKeys: protectedRects.map(({ layoutKey }) => layoutKey),
+        width,
+        height,
+      },
+    ],
+  });
+  const cue = result.cuePlacements[0];
+
+  assertClose(
+    Math.hypot(cue.center.x - anchor.x, cue.center.y - anchor.y),
+    nearestDistance,
+  );
+  assert.equal(cue.disposition, "recipient_stack");
+  assert.equal(cue.collisionFree, true);
+  for (const region of result.protectedRegions) {
+    assert.equal(rectanglesIntersect(cue.bounds, region.bounds), false);
+  }
+});
+
+test("cross-phase fallback prefers the nearest collision-free candidate over the viewport edge", () => {
+  const anchor = Object.freeze({ x: 300, y: 200 });
+  const protectedRects = [
+    {
+      layoutKey: "blocker:northwest",
+      bounds: testRectangle(200, 10, 240, 50),
+    },
+    {
+      layoutKey: "blocker:west",
+      bounds: testRectangle(10, 140, 50, 180),
+    },
+  ];
+  const request = {
+    layoutKey: "callout:nearest",
+    kind: /** @type {const} */ ("perimeter_callout"),
+    stableOrder: 0,
+    anchor,
+    width: 40,
+    height: 20,
+  };
+  const forward = layoutCrossPhaseOccupancy({
+    viewport: VIEWPORT,
+    protectedRects,
+    requests: [request],
+  });
+  const reversed = layoutCrossPhaseOccupancy({
+    viewport: VIEWPORT,
+    protectedRects: [...protectedRects].reverse(),
+    requests: [request],
+  });
+  const cue = forward.cuePlacements[0];
+
+  assert.deepEqual(forward, reversed);
+  assert.deepEqual(cue.center, { x: 263, y: 193 });
+  assert.equal(cue.disposition, "perimeter_callout");
+  assert.ok(Math.hypot(cue.center.x - anchor.x, cue.center.y - anchor.y) < 40);
+  const leaderPoints = /** @type {ReadonlyArray<{x: number, y: number}>} */ (
+    cue.leader.points
+  );
+  const leaderLength = leaderPoints
+    .slice(1)
+    .reduce(
+      (total, point, index) =>
+        total +
+        Math.hypot(point.x - leaderPoints[index].x, point.y - leaderPoints[index].y),
+      0,
+    );
+  assert.ok(leaderLength < 20);
+  assert.equal(viewportOverflow(cue.bounds, VIEWPORT), 0);
+  for (const region of forward.protectedRegions) {
+    assert.equal(rectanglesIntersect(cue.bounds, region.bounds), false);
+  }
+});
+
 test("cross-phase routes use bounded lanes and deterministic bridge gaps", () => {
   const viewport = VIEWPORT;
   const protectedRects = [

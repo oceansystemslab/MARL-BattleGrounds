@@ -306,13 +306,6 @@ test("durable visual filters remove owned paint and restore stable battlefield i
           layoutAttribute: null,
         },
         {
-          filterId: "combat_status_icon",
-          ownerSelector: ".agent-combat-state-icon",
-          ownsTooltip: false,
-          reservesLayout: false,
-          layoutAttribute: null,
-        },
-        {
           filterId: "cooldown_effects",
           ownerSelector:
             '.cooldown-cell, .required-dock-fallback[data-kind="cooldown"]',
@@ -522,7 +515,7 @@ test("durable visual filters remove owned paint and restore stable battlefield i
 
   expect(result.presentationUnchanged).toBe(true);
   expect(result.stateFrozen).toBe(true);
-  expect(result.rows).toHaveLength(12);
+  expect(result.rows).toHaveLength(10);
   for (const row of result.rows) {
     expect(row.explicitAllOnMatchesDefault, row.viewport).toBe(true);
     expect(row.baselineOwned.count, `${row.viewport} ${row.filterId}`).toBeGreaterThan(
@@ -547,11 +540,6 @@ test("durable visual filters remove owned paint and restore stable battlefield i
       expect(row.disabledProtectedKey, row.filterId).not.toBe(row.baselineProtectedKey);
       expect(row.baselineLayoutAttribute, row.filterId).toBe(true);
       expect(row.disabledLayoutAttribute, row.filterId).toBe(false);
-    }
-    if (row.filterId === "combat_status_icon") {
-      expect(row.baselineAgentAria).toContain("combat status");
-      expect(row.disabledAgentAria).not.toContain("combat status");
-      expect(row.restoredAgentAria).toContain("combat status");
     }
   }
   expect(result.povStatusRows).toHaveLength(2);
@@ -823,6 +811,292 @@ test("incoming choreography paints presentation-key metadata and no slots", asyn
   expect(result.slotAttributeCount).toBe(0);
 });
 
+test("live and replay damage/healing marks meet their activation route endpoint", async ({
+  page,
+}) => {
+  const presentations = [
+    {
+      sourcePresentation: fixture.presentations.live_oracle,
+      expectedSemantic: "healing",
+    },
+    {
+      sourcePresentation: fixture.presentations.live_oracle,
+      expectedSemantic: "damage",
+    },
+    {
+      sourcePresentation: fixture.presentations.replay_oracle,
+      expectedSemantic: "healing",
+    },
+    {
+      sourcePresentation: fixture.presentations.replay_oracle,
+      expectedSemantic: "damage",
+    },
+  ];
+  for (const { sourcePresentation, expectedSemantic } of presentations) {
+    const raw = structuredClone(sourcePresentation);
+    const agentsByKey = new Map(
+      raw.current_endpoint.scene.agents.map(
+        (/** @type {Record<string, any>} */ agent) => [agent.presentation_key, agent],
+      ),
+    );
+    /** @param {number} classId */
+    const anchorForClass = (classId) => {
+      const trajectory = raw.latest_events.agent_phase_trajectories.find(
+        (/** @type {Record<string, any>} */ candidate) =>
+          agentsByKey.get(candidate.agent_presentation_key)?.class_id === classId,
+      );
+      if (!trajectory) {
+        throw new Error(`Oracle class ${classId} trajectory is unavailable.`);
+      }
+      return structuredClone(trajectory.transition_start);
+    };
+    const activation = raw.latest_events.events.find(
+      (/** @type {Record<string, any>} */ event) =>
+        event.event_kind === "ability_activated",
+    );
+    if (!activation) {
+      throw new Error("Oracle activation event is unavailable.");
+    }
+    if (expectedSemantic === "damage") {
+      activation.source_anchor = anchorForClass(1);
+      activation.recipient_anchor = anchorForClass(3);
+    }
+    await page.goto(origin);
+    const result = await page.evaluate(async (rawPresentation) => {
+      const moduleRoot = "/src";
+      const { normalizeAuthorizedPresentationFrameV1 } = await import(
+        `${moduleRoot}/authorized-presentation-normalizer.js`
+      );
+      const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+      const { buildChoreographyPlan } = await import(
+        `${moduleRoot}/choreography-plan.js`
+      );
+      const { SvgChoreographyPainter } = await import(
+        `${moduleRoot}/choreography-painter.js`
+      );
+      const presentation =
+        await normalizeAuthorizedPresentationFrameV1(rawPresentation);
+      const battlefield = document.querySelector("#battlefield");
+      const empty = document.querySelector("#empty");
+      if (!(battlefield instanceof SVGSVGElement) || !(empty instanceof HTMLElement)) {
+        throw new Error("Activation-impact test surface is unavailable.");
+      }
+      const renderer = new BattlefieldRenderer({ battlefield, empty });
+      renderer.render(presentation, { showRanges: false });
+      const surface = renderer.choreographySurface();
+      const plan = buildChoreographyPlan(presentation, surface);
+      if (surface === null || plan === null) {
+        throw new Error("Authorized activation choreography is unavailable.");
+      }
+      new SvgChoreographyPainter().install(plan, surface, {
+        motionMode: "off",
+        settled: false,
+        persistentOnly: false,
+      });
+      const activations = /** @type {Record<string, any>[]} */ (plan.events).filter(
+        (event) =>
+          event.kind === "activation" &&
+          (event.impactSemantic === "damage" || event.impactSemantic === "healing") &&
+          event.route,
+      );
+      return {
+        presentationKind: presentation.presentation_kind,
+        scrollingTextCount: battlefield.querySelectorAll(".combat-net__label").length,
+        activations: activations.map((event) => {
+          const selector = `[data-event-id="${CSS.escape(event.eventId)}"]`;
+          const effect = battlefield.querySelector(
+            `.combat-effect--activation${selector}`,
+          );
+          const routeEffect = battlefield.querySelector(
+            `.combat-route-effect--activation${selector}`,
+          );
+          const impact = effect?.querySelector(".combat-impact");
+          const semantic = impact?.querySelector(".combat-impact__semantic");
+          const routePath = routeEffect?.querySelector(".combat-route__path");
+          if (
+            !(effect instanceof SVGElement) ||
+            !(impact instanceof SVGGraphicsElement) ||
+            !(semantic instanceof SVGElement) ||
+            !(routePath instanceof SVGPathElement)
+          ) {
+            throw new Error(`Activation impact ${event.eventId} is unavailable.`);
+          }
+          const matrix = impact.transform.baseVal.consolidate()?.matrix;
+          if (!matrix) {
+            throw new Error(`Activation impact ${event.eventId} has no transform.`);
+          }
+          const pathEnd = routePath.getPointAtLength(routePath.getTotalLength());
+          return {
+            semantic: event.impactSemantic,
+            routeEnd: event.route.end,
+            transform: { x: matrix.e, y: matrix.f },
+            pathEnd: { x: pathEnd.x, y: pathEnd.y },
+            semanticLineCount: semantic.querySelectorAll(":scope > line").length,
+            impactLayoutAttributes: impact
+              .getAttributeNames()
+              .filter((name) => name.startsWith("data-layout-")),
+            impactLeaderCount: effect.querySelectorAll(".combat-cue__leader--impact")
+              .length,
+            hasPlannedImpactCue: event.impactCue !== undefined,
+            hasPlannedImpactBounds: event.impactBounds !== undefined,
+            hasPlannedImpactLeader: event.impactLeader !== undefined,
+            hasPlannedImpactLayoutKey: event.impactLayoutKey !== undefined,
+            hasPlannedImpactDisposition: event.impactDisposition !== undefined,
+            hasPlannedImpactCollisionFlag: event.impactCueCollisionFree !== undefined,
+          };
+        }),
+      };
+    }, raw);
+
+    expect(result.presentationKind).toBe(raw.presentation_kind);
+    expect(result.activations.length).toBeGreaterThan(0);
+    expect(new Set(result.activations.map(({ semantic }) => semantic))).toEqual(
+      new Set([expectedSemantic]),
+    );
+    expect(result.scrollingTextCount).toBeGreaterThan(0);
+    for (const activation of result.activations) {
+      expect(activation.transform.x).toBeCloseTo(activation.routeEnd.x, 3);
+      expect(activation.transform.y).toBeCloseTo(activation.routeEnd.y, 3);
+      expect(activation.pathEnd.x).toBeCloseTo(activation.routeEnd.x, 3);
+      expect(activation.pathEnd.y).toBeCloseTo(activation.routeEnd.y, 3);
+      expect(activation.semanticLineCount).toBe(
+        activation.semantic === "healing" ? 2 : 1,
+      );
+      expect(activation.impactLayoutAttributes).toEqual([]);
+      expect(activation.impactLeaderCount).toBe(0);
+      expect(activation.hasPlannedImpactCue).toBe(false);
+      expect(activation.hasPlannedImpactBounds).toBe(false);
+      expect(activation.hasPlannedImpactLeader).toBe(false);
+      expect(activation.hasPlannedImpactLayoutKey).toBe(false);
+      expect(activation.hasPlannedImpactDisposition).toBe(false);
+      expect(activation.hasPlannedImpactCollisionFlag).toBe(false);
+    }
+  }
+});
+
+test("live and replay Charge displacement is the exact straight pre-movement segment", async ({
+  page,
+}) => {
+  for (const leafName of ["live_oracle", "replay_oracle"]) {
+    const raw = structuredClone(fixture.presentations[leafName]);
+    const warrior = raw.current_endpoint.scene.agents.find(
+      (/** @type {Record<string, any>} */ agent) => agent.class_id === 2,
+    );
+    const trajectory = raw.latest_events.agent_phase_trajectories.find(
+      (/** @type {Record<string, any>} */ candidate) =>
+        candidate.agent_presentation_key === warrior?.presentation_key,
+    );
+    if (!warrior || !trajectory) {
+      throw new Error(`${leafName} Warrior trajectory is unavailable.`);
+    }
+    trajectory.transition_start.position = [3, 4];
+    trajectory.post_charge.position = [7, 5];
+    const event = {
+      event_id: `${raw.latest_events.incoming_transition_id}:event:0000`,
+      event_kind: "charge_phase_displacement",
+      ordinal: 0,
+      phase_rank: 70,
+      realized_displacement: [4, 1],
+      start_anchor: structuredClone(trajectory.transition_start),
+      end_anchor: structuredClone(trajectory.post_charge),
+    };
+    raw.latest_events.events = [event];
+    raw.latest_events.event_count = 1;
+    raw.latest_events.ordered_event_ids = [event.event_id];
+    raw.latest_events.ordered_event_kinds = [event.event_kind];
+
+    await page.goto(origin);
+    const result = await page.evaluate(async (rawPresentation) => {
+      const moduleRoot = "/src";
+      const { normalizeAuthorizedPresentationFrameV1 } = await import(
+        `${moduleRoot}/authorized-presentation-normalizer.js`
+      );
+      const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+      const { buildChoreographyPlan } = await import(
+        `${moduleRoot}/choreography-plan.js`
+      );
+      const { SvgChoreographyPainter } = await import(
+        `${moduleRoot}/choreography-painter.js`
+      );
+      const presentation =
+        await normalizeAuthorizedPresentationFrameV1(rawPresentation);
+      const battlefield = document.querySelector("#battlefield");
+      const empty = document.querySelector("#empty");
+      if (!(battlefield instanceof SVGSVGElement) || !(empty instanceof HTMLElement)) {
+        throw new Error("Charge displacement test surface is unavailable.");
+      }
+      const renderer = new BattlefieldRenderer({ battlefield, empty });
+      renderer.render(presentation, { showRanges: false });
+      const surface = renderer.choreographySurface();
+      const plan = buildChoreographyPlan(presentation, surface);
+      if (surface === null || plan === null) {
+        throw new Error("Authorized Charge displacement is unavailable.");
+      }
+      new SvgChoreographyPainter().install(plan, surface, {
+        motionMode: "off",
+        settled: false,
+        persistentOnly: false,
+      });
+      const charge = /** @type {Record<string, any>} */ (plan.events[0]);
+      const trajectory = /** @type {Record<string, any>[]} */ (
+        presentation.latest_events.agent_phase_trajectories
+      ).find(
+        (candidate) =>
+          candidate.agent_presentation_key === charge.sourcePresentationKey,
+      );
+      const path = battlefield.querySelector(".combat-charge__path");
+      const hit = battlefield.querySelector(".combat-charge__hit");
+      const start = battlefield.querySelector(".combat-charge__endpoint--start");
+      const end = battlefield.querySelector(".combat-charge__endpoint--end");
+      if (
+        !trajectory ||
+        !(path instanceof SVGPathElement) ||
+        !(hit instanceof SVGPathElement) ||
+        !(start instanceof SVGCircleElement) ||
+        !(end instanceof SVGCircleElement)
+      ) {
+        throw new Error("Painted Charge displacement geometry is unavailable.");
+      }
+      return {
+        presentationKind: presentation.presentation_kind,
+        start: charge.start,
+        end: charge.end,
+        expectedStart: surface.worldToScreen(trajectory.transition_start.position),
+        expectedEnd: surface.worldToScreen(trajectory.post_charge.position),
+        successor: surface.worldToScreen(trajectory.successor.position),
+        hasRoute: Object.hasOwn(charge, "route"),
+        path: path.getAttribute("d"),
+        hitPath: hit.getAttribute("d"),
+        pathCount: battlefield.querySelectorAll(".combat-charge__path").length,
+        startPoint: {
+          x: Number(start.getAttribute("cx")),
+          y: Number(start.getAttribute("cy")),
+        },
+        endPoint: {
+          x: Number(end.getAttribute("cx")),
+          y: Number(end.getAttribute("cy")),
+        },
+        leaderCount: battlefield.querySelectorAll(
+          ".combat-cue__leader--charge-start, .combat-cue__leader--charge-end",
+        ).length,
+      };
+    }, raw);
+
+    const expectedPath = `M ${result.start.x} ${result.start.y} L ${result.end.x} ${result.end.y}`;
+    expect(result.presentationKind).toBe(leafName);
+    expect(result.start).toEqual(result.expectedStart);
+    expect(result.end).toEqual(result.expectedEnd);
+    expect(result.end).not.toEqual(result.successor);
+    expect(result.hasRoute).toBe(false);
+    expect(result.path).toBe(expectedPath);
+    expect(result.hitPath).toBe(expectedPath);
+    expect(result.pathCount).toBe(1);
+    expect(result.startPoint).toEqual(result.start);
+    expect(result.endPoint).toEqual(result.end);
+    expect(result.leaderCount).toBe(0);
+  }
+});
+
 test("digest-valid OOC state keeps all five class glyphs centered across projected radii", async ({
   page,
 }) => {
@@ -853,11 +1127,9 @@ test("digest-valid OOC state keeps all five class glyphs centered across project
       states.push(
         ...Array.from(battlefield.querySelectorAll(".agent")).map((agent) => {
           const classIcon = agent.querySelector(".agent-class-icon");
-          const combatIcon = agent.querySelector(".agent-combat-state-icon");
           const body = agent.querySelector(".agent-body");
           if (
             !(classIcon instanceof SVGSVGElement) ||
-            !(combatIcon instanceof SVGSVGElement) ||
             !(body instanceof SVGCircleElement)
           ) {
             throw new Error("Agent identity glyphs are unavailable.");
@@ -872,13 +1144,11 @@ test("digest-valid OOC state keeps all five class glyphs centered across project
             status: agent.getAttribute("data-combat-status"),
             countdown: agent.getAttribute("data-steps-until-out-of-combat"),
             ariaLabel: agent.getAttribute("aria-label"),
-            combatHidden: combatIcon.hasAttribute("hidden"),
-            combatColor: getComputedStyle(combatIcon).color,
-            combatGlyph: combatIcon.getAttribute("data-icon"),
-            combatAriaHidden: combatIcon.getAttribute("aria-hidden"),
-            combatRole: combatIcon.getAttribute("role"),
-            combatOwnsTooltip: combatIcon.hasAttribute("data-tooltip-owner"),
-            glyphCount: agent.querySelectorAll(".agent-combat-state-icon").length,
+            dedicatedCombatIconCount: agent.querySelectorAll(".agent-combat-state-icon")
+              .length,
+            inCombatStatusCount: battlefield.querySelectorAll(
+              '.status-cell[data-token-id="in_combat"]',
+            ).length,
             classCentered: Math.abs(classX + classWidth / 2 - bodyCenter) < 0.001,
           };
         }),
@@ -896,16 +1166,11 @@ test("digest-valid OOC state keeps all five class glyphs centered across project
   ).toBe(3);
   expect(result).toHaveLength(15);
   for (const state of result) {
-    expect(state.glyphCount).toBe(1);
-    expect(state.combatGlyph).toBe("combat-in-progress");
-    expect(state.combatColor).toBe("rgb(255, 255, 255)");
-    expect(state.combatAriaHidden).toBe("true");
-    expect(state.combatRole).toBeNull();
-    expect(state.combatOwnsTooltip).toBe(false);
+    expect(state.dedicatedCombatIconCount).toBe(0);
+    expect(state.inCombatStatusCount).toBe(0);
     expect(state.status).toBe("OOC");
     expect(state.countdown).toBe("0");
-    expect(state.ariaLabel).toContain("combat status OOC");
-    expect(state.combatHidden).toBe(true);
+    expect(state.ariaLabel).not.toMatch(/combat|steps until out/iu);
     expect(state.classCentered).toBe(true);
   }
 });
@@ -1150,11 +1415,21 @@ test("authorized death, team waves, and resurrection retain outward settled geom
     const { SvgChoreographyPainter } = await import(
       `${moduleRoot}/choreography-painter.js`
     );
+    const { createTooltipController } = await import(`${moduleRoot}/tooltip.js`);
     const presentation = await normalizeAuthorizedPresentationFrameV1(rawPresentation);
     const serializedBefore = JSON.stringify(presentation);
     const battlefield = document.querySelector("#battlefield");
     const empty = document.querySelector("#empty");
-    if (!(battlefield instanceof SVGSVGElement) || !(empty instanceof HTMLElement)) {
+    const tooltip = document.querySelector("#visual-tooltip");
+    const title = document.querySelector("#visual-tooltip-title");
+    const details = document.querySelector("#visual-tooltip-details");
+    if (
+      !(battlefield instanceof SVGSVGElement) ||
+      !(empty instanceof HTMLElement) ||
+      !(tooltip instanceof HTMLElement) ||
+      !(title instanceof HTMLElement) ||
+      !(details instanceof HTMLElement)
+    ) {
       throw new Error("Renderer test surface is unavailable.");
     }
     const renderer = new BattlefieldRenderer({ battlefield, empty });
@@ -1169,6 +1444,12 @@ test("authorized death, team waves, and resurrection retain outward settled geom
       motionMode: "normal",
       settled: false,
       persistentOnly: false,
+    });
+    const controller = createTooltipController({
+      root: document.body,
+      tooltip,
+      title,
+      details,
     });
     const lifecycleAnimations = normal.animationSpecs
       .filter((/** @type {Record<string, any>} */ spec) =>
@@ -1209,19 +1490,91 @@ test("authorized death, team waves, and resurrection retain outward settled geom
         label: label?.textContent ?? null,
         color: getComputedStyle(wave).color,
         ownerCount: wave.querySelectorAll("[data-tooltip-owner]").length,
+        layoutKey: wave.getAttribute("data-layout-key"),
+        layoutDisposition: wave.getAttribute("data-layout-disposition"),
+        layoutCollisionFree: wave.getAttribute("data-layout-collision-free"),
+        ariaLabel: effect?.getAttribute("aria-label") ?? null,
       };
     });
-    const lifecycleColors = lifecycleNodes.map((node) => ({
-      lifecycle: node.getAttribute("data-lifecycle-ring"),
-      color: getComputedStyle(node).color,
-      radius: node.querySelector(".combat-lifecycle-ring__ring")?.getAttribute("r"),
-    }));
+    const lifecycleGeometry = lifecycleNodes.map((node) => {
+      const effect = node.closest(".combat-effect");
+      const event = plan.events.find(
+        (/** @type {Record<string, any>} */ candidate) =>
+          candidate.eventId === effect?.getAttribute("data-event-id"),
+      );
+      const ring = node.querySelector(".combat-lifecycle-ring__ring");
+      const hit = node.querySelector(".combat-lifecycle-ring__hit");
+      const agent =
+        typeof event?.agentPresentationKey === "string"
+          ? battlefield.querySelector(
+              `.agent[data-presentation-key="${CSS.escape(event.agentPresentationKey)}"]`,
+            )
+          : null;
+      const body = agent?.querySelector(".agent-body");
+      if (
+        !(node instanceof SVGGraphicsElement) ||
+        !(effect instanceof SVGElement) ||
+        !event?.anchor ||
+        !(ring instanceof SVGCircleElement) ||
+        !(hit instanceof SVGCircleElement) ||
+        !(agent instanceof SVGElement) ||
+        !(body instanceof SVGCircleElement)
+      ) {
+        throw new Error("Authorized lifecycle geometry is unavailable.");
+      }
+      const ringMatrix = node.getScreenCTM();
+      const bodyMatrix = body.getScreenCTM();
+      if (ringMatrix === null || bodyMatrix === null) {
+        throw new Error("Authorized lifecycle transform is unavailable.");
+      }
+      const center = new DOMPoint(0, 0).matrixTransform(ringMatrix);
+      const bodyCenter = new DOMPoint(
+        body.cx.baseVal.value,
+        body.cy.baseVal.value,
+      ).matrixTransform(bodyMatrix);
+      const centerElements = document.elementsFromPoint(bodyCenter.x, bodyCenter.y);
+      effect.focus();
+      return {
+        eventType: event.eventType,
+        lifecycle: node.getAttribute("data-lifecycle-ring"),
+        color: getComputedStyle(node).color,
+        radius: ring.getAttribute("r"),
+        strokeOpacity: getComputedStyle(ring).strokeOpacity,
+        center: { x: center.x, y: center.y },
+        bodyCenter: { x: bodyCenter.x, y: bodyCenter.y },
+        planAnchor: event.anchor,
+        planLayoutFields: [
+          "cue",
+          "cueBounds",
+          "cueLeader",
+          "cueDisposition",
+          "cueCollisionFree",
+          "cueLayoutKey",
+        ].filter((field) => Object.hasOwn(event, field)),
+        domLayoutAttributes: Array.from(node.attributes, ({ name }) => name).filter(
+          (name) => name.startsWith("data-layout-"),
+        ),
+        semanticLeaderCount: effect.querySelectorAll(".combat-cue__leader--semantic")
+          .length,
+        hitOwnsBodyCenter: centerElements.includes(hit),
+        agentOwnsBodyCenter: centerElements.some(
+          (element) => element.closest(".agent") === agent,
+        ),
+        hitPointerEvents: getComputedStyle(hit).pointerEvents,
+        hitFill: getComputedStyle(hit).fill,
+        ariaLabel: effect.getAttribute("aria-label"),
+        tooltipTitle: title.textContent,
+        tooltipSummary:
+          tooltip.querySelector(".semantic-explanation__summary")?.textContent ?? null,
+      };
+    });
+    controller.destroy();
     const beforeSettle = {
       eventCount: normal.eventNodes.size,
       nodeCount: normal.nodeCount,
       persistentNodeCount: normal.persistentNodeCount,
       persistentNodeBound: plan.bounds.persistentNodes,
-      lifecycleColors,
+      lifecycleGeometry,
       lifecycleAnimations,
       waveGeometry,
       viewportBounds: surface.viewportBounds,
@@ -1291,10 +1644,57 @@ test("authorized death, team waves, and resurrection retain outward settled geom
   expect(result.beforeSettle.persistentNodeCount).toBeLessThanOrEqual(
     result.beforeSettle.persistentNodeBound,
   );
-  expect(result.beforeSettle.lifecycleColors).toEqual([
-    { lifecycle: "death", color: "rgb(251, 113, 133)", radius: "32" },
-    { lifecycle: "resurrection", color: "rgb(255, 255, 255)", radius: "32" },
+  expect(result.beforeSettle.lifecycleGeometry).toEqual([
+    expect.objectContaining({
+      eventType: "agent_died",
+      lifecycle: "death",
+      color: "rgb(251, 113, 133)",
+      radius: "32",
+      strokeOpacity: "0.5",
+      planLayoutFields: [],
+      domLayoutAttributes: [],
+      semanticLeaderCount: 0,
+      hitOwnsBodyCenter: false,
+      agentOwnsBodyCenter: true,
+      hitPointerEvents: "stroke",
+      hitFill: "none",
+      ariaLabel: "Agent died",
+      tooltipTitle: "Agent died",
+      tooltipSummary: "This agent died on the incoming transition.",
+    }),
+    expect.objectContaining({
+      eventType: "agent_respawned",
+      lifecycle: "resurrection",
+      color: "rgb(255, 255, 255)",
+      radius: "32",
+      strokeOpacity: "0.5",
+      planLayoutFields: [],
+      domLayoutAttributes: [],
+      semanticLeaderCount: 0,
+      hitOwnsBodyCenter: false,
+      agentOwnsBodyCenter: true,
+      hitPointerEvents: "stroke",
+      hitFill: "none",
+      ariaLabel: "Agent respawned",
+      tooltipTitle: "Agent respawned",
+      tooltipSummary: "This agent respawned on the incoming transition.",
+    }),
   ]);
+  for (const lifecycle of result.beforeSettle.lifecycleGeometry) {
+    expect(Math.abs(lifecycle.center.x - lifecycle.bodyCenter.x)).toBeLessThanOrEqual(
+      0.001,
+    );
+    expect(Math.abs(lifecycle.center.y - lifecycle.bodyCenter.y)).toBeLessThanOrEqual(
+      0.001,
+    );
+    const copy = [
+      lifecycle.ariaLabel,
+      lifecycle.tooltipTitle,
+      lifecycle.tooltipSummary,
+    ].join(" ");
+    expect(copy).not.toMatch(/_/u);
+    expect(copy).not.toMatch(/semantic pulse/iu);
+  }
   expect(result.beforeSettle.lifecycleAnimations).toHaveLength(2);
   for (const keyframes of result.beforeSettle.lifecycleAnimations) {
     expect(
@@ -1309,20 +1709,35 @@ test("authorized death, team waves, and resurrection retain outward settled geom
       teamIndex: 0,
       teamId: 1,
       side: "left",
-      label: "RESPAWNING · TEAM A",
+      label: "EVENT: Team A Respawn",
       color: "rgb(59, 130, 246)",
       ownerCount: 0,
+      layoutDisposition: "perimeter_callout",
+      layoutCollisionFree: "true",
+      ariaLabel: "EVENT: Team A Respawn",
     }),
     expect.objectContaining({
       teamIndex: 1,
       teamId: 2,
       side: "right",
-      label: "RESPAWNING · TEAM B",
+      label: "EVENT: Team B Respawn",
       color: "rgb(240, 90, 103)",
       ownerCount: 0,
+      layoutDisposition: "perimeter_callout",
+      layoutCollisionFree: "true",
+      ariaLabel: "EVENT: Team B Respawn",
     }),
   ]);
   const [teamA, teamB] = result.beforeSettle.waveGeometry;
+  expect(teamA.layoutKey).toBe(
+    JSON.stringify(["event", raw.latest_events.events[2].event_id, "cue"]),
+  );
+  expect(teamB.layoutKey).toBe(
+    JSON.stringify(["event", raw.latest_events.events[3].event_id, "cue"]),
+  );
+  for (const wave of [teamA, teamB]) {
+    expect([wave.label, wave.ariaLabel].join(" ")).not.toMatch(/_|semantic pulse/iu);
+  }
   const bounds = result.beforeSettle.viewportBounds;
   expect(teamA.bounds.left).toBeGreaterThanOrEqual(bounds.left);
   expect(teamA.bounds.top).toBeGreaterThanOrEqual(bounds.top);
@@ -1635,9 +2050,18 @@ test("agent wins real SVG hit arbitration over an overlapping accepted route", a
           .filter((element) => element instanceof Element),
       ),
     ];
+    const routeRoot = routeOwner.parentElement;
+    const routeLayer = routeRoot?.parentElement;
     return {
       agentPaintOrder: owners.indexOf(agent),
       routePaintOrder: owners.indexOf(routeOwner),
+      activationRoute: routeOwner.classList.contains("combat-route-effect--activation"),
+      routeRootOwned:
+        routeRoot?.classList.contains("combat-choreography-routes") === true,
+      routeLayer: routeLayer?.getAttribute("data-layer") ?? null,
+      layerOrder: [...battlefield.children].map((layer) =>
+        layer.getAttribute("data-layer"),
+      ),
       x: screenCenter.x,
       y: screenCenter.y,
     };
@@ -1646,6 +2070,23 @@ test("agent wins real SVG hit arbitration over an overlapping accepted route", a
   expect(overlap.agentPaintOrder).toBeGreaterThanOrEqual(0);
   expect(overlap.routePaintOrder).toBeGreaterThanOrEqual(0);
   expect(overlap.agentPaintOrder).toBeLessThan(overlap.routePaintOrder);
+  expect(overlap.activationRoute).toBe(true);
+  expect(overlap.routeRootOwned).toBe(true);
+  expect(overlap.routeLayer).toBe("transient-route");
+  const routeLayerIndex = overlap.layerOrder.indexOf("transient-route");
+  expect(routeLayerIndex).toBeGreaterThanOrEqual(0);
+  for (const foregroundLayer of [
+    "obstacle",
+    "body",
+    "selection-legality",
+    "transient-events",
+    "durable-status-modifier",
+    "accessible-labels",
+  ]) {
+    expect(overlap.layerOrder.indexOf(foregroundLayer)).toBeGreaterThan(
+      routeLayerIndex,
+    );
+  }
   await page.mouse.move(overlap.x, overlap.y);
   await expect(page.locator("#visual-tooltip")).toHaveAttribute(
     "data-tooltip-kind",

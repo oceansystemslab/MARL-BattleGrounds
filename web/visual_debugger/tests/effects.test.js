@@ -8,6 +8,7 @@ import {
   CHOREOGRAPHY_PAINT_FOOTPRINTS,
   isSubmissionCommand,
 } from "../src/choreography-plan.js";
+import { BATTLEFIELD_LAYER_ORDER } from "../src/scene.js";
 import {
   DEFAULT_VISUAL_FILTER_STATE,
   setVisualFilterEnabled,
@@ -104,7 +105,15 @@ test("strict authorized fixture preserves exact choreography identity", async ()
   );
   for (const event of plan.events.filter((candidate) => candidate.spatial)) {
     if (event.kind === "activation") {
-      assert.ok(event.impactCue ?? event.sourceCue, event.eventId);
+      assert.ok(event.route?.end ?? event.target ?? event.sourceCue, event.eventId);
+      if (event.target) {
+        assert.equal(event.impactCue ?? null, null, event.eventId);
+        assert.equal(event.impactLeader ?? null, null, event.eventId);
+        assert.equal(event.impactBounds ?? null, null, event.eventId);
+        assert.equal(event.impactLayoutKey ?? null, null, event.eventId);
+        assert.equal(event.impactDisposition ?? null, null, event.eventId);
+        assert.equal(event.impactCueCollisionFree ?? null, null, event.eventId);
+      }
       if (event.paintParts.ability && event.target) {
         assert.ok(event.route, event.eventId);
         assert.ok(Array.isArray(event.route.bridgeGaps), event.eventId);
@@ -445,7 +454,12 @@ test("all registered transient families validate without constructing disabled g
       teamSide: wave.teamSide,
       label: wave.label,
     },
-    { teamIndex: 0, teamId: 1, teamSide: "left", label: "RESPAWNING · TEAM A" },
+    {
+      teamIndex: 0,
+      teamId: 1,
+      teamSide: "left",
+      label: "EVENT: Team A Respawn",
+    },
   );
   assert.equal(
     plan.events.some((event) => event.kind === "rejected_action"),
@@ -610,8 +624,12 @@ test("activation ability and semantic paint parts are independently filterable",
   assert.equal(semanticOnly.event.source, null);
   assert.equal(semanticOnly.event.route, null);
   assert.ok(semanticOnly.event.target);
-  assert.ok(semanticOnly.event.impactCue && semanticOnly.event.impactBounds);
-  assert.deepEqual(semanticOnly.event.impactLeader.start, semanticOnly.event.target);
+  assert.equal(semanticOnly.event.impactCue ?? null, null);
+  assert.equal(semanticOnly.event.impactBounds ?? null, null);
+  assert.equal(semanticOnly.event.impactLeader ?? null, null);
+  assert.equal(semanticOnly.event.impactLayoutKey ?? null, null);
+  assert.equal(semanticOnly.event.impactDisposition ?? null, null);
+  assert.equal(semanticOnly.event.impactCueCollisionFree ?? null, null);
 
   const routeOnly = projectedActivation("healing_effects");
   assert.deepEqual([routeOnly.pointProjections, routeOnly.lengthProjections], [2, 2]);
@@ -619,7 +637,12 @@ test("activation ability and semantic paint parts are independently filterable",
   assert.ok(routeOnly.event.source);
   assert.ok(routeOnly.event.target);
   assert.ok(routeOnly.event.route);
-  assert.ok(routeOnly.event.impactCue && routeOnly.event.impactBounds);
+  assert.equal(routeOnly.event.impactCue ?? null, null);
+  assert.equal(routeOnly.event.impactBounds ?? null, null);
+  assert.equal(routeOnly.event.impactLeader ?? null, null);
+  assert.equal(routeOnly.event.impactLayoutKey ?? null, null);
+  assert.equal(routeOnly.event.impactDisposition ?? null, null);
+  assert.equal(routeOnly.event.impactCueCollisionFree ?? null, null);
   assert.ok(Array.isArray(routeOnly.event.route.bridgeGaps));
 
   const fullySuppressed = projectedActivation(
@@ -701,6 +724,24 @@ test("canonical V2 displacement and rejection selectors own transient color", as
   assert.match(css, /data-event-type="action_rejected"/u);
 });
 
+test("transient activation routes remain beneath every information-bearing layer", () => {
+  const routeIndex = BATTLEFIELD_LAYER_ORDER.indexOf("transient-route");
+  assert.ok(routeIndex >= 0);
+  for (const foregroundLayer of [
+    "obstacle",
+    "body",
+    "selection-legality",
+    "transient-events",
+    "durable-status-modifier",
+    "accessible-labels",
+  ]) {
+    assert.ok(
+      BATTLEFIELD_LAYER_ORDER.indexOf(foregroundLayer) > routeIndex,
+      `${foregroundLayer} must paint over transient activation routes`,
+    );
+  }
+});
+
 test("activation arrows prefer full paint before an explicit compact fallback", async () => {
   const [painter, css] = await Promise.all([
     readFile(new URL("../src/choreography-painter.js", import.meta.url), "utf8"),
@@ -737,8 +778,11 @@ test("activation arrows prefer full paint before an explicit compact fallback", 
   assert.match(holyParticleRule, /drop-shadow\(0 0 4px currentColor\)/u);
 });
 
-test("scene has one Analysis battlefield branch and owns durable shield hooks", async () => {
-  const source = await readFile(new URL("../src/scene.js", import.meta.url), "utf8");
+test("scene has one Analysis battlefield branch and owns durable shield and status hooks", async () => {
+  const [source, css] = await Promise.all([
+    readFile(new URL("../src/scene.js", import.meta.url), "utf8"),
+    readFile(new URL("../styles.css", import.meta.url), "utf8"),
+  ]);
   assert.doesNotMatch(source, /debug-protected-zone/u);
   assert.doesNotMatch(source, /debug-visibility-cue/u);
   assert.doesNotMatch(source, /preset === "debug"/u);
@@ -752,10 +796,14 @@ test("scene has one Analysis battlefield branch and owns durable shield hooks", 
   assert.match(source, /showLegality: true/u);
   assert.match(source, /agent-spawn-shield__shell/u);
   assert.match(source, /agent-spawn-shield__ticks/u);
-  assert.match(source, /combat-in-progress/u);
-  assert.match(source, /agent-combat-state-icon/u);
-  assert.match(source, /combat status IC, steps until OOC/u);
-  assert.match(source, /combat status OOC/u);
+  assert.match(source, /duration_status_badge/u);
+  assert.doesNotMatch(source, /agent-combat-state-icon/u);
+  assert.doesNotMatch(source, /showCombatStatusIcon/u);
+  assert.doesNotMatch(source, /combat status in combat/u);
+  assert.doesNotMatch(source, /combat status out of combat/u);
+  assert.match(css, /\.status-cell\[data-token-id="in_combat"\]/u);
+  assert.match(css, /\.pov-observed-status\[data-token-id="in_combat"\]/u);
+  assert.match(css, /\.combat-effect\[data-token-id="in_combat"\]/u);
   assert.match(source, /createSpawnShieldView\(agent, spawnShieldMechanics\)/u);
   assert.match(source, /layoutKey: JSON\.stringify\(/u);
   assert.match(source, /bounds: frozenBounds/u);
@@ -1298,8 +1346,19 @@ test("standalone serialized status events keep exact presentation meanings", asy
       [eventKind, lifecycle],
     );
     assert.deepEqual(plan.events[0].atomicEventIds, [event.event_id]);
-    assert.equal(plan.events[0].phaseStart, 0);
-    assert.equal(plan.events[0].phaseEnd, 480);
+    assert.equal(
+      plan.events[0].presentationSuppressed,
+      eventKind === "status_refreshed_or_extended",
+    );
+    assert.equal(plan.events[0].spatial, eventKind !== "status_refreshed_or_extended");
+    assert.equal(
+      plan.events[0].phaseStart,
+      eventKind === "status_refreshed_or_extended" ? 2560 : 0,
+    );
+    assert.equal(
+      plan.events[0].phaseEnd,
+      eventKind === "status_refreshed_or_extended" ? 3040 : 480,
+    );
   }
 });
 

@@ -17,6 +17,42 @@ function formatAgentIdentity(publicAgentId) {
     : "Agent ID unavailable";
 }
 
+/** @param {unknown} value */
+function humanizeEventName(value) {
+  return String(value ?? "event")
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+/** @param {Record<string, any>} event */
+function semanticEventCopy(event) {
+  if (event.cueSemantic === "agent_died") {
+    return Object.freeze({
+      title: "Agent died",
+      summary: "This agent died on the incoming transition.",
+    });
+  }
+  if (event.cueSemantic === "agent_respawned") {
+    return Object.freeze({
+      title: "Agent respawned",
+      summary: "This agent respawned on the incoming transition.",
+    });
+  }
+  if (event.cueSemantic === "respawn_wave_occurred") {
+    return Object.freeze({
+      title:
+        typeof event.label === "string" && event.label.trim()
+          ? event.label
+          : "Team respawn",
+      summary: "This team respawn occurred on the incoming transition.",
+    });
+  }
+  return Object.freeze({
+    title: humanizeEventName(event.eventType),
+    summary: "This event occurred on the incoming transition.",
+  });
+}
+
 /**
  * Build one structured semantic explanation from fields already authorized in
  * the choreography plan. Internal slots may key DOM records, but never supply
@@ -26,11 +62,11 @@ function formatAgentIdentity(publicAgentId) {
  */
 export function explainChoreographyEvent(event) {
   const visibleEvent = paintAwareExplanationEvent(event);
+  const semanticCopy = semanticEventCopy(visibleEvent);
   const title = String(
     visibleEvent.lifecycleToken?.label ??
       visibleEvent.token?.label ??
-      visibleEvent.eventType ??
-      "Semantic event",
+      semanticCopy.title,
   );
   const rows = [];
   const applicationSources = Array.isArray(visibleEvent.applicationSources)
@@ -89,7 +125,7 @@ export function explainChoreographyEvent(event) {
     summary: String(
       visibleEvent.lifecycleToken?.accessibleName ??
         visibleEvent.token?.accessibleName ??
-        `Authoritative ${String(visibleEvent.kind ?? "event").replaceAll("_", " ")}`,
+        semanticCopy.summary,
     ),
     rows,
     sections: [],
@@ -1358,12 +1394,6 @@ export class SvgChoreographyPainter {
     if (!event.anchor) {
       return;
     }
-    appendAllocatedLeader(
-      ownerDocument,
-      group,
-      "combat-cue__leader combat-cue__leader--semantic",
-      event.cueLeader,
-    );
     if (event.cueSemantic === "agent_died" || event.cueSemantic === "agent_respawned") {
       this.#renderLifecycleRing(
         ownerDocument,
@@ -1375,6 +1405,12 @@ export class SvgChoreographyPainter {
       );
       return;
     }
+    appendAllocatedLeader(
+      ownerDocument,
+      group,
+      "combat-cue__leader combat-cue__leader--semantic",
+      event.cueLeader,
+    );
     if (event.cueSemantic === "respawn_wave_occurred") {
       this.#renderRespawnWave(ownerDocument, group, event);
       return;
@@ -1474,13 +1510,6 @@ export class SvgChoreographyPainter {
       class: `combat-lifecycle-ring combat-lifecycle-ring--${lifecycle}`,
       "data-lifecycle-ring": lifecycle,
     });
-    assignLayoutPlacement(
-      ringGroup,
-      event.cueLayoutKey,
-      event.cueBounds,
-      event.cueDisposition,
-      event.cueCollisionFree,
-    );
     const hit = svgElement(ownerDocument, "circle", {
       class: "combat-lifecycle-ring__hit",
       r: 34,
@@ -1496,9 +1525,8 @@ export class SvgChoreographyPainter {
     });
     ringGroup.append(hit, ring);
     group.append(ringGroup);
-    const anchor = event.cue ?? event.anchor;
     setAttributes(ringGroup, {
-      transform: `translate(${anchor.x} ${anchor.y})`,
+      transform: `translate(${event.anchor.x} ${event.anchor.y})`,
     });
     if (!options.settled && options.motionMode === "normal") {
       const phaseStart = Number(event.phaseStart ?? 0);
@@ -1756,17 +1784,25 @@ export class SvgChoreographyPainter {
         ".combat-semantic-pulse, .combat-lifecycle-ring, .combat-respawn-wave",
       );
       if (pulse && event.anchor) {
-        const cue = event.cue ?? event.anchor;
+        const lifecycleRing = pulse.matches(".combat-lifecycle-ring");
+        const cue = lifecycleRing ? event.anchor : (event.cue ?? event.anchor);
         pulse.setAttribute("transform", `translate(${cue.x} ${cue.y})`);
-        assignLayoutPlacement(
-          pulse,
-          event.cueLayoutKey,
-          event.cueBounds,
-          event.cueDisposition,
-          event.cueCollisionFree,
-        );
+        if (!lifecycleRing) {
+          assignLayoutPlacement(
+            pulse,
+            event.cueLayoutKey,
+            event.cueBounds,
+            event.cueDisposition,
+            event.cueCollisionFree,
+          );
+        }
       }
-      syncAllocatedLeader(group, ".combat-cue__leader--semantic", event.cueLeader);
+      if (
+        event.cueSemantic !== "agent_died" &&
+        event.cueSemantic !== "agent_respawned"
+      ) {
+        syncAllocatedLeader(group, ".combat-cue__leader--semantic", event.cueLeader);
+      }
     }
     this.#syncRouteBridgeGaps(underlay, event.route);
   }

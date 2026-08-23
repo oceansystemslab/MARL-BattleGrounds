@@ -12,7 +12,6 @@
  *   | "aura_modifier_badges"
  *   | "duration_status_badges"
  *   | "spawn_shield"
- *   | "combat_status_icon"
  *   | "rejected_action_feedback"
  *   | "basic_ability_effects"
  *   | "ultimate_ability_effects"
@@ -47,7 +46,6 @@ export const VISUAL_FILTER_REGISTRY = Object.freeze(
     ["aura_modifier_badges", "Aura Modifier Badges"],
     ["duration_status_badges", "Duration Status Badges"],
     ["spawn_shield", "Spawn Shield"],
-    ["combat_status_icon", "Combat Status Icon"],
     ["rejected_action_feedback", "Rejected Action Feedback"],
     ["basic_ability_effects", "Basic Ability Effects"],
     ["ultimate_ability_effects", "Ultimate Ability Effects"],
@@ -109,7 +107,6 @@ export const VISUAL_PAINT_PART_REGISTRY = Object.freeze([
     "duration_status_badges",
   ),
   paintPart({ surface: "durable", kind: "spawn_shield" }, "spawn_shield"),
-  paintPart({ surface: "durable", kind: "combat_status_icon" }, "combat_status_icon"),
   paintPart({ surface: "durable", kind: "cooldown_badge" }, "cooldown_effects"),
   paintPart(
     { surface: "transient", kind: "rejected_action_feedback" },

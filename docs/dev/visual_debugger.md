@@ -34,7 +34,7 @@ belonging to the other product with a migration error.
 
 - Python remains the authority for simulator state, legality, replay
   validation, audience projection, and metric access.
-- Browser layout, help, panels, animation, ranges, and the 24 visual filters
+- Browser layout, help, panels, animation, ranges, and the 23 visual filters
   are presentation-only.
 - The replay transport uses Start/End controls, exact seeks, and document-level
   unmodified Left/Right/Space shortcuts that yield to interactive controls.

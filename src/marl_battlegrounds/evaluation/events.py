@@ -9,6 +9,7 @@ from marl_battlegrounds.evaluation.models import (
     AbilityActivatedEventV1,
     ActionRejectedEventV1,
     AgentDiedEventV1,
+    AgentLeftCombatEventV1,
     AgentRespawnedEventV1,
     ChargePhaseDisplacementEventV1,
     CombatCountdownResetEventV1,
@@ -398,17 +399,27 @@ def _append_health_resolution_candidates(
 
 def _append_regeneration_candidates(
     candidates: list[_EventCandidate],
+    start_frame: EvaluationFrameV1,
     facts: TransitionFactsV1,
+    successor_frame: EvaluationFrameV1,
 ) -> None:
-    """Emit direct combat-countdown reset and realized regeneration facts."""
+    """Emit direct countdown lifecycle and realized regeneration facts."""
     regeneration = facts.regeneration_facts
     for agent_global_slot, (
         combat_countdown_was_reset,
         actual_health_regenerated,
+        start_countdown,
+        successor_countdown,
+        start_alive,
+        successor_alive,
     ) in enumerate(
         zip(
             regeneration.combat_countdown_was_reset_by_agent,
             regeneration.actual_health_regenerated_this_step_by_agent,
+            start_frame.snapshot.steps_until_out_of_combat,
+            successor_frame.snapshot.steps_until_out_of_combat,
+            start_frame.snapshot.alive_mask,
+            successor_frame.snapshot.alive_mask,
             strict=True,
         )
     ):
@@ -421,12 +432,27 @@ def _append_regeneration_candidates(
                 model_type=CombatCountdownResetEventV1,
                 payload={"agent_global_slot": agent_global_slot},
             )
-        if actual_health_regenerated > 0.0:
+        if (
+            not combat_countdown_was_reset
+            and start_alive
+            and successor_alive
+            and start_countdown == 1
+            and successor_countdown == 0
+        ):
             _append_candidate(
                 candidates,
                 phase_rank=50,
                 primary_slot_or_team_index=agent_global_slot,
                 subtype_rank=1,
+                model_type=AgentLeftCombatEventV1,
+                payload={"agent_global_slot": agent_global_slot},
+            )
+        if actual_health_regenerated > 0.0:
+            _append_candidate(
+                candidates,
+                phase_rank=50,
+                primary_slot_or_team_index=agent_global_slot,
+                subtype_rank=2,
                 model_type=HealthRegeneratedEventV1,
                 payload={
                     "agent_global_slot": agent_global_slot,
@@ -788,7 +814,7 @@ def decode_evaluation_events_v1(
     _append_action_candidates(candidates, context, facts)
     _append_health_output_candidates(candidates, facts)
     _append_health_resolution_candidates(candidates, start_frame, facts)
-    _append_regeneration_candidates(candidates, facts)
+    _append_regeneration_candidates(candidates, start_frame, facts, successor_frame)
     _append_cooldown_candidates(candidates, start_frame, facts, successor_frame)
     _append_displacement_candidates(candidates, facts)
     _append_death_candidates(candidates, facts)
