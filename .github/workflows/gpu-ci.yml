@@ -3,15 +3,25 @@ name: GPU CI
 on:
   push:
   pull_request:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+    inputs:
+      full_regression:
+        description: Run the complete GPU regression suite
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
-  group: gpu-ci-${{ github.ref }}
+  group: gpu-ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   gpu-sanity:
     name: GPU sanity
     runs-on: [self-hosted, Linux, X64, gpu, rtx5090]
+    timeout-minutes: 15
 
     steps:
       - name: Check out repository
@@ -24,19 +34,7 @@ jobs:
         run: uv --version
 
       - name: Sync environment
-        run: uv sync --locked --extra cuda13 --extra training --extra interop --extra viz --extra dev
-
-      - name: Run tests
-        run: uv run pytest
-
-      - name: Check formatting
-        run: uv run ruff format --check .
-
-      - name: Run linter
-        run: uv run ruff check .
-
-      - name: Run type checker
-        run: uv run pyright
+        run: uv sync --locked --extra cuda13 --extra dev
 
       - name: Check NVIDIA driver
         run: nvidia-smi
@@ -59,3 +57,39 @@ jobs:
 
           print("result", y.shape, y.device)
           PY
+
+      - name: Check compiled environment contracts on GPU
+        run: >-
+          uv run pytest
+          tests/test_core_spine.py::test_that_step_can_be_jit_compiled
+          tests/test_core_spine.py::test_step_can_run_in_scanned_rollout
+          -q
+          --maxfail=1
+
+  gpu-full-regression:
+    name: GPU full regression
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.full_regression)
+    needs: gpu-sanity
+    runs-on: [self-hosted, Linux, X64, gpu, rtx5090]
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Add local bin to PATH
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Sync complete GPU environment
+        run: >-
+          uv sync --locked
+          --extra cuda13
+          --extra training
+          --extra interop
+          --extra viz
+          --extra dev
+
+      - name: Run complete GPU regression
+        run: uv run pytest --maxfail=1

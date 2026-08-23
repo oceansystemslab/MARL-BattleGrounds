@@ -72,9 +72,9 @@ contributor checks.
 
 ## Design and evaluation
 
-- [Specification amendments](docs/design/specification_amendments.md) record
-  proposed departures from the original design document and state their
-  activation status.
+- [Specification amendments](docs/design/specification_amendments.md) are the
+  controlling public authority for accepted departures from the historical
+  design PDF.
 - [Evaluation metric specification](docs/evaluation/metric_specification.md)
   defines metric meanings, attribution limits, scorecard surfaces, and
   candidate dispositions.

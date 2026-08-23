@@ -487,15 +487,16 @@ def test_independent_wave_respawns_only_transition_start_corpses_for_due_team(
     expected_countdowns: tuple[int, int],
 ) -> None:
     """Eligibility is transition-start death intersected with the due team."""
-    config, state, _, _, _ = _scenario(
+    config, state, initial_observation, _, _ = _scenario(
         team_sizes=(2, 2),
         periods=(3, 5),
     )
     state = _with_dead_slots(state, dead_slot)
     countdowns = jnp.asarray((1, 3), dtype=jnp.int32).at[due_team].set(0)
     state = state._replace(team_respawn_wave_countdowns=countdowns)
+    dead_observation, _ = _build_observation_and_action_mask(state, config)
 
-    next_state, _, _, _, _, info = _take_step(config, state)
+    next_state, next_observation, _, _, _, info = _take_step(config, state)
     expected_realized = _slot_mask(dead_slot)
 
     assert bool(next_state.alive_mask[dead_slot])
@@ -535,6 +536,18 @@ def test_independent_wave_respawns_only_transition_start_corpses_for_due_team(
     assert not bool(jnp.any(next_state.alive_mask[_TEAM_B_SECOND_SLOT + 1 :]))
     assert bool(jnp.all(next_state.current_health[2:MAX_AGENTS_PER_TEAM] == 0))
     assert bool(jnp.all(next_state.current_health[_TEAM_B_SECOND_SLOT + 1 :] == 0))
+    assert bool(
+        jnp.array_equal(
+            dead_observation.spawn_lifecycle.class_ids_by_agent_by_team,
+            initial_observation.spawn_lifecycle.class_ids_by_agent_by_team,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            next_observation.spawn_lifecycle.class_ids_by_agent_by_team,
+            initial_observation.spawn_lifecycle.class_ids_by_agent_by_team,
+        )
+    )
 
 
 def test_simultaneous_populated_waves_respawn_full_rosters_at_assigned_pads() -> None:

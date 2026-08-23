@@ -48,9 +48,11 @@ def test_evaluation_v1_wire_shapes_match_current_core_contract() -> None:
 @pytest.mark.parametrize(
     "module_name",
     (
+        "marl_battlegrounds.evaluation.actor_projection",
         "marl_battlegrounds.evaluation.replay",
         "marl_battlegrounds.evaluation.replay_io",
         "marl_battlegrounds.evaluation.pov",
+        "marl_battlegrounds.evaluation.scenario",
     ),
 )
 def test_replay_modules_import_without_array_or_capture_dependencies(
@@ -73,6 +75,44 @@ for loaded_name in sys.modules:
         raise SystemExit("unexpected array-runtime import: " + loaded_name)
 """
 
+    result = subprocess.run(
+        (sys.executable, "-c", script),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_v2_scenario_public_exports_are_host_only() -> None:
+    """Resolving host-only V2 APIs must not activate their lazy core bridge."""
+    export_names = (
+        "build_scenario_evaluation_record_v2",
+        "canonical_scenario_evaluation_record_json_bytes_v2",
+        "load_scenario_evaluation_record_v2",
+        "resolved_initial_state_digest_sha256_v2",
+        "save_scenario_evaluation_record_v2",
+        "validate_official_scenario_evaluation_record_v2",
+        "validate_scenario_evaluation_record_v2",
+    )
+    script = f"""
+import sys
+from marl_battlegrounds import evaluation as evaluation_api
+
+for export_name in {export_names!r}:
+    if not callable(getattr(evaluation_api, export_name)):
+        raise SystemExit("missing callable export: " + export_name)
+
+for loaded_name in sys.modules:
+    if loaded_name in {_FORBIDDEN_DIRECT_MODULES!r}:
+        raise SystemExit("unexpected host dependency: " + loaded_name)
+    if any(
+        loaded_name == prefix or loaded_name.startswith(prefix + ".")
+        for prefix in {_FORBIDDEN_HOST_IMPORT_PREFIXES!r}
+    ):
+        raise SystemExit("unexpected array-runtime import: " + loaded_name)
+"""
     result = subprocess.run(
         (sys.executable, "-c", script),
         check=False,

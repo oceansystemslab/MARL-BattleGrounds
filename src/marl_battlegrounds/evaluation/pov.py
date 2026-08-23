@@ -361,6 +361,8 @@ class ActorPovAxisMappingV1(EvaluationModel):
 
     @model_validator(mode="after")
     def _validate_axes(self) -> ActorPovAxisMappingV1:
+        if self.actor_projection_version != ACTOR_POV_SCHEMA_VERSION:
+            raise ValueError("POV V1 requires actor projection version 1")
         for field_name, length in (
             (
                 "target_action_recipient_public_agent_id_by_id",
@@ -1309,6 +1311,7 @@ def _axis_mapping_from_context(
     *,
     global_slot: int,
 ) -> ActorPovAxisMappingV1:
+    _require_actor_projection_v1(context)
     catalog = context.static_mechanics_catalog
     ally_slots = catalog.global_slot_by_actor_and_ally_observation_row[global_slot]
     enemy_slots = catalog.global_slot_by_actor_and_enemy_observation_row[global_slot]
@@ -1352,6 +1355,12 @@ def _axis_mapping_from_replay(
     )
 
 
+def _require_actor_projection_v1(context: EvaluationEpisodeContextV1) -> None:
+    """Reject newer actor-input projections that POV V1 cannot materialize."""
+    if context.actor_projection.version != ACTOR_POV_SCHEMA_VERSION:
+        raise ValueError("actor POV V1 requires actor projection version 1")
+
+
 def _require_selected_self_topology(
     frame: ActorPovFrameV1,
     *,
@@ -1374,6 +1383,7 @@ def _selected_pov_roster_row(
     *,
     global_slot: int,
 ) -> RosterSlotV1:
+    _require_actor_projection_v1(context)
     if type(global_slot) is not int or not 0 <= global_slot < MAX_AGENT_SLOTS:
         raise ValueError("actor POV global_slot must be an exact bounded integer")
     if context.execution_information_mode != "no_shared_obs":
@@ -1522,6 +1532,7 @@ def _export_from_validated_replay(
     global_slot: int,
 ) -> ActorPovReplayArtifactV1:
     context = replay.header.context
+    _require_actor_projection_v1(context)
     if context.execution_information_mode != "no_shared_obs":
         raise ValueError(
             "exact actor POV export is unavailable for shared_obs source material"

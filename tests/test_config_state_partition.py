@@ -254,6 +254,10 @@ def test_spawn_lifecycle_is_team_relative_and_available_to_dead_observers() -> N
     observation, _ = _build_observation_and_action_mask(state, config)
     lifecycle = observation.spawn_lifecycle
     team_roster = config.agent_profile.active_mask.reshape(2, MAX_AGENTS_PER_TEAM)
+    team_class_ids = config.agent_profile.class_ids.reshape(
+        NUM_TEAMS,
+        MAX_AGENTS_PER_TEAM,
+    )
     team_shield_durations = state.spawn_shield_durations.reshape(
         NUM_TEAMS,
         MAX_AGENTS_PER_TEAM,
@@ -283,6 +287,24 @@ def test_spawn_lifecycle_is_team_relative_and_available_to_dead_observers() -> N
         jnp.array_equal(
             lifecycle.alive_mask_by_agent_by_team[MAX_AGENTS_PER_TEAM],
             team_roster[::-1],
+        )
+    )
+    assert lifecycle.class_ids_by_agent_by_team.dtype == jnp.int32
+    assert bool(
+        jnp.array_equal(
+            lifecycle.class_ids_by_agent_by_team[0],
+            team_class_ids,
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            lifecycle.class_ids_by_agent_by_team[MAX_AGENTS_PER_TEAM],
+            team_class_ids[::-1],
+        )
+    )
+    assert bool(
+        jnp.all(
+            lifecycle.class_ids_by_agent_by_team[0][jnp.logical_not(team_roster)] == 0
         )
     )
     assert bool(
@@ -335,6 +357,7 @@ def test_spawn_lifecycle_is_team_relative_and_available_to_dead_observers() -> N
     assert lifecycle.spawn_shield_speed_by_agent[padded_observer] == 0.0
     assert not bool(jnp.any(lifecycle.active_mask_by_agent_by_team[padded_observer]))
     assert not bool(jnp.any(lifecycle.alive_mask_by_agent_by_team[padded_observer]))
+    assert bool(jnp.all(lifecycle.class_ids_by_agent_by_team[padded_observer] == 0))
 
     dead_observer_state = state._replace(
         alive_mask=state.alive_mask.at[0].set(False),
@@ -356,6 +379,12 @@ def test_spawn_lifecycle_is_team_relative_and_available_to_dead_observers() -> N
         jnp.array_equal(
             dead_lifecycle.active_mask_by_agent_by_team[0],
             lifecycle.active_mask_by_agent_by_team[0],
+        )
+    )
+    assert bool(
+        jnp.array_equal(
+            dead_lifecycle.class_ids_by_agent_by_team[0],
+            lifecycle.class_ids_by_agent_by_team[0],
         )
     )
     assert not bool(dead_lifecycle.alive_mask_by_agent_by_team[0, 0, 0])

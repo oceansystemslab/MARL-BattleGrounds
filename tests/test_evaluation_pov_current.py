@@ -11,6 +11,9 @@ from tests.evaluation_fixtures import (
 )
 
 from marl_battlegrounds.core.types import Action
+from marl_battlegrounds.evaluation.actor_projection import (
+    NO_SHARED_OBS_ACTOR_PROJECTION_V2,
+)
 from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
 from marl_battlegrounds.evaluation.pov import (
     ActorPovCurrentSliceV1,
@@ -175,6 +178,22 @@ def test_current_slice_fails_closed_for_shared_obs_and_inactive_actor() -> None:
             no_shared.context,
             no_shared.frames[0],
             global_slot=3,
+        )
+
+
+def test_current_slice_v1_rejects_actor_projection_v2(
+    trajectory: CapturedEvaluationTrajectory,
+) -> None:
+    """POV V1 must not claim exact materialization of the newer actor input."""
+    projection_v2_context = trajectory.context.model_copy(
+        update={"actor_projection": NO_SHARED_OBS_ACTOR_PROJECTION_V2}
+    )
+
+    with pytest.raises(ValueError, match="projection version 1"):
+        build_actor_pov_current_slice_v1(
+            projection_v2_context,
+            trajectory.frames[0],
+            global_slot=0,
         )
 
 

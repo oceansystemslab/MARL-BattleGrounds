@@ -922,6 +922,34 @@ def _build_spawn_lifecycle_observation(
         unmasked_active_mask, config.agent_profile.active_mask[:, None, None]
     )
 
+    # Configured classes are public roster metadata, so only inactive observer
+    # rows are hidden; death, shielding, and visibility do not alter them.
+    class_ids_team_a_view = jnp.concatenate(
+        (
+            config.agent_profile.class_ids[TEAM_A_START:TEAM_A_END][None, :],
+            config.agent_profile.class_ids[TEAM_B_START:TEAM_B_END][None, :],
+        ),
+        axis=0,
+    )
+
+    class_ids_team_b_view = jnp.concatenate(
+        (
+            config.agent_profile.class_ids[TEAM_B_START:TEAM_B_END][None, :],
+            config.agent_profile.class_ids[TEAM_A_START:TEAM_A_END][None, :],
+        ),
+        axis=0,
+    )
+
+    unmasked_class_ids = jnp.concatenate(
+        (
+            jnp.repeat(class_ids_team_a_view[None, :, :], MAX_AGENTS_PER_TEAM, axis=0),
+            jnp.repeat(class_ids_team_b_view[None, :, :], MAX_AGENTS_PER_TEAM, axis=0),
+        ),
+        axis=0,
+    )
+
+    class_ids = unmasked_class_ids * config.agent_profile.active_mask[:, None, None]
+
     alive_mask_team_a_view = jnp.concatenate(
         (
             state.alive_mask[TEAM_A_START:TEAM_A_END][None, :],
@@ -1061,6 +1089,7 @@ def _build_spawn_lifecycle_observation(
         respawn_wave_countdowns_by_agent_by_team=respawn_wave_countdowns_by_agent_by_team,
         active_mask_by_agent_by_team=active_mask,
         alive_mask_by_agent_by_team=alive_mask,
+        class_ids_by_agent_by_team=class_ids,
     )
 
 
@@ -2680,12 +2709,12 @@ def _build_death_transition_facts(
     )
 
 
-def _build_canonical_no_transition_info_object(initial_state: EnvState) -> Info:
-    """Return neutral facts for reset or curated initialization.
+def build_canonical_no_transition_info_object(initial_state: EnvState) -> Info:
+    """Return neutral facts for initialization or fixed-storage padding.
 
-    Initialization exposes the supplied state's step count only through the
-    state itself. Transition facts use their canonical sentinel because no
-    action was accepted and no simulator transition occurred.
+    The supplied step count remains available only through the state itself.
+    Transition facts use their canonical sentinel because no action was
+    accepted and no simulator transition occurred.
     """
 
     all_false_vector = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.bool_)
@@ -3159,7 +3188,7 @@ def initialize_scenario_state(
     validate_env_config(config)
     validate_scenario_initial_state(config, initial_state)
     obs, action_mask = _build_observation_and_action_mask(initial_state, config)
-    info = _build_canonical_no_transition_info_object(initial_state)
+    info = build_canonical_no_transition_info_object(initial_state)
     return (initial_state, obs, action_mask, info)
 
 
@@ -3222,7 +3251,7 @@ def reset(
         initial_state, config
     )
 
-    info = _build_canonical_no_transition_info_object(initial_state)
+    info = build_canonical_no_transition_info_object(initial_state)
 
     return (initial_state, initial_observation, initial_action_mask, info)
 

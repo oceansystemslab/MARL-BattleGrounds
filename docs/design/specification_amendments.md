@@ -13,7 +13,7 @@ They deliberately favor the four project North Stars: researcher-centricity,
 low sample complexity, meaningful tactical and strategic team behavior, and
 professional MARL/software engineering.
 
-## A1. Evaluation information regimes
+## A1. Actor execution-information regimes
 
 **Classification:** risky, accepted design drift.
 **Supersedes:** R20; Sections 2.4, 2.4.1, 2.4.8, 2.4.11, 2.6.18, 2.8.5,
@@ -38,8 +38,9 @@ communication mechanism of its own.
 
 The canonical implementation boundary is:
 
-- `execution_information_mode` is the extensible learner-side setting whose
-  current values are `shared_obs` and `no_shared_obs`;
+- `execution_information_mode` is the extensible actor-side setting whose
+  current values are `shared_obs` and `no_shared_obs`; each learned checkpoint
+  fixes exactly one value;
 - a command-line Boolean may be a convenience alias, but is not the canonical
   persisted representation;
 - simulator state, dynamics, rewards, action semantics, base observations, and
@@ -68,14 +69,23 @@ losslessly derivable from those observations, `execution_information_mode`,
 and the actor-input projection version. They do not persist a second copy of
 materialized SharedObs tensors.
 
-The Milestone 6 V1 frame schema supports both information regimes without
-implementing the future compositor. Its availability field is an optional,
-explicit Boolean matrix with axes
+The Milestone 6 V1 frame schema supports either information regime without
+implementing the future compositor. `EvaluationEpisodeContextV1` records one
+episode-wide `execution_information_mode` and one actor-input projection, so
+every configured active policy assignment in a V1 episode is homogeneous in
+those contracts. The current V1 schema is immutable: it cannot truthfully
+represent SharedObs and NoSharedObs assignments in the same episode. Such
+mixed execution is ineligible for official evaluation, scenario, replay, or
+metric output until the Milestone 10 V2 contract in A12 exists.
+
+The V1 availability field is an optional, explicit Boolean matrix with axes
 `(recipient_global_slot, sensor_source_global_slot)` and shape `(10, 10)`.
 Conditional validation requires that matrix for `shared_obs` and forbids it
 for `no_shared_obs`. Its diagonal, cross-team cells, inactive-recipient rows,
 and inactive-source columns are false. Neither regime stores a materialized
-SharedObs tensor.
+SharedObs tensor. SharedObs-versus-NoSharedObs and the reverse assignment are
+future directional strata, not values to pool with each other or with either
+homogeneous regime.
 
 ## A2. Metric architecture and simulator cost
 
@@ -94,13 +104,19 @@ MARL-BattleGrounds uses three deliberately separate data planes:
    statistics, optimizer state, runtime timing, and optional reward-shaping
    components.
 
+These are payload, authority, and cost boundaries inside one lifecycle; they
+are not separate regime-specific runners, trainers, evaluators, RNG paths,
+action-realization paths, or metric systems. A12 defines the common Milestone
+10–12 spine and the narrow seams at which actor information may differ.
+
 Milestone 6 CP2 normalizes those planes through the following accepted host
 boundary:
 
 - `EvaluationEpisodeContextV1` owns the roster's fixed-slot identity/topology
   fields and the resolved configuration's per-slot body radius, movement,
   interaction ranges, maximum health, and recovery mechanics. It also owns
-  policy, catalog, seed, `execution_information_mode`, `actor_projection`,
+  policy, catalog, seed, one episode-wide homogeneous
+  `execution_information_mode`, one compatible `actor_projection`,
   `critic_information_regime`, `canonical_reward_mode`,
   `shaping_configuration`, and code provenance. It carries exactly ten
   discriminated policy-assignment rows; inactive slots use an explicit
@@ -337,10 +353,17 @@ In particular:
 three/five-seed target or leave “standard error or confidence interval”
 unspecified.
 
-Evaluation episodes estimate one trained checkpoint. Independent training
-seeds—not episodes, teams, agents, deaths, or repeated matches—are the default
-experimental units for algorithm-level claims. Results aggregate in this
-order:
+Evaluation episodes estimate one trained checkpoint. Each learned checkpoint
+is fixed to one `execution_information_mode`, actor-input projection version,
+and compatible compiled actor front end. Compatibility validation must reject
+a mismatch before compilation, device allocation, or execution. An explicitly
+declared cross-regime transfer or out-of-distribution study is a separate
+estimand and may not reinterpret the source checkpoint as native to the
+destination regime.
+
+Independent training seeds—not episodes, teams, agents, deaths, or repeated
+matches—are the default experimental units for algorithm-level claims. Results
+aggregate in this order:
 
 1. episodes within one homogeneous training-seed/evaluation cell;
 2. evaluation cells under frozen predeclared weights;
@@ -365,6 +388,14 @@ failure/missingness policy.
 Learning/sample-efficiency results report both environment transitions and
 active-agent decision transitions, plus wall-clock/compute provenance. A 1v1
 and a 5v5 environment transition do not represent equal agent experience.
+
+Under the immutable V1 evaluation contract, every cell is also homogeneous in
+the episode-wide execution-information mode and compatible actor projection.
+Mixed-regime execution is ineligible until Milestone 10 introduces the V2
+per-active-slot provenance contract in A12. After that contract exists,
+SharedObs-versus-NoSharedObs and NoSharedObs-versus-SharedObs are distinct
+assignment directions, each requiring task-appropriate side swaps. They are
+never pooled with each other or with homogeneous-regime cells.
 
 ## A8. Milestone 6 Step 5 fact budget
 
@@ -543,7 +574,486 @@ Scene/Event V2 and browser transports preserve both events losslessly without
 adding Milestone 7 presentation behavior.
 
 Existing development artifacts and fixtures are disposable and are
-regenerated under the expanded V1 contract. There is no V2 alias, legacy
-loader, optional fallback, dual-schema root, or compatibility shim. After the
-alpha schema freeze, any incompatible wire change requires a version bump and
-an explicit migration policy rather than another in-place mutation.
+regenerated under the expanded V1 contract. For this approved pre-freeze
+in-place expansion, there is no V2 alias, legacy loader, optional fallback,
+dual-schema root, or compatibility shim. After the alpha schema freeze, any
+incompatible wire change—including the mixed-regime contract required below—
+requires a version bump and an explicit migration policy rather than another
+in-place mutation.
+
+## A12. Common Milestone 10–12 policy pipeline spine
+
+**Classification:** required policy, training, and evaluation architecture
+clarification.
+**Supersedes:** Sections 2.12.13–2.12.18, 2.13.4–2.13.5, 2.15.7,
+2.15.10–2.15.11, and 4.3.10–4.3.12, plus Appendices A.12, A.15, and A.16,
+wherever they permit separate execution-regime pipelines, mutable checkpoint
+regimes, mixed-regime V1 provenance, or duplicated lifecycle ownership.
+
+Milestones 10–12 extend one common policy-to-transition pipeline spine. An
+episode specification is either selected by a training distribution or fixed
+by an evaluation suite or scenario; that selection ownership does not create
+separate task/policy semantics or a selector-owned runner:
+
+```text
+training-selected or evaluation/scenario-fixed episode specification
+  -> versioned policy assignments and seed schedule
+  -> evaluation/scenario host adapter or JAX training adapter
+  -> reset, base observations, and exact action masks
+  -> selected authorized-input composition and learner projection
+  -> regime-compatible compiled actor front end
+  -> shared exact-mask action realization and one joint-action assembler
+  -> core step and common transition/rollout semantics
+  -> training-only batch/update/checkpoint lifecycle
+  -> the same capture/replay/metric authority wherever applicable
+```
+
+Execution-information regimes may differ only at these explicit seams:
+
+1. authorized-input composition;
+2. learner-input projection and the compatible compiled actor front end;
+3. checkpoint compatibility validation;
+4. separately measured compute and resource cost; and
+5. manifest, evaluation-cell, and report stratum.
+
+Regime selection does not authorize a second policy-specification resolver,
+environment or scenario runner, trainer or update loop, evaluator, RNG
+protocol, mask consumer, legal-action realization, joint-action assembler,
+capture path, replay format, or metric implementation. SharedObs and
+NoSharedObs therefore share lifecycle and semantic ownership even when their
+actor inputs and compatible compiled front ends differ.
+
+Milestone 10 owns the common versioned episode-specification and
+policy-assignment contracts, seed-schedule schema and named derivation
+protocol, evaluation/scenario host runner,
+capture, replay, and failure-semantics integration. Milestone 11 owns every
+training selector: stateless direct or custom training distributions and
+optional stateful, checkpointable curricula. Each emits ordinary episode and
+policy specifications into the common training spine; a distribution or
+curriculum is not a second trainer or rollout path. Milestone 12 consumes those
+selections through the common JAX rollout, batch, update, and checkpoint
+lifecycle while owning no roster catalog or selection policy. It also owns the
+SharedObs compositor, versioned learner projections, and compatible compiled
+actor front ends. These ownership boundaries create extension seams, not
+parallel products.
+
+The M10 evaluation/scenario host adapter and M12 pure-JAX training adapter may
+differ mechanically because fallible heterogeneous provider orchestration and
+compiled learner batching have different constraints. M11 training selections
+enter the shared episode contract and the M12 adapter; they do not route through
+the M10 host runner. Both adapters implement the same policy epoch, action,
+transition, completion, and reproducibility contracts and require shared
+conformance evidence. This is one semantic pipeline with purpose-appropriate
+adapters, not two interpretations of the environment.
+
+Every learned checkpoint declares exactly one `execution_information_mode`,
+one actor-input projection version, and one compatible compiled actor-front-end
+contract. Standard compatibility validation rejects incompatible combinations
+before compilation, device allocation, or execution. Cross-regime
+initialization is permitted only as an explicitly declared transfer or
+out-of-distribution intervention with separate provenance and reporting; it
+does not make one checkpoint switch regimes in place.
+
+The current `EvaluationEpisodeContextV1` and its replay family are homogeneous
+and immutable: their single episode-wide `execution_information_mode` and
+`actor_projection` apply to every configured active policy assignment. A
+runtime may not label a mixed SharedObs/NoSharedObs match as a valid V1 episode,
+even if it can mechanically produce a joint action. Such a match is ineligible
+for official evaluation, controlled-scenario evidence, replay publication, and
+metric reporting.
+
+Mixed-regime execution is deferred to a Milestone 10 V2 contract. V2 must add
+per-active-slot execution-information and actor-projection provenance, preserve
+the availability authority required to reconstruct every recipient's input,
+and feed the same common runner, action, capture, replay, and metric lifecycle.
+It must not mutate or reinterpret V1. Its recipient-by-source availability
+matrix may be absent only when every configured active assignment is
+NoSharedObs. When the matrix is present, every NoSharedObs or inactive-recipient
+row is all false; diagonal, cross-team, and inactive-source entries are also
+false. The matrix is the exact same-epoch authority used by input composition
+and capture, not a replay-side reconstruction. A homogeneous/mixed episode
+profile is derived from the configured-active per-slot assignments; it is not
+a second editable authority. An explicit V1-to-V2 migration may copy V1's
+episode-wide mode and projection to each configured-active V2 slot, mark
+inactive slots not applicable, and preserve compatible recorded availability,
+but it can produce only a homogeneous V2 profile. It fails if required
+versioned provenance cannot be established, gives the migrated V2 artifact a
+new identity, and never mutates V1 bytes or digests. After V2 exists, focal
+SharedObs versus opponent NoSharedObs and focal NoSharedObs versus opponent
+SharedObs are separate directional cells with task-appropriate side swaps.
+Neither direction is pooled with the other or with homogeneous SharedObs or
+NoSharedObs results.
+
+## A13. Canonical scripted-policy identity and task/regime separation
+
+**Classification:** required baseline-architecture correction.
+**Supersedes:** historical baseline clauses that define easy, medium, hard,
+expert, or any other difficulty-indexed scripted-policy family; and any
+Milestone 7–12 planning language that permits separate task behavior or
+parameter identities merely because SharedObs and NoSharedObs expose different
+authorized actor inputs.
+
+Each implemented task owns exactly one canonical scripted-policy behavioral
+identity and one immutable parameter profile for that semantic version. The
+historical easy/medium/hard/expert family is permanently replaced rather than
+retained as aliases, presets, evaluation strata, or hidden parameter variants.
+Episode configuration, training distribution, evaluation suite, and scenario
+are separate host concepts and do not create additional scripted-policy
+profiles. A roster is resolved by the owning training distribution,
+evaluation suite, or scenario before the common policy pipeline invokes the
+scripted policy; it is not a scripted-policy identity or difficulty profile.
+
+Information regime is provenance and input availability, not a second
+behavioral specification. SharedObs and NoSharedObs adapters must project their
+authorized same-epoch sources into the same versioned policy-fact contract and
+feed the same task scorer, class semantics, weights, thresholds, exact-mask
+handling, tie protocol, and trace ontology. The scorer may respond differently
+when SharedObs makes additional facts valid, but it must not branch on the
+regime identifier or substitute regime-specific behavioral parameters.
+
+The scripted policy uses direct combat-pair and movement-candidate scoring. It
+does not introduce persistent attack, retreat, engage, flank, recovery,
+guardian, carrier, escort, allocation, or other tactical modes. Common
+mechanic and class-role terms form the stable semantic core; a thin task head
+adds only bounded current-objective contributions authorized by that task's
+public state. A task that requires different base mechanic weights, class
+triggers, or causal semantics must first explicitly reopen the owning common
+decision and then declare a new task-policy semantic version rather than
+hiding the change in an adapter.
+
+The Milestone 7 questionnaire freezes that reusable semantic core for every
+scripted task policy: authorized mechanic facts, class roles, combat and
+movement score meanings, Ultimate triggers, mask authority, causal epochs,
+class-prior semantics, and exact-peer tie handling. Team Deathmatch supplies a
+zero objective contribution. Later King of the Hill and Capture the Flag
+questionnaires may add only their authorized objective facts and bounded
+current-objective contributions. There is no pre-authorized task-mechanic
+exception bucket. A task that cannot obey the common mechanic/class contract
+must first obtain an explicit user reopening of the owning common decision,
+with a rationale, semantic version bump, and cross-task compatibility audit;
+until then, the proposed divergence is forbidden.
+
+Within this contract, **bounded** means finite and overridable, not
+necessarily weak. A declared class prior or objective contribution may
+materially influence its scorer while remaining subject to stronger current
+threat, vulnerability, finishing, control, effectful recipient-bound team
+value, and the other declared direct-score components.
+
+Milestone 7 implements only the Team Deathmatch task policy with its
+NoSharedObs adapter.
+SharedObs is added only after its authorized source-bank and projection
+contracts exist. King of the Hill and Capture the Flag policy heads are added
+only after those tasks provide implemented observation, mask, transition,
+replay, and metric authority. No placeholder adapter, empty task head, or
+future-module stub is required. The first implementation may keep the logical
+common scorer inside the Team Deathmatch policy module; extraction to a common
+module occurs only when a second real task consumes it and equivalence proof
+shows the refactor is behavior-preserving.
+
+The canonical Team Deathmatch scripted policy treats score, score threshold,
+remaining kills, match point, and horizon as behaviorally inert. It selects
+the best current combat and movement action from current authorized mechanics;
+it does not switch personalities because the match is early, late, close, or
+at match point.
+
+## A14. Public configured class-to-slot observation metadata
+
+**Classification:** accepted actor-observation contract clarification.
+**Supersedes:** any clause or planning assumption that treats a configured
+unit's class, its class-to-roster-slot association, or configured-class
+presence/absence as private dynamic sensor information.
+
+`SpawnLifecycleObservation` includes the configured roster field:
+
+```text
+class_ids_by_agent_by_team
+full environment shape: (10, 2, 5) int32
+scalar actor shape:          (2, 5) int32
+relation row 0: observer's own team
+relation row 1: observer's opponent
+```
+
+For each configured-active observer, relation slot `j` aligns with that
+observer's unit, configured-active, alive, spawn-shield, respawn, and spawn-pad
+relation slot `j`. Team A observers receive `[Team A, Team B]`; Team B
+observers receive `[Team B, Team A]`. Configured-active slots retain their
+class ID through occlusion, death, spawn shielding, and respawn. A
+configured-inactive candidate slot uses neutral class ID `0`, and every
+configured-inactive observer row is canonical zero.
+
+This field makes both configured class-to-slot mappings public. It may be
+joined with already-public lifecycle rows, so an actor may know which
+configured class is alive, dead, shielded, or awaiting respawn. It does not
+unmask position, health, status, cooldown, selected action, action history, or
+any other visibility-gated dynamic unit value. Class equality is not a
+guaranteed focal-row decoder because duplicate-class rosters are legal; focal
+truth continues to come from the dedicated self projection and exact focal
+mask.
+
+The class field is identical for learned and scripted actors and in SharedObs
+and NoSharedObs. It is observer-invariant public roster metadata carried by the
+base observation, not teammate-sensor material and not an input that the
+SharedObs source bank owns or duplicates. SharedObs versus NoSharedObs measures
+additional authorized dynamic teammate sensing, not discovery of the public
+opposing roster.
+
+The immutable V1 evaluation/replay schema is not mutated to serialize a new
+leaf. Its existing episode roster context contains the configured slot/class
+authority needed to reconstruct this base-observation field losslessly. Any
+consumer that needs the field must use a newly versioned actor projection/POV
+contract that performs and validates that reconstruction, or fail closed.
+Mixed-regime execution remains subject to A12's separate V2 gate.
+
+## A15. Episode configuration and experiment-distribution ownership
+
+**Classification:** required experiment-architecture correction.
+**Supersedes:** Sections 2.3.1, 2.3.2, 2.3.6, 2.9.1–2.9.4,
+2.12.6–2.12.7, 2.12.17, 2.13.3, 2.17.9, 2.17.15, 4.3.7, and 4.3.11;
+Appendices A.3, A.12, A.20, and A.21; and any
+roadmap, deliverable, or planning clause, only where it requires the 136-cell
+no-duplicate composition grid, roster-bearing `1v1`–`5v5` task identifiers,
+curriculum discovery through a generic task registry, fixed smaller-team
+training rosters, or Stage/Milestone 7 completion of such a grid. It also
+supersedes those sources wherever they place training-distribution,
+information-regime, actor/critic observation-schema, action-schema,
+reward-mode or shaping,
+logging, replay, evaluation-suite, scenario, policy-assignment, seed-schedule,
+or reset-randomization ownership inside a task/episode configuration rather
+than the owning contracts named below. `EnvConfig` continues to own resolved
+simulator inputs and task mechanics; this amendment reassigns experiment and
+artifact orchestration, not transition semantics. In particular, historical
+formal-model assumptions of symmetric team topology do not constrain the two
+resolved rosters, and reset-layout randomization belongs to the selecting
+training distribution, evaluation suite, or scenario rather than a roster-
+bearing task identity.
+
+`EnvConfig` is a resolved configuration for one reproducible episode. It owns
+the immutable simulator inputs consumed by reset and step, including the task
+mode, padded roster and active slots, resolved map geometry, task constants,
+lifecycle mechanics, and horizon. Joined policy assignments, seed schedule,
+catalog and code provenance complete the reproducibility record. `EnvConfig`
+is not a roster whitelist, named matchup, training preset, sampling
+distribution, curriculum stage, evaluation suite, or scenario definition.
+
+These terms are deliberately distinct:
+
+- **structurally valid** means that an episode configuration satisfies the
+  simulator's supported task, schema, dtype, shape, catalog, padding,
+  geometry, threshold, horizon, and active-team invariants;
+- **default** identifies a convenience selected by an owning workflow and
+  imposes no restriction on other valid configurations;
+- **official** identifies a versioned benchmark-owned evaluation or scenario
+  population with frozen provenance; and
+- **canonical** identifies the benchmark's primary fixed task semantics or
+  evaluation condition, not every condition on which a policy may train.
+
+Ownership is explicit and non-overlapping:
+
+| Concern | Decision owner | Executor or consumer |
+| --- | --- | --- |
+| Structural validity and resolved inputs for one episode | `EnvConfig` construction plus core host validation | `reset` and `step` |
+| Default direct, researcher-defined custom, and optional curriculum training selection | Milestone 11 | Milestone 12 JAX training adapter |
+| Official or custom evaluation population and reporting identity | Versioned evaluation suite under the evaluation protocol | Milestone 10 evaluation host adapter |
+| Controlled setup, roster, initial state, fixed-slot roles, matched seed schedule and realized-coordinate rule, horizon, and endpoints | Versioned scenario definition | Milestone 10 scenario host adapter |
+| Shared episode/policy-assignment and seed-derivation schemas | Milestone 10 contracts | M11 selectors, M12 training, and evaluation/scenario definitions |
+
+Owning a schema does not transfer ownership of the values selected under it:
+M10 defines the shared contracts, M11 selects training populations, and each
+evaluation suite or scenario freezes its own evidence population.
+
+For Team Deathmatch, every roster with one through five configured active
+members on each team is structurally eligible. The two team sizes and class
+sequences may differ. Duplicate classes, Priest in 1v1, all-Priest teams, and
+any other catalog-valid composition are legal. Validation rejects malformed,
+out-of-domain, geometrically impossible, or unimplemented configurations; it
+does not reject an experiment because its roster is noncanonical, asymmetric,
+duplicated, strategically weak, or likely to draw. The fixed maximum shape and
+inactive-slot masks preserve one learner-facing schema across those choices.
+
+Milestone 7 exposes construction, not an experiment catalog. Its planned
+Team Deathmatch boundary is:
+
+```python
+make_standard_team_deathmatch_config(
+    *,
+    team_a_roster: Sequence[AgentClassName],
+    team_b_roster: Sequence[AgentClassName],
+    score_threshold: int,
+    max_steps: int,
+) -> EnvConfig
+
+make_canonical_team_deathmatch_evaluation_config() -> EnvConfig
+```
+
+`AgentClassName` denotes one exact supported class token (`mage`, `warrior`,
+`hunter`, `rogue`, or `priest`); it is not a roster-combination enum or
+whitelist. Its host type definition is part of the M7 construction surface.
+
+The standard-layout factory accepts every structurally valid Team Deathmatch
+roster and applies the approved standard layout and lifecycle mechanics. It is
+a focused episode-construction convenience, not the universal training API and
+not authority over future training-map selection. The canonical evaluation
+factory fixes the mirrored 5v5 roster with exactly one Mage, Warrior, Hunter,
+Rogue, and Priest per team, approved canonical evaluation layout, score
+threshold, horizon, and lifecycle rules. Canonical Team Deathmatch reward
+semantics remain simulator behavior; the evaluation suite/context separately
+records the canonical reward-mode identity and other joined provenance because
+`EnvConfig` carries no reward-mode identifier.
+`team_deathmatch` remains the battleground identity. Stable
+training-preset, evaluation-suite, and scenario IDs, if introduced, belong to
+their respective layers rather than a roster-resolving task registry.
+
+Milestone 11 owns training selection. Default direct Team Deathmatch training
+selects the canonical mirrored five-class 5v5 roster with the same task
+mechanics, lifecycle rules, score threshold `K`, horizon `H`, and canonical
+reward as canonical evaluation, but uses the separately approved training-map
+distribution and training seed schedule. Researchers may instead define any
+distribution over structurally valid episode configurations, rosters, maps,
+opponents, and supported policy contracts. Optional curriculum training is a
+stateful selector over the same episode contract; the benchmark curriculum
+will use explicitly reviewed, handpicked 1v1–5v5 rosters rather than an
+exhaustive composition product. Its exact rosters, maps, weights, retention,
+opponents, and transition rules remain Milestone 11 decisions and require
+explicit scientific approval. Milestone 12 executes the selected episodes
+through the common JAX training spine and must not reconstruct, enumerate, or
+own a roster distribution.
+
+Official canonical Team Deathmatch evaluation is a separately versioned,
+frozen mirrored 5v5 population with exactly one Mage, Warrior, Hunter, Rogue,
+and Priest per team. A custom evaluation suite may use any structurally valid
+roster but must identify itself as custom and freeze the same reproducibility
+dimensions. A scenario owns its resolved episode configuration, explicit
+fixed-slot roster, initial state, role template, horizon, matched seed schedule,
+and endpoints. The schedule is a stable multi-attempt definition; each
+episode's realized seed record joins to exactly one declared schedule
+coordinate. Runtime assignment of Team A/Team B or per-slot policies binds
+policies to those frozen slots; it cannot replace the scenario roster.
+
+This scenario contract is a required M7 C2 implementation gate, not a claim
+that the current V1 schema already proves every join. The current
+`ResolvedScenarioSpecificationV1` binds scenario identity, resolved-config
+digest, horizon, and eligible role names, but it does not bind an explicit
+fixed-slot roster, exact role template, or matched seed-schedule identity and
+membership rule. The current resolved-config record does not contain roster
+rows, and one `EvaluationSeedProtocolV1` is only one episode's realized seed
+record rather than a schedule. C2 must version the resolved scenario contract,
+bind the explicit roster and role template exactly to episode context, bind a
+stable schedule definition, and prove that each realized episode seed record
+occupies exactly one declared schedule coordinate. Its official-scenario
+validator must also enforce parity with the core structural/product config
+invariants on loaded context. Team A/Team B and per-slot policy binding cannot
+alter the resolved configuration, roster, configured-active slots, role
+template, schedule, or realized coordinate. Until those proofs pass, no
+scenario receives an official frozen-scenario claim under A15.
+
+Training distributions are never inferred from an official evaluation suite
+or scenario, and training may not consume locked evaluation or scenario maps,
+seeds, opponents, or other held-out material. Direct and curriculum training
+share task semantics and one learner lifecycle; curriculum adds selection
+state, not a simulator mode or execution path.
+
+The historical 136-cell no-duplicate Team Deathmatch grid is retired
+provenance. It is not a required preset, registry surface, evaluation grid,
+curriculum commitment, test count, acceptance criterion, or implied default.
+Any future proposal to ship that grid as a benchmark-owned training preset or
+official evaluation suite requires a new tracked amendment and explicit
+scientific approval.
+
+## A16. Development scene authoring and asset-promotion boundary
+
+**Classification:** required experiment-architecture clarification.
+**Clarifies:** Sections 2.3.1, 2.3.6, 2.8.3-2.8.4, 2.9, 2.12.6-2.12.7,
+and 4.3.7; Amendment A15; and the future Milestone 8-12 handoffs.
+**Activation:** this amendment authorizes only development-time authoring,
+validation, and content identity. It does not activate King of the Hill or
+Capture the Flag configuration, state, observations, transitions, collision,
+scoring, reward, or policy behavior.
+
+MARL-BattleGrounds may provide one local, developer-only scene-authoring tool
+for expressing map and controlled-scenario designs precisely. The tool is a
+development communication and validation surface, not a researcher-facing
+trainer, evaluation runner, scenario host, task registry, or second simulator.
+Its browser or presentation layer never owns catalog mechanics, simulator
+truth, or JAX arrays. Authoritative compilation and validation remain host-side
+and reuse the existing catalog, configuration, reset, and curated-state
+authorities.
+
+Map and scenario authoring are separate semantic concerns. A map owns reusable
+static spatial inputs: dimensions, blocking walls and pillars, the exact five
+respawn-pad centers for each team, and development annotations for future
+objective regions. A scenario references one map and adds ordered Team A and
+Team B fixed-slot rosters, initial agent centers, episode rules, sparse
+curated-state overrides, roles, schedule, horizon, and endpoints as required by
+its owning scenario contract. Duplicate classes and asymmetric
+one-to-five-agent rosters remain structurally legal; omitted team-local rows
+resolve to inactive fixed-shape padding.
+
+Development authoring has three deliberately different lifecycle stages:
+
+1. A **mutable development draft** preserves editable semantic intent. The
+   working names `DevMapDraftV1` and `DevScenarioDraftV1` are explicitly
+   non-public and do not pre-approve permanent M10 or M11 type names.
+2. A **validated candidate** contains normalized semantic content with its own
+   content digest. Its immutable candidate record separately binds that digest
+   to versioned compile and validation evidence produced by current product
+   authorities. It is not thereby official, canonical, training, validation,
+   evaluation, or locked-test material.
+3. An **owner-promoted asset** retains that inherent semantic content digest
+   and receives the durable public identity, version, and approval record
+   assigned by its owning future contract. Evaluation suites, experiment
+   manifests, scenarios, or M11 training distributions then select it and
+   assign its use.
+
+Mutable drafts are never direct production inputs to training, validation,
+official evaluation, or scenario-evaluation pipelines. Future consumers load
+owner-promoted semantic assets or the common resolved episode/scenario
+contracts. They may subsume the development compiler or retain a thin adapter,
+but they must not trust browser state, filenames, mutable draft IDs, or a
+parallel development loader as scientific authority.
+
+Maps are partition-neutral. A map document does not declare itself `training`,
+`development`, `validation`, `evaluation`, `locked-test`, `official`, or
+`canonical`. Those classifications, weights, and leakage constraints belong to
+the selecting distribution, suite, scenario, or experiment manifest. Reusing a
+map across populations is therefore an explicit manifest decision rather than
+a property inferred from its filename or authoring history.
+
+The first authoring boundary exposes only authored facts. Agent class, team and
+fixed team-local slot, initial center, alive state, current health, remaining
+cooldown, named status durations, spawn-shield duration, out-of-combat
+countdown, team scores, timestep, and respawn-wave clocks may be curated within
+their existing validation contracts. Body radius, movement speed, observation
+and interaction ranges, maximum health, recovery mechanics, damage, healing,
+cooldown maxima, and status magnitudes remain catalog-derived and read-only.
+Previous-action history remains the canonical neutral initialization and is
+not an ordinary first-version authoring control.
+
+The authoritative development path is semantic draft parsing, immutable
+profile resolution, padded configuration construction, ordinary reset defaults,
+sparse curated-state overlay, product and scenario validation, and normalized
+content identity. Map resizing never silently moves authored content; geometry
+that becomes invalid remains invalid until the author corrects it. The exact
+frontend package, reuse boundary, endpoints, persistence paths, canvas
+mechanics, components, wire shapes, and detailed proofs remain deferred until
+the accepted replay-viewer foundation has been integrated.
+
+Future-objective geometry is annotation-only until its task milestone owns the
+complete semantics. King of the Hill annotations carry hill center and radius.
+Capture the Flag carries exactly one static `CTF Team Base` per team: the base
+center is that team's flag-home point, and the circle at that center is that
+team's capture zone. One geometry record therefore serves both spatial roles
+without duplicating coordinates. Pickup radius, dynamic home/carried/dropped
+flag state, current flag position, carrier identity, return timing, capture
+eligibility, observations, and transition ordering remain separate Milestone 9
+decisions. Neither hills nor CTF bases enter current Team Deathmatch
+`EnvConfig`, `EnvState`, observations, collision, policy inputs, transitions,
+scoring, or reward authority.
+
+The bounded M7 C2 scenario precedent must anticipate promoted authored content
+without depending on development draft schemas. Its resolved scenario version
+independently freezes and joins a content-addressed layout identity, a
+content-addressed authored-initial-condition identity, the resolved
+configuration digest, explicit fixed-slot roster and role template, matched
+seed schedule and realized coordinate, horizon, and scenario identity. M10
+must later subsume or explicitly version this precedent when it defines the
+permanent shared contracts and promotion adapters.

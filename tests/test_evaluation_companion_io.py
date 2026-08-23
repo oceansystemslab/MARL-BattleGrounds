@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -13,9 +15,12 @@ from tests.evaluation_fixtures import captured_evaluation_trajectory
 import marl_battlegrounds.evaluation.replay_io as replay_io
 from marl_battlegrounds.evaluation.metrics import build_evaluation_observer_v1
 from marl_battlegrounds.evaluation.models import (
+    AssignedPolicySlotV1,
     ContentAddressedIdentityV1,
     EvaluationEpisodeContextV1,
     EvaluationEpisodeIdentityV1,
+    EvaluationFrameV1,
+    NotApplicablePolicySlotV1,
     VersionedIdentityV1,
     canonical_digest_sha256,
 )
@@ -31,25 +36,35 @@ from marl_battlegrounds.evaluation.replay import (
 )
 from marl_battlegrounds.evaluation.replay_io import (
     ACTOR_POV_FILE_SUFFIX_V1,
+    REPLAY_FILE_SUFFIX_V1,
     SCENARIO_FILE_SUFFIX_V1,
     ReplayIOErrorCodeV1,
     ReplayLoadError,
     ReplaySaveError,
     canonical_scenario_evaluation_record_json_bytes_v1,
+    canonical_scenario_evaluation_record_json_bytes_v2,
     load_actor_pov_replay_artifact_v1,
     load_scenario_evaluation_record_v1,
+    load_scenario_evaluation_record_v2,
     save_actor_pov_replay_artifact_v1,
+    save_replay_bundle_v1,
     save_scenario_evaluation_record_v1,
+    save_scenario_evaluation_record_v2,
 )
 from marl_battlegrounds.evaluation.scenario import (
     SCENARIO_SPECIFICATION_SCHEMA_ID,
     ResolvedScenarioSpecificationV1,
+    ResolvedScenarioSpecificationV2,
     ScenarioBooleanValueV1,
     ScenarioEvaluationRecordV1,
+    ScenarioEvaluationRecordV2,
     ScenarioMeasurementDefinitionV1,
     ScenarioMeasurementResultV1,
     ScenarioPredicateResultV1,
+    ScenarioSeedScheduleV2,
     build_scenario_evaluation_record_v1,
+    build_scenario_evaluation_record_v2,
+    resolved_initial_state_digest_sha256_v2,
 )
 
 type CompanionKind = Literal["pov", "scenario"]
@@ -130,7 +145,7 @@ def _scenario_specification(
 
 def _context_with_specification(
     context: EvaluationEpisodeContextV1,
-    specification: ResolvedScenarioSpecificationV1,
+    specification: ResolvedScenarioSpecificationV1 | ResolvedScenarioSpecificationV2,
 ) -> EvaluationEpisodeContextV1:
     identity_payload = context.identity.model_dump(mode="python")
     identity_payload["scenario"] = ContentAddressedIdentityV1(
@@ -149,6 +164,12 @@ class _CompanionCase:
     bundle: ReplayBundleV1
     pov: ActorPovReplayArtifactV1
     scenario: ScenarioEvaluationRecordV1
+
+
+@dataclass(frozen=True, slots=True)
+class _V2CompanionCase:
+    bundle: ReplayBundleV1
+    scenario: ScenarioEvaluationRecordV2
 
 
 def _build_case(episode_id: str) -> _CompanionCase:
@@ -197,6 +218,142 @@ def _build_case(episode_id: str) -> _CompanionCase:
     )
 
 
+def _scenario_seed_schedule_v2(
+    context: EvaluationEpisodeContextV1,
+) -> ScenarioSeedScheduleV2:
+    payload: dict[str, object] = {
+        "schema_id": "marl_battlegrounds.evaluation.scenario_seed_schedule",
+        "schema_version": 2,
+        "schedule_id": "matched-schedule",
+        "schedule_version": 1,
+        "realized_seed_protocols": (context.seed_protocol,),
+    }
+    return ScenarioSeedScheduleV2.model_validate(
+        {
+            **payload,
+            "canonical_digest_sha256": canonical_digest_sha256(payload),
+        }
+    )
+
+
+def _scenario_specification_v2(
+    context: EvaluationEpisodeContextV1,
+    *,
+    initial_frame: EvaluationFrameV1,
+) -> ResolvedScenarioSpecificationV2:
+    role_template = tuple(
+        assignment.evaluation_role
+        if isinstance(assignment, AssignedPolicySlotV1)
+        else "not_applicable"
+        for assignment in context.policy_assignments
+    )
+    assert all(
+        isinstance(assignment, (AssignedPolicySlotV1, NotApplicablePolicySlotV1))
+        for assignment in context.policy_assignments
+    )
+    payload: dict[str, object] = {
+        "schema_id": SCENARIO_SPECIFICATION_SCHEMA_ID,
+        "schema_version": 2,
+        "scenario_id": "scenario",
+        "scenario_version": 2,
+        "classification": "custom",
+        "hypothesis": "The supplied endpoint is evaluated without inference.",
+        "layout": context.identity.layout,
+        "authored_initial_condition": ContentAddressedIdentityV1(
+            identifier="initial-condition",
+            version=1,
+            canonical_digest="2" * 64,
+        ),
+        "resolved_initial_state_digest_sha256": (
+            resolved_initial_state_digest_sha256_v2(initial_frame)
+        ),
+        "parameters": (),
+        "resolved_config_digest_sha256": (
+            context.resolved_env_config.canonical_digest_sha256
+        ),
+        "roster_template": context.roster,
+        "role_template": role_template,
+        "seed_schedule": _scenario_seed_schedule_v2(context),
+        "horizon": context.expected_horizon,
+        "pressure_protocol": None,
+        "primary_measurement": ScenarioMeasurementDefinitionV1(
+            measurement_id="test.endpoint",
+            measurement_version=1,
+            role="primary",
+            value_type="boolean",
+            units="boolean",
+            completion_scope="complete_episode",
+            supports_right_censoring=False,
+        ),
+        "secondary_measurements": (),
+        "violations": (),
+        "success_predicate": VersionedIdentityV1(
+            identifier="test.success",
+            version=1,
+        ),
+        "completion_policy": VersionedIdentityV1(
+            identifier="test.completion",
+            version=1,
+        ),
+        "partial_result_policy": VersionedIdentityV1(
+            identifier="test.partial",
+            version=1,
+        ),
+    }
+    return ResolvedScenarioSpecificationV2.model_validate(
+        {
+            **payload,
+            "canonical_digest_sha256": canonical_digest_sha256(payload),
+        }
+    )
+
+
+def _build_case_v2(episode_id: str) -> _V2CompanionCase:
+    trajectory = captured_evaluation_trajectory(
+        transition_count=1,
+        capture_profile="scenario_metric_complete",
+        expected_horizon=1,
+        with_scenario=True,
+        episode_id=episode_id,
+    )
+    specification = _scenario_specification_v2(
+        trajectory.context,
+        initial_frame=trajectory.frames[0],
+    )
+    context = _context_with_specification(trajectory.context, specification)
+    observer = build_evaluation_observer_v1(context)
+    observer.start(trajectory.frames[0])
+    observer.append(trajectory.transitions[0], trajectory.frames[1])
+    report = observer.finalize(completion_state="complete")
+    bundle = build_replay_bundle_v1(
+        observer,
+        report,
+        runtime_provenance=_runtime_provenance(),
+    )
+    scenario = build_scenario_evaluation_record_v2(
+        specification,
+        bundle.replay,
+        bundle.metric_report_artifact,
+        schedule_coordinate=0,
+        measurement_results=(
+            ScenarioMeasurementResultV1(
+                measurement_id="test.endpoint",
+                measurement_version=1,
+                result_status="defined",
+                endpoint_observation_status="observed",
+                value=ScenarioBooleanValueV1(value=True),
+            ),
+        ),
+        violation_results=(),
+        predicate_result=ScenarioPredicateResultV1(
+            predicate_id="test.success",
+            predicate_version=1,
+            status="satisfied",
+        ),
+    )
+    return _V2CompanionCase(bundle=bundle, scenario=scenario)
+
+
 @pytest.fixture(scope="module")
 def companion_case() -> _CompanionCase:
     return _build_case("episode-companion")
@@ -205,6 +362,11 @@ def companion_case() -> _CompanionCase:
 @pytest.fixture(scope="module")
 def other_case() -> _CompanionCase:
     return _build_case("episode-companion-other")
+
+
+@pytest.fixture(scope="module")
+def v2_companion_case() -> _V2CompanionCase:
+    return _build_case_v2("episode-companion-v2")
 
 
 def _path(
@@ -332,6 +494,207 @@ def test_scenario_canonical_bytes_round_trip(
     assert payload == canonical_scenario_evaluation_record_json_bytes_v1(
         companion_case.scenario
     )
+
+
+def test_v2_scenario_save_load_save_bytes_are_exact(
+    v2_companion_case: _V2CompanionCase,
+    tmp_path: Path,
+) -> None:
+    first = _path(tmp_path, "scenario", stem="v2-first")
+    expected = canonical_scenario_evaluation_record_json_bytes_v2(
+        v2_companion_case.scenario
+    )
+    saved = save_scenario_evaluation_record_v2(
+        v2_companion_case.scenario,
+        v2_companion_case.bundle.replay,
+        v2_companion_case.bundle.metric_report_artifact,
+        first,
+    )
+    assert saved.path == first
+    assert saved.byte_length == len(expected)
+    assert first.read_bytes() == expected
+
+    loaded = load_scenario_evaluation_record_v2(
+        first,
+        source_replay=v2_companion_case.bundle.replay,
+        metric_report_artifact=v2_companion_case.bundle.metric_report_artifact,
+    )
+    assert loaded == v2_companion_case.scenario
+    assert ScenarioEvaluationRecordV2.model_validate_json(expected) == loaded
+
+    second = _path(tmp_path, "scenario", stem="v2-second")
+    save_scenario_evaluation_record_v2(
+        loaded,
+        v2_companion_case.bundle.replay,
+        v2_companion_case.bundle.metric_report_artifact,
+        second,
+    )
+    assert second.read_bytes() == expected
+
+
+def test_v1_and_v2_scenario_loaders_cross_reject_root_versions(
+    companion_case: _CompanionCase,
+    v2_companion_case: _V2CompanionCase,
+    tmp_path: Path,
+) -> None:
+    v1_path = _path(tmp_path, "scenario", stem="v1-cross-version")
+    v1_path.write_bytes(
+        canonical_scenario_evaluation_record_json_bytes_v1(companion_case.scenario)
+    )
+    with pytest.raises(ReplayLoadError) as v2_error:
+        load_scenario_evaluation_record_v2(
+            v1_path,
+            source_replay=companion_case.bundle.replay,
+            metric_report_artifact=companion_case.bundle.metric_report_artifact,
+        )
+    assert v2_error.value.code == "unsupported_schema_version"
+
+    v2_path = _path(tmp_path, "scenario", stem="v2-cross-version")
+    v2_path.write_bytes(
+        canonical_scenario_evaluation_record_json_bytes_v2(v2_companion_case.scenario)
+    )
+    with pytest.raises(ReplayLoadError) as v1_error:
+        load_scenario_evaluation_record_v1(
+            v2_path,
+            source_replay=v2_companion_case.bundle.replay,
+            metric_report_artifact=v2_companion_case.bundle.metric_report_artifact,
+        )
+    assert v1_error.value.code == "unsupported_schema_version"
+
+
+@pytest.mark.parametrize("hostile_version", (True, 1, 3))
+def test_v2_scenario_loader_requires_exact_root_version_two(
+    v2_companion_case: _V2CompanionCase,
+    tmp_path: Path,
+    hostile_version: bool | int,
+) -> None:
+    payload = json.loads(
+        canonical_scenario_evaluation_record_json_bytes_v2(v2_companion_case.scenario)
+    )
+    payload["schema_version"] = hostile_version
+    path = _path(tmp_path, "scenario", stem=f"v2-version-{hostile_version}")
+    path.write_bytes(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    )
+    with pytest.raises(ReplayLoadError) as caught:
+        load_scenario_evaluation_record_v2(
+            path,
+            source_replay=v2_companion_case.bundle.replay,
+            metric_report_artifact=v2_companion_case.bundle.metric_report_artifact,
+        )
+    assert caught.value.code == "unsupported_schema_version"
+
+
+def test_v2_scenario_evidence_mismatch_rejects_load_and_save(
+    v2_companion_case: _V2CompanionCase,
+    other_case: _CompanionCase,
+    tmp_path: Path,
+) -> None:
+    tampered = v2_companion_case.scenario.model_dump(mode="python")
+    tampered["realized_initial_frame_digest_sha256"] = "f" * 64
+    tampered["canonical_digest_sha256"] = canonical_digest_sha256(
+        tampered,
+        exclude={"canonical_digest_sha256"},
+    )
+    path = _path(tmp_path, "scenario", stem="v2-tampered-evidence")
+    path.write_bytes(
+        json.dumps(tampered, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    )
+    with pytest.raises(ReplayLoadError) as load_error:
+        load_scenario_evaluation_record_v2(
+            path,
+            source_replay=v2_companion_case.bundle.replay,
+            metric_report_artifact=v2_companion_case.bundle.metric_report_artifact,
+        )
+    assert load_error.value.code == "semantic_validation_failed"
+
+    save_path = _path(tmp_path, "scenario", stem="v2-mismatched-source")
+    with pytest.raises(ReplaySaveError) as save_error:
+        save_scenario_evaluation_record_v2(
+            v2_companion_case.scenario,
+            other_case.bundle.replay,
+            other_case.bundle.metric_report_artifact,
+            save_path,
+        )
+    assert save_error.value.code == "invalid_argument"
+    assert not save_path.exists()
+
+
+def test_v2_scenario_publication_is_no_clobber(
+    v2_companion_case: _V2CompanionCase,
+    tmp_path: Path,
+) -> None:
+    path = _path(tmp_path, "scenario", stem="v2-no-clobber")
+    save_scenario_evaluation_record_v2(
+        v2_companion_case.scenario,
+        v2_companion_case.bundle.replay,
+        v2_companion_case.bundle.metric_report_artifact,
+        path,
+    )
+    sentinel = path.read_bytes()
+    with pytest.raises(ReplaySaveError) as caught:
+        save_scenario_evaluation_record_v2(
+            v2_companion_case.scenario,
+            v2_companion_case.bundle.replay,
+            v2_companion_case.bundle.metric_report_artifact,
+            path,
+        )
+    assert caught.value.code == "companion_target_exists"
+    assert path.read_bytes() == sentinel
+
+
+def test_fresh_process_v2_load_and_export_remain_host_only(
+    v2_companion_case: _V2CompanionCase,
+    tmp_path: Path,
+) -> None:
+    replay_path = tmp_path / f"v2-source{REPLAY_FILE_SUFFIX_V1}"
+    saved_bundle = save_replay_bundle_v1(v2_companion_case.bundle, replay_path)
+    scenario_path = _path(tmp_path, "scenario", stem="v2-host-only")
+    save_scenario_evaluation_record_v2(
+        v2_companion_case.scenario,
+        v2_companion_case.bundle.replay,
+        v2_companion_case.bundle.metric_report_artifact,
+        scenario_path,
+    )
+    script = f"""
+import sys
+from pathlib import Path
+from marl_battlegrounds import evaluation as evaluation_api
+
+bundle = evaluation_api.load_replay_bundle_v1(
+    {str(saved_bundle.replay_path)!r},
+    require_metric_report=True,
+)
+assert bundle.metric_report_artifact is not None
+record = evaluation_api.load_scenario_evaluation_record_v2(
+    {str(scenario_path)!r},
+    source_replay=bundle.replay,
+    metric_report_artifact=bundle.metric_report_artifact,
+)
+assert evaluation_api.canonical_scenario_evaluation_record_json_bytes_v2(record) == (
+    Path({str(scenario_path)!r}).read_bytes()
+)
+
+for loaded_name in sys.modules:
+    if loaded_name in {{
+        "marl_battlegrounds.core.types",
+        "marl_battlegrounds.evaluation.capture",
+        "marl_battlegrounds.evaluation.catalog",
+    }}:
+        raise SystemExit("unexpected host dependency: " + loaded_name)
+    if any(
+        loaded_name == prefix or loaded_name.startswith(prefix + ".")
+        for prefix in ("jax", "jaxlib", "numpy")
+    ):
+        raise SystemExit("unexpected array-runtime import: " + loaded_name)
+"""
+    result = subprocess.run(
+        (sys.executable, "-c", script),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
 
 
 @pytest.mark.parametrize("kind", ("pov", "scenario"))

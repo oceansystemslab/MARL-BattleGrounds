@@ -4,7 +4,7 @@ export default defineConfig({
   testDir: "./e2e",
   fullyParallel: false,
   forbidOnly: Boolean(process.env.CI),
-  retries: process.env.CI ? 1 : 0,
+  retries: 0,
   workers: 1,
   timeout: 180_000,
   expect: {
@@ -17,11 +17,13 @@ export default defineConfig({
   reporter: "line",
   outputDir: "test-results",
   use: {
+    actionTimeout: 10_000,
     browserName: "chromium",
     colorScheme: "dark",
     deviceScaleFactor: 1,
     headless: true,
     locale: "en-GB",
+    navigationTimeout: 30_000,
     reducedMotion: "no-preference",
     screenshot: "only-on-failure",
     viewport: { width: 1440, height: 900 },

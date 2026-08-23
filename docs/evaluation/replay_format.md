@@ -22,6 +22,15 @@ and source revision. Its `schema_versions` tuple remains exactly the eight CP2
 roots. Replay-specific schema bindings live in `ReplayArtifactHeaderV1` and do
 not mutate that historical V1 contract.
 
+V1 is homogeneous with respect to execution information. Its context has one
+episode-global `execution_information_mode` and one episode-global
+`actor_projection`, and its frame validation requires SharedObs availability
+for a `shared_obs` episode and forbids it for a `no_shared_obs` episode. A V1
+policy-assignment row does not carry a per-slot information regime. Therefore,
+V1 cannot represent SharedObs and NoSharedObs actors in the same match; a
+policy ID, a false availability row, or an "at least one actor shares"
+reinterpretation must not be used as an implicit mixed-regime encoding.
+
 Milestone 7 makes one approved in-place expansion of the unreleased pre-alpha
 V1 evaluation/replay models. Resolved configuration now carries numeric task
 mode and Team Deathmatch score threshold, analysis frames carry authoritative
@@ -31,8 +40,43 @@ event union has exactly 23 variants: `TeamDeathmatchScoreChangedEventV1` at rank
 rank 140 records the result and one of `score_threshold`, `horizon`, or
 `score_threshold_at_horizon`. Existing development artifacts and fixtures are
 disposable and must be regenerated. There is no legacy loader, optional
-fallback, compatibility shim, or parallel V2 model family. After the alpha
-schema freeze, any incompatible wire change requires a schema-version bump.
+fallback, compatibility shim, or parallel V2 model family for that approved
+in-place expansion. After the alpha schema freeze, any incompatible wire
+change requires a schema-version bump.
+
+The current V1 writers, readers, validators, canonical bytes, and digests stay
+unchanged. Milestone 10 must introduce an explicit future V2 context and replay
+binding before mixed per-slot execution-information assignments become an
+official artifact. V2 must use version dispatch rather than field guessing or
+silent V1 reinterpretation; existing V1 artifacts retain their original bytes,
+identities, and digests.
+
+That future mixed-capable normal form remains one physical episode record: one
+context, exactly `T + 1` frames, and exactly `T` transitions. It stores the
+same-epoch base observations once per frame, together with stable source
+provenance and required recipient-by-source availability, and never stores a
+materialized SharedObs tensor. The context records each configured-active
+slot's regime and versioned compositor/projection provenance; inactive slots
+remain not applicable. The availability matrix may be absent only when every
+configured active slot is NoSharedObs. When present, every NoSharedObs or
+inactive-recipient row is all false, and diagonal, cross-team, and
+inactive-source entries are false. Capture records the exact same-epoch matrix
+used by actor-input composition; replay never infers it. Reconstruction is
+selected-slot-specific: a NoSharedObs slot derives from its own base-observation
+row under its recorded projection, while a SharedObs slot uses the recorded
+same-epoch source material, that recipient's availability row, the stable
+source mapping, and its recorded compositor/projection versions. Exact
+SharedObs actor-input reconstruction still fails closed until the Milestone 12
+compositor contract exists.
+
+The V2 homogeneous/mixed episode profile is derived from configured-active
+slot assignments and is never a competing stored authority. An explicit
+homogeneous-only V1-to-V2 migrator copies V1's episode-global mode and
+projection to every configured-active V2 slot, marks inactive slots not
+applicable, and preserves compatible recorded availability. It fails if the
+required versioned provenance cannot be established, cannot synthesize a mixed
+profile, emits a new V2 artifact identity/digest, and leaves the source V1
+bytes and digest unchanged. Loaders never perform this migration silently.
 
 The standard replay never contains raw `EnvState`, PRNG keys, policy logits or
 hidden state, optimizer state, learner batches, renderer summaries, local file
@@ -166,6 +210,14 @@ horizon, measurements, violations, predicate identity, and partial-result
 policy before rollout. Scenario records reference the completed replay and
 metric report and carry supplied results. Their validators join evidence and
 identities; they never execute a metric formula or success predicate.
+
+`ResolvedScenarioSpecificationV2` additionally freezes the promoted layout and
+authored-initial-condition identities, exact fixed-slot roster and role
+template, resolved configuration, one ordered matched seed schedule, and one
+stable compiled initial-state digest. That compiled digest covers only a tagged
+projection of simulator step count plus `GlobalAnalysisSnapshotV1`; the record's
+full frame-zero digest remains separate attempt-specific replay evidence.
+
 Every `right_censored` scenario result requires a censor-aware definition and a
 complete declared-horizon replay, independently of whether its estimate is
 `defined` or `insufficient_data`. A `competing_event` endpoint likewise
@@ -183,7 +235,9 @@ the privileged replay context, world snapshot, transition, or canonical CP2
 event tuple. Exact actor-input export is supported for `no_shared_obs`. Under
 `shared_obs`, Milestone 6 may expose a labelled base-sensor/source-availability
 view, but exact materialized input export fails closed until the Milestone 12
-compositor exists.
+compositor exists. Those alternatives are episode-global in V1. A future
+mixed-capable V2 selects the branch from the chosen actor's slot assignment;
+another actor's regime never authorizes or blocks that selected slot's export.
 
 `ActorPovReplayContentV1` is the independently privacy-testable payload. It
 contains one active actor's exact recorded base-observation and action-mask row,
@@ -226,8 +280,12 @@ surface is:
   `load_actor_pov_replay_artifact_v1` for source-validated, independently
   shareable POV companions; and
 - `save_scenario_evaluation_record_v1` and
-  `load_scenario_evaluation_record_v1` for scenario records whose replay and
-  metric-report evidence joins are mandatory.
+  `load_scenario_evaluation_record_v1` for historical V1 scenario records whose
+  replay and metric-report evidence joins are mandatory; and
+- `save_scenario_evaluation_record_v2` and
+  `load_scenario_evaluation_record_v2` for the versioned fixed-slot companion,
+  plus `validate_official_scenario_evaluation_record_v2` for the mandatory
+  core-aware product and curated-state acceptance gate.
 
 The filename pair is derived locally, never serialized:
 
@@ -252,13 +310,18 @@ canonical reserialization in that order.
 Only existing local directories and regular nonsymlink files participate.
 URLs, symlinks in any path component, archives, compression, pickle, dynamic
 imports, implicit directory creation, and network resolution are outside the
-contract. Replay loading imports no JAX, backend, simulator, policy, capture,
-or device-transfer path. Evaluation-owned V1 wire dimensions are frozen for
-artifact decoding and checked against the current core dimensions in ordinary
-tests; changing them requires an explicit schema migration. The V1 filesystem
-backend requires POSIX directory-descriptor and no-follow support so every
-component and final operation remain bound to one opened directory inode; it
-fails closed with `unsupported_platform` when those guarantees are unavailable.
+contract. Replay and companion loading import no JAX, backend, simulator,
+policy, capture, or device-transfer path. V2 scenario loading therefore
+establishes canonical bytes and replay/report/scenario evidence joins but does
+not by itself confer official status. Official consumers must subsequently call
+`validate_official_scenario_evaluation_record_v2`, whose deliberately separate
+host boundary rehydrates and checks the carried configuration and curated state
+against current core authorities. Evaluation-owned V1 wire dimensions are
+frozen for artifact decoding and checked against the current core dimensions in
+ordinary tests; changing them requires an explicit schema migration. The V1
+filesystem backend requires POSIX directory-descriptor and no-follow support so
+every component and final operation remain bound to one opened directory inode;
+it fails closed with `unsupported_platform` when those guarantees are unavailable.
 
 Saving writes each member to a same-directory temporary file, flushes and
 `fsync`s it, then publishes by atomic no-clobber hard link and `fsync`s the

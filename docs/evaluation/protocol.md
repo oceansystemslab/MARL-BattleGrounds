@@ -39,16 +39,33 @@ cell weight, confidence interval, or checkpoint does not.
 
 An `EvaluationSuiteV1`-equivalent declaration freezes:
 
-- suite ID, version, canonical digest, and intended scientific claim;
-- task and task version;
-- execution-time actor-information regime and actor-input projection version;
+- suite ID, version, canonical digest, ownership classification as `official`
+  or `custom`, separate canonical-condition status, and intended scientific
+  claim;
+- battleground identity and version plus the resolved episode-configuration
+  contract;
+- execution-information assignment profile, including each configured active
+  assignment's regime and actor-input projection version; in V1 this profile
+  is represented by one homogeneous episode-wide pair;
 - critic-information regime, canonical reward mode, and shaping configuration;
 - primary, secondary, exploratory, and diagnostic metric IDs;
-- layouts/maps, scenarios, rosters/compositions, cooperative partners,
-  adversarial opponents, sides, roles, and their joint target weights;
+- promoted content-addressed layouts/maps and authored initial conditions,
+  scenarios, rosters/compositions, cooperative partners, adversarial
+  opponents, sides, roles, and their joint target weights;
 - task/scenario configuration and static-mechanics catalog versions;
 - completion, retry, censoring, artifact-retention, and replay policies; and
 - the population to which results are intended to generalize.
+
+The official canonical Team Deathmatch suite freezes the mirrored 5v5 roster
+with exactly one Mage, Warrior, Hunter, Rogue, and Priest per team, approved
+canonical evaluation maps, evaluation seed schedule, cooperative partners and
+adversarial opponents, side assignments, canonical reward, metric set, cell
+weights, and all other resolved task and lifecycle constants. A custom suite
+may freeze any structurally valid roster, including unequal team sizes,
+asymmetric compositions, and duplicate classes, but its suite identity and
+every report must label it `custom`. Reusing canonical mechanics or even the
+canonical roster does not make the suite official or establish that its full
+population is the canonical condition.
 
 ### Experiment manifest
 
@@ -57,6 +74,8 @@ evaluation:
 
 - algorithms, policy architectures, training configurations, and code/artifact
   revisions;
+- each learned checkpoint's fixed execution-information regime, actor-input
+  projection version, and compatible compiled actor-front-end contract;
 - independent training-run identities and named training seeds;
 - evaluation seed schedule and common-condition pairing;
 - checkpoint-selection rule and selection split;
@@ -115,6 +134,139 @@ after a completed rollout never rewrites the rollout as failed. There is no
 logging sink, file writer, replay envelope, runner framework, or core callback
 in CP3.
 
+## Episode, training, evaluation, and scenario ownership
+
+An episode configuration resolves the fixed simulator inputs for one rollout.
+It is selected by a training distribution or fixed by an evaluation suite or
+scenario. It is not itself a training distribution, evaluation population, or
+scenario. [Amendment A15](../design/specification_amendments.md#a15-episode-configuration-and-experiment-distribution-ownership)
+defines structural validity and the permissive Team Deathmatch roster
+contract.
+
+Milestone 11 owns all training selection. Default direct Team Deathmatch
+training uses the canonical mirrored five-class 5v5 roster and the same task
+mechanics, lifecycle rules, score threshold `K`, horizon `H`, and canonical
+reward as official evaluation, but it samples from the separately approved
+training-map distribution and training seed schedule. Researchers may replace
+that default with any distribution over structurally valid episode
+configurations. An optional curriculum is a checkpointable, stateful selector
+over the same contract; its benchmark 1v1–5v5 path uses explicitly approved,
+handpicked rosters rather than an exhaustive composition grid. Map identities
+selected into the training distribution and the exact curriculum roster, map,
+weight, retention, opponent, and transition choices remain future Milestone 11
+decisions.
+
+An evaluation suite owns a frozen population of resolved configurations and
+assignments. A scenario owns its resolved episode configuration, explicit
+fixed-slot roster, initial state, role template, horizon, matched seed schedule,
+and quantitative endpoints. The schedule is a stable multi-attempt definition;
+each episode's realized seed record joins to exactly one declared schedule
+coordinate. Binding policy A to Team A and policy B to Team B, or binding
+policies per slot, fills the scenario's frozen roles; it cannot replace the
+roster or any other scenario-owned condition.
+
+Development scene-authoring drafts are mutable design inputs, not evaluation
+artifacts. A candidate becomes eligible for selection only after host-side
+normalization, product/scenario validation, content addressing, and an
+owner-approved promotion that assigns its permanent identity and version.
+Official evaluation and scenario records reference those promoted
+content-addressed layout and authored-initial-condition identities and join
+them independently to the resolved configuration and realized initial state. A
+filename, browser export, mutable draft ID, or successful preview is not an
+admissible identity or validity proof.
+
+The current `ResolvedScenarioSpecificationV1` does not yet bind an explicit
+fixed-slot roster, exact role template, or matched schedule identity and
+membership rule. Its resolved-config digest contains no roster rows, and
+`EvaluationSeedProtocolV1` represents one realized episode rather than the
+schedule. Before an M7 scenario can be accepted as official, C2 must version
+that contract, validate exact roster/role joins to
+`EvaluationEpisodeContextV1`, prove that each realized seed record occupies
+exactly one declared schedule coordinate, and enforce the core structural and
+product config invariants on loaded context. The versioned specification must
+also freeze and join the promoted content-addressed layout and authored initial
+condition independently from the resolved-config digest. It must reject any
+policy binding that changes the layout, initial condition, resolved
+configuration, roster, configured-active slots, role template, schedule, or
+realized coordinate. Scenario identity plus a subset check over role names is
+insufficient.
+
+The M7 V2 companion keeps semantic authored-content identity, compiled initial
+state, and attempt replay evidence distinct. The specification digest binds the
+promoted authored-initial-condition identity to a stable digest of simulator
+step count plus the dynamic global snapshot. Each record separately binds the
+complete frame-zero digest, including attempt identity and derived policy
+material. This prevents an attempt-specific frame hash from masquerading as the
+stable authored-state identity while still proving the exact captured frame.
+
+No training distribution is inferred from an evaluation suite or scenario.
+Locked evaluation and scenario maps, seeds, opponents, initial states, and
+other held-out material are ineligible for policy or curriculum updates.
+
+## Common policy and evaluation lifecycle
+
+[Amendment A12](../design/specification_amendments.md#a12-common-milestone-1012-policy-pipeline-spine)
+requires Milestones 10–12 to extend one common pipeline spine. Episode
+specifications selected by direct/custom training distributions or curricula,
+and episode specifications fixed by evaluation suites or scenarios, enter the
+same versioned policy-assignment and seed protocol. Both execution-information
+regimes use the same reset, base observation, exact mask, legal-action
+realization, joint-action assembly, core-step, transition, completion,
+capture/replay, and metric semantics. Evaluation/scenario episodes use M10's
+host adapter; M11-selected training episodes use M12's JAX
+rollout/update/checkpoint adapter. Training selection does not create a runner
+or trainer, and training does not route through the evaluation/scenario host
+adapter.
+
+Only authorized-input composition, learner-input projection, the compatible
+compiled actor front end, checkpoint compatibility validation, measured cost,
+and manifest/report stratum may differ by execution-information regime. A
+regime must not select a separate runner, trainer, evaluator, scenario
+lifecycle, RNG protocol, action realization, capture path, replay path, or
+metric implementation. Milestone 10 owns the versioned episode and
+policy-assignment contracts, semantic-asset promotion adapters, seed-schedule
+schema and named derivation protocol, evaluation/scenario host runner,
+capture/replay, and failure-semantics integration. Milestone 11 selects
+promoted partition-neutral maps into direct, custom-distribution, or
+curriculum training populations and feeds their resolved specifications into
+the common training spine. Milestone 12 consumes those selections through the
+common JAX rollout/update path and owns the regime-specific compositor, learner
+projections, compiled actor front ends, and trainer/checkpoint integration; it
+does not own a roster catalog, training-selection policy, promotion boundary,
+or mutable development-draft loader. M12 rejects held-out evaluation/scenario
+assets before training execution.
+
+Every learned checkpoint is fixed to one `execution_information_mode`, one
+actor-input projection version, and one compatible compiled actor-front-end
+contract. Compatibility validation rejects a mismatch before compilation,
+device allocation, or execution. An explicitly declared cross-regime
+initialization is a transfer or out-of-distribution intervention, not a mode
+switch, and receives separate provenance and reporting.
+
+The current `EvaluationEpisodeContextV1` contract is immutable and
+homogeneous: its single episode-wide `execution_information_mode` and
+`actor_projection` apply to every configured active policy assignment. V1
+mixed execution—any episode assigning SharedObs to some active slots and
+NoSharedObs to others—is scientifically ineligible even if a runtime can
+mechanically assemble its actions. It must not enter an official evaluation
+cell, controlled-scenario claim, replay publication, metric report, or
+cross-play aggregate.
+
+Mixed execution remains ineligible until Milestone 10 defines a V2 context and
+artifact family with per-active-slot execution-mode and actor-projection
+provenance plus sufficient per-recipient availability authority. V2 must feed
+the same policy/scenario/capture/replay/metric lifecycle; it must not mutate or
+reinterpret V1. Its homogeneous/mixed episode profile is derived from the
+configured-active per-slot assignments, never edited independently. An
+explicit V1-to-V2 migration may replicate V1's episode-wide mode and projection
+across configured-active slots and mark inactive slots not applicable, so it
+can create only a homogeneous V2 profile; it fails when required versioned
+provenance cannot be established and never mutates V1 bytes or digests. Once
+V2 exists, focal SharedObs versus opponent NoSharedObs and focal NoSharedObs
+versus opponent SharedObs are distinct directional cells, each with
+task-appropriate side swaps. They are never pooled with each other or with
+either homogeneous regime.
+
 ## Experimental units and terminology
 
 - A **training run** is one independently initialized and trained policy or
@@ -133,8 +285,10 @@ in CP3.
 The canonical cell coordinates are:
 
 ```text
-task x layout/map x cooperative-partner/pool x adversarial-opponent/pool
-     x side/role x roster/composition x execution_information_mode
+battleground identity/version x layout/map
+     x cooperative-partner/pool x adversarial-opponent/pool
+     x side/role x roster/composition
+     x execution_information_assignment_profile
 ```
 
 Use a declared not-applicable sentinel when the evaluated setting has no
@@ -142,22 +296,33 @@ separable cooperative partner or no adversarial opponent. Never collapse these
 axes into one “other policy” coordinate: varying a partner while also varying
 the opponent confounds cooperative generalization with adversarial robustness.
 
-Task configuration, scenario version, policy IDs, critic-information regime,
+Resolved episode configuration, scenario version, policy IDs,
+critic-information regime,
 reward mode, shaping configuration, code revision, static-catalog digest, and
 actor-input projection version remain mandatory provenance. They become
 separate cell axes whenever varying one can change the intended estimand.
 
-Task and `execution_information_mode` are separate reporting strata by default.
-SharedObs and NoSharedObs results are never pooled. Raw task-score units are
-never pooled across tasks. A cross-task scalar requires a separately versioned
-normalization and suite contract.
+Battleground identity/version and the execution-information assignment profile
+are separate reporting strata by default. V1 maps its one episode-wide
+mode/projection pair to the corresponding homogeneous profile. SharedObs and
+NoSharedObs results are never pooled. Raw task-score units are never pooled
+across battlegrounds. A cross-battleground scalar requires a separately
+versioned normalization and suite contract.
+
+For V1, the cell's `execution_information_mode` is the one homogeneous mode of
+every configured active assignment. A future eligible V2 mixed-regime cell
+must also retain the full directional per-assignment mode/projection pattern as
+cell provenance; naming only the focal policy's regime is insufficient. Its
+homogeneous/mixed profile is derived from that pattern rather than supplied as
+an independent cell authority.
 
 ## Suite construction and frozen weights
 
 Each suite declares a finite set of cells and nonnegative target weights
-`w_c` summing to one within each reported task and information-regime stratum.
-Equal cell weights are the default. A task-declared target distribution is
-allowed when it is motivated and frozen before evaluation.
+`w_c` summing to one within each reported task and execution-information
+assignment-profile stratum. Equal cell weights are the default. A
+task-declared target distribution is allowed when it is motivated and frozen
+before evaluation.
 
 Weights express the target population, not the number of episodes that happened
 to finish. A failed cell, zero-opportunity cell, or missing artifact does not
@@ -284,9 +449,23 @@ results.
 
 ## Selection, splits, and leakage control
 
-Training, development, validation, and locked-test maps, layouts, opponents,
-partners, scenarios, and seeds are disjoint wherever the intended claim is
-generalization. The manifest identifies every overlap that is intentional.
+Map/layout, opponent, partner, scenario, and seed selections assigned to
+training, development, validation, and locked-test partitions are disjoint
+wherever the intended claim is generalization. The manifest identifies every
+overlap that is intentional.
+
+Map assets themselves are partition-neutral. Training, development,
+validation, official/custom evaluation, controlled-scenario, and locked-test
+membership belongs to the selecting distribution, suite, scenario, or
+experiment manifest rather than to a split field, filename, or directory in
+the map document. Mutable development drafts are ineligible for every such
+population; manifests may reference only owner-promoted, versioned,
+content-addressed assets or their resolved contract representations.
+
+An official evaluation suite or scenario is never a default training
+distribution. Assets designated locked for evaluation or scenario evidence
+must not be sampled for policy updates, curriculum transitions, opponent
+adaptation, reward tuning, or checkpoint selection.
 
 - Training data may update policies and curricula.
 - Development data may debug implementations and metric code.
@@ -397,12 +576,18 @@ For self-play or policy-versus-policy evaluation, policy identity and side are
 not conflated. A symmetric matrix records both assignment directions or uses a
 task-justified symmetry reduction that remains recoverable.
 
+After the V2 mixed-regime contract exists, execution-information assignment
+direction is likewise not conflated with policy identity or side. Both
+SharedObs-versus-NoSharedObs directions remain recoverable and receive the same
+side-swap discipline. V1 remains homogeneous and cannot carry these cells.
+
 ## Compact scorecard reporting
 
 The [metric specification](metric_specification.md#presentation-budgets)
 exclusively owns the contents and budgets of the primary team and agent/class
 cards. An evaluation suite instantiates that scorecard for each task and
-`execution_information_mode`; this protocol does not redefine its metric
+execution-information assignment profile; V1 uses the corresponding
+homogeneous profile. This protocol does not redefine the scorecard's metric
 blocks. The suite and manifest freeze which eligible candidate fills each
 optional slot and place those primary blocks in the confirmatory endpoint
 family before locked-test evaluation.
@@ -417,14 +602,28 @@ components remain exportable.
 Context-sensitive tactical claims use controlled quantitative scenarios rather
 than episode-wide proxies. Each versioned scenario freezes:
 
-- the behavioral hypothesis and eligible policy/roster roles;
-- initial state, task/configuration, opponent or scripted pressure, horizon,
-  and matched seed schedule;
+- the behavioral hypothesis and eligible policy roles;
+- promoted content-addressed layout and authored-initial-condition identities;
+- its resolved episode configuration and exact fixed-slot roster;
+- initial state, role template, opponent or scripted pressure, horizon, and
+  matched seed schedule;
 - one primary quantitative endpoint;
 - at most two secondary margins;
 - explicit safety, role, or behavior violations;
 - success, failure, terminal, and censoring semantics; and
 - replay retention and blinded review sampling.
+
+Policy assignment is an execution binding, not scenario construction. A
+Team A/Team B convenience binding and a lower-level per-slot binding must both
+respect the scenario's fixed roster, configured-active slots, and role
+template. Changing those facts creates a different versioned scenario rather
+than an override of the current one.
+
+Scenario validation must also join the explicit fixed-slot roster and role
+template carried by the resolved scenario definition to the episode context,
+then prove that the episode's realized seed record is exactly one member of the
+scenario's stable matched schedule. A set/subset comparison of role labels or
+a digest of one realized seed record does not establish those identities.
 
 “Single-shot” prohibits learning or adaptation across attempts. It does not
 reduce a stochastic evaluation to one episode. Policies are compared over the
@@ -446,6 +645,12 @@ claims.
 Cross-play applies a frozen population protocol to a selected base task
 endpoint. It does not duplicate every tactical metric. Cooperative partners and
 adversarial opponents are separate experimental axes.
+
+The V1 cross-play tensor is homogeneous in its episode-wide
+`execution_information_mode`. A later V2 tensor may add a frozen directional
+per-assignment regime pattern, but only after V2 supplies truthful
+per-active-slot provenance; the two mixed directions are separate tensor cells
+and are not pooled.
 
 Preserve and publish the complete
 `focal policy × cooperative partner × adversarial opponent × side assignment`
@@ -491,6 +696,17 @@ full-team policy without separable partner assignments.
 Training curves are evaluated through frozen periodic held-out evaluations.
 Ordinary curriculum rollouts do not run the full evaluation suite.
 
+Default direct training, arbitrary researcher-defined training distributions,
+and curriculum training share one rollout, batch, optimizer, update, and
+checkpoint lifecycle across information regimes. The curriculum differs only
+by retaining selector state and emitting the next ordinary episode
+specification. Regime-specific input composition, learner projection, and
+compiled actor front ends plug into that lifecycle; neither roster selection
+nor information regime creates a separate trainer. A learned checkpoint is
+emitted for exactly one regime/projection/front-end contract, and the learner
+interface must accept every structurally valid fixed-slot roster without an
+input-layer or simulator-schema change.
+
 Every learning result records:
 
 - environment transitions;
@@ -524,6 +740,10 @@ Report separately:
 - optional communication-model time and cost;
 - host capture/event/metric overhead when enabled; and
 - peak device and host memory where relevant.
+
+Any regime-specific composition, projection, or compiled actor-front-end cost
+is reported as a measured stratum of this same runtime protocol, not as
+evidence for a separate runner or evaluation stack.
 
 Warm-up iterations and timed repetitions are fixed in the manifest. Evaluation
 capture must not be included in a claimed ordinary-training throughput number
@@ -566,6 +786,14 @@ publication. A POV save must validate its completed replay reference. A
 scenario save or load must validate both its replay and metric-report evidence
 joins; a structurally valid but foreign record is not accepted as a local
 scenario result.
+
+Canonical V2 scenario loading and saving remain JAX-free and establish artifact
+and evidence validity, not official product acceptance. An official consumer
+must additionally invoke `validate_official_scenario_evaluation_record_v2`.
+That separately named host gate rehydrates the exact carried configuration and
+initial state and applies the current core product and curated-state validators.
+No mutable draft, filename, or successful transport round trip can substitute
+for that gate.
 
 Rollout completion, evaluation-processing validity, and per-statistic endpoint
 observation remain independent in both live and replay-loaded analysis. A
@@ -624,6 +852,13 @@ matrix with axes
 it for `no_shared_obs`. Diagonal, cross-team, inactive-recipient, and
 inactive-source entries are false. Neither regime stores a materialized
 SharedObs actor-input projection in the evaluation frame.
+
+This V1 mode and its compatible actor projection are episode-wide context
+authorities, not per-assignment fields. All configured active policy
+assignments must therefore be homogeneous. The current V1 context, replay, and
+metric-report family is immutable and rejects mixed-regime scientific claims;
+adding per-active-slot mode/projection provenance requires the Milestone 10 V2
+family described above.
 
 Milestone 6 evaluation records use a single normalized authority for submitted
 and accepted actions inside `TransitionFactsV1.action_acceptance_facts`; the
@@ -695,9 +930,25 @@ Before a suite is used for an official claim, verify:
 7. replay/model roundtrips preserve sufficient components;
 8. aggregation reproduces from raw rows without simulator-rule reconstruction;
 9. adversarial denominator and reward-gaming cases have visible companions;
-10. information regimes and privileged sources cannot leak or pool; and
+10. information regimes and privileged sources cannot leak or pool;
 11. the four North Stars receive an explicit `PASS`, `APPROVED TRADEOFF`, or
-    `BLOCKED` verdict.
+    `BLOCKED` verdict;
+12. official/custom ownership and canonical-condition status remain separate
+    and appear truthfully in every report;
+13. each accepted scenario exactly joins promoted content-addressed layout and
+    authored-initial-condition identities, resolved configuration, explicit
+    roster, configured-active slots, fixed-slot role template, stable matched
+    seed schedule, one unique realized schedule coordinate, horizon, initial
+    state, and endpoints; loaded context passes core structural/product parity,
+    mutable drafts and unpromoted candidates are rejected, and policy binding
+    cannot replace those facts; and
+14. the permissive standard-layout factory accepts every structurally valid
+    roster while the canonical factory resolves exactly the frozen mirrored
+    five-class 5v5 evaluation configuration.
+
+Partition status in this audit comes from the owning distribution, suite,
+scenario, or experiment manifest. It must never be inferred from a map asset's
+filename, directory, mutable draft identity, or authoring history.
 
 Any unresolved Tier-1 semantic, leakage, attribution, or pseudoreplication
 finding blocks an official benchmark claim.

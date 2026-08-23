@@ -38,6 +38,10 @@ from marl_battlegrounds.core.types import (
     Reward,
     TransitionFacts,
 )
+from marl_battlegrounds.evaluation.actor_projection import (
+    NO_SHARED_OBS_ACTOR_PROJECTION_V2,
+    reconstruct_class_ids_by_agent_by_team_v2,
+)
 from marl_battlegrounds.evaluation.capture import (
     _reconstruct_transition_facts,
     capture_evaluation_transition_unit_v1,
@@ -52,6 +56,7 @@ from marl_battlegrounds.evaluation.models import (
     EvaluationFrameV1,
     EvaluationTransitionV1,
     ExecutionInformationMode,
+    SpawnLifecycleObservationV1,
     StatusAppliedEventV1,
     TeamDeathmatchCompletedEventV1,
     TeamDeathmatchScoreChangedEventV1,
@@ -61,6 +66,8 @@ from marl_battlegrounds.evaluation.validation import (
     validate_evaluation_transition_unit_v1,
     validate_initial_evaluation_frame_v1,
 )
+
+_RECONSTRUCTIBLE_V1_LIFECYCLE_OMISSIONS = {"class_ids_by_agent_by_team"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,9 +213,20 @@ def _assert_frame_copies_every_dynamic_leaf(
         model_value = getattr(frame.base_observation, field_name)
         if field_name in ("previous_timestep_actions", "spawn_lifecycle"):
             for nested_name in source_value._fields:
+                if (
+                    field_name == "spawn_lifecycle"
+                    and nested_name in _RECONSTRUCTIBLE_V1_LIFECYCLE_OMISSIONS
+                ):
+                    continue
                 _assert_array_payload_equal(
                     getattr(source_value, nested_name),
                     getattr(model_value, nested_name),
+                )
+            if field_name == "spawn_lifecycle":
+                assert (
+                    set(source_value._fields)
+                    - set(SpawnLifecycleObservationV1.model_fields)
+                    == _RECONSTRUCTIBLE_V1_LIFECYCLE_OMISSIONS
                 )
         else:
             _assert_array_payload_equal(source_value, model_value)
@@ -361,6 +379,73 @@ def test_initial_frame_contains_full_immutable_payload_and_json_roundtrip() -> N
         frame,
     )
     assert EvaluationFrameV1.model_validate_json(frame.model_dump_json()) == frame
+
+
+def test_projection_v2_capture_validates_classes_without_changing_v1_bytes() -> None:
+    """Validate the reconstructible class map while preserving immutable V1 output."""
+    config = evaluation_env_config()
+    v1_context = evaluation_context(config=config)
+    v2_context = v1_context.model_copy(
+        update={"actor_projection": NO_SHARED_OBS_ACTOR_PROJECTION_V2}
+    )
+    state, observation, action_mask, _info = reset(config, jax.random.PRNGKey(0))
+
+    v1_frame = capture_initial_evaluation_frame_v1(
+        v1_context,
+        state,
+        observation,
+        action_mask,
+    )
+    v2_frame = capture_initial_evaluation_frame_v1(
+        v2_context,
+        state,
+        observation,
+        action_mask,
+    )
+    live_classes = tuple(
+        tuple(tuple(int(value) for value in team_row) for team_row in actor_rows)
+        for actor_rows in np.asarray(
+            observation.spawn_lifecycle.class_ids_by_agent_by_team
+        )
+    )
+
+    assert reconstruct_class_ids_by_agent_by_team_v2(v2_context) == live_classes
+    assert v2_frame == v1_frame
+    assert v2_frame.model_dump_json() == v1_frame.model_dump_json()
+    assert len(v2_context.schema_versions) == 8
+    assert all(row.schema_version == 1 for row in v2_context.schema_versions)
+    assert (
+        "class_ids_by_agent_by_team"
+        not in type(v2_frame.base_observation.spawn_lifecycle).model_fields
+    )
+    assert (
+        "class_ids_by_agent_by_team"
+        not in v2_frame.model_dump(mode="python")["base_observation"]["spawn_lifecycle"]
+    )
+
+
+def test_capture_rejects_live_class_ids_that_disagree_with_context() -> None:
+    """A V1 omission cannot silently pair one roster context with another leaf."""
+    config = evaluation_env_config()
+    context = evaluation_context(config=config).model_copy(
+        update={"actor_projection": NO_SHARED_OBS_ACTOR_PROJECTION_V2}
+    )
+    state, observation, action_mask, _info = reset(config, jax.random.PRNGKey(0))
+    class_ids = observation.spawn_lifecycle.class_ids_by_agent_by_team
+    changed_class = int(class_ids[0, 0, 0]) % 5 + 1
+    changed_observation = observation._replace(
+        spawn_lifecycle=observation.spawn_lifecycle._replace(
+            class_ids_by_agent_by_team=class_ids.at[0, 0, 0].set(changed_class)
+        )
+    )
+
+    with pytest.raises(ValueError, match="do not match episode roster context"):
+        capture_initial_evaluation_frame_v1(
+            context,
+            state,
+            changed_observation,
+            action_mask,
+        )
 
 
 def test_frame_capture_enforces_both_information_regimes() -> None:

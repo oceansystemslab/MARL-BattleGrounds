@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "shards": [
+    ["visual-regression.spec.js"],
+    ["renderer-fixture.spec.js"],
+    ["replay-viewer.spec.js"],
+    ["recording-handoff.spec.js"],
+    ["combat-scenarios.spec.js"],
+    ["combat-choreography.spec.js"],
+    ["control-parity.spec.js", "server-lifecycle.spec.js"],
+    ["tooltip.spec.js", "resize.spec.js"]
+  ]
+}
