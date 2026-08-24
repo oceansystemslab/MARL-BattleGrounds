@@ -220,6 +220,31 @@ test("cursor and replay command constructors reject malformed authority inputs",
       }),
     /ten-slot/u,
   );
+  const presentationKey = `pov_${"a".repeat(64)}`;
+  assert.deepEqual(
+    normalizeReplayCommand({
+      command_type: "set_pov_actor",
+      presentation_key: presentationKey,
+    }),
+    { command_type: "set_pov_actor", presentation_key: presentationKey },
+  );
+  assert.throws(
+    () =>
+      normalizeReplayCommand({
+        command_type: "set_pov_actor",
+        presentation_key: "pov_not-opaque",
+      }),
+    /opaque Agent POV presentation key/u,
+  );
+  assert.throws(
+    () =>
+      normalizeReplayCommand({
+        command_type: "set_pov_actor",
+        global_slot: 1,
+        presentation_key: presentationKey,
+      }),
+    /exact V1 fields/u,
+  );
   assert.throws(
     () =>
       replayCommandRequest({

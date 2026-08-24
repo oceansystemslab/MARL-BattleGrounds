@@ -111,10 +111,6 @@ export const CHOREOGRAPHY_PAINT_FOOTPRINTS = Object.freeze({
     height: 45,
     ringRadius: 21,
   }),
-  chargeDisplacement: Object.freeze({
-    start: Object.freeze({ width: 10, height: 10, radius: 4 }),
-    end: Object.freeze({ width: 12, height: 12, radius: 5 }),
-  }),
   chargeOwnership: Object.freeze({ width: 72, height: 22, labelLength: 60 }),
   respawnWave: Object.freeze({
     width: 152,
@@ -551,11 +547,6 @@ function layoutCrossPhaseEvents(events, surface, sceneByKey) {
     if (!event.spatial) {
       continue;
     }
-    if (event.kind === "charge_displacement") {
-      // This scientific phase displacement owns its exact endpoints and is
-      // always painted as one direct transition-start to post-Charge segment.
-      continue;
-    }
     if (event.kind === "activation") {
       if (!event.target && event.source && event.paintParts?.ability === true) {
         const dimensions = activationCueDimensions(event);
@@ -838,7 +829,6 @@ function choreographyFamily(event) {
   if (event.kind === "rejected_action") return "rejection";
   if (event.kind === "net_health") return "health";
   if (event.kind === "regeneration") return "recovery";
-  if (event.kind === "charge_displacement") return "charge";
   if (event.kind === "movement_displacement") return "movement";
   if (event.kind === "status_lifecycle") {
     return event.eventType === "agent_left_combat" ? "recovery" : "status";
@@ -933,11 +923,6 @@ function authorizedPaintParts(event, visualFilters) {
         kind: "regeneration",
         part: "battle_text",
       }),
-    });
-  }
-  if (event.kind === "charge_displacement") {
-    return Object.freeze({
-      effect: enabled({ surface: "transient", kind: "charge_movement" }),
     });
   }
   if (event.kind === "status_lifecycle") {
@@ -1171,8 +1156,10 @@ function sameAuthorizedPoint(left, right) {
 }
 
 /**
- * Validate the Oracle trajectory identity graph once. Keys are opaque and
- * every public identity must be one-to-one across the trajectory and scene.
+ * Validate one causal visual trajectory identity graph. Oracle retains all
+ * three phase anchors. Agent POV retains the authorized union of adjacent
+ * scenes: either endpoint may be absent, but every non-null successor joins
+ * exactly one current body and a start-only trajectory never invents one.
  *
  * @param {Record<string, any>} latest
  * @param {Map<string, Record<string, any>>} sceneByKey
@@ -1183,16 +1170,25 @@ function authorizedTrajectoryMap(latest, sceneByKey) {
     return null;
   }
   const trajectories = latest.agent_phase_trajectories;
-  if (trajectories.length !== sceneByKey.size) {
+  const agentVisual = latest.summary_kind === "agent_pov_fog_filtered_visual_events";
+  if (!agentVisual && latest.summary_kind !== "replay_incoming_inventory") {
     return null;
   }
+  if (!agentVisual && trajectories.length !== sceneByKey.size) {
+    return null;
+  }
+  const sceneByPublicId = new Map(
+    [...sceneByKey.values()].map((agent) => [identifier(agent.public_agent_id), agent]),
+  );
   /** @type {Map<string, Record<string, any>>} */
   const byKey = new Map();
   const publicIds = new Set();
+  const successorKeys = new Set();
   for (const candidate of trajectories) {
     const trajectory = record(candidate);
     const key = identifier(trajectory?.agent_presentation_key);
     const publicId = identifier(trajectory?.agent_public_agent_id);
+    const agentClassId = integer(trajectory?.agent_class_id);
     if (
       !trajectory ||
       key === null ||
@@ -1203,11 +1199,23 @@ function authorizedTrajectoryMap(latest, sceneByKey) {
       return null;
     }
     const sceneAgent = sceneByKey.get(key);
-    if (!sceneAgent || identifier(sceneAgent.public_agent_id) !== publicId) {
+    if (agentVisual && Object.hasOwn(trajectory, "post_charge")) {
       return null;
     }
-    for (const phase of ["transition_start", "post_charge", "successor"]) {
+    if (
+      agentVisual &&
+      (agentClassId === null || agentClassId < 1 || agentClassId > 5)
+    ) {
+      return null;
+    }
+    const phases = agentVisual
+      ? ["transition_start", "successor"]
+      : ["transition_start", "post_charge", "successor"];
+    for (const phase of phases) {
       const anchor = record(trajectory[phase]);
+      if (agentVisual && trajectory[phase] == null) {
+        continue;
+      }
       if (
         !anchor ||
         anchor.phase !== phase ||
@@ -1218,11 +1226,39 @@ function authorizedTrajectoryMap(latest, sceneByKey) {
         return null;
       }
     }
-    if (!sameAuthorizedPoint(trajectory.successor.position, sceneAgent.position)) {
+    if (agentVisual) {
+      if (trajectory.transition_start == null && trajectory.successor == null) {
+        return null;
+      }
+      const publicSceneAgent = sceneByPublicId.get(publicId);
+      if (trajectory.successor == null) {
+        if (sceneAgent || publicSceneAgent) {
+          return null;
+        }
+      } else {
+        if (
+          !sceneAgent ||
+          sceneAgent !== publicSceneAgent ||
+          identifier(sceneAgent.public_agent_id) !== publicId ||
+          integer(sceneAgent.class_id) !== agentClassId ||
+          !sameAuthorizedPoint(trajectory.successor.position, sceneAgent.position)
+        ) {
+          return null;
+        }
+        successorKeys.add(key);
+      }
+    } else if (
+      !sceneAgent ||
+      identifier(sceneAgent.public_agent_id) !== publicId ||
+      !sameAuthorizedPoint(trajectory.successor.position, sceneAgent.position)
+    ) {
       return null;
     }
     byKey.set(key, trajectory);
     publicIds.add(publicId);
+  }
+  if (agentVisual && successorKeys.size !== sceneByKey.size) {
+    return null;
   }
   return byKey;
 }
@@ -1287,19 +1323,16 @@ function authorizedStatusSelection(group) {
   const aged = first("status_aged_to_zero");
   const applications = group.atoms.filter(({ row }) => row.kind === "status_applied");
   const applied = applications.at(0) ?? null;
+  // The canonical atomics retain apply, refresh, expiry, and break identity.
+  // The shared interactive renderer deliberately presents every transition
+  // that leaves the status active with the one ordinary application cue.
   const lifecycleId = cleared
     ? "cleared_by_death"
-    : broken && applied
-      ? "trap_broken_and_reapplied"
-      : aged && applied
-        ? "reapplied"
-        : broken
-          ? "trap_broken"
-          : aged
-            ? "expired"
-            : applied
-              ? "applied"
-              : "refreshed";
+    : applied || refreshed
+      ? "applied"
+      : broken
+        ? "trap_broken"
+        : "expired";
   const primary =
     cleared ??
     (applied && (broken || aged) ? applied : null) ??
@@ -1564,7 +1597,8 @@ function authorizedStatusCompositions(
 /**
  * Build choreography strictly from the normalized presentation's Latest
  * Events branch. Outgoing inspection is intentionally outside this function.
- * Shared observation deltas retain noncausal feed-only vocabulary.
+ * Fog-authorized Agent visual events use the same causal planner as Oracle;
+ * legacy observation deltas remain noncausal feed-only vocabulary.
  *
  * @param {Record<string, any>} presentation
  * @param {ProjectionSurface | null} surface
@@ -1576,7 +1610,10 @@ function buildAuthorizedPresentationChoreographyPlan(
   surface,
   visualFilters,
 ) {
-  const latest = record(presentation.latest_events);
+  const audience = authorizedPresentationAudience(presentation);
+  const latest = record(
+    audience === "agent_pov" ? presentation.visual_events : presentation.latest_events,
+  );
   const scene = authorizedPresentationSceneView(presentation);
   if (!latest || !scene) {
     return null;
@@ -1591,7 +1628,6 @@ function buildAuthorizedPresentationChoreographyPlan(
     return null;
   }
   const rows = authorizedPresentationIncomingRows(presentation);
-  const audience = authorizedPresentationAudience(presentation);
   /** @type {Map<string, Record<string, any>>} */
   const sceneByKey = new Map();
   const scenePublicIds = new Set();
@@ -1611,9 +1647,15 @@ function buildAuthorizedPresentationChoreographyPlan(
     sceneByKey.set(key, agent);
     scenePublicIds.add(publicId);
   }
-  const trajectories =
-    audience === "researcher" ? authorizedTrajectoryMap(latest, sceneByKey) : null;
-  if (audience === "researcher" && trajectories === null) {
+  const causalVisualInventory =
+    latest.summary_kind === "replay_incoming_inventory" ||
+    latest.summary_kind === "agent_pov_fog_filtered_visual_events";
+  const agentVisualInventory =
+    latest.summary_kind === "agent_pov_fog_filtered_visual_events";
+  const trajectories = causalVisualInventory
+    ? authorizedTrajectoryMap(latest, sceneByKey)
+    : null;
+  if (causalVisualInventory && trajectories === null) {
     return null;
   }
   const statusCompositions = authorizedStatusCompositions(
@@ -1760,21 +1802,26 @@ function buildAuthorizedPresentationChoreographyPlan(
         return null;
       }
       const sourceAgent = sourceKey === null ? null : sceneByKey.get(sourceKey);
+      const sourceClassId = agentVisualInventory
+        ? integer(sourceTrajectory.agent_class_id)
+        : integer(sourceAgent?.class_id);
       if (
         sourceKey === null ||
-        !sourceAgent ||
-        identifier(sourceAgent.public_agent_id) !==
-          identifier(sourceTrajectory.agent_public_agent_id)
+        sourceClassId === null ||
+        (!agentVisualInventory && !sourceAgent) ||
+        (sourceAgent != null &&
+          identifier(sourceAgent.public_agent_id) !==
+            identifier(sourceTrajectory.agent_public_agent_id))
       ) {
         return null;
       }
       const component = event.ability_component;
       const token =
         component === "ultimate"
-          ? ultimateTokenFromClassId(sourceAgent.class_id, event)
+          ? ultimateTokenFromClassId(sourceClassId, event)
           : resolveVisualToken(
               "activation",
-              sourceAgent.class_id === 5 ? "basic_heal" : "basic_damage",
+              sourceClassId === 5 ? "basic_heal" : "basic_damage",
               event,
             );
       const impactSemantic = activationImpactSemantic(token.tokenId);
@@ -1791,14 +1838,18 @@ function buildAuthorizedPresentationChoreographyPlan(
       if (
         (targetKey === null) !== (targetTrajectory === null) ||
         (targetKey !== null &&
-          (!targetAgent ||
-            identifier(targetAgent.public_agent_id) !==
-              identifier(targetTrajectory?.agent_public_agent_id)))
+          ((!agentVisualInventory && !targetAgent) ||
+            (targetAgent != null &&
+              identifier(targetAgent.public_agent_id) !==
+                identifier(targetTrajectory?.agent_public_agent_id))))
       ) {
         return null;
       }
-      const endpointPhase =
-        token.tokenId === "warrior_charge" ? "transition_start" : "successor";
+      const endpointPhase = agentVisualInventory
+        ? "transition_start"
+        : token.tokenId === "warrior_charge"
+          ? "transition_start"
+          : "successor";
       const authorizedSource = abilityEnabled
         ? authorizedAnchor(sourceTrajectory[endpointPhase], surface)
         : null;
@@ -1816,7 +1867,7 @@ function buildAuthorizedPresentationChoreographyPlan(
       }
       const source = authorizedSource;
       const target = authorizedTarget;
-      const routed = Boolean(abilityEnabled && source && target && targetAgent);
+      const routed = Boolean(abilityEnabled && source && target);
       planned.push(
         Object.freeze({
           ...common,
@@ -1828,8 +1879,8 @@ function buildAuthorizedPresentationChoreographyPlan(
           lane: component === "ultimate" ? 1 : 0,
           sourcePresentationKey: sourceKey,
           sourcePublicAgentId: sourceTrajectory.agent_public_agent_id,
-          sourceClassId: sourceAgent.class_id,
-          sourceClass: classTokenFromId(sourceAgent.class_id),
+          sourceClassId,
+          sourceClass: classTokenFromId(sourceClassId),
           targetPresentationKey: targetKey,
           targetPublicAgentId: targetTrajectory?.agent_public_agent_id ?? null,
           targetDisclosure: targetKey === null ? "target_none" : "public",
@@ -1943,34 +1994,11 @@ function buildAuthorizedPresentationChoreographyPlan(
       ) {
         return null;
       }
-      const paintDecision = authorizedPaintDecision(
-        { kind: "charge_displacement" },
-        visualFilters,
-      );
-      if (paintDecision === null) {
-        return null;
-      }
-      const start = paintDecision.enabled ? project(startWorld, surface) : null;
-      const end = paintDecision.enabled ? project(endWorld, surface) : null;
-      if (paintDecision.enabled && (start === null || end === null)) {
-        return null;
-      }
       planned.push(
         Object.freeze({
           ...common,
-          kind: "charge_displacement",
-          sourcePresentationKey: key,
-          sourcePublicAgentId: trajectory.agent_public_agent_id,
-          targetPresentationKey: null,
-          start,
-          end,
-          pathKind: "charge_phase",
-          paintParts: paintDecision.paintParts,
-          presentationSuppressed: !paintDecision.enabled,
-          spatial: paintDecision.enabled,
-          persistent: paintDecision.enabled,
-          phaseStart: CHOREOGRAPHY_PHASES.v2ChargeStart,
-          phaseEnd: CHOREOGRAPHY_PHASES.v2MovementStart,
+          kind: "feed_only",
+          spatial: false,
         }),
       );
       continue;
@@ -2233,7 +2261,7 @@ function buildAuthorizedPresentationChoreographyPlan(
         ...common,
         kind: "feed_only",
         spatial: false,
-        noncausal: audience === "agent_pov",
+        noncausal: row.vocabulary !== "event",
       }),
     );
   }
@@ -2273,21 +2301,14 @@ function buildAuthorizedPresentationChoreographyPlan(
 
 /**
  * Mirror the painter's maximum retained SVG shape for each planner-authored
- * persistent event kind. Charge owns two roots, five foreground descendants,
- * two route paths, and one backplate for every allocator-authored crossing.
- * Persistent lifecycle and team-wave pulses own at most five nodes each.
+ * persistent event kind. Persistent lifecycle and team-wave pulses own at
+ * most five nodes each.
  *
  * @param {Record<string, any>} event
  */
 function persistentEventNodeUpperBound(event) {
   if (!event.spatial || !event.persistent) {
     return 0;
-  }
-  if (event.kind === "charge_displacement") {
-    const bridgeCount = Array.isArray(event.route?.bridgeGaps)
-      ? event.route.bridgeGaps.length
-      : 0;
-    return 9 + bridgeCount;
   }
   if (event.kind === "semantic_pulse") {
     return 5;

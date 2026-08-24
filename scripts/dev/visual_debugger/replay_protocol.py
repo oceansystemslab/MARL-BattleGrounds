@@ -105,6 +105,14 @@ _NonNegativeInt = Annotated[int, Field(ge=0)]
 _PositiveInt = Annotated[int, Field(gt=0)]
 _PositiveUnitFloat = Annotated[float, Field(gt=0.0, le=1.0)]
 _GlobalSlot = Annotated[int, Field(ge=0, lt=10)]
+_PovPresentationKey = Annotated[
+    str,
+    StringConstraints(
+        min_length=68,
+        max_length=68,
+        pattern=r"^pov_[0-9a-f]{64}$",
+    ),
+]
 
 
 class _ReplayProtocolModel(BaseModel):
@@ -859,6 +867,75 @@ def _validate_researcher_progress(
         raise ValueError("successful processing must cover the validated prefix.")
 
 
+class ReplayArtifactFactsV1(_ReplayProtocolModel):
+    """Canonical artifact, rollout-completion, and processing facts."""
+
+    schema_version: Literal[1] = REPLAY_VIEWER_PROTOCOL_SCHEMA_VERSION
+    artifact_summary: ReplayArtifactSummaryV1
+    completion: ReplayCompletionBadgeV1
+    processing: ReplayProcessingBadgeV1
+
+    @model_validator(mode="after")
+    def _validate_facts(self) -> Self:
+        if type(self.artifact_summary) is not ReplayArtifactSummaryV1:
+            raise ValueError("artifact_summary must be the exact replay artifact root.")
+        if type(self.completion) is not ReplayCompletionBadgeV1:
+            raise ValueError("completion must be the exact canonical replay badge.")
+        if type(self.processing) is not ReplayProcessingBadgeV1:
+            raise ValueError("processing must be the exact replay processing badge.")
+        _validate_researcher_artifact_summary(self.artifact_summary)
+        _validate_researcher_progress(
+            self.artifact_summary,
+            self.completion,
+            self.processing,
+        )
+        return self
+
+
+def _validate_agent_artifact_facts_join(
+    *,
+    summary: ReplayArtifactSummaryV1 | SharedObsAgentPovReplayArtifactSummaryV1,
+    completion: ActorPovReplayCompletionBadgeV1,
+    facts: ReplayArtifactFactsV1,
+) -> None:
+    if type(facts) is not ReplayArtifactFactsV1:
+        raise ValueError("artifact_facts must be the exact canonical replay root.")
+    canonical = facts.artifact_summary
+    if type(summary) is ReplayArtifactSummaryV1:
+        if (
+            summary.replay_reference != canonical.replay_reference
+            or summary.expected_transition_count != canonical.expected_transition_count
+            or summary.recorded_transition_count != canonical.recorded_transition_count
+            or summary.recorded_frame_count != canonical.recorded_frame_count
+        ):
+            raise ValueError("Agent replay summary must join canonical artifact facts.")
+    elif type(summary) is SharedObsAgentPovReplayArtifactSummaryV1:
+        if (
+            summary.episode_id != canonical.replay_reference.episode_id
+            or summary.expected_transition_count != canonical.expected_transition_count
+            or summary.captured_transition_count != canonical.recorded_transition_count
+            or summary.captured_frame_count != canonical.recorded_frame_count
+        ):
+            raise ValueError(
+                "SharedObs Agent replay summary must join canonical artifact facts."
+            )
+    else:  # pragma: no cover - callers narrow the exact wire roots.
+        raise ValueError("Agent replay summary uses an unsupported root.")
+    canonical_completion = facts.completion
+    if (
+        completion.episode_id != canonical_completion.episode_id
+        or completion.completion_state != canonical_completion.completion_state
+        or completion.expected_transition_count
+        != canonical_completion.expected_transition_count
+        or completion.captured_transition_count
+        != canonical_completion.validated_transition_count
+        or completion.terminated != canonical_completion.terminated
+        or completion.truncated != canonical_completion.truncated
+        or completion.completion_bases != canonical_completion.completion_bases
+    ):
+        raise ValueError("Agent completion must join canonical artifact facts.")
+
+
 class ResearcherReplayViewerFrameV1(_ReplayViewerFrameBaseV1):
     """Read-only researcher frame carrying the accepted CP7.1 projection."""
 
@@ -914,7 +991,7 @@ class ResearcherReplayViewerFrameV1(_ReplayViewerFrameBaseV1):
 
 
 class ActorPovReplayViewerFrameV1(_ReplayViewerFrameBaseV1):
-    """Exact NoSharedObs recipient frame with no privileged processing truth."""
+    """NoSharedObs battlefield fog plus researcher-wide replay artifact facts."""
 
     frame_kind: Literal["actor_pov_replay_viewer"] = "actor_pov_replay_viewer"
     view_mode: Literal["pov"] = "pov"
@@ -925,6 +1002,7 @@ class ActorPovReplayViewerFrameV1(_ReplayViewerFrameBaseV1):
     incoming_pov_transition_id: _ScientificId | None
     completion: ActorPovReplayCompletionBadgeV1
     processing_disclosure: ActorPovProcessingDisclosureV1
+    artifact_facts: ReplayArtifactFactsV1
     projection: ActorPovAnalyzerProjectionV1
 
     @model_validator(mode="after")
@@ -942,6 +1020,11 @@ class ActorPovReplayViewerFrameV1(_ReplayViewerFrameBaseV1):
             raise ValueError("POV completion must equal the captured replay prefix.")
         if type(self.processing_disclosure) is not ActorPovProcessingDisclosureV1:
             raise ValueError("POV processing must use the non-disclosure root.")
+        _validate_agent_artifact_facts_join(
+            summary=summary,
+            completion=completion,
+            facts=self.artifact_facts,
+        )
         if self.timeline_id != (
             f"{reference.artifact_id}:timeline:actor-pov:{self.public_agent_id}"
         ):
@@ -1050,7 +1133,7 @@ class SharedObsSourceMaterialReplayViewerFrameV1(_ReplayViewerFrameBaseV1):
 
 
 class SharedObsAgentPovReplayViewerFrameV1(_PrivateSharedReplayProtocolModel):
-    """Identity-only SharedObs Agent POV frame for product transport."""
+    """SharedObs battlefield identity plus researcher-wide replay artifact facts."""
 
     schema_version: Literal[1]
     frame_kind: Literal["shared_obs_agent_pov_replay_viewer"]
@@ -1067,6 +1150,7 @@ class SharedObsAgentPovReplayViewerFrameV1(_PrivateSharedReplayProtocolModel):
     simulator_step_count: _NonNegativeInt
     incoming_recipient_transition_id: _ScientificId | None
     completion: ActorPovReplayCompletionBadgeV1
+    artifact_facts: ReplayArtifactFactsV1
 
     _validate_integer_fields = field_validator(
         "schema_version",
@@ -1104,6 +1188,11 @@ class SharedObsAgentPovReplayViewerFrameV1(_PrivateSharedReplayProtocolModel):
             raise ValueError("completion must be the exact Agent POV badge.")
         _validate_private_shared_cursor_root(cursor)
         _validate_private_shared_completion_root(completion)
+        _validate_agent_artifact_facts_join(
+            summary=summary,
+            completion=completion,
+            facts=self.artifact_facts,
+        )
         if self.public_agent_id != summary.public_agent_id:
             raise ValueError(
                 "SharedObs Agent frame recipient must join replay identity."
@@ -1187,7 +1276,20 @@ class ReplaySetViewCommandV1(_ReplayProtocolModel):
 
 class ReplaySetPovActorCommandV1(_ReplayProtocolModel):
     command_type: Literal["set_pov_actor"] = "set_pov_actor"
-    global_slot: _GlobalSlot
+    global_slot: _GlobalSlot | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    presentation_key: _PovPresentationKey | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+
+    @model_validator(mode="after")
+    def _validate_actor_reference(self) -> Self:
+        if (self.global_slot is None) == (self.presentation_key is None):
+            raise ValueError("set_pov_actor requires exactly one actor reference.")
+        return self
 
 
 class ReplaySetPresetCommandV1(_ReplayProtocolModel):
@@ -1281,6 +1383,7 @@ __all__ = [
     "ReplayAbsoluteSeekCommandV1",
     "ReplayApiErrorCodeV1",
     "ReplayApiErrorV1",
+    "ReplayArtifactFactsV1",
     "ReplayArtifactSummaryV1",
     "ReplayCommandRequestV1",
     "ReplayCommandResponseV1",

@@ -1521,6 +1521,8 @@ test("legality is owner-bound, class-accented, and Status-only", () => {
         target_global_slot: 99,
         lane_0_available: lane === 0 ? available : false,
         lane_1_available: lane === 1 ? available : true,
+        basic_available: lane === 0 ? available : false,
+        ultimate_available: lane === 1 ? available : true,
         armed_lane: lane,
         armed_pair_legal: false,
         python_mask: "secret",
@@ -1539,6 +1541,18 @@ test("legality is owner-bound, class-accented, and Status-only", () => {
     );
     assert.doesNotMatch(fullText(descriptor), /mask|armed|pair|target|Python|99/iu);
   }
+  const targetNoneBasic = explainLegality(
+    {
+      owner_presentation_key: owner.presentation_key,
+      owner_public_agent_id: owner.public_agent_id,
+      lane_0_available: true,
+      basic_available: false,
+    },
+    0,
+    owner,
+  );
+  assert.ok(targetNoneBasic);
+  assert.equal(rowValue(targetNoneBasic, "Status"), "False");
   assert.equal(explainLegality({ lane_0_available: true }, 0, owner), null);
   assert.equal(
     explainLegality(

@@ -201,6 +201,381 @@ test("Oracle incoming left-combat events require a successor anchor", async () =
   );
 });
 
+test("Agent fog-filtered visual events retain local identity and exact trajectory joins", async () => {
+  const source = [
+    fixture.presentations.replay_no_shared_obs_agent_pov,
+    fixture.presentations.replay_shared_obs_agent_pov,
+  ].find(
+    (candidate) =>
+      candidate.visual_events?.summary_kind ===
+        "agent_pov_fog_filtered_visual_events" &&
+      candidate.visual_events.events.some(
+        (/** @type {Record<string, any>} */ event) =>
+          event.event_kind === "ability_activated",
+      ),
+  );
+  assert.ok(source, "the Python fixture must retain one visible Agent ability");
+  const normalized = await normalizeAuthorizedPresentationFrameV1(source);
+  const summary = normalized.visual_events;
+  assert.equal(summary.summary_kind, "agent_pov_fog_filtered_visual_events");
+  assert.equal(
+    normalized.latest_events.summary_kind,
+    source.latest_events.summary_kind,
+  );
+  const healthResolution = summary.events.find(
+    (/** @type {Record<string, any>} */ event) =>
+      event.event_kind === "recipient_health_resolution",
+  );
+  assert.ok(healthResolution);
+  assert.deepEqual(Object.keys(healthResolution).sort(), [
+    "event_id",
+    "event_kind",
+    "health_after_combat_resolution",
+    "ordinal",
+    "phase_rank",
+    "realized_net_health_change",
+    "recipient_anchor",
+    "transition_start_health",
+  ]);
+  assert.deepEqual(
+    summary.ordered_event_ids,
+    summary.events.map(
+      (/** @type {Record<string, any>} */ _event, /** @type {number} */ index) =>
+        `${summary.incoming_recipient_transition_id}:visual-event:${String(index).padStart(4, "0")}`,
+    ),
+  );
+  assert.equal(
+    summary.ordered_event_kinds.some((/** @type {string} */ kind) =>
+      [
+        "source_damage_output",
+        "source_healing_output",
+        "combat_countdown_reset",
+        "lethal_damage_contribution",
+      ].includes(kind),
+    ),
+    false,
+  );
+  assert.deepEqual(
+    summary.agent_phase_trajectories
+      .filter(
+        (/** @type {Record<string, any>} */ trajectory) =>
+          trajectory.successor !== null,
+      )
+      .map((/** @type {Record<string, any>} */ trajectory) => [
+        trajectory.agent_presentation_key,
+        trajectory.agent_public_agent_id,
+        trajectory.agent_class_id,
+        trajectory.successor.position,
+      ]),
+    presentationScene(source).agents.map((/** @type {Record<string, any>} */ agent) => [
+      agent.presentation_key,
+      agent.public_agent_id,
+      agent.class_id,
+      agent.position,
+    ]),
+  );
+
+  const invalidClass = clone(source);
+  invalidClass.visual_events.agent_phase_trajectories[0].agent_class_id = 6;
+  await assert.rejects(normalizeAuthorizedPresentationFrameV1(invalidClass), TypeError);
+
+  const wrongSuccessorClass = clone(source);
+  const wrongClassTrajectory =
+    wrongSuccessorClass.visual_events.agent_phase_trajectories[0];
+  wrongClassTrajectory.agent_class_id =
+    wrongClassTrajectory.agent_class_id === 1 ? 2 : 1;
+  await assert.rejects(
+    normalizeAuthorizedPresentationFrameV1(wrongSuccessorClass),
+    /current scene/u,
+  );
+
+  const missingRequiredStart = clone(source);
+  const ability = missingRequiredStart.visual_events.events.find(
+    (/** @type {Record<string, any>} */ event) =>
+      event.event_kind === "ability_activated",
+  );
+  assert.ok(ability);
+  const sourceTrajectory =
+    missingRequiredStart.visual_events.agent_phase_trajectories.find(
+      (/** @type {Record<string, any>} */ trajectory) =>
+        trajectory.agent_presentation_key === ability.source_anchor.presentation_key,
+    );
+  assert.ok(sourceTrajectory);
+  sourceTrajectory.transition_start = null;
+  await assert.rejects(
+    normalizeAuthorizedPresentationFrameV1(missingRequiredStart),
+    /trajectory anchor/u,
+  );
+
+  const missingBoth = clone(source);
+  missingBoth.visual_events.agent_phase_trajectories[0].transition_start = null;
+  missingBoth.visual_events.agent_phase_trajectories[0].successor = null;
+  await assert.rejects(normalizeAuthorizedPresentationFrameV1(missingBoth), TypeError);
+
+  const successorDrift = clone(source);
+  const recipientTrajectory =
+    successorDrift.visual_events.agent_phase_trajectories.find(
+      (/** @type {Record<string, any>} */ trajectory) =>
+        trajectory.agent_public_agent_id ===
+        successorDrift.authority.recipient_public_agent_id,
+    );
+  assert.ok(recipientTrajectory);
+  recipientTrajectory.successor.position[0] += 0.25;
+  const replacementPosition = clone(recipientTrajectory.successor.position);
+  const pending = [...successorDrift.visual_events.events];
+  while (pending.length > 0) {
+    const value = pending.pop();
+    if (Array.isArray(value)) {
+      pending.push(...value);
+    } else if (value && typeof value === "object") {
+      if (
+        value.phase === "successor" &&
+        value.presentation_key === recipientTrajectory.agent_presentation_key
+      ) {
+        value.position = clone(replacementPosition);
+      }
+      pending.push(...Object.values(value));
+    }
+  }
+  await assert.rejects(
+    normalizeAuthorizedPresentationFrameV1(successorDrift),
+    /current scene/u,
+  );
+
+  const wrongCurrentScene = clone(fixture.state_cases.replay_no_shared_final);
+  assert.equal(wrongCurrentScene.visual_events.events.length, 0);
+  const nonrecipientCurrentTrajectory =
+    wrongCurrentScene.visual_events.agent_phase_trajectories.find(
+      (/** @type {Record<string, any>} */ trajectory) =>
+        trajectory.agent_public_agent_id !==
+        wrongCurrentScene.authority.recipient_public_agent_id,
+    );
+  assert.ok(nonrecipientCurrentTrajectory);
+  nonrecipientCurrentTrajectory.successor = null;
+  await assert.rejects(
+    normalizeAuthorizedPresentationFrameV1(wrongCurrentScene),
+    /current scene/u,
+  );
+
+  const missingRecipientStart = clone(fixture.state_cases.replay_no_shared_final);
+  const fixedRecipientTrajectory =
+    missingRecipientStart.visual_events.agent_phase_trajectories.find(
+      (/** @type {Record<string, any>} */ trajectory) =>
+        trajectory.agent_public_agent_id ===
+        missingRecipientStart.authority.recipient_public_agent_id,
+    );
+  assert.ok(fixedRecipientTrajectory);
+  fixedRecipientTrajectory.transition_start = null;
+  await assert.rejects(
+    normalizeAuthorizedPresentationFrameV1(missingRecipientStart),
+    /both endpoints/u,
+  );
+
+  const sparseEventIdentity = clone(source);
+  const sparseId =
+    `${sparseEventIdentity.visual_events.incoming_recipient_transition_id}:` +
+    "visual-event:9999";
+  sparseEventIdentity.visual_events.events[0].event_id = sparseId;
+  sparseEventIdentity.visual_events.ordered_event_ids[0] = sparseId;
+  await assert.rejects(
+    normalizeAuthorizedPresentationFrameV1(sparseEventIdentity),
+    /exact and ordered/u,
+  );
+
+  const visualChannelConfusion = clone(source);
+  visualChannelConfusion.visual_events = clone(source.latest_events);
+  await assert.rejects(normalizeAuthorizedPresentationFrameV1(visualChannelConfusion));
+
+  for (const forbiddenTotal of ["total_effective_damage", "total_effective_healing"]) {
+    const overDisclosedHealth = clone(source);
+    const health = overDisclosedHealth.visual_events.events.find(
+      (/** @type {Record<string, any>} */ event) =>
+        event.event_kind === "recipient_health_resolution",
+    );
+    assert.ok(health);
+    health[forbiddenTotal] = 1;
+    await assert.rejects(
+      normalizeAuthorizedPresentationFrameV1(overDisclosedHealth),
+      TypeError,
+    );
+  }
+
+  const tolerantHealth = clone(source);
+  const tolerantHealthEvent = tolerantHealth.visual_events.events.find(
+    (/** @type {Record<string, any>} */ event) =>
+      event.event_kind === "recipient_health_resolution",
+  );
+  assert.ok(tolerantHealthEvent);
+  tolerantHealthEvent.realized_net_health_change += 5e-6;
+  await normalizeAuthorizedPresentationFrameV1(tolerantHealth);
+
+  const inconsistentHealth = clone(source);
+  const inconsistentHealthEvent = inconsistentHealth.visual_events.events.find(
+    (/** @type {Record<string, any>} */ event) =>
+      event.event_kind === "recipient_health_resolution",
+  );
+  assert.ok(inconsistentHealthEvent);
+  inconsistentHealthEvent.realized_net_health_change += 0.25;
+  await assert.rejects(
+    normalizeAuthorizedPresentationFrameV1(inconsistentHealth),
+    /visible net change/u,
+  );
+
+  for (const eventKind of [
+    "recipient_health_resolution",
+    "health_regenerated",
+    "cooldown_started",
+    "cooldown_ready",
+  ]) {
+    const missingSuccessor = clone(source);
+    const trajectory = missingSuccessor.visual_events.agent_phase_trajectories.find(
+      (/** @type {Record<string, any>} */ candidate) =>
+        candidate.agent_public_agent_id !==
+          missingSuccessor.authority.recipient_public_agent_id &&
+        candidate.transition_start !== null,
+    );
+    assert.ok(trajectory);
+    trajectory.successor = null;
+    const eventId =
+      `${missingSuccessor.visual_events.incoming_recipient_transition_id}:` +
+      "visual-event:0000";
+    const anchorField =
+      eventKind === "recipient_health_resolution"
+        ? { recipient_anchor: clone(trajectory.transition_start) }
+        : { agent_anchor: clone(trajectory.transition_start) };
+    const event = {
+      event_id: eventId,
+      ordinal: 0,
+      phase_rank:
+        eventKind === "recipient_health_resolution"
+          ? 40
+          : eventKind === "health_regenerated"
+            ? 50
+            : 60,
+      event_kind: eventKind,
+      ...anchorField,
+      ...(eventKind === "recipient_health_resolution"
+        ? {
+            transition_start_health: 100,
+            health_after_combat_resolution: 90,
+            realized_net_health_change: -10,
+          }
+        : {}),
+      ...(eventKind === "health_regenerated" ? { actual_health_regenerated: 1 } : {}),
+    };
+    missingSuccessor.visual_events.events = [event];
+    missingSuccessor.visual_events.ordered_event_ids = [eventId];
+    missingSuccessor.visual_events.ordered_event_kinds = [eventKind];
+    missingSuccessor.visual_events.event_count = 1;
+    await assert.rejects(
+      normalizeAuthorizedPresentationFrameV1(missingSuccessor),
+      /successor-derived/u,
+    );
+  }
+
+  const teammateRejection = clone(source);
+  const teammateTrajectory =
+    teammateRejection.visual_events.agent_phase_trajectories.find(
+      (/** @type {Record<string, any>} */ trajectory) =>
+        trajectory.agent_public_agent_id !==
+          teammateRejection.authority.recipient_public_agent_id &&
+        trajectory.transition_start !== null,
+    );
+  assert.ok(teammateTrajectory);
+  teammateRejection.visual_events.events.unshift({
+    event_id: "reindexed below",
+    ordinal: 0,
+    phase_rank: 10,
+    event_kind: "action_rejected",
+    actor_identity: {
+      identity_kind: "authorized_agent",
+      presentation_key: teammateTrajectory.agent_presentation_key,
+      public_agent_id: teammateTrajectory.agent_public_agent_id,
+    },
+    actor_configured_active: true,
+    rejection_component: "domain",
+    submitted_action: {
+      move_action: 0,
+      target_action: 99,
+      use_ultimate_action: 0,
+    },
+    actor_anchor: clone(teammateTrajectory.transition_start),
+  });
+  teammateRejection.visual_events.events.forEach(
+    (/** @type {Record<string, any>} */ event, /** @type {number} */ index) => {
+      event.ordinal = index;
+      event.event_id =
+        `${teammateRejection.visual_events.incoming_recipient_transition_id}:` +
+        `visual-event:${String(index).padStart(4, "0")}`;
+    },
+  );
+  teammateRejection.visual_events.ordered_event_ids =
+    teammateRejection.visual_events.events.map(
+      (/** @type {Record<string, any>} */ event) => event.event_id,
+    );
+  teammateRejection.visual_events.ordered_event_kinds =
+    teammateRejection.visual_events.events.map(
+      (/** @type {Record<string, any>} */ event) => event.event_kind,
+    );
+  teammateRejection.visual_events.event_count =
+    teammateRejection.visual_events.events.length;
+  await assert.rejects(
+    normalizeAuthorizedPresentationFrameV1(teammateRejection),
+    /fixed recipient/u,
+  );
+
+  const oracle = await normalizeAuthorizedPresentationFrameV1(
+    fixture.presentations.replay_oracle,
+  );
+  assert.equal(oracle.latest_events.summary_kind, "replay_incoming_inventory");
+  assert.deepEqual(
+    oracle.latest_events,
+    fixture.presentations.replay_oracle.latest_events,
+  );
+});
+
+test("Agent visual trajectories authorize adjacent disappearance and appearance only", async () => {
+  const agentCases = Object.values(fixture.state_cases).filter(
+    (/** @type {Record<string, any>} */ candidate) =>
+      candidate.visual_events?.summary_kind === "agent_pov_fog_filtered_visual_events",
+  );
+  const disappearance = agentCases.find(
+    (/** @type {Record<string, any>} */ candidate) =>
+      candidate.visual_events.agent_phase_trajectories.some(
+        (/** @type {Record<string, any>} */ trajectory) =>
+          trajectory.transition_start !== null && trajectory.successor === null,
+      ),
+  );
+  const appearance = agentCases.find((/** @type {Record<string, any>} */ candidate) =>
+    candidate.visual_events.agent_phase_trajectories.some(
+      (/** @type {Record<string, any>} */ trajectory) =>
+        trajectory.transition_start === null && trajectory.successor !== null,
+    ),
+  );
+  assert.ok(disappearance, "the Python fixture must retain one Agent disappearance");
+  assert.ok(appearance, "the Python fixture must retain one Agent appearance");
+
+  for (const source of [disappearance, appearance]) {
+    const normalized = await normalizeAuthorizedPresentationFrameV1(source);
+    const currentByKey = new Map(
+      presentationScene(source).agents.map(
+        (/** @type {Record<string, any>} */ agent) => [agent.presentation_key, agent],
+      ),
+    );
+    for (const trajectory of normalized.visual_events.agent_phase_trajectories) {
+      const current = currentByKey.get(trajectory.agent_presentation_key);
+      if (trajectory.successor === null) {
+        assert.equal(current, undefined);
+      } else {
+        assert.ok(current);
+        assert.equal(current.public_agent_id, trajectory.agent_public_agent_id);
+        assert.equal(current.class_id, trajectory.agent_class_id);
+        assert.deepEqual(current.position, trajectory.successor.position);
+      }
+    }
+  }
+});
+
 test("Python-certified V2 class and shield mechanics project exactly and freeze", async () => {
   const expectedProfile = {
     availability_kind: "available",
@@ -709,6 +1084,16 @@ test("all five exact raw/presentation pairs join identity-first and timelines st
     assert.equal(joined.presentation.presentation_kind, kind);
     assert.equal(JSON.stringify(pair), before);
     assertRecursivelyFrozen(joined);
+    if (
+      kind === "replay_no_shared_obs_agent_pov" ||
+      kind === "replay_shared_obs_agent_pov"
+    ) {
+      assertRecursivelyFrozen(joined.transport.artifact_facts);
+      assert.notEqual(
+        joined.transport.artifact_facts.artifact_summary.metric_report_availability,
+        "not_available_in_actor_pov",
+      );
+    }
     if (pair.timeline) {
       const installed = joinReplayTransportAndTimelineV1(joined, pair.timeline);
       assert.equal(isJoinedTransportAndAuthorizedPresentationV1(installed), true);
@@ -947,6 +1332,36 @@ test("private Shared transport completion and timeline mirror exact Python invar
   const timeline = normalizeSharedObsAgentPovReplayTimelineTransportV1(pair.timeline);
   assertRecursivelyFrozen(valid);
   assertRecursivelyFrozen(timeline);
+  assertRecursivelyFrozen(valid.artifact_facts);
+  assert.notEqual(
+    valid.artifact_facts.artifact_summary.metric_report_availability,
+    "not_available_in_actor_pov",
+  );
+
+  const missingArtifactFacts = clone(pair.transport);
+  delete missingArtifactFacts.artifact_facts;
+  assert.throws(
+    () => normalizeSharedObsAgentPovReplayTransportV1(missingArtifactFacts),
+    TypeError,
+  );
+
+  const hiddenArtifactFacts = clone(pair.transport);
+  hiddenArtifactFacts.artifact_facts.artifact_summary.metric_report_availability =
+    "not_available_in_actor_pov";
+  assert.throws(
+    () => normalizeSharedObsAgentPovReplayTransportV1(hiddenArtifactFacts),
+    TypeError,
+  );
+
+  const mismatchedArtifactFacts = clone(pair.transport);
+  mismatchedArtifactFacts.artifact_facts = transformStrings(
+    mismatchedArtifactFacts.artifact_facts,
+    (text) => text.replaceAll("service-shared", "service-shared-other"),
+  );
+  assert.throws(
+    () => normalizeSharedObsAgentPovReplayTransportV1(mismatchedArtifactFacts),
+    TypeError,
+  );
 
   const capturedPrefixBasis = clone(pair.transport);
   capturedPrefixBasis.completion.completion_bases = ["captured_prefix"];
@@ -967,6 +1382,12 @@ test("private Shared transport completion and timeline mirror exact Python invar
   bothDone.completion.terminated = true;
   bothDone.completion.truncated = true;
   bothDone.completion.completion_bases = ["task_terminal", "declared_horizon"];
+  bothDone.artifact_facts.completion.terminated = true;
+  bothDone.artifact_facts.completion.truncated = true;
+  bothDone.artifact_facts.completion.completion_bases = [
+    "task_terminal",
+    "declared_horizon",
+  ];
   assert.doesNotThrow(() => normalizeSharedObsAgentPovReplayTransportV1(bothDone));
 
   const accessor = clone(pair.timeline);
@@ -1047,6 +1468,21 @@ test("replay continuity spans branded legacy, private, and audience-switch pairs
   assert.equal(
     validateReplayTransportContinuityV1(privateShared, privateApplied, "applied"),
     privateApplied,
+  );
+  const privateFactsDriftPair = clone(privatePair);
+  privateFactsDriftPair.transport.artifact_facts.artifact_summary.metric_report_availability =
+    privateFactsDriftPair.transport.artifact_facts.artifact_summary
+      .metric_report_availability === "available"
+      ? "missing"
+      : "available";
+  const privateFactsDrift = await joinTransportAndAuthorizedPresentationV1(
+    privateFactsDriftPair.transport,
+    privateFactsDriftPair.presentation,
+  );
+  assert.throws(
+    () =>
+      validateReplayTransportContinuityV1(privateShared, privateFactsDrift, "no_op"),
+    TypeError,
   );
   const privateSettled = await withRevision(privatePair, 1, {
     cursor: 2,

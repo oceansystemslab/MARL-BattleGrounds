@@ -68,7 +68,7 @@ read-only replay controls:
                         1.75{_RATE_SUFFIX} / 2.00{_RATE_SUFFIX}
                         scale the complete presentation clock
   Export PNG            export the settled battlefield with replay provenance
-  Download Metrics      Oracle-only canonical metric-report download
+  Download Metrics      canonical metric-report download in every visual POV
   Tick current / final  show the exact captured cursor and terminal tick
 
 The Replay Viewer is read-only and always uses fixed Analysis presentation.

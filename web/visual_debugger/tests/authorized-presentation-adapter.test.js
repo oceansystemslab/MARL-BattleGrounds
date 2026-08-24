@@ -34,6 +34,7 @@ import {
   explainPovStatus,
   explainSpawnShield,
 } from "../src/explanations.js";
+
 const fixture = JSON.parse(
   readFileSync(
     new URL("./fixtures/authorized-presentations-v1.json", import.meta.url),
@@ -930,6 +931,12 @@ test("certified legality projection crosses every target disclosure and combat l
         target.target_kind === "no_target" ? null : target.target_public_agent_id,
       );
       assert.deepEqual([legality.lane_0_available, legality.lane_1_available], row);
+      assert.equal(legality.basic_available, target.target_action > 0 && row[0]);
+      assert.equal(legality.ultimate_available, row[1]);
+      if (target.target_kind === "no_target") {
+        assert.equal(row[0], true);
+        assert.equal(legality.basic_available, false);
+      }
       assert.equal(legality.armed_lane, lane.index);
       assert.equal(
         legality.armed_pair_legal,
@@ -1046,7 +1053,7 @@ test("inspection projections fail closed on mismatched authority or target joins
   );
 });
 
-test("Latest Events, Submitted/Accepted, Technical Frame, and inspection stay disjoint", async () => {
+test("Agent visual events, local evidence, Submitted/Accepted, Technical Frame, and inspection stay disjoint", async () => {
   const frame = await normalized("replay_shared_obs_agent_pov");
   const incoming = authorizedPresentationIncomingRows(frame);
   const transition = authorizedPresentationTransitionRows(frame);
@@ -1054,8 +1061,16 @@ test("Latest Events, Submitted/Accepted, Technical Frame, and inspection stay di
   const inspection = authorizedPresentationInspection(frame);
   assert.ok(incoming.length > 0);
   assert.equal(
-    incoming.every(({ vocabulary }) => vocabulary === "observation_delta"),
+    incoming.every(({ vocabulary }) => vocabulary === "event"),
     true,
+  );
+  assert.equal(
+    frame.latest_events.summary_kind,
+    "shared_obs_recipient_observation_deltas",
+  );
+  assert.equal(
+    frame.visual_events.summary_kind,
+    "agent_pov_fog_filtered_visual_events",
   );
   assert.equal(transition.length, 1);
   assert.deepEqual(Object.keys(transition[0]), [
@@ -1397,7 +1412,7 @@ test("live scope and replay inspection states remain exact", async () => {
   assert.deepEqual(authorizedPresentationSceneView(replayNoneFrame)?.ranges, []);
 });
 
-test("Latest Events alone schedule opaque-key choreography", async () => {
+test("authority-selected visual events alone schedule opaque-key choreography", async () => {
   const oracle = await normalized("replay_oracle");
   const oraclePlan = buildChoreographyPlan(oracle, surface);
   assert.ok(oraclePlan);
@@ -1430,11 +1445,13 @@ test("Latest Events alone schedule opaque-key choreography", async () => {
   );
   assert.equal(
     sharedPlan.events.every(
-      (event) =>
-        event.authorityVocabulary === "observation_delta" &&
-        event.noncausal === true &&
-        event.kind === "feed_only" &&
-        event.spatial === false,
+      (event) => event.authorityVocabulary === "event" && event.noncausal !== true,
+    ),
+    true,
+  );
+  assert.equal(
+    sharedPlan.events.some(
+      (event) => event.kind === "activation" && event.spatial === true,
     ),
     true,
   );
@@ -1450,8 +1467,7 @@ test("Latest Events alone schedule opaque-key choreography", async () => {
   assert.ok(noSharedPlan);
   assert.equal(
     noSharedPlan.events.every(
-      (event) =>
-        event.authorityVocabulary === "recipient_cue" && event.noncausal === true,
+      (event) => event.authorityVocabulary === "event" && event.noncausal !== true,
     ),
     true,
   );
@@ -1667,20 +1683,20 @@ test("Oracle choreography exact-joins moving trajectories and presents successor
   }
 
   const charge = plan.events[10];
-  assert.equal(charge.kind, "charge_displacement");
-  assert.deepEqual(charge.start, projectedTrajectoryPoint(raw, 2, "transition_start"));
-  assert.deepEqual(charge.end, projectedTrajectoryPoint(raw, 2, "post_charge"));
-  assert.notDeepEqual(charge.end, projectedTrajectoryPoint(raw, 2, "successor"));
-  assert.equal(
-    charge.sourcePresentationKey,
-    oracleTrajectoryForClass(raw, 2).agent_presentation_key,
-  );
-  assert.equal(
-    charge.sourcePublicAgentId,
-    oracleTrajectoryForClass(raw, 2).agent_public_agent_id,
-  );
-  assert.equal(Object.hasOwn(charge, "route"), false);
-  assert.equal(plan.bounds.persistentNodes, 9);
+  assert.equal(charge.eventType, "charge_phase_displacement");
+  assert.equal(charge.kind, "feed_only");
+  assert.equal(charge.spatial, false);
+  for (const field of [
+    "sourcePresentationKey",
+    "sourcePublicAgentId",
+    "start",
+    "end",
+    "route",
+    "paintParts",
+    "persistent",
+  ]) {
+    assert.equal(Object.hasOwn(charge, field), false, field);
+  }
 
   const movement = plan.events[11];
   assert.equal(movement.eventType, "ordinary_movement_phase_displacement");
@@ -1928,7 +1944,7 @@ test("activation trajectories and impacts ignore foreground collision allocation
   );
 });
 
-test("Charge displacement stays a straight transition-start to post-Charge segment", async () => {
+test("Charge displacement remains authorized but creates no visual overlay", async () => {
   const raw = movingOracleRaw();
   const trajectory = oracleTrajectoryForClass(raw, 2);
   installOracleEvents(raw, [
@@ -1974,10 +1990,16 @@ test("Charge displacement stays a straight transition-start to post-Charge segme
   assert.ok(plan);
   const displacement = plan.events[0];
 
-  assert.equal(displacement.kind, "charge_displacement");
-  assert.deepEqual(displacement.start, scientificStart);
-  assert.deepEqual(displacement.end, scientificEnd);
+  assert.equal(displacement.eventType, "charge_phase_displacement");
+  assert.equal(displacement.kind, "feed_only");
+  assert.equal(displacement.spatial, false);
   const allocatorFields = [
+    "start",
+    "end",
+    "sourcePresentationKey",
+    "sourcePublicAgentId",
+    "paintParts",
+    "persistent",
     "route",
     "routeLayoutKey",
     "routeLane",
@@ -2359,11 +2381,7 @@ test("NoShared and Shared authorized clocks never synthesize a respawn wave", as
       kind,
     );
     assert.ok(
-      plan.events.every(
-        (event) =>
-          event.authorityVocabulary === "recipient_cue" ||
-          event.authorityVocabulary === "observation_delta",
-      ),
+      plan.events.every((event) => event.authorityVocabulary === "event"),
       kind,
     );
   }
@@ -2449,9 +2467,8 @@ test("Oracle status compositor applies exact precedence and preserves every atom
     {
       label: "refresh",
       kinds: ["status_refreshed_or_extended"],
-      lifecycle: "refreshed",
+      lifecycle: "applied",
       primaryIndex: 0,
-      suppressed: true,
     },
     {
       label: "refresh plus apply",
@@ -2468,7 +2485,7 @@ test("Oracle status compositor applies exact precedence and preserves every atom
     {
       label: "break plus apply",
       kinds: ["status_broken_by_damage", "status_applied"],
-      lifecycle: "trap_broken_and_reapplied",
+      lifecycle: "applied",
       primaryIndex: 1,
     },
     {
@@ -2480,7 +2497,7 @@ test("Oracle status compositor applies exact precedence and preserves every atom
     {
       label: "age plus apply",
       kinds: ["status_aged_to_zero", "status_applied"],
-      lifecycle: "reapplied",
+      lifecycle: "applied",
       primaryIndex: 1,
     },
     {
@@ -2541,12 +2558,8 @@ test("Oracle status compositor applies exact precedence and preserves every atom
       expectedApplicationSources,
       expected.label,
     );
-    assert.equal(
-      lifecycle.presentationSuppressed,
-      expected.suppressed === true,
-      expected.label,
-    );
-    assert.equal(lifecycle.spatial, expected.suppressed !== true, expected.label);
+    assert.equal(lifecycle.presentationSuppressed, false, expected.label);
+    assert.equal(lifecycle.spatial, true, expected.label);
     assert.ok(
       lifecycle.applicationSources.every(
         (/** @type {Record<string, any>} */ source) =>
@@ -2577,9 +2590,9 @@ test("Oracle status compositor applies exact precedence and preserves every atom
       );
     }
     assertRecursivelyFrozen(lifecycle);
-    if (expected.lifecycle === "reapplied") {
-      assert.equal(lifecycle.lifecycleToken.label, "Reapplied");
-      assert.equal(lifecycle.lifecycleToken.accessibleName, "Status reapplied");
+    if (expected.lifecycle === "applied") {
+      assert.equal(lifecycle.lifecycleToken.label, "Applied");
+      assert.equal(lifecycle.lifecycleToken.accessibleName, "Status applied");
       assert.equal(lifecycle.lifecycleToken.glyphKey, "lifecycle-applied");
       assert.doesNotMatch(JSON.stringify(lifecycle.lifecycleToken), /expir/iu);
     }
@@ -2640,39 +2653,37 @@ test("status groups keep first-atomic plan order and use the nearest collision-s
     incomingRows[2].id,
   ]);
   assert.equal(plan.events[0].lifecycle, "applied");
-  assert.equal(plan.events[1].lifecycle, "reapplied");
+  assert.equal(plan.events[1].lifecycle, "applied");
   const earlierApply = plan.events[0];
-  const laterReapplication = plan.events[1];
+  const laterApplication = plan.events[1];
   assert.ok(earlierApply.cue);
-  assert.ok(laterReapplication.cue);
+  assert.ok(laterApplication.cue);
   assert.ok(earlierApply.cueBounds);
-  assert.ok(laterReapplication.cueBounds);
+  assert.ok(laterApplication.cueBounds);
   assert.equal(earlierApply.cueCollisionFree, true);
-  assert.equal(laterReapplication.cueCollisionFree, true);
+  assert.equal(laterApplication.cueCollisionFree, true);
   assert.equal(
     earlierApply.cueLayoutKey,
     JSON.stringify(["event", incomingRows[0].id, "cue"]),
   );
   assert.equal(
-    laterReapplication.cueLayoutKey,
+    laterApplication.cueLayoutKey,
     JSON.stringify(["event", incomingRows[2].id, "cue"]),
   );
   const cueDistance = (/** @type {Record<string, any>} */ event) =>
     Math.hypot(event.cue.x - event.recipient.x, event.cue.y - event.recipient.y);
-  assert.ok(
-    Math.abs(cueDistance(earlierApply) - cueDistance(laterReapplication)) < 1e-9,
-  );
+  assert.ok(Math.abs(cueDistance(earlierApply) - cueDistance(laterApplication)) < 1e-9);
   assert.equal(earlierApply.cueDisposition, "recipient_stack");
-  assert.equal(laterReapplication.cueDisposition, "recipient_stack");
+  assert.equal(laterApplication.cueDisposition, "recipient_stack");
   const overlapWidth = Math.max(
     0,
-    Math.min(earlierApply.cueBounds.right, laterReapplication.cueBounds.right) -
-      Math.max(earlierApply.cueBounds.left, laterReapplication.cueBounds.left),
+    Math.min(earlierApply.cueBounds.right, laterApplication.cueBounds.right) -
+      Math.max(earlierApply.cueBounds.left, laterApplication.cueBounds.left),
   );
   const overlapHeight = Math.max(
     0,
-    Math.min(earlierApply.cueBounds.bottom, laterReapplication.cueBounds.bottom) -
-      Math.max(earlierApply.cueBounds.top, laterReapplication.cueBounds.top),
+    Math.min(earlierApply.cueBounds.bottom, laterApplication.cueBounds.bottom) -
+      Math.max(earlierApply.cueBounds.top, laterApplication.cueBounds.top),
   );
   assert.equal(overlapWidth * overlapHeight, 0);
 });

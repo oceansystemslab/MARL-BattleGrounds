@@ -108,6 +108,12 @@ const PROCESSING_KEYS = [
   "attempted_transition_index",
 ];
 const POV_PROCESSING_KEYS = ["schema_version", "disclosure"];
+const ARTIFACT_FACTS_KEYS = [
+  "schema_version",
+  "artifact_summary",
+  "completion",
+  "processing",
+];
 
 /**
  * @param {unknown} value
@@ -592,6 +598,78 @@ function normalizePovProcessing(value) {
   return Object.freeze({ ...value });
 }
 
+/**
+ * Normalize artifact-wide replay evidence that remains independent of the
+ * fogged battlefield presentation selected for an Agent replay view.
+ *
+ * @param {unknown} value
+ * @returns {Readonly<Record<string, any>>}
+ */
+export function normalizeReplayArtifactFactsV1(value) {
+  const facts = record(value, "Replay artifact facts");
+  exactKeys(facts, ARTIFACT_FACTS_KEYS, "Replay artifact facts");
+  if (facts.schema_version !== 1) {
+    throw new TypeError("Replay artifact facts must use schema version 1.");
+  }
+  const artifactSummary = normalizeArtifactSummary(
+    record(facts.artifact_summary, "Replay artifact facts summary"),
+  );
+  if (artifactSummary.metric_report_availability === "not_available_in_actor_pov") {
+    throw new TypeError(
+      "Replay artifact facts must preserve canonical metric-report availability.",
+    );
+  }
+  const completion = normalizeResearcherCompletion(
+    record(facts.completion, "Replay artifact facts completion"),
+    artifactSummary,
+  );
+  const processing = normalizeProcessing(
+    record(facts.processing, "Replay artifact facts processing"),
+  );
+  if (
+    completion.episode_id !== artifactSummary.replay_reference.episode_id ||
+    processing.processed_transition_count > completion.validated_transition_count ||
+    (processing.status === "succeeded" &&
+      processing.processed_transition_count !== completion.validated_transition_count)
+  ) {
+    throw new TypeError("Replay artifact facts do not join one canonical artifact.");
+  }
+  return Object.freeze({
+    schema_version: 1,
+    artifact_summary: artifactSummary,
+    completion,
+    processing,
+  });
+}
+
+/**
+ * @param {Readonly<Record<string, any>>} summary
+ * @param {Readonly<Record<string, any>>} completion
+ * @param {Readonly<Record<string, any>>} facts
+ */
+function validatePovArtifactFacts(summary, completion, facts) {
+  const factSummary = facts.artifact_summary;
+  const factCompletion = facts.completion;
+  if (
+    !structurallyEqual(factSummary.replay_reference, summary.replay_reference) ||
+    factSummary.expected_transition_count !== summary.expected_transition_count ||
+    factSummary.recorded_transition_count !== summary.recorded_transition_count ||
+    factSummary.recorded_frame_count !== summary.recorded_frame_count ||
+    factCompletion.episode_id !== completion.episode_id ||
+    factCompletion.completion_state !== completion.completion_state ||
+    factCompletion.expected_transition_count !== completion.expected_transition_count ||
+    factCompletion.validated_transition_count !==
+      completion.captured_transition_count ||
+    factCompletion.terminated !== completion.terminated ||
+    factCompletion.truncated !== completion.truncated ||
+    !structurallyEqual(factCompletion.completion_bases, completion.completion_bases)
+  ) {
+    throw new TypeError(
+      "Actor POV replay artifact facts do not join its recipient-local roots.",
+    );
+  }
+}
+
 /** @param {unknown} value @param {string} label */
 function finiteNumber(value, label) {
   if (typeof value !== "number" || !Number.isFinite(value)) {
@@ -684,6 +762,7 @@ function normalizeReplayViewerFrame(value, animateIncoming = false) {
           "projection",
         ]
       : [
+          "artifact_facts",
           "view_mode",
           "pov_global_slot",
           "public_agent_id",
@@ -728,6 +807,8 @@ function normalizeReplayViewerFrame(value, animateIncoming = false) {
   let completion;
   /** @type {Record<string, any>} */
   let processing;
+  /** @type {Readonly<Record<string, any>> | null} */
+  let artifactFacts = null;
   /** @type {string} */
   let replayAudience;
   /** @type {string | null} */
@@ -818,6 +899,8 @@ function normalizeReplayViewerFrame(value, animateIncoming = false) {
     processing = normalizePovProcessing(
       record(frame.processing_disclosure, "Actor POV processing disclosure"),
     );
+    artifactFacts = normalizeReplayArtifactFactsV1(frame.artifact_facts);
+    validatePovArtifactFacts(summary, completion, artifactFacts);
     replayAudience = "actor_pov";
     transitionId = frame.incoming_pov_transition_id;
     expectedTimelineId = `${replayReference.artifact_id}:timeline:actor-pov:${frame.public_agent_id}`;
@@ -879,7 +962,7 @@ function normalizeReplayViewerFrame(value, animateIncoming = false) {
     completion,
     processing,
     ...(frame.frame_kind === "actor_pov_replay_viewer"
-      ? { processing_disclosure: processing }
+      ? { artifact_facts: artifactFacts, processing_disclosure: processing }
       : {}),
     projection: normalizedProjection,
     viewer_mode: "replay",
@@ -1242,6 +1325,24 @@ export function validateReplayFrameContinuity(previous, next, result) {
   const processingContinuityValid =
     !sharesCompletionAuthority ||
     structurallyEqual(next.processing, previous.processing);
+  const previousArtifactFacts =
+    previous.replay_audience === "researcher"
+      ? {
+          schema_version: 1,
+          artifact_summary: previous.artifact_summary,
+          completion: previous.completion,
+          processing: previous.processing,
+        }
+      : previous.artifact_facts;
+  const nextArtifactFacts =
+    next.replay_audience === "researcher"
+      ? {
+          schema_version: 1,
+          artifact_summary: next.artifact_summary,
+          completion: next.completion,
+          processing: next.processing,
+        }
+      : next.artifact_facts;
   if (
     previous.viewer_mode !== "replay" ||
     next.viewer_mode !== "replay" ||
@@ -1258,6 +1359,7 @@ export function validateReplayFrameContinuity(previous, next, result) {
         previous.artifact_summary?.metric_report_availability) ||
     !completionContinuityValid ||
     !processingContinuityValid ||
+    !structurallyEqual(nextArtifactFacts, previousArtifactFacts) ||
     next.cursor?.final_frame_index !== previous.cursor?.final_frame_index ||
     !revisionValid ||
     !settledGenerationValid

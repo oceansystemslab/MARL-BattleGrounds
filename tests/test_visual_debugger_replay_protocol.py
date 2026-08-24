@@ -1,4 +1,4 @@
-"""Strict, audience-separated replay-viewer wire-contract proofs."""
+"""Replay wire proofs with fog-separated battlefields and shared artifact facts."""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ from scripts.dev.visual_debugger.replay_protocol import (
     ActorPovReplayViewerFrameV1,
     ReplayAbsoluteSeekCommandV1,
     ReplayApiErrorV1,
+    ReplayArtifactFactsV1,
     ReplayArtifactSummaryV1,
     ReplayCommandRequestV1,
     ReplayCommandResponseV1,
@@ -85,7 +86,7 @@ _RESEARCHER_FRAME_V1_SHA256 = (
     "3e7896f916ea88882786eaf7b965cc1d76bf5df373b248aa9acd90c03e716c0a"
 )
 _ACTOR_POV_FRAME_V1_SHA256 = (
-    "187841dd953ccb43c53eb80fe2b1a446641b866d53ee202f3f4309f736bdd8d5"
+    "7a04f114cde3c9e2faa7048ff883892e678c881030120af30b9d1e8d7741d2b3"
 )
 _RESEARCHER_TIMELINE_V1_SHA256 = (
     "24da90cf1e6c4f9fe28436ddc6ae1461d3378bcfb981feb315d9c57b09fa923a"
@@ -246,13 +247,53 @@ def _pov_completion(
     )
 
 
-def _processing(*, failed: bool = False) -> ReplayProcessingBadgeV1:
+def _processing(
+    *,
+    failed: bool = False,
+    processed_transition_count: int | None = None,
+) -> ReplayProcessingBadgeV1:
+    processed = (
+        (0 if failed else 1)
+        if processed_transition_count is None
+        else processed_transition_count
+    )
     return ReplayProcessingBadgeV1(
         status="failed" if failed else "succeeded",
-        processed_transition_count=0 if failed else 1,
+        processed_transition_count=processed,
         failure_stage="reducer_advance" if failed else None,
         failure_code="test.reducer_failed" if failed else None,
         attempted_transition_index=0 if failed else None,
+    )
+
+
+def _artifact_facts(
+    episode_id: str,
+    *,
+    expected: int = 1,
+    recorded: int = 1,
+    completion_state: Literal[
+        "complete", "partial", "interrupted", "failed"
+    ] = "complete",
+    metric_report_availability: Literal["available", "missing"] = "available",
+    failed_processing: bool = False,
+) -> ReplayArtifactFactsV1:
+    return ReplayArtifactFactsV1(
+        artifact_summary=_summary(
+            episode_id,
+            expected=expected,
+            recorded=recorded,
+            metric_report_availability=metric_report_availability,
+        ),
+        completion=_completion(
+            episode_id,
+            expected=expected,
+            validated=recorded,
+            state=completion_state,
+        ),
+        processing=_processing(
+            failed=failed_processing,
+            processed_transition_count=0 if failed_processing else recorded,
+        ),
     )
 
 
@@ -326,6 +367,8 @@ def _researcher_initial_frame(
 
 def _actor_pov_frame(
     projection: ActorPovAnalyzerProjectionV1,
+    *,
+    artifact_facts: ReplayArtifactFactsV1 | None = None,
 ) -> ActorPovReplayViewerFrameV1:
     scene = projection.scene
     episode_id = scene.episode_id
@@ -348,6 +391,9 @@ def _actor_pov_frame(
         incoming_pov_transition_id=projection.incoming_transition_id,
         completion=_pov_completion(episode_id),
         processing_disclosure=ActorPovProcessingDisclosureV1(),
+        artifact_facts=(
+            _artifact_facts(episode_id) if artifact_facts is None else artifact_facts
+        ),
         projection=projection,
     )
 
@@ -425,6 +471,7 @@ def _shared_agent_frame() -> SharedObsAgentPovReplayViewerFrameV1:
             f"{episode_id}:shared-obs-visual-union:{public_agent_id}:transition:0"
         ),
         completion=_pov_completion(episode_id),
+        artifact_facts=_artifact_facts(episode_id),
     )
 
 
@@ -625,6 +672,33 @@ def test_every_replay_command_strictly_roundtrips(command: ReplayCommandV1) -> N
     assert request.command is not command or request.command == command
 
 
+def test_pov_actor_command_accepts_exactly_one_legacy_slot_or_opaque_key() -> None:
+    presentation_key = f"pov_{'a' * 64}"
+    legacy = ReplaySetPovActorCommandV1(global_slot=5)
+    opaque = ReplaySetPovActorCommandV1(presentation_key=presentation_key)
+
+    assert legacy.model_dump(mode="json") == {
+        "command_type": "set_pov_actor",
+        "global_slot": 5,
+    }
+    assert opaque.model_dump(mode="json") == {
+        "command_type": "set_pov_actor",
+        "presentation_key": presentation_key,
+    }
+    assert _json_roundtrip(legacy) == legacy
+    assert _json_roundtrip(opaque) == opaque
+
+    with pytest.raises(ValueError, match="exactly one actor reference"):
+        ReplaySetPovActorCommandV1()
+    with pytest.raises(ValueError, match="exactly one actor reference"):
+        ReplaySetPovActorCommandV1(
+            global_slot=5,
+            presentation_key=presentation_key,
+        )
+    with pytest.raises(ValueError, match="match pattern"):
+        ReplaySetPovActorCommandV1(presentation_key=f"bad_{'a' * 64}")
+
+
 @pytest.mark.parametrize(
     "legacy_preset",
     ("presentation", "analysis", "technical", "debug"),
@@ -720,6 +794,11 @@ def test_private_shared_completion_disclosure_is_fixed_and_generic() -> None:
             "public_end_or_failure_reason": "captured_prefix",
         }
     )
+    frame_payload["artifact_facts"] = _artifact_facts(
+        "episode-timeline",
+        expected=4,
+        completion_state="interrupted",
+    ).model_dump(mode="python")
     partial_frame = SharedObsAgentPovReplayViewerFrameV1.model_validate(frame_payload)
 
     timeline_payload = _shared_agent_timeline().model_dump(mode="python")
@@ -1077,7 +1156,7 @@ def test_private_shared_frame_rejects_identity_epoch_and_strictness_poison() -> 
     wrong_completion_horizon["completion"]["public_end_or_failure_reason"] = (
         "captured_prefix"
     )
-    poisoned_payloads.append((wrong_completion_horizon, "horizon"))
+    poisoned_payloads.append((wrong_completion_horizon, "canonical artifact facts"))
 
     wrong_completion_count = frame.model_dump(mode="python")
     wrong_completion_count["completion"]["captured_transition_count"] = 0
@@ -1086,7 +1165,7 @@ def test_private_shared_frame_rejects_identity_epoch_and_strictness_poison() -> 
     wrong_completion_count["completion"]["public_end_or_failure_reason"] = (
         "captured_prefix"
     )
-    poisoned_payloads.append((wrong_completion_count, "captured replay prefix"))
+    poisoned_payloads.append((wrong_completion_count, "canonical artifact facts"))
 
     wrong_kind = frame.model_dump(mode="python")
     wrong_kind["frame_kind"] = "shared_obs_source_material_replay_viewer"
@@ -1150,6 +1229,12 @@ def test_private_shared_frame_zero_has_no_incoming_recipient_transition() -> Non
         expected=4,
         captured=0,
         state="interrupted",
+    ).model_dump(mode="python")
+    payload["artifact_facts"] = _artifact_facts(
+        "episode-timeline",
+        expected=4,
+        recorded=0,
+        completion_state="interrupted",
     ).model_dump(mode="python")
 
     initial = SharedObsAgentPovReplayViewerFrameV1.model_validate(payload)
@@ -1353,12 +1438,12 @@ def test_recorded_movement_scale_is_strict_researcher_only_replay_truth(
             type(hidden_frame).model_validate(hidden_payload)
 
 
-def test_exact_pov_frame_cannot_expose_processing_or_researcher_truth(
+def test_exact_pov_frame_shares_artifact_facts_but_not_researcher_battlefield_truth(
     projection_cases: _ProjectionCases,
 ) -> None:
     frame = _actor_pov_frame(projection_cases.pov)
     payload = json.loads(frame.model_dump_json())
-    all_keys = _recursive_keys(payload)
+    projection_keys = _recursive_keys(payload["projection"])
 
     assert payload["processing_disclosure"] == {
         "schema_version": 1,
@@ -1368,8 +1453,13 @@ def test_exact_pov_frame_cannot_expose_processing_or_researcher_truth(
         payload["artifact_summary"]["metric_report_availability"]
         == ACTOR_POV_METRIC_REPORT_AVAILABILITY_V1
     )
+    assert payload["artifact_facts"] == frame.artifact_facts.model_dump(mode="json")
+    assert (
+        payload["artifact_facts"]["artifact_summary"]["metric_report_availability"]
+        == "available"
+    )
+    assert payload["artifact_facts"]["processing"]["status"] == "succeeded"
     for forbidden in (
-        "processing",
         "incoming_event_count",
         "incoming_event_ids",
         "incoming_events",
@@ -1377,13 +1467,10 @@ def test_exact_pov_frame_cannot_expose_processing_or_researcher_truth(
         "class_mechanics",
         "aura_fields",
         "sensor_source_availability",
-        "failure_stage",
-        "failure_code",
-        "attempted_transition_index",
         "reducer_id",
         "detail",
     ):
-        assert forbidden not in all_keys
+        assert forbidden not in projection_keys
     forged = _exact_model_input(frame)
     forged["processing"] = _processing(failed=True)
     with pytest.raises(ValidationError, match="Extra inputs"):
@@ -1437,17 +1524,29 @@ def test_each_audience_enforces_metric_report_availability_disclosure(
             type(timeline).model_validate(timeline_payload)
 
 
-def test_hidden_processing_differences_cannot_change_exact_pov_frame_bytes(
+def test_researcher_wide_processing_facts_change_exact_pov_frame_bytes(
     projection_cases: _ProjectionCases,
 ) -> None:
-    frame = _actor_pov_frame(projection_cases.pov)
-    hidden_source_processing = (_processing(), _processing(failed=True))
+    healthy = _actor_pov_frame(
+        projection_cases.pov,
+        artifact_facts=_artifact_facts(projection_cases.pov.scene.episode_id),
+    )
+    failed = _actor_pov_frame(
+        projection_cases.pov,
+        artifact_facts=_artifact_facts(
+            projection_cases.pov.scene.episode_id,
+            failed_processing=True,
+        ),
+    )
 
-    serialized = tuple(frame.model_dump_json() for _ in hidden_source_processing)
+    healthy_bytes = healthy.model_dump_json()
+    failed_bytes = failed.model_dump_json()
 
-    assert serialized[0] == serialized[1]
-    assert "reducer_advance" not in serialized[0]
-    assert "test.reducer_failed" not in serialized[0]
+    assert healthy_bytes != failed_bytes
+    assert "reducer_advance" not in healthy_bytes
+    assert "test.reducer_failed" not in healthy_bytes
+    assert "reducer_advance" in failed_bytes
+    assert "test.reducer_failed" in failed_bytes
 
 
 def test_output_frame_validators_reject_cross_audience_and_epoch_joins(
@@ -1573,9 +1672,10 @@ def test_diagnostic_shared_frame_remains_directly_parseable_but_is_not_product(
         TypeAdapter(ReplayViewerFrameV1).validate_json(encoded)
 
 
-def test_private_shared_roots_have_exact_identity_only_keys_and_values() -> None:
+def test_private_shared_battlefield_root_stays_minimal_beside_artifact_facts() -> None:
     frame_payload = json.loads(_shared_agent_frame().model_dump_json())
     timeline_payload = json.loads(_shared_agent_timeline().model_dump_json())
+    artifact_facts = frame_payload.pop("artifact_facts")
     common_nested_keys = {
         "schema_version",
         "recipient_replay_id",
@@ -1625,6 +1725,7 @@ def test_private_shared_roots_have_exact_identity_only_keys_and_values() -> None
 
     assert _recursive_keys(frame_payload) == expected_frame_keys
     assert _recursive_keys(timeline_payload) == expected_timeline_keys
+    assert artifact_facts == _artifact_facts("episode-timeline").model_dump(mode="json")
 
     all_strings = _recursive_strings(frame_payload) | _recursive_strings(
         timeline_payload
@@ -1649,6 +1750,9 @@ def test_private_shared_roots_have_exact_identity_only_keys_and_values() -> None
         )
         for value in all_strings
     )
+    assert artifact_facts["artifact_summary"]["replay_reference"] == _reference(
+        "episode-timeline"
+    ).model_dump(mode="json")
 
 
 def test_researcher_and_no_shared_model_dump_bytes_are_frozen(

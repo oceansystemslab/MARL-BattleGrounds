@@ -649,10 +649,15 @@ export class CombatChoreographer {
     }
     const staticOff =
       this.motionMode === "off" && !settled && !persistentOnly && nodeCount > 1;
+    const eventlessReplayAnimated =
+      options.renderPolicy === "replay_animated" &&
+      animationSpecs.length === 0 &&
+      !settled &&
+      !persistentOnly;
     const clockBudget =
       settled || persistentOnly
         ? 0
-        : staticOff
+        : eventlessReplayAnimated || staticOff
           ? 1
           : animationSpecs.length === 0
             ? 0
@@ -684,7 +689,7 @@ export class CombatChoreographer {
       this.submissionBlocked = false;
       return;
     }
-    if (animationSpecs.length === 0 && !staticOff) {
+    if (animationSpecs.length === 0 && !staticOff && !eventlessReplayAnimated) {
       this.logicalTime = Number(plan.phases?.total ?? 0);
       this.painter.settle(installation);
       this.submissionBlocked = false;
@@ -716,7 +721,7 @@ export class CombatChoreographer {
         `mbg:${plan.epochKey}:cleanup`,
       );
       ignoreCancellation(cleanupClock.finished);
-      if (this.motionMode === "normal") {
+      if (this.motionMode === "normal" && !eventlessReplayAnimated) {
         gateClock = this.animationFactory.createClock(
           installation.root,
           Number(plan.phases?.submissionRelease ?? 0),
@@ -739,7 +744,7 @@ export class CombatChoreographer {
     this.animations = createdAnimations;
     this.cleanupClock = cleanupClock;
     this.gateClock = gateClock;
-    this.submissionBlocked = this.motionMode === "normal";
+    this.submissionBlocked = this.motionMode === "normal" && !eventlessReplayAnimated;
     for (const animation of this.#allAnimations()) {
       applyPlaybackRate(animation, this.playbackRate);
       if (this.paused) {

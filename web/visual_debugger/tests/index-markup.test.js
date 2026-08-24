@@ -116,7 +116,6 @@ test("every CP3 disclosure keeps its scientific content in one stable direct bod
     "agent-details": ["selection-card"],
     "pending-turn-details": ["pending-scope", "pending-card"],
     "latest-transition-details": ["accepted-card", "accepted-announcement"],
-    "events-details": ["event-feed"],
     "visual-key": ["live-visual-key", "replay-visual-key"],
     "technical-frame-details": ["diagnostics-card"],
   };
@@ -135,6 +134,25 @@ test("every CP3 disclosure keeps its scientific content in one stable direct bod
         `#${contentId} must remain unique.`,
       );
     }
+  }
+});
+
+test("shared shell uses the requested details and visual-filter controls without an event feed", async () => {
+  const markup = await readFile(indexUrl, "utf8");
+
+  assert.match(markup, />Comprehensive Agent Class Details</u);
+  assert.match(
+    markup,
+    /id="enable-all-visual-filters-button"[^>]*disabled[^>]*>\s*Enable All\s*<\/button>/u,
+  );
+  assert.match(
+    markup,
+    /id="disable-all-visual-filters-button"[^>]*>\s*Disable All\s*<\/button>/u,
+  );
+  assert.doesNotMatch(markup, /Restore All|Latest events/u);
+  assert.doesNotMatch(markup, /<dt>Right click<\/dt>/u);
+  for (const removedId of ["events-details", "event-count", "event-feed"]) {
+    assert.doesNotMatch(markup, new RegExp(`id="${removedId}"`, "u"));
   }
 });
 

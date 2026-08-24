@@ -13,13 +13,12 @@ test.describe.configure({ mode: "serial" });
 test.use({ screenshot: "off" });
 
 const FILTER_INPUT = 'input[type="checkbox"][data-visual-filter-id]';
-const SELECTIVE_FILTER = "status_refresh_extension";
+const SELECTIVE_FILTER = "status_application";
 const SPATIAL_HIT_SELECTOR = [
   ".combat-impact__hit",
   ".combat-local__hit",
   ".combat-net__hit",
   ".combat-regeneration__hit",
-  ".combat-charge__endpoint",
   ".combat-lifecycle__hit",
   ".combat-semantic-pulse__hit",
   ".combat-lifecycle-ring__hit",
@@ -155,15 +154,11 @@ async function authenticatedText(page, path) {
 /** @param {import("@playwright/test").Page} page */
 async function scientificSignature(page) {
   const paths = ["/api/frame", "/api/presentation/frame", "/api/replay/timeline"];
-  const api = Object.fromEntries(
+  return Object.fromEntries(
     await Promise.all(
       paths.map(async (path) => [path, await authenticatedText(page, path)]),
     ),
   );
-  return {
-    api,
-    eventFeed: await page.locator("#event-feed").innerHTML(),
-  };
 }
 
 /** @param {import("@playwright/test").Page} page */
@@ -319,9 +314,7 @@ async function staticDomSignature(page) {
         .map((element) => {
           const route = element.matches(".combat-route-effect");
           const path = route
-            ? element.querySelector(
-                ".combat-route__path, .combat-charge__path, .combat-rejection__route",
-              )
+            ? element.querySelector(".combat-route__path, .combat-rejection__route")
             : null;
           return {
             key: element.getAttribute("data-layout-key"),
@@ -707,15 +700,11 @@ async function spatialContractEvidence(page) {
         (route) => ({
           eventId: route.getAttribute("data-event-id"),
           visiblePaths: [
-            ...route.querySelectorAll(
-              ".combat-route__path, .combat-charge__path, .combat-rejection__route",
-            ),
+            ...route.querySelectorAll(".combat-route__path, .combat-rejection__route"),
           ].map((path) => rectangle(path.getBoundingClientRect())),
-          markers: [
-            ...route.querySelectorAll(
-              ".combat-route__arrow, .combat-charge__direction",
-            ),
-          ].map((marker) => rectangle(marker.getBoundingClientRect())),
+          markers: [...route.querySelectorAll(".combat-route__arrow")].map((marker) =>
+            rectangle(marker.getBoundingClientRect()),
+          ),
         }),
       );
       return {
@@ -1105,11 +1094,6 @@ test("paused replay installs a complete deterministic static summary at both sup
   const allOnExpected = await expectedPlanSignature(page, rawPresentation);
   expect(allOnExpected.orderedIds).toHaveLength(24);
   expect(allOnExpected.plannedIds).toEqual(allOnExpected.orderedIds);
-  expect(
-    await page
-      .locator("#event-feed .event-item")
-      .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-event-id"))),
-  ).toEqual(allOnExpected.orderedIds);
   const science = await scientificSignature(page);
   await openVisualFilters(page);
 
@@ -1142,7 +1126,8 @@ test("paused replay installs a complete deterministic static summary at both sup
     const filtered = await staticDomSignature(page);
     expect(filtered.atomicIds).toEqual(filteredExpected.spatialIds);
     expect(filtered.layoutKeys).toEqual(filteredExpected.layoutKeys);
-    expect(filtered.layoutKeys).toEqual(allOn.layoutKeys);
+    expect(allOn.layoutKeys).toEqual(expect.arrayContaining(filtered.layoutKeys));
+    expect(filtered.layoutKeys.length).toBeLessThan(allOn.layoutKeys.length);
     expect(filtered.rootState[0]).toMatchObject({
       authorizationKey: allOnExpected.authorizationKey,
       epochKey: allOnExpected.epochKey,
@@ -1155,37 +1140,65 @@ test("paused replay installs a complete deterministic static summary at both sup
 
     await setFilter(page, apiRequests, SELECTIVE_FILTER, true);
     expect(await staticDomSignature(page)).toEqual(allOn);
+    await expect(page.locator("#enable-all-visual-filters-button")).toBeDisabled();
+    await expect(page.locator("#disable-all-visual-filters-button")).toBeEnabled();
 
     const allOffMark = apiRequests.length;
-    await page
-      .locator(`#visual-filter-options ${FILTER_INPUT}`)
-      .evaluateAll((inputs) => {
-        for (const input of inputs) {
-          if (input instanceof HTMLInputElement && input.checked) {
-            input.click();
-          }
-        }
-      });
+    await page.locator("#disable-all-visual-filters-button").click();
     await settleStaticSummary(page);
-    expect(apiRequests.slice(allOffMark), "all-off caused an API request").toEqual([]);
+    expect(apiRequests.slice(allOffMark), "Disable All caused an API request").toEqual(
+      [],
+    );
     await expect(page.locator(FILTER_INPUT)).toHaveCount(VISUAL_FILTER_IDS.length);
     await expect(page.locator(`${FILTER_INPUT}:checked`)).toHaveCount(0);
+    await expect(page.locator("#enable-all-visual-filters-button")).toBeEnabled();
+    await expect(page.locator("#disable-all-visual-filters-button")).toBeDisabled();
     await expect(page.locator(`${CHOREOGRAPHY_ROOT} > *`)).toHaveCount(0);
     await expect(page.locator(`${CHOREOGRAPHY_ROUTE_ROOT} > *`)).toHaveCount(0);
     await expect(page.locator("#battlefield [data-layout-key]")).toHaveCount(0);
     expect(await scientificSignature(page)).toEqual(science);
-
-    const restoreMark = apiRequests.length;
-    await page.locator("#restore-all-visual-filters-button").click();
+    const disabledIdempotencyMark = apiRequests.length;
+    await page.locator("#disable-all-visual-filters-button").evaluate((button) => {
+      if (!(button instanceof HTMLButtonElement)) {
+        throw new TypeError("Disable All is unavailable.");
+      }
+      button.click();
+    });
     await settleStaticSummary(page);
-    expect(apiRequests.slice(restoreMark), "Restore All caused an API request").toEqual(
+    expect(
+      apiRequests.slice(disabledIdempotencyMark),
+      "disabled Disable All caused an API request",
+    ).toEqual([]);
+    await expect(page.locator(`${FILTER_INPUT}:checked`)).toHaveCount(0);
+
+    const enableMark = apiRequests.length;
+    await page.locator("#enable-all-visual-filters-button").click();
+    await settleStaticSummary(page);
+    expect(apiRequests.slice(enableMark), "Enable All caused an API request").toEqual(
       [],
     );
     await expect(page.locator(`${FILTER_INPUT}:checked`)).toHaveCount(
       VISUAL_FILTER_IDS.length,
     );
+    await expect(page.locator("#enable-all-visual-filters-button")).toBeDisabled();
+    await expect(page.locator("#disable-all-visual-filters-button")).toBeEnabled();
     expect(await staticDomSignature(page)).toEqual(allOn);
     expect(await scientificSignature(page)).toEqual(science);
+    const enabledIdempotencyMark = apiRequests.length;
+    await page.locator("#enable-all-visual-filters-button").evaluate((button) => {
+      if (!(button instanceof HTMLButtonElement)) {
+        throw new TypeError("Enable All is unavailable.");
+      }
+      button.click();
+    });
+    await settleStaticSummary(page);
+    expect(
+      apiRequests.slice(enabledIdempotencyMark),
+      "disabled Enable All caused an API request",
+    ).toEqual([]);
+    await expect(page.locator(`${FILTER_INPUT}:checked`)).toHaveCount(
+      VISUAL_FILTER_IDS.length,
+    );
 
     if (viewport === MINIMUM_VIEWPORT) {
       minimumSignature = allOn;

@@ -154,12 +154,14 @@ These exclusions preserve ordinary browser and assistive-technology behavior.
 
 ## Audiences and recorded authority
 
-Oracle View exposes the full authorized replay presentation, Reference
-selection, authorized ranges, completion/processing truth, PNG provenance, and
-metric availability. Agent POV keeps one fixed recipient and receives only its
-authorized NoSharedObs or recorded SharedObs visual-union projection.
-Reference/inspection changes are local presentation choices and never mutate
-the artifact.
+Oracle View exposes the full authorized battlefield presentation. Agent POV
+applies the selected recipient's fog of war to that battlefield: NoSharedObs
+shows the recipient's local view, while SharedObs shows the same-epoch visual
+union authorized by its team observations. Activating a visible agent in Replay
+Agent POV switches the recipient at the current tick; it never advances or
+mutates the artifact. Artifact identity, completion/processing evidence, PNG
+export, and metric download remain capabilities of the researcher tool in every
+visual POV.
 
 The SharedObs visual union follows
 [specification amendment A11](../design/specification_amendments.md#a11-sharedobs-recorded-visual-union-presentation).
@@ -187,7 +189,7 @@ Technical Frame expansion.
 
 ## Visual filters
 
-Visual Filters contains exactly 23 browser-local paint families, all enabled
+Visual Filters contains exactly 20 browser-local paint families, all enabled
 by default:
 
 1. Aura Fields
@@ -201,25 +203,23 @@ by default:
 9. Healing Effects
 10. Regeneration Effects
 11. Cooldown Effects
-12. Charge Movement
-13. Status Application
-14. Status Reapplication
-15. Status Refresh/Extension
-16. Natural Status Expiry
-17. Freezing Trap Break
-18. Status Clear on Death
-19. Death Effects
-20. Respawn Wave
-21. Resurrection Effects
-22. Spawn-Shield Expiry
-23. Scrolling Battle Text
+12. Status Application
+13. Natural Status Expiry
+14. Freezing Trap Break
+15. Status Clear on Death
+16. Death Effects
+17. Respawn Wave
+18. Resurrection Effects
+19. Spawn-Shield Expiry
+20. Scrolling Battle Text
 
 Duration Status Badges includes the white crossed-swords **In combat** countdown.
 
 A filter change pauses playback and reinstalls the current settled summary
 after filtering, so disabled paint never consumes layout space. Filters do not
-change authorized data, the Latest Events feed, or the separate Ranges state.
-**Restore All** enables all 23.
+change authorized data, authorized event data used by battlefield choreography,
+or the separate Ranges state. **Enable All** enables all 20; **Disable All**
+disables all 20.
 
 ## PNG export and metrics
 
@@ -228,15 +228,15 @@ visible, settled, and free of pending replay/presentation work. It exports the
 battlefield alone—not the toolbar, timeline, or inspectors—at exactly twice
 its displayed pixel dimensions. The result uses the bundled fonts and locked
 battlefield background, reflects the current audience, selection, ranges, and
-23 filter states, and embeds one canonical
+20 filter states, and embeds one canonical
 `MARL-BattleGrounds Replay Provenance` iTXt record. Export does not navigate the
 replay or request another replay frame.
 
-**Download Metrics** is Oracle-only and enabled only at the same settled
-boundary. Activating it requests the canonical adjacent metric report once and
+**Download Metrics** is enabled at the same settled boundary in every visual
+POV. Activating it requests the canonical adjacent metric report once and
 downloads the exact bytes when available. A missing sidecar reports absence
-without a download. Agent POV is rejected from audience alone: it cannot
-request the metric endpoint or learn availability, a path, or a filename.
+without a download. The metric report is artifact-wide researcher evidence;
+changing battlefield fog does not rewrite or filter it.
 
 ## Static Matplotlib frame
 
@@ -289,8 +289,8 @@ Closing the tab does not stop Python; use **Exit Replay Viewer** or `Ctrl-C`.
 - **Transport disabled:** reconnect if offline; Start/negative moves stop at the
   lower bound, positive moves/End stop at the captured endpoint, and artifact
   actions wait for a settled frame.
-- **Metrics unavailable:** confirm Oracle View and a verified adjacent metric
-  sidecar; Agent POV cannot query availability.
+- **Metrics unavailable:** confirm that the replay has a verified adjacent
+  metric sidecar.
 - **PNG export disabled:** pause playback and wait for the exact-frame summary
   to settle in a visible connected tab.
 - **Static Matplotlib import failed:** run `uv sync --extra viz`.

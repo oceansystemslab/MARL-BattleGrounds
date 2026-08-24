@@ -2,6 +2,7 @@ import { AUTHORIZED_PRESENTATION_SCHEMA_V1 } from "./authorized-presentation-sch
 import { normalizeLiveDebuggerFrameV2 } from "./frame-normalizer.js";
 import {
   joinReplayFrameAndTimeline,
+  normalizeReplayArtifactFactsV1,
   normalizeReplayCommandResponseV1,
   normalizeReplayTimelineV1,
   normalizeReplayViewerFrameV1,
@@ -81,6 +82,7 @@ const RAW_FRAME_KEYS = Object.freeze({
     "viewer_session_id",
   ],
   actor_pov_replay_viewer: [
+    "artifact_facts",
     "artifact_summary",
     "completion",
     "cursor",
@@ -101,6 +103,7 @@ const RAW_FRAME_KEYS = Object.freeze({
     "viewer_session_id",
   ],
   shared_obs_agent_pov_replay_viewer: [
+    "artifact_facts",
     "artifact_summary",
     "completion",
     "cursor",
@@ -206,6 +209,23 @@ const ORACLE_EVENT_PHASE_RANK = Object.freeze({
   respawn_wave_occurred: 120,
   agent_respawned: 120,
 });
+const AGENT_VISUAL_EVENT_KINDS = new Set([
+  "action_rejected",
+  "ability_activated",
+  "recipient_health_resolution",
+  "agent_left_combat",
+  "health_regenerated",
+  "cooldown_started",
+  "cooldown_ready",
+  "agent_died",
+  "status_aged_to_zero",
+  "status_broken_by_damage",
+  "status_applied",
+  "status_refreshed_or_extended",
+  "status_cleared_by_new_death",
+  "spawn_shield_expired",
+  "agent_respawned",
+]);
 const STATUS_ID_BY_CHANNEL = Object.freeze([
   "warrior_charge_slow",
   "hunter_basic_slow",
@@ -813,6 +833,21 @@ function structurallyEqual(left, right) {
         key === rightKeys[index] &&
         structurallyEqual(leftRecord[key], rightRecord[key]),
     )
+  );
+}
+
+/**
+ * Mirror Python math.isclose for cross-runtime semantic identities.
+ *
+ * @param {number} left
+ * @param {number} right
+ */
+function pythonIsClose(left, right) {
+  return (
+    Number.isFinite(left) &&
+    Number.isFinite(right) &&
+    Math.abs(left - right) <=
+      Math.max(1e-5, 1e-6 * Math.max(Math.abs(left), Math.abs(right)))
   );
 }
 
@@ -1782,6 +1817,180 @@ function validateLatestEvents(latest) {
   }
 }
 
+/** @param {Record<string, any>} visual */
+function validateAgentVisualEvents(visual) {
+  if (
+    visual.summary_kind !== "agent_pov_fog_filtered_visual_events" ||
+    visual.incoming_successor_simulator_step_count !==
+      visual.incoming_start_simulator_step_count + 1
+  ) {
+    invalid("Agent visual events do not retain one adjacent local epoch.");
+  }
+  const trajectories = /** @type {any[]} */ (visual.agent_phase_trajectories);
+  const events = /** @type {any[]} */ (visual.events);
+  if (
+    visual.event_count !== events.length ||
+    visual.event_count !== visual.ordered_event_ids.length ||
+    visual.event_count !== visual.ordered_event_kinds.length
+  ) {
+    invalid("Agent visual-event inventories must have equal lengths.");
+  }
+  const trajectoryByKey = new Map();
+  for (const trajectory of trajectories) {
+    if (
+      trajectoryByKey.has(trajectory.agent_presentation_key) ||
+      [...trajectoryByKey.values()].some(
+        (row) => row.agent_public_agent_id === trajectory.agent_public_agent_id,
+      ) ||
+      !Number.isInteger(trajectory.agent_class_id) ||
+      trajectory.agent_class_id < 1 ||
+      trajectory.agent_class_id > 5 ||
+      (trajectory.transition_start == null && trajectory.successor == null) ||
+      Object.hasOwn(trajectory, "post_charge")
+    ) {
+      invalid("Agent visual trajectories repeat or over-disclose an identity.");
+    }
+    for (const phase of ["transition_start", "successor"]) {
+      const anchor = trajectory[phase];
+      if (anchor == null) continue;
+      if (
+        anchor.phase !== phase ||
+        anchor.presentation_key !== trajectory.agent_presentation_key ||
+        anchor.public_agent_id !== trajectory.agent_public_agent_id
+      ) {
+        invalid("Agent visual trajectory anchors changed identity or phase.");
+      }
+    }
+    trajectoryByKey.set(trajectory.agent_presentation_key, trajectory);
+  }
+  const recipientTrajectory = trajectoryByKey.get(visual.recipient_presentation_key);
+  if (
+    !recipientTrajectory ||
+    recipientTrajectory.agent_public_agent_id !== visual.recipient_public_agent_id ||
+    recipientTrajectory.transition_start === null ||
+    recipientTrajectory.successor === null
+  ) {
+    invalid("Agent visual recipient must remain authorized at both endpoints.");
+  }
+  const trajectoryOrderByKey = new Map(
+    trajectories.map((trajectory, index) => [trajectory.agent_presentation_key, index]),
+  );
+  events.forEach((event, index) => {
+    const expectedId =
+      `${visual.incoming_recipient_transition_id}:visual-event:` +
+      String(index).padStart(4, "0");
+    if (
+      event.ordinal !== index ||
+      event.event_id !== expectedId ||
+      visual.ordered_event_ids[index] !== expectedId ||
+      visual.ordered_event_kinds[index] !== event.event_kind ||
+      !AGENT_VISUAL_EVENT_KINDS.has(event.event_kind) ||
+      event.phase_rank !== ORACLE_EVENT_PHASE_RANK[event.event_kind] ||
+      (index > 0 && event.phase_rank < events[index - 1].phase_rank) ||
+      [
+        "charge_phase_displacement",
+        "ordinary_movement_phase_displacement",
+        "respawn_wave_occurred",
+      ].includes(event.event_kind)
+    ) {
+      invalid("Agent visual-event inventory is not exact and ordered.");
+    }
+    if (event.event_kind === "action_rejected") {
+      validateSubmittedActionTuple(
+        event.submitted_action,
+        "Agent visual rejection submitted action",
+      );
+      if (
+        !event.actor_configured_active ||
+        event.actor_identity?.identity_kind !== "authorized_agent" ||
+        !event.actor_anchor
+      ) {
+        invalid("Agent visual rejection does not retain an active actor anchor.");
+      }
+      if (
+        event.actor_identity.presentation_key !== event.actor_anchor.presentation_key ||
+        event.actor_identity.public_agent_id !== event.actor_anchor.public_agent_id
+      ) {
+        invalid("Agent visual rejection actor does not join its start anchor.");
+      }
+    }
+    if (
+      event.event_kind === "recipient_health_resolution" &&
+      ["total_effective_damage", "total_effective_healing"].some((field) =>
+        Object.hasOwn(event, field),
+      )
+    ) {
+      invalid("Agent visual health resolution contains forbidden aggregate totals.");
+    }
+    if (
+      event.event_kind === "recipient_health_resolution" &&
+      !pythonIsClose(
+        event.health_after_combat_resolution - event.transition_start_health,
+        event.realized_net_health_change,
+      )
+    ) {
+      invalid("Agent visual health result does not equal its visible net change.");
+    }
+    if (
+      Object.hasOwn(event, "status_channel") &&
+      STATUS_ID_BY_CHANNEL[event.status_channel] !== event.status_id
+    ) {
+      invalid("Agent visual status channel and identity are not canonical.");
+    }
+    if (
+      ORACLE_EVENT_NONNEGATIVE_FIELDS.some(
+        (field) => Object.hasOwn(event, field) && event[field] < 0,
+      )
+    ) {
+      invalid("Agent visual event contains a negative nonnegative-domain fact.");
+    }
+    for (const { anchor, phase } of oracleEventAnchors(event)) {
+      const trajectory = trajectoryByKey.get(anchor.presentation_key);
+      const trajectoryAnchor = trajectory?.[phase];
+      if (
+        anchor.phase !== phase ||
+        !trajectory ||
+        !trajectoryAnchor ||
+        trajectory.agent_public_agent_id !== anchor.public_agent_id ||
+        !structurallyEqual(anchor, trajectoryAnchor)
+      ) {
+        invalid("Agent visual event anchor does not equal its trajectory anchor.");
+      }
+    }
+    const successorDerivedAnchor =
+      event.event_kind === "recipient_health_resolution"
+        ? event.recipient_anchor
+        : ["health_regenerated", "cooldown_started", "cooldown_ready"].includes(
+              event.event_kind,
+            )
+          ? event.agent_anchor
+          : null;
+    if (
+      successorDerivedAnchor !== null &&
+      trajectoryByKey.get(successorDerivedAnchor.presentation_key)?.successor == null
+    ) {
+      invalid("Agent visual successor-derived event has no authorized successor.");
+    }
+    if (event.event_kind === "source_damage_output") {
+      for (const emitters of /** @type {any[][]} */ ([
+        event.mage_damage_aura_covering_emitters,
+        event.warrior_mitigation_aura_covering_emitters,
+      ])) {
+        const order = /** @type {number[]} */ (
+          emitters.map((anchor) => trajectoryOrderByKey.get(anchor.presentation_key))
+        );
+        if (
+          order.some(
+            (value, itemIndex) => itemIndex > 0 && value <= order[itemIndex - 1],
+          )
+        ) {
+          invalid("Agent visual aura emitters do not use authorized scene order.");
+        }
+      }
+    }
+  });
+}
+
 /** @param {Record<string, any>} agent */
 function projectAgentIncomingObservation(agent) {
   return {
@@ -2437,6 +2646,128 @@ function validateIncomingStateMatrix(frame, source, endpoint, oracle, shared) {
 }
 
 /**
+ * Validate the additive presentation-only visual channel without weakening
+ * the existing Agent cue/delta and action-transition joins above.
+ *
+ * @param {Record<string, any>} frame
+ * @param {Record<string, any>} source
+ * @param {Record<string, any>} endpoint
+ * @param {boolean} oracle
+ * @param {boolean} shared
+ */
+function validateAgentVisualStateMatrix(frame, source, endpoint, oracle, shared) {
+  const index = source.source_frame_index;
+  if (oracle) {
+    if (Object.hasOwn(frame, "visual_events")) {
+      invalid("Oracle presentations must not contain an Agent visual channel.");
+    }
+    return;
+  }
+  const visual = frame.visual_events;
+  if (index === 0) {
+    if (visual !== null) {
+      invalid("Initial Agent presentations must not contain incoming visual events.");
+    }
+    return;
+  }
+  if (!visual) {
+    invalid("Noninitial Agent presentations require incoming visual events.");
+  }
+  validateAgentVisualEvents(visual);
+  const recipient = source.source_recipient_public_agent_id;
+  const prefix = `${source.episode_id}:${shared ? "shared-obs-visual-union" : "actor-pov"}:${recipient}`;
+  const transitionId = `${prefix}:transition:${index - 1}`;
+  const startId = `${prefix}:frame:${index - 1}`;
+  const latest = frame.latest_events;
+  if (
+    visual.source_episode_id !== source.episode_id ||
+    visual.recipient_public_agent_id !== recipient ||
+    visual.recipient_presentation_key !== endpoint.parts.recipient_presentation_key ||
+    visual.incoming_transition_index !== index - 1 ||
+    visual.incoming_recipient_transition_id !== transitionId ||
+    visual.incoming_start_recipient_frame_id !== startId ||
+    visual.incoming_successor_recipient_frame_id !== source.source_recipient_frame_id ||
+    visual.incoming_successor_simulator_step_count !==
+      source.source_simulator_step_count ||
+    visual.incoming_recipient_transition_id !==
+      latest.incoming_recipient_transition_id ||
+    visual.incoming_start_recipient_frame_id !==
+      latest.incoming_start_recipient_frame_id ||
+    visual.incoming_successor_recipient_frame_id !==
+      latest.incoming_successor_recipient_frame_id ||
+    visual.incoming_start_simulator_step_count !==
+      latest.incoming_start_simulator_step_count ||
+    visual.incoming_successor_simulator_step_count !==
+      latest.incoming_successor_simulator_step_count
+  ) {
+    invalid("Agent visual events do not join their local incoming evidence.");
+  }
+  const trajectories = /** @type {any[]} */ (visual.agent_phase_trajectories);
+  const currentAgents = /** @type {any[]} */ (endpoint.parts.scene.agents);
+  const currentByKey = new Map(currentAgents.map((row) => [row.presentation_key, row]));
+  const currentByPublicId = new Map(
+    currentAgents.map((row) => [row.public_agent_id, row]),
+  );
+  const successorTrajectories = trajectories.filter((row) => row.successor !== null);
+  if (
+    successorTrajectories.length !== currentAgents.length ||
+    trajectories.some((row) => {
+      const currentByTrajectoryKey = currentByKey.get(row.agent_presentation_key);
+      const currentByTrajectoryPublicId = currentByPublicId.get(
+        row.agent_public_agent_id,
+      );
+      if (row.successor === null) {
+        return (
+          currentByTrajectoryKey !== undefined ||
+          currentByTrajectoryPublicId !== undefined
+        );
+      }
+      return (
+        !currentByTrajectoryKey ||
+        currentByTrajectoryKey !== currentByTrajectoryPublicId ||
+        currentByTrajectoryKey.public_agent_id !== row.agent_public_agent_id ||
+        currentByTrajectoryKey.class_id !== row.agent_class_id ||
+        !structurallyEqual(currentByTrajectoryKey.position, row.successor.position)
+      );
+    })
+  ) {
+    invalid("Agent visual successors do not join their current scene.");
+  }
+  const actionRow = frame.latest_transition.action_rows[0];
+  const rejectionEvents = /** @type {any[]} */ (visual.events).filter(
+    (event) => event.event_kind === "action_rejected",
+  );
+  if (
+    rejectionEvents.some(
+      (event) =>
+        event.actor_identity?.identity_kind !== "authorized_agent" ||
+        event.actor_identity.public_agent_id !== recipient ||
+        event.actor_identity.presentation_key !==
+          endpoint.parts.recipient_presentation_key ||
+        event.actor_anchor?.public_agent_id !== recipient ||
+        event.actor_anchor?.presentation_key !==
+          endpoint.parts.recipient_presentation_key,
+    )
+  ) {
+    invalid("Agent visual rejection actor is not the fixed recipient.");
+  }
+  const expectedRejected = !structurallyEqual(
+    actionRow.submitted_action,
+    actionRow.accepted_action,
+  );
+  if (
+    rejectionEvents.length !== Number(expectedRejected) ||
+    (rejectionEvents.length === 1 &&
+      !structurallyEqual(
+        rejectionEvents[0].submitted_action,
+        actionRow.submitted_action,
+      ))
+  ) {
+    invalid("Agent own visual rejection does not join Latest Transition.");
+  }
+}
+
+/**
  * @param {Record<string, any>} frame
  * @param {Record<string, any>} source
  * @param {Record<string, any>} endpoint
@@ -3037,6 +3368,7 @@ function validateSemanticFrame(frame) {
     }
   }
   validateIncomingStateMatrix(frame, source, endpoint, oracle, shared);
+  validateAgentVisualStateMatrix(frame, source, endpoint, oracle, shared);
   const technical = frame.technical_frame;
   const expectedIncomingId =
     source.source_frame_index === 0
@@ -3228,8 +3560,9 @@ function exactPublicAgentId(value, label) {
 }
 
 /**
- * Strictly normalize the private identity-only Shared replay transport. It
- * deliberately creates no scene, event, legality, projection, or HUD aliases.
+ * Strictly normalize the recipient-local Shared replay transport plus its
+ * researcher-wide artifact facts. It deliberately creates no scene, event,
+ * legality, projection, or HUD aliases.
  *
  * @param {unknown} value
  * @param {boolean} animateIncoming
@@ -3249,6 +3582,7 @@ export function normalizeSharedObsAgentPovReplayTransportV1(
       "frame_kind",
       "viewer_session_id",
       "revision",
+      "artifact_facts",
       "artifact_summary",
       "timeline_id",
       "cursor",
@@ -3411,6 +3745,28 @@ export function normalizeSharedObsAgentPovReplayTransportV1(
   ) {
     invalid("Private Shared replay completion disclosure is invalid.");
   }
+  const artifactFacts = normalizeReplayArtifactFactsV1(frame.artifact_facts);
+  const canonicalSummary = artifactFacts.artifact_summary;
+  const canonicalCompletion = artifactFacts.completion;
+  if (
+    canonicalSummary.replay_reference.episode_id !== episodeId ||
+    canonicalSummary.expected_transition_count !== expectedCount ||
+    canonicalSummary.recorded_transition_count !== capturedCount ||
+    canonicalSummary.recorded_frame_count !== capturedFrames ||
+    canonicalCompletion.episode_id !== completion.episode_id ||
+    canonicalCompletion.completion_state !== completion.completion_state ||
+    canonicalCompletion.expected_transition_count !==
+      completion.expected_transition_count ||
+    canonicalCompletion.validated_transition_count !==
+      completion.captured_transition_count ||
+    canonicalCompletion.terminated !== completion.terminated ||
+    canonicalCompletion.truncated !== completion.truncated ||
+    !structurallyEqual(canonicalCompletion.completion_bases, completionBases)
+  ) {
+    invalid(
+      "Private Shared replay artifact facts do not join its recipient-local roots.",
+    );
+  }
   const timelineId = `${episodeId}:shared-obs-visual-union:${publicId}:timeline`;
   const recipientFrameId = `${episodeId}:shared-obs-visual-union:${publicId}:frame:${frameIndex}`;
   const incomingId =
@@ -3436,6 +3792,7 @@ export function normalizeSharedObsAgentPovReplayTransportV1(
   }
   return deepFreeze({
     ...frame,
+    artifact_facts: artifactFacts,
     artifact_summary: { ...summary },
     cursor: { ...cursor },
     completion: { ...completion, completion_bases: completionBases },
@@ -4180,6 +4537,24 @@ export function validateReplayTransportContinuityV1(previousValue, nextValue, re
     next.frame_kind === "shared_obs_agent_pov_replay_viewer";
   const previousCompletion = previous.completion;
   const nextCompletion = next.completion;
+  const previousArtifactFacts =
+    previous.frame_kind === "researcher_replay_viewer"
+      ? {
+          schema_version: 1,
+          artifact_summary: previous.artifact_summary,
+          completion: previous.completion,
+          processing: previous.processing,
+        }
+      : previous.artifact_facts;
+  const nextArtifactFacts =
+    next.frame_kind === "researcher_replay_viewer"
+      ? {
+          schema_version: 1,
+          artifact_summary: next.artifact_summary,
+          completion: next.completion,
+          processing: next.processing,
+        }
+      : next.artifact_facts;
   const completionValid = bothPrivateShared
     ? structurallyEqual(nextCompletion, previousCompletion)
     : structurallyEqual(
@@ -4228,6 +4603,7 @@ export function validateReplayTransportContinuityV1(previousValue, nextValue, re
     nextCaptured !== previousCaptured ||
     nextFrames !== previousFrames ||
     next.cursor.final_frame_index !== previous.cursor.final_frame_index ||
+    !structurallyEqual(nextArtifactFacts, previousArtifactFacts) ||
     !completionValid ||
     !revisionValid ||
     !generationValid

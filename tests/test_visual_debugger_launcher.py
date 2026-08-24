@@ -803,13 +803,14 @@ def test_debugger_help_is_live_only_and_hides_legacy_tokens() -> None:
         "Tab / Shift+Tab",
         "left click",
         "Shift+left click",
-        "right click / Escape",
+        "Escape",
         "arrow keys",
         "X",
         "Space / Enter",
         "Reconnect",
     ):
         assert control in result.stdout
+    assert "right click" not in result.stdout
     assert "every staged action as one joint turn" in result.stdout
     assert "agent POV: submit only the controlled actor" in result.stdout
     assert "left click            control the clicked authorized actor" in result.stdout
@@ -886,7 +887,7 @@ def test_replay_help_is_read_only_and_hides_live_and_legacy_tokens() -> None:
         "play or pause",
         "Export PNG",
         "Download Metrics",
-        "Oracle-only canonical metric-report download",
+        "canonical metric-report download in every visual POV",
         "Tick current / final",
     ):
         assert replay_control in result.stdout

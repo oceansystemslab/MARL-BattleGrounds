@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from inspect import signature
 from pathlib import Path
 from threading import Event
+from typing import cast
 
 import pytest
 import scripts.dev.visual_debugger.live_presentation as live_presentation_module
@@ -43,6 +44,7 @@ from marl_battlegrounds.evaluation.pov import (
     build_actor_pov_adjacent_transition_slice_v1,
     build_actor_pov_current_slice_v1,
 )
+from marl_battlegrounds.rendering.evaluation_adapter import build_visual_event_batch_v2
 
 
 def _step_once(service: service_module.DebuggerService) -> None:
@@ -515,6 +517,7 @@ def test_live_public_builders_derive_epoch_and_reject_cross_audience_inputs() ->
             None,
             raw,  # pyright: ignore[reportArgumentType]
             public_catalog=pov_session.evaluation_context.static_mechanics_catalog,
+            incoming_visual_events=None,
         )
 
 
@@ -537,6 +540,12 @@ def test_live_no_shared_builder_requires_exact_adjacent_carrier() -> None:
             None,
             raw,
             public_catalog=session.evaluation_context.static_mechanics_catalog,
+            incoming_visual_events=build_visual_event_batch_v2(
+                cast(
+                    EvaluationTransitionViewV1,
+                    session.incoming_evaluation_view,
+                )
+            ),
         )
     assert session.incoming_evaluation_view is not None
     carrier = build_actor_pov_adjacent_transition_slice_v1(
@@ -548,6 +557,9 @@ def test_live_no_shared_builder_requires_exact_adjacent_carrier() -> None:
         carrier,
         raw,
         public_catalog=session.evaluation_context.static_mechanics_catalog,
+        incoming_visual_events=build_visual_event_batch_v2(
+            session.incoming_evaluation_view
+        ),
     )
     assert accepted.latest_events is not None
 

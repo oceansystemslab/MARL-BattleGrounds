@@ -5,6 +5,7 @@ import {
   isReplayViewerFrame,
   joinReplayFrameAndTimeline,
   normalizeReplayApiErrorV1,
+  normalizeReplayArtifactFactsV1,
   normalizeReplayCommandResponseV1,
   normalizeReplayTimelineV1,
   normalizeReplayViewerFrameV1,
@@ -89,6 +90,15 @@ function processing() {
     failure_stage: null,
     failure_code: null,
     attempted_transition_index: null,
+  };
+}
+
+function artifactFacts(metricReportAvailability = "missing") {
+  return {
+    schema_version: 1,
+    artifact_summary: summary(metricReportAvailability),
+    completion: researcherCompletion(),
+    processing: processing(),
   };
 }
 
@@ -460,6 +470,7 @@ function povFrame() {
     frame_kind: "actor_pov_replay_viewer",
     viewer_session_id: "viewer-session",
     revision: 3,
+    artifact_facts: artifactFacts(),
     artifact_summary: summary("not_available_in_actor_pov"),
     timeline_id: `${artifactId}:timeline:actor-pov:agent-0`,
     cursor: cursor(),
@@ -514,6 +525,10 @@ function finalPovFrame({ ended = false, terminal = false } = {}) {
     frame.completion.terminated = true;
     frame.completion.completion_bases = ["task_terminal"];
     frame.completion.public_end_or_failure_reason = "task complete";
+    frame.artifact_facts.completion.completion_state = "complete";
+    frame.artifact_facts.completion.terminated = true;
+    frame.artifact_facts.completion.completion_bases = ["task_terminal"];
+    frame.artifact_facts.completion.end_or_failure_reason = "task complete";
   }
   return frame;
 }
@@ -1001,6 +1016,17 @@ test("researcher and Actor POV replay roots normalize through separate audience 
     schema_version: 1,
     disclosure: "not_available_in_actor_pov",
   });
+  assert.deepEqual(pov.artifact_facts, {
+    schema_version: 1,
+    artifact_summary: researcher.artifact_summary,
+    completion: researcher.completion,
+    processing: researcher.processing,
+  });
+  assert.equal(
+    pov.artifact_facts.artifact_summary.metric_report_availability,
+    "missing",
+  );
+  assert.equal(Object.isFrozen(pov.artifact_facts), true);
   assert.equal(Object.hasOwn(pov, "processing"), true);
   assert.equal(Object.hasOwn(povFrame(), "processing"), false);
 
@@ -1075,6 +1101,42 @@ test("actor POV replay processing disclosure is sanitized, frozen, and unaliased
 
   rawDisclosure.disclosure = "HOST SECRET";
   assert.equal(JSON.stringify(normalized).includes("HOST SECRET"), false);
+});
+
+test("artifact-wide replay facts are canonical, exact, frozen, and unaliased", () => {
+  const raw = artifactFacts("available");
+  const normalized = normalizeReplayArtifactFactsV1(raw);
+
+  assert.notEqual(normalized, raw);
+  assert.notEqual(normalized.artifact_summary, raw.artifact_summary);
+  assert.notEqual(normalized.completion, raw.completion);
+  assert.notEqual(normalized.processing, raw.processing);
+  assert.equal(normalized.artifact_summary.metric_report_availability, "available");
+  assertRecursivelyFrozenAndUnaliased(raw, normalized, "artifact facts");
+
+  raw.artifact_summary.metric_report_availability = "missing";
+  raw.completion.end_or_failure_reason = "mutated";
+  assert.equal(normalized.artifact_summary.metric_report_availability, "available");
+  assert.equal(normalized.completion.end_or_failure_reason, "captured prefix");
+
+  assert.throws(
+    () =>
+      normalizeReplayArtifactFactsV1({
+        ...artifactFacts(),
+        unknown: true,
+      }),
+    /unknown or missing fields/u,
+  );
+  assert.throws(
+    () => normalizeReplayArtifactFactsV1(artifactFacts("not_available_in_actor_pov")),
+    /canonical metric-report availability/u,
+  );
+  const mismatchedProcessing = artifactFacts();
+  mismatchedProcessing.processing.processed_transition_count = 0;
+  assert.throws(
+    () => normalizeReplayArtifactFactsV1(mismatchedProcessing),
+    /do not join/u,
+  );
 });
 
 test("Shared diagnostic replay roots reject at the discriminator without reading nested source material", () => {
@@ -1232,6 +1294,11 @@ test("actor POV replay ending cues join physical completion at the final cursor"
   declaredHorizonOnly.completion.completion_state = "complete";
   declaredHorizonOnly.completion.completion_bases = ["declared_horizon"];
   declaredHorizonOnly.completion.public_end_or_failure_reason = null;
+  declaredHorizonOnly.artifact_facts.artifact_summary.expected_transition_count = 1;
+  declaredHorizonOnly.artifact_facts.completion.expected_transition_count = 1;
+  declaredHorizonOnly.artifact_facts.completion.completion_state = "complete";
+  declaredHorizonOnly.artifact_facts.completion.completion_bases = ["declared_horizon"];
+  declaredHorizonOnly.artifact_facts.completion.end_or_failure_reason = null;
   assert.equal(
     normalizeReplayViewerFrameV1(declaredHorizonOnly).projection.incoming_cues.length,
     0,
@@ -1296,6 +1363,26 @@ test("replay frames reject cross-audience and response-only fields", () => {
         artifact_summary: summary("not_available_in_actor_pov"),
       }),
     /metric disclosure/u,
+  );
+  const missingArtifactFacts = povFrame();
+  Reflect.deleteProperty(missingArtifactFacts, "artifact_facts");
+  assert.throws(
+    () => normalizeReplayViewerFrameV1(missingArtifactFacts),
+    /unknown or missing/u,
+  );
+  const mismatchedArtifactFacts = povFrame();
+  mismatchedArtifactFacts.artifact_facts.artifact_summary.replay_reference.canonical_digest_sha256 =
+    "b".repeat(64);
+  assert.throws(
+    () => normalizeReplayViewerFrameV1(mismatchedArtifactFacts),
+    /do not join/u,
+  );
+  const mismatchedArtifactCompletion = povFrame();
+  mismatchedArtifactCompletion.artifact_facts.completion.completion_state =
+    "interrupted";
+  assert.throws(
+    () => normalizeReplayViewerFrameV1(mismatchedArtifactCompletion),
+    /do not join/u,
   );
   const staleCursor = researcherFrame();
   Reflect.deleteProperty(staleCursor.cursor, "schema_version");
@@ -1520,6 +1607,23 @@ test("command candidates pin launch, artifact, final bound, and revision before 
   assert.equal(
     validateReplayFrameContinuity(previous, normalizedPovAudienceCandidate, "applied"),
     normalizedPovAudienceCandidate,
+  );
+
+  const artifactFactsDrift = povFrame();
+  artifactFactsDrift.revision = previous.revision + 1;
+  artifactFactsDrift.artifact_facts.artifact_summary.metric_report_availability =
+    "available";
+  const normalizedArtifactFactsDrift = normalizeReplayCommandResponseV1({
+    schema_version: 1,
+    result: "applied",
+    frame: artifactFactsDrift,
+    notice: null,
+    animate_incoming: false,
+  }).frame;
+  assert.throws(
+    () =>
+      validateReplayFrameContinuity(previous, normalizedArtifactFactsDrift, "applied"),
+    /continuity/u,
   );
 
   const interleavedDuplicateCandidate = povFrame();

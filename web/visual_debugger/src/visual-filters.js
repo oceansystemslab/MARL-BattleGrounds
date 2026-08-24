@@ -19,10 +19,7 @@
  *   | "healing_effects"
  *   | "regeneration_effects"
  *   | "cooldown_effects"
- *   | "charge_movement"
  *   | "status_application"
- *   | "status_reapplication"
- *   | "status_refresh_extension"
  *   | "natural_status_expiry"
  *   | "freezing_trap_break"
  *   | "status_clear_on_death"
@@ -53,10 +50,7 @@ export const VISUAL_FILTER_REGISTRY = Object.freeze(
     ["healing_effects", "Healing Effects"],
     ["regeneration_effects", "Regeneration Effects"],
     ["cooldown_effects", "Cooldown Effects"],
-    ["charge_movement", "Charge Movement"],
     ["status_application", "Status Application"],
-    ["status_reapplication", "Status Reapplication"],
-    ["status_refresh_extension", "Status Refresh/Extension"],
     ["natural_status_expiry", "Natural Status Expiry"],
     ["freezing_trap_break", "Freezing Trap Break"],
     ["status_clear_on_death", "Status Clear on Death"],
@@ -82,6 +76,10 @@ const VISUAL_FILTER_ID_SET = new Set(VISUAL_FILTER_IDS);
 
 export const DEFAULT_VISUAL_FILTER_STATE = freezeVisualFilterState(
   Object.fromEntries(VISUAL_FILTER_IDS.map((id) => [id, true])),
+);
+
+const DISABLED_VISUAL_FILTER_STATE = freezeVisualFilterState(
+  Object.fromEntries(VISUAL_FILTER_IDS.map((id) => [id, false])),
 );
 
 /**
@@ -202,7 +200,6 @@ export const VISUAL_PAINT_PART_REGISTRY = Object.freeze([
     { surface: "transient", kind: "cooldown", semantic: "ready" },
     "cooldown_effects",
   ),
-  paintPart({ surface: "transient", kind: "charge_movement" }, "charge_movement"),
   paintPart(
     {
       surface: "transient",
@@ -219,7 +216,7 @@ export const VISUAL_PAINT_PART_REGISTRY = Object.freeze([
       lifecycle: "reapplied",
       part: "effect",
     },
-    "status_reapplication",
+    "status_application",
   ),
   paintPart(
     {
@@ -228,7 +225,7 @@ export const VISUAL_PAINT_PART_REGISTRY = Object.freeze([
       lifecycle: "refreshed",
       part: "effect",
     },
-    "status_refresh_extension",
+    "status_application",
   ),
   paintPart(
     {
@@ -264,7 +261,7 @@ export const VISUAL_PAINT_PART_REGISTRY = Object.freeze([
       lifecycle: "trap_broken_and_reapplied",
       part: "reapplication",
     },
-    "status_reapplication",
+    "status_application",
   ),
   paintPart(
     {
@@ -336,14 +333,29 @@ export function setVisualFilterEnabled(state, filterId, enabled) {
 }
 
 /**
- * Restore the canonical all-enabled state after validating the current state.
+ * Enable every visual filter after validating the current state.
  *
  * @param {unknown} state
  * @returns {VisualFilterState}
  */
-export function restoreAllVisualFilters(state) {
-  assertVisualFilterState(state);
-  return DEFAULT_VISUAL_FILTER_STATE;
+export function enableAllVisualFilters(state) {
+  const normalized = assertVisualFilterState(state);
+  return VISUAL_FILTER_IDS.every((id) => normalized[id])
+    ? normalized
+    : DEFAULT_VISUAL_FILTER_STATE;
+}
+
+/**
+ * Disable every visual filter after validating the current state.
+ *
+ * @param {unknown} state
+ * @returns {VisualFilterState}
+ */
+export function disableAllVisualFilters(state) {
+  const normalized = assertVisualFilterState(state);
+  return VISUAL_FILTER_IDS.every((id) => !normalized[id])
+    ? normalized
+    : DISABLED_VISUAL_FILTER_STATE;
 }
 
 /**
@@ -362,9 +374,13 @@ export function reduceVisualFilterState(state, action) {
     assertExactKeys(action, ["enabled", "filterId", "type"], "set action");
     return setVisualFilterEnabled(normalized, action.filterId, action.enabled);
   }
-  if (action.type === "restore_all") {
-    assertExactKeys(action, ["type"], "restore-all action");
-    return restoreAllVisualFilters(normalized);
+  if (action.type === "enable_all") {
+    assertExactKeys(action, ["type"], "enable-all action");
+    return enableAllVisualFilters(normalized);
+  }
+  if (action.type === "disable_all") {
+    assertExactKeys(action, ["type"], "disable-all action");
+    return disableAllVisualFilters(normalized);
   }
   throw new RangeError(`Unknown visual filter action ${action.type}.`);
 }

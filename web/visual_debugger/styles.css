@@ -998,9 +998,7 @@ select {
 }
 
 .combat-effect[data-token-id="warrior_charge"],
-.combat-route-effect[data-token-id="warrior_charge"],
-.combat-effect[data-event-type="charge_phase_displacement"],
-.combat-route-effect[data-event-type="charge_phase_displacement"] {
+.combat-route-effect[data-token-id="warrior_charge"] {
   color: var(--class-warrior);
 }
 
@@ -1040,7 +1038,6 @@ select {
 }
 
 .combat-route__path,
-.combat-charge__path,
 .combat-rejection__route {
   fill: none;
   stroke: currentColor;
@@ -1085,7 +1082,6 @@ select {
   pointer-events: fill;
 }
 
-.combat-charge__endpoint,
 .combat-respawn-wave__panel {
   pointer-events: all;
 }
@@ -1354,31 +1350,6 @@ select {
 
 .combat-effect[data-outcome="unchanged"] .combat-net__label {
   font-size: 12px;
-}
-
-.combat-charge__path {
-  stroke-width: 3;
-  stroke-dasharray: 9 6;
-  opacity: 0.72;
-}
-
-.combat-charge__endpoint {
-  fill: var(--battlefield);
-  stroke: currentColor;
-  stroke-width: 2;
-  vector-effect: non-scaling-stroke;
-}
-
-.combat-charge__direction {
-  fill: currentColor;
-  stroke: var(--battlefield);
-  stroke-width: 1;
-  filter: drop-shadow(0 0 3px currentColor);
-  vector-effect: non-scaling-stroke;
-}
-
-.combat-effect[data-settled="true"] .combat-charge__path {
-  opacity: 0.42;
 }
 
 .combat-lifecycle__ring {
@@ -2850,23 +2821,6 @@ select {
   margin-top: 0.55rem;
 }
 
-.event-feed {
-  display: grid;
-  gap: 0.35rem;
-  margin: 0.55rem 0 0;
-  padding: 0;
-  list-style: none;
-}
-
-.event-item {
-  padding: 0.45rem 0.5rem;
-  border-left: 0.18rem solid var(--accent);
-  border-radius: 0.3rem;
-  color: #cbd5e1;
-  background: #0b1220;
-  font-size: 0.76rem;
-}
-
 .visual-filters__fieldset {
   min-inline-size: 0;
   margin: 0.65rem 0 0;
@@ -2922,6 +2876,7 @@ select {
 
 .visual-filters__actions {
   display: flex;
+  gap: 0.4rem;
   justify-content: flex-end;
   margin-top: 0.55rem;
 }

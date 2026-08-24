@@ -52,7 +52,7 @@ battlefield controls (while the battlefield has focus):
   Tab / Shift+Tab       cycle active actors without discarding their drafts
   left click            control the clicked authorized actor
   Shift+left click      select the clicked active target
-  right click / Escape  clear target to target-none
+  Escape                clear target to target-none and leave battlefield focus
   1 / 2                 explicitly arm Basic lane 0 / Ultimate lane 1
   W A S D               cardinal movement
   Q E Z C               diagonal movement

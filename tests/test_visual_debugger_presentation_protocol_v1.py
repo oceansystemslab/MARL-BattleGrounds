@@ -60,6 +60,7 @@ from scripts.dev.visual_debugger.presentation_protocol import (
     canonical_authorized_endpoint_digest_sha256,
 )
 from scripts.dev.visual_debugger.scenarios import get_scenario
+from tests.evaluation_fixtures import CapturedEvaluationTrajectory
 from tests.test_rendering_authorized_inspection import (
     _InspectionCases,
     _no_shared_current,
@@ -73,6 +74,7 @@ from tests.test_rendering_authorized_inspection import (
 from tests.test_visual_debugger_authorized_presentation import _build_raw_frames
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
+from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
 from marl_battlegrounds.evaluation.models import EvaluationEpisodeContextV1
 from marl_battlegrounds.evaluation.pov import (
     ActorPovAxisMappingV1,
@@ -101,12 +103,16 @@ from marl_battlegrounds.rendering.authorized_pov_scene import (
 )
 from marl_battlegrounds.rendering.authorized_presentation import (
     AcceptedActionTupleV1,
+    AgentPovVisualIncomingSummaryV1,
     AuthorizedAgentV1,
+    AuthorizedBattlefieldSceneV1,
     SubmittedActionTupleV1,
+    build_agent_pov_visual_incoming_summary_v1,
     build_oracle_authorized_scene_v1,
     build_replay_oracle_presentation_parts_v1,
     oracle_presentation_key_v1,
 )
+from marl_battlegrounds.rendering.evaluation_adapter import build_visual_event_batch_v2
 from marl_battlegrounds.rendering.scene import AgentSceneV2, BattlefieldSceneV2
 
 
@@ -120,6 +126,35 @@ class _PoisonBattlefieldSceneV2(BattlefieldSceneV2):
 
 class _PoisonAgentSceneV2(AgentSceneV2):
     pass
+
+
+def _agent_visual_events(
+    trajectory: CapturedEvaluationTrajectory,
+    *,
+    transition_index: int,
+    transition_start_scene: AuthorizedBattlefieldSceneV1,
+    successor_scene: AuthorizedBattlefieldSceneV1,
+    recipient_public_agent_id: str,
+    incoming_recipient_transition_id: str,
+    incoming_start_recipient_frame_id: str,
+    incoming_successor_recipient_frame_id: str,
+) -> AgentPovVisualIncomingSummaryV1:
+    return build_agent_pov_visual_incoming_summary_v1(
+        build_visual_event_batch_v2(
+            EvaluationTransitionViewV1(
+                context=trajectory.context,
+                start_frame=trajectory.frames[transition_index],
+                transition=trajectory.transitions[transition_index],
+                successor_frame=trajectory.frames[transition_index + 1],
+            )
+        ),
+        transition_start_scene=transition_start_scene,
+        successor_scene=successor_scene,
+        recipient_public_agent_id=recipient_public_agent_id,
+        incoming_recipient_transition_id=incoming_recipient_transition_id,
+        incoming_start_recipient_frame_id=incoming_start_recipient_frame_id,
+        incoming_successor_recipient_frame_id=(incoming_successor_recipient_frame_id),
+    )
 
 
 class _PoisonEvaluationEpisodeContextV1(EvaluationEpisodeContextV1):
@@ -532,6 +567,12 @@ def five_frames(
         frame_index=1,
         authority=no_shared_session,
     )
+    no_shared_start = _no_shared_current(
+        no_shared,
+        no_shared_index,
+        frame_index=0,
+        authority=no_shared_session,
+    )
     replay_no_shared_inspection = build_replay_no_shared_obs_inspection_v1(
         no_shared_index,
         no_shared_current,
@@ -552,6 +593,22 @@ def five_frames(
         authority_session_id=no_shared_session,
     )
     assert no_shared_events is not None
+    no_shared_visual_events = _agent_visual_events(
+        no_shared,
+        transition_index=0,
+        transition_start_scene=no_shared_start.scene,
+        successor_scene=no_shared_current.scene,
+        recipient_public_agent_id=no_shared_current.recipient_public_agent_id,
+        incoming_recipient_transition_id=(
+            no_shared_events.incoming_recipient_transition_id
+        ),
+        incoming_start_recipient_frame_id=(
+            no_shared_events.incoming_start_recipient_frame_id
+        ),
+        incoming_successor_recipient_frame_id=(
+            no_shared_events.incoming_successor_recipient_frame_id
+        ),
+    )
     no_shared_transition = _agent_latest_transition(
         no_shared_index.content.transitions[0],
         axis=no_shared_axis,
@@ -590,6 +647,7 @@ def five_frames(
         analysis_mode="analysis",
         current_endpoint=no_shared_endpoint,
         latest_events=no_shared_events,
+        visual_events=no_shared_visual_events,
         latest_transition=no_shared_transition,
         technical_frame=ReplayNoSharedObsTechnicalFrameV1(
             technical_kind="replay_no_shared_obs_technical_frame",
@@ -607,6 +665,12 @@ def five_frames(
         no_shared,
         no_shared_index,
         frame_index=1,
+        authority=live_session,
+    )
+    live_start = _no_shared_current(
+        no_shared,
+        no_shared_index,
+        frame_index=0,
         authority=live_session,
     )
     live_slice = _pov_slice(no_shared, actor_slot=0, frame_index=1)
@@ -632,6 +696,20 @@ def five_frames(
         authority_session_id=live_session,
     )
     assert live_events is not None
+    live_visual_events = _agent_visual_events(
+        no_shared,
+        transition_index=0,
+        transition_start_scene=live_start.scene,
+        successor_scene=live_current.scene,
+        recipient_public_agent_id=live_current.recipient_public_agent_id,
+        incoming_recipient_transition_id=(live_events.incoming_recipient_transition_id),
+        incoming_start_recipient_frame_id=(
+            live_events.incoming_start_recipient_frame_id
+        ),
+        incoming_successor_recipient_frame_id=(
+            live_events.incoming_successor_recipient_frame_id
+        ),
+    )
     live_transition = _agent_latest_transition(
         no_shared_index.content.transitions[0],
         axis=live_axis,
@@ -668,6 +746,7 @@ def five_frames(
         analysis_mode="analysis",
         current_endpoint=live_endpoint,
         latest_events=live_events,
+        visual_events=live_visual_events,
         latest_transition=live_transition,
         technical_frame=LiveNoSharedObsTechnicalFrameV1(
             technical_kind="live_no_shared_obs_technical_frame",
@@ -729,6 +808,22 @@ def five_frames(
         shared_current,
     )
     assert shared_events is not None
+    shared_visual_events = _agent_visual_events(
+        inspection_cases.shared,
+        transition_index=0,
+        transition_start_scene=shared_start.scene,
+        successor_scene=shared_current.scene,
+        recipient_public_agent_id=shared_current.recipient_public_agent_id,
+        incoming_recipient_transition_id=(
+            shared_events.incoming_recipient_transition_id
+        ),
+        incoming_start_recipient_frame_id=(
+            shared_events.incoming_start_recipient_frame_id
+        ),
+        incoming_successor_recipient_frame_id=(
+            shared_events.incoming_successor_recipient_frame_id
+        ),
+    )
     shared_transition = _shared_latest_transition(
         inspection_cases,
         axis=shared_axis,
@@ -766,6 +861,7 @@ def five_frames(
         analysis_mode="analysis",
         current_endpoint=shared_endpoint,
         latest_events=shared_events,
+        visual_events=shared_visual_events,
         latest_transition=shared_transition,
         technical_frame=ReplaySharedObsTechnicalFrameV1(
             technical_kind="replay_shared_obs_technical_frame",
@@ -849,6 +945,31 @@ def _replay_no_shared_at(
             start_tick=trajectory.frames[frame_index - 1].simulator_step_count,
         )
     )
+    visual_events = None
+    if frame_index > 0:
+        assert latest_events is not None
+        start = _no_shared_current(
+            trajectory,
+            index,
+            frame_index=frame_index - 1,
+            authority=session,
+        )
+        visual_events = _agent_visual_events(
+            trajectory,
+            transition_index=frame_index - 1,
+            transition_start_scene=start.scene,
+            successor_scene=current.scene,
+            recipient_public_agent_id=current.recipient_public_agent_id,
+            incoming_recipient_transition_id=(
+                latest_events.incoming_recipient_transition_id
+            ),
+            incoming_start_recipient_frame_id=(
+                latest_events.incoming_start_recipient_frame_id
+            ),
+            incoming_successor_recipient_frame_id=(
+                latest_events.incoming_successor_recipient_frame_id
+            ),
+        )
     replay_inspection = build_replay_no_shared_obs_inspection_v1(index, current)
     return ReplayNoSharedObsAuthorizedPresentationFrameV1(
         schema_version=1,
@@ -881,6 +1002,7 @@ def _replay_no_shared_at(
         analysis_mode="analysis",
         current_endpoint=endpoint,
         latest_events=latest_events,
+        visual_events=visual_events,
         latest_transition=latest_transition,
         technical_frame=ReplayNoSharedObsTechnicalFrameV1(
             technical_kind="replay_no_shared_obs_technical_frame",
@@ -916,6 +1038,7 @@ def _replay_shared_at(
     )
     latest_events = None
     latest_transition = None
+    visual_events = None
     if frame_index > 0:
         start, _ = _shared_current(
             trajectory,
@@ -924,6 +1047,23 @@ def _replay_shared_at(
             authority=session,
         )
         latest_events = build_shared_obs_incoming_summary_v1(start, current)
+        assert latest_events is not None
+        visual_events = _agent_visual_events(
+            trajectory,
+            transition_index=frame_index - 1,
+            transition_start_scene=start.scene,
+            successor_scene=current.scene,
+            recipient_public_agent_id=current.recipient_public_agent_id,
+            incoming_recipient_transition_id=(
+                latest_events.incoming_recipient_transition_id
+            ),
+            incoming_start_recipient_frame_id=(
+                latest_events.incoming_start_recipient_frame_id
+            ),
+            incoming_successor_recipient_frame_id=(
+                latest_events.incoming_successor_recipient_frame_id
+            ),
+        )
         latest_transition = _shared_latest_transition(
             cases,
             axis=endpoint.action_axis,
@@ -973,6 +1113,7 @@ def _replay_shared_at(
         analysis_mode="analysis",
         current_endpoint=endpoint,
         latest_events=latest_events,
+        visual_events=visual_events,
         latest_transition=latest_transition,
         technical_frame=ReplaySharedObsTechnicalFrameV1(
             technical_kind="replay_shared_obs_technical_frame",
@@ -1125,6 +1266,31 @@ def _live_no_shared_at(
     incoming_id = (
         None if latest_transition is None else latest_transition.incoming_transition_id
     )
+    visual_events = None
+    if frame_index > 0:
+        assert latest_events is not None
+        start = _no_shared_current(
+            trajectory,
+            index,
+            frame_index=frame_index - 1,
+            authority=session,
+        )
+        visual_events = _agent_visual_events(
+            trajectory,
+            transition_index=frame_index - 1,
+            transition_start_scene=start.scene,
+            successor_scene=current.scene,
+            recipient_public_agent_id=current.recipient_public_agent_id,
+            incoming_recipient_transition_id=(
+                latest_events.incoming_recipient_transition_id
+            ),
+            incoming_start_recipient_frame_id=(
+                latest_events.incoming_start_recipient_frame_id
+            ),
+            incoming_successor_recipient_frame_id=(
+                latest_events.incoming_successor_recipient_frame_id
+            ),
+        )
     return LiveNoSharedObsAuthorizedPresentationFrameV1(
         schema_version=1,
         presentation_kind="live_no_shared_obs_agent_pov",
@@ -1156,6 +1322,7 @@ def _live_no_shared_at(
         analysis_mode="analysis",
         current_endpoint=endpoint,
         latest_events=latest_events,
+        visual_events=visual_events,
         latest_transition=latest_transition,
         technical_frame=LiveNoSharedObsTechnicalFrameV1(
             technical_kind="live_no_shared_obs_technical_frame",
@@ -2323,10 +2490,10 @@ def test_every_serialized_presentation_key_is_recomputed_for_its_authority(
     )
     expected_counts = {
         "live_oracle": 53,
-        "live_no_shared_obs_agent_pov": 29,
+        "live_no_shared_obs_agent_pov": 44,
         "replay_oracle": 53,
-        "replay_no_shared_obs_agent_pov": 29,
-        "replay_shared_obs_agent_pov": 44,
+        "replay_no_shared_obs_agent_pov": 44,
+        "replay_shared_obs_agent_pov": 59,
     }
     for frame in five_frames.rows:
         payload = frame.model_dump(mode="json")
@@ -2883,6 +3050,27 @@ def test_real_death_successor_keeps_fixed_recipient_corpse_authorized() -> None:
         axis=endpoint.action_axis,
         start_tick=death.start_frame.simulator_step_count,
     )
+    start_parts = build_no_shared_obs_authorized_scene_v1(
+        death,
+        public_catalog=session.evaluation_context.static_mechanics_catalog,
+        authority_session_id=authority,
+        frame_index=death.start_frame.frame_index,
+    )
+    visual_events = build_agent_pov_visual_incoming_summary_v1(
+        build_visual_event_batch_v2(view),
+        transition_start_scene=start_parts.scene,
+        successor_scene=parts.scene,
+        recipient_public_agent_id=parts.recipient_public_agent_id,
+        incoming_recipient_transition_id=(
+            latest_events.incoming_recipient_transition_id
+        ),
+        incoming_start_recipient_frame_id=(
+            latest_events.incoming_start_recipient_frame_id
+        ),
+        incoming_successor_recipient_frame_id=(
+            latest_events.incoming_successor_recipient_frame_id
+        ),
+    )
     current_slice = build_actor_pov_current_slice_v1(
         session.evaluation_context,
         view.successor_frame,
@@ -2928,6 +3116,7 @@ def test_real_death_successor_keeps_fixed_recipient_corpse_authorized() -> None:
         analysis_mode="analysis",
         current_endpoint=endpoint,
         latest_events=latest_events,
+        visual_events=visual_events,
         latest_transition=latest_transition,
         technical_frame=LiveNoSharedObsTechnicalFrameV1(
             technical_kind="live_no_shared_obs_technical_frame",

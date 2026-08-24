@@ -1,7 +1,6 @@
 import {
   authorizedPresentationAudience,
   authorizedPresentationIdentityRows,
-  authorizedPresentationIncomingRows,
   authorizedPresentationInspectionState,
   authorizedPresentationSceneView,
   authorizedPresentationTechnicalFacts,
@@ -38,8 +37,6 @@ import { classTokenFromId, resolveVisualToken, teamTokenFromId } from "./vocabul
  *   pendingCard: HTMLElement,
  *   acceptedCard: HTMLElement,
  *   acceptedAnnouncement: HTMLElement,
- *   eventFeed: HTMLElement,
- *   eventCount: HTMLElement,
  *   diagnosticsCard: HTMLElement,
  *   onCommand: (command: Record<string, unknown>) => void | Promise<void>,
  * }} DebuggerPanelBindings
@@ -123,7 +120,6 @@ export const DISCLOSURE_PANEL_IDS = Object.freeze([
   "agent-details",
   "pending-turn-details",
   "latest-transition-details",
-  "events-details",
   "visual-key",
   "technical-frame-details",
 ]);
@@ -136,11 +132,7 @@ export function disclosurePanelInitiallyOpen(panelId, replay) {
   if (!DISCLOSURE_PANEL_IDS.includes(panelId)) {
     throw new RangeError(`Unknown disclosure panel ${panelId}.`);
   }
-  return (
-    panelId === "roster-details" ||
-    panelId === "events-details" ||
-    (!replay && panelId === "command-deck")
-  );
+  return panelId === "roster-details" || (!replay && panelId === "command-deck");
 }
 
 /**
@@ -347,7 +339,7 @@ export function authorizedInspectorView(
         );
 
   return Object.freeze({
-    title: "Comprehensive Agent Details",
+    title: "Comprehensive Agent Class Details",
     owner,
     owner_descriptor: ownerDescriptor,
     owner_class_accent: ownerClassAccent,
@@ -364,31 +356,6 @@ function humanize(value) {
   return String(value)
     .replaceAll("_", " ")
     .replace(/\b\w/g, (character) => character.toUpperCase());
-}
-
-/**
- * Return the exact researcher-facing label for an authorized team respawn.
- * Invalid payloads remain unavailable instead of guessing a team identity.
- *
- * @param {Record<string, any>} event
- */
-function respawnWaveEventLabel(event) {
-  if (event.kind !== "respawn_wave_occurred") {
-    return null;
-  }
-  const teamAnchor = isRecord(event.payload?.team_anchor)
-    ? event.payload.team_anchor
-    : null;
-  const teamIndex = teamAnchor?.team_index;
-  const teamId = teamAnchor?.team_id;
-  if (
-    teamAnchor?.phase !== "successor" ||
-    (teamIndex !== 0 && teamIndex !== 1) ||
-    teamId !== teamIndex + 1
-  ) {
-    return null;
-  }
-  return `EVENT: Team ${teamIndex === 0 ? "A" : "B"} Respawn`;
 }
 
 /**
@@ -559,8 +526,6 @@ export class DebuggerPanels {
     pendingCard,
     acceptedCard,
     acceptedAnnouncement,
-    eventFeed,
-    eventCount,
     diagnosticsCard,
     onCommand,
   }) {
@@ -573,22 +538,17 @@ export class DebuggerPanels {
     this.pendingCard = pendingCard;
     this.acceptedCard = acceptedCard;
     this.acceptedAnnouncement = acceptedAnnouncement;
-    this.eventFeed = eventFeed;
-    this.eventCount = eventCount;
     this.diagnosticsCard = diagnosticsCard;
     this.onCommand = onCommand;
     /** @type {Map<string, AuthorizedRosterRow>} */
     this.rosterRows = new Map();
     /** @type {Map<number, RosterTeamGroup>} */
     this.rosterTeamGroups = new Map();
-    /** @type {Map<string, HTMLElement>} */
-    this.eventRows = new Map();
     /** @type {string | null} */
     this.lastAnnouncedTransitionKey = null;
     this.roster.replaceChildren();
     this.ensureRosterTeamGroup(1);
     this.ensureRosterTeamGroup(2);
-    this.emptyEvents = htmlElement("li", "empty-copy", "No transition events.");
     this.pendingLabel = htmlElement("p", "action-card__label");
     this.pendingList = htmlElement("ol", "pending-action-list");
   }
@@ -951,76 +911,6 @@ export class DebuggerPanels {
     }
   }
 
-  /** @param {Record<string, any>} presentation */
-  renderAuthorizedEvents(presentation) {
-    const rows = authorizedPresentationIncomingRows(presentation);
-    this.eventCount.textContent = String(rows.length);
-    const activeIds = new Set(rows.map(({ id }) => id));
-    for (const [eventId, row] of this.eventRows) {
-      if (!activeIds.has(eventId)) {
-        row.remove();
-        this.eventRows.delete(eventId);
-      }
-    }
-    if (rows.length === 0) {
-      this.reconcileChildren(this.eventFeed, [this.emptyEvents]);
-      return;
-    }
-    const desired = rows.map((event, ordinal) => {
-      let item = this.eventRows.get(event.id);
-      if (!item) {
-        item = htmlElement("li", "event-item");
-        item.tabIndex = 0;
-        this.eventRows.set(event.id, item);
-      }
-      item.dataset.eventId = event.id;
-      item.dataset.eventType = event.kind;
-      item.dataset.eventVocabulary = event.vocabulary;
-      const prefix =
-        event.vocabulary === "observation_delta"
-          ? "Observation delta"
-          : event.vocabulary === "recipient_cue"
-            ? "Recipient cue"
-            : "Incoming event";
-      const respawnLabel = respawnWaveEventLabel(event);
-      const readableKind = respawnLabel ?? humanize(event.kind);
-      item.textContent = respawnLabel ?? `${prefix} · ${readableKind}`;
-      registerTooltipOwner(
-        item,
-        createSemanticDescriptor({
-          kind: event.vocabulary,
-          id: `${presentation.session_id}:${event.id}`,
-          title: respawnLabel ?? `${prefix} ${ordinal + 1}`,
-          tone: "information",
-          accent: "none",
-          summary:
-            respawnLabel !== null
-              ? "This team respawn occurred on the incoming transition."
-              : event.vocabulary === "observation_delta"
-                ? "A recipient-authorized observation change; no simulator cause is asserted."
-                : "An exact incoming presentation fact.",
-          rows: [
-            {
-              label: "Kind",
-              value: readableKind,
-              metadata: { compact: true, full: true },
-            },
-            {
-              label: "Identity",
-              value: event.id,
-              metadata: { compact: true, full: true },
-            },
-          ],
-          sections: [],
-          metadata: { compact: true, full: true },
-          anchor: "element",
-        }),
-      );
-      return item;
-    });
-    this.reconcileChildren(this.eventFeed, desired);
-  }
-
   /**
    * @param {HTMLElement} container
    * @param {HTMLElement[]} desired
@@ -1075,13 +965,6 @@ export class DebuggerPanels {
     this.acceptedAnnouncement.textContent = "";
     this.lastAnnouncedTransitionKey = null;
 
-    for (const row of this.eventRows.values()) {
-      row.remove();
-    }
-    this.eventRows.clear();
-    this.eventCount.textContent = "0";
-    this.reconcileChildren(this.eventFeed, [this.emptyEvents]);
-
     this.diagnosticsCard.replaceChildren(
       htmlElement("p", "empty-copy", "Technical Frame unavailable."),
     );
@@ -1109,7 +992,6 @@ export class DebuggerPanels {
         frame,
         interactionState.localInspectedPresentationKey,
       );
-      this.renderAuthorizedEvents(frame);
       return;
     }
     this.renderUnavailable();

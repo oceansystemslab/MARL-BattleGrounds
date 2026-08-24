@@ -1542,10 +1542,12 @@ export function explainLegality(rawLegality, lane, rawOwner) {
   if (lane !== 0 && lane !== 1) {
     return null;
   }
+  const availabilityProperty = lane === 0 ? "basic_available" : "ultimate_available";
   const laneProperty = lane === 0 ? "lane_0_available" : "lane_1_available";
   const legality = snapshotOwnDataFields(rawLegality, [
     "owner_presentation_key",
     "owner_public_agent_id",
+    availabilityProperty,
     laneProperty,
   ]);
   if (legality === null) {
@@ -1556,7 +1558,10 @@ export function explainLegality(rawLegality, lane, rawOwner) {
     return null;
   }
   const laneName = lane === 0 ? "Basic" : "Ultimate";
-  const rawAvailable = legality[laneProperty];
+  const rawAvailable =
+    legality[availabilityProperty] === undefined
+      ? legality[laneProperty]
+      : legality[availabilityProperty];
   if (typeof rawAvailable !== "boolean") {
     return null;
   }

@@ -21,7 +21,7 @@ import {
 test.describe.configure({ mode: "serial" });
 
 const CP9_REPLAY_ARTIFACT_TEST_TITLE =
-  "all replay authorities export canonical battlefield PNGs and preserve metric privacy";
+  "all replay authorities preserve battlefield fog and canonical metric access";
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 const PNG_PROVENANCE_KEYWORD = "MARL-BattleGrounds Replay Provenance";
 const METRIC_REPORT_ROUTE = "/api/replay/metric-report";
@@ -48,10 +48,7 @@ const CP9_VISUAL_FILTER_IDS = Object.freeze([
   "healing_effects",
   "regeneration_effects",
   "cooldown_effects",
-  "charge_movement",
   "status_application",
-  "status_reapplication",
-  "status_refresh_extension",
   "natural_status_expiry",
   "freezing_trap_break",
   "status_clear_on_death",
@@ -587,17 +584,6 @@ async function currentReplayPresentation(page) {
   });
 }
 
-/** @param {import("@playwright/test").Page} page */
-async function replayCapabilityToken(page) {
-  const token = await page.evaluate(() =>
-    window.sessionStorage.getItem("marl-battlegrounds.debugger-token"),
-  );
-  if (!token) {
-    throw new Error("Replay capability token is unavailable.");
-  }
-  return token;
-}
-
 /**
  * @param {import("@playwright/test").Page} page
  * @param {"researcher" | "pov"} view
@@ -1068,12 +1054,16 @@ async function exportAndInspectReplayPng(page, options) {
 }
 
 /** @param {import("@playwright/test").Page} page */
-async function restoreAllReplayVisualFilters(page) {
-  const restore = page.locator("#restore-all-visual-filters-button");
-  if (await restore.isEnabled()) {
-    await restore.click();
+async function enableAllReplayVisualFilters(page) {
+  const enableAll = page.locator("#enable-all-visual-filters-button");
+  if (await enableAll.isEnabled()) {
+    await enableAll.click();
   }
-  await expect(page.locator("#visual-filter-count")).toHaveText("23 enabled");
+  await expect(page.locator("#visual-filter-count")).toHaveText(
+    `${CP9_VISUAL_FILTER_IDS.length} enabled`,
+  );
+  await expect(enableAll).toBeDisabled();
+  await expect(page.locator("#disable-all-visual-filters-button")).toBeEnabled();
 }
 
 /**
@@ -1112,7 +1102,9 @@ async function installRepresentativeReplayPresentationState(page, options = {}) 
     await expect(input).toBeChecked();
     await input.uncheck();
   }
-  await expect(page.locator("#visual-filter-count")).toHaveText("20 enabled");
+  await expect(page.locator("#visual-filter-count")).toHaveText(
+    `${CP9_VISUAL_FILTER_IDS.length - REPRESENTATIVE_DISABLED_FILTERS.length} enabled`,
+  );
   if (options.proveVisibleUltimate === true) {
     await expect(ultimateEffects).toHaveCount(0);
     expect(
@@ -1181,23 +1173,16 @@ async function installRepresentativeReplayPresentationState(page, options = {}) 
     const responsePromise = nextReplayResponse(page);
     await target.click();
     expect((await responsePromise).status()).toBe(200);
+    await expect(target).toHaveAttribute("data-selected", "true");
   } else {
-    /** @type {import("@playwright/test").Request[]} */
-    const commands = [];
-    const record = (/** @type {import("@playwright/test").Request} */ request) => {
-      if (new URL(request.url()).pathname === "/api/replay/command") {
-        commands.push(request);
-      }
-    };
-    page.on("request", record);
-    try {
-      await target.click();
-    } finally {
-      page.off("request", record);
-    }
-    expect(commands).toEqual([]);
+    const responsePromise = nextReplayResponse(page);
+    await target.click();
+    expect((await responsePromise).status()).toBe(200);
+    await expect(page.locator("#view-select")).toHaveValue("pov");
+    await expect(page.locator('#battlefield .agent[data-selected="true"]')).toHaveCount(
+      1,
+    );
   }
-  await expect(target).toHaveAttribute("data-selected", "true");
   await waitForSettledReplayArtifactActions(page);
 }
 
@@ -1215,7 +1200,7 @@ async function proveReplayLeafExports(page, options) {
   await openReplay(page, options.url);
   await installReplayView(page, options.view);
   await installFirstFrame(page);
-  await restoreAllReplayVisualFilters(page);
+  await enableAllReplayVisualFilters(page);
   await page.setViewportSize({ width: 960, height: 600 });
   await waitForStablePresentation(page);
   await waitForSettledReplayArtifactActions(page);
@@ -1226,7 +1211,7 @@ async function proveReplayLeafExports(page, options) {
     label: `${options.label} 960x600 all-on`,
   });
   expect(Object.values(allOn.provenance.presentation.visual_filters)).toEqual(
-    Array.from({ length: 23 }, () => true),
+    CP9_VISUAL_FILTER_IDS.map(() => true),
   );
 
   const laterFrame = await clickReplayCommand(page, "#replay-next-button");
@@ -1321,7 +1306,7 @@ async function downloadCanonicalMetricReport(page, sourceMetricPath) {
 }
 
 /** @param {import("@playwright/test").Page} page */
-async function proveMissingOracleMetricUi(page) {
+async function proveMissingMetricUi(page) {
   await waitForSettledReplayArtifactActions(page);
   const button = page.locator("#replay-download-metrics-button");
   await expect(button).toBeEnabled();
@@ -1367,36 +1352,14 @@ async function proveMissingOracleMetricUi(page) {
 }
 
 /** @param {import("@playwright/test").Page} page */
-async function directForbiddenMetricProbe(page) {
-  const token = await replayCapabilityToken(page);
-  const origin = new URL(page.url()).origin;
-  const response = await page.request.get(`${origin}${METRIC_REPORT_ROUTE}`, {
-    failOnStatusCode: false,
-    headers: {
-      "X-MARL-Debugger-Token": token,
-      Origin: origin,
-    },
-    maxRedirects: 0,
-  });
-  const headers = { ...response.headers() };
-  delete headers.date;
-  return Object.freeze({
-    ledger: Object.freeze([{ method: "GET", path: METRIC_REPORT_ROUTE }]),
-    status: response.status(),
-    body: Buffer.from(await response.body()),
-    headers: Object.freeze(headers),
-  });
-}
-
-/** @param {import("@playwright/test").Page} page */
-async function agentMetricDenialSurface(page) {
-  const button = page.locator("#replay-download-metrics-button");
+async function replayArtifactFactSurface(page) {
   await waitForSettledReplayArtifactActions(page);
-  await expect(button).toBeDisabled();
+  await expect(page.locator("#replay-download-metrics-button")).toBeEnabled();
   return Object.freeze({
-    text: await button.innerText(),
-    describedBy: await button.getAttribute("aria-describedby"),
-    help: await page.locator("#replay-download-metrics-help").innerText(),
+    artifact: await page.locator("#replay-artifact-reference").innerText(),
+    completion: await page.locator("#replay-completion-badge").innerText(),
+    processing: await page.locator("#replay-processing-badge").innerText(),
+    endReason: await page.locator("#replay-end-reason").innerText(),
   });
 }
 
@@ -1467,8 +1430,6 @@ test("canonical complete and partial artifacts join their frame-zero and capture
   await expect(page.locator("#live-visual-key")).toHaveAttribute("hidden", "");
   await expect(page.locator("#replay-visual-key")).not.toHaveAttribute("hidden", "");
   await expect(page.locator("#roster-details")).toHaveAttribute("open", "");
-  await expect(page.locator("#events-details")).toHaveAttribute("open", "");
-  await expect(page.locator("#event-feed .event-item")).toHaveCount(0);
   for (const selector of [
     "#agent-details",
     "#visual-key",
@@ -1895,6 +1856,159 @@ test("one replay transport trajectory keeps static seeks, playback, rates, and r
   expectNoBrowserErrors(page);
 });
 
+test("basic_support Agent POV playback visibly dwells for Hunter and Priest", async ({
+  page,
+}) => {
+  /** @type {Awaited<ReturnType<typeof startReplayViewer>> | null} */
+  let viewer = null;
+  /** @type {Record<string, any>[]} */
+  const replayCommands = [];
+  /** @param {import("@playwright/test").Request} request */
+  const recordReplayCommand = (request) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname === "/api/replay/command"
+    ) {
+      replayCommands.push(request.postDataJSON().command);
+    }
+  };
+  const animatedEffectSelector = [
+    '#battlefield .combat-choreography[data-state="playing"] .combat-effect',
+    '#battlefield .combat-choreography-routes[data-state="playing"] .combat-route-effect',
+  ].join(", ");
+
+  /** @param {string} incomingTransitionId */
+  const visibleAnimatedEventIds = async (incomingTransitionId) => {
+    await expect(
+      page.locator('#battlefield .combat-choreography[data-state="playing"]'),
+    ).toHaveCount(1);
+    await expect
+      .poll(
+        () =>
+          page
+            .locator(animatedEffectSelector)
+            .evaluateAll(
+              (nodes) =>
+                nodes.filter(
+                  (node) =>
+                    node.getClientRects().length > 0 &&
+                    node
+                      .getAnimations({ subtree: true })
+                      .some((animation) => animation.playState === "running"),
+                ).length,
+            ),
+        { timeout: 5_000 },
+      )
+      .toBeGreaterThan(0);
+    const eventIds = await page.locator(animatedEffectSelector).evaluateAll((nodes) => {
+      const identifiers = [];
+      for (const node of nodes) {
+        const identifier = node.getAttribute("data-event-id");
+        if (typeof identifier === "string") {
+          identifiers.push(identifier);
+        }
+      }
+      return [...new Set(identifiers)].sort();
+    });
+    expect(eventIds.length).toBeGreaterThan(0);
+    expect(
+      eventIds.every((eventId) =>
+        eventId.startsWith(`${incomingTransitionId}:visual-event:`),
+      ),
+    ).toBe(true);
+    return eventIds;
+  };
+
+  /** @param {string} publicAgentId */
+  const proveRecipientFrameOneDwell = async (publicAgentId) => {
+    const commandStart = replayCommands.length;
+    await page.locator("#replay-play-pause-button").click();
+    await expectReplayFrameIndex(page, 1);
+    const frame = await currentReplayFrame(page);
+    expect(frame.public_agent_id).toBe(publicAgentId);
+    await expect(page.locator("#replay-transport-status")).toContainText("Frame 1 / 2");
+    await expect(page.locator("#replay-transport-status")).toContainText(
+      "0.25× · PLAYING",
+    );
+    const eventIds = await visibleAnimatedEventIds(frame.incoming_pov_transition_id);
+    const presentation = await currentReplayPresentation(page);
+    const enemyHunterAttack = presentation.visual_events.events.find(
+      (event) =>
+        event.event_kind === "ability_activated" &&
+        event.source_anchor.public_agent_id === "7" &&
+        event.recipient_anchor?.public_agent_id === "2",
+    );
+    expect(enemyHunterAttack).toBeDefined();
+    expect(eventIds).toContain(enemyHunterAttack.event_id);
+    await delay(750);
+    await expect(page.locator("#replay-frame-slider")).toHaveValue("1");
+    await expect(page.locator("#replay-frame-position")).toHaveText("Tick 1 / 2");
+    expect(replayCommands.slice(commandStart)).toEqual([
+      { command_type: "next_frame" },
+    ]);
+    return eventIds;
+  };
+
+  try {
+    viewer = await startReplayViewer({
+      scenario: "basic_support",
+      seed: 0,
+      view: "pov",
+      povSlot: 1,
+    });
+    await openReplay(page, viewer.url);
+    await expect(page.locator("#view-select")).toHaveValue("pov");
+    await expectReplayFrameIndex(page, 0);
+    const hunterStart = await currentReplayFrame(page);
+    expect(hunterStart).toMatchObject({
+      frame_kind: "actor_pov_replay_viewer",
+      public_agent_id: "1",
+      cursor: { frame_index: 0, final_frame_index: 2 },
+    });
+
+    page.on("request", recordReplayCommand);
+    await page.locator("#replay-playback-rate").selectOption("0.25");
+    const hunterEventIds = await proveRecipientFrameOneDwell("1");
+
+    await expectReplayFrameIndex(page, 2);
+    await expect(page.locator("#replay-transport-status")).toContainText("Frame 2 / 2");
+    expect(replayCommands).toEqual([
+      { command_type: "next_frame" },
+      { command_type: "next_frame" },
+    ]);
+    await expect(page.locator("#replay-play-pause-button")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    await page.locator("#replay-play-pause-button").click();
+    await expectReplayChoreographySettled(page);
+
+    await clickReplayCommand(page, "#replay-first-button");
+    await expectReplayFrameIndex(page, 0);
+    const priest = page.locator(
+      '#battlefield .agent[role="button"][aria-label^="Agent ID 2."]',
+    );
+    await expect(priest).toBeVisible();
+    const priestResponse = nextReplayResponse(page);
+    await priest.click();
+    expect((await priestResponse).status()).toBe(200);
+    await expect
+      .poll(async () => (await currentReplayFrame(page)).public_agent_id)
+      .toBe("2");
+    await expectReplayFrameIndex(page, 0);
+
+    const priestEventIds = await proveRecipientFrameOneDwell("2");
+    expect(priestEventIds.length).toBeLessThan(hunterEventIds.length);
+    await page.locator("#replay-play-pause-button").click();
+    await expectReplayChoreographySettled(page);
+    expectNoBrowserErrors(page);
+  } finally {
+    page.off("request", recordReplayCommand);
+    await page.goto("about:blank").catch(() => {});
+    await stopDebugger(viewer?.process ?? null);
+  }
+});
+
 test("a stale cross-tab command atomically installs the latest audience without retry or animation", async ({
   page,
   context,
@@ -2101,7 +2215,7 @@ test("accessible playback pauses on hidden/error/endpoint and keeps one request 
   expectNoBrowserErrors(page);
 });
 
-test("Actor POV all-surface scan excludes researcher authority and host secrets", async ({
+test("Actor POV keeps battlefield fog while exposing artifact-wide facts", async ({
   page,
 }) => {
   const complete = requiredViewer(completeViewer, "complete");
@@ -2148,6 +2262,16 @@ test("Actor POV all-surface scan excludes researcher authority and host secrets"
   expect(povFrame.frame_kind).toBe("actor_pov_replay_viewer");
   expect(povTimeline.timeline_kind).toBe("actor_pov");
   expect(capabilityToken).toMatch(/^[A-Za-z0-9_-]+$/u);
+  expect(povFrame.artifact_facts).toEqual({
+    schema_version: 1,
+    artifact_summary: researcherFrame.artifact_summary,
+    completion: researcherFrame.completion,
+    processing: researcherFrame.processing,
+  });
+  expect(povFrame.processing_disclosure).toEqual({
+    schema_version: 1,
+    disclosure: "not_available_in_actor_pov",
+  });
 
   /** @param {unknown} value @param {string} field @returns {unknown[]} */
   const recursiveFieldValues = (value, field) => {
@@ -2248,19 +2372,20 @@ test("Actor POV all-surface scan excludes researcher authority and host secrets"
   };
   page.on("request", countEnterReplayCommands);
   await selfAgent.focus();
+  const selfPovResponse = nextReplayResponse(page);
   await page.keyboard.press("Enter");
+  expect((await selfPovResponse).status()).toBe(200);
   await expect(page.locator("#agent-details")).toHaveAttribute("open", "");
-  await expect(page.locator("#event-feed .event-item")).not.toHaveCount(0);
   await page.evaluate(
     () =>
       new Promise((resolve) => {
         window.requestAnimationFrame(() => window.requestAnimationFrame(resolve));
       }),
   );
-  expect(enterReplayCommandCount).toBe(0);
-  expect((await currentReplayFrame(page)).cursor.frame_index).toBe(
-    povFrame.cursor.frame_index,
-  );
+  expect(enterReplayCommandCount).toBe(1);
+  const postActivationFrame = await currentReplayFrame(page);
+  expect(postActivationFrame.cursor.frame_index).toBe(povFrame.cursor.frame_index);
+  expect(postActivationFrame.public_agent_id).toBe(povFrame.public_agent_id);
   page.off("request", countEnterReplayCommands);
 
   const surfaces = await page.evaluate(() => {
@@ -2314,7 +2439,6 @@ test("Actor POV all-surface scan excludes researcher authority and host secrets"
       normalText: document.body.innerText,
       visibleAttributes,
       descriptorText,
-      feed: snapshot(requiredRoot("#event-feed")),
       inspector: snapshot(requiredRoot("#agent-details")),
       technical: snapshot(technicalRoot),
       technicalFacts: [
@@ -2333,7 +2457,6 @@ test("Actor POV all-surface scan excludes researcher authority and host secrets"
   const allAttributes = [
     ...surfaces.visibleAttributes,
     ...tooltipSnapshot.attributes,
-    ...surfaces.feed.attributes,
     ...surfaces.inspector.attributes,
     ...surfaces.technical.attributes,
   ];
@@ -2341,7 +2464,6 @@ test("Actor POV all-surface scan excludes researcher authority and host secrets"
     surfaces.normalText,
     surfaces.descriptorText,
     tooltipSnapshot.text,
-    surfaces.feed.text,
     surfaces.inspector.text,
     surfaces.technical.text,
     ...allAttributes
@@ -2402,7 +2524,6 @@ test("Actor POV all-surface scan excludes researcher authority and host secrets"
     "incoming_event_ids",
     "metric_report_reference",
     "observer_visibility",
-    "processing",
     "public_agent_id_by_global_slot",
     "status_source_evidence",
   ]) {
@@ -2444,6 +2565,13 @@ test(CP9_REPLAY_ARTIFACT_TEST_TITLE, async ({ page }) => {
     throw new Error("Complete replay path does not use the canonical suffix.");
   }
   const sourceMetricPath = `${replayArtifacts.complete.slice(
+    0,
+    -REPLAY_SUFFIX.length,
+  )}${METRIC_SUFFIX}`;
+  if (!replayArtifacts.shared.endsWith(REPLAY_SUFFIX)) {
+    throw new Error("Shared replay path does not use the canonical suffix.");
+  }
+  const sharedSourceMetricPath = `${replayArtifacts.shared.slice(
     0,
     -REPLAY_SUFFIX.length,
   )}${METRIC_SUFFIX}`;
@@ -2500,21 +2628,28 @@ test(CP9_REPLAY_ARTIFACT_TEST_TITLE, async ({ page }) => {
         "replay_schema_version",
       ].sort(),
     );
-    const metricDownload = await downloadCanonicalMetricReport(page, sourceMetricPath);
-    expect(metricDownload.requests).toEqual([
+    const completeStableUrl = page.url();
+    const oracleArtifactSurface = await replayArtifactFactSurface(page);
+    const oracleMetricDownload = await downloadCanonicalMetricReport(
+      page,
+      sourceMetricPath,
+    );
+    expect(oracleMetricDownload.requests).toEqual([
       { method: "GET", path: METRIC_REPORT_ROUTE },
     ]);
 
     await openReplay(page, missingViewer.url);
     await installReplayView(page, "researcher");
     await installFirstFrame(page);
-    await proveMissingOracleMetricUi(page);
+    const missingOracleArtifactSurface = await replayArtifactFactSurface(page);
+    await proveMissingMetricUi(page);
     await installReplayView(page, "pov");
-    const noSharedMissingSurface = await agentMetricDenialSurface(page);
-    const noSharedMissingProbe = await directForbiddenMetricProbe(page);
+    const noSharedMissingArtifactSurface = await replayArtifactFactSurface(page);
+    expect(noSharedMissingArtifactSurface).toEqual(missingOracleArtifactSurface);
+    await proveMissingMetricUi(page);
 
     const noSharedExports = await proveReplayLeafExports(page, {
-      url: complete.url,
+      url: completeStableUrl,
       view: "pov",
       presentationKind: "replay_no_shared_obs_agent_pov",
       label: "Replay NoShared Agent POV",
@@ -2527,11 +2662,26 @@ test(CP9_REPLAY_ARTIFACT_TEST_TITLE, async ({ page }) => {
       expect(artifact.provenance.authority.observation_mode).toBe("no_shared_obs");
       expect(artifact.filename).not.toMatch(/[0-9a-f]{8}__frame-/u);
     }
-    const noSharedPresentSurface = await agentMetricDenialSurface(page);
-    const noSharedPresentProbe = await directForbiddenMetricProbe(page);
+    const noSharedArtifactSurface = await replayArtifactFactSurface(page);
+    const noSharedMetricDownload = await downloadCanonicalMetricReport(
+      page,
+      sourceMetricPath,
+    );
+    expect(noSharedArtifactSurface).toEqual(oracleArtifactSurface);
+    expect(noSharedMetricDownload).toEqual(oracleMetricDownload);
+
+    await openReplay(page, sharedViewer.url);
+    const sharedStableUrl = page.url();
+    await installReplayView(page, "researcher");
+    await installFirstFrame(page);
+    const sharedOracleArtifactSurface = await replayArtifactFactSurface(page);
+    const sharedOracleMetricDownload = await downloadCanonicalMetricReport(
+      page,
+      sharedSourceMetricPath,
+    );
 
     const sharedExports = await proveReplayLeafExports(page, {
-      url: sharedViewer.url,
+      url: sharedStableUrl,
       view: "pov",
       presentationKind: "replay_shared_obs_agent_pov",
       label: "Replay Shared Agent POV",
@@ -2546,31 +2696,23 @@ test(CP9_REPLAY_ARTIFACT_TEST_TITLE, async ({ page }) => {
       });
       expect(artifact.filename).not.toMatch(/[0-9a-f]{8}__frame-/u);
     }
-    const sharedPresentSurface = await agentMetricDenialSurface(page);
-    const sharedPresentProbe = await directForbiddenMetricProbe(page);
+    const sharedArtifactSurface = await replayArtifactFactSurface(page);
+    const sharedMetricDownload = await downloadCanonicalMetricReport(
+      page,
+      sharedSourceMetricPath,
+    );
+    expect(sharedArtifactSurface).toEqual(sharedOracleArtifactSurface);
+    expect(sharedMetricDownload).toEqual(sharedOracleMetricDownload);
 
     await openReplay(page, sharedMissingViewer.url);
+    await installReplayView(page, "researcher");
     await installFirstFrame(page);
-    const sharedMissingSurface = await agentMetricDenialSurface(page);
-    const sharedMissingProbe = await directForbiddenMetricProbe(page);
-
-    expect(noSharedMissingSurface).toEqual(noSharedPresentSurface);
-    expect(sharedMissingSurface).toEqual(sharedPresentSurface);
-    expect(sharedPresentSurface).toEqual(noSharedPresentSurface);
-    const denialProbes = [
-      noSharedPresentProbe,
-      noSharedMissingProbe,
-      sharedPresentProbe,
-      sharedMissingProbe,
-    ];
-    for (const probe of denialProbes) {
-      expect(probe.ledger).toEqual([{ method: "GET", path: METRIC_REPORT_ROUTE }]);
-      expect(probe.status).toBe(403);
-    }
-    for (const probe of denialProbes.slice(1)) {
-      expect(probe.body.equals(denialProbes[0].body)).toBe(true);
-      expect(probe.headers).toEqual(denialProbes[0].headers);
-    }
+    const sharedMissingOracleArtifactSurface = await replayArtifactFactSurface(page);
+    await proveMissingMetricUi(page);
+    await installReplayView(page, "pov");
+    const sharedMissingArtifactSurface = await replayArtifactFactSurface(page);
+    expect(sharedMissingArtifactSurface).toEqual(sharedMissingOracleArtifactSurface);
+    await proveMissingMetricUi(page);
     expectNoBrowserErrors(page);
   } catch (error) {
     testError = error;

@@ -87,7 +87,6 @@ form fields retain ordinary browser keyboard and Tab behavior.
 | --- | --- | --- |
 | Left click an authorized actor | Control that actor. | Inspect that body locally; keep the fixed recipient. |
 | Shift+left click an active authorized actor | Select it as the controlled actor's target. | No simulator command or recipient change. |
-| Right click | Clear the target. | No simulator command or recipient change. |
 | `Escape` | Clear the target and leave battlefield command focus. | Clear the recipient's target and leave battlefield command focus. |
 | `Tab` / `Shift+Tab` | Cycle active actors without discarding drafts. | Use native browser focus navigation. |
 | `W A S D` / arrow keys | Stage cardinal movement. | Stage cardinal movement for the fixed recipient. |
@@ -114,11 +113,12 @@ filters do not change scientific authority.
 
 The selected-target inspector reports authorized identity, relation, distance,
 and public geometry. Pending Action reports movement, ability, target, and
-exact lane legality. The live Technical Frame is allowlisted by authority:
-Episode, Frame, Simulator step, and conditional Incoming transition. The
-initial frame has no incoming-transition row.
+exact lane legality. Basic Legality is false when no target is selected. The
+live Technical Frame is allowlisted by authority: Episode, Frame, Simulator
+step, and conditional Incoming transition. The initial frame has no
+incoming-transition row.
 
-Visual Filters contains exactly 23 independently controlled paint families,
+Visual Filters contains exactly 20 independently controlled paint families,
 all enabled by default:
 
 1. Aura Fields
@@ -132,25 +132,23 @@ all enabled by default:
 9. Healing Effects
 10. Regeneration Effects
 11. Cooldown Effects
-12. Charge Movement
-13. Status Application
-14. Status Reapplication
-15. Status Refresh/Extension
-16. Natural Status Expiry
-17. Freezing Trap Break
-18. Status Clear on Death
-19. Death Effects
-20. Respawn Wave
-21. Resurrection Effects
-22. Spawn-Shield Expiry
-23. Scrolling Battle Text
+12. Status Application
+13. Natural Status Expiry
+14. Freezing Trap Break
+15. Status Clear on Death
+16. Death Effects
+17. Respawn Wave
+18. Resurrection Effects
+19. Spawn-Shield Expiry
+20. Scrolling Battle Text
 
 Duration Status Badges includes the white crossed-swords **In combat** countdown.
 
 These switches affect browser paint, accessible descriptions belonging to that
 paint, and nothing else. They do not redact source data, change simulator
-state, alter the Latest Events feed, or replace the separate Ranges control.
-**Restore All** enables all 23.
+state, alter authorized event data used by battlefield choreography, or replace
+the separate Ranges control. **Enable All** enables all 20; **Disable All**
+disables all 20.
 
 ## Recording and recovery
 

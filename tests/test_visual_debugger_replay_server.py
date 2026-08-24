@@ -685,7 +685,7 @@ def test_replay_metric_missing_uses_the_exact_non_disclosing_envelope(
     }
 
 
-def test_real_agent_metric_denials_are_constant_across_mode_and_presence() -> None:
+def test_real_agent_metric_routes_match_oracle_availability() -> None:
     no_shared = _real_loaded_bundle(
         episode_id="privacy-no-shared",
         execution_information_mode="no_shared_obs",
@@ -713,29 +713,33 @@ def test_real_agent_metric_denials_are_constant_across_mode_and_presence() -> No
             bundle,
             view_mode="pov",
             pov_global_slot=0,
-            viewer_session_id=f"real-agent-metric-denial-{index}",
+            viewer_session_id=f"real-agent-metric-route-{index}",
         )
         for index, bundle in enumerate(cases)
     )
 
-    denials = tuple(_real_metric_exchange(service) for service in services)
+    outcomes = tuple(_real_metric_exchange(service) for service in services)
 
-    first_response, first_body = denials[0]
-    assert json.loads(first_body) == {
-        "schema_version": 1,
-        "error_code": "audience_unavailable",
-        "message": "Metric reports are available only in Oracle View.",
-        "latest_frame": None,
-    }
-    assert all(response.status == HTTPStatus.FORBIDDEN for response, _ in denials)
-    assert all(body == first_body for _, body in denials)
-    assert all(
-        _stable_headers(response) == _stable_headers(first_response)
-        for response, _ in denials
-    )
-    assert all(
-        response.getheader("Content-Disposition") is None for response, _ in denials
-    )
+    for index in (0, 2):
+        response, body = outcomes[index]
+        artifact = cases[index].metric_report_artifact
+        assert artifact is not None
+        assert response.status == HTTPStatus.OK
+        assert body == canonical_metric_report_artifact_json_bytes_v1(artifact)
+        episode_id = cases[index].replay.header.context.identity.episode_id
+        assert response.getheader("Content-Disposition") == (
+            f'attachment; filename="{episode_id}.marlbg-metrics.json"'
+        )
+    for index in (1, 3):
+        response, body = outcomes[index]
+        assert response.status == HTTPStatus.NOT_FOUND
+        assert json.loads(body) == {
+            "schema_version": 1,
+            "error_code": "not_found",
+            "message": "No metric report is available for this replay.",
+            "latest_frame": None,
+        }
+        assert response.getheader("Content-Disposition") is None
     assert tuple(service.revision for service in services) == (0, 0, 0, 0)
 
 
@@ -1730,7 +1734,7 @@ def test_replay_frame_presentation_and_timeline_are_authenticated_bounded_models
     )
 
 
-def test_actual_shared_replay_http_outcomes_are_private_recipient_roots(
+def test_actual_shared_replay_http_keeps_fog_private_beside_artifact_facts(
     tmp_path: Path,
 ) -> None:
     artifacts = export_artifacts(tmp_path / "standalone-shared-artifacts")
@@ -1837,6 +1841,17 @@ def test_actual_shared_replay_http_outcomes_are_private_recipient_roots(
     assert stale.latest_frame == applied.frame
 
     bodies = (frame_body, timeline_body, applied_body, duplicate_body, stale_body)
+    payloads = [json.loads(body) for body in bodies]
+    fact_roots = (
+        payloads[0].pop("artifact_facts"),
+        payloads[2]["frame"].pop("artifact_facts"),
+        payloads[3]["frame"].pop("artifact_facts"),
+        payloads[4]["latest_frame"].pop("artifact_facts"),
+    )
+    assert all(facts == fact_roots[0] for facts in fact_roots)
+    assert fact_roots[0]["artifact_summary"]["metric_report_availability"] == (
+        "available"
+    )
     forbidden_keys = {
         "global_slot",
         "metric_report_availability",
@@ -1847,11 +1862,11 @@ def test_actual_shared_replay_http_outcomes_are_private_recipient_roots(
         "selected_global_slot",
         "source_material_frame_id",
     }
-    for body in bodies:
-        assert _recursive_keys(json.loads(body)).isdisjoint(forbidden_keys)
-    serialized = b"".join(bodies)
-    assert b"shared_obs_source_material" not in serialized
-    assert b"must-never-cross-http" not in serialized
+    for payload in payloads:
+        assert _recursive_keys(payload).isdisjoint(forbidden_keys)
+    serialized_battlefield = json.dumps(payloads, sort_keys=True)
+    assert "shared_obs_source_material" not in serialized_battlefield
+    assert "must-never-cross-http" not in serialized_battlefield
 
 
 def test_replay_presentation_unavailable_is_typed_and_non_disclosing(

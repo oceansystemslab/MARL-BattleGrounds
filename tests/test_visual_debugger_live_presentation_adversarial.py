@@ -30,12 +30,14 @@ from tests.test_visual_debugger_service import (
     _service,  # pyright: ignore[reportPrivateUsage]
 )
 
+from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
 from marl_battlegrounds.evaluation.pov import (
     ActorPovAdjacentTransitionSliceV1,
     ActorPovCurrentSliceV1,
     build_actor_pov_adjacent_transition_slice_v1,
     build_actor_pov_current_slice_v1,
 )
+from marl_battlegrounds.rendering.evaluation_adapter import build_visual_event_batch_v2
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
@@ -96,6 +98,17 @@ def test_live_no_shared_excludes_oracle_ids_and_diagnostics() -> None:
     result = service.current_presentation()
     assert result.outcome == "response"
     assert type(result.payload) is LiveNoSharedObsAuthorizedPresentationFrameV1
+    visual_events = result.payload.visual_events
+    assert visual_events is not None
+    assert visual_events.ordered_event_ids == tuple(
+        event.event_id for event in visual_events.events
+    )
+    assert all(
+        event_id.startswith(
+            f"{visual_events.incoming_recipient_transition_id}:visual-event:"
+        )
+        for event_id in visual_events.ordered_event_ids
+    )
     payload = result.payload.model_dump(mode="json")
     keys = _recursive_keys(payload)
     strings = _recursive_string_values(payload)
@@ -107,7 +120,6 @@ def test_live_no_shared_excludes_oracle_ids_and_diagnostics() -> None:
         "canonical_reward_by_team",
         "combat_transition_facts",
         "death_facts",
-        "event_id",
         "owning_task_end_reason",
         "physical_facts",
         "regeneration_facts",
@@ -177,6 +189,9 @@ def test_live_no_shared_rejects_separately_valid_cross_swapped_pairs() -> None:
         carrier_zero,
         raw_zero,
         public_catalog=catalog,
+        incoming_visual_events=build_visual_event_batch_v2(
+            cast(EvaluationTransitionViewV1, service.session.incoming_evaluation_view)
+        ),
     )
 
     switched = service.apply_command(
@@ -193,6 +208,9 @@ def test_live_no_shared_rejects_separately_valid_cross_swapped_pairs() -> None:
         carrier_one,
         raw_one,
         public_catalog=catalog,
+        incoming_visual_events=build_visual_event_batch_v2(
+            cast(EvaluationTransitionViewV1, service.session.incoming_evaluation_view)
+        ),
     )
     assert accepted_zero.source.source_recipient_public_agent_id != (
         accepted_one.source.source_recipient_public_agent_id
@@ -207,6 +225,12 @@ def test_live_no_shared_rejects_separately_valid_cross_swapped_pairs() -> None:
             carrier_one,
             raw_zero,
             public_catalog=catalog,
+            incoming_visual_events=build_visual_event_batch_v2(
+                cast(
+                    EvaluationTransitionViewV1,
+                    service.session.incoming_evaluation_view,
+                )
+            ),
         )
     with pytest.raises(
         ValueError,
@@ -217,6 +241,12 @@ def test_live_no_shared_rejects_separately_valid_cross_swapped_pairs() -> None:
             carrier_zero,
             raw_one,
             public_catalog=catalog,
+            incoming_visual_events=build_visual_event_batch_v2(
+                cast(
+                    EvaluationTransitionViewV1,
+                    service.session.incoming_evaluation_view,
+                )
+            ),
         )
 
 

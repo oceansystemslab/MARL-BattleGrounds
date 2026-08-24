@@ -447,10 +447,12 @@ export function authorizedPresentationInspection(value) {
 
 /**
  * Project the exact actor-owned legality row from one already-certified
- * outgoing inspection. This helper does not authorize input; the production
- * caller invokes it only after the five-leaf presentation brand has passed.
- * Keeping the projection pure makes the target-disclosure/lane cross-product
- * testable without forging a presentation root.
+ * outgoing inspection. The raw lane values remain the canonical joint-mask
+ * evidence, while Basic availability excludes the canonical target-none no-op.
+ * This helper does not authorize input; the production caller invokes it only
+ * after the five-leaf presentation brand has passed. Keeping the projection
+ * pure makes the target-disclosure/lane cross-product testable without forging
+ * a presentation root.
  *
  * @param {unknown} rawDecisionMask
  * @param {unknown} rawOwner
@@ -535,6 +537,8 @@ export function projectCertifiedInspectionLegality(
         : null,
     lane_0_available: pairRow[0],
     lane_1_available: pairRow[1],
+    basic_available: targetAction > 0 && pairRow[0],
+    ultimate_available: pairRow[1],
     armed_lane: lane,
     armed_pair_legal: lane === null ? null : pairRow[lane],
   });
@@ -761,8 +765,9 @@ export function authorizedPresentationSceneView(
 }
 
 /**
- * Flatten only the exact Latest Events branch for panel/choreography dispatch.
- * Shared observation deltas retain an explicitly noncausal vocabulary.
+ * Flatten the exact causal visual branch for choreography dispatch. Oracle
+ * owns it through Latest Events; Agent POV owns an additive fog-authorized
+ * Visual Events branch while retaining its separate cue/delta evidence.
  *
  * @param {unknown} value
  * @returns {ReadonlyArray<Readonly<{
@@ -773,10 +778,16 @@ export function authorizedPresentationSceneView(
  * }>>}
  */
 export function authorizedPresentationIncomingRows(value) {
-  if (!isAuthorizedPresentationFrame(value) || !isRecord(value.latest_events)) {
+  if (!isAuthorizedPresentationFrame(value)) {
     return Object.freeze([]);
   }
-  const latest = value.latest_events;
+  const latest =
+    authorizedPresentationAudience(value) === "agent_pov"
+      ? value.visual_events
+      : value.latest_events;
+  if (!isRecord(latest)) {
+    return Object.freeze([]);
+  }
   /** @type {[unknown[], string, string, "event" | "recipient_cue" | "observation_delta"] | null} */
   const source = Array.isArray(latest.events)
     ? [latest.events, "event_id", "event_kind", "event"]

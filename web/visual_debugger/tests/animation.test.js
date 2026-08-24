@@ -902,7 +902,7 @@ test("all eight rates scale current and future effect, gate, cleanup, and hold c
   }
 });
 
-test("replay terminal hold is clock-owned, live timing is unchanged, and empty plans have no dwell", () => {
+test("replay terminal hold is clock-owned and live timing is unchanged", () => {
   const ordinaryPlan = plan("ordinary-replay-hold");
   ordinaryPlan.phases.total = 1_200;
   const replay = harness();
@@ -941,15 +941,66 @@ test("replay terminal hold is clock-owned, live timing is unchanged, and empty p
     renderPolicy: "replay_animated",
   });
   assert.equal(dense.animationFactory.find(":cleanup")?.duration, 3_000);
+});
 
+test("eventless animated replay retains one rate-aware terminal-hold clock", async () => {
   const emptyPlan = plan("empty-replay-family");
   emptyPlan.animationSpecCount = 0;
   const empty = harness();
   empty.controller.presentFrame({ viewer_mode: "replay", plan: emptyPlan }, surfaceA, {
     renderPolicy: "replay_animated",
   });
-  assert.equal(empty.animationFactory.created.length, 0);
+
+  const cleanup = empty.animationFactory.find(":cleanup");
+  assert.ok(cleanup);
+  assert.equal(empty.animationFactory.created.length, 1);
+  assert.equal(empty.animationFactory.find(":gate"), undefined);
+  assert.equal(cleanup.duration, 1_500);
+  assert.equal(empty.controller.snapshot().animationCount, 1);
+  assert.equal(empty.controller.snapshot().submissionBlocked, false);
+  assert.equal(empty.painter.calls.filter(([kind]) => kind === "settle").length, 0);
+
+  let didSettle = false;
+  const presentation = empty.controller.whenSettled().then(() => {
+    didSettle = true;
+  });
+  await Promise.resolve();
+  assert.equal(didSettle, false);
+
+  cleanup.currentTime = 1_350;
+  empty.controller.setPlaybackRate(1.5);
+  assert.equal(cleanup.currentTime, 1_350);
+  assert.equal(cleanup.playbackRate, 1.5);
+  assert.equal(empty.controller.snapshot().logicalTime, 900);
+  assert.equal(empty.animationFactory.created.length, 1);
+
+  cleanup.finish();
+  await presentation;
+  assert.equal(didSettle, true);
   assert.equal(empty.controller.snapshot().animationCount, 0);
+  assert.equal(empty.painter.calls.filter(([kind]) => kind === "settle").length, 1);
+});
+
+test("eventless live and static replay presentations still settle immediately", async () => {
+  const emptyPlan = plan("empty-non-animated-family");
+  emptyPlan.animationSpecCount = 0;
+
+  for (const renderPolicy of /** @type {const} */ (["live_once", "replay_static"])) {
+    const immediate = harness();
+    immediate.controller.presentFrame(
+      { viewer_mode: "replay", plan: emptyPlan },
+      surfaceA,
+      { renderPolicy },
+    );
+    assert.equal(immediate.animationFactory.created.length, 0);
+    assert.equal(immediate.controller.snapshot().animationCount, 0);
+    assert.equal(immediate.controller.snapshot().submissionBlocked, false);
+    assert.equal(
+      immediate.painter.calls.filter(([kind]) => kind === "settle").length,
+      1,
+    );
+    await immediate.controller.whenSettled();
+  }
 });
 
 test("unsupported playback rates fail closed without changing an active clock", () => {

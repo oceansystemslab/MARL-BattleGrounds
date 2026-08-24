@@ -238,7 +238,7 @@ test("authorized replay inspector keeps current owner separate from outgoing tar
     const presentation = await normalizedPresentation(kind);
     const inspector = authorizedInspectorView(presentation);
     assert.ok(inspector);
-    assert.equal(inspector.title, "Comprehensive Agent Details");
+    assert.equal(inspector.title, "Comprehensive Agent Class Details");
     assert.equal(
       inspector.owner.presentation_key,
       presentation.inspection.actor_presentation_key,
@@ -340,13 +340,16 @@ test("authorized replay inspector keeps current owner separate from outgoing tar
       presentation.inspection.decision_mask.target_use_ultimate_joint_mask[
         targetAction
       ];
+    assert.equal(exactRow[0], true);
+    assert.equal(inspector.legality.basic_available, false);
+    assert.equal(inspector.legality.ultimate_available, exactRow[1]);
     assert.deepEqual(
       inspector.legality_cards.map((/** @type {Record<string, any>} */ card) => ({
         lane: card.lane,
         available: card.descriptor.rows[0].value === "True",
       })),
       [
-        { lane: 0, available: exactRow[0] },
+        { lane: 0, available: false },
         { lane: 1, available: exactRow[1] },
       ],
     );
@@ -636,91 +639,13 @@ test("authorized replay inspector leaves final unselected details absent", async
   const presentation = await normalizedStateCase("replay_oracle_final_unselected");
   const inspector = authorizedInspectorView(presentation);
   assert.ok(inspector);
-  assert.equal(inspector.title, "Comprehensive Agent Details");
+  assert.equal(inspector.title, "Comprehensive Agent Class Details");
   assert.equal(inspector.owner, null);
   assert.equal(inspector.owner_descriptor, null);
   assert.equal(inspector.owner_class_accent, null);
   assert.equal(inspector.legality, null);
   assert.equal(inspector.outgoing_target_descriptor, null);
   assert.deepEqual(inspector.legality_cards, []);
-});
-
-test("authorized team respawns use exact researcher-facing event copy", async () => {
-  const raw = structuredClone(authorizedFixture.presentations.replay_oracle);
-  const transitionId = raw.latest_events.incoming_transition_id;
-  raw.latest_events.events = [0, 1].map((teamIndex, ordinal) => ({
-    event_kind: "respawn_wave_occurred",
-    event_id: `${transitionId}:event:${String(ordinal).padStart(4, "0")}`,
-    ordinal,
-    phase_rank: 120,
-    team_anchor: {
-      phase: "successor",
-      team_index: teamIndex,
-      team_id: teamIndex + 1,
-    },
-  }));
-  raw.latest_events.event_count = raw.latest_events.events.length;
-  raw.latest_events.ordered_event_ids = raw.latest_events.events.map(
-    (/** @type {Record<string, any>} */ event) => event.event_id,
-  );
-  raw.latest_events.ordered_event_kinds = raw.latest_events.events.map(
-    (/** @type {Record<string, any>} */ event) => event.event_kind,
-  );
-  const presentation = await normalizeAuthorizedPresentationFrameV1(raw);
-  const dom = rosterDomHarness();
-  const binding = () => dom.createNode("div");
-  const documentDescriptor = Object.getOwnPropertyDescriptor(globalThis, "document");
-  Object.defineProperty(globalThis, "document", {
-    configurable: true,
-    value: dom.ownerDocument,
-  });
-
-  try {
-    const eventFeed = binding();
-    const panels = new DebuggerPanels({
-      roster: binding(),
-      rosterCount: binding(),
-      selectionCard: binding(),
-      pendingHeading: binding(),
-      pendingCount: binding(),
-      pendingScope: binding(),
-      pendingCard: binding(),
-      acceptedCard: binding(),
-      acceptedAnnouncement: binding(),
-      eventFeed,
-      eventCount: binding(),
-      diagnosticsCard: binding(),
-      onCommand: () => {},
-    });
-    panels.renderAuthorizedEvents(presentation);
-    assert.deepEqual(
-      eventFeed.children.map((/** @type {any} */ row) => row.textContent),
-      ["EVENT: Team A Respawn", "EVENT: Team B Respawn"],
-    );
-    assert.equal(
-      eventFeed.children.every(
-        (/** @type {any} */ row) =>
-          row.getAttribute("aria-description") ===
-          "This team respawn occurred on the incoming transition.",
-      ),
-      true,
-    );
-    assert.doesNotMatch(
-      eventFeed.children
-        .map(
-          (/** @type {any} */ row) =>
-            `${row.textContent} ${row.getAttribute("aria-description")}`,
-        )
-        .join(" "),
-      /respawn_wave_occurred|semantic pulse|authoritative semantic/iu,
-    );
-  } finally {
-    if (documentDescriptor === undefined) {
-      Reflect.deleteProperty(globalThis, "document");
-    } else {
-      Object.defineProperty(globalThis, "document", documentDescriptor);
-    }
-  }
 });
 
 test("authorized roster exposes one native key-only action with isolated fact owners", async () => {
@@ -741,8 +666,6 @@ test("authorized roster exposes one native key-only action with isolated fact ow
     const diagnosticsCard = binding();
     const acceptedCard = binding();
     const acceptedAnnouncement = binding();
-    const eventFeed = binding();
-    const eventCount = binding();
     const panels = new DebuggerPanels({
       roster,
       rosterCount: binding(),
@@ -753,8 +676,6 @@ test("authorized roster exposes one native key-only action with isolated fact ow
       pendingCard,
       acceptedCard,
       acceptedAnnouncement,
-      eventFeed,
-      eventCount,
       diagnosticsCard,
       onCommand: (command) => {
         commands.push(command);
@@ -1016,14 +937,12 @@ test("authorized roster exposes one native key-only action with isolated fact ow
     assert.equal(panels.rosterRows.size, 0);
     assert.equal(acceptedCard.children.length, 0);
     assert.equal(acceptedAnnouncement.textContent, "");
-    assert.equal(eventCount.textContent, "0");
     assert.doesNotMatch(
       [
         dom.textTree(roster),
         dom.textTree(selectionCard),
         dom.textTree(pendingCard),
         dom.textTree(acceptedCard),
-        dom.textTree(eventFeed),
         dom.textTree(diagnosticsCard),
       ].join(" "),
       /Submitted|Accepted|Technical Frame.*\d|Observation delta|Incoming event/u,
@@ -1116,8 +1035,9 @@ test("panel source has one branded render path and no raw fallbacks", async () =
   }
   assert.match(
     source,
-    /if \(isAuthorizedPresentationFrame\(frame\)\)[\s\S]*this\.renderAuthorizedEvents\(frame\);\s*return;\s*\}\s*this\.renderUnavailable\(\);/u,
+    /if \(isAuthorizedPresentationFrame\(frame\)\)[\s\S]*this\.renderAuthorizedInspector\([\s\S]*return;\s*\}\s*this\.renderUnavailable\(\);/u,
   );
+  assert.doesNotMatch(source, /renderAuthorizedEvents|eventFeed|eventCount/u);
   for (const forbiddenSelector of [
     ".roster-actions",
     ".action-result",
@@ -1143,13 +1063,11 @@ test("authorized inspector copy separates live draft and replay outgoing epochs"
   assert.doesNotMatch(source, /Settled range, target, and legality overlays/u);
 });
 
-test("native disclosure defaults open operational live panels, roster, and events", () => {
+test("native disclosure defaults open only operational live panels and roster", () => {
   assert.equal(disclosurePanelInitiallyOpen("command-deck", false), true);
   assert.equal(disclosurePanelInitiallyOpen("command-deck", true), false);
   assert.equal(disclosurePanelInitiallyOpen("roster-details", false), true);
   assert.equal(disclosurePanelInitiallyOpen("roster-details", true), true);
-  assert.equal(disclosurePanelInitiallyOpen("events-details", false), true);
-  assert.equal(disclosurePanelInitiallyOpen("events-details", true), true);
   for (const id of [
     "agent-details",
     "pending-turn-details",

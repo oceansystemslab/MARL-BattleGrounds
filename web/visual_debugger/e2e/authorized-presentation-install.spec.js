@@ -362,18 +362,6 @@ async function cp5Slice5PlanAndDomSignature(page, rawPresentation) {
     if (JSON.stringify(plannedAtomicIds) !== JSON.stringify(orderedEventIds)) {
       throw new Error("Authorized plan lost, duplicated, or reordered an incoming ID.");
     }
-    const eventRows = [...document.querySelectorAll("#event-feed .event-item")].map(
-      (row) => ({
-        id: row.getAttribute("data-event-id"),
-        type: row.getAttribute("data-event-type"),
-        vocabulary: row.getAttribute("data-event-vocabulary"),
-      }),
-    );
-    if (
-      JSON.stringify(eventRows.map(({ id }) => id)) !== JSON.stringify(orderedEventIds)
-    ) {
-      throw new Error("Installed Latest Events DOM differs from authorized ID order.");
-    }
     const statusLifecycles = [];
     for (const effect of document.querySelectorAll(
       ".combat-effect--status-lifecycle[data-tooltip-owner]",
@@ -449,7 +437,9 @@ async function cp5Slice5PlanAndDomSignature(page, rawPresentation) {
       },
       dom: {
         authority: document.documentElement.dataset.presentationAuthority ?? null,
-        eventRows,
+        removedEventSurfaceCount: document.querySelectorAll(
+          "#events-details, #event-feed, #event-count",
+        ).length,
         agents: [...document.querySelectorAll("#battlefield .agent")].map((agent) => ({
           key: agent.getAttribute("data-presentation-key"),
           alive: agent.getAttribute("data-alive"),
@@ -1509,10 +1499,10 @@ async function expectTerminalAgentActivationInert(page) {
   await expect(page.locator("#battlefield")).toHaveAttribute("tabindex", "-1");
   await expect(page.locator("#battlefield")).toHaveAttribute(
     "aria-label",
-    "Read-only terminal replay battlefield snapshot. Agent inspection controls are unavailable.",
+    "Read-only terminal replay battlefield snapshot.",
   );
   await expect(page.locator("#battlefield-instructions")).toHaveText(
-    "This replay frame is terminal. Agent inspection controls are unavailable; use the timeline to review another frame.",
+    "This replay frame is terminal; use the timeline to review another frame.",
   );
   const bodies = page.locator("#battlefield .agent");
   const rows = page.locator("#roster .roster-primary-action");
@@ -1666,7 +1656,7 @@ async function expectReplayInspectionDom(page, presentation) {
       : null;
 
   await expect(page.locator("#selection-heading")).toHaveText(
-    "Comprehensive Agent Details",
+    "Comprehensive Agent Class Details",
   );
   await expect(page.locator('[data-layer="selection-legality"]')).toHaveAttribute(
     "aria-label",
@@ -1768,7 +1758,7 @@ async function expectReplayInspectionDom(page, presentation) {
       })),
     ),
   ).toEqual([
-    { available: String(exactRow[0]), lane: "0" },
+    { available: String(targetAction > 0 && exactRow[0]), lane: "0" },
     { available: String(exactRow[1]), lane: "1" },
   ]);
   const routeExpected =
@@ -2003,7 +1993,6 @@ async function expectPendingAuthorityIsEmpty(
     "#agent-details",
     "#pending-card",
     "#accepted-card",
-    "#event-feed",
     "#diagnostics-card",
   ];
   const descendantsWith = (/** @type {string} */ attribute) =>
@@ -2030,7 +2019,7 @@ async function expectPendingAuthorityIsEmpty(
   await expect(page.locator("#agent-details")).not.toHaveAttribute("data-tone");
   await expect(page.locator("#agent-details")).not.toHaveAttribute("data-accent");
   await expect(page.locator("#selection-heading")).toHaveText(
-    "Comprehensive Agent Details",
+    "Comprehensive Agent Class Details",
   );
   for (const selector of [
     "#command-deck",
@@ -2038,14 +2027,12 @@ async function expectPendingAuthorityIsEmpty(
     "#agent-details",
     "#pending-turn-details",
     "#latest-transition-details",
-    "#events-details",
     "#technical-frame-details",
   ]) {
     await expect(page.locator(selector)).not.toHaveAttribute("open", "");
   }
   for (const selector of [
     "#roster",
-    "#event-feed",
     "#pending-card",
     "#accepted-card",
     "#diagnostics-card",
@@ -2071,7 +2058,7 @@ async function expectPendingAuthorityIsEmpty(
   }
 }
 
-test("all five real service leaves install and live authority clears atomically", async ({
+test("all five real service leaves install with safe pending continuity", async ({
   page,
 }) => {
   if (!liveDebugger || !noSharedReplay) {
@@ -2091,7 +2078,7 @@ test("all five real service leaves install and live authority clears atomically"
   );
   await expectAuthorizedRosterColors(page);
   await expect(page.locator("#battlefield-instructions")).toHaveText(
-    "Live Oracle View is interactive. Activate an authorized actor to control it; Shift-click selects an authorized target; right-click clears the target. Battlefield keyboard commands apply only while this surface has focus.",
+    "Live Oracle View is interactive. Activate an authorized actor to control it; Shift-click selects an authorized target; Escape clears the target and leaves battlefield focus. Battlefield keyboard commands apply only while this surface has focus.",
   );
   await expect(page.locator("#pending-scope")).toHaveText(
     "This panel shows only the authorized pending draft for the next submission.",
@@ -2673,8 +2660,9 @@ test("all five real service leaves install and live authority clears atomically"
   await expectTechnicalFrameDom(page, replayOracle.presentation);
   await expectLatestTransitionDom(page, replayOracle.presentation);
   await expectRetiredMetadataAbsent(page);
-  await expect(page.locator("#events-details")).toHaveAttribute("open", "");
-  await expect(page.locator("#event-feed .event-item")).toHaveCount(0);
+  await expect(page.locator("#events-details, #event-feed, #event-count")).toHaveCount(
+    0,
+  );
   await expect(page.locator("#battlefield-instructions")).toHaveText(
     "Replay is read-only. Activate an authorized agent to inspect current facts and its recorded outgoing action; use the timeline to change frames.",
   );
@@ -2751,8 +2739,6 @@ test("all five real service leaves install and live authority clears atomically"
 
   await expectAuthorizedIncomingTransitionDom(page, replayOracle.presentation);
   expect(replayOracle.presentation.latest_events).toBeNull();
-  await page.locator("#events-details > summary").click();
-  await expect(page.locator("#events-details")).not.toHaveAttribute("open", "");
   await page.locator("#technical-frame-details > summary").click();
   await expect(page.locator("#technical-frame-details")).toHaveAttribute("open", "");
   if ((await page.locator("#agent-details").getAttribute("open")) === "") {
@@ -2778,7 +2764,6 @@ test("all five real service leaves install and live authority clears atomically"
     page.off("request", countReplaySeek);
   }
   expect(replaySeekRequestCount).toBe(1);
-  await expect(page.locator("#events-details")).not.toHaveAttribute("open", "");
   await expect(page.locator("#technical-frame-details")).toHaveAttribute("open", "");
   await expect(page.locator("#agent-details")).not.toHaveAttribute("open", "");
   await expect
@@ -2885,7 +2870,20 @@ test("all five real service leaves install and live authority clears atomically"
     "actor_pov_replay_viewer",
     "replay_no_shared_obs_agent_pov",
   );
-  await expectAgentAuthoritySurface(page, replayAgent.presentation, oracleOnlyValues);
+  const replayAgentArtifactReference =
+    replayAgent.transport.artifact_facts.artifact_summary.replay_reference;
+  const replayAgentArtifactShellValues = new Set([
+    replayAgentArtifactReference.artifact_id,
+    replayAgentArtifactReference.canonical_digest_sha256,
+  ]);
+  const replayAgentBattlefieldForbiddenValues = oracleOnlyValues.filter(
+    (value) => !replayAgentArtifactShellValues.has(value),
+  );
+  await expectAgentAuthoritySurface(
+    page,
+    replayAgent.presentation,
+    replayAgentBattlefieldForbiddenValues,
+  );
   await expectReplayInspectionDom(page, replayAgent.presentation);
   await expectTechnicalFrameDom(page, replayAgent.presentation);
   await expectLatestTransitionDom(page, replayAgent.presentation);
@@ -2914,7 +2912,7 @@ test("all five real service leaves install and live authority clears atomically"
     replayAgentInitialDocumentation,
   );
   await expect(page.locator("#battlefield-instructions")).toHaveText(
-    "Replay Agent POV is read-only and keeps one fixed recipient. Activate an authorized visible body to inspect current facts; the replay authority does not change.",
+    "Replay Agent POV is read-only. Activate an authorized visible body to switch to that agent's fog-of-war view at the same replay tick.",
   );
   const replayAgentRecipientKey =
     replayAgent.presentation.authority.recipient_presentation_key;
@@ -2934,69 +2932,103 @@ test("all five real service leaves install and live authority clears atomically"
       agent.presentation_key === replayAgentLocalKey,
   );
   expect(replayAgentLocal).toBeTruthy();
-  const replayAgentLocalRow = page.locator(
-    `#roster .roster-primary-action[data-presentation-key="${replayAgentLocalKey}"]`,
-  );
   const replayAgentLocalBody = page.locator(
     `#battlefield .agent[data-presentation-key="${replayAgentLocalKey}"]`,
   );
-  await expectNativeAgentActivationMatrix(page, {
-    body: replayAgentLocalBody,
-    row: replayAgentLocalRow,
-    path: null,
-    command: null,
+  const replayAgentCursorBeforeSwitch = structuredClone(replayAgent.transport.cursor);
+  let releasePovPresentation = () => {};
+  let markPovPresentationHeld = () => {};
+  const povPresentationHeld = new Promise((resolve) => {
+    markPovPresentationHeld = () => resolve(undefined);
   });
-  await expect(replayAgentLocalBody).toHaveAttribute("data-selected", "true");
-  await expect(replayAgentLocalRow).toHaveAttribute("aria-pressed", "true");
-  await expectCertifiedDocumentationCard(page, replayAgentLocal);
-  await expect(page.locator("#pending-card .selected-legality__lane")).toHaveCount(0);
-  await expect(page.locator("#pending-card .selected-outgoing-target")).toHaveCount(0);
-  await expect(page.locator("#battlefield .pending-route")).toHaveCount(0);
+  const povPresentationRelease = new Promise((resolve) => {
+    releasePovPresentation = () => resolve(undefined);
+  });
+  await page.route("**/api/presentation/frame", async (route) => {
+    const response = await route.fetch();
+    markPovPresentationHeld();
+    await povPresentationRelease;
+    await route.fulfill({ response });
+  });
+  const povSwitch = expectSingleActivationCommand(
+    page,
+    "/api/replay/command",
+    () => replayAgentLocalBody.click(),
+    {
+      command_type: "set_pov_actor",
+      presentation_key: replayAgentLocalKey,
+    },
+  );
+  try {
+    await povPresentationHeld;
+    await expect(page.locator("html")).toHaveAttribute(
+      "data-presentation-authority",
+      "retained",
+    );
+    await expect(page.locator("#battlefield .agent")).toHaveCount(
+      replayAgentBodyKeys.length,
+    );
+    expect(
+      await page
+        .locator("#battlefield .agent")
+        .evaluateAll((agents) =>
+          agents.map((agent) => agent.getAttribute("data-presentation-key")),
+        ),
+    ).toEqual(replayAgentBodyKeys);
+    await expect(page.locator("#battlefield-empty")).toBeHidden();
+    await expect(page.locator("#replay-frame-slider")).toBeDisabled();
+    expect(
+      await page
+        .locator("#replay-timeline button")
+        .evaluateAll((buttons) =>
+          buttons.every(
+            (button) => button instanceof HTMLButtonElement && button.disabled,
+          ),
+        ),
+    ).toBe(true);
+    await page.keyboard.press("ArrowRight");
+  } finally {
+    releasePovPresentation();
+  }
+  await povSwitch;
+  await page.unroute("**/api/presentation/frame");
+  const switchedReplayAgent = await expectInstalledLeaf(
+    page,
+    "actor_pov_replay_viewer",
+    "replay_no_shared_obs_agent_pov",
+  );
+  expect(switchedReplayAgent.transport.cursor).toEqual(replayAgentCursorBeforeSwitch);
+  expect(switchedReplayAgent.presentation.authority.recipient_public_agent_id).toBe(
+    replayAgentLocal.public_agent_id,
+  );
   expect(
-    await page.locator('[data-layer="debug-range"] .range-ring').evaluateAll((ranges) =>
-      ranges.map((range) => ({
-        kind: range.getAttribute("data-kind"),
-        owner: range.getAttribute("data-presentation-key"),
-      })),
-    ),
-  ).toEqual([
-    { kind: "observation", owner: replayAgentLocalKey },
-    { kind: "basic", owner: replayAgentLocalKey },
-    { kind: "ultimate", owner: replayAgentLocalKey },
-  ]);
-  await expectAgentAuthoritySurface(page, replayAgent.presentation, oracleOnlyValues);
+    switchedReplayAgent.presentation.authority.recipient_presentation_key,
+  ).not.toBe(replayAgentRecipientKey);
+  await expect(
+    page.locator(`[data-presentation-key="${replayAgentLocalKey}"]`),
+  ).toHaveCount(0);
+  await expectAgentAuthoritySurface(
+    page,
+    switchedReplayAgent.presentation,
+    replayAgentBattlefieldForbiddenValues,
+  );
+  await expect(page.locator("#battlefield")).toBeFocused();
   const replayAgentRanges = page.locator("#replay-ranges-button");
   await expect(replayAgentRanges).toHaveAttribute("aria-pressed", "true");
   await expectZeroCommandInteraction(page, () => replayAgentRanges.click());
   await expect(replayAgentRanges).toHaveAttribute("aria-pressed", "false");
   await expect(page.locator('[data-layer="debug-range"] .range-ring')).toHaveCount(0);
   await expectZeroCommandInteraction(page, () => replayAgentRanges.click());
-  await expectZeroCommandInteraction(page, () =>
-    page.locator("#replay-clear-reference-button").click(),
-  );
-  await expect(page.locator('#battlefield .agent[data-selected="true"]')).toHaveCount(
-    0,
-  );
-  await expect(page.locator('[data-layer="debug-range"] .range-ring')).toHaveCount(0);
-  await expect(page.locator("#agent-details")).not.toHaveAttribute("open", "");
-  await expect(page.locator("#replay-clear-reference-button")).toBeDisabled();
   const replayAgentPresentationAfterLocalActions = await authenticatedGet(
     page,
     "/api/presentation/frame",
   );
   expect(
     replayAgentPresentationAfterLocalActions.authority.recipient_presentation_key,
-  ).toBe(replayAgentRecipientKey);
+  ).toBe(switchedReplayAgent.presentation.authority.recipient_presentation_key);
   await expect(page.locator("#view-select")).toHaveValue("pov");
-  await expectZeroCommandInteraction(page, () =>
-    page
-      .locator(
-        `#roster .roster-primary-action[data-presentation-key="${replayAgentRecipientKey}"]`,
-      )
-      .click(),
-  );
-  expect(replayAgent.presentation.source.source_frame_index).toBe(0);
-  await expectAuthorizedIncomingTransitionDom(page, replayAgent.presentation);
+  expect(switchedReplayAgent.presentation.source.source_frame_index).toBe(0);
+  await expectAuthorizedIncomingTransitionDom(page, switchedReplayAgent.presentation);
   for (const frameIndex of [
     1,
     replayAgent.presentation.source.source_final_frame_index,
@@ -3013,9 +3045,28 @@ test("all five real service leaves install and live authority clears atomically"
       await page.locator("#transition-value").textContent(),
     );
     if (frameIndex === replayAgent.presentation.source.source_final_frame_index) {
-      await expectTerminalAgentActivationInert(page);
+      await expect(page.locator("#battlefield .agent[role=button]")).not.toHaveCount(0);
+      await expect(page.locator("#battlefield-instructions")).toContainText(
+        "switch the fog-of-war recipient",
+      );
     }
   }
+  await expectZeroCommandInteraction(page, () =>
+    page.locator("#replay-clear-reference-button").click(),
+  );
+  await expect(page.locator('#battlefield .agent[data-selected="true"]')).toHaveCount(
+    0,
+  );
+  await expect(page.locator('[data-layer="debug-range"] .range-ring')).toHaveCount(0);
+  await expect(page.locator("#agent-details")).not.toHaveAttribute("open", "");
+  await expect(page.locator("#replay-clear-reference-button")).toBeDisabled();
+  const replayAgentPresentationAfterClear = await authenticatedGet(
+    page,
+    "/api/presentation/frame",
+  );
+  expect(replayAgentPresentationAfterClear.authority.recipient_presentation_key).toBe(
+    switchedReplayAgent.presentation.authority.recipient_presentation_key,
+  );
   expect(browserErrors.get(page) ?? []).toEqual([]);
 });
 
@@ -3567,12 +3618,6 @@ test(CP5_C_SLICE_TEST_TITLE, async ({ page }) => {
     expect(resetEvents).toHaveLength(4);
     expect(regenerationEvents).toHaveLength(1);
     expect(regenerationEvents[0].actual_health_regenerated).toBe(4);
-    await expect(
-      page.locator('#event-feed .event-item[data-event-type="combat_countdown_reset"]'),
-    ).toHaveCount(4);
-    await expect(
-      page.locator('#event-feed .event-item[data-event-type="health_regenerated"]'),
-    ).toHaveCount(1);
     expect(regenerationDom).toEqual({
       eventId: regenerationEvents[0].event_id,
       dataValue: "4",
@@ -3675,12 +3720,6 @@ test(CP5_C_SLICE_TEST_TITLE, async ({ page }) => {
       `${expirationDom.ariaLabel} ${expirationDom.tooltipTitle} ${expirationDom.tooltipSummary}`,
     ).not.toMatch(/_|semantic pulse/iu);
 
-    const expirationFeedRow = page.locator(
-      `#event-feed .event-item[data-event-id="${leftCombatFinding.event.event_id}"][data-event-type="agent_left_combat"]`,
-    );
-    await expect(expirationFeedRow).toHaveCount(1);
-    await expect(expirationFeedRow).toHaveText("Incoming event · Agent Left Combat");
-    expect(await expirationFeedRow.textContent()).not.toMatch(/_|semantic pulse/iu);
     expect(browserErrors.get(page) ?? []).toEqual([]);
   } catch (error) {
     testError = error;
@@ -4214,7 +4253,7 @@ test(CP5_SLICE_5_TEST_TITLE, async ({ page }) => {
         throw new Error(`${label} lost planned route ${expected.id}.`);
       }
       expect(
-        planned.route !== null || planned.kind === "charge_displacement",
+        planned.route !== null,
         `${label} ${expected.id} remains route-owned`,
       ).toBe(true);
     }
@@ -4501,12 +4540,7 @@ test(CP5_SLICE_5_TEST_TITLE, async ({ page }) => {
             (left, right) => left - right,
           ),
         );
-        const expectedFeedRows = incomingEvents.map((event) => ({
-          id: event.event_id,
-          type: event.event_kind,
-          vocabulary: "event",
-        }));
-        expect(signature.dom.eventRows).toEqual(expectedFeedRows);
+        expect(signature.dom.removedEventSurfaceCount).toBe(0);
         expect(signature.dom.transition).toBe(incoming.incoming_transition_id);
         expect(signature.plan.transitionId).toBe(incoming.incoming_transition_id);
         const planEvents = signaturePlanEvents(signature);
@@ -4545,9 +4579,7 @@ test(CP5_SLICE_5_TEST_TITLE, async ({ page }) => {
           if (!planned) {
             throw new Error(`${contract.name} installed unknown route ${route.id}.`);
           }
-          expect(planned.route !== null || planned.kind === "charge_displacement").toBe(
-            true,
-          );
+          expect(planned.route).not.toBeNull();
           expect(route.type).toBe(planned.eventType);
           expect(route.persistent).toBe(planned.persistent);
           expect(route.sourceKey).toBe(planned.sourcePresentationKey);
@@ -5210,15 +5242,12 @@ test(CP5_SLICE_5_TEST_TITLE, async ({ page }) => {
             [11, "cooldown_started", null, null, null, 0],
             [12, "cooldown_started", null, null, null, 1],
             [13, "cooldown_started", null, null, null, 5],
-            [14, "charge_phase_displacement", 0, null, null, null, true],
-            [15, "charge_phase_displacement", 1, null, null, null, true],
-            [16, "charge_phase_displacement", 5, null, null, null, true],
             [17, "status_applied", 5, null, 0, null],
             [18, "status_applied", 5, null, 0, null],
             [19, "status_applied", 0, null, 5, null],
             [21, "status_applied", 0, null, 5, null],
           ],
-          [0, 1, 2, 14, 15, 16],
+          [0, 1, 2],
         );
         const startAgents = new Map(
           oracleSceneAgents(start).map((agent) => [
@@ -5254,44 +5283,28 @@ test(CP5_SLICE_5_TEST_TITLE, async ({ page }) => {
           });
           expect(event.route).not.toBeNull();
         }
-        const trajectoriesByPublicId = new Map(
-          successor.latest_events.agent_phase_trajectories.map(
-            (/** @type {Record<string, any>} */ trajectory) => [
-              trajectory.agent_public_agent_id,
-              trajectory,
-            ],
-          ),
-        );
         const chargePlan = signaturePlanEvents(frames[1].signature).filter(
-          ({ kind }) => kind === "charge_displacement",
+          ({ eventType }) => eventType === "charge_phase_displacement",
         );
         expect(
           chargePlan.map((event) => [
-            successorSlots.get(event.sourcePublicAgentId),
+            event.eventType,
+            event.kind,
+            event.spatial,
             event.start,
             event.end,
             event.route,
           ]),
-          "Charge plan joins exact transition-start and post-Charge endpoints",
+          "Charge phase displacement remains authorized but creates no overlay",
         ).toEqual([
-          [0, { x: 30, y: 40 }, { x: 70.71523189544678, y: 55 }, null],
-          [1, { x: 30, y: 80 }, { x: 70.71523189544678, y: 65 }, null],
-          [5, { x: 80, y: 60 }, { x: 39.28476810455322, y: 43.713908195495605 }, null],
+          ["charge_phase_displacement", "feed_only", false, null, null, null],
+          ["charge_phase_displacement", "feed_only", false, null, null, null],
+          ["charge_phase_displacement", "feed_only", false, null, null, null],
         ]);
         for (const event of chargePlan) {
-          const trajectory = trajectoriesByPublicId.get(event.sourcePublicAgentId);
-          if (!trajectory) {
-            throw new Error("Charge plan lost its authorized trajectory.");
-          }
-          expect(event.start).toEqual({
-            x: trajectory.transition_start.position[0] * 10,
-            y: trajectory.transition_start.position[1] * 10,
-          });
-          expect(event.end).toEqual({
-            x: trajectory.post_charge.position[0] * 10,
-            y: trajectory.post_charge.position[1] * 10,
-          });
-          expect(event.route).toBeNull();
+          expect(event.sourcePublicAgentId).toBeNull();
+          expect(event.sourcePresentationKey).toBeNull();
+          expect(event.persistent).toBe(false);
         }
       }
       if (contract.name === "recovery_refresh_cycle") {
@@ -5457,9 +5470,9 @@ test(CP5_SLICE_5_TEST_TITLE, async ({ page }) => {
               19,
               "status_applied",
               "stun_rogue_poison",
-              "reapplied",
-              "Reapplied",
-              "Status reapplied",
+              "applied",
+              "Applied",
+              "Status applied",
               [18, 19],
               [19],
             ),
@@ -5479,9 +5492,9 @@ test(CP5_SLICE_5_TEST_TITLE, async ({ page }) => {
               23,
               "status_applied",
               "stun_hunter_trap",
-              "trap_broken_and_reapplied",
-              "Broken, then reapplied",
-              "Freezing Trap was broken, then reapplied",
+              "applied",
+              "Applied",
+              "Status applied",
               [22, 23],
               [23],
             ),
@@ -5907,7 +5920,7 @@ test("real Shared replay installs frame zero, middle, final, then rejects a forg
     if (frameIndex !== 0) {
       await seekReplay(page, frameIndex);
     }
-    const leaf = await expectInstalledLeaf(
+    let leaf = await expectInstalledLeaf(
       page,
       "shared_obs_agent_pov_replay_viewer",
       "replay_shared_obs_agent_pov",
@@ -5921,15 +5934,16 @@ test("real Shared replay installs frame zero, middle, final, then rejects a forg
     expect(leaf.presentation.source.source_recipient_frame_id).toBe(
       leaf.transport.recipient_frame_id,
     );
-    await expectAgentAuthoritySurface(page, leaf.presentation, [], frameIndex < 2);
+    await expectAgentAuthoritySurface(page, leaf.presentation, []);
     await expectAuthorizedIncomingTransitionDom(page, leaf.presentation);
     await expectReplayInspectionDom(page, leaf.presentation);
     await expectTechnicalFrameDom(page, leaf.presentation);
     await expectLatestTransitionDom(page, leaf.presentation);
     await expectRetiredMetadataAbsent(page);
     if (frameIndex === 0) {
-      await expect(page.locator("#events-details")).toHaveAttribute("open", "");
-      await expect(page.locator("#event-feed .event-item")).toHaveCount(0);
+      await expect(
+        page.locator("#events-details, #event-feed, #event-count"),
+      ).toHaveCount(0);
       const recipientKey = leaf.presentation.authority.recipient_presentation_key;
       const scene =
         leaf.presentation.current_endpoint.scene ??
@@ -5940,43 +5954,33 @@ test("real Shared replay installs frame zero, middle, final, then rejects a forg
       );
       expect(localAgent).toBeTruthy();
       const localKey = localAgent.presentation_key;
-      const localBody = page.locator(
-        `#battlefield .agent[data-presentation-key="${localKey}"]`,
-      );
       const localRow = page.locator(
         `#roster .roster-primary-action[data-presentation-key="${localKey}"]`,
       );
-      await expectNativeAgentActivationMatrix(page, {
-        body: localBody,
-        row: localRow,
-        path: null,
-        command: null,
-      });
-      await expect(localBody).toHaveAttribute("data-selected", "true");
-      await expect(localRow).toHaveAttribute("aria-pressed", "true");
-      await expectCertifiedDocumentationCard(page, localAgent);
-      await expect(page.locator("#pending-card .selected-legality__lane")).toHaveCount(
+      const cursorBeforeSwitch = structuredClone(leaf.transport.cursor);
+      await expectSingleActivationCommand(
+        page,
+        "/api/replay/command",
+        () => localRow.click(),
+        { command_type: "set_pov_actor", presentation_key: localKey },
+      );
+      leaf = await expectInstalledLeaf(
+        page,
+        "shared_obs_agent_pov_replay_viewer",
+        "replay_shared_obs_agent_pov",
+      );
+      expect(leaf.transport.cursor).toEqual(cursorBeforeSwitch);
+      expect(leaf.presentation.authority.recipient_public_agent_id).toBe(
+        localAgent.public_agent_id,
+      );
+      expect(leaf.presentation.authority.recipient_presentation_key).not.toBe(
+        recipientKey,
+      );
+      await expect(page.locator(`[data-presentation-key="${localKey}"]`)).toHaveCount(
         0,
       );
-      await expect(page.locator("#pending-card .selected-outgoing-target")).toHaveCount(
-        0,
-      );
-      await expect(page.locator("#battlefield .pending-route")).toHaveCount(0);
-      expect(
-        await page
-          .locator('[data-layer="debug-range"] .range-ring')
-          .evaluateAll((ranges) =>
-            ranges.map((range) => ({
-              kind: range.getAttribute("data-kind"),
-              owner: range.getAttribute("data-presentation-key"),
-            })),
-          ),
-      ).toEqual([
-        { kind: "observation", owner: localKey },
-        { kind: "basic", owner: localKey },
-        { kind: "ultimate", owner: localKey },
-      ]);
       await expectAgentAuthoritySurface(page, leaf.presentation, []);
+      await expect(page.locator("#battlefield")).toBeFocused();
       const rangesButton = page.locator("#replay-ranges-button");
       await expectZeroCommandInteraction(page, () => rangesButton.click());
       await expect(rangesButton).toHaveAttribute("aria-pressed", "false");
@@ -5985,40 +5989,10 @@ test("real Shared replay installs frame zero, middle, final, then rejects a forg
       );
       await expectZeroCommandInteraction(page, () => rangesButton.click());
       await expect(rangesButton).toHaveAttribute("aria-pressed", "true");
-      expect(
-        await page
-          .locator('[data-layer="debug-range"] .range-ring')
-          .evaluateAll((ranges) =>
-            ranges.map((range) => ({
-              kind: range.getAttribute("data-kind"),
-              owner: range.getAttribute("data-presentation-key"),
-            })),
-          ),
-      ).toEqual([
-        { kind: "observation", owner: localKey },
-        { kind: "basic", owner: localKey },
-        { kind: "ultimate", owner: localKey },
-      ]);
-      await expectZeroCommandInteraction(page, () =>
-        page.locator("#replay-clear-reference-button").click(),
-      );
-      await expect(
-        page.locator('#battlefield .agent[data-selected="true"]'),
-      ).toHaveCount(0);
-      await expect(page.locator('[data-layer="debug-range"] .range-ring')).toHaveCount(
-        0,
-      );
-      await expect(page.locator("#agent-details")).not.toHaveAttribute("open", "");
-      await expect(page.locator("#replay-clear-reference-button")).toBeDisabled();
-      await expectZeroCommandInteraction(page, () =>
-        page
-          .locator(
-            `#roster .roster-primary-action[data-presentation-key="${recipientKey}"]`,
-          )
-          .click(),
-      );
       const afterLocalActions = await authenticatedGet(page, "/api/presentation/frame");
-      expect(afterLocalActions.authority.recipient_presentation_key).toBe(recipientKey);
+      expect(afterLocalActions.authority.recipient_presentation_key).toBe(
+        leaf.presentation.authority.recipient_presentation_key,
+      );
     }
     if (frameIndex === 1) {
       const scene =
@@ -6062,10 +6036,27 @@ test("real Shared replay installs frame zero, middle, final, then rejects a forg
       ]);
     }
     if (frameIndex === 2) {
-      await expectTerminalAgentActivationInert(page);
+      await expect(page.locator("#battlefield .agent[role=button]")).not.toHaveCount(0);
+      await expect(page.locator("#battlefield-instructions")).toContainText(
+        "switch the fog-of-war recipient",
+      );
     }
     installed.push(leaf);
   }
+
+  await expectZeroCommandInteraction(page, () =>
+    page.locator("#replay-clear-reference-button").click(),
+  );
+  await expect(page.locator('#battlefield .agent[data-selected="true"]')).toHaveCount(
+    0,
+  );
+  await expect(page.locator('[data-layer="debug-range"] .range-ring')).toHaveCount(0);
+  await expect(page.locator("#agent-details")).not.toHaveAttribute("open", "");
+  await expect(page.locator("#replay-clear-reference-button")).toBeDisabled();
+  const afterLocalClear = await authenticatedGet(page, "/api/presentation/frame");
+  expect(afterLocalClear.authority.recipient_presentation_key).toBe(
+    installed[2].presentation.authority.recipient_presentation_key,
+  );
 
   expect(installed[0].presentation.latest_events).toBeNull();
   expect(installed[0].presentation.latest_transition).toBeNull();
@@ -6078,11 +6069,6 @@ test("real Shared replay installs frame zero, middle, final, then rejects a forg
 
   await seekReplay(page, 1);
   const middlePresentation = await authenticatedGet(page, "/api/presentation/frame");
-  const incomingCount =
-    middlePresentation.latest_events.events?.length ??
-    middlePresentation.latest_events.deltas?.length ??
-    0;
-  await expect(page.locator("#event-feed .event-item")).toHaveCount(incomingCount);
   await expect(page.locator("#accepted-card .accepted-action-row")).toHaveCount(
     middlePresentation.latest_transition.action_rows.length,
   );

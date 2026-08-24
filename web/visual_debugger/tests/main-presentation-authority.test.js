@@ -166,6 +166,10 @@ test("main applies explicit retain-or-clear policy before bounded installation",
   const liveCommandSource = source.slice(liveCommandStart, liveCommandEnd);
   assert.match(
     replayCommandSource,
+    /const changesAudience = command\.command_type === "set_view";[\s\S]*reason: changesAudience \? "replay_audience_change" : "replay_command"[\s\S]*pendingPolicy: changesAudience \? "clear" : "retain_last_authorized"/u,
+  );
+  assert.match(
+    replayCommandSource,
     /const status = error instanceof DebuggerApiError \? error\.status : 0;[\s\S]*isPresentationJoinRace\(error\)[\s\S]*clearPresentationAuthority\("replay_presentation_identity_mismatch"\)[\s\S]*status === 401 \|\| status === 403[\s\S]*clearPresentationAuthority\("replay_authorization_failure"\)[\s\S]*commandResponseSchedulesShutdown\(request\.command, payload\)/u,
   );
   assert.match(
@@ -606,7 +610,7 @@ test("main rejects battlefield pointer commands unless Oracle authority is insta
   );
 });
 
-test("main resolves one certified agent activation to one Oracle command or Agent-local effect", async () => {
+test("main resolves one certified activation to Oracle, live-local, or Replay POV behavior", async () => {
   const source = await readFile(mainUrl, "utf8");
   const resolverStart = source.indexOf("function authorizedAgentActivation(");
   const resolverEnd = source.indexOf(
@@ -631,8 +635,9 @@ test("main resolves one certified agent activation to one Oracle command or Agen
   assert.match(resolver, /isTerminal\(state\.frame\)/u);
   assert.match(
     resolver,
-    /audience === "agent_pov" \|\| inspectionState\.state_kind === "live_scripted"/u,
+    /const replayPovSwitch = isReplayMode\(\) && audience === "agent_pov"/u,
   );
+  assert.match(resolver, /effect: "replay_pov_switch"/u);
   assert.match(resolver, /effect: "local_inspection"/u);
   assert.match(resolver, /effect: "replay_select"/u);
   assert.match(resolver, /effect: "live_control"/u);
@@ -640,7 +645,10 @@ test("main resolves one certified agent activation to one Oracle command or Agen
     panel,
     /command\.command_type === "activate_authorized_agent"[\s\S]*activateAuthorizedAgent\(command\.presentation_key\)/u,
   );
-  assert.doesNotMatch(source, /set_pov_actor/u);
+  assert.match(
+    source,
+    /effect === "replay_pov_switch"[\s\S]*command_type: "set_pov_actor"[\s\S]*presentation_key: activation\.presentationKey/u,
+  );
   assert.match(
     source,
     /setLocalInspectedPresentationKey\(presentationKey\)[\s\S]*render\(\);/u,
@@ -681,6 +689,14 @@ test("command legality requires one exact authorized owner and has no generic fa
   assert.match(
     renderDraft,
     /owner_presentation_key: controlledOwner\.presentation_key[\s\S]*owner_public_agent_id: controlledOwner\.public_agent_id/u,
+  );
+  assert.match(
+    renderDraft,
+    /basicAvailable = targetAction > 0 && asArray\(pairMask\)\[0\] === true/u,
+  );
+  assert.match(
+    renderDraft,
+    /lane_0_available: asArray\(pairMask\)\[0\] === true[\s\S]*basic_available: basicAvailable/u,
   );
   assert.match(renderDraft, /explainLegality\(legality, 0, controlledOwner\)/u);
   assert.match(renderDraft, /explainLegality\(legality, 1, controlledOwner\)/u);
@@ -840,7 +856,7 @@ test("main derives replay animation only from the current controller intent", as
   );
 });
 
-test("replay artifact capabilities cross CP8 state and audience without sidecar input", async () => {
+test("replay artifact capabilities remain available across visual POVs", async () => {
   const source = await readFile(mainUrl, "utf8");
   const module = await importPureMainHelper(
     source,
@@ -879,7 +895,7 @@ test("replay artifact capabilities cross CP8 state and audience without sidecar 
   assert.equal(capabilities(oracleMissing).downloadMetrics, true);
   assert.deepEqual(
     { ...capabilities({ ...base, audience: "agent_pov" }) },
-    { exportPng: true, downloadMetrics: false },
+    { exportPng: true, downloadMetrics: true },
   );
   for (const transportState of ["OFFLINE", "PLAYING", "ADVANCING"]) {
     assert.deepEqual(
@@ -1091,7 +1107,11 @@ test("playback controller owns the first installed-successor render", async () =
   );
   assert.match(
     source,
-    /keyboardEnabled: \(\) => installedPresentationAuthority\(\) !== null/u,
+    /keyboardEnabled: \(\) => installedPresentationAuthority\(\) !== null && !state\.busy/u,
+  );
+  assert.match(
+    source,
+    /function replayTimelineRenderState\(playback\)[\s\S]*!state\.busy[\s\S]*REPLAY_TRANSPORT_STATES\.OFFLINE[\s\S]*transportState: REPLAY_TRANSPORT_STATES\.ADVANCING/u,
   );
   assert.match(
     sendSource,
@@ -1238,7 +1258,7 @@ test("main describes Agent bodies as passive while preserving researcher guidanc
   );
   assert.match(
     boundarySource,
-    /Live Oracle View is interactive\. Activate an authorized actor to control it; Shift-click selects an authorized target; right-click clears the target\. Battlefield keyboard commands apply only while this surface has focus\./u,
+    /Live Oracle View is interactive\. Activate an authorized actor to control it; Shift-click selects an authorized target; Escape clears the target and leaves battlefield focus\. Battlefield keyboard commands apply only while this surface has focus\./u,
   );
   assert.match(
     boundarySource,
@@ -1246,7 +1266,7 @@ test("main describes Agent bodies as passive while preserving researcher guidanc
   );
   assert.match(
     boundarySource,
-    /Replay Agent POV is read-only and keeps one fixed recipient\. Activate an authorized visible body to inspect current facts; the replay authority does not change\./u,
+    /Replay Agent POV is read-only\. Activate an authorized visible body to switch to that agent's fog-of-war view at the same replay tick\./u,
   );
   assert.match(
     source,
@@ -1266,7 +1286,7 @@ test("main describes Agent bodies as passive while preserving researcher guidanc
   );
   assert.match(
     source,
-    /This replay frame is terminal\. Agent inspection controls are unavailable; use the timeline to review another frame\./u,
+    /This replay frame is terminal\. Activate an authorized visible body to switch the fog-of-war recipient, or use the timeline to review another frame\./u,
   );
 });
 

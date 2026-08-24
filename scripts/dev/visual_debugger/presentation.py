@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 from marl_battlegrounds.evaluation.models import (
     ActionAcceptanceFactsV1,
     EvaluationEpisodeContextV1,
@@ -29,6 +31,7 @@ from marl_battlegrounds.rendering.authorized_pov_scene import (
 from marl_battlegrounds.rendering.authorized_presentation import (
     AcceptedActionTupleV1,
     SubmittedActionTupleV1,
+    build_agent_pov_visual_incoming_summary_v1,
     build_replay_oracle_presentation_parts_v1,
     oracle_presentation_key_v1,
 )
@@ -40,6 +43,7 @@ from marl_battlegrounds.rendering.pov_scene import (
     ActorPovProjectionIndexV1,
     build_actor_pov_analyzer_projection_v1,
 )
+from marl_battlegrounds.rendering.scene import VisualEventBatchV2
 from scripts.dev.visual_debugger.presentation_protocol import (
     AgentPovActionAxisV1,
     LatestTransitionActionRowV1,
@@ -192,6 +196,7 @@ def build_replay_no_shared_obs_authorized_presentation_v1(
     *,
     public_catalog: StaticMechanicsCatalogV1,
     source_authority_epoch: int,
+    incoming_visual_events: VisualEventBatchV2 | None,
 ) -> ReplayNoSharedObsAuthorizedPresentationFrameV1:
     """Package one committed recipient-local NoSharedObs replay frame."""
     if type(source) is not ActorPovProjectionIndexV1:
@@ -266,6 +271,31 @@ def build_replay_no_shared_obs_authorized_presentation_v1(
         parts=current,
         axis_mapping=content.axis_mapping,
     )
+    if frame_index == 0:
+        if incoming_visual_events is not None:
+            raise ValueError("NoSharedObs frame zero cannot carry visual events.")
+        visual_events = None
+    else:
+        if type(incoming_visual_events) is not VisualEventBatchV2:
+            raise TypeError(
+                "non-initial NoSharedObs frames require exact visual events."
+            )
+        previous = build_no_shared_obs_authorized_scene_v1(
+            source,
+            public_catalog=public_catalog,
+            authority_session_id=raw_frame.viewer_session_id,
+            frame_index=frame_index - 1,
+        )
+        transition = content.transitions[frame_index - 1]
+        visual_events = build_agent_pov_visual_incoming_summary_v1(
+            incoming_visual_events,
+            transition_start_scene=previous.scene,
+            successor_scene=current.scene,
+            recipient_public_agent_id=current.recipient_public_agent_id,
+            incoming_recipient_transition_id=transition.pov_transition_id,
+            incoming_start_recipient_frame_id=transition.start_pov_frame_id,
+            incoming_successor_recipient_frame_id=transition.successor_pov_frame_id,
+        )
     latest_events = build_replay_no_shared_obs_incoming_summary_v1(
         source,
         successor_frame_index=frame_index,
@@ -309,6 +339,7 @@ def build_replay_no_shared_obs_authorized_presentation_v1(
         analysis_mode="analysis",
         current_endpoint=endpoint,
         latest_events=latest_events,
+        visual_events=visual_events,
         latest_transition=latest_transition,
         technical_frame=ReplayNoSharedObsTechnicalFrameV1(
             technical_kind="replay_no_shared_obs_technical_frame",
@@ -456,6 +487,7 @@ def build_replay_shared_obs_authorized_presentation_v1(
     previous_active_nonrecipient_source_material: tuple[
         SharedObsSourceMaterialProjectionV1, ...
     ],
+    incoming_visual_events: VisualEventBatchV2 | None,
     incoming_transition: EvaluationTransitionV1 | None,
     outgoing_transition: EvaluationTransitionV1 | None,
 ) -> ReplaySharedObsAuthorizedPresentationFrameV1:
@@ -579,6 +611,27 @@ def build_replay_shared_obs_authorized_presentation_v1(
             public_catalog=public_catalog,
             authority_session_id=raw_frame.viewer_session_id,
         )
+    if previous is None:
+        if incoming_visual_events is not None:
+            raise ValueError("SharedObs frame zero cannot carry visual events.")
+        visual_events = None
+    else:
+        if type(incoming_visual_events) is not VisualEventBatchV2:
+            raise TypeError("non-initial SharedObs frames require exact visual events.")
+        visual_events = build_agent_pov_visual_incoming_summary_v1(
+            incoming_visual_events,
+            transition_start_scene=previous.scene,
+            successor_scene=current.scene,
+            recipient_public_agent_id=current.recipient_public_agent_id,
+            incoming_recipient_transition_id=cast(
+                str,
+                raw_frame.incoming_recipient_transition_id,
+            ),
+            incoming_start_recipient_frame_id=(
+                f"{local_prefix}:frame:{frame_index - 1}"
+            ),
+            incoming_successor_recipient_frame_id=current.source_recipient_frame_id,
+        )
     latest_events = build_shared_obs_incoming_summary_v1(previous, current)
     endpoint = build_shared_obs_authorized_current_endpoint_v1(
         parts=current,
@@ -628,6 +681,7 @@ def build_replay_shared_obs_authorized_presentation_v1(
         analysis_mode="analysis",
         current_endpoint=endpoint,
         latest_events=latest_events,
+        visual_events=visual_events,
         latest_transition=latest_transition,
         technical_frame=ReplaySharedObsTechnicalFrameV1(
             technical_kind="replay_shared_obs_technical_frame",

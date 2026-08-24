@@ -4,10 +4,11 @@ import test from "node:test";
 import {
   classifyVisualPaintPart,
   DEFAULT_VISUAL_FILTER_STATE,
+  disableAllVisualFilters,
+  enableAllVisualFilters,
   isVisualFilterEnabled,
   isVisualPaintPartEnabled,
   reduceVisualFilterState,
-  restoreAllVisualFilters,
   setVisualFilterEnabled,
   VISUAL_FILTER_IDS,
   VISUAL_FILTER_REGISTRY,
@@ -27,10 +28,7 @@ const EXPECTED_FILTERS = Object.freeze([
   ["healing_effects", "Healing Effects"],
   ["regeneration_effects", "Regeneration Effects"],
   ["cooldown_effects", "Cooldown Effects"],
-  ["charge_movement", "Charge Movement"],
   ["status_application", "Status Application"],
-  ["status_reapplication", "Status Reapplication"],
-  ["status_refresh_extension", "Status Refresh/Extension"],
   ["natural_status_expiry", "Natural Status Expiry"],
   ["freezing_trap_break", "Freezing Trap Break"],
   ["status_clear_on_death", "Status Clear on Death"],
@@ -41,7 +39,7 @@ const EXPECTED_FILTERS = Object.freeze([
   ["scrolling_battle_text", "Scrolling Battle Text"],
 ]);
 
-test("locked registry exposes exactly 23 ordered all-on filters", () => {
+test("locked registry exposes exactly 20 ordered all-on filters", () => {
   assert.deepEqual(
     VISUAL_FILTER_REGISTRY.map(({ id, label }) => [id, label]),
     EXPECTED_FILTERS,
@@ -50,7 +48,7 @@ test("locked registry exposes exactly 23 ordered all-on filters", () => {
     VISUAL_FILTER_IDS,
     EXPECTED_FILTERS.map(([id]) => id),
   );
-  assert.equal(new Set(VISUAL_FILTER_IDS).size, 23);
+  assert.equal(new Set(VISUAL_FILTER_IDS).size, 20);
   assert.equal(
     VISUAL_FILTER_REGISTRY.every(({ defaultEnabled }) => defaultEnabled),
     true,
@@ -69,7 +67,7 @@ test("default state is immutable, exact, and enabled through the public helper",
   assert.equal(Reflect.set(DEFAULT_VISUAL_FILTER_STATE, "aura_fields", false), false);
 });
 
-test("set and restore-all return frozen states without mutating their input", () => {
+test("set and bulk actions return frozen states without mutating their input", () => {
   const before = JSON.stringify(DEFAULT_VISUAL_FILTER_STATE);
   const disabled = setVisualFilterEnabled(
     DEFAULT_VISUAL_FILTER_STATE,
@@ -82,10 +80,21 @@ test("set and restore-all return frozen states without mutating their input", ()
   assert.equal(disabled.spawn_shield, true);
   assert.equal(JSON.stringify(DEFAULT_VISUAL_FILTER_STATE), before);
   assert.equal(setVisualFilterEnabled(disabled, "aura_fields", false), disabled);
-  assert.equal(restoreAllVisualFilters(disabled), DEFAULT_VISUAL_FILTER_STATE);
+  assert.equal(enableAllVisualFilters(disabled), DEFAULT_VISUAL_FILTER_STATE);
+  assert.equal(
+    enableAllVisualFilters(DEFAULT_VISUAL_FILTER_STATE),
+    DEFAULT_VISUAL_FILTER_STATE,
+  );
+  const allDisabled = disableAllVisualFilters(disabled);
+  assert.equal(Object.isFrozen(allDisabled), true);
+  assert.equal(
+    VISUAL_FILTER_IDS.every((id) => allDisabled[id] === false),
+    true,
+  );
+  assert.equal(disableAllVisualFilters(allDisabled), allDisabled);
 });
 
-test("strict reducer accepts only exact set and restore-all actions", () => {
+test("strict reducer accepts only exact set and bulk actions", () => {
   const disabled = reduceVisualFilterState(DEFAULT_VISUAL_FILTER_STATE, {
     type: "set",
     filterId: "scrolling_battle_text",
@@ -93,8 +102,13 @@ test("strict reducer accepts only exact set and restore-all actions", () => {
   });
   assert.equal(disabled.scrolling_battle_text, false);
   assert.equal(
-    reduceVisualFilterState(disabled, { type: "restore_all" }),
+    reduceVisualFilterState(disabled, { type: "enable_all" }),
     DEFAULT_VISUAL_FILTER_STATE,
+  );
+  const allDisabled = reduceVisualFilterState(disabled, { type: "disable_all" });
+  assert.equal(
+    VISUAL_FILTER_IDS.every((id) => allDisabled[id] === false),
+    true,
   );
   assert.throws(
     () =>
@@ -119,9 +133,9 @@ test("state validation and paint-key serialization are strict and deterministic"
   );
   assert.equal(
     visualFilterPaintKey(DEFAULT_VISUAL_FILTER_STATE),
-    `visual-filters-v1:${"1".repeat(23)}`,
+    `visual-filters-v1:${"1".repeat(20)}`,
   );
-  assert.equal(visualFilterPaintKey(disabled), `visual-filters-v1:0${"1".repeat(21)}0`);
+  assert.equal(visualFilterPaintKey(disabled), `visual-filters-v1:0${"1".repeat(18)}0`);
   assert.equal(
     visualFilterPaintKey(Object.fromEntries([...Object.entries(disabled)].reverse())),
     visualFilterPaintKey(disabled),
@@ -161,6 +175,17 @@ test("every registered paint part has one exact owner and every filter owns a pa
 });
 
 test("multipart effects retain disjoint filter ownership", () => {
+  for (const lifecycle of ["refreshed", "reapplied"]) {
+    assert.equal(
+      classifyVisualPaintPart({
+        surface: "transient",
+        kind: "status_lifecycle",
+        lifecycle,
+        part: "effect",
+      }),
+      "status_application",
+    );
+  }
   assert.equal(
     classifyVisualPaintPart({
       surface: "transient",
@@ -177,7 +202,7 @@ test("multipart effects retain disjoint filter ownership", () => {
       lifecycle: "trap_broken_and_reapplied",
       part: "reapplication",
     }),
-    "status_reapplication",
+    "status_application",
   );
   assert.equal(
     classifyVisualPaintPart({

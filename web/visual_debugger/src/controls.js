@@ -402,7 +402,7 @@ export function bindBattlefieldControls({
     if (!isInteractive()) {
       return;
     }
-    if (event.button !== 0 && event.button !== 2) {
+    if (event.button !== 0) {
       return;
     }
     event.preventDefault();
@@ -423,16 +423,10 @@ export function bindBattlefieldControls({
       command_type: "battlefield_pointer",
       world_x: worldPoint.world_x,
       world_y: worldPoint.world_y,
-      button: event.button === 0 ? "primary" : "secondary",
+      button: "primary",
       ...modifierFields(event),
     };
     onPointerCommand(event.target, command);
     onCommand(command);
-  });
-
-  battlefield.addEventListener("contextmenu", (event) => {
-    if (isInteractive()) {
-      event.preventDefault();
-    }
   });
 }

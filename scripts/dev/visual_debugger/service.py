@@ -11,6 +11,9 @@ from marl_battlegrounds.evaluation.pov import (
     build_actor_pov_adjacent_transition_slice_v1,
     build_actor_pov_current_slice_v1,
 )
+from marl_battlegrounds.rendering.evaluation_adapter import (
+    build_visual_event_batch_v2,
+)
 from scripts.dev.visual_debugger.control import (
     DebuggerTransitionFailureStageV1,
     DebuggerTransitionFailureV1,
@@ -435,6 +438,11 @@ class DebuggerService:
                     carrier,
                     raw_frame,
                     public_catalog=context.static_mechanics_catalog,
+                    incoming_visual_events=(
+                        None
+                        if incoming is None
+                        else build_visual_event_batch_v2(incoming)
+                    ),
                 )
             return PresentationResourceResultV1(
                 outcome="response",

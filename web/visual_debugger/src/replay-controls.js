@@ -155,6 +155,14 @@ function replayGlobalSlot(value, label) {
   return slot;
 }
 
+/** @param {unknown} value @param {string} label */
+function povPresentationKey(value, label) {
+  if (typeof value !== "string" || !/^pov_[0-9a-f]{64}$/u.test(value)) {
+    throw new TypeError(`${label} must be an opaque Agent POV presentation key.`);
+  }
+  return value;
+}
+
 /**
  * Normalize the complete outbound replay command union. The browser never
  * emits compatibility aliases or audience-dependent extra fields.
@@ -198,6 +206,20 @@ export function normalizeReplayCommand(value) {
     });
   }
   if (type === "set_pov_actor") {
+    if (Object.hasOwn(value, "presentation_key")) {
+      exactKeys(
+        value,
+        ["command_type", "presentation_key"],
+        "Replay POV actor command",
+      );
+      return Object.freeze({
+        command_type: type,
+        presentation_key: povPresentationKey(
+          value.presentation_key,
+          "presentation_key",
+        ),
+      });
+    }
     exactKeys(value, ["command_type", "global_slot"], "Replay POV actor command");
     return Object.freeze({
       command_type: type,

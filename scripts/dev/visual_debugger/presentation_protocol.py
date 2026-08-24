@@ -67,6 +67,7 @@ from marl_battlegrounds.rendering.authorized_pov_scene import (
 )
 from marl_battlegrounds.rendering.authorized_presentation import (
     AcceptedActionTupleV1,
+    AgentPovVisualIncomingSummaryV1,
     AuthorizedAgentV1,
     AuthorizedBattlefieldSceneV1,
     ReplayIncomingActionRejectedEventV1,
@@ -2531,6 +2532,7 @@ class LiveNoSharedObsAuthorizedPresentationFrameV1(_PresentationProtocolModel):
     analysis_mode: Literal["analysis"]
     current_endpoint: NoSharedObsAuthorizedCurrentEndpointV1
     latest_events: NoSharedObsIncomingSummaryV1 | None
+    visual_events: AgentPovVisualIncomingSummaryV1 | None
     latest_transition: NoSharedObsLatestTransitionV1 | None
     technical_frame: LiveNoSharedObsTechnicalFrameV1
     live_inspection: LiveNoSharedObsInspectionEnvelopeV1
@@ -2637,6 +2639,7 @@ class ReplayNoSharedObsAuthorizedPresentationFrameV1(_PresentationProtocolModel)
     analysis_mode: Literal["analysis"]
     current_endpoint: NoSharedObsAuthorizedCurrentEndpointV1
     latest_events: NoSharedObsIncomingSummaryV1 | None
+    visual_events: AgentPovVisualIncomingSummaryV1 | None
     latest_transition: NoSharedObsLatestTransitionV1 | None
     technical_frame: ReplayNoSharedObsTechnicalFrameV1
     replay_inspection: ReplayInspectionPresentationV1 | None
@@ -2659,6 +2662,7 @@ class ReplaySharedObsAuthorizedPresentationFrameV1(_PresentationProtocolModel):
     analysis_mode: Literal["analysis"]
     current_endpoint: SharedObsAuthorizedCurrentEndpointV1
     latest_events: SharedObsIncomingSummaryV1 | None
+    visual_events: AgentPovVisualIncomingSummaryV1 | None
     latest_transition: SharedObsLatestTransitionV1 | None
     technical_frame: ReplaySharedObsTechnicalFrameV1
     replay_inspection: ReplayInspectionPresentationV1 | None
@@ -2727,6 +2731,90 @@ def _validate_no_shared_agent_types(
     _require_exact_type(frame.technical_frame, technical_type, name="technical_frame")
 
 
+def _validate_agent_visual_events(
+    frame: LiveNoSharedObsAuthorizedPresentationFrameV1
+    | ReplayNoSharedObsAuthorizedPresentationFrameV1
+    | ReplaySharedObsAuthorizedPresentationFrameV1,
+) -> None:
+    source = frame.source
+    endpoint = frame.current_endpoint
+    index = source.source_frame_index
+    if index == 0:
+        if frame.visual_events is not None:
+            raise ValueError("frame zero cannot carry Agent visual events.")
+        return
+    _require_exact_type(
+        frame.visual_events,
+        AgentPovVisualIncomingSummaryV1,
+        name="visual_events",
+    )
+    events = cast(AgentPovVisualIncomingSummaryV1, frame.visual_events)
+    latest_events = frame.latest_events
+    latest_transition = frame.latest_transition
+    if latest_events is None or latest_transition is None:
+        raise ValueError("Agent visual events require both incoming fact branches.")
+    if (
+        events.source_episode_id != source.episode_id
+        or events.recipient_public_agent_id != source.source_recipient_public_agent_id
+        or events.recipient_presentation_key
+        != endpoint.parts.recipient_presentation_key
+        or events.incoming_transition_index != index - 1
+        or events.incoming_recipient_transition_id
+        != latest_events.incoming_recipient_transition_id
+        or events.incoming_start_recipient_frame_id
+        != latest_events.incoming_start_recipient_frame_id
+        or events.incoming_successor_recipient_frame_id
+        != latest_events.incoming_successor_recipient_frame_id
+        or events.incoming_start_simulator_step_count
+        != latest_events.incoming_start_simulator_step_count
+        or events.incoming_successor_simulator_step_count
+        != latest_events.incoming_successor_simulator_step_count
+        or events.incoming_recipient_transition_id
+        != latest_transition.incoming_transition_id
+    ):
+        raise ValueError(
+            "Agent visual events do not join the existing recipient-local epoch."
+        )
+    scene_rows = {
+        row.presentation_key: (row.public_agent_id, row.class_id, row.position)
+        for row in endpoint.parts.scene.agents
+    }
+    successor_rows = {
+        row.agent_presentation_key: (
+            row.agent_public_agent_id,
+            row.agent_class_id,
+            row.successor.position,
+        )
+        for row in events.agent_phase_trajectories
+        if row.successor is not None
+    }
+    if successor_rows != scene_rows:
+        raise ValueError(
+            "Agent visual-event successors must equal the current authorized scene."
+        )
+    action_row = latest_transition.action_rows[0]
+    own_rejections = tuple(
+        event
+        for event in events.events
+        if type(event) is ReplayIncomingActionRejectedEventV1
+        and type(event.actor_identity) is ReplayIncomingAuthorizedAgentIdentityV1
+        and event.actor_identity.public_agent_id
+        == source.source_recipient_public_agent_id
+    )
+    submitted = action_row.submitted_action
+    accepted = action_row.accepted_action
+    expected_rejected = (
+        submitted.move_action != accepted.move_action
+        or submitted.target_action != accepted.target_action
+        or submitted.use_ultimate_action != accepted.use_ultimate_action
+    )
+    if len(own_rejections) != int(expected_rejected) or (
+        own_rejections
+        and own_rejections[0].submitted_action != action_row.submitted_action
+    ):
+        raise ValueError("Agent own visual rejection does not join Latest Transition.")
+
+
 def _validate_agent_common(
     frame: LiveNoSharedObsAuthorizedPresentationFrameV1
     | ReplayNoSharedObsAuthorizedPresentationFrameV1
@@ -2756,6 +2844,7 @@ def _validate_agent_common(
         latest_transition=frame.latest_transition,
         shared=shared,
     )
+    _validate_agent_visual_events(frame)
     _validate_recursive_presentation_keys(
         frame,
         source_session_id=source.source_session_id,

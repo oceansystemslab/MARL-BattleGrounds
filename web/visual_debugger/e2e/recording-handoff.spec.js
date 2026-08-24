@@ -547,7 +547,7 @@ test("a second live tab cannot advance after Finish and Reconnect adopts replay"
   await stalePage.close();
 });
 
-test("actor POV recording and handoff retain exact status and non-disclosure roots", async ({
+test("actor POV handoff retains battlefield fog and artifact-wide facts", async ({
   page,
 }) => {
   const started = requiredRecording();
@@ -587,7 +587,30 @@ test("actor POV recording and handoff retain exact status and non-disclosure roo
       metric_report_availability: "not_available_in_actor_pov",
     },
     processing_disclosure: { disclosure: "not_available_in_actor_pov" },
+    artifact_facts: {
+      schema_version: 1,
+      artifact_summary: {
+        metric_report_availability: "available",
+        recorded_transition_count: 1,
+        recorded_frame_count: 2,
+      },
+      completion: { validated_transition_count: 1 },
+      processing: {
+        status: "succeeded",
+        processed_transition_count: 1,
+      },
+    },
   });
+  expect(frame.artifact_facts.artifact_summary.replay_reference).toEqual(
+    frame.artifact_summary.replay_reference,
+  );
+  await expect(page.locator("#replay-artifact-reference")).toHaveText(
+    frame.artifact_facts.artifact_summary.replay_reference.artifact_id,
+  );
+  await expect(page.locator("#replay-processing-badge")).toHaveText(
+    "Authorized replay",
+  );
+  await expect(page.locator("#replay-download-metrics-button")).toBeEnabled();
   const forbiddenKeys = new Set([
     "processing",
     "processing_status",
@@ -611,7 +634,9 @@ test("actor POV recording and handoff retain exact status and non-disclosure roo
       visit(child);
     }
   };
-  visit(frame);
+  const battlefieldTransport = { ...frame };
+  delete battlefieldTransport.artifact_facts;
+  visit(battlefieldTransport);
   visit(timeline);
   expect([...leaked].sort()).toEqual([]);
   await expectSavedArtifacts(started.replayPath, started.metricReportPath, 1);

@@ -245,11 +245,9 @@ export async function assertBoundedChoreography(page) {
   const routeRoots = page.locator(CHOREOGRAPHY_ROUTE_ROOT);
   await expect(roots).toHaveCount(1);
   await expect(routeRoots).toHaveCount(1);
-  const eventCount = Number(await page.locator("#event-count").textContent());
   const snapshot = await choreographySnapshot(page);
   const effectIds = snapshot.effectIds.filter((eventId) => eventId !== null);
   expect(new Set(effectIds).size).toBe(effectIds.length);
-  expect(effectIds.length).toBeLessThanOrEqual(eventCount);
   expect(snapshot.routeEffectIds).not.toContain(null);
   expect(new Set(snapshot.routeEffectIds).size).toBe(snapshot.routeEffectIds.length);
   for (const routeEffectId of snapshot.routeEffectIds) {
@@ -266,7 +264,7 @@ export async function assertBoundedChoreography(page) {
         ?.querySelectorAll("*").length ?? 0) +
       1,
   );
-  expect(nodeCount).toBeLessThanOrEqual(Math.min(eventCount * 28 + 2, 512));
+  expect(nodeCount).toBeLessThanOrEqual(Math.min(effectIds.length * 28 + 2, 512));
   expect(snapshot.animationIds.length).toBeLessThanOrEqual(
     Math.min(effectIds.length * 3 + 2, 512),
   );

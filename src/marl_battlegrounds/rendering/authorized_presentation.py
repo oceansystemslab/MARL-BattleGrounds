@@ -10,7 +10,7 @@ displayed state.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
 from hashlib import sha256
 from math import isclose, isfinite
 from struct import pack, unpack
@@ -2621,6 +2621,411 @@ class ReplayIncomingSummaryV1:
                         )
 
 
+type AgentPovVisualIncomingEventKindV1 = Literal[
+    "action_rejected",
+    "ability_activated",
+    "recipient_health_resolution",
+    "agent_left_combat",
+    "health_regenerated",
+    "cooldown_started",
+    "cooldown_ready",
+    "agent_died",
+    "status_aged_to_zero",
+    "status_broken_by_damage",
+    "status_applied",
+    "status_refreshed_or_extended",
+    "status_cleared_by_new_death",
+    "spawn_shield_expired",
+    "agent_respawned",
+]
+
+_AGENT_POV_VISUAL_INCOMING_EVENT_KINDS_V1 = frozenset(
+    (
+        "action_rejected",
+        "ability_activated",
+        "recipient_health_resolution",
+        "agent_left_combat",
+        "health_regenerated",
+        "cooldown_started",
+        "cooldown_ready",
+        "agent_died",
+        "status_aged_to_zero",
+        "status_broken_by_damage",
+        "status_applied",
+        "status_refreshed_or_extended",
+        "status_cleared_by_new_death",
+        "spawn_shield_expired",
+        "agent_respawned",
+    )
+)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AgentPovVisualIncomingAgentPhaseTrajectoryV1:
+    """One fog-authorized adjacent-scene trajectory with no Charge phase."""
+
+    __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+
+    agent_presentation_key: str
+    agent_public_agent_id: str
+    agent_class_id: int
+    transition_start: ReplayIncomingAgentAnchorV1 | None
+    successor: ReplayIncomingAgentAnchorV1 | None
+
+    def __post_init__(self) -> None:
+        _require_text(self.agent_presentation_key, name="agent_presentation_key")
+        _require_text(self.agent_public_agent_id, name="agent_public_agent_id")
+        _require_python_int(self.agent_class_id, name="agent_class_id", minimum=1)
+        if self.agent_class_id > 5:
+            raise ValueError("agent_class_id must identify a real V1 class.")
+        _require_optional_incoming_anchor(
+            self.transition_start,
+            name="transition_start",
+            phase="transition_start",
+        )
+        _require_optional_incoming_anchor(
+            self.successor,
+            name="successor",
+            phase="successor",
+        )
+        if self.transition_start is None and self.successor is None:
+            raise ValueError(
+                "Agent POV visual trajectories require at least one authorized anchor."
+            )
+        for anchor in (self.transition_start, self.successor):
+            if anchor is not None and (
+                anchor.presentation_key != self.agent_presentation_key
+                or anchor.public_agent_id != self.agent_public_agent_id
+            ):
+                raise ValueError(
+                    "Agent POV visual trajectory anchors must retain one identity."
+                )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AgentPovVisualIncomingRecipientHealthResolutionEventV1(
+    _ReplayIncomingEventBaseV1
+):
+    """One visible recipient's health result without hidden gross causes."""
+
+    event_kind: Literal["recipient_health_resolution"]
+    recipient_anchor: ReplayIncomingAgentAnchorV1
+    transition_start_health: float
+    health_after_combat_resolution: float
+    realized_net_health_change: float
+
+    def __post_init__(self) -> None:
+        self._validate_base(
+            event_kind=self.event_kind,
+            expected_kind="recipient_health_resolution",
+            expected_phase_rank=40,
+        )
+        _require_incoming_anchor(
+            self.recipient_anchor,
+            name="recipient_anchor",
+            phase="transition_start",
+        )
+        for name in (
+            "transition_start_health",
+            "health_after_combat_resolution",
+        ):
+            _require_finite(cast(float, getattr(self, name)), name=name, minimum=0.0)
+        _require_finite(
+            self.realized_net_health_change,
+            name="realized_net_health_change",
+        )
+        if not isclose(
+            self.health_after_combat_resolution - self.transition_start_health,
+            self.realized_net_health_change,
+            rel_tol=1e-6,
+            abs_tol=1e-5,
+        ):
+            raise ValueError(
+                "Agent POV health result must equal its visible realized net change."
+            )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AgentPovVisualIncomingAgentRespawnedEventV1(_ReplayIncomingEventBaseV1):
+    """One visible respawn paint cue with no unjoined team metadata."""
+
+    event_kind: Literal["agent_respawned"]
+    agent_anchor: ReplayIncomingAgentAnchorV1
+
+    def __post_init__(self) -> None:
+        self._validate_base(
+            event_kind=self.event_kind,
+            expected_kind="agent_respawned",
+            expected_phase_rank=120,
+        )
+        _require_incoming_anchor(
+            self.agent_anchor,
+            name="agent_anchor",
+            phase="successor",
+        )
+
+
+type AgentPovVisualIncomingEventV1 = Annotated[
+    ReplayIncomingActionRejectedEventV1
+    | ReplayIncomingAbilityActivatedEventV1
+    | AgentPovVisualIncomingRecipientHealthResolutionEventV1
+    | ReplayIncomingAgentLeftCombatEventV1
+    | ReplayIncomingHealthRegeneratedEventV1
+    | ReplayIncomingCooldownStartedEventV1
+    | ReplayIncomingCooldownReadyEventV1
+    | ReplayIncomingAgentDiedEventV1
+    | ReplayIncomingStatusAgedToZeroEventV1
+    | ReplayIncomingStatusBrokenByDamageEventV1
+    | ReplayIncomingStatusAppliedEventV1
+    | ReplayIncomingStatusRefreshedOrExtendedEventV1
+    | ReplayIncomingStatusClearedByNewDeathEventV1
+    | ReplayIncomingSpawnShieldExpiredEventV1
+    | AgentPovVisualIncomingAgentRespawnedEventV1,
+    Field(discriminator="event_kind"),
+]
+
+_AGENT_POV_VISUAL_INCOMING_EVENT_TYPES_V1: tuple[type[object], ...] = (
+    ReplayIncomingActionRejectedEventV1,
+    ReplayIncomingAbilityActivatedEventV1,
+    AgentPovVisualIncomingRecipientHealthResolutionEventV1,
+    ReplayIncomingAgentLeftCombatEventV1,
+    ReplayIncomingHealthRegeneratedEventV1,
+    ReplayIncomingCooldownStartedEventV1,
+    ReplayIncomingCooldownReadyEventV1,
+    ReplayIncomingAgentDiedEventV1,
+    ReplayIncomingStatusAgedToZeroEventV1,
+    ReplayIncomingStatusBrokenByDamageEventV1,
+    ReplayIncomingStatusAppliedEventV1,
+    ReplayIncomingStatusRefreshedOrExtendedEventV1,
+    ReplayIncomingStatusClearedByNewDeathEventV1,
+    ReplayIncomingSpawnShieldExpiredEventV1,
+    AgentPovVisualIncomingAgentRespawnedEventV1,
+)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AgentPovVisualIncomingSummaryV1:
+    """Fog-filtered visual facts bound only to recipient-local epochs."""
+
+    __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+
+    schema_version: Literal[1]
+    summary_kind: Literal["agent_pov_fog_filtered_visual_events"]
+    source_episode_id: str
+    recipient_public_agent_id: str
+    recipient_presentation_key: str
+    incoming_transition_index: int
+    incoming_recipient_transition_id: str
+    incoming_start_recipient_frame_id: str
+    incoming_successor_recipient_frame_id: str
+    incoming_start_simulator_step_count: int
+    incoming_successor_simulator_step_count: int
+    agent_phase_trajectories: tuple[AgentPovVisualIncomingAgentPhaseTrajectoryV1, ...]
+    ordered_event_ids: tuple[str, ...]
+    ordered_event_kinds: tuple[AgentPovVisualIncomingEventKindV1, ...]
+    events: tuple[AgentPovVisualIncomingEventV1, ...]
+    event_count: int
+
+    def __post_init__(self) -> None:
+        if self.schema_version != AUTHORIZED_PRESENTATION_SCHEMA_VERSION:
+            raise ValueError("unknown Agent POV visual incoming schema version.")
+        if self.summary_kind != "agent_pov_fog_filtered_visual_events":
+            raise ValueError("unknown Agent POV visual incoming summary kind.")
+        for name in (
+            "source_episode_id",
+            "recipient_public_agent_id",
+            "recipient_presentation_key",
+            "incoming_recipient_transition_id",
+            "incoming_start_recipient_frame_id",
+            "incoming_successor_recipient_frame_id",
+        ):
+            _require_text(cast(str, getattr(self, name)), name=name)
+        _require_python_int(
+            self.incoming_transition_index,
+            name="incoming_transition_index",
+            minimum=0,
+        )
+        transition_suffix = f":transition:{self.incoming_transition_index}"
+        if not self.incoming_recipient_transition_id.endswith(transition_suffix):
+            raise ValueError(
+                "Agent POV visual transition ID is not canonical for its index."
+            )
+        local_prefix = self.incoming_recipient_transition_id.removesuffix(
+            transition_suffix
+        )
+        allowed_prefixes = (
+            f"{self.source_episode_id}:actor-pov:{self.recipient_public_agent_id}",
+            f"{self.source_episode_id}:shared-obs-visual-union:"
+            f"{self.recipient_public_agent_id}",
+        )
+        if local_prefix not in allowed_prefixes:
+            raise ValueError(
+                "Agent POV visual epochs must use an exact recipient-local namespace."
+            )
+        if (
+            self.incoming_start_recipient_frame_id
+            != f"{local_prefix}:frame:{self.incoming_transition_index}"
+            or self.incoming_successor_recipient_frame_id
+            != f"{local_prefix}:frame:{self.incoming_transition_index + 1}"
+        ):
+            raise ValueError(
+                "Agent POV visual frame IDs must join the local transition epoch."
+            )
+        for name in (
+            "incoming_start_simulator_step_count",
+            "incoming_successor_simulator_step_count",
+            "event_count",
+        ):
+            _require_python_int(
+                cast(int, getattr(self, name)),
+                name=name,
+                minimum=0,
+            )
+        if self.incoming_successor_simulator_step_count != (
+            self.incoming_start_simulator_step_count + 1
+        ):
+            raise ValueError("Agent POV visual simulator ticks must be adjacent.")
+        if (
+            type(self.agent_phase_trajectories) is not tuple
+            or not self.agent_phase_trajectories
+            or any(
+                type(value) is not AgentPovVisualIncomingAgentPhaseTrajectoryV1
+                for value in self.agent_phase_trajectories
+            )
+            or type(self.events) is not tuple
+            or any(
+                type(value) not in _AGENT_POV_VISUAL_INCOMING_EVENT_TYPES_V1
+                for value in self.events
+            )
+        ):
+            raise ValueError(
+                "Agent POV visual trajectories and events require exact rows."
+            )
+        if (
+            type(self.ordered_event_ids) is not tuple
+            or type(self.ordered_event_kinds) is not tuple
+            or any(
+                type(value) is not str or not value for value in self.ordered_event_ids
+            )
+            or any(
+                type(value) is not str
+                or value not in _AGENT_POV_VISUAL_INCOMING_EVENT_KINDS_V1
+                for value in self.ordered_event_kinds
+            )
+        ):
+            raise ValueError("Agent POV visual inventories require exact tuples.")
+        if (
+            self.event_count != len(self.ordered_event_ids)
+            or self.event_count != len(self.ordered_event_kinds)
+            or self.event_count != len(self.events)
+        ):
+            raise ValueError("Agent POV visual count must equal every event inventory.")
+        expected_ids = tuple(
+            f"{self.incoming_recipient_transition_id}:visual-event:{ordinal:04d}"
+            for ordinal in range(self.event_count)
+        )
+        if self.ordered_event_ids != expected_ids or (
+            tuple(event.ordinal for event in self.events)
+            != tuple(range(self.event_count))
+            or tuple(event.event_id for event in self.events) != self.ordered_event_ids
+            or tuple(event.event_kind for event in self.events)
+            != self.ordered_event_kinds
+            or tuple(event.phase_rank for event in self.events)
+            != tuple(sorted(event.phase_rank for event in self.events))
+        ):
+            raise ValueError(
+                "Agent POV visual events must use dense local identity and order."
+            )
+        trajectory_by_key = {
+            row.agent_presentation_key: row for row in self.agent_phase_trajectories
+        }
+        if len(trajectory_by_key) != len(self.agent_phase_trajectories) or len(
+            {row.agent_public_agent_id for row in self.agent_phase_trajectories}
+        ) != len(self.agent_phase_trajectories):
+            raise ValueError("Agent POV visual trajectories require unique identities.")
+        recipient_rows = tuple(
+            row
+            for row in self.agent_phase_trajectories
+            if row.agent_public_agent_id == self.recipient_public_agent_id
+            and row.agent_presentation_key == self.recipient_presentation_key
+        )
+        if len(recipient_rows) != 1:
+            raise ValueError(
+                "Agent POV visual trajectories must contain the exact recipient."
+            )
+        if (
+            recipient_rows[0].transition_start is None
+            or recipient_rows[0].successor is None
+        ):
+            raise ValueError(
+                "Agent POV visual recipient must remain authorized at both endpoints."
+            )
+        for event in self.events:
+            if type(event) is ReplayIncomingActionRejectedEventV1 and not (
+                event.actor_configured_active
+                and type(event.actor_identity)
+                is ReplayIncomingAuthorizedAgentIdentityV1
+                and event.actor_anchor is not None
+                and event.actor_identity.public_agent_id
+                == self.recipient_public_agent_id
+                and event.actor_identity.presentation_key
+                == self.recipient_presentation_key
+                and event.actor_anchor.public_agent_id == self.recipient_public_agent_id
+                and event.actor_anchor.presentation_key
+                == self.recipient_presentation_key
+            ):
+                raise ValueError(
+                    "Agent POV visual rejection must belong to its active recipient."
+                )
+            if type(event) is AgentPovVisualIncomingRecipientHealthResolutionEventV1:
+                anchors = (event.recipient_anchor,)
+            elif type(event) is AgentPovVisualIncomingAgentRespawnedEventV1:
+                anchors = (event.agent_anchor,)
+            else:
+                anchors = _incoming_event_agent_anchors(
+                    cast(ReplayIncomingEventV1, event)
+                )
+            for anchor in anchors:
+                if anchor.phase == "post_charge":
+                    raise ValueError(
+                        "Agent POV visual events cannot retain post-Charge anchors."
+                    )
+                trajectory = trajectory_by_key.get(anchor.presentation_key)
+                expected_anchor = (
+                    None if trajectory is None else getattr(trajectory, anchor.phase)
+                )
+                if trajectory is None or (
+                    trajectory.agent_public_agent_id != anchor.public_agent_id
+                    or expected_anchor != anchor
+                ):
+                    raise ValueError(
+                        "Agent POV visual anchors must join authorized trajectories."
+                    )
+            successor_required_anchors: tuple[ReplayIncomingAgentAnchorV1, ...] = ()
+            if type(event) is AgentPovVisualIncomingRecipientHealthResolutionEventV1:
+                successor_required_anchors = (event.recipient_anchor,)
+            elif type(event) in (
+                ReplayIncomingHealthRegeneratedEventV1,
+                ReplayIncomingCooldownStartedEventV1,
+                ReplayIncomingCooldownReadyEventV1,
+            ):
+                after_state_event = cast(
+                    ReplayIncomingHealthRegeneratedEventV1
+                    | ReplayIncomingCooldownStartedEventV1
+                    | ReplayIncomingCooldownReadyEventV1,
+                    event,
+                )
+                successor_required_anchors = (after_state_event.agent_anchor,)
+            if any(
+                trajectory_by_key[anchor.presentation_key].successor is None
+                for anchor in successor_required_anchors
+            ):
+                raise ValueError(
+                    "Agent POV visual after-state event requires an authorized "
+                    "successor."
+                )
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SubmittedActionTupleV1:
     """One recorded submitted tuple, including possible out-of-domain integers."""
@@ -3675,6 +4080,367 @@ def _replay_incoming_event(
     raise TypeError("unsupported canonical V2 event kind.")
 
 
+def _visual_event_agent_anchors(
+    event: VisualEventV2,
+    *,
+    trajectory_by_internal_slot: dict[int, VisualAgentPhaseTrajectoryV2],
+) -> tuple[VisualAgentAnchorV2, ...]:
+    anchors: list[VisualAgentAnchorV2] = []
+    for field_name in (
+        "actor_anchor",
+        "source_anchor",
+        "recipient_anchor",
+        "agent_anchor",
+        "start_anchor",
+        "end_anchor",
+    ):
+        anchor = getattr(event, field_name, None)
+        if anchor is not None:
+            if type(anchor) is not VisualAgentAnchorV2:
+                raise ValueError("visual events must retain exact agent anchors.")
+            anchors.append(anchor)
+    if type(event) is SourceDamageOutputEventV2:
+        for slot in (
+            *event.mage_damage_aura_covering_emitter_global_slots,
+            *event.warrior_mitigation_aura_covering_emitter_global_slots,
+        ):
+            trajectory = trajectory_by_internal_slot.get(slot)
+            if trajectory is None:
+                raise ValueError(
+                    "visual damage aura emitters must join an active trajectory."
+                )
+            anchors.append(trajectory.transition_start)
+    return tuple(anchors)
+
+
+def _agent_pov_visual_scene_agents_by_slot(
+    scene: AuthorizedBattlefieldSceneV1,
+    *,
+    scene_name: str,
+    phase: Literal["transition_start", "successor"],
+    recipient_public_agent_id: str,
+    slot_by_public_agent_id: dict[str, int],
+    trajectory_by_internal_slot: dict[int, VisualAgentPhaseTrajectoryV2],
+    configured_active_by_global_slot: tuple[bool, ...],
+) -> dict[int, AuthorizedAgentV1]:
+    if type(scene) is not AuthorizedBattlefieldSceneV1:
+        raise ValueError(f"{scene_name} must be an exact authorized scene.")
+    AuthorizedBattlefieldSceneV1.__post_init__(scene)
+    if any(agent.relation == "oracle" for agent in scene.agents):
+        raise ValueError(f"{scene_name} must use Agent POV authority.")
+    self_rows = tuple(agent for agent in scene.agents if agent.relation == "self")
+    if len(self_rows) != 1 or self_rows[0].public_agent_id != recipient_public_agent_id:
+        raise ValueError(f"{scene_name} must contain the exact POV recipient.")
+    agents_by_slot: dict[int, AuthorizedAgentV1] = {}
+    for agent in scene.agents:
+        slot = slot_by_public_agent_id.get(agent.public_agent_id)
+        trajectory = None if slot is None else trajectory_by_internal_slot.get(slot)
+        if (
+            slot is None
+            or not configured_active_by_global_slot[slot]
+            or trajectory is None
+        ):
+            raise ValueError(
+                f"{scene_name} agents must join configured-active visual trajectories."
+            )
+        canonical_anchor = cast(
+            VisualAgentAnchorV2,
+            getattr(trajectory, phase),
+        )
+        if (
+            canonical_anchor.public_agent_id != agent.public_agent_id
+            or canonical_anchor.position != agent.position
+        ):
+            raise ValueError(
+                f"{scene_name} positions must join canonical visual trajectories."
+            )
+        if slot in agents_by_slot:
+            raise ValueError(f"{scene_name} cannot duplicate a visual trajectory.")
+        agents_by_slot[slot] = agent
+    return agents_by_slot
+
+
+def _agent_pov_visual_event_is_authorized(
+    event: VisualEventV2,
+    *,
+    recipient_global_slot: int,
+    transition_start_agents_by_slot: dict[int, AuthorizedAgentV1],
+    successor_agents_by_slot: dict[int, AuthorizedAgentV1],
+    trajectory_by_internal_slot: dict[int, VisualAgentPhaseTrajectoryV2],
+) -> bool:
+    if type(event) in (
+        ChargePhaseDisplacementEventV2,
+        OrdinaryMovementPhaseDisplacementEventV2,
+        RespawnWaveOccurredEventV2,
+        SourceDamageOutputEventV2,
+        SourceHealingOutputEventV2,
+        CombatCountdownResetEventV2,
+        LethalDamageContributionEventV2,
+    ):
+        return False
+    if type(event) is ActionRejectedEventV2 and (
+        not event.actor_configured_active
+        or event.actor_global_slot != recipient_global_slot
+    ):
+        return False
+    for anchor in _visual_event_agent_anchors(
+        event,
+        trajectory_by_internal_slot=trajectory_by_internal_slot,
+    ):
+        if anchor.phase == "transition_start":
+            if anchor.global_slot not in transition_start_agents_by_slot:
+                return False
+        elif anchor.phase == "successor":
+            if anchor.global_slot not in successor_agents_by_slot:
+                return False
+        else:
+            return False
+    successor_required_slots: tuple[int, ...] = ()
+    if type(event) is RecipientHealthResolutionEventV2:
+        successor_required_slots = (event.recipient_global_slot,)
+    elif type(event) in (
+        HealthRegeneratedEventV2,
+        CooldownStartedEventV2,
+        CooldownReadyEventV2,
+    ):
+        after_state_event = cast(
+            HealthRegeneratedEventV2 | CooldownStartedEventV2 | CooldownReadyEventV2,
+            event,
+        )
+        successor_required_slots = (after_state_event.agent_global_slot,)
+    if any(slot not in successor_agents_by_slot for slot in successor_required_slots):
+        return False
+    if type(event) is RecipientHealthResolutionEventV2:
+        recipient = transition_start_agents_by_slot.get(event.recipient_global_slot)
+        if recipient is not None and not isclose(
+            recipient.current_health,
+            event.transition_start_health,
+            rel_tol=1e-6,
+            abs_tol=1e-5,
+        ):
+            raise ValueError(
+                "visible health result must join transition-start scene health."
+            )
+    return True
+
+
+def build_agent_pov_visual_incoming_summary_v1(
+    incoming_events: VisualEventBatchV2,
+    *,
+    transition_start_scene: AuthorizedBattlefieldSceneV1,
+    successor_scene: AuthorizedBattlefieldSceneV1,
+    recipient_public_agent_id: str,
+    incoming_recipient_transition_id: str,
+    incoming_start_recipient_frame_id: str,
+    incoming_successor_recipient_frame_id: str,
+) -> AgentPovVisualIncomingSummaryV1:
+    """Filter canonical visual facts through two adjacent Agent POV scenes."""
+    if type(incoming_events) is not VisualEventBatchV2:
+        raise ValueError("incoming_events must be an exact VisualEventBatchV2.")
+    VisualEventBatchV2.__post_init__(incoming_events)
+    _require_text(
+        recipient_public_agent_id,
+        name="recipient_public_agent_id",
+    )
+    for name, value in (
+        ("incoming_recipient_transition_id", incoming_recipient_transition_id),
+        ("incoming_start_recipient_frame_id", incoming_start_recipient_frame_id),
+        (
+            "incoming_successor_recipient_frame_id",
+            incoming_successor_recipient_frame_id,
+        ),
+    ):
+        _require_text(value, name=name)
+    slot_by_public_agent_id = {
+        public_agent_id: slot
+        for slot, public_agent_id in enumerate(
+            incoming_events.public_agent_id_by_global_slot
+        )
+    }
+    trajectory_by_internal_slot = {
+        row.global_slot: row for row in incoming_events.agent_phase_trajectories
+    }
+    transition_start_agents_by_slot = _agent_pov_visual_scene_agents_by_slot(
+        transition_start_scene,
+        scene_name="transition_start_scene",
+        phase="transition_start",
+        recipient_public_agent_id=recipient_public_agent_id,
+        slot_by_public_agent_id=slot_by_public_agent_id,
+        trajectory_by_internal_slot=trajectory_by_internal_slot,
+        configured_active_by_global_slot=(
+            incoming_events.configured_active_by_global_slot
+        ),
+    )
+    successor_agents_by_slot = _agent_pov_visual_scene_agents_by_slot(
+        successor_scene,
+        scene_name="successor_scene",
+        phase="successor",
+        recipient_public_agent_id=recipient_public_agent_id,
+        slot_by_public_agent_id=slot_by_public_agent_id,
+        trajectory_by_internal_slot=trajectory_by_internal_slot,
+        configured_active_by_global_slot=(
+            incoming_events.configured_active_by_global_slot
+        ),
+    )
+    start_recipient = next(
+        row for row in transition_start_scene.agents if row.relation == "self"
+    )
+    successor_recipient = next(
+        row for row in successor_scene.agents if row.relation == "self"
+    )
+    recipient_global_slot = slot_by_public_agent_id[recipient_public_agent_id]
+    if start_recipient.presentation_key != successor_recipient.presentation_key:
+        raise ValueError("Agent POV recipient authority changed within one transition.")
+    common_slots = (
+        transition_start_agents_by_slot.keys() & successor_agents_by_slot.keys()
+    )
+    for slot in common_slots:
+        if (
+            transition_start_agents_by_slot[slot].presentation_key
+            != successor_agents_by_slot[slot].presentation_key
+        ):
+            raise ValueError(
+                "Agent POV visual identities changed within one transition."
+            )
+        if (
+            transition_start_agents_by_slot[slot].class_id
+            != successor_agents_by_slot[slot].class_id
+        ):
+            raise ValueError(
+                "Agent POV visual class identity changed within one transition."
+            )
+    union_slots = (
+        *transition_start_agents_by_slot,
+        *(
+            slot
+            for slot in successor_agents_by_slot
+            if slot not in transition_start_agents_by_slot
+        ),
+    )
+    key_by_internal_slot = {
+        slot: (
+            transition_start_agents_by_slot[slot].presentation_key
+            if slot in transition_start_agents_by_slot
+            else successor_agents_by_slot[slot].presentation_key
+        )
+        for slot in union_slots
+    }
+    trajectories = tuple(
+        AgentPovVisualIncomingAgentPhaseTrajectoryV1(
+            agent_presentation_key=key_by_internal_slot[slot],
+            agent_public_agent_id=(
+                transition_start_agents_by_slot[slot].public_agent_id
+                if slot in transition_start_agents_by_slot
+                else successor_agents_by_slot[slot].public_agent_id
+            ),
+            agent_class_id=(
+                transition_start_agents_by_slot[slot].class_id
+                if slot in transition_start_agents_by_slot
+                else successor_agents_by_slot[slot].class_id
+            ),
+            transition_start=(
+                None
+                if slot not in transition_start_agents_by_slot
+                else _replay_incoming_anchor(
+                    trajectory_by_internal_slot[slot].transition_start,
+                    key_by_internal_slot=key_by_internal_slot,
+                )
+            ),
+            successor=(
+                None
+                if slot not in successor_agents_by_slot
+                else _replay_incoming_anchor(
+                    trajectory_by_internal_slot[slot].successor,
+                    key_by_internal_slot=key_by_internal_slot,
+                )
+            ),
+        )
+        for slot in union_slots
+    )
+    events: list[AgentPovVisualIncomingEventV1] = []
+    for source_event in incoming_events.events:
+        if not _agent_pov_visual_event_is_authorized(
+            source_event,
+            recipient_global_slot=recipient_global_slot,
+            transition_start_agents_by_slot=transition_start_agents_by_slot,
+            successor_agents_by_slot=successor_agents_by_slot,
+            trajectory_by_internal_slot=trajectory_by_internal_slot,
+        ):
+            continue
+        projected_event: (
+            ReplayIncomingEventV1
+            | AgentPovVisualIncomingRecipientHealthResolutionEventV1
+            | AgentPovVisualIncomingAgentRespawnedEventV1
+        )
+        if type(source_event) is RecipientHealthResolutionEventV2:
+            projected_event = AgentPovVisualIncomingRecipientHealthResolutionEventV1(
+                event_id=source_event.event_id,
+                ordinal=source_event.ordinal,
+                phase_rank=source_event.phase_rank,
+                event_kind=source_event.event_type,
+                recipient_anchor=_replay_incoming_anchor(
+                    source_event.recipient_anchor,
+                    key_by_internal_slot=key_by_internal_slot,
+                ),
+                transition_start_health=(source_event.transition_start_health),
+                health_after_combat_resolution=(
+                    source_event.health_after_combat_resolution
+                ),
+                realized_net_health_change=(source_event.realized_net_health_change),
+            )
+        elif type(source_event) is AgentRespawnedEventV2:
+            projected_event = AgentPovVisualIncomingAgentRespawnedEventV1(
+                event_id=source_event.event_id,
+                ordinal=source_event.ordinal,
+                phase_rank=source_event.phase_rank,
+                event_kind=source_event.event_type,
+                agent_anchor=_replay_incoming_anchor(
+                    source_event.agent_anchor,
+                    key_by_internal_slot=key_by_internal_slot,
+                ),
+            )
+        else:
+            projected_event = _replay_incoming_event(
+                source_event,
+                trajectory_by_internal_slot=trajectory_by_internal_slot,
+                key_by_internal_slot=key_by_internal_slot,
+            )
+        if type(projected_event) not in _AGENT_POV_VISUAL_INCOMING_EVENT_TYPES_V1:
+            raise AssertionError("filtered Agent POV event used an excluded variant")
+        local_ordinal = len(events)
+        projected_event = replace(
+            projected_event,
+            event_id=(
+                f"{incoming_recipient_transition_id}:visual-event:{local_ordinal:04d}"
+            ),
+            ordinal=local_ordinal,
+        )
+        events.append(cast(AgentPovVisualIncomingEventV1, projected_event))
+    event_rows = tuple(events)
+    return AgentPovVisualIncomingSummaryV1(
+        schema_version=AUTHORIZED_PRESENTATION_SCHEMA_VERSION,
+        summary_kind="agent_pov_fog_filtered_visual_events",
+        source_episode_id=incoming_events.episode_id,
+        recipient_public_agent_id=recipient_public_agent_id,
+        recipient_presentation_key=successor_recipient.presentation_key,
+        incoming_transition_index=incoming_events.transition_index,
+        incoming_recipient_transition_id=incoming_recipient_transition_id,
+        incoming_start_recipient_frame_id=incoming_start_recipient_frame_id,
+        incoming_successor_recipient_frame_id=(incoming_successor_recipient_frame_id),
+        incoming_start_simulator_step_count=(
+            incoming_events.start_simulator_step_count
+        ),
+        incoming_successor_simulator_step_count=(
+            incoming_events.successor_simulator_step_count
+        ),
+        agent_phase_trajectories=trajectories,
+        ordered_event_ids=tuple(event.event_id for event in event_rows),
+        ordered_event_kinds=tuple(event.event_kind for event in event_rows),
+        events=event_rows,
+        event_count=len(event_rows),
+    )
+
+
 def _project_replay_incoming_summary_v1(
     incoming_events: VisualEventBatchV2,
     *,
@@ -3943,6 +4709,12 @@ __all__ = [
     "AUTHORIZED_CLASS_DOCUMENTATION_PROFILE_ID_V1",
     "AUTHORIZED_PRESENTATION_SCHEMA_VERSION",
     "AcceptedActionTupleV1",
+    "AgentPovVisualIncomingAgentPhaseTrajectoryV1",
+    "AgentPovVisualIncomingAgentRespawnedEventV1",
+    "AgentPovVisualIncomingEventKindV1",
+    "AgentPovVisualIncomingEventV1",
+    "AgentPovVisualIncomingRecipientHealthResolutionEventV1",
+    "AgentPovVisualIncomingSummaryV1",
     "AuthorizedAgentV1",
     "AuthorizedAuraFieldV1",
     "AuthorizedAuraIdV1",
@@ -4006,6 +4778,7 @@ __all__ = [
     "ReplayOutgoingInspectionV1",
     "SubmittedActionTupleV1",
     "authorized_class_documentation_profile_v1",
+    "build_agent_pov_visual_incoming_summary_v1",
     "build_oracle_authorized_scene_v1",
     "build_replay_oracle_presentation_parts_v1",
     "oracle_presentation_key_v1",

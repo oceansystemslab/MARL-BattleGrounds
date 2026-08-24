@@ -32,6 +32,7 @@ from marl_battlegrounds.rendering.authorized_pov_scene import (
 from marl_battlegrounds.rendering.authorized_presentation import (
     AcceptedActionTupleV1,
     SubmittedActionTupleV1,
+    build_agent_pov_visual_incoming_summary_v1,
     build_replay_oracle_presentation_parts_v1,
     oracle_presentation_key_v1,
 )
@@ -42,7 +43,10 @@ from marl_battlegrounds.rendering.pov_scene import (
     ActorPovAnalyzerProjectionV1,
     build_actor_pov_analyzer_projection_v1,
 )
-from marl_battlegrounds.rendering.scene import ResearcherAnalyzerProjectionV2
+from marl_battlegrounds.rendering.scene import (
+    ResearcherAnalyzerProjectionV2,
+    VisualEventBatchV2,
+)
 from scripts.dev.visual_debugger.presentation_protocol import (
     AgentPovActionAxisV1,
     LatestTransitionActionRowV1,
@@ -439,6 +443,7 @@ def build_live_no_shared_obs_authorized_presentation_v1(
     raw_frame: ActorPovLiveDebuggerFrameV2,
     *,
     public_catalog: StaticMechanicsCatalogV1,
+    incoming_visual_events: VisualEventBatchV2 | None,
 ) -> LiveNoSharedObsAuthorizedPresentationFrameV1:
     """Package one committed fixed-recipient live NoSharedObs presentation."""
     _require_live_header(
@@ -500,6 +505,32 @@ def build_live_no_shared_obs_authorized_presentation_v1(
         parts=parts,
         axis_mapping=current_slice.axis_mapping,
     )
+    if carrier is None:
+        if incoming_visual_events is not None:
+            raise ValueError("live NoSharedObs frame zero cannot carry visual events.")
+        visual_events = None
+    else:
+        if type(incoming_visual_events) is not VisualEventBatchV2:
+            raise TypeError(
+                "non-initial live NoSharedObs frames require exact visual events."
+            )
+        previous = build_no_shared_obs_authorized_scene_v1(
+            carrier,
+            public_catalog=public_catalog,
+            authority_session_id=raw_frame.session_id,
+            frame_index=carrier.start_frame.frame_index,
+        )
+        visual_events = build_agent_pov_visual_incoming_summary_v1(
+            incoming_visual_events,
+            transition_start_scene=previous.scene,
+            successor_scene=parts.scene,
+            recipient_public_agent_id=parts.recipient_public_agent_id,
+            incoming_recipient_transition_id=carrier.transition.pov_transition_id,
+            incoming_start_recipient_frame_id=carrier.transition.start_pov_frame_id,
+            incoming_successor_recipient_frame_id=(
+                carrier.transition.successor_pov_frame_id
+            ),
+        )
     latest_events = (
         None
         if carrier is None
@@ -572,6 +603,7 @@ def build_live_no_shared_obs_authorized_presentation_v1(
         analysis_mode="analysis",
         current_endpoint=endpoint,
         latest_events=latest_events,
+        visual_events=visual_events,
         latest_transition=latest_transition,
         technical_frame=LiveNoSharedObsTechnicalFrameV1(
             technical_kind="live_no_shared_obs_technical_frame",

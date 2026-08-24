@@ -134,6 +134,224 @@ test("strict authorized fixture preserves exact choreography identity", async ()
   assert.equal(buildChoreographyPlan({}, surface), null);
 });
 
+test("fog-authorized Agent abilities use the causal spatial choreography path", async () => {
+  const fixture = await authorizedFixture();
+  const raw = [
+    fixture.presentations.replay_no_shared_obs_agent_pov,
+    fixture.presentations.replay_shared_obs_agent_pov,
+  ].find(
+    (candidate) =>
+      candidate.visual_events?.summary_kind ===
+        "agent_pov_fog_filtered_visual_events" &&
+      candidate.visual_events.events.some(
+        (/** @type {Record<string, any>} */ event) =>
+          event.event_kind === "ability_activated",
+      ),
+  );
+  assert.ok(raw, "the Python fixture must retain one visible Agent ability");
+  const presentation = await normalizeAuthorizedPresentationFrameV1(raw);
+  const plan = buildChoreographyPlan(presentation, surface);
+  assert.ok(plan);
+  const activation = plan.events.find((event) => event.kind === "activation");
+  assert.ok(activation);
+  assert.equal(activation.authorityVocabulary, "event");
+  assert.equal(activation.spatial, true);
+  assert.notEqual(activation.noncausal, true);
+  assert.equal(activation.endpointPhase, "transition_start");
+  assert.ok(activation.source);
+  assert.ok(activation.target);
+  assert.ok(activation.route);
+  assert.equal(
+    activation.eventId.startsWith(
+      `${raw.visual_events.incoming_recipient_transition_id}:visual-event:`,
+    ),
+    true,
+  );
+  const healthRow = raw.visual_events.events.find(
+    (/** @type {Record<string, any>} */ event) =>
+      event.event_kind === "recipient_health_resolution",
+  );
+  assert.ok(healthRow);
+  const netHealth = plan.events.find((event) => event.eventId === healthRow.event_id);
+  assert.ok(netHealth);
+  assert.deepEqual(
+    {
+      kind: netHealth.kind,
+      healthBefore: netHealth.healthBefore,
+      healthAfter: netHealth.healthAfter,
+      netDelta: netHealth.netDelta,
+      recipientPresentationKey: netHealth.recipientPresentationKey,
+      recipientPublicAgentId: netHealth.recipientPublicAgentId,
+    },
+    {
+      kind: "net_health",
+      healthBefore: healthRow.transition_start_health,
+      healthAfter: healthRow.health_after_combat_resolution,
+      netDelta: healthRow.realized_net_health_change,
+      recipientPresentationKey: healthRow.recipient_anchor.presentation_key,
+      recipientPublicAgentId: healthRow.recipient_anchor.public_agent_id,
+    },
+  );
+  assert.equal(Object.hasOwn(netHealth, "totalEffectiveDamage"), false);
+  assert.equal(Object.hasOwn(netHealth, "totalEffectiveHealing"), false);
+});
+
+test("Agent adjacent-fog choreography preserves disappearance routes and appearance lifecycles", async () => {
+  const fixture = await authorizedFixture();
+  const agentCases = Object.values(fixture.state_cases).filter(
+    (/** @type {Record<string, any>} */ candidate) =>
+      candidate.visual_events?.summary_kind === "agent_pov_fog_filtered_visual_events",
+  );
+  const disappearance = agentCases.find(
+    (/** @type {Record<string, any>} */ candidate) =>
+      candidate.visual_events.events.some(
+        (/** @type {Record<string, any>} */ event) => {
+          if (event.event_kind !== "ability_activated") return false;
+          const trajectory = candidate.visual_events.agent_phase_trajectories.find(
+            (/** @type {Record<string, any>} */ row) =>
+              row.agent_presentation_key === event.source_anchor.presentation_key,
+          );
+          return (
+            trajectory?.transition_start !== null && trajectory?.successor === null
+          );
+        },
+      ),
+  );
+  assert.ok(
+    disappearance,
+    "the Python fixture must retain one start-visible disappearing ability source",
+  );
+  const disappearingEvent = disappearance.visual_events.events.find(
+    (/** @type {Record<string, any>} */ event) => {
+      if (event.event_kind !== "ability_activated") return false;
+      const trajectory = disappearance.visual_events.agent_phase_trajectories.find(
+        (/** @type {Record<string, any>} */ row) =>
+          row.agent_presentation_key === event.source_anchor.presentation_key,
+      );
+      return trajectory?.successor === null;
+    },
+  );
+  assert.ok(disappearingEvent);
+  const disappearingTrajectory =
+    disappearance.visual_events.agent_phase_trajectories.find(
+      (/** @type {Record<string, any>} */ row) =>
+        row.agent_presentation_key === disappearingEvent.source_anchor.presentation_key,
+    );
+  assert.ok(disappearingTrajectory);
+  assert.equal(
+    disappearance.current_endpoint.parts.scene.agents.some(
+      (/** @type {Record<string, any>} */ agent) =>
+        agent.presentation_key === disappearingTrajectory.agent_presentation_key,
+    ),
+    false,
+  );
+  const disappearanceFrame =
+    await normalizeAuthorizedPresentationFrameV1(disappearance);
+  const disappearancePlan = buildChoreographyPlan(disappearanceFrame, surface);
+  assert.ok(disappearancePlan);
+  const activation = disappearancePlan.events.find(
+    (event) => event.eventId === disappearingEvent.event_id,
+  );
+  assert.ok(activation);
+  assert.equal(activation.kind, "activation");
+  assert.equal(activation.endpointPhase, "transition_start");
+  assert.deepEqual(
+    activation.source,
+    surface.worldToScreen(disappearingTrajectory.transition_start.position),
+  );
+  assert.equal(activation.sourceClassId, disappearingTrajectory.agent_class_id);
+  const expectedUltimateToken = /** @type {Readonly<Record<number, string>>} */ ({
+    1: "mage_burst",
+    2: "warrior_charge",
+    3: "hunter_trap",
+    4: "rogue_poison",
+    5: "holy_word",
+  })[disappearingTrajectory.agent_class_id];
+  assert.equal(
+    activation.tokenId,
+    disappearingEvent.ability_component === "ultimate"
+      ? expectedUltimateToken
+      : disappearingTrajectory.agent_class_id === 5
+        ? "basic_heal"
+        : "basic_damage",
+  );
+  assert.equal(activation.spatial, true);
+  if (disappearingEvent.recipient_anchor !== null) {
+    assert.ok(activation.target);
+    assert.ok(activation.route);
+  }
+
+  const successorLifecycleKinds = new Set([
+    "agent_died",
+    "agent_left_combat",
+    "agent_respawned",
+    "spawn_shield_expired",
+    "status_aged_to_zero",
+    "status_broken_by_damage",
+    "status_applied",
+    "status_refreshed_or_extended",
+    "status_cleared_by_new_death",
+  ]);
+  let appearance = null;
+  let appearingTrajectory = null;
+  let appearanceEvent = null;
+  for (const candidate of agentCases) {
+    for (const trajectory of candidate.visual_events.agent_phase_trajectories) {
+      if (trajectory.transition_start !== null || trajectory.successor === null) {
+        continue;
+      }
+      const event = candidate.visual_events.events.find(
+        (/** @type {Record<string, any>} */ row) =>
+          successorLifecycleKinds.has(row.event_kind) &&
+          Object.values(row).some(
+            (value) =>
+              value?.phase === "successor" &&
+              value.presentation_key === trajectory.agent_presentation_key,
+          ),
+      );
+      if (event) {
+        appearance = candidate;
+        appearingTrajectory = trajectory;
+        appearanceEvent = event;
+        break;
+      }
+    }
+    if (appearance) break;
+  }
+  assert.ok(
+    appearance && appearingTrajectory && appearanceEvent,
+    "the Python fixture must retain one successor-only lifecycle event",
+  );
+  const appearanceFrame = await normalizeAuthorizedPresentationFrameV1(appearance);
+  const appearancePlan = buildChoreographyPlan(appearanceFrame, surface);
+  assert.ok(appearancePlan);
+  const lifecycle = appearancePlan.events.find(
+    (event) =>
+      event.eventId === appearanceEvent.event_id ||
+      event.atomicEventIds?.includes(appearanceEvent.event_id),
+  );
+  assert.ok(lifecycle);
+  assert.equal(lifecycle.spatial, true);
+  assert.ok(
+    appearance.current_endpoint.parts.scene.agents.some(
+      (/** @type {Record<string, any>} */ agent) =>
+        agent.presentation_key === appearingTrajectory.agent_presentation_key &&
+        agent.class_id === appearingTrajectory.agent_class_id,
+    ),
+  );
+
+  const oracle = await normalizeAuthorizedPresentationFrameV1(
+    fixture.presentations.replay_oracle,
+  );
+  const oraclePlan = buildChoreographyPlan(oracle, surface);
+  assert.ok(oraclePlan);
+  const oracleBasic = oraclePlan.events.find(
+    (event) => event.kind === "activation" && event.component === "basic",
+  );
+  assert.ok(oracleBasic);
+  assert.equal(oracleBasic.endpointPhase, "successor");
+});
+
 test("visual filters preserve scientific identity and retain suppressed atomics before scheduling", async () => {
   const fixture = await authorizedFixture();
   const raw = fixture.presentations.replay_oracle;
@@ -267,8 +485,8 @@ test("all registered transient families validate without constructing disabled g
     {
       event_kind: "ability_activated",
       ability_component: "ultimate",
-      source_anchor: anchor(3, "transition_start"),
-      recipient_anchor: anchor(1, "transition_start"),
+      source_anchor: anchor(2, "transition_start"),
+      recipient_anchor: anchor(4, "transition_start"),
     },
     {
       event_kind: "recipient_health_resolution",
@@ -362,7 +580,9 @@ test("all registered transient families validate without constructing disabled g
     /** @type {any} */ (forbiddenSurface),
     allOffState,
   );
+  const visualPlan = buildChoreographyPlan(frame, surface);
   assert.ok(plan);
+  assert.ok(visualPlan);
   assert.equal(JSON.stringify(frame), serializedBefore);
   assert.equal(plan.paintKey, visualFilterPaintKey(allOffState));
   assert.deepEqual(
@@ -370,12 +590,13 @@ test("all registered transient families validate without constructing disabled g
     raw.latest_events.ordered_event_ids,
   );
   assert.equal(
-    plan.events.every(
-      (event) =>
-        event.paintParts &&
-        Object.values(event.paintParts).every((enabled) => enabled === false) &&
-        event.presentationSuppressed === true &&
-        event.spatial === false,
+    plan.events.every((event) =>
+      event.kind === "feed_only"
+        ? event.spatial === false
+        : event.paintParts &&
+          Object.values(event.paintParts).every((enabled) => enabled === false) &&
+          event.presentationSuppressed === true &&
+          event.spatial === false,
     ),
     true,
   );
@@ -401,35 +622,39 @@ test("all registered transient families validate without constructing disabled g
   }
   const activationParts = plan.events
     .filter((event) => event.kind === "activation")
-    .map(({ component, impactSemantic, paintParts }) => ({
+    .map(({ component, impactSemantic, paintParts, tokenId }) => ({
       component,
       impactSemantic,
       paintParts,
+      tokenId,
     }));
   assert.deepEqual(activationParts, [
     {
       component: "basic",
       impactSemantic: "healing",
       paintParts: { ability: false, semantic: false },
+      tokenId: "basic_heal",
     },
     {
       component: "ultimate",
       impactSemantic: "damage",
       paintParts: { ability: false, semantic: false },
+      tokenId: "warrior_charge",
     },
   ]);
+  const warriorActivation = visualPlan.events.find(
+    (event) => event.kind === "activation" && event.tokenId === "warrior_charge",
+  );
+  assert.ok(warriorActivation);
+  assert.equal(warriorActivation.component, "ultimate");
+  assert.equal(warriorActivation.spatial, true);
+  assert.equal(warriorActivation.presentationSuppressed, false);
+  assert.ok(warriorActivation.route);
   assert.deepEqual(
     plan.events
       .filter((event) => event.kind === "status_lifecycle")
       .map(({ lifecycle }) => lifecycle),
-    [
-      "applied",
-      "refreshed",
-      "expired",
-      "trap_broken",
-      "trap_broken_and_reapplied",
-      "cleared_by_death",
-    ],
+    ["applied", "applied", "expired", "trap_broken", "applied", "cleared_by_death"],
   );
   assert.deepEqual(
     plan.events
@@ -473,10 +698,32 @@ test("all registered transient families validate without constructing disabled g
     plan.events.some((event) => event.kind === "regeneration"),
     true,
   );
-  assert.equal(
-    plan.events.some((event) => event.kind === "charge_displacement"),
-    true,
+  const chargeIndex = raw.latest_events.ordered_event_kinds.indexOf(
+    "charge_phase_displacement",
   );
+  assert.notEqual(chargeIndex, -1);
+  const charge = plan.events[chargeIndex];
+  assert.equal(charge.eventId, raw.latest_events.ordered_event_ids[chargeIndex]);
+  assert.equal(charge.eventType, "charge_phase_displacement");
+  assert.equal(charge.kind, "feed_only");
+  assert.equal(charge.spatial, false);
+  for (const field of [
+    "source",
+    "target",
+    "recipient",
+    "anchor",
+    "actor",
+    "start",
+    "end",
+    "cue",
+    "cueBounds",
+    "route",
+    "paintParts",
+    "presentationSuppressed",
+    "persistent",
+  ]) {
+    assert.equal(Object.hasOwn(charge, field), false, field);
+  }
   assert.equal(plan.phases.total, 0);
   assert.equal(plan.bounds.persistentNodes, 0);
 });
@@ -718,9 +965,9 @@ test("submission classification is presentation gating, not legality", () => {
   );
 });
 
-test("canonical V2 displacement and rejection selectors own transient color", async () => {
+test("Charge displacement has no paint selector while rejection retains its color", async () => {
   const css = await readFile(new URL("../styles.css", import.meta.url), "utf8");
-  assert.match(css, /data-event-type="charge_phase_displacement"/u);
+  assert.doesNotMatch(css, /data-event-type="charge_phase_displacement"/u);
   assert.match(css, /data-event-type="action_rejected"/u);
 });
 
@@ -751,7 +998,6 @@ test("activation arrows prefer full paint before an explicit compact fallback", 
   const compactArrowRule = css.match(
     /\.combat-route__arrow\[data-marker-variant="compact"\]\s*\{[^}]*\}/u,
   )?.[0];
-  const chargeArrowRule = css.match(/\.combat-charge__direction\s*\{[^}]*\}/u)?.[0];
   const activationParticleRule = css.match(
     /\.combat-route__particle\s*\{[^}]*\}/u,
   )?.[0];
@@ -770,8 +1016,6 @@ test("activation arrows prefer full paint before an explicit compact fallback", 
   assert.match(activationArrowRule, /drop-shadow\(0 0 3px currentColor\)/u);
   assert.ok(compactArrowRule);
   assert.match(compactArrowRule, /filter: none/u);
-  assert.ok(chargeArrowRule);
-  assert.match(chargeArrowRule, /drop-shadow\(0 0 3px currentColor\)/u);
   assert.ok(activationParticleRule);
   assert.match(activationParticleRule, /drop-shadow\(0 0 3px currentColor\)/u);
   assert.ok(holyParticleRule);
@@ -982,7 +1226,7 @@ test("NET and regeneration effects remain independent from scrolling battle text
   }
 });
 
-test("authorized age plus application is one Reapplied plan row without changing atomics", async () => {
+test("authorized age plus application uses the ordinary Applied presentation without changing atomics", async () => {
   const fixture = JSON.parse(
     await readFile(
       new URL("./fixtures/authorized-presentations-v1.json", import.meta.url),
@@ -1031,15 +1275,15 @@ test("authorized age plus application is one Reapplied plan row without changing
   assert.deepEqual(primaryApplication.applicationEventIds, [events[1].event_id]);
   assert.equal(primaryApplication.presentationSuppressed, false);
   assert.equal(primaryApplication.spatial, true);
-  assert.equal(primaryApplication.lifecycle, "reapplied");
-  assert.equal(primaryApplication.lifecycleToken.label, "Reapplied");
+  assert.equal(primaryApplication.lifecycle, "applied");
+  assert.equal(primaryApplication.lifecycleToken.label, "Applied");
   assert.doesNotMatch(
     `${primaryApplication.lifecycleToken.accessibleName} ${primaryApplication.lifecycleToken.glyphKey}`,
     /expir/iu,
   );
 });
 
-test("authorized break plus application is one Reapplied plan row without changing atomics", async () => {
+test("authorized break plus application uses the ordinary Applied presentation without changing atomics", async () => {
   const fixture = await authorizedFixture();
   const raw = structuredClone(fixture.presentations.replay_oracle);
   const applied = structuredClone(
@@ -1073,8 +1317,8 @@ test("authorized break plus application is one Reapplied plan row without changi
     events.map(({ event_id }) => event_id),
   );
   assert.deepEqual(plan.events[0]?.applicationEventIds, [events[1].event_id]);
-  assert.equal(plan.events[0]?.lifecycle, "trap_broken_and_reapplied");
-  assert.equal(plan.events[0]?.lifecycleToken.label, "Broken, then reapplied");
+  assert.equal(plan.events[0]?.lifecycle, "applied");
+  assert.equal(plan.events[0]?.lifecycleToken.label, "Applied");
   assert.deepEqual(
     {
       width: Math.round(plan.events[0]?.cueBounds?.width ?? 0),
@@ -1083,22 +1327,11 @@ test("authorized break plus application is one Reapplied plan row without changi
     { width: 52, height: 52 },
   );
 
-  /**
-   * @type {ReadonlyArray<readonly [
-   *   string[],
-   *   {break: boolean, reapplication: boolean},
-   *   boolean,
-   * ]>}
-   */
+  /** @type {ReadonlyArray<readonly [string[], {effect: boolean}, boolean]>} */
   const cases = [
-    [[], { break: true, reapplication: true }, false],
-    [["freezing_trap_break"], { break: false, reapplication: true }, false],
-    [["status_reapplication"], { break: true, reapplication: false }, false],
-    [
-      ["freezing_trap_break", "status_reapplication"],
-      { break: false, reapplication: false },
-      true,
-    ],
+    [[], { effect: true }, false],
+    [["freezing_trap_break"], { effect: true }, false],
+    [["status_application"], { effect: false }, true],
   ];
   for (const [disabled, expected, suppressed] of cases) {
     const filtered = buildChoreographyPlan(
@@ -1120,48 +1353,30 @@ test("authorized break plus application is one Reapplied plan row without changi
     }
   }
 
-  const breakOnly = buildChoreographyPlan(
+  const application = buildChoreographyPlan(frame, surface);
+  const applicationDisabled = buildChoreographyPlan(
     frame,
     surface,
-    filtersDisabled("status_reapplication"),
+    filtersDisabled("status_application"),
   );
-  const reapplicationOnly = buildChoreographyPlan(
-    frame,
-    surface,
-    filtersDisabled("freezing_trap_break"),
-  );
-  assert.ok(breakOnly);
-  assert.ok(reapplicationOnly);
-  const breakExplanation = explainChoreographyEvent(breakOnly.events[0]);
-  const reapplicationExplanation = explainChoreographyEvent(
-    reapplicationOnly.events[0],
-  );
-  assert.equal(breakExplanation.title, "Broken");
+  assert.ok(application);
+  assert.ok(applicationDisabled);
+  const applicationExplanation = explainChoreographyEvent(application.events[0]);
+  assert.equal(applicationExplanation.title, "Applied");
   assert.deepEqual(
-    breakExplanation.rows.map(({ label }) => label),
-    ["Recipient"],
+    applicationExplanation.rows.map(({ label }) => label),
+    ["Source", "Recipient"],
   );
-  assert.doesNotMatch(JSON.stringify(breakExplanation), /reappl|status_applied/iu);
+  assert.doesNotMatch(JSON.stringify(applicationExplanation), /broken|reappl/iu);
   assert.deepEqual(
     {
-      width: Math.round(breakOnly.events[0].cueBounds?.width ?? 0),
-      height: Math.round(breakOnly.events[0].cueBounds?.height ?? 0),
+      width: Math.round(application.events[0].cueBounds?.width ?? 0),
+      height: Math.round(application.events[0].cueBounds?.height ?? 0),
     },
     { width: 52, height: 52 },
   );
-  assert.equal(reapplicationExplanation.title, "Reapplied");
-  assert.deepEqual(
-    reapplicationExplanation.rows.map(({ label }) => label),
-    ["Source", "Recipient"],
-  );
-  assert.doesNotMatch(JSON.stringify(reapplicationExplanation), /broken/iu);
-  assert.deepEqual(
-    {
-      width: Math.round(reapplicationOnly.events[0].cueBounds?.width ?? 0),
-      height: Math.round(reapplicationOnly.events[0].cueBounds?.height ?? 0),
-    },
-    { width: 45, height: 45 },
-  );
+  assert.equal(applicationDisabled.events[0].presentationSuppressed, true);
+  assert.equal(applicationDisabled.events[0].spatial, false);
 });
 
 test("authorized Trap and Charge routes retain exact public endpoint owners", async () => {
@@ -1316,7 +1531,7 @@ test("standalone serialized status events keep exact presentation meanings", asy
     ["status_aged_to_zero", "expired"],
     ["status_broken_by_damage", "trap_broken"],
     ["status_applied", "applied"],
-    ["status_refreshed_or_extended", "refreshed"],
+    ["status_refreshed_or_extended", "applied"],
     ["status_cleared_by_new_death", "cleared_by_death"],
   ]);
   for (const [eventKind, lifecycle] of expectedCases) {
@@ -1346,19 +1561,10 @@ test("standalone serialized status events keep exact presentation meanings", asy
       [eventKind, lifecycle],
     );
     assert.deepEqual(plan.events[0].atomicEventIds, [event.event_id]);
-    assert.equal(
-      plan.events[0].presentationSuppressed,
-      eventKind === "status_refreshed_or_extended",
-    );
-    assert.equal(plan.events[0].spatial, eventKind !== "status_refreshed_or_extended");
-    assert.equal(
-      plan.events[0].phaseStart,
-      eventKind === "status_refreshed_or_extended" ? 2560 : 0,
-    );
-    assert.equal(
-      plan.events[0].phaseEnd,
-      eventKind === "status_refreshed_or_extended" ? 3040 : 480,
-    );
+    assert.equal(plan.events[0].presentationSuppressed, false);
+    assert.equal(plan.events[0].spatial, true);
+    assert.equal(plan.events[0].phaseStart, 0);
+    assert.equal(plan.events[0].phaseEnd, 480);
   }
 });
 

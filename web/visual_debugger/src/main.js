@@ -56,6 +56,7 @@ import { PresentationInstallCoordinator } from "./presentation-install.js";
 import {
   bindReplayTimelineControls,
   ReplayPlaybackController,
+  REPLAY_TRANSPORT_STATES,
   renderReplayTimelineControls,
   replayCommandRequest,
   replayTimelineSimulatorStep,
@@ -153,7 +154,8 @@ const elements = {
   visualFilters: requiredElement("visual-filters"),
   visualFilterOptions: requiredElement("visual-filter-options"),
   visualFilterCount: requiredElement("visual-filter-count"),
-  restoreAllVisualFiltersButton: requiredElement("restore-all-visual-filters-button"),
+  enableAllVisualFiltersButton: requiredElement("enable-all-visual-filters-button"),
+  disableAllVisualFiltersButton: requiredElement("disable-all-visual-filters-button"),
   visualKey: requiredElement("visual-key"),
   selectionCard: requiredElement("selection-card"),
   selectionHeading: requiredElement("selection-heading"),
@@ -171,8 +173,6 @@ const elements = {
   commandCommitSummary: requiredElement("command-commit-summary"),
   acceptedCard: requiredElement("accepted-card"),
   acceptedAnnouncement: requiredElement("accepted-announcement"),
-  eventFeed: requiredElement("event-feed"),
-  eventCount: requiredElement("event-count"),
   diagnosticsCard: requiredElement("diagnostics-card"),
   visualTooltip: requiredElement("visual-tooltip"),
   visualTooltipTitle: requiredElement("visual-tooltip-title"),
@@ -191,7 +191,7 @@ const elements = {
   ),
 };
 
-const EXPECTED_VISUAL_FILTER_COUNT = 23;
+const EXPECTED_VISUAL_FILTER_COUNT = 20;
 
 /**
  * Build the fixed page-local filter surface from the shared paint registry.
@@ -308,7 +308,6 @@ const SCIENTIFIC_DISCLOSURE_BODY_IDS = Object.freeze({
   "agent-details": "agent-details-body",
   "pending-turn-details": "pending-turn-details-body",
   "latest-transition-details": "latest-transition-details-body",
-  "events-details": "events-details-body",
   "technical-frame-details": "technical-frame-details-body",
 });
 
@@ -558,9 +557,14 @@ const CONTROL_HELP = Object.freeze([
     "Show or hide individual battlefield presentation layers without changing scientific authority.",
   ],
   [
-    "#restore-all-visual-filters-button",
-    "Restore All",
-    "Turn on all 23 local visual filters. The separate Ranges control is unchanged.",
+    "#enable-all-visual-filters-button",
+    "Enable All",
+    "Turn on all 20 local visual filters. The separate Ranges control is unchanged.",
+  ],
+  [
+    "#disable-all-visual-filters-button",
+    "Disable All",
+    "Turn off all 20 local visual filters. The separate Ranges control is unchanged.",
   ],
   [
     ".diagnostics > summary",
@@ -601,7 +605,7 @@ const choreographer = new CombatChoreographer({
 const replayTimelineElements = {
   root: elements.replayTimeline,
   keyboardTarget: document,
-  keyboardEnabled: () => installedPresentationAuthority() !== null,
+  keyboardEnabled: () => installedPresentationAuthority() !== null && !state.busy,
   firstButton: elements.replayFirstButton,
   backTenButton: elements.replayBackTenButton,
   previousButton: elements.replayPreviousButton,
@@ -626,6 +630,22 @@ const replayTimelineElements = {
   },
 };
 
+/**
+ * Keep retained replay authority visible while fencing timeline navigation
+ * behind the request that is installing its complete successor.
+ *
+ * @param {ReturnType<ReplayPlaybackController["snapshot"]>} playback
+ */
+function replayTimelineRenderState(playback) {
+  if (!state.busy || playback.transportState === REPLAY_TRANSPORT_STATES.OFFLINE) {
+    return playback;
+  }
+  return Object.freeze({
+    ...playback,
+    transportState: REPLAY_TRANSPORT_STATES.ADVANCING,
+  });
+}
+
 const replayPlayback = new ReplayPlaybackController({
   request: sendReplayTransportCommand,
   waitForPresentation: () => choreographer.whenSettled(),
@@ -642,7 +662,10 @@ const replayPlayback = new ReplayPlaybackController({
       installedPresentationAuthority() === null
         ? pendingPresentationSurfaceView(playback).replay.timeline
         : playback;
-    renderReplayTimelineControls(replayTimelineElements, timeline);
+    renderReplayTimelineControls(
+      replayTimelineElements,
+      replayTimelineRenderState(timeline),
+    );
     renderReplayArtifactActions(installedPresentationAuthority());
     if (
       installedPresentationAuthority() !== null &&
@@ -674,8 +697,6 @@ const panels = new DebuggerPanels({
   pendingCard: elements.pendingCard,
   acceptedCard: elements.acceptedCard,
   acceptedAnnouncement: elements.acceptedAnnouncement,
-  eventFeed: elements.eventFeed,
-  eventCount: elements.eventCount,
   diagnosticsCard: elements.diagnosticsCard,
   onCommand: dispatchPanelCommand,
 });
@@ -859,9 +880,9 @@ function clearPresentationAuthority(reason) {
 
 /**
  * Begin one authority request under an explicit visual pending policy.
- * Ordinary same-authority work keeps only the last complete certified pair;
- * audience changes clear synchronously, and later identity failures fail
- * closed before the next render.
+ * Ordinary same-audience work keeps only the last complete certified pair;
+ * cross-audience changes clear synchronously, and later identity failures
+ * fail closed before the next render.
  *
  * @param {string} reason
  * @param {"retain_last_authorized" | "clear"} pendingPolicy
@@ -984,7 +1005,7 @@ const presentationInstallation = new PresentationInstallCoordinator({
   isJoinRace: isPresentationJoinRace,
 });
 
-const AUTHORIZED_INSPECTOR_TITLE = "Comprehensive Agent Details";
+const AUTHORIZED_INSPECTOR_TITLE = "Comprehensive Agent Class Details";
 
 function applyAuthorizedInspectorChrome() {
   const inspector = authorizedInspectorView(
@@ -1591,8 +1612,9 @@ function renderVisualFilterControls(snapshot) {
     enabledCount += enabled ? 1 : 0;
   }
   elements.visualFilterCount.textContent = `${enabledCount} enabled`;
-  elements.restoreAllVisualFiltersButton.disabled =
+  elements.enableAllVisualFiltersButton.disabled =
     enabledCount === EXPECTED_VISUAL_FILTER_COUNT;
+  elements.disableAllVisualFiltersButton.disabled = enabledCount === 0;
 }
 
 /**
@@ -1816,8 +1838,8 @@ function installedPresentationRangesVisible(presentation) {
 
 /**
  * Project the exact public capability state from one coherent authority and
- * one CP8 controller snapshot. Metric availability is deliberately absent:
- * Agent POV is rejected from audience alone, before any sidecar request.
+ * one CP8 controller snapshot. Artifact actions belong to the local researcher
+ * tool, so visual POV changes do not remove them.
  *
  * @param {{
  *   replayProduct: boolean,
@@ -1853,7 +1875,7 @@ function replayArtifactActionCapabilities(input) {
     !input.actionPending;
   return Object.freeze({
     exportPng: settled && input.battlefieldReady,
-    downloadMetrics: settled && input.audience === "researcher",
+    downloadMetrics: settled,
   });
 }
 
@@ -2045,8 +2067,8 @@ function replayMetricDownloadError(error) {
   }
   if (error instanceof DebuggerApiError && error.status === 403) {
     return Object.freeze({
-      message: "Metric reports are available only in Oracle View.",
-      level: "warning",
+      message: "Metric download is not authorized for this replay session.",
+      level: "error",
     });
   }
   return Object.freeze({
@@ -2225,9 +2247,11 @@ const AGENT_CLOSEOUT_BATTLEFIELD_LABEL =
 const AGENT_CLOSEOUT_BATTLEFIELD_INSTRUCTIONS =
   "Agent POV keeps one fixed recipient. Activate an authorized visible body to inspect current facts; recording closeout has fenced simulator and pending-action controls.";
 const TERMINAL_REPLAY_BATTLEFIELD_LABEL =
-  "Read-only terminal replay battlefield snapshot. Agent inspection controls are unavailable.";
+  "Read-only terminal replay battlefield snapshot.";
 const TERMINAL_REPLAY_BATTLEFIELD_INSTRUCTIONS =
-  "This replay frame is terminal. Agent inspection controls are unavailable; use the timeline to review another frame.";
+  "This replay frame is terminal; use the timeline to review another frame.";
+const TERMINAL_REPLAY_AGENT_BATTLEFIELD_INSTRUCTIONS =
+  "This replay frame is terminal. Activate an authorized visible body to switch the fog-of-war recipient, or use the timeline to review another frame.";
 
 function liveBattlefieldCommandsInteractive() {
   return (
@@ -2314,9 +2338,11 @@ function applyBattlefieldBoundaryCopy() {
         : "Read-only replay battlefield snapshot. Authorized agents can be inspected.",
     );
     elements.battlefieldInstructions.textContent = terminal
-      ? TERMINAL_REPLAY_BATTLEFIELD_INSTRUCTIONS
+      ? audience === "agent_pov"
+        ? TERMINAL_REPLAY_AGENT_BATTLEFIELD_INSTRUCTIONS
+        : TERMINAL_REPLAY_BATTLEFIELD_INSTRUCTIONS
       : audience === "agent_pov"
-        ? "Replay Agent POV is read-only and keeps one fixed recipient. Activate an authorized visible body to inspect current facts; the replay authority does not change."
+        ? "Replay Agent POV is read-only. Activate an authorized visible body to switch to that agent's fog-of-war view at the same replay tick."
         : "Replay is read-only. Activate an authorized agent to inspect current facts and its recorded outgoing action; use the timeline to change frames.";
   } else if (liveInteractive) {
     elements.battlefield.setAttribute("role", "application");
@@ -2328,7 +2354,7 @@ function applyBattlefieldBoundaryCopy() {
     elements.battlefieldInstructions.textContent =
       audience === "agent_pov"
         ? "Live Agent POV keeps one fixed recipient. Bodies are passive inspection targets; use the authorized draft controls to prepare that recipient's action."
-        : "Live Oracle View is interactive. Activate an authorized actor to control it; Shift-click selects an authorized target; right-click clears the target. Battlefield keyboard commands apply only while this surface has focus.";
+        : "Live Oracle View is interactive. Activate an authorized actor to control it; Shift-click selects an authorized target; Escape clears the target and leaves battlefield focus. Battlefield keyboard commands apply only while this surface has focus.";
   } else if (installedLiveScientificInspectionAvailable()) {
     elements.battlefield.setAttribute("role", "group");
     elements.battlefield.tabIndex = -1;
@@ -2391,10 +2417,23 @@ function renderReplayMetadata(installed) {
   }
   const frame = installed.transport;
   const presentation = installed.presentation;
-  const source = isRecord(presentation.source) ? presentation.source : {};
-  const completion = isRecord(frame.completion) ? frame.completion : {};
+  const artifactFacts =
+    authorizedPresentationAudience(presentation) === "researcher"
+      ? {
+          artifact_summary: frame.artifact_summary,
+          completion: frame.completion,
+          processing: frame.processing,
+        }
+      : frame.artifact_facts;
+  const summary = isRecord(artifactFacts?.artifact_summary)
+    ? artifactFacts.artifact_summary
+    : {};
+  const reference = isRecord(summary.replay_reference) ? summary.replay_reference : {};
+  const completion = isRecord(artifactFacts?.completion)
+    ? artifactFacts.completion
+    : {};
   elements.replayArtifactReference.textContent = String(
-    source.source_artifact_id ?? "Unavailable in this audience",
+    reference.artifact_id ?? "Unavailable",
   );
   elements.replayArtifactReference.removeAttribute("title");
   registerTooltipOwner(
@@ -2409,14 +2448,12 @@ function renderReplayMetadata(installed) {
       rows: [
         {
           label: "Artifact",
-          value: String(source.source_artifact_id ?? "Unavailable in this audience"),
+          value: String(reference.artifact_id ?? "Unavailable"),
           metadata: { compact: true, full: true },
         },
         {
           label: "Canonical digest",
-          value: String(
-            source.source_artifact_digest_sha256 ?? "Unavailable in this audience",
-          ),
+          value: String(reference.canonical_digest_sha256 ?? "Unavailable"),
           metadata: { compact: false, full: true },
         },
       ],
@@ -2428,10 +2465,7 @@ function renderReplayMetadata(installed) {
   elements.replayCompletionBadge.textContent = humanize(
     completion.completion_state ?? "unavailable",
   );
-  elements.replayProcessingBadge.textContent =
-    authorizedPresentationAudience(presentation) !== "researcher"
-      ? "Not available in actor POV"
-      : "Authorized replay";
+  elements.replayProcessingBadge.textContent = "Authorized replay";
   registerTooltipOwner(
     elements.replayCompletionBadge,
     explainTechnicalFact("completion"),
@@ -2465,7 +2499,10 @@ function renderReplayMetadata(installed) {
     state.resyncRequired ||
     state.offline ||
     typeof selectedOwnerKey !== "string";
-  renderReplayTimelineControls(replayTimelineElements, replayPlayback.snapshot());
+  renderReplayTimelineControls(
+    replayTimelineElements,
+    replayTimelineRenderState(replayPlayback.snapshot()),
+  );
 }
 
 /** @type {Readonly<Record<string, string>>} */
@@ -2991,7 +3028,7 @@ function renderCommandTargets(presentation, inspection) {
     }
     const pairMask = asArray(mask.target_use_ultimate_joint_mask)[targetAction];
     const option = document.createElement("option");
-    const basic = asArray(pairMask)[0] === true ? "B ✓" : "B ×";
+    const basic = targetAction > 0 && asArray(pairMask)[0] === true ? "B ✓" : "B ×";
     const ultimate = asArray(pairMask)[1] === true ? "U ✓" : "U ×";
     if (target.target_kind === "no_target") {
       option.value = "";
@@ -3097,7 +3134,7 @@ function renderDraftState(presentation) {
     ? Number(pending.target_action)
     : 0;
   const pairMask = asArray(mask.target_use_ultimate_joint_mask)[targetAction];
-  const basicAvailable = asArray(pairMask)[0] === true;
+  const basicAvailable = targetAction > 0 && asArray(pairMask)[0] === true;
   const ultimateAvailable = asArray(pairMask)[1] === true;
   const noCombatSelected =
     pending.armed_lane === "none" ||
@@ -3119,8 +3156,10 @@ function renderDraftState(presentation) {
       : {
           owner_presentation_key: controlledOwner.presentation_key,
           owner_public_agent_id: controlledOwner.public_agent_id,
-          lane_0_available: basicAvailable,
+          lane_0_available: asArray(pairMask)[0] === true,
           lane_1_available: ultimateAvailable,
+          basic_available: basicAvailable,
+          ultimate_available: ultimateAvailable,
         };
   const basicLegality =
     legality === null ? null : explainLegality(legality, 0, controlledOwner);
@@ -3295,8 +3334,7 @@ function authorizedAgentActivation(presentationKey) {
     state.busy ||
     state.shuttingDown ||
     state.resyncRequired ||
-    state.offline ||
-    isTerminal(state.frame)
+    state.offline
   ) {
     return null;
   }
@@ -3306,8 +3344,20 @@ function authorizedAgentActivation(presentationKey) {
   }
   const audience = authorizedPresentationAudience(presentation);
   const inspectionState = authorizedPresentationInspectionState(presentation);
+  const replayPovSwitch = isReplayMode() && audience === "agent_pov";
+  if (isTerminal(state.frame) && !replayPovSwitch) {
+    return null;
+  }
   if (audience === "researcher" && recordingScientificControlsFenced()) {
     return null;
+  }
+  if (replayPovSwitch) {
+    return Object.freeze({
+      effect: "replay_pov_switch",
+      presentationKey,
+      agent,
+      audience,
+    });
   }
   if (audience === "agent_pov" || inspectionState.state_kind === "live_scripted") {
     return Object.freeze({
@@ -3400,7 +3450,9 @@ function installAuthorizedAgentActivation() {
         "aria-label",
         activation.effect === "live_control"
           ? `${identity}. Control and inspect this authorized agent.`
-          : `${identity}. Inspect this authorized agent.`,
+          : activation.effect === "replay_pov_switch"
+            ? `${identity}. Switch replay Agent POV to this authorized agent.`
+            : `${identity}. Inspect this authorized agent.`,
       );
     }
     registerTooltipOwner(
@@ -3433,7 +3485,12 @@ function activateAuthorizedAgent(presentationKey) {
     return true;
   }
   openAgentDetails();
-  if (activation.effect === "replay_select") {
+  if (activation.effect === "replay_pov_switch") {
+    void dispatchReplayCommand({
+      command_type: "set_pov_actor",
+      presentation_key: activation.presentationKey,
+    });
+  } else if (activation.effect === "replay_select") {
     void dispatchReplayCommand({
       command_type: "select_agent",
       selected_global_slot: activation.commandSlot,
@@ -3508,7 +3565,12 @@ function render() {
     resyncRequired: state.resyncRequired,
     offline: state.offline,
     activationDisabled:
-      (transportFrame !== null && isTerminal(transportFrame)) ||
+      (transportFrame !== null &&
+        isTerminal(transportFrame) &&
+        !(
+          isReplayMode() &&
+          authorizedPresentationAudience(presentationFrame) === "agent_pov"
+        )) ||
       (authorizedPresentationAudience(presentationFrame) === "researcher" &&
         recordingScientificControlsFenced()),
     localInspectedPresentationKey:
@@ -3647,14 +3709,11 @@ async function sendReplayCommand(command, { deferFinalRender = false } = {}) {
   });
   /** @type {{current: {kind: "success" | "stale", payload: any} | null}} */
   const commandOutcome = { current: null };
+  const changesAudience = command.command_type === "set_view";
   try {
     const installPromise = presentationInstallation.installFromCommand({
-      reason:
-        command.command_type === "set_view"
-          ? "replay_audience_change"
-          : "replay_command",
-      pendingPolicy:
-        command.command_type === "set_view" ? "clear" : "retain_last_authorized",
+      reason: changesAudience ? "replay_audience_change" : "replay_command",
+      pendingPolicy: changesAudience ? "clear" : "retain_last_authorized",
       sendCommand: async () => {
         try {
           const payload = await postReplayCommand(state.token, request);
@@ -3812,6 +3871,14 @@ async function dispatchReplayCommand(command) {
     const frame = state.frame;
     if (frame) {
       replayPlayback.installCursor(frame.cursor);
+    }
+    if (
+      command.command_type === "set_pov_actor" &&
+      !state.resyncRequired &&
+      !state.offline &&
+      authorizedPresentationAudience(state.presentation) === "agent_pov"
+    ) {
+      elements.battlefield.focus({ preventScroll: true });
     }
     return payload;
   } catch {
@@ -4503,8 +4570,12 @@ const handleVisualFilterChange = (event) => {
 
 elements.visualFilterOptions.addEventListener("change", handleVisualFilterChange);
 
-elements.restoreAllVisualFiltersButton.addEventListener("click", () => {
-  applyVisualFilterAction({ type: "restore_all" });
+elements.enableAllVisualFiltersButton.addEventListener("click", () => {
+  applyVisualFilterAction({ type: "enable_all" });
+});
+
+elements.disableAllVisualFiltersButton.addEventListener("click", () => {
+  applyVisualFilterAction({ type: "disable_all" });
 });
 
 elements.replayExportPngButton.addEventListener("click", () => {

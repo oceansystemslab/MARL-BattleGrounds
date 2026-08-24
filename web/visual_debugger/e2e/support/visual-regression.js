@@ -5,7 +5,6 @@ import { expect } from "@playwright/test";
 import {
   CHOREOGRAPHY_ROOT,
   CHOREOGRAPHY_ROUTE_ROOT,
-  choreographySnapshot,
   installWaapiAutopause,
   pauseInsideEventWindow,
 } from "./choreography.js";
@@ -14,7 +13,6 @@ export const DESKTOP_VIEWPORT = Object.freeze({ width: 1440, height: 900 });
 export const MINIMUM_VIEWPORT = Object.freeze({ width: 960, height: 600 });
 export const ABILITY_EVENT_TYPE = "ability_activated";
 export const HEALTH_RESOLUTION_EVENT_TYPE = "recipient_health_resolution";
-export const CHARGE_EVENT_TYPE = "charge_phase_displacement";
 export const STATUS_EVENT_TYPE = "status_applied";
 export const POV_HEALTH_EVENT_TYPE = "own_health_changed";
 
@@ -439,36 +437,6 @@ export async function expectActivationPairs(page, expected) {
       left.tokenId.localeCompare(right.tokenId),
   );
   expect(activations).toEqual(normalizedExpected);
-}
-
-/**
- * Prove the event feed and every rendered effect use unique IDs from the
- * current authoritative batch.
- *
- * @param {import("@playwright/test").Page} page
- * @param {number} expectedCount
- */
-export async function assertCurrentEventIds(page, expectedCount) {
-  await expect(page.locator("#event-count")).toHaveText(String(expectedCount));
-  const feedIds = await page
-    .locator("#event-feed [data-event-id]")
-    .evaluateAll((items) => items.map((item) => item.getAttribute("data-event-id")));
-  expect(feedIds).not.toContain(null);
-  expect(feedIds).toHaveLength(expectedCount);
-  expect(new Set(feedIds).size).toBe(feedIds.length);
-
-  const feedIdSet = new Set(feedIds);
-  const renderedIds =
-    (await page.locator(CHOREOGRAPHY_ROOT).count()) === 0
-      ? []
-      : [
-          ...(await choreographySnapshot(page)).effectIds,
-          ...(await choreographySnapshot(page)).routeEffectIds,
-        ];
-  expect(renderedIds).not.toContain(null);
-  for (const eventId of renderedIds) {
-    expect(feedIdSet.has(eventId)).toBe(true);
-  }
 }
 
 /**

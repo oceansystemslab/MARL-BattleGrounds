@@ -14,6 +14,7 @@ from scripts.dev.visual_debugger.control import create_session
 from scripts.dev.visual_debugger.presentation_protocol import (
     LiveOracleAuthorizedPresentationFrameV1,
     LiveOraclePresentationSourceIdentityV1,
+    ReplayNoSharedObsAuthorizedPresentationFrameV1,
     _seal_oracle_authorized_current_endpoint_v1,
 )
 from scripts.dev.visual_debugger.replay_service import ReplayViewerService
@@ -40,12 +41,17 @@ from tests.test_visual_debugger_replay_service import (
 from tests.test_visual_debugger_service import _service
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
+from marl_battlegrounds.rendering.authorized_pov_scene import pov_presentation_key_v1
 from marl_battlegrounds.rendering.authorized_presentation import (
+    AgentPovVisualIncomingAgentPhaseTrajectoryV1,
     AuthorizedBattlefieldSceneV1,
     AuthorizedClassMechanicsV1,
     AuthorizedClassMechanicsV2,
     AuthorizedSpawnShieldMechanicsAvailableV1,
     AuthorizedSpawnShieldMechanicsAvailableV2,
+    ReplayIncomingAbilityActivatedEventV1,
+    ReplayIncomingAgentAnchorV1,
+    ReplayIncomingAgentLeftCombatEventV1,
 )
 
 
@@ -150,6 +156,119 @@ def _legacy_v1_compatibility_presentation(
     return LiveOracleAuthorizedPresentationFrameV1(**frame_values)
 
 
+def _with_visual_events(
+    frame: ReplayNoSharedObsAuthorizedPresentationFrameV1,
+    *,
+    trajectories: tuple[AgentPovVisualIncomingAgentPhaseTrajectoryV1, ...],
+    event: ReplayIncomingAbilityActivatedEventV1 | ReplayIncomingAgentLeftCombatEventV1,
+) -> ReplayNoSharedObsAuthorizedPresentationFrameV1:
+    """Revalidate one branded adjacent-fog browser contract case."""
+    visual = frame.visual_events
+    if visual is None or visual.events:
+        raise RuntimeError("adjacent-fog fixture requires an empty incoming inventory")
+    event_id = f"{visual.incoming_recipient_transition_id}:visual-event:0000"
+    bound_event = replace(event, event_id=event_id)
+    bound_visual = replace(
+        visual,
+        agent_phase_trajectories=trajectories,
+        ordered_event_ids=(event_id,),
+        ordered_event_kinds=(bound_event.event_kind,),
+        events=(bound_event,),
+        event_count=1,
+    )
+    values = {
+        name: getattr(frame, name)
+        for name in ReplayNoSharedObsAuthorizedPresentationFrameV1.model_fields
+    }
+    values["visual_events"] = bound_visual
+    return ReplayNoSharedObsAuthorizedPresentationFrameV1(**values)
+
+
+def _adjacent_fog_state_cases(
+    frame: ReplayNoSharedObsAuthorizedPresentationFrameV1,
+) -> dict[str, ReplayNoSharedObsAuthorizedPresentationFrameV1]:
+    """Generate positive browser cases for both adjacent fog-set directions."""
+    visual = frame.visual_events
+    if visual is None or visual.events:
+        raise RuntimeError("adjacent-fog fixture requires a noninitial empty frame")
+    recipient = next(
+        row
+        for row in visual.agent_phase_trajectories
+        if row.agent_presentation_key == visual.recipient_presentation_key
+    )
+    if recipient.transition_start is None:
+        raise RuntimeError("adjacent-fog fixture recipient requires a start anchor")
+
+    disappearing_public_id = "agent-slot-5"
+    disappearing_key = pov_presentation_key_v1(
+        authority_session_id=frame.source.source_session_id,
+        recipient_public_agent_id=visual.recipient_public_agent_id,
+        public_agent_id=disappearing_public_id,
+    )
+    disappearing_anchor = ReplayIncomingAgentAnchorV1(
+        phase="transition_start",
+        presentation_key=disappearing_key,
+        public_agent_id=disappearing_public_id,
+        position=(8.0, 4.0),
+    )
+    disappearing = AgentPovVisualIncomingAgentPhaseTrajectoryV1(
+        agent_presentation_key=disappearing_key,
+        agent_public_agent_id=disappearing_public_id,
+        agent_class_id=1,
+        transition_start=disappearing_anchor,
+        successor=None,
+    )
+    disappearance = _with_visual_events(
+        frame,
+        trajectories=(*visual.agent_phase_trajectories, disappearing),
+        event=ReplayIncomingAbilityActivatedEventV1(
+            event_id="pending-local-id",
+            ordinal=0,
+            phase_rank=20,
+            event_kind="ability_activated",
+            ability_component="basic",
+            source_anchor=disappearing_anchor,
+            recipient_anchor=recipient.transition_start,
+        ),
+    )
+
+    appearing_index = next(
+        index
+        for index, row in enumerate(visual.agent_phase_trajectories)
+        if row.agent_presentation_key != visual.recipient_presentation_key
+        and row.successor is not None
+    )
+    appearing = replace(
+        visual.agent_phase_trajectories[appearing_index],
+        transition_start=None,
+    )
+    appearance_trajectories = (
+        *(
+            row
+            for index, row in enumerate(visual.agent_phase_trajectories)
+            if index != appearing_index
+        ),
+        appearing,
+    )
+    if appearing.successor is None:
+        raise RuntimeError("adjacent-fog fixture appearance requires a successor")
+    appearance = _with_visual_events(
+        frame,
+        trajectories=appearance_trajectories,
+        event=ReplayIncomingAgentLeftCombatEventV1(
+            event_id="pending-local-id",
+            ordinal=0,
+            phase_rank=50,
+            event_kind="agent_left_combat",
+            agent_anchor=appearing.successor,
+        ),
+    )
+    return {
+        "replay_no_shared_agent_disappearance": disappearance,
+        "replay_no_shared_agent_appearance": appearance,
+    }
+
+
 def render_fixture() -> str:
     cases = cast("_WrappedFixture0[_InspectionCases]", inspection_cases).__wrapped__()
     frames = cast(
@@ -199,6 +318,11 @@ def render_fixture() -> str:
     }
     final_index = len(cases.no_shared.transitions)
     shared_final_index = len(cases.shared.transitions)
+    replay_no_shared_final = _replay_no_shared_at(
+        cases,
+        frame_index=final_index,
+        session="cp2-7-replay-no-shared-final",
+    )
     state_cases = {
         "live_oracle_frame_zero": _live_oracle_at(
             cases,
@@ -233,11 +357,7 @@ def render_fixture() -> str:
             frame_index=0,
             session="cp2-7-replay-no-shared-zero",
         ),
-        "replay_no_shared_final": _replay_no_shared_at(
-            cases,
-            frame_index=final_index,
-            session="cp2-7-replay-no-shared-final",
-        ),
+        "replay_no_shared_final": replay_no_shared_final,
         "replay_shared_frame_zero": _replay_shared_at(
             cases,
             frame_index=0,
@@ -249,6 +369,7 @@ def render_fixture() -> str:
             session="cp2-7-replay-shared-final",
         ),
     }
+    state_cases.update(_adjacent_fog_state_cases(replay_no_shared_final))
     payload = {
         "schema_version": 1,
         "presentations": {

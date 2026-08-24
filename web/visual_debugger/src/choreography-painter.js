@@ -427,14 +427,13 @@ export class SvgChoreographyPainter {
     if (Array.isArray(event.atomicEventIds)) {
       group.dataset.atomicEventIds = JSON.stringify(event.atomicEventIds);
     }
-    const underlay =
-      event.route || event.kind === "charge_displacement"
-        ? svgElement(ownerDocument, "g", {
-            class: `combat-route-effect combat-route-effect--${cssIdentifier(event.kind)}`,
-            "aria-hidden": "true",
-            opacity: options.settled || options.motionMode === "off" ? 1 : 0,
-          })
-        : null;
+    const underlay = event.route
+      ? svgElement(ownerDocument, "g", {
+          class: `combat-route-effect combat-route-effect--${cssIdentifier(event.kind)}`,
+          "aria-hidden": "true",
+          opacity: options.settled || options.motionMode === "off" ? 1 : 0,
+        })
+      : null;
     if (underlay) {
       copyEventMetadata(group, underlay);
       assignLayoutKey(underlay, event.routeLayoutKey ?? event.route?.layoutKey);
@@ -457,8 +456,6 @@ export class SvgChoreographyPainter {
       this.#renderNet(ownerDocument, group, event);
     } else if (event.kind === "regeneration") {
       this.#renderRegeneration(ownerDocument, group, event);
-    } else if (event.kind === "charge_displacement") {
-      this.#renderCharge(ownerDocument, group, underlay, event);
     } else if (event.kind === "status_lifecycle") {
       this.#renderLifecycle(ownerDocument, group, event, plan, options, animationSpecs);
     } else if (event.kind === "rejected_action") {
@@ -1139,70 +1136,6 @@ export class SvgChoreographyPainter {
   /**
    * @param {Document} ownerDocument
    * @param {SVGElement} group
-   * @param {SVGElement | null} underlay
-   * @param {JsonRecord} event
-   */
-  #renderCharge(ownerDocument, group, underlay, event) {
-    if (!event.start || !event.end || !underlay) {
-      return;
-    }
-    group.dataset.pathKind = event.pathKind;
-    underlay.append(
-      svgElement(ownerDocument, "path", {
-        class: "combat-route__hit combat-charge__hit",
-      }),
-      svgElement(ownerDocument, "path", {
-        class: "combat-charge__path",
-      }),
-    );
-    const start = svgElement(ownerDocument, "circle", {
-      class: "combat-charge__endpoint combat-charge__endpoint--start",
-      r: CHOREOGRAPHY_PAINT_FOOTPRINTS.chargeDisplacement.start.radius,
-    });
-    const end = svgElement(ownerDocument, "circle", {
-      class: "combat-charge__endpoint combat-charge__endpoint--end",
-      r: CHOREOGRAPHY_PAINT_FOOTPRINTS.chargeDisplacement.end.radius,
-    });
-    assignLayoutPlacement(
-      start,
-      event.startCueLayoutKey,
-      event.startCueBounds,
-      event.startCueDisposition,
-      event.startCueCollisionFree,
-    );
-    assignLayoutPlacement(
-      end,
-      event.endCueLayoutKey,
-      event.endCueBounds,
-      event.endCueDisposition,
-      event.endCueCollisionFree,
-    );
-    group.append(
-      start,
-      end,
-      svgElement(ownerDocument, "path", {
-        class: "combat-charge__direction",
-        d: "M -9 -5 L 1 0 L -9 5 Z",
-      }),
-    );
-    appendAllocatedLeader(
-      ownerDocument,
-      group,
-      "combat-cue__leader combat-cue__leader--charge-start",
-      event.startCueLeader,
-    );
-    appendAllocatedLeader(
-      ownerDocument,
-      group,
-      "combat-cue__leader combat-cue__leader--charge-end",
-      event.endCueLeader,
-    );
-    this.#updateChargeGeometry(group, underlay, event);
-  }
-
-  /**
-   * @param {Document} ownerDocument
-   * @param {SVGElement} group
    * @param {JsonRecord} event
    * @param {JsonRecord} plan
    * @param {PainterOptions} options
@@ -1678,7 +1611,7 @@ export class SvgChoreographyPainter {
       bridge.remove();
     }
     const visibleRoute = underlay.querySelector(
-      ".combat-route__path, .combat-charge__path, .combat-rejection__route",
+      ".combat-route__path, .combat-rejection__route",
     );
     if (!(visibleRoute instanceof SVGElement) || !Array.isArray(route?.bridgeGaps)) {
       return;
@@ -1739,8 +1672,6 @@ export class SvgChoreographyPainter {
         });
         this.#updateCueLeader(group, event, 18);
       }
-    } else if (event.kind === "charge_displacement") {
-      this.#updateChargeGeometry(group, underlay, event);
     } else if (event.kind === "status_lifecycle") {
       const lifecycle = group.querySelector(".combat-lifecycle");
       if (lifecycle instanceof SVGElement && event.recipient) {
@@ -2092,85 +2023,6 @@ export class SvgChoreographyPainter {
       });
     }
   }
-
-  /**
-   * @param {SVGElement} group
-   * @param {SVGElement | null} underlay
-   * @param {JsonRecord} event
-   */
-  #updateChargeGeometry(group, underlay, event) {
-    if (!event.start || !event.end) {
-      return;
-    }
-    const path = underlay?.querySelector(".combat-charge__path");
-    const hitPath = underlay?.querySelector(".combat-charge__hit");
-    const start = group.querySelector(".combat-charge__endpoint--start");
-    const end = group.querySelector(".combat-charge__endpoint--end");
-    const direction = group.querySelector(".combat-charge__direction");
-    const routePath =
-      event.route?.path ??
-      `M ${event.start.x} ${event.start.y} L ${event.end.x} ${event.end.y}`;
-    if (path) {
-      path.setAttribute("d", routePath);
-    }
-    if (hitPath) {
-      hitPath.setAttribute("d", routePath);
-    }
-    const startCue = event.startCue ?? event.start;
-    const endCue = event.endCue ?? event.end;
-    if (start) {
-      setAttributes(start, { cx: startCue.x, cy: startCue.y });
-      assignLayoutPlacement(
-        start,
-        event.startCueLayoutKey,
-        event.startCueBounds,
-        event.startCueDisposition,
-        event.startCueCollisionFree,
-      );
-    }
-    if (end) {
-      setAttributes(end, { cx: endCue.x, cy: endCue.y });
-      assignLayoutPlacement(
-        end,
-        event.endCueLayoutKey,
-        event.endCueBounds,
-        event.endCueDisposition,
-        event.endCueCollisionFree,
-      );
-    }
-    if (direction) {
-      const marker = event.route
-        ? routeMarkerPose(event.route)
-        : straightMarkerPose(event.start, event.end, 12);
-      setAttributes(direction, {
-        transform: `translate(${marker.x} ${marker.y}) rotate(${marker.degrees})`,
-      });
-    }
-    syncAllocatedLeader(
-      group,
-      ".combat-cue__leader--charge-start",
-      event.startCueLeader,
-    );
-    syncAllocatedLeader(group, ".combat-cue__leader--charge-end", event.endCueLeader);
-  }
-}
-
-/**
- * @param {{x: number, y: number}} start
- * @param {{x: number, y: number}} end
- * @param {number} endpointGap
- */
-function straightMarkerPose(start, end, endpointGap) {
-  const deltaX = end.x - start.x;
-  const deltaY = end.y - start.y;
-  const distance = Math.hypot(deltaX, deltaY);
-  const unitX = distance > 0 ? deltaX / distance : 1;
-  const unitY = distance > 0 ? deltaY / distance : 0;
-  return {
-    x: end.x - unitX * endpointGap,
-    y: end.y - unitY * endpointGap,
-    degrees: (Math.atan2(deltaY, deltaX) * 180) / Math.PI,
-  };
 }
 
 /**
@@ -2492,10 +2344,7 @@ function phaseFor(event) {
   if (event.kind === "net_health" || event.kind === "status_lifecycle") {
     return "outcome";
   }
-  if (
-    event.kind === "charge_displacement" ||
-    (event.kind === "activation" && event.presentationKind === "target_only_impact")
-  ) {
+  if (event.kind === "activation" && event.presentationKind === "target_only_impact") {
     return "impact";
   }
   return "activation";

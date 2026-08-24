@@ -12,7 +12,6 @@ const SCIENTIFIC_DISCLOSURES = Object.freeze([
   "#agent-details",
   "#pending-turn-details",
   "#latest-transition-details",
-  "#events-details",
   "#technical-frame-details",
 ]);
 
@@ -96,12 +95,10 @@ async function setDisclosureOpen(page, selector, open) {
 
 /**
  * @param {import("@playwright/test").Page} page
- * @param {{frameZeroEvents?: boolean}} [options]
  */
-async function expectExactDisclosureDefaults(page, { frameZeroEvents = false } = {}) {
+async function expectExactDisclosureDefaults(page) {
   await expect(page.locator("#command-deck")).toHaveAttribute("open", "");
   await expect(page.locator("#roster-details")).toHaveAttribute("open", "");
-  await expect(page.locator("#events-details")).toHaveAttribute("open", "");
   for (const selector of [
     "#agent-details",
     "#pending-turn-details",
@@ -109,11 +106,6 @@ async function expectExactDisclosureDefaults(page, { frameZeroEvents = false } =
     "#technical-frame-details",
   ]) {
     await expect(page.locator(selector)).not.toHaveAttribute("open", "");
-  }
-  if (frameZeroEvents) {
-    await expect(page.locator("#step-value")).toHaveText("0");
-    await expect(page.locator("#event-count")).toHaveText("0");
-    await expect(page.locator("#event-feed .event-item")).toHaveCount(0);
   }
 }
 
@@ -501,17 +493,56 @@ test("target selection preserves pointer Submit and keyboard-native focus", asyn
   const baseStep = await currentStep(page);
   const battlefield = page.locator("#battlefield");
   const targetSelect = page.locator("#command-target-select");
-  const pointerTarget = await targetSelect.evaluate((select) => {
+  const basicButton = page.locator("#basic-button");
+  await expect(targetSelect).toHaveValue("");
+  expect(
+    await targetSelect
+      .locator('option[value=""]')
+      .evaluate((option) => option.textContent?.includes("B ×")),
+  ).toBe(true);
+  await expect(basicButton).toHaveAttribute("data-authoritative-available", "false");
+  await expect(basicButton).toHaveAttribute("aria-disabled", "true");
+
+  const authorizedNonzeroTarget = await targetSelect.evaluate((select) => {
     if (!(select instanceof HTMLSelectElement)) {
       throw new TypeError("Target control is unavailable.");
     }
-    return [...select.options].find(
-      (option) => !option.disabled && option.value !== select.value,
-    )?.value;
+    const option = [...select.options].find(
+      (candidate) => !candidate.disabled && candidate.value !== "",
+    );
+    return option
+      ? {
+          value: option.value,
+          basicAvailable: option.textContent?.includes("B ✓") === true,
+        }
+      : null;
   });
-  if (pointerTarget === undefined) {
+  if (authorizedNonzeroTarget === null) {
     throw new Error("Target control has no alternative authorized option.");
   }
+
+  await targetSelect.selectOption(authorizedNonzeroTarget.value);
+  await expect.poll(() => requests.length).toBe(1);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await expect(targetSelect).toHaveValue(authorizedNonzeroTarget.value);
+  await expect(basicButton).toHaveAttribute(
+    "data-authoritative-available",
+    String(authorizedNonzeroTarget.basicAvailable),
+  );
+  await expect(basicButton).toHaveAttribute(
+    "aria-disabled",
+    String(!authorizedNonzeroTarget.basicAvailable),
+  );
+
+  await targetSelect.selectOption("");
+  await expect.poll(() => requests.length).toBe(2);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await expect(targetSelect).toHaveValue("");
+  await expect(basicButton).toHaveAttribute("data-authoritative-available", "false");
+  await expect(basicButton).toHaveAttribute("aria-disabled", "true");
+  requests.length = 0;
+
+  const pointerTarget = authorizedNonzeroTarget.value;
 
   const heldPointerPresentation = await holdNextPresentation(page);
   try {
@@ -575,6 +606,145 @@ test("target selection preserves pointer Submit and keyboard-native focus", asyn
   await expect(targetSelect).toBeFocused();
   await expect(page.locator("#step-value")).toHaveText(String(baseStep + 1));
   await page.unroute("**/api/command");
+});
+
+test("right click stays native while Escape alone clears the target and releases focus", async ({
+  page,
+}) => {
+  /** @type {Record<string, any>[]} */
+  const commands = [];
+  await page.route("**/api/command", async (route) => {
+    commands.push(route.request().postDataJSON()?.command ?? {});
+    await route.continue();
+  });
+
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  const battlefield = page.locator("#battlefield");
+  const targetSelect = page.locator("#command-target-select");
+  const target = await targetSelect.evaluate((select) => {
+    if (!(select instanceof HTMLSelectElement)) {
+      throw new TypeError("Target control is unavailable.");
+    }
+    return [...select.options].find((option) => !option.disabled && option.value !== "")
+      ?.value;
+  });
+  if (typeof target !== "string") {
+    throw new Error("Target control has no authorized nonzero target.");
+  }
+  await targetSelect.selectOption(target);
+  await expect.poll(() => commands.length).toBe(1);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await expect(targetSelect).toHaveValue(target);
+  commands.length = 0;
+
+  await page.locator("#help-button").focus();
+  const nativeEvents = await battlefield.evaluate((surface) => {
+    const pointerdown = new PointerEvent("pointerdown", {
+      bubbles: true,
+      cancelable: true,
+      button: 2,
+      clientX: 100,
+      clientY: 100,
+      pointerType: "mouse",
+    });
+    const contextmenu = new MouseEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+      button: 2,
+      clientX: 100,
+      clientY: 100,
+    });
+    const pointerDispatched = surface.dispatchEvent(pointerdown);
+    const contextmenuDispatched = surface.dispatchEvent(contextmenu);
+    return {
+      pointerDispatched,
+      pointerDefaultPrevented: pointerdown.defaultPrevented,
+      contextmenuDispatched,
+      contextmenuDefaultPrevented: contextmenu.defaultPrevented,
+      activeElementId: document.activeElement?.id ?? null,
+    };
+  });
+  expect(nativeEvents).toEqual({
+    pointerDispatched: true,
+    pointerDefaultPrevented: false,
+    contextmenuDispatched: true,
+    contextmenuDefaultPrevented: false,
+    activeElementId: "help-button",
+  });
+  await page.waitForTimeout(100);
+  expect(commands).toEqual([]);
+  await expect(targetSelect).toHaveValue(target);
+
+  await battlefield.focus();
+  await page.keyboard.press("Escape");
+  await expect.poll(() => commands.length).toBe(1);
+  expect(commands[0]).toMatchObject({ command_type: "keyboard", key: "Escape" });
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await expect(targetSelect).toHaveValue("");
+  await expect(battlefield).not.toBeFocused();
+  await page.unroute("**/api/command");
+});
+
+test("Live Mage Burst retains every authorized Mage and Warrior aura modifier", async ({
+  page,
+}) => {
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await page.locator("#reset-button").click();
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await expect(page.locator("#step-value")).toHaveText("0");
+  const stepBefore = await currentStep(page);
+  await page.locator("#ultimate-button").click();
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await expect(page.locator("#ultimate-button")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await page.locator("#submit-turn-button").click();
+  await expect(page.locator("#step-value")).toHaveText(String(stepBefore + 1), {
+    timeout: 120_000,
+  });
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+
+  const inventories = await page.evaluate(() => {
+    const identity = (/** @type {Element} */ element) =>
+      element
+        .closest("[data-presentation-key]")
+        ?.getAttribute("data-presentation-key") ?? null;
+    const factKey = (/** @type {Element} */ element) =>
+      `${identity(element)}|${element.getAttribute("data-token-id")}`;
+    return {
+      roster: Array.from(
+        document.querySelectorAll(".roster-fact-token--modifier"),
+        factKey,
+      ).sort(),
+      battlefield: Array.from(
+        document.querySelectorAll("#battlefield .modifier-cell"),
+        factKey,
+      ).sort(),
+      controlledKey: document
+        .querySelector('#battlefield .agent[data-controlled="true"]')
+        ?.getAttribute("data-presentation-key"),
+      suppressed: document
+        .querySelector('#battlefield [data-layer="durable-status-modifier"]')
+        ?.getAttribute("data-suppressed-modifier-presentation-keys"),
+    };
+  });
+  expect(inventories.roster).toHaveLength(10);
+  expect(inventories.battlefield).toEqual(inventories.roster);
+  expect(inventories.suppressed).toBe("");
+  expect(inventories.controlledKey).toBeTruthy();
+  await expect(
+    page.locator(
+      `#battlefield .status-cell[data-presentation-key="${inventories.controlledKey}"]`,
+    ),
+  ).not.toHaveCount(0);
+  await expect(
+    page.locator(
+      `#battlefield .cooldown-cell[data-presentation-key="${inventories.controlledKey}"]`,
+    ),
+  ).not.toHaveCount(0);
 });
 
 test("WASD followed immediately by Enter submits the installed draft once", async ({
@@ -928,9 +1098,7 @@ test("native panels preserve user state only within exact authority", async ({
     "installed",
   );
   await expect(page.locator("#view-select")).toHaveValue("researcher");
-  await expectExactDisclosureDefaults(page, {
-    frameZeroEvents: (await currentStep(page)) === 0,
-  });
+  await expectExactDisclosureDefaults(page);
 
   const firstActivation = page
     .locator(
@@ -957,7 +1125,6 @@ test("native panels preserve user state only within exact authority", async ({
   await page.locator("#battlefield .range-ring-owner").first().dispatchEvent("click");
   await expect(page.locator("#agent-details")).not.toHaveAttribute("open", "");
 
-  await setDisclosureOpen(page, "#events-details", false);
   await setDisclosureOpen(page, "#technical-frame-details", true);
   const rosterBody = page.locator("#roster-details-body");
   let savedScrollTop = await rosterBody.evaluate((body) => {
@@ -1022,7 +1189,6 @@ test("native panels preserve user state only within exact authority", async ({
     role: "control",
   });
   await expect(page.locator("#roster-details")).toHaveAttribute("open", "");
-  await expect(page.locator("#events-details")).not.toHaveAttribute("open", "");
   await expect(page.locator("#technical-frame-details")).toHaveAttribute("open", "");
   await expect(page.locator("#agent-details")).not.toHaveAttribute("open", "");
   await expect
@@ -1098,7 +1264,6 @@ test("native panels preserve user state only within exact authority", async ({
     )
     .toBe(true);
 
-  await setDisclosureOpen(page, "#events-details", false);
   await setDisclosureOpen(page, "#technical-frame-details", true);
   await page.locator("#view-select").selectOption("researcher");
   await expect(page.locator("#view-select")).toHaveValue("researcher");

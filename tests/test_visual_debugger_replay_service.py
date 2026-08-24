@@ -53,6 +53,7 @@ from scripts.dev.visual_debugger.replay_protocol import (
     ReplaySetRangesCommandV1,
     ReplaySetVerbosityCommandV1,
     ReplaySetViewCommandV1,
+    ReplayViewerFrameV1,
     ResearcherReplayTimelineV1,
     ResearcherReplayViewerFrameV1,
     SharedObsAgentPovReplayTimelineV1,
@@ -108,9 +109,13 @@ from marl_battlegrounds.evaluation.replay_io import (
     load_replay_bundle_v1,
     save_replay_bundle_v1,
 )
+from marl_battlegrounds.rendering.authorized_pov_scene import (
+    pov_presentation_key_v1,
+)
 from marl_battlegrounds.rendering.evaluation_adapter import (
     SharedObsSourceMaterialProjectionV1,
     build_shared_obs_authority_source_material_projection_v1,
+    build_visual_event_batch_v2,
 )
 from marl_battlegrounds.rendering.pov_scene import (
     ActorPovAnalyzerProjectionV1,
@@ -193,6 +198,13 @@ type _ReplayPresentationFrame = (
     ReplayOracleAuthorizedPresentationFrameV1
     | ReplayNoSharedObsAuthorizedPresentationFrameV1
     | ReplaySharedObsAuthorizedPresentationFrameV1
+)
+type _ReplayAgentPresentationFrame = (
+    ReplayNoSharedObsAuthorizedPresentationFrameV1
+    | ReplaySharedObsAuthorizedPresentationFrameV1
+)
+type _ReplayAgentViewerFrame = (
+    ActorPovReplayViewerFrameV1 | SharedObsAgentPovReplayViewerFrameV1
 )
 
 
@@ -462,6 +474,25 @@ def _presentation_response(
     return cast(_ReplayPresentationFrame, result.payload)
 
 
+def _agent_presentation_response(
+    result: PresentationResourceResultV1,
+) -> _ReplayAgentPresentationFrame:
+    assert result.outcome == "response"
+    assert type(result.payload) in {
+        ReplayNoSharedObsAuthorizedPresentationFrameV1,
+        ReplaySharedObsAuthorizedPresentationFrameV1,
+    }
+    return cast(_ReplayAgentPresentationFrame, result.payload)
+
+
+def _agent_viewer_frame(frame: ReplayViewerFrameV1) -> _ReplayAgentViewerFrame:
+    assert type(frame) in {
+        ActorPovReplayViewerFrameV1,
+        SharedObsAgentPovReplayViewerFrameV1,
+    }
+    return cast(_ReplayAgentViewerFrame, frame)
+
+
 def _recursive_keys(value: object) -> set[str]:
     if isinstance(value, dict):
         record = cast(dict[str, object], value)
@@ -549,6 +580,7 @@ def _shared_presentation_for_raw(
         if frame_index == len(case.bundle.replay.transitions)
         else case.bundle.replay.transitions[frame_index]
     )
+    incoming_visual_events = _incoming_visual_events(case, frame_index=frame_index)
     return build_replay_shared_obs_authorized_presentation_v1(
         raw,
         public_catalog=case.bundle.replay.header.context.static_mechanics_catalog,
@@ -558,8 +590,27 @@ def _shared_presentation_for_raw(
         current_active_nonrecipient_source_material=current_nonrecipient,
         previous_recipient_source_material=previous_recipient,
         previous_active_nonrecipient_source_material=previous_nonrecipient,
+        incoming_visual_events=incoming_visual_events,
         incoming_transition=incoming_transition,
         outgoing_transition=outgoing_transition,
+    )
+
+
+def _incoming_visual_events(
+    case: _ServiceCase,
+    *,
+    frame_index: int,
+) -> VisualEventBatchV2 | None:
+    if frame_index == 0:
+        return None
+    replay = case.bundle.replay
+    return build_visual_event_batch_v2(
+        EvaluationTransitionViewV1(
+            context=replay.header.context,
+            start_frame=replay.frames[frame_index - 1],
+            transition=replay.transitions[frame_index - 1],
+            successor_frame=replay.frames[frame_index],
+        )
     )
 
 
@@ -730,7 +781,7 @@ def test_current_metric_report_returns_exact_canonical_bytes_without_mutation(
     ) == before
 
 
-def test_current_metric_report_distinguishes_missing_only_in_oracle(
+def test_current_metric_report_availability_is_identical_in_every_visual_pov(
     service_cases: _ServiceCases,
 ) -> None:
     missing = ReplayViewerService(
@@ -767,30 +818,41 @@ def test_current_metric_report_distinguishes_missing_only_in_oracle(
         viewer_session_id="metric-report-shared-missing",
     )
 
-    assert missing.current_metric_report() == ReplayMetricReportResultV1(
-        outcome="missing",
-        payload=None,
-        filename=None,
+    available_cases = (
+        (no_shared_available, service_cases.complete.bundle),
+        (shared_available, service_cases.shared.bundle),
     )
-    denials = tuple(
-        service.current_metric_report()
-        for service in (
-            no_shared_available,
-            no_shared_missing,
-            shared_available,
-            shared_missing,
+    for service, bundle in available_cases:
+        artifact = bundle.metric_report_artifact
+        assert artifact is not None
+        assert service.current_metric_report() == ReplayMetricReportResultV1(
+            outcome="available",
+            payload=canonical_metric_report_artifact_json_bytes_v1(artifact),
+            filename=replay_service_module._safe_metric_report_filename(  # pyright: ignore[reportPrivateUsage]
+                bundle.replay.header.context.identity.episode_id
+            ),
         )
-    )
-    assert denials == (ReplayMetricReportResultV1("forbidden", None, None),) * 4
+    for service in (missing, no_shared_missing, shared_missing):
+        assert service.current_metric_report() == ReplayMetricReportResultV1(
+            outcome="missing",
+            payload=None,
+            filename=None,
+        )
 
 
-def test_agent_metric_denial_occurs_before_sidecar_access(
+def test_agent_metric_download_reads_the_canonical_sidecar_once(
     service_cases: _ServiceCases,
 ) -> None:
-    class PoisonBundle:
+    artifact = service_cases.complete.bundle.metric_report_artifact
+    assert artifact is not None
+
+    class CountingBundle:
+        calls = 0
+
         @property
         def metric_report_artifact(self) -> object:
-            raise AssertionError("Agent POV must not inspect metric sidecar presence")
+            self.calls += 1
+            return artifact
 
     service = ReplayViewerService(
         service_cases.complete.bundle,
@@ -798,13 +860,15 @@ def test_agent_metric_denial_occurs_before_sidecar_access(
         pov_global_slot=0,
         viewer_session_id="metric-report-poison",
     )
-    object.__setattr__(service, "_bundle", PoisonBundle())
+    bundle = CountingBundle()
+    object.__setattr__(service, "_bundle", bundle)
 
     assert service.current_metric_report() == ReplayMetricReportResultV1(
-        outcome="forbidden",
-        payload=None,
-        filename=None,
+        outcome="available",
+        payload=canonical_metric_report_artifact_json_bytes_v1(artifact),
+        filename="service-complete.marlbg-metrics.json",
     )
+    assert bundle.calls == 1
 
 
 def test_metric_report_view_switch_and_sidecar_read_share_one_lock_epoch(
@@ -851,11 +915,7 @@ def test_metric_report_view_switch_and_sidecar_read_share_one_lock_epoch(
 
     assert metric_result.outcome == "available"
     assert _response(command_result).frame.view_mode == "pov"
-    assert service.current_metric_report() == ReplayMetricReportResultV1(
-        outcome="forbidden",
-        payload=None,
-        filename=None,
-    )
+    assert service.current_metric_report() == metric_result
 
 
 @pytest.mark.parametrize(
@@ -1513,6 +1573,10 @@ def test_no_shared_packager_ignores_every_forbidden_raw_diagnostic_branch(
             service_cases.complete.bundle.replay.header.context.static_mechanics_catalog
         ),
         source_authority_epoch=raw.revision,
+        incoming_visual_events=_incoming_visual_events(
+            service_cases.complete,
+            frame_index=raw.cursor.frame_index,
+        ),
     )
     diagnostic_cursor = raw.cursor.model_copy(
         update={
@@ -1540,6 +1604,10 @@ def test_no_shared_packager_ignores_every_forbidden_raw_diagnostic_branch(
             service_cases.complete.bundle.replay.header.context.static_mechanics_catalog
         ),
         source_authority_epoch=raw.revision,
+        incoming_visual_events=_incoming_visual_events(
+            service_cases.complete,
+            frame_index=raw.cursor.frame_index,
+        ),
     )
 
     assert mutated == baseline
@@ -1590,6 +1658,10 @@ def test_no_shared_packager_rejects_poisoned_used_raw_headers(
                 service_cases.complete.bundle.replay.header.context.static_mechanics_catalog
             ),
             source_authority_epoch=raw.revision,
+            incoming_visual_events=_incoming_visual_events(
+                service_cases.complete,
+                frame_index=raw.cursor.frame_index,
+            ),
         )
 
 
@@ -1650,6 +1722,10 @@ def test_no_shared_packager_rejects_cursor_and_projection_runtime_poisons(
                     service_cases.complete.bundle.replay.header.context.static_mechanics_catalog
                 ),
                 source_authority_epoch=raw.revision,
+                incoming_visual_events=_incoming_visual_events(
+                    service_cases.complete,
+                    frame_index=raw.cursor.frame_index,
+                ),
             )
 
 
@@ -1840,7 +1916,7 @@ def test_current_presentation_shared_uses_fixed_recipient_epochs(
     assert service.command_cache_size == 0
 
 
-def test_shared_raw_product_contains_only_private_transport_identity(
+def test_shared_raw_product_separates_artifact_facts_from_private_battlefield_identity(
     service_cases: _ServiceCases,
 ) -> None:
     service = ReplayViewerService(
@@ -1854,6 +1930,7 @@ def test_shared_raw_product_contains_only_private_transport_identity(
     timeline = cast(SharedObsAgentPovReplayTimelineV1, service.current_timeline())
     frame_payload = json.loads(raw.model_dump_json())
     timeline_payload = json.loads(timeline.model_dump_json())
+    artifact_facts = frame_payload.pop("artifact_facts")
     forbidden = {
         "replay_reference",
         "artifact_id",
@@ -1899,6 +1976,11 @@ def test_shared_raw_product_contains_only_private_transport_identity(
     )
     assert not (all_strings & forbidden_values)
     assert not any(":shared-obs-source-material:" in value for value in all_strings)
+    assert artifact_facts == raw.artifact_facts.model_dump(mode="json")
+    assert artifact_facts["artifact_summary"]["replay_reference"]["artifact_id"] == (
+        service_cases.shared.bundle.replay.artifact_id
+    )
+    assert artifact_facts["processing"]["status"] == "succeeded"
     assert raw.frame_kind == "shared_obs_agent_pov_replay_viewer"
     assert timeline.timeline_kind == "shared_obs_agent_pov"
     assert raw.artifact_summary == timeline.artifact_summary
@@ -1909,7 +1991,7 @@ def test_shared_raw_product_contains_only_private_transport_identity(
     assert service.current_presentation().outcome == "response"
 
 
-def test_shared_command_and_error_envelopes_return_only_the_private_root(
+def test_shared_command_envelopes_keep_battlefield_private_beside_artifact_facts(
     service_cases: _ServiceCases,
 ) -> None:
     service = ReplayViewerService(
@@ -1942,7 +2024,13 @@ def test_shared_command_and_error_envelopes_return_only_the_private_root(
     assert duplicate.frame == applied.frame
     assert stale.latest_frame == applied.frame
     for envelope in (applied, duplicate, stale):
-        payload = json.loads(envelope.model_dump_json())
+        payload = cast(dict[str, Any], json.loads(envelope.model_dump_json()))
+        frame_payload = cast(
+            dict[str, Any],
+            payload.get("frame", payload.get("latest_frame")),
+        )
+        artifact_facts = frame_payload.pop("artifact_facts")
+        assert artifact_facts == applied.frame.artifact_facts.model_dump(mode="json")
         keys = _recursive_keys(payload)
         assert "projection" not in keys
         assert "replay_reference" not in keys
@@ -1951,7 +2039,7 @@ def test_shared_command_and_error_envelopes_return_only_the_private_root(
         assert "processing" not in keys
 
 
-def test_shared_raw_bytes_ignore_metric_and_processing_truth(
+def test_shared_artifact_facts_vary_without_changing_authorized_battlefield(
     service_cases: _ServiceCases,
 ) -> None:
     case = service_cases.shared
@@ -1985,7 +2073,23 @@ def test_shared_raw_bytes_ignore_metric_and_processing_truth(
         for bundle in (case.bundle, missing_metric, failed_bundle)
     )
 
-    assert len({service.current_frame().model_dump_json() for service in services}) == 1
+    frame_payloads: list[dict[str, Any]] = []
+    artifact_facts: list[dict[str, Any]] = []
+    for service in services:
+        payload = json.loads(service.current_frame().model_dump_json())
+        artifact_facts.append(payload.pop("artifact_facts"))
+        frame_payloads.append(payload)
+
+    assert len({json.dumps(payload, sort_keys=True) for payload in frame_payloads}) == 1
+    assert tuple(
+        facts["artifact_summary"]["metric_report_availability"]
+        for facts in artifact_facts
+    ) == ("available", "missing", "available")
+    assert tuple(facts["processing"]["status"] for facts in artifact_facts) == (
+        "succeeded",
+        "succeeded",
+        "failed",
+    )
     assert (
         len({service.current_timeline().model_dump_json() for service in services}) == 1
     )
@@ -2046,6 +2150,10 @@ def test_shared_packager_binds_private_raw_identity_to_authority_sources(
             current_active_nonrecipient_source_material=nonrecipient_zero,
             previous_recipient_source_material=current_zero,
             previous_active_nonrecipient_source_material=nonrecipient_zero,
+            incoming_visual_events=_incoming_visual_events(
+                service_cases.shared,
+                frame_index=raw.cursor.frame_index,
+            ),
             incoming_transition=service_cases.shared.bundle.replay.transitions[0],
             outgoing_transition=service_cases.shared.bundle.replay.transitions[1],
         )
@@ -2134,6 +2242,10 @@ def test_agent_packagers_reject_poisoned_cursor_schema_version(
                 service_cases.complete.bundle.replay.header.context.static_mechanics_catalog
             ),
             source_authority_epoch=no_shared_raw.revision,
+            incoming_visual_events=_incoming_visual_events(
+                service_cases.complete,
+                frame_index=no_shared_raw.cursor.frame_index,
+            ),
         )
 
     shared_service = ReplayViewerService(
@@ -2339,6 +2451,7 @@ def test_shared_packager_ignores_forbidden_transition_branches(
         current_active_nonrecipient_source_material=current_nonrecipient,
         previous_recipient_source_material=previous_recipient,
         previous_active_nonrecipient_source_material=previous_nonrecipient,
+        incoming_visual_events=_incoming_visual_events(case, frame_index=1),
         incoming_transition=incoming,
         outgoing_transition=outgoing,
     )
@@ -2351,6 +2464,7 @@ def test_shared_packager_ignores_forbidden_transition_branches(
         current_active_nonrecipient_source_material=current_nonrecipient,
         previous_recipient_source_material=previous_recipient,
         previous_active_nonrecipient_source_material=previous_nonrecipient,
+        incoming_visual_events=_incoming_visual_events(case, frame_index=1),
         incoming_transition=poison_hidden_rows(incoming),
         outgoing_transition=poison_hidden_rows(outgoing),
     )
@@ -2438,6 +2552,7 @@ def test_shared_packager_ignores_contributor_non_authority_and_unavailable_paylo
         current_active_nonrecipient_source_material=current_nonrecipient,
         previous_recipient_source_material=previous_recipient,
         previous_active_nonrecipient_source_material=previous_nonrecipient,
+        incoming_visual_events=_incoming_visual_events(case, frame_index=1),
         incoming_transition=case.bundle.replay.transitions[0],
         outgoing_transition=case.bundle.replay.transitions[1],
     )
@@ -2454,6 +2569,7 @@ def test_shared_packager_ignores_contributor_non_authority_and_unavailable_paylo
         previous_active_nonrecipient_source_material=poison_contributors(
             previous_nonrecipient
         ),
+        incoming_visual_events=_incoming_visual_events(case, frame_index=1),
         incoming_transition=case.bundle.replay.transitions[0],
         outgoing_transition=case.bundle.replay.transitions[1],
     )
@@ -2498,6 +2614,7 @@ def test_shared_packager_rejects_nonfixed_recipient_credentials(
             current_active_nonrecipient_source_material=current_nonrecipient,
             previous_recipient_source_material=previous_recipient,
             previous_active_nonrecipient_source_material=previous_nonrecipient,
+            incoming_visual_events=_incoming_visual_events(case, frame_index=1),
             incoming_transition=case.bundle.replay.transitions[0],
             outgoing_transition=case.bundle.replay.transitions[1],
         )
@@ -2628,6 +2745,7 @@ def test_shared_packager_rejects_source_tuple_and_epoch_swaps(
             previous_active_nonrecipient_source_material=(
                 previous_active_nonrecipient_source_material
             ),
+            incoming_visual_events=_incoming_visual_events(case, frame_index=1),
             incoming_transition=incoming_transition,
             outgoing_transition=outgoing_transition,
         )
@@ -2719,6 +2837,7 @@ def test_shared_packager_changes_for_valid_recipient_authorized_mask_mutation(
         current_active_nonrecipient_source_material=current_nonrecipient,
         previous_recipient_source_material=previous_recipient,
         previous_active_nonrecipient_source_material=previous_nonrecipient,
+        incoming_visual_events=_incoming_visual_events(case, frame_index=1),
         incoming_transition=case.bundle.replay.transitions[0],
         outgoing_transition=case.bundle.replay.transitions[1],
     )
@@ -2821,7 +2940,7 @@ def test_completion_states_and_captured_prefix_endpoints_are_exact(
         assert len(timeline.rows) == 1
 
 
-def test_missing_metric_sidecar_is_researcher_visible_but_pov_hidden(
+def test_missing_metric_sidecar_is_visible_in_every_frame_artifact_shell(
     service_cases: _ServiceCases,
 ) -> None:
     researcher = ReplayViewerService(
@@ -2846,9 +2965,21 @@ def test_missing_metric_sidecar_is_researcher_visible_but_pov_hidden(
         pov_frame.artifact_summary.metric_report_availability
         == ACTOR_POV_METRIC_REPORT_AVAILABILITY_V1
     )
+    assert pov_frame.artifact_facts.artifact_summary == (
+        researcher_frame.artifact_summary
+    )
+    assert (
+        pov_frame.artifact_facts.artifact_summary.metric_report_availability
+        == "missing"
+    )
     assert (
         pov_timeline.artifact_summary.metric_report_availability
         == ACTOR_POV_METRIC_REPORT_AVAILABILITY_V1
+    )
+    assert exact_pov.current_metric_report() == ReplayMetricReportResultV1(
+        outcome="missing",
+        payload=None,
+        filename=None,
     )
 
 
@@ -2872,7 +3003,7 @@ def test_loaded_bundle_status_must_match_metric_sidecar_presence(
             ReplayViewerService(bundle)
 
 
-def test_exact_pov_is_byte_identical_with_or_without_metric_sidecar(
+def test_exact_pov_metric_availability_changes_only_shared_artifact_facts(
     service_cases: _ServiceCases,
 ) -> None:
     available = ReplayViewerService(
@@ -2886,15 +3017,24 @@ def test_exact_pov_is_byte_identical_with_or_without_metric_sidecar(
         viewer_session_id="same-pov-session",
     )
 
-    assert available.current_frame().model_dump_json() == (
-        missing.current_frame().model_dump_json()
+    available_payload = json.loads(available.current_frame().model_dump_json())
+    missing_payload = json.loads(missing.current_frame().model_dump_json())
+    available_facts = available_payload.pop("artifact_facts")
+    missing_facts = missing_payload.pop("artifact_facts")
+
+    assert available_payload == missing_payload
+    assert available_facts["artifact_summary"]["metric_report_availability"] == (
+        "available"
+    )
+    assert missing_facts["artifact_summary"]["metric_report_availability"] == (
+        "missing"
     )
     assert available.current_timeline().model_dump_json() == (
         missing.current_timeline().model_dump_json()
     )
 
 
-def test_exact_pov_processing_failure_disclosure_is_constant_and_content_stable(
+def test_exact_pov_processing_facts_are_shared_without_changing_fogged_battlefield(
     service_cases: _ServiceCases,
 ) -> None:
     healthy = ReplayViewerService(
@@ -2921,11 +3061,18 @@ def test_exact_pov_processing_failure_disclosure_is_constant_and_content_stable(
     )
     healthy_payload = json.loads(healthy_frame.model_dump_json())
     failed_payload = json.loads(failed_frame.model_dump_json())
+    healthy_facts = healthy_payload.pop("artifact_facts")
+    failed_facts = failed_payload.pop("artifact_facts")
     healthy_reference = healthy_payload["artifact_summary"].pop("replay_reference")
     failed_reference = failed_payload["artifact_summary"].pop("replay_reference")
 
     assert healthy_reference != failed_reference
     assert healthy_payload == failed_payload
+    assert healthy_facts["processing"]["status"] == "succeeded"
+    assert healthy_facts["processing"]["failure_stage"] is None
+    assert failed_facts["processing"]["status"] == "failed"
+    assert failed_facts["processing"]["failure_stage"] == "reducer_finalize"
+    assert failed_facts["processing"]["failure_code"] == "reducer_finalize_failed"
     assert healthy_frame.processing_disclosure.disclosure == (
         ACTOR_POV_PROCESSING_DISCLOSURE_V1
     )
@@ -2945,9 +3092,10 @@ def test_exact_pov_processing_failure_disclosure_is_constant_and_content_stable(
     healthy_timeline["artifact_summary"].pop("replay_reference")
     failed_timeline["artifact_summary"].pop("replay_reference")
     assert healthy_timeline == failed_timeline
+    assert healthy.current_presentation() == failed.current_presentation()
 
 
-def test_shared_obs_raw_view_is_private_identity_only_and_never_exports_exact_pov(
+def test_shared_obs_raw_view_keeps_fog_identity_private_beside_artifact_facts(
     service_cases: _ServiceCases,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2971,6 +3119,7 @@ def test_shared_obs_raw_view_is_private_identity_only_and_never_exports_exact_po
     frame = service.current_frame()
     timeline = service.current_timeline()
     payload = json.loads(frame.model_dump_json())
+    artifact_facts = payload.pop("artifact_facts")
 
     assert isinstance(frame, SharedObsAgentPovReplayViewerFrameV1)
     assert isinstance(timeline, SharedObsAgentPovReplayTimelineV1)
@@ -2987,6 +3136,7 @@ def test_shared_obs_raw_view_is_private_identity_only_and_never_exports_exact_po
     assert "selected_global_slot" not in keys
     assert "source_material_frame_id" not in keys
     assert "replay_reference" not in keys
+    assert artifact_facts == frame.artifact_facts.model_dump(mode="json")
     assert service.current_presentation().outcome == "response"
     assert service.shared_timeline_build_count == 1
 
@@ -3112,6 +3262,225 @@ def test_inactive_actor_requests_fail_closed_without_state_change(
     assert _error(invalid_selection).latest_frame == before
     assert service.revision == 0
     assert service.current_frame() == before
+
+
+@pytest.mark.parametrize("audience", ("no_shared_obs", "shared_obs"))
+def test_visible_pov_presentation_key_switches_exact_recipient_without_navigation(
+    service_cases: _ServiceCases,
+    audience: Literal["no_shared_obs", "shared_obs"],
+) -> None:
+    service = _presentation_service(
+        service_cases,
+        audience,
+        viewer_session_id=f"visible-pov-switch-{audience}",
+        frame_index=0,
+    )
+    before = _agent_viewer_frame(service.current_frame())
+    before_presentation = _agent_presentation_response(service.current_presentation())
+    candidate = next(
+        row
+        for row in before_presentation.current_endpoint.parts.scene.agents
+        if row.public_agent_id != before.public_agent_id
+    )
+    case = service_cases.shared if audience == "shared_obs" else service_cases.complete
+    expected_slot = next(
+        row.global_slot
+        for row in case.bundle.replay.header.context.roster
+        if row.configured_active and row.public_agent_id == candidate.public_agent_id
+    )
+
+    switched = _response(
+        _apply(
+            service,
+            ReplaySetPovActorCommandV1(
+                presentation_key=candidate.presentation_key,
+            ),
+            command_id=f"visible-pov-switch-{audience}",
+        )
+    )
+
+    assert switched.result == "applied"
+    assert switched.animate_incoming is False
+    switched_frame = _agent_viewer_frame(switched.frame)
+    assert switched_frame.revision == before.revision + 1 == service.revision
+    assert switched_frame.cursor == before.cursor
+    assert switched_frame.public_agent_id == candidate.public_agent_id
+    if type(switched_frame) is ActorPovReplayViewerFrameV1:
+        assert switched_frame.pov_global_slot == expected_slot
+    after_presentation = _agent_presentation_response(service.current_presentation())
+    assert (
+        after_presentation.source.source_recipient_public_agent_id
+        == candidate.public_agent_id
+    )
+    assert (
+        after_presentation.current_endpoint.parts.recipient_presentation_key
+        != candidate.presentation_key
+    )
+
+
+@pytest.mark.parametrize("audience", ("no_shared_obs", "shared_obs"))
+@pytest.mark.parametrize("invalid_key_kind", ("forged", "invisible"))
+def test_unavailable_pov_presentation_key_cannot_mutate_recipient_or_cursor(
+    service_cases: _ServiceCases,
+    audience: Literal["no_shared_obs", "shared_obs"],
+    invalid_key_kind: Literal["forged", "invisible"],
+) -> None:
+    service = _presentation_service(
+        service_cases,
+        audience,
+        viewer_session_id=f"invalid-pov-key-{audience}-{invalid_key_kind}",
+        frame_index=0,
+    )
+    before = _agent_viewer_frame(service.current_frame())
+    presentation = _agent_presentation_response(service.current_presentation())
+    visible_ids = {
+        row.public_agent_id for row in presentation.current_endpoint.parts.scene.agents
+    }
+    if invalid_key_kind == "forged":
+        invalid_key = f"pov_{'f' * 64}"
+        assert invalid_key not in {
+            row.presentation_key
+            for row in presentation.current_endpoint.parts.scene.agents
+        }
+    else:
+        case = (
+            service_cases.shared if audience == "shared_obs" else service_cases.complete
+        )
+        invisible = next(
+            row
+            for row in case.bundle.replay.header.context.roster
+            if row.configured_active and row.public_agent_id not in visible_ids
+        )
+        invalid_key = pov_presentation_key_v1(
+            authority_session_id=presentation.source.source_session_id,
+            recipient_public_agent_id=before.public_agent_id,
+            public_agent_id=invisible.public_agent_id,
+        )
+
+    rejected = _apply(
+        service,
+        ReplaySetPovActorCommandV1(presentation_key=invalid_key),
+        command_id=f"invalid-pov-key-{audience}-{invalid_key_kind}",
+    )
+
+    assert rejected.outcome == "audience_unavailable"
+    assert _error(rejected).latest_frame == before
+    assert service.current_frame() is before
+    assert service.revision == before.revision
+    current = _agent_viewer_frame(service.current_frame())
+    assert current.cursor == before.cursor
+    assert current.public_agent_id == before.public_agent_id
+    assert service.current_presentation() == PresentationResourceResultV1(
+        outcome="response",
+        payload=presentation,
+    )
+
+
+@pytest.mark.parametrize("audience", ("no_shared_obs", "shared_obs"))
+def test_previous_authority_pov_key_is_stale_after_recipient_switch(
+    service_cases: _ServiceCases,
+    audience: Literal["no_shared_obs", "shared_obs"],
+) -> None:
+    service = _presentation_service(
+        service_cases,
+        audience,
+        viewer_session_id=f"stale-pov-key-{audience}",
+        frame_index=0,
+    )
+    initial_presentation = _agent_presentation_response(service.current_presentation())
+    old_authority_candidate = next(
+        row
+        for row in initial_presentation.current_endpoint.parts.scene.agents
+        if row.public_agent_id
+        != initial_presentation.source.source_recipient_public_agent_id
+    )
+    _response(
+        _apply(
+            service,
+            ReplaySetPovActorCommandV1(
+                presentation_key=old_authority_candidate.presentation_key,
+            ),
+            command_id=f"establish-new-pov-authority-{audience}",
+        )
+    )
+    before_rejection = _agent_viewer_frame(service.current_frame())
+
+    rejected = _apply(
+        service,
+        ReplaySetPovActorCommandV1(
+            presentation_key=old_authority_candidate.presentation_key,
+        ),
+        command_id=f"reject-stale-pov-key-{audience}",
+    )
+
+    assert rejected.outcome == "audience_unavailable"
+    assert _error(rejected).latest_frame == before_rejection
+    assert service.current_frame() is before_rejection
+    assert service.revision == before_rejection.revision
+    current = _agent_viewer_frame(service.current_frame())
+    assert current.cursor == before_rejection.cursor
+    assert current.public_agent_id == old_authority_candidate.public_agent_id
+
+
+def test_presentation_key_pov_switch_is_unavailable_in_researcher_view(
+    service_cases: _ServiceCases,
+) -> None:
+    service = _presentation_service(
+        service_cases,
+        "oracle",
+        viewer_session_id="researcher-rejects-pov-key",
+        frame_index=0,
+    )
+    before = service.current_frame()
+
+    rejected = _apply(
+        service,
+        ReplaySetPovActorCommandV1(presentation_key=f"pov_{'a' * 64}"),
+        command_id="researcher-rejects-pov-key",
+    )
+
+    assert rejected.outcome == "audience_unavailable"
+    assert _error(rejected).latest_frame == before
+    assert service.current_frame() is before
+    assert service.revision == before.revision
+    assert service.current_frame().cursor == before.cursor
+
+
+@pytest.mark.parametrize("audience", ("no_shared_obs", "shared_obs"))
+def test_legacy_global_slot_pov_switch_remains_compatible(
+    service_cases: _ServiceCases,
+    audience: Literal["no_shared_obs", "shared_obs"],
+) -> None:
+    service = _presentation_service(
+        service_cases,
+        audience,
+        viewer_session_id=f"legacy-pov-switch-{audience}",
+        frame_index=0,
+    )
+    before = _agent_viewer_frame(service.current_frame())
+    case = service_cases.shared if audience == "shared_obs" else service_cases.complete
+    expected_public_id = next(
+        row.public_agent_id
+        for row in case.bundle.replay.header.context.roster
+        if row.global_slot == 1
+    )
+
+    switched = _response(
+        _apply(
+            service,
+            ReplaySetPovActorCommandV1(global_slot=1),
+            command_id=f"legacy-pov-switch-{audience}",
+        )
+    )
+
+    assert switched.result == "applied"
+    assert switched.animate_incoming is False
+    switched_frame = _agent_viewer_frame(switched.frame)
+    assert switched_frame.revision == before.revision + 1 == service.revision
+    assert switched_frame.cursor == before.cursor
+    assert switched_frame.public_agent_id == expected_public_id
+    if type(switched_frame) is ActorPovReplayViewerFrameV1:
+        assert switched_frame.pov_global_slot == 1
 
 
 @pytest.mark.parametrize("invalid_lane", (True, -1, 2, "1"))

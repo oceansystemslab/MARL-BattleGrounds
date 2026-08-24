@@ -1466,13 +1466,13 @@ export class BattlefieldRenderer {
         lane: 0,
         label: "0/B",
         name: "Basic",
-        available: Boolean(legality.lane_0_available),
+        available: Boolean(legality.basic_available),
       },
       {
         lane: 1,
         label: "1/U",
         name: "Ultimate",
-        available: Boolean(legality.lane_1_available),
+        available: Boolean(legality.ultimate_available),
       },
     ];
     for (const [index, lane] of lanes.entries()) {
@@ -1726,8 +1726,8 @@ export class BattlefieldRenderer {
                   !Number.isFinite(modifier.multiplier) ||
                   modifier.multiplier !== 1,
               ),
-              controlled: false,
-              selected: false,
+              controlled: agent.controlled,
+              selected: agent.selected,
             })),
             viewport: transform.viewportBounds,
             reservedRects: [

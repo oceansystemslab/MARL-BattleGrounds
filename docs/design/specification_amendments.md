@@ -511,6 +511,23 @@ Oracle state. The diagnostic `source_material_only` view described by A10 is
 not a product Agent-POV presentation root and must not be installed or labelled
 as one.
 
+That exclusion governs the durable Agent scene and learner-facing material; it
+does not make visible battlefield actions disappear from replay or debugger
+playback.  The presentation layer may carry a separate, ephemeral visual-event
+projection derived from the canonical incoming transition.  Every agent and
+phase anchor in an emitted row must already be authorized by the recipient's
+fog-filtered start or successor scene. A payload fact that describes or derives
+from an endpoint requires that endpoint to be authorized even when its canonical
+coordinate anchor belongs to an earlier phase; for example, hidden successor
+health, regeneration, and cooldown outcomes cannot be disclosed through a
+transition-start anchor. Hidden sources, targets, aura emitters, inactive
+identities, and global-only pulses are omitted server-side. Surviving rows use a
+dense recipient-local identity axis, so canonical event IDs, hidden counts,
+ordering gaps, slots, and Oracle frame or transition identities never cross the
+Agent presentation boundary. This projection exists only to render the same
+visible action semantics as Oracle View under fog; it is not stored in or
+derived from the learner's actor-input artifact.
+
 Neither representation is a materialized SharedObs learner input. Exact
 SharedObs actor-input export remains unavailable until the Milestone 12
 compositor is implemented, performance-tested, and accepted. Presentation and

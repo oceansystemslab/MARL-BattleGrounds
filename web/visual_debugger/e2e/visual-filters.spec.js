@@ -24,10 +24,7 @@ const FILTERS = Object.freeze([
   ["healing_effects", "Healing Effects"],
   ["regeneration_effects", "Regeneration Effects"],
   ["cooldown_effects", "Cooldown Effects"],
-  ["charge_movement", "Charge Movement"],
   ["status_application", "Status Application"],
-  ["status_reapplication", "Status Reapplication"],
-  ["status_refresh_extension", "Status Refresh/Extension"],
   ["natural_status_expiry", "Natural Status Expiry"],
   ["freezing_trap_break", "Freezing Trap Break"],
   ["status_clear_on_death", "Status Clear on Death"],
@@ -294,11 +291,17 @@ async function expectFilterSurface(page, disabledIds = []) {
   await expect(page.locator("#visual-filter-count")).toHaveText(
     `${enabledCount} enabled`,
   );
-  const restoreAll = page.locator("#restore-all-visual-filters-button");
+  const enableAll = page.locator("#enable-all-visual-filters-button");
+  const disableAll = page.locator("#disable-all-visual-filters-button");
   if (enabledCount === FILTERS.length) {
-    await expect(restoreAll).toBeDisabled();
+    await expect(enableAll).toBeDisabled();
   } else {
-    await expect(restoreAll).toBeEnabled();
+    await expect(enableAll).toBeEnabled();
+  }
+  if (enabledCount === 0) {
+    await expect(disableAll).toBeDisabled();
+  } else {
+    await expect(disableAll).toBeEnabled();
   }
   expect(
     await page.locator("#visual-filters button").evaluateAll((buttons) =>
@@ -307,7 +310,10 @@ async function expectFilterSurface(page, disabledIds = []) {
         text: button.textContent?.trim(),
       })),
     ),
-  ).toEqual([{ id: "restore-all-visual-filters-button", text: "Restore All" }]);
+  ).toEqual([
+    { id: "enable-all-visual-filters-button", text: "Enable All" },
+    { id: "disable-all-visual-filters-button", text: "Disable All" },
+  ]);
 }
 
 /**
@@ -335,7 +341,7 @@ async function setFilter(page, apiRequests, filterId, enabled, label) {
 }
 
 /**
- * Exact science, inspector, legality, authority, and accessible-feed bytes.
+ * Exact science, inspector, legality, authority, and authorized-panel bytes.
  * Deliberately excludes filter paint and playback state.
  *
  * @param {import("@playwright/test").Page} page
@@ -391,7 +397,6 @@ async function scientificSignature(page, replay) {
       },
       step: document.querySelector("#step-value")?.textContent,
       transition: document.querySelector("#transition-value")?.textContent,
-      feed: exactHtml("#event-feed"),
       selection: exactHtml("#selection-card"),
       pending: exactHtml("#pending-card"),
       accepted: exactHtml("#accepted-card"),
@@ -401,7 +406,6 @@ async function scientificSignature(page, replay) {
         "agent-details",
         "pending-turn-details",
         "latest-transition-details",
-        "events-details",
         "technical-frame-details",
       ].map((id) => ({
         id,
@@ -536,19 +540,12 @@ async function expectUltimateAbsent(page, eventIds) {
  * @param {import("@playwright/test").Page} page
  * @param {{method: string, path: string}[]} apiRequests
  */
-async function disableEveryFilter(page, apiRequests) {
+async function disableAllFilters(page, apiRequests) {
   await expectLocalOnly(
     page,
     apiRequests,
-    () =>
-      page.locator(`#visual-filter-options ${FILTER_INPUT}`).evaluateAll((inputs) => {
-        for (const input of inputs) {
-          if (input instanceof HTMLInputElement && input.checked) {
-            input.click();
-          }
-        }
-      }),
-    { label: "disabling all 23 filters" },
+    () => page.locator("#disable-all-visual-filters-button").click(),
+    { label: "Disable All" },
   );
 }
 
@@ -595,12 +592,12 @@ async function expectAllPaintAbsentWithoutDwell(page) {
   expect(state.roots).toEqual([
     {
       state: "settled",
-      paintKey: `visual-filters-v1:${"0".repeat(23)}`,
+      paintKey: `visual-filters-v1:${"0".repeat(20)}`,
       childCount: 0,
     },
     {
       state: "settled",
-      paintKey: `visual-filters-v1:${"0".repeat(23)}`,
+      paintKey: `visual-filters-v1:${"0".repeat(20)}`,
       childCount: 0,
     },
   ]);
@@ -624,6 +621,19 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
     presentationKind: "live_oracle",
   });
   await openVisualFilters(page);
+  await expectFilterSurface(page);
+  await expectLocalOnly(
+    page,
+    apiRequests,
+    () =>
+      page.locator("#enable-all-visual-filters-button").evaluate((button) => {
+        if (!(button instanceof HTMLButtonElement)) {
+          throw new TypeError("Enable All is unavailable.");
+        }
+        button.click();
+      }),
+    { label: "disabled Enable All idempotency" },
+  );
   await expectFilterSurface(page);
   await ensureRangesOn(page, "live");
 
@@ -848,30 +858,56 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
 
   const allOffScience = await scientificSignature(page, true);
   const allOffRanges = await rangeSignature(page, "#replay-ranges-button");
-  await disableEveryFilter(page, apiRequests);
+  await disableAllFilters(page, apiRequests);
   await expectFilterSurface(page, FILTER_IDS);
   await expectAllPaintAbsentWithoutDwell(page);
   expect(await scientificSignature(page, true)).toEqual(allOffScience);
   expect(await rangeSignature(page, "#replay-ranges-button")).toEqual(allOffRanges);
+  await expectLocalOnly(
+    page,
+    apiRequests,
+    () =>
+      page.locator("#disable-all-visual-filters-button").evaluate((button) => {
+        if (!(button instanceof HTMLButtonElement)) {
+          throw new TypeError("Disable All is unavailable.");
+        }
+        button.click();
+      }),
+    { label: "disabled Disable All idempotency" },
+  );
+  await expectFilterSurface(page, FILTER_IDS);
 
   await expectLocalOnly(
     page,
     apiRequests,
-    () => page.locator("#restore-all-visual-filters-button").click(),
-    { label: "Restore All" },
+    () => page.locator("#enable-all-visual-filters-button").click(),
+    { label: "Enable All" },
   );
   await expectFilterSurface(page);
   expect(await scientificSignature(page, true)).toEqual(allOffScience);
   expect(await rangeSignature(page, "#replay-ranges-button")).toEqual(allOffRanges);
   expect(await auraMarkup(page)).toBe(replayAuras);
   expect(await ultimateInventory(page)).toEqual(ultimateBefore);
-  const restoredChoreographyRoots = page.locator(CHOREOGRAPHY_ROOTS);
-  await expect(restoredChoreographyRoots).toHaveCount(2);
+  const enabledChoreographyRoots = page.locator(CHOREOGRAPHY_ROOTS);
+  await expect(enabledChoreographyRoots).toHaveCount(2);
   expect(
-    await restoredChoreographyRoots.evaluateAll((roots) =>
+    await enabledChoreographyRoots.evaluateAll((roots) =>
       roots.map((root) => root.getAttribute("data-paint-key")),
     ),
-  ).toEqual(Array(2).fill(`visual-filters-v1:${"1".repeat(23)}`));
+  ).toEqual(Array(2).fill(`visual-filters-v1:${"1".repeat(20)}`));
+  await expectLocalOnly(
+    page,
+    apiRequests,
+    () =>
+      page.locator("#enable-all-visual-filters-button").evaluate((button) => {
+        if (!(button instanceof HTMLButtonElement)) {
+          throw new TypeError("Enable All is unavailable.");
+        }
+        button.click();
+      }),
+    { label: "post-enable Enable All idempotency" },
+  );
+  await expectFilterSurface(page);
 
   await setFilter(page, apiRequests, "aura_fields", false, "pre-reload replay aura");
   await page.reload();

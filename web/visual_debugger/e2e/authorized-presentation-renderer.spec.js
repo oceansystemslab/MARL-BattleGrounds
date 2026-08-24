@@ -558,6 +558,111 @@ test("durable visual filters remove owned paint and restore stable battlefield i
   }
 });
 
+test("selected Replay aura modifiers remain exact beside Mage Burst duration and cooldown", async ({
+  page,
+}) => {
+  await page.goto(origin);
+  const result = await page.evaluate(async (raw) => {
+    const moduleRoot = "/src";
+    const { normalizeAuthorizedPresentationFrameV1 } = await import(
+      `${moduleRoot}/authorized-presentation-normalizer.js`
+    );
+    const { authorizedPresentationSceneView } = await import(
+      `${moduleRoot}/authorized-presentation-adapter.js`
+    );
+    const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+    const { resolveVisualToken } = await import(`${moduleRoot}/vocabulary.js`);
+    const battlefield = document.querySelector("#battlefield");
+    const empty = document.querySelector("#empty");
+    if (!(battlefield instanceof SVGSVGElement) || !(empty instanceof HTMLElement)) {
+      throw new Error("Aura-coexistence test surface is unavailable.");
+    }
+    const presentation = await normalizeAuthorizedPresentationFrameV1(raw);
+    const scene = authorizedPresentationSceneView(presentation);
+    if (scene === null) {
+      throw new Error("Authorized Replay scene is unavailable.");
+    }
+    const expected = scene.agents
+      .flatMap((/** @type {Record<string, any>} */ agent) =>
+        (Array.isArray(agent.modifiers) ? agent.modifiers : [])
+          .filter(
+            (/** @type {Record<string, any>} */ modifier) =>
+              typeof modifier.multiplier !== "number" ||
+              !Number.isFinite(modifier.multiplier) ||
+              modifier.multiplier !== 1,
+          )
+          .map((/** @type {Record<string, any>} */ modifier) => {
+            const token = resolveVisualToken("modifier", modifier.token_id, modifier);
+            return `${agent.presentation_key}|${token.tokenId}`;
+          }),
+      )
+      .sort();
+    const selectedKey = scene.selection?.selected_presentation_key ?? null;
+    const renderer = new BattlefieldRenderer({ battlefield, empty });
+    const rows = [];
+    for (const viewport of [
+      { width: 960, height: 600 },
+      { width: 1440, height: 900 },
+    ]) {
+      battlefield.style.width = `${viewport.width}px`;
+      battlefield.style.height = `${viewport.height}px`;
+      renderer.render(presentation, { showRanges: true });
+      const actual = Array.from(
+        battlefield.querySelectorAll(".modifier-cell"),
+        (cell) =>
+          `${cell.getAttribute("data-presentation-key")}|${cell.getAttribute("data-token-id")}`,
+      ).sort();
+      const durableLayer = battlefield.querySelector(
+        '[data-layer="durable-status-modifier"]',
+      );
+      rows.push({
+        viewport: `${viewport.width}x${viewport.height}`,
+        actual,
+        suppressed:
+          durableLayer?.getAttribute("data-suppressed-modifier-presentation-keys") ??
+          null,
+        collisionFree: Array.from(
+          battlefield.querySelectorAll(".modifier-dock"),
+          (dock) => dock.getAttribute("data-collision-free"),
+        ),
+        selectedStatusCount:
+          selectedKey === null
+            ? 0
+            : battlefield.querySelectorAll(
+                `.status-cell[data-presentation-key="${selectedKey}"]`,
+              ).length,
+        selectedCooldownCount:
+          selectedKey === null
+            ? 0
+            : battlefield.querySelectorAll(
+                `.cooldown-cell[data-presentation-key="${selectedKey}"]`,
+              ).length,
+      });
+    }
+    return { expected, selectedKey, rows };
+  }, fixture.state_cases.replay_oracle_final_selected);
+
+  expect(result.selectedKey).not.toBeNull();
+  expect(result.expected).toHaveLength(2);
+  expect(
+    result.expected.some((/** @type {string} */ key) =>
+      key.endsWith("|mage_amplification"),
+    ),
+  ).toBe(true);
+  expect(
+    result.expected.some((/** @type {string} */ key) =>
+      key.endsWith("|warrior_mitigation"),
+    ),
+  ).toBe(true);
+  for (const row of result.rows) {
+    expect(row.actual, row.viewport).toEqual(result.expected);
+    expect(row.suppressed, row.viewport).toBe("");
+    expect(row.collisionFree, row.viewport).not.toContain("false");
+    expect(row.selectedStatusCount, row.viewport).toBeGreaterThan(0);
+    expect(row.selectedCooldownCount, row.viewport).toBeGreaterThan(0);
+  }
+});
+
 test("all three normalized Agent POV leaves keep hidden aura sources byte-inert", async ({
   page,
 }) => {
@@ -974,7 +1079,7 @@ test("live and replay damage/healing marks meet their activation route endpoint"
   }
 });
 
-test("live and replay Charge displacement is the exact straight pre-movement segment", async ({
+test("live and replay keep Charge displacement authorized without painting an overlay", async ({
   page,
 }) => {
   for (const leafName of ["live_oracle", "replay_oracle"]) {
@@ -1030,7 +1135,7 @@ test("live and replay Charge displacement is the exact straight pre-movement seg
       const surface = renderer.choreographySurface();
       const plan = buildChoreographyPlan(presentation, surface);
       if (surface === null || plan === null) {
-        throw new Error("Authorized Charge displacement is unavailable.");
+        throw new Error("Authorized Charge event is unavailable.");
       }
       new SvgChoreographyPainter().install(plan, surface, {
         motionMode: "off",
@@ -1038,61 +1143,38 @@ test("live and replay Charge displacement is the exact straight pre-movement seg
         persistentOnly: false,
       });
       const charge = /** @type {Record<string, any>} */ (plan.events[0]);
-      const trajectory = /** @type {Record<string, any>[]} */ (
-        presentation.latest_events.agent_phase_trajectories
-      ).find(
-        (candidate) =>
-          candidate.agent_presentation_key === charge.sourcePresentationKey,
-      );
-      const path = battlefield.querySelector(".combat-charge__path");
-      const hit = battlefield.querySelector(".combat-charge__hit");
-      const start = battlefield.querySelector(".combat-charge__endpoint--start");
-      const end = battlefield.querySelector(".combat-charge__endpoint--end");
-      if (
-        !trajectory ||
-        !(path instanceof SVGPathElement) ||
-        !(hit instanceof SVGPathElement) ||
-        !(start instanceof SVGCircleElement) ||
-        !(end instanceof SVGCircleElement)
-      ) {
-        throw new Error("Painted Charge displacement geometry is unavailable.");
-      }
       return {
         presentationKind: presentation.presentation_kind,
-        start: charge.start,
-        end: charge.end,
-        expectedStart: surface.worldToScreen(trajectory.transition_start.position),
-        expectedEnd: surface.worldToScreen(trajectory.post_charge.position),
-        successor: surface.worldToScreen(trajectory.successor.position),
-        hasRoute: Object.hasOwn(charge, "route"),
-        path: path.getAttribute("d"),
-        hitPath: hit.getAttribute("d"),
+        eventType: charge.eventType,
+        kind: charge.kind,
+        spatial: charge.spatial,
+        geometryFields: [
+          "start",
+          "end",
+          "route",
+          "sourcePresentationKey",
+          "sourcePublicAgentId",
+          "paintParts",
+          "persistent",
+        ].filter((field) => Object.hasOwn(charge, field)),
         pathCount: battlefield.querySelectorAll(".combat-charge__path").length,
-        startPoint: {
-          x: Number(start.getAttribute("cx")),
-          y: Number(start.getAttribute("cy")),
-        },
-        endPoint: {
-          x: Number(end.getAttribute("cx")),
-          y: Number(end.getAttribute("cy")),
-        },
+        endpointCount: battlefield.querySelectorAll(".combat-charge__endpoint").length,
+        directionCount: battlefield.querySelectorAll(".combat-charge__direction")
+          .length,
         leaderCount: battlefield.querySelectorAll(
           ".combat-cue__leader--charge-start, .combat-cue__leader--charge-end",
         ).length,
       };
     }, raw);
 
-    const expectedPath = `M ${result.start.x} ${result.start.y} L ${result.end.x} ${result.end.y}`;
     expect(result.presentationKind).toBe(leafName);
-    expect(result.start).toEqual(result.expectedStart);
-    expect(result.end).toEqual(result.expectedEnd);
-    expect(result.end).not.toEqual(result.successor);
-    expect(result.hasRoute).toBe(false);
-    expect(result.path).toBe(expectedPath);
-    expect(result.hitPath).toBe(expectedPath);
-    expect(result.pathCount).toBe(1);
-    expect(result.startPoint).toEqual(result.start);
-    expect(result.endPoint).toEqual(result.end);
+    expect(result.eventType).toBe("charge_phase_displacement");
+    expect(result.kind).toBe("feed_only");
+    expect(result.spatial).toBe(false);
+    expect(result.geometryFields).toEqual([]);
+    expect(result.pathCount).toBe(0);
+    expect(result.endpointCount).toBe(0);
+    expect(result.directionCount).toBe(0);
     expect(result.leaderCount).toBe(0);
   }
 });

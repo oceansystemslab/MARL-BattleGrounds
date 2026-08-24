@@ -195,7 +195,7 @@
           disabled
         >Download Metrics</button>
         <span id="replay-download-metrics-help" class="sr-only">
-          Download the canonical metric report in Oracle View.
+          Download the canonical metric report for this replay.
         </span>
       </fieldset>
       <fieldset class="replay-timeline__transport">
@@ -417,7 +417,7 @@
         </details>
 
         <details id="agent-details" class="hud-section semantic-inspector">
-          <summary><span id="selection-heading">Comprehensive Agent Details</span></summary>
+          <summary><span id="selection-heading">Comprehensive Agent Class Details</span></summary>
           <div id="agent-details-body" class="disclosure-body" data-disclosure-body="agent-details">
             <div id="selection-card" class="fact-card">
               <p class="empty-copy">Select an authorized agent to inspect its details.</p>
@@ -463,22 +463,10 @@
           </div>
         </details>
 
-        <details id="events-details" class="hud-section">
-          <summary class="section-heading">
-            <strong id="events-heading" class="section-title">Latest events</strong>
-            <span id="event-count" class="count-badge">0</span>
-          </summary>
-          <div id="events-details-body" class="disclosure-body" data-disclosure-body="events-details">
-            <ol id="event-feed" class="event-feed">
-              <li class="empty-copy">No transition events.</li>
-            </ol>
-          </div>
-        </details>
-
         <details id="visual-filters" class="hud-section visual-filters">
           <summary class="section-heading">
             <strong class="section-title">Visual Filters</strong>
-            <span id="visual-filter-count" class="count-badge">23 enabled</span>
+            <span id="visual-filter-count" class="count-badge">22 enabled</span>
           </summary>
           <div
             id="visual-filters-body"
@@ -494,8 +482,11 @@
               <div id="visual-filter-options" class="visual-filters__options"></div>
             </fieldset>
             <div class="visual-filters__actions">
-              <button id="restore-all-visual-filters-button" type="button" disabled>
-                Restore All
+              <button id="enable-all-visual-filters-button" type="button" disabled>
+                Enable All
+              </button>
+              <button id="disable-all-visual-filters-button" type="button">
+                Disable All
               </button>
             </div>
           </div>
@@ -569,7 +560,6 @@
             <dt>Tab / Shift+Tab</dt><dd>Cycle the controlled actor</dd>
             <dt>Left click</dt><dd>Control the clicked authorized actor</dd>
             <dt>Shift+left click</dt><dd>Select the clicked authorized target</dd>
-            <dt>Right click</dt><dd>Clear the target</dd>
             <dt>Escape</dt>
             <dd>Clear the target and leave battlefield focus</dd>
             <dt>WASD / QEZC</dt><dd>Choose movement for the controlled actor</dd>

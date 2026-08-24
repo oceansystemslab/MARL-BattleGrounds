@@ -31,6 +31,24 @@ function cancelableKeydown(key, { repeat = false, ctrlKey = false } = {}) {
   return event;
 }
 
+/**
+ * @param {"pointerdown" | "contextmenu"} type
+ * @param {number} [button]
+ */
+function cancelablePointerEvent(type, button = 2) {
+  const event = new Event(type, { bubbles: true, cancelable: true });
+  Object.defineProperties(event, {
+    button: { value: button },
+    clientX: { value: 10 },
+    clientY: { value: 20 },
+    shiftKey: { value: false },
+    ctrlKey: { value: false },
+    altKey: { value: false },
+    metaKey: { value: false },
+  });
+  return event;
+}
+
 test("keyboardCommand forwards raw key and modifier state without semantics", () => {
   assert.deepEqual(
     keyboardCommand("Enter", {
@@ -161,6 +179,39 @@ test("battlefield-owned Space and accepted fenced Enter never become browser def
   battlefield.dispatchEvent(modifiedSpace);
   assert.equal(modifiedSpace.defaultPrevented, false);
   assert.deepEqual(commands, [keyboardCommand(" ")]);
+});
+
+test("secondary pointer and context-menu events remain native and command-silent", () => {
+  const battlefield = new EventTarget();
+  let projectionCalls = 0;
+  let pointerCalls = 0;
+  /** @type {Record<string, unknown>[]} */
+  const commands = [];
+  bindBattlefieldControls({
+    battlefield: /** @type {any} */ (battlefield),
+    toWorldPoint: () => {
+      projectionCalls += 1;
+      return { world_x: 1, world_y: 2 };
+    },
+    onCommand: (command) => {
+      commands.push(command);
+    },
+    onPointerCommand: () => {
+      pointerCalls += 1;
+    },
+    onHelp: () => {},
+    onReleaseFocus: () => {},
+  });
+
+  const pointerdown = cancelablePointerEvent("pointerdown");
+  const contextmenu = cancelablePointerEvent("contextmenu");
+  assert.equal(battlefield.dispatchEvent(pointerdown), true);
+  assert.equal(battlefield.dispatchEvent(contextmenu), true);
+  assert.equal(pointerdown.defaultPrevented, false);
+  assert.equal(contextmenu.defaultPrevented, false);
+  assert.equal(projectionCalls, 0);
+  assert.equal(pointerCalls, 0);
+  assert.deepEqual(commands, []);
 });
 
 test("target selection keeps researcher and actor-POV identity domains separate", () => {
