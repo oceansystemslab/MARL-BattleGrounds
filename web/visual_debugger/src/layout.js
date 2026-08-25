@@ -22,7 +22,7 @@ const CROSS_PHASE_ROUTE_SAMPLES = 32;
 // round a collision-free detour back onto a durable boundary.
 const CROSS_PHASE_ROUTE_GRAPH_MARGIN = 1;
 const CROSS_PHASE_ROUTE_GRAPH_NODE_LIMIT = 384;
-const CROSS_PHASE_LEADER_STROKE_PADDING = 1;
+const CROSS_PHASE_CUE_PAINT_PADDING = 1;
 const CROSS_PHASE_RECIPIENT_COMPACTION_RADIAL_OFFSET = 4;
 const CROSS_PHASE_RECIPIENT_COMPACTION_RADIAL_STEP = 8;
 const CROSS_PHASE_RECIPIENT_COMPACTION_ANGLE_OFFSET_DEGREES = 4;
@@ -655,11 +655,13 @@ export function layoutRequiredDocks(input, options = {}) {
 
 /**
  * Allocate one immutable presentation ledger across every enabled phase.
- * Rectangular semantic cues reserve space before routes. Routes occupy a
- * dedicated layer behind those cues, so cue rectangles are not route blockers.
- * Routes still avoid every non-allowed durable protected region and may cross
- * one another; deterministic bridge-gap metadata marks route crossings for the
- * painter.
+ * Rectangular semantic cues reserve space before routes. Their direct
+ * connectors are a low-priority underlay and never participate in placement;
+ * only the information-bearing cue rectangles avoid durable and peer bounds.
+ * Routes occupy a dedicated layer behind those cues, so cue rectangles are not
+ * route blockers. Routes still avoid every non-allowed durable protected region
+ * and may cross one another; deterministic bridge-gap metadata marks route
+ * crossings for the painter.
  *
  * Disabled requests are removed before their geometry fields are inspected.
  * An enabled request is either placed or causes a loud bounded-layout error;
@@ -694,8 +696,6 @@ export function layoutCrossPhaseOccupancy(input, options = {}) {
   const recipientCounts = new Map();
   /** @type {Array<Record<string, any>>} */
   const cuePlacements = [];
-  /** @type {Array<ReadonlyArray<Point>>} */
-  const placedLeaders = [];
   const cueAnchors = cueRequests.map(({ layoutKey, anchor }) => ({
     layoutKey,
     anchor,
@@ -711,35 +711,20 @@ export function layoutCrossPhaseOccupancy(input, options = {}) {
       request.kind === "recipient_cue"
         ? crossPhaseRecipientCandidates(request, viewport, resolved)
         : [];
-    const allowed = new Set(request.allowProtectedKeys);
-    const leaderBlockers = [
-      ...protectedRegions
-        .filter(({ layoutKey }) => !allowed.has(layoutKey))
-        .map(({ bounds }) => bounds),
-      ...cuePlacements.map(({ bounds }) => bounds),
-    ];
     const selected =
       firstFreeCueCandidate(
         localCandidates,
         occupied,
         request.anchor,
-        leaderBlockers,
-        placedLeaders,
         cueAnchors,
         request.layoutKey,
-        viewport,
-        request.allowProtectedKeys.length === 0,
       ) ??
       firstFreeCueCandidate(
         crossPhasePerimeterCandidates(request, viewport, occupied),
         occupied,
         request.anchor,
-        leaderBlockers,
-        placedLeaders,
         cueAnchors,
         request.layoutKey,
-        viewport,
-        request.allowProtectedKeys.length === 0,
       );
     if (selected === null) {
       throw new RangeError(
@@ -748,7 +733,6 @@ export function layoutCrossPhaseOccupancy(input, options = {}) {
     }
     const { candidate, leader } = selected;
     occupied.push(expandRectangle(candidate.bounds, resolved.clearance));
-    placedLeaders.push(leader.points);
     cuePlacements.push(
       Object.freeze({
         layoutKey: request.layoutKey,
@@ -821,16 +805,6 @@ export function layoutCrossPhaseOccupancy(input, options = {}) {
           expandRectangle(bounds, resolved.clearance),
         ),
       ];
-      const allowed = new Set(request.allowProtectedKeys);
-      const leaderBlockers = [
-        ...protectedRegions
-          .filter(({ layoutKey }) => !allowed.has(layoutKey))
-          .map(({ bounds }) => bounds),
-        ...otherPlacements.map(({ bounds }) => bounds),
-      ];
-      const otherLeaders = otherPlacements.map(({ leader }) => leader.points);
-      const currentLeaderLength = cuePolylineLength(current.leader.points);
-      const currentLeaderSegments = current.leader.points.length - 1;
       /** @type {{candidate: CrossPhaseCueCandidate, leader: Record<string, any>} | null} */
       let replacement = null;
       for (const candidate of compactCandidates) {
@@ -845,27 +819,15 @@ export function layoutCrossPhaseOccupancy(input, options = {}) {
           [candidate],
           compactOccupied,
           request.anchor,
-          leaderBlockers,
-          otherLeaders,
           cueAnchors,
           request.layoutKey,
-          viewport,
-          request.allowProtectedKeys.length === 0,
         );
         if (selected === null) {
           continue;
         }
-        const leaderLength = cuePolylineLength(selected.leader.points);
-        if (
-          leaderLength > currentLeaderLength + EPSILON ||
-          selected.leader.points.length - 1 > currentLeaderSegments
-        ) {
-          continue;
-        }
         // Candidates are ordered nearest-first. The first valid replacement is
-        // already a strict center-distance improvement and cannot worsen its
-        // leader, so scanning equivalent angles would add latency without
-        // strengthening the placement contract.
+        // already a strict center-distance improvement, so scanning equivalent
+        // angles would add latency without strengthening cue placement.
         replacement = {
           candidate: selected.candidate,
           leader: selected.leader,
@@ -1627,32 +1589,18 @@ function crossPhasePerimeterCandidates(request, viewport, occupied) {
  * @param {ReadonlyArray<CrossPhaseCueCandidate>} candidates
  * @param {ReadonlyArray<Rectangle>} occupied
  * @param {Point} anchor
- * @param {ReadonlyArray<Rectangle>} leaderBlockers
- * @param {ReadonlyArray<ReadonlyArray<Point>>} placedLeaders
  * @param {ReadonlyArray<{layoutKey: string, anchor: Point}>} cueAnchors
  * @param {string} layoutKey
- * @param {Rectangle} viewport
- * @param {boolean} allowOccludedAnchorEscape
  * @returns {{candidate: CrossPhaseCueCandidate, leader: Record<string, any>} | null}
  */
-function firstFreeCueCandidate(
-  candidates,
-  occupied,
-  anchor,
-  leaderBlockers,
-  placedLeaders,
-  cueAnchors,
-  layoutKey,
-  viewport,
-  allowOccludedAnchorEscape,
-) {
+function firstFreeCueCandidate(candidates, occupied, anchor, cueAnchors, layoutKey) {
   for (const candidate of candidates) {
     if (!occupied.every((bounds) => !rectanglesIntersect(candidate.bounds, bounds))) {
       continue;
     }
     const candidatePaintBounds = expandRectangle(
       candidate.bounds,
-      CROSS_PHASE_LEADER_STROKE_PADDING,
+      CROSS_PHASE_CUE_PAINT_PADDING,
     );
     if (
       cueAnchors.some(
@@ -1663,49 +1611,20 @@ function firstFreeCueCandidate(
     ) {
       continue;
     }
-    if (
-      placedLeaders.some((points) =>
-        polylineIntersectsRectangle(points, candidatePaintBounds),
-      )
-    ) {
-      continue;
-    }
-    const leader = collisionFreeCueLeader(
-      anchor,
-      candidate.bounds,
-      leaderBlockers,
-      viewport,
-      allowOccludedAnchorEscape,
-    );
-    if (leader !== null) {
-      return Object.freeze({ candidate, leader });
-    }
+    return Object.freeze({
+      candidate,
+      leader: cueLeader(anchor, candidate.center),
+    });
   }
   return null;
 }
 
 /**
- * @param {ReadonlyArray<Point>} points
- * @param {Rectangle} bounds
- */
-function polylineIntersectsRectangle(points, bounds) {
-  for (let index = 1; index < points.length; index += 1) {
-    if (segmentIntersectsRectangle(points[index - 1], points[index], bounds)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/**
  * @param {Point} anchor
- * @param {Rectangle} bounds
+ * @param {Point} center
  */
-function cueLeader(anchor, bounds) {
-  const end = frozenPoint(
-    Math.min(bounds.right, Math.max(bounds.left, anchor.x)),
-    Math.min(bounds.bottom, Math.max(bounds.top, anchor.y)),
-  );
+function cueLeader(anchor, center) {
+  const end = frozenPoint(center.x, center.y);
   return Object.freeze({
     kind: "line",
     start: anchor,
@@ -1713,77 +1632,6 @@ function cueLeader(anchor, bounds) {
     points: Object.freeze([anchor, end]),
     path: `M ${numberKey(anchor.x)} ${numberKey(anchor.y)} L ${numberKey(end.x)} ${numberKey(end.y)}`,
   });
-}
-
-/** @param {ReadonlyArray<Point>} points */
-function cuePolylineLength(points) {
-  let length = 0;
-  for (let index = 1; index < points.length; index += 1) {
-    length += Math.hypot(
-      points[index].x - points[index - 1].x,
-      points[index].y - points[index - 1].y,
-    );
-  }
-  return length;
-}
-
-/**
- * Allocate a visible foreground leader. Straight geometry remains the fast
- * path; a deterministic visibility graph supplies a bounded polyline when an
- * unrelated durable region or earlier cue blocks that segment.
- *
- * @param {Point} anchor
- * @param {Rectangle} bounds
- * @param {ReadonlyArray<Rectangle>} blockers
- * @param {Rectangle} viewport
- * @param {boolean} allowOccludedAnchorEscape
- */
-function collisionFreeCueLeader(
-  anchor,
-  bounds,
-  blockers,
-  viewport,
-  allowOccludedAnchorEscape,
-) {
-  const paddedBlockers = blockers.map((blocker) =>
-    expandRectangle(blocker, CROSS_PHASE_LEADER_STROKE_PADDING),
-  );
-  const leaderViewport = rectangle(
-    viewport.left + CROSS_PHASE_LEADER_STROKE_PADDING,
-    viewport.top + CROSS_PHASE_LEADER_STROKE_PADDING,
-    viewport.right - CROSS_PHASE_LEADER_STROKE_PADDING,
-    viewport.bottom - CROSS_PHASE_LEADER_STROKE_PADDING,
-  );
-  const starts = allowOccludedAnchorEscape
-    ? freeEndpointPorts(anchor, paddedBlockers, leaderViewport)
-    : Object.freeze([anchor]);
-  for (const start of starts) {
-    const straight = cueLeader(start, bounds);
-    if (polylineIsClear(straight.points, paddedBlockers, leaderViewport)) {
-      return straight;
-    }
-    const points = boundedVisibilityPolyline(
-      straight.start,
-      straight.end,
-      paddedBlockers,
-      leaderViewport,
-    );
-    if (points === null) {
-      continue;
-    }
-    const geometry = createPolylineRouteGeometry({ points });
-    if (geometry.kind !== "polyline") {
-      throw new Error("Allocated leader polyline lost its geometry kind.");
-    }
-    return Object.freeze({
-      kind: "polyline",
-      start: geometry.start,
-      end: geometry.end,
-      points: geometry.points,
-      path: geometry.path,
-    });
-  }
-  return null;
 }
 
 /**

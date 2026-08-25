@@ -191,7 +191,7 @@ const elements = {
   ),
 };
 
-const EXPECTED_VISUAL_FILTER_COUNT = 20;
+const EXPECTED_VISUAL_FILTER_COUNT = 18;
 
 /**
  * Build the fixed page-local filter surface from the shared paint registry.
@@ -548,7 +548,7 @@ const CONTROL_HELP = Object.freeze([
   ],
   [
     "#visual-key > summary",
-    "Visual key",
+    "Visual Key",
     "Explain the non-color visual grammar used on the battlefield.",
   ],
   [
@@ -559,12 +559,12 @@ const CONTROL_HELP = Object.freeze([
   [
     "#enable-all-visual-filters-button",
     "Enable All",
-    "Turn on all 20 local visual filters. The separate Ranges control is unchanged.",
+    "Turn on all 18 local visual filters. The separate Ranges control is unchanged.",
   ],
   [
     "#disable-all-visual-filters-button",
     "Disable All",
-    "Turn off all 20 local visual filters. The separate Ranges control is unchanged.",
+    "Turn off all 18 local visual filters. The separate Ranges control is unchanged.",
   ],
   [
     ".diagnostics > summary",
@@ -823,7 +823,7 @@ function clearPresentationAuthority(reason) {
   elements.pendingCard.removeAttribute("data-pending-count");
   elements.pendingHeading.textContent = "Inspection unavailable";
   elements.pendingCount.textContent = "0 actors";
-  elements.pendingScope.textContent = "Waiting for an authorized outgoing inspection.";
+  elements.pendingScope.textContent = "Waiting for authorized action details.";
   const pendingLabel = elements.pendingCard.querySelector(".action-card__label");
   if (pendingLabel) {
     pendingLabel.textContent = "NO AUTHORIZED INSPECTION";
@@ -2249,9 +2249,9 @@ const AGENT_CLOSEOUT_BATTLEFIELD_INSTRUCTIONS =
 const TERMINAL_REPLAY_BATTLEFIELD_LABEL =
   "Read-only terminal replay battlefield snapshot.";
 const TERMINAL_REPLAY_BATTLEFIELD_INSTRUCTIONS =
-  "This replay frame is terminal; use the timeline to review another frame.";
+  "This replay frame is terminal. Activate an agent to inspect current facts, or use the timeline to review another frame.";
 const TERMINAL_REPLAY_AGENT_BATTLEFIELD_INSTRUCTIONS =
-  "This replay frame is terminal. Activate an authorized visible body to switch the fog-of-war recipient, or use the timeline to review another frame.";
+  "This replay frame is terminal. Activate a visible body or choose any agent in the roster to switch the fog-of-war recipient; use the timeline to review another frame.";
 
 function liveBattlefieldCommandsInteractive() {
   return (
@@ -2342,8 +2342,8 @@ function applyBattlefieldBoundaryCopy() {
         ? TERMINAL_REPLAY_AGENT_BATTLEFIELD_INSTRUCTIONS
         : TERMINAL_REPLAY_BATTLEFIELD_INSTRUCTIONS
       : audience === "agent_pov"
-        ? "Replay Agent POV is read-only. Activate an authorized visible body to switch to that agent's fog-of-war view at the same replay tick."
-        : "Replay is read-only. Activate an authorized agent to inspect current facts and its recorded outgoing action; use the timeline to change frames.";
+        ? "Replay Agent POV is read-only. Activate a visible body or choose any agent in the roster to switch to that agent's fog-of-war view at the same replay tick."
+        : "Replay is read-only. Upcoming Transition shows the authorized recorded joint action out of this frame; activate an agent to inspect current facts, or use the timeline to change frames.";
   } else if (liveInteractive) {
     elements.battlefield.setAttribute("role", "application");
     elements.battlefield.tabIndex = 0;
@@ -3345,7 +3345,7 @@ function authorizedAgentActivation(presentationKey) {
   const audience = authorizedPresentationAudience(presentation);
   const inspectionState = authorizedPresentationInspectionState(presentation);
   const replayPovSwitch = isReplayMode() && audience === "agent_pov";
-  if (isTerminal(state.frame) && !replayPovSwitch) {
+  if (isTerminal(state.frame) && !isReplayMode()) {
     return null;
   }
   if (audience === "researcher" && recordingScientificControlsFenced()) {
@@ -3565,12 +3565,7 @@ function render() {
     resyncRequired: state.resyncRequired,
     offline: state.offline,
     activationDisabled:
-      (transportFrame !== null &&
-        isTerminal(transportFrame) &&
-        !(
-          isReplayMode() &&
-          authorizedPresentationAudience(presentationFrame) === "agent_pov"
-        )) ||
+      (transportFrame !== null && isTerminal(transportFrame) && !isReplayMode()) ||
       (authorizedPresentationAudience(presentationFrame) === "researcher" &&
         recordingScientificControlsFenced()),
     localInspectedPresentationKey:
@@ -3709,11 +3704,13 @@ async function sendReplayCommand(command, { deferFinalRender = false } = {}) {
   });
   /** @type {{current: {kind: "success" | "stale", payload: any} | null}} */
   const commandOutcome = { current: null };
-  const changesAudience = command.command_type === "set_view";
   try {
     const installPromise = presentationInstallation.installFromCommand({
-      reason: changesAudience ? "replay_audience_change" : "replay_command",
-      pendingPolicy: changesAudience ? "clear" : "retain_last_authorized",
+      reason:
+        command.command_type === "set_view"
+          ? "replay_audience_change"
+          : "replay_command",
+      pendingPolicy: "retain_last_authorized",
       sendCommand: async () => {
         try {
           const payload = await postReplayCommand(state.token, request);
@@ -3894,6 +3891,19 @@ function dispatchPanelCommand(command) {
   ) {
     activateAuthorizedAgent(command.presentation_key);
     return Promise.resolve(null);
+  }
+  if (
+    command.command_type === "activate_replay_pov_agent" &&
+    Number.isInteger(command.global_slot) &&
+    Number(command.global_slot) >= 0 &&
+    Number(command.global_slot) < 10 &&
+    isReplayMode()
+  ) {
+    openAgentDetails();
+    return dispatchReplayCommand({
+      command_type: "set_pov_actor",
+      global_slot: command.global_slot,
+    });
   }
   if (
     command.command_type === "roster_selection" &&

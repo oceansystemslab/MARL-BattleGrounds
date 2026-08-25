@@ -150,17 +150,80 @@ test("fog-authorized Agent abilities use the causal spatial choreography path", 
   );
   assert.ok(raw, "the Python fixture must retain one visible Agent ability");
   const presentation = await normalizeAuthorizedPresentationFrameV1(raw);
-  const plan = buildChoreographyPlan(presentation, surface);
+  const sceneAgents = raw.current_endpoint.parts.scene.agents;
+  const protectedSurface = {
+    ...surface,
+    protectedRects: sceneAgents.map((/** @type {Record<string, any>} */ agent) => {
+      const center = surface.worldToScreen(agent.position);
+      const radius = surface.worldLengthToScreen(agent.radius);
+      return {
+        layoutKey: `body:${agent.presentation_key}`,
+        protectedKind: "body",
+        ownerPresentationKey: agent.presentation_key,
+        bounds: {
+          left: center.x - radius,
+          top: center.y - radius,
+          right: center.x + radius,
+          bottom: center.y + radius,
+          width: radius * 2,
+          height: radius * 2,
+        },
+      };
+    }),
+  };
+  const plan = buildChoreographyPlan(presentation, protectedSurface);
   assert.ok(plan);
   const activation = plan.events.find((event) => event.kind === "activation");
   assert.ok(activation);
   assert.equal(activation.authorityVocabulary, "event");
   assert.equal(activation.spatial, true);
   assert.notEqual(activation.noncausal, true);
-  assert.equal(activation.endpointPhase, "transition_start");
+  assert.equal(activation.sourceEndpointPhase, "successor");
+  assert.equal(activation.targetEndpointPhase, "successor");
+  assert.equal(activation.endpointPhase, "successor");
   assert.ok(activation.source);
   assert.ok(activation.target);
   assert.ok(activation.route);
+  const rawActivation = raw.visual_events.events.find(
+    (/** @type {Record<string, any>} */ event) =>
+      event.event_kind === "ability_activated",
+  );
+  assert.ok(rawActivation);
+  const sourceTrajectory = raw.visual_events.agent_phase_trajectories.find(
+    (/** @type {Record<string, any>} */ trajectory) =>
+      trajectory.agent_presentation_key ===
+      rawActivation.source_anchor.presentation_key,
+  );
+  const targetTrajectory = raw.visual_events.agent_phase_trajectories.find(
+    (/** @type {Record<string, any>} */ trajectory) =>
+      trajectory.agent_presentation_key ===
+      rawActivation.recipient_anchor.presentation_key,
+  );
+  assert.ok(sourceTrajectory?.successor);
+  assert.ok(targetTrajectory?.successor);
+  assert.deepEqual(
+    activation.source,
+    surface.worldToScreen(sourceTrajectory.successor.position),
+  );
+  assert.deepEqual(
+    activation.target,
+    surface.worldToScreen(targetTrajectory.successor.position),
+  );
+  const targetAgent = sceneAgents.find(
+    (/** @type {Record<string, any>} */ agent) =>
+      agent.presentation_key === targetTrajectory.agent_presentation_key,
+  );
+  assert.ok(targetAgent);
+  assert.notDeepEqual(activation.route.end, activation.target);
+  assert.ok(
+    Math.abs(
+      Math.hypot(
+        activation.route.end.x - activation.target.x,
+        activation.route.end.y - activation.target.y,
+      ) -
+        (surface.worldLengthToScreen(targetAgent.radius) + 3),
+    ) < 1e-9,
+  );
   assert.equal(
     activation.eventId.startsWith(
       `${raw.visual_events.incoming_recipient_transition_id}:visual-event:`,
@@ -254,7 +317,7 @@ test("Agent adjacent-fog choreography preserves disappearance routes and appeara
   );
   assert.ok(activation);
   assert.equal(activation.kind, "activation");
-  assert.equal(activation.endpointPhase, "transition_start");
+  assert.equal(activation.sourceEndpointPhase, "transition_start");
   assert.deepEqual(
     activation.source,
     surface.worldToScreen(disappearingTrajectory.transition_start.position),
@@ -277,8 +340,23 @@ test("Agent adjacent-fog choreography preserves disappearance routes and appeara
   );
   assert.equal(activation.spatial, true);
   if (disappearingEvent.recipient_anchor !== null) {
+    const targetTrajectory = disappearance.visual_events.agent_phase_trajectories.find(
+      (/** @type {Record<string, any>} */ row) =>
+        row.agent_presentation_key ===
+        disappearingEvent.recipient_anchor.presentation_key,
+    );
+    assert.ok(targetTrajectory?.successor);
+    assert.equal(activation.targetEndpointPhase, "successor");
+    assert.equal(activation.endpointPhase, null);
+    assert.deepEqual(
+      activation.target,
+      surface.worldToScreen(targetTrajectory.successor.position),
+    );
     assert.ok(activation.target);
     assert.ok(activation.route);
+  } else {
+    assert.equal(activation.targetEndpointPhase, null);
+    assert.equal(activation.endpointPhase, "transition_start");
   }
 
   const successorLifecycleKinds = new Set([
@@ -349,6 +427,8 @@ test("Agent adjacent-fog choreography preserves disappearance routes and appeara
     (event) => event.kind === "activation" && event.component === "basic",
   );
   assert.ok(oracleBasic);
+  assert.equal(oracleBasic.sourceEndpointPhase, "successor");
+  assert.equal(oracleBasic.targetEndpointPhase, "successor");
   assert.equal(oracleBasic.endpointPhase, "successor");
 });
 
@@ -728,7 +808,7 @@ test("all registered transient families validate without constructing disabled g
   assert.equal(plan.bounds.persistentNodes, 0);
 });
 
-test("activation ability and semantic paint parts are independently filterable", async () => {
+test("activation ability and semantic paint parts follow their Basic or Ultimate owner", async () => {
   const fixture = await authorizedFixture();
   const frame = await normalizeAuthorizedPresentationFrameV1(
     fixture.presentations.replay_oracle,
@@ -740,17 +820,12 @@ test("activation ability and semantic paint parts are independently filterable",
       suppressed: false,
     },
     {
+      disabled: ["ultimate_ability_effects"],
+      expected: { ability: true, semantic: true },
+      suppressed: false,
+    },
+    {
       disabled: ["basic_ability_effects"],
-      expected: { ability: false, semantic: true },
-      suppressed: false,
-    },
-    {
-      disabled: ["healing_effects"],
-      expected: { ability: true, semantic: false },
-      suppressed: false,
-    },
-    {
-      disabled: ["basic_ability_effects", "healing_effects"],
       expected: { ability: false, semantic: false },
       suppressed: true,
     },
@@ -768,15 +843,8 @@ test("activation ability and semantic paint parts are independently filterable",
     if (disabled.includes("basic_ability_effects")) {
       assert.equal(activation.route, null);
       assert.equal(activation.source, null);
-      if (suppressed) {
-        assert.equal(activation.target, null);
-      } else {
-        assert.ok(activation.target);
-      }
-      assert.equal(
-        activation.presentationKind,
-        suppressed ? "source_local" : "target_only_impact",
-      );
+      assert.equal(activation.target, null);
+      assert.equal(activation.presentationKind, "source_local");
     } else {
       assert.ok(activation.route);
       assert.ok(activation.source);
@@ -809,7 +877,7 @@ test("activation ability and semantic paint parts are independently filterable",
   const damagePlan = buildChoreographyPlan(
     damageFrame,
     surface,
-    filtersDisabled("damage_effects"),
+    filtersDisabled("basic_ability_effects"),
   );
   assert.ok(damagePlan);
   const damageActivation = damagePlan.events.find(
@@ -818,7 +886,7 @@ test("activation ability and semantic paint parts are independently filterable",
   assert.ok(damageActivation);
   assert.equal(damageActivation.impactSemantic, "damage");
   assert.deepEqual(damageActivation.paintParts, {
-    ability: true,
+    ability: false,
     semantic: false,
   });
 
@@ -862,40 +930,7 @@ test("activation ability and semantic paint parts are independently filterable",
     assert.ok(plan);
     return { event: plan.events[0], pointProjections, lengthProjections };
   };
-  const semanticOnly = projectedActivation("basic_ability_effects");
-  assert.deepEqual(
-    [semanticOnly.pointProjections, semanticOnly.lengthProjections],
-    [1, 0],
-  );
-  assert.equal(semanticOnly.event.presentationKind, "target_only_impact");
-  assert.equal(semanticOnly.event.source, null);
-  assert.equal(semanticOnly.event.route, null);
-  assert.ok(semanticOnly.event.target);
-  assert.equal(semanticOnly.event.impactCue ?? null, null);
-  assert.equal(semanticOnly.event.impactBounds ?? null, null);
-  assert.equal(semanticOnly.event.impactLeader ?? null, null);
-  assert.equal(semanticOnly.event.impactLayoutKey ?? null, null);
-  assert.equal(semanticOnly.event.impactDisposition ?? null, null);
-  assert.equal(semanticOnly.event.impactCueCollisionFree ?? null, null);
-
-  const routeOnly = projectedActivation("healing_effects");
-  assert.deepEqual([routeOnly.pointProjections, routeOnly.lengthProjections], [2, 2]);
-  assert.equal(routeOnly.event.presentationKind, "routed");
-  assert.ok(routeOnly.event.source);
-  assert.ok(routeOnly.event.target);
-  assert.ok(routeOnly.event.route);
-  assert.equal(routeOnly.event.impactCue ?? null, null);
-  assert.equal(routeOnly.event.impactBounds ?? null, null);
-  assert.equal(routeOnly.event.impactLeader ?? null, null);
-  assert.equal(routeOnly.event.impactLayoutKey ?? null, null);
-  assert.equal(routeOnly.event.impactDisposition ?? null, null);
-  assert.equal(routeOnly.event.impactCueCollisionFree ?? null, null);
-  assert.ok(Array.isArray(routeOnly.event.route.bridgeGaps));
-
-  const fullySuppressed = projectedActivation(
-    "basic_ability_effects",
-    "healing_effects",
-  );
+  const fullySuppressed = projectedActivation("basic_ability_effects");
   assert.deepEqual(
     [fullySuppressed.pointProjections, fullySuppressed.lengthProjections],
     [0, 0],
@@ -904,6 +939,14 @@ test("activation ability and semantic paint parts are independently filterable",
   assert.equal(fullySuppressed.event.target, null);
   assert.equal(fullySuppressed.event.route, null);
   assert.equal(fullySuppressed.event.impactCue ?? null, null);
+
+  const unrelatedUltimateFilter = projectedActivation("ultimate_ability_effects");
+  assert.equal(unrelatedUltimateFilter.event.presentationKind, "routed");
+  assert.deepEqual(unrelatedUltimateFilter.event.paintParts, {
+    ability: true,
+    semantic: true,
+  });
+  assert.ok(unrelatedUltimateFilter.event.route);
 });
 
 test("transition identity excludes revision while authorization tracks POV actor", async () => {
@@ -1038,6 +1081,11 @@ test("scene has one Analysis battlefield branch and owns durable shield and stat
     /scene\.audience === "researcher" \? "Oracle View" : "Agent POV"/u,
   );
   assert.match(source, /showLegality: true/u);
+  assert.match(source, /showModifiers: visualPolicy\.showAuraModifierBadges/u);
+  assert.doesNotMatch(
+    source,
+    /scene\.audience === "researcher" && visualPolicy\.showAuraModifierBadges/u,
+  );
   assert.match(source, /agent-spawn-shield__shell/u);
   assert.match(source, /agent-spawn-shield__ticks/u);
   assert.match(source, /duration_status_badge/u);
@@ -1075,13 +1123,15 @@ test("authorized regeneration owns a packed plus cue instead of the generic onio
   );
   assert.match(painterSource, /combat-regeneration__plus/u);
   assert.match(painterSource, /combat-regeneration__value/u);
+  assert.match(painterSource, /combat-choreography-connectors/u);
   assert.doesNotMatch(painterSource, /event\.cueSemantic === "health_regenerated"/u);
   assert.match(css, /\.combat-regeneration__pulse/u);
-  assert.match(css, /\.combat-regeneration__recipient-anchor/u);
+  assert.match(css, /\.combat-connector-effect/u);
+  assert.doesNotMatch(css, /\.combat-regeneration__recipient-anchor/u);
   assert.doesNotMatch(css, /\.combat-semantic-pulse--health-regenerated/u);
 });
 
-test("NET and regeneration effects remain independent from scrolling battle text", async () => {
+test("NET cues follow scrolling battle text while regeneration retains useful granularity", async () => {
   const fixture = await authorizedFixture();
   const rawNet = structuredClone(fixture.presentations.replay_oracle);
   const netEvent = rawNet.latest_events.events.find(
@@ -1106,16 +1156,6 @@ test("NET and regeneration effects remain independent from scrolling battle text
     [[], { effect: true, battleText: true, recipientText: true }, false],
     [
       ["scrolling_battle_text"],
-      { effect: true, battleText: false, recipientText: false },
-      false,
-    ],
-    [
-      ["damage_effects"],
-      { effect: false, battleText: true, recipientText: true },
-      false,
-    ],
-    [
-      ["damage_effects", "scrolling_battle_text"],
       { effect: false, battleText: false, recipientText: false },
       true,
     ],
@@ -1133,17 +1173,9 @@ test("NET and regeneration effects remain independent from scrolling battle text
         { width: 88, height: 36 },
       );
     }
-    if (disabled.length === 1 && disabled[0] === "scrolling_battle_text") {
-      assert.deepEqual(
-        { width: net.cueBounds?.width, height: net.cueBounds?.height },
-        { width: 48, height: 36 },
-      );
-    }
-    if (disabled.length === 1 && disabled[0] === "damage_effects") {
-      assert.deepEqual(
-        { width: net.cueBounds?.width, height: net.cueBounds?.height },
-        { width: 88, height: 36 },
-      );
+    if (suppressed) {
+      assert.equal(net.cueBounds ?? null, null);
+      assert.equal(net.cueLeader ?? null, null);
     }
   }
 
@@ -1262,7 +1294,7 @@ test("authorized age plus application uses the ordinary Applied presentation wit
   assert.equal(JSON.stringify(frame), serializedBefore);
   assert.equal(JSON.stringify(frame.latest_events.events), incomingEventsBefore);
   assert.equal(plan.events.length, 1);
-  assert.equal(plan.bounds.nodes, 30);
+  assert.equal(plan.bounds.nodes, 33);
   assert.deepEqual(
     plan.events.map(({ eventId, eventType }) => [eventId, eventType]),
     [[events[1].event_id, events[1].event_kind]],

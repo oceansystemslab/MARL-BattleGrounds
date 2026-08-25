@@ -225,7 +225,7 @@ test("authorized inspector rejects raw and forged presentation roots", async () 
   assert.equal(authorizedInspectorView(null), null);
 });
 
-test("authorized replay inspector keeps current owner separate from outgoing target", async () => {
+test("authorized replay inspector keeps researcher selection separate from transition panels", async () => {
   const cases = [
     "replay_oracle",
     "replay_no_shared_obs_agent_pov",
@@ -237,15 +237,24 @@ test("authorized replay inspector keeps current owner separate from outgoing tar
   for (const kind of cases) {
     const presentation = await normalizedPresentation(kind);
     const inspector = authorizedInspectorView(presentation);
+    const researcher = presentation.authority.authority_kind === "agent_pov";
+    const expectedOwner = researcher
+      ? presentation.researcher_space.roster_agents.find(
+          (/** @type {Record<string, any>} */ agent) =>
+            agent.public_agent_id ===
+            presentation.researcher_space.selected_public_agent_id,
+        )
+      : presentation.inspection;
+    assert.ok(expectedOwner);
     assert.ok(inspector);
     assert.equal(inspector.title, "Comprehensive Agent Class Details");
     assert.equal(
       inspector.owner.presentation_key,
-      presentation.inspection.actor_presentation_key,
+      expectedOwner.presentation_key ?? expectedOwner.actor_presentation_key,
     );
     assert.equal(
       inspector.owner.public_agent_id,
-      presentation.inspection.actor_public_agent_id,
+      expectedOwner.public_agent_id ?? expectedOwner.actor_public_agent_id,
     );
     assert.equal(
       inspector.owner_descriptor.title,
@@ -298,6 +307,12 @@ test("authorized replay inspector keeps current owner separate from outgoing tar
     );
     documentationBytes.add(JSON.stringify(inspector.owner_descriptor));
     assert.equal(inspector.owner_class_accent, "mage");
+    if (researcher) {
+      assert.equal(inspector.legality, null);
+      assert.equal(inspector.outgoing_target_descriptor, null);
+      assert.deepEqual(inspector.legality_cards, []);
+      continue;
+    }
     assert.equal(
       inspector.legality.owner_presentation_key,
       inspector.owner.presentation_key,
@@ -309,7 +324,7 @@ test("authorized replay inspector keeps current owner separate from outgoing tar
     assert.equal(inspector.legality.target_kind, "no_target");
     assert.equal(inspector.legality.target_presentation_key, null);
     assert.equal(inspector.legality.target_public_agent_id, null);
-    assert.equal(inspector.outgoing_target_descriptor.title, "Outgoing target");
+    assert.equal(inspector.outgoing_target_descriptor.title, "Upcoming target");
     assert.equal(
       semanticRowValue(inspector.outgoing_target_descriptor, "Disclosure"),
       "No Target",
@@ -377,7 +392,7 @@ test("authorized replay inspector keeps current owner separate from outgoing tar
       true,
     );
   }
-  assert.equal(legalityDescriptorIds.size, 6);
+  assert.equal(legalityDescriptorIds.size, 2);
   assert.equal(documentationBytes.size, 1);
 });
 
@@ -607,14 +622,23 @@ test("authorized replay inspector retains final selected owner without outgoing 
   ]) {
     const presentation = await normalizedStateCase(kind);
     const inspector = authorizedInspectorView(presentation);
+    const researcher = presentation.authority.authority_kind === "agent_pov";
+    const expectedOwner = researcher
+      ? presentation.researcher_space.roster_agents.find(
+          (/** @type {Record<string, any>} */ agent) =>
+            agent.public_agent_id ===
+            presentation.researcher_space.selected_public_agent_id,
+        )
+      : presentation.action_axis;
+    assert.ok(expectedOwner);
     assert.ok(inspector);
     assert.equal(
       inspector.owner.presentation_key,
-      presentation.action_axis.owner_presentation_key,
+      expectedOwner.presentation_key ?? expectedOwner.owner_presentation_key,
     );
     assert.equal(
       inspector.owner.public_agent_id,
-      presentation.action_axis.owner_public_agent_id,
+      expectedOwner.public_agent_id ?? expectedOwner.owner_public_agent_id,
     );
     assert.equal(
       inspector.owner_descriptor.title,
@@ -663,6 +687,8 @@ test("authorized roster exposes one native key-only action with isolated fact ow
     const roster = binding();
     const selectionCard = binding();
     const pendingCard = binding();
+    const pendingHeading = binding();
+    const pendingScope = binding();
     const diagnosticsCard = binding();
     const acceptedCard = binding();
     const acceptedAnnouncement = binding();
@@ -670,9 +696,9 @@ test("authorized roster exposes one native key-only action with isolated fact ow
       roster,
       rosterCount: binding(),
       selectionCard,
-      pendingHeading: binding(),
+      pendingHeading,
       pendingCount: binding(),
-      pendingScope: binding(),
+      pendingScope,
       pendingCard,
       acceptedCard,
       acceptedAnnouncement,
@@ -757,6 +783,13 @@ test("authorized roster exposes one native key-only action with isolated fact ow
 
     const replayAgent = await normalizedPresentation("replay_no_shared_obs_agent_pov");
     panels.renderAuthorizedInspector(replayAgent);
+    assert.equal(pendingHeading.textContent, "Upcoming Transition");
+    assert.equal(pendingScope.hidden, true);
+    const upcomingRows = dom
+      .descendants(pendingCard)
+      .filter((node) => node.className === "accepted-action-row");
+    assert.equal(upcomingRows.length, 5);
+    assert.match(dom.textTree(upcomingRows[0]), /Submitted.*Accepted/u);
     assert.match(
       dom.textTree(selectionCard),
       /Class Overview.*Authored Tactical Guide.*Class Mechanics/u,
@@ -773,13 +806,13 @@ test("authorized roster exposes one native key-only action with isolated fact ow
       dom
         .descendants(pendingCard)
         .some((node) => node.className === "selected-outgoing-target"),
-      true,
+      false,
     );
     assert.equal(
       dom
         .descendants(pendingCard)
         .some((node) => node.className === "selected-legality"),
-      true,
+      false,
     );
     panels.renderAuthorizedRoster(replayAgent, false);
     const agentRows = /** @type {Record<string, any>[]} */ (
@@ -787,19 +820,48 @@ test("authorized roster exposes one native key-only action with isolated fact ow
         (/** @type {Record<string, any>} */ row) => "primaryButton" in row,
       )
     );
-    assert.equal(agentRows.length, 3);
+    assert.equal(agentRows.length, 5);
+    assert.match(dom.textTree(roster), /VISIBLE.*NOT VISIBLE/u);
+    assert.equal(
+      [...panels.rosterVisibilityGroups.values()].every(
+        (group) => group.element.hidden === false,
+      ),
+      true,
+    );
+    const agentModifierOwners = agentRows.flatMap((row) =>
+      dom
+        .descendants(row.element)
+        .filter((node) => node.className.includes("roster-fact-token--modifier")),
+    );
+    assert.deepEqual(agentModifierOwners.map((node) => node.dataset.tokenId).sort(), [
+      "mage_amplification",
+      "warrior_mitigation",
+    ]);
+    assert.deepEqual(
+      agentModifierOwners.map((node) => node.dataset.multiplier).sort(),
+      ["0.8500000238418579", "1.149999976158142"],
+    );
+    for (const modifierOwner of agentModifierOwners) {
+      assert.doesNotMatch(
+        modifierOwner.getAttribute("aria-label"),
+        /source|agent-slot/iu,
+      );
+    }
     assert.equal(
       agentRows.every((row) => row.primaryButton.disabled === false),
       true,
     );
     agentRows[0].primaryButton.click();
-    const latestCommand = commands.at(-1);
+    const latestCommand = /** @type {Record<string, any> | undefined} */ (
+      commands.at(-1)
+    );
     assert.ok(latestCommand);
     assert.deepEqual(Object.keys(latestCommand).sort(), [
       "command_type",
-      "presentation_key",
+      "global_slot",
     ]);
-    assert.equal(latestCommand.command_type, "activate_authorized_agent");
+    assert.equal(latestCommand.command_type, "activate_replay_pov_agent");
+    assert.equal(latestCommand.global_slot, 0);
     panels.renderAuthorizedRoster(replayAgent, true);
     assert.equal(
       agentRows.every((row) => row.primaryButton.disabled === true),
@@ -1054,12 +1116,16 @@ test("panel source has one branded render path and no raw fallbacks", async () =
   }
 });
 
-test("authorized inspector copy separates live draft and replay outgoing epochs", async () => {
+test("authorized inspector copy separates live draft and replay upcoming epochs", async () => {
   const source = await readFile(new URL("../src/panels.js", import.meta.url), "utf8");
   assert.match(source, /authorized pending draft for the next submission/u);
-  assert.match(source, /separately authorized recorded outgoing action/u);
+  assert.match(source, /authorized recorded actions out of the current frame/u);
   assert.match(source, /Draft range, target, and legality overlays/u);
-  assert.match(source, /Recorded range, target, and legality overlays/u);
+  assert.match(source, /Upcoming Transition/u);
+  assert.doesNotMatch(
+    source,
+    /Recorded outgoing inspection|No (?:authorized )?outgoing inspection/u,
+  );
   assert.doesNotMatch(source, /Settled range, target, and legality overlays/u);
 });
 

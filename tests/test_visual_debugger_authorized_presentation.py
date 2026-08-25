@@ -246,7 +246,7 @@ def _presentation(
     )
     outgoing = (
         None
-        if selected_internal_slot is None or index == len(cases.trajectory.transitions)
+        if index == len(cases.trajectory.transitions)
         else cases.trajectory.transitions[index]
     )
     return build_replay_oracle_authorized_presentation_v1(
@@ -350,6 +350,8 @@ def test_no_selected_actor_has_no_outgoing_inspection(
     frame = _presentation(oracle_cases, 3, selected_internal_slot=None)
     assert frame.incoming_summary is not None
     assert frame.outgoing_inspection is None
+    assert frame.upcoming_transition is not None
+    assert frame.upcoming_transition.outgoing_transition_index == 3
 
 
 def test_service_owned_selection_ignores_legacy_scene_selection(
@@ -477,7 +479,7 @@ def test_checked_recovery_sample_projects_status_durations() -> None:
         source_authority_epoch=raw.revision,
         selected_internal_slot=None,
         incoming_transition=trajectory.transitions[0],
-        outgoing_transition=None,
+        outgoing_transition=trajectory.transitions[1],
     )
     mechanics_by_channel = {
         status.status_channel: status

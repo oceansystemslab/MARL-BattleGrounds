@@ -2,9 +2,11 @@ import {
   authorizedPresentationAudience,
   authorizedPresentationIdentityRows,
   authorizedPresentationInspectionState,
+  authorizedPresentationResearcherSceneView,
   authorizedPresentationSceneView,
   authorizedPresentationTechnicalFacts,
   authorizedPresentationTransitionRows,
+  authorizedPresentationUpcomingTransitionRows,
   isAuthorizedPresentationFrame,
 } from "./authorized-presentation-adapter.js";
 import { formatCompactDisplayNumber, formatDisplayNumber } from "./display.js";
@@ -206,11 +208,11 @@ export function authorizedOutgoingTargetDescriptor(rawLegality) {
   return createSemanticDescriptor({
     kind: "action",
     id: `outgoing-target:${legality.owner_presentation_key}:${legality.target_action}:${legality.target_kind}`,
-    title: "Outgoing target",
+    title: "Upcoming target",
     tone: "information",
     accent: "none",
     summary:
-      "This target disclosure belongs to the separately authorized outgoing action.",
+      "This target disclosure belongs to the selected agent's authorized upcoming transition.",
     rows: [
       {
         label: "Disclosure",
@@ -275,10 +277,10 @@ export function authorizedInspectorView(
   if (!isAuthorizedPresentationFrame(presentation)) {
     return null;
   }
-  const scene = authorizedPresentationSceneView(
-    presentation,
-    localInspectedPresentationKey,
-  );
+  const scene =
+    presentation.viewer_mode === "replay"
+      ? authorizedPresentationResearcherSceneView(presentation)
+      : authorizedPresentationSceneView(presentation, localInspectedPresentationKey);
   const audience = authorizedPresentationAudience(presentation);
   if (scene === null || (audience !== "researcher" && audience !== "agent_pov")) {
     return null;
@@ -411,6 +413,33 @@ function authorizedTransitionTuple(label, action) {
 }
 
 /**
+ * Render accepted action rows with one shared grammar for the incoming and
+ * selected-actor upcoming transition panels.
+ *
+ * @param {ReadonlyArray<Record<string, any>>} rows
+ */
+function authorizedTransitionList(rows) {
+  const list = htmlElement("ol", "accepted-action-list");
+  for (const transition of rows) {
+    const item = htmlElement("li", "accepted-action-row");
+    const title = htmlElement(
+      "h3",
+      "accepted-action-row__title",
+      transition.actor_title,
+    );
+    title.dataset.class = transition.actor_accent;
+    const comparison = htmlElement("div", "accepted-action-row__comparison");
+    comparison.append(
+      authorizedTransitionTuple("Submitted", transition.submitted_action),
+      authorizedTransitionTuple("Accepted", transition.accepted_action),
+    );
+    item.append(title, comparison);
+    list.append(item);
+  }
+  return list;
+}
+
+/**
  * Keep roster status values compact while leaving exact duration truth in the
  * owning chip's data, accessible label, and tooltip.
  *
@@ -443,11 +472,9 @@ function renderFactTokens(
 ) {
   const nodes = [];
   const authorizedItems =
-    audience === "agent_pov" && kind === "modifier"
-      ? []
-      : kind === "modifier"
-        ? items.filter((item) => !isRecord(item) || item.multiplier !== 1)
-        : items;
+    kind === "modifier"
+      ? items.filter((item) => !isRecord(item) || item.multiplier !== 1)
+      : items;
   for (const rawItem of authorizedItems) {
     const item = isRecord(rawItem) ? rawItem : {};
     const token = resolveVisualToken(
@@ -544,13 +571,50 @@ export class DebuggerPanels {
     this.rosterRows = new Map();
     /** @type {Map<number, RosterTeamGroup>} */
     this.rosterTeamGroups = new Map();
+    /** @type {Map<string, RosterTeamGroup>} */
+    this.rosterVisibilityGroups = new Map();
+    /** @type {WeakMap<HTMLButtonElement, Readonly<Record<string, unknown>>>} */
+    this.rosterActivationByButton = new WeakMap();
     /** @type {string | null} */
     this.lastAnnouncedTransitionKey = null;
     this.roster.replaceChildren();
     this.ensureRosterTeamGroup(1);
     this.ensureRosterTeamGroup(2);
+    this.ensureRosterVisibilityGroup("visible");
+    this.ensureRosterVisibilityGroup("not-visible");
     this.pendingLabel = htmlElement("p", "action-card__label");
     this.pendingList = htmlElement("ol", "pending-action-list");
+  }
+
+  /**
+   * @param {"visible" | "not-visible"} visibility
+   * @returns {RosterTeamGroup}
+   */
+  ensureRosterVisibilityGroup(visibility) {
+    const existing = this.rosterVisibilityGroups.get(visibility);
+    if (existing) {
+      return existing;
+    }
+    const visible = visibility === "visible";
+    const element = htmlElement("section", "roster-team roster-visibility");
+    element.dataset.visibility = visibility;
+    element.hidden = true;
+    const heading = htmlElement("div", "roster-team__heading");
+    const title = htmlElement("h3", null, visible ? "VISIBLE" : "NOT VISIBLE");
+    const count = htmlElement("span", "count-badge", "0 agents");
+    heading.append(title, count);
+    const rows = htmlElement("div", "roster-team__rows");
+    const empty = htmlElement(
+      "p",
+      "empty-copy",
+      visible ? "No agents are visible." : "No agents are outside this snapshot.",
+    );
+    rows.append(empty);
+    element.append(heading, rows);
+    this.roster.append(element);
+    const group = { element, count, rows, empty };
+    this.rosterVisibilityGroups.set(visibility, group);
+    return group;
   }
 
   /**
@@ -606,10 +670,10 @@ export class DebuggerPanels {
     summary.append(identityContainer, health);
     primaryButton.append(summary);
     primaryButton.addEventListener("click", () => {
-      void this.onCommand({
-        command_type: "activate_authorized_agent",
-        presentation_key: identity.presentation_key,
-      });
+      const command = this.rosterActivationByButton.get(primaryButton);
+      if (command !== undefined) {
+        void this.onCommand(command);
+      }
     });
 
     const facts = htmlElement("div", "roster-row__facts");
@@ -642,13 +706,15 @@ export class DebuggerPanels {
   ) {
     const audience = authorizedPresentationAudience(presentation);
     const identities = authorizedPresentationIdentityRows(presentation);
-    const scene = authorizedPresentationSceneView(
-      presentation,
-      localInspectedPresentationKey,
-    );
+    const replayAgent =
+      presentation.viewer_mode === "replay" && audience === "agent_pov";
+    const scene = replayAgent
+      ? authorizedPresentationResearcherSceneView(presentation)
+      : authorizedPresentationSceneView(presentation, localInspectedPresentationKey);
+    const rosterAudience = scene?.audience ?? audience;
     const selection = isRecord(scene?.selection) ? scene.selection : {};
     const sourceAgents =
-      audience === "researcher" ? identities.map(({ agent }) => agent) : [];
+      rosterAudience === "researcher" ? identities.map(({ agent }) => agent) : [];
     const activeKeys = new Set(identities.map(({ display_key }) => display_key));
     for (const [key, row] of this.rosterRows) {
       if (typeof key !== "string" || !activeKeys.has(key)) {
@@ -657,9 +723,16 @@ export class DebuggerPanels {
       }
     }
 
-    this.rosterCount.textContent = `${identities.length} visible`;
+    const visibleCount = identities.filter(
+      (identity) => identity.visible_in_snapshot,
+    ).length;
+    this.rosterCount.textContent = replayAgent
+      ? `${identities.length} agents · ${visibleCount} visible · ${identities.length - visibleCount} not visible`
+      : `${identities.length} visible`;
     /** @type {Map<number, HTMLElement[]>} */
     const desiredByTeam = new Map();
+    /** @type {Map<string, HTMLElement[]>} */
+    const desiredByVisibility = new Map();
     for (const identity of identities) {
       const agent = agentForPresentation(
         isRecord(scene)
@@ -685,6 +758,7 @@ export class DebuggerPanels {
       row.element.dataset.teamId = String(agent.team_id);
       row.element.dataset.classId = String(agent.class_id);
       row.element.dataset.team = teamToken.cssKey;
+      row.element.dataset.visibleInSnapshot = String(identity.visible_in_snapshot);
       row.element.removeAttribute("data-class");
       row.identityId.dataset.class = classToken.cssKey;
       row.element.setAttribute(
@@ -693,7 +767,7 @@ export class DebuggerPanels {
       );
       registerTooltipOwner(
         row.primaryButton,
-        audience === "researcher"
+        rosterAudience === "researcher"
           ? explainAgent(agent)
           : explainPovAgent(agent, {
               controlled:
@@ -705,14 +779,32 @@ export class DebuggerPanels {
         { inspectable: false },
       );
       row.primaryButton.dataset.presentationKey = String(agent.presentation_key);
-      row.primaryButton.disabled = disabled;
+      const activation =
+        identity.activation_kind === "replay_pov_global" &&
+        Number.isInteger(identity.command_global_slot)
+          ? Object.freeze({
+              command_type: "activate_replay_pov_agent",
+              global_slot: identity.command_global_slot,
+            })
+          : identity.activation_kind === "scene_agent"
+            ? Object.freeze({
+                command_type: "activate_authorized_agent",
+                presentation_key: identity.presentation_key,
+              })
+            : null;
+      if (activation === null) {
+        this.rosterActivationByButton.delete(row.primaryButton);
+      } else {
+        this.rosterActivationByButton.set(row.primaryButton, activation);
+      }
+      row.primaryButton.disabled = disabled || activation === null;
       const inspected =
         selection.inspection_owner_presentation_key === agent.presentation_key;
       row.primaryButton.setAttribute("aria-pressed", String(inspected));
       row.element.dataset.selected = String(inspected);
       row.primaryButton.setAttribute(
         "aria-label",
-        audience === "researcher" &&
+        rosterAudience === "researcher" &&
           presentation.viewer_mode === "live" &&
           authorizedPresentationInspectionState(presentation).state_kind ===
             "live_editable"
@@ -731,29 +823,39 @@ export class DebuggerPanels {
         "No persistent statuses",
         agent,
         sourceAgents,
-        audience ?? "agent_pov",
+        rosterAudience ?? "agent_pov",
       );
       renderFactTokens(
         row.modifiers,
-        audience === "researcher"
-          ? asArray(agent.modifiers ?? agent.aura_modifiers)
-          : [],
+        asArray(agent.modifiers ?? agent.aura_modifiers),
         "modifier",
-        audience === "researcher"
-          ? "No effective modifiers"
-          : "Effective modifiers unavailable",
+        "No effective modifiers",
         agent,
         sourceAgents,
-        audience ?? "agent_pov",
+        rosterAudience ?? "agent_pov",
       );
-      const desired = desiredByTeam.get(Number(agent.team_id)) ?? [];
-      desired.push(row.element);
-      desiredByTeam.set(Number(agent.team_id), desired);
-      this.ensureRosterTeamGroup(Number(agent.team_id));
+      if (replayAgent) {
+        const visibility = identity.visible_in_snapshot ? "visible" : "not-visible";
+        const desired = desiredByVisibility.get(visibility) ?? [];
+        desired.push(row.element);
+        desiredByVisibility.set(visibility, desired);
+      } else {
+        const desired = desiredByTeam.get(Number(agent.team_id)) ?? [];
+        desired.push(row.element);
+        desiredByTeam.set(Number(agent.team_id), desired);
+        this.ensureRosterTeamGroup(Number(agent.team_id));
+      }
     }
     for (const [teamId, group] of this.rosterTeamGroups) {
+      group.element.hidden = replayAgent;
       const desired = desiredByTeam.get(teamId) ?? [];
       group.count.textContent = `${desired.length} authorized`;
+      this.reconcileChildren(group.rows, desired.length > 0 ? desired : [group.empty]);
+    }
+    for (const [visibility, group] of this.rosterVisibilityGroups) {
+      group.element.hidden = !replayAgent;
+      const desired = desiredByVisibility.get(visibility) ?? [];
+      group.count.textContent = `${desired.length} agents`;
       this.reconcileChildren(group.rows, desired.length > 0 ? desired : [group.empty]);
     }
   }
@@ -769,6 +871,10 @@ export class DebuggerPanels {
     );
     const inspectionState = authorizedPresentationInspectionState(presentation);
     const inspection = inspectionState.inspection;
+    const replay = presentation.viewer_mode === "replay";
+    const upcomingRows = replay
+      ? authorizedPresentationUpcomingTransitionRows(presentation)
+      : [];
     this.selectionCard.replaceChildren();
     if (inspector === null || inspector.owner_descriptor === null) {
       this.selectionCard.append(
@@ -787,10 +893,12 @@ export class DebuggerPanels {
     this.pendingHeading.textContent = {
       live_editable: "Pending authorized draft",
       live_scripted: "Scripted playback inspection",
-      replay_outgoing: "Recorded outgoing inspection",
-      replay_none: "No outgoing inspection",
+      replay_outgoing: "Upcoming Transition",
+      replay_none: "Upcoming Transition",
       unavailable: "Inspection unavailable",
     }[inspectionState.state_kind];
+    this.pendingCount.hidden = replay;
+    this.pendingScope.hidden = replay;
     this.pendingCount.textContent = inspection ? "1 actor" : "0 actors";
     this.pendingScope.textContent =
       inspectionState.state_kind === "live_scripted"
@@ -798,9 +906,9 @@ export class DebuggerPanels {
         : inspectionState.state_kind === "live_editable"
           ? "This panel shows only the authorized pending draft for the next submission."
           : inspectionState.state_kind === "replay_outgoing"
-            ? "This panel shows only the separately authorized recorded outgoing action."
+            ? "This panel shows the authorized recorded actions out of the current frame."
             : inspectionState.state_kind === "replay_none"
-              ? "No outgoing inspection is authorized at this replay frame."
+              ? "No upcoming transition is available at this replay frame."
               : "Inspection is unavailable for this frame.";
     const action =
       inspection?.inspection_kind === "live_draft_action"
@@ -808,23 +916,30 @@ export class DebuggerPanels {
         : inspection?.inspection_kind === "replay_recorded_outgoing_action"
           ? inspection.accepted_action
           : null;
-    this.pendingLabel.textContent =
-      action === null || inspection === null
-        ? "NO OUTGOING INSPECTION"
-        : `${inspection.actor_public_agent_id} · move ${action.move_action} · target ${action.target_action} · ${inspection.inspection_kind === "live_draft_action" ? action.armed_lane : inspection.combat_lane}`;
-    this.pendingList.replaceChildren(
-      htmlElement(
-        "li",
-        action === null ? "empty-copy" : "pending-action-row",
-        action === null
-          ? "No pending action."
-          : inspectionState.state_kind === "live_editable"
-            ? "Draft range, target, and legality overlays use this pending branch only."
-            : "Recorded range, target, and legality overlays use this outgoing branch only.",
-      ),
-    );
-    this.pendingCard.replaceChildren(this.pendingLabel, this.pendingList);
+    if (replay) {
+      this.pendingCard.replaceChildren(
+        upcomingRows.length > 0
+          ? authorizedTransitionList(upcomingRows)
+          : htmlElement("p", "empty-copy", "No upcoming transition is available."),
+      );
+    } else {
+      this.pendingLabel.textContent =
+        action === null || inspection === null
+          ? "NO PENDING INSPECTION"
+          : `${inspection.actor_public_agent_id} · move ${action.move_action} · target ${action.target_action} · ${action.armed_lane}`;
+      this.pendingList.replaceChildren(
+        htmlElement(
+          "li",
+          action === null ? "empty-copy" : "pending-action-row",
+          action === null
+            ? "No pending action."
+            : "Draft range, target, and legality overlays use this pending branch only.",
+        ),
+      );
+      this.pendingCard.replaceChildren(this.pendingLabel, this.pendingList);
+    }
     if (
+      !replay &&
       inspector !== null &&
       inspector.owner !== null &&
       inspector.outgoing_target_descriptor !== null &&
@@ -837,11 +952,12 @@ export class DebuggerPanels {
       outgoingTarget.dataset.targetKind = inspector.legality.target_kind;
       outgoingTarget.setAttribute(
         "aria-label",
-        `Outgoing target disclosure for Agent ID ${inspector.owner.public_agent_id}`,
+        `Upcoming target disclosure for Agent ID ${inspector.owner.public_agent_id}`,
       );
       this.pendingCard.append(outgoingTarget);
     }
     if (
+      !replay &&
       inspector !== null &&
       inspector.owner !== null &&
       inspector.legality_cards.length > 0
@@ -868,26 +984,7 @@ export class DebuggerPanels {
       this.acceptedAnnouncement.textContent = "";
       this.lastAnnouncedTransitionKey = null;
     } else {
-      const list = htmlElement("ol", "accepted-action-list");
-      for (const transition of transitionRows) {
-        const item = htmlElement("li", "accepted-action-row");
-        const title = htmlElement(
-          "h3",
-          "accepted-action-row__title",
-          transition.actor_title,
-        );
-        title.dataset.class = transition.actor_accent;
-        const submitted = transition.submitted_action;
-        const accepted = transition.accepted_action;
-        const comparison = htmlElement("div", "accepted-action-row__comparison");
-        comparison.append(
-          authorizedTransitionTuple("Submitted", submitted),
-          authorizedTransitionTuple("Accepted", accepted),
-        );
-        item.append(title, comparison);
-        list.append(item);
-      }
-      this.acceptedCard.append(list);
+      this.acceptedCard.append(authorizedTransitionList(transitionRows));
       const transitionId = presentation.latest_transition?.incoming_transition_id;
       const transitionKey =
         typeof transitionId === "string"
@@ -943,7 +1040,13 @@ export class DebuggerPanels {
     }
     this.rosterRows.clear();
     for (const group of this.rosterTeamGroups.values()) {
+      group.element.hidden = false;
       group.count.textContent = "0 authorized";
+      this.reconcileChildren(group.rows, [group.empty]);
+    }
+    for (const group of this.rosterVisibilityGroups.values()) {
+      group.element.hidden = true;
+      group.count.textContent = "0 agents";
       this.reconcileChildren(group.rows, [group.empty]);
     }
     this.rosterCount.textContent = "0 visible";
@@ -953,12 +1056,12 @@ export class DebuggerPanels {
     );
     this.pendingHeading.textContent = "Inspection unavailable";
     this.pendingCount.textContent = "0 actors";
-    this.pendingScope.textContent = "Waiting for an authorized outgoing inspection.";
+    this.pendingScope.textContent = "Waiting for authorized action details.";
     this.pendingCard.removeAttribute("data-submission-scope");
     this.pendingCard.removeAttribute("data-inspection-state");
     this.pendingCard.removeAttribute("data-pending-count");
     this.pendingCard.replaceChildren(
-      htmlElement("p", "empty-copy", "No authorized outgoing inspection."),
+      htmlElement("p", "empty-copy", "No authorized action details."),
     );
 
     this.acceptedCard.replaceChildren();

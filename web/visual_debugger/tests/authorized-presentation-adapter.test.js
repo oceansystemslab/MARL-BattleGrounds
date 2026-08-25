@@ -11,9 +11,11 @@ import {
   authorizedPresentationInspection,
   authorizedPresentationInspectionState,
   authorizedPresentationPreferenceKey,
+  authorizedPresentationResearcherSceneView,
   authorizedPresentationSceneView,
   authorizedPresentationTechnicalFacts,
   authorizedPresentationTransitionRows,
+  authorizedPresentationUpcomingTransitionRows,
   isAuthorizedPresentationFrame,
   projectCertifiedInCombatDurationStatus,
   projectCertifiedInspectionLegality,
@@ -414,7 +416,7 @@ test("structured preference keys reject colon collisions and distinguish A to B 
   assert.equal(sameAuthorizedPresentationPreferenceKey(authorityA, forged), false);
 });
 
-test("opaque display identity is session-scoped and Agent rows gain no slot", async () => {
+test("opaque display identity is session-scoped and Replay Agent rows gain only researcher navigation slots", async () => {
   const oracle = await normalized("replay_oracle");
   const shared = await normalized("replay_shared_obs_agent_pov");
   const oracleIdentity = authorizedPresentationIdentityRows(oracle).find(
@@ -426,7 +428,9 @@ test("opaque display identity is session-scoped and Agent rows gain no slot", as
   assert.ok(oracleIdentity);
   assert.ok(sharedIdentity);
   assert.notEqual(oracleIdentity.display_key, sharedIdentity.display_key);
-  assert.equal(sharedIdentity.command_global_slot, null);
+  assert.equal(sharedIdentity.command_global_slot, 0);
+  assert.equal(sharedIdentity.activation_kind, "replay_pov_global");
+  assert.equal(typeof sharedIdentity.visible_in_snapshot, "boolean");
   assert.equal(Object.hasOwn(sharedIdentity.agent, "global_slot"), false);
   assert.equal(
     scopedPresentationKey(shared, sharedIdentity.presentation_key),
@@ -435,7 +439,7 @@ test("opaque display identity is session-scoped and Agent rows gain no slot", as
   assert.equal(Object.isFrozen(sharedIdentity), true);
 });
 
-test("only Oracle directory topology yields command transport slots", async () => {
+test("Oracle commands and Replay Agent researcher navigation keep separate capabilities", async () => {
   const oracle = await normalized("live_oracle");
   const rows = authorizedPresentationIdentityRows(oracle);
   assert.equal(authorizedPresentationAudience(oracle), "researcher");
@@ -463,28 +467,71 @@ test("only Oracle directory topology yields command transport slots", async () =
     true,
   );
 
+  const liveAgent = await normalized("live_no_shared_obs_agent_pov");
+  assert.equal(
+    authorizedPresentationIdentityRows(liveAgent).every(
+      ({ command_global_slot }) => command_global_slot === null,
+    ),
+    true,
+  );
   for (const kind of [
-    "live_no_shared_obs_agent_pov",
     "replay_no_shared_obs_agent_pov",
     "replay_shared_obs_agent_pov",
   ]) {
+    const agentFrame = await normalized(kind);
+    const agentRows = authorizedPresentationIdentityRows(agentFrame);
     assert.equal(
-      authorizedPresentationIdentityRows(await normalized(kind)).every(
-        ({ command_global_slot }) => command_global_slot === null,
+      agentRows.every(
+        ({ command_global_slot, activation_kind }) =>
+          Number.isInteger(command_global_slot) &&
+          activation_kind === "replay_pov_global",
       ),
       true,
     );
-    const agentFrame = await normalized(kind);
     assert.equal(
       authorizedOracleCommandSlotForPresentationKey(
         agentFrame,
-        authorizedPresentationIdentityRows(agentFrame)[0].presentation_key,
+        agentRows[0].presentation_key,
       ),
       null,
     );
     assert.equal(
       authorizedOracleCommandSlotForPublicAgentId(agentFrame, "agent-slot-0"),
       null,
+    );
+  }
+});
+
+test("Replay Agent researcher roster is global while the battlefield remains fog-scoped", async () => {
+  for (const kind of [
+    "replay_no_shared_obs_agent_pov",
+    "replay_shared_obs_agent_pov",
+  ]) {
+    const frame = await normalized(kind);
+    const battlefield = authorizedPresentationSceneView(frame);
+    const researcher = authorizedPresentationResearcherSceneView(frame);
+    const rows = authorizedPresentationIdentityRows(frame);
+    assert.ok(battlefield);
+    assert.ok(researcher);
+    assert.equal(researcher.agents.length, frame.researcher_space.roster_agents.length);
+    assert.equal(rows.length, researcher.agents.length);
+    assert.deepEqual(
+      rows
+        .filter((/** @type {Record<string, any>} */ row) => row.visible_in_snapshot)
+        .map((/** @type {Record<string, any>} */ row) => row.public_agent_id),
+      battlefield.agents.map(
+        (/** @type {Record<string, any>} */ agent) => agent.public_agent_id,
+      ),
+    );
+    assert.equal(
+      rows.some(({ visible_in_snapshot }) => !visible_in_snapshot),
+      true,
+    );
+    assert.equal(
+      frame.researcher_space.roster_agents.some(
+        (/** @type {Record<string, any>} */ agent) => Object.hasOwn(agent, "position"),
+      ),
+      false,
     );
   }
 });
@@ -1072,7 +1119,10 @@ test("Agent visual events, local evidence, Submitted/Accepted, Technical Frame, 
     frame.visual_events.summary_kind,
     "agent_pov_fog_filtered_visual_events",
   );
-  assert.equal(transition.length, 1);
+  assert.equal(
+    transition.length,
+    frame.researcher_space.latest_transition.action_rows.length,
+  );
   assert.deepEqual(Object.keys(transition[0]), [
     "actor_title",
     "actor_accent",
@@ -1115,8 +1165,8 @@ test("Latest Transition is exact for all five leaves and empty at frame zero", a
     ["live_oracle", 5],
     ["live_no_shared_obs_agent_pov", 1],
     ["replay_oracle", 5],
-    ["replay_no_shared_obs_agent_pov", 1],
-    ["replay_shared_obs_agent_pov", 1],
+    ["replay_no_shared_obs_agent_pov", 5],
+    ["replay_shared_obs_agent_pov", 5],
   ];
   const exactKeys = [
     "actor_title",
@@ -1181,6 +1231,73 @@ test("Latest Transition is exact for all five leaves and empty at frame zero", a
       String(kind),
     );
   }
+});
+
+test("Upcoming Transition is the exact authority-scoped transition out of the current frame", async () => {
+  const replayCases = [
+    await normalized("replay_oracle"),
+    await normalized("replay_no_shared_obs_agent_pov"),
+    await normalized("replay_shared_obs_agent_pov"),
+    await normalizedState("replay_oracle_frame_zero"),
+    await normalizedState("replay_no_shared_frame_zero"),
+    await normalizedState("replay_shared_frame_zero"),
+  ];
+  for (const frame of replayCases) {
+    const rows = authorizedPresentationUpcomingTransitionRows(frame);
+    const transition =
+      frame.authority.authority_kind === "oracle"
+        ? frame.upcoming_transition
+        : frame.researcher_space.upcoming_transition;
+    assert.ok(transition);
+    assert.equal(rows.length, transition.action_rows.length);
+    for (const [index, row] of rows.entries()) {
+      const source = transition.action_rows[index];
+      assert.deepEqual(Object.keys(row), [
+        "actor_title",
+        "actor_accent",
+        "submitted_action",
+        "accepted_action",
+      ]);
+      assert.deepEqual(row.submitted_action, source.submitted_action);
+      assert.deepEqual(row.accepted_action, source.accepted_action);
+      assert.notEqual(row.submitted_action, source.submitted_action);
+      assert.notEqual(row.accepted_action, source.accepted_action);
+      assert.match(
+        row.actor_title,
+        /^Agent ID .+ · (?:Mage|Warrior|Hunter|Rogue|Priest) · Team [AB]$/u,
+      );
+      assert.equal(Object.isFrozen(row), true);
+    }
+    assert.equal(rows.length, 5, frame.presentation_kind);
+    assert.equal(Object.isFrozen(rows), true);
+  }
+
+  for (const kind of ["live_oracle", "live_no_shared_obs_agent_pov"]) {
+    assert.deepEqual(
+      authorizedPresentationUpcomingTransitionRows(
+        await normalized(/** @type {keyof typeof fixture.presentations} */ (kind)),
+      ),
+      [],
+    );
+  }
+  for (const kind of [
+    "replay_oracle_final_selected",
+    "replay_oracle_final_unselected",
+    "replay_no_shared_final",
+    "replay_shared_final",
+  ]) {
+    assert.deepEqual(
+      authorizedPresentationUpcomingTransitionRows(
+        await normalizedState(/** @type {keyof typeof fixture.state_cases} */ (kind)),
+      ),
+      [],
+      kind,
+    );
+  }
+  assert.deepEqual(
+    authorizedPresentationUpcomingTransitionRows({ ...replayCases[0] }),
+    [],
+  );
 });
 
 test("Technical Frame projects the exact final five-leaf allowlist atomically", async () => {
@@ -1788,6 +1905,8 @@ test("moving Warrior Charge activation stays a direct transition-start underlay"
   const startTarget = projectedTrajectoryPoint(raw, 4, "transition_start");
 
   assert.equal(activation.tokenId, "warrior_charge");
+  assert.equal(activation.sourceEndpointPhase, "transition_start");
+  assert.equal(activation.targetEndpointPhase, "transition_start");
   assert.equal(activation.endpointPhase, "transition_start");
   assert.notDeepEqual(startSource, projectedTrajectoryPoint(raw, 2, "successor"));
   assert.notDeepEqual(startTarget, projectedTrajectoryPoint(raw, 4, "successor"));
@@ -2358,7 +2477,7 @@ test("Oracle lifecycle cues retain successor and strict team-anchor authority", 
     ),
     /agent_died|agent_respawned|respawn_wave_occurred|semantic pulse|authoritative semantic/iu,
   );
-  assert.equal(plan.bounds.persistentNodes, 20);
+  assert.equal(plan.bounds.persistentNodes, 28);
 });
 
 test("NoShared and Shared authorized clocks never synthesize a respawn wave", async () => {
@@ -2538,7 +2657,7 @@ test("Oracle status compositor applies exact precedence and preserves every atom
       sourcePublicAgentId: payload.source_anchor.public_agent_id,
     }));
     assert.equal(plan.events.length, 1, expected.label);
-    assert.equal(plan.bounds.nodes, 30, expected.label);
+    assert.equal(plan.bounds.nodes, 33, expected.label);
     const [lifecycle] = plan.events;
     assert.deepEqual(
       [lifecycle.eventId, lifecycle.eventType],
@@ -2629,7 +2748,7 @@ test("status groups keep first-atomic plan order and use the nearest collision-s
     incomingRowsBefore,
   );
   assert.equal(plan.events.length, 4);
-  assert.equal(plan.bounds.nodes, 114);
+  assert.equal(plan.bounds.nodes, 123);
   assert.deepEqual(
     plan.events.map(({ eventId }) => eventId),
     [incomingRows[0].id, incomingRows[2].id, incomingRows[3].id, incomingRows[4].id],

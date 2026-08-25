@@ -184,6 +184,14 @@ const AGENT_PAIRED_FORBIDDEN_VALUE_FIELDS = new Set([
   "artifact_digest_sha256",
   "source_material_frame_id",
 ]);
+const RESEARCHER_SPACE_RECORDED_ID_FIELDS = new Set([
+  "incoming_transition_id",
+  "incoming_start_frame_id",
+  "incoming_successor_frame_id",
+  "outgoing_transition_id",
+  "outgoing_start_frame_id",
+  "outgoing_successor_frame_id",
+]);
 /** @type {Readonly<Record<string, number>>} */
 const ORACLE_EVENT_PHASE_RANK = Object.freeze({
   action_rejected: 10,
@@ -924,14 +932,17 @@ function validateDecisionMask(mask, label) {
   }
 }
 
-/** @param {Record<string, any>} root */
-function validatePresentationKeyGraph(root) {
-  const expectedPrefix =
-    root.authority.authority_kind === "oracle" ? "oracle_" : "pov_";
+/**
+ * @param {Record<string, any>} root
+ * @param {{authorityKind?: "oracle" | "agent_pov", excludedRootFields?: ReadonlySet<string>}} [options]
+ */
+function validatePresentationKeyGraph(root, options = {}) {
+  const authorityKind = options.authorityKind ?? root.authority.authority_kind;
+  const expectedPrefix = authorityKind === "oracle" ? "oracle_" : "pov_";
   const publicByKey = new Map();
   const keyByPublic = new Map();
   /** @param {unknown} value */
-  function visit(value) {
+  function visit(value, rootLevel = false) {
     if (Array.isArray(value)) {
       for (const child of value) visit(child);
       return;
@@ -964,23 +975,26 @@ function validatePresentationKeyGraph(root) {
       publicByKey.set(key, publicId);
       keyByPublic.set(publicId, key);
     }
-    for (const child of Object.values(record)) visit(child);
+    for (const [name, child] of Object.entries(record)) {
+      if (rootLevel && options.excludedRootFields?.has(name)) continue;
+      visit(child);
+    }
   }
-  visit(root);
+  visit(root, true);
   return [...keyByPublic.entries()].map(([publicId, key]) => ({ key, publicId }));
 }
 
 /**
- * @param {Record<string, any>} frame
+ * @param {string} session
+ * @param {"oracle" | "agent_pov"} authorityKind
+ * @param {string | null} recipient
  * @param {{key: string, publicId: string}[]} pairs
  */
-async function verifyPresentationKeyDerivation(frame, pairs) {
+async function verifyPresentationKeyPairs(session, authorityKind, recipient, pairs) {
   const subtle = globalThis.crypto?.subtle;
   if (!subtle) invalid("Web Crypto is required for presentation-key validation.");
   const encoder = new TextEncoder();
-  const oracle = frame.authority.authority_kind === "oracle";
-  const session = frame.source.source_session_id;
-  const recipient = oracle ? null : frame.authority.recipient_public_agent_id;
+  const oracle = authorityKind === "oracle";
   await Promise.all(
     pairs.map(async ({ key, publicId }) => {
       const payload = oracle
@@ -998,6 +1012,20 @@ async function verifyPresentationKeyDerivation(frame, pairs) {
   );
 }
 
+/**
+ * @param {Record<string, any>} frame
+ * @param {{key: string, publicId: string}[]} pairs
+ */
+async function verifyPresentationKeyDerivation(frame, pairs) {
+  const oracle = frame.authority.authority_kind === "oracle";
+  return verifyPresentationKeyPairs(
+    frame.source.source_session_id,
+    oracle ? "oracle" : "agent_pov",
+    oracle ? null : frame.authority.recipient_public_agent_id,
+    pairs,
+  );
+}
+
 /** @param {Record<string, any>} root */
 function validateAgentPrivacy(root) {
   const episodeId = root.source.episode_id;
@@ -1008,16 +1036,23 @@ function validateAgentPrivacy(root) {
     `^${escapedEpisodeId}:(?:frame:[0-9]+|transition:[0-9]+(?::event:[0-9]{4})?|replay(?:|:timeline(?::[^\\s]+)?)|(?:actor-pov|shared-obs-visual-union):${escapedRecipientId}:(?:replay|timeline))$`,
     "u",
   );
-  /** @param {unknown} value */
-  function visit(value) {
+  /**
+   * @param {unknown} value
+   * @param {string | null} field
+   * @param {boolean} researcherSpace
+   */
+  function visit(value, field = null, researcherSpace = false) {
     if (typeof value === "string") {
-      if (oracleIdentity.test(value)) {
+      if (
+        oracleIdentity.test(value) &&
+        !(researcherSpace && RESEARCHER_SPACE_RECORDED_ID_FIELDS.has(field ?? ""))
+      ) {
         invalid("Agent presentation contains a forbidden Oracle/diagnostic value.");
       }
       return;
     }
     if (Array.isArray(value)) {
-      for (const child of value) visit(child);
+      for (const child of value) visit(child, field, researcherSpace);
       return;
     }
     if (!value || typeof value !== "object") return;
@@ -1025,7 +1060,7 @@ function validateAgentPrivacy(root) {
       if (AGENT_FORBIDDEN_KEYS.has(key)) {
         invalid(`Agent presentation contains forbidden key ${key}.`);
       }
-      visit(child);
+      visit(child, key, researcherSpace || key === "researcher_space");
     }
   }
   visit(root);
@@ -1062,24 +1097,36 @@ function validatePairedAgentPrivacy(transport, presentation) {
     }
   }
   collect(transport);
-  /** @param {unknown} value @param {string | null} [field] */
-  function rejectReflections(value, field = null) {
+  /**
+   * @param {unknown} value
+   * @param {string | null} [field]
+   * @param {boolean} [researcherSpace]
+   */
+  function rejectReflections(value, field = null, researcherSpace = false) {
     if (typeof value === "string") {
       const allowedEndpointDigest =
         field === "authorized_endpoint_digest_sha256" ||
         field === "source_authorized_endpoint_digest_sha256";
-      if (!allowedEndpointDigest && forbiddenValues.has(value)) {
+      const allowedRecordedIdentity =
+        researcherSpace && RESEARCHER_SPACE_RECORDED_ID_FIELDS.has(field ?? "");
+      if (
+        !allowedEndpointDigest &&
+        !allowedRecordedIdentity &&
+        forbiddenValues.has(value)
+      ) {
         invalid("Agent presentation reflects a forbidden paired transport value.");
       }
       return;
     }
     if (Array.isArray(value)) {
-      for (const child of value) rejectReflections(child, field);
+      for (const child of value) {
+        rejectReflections(child, field, researcherSpace);
+      }
       return;
     }
     if (!value || typeof value !== "object") return;
     for (const [key, child] of Object.entries(value)) {
-      rejectReflections(child, key);
+      rejectReflections(child, key, researcherSpace || key === "researcher_space");
     }
   }
   rejectReflections(presentation);
@@ -1149,6 +1196,51 @@ function validateLatestTransition(latest, prefix, episodeId) {
     requireUnique(
       row.target_action_recipient_public_agent_id_by_id.slice(1),
       "Latest Transition target identities",
+    );
+  }
+}
+
+/**
+ * @param {Record<string, any>} upcoming
+ * @param {string} prefix
+ * @param {string} episodeId
+ */
+function validateUpcomingTransition(upcoming, prefix, episodeId) {
+  const actionRows = /** @type {any[]} */ (upcoming.action_rows);
+  const index = upcoming.outgoing_transition_index;
+  if (
+    upcoming.episode_id !== episodeId ||
+    upcoming.outgoing_transition_id !== `${prefix}:transition:${index}` ||
+    upcoming.outgoing_start_frame_id !== `${prefix}:frame:${index}` ||
+    upcoming.outgoing_successor_frame_id !== `${prefix}:frame:${index + 1}` ||
+    upcoming.outgoing_successor_simulator_step_count !==
+      upcoming.outgoing_start_simulator_step_count + 1 ||
+    actionRows.length === 0
+  ) {
+    invalid("Upcoming Transition does not retain one adjacent canonical epoch.");
+  }
+  requireUnique(
+    actionRows.map((row) => row.actor_public_agent_id),
+    "Upcoming Transition actors",
+  );
+  for (const row of actionRows) {
+    validateSubmittedActionTuple(
+      row.submitted_action,
+      "Upcoming Transition submitted action",
+    );
+    validateAcceptedActionTuple(
+      row.accepted_action,
+      "Upcoming Transition accepted action",
+    );
+    if (
+      row.target_action_recipient_public_agent_id_by_id.length !== 11 ||
+      row.target_action_recipient_public_agent_id_by_id[0] !== null
+    ) {
+      invalid("Upcoming Transition target axis must retain eleven rows.");
+    }
+    requireUnique(
+      row.target_action_recipient_public_agent_id_by_id.slice(1),
+      "Upcoming Transition target identities",
     );
   }
 }
@@ -2771,6 +2863,262 @@ function validateAgentVisualStateMatrix(frame, source, endpoint, oracle, shared)
  * @param {Record<string, any>} frame
  * @param {Record<string, any>} source
  * @param {Record<string, any>} endpoint
+ * @param {boolean} oracle
+ * @param {boolean} shared
+ */
+function validateUpcomingStateMatrix(frame, source, endpoint, oracle, shared) {
+  const final = source.source_frame_index === source.source_final_frame_index;
+  const upcoming = frame.upcoming_transition;
+  if (final) {
+    if (upcoming !== null) {
+      invalid("Final replay frame cannot carry Upcoming Transition.");
+    }
+    return;
+  }
+  if (upcoming === null) {
+    invalid("Non-final replay frame requires Upcoming Transition.");
+  }
+  const recipient = oracle ? null : source.source_recipient_public_agent_id;
+  const prefix = oracle
+    ? source.episode_id
+    : `${source.episode_id}:${shared ? "shared-obs-visual-union" : "actor-pov"}:${recipient}`;
+  validateUpcomingTransition(upcoming, prefix, source.episode_id);
+  const currentFrameId = oracle
+    ? source.source_frame_id
+    : source.source_recipient_frame_id;
+  if (
+    upcoming.outgoing_transition_index !== source.source_frame_index ||
+    upcoming.outgoing_start_frame_id !== currentFrameId ||
+    upcoming.outgoing_start_simulator_step_count !== source.source_simulator_step_count
+  ) {
+    invalid("Upcoming Transition does not leave the current source frame.");
+  }
+  const actionRows = /** @type {any[]} */ (upcoming.action_rows);
+  if (oracle) {
+    const directory = /** @type {any[]} */ (endpoint.identity_directory.identities);
+    const sceneById = new Map(
+      /** @type {any[]} */ (endpoint.scene.agents).map((row) => [
+        row.public_agent_id,
+        row,
+      ]),
+    );
+    const activeIds = directory
+      .filter((row) => row.configured_active)
+      .map((row) => row.public_agent_id);
+    if (
+      actionRows.length !== activeIds.length ||
+      actionRows.some(
+        (row, index) =>
+          row.actor_public_agent_id !== activeIds[index] ||
+          row.actor_presentation_key !==
+            sceneById.get(row.actor_public_agent_id)?.presentation_key,
+      )
+    ) {
+      invalid("Oracle Upcoming Transition actors do not equal active scene order.");
+    }
+    for (const row of actionRows) {
+      const actor = directory.find(
+        (candidate) => candidate.public_agent_id === row.actor_public_agent_id,
+      );
+      const expectedTargets = [
+        ...directory.filter((candidate) => candidate.team_id === actor.team_id),
+        ...directory.filter((candidate) => candidate.team_id !== actor.team_id),
+      ].map((candidate) => candidate.public_agent_id);
+      if (
+        !structurallyEqual(row.target_action_recipient_public_agent_id_by_id, [
+          null,
+          ...expectedTargets,
+        ])
+      ) {
+        invalid("Oracle Upcoming Transition target axis changed actor-relative order.");
+      }
+    }
+  } else {
+    const parts = endpoint.parts;
+    const targetIds = /** @type {any[]} */ (endpoint.action_axis.target_actions).map(
+      (row) => (row.target_action === 0 ? null : row.target_public_agent_id),
+    );
+    if (
+      upcoming.recipient_public_agent_id !== recipient ||
+      upcoming.recipient_presentation_key !== parts.recipient_presentation_key ||
+      actionRows.length !== 1 ||
+      actionRows[0].actor_public_agent_id !== recipient ||
+      actionRows[0].actor_presentation_key !== parts.recipient_presentation_key ||
+      !structurallyEqual(
+        actionRows[0].target_action_recipient_public_agent_id_by_id,
+        targetIds,
+      )
+    ) {
+      invalid("Agent Upcoming Transition must contain only its fixed recipient.");
+    }
+  }
+  const inspection = frame.replay_inspection;
+  if (inspection === null) return;
+  const inspectedRow = actionRows.find(
+    (row) => row.actor_public_agent_id === inspection.actor_public_agent_id,
+  );
+  if (
+    !inspectedRow ||
+    inspectedRow.actor_presentation_key !== inspection.actor_presentation_key ||
+    !structurallyEqual(inspectedRow.submitted_action, inspection.submitted_action) ||
+    !structurallyEqual(inspectedRow.accepted_action, inspection.accepted_action)
+  ) {
+    invalid("Replay inspection does not equal its Upcoming Transition row.");
+  }
+}
+
+/**
+ * Validate the deliberately narrow global researcher branch carried by Replay
+ * Agent leaves. It contains roster and recorded-action facts, never battlefield
+ * geometry or choreography.
+ *
+ * @param {Record<string, any>} frame
+ * @returns {{key: string, publicId: string}[]}
+ */
+function validateReplayResearcherSpace(frame) {
+  const source = frame.source;
+  const researcher = frame.researcher_space;
+  if (
+    researcher.researcher_space_kind !== "global_replay_researcher_space" ||
+    researcher.episode_id !== source.episode_id ||
+    researcher.frame_index !== source.source_frame_index ||
+    researcher.final_frame_index !== source.source_final_frame_index ||
+    researcher.simulator_step_count !== source.source_simulator_step_count ||
+    researcher.selected_public_agent_id !== source.source_recipient_public_agent_id
+  ) {
+    invalid("Replay researcher space does not join its Agent source epoch.");
+  }
+
+  const directory = /** @type {any[]} */ (researcher.identity_directory.identities);
+  if (directory.length !== 10) {
+    invalid("Replay researcher directory requires ten rows.");
+  }
+  directory.forEach((row, index) => {
+    if (
+      row.team_id !== Math.floor(index / 5) + 1 ||
+      row.team_local_slot !== index % 5 ||
+      row.configured_active !== (row.class_id !== null) ||
+      (row.class_id === null) !== (row.class_name === null)
+    ) {
+      invalid("Replay researcher directory lost fixed team topology.");
+    }
+  });
+  requireUnique(
+    directory.map((row) => row.public_agent_id),
+    "Replay researcher directory identities",
+  );
+
+  const activeDirectory = directory.filter((row) => row.configured_active);
+  const roster = /** @type {any[]} */ (researcher.roster_agents);
+  if (
+    roster.length !== activeDirectory.length ||
+    roster.some((row, index) => {
+      const identity = activeDirectory[index];
+      return (
+        row.public_agent_id !== identity.public_agent_id ||
+        row.team_id !== identity.team_id ||
+        row.team_local_slot !== identity.team_local_slot ||
+        row.class_id !== identity.class_id ||
+        row.class_name !== identity.class_name
+      );
+    }) ||
+    !roster.some((row) => row.public_agent_id === researcher.selected_public_agent_id)
+  ) {
+    invalid("Replay researcher roster does not exactly join active identities.");
+  }
+  const representedClasses = [...new Set(roster.map((row) => row.class_id))].sort(
+    (left, right) => left - right,
+  );
+  if (
+    !structurallyEqual(
+      /** @type {any[]} */ (researcher.class_mechanics).map((row) => row.class_id),
+      representedClasses,
+    )
+  ) {
+    invalid("Replay researcher class mechanics do not cover its roster.");
+  }
+
+  /**
+   * @param {Record<string, any> | null} transition
+   * @param {boolean} incoming
+   */
+  const validateTransition = (transition, incoming) => {
+    const expected = incoming
+      ? source.source_frame_index > 0
+      : source.source_frame_index < source.source_final_frame_index;
+    if (!expected) {
+      if (transition !== null) {
+        invalid("Replay researcher transition presence changed at an edge.");
+      }
+      return;
+    }
+    if (transition === null) {
+      invalid("Replay researcher transition is missing from a recorded epoch.");
+    }
+    if (incoming) {
+      validateLatestTransition(transition, source.episode_id, source.episode_id);
+      if (
+        transition.incoming_transition_index !== source.source_frame_index - 1 ||
+        transition.incoming_successor_frame_id !==
+          `${source.episode_id}:frame:${source.source_frame_index}` ||
+        transition.incoming_successor_simulator_step_count !==
+          source.source_simulator_step_count
+      ) {
+        invalid("Replay researcher Latest Transition misses current s_n.");
+      }
+    } else {
+      validateUpcomingTransition(transition, source.episode_id, source.episode_id);
+      if (
+        transition.outgoing_transition_index !== source.source_frame_index ||
+        transition.outgoing_start_frame_id !==
+          `${source.episode_id}:frame:${source.source_frame_index}` ||
+        transition.outgoing_start_simulator_step_count !==
+          source.source_simulator_step_count
+      ) {
+        invalid("Replay researcher Upcoming Transition does not leave current s_n.");
+      }
+    }
+    const rows = /** @type {any[]} */ (transition.action_rows);
+    if (
+      rows.length !== roster.length ||
+      rows.some(
+        (row, index) =>
+          row.actor_public_agent_id !== roster[index].public_agent_id ||
+          row.actor_presentation_key !== roster[index].presentation_key,
+      )
+    ) {
+      invalid("Replay researcher transition actors changed roster order.");
+    }
+    for (const row of rows) {
+      const actor = directory.find(
+        (identity) => identity.public_agent_id === row.actor_public_agent_id,
+      );
+      const expectedTargets = [
+        ...directory.filter((identity) => identity.team_id === actor.team_id),
+        ...directory.filter((identity) => identity.team_id !== actor.team_id),
+      ].map((identity) => identity.public_agent_id);
+      if (
+        !structurallyEqual(row.target_action_recipient_public_agent_id_by_id, [
+          null,
+          ...expectedTargets,
+        ])
+      ) {
+        invalid("Replay researcher transition target axis changed team order.");
+      }
+    }
+  };
+
+  validateTransition(researcher.latest_transition, true);
+  validateTransition(researcher.upcoming_transition, false);
+  return validatePresentationKeyGraph(researcher, {
+    authorityKind: "oracle",
+  });
+}
+
+/**
+ * @param {Record<string, any>} frame
+ * @param {Record<string, any>} source
+ * @param {Record<string, any>} endpoint
  * @param {Record<string, any> | null} actionAxis
  * @param {Record<string, any>} scene
  * @param {boolean} live
@@ -3057,6 +3405,8 @@ function validateSemanticFrame(frame) {
   let actionAxis;
   let decisionMask = null;
   let frameId;
+  /** @type {{key: string, publicId: string}[]} */
+  let researcherPresentationKeyPairs = [];
   if (oracle) {
     if (!frame.presentation_kind.endsWith("oracle")) {
       invalid("Oracle authority is attached to an Agent presentation leaf.");
@@ -3335,6 +3685,9 @@ function validateSemanticFrame(frame) {
     }
     validateDecisionMask(decisionMask, "Agent next-decision mask");
     validateAgentPrivacy(frame);
+    if (!live) {
+      researcherPresentationKeyPairs = validateReplayResearcherSpace(frame);
+    }
   }
   validateAuthorizedScene(scene);
   const sceneAgents = /** @type {any[]} */ (scene.agents);
@@ -3347,7 +3700,9 @@ function validateSemanticFrame(frame) {
     "Scene public identities",
   );
   if (actionAxis !== null) validateActionAxis(actionAxis);
-  const presentationKeyPairs = validatePresentationKeyGraph(frame);
+  const presentationKeyPairs = validatePresentationKeyGraph(frame, {
+    excludedRootFields: !live && !oracle ? new Set(["researcher_space"]) : new Set(),
+  });
 
   const incomingIndex =
     source.source_frame_index === 0 ? null : source.source_frame_index - 1;
@@ -3397,6 +3752,9 @@ function validateSemanticFrame(frame) {
   ) {
     invalid("Replay Oracle Technical Frame does not join artifact provenance.");
   }
+  if (!live) {
+    validateUpcomingStateMatrix(frame, source, endpoint, oracle, shared);
+  }
   validateInspectionStateMatrix(
     frame,
     source,
@@ -3414,6 +3772,7 @@ function validateSemanticFrame(frame) {
     live,
     oracle,
     presentationKeyPairs,
+    researcherPresentationKeyPairs,
     scene,
   };
 }
@@ -3439,6 +3798,12 @@ export async function normalizeAuthorizedPresentationFrameV1(value) {
   const semantic = validateSemanticFrame(frame);
   await Promise.all([
     verifyPresentationKeyDerivation(frame, semantic.presentationKeyPairs),
+    verifyPresentationKeyPairs(
+      frame.source.source_session_id,
+      "oracle",
+      null,
+      semantic.researcherPresentationKeyPairs,
+    ),
     verifyAuthorizedEndpointDigest(frame),
   ]);
   const inspection = semantic.live

@@ -15,8 +15,6 @@
  *   | "rejected_action_feedback"
  *   | "basic_ability_effects"
  *   | "ultimate_ability_effects"
- *   | "damage_effects"
- *   | "healing_effects"
  *   | "regeneration_effects"
  *   | "cooldown_effects"
  *   | "status_application"
@@ -46,8 +44,6 @@ export const VISUAL_FILTER_REGISTRY = Object.freeze(
     ["rejected_action_feedback", "Rejected Action Feedback"],
     ["basic_ability_effects", "Basic Ability Effects"],
     ["ultimate_ability_effects", "Ultimate Ability Effects"],
-    ["damage_effects", "Damage Effects"],
-    ["healing_effects", "Healing Effects"],
     ["regeneration_effects", "Regeneration Effects"],
     ["cooldown_effects", "Cooldown Effects"],
     ["status_application", "Status Application"],
@@ -132,39 +128,30 @@ export const VISUAL_PAINT_PART_REGISTRY = Object.freeze([
     {
       surface: "transient",
       kind: "activation",
-      semantic: "damage",
+      component: "basic",
       part: "semantic",
     },
-    "damage_effects",
+    "basic_ability_effects",
   ),
   paintPart(
     {
       surface: "transient",
       kind: "activation",
-      semantic: "healing",
+      component: "ultimate",
       part: "semantic",
     },
-    "healing_effects",
-  ),
-  paintPart(
-    {
-      surface: "transient",
-      kind: "net_health",
-      outcome: "damage",
-      part: "effect",
-    },
-    "damage_effects",
-  ),
-  paintPart(
-    {
-      surface: "transient",
-      kind: "net_health",
-      outcome: "healing",
-      part: "effect",
-    },
-    "healing_effects",
+    "ultimate_ability_effects",
   ),
   ...["damage", "healing", "unchanged"].flatMap((outcome) => [
+    paintPart(
+      {
+        surface: "transient",
+        kind: "net_health",
+        outcome,
+        part: "effect",
+      },
+      "scrolling_battle_text",
+    ),
     paintPart(
       {
         surface: "transient",
@@ -393,7 +380,7 @@ export function reduceVisualFilterState(state, action) {
  */
 export function visualFilterPaintKey(state) {
   const normalized = assertVisualFilterState(state);
-  return `visual-filters-v1:${VISUAL_FILTER_IDS.map((id) =>
+  return `visual-filters-v2:${VISUAL_FILTER_IDS.map((id) =>
     normalized[id] ? "1" : "0",
   ).join("")}`;
 }

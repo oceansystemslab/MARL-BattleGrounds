@@ -186,7 +186,7 @@ function plan(
   epoch,
   authorization = "researcher",
   fingerprint = `events-${epoch}`,
-  paintKey = "visual-filters-v1:all-on",
+  paintKey = "visual-filters-v2:all-on",
 ) {
   return {
     epochKey: epoch,
@@ -1070,7 +1070,7 @@ test("switching an active explanation Off reinstalls the authorized batch until 
     epochKey: "epoch-mid-off",
     authorizationKey: "researcher",
     fingerprint: "authorized-events",
-    paintKey: "visual-filters-v1:all-on",
+    paintKey: "visual-filters-v2:all-on",
     renderPolicy: "live_once",
     logicalTime: 0,
     motionMode: "off",

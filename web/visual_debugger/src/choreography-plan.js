@@ -574,14 +574,17 @@ function layoutCrossPhaseEvents(events, surface, sceneByKey) {
           sceneByKey,
           event.targetPresentationKey,
         );
-        // Scene body regions describe the current successor endpoint. Their
-        // radii still clip a successor-anchored underlay to the owning bodies,
-        // but they never claim historical Charge endpoints from transition_start.
-        const successorAnchored = event.endpointPhase === "successor";
-        const sourceProtectedKey = successorAnchored
+        // Scene body regions describe current successor endpoints. Clip each
+        // authorized endpoint independently: an Agent event can retain a
+        // start-only source while its still-visible recipient uses the same
+        // successor body boundary as Oracle. Historical Charge endpoints
+        // remain transition-start anchors and never claim current bodies.
+        const sourceSuccessorAnchored = event.sourceEndpointPhase === "successor";
+        const targetSuccessorAnchored = event.targetEndpointPhase === "successor";
+        const sourceProtectedKey = sourceSuccessorAnchored
           ? protectedBodyKey(surface, event.sourcePresentationKey)
           : null;
-        const targetProtectedKey = successorAnchored
+        const targetProtectedKey = targetSuccessorAnchored
           ? protectedBodyKey(surface, event.targetPresentationKey)
           : null;
         const pairKey = JSON.stringify([
@@ -879,7 +882,7 @@ function authorizedPaintParts(event, visualFilters) {
         ? enabled({
             surface: "transient",
             kind: "activation",
-            semantic: event.impactSemantic,
+            component: event.component,
             part: "semantic",
           })
         : false;
@@ -1845,17 +1848,29 @@ function buildAuthorizedPresentationChoreographyPlan(
       ) {
         return null;
       }
-      const endpointPhase = agentVisualInventory
-        ? "transition_start"
-        : token.tokenId === "warrior_charge"
+      const chargeEndpoints = token.tokenId === "warrior_charge";
+      const sourceEndpointPhase =
+        chargeEndpoints || (agentVisualInventory && sourceTrajectory.successor == null)
           ? "transition_start"
           : "successor";
+      const targetEndpointPhase =
+        targetTrajectory === null
+          ? null
+          : chargeEndpoints ||
+              (agentVisualInventory && targetTrajectory.successor == null)
+            ? "transition_start"
+            : "successor";
       const authorizedSource = abilityEnabled
-        ? authorizedAnchor(sourceTrajectory[endpointPhase], surface)
+        ? authorizedAnchor(sourceTrajectory[sourceEndpointPhase], surface)
         : null;
       const authorizedTarget =
         abilityEnabled || semanticEnabled
-          ? authorizedAnchor(targetTrajectory?.[endpointPhase], surface)
+          ? authorizedAnchor(
+              targetEndpointPhase === null
+                ? null
+                : targetTrajectory?.[targetEndpointPhase],
+              surface,
+            )
           : null;
       if (
         (abilityEnabled && authorizedSource === null) ||
@@ -1886,7 +1901,12 @@ function buildAuthorizedPresentationChoreographyPlan(
           targetDisclosure: targetKey === null ? "target_none" : "public",
           source,
           target,
-          endpointPhase,
+          sourceEndpointPhase,
+          targetEndpointPhase,
+          endpointPhase:
+            targetEndpointPhase === null || sourceEndpointPhase === targetEndpointPhase
+              ? sourceEndpointPhase
+              : null,
           route: null,
           paintParts,
           spatial:
@@ -2292,8 +2312,8 @@ function buildAuthorizedPresentationChoreographyPlan(
     phases: scheduled.phases,
     events,
     bounds: Object.freeze({
-      nodes: Math.min(events.length * 28 + 2, 512),
-      animations: Math.min(spatialEventCount * 3 + 2, 512),
+      nodes: Math.min(events.length * 30 + 3, 512),
+      animations: Math.min(spatialEventCount * 4 + 3, 512),
       persistentNodes: Math.min(persistentNodeUpperBound, 512),
     }),
   });
@@ -2301,8 +2321,8 @@ function buildAuthorizedPresentationChoreographyPlan(
 
 /**
  * Mirror the painter's maximum retained SVG shape for each planner-authored
- * persistent event kind. Persistent lifecycle and team-wave pulses own at
- * most five nodes each.
+ * persistent event kind. The event subtree plus its optional connector group
+ * and line own at most seven nodes.
  *
  * @param {Record<string, any>} event
  */
@@ -2311,7 +2331,7 @@ function persistentEventNodeUpperBound(event) {
     return 0;
   }
   if (event.kind === "semantic_pulse") {
-    return 5;
+    return 7;
   }
   throw new RangeError(
     `unsupported persistent choreography event kind ${String(event.kind)}.`,

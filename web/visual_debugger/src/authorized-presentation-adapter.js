@@ -145,6 +145,15 @@ export function scopedPresentationKey(value, presentationKey) {
   return JSON.stringify([value.session_id, presentationKey]);
 }
 
+/** @param {AuthorizedPresentationFrame} value */
+function replayResearcherSpace(value) {
+  return value.viewer_mode === "replay" &&
+    authorizedPresentationAudience(value) === "agent_pov" &&
+    isRecord(value.researcher_space)
+    ? value.researcher_space
+    : null;
+}
+
 /**
  * Enumerate exact presentation identities for retained scene/roster nodes.
  * Oracle command slots are derived only from the fixed ten-row public identity
@@ -157,6 +166,8 @@ export function scopedPresentationKey(value, presentationKey) {
  *   presentation_key: string,
  *   public_agent_id: string,
  *   command_global_slot: number | null,
+ *   activation_kind: "scene_agent" | "replay_pov_global",
+ *   visible_in_snapshot: boolean,
  *   agent: Readonly<Record<string, any>>,
  * }>>}
  */
@@ -165,10 +176,13 @@ export function authorizedPresentationIdentityRows(value) {
     return Object.freeze([]);
   }
   const audience = authorizedPresentationAudience(value);
+  const researcherSpace = replayResearcherSpace(value);
   const directory =
-    audience === "researcher" && isRecord(value.current_endpoint)
-      ? value.current_endpoint.identity_directory
-      : null;
+    researcherSpace !== null
+      ? researcherSpace.identity_directory
+      : audience === "researcher" && isRecord(value.current_endpoint)
+        ? value.current_endpoint.identity_directory
+        : null;
   const commandSlotByPublicId = new Map();
   if (isRecord(directory) && Array.isArray(directory.identities)) {
     for (const row of directory.identities) {
@@ -190,7 +204,20 @@ export function authorizedPresentationIdentityRows(value) {
   }
 
   const rows = [];
-  for (const agent of Array.isArray(value.scene.agents) ? value.scene.agents : []) {
+  const rosterAgents =
+    researcherSpace !== null && Array.isArray(researcherSpace.roster_agents)
+      ? researcherSpace.roster_agents
+      : Array.isArray(value.scene.agents)
+        ? value.scene.agents
+        : [];
+  const visiblePublicIds = new Set(
+    (Array.isArray(value.scene.agents) ? value.scene.agents : []).flatMap((agent) =>
+      isRecord(agent) && typeof agent.public_agent_id === "string"
+        ? [agent.public_agent_id]
+        : [],
+    ),
+  );
+  for (const agent of rosterAgents) {
     if (
       !isRecord(agent) ||
       typeof agent.presentation_key !== "string" ||
@@ -208,9 +235,11 @@ export function authorizedPresentationIdentityRows(value) {
         presentation_key: agent.presentation_key,
         public_agent_id: agent.public_agent_id,
         command_global_slot:
-          audience === "researcher"
+          audience === "researcher" || researcherSpace !== null
             ? (commandSlotByPublicId.get(agent.public_agent_id) ?? null)
             : null,
+        activation_kind: researcherSpace === null ? "scene_agent" : "replay_pov_global",
+        visible_in_snapshot: visiblePublicIds.has(agent.public_agent_id),
         agent,
       }),
     );
@@ -227,7 +256,10 @@ export function authorizedPresentationIdentityRows(value) {
  * @returns {number | null}
  */
 export function authorizedOracleCommandSlotForPresentationKey(value, presentationKey) {
-  if (typeof presentationKey !== "string") {
+  if (
+    typeof presentationKey !== "string" ||
+    authorizedPresentationAudience(value) !== "researcher"
+  ) {
     return null;
   }
   const row = authorizedPresentationIdentityRows(value).find(
@@ -765,6 +797,46 @@ export function authorizedPresentationSceneView(
 }
 
 /**
+ * Project only the non-spatial researcher surface carried by Replay Agent
+ * presentations. Battlefield rendering must continue to use
+ * `authorizedPresentationSceneView()` and therefore remains fog-scoped.
+ *
+ * @param {unknown} value
+ * @returns {Readonly<Record<string, any>> | null}
+ */
+export function authorizedPresentationResearcherSceneView(value) {
+  if (!isAuthorizedPresentationFrame(value)) {
+    return null;
+  }
+  const researcher = replayResearcherSpace(value);
+  if (researcher === null) {
+    return authorizedPresentationSceneView(value);
+  }
+  const agents = Object.freeze(
+    (Array.isArray(researcher.roster_agents) ? researcher.roster_agents : [])
+      .map((agent) => agentView(agent, value))
+      .filter((agent) => agent !== null),
+  );
+  const selected = agents.find(
+    (agent) => agent.public_agent_id === researcher.selected_public_agent_id,
+  );
+  const selectedKey = selected?.presentation_key ?? null;
+  return Object.freeze({
+    audience: "researcher",
+    agents,
+    class_mechanics: researcher.class_mechanics,
+    selection: Object.freeze({
+      controlled_presentation_key: null,
+      inspection_owner_presentation_key: selectedKey,
+      selected_presentation_key: selectedKey,
+    }),
+    ranges: Object.freeze([]),
+    pending_route: null,
+    selected_legality: null,
+  });
+}
+
+/**
  * Flatten the exact causal visual branch for choreography dispatch. Oracle
  * owns it through Latest Events; Agent POV owns an additive fog-authorized
  * Visual Events branch while retaining its separate cue/delta evidence.
@@ -818,13 +890,12 @@ export function authorizedPresentationIncomingRows(value) {
   );
 }
 
-/** @param {unknown} value */
-export function authorizedPresentationTransitionRows(value) {
-  if (
-    !isAuthorizedPresentationFrame(value) ||
-    !isRecord(value.latest_transition) ||
-    !Array.isArray(value.latest_transition.action_rows)
-  ) {
+/**
+ * @param {Record<string, any>} value
+ * @param {unknown} transition
+ */
+function authorizedPresentationActionRows(value, transition) {
+  if (!isRecord(transition) || !Array.isArray(transition.action_rows)) {
     return Object.freeze([]);
   }
   const identityByPresentationKey = new Map(
@@ -834,7 +905,7 @@ export function authorizedPresentationTransitionRows(value) {
     ]),
   );
   const rows = [];
-  for (const rawRow of value.latest_transition.action_rows) {
+  for (const rawRow of transition.action_rows) {
     const identity = isRecord(rawRow)
       ? identityByPresentationKey.get(rawRow.actor_presentation_key)
       : null;
@@ -878,6 +949,32 @@ export function authorizedPresentationTransitionRows(value) {
     );
   }
   return Object.freeze(rows);
+}
+
+/**
+ * @param {unknown} value
+ */
+export function authorizedPresentationTransitionRows(value) {
+  if (!isAuthorizedPresentationFrame(value)) {
+    return Object.freeze([]);
+  }
+  const researcher = replayResearcherSpace(value);
+  return authorizedPresentationActionRows(
+    value,
+    researcher?.latest_transition ?? value.latest_transition,
+  );
+}
+
+/** @param {unknown} value */
+export function authorizedPresentationUpcomingTransitionRows(value) {
+  if (!isAuthorizedPresentationFrame(value) || value.viewer_mode !== "replay") {
+    return Object.freeze([]);
+  }
+  const researcher = replayResearcherSpace(value);
+  return authorizedPresentationActionRows(
+    value,
+    researcher?.upcoming_transition ?? value.upcoming_transition,
+  );
 }
 
 /** @typedef {"nonnegative_integer" | "positive_finite_number" | "scientific_id" | "optional_scientific_id" | "sha256_prefix"} TechnicalFactValueKind */

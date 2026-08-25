@@ -69,7 +69,12 @@ from marl_battlegrounds.rendering.authorized_presentation import (
     AcceptedActionTupleV1,
     AgentPovVisualIncomingSummaryV1,
     AuthorizedAgentV1,
+    AuthorizedAuraModifierV1,
     AuthorizedBattlefieldSceneV1,
+    AuthorizedClassMechanics,
+    AuthorizedClassMechanicsV1,
+    AuthorizedClassMechanicsV2,
+    AuthorizedStatusV1,
     ReplayIncomingActionRejectedEventV1,
     ReplayIncomingAuthorizedAgentIdentityV1,
     ReplayIncomingFeedOnlyAgentIdentityV1,
@@ -350,6 +355,41 @@ class OraclePublicIdentityDirectoryV1(_PresentationProtocolModel):
             tuple(row.public_agent_id for row in self.identities),
             name="Oracle directory public identities",
         )
+        return self
+
+
+class ReplayResearcherRosterAgentV1(_PresentationProtocolModel):
+    """Global roster facts that deliberately omit battlefield geometry."""
+
+    presentation_key: _ScientificId
+    public_agent_id: _ScientificId
+    team_id: Annotated[int, Field(ge=1, le=2)]
+    team_local_slot: Annotated[int, Field(ge=0, lt=5)]
+    class_id: Annotated[int, Field(ge=1, le=5)]
+    class_name: _DisplayText
+    life_state: Literal["alive", "corpse"]
+    current_health: Annotated[float, Field(ge=0.0)]
+    maximum_health: Annotated[float, Field(gt=0.0)]
+    effective_movement_speed: Annotated[float, Field(ge=0.0)]
+    ultimate_cooldown_remaining: _NonNegativeInt
+    spawn_shield_remaining: _NonNegativeInt
+    steps_until_out_of_combat: _NonNegativeInt
+    out_of_combat_delay_steps: _NonNegativeInt
+    statuses: tuple[AuthorizedStatusV1, ...]
+    aura_modifiers: tuple[AuthorizedAuraModifierV1, ...]
+
+    @model_validator(mode="after")
+    def _validate_row(self) -> Self:
+        if self.current_health > self.maximum_health:
+            raise ValueError("researcher roster health exceeds maximum health.")
+        if self.steps_until_out_of_combat > self.out_of_combat_delay_steps:
+            raise ValueError("researcher roster combat duration exceeds its delay.")
+        if any(type(row) is not AuthorizedStatusV1 for row in self.statuses):
+            raise ValueError("researcher roster statuses require exact roots.")
+        if any(
+            type(row) is not AuthorizedAuraModifierV1 for row in self.aura_modifiers
+        ):
+            raise ValueError("researcher roster modifiers require exact roots.")
         return self
 
 
@@ -1439,6 +1479,69 @@ class SharedObsLatestTransitionV1(_LatestTransitionBaseV1):
         return self
 
 
+class _UpcomingTransitionBaseV1(_PresentationProtocolModel):
+    episode_id: _ScientificId
+    outgoing_transition_index: _NonNegativeInt
+    outgoing_transition_id: _ScientificId
+    outgoing_start_frame_id: _ScientificId
+    outgoing_successor_frame_id: _ScientificId
+    outgoing_start_simulator_step_count: _NonNegativeInt
+    outgoing_successor_simulator_step_count: _NonNegativeInt
+    action_rows: tuple[LatestTransitionActionRowV1, ...]
+
+    @model_validator(mode="after")
+    def _validate_epoch(self) -> Self:
+        if self.outgoing_successor_simulator_step_count != (
+            self.outgoing_start_simulator_step_count + 1
+        ):
+            raise ValueError("Upcoming Transition ticks must be adjacent.")
+        if not self.action_rows or any(
+            type(row) is not LatestTransitionActionRowV1 for row in self.action_rows
+        ):
+            raise ValueError("Upcoming Transition requires exact action rows.")
+        _require_ordered_unique(
+            tuple(row.actor_public_agent_id for row in self.action_rows),
+            name="Upcoming Transition actors",
+        )
+        return self
+
+
+class OracleUpcomingTransitionV1(_UpcomingTransitionBaseV1):
+    transition_kind: Literal["oracle_outgoing_submitted_accepted"]
+
+    @model_validator(mode="after")
+    def _validate_ids(self) -> Self:
+        _validate_upcoming_transition_ids(self, prefix=self.episode_id)
+        return self
+
+
+class NoSharedObsUpcomingTransitionV1(_UpcomingTransitionBaseV1):
+    transition_kind: Literal["no_shared_obs_outgoing_submitted_accepted"]
+    recipient_public_agent_id: _ScientificId
+    recipient_presentation_key: _ScientificId
+
+    @model_validator(mode="after")
+    def _validate_ids(self) -> Self:
+        prefix = f"{self.episode_id}:actor-pov:{self.recipient_public_agent_id}"
+        _validate_agent_upcoming_transition(self, prefix=prefix)
+        return self
+
+
+class SharedObsUpcomingTransitionV1(_UpcomingTransitionBaseV1):
+    transition_kind: Literal["shared_obs_outgoing_submitted_accepted"]
+    recipient_public_agent_id: _ScientificId
+    recipient_presentation_key: _ScientificId
+
+    @model_validator(mode="after")
+    def _validate_ids(self) -> Self:
+        prefix = (
+            f"{self.episode_id}:shared-obs-visual-union:"
+            f"{self.recipient_public_agent_id}"
+        )
+        _validate_agent_upcoming_transition(self, prefix=prefix)
+        return self
+
+
 def _validate_latest_transition_ids(
     transition: _LatestTransitionBaseV1,
     *,
@@ -1467,6 +1570,171 @@ def _validate_agent_latest_transition(
         or row.actor_presentation_key != transition.recipient_presentation_key
     ):
         raise ValueError("Agent Latest Transition row must equal the fixed owner.")
+
+
+def _validate_upcoming_transition_ids(
+    transition: _UpcomingTransitionBaseV1,
+    *,
+    prefix: str,
+) -> None:
+    index = transition.outgoing_transition_index
+    if (
+        transition.outgoing_transition_id != f"{prefix}:transition:{index}"
+        or transition.outgoing_start_frame_id != f"{prefix}:frame:{index}"
+        or transition.outgoing_successor_frame_id != f"{prefix}:frame:{index + 1}"
+    ):
+        raise ValueError("Upcoming Transition IDs do not retain one adjacent epoch.")
+
+
+def _validate_agent_upcoming_transition(
+    transition: NoSharedObsUpcomingTransitionV1 | SharedObsUpcomingTransitionV1,
+    *,
+    prefix: str,
+) -> None:
+    _validate_upcoming_transition_ids(transition, prefix=prefix)
+    if len(transition.action_rows) != 1:
+        raise ValueError("Agent Upcoming Transition requires exactly the fixed owner.")
+    row = transition.action_rows[0]
+    if (
+        row.actor_public_agent_id != transition.recipient_public_agent_id
+        or row.actor_presentation_key != transition.recipient_presentation_key
+    ):
+        raise ValueError("Agent Upcoming Transition row must equal the fixed owner.")
+
+
+class ReplayResearcherSpaceV1(_PresentationProtocolModel):
+    """Global researcher facts that deliberately omit battlefield geometry."""
+
+    researcher_space_kind: Literal["global_replay_researcher_space"]
+    episode_id: _ScientificId
+    frame_index: _NonNegativeInt
+    final_frame_index: _NonNegativeInt
+    simulator_step_count: _NonNegativeInt
+    selected_public_agent_id: _ScientificId
+    identity_directory: OraclePublicIdentityDirectoryV1
+    roster_agents: tuple[ReplayResearcherRosterAgentV1, ...]
+    class_mechanics: tuple[AuthorizedClassMechanics, ...]
+    latest_transition: OracleLatestTransitionV1 | None
+    upcoming_transition: OracleUpcomingTransitionV1 | None
+
+    @model_validator(mode="after")
+    def _validate_space(self) -> Self:
+        if self.frame_index > self.final_frame_index:
+            raise ValueError("researcher-space frame exceeds the replay prefix.")
+        active_directory = tuple(
+            row for row in self.identity_directory.identities if row.configured_active
+        )
+        if len(self.roster_agents) != len(active_directory) or any(
+            type(row) is not ReplayResearcherRosterAgentV1 for row in self.roster_agents
+        ):
+            raise ValueError("researcher roster must exactly cover active identities.")
+        for roster, directory in zip(
+            self.roster_agents,
+            active_directory,
+            strict=True,
+        ):
+            if (
+                roster.public_agent_id != directory.public_agent_id
+                or roster.team_id != directory.team_id
+                or roster.team_local_slot != directory.team_local_slot
+                or roster.class_id != directory.class_id
+                or roster.class_name != directory.class_name
+            ):
+                raise ValueError("researcher roster does not join its directory.")
+        if self.selected_public_agent_id not in {
+            row.public_agent_id for row in self.roster_agents
+        }:
+            raise ValueError("researcher selection must name an active roster row.")
+        represented_classes = tuple(
+            sorted({row.class_id for row in self.roster_agents})
+        )
+        if tuple(
+            row.class_id for row in self.class_mechanics
+        ) != represented_classes or any(
+            type(row) not in (AuthorizedClassMechanicsV1, AuthorizedClassMechanicsV2)
+            for row in self.class_mechanics
+        ):
+            raise ValueError(
+                "researcher class mechanics must cover represented classes exactly."
+            )
+        self._validate_transition(self.latest_transition, incoming=True)
+        self._validate_transition(self.upcoming_transition, incoming=False)
+        return self
+
+    def _validate_transition(
+        self,
+        transition: OracleLatestTransitionV1 | OracleUpcomingTransitionV1 | None,
+        *,
+        incoming: bool,
+    ) -> None:
+        expected_present = (
+            self.frame_index > 0
+            if incoming
+            else (self.frame_index < self.final_frame_index)
+        )
+        expected_type = (
+            OracleLatestTransitionV1 if incoming else OracleUpcomingTransitionV1
+        )
+        if not expected_present:
+            if transition is not None:
+                raise ValueError("researcher transition presence changed at an edge.")
+            return
+        _require_exact_type(transition, expected_type, name="researcher transition")
+        checked = cast(
+            OracleLatestTransitionV1 | OracleUpcomingTransitionV1,
+            transition,
+        )
+        if incoming:
+            latest = cast(OracleLatestTransitionV1, checked)
+            if (
+                latest.episode_id != self.episode_id
+                or latest.incoming_transition_index != self.frame_index - 1
+                or latest.incoming_successor_frame_id
+                != f"{self.episode_id}:frame:{self.frame_index}"
+                or latest.incoming_successor_simulator_step_count
+                != self.simulator_step_count
+            ):
+                raise ValueError("researcher Latest Transition misses current s_n.")
+            action_rows = latest.action_rows
+        else:
+            upcoming = cast(OracleUpcomingTransitionV1, checked)
+            if (
+                upcoming.episode_id != self.episode_id
+                or upcoming.outgoing_transition_index != self.frame_index
+                or upcoming.outgoing_start_frame_id
+                != f"{self.episode_id}:frame:{self.frame_index}"
+                or upcoming.outgoing_start_simulator_step_count
+                != self.simulator_step_count
+            ):
+                raise ValueError("researcher Upcoming Transition does not leave s_n.")
+            action_rows = upcoming.action_rows
+        active_ids = tuple(row.public_agent_id for row in self.roster_agents)
+        if tuple(row.actor_public_agent_id for row in action_rows) != active_ids:
+            raise ValueError("researcher transition rows changed active roster order.")
+        roster_by_id = {row.public_agent_id: row for row in self.roster_agents}
+        directory_ids = {
+            row.public_agent_id for row in self.identity_directory.identities
+        }
+        directory_by_id = {
+            row.public_agent_id: row for row in self.identity_directory.identities
+        }
+        for row in action_rows:
+            actor = roster_by_id[row.actor_public_agent_id]
+            directory = directory_by_id[row.actor_public_agent_id]
+            target_axis = cast(
+                tuple[str, ...],
+                row.target_action_recipient_public_agent_id_by_id[1:],
+            )
+            if (
+                row.actor_presentation_key != actor.presentation_key
+                or set(target_axis) != directory_ids
+                or target_axis
+                != _oracle_target_public_axis(
+                    self.identity_directory,
+                    owner_team_id=directory.team_id,
+                )
+            ):
+                raise ValueError("researcher transition action identity is invalid.")
 
 
 class LiveOracleTechnicalFrameV1(_PresentationProtocolModel):
@@ -1664,6 +1932,7 @@ def _validate_recursive_presentation_keys(
     source_session_id: str,
     audience: Literal["oracle", "agent_pov"],
     recipient_public_agent_id: str | None,
+    excluded_root_fields: frozenset[str] = frozenset(),
 ) -> None:
     _validate_recursive_exact_runtime_types(root)
     visited: set[int] = set()
@@ -1722,6 +1991,8 @@ def _validate_recursive_presentation_keys(
             if key != expected:
                 raise ValueError(f"presentation key does not join authority at {path}.")
         for name, nested in values.items():
+            if path == "presentation" and name in excluded_root_fields:
+                continue
             visit(nested, path=f"{path}.{name}")
 
     visit(root, path="presentation")
@@ -2567,6 +2838,7 @@ class ReplayOracleAuthorizedPresentationFrameV1(_PresentationProtocolModel):
     current_endpoint: OracleAuthorizedCurrentEndpointV1
     latest_events: ReplayIncomingSummaryV1 | None
     latest_transition: OracleLatestTransitionV1 | None
+    upcoming_transition: OracleUpcomingTransitionV1 | None
     technical_frame: ReplayOracleTechnicalFrameV1
     replay_inspection: ReplayInspectionPresentationV1 | None
 
@@ -2593,6 +2865,12 @@ class ReplayOracleAuthorizedPresentationFrameV1(_PresentationProtocolModel):
             endpoint=self.current_endpoint,
             latest_events=self.latest_events,
             latest_transition=self.latest_transition,
+        )
+        _validate_replay_oracle_upcoming(
+            source=self.source,
+            endpoint=self.current_endpoint,
+            upcoming_transition=self.upcoming_transition,
+            inspection=self.replay_inspection,
         )
         _validate_replay_oracle_technical(self)
         if (
@@ -2641,15 +2919,19 @@ class ReplayNoSharedObsAuthorizedPresentationFrameV1(_PresentationProtocolModel)
     latest_events: NoSharedObsIncomingSummaryV1 | None
     visual_events: AgentPovVisualIncomingSummaryV1 | None
     latest_transition: NoSharedObsLatestTransitionV1 | None
+    upcoming_transition: NoSharedObsUpcomingTransitionV1 | None
     technical_frame: ReplayNoSharedObsTechnicalFrameV1
     replay_inspection: ReplayInspectionPresentationV1 | None
+    researcher_space: ReplayResearcherSpaceV1
 
     @model_validator(mode="after")
     def _validate_frame(self) -> Self:
         _validate_no_shared_agent_types(self, live=False)
         _validate_agent_common(self, shared=False)
+        _validate_replay_agent_upcoming(self, shared=False)
         _validate_replay_agent_technical(self, shared=False)
         _validate_replay_agent_inspection_state(self)
+        _validate_replay_researcher_space(self)
         return self
 
 
@@ -2664,8 +2946,10 @@ class ReplaySharedObsAuthorizedPresentationFrameV1(_PresentationProtocolModel):
     latest_events: SharedObsIncomingSummaryV1 | None
     visual_events: AgentPovVisualIncomingSummaryV1 | None
     latest_transition: SharedObsLatestTransitionV1 | None
+    upcoming_transition: SharedObsUpcomingTransitionV1 | None
     technical_frame: ReplaySharedObsTechnicalFrameV1
     replay_inspection: ReplayInspectionPresentationV1 | None
+    researcher_space: ReplayResearcherSpaceV1
 
     @model_validator(mode="after")
     def _validate_frame(self) -> Self:
@@ -2686,8 +2970,10 @@ class ReplaySharedObsAuthorizedPresentationFrameV1(_PresentationProtocolModel):
             name="technical_frame",
         )
         _validate_agent_common(self, shared=True)
+        _validate_replay_agent_upcoming(self, shared=True)
         _validate_replay_agent_technical(self, shared=True)
         _validate_replay_agent_inspection_state(self)
+        _validate_replay_researcher_space(self)
         return self
 
 
@@ -2850,6 +3136,45 @@ def _validate_agent_common(
         source_session_id=source.source_session_id,
         audience="agent_pov",
         recipient_public_agent_id=parts.recipient_public_agent_id,
+        excluded_root_fields=(
+            frozenset({"researcher_space"})
+            if type(frame)
+            in (
+                ReplayNoSharedObsAuthorizedPresentationFrameV1,
+                ReplaySharedObsAuthorizedPresentationFrameV1,
+            )
+            else frozenset()
+        ),
+    )
+
+
+def _validate_replay_researcher_space(
+    frame: ReplayNoSharedObsAuthorizedPresentationFrameV1
+    | ReplaySharedObsAuthorizedPresentationFrameV1,
+) -> None:
+    researcher = frame.researcher_space
+    _require_exact_type(
+        researcher,
+        ReplayResearcherSpaceV1,
+        name="researcher_space",
+    )
+    source = frame.source
+    if (
+        researcher.episode_id != source.episode_id
+        or researcher.frame_index != source.source_frame_index
+        or researcher.final_frame_index != source.source_final_frame_index
+        or researcher.simulator_step_count != source.source_simulator_step_count
+        or researcher.selected_public_agent_id
+        != source.source_recipient_public_agent_id
+    ):
+        raise ValueError(
+            "Replay researcher space does not join its Agent presentation epoch."
+        )
+    _validate_recursive_presentation_keys(
+        researcher,
+        source_session_id=source.source_session_id,
+        audience="oracle",
+        recipient_public_agent_id=None,
     )
 
 
@@ -2990,6 +3315,92 @@ def _validate_replay_oracle_technical(
         raise ValueError("replay Oracle Technical Frame does not join its source.")
 
 
+def _validate_replay_oracle_upcoming(
+    *,
+    source: ReplayOraclePresentationSourceIdentityV1,
+    endpoint: OracleAuthorizedCurrentEndpointV1,
+    upcoming_transition: OracleUpcomingTransitionV1 | None,
+    inspection: ReplayInspectionPresentationV1 | None,
+) -> None:
+    final = source.source_frame_index == source.source_final_frame_index
+    if final:
+        if upcoming_transition is not None:
+            raise ValueError("the final replay frame cannot carry Upcoming Transition.")
+        return
+    _require_exact_type(
+        upcoming_transition,
+        OracleUpcomingTransitionV1,
+        name="upcoming_transition",
+    )
+    transition = cast(OracleUpcomingTransitionV1, upcoming_transition)
+    if (
+        transition.episode_id != source.episode_id
+        or transition.outgoing_transition_index != source.source_frame_index
+        or transition.outgoing_start_frame_id != endpoint.frame_id
+        or transition.outgoing_start_simulator_step_count
+        != endpoint.simulator_step_count
+    ):
+        raise ValueError("Oracle Upcoming Transition does not leave current s_n.")
+    directory_by_id = {
+        row.public_agent_id: row for row in endpoint.identity_directory.identities
+    }
+    scene_by_id = {row.public_agent_id: row for row in endpoint.scene.agents}
+    expected_active = tuple(
+        row.public_agent_id
+        for row in endpoint.identity_directory.identities
+        if row.configured_active
+    )
+    if (
+        tuple(row.actor_public_agent_id for row in transition.action_rows)
+        != expected_active
+    ):
+        raise ValueError(
+            "Oracle Upcoming Transition rows must equal active directory order."
+        )
+    directory_ids = set(directory_by_id)
+    for row in transition.action_rows:
+        actor = directory_by_id[row.actor_public_agent_id]
+        scene_actor = scene_by_id.get(row.actor_public_agent_id)
+        if (
+            scene_actor is None
+            or row.actor_presentation_key != scene_actor.presentation_key
+        ):
+            raise ValueError(
+                "Oracle Upcoming Transition actor key does not join the directory."
+            )
+        target_axis = cast(
+            tuple[str, ...],
+            row.target_action_recipient_public_agent_id_by_id[1:],
+        )
+        if set(target_axis) != directory_ids or target_axis != (
+            _oracle_target_public_axis(
+                endpoint.identity_directory,
+                owner_team_id=actor.team_id,
+            )
+        ):
+            raise ValueError(
+                "Oracle Upcoming Transition target axis changed action semantics."
+            )
+    if inspection is None:
+        return
+    selected = next(
+        (
+            row
+            for row in transition.action_rows
+            if row.actor_public_agent_id == inspection.actor_public_agent_id
+        ),
+        None,
+    )
+    if selected is None or (
+        selected.actor_presentation_key != inspection.actor_presentation_key
+        or selected.submitted_action != inspection.submitted_action
+        or selected.accepted_action != inspection.accepted_action
+    ):
+        raise ValueError(
+            "Oracle replay inspection must equal its Upcoming Transition row."
+        )
+
+
 def _validate_replay_agent_technical(
     frame: ReplayNoSharedObsAuthorizedPresentationFrameV1
     | ReplaySharedObsAuthorizedPresentationFrameV1,
@@ -3012,6 +3423,58 @@ def _validate_replay_agent_technical(
         or technical.incoming_recipient_transition_id != incoming_id
     ):
         raise ValueError("replay Agent Technical Frame does not join its source.")
+
+
+def _validate_replay_agent_upcoming(
+    frame: ReplayNoSharedObsAuthorizedPresentationFrameV1
+    | ReplaySharedObsAuthorizedPresentationFrameV1,
+    *,
+    shared: bool,
+) -> None:
+    final = frame.source.source_frame_index == frame.source.source_final_frame_index
+    transition = frame.upcoming_transition
+    if final:
+        if transition is not None:
+            raise ValueError(
+                "the final replay Agent frame cannot carry Upcoming Transition."
+            )
+        return
+    expected_type = (
+        SharedObsUpcomingTransitionV1 if shared else NoSharedObsUpcomingTransitionV1
+    )
+    _require_exact_type(transition, expected_type, name="upcoming_transition")
+    outgoing = cast(
+        NoSharedObsUpcomingTransitionV1 | SharedObsUpcomingTransitionV1,
+        transition,
+    )
+    source = frame.source
+    endpoint = frame.current_endpoint
+    parts = endpoint.parts
+    if (
+        outgoing.episode_id != source.episode_id
+        or outgoing.outgoing_transition_index != source.source_frame_index
+        or outgoing.outgoing_start_frame_id != source.source_recipient_frame_id
+        or outgoing.outgoing_start_simulator_step_count
+        != source.source_simulator_step_count
+        or outgoing.recipient_public_agent_id != source.source_recipient_public_agent_id
+        or outgoing.recipient_presentation_key != parts.recipient_presentation_key
+        or outgoing.action_rows[0].target_action_recipient_public_agent_id_by_id
+        != endpoint.action_axis.target_public_agent_id_by_action
+    ):
+        raise ValueError("Agent Upcoming Transition does not leave current s_n.")
+    inspection = frame.replay_inspection
+    if inspection is None:
+        return
+    row = outgoing.action_rows[0]
+    if (
+        row.actor_presentation_key != inspection.actor_presentation_key
+        or row.actor_public_agent_id != inspection.actor_public_agent_id
+        or row.submitted_action != inspection.submitted_action
+        or row.accepted_action != inspection.accepted_action
+    ):
+        raise ValueError(
+            "Agent replay inspection must equal its Upcoming Transition row."
+        )
 
 
 def _validate_replay_agent_inspection_state(
@@ -3142,12 +3605,14 @@ __all__ = [
     "NoSharedObsLatestTransitionV1",
     "NoSharedObsPresentationAuthorityV1",
     "NoSharedObsPresentationEndpointPartsV1",
+    "NoSharedObsUpcomingTransitionV1",
     "OracleActionAxisV1",
     "OracleAuthorizedCurrentEndpointV1",
     "OracleLatestTransitionV1",
     "OraclePresentationAuthorityV1",
     "OraclePublicIdentityDirectoryRowV1",
     "OraclePublicIdentityDirectoryV1",
+    "OracleUpcomingTransitionV1",
     "PresentationApiErrorV1",
     "PresentationResourceResultV1",
     "ReplayNoSharedObsAuthorizedPresentationFrameV1",
@@ -3156,6 +3621,8 @@ __all__ = [
     "ReplayOracleAuthorizedPresentationFrameV1",
     "ReplayOraclePresentationSourceIdentityV1",
     "ReplayOracleTechnicalFrameV1",
+    "ReplayResearcherRosterAgentV1",
+    "ReplayResearcherSpaceV1",
     "ReplaySharedObsAuthorizedPresentationFrameV1",
     "ReplaySharedObsPresentationSourceIdentityV1",
     "ReplaySharedObsTechnicalFrameV1",
@@ -3163,6 +3630,7 @@ __all__ = [
     "SharedObsLatestTransitionV1",
     "SharedObsPresentationAuthorityV1",
     "SharedObsPresentationEndpointPartsV1",
+    "SharedObsUpcomingTransitionV1",
     "TargetActionDisplayRowV1",
     "TargetAgentActionDisplayRowV1",
     "TargetNoneActionDisplayRowV1",

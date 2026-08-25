@@ -20,6 +20,7 @@ from scripts.dev.visual_debugger.evaluation_bridge import (
 )
 from scripts.dev.visual_debugger.presentation import (
     build_replay_oracle_authorized_presentation_v1,
+    build_replay_researcher_space_v1,
 )
 from scripts.dev.visual_debugger.presentation_protocol import (
     AgentPovActionAxisV1,
@@ -37,6 +38,7 @@ from scripts.dev.visual_debugger.presentation_protocol import (
     MovementActionDisplayRowV1,
     NoSharedObsLatestTransitionV1,
     NoSharedObsPresentationAuthorityV1,
+    NoSharedObsUpcomingTransitionV1,
     OracleActionAxisV1,
     OracleAuthorizedCurrentEndpointV1,
     PresentationApiErrorV1,
@@ -46,11 +48,13 @@ from scripts.dev.visual_debugger.presentation_protocol import (
     ReplayNoSharedObsTechnicalFrameV1,
     ReplayOracleAuthorizedPresentationFrameV1,
     ReplayOraclePresentationSourceIdentityV1,
+    ReplayResearcherSpaceV1,
     ReplaySharedObsAuthorizedPresentationFrameV1,
     ReplaySharedObsPresentationSourceIdentityV1,
     ReplaySharedObsTechnicalFrameV1,
     SharedObsLatestTransitionV1,
     SharedObsPresentationAuthorityV1,
+    SharedObsUpcomingTransitionV1,
     TargetAgentActionDisplayRowV1,
     TargetNoneActionDisplayRowV1,
     UltimateChoiceDisplayRowV1,
@@ -92,6 +96,7 @@ from marl_battlegrounds.rendering.authorized_inspection import (
     AuthorizedDecisionMaskV1,
     AuthorizedNoTargetActionV1,
     AuthorizedVisibleTargetActionV1,
+    ReplayInspectionPresentationV1,
     build_live_no_shared_obs_draft_inspection_v1,
     build_live_oracle_draft_inspection_v1,
     build_replay_no_shared_obs_inspection_v1,
@@ -114,6 +119,32 @@ from marl_battlegrounds.rendering.authorized_presentation import (
 )
 from marl_battlegrounds.rendering.evaluation_adapter import build_visual_event_batch_v2
 from marl_battlegrounds.rendering.scene import AgentSceneV2, BattlefieldSceneV2
+
+
+def _replay_researcher_space_at(
+    trajectory: CapturedEvaluationTrajectory,
+    *,
+    frame_index: int,
+    selected_global_slot: int,
+    session: str,
+) -> ReplayResearcherSpaceV1:
+    raw = _build_raw_frames(trajectory, viewer_session_id=session)[frame_index]
+    final_frame_index = len(trajectory.transitions)
+    return build_replay_researcher_space_v1(
+        trajectory.context,
+        raw.projection.scene,
+        authority_session_id=session,
+        final_frame_index=final_frame_index,
+        selected_global_slot=selected_global_slot,
+        incoming_transition=(
+            None if frame_index == 0 else trajectory.transitions[frame_index - 1]
+        ),
+        outgoing_transition=(
+            None
+            if frame_index == final_frame_index
+            else trajectory.transitions[frame_index]
+        ),
+    )
 
 
 class _PoisonAuthorizedAgentV1(AuthorizedAgentV1):
@@ -297,6 +328,19 @@ def _serialized_string_values(value: object) -> set[str]:
     return result
 
 
+def _nested_keys(value: object) -> set[str]:
+    result: set[str] = set()
+    if isinstance(value, dict):
+        mapping = cast(dict[str, object], value)
+        result.update(mapping)
+        for nested in mapping.values():
+            result.update(_nested_keys(nested))
+    elif isinstance(value, list):
+        for nested in cast(list[object], value):
+            result.update(_nested_keys(nested))
+    return result
+
+
 def _axis_from_mask(
     mask: AuthorizedDecisionMaskV1,
     *,
@@ -459,6 +503,76 @@ def _shared_latest_transition(
         incoming_successor_simulator_step_count=start_tick + 1,
         action_rows=(row,),
         recipient_public_agent_id=recipient,
+        recipient_presentation_key=axis.owner_presentation_key,
+    )
+
+
+def _no_shared_upcoming_transition(
+    inspection: ReplayInspectionPresentationV1 | None,
+    *,
+    axis: AgentPovActionAxisV1,
+) -> NoSharedObsUpcomingTransitionV1 | None:
+    if inspection is None:
+        return None
+    reference = inspection.transition_reference
+    return NoSharedObsUpcomingTransitionV1(
+        transition_kind="no_shared_obs_outgoing_submitted_accepted",
+        episode_id=inspection.episode_id,
+        outgoing_transition_index=inspection.outgoing_transition_index,
+        outgoing_transition_id=reference.transition_id,
+        outgoing_start_frame_id=reference.start_frame_id,
+        outgoing_successor_frame_id=reference.successor_frame_id,
+        outgoing_start_simulator_step_count=inspection.current_simulator_step_count,
+        outgoing_successor_simulator_step_count=(
+            inspection.current_simulator_step_count + 1
+        ),
+        action_rows=(
+            LatestTransitionActionRowV1(
+                actor_presentation_key=axis.owner_presentation_key,
+                actor_public_agent_id=axis.owner_public_agent_id,
+                target_action_recipient_public_agent_id_by_id=(
+                    axis.target_public_agent_id_by_action
+                ),
+                submitted_action=inspection.submitted_action,
+                accepted_action=inspection.accepted_action,
+            ),
+        ),
+        recipient_public_agent_id=axis.owner_public_agent_id,
+        recipient_presentation_key=axis.owner_presentation_key,
+    )
+
+
+def _shared_upcoming_transition(
+    inspection: ReplayInspectionPresentationV1 | None,
+    *,
+    axis: AgentPovActionAxisV1,
+) -> SharedObsUpcomingTransitionV1 | None:
+    if inspection is None:
+        return None
+    reference = inspection.transition_reference
+    return SharedObsUpcomingTransitionV1(
+        transition_kind="shared_obs_outgoing_submitted_accepted",
+        episode_id=inspection.episode_id,
+        outgoing_transition_index=inspection.outgoing_transition_index,
+        outgoing_transition_id=reference.transition_id,
+        outgoing_start_frame_id=reference.start_frame_id,
+        outgoing_successor_frame_id=reference.successor_frame_id,
+        outgoing_start_simulator_step_count=inspection.current_simulator_step_count,
+        outgoing_successor_simulator_step_count=(
+            inspection.current_simulator_step_count + 1
+        ),
+        action_rows=(
+            LatestTransitionActionRowV1(
+                actor_presentation_key=axis.owner_presentation_key,
+                actor_public_agent_id=axis.owner_public_agent_id,
+                target_action_recipient_public_agent_id_by_id=(
+                    axis.target_public_agent_id_by_action
+                ),
+                submitted_action=inspection.submitted_action,
+                accepted_action=inspection.accepted_action,
+            ),
+        ),
+        recipient_public_agent_id=axis.owner_public_agent_id,
         recipient_presentation_key=axis.owner_presentation_key,
     )
 
@@ -649,6 +763,16 @@ def five_frames(
         latest_events=no_shared_events,
         visual_events=no_shared_visual_events,
         latest_transition=no_shared_transition,
+        upcoming_transition=_no_shared_upcoming_transition(
+            replay_no_shared_inspection,
+            axis=no_shared_endpoint.action_axis,
+        ),
+        researcher_space=_replay_researcher_space_at(
+            no_shared,
+            frame_index=1,
+            selected_global_slot=0,
+            session=no_shared_session,
+        ),
         technical_frame=ReplayNoSharedObsTechnicalFrameV1(
             technical_kind="replay_no_shared_obs_technical_frame",
             frame_index=1,
@@ -863,6 +987,16 @@ def five_frames(
         latest_events=shared_events,
         visual_events=shared_visual_events,
         latest_transition=shared_transition,
+        upcoming_transition=_shared_upcoming_transition(
+            shared_inspection,
+            axis=shared_endpoint.action_axis,
+        ),
+        researcher_space=_replay_researcher_space_at(
+            inspection_cases.shared,
+            frame_index=1,
+            selected_global_slot=0,
+            session=shared_session,
+        ),
         technical_frame=ReplaySharedObsTechnicalFrameV1(
             technical_kind="replay_shared_obs_technical_frame",
             frame_index=1,
@@ -901,7 +1035,7 @@ def _replay_oracle_at(
         ),
         outgoing_transition=(
             None
-            if selected_internal_slot is None or frame_index == final_frame_index
+            if frame_index == final_frame_index
             else cases.no_shared.transitions[frame_index]
         ),
     )
@@ -1004,6 +1138,16 @@ def _replay_no_shared_at(
         latest_events=latest_events,
         visual_events=visual_events,
         latest_transition=latest_transition,
+        upcoming_transition=_no_shared_upcoming_transition(
+            replay_inspection,
+            axis=endpoint.action_axis,
+        ),
+        researcher_space=_replay_researcher_space_at(
+            trajectory,
+            frame_index=frame_index,
+            selected_global_slot=actor_slot,
+            session=session,
+        ),
         technical_frame=ReplayNoSharedObsTechnicalFrameV1(
             technical_kind="replay_no_shared_obs_technical_frame",
             frame_index=frame_index,
@@ -1115,6 +1259,16 @@ def _replay_shared_at(
         latest_events=latest_events,
         visual_events=visual_events,
         latest_transition=latest_transition,
+        upcoming_transition=_shared_upcoming_transition(
+            replay_inspection,
+            axis=endpoint.action_axis,
+        ),
+        researcher_space=_replay_researcher_space_at(
+            trajectory,
+            frame_index=frame_index,
+            selected_global_slot=recipient_slot,
+            session=session,
+        ),
         technical_frame=ReplaySharedObsTechnicalFrameV1(
             technical_kind="replay_shared_obs_technical_frame",
             frame_index=frame_index,
@@ -1755,10 +1909,19 @@ def test_replay_oracle_selected_axis_state_matrix(
                 ),
                 outgoing_transition=(
                     None
-                    if frame_index == final_index or selected_internal_slot is None
+                    if frame_index == final_index
                     else trajectory.transitions[frame_index]
                 ),
             )
+            if frame_index == final_index:
+                assert frame.upcoming_transition is None
+            else:
+                upcoming = frame.upcoming_transition
+                assert upcoming is not None
+                assert upcoming.outgoing_transition_index == frame_index
+                assert len(upcoming.action_rows) == sum(
+                    roster.configured_active for roster in trajectory.context.roster
+                )
             if selected_internal_slot is None:
                 assert frame.current_endpoint.action_axis is None
                 assert frame.replay_inspection is None
@@ -1774,6 +1937,18 @@ def test_replay_oracle_selected_axis_state_matrix(
                 assert frame.replay_inspection is None
             else:
                 assert frame.replay_inspection is not None
+                assert frame.upcoming_transition is not None
+                selected_upcoming = next(
+                    row
+                    for row in frame.upcoming_transition.action_rows
+                    if row.actor_public_agent_id == axis.owner_public_agent_id
+                )
+                assert selected_upcoming.submitted_action == (
+                    frame.replay_inspection.submitted_action
+                )
+                assert selected_upcoming.accepted_action == (
+                    frame.replay_inspection.accepted_action
+                )
                 assert (
                     frame.replay_inspection.decision_mask.owner_public_agent_id
                     == axis.owner_public_agent_id
@@ -1850,9 +2025,19 @@ def test_replay_agent_actual_frame_zero_middle_final_state_matrix(
             assert frame.latest_transition.incoming_transition_index == frame_index - 1
         if frame_index == final_frame_index:
             assert frame.replay_inspection is None
+            assert frame.upcoming_transition is None
         else:
             assert frame.replay_inspection is not None
             assert frame.replay_inspection.outgoing_transition_index == frame_index
+            assert frame.upcoming_transition is not None
+            assert frame.upcoming_transition.outgoing_transition_index == frame_index
+            assert len(frame.upcoming_transition.action_rows) == 1
+            assert frame.upcoming_transition.action_rows[0].submitted_action == (
+                frame.replay_inspection.submitted_action
+            )
+            assert frame.upcoming_transition.action_rows[0].accepted_action == (
+                frame.replay_inspection.accepted_action
+            )
         encoded = frame.model_dump_json()
         assert frame_type.model_validate_json(encoded) == frame
 
@@ -1990,6 +2175,11 @@ def test_replay_agent_final_and_nonfinal_inspection_state_machine(
         frame.source.source_frame_index
     )
     final_payload["replay_inspection"] = None
+    final_payload["upcoming_transition"] = None
+    final_payload["researcher_space"]["final_frame_index"] = (
+        frame.source.source_frame_index
+    )
+    final_payload["researcher_space"]["upcoming_transition"] = None
     final_frame = frame_type.model_validate_json(json.dumps(final_payload))
     assert final_frame.current_endpoint.action_axis.owner_public_agent_id == (
         frame.current_endpoint.action_axis.owner_public_agent_id
@@ -2000,8 +2190,54 @@ def test_replay_agent_final_and_nonfinal_inspection_state_machine(
     forbidden_final["source"]["source_final_frame_index"] = (
         frame.source.source_frame_index
     )
+    forbidden_final["researcher_space"]["final_frame_index"] = (
+        frame.source.source_frame_index
+    )
+    forbidden_final["researcher_space"]["upcoming_transition"] = None
     with pytest.raises(ValidationError, match="final replay Agent"):
         frame_type.model_validate_json(json.dumps(forbidden_final))
+
+
+@pytest.mark.parametrize(
+    ("frame_attribute", "frame_type"),
+    (
+        ("replay_oracle", ReplayOracleAuthorizedPresentationFrameV1),
+        ("replay_no_shared", ReplayNoSharedObsAuthorizedPresentationFrameV1),
+        ("replay_shared", ReplaySharedObsAuthorizedPresentationFrameV1),
+    ),
+)
+def test_replay_upcoming_transition_rejects_missing_epoch_and_inspection_drift(
+    five_frames: _FiveFrames,
+    frame_attribute: str,
+    frame_type: type[
+        ReplayOracleAuthorizedPresentationFrameV1
+        | ReplayNoSharedObsAuthorizedPresentationFrameV1
+        | ReplaySharedObsAuthorizedPresentationFrameV1
+    ],
+) -> None:
+    frame = cast(
+        ReplayOracleAuthorizedPresentationFrameV1
+        | ReplayNoSharedObsAuthorizedPresentationFrameV1
+        | ReplaySharedObsAuthorizedPresentationFrameV1,
+        getattr(five_frames, frame_attribute),
+    )
+    missing = frame.model_dump(mode="json")
+    missing["upcoming_transition"] = None
+    with pytest.raises(ValidationError, match="upcoming_transition"):
+        frame_type.model_validate_json(json.dumps(missing))
+
+    wrong_epoch = frame.model_dump(mode="json")
+    wrong_epoch["upcoming_transition"]["outgoing_transition_index"] += 1
+    with pytest.raises(ValidationError, match="Upcoming Transition"):
+        frame_type.model_validate_json(json.dumps(wrong_epoch))
+
+    inspection_drift = frame.model_dump(mode="json")
+    accepted = inspection_drift["upcoming_transition"]["action_rows"][0][
+        "accepted_action"
+    ]
+    accepted["move_action"] = (accepted["move_action"] + 1) % 9
+    with pytest.raises(ValidationError, match=r"inspection.*Upcoming Transition"):
+        frame_type.model_validate_json(json.dumps(inspection_drift))
 
 
 def test_oracle_endpoint_digest_and_source_reject_nested_scene_swap(
@@ -2491,9 +2727,9 @@ def test_every_serialized_presentation_key_is_recomputed_for_its_authority(
     expected_counts = {
         "live_oracle": 53,
         "live_no_shared_obs_agent_pov": 44,
-        "replay_oracle": 53,
-        "replay_no_shared_obs_agent_pov": 44,
-        "replay_shared_obs_agent_pov": 59,
+        "replay_oracle": 58,
+        "replay_no_shared_obs_agent_pov": 62,
+        "replay_shared_obs_agent_pov": 77,
     }
     for frame in five_frames.rows:
         payload = frame.model_dump(mode="json")
@@ -2503,6 +2739,8 @@ def test_every_serialized_presentation_key_is_recomputed_for_its_authority(
         source_session_id = cast(str, source["source_session_id"])
         recipient_public_agent_id = source.get("source_recipient_public_agent_id")
         for path, current_key, public_agent_id in key_paths:
+            researcher_key = path[0] == "researcher_space"
+            oracle_key = "oracle" in frame.presentation_kind or researcher_key
             if current_key is None:
                 assert public_agent_id is None
                 wrong = (
@@ -2510,7 +2748,7 @@ def test_every_serialized_presentation_key_is_recomputed_for_its_authority(
                         authority_session_id=source_session_id,
                         public_agent_id="poison-inactive-agent",
                     )
-                    if "oracle" in frame.presentation_kind
+                    if oracle_key
                     else pov_presentation_key_v1(
                         authority_session_id=source_session_id,
                         recipient_public_agent_id=cast(
@@ -2526,7 +2764,7 @@ def test_every_serialized_presentation_key_is_recomputed_for_its_authority(
                     adapter.validate_json(json.dumps(poisoned))
                 continue
             assert public_agent_id is not None
-            if "oracle" in frame.presentation_kind:
+            if oracle_key:
                 expected = oracle_presentation_key_v1(
                     authority_session_id=source_session_id,
                     public_agent_id=public_agent_id,
@@ -2569,18 +2807,36 @@ def test_agent_sources_and_technical_frames_have_exact_privacy_allowlists(
         "processing",
         "completion",
     )
-    for frame in (
-        five_frames.live_no_shared,
-        five_frames.replay_no_shared,
-        five_frames.replay_shared,
-    ):
+    for frame in five_frames.rows:
+        if frame.authority.authority_kind != "agent_pov":
+            continue
         source_keys = set(frame.source.model_dump(mode="json"))
         technical_keys = set(frame.technical_frame.model_dump(mode="json"))
         assert not any(
             token in key for key in source_keys | technical_keys for token in forbidden
         )
-        encoded = frame.model_dump_json()
-        assert "oracle_" not in encoded
+        payload = frame.model_dump(mode="json")
+        researcher = payload.pop("researcher_space", None)
+        assert "oracle_" not in json.dumps(payload)
+        if researcher is not None:
+            assert "oracle_" in json.dumps(researcher)
+            researcher_keys = _nested_keys(researcher)
+            forbidden_researcher_keys = {
+                "position",
+                "map",
+                "spawn_pads",
+                "respawn_waves",
+                "aura_fields",
+                "latest_events",
+                "visual_events",
+                "artifact_id",
+                "timeline_id",
+                "processing",
+                "completion",
+                "metric_report",
+            }
+            leaked_researcher_keys = researcher_keys & forbidden_researcher_keys
+            assert not leaked_researcher_keys, leaked_researcher_keys
 
     oracle_source = five_frames.replay_oracle.source
     forbidden_oracle_values = {
@@ -2601,12 +2857,12 @@ def test_agent_sources_and_technical_frames_have_exact_privacy_allowlists(
         ),
     }
     assert forbidden_oracle_values
-    for frame in (
-        five_frames.live_no_shared,
-        five_frames.replay_no_shared,
-        five_frames.replay_shared,
-    ):
-        serialized_values = _serialized_string_values(frame.model_dump(mode="json"))
+    for frame in five_frames.rows:
+        if frame.authority.authority_kind != "agent_pov":
+            continue
+        payload = frame.model_dump(mode="json")
+        payload.pop("researcher_space", None)
+        serialized_values = _serialized_string_values(payload)
         assert serialized_values.isdisjoint(forbidden_oracle_values)
 
 
@@ -3526,6 +3782,7 @@ def test_result_rejects_nested_subclass_and_list_model_construct_poison(
         current_endpoint=poison_endpoint,
         latest_events=base.latest_events,
         latest_transition=base.latest_transition,
+        upcoming_transition=base.upcoming_transition,
         technical_frame=base.technical_frame,
         replay_inspection=base.replay_inspection,
     )
@@ -3563,6 +3820,7 @@ def test_result_rejects_nested_subclass_and_list_model_construct_poison(
         current_endpoint=list_endpoint,
         latest_events=base.latest_events,
         latest_transition=base.latest_transition,
+        upcoming_transition=base.upcoming_transition,
         technical_frame=base.technical_frame,
         replay_inspection=base.replay_inspection,
     )
@@ -3584,6 +3842,7 @@ def test_result_rejects_nested_subclass_and_list_model_construct_poison(
         current_endpoint=base.current_endpoint,
         latest_events=base.latest_events,
         latest_transition=base.latest_transition,
+        upcoming_transition=base.upcoming_transition,
         technical_frame=base.technical_frame,
         replay_inspection=base.replay_inspection,
     )

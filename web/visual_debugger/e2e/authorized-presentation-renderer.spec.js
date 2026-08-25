@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { dirname, extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "@playwright/test";
+import { MINIMUM_VIEWPORT } from "./support/visual-regression.js";
 
 const WEB_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SOURCE_ROOT = resolve(WEB_ROOT, "src");
@@ -682,6 +683,7 @@ test("all three normalized Agent POV leaves keep hidden aura sources byte-inert"
       );
       const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
       const { createTooltipController } = await import(`${moduleRoot}/tooltip.js`);
+      const { resolveVisualToken } = await import(`${moduleRoot}/vocabulary.js`);
       const presentation =
         await normalizeAuthorizedPresentationFrameV1(rawPresentation);
       const battlefield = document.querySelector("#battlefield");
@@ -710,6 +712,18 @@ test("all three normalized Agent POV leaves keep hidden aura sources byte-inert"
       const rawAuraFields = Array.isArray(rawScene?.aura_fields)
         ? rawScene.aura_fields
         : [];
+      const expectedModifierRows = (
+        Array.isArray(rawScene?.agents) ? rawScene.agents : []
+      )
+        .flatMap((/** @type {Record<string, any>} */ agent) =>
+          (Array.isArray(agent.aura_modifiers) ? agent.aura_modifiers : []).map(
+            (/** @type {Record<string, any>} */ modifier) => {
+              const token = resolveVisualToken("modifier", modifier.aura_id, modifier);
+              return `${agent.presentation_key}|${token.tokenId}|${modifier.multiplier}`;
+            },
+          ),
+        )
+        .sort();
       const auraOwners = Array.from(
         battlefield.querySelectorAll(
           '[data-layer="aura"] .aura-field[data-tooltip-owner]',
@@ -727,6 +741,29 @@ test("all three normalized Agent POV leaves keep hidden aura sources byte-inert"
         });
       });
       const auraMarkup = auraOwners.map((owner) => owner.outerHTML);
+      const modifierOwners = Array.from(
+        battlefield.querySelectorAll(
+          '[data-layer="durable-status-modifier"] .modifier-cell[data-tooltip-owner]',
+        ),
+      );
+      const modifierRows = modifierOwners
+        .map(
+          (owner) =>
+            `${owner.getAttribute("data-presentation-key")}|${owner.getAttribute("data-token-id")}|${owner.getAttribute("data-multiplier")}`,
+        )
+        .sort();
+      const modifierTooltipBytes = modifierOwners.map((owner) => {
+        if (!(owner instanceof SVGElement)) {
+          throw new Error("Agent POV modifier owner is not an SVG element.");
+        }
+        owner.focus();
+        return JSON.stringify({
+          title: title.textContent,
+          details: details.innerHTML,
+          text: details.textContent,
+        });
+      });
+      const modifierMarkup = modifierOwners.map((owner) => owner.outerHTML);
       controller.destroy();
       return {
         auraCount: auraOwners.length,
@@ -740,6 +777,13 @@ test("all three normalized Agent POV leaves keep hidden aura sources byte-inert"
         ).length,
         auraMarkup,
         tooltipBytes,
+        expectedModifierRows,
+        modifierRows,
+        modifierMarkup,
+        modifierTooltipBytes,
+        modifierSourceAttributeCount: battlefield.querySelectorAll(
+          '[data-layer="durable-status-modifier"] .modifier-dock [data-source-presentation-key], [data-layer="durable-status-modifier"] .modifier-dock [data-source-public-agent-id], [data-layer="durable-status-modifier"] .modifier-dock [data-source-class-id]',
+        ).length,
       };
     }, raw);
     expect(installed.auraCount).toBe(2);
@@ -759,6 +803,15 @@ test("all three normalized Agent POV leaves keep hidden aura sources byte-inert"
       expect(tooltipBytes).toContain("Not disclosed in Agent POV");
       expect(tooltipBytes).not.toContain("agent-slot-");
     }
+    expect(installed.expectedModifierRows).toHaveLength(2);
+    expect(installed.modifierRows).toEqual(installed.expectedModifierRows);
+    expect(installed.modifierSourceAttributeCount).toBe(0);
+    expect(installed.modifierTooltipBytes).toHaveLength(2);
+    expect(installed.modifierMarkup.join("\n")).not.toContain("data-source-");
+    for (const tooltipBytes of installed.modifierTooltipBytes) {
+      expect(tooltipBytes).not.toContain('semantic-explanation__label">Source');
+      expect(tooltipBytes).not.toContain("Emitter");
+    }
     renderings.push(installed);
   }
 
@@ -772,6 +825,12 @@ test("all three normalized Agent POV leaves keep hidden aura sources byte-inert"
   expect(renderings[2].auraMarkup).toEqual(renderings[0].auraMarkup);
   expect(renderings[1].tooltipBytes).toEqual(renderings[0].tooltipBytes);
   expect(renderings[2].tooltipBytes).toEqual(renderings[0].tooltipBytes);
+  expect(renderings[1].modifierTooltipBytes).toEqual(
+    renderings[0].modifierTooltipBytes,
+  );
+  expect(renderings[2].modifierTooltipBytes).toEqual(
+    renderings[0].modifierTooltipBytes,
+  );
 });
 
 test("Oracle aura attribution remains exact in the tooltip and absent from aura DOM keys", async ({
@@ -1076,6 +1135,207 @@ test("live and replay damage/healing marks meet their activation route endpoint"
       expect(activation.hasPlannedImpactDisposition).toBe(false);
       expect(activation.hasPlannedImpactCollisionFlag).toBe(false);
     }
+  }
+});
+
+test("Agent POV damage and healing impacts stop outside the recipient body without intercepting its centre", async ({
+  page,
+}) => {
+  await page.setViewportSize(MINIMUM_VIEWPORT);
+  const cases = [
+    {
+      leafName: "live_no_shared_obs_agent_pov",
+      expectedSemantic: "healing",
+    },
+    {
+      leafName: "live_no_shared_obs_agent_pov",
+      expectedSemantic: "damage",
+    },
+    {
+      leafName: "replay_no_shared_obs_agent_pov",
+      expectedSemantic: "healing",
+    },
+    {
+      leafName: "replay_no_shared_obs_agent_pov",
+      expectedSemantic: "damage",
+    },
+  ];
+
+  for (const { leafName, expectedSemantic } of cases) {
+    const raw = structuredClone(fixture.presentations[leafName]);
+    const activation = raw.visual_events.events.find(
+      (/** @type {Record<string, any>} */ event) =>
+        event.event_kind === "ability_activated",
+    );
+    if (!activation) {
+      throw new Error(`${leafName} Agent activation is unavailable.`);
+    }
+    if (expectedSemantic === "damage") {
+      const sourceTrajectory = raw.visual_events.agent_phase_trajectories.find(
+        (/** @type {Record<string, any>} */ trajectory) =>
+          trajectory.agent_class_id === 1 && trajectory.successor !== null,
+      );
+      const targetTrajectory = raw.visual_events.agent_phase_trajectories.find(
+        (/** @type {Record<string, any>} */ trajectory) =>
+          trajectory.agent_class_id === 2 && trajectory.successor !== null,
+      );
+      if (!sourceTrajectory?.transition_start || !targetTrajectory?.transition_start) {
+        throw new Error(`${leafName} Agent damage trajectories are unavailable.`);
+      }
+      activation.source_anchor = structuredClone(sourceTrajectory.transition_start);
+      activation.recipient_anchor = structuredClone(targetTrajectory.transition_start);
+    }
+
+    await page.goto(origin);
+    const geometry = await page.evaluate(
+      async ({ rawPresentation, expectedImpactSemantic }) => {
+        const moduleRoot = "/src";
+        const { normalizeAuthorizedPresentationFrameV1 } = await import(
+          `${moduleRoot}/authorized-presentation-normalizer.js`
+        );
+        const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+        const { buildChoreographyPlan } = await import(
+          `${moduleRoot}/choreography-plan.js`
+        );
+        const { SvgChoreographyPainter } = await import(
+          `${moduleRoot}/choreography-painter.js`
+        );
+        const presentation =
+          await normalizeAuthorizedPresentationFrameV1(rawPresentation);
+        const battlefield = document.querySelector("#battlefield");
+        const empty = document.querySelector("#empty");
+        if (
+          !(battlefield instanceof SVGSVGElement) ||
+          !(empty instanceof HTMLElement)
+        ) {
+          throw new Error("Agent impact test surface is unavailable.");
+        }
+        document.body.style.margin = "0";
+        battlefield.style.width = `${window.innerWidth}px`;
+        battlefield.style.height = `${window.innerHeight}px`;
+        battlefield.style.display = "block";
+        const renderer = new BattlefieldRenderer({ battlefield, empty });
+        renderer.render(presentation, { showRanges: false });
+        const surface = renderer.choreographySurface();
+        const plan = buildChoreographyPlan(presentation, surface);
+        if (surface === null || plan === null) {
+          throw new Error("Agent impact choreography is unavailable.");
+        }
+        new SvgChoreographyPainter().install(plan, surface, {
+          motionMode: "off",
+          settled: false,
+          persistentOnly: false,
+        });
+        const event = /** @type {Record<string, any> | undefined} */ (
+          plan.events.find(
+            (/** @type {Record<string, any>} */ candidate) =>
+              candidate.kind === "activation" &&
+              candidate.component === "basic" &&
+              candidate.impactSemantic === expectedImpactSemantic &&
+              candidate.route,
+          )
+        );
+        if (!event || typeof event.targetPresentationKey !== "string") {
+          throw new Error(
+            `Agent ${expectedImpactSemantic} activation route is unavailable.`,
+          );
+        }
+        const escapedEventId = CSS.escape(event.eventId);
+        const effect = battlefield.querySelector(
+          `.combat-effect--activation[data-event-id="${escapedEventId}"]`,
+        );
+        const impact = effect?.querySelector(".combat-impact");
+        const semantic = impact?.querySelector(".combat-impact__semantic");
+        const targetAgent = battlefield.querySelector(
+          `.agent[data-presentation-key="${CSS.escape(event.targetPresentationKey)}"]`,
+        );
+        const body = targetAgent?.querySelector(".agent-body");
+        if (
+          !(effect instanceof SVGElement) ||
+          !(impact instanceof SVGGraphicsElement) ||
+          !(semantic instanceof SVGElement) ||
+          !(targetAgent instanceof SVGElement) ||
+          !(body instanceof SVGCircleElement)
+        ) {
+          throw new Error("Agent impact or recipient body is unavailable.");
+        }
+        const impactMatrix = impact.transform.baseVal.consolidate()?.matrix;
+        const bodyMatrix = body.getScreenCTM();
+        if (!impactMatrix || bodyMatrix === null) {
+          throw new Error("Agent impact or recipient screen geometry is unavailable.");
+        }
+        const centre = { x: body.cx.baseVal.value, y: body.cy.baseVal.value };
+        const bodyRadius = body.r.baseVal.value;
+        const routeEndDistance = Math.hypot(
+          event.route.end.x - centre.x,
+          event.route.end.y - centre.y,
+        );
+        const impactDistance = Math.hypot(
+          impactMatrix.e - centre.x,
+          impactMatrix.f - centre.y,
+        );
+        const targetCentreDistance = Math.hypot(
+          event.target.x - centre.x,
+          event.target.y - centre.y,
+        );
+        const screenCentre = new DOMPoint(centre.x, centre.y).matrixTransform(
+          bodyMatrix,
+        );
+        battlefield.addEventListener(
+          "pointerdown",
+          (pointerEvent) => {
+            const pointerTarget =
+              pointerEvent.target instanceof Element ? pointerEvent.target : null;
+            battlefield.dataset.centrePointerAgentKey =
+              pointerTarget
+                ?.closest(".agent[data-presentation-key]")
+                ?.getAttribute("data-presentation-key") ?? "";
+            battlefield.dataset.centrePointerInterceptedByImpact = String(
+              pointerTarget?.closest(".combat-impact") !== null,
+            );
+          },
+          { capture: true, once: true },
+        );
+        return {
+          audience: battlefield.dataset.audience,
+          component: event.component,
+          impactSemantic: event.impactSemantic,
+          sourceEndpointPhase: event.sourceEndpointPhase,
+          targetEndpointPhase: event.targetEndpointPhase,
+          targetPresentationKey: event.targetPresentationKey,
+          bodyRadius,
+          routeEndDistance,
+          impactDistance,
+          targetCentreDistance,
+          semanticLineCount: semantic.querySelectorAll(":scope > line").length,
+          screenCentre: { x: screenCentre.x, y: screenCentre.y },
+          viewport: { width: window.innerWidth, height: window.innerHeight },
+        };
+      },
+      { rawPresentation: raw, expectedImpactSemantic: expectedSemantic },
+    );
+
+    await page.mouse.click(geometry.screenCentre.x, geometry.screenCentre.y);
+    const pointerTarget = await page
+      .locator("#battlefield")
+      .evaluate((battlefield) => ({
+        agentKey: battlefield.dataset.centrePointerAgentKey ?? null,
+        interceptedByImpact:
+          battlefield.dataset.centrePointerInterceptedByImpact ?? null,
+      }));
+
+    expect(geometry.audience, `${leafName} ${expectedSemantic}`).toBe("agent_pov");
+    expect(geometry.viewport).toEqual(MINIMUM_VIEWPORT);
+    expect(geometry.component).toBe("basic");
+    expect(geometry.impactSemantic).toBe(expectedSemantic);
+    expect(geometry.sourceEndpointPhase).toBe("successor");
+    expect(geometry.targetEndpointPhase).toBe("successor");
+    expect(geometry.targetCentreDistance).toBeCloseTo(0, 3);
+    expect(geometry.routeEndDistance).toBeCloseTo(geometry.bodyRadius + 3, 3);
+    expect(geometry.impactDistance).toBeCloseTo(geometry.routeEndDistance, 3);
+    expect(geometry.semanticLineCount).toBe(expectedSemantic === "healing" ? 2 : 1);
+    expect(pointerTarget.agentKey).toBe(geometry.targetPresentationKey);
+    expect(pointerTarget.interceptedByImpact).toBe("false");
   }
 });
 
@@ -1721,7 +1981,7 @@ test("authorized death, team waves, and resurrection retain outward settled geom
   expect(result.planEventIds).toEqual(raw.latest_events.ordered_event_ids);
   expect(result.beforeSettle.eventCount).toBe(5);
   expect(result.beforeSettle.nodeCount).toBeLessThanOrEqual(
-    raw.latest_events.event_count * 28 + 2,
+    raw.latest_events.event_count * 30 + 3,
   );
   expect(result.beforeSettle.persistentNodeCount).toBeLessThanOrEqual(
     result.beforeSettle.persistentNodeBound,

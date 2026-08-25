@@ -24,8 +24,6 @@ const EXPECTED_FILTERS = Object.freeze([
   ["rejected_action_feedback", "Rejected Action Feedback"],
   ["basic_ability_effects", "Basic Ability Effects"],
   ["ultimate_ability_effects", "Ultimate Ability Effects"],
-  ["damage_effects", "Damage Effects"],
-  ["healing_effects", "Healing Effects"],
   ["regeneration_effects", "Regeneration Effects"],
   ["cooldown_effects", "Cooldown Effects"],
   ["status_application", "Status Application"],
@@ -39,7 +37,7 @@ const EXPECTED_FILTERS = Object.freeze([
   ["scrolling_battle_text", "Scrolling Battle Text"],
 ]);
 
-test("locked registry exposes exactly 20 ordered all-on filters", () => {
+test("locked registry exposes exactly 18 ordered all-on filters", () => {
   assert.deepEqual(
     VISUAL_FILTER_REGISTRY.map(({ id, label }) => [id, label]),
     EXPECTED_FILTERS,
@@ -48,7 +46,7 @@ test("locked registry exposes exactly 20 ordered all-on filters", () => {
     VISUAL_FILTER_IDS,
     EXPECTED_FILTERS.map(([id]) => id),
   );
-  assert.equal(new Set(VISUAL_FILTER_IDS).size, 20);
+  assert.equal(new Set(VISUAL_FILTER_IDS).size, 18);
   assert.equal(
     VISUAL_FILTER_REGISTRY.every(({ defaultEnabled }) => defaultEnabled),
     true,
@@ -133,9 +131,9 @@ test("state validation and paint-key serialization are strict and deterministic"
   );
   assert.equal(
     visualFilterPaintKey(DEFAULT_VISUAL_FILTER_STATE),
-    `visual-filters-v1:${"1".repeat(20)}`,
+    `visual-filters-v2:${"1".repeat(18)}`,
   );
-  assert.equal(visualFilterPaintKey(disabled), `visual-filters-v1:0${"1".repeat(18)}0`);
+  assert.equal(visualFilterPaintKey(disabled), `visual-filters-v2:0${"1".repeat(16)}0`);
   assert.equal(
     visualFilterPaintKey(Object.fromEntries([...Object.entries(disabled)].reverse())),
     visualFilterPaintKey(disabled),
@@ -174,7 +172,7 @@ test("every registered paint part has one exact owner and every filter owns a pa
   assert.deepEqual([...usedFilters].sort(), [...VISUAL_FILTER_IDS].sort());
 });
 
-test("multipart effects retain disjoint filter ownership", () => {
+test("multipart effects retain coherent filter ownership", () => {
   for (const lifecycle of ["refreshed", "reapplied"]) {
     assert.equal(
       classifyVisualPaintPart({
@@ -217,10 +215,41 @@ test("multipart effects retain disjoint filter ownership", () => {
     classifyVisualPaintPart({
       surface: "transient",
       kind: "activation",
-      semantic: "healing",
+      component: "basic",
       part: "semantic",
     }),
-    "healing_effects",
+    "basic_ability_effects",
+  );
+  assert.equal(
+    classifyVisualPaintPart({
+      surface: "transient",
+      kind: "activation",
+      component: "ultimate",
+      part: "semantic",
+    }),
+    "ultimate_ability_effects",
+  );
+  for (const outcome of ["damage", "healing", "unchanged"]) {
+    assert.equal(
+      classifyVisualPaintPart({
+        surface: "transient",
+        kind: "net_health",
+        outcome,
+        part: "effect",
+      }),
+      "scrolling_battle_text",
+    );
+  }
+  for (const removedId of ["damage_effects", "healing_effects"]) {
+    assert.throws(
+      () => isVisualFilterEnabled(DEFAULT_VISUAL_FILTER_STATE, removedId),
+      /Unknown visual filter/u,
+    );
+  }
+  assert.equal(
+    VISUAL_FILTER_IDS.includes("damage_effects") ||
+      VISUAL_FILTER_IDS.includes("healing_effects"),
+    false,
   );
   assert.equal(
     classifyVisualPaintPart({

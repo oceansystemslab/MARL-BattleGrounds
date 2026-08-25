@@ -788,8 +788,7 @@ export class BattlefieldRenderer {
     );
     this.#renderStatusDocks(scene, projectedAgents, transform, {
       showLegality: true,
-      showModifiers:
-        scene.audience === "researcher" && visualPolicy.showAuraModifierBadges,
+      showModifiers: visualPolicy.showAuraModifierBadges,
       showStatuses: visualPolicy.showDurationStatusBadges,
       showCooldowns: visualPolicy.showCooldownBadges,
       audience: scene.audience,

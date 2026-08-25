@@ -39,11 +39,13 @@ from marl_battlegrounds.rendering.pov_scene import (
 from scripts.dev.visual_debugger.presentation import (
     build_replay_no_shared_obs_authorized_presentation_v1,
     build_replay_oracle_authorized_presentation_v1,
+    build_replay_researcher_space_v1,
     build_replay_shared_obs_authorized_presentation_v1,
 )
 from scripts.dev.visual_debugger.presentation_protocol import (
     PresentationResourceResultV1,
     ReplayNoSharedObsAuthorizedPresentationFrameV1,
+    ReplayResearcherSpaceV1,
     ReplaySharedObsAuthorizedPresentationFrameV1,
 )
 from scripts.dev.visual_debugger.replay_protocol import (
@@ -303,20 +305,22 @@ class ReplayViewerService:
         self._bundle = bundle
         self._replay = bundle.replay
         self._context = bundle.replay.header.context
-        self._active_slots = tuple(
+        self._active_slots: tuple[int, ...] = tuple(
             row.global_slot for row in self._context.roster if row.configured_active
         )
-        focal_slots = tuple(
+        focal_slots: tuple[int, ...] = tuple(
             row.global_slot
             for row in self._context.policy_assignments
             if isinstance(row, AssignedPolicySlotV1) and row.evaluation_role == "focal"
         )
-        default_slot = min(focal_slots) if focal_slots else None
-        researcher_slot = (
+        default_slot: int | None = min(focal_slots) if focal_slots else None
+        researcher_slot: int | None = (
             default_slot if reference_global_slot is None else reference_global_slot
         )
-        inspection_slot = selected_global_slot
-        actor_slot = default_slot if pov_global_slot is None else pov_global_slot
+        inspection_slot: int | None = selected_global_slot
+        actor_slot: int | None = (
+            default_slot if pov_global_slot is None else pov_global_slot
+        )
         self._require_active_or_none(
             researcher_slot,
             name="reference_global_slot",
@@ -375,10 +379,10 @@ class ReplayViewerService:
         self._cursor_generation = 0
         self._choreography_generation = 0
         self._view_mode: ReplayViewModeV1 = view_mode
-        self._reference_global_slot = researcher_slot
-        self._inspection_global_slot = inspection_slot
+        self._reference_global_slot: int | None = researcher_slot
+        self._inspection_global_slot: int | None = inspection_slot
         self._armed_lane = armed_lane
-        self._pov_global_slot = actor_slot
+        self._pov_global_slot: int | None = actor_slot
         self._preset: ReplayPresetV1 = "analysis"
         self._show_ranges = show_ranges
         self._verbose = False
@@ -503,6 +507,10 @@ class ReplayViewerService:
                                 )
                             )
                         ),
+                        researcher_space=self._researcher_space_for_frame(
+                            frame_index=raw_frame.cursor.frame_index,
+                            selected_global_slot=self._pov_global_slot,
+                        ),
                     )
                     return PresentationResourceResultV1(
                         outcome="response",
@@ -571,6 +579,10 @@ class ReplayViewerService:
                     ),
                     incoming_transition=incoming_transition,
                     outgoing_transition=outgoing_transition,
+                    researcher_space=self._researcher_space_for_frame(
+                        frame_index=frame_index,
+                        selected_global_slot=self._pov_global_slot,
+                    ),
                 )
                 return PresentationResourceResultV1(outcome="response", payload=frame)
 
@@ -588,10 +600,9 @@ class ReplayViewerService:
                 else self._replay.transitions[source_frame_index - 1]
             )
             outgoing_transition = (
-                self._replay.transitions[source_frame_index]
-                if self._inspection_global_slot is not None
-                and source_frame_index < len(self._replay.transitions)
-                else None
+                None
+                if source_frame_index == len(self._replay.transitions)
+                else self._replay.transitions[source_frame_index]
             )
             frame = build_replay_oracle_authorized_presentation_v1(
                 self._context,
@@ -880,9 +891,10 @@ class ReplayViewerService:
                         "audience_unavailable",
                         "Researcher selection is unavailable in POV replay.",
                     )
+                requested_selection: int | None = command.selected_global_slot
                 try:
                     self._require_active_or_none(
-                        command.selected_global_slot,
+                        requested_selection,
                         name="selected_global_slot",
                     )
                 except ValueError:
@@ -893,8 +905,15 @@ class ReplayViewerService:
                         "audience_unavailable",
                         "The requested researcher selection is unavailable.",
                     )
-                if command.selected_global_slot != inspection_global_slot:
-                    inspection_global_slot = command.selected_global_slot
+                selection_changed = requested_selection != inspection_global_slot
+                pov_changed = (
+                    requested_selection is not None
+                    and requested_selection != pov_global_slot
+                )
+                if selection_changed or pov_changed:
+                    inspection_global_slot = requested_selection
+                    if requested_selection is not None:
+                        pov_global_slot = requested_selection
                     armed_lane = None
                     changed = True
             elif type(command) is ReplaySetViewCommandV1:
@@ -907,10 +926,19 @@ class ReplayViewerService:
                         "No configured-active actor is available for POV replay.",
                     )
                 if command.view_mode != view_mode:
+                    if command.view_mode == "pov":
+                        if (
+                            inspection_global_slot is not None
+                            and inspection_global_slot != pov_global_slot
+                        ):
+                            pov_global_slot = inspection_global_slot
+                    elif inspection_global_slot != pov_global_slot:
+                        inspection_global_slot = pov_global_slot
+                        armed_lane = None
                     view_mode = command.view_mode
                     changed = True
             elif type(command) is ReplaySetPovActorCommandV1:
-                requested_slot = command.global_slot
+                requested_slot: int | None = command.global_slot
                 try:
                     if command.presentation_key is not None:
                         if view_mode != "pov":
@@ -934,8 +962,13 @@ class ReplayViewerService:
                         "audience_unavailable",
                         "The requested POV actor is unavailable.",
                     )
-                if requested_slot != pov_global_slot:
+                if (
+                    requested_slot != pov_global_slot
+                    or requested_slot != inspection_global_slot
+                ):
                     pov_global_slot = requested_slot
+                    inspection_global_slot = requested_slot
+                    armed_lane = None
                     changed = True
             elif type(command) is ReplaySetPresetCommandV1:
                 # V1 compatibility command. All legacy preset requests
@@ -1339,6 +1372,43 @@ class ReplayViewerService:
             start_frame=self._replay.frames[frame_index - 1],
             transition=self._replay.transitions[frame_index - 1],
             successor_frame=self._replay.frames[frame_index],
+        )
+
+    def _researcher_space_for_frame(
+        self,
+        *,
+        frame_index: int,
+        selected_global_slot: int,
+    ) -> ReplayResearcherSpaceV1:
+        incoming_view = self._transition_view(frame_index)
+        projection = build_researcher_analyzer_projection_v2(
+            self._context,
+            self._replay.frames[frame_index],
+            transition_view=incoming_view,
+            presentation=EvaluationScenePresentationStateV1(
+                controlled_global_slot=self._reference_global_slot,
+                selected_global_slot=selected_global_slot,
+                armed_lane=None,
+                show_ranges=self._show_ranges,
+            ),
+            status_source_evidence_state=self._status_index.state_for_frame(
+                frame_index
+            ),
+        )
+        return build_replay_researcher_space_v1(
+            self._context,
+            projection.scene,
+            authority_session_id=self._viewer_session_id,
+            final_frame_index=self._artifact_summary.recorded_transition_count,
+            selected_global_slot=selected_global_slot,
+            incoming_transition=(
+                None if incoming_view is None else incoming_view.transition
+            ),
+            outgoing_transition=(
+                None
+                if frame_index == len(self._replay.transitions)
+                else self._replay.transitions[frame_index]
+            ),
         )
 
     def _require_active_or_none(self, value: int | None, *, name: str) -> None:

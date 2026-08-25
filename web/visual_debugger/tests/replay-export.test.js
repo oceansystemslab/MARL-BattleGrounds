@@ -549,7 +549,7 @@ test("Agent artifacts retain public provenance while excluding Oracle identity",
   for (const name of replayNames.slice(1)) {
     const filters = setVisualFilterEnabled(
       DEFAULT_VISUAL_FILTER_STATE,
-      "damage_effects",
+      "scrolling_battle_text",
       false,
     );
     const artifact = buildReplayBattlefieldPngArtifactV1({
@@ -563,7 +563,7 @@ test("Agent artifacts retain public provenance while excluding Oracle identity",
     assert.equal(inspected.provenance.authority.audience, "agent_pov");
     assert.equal(inspected.provenance.presentation.show_ranges, false);
     assert.equal(
-      inspected.provenance.presentation.visual_filters.damage_effects,
+      inspected.provenance.presentation.visual_filters.scrolling_battle_text,
       false,
     );
     assert.equal(artifact.filename.includes("oracle"), false);
@@ -912,14 +912,17 @@ test("deferred font loading cannot relabel the detached export snapshot", async 
     assert.equal(cloneCount, 1);
     assert.equal(fontRequests, 2);
 
-    visualFilters.damage_effects = false;
+    visualFilters.scrolling_battle_text = false;
     captureOptions.localInspectedPresentationKey = null;
     captureOptions.showRanges = false;
     fontGate.resolve();
     const artifact = await pending;
 
     assert.equal(artifact.provenance.presentation.show_ranges, true);
-    assert.equal(artifact.provenance.presentation.visual_filters.damage_effects, true);
+    assert.equal(
+      artifact.provenance.presentation.visual_filters.scrolling_battle_text,
+      true,
+    );
     assert.equal(
       artifact.provenance.presentation.selected_public_agent_id,
       firstAgent.public_agent_id,

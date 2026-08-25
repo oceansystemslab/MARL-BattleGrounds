@@ -141,6 +141,9 @@ test("shared shell uses the requested details and visual-filter controls without
   const markup = await readFile(indexUrl, "utf8");
 
   assert.match(markup, />Comprehensive Agent Class Details</u);
+  assert.match(markup, /id="accepted-heading">Latest Transition</u);
+  assert.match(markup, /<summary>Visual Key<\/summary>/u);
+  assert.match(markup, /id="visual-filter-count"[^>]*>18 enabled</u);
   assert.match(
     markup,
     /id="enable-all-visual-filters-button"[^>]*disabled[^>]*>\s*Enable All\s*<\/button>/u,
@@ -156,7 +159,7 @@ test("shared shell uses the requested details and visual-filter controls without
   }
 });
 
-test("current, outgoing, and latest-transition surfaces remain available in both products", async () => {
+test("current, upcoming, and latest-transition surfaces remain available in both products", async () => {
   const markup = await readFile(indexUrl, "utf8");
   const pendingOpeningTag = markup.match(
     /<details\b[^>]*\bid="pending-turn-details"[^>]*>/u,

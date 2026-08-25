@@ -44,8 +44,6 @@ const CP9_VISUAL_FILTER_IDS = Object.freeze([
   "rejected_action_feedback",
   "basic_ability_effects",
   "ultimate_ability_effects",
-  "damage_effects",
-  "healing_effects",
   "regeneration_effects",
   "cooldown_effects",
   "status_application",
@@ -1933,7 +1931,7 @@ test("basic_support Agent POV playback visibly dwells for Hunter and Priest", as
     const eventIds = await visibleAnimatedEventIds(frame.incoming_pov_transition_id);
     const presentation = await currentReplayPresentation(page);
     const enemyHunterAttack = presentation.visual_events.events.find(
-      (event) =>
+      (/** @type {Record<string, any>} */ event) =>
         event.event_kind === "ability_activated" &&
         event.source_anchor.public_agent_id === "7" &&
         event.recipient_anchor?.public_agent_id === "2",

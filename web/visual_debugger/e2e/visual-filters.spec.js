@@ -20,8 +20,6 @@ const FILTERS = Object.freeze([
   ["rejected_action_feedback", "Rejected Action Feedback"],
   ["basic_ability_effects", "Basic Ability Effects"],
   ["ultimate_ability_effects", "Ultimate Ability Effects"],
-  ["damage_effects", "Damage Effects"],
-  ["healing_effects", "Healing Effects"],
   ["regeneration_effects", "Regeneration Effects"],
   ["cooldown_effects", "Cooldown Effects"],
   ["status_application", "Status Application"],
@@ -38,7 +36,7 @@ const FILTERS = Object.freeze([
 const FILTER_IDS = FILTERS.map(([id]) => id);
 const FILTER_INPUT = 'input[type="checkbox"][data-visual-filter-id]';
 const CHOREOGRAPHY_ROOTS =
-  "#battlefield .combat-choreography, #battlefield .combat-choreography-routes";
+  "#battlefield .combat-choreography, #battlefield .combat-choreography-connectors, #battlefield .combat-choreography-routes";
 
 /** @type {Awaited<ReturnType<typeof exportReplayArtifacts>> | null} */
 let artifacts = null;
@@ -565,6 +563,7 @@ async function expectAllPaintAbsentWithoutDwell(page) {
         "#battlefield .cooldown-cell",
         '#battlefield .required-dock-fallback[data-kind="cooldown"]',
         "#battlefield .combat-effect",
+        "#battlefield .combat-connector-effect",
         "#battlefield .combat-route-effect",
       ].join(", "),
     ),
@@ -573,7 +572,7 @@ async function expectAllPaintAbsentWithoutDwell(page) {
     blocked: document.documentElement.dataset.submissionBlocked,
     roots: Array.from(
       document.querySelectorAll(
-        "#battlefield .combat-choreography, #battlefield .combat-choreography-routes",
+        "#battlefield .combat-choreography, #battlefield .combat-choreography-connectors, #battlefield .combat-choreography-routes",
       ),
     ).map((root) => ({
       state: root.getAttribute("data-state"),
@@ -592,12 +591,17 @@ async function expectAllPaintAbsentWithoutDwell(page) {
   expect(state.roots).toEqual([
     {
       state: "settled",
-      paintKey: `visual-filters-v1:${"0".repeat(20)}`,
+      paintKey: `visual-filters-v2:${"0".repeat(18)}`,
       childCount: 0,
     },
     {
       state: "settled",
-      paintKey: `visual-filters-v1:${"0".repeat(20)}`,
+      paintKey: `visual-filters-v2:${"0".repeat(18)}`,
+      childCount: 0,
+    },
+    {
+      state: "settled",
+      paintKey: `visual-filters-v2:${"0".repeat(18)}`,
       childCount: 0,
     },
   ]);
@@ -889,12 +893,12 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
   expect(await auraMarkup(page)).toBe(replayAuras);
   expect(await ultimateInventory(page)).toEqual(ultimateBefore);
   const enabledChoreographyRoots = page.locator(CHOREOGRAPHY_ROOTS);
-  await expect(enabledChoreographyRoots).toHaveCount(2);
+  await expect(enabledChoreographyRoots).toHaveCount(3);
   expect(
     await enabledChoreographyRoots.evaluateAll((roots) =>
       roots.map((root) => root.getAttribute("data-paint-key")),
     ),
-  ).toEqual(Array(2).fill(`visual-filters-v1:${"1".repeat(20)}`));
+  ).toEqual(Array(3).fill(`visual-filters-v2:${"1".repeat(18)}`));
   await expectLocalOnly(
     page,
     apiRequests,

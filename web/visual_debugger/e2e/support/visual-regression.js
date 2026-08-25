@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { expect } from "@playwright/test";
 
 import {
+  CHOREOGRAPHY_CONNECTOR_ROOT,
   CHOREOGRAPHY_ROOT,
   CHOREOGRAPHY_ROUTE_ROOT,
   installWaapiAutopause,
@@ -251,6 +252,7 @@ export async function loadLiveVisualCase(
   await expect(page.locator("#step-value")).toHaveText("0");
   await expect(page.locator("#transition-value")).toHaveText("—");
   await expect(page.locator(CHOREOGRAPHY_ROOT)).toHaveCount(0);
+  await expect(page.locator(CHOREOGRAPHY_CONNECTOR_ROOT)).toHaveCount(0);
   await expect(page.locator(CHOREOGRAPHY_ROUTE_ROOT)).toHaveCount(0);
 
   await selectAuthoritativeValue(page, "#view-select", view);
@@ -279,6 +281,7 @@ export async function advanceScriptTo(page, targetTransition) {
     );
     await expect(page.locator("#step-value")).toHaveText(String(transition));
     await expect(page.locator(CHOREOGRAPHY_ROOT)).toHaveCount(1);
+    await expect(page.locator(CHOREOGRAPHY_CONNECTOR_ROOT)).toHaveCount(1);
     await expect(page.locator(CHOREOGRAPHY_ROUTE_ROOT)).toHaveCount(1);
     if (transition === targetTransition) {
       return;
@@ -839,12 +842,19 @@ export async function assertTransientNumberLayout(page, expectedCount) {
         }
       }
 
-      const effectGroup = battlefield.querySelector(
-        `.combat-effect--net-health[data-event-id="${CSS.escape(record.eventId)}"]`,
+      const connectorGroup = battlefield.querySelector(
+        `.combat-connector-effect--net-health[data-event-id="${CSS.escape(record.eventId)}"]`,
       );
-      const leader = effectGroup?.querySelector(".combat-cue__leader");
-      if (leader && getComputedStyle(leader).visibility !== "hidden") {
-        if (leader.closest(".combat-effect--net-health") !== effectGroup) {
+      const leader = connectorGroup?.querySelector(".combat-cue__leader");
+      if (!leader || getComputedStyle(leader).visibility === "hidden") {
+        violations.push({
+          eventId: record.eventId,
+          recipientSlot: record.recipientSlot,
+          protectedSelector: ".combat-cue__leader",
+          reason: "NET text has no visible event-owned connector",
+        });
+      } else {
+        if (leader.closest(".combat-connector-effect--net-health") !== connectorGroup) {
           violations.push({
             eventId: record.eventId,
             recipientSlot: record.recipientSlot,
@@ -865,6 +875,15 @@ export async function assertTransientNumberLayout(page, expectedCount) {
             recipientSlot: record.recipientSlot,
             protectedSelector: ".combat-cue__leader",
             reason: "Visible NET leader has non-finite endpoints",
+          });
+        }
+        const points = JSON.parse(leader.getAttribute("data-leader-points") ?? "[]");
+        if (leader.localName !== "line" || points.length !== 2) {
+          violations.push({
+            eventId: record.eventId,
+            recipientSlot: record.recipientSlot,
+            protectedSelector: ".combat-cue__leader",
+            reason: "NET connector is not one straight two-point line",
           });
         }
       }
@@ -988,6 +1007,7 @@ export async function assertStablePresentationFrame(
   const commandCountBeforePresentation = commandPosts.count();
   if (eventWindow !== undefined) {
     await expect(page.locator(CHOREOGRAPHY_ROOT)).toHaveCount(1);
+    await expect(page.locator(CHOREOGRAPHY_CONNECTOR_ROOT)).toHaveCount(1);
     await pauseInsideEventWindow(page, eventWindow.eventType, eventWindow);
   } else if (settle) {
     const skip = page.locator("#motion-skip-button");

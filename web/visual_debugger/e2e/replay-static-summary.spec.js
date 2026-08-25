@@ -1,7 +1,11 @@
 import { expect, test } from "@playwright/test";
 
 import { VISUAL_FILTER_IDS } from "../src/visual-filters.js";
-import { CHOREOGRAPHY_ROOT, CHOREOGRAPHY_ROUTE_ROOT } from "./support/choreography.js";
+import {
+  CHOREOGRAPHY_CONNECTOR_ROOT,
+  CHOREOGRAPHY_ROOT,
+  CHOREOGRAPHY_ROUTE_ROOT,
+} from "./support/choreography.js";
 import {
   expectReplayFrameIndex,
   startReplayViewer,
@@ -266,11 +270,16 @@ async function expectedPlanSignature(page, rawPresentation, disabledFilters = []
 /** @param {import("@playwright/test").Page} page */
 async function staticDomSignature(page) {
   return page.evaluate(
-    ({ eventRootSelector, routeRootSelector }) => {
+    ({ connectorRootSelector, eventRootSelector, routeRootSelector }) => {
       const eventRoot = document.querySelector(eventRootSelector);
+      const connectorRoot = document.querySelector(connectorRootSelector);
       const routeRoot = document.querySelector(routeRootSelector);
       const map = document.querySelector("#battlefield .map-boundary");
-      if (!(eventRoot instanceof SVGElement) || !(routeRoot instanceof SVGElement)) {
+      if (
+        !(eventRoot instanceof SVGElement) ||
+        !(connectorRoot instanceof SVGElement) ||
+        !(routeRoot instanceof SVGElement)
+      ) {
         throw new Error("Static choreography roots are unavailable.");
       }
       if (!(map instanceof SVGRectElement)) {
@@ -372,7 +381,7 @@ async function staticDomSignature(page) {
           bottom: cy === null || radius === null ? null : cy + radius,
         });
       }
-      const rootState = [eventRoot, routeRoot].map((root) => ({
+      const rootState = [eventRoot, connectorRoot, routeRoot].map((root) => ({
         authorizationKey: root.getAttribute("data-authorization-key"),
         epochKey: root.getAttribute("data-epoch-key"),
         fingerprint: root.getAttribute("data-event-fingerprint"),
@@ -395,9 +404,7 @@ async function staticDomSignature(page) {
           bottom: Number(map.getAttribute("y")) + Number(map.getAttribute("height")),
         },
         leaders: [
-          ...document.querySelectorAll(
-            `${eventRootSelector} .combat-cue__leader, ${eventRootSelector} .combat-route__ownership-leader`,
-          ),
+          ...document.querySelectorAll(`${connectorRootSelector} .combat-cue__leader`),
         ].map((leader) => ({
           ariaHidden: leader.getAttribute("aria-hidden"),
           tagName: leader.localName,
@@ -409,6 +416,7 @@ async function staticDomSignature(page) {
       };
     },
     {
+      connectorRootSelector: CHOREOGRAPHY_CONNECTOR_ROOT,
       eventRootSelector: CHOREOGRAPHY_ROOT,
       routeRootSelector: CHOREOGRAPHY_ROUTE_ROOT,
     },
@@ -418,15 +426,22 @@ async function staticDomSignature(page) {
 /** @param {import("@playwright/test").Page} page */
 async function spatialContractEvidence(page) {
   return page.evaluate(
-    async ({ eventRootSelector, routeRootSelector, hitSelector }) => {
+    async ({
+      connectorRootSelector,
+      eventRootSelector,
+      routeRootSelector,
+      hitSelector,
+    }) => {
       await document.fonts.ready;
       const battlefield = document.querySelector("#battlefield");
       const eventRoot = document.querySelector(eventRootSelector);
+      const connectorRoot = document.querySelector(connectorRootSelector);
       const routeRoot = document.querySelector(routeRootSelector);
       const map = battlefield?.querySelector(".map-boundary") ?? null;
       if (
         !(battlefield instanceof SVGSVGElement) ||
         !(eventRoot instanceof SVGElement) ||
+        !(connectorRoot instanceof SVGElement) ||
         !(routeRoot instanceof SVGElement) ||
         !(map instanceof SVGRectElement)
       ) {
@@ -610,7 +625,15 @@ async function spatialContractEvidence(page) {
       const leaderLayoutKey = (leader, end) => {
         const directOwner = leader.closest("[data-layout-key]");
         if (directOwner) return directOwner.getAttribute("data-layout-key");
-        const event = leader.closest(".combat-effect, .combat-route-effect");
+        const connectorEvent = leader.closest(".combat-connector-effect");
+        const connectorEventId = connectorEvent?.getAttribute("data-event-id");
+        const event =
+          connectorEventId === null || connectorEventId === undefined
+            ? leader.closest(".combat-effect, .combat-route-effect")
+            : [...eventRoot.querySelectorAll(".combat-effect")].find(
+                (candidate) =>
+                  candidate.getAttribute("data-event-id") === connectorEventId,
+              );
         if (!event) return null;
         const candidates = [
           ...(event.hasAttribute("data-layout-key") ? [event] : []),
@@ -632,40 +655,7 @@ async function spatialContractEvidence(page) {
           .sort((left, right) => String(left.key).localeCompare(String(right.key)));
         return matches[0]?.key ?? null;
       };
-      /** @param {Element} leader */
-      const allowedBodyOwners = (leader) => {
-        const event = leader.closest(".combat-effect, .combat-route-effect");
-        if (!(event instanceof HTMLElement || event instanceof SVGElement)) return [];
-        const historicalChargeImpact =
-          leader.matches(".combat-cue__leader--impact") &&
-          event.getAttribute("data-token-id") === "warrior_charge";
-        const attribute = leader.matches(".combat-cue__leader--source")
-          ? "data-source-presentation-key"
-          : leader.matches(".combat-cue__leader--impact")
-            ? historicalChargeImpact
-              ? null
-              : "data-target-presentation-key"
-            : leader.matches(".combat-cue__leader--semantic")
-              ? "data-agent-presentation-key"
-              : leader.matches(".combat-cue__leader--rejection")
-                ? "data-actor-presentation-key"
-                : leader.matches(".combat-cue__leader--charge-end")
-                  ? "data-source-presentation-key"
-                  : leader.matches(
-                        ".combat-route__ownership-leader, .combat-cue__leader--charge-start",
-                      )
-                    ? null
-                    : event.hasAttribute("data-recipient-presentation-key")
-                      ? "data-recipient-presentation-key"
-                      : "data-agent-presentation-key";
-        const value = attribute === null ? null : event.getAttribute(attribute);
-        return value ? [value] : [];
-      };
-      const leaders = [
-        ...document.querySelectorAll(
-          `${eventRootSelector} .combat-cue__leader, ${eventRootSelector} .combat-route__ownership-leader`,
-        ),
-      ]
+      const leaders = [...connectorRoot.querySelectorAll(".combat-cue__leader")]
         .filter((leader) => getComputedStyle(leader).visibility !== "hidden")
         .map((leader) => {
           if (!(leader instanceof SVGGraphicsElement)) {
@@ -681,8 +671,9 @@ async function spatialContractEvidence(page) {
           const points = rawPoints.map((point) => transformPoint(point, matrix));
           return {
             eventId: leader
-              .closest(".combat-effect, .combat-route-effect")
+              .closest(".combat-connector-effect")
               ?.getAttribute("data-event-id"),
+            tagName: leader.localName,
             className: leader.getAttribute("class"),
             ariaHidden: leader.getAttribute("aria-hidden"),
             points,
@@ -693,7 +684,6 @@ async function spatialContractEvidence(page) {
                     /** @type {{x: number, y: number}} */ (points.at(-1)),
                   )
                 : null,
-            allowedBodyOwners: allowedBodyOwners(leader),
           };
         });
       const routeGeometry = [...routeRoot.querySelectorAll(".combat-route-effect")].map(
@@ -715,11 +705,18 @@ async function spatialContractEvidence(page) {
         protectedRects,
         cueRects,
         leaders,
+        connectorBeforeRoutes: Boolean(
+          connectorRoot.compareDocumentPosition(routeRoot) &
+            Node.DOCUMENT_POSITION_FOLLOWING,
+        ),
+        connectorRootParentLayer:
+          connectorRoot.parentElement?.getAttribute("data-layer") ?? null,
         routeGeometry,
       };
     },
     {
       eventRootSelector: CHOREOGRAPHY_ROOT,
+      connectorRootSelector: CHOREOGRAPHY_CONNECTOR_ROOT,
       routeRootSelector: CHOREOGRAPHY_ROUTE_ROOT,
       hitSelector: SPATIAL_HIT_SELECTOR,
     },
@@ -736,56 +733,6 @@ function expectSpatialContracts(evidence) {
   const finiteBounds = (bounds) =>
     bounds !== null &&
     [bounds.left, bounds.top, bounds.right, bounds.bottom].every(Number.isFinite);
-  /**
-   * @param {{x: number, y: number}} point
-   * @param {{left: number, top: number, right: number, bottom: number}} bounds
-   */
-  const pointInside = (point, bounds) =>
-    point.x >= bounds.left - 0.001 &&
-    point.x <= bounds.right + 0.001 &&
-    point.y >= bounds.top - 0.001 &&
-    point.y <= bounds.bottom + 0.001;
-  /**
-   * @param {{x: number, y: number}} first
-   * @param {{x: number, y: number}} second
-   * @param {{x: number, y: number}} third
-   */
-  const orientation = (first, second, third) =>
-    (second.x - first.x) * (third.y - first.y) -
-    (second.y - first.y) * (third.x - first.x);
-  /**
-   * @param {{x: number, y: number}} firstStart
-   * @param {{x: number, y: number}} firstEnd
-   * @param {{x: number, y: number}} secondStart
-   * @param {{x: number, y: number}} secondEnd
-   */
-  const segmentsIntersect = (firstStart, firstEnd, secondStart, secondEnd) => {
-    const firstSide = orientation(firstStart, firstEnd, secondStart);
-    const secondSide = orientation(firstStart, firstEnd, secondEnd);
-    const thirdSide = orientation(secondStart, secondEnd, firstStart);
-    const fourthSide = orientation(secondStart, secondEnd, firstEnd);
-    return (
-      ((firstSide > 0 && secondSide < 0) || (firstSide < 0 && secondSide > 0)) &&
-      ((thirdSide > 0 && fourthSide < 0) || (thirdSide < 0 && fourthSide > 0))
-    );
-  };
-  /**
-   * @param {{x: number, y: number}} start
-   * @param {{x: number, y: number}} end
-   * @param {{left: number, top: number, right: number, bottom: number}} bounds
-   */
-  const segmentIntersects = (start, end, bounds) => {
-    if (pointInside(start, bounds) || pointInside(end, bounds)) return true;
-    const corners = [
-      { x: bounds.left, y: bounds.top },
-      { x: bounds.right, y: bounds.top },
-      { x: bounds.right, y: bounds.bottom },
-      { x: bounds.left, y: bounds.bottom },
-    ];
-    return corners.some((corner, index) =>
-      segmentsIntersect(start, end, corner, corners[(index + 1) % corners.length]),
-    );
-  };
   /**
    * @param {{left: number, top: number, right: number, bottom: number} | null} actual
    * @param {{left: number, top: number, right: number, bottom: number} | null} reserved
@@ -875,9 +822,12 @@ function expectSpatialContracts(evidence) {
     }
   }
   expect(evidence.leaders.length).toBeGreaterThan(0);
+  expect(evidence.connectorRootParentLayer).toBe("transient-route");
+  expect(evidence.connectorBeforeRoutes).toBe(true);
   for (const leader of evidence.leaders) {
     expect(leader.ariaHidden, String(leader.eventId)).toBe("true");
-    expect(leader.points.length, String(leader.eventId)).toBeGreaterThanOrEqual(2);
+    expect(leader.tagName, String(leader.eventId)).toBe("line");
+    expect(leader.points, String(leader.eventId)).toHaveLength(2);
     expect(leader.ownLayoutKey, `${leader.eventId} has no owning cue`).not.toBeNull();
     for (const point of leader.points) {
       expect([point.x, point.y].every(Number.isFinite), String(leader.eventId)).toBe(
@@ -896,35 +846,20 @@ function expectSpatialContracts(evidence) {
         evidence.mapBounds.bottom + tolerance,
       );
     }
-    for (let index = 1; index < leader.points.length; index += 1) {
-      const start = leader.points[index - 1];
-      const end = leader.points[index];
-      for (const protectedRect of evidence.protectedRects) {
-        if (!finiteBounds(protectedRect.bounds)) {
-          throw new Error("Durable protected client bounds are not finite.");
-        }
-        const allowedBody =
-          protectedRect.kind === "body" &&
-          protectedRect.ownerPresentationKey !== null &&
-          leader.allowedBodyOwners.includes(protectedRect.ownerPresentationKey);
-        if (!allowedBody) {
-          expect(
-            segmentIntersects(start, end, protectedRect.bounds),
-            `${leader.eventId} leader intersects nonowner durable geometry`,
-          ).toBe(false);
-        }
-      }
-      for (const cue of evidence.cueRects) {
-        if (cue.key === leader.ownLayoutKey) continue;
-        if (!finiteBounds(cue.bounds)) {
-          throw new Error(`Cue ${String(cue.key)} has non-finite client bounds.`);
-        }
-        expect(
-          segmentIntersects(start, end, cue.bounds),
-          `${leader.eventId} leader intersects cue ${String(cue.key)}`,
-        ).toBe(false);
-      }
+    const owningCue = evidence.cueRects.find(({ key }) => key === leader.ownLayoutKey);
+    expect(owningCue, `${leader.eventId} owning cue is missing`).toBeDefined();
+    if (!owningCue || !finiteBounds(owningCue.bounds)) {
+      throw new Error(`${leader.eventId} owning cue bounds are not finite.`);
     }
+    const end = leader.points[1];
+    expect(end.x, `${leader.eventId} connector misses cue center x`).toBeCloseTo(
+      (owningCue.bounds.left + owningCue.bounds.right) / 2,
+      1,
+    );
+    expect(end.y, `${leader.eventId} connector misses cue center y`).toBeCloseTo(
+      (owningCue.bounds.top + owningCue.bounds.bottom) / 2,
+      1,
+    );
   }
 }
 
@@ -1003,8 +938,8 @@ function expectBoundedNonOverlap(signature) {
   expect(signature.leaders.length).toBeGreaterThan(0);
   for (const leader of signature.leaders) {
     expect(leader.ariaHidden).toBe("true");
-    expect(["line", "path"]).toContain(leader.tagName);
-    expect(leader.points.length).toBeGreaterThanOrEqual(2);
+    expect(leader.tagName).toBe("line");
+    expect(leader.points).toHaveLength(2);
     expect(
       leader.points.every(({ x, y }) => Number.isFinite(x) && Number.isFinite(y)),
     ).toBe(true);
@@ -1114,6 +1049,7 @@ test("paused replay installs a complete deterministic static summary at both sup
       state: "settled",
     });
     expect(allOn.rootState[1]).toEqual(allOn.rootState[0]);
+    expect(allOn.rootState[2]).toEqual(allOn.rootState[0]);
     expectBoundedNonOverlap(allOn);
     expectSpatialContracts(await spatialContractEvidence(page));
     await expectTransientHoverHelp(page);

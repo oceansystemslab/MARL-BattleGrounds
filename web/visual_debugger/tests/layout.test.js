@@ -1185,7 +1185,7 @@ test("cross-phase compaction refines a still-far cue between primary angular spo
   }
 });
 
-test("cross-phase fallback prefers the nearest collision-free candidate over the viewport edge", () => {
+test("cross-phase fallback prefers the nearest collision-free cue independent of its connector", () => {
   const anchor = Object.freeze({ x: 300, y: 200 });
   const protectedRects = [
     {
@@ -1221,18 +1221,10 @@ test("cross-phase fallback prefers the nearest collision-free candidate over the
   assert.deepEqual(cue.center, { x: 263, y: 193 });
   assert.equal(cue.disposition, "perimeter_callout");
   assert.ok(Math.hypot(cue.center.x - anchor.x, cue.center.y - anchor.y) < 40);
-  const leaderPoints = /** @type {ReadonlyArray<{x: number, y: number}>} */ (
-    cue.leader.points
-  );
-  const leaderLength = leaderPoints
-    .slice(1)
-    .reduce(
-      (total, point, index) =>
-        total +
-        Math.hypot(point.x - leaderPoints[index].x, point.y - leaderPoints[index].y),
-      0,
-    );
-  assert.ok(leaderLength < 20);
+  assert.equal(cue.leader.kind, "line");
+  assert.deepEqual(cue.leader.points, [anchor, cue.center]);
+  assert.deepEqual(cue.leader.start, anchor);
+  assert.deepEqual(cue.leader.end, cue.center);
   assert.equal(viewportOverflow(cue.bounds, VIEWPORT), 0);
   for (const region of forward.protectedRegions) {
     assert.equal(rectanglesIntersect(cue.bounds, region.bounds), false);
@@ -2470,7 +2462,7 @@ test("cross-phase Charge displacement clips only its successor target and keeps 
   });
 });
 
-test("cross-phase Charge impact escapes an occluding free historical anchor through the full durable ledger", () => {
+test("cross-phase Charge impact keeps a straight historical-anchor connector through the durable ledger", () => {
   const viewport = testRectangle(134.5, 24, 818.5, 556);
   const owners = [
     "oracle_73842f605e7ae4d27877db75aebd26132dda09018d1f86fc5282e0b8ef938a3e",
@@ -2556,7 +2548,10 @@ test("cross-phase Charge impact escapes an occluding free historical anchor thro
   assert.deepEqual(forward, reversed);
   assert.deepEqual(request.anchor, anchor);
   const cue = forward.cuePlacements[0];
-  assert.notDeepEqual(cue.leader.start, anchor);
+  assert.equal(cue.leader.kind, "line");
+  assert.deepEqual(cue.leader.start, anchor);
+  assert.deepEqual(cue.leader.end, cue.center);
+  assert.deepEqual(cue.leader.points, [anchor, cue.center]);
   assert.equal(cue.collisionFree, true);
   assert.equal(viewportOverflow(cue.bounds, viewport), 0);
   const occludingStatus = protectedRects.find(
@@ -2570,9 +2565,6 @@ test("cross-phase Charge impact escapes an occluding free historical anchor thro
       anchor.y <= occludingStatus.bounds.bottom,
     true,
   );
-  const paddedBlockers = protectedRects.map(({ bounds }) =>
-    testRectangle(bounds.left - 1, bounds.top - 1, bounds.right + 1, bounds.bottom + 1),
-  );
   for (const point of cue.leader.points) {
     assert.equal(Number.isFinite(point.x) && Number.isFinite(point.y), true);
     assert.equal(
@@ -2580,34 +2572,21 @@ test("cross-phase Charge impact escapes an occluding free historical anchor thro
       0,
     );
   }
-  for (let index = 1; index < cue.leader.points.length; index += 1) {
-    for (const blocker of paddedBlockers) {
-      assert.equal(
-        segmentTouchesRectangle(
-          cue.leader.points[index - 1],
-          cue.leader.points[index],
-          blocker,
-        ),
-        false,
-        `impact leader segment ${index - 1} touched a padded durable region`,
-      );
-    }
-  }
-
-  assert.throws(
-    () =>
-      layoutCrossPhaseOccupancy({
-        viewport,
-        protectedRects,
-        requests: [
-          {
-            ...request,
-            allowProtectedKeys: [protectedKey("body", 1)],
-          },
-        ],
-      }),
-    /no bounded collision-free placement/,
+  assert.equal(
+    segmentTouchesRectangle(cue.leader.start, cue.leader.end, occludingStatus.bounds),
+    true,
   );
+  const allowed = layoutCrossPhaseOccupancy({
+    viewport,
+    protectedRects,
+    requests: [
+      {
+        ...request,
+        allowProtectedKeys: [protectedKey("body", 1)],
+      },
+    ],
+  });
+  assert.deepEqual(allowed.cuePlacements[0].leader.points, [anchor, cue.center]);
 });
 
 test("cross-phase free-endpoint escape still fails when no exterior port exists", () => {

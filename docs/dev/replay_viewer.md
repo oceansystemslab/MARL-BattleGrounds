@@ -132,6 +132,18 @@ logical time zero when one exists, waits for its scaled presentation to settle,
 and then requests the next frame. Each accepted exact successor advance may
 animate only that successor's recorded incoming transition.
 
+**Latest Transition** is the recorded incoming transition `T_(n-1)` that
+produced the displayed frame `s_n`; it is absent at frame zero. **Upcoming
+Transition** is the recorded `T_n` out of `s_n` in the same Submitted /
+Accepted row grammar. Both panels remain global researcher-space evidence in
+Oracle View and Agent POV: they show every configured-active actor in canonical
+roster order and never stage, predict, or execute an action. Agent POV fog of
+war applies only inside the battlefield snapshot and its choreography. The
+roster likewise remains a global researcher control, partitioning active agents
+into **Visible** and **Not Visible** groups so any agent's POV can be selected at
+the same replay tick. Upcoming is absent only when the displayed frame has no
+recorded successor.
+
 The eight supported rates are exactly **0.25×, 0.50×, 0.75×, 1.00×, 1.25×,
 1.50×, 1.75×, and 2.00×**. A rate scales the complete presentation clock,
 including animation phases, waits, and the replay terminal hold. It never
@@ -189,7 +201,7 @@ Technical Frame expansion.
 
 ## Visual filters
 
-Visual Filters contains exactly 20 browser-local paint families, all enabled
+Visual Filters contains exactly 18 browser-local paint families, all enabled
 by default:
 
 1. Aura Fields
@@ -199,27 +211,31 @@ by default:
 5. Rejected Action Feedback
 6. Basic Ability Effects
 7. Ultimate Ability Effects
-8. Damage Effects
-9. Healing Effects
-10. Regeneration Effects
-11. Cooldown Effects
-12. Status Application
-13. Natural Status Expiry
-14. Freezing Trap Break
-15. Status Clear on Death
-16. Death Effects
-17. Respawn Wave
-18. Resurrection Effects
-19. Spawn-Shield Expiry
-20. Scrolling Battle Text
+8. Regeneration Effects
+9. Cooldown Effects
+10. Status Application
+11. Natural Status Expiry
+12. Freezing Trap Break
+13. Status Clear on Death
+14. Death Effects
+15. Respawn Wave
+16. Resurrection Effects
+17. Spawn-Shield Expiry
+18. Scrolling Battle Text
 
 Duration Status Badges includes the white crossed-swords **In combat** countdown.
+Basic Ability Effects and Ultimate Ability Effects each own their corresponding
+activation presentation and damage/healing impact glyphs. Scrolling Battle
+Text owns the complete net-health unit: outcome glyph, signed value, recipient
+label, and connector. Those parts are enabled or disabled together; damage and
+healing remain distinguished by their outcome sign and color rather than by
+separate filters.
 
 A filter change pauses playback and reinstalls the current settled summary
 after filtering, so disabled paint never consumes layout space. Filters do not
 change authorized data, authorized event data used by battlefield choreography,
-or the separate Ranges state. **Enable All** enables all 20; **Disable All**
-disables all 20.
+or the separate Ranges state. **Enable All** enables all 18; **Disable All**
+disables all 18.
 
 ## PNG export and metrics
 
@@ -228,7 +244,7 @@ visible, settled, and free of pending replay/presentation work. It exports the
 battlefield alone—not the toolbar, timeline, or inspectors—at exactly twice
 its displayed pixel dimensions. The result uses the bundled fonts and locked
 battlefield background, reflects the current audience, selection, ranges, and
-20 filter states, and embeds one canonical
+18 filter states, and embeds one canonical
 `MARL-BattleGrounds Replay Provenance` iTXt record. Export does not navigate the
 replay or request another replay frame.
 

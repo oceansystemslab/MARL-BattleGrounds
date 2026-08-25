@@ -9,7 +9,7 @@ import sys
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from threading import Barrier, Event
 from types import SimpleNamespace
@@ -29,6 +29,7 @@ from scripts.dev.visual_debugger.presentation_protocol import (
     PresentationApiErrorV1,
     ReplayNoSharedObsAuthorizedPresentationFrameV1,
     ReplayOracleAuthorizedPresentationFrameV1,
+    ReplayResearcherSpaceV1,
     ReplaySharedObsAuthorizedPresentationFrameV1,
 )
 from scripts.dev.visual_debugger.replay_protocol import (
@@ -523,6 +524,30 @@ def _recursive_string_values(value: object) -> set[str]:
     return set()
 
 
+def _researcher_space_for_raw(
+    case: _ServiceCase,
+    raw: ActorPovReplayViewerFrameV1 | SharedObsAgentPovReplayViewerFrameV1,
+    *,
+    selected_global_slot: int,
+) -> ReplayResearcherSpaceV1:
+    service = ReplayViewerService(
+        case.bundle,
+        initial_frame_index=raw.cursor.frame_index,
+        view_mode="pov",
+        pov_global_slot=selected_global_slot,
+        viewer_session_id=raw.viewer_session_id,
+    )
+    payload = service.current_presentation().payload
+    assert isinstance(
+        payload,
+        (
+            ReplayNoSharedObsAuthorizedPresentationFrameV1,
+            ReplaySharedObsAuthorizedPresentationFrameV1,
+        ),
+    )
+    return payload.researcher_space
+
+
 def _shared_authority_sources(
     case: _ServiceCase,
     *,
@@ -593,6 +618,11 @@ def _shared_presentation_for_raw(
         incoming_visual_events=incoming_visual_events,
         incoming_transition=incoming_transition,
         outgoing_transition=outgoing_transition,
+        researcher_space=_researcher_space_for_raw(
+            case,
+            raw,
+            selected_global_slot=recipient_global_slot,
+        ),
     )
 
 
@@ -923,13 +953,14 @@ def test_metric_report_view_switch_and_sidecar_read_share_one_lock_epoch(
         "frame_index",
         "selected_global_slot",
         "expected_incoming_index",
-        "expected_outgoing_index",
+        "expected_inspection_index",
+        "expected_upcoming_index",
     ),
     (
-        (0, 1, None, 0),
-        (1, 1, 0, 1),
-        (2, 1, 1, None),
-        (1, None, 0, None),
+        (0, 1, None, 0, 0),
+        (1, 1, 0, 1, 1),
+        (2, 1, 1, None, None),
+        (1, None, 0, None, 1),
     ),
 )
 def test_current_presentation_uses_committed_oracle_epochs_only(
@@ -937,7 +968,8 @@ def test_current_presentation_uses_committed_oracle_epochs_only(
     frame_index: int,
     selected_global_slot: int | None,
     expected_incoming_index: int | None,
-    expected_outgoing_index: int | None,
+    expected_inspection_index: int | None,
+    expected_upcoming_index: int | None,
 ) -> None:
     service = ReplayViewerService(
         service_cases.complete.bundle,
@@ -970,14 +1002,55 @@ def test_current_presentation_uses_committed_oracle_epochs_only(
             presentation.incoming_summary.incoming_transition_index
             == expected_incoming_index
         )
-    if expected_outgoing_index is None:
+    if expected_inspection_index is None:
         assert presentation.outgoing_inspection is None
     else:
         assert presentation.outgoing_inspection is not None
         assert (
             presentation.outgoing_inspection.outgoing_transition_index
-            == expected_outgoing_index
+            == expected_inspection_index
         )
+    if expected_upcoming_index is None:
+        assert presentation.upcoming_transition is None
+    else:
+        assert presentation.upcoming_transition is not None
+        assert (
+            presentation.upcoming_transition.outgoing_transition_index
+            == expected_upcoming_index
+        )
+        assert len(presentation.upcoming_transition.action_rows) == sum(
+            roster.configured_active
+            for roster in service_cases.complete.bundle.replay.header.context.roster
+        )
+
+
+@pytest.mark.parametrize("audience", ("oracle", "no_shared_obs", "shared_obs"))
+def test_upcoming_action_rows_become_the_exact_successor_latest_rows(
+    service_cases: _ServiceCases,
+    audience: Literal["oracle", "no_shared_obs", "shared_obs"],
+) -> None:
+    session = f"upcoming-successor-latest-{audience}"
+    at_zero = _presentation_response(
+        _presentation_service(
+            service_cases,
+            audience,
+            viewer_session_id=session,
+            frame_index=0,
+        ).current_presentation()
+    )
+    at_one = _presentation_response(
+        _presentation_service(
+            service_cases,
+            audience,
+            viewer_session_id=session,
+            frame_index=1,
+        ).current_presentation()
+    )
+    assert at_zero.upcoming_transition is not None
+    assert at_one.latest_transition is not None
+    assert at_zero.upcoming_transition.action_rows == (
+        at_one.latest_transition.action_rows
+    )
 
 
 @pytest.mark.parametrize("audience", ("oracle", "no_shared_obs", "shared_obs"))
@@ -1541,9 +1614,16 @@ def test_current_presentation_no_shared_uses_fixed_recipient_epochs(
         )
     if frame_index == 2:
         assert presentation.replay_inspection is None
+        assert presentation.upcoming_transition is None
     else:
         assert presentation.replay_inspection is not None
         assert presentation.replay_inspection.outgoing_transition_index == frame_index
+        assert presentation.upcoming_transition is not None
+        assert presentation.upcoming_transition.outgoing_transition_index == frame_index
+        assert len(presentation.upcoming_transition.action_rows) == 1
+        assert presentation.upcoming_transition.action_rows[0].submitted_action == (
+            presentation.replay_inspection.submitted_action
+        )
     assert service.current_frame() is raw
     assert service.current_frame().model_dump_json() == raw_bytes
     assert service.pov_index_build_count == cache_count == 1
@@ -1577,6 +1657,11 @@ def test_no_shared_packager_ignores_every_forbidden_raw_diagnostic_branch(
             service_cases.complete,
             frame_index=raw.cursor.frame_index,
         ),
+        researcher_space=_researcher_space_for_raw(
+            service_cases.complete,
+            raw,
+            selected_global_slot=0,
+        ),
     )
     diagnostic_cursor = raw.cursor.model_copy(
         update={
@@ -1607,6 +1692,11 @@ def test_no_shared_packager_ignores_every_forbidden_raw_diagnostic_branch(
         incoming_visual_events=_incoming_visual_events(
             service_cases.complete,
             frame_index=raw.cursor.frame_index,
+        ),
+        researcher_space=_researcher_space_for_raw(
+            service_cases.complete,
+            raw,
+            selected_global_slot=0,
         ),
     )
 
@@ -1661,6 +1751,11 @@ def test_no_shared_packager_rejects_poisoned_used_raw_headers(
             incoming_visual_events=_incoming_visual_events(
                 service_cases.complete,
                 frame_index=raw.cursor.frame_index,
+            ),
+            researcher_space=_researcher_space_for_raw(
+                service_cases.complete,
+                raw,
+                selected_global_slot=0,
             ),
         )
 
@@ -1725,6 +1820,11 @@ def test_no_shared_packager_rejects_cursor_and_projection_runtime_poisons(
                 incoming_visual_events=_incoming_visual_events(
                     service_cases.complete,
                     frame_index=raw.cursor.frame_index,
+                ),
+                researcher_space=_researcher_space_for_raw(
+                    service_cases.complete,
+                    raw,
+                    selected_global_slot=0,
                 ),
             )
 
@@ -1895,11 +1995,18 @@ def test_current_presentation_shared_uses_fixed_recipient_epochs(
         )
     if frame_index == 2:
         assert presentation.replay_inspection is None
+        assert presentation.upcoming_transition is None
     else:
         assert presentation.replay_inspection is not None
         assert presentation.replay_inspection.outgoing_transition_index == frame_index
         assert presentation.replay_inspection.actor_public_agent_id == (
             raw.public_agent_id
+        )
+        assert presentation.upcoming_transition is not None
+        assert presentation.upcoming_transition.outgoing_transition_index == frame_index
+        assert len(presentation.upcoming_transition.action_rows) == 1
+        assert presentation.upcoming_transition.action_rows[0].accepted_action == (
+            presentation.replay_inspection.accepted_action
         )
     assert service.current_frame() is raw
     assert service.current_frame().model_dump_json() == raw_bytes
@@ -2156,6 +2263,11 @@ def test_shared_packager_binds_private_raw_identity_to_authority_sources(
             ),
             incoming_transition=service_cases.shared.bundle.replay.transitions[0],
             outgoing_transition=service_cases.shared.bundle.replay.transitions[1],
+            researcher_space=_researcher_space_for_raw(
+                service_cases.shared,
+                raw,
+                selected_global_slot=0,
+            ),
         )
 
     object.__setattr__(service, "_frame", other_raw)
@@ -2245,6 +2357,11 @@ def test_agent_packagers_reject_poisoned_cursor_schema_version(
             incoming_visual_events=_incoming_visual_events(
                 service_cases.complete,
                 frame_index=no_shared_raw.cursor.frame_index,
+            ),
+            researcher_space=_researcher_space_for_raw(
+                service_cases.complete,
+                no_shared_raw,
+                selected_global_slot=0,
             ),
         )
 
@@ -2454,6 +2571,11 @@ def test_shared_packager_ignores_forbidden_transition_branches(
         incoming_visual_events=_incoming_visual_events(case, frame_index=1),
         incoming_transition=incoming,
         outgoing_transition=outgoing,
+        researcher_space=_researcher_space_for_raw(
+            case,
+            raw,
+            selected_global_slot=0,
+        ),
     )
     mutated = build_replay_shared_obs_authorized_presentation_v1(
         raw,
@@ -2467,6 +2589,11 @@ def test_shared_packager_ignores_forbidden_transition_branches(
         incoming_visual_events=_incoming_visual_events(case, frame_index=1),
         incoming_transition=poison_hidden_rows(incoming),
         outgoing_transition=poison_hidden_rows(outgoing),
+        researcher_space=_researcher_space_for_raw(
+            case,
+            raw,
+            selected_global_slot=0,
+        ),
     )
 
     assert mutated == baseline
@@ -2555,6 +2682,11 @@ def test_shared_packager_ignores_contributor_non_authority_and_unavailable_paylo
         incoming_visual_events=_incoming_visual_events(case, frame_index=1),
         incoming_transition=case.bundle.replay.transitions[0],
         outgoing_transition=case.bundle.replay.transitions[1],
+        researcher_space=_researcher_space_for_raw(
+            case,
+            raw,
+            selected_global_slot=0,
+        ),
     )
     mutated = build_replay_shared_obs_authorized_presentation_v1(
         raw,
@@ -2572,6 +2704,11 @@ def test_shared_packager_ignores_contributor_non_authority_and_unavailable_paylo
         incoming_visual_events=_incoming_visual_events(case, frame_index=1),
         incoming_transition=case.bundle.replay.transitions[0],
         outgoing_transition=case.bundle.replay.transitions[1],
+        researcher_space=_researcher_space_for_raw(
+            case,
+            raw,
+            selected_global_slot=0,
+        ),
     )
 
     assert unavailable_ids
@@ -2617,6 +2754,11 @@ def test_shared_packager_rejects_nonfixed_recipient_credentials(
             incoming_visual_events=_incoming_visual_events(case, frame_index=1),
             incoming_transition=case.bundle.replay.transitions[0],
             outgoing_transition=case.bundle.replay.transitions[1],
+            researcher_space=_researcher_space_for_raw(
+                case,
+                raw,
+                selected_global_slot=0,
+            ),
         )
 
 
@@ -2646,8 +2788,11 @@ def test_agent_presentations_exclude_privileged_fields_and_canonical_values(
     )
     raw = service.current_frame()
     payload = service.current_presentation().payload.model_dump(mode="json")
+    researcher_space = cast(dict[str, object], payload.pop("researcher_space"))
     keys = _recursive_keys(payload)
     strings = _recursive_string_values(payload)
+    researcher_keys = _recursive_keys(researcher_space)
+    researcher_strings = _recursive_string_values(researcher_space)
     replay = case.bundle.replay
     metric = replay.metric_report_reference
     forbidden_values = {
@@ -2675,6 +2820,39 @@ def test_agent_presentations_exclude_privileged_fields_and_canonical_values(
     }
 
     assert not (strings & forbidden_values)
+    privileged_values = {
+        replay.artifact_id,
+        replay.canonical_digest_sha256,
+        replay.trajectory_content_digest_sha256,
+        replay.header.header_id,
+        replay.header.context_digest_sha256,
+        raw.timeline_id,
+        metric.report_artifact_id,
+        metric.metric_report_id,
+        metric.trajectory_content_digest_sha256,
+        metric.canonical_digest_sha256,
+        *(
+            event.event_id
+            for transition in replay.transitions
+            for event in transition.events
+        ),
+    }
+    assert not (researcher_strings & privileged_values)
+    assert not (
+        researcher_keys
+        & {
+            "position",
+            "map",
+            "spawn_pads",
+            "respawn_waves",
+            "aura_fields",
+            "artifact_id",
+            "timeline_id",
+            "metric_report",
+            "processing",
+            "completion",
+        }
+    )
     for key in keys:
         assert "global_slot" not in key
         assert "artifact" not in key
@@ -2748,6 +2926,11 @@ def test_shared_packager_rejects_source_tuple_and_epoch_swaps(
             incoming_visual_events=_incoming_visual_events(case, frame_index=1),
             incoming_transition=incoming_transition,
             outgoing_transition=outgoing_transition,
+            researcher_space=_researcher_space_for_raw(
+                case,
+                raw,
+                selected_global_slot=0,
+            ),
         )
 
     baseline = build()
@@ -2840,6 +3023,11 @@ def test_shared_packager_changes_for_valid_recipient_authorized_mask_mutation(
         incoming_visual_events=_incoming_visual_events(case, frame_index=1),
         incoming_transition=case.bundle.replay.transitions[0],
         outgoing_transition=case.bundle.replay.transitions[1],
+        researcher_space=_researcher_space_for_raw(
+            case,
+            raw,
+            selected_global_slot=0,
+        ),
     )
 
     assert mutated != baseline
@@ -3481,6 +3669,158 @@ def test_legacy_global_slot_pov_switch_remains_compatible(
     assert switched_frame.public_agent_id == expected_public_id
     if type(switched_frame) is ActorPovReplayViewerFrameV1:
         assert switched_frame.pov_global_slot == 1
+
+
+@pytest.mark.parametrize("audience", ("no_shared_obs", "shared_obs"))
+def test_agent_researcher_space_stays_global_while_battlefield_stays_fogged(
+    service_cases: _ServiceCases,
+    audience: Literal["no_shared_obs", "shared_obs"],
+) -> None:
+    case = service_cases.shared if audience == "shared_obs" else service_cases.complete
+    service = ReplayViewerService(
+        case.bundle,
+        initial_frame_index=1,
+        viewer_session_id=f"global-researcher-space-{audience}",
+    )
+    _response(
+        _apply(
+            service,
+            ReplaySelectAgentCommandV1(selected_global_slot=0),
+            command_id=f"select-global-reference-{audience}",
+        )
+    )
+    oracle = cast(
+        ReplayOracleAuthorizedPresentationFrameV1,
+        _presentation_response(service.current_presentation()),
+    )
+
+    _response(
+        _apply(
+            service,
+            ReplaySetViewCommandV1(view_mode="pov"),
+            command_id=f"open-fogged-battlefield-{audience}",
+        )
+    )
+    agent = _agent_presentation_response(service.current_presentation())
+    researcher = agent.researcher_space
+    oracle_agents = {
+        row.public_agent_id: row for row in oracle.current_endpoint.scene.agents
+    }
+
+    assert researcher.latest_transition == oracle.latest_transition
+    assert researcher.upcoming_transition == oracle.upcoming_transition
+    assert (
+        researcher.selected_public_agent_id
+        == agent.source.source_recipient_public_agent_id
+    )
+    assert len(researcher.roster_agents) == len(oracle_agents)
+    directory = {
+        row.public_agent_id: row for row in researcher.identity_directory.identities
+    }
+    for row in researcher.roster_agents:
+        oracle_row = oracle_agents[row.public_agent_id]
+        expected = row.model_dump(mode="json")
+        team_local_slot = expected.pop("team_local_slot")
+        oracle_values = json.loads(json.dumps(asdict(oracle_row)))
+        assert expected == {name: oracle_values[name] for name in expected}
+        assert team_local_slot == directory[row.public_agent_id].team_local_slot
+    assert {
+        row.public_agent_id for row in agent.current_endpoint.parts.scene.agents
+    } <= set(oracle_agents)
+
+
+@pytest.mark.parametrize("audience", ("no_shared_obs", "shared_obs"))
+def test_replay_selection_round_trip_preserves_agent_and_cursor(
+    service_cases: _ServiceCases,
+    audience: Literal["no_shared_obs", "shared_obs"],
+) -> None:
+    case = service_cases.shared if audience == "shared_obs" else service_cases.complete
+    service = ReplayViewerService(
+        case.bundle,
+        initial_frame_index=1,
+        viewer_session_id=f"selection-round-trip-{audience}",
+    )
+    baseline_cursor = service.current_frame().cursor
+    public_ids_by_slot = {
+        row.global_slot: row.public_agent_id
+        for row in case.bundle.replay.header.context.roster
+        if row.configured_active
+    }
+
+    selected = _response(
+        _apply(
+            service,
+            ReplaySelectAgentCommandV1(selected_global_slot=1),
+            command_id=f"oracle-select-one-{audience}",
+        )
+    ).frame
+    assert isinstance(selected, ResearcherReplayViewerFrameV1)
+    assert selected.cursor == baseline_cursor
+
+    opened = _agent_viewer_frame(
+        _response(
+            _apply(
+                service,
+                ReplaySetViewCommandV1(view_mode="pov"),
+                command_id=f"open-selected-pov-{audience}",
+            )
+        ).frame
+    )
+    assert opened.cursor == baseline_cursor
+    assert opened.public_agent_id == public_ids_by_slot[1]
+
+    switched = _agent_viewer_frame(
+        _response(
+            _apply(
+                service,
+                ReplaySetPovActorCommandV1(global_slot=0),
+                command_id=f"switch-pov-zero-{audience}",
+            )
+        ).frame
+    )
+    assert switched.cursor == baseline_cursor
+    assert switched.public_agent_id == public_ids_by_slot[0]
+
+    restored = _response(
+        _apply(
+            service,
+            ReplaySetViewCommandV1(view_mode="researcher"),
+            command_id=f"restore-oracle-zero-{audience}",
+        )
+    ).frame
+    assert isinstance(restored, ResearcherReplayViewerFrameV1)
+    assert restored.cursor == baseline_cursor
+    assert restored.projection.scene.selection is not None
+    assert restored.projection.scene.selection.selected_global_slot == 0
+
+
+@pytest.mark.parametrize("audience", ("no_shared_obs", "shared_obs"))
+def test_final_replay_frame_still_accepts_researcher_selection(
+    service_cases: _ServiceCases,
+    audience: Literal["no_shared_obs", "shared_obs"],
+) -> None:
+    case = service_cases.shared if audience == "shared_obs" else service_cases.complete
+    final_frame_index = len(case.bundle.replay.transitions)
+    service = ReplayViewerService(
+        case.bundle,
+        initial_frame_index=final_frame_index,
+        viewer_session_id=f"final-selection-{audience}",
+    )
+    before = cast(ResearcherReplayViewerFrameV1, service.current_frame())
+
+    selected = _response(
+        _apply(
+            service,
+            ReplaySelectAgentCommandV1(selected_global_slot=1),
+            command_id=f"select-final-one-{audience}",
+        )
+    ).frame
+
+    assert isinstance(selected, ResearcherReplayViewerFrameV1)
+    assert selected.cursor == before.cursor
+    assert selected.cursor.frame_index == final_frame_index
+    assert selected.projection.scene.selection is not None
+    assert selected.projection.scene.selection.selected_global_slot == 1
 
 
 @pytest.mark.parametrize("invalid_lane", (True, -1, 2, "1"))

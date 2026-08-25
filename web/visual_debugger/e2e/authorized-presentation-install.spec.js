@@ -945,7 +945,10 @@ async function expectTechnicalFrameDom(page, presentation) {
  * @param {Record<string, any>} presentation
  */
 async function expectLatestTransitionDom(page, presentation) {
-  const rawRows = presentation.latest_transition?.action_rows ?? [];
+  const researcher = presentation.researcher_space ?? null;
+  const rawRows =
+    (researcher?.latest_transition ?? presentation.latest_transition)?.action_rows ??
+    [];
   const rows = page.locator("#accepted-card .accepted-action-row");
   await expect(rows).toHaveCount(rawRows.length);
   await expect(page.locator("#accepted-card")).not.toHaveAttribute(
@@ -962,8 +965,9 @@ async function expectLatestTransitionDom(page, presentation) {
   const scene =
     presentation.current_endpoint.scene ?? presentation.current_endpoint.parts?.scene;
   expect(Array.isArray(scene?.agents)).toBe(true);
+  const identities = researcher?.roster_agents ?? scene.agents;
   for (const [index, row] of rawRows.entries()) {
-    const identity = scene.agents.find(
+    const identity = identities.find(
       (/** @type {Record<string, any>} */ candidate) =>
         candidate.presentation_key === row.actor_presentation_key &&
         candidate.public_agent_id === row.actor_public_agent_id,
@@ -1489,12 +1493,12 @@ async function expectNativeAgentActivationMatrix(page, { body, row, path, comman
 }
 
 /**
- * Terminal presentation bodies and roster activators remain descriptive but
- * cannot cross either product command route, even under forced DOM events.
+ * A terminal replay has no outgoing transition, but its frozen snapshot stays
+ * researcher-selectable without advancing the cursor.
  *
  * @param {import("@playwright/test").Page} page
  */
-async function expectTerminalAgentActivationInert(page) {
+async function expectTerminalReplayAgentSelection(page) {
   await expect(page.locator("#battlefield")).toHaveAttribute("role", "group");
   await expect(page.locator("#battlefield")).toHaveAttribute("tabindex", "-1");
   await expect(page.locator("#battlefield")).toHaveAttribute(
@@ -1502,47 +1506,43 @@ async function expectTerminalAgentActivationInert(page) {
     "Read-only terminal replay battlefield snapshot.",
   );
   await expect(page.locator("#battlefield-instructions")).toHaveText(
-    "This replay frame is terminal; use the timeline to review another frame.",
+    "This replay frame is terminal. Activate an agent to inspect current facts, or use the timeline to review another frame.",
   );
-  const bodies = page.locator("#battlefield .agent");
-  const rows = page.locator("#roster .roster-primary-action");
-  expect(await bodies.count()).toBeGreaterThan(0);
-  await expect(bodies.first()).toHaveAttribute("role", "img");
-  await expect(bodies.first()).toHaveAttribute("tabindex", "-1");
-  expect(
-    await rows.evaluateAll((buttons) =>
-      buttons.every((button) => button instanceof HTMLButtonElement && button.disabled),
-    ),
-  ).toBe(true);
-  const localState = () =>
-    page.evaluate(() => ({
-      selectedKeys: [
-        ...document.querySelectorAll('#battlefield .agent[data-selected="true"]'),
-      ].map((agent) => agent.getAttribute("data-presentation-key")),
-      pressedRows: [...document.querySelectorAll("#roster .roster-primary-action")].map(
-        (button) => button.getAttribute("aria-pressed"),
-      ),
-      ranges: [...document.querySelectorAll("#battlefield .range-ring")].map(
-        (range) => ({
-          kind: range.getAttribute("data-kind"),
-          owner: range.getAttribute("data-presentation-key"),
-        }),
-      ),
-      detailsOpen: document.querySelector("#agent-details")?.hasAttribute("open"),
-      detailsAccent: document
-        .querySelector("#agent-details")
-        ?.getAttribute("data-accent"),
-      selectionText: document.querySelector("#selection-card")?.textContent,
-    }));
-  const before = await localState();
-  await expectZeroCommandInteraction(page, () => bodies.first().click({ force: true }));
-  await expectZeroCommandInteraction(page, () =>
-    bodies.first().dispatchEvent("keydown", { key: "Enter" }),
+  const before = await authenticatedGet(page, "/api/presentation/frame");
+  expect(before.presentation_kind).toBe("replay_oracle");
+  expect(before.source.source_frame_index).toBe(before.source.source_final_frame_index);
+  const selectedKey = await page
+    .locator('#battlefield .agent[data-selected="true"]')
+    .getAttribute("data-presentation-key");
+  const candidate = before.current_endpoint.scene.agents.find(
+    (/** @type {Record<string, any>} */ agent) =>
+      agent.presentation_key !== selectedKey,
   );
-  await expectZeroCommandInteraction(page, () =>
-    bodies.first().dispatchEvent("keydown", { key: " " }),
+  expect(candidate).toBeTruthy();
+  const identity = before.current_endpoint.identity_directory.identities.find(
+    (/** @type {Record<string, any>} */ row) =>
+      row.public_agent_id === candidate.public_agent_id,
   );
-  expect(await localState()).toEqual(before);
+  expect(identity).toBeTruthy();
+  const globalSlot = (identity.team_id - 1) * 5 + identity.team_local_slot;
+  const body = page.locator(
+    `#battlefield .agent[data-presentation-key="${candidate.presentation_key}"]`,
+  );
+  const row = page.locator(
+    `#roster .roster-primary-action[data-presentation-key="${candidate.presentation_key}"]`,
+  );
+  await expect(body).toHaveAttribute("role", "button");
+  await expect(row).toBeEnabled();
+  await expectSingleActivationCommand(page, "/api/replay/command", () => body.click(), {
+    command_type: "select_agent",
+    selected_global_slot: globalSlot,
+  });
+  const after = await authenticatedGet(page, "/api/presentation/frame");
+  expect(after.source.source_frame_index).toBe(before.source.source_frame_index);
+  expect(after.current_endpoint.action_axis.owner_public_agent_id).toBe(
+    candidate.public_agent_id,
+  );
+  await expect(body).toHaveAttribute("data-selected", "true");
 }
 
 /**
@@ -1638,19 +1638,20 @@ async function expectAuthorizedIncomingTransitionDom(page, presentation) {
 async function expectReplayInspectionDom(page, presentation) {
   expect(presentation.product_kind).toBe("replay_viewer");
   const inspection = presentation.replay_inspection;
+  const researcher = presentation.researcher_space ?? null;
   const endpoint = presentation.current_endpoint;
   const axis = endpoint.action_axis;
   const scene = endpoint.scene ?? endpoint.parts?.scene;
   expect(Array.isArray(scene?.agents)).toBe(true);
-  const ownerKey =
-    inspection?.actor_presentation_key ?? axis?.owner_presentation_key ?? null;
   const ownerPublicId =
-    inspection?.actor_public_agent_id ?? axis?.owner_public_agent_id ?? null;
+    researcher?.selected_public_agent_id ??
+    inspection?.actor_public_agent_id ??
+    axis?.owner_public_agent_id ??
+    null;
   const owner =
-    typeof ownerKey === "string"
+    typeof ownerPublicId === "string"
       ? (scene.agents.find(
           (/** @type {Record<string, any>} */ agent) =>
-            agent.presentation_key === ownerKey &&
             agent.public_agent_id === ownerPublicId,
         ) ?? null)
       : null;
@@ -1662,6 +1663,55 @@ async function expectReplayInspectionDom(page, presentation) {
     "aria-label",
     "Selection and exact actor-owned legality",
   );
+  await expect(page.locator("#accepted-heading")).toHaveText("Latest Transition");
+  await expect(page.locator("#visual-key > summary")).toHaveText("Visual Key");
+  await expect(page.locator("#pending-heading")).toHaveText("Upcoming Transition");
+  await expect(page.locator("#pending-count")).toBeHidden();
+  await expect(page.locator("#pending-scope")).toBeHidden();
+  const upcoming = researcher?.upcoming_transition ?? presentation.upcoming_transition;
+  const rawUpcomingRows = upcoming?.action_rows ?? [];
+  const upcomingRows = page.locator("#pending-card .accepted-action-row");
+  await expect(upcomingRows).toHaveCount(rawUpcomingRows.length);
+  await expect(
+    page.locator("#pending-card .accepted-action-row[data-presentation-key]"),
+  ).toHaveCount(0);
+  const tupleText = (/** @type {Record<string, any>} */ action) =>
+    `Move ${action.move_action} · Target ${action.target_action} · Ultimate ${action.use_ultimate_action}`;
+  for (const [index, row] of rawUpcomingRows.entries()) {
+    const identities = researcher?.roster_agents ?? scene.agents;
+    const identity = identities.find(
+      (/** @type {Record<string, any>} */ candidate) =>
+        candidate.presentation_key === row.actor_presentation_key &&
+        candidate.public_agent_id === row.actor_public_agent_id,
+    );
+    expect(identity).toBeTruthy();
+    const expectedIdentity = expectedAgentIdentity(identity);
+    const rendered = upcomingRows.nth(index);
+    await expect(rendered.locator(".accepted-action-row__title")).toHaveText(
+      expectedIdentity.title,
+    );
+    await expect(rendered.locator(".accepted-action-row__title")).toHaveAttribute(
+      "data-class",
+      expectedIdentity.accent,
+    );
+    await expect(rendered.locator(".accepted-action-tuple > h4")).toHaveText([
+      "Submitted",
+      "Accepted",
+    ]);
+    expect(
+      await rendered
+        .locator(".accepted-action-tuple")
+        .evaluateAll((tuples) =>
+          tuples.map((tuple) => tuple.getAttribute("data-kind")),
+        ),
+    ).toEqual(["submitted", "accepted"]);
+    await expect(rendered.locator(".accepted-action-tuple__value")).toHaveText([
+      tupleText(row.submitted_action),
+      tupleText(row.accepted_action),
+    ]);
+  }
+  await expect(page.locator("#pending-card .selected-legality__lane")).toHaveCount(0);
+  await expect(page.locator("#pending-card .selected-outgoing-target")).toHaveCount(0);
   if (owner === null) {
     await expect(page.locator('#battlefield .agent[data-selected="true"]')).toHaveCount(
       0,
@@ -1671,10 +1721,6 @@ async function expectReplayInspectionDom(page, presentation) {
       "No authorized agent details are available.",
     );
     await expect(page.locator('[data-layer="debug-range"] .range-ring')).toHaveCount(0);
-    await expect(page.locator("#pending-card .selected-legality__lane")).toHaveCount(0);
-    await expect(page.locator("#pending-card .selected-outgoing-target")).toHaveCount(
-      0,
-    );
     await expect(page.locator("#battlefield .legality-dock")).toHaveCount(0);
     await expect(page.locator("#battlefield .pending-route")).toHaveCount(0);
     return;
@@ -1714,34 +1760,24 @@ async function expectReplayInspectionDom(page, presentation) {
   );
 
   if (inspection === null) {
-    await expect(page.locator("#pending-card .selected-outgoing-target")).toHaveCount(
-      0,
-    );
-    await expect(page.locator("#pending-card .selected-legality__lane")).toHaveCount(0);
     await expect(page.locator("#battlefield .legality-dock")).toHaveCount(0);
     await expect(page.locator("#battlefield .pending-route")).toHaveCount(0);
     return;
   }
 
+  const inspectionRow = rawUpcomingRows.find(
+    (/** @type {Record<string, any>} */ row) =>
+      row.actor_public_agent_id === inspection.actor_public_agent_id &&
+      (researcher !== null ||
+        row.actor_presentation_key === inspection.actor_presentation_key),
+  );
+  expect(inspectionRow).toBeTruthy();
+  expect(inspectionRow.submitted_action).toEqual(inspection.submitted_action);
+  expect(inspectionRow.accepted_action).toEqual(inspection.accepted_action);
+
   const targetAction = inspection.accepted_action.target_action;
   const exactRow =
     inspection.decision_mask.target_use_ultimate_joint_mask[targetAction];
-  const outgoingTarget = page.locator("#pending-card .selected-outgoing-target");
-  await expect(outgoingTarget).toHaveCount(1);
-  await expect(outgoingTarget).toHaveAttribute(
-    "data-target-kind",
-    inspection.accepted_target.target_kind,
-  );
-  await expect(outgoingTarget).toContainText(inspection.accepted_target.display_name);
-  await expect(outgoingTarget).toContainText(
-    inspection.accepted_target.target_kind === "no_target"
-      ? "No target"
-      : `Agent ID ${inspection.accepted_target.target_public_agent_id}`,
-  );
-  await expect(page.locator("#pending-card .selected-legality__lane h3")).toHaveText([
-    `Basic Legality · Agent ID ${owner.public_agent_id}`,
-    `Ultimate Legality · Agent ID ${owner.public_agent_id}`,
-  ]);
   const legalityDock = page.locator(
     `#battlefield .legality-dock[data-presentation-key="${owner.presentation_key}"]`,
   );
@@ -1814,12 +1850,19 @@ async function expectAgentAuthoritySurface(
   expect(
     bodyKeys.every(({ role }) => role === (activationEnabled ? "button" : "img")),
   ).toBe(true);
+  const researcherRoster = presentation.researcher_space?.roster_agents ?? null;
+  const expectedRosterCount = researcherRoster?.length ?? bodyKeys.length;
   await expect(page.locator("#roster .roster-row--authorized")).toHaveCount(
-    bodyKeys.length,
+    expectedRosterCount,
   );
   await expect(page.locator("#roster .roster-primary-action")).toHaveCount(
-    bodyKeys.length,
+    expectedRosterCount,
   );
+  if (researcherRoster !== null) {
+    await expect(page.locator('#roster [data-visibility="visible"]')).toBeVisible();
+    await expect(page.locator('#roster [data-visibility="not-visible"]')).toBeVisible();
+    expect(expectedRosterCount).toBeGreaterThanOrEqual(bodyKeys.length);
+  }
   if (activationEnabled) {
     await expect(page.locator("#roster .roster-primary-action").first()).toBeEnabled();
   } else {
@@ -2664,7 +2707,7 @@ test("all five real service leaves install with safe pending continuity", async 
     0,
   );
   await expect(page.locator("#battlefield-instructions")).toHaveText(
-    "Replay is read-only. Activate an authorized agent to inspect current facts and its recorded outgoing action; use the timeline to change frames.",
+    "Replay is read-only. Upcoming Transition shows the authorized recorded joint action out of this frame; activate an agent to inspect current facts, or use the timeline to change frames.",
   );
   await expect(
     page.locator("#battlefield-utilities > #replay-ranges-button"),
@@ -2834,7 +2877,7 @@ test("all five real service leaves install with safe pending continuity", async 
   await expectReplayInspectionDom(page, replayOracleFinal);
   await expectTechnicalFrameDom(page, replayOracleFinal);
   await expectLatestTransitionDom(page, replayOracleFinal);
-  await expectTerminalAgentActivationInert(page);
+  await expectTerminalReplayAgentSelection(page);
   const nextShowRanges = replayOracle.transport.show_ranges !== true;
   await expectSingleReplayUtilityCommand(page, "#replay-ranges-button", {
     command_type: "set_ranges",
@@ -2854,6 +2897,15 @@ test("all five real service leaves install with safe pending continuity", async 
   );
   await expectReplayInspectionDom(page, replayOracleFinalUnselected);
   await seekReplay(page, 0);
+  await expectSingleActivationCommand(
+    page,
+    "/api/replay/command",
+    () => replaySelectedRow.click(),
+    {
+      command_type: "select_agent",
+      selected_global_slot: replaySelectedSlot,
+    },
+  );
   const oracleOnlyValues = [
     replayOracle.presentation.source.source_artifact_id,
     replayOracle.presentation.source.source_artifact_digest_sha256,
@@ -2864,12 +2916,38 @@ test("all five real service leaves install with safe pending continuity", async 
     ),
   ].filter((value) => typeof value === "string");
 
+  let releaseViewPresentation = () => {};
+  let markViewPresentationHeld = () => {};
+  const viewPresentationHeld = new Promise((resolve) => {
+    markViewPresentationHeld = () => resolve(undefined);
+  });
+  const viewPresentationRelease = new Promise((resolve) => {
+    releaseViewPresentation = () => resolve(undefined);
+  });
+  await page.route("**/api/presentation/frame", async (route) => {
+    const response = await route.fetch();
+    markViewPresentationHeld();
+    await viewPresentationRelease;
+    await route.fulfill({ response });
+  });
   await page.locator("#view-select").selectOption("pov");
+  try {
+    await viewPresentationHeld;
+    await expect(page.locator("html")).toHaveAttribute(
+      "data-presentation-authority",
+      "retained",
+    );
+    await expect(page.locator("#battlefield-empty")).toBeHidden();
+    await expect(page.locator("#battlefield .agent")).not.toHaveCount(0);
+  } finally {
+    releaseViewPresentation();
+  }
   const replayAgent = await expectInstalledLeaf(
     page,
     "actor_pov_replay_viewer",
     "replay_no_shared_obs_agent_pov",
   );
+  await page.unroute("**/api/presentation/frame");
   const replayAgentArtifactReference =
     replayAgent.transport.artifact_facts.artifact_summary.replay_reference;
   const replayAgentArtifactShellValues = new Set([
@@ -2888,6 +2966,9 @@ test("all five real service leaves install with safe pending continuity", async 
   await expectTechnicalFrameDom(page, replayAgent.presentation);
   await expectLatestTransitionDom(page, replayAgent.presentation);
   await expectRetiredMetadataAbsent(page);
+  expect(replayAgent.presentation.authority.recipient_public_agent_id).toBe(
+    replaySelectedAgent.public_agent_id,
+  );
   const replayAgentSelectedBody = page.locator(
     '#battlefield .agent[data-selected="true"]',
   );
@@ -2912,7 +2993,7 @@ test("all five real service leaves install with safe pending continuity", async 
     replayAgentInitialDocumentation,
   );
   await expect(page.locator("#battlefield-instructions")).toHaveText(
-    "Replay Agent POV is read-only. Activate an authorized visible body to switch to that agent's fog-of-war view at the same replay tick.",
+    "Replay Agent POV is read-only. Activate a visible body or choose any agent in the roster to switch to that agent's fog-of-war view at the same replay tick.",
   );
   const replayAgentRecipientKey =
     replayAgent.presentation.authority.recipient_presentation_key;
@@ -2920,21 +3001,33 @@ test("all five real service leaves install with safe pending continuity", async 
   const replayAgentBodyKeys = await replayAgentBodies.evaluateAll((agents) =>
     agents.map((agent) => agent.getAttribute("data-presentation-key")),
   );
-  const replayAgentLocalKey = replayAgentBodyKeys.find(
-    (key) => key !== replayAgentRecipientKey,
-  );
-  expect(typeof replayAgentLocalKey).toBe("string");
   const replayAgentScene =
     replayAgent.presentation.current_endpoint.scene ??
     replayAgent.presentation.current_endpoint.parts?.scene;
-  const replayAgentLocal = replayAgentScene.agents.find(
-    (/** @type {Record<string, any>} */ agent) =>
-      agent.presentation_key === replayAgentLocalKey,
+  const replayAgentVisibleIds = new Set(
+    replayAgentScene.agents.map(
+      (/** @type {Record<string, any>} */ agent) => agent.public_agent_id,
+    ),
   );
-  expect(replayAgentLocal).toBeTruthy();
-  const replayAgentLocalBody = page.locator(
-    `#battlefield .agent[data-presentation-key="${replayAgentLocalKey}"]`,
+  const replayAgentNotVisible =
+    replayAgent.presentation.researcher_space.roster_agents.find(
+      (/** @type {Record<string, any>} */ agent) =>
+        !replayAgentVisibleIds.has(agent.public_agent_id),
+    );
+  expect(replayAgentNotVisible).toBeTruthy();
+  const replayAgentNotVisibleIdentity =
+    replayAgent.presentation.researcher_space.identity_directory.identities.find(
+      (/** @type {Record<string, any>} */ identity) =>
+        identity.public_agent_id === replayAgentNotVisible.public_agent_id,
+    );
+  expect(replayAgentNotVisibleIdentity).toBeTruthy();
+  const replayAgentNotVisibleSlot =
+    (replayAgentNotVisibleIdentity.team_id - 1) * 5 +
+    replayAgentNotVisibleIdentity.team_local_slot;
+  const replayAgentNotVisibleRow = page.locator(
+    `#roster [data-visibility="not-visible"] .roster-primary-action[data-presentation-key="${replayAgentNotVisible.presentation_key}"]`,
   );
+  await expect(replayAgentNotVisibleRow).toBeEnabled();
   const replayAgentCursorBeforeSwitch = structuredClone(replayAgent.transport.cursor);
   let releasePovPresentation = () => {};
   let markPovPresentationHeld = () => {};
@@ -2953,10 +3046,10 @@ test("all five real service leaves install with safe pending continuity", async 
   const povSwitch = expectSingleActivationCommand(
     page,
     "/api/replay/command",
-    () => replayAgentLocalBody.click(),
+    () => replayAgentNotVisibleRow.click(),
     {
       command_type: "set_pov_actor",
-      presentation_key: replayAgentLocalKey,
+      global_slot: replayAgentNotVisibleSlot,
     },
   );
   try {
@@ -2999,13 +3092,13 @@ test("all five real service leaves install with safe pending continuity", async 
   );
   expect(switchedReplayAgent.transport.cursor).toEqual(replayAgentCursorBeforeSwitch);
   expect(switchedReplayAgent.presentation.authority.recipient_public_agent_id).toBe(
-    replayAgentLocal.public_agent_id,
+    replayAgentNotVisible.public_agent_id,
   );
   expect(
     switchedReplayAgent.presentation.authority.recipient_presentation_key,
   ).not.toBe(replayAgentRecipientKey);
   await expect(
-    page.locator(`[data-presentation-key="${replayAgentLocalKey}"]`),
+    page.locator(`#battlefield [data-presentation-key="${replayAgentRecipientKey}"]`),
   ).toHaveCount(0);
   await expectAgentAuthoritySurface(
     page,
@@ -3051,6 +3144,31 @@ test("all five real service leaves install with safe pending continuity", async 
       );
     }
   }
+  const terminalAgent = await expectInstalledLeaf(
+    page,
+    "actor_pov_replay_viewer",
+    "replay_no_shared_obs_agent_pov",
+  );
+  await page.locator("#view-select").selectOption("researcher");
+  const roundTripOracle = await expectInstalledLeaf(
+    page,
+    "researcher_replay_viewer",
+    "replay_oracle",
+  );
+  expect(roundTripOracle.transport.cursor).toEqual(terminalAgent.transport.cursor);
+  expect(
+    roundTripOracle.presentation.current_endpoint.action_axis.owner_public_agent_id,
+  ).toBe(replayAgentNotVisible.public_agent_id);
+  await page.locator("#view-select").selectOption("pov");
+  const roundTripAgent = await expectInstalledLeaf(
+    page,
+    "actor_pov_replay_viewer",
+    "replay_no_shared_obs_agent_pov",
+  );
+  expect(roundTripAgent.transport.cursor).toEqual(terminalAgent.transport.cursor);
+  expect(roundTripAgent.presentation.authority.recipient_public_agent_id).toBe(
+    replayAgentNotVisible.public_agent_id,
+  );
   await expectZeroCommandInteraction(page, () =>
     page.locator("#replay-clear-reference-button").click(),
   );
@@ -3065,7 +3183,7 @@ test("all five real service leaves install with safe pending continuity", async 
     "/api/presentation/frame",
   );
   expect(replayAgentPresentationAfterClear.authority.recipient_presentation_key).toBe(
-    switchedReplayAgent.presentation.authority.recipient_presentation_key,
+    roundTripAgent.presentation.authority.recipient_presentation_key,
   );
   expect(browserErrors.get(page) ?? []).toEqual([]);
 });
@@ -4311,6 +4429,10 @@ test(CP5_SLICE_5_TEST_TITLE, async ({ page }) => {
     ) {
       await seekReplay(page, frameIndex);
     }
+    const predecessor = await authenticatedGet(page, "/api/presentation/frame");
+    const upcoming = predecessor.upcoming_transition;
+    expect(upcoming).not.toBeNull();
+    expect(upcoming.outgoing_transition_index).toBe(frameIndex);
     /** @type {Array<Record<string, any>>} */
     const outgoing = [];
     for (const expected of expectations) {
@@ -4345,6 +4467,7 @@ test(CP5_SLICE_5_TEST_TITLE, async ({ page }) => {
       ).toHaveAttribute("data-selected", "true");
       const selected = await authenticatedGet(page, "/api/presentation/frame");
       const inspection = selected.replay_inspection;
+      expect(selected.upcoming_transition).toEqual(upcoming);
       expect(inspection.outgoing_transition_index).toBe(frameIndex);
       expect(inspection.actor_public_agent_id).toBe(identity.public_agent_id);
       expect(inspection.submitted_action).toEqual(expected.submitted);
@@ -4377,6 +4500,7 @@ test(CP5_SLICE_5_TEST_TITLE, async ({ page }) => {
     }
     await seekReplay(page, frameIndex + 1);
     const successor = await authenticatedGet(page, "/api/presentation/frame");
+    expect(successor.latest_transition.action_rows).toEqual(upcoming.action_rows);
     for (const expected of outgoing) {
       expect(successor.latest_events.incoming_transition_id).toBe(
         expected.reference.transition_id,
@@ -5954,15 +6078,28 @@ test("real Shared replay installs frame zero, middle, final, then rejects a forg
       );
       expect(localAgent).toBeTruthy();
       const localKey = localAgent.presentation_key;
+      const researcherAgent = leaf.presentation.researcher_space.roster_agents.find(
+        (/** @type {Record<string, any>} */ agent) =>
+          agent.public_agent_id === localAgent.public_agent_id,
+      );
+      expect(researcherAgent).toBeTruthy();
+      const researcherIdentity =
+        leaf.presentation.researcher_space.identity_directory.identities.find(
+          (/** @type {Record<string, any>} */ identity) =>
+            identity.public_agent_id === localAgent.public_agent_id,
+        );
+      expect(researcherIdentity).toBeTruthy();
+      const researcherSlot =
+        (researcherIdentity.team_id - 1) * 5 + researcherIdentity.team_local_slot;
       const localRow = page.locator(
-        `#roster .roster-primary-action[data-presentation-key="${localKey}"]`,
+        `#roster .roster-primary-action[data-presentation-key="${researcherAgent.presentation_key}"]`,
       );
       const cursorBeforeSwitch = structuredClone(leaf.transport.cursor);
       await expectSingleActivationCommand(
         page,
         "/api/replay/command",
         () => localRow.click(),
-        { command_type: "set_pov_actor", presentation_key: localKey },
+        { command_type: "set_pov_actor", global_slot: researcherSlot },
       );
       leaf = await expectInstalledLeaf(
         page,
@@ -5976,9 +6113,9 @@ test("real Shared replay installs frame zero, middle, final, then rejects a forg
       expect(leaf.presentation.authority.recipient_presentation_key).not.toBe(
         recipientKey,
       );
-      await expect(page.locator(`[data-presentation-key="${localKey}"]`)).toHaveCount(
-        0,
-      );
+      await expect(
+        page.locator(`#battlefield [data-presentation-key="${localKey}"]`),
+      ).toHaveCount(0);
       await expectAgentAuthoritySurface(page, leaf.presentation, []);
       await expect(page.locator("#battlefield")).toBeFocused();
       const rangesButton = page.locator("#replay-ranges-button");
@@ -6070,7 +6207,7 @@ test("real Shared replay installs frame zero, middle, final, then rejects a forg
   await seekReplay(page, 1);
   const middlePresentation = await authenticatedGet(page, "/api/presentation/frame");
   await expect(page.locator("#accepted-card .accepted-action-row")).toHaveCount(
-    middlePresentation.latest_transition.action_rows.length,
+    middlePresentation.researcher_space.latest_transition.action_rows.length,
   );
   await expect(page.locator("#accepted-card")).not.toHaveAttribute(
     "data-transition-id",

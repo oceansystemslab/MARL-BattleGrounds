@@ -19,6 +19,7 @@ from marl_battlegrounds.rendering.authorized_incoming import (
     build_shared_obs_incoming_summary_v1,
 )
 from marl_battlegrounds.rendering.authorized_inspection import (
+    ReplayInspectionPresentationV1,
     build_replay_no_shared_obs_inspection_v1,
     build_replay_oracle_inspection_v1,
     build_replay_shared_obs_inspection_v1,
@@ -43,25 +44,30 @@ from marl_battlegrounds.rendering.pov_scene import (
     ActorPovProjectionIndexV1,
     build_actor_pov_analyzer_projection_v1,
 )
-from marl_battlegrounds.rendering.scene import VisualEventBatchV2
+from marl_battlegrounds.rendering.scene import BattlefieldSceneV2, VisualEventBatchV2
 from scripts.dev.visual_debugger.presentation_protocol import (
     AgentPovActionAxisV1,
     LatestTransitionActionRowV1,
     NoSharedObsLatestTransitionV1,
     NoSharedObsPresentationAuthorityV1,
+    NoSharedObsUpcomingTransitionV1,
     OracleLatestTransitionV1,
     OraclePresentationAuthorityV1,
+    OracleUpcomingTransitionV1,
     ReplayNoSharedObsAuthorizedPresentationFrameV1,
     ReplayNoSharedObsPresentationSourceIdentityV1,
     ReplayNoSharedObsTechnicalFrameV1,
     ReplayOracleAuthorizedPresentationFrameV1,
     ReplayOraclePresentationSourceIdentityV1,
     ReplayOracleTechnicalFrameV1,
+    ReplayResearcherRosterAgentV1,
+    ReplayResearcherSpaceV1,
     ReplaySharedObsAuthorizedPresentationFrameV1,
     ReplaySharedObsPresentationSourceIdentityV1,
     ReplaySharedObsTechnicalFrameV1,
     SharedObsLatestTransitionV1,
     SharedObsPresentationAuthorityV1,
+    SharedObsUpcomingTransitionV1,
     build_no_shared_obs_authorized_current_endpoint_v1,
     build_oracle_authorized_current_endpoint_v1,
     build_shared_obs_authorized_current_endpoint_v1,
@@ -76,19 +82,12 @@ from scripts.dev.visual_debugger.replay_protocol import (
 )
 
 
-def _oracle_latest_transition_v1(
+def _oracle_transition_action_rows_v1(
     context: EvaluationEpisodeContextV1,
-    incoming_transition: EvaluationTransitionV1 | None,
+    transition: EvaluationTransitionV1,
     *,
     authority_session_id: str,
-) -> OracleLatestTransitionV1 | None:
-    if incoming_transition is None:
-        return None
-    if type(incoming_transition) is not EvaluationTransitionV1:
-        raise TypeError("incoming_transition must use its exact evaluation root.")
-    transition = EvaluationTransitionV1.model_validate(
-        incoming_transition.model_dump(mode="python")
-    )
+) -> tuple[LatestTransitionActionRowV1, ...]:
     acceptance = transition.facts.action_acceptance_facts
     submitted = acceptance.submitted_joint_action
     accepted = acceptance.accepted_joint_action
@@ -125,6 +124,22 @@ def _oracle_latest_transition_v1(
                 ),
             )
         )
+    return tuple(rows)
+
+
+def _oracle_latest_transition_v1(
+    context: EvaluationEpisodeContextV1,
+    incoming_transition: EvaluationTransitionV1 | None,
+    *,
+    authority_session_id: str,
+) -> OracleLatestTransitionV1 | None:
+    if incoming_transition is None:
+        return None
+    if type(incoming_transition) is not EvaluationTransitionV1:
+        raise TypeError("incoming_transition must use its exact evaluation root.")
+    transition = EvaluationTransitionV1.model_validate(
+        incoming_transition.model_dump(mode="python")
+    )
     start_tick = transition.facts.transition_start_step_count
     return OracleLatestTransitionV1(
         transition_kind="oracle_incoming_submitted_accepted",
@@ -135,7 +150,108 @@ def _oracle_latest_transition_v1(
         incoming_successor_frame_id=transition.successor_frame_id,
         incoming_start_simulator_step_count=start_tick,
         incoming_successor_simulator_step_count=start_tick + 1,
-        action_rows=tuple(rows),
+        action_rows=_oracle_transition_action_rows_v1(
+            context,
+            transition,
+            authority_session_id=authority_session_id,
+        ),
+    )
+
+
+def _oracle_upcoming_transition_v1(
+    context: EvaluationEpisodeContextV1,
+    outgoing_transition: EvaluationTransitionV1 | None,
+    *,
+    authority_session_id: str,
+) -> OracleUpcomingTransitionV1 | None:
+    if outgoing_transition is None:
+        return None
+    if type(outgoing_transition) is not EvaluationTransitionV1:
+        raise TypeError("outgoing_transition must use its exact evaluation root.")
+    transition = EvaluationTransitionV1.model_validate(
+        outgoing_transition.model_dump(mode="python")
+    )
+    start_tick = transition.facts.transition_start_step_count
+    return OracleUpcomingTransitionV1(
+        transition_kind="oracle_outgoing_submitted_accepted",
+        episode_id=transition.episode_id,
+        outgoing_transition_index=transition.transition_index,
+        outgoing_transition_id=transition.transition_id,
+        outgoing_start_frame_id=transition.start_frame_id,
+        outgoing_successor_frame_id=transition.successor_frame_id,
+        outgoing_start_simulator_step_count=start_tick,
+        outgoing_successor_simulator_step_count=start_tick + 1,
+        action_rows=_oracle_transition_action_rows_v1(
+            context,
+            transition,
+            authority_session_id=authority_session_id,
+        ),
+    )
+
+
+def build_replay_researcher_space_v1(
+    context: EvaluationEpisodeContextV1,
+    source_scene: BattlefieldSceneV2,
+    *,
+    authority_session_id: str,
+    final_frame_index: int,
+    selected_global_slot: int,
+    incoming_transition: EvaluationTransitionV1 | None,
+    outgoing_transition: EvaluationTransitionV1 | None,
+) -> ReplayResearcherSpaceV1:
+    """Package global roster/navigation facts without global scene geometry."""
+    endpoint = build_oracle_authorized_current_endpoint_v1(
+        context=context,
+        source_scene=source_scene,
+        authority_session_id=authority_session_id,
+        selected_internal_slot=selected_global_slot,
+    )
+    selected = context.roster[selected_global_slot]
+    if not selected.configured_active:
+        raise ValueError("researcher-space selection must be configured active.")
+    directory_by_id = {
+        row.public_agent_id: row for row in endpoint.identity_directory.identities
+    }
+    return ReplayResearcherSpaceV1(
+        researcher_space_kind="global_replay_researcher_space",
+        episode_id=source_scene.episode_id,
+        frame_index=source_scene.frame_index,
+        final_frame_index=final_frame_index,
+        simulator_step_count=source_scene.simulator_step_count,
+        selected_public_agent_id=selected.public_agent_id,
+        identity_directory=endpoint.identity_directory,
+        roster_agents=tuple(
+            ReplayResearcherRosterAgentV1(
+                presentation_key=agent.presentation_key,
+                public_agent_id=agent.public_agent_id,
+                team_id=agent.team_id,
+                team_local_slot=directory_by_id[agent.public_agent_id].team_local_slot,
+                class_id=agent.class_id,
+                class_name=agent.class_name,
+                life_state=agent.life_state,
+                current_health=agent.current_health,
+                maximum_health=agent.maximum_health,
+                effective_movement_speed=agent.effective_movement_speed,
+                ultimate_cooldown_remaining=agent.ultimate_cooldown_remaining,
+                spawn_shield_remaining=agent.spawn_shield_remaining,
+                steps_until_out_of_combat=agent.steps_until_out_of_combat,
+                out_of_combat_delay_steps=agent.out_of_combat_delay_steps,
+                statuses=agent.statuses,
+                aura_modifiers=agent.aura_modifiers,
+            )
+            for agent in endpoint.scene.agents
+        ),
+        class_mechanics=endpoint.scene.class_mechanics,
+        latest_transition=_oracle_latest_transition_v1(
+            context,
+            incoming_transition,
+            authority_session_id=authority_session_id,
+        ),
+        upcoming_transition=_oracle_upcoming_transition_v1(
+            context,
+            outgoing_transition,
+            authority_session_id=authority_session_id,
+        ),
     )
 
 
@@ -190,6 +306,74 @@ def _no_shared_obs_latest_transition_v1(
     )
 
 
+def _no_shared_obs_upcoming_transition_v1(
+    inspection: ReplayInspectionPresentationV1 | None,
+    *,
+    action_axis: AgentPovActionAxisV1,
+) -> NoSharedObsUpcomingTransitionV1 | None:
+    if inspection is None:
+        return None
+    reference = inspection.transition_reference
+    row = LatestTransitionActionRowV1(
+        actor_presentation_key=action_axis.owner_presentation_key,
+        actor_public_agent_id=action_axis.owner_public_agent_id,
+        target_action_recipient_public_agent_id_by_id=(
+            action_axis.target_public_agent_id_by_action
+        ),
+        submitted_action=inspection.submitted_action,
+        accepted_action=inspection.accepted_action,
+    )
+    return NoSharedObsUpcomingTransitionV1(
+        transition_kind="no_shared_obs_outgoing_submitted_accepted",
+        episode_id=inspection.episode_id,
+        outgoing_transition_index=inspection.outgoing_transition_index,
+        outgoing_transition_id=reference.transition_id,
+        outgoing_start_frame_id=reference.start_frame_id,
+        outgoing_successor_frame_id=reference.successor_frame_id,
+        outgoing_start_simulator_step_count=inspection.current_simulator_step_count,
+        outgoing_successor_simulator_step_count=(
+            inspection.current_simulator_step_count + 1
+        ),
+        action_rows=(row,),
+        recipient_public_agent_id=action_axis.owner_public_agent_id,
+        recipient_presentation_key=action_axis.owner_presentation_key,
+    )
+
+
+def _shared_obs_upcoming_transition_v1(
+    inspection: ReplayInspectionPresentationV1 | None,
+    *,
+    action_axis: AgentPovActionAxisV1,
+) -> SharedObsUpcomingTransitionV1 | None:
+    if inspection is None:
+        return None
+    reference = inspection.transition_reference
+    row = LatestTransitionActionRowV1(
+        actor_presentation_key=action_axis.owner_presentation_key,
+        actor_public_agent_id=action_axis.owner_public_agent_id,
+        target_action_recipient_public_agent_id_by_id=(
+            action_axis.target_public_agent_id_by_action
+        ),
+        submitted_action=inspection.submitted_action,
+        accepted_action=inspection.accepted_action,
+    )
+    return SharedObsUpcomingTransitionV1(
+        transition_kind="shared_obs_outgoing_submitted_accepted",
+        episode_id=inspection.episode_id,
+        outgoing_transition_index=inspection.outgoing_transition_index,
+        outgoing_transition_id=reference.transition_id,
+        outgoing_start_frame_id=reference.start_frame_id,
+        outgoing_successor_frame_id=reference.successor_frame_id,
+        outgoing_start_simulator_step_count=inspection.current_simulator_step_count,
+        outgoing_successor_simulator_step_count=(
+            inspection.current_simulator_step_count + 1
+        ),
+        action_rows=(row,),
+        recipient_public_agent_id=action_axis.owner_public_agent_id,
+        recipient_presentation_key=action_axis.owner_presentation_key,
+    )
+
+
 def build_replay_no_shared_obs_authorized_presentation_v1(
     source: ActorPovProjectionIndexV1,
     raw_frame: ActorPovReplayViewerFrameV1,
@@ -197,6 +381,7 @@ def build_replay_no_shared_obs_authorized_presentation_v1(
     public_catalog: StaticMechanicsCatalogV1,
     source_authority_epoch: int,
     incoming_visual_events: VisualEventBatchV2 | None,
+    researcher_space: ReplayResearcherSpaceV1,
 ) -> ReplayNoSharedObsAuthorizedPresentationFrameV1:
     """Package one committed recipient-local NoSharedObs replay frame."""
     if type(source) is not ActorPovProjectionIndexV1:
@@ -308,6 +493,10 @@ def build_replay_no_shared_obs_authorized_presentation_v1(
         action_axis=endpoint.action_axis,
     )
     replay_inspection = build_replay_no_shared_obs_inspection_v1(source, current)
+    upcoming_transition = _no_shared_obs_upcoming_transition_v1(
+        replay_inspection,
+        action_axis=endpoint.action_axis,
+    )
     return ReplayNoSharedObsAuthorizedPresentationFrameV1(
         schema_version=1,
         presentation_kind="replay_no_shared_obs_agent_pov",
@@ -341,6 +530,7 @@ def build_replay_no_shared_obs_authorized_presentation_v1(
         latest_events=latest_events,
         visual_events=visual_events,
         latest_transition=latest_transition,
+        upcoming_transition=upcoming_transition,
         technical_frame=ReplayNoSharedObsTechnicalFrameV1(
             technical_kind="replay_no_shared_obs_technical_frame",
             frame_index=frame_index,
@@ -352,6 +542,7 @@ def build_replay_no_shared_obs_authorized_presentation_v1(
             ),
         ),
         replay_inspection=replay_inspection,
+        researcher_space=researcher_space,
     )
 
 
@@ -490,6 +681,7 @@ def build_replay_shared_obs_authorized_presentation_v1(
     incoming_visual_events: VisualEventBatchV2 | None,
     incoming_transition: EvaluationTransitionV1 | None,
     outgoing_transition: EvaluationTransitionV1 | None,
+    researcher_space: ReplayResearcherSpaceV1,
 ) -> ReplaySharedObsAuthorizedPresentationFrameV1:
     """Package one fixed-recipient SharedObs visual-union replay frame."""
     if type(raw_frame) is not SharedObsAgentPovReplayViewerFrameV1:
@@ -650,6 +842,10 @@ def build_replay_shared_obs_authorized_presentation_v1(
         outgoing_transition=outgoing_transition,
         final_frame_index=raw_frame.cursor.final_frame_index,
     )
+    upcoming_transition = _shared_obs_upcoming_transition_v1(
+        replay_inspection,
+        action_axis=endpoint.action_axis,
+    )
     return ReplaySharedObsAuthorizedPresentationFrameV1(
         schema_version=1,
         presentation_kind="replay_shared_obs_agent_pov",
@@ -683,6 +879,7 @@ def build_replay_shared_obs_authorized_presentation_v1(
         latest_events=latest_events,
         visual_events=visual_events,
         latest_transition=latest_transition,
+        upcoming_transition=upcoming_transition,
         technical_frame=ReplaySharedObsTechnicalFrameV1(
             technical_kind="replay_shared_obs_technical_frame",
             frame_index=frame_index,
@@ -694,6 +891,7 @@ def build_replay_shared_obs_authorized_presentation_v1(
             ),
         ),
         replay_inspection=replay_inspection,
+        researcher_space=researcher_space,
     )
 
 
@@ -759,7 +957,9 @@ def build_replay_oracle_authorized_presentation_v1(
         current_frame,
         parts.current_scene,
         inspection_internal_slot=selected_internal_slot,
-        outgoing_transition=outgoing_transition,
+        outgoing_transition=(
+            outgoing_transition if selected_internal_slot is not None else None
+        ),
         final_frame_index=raw_frame.cursor.final_frame_index,
     )
     endpoint = build_oracle_authorized_current_endpoint_v1(
@@ -773,6 +973,11 @@ def build_replay_oracle_authorized_presentation_v1(
     latest_transition = _oracle_latest_transition_v1(
         context,
         incoming_transition,
+        authority_session_id=raw_frame.viewer_session_id,
+    )
+    upcoming_transition = _oracle_upcoming_transition_v1(
+        context,
+        outgoing_transition,
         authority_session_id=raw_frame.viewer_session_id,
     )
     source = ReplayOraclePresentationSourceIdentityV1(
@@ -815,6 +1020,7 @@ def build_replay_oracle_authorized_presentation_v1(
         current_endpoint=endpoint,
         latest_events=parts.incoming_summary,
         latest_transition=latest_transition,
+        upcoming_transition=upcoming_transition,
         technical_frame=ReplayOracleTechnicalFrameV1(
             technical_kind="replay_oracle_technical_frame",
             artifact_digest_prefix=(reference.canonical_digest_sha256[:12]),
@@ -836,5 +1042,6 @@ def build_replay_oracle_authorized_presentation_v1(
 __all__ = [
     "build_replay_no_shared_obs_authorized_presentation_v1",
     "build_replay_oracle_authorized_presentation_v1",
+    "build_replay_researcher_space_v1",
     "build_replay_shared_obs_authorized_presentation_v1",
 ]

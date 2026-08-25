@@ -2,6 +2,8 @@ import { expect } from "@playwright/test";
 
 export const CHOREOGRAPHY_ROOT =
   '#battlefield [data-layer="transient-events"] > .combat-choreography';
+export const CHOREOGRAPHY_CONNECTOR_ROOT =
+  '#battlefield [data-layer="transient-route"] > .combat-choreography-connectors';
 export const CHOREOGRAPHY_ROUTE_ROOT =
   '#battlefield [data-layer="transient-route"] > .combat-choreography-routes';
 
@@ -16,7 +18,11 @@ export async function installWaapiAutopause(page) {
     const nativeAnimate = Element.prototype.animate;
     Element.prototype.animate = function animateAndPause(keyframes, options) {
       const animation = nativeAnimate.call(this, keyframes, options);
-      if (this.closest(".combat-choreography, .combat-choreography-routes")) {
+      if (
+        this.closest(
+          ".combat-choreography, .combat-choreography-connectors, .combat-choreography-routes",
+        )
+      ) {
         animation.pause();
       }
       return animation;
@@ -33,9 +39,11 @@ export async function installWaapiAutopause(page) {
  */
 export async function pauseAtLogicalTime(page, logicalMs) {
   const root = page.locator(CHOREOGRAPHY_ROOT);
+  const connectorRoot = page.locator(CHOREOGRAPHY_CONNECTOR_ROOT);
   const routeRoot = page.locator(CHOREOGRAPHY_ROUTE_ROOT);
   await Promise.all([
     root.waitFor({ state: "attached" }),
+    connectorRoot.waitFor({ state: "attached" }),
     routeRoot.waitFor({ state: "attached" }),
   ]);
   if ((await page.locator("html").getAttribute("data-motion-paused")) !== "true") {
@@ -220,6 +228,13 @@ export async function choreographySnapshot(page) {
     effectIds: [...root.querySelectorAll(".combat-effect")].map((effect) =>
       effect.getAttribute("data-event-id"),
     ),
+    connectorEffectIds: [
+      ...(root
+        .closest("svg")
+        ?.querySelectorAll(
+          '[data-layer="transient-route"] > .combat-choreography-connectors > .combat-connector-effect',
+        ) ?? []),
+    ].map((effect) => effect.getAttribute("data-event-id")),
     routeEffectIds: [
       ...(root
         .closest("svg")
@@ -242,12 +257,21 @@ export async function choreographySnapshot(page) {
  */
 export async function assertBoundedChoreography(page) {
   const roots = page.locator(CHOREOGRAPHY_ROOT);
+  const connectorRoots = page.locator(CHOREOGRAPHY_CONNECTOR_ROOT);
   const routeRoots = page.locator(CHOREOGRAPHY_ROUTE_ROOT);
   await expect(roots).toHaveCount(1);
+  await expect(connectorRoots).toHaveCount(1);
   await expect(routeRoots).toHaveCount(1);
   const snapshot = await choreographySnapshot(page);
   const effectIds = snapshot.effectIds.filter((eventId) => eventId !== null);
   expect(new Set(effectIds).size).toBe(effectIds.length);
+  expect(snapshot.connectorEffectIds).not.toContain(null);
+  expect(new Set(snapshot.connectorEffectIds).size).toBe(
+    snapshot.connectorEffectIds.length,
+  );
+  for (const connectorEffectId of snapshot.connectorEffectIds) {
+    expect(effectIds).toContain(connectorEffectId);
+  }
   expect(snapshot.routeEffectIds).not.toContain(null);
   expect(new Set(snapshot.routeEffectIds).size).toBe(snapshot.routeEffectIds.length);
   for (const routeEffectId of snapshot.routeEffectIds) {
@@ -260,13 +284,20 @@ export async function assertBoundedChoreography(page) {
       1 +
       (root
         .closest("svg")
+        ?.querySelector(
+          '[data-layer="transient-route"] > .combat-choreography-connectors',
+        )
+        ?.querySelectorAll("*").length ?? 0) +
+      1 +
+      (root
+        .closest("svg")
         ?.querySelector('[data-layer="transient-route"] > .combat-choreography-routes')
         ?.querySelectorAll("*").length ?? 0) +
       1,
   );
-  expect(nodeCount).toBeLessThanOrEqual(Math.min(effectIds.length * 28 + 2, 512));
+  expect(nodeCount).toBeLessThanOrEqual(Math.min(effectIds.length * 30 + 3, 512));
   expect(snapshot.animationIds.length).toBeLessThanOrEqual(
-    Math.min(effectIds.length * 3 + 2, 512),
+    Math.min(effectIds.length * 4 + 3, 512),
   );
   expect(new Set(snapshot.animationIds.map(({ id }) => id)).size).toBe(
     snapshot.animationIds.length,
@@ -292,7 +323,7 @@ export async function assertTransientSlotsAuthorized(page) {
     const values = [];
     const battlefield = root.closest("svg");
     const elements = battlefield?.querySelectorAll(
-      ".combat-effect, .combat-route-effect",
+      ".combat-effect, .combat-connector-effect, .combat-route-effect",
     );
     for (const element of elements ?? []) {
       for (const name of element.getAttributeNames()) {

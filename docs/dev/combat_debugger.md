@@ -118,7 +118,7 @@ live Technical Frame is allowlisted by authority: Episode, Frame, Simulator
 step, and conditional Incoming transition. The initial frame has no
 incoming-transition row.
 
-Visual Filters contains exactly 20 independently controlled paint families,
+Visual Filters contains exactly 18 independently controlled paint families,
 all enabled by default:
 
 1. Aura Fields
@@ -128,27 +128,31 @@ all enabled by default:
 5. Rejected Action Feedback
 6. Basic Ability Effects
 7. Ultimate Ability Effects
-8. Damage Effects
-9. Healing Effects
-10. Regeneration Effects
-11. Cooldown Effects
-12. Status Application
-13. Natural Status Expiry
-14. Freezing Trap Break
-15. Status Clear on Death
-16. Death Effects
-17. Respawn Wave
-18. Resurrection Effects
-19. Spawn-Shield Expiry
-20. Scrolling Battle Text
+8. Regeneration Effects
+9. Cooldown Effects
+10. Status Application
+11. Natural Status Expiry
+12. Freezing Trap Break
+13. Status Clear on Death
+14. Death Effects
+15. Respawn Wave
+16. Resurrection Effects
+17. Spawn-Shield Expiry
+18. Scrolling Battle Text
 
 Duration Status Badges includes the white crossed-swords **In combat** countdown.
+Basic Ability Effects and Ultimate Ability Effects each own their corresponding
+activation presentation and damage/healing impact glyphs. Scrolling Battle
+Text owns the complete net-health unit: outcome glyph, signed value, recipient
+label, and connector. Those parts are enabled or disabled together; damage and
+healing remain distinguished by their outcome sign and color rather than by
+separate filters.
 
 These switches affect browser paint, accessible descriptions belonging to that
 paint, and nothing else. They do not redact source data, change simulator
 state, alter authorized event data used by battlefield choreography, or replace
-the separate Ranges control. **Enable All** enables all 20; **Disable All**
-disables all 20.
+the separate Ranges control. **Enable All** enables all 18; **Disable All**
+disables all 18.
 
 ## Recording and recovery
 

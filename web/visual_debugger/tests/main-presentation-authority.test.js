@@ -166,7 +166,7 @@ test("main applies explicit retain-or-clear policy before bounded installation",
   const liveCommandSource = source.slice(liveCommandStart, liveCommandEnd);
   assert.match(
     replayCommandSource,
-    /const changesAudience = command\.command_type === "set_view";[\s\S]*reason: changesAudience \? "replay_audience_change" : "replay_command"[\s\S]*pendingPolicy: changesAudience \? "clear" : "retain_last_authorized"/u,
+    /command\.command_type === "set_view"[\s\S]*\? "replay_audience_change"[\s\S]*: "replay_command"[\s\S]*pendingPolicy: "retain_last_authorized"/u,
   );
   assert.match(
     replayCommandSource,
@@ -633,6 +633,7 @@ test("main resolves one certified activation to Oracle, live-local, or Replay PO
     /state\.busy[\s\S]*state\.resyncRequired[\s\S]*state\.offline/u,
   );
   assert.match(resolver, /isTerminal\(state\.frame\)/u);
+  assert.match(resolver, /isTerminal\(state\.frame\) && !isReplayMode\(\)/u);
   assert.match(
     resolver,
     /const replayPovSwitch = isReplayMode\(\) && audience === "agent_pov"/u,
@@ -644,6 +645,10 @@ test("main resolves one certified activation to Oracle, live-local, or Replay PO
   assert.match(
     panel,
     /command\.command_type === "activate_authorized_agent"[\s\S]*activateAuthorizedAgent\(command\.presentation_key\)/u,
+  );
+  assert.match(
+    panel,
+    /command\.command_type === "activate_replay_pov_agent"[\s\S]*command_type: "set_pov_actor"[\s\S]*global_slot: command\.global_slot/u,
   );
   assert.match(
     source,
@@ -1262,11 +1267,11 @@ test("main describes Agent bodies as passive while preserving researcher guidanc
   );
   assert.match(
     boundarySource,
-    /Replay is read-only\. Activate an authorized agent to inspect current facts and its recorded outgoing action; use the timeline to change frames\./u,
+    /Replay is read-only\. Upcoming Transition shows the authorized recorded joint action out of this frame; activate an agent to inspect current facts, or use the timeline to change frames\./u,
   );
   assert.match(
     boundarySource,
-    /Replay Agent POV is read-only\. Activate an authorized visible body to switch to that agent's fog-of-war view at the same replay tick\./u,
+    /Replay Agent POV is read-only\. Activate a visible body or choose any agent in the roster to switch to that agent's fog-of-war view at the same replay tick\./u,
   );
   assert.match(
     source,
@@ -1286,7 +1291,7 @@ test("main describes Agent bodies as passive while preserving researcher guidanc
   );
   assert.match(
     source,
-    /This replay frame is terminal\. Activate an authorized visible body to switch the fog-of-war recipient, or use the timeline to review another frame\./u,
+    /This replay frame is terminal\. Activate a visible body or choose any agent in the roster to switch the fog-of-war recipient; use the timeline to review another frame\./u,
   );
 });
 
@@ -1425,7 +1430,7 @@ test("main reuses only Submit for coherent scripted-live advancement", async () 
   assert.match(source, /shuttingDown:\s*state\.shuttingDown,/u);
   assert.match(
     source,
-    /activationDisabled:[\s\S]*isTerminal\(transportFrame\)[\s\S]*authorizedPresentationAudience\(presentationFrame\) === "researcher"[\s\S]*recordingScientificControlsFenced\(\)/u,
+    /activationDisabled:[\s\S]*isTerminal\(transportFrame\)[\s\S]*!isReplayMode\(\)[\s\S]*recordingScientificControlsFenced\(\)/u,
   );
   assert.match(source, /isInteractive: liveBattlefieldCommandsInteractive/u);
   assert.match(

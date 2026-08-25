@@ -944,20 +944,87 @@ select {
 }
 
 .combat-choreography,
+.combat-choreography-connectors,
 .combat-choreography-routes,
+.combat-connector-effect,
 .combat-route-effect,
 .combat-effect {
   pointer-events: none;
 }
 
 .combat-choreography,
+.combat-choreography-connectors,
 .combat-choreography-routes {
   isolation: isolate;
 }
 
 .combat-effect,
+.combat-connector-effect,
 .combat-route-effect {
   color: var(--ultimate);
+}
+
+.combat-connector-effect[data-outcome="damage"],
+.combat-connector-effect[data-event-type="action_rejected"] {
+  color: var(--danger);
+}
+
+.combat-connector-effect[data-token-id="basic_damage"][data-source-class="mage"],
+.combat-connector-effect[data-token-id="mage_burst"] {
+  color: var(--class-mage);
+}
+
+.combat-connector-effect[data-token-id="basic_damage"][data-source-class="warrior"],
+.combat-connector-effect[data-token-id="warrior_charge"],
+.combat-connector-effect[data-token-id="stun_warrior_charge"],
+.combat-connector-effect[data-token-id="slow_warrior_charge"] {
+  color: var(--class-warrior);
+}
+
+.combat-connector-effect[data-token-id="basic_damage"][data-source-class="hunter"],
+.combat-connector-effect[data-token-id="hunter_trap"],
+.combat-connector-effect[data-token-id="stun_hunter_trap"],
+.combat-connector-effect[data-token-id="slow_hunter_basic"] {
+  color: var(--class-hunter);
+}
+
+.combat-connector-effect[data-token-id="basic_damage"][data-source-class="rogue"],
+.combat-connector-effect[data-token-id="rogue_poison"],
+.combat-connector-effect[data-token-id="stun_rogue_poison"],
+.combat-connector-effect[data-token-id="slow_rogue_poison"],
+.combat-connector-effect[data-token-id="anti_heal_rogue_poison"] {
+  color: var(--class-rogue);
+}
+
+.combat-connector-effect[data-token-id="basic_heal"],
+.combat-connector-effect[data-token-id="holy_word"],
+.combat-connector-effect[data-outcome="healing"],
+.combat-connector-effect[data-event-type="health_regenerated"] {
+  color: var(--success);
+}
+
+.combat-connector-effect[data-token-id="priest_freedom"] {
+  color: var(--class-priest);
+}
+
+.combat-connector-effect[data-outcome="unchanged"] {
+  color: var(--text);
+}
+
+.combat-connector-effect[data-lifecycle="expired"] {
+  color: var(--text-muted);
+}
+
+.combat-connector-effect[data-token-id="in_combat"] {
+  color: #fff;
+}
+
+.combat-connector-effect[data-lifecycle="cleared_by_death"] {
+  color: var(--danger);
+}
+
+.combat-connector-effect[data-lifecycle="cleared_unclassified"] {
+  color: var(--unavailable);
 }
 
 .combat-effect[data-outcome="damage"] {
@@ -1288,13 +1355,6 @@ select {
   dominant-baseline: central;
 }
 
-.combat-net__recipient-anchor {
-  fill: currentColor;
-  stroke: var(--battlefield);
-  stroke-width: 1.5;
-  vector-effect: non-scaling-stroke;
-}
-
 .combat-cue__leader {
   fill: none;
   stroke: currentColor;
@@ -1302,12 +1362,6 @@ select {
   stroke-dasharray: 2 4;
   opacity: 0.46;
   vector-effect: non-scaling-stroke;
-}
-
-.combat-effect--net-health .combat-cue__leader {
-  stroke-width: 2;
-  stroke-dasharray: none;
-  opacity: 0.82;
 }
 
 .combat-regeneration {
@@ -1335,13 +1389,6 @@ select {
   font-weight: 850;
   text-anchor: middle;
   dominant-baseline: central;
-}
-
-.combat-regeneration__recipient-anchor {
-  fill: currentColor;
-  stroke: var(--battlefield);
-  stroke-width: 1.5;
-  vector-effect: non-scaling-stroke;
 }
 
 .combat-effect[data-outcome="unchanged"] {

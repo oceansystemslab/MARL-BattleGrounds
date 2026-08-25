@@ -881,6 +881,95 @@ test("per-leaf history, Technical Frame, and inspection branches join source epo
   }
 });
 
+test("Upcoming Transition is required, authority-scoped, epoch-bound, and inspection-coherent", async () => {
+  const replayKinds = [
+    "replay_oracle",
+    "replay_no_shared_obs_agent_pov",
+    "replay_shared_obs_agent_pov",
+  ];
+  for (const kind of replayKinds) {
+    const normalized = await normalizeAuthorizedPresentationFrameV1(
+      fixture.presentations[kind],
+    );
+    assert.equal(
+      normalized.upcoming_transition.outgoing_transition_index,
+      normalized.source.source_frame_index,
+    );
+    assert.equal(
+      normalized.upcoming_transition.action_rows.length,
+      normalized.authority.authority_kind === "oracle" ? 5 : 1,
+    );
+
+    const missing = clone(fixture.presentations[kind]);
+    missing.upcoming_transition = null;
+    await assert.rejects(
+      normalizeAuthorizedPresentationFrameV1(missing),
+      /Non-final replay frame requires Upcoming Transition\./u,
+    );
+
+    const wrongEpoch = clone(fixture.presentations[kind]);
+    wrongEpoch.upcoming_transition.outgoing_transition_index += 1;
+    await assert.rejects(
+      normalizeAuthorizedPresentationFrameV1(wrongEpoch),
+      /Upcoming Transition/u,
+    );
+
+    const inspectionDrift = clone(fixture.presentations[kind]);
+    const accepted = inspectionDrift.upcoming_transition.action_rows[0].accepted_action;
+    accepted.move_action = (accepted.move_action + 1) % 9;
+    await assert.rejects(
+      normalizeAuthorizedPresentationFrameV1(inspectionDrift),
+      /inspection does not equal its Upcoming Transition row/u,
+    );
+  }
+
+  const oracleOrder = clone(fixture.presentations.replay_oracle);
+  [
+    oracleOrder.upcoming_transition.action_rows[0],
+    oracleOrder.upcoming_transition.action_rows[1],
+  ] = [
+    oracleOrder.upcoming_transition.action_rows[1],
+    oracleOrder.upcoming_transition.action_rows[0],
+  ];
+  await assert.rejects(
+    normalizeAuthorizedPresentationFrameV1(oracleOrder),
+    /Oracle Upcoming Transition actors do not equal active scene order\./u,
+  );
+
+  const agentExpansion = clone(fixture.presentations.replay_shared_obs_agent_pov);
+  const agentScene =
+    agentExpansion.current_endpoint.scene ??
+    agentExpansion.current_endpoint.parts?.scene;
+  const unauthorizedVisibleAgent = agentScene.agents.find(
+    (/** @type {Record<string, any>} */ agent) =>
+      agent.presentation_key !== agentExpansion.authority.recipient_presentation_key,
+  );
+  assert.ok(unauthorizedVisibleAgent);
+  agentExpansion.upcoming_transition.action_rows.push(
+    clone(agentExpansion.upcoming_transition.action_rows[0]),
+  );
+  agentExpansion.upcoming_transition.action_rows[1].actor_presentation_key =
+    unauthorizedVisibleAgent.presentation_key;
+  agentExpansion.upcoming_transition.action_rows[1].actor_public_agent_id =
+    unauthorizedVisibleAgent.public_agent_id;
+  await assert.rejects(
+    normalizeAuthorizedPresentationFrameV1(agentExpansion),
+    /Agent Upcoming Transition must contain only its fixed recipient\./u,
+  );
+
+  for (const kind of [
+    "replay_oracle_final_selected",
+    "replay_oracle_final_unselected",
+    "replay_no_shared_final",
+    "replay_shared_final",
+  ]) {
+    const normalized = await normalizeAuthorizedPresentationFrameV1(
+      fixture.state_cases[kind],
+    );
+    assert.equal(normalized.upcoming_transition, null);
+  }
+});
+
 test("action semantics, endpoint identity, and authority key derivation match Python", async () => {
   const replayAgent = fixture.presentations.replay_no_shared_obs_agent_pov;
   const liveAgent = fixture.presentations.live_no_shared_obs_agent_pov;
@@ -1615,12 +1704,15 @@ test("raw Shared and retired diagnostic roots are never presentation leaves", as
   }
 });
 
-test("Agent leaves contain no forbidden Oracle or diagnostic transport keys", async () => {
+test("Agent local branches stay private while Replay researcher facts remain narrowly global", async () => {
   for (const kind of kinds.filter((value) => value.includes("agent_pov"))) {
     const normalized = await normalizeAuthorizedPresentationFrameV1(
       fixture.presentations[kind],
     );
-    const encoded = JSON.stringify(normalized);
+    const local = /** @type {Record<string, any>} */ (clone(normalized));
+    const researcher = local.researcher_space ?? null;
+    delete local.researcher_space;
+    const encoded = JSON.stringify(local);
     for (const forbidden of [
       "global_slot",
       "source_material",
@@ -1630,6 +1722,27 @@ test("Agent leaves contain no forbidden Oracle or diagnostic transport keys", as
       "oracle_",
     ]) {
       assert.equal(encoded.includes(forbidden), false, `${kind}: ${forbidden}`);
+    }
+    if (researcher !== null) {
+      const researcherEncoded = JSON.stringify(researcher);
+      assert.equal(researcherEncoded.includes("oracle_"), true, kind);
+      for (const forbidden of [
+        '"position"',
+        '"map"',
+        '"spawn_pads"',
+        '"respawn_waves"',
+        '"aura_fields"',
+        '"source_material"',
+        '"metric_report"',
+        '"processing"',
+        '"completion"',
+      ]) {
+        assert.equal(
+          researcherEncoded.includes(forbidden),
+          false,
+          `${kind}: ${forbidden}`,
+        );
+      }
     }
 
     const oracleValue = clone(fixture.presentations[kind]);
@@ -1651,6 +1764,23 @@ test("Agent leaves contain no forbidden Oracle or diagnostic transport keys", as
         TypeError,
       );
     }
+  }
+
+  for (const kind of [
+    "replay_no_shared_obs_agent_pov",
+    "replay_shared_obs_agent_pov",
+  ]) {
+    const geometry = clone(fixture.presentations[kind]);
+    geometry.researcher_space.roster_agents[0].position = [1, 2];
+    await assert.rejects(normalizeAuthorizedPresentationFrameV1(geometry), TypeError);
+
+    const wrongNamespace = clone(fixture.presentations[kind]);
+    wrongNamespace.researcher_space.roster_agents[0].presentation_key =
+      wrongNamespace.current_endpoint.parts.scene.agents[0].presentation_key;
+    await assert.rejects(
+      normalizeAuthorizedPresentationFrameV1(wrongNamespace),
+      TypeError,
+    );
   }
 
   const shared = clone(fixture.presentations.replay_shared_obs_agent_pov);
