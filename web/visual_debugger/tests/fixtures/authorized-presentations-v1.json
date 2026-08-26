@@ -1400,10 +1400,10 @@
           "inspection_kind": "editable_live_draft",
           "submission_scope": "joint_turn"
         },
-        "source_authority_epoch": 11,
+        "source_authority_epoch": 1,
         "source_frame_id": "episode-001:frame:1",
         "source_frame_index": 1,
-        "source_revision": 11,
+        "source_revision": 1,
         "source_run_generation": 0,
         "source_session_id": "cp2-5-b-oracle",
         "source_simulator_step_count": 1
@@ -1413,12 +1413,12 @@
       "schema_version": 1,
       "source": {
         "episode_id": "episode-001",
-        "source_authority_epoch": 11,
+        "source_authority_epoch": 1,
         "source_authorized_endpoint_digest_sha256": "bfc09cf527a0de8ac1d1b03da50afad29c3a621308c8f0d6cf62a47d2df64f14",
         "source_frame_id": "episode-001:frame:1",
         "source_frame_index": 1,
         "source_kind": "live_oracle_frame",
-        "source_revision": 11,
+        "source_revision": 1,
         "source_run_generation": 0,
         "source_session_id": "cp2-5-b-oracle",
         "source_simulator_step_count": 1,
@@ -6897,7 +6897,7 @@
               "schema_version": 1
             },
             "inspection_kind": "editable_live_draft",
-            "submission_scope": "controlled_actor"
+            "submission_scope": "joint_turn"
           },
           "source_authority_epoch": 0,
           "source_frame_index": 0,
@@ -6910,6 +6910,771 @@
         },
         "presentation_kind": "live_no_shared_obs_agent_pov",
         "product_kind": "combat_debugger",
+        "researcher_space": {
+          "class_mechanics": [
+            {
+              "aura_mechanics": [
+                {
+                  "aura_id": "mage_damage_amplification",
+                  "clamp_kind": "ceiling",
+                  "clamp_value": 1.3224999999999998,
+                  "per_emitter_multiplier": 1.15,
+                  "radius": 2.0,
+                  "stacking_rule": "multiply_then_clamp"
+                }
+              ],
+              "base_movement_speed": 1.0,
+              "basic_interaction_radius": 3.0,
+              "basic_raw_damage": 13.0,
+              "basic_raw_healing": 0.0,
+              "basic_target_mode": "enemy",
+              "body_radius": 0.5,
+              "class_id": 1,
+              "class_name": "Mage",
+              "documentation_profile": {
+                "availability_kind": "available",
+                "profile_id": "marl_battlegrounds.class_documentation.canonical_v1"
+              },
+              "maximum_health": 80.0,
+              "mechanics_version": 2,
+              "observation_radius": 6.0,
+              "out_of_combat_delay_steps": 5,
+              "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033,
+              "status_mechanics": [
+                {
+                  "breaks_on_positive_damage": false,
+                  "duration_steps": 5,
+                  "family": "damage_amplification",
+                  "magnitude": 1.5,
+                  "magnitude_kind": "damage_multiplier",
+                  "source_action_component": "ultimate",
+                  "status_channel": 7,
+                  "status_id": "mage_burst_damage_amplification"
+                }
+              ],
+              "ultimate_cooldown_steps": 30,
+              "ultimate_interaction_radius": 0.0,
+              "ultimate_raw_damage": 0.0,
+              "ultimate_raw_healing": 0.0,
+              "ultimate_target_mode": "target_none"
+            },
+            {
+              "aura_mechanics": [
+                {
+                  "aura_id": "warrior_damage_mitigation",
+                  "clamp_kind": "floor",
+                  "clamp_value": 0.7224999999999999,
+                  "per_emitter_multiplier": 0.85,
+                  "radius": 2.0,
+                  "stacking_rule": "multiply_then_clamp"
+                }
+              ],
+              "base_movement_speed": 1.0,
+              "basic_interaction_radius": 1.5,
+              "basic_raw_damage": 8.0,
+              "basic_raw_healing": 0.0,
+              "basic_target_mode": "enemy",
+              "body_radius": 0.5,
+              "class_id": 2,
+              "class_name": "Warrior",
+              "documentation_profile": {
+                "availability_kind": "available",
+                "profile_id": "marl_battlegrounds.class_documentation.canonical_v1"
+              },
+              "maximum_health": 200.0,
+              "mechanics_version": 2,
+              "observation_radius": 6.0,
+              "out_of_combat_delay_steps": 5,
+              "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033,
+              "status_mechanics": [
+                {
+                  "breaks_on_positive_damage": false,
+                  "duration_steps": 5,
+                  "family": "slow",
+                  "magnitude": 0.5,
+                  "magnitude_kind": "movement_multiplier",
+                  "source_action_component": "ultimate",
+                  "status_channel": 0,
+                  "status_id": "warrior_charge_slow"
+                },
+                {
+                  "breaks_on_positive_damage": false,
+                  "duration_steps": 1,
+                  "family": "stun",
+                  "magnitude": null,
+                  "magnitude_kind": "none",
+                  "source_action_component": "ultimate",
+                  "status_channel": 3,
+                  "status_id": "warrior_charge_stun"
+                }
+              ],
+              "ultimate_cooldown_steps": 30,
+              "ultimate_interaction_radius": 5.75,
+              "ultimate_raw_damage": 20.0,
+              "ultimate_raw_healing": 0.0,
+              "ultimate_target_mode": "enemy"
+            },
+            {
+              "aura_mechanics": [],
+              "base_movement_speed": 1.0,
+              "basic_interaction_radius": 3.5,
+              "basic_raw_damage": 6.0,
+              "basic_raw_healing": 0.0,
+              "basic_target_mode": "enemy",
+              "body_radius": 0.5,
+              "class_id": 3,
+              "class_name": "Hunter",
+              "documentation_profile": {
+                "availability_kind": "available",
+                "profile_id": "marl_battlegrounds.class_documentation.canonical_v1"
+              },
+              "maximum_health": 100.0,
+              "mechanics_version": 2,
+              "observation_radius": 6.5,
+              "out_of_combat_delay_steps": 5,
+              "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033,
+              "status_mechanics": [
+                {
+                  "breaks_on_positive_damage": false,
+                  "duration_steps": 1,
+                  "family": "slow",
+                  "magnitude": 0.85,
+                  "magnitude_kind": "movement_multiplier",
+                  "source_action_component": "basic",
+                  "status_channel": 1,
+                  "status_id": "hunter_basic_slow"
+                },
+                {
+                  "breaks_on_positive_damage": true,
+                  "duration_steps": 4,
+                  "family": "stun",
+                  "magnitude": null,
+                  "magnitude_kind": "none",
+                  "source_action_component": "ultimate",
+                  "status_channel": 4,
+                  "status_id": "hunter_trap_stun"
+                }
+              ],
+              "ultimate_cooldown_steps": 30,
+              "ultimate_interaction_radius": 3.0,
+              "ultimate_raw_damage": 10.0,
+              "ultimate_raw_healing": 0.0,
+              "ultimate_target_mode": "enemy"
+            },
+            {
+              "aura_mechanics": [],
+              "base_movement_speed": 1.2999999523162842,
+              "basic_interaction_radius": 1.5,
+              "basic_raw_damage": 12.0,
+              "basic_raw_healing": 0.0,
+              "basic_target_mode": "enemy",
+              "body_radius": 0.5,
+              "class_id": 4,
+              "class_name": "Rogue",
+              "documentation_profile": {
+                "availability_kind": "available",
+                "profile_id": "marl_battlegrounds.class_documentation.canonical_v1"
+              },
+              "maximum_health": 100.0,
+              "mechanics_version": 2,
+              "observation_radius": 6.0,
+              "out_of_combat_delay_steps": 3,
+              "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033,
+              "status_mechanics": [
+                {
+                  "breaks_on_positive_damage": false,
+                  "duration_steps": 5,
+                  "family": "slow",
+                  "magnitude": 0.5,
+                  "magnitude_kind": "movement_multiplier",
+                  "source_action_component": "ultimate",
+                  "status_channel": 2,
+                  "status_id": "rogue_poison_slow"
+                },
+                {
+                  "breaks_on_positive_damage": false,
+                  "duration_steps": 1,
+                  "family": "stun",
+                  "magnitude": null,
+                  "magnitude_kind": "none",
+                  "source_action_component": "ultimate",
+                  "status_channel": 5,
+                  "status_id": "rogue_poison_stun"
+                },
+                {
+                  "breaks_on_positive_damage": false,
+                  "duration_steps": 4,
+                  "family": "anti_heal",
+                  "magnitude": 0.5,
+                  "magnitude_kind": "healing_multiplier",
+                  "source_action_component": "ultimate",
+                  "status_channel": 6,
+                  "status_id": "rogue_poison_anti_heal"
+                }
+              ],
+              "ultimate_cooldown_steps": 30,
+              "ultimate_interaction_radius": 1.5,
+              "ultimate_raw_damage": 36.0,
+              "ultimate_raw_healing": 0.0,
+              "ultimate_target_mode": "enemy"
+            },
+            {
+              "aura_mechanics": [],
+              "base_movement_speed": 1.0,
+              "basic_interaction_radius": 3.0,
+              "basic_raw_damage": 0.0,
+              "basic_raw_healing": 8.0,
+              "basic_target_mode": "ally",
+              "body_radius": 0.5,
+              "class_id": 5,
+              "class_name": "Priest",
+              "documentation_profile": {
+                "availability_kind": "available",
+                "profile_id": "marl_battlegrounds.class_documentation.canonical_v1"
+              },
+              "maximum_health": 100.0,
+              "mechanics_version": 2,
+              "observation_radius": 6.0,
+              "out_of_combat_delay_steps": 5,
+              "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033,
+              "status_mechanics": [
+                {
+                  "breaks_on_positive_damage": false,
+                  "duration_steps": 1,
+                  "family": "movement_floor",
+                  "magnitude": 0.85,
+                  "magnitude_kind": "movement_floor",
+                  "source_action_component": "basic",
+                  "status_channel": 8,
+                  "status_id": "priest_blessing_of_freedom_movement_floor"
+                }
+              ],
+              "ultimate_cooldown_steps": 30,
+              "ultimate_interaction_radius": 5.75,
+              "ultimate_raw_damage": 0.0,
+              "ultimate_raw_healing": 200.0,
+              "ultimate_target_mode": "ally"
+            }
+          ],
+          "episode_id": "debugger-episode:5b6184f9ff4549a1c36782a41d15553fdb28f2bb6b2d91bc767b1c473e57380d",
+          "frame_index": 0,
+          "identity_directory": {
+            "directory_kind": "oracle_public_identity_directory",
+            "identities": [
+              {
+                "class_id": 1,
+                "class_name": "Mage",
+                "configured_active": true,
+                "public_agent_id": "0",
+                "team_id": 1,
+                "team_local_slot": 0
+              },
+              {
+                "class_id": 2,
+                "class_name": "Warrior",
+                "configured_active": true,
+                "public_agent_id": "1",
+                "team_id": 1,
+                "team_local_slot": 1
+              },
+              {
+                "class_id": 3,
+                "class_name": "Hunter",
+                "configured_active": true,
+                "public_agent_id": "2",
+                "team_id": 1,
+                "team_local_slot": 2
+              },
+              {
+                "class_id": 4,
+                "class_name": "Rogue",
+                "configured_active": true,
+                "public_agent_id": "3",
+                "team_id": 1,
+                "team_local_slot": 3
+              },
+              {
+                "class_id": 5,
+                "class_name": "Priest",
+                "configured_active": true,
+                "public_agent_id": "4",
+                "team_id": 1,
+                "team_local_slot": 4
+              },
+              {
+                "class_id": 1,
+                "class_name": "Mage",
+                "configured_active": true,
+                "public_agent_id": "5",
+                "team_id": 2,
+                "team_local_slot": 0
+              },
+              {
+                "class_id": 2,
+                "class_name": "Warrior",
+                "configured_active": true,
+                "public_agent_id": "6",
+                "team_id": 2,
+                "team_local_slot": 1
+              },
+              {
+                "class_id": 3,
+                "class_name": "Hunter",
+                "configured_active": true,
+                "public_agent_id": "7",
+                "team_id": 2,
+                "team_local_slot": 2
+              },
+              {
+                "class_id": 4,
+                "class_name": "Rogue",
+                "configured_active": true,
+                "public_agent_id": "8",
+                "team_id": 2,
+                "team_local_slot": 3
+              },
+              {
+                "class_id": 5,
+                "class_name": "Priest",
+                "configured_active": true,
+                "public_agent_id": "9",
+                "team_id": 2,
+                "team_local_slot": 4
+              }
+            ]
+          },
+          "latest_transition": null,
+          "pending_inspection": {
+            "draft": {
+              "actor_presentation_key": "oracle_0bfbd49bcfdb4b155a6b261524ac78b97842c8b53a943a4e2fb3ccaad3e67386",
+              "actor_public_agent_id": "0",
+              "current_simulator_step_count": 0,
+              "decision_mask": {
+                "movement_action_display_names": [
+                  "Stay",
+                  "North",
+                  "South",
+                  "East",
+                  "West",
+                  "Northeast",
+                  "Northwest",
+                  "Southeast",
+                  "Southwest"
+                ],
+                "movement_action_mask": [
+                  true,
+                  true,
+                  true,
+                  true,
+                  true,
+                  true,
+                  true,
+                  true,
+                  true
+                ],
+                "owner_presentation_key": "oracle_0bfbd49bcfdb4b155a6b261524ac78b97842c8b53a943a4e2fb3ccaad3e67386",
+                "owner_public_agent_id": "0",
+                "schema_version": 1,
+                "target_action_mask": [
+                  true,
+                  false,
+                  false,
+                  false,
+                  false,
+                  false,
+                  false,
+                  false,
+                  false,
+                  false,
+                  false
+                ],
+                "target_actions": [
+                  {
+                    "display_name": "Target None",
+                    "target_action": 0,
+                    "target_kind": "no_target"
+                  },
+                  {
+                    "display_name": "Ally 0",
+                    "target_action": 1,
+                    "target_kind": "axis_only_authorized_agent",
+                    "target_public_agent_id": "0"
+                  },
+                  {
+                    "display_name": "Ally 1",
+                    "target_action": 2,
+                    "target_kind": "axis_only_authorized_agent",
+                    "target_public_agent_id": "1"
+                  },
+                  {
+                    "display_name": "Ally 2",
+                    "target_action": 3,
+                    "target_kind": "axis_only_authorized_agent",
+                    "target_public_agent_id": "2"
+                  },
+                  {
+                    "display_name": "Ally 3",
+                    "target_action": 4,
+                    "target_kind": "axis_only_authorized_agent",
+                    "target_public_agent_id": "3"
+                  },
+                  {
+                    "display_name": "Ally 4",
+                    "target_action": 5,
+                    "target_kind": "axis_only_authorized_agent",
+                    "target_public_agent_id": "4"
+                  },
+                  {
+                    "display_name": "Enemy 0",
+                    "target_action": 6,
+                    "target_kind": "axis_only_authorized_agent",
+                    "target_public_agent_id": "5"
+                  },
+                  {
+                    "display_name": "Enemy 1",
+                    "target_action": 7,
+                    "target_kind": "axis_only_authorized_agent",
+                    "target_public_agent_id": "6"
+                  },
+                  {
+                    "display_name": "Enemy 2",
+                    "target_action": 8,
+                    "target_kind": "axis_only_authorized_agent",
+                    "target_public_agent_id": "7"
+                  },
+                  {
+                    "display_name": "Enemy 3",
+                    "target_action": 9,
+                    "target_kind": "axis_only_authorized_agent",
+                    "target_public_agent_id": "8"
+                  },
+                  {
+                    "display_name": "Enemy 4",
+                    "target_action": 10,
+                    "target_kind": "axis_only_authorized_agent",
+                    "target_public_agent_id": "9"
+                  }
+                ],
+                "target_use_ultimate_joint_mask": [
+                  [
+                    true,
+                    true
+                  ],
+                  [
+                    false,
+                    false
+                  ],
+                  [
+                    false,
+                    false
+                  ],
+                  [
+                    false,
+                    false
+                  ],
+                  [
+                    false,
+                    false
+                  ],
+                  [
+                    false,
+                    false
+                  ],
+                  [
+                    false,
+                    false
+                  ],
+                  [
+                    false,
+                    false
+                  ],
+                  [
+                    false,
+                    false
+                  ],
+                  [
+                    false,
+                    false
+                  ],
+                  [
+                    false,
+                    false
+                  ]
+                ],
+                "use_ultimate_action_display_names": [
+                  "Do Not Use Ultimate",
+                  "Use Ultimate"
+                ],
+                "use_ultimate_action_mask": [
+                  true,
+                  true
+                ]
+              },
+              "draft_action": {
+                "armed_lane": "none",
+                "move_action": 0,
+                "target_action": 0
+              },
+              "draft_legality": {
+                "armed_lane_is_legal": null,
+                "combat_pair_is_legal": null,
+                "move_action_is_legal": true,
+                "target_action_is_legal": true
+              },
+              "draft_target": {
+                "display_name": "Target None",
+                "target_action": 0,
+                "target_kind": "no_target"
+              },
+              "inspection_kind": "live_draft_action",
+              "schema_version": 1
+            },
+            "inspection_kind": "editable_live_draft",
+            "submission_scope": "joint_turn"
+          },
+          "researcher_space_kind": "global_live_researcher_space",
+          "roster_agents": [
+            {
+              "aura_modifiers": [
+                {
+                  "aura_id": "mage_damage_amplification",
+                  "multiplier": 1.149999976158142
+                },
+                {
+                  "aura_id": "warrior_damage_mitigation",
+                  "multiplier": 0.8500000238418579
+                }
+              ],
+              "class_id": 1,
+              "class_name": "Mage",
+              "current_health": 80.0,
+              "effective_movement_speed": 1.0,
+              "life_state": "alive",
+              "maximum_health": 80.0,
+              "out_of_combat_delay_steps": 5,
+              "presentation_key": "oracle_0bfbd49bcfdb4b155a6b261524ac78b97842c8b53a943a4e2fb3ccaad3e67386",
+              "public_agent_id": "0",
+              "spawn_shield_remaining": 0,
+              "statuses": [],
+              "steps_until_out_of_combat": 0,
+              "team_id": 1,
+              "team_local_slot": 0,
+              "ultimate_cooldown_remaining": 0
+            },
+            {
+              "aura_modifiers": [
+                {
+                  "aura_id": "mage_damage_amplification",
+                  "multiplier": 1.149999976158142
+                },
+                {
+                  "aura_id": "warrior_damage_mitigation",
+                  "multiplier": 0.8500000238418579
+                }
+              ],
+              "class_id": 2,
+              "class_name": "Warrior",
+              "current_health": 200.0,
+              "effective_movement_speed": 1.0,
+              "life_state": "alive",
+              "maximum_health": 200.0,
+              "out_of_combat_delay_steps": 5,
+              "presentation_key": "oracle_33f39c6769a2d75c63169c6bae3a04c12ecad45a161482d840b8fab642addd23",
+              "public_agent_id": "1",
+              "spawn_shield_remaining": 0,
+              "statuses": [],
+              "steps_until_out_of_combat": 0,
+              "team_id": 1,
+              "team_local_slot": 1,
+              "ultimate_cooldown_remaining": 0
+            },
+            {
+              "aura_modifiers": [
+                {
+                  "aura_id": "warrior_damage_mitigation",
+                  "multiplier": 0.8500000238418579
+                }
+              ],
+              "class_id": 3,
+              "class_name": "Hunter",
+              "current_health": 100.0,
+              "effective_movement_speed": 1.0,
+              "life_state": "alive",
+              "maximum_health": 100.0,
+              "out_of_combat_delay_steps": 5,
+              "presentation_key": "oracle_6cd5f3e33ca9df200d731a40c92f9fdb066ee426d217557a27ba7832259bb5e5",
+              "public_agent_id": "2",
+              "spawn_shield_remaining": 0,
+              "statuses": [],
+              "steps_until_out_of_combat": 0,
+              "team_id": 1,
+              "team_local_slot": 2,
+              "ultimate_cooldown_remaining": 0
+            },
+            {
+              "aura_modifiers": [],
+              "class_id": 4,
+              "class_name": "Rogue",
+              "current_health": 100.0,
+              "effective_movement_speed": 1.2999999523162842,
+              "life_state": "alive",
+              "maximum_health": 100.0,
+              "out_of_combat_delay_steps": 3,
+              "presentation_key": "oracle_75d7a919795d919f627cc9e0a30e471439c6526afe391037c49bf0584dc872a1",
+              "public_agent_id": "3",
+              "spawn_shield_remaining": 0,
+              "statuses": [],
+              "steps_until_out_of_combat": 0,
+              "team_id": 1,
+              "team_local_slot": 3,
+              "ultimate_cooldown_remaining": 0
+            },
+            {
+              "aura_modifiers": [],
+              "class_id": 5,
+              "class_name": "Priest",
+              "current_health": 100.0,
+              "effective_movement_speed": 1.0,
+              "life_state": "alive",
+              "maximum_health": 100.0,
+              "out_of_combat_delay_steps": 5,
+              "presentation_key": "oracle_bb14a5396636b3067af77ef1c083b4823203518b17c2069e6fa5e52d51e51979",
+              "public_agent_id": "4",
+              "spawn_shield_remaining": 0,
+              "statuses": [],
+              "steps_until_out_of_combat": 0,
+              "team_id": 1,
+              "team_local_slot": 4,
+              "ultimate_cooldown_remaining": 0
+            },
+            {
+              "aura_modifiers": [
+                {
+                  "aura_id": "mage_damage_amplification",
+                  "multiplier": 1.149999976158142
+                },
+                {
+                  "aura_id": "warrior_damage_mitigation",
+                  "multiplier": 0.8500000238418579
+                }
+              ],
+              "class_id": 1,
+              "class_name": "Mage",
+              "current_health": 80.0,
+              "effective_movement_speed": 1.0,
+              "life_state": "alive",
+              "maximum_health": 80.0,
+              "out_of_combat_delay_steps": 5,
+              "presentation_key": "oracle_15f906977288973cb8fb3f6ed2c504d1f766563f28981baf1504f1c34e5f9d48",
+              "public_agent_id": "5",
+              "spawn_shield_remaining": 0,
+              "statuses": [],
+              "steps_until_out_of_combat": 0,
+              "team_id": 2,
+              "team_local_slot": 0,
+              "ultimate_cooldown_remaining": 0
+            },
+            {
+              "aura_modifiers": [
+                {
+                  "aura_id": "mage_damage_amplification",
+                  "multiplier": 1.149999976158142
+                },
+                {
+                  "aura_id": "warrior_damage_mitigation",
+                  "multiplier": 0.8500000238418579
+                }
+              ],
+              "class_id": 2,
+              "class_name": "Warrior",
+              "current_health": 200.0,
+              "effective_movement_speed": 1.0,
+              "life_state": "alive",
+              "maximum_health": 200.0,
+              "out_of_combat_delay_steps": 5,
+              "presentation_key": "oracle_f74a93b011fcd5e37814134189f2613263fbd522c8a9186528c13b8b1d58928f",
+              "public_agent_id": "6",
+              "spawn_shield_remaining": 0,
+              "statuses": [],
+              "steps_until_out_of_combat": 0,
+              "team_id": 2,
+              "team_local_slot": 1,
+              "ultimate_cooldown_remaining": 0
+            },
+            {
+              "aura_modifiers": [
+                {
+                  "aura_id": "warrior_damage_mitigation",
+                  "multiplier": 0.8500000238418579
+                }
+              ],
+              "class_id": 3,
+              "class_name": "Hunter",
+              "current_health": 100.0,
+              "effective_movement_speed": 1.0,
+              "life_state": "alive",
+              "maximum_health": 100.0,
+              "out_of_combat_delay_steps": 5,
+              "presentation_key": "oracle_d59280f780994cbca72a739f39dd2474c53cfc00ee1c0d06b8bfc52f5e675610",
+              "public_agent_id": "7",
+              "spawn_shield_remaining": 0,
+              "statuses": [],
+              "steps_until_out_of_combat": 0,
+              "team_id": 2,
+              "team_local_slot": 2,
+              "ultimate_cooldown_remaining": 0
+            },
+            {
+              "aura_modifiers": [],
+              "class_id": 4,
+              "class_name": "Rogue",
+              "current_health": 100.0,
+              "effective_movement_speed": 1.2999999523162842,
+              "life_state": "alive",
+              "maximum_health": 100.0,
+              "out_of_combat_delay_steps": 3,
+              "presentation_key": "oracle_08cfeab90607eebf438927f0b46d7f6e1435f3447f090a6fc5ed2adc57a6ee9f",
+              "public_agent_id": "8",
+              "spawn_shield_remaining": 0,
+              "statuses": [],
+              "steps_until_out_of_combat": 0,
+              "team_id": 2,
+              "team_local_slot": 3,
+              "ultimate_cooldown_remaining": 0
+            },
+            {
+              "aura_modifiers": [],
+              "class_id": 5,
+              "class_name": "Priest",
+              "current_health": 100.0,
+              "effective_movement_speed": 1.0,
+              "life_state": "alive",
+              "maximum_health": 100.0,
+              "out_of_combat_delay_steps": 5,
+              "presentation_key": "oracle_a2ad1bc6d84e4cdca026117a1234b9f29697435a563f7a1729f64d41297700aa",
+              "public_agent_id": "9",
+              "spawn_shield_remaining": 0,
+              "statuses": [],
+              "steps_until_out_of_combat": 0,
+              "team_id": 2,
+              "team_local_slot": 4,
+              "ultimate_cooldown_remaining": 0
+            }
+          ],
+          "selected_public_agent_id": "0",
+          "simulator_step_count": 0,
+          "source_authority_epoch": 0,
+          "source_revision": 0,
+          "source_run_generation": 0,
+          "source_session_id": "cp2-7-live-pov-fixture",
+          "technical_frame": {
+            "episode_id": "debugger-episode:5b6184f9ff4549a1c36782a41d15553fdb28f2bb6b2d91bc767b1c473e57380d",
+            "evaluation_frame_index": 0,
+            "incoming_transition_id": null,
+            "simulator_step_count": 0,
+            "technical_kind": "live_oracle_technical_frame"
+          }
+        },
         "schema_version": 1,
         "source": {
           "episode_id": "debugger-episode:5b6184f9ff4549a1c36782a41d15553fdb28f2bb6b2d91bc767b1c473e57380d",
@@ -6923,7 +7688,7 @@
           "source_run_generation": 0,
           "source_session_id": "cp2-7-live-pov-fixture",
           "source_simulator_step_count": 0,
-          "source_submission_scope": "controlled_actor"
+          "source_submission_scope": "joint_turn"
         },
         "technical_frame": {
           "episode_id": "debugger-episode:5b6184f9ff4549a1c36782a41d15553fdb28f2bb6b2d91bc767b1c473e57380d",
@@ -7132,7 +7897,7 @@
               "target_action": 0
             }
           },
-          "pending_submission_scope": "controlled_actor"
+          "pending_submission_scope": "joint_turn"
         },
         "incoming_pov_transition_id": null,
         "preset": "analysis",
@@ -16801,7 +17566,7 @@
         "exact_actor_input_export_available": true,
         "observation_mode": "no_shared_obs",
         "projection_basis": "recipient_own_recorded_observation",
-        "recipient_presentation_key": "pov_9ad2117434675a4f472457c62d4883d4a0768b65688154d9089d3cf1f7e4f883",
+        "recipient_presentation_key": "pov_2922363c63a67d939cb6c38196c7f46d9c393fc06fde27ea86019312bd198013",
         "recipient_public_agent_id": "agent-slot-0"
       },
       "current_endpoint": {
@@ -16845,7 +17610,7 @@
               "move_action": 8
             }
           ],
-          "owner_presentation_key": "pov_9ad2117434675a4f472457c62d4883d4a0768b65688154d9089d3cf1f7e4f883",
+          "owner_presentation_key": "pov_2922363c63a67d939cb6c38196c7f46d9c393fc06fde27ea86019312bd198013",
           "owner_public_agent_id": "agent-slot-0",
           "target_actions": [
             {
@@ -16935,7 +17700,7 @@
             }
           ]
         },
-        "authorized_endpoint_digest_sha256": "f591b4a2da29d9f4aa7daeb7c9661ca5a6bd40f81e5eb61fed572a202c4e8fdd",
+        "authorized_endpoint_digest_sha256": "0cdacd4dc215b22709fae57bb7c8de9499c68bc098b81976707253c401663112",
         "endpoint_kind": "no_shared_obs_authorized_current",
         "parts": {
           "next_decision_action_mask": {
@@ -17016,7 +17781,7 @@
               true
             ]
           },
-          "recipient_presentation_key": "pov_9ad2117434675a4f472457c62d4883d4a0768b65688154d9089d3cf1f7e4f883",
+          "recipient_presentation_key": "pov_2922363c63a67d939cb6c38196c7f46d9c393fc06fde27ea86019312bd198013",
           "recipient_public_agent_id": "agent-slot-0",
           "scene": {
             "agents": [
@@ -17042,7 +17807,7 @@
                   1.5,
                   1.5
                 ],
-                "presentation_key": "pov_9ad2117434675a4f472457c62d4883d4a0768b65688154d9089d3cf1f7e4f883",
+                "presentation_key": "pov_2922363c63a67d939cb6c38196c7f46d9c393fc06fde27ea86019312bd198013",
                 "public_agent_id": "agent-slot-0",
                 "radius": 0.5,
                 "relation": "self",
@@ -17075,7 +17840,7 @@
                   1.5,
                   3.75
                 ],
-                "presentation_key": "pov_9fcc95d012a4683fcc3c9b64ffec939876e625abe341d037d693c67ca848f0b3",
+                "presentation_key": "pov_4384ebef1fd45f6319505b0a0e2e98db40d59938b899421472bf94da7d1e7c18",
                 "public_agent_id": "agent-slot-1",
                 "radius": 0.5,
                 "relation": "ally",
@@ -17118,7 +17883,7 @@
                   1.5,
                   6.0
                 ],
-                "presentation_key": "pov_58339b6533e619fefccb59c8f2f9e850964777f94dd6086524aeb37ece12f42c",
+                "presentation_key": "pov_54ddb4ea3c05433c2f753973612c013385e047b289d6d33bde1f178bcb2ad895",
                 "public_agent_id": "agent-slot-2",
                 "radius": 0.5,
                 "relation": "ally",
@@ -17145,7 +17910,7 @@
                 "source_alive": true,
                 "source_class_id": 1,
                 "source_class_name": "Mage",
-                "source_presentation_key": "pov_9ad2117434675a4f472457c62d4883d4a0768b65688154d9089d3cf1f7e4f883",
+                "source_presentation_key": "pov_2922363c63a67d939cb6c38196c7f46d9c393fc06fde27ea86019312bd198013",
                 "source_public_agent_id": "agent-slot-0",
                 "stacking_rule": "multiply_then_clamp"
               },
@@ -17163,7 +17928,7 @@
                 "source_alive": true,
                 "source_class_id": 2,
                 "source_class_name": "Warrior",
-                "source_presentation_key": "pov_9fcc95d012a4683fcc3c9b64ffec939876e625abe341d037d693c67ca848f0b3",
+                "source_presentation_key": "pov_4384ebef1fd45f6319505b0a0e2e98db40d59938b899421472bf94da7d1e7c18",
                 "source_public_agent_id": "agent-slot-1",
                 "stacking_rule": "multiply_then_clamp"
               }
@@ -17331,7 +18096,7 @@
             "schema_version": 1,
             "spawn_pads": [
               {
-                "assigned_presentation_key": "pov_9ad2117434675a4f472457c62d4883d4a0768b65688154d9089d3cf1f7e4f883",
+                "assigned_presentation_key": "pov_2922363c63a67d939cb6c38196c7f46d9c393fc06fde27ea86019312bd198013",
                 "assigned_public_agent_id": "agent-slot-0",
                 "configured_active": true,
                 "currently_alive": true,
@@ -17344,7 +18109,7 @@
                 "team_local_slot": 0
               },
               {
-                "assigned_presentation_key": "pov_9fcc95d012a4683fcc3c9b64ffec939876e625abe341d037d693c67ca848f0b3",
+                "assigned_presentation_key": "pov_4384ebef1fd45f6319505b0a0e2e98db40d59938b899421472bf94da7d1e7c18",
                 "assigned_public_agent_id": "agent-slot-1",
                 "configured_active": true,
                 "currently_alive": true,
@@ -17357,7 +18122,7 @@
                 "team_local_slot": 1
               },
               {
-                "assigned_presentation_key": "pov_58339b6533e619fefccb59c8f2f9e850964777f94dd6086524aeb37ece12f42c",
+                "assigned_presentation_key": "pov_54ddb4ea3c05433c2f753973612c013385e047b289d6d33bde1f178bcb2ad895",
                 "assigned_public_agent_id": "agent-slot-2",
                 "configured_active": true,
                 "currently_alive": true,
@@ -17491,7 +18256,7 @@
             "pov_transition_id": "episode-001:actor-pov:agent-slot-0:transition:0"
           },
           {
-            "agent_presentation_key": "pov_9fcc95d012a4683fcc3c9b64ffec939876e625abe341d037d693c67ca848f0b3",
+            "agent_presentation_key": "pov_4384ebef1fd45f6319505b0a0e2e98db40d59938b899421472bf94da7d1e7c18",
             "agent_public_agent_id": "agent-slot-1",
             "cue_id": "episode-001:actor-pov:agent-slot-0:transition:0:cue:1",
             "cue_type": "visible_body_observation_changed",
@@ -17521,7 +18286,7 @@
                 1.5,
                 3.75
               ],
-              "presentation_key": "pov_9fcc95d012a4683fcc3c9b64ffec939876e625abe341d037d693c67ca848f0b3",
+              "presentation_key": "pov_4384ebef1fd45f6319505b0a0e2e98db40d59938b899421472bf94da7d1e7c18",
               "public_agent_id": "agent-slot-1",
               "radius": 0.5,
               "relation": "ally",
@@ -17554,7 +18319,7 @@
                 1.5,
                 3.75
               ],
-              "presentation_key": "pov_9fcc95d012a4683fcc3c9b64ffec939876e625abe341d037d693c67ca848f0b3",
+              "presentation_key": "pov_4384ebef1fd45f6319505b0a0e2e98db40d59938b899421472bf94da7d1e7c18",
               "public_agent_id": "agent-slot-1",
               "radius": 0.5,
               "relation": "ally",
@@ -17585,7 +18350,7 @@
         "incoming_successor_recipient_frame_id": "episode-001:actor-pov:agent-slot-0:frame:1",
         "incoming_successor_simulator_step_count": 1,
         "incoming_transition_index": 0,
-        "recipient_presentation_key": "pov_9ad2117434675a4f472457c62d4883d4a0768b65688154d9089d3cf1f7e4f883",
+        "recipient_presentation_key": "pov_2922363c63a67d939cb6c38196c7f46d9c393fc06fde27ea86019312bd198013",
         "recipient_public_agent_id": "agent-slot-0",
         "schema_version": 1,
         "source_episode_id": "episode-001",
@@ -17599,7 +18364,7 @@
               "target_action": 0,
               "use_ultimate_action": 0
             },
-            "actor_presentation_key": "pov_9ad2117434675a4f472457c62d4883d4a0768b65688154d9089d3cf1f7e4f883",
+            "actor_presentation_key": "pov_2922363c63a67d939cb6c38196c7f46d9c393fc06fde27ea86019312bd198013",
             "actor_public_agent_id": "agent-slot-0",
             "submitted_action": {
               "move_action": 0,
@@ -17628,7 +18393,7 @@
         "incoming_successor_simulator_step_count": 1,
         "incoming_transition_id": "episode-001:actor-pov:agent-slot-0:transition:0",
         "incoming_transition_index": 0,
-        "recipient_presentation_key": "pov_9ad2117434675a4f472457c62d4883d4a0768b65688154d9089d3cf1f7e4f883",
+        "recipient_presentation_key": "pov_2922363c63a67d939cb6c38196c7f46d9c393fc06fde27ea86019312bd198013",
         "recipient_public_agent_id": "agent-slot-0",
         "transition_kind": "no_shared_obs_incoming_submitted_accepted"
       },
@@ -17641,7 +18406,7 @@
               1.5,
               1.5
             ],
-            "actor_presentation_key": "pov_9ad2117434675a4f472457c62d4883d4a0768b65688154d9089d3cf1f7e4f883",
+            "actor_presentation_key": "pov_2922363c63a67d939cb6c38196c7f46d9c393fc06fde27ea86019312bd198013",
             "actor_public_agent_id": "agent-slot-0",
             "current_simulator_step_count": 1,
             "decision_mask": {
@@ -17667,7 +18432,7 @@
                 true,
                 true
               ],
-              "owner_presentation_key": "pov_9ad2117434675a4f472457c62d4883d4a0768b65688154d9089d3cf1f7e4f883",
+              "owner_presentation_key": "pov_2922363c63a67d939cb6c38196c7f46d9c393fc06fde27ea86019312bd198013",
               "owner_public_agent_id": "agent-slot-0",
               "schema_version": 1,
               "target_action_mask": [
@@ -17697,7 +18462,7 @@
                     1.5
                   ],
                   "target_kind": "visible_authorized_agent",
-                  "target_presentation_key": "pov_9ad2117434675a4f472457c62d4883d4a0768b65688154d9089d3cf1f7e4f883",
+                  "target_presentation_key": "pov_2922363c63a67d939cb6c38196c7f46d9c393fc06fde27ea86019312bd198013",
                   "target_public_agent_id": "agent-slot-0"
                 },
                 {
@@ -17708,7 +18473,7 @@
                     3.75
                   ],
                   "target_kind": "visible_authorized_agent",
-                  "target_presentation_key": "pov_9fcc95d012a4683fcc3c9b64ffec939876e625abe341d037d693c67ca848f0b3",
+                  "target_presentation_key": "pov_4384ebef1fd45f6319505b0a0e2e98db40d59938b899421472bf94da7d1e7c18",
                   "target_public_agent_id": "agent-slot-1"
                 },
                 {
@@ -17719,7 +18484,7 @@
                     6.0
                   ],
                   "target_kind": "visible_authorized_agent",
-                  "target_presentation_key": "pov_58339b6533e619fefccb59c8f2f9e850964777f94dd6086524aeb37ece12f42c",
+                  "target_presentation_key": "pov_54ddb4ea3c05433c2f753973612c013385e047b289d6d33bde1f178bcb2ad895",
                   "target_public_agent_id": "agent-slot-2"
                 },
                 {
@@ -17841,7 +18606,7 @@
             "schema_version": 1
           },
           "inspection_kind": "editable_live_draft",
-          "submission_scope": "controlled_actor"
+          "submission_scope": "joint_turn"
         },
         "source_authority_epoch": 1,
         "source_frame_index": 1,
@@ -17849,25 +18614,830 @@
         "source_recipient_public_agent_id": "agent-slot-0",
         "source_revision": 1,
         "source_run_generation": 0,
-        "source_session_id": "cp2-5-b-live-no-shared",
+        "source_session_id": "cp2-5-b-oracle",
         "source_simulator_step_count": 1
       },
       "presentation_kind": "live_no_shared_obs_agent_pov",
       "product_kind": "combat_debugger",
+      "researcher_space": {
+        "class_mechanics": [
+          {
+            "aura_mechanics": [
+              {
+                "aura_id": "mage_damage_amplification",
+                "clamp_kind": "ceiling",
+                "clamp_value": 1.3224999999999998,
+                "per_emitter_multiplier": 1.15,
+                "radius": 2.0,
+                "stacking_rule": "multiply_then_clamp"
+              }
+            ],
+            "base_movement_speed": 1.0,
+            "basic_interaction_radius": 3.0,
+            "basic_raw_damage": 13.0,
+            "basic_raw_healing": 0.0,
+            "basic_target_mode": "enemy",
+            "body_radius": 0.5,
+            "class_id": 1,
+            "class_name": "Mage",
+            "documentation_profile": {
+              "availability_kind": "available",
+              "profile_id": "marl_battlegrounds.class_documentation.canonical_v1"
+            },
+            "maximum_health": 80.0,
+            "mechanics_version": 2,
+            "observation_radius": 6.0,
+            "out_of_combat_delay_steps": 5,
+            "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033,
+            "status_mechanics": [
+              {
+                "breaks_on_positive_damage": false,
+                "duration_steps": 5,
+                "family": "damage_amplification",
+                "magnitude": 1.5,
+                "magnitude_kind": "damage_multiplier",
+                "source_action_component": "ultimate",
+                "status_channel": 7,
+                "status_id": "mage_burst_damage_amplification"
+              }
+            ],
+            "ultimate_cooldown_steps": 30,
+            "ultimate_interaction_radius": 0.0,
+            "ultimate_raw_damage": 0.0,
+            "ultimate_raw_healing": 0.0,
+            "ultimate_target_mode": "target_none"
+          },
+          {
+            "aura_mechanics": [
+              {
+                "aura_id": "warrior_damage_mitigation",
+                "clamp_kind": "floor",
+                "clamp_value": 0.7224999999999999,
+                "per_emitter_multiplier": 0.85,
+                "radius": 2.0,
+                "stacking_rule": "multiply_then_clamp"
+              }
+            ],
+            "base_movement_speed": 1.0,
+            "basic_interaction_radius": 1.5,
+            "basic_raw_damage": 8.0,
+            "basic_raw_healing": 0.0,
+            "basic_target_mode": "enemy",
+            "body_radius": 0.5,
+            "class_id": 2,
+            "class_name": "Warrior",
+            "documentation_profile": {
+              "availability_kind": "available",
+              "profile_id": "marl_battlegrounds.class_documentation.canonical_v1"
+            },
+            "maximum_health": 200.0,
+            "mechanics_version": 2,
+            "observation_radius": 6.0,
+            "out_of_combat_delay_steps": 5,
+            "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033,
+            "status_mechanics": [
+              {
+                "breaks_on_positive_damage": false,
+                "duration_steps": 5,
+                "family": "slow",
+                "magnitude": 0.5,
+                "magnitude_kind": "movement_multiplier",
+                "source_action_component": "ultimate",
+                "status_channel": 0,
+                "status_id": "warrior_charge_slow"
+              },
+              {
+                "breaks_on_positive_damage": false,
+                "duration_steps": 1,
+                "family": "stun",
+                "magnitude": null,
+                "magnitude_kind": "none",
+                "source_action_component": "ultimate",
+                "status_channel": 3,
+                "status_id": "warrior_charge_stun"
+              }
+            ],
+            "ultimate_cooldown_steps": 30,
+            "ultimate_interaction_radius": 5.75,
+            "ultimate_raw_damage": 20.0,
+            "ultimate_raw_healing": 0.0,
+            "ultimate_target_mode": "enemy"
+          },
+          {
+            "aura_mechanics": [],
+            "base_movement_speed": 1.0,
+            "basic_interaction_radius": 3.5,
+            "basic_raw_damage": 6.0,
+            "basic_raw_healing": 0.0,
+            "basic_target_mode": "enemy",
+            "body_radius": 0.5,
+            "class_id": 3,
+            "class_name": "Hunter",
+            "documentation_profile": {
+              "availability_kind": "available",
+              "profile_id": "marl_battlegrounds.class_documentation.canonical_v1"
+            },
+            "maximum_health": 100.0,
+            "mechanics_version": 2,
+            "observation_radius": 6.5,
+            "out_of_combat_delay_steps": 5,
+            "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033,
+            "status_mechanics": [
+              {
+                "breaks_on_positive_damage": false,
+                "duration_steps": 1,
+                "family": "slow",
+                "magnitude": 0.85,
+                "magnitude_kind": "movement_multiplier",
+                "source_action_component": "basic",
+                "status_channel": 1,
+                "status_id": "hunter_basic_slow"
+              },
+              {
+                "breaks_on_positive_damage": true,
+                "duration_steps": 4,
+                "family": "stun",
+                "magnitude": null,
+                "magnitude_kind": "none",
+                "source_action_component": "ultimate",
+                "status_channel": 4,
+                "status_id": "hunter_trap_stun"
+              }
+            ],
+            "ultimate_cooldown_steps": 30,
+            "ultimate_interaction_radius": 3.0,
+            "ultimate_raw_damage": 10.0,
+            "ultimate_raw_healing": 0.0,
+            "ultimate_target_mode": "enemy"
+          },
+          {
+            "aura_mechanics": [],
+            "base_movement_speed": 1.2999999523162842,
+            "basic_interaction_radius": 1.5,
+            "basic_raw_damage": 12.0,
+            "basic_raw_healing": 0.0,
+            "basic_target_mode": "enemy",
+            "body_radius": 0.5,
+            "class_id": 4,
+            "class_name": "Rogue",
+            "documentation_profile": {
+              "availability_kind": "available",
+              "profile_id": "marl_battlegrounds.class_documentation.canonical_v1"
+            },
+            "maximum_health": 100.0,
+            "mechanics_version": 2,
+            "observation_radius": 6.0,
+            "out_of_combat_delay_steps": 3,
+            "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033,
+            "status_mechanics": [
+              {
+                "breaks_on_positive_damage": false,
+                "duration_steps": 5,
+                "family": "slow",
+                "magnitude": 0.5,
+                "magnitude_kind": "movement_multiplier",
+                "source_action_component": "ultimate",
+                "status_channel": 2,
+                "status_id": "rogue_poison_slow"
+              },
+              {
+                "breaks_on_positive_damage": false,
+                "duration_steps": 1,
+                "family": "stun",
+                "magnitude": null,
+                "magnitude_kind": "none",
+                "source_action_component": "ultimate",
+                "status_channel": 5,
+                "status_id": "rogue_poison_stun"
+              },
+              {
+                "breaks_on_positive_damage": false,
+                "duration_steps": 4,
+                "family": "anti_heal",
+                "magnitude": 0.5,
+                "magnitude_kind": "healing_multiplier",
+                "source_action_component": "ultimate",
+                "status_channel": 6,
+                "status_id": "rogue_poison_anti_heal"
+              }
+            ],
+            "ultimate_cooldown_steps": 30,
+            "ultimate_interaction_radius": 1.5,
+            "ultimate_raw_damage": 36.0,
+            "ultimate_raw_healing": 0.0,
+            "ultimate_target_mode": "enemy"
+          },
+          {
+            "aura_mechanics": [],
+            "base_movement_speed": 1.0,
+            "basic_interaction_radius": 3.0,
+            "basic_raw_damage": 0.0,
+            "basic_raw_healing": 8.0,
+            "basic_target_mode": "ally",
+            "body_radius": 0.5,
+            "class_id": 5,
+            "class_name": "Priest",
+            "documentation_profile": {
+              "availability_kind": "available",
+              "profile_id": "marl_battlegrounds.class_documentation.canonical_v1"
+            },
+            "maximum_health": 100.0,
+            "mechanics_version": 2,
+            "observation_radius": 6.0,
+            "out_of_combat_delay_steps": 5,
+            "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033,
+            "status_mechanics": [
+              {
+                "breaks_on_positive_damage": false,
+                "duration_steps": 1,
+                "family": "movement_floor",
+                "magnitude": 0.85,
+                "magnitude_kind": "movement_floor",
+                "source_action_component": "basic",
+                "status_channel": 8,
+                "status_id": "priest_blessing_of_freedom_movement_floor"
+              }
+            ],
+            "ultimate_cooldown_steps": 30,
+            "ultimate_interaction_radius": 5.75,
+            "ultimate_raw_damage": 0.0,
+            "ultimate_raw_healing": 200.0,
+            "ultimate_target_mode": "ally"
+          }
+        ],
+        "episode_id": "episode-001",
+        "frame_index": 1,
+        "identity_directory": {
+          "directory_kind": "oracle_public_identity_directory",
+          "identities": [
+            {
+              "class_id": 1,
+              "class_name": "Mage",
+              "configured_active": true,
+              "public_agent_id": "agent-slot-0",
+              "team_id": 1,
+              "team_local_slot": 0
+            },
+            {
+              "class_id": 2,
+              "class_name": "Warrior",
+              "configured_active": true,
+              "public_agent_id": "agent-slot-1",
+              "team_id": 1,
+              "team_local_slot": 1
+            },
+            {
+              "class_id": 5,
+              "class_name": "Priest",
+              "configured_active": true,
+              "public_agent_id": "agent-slot-2",
+              "team_id": 1,
+              "team_local_slot": 2
+            },
+            {
+              "class_id": null,
+              "class_name": null,
+              "configured_active": false,
+              "public_agent_id": "agent-slot-3",
+              "team_id": 1,
+              "team_local_slot": 3
+            },
+            {
+              "class_id": null,
+              "class_name": null,
+              "configured_active": false,
+              "public_agent_id": "agent-slot-4",
+              "team_id": 1,
+              "team_local_slot": 4
+            },
+            {
+              "class_id": 3,
+              "class_name": "Hunter",
+              "configured_active": true,
+              "public_agent_id": "agent-slot-5",
+              "team_id": 2,
+              "team_local_slot": 0
+            },
+            {
+              "class_id": 4,
+              "class_name": "Rogue",
+              "configured_active": true,
+              "public_agent_id": "agent-slot-6",
+              "team_id": 2,
+              "team_local_slot": 1
+            },
+            {
+              "class_id": null,
+              "class_name": null,
+              "configured_active": false,
+              "public_agent_id": "agent-slot-7",
+              "team_id": 2,
+              "team_local_slot": 2
+            },
+            {
+              "class_id": null,
+              "class_name": null,
+              "configured_active": false,
+              "public_agent_id": "agent-slot-8",
+              "team_id": 2,
+              "team_local_slot": 3
+            },
+            {
+              "class_id": null,
+              "class_name": null,
+              "configured_active": false,
+              "public_agent_id": "agent-slot-9",
+              "team_id": 2,
+              "team_local_slot": 4
+            }
+          ]
+        },
+        "latest_transition": {
+          "action_rows": [
+            {
+              "accepted_action": {
+                "move_action": 0,
+                "target_action": 0,
+                "use_ultimate_action": 0
+              },
+              "actor_presentation_key": "oracle_15cf626b6e52faa32328cf1e6f9eb2ce6c89fe8e487bd17f4583fd6a592d81fd",
+              "actor_public_agent_id": "agent-slot-0",
+              "submitted_action": {
+                "move_action": 0,
+                "target_action": 0,
+                "use_ultimate_action": 0
+              },
+              "target_action_recipient_public_agent_id_by_id": [
+                null,
+                "agent-slot-0",
+                "agent-slot-1",
+                "agent-slot-2",
+                "agent-slot-3",
+                "agent-slot-4",
+                "agent-slot-5",
+                "agent-slot-6",
+                "agent-slot-7",
+                "agent-slot-8",
+                "agent-slot-9"
+              ]
+            },
+            {
+              "accepted_action": {
+                "move_action": 0,
+                "target_action": 0,
+                "use_ultimate_action": 0
+              },
+              "actor_presentation_key": "oracle_a60e0df75a5f09d66101713ed0bc1d1fa2b062cbbe41526a5a2d15dfa1a9ccc7",
+              "actor_public_agent_id": "agent-slot-1",
+              "submitted_action": {
+                "move_action": 0,
+                "target_action": 0,
+                "use_ultimate_action": 0
+              },
+              "target_action_recipient_public_agent_id_by_id": [
+                null,
+                "agent-slot-0",
+                "agent-slot-1",
+                "agent-slot-2",
+                "agent-slot-3",
+                "agent-slot-4",
+                "agent-slot-5",
+                "agent-slot-6",
+                "agent-slot-7",
+                "agent-slot-8",
+                "agent-slot-9"
+              ]
+            },
+            {
+              "accepted_action": {
+                "move_action": 0,
+                "target_action": 2,
+                "use_ultimate_action": 0
+              },
+              "actor_presentation_key": "oracle_bbf97bc0a6de8621603ce30ad21e22e980cb83a554ffb28f62880b2ef07767dd",
+              "actor_public_agent_id": "agent-slot-2",
+              "submitted_action": {
+                "move_action": 0,
+                "target_action": 2,
+                "use_ultimate_action": 0
+              },
+              "target_action_recipient_public_agent_id_by_id": [
+                null,
+                "agent-slot-0",
+                "agent-slot-1",
+                "agent-slot-2",
+                "agent-slot-3",
+                "agent-slot-4",
+                "agent-slot-5",
+                "agent-slot-6",
+                "agent-slot-7",
+                "agent-slot-8",
+                "agent-slot-9"
+              ]
+            },
+            {
+              "accepted_action": {
+                "move_action": 0,
+                "target_action": 0,
+                "use_ultimate_action": 0
+              },
+              "actor_presentation_key": "oracle_cd6dfec8f11f0c584a8a61e3cf37e55312a6df51a5885f5d8758501d51e7f570",
+              "actor_public_agent_id": "agent-slot-5",
+              "submitted_action": {
+                "move_action": 0,
+                "target_action": 0,
+                "use_ultimate_action": 0
+              },
+              "target_action_recipient_public_agent_id_by_id": [
+                null,
+                "agent-slot-5",
+                "agent-slot-6",
+                "agent-slot-7",
+                "agent-slot-8",
+                "agent-slot-9",
+                "agent-slot-0",
+                "agent-slot-1",
+                "agent-slot-2",
+                "agent-slot-3",
+                "agent-slot-4"
+              ]
+            },
+            {
+              "accepted_action": {
+                "move_action": 0,
+                "target_action": 0,
+                "use_ultimate_action": 0
+              },
+              "actor_presentation_key": "oracle_1a9ca9e0cb149802c7fbd3cfd7d83ceb11f880da525da1b2dca4722d75717f00",
+              "actor_public_agent_id": "agent-slot-6",
+              "submitted_action": {
+                "move_action": 0,
+                "target_action": 0,
+                "use_ultimate_action": 0
+              },
+              "target_action_recipient_public_agent_id_by_id": [
+                null,
+                "agent-slot-5",
+                "agent-slot-6",
+                "agent-slot-7",
+                "agent-slot-8",
+                "agent-slot-9",
+                "agent-slot-0",
+                "agent-slot-1",
+                "agent-slot-2",
+                "agent-slot-3",
+                "agent-slot-4"
+              ]
+            }
+          ],
+          "episode_id": "episode-001",
+          "incoming_start_frame_id": "episode-001:frame:0",
+          "incoming_start_simulator_step_count": 0,
+          "incoming_successor_frame_id": "episode-001:frame:1",
+          "incoming_successor_simulator_step_count": 1,
+          "incoming_transition_id": "episode-001:transition:0",
+          "incoming_transition_index": 0,
+          "transition_kind": "oracle_incoming_submitted_accepted"
+        },
+        "pending_inspection": {
+          "draft": {
+            "actor_presentation_key": "oracle_15cf626b6e52faa32328cf1e6f9eb2ce6c89fe8e487bd17f4583fd6a592d81fd",
+            "actor_public_agent_id": "agent-slot-0",
+            "current_simulator_step_count": 1,
+            "decision_mask": {
+              "movement_action_display_names": [
+                "Stay",
+                "North",
+                "South",
+                "East",
+                "West",
+                "Northeast",
+                "Northwest",
+                "Southeast",
+                "Southwest"
+              ],
+              "movement_action_mask": [
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true
+              ],
+              "owner_presentation_key": "oracle_15cf626b6e52faa32328cf1e6f9eb2ce6c89fe8e487bd17f4583fd6a592d81fd",
+              "owner_public_agent_id": "agent-slot-0",
+              "schema_version": 1,
+              "target_action_mask": [
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "target_actions": [
+                {
+                  "display_name": "Target None",
+                  "target_action": 0,
+                  "target_kind": "no_target"
+                },
+                {
+                  "display_name": "Ally 0",
+                  "target_action": 1,
+                  "target_kind": "axis_only_authorized_agent",
+                  "target_public_agent_id": "agent-slot-0"
+                },
+                {
+                  "display_name": "Ally 1",
+                  "target_action": 2,
+                  "target_kind": "axis_only_authorized_agent",
+                  "target_public_agent_id": "agent-slot-1"
+                },
+                {
+                  "display_name": "Ally 2",
+                  "target_action": 3,
+                  "target_kind": "axis_only_authorized_agent",
+                  "target_public_agent_id": "agent-slot-2"
+                },
+                {
+                  "display_name": "Ally 3",
+                  "target_action": 4,
+                  "target_kind": "axis_only_authorized_agent",
+                  "target_public_agent_id": "agent-slot-3"
+                },
+                {
+                  "display_name": "Ally 4",
+                  "target_action": 5,
+                  "target_kind": "axis_only_authorized_agent",
+                  "target_public_agent_id": "agent-slot-4"
+                },
+                {
+                  "display_name": "Enemy 0",
+                  "target_action": 6,
+                  "target_kind": "axis_only_authorized_agent",
+                  "target_public_agent_id": "agent-slot-5"
+                },
+                {
+                  "display_name": "Enemy 1",
+                  "target_action": 7,
+                  "target_kind": "axis_only_authorized_agent",
+                  "target_public_agent_id": "agent-slot-6"
+                },
+                {
+                  "display_name": "Enemy 2",
+                  "target_action": 8,
+                  "target_kind": "axis_only_authorized_agent",
+                  "target_public_agent_id": "agent-slot-7"
+                },
+                {
+                  "display_name": "Enemy 3",
+                  "target_action": 9,
+                  "target_kind": "axis_only_authorized_agent",
+                  "target_public_agent_id": "agent-slot-8"
+                },
+                {
+                  "display_name": "Enemy 4",
+                  "target_action": 10,
+                  "target_kind": "axis_only_authorized_agent",
+                  "target_public_agent_id": "agent-slot-9"
+                }
+              ],
+              "target_use_ultimate_joint_mask": [
+                [
+                  true,
+                  true
+                ],
+                [
+                  false,
+                  false
+                ],
+                [
+                  false,
+                  false
+                ],
+                [
+                  false,
+                  false
+                ],
+                [
+                  false,
+                  false
+                ],
+                [
+                  false,
+                  false
+                ],
+                [
+                  false,
+                  false
+                ],
+                [
+                  false,
+                  false
+                ],
+                [
+                  false,
+                  false
+                ],
+                [
+                  false,
+                  false
+                ],
+                [
+                  false,
+                  false
+                ]
+              ],
+              "use_ultimate_action_display_names": [
+                "Do Not Use Ultimate",
+                "Use Ultimate"
+              ],
+              "use_ultimate_action_mask": [
+                true,
+                true
+              ]
+            },
+            "draft_action": {
+              "armed_lane": "none",
+              "move_action": 0,
+              "target_action": 0
+            },
+            "draft_legality": {
+              "armed_lane_is_legal": null,
+              "combat_pair_is_legal": null,
+              "move_action_is_legal": true,
+              "target_action_is_legal": true
+            },
+            "draft_target": {
+              "display_name": "Target None",
+              "target_action": 0,
+              "target_kind": "no_target"
+            },
+            "inspection_kind": "live_draft_action",
+            "schema_version": 1
+          },
+          "inspection_kind": "editable_live_draft",
+          "submission_scope": "joint_turn"
+        },
+        "researcher_space_kind": "global_live_researcher_space",
+        "roster_agents": [
+          {
+            "aura_modifiers": [
+              {
+                "aura_id": "mage_damage_amplification",
+                "multiplier": 1.149999976158142
+              }
+            ],
+            "class_id": 1,
+            "class_name": "Mage",
+            "current_health": 80.0,
+            "effective_movement_speed": 1.0,
+            "life_state": "alive",
+            "maximum_health": 80.0,
+            "out_of_combat_delay_steps": 5,
+            "presentation_key": "oracle_15cf626b6e52faa32328cf1e6f9eb2ce6c89fe8e487bd17f4583fd6a592d81fd",
+            "public_agent_id": "agent-slot-0",
+            "spawn_shield_remaining": 0,
+            "statuses": [],
+            "steps_until_out_of_combat": 0,
+            "team_id": 1,
+            "team_local_slot": 0,
+            "ultimate_cooldown_remaining": 0
+          },
+          {
+            "aura_modifiers": [
+              {
+                "aura_id": "warrior_damage_mitigation",
+                "multiplier": 0.8500000238418579
+              }
+            ],
+            "class_id": 2,
+            "class_name": "Warrior",
+            "current_health": 200.0,
+            "effective_movement_speed": 1.0,
+            "life_state": "alive",
+            "maximum_health": 200.0,
+            "out_of_combat_delay_steps": 5,
+            "presentation_key": "oracle_a60e0df75a5f09d66101713ed0bc1d1fa2b062cbbe41526a5a2d15dfa1a9ccc7",
+            "public_agent_id": "agent-slot-1",
+            "spawn_shield_remaining": 0,
+            "statuses": [
+              {
+                "breaks_on_positive_damage": false,
+                "configured_duration_steps": 1,
+                "direct_sources": [
+                  {
+                    "source_presentation_key": "oracle_bbf97bc0a6de8621603ce30ad21e22e980cb83a554ffb28f62880b2ef07767dd",
+                    "source_public_agent_id": "agent-slot-2"
+                  }
+                ],
+                "family": "movement_floor",
+                "magnitude": 0.85,
+                "magnitude_kind": "movement_floor",
+                "remaining_duration": 1,
+                "source_action_component": "basic",
+                "source_class_id": 5,
+                "source_class_name": "Priest",
+                "status_channel": 8,
+                "status_id": "priest_blessing_of_freedom_movement_floor"
+              }
+            ],
+            "steps_until_out_of_combat": 0,
+            "team_id": 1,
+            "team_local_slot": 1,
+            "ultimate_cooldown_remaining": 0
+          },
+          {
+            "aura_modifiers": [],
+            "class_id": 5,
+            "class_name": "Priest",
+            "current_health": 100.0,
+            "effective_movement_speed": 1.0,
+            "life_state": "alive",
+            "maximum_health": 100.0,
+            "out_of_combat_delay_steps": 5,
+            "presentation_key": "oracle_bbf97bc0a6de8621603ce30ad21e22e980cb83a554ffb28f62880b2ef07767dd",
+            "public_agent_id": "agent-slot-2",
+            "spawn_shield_remaining": 0,
+            "statuses": [],
+            "steps_until_out_of_combat": 0,
+            "team_id": 1,
+            "team_local_slot": 2,
+            "ultimate_cooldown_remaining": 0
+          },
+          {
+            "aura_modifiers": [],
+            "class_id": 3,
+            "class_name": "Hunter",
+            "current_health": 100.0,
+            "effective_movement_speed": 1.0,
+            "life_state": "alive",
+            "maximum_health": 100.0,
+            "out_of_combat_delay_steps": 5,
+            "presentation_key": "oracle_cd6dfec8f11f0c584a8a61e3cf37e55312a6df51a5885f5d8758501d51e7f570",
+            "public_agent_id": "agent-slot-5",
+            "spawn_shield_remaining": 0,
+            "statuses": [],
+            "steps_until_out_of_combat": 0,
+            "team_id": 2,
+            "team_local_slot": 0,
+            "ultimate_cooldown_remaining": 0
+          },
+          {
+            "aura_modifiers": [],
+            "class_id": 4,
+            "class_name": "Rogue",
+            "current_health": 100.0,
+            "effective_movement_speed": 1.2999999523162842,
+            "life_state": "alive",
+            "maximum_health": 100.0,
+            "out_of_combat_delay_steps": 3,
+            "presentation_key": "oracle_1a9ca9e0cb149802c7fbd3cfd7d83ceb11f880da525da1b2dca4722d75717f00",
+            "public_agent_id": "agent-slot-6",
+            "spawn_shield_remaining": 0,
+            "statuses": [],
+            "steps_until_out_of_combat": 0,
+            "team_id": 2,
+            "team_local_slot": 1,
+            "ultimate_cooldown_remaining": 0
+          }
+        ],
+        "selected_public_agent_id": "agent-slot-0",
+        "simulator_step_count": 1,
+        "source_authority_epoch": 1,
+        "source_revision": 1,
+        "source_run_generation": 0,
+        "source_session_id": "cp2-5-b-oracle",
+        "technical_frame": {
+          "episode_id": "episode-001",
+          "evaluation_frame_index": 1,
+          "incoming_transition_id": "episode-001:transition:0",
+          "simulator_step_count": 1,
+          "technical_kind": "live_oracle_technical_frame"
+        }
+      },
       "schema_version": 1,
       "source": {
         "episode_id": "episode-001",
         "source_authority_epoch": 1,
-        "source_authorized_endpoint_digest_sha256": "f591b4a2da29d9f4aa7daeb7c9661ca5a6bd40f81e5eb61fed572a202c4e8fdd",
+        "source_authorized_endpoint_digest_sha256": "0cdacd4dc215b22709fae57bb7c8de9499c68bc098b81976707253c401663112",
         "source_frame_index": 1,
         "source_kind": "live_no_shared_obs_frame",
         "source_recipient_frame_id": "episode-001:actor-pov:agent-slot-0:frame:1",
         "source_recipient_public_agent_id": "agent-slot-0",
         "source_revision": 1,
         "source_run_generation": 0,
-        "source_session_id": "cp2-5-b-live-no-shared",
+        "source_session_id": "cp2-5-b-oracle",
         "source_simulator_step_count": 1,
-        "source_submission_scope": "controlled_actor"
+        "source_submission_scope": "joint_turn"
       },
       "technical_frame": {
         "episode_id": "episode-001",
@@ -17880,7 +19450,7 @@
         "agent_phase_trajectories": [
           {
             "agent_class_id": 1,
-            "agent_presentation_key": "pov_9ad2117434675a4f472457c62d4883d4a0768b65688154d9089d3cf1f7e4f883",
+            "agent_presentation_key": "pov_2922363c63a67d939cb6c38196c7f46d9c393fc06fde27ea86019312bd198013",
             "agent_public_agent_id": "agent-slot-0",
             "successor": {
               "phase": "successor",
@@ -17888,7 +19458,7 @@
                 1.5,
                 1.5
               ],
-              "presentation_key": "pov_9ad2117434675a4f472457c62d4883d4a0768b65688154d9089d3cf1f7e4f883",
+              "presentation_key": "pov_2922363c63a67d939cb6c38196c7f46d9c393fc06fde27ea86019312bd198013",
               "public_agent_id": "agent-slot-0"
             },
             "transition_start": {
@@ -17897,13 +19467,13 @@
                 1.5,
                 1.5
               ],
-              "presentation_key": "pov_9ad2117434675a4f472457c62d4883d4a0768b65688154d9089d3cf1f7e4f883",
+              "presentation_key": "pov_2922363c63a67d939cb6c38196c7f46d9c393fc06fde27ea86019312bd198013",
               "public_agent_id": "agent-slot-0"
             }
           },
           {
             "agent_class_id": 2,
-            "agent_presentation_key": "pov_9fcc95d012a4683fcc3c9b64ffec939876e625abe341d037d693c67ca848f0b3",
+            "agent_presentation_key": "pov_4384ebef1fd45f6319505b0a0e2e98db40d59938b899421472bf94da7d1e7c18",
             "agent_public_agent_id": "agent-slot-1",
             "successor": {
               "phase": "successor",
@@ -17911,7 +19481,7 @@
                 1.5,
                 3.75
               ],
-              "presentation_key": "pov_9fcc95d012a4683fcc3c9b64ffec939876e625abe341d037d693c67ca848f0b3",
+              "presentation_key": "pov_4384ebef1fd45f6319505b0a0e2e98db40d59938b899421472bf94da7d1e7c18",
               "public_agent_id": "agent-slot-1"
             },
             "transition_start": {
@@ -17920,13 +19490,13 @@
                 1.5,
                 3.75
               ],
-              "presentation_key": "pov_9fcc95d012a4683fcc3c9b64ffec939876e625abe341d037d693c67ca848f0b3",
+              "presentation_key": "pov_4384ebef1fd45f6319505b0a0e2e98db40d59938b899421472bf94da7d1e7c18",
               "public_agent_id": "agent-slot-1"
             }
           },
           {
             "agent_class_id": 5,
-            "agent_presentation_key": "pov_58339b6533e619fefccb59c8f2f9e850964777f94dd6086524aeb37ece12f42c",
+            "agent_presentation_key": "pov_54ddb4ea3c05433c2f753973612c013385e047b289d6d33bde1f178bcb2ad895",
             "agent_public_agent_id": "agent-slot-2",
             "successor": {
               "phase": "successor",
@@ -17934,7 +19504,7 @@
                 1.5,
                 6.0
               ],
-              "presentation_key": "pov_58339b6533e619fefccb59c8f2f9e850964777f94dd6086524aeb37ece12f42c",
+              "presentation_key": "pov_54ddb4ea3c05433c2f753973612c013385e047b289d6d33bde1f178bcb2ad895",
               "public_agent_id": "agent-slot-2"
             },
             "transition_start": {
@@ -17943,7 +19513,7 @@
                 1.5,
                 6.0
               ],
-              "presentation_key": "pov_58339b6533e619fefccb59c8f2f9e850964777f94dd6086524aeb37ece12f42c",
+              "presentation_key": "pov_54ddb4ea3c05433c2f753973612c013385e047b289d6d33bde1f178bcb2ad895",
               "public_agent_id": "agent-slot-2"
             }
           }
@@ -17962,7 +19532,7 @@
                 1.5,
                 3.75
               ],
-              "presentation_key": "pov_9fcc95d012a4683fcc3c9b64ffec939876e625abe341d037d693c67ca848f0b3",
+              "presentation_key": "pov_4384ebef1fd45f6319505b0a0e2e98db40d59938b899421472bf94da7d1e7c18",
               "public_agent_id": "agent-slot-1"
             },
             "source_anchor": {
@@ -17971,7 +19541,7 @@
                 1.5,
                 6.0
               ],
-              "presentation_key": "pov_58339b6533e619fefccb59c8f2f9e850964777f94dd6086524aeb37ece12f42c",
+              "presentation_key": "pov_54ddb4ea3c05433c2f753973612c013385e047b289d6d33bde1f178bcb2ad895",
               "public_agent_id": "agent-slot-2"
             }
           },
@@ -17988,7 +19558,7 @@
                 1.5,
                 3.75
               ],
-              "presentation_key": "pov_9fcc95d012a4683fcc3c9b64ffec939876e625abe341d037d693c67ca848f0b3",
+              "presentation_key": "pov_4384ebef1fd45f6319505b0a0e2e98db40d59938b899421472bf94da7d1e7c18",
               "public_agent_id": "agent-slot-1"
             },
             "transition_start_health": 200.0
@@ -18004,7 +19574,7 @@
                 1.5,
                 3.75
               ],
-              "presentation_key": "pov_9fcc95d012a4683fcc3c9b64ffec939876e625abe341d037d693c67ca848f0b3",
+              "presentation_key": "pov_4384ebef1fd45f6319505b0a0e2e98db40d59938b899421472bf94da7d1e7c18",
               "public_agent_id": "agent-slot-1"
             },
             "source_anchor": {
@@ -18013,7 +19583,7 @@
                 1.5,
                 6.0
               ],
-              "presentation_key": "pov_58339b6533e619fefccb59c8f2f9e850964777f94dd6086524aeb37ece12f42c",
+              "presentation_key": "pov_54ddb4ea3c05433c2f753973612c013385e047b289d6d33bde1f178bcb2ad895",
               "public_agent_id": "agent-slot-2"
             },
             "status_channel": 8,
@@ -18036,7 +19606,7 @@
           "recipient_health_resolution",
           "status_applied"
         ],
-        "recipient_presentation_key": "pov_9ad2117434675a4f472457c62d4883d4a0768b65688154d9089d3cf1f7e4f883",
+        "recipient_presentation_key": "pov_2922363c63a67d939cb6c38196c7f46d9c393fc06fde27ea86019312bd198013",
         "recipient_public_agent_id": "agent-slot-0",
         "schema_version": 1,
         "source_episode_id": "episode-001",
@@ -19475,10 +21045,10 @@
           "inspection_kind": "editable_live_draft",
           "submission_scope": "joint_turn"
         },
-        "source_authority_epoch": 11,
+        "source_authority_epoch": 1,
         "source_frame_id": "episode-001:frame:1",
         "source_frame_index": 1,
-        "source_revision": 11,
+        "source_revision": 1,
         "source_run_generation": 0,
         "source_session_id": "cp2-5-b-oracle",
         "source_simulator_step_count": 1
@@ -19488,12 +21058,12 @@
       "schema_version": 1,
       "source": {
         "episode_id": "episode-001",
-        "source_authority_epoch": 11,
+        "source_authority_epoch": 1,
         "source_authorized_endpoint_digest_sha256": "28a30da7583764325896ab02705463d7e146a069f66ca160f143ac0217b292e6",
         "source_frame_id": "episode-001:frame:1",
         "source_frame_index": 1,
         "source_kind": "live_oracle_frame",
-        "source_revision": 11,
+        "source_revision": 1,
         "source_run_generation": 0,
         "source_session_id": "cp2-5-b-oracle",
         "source_simulator_step_count": 1,
@@ -26153,7 +27723,7 @@
             "schema_version": 1
           },
           "inspection_kind": "editable_live_draft",
-          "submission_scope": "controlled_actor"
+          "submission_scope": "joint_turn"
         },
         "source_authority_epoch": 0,
         "source_frame_index": 0,
@@ -26166,6 +27736,645 @@
       },
       "presentation_kind": "live_no_shared_obs_agent_pov",
       "product_kind": "combat_debugger",
+      "researcher_space": {
+        "class_mechanics": [
+          {
+            "aura_mechanics": [
+              {
+                "aura_id": "mage_damage_amplification",
+                "clamp_kind": "ceiling",
+                "clamp_value": 1.3224999999999998,
+                "per_emitter_multiplier": 1.15,
+                "radius": 2.0,
+                "stacking_rule": "multiply_then_clamp"
+              }
+            ],
+            "base_movement_speed": 1.0,
+            "basic_interaction_radius": 3.0,
+            "basic_raw_damage": 13.0,
+            "basic_raw_healing": 0.0,
+            "basic_target_mode": "enemy",
+            "body_radius": 0.5,
+            "class_id": 1,
+            "class_name": "Mage",
+            "documentation_profile": {
+              "availability_kind": "available",
+              "profile_id": "marl_battlegrounds.class_documentation.canonical_v1"
+            },
+            "maximum_health": 80.0,
+            "mechanics_version": 2,
+            "observation_radius": 6.0,
+            "out_of_combat_delay_steps": 5,
+            "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033,
+            "status_mechanics": [
+              {
+                "breaks_on_positive_damage": false,
+                "duration_steps": 5,
+                "family": "damage_amplification",
+                "magnitude": 1.5,
+                "magnitude_kind": "damage_multiplier",
+                "source_action_component": "ultimate",
+                "status_channel": 7,
+                "status_id": "mage_burst_damage_amplification"
+              }
+            ],
+            "ultimate_cooldown_steps": 30,
+            "ultimate_interaction_radius": 0.0,
+            "ultimate_raw_damage": 0.0,
+            "ultimate_raw_healing": 0.0,
+            "ultimate_target_mode": "target_none"
+          },
+          {
+            "aura_mechanics": [
+              {
+                "aura_id": "warrior_damage_mitigation",
+                "clamp_kind": "floor",
+                "clamp_value": 0.7224999999999999,
+                "per_emitter_multiplier": 0.85,
+                "radius": 2.0,
+                "stacking_rule": "multiply_then_clamp"
+              }
+            ],
+            "base_movement_speed": 1.0,
+            "basic_interaction_radius": 1.5,
+            "basic_raw_damage": 8.0,
+            "basic_raw_healing": 0.0,
+            "basic_target_mode": "enemy",
+            "body_radius": 0.5,
+            "class_id": 2,
+            "class_name": "Warrior",
+            "documentation_profile": {
+              "availability_kind": "available",
+              "profile_id": "marl_battlegrounds.class_documentation.canonical_v1"
+            },
+            "maximum_health": 200.0,
+            "mechanics_version": 2,
+            "observation_radius": 6.0,
+            "out_of_combat_delay_steps": 5,
+            "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033,
+            "status_mechanics": [
+              {
+                "breaks_on_positive_damage": false,
+                "duration_steps": 5,
+                "family": "slow",
+                "magnitude": 0.5,
+                "magnitude_kind": "movement_multiplier",
+                "source_action_component": "ultimate",
+                "status_channel": 0,
+                "status_id": "warrior_charge_slow"
+              },
+              {
+                "breaks_on_positive_damage": false,
+                "duration_steps": 1,
+                "family": "stun",
+                "magnitude": null,
+                "magnitude_kind": "none",
+                "source_action_component": "ultimate",
+                "status_channel": 3,
+                "status_id": "warrior_charge_stun"
+              }
+            ],
+            "ultimate_cooldown_steps": 30,
+            "ultimate_interaction_radius": 5.75,
+            "ultimate_raw_damage": 20.0,
+            "ultimate_raw_healing": 0.0,
+            "ultimate_target_mode": "enemy"
+          },
+          {
+            "aura_mechanics": [],
+            "base_movement_speed": 1.0,
+            "basic_interaction_radius": 3.5,
+            "basic_raw_damage": 6.0,
+            "basic_raw_healing": 0.0,
+            "basic_target_mode": "enemy",
+            "body_radius": 0.5,
+            "class_id": 3,
+            "class_name": "Hunter",
+            "documentation_profile": {
+              "availability_kind": "available",
+              "profile_id": "marl_battlegrounds.class_documentation.canonical_v1"
+            },
+            "maximum_health": 100.0,
+            "mechanics_version": 2,
+            "observation_radius": 6.5,
+            "out_of_combat_delay_steps": 5,
+            "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033,
+            "status_mechanics": [
+              {
+                "breaks_on_positive_damage": false,
+                "duration_steps": 1,
+                "family": "slow",
+                "magnitude": 0.85,
+                "magnitude_kind": "movement_multiplier",
+                "source_action_component": "basic",
+                "status_channel": 1,
+                "status_id": "hunter_basic_slow"
+              },
+              {
+                "breaks_on_positive_damage": true,
+                "duration_steps": 4,
+                "family": "stun",
+                "magnitude": null,
+                "magnitude_kind": "none",
+                "source_action_component": "ultimate",
+                "status_channel": 4,
+                "status_id": "hunter_trap_stun"
+              }
+            ],
+            "ultimate_cooldown_steps": 30,
+            "ultimate_interaction_radius": 3.0,
+            "ultimate_raw_damage": 10.0,
+            "ultimate_raw_healing": 0.0,
+            "ultimate_target_mode": "enemy"
+          },
+          {
+            "aura_mechanics": [],
+            "base_movement_speed": 1.2999999523162842,
+            "basic_interaction_radius": 1.5,
+            "basic_raw_damage": 12.0,
+            "basic_raw_healing": 0.0,
+            "basic_target_mode": "enemy",
+            "body_radius": 0.5,
+            "class_id": 4,
+            "class_name": "Rogue",
+            "documentation_profile": {
+              "availability_kind": "available",
+              "profile_id": "marl_battlegrounds.class_documentation.canonical_v1"
+            },
+            "maximum_health": 100.0,
+            "mechanics_version": 2,
+            "observation_radius": 6.0,
+            "out_of_combat_delay_steps": 3,
+            "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033,
+            "status_mechanics": [
+              {
+                "breaks_on_positive_damage": false,
+                "duration_steps": 5,
+                "family": "slow",
+                "magnitude": 0.5,
+                "magnitude_kind": "movement_multiplier",
+                "source_action_component": "ultimate",
+                "status_channel": 2,
+                "status_id": "rogue_poison_slow"
+              },
+              {
+                "breaks_on_positive_damage": false,
+                "duration_steps": 1,
+                "family": "stun",
+                "magnitude": null,
+                "magnitude_kind": "none",
+                "source_action_component": "ultimate",
+                "status_channel": 5,
+                "status_id": "rogue_poison_stun"
+              },
+              {
+                "breaks_on_positive_damage": false,
+                "duration_steps": 4,
+                "family": "anti_heal",
+                "magnitude": 0.5,
+                "magnitude_kind": "healing_multiplier",
+                "source_action_component": "ultimate",
+                "status_channel": 6,
+                "status_id": "rogue_poison_anti_heal"
+              }
+            ],
+            "ultimate_cooldown_steps": 30,
+            "ultimate_interaction_radius": 1.5,
+            "ultimate_raw_damage": 36.0,
+            "ultimate_raw_healing": 0.0,
+            "ultimate_target_mode": "enemy"
+          },
+          {
+            "aura_mechanics": [],
+            "base_movement_speed": 1.0,
+            "basic_interaction_radius": 3.0,
+            "basic_raw_damage": 0.0,
+            "basic_raw_healing": 8.0,
+            "basic_target_mode": "ally",
+            "body_radius": 0.5,
+            "class_id": 5,
+            "class_name": "Priest",
+            "documentation_profile": {
+              "availability_kind": "available",
+              "profile_id": "marl_battlegrounds.class_documentation.canonical_v1"
+            },
+            "maximum_health": 100.0,
+            "mechanics_version": 2,
+            "observation_radius": 6.0,
+            "out_of_combat_delay_steps": 5,
+            "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033,
+            "status_mechanics": [
+              {
+                "breaks_on_positive_damage": false,
+                "duration_steps": 1,
+                "family": "movement_floor",
+                "magnitude": 0.85,
+                "magnitude_kind": "movement_floor",
+                "source_action_component": "basic",
+                "status_channel": 8,
+                "status_id": "priest_blessing_of_freedom_movement_floor"
+              }
+            ],
+            "ultimate_cooldown_steps": 30,
+            "ultimate_interaction_radius": 5.75,
+            "ultimate_raw_damage": 0.0,
+            "ultimate_raw_healing": 200.0,
+            "ultimate_target_mode": "ally"
+          }
+        ],
+        "episode_id": "episode-001",
+        "frame_index": 0,
+        "identity_directory": {
+          "directory_kind": "oracle_public_identity_directory",
+          "identities": [
+            {
+              "class_id": 1,
+              "class_name": "Mage",
+              "configured_active": true,
+              "public_agent_id": "agent-slot-0",
+              "team_id": 1,
+              "team_local_slot": 0
+            },
+            {
+              "class_id": 2,
+              "class_name": "Warrior",
+              "configured_active": true,
+              "public_agent_id": "agent-slot-1",
+              "team_id": 1,
+              "team_local_slot": 1
+            },
+            {
+              "class_id": 5,
+              "class_name": "Priest",
+              "configured_active": true,
+              "public_agent_id": "agent-slot-2",
+              "team_id": 1,
+              "team_local_slot": 2
+            },
+            {
+              "class_id": null,
+              "class_name": null,
+              "configured_active": false,
+              "public_agent_id": "agent-slot-3",
+              "team_id": 1,
+              "team_local_slot": 3
+            },
+            {
+              "class_id": null,
+              "class_name": null,
+              "configured_active": false,
+              "public_agent_id": "agent-slot-4",
+              "team_id": 1,
+              "team_local_slot": 4
+            },
+            {
+              "class_id": 3,
+              "class_name": "Hunter",
+              "configured_active": true,
+              "public_agent_id": "agent-slot-5",
+              "team_id": 2,
+              "team_local_slot": 0
+            },
+            {
+              "class_id": 4,
+              "class_name": "Rogue",
+              "configured_active": true,
+              "public_agent_id": "agent-slot-6",
+              "team_id": 2,
+              "team_local_slot": 1
+            },
+            {
+              "class_id": null,
+              "class_name": null,
+              "configured_active": false,
+              "public_agent_id": "agent-slot-7",
+              "team_id": 2,
+              "team_local_slot": 2
+            },
+            {
+              "class_id": null,
+              "class_name": null,
+              "configured_active": false,
+              "public_agent_id": "agent-slot-8",
+              "team_id": 2,
+              "team_local_slot": 3
+            },
+            {
+              "class_id": null,
+              "class_name": null,
+              "configured_active": false,
+              "public_agent_id": "agent-slot-9",
+              "team_id": 2,
+              "team_local_slot": 4
+            }
+          ]
+        },
+        "latest_transition": null,
+        "pending_inspection": {
+          "draft": {
+            "actor_presentation_key": "oracle_5c59e1b75f3a94a5aaeb8a8c4fd75d4c0820485c9141d5274d5ce4b3a1919e5d",
+            "actor_public_agent_id": "agent-slot-0",
+            "current_simulator_step_count": 0,
+            "decision_mask": {
+              "movement_action_display_names": [
+                "Stay",
+                "North",
+                "South",
+                "East",
+                "West",
+                "Northeast",
+                "Northwest",
+                "Southeast",
+                "Southwest"
+              ],
+              "movement_action_mask": [
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true
+              ],
+              "owner_presentation_key": "oracle_5c59e1b75f3a94a5aaeb8a8c4fd75d4c0820485c9141d5274d5ce4b3a1919e5d",
+              "owner_public_agent_id": "agent-slot-0",
+              "schema_version": 1,
+              "target_action_mask": [
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "target_actions": [
+                {
+                  "display_name": "Target None",
+                  "target_action": 0,
+                  "target_kind": "no_target"
+                },
+                {
+                  "display_name": "Ally 0",
+                  "target_action": 1,
+                  "target_kind": "axis_only_authorized_agent",
+                  "target_public_agent_id": "agent-slot-0"
+                },
+                {
+                  "display_name": "Ally 1",
+                  "target_action": 2,
+                  "target_kind": "axis_only_authorized_agent",
+                  "target_public_agent_id": "agent-slot-1"
+                },
+                {
+                  "display_name": "Ally 2",
+                  "target_action": 3,
+                  "target_kind": "axis_only_authorized_agent",
+                  "target_public_agent_id": "agent-slot-2"
+                },
+                {
+                  "display_name": "Ally 3",
+                  "target_action": 4,
+                  "target_kind": "axis_only_authorized_agent",
+                  "target_public_agent_id": "agent-slot-3"
+                },
+                {
+                  "display_name": "Ally 4",
+                  "target_action": 5,
+                  "target_kind": "axis_only_authorized_agent",
+                  "target_public_agent_id": "agent-slot-4"
+                },
+                {
+                  "display_name": "Enemy 0",
+                  "target_action": 6,
+                  "target_kind": "axis_only_authorized_agent",
+                  "target_public_agent_id": "agent-slot-5"
+                },
+                {
+                  "display_name": "Enemy 1",
+                  "target_action": 7,
+                  "target_kind": "axis_only_authorized_agent",
+                  "target_public_agent_id": "agent-slot-6"
+                },
+                {
+                  "display_name": "Enemy 2",
+                  "target_action": 8,
+                  "target_kind": "axis_only_authorized_agent",
+                  "target_public_agent_id": "agent-slot-7"
+                },
+                {
+                  "display_name": "Enemy 3",
+                  "target_action": 9,
+                  "target_kind": "axis_only_authorized_agent",
+                  "target_public_agent_id": "agent-slot-8"
+                },
+                {
+                  "display_name": "Enemy 4",
+                  "target_action": 10,
+                  "target_kind": "axis_only_authorized_agent",
+                  "target_public_agent_id": "agent-slot-9"
+                }
+              ],
+              "target_use_ultimate_joint_mask": [
+                [
+                  true,
+                  true
+                ],
+                [
+                  false,
+                  false
+                ],
+                [
+                  false,
+                  false
+                ],
+                [
+                  false,
+                  false
+                ],
+                [
+                  false,
+                  false
+                ],
+                [
+                  false,
+                  false
+                ],
+                [
+                  false,
+                  false
+                ],
+                [
+                  false,
+                  false
+                ],
+                [
+                  false,
+                  false
+                ],
+                [
+                  false,
+                  false
+                ],
+                [
+                  false,
+                  false
+                ]
+              ],
+              "use_ultimate_action_display_names": [
+                "Do Not Use Ultimate",
+                "Use Ultimate"
+              ],
+              "use_ultimate_action_mask": [
+                true,
+                true
+              ]
+            },
+            "draft_action": {
+              "armed_lane": "none",
+              "move_action": 0,
+              "target_action": 0
+            },
+            "draft_legality": {
+              "armed_lane_is_legal": null,
+              "combat_pair_is_legal": null,
+              "move_action_is_legal": true,
+              "target_action_is_legal": true
+            },
+            "draft_target": {
+              "display_name": "Target None",
+              "target_action": 0,
+              "target_kind": "no_target"
+            },
+            "inspection_kind": "live_draft_action",
+            "schema_version": 1
+          },
+          "inspection_kind": "editable_live_draft",
+          "submission_scope": "joint_turn"
+        },
+        "researcher_space_kind": "global_live_researcher_space",
+        "roster_agents": [
+          {
+            "aura_modifiers": [
+              {
+                "aura_id": "mage_damage_amplification",
+                "multiplier": 1.149999976158142
+              }
+            ],
+            "class_id": 1,
+            "class_name": "Mage",
+            "current_health": 80.0,
+            "effective_movement_speed": 1.0,
+            "life_state": "alive",
+            "maximum_health": 80.0,
+            "out_of_combat_delay_steps": 5,
+            "presentation_key": "oracle_5c59e1b75f3a94a5aaeb8a8c4fd75d4c0820485c9141d5274d5ce4b3a1919e5d",
+            "public_agent_id": "agent-slot-0",
+            "spawn_shield_remaining": 0,
+            "statuses": [],
+            "steps_until_out_of_combat": 0,
+            "team_id": 1,
+            "team_local_slot": 0,
+            "ultimate_cooldown_remaining": 0
+          },
+          {
+            "aura_modifiers": [
+              {
+                "aura_id": "warrior_damage_mitigation",
+                "multiplier": 0.8500000238418579
+              }
+            ],
+            "class_id": 2,
+            "class_name": "Warrior",
+            "current_health": 200.0,
+            "effective_movement_speed": 1.0,
+            "life_state": "alive",
+            "maximum_health": 200.0,
+            "out_of_combat_delay_steps": 5,
+            "presentation_key": "oracle_2720a3450a0e00f0b476d10aa8f3b8f9e086e0a4b7f56d619e004d726cf23ac9",
+            "public_agent_id": "agent-slot-1",
+            "spawn_shield_remaining": 0,
+            "statuses": [],
+            "steps_until_out_of_combat": 0,
+            "team_id": 1,
+            "team_local_slot": 1,
+            "ultimate_cooldown_remaining": 0
+          },
+          {
+            "aura_modifiers": [],
+            "class_id": 5,
+            "class_name": "Priest",
+            "current_health": 100.0,
+            "effective_movement_speed": 1.0,
+            "life_state": "alive",
+            "maximum_health": 100.0,
+            "out_of_combat_delay_steps": 5,
+            "presentation_key": "oracle_76cb88526d84a9efefdee00cfee2125398ed1b7613e31a8cb1c6001bb17ca60f",
+            "public_agent_id": "agent-slot-2",
+            "spawn_shield_remaining": 0,
+            "statuses": [],
+            "steps_until_out_of_combat": 0,
+            "team_id": 1,
+            "team_local_slot": 2,
+            "ultimate_cooldown_remaining": 0
+          },
+          {
+            "aura_modifiers": [],
+            "class_id": 3,
+            "class_name": "Hunter",
+            "current_health": 100.0,
+            "effective_movement_speed": 1.0,
+            "life_state": "alive",
+            "maximum_health": 100.0,
+            "out_of_combat_delay_steps": 5,
+            "presentation_key": "oracle_1af144bc440bcb3b3cb681485131b55994a9bc56d8ec64ac79aab6b94957a8a7",
+            "public_agent_id": "agent-slot-5",
+            "spawn_shield_remaining": 0,
+            "statuses": [],
+            "steps_until_out_of_combat": 0,
+            "team_id": 2,
+            "team_local_slot": 0,
+            "ultimate_cooldown_remaining": 0
+          },
+          {
+            "aura_modifiers": [],
+            "class_id": 4,
+            "class_name": "Rogue",
+            "current_health": 100.0,
+            "effective_movement_speed": 1.2999999523162842,
+            "life_state": "alive",
+            "maximum_health": 100.0,
+            "out_of_combat_delay_steps": 3,
+            "presentation_key": "oracle_0485a0eda16193782fcba264688d3415f53615f527dea3b1e3e80903dd979358",
+            "public_agent_id": "agent-slot-6",
+            "spawn_shield_remaining": 0,
+            "statuses": [],
+            "steps_until_out_of_combat": 0,
+            "team_id": 2,
+            "team_local_slot": 1,
+            "ultimate_cooldown_remaining": 0
+          }
+        ],
+        "selected_public_agent_id": "agent-slot-0",
+        "simulator_step_count": 0,
+        "source_authority_epoch": 0,
+        "source_revision": 0,
+        "source_run_generation": 0,
+        "source_session_id": "cp2-7-live-no-shared-zero",
+        "technical_frame": {
+          "episode_id": "episode-001",
+          "evaluation_frame_index": 0,
+          "incoming_transition_id": null,
+          "simulator_step_count": 0,
+          "technical_kind": "live_oracle_technical_frame"
+        }
+      },
       "schema_version": 1,
       "source": {
         "episode_id": "episode-001",
@@ -26179,7 +28388,7 @@
         "source_run_generation": 0,
         "source_session_id": "cp2-7-live-no-shared-zero",
         "source_simulator_step_count": 0,
-        "source_submission_scope": "controlled_actor"
+        "source_submission_scope": "joint_turn"
       },
       "technical_frame": {
         "episode_id": "episode-001",
@@ -27178,10 +29387,10 @@
           "inspection_kind": "editable_live_draft",
           "submission_scope": "joint_turn"
         },
-        "source_authority_epoch": 10,
+        "source_authority_epoch": 0,
         "source_frame_id": "episode-001:frame:0",
         "source_frame_index": 0,
-        "source_revision": 10,
+        "source_revision": 0,
         "source_run_generation": 0,
         "source_session_id": "cp2-7-live-oracle-zero",
         "source_simulator_step_count": 0
@@ -27191,12 +29400,12 @@
       "schema_version": 1,
       "source": {
         "episode_id": "episode-001",
-        "source_authority_epoch": 10,
+        "source_authority_epoch": 0,
         "source_authorized_endpoint_digest_sha256": "7676324497665ef7d9c02055fef6ced82e1c4669ba2669418f14035c88741e2a",
         "source_frame_id": "episode-001:frame:0",
         "source_frame_index": 0,
         "source_kind": "live_oracle_frame",
-        "source_revision": 10,
+        "source_revision": 0,
         "source_run_generation": 0,
         "source_session_id": "cp2-7-live-oracle-zero",
         "source_simulator_step_count": 0,

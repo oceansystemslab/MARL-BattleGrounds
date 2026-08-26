@@ -2129,34 +2129,23 @@ function joinsCatalogFloat(recorded, catalog) {
 }
 
 /**
- * Port the closed semantic joins of Python's AuthorizedBattlefieldSceneV1.
- * JSON Schema owns local wire shapes; this visitor owns catalog identity,
- * cross-row cardinality/order, and source/mechanic/lifecycle coherence.
+ * Validate the geometry-independent public class catalog used by battlefield
+ * scenes and global researcher panels alike.
  *
- * @param {Record<string, any>} scene
+ * @param {any[]} classMechanics
+ * @param {number[]} representedClassIds
+ * @param {string} scope
  */
-function validateAuthorizedScene(scene) {
-  const agents = /** @type {any[]} */ (scene.agents);
-  const classMechanics = /** @type {any[]} */ (scene.class_mechanics);
-  const auraFields = /** @type {any[]} */ (scene.aura_fields);
-  const spawnPads = /** @type {any[]} */ (scene.spawn_pads);
-  const respawnWaves = /** @type {any[]} */ (scene.respawn_waves);
-  if (scene.map.width <= 0 || scene.map.height <= 0) {
-    invalid("Scene map dimensions must be positive.");
-  }
-  const agentsByKey = new Map(agents.map((agent) => [agent.presentation_key, agent]));
-  const representedClassIds = [...new Set(agents.map((agent) => agent.class_id))].sort(
-    (left, right) => left - right,
-  );
+function validateAuthorizedClassMechanics(classMechanics, representedClassIds, scope) {
   const mechanicsIds = classMechanics.map((mechanics) => mechanics.class_id);
   if (!structurallyEqual(mechanicsIds, representedClassIds)) {
-    invalid("Scene class mechanics must exactly equal represented class order.");
+    invalid(`${scope} class mechanics must exactly equal represented class order.`);
   }
   const mechanicsVersions = new Set(
     classMechanics.map((mechanics) => (mechanics.mechanics_version === 2 ? 2 : 1)),
   );
   if (mechanicsVersions.size > 1) {
-    invalid("Scene class mechanics must be entirely V1 or entirely V2.");
+    invalid(`${scope} class mechanics must be entirely V1 or entirely V2.`);
   }
   if (
     mechanicsVersions.has(2) &&
@@ -2168,7 +2157,7 @@ function validateAuthorizedScene(scene) {
         ),
     )
   ) {
-    invalid("Scene V2 class mechanics must share one documentation profile.");
+    invalid(`${scope} V2 class mechanics must share one documentation profile.`);
   }
 
   const mechanicsById = new Map();
@@ -2197,7 +2186,7 @@ function validateAuthorizedScene(scene) {
       mechanics.out_of_combat_delay_steps < 0 ||
       mechanics.out_of_combat_health_regeneration_fraction_per_step > 1
     ) {
-      invalid("Scene class mechanics changed canonical class identity or bounds.");
+      invalid(`${scope} class mechanics changed canonical identity or bounds.`);
     }
     mechanicsById.set(mechanics.class_id, mechanics);
     let previousStatusChannel = -1;
@@ -2209,7 +2198,9 @@ function validateAuthorizedScene(scene) {
         status.duration_steps < 1 ||
         (status.magnitude === null) !== (status.magnitude_kind === "none")
       ) {
-        invalid("Scene class status mechanics changed the canonical V1 status axis.");
+        invalid(
+          `${scope} class status mechanics changed the canonical V1 status axis.`,
+        );
       }
       previousStatusChannel = status.status_channel;
       projectedStatusChannels.push(status.status_channel);
@@ -2224,7 +2215,7 @@ function validateAuthorizedScene(scene) {
         aura.per_emitter_multiplier < 0 ||
         aura.clamp_value < 0
       ) {
-        invalid("Scene class aura mechanics changed the canonical V1 aura axis.");
+        invalid(`${scope} class aura mechanics changed the canonical V1 aura axis.`);
       }
       auraIds.add(aura.aura_id);
       projectedAuraIds.push(aura.aura_id);
@@ -2244,8 +2235,162 @@ function validateAuthorizedScene(scene) {
     !structurallyEqual(projectedStatusChannels, expectedStatusChannels) ||
     !structurallyEqual(projectedAuraIds, expectedAuraIds)
   ) {
-    invalid("Scene mechanics inventories do not equal represented catalog axes.");
+    invalid(`${scope} mechanics inventories do not equal represented catalog axes.`);
   }
+  return { mechanicsById, statusMechanicsByChannel };
+}
+
+/**
+ * Validate durable status and aggregate-aura rows shared by battlefield actors
+ * and geometry-free researcher roster actors.
+ *
+ * @param {Record<string, any>} agent
+ * @param {Map<string, Record<string, any>>} agentsByKey
+ * @param {Map<number, Record<string, any>>} statusMechanicsByChannel
+ * @param {string} scope
+ */
+function validateAuthorizedAgentEffects(
+  agent,
+  agentsByKey,
+  statusMechanicsByChannel,
+  scope,
+) {
+  const statusChannels = new Set();
+  for (const status of agent.statuses) {
+    if (
+      statusChannels.has(status.status_channel) ||
+      STATUS_ID_BY_CHANNEL[status.status_channel] !== status.status_id ||
+      status.configured_duration_steps < 1 ||
+      status.remaining_duration < 1 ||
+      status.remaining_duration > status.configured_duration_steps ||
+      STATUS_SOURCE_CLASS_BY_CHANNEL[status.status_channel] !==
+        status.source_class_id ||
+      CLASS_NAME_BY_ID[status.source_class_id] !== status.source_class_name ||
+      (status.magnitude === null) !== (status.magnitude_kind === "none")
+    ) {
+      invalid(`${scope} durable status changed its canonical identity or bounds.`);
+    }
+    statusChannels.add(status.status_channel);
+    const statusMechanic = statusMechanicsByChannel.get(status.status_channel);
+    if (
+      statusMechanic &&
+      (statusMechanic.status_id !== status.status_id ||
+        statusMechanic.duration_steps !== status.configured_duration_steps ||
+        statusMechanic.family !== status.family ||
+        statusMechanic.source_action_component !== status.source_action_component ||
+        statusMechanic.magnitude_kind !== status.magnitude_kind ||
+        (status.magnitude === null || statusMechanic.magnitude === null
+          ? status.magnitude !== statusMechanic.magnitude
+          : !joinsCatalogFloat(status.magnitude, statusMechanic.magnitude)) ||
+        statusMechanic.breaks_on_positive_damage !== status.breaks_on_positive_damage)
+    ) {
+      invalid(`${scope} durable status does not join its catalog mechanic.`);
+    }
+    const directSourceKeys = new Set();
+    for (const source of status.direct_sources) {
+      const sourceAgent = agentsByKey.get(source.source_presentation_key);
+      if (
+        directSourceKeys.has(source.source_presentation_key) ||
+        !sourceAgent ||
+        sourceAgent.public_agent_id !== source.source_public_agent_id ||
+        sourceAgent.class_id !== status.source_class_id ||
+        sourceAgent.class_name !== status.source_class_name
+      ) {
+        invalid(
+          `${scope} status source does not join an authorized source-class agent.`,
+        );
+      }
+      directSourceKeys.add(source.source_presentation_key);
+    }
+  }
+  const auraIds = new Set();
+  for (const modifier of agent.aura_modifiers) {
+    if (
+      auraIds.has(modifier.aura_id) ||
+      !Object.hasOwn(AURA_SOURCE_CLASS_BY_ID, modifier.aura_id) ||
+      modifier.multiplier < 0 ||
+      modifier.multiplier === 1
+    ) {
+      invalid(`${scope} aura modifiers are not canonical and unique.`);
+    }
+    auraIds.add(modifier.aura_id);
+  }
+}
+
+/**
+ * Validate every geometry-free researcher row with the same catalog and effect
+ * machinery used by the authorized battlefield scene.
+ *
+ * @param {any[]} roster
+ * @param {any[]} classMechanics
+ * @param {string} scope
+ */
+function validateResearcherRosterFacts(roster, classMechanics, scope) {
+  const representedClassIds = [...new Set(roster.map((agent) => agent.class_id))].sort(
+    (left, right) => left - right,
+  );
+  const { mechanicsById, statusMechanicsByChannel } = validateAuthorizedClassMechanics(
+    classMechanics,
+    representedClassIds,
+    scope,
+  );
+  const agentsByKey = new Map(roster.map((agent) => [agent.presentation_key, agent]));
+  for (const agent of roster) {
+    const mechanics = mechanicsById.get(agent.class_id);
+    if (
+      CLASS_NAME_BY_ID[agent.class_id] !== agent.class_name ||
+      !mechanics ||
+      mechanics.class_name !== agent.class_name ||
+      ["current_health", "maximum_health", "effective_movement_speed"].some(
+        (field) => agent[field] < 0,
+      ) ||
+      agent.maximum_health <= 0 ||
+      agent.ultimate_cooldown_remaining < 0 ||
+      agent.spawn_shield_remaining < 0 ||
+      agent.steps_until_out_of_combat < 0 ||
+      agent.out_of_combat_delay_steps < 0 ||
+      agent.current_health > agent.maximum_health ||
+      agent.steps_until_out_of_combat > agent.out_of_combat_delay_steps ||
+      agent.ultimate_cooldown_remaining > mechanics.ultimate_cooldown_steps ||
+      !joinsCatalogFloat(agent.maximum_health, mechanics.maximum_health) ||
+      agent.out_of_combat_delay_steps !== mechanics.out_of_combat_delay_steps
+    ) {
+      invalid(`${scope} roster actor changed canonical identity or bounds.`);
+    }
+    validateAuthorizedAgentEffects(
+      agent,
+      agentsByKey,
+      statusMechanicsByChannel,
+      `${scope} roster actor`,
+    );
+  }
+}
+
+/**
+ * Port the closed semantic joins of Python's AuthorizedBattlefieldSceneV1.
+ * JSON Schema owns local wire shapes; this visitor owns catalog identity,
+ * cross-row cardinality/order, and source/mechanic/lifecycle coherence.
+ *
+ * @param {Record<string, any>} scene
+ */
+function validateAuthorizedScene(scene) {
+  const agents = /** @type {any[]} */ (scene.agents);
+  const classMechanics = /** @type {any[]} */ (scene.class_mechanics);
+  const auraFields = /** @type {any[]} */ (scene.aura_fields);
+  const spawnPads = /** @type {any[]} */ (scene.spawn_pads);
+  const respawnWaves = /** @type {any[]} */ (scene.respawn_waves);
+  if (scene.map.width <= 0 || scene.map.height <= 0) {
+    invalid("Scene map dimensions must be positive.");
+  }
+  const agentsByKey = new Map(agents.map((agent) => [agent.presentation_key, agent]));
+  const representedClassIds = [...new Set(agents.map((agent) => agent.class_id))].sort(
+    (left, right) => left - right,
+  );
+  const { mechanicsById, statusMechanicsByChannel } = validateAuthorizedClassMechanics(
+    classMechanics,
+    representedClassIds,
+    "Scene",
+  );
 
   for (const agent of agents) {
     const mechanics = mechanicsById.get(agent.class_id);
@@ -2299,66 +2444,12 @@ function validateAuthorizedScene(scene) {
     ) {
       invalid("Oracle agent static facts do not join public class mechanics.");
     }
-    const statusChannels = new Set();
-    for (const status of agent.statuses) {
-      if (
-        statusChannels.has(status.status_channel) ||
-        STATUS_ID_BY_CHANNEL[status.status_channel] !== status.status_id ||
-        status.configured_duration_steps < 1 ||
-        status.remaining_duration < 1 ||
-        status.remaining_duration > status.configured_duration_steps ||
-        STATUS_SOURCE_CLASS_BY_CHANNEL[status.status_channel] !==
-          status.source_class_id ||
-        CLASS_NAME_BY_ID[status.source_class_id] !== status.source_class_name ||
-        (status.magnitude === null) !== (status.magnitude_kind === "none")
-      ) {
-        invalid("Scene durable status changed its canonical identity or bounds.");
-      }
-      statusChannels.add(status.status_channel);
-      const statusMechanic = statusMechanicsByChannel.get(status.status_channel);
-      if (
-        statusMechanic &&
-        (statusMechanic.status_id !== status.status_id ||
-          statusMechanic.duration_steps !== status.configured_duration_steps ||
-          statusMechanic.family !== status.family ||
-          statusMechanic.source_action_component !== status.source_action_component ||
-          statusMechanic.magnitude_kind !== status.magnitude_kind ||
-          (status.magnitude === null || statusMechanic.magnitude === null
-            ? status.magnitude !== statusMechanic.magnitude
-            : !joinsCatalogFloat(status.magnitude, statusMechanic.magnitude)) ||
-          statusMechanic.breaks_on_positive_damage !== status.breaks_on_positive_damage)
-      ) {
-        invalid("Scene durable status does not join its catalog mechanic.");
-      }
-      const directSourceKeys = new Set();
-      for (const source of status.direct_sources) {
-        const sourceAgent = agentsByKey.get(source.source_presentation_key);
-        if (
-          directSourceKeys.has(source.source_presentation_key) ||
-          !sourceAgent ||
-          sourceAgent.public_agent_id !== source.source_public_agent_id ||
-          sourceAgent.class_id !== status.source_class_id ||
-          sourceAgent.class_name !== status.source_class_name
-        ) {
-          invalid(
-            "Scene status source does not join an authorized source-class agent.",
-          );
-        }
-        directSourceKeys.add(source.source_presentation_key);
-      }
-    }
-    const auraIds = new Set();
-    for (const modifier of agent.aura_modifiers) {
-      if (
-        auraIds.has(modifier.aura_id) ||
-        !Object.hasOwn(AURA_SOURCE_CLASS_BY_ID, modifier.aura_id) ||
-        modifier.multiplier < 0 ||
-        modifier.multiplier === 1
-      ) {
-        invalid("Scene agent aura modifiers are not canonical and unique.");
-      }
-      auraIds.add(modifier.aura_id);
-    }
+    validateAuthorizedAgentEffects(
+      agent,
+      agentsByKey,
+      statusMechanicsByChannel,
+      "Scene agent",
+    );
   }
 
   for (const field of auraFields) {
@@ -3026,17 +3117,11 @@ function validateReplayResearcherSpace(frame) {
   ) {
     invalid("Replay researcher roster does not exactly join active identities.");
   }
-  const representedClasses = [...new Set(roster.map((row) => row.class_id))].sort(
-    (left, right) => left - right,
+  validateResearcherRosterFacts(
+    roster,
+    /** @type {any[]} */ (researcher.class_mechanics),
+    "Replay researcher",
   );
-  if (
-    !structurallyEqual(
-      /** @type {any[]} */ (researcher.class_mechanics).map((row) => row.class_id),
-      representedClasses,
-    )
-  ) {
-    invalid("Replay researcher class mechanics do not cover its roster.");
-  }
 
   /**
    * @param {Record<string, any> | null} transition
@@ -3110,6 +3195,382 @@ function validateReplayResearcherSpace(frame) {
 
   validateTransition(researcher.latest_transition, true);
   validateTransition(researcher.upcoming_transition, false);
+  return validatePresentationKeyGraph(researcher, {
+    authorityKind: "oracle",
+  });
+}
+
+/** @param {number} left @param {number} right */
+function liveResearcherFloatMatches(left, right) {
+  return (
+    Number.isFinite(left) &&
+    Number.isFinite(right) &&
+    Math.abs(left - right) <=
+      Math.max(1e-8, 1e-6 * Math.max(Math.abs(left), Math.abs(right)))
+  );
+}
+
+/** @param {Record<string, any>} globalStatus @param {Record<string, any>} localStatus */
+function liveResearcherStatusMatches(globalStatus, localStatus) {
+  for (const field of [
+    "status_channel",
+    "status_id",
+    "family",
+    "configured_duration_steps",
+    "remaining_duration",
+    "source_class_id",
+    "source_class_name",
+    "source_action_component",
+    "magnitude_kind",
+    "breaks_on_positive_damage",
+  ]) {
+    if (!Object.is(globalStatus[field], localStatus[field])) {
+      return false;
+    }
+  }
+  if (globalStatus.magnitude === null || localStatus.magnitude === null) {
+    return globalStatus.magnitude === localStatus.magnitude;
+  }
+  return liveResearcherFloatMatches(globalStatus.magnitude, localStatus.magnitude);
+}
+
+/** @param {Record<string, any>} globalAura @param {Record<string, any>} localAura */
+function liveResearcherAuraMatches(globalAura, localAura) {
+  return (
+    globalAura.aura_id === localAura.aura_id &&
+    liveResearcherFloatMatches(globalAura.multiplier, localAura.multiplier)
+  );
+}
+
+/**
+ * Validate the global, geometry-free controls carried beside a live Agent
+ * battlefield. This branch may drive panels and commands, never the SVG.
+ *
+ * @param {Record<string, any>} frame
+ * @returns {{key: string, publicId: string}[]}
+ */
+function validateLiveResearcherSpace(frame) {
+  const source = frame.source;
+  const researcher = frame.researcher_space;
+  if (
+    researcher.researcher_space_kind !== "global_live_researcher_space" ||
+    researcher.source_session_id !== source.source_session_id ||
+    researcher.source_run_generation !== source.source_run_generation ||
+    researcher.source_revision !== source.source_revision ||
+    researcher.source_authority_epoch !== source.source_authority_epoch ||
+    researcher.episode_id !== source.episode_id ||
+    researcher.frame_index !== source.source_frame_index ||
+    researcher.simulator_step_count !== source.source_simulator_step_count ||
+    researcher.selected_public_agent_id !== source.source_recipient_public_agent_id
+  ) {
+    invalid("Live researcher space does not join its Agent source epoch.");
+  }
+
+  const directory = /** @type {any[]} */ (researcher.identity_directory.identities);
+  if (directory.length !== 10) {
+    invalid("Live researcher directory requires ten rows.");
+  }
+  directory.forEach((row, index) => {
+    if (
+      row.team_id !== Math.floor(index / 5) + 1 ||
+      row.team_local_slot !== index % 5 ||
+      row.configured_active !== (row.class_id !== null) ||
+      (row.class_id === null) !== (row.class_name === null)
+    ) {
+      invalid("Live researcher directory lost fixed team topology.");
+    }
+  });
+  requireUnique(
+    directory.map((row) => row.public_agent_id),
+    "Live researcher directory identities",
+  );
+
+  const activeDirectory = directory.filter((row) => row.configured_active);
+  const roster = /** @type {any[]} */ (researcher.roster_agents);
+  if (
+    roster.length !== activeDirectory.length ||
+    roster.some((row, index) => {
+      const identity = activeDirectory[index];
+      return (
+        row.public_agent_id !== identity.public_agent_id ||
+        row.team_id !== identity.team_id ||
+        row.team_local_slot !== identity.team_local_slot ||
+        row.class_id !== identity.class_id ||
+        row.class_name !== identity.class_name
+      );
+    }) ||
+    !roster.some((row) => row.public_agent_id === researcher.selected_public_agent_id)
+  ) {
+    invalid("Live researcher roster does not exactly join active identities.");
+  }
+  validateResearcherRosterFacts(
+    roster,
+    /** @type {any[]} */ (researcher.class_mechanics),
+    "Live researcher",
+  );
+
+  const latest = researcher.latest_transition;
+  if (source.source_frame_index === 0) {
+    if (latest !== null) {
+      invalid("Live researcher frame zero cannot carry Latest Transition.");
+    }
+  } else {
+    if (latest === null) {
+      invalid("Live researcher Latest Transition is missing.");
+    }
+    validateLatestTransition(latest, source.episode_id, source.episode_id);
+    if (
+      latest.incoming_transition_index !== source.source_frame_index - 1 ||
+      latest.incoming_successor_frame_id !==
+        `${source.episode_id}:frame:${source.source_frame_index}` ||
+      latest.incoming_successor_simulator_step_count !==
+        source.source_simulator_step_count ||
+      latest.action_rows.length !== roster.length ||
+      /** @type {any[]} */ (latest.action_rows).some(
+        (row, index) =>
+          row.actor_public_agent_id !== roster[index]?.public_agent_id ||
+          row.actor_presentation_key !== roster[index]?.presentation_key,
+      )
+    ) {
+      invalid("Live researcher Latest Transition misses current joint s_n.");
+    }
+    for (const row of /** @type {any[]} */ (latest.action_rows)) {
+      const actor = directory.find(
+        (identity) => identity.public_agent_id === row.actor_public_agent_id,
+      );
+      const expectedTargets = [
+        ...directory.filter((identity) => identity.team_id === actor.team_id),
+        ...directory.filter((identity) => identity.team_id !== actor.team_id),
+      ].map((identity) => identity.public_agent_id);
+      if (
+        !structurallyEqual(row.target_action_recipient_public_agent_id_by_id, [
+          null,
+          ...expectedTargets,
+        ])
+      ) {
+        invalid("Live researcher Latest target axis changed team order.");
+      }
+    }
+  }
+
+  const technical = researcher.technical_frame;
+  if (
+    technical.technical_kind !== "live_oracle_technical_frame" ||
+    technical.episode_id !== source.episode_id ||
+    technical.evaluation_frame_index !== source.source_frame_index ||
+    technical.simulator_step_count !== source.source_simulator_step_count ||
+    technical.incoming_transition_id !==
+      (latest === null ? null : latest.incoming_transition_id)
+  ) {
+    invalid("Live researcher Technical Frame does not join its epoch.");
+  }
+
+  const pending = researcher.pending_inspection;
+  if (pending.submission_scope !== source.source_submission_scope) {
+    invalid("Live researcher pending scope does not join its source.");
+  }
+  if (pending.inspection_kind === "editable_live_draft") {
+    if (pending.submission_scope !== "joint_turn") {
+      invalid("Live researcher editable draft must submit one joint turn.");
+    }
+    const draft = pending.draft;
+    const owner = roster.find(
+      (row) => row.public_agent_id === researcher.selected_public_agent_id,
+    );
+    const decision = draft.decision_mask;
+    validateDecisionMask(decision, "Live researcher decision mask");
+    if (
+      draft.current_simulator_step_count !== source.source_simulator_step_count ||
+      draft.actor_public_agent_id !== researcher.selected_public_agent_id ||
+      draft.actor_public_agent_id !== owner.public_agent_id ||
+      draft.actor_presentation_key !== owner.presentation_key ||
+      decision.owner_public_agent_id !== draft.actor_public_agent_id ||
+      decision.owner_presentation_key !== draft.actor_presentation_key ||
+      decision.target_actions[0].target_kind !== "no_target" ||
+      /** @type {any[]} */ (decision.target_actions)
+        .slice(1)
+        .some((row) => row.target_kind !== "axis_only_authorized_agent")
+    ) {
+      invalid("Live researcher draft is not geometry-free selected-actor truth.");
+    }
+    const ownerDirectory = directory.find(
+      (row) => row.public_agent_id === draft.actor_public_agent_id,
+    );
+    const expectedTargets = [
+      ...directory.filter((row) => row.team_id === ownerDirectory.team_id),
+      ...directory.filter((row) => row.team_id !== ownerDirectory.team_id),
+    ].map((row) => row.public_agent_id);
+    if (
+      !structurallyEqual(
+        /** @type {any[]} */ (decision.target_actions)
+          .slice(1)
+          .map((row) => row.target_public_agent_id),
+        expectedTargets,
+      )
+    ) {
+      invalid("Live researcher draft target axis changed team order.");
+    }
+    const action = draft.draft_action;
+    const legality = draft.draft_legality;
+    if (
+      !structurallyEqual(
+        draft.draft_target,
+        decision.target_actions[action.target_action],
+      ) ||
+      legality.move_action_is_legal !==
+        decision.movement_action_mask[action.move_action] ||
+      legality.target_action_is_legal !==
+        decision.target_action_mask[action.target_action]
+    ) {
+      invalid("Live researcher draft does not join its exact decision row.");
+    }
+    if (action.armed_lane === "none") {
+      if (
+        legality.armed_lane_is_legal !== null ||
+        legality.combat_pair_is_legal !== null
+      ) {
+        invalid("Unarmed live researcher draft cannot carry combat legality.");
+      }
+    } else {
+      const lane = action.armed_lane === "basic" ? 0 : 1;
+      if (
+        legality.armed_lane_is_legal !== decision.use_ultimate_action_mask[lane] ||
+        legality.combat_pair_is_legal !==
+          decision.target_use_ultimate_joint_mask[action.target_action][lane]
+      ) {
+        invalid("Live researcher draft joint legality changed.");
+      }
+    }
+
+    const localInspection = frame.live_inspection.inspection;
+    if (localInspection.inspection_kind !== "editable_live_draft") {
+      invalid("Live researcher and Agent draft modes diverged.");
+    }
+    const localDraft = localInspection.draft;
+    const localDecision = localDraft.decision_mask;
+    const researcherTargetIds = /** @type {any[]} */ (decision.target_actions).map(
+      (row) => (row.target_kind === "no_target" ? null : row.target_public_agent_id),
+    );
+    const localTargetIds = /** @type {any[]} */ (localDecision.target_actions).map(
+      (row) => (row.target_kind === "no_target" ? null : row.target_public_agent_id),
+    );
+    if (
+      !structurallyEqual(
+        decision.movement_action_display_names,
+        localDecision.movement_action_display_names,
+      ) ||
+      !structurallyEqual(
+        decision.movement_action_mask,
+        localDecision.movement_action_mask,
+      ) ||
+      !structurallyEqual(
+        /** @type {any[]} */ (decision.target_actions).map((row) => row.display_name),
+        /** @type {any[]} */ (localDecision.target_actions).map(
+          (row) => row.display_name,
+        ),
+      ) ||
+      !structurallyEqual(researcherTargetIds, localTargetIds) ||
+      !structurallyEqual(
+        decision.target_action_mask,
+        localDecision.target_action_mask,
+      ) ||
+      !structurallyEqual(
+        decision.use_ultimate_action_display_names,
+        localDecision.use_ultimate_action_display_names,
+      ) ||
+      !structurallyEqual(
+        decision.use_ultimate_action_mask,
+        localDecision.use_ultimate_action_mask,
+      ) ||
+      !structurallyEqual(
+        decision.target_use_ultimate_joint_mask,
+        localDecision.target_use_ultimate_joint_mask,
+      ) ||
+      !structurallyEqual(draft.draft_action, localDraft.draft_action) ||
+      !structurallyEqual(draft.draft_legality, localDraft.draft_legality)
+    ) {
+      invalid("Live researcher draft changed Agent action semantics.");
+    }
+  } else if (pending.inspection_kind !== "scripted_playback_inspection") {
+    invalid("Live researcher inspection uses an unknown variant.");
+  }
+
+  const localScene = frame.current_endpoint.parts.scene;
+  const researcherClasses = new Map(
+    /** @type {any[]} */ (researcher.class_mechanics).map((row) => [row.class_id, row]),
+  );
+  for (const localClass of /** @type {any[]} */ (localScene.class_mechanics)) {
+    if (!structurallyEqual(researcherClasses.get(localClass.class_id), localClass)) {
+      invalid("Live researcher class mechanics changed a fog-authorized class.");
+    }
+  }
+
+  const researcherRoster = new Map(roster.map((row) => [row.public_agent_id, row]));
+  for (const localActor of /** @type {any[]} */ (localScene.agents)) {
+    const globalActor = researcherRoster.get(localActor.public_agent_id);
+    const globalStatuses = /** @type {any[]} */ (globalActor?.statuses ?? []);
+    const localStatuses = /** @type {any[]} */ (localActor.statuses);
+    const globalAuras = /** @type {any[]} */ (globalActor?.aura_modifiers ?? []);
+    const localAuras = /** @type {any[]} */ (localActor.aura_modifiers);
+    if (
+      !globalActor ||
+      typeof globalActor !== "object" ||
+      globalActor.team_id !== localActor.team_id ||
+      globalActor.class_id !== localActor.class_id ||
+      globalActor.class_name !== localActor.class_name ||
+      globalActor.life_state !== localActor.life_state ||
+      !liveResearcherFloatMatches(
+        globalActor.current_health,
+        localActor.current_health,
+      ) ||
+      !liveResearcherFloatMatches(
+        globalActor.maximum_health,
+        localActor.maximum_health,
+      ) ||
+      !liveResearcherFloatMatches(
+        globalActor.effective_movement_speed,
+        localActor.effective_movement_speed,
+      ) ||
+      globalActor.ultimate_cooldown_remaining !==
+        localActor.ultimate_cooldown_remaining ||
+      globalActor.spawn_shield_remaining !== localActor.spawn_shield_remaining ||
+      globalActor.steps_until_out_of_combat !== localActor.steps_until_out_of_combat ||
+      globalActor.out_of_combat_delay_steps !== localActor.out_of_combat_delay_steps ||
+      globalStatuses.length !== localStatuses.length ||
+      globalStatuses.some(
+        (status, index) => !liveResearcherStatusMatches(status, localStatuses[index]),
+      ) ||
+      globalAuras.length !== localAuras.length ||
+      globalAuras.some(
+        (aura, index) => !liveResearcherAuraMatches(aura, localAuras[index]),
+      )
+    ) {
+      invalid("Live researcher roster changed a fog-authorized actor fact.");
+    }
+  }
+
+  if (latest !== null) {
+    const localLatest = frame.latest_transition;
+    if (localLatest === null) {
+      invalid("Live researcher Latest lacks its Agent transition.");
+    }
+    const globalRow = /** @type {any[]} */ (latest.action_rows).find(
+      (row) => row.actor_public_agent_id === source.source_recipient_public_agent_id,
+    );
+    const localRow = localLatest.action_rows[0];
+    if (
+      !globalRow ||
+      typeof globalRow !== "object" ||
+      !structurallyEqual(
+        globalRow.target_action_recipient_public_agent_id_by_id,
+        localRow.target_action_recipient_public_agent_id_by_id,
+      ) ||
+      !structurallyEqual(globalRow.submitted_action, localRow.submitted_action) ||
+      !structurallyEqual(globalRow.accepted_action, localRow.accepted_action)
+    ) {
+      invalid("Live researcher Latest changed Agent action semantics.");
+    }
+  }
   return validatePresentationKeyGraph(researcher, {
     authorityKind: "oracle",
   });
@@ -3685,9 +4146,9 @@ function validateSemanticFrame(frame) {
     }
     validateDecisionMask(decisionMask, "Agent next-decision mask");
     validateAgentPrivacy(frame);
-    if (!live) {
-      researcherPresentationKeyPairs = validateReplayResearcherSpace(frame);
-    }
+    researcherPresentationKeyPairs = live
+      ? validateLiveResearcherSpace(frame)
+      : validateReplayResearcherSpace(frame);
   }
   validateAuthorizedScene(scene);
   const sceneAgents = /** @type {any[]} */ (scene.agents);
@@ -3701,7 +4162,7 @@ function validateSemanticFrame(frame) {
   );
   if (actionAxis !== null) validateActionAxis(actionAxis);
   const presentationKeyPairs = validatePresentationKeyGraph(frame, {
-    excludedRootFields: !live && !oracle ? new Set(["researcher_space"]) : new Set(),
+    excludedRootFields: !oracle ? new Set(["researcher_space"]) : new Set(),
   });
 
   const incomingIndex =
@@ -4516,11 +4977,7 @@ function preflightTransportPresentationIdentity(rawValue, presentationValue) {
   );
   if (live) {
     const hud = snapshotRecord(raw.hud, "Live transport HUD identity");
-    if (
-      !["joint_turn", "controlled_actor", "scripted_playback"].includes(
-        hud.pending_submission_scope,
-      )
-    ) {
+    if (!["joint_turn", "scripted_playback"].includes(hud.pending_submission_scope)) {
       invalid("Live raw pending submission scope is malformed.");
     }
     exactNonnegativeInteger(raw.run_generation, "run_generation");

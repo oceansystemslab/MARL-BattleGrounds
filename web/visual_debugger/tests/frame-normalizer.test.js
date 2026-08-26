@@ -625,7 +625,7 @@ function researcherFrame() {
       roster_global_slots: [0, 1],
       controlled_global_slot: 0,
       selected_global_slot: 1,
-      pending_submission_scope: "controlled_actor",
+      pending_submission_scope: "joint_turn",
       pending_actions: [
         {
           label: "PENDING / WILL SUBMIT",
@@ -638,6 +638,18 @@ function researcherFrame() {
           movement_mask_value: true,
           pair_mask_value: true,
           summary: "STAY + BASIC → Agent ID 1",
+        },
+        {
+          label: "PENDING / WILL SUBMIT",
+          actor_global_slot: 1,
+          move_action: 0,
+          target_action: 0,
+          armed_lane: null,
+          arm_origin: null,
+          target: { disclosure: "target_none", global_slot: null },
+          movement_mask_value: true,
+          pair_mask_value: null,
+          summary: "STAY + NO COMBAT",
         },
       ],
       pending_action: {
@@ -1069,6 +1081,18 @@ test("researcher direct status source evidence is exact and roster-joined", () =
     position: [4, 1],
   });
   sourceJoined.hud.roster_global_slots.push(2);
+  sourceJoined.hud.pending_actions.push({
+    label: "PENDING / WILL SUBMIT",
+    actor_global_slot: 2,
+    move_action: 0,
+    target_action: 0,
+    armed_lane: null,
+    arm_origin: null,
+    target: { disclosure: "target_none", global_slot: null },
+    movement_mask_value: true,
+    pair_mask_value: null,
+    summary: "STAY + NO COMBAT",
+  });
   sourceJoined.projection.scene.observer_visibility.push({
     observer_global_slot: 0,
     candidate_global_slot: 2,
@@ -1768,7 +1792,7 @@ function povFrame() {
     },
     hud: {
       controlled_public_agent_id: publicAgentId,
-      pending_submission_scope: "controlled_actor",
+      pending_submission_scope: "joint_turn",
       pending_action: {
         label: "PENDING / WILL SUBMIT",
         actor_public_agent_id: publicAgentId,
@@ -2514,7 +2538,7 @@ test("scripted authority comes from the audience-owned live envelope", () => {
   assert.equal(
     liveDebuggerFrameIsScripted({
       frame_kind: "actor_pov_live_debugger",
-      hud: { pending_submission_scope: "controlled_actor" },
+      hud: { pending_submission_scope: "joint_turn" },
       scenario: { mode: "scripted" },
     }),
     false,
@@ -2528,7 +2552,7 @@ test("scripted authority comes from the audience-owned live envelope", () => {
   assert.equal(
     liveDebuggerScenarioControlsAvailable({
       frame_kind: "actor_pov_live_debugger",
-      hud: { pending_submission_scope: "controlled_actor" },
+      hud: { pending_submission_scope: "joint_turn" },
     }),
     false,
   );

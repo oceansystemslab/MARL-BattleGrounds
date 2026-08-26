@@ -36,6 +36,40 @@ async function currentStep(page) {
 }
 
 /**
+ * Return one global live-researcher roster actor that the current Agent POV
+ * battlefield does not expose. Fog must not be encoded into the roster DOM.
+ *
+ * @param {import("@playwright/test").Page} page
+ */
+async function liveRosterActorOutsideBattlefield(page) {
+  const publicId = (/** @type {string | null} */ label) =>
+    label?.match(/Agent ID ([^,.]+)/u)?.[1] ?? null;
+  const visiblePublicIds = new Set(
+    (
+      await page
+        .locator("#battlefield .agent")
+        .evaluateAll((agents) =>
+          agents.map((agent) => agent.getAttribute("aria-label")),
+        )
+    ).map(publicId),
+  );
+  const rosterActors = page.locator(
+    '#roster .roster-primary-action:not([aria-pressed="true"])',
+  );
+  const labels = await rosterActors.evaluateAll((buttons) =>
+    buttons.map((button) => button.getAttribute("aria-label")),
+  );
+  const index = labels.findIndex((label) => {
+    const candidate = publicId(label);
+    return candidate !== null && !visiblePublicIds.has(candidate);
+  });
+  if (index < 0) {
+    throw new Error("The live researcher roster has no actor outside this snapshot.");
+  }
+  return rosterActors.nth(index);
+}
+
+/**
  * Hold exactly one real authorized-presentation response after the browser has
  * synchronously crossed into pending authority.
  *
@@ -277,6 +311,7 @@ test("authorized draft edit and rapid Submit install exactly one successor", asy
       .dispatchEvent("pointerdown", { button: 0 });
     await page.locator("#battlefield").focus();
     await page.keyboard.press("w");
+    await expect(page.locator("#connection-status")).toHaveText("Input queued");
     await expect.poll(() => commands.length).toBe(2);
     heldSubmitPresentation.release();
   } finally {
@@ -286,7 +321,7 @@ test("authorized draft edit and rapid Submit install exactly one successor", asy
   await expect(page.locator("#step-value")).toHaveText(String(successorStep + 1), {
     timeout: 120_000,
   });
-  await expect.poll(() => commands.length).toBe(2);
+  await expect.poll(() => commands.length).toBe(3);
   expect(
     commands.filter(
       (command) =>
@@ -294,6 +329,11 @@ test("authorized draft edit and rapid Submit install exactly one successor", asy
         String(command.key).toLowerCase() === "enter",
     ),
   ).toHaveLength(1);
+  expect(commands[2]).toMatchObject({
+    command_type: "keyboard",
+    key: "w",
+    repeat: false,
+  });
 
   const transitionId = await page.locator("#transition-value").textContent();
   expect(transitionId).not.toBeNull();
@@ -411,6 +451,7 @@ test("pointer draft keeps battlefield focus and queues one Enter exactly once", 
       new URL(response.url()).pathname === "/api/command",
   );
   const heldKeyboardPresentation = await holdNextPresentation(page);
+  let heldKeyboardSubmitPresentation = null;
   try {
     await keyboardMovement.press("Enter");
     await heldKeyboardPresentation.held;
@@ -419,16 +460,34 @@ test("pointer draft keeps battlefield focus and queues one Enter exactly once", 
     await expect(battlefield).toBeFocused();
     await page.keyboard.press("Enter");
     await expect.poll(() => requests.length).toBe(3);
+    await expect(page.locator("#connection-status")).toHaveText("Submit queued");
+    heldKeyboardSubmitPresentation = await holdNextPresentation(page);
     heldKeyboardPresentation.release();
+    await heldKeyboardSubmitPresentation.held;
+    await expect.poll(() => requests.length).toBe(4);
+    expect(String(requests[2].command.key).toLowerCase()).not.toBe("enter");
+    expect(requests[3].command).toEqual({
+      command_type: "keyboard",
+      key: "Enter",
+      shift_key: false,
+      ctrl_key: false,
+      alt_key: false,
+      meta_key: false,
+      repeat: false,
+    });
+    expect(requests[3].command_id).not.toBe(requests[2].command_id);
+    expect(requests[3].base_revision).toBe(requests[2].base_revision + 1);
+    heldKeyboardSubmitPresentation.release();
   } finally {
     heldKeyboardPresentation.release();
     await heldKeyboardPresentation.dispose();
+    heldKeyboardSubmitPresentation?.release();
+    await heldKeyboardSubmitPresentation?.dispose();
   }
-  await expect.poll(() => requests.length).toBe(3);
+  await expect.poll(() => requests.length).toBe(4);
   await expect(page.locator("#connection-status")).toHaveText("Online");
   await expect(keyboardMovement).toBeFocused();
-  expect(String(requests[2].command.key).toLowerCase()).not.toBe("enter");
-  await expect(page.locator("#step-value")).toHaveText(String(baseStep + 1));
+  await expect(page.locator("#step-value")).toHaveText(String(baseStep + 2));
   await page.unroute("**/api/command");
 });
 
@@ -587,6 +646,7 @@ test("target selection preserves pointer Submit and keyboard-native focus", asyn
     return currentIndex < enabled.length - 1 ? "ArrowDown" : "ArrowUp";
   });
   const heldKeyboardPresentation = await holdNextPresentation(page);
+  let heldKeyboardSubmitPresentation = null;
   try {
     await targetSelect.focus();
     await page.keyboard.press(keyboardDirection);
@@ -595,17 +655,328 @@ test("target selection preserves pointer Submit and keyboard-native focus", asyn
     await expect(battlefield).toBeFocused();
     await page.keyboard.press("Enter");
     await expect.poll(() => requests.length).toBe(3);
+    await expect(page.locator("#connection-status")).toHaveText("Submit queued");
+    heldKeyboardSubmitPresentation = await holdNextPresentation(page);
     heldKeyboardPresentation.release();
+    await heldKeyboardSubmitPresentation.held;
+    await expect.poll(() => requests.length).toBe(4);
+    expect(requests[2].command.command_type).not.toBe("keyboard");
+    expect(String(requests[3].command.key).toLowerCase()).toBe("enter");
+    expect(requests[3].command_id).not.toBe(requests[2].command_id);
+    expect(requests[3].base_revision).toBe(requests[2].base_revision + 1);
+    heldKeyboardSubmitPresentation.release();
   } finally {
     heldKeyboardPresentation.release();
     await heldKeyboardPresentation.dispose();
+    heldKeyboardSubmitPresentation?.release();
+    await heldKeyboardSubmitPresentation?.dispose();
   }
   await expect(page.locator("#connection-status")).toHaveText("Online");
-  await expect.poll(() => requests.length).toBe(3);
-  expect(requests[2].command.command_type).not.toBe("keyboard");
+  await expect.poll(() => requests.length).toBe(4);
   await expect(targetSelect).toBeFocused();
-  await expect(page.locator("#step-value")).toHaveText(String(baseStep + 1));
+  await expect(page.locator("#step-value")).toHaveText(String(baseStep + 2));
   await page.unroute("**/api/command");
+});
+
+test("Agent pointer roster selection queues movement before one Enter", async ({
+  page,
+}) => {
+  /** @type {Record<string, any>[]} */
+  const requests = [];
+  await page.route("**/api/command", async (route) => {
+    requests.push(route.request().postDataJSON());
+    await route.continue();
+  });
+
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  const viewSelect = page.locator("#view-select");
+  await viewSelect.selectOption("pov");
+  await expect(viewSelect).toHaveValue("pov");
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await expect(page.locator("html")).toHaveAttribute(
+    "data-presentation-authority",
+    "installed",
+  );
+  const initialRosterActorLabel = await page
+    .locator('#roster .roster-primary-action[aria-pressed="true"]')
+    .getAttribute("aria-label");
+  if (initialRosterActorLabel === null) {
+    throw new Error("Agent POV has no initially controlled roster actor.");
+  }
+  requests.length = 0;
+
+  const baseStep = await currentStep(page);
+  const battlefield = page.locator("#battlefield");
+  const hiddenRosterActor = await liveRosterActorOutsideBattlefield(page);
+  await expect(hiddenRosterActor).toBeVisible();
+
+  const heldRosterPresentation = await holdNextPresentation(page);
+  try {
+    await hiddenRosterActor.click();
+    await heldRosterPresentation.held;
+    await expect(page.locator("#connection-status")).toHaveText("Command in flight");
+    await expect(battlefield).toBeFocused();
+    await expect.poll(() => requests.length).toBe(1);
+
+    await page.keyboard.press("w");
+    await expect(page.locator("#connection-status")).toHaveText("Input queued");
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#connection-status")).toHaveText("Submit queued");
+    await expect.poll(() => requests.length).toBe(1);
+
+    heldRosterPresentation.release();
+  } finally {
+    heldRosterPresentation.release();
+    await heldRosterPresentation.dispose();
+  }
+
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await expect(page.locator("#step-value")).toHaveText(String(baseStep + 1), {
+    timeout: 120_000,
+  });
+  await expect.poll(() => requests.length).toBe(3);
+  expect(requests[0].command).toMatchObject({
+    command_type: "roster_selection",
+    role: "control",
+  });
+  expect(requests[1].command).toMatchObject({
+    command_type: "keyboard",
+    key: "w",
+    repeat: false,
+  });
+  expect(requests[2].command).toEqual({
+    command_type: "keyboard",
+    key: "Enter",
+    shift_key: false,
+    ctrl_key: false,
+    alt_key: false,
+    meta_key: false,
+    repeat: false,
+  });
+  expect(requests[1].command_id).not.toBe(requests[0].command_id);
+  expect(requests[2].command_id).not.toBe(requests[1].command_id);
+  expect(requests[1].base_revision).toBe(requests[0].base_revision + 1);
+  expect(requests[2].base_revision).toBe(requests[1].base_revision + 1);
+  await expect(battlefield).toBeFocused();
+
+  await page.unroute("**/api/command");
+  await page
+    .getByRole("button", { name: initialRosterActorLabel, exact: true })
+    .click();
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await viewSelect.selectOption("researcher");
+  await expect(viewSelect).toHaveValue("researcher");
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+});
+
+test("Agent keyboard roster selection retains researcher focus without submitting", async ({
+  page,
+}) => {
+  /** @type {Record<string, any>[]} */
+  const requests = [];
+  await page.route("**/api/command", async (route) => {
+    requests.push(route.request().postDataJSON());
+    await route.continue();
+  });
+
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  const viewSelect = page.locator("#view-select");
+  await viewSelect.selectOption("pov");
+  await expect(viewSelect).toHaveValue("pov");
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+
+  const initialRosterActorLabel = await page
+    .locator('#roster .roster-primary-action[aria-pressed="true"]')
+    .getAttribute("aria-label");
+  if (initialRosterActorLabel === null) {
+    throw new Error("Agent POV has no initially controlled roster actor.");
+  }
+  const hiddenRosterActor = await liveRosterActorOutsideBattlefield(page);
+  await expect(hiddenRosterActor).toBeVisible();
+  const focusedPresentationKey = await hiddenRosterActor.getAttribute(
+    "data-presentation-key",
+  );
+  if (focusedPresentationKey === null) {
+    throw new Error("Agent researcher roster action has no presentation key.");
+  }
+  const baseStep = await currentStep(page);
+  requests.length = 0;
+
+  const heldRosterPresentation = await holdNextPresentation(page);
+  try {
+    await hiddenRosterActor.press("Enter");
+    await heldRosterPresentation.held;
+    await expect(page.locator("#connection-status")).toHaveText("Command in flight");
+    await expect.poll(() => requests.length).toBe(1);
+    heldRosterPresentation.release();
+  } finally {
+    heldRosterPresentation.release();
+    await heldRosterPresentation.dispose();
+  }
+
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await expect(page.locator("#step-value")).toHaveText(String(baseStep));
+  await expect.poll(() => requests.length).toBe(1);
+  expect(requests[0].command).toMatchObject({
+    command_type: "roster_selection",
+    role: "control",
+  });
+  await expect
+    .poll(() =>
+      page.evaluate(() => ({
+        surface: document.activeElement?.closest("#roster")?.id ?? null,
+        presentationKey:
+          document.activeElement
+            ?.closest("[data-presentation-key]")
+            ?.getAttribute("data-presentation-key") ?? null,
+      })),
+    )
+    .toEqual({ surface: "roster", presentationKey: focusedPresentationKey });
+
+  await page.unroute("**/api/command");
+  await viewSelect.evaluate((select) => {
+    if (!(select instanceof HTMLSelectElement)) {
+      throw new TypeError("View mode control is unavailable.");
+    }
+    select.value = "researcher";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await expect(viewSelect).toHaveValue("researcher");
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await expectExactDisclosureDefaults(page);
+  await expect
+    .poll(() =>
+      page.evaluate(() => document.activeElement?.closest("#roster") === null),
+    )
+    .toBe(true);
+
+  await page
+    .getByRole("button", { name: initialRosterActorLabel, exact: true })
+    .click();
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+});
+
+test("Agent keyboard battlefield activation rebinds focus to the authorized successor", async ({
+  page,
+}) => {
+  /** @type {Record<string, any>[]} */
+  const requests = [];
+  await page.route("**/api/command", async (route) => {
+    requests.push(route.request().postDataJSON());
+    await route.continue();
+  });
+
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  const viewSelect = page.locator("#view-select");
+  await viewSelect.selectOption("pov");
+  await expect(viewSelect).toHaveValue("pov");
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+
+  const initialRosterActorLabel = await page
+    .locator('#roster .roster-primary-action[aria-pressed="true"]')
+    .getAttribute("aria-label");
+  const initialPublicId = initialRosterActorLabel?.match(/Agent ID ([^.]+)/u)?.[1];
+  if (initialRosterActorLabel === null || initialPublicId === undefined) {
+    throw new Error("Agent POV has no parseable initially controlled actor.");
+  }
+  const battlefieldActors = page.locator("#battlefield .agent[data-presentation-key]");
+  const labels = await battlefieldActors.evaluateAll((actors) =>
+    actors.map((actor) => actor.getAttribute("aria-label")),
+  );
+  const targetIndex = labels.findIndex(
+    (label) =>
+      typeof label === "string" && !label.startsWith(`Agent ID ${initialPublicId}.`),
+  );
+  if (targetIndex < 0) {
+    throw new Error("Agent POV has no visible non-controlled battlefield actor.");
+  }
+  const target = battlefieldActors.nth(targetIndex);
+  const targetLabel = await target.getAttribute("aria-label");
+  const oldPresentationKey = await target.getAttribute("data-presentation-key");
+  const targetPublicId = targetLabel?.match(/Agent ID ([^.]+)/u)?.[1];
+  if (
+    targetLabel === null ||
+    oldPresentationKey === null ||
+    targetPublicId === undefined
+  ) {
+    throw new Error("Visible Agent battlefield actor lacks its public identity.");
+  }
+  await setDisclosureOpen(page, "#technical-frame-details", true);
+  const ranges = page.locator("#live-ranges-button");
+  if ((await ranges.getAttribute("aria-pressed")) !== "false") {
+    await ranges.click();
+  }
+  await expect(ranges).toHaveAttribute("aria-pressed", "false");
+  await expect(page.locator("#agent-details")).not.toHaveAttribute("open", "");
+  const baseStep = await currentStep(page);
+  requests.length = 0;
+
+  const heldPresentation = await holdNextPresentation(page);
+  try {
+    await target.press("Enter");
+    await heldPresentation.held;
+    await expect(page.locator("#connection-status")).toHaveText("Command in flight");
+    await expect.poll(() => requests.length).toBe(1);
+    heldPresentation.release();
+  } finally {
+    heldPresentation.release();
+    await heldPresentation.dispose();
+  }
+
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await expect(page.locator("#step-value")).toHaveText(String(baseStep));
+  await expect.poll(() => requests.length).toBe(1);
+  expect(requests[0].command).toMatchObject({
+    command_type: "roster_selection",
+    role: "control",
+  });
+  await expect(page.locator("#command-controlled-actor")).toContainText(
+    `Agent ID ${targetPublicId}`,
+  );
+  await expect(page.locator("#agent-details")).toHaveAttribute("open", "");
+  await expect(page.locator("#technical-frame-details")).toHaveAttribute("open", "");
+  await expect(ranges).toHaveAttribute("aria-pressed", "false");
+  const restoredFocus = await page.evaluate(() => ({
+    inBattlefield: Boolean(document.activeElement?.closest("#battlefield")),
+    label: document.activeElement?.getAttribute("aria-label") ?? null,
+    presentationKey:
+      document.activeElement?.getAttribute("data-presentation-key") ?? null,
+  }));
+  expect(restoredFocus).toMatchObject({
+    inBattlefield: true,
+    label: targetLabel,
+  });
+  expect(restoredFocus.presentationKey).not.toBe(oldPresentationKey);
+
+  await page.unroute("**/api/command");
+  await viewSelect.evaluate((select) => {
+    if (!(select instanceof HTMLSelectElement)) {
+      throw new TypeError("View mode control is unavailable.");
+    }
+    select.value = "researcher";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await expect(viewSelect).toHaveValue("researcher");
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await expect(page.locator("#command-controlled-actor")).toContainText(
+    `Agent ID ${targetPublicId}`,
+  );
+  await expectExactDisclosureDefaults(page);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => document.activeElement?.matches("#battlefield .agent") ?? false,
+      ),
+    )
+    .toBe(false);
+
+  await page
+    .getByRole("button", { name: initialRosterActorLabel, exact: true })
+    .click();
+  await expect(page.locator("#connection-status")).toHaveText("Online");
 });
 
 test("right click stays native while Escape alone clears the target and releases focus", async ({
@@ -679,7 +1050,10 @@ test("right click stays native while Escape alone clears the target and releases
   await battlefield.focus();
   await page.keyboard.press("Escape");
   await expect.poll(() => commands.length).toBe(1);
-  expect(commands[0]).toMatchObject({ command_type: "keyboard", key: "Escape" });
+  expect(commands[0]).toMatchObject({
+    command_type: "keyboard",
+    key: "Escape",
+  });
   await expect(page.locator("#connection-status")).toHaveText("Online");
   await expect(targetSelect).toHaveValue("");
   await expect(battlefield).not.toBeFocused();
@@ -786,6 +1160,140 @@ test("WASD followed immediately by Enter submits the installed draft once", asyn
   await expect(page.locator("#connection-status")).toHaveText("Online");
   await expect(battlefield).toBeFocused();
   await page.unroute("**/api/command");
+});
+
+for (const [viewLabel, viewValue] of [
+  ["Oracle", "researcher"],
+  ["Agent", "pov"],
+]) {
+  test(`${viewLabel} queues next-turn WASD and Enter behind an in-flight Submit`, async ({
+    page,
+  }) => {
+    /** @type {Record<string, any>[]} */
+    const requests = [];
+    await page.route("**/api/command", async (route) => {
+      requests.push(route.request().postDataJSON());
+      await route.continue();
+    });
+
+    await page.goto(debuggerUrl);
+    await expect(page.locator("#connection-status")).toHaveText("Online");
+    const viewSelect = page.locator("#view-select");
+    if (viewValue === "pov") {
+      await viewSelect.selectOption(viewValue);
+      await expect(viewSelect).toHaveValue(viewValue);
+      await expect(page.locator("#connection-status")).toHaveText("Online");
+    }
+    requests.length = 0;
+
+    const baseStep = await currentStep(page);
+    const battlefield = page.locator("#battlefield");
+    await battlefield.focus();
+    const heldSubmitPresentation = await holdNextPresentation(page);
+    let heldDraftPresentation = null;
+    try {
+      await page.keyboard.press("Enter");
+      await heldSubmitPresentation.held;
+      await expect(page.locator("#connection-status")).toHaveText("Command in flight");
+      await expect.poll(() => requests.length).toBe(1);
+      await expect(battlefield).toBeFocused();
+
+      await page.keyboard.press("w");
+      await expect(page.locator("#connection-status")).toHaveText("Input queued");
+      await page.keyboard.press("Enter");
+      await expect(page.locator("#connection-status")).toHaveText("Submit queued");
+      await expect.poll(() => requests.length).toBe(1);
+      heldDraftPresentation = await holdNextPresentation(page);
+      heldSubmitPresentation.release();
+      await heldDraftPresentation.held;
+      await expect.poll(() => requests.length).toBe(2);
+      expect(String(requests[1].command.key).toLowerCase()).toBe("w");
+      await expect(page.locator("#connection-status")).toHaveText("Submit queued");
+
+      await page.keyboard.press("a");
+      await expect.poll(() => requests.length).toBe(2);
+      await expect(page.locator("#connection-status")).toHaveText("Submit queued");
+      await page.keyboard.press("Escape");
+      await expect.poll(() => requests.length).toBe(2);
+      await expect(page.locator("#connection-status")).toHaveText("Submit queued");
+      heldDraftPresentation.release();
+    } finally {
+      heldSubmitPresentation.release();
+      await heldSubmitPresentation.dispose();
+      heldDraftPresentation?.release();
+      await heldDraftPresentation?.dispose();
+    }
+
+    await expect.poll(() => requests.length, { timeout: 120_000 }).toBe(3);
+    expect(
+      requests.map((request) => String(request.command.key).toLowerCase()),
+    ).toEqual(["enter", "w", "enter"]);
+    expect(requests[1].command_id).not.toBe(requests[0].command_id);
+    expect(requests[2].command_id).not.toBe(requests[1].command_id);
+    expect(requests[1].base_revision).toBe(requests[0].base_revision + 1);
+    expect(requests[2].base_revision).toBe(requests[1].base_revision + 1);
+    await expect(page.locator("#step-value")).toHaveText(String(baseStep + 2), {
+      timeout: 120_000,
+    });
+    await expect(page.locator("#connection-status")).toHaveText("Online");
+    await expect(battlefield).not.toBeFocused();
+    await page.unroute("**/api/command");
+    if (viewValue === "pov") {
+      await viewSelect.selectOption("researcher");
+      await expect(viewSelect).toHaveValue("researcher");
+      await expect(page.locator("#connection-status")).toHaveText("Online");
+    }
+    await page.locator("#reset-button").click();
+    await expect(page.locator("#connection-status")).toHaveText("Online");
+    await expect(page.locator("#step-value")).toHaveText("0");
+  });
+}
+
+test("queued Escape preserves its direct battlefield focus release", async ({
+  page,
+}) => {
+  /** @type {Record<string, any>[]} */
+  const requests = [];
+  await page.route("**/api/command", async (route) => {
+    requests.push(route.request().postDataJSON());
+    await route.continue();
+  });
+
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  const baseStep = await currentStep(page);
+  const battlefield = page.locator("#battlefield");
+  await battlefield.focus();
+  const heldSubmitPresentation = await holdNextPresentation(page);
+  try {
+    await page.keyboard.press("Enter");
+    await heldSubmitPresentation.held;
+    await expect(page.locator("#connection-status")).toHaveText("Command in flight");
+    await expect.poll(() => requests.length).toBe(1);
+
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#connection-status")).toHaveText("Input queued");
+    await expect.poll(() => requests.length).toBe(1);
+    heldSubmitPresentation.release();
+  } finally {
+    heldSubmitPresentation.release();
+    await heldSubmitPresentation.dispose();
+  }
+
+  await expect.poll(() => requests.length, { timeout: 120_000 }).toBe(2);
+  expect(requests.map((request) => String(request.command.key).toLowerCase())).toEqual([
+    "enter",
+    "escape",
+  ]);
+  await expect(page.locator("#step-value")).toHaveText(String(baseStep + 1), {
+    timeout: 120_000,
+  });
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await expect(battlefield).not.toBeFocused();
+  await page.unroute("**/api/command");
+  await page.locator("#reset-button").click();
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await expect(page.locator("#step-value")).toHaveText("0");
 });
 
 test("battlefield Space submits once and consumes busy repeats without scrolling", async ({
@@ -929,19 +1437,39 @@ test("a lost applied response requires GET resync and never replays submit", asy
     "live_editable",
   );
   const baseStep = await currentStep(page);
+  let markAppliedResponseHeld = () => {};
+  let releaseAppliedResponse = () => {};
+  const appliedResponseHeld = new Promise((resolve) => {
+    markAppliedResponseHeld = () => resolve(undefined);
+  });
+  const appliedResponseRelease = new Promise((resolve) => {
+    releaseAppliedResponse = () => resolve(undefined);
+  });
   let interceptedCommands = 0;
   let appliedStatus = 0;
   await page.route("**/api/command", async (route) => {
     interceptedCommands += 1;
     const response = await route.fetch();
     appliedStatus = response.status();
+    markAppliedResponseHeld();
+    await appliedResponseRelease;
     await route.abort("failed");
   });
 
   const battlefield = page.locator("#battlefield");
-  await battlefield.focus();
-  await page.keyboard.press("Enter");
+  try {
+    await battlefield.focus();
+    await page.keyboard.press("Enter");
+    await appliedResponseHeld;
+    await expect(page.locator("#connection-status")).toHaveText("Command in flight");
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#connection-status")).toHaveText("Input queued");
+    await expect.poll(() => interceptedCommands).toBe(1);
+  } finally {
+    releaseAppliedResponse();
+  }
   await expect(page.locator("#connection-status")).toHaveText("Resync required");
+  await expect(battlefield).not.toBeFocused();
   await expect(page.locator("html")).toHaveAttribute(
     "data-presentation-authority",
     "retained",

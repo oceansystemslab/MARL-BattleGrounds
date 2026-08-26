@@ -110,10 +110,29 @@ def test_live_no_shared_excludes_oracle_ids_and_diagnostics() -> None:
         for event_id in visual_events.ordered_event_ids
     )
     payload = result.payload.model_dump(mode="json")
+    researcher_space = cast(dict[str, object], payload.pop("researcher_space"))
     keys = _recursive_keys(payload)
     strings = _recursive_string_values(payload)
 
     assert not (strings & forbidden_values)
+    researcher_keys = _recursive_keys(researcher_space)
+    assert not researcher_keys.intersection(
+        {
+            "actor_anchor",
+            "center",
+            "events",
+            "latest_events",
+            "map",
+            "pending_route",
+            "position",
+            "ranges",
+            "respawn_waves",
+            "scene",
+            "spawn_pads",
+            "target_anchor",
+            "visual_events",
+        }
+    )
     forbidden_exact_keys = {
         "aura_facts",
         "canonical_reward_by_agent",
@@ -184,6 +203,12 @@ def test_live_no_shared_rejects_separately_valid_cross_swapped_pairs() -> None:
     _switch_to_pov(service)
     current_zero, carrier_zero, raw_zero = _recipient_pair(service)
     catalog = service.session.evaluation_context.static_mechanics_catalog
+    zero_presentation = service.current_presentation()
+    assert zero_presentation.outcome == "response"
+    assert (
+        type(zero_presentation.payload) is LiveNoSharedObsAuthorizedPresentationFrameV1
+    )
+    researcher_zero = zero_presentation.payload.researcher_space
     accepted_zero = build_live_no_shared_obs_authorized_presentation_v1(
         current_zero,
         carrier_zero,
@@ -192,6 +217,7 @@ def test_live_no_shared_rejects_separately_valid_cross_swapped_pairs() -> None:
         incoming_visual_events=build_visual_event_batch_v2(
             cast(EvaluationTransitionViewV1, service.session.incoming_evaluation_view)
         ),
+        researcher_space=researcher_zero,
     )
 
     switched = service.apply_command(
@@ -203,6 +229,12 @@ def test_live_no_shared_rejects_separately_valid_cross_swapped_pairs() -> None:
     )
     assert switched.outcome == "response"
     current_one, carrier_one, raw_one = _recipient_pair(service)
+    one_presentation = service.current_presentation()
+    assert one_presentation.outcome == "response"
+    assert (
+        type(one_presentation.payload) is LiveNoSharedObsAuthorizedPresentationFrameV1
+    )
+    researcher_one = one_presentation.payload.researcher_space
     accepted_one = build_live_no_shared_obs_authorized_presentation_v1(
         current_one,
         carrier_one,
@@ -211,6 +243,7 @@ def test_live_no_shared_rejects_separately_valid_cross_swapped_pairs() -> None:
         incoming_visual_events=build_visual_event_batch_v2(
             cast(EvaluationTransitionViewV1, service.session.incoming_evaluation_view)
         ),
+        researcher_space=researcher_one,
     )
     assert accepted_zero.source.source_recipient_public_agent_id != (
         accepted_one.source.source_recipient_public_agent_id
@@ -231,6 +264,7 @@ def test_live_no_shared_rejects_separately_valid_cross_swapped_pairs() -> None:
                     service.session.incoming_evaluation_view,
                 )
             ),
+            researcher_space=researcher_zero,
         )
     with pytest.raises(
         ValueError,
@@ -247,6 +281,7 @@ def test_live_no_shared_rejects_separately_valid_cross_swapped_pairs() -> None:
                     service.session.incoming_evaluation_view,
                 )
             ),
+            researcher_space=researcher_one,
         )
 
 

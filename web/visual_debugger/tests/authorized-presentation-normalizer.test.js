@@ -176,6 +176,273 @@ test("all five exact Python presentation leaves normalize repeatably and freeze"
   assertRecursivelyFrozen(AUTHORIZED_PRESENTATION_SCHEMA_V1);
 });
 
+test("live Agent keeps a fog-local battlefield beside one global researcher-space epoch", async () => {
+  const source = fixture.presentations.live_no_shared_obs_agent_pov;
+  const normalized = await normalizeAuthorizedPresentationFrameV1(source);
+  const researcher = normalized.researcher_space;
+  const localScene = presentationScene(normalized);
+  assert.equal(researcher.researcher_space_kind, "global_live_researcher_space");
+  assert.equal(researcher.source_revision, normalized.source.source_revision);
+  assert.equal(
+    researcher.source_authority_epoch,
+    normalized.source.source_authority_epoch,
+  );
+  assert.equal(researcher.frame_index, normalized.source.source_frame_index);
+  assert.equal(
+    researcher.simulator_step_count,
+    normalized.source.source_simulator_step_count,
+  );
+  assert.equal(
+    researcher.selected_public_agent_id,
+    normalized.authority.recipient_public_agent_id,
+  );
+  assert.equal(
+    researcher.roster_agents.length,
+    researcher.identity_directory.identities.filter(
+      (/** @type {Record<string, any>} */ row) => row.configured_active,
+    ).length,
+  );
+  assert.equal(
+    researcher.roster_agents.some(
+      (/** @type {Record<string, any>} */ row) =>
+        !localScene.agents.some(
+          (/** @type {Record<string, any>} */ local) =>
+            local.public_agent_id === row.public_agent_id,
+        ),
+    ),
+    true,
+  );
+  assert.equal(researcher.latest_transition.action_rows.length, 5);
+  assert.equal(normalized.latest_transition.action_rows.length, 1);
+  assert.equal(
+    researcher.technical_frame.technical_kind,
+    "live_oracle_technical_frame",
+  );
+  assert.equal(
+    normalized.technical_frame.technical_kind,
+    "live_no_shared_obs_technical_frame",
+  );
+  assert.equal(researcher.pending_inspection.submission_scope, "joint_turn");
+  assert.equal(
+    researcher.pending_inspection.draft.actor_public_agent_id,
+    researcher.selected_public_agent_id,
+  );
+  for (const forbidden of [
+    '"position"',
+    '"map"',
+    '"spawn_pads"',
+    '"respawn_waves"',
+    '"aura_fields"',
+    '"actor_anchor"',
+    '"target_anchor"',
+  ]) {
+    assert.equal(JSON.stringify(researcher).includes(forbidden), false, forbidden);
+  }
+
+  const wrongEpoch = clone(source);
+  wrongEpoch.researcher_space.source_revision += 1;
+  await assert.rejects(normalizeAuthorizedPresentationFrameV1(wrongEpoch), TypeError);
+
+  const geometry = clone(source);
+  geometry.researcher_space.roster_agents[0].position = [1, 2];
+  await assert.rejects(normalizeAuthorizedPresentationFrameV1(geometry), TypeError);
+
+  const targetAxis = clone(source);
+  const latestAxis =
+    targetAxis.researcher_space.latest_transition.action_rows[0]
+      .target_action_recipient_public_agent_id_by_id;
+  [latestAxis[1], latestAxis[2]] = [latestAxis[2], latestAxis[1]];
+  await assert.rejects(normalizeAuthorizedPresentationFrameV1(targetAxis), TypeError);
+
+  const visibleFact = clone(source);
+  const visiblePublicId =
+    visibleFact.current_endpoint.parts.scene.agents[0].public_agent_id;
+  const visibleGlobalActor = visibleFact.researcher_space.roster_agents.find(
+    (/** @type {Record<string, any>} */ row) => row.public_agent_id === visiblePublicId,
+  );
+  visibleGlobalActor.current_health =
+    visibleGlobalActor.current_health === visibleGlobalActor.maximum_health
+      ? visibleGlobalActor.current_health - 0.25
+      : Math.min(
+          visibleGlobalActor.maximum_health,
+          visibleGlobalActor.current_health + 0.25,
+        );
+  await assert.rejects(
+    normalizeAuthorizedPresentationFrameV1(visibleFact),
+    /Live researcher roster changed a fog-authorized actor fact\./u,
+  );
+
+  const visibleClass = clone(source);
+  const visibleClassId =
+    visibleClass.current_endpoint.parts.scene.class_mechanics[0].class_id;
+  visibleClass.researcher_space.class_mechanics.find(
+    (/** @type {Record<string, any>} */ row) => row.class_id === visibleClassId,
+  ).basic_raw_damage += 1;
+  await assert.rejects(
+    normalizeAuthorizedPresentationFrameV1(visibleClass),
+    /Live researcher class mechanics changed a fog-authorized class\./u,
+  );
+
+  const latestAction = clone(source);
+  const recipientPublicId = latestAction.source.source_recipient_public_agent_id;
+  latestAction.researcher_space.latest_transition.action_rows.find(
+    (/** @type {Record<string, any>} */ row) =>
+      row.actor_public_agent_id === recipientPublicId,
+  ).submitted_action.move_action = 1;
+  await assert.rejects(
+    normalizeAuthorizedPresentationFrameV1(latestAction),
+    /Live researcher Latest changed Agent action semantics\./u,
+  );
+});
+
+test("live and replay researcher spaces reject hidden standalone fact poison", async () => {
+  for (const kind of [
+    "live_no_shared_obs_agent_pov",
+    "replay_no_shared_obs_agent_pov",
+    "replay_shared_obs_agent_pov",
+  ]) {
+    const source = fixture.presentations[kind];
+    const localPublicIds = new Set(
+      presentationScene(source).agents.map(
+        (/** @type {Record<string, any>} */ agent) => agent.public_agent_id,
+      ),
+    );
+    const hiddenIndex = source.researcher_space.roster_agents.findIndex(
+      (/** @type {Record<string, any>} */ agent) =>
+        !localPublicIds.has(agent.public_agent_id),
+    );
+    assert.notEqual(hiddenIndex, -1, `${kind} requires a hidden researcher row`);
+    const hiddenClassId = source.researcher_space.roster_agents[hiddenIndex].class_id;
+    const statusTemplate = source.researcher_space.roster_agents
+      .flatMap((/** @type {Record<string, any>} */ agent) => agent.statuses)
+      .at(0);
+    const auraTemplate = source.researcher_space.roster_agents
+      .flatMap((/** @type {Record<string, any>} */ agent) => agent.aura_modifiers)
+      .at(0);
+    assert.ok(statusTemplate, `${kind} requires one status template`);
+    assert.ok(auraTemplate, `${kind} requires one aura template`);
+
+    /** @type {{label: string, mutate: (candidate: Record<string, any>) => void}[]} */
+    const mutations = [
+      {
+        label: "health above maximum",
+        mutate(candidate) {
+          const hidden = candidate.researcher_space.roster_agents[hiddenIndex];
+          hidden.current_health = hidden.maximum_health + 1;
+        },
+      },
+      {
+        label: "maximum health outside class mechanics",
+        mutate(candidate) {
+          candidate.researcher_space.roster_agents[hiddenIndex].maximum_health += 1;
+        },
+      },
+      {
+        label: "duplicate hidden status channel",
+        mutate(candidate) {
+          candidate.researcher_space.roster_agents[hiddenIndex].statuses.push(
+            clone(statusTemplate),
+            clone(statusTemplate),
+          );
+        },
+      },
+      {
+        label: "hidden status outside its catalog family",
+        mutate(candidate) {
+          const status = clone(statusTemplate);
+          status.family = status.family === "slow" ? "stun" : "slow";
+          candidate.researcher_space.roster_agents[hiddenIndex].statuses.push(status);
+        },
+      },
+      {
+        label: "duplicate hidden aura",
+        mutate(candidate) {
+          candidate.researcher_space.roster_agents[hiddenIndex].aura_modifiers.push(
+            clone(auraTemplate),
+            clone(auraTemplate),
+          );
+        },
+      },
+      {
+        label: "hidden class name outside the catalog",
+        mutate(candidate) {
+          candidate.researcher_space.class_mechanics.find(
+            (/** @type {Record<string, any>} */ row) => row.class_id === hiddenClassId,
+          ).class_name = "Wrong Class";
+        },
+      },
+      {
+        label: "mixed hidden V1 and V2 class mechanics",
+        mutate(candidate) {
+          const mechanics = candidate.researcher_space.class_mechanics.find(
+            (/** @type {Record<string, any>} */ row) => row.class_id === hiddenClassId,
+          );
+          delete mechanics.mechanics_version;
+          delete mechanics.documentation_profile;
+        },
+      },
+      {
+        label: "hidden class with another class status mechanic",
+        mutate(candidate) {
+          const mechanics = candidate.researcher_space.class_mechanics;
+          const hidden = mechanics.find(
+            (/** @type {Record<string, any>} */ row) => row.class_id === hiddenClassId,
+          );
+          const foreign = mechanics
+            .filter(
+              (/** @type {Record<string, any>} */ row) =>
+                row.class_id !== hiddenClassId,
+            )
+            .flatMap((/** @type {Record<string, any>} */ row) => row.status_mechanics)
+            .find(
+              (/** @type {Record<string, any>} */ status) =>
+                !hidden.status_mechanics.some(
+                  (/** @type {Record<string, any>} */ current) =>
+                    current.status_channel === status.status_channel,
+                ),
+            );
+          assert.ok(foreign);
+          hidden.status_mechanics.push(clone(foreign));
+          hidden.status_mechanics.sort(
+            (
+              /** @type {Record<string, any>} */ left,
+              /** @type {Record<string, any>} */ right,
+            ) => left.status_channel - right.status_channel,
+          );
+        },
+      },
+      {
+        label: "hidden class with another class aura mechanic",
+        mutate(candidate) {
+          const mechanics = candidate.researcher_space.class_mechanics;
+          const hidden = mechanics.find(
+            (/** @type {Record<string, any>} */ row) => row.class_id === hiddenClassId,
+          );
+          const foreign = mechanics
+            .filter(
+              (/** @type {Record<string, any>} */ row) =>
+                row.class_id !== hiddenClassId,
+            )
+            .flatMap((/** @type {Record<string, any>} */ row) => row.aura_mechanics)
+            .at(0);
+          assert.ok(foreign);
+          hidden.aura_mechanics.push(clone(foreign));
+        },
+      },
+    ];
+
+    for (const { label, mutate } of mutations) {
+      const candidate = clone(source);
+      mutate(candidate);
+      await assert.rejects(
+        normalizeAuthorizedPresentationFrameV1(candidate),
+        TypeError,
+        `${kind}: ${label}`,
+      );
+    }
+  }
+});
+
 test("Oracle incoming left-combat events require a successor anchor", async () => {
   const candidate = clone(fixture.presentations.replay_oracle);
   const summary = candidate.latest_events;
@@ -983,6 +1250,9 @@ test("action semantics, endpoint identity, and authority key derivation match Py
   draftLegality.live_inspection.inspection.draft.draft_legality.move_action_is_legal =
     !draftLegality.live_inspection.inspection.draft.draft_legality.move_action_is_legal;
 
+  const researcherDraftDivergence = clone(liveAgent);
+  researcherDraftDivergence.researcher_space.pending_inspection.draft.draft_action.move_action = 1;
+
   const targetVariant = clone(replayAgent);
   const visibleIndex =
     targetVariant.replay_inspection.decision_mask.target_actions.findIndex(
@@ -1033,6 +1303,11 @@ test("action semantics, endpoint identity, and authority key derivation match Py
     (/** @type {any} */ event) => event.source_anchor,
   );
   anchoredEvent.source_anchor.position[0] += 0.25;
+
+  await assert.rejects(
+    normalizeAuthorizedPresentationFrameV1(researcherDraftDivergence),
+    /Live researcher draft changed Agent action semantics\./u,
+  );
 
   for (const poisoned of [
     combatLane,
@@ -1363,6 +1638,15 @@ test("every coherent raw identity tuple mismatch is a retryable race before endp
       wrongPreset,
       `${kind}: preset must remain analysis`,
     );
+    if (live) {
+      const retiredControlledActorScope = clone(pair.transport);
+      retiredControlledActorScope.hud.pending_submission_scope = "controlled_actor";
+      await assertProtocolPoisonBeforeEndpoint(
+        pair,
+        retiredControlledActorScope,
+        `${kind}: retired controlled-actor scope is rejected`,
+      );
+    }
   }
 
   const replayOracle = fixture.pairs.replay_oracle;
@@ -1704,7 +1988,7 @@ test("raw Shared and retired diagnostic roots are never presentation leaves", as
   }
 });
 
-test("Agent local branches stay private while Replay researcher facts remain narrowly global", async () => {
+test("Agent local branches stay private while live and Replay researcher facts remain geometry-free and global", async () => {
   for (const kind of kinds.filter((value) => value.includes("agent_pov"))) {
     const normalized = await normalizeAuthorizedPresentationFrameV1(
       fixture.presentations[kind],
@@ -1767,6 +2051,7 @@ test("Agent local branches stay private while Replay researcher facts remain nar
   }
 
   for (const kind of [
+    "live_no_shared_obs_agent_pov",
     "replay_no_shared_obs_agent_pov",
     "replay_shared_obs_agent_pov",
   ]) {

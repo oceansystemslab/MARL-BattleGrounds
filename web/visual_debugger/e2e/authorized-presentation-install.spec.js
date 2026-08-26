@@ -791,7 +791,11 @@ const FORBIDDEN_TECHNICAL_FACT_IDS = Object.freeze([
  * @param {Record<string, any>} presentation
  */
 async function expectTechnicalFrameDom(page, presentation) {
-  const technical = presentation.technical_frame;
+  const liveResearcherTechnical =
+    presentation.presentation_kind === "live_no_shared_obs_agent_pov"
+      ? presentation.researcher_space?.technical_frame
+      : null;
+  const technical = liveResearcherTechnical ?? presentation.technical_frame;
   const technicalDetailsWasOpen =
     (await page.locator("#technical-frame-details").getAttribute("open")) === "";
   if (!technicalDetailsWasOpen) {
@@ -829,7 +833,10 @@ async function expectTechnicalFrameDom(page, presentation) {
       ["incoming_transition", "incoming_recipient_transition_id"],
     ],
   };
-  const specification = specifications[presentation.presentation_kind];
+  const specification =
+    specifications[
+      liveResearcherTechnical === null ? presentation.presentation_kind : "live_oracle"
+    ];
   if (!specification) {
     throw new TypeError(
       `Unsupported Technical Frame presentation kind ${String(presentation.presentation_kind)}.`,
@@ -1401,6 +1408,48 @@ async function expectSingleActivationCommand(page, path, activate, expectedComma
 }
 
 /**
+ * Prove one native interaction emits exactly one product command while letting
+ * the caller validate runtime-derived pointer coordinates.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @param {"/api/command" | "/api/replay/command"} path
+ * @param {() => Promise<void>} activate
+ * @param {(command: Record<string, any>) => void} verifyCommand
+ */
+async function expectSingleCommandMatching(page, path, activate, verifyCommand) {
+  /** @type {import("@playwright/test").Request[]} */
+  const requests = [];
+  const record = (/** @type {import("@playwright/test").Request} */ request) => {
+    if (
+      request.method() === "POST" &&
+      ["/api/command", "/api/replay/command"].includes(new URL(request.url()).pathname)
+    ) {
+      requests.push(request);
+    }
+  };
+  page.on("request", record);
+  try {
+    const responsePromise = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === path,
+      { timeout: 30_000 },
+    );
+    await activate();
+    expect((await responsePromise).status()).toBe(200);
+    await expect(page.locator("html")).toHaveAttribute(
+      "data-presentation-authority",
+      "installed",
+    );
+  } finally {
+    page.off("request", record);
+  }
+  expect(requests).toHaveLength(1);
+  expect(new URL(requests[0].url()).pathname).toBe(path);
+  verifyCommand(requests[0].postDataJSON().command);
+}
+
+/**
  * Run one local interaction through a real browser event and prove neither
  * product command route was touched.
  *
@@ -1602,25 +1651,27 @@ async function expectInstalledLeaf(page, transportKind, presentationKind) {
 }
 
 /**
- * Prove the retained session fact uses the installed presentation variant's
- * exact incoming-transition identity. The authoritative frame-zero
- * representation has no latest-events branch.
+ * Prove the retained researcher-space session fact uses the global incoming
+ * transition while battlefield choreography keeps its audience-local ID.
  *
  * @param {import("@playwright/test").Page} page
  * @param {Record<string, any>} presentation
  */
 async function expectAuthorizedIncomingTransitionDom(page, presentation) {
   const latestEvents = presentation.latest_events;
+  const researcherSpace = presentation.researcher_space;
   const oracle =
     presentation.presentation_kind === "live_oracle" ||
     presentation.presentation_kind === "replay_oracle";
   const expected =
-    latestEvents === null
-      ? null
-      : oracle
-        ? latestEvents.incoming_transition_id
-        : latestEvents.incoming_recipient_transition_id;
-  if (latestEvents !== null) {
+    researcherSpace !== undefined
+      ? (researcherSpace.latest_transition?.incoming_transition_id ?? null)
+      : latestEvents === null
+        ? null
+        : oracle
+          ? latestEvents.incoming_transition_id
+          : latestEvents.incoming_recipient_transition_id;
+  if (expected !== null) {
     expect(typeof expected).toBe("string");
     expect(expected.length).toBeGreaterThan(0);
   }
@@ -1859,8 +1910,21 @@ async function expectAgentAuthoritySurface(
     expectedRosterCount,
   );
   if (researcherRoster !== null) {
-    await expect(page.locator('#roster [data-visibility="visible"]')).toBeVisible();
-    await expect(page.locator('#roster [data-visibility="not-visible"]')).toBeVisible();
+    if (presentation.presentation_kind.startsWith("replay_")) {
+      await expect(page.locator('#roster [data-visibility="visible"]')).toBeVisible();
+      await expect(
+        page.locator('#roster [data-visibility="not-visible"]'),
+      ).toBeVisible();
+    } else {
+      await expect(page.locator('#roster [data-visibility="visible"]')).toBeHidden();
+      await expect(
+        page.locator('#roster [data-visibility="not-visible"]'),
+      ).toBeHidden();
+      await expect(page.locator("#roster .roster-team[data-team-id]")).toHaveCount(2);
+      await expect(page.locator("#roster-count")).toHaveText(
+        `${expectedRosterCount} visible`,
+      );
+    }
     expect(expectedRosterCount).toBeGreaterThanOrEqual(bodyKeys.length);
   }
   if (activationEnabled) {
@@ -1906,16 +1970,20 @@ async function expectAgentAuthoritySurface(
     presentation.product_kind === "replay_viewer"
       ? ["#replay-ranges-button", "#replay-clear-reference-button"]
       : ["#live-ranges-button"];
+  const localUtilityDescription =
+    presentation.product_kind === "replay_viewer"
+      ? /locally authorized|local inspected-agent/u
+      : /fog-authorized/u;
   for (const selector of agentUtilitySelectors) {
     await expect(page.locator(selector)).toHaveAttribute(
       "aria-description",
-      /locally authorized|local inspected-agent/u,
+      localUtilityDescription,
     );
     await expect(page.locator(selector)).toHaveAttribute(
       "aria-description",
       /sends no (?:replay )?command/u,
     );
-    await expect(page.locator(selector)).toHaveAttribute(
+    await expect(page.locator(selector)).not.toHaveAttribute(
       "aria-description",
       /fixed recipient/u,
     );
@@ -2124,7 +2192,7 @@ test("all five real service leaves install with safe pending continuity", async 
     "Live Oracle View is interactive. Activate an authorized actor to control it; Shift-click selects an authorized target; Escape clears the target and leaves battlefield focus. Battlefield keyboard commands apply only while this surface has focus.",
   );
   await expect(page.locator("#pending-scope")).toHaveText(
-    "This panel shows only the authorized pending draft for the next submission.",
+    "This panel shows the selected actor's authorized pending draft for the next submission within the global joint turn.",
   );
   await expect(
     page.locator("#battlefield-utilities > #live-ranges-button"),
@@ -2247,7 +2315,10 @@ test("all five real service leaves install with safe pending continuity", async 
     "battlefield-instructions",
   );
   await expect(page.locator("#battlefield-instructions")).toHaveText(
-    "Live Agent POV keeps one fixed recipient. Bodies are passive inspection targets; use the authorized draft controls to prepare that recipient's action.",
+    "Live Agent POV is interactive. Activate a visible authorized actor or choose any active actor in Roster to control it and switch POV; Shift-click selects a visible authorized target; Escape clears the target and leaves battlefield focus.",
+  );
+  await expect(page.locator("#pending-scope")).toHaveText(
+    "This panel shows the selected actor's authorized pending draft for the next submission within the global joint turn.",
   );
   await page.locator("#help-button").click();
   await expect(page.locator("#help-dialog")).toBeVisible();
@@ -2257,84 +2328,76 @@ test("all five real service leaves install with safe pending continuity", async 
   await expect(visibleLiveHelp).toHaveCount(1);
   await expect(visibleLiveHelp).toHaveAttribute("data-live-help-mode", "agent");
   const agentHelpText = await visibleLiveHelp.innerText();
-  expect(agentHelpText).toContain("fixed recipient");
-  expect(agentHelpText).toContain("Toggle locally authorized ranges without a command");
-  expect(agentHelpText).not.toContain("Cycle the controlled actor");
-  expect(agentHelpText).not.toContain("Control the clicked authorized actor");
+  expect(agentHelpText).not.toContain("fixed recipient");
+  expect(agentHelpText).toContain("Toggle fog-authorized ranges without a command");
+  expect(agentHelpText).toContain("Cycle the controlled actor and Agent POV");
+  expect(agentHelpText).toContain("Control that actor and switch Agent POV");
   expect(agentHelpText).not.toContain("Toggle Oracle View ranges");
-  expect(agentHelpText).not.toContain("drafts persist when you cycle");
+  expect(agentHelpText).toContain("drafts persist when you cycle");
   await page.locator("#help-close-button").click();
   await expect(page.locator("#help-dialog")).toBeHidden();
 
-  const agentRecipientKey = liveAgent.presentation.authority.recipient_presentation_key;
+  const initialAgentRecipientKey =
+    liveAgent.presentation.authority.recipient_presentation_key;
   const agentBodyKeys = await page
     .locator("#battlefield .agent")
     .evaluateAll((agents) =>
       agents.map((agent) => agent.getAttribute("data-presentation-key")),
     );
-  const passiveAgentIndex = agentBodyKeys.findIndex(
-    (presentationKey) => presentationKey !== agentRecipientKey,
-  );
-  expect(passiveAgentIndex).toBeGreaterThanOrEqual(0);
-  const passiveAgentKey = agentBodyKeys[passiveAgentIndex];
-  expect(typeof passiveAgentKey).toBe("string");
   const liveAgentScene =
     liveAgent.presentation.current_endpoint.scene ??
     liveAgent.presentation.current_endpoint.parts?.scene;
-  const passiveAgent = liveAgentScene.agents.find(
+  const liveResearcher = liveAgent.presentation.researcher_space;
+  expect(liveResearcher.researcher_space_kind).toBe("global_live_researcher_space");
+  expect(liveResearcher.latest_transition).toBeNull();
+  expect(liveAgent.presentation.latest_transition).toBeNull();
+  expect(liveResearcher.technical_frame.technical_kind).toBe(
+    "live_oracle_technical_frame",
+  );
+  expect(liveResearcher.pending_inspection.submission_scope).toBe("joint_turn");
+  await expect(page.locator("#roster .roster-row--authorized")).toHaveCount(
+    liveResearcher.roster_agents.length,
+  );
+  await expect(page.locator('#roster [data-visibility="visible"]')).toBeHidden();
+  await expect(page.locator('#roster [data-visibility="not-visible"]')).toBeHidden();
+  await expect(page.locator("#roster .roster-team[data-team-id]")).toHaveCount(2);
+  await expect(page.locator("#roster-count")).toHaveText(
+    `${liveResearcher.roster_agents.length} visible`,
+  );
+  await expect(page.locator("#command-target-select")).toBeEnabled();
+  await expect(page.locator("#command-target-select option")).toHaveCount(11);
+  await expect(page.locator("#submit-turn-button")).toHaveText("Submit joint turn");
+  await expect(page.locator("#submit-turn-button")).toBeEnabled();
+
+  const recipientBody = page.locator(
+    `#battlefield .agent[data-presentation-key="${initialAgentRecipientKey}"]`,
+  );
+  const recipientAgent = liveAgentScene.agents.find(
     (/** @type {Record<string, any>} */ agent) =>
-      agent.presentation_key === passiveAgentKey,
+      agent.presentation_key === initialAgentRecipientKey,
   );
-  expect(passiveAgent).toBeTruthy();
-  const passiveAgentBody = page.locator(
-    `#battlefield .agent[data-presentation-key="${passiveAgentKey}"]`,
-  );
-  const passiveRowButton = page.locator(
-    `#roster .roster-primary-action[data-presentation-key="${passiveAgentKey}"]`,
-  );
+  expect(recipientAgent).toBeTruthy();
   await page.setViewportSize({ width: 960, height: 600 });
-  await expectNativeAgentActivationMatrix(page, {
-    body: passiveAgentBody,
-    row: passiveRowButton,
-    path: null,
-    command: null,
-  });
-  await expect(passiveAgentBody).toHaveAttribute("data-selected", "true");
-  await expect(passiveRowButton).toHaveAttribute("aria-pressed", "true");
-  await expectCertifiedDocumentationCard(page, passiveAgent);
+  await expectCertifiedDocumentationCard(page, recipientAgent);
   const liveAgentDocumentationBefore = await page
     .locator("#selection-card")
     .evaluate((node) => node.innerHTML);
-  await passiveAgentBody.hover();
-  await expectCompactAgentTooltip(page, passiveAgent, liveAgentDocumentationBefore);
-  expect(
-    await page.locator('[data-layer="debug-range"] .range-ring').evaluateAll((ranges) =>
-      ranges.map((range) => ({
-        kind: range.getAttribute("data-kind"),
-        owner: range.getAttribute("data-presentation-key"),
-      })),
-    ),
-  ).toEqual([
-    { kind: "observation", owner: passiveAgentKey },
-    { kind: "basic", owner: passiveAgentKey },
-    { kind: "ultimate", owner: passiveAgentKey },
-  ]);
-  await expect(page.locator("#pending-card .selected-legality__lane")).toHaveCount(0);
-  await expect(page.locator("#pending-card .selected-outgoing-target")).toHaveCount(0);
+  await recipientBody.hover();
+  await expectCompactAgentTooltip(page, recipientAgent, liveAgentDocumentationBefore);
   await expect(page.locator("#battlefield .pending-route")).toHaveCount(0);
   await openDetails(page, [
     "#agent-details",
     "#latest-transition-details",
     "#technical-frame-details",
   ]);
-  await passiveAgentBody.hover();
-  await expectCompactAgentTooltip(page, passiveAgent, liveAgentDocumentationBefore);
+  await recipientBody.hover();
+  await expectCompactAgentTooltip(page, recipientAgent, liveAgentDocumentationBefore);
   await captureCp4ENativeState(page, {
     filename: "live-no-shared-agent-960x600.png",
     width: 960,
     height: 600,
     presentation: liveAgent.presentation,
-    selectedAgent: passiveAgent,
+    selectedAgent: recipientAgent,
   });
   await cleanupAfterCp4ECapture(page, [
     "#agent-details",
@@ -2342,46 +2405,7 @@ test("all five real service leaves install with safe pending continuity", async 
     "#technical-frame-details",
   ]);
   await expectAgentAuthoritySurface(page, liveAgent.presentation, [oldPresentationKey]);
-  const recipientBody = page.locator(
-    `#battlefield .agent[data-presentation-key="${agentRecipientKey}"]`,
-  );
-  await recipientBody.focus();
-  await expectZeroCommandInteraction(page, () => recipientBody.press("Enter"));
-  await expect(recipientBody).toHaveAttribute("data-selected", "true");
-  const agentTabButtons = page.locator('#command-deck button[data-key="Tab"]');
-  await expect(agentTabButtons).toHaveCount(2);
-  expect(
-    await agentTabButtons.evaluateAll((buttons) =>
-      buttons.every((button) => button instanceof HTMLButtonElement && button.disabled),
-    ),
-  ).toBe(true);
-  for (const button of await agentTabButtons.all()) {
-    await expect(button).toHaveAttribute(
-      "aria-description",
-      /unavailable in Agent POV[\s\S]*native browser focus[\s\S]*fixed recipient/u,
-    );
-    await expect(button).not.toHaveAttribute(
-      "aria-description",
-      /Move Oracle View control/u,
-    );
-  }
-  await page.locator("#battlefield").focus();
-  await expectZeroCommandInteraction(page, () => page.keyboard.press("Tab"));
-  await expect(page.locator("#battlefield")).not.toBeFocused();
-  for (const button of await agentTabButtons.all()) {
-    await expectZeroCommandInteraction(page, () =>
-      button.evaluate((element) => {
-        if (!(element instanceof HTMLButtonElement)) {
-          throw new TypeError("Agent actor-cycle control is not a button.");
-        }
-        element.click();
-      }),
-    );
-  }
-  expect(
-    (await authenticatedGet(page, "/api/presentation/frame")).authority
-      .recipient_presentation_key,
-  ).toBe(agentRecipientKey);
+
   const liveAgentRanges = page.locator("#live-ranges-button");
   await expect(liveAgentRanges).toHaveAttribute("aria-pressed", "true");
   await expectZeroCommandInteraction(page, () => liveAgentRanges.click());
@@ -2389,51 +2413,247 @@ test("all five real service leaves install with safe pending continuity", async 
   await expect(page.locator('[data-layer="debug-range"] .range-ring')).toHaveCount(0);
   await expectZeroCommandInteraction(page, () => liveAgentRanges.click());
   await expect(liveAgentRanges).toHaveAttribute("aria-pressed", "true");
-  const currentAgentRanges = await page
-    .locator('[data-layer="debug-range"] .range-ring')
-    .evaluateAll((ranges) =>
-      ranges.map((range) => ({
-        kind: range.getAttribute("data-kind"),
-        owner: range.getAttribute("data-presentation-key"),
-      })),
+
+  const agentTabButtons = page.locator('#command-deck button[data-key="Tab"]');
+  await expect(agentTabButtons).toHaveCount(2);
+  expect(
+    await agentTabButtons.evaluateAll((buttons) =>
+      buttons.every(
+        (button) => button instanceof HTMLButtonElement && !button.disabled,
+      ),
+    ),
+  ).toBe(true);
+  for (const button of await agentTabButtons.all()) {
+    await expect(button).toHaveAttribute(
+      "aria-description",
+      /Move Agent POV control[\s\S]*Staged drafts are preserved/u,
     );
-  expect(currentAgentRanges.length).toBeGreaterThan(0);
-  expect(currentAgentRanges.every(({ owner }) => owner === agentRecipientKey)).toBe(
-    true,
+  }
+
+  const visiblePublicIds = new Set(
+    liveAgentScene.agents.map(
+      (/** @type {Record<string, any>} */ agent) => agent.public_agent_id,
+    ),
   );
-  await page.locator("#battlefield").focus();
-  await expectZeroCommandInteraction(page, () => page.keyboard.press("Shift+g"));
-  await expect(liveAgentRanges).toHaveAttribute("aria-pressed", "true");
-  expect(
-    await page.locator('[data-layer="debug-range"] .range-ring').evaluateAll((ranges) =>
-      ranges.map((range) => ({
-        kind: range.getAttribute("data-kind"),
-        owner: range.getAttribute("data-presentation-key"),
-      })),
-    ),
-  ).toEqual(currentAgentRanges);
-  await expectZeroCommandInteraction(page, () => page.keyboard.press("g"));
-  await expect(liveAgentRanges).toHaveAttribute("aria-pressed", "false");
-  await expect(page.locator('[data-layer="debug-range"] .range-ring')).toHaveCount(0);
-  await expectZeroCommandInteraction(page, () => page.keyboard.press("g"));
-  await expect(liveAgentRanges).toHaveAttribute("aria-pressed", "true");
-  expect(
-    await page.locator('[data-layer="debug-range"] .range-ring').evaluateAll((ranges) =>
-      ranges.map((range) => ({
-        kind: range.getAttribute("data-kind"),
-        owner: range.getAttribute("data-presentation-key"),
-      })),
-    ),
-  ).toEqual(currentAgentRanges);
-  const agentPresentationAfterClick = await authenticatedGet(
+  const hiddenAgent = liveResearcher.roster_agents.find(
+    (/** @type {Record<string, any>} */ agent) =>
+      !visiblePublicIds.has(agent.public_agent_id),
+  );
+  expect(hiddenAgent).toBeTruthy();
+  const hiddenIdentity = liveResearcher.identity_directory.identities.find(
+    (/** @type {Record<string, any>} */ identity) =>
+      identity.public_agent_id === hiddenAgent.public_agent_id,
+  );
+  expect(hiddenIdentity).toBeTruthy();
+  const hiddenSlot = (hiddenIdentity.team_id - 1) * 5 + hiddenIdentity.team_local_slot;
+  const hiddenRow = page.locator(
+    `#roster .roster-primary-action[data-presentation-key="${hiddenAgent.presentation_key}"]`,
+  );
+  await expect(hiddenRow).toBeEnabled();
+
+  let releaseAgentPresentation = () => {};
+  let markAgentPresentationHeld = () => {};
+  const agentPresentationHeld = new Promise((resolve) => {
+    markAgentPresentationHeld = () => resolve(undefined);
+  });
+  const agentPresentationRelease = new Promise((resolve) => {
+    releaseAgentPresentation = () => resolve(undefined);
+  });
+  await page.route("**/api/presentation/frame", async (route) => {
+    const response = await route.fetch();
+    markAgentPresentationHeld();
+    await agentPresentationRelease;
+    await route.fulfill({ response });
+  });
+  const hiddenSwitch = expectSingleActivationCommand(
     page,
-    "/api/presentation/frame",
+    "/api/command",
+    () => hiddenRow.click(),
+    {
+      command_type: "roster_selection",
+      role: "control",
+      global_slot: hiddenSlot,
+    },
   );
-  expect(agentPresentationAfterClick.authority.recipient_presentation_key).toBe(
-    agentRecipientKey,
+  try {
+    await agentPresentationHeld;
+    await expect(page.locator("html")).toHaveAttribute(
+      "data-presentation-authority",
+      "retained",
+    );
+    expect(
+      await page
+        .locator("#battlefield .agent")
+        .evaluateAll((agents) =>
+          agents.map((agent) => agent.getAttribute("data-presentation-key")),
+        ),
+    ).toEqual(agentBodyKeys);
+    await expect(page.locator("#battlefield-empty")).toBeHidden();
+    await expect(page.locator("#command-target-select")).toBeDisabled();
+  } finally {
+    releaseAgentPresentation();
+  }
+  await hiddenSwitch;
+  await page.unroute("**/api/presentation/frame");
+  let switchedAgent = await expectInstalledLeaf(
+    page,
+    "actor_pov_live_debugger",
+    "live_no_shared_obs_agent_pov",
   );
-  await expectZeroCommandInteraction(page, () => passiveAgentBody.click());
+  expect(switchedAgent.presentation.authority.recipient_public_agent_id).toBe(
+    hiddenAgent.public_agent_id,
+  );
+  expect(switchedAgent.presentation.source.source_simulator_step_count).toBe(
+    liveAgent.presentation.source.source_simulator_step_count,
+  );
+
+  const switchedScene =
+    switchedAgent.presentation.current_endpoint.scene ??
+    switchedAgent.presentation.current_endpoint.parts?.scene;
+  const visibleControl = switchedScene.agents.find(
+    (/** @type {Record<string, any>} */ agent) =>
+      agent.public_agent_id !==
+      switchedAgent.presentation.authority.recipient_public_agent_id,
+  );
+  expect(visibleControl).toBeTruthy();
+  const visibleControlIdentity =
+    switchedAgent.presentation.researcher_space.identity_directory.identities.find(
+      (/** @type {Record<string, any>} */ identity) =>
+        identity.public_agent_id === visibleControl.public_agent_id,
+    );
+  expect(visibleControlIdentity).toBeTruthy();
+  const visibleControlSlot =
+    (visibleControlIdentity.team_id - 1) * 5 + visibleControlIdentity.team_local_slot;
+  const visibleControlBody = page.locator(
+    `#battlefield .agent[data-presentation-key="${visibleControl.presentation_key}"]`,
+  );
+  await expectSingleActivationCommand(
+    page,
+    "/api/command",
+    () => visibleControlBody.click(),
+    {
+      command_type: "roster_selection",
+      role: "control",
+      global_slot: visibleControlSlot,
+    },
+  );
   await expectBattlefieldRootCommandFocus(page);
+  switchedAgent = await expectInstalledLeaf(
+    page,
+    "actor_pov_live_debugger",
+    "live_no_shared_obs_agent_pov",
+  );
+  expect(switchedAgent.presentation.authority.recipient_public_agent_id).toBe(
+    visibleControl.public_agent_id,
+  );
+
+  await expectSingleActivationCommand(
+    page,
+    "/api/command",
+    () => page.keyboard.press("Tab"),
+    {
+      command_type: "keyboard",
+      key: "Tab",
+      shift_key: false,
+      ctrl_key: false,
+      alt_key: false,
+      meta_key: false,
+      repeat: false,
+    },
+  );
+  await expectBattlefieldRootCommandFocus(page);
+  await expectSingleActivationCommand(
+    page,
+    "/api/command",
+    () => page.keyboard.press("Shift+Tab"),
+    {
+      command_type: "keyboard",
+      key: "Tab",
+      shift_key: true,
+      ctrl_key: false,
+      alt_key: false,
+      meta_key: false,
+      repeat: false,
+    },
+  );
+  switchedAgent = await expectInstalledLeaf(
+    page,
+    "actor_pov_live_debugger",
+    "live_no_shared_obs_agent_pov",
+  );
+
+  const targetScene =
+    switchedAgent.presentation.current_endpoint.scene ??
+    switchedAgent.presentation.current_endpoint.parts?.scene;
+  const visibleTarget = targetScene.agents.find(
+    (/** @type {Record<string, any>} */ agent) =>
+      agent.public_agent_id !==
+      switchedAgent.presentation.authority.recipient_public_agent_id,
+  );
+  expect(visibleTarget).toBeTruthy();
+  const visibleTargetBody = page.locator(
+    `#battlefield .agent[data-presentation-key="${visibleTarget.presentation_key}"]`,
+  );
+  await expectSingleCommandMatching(
+    page,
+    "/api/command",
+    () => visibleTargetBody.click({ modifiers: ["Shift"] }),
+    (command) => {
+      expect(command).toMatchObject({
+        command_type: "battlefield_pointer",
+        button: "primary",
+        shift_key: true,
+        ctrl_key: false,
+        alt_key: false,
+        meta_key: false,
+      });
+      expect(Number.isFinite(command.world_x)).toBe(true);
+      expect(Number.isFinite(command.world_y)).toBe(true);
+    },
+  );
+
+  const targetSelect = page.locator("#command-target-select");
+  const currentTargetValue = await targetSelect.inputValue();
+  const alternateTargetValue = await targetSelect
+    .locator("option")
+    .evaluateAll(
+      (options, current) =>
+        options
+          .map((option) => option.getAttribute("value") ?? "")
+          .find((value) => value.startsWith("pov-target-action:") && value !== current),
+      currentTargetValue,
+    );
+  if (typeof alternateTargetValue !== "string") {
+    throw new Error("Live Agent global target selector has no alternate target.");
+  }
+  expect(alternateTargetValue).toMatch(/^pov-target-action:\d+$/u);
+  const alternateTargetAction = Number(alternateTargetValue.split(":").at(-1));
+  await expectSingleActivationCommand(
+    page,
+    "/api/command",
+    async () => {
+      await targetSelect.selectOption(alternateTargetValue);
+    },
+    {
+      command_type: "actor_pov_target_action",
+      target_action: alternateTargetAction,
+    },
+  );
+  await expectSingleActivationCommand(
+    page,
+    "/api/command",
+    async () => {
+      await targetSelect.selectOption("pov-target-action:0");
+    },
+    {
+      command_type: "actor_pov_target_action",
+      target_action: 0,
+    },
+  );
+  await expect(targetSelect).toHaveValue("pov-target-action:0");
+  await page.locator("#battlefield").focus();
+  await expectBattlefieldRootCommandFocus(page);
+
   const agentStepBeforeW = await page.locator("#step-value").innerText();
   await expect(
     page.locator('#command-deck button[data-move-action="1"]'),
@@ -2456,14 +2676,39 @@ test("all five real service leaves install with safe pending continuity", async 
     page.locator('#command-deck button[data-move-action="1"]'),
   ).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator("#step-value")).toHaveText(agentStepBeforeW);
-  const agentPresentationAfterKeyboard = await authenticatedGet(
+  const recipientBeforeSubmit = (
+    await authenticatedGet(page, "/api/presentation/frame")
+  ).authority.recipient_public_agent_id;
+  await expect(page.locator("#submit-turn-button")).toHaveText("Submit joint turn");
+  await expectSingleActivationCommand(
+    page,
+    "/api/command",
+    () => page.locator("#submit-turn-button").click(),
+    {
+      command_type: "keyboard",
+      key: "Enter",
+      shift_key: false,
+      ctrl_key: false,
+      alt_key: false,
+      meta_key: false,
+      repeat: false,
+    },
+  );
+  const agentPresentationAfterSubmit = await authenticatedGet(
     page,
     "/api/presentation/frame",
   );
-  expect(agentPresentationAfterKeyboard.authority.recipient_presentation_key).toBe(
-    agentRecipientKey,
+  expect(
+    agentPresentationAfterSubmit.researcher_space.latest_transition.action_rows.length,
+  ).toBe(agentPresentationAfterSubmit.researcher_space.roster_agents.length);
+  expect(agentPresentationAfterSubmit.latest_transition.action_rows).toHaveLength(1);
+  expect(
+    agentPresentationAfterSubmit.source.source_simulator_step_count,
+  ).toBeGreaterThan(Number(agentStepBeforeW));
+  expect(agentPresentationAfterSubmit.authority.recipient_public_agent_id).toBe(
+    recipientBeforeSubmit,
   );
-  await expectTechnicalFrameDom(page, agentPresentationAfterKeyboard);
+  await expectTechnicalFrameDom(page, agentPresentationAfterSubmit);
 
   await page.locator("#view-select").selectOption("researcher");
   const restoredOracle = await expectInstalledLeaf(
@@ -3134,7 +3379,7 @@ test("all five real service leaves install with safe pending continuity", async 
     await expectReplayInspectionDom(page, presentation);
     await expectTechnicalFrameDom(page, presentation);
     await expectLatestTransitionDom(page, presentation);
-    expect(presentation.latest_events.incoming_recipient_transition_id).toBe(
+    expect(presentation.researcher_space.latest_transition.incoming_transition_id).toBe(
       await page.locator("#transition-value").textContent(),
     );
     if (frameIndex === replayAgent.presentation.source.source_final_frame_index) {

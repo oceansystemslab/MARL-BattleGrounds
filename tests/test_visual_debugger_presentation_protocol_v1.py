@@ -13,10 +13,16 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 from scripts.dev.visual_debugger.control import (
     create_session,
+    select_controlled_actor,
     submit_next_script_frame,
 )
 from scripts.dev.visual_debugger.evaluation_bridge import (
     build_debugger_evaluation_launch_specification_v1,
+)
+from scripts.dev.visual_debugger.frame import build_debugger_frame
+from scripts.dev.visual_debugger.live_presentation import (
+    build_live_oracle_authorized_presentation_v1,
+    build_live_researcher_space_v1,
 )
 from scripts.dev.visual_debugger.presentation import (
     build_replay_oracle_authorized_presentation_v1,
@@ -35,6 +41,7 @@ from scripts.dev.visual_debugger.presentation_protocol import (
     LiveOracleInspectionEnvelopeV1,
     LiveOraclePresentationSourceIdentityV1,
     LiveOracleTechnicalFrameV1,
+    LiveScriptedPlaybackInspectionV1,
     MovementActionDisplayRowV1,
     NoSharedObsLatestTransitionV1,
     NoSharedObsPresentationAuthorityV1,
@@ -63,6 +70,7 @@ from scripts.dev.visual_debugger.presentation_protocol import (
     build_shared_obs_authorized_current_endpoint_v1,
     canonical_authorized_endpoint_digest_sha256,
 )
+from scripts.dev.visual_debugger.protocol import ResearcherLiveDebuggerFrameV2
 from scripts.dev.visual_debugger.scenarios import get_scenario
 from tests.evaluation_fixtures import CapturedEvaluationTrajectory
 from tests.test_rendering_authorized_inspection import (
@@ -84,7 +92,6 @@ from marl_battlegrounds.evaluation.pov import (
     ActorPovAxisMappingV1,
     ActorPovTransitionV1,
     build_actor_pov_adjacent_transition_slice_v1,
-    build_actor_pov_current_slice_v1,
 )
 from marl_battlegrounds.rendering.authorized_incoming import (
     build_live_no_shared_obs_incoming_summary_v1,
@@ -632,8 +639,8 @@ def five_frames(
             source_kind="live_oracle_frame",
             source_session_id=raw.viewer_session_id,
             source_run_generation=0,
-            source_revision=raw.revision,
-            source_authority_epoch=raw.revision,
+            source_revision=1,
+            source_authority_epoch=1,
             episode_id=no_shared.context.identity.episode_id,
             source_frame_index=1,
             source_frame_id=no_shared.frames[1].frame_id,
@@ -659,8 +666,8 @@ def five_frames(
             envelope_kind="live_oracle_source_bound_inspection",
             source_session_id=raw.viewer_session_id,
             source_run_generation=0,
-            source_revision=raw.revision,
-            source_authority_epoch=raw.revision,
+            source_revision=1,
+            source_authority_epoch=1,
             episode_id=no_shared.context.identity.episode_id,
             source_frame_index=1,
             source_frame_id=no_shared.frames[1].frame_id,
@@ -784,7 +791,7 @@ def five_frames(
         replay_inspection=replay_no_shared_inspection,
     )
 
-    live_session = "cp2-5-b-live-no-shared"
+    live_session = raw.viewer_session_id
     live_current = _no_shared_current(
         no_shared,
         no_shared_index,
@@ -854,7 +861,7 @@ def five_frames(
             source_recipient_public_agent_id=live_current.recipient_public_agent_id,
             source_recipient_frame_id=live_current.source_recipient_frame_id,
             source_simulator_step_count=live_current.source_simulator_step_count,
-            source_submission_scope="controlled_actor",
+            source_submission_scope="joint_turn",
             source_authorized_endpoint_digest_sha256=(
                 live_endpoint.authorized_endpoint_digest_sha256
             ),
@@ -892,10 +899,11 @@ def five_frames(
             source_simulator_step_count=(live_current.source_simulator_step_count),
             inspection=LiveEditableDraftInspectionV1(
                 inspection_kind="editable_live_draft",
-                submission_scope="controlled_actor",
+                submission_scope="joint_turn",
                 draft=live_inspection,
             ),
         ),
+        researcher_space=build_live_researcher_space_v1(live_oracle),
     )
 
     shared_session = "cp2-5-b-shared"
@@ -1330,8 +1338,8 @@ def _live_oracle_at(
             source_kind="live_oracle_frame",
             source_session_id=session,
             source_run_generation=0,
-            source_revision=raw.revision,
-            source_authority_epoch=raw.revision,
+            source_revision=frame_index,
+            source_authority_epoch=frame_index,
             episode_id=trajectory.context.identity.episode_id,
             source_frame_index=frame_index,
             source_frame_id=trajectory.frames[frame_index].frame_id,
@@ -1359,8 +1367,8 @@ def _live_oracle_at(
             envelope_kind="live_oracle_source_bound_inspection",
             source_session_id=session,
             source_run_generation=0,
-            source_revision=raw.revision,
-            source_authority_epoch=raw.revision,
+            source_revision=frame_index,
+            source_authority_epoch=frame_index,
             episode_id=trajectory.context.identity.episode_id,
             source_frame_index=frame_index,
             source_frame_id=trajectory.frames[frame_index].frame_id,
@@ -1460,7 +1468,7 @@ def _live_no_shared_at(
             source_recipient_public_agent_id=current.recipient_public_agent_id,
             source_recipient_frame_id=current.source_recipient_frame_id,
             source_simulator_step_count=current.source_simulator_step_count,
-            source_submission_scope="controlled_actor",
+            source_submission_scope="joint_turn",
             source_authorized_endpoint_digest_sha256=(
                 endpoint.authorized_endpoint_digest_sha256
             ),
@@ -1498,9 +1506,16 @@ def _live_no_shared_at(
             source_simulator_step_count=current.source_simulator_step_count,
             inspection=LiveEditableDraftInspectionV1(
                 inspection_kind="editable_live_draft",
-                submission_scope="controlled_actor",
+                submission_scope="joint_turn",
                 draft=draft,
             ),
+        ),
+        researcher_space=build_live_researcher_space_v1(
+            _live_oracle_at(
+                cases,
+                frame_index=frame_index,
+                session=session,
+            )
         ),
     )
 
@@ -1566,6 +1581,192 @@ def test_recursive_schema_is_closed_required_and_key_catalog_is_exhaustive() -> 
     assert encountered_key_fields == set(key_pairs)
     assert one_of_count > 1
     assert len(definitions) >= 100
+
+
+def test_live_researcher_latest_rejects_reordered_target_identity_axis(
+    five_frames: _FiveFrames,
+) -> None:
+    payload = json.loads(five_frames.live_no_shared.model_dump_json())
+    target_axis = payload["researcher_space"]["latest_transition"]["action_rows"][0][
+        "target_action_recipient_public_agent_id_by_id"
+    ]
+    target_axis[1], target_axis[2] = target_axis[2], target_axis[1]
+
+    with pytest.raises(
+        ValidationError,
+        match="live researcher Latest action identity changed",
+    ):
+        LiveNoSharedObsAuthorizedPresentationFrameV1.model_validate_json(
+            json.dumps(payload)
+        )
+
+
+def test_live_researcher_rejects_changed_fog_authorized_class_mechanics(
+    five_frames: _FiveFrames,
+) -> None:
+    payload = json.loads(five_frames.live_no_shared.model_dump_json())
+    local_class_id = payload["current_endpoint"]["parts"]["scene"]["class_mechanics"][
+        0
+    ]["class_id"]
+    global_class = next(
+        row
+        for row in payload["researcher_space"]["class_mechanics"]
+        if row["class_id"] == local_class_id
+    )
+    global_class["basic_raw_damage"] += 1.0
+
+    with pytest.raises(
+        ValidationError,
+        match="live researcher class mechanics changed a fog-authorized class",
+    ):
+        LiveNoSharedObsAuthorizedPresentationFrameV1.model_validate_json(
+            json.dumps(payload)
+        )
+
+
+def test_live_and_replay_researcher_spaces_reject_hidden_standalone_fact_poison(
+    five_frames: _FiveFrames,
+) -> None:
+    cases = (
+        (
+            "live NoSharedObs",
+            five_frames.live_no_shared,
+            LiveNoSharedObsAuthorizedPresentationFrameV1,
+        ),
+        (
+            "replay NoSharedObs",
+            five_frames.replay_no_shared,
+            ReplayNoSharedObsAuthorizedPresentationFrameV1,
+        ),
+        (
+            "replay SharedObs",
+            five_frames.replay_shared,
+            ReplaySharedObsAuthorizedPresentationFrameV1,
+        ),
+    )
+    for leaf_name, frame, model in cases:
+        payload = json.loads(frame.model_dump_json())
+        local_public_ids = {
+            row["public_agent_id"]
+            for row in payload["current_endpoint"]["parts"]["scene"]["agents"]
+        }
+        hidden_index = next(
+            index
+            for index, row in enumerate(payload["researcher_space"]["roster_agents"])
+            if row["public_agent_id"] not in local_public_ids
+        )
+        hidden_class_id = payload["researcher_space"]["roster_agents"][hidden_index][
+            "class_id"
+        ]
+        status_template = next(
+            status
+            for row in payload["researcher_space"]["roster_agents"]
+            for status in row["statuses"]
+        )
+        aura_template = next(
+            aura
+            for row in payload["researcher_space"]["roster_agents"]
+            for aura in row["aura_modifiers"]
+        )
+        poisoned: list[tuple[str, object]] = []
+
+        health = copy.deepcopy(payload)
+        hidden = health["researcher_space"]["roster_agents"][hidden_index]
+        hidden["current_health"] = hidden["maximum_health"] + 1.0
+        poisoned.append(("health above maximum", health))
+
+        maximum = copy.deepcopy(payload)
+        maximum["researcher_space"]["roster_agents"][hidden_index][
+            "maximum_health"
+        ] += 1.0
+        poisoned.append(("maximum health outside class mechanics", maximum))
+
+        duplicate_status = copy.deepcopy(payload)
+        duplicate_status["researcher_space"]["roster_agents"][hidden_index][
+            "statuses"
+        ].extend((copy.deepcopy(status_template), copy.deepcopy(status_template)))
+        poisoned.append(("duplicate hidden status channel", duplicate_status))
+
+        wrong_status_family = copy.deepcopy(payload)
+        status = copy.deepcopy(status_template)
+        status["family"] = "stun" if status["family"] == "slow" else "slow"
+        wrong_status_family["researcher_space"]["roster_agents"][hidden_index][
+            "statuses"
+        ].append(status)
+        poisoned.append(
+            ("hidden status outside its catalog family", wrong_status_family)
+        )
+
+        duplicate_aura = copy.deepcopy(payload)
+        duplicate_aura["researcher_space"]["roster_agents"][hidden_index][
+            "aura_modifiers"
+        ].extend((copy.deepcopy(aura_template), copy.deepcopy(aura_template)))
+        poisoned.append(("duplicate hidden aura", duplicate_aura))
+
+        wrong_class_name = copy.deepcopy(payload)
+        next(
+            row
+            for row in wrong_class_name["researcher_space"]["class_mechanics"]
+            if row["class_id"] == hidden_class_id
+        )["class_name"] = "Wrong Class"
+        poisoned.append(("hidden class name outside the catalog", wrong_class_name))
+
+        mixed_versions = copy.deepcopy(payload)
+        hidden_mechanics = next(
+            row
+            for row in mixed_versions["researcher_space"]["class_mechanics"]
+            if row["class_id"] == hidden_class_id
+        )
+        del hidden_mechanics["mechanics_version"]
+        del hidden_mechanics["documentation_profile"]
+        poisoned.append(("mixed hidden V1 and V2 mechanics", mixed_versions))
+
+        wrong_status_owner = copy.deepcopy(payload)
+        mechanics = wrong_status_owner["researcher_space"]["class_mechanics"]
+        hidden_mechanics = next(
+            row for row in mechanics if row["class_id"] == hidden_class_id
+        )
+        hidden_channels = {
+            row["status_channel"] for row in hidden_mechanics["status_mechanics"]
+        }
+        foreign_status = next(
+            status
+            for row in mechanics
+            if row["class_id"] != hidden_class_id
+            for status in row["status_mechanics"]
+            if status["status_channel"] not in hidden_channels
+        )
+        status_mechanics = cast(
+            list[dict[str, object]],
+            hidden_mechanics["status_mechanics"],
+        )
+        status_mechanics.append(copy.deepcopy(foreign_status))
+        status_mechanics.sort(
+            key=lambda row: cast(int, row["status_channel"]),
+        )
+        poisoned.append(("hidden class with a foreign status", wrong_status_owner))
+
+        wrong_aura_owner = copy.deepcopy(payload)
+        mechanics = wrong_aura_owner["researcher_space"]["class_mechanics"]
+        hidden_mechanics = next(
+            row for row in mechanics if row["class_id"] == hidden_class_id
+        )
+        foreign_aura = next(
+            aura
+            for row in mechanics
+            if row["class_id"] != hidden_class_id
+            for aura in row["aura_mechanics"]
+        )
+        hidden_mechanics["aura_mechanics"].append(copy.deepcopy(foreign_aura))
+        poisoned.append(("hidden class with a foreign aura", wrong_aura_owner))
+
+        for mutation_name, candidate in poisoned:
+            try:
+                model.model_validate_json(json.dumps(candidate))
+            except ValidationError:
+                pass
+            else:
+                pytest.fail(f"{leaf_name}: {mutation_name} unexpectedly passed")
 
 
 def test_agent_endpoint_factories_derive_exact_axis_from_accepted_mapping(
@@ -2726,7 +2927,7 @@ def test_every_serialized_presentation_key_is_recomputed_for_its_authority(
     )
     expected_counts = {
         "live_oracle": 53,
-        "live_no_shared_obs_agent_pov": 44,
+        "live_no_shared_obs_agent_pov": 57,
         "replay_oracle": 58,
         "replay_no_shared_obs_agent_pov": 62,
         "replay_shared_obs_agent_pov": 77,
@@ -3236,7 +3437,7 @@ def test_no_shared_own_status_successor_joins_current_self(
         )
 
 
-def test_real_death_successor_keeps_fixed_recipient_corpse_authorized() -> None:
+def test_real_death_successor_keeps_selected_recipient_corpse_authorized() -> None:
     launch = debugger_test_launch_specification(0)
     session = create_session(
         get_scenario("death_respawn_cycle"),
@@ -3253,6 +3454,7 @@ def test_real_death_successor_keeps_fixed_recipient_corpse_authorized() -> None:
         verbose_logging=False,
     )
     session = submit_next_script_frame(session)
+    session = select_controlled_actor(session, 5)
     view = session.incoming_evaluation_view
     assert view is not None
     death = build_actor_pov_adjacent_transition_slice_v1(view, global_slot=5)
@@ -3327,20 +3529,22 @@ def test_real_death_successor_keeps_fixed_recipient_corpse_authorized() -> None:
             latest_events.incoming_successor_recipient_frame_id
         ),
     )
-    current_slice = build_actor_pov_current_slice_v1(
-        session.evaluation_context,
-        view.successor_frame,
-        global_slot=5,
-        incoming_transition_view=view,
-    )
-    draft = build_live_no_shared_obs_draft_inspection_v1(
-        current_slice,
-        parts,
-        draft_move_action=0,
-        draft_target_action=0,
-        draft_armed_lane="none",
-    )
     frame_index = death.successor_frame.frame_index
+    oracle_raw = build_debugger_frame(
+        session,
+        session_id=authority,
+        revision=frame_index,
+        view_mode="researcher",
+        preset="analysis",
+        include_stress=False,
+    )
+    assert type(oracle_raw) is ResearcherLiveDebuggerFrameV2
+    oracle_presentation = build_live_oracle_authorized_presentation_v1(
+        session.evaluation_context,
+        session.current_evaluation_frame,
+        session.incoming_evaluation_view,
+        oracle_raw,
+    )
     frame = LiveNoSharedObsAuthorizedPresentationFrameV1(
         schema_version=1,
         presentation_kind="live_no_shared_obs_agent_pov",
@@ -3356,7 +3560,7 @@ def test_real_death_successor_keeps_fixed_recipient_corpse_authorized() -> None:
             source_recipient_public_agent_id=parts.recipient_public_agent_id,
             source_recipient_frame_id=parts.source_recipient_frame_id,
             source_simulator_step_count=parts.source_simulator_step_count,
-            source_submission_scope="controlled_actor",
+            source_submission_scope="scripted_playback",
             source_authorized_endpoint_digest_sha256=(
                 endpoint.authorized_endpoint_digest_sha256
             ),
@@ -3392,12 +3596,14 @@ def test_real_death_successor_keeps_fixed_recipient_corpse_authorized() -> None:
             source_recipient_public_agent_id=parts.recipient_public_agent_id,
             source_recipient_frame_id=parts.source_recipient_frame_id,
             source_simulator_step_count=parts.source_simulator_step_count,
-            inspection=LiveEditableDraftInspectionV1(
-                inspection_kind="editable_live_draft",
-                submission_scope="controlled_actor",
-                draft=draft,
+            inspection=LiveScriptedPlaybackInspectionV1(
+                inspection_kind="scripted_playback_inspection",
+                submission_scope="scripted_playback",
+                editable_draft_available=False,
+                advance_semantics="registered_script_frame",
             ),
         ),
+        researcher_space=build_live_researcher_space_v1(oracle_presentation),
     )
     encoded = frame.model_dump_json()
     parsed = LiveNoSharedObsAuthorizedPresentationFrameV1.model_validate_json(encoded)
@@ -3737,6 +3943,16 @@ def test_live_inspection_envelope_rejects_stale_run_and_revision(
     rebound["live_inspection"]["source_authority_epoch"] = stale["source"][
         "source_authority_epoch"
     ]
+    if frame_attribute == "live_no_shared":
+        rebound["researcher_space"]["source_run_generation"] = stale["source"][
+            "source_run_generation"
+        ]
+        rebound["researcher_space"]["source_revision"] = stale["source"][
+            "source_revision"
+        ]
+        rebound["researcher_space"]["source_authority_epoch"] = stale["source"][
+            "source_authority_epoch"
+        ]
     parsed = frame_type.model_validate_json(json.dumps(rebound))
     assert parsed.live_inspection.source_revision == parsed.source.source_revision
     assert (

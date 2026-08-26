@@ -1,12 +1,16 @@
 """Live packaging seams for the authorized presentation resource.
 
 The Combat Debugger owns two presentation audiences: the full researcher
-Oracle and one fixed-recipient NoSharedObs Agent POV.  This module packages
-only already-committed live epochs.  It does not step the simulator, retain
-history, read replay artifacts, or expose a live SharedObs product.
+Oracle and a selected-recipient NoSharedObs Agent POV.  The Agent battlefield
+remains fog-authorized while a separate geometry-free researcher branch owns
+global controls and panels.  This module packages only already-committed live
+epochs.  It does not step the simulator, retain history, read replay artifacts,
+or expose a live SharedObs product.
 """
 
 from __future__ import annotations
+
+from dataclasses import replace
 
 from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
 from marl_battlegrounds.evaluation.models import (
@@ -22,6 +26,9 @@ from marl_battlegrounds.rendering.authorized_incoming import (
     build_live_no_shared_obs_incoming_summary_v1,
 )
 from marl_battlegrounds.rendering.authorized_inspection import (
+    AuthorizedAxisOnlyTargetActionV1,
+    AuthorizedNoTargetActionV1,
+    AuthorizedVisibleTargetActionV1,
     DraftArmedLaneV1,
     build_live_no_shared_obs_draft_inspection_v1,
     build_live_oracle_draft_inspection_v1,
@@ -59,11 +66,15 @@ from scripts.dev.visual_debugger.presentation_protocol import (
     LiveOracleInspectionEnvelopeV1,
     LiveOraclePresentationSourceIdentityV1,
     LiveOracleTechnicalFrameV1,
+    LiveResearcherDraftInspectionV1,
+    LiveResearcherEditableDraftInspectionV1,
+    LiveResearcherSpaceV1,
     LiveScriptedPlaybackInspectionV1,
     NoSharedObsLatestTransitionV1,
     NoSharedObsPresentationAuthorityV1,
     OracleLatestTransitionV1,
     OraclePresentationAuthorityV1,
+    ReplayResearcherRosterAgentV1,
     build_no_shared_obs_authorized_current_endpoint_v1,
     build_oracle_authorized_current_endpoint_v1,
 )
@@ -437,6 +448,111 @@ def build_live_oracle_authorized_presentation_v1(
     )
 
 
+def build_live_researcher_space_v1(
+    oracle: LiveOracleAuthorizedPresentationFrameV1,
+) -> LiveResearcherSpaceV1:
+    """Project one validated Oracle epoch into non-battlefield researcher UI."""
+    if type(oracle) is not LiveOracleAuthorizedPresentationFrameV1:
+        raise TypeError("oracle must be an exact live Oracle presentation.")
+    endpoint = oracle.current_endpoint
+    action_axis = endpoint.action_axis
+    if action_axis is None:
+        raise ValueError("live researcher controls require a selected Oracle actor.")
+    source = oracle.source
+    directory_by_id = {
+        row.public_agent_id: row for row in endpoint.identity_directory.identities
+    }
+    inspection = oracle.live_inspection.inspection
+    if type(inspection) is LiveEditableDraftInspectionV1:
+        source_draft = inspection.draft
+        no_target = source_draft.decision_mask.target_actions[0]
+        if type(no_target) is not AuthorizedNoTargetActionV1:
+            raise ValueError("Oracle draft target zero changed its exact variant.")
+        positive_targets: list[AuthorizedAxisOnlyTargetActionV1] = []
+        for row in source_draft.decision_mask.target_actions[1:]:
+            if (
+                type(row) is AuthorizedVisibleTargetActionV1
+                or type(row) is AuthorizedAxisOnlyTargetActionV1
+            ):
+                target_public_agent_id = row.target_public_agent_id
+            else:
+                raise ValueError("Oracle draft positive target changed its variant.")
+            positive_targets.append(
+                AuthorizedAxisOnlyTargetActionV1(
+                    target_kind="axis_only_authorized_agent",
+                    target_action=row.target_action,
+                    display_name=row.display_name,
+                    target_public_agent_id=target_public_agent_id,
+                )
+            )
+        geometry_free_targets = (no_target, *positive_targets)
+        geometry_free_mask = replace(
+            source_draft.decision_mask,
+            target_actions=geometry_free_targets,
+        )
+        pending_inspection = LiveResearcherEditableDraftInspectionV1(
+            inspection_kind="editable_live_draft",
+            submission_scope="joint_turn",
+            draft=LiveResearcherDraftInspectionV1(
+                schema_version=source_draft.schema_version,
+                inspection_kind="live_draft_action",
+                current_simulator_step_count=(
+                    source_draft.current_simulator_step_count
+                ),
+                actor_presentation_key=source_draft.actor_presentation_key,
+                actor_public_agent_id=source_draft.actor_public_agent_id,
+                decision_mask=geometry_free_mask,
+                draft_action=source_draft.draft_action,
+                draft_target=geometry_free_targets[
+                    source_draft.draft_action.target_action
+                ],
+                draft_legality=source_draft.draft_legality,
+            ),
+        )
+    elif type(inspection) is LiveScriptedPlaybackInspectionV1:
+        pending_inspection = inspection
+    else:  # pragma: no cover - the Oracle root owns this exact union.
+        raise AssertionError("validated Oracle inspection variant disappeared.")
+
+    return LiveResearcherSpaceV1(
+        researcher_space_kind="global_live_researcher_space",
+        source_session_id=source.source_session_id,
+        source_run_generation=source.source_run_generation,
+        source_revision=source.source_revision,
+        source_authority_epoch=source.source_authority_epoch,
+        episode_id=source.episode_id,
+        frame_index=source.source_frame_index,
+        simulator_step_count=source.source_simulator_step_count,
+        selected_public_agent_id=action_axis.owner_public_agent_id,
+        identity_directory=endpoint.identity_directory,
+        roster_agents=tuple(
+            ReplayResearcherRosterAgentV1(
+                presentation_key=agent.presentation_key,
+                public_agent_id=agent.public_agent_id,
+                team_id=agent.team_id,
+                team_local_slot=directory_by_id[agent.public_agent_id].team_local_slot,
+                class_id=agent.class_id,
+                class_name=agent.class_name,
+                life_state=agent.life_state,
+                current_health=agent.current_health,
+                maximum_health=agent.maximum_health,
+                effective_movement_speed=agent.effective_movement_speed,
+                ultimate_cooldown_remaining=agent.ultimate_cooldown_remaining,
+                spawn_shield_remaining=agent.spawn_shield_remaining,
+                steps_until_out_of_combat=agent.steps_until_out_of_combat,
+                out_of_combat_delay_steps=agent.out_of_combat_delay_steps,
+                statuses=agent.statuses,
+                aura_modifiers=agent.aura_modifiers,
+            )
+            for agent in endpoint.scene.agents
+        ),
+        class_mechanics=endpoint.scene.class_mechanics,
+        latest_transition=oracle.latest_transition,
+        technical_frame=oracle.technical_frame,
+        pending_inspection=pending_inspection,
+    )
+
+
 def build_live_no_shared_obs_authorized_presentation_v1(
     current_slice: ActorPovCurrentSliceV1,
     incoming_carrier: ActorPovAdjacentTransitionSliceV1 | None,
@@ -444,8 +560,9 @@ def build_live_no_shared_obs_authorized_presentation_v1(
     *,
     public_catalog: StaticMechanicsCatalogV1,
     incoming_visual_events: VisualEventBatchV2 | None,
+    researcher_space: LiveResearcherSpaceV1,
 ) -> LiveNoSharedObsAuthorizedPresentationFrameV1:
-    """Package one committed fixed-recipient live NoSharedObs presentation."""
+    """Package one committed live NoSharedObs battlefield and researcher UI."""
     _require_live_header(
         raw_frame,
         researcher=False,
@@ -545,12 +662,12 @@ def build_live_no_shared_obs_authorized_presentation_v1(
         endpoint_action_axis=endpoint.action_axis,
     )
     submission_scope = raw_frame.hud.pending_submission_scope
-    if submission_scope == "controlled_actor":
+    if submission_scope == "joint_turn":
         pending = raw_frame.hud.pending_action
         pending_target_action = pending.target.target_action
         input_inspection = LiveEditableDraftInspectionV1(
             inspection_kind="editable_live_draft",
-            submission_scope="controlled_actor",
+            submission_scope="joint_turn",
             draft=build_live_no_shared_obs_draft_inspection_v1(
                 current_slice,
                 parts,
@@ -629,10 +746,12 @@ def build_live_no_shared_obs_authorized_presentation_v1(
             source_simulator_step_count=source.source_simulator_step_count,
             inspection=input_inspection,
         ),
+        researcher_space=researcher_space,
     )
 
 
 __all__ = [
     "build_live_no_shared_obs_authorized_presentation_v1",
     "build_live_oracle_authorized_presentation_v1",
+    "build_live_researcher_space_v1",
 ]

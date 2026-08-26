@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Lock
+from typing import Literal
 from unittest.mock import Mock
 
 import jax.numpy as jnp
@@ -558,7 +559,7 @@ def test_unavailable_browser_draft_is_a_revision_preserving_no_op() -> None:
     assert "canonical no-combat tuple" in result.payload.notice
 
 
-def test_entering_pov_clears_a_hidden_pending_target_without_stepping() -> None:
+def test_entering_pov_preserves_a_hidden_pending_target_without_stepping() -> None:
     service = _service()
     researcher_slots = {
         row.global_slot
@@ -593,13 +594,13 @@ def test_entering_pov_clears_a_hidden_pending_target_without_stepping() -> None:
 
     assert isinstance(changed_view.payload, CommandResponseV2)
     assert changed_view.payload.frame.view_mode == "pov"
-    assert service.session.pending_action.selected_global_target_slot is None
+    assert service.session.pending_action.selected_global_target_slot == hidden_target
     assert service.session.state is before_view.state
     assert bool(jnp.array_equal(service.session.key, before_view.key))
     assert int(service.session.state.step_count) == 0
 
 
-def test_terminal_pov_sanitizer_change_does_not_append_stale_transition(
+def test_terminal_pov_submit_retains_draft_without_appending_stale_transition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registered = get_scenario("arena_5v5")
@@ -622,7 +623,7 @@ def test_terminal_pov_sanitizer_change_does_not_append_stale_transition(
         view_mode="pov",
         preset="analysis",
         include_stress=False,
-        session_id="terminal-pov-sanitizer",
+        session_id="terminal-pov-submit",
     )
     terminal = service.apply_command(
         _request(
@@ -648,14 +649,8 @@ def test_terminal_pov_sanitizer_change_does_not_append_stale_transition(
     previous_key = service.session.key
     previous_observer_count = service.evaluation_validated_transition_count
 
-    def clear_terminal_target(session: DebuggerSession) -> DebuggerSession:
-        return control_module.clear_pending_target(session)
-
     step_spy = Mock(side_effect=AssertionError("terminal submit must not step"))
     capture_spy = Mock(side_effect=AssertionError("terminal submit must not capture"))
-    monkeypatch.setattr(
-        input_module, "sanitize_pov_pending_target", clear_terminal_target
-    )
     monkeypatch.setattr(control_module, "step", step_spy)
     monkeypatch.setattr(
         control_module,
@@ -663,18 +658,18 @@ def test_terminal_pov_sanitizer_change_does_not_append_stale_transition(
         capture_spy,
     )
 
-    sanitized = service.apply_command(
+    retained = service.apply_command(
         _request(
-            "sanitize-terminal-pov-target",
+            "retain-terminal-pov-target",
             base_revision=2,
             command=KeyboardCommandV1(key="Enter"),
         )
     )
 
-    assert isinstance(sanitized.payload, CommandResponseV2)
-    assert sanitized.payload.result == "applied"
-    assert service.revision == 3
-    assert service.session.pending_action.selected_global_target_slot is None
+    assert isinstance(retained.payload, CommandResponseV2)
+    assert retained.payload.result == "no_op"
+    assert service.revision == 2
+    assert service.session.pending_action.selected_global_target_slot == target
     assert service.session.incoming_evaluation_view is previous_incoming
     assert service.session.state is previous_state
     assert service.session.key is previous_key
@@ -684,7 +679,7 @@ def test_terminal_pov_sanitizer_change_does_not_append_stale_transition(
     assert not service.faulted
 
 
-def test_initial_pov_service_clears_hidden_pending_target() -> None:
+def test_initial_pov_service_preserves_hidden_pending_target() -> None:
     session = create_session(
         get_scenario("arena_5v5"),
         seed=0,
@@ -709,7 +704,7 @@ def test_initial_pov_service_clears_hidden_pending_target() -> None:
         session_id="initial-pov",
     )
 
-    assert service.session.pending_action.selected_global_target_slot is None
+    assert service.session.pending_action.selected_global_target_slot == hidden_target
     frame = service.current_frame()
     assert isinstance(frame, ActorPovLiveDebuggerFrameV2)
     assert not hasattr(frame.hud, "selected_global_slot")
@@ -2011,15 +2006,15 @@ def test_typed_transition_failure_with_save_failure_stays_recoverable(
     assert recorder.lifecycle == "reviewing"
 
 
-@pytest.mark.parametrize("failure_site", ("pov_sanitizer", "result_envelope"))
+@pytest.mark.parametrize("view_mode", ("researcher", "pov"))
 def test_transition_result_packaging_failure_saves_uncommitted_candidate_prefix(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    failure_site: str,
+    view_mode: Literal["researcher", "pov"],
 ) -> None:
     service, recorder = _recording_service(
         tmp_path,
-        view_mode="pov" if failure_site == "pov_sanitizer" else "researcher",
+        view_mode=view_mode,
     )
     initial_session = service.session
     tracked_step = Mock(wraps=control_module.step)
@@ -2034,13 +2029,10 @@ def test_transition_result_packaging_failure_saves_uncommitted_candidate_prefix(
         "capture_evaluation_transition_unit_v1",
         tracked_capture,
     )
-    if failure_site == "pov_sanitizer":
-        monkeypatch.setattr(input_module, "sanitize_pov_pending_target", fail_packaging)
-    else:
-        monkeypatch.setattr(input_module, "_result", fail_packaging)
+    monkeypatch.setattr(input_module, "_result", fail_packaging)
 
     request = _request(
-        f"{failure_site}-failure",
+        f"{view_mode}-result-envelope-failure",
         base_revision=0,
         command=KeyboardCommandV1(key="Enter"),
     )

@@ -142,6 +142,12 @@ test("shared shell uses the requested details and visual-filter controls without
 
   assert.match(markup, />Comprehensive Agent Class Details</u);
   assert.match(markup, /id="accepted-heading">Latest Transition</u);
+  assert.match(markup, /id="command-commit-title">Submit the staged joint turn</u);
+  assert.match(markup, /id="submit-turn-button"[^>]*>\s*Submit joint turn\s*</u);
+  assert.match(
+    markup,
+    /<button type="button" data-key="Tab">Next actor<\/button>[\s\S]*<button type="button" data-key="Tab" data-shift="true">/u,
+  );
   assert.match(markup, /<summary>Visual Key<\/summary>/u);
   assert.match(markup, /id="visual-filter-count"[^>]*>18 enabled</u);
   assert.match(
@@ -317,6 +323,8 @@ test("browser production paths omit retired navigation and privileged display co
   assert.match(main, /return "Oracle View"/u);
   assert.match(main, /return "Agent POV"/u);
   assert.doesNotMatch(main, /SharedObs source material/u);
+  assert.doesNotMatch(main, /fixed recipient|passive inspection|controlled_actor/iu);
+  assert.doesNotMatch(panels, /fixed recipient|controlled_actor/iu);
   assert.doesNotMatch(scene, /scene\.audience_badge/u);
   assert.match(scene, /"Oracle View" : "Agent POV"/u);
 

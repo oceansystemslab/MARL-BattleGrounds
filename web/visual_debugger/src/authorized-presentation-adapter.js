@@ -146,19 +146,32 @@ export function scopedPresentationKey(value, presentationKey) {
 }
 
 /** @param {AuthorizedPresentationFrame} value */
-function replayResearcherSpace(value) {
-  return value.viewer_mode === "replay" &&
-    authorizedPresentationAudience(value) === "agent_pov" &&
-    isRecord(value.researcher_space)
+function researcherSpace(value) {
+  if (
+    authorizedPresentationAudience(value) !== "agent_pov" ||
+    !isRecord(value.researcher_space)
+  ) {
+    return null;
+  }
+  const expectedKind =
+    value.viewer_mode === "live"
+      ? "global_live_researcher_space"
+      : "global_replay_researcher_space";
+  return value.researcher_space.researcher_space_kind === expectedKind
     ? value.researcher_space
     : null;
+}
+
+/** @param {unknown} value */
+export function authorizedPresentationHasResearcherSpace(value) {
+  return isAuthorizedPresentationFrame(value) && researcherSpace(value) !== null;
 }
 
 /**
  * Enumerate exact presentation identities for retained scene/roster nodes.
  * Oracle command slots are derived only from the fixed ten-row public identity
- * directory and remain outside body records. Agent rows never gain a command
- * slot.
+ * directory and remain outside body records. Agent researcher rows may expose
+ * a slot only through this internal adapter; body records never gain one.
  *
  * @param {unknown} value
  * @returns {ReadonlyArray<Readonly<{
@@ -166,7 +179,7 @@ function replayResearcherSpace(value) {
  *   presentation_key: string,
  *   public_agent_id: string,
  *   command_global_slot: number | null,
- *   activation_kind: "scene_agent" | "replay_pov_global",
+ *   activation_kind: "scene_agent" | "live_pov_global" | "replay_pov_global",
  *   visible_in_snapshot: boolean,
  *   agent: Readonly<Record<string, any>>,
  * }>>}
@@ -176,10 +189,10 @@ export function authorizedPresentationIdentityRows(value) {
     return Object.freeze([]);
   }
   const audience = authorizedPresentationAudience(value);
-  const researcherSpace = replayResearcherSpace(value);
+  const globalResearcherSpace = researcherSpace(value);
   const directory =
-    researcherSpace !== null
-      ? researcherSpace.identity_directory
+    globalResearcherSpace !== null
+      ? globalResearcherSpace.identity_directory
       : audience === "researcher" && isRecord(value.current_endpoint)
         ? value.current_endpoint.identity_directory
         : null;
@@ -205,8 +218,8 @@ export function authorizedPresentationIdentityRows(value) {
 
   const rows = [];
   const rosterAgents =
-    researcherSpace !== null && Array.isArray(researcherSpace.roster_agents)
-      ? researcherSpace.roster_agents
+    globalResearcherSpace !== null && Array.isArray(globalResearcherSpace.roster_agents)
+      ? globalResearcherSpace.roster_agents
       : Array.isArray(value.scene.agents)
         ? value.scene.agents
         : [];
@@ -235,10 +248,15 @@ export function authorizedPresentationIdentityRows(value) {
         presentation_key: agent.presentation_key,
         public_agent_id: agent.public_agent_id,
         command_global_slot:
-          audience === "researcher" || researcherSpace !== null
+          audience === "researcher" || globalResearcherSpace !== null
             ? (commandSlotByPublicId.get(agent.public_agent_id) ?? null)
             : null,
-        activation_kind: researcherSpace === null ? "scene_agent" : "replay_pov_global",
+        activation_kind:
+          globalResearcherSpace === null
+            ? "scene_agent"
+            : value.viewer_mode === "live"
+              ? "live_pov_global"
+              : "replay_pov_global",
         visible_in_snapshot: visiblePublicIds.has(agent.public_agent_id),
         agent,
       }),
@@ -273,28 +291,52 @@ export function authorizedOracleCommandSlotForPresentationKey(value, presentatio
  * identity directory. Unlike visible presentation-key rows, the 11-category
  * target axis deliberately includes axis-only inactive identities. Requiring
  * the public ID to occur on that exact axis prevents this directory lookup
- * from becoming a general capability mint. Agent POV roots always return null.
+ * from becoming a general capability mint. Live Agent POV resolves only from
+ * its separately certified global researcher branch.
  *
  * @param {unknown} value
  * @param {unknown} publicAgentId
  * @returns {number | null}
  */
 export function authorizedOracleCommandSlotForPublicAgentId(value, publicAgentId) {
+  const globalResearcherSpace = isAuthorizedPresentationFrame(value)
+    ? researcherSpace(value)
+    : null;
+  const liveResearcherSpace =
+    isAuthorizedPresentationFrame(value) &&
+    value.viewer_mode === "live" &&
+    globalResearcherSpace !== null
+      ? globalResearcherSpace
+      : null;
+  const directory =
+    liveResearcherSpace !== null
+      ? liveResearcherSpace.identity_directory
+      : isAuthorizedPresentationFrame(value) &&
+          authorizedPresentationAudience(value) === "researcher"
+        ? value.current_endpoint?.identity_directory
+        : null;
+  const targetActions =
+    liveResearcherSpace !== null &&
+    isRecord(liveResearcherSpace.pending_inspection?.draft?.decision_mask)
+      ? liveResearcherSpace.pending_inspection.draft.decision_mask.target_actions
+      : isAuthorizedPresentationFrame(value) &&
+          authorizedPresentationAudience(value) === "researcher" &&
+          isRecord(value.action_axis)
+        ? value.action_axis.target_actions
+        : null;
   if (
     !isAuthorizedPresentationFrame(value) ||
-    authorizedPresentationAudience(value) !== "researcher" ||
     typeof publicAgentId !== "string" ||
-    !isRecord(value.action_axis) ||
-    !Array.isArray(value.action_axis.target_actions) ||
-    !value.action_axis.target_actions.some(
+    !Array.isArray(targetActions) ||
+    !targetActions.some(
       (target) => isRecord(target) && target.target_public_agent_id === publicAgentId,
     ) ||
-    !isRecord(value.current_endpoint?.identity_directory) ||
-    !Array.isArray(value.current_endpoint.identity_directory.identities)
+    !isRecord(directory) ||
+    !Array.isArray(directory.identities)
   ) {
     return null;
   }
-  const identity = value.current_endpoint.identity_directory.identities.find(
+  const identity = directory.identities.find(
     (/** @type {unknown} */ row) =>
       isRecord(row) && row.public_agent_id === publicAgentId,
   );
@@ -319,7 +361,7 @@ function presentationInspection(value) {
  * @param {unknown} value
  * @returns {Readonly<{
  *   state_kind: "live_editable" | "live_scripted" | "replay_outgoing" | "replay_none" | "unavailable",
- *   submission_scope: "joint_turn" | "controlled_actor" | "scripted_playback" | null,
+ *   submission_scope: "joint_turn" | "scripted_playback" | null,
  *   inspection: Readonly<Record<string, any>> | null,
  * }>}
  */
@@ -359,6 +401,37 @@ export function authorizedPresentationInspectionState(value) {
         submission_scope: null,
         inspection: null,
       });
+}
+
+/**
+ * Return the inspection state that owns researcher panels and live controls.
+ * The live Agent branch is geometry-free; SVG consumers must continue using
+ * `authorizedPresentationInspectionState()` instead.
+ *
+ * @param {unknown} value
+ * @returns {ReturnType<typeof authorizedPresentationInspectionState>}
+ */
+export function authorizedPresentationResearcherInspectionState(value) {
+  if (!isAuthorizedPresentationFrame(value)) {
+    return authorizedPresentationInspectionState(value);
+  }
+  const globalResearcherSpace = researcherSpace(value);
+  if (value.viewer_mode !== "live" || globalResearcherSpace === null) {
+    return authorizedPresentationInspectionState(value);
+  }
+  const pending = globalResearcherSpace.pending_inspection;
+  if (isRecord(pending) && pending.inspection_kind === "editable_live_draft") {
+    return Object.freeze({
+      state_kind: "live_editable",
+      submission_scope: pending.submission_scope,
+      inspection: isRecord(pending.draft) ? pending.draft : null,
+    });
+  }
+  return Object.freeze({
+    state_kind: "live_scripted",
+    submission_scope: isRecord(pending) ? pending.submission_scope : null,
+    inspection: null,
+  });
 }
 
 /**
@@ -797,7 +870,7 @@ export function authorizedPresentationSceneView(
 }
 
 /**
- * Project only the non-spatial researcher surface carried by Replay Agent
+ * Project only the non-spatial researcher surface carried by Agent
  * presentations. Battlefield rendering must continue to use
  * `authorizedPresentationSceneView()` and therefore remains fog-scoped.
  *
@@ -808,7 +881,7 @@ export function authorizedPresentationResearcherSceneView(value) {
   if (!isAuthorizedPresentationFrame(value)) {
     return null;
   }
-  const researcher = replayResearcherSpace(value);
+  const researcher = researcherSpace(value);
   if (researcher === null) {
     return authorizedPresentationSceneView(value);
   }
@@ -821,6 +894,21 @@ export function authorizedPresentationResearcherSceneView(value) {
     (agent) => agent.public_agent_id === researcher.selected_public_agent_id,
   );
   const selectedKey = selected?.presentation_key ?? null;
+  const inspectionState = authorizedPresentationResearcherInspectionState(value);
+  const inspection = inspectionState.inspection;
+  const target = isRecord(inspection?.draft_target) ? inspection.draft_target : null;
+  const selectedLegality =
+    selected !== undefined &&
+    isRecord(inspection) &&
+    isRecord(inspection.decision_mask) &&
+    target !== null
+      ? projectCertifiedInspectionLegality(
+          inspection.decision_mask,
+          selected,
+          target,
+          inspection.draft_action?.armed_lane,
+        )
+      : null;
   return Object.freeze({
     audience: "researcher",
     agents,
@@ -832,7 +920,7 @@ export function authorizedPresentationResearcherSceneView(value) {
     }),
     ranges: Object.freeze([]),
     pending_route: null,
-    selected_legality: null,
+    selected_legality: selectedLegality,
   });
 }
 
@@ -958,11 +1046,30 @@ export function authorizedPresentationTransitionRows(value) {
   if (!isAuthorizedPresentationFrame(value)) {
     return Object.freeze([]);
   }
-  const researcher = replayResearcherSpace(value);
+  const researcher = researcherSpace(value);
   return authorizedPresentationActionRows(
     value,
     researcher?.latest_transition ?? value.latest_transition,
   );
+}
+
+/**
+ * Return the exact incoming transition identity that owns Latest Transition.
+ * Agent researcher panels use their global branch while battlefield animation
+ * remains bound to the fog-authorized top-level transition.
+ *
+ * @param {unknown} value
+ * @returns {string | null}
+ */
+export function authorizedPresentationLatestTransitionId(value) {
+  if (!isAuthorizedPresentationFrame(value)) {
+    return null;
+  }
+  const researcher = researcherSpace(value);
+  const transition = researcher?.latest_transition ?? value.latest_transition;
+  return isRecord(transition) && typeof transition.incoming_transition_id === "string"
+    ? transition.incoming_transition_id
+    : null;
 }
 
 /** @param {unknown} value */
@@ -970,7 +1077,7 @@ export function authorizedPresentationUpcomingTransitionRows(value) {
   if (!isAuthorizedPresentationFrame(value) || value.viewer_mode !== "replay") {
     return Object.freeze([]);
   }
-  const researcher = replayResearcherSpace(value);
+  const researcher = researcherSpace(value);
   return authorizedPresentationActionRows(
     value,
     researcher?.upcoming_transition ?? value.upcoming_transition,
@@ -1151,7 +1258,10 @@ export function authorizedPresentationTechnicalFacts(value) {
   if (!isAuthorizedPresentationFrame(value)) {
     return Object.freeze([]);
   }
-  const technicalFrame = technicalFrameDataValue(value, "technical_frame");
+  const researcher = researcherSpace(value);
+  const technicalOwner =
+    value.viewer_mode === "live" && researcher !== null ? researcher : value;
+  const technicalFrame = technicalFrameDataValue(technicalOwner, "technical_frame");
   if (technicalFrame === TECHNICAL_FIELD_UNAVAILABLE || !isRecord(technicalFrame)) {
     return Object.freeze([]);
   }

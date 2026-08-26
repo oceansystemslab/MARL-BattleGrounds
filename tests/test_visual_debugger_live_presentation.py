@@ -14,11 +14,13 @@ import scripts.dev.visual_debugger.service as service_module
 from scripts.dev.visual_debugger.live_presentation import (
     build_live_no_shared_obs_authorized_presentation_v1,
     build_live_oracle_authorized_presentation_v1,
+    build_live_researcher_space_v1,
 )
 from scripts.dev.visual_debugger.presentation_protocol import (
     LiveEditableDraftInspectionV1,
     LiveNoSharedObsAuthorizedPresentationFrameV1,
     LiveOracleAuthorizedPresentationFrameV1,
+    LiveResearcherEditableDraftInspectionV1,
     LiveScriptedPlaybackInspectionV1,
     PresentationResourceResultV1,
 )
@@ -128,9 +130,23 @@ def test_live_frame_zero_presentation_is_exact_and_repeatable(view_mode: str) ->
     else:
         assert type(payload) is LiveNoSharedObsAuthorizedPresentationFrameV1
         assert payload.technical_frame.incoming_recipient_transition_id is None
-        encoded = payload.model_dump_json()
-        assert ":frame:0" in encoded
-        assert "oracle_" not in encoded
+        local_encoded = payload.model_dump_json(exclude={"researcher_space"})
+        assert ":frame:0" in local_encoded
+        assert "oracle_" not in local_encoded
+        researcher = payload.researcher_space
+        assert researcher.latest_transition is None
+        assert (
+            researcher.selected_public_agent_id
+            == payload.source.source_recipient_public_agent_id
+        )
+        assert type(researcher.pending_inspection) is (
+            LiveResearcherEditableDraftInspectionV1
+        )
+        assert researcher.pending_inspection.submission_scope == "joint_turn"
+        assert all(
+            not hasattr(row, "target_anchor")
+            for row in researcher.pending_inspection.draft.decision_mask.target_actions
+        )
 
 
 def test_live_nonzero_oracle_and_no_shared_enter_exact_same_transition() -> None:
@@ -174,7 +190,12 @@ def test_live_nonzero_oracle_and_no_shared_enter_exact_same_transition() -> None
         pov.latest_transition.action_rows[0].actor_public_agent_id
         == pov.source.source_recipient_public_agent_id
     )
-    assert "oracle_" not in pov.model_dump_json()
+    assert "oracle_" not in pov.model_dump_json(exclude={"researcher_space"})
+    assert pov.researcher_space.latest_transition == oracle.latest_transition
+    assert (
+        pov.researcher_space.technical_frame.incoming_transition_id
+        == incoming.transition.transition_id
+    )
 
 
 @pytest.mark.parametrize("view_mode", ("researcher", "pov"))
@@ -518,6 +539,14 @@ def test_live_public_builders_derive_epoch_and_reject_cross_audience_inputs() ->
             raw,  # pyright: ignore[reportArgumentType]
             public_catalog=pov_session.evaluation_context.static_mechanics_catalog,
             incoming_visual_events=None,
+            researcher_space=build_live_researcher_space_v1(
+                build_live_oracle_authorized_presentation_v1(
+                    pov_session.evaluation_context,
+                    pov_session.current_evaluation_frame,
+                    pov_session.incoming_evaluation_view,
+                    raw,
+                )
+            ),
         )
 
 
@@ -534,6 +563,11 @@ def test_live_no_shared_builder_requires_exact_adjacent_carrier() -> None:
         global_slot=session.controlled_global_slot,
         incoming_transition_view=session.incoming_evaluation_view,
     )
+    current_presentation = service.current_presentation()
+    assert type(current_presentation.payload) is (
+        LiveNoSharedObsAuthorizedPresentationFrameV1
+    )
+    researcher_space = current_presentation.payload.researcher_space
     with pytest.raises(TypeError, match="require an exact carrier"):
         build_live_no_shared_obs_authorized_presentation_v1(
             current_slice,
@@ -546,6 +580,7 @@ def test_live_no_shared_builder_requires_exact_adjacent_carrier() -> None:
                     session.incoming_evaluation_view,
                 )
             ),
+            researcher_space=researcher_space,
         )
     assert session.incoming_evaluation_view is not None
     carrier = build_actor_pov_adjacent_transition_slice_v1(
@@ -560,6 +595,7 @@ def test_live_no_shared_builder_requires_exact_adjacent_carrier() -> None:
         incoming_visual_events=build_visual_event_batch_v2(
             session.incoming_evaluation_view
         ),
+        researcher_space=researcher_space,
     )
     assert accepted.latest_events is not None
 
@@ -650,6 +686,7 @@ def test_live_module_exposes_no_shared_product_builder() -> None:
     assert module.__all__ == [
         "build_live_no_shared_obs_authorized_presentation_v1",
         "build_live_oracle_authorized_presentation_v1",
+        "build_live_researcher_space_v1",
     ]
     assert not any(
         "shared_obs" in name and "no_shared_obs" not in name for name in dir(module)

@@ -42,7 +42,6 @@ type Preset = Literal["presentation", "analysis"]
 type PresentationPreset = Preset
 type PendingSubmissionScope = Literal[
     "joint_turn",
-    "controlled_actor",
     "scripted_playback",
 ]
 type CommandResult = Literal[
@@ -690,10 +689,10 @@ class ActorPovCandidateLegalityCardV1(_ProtocolModel):
 
 
 class ActorPovHudFrameV1(_ProtocolModel):
-    """Recipient-authorized HUD without researcher roster or global targets."""
+    """Recipient-authorized HUD for the selected row of one joint draft."""
 
     controlled_public_agent_id: _CanonicalScientificId
-    pending_submission_scope: Literal["controlled_actor", "scripted_playback"]
+    pending_submission_scope: Literal["joint_turn", "scripted_playback"]
     pending_action: ActorPovPendingActionCardV1
     latest_transition: ActorPovLatestTransitionCardV1 | None
     movement_legalities: tuple[MovementLegalityCardV1, ...]

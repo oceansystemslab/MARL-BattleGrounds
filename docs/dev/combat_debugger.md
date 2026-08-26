@@ -65,10 +65,12 @@ and presentation timing. Browser-only activity never advances the simulator.
 
 Oracle View can inspect every authorized actor and stages one independent draft
 per active slot. A submit precommits all staged actions and applies one
-simultaneous joint transition. Agent POV keeps one fixed recipient, exposes
-only its authorized presentation and decision axis, and submits only that
-recipient's draft. Activating another visible body in Agent POV changes local
-inspection only; it does not change the recipient.
+simultaneous joint transition. Agent POV uses the same global researcher
+controls and panels, including the complete roster, target selector, Pending
+Authorized Draft, Latest Transition, and joint submission. The selected actor
+is also the POV recipient. Only the authoritative battlefield snapshot,
+hit-testing, ranges, routes, and choreography are filtered by that actor's fog
+of war.
 
 The View control may switch between these authorities. Analysis is the only
 public presentation: there is no user-selectable density mode. The
@@ -85,17 +87,19 @@ form fields retain ordinary browser keyboard and Tab behavior.
 
 | Input | Oracle View | Agent POV |
 | --- | --- | --- |
-| Left click an authorized actor | Control that actor. | Inspect that body locally; keep the fixed recipient. |
-| Shift+left click an active authorized actor | Select it as the controlled actor's target. | No simulator command or recipient change. |
-| `Escape` | Clear the target and leave battlefield command focus. | Clear the recipient's target and leave battlefield command focus. |
-| `Tab` / `Shift+Tab` | Cycle active actors without discarding drafts. | Use native browser focus navigation. |
-| `W A S D` / arrow keys | Stage cardinal movement. | Stage cardinal movement for the fixed recipient. |
-| `Q E Z C` | Stage diagonal movement. | Stage diagonal movement for the fixed recipient. |
-| `X` | Stage Stay. | Stage Stay for the fixed recipient. |
-| `0` / `1` / `2` | Stage no combat / Basic / Ultimate. | Stage no combat / Basic / Ultimate for the fixed recipient. |
-| `Space` / `Enter` | Submit every staged actor as one joint turn. | Submit only the fixed recipient. |
+| Left click an authorized actor | Control that actor. | Control that visible actor and switch to its POV. |
+| Activate a Roster row | Control that actor. | Control any active actor and switch to its POV, whether or not its body is currently visible. |
+| Shift+left click an active authorized actor | Select it as the controlled actor's target. | Select that visible actor as the controlled actor's target. |
+| Target selector | Stage any globally authorized target. | Stage any globally authorized target. |
+| `Escape` | Clear the target and leave battlefield command focus. | Clear the target and leave battlefield command focus. |
+| `Tab` / `Shift+Tab` | Cycle active actors without discarding drafts. | Cycle active actors and POV recipients without discarding drafts. |
+| `W A S D` / arrow keys | Stage cardinal movement. | Stage cardinal movement. |
+| `Q E Z C` | Stage diagonal movement. | Stage diagonal movement. |
+| `X` | Stage Stay. | Stage Stay. |
+| `0` / `1` / `2` | Stage no combat / Basic / Ultimate. | Stage no combat / Basic / Ultimate. |
+| `Space` / `Enter` | Submit every staged actor as one joint turn. | Submit every staged actor as one joint turn. |
 | `R` | Reset the arena deterministically. | Reset the arena deterministically. |
-| `G` | Toggle Oracle controlled-actor ranges. | Toggle locally authorized ranges without a simulator command. |
+| `G` | Toggle Oracle controlled-actor ranges. | Toggle fog-authorized controlled-actor ranges without a simulator command. |
 | `?` | Open browser help. | Open browser help. |
 
 Each active actor has an independent movement, target, and combat-lane draft.
@@ -106,17 +110,27 @@ after Python applies the transition.
 
 Network-busy duplicate submissions are blocked. If readable choreography is
 still active, Submit settles that presentation before sending the current
-revision-fenced draft once. Animation, hover, panels, help, selection, and
-filters do not change scientific authority.
+revision-fenced draft once. While a live response is still installing, both
+views retain at most the first fresh battlefield staging key and one following
+fresh Enter, then apply them in that order after the confirmed update. Once
+Enter is queued, later staging keys cannot move ahead of it. Retained input is
+discarded if the update is stale, fails, requires reconnection, ends the
+episode, or shuts down the debugger; a retained Escape still performs its local
+focus release without replaying a simulator command. Animation, hover, panels,
+help, selection, and filters do not change scientific authority.
 
 ## Inspection and visual filters
 
 The selected-target inspector reports authorized identity, relation, distance,
-and public geometry. Pending Action reports movement, ability, target, and
-exact lane legality. Basic Legality is false when no target is selected. The
-live Technical Frame is allowlisted by authority: Episode, Frame, Simulator
-step, and conditional Incoming transition. The initial frame has no
-incoming-transition row.
+and public geometry. Roster, Comprehensive Agent Class Details, Pending
+Authorized Draft, Latest Transition, Technical Frame, and the target selector
+remain global researcher-space in both views. Pending Authorized Draft reports
+movement, ability, target, and exact lane legality without carrying battlefield
+anchors. Basic Legality is false when no target is selected. Only SVG-local
+inspection and choreography consume fog-filtered geometry. The live Technical
+Frame is allowlisted by authority: Episode, Frame, Simulator step, and
+conditional Incoming transition. The initial frame has no incoming-transition
+row.
 
 Visual Filters contains exactly 18 independently controlled paint families,
 all enabled by default:

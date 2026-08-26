@@ -626,7 +626,7 @@ def _build_pov_hud(
         use_ultimate_action=0 if pending.armed_lane is None else pending.armed_lane,
     )
     scenario = get_scenario(session.scenario_name)
-    scope = "scripted_playback" if scenario.mode == "scripted" else "controlled_actor"
+    scope = "scripted_playback" if scenario.mode == "scripted" else "joint_turn"
     return ActorPovHudFrameV1(
         controlled_public_agent_id=slice_.public_agent_id,
         pending_submission_scope=scope,

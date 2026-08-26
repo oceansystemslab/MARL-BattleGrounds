@@ -438,7 +438,7 @@ def test_pov_frame_uses_dedicated_projection_and_omits_researcher_ranges() -> No
     assert frame.frame_kind == "actor_pov_live_debugger"
     assert frame.projection.scene.self_actor.public_agent_id == "0"
     assert frame.hud.controlled_public_agent_id == "0"
-    assert frame.hud.pending_submission_scope == "controlled_actor"
+    assert frame.hud.pending_submission_scope == "joint_turn"
     assert frame.verbose is False
     assert "show_ranges" not in payload
     assert "ranges" not in scene_payload

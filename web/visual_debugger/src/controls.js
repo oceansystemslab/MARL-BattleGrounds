@@ -352,7 +352,7 @@ function pointInSvg(svg, event) {
  *   onHelp: () => void,
  *   onReleaseFocus: () => void,
  *   isInteractive?: () => boolean,
- *   onFencedEnter?: (command: Record<string, unknown>) => boolean,
+ *   onFencedCommand?: (command: Record<string, unknown>) => boolean,
  * }} bindings
  */
 export function bindBattlefieldControls({
@@ -363,21 +363,18 @@ export function bindBattlefieldControls({
   onHelp,
   onReleaseFocus,
   isInteractive = () => true,
-  onFencedEnter = () => false,
+  onFencedCommand = () => false,
 }) {
   battlefield.addEventListener("keydown", async (event) => {
     if (event.target !== battlefield || !isDebuggerKey(event)) {
       return;
     }
     if (!isInteractive()) {
-      if (event.key === " ") {
-        event.preventDefault();
-      } else if (
-        event.key === "Enter" &&
-        onFencedEnter(keyboardCommandFromEvent(event))
-      ) {
+      if (onFencedCommand(keyboardCommandFromEvent(event))) {
         event.preventDefault();
         event.stopPropagation();
+      } else if (event.key === " ") {
+        event.preventDefault();
       }
       return;
     }

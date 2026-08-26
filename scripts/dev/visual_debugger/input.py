@@ -252,35 +252,6 @@ def hit_test_scene_agents(
     )
 
 
-def sanitize_pov_pending_target(session: DebuggerSession) -> DebuggerSession:
-    """Clear a pending target absent from the controlled actor's safe POV."""
-    target = session.pending_action.selected_global_target_slot
-    if target is None:
-        return session
-    slice_ = build_actor_pov_current_slice_v1(
-        session.evaluation_context,
-        session.current_evaluation_frame,
-        global_slot=session.controlled_global_slot,
-        incoming_transition_view=session.incoming_evaluation_view,
-    )
-    projection = build_actor_pov_analyzer_projection_v1(slice_)
-    authorized_public_ids = {
-        projection.scene.self_actor.public_agent_id,
-        *(body.public_agent_id for body in projection.scene.visible_bodies),
-    }
-    authorized_slots = {
-        row.global_slot
-        for row in session.evaluation_context.roster
-        if row.public_agent_id in authorized_public_ids
-    }
-    if target in authorized_slots:
-        return session
-    sanitized = clear_pending_target(session)
-    if sanitized.pending_action == session.pending_action:
-        return session
-    return sanitized
-
-
 def _result(
     session: DebuggerSession,
     *,
@@ -316,20 +287,16 @@ def _applied_transition_result(
     *,
     view_mode: ViewMode,
     preset: Preset,
-    sanitize_pov: bool = False,
 ) -> InputDispatchResult:
     """Package one captured transition behind the typed validation boundary."""
     try:
-        packaged_session = (
-            sanitize_pov_pending_target(session) if sanitize_pov else session
-        )
         return _result(
-            packaged_session,
+            session,
             view_mode=view_mode,
             preset=preset,
             handled=True,
             changed=True,
-            transition_applied=packaged_session.incoming_evaluation_view,
+            transition_applied=session.incoming_evaluation_view,
         )
     except DebuggerTransitionFailureV1:
         raise
@@ -489,8 +456,6 @@ def _dispatch_keyboard(
         current_index = active_slots.index(session.controlled_global_slot)
         controlled_slot = active_slots[(current_index + direction) % len(active_slots)]
         edited = select_controlled_actor(session, controlled_slot)
-        if view_mode == "pov":
-            edited = sanitize_pov_pending_target(edited)
         return _pending_edit_result(
             session,
             edited,
@@ -651,22 +616,14 @@ def _dispatch_keyboard(
             notice=notice,
         )
     if key in ("space", "enter"):
-        edited = submit_interactive(
-            session,
-            actor_global_slots=(
-                (session.controlled_global_slot,) if view_mode == "pov" else None
-            ),
-        )
+        edited = submit_interactive(session, actor_global_slots=None)
         transition_applied = edited is not session
         if transition_applied:
             return _applied_transition_result(
                 edited,
                 view_mode=view_mode,
                 preset=preset,
-                sanitize_pov=view_mode == "pov",
             )
-        if view_mode == "pov":
-            edited = sanitize_pov_pending_target(edited)
         changed = edited is not session
         notice = (
             _terminal_notice(session)
@@ -771,8 +728,6 @@ def _dispatch_pointer(
         if command.shift_key
         else select_controlled_actor(session, target)
     )
-    if view_mode == "pov" and not command.shift_key:
-        edited = sanitize_pov_pending_target(edited)
     return _pending_edit_result(
         session,
         edited,
@@ -789,7 +744,9 @@ def _dispatch_roster_selection(
     preset: Preset,
 ) -> InputDispatchResult:
     authorized_slots = {
-        row[0] for row in _authorized_pointer_rows(session, view_mode=view_mode)
+        row.global_slot
+        for row in session.evaluation_context.roster
+        if row.configured_active
     }
     if command.global_slot not in authorized_slots:
         return _result(
@@ -805,8 +762,6 @@ def _dispatch_roster_selection(
         if command.role == "control"
         else select_clicked_target(session, command.global_slot)
     )
-    if view_mode == "pov" and command.role == "control":
-        edited = sanitize_pov_pending_target(edited)
     return _pending_edit_result(
         session,
         edited,
@@ -846,7 +801,9 @@ def _dispatch_actor_pov_target_action(
     ]
     target_global_slot = recipients[command.target_action]
     authorized_slots = {
-        row[0] for row in _authorized_pointer_rows(session, view_mode="pov")
+        row.global_slot
+        for row in session.evaluation_context.roster
+        if row.configured_active
     }
     if target_global_slot not in authorized_slots:
         return _result(
@@ -927,8 +884,6 @@ def dispatch_command(
         )
     if isinstance(command, ResetCommandV1):
         edited = reset_session(session)
-        if view_mode == "pov":
-            edited = sanitize_pov_pending_target(edited)
         return _result(
             edited,
             view_mode=view_mode,
@@ -938,12 +893,8 @@ def dispatch_command(
             episode_restarted=True,
         )
     if isinstance(command, SetViewCommandV1):
-        edited = (
-            sanitize_pov_pending_target(session)
-            if command.view_mode == "pov" and not scripted_inspection
-            else session
-        )
-        changed = command.view_mode != view_mode or edited is not session
+        edited = session
+        changed = command.view_mode != view_mode
         return _result(
             edited,
             view_mode=command.view_mode,

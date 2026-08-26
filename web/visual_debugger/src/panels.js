@@ -1,7 +1,9 @@
 import {
   authorizedPresentationAudience,
+  authorizedPresentationHasResearcherSpace,
   authorizedPresentationIdentityRows,
-  authorizedPresentationInspectionState,
+  authorizedPresentationLatestTransitionId,
+  authorizedPresentationResearcherInspectionState,
   authorizedPresentationResearcherSceneView,
   authorizedPresentationSceneView,
   authorizedPresentationTechnicalFacts,
@@ -40,7 +42,10 @@ import { classTokenFromId, resolveVisualToken, teamTokenFromId } from "./vocabul
  *   acceptedCard: HTMLElement,
  *   acceptedAnnouncement: HTMLElement,
  *   diagnosticsCard: HTMLElement,
- *   onCommand: (command: Record<string, unknown>) => void | Promise<void>,
+ *   onCommand: (
+ *     command: Record<string, unknown>,
+ *     context?: Readonly<{pointerOriginated: boolean}>,
+ *   ) => void | Promise<void>,
  * }} DebuggerPanelBindings
  */
 
@@ -278,7 +283,8 @@ export function authorizedInspectorView(
     return null;
   }
   const scene =
-    presentation.viewer_mode === "replay"
+    presentation.viewer_mode === "replay" ||
+    authorizedPresentationHasResearcherSpace(presentation)
       ? authorizedPresentationResearcherSceneView(presentation)
       : authorizedPresentationSceneView(presentation, localInspectedPresentationKey);
   const audience = authorizedPresentationAudience(presentation);
@@ -669,10 +675,12 @@ export class DebuggerPanels {
     const health = htmlElement("span", "roster-health");
     summary.append(identityContainer, health);
     primaryButton.append(summary);
-    primaryButton.addEventListener("click", () => {
+    primaryButton.addEventListener("click", (event) => {
       const command = this.rosterActivationByButton.get(primaryButton);
       if (command !== undefined) {
-        void this.onCommand(command);
+        void this.onCommand(command, {
+          pointerOriginated: Number(event.detail) > 0,
+        });
       }
     });
 
@@ -706,9 +714,14 @@ export class DebuggerPanels {
   ) {
     const audience = authorizedPresentationAudience(presentation);
     const identities = authorizedPresentationIdentityRows(presentation);
-    const replayAgent =
-      presentation.viewer_mode === "replay" && audience === "agent_pov";
-    const scene = replayAgent
+    const researcherInspectionState =
+      authorizedPresentationResearcherInspectionState(presentation);
+    const globalAgentRoster =
+      audience === "agent_pov" &&
+      authorizedPresentationHasResearcherSpace(presentation);
+    const visibilityGroupedRoster =
+      globalAgentRoster && presentation.viewer_mode === "replay";
+    const scene = globalAgentRoster
       ? authorizedPresentationResearcherSceneView(presentation)
       : authorizedPresentationSceneView(presentation, localInspectedPresentationKey);
     const rosterAudience = scene?.audience ?? audience;
@@ -726,7 +739,7 @@ export class DebuggerPanels {
     const visibleCount = identities.filter(
       (identity) => identity.visible_in_snapshot,
     ).length;
-    this.rosterCount.textContent = replayAgent
+    this.rosterCount.textContent = visibilityGroupedRoster
       ? `${identities.length} agents · ${visibleCount} visible · ${identities.length - visibleCount} not visible`
       : `${identities.length} visible`;
     /** @type {Map<number, HTMLElement[]>} */
@@ -758,7 +771,11 @@ export class DebuggerPanels {
       row.element.dataset.teamId = String(agent.team_id);
       row.element.dataset.classId = String(agent.class_id);
       row.element.dataset.team = teamToken.cssKey;
-      row.element.dataset.visibleInSnapshot = String(identity.visible_in_snapshot);
+      if (presentation.viewer_mode === "replay") {
+        row.element.dataset.visibleInSnapshot = String(identity.visible_in_snapshot);
+      } else {
+        delete row.element.dataset.visibleInSnapshot;
+      }
       row.element.removeAttribute("data-class");
       row.identityId.dataset.class = classToken.cssKey;
       row.element.setAttribute(
@@ -779,19 +796,30 @@ export class DebuggerPanels {
         { inspectable: false },
       );
       row.primaryButton.dataset.presentationKey = String(agent.presentation_key);
-      const activation =
-        identity.activation_kind === "replay_pov_global" &&
-        Number.isInteger(identity.command_global_slot)
+      const activation = Number.isInteger(identity.command_global_slot)
+        ? identity.activation_kind === "replay_pov_global"
           ? Object.freeze({
               command_type: "activate_replay_pov_agent",
               global_slot: identity.command_global_slot,
             })
-          : identity.activation_kind === "scene_agent"
+          : identity.activation_kind === "live_pov_global" &&
+              researcherInspectionState.state_kind === "live_editable"
             ? Object.freeze({
-                command_type: "activate_authorized_agent",
-                presentation_key: identity.presentation_key,
+                command_type: "activate_live_pov_agent",
+                global_slot: identity.command_global_slot,
               })
-            : null;
+            : identity.activation_kind === "scene_agent"
+              ? Object.freeze({
+                  command_type: "activate_authorized_agent",
+                  presentation_key: identity.presentation_key,
+                })
+              : null
+        : identity.activation_kind === "scene_agent"
+          ? Object.freeze({
+              command_type: "activate_authorized_agent",
+              presentation_key: identity.presentation_key,
+            })
+          : null;
       if (activation === null) {
         this.rosterActivationByButton.delete(row.primaryButton);
       } else {
@@ -806,8 +834,7 @@ export class DebuggerPanels {
         "aria-label",
         rosterAudience === "researcher" &&
           presentation.viewer_mode === "live" &&
-          authorizedPresentationInspectionState(presentation).state_kind ===
-            "live_editable"
+          researcherInspectionState.state_kind === "live_editable"
           ? `Control and inspect Agent ID ${publicId}`
           : `Inspect Agent ID ${publicId}`,
       );
@@ -834,7 +861,7 @@ export class DebuggerPanels {
         sourceAgents,
         rosterAudience ?? "agent_pov",
       );
-      if (replayAgent) {
+      if (visibilityGroupedRoster) {
         const visibility = identity.visible_in_snapshot ? "visible" : "not-visible";
         const desired = desiredByVisibility.get(visibility) ?? [];
         desired.push(row.element);
@@ -847,13 +874,13 @@ export class DebuggerPanels {
       }
     }
     for (const [teamId, group] of this.rosterTeamGroups) {
-      group.element.hidden = replayAgent;
+      group.element.hidden = visibilityGroupedRoster;
       const desired = desiredByTeam.get(teamId) ?? [];
       group.count.textContent = `${desired.length} authorized`;
       this.reconcileChildren(group.rows, desired.length > 0 ? desired : [group.empty]);
     }
     for (const [visibility, group] of this.rosterVisibilityGroups) {
-      group.element.hidden = !replayAgent;
+      group.element.hidden = !visibilityGroupedRoster;
       const desired = desiredByVisibility.get(visibility) ?? [];
       group.count.textContent = `${desired.length} agents`;
       this.reconcileChildren(group.rows, desired.length > 0 ? desired : [group.empty]);
@@ -869,7 +896,8 @@ export class DebuggerPanels {
       presentation,
       localInspectedPresentationKey,
     );
-    const inspectionState = authorizedPresentationInspectionState(presentation);
+    const inspectionState =
+      authorizedPresentationResearcherInspectionState(presentation);
     const inspection = inspectionState.inspection;
     const replay = presentation.viewer_mode === "replay";
     const upcomingRows = replay
@@ -904,7 +932,7 @@ export class DebuggerPanels {
       inspectionState.state_kind === "live_scripted"
         ? "This live frame advances registered scripted actions and has no editable draft."
         : inspectionState.state_kind === "live_editable"
-          ? "This panel shows only the authorized pending draft for the next submission."
+          ? "This panel shows the selected actor's authorized pending draft for the next submission within the global joint turn."
           : inspectionState.state_kind === "replay_outgoing"
             ? "This panel shows the authorized recorded actions out of the current frame."
             : inspectionState.state_kind === "replay_none"
@@ -985,10 +1013,11 @@ export class DebuggerPanels {
       this.lastAnnouncedTransitionKey = null;
     } else {
       this.acceptedCard.append(authorizedTransitionList(transitionRows));
-      const transitionId = presentation.latest_transition?.incoming_transition_id;
+      const transitionId = authorizedPresentationLatestTransitionId(presentation);
+      const sessionId = presentation.source?.source_session_id;
       const transitionKey =
-        typeof transitionId === "string"
-          ? `${presentation.session_id}:${transitionId}`
+        typeof sessionId === "string" && typeof transitionId === "string"
+          ? `${sessionId}:${transitionId}`
           : null;
       if (transitionKey !== this.lastAnnouncedTransitionKey) {
         this.acceptedAnnouncement.textContent = `${transitionRows.length} Submitted / Accepted action ${transitionRows.length === 1 ? "row" : "rows"}.`;

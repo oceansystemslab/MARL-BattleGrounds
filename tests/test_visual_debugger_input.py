@@ -423,7 +423,7 @@ def test_actor_pov_target_action_selects_a_currently_visible_recipient() -> None
     assert result.transition_applied is None
 
 
-def test_actor_pov_target_action_rejects_hidden_recipient_without_disclosure() -> None:
+def test_actor_pov_target_action_stages_hidden_researcher_space_recipient() -> None:
     session = _session()
     result = dispatch_command(
         session,
@@ -434,12 +434,10 @@ def test_actor_pov_target_action_rejects_hidden_recipient_without_disclosure() -
     )
 
     assert result.handled
-    assert not result.changed
-    assert result.session is session
-    assert result.notice == (
-        "Target action 6 is unavailable in the current authorized POV."
-    )
-    assert "g5" not in result.notice
+    assert result.changed
+    assert result.notice is None
+    assert result.session.pending_action.selected_global_target_slot == 5
+    assert result.transition_applied is None
 
 
 def test_actor_pov_target_action_zero_clears_the_pending_target() -> None:
@@ -662,24 +660,6 @@ def test_applied_transition_packaging_preserves_typed_failure(
     assert caught.value is failure
 
 
-def test_ui_only_pov_sanitizer_failure_remains_outside_transition_boundary(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fail_sanitizer(*_args: object, **_kwargs: object) -> object:
-        raise RuntimeError("ui-only sanitizer failure")
-
-    monkeypatch.setattr(input_module, "sanitize_pov_pending_target", fail_sanitizer)
-
-    with pytest.raises(RuntimeError, match="ui-only sanitizer failure"):
-        dispatch_command(
-            _session(),
-            SetViewCommandV1(view_mode="pov"),
-            view_mode="researcher",
-            preset="analysis",
-            include_stress=False,
-        )
-
-
 def test_researcher_and_pov_submit_scopes_are_explicit_and_single_step() -> None:
     researcher = _session()
     researcher_result = dispatch_command(
@@ -715,7 +695,7 @@ def test_researcher_and_pov_submit_scopes_are_explicit_and_single_step() -> None
     assert pov_result.changed
     assert pov_view is not None
     assert pov_result.transition_applied is pov_view
-    assert pov_result.session.last_report_actor_slots == (0,)
+    assert pov_result.session.last_report_actor_slots == tuple(range(MAX_AGENT_SLOTS))
     submitted_action = (
         pov_view.transition.facts.action_acceptance_facts.submitted_joint_action
     )
@@ -728,7 +708,12 @@ def test_researcher_and_pov_submit_scopes_are_explicit_and_single_step() -> None
         0,
         0,
     )
-    for actor_slot in range(1, MAX_AGENT_SLOTS):
+    assert (
+        submitted_action.move[1],
+        submitted_action.select_target[1],
+        submitted_action.use_ultimate[1],
+    ) == (MOVE_EAST, 0, 0)
+    for actor_slot in range(2, MAX_AGENT_SLOTS):
         assert (
             submitted_action.move[actor_slot],
             submitted_action.select_target[actor_slot],
@@ -812,7 +797,7 @@ def test_terminal_scripted_inspection_keeps_every_draft_and_actor_control_fixed(
     assert cycled.session.key is terminal.key
 
 
-def test_terminal_pov_submit_sanitizes_draft_without_reusing_incoming_transition(
+def test_terminal_pov_submit_retains_draft_without_reusing_incoming_transition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registered = get_scenario("arena_5v5")
@@ -865,9 +850,10 @@ def test_terminal_pov_submit_sanitizes_draft_without_reusing_incoming_transition
         include_stress=False,
     )
 
-    assert result.changed
+    assert not result.changed
+    assert result.session is staged
     assert result.transition_applied is None
-    assert result.session.pending_action.selected_global_target_slot is None
+    assert result.session.pending_action.selected_global_target_slot == hidden_target
     assert result.session.incoming_evaluation_view is previous_incoming
     assert result.session.state is state
     assert result.session.key is key
@@ -937,7 +923,7 @@ def test_pointer_hit_test_uses_plain_control_and_shift_target() -> None:
     assert cleared.session.key is session.key
 
 
-def test_pov_pointer_and_roster_cannot_select_hidden_agent() -> None:
+def test_pov_pointer_stays_fog_local_while_roster_selects_hidden_agent() -> None:
     session = _session("arena_5v5")
     assert 5 not in _authorized_pov_slots(session)
 
@@ -978,13 +964,16 @@ def test_pov_pointer_and_roster_cannot_select_hidden_agent() -> None:
     for pointer in (plain_pointer, shifted_pointer):
         assert pointer.session is session
         assert not pointer.changed
-    for roster in roster_results:
-        assert roster.session is session
-        assert not roster.changed
-        assert roster.notice == "Agent g5 is unavailable in this view."
+    target_result, control_result = roster_results
+    assert target_result.changed
+    assert target_result.notice is None
+    assert target_result.session.pending_action.selected_global_target_slot == 5
+    assert control_result.changed
+    assert control_result.notice is None
+    assert control_result.session.controlled_global_slot == 5
 
 
-def test_entering_pov_clears_hidden_pending_target_without_advancing_epoch() -> None:
+def test_entering_pov_preserves_hidden_pending_target_without_advancing_epoch() -> None:
     session = select_clicked_target(_session("arena_5v5"), 5)
     state = session.state
     key = session.key
@@ -998,13 +987,13 @@ def test_entering_pov_clears_hidden_pending_target_without_advancing_epoch() -> 
 
     assert result.changed
     assert result.view_mode == "pov"
-    assert result.session.pending_action.selected_global_target_slot is None
+    assert result.session.pending_action.selected_global_target_slot == 5
     assert result.session.state is state
     assert result.session.key is key
     assert int(result.session.state.step_count) == 0
 
 
-def test_pov_submit_clears_target_that_leaves_successor_visibility() -> None:
+def test_pov_submit_preserves_target_that_leaves_successor_visibility() -> None:
     registered = get_scenario("arena_5v5")
     build_registered_scenario = registered.build_scenario
 
@@ -1049,7 +1038,7 @@ def test_pov_submit_clears_target_that_leaves_successor_visibility() -> None:
 
     assert int(submitted.session.state.step_count) == 1
     assert 5 not in _authorized_pov_slots(submitted.session)
-    assert submitted.session.pending_action.selected_global_target_slot is None
+    assert submitted.session.pending_action.selected_global_target_slot == 5
 
 
 @pytest.mark.parametrize("include_stress", (False, True))

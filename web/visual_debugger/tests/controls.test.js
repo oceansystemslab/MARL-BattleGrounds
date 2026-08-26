@@ -120,14 +120,14 @@ test("debugger key capture leaves modified browser shortcuts native", () => {
   }
 });
 
-test("battlefield-owned Space and accepted fenced Enter never become browser defaults", () => {
+test("battlefield-owned commands and accepted fenced input never become browser defaults", () => {
   const battlefield = new EventTarget();
   let interactive = false;
-  let ownFencedEnter = true;
+  let ownFencedCommand = true;
   /** @type {Record<string, unknown>[]} */
   const commands = [];
   /** @type {Record<string, unknown>[]} */
-  const fencedEnterCommands = [];
+  const fencedCommands = [];
   bindBattlefieldControls({
     battlefield: /** @type {any} */ (battlefield),
     toWorldPoint: () => null,
@@ -137,33 +137,49 @@ test("battlefield-owned Space and accepted fenced Enter never become browser def
     onHelp: () => {},
     onReleaseFocus: () => {},
     isInteractive: () => interactive,
-    onFencedEnter: (command) => {
-      fencedEnterCommands.push(command);
-      return ownFencedEnter;
+    onFencedCommand: (command) => {
+      fencedCommands.push(command);
+      return ownFencedCommand;
     },
   });
 
   const fencedSpace = cancelableKeydown(" ", { repeat: true });
   battlefield.dispatchEvent(fencedSpace);
   assert.equal(fencedSpace.defaultPrevented, true);
+  assert.deepEqual(fencedCommands, [keyboardCommand(" ", { repeat: true })]);
+  assert.deepEqual(commands, []);
+
+  const fencedMovement = cancelableKeydown("w");
+  battlefield.dispatchEvent(fencedMovement);
+  assert.equal(fencedMovement.defaultPrevented, true);
+  assert.deepEqual(fencedCommands, [
+    keyboardCommand(" ", { repeat: true }),
+    keyboardCommand("w"),
+  ]);
   assert.deepEqual(commands, []);
 
   const fencedEnter = cancelableKeydown("Enter");
   battlefield.dispatchEvent(fencedEnter);
   assert.equal(fencedEnter.defaultPrevented, true);
-  assert.deepEqual(fencedEnterCommands, [keyboardCommand("Enter")]);
+  assert.deepEqual(fencedCommands, [
+    keyboardCommand(" ", { repeat: true }),
+    keyboardCommand("w"),
+    keyboardCommand("Enter"),
+  ]);
   assert.deepEqual(commands, []);
 
   const fencedRepeatEnter = cancelableKeydown("Enter", { repeat: true });
   battlefield.dispatchEvent(fencedRepeatEnter);
   assert.equal(fencedRepeatEnter.defaultPrevented, true);
-  assert.deepEqual(fencedEnterCommands, [
+  assert.deepEqual(fencedCommands, [
+    keyboardCommand(" ", { repeat: true }),
+    keyboardCommand("w"),
     keyboardCommand("Enter"),
     keyboardCommand("Enter", { repeat: true }),
   ]);
   assert.deepEqual(commands, []);
 
-  ownFencedEnter = false;
+  ownFencedCommand = false;
   const nativeFencedEnter = cancelableKeydown("Enter");
   battlefield.dispatchEvent(nativeFencedEnter);
   assert.equal(nativeFencedEnter.defaultPrevented, false);

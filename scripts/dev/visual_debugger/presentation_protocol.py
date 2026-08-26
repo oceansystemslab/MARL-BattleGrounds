@@ -12,7 +12,8 @@ import json
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, fields, is_dataclass
-from math import isfinite
+from math import isclose, isfinite
+from struct import pack, unpack
 from typing import Annotated, Literal, Self, cast
 
 from pydantic import (
@@ -51,8 +52,11 @@ from marl_battlegrounds.rendering.authorized_inspection import (
     AuthorizedAxisOnlyTargetActionV1,
     AuthorizedDecisionMaskV1,
     AuthorizedNoTargetActionV1,
+    AuthorizedTargetActionV1,
     AuthorizedVisibleTargetActionV1,
+    LiveDraftActionTupleV1,
     LiveDraftInspectionPresentationV1,
+    LiveDraftLegalityV1,
     NoSharedObsReplayTransitionReferenceV1,
     OracleReplayTransitionReferenceV1,
     ReplayInspectionPresentationV1,
@@ -118,6 +122,19 @@ _Sha256Prefix = Annotated[
     ),
 ]
 
+_RESEARCHER_STATUS_SOURCE_CLASS_BY_CHANNEL_V1 = (2, 3, 4, 2, 3, 4, 4, 1, 5)
+_RESEARCHER_AURA_SOURCE_CLASS_BY_ID_V1 = {
+    "mage_damage_amplification": 1,
+    "warrior_damage_mitigation": 2,
+}
+_RESEARCHER_CLASS_NAME_BY_ID_V1 = {
+    1: "Mage",
+    2: "Warrior",
+    3: "Hunter",
+    4: "Rogue",
+    5: "Priest",
+}
+
 
 class _PresentationProtocolModel(BaseModel):
     """Strict immutable base for the additive presentation resource."""
@@ -173,7 +190,7 @@ class LiveNoSharedObsPresentationSourceIdentityV1(_PresentationProtocolModel):
     source_recipient_public_agent_id: _ScientificId
     source_recipient_frame_id: _ScientificId
     source_simulator_step_count: _NonNegativeInt
-    source_submission_scope: Literal["controlled_actor", "scripted_playback"]
+    source_submission_scope: Literal["joint_turn", "scripted_playback"]
     source_authorized_endpoint_digest_sha256: _Sha256Hex
 
     @model_validator(mode="after")
@@ -391,6 +408,162 @@ class ReplayResearcherRosterAgentV1(_PresentationProtocolModel):
         ):
             raise ValueError("researcher roster modifiers require exact roots.")
         return self
+
+
+def _researcher_catalog_float_joins(recorded: float, catalog: float) -> bool:
+    """Match the exact public float or its exact binary32 wire encoding."""
+    if recorded == catalog:
+        return True
+    try:
+        catalog_as_f32 = unpack(">f", pack(">f", catalog))[0]
+    except OverflowError:
+        return False
+    return recorded == catalog_as_f32
+
+
+def _researcher_optional_catalog_float_joins(
+    recorded: float | None,
+    catalog: float | None,
+) -> bool:
+    if recorded is None or catalog is None:
+        return recorded is catalog
+    return _researcher_catalog_float_joins(recorded, catalog)
+
+
+def _validate_researcher_roster_facts(
+    *,
+    roster: tuple[ReplayResearcherRosterAgentV1, ...],
+    class_mechanics: tuple[AuthorizedClassMechanics, ...],
+) -> None:
+    """Apply scene-equivalent catalog/effect checks without adding geometry."""
+    represented_class_ids = tuple(sorted({row.class_id for row in roster}))
+    if tuple(row.class_id for row in class_mechanics) != represented_class_ids:
+        raise ValueError(
+            "researcher class mechanics must equal represented class order."
+        )
+    mechanics_versions = {type(row) for row in class_mechanics}
+    if len(mechanics_versions) > 1:
+        raise ValueError("researcher class mechanics cannot mix V1 and V2 rows.")
+    if mechanics_versions == {AuthorizedClassMechanicsV2}:
+        profiles = {
+            cast(AuthorizedClassMechanicsV2, row).documentation_profile
+            for row in class_mechanics
+        }
+        if len(profiles) > 1:
+            raise ValueError(
+                "researcher V2 class mechanics must share one documentation profile."
+            )
+
+    mechanics_by_id = {row.class_id: row for row in class_mechanics}
+    projected_status_channels = tuple(
+        status.status_channel
+        for mechanics in class_mechanics
+        for status in mechanics.status_mechanics
+    )
+    expected_status_channels = tuple(
+        status_channel
+        for class_id in represented_class_ids
+        for status_channel, source_class_id in enumerate(
+            _RESEARCHER_STATUS_SOURCE_CLASS_BY_CHANNEL_V1
+        )
+        if source_class_id == class_id
+    )
+    if projected_status_channels != expected_status_channels:
+        raise ValueError("researcher class mechanics changed the V1 status axis.")
+    for mechanics in class_mechanics:
+        if any(
+            _RESEARCHER_STATUS_SOURCE_CLASS_BY_CHANNEL_V1[status.status_channel]
+            != mechanics.class_id
+            for status in mechanics.status_mechanics
+        ):
+            raise ValueError("researcher class status mechanics changed source class.")
+
+    projected_aura_ids = tuple(
+        aura.aura_id
+        for mechanics in class_mechanics
+        for aura in mechanics.aura_mechanics
+    )
+    expected_aura_ids = tuple(
+        aura_id
+        for aura_id, source_class_id in (_RESEARCHER_AURA_SOURCE_CLASS_BY_ID_V1.items())
+        if source_class_id in represented_class_ids
+    )
+    if projected_aura_ids != expected_aura_ids:
+        raise ValueError("researcher class mechanics changed the V1 aura axis.")
+    for mechanics in class_mechanics:
+        if any(
+            _RESEARCHER_AURA_SOURCE_CLASS_BY_ID_V1[aura.aura_id] != mechanics.class_id
+            for aura in mechanics.aura_mechanics
+        ):
+            raise ValueError("researcher class aura mechanics changed emitter class.")
+
+    agents_by_key = {row.presentation_key: row for row in roster}
+    status_by_channel = {
+        status.status_channel: status
+        for mechanics in class_mechanics
+        for status in mechanics.status_mechanics
+    }
+    for agent in roster:
+        mechanics = mechanics_by_id.get(agent.class_id)
+        if (
+            mechanics is None
+            or mechanics.class_name != agent.class_name
+            or _RESEARCHER_CLASS_NAME_BY_ID_V1[agent.class_id] != agent.class_name
+            or not _researcher_catalog_float_joins(
+                agent.maximum_health,
+                mechanics.maximum_health,
+            )
+            or agent.ultimate_cooldown_remaining > mechanics.ultimate_cooldown_steps
+            or agent.out_of_combat_delay_steps != mechanics.out_of_combat_delay_steps
+        ):
+            raise ValueError(
+                "researcher roster actor changed canonical identity or bounds."
+            )
+        status_channels = tuple(row.status_channel for row in agent.statuses)
+        if len(status_channels) != len(set(status_channels)):
+            raise ValueError("researcher roster statuses require unique channels.")
+        for status in agent.statuses:
+            if (
+                _RESEARCHER_STATUS_SOURCE_CLASS_BY_CHANNEL_V1[status.status_channel]
+                != status.source_class_id
+                or _RESEARCHER_CLASS_NAME_BY_ID_V1[status.source_class_id]
+                != status.source_class_name
+            ):
+                raise ValueError("researcher status changed its V1 source identity.")
+            status_mechanic = status_by_channel.get(status.status_channel)
+            if status_mechanic is not None and (
+                status_mechanic.status_id != status.status_id
+                or status_mechanic.duration_steps != status.configured_duration_steps
+                or status_mechanic.family != status.family
+                or status_mechanic.source_action_component
+                != status.source_action_component
+                or status_mechanic.magnitude_kind != status.magnitude_kind
+                or not _researcher_optional_catalog_float_joins(
+                    status.magnitude,
+                    status_mechanic.magnitude,
+                )
+                or status_mechanic.breaks_on_positive_damage
+                != status.breaks_on_positive_damage
+            ):
+                raise ValueError(
+                    "researcher status does not join its catalog mechanic."
+                )
+            for source in status.direct_sources:
+                source_agent = agents_by_key.get(source.source_presentation_key)
+                if source_agent is None or (
+                    source_agent.public_agent_id != source.source_public_agent_id
+                    or source_agent.class_id != status.source_class_id
+                    or source_agent.class_name != status.source_class_name
+                ):
+                    raise ValueError(
+                        "researcher status source does not join a source-class actor."
+                    )
+        aura_ids = tuple(row.aura_id for row in agent.aura_modifiers)
+        if len(aura_ids) != len(set(aura_ids)) or any(
+            aura_id not in _RESEARCHER_AURA_SOURCE_CLASS_BY_ID_V1
+            for aura_id in aura_ids
+        ):
+            raise ValueError("researcher aura modifiers must be canonical and unique.")
 
 
 class MovementActionDisplayRowV1(_PresentationProtocolModel):
@@ -1657,6 +1830,10 @@ class ReplayResearcherSpaceV1(_PresentationProtocolModel):
             raise ValueError(
                 "researcher class mechanics must cover represented classes exactly."
             )
+        _validate_researcher_roster_facts(
+            roster=self.roster_agents,
+            class_mechanics=self.class_mechanics,
+        )
         self._validate_transition(self.latest_transition, incoming=True)
         self._validate_transition(self.upcoming_transition, incoming=False)
         return self
@@ -2664,7 +2841,7 @@ def _validate_agent_inspection(
 
 class LiveEditableDraftInspectionV1(_PresentationProtocolModel):
     inspection_kind: Literal["editable_live_draft"]
-    submission_scope: Literal["joint_turn", "controlled_actor"]
+    submission_scope: Literal["joint_turn"]
     draft: LiveDraftInspectionPresentationV1
 
     @model_validator(mode="after")
@@ -2682,6 +2859,266 @@ class LiveScriptedPlaybackInspectionV1(_PresentationProtocolModel):
     submission_scope: Literal["scripted_playback"]
     editable_draft_available: Literal[False]
     advance_semantics: Literal["registered_script_frame"]
+
+
+class LiveResearcherDraftInspectionV1(_PresentationProtocolModel):
+    """Global draft facts with every non-owner battlefield anchor removed."""
+
+    schema_version: Literal[1]
+    inspection_kind: Literal["live_draft_action"]
+    current_simulator_step_count: _NonNegativeInt
+    actor_presentation_key: _ScientificId
+    actor_public_agent_id: _ScientificId
+    decision_mask: AuthorizedDecisionMaskV1
+    draft_action: LiveDraftActionTupleV1
+    draft_target: AuthorizedTargetActionV1
+    draft_legality: LiveDraftLegalityV1
+
+    @model_validator(mode="after")
+    def _validate_draft(self) -> Self:
+        _require_exact_type(
+            self.decision_mask,
+            AuthorizedDecisionMaskV1,
+            name="researcher decision_mask",
+        )
+        _require_exact_type(
+            self.draft_action,
+            LiveDraftActionTupleV1,
+            name="researcher draft_action",
+        )
+        _require_exact_type(
+            self.draft_legality,
+            LiveDraftLegalityV1,
+            name="researcher draft_legality",
+        )
+        if type(self.draft_target) not in (
+            AuthorizedNoTargetActionV1,
+            AuthorizedAxisOnlyTargetActionV1,
+        ):
+            raise ValueError("researcher draft targets must omit battlefield anchors.")
+        target_rows = self.decision_mask.target_actions
+        if type(target_rows[0]) is not AuthorizedNoTargetActionV1 or any(
+            type(row) is not AuthorizedAxisOnlyTargetActionV1 for row in target_rows[1:]
+        ):
+            raise ValueError(
+                "researcher decision targets must be geometry-free axis rows."
+            )
+        if (
+            self.decision_mask.owner_presentation_key != self.actor_presentation_key
+            or self.decision_mask.owner_public_agent_id != self.actor_public_agent_id
+        ):
+            raise ValueError("researcher decision mask does not join its actor.")
+        action = self.draft_action
+        if self.draft_target != target_rows[action.target_action]:
+            raise ValueError("researcher draft target does not join its decision row.")
+        legality = self.draft_legality
+        if (
+            legality.move_action_is_legal
+            != self.decision_mask.movement_action_mask[action.move_action]
+            or legality.target_action_is_legal
+            != self.decision_mask.target_action_mask[action.target_action]
+        ):
+            raise ValueError("researcher draft marginal legality changed.")
+        if action.armed_lane == "none":
+            if (
+                legality.armed_lane_is_legal is not None
+                or legality.combat_pair_is_legal is not None
+            ):
+                raise ValueError("an unarmed researcher draft cannot carry legality.")
+        else:
+            lane = 0 if action.armed_lane == "basic" else 1
+            if (
+                legality.armed_lane_is_legal
+                != self.decision_mask.use_ultimate_action_mask[lane]
+                or legality.combat_pair_is_legal
+                != self.decision_mask.target_use_ultimate_joint_mask[
+                    action.target_action
+                ][lane]
+            ):
+                raise ValueError("researcher draft joint legality changed.")
+        return self
+
+
+class LiveResearcherEditableDraftInspectionV1(_PresentationProtocolModel):
+    inspection_kind: Literal["editable_live_draft"]
+    submission_scope: Literal["joint_turn"]
+    draft: LiveResearcherDraftInspectionV1
+
+    @model_validator(mode="after")
+    def _validate_draft(self) -> Self:
+        _require_exact_type(
+            self.draft,
+            LiveResearcherDraftInspectionV1,
+            name="researcher draft",
+        )
+        return self
+
+
+type LiveResearcherInputInspectionV1 = Annotated[
+    LiveResearcherEditableDraftInspectionV1 | LiveScriptedPlaybackInspectionV1,
+    Field(discriminator="inspection_kind"),
+]
+
+
+class LiveResearcherSpaceV1(_PresentationProtocolModel):
+    """Global live controls and panels, without a second battlefield scene."""
+
+    researcher_space_kind: Literal["global_live_researcher_space"]
+    source_session_id: _OpaqueId
+    source_run_generation: _NonNegativeInt
+    source_revision: _NonNegativeInt
+    source_authority_epoch: _NonNegativeInt
+    episode_id: _ScientificId
+    frame_index: _NonNegativeInt
+    simulator_step_count: _NonNegativeInt
+    selected_public_agent_id: _ScientificId
+    identity_directory: OraclePublicIdentityDirectoryV1
+    roster_agents: tuple[ReplayResearcherRosterAgentV1, ...]
+    class_mechanics: tuple[AuthorizedClassMechanics, ...]
+    latest_transition: OracleLatestTransitionV1 | None
+    technical_frame: LiveOracleTechnicalFrameV1
+    pending_inspection: LiveResearcherInputInspectionV1
+
+    @model_validator(mode="after")
+    def _validate_space(self) -> Self:
+        if self.source_authority_epoch != self.source_revision:
+            raise ValueError("live researcher authority epoch changed.")
+        active_directory = tuple(
+            row for row in self.identity_directory.identities if row.configured_active
+        )
+        if len(self.roster_agents) != len(active_directory) or any(
+            type(row) is not ReplayResearcherRosterAgentV1 for row in self.roster_agents
+        ):
+            raise ValueError("live researcher roster must cover active identities.")
+        for roster, directory in zip(
+            self.roster_agents,
+            active_directory,
+            strict=True,
+        ):
+            if (
+                roster.public_agent_id != directory.public_agent_id
+                or roster.team_id != directory.team_id
+                or roster.team_local_slot != directory.team_local_slot
+                or roster.class_id != directory.class_id
+                or roster.class_name != directory.class_name
+            ):
+                raise ValueError("live researcher roster does not join its directory.")
+        roster_by_id = {row.public_agent_id: row for row in self.roster_agents}
+        selected = roster_by_id.get(self.selected_public_agent_id)
+        if selected is None:
+            raise ValueError("live researcher selection must name an active actor.")
+        represented_classes = tuple(
+            sorted({row.class_id for row in self.roster_agents})
+        )
+        if tuple(row.class_id for row in self.class_mechanics) != represented_classes:
+            raise ValueError("live researcher class mechanics changed roster coverage.")
+        if any(
+            type(row) not in (AuthorizedClassMechanicsV1, AuthorizedClassMechanicsV2)
+            for row in self.class_mechanics
+        ):
+            raise ValueError("live researcher mechanics require exact roots.")
+        _validate_researcher_roster_facts(
+            roster=self.roster_agents,
+            class_mechanics=self.class_mechanics,
+        )
+
+        latest = self.latest_transition
+        if self.frame_index == 0:
+            if latest is not None:
+                raise ValueError("live researcher frame zero cannot have Latest.")
+        else:
+            _require_exact_type(latest, OracleLatestTransitionV1, name="Latest")
+            checked = cast(OracleLatestTransitionV1, latest)
+            if (
+                checked.episode_id != self.episode_id
+                or checked.incoming_transition_index != self.frame_index - 1
+                or checked.incoming_successor_frame_id
+                != f"{self.episode_id}:frame:{self.frame_index}"
+                or checked.incoming_successor_simulator_step_count
+                != self.simulator_step_count
+            ):
+                raise ValueError("live researcher Latest misses current s_n.")
+            if tuple(row.actor_public_agent_id for row in checked.action_rows) != tuple(
+                row.public_agent_id for row in self.roster_agents
+            ):
+                raise ValueError("live researcher Latest changed active roster order.")
+            for transition_row, roster_row in zip(
+                checked.action_rows,
+                self.roster_agents,
+                strict=True,
+            ):
+                directory = next(
+                    row
+                    for row in self.identity_directory.identities
+                    if row.public_agent_id == transition_row.actor_public_agent_id
+                )
+                target_axis = cast(
+                    tuple[str, ...],
+                    transition_row.target_action_recipient_public_agent_id_by_id[1:],
+                )
+                if (
+                    transition_row.actor_presentation_key != roster_row.presentation_key
+                    or set(target_axis)
+                    != {
+                        row.public_agent_id
+                        for row in self.identity_directory.identities
+                    }
+                    or target_axis
+                    != _oracle_target_public_axis(
+                        self.identity_directory,
+                        owner_team_id=directory.team_id,
+                    )
+                ):
+                    raise ValueError("live researcher Latest action identity changed.")
+
+        technical = self.technical_frame
+        _require_exact_type(
+            technical,
+            LiveOracleTechnicalFrameV1,
+            name="live researcher technical_frame",
+        )
+        expected_incoming_id = None if latest is None else latest.incoming_transition_id
+        if (
+            technical.episode_id != self.episode_id
+            or technical.evaluation_frame_index != self.frame_index
+            or technical.simulator_step_count != self.simulator_step_count
+            or technical.incoming_transition_id != expected_incoming_id
+        ):
+            raise ValueError("live researcher Technical Frame misses its epoch.")
+
+        inspection = self.pending_inspection
+        if type(inspection) is LiveResearcherEditableDraftInspectionV1:
+            draft = inspection.draft
+            if (
+                draft.current_simulator_step_count != self.simulator_step_count
+                or draft.actor_public_agent_id != self.selected_public_agent_id
+                or draft.actor_presentation_key != selected.presentation_key
+            ):
+                raise ValueError("live researcher draft misses selection or epoch.")
+            directory = self.identity_directory.identities
+            selected_directory = next(
+                row
+                for row in directory
+                if row.public_agent_id == self.selected_public_agent_id
+            )
+            expected_targets = tuple(
+                row.public_agent_id
+                for row in directory
+                if row.team_id == selected_directory.team_id
+            ) + tuple(
+                row.public_agent_id
+                for row in directory
+                if row.team_id != selected_directory.team_id
+            )
+            actual_targets = tuple(
+                cast(AuthorizedAxisOnlyTargetActionV1, row).target_public_agent_id
+                for row in draft.decision_mask.target_actions[1:]
+            )
+            if actual_targets != expected_targets:
+                raise ValueError("live researcher draft target axis changed order.")
+        elif type(inspection) is not LiveScriptedPlaybackInspectionV1:
+            raise ValueError("live researcher inspection uses an unknown variant.")
+        return self
 
 
 type LiveInputInspectionV1 = Annotated[
@@ -2807,6 +3244,7 @@ class LiveNoSharedObsAuthorizedPresentationFrameV1(_PresentationProtocolModel):
     latest_transition: NoSharedObsLatestTransitionV1 | None
     technical_frame: LiveNoSharedObsTechnicalFrameV1
     live_inspection: LiveNoSharedObsInspectionEnvelopeV1
+    researcher_space: LiveResearcherSpaceV1
 
     @model_validator(mode="after")
     def _validate_frame(self) -> Self:
@@ -2825,6 +3263,7 @@ class LiveNoSharedObsAuthorizedPresentationFrameV1(_PresentationProtocolModel):
                 inspection=self.live_inspection.inspection.draft,
                 replay=False,
             )
+        _validate_live_researcher_space(self)
         return self
 
 
@@ -3136,15 +3575,218 @@ def _validate_agent_common(
         source_session_id=source.source_session_id,
         audience="agent_pov",
         recipient_public_agent_id=parts.recipient_public_agent_id,
-        excluded_root_fields=(
-            frozenset({"researcher_space"})
-            if type(frame)
-            in (
-                ReplayNoSharedObsAuthorizedPresentationFrameV1,
-                ReplaySharedObsAuthorizedPresentationFrameV1,
+        excluded_root_fields=frozenset({"researcher_space"}),
+    )
+
+
+def _status_semantics_match(
+    global_status: AuthorizedStatusV1,
+    local_status: AuthorizedStatusV1,
+) -> bool:
+    """Compare observable status truth across the global and fog projections."""
+    discrete_match = (
+        global_status.status_channel == local_status.status_channel
+        and global_status.status_id == local_status.status_id
+        and global_status.family == local_status.family
+        and global_status.configured_duration_steps
+        == local_status.configured_duration_steps
+        and global_status.remaining_duration == local_status.remaining_duration
+        and global_status.source_class_id == local_status.source_class_id
+        and global_status.source_class_name == local_status.source_class_name
+        and global_status.source_action_component
+        == local_status.source_action_component
+        and global_status.magnitude_kind == local_status.magnitude_kind
+        and global_status.breaks_on_positive_damage
+        == local_status.breaks_on_positive_damage
+    )
+    if not discrete_match:
+        return False
+    if global_status.magnitude is None or local_status.magnitude is None:
+        return global_status.magnitude is local_status.magnitude
+    return isclose(
+        global_status.magnitude,
+        local_status.magnitude,
+        rel_tol=1e-6,
+        abs_tol=1e-8,
+    )
+
+
+def _aura_semantics_match(
+    global_aura: AuthorizedAuraModifierV1,
+    local_aura: AuthorizedAuraModifierV1,
+) -> bool:
+    return global_aura.aura_id == local_aura.aura_id and isclose(
+        global_aura.multiplier,
+        local_aura.multiplier,
+        rel_tol=1e-6,
+        abs_tol=1e-8,
+    )
+
+
+def _validate_live_researcher_space(
+    frame: LiveNoSharedObsAuthorizedPresentationFrameV1,
+) -> None:
+    researcher = frame.researcher_space
+    _require_exact_type(
+        researcher,
+        LiveResearcherSpaceV1,
+        name="researcher_space",
+    )
+    source = frame.source
+    if (
+        researcher.source_session_id != source.source_session_id
+        or researcher.source_run_generation != source.source_run_generation
+        or researcher.source_revision != source.source_revision
+        or researcher.source_authority_epoch != source.source_authority_epoch
+        or researcher.episode_id != source.episode_id
+        or researcher.frame_index != source.source_frame_index
+        or researcher.simulator_step_count != source.source_simulator_step_count
+        or researcher.selected_public_agent_id
+        != source.source_recipient_public_agent_id
+        or researcher.pending_inspection.submission_scope
+        != source.source_submission_scope
+    ):
+        raise ValueError(
+            "live researcher space does not join its Agent presentation epoch."
+        )
+    if type(researcher.pending_inspection) is LiveResearcherEditableDraftInspectionV1:
+        self_actor = next(
+            row
+            for row in frame.current_endpoint.parts.scene.agents
+            if row.relation == "self"
+        )
+        draft = researcher.pending_inspection.draft
+        if (
+            draft.actor_public_agent_id != self_actor.public_agent_id
+            or draft.current_simulator_step_count
+            != frame.current_endpoint.parts.source_simulator_step_count
+        ):
+            raise ValueError("live researcher draft does not join the Agent self row.")
+        local_inspection = frame.live_inspection.inspection
+        if type(local_inspection) is not LiveEditableDraftInspectionV1:
+            raise ValueError("live researcher and Agent draft modes diverged.")
+        local_draft = local_inspection.draft
+        researcher_mask = draft.decision_mask
+        local_mask = local_draft.decision_mask
+        researcher_target_ids = tuple(
+            None
+            if type(row) is AuthorizedNoTargetActionV1
+            else cast(AuthorizedAxisOnlyTargetActionV1, row).target_public_agent_id
+            for row in researcher_mask.target_actions
+        )
+        local_target_ids = tuple(
+            None
+            if type(row) is AuthorizedNoTargetActionV1
+            else cast(
+                AuthorizedVisibleTargetActionV1 | AuthorizedAxisOnlyTargetActionV1,
+                row,
+            ).target_public_agent_id
+            for row in local_mask.target_actions
+        )
+        if (
+            researcher_mask.movement_action_display_names
+            != local_mask.movement_action_display_names
+            or researcher_mask.movement_action_mask != local_mask.movement_action_mask
+            or tuple(row.display_name for row in researcher_mask.target_actions)
+            != tuple(row.display_name for row in local_mask.target_actions)
+            or researcher_target_ids != local_target_ids
+            or researcher_mask.target_action_mask != local_mask.target_action_mask
+            or researcher_mask.use_ultimate_action_display_names
+            != local_mask.use_ultimate_action_display_names
+            or researcher_mask.use_ultimate_action_mask
+            != local_mask.use_ultimate_action_mask
+            or researcher_mask.target_use_ultimate_joint_mask
+            != local_mask.target_use_ultimate_joint_mask
+            or draft.draft_action != local_draft.draft_action
+            or draft.draft_legality != local_draft.draft_legality
+        ):
+            raise ValueError("live researcher draft changed Agent action semantics.")
+
+    researcher_classes = {row.class_id: row for row in researcher.class_mechanics}
+    for local_class in frame.current_endpoint.parts.scene.class_mechanics:
+        if researcher_classes.get(local_class.class_id) != local_class:
+            raise ValueError(
+                "live researcher class mechanics changed a fog-authorized class."
             )
-            else frozenset()
-        ),
+
+    researcher_roster = {row.public_agent_id: row for row in researcher.roster_agents}
+    for local_actor in frame.current_endpoint.parts.scene.agents:
+        global_actor = researcher_roster[local_actor.public_agent_id]
+        if (
+            global_actor.team_id != local_actor.team_id
+            or global_actor.class_id != local_actor.class_id
+            or global_actor.class_name != local_actor.class_name
+            or global_actor.life_state != local_actor.life_state
+            or not isclose(
+                global_actor.current_health,
+                local_actor.current_health,
+                rel_tol=1e-6,
+                abs_tol=1e-8,
+            )
+            or not isclose(
+                global_actor.maximum_health,
+                local_actor.maximum_health,
+                rel_tol=1e-6,
+                abs_tol=1e-8,
+            )
+            or not isclose(
+                global_actor.effective_movement_speed,
+                local_actor.effective_movement_speed,
+                rel_tol=1e-6,
+                abs_tol=1e-8,
+            )
+            or global_actor.ultimate_cooldown_remaining
+            != local_actor.ultimate_cooldown_remaining
+            or global_actor.spawn_shield_remaining != local_actor.spawn_shield_remaining
+            or global_actor.steps_until_out_of_combat
+            != local_actor.steps_until_out_of_combat
+            or global_actor.out_of_combat_delay_steps
+            != local_actor.out_of_combat_delay_steps
+            or len(global_actor.statuses) != len(local_actor.statuses)
+            or not all(
+                _status_semantics_match(global_status, local_status)
+                for global_status, local_status in zip(
+                    global_actor.statuses,
+                    local_actor.statuses,
+                    strict=True,
+                )
+            )
+            or len(global_actor.aura_modifiers) != len(local_actor.aura_modifiers)
+            or not all(
+                _aura_semantics_match(global_aura, local_aura)
+                for global_aura, local_aura in zip(
+                    global_actor.aura_modifiers,
+                    local_actor.aura_modifiers,
+                    strict=True,
+                )
+            )
+        ):
+            raise ValueError(
+                "live researcher roster changed a fog-authorized actor fact."
+            )
+
+    if researcher.latest_transition is not None:
+        local_latest = frame.latest_transition
+        if local_latest is None:
+            raise ValueError("live researcher Latest lacks its Agent transition.")
+        global_row = next(
+            row
+            for row in researcher.latest_transition.action_rows
+            if row.actor_public_agent_id == source.source_recipient_public_agent_id
+        )
+        local_row = local_latest.action_rows[0]
+        if (
+            global_row.target_action_recipient_public_agent_id_by_id
+            != local_row.target_action_recipient_public_agent_id_by_id
+            or global_row.submitted_action != local_row.submitted_action
+            or global_row.accepted_action != local_row.accepted_action
+        ):
+            raise ValueError("live researcher Latest changed Agent action semantics.")
+    _validate_recursive_presentation_keys(
+        researcher,
+        source_session_id=source.source_session_id,
+        audience="oracle",
+        recipient_public_agent_id=None,
     )
 
 
@@ -3248,10 +3890,10 @@ def _validate_live_no_shared_inspection_envelope(
         raise ValueError("live Agent inspection scope does not join its source.")
     if type(inspection) is LiveEditableDraftInspectionV1:
         if (
-            inspection.submission_scope != "controlled_actor"
+            inspection.submission_scope != "joint_turn"
             or inspection.draft.actor_public_agent_id != parts.recipient_public_agent_id
         ):
-            raise ValueError("editable Agent draft does not join its owner/scope.")
+            raise ValueError("editable Agent draft does not join its joint scope.")
     elif type(inspection) is not LiveScriptedPlaybackInspectionV1:
         raise ValueError("unknown live Agent inspection variant.")
 
@@ -3599,6 +4241,10 @@ __all__ = [
     "LiveOracleInspectionEnvelopeV1",
     "LiveOraclePresentationSourceIdentityV1",
     "LiveOracleTechnicalFrameV1",
+    "LiveResearcherDraftInspectionV1",
+    "LiveResearcherEditableDraftInspectionV1",
+    "LiveResearcherInputInspectionV1",
+    "LiveResearcherSpaceV1",
     "LiveScriptedPlaybackInspectionV1",
     "MovementActionDisplayRowV1",
     "NoSharedObsAuthorizedCurrentEndpointV1",

@@ -23,11 +23,11 @@ from scripts.dev.visual_debugger.input import (
     dispatch_command,
     normalize_key,
     recording_restart_intent_v1,
-    sanitize_pov_pending_target,
 )
 from scripts.dev.visual_debugger.live_presentation import (
     build_live_no_shared_obs_authorized_presentation_v1,
     build_live_oracle_authorized_presentation_v1,
+    build_live_researcher_space_v1,
 )
 from scripts.dev.visual_debugger.model import DebuggerSession
 from scripts.dev.visual_debugger.presentation_protocol import (
@@ -151,9 +151,7 @@ class DebuggerService:
             raise ValueError(msg)
         if preset not in ("presentation", "analysis", "technical", "debug"):
             raise ValueError("unknown debugger preset")
-        self._session: DebuggerSession = (
-            sanitize_pov_pending_target(session) if view_mode == "pov" else session
-        )
+        self._session: DebuggerSession = session
         self._view_mode: ViewMode = view_mode
         self._preset: Preset = "analysis"
         self._include_stress = include_stress
@@ -433,6 +431,17 @@ class DebuggerService:
                         global_slot=recipient,
                     )
                 )
+                oracle_raw_frame = self._build_frame(view_mode="researcher")
+                if type(oracle_raw_frame) is not ResearcherLiveDebuggerFrameV2:
+                    raise RuntimeError(
+                        "POV live service cannot build its researcher-space epoch."
+                    )
+                oracle_presentation = build_live_oracle_authorized_presentation_v1(
+                    context,
+                    current,
+                    incoming,
+                    oracle_raw_frame,
+                )
                 presentation = build_live_no_shared_obs_authorized_presentation_v1(
                     current_slice,
                     carrier,
@@ -442,6 +451,9 @@ class DebuggerService:
                         None
                         if incoming is None
                         else build_visual_event_batch_v2(incoming)
+                    ),
+                    researcher_space=build_live_researcher_space_v1(
+                        oracle_presentation
                     ),
                 )
             return PresentationResourceResultV1(
@@ -1404,8 +1416,6 @@ class DebuggerService:
                         )
                     )
                     if scenario.mode == "scripted"
-                    else (self._session.controlled_global_slot,)
-                    if self._view_mode == "pov"
                     else tuple(
                         row.global_slot
                         for row in self._session.evaluation_context.roster

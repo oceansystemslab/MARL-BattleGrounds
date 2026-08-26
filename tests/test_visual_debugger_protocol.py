@@ -62,7 +62,7 @@ def test_hud_movement_legality_requires_exact_canonical_action_rows() -> None:
         roster_global_slots=(0,),
         controlled_global_slot=0,
         selected_global_slot=None,
-        pending_submission_scope="controlled_actor",
+        pending_submission_scope="joint_turn",
         pending_actions=(pending,),
         pending_action=pending,
         latest_transition=None,
@@ -72,6 +72,10 @@ def test_hud_movement_legality_requires_exact_canonical_action_rows() -> None:
     assert tuple(row.move_action for row in hud.movement_legalities) == tuple(
         range(NUM_MOVE_ACTIONS)
     )
+    retired_scope = hud.model_dump(mode="python")
+    retired_scope["pending_submission_scope"] = "controlled_actor"
+    with pytest.raises(ValidationError, match=r"joint_turn.*scripted_playback"):
+        HudFrameV1.model_validate(retired_scope)
     for invalid_rows in (
         legalities[:-1],
         tuple(reversed(legalities)),
@@ -82,7 +86,7 @@ def test_hud_movement_legality_requires_exact_canonical_action_rows() -> None:
                 roster_global_slots=(0,),
                 controlled_global_slot=0,
                 selected_global_slot=None,
-                pending_submission_scope="controlled_actor",
+                pending_submission_scope="joint_turn",
                 pending_actions=(pending,),
                 pending_action=pending,
                 latest_transition=None,
@@ -524,7 +528,7 @@ def test_hud_candidate_legality_requires_target_none_and_exact_roster() -> None:
         roster_global_slots=(0,),
         controlled_global_slot=0,
         selected_global_slot=None,
-        pending_submission_scope="controlled_actor",
+        pending_submission_scope="joint_turn",
         pending_actions=(pending,),
         pending_action=pending,
         latest_transition=None,
@@ -547,7 +551,7 @@ def test_hud_candidate_legality_requires_target_none_and_exact_roster() -> None:
             roster_global_slots=(0,),
             controlled_global_slot=0,
             selected_global_slot=None,
-            pending_submission_scope="controlled_actor",
+            pending_submission_scope="joint_turn",
             pending_actions=(pending,),
             pending_action=pending,
             latest_transition=None,
@@ -559,8 +563,11 @@ def test_hud_candidate_legality_requires_target_none_and_exact_roster() -> None:
             roster_global_slots=(0, 1),
             controlled_global_slot=0,
             selected_global_slot=None,
-            pending_submission_scope="controlled_actor",
-            pending_actions=(pending,),
+            pending_submission_scope="joint_turn",
+            pending_actions=(
+                pending,
+                pending.model_copy(update={"actor_global_slot": 1}),
+            ),
             pending_action=pending,
             latest_transition=None,
             movement_legalities=_movement_legalities(),
@@ -571,7 +578,7 @@ def test_hud_candidate_legality_requires_target_none_and_exact_roster() -> None:
             roster_global_slots=(0,),
             controlled_global_slot=0,
             selected_global_slot=None,
-            pending_submission_scope="controlled_actor",
+            pending_submission_scope="joint_turn",
             pending_actions=(pending,),
             pending_action=pending,
             latest_transition=None,
@@ -583,7 +590,7 @@ def test_hud_candidate_legality_requires_target_none_and_exact_roster() -> None:
             roster_global_slots=(0,),
             controlled_global_slot=0,
             selected_global_slot=None,
-            pending_submission_scope="controlled_actor",
+            pending_submission_scope="joint_turn",
             pending_actions=(pending,),
             pending_action=pending,
             latest_transition=None,
@@ -625,8 +632,8 @@ def test_hud_candidate_legality_requires_target_none_and_exact_roster() -> None:
         roster_global_slots=(0, 5),
         controlled_global_slot=5,
         selected_global_slot=None,
-        pending_submission_scope="controlled_actor",
-        pending_actions=(team_b_pending,),
+        pending_submission_scope="joint_turn",
+        pending_actions=(pending, team_b_pending),
         pending_action=team_b_pending,
         latest_transition=None,
         movement_legalities=_movement_legalities(),
@@ -787,7 +794,7 @@ def test_hud_rejects_public_action_endpoints_absent_from_authorized_roster() -> 
             roster_global_slots=(0,),
             controlled_global_slot=0,
             selected_global_slot=None,
-            pending_submission_scope="controlled_actor",
+            pending_submission_scope="joint_turn",
             pending_actions=(pending,),
             pending_action=pending,
             latest_transition=latest,

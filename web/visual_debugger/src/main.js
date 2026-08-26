@@ -17,7 +17,10 @@ import {
   authorizedOracleCommandSlotForPublicAgentId,
   authorizedPresentationAudience,
   authorizedPresentationInspectionState,
+  authorizedPresentationLatestTransitionId,
   authorizedPresentationPreferenceKey,
+  authorizedPresentationResearcherInspectionState,
+  authorizedPresentationResearcherSceneView,
   authorizedPresentationSceneView,
   isAuthorizedPresentationFrame,
   sameAuthorizedPresentationPreferenceKey,
@@ -273,13 +276,15 @@ const state = {
 };
 
 /**
- * One live request may retain one fresh Enter intent while a coherent draft
- * response is installed. This is page-local latency state, not simulator,
- * action, or replay state.
+ * One live request may retain one fresh draft intent and one following Enter
+ * while a coherent response is installed. This is page-local latency state,
+ * not simulator, action, or replay state.
  *
  * @type {{
  *   allowsDeferredSubmit: boolean,
+ *   deferredDraft: Readonly<Record<string, unknown>> | null,
  *   deferredSubmit: Readonly<Record<string, unknown>> | null,
+ *   releaseFocusAfterSettlement: boolean,
  * } | null}
  */
 let activeLiveCommandTransaction = null;
@@ -324,14 +329,20 @@ const scientificDisclosures = Object.freeze(
 
 /**
  * The only retained scientific preference record. This is deliberately one
- * active record rather than a cache keyed by authority: crossing A -> B
- * replaces A, so a later B -> A boundary receives fresh defaults.
+ * active record rather than a cache keyed by authority: unrelated A -> B
+ * crossings replace A, so a later B -> A boundary receives fresh defaults.
+ * One live Agent recipient rotation retains only the current user-interface
+ * preferences; local inspection is still rebuilt from the new authority.
  *
  * @type {{
  *   authorityKey: Readonly<{tuple: readonly unknown[], serialized: string}>,
  *   disclosures: Record<string, {open: boolean, scrollTop: number}>,
  *   agentDetailsAutoOpenAllowed: boolean,
- *   primaryFocus: null | {surface: "roster" | "battlefield", presentationKey: string},
+ *   primaryFocus: null | {
+ *     surface: "roster" | "battlefield",
+ *     presentationKey: string,
+ *     publicAgentId: string,
+ *   },
  *   localInspection: {owned: false} | {owned: true, presentationKey: string | null},
  *   localRanges: {owned: false} | {owned: true, visible: boolean},
  * } | null}
@@ -1133,7 +1144,7 @@ function registerAuthorityAwareUtilityHelp() {
     "#live-ranges-button",
     "Ranges",
     agentPov
-      ? "Show or hide locally authorized range overlays. This sends no command and does not change the fixed recipient."
+      ? "Show or hide fog-authorized range overlays for the current Agent POV. This sends no command."
       : researcher
         ? "Toggle server-authored Oracle View range presentation."
         : "Range presentation is unavailable until one coherent authorized live frame is installed.",
@@ -1143,7 +1154,7 @@ function registerAuthorityAwareUtilityHelp() {
     "#replay-ranges-button",
     "Replay ranges",
     agentPov
-      ? "Show or hide locally authorized inspected-agent range overlays. This sends no replay command and does not change the fixed recipient."
+      ? "Show or hide locally authorized inspected-agent range overlays. This sends no replay command and does not switch Agent POV."
       : researcher
         ? "Toggle recorded Oracle View range presentation."
         : "Replay range presentation is unavailable until one coherent authorized frame is installed.",
@@ -1153,7 +1164,7 @@ function registerAuthorityAwareUtilityHelp() {
     "#replay-clear-reference-button",
     "Clear Selection",
     agentPov
-      ? "Clear the local inspected-agent highlight, details, and ranges. This sends no replay command and does not change the fixed recipient."
+      ? "Clear the local inspected-agent highlight, details, and ranges. This sends no replay command and does not switch Agent POV."
       : researcher
         ? "Clear the selected Oracle View agent and its inspection highlight."
         : "Selection cannot be cleared until one coherent authorized replay frame is installed.",
@@ -1173,17 +1184,21 @@ function registerAuthorityAwareUtilityHelp() {
     for (const control of document.querySelectorAll(selector)) {
       const oracleActorCyclingAvailable =
         researcher && control instanceof HTMLButtonElement && !control.disabled;
+      const agentActorCyclingAvailable =
+        agentPov && control instanceof HTMLButtonElement && !control.disabled;
       registerControlHelpOwner(
         control,
         selector,
         title,
-        agentPov
-          ? "Actor cycling is unavailable in Agent POV. Tab and Shift+Tab keep native browser focus and never change the fixed recipient."
-          : oracleActorCyclingAvailable
-            ? oracleSummary
-            : researcher
-              ? "Actor cycling is unavailable in the current Oracle View state. Tab and Shift+Tab retain native browser focus navigation."
-              : "Actor cycling is unavailable until one coherent authorized live frame is installed.",
+        agentActorCyclingAvailable
+          ? `${oracleSummary.replace("Oracle View", "Agent POV")} Staged drafts are preserved.`
+          : agentPov
+            ? "Actor cycling is unavailable in the current Agent POV state. Tab and Shift+Tab retain native browser focus navigation."
+            : oracleActorCyclingAvailable
+              ? oracleSummary
+              : researcher
+                ? "Actor cycling is unavailable in the current Oracle View state. Tab and Shift+Tab retain native browser focus navigation."
+                : "Actor cycling is unavailable until one coherent authorized live frame is installed.",
       );
     }
   }
@@ -1333,15 +1348,98 @@ function reconcilePresentationPreference(preference, presentation) {
     preference.localInspection.presentationKey = null;
     preference.disclosures["agent-details"].open = false;
   }
-  if (
-    preference.primaryFocus !== null &&
-    authorizedAgentForPresentationKey(
+  if (preference.primaryFocus !== null) {
+    preference.primaryFocus = rebindAuthorizedPrimaryFocus(
       presentation,
-      preference.primaryFocus.presentationKey,
-    ) === null
-  ) {
-    preference.primaryFocus = null;
+      preference.primaryFocus,
+    );
   }
+}
+
+/**
+ * Roster focus belongs to global researcher space in both live audiences;
+ * battlefield focus belongs to the currently authorized scene. Keeping that
+ * distinction here prevents fog projection from changing keyboard controls.
+ * Recipient switches legitimately rotate Agent-scene presentation keys, so a
+ * retained focus may rebind by public identity only inside the newly
+ * authorized surface.
+ *
+ * @param {unknown} presentation
+ * @param {Readonly<{
+ *   surface: "roster" | "battlefield",
+ *   presentationKey: string,
+ *   publicAgentId: string,
+ * }>} focus
+ * @param {Readonly<{allowPublicIdentityFallback?: boolean}>} [options]
+ * @returns {null | {surface: "roster" | "battlefield", presentationKey: string, publicAgentId: string}}
+ */
+function rebindAuthorizedPrimaryFocus(
+  presentation,
+  focus,
+  { allowPublicIdentityFallback = false } = {},
+) {
+  const scene =
+    focus.surface === "roster"
+      ? authorizedPresentationResearcherSceneView(presentation)
+      : authorizedPresentationSceneView(presentation);
+  const authorizedAgent = asArray(scene?.agents).find(
+    (candidate) =>
+      isRecord(candidate) &&
+      (candidate.presentation_key === focus.presentationKey ||
+        (allowPublicIdentityFallback &&
+          candidate.public_agent_id === focus.publicAgentId)),
+  );
+  if (!isRecord(authorizedAgent)) {
+    return null;
+  }
+  return {
+    surface: focus.surface,
+    presentationKey: String(authorizedAgent.presentation_key),
+    publicAgentId: String(authorizedAgent.public_agent_id),
+  };
+}
+
+/**
+ * Recognize one live Agent recipient rotation inside the same debugger session
+ * and episode. Every other product, audience, artifact, session, and episode
+ * boundary keeps its fresh preference defaults and opaque keys strict.
+ *
+ * @param {Readonly<{tuple: readonly unknown[]}>} previous
+ * @param {Readonly<{tuple: readonly unknown[]}>} next
+ */
+function isLiveAgentRecipientRotation(previous, next) {
+  const left = previous.tuple;
+  const right = next.tuple;
+  return (
+    left[0] === "combat_debugger" &&
+    right[0] === left[0] &&
+    right[1] === left[1] &&
+    right[2] === left[2] &&
+    left[3] === "live_no_shared_obs_agent_pov" &&
+    right[3] === left[3] &&
+    left[4] === "agent_pov" &&
+    right[4] === left[4] &&
+    left[5] === "no_shared_obs" &&
+    right[5] === left[5] &&
+    left[6] === null &&
+    right[6] === null &&
+    typeof left[7] === "string" &&
+    typeof right[7] === "string" &&
+    right[7] !== left[7] &&
+    right[8] !== left[8]
+  );
+}
+
+/**
+ * @param {Readonly<{tuple: readonly unknown[]}>} previous
+ * @param {Readonly<{tuple: readonly unknown[]}>} next
+ * @param {Readonly<{publicAgentId: string}>} focus
+ */
+function isLiveAgentRecipientFocusRotation(previous, next, focus) {
+  return (
+    isLiveAgentRecipientRotation(previous, next) &&
+    next.tuple[7] === focus.publicAgentId
+  );
 }
 
 /**
@@ -1358,10 +1456,48 @@ function installActivePresentationPreference(presentation, authorityKey) {
       authorityKey,
     )
   ) {
+    const previousPreference = activePresentationPreference;
+    const previousAuthorityKey = previousPreference?.authorityKey ?? null;
+    const previousPrimaryFocus = previousPreference?.primaryFocus ?? null;
+    const retainLiveAgentPreferences =
+      previousPreference !== null &&
+      isLiveAgentRecipientRotation(previousPreference.authorityKey, authorityKey);
     activePresentationPreference = defaultPresentationPreference(
       presentation,
       authorityKey,
     );
+    if (retainLiveAgentPreferences && previousPreference !== null) {
+      activePresentationPreference.disclosures = Object.fromEntries(
+        Object.entries(previousPreference.disclosures).map(([panelId, saved]) => [
+          panelId,
+          { ...saved },
+        ]),
+      );
+      activePresentationPreference.agentDetailsAutoOpenAllowed =
+        previousPreference.agentDetailsAutoOpenAllowed;
+      if (
+        previousPreference.localRanges.owned &&
+        activePresentationPreference.localRanges.owned
+      ) {
+        activePresentationPreference.localRanges.visible =
+          previousPreference.localRanges.visible;
+      }
+    }
+    if (
+      previousPrimaryFocus !== null &&
+      previousAuthorityKey !== null &&
+      isLiveAgentRecipientFocusRotation(
+        previousAuthorityKey,
+        authorityKey,
+        previousPrimaryFocus,
+      )
+    ) {
+      activePresentationPreference.primaryFocus = rebindAuthorizedPrimaryFocus(
+        presentation,
+        previousPrimaryFocus,
+        { allowPublicIdentityFallback: true },
+      );
+    }
   } else {
     reconcilePresentationPreference(activePresentationPreference, presentation);
   }
@@ -1369,7 +1505,11 @@ function installActivePresentationPreference(presentation, authorityKey) {
 
 /**
  * @param {Readonly<Record<string, any>>} presentation
- * @returns {null | {surface: "roster" | "battlefield", presentationKey: string}}
+ * @returns {null | {
+ *   surface: "roster" | "battlefield",
+ *   presentationKey: string,
+ *   publicAgentId: string,
+ * }}
  */
 function focusedAuthorizedPrimaryAction(presentation) {
   const active = document.activeElement;
@@ -1384,15 +1524,17 @@ function focusedAuthorizedPrimaryAction(presentation) {
   );
   const action = rosterAction ?? battlefieldAction;
   const presentationKey = action?.getAttribute("data-presentation-key");
-  if (
-    typeof presentationKey !== "string" ||
-    authorizedAgentForPresentationKey(presentation, presentationKey) === null
-  ) {
+  const authorizedAgent =
+    rosterAction !== null
+      ? authorizedResearcherAgentForPresentationKey(presentation, presentationKey)
+      : authorizedAgentForPresentationKey(presentation, presentationKey);
+  if (typeof presentationKey !== "string" || authorizedAgent === null) {
     return null;
   }
   return {
     surface: rosterAction !== null ? "roster" : "battlefield",
     presentationKey,
+    publicAgentId: String(authorizedAgent.public_agent_id),
   };
 }
 
@@ -1515,21 +1657,20 @@ function schedulePresentationPreferenceRestore(preference) {
       if (focus === null || anchor === null) {
         return;
       }
+      const reboundFocus = rebindAuthorizedPrimaryFocus(state.presentation, focus);
       const active = document.activeElement;
       const focusWasNotMovedByUser =
         active === anchor || (!anchor.isConnected && active === document.body);
-      if (
-        !focusWasNotMovedByUser ||
-        authorizedAgentForPresentationKey(state.presentation, focus.presentationKey) ===
-          null
-      ) {
+      if (!focusWasNotMovedByUser || reboundFocus === null) {
         return;
       }
-      const root = focus.surface === "roster" ? elements.roster : elements.battlefield;
+      installed.primaryFocus = reboundFocus;
+      const root =
+        reboundFocus.surface === "roster" ? elements.roster : elements.battlefield;
       const selector =
-        focus.surface === "roster"
-          ? `.roster-primary-action[data-presentation-key="${CSS.escape(focus.presentationKey)}"]`
-          : `.agent[data-presentation-key="${CSS.escape(focus.presentationKey)}"]`;
+        reboundFocus.surface === "roster"
+          ? `.roster-primary-action[data-presentation-key="${CSS.escape(reboundFocus.presentationKey)}"]`
+          : `.agent[data-presentation-key="${CSS.escape(reboundFocus.presentationKey)}"]`;
       const target = root.querySelector(selector);
       if (
         !(target instanceof HTMLElement || target instanceof SVGElement) ||
@@ -1741,6 +1882,30 @@ function authorizedAgentForPresentationKey(presentation, presentationKey) {
   }
   return (
     asArray(authorizedPresentationSceneView(presentation)?.agents).find(
+      (candidate) =>
+        isRecord(candidate) && candidate.presentation_key === presentationKey,
+    ) ?? null
+  );
+}
+
+/**
+ * Resolve a non-battlefield roster identity only through the strict global
+ * researcher branch. This must never be used by the SVG renderer or its hit
+ * testing.
+ *
+ * @param {unknown} presentation
+ * @param {unknown} presentationKey
+ * @returns {Readonly<Record<string, any>> | null}
+ */
+function authorizedResearcherAgentForPresentationKey(presentation, presentationKey) {
+  if (
+    !isAuthorizedPresentationFrame(presentation) ||
+    typeof presentationKey !== "string"
+  ) {
+    return null;
+  }
+  return (
+    asArray(authorizedPresentationResearcherSceneView(presentation)?.agents).find(
       (candidate) =>
         isRecord(candidate) && candidate.presentation_key === presentationKey,
     ) ?? null
@@ -2245,7 +2410,7 @@ const READ_ONLY_LIVE_SCIENTIFIC_INSTRUCTIONS =
 const AGENT_CLOSEOUT_BATTLEFIELD_LABEL =
   "Agent POV recording closeout battlefield. Authorized bodies can be inspected; simulator controls are unavailable.";
 const AGENT_CLOSEOUT_BATTLEFIELD_INSTRUCTIONS =
-  "Agent POV keeps one fixed recipient. Activate an authorized visible body to inspect current facts; recording closeout has fenced simulator and pending-action controls.";
+  "Authorized visible bodies can still be inspected locally; recording closeout has fenced POV switching, simulator input, and pending-action controls.";
 const TERMINAL_REPLAY_BATTLEFIELD_LABEL =
   "Read-only terminal replay battlefield snapshot.";
 const TERMINAL_REPLAY_BATTLEFIELD_INSTRUCTIONS =
@@ -2353,7 +2518,7 @@ function applyBattlefieldBoundaryCopy() {
     );
     elements.battlefieldInstructions.textContent =
       audience === "agent_pov"
-        ? "Live Agent POV keeps one fixed recipient. Bodies are passive inspection targets; use the authorized draft controls to prepare that recipient's action."
+        ? "Live Agent POV is interactive. Activate a visible authorized actor or choose any active actor in Roster to control it and switch POV; Shift-click selects a visible authorized target; Escape clears the target and leaves battlefield focus."
         : "Live Oracle View is interactive. Activate an authorized actor to control it; Shift-click selects an authorized target; Escape clears the target and leaves battlefield focus. Battlefield keyboard commands apply only while this surface has focus.";
   } else if (installedLiveScientificInspectionAvailable()) {
     elements.battlefield.setAttribute("role", "group");
@@ -2676,6 +2841,30 @@ function commandPreparesDeferredSubmit(command) {
 }
 
 /** @param {Record<string, unknown>} command */
+function isDeferredDraftKey(command) {
+  return (
+    command.command_type === "keyboard" &&
+    typeof command.key === "string" &&
+    commandPreparesDeferredSubmit(command)
+  );
+}
+
+/** @param {Record<string, unknown>} command */
+function isFreshDeferredDraft(command) {
+  if (!isDeferredDraftKey(command)) {
+    return false;
+  }
+  const key = String(command.key).toLowerCase();
+  return (
+    command.ctrl_key === false &&
+    command.alt_key === false &&
+    command.meta_key === false &&
+    command.repeat === false &&
+    (command.shift_key === false || key === "tab")
+  );
+}
+
+/** @param {Record<string, unknown>} command */
 function isFreshUnmodifiedEnter(command) {
   return (
     command.command_type === "keyboard" &&
@@ -2689,14 +2878,27 @@ function isFreshUnmodifiedEnter(command) {
   );
 }
 
+/** @param {Readonly<Record<string, unknown>> | null} command */
+function isEscapeKeyboardCommand(command) {
+  return (
+    command !== null &&
+    command.command_type === "keyboard" &&
+    typeof command.key === "string" &&
+    command.key.toLowerCase() === "escape"
+  );
+}
+
 /**
- * Consume live Enter while a request owns the battlefield. Only one fresh,
- * unmodified edge may be retained, and only behind a draft-preparation
- * transaction. Replay and every non-request fence retain native Enter.
+ * Consume eligible live input while a request owns the battlefield. Retain at
+ * most one fresh draft command and one following Enter so the normal command
+ * fence can apply them in order after a coherent successor is installed. A
+ * consumed Escape independently retains its local focus-release intent even
+ * when ordering or freshness prevents its simulator command from being queued.
+ * Replay and every non-request fence retain native keyboard behavior.
  *
  * @param {Record<string, unknown>} command
  */
-function retainFencedEnter(command) {
+function retainFencedCommand(command) {
   const transaction = activeLiveCommandTransaction;
   if (
     isReplayMode() ||
@@ -2708,9 +2910,34 @@ function retainFencedEnter(command) {
   ) {
     return false;
   }
+  if (isEscapeKeyboardCommand(command)) {
+    transaction.releaseFocusAfterSettlement = true;
+  }
+  if (isDeferredDraftKey(command)) {
+    if (
+      transaction.deferredDraft === null &&
+      transaction.deferredSubmit === null &&
+      isFreshDeferredDraft(command)
+    ) {
+      transaction.deferredDraft = Object.freeze({ ...command });
+      setNotice(
+        "Input queued; waiting for the current battlefield update first…",
+        "info",
+      );
+      renderConnection();
+    }
+    return true;
+  }
   if (
-    transaction.allowsDeferredSubmit &&
+    command.command_type !== "keyboard" ||
+    typeof command.key !== "string" ||
+    command.key.toLowerCase() !== "enter"
+  ) {
+    return false;
+  }
+  if (
     transaction.deferredSubmit === null &&
+    (transaction.allowsDeferredSubmit || transaction.deferredDraft !== null) &&
     isFreshUnmodifiedEnter(command)
   ) {
     transaction.deferredSubmit = Object.freeze({ ...command });
@@ -2820,7 +3047,9 @@ function renderConnection() {
   } else if (state.busy) {
     label = activeLiveCommandTransaction?.deferredSubmit
       ? "Submit queued"
-      : "Command in flight";
+      : activeLiveCommandTransaction?.deferredDraft
+        ? "Input queued"
+        : "Command in flight";
     status = "busy";
   } else if (state.resyncRequired) {
     label = "Resync required";
@@ -2857,7 +3086,7 @@ function renderSessionToolbar(installed = installedPresentationAuthority()) {
   elements.stepValue.textContent = presentation
     ? String(presentation.simulator_step_count ?? "—")
     : "—";
-  const incomingTransition = authorizedIncomingTransitionId(presentation);
+  const incomingTransition = authorizedPresentationLatestTransitionId(presentation);
   elements.transitionValue.textContent = incomingTransition
     ? String(incomingTransition)
     : "—";
@@ -3031,11 +3260,12 @@ function renderCommandTargets(presentation, inspection) {
     const basic = targetAction > 0 && asArray(pairMask)[0] === true ? "B ✓" : "B ×";
     const ultimate = asArray(pairMask)[1] === true ? "U ✓" : "U ×";
     if (target.target_kind === "no_target") {
-      option.value = "";
+      option.value =
+        audience === "agent_pov" ? `pov-target-action:${targetAction}` : "";
       option.textContent = `${target.display_name ?? "No target"} · ${basic} · ${ultimate}`;
     } else if (audience === "agent_pov") {
       option.value = `pov-target-action:${targetAction}`;
-      option.textContent = `${agentIdentity(target.target_public_agent_id)} · action ${targetAction} · ${basic} · ${ultimate}`;
+      option.textContent = `${agentIdentity(target.target_public_agent_id)} · ${basic} · ${ultimate}`;
     } else if (audience === "researcher") {
       const commandSlot = authorizedOracleCommandSlotForPublicAgentId(
         presentation,
@@ -3070,13 +3300,13 @@ function renderCommandTargets(presentation, inspection) {
  * @param {Readonly<Record<string, any>>} presentation
  */
 function renderDraftState(presentation) {
-  const inspectionState = authorizedPresentationInspectionState(presentation);
+  const inspectionState = authorizedPresentationResearcherInspectionState(presentation);
   const inspection = isRecord(inspectionState.inspection)
     ? inspectionState.inspection
     : {};
   const mask = isRecord(inspection.decision_mask) ? inspection.decision_mask : {};
   const pending = isRecord(inspection.draft_action) ? inspection.draft_action : {};
-  const controlledCandidate = authorizedAgentForPresentationKey(
+  const controlledCandidate = authorizedResearcherAgentForPresentationKey(
     presentation,
     inspection.actor_presentation_key,
   );
@@ -3106,7 +3336,10 @@ function renderDraftState(presentation) {
           presentation,
           controlledOwner.presentation_key,
         );
-  if (Number.isInteger(controlledSlot)) {
+  if (
+    authorizedPresentationAudience(presentation) === "researcher" &&
+    Number.isInteger(controlledSlot)
+  ) {
     elements.commandControlledActor.dataset.controlledSlot = String(controlledSlot);
   } else {
     delete elements.commandControlledActor.dataset.controlledSlot;
@@ -3189,11 +3422,9 @@ function renderDraftState(presentation) {
 
 function renderCommandAvailability() {
   const presentation = state.presentation;
-  const inspectionState = authorizedPresentationInspectionState(presentation);
+  const inspectionState = authorizedPresentationResearcherInspectionState(presentation);
   const editableDraft = inspectionState.state_kind === "live_editable";
   const scriptedAdvance = liveScriptedInspectionOnly();
-  const fixedAgentRecipient =
-    authorizedPresentationAudience(presentation) === "agent_pov";
   const disabled =
     state.busy ||
     !state.frame ||
@@ -3206,9 +3437,7 @@ function renderCommandAvailability() {
   elements.submitTurnButton.dataset.key = scriptedAdvance ? "n" : "Enter";
   elements.submitTurnButton.textContent = scriptedAdvance
     ? "Advance scripted frame"
-    : inspectionState.submission_scope === "controlled_actor"
-      ? "Submit controlled actor"
-      : "Submit joint turn";
+    : "Submit joint turn";
   elements.commandCommitTitle.textContent = scriptedAdvance
     ? "Advance the registered script"
     : "Submit the staged joint turn";
@@ -3252,7 +3481,6 @@ function renderCommandAvailability() {
         disabled ||
         scientificFenced ||
         !enabledByInspection ||
-        (fixedAgentRecipient && button.dataset.key === "Tab") ||
         (scriptedAdvance && isTerminal(state.frame)) ||
         recordingDecision.action === "block" ||
         !mode.allowed;
@@ -3343,7 +3571,10 @@ function authorizedAgentActivation(presentationKey) {
     return null;
   }
   const audience = authorizedPresentationAudience(presentation);
-  const inspectionState = authorizedPresentationInspectionState(presentation);
+  const battlefieldInspectionState =
+    authorizedPresentationInspectionState(presentation);
+  const researcherInspectionState =
+    authorizedPresentationResearcherInspectionState(presentation);
   const replayPovSwitch = isReplayMode() && audience === "agent_pov";
   if (isTerminal(state.frame) && !isReplayMode()) {
     return null;
@@ -3359,7 +3590,35 @@ function authorizedAgentActivation(presentationKey) {
       audience,
     });
   }
-  if (audience === "agent_pov" || inspectionState.state_kind === "live_scripted") {
+  if (
+    audience === "agent_pov" &&
+    (battlefieldInspectionState.state_kind === "live_scripted" ||
+      recordingScientificControlsFenced())
+  ) {
+    return Object.freeze({
+      effect: "local_inspection",
+      presentationKey,
+      agent,
+      audience,
+    });
+  }
+  if (audience === "agent_pov") {
+    const commandSlot = authorizedOracleCommandSlotForPublicAgentId(
+      presentation,
+      agent.public_agent_id,
+    );
+    return researcherInspectionState.state_kind === "live_editable" &&
+      Number.isInteger(commandSlot)
+      ? Object.freeze({
+          effect: "live_control",
+          presentationKey,
+          commandSlot,
+          agent,
+          audience,
+        })
+      : null;
+  }
+  if (battlefieldInspectionState.state_kind === "live_scripted") {
     return Object.freeze({
       effect: "local_inspection",
       presentationKey,
@@ -3386,7 +3645,7 @@ function authorizedAgentActivation(presentationKey) {
       audience,
     });
   }
-  return inspectionState.state_kind === "live_editable"
+  return researcherInspectionState.state_kind === "live_editable"
     ? Object.freeze({
         effect: "live_control",
         presentationKey,
@@ -3466,12 +3725,15 @@ function installAuthorizedAgentActivation() {
 /**
  * Apply the already-resolved single effect. Local Agent state is installed
  * before rendering; Oracle waits for the server successor and never receives
- * an optimistic scientific selection.
+ * an optimistic scientific selection. Pointer roster activation hands
+ * keyboard ownership to the battlefield; keyboard activation retains the
+ * native roster focus contract.
  *
  * @param {string} presentationKey
+ * @param {Readonly<{pointerOriginated?: boolean}>} context
  * @returns {boolean}
  */
-function activateAuthorizedAgent(presentationKey) {
+function activateAuthorizedAgent(presentationKey, { pointerOriginated = false } = {}) {
   const activation = authorizedAgentActivation(presentationKey);
   if (activation === null) {
     return false;
@@ -3496,11 +3758,16 @@ function activateAuthorizedAgent(presentationKey) {
       selected_global_slot: activation.commandSlot,
     });
   } else if (activation.effect === "live_control") {
-    void dispatchCommand({
+    const controlCommand = {
       command_type: "roster_selection",
       role: "control",
       global_slot: activation.commandSlot,
-    });
+    };
+    if (pointerOriginated) {
+      dispatchCommandFromDraftControl(controlCommand);
+    } else {
+      void dispatchCommand(controlCommand);
+    }
   }
   return true;
 }
@@ -3566,8 +3833,7 @@ function render() {
     offline: state.offline,
     activationDisabled:
       (transportFrame !== null && isTerminal(transportFrame) && !isReplayMode()) ||
-      (authorizedPresentationAudience(presentationFrame) === "researcher" &&
-        recordingScientificControlsFenced()),
+      (!isReplayMode() && recordingScientificControlsFenced()),
     localInspectedPresentationKey:
       installedLocalInspectedPresentationKey(presentationFrame),
   });
@@ -3883,13 +4149,16 @@ async function dispatchReplayCommand(command) {
   }
 }
 
-/** @param {Record<string, unknown>} command */
-function dispatchPanelCommand(command) {
+/**
+ * @param {Record<string, unknown>} command
+ * @param {Readonly<{pointerOriginated?: boolean}>} context
+ */
+function dispatchPanelCommand(command, { pointerOriginated = false } = {}) {
   if (
     command.command_type === "activate_authorized_agent" &&
     typeof command.presentation_key === "string"
   ) {
-    activateAuthorizedAgent(command.presentation_key);
+    activateAuthorizedAgent(command.presentation_key, { pointerOriginated });
     return Promise.resolve(null);
   }
   if (
@@ -3904,6 +4173,26 @@ function dispatchPanelCommand(command) {
       command_type: "set_pov_actor",
       global_slot: command.global_slot,
     });
+  }
+  if (
+    command.command_type === "activate_live_pov_agent" &&
+    Number.isInteger(command.global_slot) &&
+    Number(command.global_slot) >= 0 &&
+    Number(command.global_slot) < 10 &&
+    !isReplayMode() &&
+    authorizedPresentationAudience(state.presentation) === "agent_pov"
+  ) {
+    openAgentDetails();
+    const controlCommand = {
+      command_type: "roster_selection",
+      role: "control",
+      global_slot: command.global_slot,
+    };
+    if (pointerOriginated) {
+      dispatchCommandFromDraftControl(controlCommand);
+      return Promise.resolve(null);
+    }
+    return dispatchCommand(controlCommand);
   }
   if (
     command.command_type === "roster_selection" &&
@@ -3930,9 +4219,9 @@ function dispatchPanelCommand(command) {
 
 /**
  * @param {Record<string, unknown>} command
- * @param {{allowDeferredSubmit?: boolean}} options
+ * @param {{deferredSubmit?: Readonly<Record<string, unknown>> | null}} options
  */
-async function dispatchCommand(command, { allowDeferredSubmit = true } = {}) {
+async function dispatchCommand(command, { deferredSubmit = null } = {}) {
   if (isReplayMode()) {
     setNotice("Live debugger commands are unavailable in read-only replay.", "warning");
     renderConnection();
@@ -3964,9 +4253,6 @@ async function dispatchCommand(command, { allowDeferredSubmit = true } = {}) {
     typeof command.key === "string" &&
     authorizedPresentationAudience(state.presentation) === "agent_pov"
   ) {
-    if (command.key === "Tab") {
-      return;
-    }
     if (command.key.toLowerCase() === "g") {
       if (
         command.shift_key === false &&
@@ -3988,17 +4274,6 @@ async function dispatchCommand(command, { allowDeferredSubmit = true } = {}) {
     );
     renderConnection();
     renderCommandAvailability();
-    return;
-  }
-  if (
-    command.command_type === "battlefield_pointer" &&
-    authorizedPresentationAudience(state.presentation) !== "researcher"
-  ) {
-    setNotice(
-      "Battlefield bodies are passive in Agent POV. Use the authorized draft controls.",
-      "warning",
-    );
-    renderConnection();
     return;
   }
   const mode = modeAvailability(command, state.frame);
@@ -4039,17 +4314,28 @@ async function dispatchCommand(command, { allowDeferredSubmit = true } = {}) {
 
   /** @type {{
    *   allowsDeferredSubmit: boolean,
+   *   deferredDraft: Readonly<Record<string, unknown>> | null,
    *   deferredSubmit: Readonly<Record<string, unknown>> | null,
+   *   releaseFocusAfterSettlement: boolean,
    * }} */
   const liveCommandTransaction = {
-    allowsDeferredSubmit: allowDeferredSubmit && commandPreparesDeferredSubmit(command),
-    deferredSubmit: null,
+    allowsDeferredSubmit: commandPreparesDeferredSubmit(command),
+    deferredDraft: null,
+    deferredSubmit:
+      commandPreparesDeferredSubmit(command) &&
+      deferredSubmit !== null &&
+      isFreshUnmodifiedEnter(deferredSubmit)
+        ? deferredSubmit
+        : null,
+    releaseFocusAfterSettlement: false,
   };
   activeLiveCommandTransaction = liveCommandTransaction;
   state.busy = true;
   state.offline = false;
   setNotice("Waiting for the authoritative Python response…", "info");
   let reviewHandoff = false;
+  /** @type {Readonly<Record<string, unknown>> | null} */
+  let deferredDraftToDispatch = null;
   /** @type {Readonly<Record<string, unknown>> | null} */
   let deferredSubmitToDispatch = null;
   const previousAuthority = state.authority;
@@ -4131,8 +4417,8 @@ async function dispatchCommand(command, { allowDeferredSubmit = true } = {}) {
       setNotice("Exit accepted. The local product server is shutting down.", "info");
     }
     if (
-      liveCommandTransaction.allowsDeferredSubmit &&
-      liveCommandTransaction.deferredSubmit !== null &&
+      (liveCommandTransaction.deferredDraft !== null ||
+        liveCommandTransaction.deferredSubmit !== null) &&
       !stale &&
       !installOutcome.resynchronized &&
       (payload?.result === "applied" || payload?.result === "no_op") &&
@@ -4143,6 +4429,7 @@ async function dispatchCommand(command, { allowDeferredSubmit = true } = {}) {
       installedAuthorityIsCoherent() &&
       !isTerminal(state.frame)
     ) {
+      deferredDraftToDispatch = liveCommandTransaction.deferredDraft;
       deferredSubmitToDispatch = liveCommandTransaction.deferredSubmit;
     }
   } catch (error) {
@@ -4195,12 +4482,19 @@ async function dispatchCommand(command, { allowDeferredSubmit = true } = {}) {
     if (!reviewHandoff || state.shuttingDown || state.resyncRequired) {
       render();
     }
+    if (liveCommandTransaction.releaseFocusAfterSettlement) {
+      releaseBattlefieldFocus();
+    }
   }
   if (reviewHandoff && !state.shuttingDown && !state.resyncRequired) {
     reloadForProductHandoff();
     return;
   }
-  if (deferredSubmitToDispatch !== null) {
+  if (deferredDraftToDispatch !== null) {
+    await dispatchCommand(deferredDraftToDispatch, {
+      deferredSubmit: deferredSubmitToDispatch,
+    });
+  } else if (deferredSubmitToDispatch !== null) {
     await dispatchCommand(deferredSubmitToDispatch);
   }
 }
@@ -4304,23 +4598,19 @@ async function loadCurrentFrame({ reviewHandoff = false } = {}) {
 }
 
 /**
- * Move pointer-originated draft flow back to the battlefield while preserving
- * native keyboard-control ownership across the serialized request. Keyboard
- * activation uses the battlefield only as a safe temporary focus anchor and
- * may not turn a second Enter into Submit.
+ * Move draft flow through the battlefield while preserving native keyboard
+ * control ownership across the serialized request. Every draft-preparation
+ * transaction may retain one distinct fresh Enter while its coherent
+ * successor is still being installed.
  *
  * @param {Record<string, unknown>} command
  * @param {{
  *   restoreFocusTo?: HTMLElement | null,
- *   allowDeferredSubmit?: boolean,
  * }} options
  */
-function dispatchCommandFromDraftControl(
-  command,
-  { restoreFocusTo = null, allowDeferredSubmit = true } = {},
-) {
+function dispatchCommandFromDraftControl(command, { restoreFocusTo = null } = {}) {
   elements.battlefield.focus({ preventScroll: true });
-  const completion = dispatchCommand(command, { allowDeferredSubmit });
+  const completion = dispatchCommand(command);
   if (restoreFocusTo === null) {
     void completion;
     return;
@@ -4335,6 +4625,14 @@ function dispatchCommandFromDraftControl(
       restoreFocusTo.focus({ preventScroll: true });
     }
   });
+}
+
+function releaseBattlefieldFocus() {
+  const firstCommand = /** @type {HTMLButtonElement | null} */ (
+    elements.commandDeck?.querySelector("button:not([disabled])") ?? null
+  );
+  const focusTarget = firstCommand ?? elements.helpButton;
+  focusTarget.focus({ preventScroll: true });
 }
 
 bindBattlefieldControls({
@@ -4352,14 +4650,8 @@ bindBattlefieldControls({
   },
   onHelp: () => elements.helpDialog.showModal(),
   isInteractive: liveBattlefieldCommandsInteractive,
-  onFencedEnter: retainFencedEnter,
-  onReleaseFocus: () => {
-    const firstCommand = /** @type {HTMLButtonElement | null} */ (
-      elements.commandDeck?.querySelector("button:not([disabled])") ?? null
-    );
-    const focusTarget = firstCommand ?? elements.helpButton;
-    focusTarget.focus({ preventScroll: true });
-  },
+  onFencedCommand: retainFencedCommand,
+  onReleaseFocus: releaseBattlefieldFocus,
 });
 
 elements.battlefield.addEventListener(
@@ -4397,16 +4689,6 @@ elements.battlefield.addEventListener(
 elements.battlefield.addEventListener(
   "keydown",
   (/** @type {KeyboardEvent} */ event) => {
-    if (
-      event.key === "Tab" &&
-      event.target === elements.battlefield &&
-      authorizedPresentationAudience(state.presentation) === "agent_pov"
-    ) {
-      // Preserve native forward/backward focus navigation while preventing the
-      // fixed Agent POV recipient from being cycled through the live service.
-      event.stopImmediatePropagation();
-      return;
-    }
     if (event.key !== "Enter" && event.key !== " ") {
       return;
     }
@@ -4467,7 +4749,6 @@ elements.commandTargetSelect.addEventListener("change", () => {
   }
   dispatchCommandFromDraftControl(command, {
     restoreFocusTo: pointerOriginated ? null : elements.commandTargetSelect,
-    allowDeferredSubmit: pointerOriginated,
   });
 });
 
@@ -4682,7 +4963,6 @@ if (elements.commandDeck) {
         }),
         {
           restoreFocusTo: restoreKeyboardFocus ? button : null,
-          allowDeferredSubmit: !restoreKeyboardFocus,
         },
       );
     });

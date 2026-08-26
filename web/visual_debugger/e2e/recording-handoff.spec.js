@@ -763,12 +763,20 @@ test("target race remains Online and fenced until Save As recovers cached artifa
   await expect(page.getByRole("group", { name: agentCloseoutLabel })).toBeVisible();
   await expect(page.locator("#battlefield")).toHaveAttribute("tabindex", "-1");
   await expect(page.locator("#battlefield-instructions")).toHaveText(
-    "Agent POV keeps one fixed recipient. Activate an authorized visible body to inspect current facts; recording closeout has fenced simulator and pending-action controls.",
+    "Authorized visible bodies can still be inspected locally; recording closeout has fenced POV switching, simulator input, and pending-action controls.",
   );
   const agentCloseoutBodies = page.locator("#battlefield .agent[role='button']");
   await expect.poll(() => agentCloseoutBodies.count()).toBeGreaterThan(0);
   const agentCloseoutRows = page.locator("#roster .roster-primary-action");
   await expect.poll(() => agentCloseoutRows.count()).toBeGreaterThan(1);
+  await expect(page.locator('#roster [data-visibility="visible"]')).toBeHidden();
+  await expect(page.locator('#roster [data-visibility="not-visible"]')).toBeHidden();
+  await expect(page.locator("#roster .roster-team[data-team-id]")).toHaveCount(2);
+  expect(
+    await agentCloseoutRows.evaluateAll((buttons) =>
+      buttons.every((button) => button instanceof HTMLButtonElement && button.disabled),
+    ),
+  ).toBe(true);
   /** @type {unknown[]} */
   const localActivationRequests = [];
   /** @param {import("@playwright/test").Request} request */
@@ -781,8 +789,8 @@ test("target race remains Online and fenced until Save As recovers cached artifa
     }
   };
   page.on("request", recordLocalActivation);
-  await agentCloseoutRows.nth(1).click();
-  await expect(agentCloseoutRows.nth(1)).toHaveAttribute("aria-pressed", "true");
+  await agentCloseoutBodies.nth(1).click();
+  await expect(agentCloseoutBodies.nth(1)).toHaveAttribute("data-selected", "true");
   await expect(page.locator("#agent-details")).toHaveAttribute("open", "");
   await page.evaluate(
     () =>

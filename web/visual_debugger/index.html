@@ -577,23 +577,28 @@
         </div>
         <div data-live-only data-live-help-mode="agent" hidden>
           <p>
-            Click the battlefield once to give the fixed recipient's draft
-            keyboard focus. Ordinary Tab and Shift+Tab move browser focus.
+            Click the battlefield once to give the current controlled actor's
+            draft keyboard focus. Panels remain global researcher controls;
+            only the battlefield snapshot is fog-limited.
           </p>
           <dl class="help-grid">
-            <dt>Agent body or roster row</dt>
-            <dd>Inspect an authorized actor locally without changing the recipient</dd>
-            <dt>WASD / QEZC</dt><dd>Choose movement for the fixed recipient</dd>
+            <dt>Tab / Shift+Tab</dt><dd>Cycle the controlled actor and Agent POV</dd>
+            <dt>Visible agent body</dt><dd>Control that actor and switch Agent POV</dd>
+            <dt>Roster row</dt><dd>Control any active actor and switch Agent POV</dd>
+            <dt>Shift+left click</dt><dd>Select a visible authorized target</dd>
+            <dt>Escape</dt>
+            <dd>Clear the target and leave battlefield focus</dd>
+            <dt>WASD / QEZC</dt><dd>Choose movement for the controlled actor</dd>
             <dt>Arrow keys</dt><dd>Cardinal movement aliases</dd>
-            <dt>X</dt><dd>Set the fixed recipient to Stay</dd>
+            <dt>X</dt><dd>Set the controlled actor to Stay</dd>
             <dt>0 / 1 / 2</dt><dd>Stage no combat / Basic / Ultimate</dd>
-            <dt>Space / Enter</dt><dd>Submit only the fixed recipient</dd>
+            <dt>Space / Enter</dt><dd>Submit every staged actor</dd>
             <dt>R</dt><dd>Deterministically reset the episode</dd>
-            <dt>G</dt><dd>Toggle locally authorized ranges without a command</dd>
+            <dt>G</dt><dd>Toggle fog-authorized ranges without a command</dd>
           </dl>
           <p class="help-note">
-            Inspection and range visibility are local preferences. They never
-            change the fixed recipient or the authoritative simulator state.
+            Actor drafts persist when you cycle or directly control another
+            actor. Agent POV changes only the battlefield's fog of war.
           </p>
         </div>
         <div data-live-only data-live-help-mode="scripted" hidden>

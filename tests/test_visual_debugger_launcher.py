@@ -812,10 +812,14 @@ def test_debugger_help_is_live_only_and_hides_legacy_tokens() -> None:
         assert control in result.stdout
     assert "right click" not in result.stdout
     assert "every staged action as one joint turn" in result.stdout
-    assert "agent POV: submit only the controlled actor" in result.stdout
+    assert "submit only the controlled actor" not in result.stdout
     assert "left click            control the clicked authorized actor" in result.stdout
     assert "Shift+left click      select the clicked active target" in result.stdout
-    for inspector in ("SELECTED TARGET", "PENDING ACTION", "TECHNICAL FRAME"):
+    for inspector in (
+        "SELECTED TARGET",
+        "PENDING AUTHORIZED DRAFT",
+        "TECHNICAL FRAME",
+    ):
         assert inspector in result.stdout
     assert "exact authority-safe facts permitted by the active leaf" in result.stdout
     for technical_fact in (

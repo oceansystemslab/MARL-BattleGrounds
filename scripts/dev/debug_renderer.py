@@ -58,8 +58,7 @@ battlefield controls (while the battlefield has focus):
   Q E Z C               diagonal movement
   arrow keys            cardinal movement aliases
   X                     select Stay movement
-  Space / Enter         Oracle: submit every staged action as one joint turn
-                        agent POV: submit only the controlled actor
+  Space / Enter         submit every staged action as one joint turn
   R                     reset the manual 18x12 arena deterministically
   G                     toggle controlled-actor ranges
   ?                     open browser controls/help
@@ -71,7 +70,8 @@ browser controls:
 
 live selected-target inspector:
   SELECTED TARGET        identity, relation, distance, and public geometry
-  PENDING ACTION         movement, ability, target, and exact lane legality
+  PENDING AUTHORIZED DRAFT
+                         movement, ability, target, and exact lane legality
   TECHNICAL FRAME        exact authority-safe facts permitted by the active leaf:
                          Episode or Artifact digest prefix; Frame; Simulator step;
                          conditional Incoming transition; replay-only movement scale

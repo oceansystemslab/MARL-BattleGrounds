@@ -651,12 +651,21 @@ test("authorized replay inspector retains final selected owner without outgoing 
   }
 });
 
-test("authorized live inspector keeps draft target vocabulary out of the outgoing card", async () => {
-  const presentation = await normalizedPresentation("live_oracle");
-  const inspector = authorizedInspectorView(presentation);
-  assert.ok(inspector);
-  assert.ok(inspector.legality);
-  assert.equal(inspector.outgoing_target_descriptor, null);
+test("authorized live inspector uses the selected global draft while keeping battlefield geometry out of Agent panels", async () => {
+  for (const kind of ["live_oracle", "live_no_shared_obs_agent_pov"]) {
+    const presentation = await normalizedPresentation(kind);
+    const inspector = authorizedInspectorView(presentation);
+    assert.ok(inspector);
+    assert.ok(inspector.legality);
+    assert.equal(inspector.outgoing_target_descriptor, null);
+    if (kind === "live_no_shared_obs_agent_pov") {
+      assert.equal(
+        inspector.owner.public_agent_id,
+        presentation.researcher_space.selected_public_agent_id,
+      );
+      assert.equal(JSON.stringify(inspector).includes('"position"'), false);
+    }
+  }
 });
 
 test("authorized replay inspector leaves final unselected details absent", async () => {
@@ -692,9 +701,10 @@ test("authorized roster exposes one native key-only action with isolated fact ow
     const diagnosticsCard = binding();
     const acceptedCard = binding();
     const acceptedAnnouncement = binding();
+    const rosterCount = binding();
     const panels = new DebuggerPanels({
       roster,
-      rosterCount: binding(),
+      rosterCount,
       selectionCard,
       pendingHeading,
       pendingCount: binding(),
@@ -709,6 +719,8 @@ test("authorized roster exposes one native key-only action with isolated fact ow
     });
     const liveOracle = await normalizedPresentation("live_oracle");
     panels.renderAuthorizedRoster(liveOracle, false);
+    const liveOracleRosterCount = liveOracle.scene.agents.length;
+    assert.equal(rosterCount.textContent, `${liveOracleRosterCount} visible`);
     const oracleRows = /** @type {Record<string, any>[]} */ (
       [...panels.rosterRows.values()].filter(
         (/** @type {Record<string, any>} */ row) => "primaryButton" in row,
@@ -781,6 +793,85 @@ test("authorized roster exposes one native key-only action with isolated fact ow
     modifierOwner.click();
     assert.equal(commands.length, 1);
 
+    const liveAgent = await normalizedPresentation("live_no_shared_obs_agent_pov");
+    panels.renderAuthorizedInspector(liveAgent);
+    assert.equal(pendingHeading.textContent, "Pending authorized draft");
+    assert.equal(pendingScope.hidden, false);
+    assert.equal(
+      pendingScope.textContent,
+      "This panel shows the selected actor's authorized pending draft for the next submission within the global joint turn.",
+    );
+    assert.equal(
+      dom
+        .descendants(acceptedCard)
+        .filter((node) => node.className === "accepted-action-row").length,
+      liveAgent.researcher_space.latest_transition.action_rows.length,
+    );
+    panels.renderAuthorizedRoster(liveAgent, false);
+    const liveAgentRows = /** @type {Record<string, any>[]} */ (
+      [...panels.rosterRows.values()].filter(
+        (/** @type {Record<string, any>} */ row) => "primaryButton" in row,
+      )
+    );
+    assert.equal(liveAgentRows.length, liveAgent.researcher_space.roster_agents.length);
+    assert.equal(
+      rosterCount.textContent,
+      `${liveAgent.researcher_space.roster_agents.length} visible`,
+    );
+    assert.equal(
+      [...panels.rosterTeamGroups.values()].every(
+        (group) => group.element.hidden === false,
+      ),
+      true,
+    );
+    assert.equal(
+      [...panels.rosterVisibilityGroups.values()].every(
+        (group) => group.element.hidden === true,
+      ),
+      true,
+    );
+    assert.equal(
+      liveAgentRows.every(
+        (row) => !Object.hasOwn(row.element.dataset, "visibleInSnapshot"),
+      ),
+      true,
+    );
+    assert.equal(
+      liveAgentRows.every(
+        (row) =>
+          row.primaryButton.disabled === false &&
+          !Object.hasOwn(row.primaryButton.dataset, "globalSlot") &&
+          !Object.hasOwn(row.primaryButton.dataset, "commandSlot"),
+      ),
+      true,
+    );
+    const visibleLivePublicIds = new Set(
+      liveAgent.scene.agents.map(
+        (/** @type {Record<string, any>} */ agent) => agent.public_agent_id,
+      ),
+    );
+    const hiddenLiveAgent = liveAgent.researcher_space.roster_agents.find(
+      (/** @type {Record<string, any>} */ agent) =>
+        !visibleLivePublicIds.has(agent.public_agent_id),
+    );
+    assert.ok(hiddenLiveAgent);
+    const hiddenLiveRow = liveAgentRows.find(
+      (row) => row.element.dataset.presentationKey === hiddenLiveAgent.presentation_key,
+    );
+    assert.ok(hiddenLiveRow);
+    hiddenLiveRow.primaryButton.click();
+    assert.deepEqual(commands.at(-1), {
+      command_type: "activate_live_pov_agent",
+      global_slot:
+        (hiddenLiveRow.element.dataset.teamId === "1" ? 0 : 5) +
+        Number(
+          liveAgent.researcher_space.roster_agents.find(
+            (/** @type {Record<string, any>} */ agent) =>
+              agent.presentation_key === hiddenLiveRow.element.dataset.presentationKey,
+          ).team_local_slot,
+        ),
+    });
+
     const replayAgent = await normalizedPresentation("replay_no_shared_obs_agent_pov");
     panels.renderAuthorizedInspector(replayAgent);
     assert.equal(pendingHeading.textContent, "Upcoming Transition");
@@ -821,6 +912,10 @@ test("authorized roster exposes one native key-only action with isolated fact ow
       )
     );
     assert.equal(agentRows.length, 5);
+    assert.equal(
+      rosterCount.textContent,
+      `${agentRows.length} agents · ${agentRows.filter((row) => row.element.dataset.visibleInSnapshot === "true").length} visible · ${agentRows.filter((row) => row.element.dataset.visibleInSnapshot === "false").length} not visible`,
+    );
     assert.match(dom.textTree(roster), /VISIBLE.*NOT VISIBLE/u);
     assert.equal(
       [...panels.rosterVisibilityGroups.values()].every(

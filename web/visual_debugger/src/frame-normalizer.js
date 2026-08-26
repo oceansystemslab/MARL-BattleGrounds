@@ -4559,7 +4559,7 @@ function normalizePovHud(rawHud, selfActor, mask, visibleBodies, frame) {
   const selfId = selfActor.public_agent_id;
   if (
     rawHud.controlled_public_agent_id !== selfId ||
-    !["controlled_actor", "scripted_playback"].includes(rawHud.pending_submission_scope)
+    !["joint_turn", "scripted_playback"].includes(rawHud.pending_submission_scope)
   ) {
     throw new TypeError("POV HUD actor or submission scope is invalid.");
   }

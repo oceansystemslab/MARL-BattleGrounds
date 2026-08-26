@@ -568,13 +568,28 @@ test("main shares the Agent Details latch and rejects stale local keys and focus
   assert.match(open, /!preference\.agentDetailsAutoOpenAllowed/u);
   assert.match(reconcile, /preference\.localInspection\.presentationKey = null;/u);
   assert.match(reconcile, /preference\.disclosures\["agent-details"\]\.open = false;/u);
-  assert.match(reconcile, /preference\.primaryFocus = null;/u);
-  assert.doesNotMatch(reconcile, /recipient/u);
+  assert.match(reconcile, /preference\.primaryFocus = rebindAuthorizedPrimaryFocus\(/u);
+  assert.match(
+    reconcile,
+    /focus\.surface === "roster"[\s\S]*authorizedPresentationResearcherSceneView\(presentation\)[\s\S]*authorizedPresentationSceneView\(presentation\)/u,
+  );
+  assert.match(
+    source,
+    /function isLiveAgentRecipientRotation\([\s\S]*left\[0\] === "combat_debugger"[\s\S]*right\[1\] === left\[1\][\s\S]*right\[2\] === left\[2\][\s\S]*left\[3\] === "live_no_shared_obs_agent_pov"[\s\S]*right\[8\] !== left\[8\]/u,
+  );
+  assert.match(
+    source,
+    /function isLiveAgentRecipientFocusRotation\([\s\S]*isLiveAgentRecipientRotation\(previous, next\)[\s\S]*next\.tuple\[7\] === focus\.publicAgentId/u,
+  );
+  assert.match(
+    source,
+    /retainLiveAgentPreferences[\s\S]*Object\.entries\(previousPreference\.disclosures\)[\s\S]*previousPreference\.localRanges\.visible/u,
+  );
   assert.match(
     restore,
     /generation !== presentationPreferenceGeneration[\s\S]*sameAuthorizedPresentationPreferenceKey\(installed\.authorityKey, authorityKey\)/u,
   );
-  assert.match(restore, /CSS\.escape\(focus\.presentationKey\)/u);
+  assert.match(restore, /CSS\.escape\(reboundFocus\.presentationKey\)/u);
   assert.match(restore, /focusWasNotMovedByUser/u);
 });
 
@@ -588,7 +603,7 @@ test("main excludes the global Visual Key from scientific preference and inert s
   assert.match(source, /elements\.visualKey\.addEventListener\("toggle"/u);
 });
 
-test("main rejects battlefield pointer commands unless Oracle authority is installed", async () => {
+test("main sends authorized battlefield pointer commands in both live visual authorities", async () => {
   const source = await readFile(mainUrl, "utf8");
   const dispatchStart = source.indexOf("async function dispatchCommand(");
   const dispatchEnd = source.indexOf(
@@ -599,14 +614,17 @@ test("main rejects battlefield pointer commands unless Oracle authority is insta
   assert.notEqual(dispatchStart, -1);
   assert.notEqual(dispatchEnd, -1);
   const dispatchSource = source.slice(dispatchStart, dispatchEnd);
-  assert.match(
+  assert.doesNotMatch(
     dispatchSource,
     /command\.command_type === "battlefield_pointer"[\s\S]*authorizedPresentationAudience\(state\.presentation\) !== "researcher"[\s\S]*return;/u,
   );
-  assertSourceOrder(
-    dispatchSource,
-    'command.command_type === "battlefield_pointer"',
-    "const mode = modeAvailability(command, state.frame)",
+  assert.match(
+    source,
+    /bindBattlefieldControls\(\{[\s\S]*onCommand: \(command\) => dispatchCommand\(command\),/u,
+  );
+  assert.match(
+    source,
+    /DEFERRED_SUBMIT_PREPARATION_COMMAND_TYPES = new Set\(\[[\s\S]*"battlefield_pointer"/u,
   );
 });
 
@@ -643,12 +661,24 @@ test("main resolves one certified activation to Oracle, live-local, or Replay PO
   assert.match(resolver, /effect: "replay_select"/u);
   assert.match(resolver, /effect: "live_control"/u);
   assert.match(
+    resolver,
+    /audience === "agent_pov"[\s\S]*authorizedOracleCommandSlotForPublicAgentId\([\s\S]*researcherInspectionState\.state_kind === "live_editable"/u,
+  );
+  assert.match(
     panel,
-    /command\.command_type === "activate_authorized_agent"[\s\S]*activateAuthorizedAgent\(command\.presentation_key\)/u,
+    /command\.command_type === "activate_authorized_agent"[\s\S]*activateAuthorizedAgent\(command\.presentation_key, \{ pointerOriginated \}\)/u,
   );
   assert.match(
     panel,
     /command\.command_type === "activate_replay_pov_agent"[\s\S]*command_type: "set_pov_actor"[\s\S]*global_slot: command\.global_slot/u,
+  );
+  assert.match(
+    panel,
+    /command\.command_type === "activate_live_pov_agent"[\s\S]*authorizedPresentationAudience\(state\.presentation\) === "agent_pov"[\s\S]*command_type: "roster_selection"[\s\S]*role: "control"[\s\S]*global_slot: command\.global_slot/u,
+  );
+  assert.match(
+    panel,
+    /if \(pointerOriginated\) \{\s*dispatchCommandFromDraftControl\(controlCommand\);/u,
   );
   assert.match(
     source,
@@ -686,7 +716,11 @@ test("command legality requires one exact authorized owner and has no generic fa
   const renderDraft = source.slice(renderStart, renderEnd);
   const clearOwner = source.slice(clearStart, clearEnd);
 
-  assert.match(renderDraft, /authorizedAgentForPresentationKey\(/u);
+  assert.match(renderDraft, /authorizedResearcherAgentForPresentationKey\(/u);
+  assert.match(
+    renderDraft,
+    /authorizedPresentationResearcherInspectionState\(presentation\)/u,
+  );
   assert.match(
     renderDraft,
     /controlledCandidate\.public_agent_id === inspection\.actor_public_agent_id/u,
@@ -1214,7 +1248,7 @@ test("main renders ranges and inspector chrome only from installed presentation 
   assert.equal([...source.matchAll(/applyReplayReferenceSemantics\(\);/gu)].length, 2);
 });
 
-test("main selects incoming transition IDs from the exact presentation variant", async () => {
+test("main separates battlefield and researcher incoming transition IDs", async () => {
   const source = await readFile(mainUrl, "utf8");
   const helperStart = source.indexOf("function authorizedIncomingTransitionId(");
   const helperEnd = source.indexOf("function recordingStatus()", helperStart);
@@ -1230,7 +1264,16 @@ test("main selects incoming transition IDs from the exact presentation variant",
   assert.doesNotMatch(helperSource, /state\.frame|transport/u);
   assert.equal(
     [...source.matchAll(/authorizedIncomingTransitionId\(presentation\)/gu)].length,
-    2,
+    1,
+  );
+  assert.equal(
+    [...source.matchAll(/authorizedPresentationLatestTransitionId\(presentation\)/gu)]
+      .length,
+    1,
+  );
+  assert.match(
+    source,
+    /const incomingTransition = authorizedPresentationLatestTransitionId\(presentation\);/u,
   );
   assert.doesNotMatch(source, /requiredElement\("revision-value"\)/u);
   assert.doesNotMatch(source, /requiredElement\("replay-incoming-value"\)/u);
@@ -1245,7 +1288,7 @@ test("main selects incoming transition IDs from the exact presentation variant",
   );
 });
 
-test("main describes Agent bodies as passive while preserving researcher guidance", async () => {
+test("main describes live Agent POV as globally controllable while preserving fog-local battlefield guidance", async () => {
   const source = await readFile(mainUrl, "utf8");
   const boundaryStart = source.indexOf("function applyBattlefieldBoundaryCopy()");
   const boundaryEnd = source.indexOf(
@@ -1259,8 +1302,9 @@ test("main describes Agent bodies as passive while preserving researcher guidanc
   assert.match(boundarySource, /audience === "agent_pov"/u);
   assert.match(
     boundarySource,
-    /Live Agent POV keeps one fixed recipient\. Bodies are passive inspection targets; use the authorized draft controls to prepare that recipient's action\./u,
+    /Live Agent POV is interactive\. Activate a visible authorized actor or choose any active actor in Roster to control it and switch POV; Shift-click selects a visible authorized target; Escape clears the target and leaves battlefield focus\./u,
   );
+  assert.doesNotMatch(boundarySource, /fixed recipient|passive inspection/iu);
   assert.match(
     boundarySource,
     /Live Oracle View is interactive\. Activate an authorized actor to control it; Shift-click selects an authorized target; Escape clears the target and leaves battlefield focus\. Battlefield keyboard commands apply only while this surface has focus\./u,
@@ -1380,12 +1424,14 @@ test("main reuses only Submit for coherent scripted-live advancement", async () 
   assert.match(availabilitySource, /!installedAuthorityIsCoherent\(\)/u);
   assert.match(
     availabilitySource,
-    /elements\.submitTurnButton\.dataset\.key = scriptedAdvance \? "n" : "Enter";/u,
+    /authorizedPresentationResearcherInspectionState\(presentation\)[\s\S]*elements\.submitTurnButton\.dataset\.key = scriptedAdvance \? "n" : "Enter";/u,
   );
   assert.match(
     availabilitySource,
-    /scriptedAdvance\s*\? "Advance scripted frame"[\s\S]*\? "Submit controlled actor"\s*:\s*"Submit joint turn"/u,
+    /scriptedAdvance\s*\? "Advance scripted frame"\s*:\s*"Submit joint turn"/u,
   );
+  assert.doesNotMatch(availabilitySource, /controlled_actor|fixedAgentRecipient/u);
+  assert.doesNotMatch(availabilitySource, /button\.dataset\.key === "Tab"/u);
   assert.match(
     availabilitySource,
     /editableDraft \|\| \(scriptedAdvance && button === elements\.submitTurnButton\)/u,

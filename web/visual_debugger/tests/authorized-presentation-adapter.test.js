@@ -6,11 +6,13 @@ import {
   authorizedOracleCommandSlotForPresentationKey,
   authorizedOracleCommandSlotForPublicAgentId,
   authorizedPresentationAudience,
+  authorizedPresentationHasResearcherSpace,
   authorizedPresentationIdentityRows,
   authorizedPresentationIncomingRows,
   authorizedPresentationInspection,
   authorizedPresentationInspectionState,
   authorizedPresentationPreferenceKey,
+  authorizedPresentationResearcherInspectionState,
   authorizedPresentationResearcherSceneView,
   authorizedPresentationSceneView,
   authorizedPresentationTechnicalFacts,
@@ -291,6 +293,13 @@ test("preference authority keys ignore revision, epoch, and replay cursor genera
     const changed = structuredClone(raw);
     changed.source.source_revision += 17;
     changed.source.source_authority_epoch = changed.source.source_revision;
+    if (
+      changed.researcher_space?.researcher_space_kind === "global_live_researcher_space"
+    ) {
+      changed.researcher_space.source_revision = changed.source.source_revision;
+      changed.researcher_space.source_authority_epoch =
+        changed.source.source_authority_epoch;
+    }
     if (changed.live_inspection) {
       changed.live_inspection.source_revision = changed.source.source_revision;
       changed.live_inspection.source_authority_epoch =
@@ -416,7 +425,7 @@ test("structured preference keys reject colon collisions and distinguish A to B 
   assert.equal(sameAuthorizedPresentationPreferenceKey(authorityA, forged), false);
 });
 
-test("opaque display identity is session-scoped and Replay Agent rows gain only researcher navigation slots", async () => {
+test("opaque display identity is session-scoped and Agent researcher rows expose only internal navigation slots", async () => {
   const oracle = await normalized("replay_oracle");
   const shared = await normalized("replay_shared_obs_agent_pov");
   const oracleIdentity = authorizedPresentationIdentityRows(oracle).find(
@@ -439,7 +448,7 @@ test("opaque display identity is session-scoped and Replay Agent rows gain only 
   assert.equal(Object.isFrozen(sharedIdentity), true);
 });
 
-test("Oracle commands and Replay Agent researcher navigation keep separate capabilities", async () => {
+test("Oracle, live Agent control, and Replay Agent navigation keep separate capabilities", async () => {
   const oracle = await normalized("live_oracle");
   const rows = authorizedPresentationIdentityRows(oracle);
   assert.equal(authorizedPresentationAudience(oracle), "researcher");
@@ -468,11 +477,33 @@ test("Oracle commands and Replay Agent researcher navigation keep separate capab
   );
 
   const liveAgent = await normalized("live_no_shared_obs_agent_pov");
+  const liveAgentRows = authorizedPresentationIdentityRows(liveAgent);
+  assert.equal(authorizedPresentationHasResearcherSpace(liveAgent), true);
   assert.equal(
-    authorizedPresentationIdentityRows(liveAgent).every(
-      ({ command_global_slot }) => command_global_slot === null,
+    liveAgentRows.every(
+      ({ command_global_slot, activation_kind }) =>
+        Number.isInteger(command_global_slot) && activation_kind === "live_pov_global",
     ),
     true,
+  );
+  assert.equal(
+    authorizedOracleCommandSlotForPresentationKey(
+      liveAgent,
+      liveAgentRows[0].presentation_key,
+    ),
+    null,
+  );
+  assert.equal(liveAgentRows[0].command_global_slot, 0);
+  assert.deepEqual(
+    liveAgent.researcher_space.pending_inspection.draft.decision_mask.target_actions
+      .slice(1)
+      .map((/** @type {Record<string, any>} */ target) =>
+        authorizedOracleCommandSlotForPublicAgentId(
+          liveAgent,
+          target.target_public_agent_id,
+        ),
+      ),
+    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
   );
   for (const kind of [
     "replay_no_shared_obs_agent_pov",
@@ -502,8 +533,9 @@ test("Oracle commands and Replay Agent researcher navigation keep separate capab
   }
 });
 
-test("Replay Agent researcher roster is global while the battlefield remains fog-scoped", async () => {
+test("Agent researcher roster is global while live and replay battlefields remain fog-scoped", async () => {
   for (const kind of [
+    "live_no_shared_obs_agent_pov",
     "replay_no_shared_obs_agent_pov",
     "replay_shared_obs_agent_pov",
   ]) {
@@ -515,6 +547,7 @@ test("Replay Agent researcher roster is global while the battlefield remains fog
     assert.ok(researcher);
     assert.equal(researcher.agents.length, frame.researcher_space.roster_agents.length);
     assert.equal(rows.length, researcher.agents.length);
+    assert.equal(authorizedPresentationHasResearcherSpace(frame), true);
     assert.deepEqual(
       rows
         .filter((/** @type {Record<string, any>} */ row) => row.visible_in_snapshot)
@@ -1163,7 +1196,7 @@ test("Agent visual events, local evidence, Submitted/Accepted, Technical Frame, 
 test("Latest Transition is exact for all five leaves and empty at frame zero", async () => {
   const laterCases = [
     ["live_oracle", 5],
-    ["live_no_shared_obs_agent_pov", 1],
+    ["live_no_shared_obs_agent_pov", 5],
     ["replay_oracle", 5],
     ["replay_no_shared_obs_agent_pov", 5],
     ["replay_shared_obs_agent_pov", 5],
@@ -1317,11 +1350,7 @@ test("Technical Frame projects the exact final five-leaf allowlist atomically", 
         ["episode", "Episode", "episode-001"],
         ["frame", "Frame", 1],
         ["simulator_step", "Simulator step", 1],
-        [
-          "incoming_transition",
-          "Incoming transition",
-          "episode-001:actor-pov:agent-slot-0:transition:0",
-        ],
+        ["incoming_transition", "Incoming transition", "episode-001:transition:0"],
       ],
     ],
     [
@@ -1512,6 +1541,9 @@ test("live scope and replay inspection states remain exact", async () => {
   const liveAgent = authorizedPresentationInspectionState(
     await normalized("live_no_shared_obs_agent_pov"),
   );
+  const liveAgentResearcher = authorizedPresentationResearcherInspectionState(
+    await normalized("live_no_shared_obs_agent_pov"),
+  );
   const replayFrame = await normalized("replay_oracle");
   const replay = authorizedPresentationInspectionState(replayFrame);
   const replayNoneFrame = await normalizedPairPresentation("replay_oracle");
@@ -1519,7 +1551,10 @@ test("live scope and replay inspection states remain exact", async () => {
   assert.equal(liveOracle.state_kind, "live_editable");
   assert.equal(liveOracle.submission_scope, "joint_turn");
   assert.equal(liveOracle.inspection?.inspection_kind, "live_draft_action");
-  assert.equal(liveAgent.submission_scope, "controlled_actor");
+  assert.equal(liveAgent.submission_scope, "joint_turn");
+  assert.equal(liveAgentResearcher.state_kind, "live_editable");
+  assert.equal(liveAgentResearcher.submission_scope, "joint_turn");
+  assert.equal(liveAgentResearcher.inspection?.actor_public_agent_id, "agent-slot-0");
   assert.equal(replay.state_kind, "replay_outgoing");
   assert.equal(replay.submission_scope, null);
   assert.equal(replay.inspection?.combat_lane, replayFrame.inspection.combat_lane);
