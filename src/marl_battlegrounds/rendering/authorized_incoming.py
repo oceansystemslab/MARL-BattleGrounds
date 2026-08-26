@@ -51,7 +51,11 @@ from marl_battlegrounds.rendering.authorized_presentation import (
     AuthorizedStatusV1,
 )
 from marl_battlegrounds.rendering.pov_scene import ActorPovProjectionIndexV1
-from marl_battlegrounds.rendering.vocabulary import CATALOG_STATUS_ID_BY_CHANNEL
+from marl_battlegrounds.rendering.vocabulary import (
+    CATALOG_STATUS_ID_BY_CHANNEL,
+    status_sort_key,
+    status_token_id_from_catalog_status_id,
+)
 
 _STRICT_WIRE_CONFIG = ConfigDict(
     allow_inf_nan=False,
@@ -230,6 +234,22 @@ class AgentIncomingObservedStatusV1:
         )
 
 
+def _require_canonical_status_order(
+    statuses: tuple[AgentIncomingObservedStatusV1, ...],
+    *,
+    name: str,
+) -> None:
+    channels = tuple(status.status_channel for status in statuses)
+    presentation_keys = tuple(
+        status_sort_key(status_token_id_from_catalog_status_id(status.status_id))
+        for status in statuses
+    )
+    if len(channels) != len(set(channels)) or presentation_keys != tuple(
+        sorted(presentation_keys)
+    ):
+        raise ValueError(f"{name} must use unique canonical status order.")
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AgentIncomingObservationV1:
     """One generic endpoint observation stripped of causal source claims."""
@@ -309,9 +329,7 @@ class AgentIncomingObservationV1:
             name="statuses",
             item_types=AgentIncomingObservedStatusV1,
         )
-        channels = tuple(status.status_channel for status in self.statuses)
-        if channels != tuple(sorted(channels)) or len(channels) != len(set(channels)):
-            raise ValueError("incoming statuses must be uniquely channel ordered.")
+        _require_canonical_status_order(self.statuses, name="incoming statuses")
         _require_exact_tuple(
             cast(tuple[object, ...], self.aura_modifiers),
             name="aura_modifiers",
@@ -444,14 +462,10 @@ class NoSharedObsOwnStatusChangedIncomingCueV1:
                 name=name,
                 item_types=AgentIncomingObservedStatusV1,
             )
-            channels = tuple(
-                status.status_channel
-                for status in cast(tuple[AgentIncomingObservedStatusV1, ...], value)
+            _require_canonical_status_order(
+                cast(tuple[AgentIncomingObservedStatusV1, ...], value),
+                name=name,
             )
-            if channels != tuple(sorted(channels)) or len(channels) != len(
-                set(channels)
-            ):
-                raise ValueError(f"{name} must be uniquely channel ordered.")
         if self.start_statuses == self.successor_statuses:
             raise ValueError("status-change cue requires changed status observations.")
         start_by_channel = {

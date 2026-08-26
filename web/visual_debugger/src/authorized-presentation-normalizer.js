@@ -8,6 +8,7 @@ import {
   normalizeReplayViewerFrameV1,
   validateReplayFrameContinuity,
 } from "./replay-frame-normalizer.js";
+import { CANONICAL_STATUS_ORDER, statusTokenIdFromCatalogId } from "./vocabulary.js";
 
 const PRESENTATION_KINDS = new Set([
   "live_oracle",
@@ -1324,11 +1325,16 @@ function oracleEventAnchors(event) {
 
 /** @param {Record<string, any>[]} statuses @param {string} label */
 function validateIncomingStatuses(statuses, label) {
-  let previousChannel = -1;
+  const statusChannels = new Set();
+  let previousPresentationRank = -1;
   for (const status of statuses) {
+    const presentationRank = CANONICAL_STATUS_ORDER.indexOf(
+      statusTokenIdFromCatalogId(status.status_id),
+    );
     if (
-      status.status_channel <= previousChannel ||
+      statusChannels.has(status.status_channel) ||
       STATUS_ID_BY_CHANNEL[status.status_channel] !== status.status_id ||
+      presentationRank <= previousPresentationRank ||
       status.configured_duration_steps < 1 ||
       status.remaining_duration < 1 ||
       status.remaining_duration > status.configured_duration_steps ||
@@ -1336,7 +1342,8 @@ function validateIncomingStatuses(statuses, label) {
     ) {
       invalid(`${label} is not a canonical status-axis snapshot.`);
     }
-    previousChannel = status.status_channel;
+    statusChannels.add(status.status_channel);
+    previousPresentationRank = presentationRank;
   }
 }
 
@@ -2934,17 +2941,32 @@ function validateAgentVisualStateMatrix(frame, source, endpoint, oracle, shared)
   ) {
     invalid("Agent visual rejection actor is not the fixed recipient.");
   }
-  const expectedRejected = !structurallyEqual(
-    actionRow.submitted_action,
-    actionRow.accepted_action,
-  );
+  const submitted = actionRow.submitted_action;
+  const accepted = actionRow.accepted_action;
+  const submittedIsOutOfDomain =
+    submitted.move_action < 0 ||
+    submitted.move_action >= 9 ||
+    submitted.target_action < 0 ||
+    submitted.target_action >= 11 ||
+    submitted.use_ultimate_action < 0 ||
+    submitted.use_ultimate_action >= 2;
+  const expectedRejectionComponents = submittedIsOutOfDomain
+    ? ["domain"]
+    : [
+        ...(submitted.move_action !== accepted.move_action ? ["movement"] : []),
+        ...(submitted.target_action !== accepted.target_action ||
+        submitted.use_ultimate_action !== accepted.use_ultimate_action
+          ? ["combat_pair"]
+          : []),
+      ];
   if (
-    rejectionEvents.length !== Number(expectedRejected) ||
-    (rejectionEvents.length === 1 &&
-      !structurallyEqual(
-        rejectionEvents[0].submitted_action,
-        actionRow.submitted_action,
-      ))
+    !structurallyEqual(
+      rejectionEvents.map((event) => event.rejection_component),
+      expectedRejectionComponents,
+    ) ||
+    rejectionEvents.some(
+      (event) => !structurallyEqual(event.submitted_action, submitted),
+    )
   ) {
     invalid("Agent own visual rejection does not join Latest Transition.");
   }

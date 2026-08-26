@@ -2612,45 +2612,152 @@ test("all five real service leaves install with safe pending continuity", async 
     },
   );
 
+  switchedAgent = await expectInstalledLeaf(
+    page,
+    "actor_pov_live_debugger",
+    "live_no_shared_obs_agent_pov",
+  );
+  const selectedTargetScene =
+    switchedAgent.presentation.current_endpoint.scene ??
+    switchedAgent.presentation.current_endpoint.parts?.scene;
+  expect(selectedTargetScene).toBeTruthy();
+  const visibleTargetAfterSelection = selectedTargetScene.agents.find(
+    (/** @type {Record<string, any>} */ agent) =>
+      agent.public_agent_id === visibleTarget.public_agent_id,
+  );
+  expect(visibleTargetAfterSelection).toBeTruthy();
+  await expect(
+    page.locator(
+      `#battlefield .agent[data-presentation-key="${visibleTargetAfterSelection.presentation_key}"]`,
+    ),
+  ).toHaveAttribute("data-selected", "true");
+  await expect(page.locator('#battlefield .agent[data-selected="true"]')).toHaveCount(
+    1,
+  );
+  await expect(
+    page.locator('#battlefield .agent[data-controlled="true"]'),
+  ).toHaveAttribute("data-selected", "false");
+
   const targetSelect = page.locator("#command-target-select");
-  const currentTargetValue = await targetSelect.inputValue();
-  const alternateTargetValue = await targetSelect
-    .locator("option")
-    .evaluateAll(
-      (options, current) =>
-        options
-          .map((option) => option.getAttribute("value") ?? "")
-          .find((value) => value.startsWith("pov-target-action:") && value !== current),
-      currentTargetValue,
+  expect(await targetSelect.inputValue()).toMatch(/^(0|[1-9])$/u);
+  const switchedVisibleIds = new Set(
+    selectedTargetScene.agents.map(
+      (/** @type {Record<string, any>} */ agent) => agent.public_agent_id,
+    ),
+  );
+  const fogHiddenTarget =
+    switchedAgent.presentation.researcher_space.roster_agents.find(
+      (/** @type {Record<string, any>} */ agent) =>
+        !switchedVisibleIds.has(agent.public_agent_id),
     );
-  if (typeof alternateTargetValue !== "string") {
-    throw new Error("Live Agent global target selector has no alternate target.");
+  expect(fogHiddenTarget).toBeTruthy();
+  const fogHiddenIdentity =
+    switchedAgent.presentation.researcher_space.identity_directory.identities.find(
+      (/** @type {Record<string, any>} */ identity) =>
+        identity.public_agent_id === fogHiddenTarget.public_agent_id,
+    );
+  expect(fogHiddenIdentity).toBeTruthy();
+  const fogHiddenSlot =
+    (fogHiddenIdentity.team_id - 1) * 5 + fogHiddenIdentity.team_local_slot;
+  await expect(targetSelect.locator(`option[value="${fogHiddenSlot}"]`)).toHaveCount(1);
+  await expectSingleActivationCommand(
+    page,
+    "/api/command",
+    async () => {
+      await targetSelect.selectOption(String(fogHiddenSlot));
+    },
+    {
+      command_type: "roster_selection",
+      role: "target",
+      global_slot: fogHiddenSlot,
+    },
+  );
+  switchedAgent = await expectInstalledLeaf(
+    page,
+    "actor_pov_live_debugger",
+    "live_no_shared_obs_agent_pov",
+  );
+  const parityStep = switchedAgent.presentation.source.source_simulator_step_count;
+  const parityActor = switchedAgent.presentation.authority.recipient_public_agent_id;
+  await expect(targetSelect).toHaveValue(String(fogHiddenSlot));
+  await expect(page.locator('#battlefield .agent[data-selected="true"]')).toHaveCount(
+    0,
+  );
+  await expect(page.locator("#battlefield .pending-route")).toHaveCount(0);
+
+  for (let cycle = 0; cycle < 3; cycle += 1) {
+    await page.locator("#view-select").selectOption("researcher");
+    const cycleOracle = await expectInstalledLeaf(
+      page,
+      "researcher_live_debugger",
+      "live_oracle",
+    );
+    expect(cycleOracle.presentation.source.source_simulator_step_count).toBe(
+      parityStep,
+    );
+    const oracleControlled =
+      cycleOracle.presentation.current_endpoint.scene.agents.find(
+        (/** @type {Record<string, any>} */ agent) =>
+          agent.public_agent_id === parityActor,
+      );
+    const oracleTarget = cycleOracle.presentation.current_endpoint.scene.agents.find(
+      (/** @type {Record<string, any>} */ agent) =>
+        agent.public_agent_id === fogHiddenTarget.public_agent_id,
+    );
+    expect(oracleControlled).toBeTruthy();
+    expect(oracleTarget).toBeTruthy();
+    await expect(
+      page.locator(
+        `#battlefield .agent[data-presentation-key="${oracleControlled.presentation_key}"]`,
+      ),
+    ).toHaveAttribute("data-controlled", "true");
+    await expect(
+      page.locator(
+        `#battlefield .agent[data-presentation-key="${oracleTarget.presentation_key}"]`,
+      ),
+    ).toHaveAttribute("data-selected", "true");
+    await expect(targetSelect).toHaveValue(String(fogHiddenSlot));
+    await expect(page.locator("#battlefield-empty")).toBeHidden();
+
+    await page.locator("#view-select").selectOption("pov");
+    const cycleAgent = await expectInstalledLeaf(
+      page,
+      "actor_pov_live_debugger",
+      "live_no_shared_obs_agent_pov",
+    );
+    expect(cycleAgent.presentation.source.source_simulator_step_count).toBe(parityStep);
+    expect(cycleAgent.presentation.authority.recipient_public_agent_id).toBe(
+      parityActor,
+    );
+    await expect(targetSelect).toHaveValue(String(fogHiddenSlot));
+    await expect(page.locator('#battlefield .agent[data-selected="true"]')).toHaveCount(
+      0,
+    );
+    await expect(page.locator("#battlefield .pending-route")).toHaveCount(0);
+    await expect(page.locator("#battlefield-empty")).toBeHidden();
+    await expect(page.locator("#connection-status")).toHaveText("Online");
   }
-  expect(alternateTargetValue).toMatch(/^pov-target-action:\d+$/u);
-  const alternateTargetAction = Number(alternateTargetValue.split(":").at(-1));
+
   await expectSingleActivationCommand(
     page,
     "/api/command",
     async () => {
-      await targetSelect.selectOption(alternateTargetValue);
+      await targetSelect.selectOption("");
     },
     {
-      command_type: "actor_pov_target_action",
-      target_action: alternateTargetAction,
+      command_type: "keyboard",
+      key: "Escape",
+      shift_key: false,
+      ctrl_key: false,
+      alt_key: false,
+      meta_key: false,
+      repeat: false,
     },
   );
-  await expectSingleActivationCommand(
-    page,
-    "/api/command",
-    async () => {
-      await targetSelect.selectOption("pov-target-action:0");
-    },
-    {
-      command_type: "actor_pov_target_action",
-      target_action: 0,
-    },
+  await expect(targetSelect).toHaveValue("");
+  await expect(page.locator('#battlefield .agent[data-selected="true"]')).toHaveCount(
+    0,
   );
-  await expect(targetSelect).toHaveValue("pov-target-action:0");
   await page.locator("#battlefield").focus();
   await expectBattlefieldRootCommandFocus(page);
 

@@ -3528,14 +3528,29 @@ def _validate_agent_visual_events(
     )
     submitted = action_row.submitted_action
     accepted = action_row.accepted_action
-    expected_rejected = (
-        submitted.move_action != accepted.move_action
-        or submitted.target_action != accepted.target_action
-        or submitted.use_ultimate_action != accepted.use_ultimate_action
+    submitted_is_out_of_domain = not (
+        0 <= submitted.move_action < 9
+        and 0 <= submitted.target_action < 11
+        and 0 <= submitted.use_ultimate_action < 2
     )
-    if len(own_rejections) != int(expected_rejected) or (
-        own_rejections
-        and own_rejections[0].submitted_action != action_row.submitted_action
+    expected_components: tuple[Literal["domain", "movement", "combat_pair"], ...]
+    if submitted_is_out_of_domain:
+        expected_components = ("domain",)
+    else:
+        components: list[Literal["domain", "movement", "combat_pair"]] = []
+        if submitted.move_action != accepted.move_action:
+            components.append("movement")
+        if (
+            submitted.target_action != accepted.target_action
+            or submitted.use_ultimate_action != accepted.use_ultimate_action
+        ):
+            components.append("combat_pair")
+        expected_components = tuple(components)
+    if tuple(
+        event.rejection_component for event in own_rejections
+    ) != expected_components or any(
+        event.submitted_action != action_row.submitted_action
+        for event in own_rejections
     ):
         raise ValueError("Agent own visual rejection does not join Latest Transition.")
 

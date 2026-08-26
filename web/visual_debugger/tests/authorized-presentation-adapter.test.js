@@ -738,9 +738,88 @@ test("replay selection names the inspection owner while live selection remains t
   }
 });
 
-test("Agent local inspection keeps the no-argument view exact and preserves action-owner overlays", async () => {
+test("live Agent local preferences cannot replace the controlled draft target or overlays", async () => {
+  const frame = await normalized("live_no_shared_obs_agent_pov");
+  const baseline = authorizedPresentationSceneView(frame);
+  assert.ok(baseline);
+  const localAgent = baseline.agents.find(
+    (/** @type {Record<string, any>} */ agent) =>
+      agent.presentation_key !== baseline.selection.inspection_owner_presentation_key,
+  );
+  assert.ok(localAgent);
+
+  for (const localKey of [
+    baseline.selection.inspection_owner_presentation_key,
+    localAgent.presentation_key,
+    null,
+    "disappeared-agent-presentation-key",
+  ]) {
+    const projected = authorizedPresentationSceneView(frame, localKey);
+    assert.ok(projected);
+    assert.deepEqual(projected.selection, baseline.selection);
+    assert.deepEqual(projected.ranges, baseline.ranges);
+    assert.deepEqual(projected.selected_legality, baseline.selected_legality);
+    assert.deepEqual(projected.pending_route, baseline.pending_route);
+    assertRecursivelyFrozen(projected);
+  }
+});
+
+test("live Oracle and Agent expose one interaction model before fog projection", async () => {
+  const oracle = authorizedPresentationSceneView(await normalized("live_oracle"));
+  const agentFrame = await normalized("live_no_shared_obs_agent_pov");
+  const agentBaseline = authorizedPresentationSceneView(agentFrame);
+  assert.ok(oracle);
+  assert.ok(agentBaseline);
+  const alternateLocalAgent = agentBaseline.agents.find(
+    (/** @type {Record<string, any>} */ agent) =>
+      agent.presentation_key !==
+      agentBaseline.selection.inspection_owner_presentation_key,
+  );
+  assert.ok(alternateLocalAgent);
+  const agent = authorizedPresentationSceneView(
+    agentFrame,
+    alternateLocalAgent.presentation_key,
+  );
+  assert.ok(agent);
+
+  const publicSelection = (/** @type {Record<string, any>} */ scene) => {
+    const byKey = new Map(
+      scene.agents.map((/** @type {Record<string, any>} */ row) => [
+        row.presentation_key,
+        row.public_agent_id,
+      ]),
+    );
+    return {
+      controlled: byKey.get(scene.selection.controlled_presentation_key) ?? null,
+      inspectionOwner:
+        byKey.get(scene.selection.inspection_owner_presentation_key) ?? null,
+      selected: byKey.get(scene.selection.selected_presentation_key) ?? null,
+      legality: {
+        ...scene.selected_legality,
+        owner_presentation_key: undefined,
+        target_presentation_key: undefined,
+      },
+      route:
+        scene.pending_route === null
+          ? null
+          : {
+              ...scene.pending_route,
+              source_presentation_key: undefined,
+              target_presentation_key: undefined,
+            },
+      ranges: scene.ranges.map((/** @type {Record<string, any>} */ range) => ({
+        kind: range.kind,
+        public_agent_id: range.public_agent_id,
+        center: range.center,
+        radius: range.radius,
+      })),
+    };
+  };
+  assert.deepEqual(publicSelection(agent), publicSelection(oracle));
+});
+
+test("replay Agent local inspection keeps the no-argument view exact and preserves action-owner overlays", async () => {
   for (const kind of [
-    "live_no_shared_obs_agent_pov",
     "replay_no_shared_obs_agent_pov",
     "replay_shared_obs_agent_pov",
   ]) {
@@ -767,9 +846,8 @@ test("Agent local inspection keeps the no-argument view exact and preserves acti
   }
 });
 
-test("Agent local inspection selects an authorized nonrecipient without transferring outgoing authority", async () => {
+test("replay Agent local inspection selects an authorized nonrecipient without transferring outgoing authority", async () => {
   for (const kind of [
-    "live_no_shared_obs_agent_pov",
     "replay_no_shared_obs_agent_pov",
     "replay_shared_obs_agent_pov",
   ]) {

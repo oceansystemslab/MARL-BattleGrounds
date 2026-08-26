@@ -327,6 +327,17 @@ class DebuggerService:
                     ),
                 )
             }
+            self._build_authorized_presentation(
+                session=self._session,
+                raw_frame=saved_frame,
+                view_mode=self._view_mode,
+            )
+            for failure_frame in failure_frames.values():
+                self._build_authorized_presentation(
+                    session=self._session,
+                    raw_frame=failure_frame,
+                    view_mode=self._view_mode,
+                )
 
             if recorder.lifecycle == "persistence_failed":
                 outcome = recorder.retry_save()
@@ -396,70 +407,85 @@ class DebuggerService:
                 raise RuntimeError(
                     "committed live frame diverged from service-owned state."
                 )
-            session = self._session
-            context = session.evaluation_context
-            current = session.current_evaluation_frame
-            incoming = session.incoming_evaluation_view
-            if self._view_mode == "researcher":
-                if type(raw_frame) is not ResearcherLiveDebuggerFrameV2:
-                    raise RuntimeError(
-                        "researcher live service lacks its committed Oracle frame."
-                    )
-                presentation = build_live_oracle_authorized_presentation_v1(
-                    context,
-                    current,
-                    incoming,
-                    raw_frame,
-                )
-            else:
-                if type(raw_frame) is not ActorPovLiveDebuggerFrameV2:
-                    raise RuntimeError(
-                        "POV live service lacks its committed recipient frame."
-                    )
-                recipient = session.controlled_global_slot
-                current_slice = build_actor_pov_current_slice_v1(
-                    context,
-                    current,
-                    global_slot=recipient,
-                    incoming_transition_view=incoming,
-                )
-                carrier = (
-                    None
-                    if incoming is None
-                    else build_actor_pov_adjacent_transition_slice_v1(
-                        incoming,
-                        global_slot=recipient,
-                    )
-                )
-                oracle_raw_frame = self._build_frame(view_mode="researcher")
-                if type(oracle_raw_frame) is not ResearcherLiveDebuggerFrameV2:
-                    raise RuntimeError(
-                        "POV live service cannot build its researcher-space epoch."
-                    )
-                oracle_presentation = build_live_oracle_authorized_presentation_v1(
-                    context,
-                    current,
-                    incoming,
-                    oracle_raw_frame,
-                )
-                presentation = build_live_no_shared_obs_authorized_presentation_v1(
-                    current_slice,
-                    carrier,
-                    raw_frame,
-                    public_catalog=context.static_mechanics_catalog,
-                    incoming_visual_events=(
-                        None
-                        if incoming is None
-                        else build_visual_event_batch_v2(incoming)
-                    ),
-                    researcher_space=build_live_researcher_space_v1(
-                        oracle_presentation
-                    ),
-                )
-            return PresentationResourceResultV1(
-                outcome="response",
-                payload=presentation,
+            return self._build_authorized_presentation(
+                session=self._session,
+                raw_frame=raw_frame,
+                view_mode=self._view_mode,
             )
+
+    def _build_authorized_presentation(
+        self,
+        *,
+        session: DebuggerSession,
+        raw_frame: LiveDebuggerFrame,
+        view_mode: ViewMode,
+    ) -> PresentationResourceResultV1:
+        """Build and strictly validate one parameterized live presentation."""
+        context = session.evaluation_context
+        current = session.current_evaluation_frame
+        incoming = session.incoming_evaluation_view
+        if view_mode == "researcher":
+            if type(raw_frame) is not ResearcherLiveDebuggerFrameV2:
+                raise RuntimeError(
+                    "researcher live service lacks its committed Oracle frame."
+                )
+            presentation = build_live_oracle_authorized_presentation_v1(
+                context,
+                current,
+                incoming,
+                raw_frame,
+            )
+        else:
+            if type(raw_frame) is not ActorPovLiveDebuggerFrameV2:
+                raise RuntimeError(
+                    "POV live service lacks its committed recipient frame."
+                )
+            recipient = session.controlled_global_slot
+            current_slice = build_actor_pov_current_slice_v1(
+                context,
+                current,
+                global_slot=recipient,
+                incoming_transition_view=incoming,
+            )
+            carrier = (
+                None
+                if incoming is None
+                else build_actor_pov_adjacent_transition_slice_v1(
+                    incoming,
+                    global_slot=recipient,
+                )
+            )
+            oracle_raw_frame = self._build_frame(
+                session=session,
+                revision=raw_frame.revision,
+                view_mode="researcher",
+                preset=raw_frame.preset,
+                recording_status=raw_frame.recording,
+            )
+            if type(oracle_raw_frame) is not ResearcherLiveDebuggerFrameV2:
+                raise RuntimeError(
+                    "POV live service cannot build its researcher-space epoch."
+                )
+            oracle_presentation = build_live_oracle_authorized_presentation_v1(
+                context,
+                current,
+                incoming,
+                oracle_raw_frame,
+            )
+            presentation = build_live_no_shared_obs_authorized_presentation_v1(
+                current_slice,
+                carrier,
+                raw_frame,
+                public_catalog=context.static_mechanics_catalog,
+                incoming_visual_events=(
+                    None if incoming is None else build_visual_event_batch_v2(incoming)
+                ),
+                researcher_space=build_live_researcher_space_v1(oracle_presentation),
+            )
+        return PresentationResourceResultV1(
+            outcome="response",
+            payload=presentation,
+        )
 
     def _recording_no_op(
         self,
@@ -526,6 +552,11 @@ class DebuggerService:
         candidate_frame = self._build_frame(
             revision=candidate_revision,
             recording_status=recording_status,
+        )
+        self._build_authorized_presentation(
+            session=self._session,
+            raw_frame=candidate_frame,
+            view_mode=self._view_mode,
         )
         response = CommandResponseV2(
             result=result,
@@ -951,6 +982,11 @@ class DebuggerService:
                 preset=preset,
                 recording_status=status,
             )
+            self._build_authorized_presentation(
+                session=session,
+                raw_frame=frame,
+                view_mode=view_mode,
+            )
             response = CommandResponseV2(
                 result="applied",
                 frame=frame,
@@ -1061,6 +1097,11 @@ class DebuggerService:
                 session=resolved_session,
                 revision=candidate_revision,
                 recording_status=status,
+            )
+            self._build_authorized_presentation(
+                session=resolved_session,
+                raw_frame=frame,
+                view_mode=self._view_mode,
             )
             response = CommandResponseV2(
                 result="applied",
@@ -1543,6 +1584,11 @@ class DebuggerService:
                         view_mode=candidate_view_mode,
                         preset=candidate_preset,
                         recording_status=candidate_recording_status,
+                    )
+                    self._build_authorized_presentation(
+                        session=candidate_session,
+                        raw_frame=candidate_frame,
+                        view_mode=candidate_view_mode,
                     )
                     if (
                         self._recorder is not None

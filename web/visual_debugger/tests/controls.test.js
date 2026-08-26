@@ -230,27 +230,23 @@ test("secondary pointer and context-menu events remain native and command-silent
   assert.deepEqual(commands, []);
 });
 
-test("target selection keeps researcher and actor-POV identity domains separate", () => {
+test("target selection uses the same researcher-space command in both live audiences", () => {
   assert.deepEqual(targetSelectionCommand("7"), {
     command_type: "roster_selection",
     role: "target",
     global_slot: 7,
   });
-  assert.deepEqual(targetSelectionCommand("pov-target-action:7", { actorPov: true }), {
-    command_type: "actor_pov_target_action",
-    target_action: 7,
+  assert.deepEqual(targetSelectionCommand(""), {
+    command_type: "keyboard",
+    key: "Escape",
+    shift_key: false,
+    ctrl_key: false,
+    alt_key: false,
+    meta_key: false,
+    repeat: false,
   });
-  const povCommand = targetSelectionCommand("pov-target-action:7", {
-    actorPov: true,
-  });
-  assert.ok(povCommand);
-  assert.equal(Object.hasOwn(povCommand, "global_slot"), false);
-  assert.deepEqual(targetSelectionCommand("pov-target-action:0", { actorPov: true }), {
-    command_type: "actor_pov_target_action",
-    target_action: 0,
-  });
-  assert.equal(targetSelectionCommand("7", { actorPov: true }), null);
   assert.equal(targetSelectionCommand("pov-target-action:7"), null);
+  assert.equal(targetSelectionCommand("10"), null);
 });
 
 function recordingFrame({ lifecycle = "recording", captured = 1 } = {}) {

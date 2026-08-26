@@ -57,6 +57,7 @@ from marl_battlegrounds.evaluation.replay import (
 )
 from marl_battlegrounds.rendering.authorized_incoming import (
     NoSharedObsIncomingSummaryV1,
+    NoSharedObsOwnStatusChangedIncomingCueV1,
     NoSharedObsVisibleBodyChangedIncomingCueV1,
     SharedObsIncomingSummaryV1,
     SharedObsObservedValuesIncomingDeltaV1,
@@ -70,7 +71,9 @@ from marl_battlegrounds.rendering.authorized_pov_scene import (
 )
 from marl_battlegrounds.rendering.authorized_presentation import (
     AuthorizedAgentV1,
+    AuthorizedAuraModifierV1,
     AuthorizedSpawnShieldMechanicsAvailableV2,
+    AuthorizedStatusV1,
 )
 from marl_battlegrounds.rendering.evaluation_adapter import (
     SharedObsSourceMaterialProjectionV1,
@@ -78,6 +81,11 @@ from marl_battlegrounds.rendering.evaluation_adapter import (
 )
 from marl_battlegrounds.rendering.evaluation_wire_features import (
     AGENT_FEATURE_CURRENT_HEALTH_V1,
+    AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_BURST_DURATION_V1,
+    AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_DURATION_V1,
+    AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_FRACTION_V1,
+    AGENT_FEATURE_SLOW_WARRIOR_CHARGE_DURATION_V1,
+    AGENT_FEATURE_SLOW_WARRIOR_CHARGE_MULTIPLIER_V1,
     AGENT_FEATURE_STUN_HUNTER_TRAP_DURATION_V1,
     AGENT_FEATURE_STUN_WARRIOR_CHARGE_DURATION_V1,
     AGENT_FEATURE_ULTIMATE_COOLDOWN_REMAINING_V1,
@@ -227,6 +235,8 @@ def _exhaustive_no_shared_index(
     successor_self = list(start.self_features)
     successor_self[AGENT_FEATURE_X_V1] += 0.25
     successor_self[AGENT_FEATURE_CURRENT_HEALTH_V1] -= 1.0
+    successor_self[AGENT_FEATURE_SLOW_WARRIOR_CHARGE_DURATION_V1] = 1.0
+    successor_self[AGENT_FEATURE_SLOW_WARRIOR_CHARGE_MULTIPLIER_V1] = 0.5
     successor_self[AGENT_FEATURE_STUN_WARRIOR_CHARGE_DURATION_V1] = 1.0
     successor_self[AGENT_FEATURE_ULTIMATE_COOLDOWN_REMAINING_V1] = 1.0
     successor_self_tuple = tuple(successor_self)
@@ -307,6 +317,8 @@ def _exhaustive_live_carrier(
     successor_self = list(start.self_features)
     successor_self[AGENT_FEATURE_X_V1] += 0.25
     successor_self[AGENT_FEATURE_CURRENT_HEALTH_V1] -= 1.0
+    successor_self[AGENT_FEATURE_SLOW_WARRIOR_CHARGE_DURATION_V1] = 1.0
+    successor_self[AGENT_FEATURE_SLOW_WARRIOR_CHARGE_MULTIPLIER_V1] = 0.5
     successor_self[AGENT_FEATURE_STUN_WARRIOR_CHARGE_DURATION_V1] = 1.0
     successor_self[AGENT_FEATURE_ULTIMATE_COOLDOWN_REMAINING_V1] = 1.0
     successor_self_tuple = tuple(successor_self)
@@ -565,8 +577,18 @@ def _with_no_shared_health_and_status_values(
     ):
         self_features = list(frame.self_features)
         self_features[AGENT_FEATURE_CURRENT_HEALTH_V1] = health
+        self_features[AGENT_FEATURE_SLOW_WARRIOR_CHARGE_DURATION_V1] = 0.0
         self_features[AGENT_FEATURE_STUN_WARRIOR_CHARGE_DURATION_V1] = 0.0
         self_features[AGENT_FEATURE_STUN_HUNTER_TRAP_DURATION_V1] = status_remaining
+        self_features[AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_BURST_DURATION_V1] = (
+            status_remaining
+        )
+        self_features[
+            AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_DURATION_V1
+        ] = 1.0
+        self_features[
+            AGENT_FEATURE_SLOW_FLOOR_PRIEST_BLESSING_OF_FREEDOM_FRACTION_V1
+        ] = 0.85
         self_row = tuple(self_features)
         payload = frame.model_dump(mode="python")
         payload["self_features"] = self_row
@@ -974,6 +996,16 @@ def test_public_no_shared_mapper_preserves_all_eight_local_cue_kinds(
         cue.cue_type for cue in transition.cues
     )
     assert summary.cue_count == len(transition.cues)
+    status_cue = next(
+        cue
+        for cue in summary.cues
+        if type(cue) is NoSharedObsOwnStatusChangedIncomingCueV1
+    )
+    assert type(status_cue) is NoSharedObsOwnStatusChangedIncomingCueV1
+    assert tuple(row.status_id for row in status_cue.successor_statuses) == (
+        "warrior_charge_stun",
+        "warrior_charge_slow",
+    )
     body_rows = tuple(
         cue
         for cue in summary.cues
@@ -1044,6 +1076,16 @@ def test_live_carrier_preserves_all_eight_local_cues_at_nonzero_index() -> None:
         cue.cue_type for cue in carrier.transition.cues
     )
     assert summary.cue_count == len(carrier.transition.cues)
+    status_cue = next(
+        cue
+        for cue in summary.cues
+        if type(cue) is NoSharedObsOwnStatusChangedIncomingCueV1
+    )
+    assert type(status_cue) is NoSharedObsOwnStatusChangedIncomingCueV1
+    assert tuple(row.status_id for row in status_cue.successor_statuses) == (
+        "warrior_charge_stun",
+        "warrior_charge_slow",
+    )
 
 
 def test_live_summary_is_repeatable_read_only_and_matches_replay_path() -> None:
@@ -1433,6 +1475,11 @@ def test_no_shared_health_sign_and_status_decrement_remain_generic(
         hunter_successor = next(
             row for row in successor_statuses if row["status_channel"] == 4
         )
+        assert tuple(row["status_id"] for row in successor_statuses) == (
+            "hunter_trap_stun",
+            "priest_blessing_of_freedom_movement_floor",
+            "mage_burst_damage_amplification",
+        )
         assert hunter_start["remaining_duration"] == 2
         assert hunter_successor["remaining_duration"] == 1
         assert set(row["cue_type"] for row in cue_rows).isdisjoint(
@@ -1497,6 +1544,90 @@ def test_shared_frame_zero_empty_delta_and_dynamic_change(
         f"{shared_start.source_episode_id}:shared-obs-visual-union:"
         f"{shared_start.recipient_public_agent_id}:transition:0"
     )
+
+
+def test_shared_incoming_effect_delta_requires_canonical_status_order(
+    shared_start: SharedObsAuthorizedScenePartsV1,
+) -> None:
+    status_profiles = {
+        mechanic.status_id: (owner, mechanic)
+        for owner in shared_start.scene.class_mechanics
+        for mechanic in owner.status_mechanics
+    }
+
+    def status(status_id: str) -> AuthorizedStatusV1:
+        owner, mechanic = status_profiles[status_id]
+        return AuthorizedStatusV1(
+            status_channel=mechanic.status_channel,
+            status_id=mechanic.status_id,
+            family=mechanic.family,
+            configured_duration_steps=mechanic.duration_steps,
+            remaining_duration=1,
+            source_class_id=owner.class_id,
+            source_class_name=owner.class_name,
+            source_action_component=mechanic.source_action_component,
+            magnitude_kind=mechanic.magnitude_kind,
+            magnitude=mechanic.magnitude,
+            breaks_on_positive_damage=mechanic.breaks_on_positive_damage,
+            direct_sources=(),
+        )
+
+    aura_profiles = {
+        mechanic.aura_id: mechanic
+        for owner in shared_start.scene.class_mechanics
+        for mechanic in owner.aura_mechanics
+    }
+    auras = tuple(
+        AuthorizedAuraModifierV1(
+            aura_id=aura_id,
+            multiplier=aura_profiles[aura_id].per_emitter_multiplier,
+        )
+        for aura_id in (
+            "mage_damage_amplification",
+            "warrior_damage_mitigation",
+        )
+    )
+    charge_stun = status("warrior_charge_stun")
+    charge_slow = status("warrior_charge_slow")
+    actor = shared_start.scene.agents[0]
+    changed = replace(
+        actor,
+        statuses=(charge_stun, charge_slow),
+        aura_modifiers=auras,
+    )
+    summary = build_shared_obs_incoming_summary_v1(
+        shared_start,
+        _replace_agent(shared_start, changed),
+    )
+    assert summary is not None
+    delta = next(
+        row
+        for row in summary.deltas
+        if type(row) is SharedObsObservedValuesIncomingDeltaV1
+        and row.agent_public_agent_id == actor.public_agent_id
+    )
+    assert type(delta) is SharedObsObservedValuesIncomingDeltaV1
+    assert delta.successor_observation is not None
+    assert tuple(row.status_id for row in delta.successor_observation.statuses) == (
+        "warrior_charge_stun",
+        "warrior_charge_slow",
+    )
+    assert tuple(row.aura_id for row in delta.successor_observation.aura_modifiers) == (
+        "mage_damage_amplification",
+        "warrior_damage_mitigation",
+    )
+    assert delta.changed_dynamic_fields == ("statuses", "aura_modifiers")
+
+    channel_ordered = replace(
+        actor,
+        statuses=(charge_slow, charge_stun),
+        aura_modifiers=auras,
+    )
+    with pytest.raises(ValueError, match="unique canonical status order"):
+        build_shared_obs_incoming_summary_v1(
+            shared_start,
+            _replace_agent(shared_start, channel_ordered),
+        )
 
 
 def test_shared_provenance_entry_exit_and_static_conflict(

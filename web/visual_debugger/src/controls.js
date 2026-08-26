@@ -115,26 +115,13 @@ export function presentationRequiresSubmissionSettle(rawPresentation) {
 }
 
 /**
- * Convert the target select's audience-specific option value into the one
- * command authorized for that audience. Actor POV values deliberately carry
- * only the recipient-relative target-action axis; this boundary must never
- * manufacture or transmit a researcher global slot.
+ * Convert the researcher-space target select's validated command-slot value
+ * into the one target-selection command shared by both live audiences.
  *
  * @param {string} value
- * @param {{actorPov?: boolean}} options
  * @returns {Record<string, unknown> | null}
  */
-export function targetSelectionCommand(value, { actorPov = false } = {}) {
-  if (actorPov) {
-    const match = /^pov-target-action:(0|[1-9]|10)$/u.exec(value);
-    if (!match) {
-      return null;
-    }
-    return {
-      command_type: "actor_pov_target_action",
-      target_action: Number(match[1]),
-    };
-  }
+export function targetSelectionCommand(value) {
   if (value === "") {
     return keyboardCommand("Escape");
   }

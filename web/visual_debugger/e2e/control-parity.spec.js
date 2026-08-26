@@ -15,6 +15,12 @@ const SCIENTIFIC_DISCLOSURES = Object.freeze([
   "#technical-frame-details",
 ]);
 
+/** @typedef {{target_public_agent_id?: string, target_action: number}} TargetActionRow */
+/** @typedef {{move_action: number, target_action: number, use_ultimate_action: number}} ActionTuple */
+/** @typedef {{actor_public_agent_id: string, submitted_action: ActionTuple, accepted_action: ActionTuple}} TransitionActionRow */
+/** @typedef {{status_id: string}} IncomingStatus */
+/** @typedef {{cue_type: string, start_statuses: IncomingStatus[], successor_statuses: IncomingStatus[]}} IncomingStatusCue */
+
 test.beforeAll(async () => {
   const started = await startDebugger();
   serverProcess = started.process;
@@ -33,6 +39,91 @@ test.afterAll(async () => {
  */
 async function currentStep(page) {
   return Number(await page.locator("#step-value").textContent());
+}
+
+/**
+ * Read the exact currently installed authorized presentation from the real
+ * loopback service. This does not bypass the browser capability boundary.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @returns {Promise<Record<string, any>>}
+ */
+async function currentAuthorizedPresentation(page) {
+  return page.evaluate(async () => {
+    const token = window.sessionStorage.getItem("marl-battlegrounds.debugger-token");
+    if (!token) {
+      throw new Error("Debugger capability token is unavailable.");
+    }
+    const response = await window.fetch("/api/presentation/frame", {
+      cache: "no-store",
+      credentials: "omit",
+      headers: { "X-MARL-Debugger-Token": token },
+      redirect: "error",
+    });
+    if (!response.ok) {
+      throw new Error(
+        `Could not obtain the authorized presentation: HTTP ${response.status}.`,
+      );
+    }
+    return response.json();
+  });
+}
+
+/**
+ * Wait for one ordinary live command and its complete presentation successor.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @param {() => Promise<unknown>} activate
+ */
+async function activateLiveCommand(page, activate) {
+  const response = page.waitForResponse(
+    (candidate) =>
+      candidate.request().method() === "POST" &&
+      new URL(candidate.url()).pathname === "/api/command",
+  );
+  await activate();
+  expect((await response).status()).toBe(200);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await expect(page.locator("html")).toHaveAttribute(
+    "data-presentation-authority",
+    "installed",
+  );
+  await expect(page.locator("#battlefield-empty")).toBeHidden();
+}
+
+/**
+ * @param {import("@playwright/test").Page} page
+ * @param {number} publicAgentId
+ */
+async function controlLiveAgent(page, publicAgentId) {
+  await activateLiveCommand(page, () =>
+    page
+      .getByRole("button", {
+        name: `Control and inspect Agent ID ${publicAgentId}`,
+        exact: true,
+      })
+      .click(),
+  );
+  await expect(page.locator("#command-controlled-actor")).toContainText(
+    `Agent ID ${publicAgentId}`,
+  );
+}
+
+/**
+ * @param {import("@playwright/test").Page} page
+ * @param {number} publicAgentId
+ */
+async function liveTargetOption(page, publicAgentId) {
+  const option = page
+    .locator("#command-target-select option")
+    .filter({ hasText: `Agent ID ${publicAgentId} ·` });
+  await expect(option).toHaveCount(1);
+  const value = await option.getAttribute("value");
+  const text = await option.textContent();
+  if (value === null || text === null) {
+    throw new Error(`Agent ID ${publicAgentId} has no target option.`);
+  }
+  return { option, text, value };
 }
 
 /**
@@ -977,6 +1068,312 @@ test("Agent keyboard battlefield activation rebinds focus to the authorized succ
     .getByRole("button", { name: initialRosterActorLabel, exact: true })
     .click();
   await expect(page.locator("#connection-status")).toHaveText("Online");
+});
+
+test("post-Charge Agent history stays installable through a reciprocal Charge", async ({
+  page,
+}) => {
+  test.setTimeout(300_000);
+  /** @type {Record<string, any>[]} */
+  const commandRequests = [];
+  /** @type {{path: string, status: number}[]} */
+  const endpointFailures = [];
+  /** @type {string[]} */
+  const pageErrors = [];
+  const recordResponse = (
+    /** @type {import("@playwright/test").Response} */ response,
+  ) => {
+    const path = new URL(response.url()).pathname;
+    if (
+      (path === "/api/command" || path === "/api/presentation/frame") &&
+      response.status() >= 400
+    ) {
+      endpointFailures.push({ path, status: response.status() });
+    }
+  };
+  const recordPageError = (/** @type {Error} */ error) => {
+    pageErrors.push(error.message);
+  };
+  page.on("response", recordResponse);
+  page.on("pageerror", recordPageError);
+  await page.route("**/api/command", async (route) => {
+    commandRequests.push(route.request().postDataJSON());
+    await route.continue();
+  });
+
+  const battlefield = page.locator("#battlefield");
+  const viewSelect = page.locator("#view-select");
+  const targetSelect = page.locator("#command-target-select");
+  let initialControlledPublicId = null;
+  let primaryError = null;
+  const expectHealthyInstallation = async () => {
+    await expect(page.locator("#connection-status")).toHaveText("Online");
+    await expect(page.locator("html")).toHaveAttribute(
+      "data-presentation-authority",
+      "installed",
+    );
+    await expect(page.locator("#battlefield-empty")).toBeHidden();
+    await expect(page.locator("#notice")).not.toContainText(
+      /could not process|safe fault|reconnect before sending|no authorized battlefield scene/iu,
+    );
+  };
+  /** @param {string} key */
+  const selectMovement = async (key) => {
+    const button = page.locator(`#command-deck button[data-key="${key}"]`);
+    await expect(button).toBeEnabled();
+    if ((await button.getAttribute("aria-pressed")) !== "true") {
+      await activateLiveCommand(page, () => button.click());
+    }
+    await expect(button).toHaveAttribute("aria-pressed", "true");
+  };
+
+  try {
+    await page.goto(debuggerUrl);
+    await expectHealthyInstallation();
+    const initialControlledLabel = await page
+      .locator("#command-controlled-actor")
+      .textContent();
+    initialControlledPublicId =
+      initialControlledLabel?.match(/Agent ID ([^\s]+)/u)?.[1] ?? null;
+    if (initialControlledPublicId === null) {
+      throw new Error("The initial controlled actor identity is unavailable.");
+    }
+    await activateLiveCommand(page, () => page.locator("#reset-button").click());
+    await expect(page.locator("#step-value")).toHaveText("0");
+
+    // Use only ordinary browser drafts and joint submissions to converge the
+    // two Warriors. Stop as soon as Agent 1's exact mask exposes Charge.
+    let stagedTurns = 0;
+    /** @type {Awaited<ReturnType<typeof liveTargetOption>> | null} */
+    let chargeTarget = null;
+    while (stagedTurns < 6) {
+      await controlLiveAgent(page, 1);
+      chargeTarget = await liveTargetOption(page, 6);
+      if (chargeTarget.text.includes("U ✓")) {
+        break;
+      }
+      await selectMovement("d");
+      await controlLiveAgent(page, 6);
+      await selectMovement("z");
+      const stepBeforeMovement = await currentStep(page);
+      await activateLiveCommand(page, () =>
+        page.locator("#submit-turn-button").click(),
+      );
+      await expect(page.locator("#step-value")).toHaveText(
+        String(stepBeforeMovement + 1),
+        { timeout: 120_000 },
+      );
+      stagedTurns += 1;
+    }
+    expect(stagedTurns).toBeGreaterThan(0);
+    expect(chargeTarget).not.toBeNull();
+    if (chargeTarget === null) {
+      throw new Error("The Warriors could not be staged into Charge range.");
+    }
+    expect(chargeTarget.text).toContain("U ✓");
+
+    // Freeze both movement drafts at the converged geometry before combat.
+    await selectMovement("x");
+    await controlLiveAgent(page, 6);
+    await selectMovement("x");
+    await controlLiveAgent(page, 1);
+    chargeTarget = await liveTargetOption(page, 6);
+    await activateLiveCommand(page, () =>
+      targetSelect.selectOption(chargeTarget.value),
+    );
+    await expect(targetSelect).toHaveValue(chargeTarget.value);
+    await expect(page.locator("#ultimate-button")).toHaveAttribute(
+      "data-authoritative-available",
+      "true",
+    );
+    await expect(battlefield.locator('.agent[data-selected="true"]')).toHaveCount(1);
+    await expect(battlefield.locator('.agent[data-selected="true"]')).toHaveAttribute(
+      "aria-label",
+      /^Agent ID 6[,.]/u,
+    );
+    const firstChargeDraftPresentation = await currentAuthorizedPresentation(page);
+    const firstChargeDraft =
+      firstChargeDraftPresentation.live_inspection.inspection.draft;
+    const firstChargeTargetAction = /** @type {TargetActionRow[]} */ (
+      firstChargeDraft.decision_mask.target_actions
+    ).find((target) => target.target_public_agent_id === "6")?.target_action;
+    expect(firstChargeTargetAction).toEqual(expect.any(Number));
+    if (typeof firstChargeTargetAction !== "number") {
+      throw new Error("Agent 6 is absent from Agent 1's authorized target axis.");
+    }
+    expect(firstChargeDraft.draft_action.target_action).toBe(firstChargeTargetAction);
+
+    await activateLiveCommand(page, () => page.locator("#ultimate-button").click());
+    const firstChargeStep = await currentStep(page);
+    await activateLiveCommand(page, () => page.locator("#submit-turn-button").click());
+    await expect(page.locator("#step-value")).toHaveText(String(firstChargeStep + 1), {
+      timeout: 120_000,
+    });
+    const afterFirstCharge = await currentAuthorizedPresentation(page);
+    const firstChargeRow = /** @type {TransitionActionRow[]} */ (
+      afterFirstCharge.latest_transition.action_rows
+    ).find((row) => row.actor_public_agent_id === "1");
+    expect(firstChargeRow).toBeTruthy();
+    if (firstChargeRow === undefined) {
+      throw new Error("Agent 1 is absent from the first Charge transition.");
+    }
+    expect(firstChargeRow.submitted_action).toMatchObject({
+      target_action: firstChargeTargetAction,
+      use_ultimate_action: 1,
+    });
+    expect(firstChargeRow.accepted_action).toEqual(firstChargeRow.submitted_action);
+
+    // Age the one-tick stun while retaining Charge's five-tick slow. This is
+    // the exact transition whose historical status ordering used to make the
+    // subsequent Agent presentation unbuildable.
+    await activateLiveCommand(page, () => page.locator("#no-combat-button").click());
+    const settlingStep = await currentStep(page);
+    await activateLiveCommand(page, () => page.locator("#submit-turn-button").click());
+    await expect(page.locator("#step-value")).toHaveText(String(settlingStep + 1), {
+      timeout: 120_000,
+    });
+
+    await controlLiveAgent(page, 6);
+    const stepBeforeAgentInstall = await currentStep(page);
+    await activateLiveCommand(page, () => viewSelect.selectOption("pov"));
+    await expect(viewSelect).toHaveValue("pov");
+    await expect(page.locator("#step-value")).toHaveText(
+      String(stepBeforeAgentInstall),
+    );
+    await expectHealthyInstallation();
+
+    const agentAfterSettling = await currentAuthorizedPresentation(page);
+    expect(agentAfterSettling.presentation_kind).toBe("live_no_shared_obs_agent_pov");
+    expect(agentAfterSettling.authority.recipient_public_agent_id).toBe("6");
+    const statusHistory = /** @type {IncomingStatusCue[]} */ (
+      agentAfterSettling.latest_events.cues
+    ).find((cue) => cue.cue_type === "own_status_changed");
+    expect(statusHistory).toBeTruthy();
+    if (statusHistory === undefined) {
+      throw new Error("Agent 6 has no post-Charge status history cue.");
+    }
+    expect(statusHistory.start_statuses.map((status) => status.status_id)).toEqual([
+      "warrior_charge_stun",
+      "warrior_charge_slow",
+    ]);
+    expect(statusHistory.successor_statuses.map((status) => status.status_id)).toEqual([
+      "warrior_charge_slow",
+    ]);
+    for (const status of [
+      ...statusHistory.start_statuses,
+      ...statusHistory.successor_statuses,
+    ]) {
+      expect("direct_sources" in status).toBe(false);
+      expect("source_public_agent_id" in status).toBe(false);
+      expect("source_presentation_key" in status).toBe(false);
+    }
+
+    const reverseTarget = await liveTargetOption(page, 1);
+    expect(reverseTarget.text).toContain("U ✓");
+    await activateLiveCommand(page, () =>
+      targetSelect.selectOption(reverseTarget.value),
+    );
+    await expect(targetSelect).toHaveValue(reverseTarget.value);
+    await expect(battlefield.locator('.agent[data-selected="true"]')).toHaveAttribute(
+      "aria-label",
+      /^Agent ID 1[,.]/u,
+    );
+    const reverseDraftPresentation = await currentAuthorizedPresentation(page);
+    const reverseDraft =
+      reverseDraftPresentation.researcher_space.pending_inspection.draft;
+    const reverseTargetAction = /** @type {TargetActionRow[]} */ (
+      reverseDraft.decision_mask.target_actions
+    ).find((target) => target.target_public_agent_id === "1")?.target_action;
+    expect(reverseDraft.actor_public_agent_id).toBe("6");
+    expect(reverseTargetAction).toEqual(expect.any(Number));
+    if (typeof reverseTargetAction !== "number") {
+      throw new Error("Agent 1 is absent from Agent 6's authorized target axis.");
+    }
+    expect(reverseDraft.draft_action.target_action).toBe(reverseTargetAction);
+
+    // Reproduce the user's rapid path: arm Ultimate and press Enter before the
+    // Agent successor has finished installing. The queue must serialize both
+    // commands and advance exactly once.
+    commandRequests.length = 0;
+    const reverseChargeStep = await currentStep(page);
+    await page.locator("#ultimate-button").click();
+    await page.keyboard.press("Enter");
+    await expect.poll(() => commandRequests.length).toBe(2);
+    expect(commandRequests.map((request) => request.command.key)).toEqual([
+      "2",
+      "Enter",
+    ]);
+    expect(commandRequests[1].base_revision).toBe(commandRequests[0].base_revision + 1);
+    await expect(page.locator("#step-value")).toHaveText(
+      String(reverseChargeStep + 1),
+      { timeout: 120_000 },
+    );
+    await expectHealthyInstallation();
+    await expect.poll(() => commandRequests.length).toBe(2);
+
+    const afterReverseCharge = await currentAuthorizedPresentation(page);
+    const reverseChargeRow = /** @type {TransitionActionRow[]} */ (
+      afterReverseCharge.researcher_space.latest_transition.action_rows
+    ).find((row) => row.actor_public_agent_id === "6");
+    expect(reverseChargeRow).toBeTruthy();
+    if (reverseChargeRow === undefined) {
+      throw new Error("Agent 6 is absent from the reciprocal Charge transition.");
+    }
+    expect(reverseChargeRow.submitted_action).toMatchObject({
+      target_action: reverseTargetAction,
+      use_ultimate_action: 1,
+    });
+    expect(reverseChargeRow.accepted_action).toEqual(reverseChargeRow.submitted_action);
+
+    const fixedStep = await currentStep(page);
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      for (const mode of ["researcher", "pov"]) {
+        await activateLiveCommand(page, () => viewSelect.selectOption(mode));
+        await expect(viewSelect).toHaveValue(mode);
+        await expect(page.locator("#step-value")).toHaveText(String(fixedStep));
+        await expect(targetSelect).toHaveValue(reverseTarget.value);
+        await expect(
+          battlefield.locator('.agent[data-controlled="true"]'),
+        ).toHaveAttribute("aria-label", /^Agent ID 6[,.]/u);
+        await expect(battlefield.locator('.agent[data-selected="true"]')).toHaveCount(
+          1,
+        );
+        await expect(
+          battlefield.locator('.agent[data-selected="true"]'),
+        ).toHaveAttribute("aria-label", /^Agent ID 1[,.]/u);
+        await expectHealthyInstallation();
+      }
+    }
+
+    expect(endpointFailures).toEqual([]);
+    expect(pageErrors).toEqual([]);
+  } catch (error) {
+    primaryError = error;
+  }
+
+  let cleanupError = null;
+  try {
+    page.off("response", recordResponse);
+    page.off("pageerror", recordPageError);
+    await page.unroute("**/api/command");
+    if (!page.isClosed()) {
+      if ((await viewSelect.inputValue()) !== "researcher") {
+        await activateLiveCommand(page, () => viewSelect.selectOption("researcher"));
+      }
+      await activateLiveCommand(page, () => page.locator("#reset-button").click());
+      if (initialControlledPublicId !== null) {
+        await controlLiveAgent(page, Number(initialControlledPublicId));
+      }
+    }
+  } catch (error) {
+    cleanupError = error;
+  }
+  if (primaryError !== null) {
+    throw primaryError;
+  }
+  if (cleanupError !== null) {
+    throw cleanupError;
+  }
 });
 
 test("right click stays native while Escape alone clears the target and releases focus", async ({

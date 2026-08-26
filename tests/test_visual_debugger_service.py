@@ -20,6 +20,10 @@ from scripts.dev.visual_debugger.evaluation_bridge import (
 from scripts.dev.visual_debugger.frame import build_debugger_frame
 from scripts.dev.visual_debugger.input import InputDispatchResult
 from scripts.dev.visual_debugger.model import DebuggerSession
+from scripts.dev.visual_debugger.presentation_protocol import (
+    LiveNoSharedObsAuthorizedPresentationFrameV1,
+    LiveOracleAuthorizedPresentationFrameV1,
+)
 from scripts.dev.visual_debugger.protocol import (
     ActorPovLiveDebuggerFrameV2,
     ActorPovTargetActionCommandV1,
@@ -47,7 +51,7 @@ from scripts.dev.visual_debugger.recording import (
     build_debugger_recording_specification_v1,
 )
 from scripts.dev.visual_debugger.replay_protocol import ResearcherReplayViewerFrameV1
-from scripts.dev.visual_debugger.scenarios import get_scenario
+from scripts.dev.visual_debugger.scenarios import get_scenario, list_scenarios
 from scripts.dev.visual_debugger.service import DebuggerService
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
@@ -790,6 +794,144 @@ def test_same_base_concurrent_submits_call_authoritative_step_once(
     assert service.revision == 1
 
 
+@pytest.mark.parametrize(("actor_slot", "target_slot"), ((1, 6), (6, 1)))
+def test_interactive_warrior_charge_is_identical_and_presentable_in_both_views(
+    actor_slot: int,
+    target_slot: int,
+) -> None:
+    registered = get_scenario("arena_5v5")
+    config, state = registered.build_scenario()
+    positions = (
+        state.agent_positions.at[1]
+        .set(jnp.asarray((6.0, 6.0), dtype=jnp.float32))
+        .at[6]
+        .set(jnp.asarray((10.0, 6.0), dtype=jnp.float32))
+    )
+    charge_duel = replace(
+        registered,
+        build_scenario=lambda: (
+            config,
+            state._replace(agent_positions=positions),
+        ),
+    )
+    evidence_by_view: dict[
+        ViewMode,
+        tuple[int, int, tuple[int, int, int], tuple[int, int, int]],
+    ] = {}
+
+    for view_mode in ("researcher", "pov"):
+        session = create_session(
+            charge_duel,
+            seed=0,
+            evaluation_launch_specification=debugger_test_launch_specification(),
+            controlled_global_slot=0,
+            show_ranges=True,
+            verbose_logging=False,
+        )
+        service = DebuggerService(
+            session,
+            view_mode=view_mode,
+            preset="analysis",
+            include_stress=False,
+            session_id=f"interactive-charge-{actor_slot}-{view_mode}",
+        )
+        initial = service.current_presentation()
+        assert initial == service.current_presentation()
+        commands = (
+            RosterSelectionCommandV1(role="control", global_slot=actor_slot),
+            RosterSelectionCommandV1(role="target", global_slot=target_slot),
+            KeyboardCommandV1(key="2"),
+            KeyboardCommandV1(key="Enter"),
+        )
+        for command_index, command in enumerate(commands, start=1):
+            applied = service.apply_command(
+                _request(
+                    f"charge-{actor_slot}-{view_mode}-{command_index}",
+                    base_revision=service.revision,
+                    command=command,
+                )
+            )
+            assert applied.outcome == "response"
+            assert isinstance(applied.payload, CommandResponseV2)
+            assert applied.payload.result == "applied"
+            assert service.revision == command_index
+            current = service.current_presentation()
+            assert current == service.current_presentation()
+
+        incoming = service.session.incoming_evaluation_view
+        assert incoming is not None
+        acceptance = incoming.transition.facts.action_acceptance_facts
+        submitted = (
+            int(acceptance.submitted_joint_action.move[actor_slot]),
+            int(acceptance.submitted_joint_action.select_target[actor_slot]),
+            int(acceptance.submitted_joint_action.use_ultimate[actor_slot]),
+        )
+        accepted = (
+            int(acceptance.accepted_joint_action.move[actor_slot]),
+            int(acceptance.accepted_joint_action.select_target[actor_slot]),
+            int(acceptance.accepted_joint_action.use_ultimate[actor_slot]),
+        )
+        target_action = service.session.evaluation_context.static_mechanics_catalog
+        expected_target_action = (
+            target_action.global_recipient_slot_by_actor_and_target_action[
+                actor_slot
+            ].index(target_slot)
+        )
+        assert submitted[1:] == (expected_target_action, 1)
+        assert accepted == submitted
+        assert service.session.controlled_global_slot == actor_slot
+        assert (
+            service.session.pending_actions[actor_slot].selected_global_target_slot
+            == target_slot
+        )
+        assert service.session.current_evaluation_frame.frame_index == 1
+        assert service.evaluation_validated_transition_count == 1
+        assert not service.faulted
+
+        settled = service.current_presentation()
+        payload = settled.payload
+        actor_public_id = service.session.evaluation_context.roster[
+            actor_slot
+        ].public_agent_id
+        target_public_id = service.session.evaluation_context.roster[
+            target_slot
+        ].public_agent_id
+        if type(payload) is LiveOracleAuthorizedPresentationFrameV1:
+            scene = payload.current_endpoint.scene
+        else:
+            assert type(payload) is LiveNoSharedObsAuthorizedPresentationFrameV1
+            assert payload.source.source_recipient_public_agent_id == actor_public_id
+            scene = payload.current_endpoint.parts.scene
+        target_row = next(
+            row for row in scene.agents if row.public_agent_id == target_public_id
+        )
+        charge_statuses = tuple(
+            status
+            for status in target_row.statuses
+            if status.status_id.startswith("warrior_charge_")
+        )
+        assert tuple(status.status_id for status in charge_statuses) == (
+            "warrior_charge_stun",
+            "warrior_charge_slow",
+        )
+        if view_mode == "researcher":
+            assert all(
+                tuple(source.source_public_agent_id for source in status.direct_sources)
+                == (actor_public_id,)
+                for status in charge_statuses
+            )
+        else:
+            assert all(not status.direct_sources for status in charge_statuses)
+        evidence_by_view[view_mode] = (
+            service.session.controlled_global_slot,
+            target_slot,
+            submitted,
+            accepted,
+        )
+
+    assert evidence_by_view["researcher"] == evidence_by_view["pov"]
+
+
 def test_frame_build_failure_keeps_epoch_coherent_and_consumes_command_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1112,6 +1254,94 @@ def test_scripted_service_fences_hidden_control_edits_before_advancing_once() ->
     assert service.revision == 1
     assert service.session.current_evaluation_frame.frame_index == 1
     assert service.evaluation_validated_transition_count == 1
+
+
+_SCRIPTED_SCENARIO_NAMES = tuple(
+    scenario.name
+    for scenario in list_scenarios(include_stress=True)
+    if scenario.mode == "scripted"
+)
+
+
+@pytest.mark.parametrize("scenario_name", _SCRIPTED_SCENARIO_NAMES)
+@pytest.mark.parametrize("view_mode", ("researcher", "pov"))
+def test_every_scripted_scenario_preflights_each_successor_in_both_views(
+    scenario_name: str,
+    view_mode: ViewMode,
+) -> None:
+    """Every authored successor must remain presentable before it can commit."""
+    service = _service(scenario_name, include_stress=True)
+    scenario = get_scenario(scenario_name)
+    if view_mode == "pov":
+        switched = service.apply_command(
+            _request(
+                f"{scenario_name}-pov",
+                base_revision=service.revision,
+                command=SetViewCommandV1(view_mode="pov"),
+            )
+        )
+        assert switched.outcome == "response"
+        assert isinstance(switched.payload, CommandResponseV2)
+        assert switched.payload.result == "applied"
+
+    for script_index, _frame in enumerate(scenario.frames):
+        before_revision = service.revision
+        before_frame_index = service.session.current_evaluation_frame.frame_index
+        before_transition_count = service.evaluation_validated_transition_count
+        advanced = service.apply_command(
+            _request(
+                f"{scenario_name}-{view_mode}-n-{script_index}",
+                base_revision=before_revision,
+                command=KeyboardCommandV1(key="n"),
+            )
+        )
+
+        assert advanced.outcome == "response"
+        assert isinstance(advanced.payload, CommandResponseV2)
+        assert advanced.payload.result == "applied"
+        assert service.revision == before_revision + 1
+        assert (
+            service.session.current_evaluation_frame.frame_index
+            == before_frame_index + 1
+        )
+        assert (
+            service.evaluation_validated_transition_count == before_transition_count + 1
+        )
+        assert not service.faulted
+
+        first = service.current_presentation()
+        second = service.current_presentation()
+        assert first.outcome == second.outcome == "response"
+        assert first.payload is not None
+        assert second.payload is not None
+        assert first.payload.model_dump_json() == second.payload.model_dump_json()
+
+        if scenario_name != "death_respawn_cycle" or script_index != 2:
+            continue
+        if type(first.payload) is LiveOracleAuthorizedPresentationFrameV1:
+            assert first.payload.latest_events is not None
+            events = first.payload.latest_events.events
+            assert tuple(
+                event.rejection_component
+                for event in events
+                if event.event_kind == "action_rejected"
+            ) == ("movement", "combat_pair")
+            assert (
+                tuple(event.event_kind for event in events).count(
+                    "respawn_wave_occurred"
+                )
+                == 1
+            )
+        else:
+            assert type(first.payload) is LiveNoSharedObsAuthorizedPresentationFrameV1
+            assert first.payload.visual_events is not None
+            events = first.payload.visual_events.events
+            assert tuple(
+                event.rejection_component
+                for event in events
+                if event.event_kind == "action_rejected"
+            ) == ("movement", "combat_pair")
+        assert tuple(event.event_kind for event in events).count("agent_respawned") == 1
 
 
 def test_exact_horizon_truncation_auto_saves_as_complete_declared_horizon(

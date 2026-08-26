@@ -2897,6 +2897,194 @@ def test_oracle_rejection_events_exactly_match_rejected_action_rows(
         )
 
 
+def _agent_payload_with_rejection_components(
+    frame: LiveNoSharedObsAuthorizedPresentationFrameV1
+    | ReplayNoSharedObsAuthorizedPresentationFrameV1
+    | ReplaySharedObsAuthorizedPresentationFrameV1,
+    *,
+    submitted_action: dict[str, int],
+    rejection_components: tuple[str, ...],
+) -> dict[str, object]:
+    payload = frame.model_dump(mode="json")
+    latest_transition = cast(dict[str, object], payload["latest_transition"])
+    action_rows = cast(list[dict[str, object]], latest_transition["action_rows"])
+    action_rows[0]["submitted_action"] = copy.deepcopy(submitted_action)
+    latest_events = cast(dict[str, object], payload["latest_events"])
+    if latest_events.get("summary_kind") == "no_shared_obs_recipient_cues":
+        cues = cast(list[dict[str, object]], latest_events["cues"])
+        cues[0]["outcome"] = (
+            "accepted"
+            if submitted_action
+            == cast(dict[str, object], action_rows[0]["accepted_action"])
+            else "rejected"
+        )
+
+    visual = cast(dict[str, object], payload["visual_events"])
+    trajectories = cast(list[dict[str, object]], visual["agent_phase_trajectories"])
+    recipient_public_id = cast(str, visual["recipient_public_agent_id"])
+    recipient_key = cast(str, visual["recipient_presentation_key"])
+    trajectory = next(
+        row
+        for row in trajectories
+        if row["agent_public_agent_id"] == recipient_public_id
+    )
+    events = [
+        event
+        for event in cast(list[dict[str, object]], visual["events"])
+        if event["event_kind"] != "action_rejected"
+    ]
+    rejection_events = [
+        {
+            "event_id": "reindexed below",
+            "ordinal": 0,
+            "phase_rank": 10,
+            "event_kind": "action_rejected",
+            "actor_identity": {
+                "identity_kind": "authorized_agent",
+                "presentation_key": recipient_key,
+                "public_agent_id": recipient_public_id,
+            },
+            "actor_configured_active": True,
+            "rejection_component": component,
+            "submitted_action": copy.deepcopy(submitted_action),
+            "actor_anchor": copy.deepcopy(trajectory["transition_start"]),
+        }
+        for component in rejection_components
+    ]
+    events = [*rejection_events, *events]
+    transition_id = cast(str, visual["incoming_recipient_transition_id"])
+    for ordinal, event in enumerate(events):
+        event["ordinal"] = ordinal
+        event["event_id"] = f"{transition_id}:visual-event:{ordinal:04d}"
+    visual["events"] = events
+    visual["event_count"] = len(events)
+    visual["ordered_event_ids"] = [event["event_id"] for event in events]
+    visual["ordered_event_kinds"] = [event["event_kind"] for event in events]
+    return payload
+
+
+@pytest.mark.parametrize(
+    ("frame_name", "frame_type"),
+    (
+        ("replay_no_shared", ReplayNoSharedObsAuthorizedPresentationFrameV1),
+        ("replay_shared", ReplaySharedObsAuthorizedPresentationFrameV1),
+    ),
+)
+@pytest.mark.parametrize(
+    ("submitted_action", "rejection_components"),
+    (
+        (
+            {"move_action": 0, "target_action": 0, "use_ultimate_action": 0},
+            (),
+        ),
+        (
+            {"move_action": 1, "target_action": 0, "use_ultimate_action": 0},
+            ("movement",),
+        ),
+        (
+            {"move_action": 0, "target_action": 6, "use_ultimate_action": 1},
+            ("combat_pair",),
+        ),
+        (
+            {"move_action": 1, "target_action": 6, "use_ultimate_action": 1},
+            ("movement", "combat_pair"),
+        ),
+        (
+            {"move_action": 99, "target_action": 0, "use_ultimate_action": 0},
+            ("domain",),
+        ),
+    ),
+)
+def test_agent_rejection_events_retain_each_rejected_head_group(
+    five_frames: _FiveFrames,
+    frame_name: str,
+    frame_type: type[
+        LiveNoSharedObsAuthorizedPresentationFrameV1
+        | ReplayNoSharedObsAuthorizedPresentationFrameV1
+        | ReplaySharedObsAuthorizedPresentationFrameV1
+    ],
+    submitted_action: dict[str, int],
+    rejection_components: tuple[str, ...],
+) -> None:
+    payload = _agent_payload_with_rejection_components(
+        cast(
+            LiveNoSharedObsAuthorizedPresentationFrameV1
+            | ReplayNoSharedObsAuthorizedPresentationFrameV1
+            | ReplaySharedObsAuthorizedPresentationFrameV1,
+            getattr(five_frames, frame_name),
+        ),
+        submitted_action=submitted_action,
+        rejection_components=rejection_components,
+    )
+
+    restored = frame_type.model_validate_json(json.dumps(payload))
+    assert restored.visual_events is not None
+    assert (
+        tuple(
+            event.rejection_component
+            for event in restored.visual_events.events
+            if event.event_kind == "action_rejected"
+        )
+        == rejection_components
+    )
+
+
+@pytest.mark.parametrize(
+    ("submitted_action", "rejection_components", "mismatch_second_tuple"),
+    (
+        (
+            {"move_action": 1, "target_action": 6, "use_ultimate_action": 1},
+            ("movement",),
+            False,
+        ),
+        (
+            {"move_action": 1, "target_action": 6, "use_ultimate_action": 1},
+            ("movement", "movement"),
+            False,
+        ),
+        (
+            {"move_action": 1, "target_action": 6, "use_ultimate_action": 1},
+            ("combat_pair", "movement"),
+            False,
+        ),
+        (
+            {"move_action": 99, "target_action": 0, "use_ultimate_action": 0},
+            ("movement",),
+            False,
+        ),
+        (
+            {"move_action": 1, "target_action": 6, "use_ultimate_action": 1},
+            ("movement", "combat_pair"),
+            True,
+        ),
+    ),
+)
+def test_agent_rejection_events_reject_inexact_head_group_inventory(
+    five_frames: _FiveFrames,
+    submitted_action: dict[str, int],
+    rejection_components: tuple[str, ...],
+    mismatch_second_tuple: bool,
+) -> None:
+    payload = _agent_payload_with_rejection_components(
+        five_frames.replay_no_shared,
+        submitted_action=submitted_action,
+        rejection_components=rejection_components,
+    )
+    if mismatch_second_tuple:
+        visual = cast(dict[str, object], payload["visual_events"])
+        events = cast(list[dict[str, object]], visual["events"])
+        events[1]["submitted_action"] = {
+            "move_action": 1,
+            "target_action": 6,
+            "use_ultimate_action": 0,
+        }
+
+    with pytest.raises(ValidationError, match="visual rejection"):
+        ReplayNoSharedObsAuthorizedPresentationFrameV1.model_validate_json(
+            json.dumps(payload)
+        )
+
+
 def test_wrong_session_bare_scene_agent_and_incoming_anchor_keys_reject(
     five_frames: _FiveFrames,
 ) -> None:

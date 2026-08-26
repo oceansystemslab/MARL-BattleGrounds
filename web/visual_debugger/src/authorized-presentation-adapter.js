@@ -763,7 +763,8 @@ export function authorizedPresentationSceneView(
   const ownerKey = actor?.presentation_key ?? null;
   const hasLocalInspection =
     localInspectedPresentationKey !== undefined &&
-    (audience === "agent_pov" || inspectionState.state_kind === "live_scripted");
+    ((audience === "agent_pov" && value.viewer_mode === "replay") ||
+      inspectionState.state_kind === "live_scripted");
   const inspectedActor = hasLocalInspection
     ? typeof localInspectedPresentationKey === "string"
       ? (agentByKey.get(localInspectedPresentationKey) ?? null)

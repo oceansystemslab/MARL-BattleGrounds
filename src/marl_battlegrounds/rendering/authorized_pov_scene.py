@@ -72,6 +72,10 @@ from marl_battlegrounds.rendering.pov_scene import (
     build_actor_pov_projection_index_v1,
 )
 from marl_battlegrounds.rendering.scene import MapSceneV1, ObstacleSceneV1
+from marl_battlegrounds.rendering.vocabulary import (
+    status_sort_key,
+    status_token_id_from_catalog_status_id,
+)
 
 type NoSharedObsPovSourceV1 = (
     ActorPovProjectionIndexV1
@@ -1168,7 +1172,14 @@ def _active_statuses(
                 direct_sources=(),
             )
         )
-    return tuple(statuses)
+    return tuple(
+        sorted(
+            statuses,
+            key=lambda row: status_sort_key(
+                status_token_id_from_catalog_status_id(row.status_id)
+            ),
+        )
+    )
 
 
 def _aura_modifiers(

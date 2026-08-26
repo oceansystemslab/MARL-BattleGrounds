@@ -47,6 +47,64 @@ function presentationScene(presentation) {
   );
 }
 
+/**
+ * @param {Record<string, any>} source
+ * @param {Record<string, number>} submittedAction
+ * @param {string[]} rejectionComponents
+ */
+function withAgentRejectionComponents(source, submittedAction, rejectionComponents) {
+  const candidate = clone(source);
+  const actionRow = candidate.latest_transition.action_rows[0];
+  actionRow.submitted_action = clone(submittedAction);
+  if (candidate.latest_events.summary_kind === "no_shared_obs_recipient_cues") {
+    candidate.latest_events.cues[0].outcome =
+      JSON.stringify(submittedAction) === JSON.stringify(actionRow.accepted_action)
+        ? "accepted"
+        : "rejected";
+  }
+  const visual = candidate.visual_events;
+  const recipient = visual.recipient_public_agent_id;
+  const presentationKey = visual.recipient_presentation_key;
+  const trajectory = visual.agent_phase_trajectories.find(
+    (/** @type {Record<string, any>} */ row) => row.agent_public_agent_id === recipient,
+  );
+  assert.ok(trajectory);
+  const retainedEvents = visual.events.filter(
+    (/** @type {Record<string, any>} */ event) =>
+      event.event_kind !== "action_rejected",
+  );
+  visual.events = [
+    ...rejectionComponents.map((component) => ({
+      event_id: "reindexed below",
+      ordinal: 0,
+      phase_rank: 10,
+      event_kind: "action_rejected",
+      actor_identity: {
+        identity_kind: "authorized_agent",
+        presentation_key: presentationKey,
+        public_agent_id: recipient,
+      },
+      actor_configured_active: true,
+      rejection_component: component,
+      submitted_action: clone(submittedAction),
+      actor_anchor: clone(trajectory.transition_start),
+    })),
+    ...retainedEvents,
+  ];
+  /** @type {Record<string, any>[]} */
+  const indexedEvents = visual.events;
+  indexedEvents.forEach((event, ordinal) => {
+    event.ordinal = ordinal;
+    event.event_id =
+      `${visual.incoming_recipient_transition_id}:` +
+      `visual-event:${String(ordinal).padStart(4, "0")}`;
+  });
+  visual.event_count = indexedEvents.length;
+  visual.ordered_event_ids = indexedEvents.map((event) => event.event_id);
+  visual.ordered_event_kinds = indexedEvents.map((event) => event.event_kind);
+  return candidate;
+}
+
 /** @param {unknown} value */
 function assertRecursivelyFrozen(value) {
   if (!value || typeof value !== "object") return;
@@ -174,6 +232,128 @@ test("all five exact Python presentation leaves normalize repeatably and freeze"
     assertRecursivelyFrozen(normalized);
   }
   assertRecursivelyFrozen(AUTHORIZED_PRESENTATION_SCHEMA_V1);
+});
+
+test("Agent rejection validation retains every independently rejected head group", async () => {
+  /** @type {Array<[Record<string, number>, string[]]>} */
+  const exactCases = [
+    [{ move_action: 0, target_action: 0, use_ultimate_action: 0 }, []],
+    [{ move_action: 1, target_action: 0, use_ultimate_action: 0 }, ["movement"]],
+    [{ move_action: 0, target_action: 6, use_ultimate_action: 1 }, ["combat_pair"]],
+    [
+      { move_action: 1, target_action: 6, use_ultimate_action: 1 },
+      ["movement", "combat_pair"],
+    ],
+    [{ move_action: 99, target_action: 0, use_ultimate_action: 0 }, ["domain"]],
+  ];
+  for (const [submittedAction, components] of exactCases) {
+    for (const kind of [
+      "replay_no_shared_obs_agent_pov",
+      "replay_shared_obs_agent_pov",
+    ]) {
+      const candidate = withAgentRejectionComponents(
+        fixture.presentations[kind],
+        submittedAction,
+        components,
+      );
+      const normalized = await normalizeAuthorizedPresentationFrameV1(candidate);
+      /** @type {Record<string, any>[]} */
+      const normalizedEvents = normalized.visual_events.events;
+      assert.deepEqual(
+        normalizedEvents
+          .filter((event) => event.event_kind === "action_rejected")
+          .map((event) => event.rejection_component),
+        components,
+      );
+    }
+  }
+
+  const submitted = { move_action: 1, target_action: 6, use_ultimate_action: 1 };
+  /** @type {Array<[Record<string, number>, string[]]>} */
+  const inexactCases = [
+    [submitted, ["movement"]],
+    [submitted, ["movement", "movement"]],
+    [submitted, ["combat_pair", "movement"]],
+    [{ move_action: 99, target_action: 0, use_ultimate_action: 0 }, ["movement"]],
+  ];
+  for (const [submittedAction, components] of inexactCases) {
+    await assert.rejects(
+      normalizeAuthorizedPresentationFrameV1(
+        withAgentRejectionComponents(
+          fixture.presentations.replay_no_shared_obs_agent_pov,
+          submittedAction,
+          components,
+        ),
+      ),
+      /visual rejection/u,
+    );
+  }
+
+  const mismatchedTuple = withAgentRejectionComponents(
+    fixture.presentations.replay_no_shared_obs_agent_pov,
+    submitted,
+    ["movement", "combat_pair"],
+  );
+  mismatchedTuple.visual_events.events[1].submitted_action.use_ultimate_action = 0;
+  await assert.rejects(
+    normalizeAuthorizedPresentationFrameV1(mismatchedTuple),
+    /visual rejection/u,
+  );
+});
+
+test("Agent incoming status history uses canonical presentation order, not channel order", async () => {
+  const candidate = clone(fixture.state_cases.replay_no_shared_agent_appearance);
+  const statusCue = candidate.latest_events.cues.find(
+    (/** @type {Record<string, any>} */ cue) => cue.cue_type === "own_status_changed",
+  );
+  assert.ok(statusCue);
+  const canonicalChargeStatuses = [
+    {
+      status_channel: 3,
+      status_id: "warrior_charge_stun",
+      family: "stun",
+      configured_duration_steps: 1,
+      remaining_duration: 1,
+      mechanic_action_component: "ultimate",
+      magnitude_kind: "none",
+      magnitude: null,
+      breaks_on_positive_damage: false,
+    },
+    {
+      status_channel: 0,
+      status_id: "warrior_charge_slow",
+      family: "slow",
+      configured_duration_steps: 5,
+      remaining_duration: 5,
+      mechanic_action_component: "ultimate",
+      magnitude_kind: "movement_multiplier",
+      magnitude: 0.5,
+      breaks_on_positive_damage: false,
+    },
+  ];
+  statusCue.start_statuses = canonicalChargeStatuses;
+
+  const normalized = await normalizeAuthorizedPresentationFrameV1(candidate);
+  const normalizedStatusCue = normalized.latest_events.cues.find(
+    (/** @type {Record<string, any>} */ cue) => cue.cue_type === "own_status_changed",
+  );
+  assert.deepEqual(
+    normalizedStatusCue.start_statuses.map(
+      (/** @type {Record<string, any>} */ status) => status.status_id,
+    ),
+    ["warrior_charge_stun", "warrior_charge_slow"],
+  );
+
+  const channelOrdered = clone(candidate);
+  channelOrdered.latest_events.cues
+    .find(
+      (/** @type {Record<string, any>} */ cue) => cue.cue_type === "own_status_changed",
+    )
+    .start_statuses.reverse();
+  await assert.rejects(
+    normalizeAuthorizedPresentationFrameV1(channelOrdered),
+    /canonical status-axis snapshot/u,
+  );
 });
 
 test("live Agent keeps a fog-local battlefield beside one global researcher-space epoch", async () => {

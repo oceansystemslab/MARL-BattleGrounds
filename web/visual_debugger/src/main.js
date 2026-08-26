@@ -2825,7 +2825,6 @@ const DRAFT_KEYS = new Set([
 const DEFERRED_SUBMIT_PREPARATION_COMMAND_TYPES = new Set([
   "battlefield_pointer",
   "roster_selection",
-  "actor_pov_target_action",
 ]);
 
 /** @param {Record<string, unknown>} command */
@@ -3237,9 +3236,9 @@ function clearOwnerBoundLegalityAvailability(button) {
 }
 
 /**
- * Rebuild target choices from the exact authorized decision mask. Oracle
- * command slots come only from the validated presentation identity directory;
- * Agent POV uses its recipient-local target-action axis and never gains a slot.
+ * Rebuild researcher-space target choices from the exact authorized decision
+ * mask. Both live audiences resolve the public identity through the same
+ * validated global researcher directory and submit the same target command.
  *
  * @param {Readonly<Record<string, any>>} presentation
  * @param {Readonly<Record<string, any>>} inspection
@@ -3248,7 +3247,6 @@ function renderCommandTargets(presentation, inspection) {
   const mask = isRecord(inspection.decision_mask) ? inspection.decision_mask : {};
   const action = isRecord(inspection.draft_action) ? inspection.draft_action : {};
   const selectedTargetAction = Number(action.target_action);
-  const audience = authorizedPresentationAudience(presentation);
   const fragment = document.createDocumentFragment();
   for (const target of asArray(mask.target_actions).filter(isRecord)) {
     const targetAction = Number(target.target_action);
@@ -3260,13 +3258,9 @@ function renderCommandTargets(presentation, inspection) {
     const basic = targetAction > 0 && asArray(pairMask)[0] === true ? "B ✓" : "B ×";
     const ultimate = asArray(pairMask)[1] === true ? "U ✓" : "U ×";
     if (target.target_kind === "no_target") {
-      option.value =
-        audience === "agent_pov" ? `pov-target-action:${targetAction}` : "";
+      option.value = "";
       option.textContent = `${target.display_name ?? "No target"} · ${basic} · ${ultimate}`;
-    } else if (audience === "agent_pov") {
-      option.value = `pov-target-action:${targetAction}`;
-      option.textContent = `${agentIdentity(target.target_public_agent_id)} · ${basic} · ${ultimate}`;
-    } else if (audience === "researcher") {
+    } else {
       const commandSlot = authorizedOracleCommandSlotForPublicAgentId(
         presentation,
         target.target_public_agent_id,
@@ -3276,8 +3270,6 @@ function renderCommandTargets(presentation, inspection) {
       }
       option.value = String(commandSlot);
       option.textContent = `${agentIdentity(target.target_public_agent_id)} · ${basic} · ${ultimate}`;
-    } else {
-      continue;
     }
     if (typeof target.target_presentation_key === "string") {
       option.dataset.presentationKey = target.target_presentation_key;
@@ -4741,9 +4733,7 @@ elements.commandTargetSelect.addEventListener("keydown", () => {
 elements.commandTargetSelect.addEventListener("change", () => {
   const pointerOriginated = commandTargetSelectionModality === "pointer";
   commandTargetSelectionModality = null;
-  const command = targetSelectionCommand(elements.commandTargetSelect.value, {
-    actorPov: authorizedPresentationAudience(state.presentation) === "agent_pov",
-  });
+  const command = targetSelectionCommand(elements.commandTargetSelect.value);
   if (!command) {
     return;
   }

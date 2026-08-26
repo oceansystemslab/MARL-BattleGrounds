@@ -27,8 +27,10 @@ from scripts.dev.visual_debugger.presentation_protocol import (
 from scripts.dev.visual_debugger.protocol import (
     ActorPovLiveDebuggerFrameV2,
     CommandResponseV2,
+    FinishAndReviewCommandV1,
     KeyboardCommandV1,
     ResearcherLiveDebuggerFrameV2,
+    ResetCommandV1,
     SetViewCommandV1,
 )
 from tests.test_visual_debugger_service import (
@@ -507,6 +509,259 @@ def test_live_packaging_exception_leaves_committed_service_untouched(
     assert service._command_records == before_commands  # pyright: ignore[reportPrivateUsage]
     assert service.shutting_down is before_shutting_down
     assert service.faulted is before_faulted
+
+
+@pytest.mark.parametrize(
+    ("initial_view", "command", "builder_name"),
+    (
+        (
+            "researcher",
+            KeyboardCommandV1(key="Enter"),
+            "build_live_oracle_authorized_presentation_v1",
+        ),
+        (
+            "researcher",
+            KeyboardCommandV1(key="g"),
+            "build_live_oracle_authorized_presentation_v1",
+        ),
+        (
+            "researcher",
+            ResetCommandV1(),
+            "build_live_oracle_authorized_presentation_v1",
+        ),
+        (
+            "researcher",
+            SetViewCommandV1(view_mode="pov"),
+            "build_live_no_shared_obs_authorized_presentation_v1",
+        ),
+        (
+            "pov",
+            KeyboardCommandV1(key="Enter"),
+            "build_live_no_shared_obs_authorized_presentation_v1",
+        ),
+        (
+            "pov",
+            KeyboardCommandV1(key="g"),
+            "build_live_no_shared_obs_authorized_presentation_v1",
+        ),
+        (
+            "pov",
+            SetViewCommandV1(view_mode="researcher"),
+            "build_live_oracle_authorized_presentation_v1",
+        ),
+    ),
+)
+def test_changed_live_command_categories_require_a_buildable_candidate_presentation(
+    initial_view: str,
+    command: object,
+    builder_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service()
+    if initial_view == "pov":
+        _switch_to_pov(service)
+    before_presentation = service.current_presentation()
+    before_raw = service.current_frame()
+    before_session = service.session
+    before_revision = service.revision
+    before_observer = service._evaluation_observer  # pyright: ignore[reportPrivateUsage]
+    before_observer_count = service.evaluation_validated_transition_count
+    before_command_count = service.command_cache_size
+    real_builder = getattr(service_module, builder_name)
+    builder_calls = 0
+
+    def fail_first_candidate(*args: object, **kwargs: object) -> object:
+        nonlocal builder_calls
+        builder_calls += 1
+        if builder_calls == 1:
+            raise RuntimeError("injected candidate-presentation failure")
+        return real_builder(  # pyright: ignore[reportArgumentType]
+            *args,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(service_module, builder_name, fail_first_candidate)
+    with pytest.raises(RuntimeError, match="candidate-presentation failure"):
+        service.apply_command(
+            _request(
+                f"{initial_view}-{type(command).__name__}-presentation-failure",
+                base_revision=before_revision,
+                command=command,
+            )
+        )
+
+    assert service.faulted
+    assert service.current_frame() is before_raw
+    assert service.session is before_session
+    assert service.revision == before_revision
+    assert service._evaluation_observer is before_observer  # pyright: ignore[reportPrivateUsage]
+    assert service.evaluation_validated_transition_count == before_observer_count
+    assert service.command_cache_size == before_command_count + 1
+    assert service.current_presentation() == before_presentation
+
+
+def test_candidate_presentation_failure_precedes_recorder_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, recorder = _recording_service(tmp_path, view_mode="pov")
+    before_presentation = service.current_presentation()
+    before_raw = service.current_frame()
+    before_session = service.session
+    before_revision = service.revision
+    before_status = recorder.status
+    before_lifecycle = recorder.lifecycle
+    before_observer_lifecycle = recorder.observer_lifecycle_state
+    before_validated = recorder.validated_transition_count
+    before_frames = recorder.retained_frame_count
+    before_transitions = recorder.retained_transition_count
+    before_recorder_frame = recorder.current_frame
+    real_builder = service_module.build_live_no_shared_obs_authorized_presentation_v1
+    builder_calls = 0
+
+    def fail_first_candidate(*args: object, **kwargs: object) -> object:
+        nonlocal builder_calls
+        builder_calls += 1
+        if builder_calls == 1:
+            raise RuntimeError("injected recorded candidate-presentation failure")
+        return real_builder(*args, **kwargs)  # type: ignore[no-any-return]
+
+    monkeypatch.setattr(
+        service_module,
+        "build_live_no_shared_obs_authorized_presentation_v1",
+        fail_first_candidate,
+    )
+    with pytest.raises(
+        RuntimeError,
+        match="recorded candidate-presentation failure",
+    ):
+        service.apply_command(
+            _request(
+                "recorded-candidate-presentation-failure",
+                base_revision=before_revision,
+                command=KeyboardCommandV1(key="Enter"),
+            )
+        )
+
+    assert service.faulted
+    assert service.current_frame() is before_raw
+    assert service.session is before_session
+    assert service.revision == before_revision
+    assert recorder.status == before_status
+    assert recorder.lifecycle == before_lifecycle
+    assert recorder.observer_lifecycle_state == before_observer_lifecycle
+    assert recorder.validated_transition_count == before_validated
+    assert recorder.retained_frame_count == before_frames
+    assert recorder.retained_transition_count == before_transitions
+    assert recorder.current_frame is before_recorder_frame
+    assert service.current_presentation() == before_presentation
+
+
+def test_recording_lifecycle_presentation_preflight_precedes_recorder_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, recorder = _recording_service(tmp_path)
+    before_presentation = service.current_presentation()
+    before_raw = service.current_frame()
+    before_status = recorder.status
+    before_lifecycle = recorder.lifecycle
+    before_validated = recorder.validated_transition_count
+    real_builder = service_module.build_live_oracle_authorized_presentation_v1
+    builder_calls = 0
+
+    def fail_first_candidate(
+        context: EvaluationEpisodeContextV1,
+        current_frame: EvaluationFrameV1,
+        incoming_transition_view: EvaluationTransitionViewV1 | None,
+        raw_frame: ResearcherLiveDebuggerFrameV2,
+    ) -> LiveOracleAuthorizedPresentationFrameV1:
+        nonlocal builder_calls
+        builder_calls += 1
+        if builder_calls == 1:
+            raise RuntimeError("injected lifecycle candidate-presentation failure")
+        return real_builder(
+            context,
+            current_frame,
+            incoming_transition_view,
+            raw_frame,
+        )
+
+    monkeypatch.setattr(
+        service_module,
+        "build_live_oracle_authorized_presentation_v1",
+        fail_first_candidate,
+    )
+    with pytest.raises(
+        RuntimeError,
+        match="lifecycle candidate-presentation failure",
+    ):
+        service.apply_command(
+            _request(
+                "lifecycle-candidate-presentation-failure",
+                base_revision=service.revision,
+                command=FinishAndReviewCommandV1(),
+            )
+        )
+
+    assert service.current_frame() is before_raw
+    assert service.revision == 0
+    assert recorder.status == before_status
+    assert recorder.lifecycle == before_lifecycle
+    assert recorder.validated_transition_count == before_validated
+    assert service.current_presentation() == before_presentation
+
+
+def test_agent_charge_candidate_is_presentable_before_observer_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service("charge_convergence", include_stress=True)
+    _switch_to_pov(service)
+    before_revision = service.revision
+    real_builder = service_module.build_live_no_shared_obs_authorized_presentation_v1
+    preflight_observations: list[tuple[int, int, int]] = []
+
+    def observe_candidate(
+        *args: object,
+        **kwargs: object,
+    ) -> LiveNoSharedObsAuthorizedPresentationFrameV1:
+        raw_frame = cast(ActorPovLiveDebuggerFrameV2, args[2])
+        preflight_observations.append(
+            (
+                raw_frame.frame_index,
+                service.session.current_evaluation_frame.frame_index,
+                service.evaluation_validated_transition_count,
+            )
+        )
+        return real_builder(*args, **kwargs)  # type: ignore[no-any-return]
+
+    monkeypatch.setattr(
+        service_module,
+        "build_live_no_shared_obs_authorized_presentation_v1",
+        observe_candidate,
+    )
+    advanced = service.apply_command(
+        _request(
+            "agent-charge-preflight",
+            base_revision=before_revision,
+            command=KeyboardCommandV1(key="n"),
+        )
+    )
+
+    assert advanced.outcome == "response"
+    assert isinstance(advanced.payload, CommandResponseV2)
+    assert advanced.payload.result == "applied"
+    assert preflight_observations == [(1, 0, 0)]
+    assert service.revision == before_revision + 1
+    assert service.session.current_evaluation_frame.frame_index == 1
+    assert service.evaluation_validated_transition_count == 1
+    assert not service.faulted
+    settled = service.current_presentation()
+    assert settled.outcome == "response"
+    assert isinstance(
+        settled.payload,
+        LiveNoSharedObsAuthorizedPresentationFrameV1,
+    )
 
 
 def test_live_public_builders_derive_epoch_and_reject_cross_audience_inputs() -> None:

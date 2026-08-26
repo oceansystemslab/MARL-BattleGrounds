@@ -46,6 +46,7 @@ from marl_battlegrounds.evaluation.pov import (
 )
 from marl_battlegrounds.rendering import authorized_inspection as inspection_module
 from marl_battlegrounds.rendering import evaluation_adapter as evaluation_adapter_module
+from marl_battlegrounds.rendering import evaluation_wire_features as wire
 from marl_battlegrounds.rendering.authorized_inspection import (
     AuthorizedAxisOnlyTargetActionV1,
     AuthorizedDecisionMaskV1,
@@ -86,6 +87,10 @@ from marl_battlegrounds.rendering.evaluation_wire_features import AGENT_FEATURE_
 from marl_battlegrounds.rendering.pov_scene import (
     ActorPovProjectionIndexV1,
     build_actor_pov_projection_index_v1,
+)
+from marl_battlegrounds.rendering.vocabulary import (
+    status_sort_key,
+    status_token_id_from_catalog_status_id,
 )
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -316,6 +321,117 @@ def _shared_current(
     return current, recipient
 
 
+def _trajectory_with_public_effects(
+    trajectory: CapturedEvaluationTrajectory,
+    *,
+    global_slot: int,
+    active_status_channels: tuple[int, ...],
+    active_aura_ids: tuple[str, ...],
+) -> CapturedEvaluationTrajectory:
+    """Install one coherent public multi-effect row at frame zero."""
+    frame = trajectory.frames[0]
+    context = trajectory.context
+    catalog = context.static_mechanics_catalog
+    active_statuses = set(active_status_channels)
+    active_auras = set(active_aura_ids)
+    if len(active_statuses) != len(active_status_channels):
+        raise AssertionError("test status channels must be unique")
+    if len(active_auras) != len(active_aura_ids):
+        raise AssertionError("test aura IDs must be unique")
+
+    aura_by_id = {row.aura_id: row for row in catalog.aura_mechanics}
+
+    def with_effects(row: tuple[float, ...]) -> tuple[float, ...]:
+        values = list(row)
+        for channel, mechanic in enumerate(catalog.status_channels):
+            duration_column = wire.AGENT_STATUS_REMAINING_DURATION_COLUMN_BY_CHANNEL_V1[
+                channel
+            ]
+            values[duration_column] = 1.0 if channel in active_statuses else 0.0
+            magnitude_column = wire.AGENT_STATUS_ACTIVE_MAGNITUDE_COLUMN_BY_CHANNEL_V1[
+                channel
+            ]
+            if channel in active_statuses and magnitude_column is not None:
+                assert mechanic.magnitude is not None
+                values[magnitude_column] = mechanic.magnitude
+        values[wire.AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_AURA_MULTIPLIER_V1] = (
+            aura_by_id["mage_damage_amplification"].per_emitter_multiplier
+            if "mage_damage_amplification" in active_auras
+            else 1.0
+        )
+        values[wire.AGENT_FEATURE_DAMAGE_MITIGATION_WARRIOR_AURA_MULTIPLIER_V1] = (
+            aura_by_id["warrior_damage_mitigation"].per_emitter_multiplier
+            if "warrior_damage_mitigation" in active_auras
+            else 1.0
+        )
+        return tuple(values)
+
+    base_payload = frame.base_observation.model_dump(mode="python")
+    self_rows = list(cast(tuple[tuple[float, ...], ...], base_payload["self_features"]))
+    self_rows[global_slot] = with_effects(self_rows[global_slot])
+    base_payload["self_features"] = tuple(self_rows)
+
+    target = context.roster[global_slot]
+    for relation, mask_name, row_name in (
+        ("ally", "ally_visibility_mask", "ally_unit_features"),
+        ("enemy", "enemy_visibility_mask", "enemy_unit_features"),
+    ):
+        masks = cast(tuple[tuple[bool, ...], ...], base_payload[mask_name])
+        observer_rows = list(
+            cast(tuple[tuple[tuple[float, ...], ...], ...], base_payload[row_name])
+        )
+        for observer_slot, observer in enumerate(context.roster):
+            expected_relation = (
+                "ally"
+                if observer.configured_team_id == target.configured_team_id
+                else "enemy"
+            )
+            if (
+                not observer.configured_active
+                or relation != expected_relation
+                or not masks[observer_slot][target.team_local_slot]
+            ):
+                continue
+            rows = list(observer_rows[observer_slot])
+            rows[target.team_local_slot] = with_effects(rows[target.team_local_slot])
+            observer_rows[observer_slot] = tuple(rows)
+        base_payload[row_name] = tuple(observer_rows)
+
+    snapshot_payload = frame.snapshot.model_dump(mode="python")
+    slow_rows = list(
+        cast(tuple[tuple[int, ...], ...], snapshot_payload["slow_durations"])
+    )
+    slow_rows[global_slot] = tuple(
+        1 if channel in active_statuses else 0 for channel in range(3)
+    )
+    snapshot_payload["slow_durations"] = tuple(slow_rows)
+    stun_rows = list(
+        cast(tuple[tuple[int, ...], ...], snapshot_payload["stun_durations"])
+    )
+    stun_rows[global_slot] = tuple(
+        1 if channel + 3 in active_statuses else 0 for channel in range(3)
+    )
+    snapshot_payload["stun_durations"] = tuple(stun_rows)
+    for field_name, channel in (
+        ("rogue_poison_anti_heal_durations", 6),
+        ("mage_burst_damage_amplification_durations", 7),
+        ("priest_blessing_of_freedom_slow_floor_durations", 8),
+    ):
+        values = list(cast(tuple[int, ...], snapshot_payload[field_name]))
+        values[global_slot] = 1 if channel in active_statuses else 0
+        snapshot_payload[field_name] = tuple(values)
+
+    frame_payload = frame.model_dump(mode="python")
+    frame_payload["base_observation"] = base_payload
+    frame_payload["snapshot"] = snapshot_payload
+    changed_frame = EvaluationFrameV1.model_validate(frame_payload)
+    return CapturedEvaluationTrajectory(
+        context=context,
+        frames=(changed_frame,),
+        transitions=(),
+    )
+
+
 def _canonical_bytes(value: object) -> bytes:
     return TypeAdapter(type(value)).dump_json(value)
 
@@ -324,6 +440,147 @@ def _json_payload(value: object) -> dict[str, object]:
     payload = json.loads(_canonical_bytes(value))
     assert isinstance(payload, dict)
     return cast(dict[str, object], payload)
+
+
+@pytest.mark.parametrize(
+    ("active_status_channels", "active_aura_ids"),
+    (
+        ((0, 3), ()),
+        ((4, 6, 7), ("mage_damage_amplification",)),
+        ((0, 3, 8), ("warrior_damage_mitigation",)),
+        (
+            tuple(range(9)),
+            (
+                "mage_damage_amplification",
+                "warrior_damage_mitigation",
+            ),
+        ),
+    ),
+    ids=("charge", "control-and-burst", "charge-and-freedom", "all-effects"),
+)
+def test_live_and_replay_agent_effect_rows_match_local_oracle_order(
+    inspection_cases: _InspectionCases,
+    active_status_channels: tuple[int, ...],
+    active_aura_ids: tuple[str, ...],
+) -> None:
+    global_slot = 1
+    base_no_shared = CapturedEvaluationTrajectory(
+        context=inspection_cases.no_shared.context,
+        frames=(inspection_cases.no_shared.frames[0],),
+        transitions=(),
+    )
+    base_shared = CapturedEvaluationTrajectory(
+        context=inspection_cases.shared.context,
+        frames=(inspection_cases.shared.frames[0],),
+        transitions=(),
+    )
+    no_shared = _trajectory_with_public_effects(
+        base_no_shared,
+        global_slot=global_slot,
+        active_status_channels=active_status_channels,
+        active_aura_ids=active_aura_ids,
+    )
+    shared = _trajectory_with_public_effects(
+        base_shared,
+        global_slot=global_slot,
+        active_status_channels=active_status_channels,
+        active_aura_ids=active_aura_ids,
+    )
+    public_agent_id = no_shared.context.roster[global_slot].public_agent_id
+    catalog = no_shared.context.static_mechanics_catalog
+    expected_status_ids = tuple(
+        catalog.status_channels[channel].status_id
+        for channel in sorted(
+            active_status_channels,
+            key=lambda channel: status_sort_key(
+                status_token_id_from_catalog_status_id(
+                    catalog.status_channels[channel].status_id
+                )
+            ),
+        )
+    )
+    expected_aura_ids = tuple(
+        aura_id
+        for aura_id in (
+            "mage_damage_amplification",
+            "warrior_damage_mitigation",
+        )
+        if aura_id in active_aura_ids
+    )
+
+    oracle_no_shared = next(
+        row
+        for row in _oracle_scenes(no_shared)[0].agents
+        if row.public_agent_id == public_agent_id
+    )
+    live_slice = _pov_slice(no_shared, actor_slot=global_slot, frame_index=0)
+    live_no_shared = build_no_shared_obs_authorized_scene_v1(
+        live_slice,
+        public_catalog=catalog,
+        authority_session_id="effect-order-live-no-shared",
+    )
+    replay_source = _pov_index(
+        inspection_cases.no_shared,
+        actor_slot=global_slot,
+    )
+    replay_frames = list(replay_source.content.frames)
+    replay_frames[0] = live_slice.frame
+    replay_transitions = _rederive_pov_transitions(
+        replay_source,
+        tuple(replay_frames),
+        replay_source.content.transitions,
+    )
+    replay_source = _rebuild_pov_index(
+        replay_source,
+        frames=tuple(replay_frames),
+        transitions=replay_transitions,
+    )
+    replay_no_shared = _no_shared_current(
+        no_shared,
+        replay_source,
+        frame_index=0,
+        authority="effect-order-replay-no-shared",
+    )
+    shared_current, _ = _shared_current(
+        shared,
+        recipient_slot=global_slot,
+        frame_index=0,
+        authority="effect-order-replay-shared",
+    )
+    oracle_shared = next(
+        row
+        for row in _oracle_scenes(shared)[0].agents
+        if row.public_agent_id == public_agent_id
+    )
+
+    local_rows = (
+        next(
+            row
+            for row in live_no_shared.scene.agents
+            if row.public_agent_id == public_agent_id
+        ),
+        next(
+            row
+            for row in replay_no_shared.scene.agents
+            if row.public_agent_id == public_agent_id
+        ),
+        next(
+            row
+            for row in shared_current.scene.agents
+            if row.public_agent_id == public_agent_id
+        ),
+    )
+    assert tuple(row.status_id for row in oracle_no_shared.statuses) == (
+        expected_status_ids
+    )
+    assert tuple(row.aura_id for row in oracle_no_shared.aura_modifiers) == (
+        expected_aura_ids
+    )
+    assert oracle_shared.statuses == oracle_no_shared.statuses
+    assert oracle_shared.aura_modifiers == oracle_no_shared.aura_modifiers
+    for local in local_rows:
+        assert local.statuses == oracle_no_shared.statuses
+        assert local.aura_modifiers == oracle_no_shared.aura_modifiers
 
 
 def _rebuild_pov_index(
