@@ -595,8 +595,9 @@ export class DebuggerPanels {
     const globalAgentRoster =
       audience === "agent_pov" &&
       authorizedPresentationHasResearcherSpace(presentation);
-    const visibilityGroupedRoster =
-      globalAgentRoster && presentation.viewer_mode === "replay";
+    // Live Debugger and Replay Agent POV deliberately share the same complete
+    // researcher roster; battlefield presentation and interaction stay fog-scoped.
+    const visibilityGroupedRoster = globalAgentRoster;
     const scene = globalAgentRoster
       ? authorizedPresentationResearcherSceneView(presentation)
       : authorizedPresentationSceneView(presentation, localInspectedPresentationKey);
@@ -647,7 +648,7 @@ export class DebuggerPanels {
       row.element.dataset.teamId = String(agent.team_id);
       row.element.dataset.classId = String(agent.class_id);
       row.element.dataset.team = teamToken.cssKey;
-      if (presentation.viewer_mode === "replay") {
+      if (visibilityGroupedRoster) {
         row.element.dataset.visibleInSnapshot = String(identity.visible_in_snapshot);
       } else {
         delete row.element.dataset.visibleInSnapshot;

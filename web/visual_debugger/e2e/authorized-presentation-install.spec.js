@@ -1971,21 +1971,21 @@ async function expectAgentAuthoritySurface(
     expectedRosterCount,
   );
   if (researcherRoster !== null) {
-    if (presentation.presentation_kind.startsWith("replay_")) {
-      await expect(page.locator('#roster [data-visibility="visible"]')).toBeVisible();
-      await expect(
-        page.locator('#roster [data-visibility="not-visible"]'),
-      ).toBeVisible();
-    } else {
-      await expect(page.locator('#roster [data-visibility="visible"]')).toBeHidden();
-      await expect(
-        page.locator('#roster [data-visibility="not-visible"]'),
-      ).toBeHidden();
-      await expect(page.locator("#roster .roster-team[data-team-id]")).toHaveCount(2);
-      await expect(page.locator("#roster-count")).toHaveText(
-        `${expectedRosterCount} ${expectedRosterCount === 1 ? "actor" : "actors"}`,
-      );
-    }
+    const visibleRosterCount = await page
+      .locator('#roster [data-visibility="visible"] .roster-primary-action')
+      .count();
+    const notVisibleRosterCount = await page
+      .locator('#roster [data-visibility="not-visible"] .roster-primary-action')
+      .count();
+    await expect(page.locator('#roster [data-visibility="visible"]')).toBeVisible();
+    await expect(page.locator('#roster [data-visibility="not-visible"]')).toBeVisible();
+    await expect(page.locator("#roster .roster-team[data-team-id]")).toHaveCount(2);
+    await expect(
+      page.locator("#roster .roster-team[data-team-id]:visible"),
+    ).toHaveCount(0);
+    await expect(page.locator("#roster-count")).toHaveText(
+      `${expectedRosterCount} agents · ${visibleRosterCount} visible · ${notVisibleRosterCount} not visible`,
+    );
     expect(expectedRosterCount).toBeGreaterThanOrEqual(bodyKeys.length);
   }
   if (activationEnabled) {
@@ -2421,11 +2421,20 @@ test("all five real service leaves install with safe pending continuity", async 
   await expect(page.locator("#roster .roster-row--authorized")).toHaveCount(
     liveResearcher.roster_agents.length,
   );
-  await expect(page.locator('#roster [data-visibility="visible"]')).toBeHidden();
-  await expect(page.locator('#roster [data-visibility="not-visible"]')).toBeHidden();
+  await expect(page.locator('#roster [data-visibility="visible"]')).toBeVisible();
+  await expect(page.locator('#roster [data-visibility="not-visible"]')).toBeVisible();
   await expect(page.locator("#roster .roster-team[data-team-id]")).toHaveCount(2);
+  await expect(page.locator("#roster .roster-team[data-team-id]:visible")).toHaveCount(
+    0,
+  );
+  const liveVisibleRosterCount = await page
+    .locator('#roster [data-visibility="visible"] .roster-primary-action')
+    .count();
+  const liveNotVisibleRosterCount = await page
+    .locator('#roster [data-visibility="not-visible"] .roster-primary-action')
+    .count();
   await expect(page.locator("#roster-count")).toHaveText(
-    `${liveResearcher.roster_agents.length} actors`,
+    `${liveResearcher.roster_agents.length} agents · ${liveVisibleRosterCount} visible · ${liveNotVisibleRosterCount} not visible`,
   );
   await expect(page.locator("#command-target-select")).toBeEnabled();
   await expect(page.locator("#command-target-select option")).toHaveCount(11);

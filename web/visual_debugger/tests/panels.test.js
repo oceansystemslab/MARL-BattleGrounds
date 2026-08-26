@@ -802,25 +802,28 @@ test("authorized roster exposes one native key-only action with isolated fact ow
       )
     );
     assert.equal(liveAgentRows.length, liveAgent.researcher_space.roster_agents.length);
+    const liveAgentVisibleCount = liveAgentRows.filter(
+      (row) => row.element.dataset.visibleInSnapshot === "true",
+    ).length;
     assert.equal(
       rosterCount.textContent,
-      `${liveAgent.researcher_space.roster_agents.length} actors`,
+      `${liveAgentRows.length} agents · ${liveAgentVisibleCount} visible · ${liveAgentRows.length - liveAgentVisibleCount} not visible`,
     );
     assert.equal(
       [...panels.rosterTeamGroups.values()].every(
-        (group) => group.element.hidden === false,
-      ),
-      true,
-    );
-    assert.equal(
-      [...panels.rosterVisibilityGroups.values()].every(
         (group) => group.element.hidden === true,
       ),
       true,
     );
     assert.equal(
-      liveAgentRows.every(
-        (row) => !Object.hasOwn(row.element.dataset, "visibleInSnapshot"),
+      [...panels.rosterVisibilityGroups.values()].every(
+        (group) => group.element.hidden === false,
+      ),
+      true,
+    );
+    assert.equal(
+      liveAgentRows.every((row) =>
+        ["true", "false"].includes(row.element.dataset.visibleInSnapshot),
       ),
       true,
     );

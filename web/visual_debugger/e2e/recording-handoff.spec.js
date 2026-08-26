@@ -769,9 +769,12 @@ test("target race remains Online and fenced until Save As recovers cached artifa
   await expect.poll(() => agentCloseoutBodies.count()).toBeGreaterThan(0);
   const agentCloseoutRows = page.locator("#roster .roster-primary-action");
   await expect.poll(() => agentCloseoutRows.count()).toBeGreaterThan(1);
-  await expect(page.locator('#roster [data-visibility="visible"]')).toBeHidden();
-  await expect(page.locator('#roster [data-visibility="not-visible"]')).toBeHidden();
+  await expect(page.locator('#roster [data-visibility="visible"]')).toBeVisible();
+  await expect(page.locator('#roster [data-visibility="not-visible"]')).toBeVisible();
   await expect(page.locator("#roster .roster-team[data-team-id]")).toHaveCount(2);
+  await expect(page.locator("#roster .roster-team[data-team-id]:visible")).toHaveCount(
+    0,
+  );
   expect(
     await agentCloseoutRows.evaluateAll((buttons) =>
       buttons.every((button) => button instanceof HTMLButtonElement && button.disabled),
