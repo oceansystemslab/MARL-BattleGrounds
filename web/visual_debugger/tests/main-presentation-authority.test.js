@@ -210,7 +210,7 @@ test("main applies explicit retain-or-clear policy before bounded installation",
     source,
     /elements\.pendingCard\.removeAttribute\("data-inspection-state"\);/u,
   );
-  assert.match(source, /pendingLabel\.textContent = "NO AUTHORIZED INSPECTION";/u);
+  assert.doesNotMatch(source, /action-card__label|pendingLabel/u);
   assert.match(
     source,
     /elements\.recordingReviewButton,[\s\S]*elements\.recordingSaveAsButton,/u,

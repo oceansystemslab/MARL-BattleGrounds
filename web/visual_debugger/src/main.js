@@ -617,6 +617,7 @@ const replayTimelineElements = {
   root: elements.replayTimeline,
   keyboardTarget: document,
   keyboardEnabled: () => installedPresentationAuthority() !== null && !state.busy,
+  clearSelection: () => clearReplaySelection(),
   firstButton: elements.replayFirstButton,
   backTenButton: elements.replayBackTenButton,
   previousButton: elements.replayPreviousButton,
@@ -835,10 +836,6 @@ function clearPresentationAuthority(reason) {
   elements.pendingHeading.textContent = "Inspection unavailable";
   elements.pendingCount.textContent = "0 actors";
   elements.pendingScope.textContent = "Waiting for authorized action details.";
-  const pendingLabel = elements.pendingCard.querySelector(".action-card__label");
-  if (pendingLabel) {
-    pendingLabel.textContent = "NO AUTHORIZED INSPECTION";
-  }
   elements.stepValue.textContent = "—";
   elements.transitionValue.textContent = "—";
   elements.audienceBadge.textContent = "View unavailable";
@@ -4890,7 +4887,7 @@ elements.replayRangesButton.addEventListener("click", () => {
   });
 });
 
-elements.replayClearReferenceButton.addEventListener("click", () => {
+function clearReplaySelection() {
   if (!isReplayMode() || elements.replayClearReferenceButton.disabled) {
     return;
   }
@@ -4909,7 +4906,9 @@ elements.replayClearReferenceButton.addEventListener("click", () => {
     command_type: "select_agent",
     selected_global_slot: null,
   });
-});
+}
+
+elements.replayClearReferenceButton.addEventListener("click", clearReplaySelection);
 
 elements.liveRangesButton.addEventListener("click", () => {
   if (isReplayMode() || elements.liveRangesButton.disabled) {

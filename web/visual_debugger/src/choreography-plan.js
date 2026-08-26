@@ -960,21 +960,25 @@ function authorizedPaintParts(event, visualFilters) {
   if (event.kind !== "semantic_pulse") {
     return null;
   }
+  // Cooldown truth remains in the authorized event and durable badge. The
+  // start pulse duplicates the accepted Ultimate activation, so it is always
+  // presentation-suppressed while cooldown-ready retains its distinct cue.
+  if (event.cueSemantic === "cooldown_started") {
+    return Object.freeze({ effect: false });
+  }
   /** @type {Record<string, string> | null} */
   const tag =
-    event.cueSemantic === "cooldown_started"
-      ? { surface: "transient", kind: "cooldown", semantic: "started" }
-      : event.cueSemantic === "cooldown_ready"
-        ? { surface: "transient", kind: "cooldown", semantic: "ready" }
-        : event.cueSemantic === "agent_died"
-          ? { surface: "transient", kind: "death_effect" }
-          : event.cueSemantic === "respawn_wave_occurred"
-            ? { surface: "transient", kind: "respawn_wave" }
-            : event.cueSemantic === "agent_respawned"
-              ? { surface: "transient", kind: "resurrection_effect" }
-              : event.cueSemantic === "spawn_shield_expired"
-                ? { surface: "transient", kind: "spawn_shield_expiry" }
-                : null;
+    event.cueSemantic === "cooldown_ready"
+      ? { surface: "transient", kind: "cooldown", semantic: "ready" }
+      : event.cueSemantic === "agent_died"
+        ? { surface: "transient", kind: "death_effect" }
+        : event.cueSemantic === "respawn_wave_occurred"
+          ? { surface: "transient", kind: "respawn_wave" }
+          : event.cueSemantic === "agent_respawned"
+            ? { surface: "transient", kind: "resurrection_effect" }
+            : event.cueSemantic === "spawn_shield_expired"
+              ? { surface: "transient", kind: "spawn_shield_expiry" }
+              : null;
   return tag === null ? null : Object.freeze({ effect: enabled(tag) });
 }
 

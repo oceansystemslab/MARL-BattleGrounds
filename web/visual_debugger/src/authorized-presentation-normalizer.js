@@ -1157,6 +1157,49 @@ function validateAcceptedActionTuple(action, label) {
 }
 
 /**
+ * @param {Record<string, any> | null} pending
+ * @param {any[]} roster
+ * @param {number} simulatorStep
+ * @param {Record<string, any>} draft
+ * @param {string} label
+ */
+function validateLivePendingJointAction(pending, roster, simulatorStep, draft, label) {
+  if (
+    pending === null ||
+    pending.current_simulator_step_count !== simulatorStep ||
+    !Array.isArray(pending.action_rows) ||
+    pending.action_rows.length !== roster.length
+  ) {
+    invalid(`${label} misses its active roster or decision epoch.`);
+  }
+  const rows = /** @type {any[]} */ (pending.action_rows);
+  if (
+    rows.some(
+      (row, index) =>
+        row.actor_presentation_key !== roster[index]?.presentation_key ||
+        row.actor_public_agent_id !== roster[index]?.public_agent_id,
+    )
+  ) {
+    invalid(`${label} changed active actor identity or order.`);
+  }
+  for (const [index, row] of rows.entries()) {
+    validateAcceptedActionTuple(row.pending_action, `${label}[${index}].pending`);
+  }
+  const selected = rows.find(
+    (row) => row.actor_public_agent_id === draft.actor_public_agent_id,
+  );
+  const expected = {
+    move_action: draft.draft_action.move_action,
+    target_action:
+      draft.draft_action.armed_lane === "none" ? 0 : draft.draft_action.target_action,
+    use_ultimate_action: draft.draft_action.armed_lane === "ultimate" ? 1 : 0,
+  };
+  if (!selected || !structurallyEqual(selected.pending_action, expected)) {
+    invalid(`${label} changed the selected editable draft.`);
+  }
+}
+
+/**
  * @param {Record<string, any>} latest
  * @param {string} prefix
  * @param {string} episodeId
@@ -3434,6 +3477,13 @@ function validateLiveResearcherSpace(frame) {
     }
     const action = draft.draft_action;
     const legality = draft.draft_legality;
+    validateLivePendingJointAction(
+      researcher.pending_joint_action,
+      roster,
+      source.source_simulator_step_count,
+      draft,
+      "Live researcher Pending Joint Action",
+    );
     if (
       !structurallyEqual(
         draft.draft_target,
@@ -3513,7 +3563,11 @@ function validateLiveResearcherSpace(frame) {
     ) {
       invalid("Live researcher draft changed Agent action semantics.");
     }
-  } else if (pending.inspection_kind !== "scripted_playback_inspection") {
+  } else if (pending.inspection_kind === "scripted_playback_inspection") {
+    if (researcher.pending_joint_action !== null) {
+      invalid("Scripted researcher presentation cannot carry pending joint intent.");
+    }
+  } else {
     invalid("Live researcher inspection uses an unknown variant.");
   }
 
@@ -4183,6 +4237,20 @@ function validateSemanticFrame(frame) {
     "Scene public identities",
   );
   if (actionAxis !== null) validateActionAxis(actionAxis);
+  if (live && oracle) {
+    const wrapper = frame.live_inspection.inspection;
+    if (wrapper.inspection_kind === "editable_live_draft") {
+      validateLivePendingJointAction(
+        frame.pending_joint_action,
+        sceneAgents,
+        source.source_simulator_step_count,
+        wrapper.draft,
+        "Live Oracle Pending Joint Action",
+      );
+    } else if (frame.pending_joint_action !== null) {
+      invalid("Scripted Oracle presentation cannot carry pending joint intent.");
+    }
+  }
   const presentationKeyPairs = validatePresentationKeyGraph(frame, {
     excludedRootFields: !oracle ? new Set(["researcher_space"]) : new Set(),
   });

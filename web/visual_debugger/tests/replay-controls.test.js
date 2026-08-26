@@ -113,6 +113,7 @@ function controlElements(
     root: new FakeElement(),
     keyboardTarget: new FakeElement(),
     keyboardEnabled: () => true,
+    clearSelection: () => {},
     firstButton: new FakeElement(),
     backTenButton: new FakeElement(),
     previousButton: new FakeElement(),
@@ -266,9 +267,71 @@ test("keyboard intent is bounded to unmodified replay navigation and edge-trigge
   assert.equal(replayKeyboardIntent({ key: "ArrowRight", shiftKey: true }), null);
   assert.equal(replayKeyboardIntent({ key: " ", repeat: false }), "toggle");
   assert.equal(replayKeyboardIntent({ key: " ", repeat: true }), null);
+  assert.equal(
+    replayKeyboardIntent({ key: "Escape", repeat: false }),
+    "clear_selection",
+  );
+  assert.equal(replayKeyboardIntent({ key: "Escape", repeat: true }), null);
+  assert.equal(replayKeyboardIntent({ key: "Escape", shiftKey: true }), null);
   assert.equal(replayKeyboardIntent({ key: "Spacebar", repeat: false }), null);
   assert.equal(replayKeyboardIntent({ key: "ArrowRight", ctrlKey: true }), null);
   assert.equal(replayKeyboardIntent({ key: "n" }), null);
+});
+
+test("replay-owned Escape clears selection once without moving the replay cursor", () => {
+  const originalElement = Object.getOwnPropertyDescriptor(globalThis, "Element");
+  Object.defineProperty(globalThis, "Element", {
+    configurable: true,
+    value: FakeElement,
+  });
+  const elements = controlElements();
+  let clearCount = 0;
+  elements.clearSelection = () => {
+    clearCount += 1;
+  };
+  const controller = new ReplayPlaybackController({
+    onStateChange: () => {},
+    request: async () => ({ frame: { cursor: cursor(1) } }),
+  });
+  installConnected(controller, cursor(1));
+  const unbind = bindReplayTimelineControls(/** @type {any} */ (elements), controller);
+
+  try {
+    const initialCursor = controller.snapshot().cursor;
+    const firstEscape = elements.keyboardTarget.dispatch("keydown", {
+      key: "Escape",
+      repeat: false,
+      target: elements.root,
+    });
+    assert.equal(firstEscape.defaultPrevented, true);
+    assert.equal(clearCount, 1);
+    assert.deepEqual(controller.snapshot().cursor, initialCursor);
+
+    const repeatedEscape = elements.keyboardTarget.dispatch("keydown", {
+      key: "Escape",
+      repeat: true,
+      target: elements.root,
+    });
+    assert.equal(repeatedEscape.defaultPrevented, false);
+    assert.equal(clearCount, 1);
+
+    elements.keyboardEnabled = () => false;
+    const fencedEscape = elements.keyboardTarget.dispatch("keydown", {
+      key: "Escape",
+      repeat: false,
+      target: elements.root,
+    });
+    assert.equal(fencedEscape.defaultPrevented, false);
+    assert.equal(clearCount, 1);
+    assert.deepEqual(controller.snapshot().cursor, initialCursor);
+  } finally {
+    unbind();
+    if (originalElement) {
+      Object.defineProperty(globalThis, "Element", originalElement);
+    } else {
+      Reflect.deleteProperty(globalThis, "Element");
+    }
+  }
 });
 
 test("replay-owned Space suppresses scroll without repeating toggles or stealing native controls", () => {

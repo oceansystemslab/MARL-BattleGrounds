@@ -82,6 +82,15 @@ test("static debugger IDs are unique", async () => {
   assert.equal(new Set(ids).size, ids.length);
 });
 
+test("replay Help names the exact arrow keys and Escape selection behavior", async () => {
+  const markup = await readFile(indexUrl, "utf8");
+  const help = elementBody(markup, "help-dialog", "dialog");
+  assert.match(help, /<dt>LEFT ARROW \/ RIGHT ARROW<\/dt>/u);
+  assert.match(help, /<dd>Go to the previous \/ next captured tick<\/dd>/u);
+  assert.match(help, /<dt>Escape<\/dt><dd>Clear the selected agent<\/dd>/u);
+  assert.doesNotMatch(help, /<dt>Left \/ Right<\/dt>/u);
+});
+
 test("every native disclosure has one named phrasing-content summary", async () => {
   const markup = await readFile(indexUrl, "utf8");
   const detailsCount = [...markup.matchAll(/<details\b/gu)].length;

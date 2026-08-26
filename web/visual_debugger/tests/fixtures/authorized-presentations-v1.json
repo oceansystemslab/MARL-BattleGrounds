@@ -1408,6 +1408,56 @@
         "source_session_id": "cp2-5-b-oracle",
         "source_simulator_step_count": 1
       },
+      "pending_joint_action": {
+        "action_rows": [
+          {
+            "actor_presentation_key": "oracle_15cf626b6e52faa32328cf1e6f9eb2ce6c89fe8e487bd17f4583fd6a592d81fd",
+            "actor_public_agent_id": "agent-slot-0",
+            "pending_action": {
+              "move_action": 0,
+              "target_action": 0,
+              "use_ultimate_action": 0
+            }
+          },
+          {
+            "actor_presentation_key": "oracle_a60e0df75a5f09d66101713ed0bc1d1fa2b062cbbe41526a5a2d15dfa1a9ccc7",
+            "actor_public_agent_id": "agent-slot-1",
+            "pending_action": {
+              "move_action": 0,
+              "target_action": 0,
+              "use_ultimate_action": 0
+            }
+          },
+          {
+            "actor_presentation_key": "oracle_bbf97bc0a6de8621603ce30ad21e22e980cb83a554ffb28f62880b2ef07767dd",
+            "actor_public_agent_id": "agent-slot-2",
+            "pending_action": {
+              "move_action": 0,
+              "target_action": 0,
+              "use_ultimate_action": 0
+            }
+          },
+          {
+            "actor_presentation_key": "oracle_cd6dfec8f11f0c584a8a61e3cf37e55312a6df51a5885f5d8758501d51e7f570",
+            "actor_public_agent_id": "agent-slot-5",
+            "pending_action": {
+              "move_action": 0,
+              "target_action": 0,
+              "use_ultimate_action": 0
+            }
+          },
+          {
+            "actor_presentation_key": "oracle_1a9ca9e0cb149802c7fbd3cfd7d83ceb11f880da525da1b2dca4722d75717f00",
+            "actor_public_agent_id": "agent-slot-6",
+            "pending_action": {
+              "move_action": 0,
+              "target_action": 0,
+              "use_ultimate_action": 0
+            }
+          }
+        ],
+        "current_simulator_step_count": 1
+      },
       "presentation_kind": "live_oracle",
       "product_kind": "combat_debugger",
       "schema_version": 1,
@@ -7432,6 +7482,101 @@
             "inspection_kind": "editable_live_draft",
             "submission_scope": "joint_turn"
           },
+          "pending_joint_action": {
+            "action_rows": [
+              {
+                "actor_presentation_key": "oracle_0bfbd49bcfdb4b155a6b261524ac78b97842c8b53a943a4e2fb3ccaad3e67386",
+                "actor_public_agent_id": "0",
+                "pending_action": {
+                  "move_action": 0,
+                  "target_action": 0,
+                  "use_ultimate_action": 0
+                }
+              },
+              {
+                "actor_presentation_key": "oracle_33f39c6769a2d75c63169c6bae3a04c12ecad45a161482d840b8fab642addd23",
+                "actor_public_agent_id": "1",
+                "pending_action": {
+                  "move_action": 0,
+                  "target_action": 0,
+                  "use_ultimate_action": 0
+                }
+              },
+              {
+                "actor_presentation_key": "oracle_6cd5f3e33ca9df200d731a40c92f9fdb066ee426d217557a27ba7832259bb5e5",
+                "actor_public_agent_id": "2",
+                "pending_action": {
+                  "move_action": 0,
+                  "target_action": 0,
+                  "use_ultimate_action": 0
+                }
+              },
+              {
+                "actor_presentation_key": "oracle_75d7a919795d919f627cc9e0a30e471439c6526afe391037c49bf0584dc872a1",
+                "actor_public_agent_id": "3",
+                "pending_action": {
+                  "move_action": 0,
+                  "target_action": 0,
+                  "use_ultimate_action": 0
+                }
+              },
+              {
+                "actor_presentation_key": "oracle_bb14a5396636b3067af77ef1c083b4823203518b17c2069e6fa5e52d51e51979",
+                "actor_public_agent_id": "4",
+                "pending_action": {
+                  "move_action": 0,
+                  "target_action": 0,
+                  "use_ultimate_action": 0
+                }
+              },
+              {
+                "actor_presentation_key": "oracle_15f906977288973cb8fb3f6ed2c504d1f766563f28981baf1504f1c34e5f9d48",
+                "actor_public_agent_id": "5",
+                "pending_action": {
+                  "move_action": 0,
+                  "target_action": 0,
+                  "use_ultimate_action": 0
+                }
+              },
+              {
+                "actor_presentation_key": "oracle_f74a93b011fcd5e37814134189f2613263fbd522c8a9186528c13b8b1d58928f",
+                "actor_public_agent_id": "6",
+                "pending_action": {
+                  "move_action": 0,
+                  "target_action": 0,
+                  "use_ultimate_action": 0
+                }
+              },
+              {
+                "actor_presentation_key": "oracle_d59280f780994cbca72a739f39dd2474c53cfc00ee1c0d06b8bfc52f5e675610",
+                "actor_public_agent_id": "7",
+                "pending_action": {
+                  "move_action": 0,
+                  "target_action": 0,
+                  "use_ultimate_action": 0
+                }
+              },
+              {
+                "actor_presentation_key": "oracle_08cfeab90607eebf438927f0b46d7f6e1435f3447f090a6fc5ed2adc57a6ee9f",
+                "actor_public_agent_id": "8",
+                "pending_action": {
+                  "move_action": 0,
+                  "target_action": 0,
+                  "use_ultimate_action": 0
+                }
+              },
+              {
+                "actor_presentation_key": "oracle_a2ad1bc6d84e4cdca026117a1234b9f29697435a563f7a1729f64d41297700aa",
+                "actor_public_agent_id": "9",
+                "pending_action": {
+                  "move_action": 0,
+                  "target_action": 0,
+                  "use_ultimate_action": 0
+                }
+              }
+            ],
+            "current_simulator_step_count": 0
+          },
           "researcher_space_kind": "global_live_researcher_space",
           "roster_agents": [
             {
@@ -9684,6 +9829,101 @@
           "source_run_generation": 0,
           "source_session_id": "test-session",
           "source_simulator_step_count": 0
+        },
+        "pending_joint_action": {
+          "action_rows": [
+            {
+              "actor_presentation_key": "oracle_5a43fff5846d29ec5606671e43f1c974e4f498a36d926bdfb853e4564b8ff2a8",
+              "actor_public_agent_id": "0",
+              "pending_action": {
+                "move_action": 0,
+                "target_action": 0,
+                "use_ultimate_action": 0
+              }
+            },
+            {
+              "actor_presentation_key": "oracle_b0173826f431a4a001f864009ea6111e9f428a06f54cf47835baff209c1aa9e7",
+              "actor_public_agent_id": "1",
+              "pending_action": {
+                "move_action": 0,
+                "target_action": 0,
+                "use_ultimate_action": 0
+              }
+            },
+            {
+              "actor_presentation_key": "oracle_bc9360d429d87df909ffcaab4d2ec7b84a03c15ef5958a84a1e3c5a27f613ad2",
+              "actor_public_agent_id": "2",
+              "pending_action": {
+                "move_action": 0,
+                "target_action": 0,
+                "use_ultimate_action": 0
+              }
+            },
+            {
+              "actor_presentation_key": "oracle_7c77db66031af98a64b61ca66e4f7eab414e983b083bfe99c810a35045f7f322",
+              "actor_public_agent_id": "3",
+              "pending_action": {
+                "move_action": 0,
+                "target_action": 0,
+                "use_ultimate_action": 0
+              }
+            },
+            {
+              "actor_presentation_key": "oracle_a645aa503381aac2598ffb91ba5760875319a72fd2c4e51277c18a3d3b02fcdb",
+              "actor_public_agent_id": "4",
+              "pending_action": {
+                "move_action": 0,
+                "target_action": 0,
+                "use_ultimate_action": 0
+              }
+            },
+            {
+              "actor_presentation_key": "oracle_6e5e9a1ddba7d376c72223d53d6e40897863cb9a596fb19863d9749f03441a1e",
+              "actor_public_agent_id": "5",
+              "pending_action": {
+                "move_action": 0,
+                "target_action": 0,
+                "use_ultimate_action": 0
+              }
+            },
+            {
+              "actor_presentation_key": "oracle_2fb5dfce412d5a37668f71f10ba87839c7eaf4e46057d1b72bad60dce56ae0dc",
+              "actor_public_agent_id": "6",
+              "pending_action": {
+                "move_action": 0,
+                "target_action": 0,
+                "use_ultimate_action": 0
+              }
+            },
+            {
+              "actor_presentation_key": "oracle_1cd909acb86ab4228ab01396d3edfabaf2eb8bc87161aa5f852077d0ef812dc6",
+              "actor_public_agent_id": "7",
+              "pending_action": {
+                "move_action": 0,
+                "target_action": 0,
+                "use_ultimate_action": 0
+              }
+            },
+            {
+              "actor_presentation_key": "oracle_f662497ae7e80ca35026aeb777f1e814d98ffd42f3e689b73db1c58afde17367",
+              "actor_public_agent_id": "8",
+              "pending_action": {
+                "move_action": 0,
+                "target_action": 0,
+                "use_ultimate_action": 0
+              }
+            },
+            {
+              "actor_presentation_key": "oracle_a00cd6a9df4b007e5b900a69905c3f95612a9c50161a2abb4675e02d4516dc26",
+              "actor_public_agent_id": "9",
+              "pending_action": {
+                "move_action": 0,
+                "target_action": 0,
+                "use_ultimate_action": 0
+              }
+            }
+          ],
+          "current_simulator_step_count": 0
         },
         "presentation_kind": "live_oracle",
         "product_kind": "combat_debugger",
@@ -19287,6 +19527,56 @@
           "inspection_kind": "editable_live_draft",
           "submission_scope": "joint_turn"
         },
+        "pending_joint_action": {
+          "action_rows": [
+            {
+              "actor_presentation_key": "oracle_15cf626b6e52faa32328cf1e6f9eb2ce6c89fe8e487bd17f4583fd6a592d81fd",
+              "actor_public_agent_id": "agent-slot-0",
+              "pending_action": {
+                "move_action": 0,
+                "target_action": 0,
+                "use_ultimate_action": 0
+              }
+            },
+            {
+              "actor_presentation_key": "oracle_a60e0df75a5f09d66101713ed0bc1d1fa2b062cbbe41526a5a2d15dfa1a9ccc7",
+              "actor_public_agent_id": "agent-slot-1",
+              "pending_action": {
+                "move_action": 0,
+                "target_action": 0,
+                "use_ultimate_action": 0
+              }
+            },
+            {
+              "actor_presentation_key": "oracle_bbf97bc0a6de8621603ce30ad21e22e980cb83a554ffb28f62880b2ef07767dd",
+              "actor_public_agent_id": "agent-slot-2",
+              "pending_action": {
+                "move_action": 0,
+                "target_action": 0,
+                "use_ultimate_action": 0
+              }
+            },
+            {
+              "actor_presentation_key": "oracle_cd6dfec8f11f0c584a8a61e3cf37e55312a6df51a5885f5d8758501d51e7f570",
+              "actor_public_agent_id": "agent-slot-5",
+              "pending_action": {
+                "move_action": 0,
+                "target_action": 0,
+                "use_ultimate_action": 0
+              }
+            },
+            {
+              "actor_presentation_key": "oracle_1a9ca9e0cb149802c7fbd3cfd7d83ceb11f880da525da1b2dca4722d75717f00",
+              "actor_public_agent_id": "agent-slot-6",
+              "pending_action": {
+                "move_action": 0,
+                "target_action": 0,
+                "use_ultimate_action": 0
+              }
+            }
+          ],
+          "current_simulator_step_count": 1
+        },
         "researcher_space_kind": "global_live_researcher_space",
         "roster_agents": [
           {
@@ -21052,6 +21342,56 @@
         "source_run_generation": 0,
         "source_session_id": "cp2-5-b-oracle",
         "source_simulator_step_count": 1
+      },
+      "pending_joint_action": {
+        "action_rows": [
+          {
+            "actor_presentation_key": "oracle_15cf626b6e52faa32328cf1e6f9eb2ce6c89fe8e487bd17f4583fd6a592d81fd",
+            "actor_public_agent_id": "agent-slot-0",
+            "pending_action": {
+              "move_action": 0,
+              "target_action": 0,
+              "use_ultimate_action": 0
+            }
+          },
+          {
+            "actor_presentation_key": "oracle_a60e0df75a5f09d66101713ed0bc1d1fa2b062cbbe41526a5a2d15dfa1a9ccc7",
+            "actor_public_agent_id": "agent-slot-1",
+            "pending_action": {
+              "move_action": 0,
+              "target_action": 0,
+              "use_ultimate_action": 0
+            }
+          },
+          {
+            "actor_presentation_key": "oracle_bbf97bc0a6de8621603ce30ad21e22e980cb83a554ffb28f62880b2ef07767dd",
+            "actor_public_agent_id": "agent-slot-2",
+            "pending_action": {
+              "move_action": 0,
+              "target_action": 0,
+              "use_ultimate_action": 0
+            }
+          },
+          {
+            "actor_presentation_key": "oracle_cd6dfec8f11f0c584a8a61e3cf37e55312a6df51a5885f5d8758501d51e7f570",
+            "actor_public_agent_id": "agent-slot-5",
+            "pending_action": {
+              "move_action": 0,
+              "target_action": 0,
+              "use_ultimate_action": 0
+            }
+          },
+          {
+            "actor_presentation_key": "oracle_1a9ca9e0cb149802c7fbd3cfd7d83ceb11f880da525da1b2dca4722d75717f00",
+            "actor_public_agent_id": "agent-slot-6",
+            "pending_action": {
+              "move_action": 0,
+              "target_action": 0,
+              "use_ultimate_action": 0
+            }
+          }
+        ],
+        "current_simulator_step_count": 1
       },
       "presentation_kind": "live_oracle",
       "product_kind": "combat_debugger",
@@ -28258,6 +28598,56 @@
           "inspection_kind": "editable_live_draft",
           "submission_scope": "joint_turn"
         },
+        "pending_joint_action": {
+          "action_rows": [
+            {
+              "actor_presentation_key": "oracle_5c59e1b75f3a94a5aaeb8a8c4fd75d4c0820485c9141d5274d5ce4b3a1919e5d",
+              "actor_public_agent_id": "agent-slot-0",
+              "pending_action": {
+                "move_action": 0,
+                "target_action": 0,
+                "use_ultimate_action": 0
+              }
+            },
+            {
+              "actor_presentation_key": "oracle_2720a3450a0e00f0b476d10aa8f3b8f9e086e0a4b7f56d619e004d726cf23ac9",
+              "actor_public_agent_id": "agent-slot-1",
+              "pending_action": {
+                "move_action": 0,
+                "target_action": 0,
+                "use_ultimate_action": 0
+              }
+            },
+            {
+              "actor_presentation_key": "oracle_76cb88526d84a9efefdee00cfee2125398ed1b7613e31a8cb1c6001bb17ca60f",
+              "actor_public_agent_id": "agent-slot-2",
+              "pending_action": {
+                "move_action": 0,
+                "target_action": 0,
+                "use_ultimate_action": 0
+              }
+            },
+            {
+              "actor_presentation_key": "oracle_1af144bc440bcb3b3cb681485131b55994a9bc56d8ec64ac79aab6b94957a8a7",
+              "actor_public_agent_id": "agent-slot-5",
+              "pending_action": {
+                "move_action": 0,
+                "target_action": 0,
+                "use_ultimate_action": 0
+              }
+            },
+            {
+              "actor_presentation_key": "oracle_0485a0eda16193782fcba264688d3415f53615f527dea3b1e3e80903dd979358",
+              "actor_public_agent_id": "agent-slot-6",
+              "pending_action": {
+                "move_action": 0,
+                "target_action": 0,
+                "use_ultimate_action": 0
+              }
+            }
+          ],
+          "current_simulator_step_count": 0
+        },
         "researcher_space_kind": "global_live_researcher_space",
         "roster_agents": [
           {
@@ -29394,6 +29784,56 @@
         "source_run_generation": 0,
         "source_session_id": "cp2-7-live-oracle-zero",
         "source_simulator_step_count": 0
+      },
+      "pending_joint_action": {
+        "action_rows": [
+          {
+            "actor_presentation_key": "oracle_c2653b621941440dde5b206b33c3127e52cdef413ba9ebc7ea612d3f3fab6706",
+            "actor_public_agent_id": "agent-slot-0",
+            "pending_action": {
+              "move_action": 0,
+              "target_action": 0,
+              "use_ultimate_action": 0
+            }
+          },
+          {
+            "actor_presentation_key": "oracle_de1e4e6831de7f2776d33e10bb360c30f0a7baa628c87aa3fcb78249631dfb4d",
+            "actor_public_agent_id": "agent-slot-1",
+            "pending_action": {
+              "move_action": 0,
+              "target_action": 0,
+              "use_ultimate_action": 0
+            }
+          },
+          {
+            "actor_presentation_key": "oracle_bee886b71cedbfd78a92de87d30855eb8aef2f75b8830c1c209659163a58e006",
+            "actor_public_agent_id": "agent-slot-2",
+            "pending_action": {
+              "move_action": 0,
+              "target_action": 0,
+              "use_ultimate_action": 0
+            }
+          },
+          {
+            "actor_presentation_key": "oracle_92cc0f67571e1f49abeb260e648eae0590f71d4efde90fe321221d41e2ab8205",
+            "actor_public_agent_id": "agent-slot-5",
+            "pending_action": {
+              "move_action": 0,
+              "target_action": 0,
+              "use_ultimate_action": 0
+            }
+          },
+          {
+            "actor_presentation_key": "oracle_239045b86371b99bca455a80707a1d495bd5c232e8e4dcee069d04ca89f19ee7",
+            "actor_public_agent_id": "agent-slot-6",
+            "pending_action": {
+              "move_action": 0,
+              "target_action": 0,
+              "use_ultimate_action": 0
+            }
+          }
+        ],
+        "current_simulator_step_count": 0
       },
       "presentation_kind": "live_oracle",
       "product_kind": "combat_debugger",

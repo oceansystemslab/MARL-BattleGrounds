@@ -944,6 +944,9 @@ export class ReplayPlaybackController {
  */
 export function replayKeyboardIntent(event) {
   if (!event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
+    if (event.key === "Escape" && !event.repeat) {
+      return "clear_selection";
+    }
     if (event.key === "ArrowLeft") {
       return "previous";
     }
@@ -962,6 +965,7 @@ export function replayKeyboardIntent(event) {
  *   root: HTMLElement,
  *   keyboardTarget: EventTarget,
  *   keyboardEnabled: () => boolean,
+ *   clearSelection: () => void,
  *   firstButton: HTMLButtonElement,
  *   backTenButton: HTMLButtonElement,
  *   previousButton: HTMLButtonElement,
@@ -1010,14 +1014,26 @@ export function bindReplayTimelineControls(elements, controller, clock = globalT
     }
     const keyboardEvent = /** @type {KeyboardEvent} */ (event);
     const target = event.target;
+    const intent = replayKeyboardIntent(keyboardEvent);
+    const clearsSelection = intent === "clear_selection";
     if (
       target instanceof Element &&
+      !clearsSelection &&
       (target.closest?.(
         'button, input, select, textarea, a[href], summary, dialog, [contenteditable]:not([contenteditable="false"]), [role="button"], [role="slider"], [role="textbox"], [role="combobox"], [role="spinbutton"], [role="menuitem"]',
       ) ??
         target.matches(
           'button, input, select, textarea, a[href], summary, dialog, [contenteditable]:not([contenteditable="false"]), [role="button"], [role="slider"], [role="textbox"], [role="combobox"], [role="spinbutton"], [role="menuitem"]',
         ))
+    ) {
+      return;
+    }
+    if (
+      clearsSelection &&
+      target instanceof Element &&
+      (target.closest?.(
+        'dialog, input, select, textarea, [contenteditable]:not([contenteditable="false"])',
+      ) ?? null) !== null
     ) {
       return;
     }
@@ -1039,12 +1055,13 @@ export function bindReplayTimelineControls(elements, controller, clock = globalT
     ) {
       return;
     }
-    const intent = replayKeyboardIntent(keyboardEvent);
     if (!intent) {
       return;
     }
     event.preventDefault();
-    if (intent === "toggle") {
+    if (intent === "clear_selection") {
+      elements.clearSelection();
+    } else if (intent === "toggle") {
       controller.toggle();
     } else {
       void controller[intent]();

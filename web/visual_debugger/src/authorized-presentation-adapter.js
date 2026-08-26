@@ -1032,6 +1032,7 @@ function authorizedPresentationActionRows(value, transition) {
       Object.freeze({
         actor_title: actorIdentity.title,
         actor_accent: actorIdentity.accent,
+        actor_team: identity.agent.team_id === 1 ? "team-a" : "team-b",
         submitted_action: submittedAction,
         accepted_action: acceptedAction,
       }),
@@ -1071,6 +1072,61 @@ export function authorizedPresentationLatestTransitionId(value) {
   return isRecord(transition) && typeof transition.incoming_transition_id === "string"
     ? transition.incoming_transition_id
     : null;
+}
+
+/** @param {unknown} value */
+export function authorizedPresentationPendingJointActionRows(value) {
+  if (!isAuthorizedPresentationFrame(value) || value.viewer_mode !== "live") {
+    return Object.freeze([]);
+  }
+  const researcher = researcherSpace(value);
+  const pending = researcher?.pending_joint_action ?? value.pending_joint_action;
+  if (!isRecord(pending) || !Array.isArray(pending.action_rows)) {
+    return Object.freeze([]);
+  }
+  const identityByPresentationKey = new Map(
+    authorizedPresentationIdentityRows(value).map((identity) => [
+      identity.presentation_key,
+      identity,
+    ]),
+  );
+  const rows = [];
+  for (const rawRow of pending.action_rows) {
+    const identity = isRecord(rawRow)
+      ? identityByPresentationKey.get(rawRow.actor_presentation_key)
+      : null;
+    const actorIdentity = exactAuthorizedAgentIdentityV1(identity?.agent);
+    const rawAction = isRecord(rawRow) ? rawRow.pending_action : null;
+    if (
+      !isRecord(rawRow) ||
+      identity === null ||
+      identity === undefined ||
+      actorIdentity === null ||
+      actorIdentity.presentationKey !== rawRow.actor_presentation_key ||
+      actorIdentity.publicAgentId !== rawRow.actor_public_agent_id ||
+      identity.public_agent_id !== rawRow.actor_public_agent_id ||
+      !isRecord(rawAction)
+    ) {
+      return Object.freeze([]);
+    }
+    const pendingAction = Object.freeze({
+      move_action: rawAction.move_action,
+      target_action: rawAction.target_action,
+      use_ultimate_action: rawAction.use_ultimate_action,
+    });
+    if (!Object.values(pendingAction).every(Number.isInteger)) {
+      return Object.freeze([]);
+    }
+    rows.push(
+      Object.freeze({
+        actor_title: actorIdentity.title,
+        actor_accent: actorIdentity.accent,
+        actor_team: identity.agent.team_id === 1 ? "team-a" : "team-b",
+        pending_action: pendingAction,
+      }),
+    );
+  }
+  return Object.freeze(rows);
 }
 
 /** @param {unknown} value */

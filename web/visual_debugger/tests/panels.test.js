@@ -9,7 +9,6 @@ import {
 } from "../src/explanations.js";
 import {
   authorizedInspectorView,
-  authorizedOutgoingTargetDescriptor,
   DebuggerPanels,
   disclosurePanelInitiallyOpen,
   rosterStatusDurationLabel,
@@ -197,15 +196,6 @@ function rosterDomHarness() {
   return { createNode, descendants, ownerDocument, textTree };
 }
 
-/** @param {Record<string, any>} descriptor @param {string} label */
-function semanticRowValue(descriptor, label) {
-  const found = descriptor.rows.find(
-    (/** @type {Record<string, any>} */ row) => row.label === label,
-  );
-  assert.ok(found, `missing semantic row ${label}`);
-  return found.value;
-}
-
 /** @param {Record<string, any>} descriptor @param {string} title */
 function semanticSection(descriptor, title) {
   const found = descriptor.sections.find(
@@ -231,7 +221,6 @@ test("authorized replay inspector keeps researcher selection separate from trans
     "replay_no_shared_obs_agent_pov",
     "replay_shared_obs_agent_pov",
   ];
-  const legalityDescriptorIds = new Set();
   const documentationBytes = new Set();
 
   for (const kind of cases) {
@@ -307,92 +296,14 @@ test("authorized replay inspector keeps researcher selection separate from trans
     );
     documentationBytes.add(JSON.stringify(inspector.owner_descriptor));
     assert.equal(inspector.owner_class_accent, "mage");
-    if (researcher) {
-      assert.equal(inspector.legality, null);
-      assert.equal(inspector.outgoing_target_descriptor, null);
-      assert.deepEqual(inspector.legality_cards, []);
-      continue;
-    }
-    assert.equal(
-      inspector.legality.owner_presentation_key,
-      inspector.owner.presentation_key,
-    );
-    assert.equal(
-      inspector.legality.owner_public_agent_id,
-      inspector.owner.public_agent_id,
-    );
-    assert.equal(inspector.legality.target_kind, "no_target");
-    assert.equal(inspector.legality.target_presentation_key, null);
-    assert.equal(inspector.legality.target_public_agent_id, null);
-    assert.equal(inspector.outgoing_target_descriptor.title, "Upcoming target");
-    assert.equal(
-      semanticRowValue(inspector.outgoing_target_descriptor, "Disclosure"),
-      "No Target",
-    );
-    assert.equal(
-      semanticRowValue(inspector.outgoing_target_descriptor, "Target"),
-      "No target",
-    );
-    assert.equal(
-      semanticRowValue(inspector.outgoing_target_descriptor, "Authorized label"),
-      inspector.legality.target_display_name,
-    );
-    assert.notEqual(
-      inspector.owner.public_agent_id,
-      inspector.legality.target_public_agent_id,
-    );
-    assert.deepEqual(
-      inspector.legality_cards.map(
-        (/** @type {Record<string, any>} */ card) => card.heading,
-      ),
-      [
-        "Basic Legality · Agent ID agent-slot-0",
-        "Ultimate Legality · Agent ID agent-slot-0",
-      ],
-    );
-    const targetAction = presentation.inspection.accepted_action.target_action;
-    const exactRow =
-      presentation.inspection.decision_mask.target_use_ultimate_joint_mask[
-        targetAction
-      ];
-    assert.equal(exactRow[0], true);
-    assert.equal(inspector.legality.basic_available, false);
-    assert.equal(inspector.legality.ultimate_available, exactRow[1]);
-    assert.deepEqual(
-      inspector.legality_cards.map((/** @type {Record<string, any>} */ card) => ({
-        lane: card.lane,
-        available: card.descriptor.rows[0].value === "True",
-      })),
-      [
-        { lane: 0, available: false },
-        { lane: 1, available: exactRow[1] },
-      ],
-    );
-    for (const card of /** @type {ReadonlyArray<Record<string, any>>} */ (
-      inspector.legality_cards
-    )) {
-      assert.equal(card.descriptor.title, card.heading);
-      assert.equal(card.descriptor.id.includes(inspector.owner.presentation_key), true);
-      assert.equal(card.descriptor.summary, null);
-      assert.equal(card.descriptor.accent, "mage");
-      assert.deepEqual(
-        card.descriptor.rows.map((/** @type {Record<string, any>} */ row) => row.label),
-        ["Status"],
-      );
-      assert.deepEqual(card.descriptor.sections, []);
-      legalityDescriptorIds.add(card.descriptor.id);
-      assert.equal(Object.isFrozen(card.descriptor), true);
-    }
+    assert.deepEqual(Object.keys(inspector), [
+      "title",
+      "owner",
+      "owner_descriptor",
+      "owner_class_accent",
+    ]);
     assert.equal(Object.isFrozen(inspector), true);
-    assert.equal(Object.isFrozen(inspector.legality_cards), true);
-    assert.equal(
-      inspector.legality_cards.every((/** @type {Record<string, any>} */ card) =>
-        Object.isFrozen(card),
-      ),
-      true,
-    );
   }
-  assert.equal(legalityDescriptorIds.size, 2);
   assert.equal(documentationBytes.size, 1);
 });
 
@@ -645,19 +556,26 @@ test("authorized replay inspector retains final selected owner without outgoing 
       "Agent ID agent-slot-0 · Mage · Team A",
     );
     assert.equal(inspector.owner_class_accent, "mage");
-    assert.equal(inspector.legality, null);
-    assert.equal(inspector.outgoing_target_descriptor, null);
-    assert.deepEqual(inspector.legality_cards, []);
+    assert.deepEqual(Object.keys(inspector), [
+      "title",
+      "owner",
+      "owner_descriptor",
+      "owner_class_accent",
+    ]);
   }
 });
 
-test("authorized live inspector uses the selected global draft while keeping battlefield geometry out of Agent panels", async () => {
+test("authorized live inspector keeps battlefield geometry out of Agent panels", async () => {
   for (const kind of ["live_oracle", "live_no_shared_obs_agent_pov"]) {
     const presentation = await normalizedPresentation(kind);
     const inspector = authorizedInspectorView(presentation);
     assert.ok(inspector);
-    assert.ok(inspector.legality);
-    assert.equal(inspector.outgoing_target_descriptor, null);
+    assert.deepEqual(Object.keys(inspector), [
+      "title",
+      "owner",
+      "owner_descriptor",
+      "owner_class_accent",
+    ]);
     if (kind === "live_no_shared_obs_agent_pov") {
       assert.equal(
         inspector.owner.public_agent_id,
@@ -676,9 +594,12 @@ test("authorized replay inspector leaves final unselected details absent", async
   assert.equal(inspector.owner, null);
   assert.equal(inspector.owner_descriptor, null);
   assert.equal(inspector.owner_class_accent, null);
-  assert.equal(inspector.legality, null);
-  assert.equal(inspector.outgoing_target_descriptor, null);
-  assert.deepEqual(inspector.legality_cards, []);
+  assert.deepEqual(Object.keys(inspector), [
+    "title",
+    "owner",
+    "owner_descriptor",
+    "owner_class_accent",
+  ]);
 });
 
 test("authorized roster exposes one native key-only action with isolated fact owners", async () => {
@@ -697,6 +618,7 @@ test("authorized roster exposes one native key-only action with isolated fact ow
     const selectionCard = binding();
     const pendingCard = binding();
     const pendingHeading = binding();
+    const pendingCount = binding();
     const pendingScope = binding();
     const diagnosticsCard = binding();
     const acceptedCard = binding();
@@ -707,7 +629,7 @@ test("authorized roster exposes one native key-only action with isolated fact ow
       rosterCount,
       selectionCard,
       pendingHeading,
-      pendingCount: binding(),
+      pendingCount,
       pendingScope,
       pendingCard,
       acceptedCard,
@@ -720,7 +642,7 @@ test("authorized roster exposes one native key-only action with isolated fact ow
     const liveOracle = await normalizedPresentation("live_oracle");
     panels.renderAuthorizedRoster(liveOracle, false);
     const liveOracleRosterCount = liveOracle.scene.agents.length;
-    assert.equal(rosterCount.textContent, `${liveOracleRosterCount} visible`);
+    assert.equal(rosterCount.textContent, `${liveOracleRosterCount} actors`);
     const oracleRows = /** @type {Record<string, any>[]} */ (
       [...panels.rosterRows.values()].filter(
         (/** @type {Record<string, any>} */ row) => "primaryButton" in row,
@@ -795,12 +717,78 @@ test("authorized roster exposes one native key-only action with isolated fact ow
 
     const liveAgent = await normalizedPresentation("live_no_shared_obs_agent_pov");
     panels.renderAuthorizedInspector(liveAgent);
-    assert.equal(pendingHeading.textContent, "Pending authorized draft");
+    assert.equal(pendingHeading.textContent, "Pending Joint Action");
     assert.equal(pendingScope.hidden, false);
     assert.equal(
       pendingScope.textContent,
-      "This panel shows the selected actor's authorized pending draft for the next submission within the global joint turn.",
+      "This panel shows the complete researcher-space joint action staged for the next submission.",
     );
+    assert.equal(
+      pendingCount.textContent,
+      `${liveAgent.researcher_space.pending_joint_action.action_rows.length} actors`,
+    );
+    const pendingRows = dom
+      .descendants(pendingCard)
+      .filter((node) => node.className === "accepted-action-row");
+    assert.equal(
+      pendingRows.length,
+      liveAgent.researcher_space.pending_joint_action.action_rows.length,
+    );
+    assert.equal(
+      pendingRows.every((row) => {
+        const text = dom.textTree(row);
+        const tuples = dom
+          .descendants(row)
+          .filter((node) => node.className === "accepted-action-tuple");
+        const comparisons = dom
+          .descendants(row)
+          .filter((node) => node.className === "accepted-action-row__comparison");
+        return (
+          /^team-[ab]$/u.test(row.dataset.team) &&
+          tuples.length === 1 &&
+          tuples[0].dataset.kind === "pending" &&
+          comparisons.length === 1 &&
+          comparisons[0].dataset.layout === "single" &&
+          text.includes("Pending") &&
+          !/Submitted|Accepted|Current Legality|Upcoming Target/u.test(text)
+        );
+      }),
+      true,
+    );
+    const scriptedRaw = structuredClone(
+      authorizedFixture.presentations.live_no_shared_obs_agent_pov,
+    );
+    const scriptedInspection = {
+      inspection_kind: "scripted_playback_inspection",
+      submission_scope: "scripted_playback",
+      editable_draft_available: false,
+      advance_semantics: "registered_script_frame",
+    };
+    scriptedRaw.source.source_submission_scope = "scripted_playback";
+    scriptedRaw.live_inspection.inspection = structuredClone(scriptedInspection);
+    scriptedRaw.researcher_space.pending_inspection =
+      structuredClone(scriptedInspection);
+    scriptedRaw.researcher_space.pending_joint_action = null;
+    const scriptedAgent = await normalizeAuthorizedPresentationFrameV1(scriptedRaw);
+    panels.renderAuthorizedInspector(scriptedAgent);
+    assert.equal(pendingHeading.textContent, "Scripted playback inspection");
+    assert.equal(pendingCount.textContent, "0 actors");
+    assert.equal(pendingCount.hidden, false);
+    assert.equal(
+      pendingScope.textContent,
+      "This live frame advances registered scripted actions and has no editable draft.",
+    );
+    assert.equal(
+      dom
+        .descendants(pendingCard)
+        .filter((node) => node.className === "accepted-action-row").length,
+      0,
+    );
+    assert.equal(
+      dom.textTree(pendingCard),
+      "No editable joint action is available during scripted playback.",
+    );
+    panels.renderAuthorizedInspector(liveAgent);
     assert.equal(
       dom
         .descendants(acceptedCard)
@@ -816,7 +804,7 @@ test("authorized roster exposes one native key-only action with isolated fact ow
     assert.equal(liveAgentRows.length, liveAgent.researcher_space.roster_agents.length);
     assert.equal(
       rosterCount.textContent,
-      `${liveAgent.researcher_space.roster_agents.length} visible`,
+      `${liveAgent.researcher_space.roster_agents.length} actors`,
     );
     assert.equal(
       [...panels.rosterTeamGroups.values()].every(
@@ -881,6 +869,10 @@ test("authorized roster exposes one native key-only action with isolated fact ow
       .filter((node) => node.className === "accepted-action-row");
     assert.equal(upcomingRows.length, 5);
     assert.match(dom.textTree(upcomingRows[0]), /Submitted.*Accepted/u);
+    assert.equal(
+      upcomingRows.every((row) => /^team-[ab]$/u.test(row.dataset.team)),
+      true,
+    );
     assert.match(
       dom.textTree(selectionCard),
       /Class Overview.*Authored Tactical Guide.*Class Mechanics/u,
@@ -1076,7 +1068,8 @@ test("authorized roster exposes one native key-only action with isolated fact ow
             titles[0].dataset.class,
           ) &&
           !Object.hasOwn(row.dataset, "presentationKey") &&
-          !Object.hasOwn(row.dataset, "transitionId")
+          !Object.hasOwn(row.dataset, "transitionId") &&
+          /^team-[ab]$/u.test(row.dataset.team)
         );
       }),
       true,
@@ -1113,58 +1106,6 @@ test("authorized roster exposes one native key-only action with isolated fact ow
   }
 });
 
-test("authorized outgoing target descriptor preserves all three disclosure kinds", () => {
-  const base = {
-    owner_presentation_key: "pov_owner",
-    owner_public_agent_id: "owner:opaque",
-    target_action: 4,
-  };
-  const cases = [
-    ["no_target", "No target", null, null, "No Target"],
-    [
-      "visible_authorized_agent",
-      "Visible body",
-      "pov_visible",
-      "visible/opaque",
-      "Visible Authorized Agent",
-    ],
-    [
-      "axis_only_authorized_agent",
-      "Axis-only body",
-      null,
-      "axis:opaque",
-      "Axis Only Authorized Agent",
-    ],
-  ];
-  for (const [kind, label, key, publicId, disclosure] of cases) {
-    const descriptor = authorizedOutgoingTargetDescriptor({
-      ...base,
-      target_kind: kind,
-      target_display_name: label,
-      target_presentation_key: key,
-      target_public_agent_id: publicId,
-    });
-    assert.ok(descriptor);
-    assert.equal(semanticRowValue(descriptor, "Disclosure"), disclosure);
-    assert.equal(
-      semanticRowValue(descriptor, "Target"),
-      kind === "no_target" ? "No target" : `Agent ID ${publicId}`,
-    );
-    assert.equal(semanticRowValue(descriptor, "Authorized label"), label);
-    assert.equal(Object.isFrozen(descriptor), true);
-  }
-  assert.equal(
-    authorizedOutgoingTargetDescriptor({
-      ...base,
-      target_kind: "axis_only_authorized_agent",
-      target_display_name: "Poisoned axis",
-      target_presentation_key: "forbidden-visible-key",
-      target_public_agent_id: "axis:opaque",
-    }),
-    null,
-  );
-});
-
 test("panel source has one branded render path and no raw fallbacks", async () => {
   const [source, styles] = await Promise.all([
     readFile(new URL("../src/panels.js", import.meta.url), "utf8"),
@@ -1199,11 +1140,13 @@ test("panel source has one branded render path and no raw fallbacks", async () =
     ".roster-actions",
     ".action-result",
     ".action-tuple",
-    ".pending-action-row__",
+    ".pending-action-list",
+    ".pending-action-row",
     ".pending-action-chip",
     ".diagnostic-fact",
-    "#accepted-card .action-card__label",
-    ".pending-action-row:focus-visible",
+    ".action-card__label",
+    ".selected-outgoing-target",
+    ".selected-legality",
     ".roster-row:focus-visible",
     ".event-item strong",
   ]) {
@@ -1213,10 +1156,11 @@ test("panel source has one branded render path and no raw fallbacks", async () =
 
 test("authorized inspector copy separates live draft and replay upcoming epochs", async () => {
   const source = await readFile(new URL("../src/panels.js", import.meta.url), "utf8");
-  assert.match(source, /authorized pending draft for the next submission/u);
+  assert.match(source, /complete researcher-space joint action staged/u);
   assert.match(source, /authorized recorded actions out of the current frame/u);
-  assert.match(source, /Draft range, target, and legality overlays/u);
+  assert.match(source, /Pending Joint Action/u);
   assert.match(source, /Upcoming Transition/u);
+  assert.doesNotMatch(source, /Current Legality|Upcoming Target/u);
   assert.doesNotMatch(
     source,
     /Recorded outgoing inspection|No (?:authorized )?outgoing inspection/u,

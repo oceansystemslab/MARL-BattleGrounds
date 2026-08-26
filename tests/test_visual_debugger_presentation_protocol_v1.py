@@ -41,6 +41,9 @@ from scripts.dev.visual_debugger.presentation_protocol import (
     LiveOracleInspectionEnvelopeV1,
     LiveOraclePresentationSourceIdentityV1,
     LiveOracleTechnicalFrameV1,
+    LivePendingActionTupleV1,
+    LivePendingJointActionRowV1,
+    LivePendingJointActionV1,
     LiveScriptedPlaybackInspectionV1,
     MovementActionDisplayRowV1,
     NoSharedObsLatestTransitionV1,
@@ -468,6 +471,28 @@ def _agent_latest_transition(
     )
 
 
+def _neutral_pending_joint_action(
+    endpoint: OracleAuthorizedCurrentEndpointV1,
+    *,
+    simulator_step_count: int,
+) -> LivePendingJointActionV1:
+    return LivePendingJointActionV1(
+        current_simulator_step_count=simulator_step_count,
+        action_rows=tuple(
+            LivePendingJointActionRowV1(
+                actor_presentation_key=agent.presentation_key,
+                actor_public_agent_id=agent.public_agent_id,
+                pending_action=LivePendingActionTupleV1(
+                    move_action=0,
+                    target_action=0,
+                    use_ultimate_action=0,
+                ),
+            )
+            for agent in endpoint.scene.agents
+        ),
+    )
+
+
 def _shared_latest_transition(
     cases: _InspectionCases,
     *,
@@ -655,6 +680,10 @@ def five_frames(
         current_endpoint=live_oracle_endpoint,
         latest_events=replay_oracle.latest_events,
         latest_transition=replay_oracle.latest_transition,
+        pending_joint_action=_neutral_pending_joint_action(
+            live_oracle_endpoint,
+            simulator_step_count=no_shared.frames[1].simulator_step_count,
+        ),
         technical_frame=LiveOracleTechnicalFrameV1(
             technical_kind="live_oracle_technical_frame",
             episode_id=no_shared.context.identity.episode_id,
@@ -1356,6 +1385,10 @@ def _live_oracle_at(
         current_endpoint=endpoint,
         latest_events=replay_projection.latest_events,
         latest_transition=replay_projection.latest_transition,
+        pending_joint_action=_neutral_pending_joint_action(
+            endpoint,
+            simulator_step_count=trajectory.frames[frame_index].simulator_step_count,
+        ),
         technical_frame=LiveOracleTechnicalFrameV1(
             technical_kind="live_oracle_technical_frame",
             episode_id=trajectory.context.identity.episode_id,
@@ -3114,8 +3147,8 @@ def test_every_serialized_presentation_key_is_recomputed_for_its_authority(
         AuthorizedPresentationFrameV1
     )
     expected_counts = {
-        "live_oracle": 53,
-        "live_no_shared_obs_agent_pov": 57,
+        "live_oracle": 58,
+        "live_no_shared_obs_agent_pov": 62,
         "replay_oracle": 58,
         "replay_no_shared_obs_agent_pov": 62,
         "replay_shared_obs_agent_pov": 77,

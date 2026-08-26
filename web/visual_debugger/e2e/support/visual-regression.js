@@ -443,25 +443,6 @@ export async function expectActivationPairs(page, expected) {
 }
 
 /**
- * @param {import("@playwright/test").Page} page
- * @param {{pending: string, accepted: string}} expected
- */
-export async function assertHudStoryLabels(page, expected) {
-  await expect(page.locator("#pending-card .action-card__label")).toHaveText(
-    expected.pending,
-  );
-  if (expected.accepted === "No transition yet.") {
-    await expect(page.locator("#accepted-card .empty-copy")).toHaveText(
-      expected.accepted,
-    );
-  } else {
-    await expect(page.locator("#accepted-card .action-card__label")).toHaveText(
-      expected.accepted,
-    );
-  }
-}
-
-/**
  * Every durable dock that survived the deterministic suppression policy must
  * explicitly report collision-free placement.
  *

@@ -407,7 +407,7 @@
         <details id="roster-details" class="hud-section" open>
           <summary class="section-heading">
             <strong id="roster-heading" class="section-title">Roster</strong>
-            <span id="roster-count" class="count-badge">0 visible</span>
+            <span id="roster-count" class="count-badge">0 actors</span>
           </summary>
           <div id="roster-details-body" class="disclosure-body" data-disclosure-body="roster-details">
             <div id="roster" class="roster">
@@ -427,7 +427,7 @@
 
         <details id="pending-turn-details" class="hud-section">
           <summary class="section-heading">
-            <strong id="pending-heading" class="section-title">Pending joint turn</strong>
+            <strong id="pending-heading" class="section-title">Pending Joint Action</strong>
             <span id="pending-count" class="count-badge">0 actors</span>
           </summary>
           <div
@@ -630,7 +630,9 @@
             recorded frame; it cannot submit an action or advance the simulator.
           </p>
           <dl class="help-grid">
-            <dt>Left / Right</dt><dd>Go to the previous / next captured tick</dd>
+            <dt>LEFT ARROW / RIGHT ARROW</dt>
+            <dd>Go to the previous / next captured tick</dd>
+            <dt>Escape</dt><dd>Clear the selected agent</dd>
             <dt>Space</dt><dd>Play or pause serialized replay</dd>
             <dt>Frame slider</dt><dd>Preview without a request; commit one exact seek</dd>
             <dt>Playback speed</dt><dd>Scale the complete replay presentation clock</dd>

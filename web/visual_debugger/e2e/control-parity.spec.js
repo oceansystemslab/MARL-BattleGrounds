@@ -327,7 +327,16 @@ test("authorized draft edit and rapid Submit install exactly one successor", asy
     page.locator("#battlefield .agent[data-presentation-key]"),
   ).not.toHaveCount(0);
 
-  const draftLabel = page.locator("#pending-card .action-card__label");
+  const controlledActor = await page.locator("#command-controlled-actor").textContent();
+  const controlledPublicId = controlledActor?.match(/Agent ID ([^ ·]+)/u)?.[1];
+  if (controlledPublicId === undefined) {
+    throw new Error("Controlled actor identity is unavailable.");
+  }
+  const draftLabel = page
+    .locator("#pending-card .accepted-action-row")
+    .filter({ hasText: `Agent ID ${controlledPublicId} ·` })
+    .locator(".accepted-action-tuple__value");
+  await expect(draftLabel).toHaveCount(1);
   const draftBefore = await draftLabel.textContent();
   if (draftBefore === null || draftBefore.length === 0) {
     throw new Error("Authorized draft label is unavailable.");

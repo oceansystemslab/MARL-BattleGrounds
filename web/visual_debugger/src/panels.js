@@ -3,6 +3,7 @@ import {
   authorizedPresentationHasResearcherSpace,
   authorizedPresentationIdentityRows,
   authorizedPresentationLatestTransitionId,
+  authorizedPresentationPendingJointActionRows,
   authorizedPresentationResearcherInspectionState,
   authorizedPresentationResearcherSceneView,
   authorizedPresentationSceneView,
@@ -15,7 +16,6 @@ import { formatCompactDisplayNumber, formatDisplayNumber } from "./display.js";
 import {
   explainAgent,
   explainClassDocumentation,
-  explainLegality,
   explainModifier,
   explainPovAgent,
   explainPovStatus,
@@ -23,11 +23,7 @@ import {
   explainTechnicalFact,
 } from "./explanations.js";
 import { createSvgIcon } from "./icons.js";
-import {
-  createSemanticDescriptor,
-  registerTooltipOwner,
-  renderSemanticDescriptor,
-} from "./tooltip.js";
+import { registerTooltipOwner, renderSemanticDescriptor } from "./tooltip.js";
 import { classTokenFromId, resolveVisualToken, teamTokenFromId } from "./vocabulary.js";
 
 /**
@@ -162,86 +158,6 @@ export function renderSemanticInspector(container, descriptor) {
 }
 
 /**
- * @param {unknown} descriptor
- * @param {string} className
- */
-function semanticPanelCard(descriptor, className) {
-  const card = htmlElement("article", className);
-  const title = htmlElement("h3");
-  const details = htmlElement("div", "semantic-panel-card__details");
-  card.append(title, details);
-  renderSemanticDescriptor({ descriptor, title, details, surface: "full" });
-  return card;
-}
-
-/**
- * Build the separate outgoing-target disclosure from an already-certified
- * legality projection. This helper is not an authorization boundary; its
- * production caller supplies only the legality joined from a branded
- * presentation.
- *
- * @param {unknown} rawLegality
- * @returns {ReturnType<typeof createSemanticDescriptor> | null}
- */
-export function authorizedOutgoingTargetDescriptor(rawLegality) {
-  const legality = isRecord(rawLegality) ? rawLegality : null;
-  if (
-    legality === null ||
-    typeof legality.owner_presentation_key !== "string" ||
-    typeof legality.owner_public_agent_id !== "string" ||
-    !Number.isInteger(legality.target_action) ||
-    typeof legality.target_display_name !== "string" ||
-    !["no_target", "visible_authorized_agent", "axis_only_authorized_agent"].includes(
-      legality.target_kind,
-    ) ||
-    (legality.target_kind === "no_target" &&
-      (legality.target_presentation_key !== null ||
-        legality.target_public_agent_id !== null)) ||
-    (legality.target_kind === "visible_authorized_agent" &&
-      (typeof legality.target_presentation_key !== "string" ||
-        typeof legality.target_public_agent_id !== "string")) ||
-    (legality.target_kind === "axis_only_authorized_agent" &&
-      (legality.target_presentation_key !== null ||
-        typeof legality.target_public_agent_id !== "string"))
-  ) {
-    return null;
-  }
-  const targetIdentity =
-    legality.target_kind === "no_target"
-      ? "No target"
-      : `Agent ID ${legality.target_public_agent_id}`;
-  return createSemanticDescriptor({
-    kind: "action",
-    id: `outgoing-target:${legality.owner_presentation_key}:${legality.target_action}:${legality.target_kind}`,
-    title: "Upcoming target",
-    tone: "information",
-    accent: "none",
-    summary:
-      "This target disclosure belongs to the selected agent's authorized upcoming transition.",
-    rows: [
-      {
-        label: "Disclosure",
-        value: humanize(legality.target_kind),
-        metadata: { compact: true, full: true },
-      },
-      {
-        label: "Target",
-        value: targetIdentity,
-        metadata: { compact: true, full: true },
-      },
-      {
-        label: "Authorized label",
-        value: legality.target_display_name,
-        metadata: { compact: true, full: true },
-      },
-    ],
-    sections: [],
-    metadata: { compact: true, full: true },
-    anchor: "element",
-  });
-}
-
-/**
  * Join one already-authorized inspected owner to exactly one serialized class
  * mechanics row. Neither class name nor numeric-looking values are coerced.
  *
@@ -266,10 +182,10 @@ function exactOwnerClassMechanics(owner, rawClassMechanics) {
 }
 
 /**
- * Project the authorized Agent Details surface without consulting raw
- * transport, outgoing target identity, or recipient fallbacks. The selected
- * actor owns current details; its separately certified outgoing mask row owns
- * Basic and Ultimate legality even when the target has no visible body.
+ * Project the authorized Agent Details class-documentation surface without
+ * consulting raw transport, outgoing target identity, or recipient fallbacks.
+ * The selected actor owns the returned identity and class descriptor; command
+ * and battlefield legality remain with their dedicated consumers.
  *
  * @param {unknown} presentation
  * @param {string | null | undefined} [localInspectedPresentationKey]
@@ -304,66 +220,19 @@ export function authorizedInspectorView(
       : (agents.find((agent) => agent.presentation_key === ownerKey) ?? null);
   const ownerMechanics =
     owner === null ? null : exactOwnerClassMechanics(owner, scene.class_mechanics);
-  const candidateLegality = isRecord(scene.selected_legality)
-    ? scene.selected_legality
-    : null;
-  const joinedLegality =
-    owner !== null &&
-    candidateLegality !== null &&
-    candidateLegality.owner_presentation_key === owner.presentation_key &&
-    candidateLegality.owner_public_agent_id === owner.public_agent_id
-      ? candidateLegality
-      : null;
-  const outgoingTargetDescriptor =
-    joinedLegality === null || presentation.viewer_mode !== "replay"
-      ? null
-      : authorizedOutgoingTargetDescriptor(joinedLegality);
-  const legality =
-    presentation.viewer_mode === "replay" && outgoingTargetDescriptor === null
-      ? null
-      : joinedLegality;
   const ownerDescriptor =
     owner === null || ownerMechanics === null
       ? null
       : explainClassDocumentation(owner, ownerMechanics);
   const ownerClassAccent =
     owner === null ? null : classTokenFromId(owner.class_id).cssKey;
-  const legalityCards =
-    legality === null || owner === null
-      ? Object.freeze([])
-      : Object.freeze(
-          /** @type {const} */ ([0, 1])
-            .map((lane) => {
-              const explanation = explainLegality(legality, lane, owner);
-              return explanation === null
-                ? null
-                : Object.freeze({
-                    lane,
-                    heading: explanation.title,
-                    descriptor: explanation,
-                  });
-            })
-            .filter((card) => card !== null),
-        );
 
   return Object.freeze({
     title: "Comprehensive Agent Class Details",
     owner,
     owner_descriptor: ownerDescriptor,
     owner_class_accent: ownerClassAccent,
-    legality,
-    outgoing_target_descriptor: outgoingTargetDescriptor,
-    legality_cards: legalityCards,
   });
-}
-
-/**
- * @param {unknown} value
- */
-function humanize(value) {
-  return String(value)
-    .replaceAll("_", " ")
-    .replace(/\b\w/g, (character) => character.toUpperCase());
 }
 
 /**
@@ -401,7 +270,7 @@ function addFact(container, label, value) {
 }
 
 /**
- * @param {"Submitted" | "Accepted"} label
+ * @param {"Submitted" | "Accepted" | "Pending"} label
  * @param {Record<string, any>} action
  */
 function authorizedTransitionTuple(label, action) {
@@ -419,15 +288,17 @@ function authorizedTransitionTuple(label, action) {
 }
 
 /**
- * Render accepted action rows with one shared grammar for the incoming and
- * selected-actor upcoming transition panels.
+ * Render action rows with one shared grammar for pending, incoming, and
+ * upcoming researcher-space panels.
  *
  * @param {ReadonlyArray<Record<string, any>>} rows
+ * @param {boolean} [pending]
  */
-function authorizedTransitionList(rows) {
+function authorizedTransitionList(rows, pending = false) {
   const list = htmlElement("ol", "accepted-action-list");
   for (const transition of rows) {
     const item = htmlElement("li", "accepted-action-row");
+    item.dataset.team = transition.actor_team;
     const title = htmlElement(
       "h3",
       "accepted-action-row__title",
@@ -435,10 +306,17 @@ function authorizedTransitionList(rows) {
     );
     title.dataset.class = transition.actor_accent;
     const comparison = htmlElement("div", "accepted-action-row__comparison");
-    comparison.append(
-      authorizedTransitionTuple("Submitted", transition.submitted_action),
-      authorizedTransitionTuple("Accepted", transition.accepted_action),
-    );
+    comparison.dataset.layout = pending ? "single" : "comparison";
+    if (pending) {
+      comparison.append(
+        authorizedTransitionTuple("Pending", transition.pending_action),
+      );
+    } else {
+      comparison.append(
+        authorizedTransitionTuple("Submitted", transition.submitted_action),
+        authorizedTransitionTuple("Accepted", transition.accepted_action),
+      );
+    }
     item.append(title, comparison);
     list.append(item);
   }
@@ -588,8 +466,6 @@ export class DebuggerPanels {
     this.ensureRosterTeamGroup(2);
     this.ensureRosterVisibilityGroup("visible");
     this.ensureRosterVisibilityGroup("not-visible");
-    this.pendingLabel = htmlElement("p", "action-card__label");
-    this.pendingList = htmlElement("ol", "pending-action-list");
   }
 
   /**
@@ -741,7 +617,7 @@ export class DebuggerPanels {
     ).length;
     this.rosterCount.textContent = visibilityGroupedRoster
       ? `${identities.length} agents · ${visibleCount} visible · ${identities.length - visibleCount} not visible`
-      : `${identities.length} visible`;
+      : `${identities.length} ${identities.length === 1 ? "actor" : "actors"}`;
     /** @type {Map<number, HTMLElement[]>} */
     const desiredByTeam = new Map();
     /** @type {Map<string, HTMLElement[]>} */
@@ -898,11 +774,13 @@ export class DebuggerPanels {
     );
     const inspectionState =
       authorizedPresentationResearcherInspectionState(presentation);
-    const inspection = inspectionState.inspection;
     const replay = presentation.viewer_mode === "replay";
     const upcomingRows = replay
       ? authorizedPresentationUpcomingTransitionRows(presentation)
       : [];
+    const pendingRows = replay
+      ? []
+      : authorizedPresentationPendingJointActionRows(presentation);
     this.selectionCard.replaceChildren();
     if (inspector === null || inspector.owner_descriptor === null) {
       this.selectionCard.append(
@@ -919,7 +797,7 @@ export class DebuggerPanels {
     }
     this.pendingCard.dataset.inspectionState = inspectionState.state_kind;
     this.pendingHeading.textContent = {
-      live_editable: "Pending authorized draft",
+      live_editable: "Pending Joint Action",
       live_scripted: "Scripted playback inspection",
       replay_outgoing: "Upcoming Transition",
       replay_none: "Upcoming Transition",
@@ -927,83 +805,39 @@ export class DebuggerPanels {
     }[inspectionState.state_kind];
     this.pendingCount.hidden = replay;
     this.pendingScope.hidden = replay;
-    this.pendingCount.textContent = inspection ? "1 actor" : "0 actors";
+    this.pendingCount.textContent = `${pendingRows.length} ${pendingRows.length === 1 ? "actor" : "actors"}`;
     this.pendingScope.textContent =
       inspectionState.state_kind === "live_scripted"
         ? "This live frame advances registered scripted actions and has no editable draft."
         : inspectionState.state_kind === "live_editable"
-          ? "This panel shows the selected actor's authorized pending draft for the next submission within the global joint turn."
+          ? "This panel shows the complete researcher-space joint action staged for the next submission."
           : inspectionState.state_kind === "replay_outgoing"
             ? "This panel shows the authorized recorded actions out of the current frame."
             : inspectionState.state_kind === "replay_none"
               ? "No upcoming transition is available at this replay frame."
               : "Inspection is unavailable for this frame.";
-    const action =
-      inspection?.inspection_kind === "live_draft_action"
-        ? inspection.draft_action
-        : inspection?.inspection_kind === "replay_recorded_outgoing_action"
-          ? inspection.accepted_action
-          : null;
     if (replay) {
       this.pendingCard.replaceChildren(
         upcomingRows.length > 0
           ? authorizedTransitionList(upcomingRows)
           : htmlElement("p", "empty-copy", "No upcoming transition is available."),
       );
+    } else if (inspectionState.state_kind === "live_editable") {
+      this.pendingCard.replaceChildren(
+        pendingRows.length > 0
+          ? authorizedTransitionList(pendingRows, true)
+          : htmlElement("p", "empty-copy", "No pending joint action is available."),
+      );
     } else {
-      this.pendingLabel.textContent =
-        action === null || inspection === null
-          ? "NO PENDING INSPECTION"
-          : `${inspection.actor_public_agent_id} · move ${action.move_action} · target ${action.target_action} · ${action.armed_lane}`;
-      this.pendingList.replaceChildren(
+      this.pendingCard.replaceChildren(
         htmlElement(
-          "li",
-          action === null ? "empty-copy" : "pending-action-row",
-          action === null
-            ? "No pending action."
-            : "Draft range, target, and legality overlays use this pending branch only.",
+          "p",
+          "empty-copy",
+          inspectionState.state_kind === "live_scripted"
+            ? "No editable joint action is available during scripted playback."
+            : "No pending joint action is available.",
         ),
       );
-      this.pendingCard.replaceChildren(this.pendingLabel, this.pendingList);
-    }
-    if (
-      !replay &&
-      inspector !== null &&
-      inspector.owner !== null &&
-      inspector.outgoing_target_descriptor !== null &&
-      inspector.legality !== null
-    ) {
-      const outgoingTarget = semanticPanelCard(
-        inspector.outgoing_target_descriptor,
-        "selected-outgoing-target",
-      );
-      outgoingTarget.dataset.targetKind = inspector.legality.target_kind;
-      outgoingTarget.setAttribute(
-        "aria-label",
-        `Upcoming target disclosure for Agent ID ${inspector.owner.public_agent_id}`,
-      );
-      this.pendingCard.append(outgoingTarget);
-    }
-    if (
-      !replay &&
-      inspector !== null &&
-      inspector.owner !== null &&
-      inspector.legality_cards.length > 0
-    ) {
-      const selectedLegality = htmlElement("section", "selected-legality");
-      selectedLegality.setAttribute(
-        "aria-label",
-        `Exact actor-owned Basic and Ultimate legality for Agent ID ${inspector.owner.public_agent_id}`,
-      );
-      selectedLegality.append(htmlElement("h3", null, "Current legality"));
-      const legalityFacts = htmlElement("div", "selected-legality__facts");
-      for (const card of inspector.legality_cards) {
-        legalityFacts.append(
-          semanticPanelCard(card.descriptor, "selected-legality__lane"),
-        );
-      }
-      selectedLegality.append(legalityFacts);
-      this.pendingCard.append(selectedLegality);
     }
 
     const transitionRows = authorizedPresentationTransitionRows(presentation);
@@ -1078,7 +912,7 @@ export class DebuggerPanels {
       group.count.textContent = "0 agents";
       this.reconcileChildren(group.rows, [group.empty]);
     }
-    this.rosterCount.textContent = "0 visible";
+    this.rosterCount.textContent = "0 actors";
 
     this.selectionCard.replaceChildren(
       htmlElement("p", "empty-copy", "No authorized agent details are available."),

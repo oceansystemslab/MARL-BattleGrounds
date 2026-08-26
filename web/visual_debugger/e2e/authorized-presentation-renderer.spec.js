@@ -1693,6 +1693,214 @@ test("authorized regeneration paints packed successor plus cues while reset stay
   expect(result.routeChildCount).toBe(0);
 });
 
+test("shared painter removes cooldown start clutter and keeps clear trap and poison semantics", async ({
+  page,
+}) => {
+  const raw = structuredClone(fixture.presentations.replay_oracle);
+  const transitionId = raw.latest_events.incoming_transition_id;
+  const agentsByKey = new Map(
+    raw.current_endpoint.scene.agents.map(
+      (/** @type {Record<string, any>} */ agent) => [agent.presentation_key, agent],
+    ),
+  );
+  /** @param {number} classId @param {"transition_start" | "successor"} phase */
+  const anchor = (classId, phase) => {
+    const trajectory = raw.latest_events.agent_phase_trajectories.find(
+      (/** @type {Record<string, any>} */ candidate) =>
+        agentsByKey.get(candidate.agent_presentation_key)?.class_id === classId,
+    );
+    if (!trajectory) {
+      throw new Error(`Oracle class ${classId} trajectory is unavailable.`);
+    }
+    return structuredClone(trajectory[phase]);
+  };
+  const specifications = [
+    {
+      event_kind: "ability_activated",
+      ability_component: "ultimate",
+      source_anchor: anchor(4, "transition_start"),
+      recipient_anchor: anchor(3, "transition_start"),
+      phase_rank: 20,
+    },
+    {
+      event_kind: "cooldown_started",
+      agent_anchor: anchor(4, "transition_start"),
+      phase_rank: 60,
+    },
+    {
+      event_kind: "cooldown_ready",
+      agent_anchor: anchor(4, "transition_start"),
+      phase_rank: 60,
+    },
+    {
+      event_kind: "status_broken_by_damage",
+      recipient_anchor: anchor(3, "successor"),
+      status_channel: 4,
+      status_id: "hunter_trap_stun",
+      phase_rank: 100,
+    },
+  ];
+  raw.latest_events.events = specifications.map((event, ordinal) => ({
+    ...event,
+    event_id: `${transitionId}:event:${String(ordinal).padStart(4, "0")}`,
+    ordinal,
+  }));
+  raw.latest_events.event_count = raw.latest_events.events.length;
+  raw.latest_events.ordered_event_ids = raw.latest_events.events.map(
+    (/** @type {Record<string, any>} */ event) => event.event_id,
+  );
+  raw.latest_events.ordered_event_kinds = raw.latest_events.events.map(
+    (/** @type {Record<string, any>} */ event) => event.event_kind,
+  );
+
+  await page.goto(origin);
+  const result = await page.evaluate(async (rawPresentation) => {
+    const moduleRoot = "/src";
+    const { normalizeAuthorizedPresentationFrameV1 } = await import(
+      `${moduleRoot}/authorized-presentation-normalizer.js`
+    );
+    const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+    const { buildChoreographyPlan } = await import(
+      `${moduleRoot}/choreography-plan.js`
+    );
+    const { SvgChoreographyPainter } = await import(
+      `${moduleRoot}/choreography-painter.js`
+    );
+    const presentation = await normalizeAuthorizedPresentationFrameV1(rawPresentation);
+    const battlefield = document.querySelector("#battlefield");
+    const empty = document.querySelector("#empty");
+    if (!(battlefield instanceof SVGSVGElement) || !(empty instanceof HTMLElement)) {
+      throw new Error("Shared cue test surface is unavailable.");
+    }
+    const renderer = new BattlefieldRenderer({ battlefield, empty });
+    renderer.render(presentation, { showRanges: false });
+    const surface = renderer.choreographySurface();
+    const plan = buildChoreographyPlan(presentation, surface);
+    if (surface === null || plan === null) {
+      throw new Error("Authorized shared cue choreography is unavailable.");
+    }
+    new SvgChoreographyPainter().install(plan, surface, {
+      motionMode: "off",
+      settled: false,
+      persistentOnly: false,
+    });
+    const planEvents = /** @type {Record<string, any>[]} */ (plan.events);
+    const cooldownStarted = planEvents.find(
+      (event) => event.cueSemantic === "cooldown_started",
+    );
+    const cooldownReady = planEvents.find(
+      (event) => event.cueSemantic === "cooldown_ready",
+    );
+    if (!cooldownStarted || !cooldownReady) {
+      throw new Error("Cooldown plan events are unavailable.");
+    }
+    const poisonEffect = battlefield.querySelector(
+      '.combat-effect--activation[data-token-id="rogue_poison"]',
+    );
+    const impact = poisonEffect?.querySelector(".combat-impact");
+    const dagger = poisonEffect?.querySelector(".combat-poison__dagger");
+    const damageLine = poisonEffect?.querySelector(
+      ".combat-impact__semantic--damage > line",
+    );
+    const trapEffect = battlefield.querySelector(
+      '.combat-effect--status-lifecycle[data-lifecycle="trap_broken"]',
+    );
+    if (
+      !(poisonEffect instanceof SVGElement) ||
+      !(impact instanceof SVGElement) ||
+      !(dagger instanceof SVGSVGElement) ||
+      !(damageLine instanceof SVGLineElement) ||
+      !(trapEffect instanceof SVGElement)
+    ) {
+      throw new Error("Trap or poisoned-dagger cue is unavailable.");
+    }
+
+    const forgedStartPlan = {
+      ...plan,
+      events: [
+        {
+          ...cooldownReady,
+          eventId: `${cooldownReady.eventId}:defense`,
+          eventType: "cooldown_started",
+          cueSemantic: "cooldown_started",
+          paintParts: { effect: true },
+          presentationSuppressed: false,
+          spatial: true,
+        },
+      ],
+    };
+    const defensiveInstallation = new SvgChoreographyPainter().install(
+      forgedStartPlan,
+      surface,
+      {
+        motionMode: "off",
+        settled: false,
+        persistentOnly: false,
+      },
+    );
+    return {
+      cooldownStartedPlan: {
+        paintParts: cooldownStarted.paintParts,
+        presentationSuppressed: cooldownStarted.presentationSuppressed,
+        spatial: cooldownStarted.spatial,
+        anchor: cooldownStarted.anchor,
+      },
+      cooldownReadyPlan: {
+        paintParts: cooldownReady.paintParts,
+        presentationSuppressed: cooldownReady.presentationSuppressed,
+        spatial: cooldownReady.spatial,
+        hasAnchor: cooldownReady.anchor !== null,
+      },
+      cooldownStartedDomCount: battlefield.querySelectorAll(
+        '[data-cue-semantic="cooldown_started"]',
+      ).length,
+      cooldownReadyDomCount: battlefield.querySelectorAll(
+        '[data-cue-semantic="cooldown_ready"] .combat-semantic-pulse__mark',
+      ).length,
+      defensiveEventNodeCount: defensiveInstallation.eventNodes.size,
+      poison: {
+        icon: dagger.getAttribute("data-icon"),
+        rightEdge: dagger.x.baseVal.value + dagger.width.baseVal.value,
+        damageMarkLeftEdge: damageLine.x1.baseVal.value,
+        splashCount: poisonEffect.querySelectorAll(".combat-poison__splash").length,
+        flareCount: poisonEffect.querySelectorAll(".combat-poison__flare").length,
+      },
+      trap: {
+        statusIconCount: trapEffect.querySelectorAll(".combat-lifecycle__status-icon")
+          .length,
+        changeBadgeCount: trapEffect.querySelectorAll(".combat-lifecycle__change")
+          .length,
+        shardCount: trapEffect.querySelectorAll(".combat-lifecycle__shard").length,
+      },
+    };
+  }, raw);
+
+  expect(result.cooldownStartedPlan).toEqual({
+    paintParts: { effect: false },
+    presentationSuppressed: true,
+    spatial: false,
+    anchor: null,
+  });
+  expect(result.cooldownReadyPlan).toEqual({
+    paintParts: { effect: true },
+    presentationSuppressed: false,
+    spatial: true,
+    hasAnchor: true,
+  });
+  expect(result.cooldownStartedDomCount).toBe(0);
+  expect(result.cooldownReadyDomCount).toBe(1);
+  expect(result.defensiveEventNodeCount).toBe(0);
+  expect(result.poison.icon).toBe("activation-poison");
+  expect(result.poison.rightEdge).toBeLessThanOrEqual(result.poison.damageMarkLeftEdge);
+  expect(result.poison.splashCount).toBe(1);
+  expect(result.poison.flareCount).toBe(0);
+  expect(result.trap).toEqual({
+    statusIconCount: 1,
+    changeBadgeCount: 0,
+    shardCount: 6,
+  });
+});
+
 test("authorized death, team waves, and resurrection retain outward settled geometry", async ({
   page,
 }) => {

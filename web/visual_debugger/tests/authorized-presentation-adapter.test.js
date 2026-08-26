@@ -11,6 +11,7 @@ import {
   authorizedPresentationIncomingRows,
   authorizedPresentationInspection,
   authorizedPresentationInspectionState,
+  authorizedPresentationPendingJointActionRows,
   authorizedPresentationPreferenceKey,
   authorizedPresentationResearcherInspectionState,
   authorizedPresentationResearcherSceneView,
@@ -1237,6 +1238,7 @@ test("Agent visual events, local evidence, Submitted/Accepted, Technical Frame, 
   assert.deepEqual(Object.keys(transition[0]), [
     "actor_title",
     "actor_accent",
+    "actor_team",
     "submitted_action",
     "accepted_action",
   ]);
@@ -1282,6 +1284,7 @@ test("Latest Transition is exact for all five leaves and empty at frame zero", a
   const exactKeys = [
     "actor_title",
     "actor_accent",
+    "actor_team",
     "submitted_action",
     "accepted_action",
   ];
@@ -1297,6 +1300,7 @@ test("Latest Transition is exact for all five leaves and empty at frame zero", a
         /^Agent ID .+ · (?:Mage|Warrior|Hunter|Rogue|Priest) · Team [AB]$/u,
       );
       assert.match(row.actor_accent, /^(?:mage|warrior|hunter|rogue|priest)$/u);
+      assert.match(row.actor_team, /^team-[ab]$/u);
       assert.equal(Object.isFrozen(row.submitted_action), true);
       assert.equal(Object.isFrozen(row.accepted_action), true);
       assert.deepEqual(Object.keys(row.submitted_action), [
@@ -1366,6 +1370,7 @@ test("Upcoming Transition is the exact authority-scoped transition out of the cu
       assert.deepEqual(Object.keys(row), [
         "actor_title",
         "actor_accent",
+        "actor_team",
         "submitted_action",
         "accepted_action",
       ]);
@@ -1377,6 +1382,7 @@ test("Upcoming Transition is the exact authority-scoped transition out of the cu
         row.actor_title,
         /^Agent ID .+ · (?:Mage|Warrior|Hunter|Rogue|Priest) · Team [AB]$/u,
       );
+      assert.match(row.actor_team, /^team-[ab]$/u);
       assert.equal(Object.isFrozen(row), true);
     }
     assert.equal(rows.length, 5, frame.presentation_kind);
@@ -1409,6 +1415,55 @@ test("Upcoming Transition is the exact authority-scoped transition out of the cu
     authorizedPresentationUpcomingTransitionRows({ ...replayCases[0] }),
     [],
   );
+});
+
+test("Pending Joint Action is one exact researcher-space row per live actor", async () => {
+  const oracle = await normalized("live_oracle");
+  const agent = await normalized("live_no_shared_obs_agent_pov");
+  const oracleRows = authorizedPresentationPendingJointActionRows(oracle);
+  const agentRows = authorizedPresentationPendingJointActionRows(agent);
+  assert.equal(oracleRows.length, oracle.pending_joint_action.action_rows.length);
+  assert.equal(
+    agentRows.length,
+    agent.researcher_space.pending_joint_action.action_rows.length,
+  );
+  assert.deepEqual(agentRows, oracleRows);
+  for (const row of oracleRows) {
+    assert.deepEqual(Object.keys(row), [
+      "actor_title",
+      "actor_accent",
+      "actor_team",
+      "pending_action",
+    ]);
+    assert.match(
+      row.actor_title,
+      /^Agent ID .+ · (?:Mage|Warrior|Hunter|Rogue|Priest) · Team [AB]$/u,
+    );
+    assert.match(row.actor_accent, /^(?:mage|warrior|hunter|rogue|priest)$/u);
+    assert.match(row.actor_team, /^team-[ab]$/u);
+    assert.deepEqual(Object.keys(row.pending_action), [
+      "move_action",
+      "target_action",
+      "use_ultimate_action",
+    ]);
+    assert.equal(Object.isFrozen(row), true);
+    assert.equal(Object.isFrozen(row.pending_action), true);
+  }
+  assert.equal(Object.isFrozen(oracleRows), true);
+  assert.equal(Object.isFrozen(agentRows), true);
+  for (const kind of [
+    "replay_oracle",
+    "replay_no_shared_obs_agent_pov",
+    "replay_shared_obs_agent_pov",
+  ]) {
+    assert.deepEqual(
+      authorizedPresentationPendingJointActionRows(
+        await normalized(/** @type {keyof typeof fixture.presentations} */ (kind)),
+      ),
+      [],
+      kind,
+    );
+  }
 });
 
 test("Technical Frame projects the exact final five-leaf allowlist atomically", async () => {
@@ -1894,23 +1949,39 @@ test("Oracle choreography exact-joins moving trajectories and presents successor
     regenerationTrajectory.agent_public_agent_id,
   );
 
-  /** @type {ReadonlyArray<readonly [number, number, string]>} */
-  const successorPulseCases = [
-    [8, 1, "cooldown_started"],
-    [9, 5, "cooldown_ready"],
-  ];
-  for (const [eventIndex, classId, cueSemantic] of successorPulseCases) {
-    const plannedEvent = /** @type {Record<string, any>} */ (plan.events[eventIndex]);
-    const trajectory = oracleTrajectoryForClass(raw, classId);
-    assert.equal(plannedEvent.kind, "semantic_pulse");
-    assert.equal(plannedEvent.cueSemantic, cueSemantic);
-    assert.deepEqual(
-      plannedEvent.anchor,
-      projectedTrajectoryPoint(raw, classId, "successor"),
-    );
-    assert.equal(plannedEvent.agentPresentationKey, trajectory.agent_presentation_key);
-    assert.equal(plannedEvent.agentPublicAgentId, trajectory.agent_public_agent_id);
-  }
+  const cooldownStarted = /** @type {Record<string, any>} */ (plan.events[8]);
+  const cooldownStartedTrajectory = oracleTrajectoryForClass(raw, 1);
+  assert.equal(cooldownStarted.kind, "semantic_pulse");
+  assert.equal(cooldownStarted.cueSemantic, "cooldown_started");
+  assert.equal(cooldownStarted.anchor, null);
+  assert.deepEqual(cooldownStarted.paintParts, { effect: false });
+  assert.equal(cooldownStarted.presentationSuppressed, true);
+  assert.equal(cooldownStarted.spatial, false);
+  assert.equal(
+    cooldownStarted.agentPresentationKey,
+    cooldownStartedTrajectory.agent_presentation_key,
+  );
+  assert.equal(
+    cooldownStarted.agentPublicAgentId,
+    cooldownStartedTrajectory.agent_public_agent_id,
+  );
+
+  const cooldownReady = /** @type {Record<string, any>} */ (plan.events[9]);
+  const cooldownReadyTrajectory = oracleTrajectoryForClass(raw, 5);
+  assert.equal(cooldownReady.kind, "semantic_pulse");
+  assert.equal(cooldownReady.cueSemantic, "cooldown_ready");
+  assert.deepEqual(cooldownReady.anchor, projectedTrajectoryPoint(raw, 5, "successor"));
+  assert.deepEqual(cooldownReady.paintParts, { effect: true });
+  assert.equal(cooldownReady.presentationSuppressed, false);
+  assert.equal(cooldownReady.spatial, true);
+  assert.equal(
+    cooldownReady.agentPresentationKey,
+    cooldownReadyTrajectory.agent_presentation_key,
+  );
+  assert.equal(
+    cooldownReady.agentPublicAgentId,
+    cooldownReadyTrajectory.agent_public_agent_id,
+  );
 
   const charge = plan.events[10];
   assert.equal(charge.eventType, "charge_phase_displacement");

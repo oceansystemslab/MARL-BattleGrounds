@@ -395,6 +395,9 @@ export class SvgChoreographyPainter {
    * } | null}
    */
   #renderEvent(ownerDocument, event, plan, options, animationSpecs) {
+    if (event.kind === "semantic_pulse" && event.cueSemantic === "cooldown_started") {
+      return null;
+    }
     const group = svgElement(ownerDocument, "g", {
       class: `combat-effect combat-effect--${cssIdentifier(event.kind)}`,
       opacity: options.settled || options.motionMode === "off" ? 1 : 0,
@@ -936,28 +939,17 @@ export class SvgChoreographyPainter {
         }),
       );
     } else if (abilityEnabled && event.tokenId === "rogue_poison") {
+      const dagger = createSvgIcon(ownerDocument, "activation-poison", {
+        className: "combat-poison__dagger",
+      });
+      setAttributes(dagger, { x: -24, y: 2, width: 18, height: 18 });
       impact.append(
+        dagger,
         svgElement(ownerDocument, "circle", {
           class: "combat-poison__splash",
-          cx: -15,
-          cy: 8,
-          r: 3,
-        }),
-        svgElement(ownerDocument, "circle", {
-          class: "combat-poison__splash",
-          cx: 14,
-          cy: 10,
-          r: 4,
-        }),
-        svgElement(ownerDocument, "circle", {
-          class: "combat-poison__splash",
-          cx: 10,
+          cx: 13,
           cy: -13,
-          r: 2.5,
-        }),
-        svgElement(ownerDocument, "path", {
-          class: "combat-ultimate__flare combat-poison__flare",
-          d: "M -23 16 Q -14 7 -7 18 M 7 18 Q 14 7 23 16",
+          r: 3,
         }),
       );
     } else if (abilityEnabled && event.tokenId === "warrior_charge") {
@@ -1255,28 +1247,30 @@ export class SvgChoreographyPainter {
         { className: "combat-lifecycle__status-icon" },
       );
       setAttributes(statusIcon, { x: -10, y: -10, width: 20, height: 20 });
-      const change = svgElement(ownerDocument, "g", {
-        class: "combat-lifecycle__change",
-        transform: "translate(13 -13)",
-      });
-      change.append(
-        svgElement(ownerDocument, "circle", {
-          class: "combat-lifecycle__change-disc",
-          r: 8,
-        }),
-      );
-      const changeToken =
-        combinedLifecycle && !reapplicationEnabled
-          ? resolveVisualToken("lifecycle", "trap_broken", event)
-          : event.lifecycleToken;
-      const changeIcon = createSvgIcon(
-        ownerDocument,
-        changeToken?.glyphKey ?? "unknown",
-        { className: "combat-lifecycle__change-icon" },
-      );
-      setAttributes(changeIcon, { x: -6, y: -6, width: 12, height: 12 });
-      change.append(changeIcon);
-      lifecycle.append(statusIcon, change);
+      lifecycle.append(statusIcon);
+      if (
+        event.lifecycle !== "trap_broken" &&
+        event.lifecycle !== "trap_broken_and_reapplied"
+      ) {
+        const change = svgElement(ownerDocument, "g", {
+          class: "combat-lifecycle__change",
+          transform: "translate(13 -13)",
+        });
+        change.append(
+          svgElement(ownerDocument, "circle", {
+            class: "combat-lifecycle__change-disc",
+            r: 8,
+          }),
+        );
+        const changeIcon = createSvgIcon(
+          ownerDocument,
+          event.lifecycleToken?.glyphKey ?? "unknown",
+          { className: "combat-lifecycle__change-icon" },
+        );
+        setAttributes(changeIcon, { x: -6, y: -6, width: 12, height: 12 });
+        change.append(changeIcon);
+        lifecycle.append(change);
+      }
     } else if (reapplicationEnabled) {
       const lifecycleHit = svgElement(ownerDocument, "circle", {
         class: "combat-lifecycle__hit",
@@ -1404,6 +1398,9 @@ export class SvgChoreographyPainter {
     options,
     animationSpecs,
   ) {
+    if (event.cueSemantic === "cooldown_started") {
+      return;
+    }
     if (!event.anchor) {
       return;
     }
@@ -1459,17 +1456,11 @@ export class SvgChoreographyPainter {
         r: 10,
       }),
     );
-    if (
-      event.cueSemantic === "cooldown_started" ||
-      event.cueSemantic === "cooldown_ready"
-    ) {
+    if (event.cueSemantic === "cooldown_ready") {
       pulse.append(
         svgElement(ownerDocument, "path", {
           class: "combat-semantic-pulse__mark",
-          d:
-            event.cueSemantic === "cooldown_ready"
-              ? "M -7 0 L -2 6 L 8 -7"
-              : "M 0 -8 V 0 L 6 4 M -5 -11 H 5",
+          d: "M -7 0 L -2 6 L 8 -7",
         }),
       );
     } else if (event.cueSemantic === "spawn_shield_expired") {

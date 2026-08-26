@@ -20,6 +20,7 @@ from scripts.dev.visual_debugger.presentation_protocol import (
     LiveEditableDraftInspectionV1,
     LiveNoSharedObsAuthorizedPresentationFrameV1,
     LiveOracleAuthorizedPresentationFrameV1,
+    LivePendingJointActionV1,
     LiveResearcherEditableDraftInspectionV1,
     LiveScriptedPlaybackInspectionV1,
     PresentationResourceResultV1,
@@ -31,6 +32,7 @@ from scripts.dev.visual_debugger.protocol import (
     KeyboardCommandV1,
     ResearcherLiveDebuggerFrameV2,
     ResetCommandV1,
+    RosterSelectionCommandV1,
     SetViewCommandV1,
 )
 from tests.test_visual_debugger_service import (
@@ -71,6 +73,15 @@ def _switch_to_pov(service: service_module.DebuggerService) -> None:
         )
     )
     assert result.outcome == "response"
+
+
+def _researcher_pending_joint_action(
+    presentation: LiveOracleAuthorizedPresentationFrameV1
+    | LiveNoSharedObsAuthorizedPresentationFrameV1,
+) -> LivePendingJointActionV1 | None:
+    if isinstance(presentation, LiveOracleAuthorizedPresentationFrameV1):
+        return presentation.pending_joint_action
+    return presentation.researcher_space.pending_joint_action
 
 
 @pytest.mark.parametrize("view_mode", ("researcher", "pov"))
@@ -149,6 +160,15 @@ def test_live_frame_zero_presentation_is_exact_and_repeatable(view_mode: str) ->
             not hasattr(row, "target_anchor")
             for row in researcher.pending_inspection.draft.decision_mask.target_actions
         )
+    pending_joint = _researcher_pending_joint_action(payload)
+    assert pending_joint is not None
+    assert pending_joint.current_simulator_step_count == 0
+    expected_pending_count = (
+        len(payload.current_endpoint.scene.agents)
+        if isinstance(payload, LiveOracleAuthorizedPresentationFrameV1)
+        else len(payload.researcher_space.roster_agents)
+    )
+    assert len(pending_joint.action_rows) == expected_pending_count
 
 
 def test_live_nonzero_oracle_and_no_shared_enter_exact_same_transition() -> None:
@@ -194,6 +214,7 @@ def test_live_nonzero_oracle_and_no_shared_enter_exact_same_transition() -> None
     )
     assert "oracle_" not in pov.model_dump_json(exclude={"researcher_space"})
     assert pov.researcher_space.latest_transition == oracle.latest_transition
+    assert pov.researcher_space.pending_joint_action == oracle.pending_joint_action
     assert (
         pov.researcher_space.technical_frame.incoming_transition_id
         == incoming.transition.transition_id
@@ -255,6 +276,81 @@ def test_live_draft_edit_changes_only_revision_scoped_draft_truth(
     )
 
 
+def test_pending_joint_action_is_global_geometry_free_submission_truth() -> None:
+    service = _service()
+    active_slots = tuple(
+        slot
+        for slot, row in enumerate(service.session.evaluation_context.roster)
+        if row.configured_active
+    )
+    first, second, target = active_slots[:3]
+    for command_id, command in (
+        ("pending-first-east", KeyboardCommandV1(key="d")),
+        (
+            "pending-control-second",
+            RosterSelectionCommandV1(role="control", global_slot=second),
+        ),
+        ("pending-second-west", KeyboardCommandV1(key="a")),
+        (
+            "pending-second-target",
+            RosterSelectionCommandV1(role="target", global_slot=target),
+        ),
+        ("pending-second-no-combat", KeyboardCommandV1(key="0")),
+    ):
+        result = service.apply_command(
+            _request(
+                command_id,
+                base_revision=service.revision,
+                command=command,
+            )
+        )
+        assert result.outcome == "response"
+
+    assert service.session.current_evaluation_frame.frame_index == 0
+    assert service.session.pending_actions[first].move_action != 0
+    assert service.session.pending_actions[second].move_action != 0
+    assert service.session.pending_actions[second].selected_global_target_slot == target
+    assert service.session.pending_actions[second].armed_lane is None
+
+    oracle_result = service.current_presentation()
+    assert type(oracle_result.payload) is LiveOracleAuthorizedPresentationFrameV1
+    oracle = oracle_result.payload
+    pending = oracle.pending_joint_action
+    assert pending is not None
+    assert len(pending.action_rows) == len(active_slots)
+    assert tuple(row.actor_public_agent_id for row in pending.action_rows) == tuple(
+        row.public_agent_id for row in oracle.current_endpoint.scene.agents
+    )
+    pending_by_id = {
+        row.actor_public_agent_id: row.pending_action for row in pending.action_rows
+    }
+    first_id = service.session.evaluation_context.roster[first].public_agent_id
+    second_id = service.session.evaluation_context.roster[second].public_agent_id
+    assert (
+        pending_by_id[first_id].move_action
+        == service.session.pending_actions[first].move_action
+    )
+    assert (
+        pending_by_id[second_id].move_action
+        == service.session.pending_actions[second].move_action
+    )
+    assert pending_by_id[second_id].target_action == 0
+    assert pending_by_id[second_id].use_ultimate_action == 0
+    assert "global_slot" not in pending.model_dump_json()
+    assert "position" not in pending.model_dump_json()
+
+    _switch_to_pov(service)
+    agent_result = service.current_presentation()
+    assert type(agent_result.payload) is LiveNoSharedObsAuthorizedPresentationFrameV1
+    assert (
+        agent_result.payload.researcher_space.pending_joint_action
+        == oracle.pending_joint_action
+    )
+    assert "pending_joint_action" not in agent_result.payload.model_dump_json(
+        exclude={"researcher_space"}
+    )
+
+
 @pytest.mark.parametrize("view_mode", ("researcher", "pov"))
 def test_scripted_live_presentation_is_explicitly_inspection_only(
     view_mode: str,
@@ -280,6 +376,7 @@ def test_scripted_live_presentation_is_explicitly_inspection_only(
     assert inspection.submission_scope == "scripted_playback"
     assert inspection.editable_draft_available is False
     assert inspection.advance_semantics == "registered_script_frame"
+    assert _researcher_pending_joint_action(result.payload) is None
     encoded = result.payload.model_dump_json()
     assert '"draft_action"' not in encoded
     assert '"decision_mask"' not in encoded

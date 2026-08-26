@@ -886,7 +886,7 @@ def test_replay_help_is_read_only_and_hides_live_and_legacy_tokens() -> None:
         "run serialized replay with one request in flight",
         "frame slider",
         "preview without a request; commit one exact seek",
-        "Left / Right / Space",
+        "LEFT ARROW / RIGHT ARROW / Space",
         "unmodified document shortcuts: previous / next /",
         "play or pause",
         "Export PNG",

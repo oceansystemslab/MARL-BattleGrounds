@@ -40,6 +40,40 @@ function clone(value) {
   return structuredClone(value);
 }
 
+/**
+ * @param {Record<string, any>} source
+ * @param {"none" | "basic" | "ultimate"} lane
+ */
+function withCoherentLiveAgentDraftLane(source, lane) {
+  const candidate = clone(source);
+  const targetAction = 2;
+  const researcherDraft = candidate.researcher_space.pending_inspection.draft;
+  const localDraft = candidate.live_inspection.inspection.draft;
+  for (const draft of [researcherDraft, localDraft]) {
+    const laneIndex = lane === "ultimate" ? 1 : 0;
+    draft.draft_action.armed_lane = lane;
+    draft.draft_action.target_action = targetAction;
+    draft.draft_target = clone(draft.decision_mask.target_actions[targetAction]);
+    draft.draft_legality.target_action_is_legal =
+      draft.decision_mask.target_action_mask[targetAction];
+    draft.draft_legality.armed_lane_is_legal =
+      lane === "none" ? null : draft.decision_mask.use_ultimate_action_mask[laneIndex];
+    draft.draft_legality.combat_pair_is_legal =
+      lane === "none"
+        ? null
+        : draft.decision_mask.target_use_ultimate_joint_mask[targetAction][laneIndex];
+  }
+  const selectedPublicId = candidate.researcher_space.selected_public_agent_id;
+  const selectedPending =
+    candidate.researcher_space.pending_joint_action.action_rows.find(
+      (/** @type {any} */ row) => row.actor_public_agent_id === selectedPublicId,
+    );
+  assert.ok(selectedPending);
+  selectedPending.pending_action.target_action = lane === "none" ? 0 : targetAction;
+  selectedPending.pending_action.use_ultimate_action = lane === "ultimate" ? 1 : 0;
+  return candidate;
+}
+
 /** @param {Record<string, any>} presentation */
 function presentationScene(presentation) {
   return (
@@ -1432,6 +1466,14 @@ test("action semantics, endpoint identity, and authority key derivation match Py
 
   const researcherDraftDivergence = clone(liveAgent);
   researcherDraftDivergence.researcher_space.pending_inspection.draft.draft_action.move_action = 1;
+  const researcherDraftOwner =
+    researcherDraftDivergence.researcher_space.selected_public_agent_id;
+  const researcherDraftJointRow =
+    researcherDraftDivergence.researcher_space.pending_joint_action.action_rows.find(
+      (/** @type {any} */ row) => row.actor_public_agent_id === researcherDraftOwner,
+    );
+  assert.ok(researcherDraftJointRow);
+  researcherDraftJointRow.pending_action.move_action = 1;
 
   const targetVariant = clone(replayAgent);
   const visibleIndex =
@@ -1522,6 +1564,110 @@ test("action semantics, endpoint identity, and authority key derivation match Py
       normalizeAuthorizedPresentationFrameV1(wrongAuthorityHash),
       TypeError,
     );
+  }
+});
+
+test("Pending Joint Action rejects epoch and roster drift and canonicalizes every lane", async () => {
+  const liveAgent = fixture.presentations.live_no_shared_obs_agent_pov;
+
+  const wrongEpoch = clone(liveAgent);
+  wrongEpoch.researcher_space.pending_joint_action.current_simulator_step_count += 1;
+  await assert.rejects(
+    normalizeAuthorizedPresentationFrameV1(wrongEpoch),
+    /Pending Joint Action misses its active roster or decision epoch\./u,
+  );
+
+  const reordered = clone(liveAgent);
+  [
+    reordered.researcher_space.pending_joint_action.action_rows[0],
+    reordered.researcher_space.pending_joint_action.action_rows[1],
+  ] = [
+    reordered.researcher_space.pending_joint_action.action_rows[1],
+    reordered.researcher_space.pending_joint_action.action_rows[0],
+  ];
+  await assert.rejects(
+    normalizeAuthorizedPresentationFrameV1(reordered),
+    /Pending Joint Action changed active actor identity or order\./u,
+  );
+
+  const duplicateActor = clone(liveAgent);
+  duplicateActor.researcher_space.pending_joint_action.action_rows[1] = clone(
+    duplicateActor.researcher_space.pending_joint_action.action_rows[0],
+  );
+  await assert.rejects(
+    normalizeAuthorizedPresentationFrameV1(duplicateActor),
+    /Pending Joint Action changed active actor identity or order\./u,
+  );
+
+  const missingActor = clone(liveAgent);
+  missingActor.researcher_space.pending_joint_action.action_rows.pop();
+  await assert.rejects(
+    normalizeAuthorizedPresentationFrameV1(missingActor),
+    /Pending Joint Action misses its active roster or decision epoch\./u,
+  );
+
+  const selectedDivergence = clone(liveAgent);
+  const selectedPublicId = selectedDivergence.researcher_space.selected_public_agent_id;
+  const selectedPending =
+    selectedDivergence.researcher_space.pending_joint_action.action_rows.find(
+      (/** @type {any} */ row) => row.actor_public_agent_id === selectedPublicId,
+    );
+  assert.ok(selectedPending);
+  selectedPending.pending_action.move_action = 1;
+  await assert.rejects(
+    normalizeAuthorizedPresentationFrameV1(selectedDivergence),
+    /Pending Joint Action changed the selected editable draft\./u,
+  );
+
+  const laneCases = /** @type {ReadonlyArray<readonly [
+    "none" | "basic" | "ultimate",
+    Readonly<{target_action: number, use_ultimate_action: number}>,
+  ]>} */ ([
+    ["none", { target_action: 0, use_ultimate_action: 0 }],
+    ["basic", { target_action: 2, use_ultimate_action: 0 }],
+    ["ultimate", { target_action: 2, use_ultimate_action: 1 }],
+  ]);
+  for (const [lane, expected] of laneCases) {
+    const coherent = withCoherentLiveAgentDraftLane(liveAgent, lane);
+    const normalized = await normalizeAuthorizedPresentationFrameV1(coherent);
+    const normalizedPending =
+      normalized.researcher_space.pending_joint_action.action_rows.find(
+        (/** @type {any} */ row) =>
+          row.actor_public_agent_id ===
+          normalized.researcher_space.selected_public_agent_id,
+      );
+    assert.ok(normalizedPending);
+    assert.deepEqual(
+      {
+        target_action: normalizedPending.pending_action.target_action,
+        use_ultimate_action: normalizedPending.pending_action.use_ultimate_action,
+      },
+      expected,
+      String(lane),
+    );
+    const poisonCases = /** @type {ReadonlyArray<readonly [
+      "target_action" | "use_ultimate_action",
+      number,
+    ]>} */ ([
+      ["target_action", expected.target_action === 0 ? 2 : 3],
+      ["use_ultimate_action", expected.use_ultimate_action === 0 ? 1 : 0],
+    ]);
+    for (const [field, wrongValue] of poisonCases) {
+      const poisoned = clone(coherent);
+      const poisonedPending =
+        poisoned.researcher_space.pending_joint_action.action_rows.find(
+          (/** @type {any} */ row) =>
+            row.actor_public_agent_id ===
+            poisoned.researcher_space.selected_public_agent_id,
+        );
+      assert.ok(poisonedPending);
+      poisonedPending.pending_action[field] = wrongValue;
+      await assert.rejects(
+        normalizeAuthorizedPresentationFrameV1(poisoned),
+        /Pending Joint Action changed the selected editable draft\./u,
+        `${lane}:${field}`,
+      );
+    }
   }
 });
 

@@ -749,6 +749,22 @@ test("all registered transient families validate without constructing disabled g
       "agent_respawned",
     ],
   );
+  const cooldownStarted = visualPlan.events.find(
+    (event) => event.cueSemantic === "cooldown_started",
+  );
+  assert.ok(cooldownStarted);
+  assert.deepEqual(cooldownStarted.paintParts, { effect: false });
+  assert.equal(cooldownStarted.presentationSuppressed, true);
+  assert.equal(cooldownStarted.spatial, false);
+  assert.equal(cooldownStarted.anchor, null);
+  const cooldownReady = visualPlan.events.find(
+    (event) => event.cueSemantic === "cooldown_ready",
+  );
+  assert.ok(cooldownReady);
+  assert.deepEqual(cooldownReady.paintParts, { effect: true });
+  assert.equal(cooldownReady.presentationSuppressed, false);
+  assert.equal(cooldownReady.spatial, true);
+  assert.ok(cooldownReady.anchor);
   const wave = plan.events.find(
     (event) => event.cueSemantic === "respawn_wave_occurred",
   );

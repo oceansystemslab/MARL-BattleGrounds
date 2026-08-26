@@ -337,6 +337,21 @@ test("class-specific Ultimate tokens preserve activation vocabulary", () => {
   );
 });
 
+test("Crippling Poison uses a dagger-and-venom activation glyph", () => {
+  const poison = iconDefinition("activation-poison");
+  assert.equal(poison.glyphKey, "activation-poison");
+  assert.deepEqual(
+    poison.primitives.map((primitive) => primitive.tag),
+    ["path", "path", "path", "path"],
+  );
+  assert.deepEqual(
+    poison.primitives.slice(0, 3).map((primitive) => primitive.attributes.d),
+    ["M4 20 9 15", "M6 14 10 18", "M9 15 20 4 17 12 12 17Z"],
+  );
+  assert.equal(poison.primitives[3].attributes.fill, "currentColor");
+  assert.equal(poison.primitives[3].attributes.stroke, "none");
+});
+
 test("activation impact grammar is explicit, non-numeric, and fail-closed", () => {
   assert.deepEqual(
     EXPECTED_ACTIVATIONS.map((tokenId) => activationImpactSemantic(tokenId)),

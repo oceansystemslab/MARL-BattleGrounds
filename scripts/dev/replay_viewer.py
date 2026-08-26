@@ -60,7 +60,8 @@ read-only replay controls:
   -10 / -1 / +1 / +10  issue one clamped absolute seek
   Play / Pause          run serialized replay with one request in flight
   frame slider          preview without a request; commit one exact seek
-  Left / Right / Space  unmodified document shortcuts: previous / next /
+  LEFT ARROW / RIGHT ARROW / Space
+                        unmodified document shortcuts: previous / next /
                         play or pause
   playback rates        0.25{_RATE_SUFFIX} / 0.50{_RATE_SUFFIX} /
                         0.75{_RATE_SUFFIX} / 1.00{_RATE_SUFFIX} /

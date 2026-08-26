@@ -1588,6 +1588,70 @@ class LatestTransitionActionRowV1(_PresentationProtocolModel):
         return self
 
 
+class LivePendingActionTupleV1(_PresentationProtocolModel):
+    """One category-bounded tuple that the next joint submission will send."""
+
+    move_action: int
+    target_action: int
+    use_ultimate_action: int
+
+    @model_validator(mode="after")
+    def _validate_tuple(self) -> Self:
+        # Reuse the exact bounded action vocabulary without mislabelling this
+        # not-yet-submitted tuple as accepted on the wire.
+        AcceptedActionTupleV1(
+            move_action=self.move_action,
+            target_action=self.target_action,
+            use_ultimate_action=self.use_ultimate_action,
+        )
+        return self
+
+
+class LivePendingJointActionRowV1(_PresentationProtocolModel):
+    actor_presentation_key: _ScientificId
+    actor_public_agent_id: _ScientificId
+    pending_action: LivePendingActionTupleV1
+
+    @model_validator(mode="after")
+    def _validate_row(self) -> Self:
+        _require_exact_type(
+            self.pending_action,
+            LivePendingActionTupleV1,
+            name="pending_action",
+        )
+        return self
+
+
+class LivePendingJointActionV1(_PresentationProtocolModel):
+    current_simulator_step_count: _NonNegativeInt
+    action_rows: tuple[LivePendingJointActionRowV1, ...]
+
+    @model_validator(mode="after")
+    def _validate_rows(self) -> Self:
+        if not self.action_rows or any(
+            type(row) is not LivePendingJointActionRowV1 for row in self.action_rows
+        ):
+            raise ValueError("Pending Joint Action requires exact action rows.")
+        _require_ordered_unique(
+            tuple(row.actor_public_agent_id for row in self.action_rows),
+            name="Pending Joint Action actors",
+        )
+        return self
+
+
+def _pending_action_matches_live_draft(
+    pending: LivePendingActionTupleV1,
+    draft: LiveDraftActionTupleV1,
+) -> bool:
+    target_action = 0 if draft.armed_lane == "none" else draft.target_action
+    use_ultimate_action = 1 if draft.armed_lane == "ultimate" else 0
+    return (
+        pending.move_action == draft.move_action
+        and pending.target_action == target_action
+        and pending.use_ultimate_action == use_ultimate_action
+    )
+
+
 class _LatestTransitionBaseV1(_PresentationProtocolModel):
     episode_id: _ScientificId
     incoming_transition_index: _NonNegativeInt
@@ -2976,6 +3040,7 @@ class LiveResearcherSpaceV1(_PresentationProtocolModel):
     roster_agents: tuple[ReplayResearcherRosterAgentV1, ...]
     class_mechanics: tuple[AuthorizedClassMechanics, ...]
     latest_transition: OracleLatestTransitionV1 | None
+    pending_joint_action: LivePendingJointActionV1 | None
     technical_frame: LiveOracleTechnicalFrameV1
     pending_inspection: LiveResearcherInputInspectionV1
 
@@ -3088,7 +3153,41 @@ class LiveResearcherSpaceV1(_PresentationProtocolModel):
 
         inspection = self.pending_inspection
         if type(inspection) is LiveResearcherEditableDraftInspectionV1:
+            pending_joint = self.pending_joint_action
+            _require_exact_type(
+                pending_joint,
+                LivePendingJointActionV1,
+                name="pending_joint_action",
+            )
+            checked_pending = cast(LivePendingJointActionV1, pending_joint)
+            if (
+                checked_pending.current_simulator_step_count
+                != self.simulator_step_count
+                or tuple(
+                    (row.actor_presentation_key, row.actor_public_agent_id)
+                    for row in checked_pending.action_rows
+                )
+                != tuple(
+                    (row.presentation_key, row.public_agent_id)
+                    for row in self.roster_agents
+                )
+            ):
+                raise ValueError(
+                    "live researcher Pending Joint Action misses its roster or epoch."
+                )
             draft = inspection.draft
+            selected_pending = next(
+                row
+                for row in checked_pending.action_rows
+                if row.actor_public_agent_id == self.selected_public_agent_id
+            )
+            if not _pending_action_matches_live_draft(
+                selected_pending.pending_action,
+                draft.draft_action,
+            ):
+                raise ValueError(
+                    "live researcher Pending Joint Action changed the selected draft."
+                )
             if (
                 draft.current_simulator_step_count != self.simulator_step_count
                 or draft.actor_public_agent_id != self.selected_public_agent_id
@@ -3116,7 +3215,12 @@ class LiveResearcherSpaceV1(_PresentationProtocolModel):
             )
             if actual_targets != expected_targets:
                 raise ValueError("live researcher draft target axis changed order.")
-        elif type(inspection) is not LiveScriptedPlaybackInspectionV1:
+        elif type(inspection) is LiveScriptedPlaybackInspectionV1:
+            if self.pending_joint_action is not None:
+                raise ValueError(
+                    "scripted playback cannot carry an editable Pending Joint Action."
+                )
+        else:
             raise ValueError("live researcher inspection uses an unknown variant.")
         return self
 
@@ -3182,6 +3286,7 @@ class LiveOracleAuthorizedPresentationFrameV1(_PresentationProtocolModel):
     current_endpoint: OracleAuthorizedCurrentEndpointV1
     latest_events: ReplayIncomingSummaryV1 | None
     latest_transition: OracleLatestTransitionV1 | None
+    pending_joint_action: LivePendingJointActionV1 | None
     technical_frame: LiveOracleTechnicalFrameV1
     live_inspection: LiveOracleInspectionEnvelopeV1
 
@@ -3216,11 +3321,50 @@ class LiveOracleAuthorizedPresentationFrameV1(_PresentationProtocolModel):
             self.live_inspection,
         )
         if type(self.live_inspection.inspection) is LiveEditableDraftInspectionV1:
+            pending_joint = self.pending_joint_action
+            _require_exact_type(
+                pending_joint,
+                LivePendingJointActionV1,
+                name="pending_joint_action",
+            )
+            checked_pending = cast(LivePendingJointActionV1, pending_joint)
+            if (
+                checked_pending.current_simulator_step_count
+                != self.source.source_simulator_step_count
+                or tuple(
+                    (row.actor_presentation_key, row.actor_public_agent_id)
+                    for row in checked_pending.action_rows
+                )
+                != tuple(
+                    (row.presentation_key, row.public_agent_id)
+                    for row in self.current_endpoint.scene.agents
+                )
+            ):
+                raise ValueError(
+                    "live Oracle Pending Joint Action misses its scene or epoch."
+                )
+            selected_pending = next(
+                row
+                for row in checked_pending.action_rows
+                if row.actor_public_agent_id
+                == self.live_inspection.inspection.draft.actor_public_agent_id
+            )
+            if not _pending_action_matches_live_draft(
+                selected_pending.pending_action,
+                self.live_inspection.inspection.draft.draft_action,
+            ):
+                raise ValueError(
+                    "live Oracle Pending Joint Action changed the selected draft."
+                )
             _validate_oracle_inspection(
                 source=self.source,
                 endpoint=self.current_endpoint,
                 inspection=self.live_inspection.inspection.draft,
                 replay=False,
+            )
+        elif self.pending_joint_action is not None:
+            raise ValueError(
+                "scripted playback cannot carry an editable Pending Joint Action."
             )
         _validate_recursive_presentation_keys(
             self,
@@ -4256,6 +4400,9 @@ __all__ = [
     "LiveOracleInspectionEnvelopeV1",
     "LiveOraclePresentationSourceIdentityV1",
     "LiveOracleTechnicalFrameV1",
+    "LivePendingActionTupleV1",
+    "LivePendingJointActionRowV1",
+    "LivePendingJointActionV1",
     "LiveResearcherDraftInspectionV1",
     "LiveResearcherEditableDraftInspectionV1",
     "LiveResearcherInputInspectionV1",

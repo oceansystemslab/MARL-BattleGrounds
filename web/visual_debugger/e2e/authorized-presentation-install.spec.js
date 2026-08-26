@@ -640,6 +640,7 @@ function expectedAgentIdentity(agent) {
   return {
     title: `Agent ID ${agent.public_agent_id} · ${classIdentity.label} · ${teamLabel}`,
     accent: classIdentity.accent,
+    team: agent.team_id === 1 ? "team-a" : "team-b",
   };
 }
 
@@ -989,6 +990,7 @@ async function expectLatestTransitionDom(page, presentation) {
       "data-class",
       expectedIdentity.accent,
     );
+    await expect(rendered).toHaveAttribute("data-team", expectedIdentity.team);
     await expect(rendered.locator(".accepted-action-tuple")).toHaveCount(2);
     await expect(rendered.locator(".accepted-action-tuple > h4")).toHaveText([
       "Submitted",
@@ -1007,6 +1009,64 @@ async function expectLatestTransitionDom(page, presentation) {
       tupleText(row.submitted_action),
       tupleText(row.accepted_action),
     ]);
+  }
+}
+
+/**
+ * @param {import("@playwright/test").Page} page
+ * @param {Record<string, any>} presentation
+ */
+async function expectPendingJointActionDom(page, presentation) {
+  const researcher = presentation.researcher_space ?? null;
+  const pending = researcher?.pending_joint_action ?? presentation.pending_joint_action;
+  expect(pending).toBeTruthy();
+  const rawRows = pending.action_rows;
+  const rows = page.locator("#pending-card .accepted-action-row");
+  await expect(page.locator("#pending-heading")).toHaveText("Pending Joint Action");
+  await expect(page.locator("#pending-count")).toHaveText(
+    `${rawRows.length} ${rawRows.length === 1 ? "actor" : "actors"}`,
+  );
+  await expect(rows).toHaveCount(rawRows.length);
+  await expect(
+    page.locator(
+      "#pending-card .selected-legality, #pending-card .selected-outgoing-target",
+    ),
+  ).toHaveCount(0);
+  const scene =
+    presentation.current_endpoint.scene ?? presentation.current_endpoint.parts?.scene;
+  const identities = researcher?.roster_agents ?? scene.agents;
+  const tupleText = (/** @type {Record<string, any>} */ action) =>
+    `Move ${action.move_action} · Target ${action.target_action} · Ultimate ${action.use_ultimate_action}`;
+  for (const [index, row] of rawRows.entries()) {
+    const identity = identities.find(
+      (/** @type {Record<string, any>} */ candidate) =>
+        candidate.presentation_key === row.actor_presentation_key &&
+        candidate.public_agent_id === row.actor_public_agent_id,
+    );
+    expect(identity).toBeTruthy();
+    const expectedIdentity = expectedAgentIdentity(identity);
+    const rendered = rows.nth(index);
+    await expect(rendered).toHaveAttribute("data-team", expectedIdentity.team);
+    await expect(rendered.locator(".accepted-action-row__title")).toHaveText(
+      expectedIdentity.title,
+    );
+    await expect(rendered.locator(".accepted-action-row__title")).toHaveAttribute(
+      "data-class",
+      expectedIdentity.accent,
+    );
+    await expect(rendered.locator(".accepted-action-row__comparison")).toHaveAttribute(
+      "data-layout",
+      "single",
+    );
+    await expect(rendered.locator(".accepted-action-tuple")).toHaveCount(1);
+    await expect(rendered.locator(".accepted-action-tuple")).toHaveAttribute(
+      "data-kind",
+      "pending",
+    );
+    await expect(rendered.locator(".accepted-action-tuple > h4")).toHaveText("Pending");
+    await expect(rendered.locator(".accepted-action-tuple__value")).toHaveText(
+      tupleText(row.pending_action),
+    );
   }
 }
 
@@ -1745,6 +1805,7 @@ async function expectReplayInspectionDom(page, presentation) {
       "data-class",
       expectedIdentity.accent,
     );
+    await expect(rendered).toHaveAttribute("data-team", expectedIdentity.team);
     await expect(rendered.locator(".accepted-action-tuple > h4")).toHaveText([
       "Submitted",
       "Accepted",
@@ -1922,7 +1983,7 @@ async function expectAgentAuthoritySurface(
       ).toBeHidden();
       await expect(page.locator("#roster .roster-team[data-team-id]")).toHaveCount(2);
       await expect(page.locator("#roster-count")).toHaveText(
-        `${expectedRosterCount} visible`,
+        `${expectedRosterCount} ${expectedRosterCount === 1 ? "actor" : "actors"}`,
       );
     }
     expect(expectedRosterCount).toBeGreaterThanOrEqual(bodyKeys.length);
@@ -2192,7 +2253,7 @@ test("all five real service leaves install with safe pending continuity", async 
     "Live Oracle View is interactive. Activate an authorized actor to control it; Shift-click selects an authorized target; Escape clears the target and leaves battlefield focus. Battlefield keyboard commands apply only while this surface has focus.",
   );
   await expect(page.locator("#pending-scope")).toHaveText(
-    "This panel shows the selected actor's authorized pending draft for the next submission within the global joint turn.",
+    "This panel shows the complete researcher-space joint action staged for the next submission.",
   );
   await expect(
     page.locator("#battlefield-utilities > #live-ranges-button"),
@@ -2241,6 +2302,7 @@ test("all five real service leaves install with safe pending continuity", async 
   );
   await expectTechnicalFrameDom(page, liveOracle.presentation);
   await expectLatestTransitionDom(page, liveOracle.presentation);
+  await expectPendingJointActionDom(page, liveOracle.presentation);
   await expectRetiredMetadataAbsent(page);
   await openDetails(page, [
     "#agent-details",
@@ -2304,6 +2366,7 @@ test("all five real service leaves install with safe pending continuity", async 
   );
   await expectTechnicalFrameDom(page, liveAgent.presentation);
   await expectLatestTransitionDom(page, liveAgent.presentation);
+  await expectPendingJointActionDom(page, liveAgent.presentation);
   await expectRetiredMetadataAbsent(page);
   await expectAgentAuthoritySurface(page, liveAgent.presentation, [oldPresentationKey]);
   await expect(page.locator("#battlefield")).not.toHaveAttribute(
@@ -2318,7 +2381,7 @@ test("all five real service leaves install with safe pending continuity", async 
     "Live Agent POV is interactive. Activate a visible authorized actor or choose any active actor in Roster to control it and switch POV; Shift-click selects a visible authorized target; Escape clears the target and leaves battlefield focus.",
   );
   await expect(page.locator("#pending-scope")).toHaveText(
-    "This panel shows the selected actor's authorized pending draft for the next submission within the global joint turn.",
+    "This panel shows the complete researcher-space joint action staged for the next submission.",
   );
   await page.locator("#help-button").click();
   await expect(page.locator("#help-dialog")).toBeVisible();
@@ -2362,7 +2425,7 @@ test("all five real service leaves install with safe pending continuity", async 
   await expect(page.locator('#roster [data-visibility="not-visible"]')).toBeHidden();
   await expect(page.locator("#roster .roster-team[data-team-id]")).toHaveCount(2);
   await expect(page.locator("#roster-count")).toHaveText(
-    `${liveResearcher.roster_agents.length} visible`,
+    `${liveResearcher.roster_agents.length} actors`,
   );
   await expect(page.locator("#command-target-select")).toBeEnabled();
   await expect(page.locator("#command-target-select option")).toHaveCount(11);
@@ -3239,14 +3302,40 @@ test("all five real service leaves install with safe pending continuity", async 
     "aria-pressed",
     String(nextShowRanges),
   );
-  await expectSingleReplayUtilityCommand(page, "#replay-clear-reference-button", {
-    command_type: "select_agent",
-    selected_global_slot: null,
-  });
+  const replayOracleBeforeEscape = await authenticatedGet(
+    page,
+    "/api/presentation/frame",
+  );
+  await expectSingleActivationCommand(
+    page,
+    "/api/replay/command",
+    async () => {
+      await page.locator("#battlefield").focus();
+      await page.keyboard.press("Escape");
+    },
+    {
+      command_type: "select_agent",
+      selected_global_slot: null,
+    },
+  );
   const replayOracleFinalUnselected = await authenticatedGet(
     page,
     "/api/presentation/frame",
   );
+  expect(replayOracleFinalUnselected.source.source_frame_index).toBe(
+    replayOracleBeforeEscape.source.source_frame_index,
+  );
+  expect(replayOracleFinalUnselected.source.source_simulator_step_count).toBe(
+    replayOracleBeforeEscape.source.source_simulator_step_count,
+  );
+  expect(replayOracleFinalUnselected.presentation_kind).toBe(
+    replayOracleBeforeEscape.presentation_kind,
+  );
+  expect(replayOracleFinalUnselected.authority).toEqual(
+    replayOracleBeforeEscape.authority,
+  );
+  await expect(page.locator("#battlefield")).toBeFocused();
+  await expect(page.locator("#battlefield-empty")).toBeHidden();
   await expectReplayInspectionDom(page, replayOracleFinalUnselected);
   await seekReplay(page, 0);
   await expectSingleActivationCommand(
@@ -3521,9 +3610,14 @@ test("all five real service leaves install with safe pending continuity", async 
   expect(roundTripAgent.presentation.authority.recipient_public_agent_id).toBe(
     replayAgentNotVisible.public_agent_id,
   );
-  await expectZeroCommandInteraction(page, () =>
-    page.locator("#replay-clear-reference-button").click(),
+  const replayAgentBeforeEscape = await authenticatedGet(
+    page,
+    "/api/presentation/frame",
   );
+  await expectZeroCommandInteraction(page, async () => {
+    await page.locator("#battlefield").focus();
+    await page.keyboard.press("Escape");
+  });
   await expect(page.locator('#battlefield .agent[data-selected="true"]')).toHaveCount(
     0,
   );
@@ -3537,6 +3631,20 @@ test("all five real service leaves install with safe pending continuity", async 
   expect(replayAgentPresentationAfterClear.authority.recipient_presentation_key).toBe(
     roundTripAgent.presentation.authority.recipient_presentation_key,
   );
+  expect(replayAgentPresentationAfterClear.source.source_frame_index).toBe(
+    replayAgentBeforeEscape.source.source_frame_index,
+  );
+  expect(replayAgentPresentationAfterClear.source.source_simulator_step_count).toBe(
+    replayAgentBeforeEscape.source.source_simulator_step_count,
+  );
+  expect(replayAgentPresentationAfterClear.presentation_kind).toBe(
+    replayAgentBeforeEscape.presentation_kind,
+  );
+  expect(replayAgentPresentationAfterClear.authority).toEqual(
+    replayAgentBeforeEscape.authority,
+  );
+  await expect(page.locator("#battlefield")).toBeFocused();
+  await expect(page.locator("#battlefield-empty")).toBeHidden();
   expect(browserErrors.get(page) ?? []).toEqual([]);
 });
 

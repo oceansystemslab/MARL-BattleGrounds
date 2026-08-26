@@ -66,6 +66,9 @@ from scripts.dev.visual_debugger.presentation_protocol import (
     LiveOracleInspectionEnvelopeV1,
     LiveOraclePresentationSourceIdentityV1,
     LiveOracleTechnicalFrameV1,
+    LivePendingActionTupleV1,
+    LivePendingJointActionRowV1,
+    LivePendingJointActionV1,
     LiveResearcherDraftInspectionV1,
     LiveResearcherEditableDraftInspectionV1,
     LiveResearcherSpaceV1,
@@ -201,6 +204,53 @@ def _draft_lane_v1(
     if raw_armed_lane is None or (raw_armed_lane == 0 and target_action == 0):
         return "none"
     return "basic" if raw_armed_lane == 0 else "ultimate"
+
+
+def _pending_joint_action_v1(
+    context: EvaluationEpisodeContextV1,
+    raw_frame: ResearcherLiveDebuggerFrameV2,
+) -> LivePendingJointActionV1 | None:
+    """Project the exact next joint submission without slots or geometry."""
+    if raw_frame.hud.pending_submission_scope != "joint_turn":
+        return None
+    rows: list[LivePendingJointActionRowV1] = []
+    for pending in raw_frame.hud.pending_actions:
+        roster = context.roster[pending.actor_global_slot]
+        if not roster.configured_active:
+            raise ValueError("Pending Joint Action cannot include an inactive actor.")
+        target_action = pending.target_action
+        if type(target_action) is not int:
+            raise ValueError("researcher pending target action must be public.")
+        armed_lane = _draft_lane_v1(
+            target_action=target_action,
+            raw_armed_lane=pending.armed_lane,
+        )
+        if armed_lane == "none":
+            submitted_target_action = 0
+            submitted_ultimate_action = 0
+        else:
+            submitted_target_action = target_action
+            submitted_ultimate_action = pending.armed_lane
+            if type(submitted_ultimate_action) is not int:
+                raise ValueError("an armed pending action requires an exact lane.")
+        rows.append(
+            LivePendingJointActionRowV1(
+                actor_presentation_key=oracle_presentation_key_v1(
+                    authority_session_id=raw_frame.session_id,
+                    public_agent_id=roster.public_agent_id,
+                ),
+                actor_public_agent_id=roster.public_agent_id,
+                pending_action=LivePendingActionTupleV1(
+                    move_action=pending.move_action,
+                    target_action=submitted_target_action,
+                    use_ultimate_action=submitted_ultimate_action,
+                ),
+            )
+        )
+    return LivePendingJointActionV1(
+        current_simulator_step_count=raw_frame.simulator_step_count,
+        action_rows=tuple(rows),
+    )
 
 
 def _oracle_latest_transition_v1(
@@ -422,6 +472,7 @@ def build_live_oracle_authorized_presentation_v1(
         current_endpoint=endpoint,
         latest_events=parts.incoming_summary,
         latest_transition=latest_transition,
+        pending_joint_action=_pending_joint_action_v1(context, raw_frame),
         technical_frame=LiveOracleTechnicalFrameV1(
             technical_kind="live_oracle_technical_frame",
             episode_id=source.episode_id,
@@ -548,6 +599,7 @@ def build_live_researcher_space_v1(
         ),
         class_mechanics=endpoint.scene.class_mechanics,
         latest_transition=oracle.latest_transition,
+        pending_joint_action=oracle.pending_joint_action,
         technical_frame=oracle.technical_frame,
         pending_inspection=pending_inspection,
     )

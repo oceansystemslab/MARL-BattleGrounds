@@ -152,10 +152,14 @@ const ICONS = Object.freeze({
     primitive("path", { d: "M12 10.5V20M8.5 14h7" }),
   ]),
   "activation-poison": icon("activation-poison", [
+    primitive("path", { d: "M4 20 9 15" }),
+    primitive("path", { d: "M6 14 10 18" }),
+    primitive("path", { d: "M9 15 20 4 17 12 12 17Z" }),
     primitive("path", {
-      d: "M12 2.5c3.4 4.7 5.6 7.7 5.6 11.3a5.6 5.6 0 1 1-11.2 0C6.4 10.2 8.6 7.2 12 2.5Z",
+      d: "M19 12.5c1.2 1.8 1.8 2.7 1.8 3.6a1.8 1.8 0 1 1-3.6 0c0-.9.6-1.8 1.8-3.6Z",
+      fill: "currentColor",
+      stroke: "none",
     }),
-    primitive("path", { d: "M10 16.5h4" }),
   ]),
   "modifier-amplification": icon("modifier-amplification", [
     primitive("path", { d: "M12 21V4M5 11l7-7 7 7" }),
