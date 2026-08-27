@@ -1,7 +1,7 @@
 # Combat Debugger
 
 The Combat Debugger is the live, manual MARL-BattleGrounds laboratory. It
-always opens `arena_5v5`, whose map is 18×12, and always uses the fixed Analysis
+always opens `arena_5v5`, whose map is 20×10, and always uses the fixed Analysis
 presentation. Use it to inspect same-epoch authority, compose simultaneous
 actions, submit transitions, and optionally record one manual episode.
 
@@ -122,9 +122,9 @@ help, selection, and filters do not change scientific authority.
 ## Inspection and visual filters
 
 The selected-target inspector reports authorized identity, relation, distance,
-and public geometry. Roster, Comprehensive Agent Class Details, Pending
-Authorized Draft, Latest Transition, Technical Frame, and the target selector
-remain global researcher-space in both views. Pending Authorized Draft reports
+and public geometry. Roster, Comprehensive Agent Class Details, Pending Joint
+Action, Latest Transition, Technical Frame, and the target selector remain
+global researcher-space in both views. Pending Joint Action reports
 movement, ability, target, and exact lane legality without carrying battlefield
 anchors. Basic Legality is false when no target is selected. Only SVG-local
 inspection and choreography consume fog-filtered geometry. The live Technical
@@ -132,14 +132,14 @@ Frame is allowlisted by authority: Episode, Frame, Simulator step, and
 conditional Incoming transition. The initial frame has no incoming-transition
 row.
 
-Visual Filters contains exactly 18 independently controlled paint families,
-all enabled by default:
+Visual Filters contains 18 independently controlled paint families plus the
+Ranges control. All 19 visible controls are enabled by default:
 
 1. Aura Fields
 2. Aura Modifier Badges
 3. Duration Status Badges
 4. Spawn Shield
-5. Rejected Action Feedback
+5. Target Selection Visuals
 6. Basic Ability Effects
 7. Ultimate Ability Effects
 8. Regeneration Effects
@@ -154,7 +154,7 @@ all enabled by default:
 17. Spawn-Shield Expiry
 18. Scrolling Battle Text
 
-Duration Status Badges includes the white crossed-swords **In combat** countdown.
+Duration Status Badges includes the white crossed-swords **In Combat** countdown.
 Basic Ability Effects and Ultimate Ability Effects each own their corresponding
 activation presentation and damage/healing impact glyphs. Scrolling Battle
 Text owns the complete net-health unit: outcome glyph, signed value, recipient
@@ -163,10 +163,11 @@ healing remain distinguished by their outcome sign and color rather than by
 separate filters.
 
 These switches affect browser paint, accessible descriptions belonging to that
-paint, and nothing else. They do not redact source data, change simulator
-state, alter authorized event data used by battlefield choreography, or replace
-the separate Ranges control. **Enable All** enables all 18; **Disable All**
-disables all 18.
+paint, and nothing else. They do not redact source data, change simulator state,
+or alter authorized event data used by battlefield choreography. Ranges uses
+its existing service/local authority path rather than the 18-entry paint schema.
+**Enable All** and **Disable All** govern all 18 paint families and the active
+Ranges control together.
 
 ## Recording and recovery
 

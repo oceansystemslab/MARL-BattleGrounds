@@ -521,7 +521,7 @@ test("timeline rendering publishes bounded controls and accessible cursor text",
   assert.equal(elements.rateSelect.value, "1");
   assert.equal(
     elements.status.textContent,
-    "Frame 2 / 3 · Tick 2 / 3 · Incoming transition episode:test:transition:1 · 1.00× · SETTLED",
+    "Frame 2 / 3 · Tick 2 / 3 · Incoming Transition episode:test:transition:1 · 1.00× · SETTLED",
   );
   assert.equal(elements.backTenButton.disabled, false);
   assert.equal(elements.previousButton.disabled, false);
@@ -561,7 +561,7 @@ test("timeline labels use nonzero simulator ticks while slider seeks frame indic
   assert.equal(elements.position.textContent, "Tick 42 / 43");
   assert.equal(
     elements.status.textContent,
-    "Frame 2 / 3 · Tick 42 / 43 · Incoming transition episode:test:transition:1 · 1.00× · SETTLED",
+    "Frame 2 / 3 · Tick 42 / 43 · Incoming Transition episode:test:transition:1 · 1.00× · SETTLED",
   );
   assert.equal(replayTimelineSimulatorStep(timeline, 2), 42);
   assert.equal(replayTimelineSimulatorStep(timeline, 4), null);

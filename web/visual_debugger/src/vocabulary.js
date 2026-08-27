@@ -116,16 +116,16 @@ const TEAM_TOKENS = Object.freeze({
 const STATUS_TOKENS = Object.freeze({
   in_combat: token({
     tokenId: "in_combat",
-    label: "In combat",
+    label: "In Combat",
     shortLabel: "COMBAT",
-    accessibleName: "In combat",
+    accessibleName: "In Combat",
     glyphKey: "combat-in-progress",
     cssKey: "in-combat",
     fallback: "C",
   }),
   stun_warrior_charge: token({
     tokenId: "stun_warrior_charge",
-    label: "Charge stun",
+    label: "Charge Stun",
     shortLabel: "C-STN",
     accessibleName: "Warrior Charge stun",
     glyphKey: "status-stun",
@@ -143,7 +143,7 @@ const STATUS_TOKENS = Object.freeze({
   }),
   stun_rogue_poison: token({
     tokenId: "stun_rogue_poison",
-    label: "Crippling Poison stun",
+    label: "Crippling Poison Stun",
     shortLabel: "P-STN",
     accessibleName: "Rogue Crippling Poison stun",
     glyphKey: "status-stun",
@@ -152,7 +152,7 @@ const STATUS_TOKENS = Object.freeze({
   }),
   slow_warrior_charge: token({
     tokenId: "slow_warrior_charge",
-    label: "Charge slow",
+    label: "Charge Slow",
     shortLabel: "C-SLW",
     accessibleName: "Warrior Charge slow",
     glyphKey: "status-slow",
@@ -161,7 +161,7 @@ const STATUS_TOKENS = Object.freeze({
   }),
   slow_hunter_basic: token({
     tokenId: "slow_hunter_basic",
-    label: "Hunter slow",
+    label: "Hunter Slow",
     shortLabel: "H-SLW",
     accessibleName: "Hunter Basic slow",
     glyphKey: "status-slow",
@@ -170,7 +170,7 @@ const STATUS_TOKENS = Object.freeze({
   }),
   slow_rogue_poison: token({
     tokenId: "slow_rogue_poison",
-    label: "Crippling Poison slow",
+    label: "Crippling Poison Slow",
     shortLabel: "P-SLW",
     accessibleName: "Rogue Crippling Poison slow",
     glyphKey: "status-slow",
@@ -209,18 +209,18 @@ const STATUS_TOKENS = Object.freeze({
 const ACTIVATION_TOKENS = Object.freeze({
   basic_damage: token({
     tokenId: "basic_damage",
-    label: "Basic damage",
+    label: "Basic Damage",
     shortLabel: "Basic",
-    accessibleName: "Accepted Basic damage activation",
+    accessibleName: "Accepted Basic Damage activation",
     glyphKey: "activation-basic-damage",
     cssKey: "basic-damage",
     fallback: "B",
   }),
   basic_heal: token({
     tokenId: "basic_heal",
-    label: "Basic healing",
+    label: "Basic Healing",
     shortLabel: "Basic",
-    accessibleName: "Accepted Priest Basic healing activation",
+    accessibleName: "Accepted Priest Basic Healing activation",
     glyphKey: "activation-basic-heal",
     cssKey: "basic-heal",
     fallback: "B",
@@ -302,7 +302,7 @@ const MODIFIER_TOKENS = Object.freeze({
   }),
   priest_freedom: token({
     tokenId: "priest_freedom",
-    label: "Freedom speed floor",
+    label: "Freedom Speed Floor",
     shortLabel: "FREE",
     accessibleName: "Effective Priest Freedom movement-speed floor",
     glyphKey: "status-freedom",
@@ -311,7 +311,7 @@ const MODIFIER_TOKENS = Object.freeze({
   }),
   mage_burst: token({
     tokenId: "mage_burst",
-    label: "Burst amplification",
+    label: "Burst Amplification",
     shortLabel: "BURST",
     accessibleName: "Effective Mage Burst damage amplification modifier",
     glyphKey: "status-burst",
@@ -368,8 +368,8 @@ const LIFECYCLE_TOKENS = Object.freeze({
   }),
   cleared_by_death: token({
     tokenId: "cleared_by_death",
-    label: "Cleared on death",
-    shortLabel: "Death clear",
+    label: "Cleared On Death",
+    shortLabel: "Death Clear",
     accessibleName: "Status cleared by the recipient's recorded new death",
     glyphKey: "lifecycle-death-clear",
     cssKey: "cleared-by-death",
@@ -377,7 +377,7 @@ const LIFECYCLE_TOKENS = Object.freeze({
   }),
   cleared_unclassified: token({
     tokenId: "cleared_unclassified",
-    label: "Status ended",
+    label: "Status Ended",
     shortLabel: "End",
     accessibleName: "Status ended for an unclassified or ambiguous reason",
     glyphKey: "lifecycle-ended",
@@ -386,7 +386,7 @@ const LIFECYCLE_TOKENS = Object.freeze({
   }),
   trap_broken_and_reapplied: token({
     tokenId: "trap_broken_and_reapplied",
-    label: "Broken, then reapplied",
+    label: "Broken, Then Reapplied",
     shortLabel: "Break+",
     accessibleName: "Freezing Trap was broken, then reapplied",
     glyphKey: "lifecycle-trap-broken-reapplied",

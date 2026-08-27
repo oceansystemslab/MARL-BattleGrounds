@@ -163,114 +163,22 @@ AUTHORIZED_CLASS_DOCUMENTATION_PROFILE_ID_V1 = (
     "marl_battlegrounds.class_documentation.canonical_v1"
 )
 
-_CANONICAL_CLASS_DOCUMENTATION_ROWS_V1: tuple[tuple[object, ...], ...] = (
-    (
-        1,
-        "Mage",
-        80.0,
-        0.5,
-        1.0,
-        6.0,
-        "enemy",
-        3.0,
-        13.0,
-        0.0,
-        "target_none",
-        0.0,
-        30,
-        0.0,
-        0.0,
-        5,
-        0.03999999910593033,
-    ),
-    (
-        2,
-        "Warrior",
-        200.0,
-        0.5,
-        1.0,
-        6.0,
-        "enemy",
-        1.5,
-        8.0,
-        0.0,
-        "enemy",
-        5.75,
-        30,
-        20.0,
-        0.0,
-        5,
-        0.03999999910593033,
-    ),
-    (
-        3,
-        "Hunter",
-        100.0,
-        0.5,
-        1.0,
-        6.5,
-        "enemy",
-        3.5,
-        6.0,
-        0.0,
-        "enemy",
-        3.0,
-        30,
-        10.0,
-        0.0,
-        5,
-        0.03999999910593033,
-    ),
-    (
-        4,
-        "Rogue",
-        100.0,
-        0.5,
-        1.2999999523162842,
-        6.0,
-        "enemy",
-        1.5,
-        12.0,
-        0.0,
-        "enemy",
-        1.5,
-        30,
-        36.0,
-        0.0,
-        3,
-        0.03999999910593033,
-    ),
-    (
-        5,
-        "Priest",
-        100.0,
-        0.5,
-        1.0,
-        6.0,
-        "ally",
-        3.0,
-        0.0,
-        8.0,
-        "ally",
-        5.75,
-        30,
-        0.0,
-        200.0,
-        5,
-        0.03999999910593033,
-    ),
+_CANONICAL_CLASS_DOCUMENTATION_SHAPE_V1: tuple[tuple[object, ...], ...] = (
+    (1, "Mage", "enemy", "target_none"),
+    (2, "Warrior", "enemy", "enemy"),
+    (3, "Hunter", "enemy", "enemy"),
+    (4, "Rogue", "enemy", "enemy"),
+    (5, "Priest", "ally", "ally"),
 )
 
-_CANONICAL_STATUS_DOCUMENTATION_ROWS_V1: tuple[tuple[object, ...], ...] = (
+_CANONICAL_STATUS_DOCUMENTATION_SHAPE_V1: tuple[tuple[object, ...], ...] = (
     (
         0,
         "warrior_charge_slow",
         "slow",
         2,
         "ultimate",
-        5,
         "movement_multiplier",
-        0.5,
         "maximum_remaining_duration",
         False,
     ),
@@ -280,9 +188,7 @@ _CANONICAL_STATUS_DOCUMENTATION_ROWS_V1: tuple[tuple[object, ...], ...] = (
         "slow",
         3,
         "basic",
-        1,
         "movement_multiplier",
-        0.85,
         "maximum_remaining_duration",
         False,
     ),
@@ -292,9 +198,7 @@ _CANONICAL_STATUS_DOCUMENTATION_ROWS_V1: tuple[tuple[object, ...], ...] = (
         "slow",
         4,
         "ultimate",
-        5,
         "movement_multiplier",
-        0.5,
         "maximum_remaining_duration",
         False,
     ),
@@ -304,9 +208,7 @@ _CANONICAL_STATUS_DOCUMENTATION_ROWS_V1: tuple[tuple[object, ...], ...] = (
         "stun",
         2,
         "ultimate",
-        1,
         "none",
-        None,
         "maximum_remaining_duration",
         False,
     ),
@@ -316,9 +218,7 @@ _CANONICAL_STATUS_DOCUMENTATION_ROWS_V1: tuple[tuple[object, ...], ...] = (
         "stun",
         3,
         "ultimate",
-        4,
         "none",
-        None,
         "maximum_remaining_duration",
         True,
     ),
@@ -328,9 +228,7 @@ _CANONICAL_STATUS_DOCUMENTATION_ROWS_V1: tuple[tuple[object, ...], ...] = (
         "stun",
         4,
         "ultimate",
-        1,
         "none",
-        None,
         "maximum_remaining_duration",
         False,
     ),
@@ -340,9 +238,7 @@ _CANONICAL_STATUS_DOCUMENTATION_ROWS_V1: tuple[tuple[object, ...], ...] = (
         "anti_heal",
         4,
         "ultimate",
-        4,
         "healing_multiplier",
-        0.5,
         "maximum_remaining_duration",
         False,
     ),
@@ -352,9 +248,7 @@ _CANONICAL_STATUS_DOCUMENTATION_ROWS_V1: tuple[tuple[object, ...], ...] = (
         "damage_amplification",
         1,
         "ultimate",
-        5,
         "damage_multiplier",
-        1.5,
         "maximum_remaining_duration",
         False,
     ),
@@ -364,35 +258,15 @@ _CANONICAL_STATUS_DOCUMENTATION_ROWS_V1: tuple[tuple[object, ...], ...] = (
         "movement_floor",
         5,
         "basic",
-        1,
         "movement_floor",
-        0.85,
         "maximum_remaining_duration",
         False,
     ),
 )
 
-_CANONICAL_AURA_DOCUMENTATION_ROWS_V1: tuple[tuple[object, ...], ...] = (
-    (
-        "mage_damage_amplification",
-        1,
-        "same_team",
-        2.0,
-        1.15,
-        "multiply_then_clamp",
-        "ceiling",
-        1.3224999999999998,
-    ),
-    (
-        "warrior_damage_mitigation",
-        2,
-        "same_team",
-        2.0,
-        0.85,
-        "multiply_then_clamp",
-        "floor",
-        0.7224999999999999,
-    ),
+_CANONICAL_AURA_DOCUMENTATION_SHAPE_V1: tuple[tuple[object, ...], ...] = (
+    ("mage_damage_amplification", 1, "same_team", "multiply_then_clamp", "ceiling"),
+    ("warrior_damage_mitigation", 2, "same_team", "multiply_then_clamp", "floor"),
 )
 
 
@@ -796,53 +670,41 @@ type AuthorizedClassMechanics = AuthorizedClassMechanicsV1 | AuthorizedClassMech
 def _catalog_has_complete_class_documentation_profile_v1(
     catalog: StaticMechanicsCatalogV1,
 ) -> bool:
-    class_rows = tuple(
+    """Certify canonical V1 semantic identities plus prose-dependent tuning facts.
+
+    Literal class, status, and aura shapes bind the versioned simulator semantics
+    that are not repeated as numeric catalog leaves. Numeric predicates below
+    exist only where the authored guide makes the corresponding qualitative claim.
+    """
+    class_shape = tuple(
         (
             row.class_id,
             row.class_name,
-            row.maximum_health,
-            row.body_radius,
-            row.base_movement_speed,
-            row.observation_radius,
             row.basic_target_mode,
-            row.basic_interaction_radius,
-            row.basic_raw_damage,
-            row.basic_raw_healing,
             row.ultimate_target_mode,
-            row.ultimate_interaction_radius,
-            row.ultimate_cooldown_steps,
-            row.ultimate_raw_damage,
-            row.ultimate_raw_healing,
-            row.out_of_combat_delay_steps,
-            row.out_of_combat_health_regeneration_fraction_per_step,
         )
         for row in catalog.class_mechanics[1:]
     )
-    status_rows = tuple(
+    status_shape = tuple(
         (
             row.status_channel_id,
             row.status_id,
             row.family,
             row.source_class_id,
             row.source_action_component,
-            row.duration_steps,
             row.magnitude_kind,
-            row.magnitude,
             row.application_update,
             row.breaks_on_positive_damage,
         )
         for row in catalog.status_channels
     )
-    aura_rows = tuple(
+    aura_shape = tuple(
         (
             row.aura_id,
             row.emitter_class_id,
             row.beneficiary_relation,
-            row.radius,
-            row.per_emitter_multiplier,
             row.stacking_rule,
             row.clamp_kind,
-            row.clamp_value,
         )
         for row in catalog.aura_mechanics
     )
@@ -852,14 +714,77 @@ def _catalog_has_complete_class_documentation_profile_v1(
         or catalog.health_unit != "hit_points"
         or catalog.spatial_unit != "world_units"
         or catalog.duration_unit != "transition_ticks"
-        or catalog.global_slow_floor != 0.2
-        or class_rows != _CANONICAL_CLASS_DOCUMENTATION_ROWS_V1
-        or status_rows != _CANONICAL_STATUS_DOCUMENTATION_ROWS_V1
-        or aura_rows != _CANONICAL_AURA_DOCUMENTATION_ROWS_V1
+        or class_shape != _CANONICAL_CLASS_DOCUMENTATION_SHAPE_V1
+        or status_shape != _CANONICAL_STATUS_DOCUMENTATION_SHAPE_V1
+        or aura_shape != _CANONICAL_AURA_DOCUMENTATION_SHAPE_V1
     ):
         return False
 
     by_id = {row.class_id: row for row in catalog.class_mechanics[1:]}
+    status_by_id = {row.status_id: row for row in catalog.status_channels}
+    aura_by_id = {row.aura_id: row for row in catalog.aura_mechanics}
+    damage_classes = tuple(by_id[class_id] for class_id in (1, 2, 3, 4))
+    priest = by_id[5]
+    maximum_body_radius = max(row.body_radius for row in by_id.values())
+    melee_basic_radius = max(
+        by_id[class_id].basic_interaction_radius for class_id in (2, 4)
+    )
+    ranged_basic_radius = min(
+        by_id[class_id].basic_interaction_radius for class_id in (1, 3)
+    )
+    if not (
+        all(row.maximum_health > 0.0 for row in by_id.values())
+        and all(
+            row.basic_interaction_radius >= row.body_radius + maximum_body_radius
+            and row.observation_radius >= row.body_radius + maximum_body_radius
+            for row in by_id.values()
+        )
+        and all(
+            row.ultimate_interaction_radius >= row.body_radius + maximum_body_radius
+            for row in (by_id[2], by_id[3], by_id[4], by_id[5])
+        )
+        and ranged_basic_radius > melee_basic_radius
+        and all(row.basic_raw_damage > 0.0 for row in damage_classes)
+        and all(row.basic_raw_healing == 0.0 for row in damage_classes)
+        and by_id[1].ultimate_raw_damage == 0.0
+        and by_id[1].ultimate_raw_healing == 0.0
+        and all(row.ultimate_raw_damage > 0.0 for row in damage_classes[1:])
+        and all(row.ultimate_raw_healing == 0.0 for row in damage_classes[1:])
+        and priest.basic_raw_damage == 0.0
+        and priest.ultimate_raw_damage == 0.0
+        and priest.basic_raw_healing > 0.0
+        and priest.ultimate_raw_healing > 0.0
+        and by_id[4].out_of_combat_health_regeneration_fraction_per_step > 0.0
+        and all(
+            row.duration_steps > 0
+            and (
+                (row.magnitude_kind == "none" and row.magnitude is None)
+                or (row.magnitude_kind != "none" and row.magnitude is not None)
+            )
+            for row in status_by_id.values()
+        )
+        and all(
+            row.magnitude is not None and 0.0 < row.magnitude < 1.0
+            for row in status_by_id.values()
+            if row.magnitude_kind in ("movement_multiplier", "healing_multiplier")
+        )
+        and status_by_id["mage_burst_damage_amplification"].magnitude is not None
+        and status_by_id["mage_burst_damage_amplification"].magnitude > 1.0
+        and status_by_id["priest_blessing_of_freedom_movement_floor"].magnitude
+        is not None
+        and catalog.global_slow_floor
+        < status_by_id["priest_blessing_of_freedom_movement_floor"].magnitude
+        <= 1.0
+        and aura_by_id["mage_damage_amplification"].per_emitter_multiplier > 1.0
+        and aura_by_id["mage_damage_amplification"].clamp_value
+        >= aura_by_id["mage_damage_amplification"].per_emitter_multiplier
+        and 0.0 < aura_by_id["warrior_damage_mitigation"].per_emitter_multiplier < 1.0
+        and 0.0
+        < aura_by_id["warrior_damage_mitigation"].clamp_value
+        <= aura_by_id["warrior_damage_mitigation"].per_emitter_multiplier
+    ):
+        return False
+
     positive_basic_damage = sorted(
         (row.basic_raw_damage, row.class_id)
         for row in by_id.values()
@@ -880,41 +805,46 @@ def _catalog_has_complete_class_documentation_profile_v1(
         and sum(row.maximum_health == by_id[1].maximum_health for row in by_id.values())
         == 1
         and max(by_id.values(), key=lambda row: row.maximum_health).class_id == 2
+        and sum(row.maximum_health == by_id[2].maximum_health for row in by_id.values())
+        == 1
+        and by_id[4].maximum_health < by_id[2].maximum_health
+        and positive_basic_damage[0][1] == 3
+        and sum(
+            row.basic_raw_damage == by_id[3].basic_raw_damage for row in damage_classes
+        )
+        == 1
         and positive_basic_damage[1][1] == 2
+        and sum(
+            row.basic_raw_damage == by_id[2].basic_raw_damage for row in damage_classes
+        )
+        == 1
         and max(by_id.values(), key=lambda row: row.base_movement_speed).class_id == 4
         and sum(
             row.base_movement_speed == by_id[4].base_movement_speed
             for row in by_id.values()
         )
         == 1
-        and max(stun_duration_by_class, key=stun_duration_by_class.__getitem__) == 3
-        and positive_basic_damage[0][1] == 3
+        and stun_duration_by_class[3] == max(stun_duration_by_class.values())
+        and sum(
+            duration == stun_duration_by_class[3]
+            for duration in stun_duration_by_class.values()
+        )
+        == 1
         and by_id[5].basic_raw_healing > 0.0
         and by_id[5].ultimate_raw_healing > 0.0
-        and by_id[5].basic_raw_damage == 0.0
-        and by_id[5].ultimate_raw_damage == 0.0
-        and all(
-            row.basic_raw_healing == 0.0 and row.ultimate_raw_healing == 0.0
-            for class_id, row in by_id.items()
-            if class_id != 5
-        )
     )
 
 
 def authorized_class_documentation_profile_v1(
     catalog: StaticMechanicsCatalogV1,
 ) -> AuthorizedClassDocumentationProfileV1:
-    """Certify the one frozen catalog profile; fail closed for historical peers."""
+    """Certify the authored categorical and qualitative documentation profile."""
     if type(catalog) is not StaticMechanicsCatalogV1:
         raise TypeError("catalog must be the exact StaticMechanicsCatalogV1 root.")
     validated = StaticMechanicsCatalogV1.model_validate(
         catalog.model_dump(mode="python")
     )
-    if (
-        validated.canonical_digest_sha256
-        == AUTHORIZED_CLASS_DOCUMENTATION_CATALOG_FINGERPRINT_V1
-        and _catalog_has_complete_class_documentation_profile_v1(validated)
-    ):
+    if _catalog_has_complete_class_documentation_profile_v1(validated):
         return AuthorizedClassDocumentationProfileAvailableV1(
             availability_kind="available",
             profile_id=AUTHORIZED_CLASS_DOCUMENTATION_PROFILE_ID_V1,

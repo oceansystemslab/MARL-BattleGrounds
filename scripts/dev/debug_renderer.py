@@ -59,7 +59,7 @@ battlefield controls (while the battlefield has focus):
   arrow keys            cardinal movement aliases
   X                     select Stay movement
   Space / Enter         submit every staged action as one joint turn
-  R                     reset the manual 18x12 arena deterministically
+  R                     reset the manual 20x10 arena deterministically
   G                     toggle controlled-actor ranges
   ?                     open browser controls/help
 
@@ -70,8 +70,7 @@ browser controls:
 
 live selected-target inspector:
   SELECTED TARGET        identity, relation, distance, and public geometry
-  PENDING AUTHORIZED DRAFT
-                         movement, ability, target, and exact lane legality
+  PENDING JOINT ACTION   movement, ability, target, and exact lane legality
   TECHNICAL FRAME        exact authority-safe facts permitted by the active leaf:
                          Episode or Artifact digest prefix; Frame; Simulator step;
                          conditional Incoming transition; replay-only movement scale
@@ -102,7 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the live-only debugger CLI without importing runtime backends."""
     parser = argparse.ArgumentParser(
         description=(
-            "Open the manual 18x12 MARL-BattleGrounds Combat Debugger in fixed "
+            "Open the manual 20x10 MARL-BattleGrounds Combat Debugger in fixed "
             "Analysis presentation."
         ),
         epilog=_EPILOG,

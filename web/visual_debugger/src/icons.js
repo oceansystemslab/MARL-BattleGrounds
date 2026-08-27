@@ -123,6 +123,14 @@ const ICONS = Object.freeze({
       d: "m12 2 2 6 5.5-3.5-2.3 6.2 6.3.3-5.6 3.2 5.1 3.7-6.3-.2 1.7 6.1-4.9-4-2.4 5.8-.2-6.3-5.6 3 4-4.9-6.2.9 5.2-3.7Z",
     }),
   ]),
+  "status-spawn-shield": icon("status-spawn-shield", [
+    primitive("path", {
+      d: "M12 2.5 19.5 6v5.3c0 4.7-2.9 7.8-7.5 10.2-4.6-2.4-7.5-5.5-7.5-10.2V6Z",
+    }),
+    primitive("path", {
+      d: "m12 6.5 1.4 4.1 4.1 1.4-4.1 1.4-1.4 4.1-1.4-4.1L6.5 12l4.1-1.4Z",
+    }),
+  ]),
   "activation-basic-damage": icon("activation-basic-damage", [
     primitive("path", { d: "M3 12h14M12 6l6 6-6 6" }),
     primitive("circle", { cx: 5, cy: 12, r: 2, fill: "currentColor" }),

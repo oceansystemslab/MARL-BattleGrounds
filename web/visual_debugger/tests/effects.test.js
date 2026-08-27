@@ -8,6 +8,12 @@ import {
   CHOREOGRAPHY_PAINT_FOOTPRINTS,
   isSubmissionCommand,
 } from "../src/choreography-plan.js";
+import {
+  authorizedUltimatePresentationV1,
+  explainActivation,
+} from "../src/explanations.js";
+import { iconDefinition } from "../src/icons.js";
+import { routeMarkerPose } from "../src/routes.js";
 import { BATTLEFIELD_LAYER_ORDER } from "../src/scene.js";
 import {
   DEFAULT_VISUAL_FILTER_STATE,
@@ -358,6 +364,46 @@ test("Agent adjacent-fog choreography preserves disappearance routes and appeara
     assert.equal(activation.targetEndpointPhase, null);
     assert.equal(activation.endpointPhase, "transition_start");
   }
+
+  const ultimateDisappearance = structuredClone(disappearance);
+  const ultimateRawEvent = ultimateDisappearance.visual_events.events.find(
+    (/** @type {Record<string, any>} */ event) =>
+      event.event_id === disappearingEvent.event_id,
+  );
+  assert.ok(ultimateRawEvent);
+  ultimateRawEvent.ability_component = "ultimate";
+  const ultimateFrame =
+    await normalizeAuthorizedPresentationFrameV1(ultimateDisappearance);
+  const ultimatePlan = buildChoreographyPlan(ultimateFrame, surface);
+  assert.ok(ultimatePlan);
+  const ultimateActivation = ultimatePlan.events.find(
+    (event) => event.eventId === ultimateRawEvent.event_id,
+  );
+  assert.ok(ultimateActivation);
+  assert.equal(ultimateActivation.sourceEndpointPhase, "transition_start");
+  assert.equal(
+    ultimateDisappearance.current_endpoint.parts.scene.agents.some(
+      (/** @type {Record<string, any>} */ agent) =>
+        agent.presentation_key === disappearingTrajectory.agent_presentation_key,
+    ),
+    false,
+  );
+  const authorizedUltimate = authorizedUltimatePresentationV1(
+    ultimateActivation.authorizedClassMechanics,
+  );
+  assert.ok(authorizedUltimate);
+  const ultimateExplanation = explainActivation(ultimateActivation);
+  assert.equal(
+    ultimateExplanation.title,
+    `${authorizedUltimate.name} (Mage Ultimate Ability)`,
+  );
+  assert.equal(ultimateExplanation.summary, authorizedUltimate.description);
+  assert.deepEqual(
+    Object.keys(ultimateActivation.authorizedClassMechanics).filter((key) =>
+      ["position", "public_agent_id", "presentation_key"].includes(key),
+    ),
+    [],
+  );
 
   const successorLifecycleKinds = new Set([
     "agent_died",
@@ -730,11 +776,58 @@ test("all registered transient families validate without constructing disabled g
   assert.equal(warriorActivation.spatial, true);
   assert.equal(warriorActivation.presentationSuppressed, false);
   assert.ok(warriorActivation.route);
+  assert.equal(warriorActivation.route.markerVariant, "compact");
+  assert.deepEqual(warriorActivation.route.markerProgresses, [1 / 3, 2 / 3]);
+  const chargeMarkers = warriorActivation.route.markerProgresses.map(
+    (/** @type {number} */ progress) =>
+      routeMarkerPose(warriorActivation.route, progress),
+  );
+  assert.equal(chargeMarkers.length, 2);
+  assert.ok(
+    (chargeMarkers[1].x - chargeMarkers[0].x) *
+      (warriorActivation.target.x - warriorActivation.source.x) +
+      (chargeMarkers[1].y - chargeMarkers[0].y) *
+        (warriorActivation.target.y - warriorActivation.source.y) >
+      0,
+  );
+  const preferredFirst = routeMarkerPose(warriorActivation.route, 1 / 3);
+  const markerBlocker = {
+    left: preferredFirst.x - 1,
+    top: preferredFirst.y - 1,
+    right: preferredFirst.x + 1,
+    bottom: preferredFirst.y + 1,
+    width: 2,
+    height: 2,
+  };
+  const fallbackPlan = buildChoreographyPlan(frame, {
+    ...surface,
+    protectedRects: [
+      {
+        layoutKey: "charge-source-marker-blocker",
+        protectedKind: "body",
+        ownerPresentationKey: warriorActivation.sourcePresentationKey,
+        bounds: markerBlocker,
+      },
+    ],
+  });
+  const fallbackCharge = fallbackPlan?.events.find(
+    (event) => event.kind === "activation" && event.tokenId === "warrior_charge",
+  );
+  assert.ok(fallbackCharge?.route);
+  assert.deepEqual(fallbackCharge.route.markerProgresses, [1 / 4]);
   assert.deepEqual(
     plan.events
       .filter((event) => event.kind === "status_lifecycle")
       .map(({ lifecycle }) => lifecycle),
-    ["applied", "applied", "expired", "trap_broken", "applied", "cleared_by_death"],
+    [
+      "applied",
+      "applied",
+      "expired",
+      "trap_broken",
+      "applied",
+      "cleared_by_death",
+      "expired",
+    ],
   );
   assert.deepEqual(
     plan.events
@@ -744,7 +837,6 @@ test("all registered transient families validate without constructing disabled g
       "cooldown_started",
       "cooldown_ready",
       "agent_died",
-      "spawn_shield_expired",
       "respawn_wave_occurred",
       "agent_respawned",
     ],
@@ -784,7 +876,97 @@ test("all registered transient families validate without constructing disabled g
   );
   assert.equal(
     plan.events.some((event) => event.kind === "rejected_action"),
-    true,
+    false,
+  );
+  const rejection = plan.events.find((event) => event.eventType === "action_rejected");
+  assert.deepEqual(
+    rejection && {
+      kind: rejection.kind,
+      feedKind: rejection.feedKind,
+      presentationSuppressed: rejection.presentationSuppressed,
+      spatial: rejection.spatial,
+    },
+    {
+      kind: "feed_only",
+      feedKind: "rejected_action",
+      presentationSuppressed: true,
+      spatial: false,
+    },
+  );
+  const shieldExpiry = visualPlan.events.find(
+    (event) => event.eventType === "spawn_shield_expired",
+  );
+  assert.ok(shieldExpiry);
+  assert.deepEqual(
+    {
+      kind: shieldExpiry.kind,
+      cueSemantic: shieldExpiry.cueSemantic,
+      tokenId: shieldExpiry.tokenId,
+      glyphKey: shieldExpiry.token?.glyphKey,
+      lifecycle: shieldExpiry.lifecycle,
+      paintParts: shieldExpiry.paintParts,
+      presentationSuppressed: shieldExpiry.presentationSuppressed,
+      spatial: shieldExpiry.spatial,
+      sourcePresentationKey: shieldExpiry.sourcePresentationKey,
+      sourcePublicAgentId: shieldExpiry.sourcePublicAgentId,
+    },
+    {
+      kind: "status_lifecycle",
+      cueSemantic: "spawn_shield_expired",
+      tokenId: "spawn_shield",
+      glyphKey: "status-spawn-shield",
+      lifecycle: "expired",
+      paintParts: { effect: true },
+      presentationSuppressed: false,
+      spatial: true,
+      sourcePresentationKey: null,
+      sourcePublicAgentId: null,
+    },
+  );
+  const shieldExplanation = explainChoreographyEvent(shieldExpiry);
+  assert.equal(shieldExplanation.title, "Expired Spawn Shield");
+  assert.equal(shieldExplanation.summary, null);
+  assert.equal(
+    explainChoreographyEvent({
+      ...shieldExpiry,
+      authorizedStatusSummary: null,
+    }).summary,
+    null,
+  );
+  assert.deepEqual(
+    shieldExplanation.rows.map(({ label }) => label),
+    ["Recipient"],
+  );
+  const shieldDisabled = buildChoreographyPlan(
+    frame,
+    surface,
+    filtersDisabled("spawn_shield_expiry"),
+  );
+  assert.ok(shieldDisabled);
+  const suppressedShield = shieldDisabled.events.find(
+    (event) => event.eventType === "spawn_shield_expired",
+  );
+  assert.deepEqual(
+    suppressedShield && {
+      paintParts: suppressedShield.paintParts,
+      presentationSuppressed: suppressedShield.presentationSuppressed,
+      spatial: suppressedShield.spatial,
+    },
+    {
+      paintParts: { effect: false },
+      presentationSuppressed: true,
+      spatial: false,
+    },
+  );
+  const spawnShieldIcon = iconDefinition("status-spawn-shield");
+  assert.equal(spawnShieldIcon.glyphKey, "status-spawn-shield");
+  assert.notDeepEqual(
+    spawnShieldIcon.primitives,
+    iconDefinition("class-warrior").primitives,
+  );
+  assert.notDeepEqual(
+    spawnShieldIcon.primitives,
+    iconDefinition("modifier-mitigation").primitives,
   );
   assert.equal(
     plan.events.some((event) => event.kind === "net_health"),
@@ -1024,10 +1206,11 @@ test("submission classification is presentation gating, not legality", () => {
   );
 });
 
-test("Charge displacement has no paint selector while rejection retains its color", async () => {
+test("Charge displacement and rejected actions have no battlefield paint selector", async () => {
   const css = await readFile(new URL("../styles.css", import.meta.url), "utf8");
   assert.doesNotMatch(css, /data-event-type="charge_phase_displacement"/u);
-  assert.match(css, /data-event-type="action_rejected"/u);
+  assert.doesNotMatch(css, /data-event-type="action_rejected"/u);
+  assert.doesNotMatch(css, /combat-rejection/u);
 });
 
 test("transient activation routes remain beneath every information-bearing layer", () => {
@@ -1096,13 +1279,14 @@ test("scene has one Analysis battlefield branch and owns durable shield and stat
     source,
     /scene\.audience === "researcher" \? "Oracle View" : "Agent POV"/u,
   );
-  assert.match(source, /showLegality: true/u);
+  assert.match(source, /showLegality: visualPolicy\.showSelectedPairLegality/u);
   assert.match(source, /showModifiers: visualPolicy\.showAuraModifierBadges/u);
   assert.doesNotMatch(
     source,
     /scene\.audience === "researcher" && visualPolicy\.showAuraModifierBadges/u,
   );
-  assert.match(source, /agent-spawn-shield__shell/u);
+  assert.doesNotMatch(source, /agent-spawn-shield__shell/u);
+  assert.match(source, /agent-spawn-shield__icon/u);
   assert.match(source, /agent-spawn-shield__ticks/u);
   assert.match(source, /duration_status_badge/u);
   assert.doesNotMatch(source, /agent-combat-state-icon/u);
@@ -1121,6 +1305,24 @@ test("scene has one Analysis battlefield branch and owns durable shield and stat
     source,
     /registerTooltipOwner\(nodes\.shieldRoot, spawnShieldView\.descriptor\)/u,
   );
+});
+
+test("lifecycle painter keeps exact status copy while suppressing obsolete ornaments and rejection paint", async () => {
+  const painter = await readFile(
+    new URL("../src/choreography-painter.js", import.meta.url),
+    "utf8",
+  );
+  assert.match(painter, /statusLifecyclePresentation\(/u);
+  assert.match(painter, /visibleEvent\.lifecycle !== "cleared_by_death"/u);
+  assert.match(painter, /combat-lifecycle__death-sweep-cut/u);
+  assert.doesNotMatch(painter, /combat-lifecycle__death-sweep-arc/u);
+  assert.doesNotMatch(painter, /combat-semantic-pulse__shield-shell/u);
+  assert.doesNotMatch(
+    painter,
+    /event\.kind === "semantic_pulse"\s*&&\s*event\.cueSemantic === "spawn_shield_expired"\s*&&\s*motionMode === "normal"/u,
+  );
+  assert.doesNotMatch(painter, /rejected_action|combat-rejection/u);
+  assert.doesNotMatch(painter, /combat-lifecycle__reapply|"reapply"/u);
 });
 
 test("authorized regeneration owns a packed plus cue instead of the generic onion", async () => {
@@ -1410,7 +1612,14 @@ test("authorized break plus application uses the ordinary Applied presentation w
   assert.ok(application);
   assert.ok(applicationDisabled);
   const applicationExplanation = explainChoreographyEvent(application.events[0]);
-  assert.equal(applicationExplanation.title, "Applied");
+  assert.equal(
+    applicationExplanation.title,
+    "Applied Priest (Basic: Heal) Blessing of Freedom",
+  );
+  assert.equal(
+    applicationExplanation.summary,
+    "Freedom is applied when a Priest heals a same-team target, including itself where same-team targeting permits it. It prevents slow effects from reducing this agent's ordinary movement below the authorized floor; it does not override stun.",
+  );
   assert.deepEqual(
     applicationExplanation.rows.map(({ label }) => label),
     ["Source", "Recipient"],
@@ -1547,15 +1756,16 @@ test("status presentation preserves the valid five-source application maximum", 
     explanation.rows.map(({ label, value }) => [label, value]),
     [
       [
-        "Application Sources",
-        sourceTrajectories
-          .map(
-            (/** @type {Record<string, any>} */ { agent_public_agent_id }) =>
-              `Agent ID ${agent_public_agent_id}`,
-          )
-          .join("; "),
+        "Sources",
+        [
+          "Agent ID agent-slot-0 · Mage · Team A",
+          "Agent ID agent-slot-1 · Warrior · Team A",
+          "Agent ID agent-slot-2 · Priest · Team A",
+          "Agent ID agent-slot-5 · Hunter · Team B",
+          "Agent ID agent-slot-6 · Rogue · Team B",
+        ].join("; "),
       ],
-      ["Recipient", `Agent ID ${applications[0].recipient_anchor.public_agent_id}`],
+      ["Recipient", "Agent ID agent-slot-1 · Warrior · Team A"],
     ],
   );
 });
@@ -1593,6 +1803,10 @@ test("standalone serialized status events keep exact presentation meanings", asy
     event.event_kind = eventKind;
     event.event_id = `${raw.latest_events.incoming_transition_id}:event:0000`;
     event.ordinal = 0;
+    if (eventKind === "status_broken_by_damage") {
+      event.status_channel = 4;
+      event.status_id = "hunter_trap_stun";
+    }
     if (eventKind !== "status_applied") {
       delete event.source_anchor;
     }
@@ -1613,6 +1827,20 @@ test("standalone serialized status events keep exact presentation meanings", asy
     assert.equal(plan.events[0].spatial, true);
     assert.equal(plan.events[0].phaseStart, 0);
     assert.equal(plan.events[0].phaseEnd, 480);
+    const explanation = explainChoreographyEvent(plan.events[0]);
+    if (eventKind === "status_aged_to_zero") {
+      assert.equal(explanation.summary, null);
+    }
+    if (eventKind === "status_broken_by_damage") {
+      assert.equal(
+        explanation.summary,
+        "The Freezing Trap stun ended early because the recipient received damage.",
+      );
+    }
+    if (eventKind === "status_cleared_by_new_death") {
+      assert.match(explanation.title, /^Cleared .+ On Death$/u);
+      assert.equal(explanation.summary, null);
+    }
   }
 });
 

@@ -1,11 +1,12 @@
 import {
   authorizedPresentationAudience,
   authorizedPresentationIncomingRows,
+  authorizedPresentationResearcherSceneView,
   authorizedPresentationSceneView,
   isAuthorizedPresentationFrame,
 } from "./authorized-presentation-adapter.js";
 import { layoutCrossPhaseOccupancy } from "./layout.js";
-import { createRouteGeometry } from "./routes.js";
+import { createRouteGeometry, routeMarkerPose } from "./routes.js";
 import {
   DEFAULT_VISUAL_FILTER_STATE,
   isVisualPaintPartEnabled,
@@ -25,7 +26,6 @@ export const CHOREOGRAPHY_PHASES = Object.freeze({
   outcomeStart: 420,
   submissionRelease: 450,
   settleStart: 760,
-  v2RejectionStart: 0,
   v2AbilityStart: 0,
   v2HealthResolutionStart: 420,
   v2CountdownAndRegenStart: 900,
@@ -52,9 +52,18 @@ const STATUS_EVENT_TYPES = new Set([
   "status_refreshed_or_extended",
   "status_cleared_by_new_death",
 ]);
+const SPAWN_SHIELD_STATUS_TOKEN = Object.freeze({
+  tokenId: "spawn_shield",
+  label: "Spawn Shield",
+  shortLabel: "Shield",
+  accessibleName: "Spawn Shield",
+  glyphKey: "status-spawn-shield",
+  cssKey: "spawn-shield",
+  fallback: "S",
+});
 /**
- * @typedef {"ability" | "rejection" | "health" | "recovery" | "cooldown" | "charge" | "movement" | "death" | "status" | "shield" | "respawn_wave" | "respawn"} ChoreographyFamily
- * @typedef {Exclude<ChoreographyFamily, "ability" | "rejection">} OutcomeFamily
+ * @typedef {"ability" | "health" | "recovery" | "cooldown" | "charge" | "movement" | "death" | "status" | "shield" | "respawn_wave" | "respawn"} ChoreographyFamily
+ * @typedef {Exclude<ChoreographyFamily, "ability">} OutcomeFamily
  */
 /** @type {ReadonlyArray<OutcomeFamily>} */
 const OUTCOME_FAMILY_ORDER = Object.freeze([
@@ -105,12 +114,6 @@ export const CHOREOGRAPHY_PAINT_FOOTPRINTS = Object.freeze({
     mage_burst: Object.freeze({ width: 70, height: 70, flareExtent: 34 }),
     local: Object.freeze({ width: 48, height: 48 }),
   }),
-  rejection: Object.freeze({ width: 52, height: 52, ringRadius: 24 }),
-  lifecycleReapplication: Object.freeze({
-    width: 45,
-    height: 45,
-    ringRadius: 21,
-  }),
   chargeOwnership: Object.freeze({ width: 72, height: 22, labelLength: 60 }),
   respawnWave: Object.freeze({
     width: 152,
@@ -123,7 +126,6 @@ export const CHOREOGRAPHY_PAINT_FOOTPRINTS = Object.freeze({
     // 3px glow and 1px clearance. Holy Word alone needs 8px for its r4 particle
     // and 4px glow (and its 5px route stroke plus 5px glow spans 7.5px).
     activationPathPadding: Object.freeze({ default: 7, holy_word: 8 }),
-    rejectionPathPadding: 1,
     chargePathPadding: 1.5,
     activationMarkerPadding: 17,
     activationCompactMarkerPadding: 8,
@@ -135,10 +137,6 @@ const NET_EFFECT_CUE_RECTANGLE = centeredCueRectangle(48, 36);
 const NET_TEXT_CUE_RECTANGLE = centeredCueRectangle(88, 36);
 const UNCHANGED_NET_TEXT_CUE_RECTANGLE = centeredCueRectangle(102, 36);
 const LIFECYCLE_BREAK_CUE_RECTANGLE = centeredCueRectangle(52, 52);
-const LIFECYCLE_REAPPLICATION_CUE_RECTANGLE = centeredCueRectangle(
-  CHOREOGRAPHY_PAINT_FOOTPRINTS.lifecycleReapplication.width,
-  CHOREOGRAPHY_PAINT_FOOTPRINTS.lifecycleReapplication.height,
-);
 const REGENERATION_EFFECT_CUE_RECTANGLE = centeredCueRectangle(48, 48);
 const REGENERATION_TEXT_CUE_RECTANGLE = Object.freeze({
   left: -32,
@@ -213,6 +211,37 @@ function finiteNumber(value) {
  */
 function identifier(value) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+/**
+ * Retain only the four already-authorized public identity fields needed by
+ * semantic explanations. Scientific and geometry fields never cross this
+ * narrow browser-internal boundary.
+ *
+ * @param {unknown} value
+ */
+function authorizedIdentitySnapshot(value) {
+  const agent = record(value);
+  const presentationKey = identifier(agent?.presentation_key);
+  const publicAgentId = identifier(agent?.public_agent_id);
+  const classId = integer(agent?.class_id);
+  const teamId = integer(agent?.team_id);
+  if (
+    presentationKey === null ||
+    publicAgentId === null ||
+    classId === null ||
+    classId < 1 ||
+    classId > 5 ||
+    (teamId !== 1 && teamId !== 2)
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    presentation_key: presentationKey,
+    public_agent_id: publicAgentId,
+    class_id: classId,
+    team_id: teamId,
+  });
 }
 
 /**
@@ -310,9 +339,6 @@ function paintedOutcomeCueDimensions(event) {
   } else {
     if (enabled("effect") || enabled("break")) {
       rectangles.push(LIFECYCLE_BREAK_CUE_RECTANGLE);
-    }
-    if (enabled("reapplication")) {
-      rectangles.push(LIFECYCLE_REAPPLICATION_CUE_RECTANGLE);
     }
   }
   return unionCueRectangles(rectangles);
@@ -502,6 +528,68 @@ function projectedAgentRadius(surface, sceneByKey, presentationKey) {
   return Number.isFinite(projected) ? Number(projected) : 0;
 }
 
+const CHARGE_DIRECTION_MARKER_CANDIDATES = Object.freeze([
+  Object.freeze([1 / 3, 1 / 4]),
+  Object.freeze([2 / 3, 3 / 4]),
+]);
+
+/**
+ * Choose the preferred thirds for Charge direction markers, moving only the
+ * colliding marker outward to its paired quarter. These compact underlay
+ * markers do not enter the foreground allocator; they only avoid the two
+ * endpoint bodies, the route's Agent-ID ownership label, and the viewport.
+ *
+ * @param {Record<string, any>} route
+ * @param {ProjectionSurface | null} surface
+ * @param {ReadonlyArray<string>} protectedBodyKeysForCharge
+ * @param {unknown} ownershipBounds
+ */
+function chargeDirectionMarkerProgresses(
+  route,
+  surface,
+  protectedBodyKeysForCharge,
+  ownershipBounds,
+) {
+  const viewport = normalizedRectangle(surface?.viewportBounds);
+  if (viewport === null) {
+    return Object.freeze([]);
+  }
+  const bodyKeys = new Set(protectedBodyKeysForCharge);
+  const protectedBounds = crossPhaseProtectedRects(surface)
+    .filter(({ layoutKey }) => bodyKeys.has(layoutKey))
+    .map(({ bounds }) => bounds);
+  const ownership = normalizedRectangle(ownershipBounds);
+  if (ownership !== null) {
+    protectedBounds.push(ownership);
+  }
+  const padding = CHOREOGRAPHY_PAINT_FOOTPRINTS.route.activationCompactMarkerPadding;
+  /** @param {number} progress */
+  const isSafe = (progress) => {
+    const marker = routeMarkerPose(/** @type {any} */ (route), progress);
+    if (
+      marker.x < viewport.left + padding ||
+      marker.x > viewport.right - padding ||
+      marker.y < viewport.top + padding ||
+      marker.y > viewport.bottom - padding
+    ) {
+      return false;
+    }
+    return protectedBounds.every(
+      (bounds) =>
+        marker.x < bounds.left - padding ||
+        marker.x > bounds.right + padding ||
+        marker.y < bounds.top - padding ||
+        marker.y > bounds.bottom + padding,
+    );
+  };
+  return Object.freeze(
+    CHARGE_DIRECTION_MARKER_CANDIDATES.flatMap((candidates) => {
+      const progress = candidates.find(isSafe);
+      return progress === undefined ? [] : [progress];
+    }),
+  );
+}
+
 /**
  * Run one filter-first reservation pass for every surviving collision-managed
  * fragment, then attach allocator-owned geometry without changing event order
@@ -522,6 +610,8 @@ function layoutCrossPhaseEvents(events, surface, sceneByKey) {
   const patches = events.map(() => ({}));
   /** @type {Map<number, string>} */
   const activationUnderlayPairByEvent = new Map();
+  /** @type {Map<number, ReadonlyArray<string>>} */
+  const chargeProtectedBodyKeysByEvent = new Map();
 
   /**
    * @param {number} eventIndex
@@ -617,7 +707,6 @@ function layoutCrossPhaseEvents(events, surface, sceneByKey) {
             },
             {
               viewportBounds: surface.viewportBounds,
-              markerProgress: event.tokenId === "warrior_charge" ? 0.42 : undefined,
             },
           ),
         });
@@ -629,6 +718,15 @@ function layoutCrossPhaseEvents(events, surface, sceneByKey) {
         });
         activationUnderlayPairByEvent.set(eventIndex, pairKey);
         if (event.tokenId === "warrior_charge") {
+          chargeProtectedBodyKeysByEvent.set(
+            eventIndex,
+            Object.freeze(
+              [
+                protectedBodyKey(surface, event.sourcePresentationKey),
+                protectedBodyKey(surface, event.targetPresentationKey),
+              ].filter((key) => key !== null),
+            ),
+          );
           const ownershipAnchor = Object.freeze({
             x: (event.source.x + event.target.x) / 2,
             y: (event.source.y + event.target.y) / 2,
@@ -662,17 +760,6 @@ function layoutCrossPhaseEvents(events, surface, sceneByKey) {
         recipientKey: recipientPresentationKey ?? event.eventId,
         allowProtectedKeys: protectedBodyKeys(surface, recipientPresentationKey),
         ...dimensions,
-      });
-      continue;
-    }
-    if (event.kind === "rejected_action") {
-      add(eventIndex, "cue", 0, {
-        kind: "perimeter_callout",
-        anchor: event.actor,
-        recipientKey: event.actorPresentationKey ?? event.eventId,
-        allowProtectedKeys: protectedBodyKeys(surface, event.actorPresentationKey),
-        width: CHOREOGRAPHY_PAINT_FOOTPRINTS.rejection.width,
-        height: CHOREOGRAPHY_PAINT_FOOTPRINTS.rejection.height,
       });
       continue;
     }
@@ -787,6 +874,25 @@ function layoutCrossPhaseEvents(events, surface, sceneByKey) {
       Object.assign(patch, cuePatch);
     }
   }
+  for (const [
+    eventIndex,
+    protectedBodyKeysForCharge,
+  ] of chargeProtectedBodyKeysByEvent) {
+    const patch = patches[eventIndex];
+    if (!patch.route) {
+      continue;
+    }
+    patch.route = Object.freeze({
+      ...patch.route,
+      markerVariant: "compact",
+      markerProgresses: chargeDirectionMarkerProgresses(
+        patch.route,
+        surface,
+        protectedBodyKeysForCharge,
+        patch.ownershipBounds,
+      ),
+    });
+  }
   return Object.freeze(
     events.map((event, index) => Object.freeze({ ...event, ...patches[index] })),
   );
@@ -829,12 +935,12 @@ export function isSubmissionCommand(command) {
 /** @param {Record<string, any>} event @returns {ChoreographyFamily | null} */
 function choreographyFamily(event) {
   if (event.kind === "activation") return "ability";
-  if (event.kind === "rejected_action") return "rejection";
   if (event.kind === "net_health") return "health";
   if (event.kind === "regeneration") return "recovery";
   if (event.kind === "movement_displacement") return "movement";
   if (event.kind === "status_lifecycle") {
-    return event.eventType === "agent_left_combat" ? "recovery" : "status";
+    if (event.eventType === "agent_left_combat") return "recovery";
+    return event.cueSemantic === "spawn_shield_expired" ? "shield" : "status";
   }
   if (event.kind !== "semantic_pulse") return null;
   if (
@@ -844,7 +950,6 @@ function choreographyFamily(event) {
     return "cooldown";
   }
   if (event.cueSemantic === "agent_died") return "death";
-  if (event.cueSemantic === "spawn_shield_expired") return "shield";
   if (event.cueSemantic === "respawn_wave_occurred") return "respawn_wave";
   if (event.cueSemantic === "agent_respawned") return "respawn";
   return null;
@@ -862,14 +967,6 @@ function choreographyFamily(event) {
 function authorizedPaintParts(event, visualFilters) {
   /** @param {Record<string, string>} tag */
   const enabled = (tag) => isVisualPaintPartEnabled(visualFilters, tag);
-  if (event.kind === "rejected_action") {
-    return Object.freeze({
-      effect: enabled({
-        surface: "transient",
-        kind: "rejected_action_feedback",
-      }),
-    });
-  }
   if (event.kind === "activation") {
     const ability = enabled({
       surface: "transient",
@@ -929,30 +1026,26 @@ function authorizedPaintParts(event, visualFilters) {
     });
   }
   if (event.kind === "status_lifecycle") {
-    if (event.lifecycle === "refreshed") {
-      return Object.freeze({ effect: false });
-    }
-    if (event.lifecycle === "trap_broken_and_reapplied") {
+    if (event.cueSemantic === "spawn_shield_expired") {
       return Object.freeze({
-        break: enabled({
+        effect: enabled({
           surface: "transient",
-          kind: "status_lifecycle",
-          lifecycle: event.lifecycle,
-          part: "break",
-        }),
-        reapplication: enabled({
-          surface: "transient",
-          kind: "status_lifecycle",
-          lifecycle: event.lifecycle,
-          part: "reapplication",
+          kind: "spawn_shield_expiry",
         }),
       });
     }
+    const visibleLifecycle = [
+      "refreshed",
+      "reapplied",
+      "trap_broken_and_reapplied",
+    ].includes(event.lifecycle)
+      ? "applied"
+      : event.lifecycle;
     return Object.freeze({
       effect: enabled({
         surface: "transient",
         kind: "status_lifecycle",
-        lifecycle: event.lifecycle,
+        lifecycle: visibleLifecycle,
         part: "effect",
       }),
     });
@@ -976,9 +1069,7 @@ function authorizedPaintParts(event, visualFilters) {
           ? { surface: "transient", kind: "respawn_wave" }
           : event.cueSemantic === "agent_respawned"
             ? { surface: "transient", kind: "resurrection_effect" }
-            : event.cueSemantic === "spawn_shield_expired"
-              ? { surface: "transient", kind: "spawn_shield_expiry" }
-              : null;
+            : null;
   return tag === null ? null : Object.freeze({ effect: enabled(tag) });
 }
 
@@ -1040,12 +1131,6 @@ function scheduleChoreography(events) {
   );
   /** @type {Map<string, {start: number, end: number}>} */
   const windows = new Map();
-  if (families.has("rejection")) {
-    windows.set("rejection", {
-      start: CHOREOGRAPHY_PHASES.activationStart,
-      end: CHOREOGRAPHY_PHASES.settleStart,
-    });
-  }
   if (families.has("ability")) {
     windows.set("ability", {
       start: CHOREOGRAPHY_PHASES.activationStart,
@@ -1054,7 +1139,7 @@ function scheduleChoreography(events) {
   }
   const activeOutcomes = OUTCOME_FAMILY_ORDER.filter((family) => families.has(family));
   let cursor =
-    activeOutcomes.length > 0 && (families.has("ability") || families.has("rejection"))
+    activeOutcomes.length > 0 && families.has("ability")
       ? CHOREOGRAPHY_PHASES.outcomeStart
       : 0;
   for (const family of activeOutcomes) {
@@ -1062,17 +1147,12 @@ function scheduleChoreography(events) {
     windows.set(family, { start: cursor, end: cursor + duration });
     cursor += duration;
   }
-  const total = Math.max(
-    cursor,
-    windows.get("ability")?.end ?? 0,
-    windows.get("rejection")?.end ?? 0,
-  );
+  const total = Math.max(cursor, windows.get("ability")?.end ?? 0);
   /** @param {ChoreographyFamily} family */
   const startFor = (family) => windows.get(family)?.start ?? total;
   const phases = Object.freeze({
     ...CHOREOGRAPHY_PHASES,
     outcomeStart: activeOutcomes.length > 0 ? startFor(activeOutcomes[0]) : total,
-    v2RejectionStart: startFor("rejection"),
     v2AbilityStart: startFor("ability"),
     v2HealthResolutionStart: startFor("health"),
     v2CountdownAndRegenStart: startFor("recovery"),
@@ -1310,6 +1390,7 @@ function trajectoryForAuthorizedAnchor(trajectories, rawAnchor, phase) {
  *   atoms: AuthorizedStatusAtom[],
  *   firstIndex: number,
  *   recipientAnchor: Readonly<Record<string, any>>,
+ *   recipientIdentity: Readonly<Record<string, any>>,
  *   recipientPresentationKey: string,
  *   recipientPublicAgentId: string,
  * }} AuthorizedStatusGroup
@@ -1418,13 +1499,15 @@ function authorizedStatusCompositions(
       "successor",
     );
     const recipientAgent = sceneByKey.get(recipientKey);
+    const recipientIdentity = authorizedIdentitySnapshot(recipientAgent);
     const recipientWorld = authorizedWorldPoint(recipientTrajectory?.successor);
     if (
       recipientTrajectory === null ||
       !recipientAgent ||
       identifier(recipientAgent.public_agent_id) !==
         identifier(recipientTrajectory.agent_public_agent_id) ||
-      recipientWorld === null
+      recipientWorld === null ||
+      recipientIdentity === null
     ) {
       return null;
     }
@@ -1452,7 +1535,11 @@ function authorizedStatusCompositions(
         eventId: row.id,
         sourcePresentationKey: sourceKey,
         sourcePublicAgentId: sourceTrajectory.agent_public_agent_id,
+        sourceIdentity: authorizedIdentitySnapshot(sourceAgent),
       });
+      if (applicationSource.sourceIdentity === null) {
+        return null;
+      }
     }
     seenEventIds.add(row.id);
     const key = JSON.stringify([transitionId, recipientKey, statusChannel, statusId]);
@@ -1461,6 +1548,7 @@ function authorizedStatusCompositions(
       atoms: [],
       firstIndex: index,
       recipientAnchor: recipientTrajectory.successor,
+      recipientIdentity,
       recipientPresentationKey: recipientKey,
       recipientPublicAgentId: recipientTrajectory.agent_public_agent_id,
     };
@@ -1577,6 +1665,7 @@ function authorizedStatusCompositions(
       lifecycleToken: lifecycle,
       recipientPresentationKey: group.recipientPresentationKey,
       recipientPublicAgentId: group.recipientPublicAgentId,
+      recipientIdentity: group.recipientIdentity,
       recipient,
       sourcePresentationKey: directApplicationSource?.sourcePresentationKey ?? null,
       sourcePublicAgentId: directApplicationSource?.sourcePublicAgentId ?? null,
@@ -1622,7 +1711,8 @@ function buildAuthorizedPresentationChoreographyPlan(
     audience === "agent_pov" ? presentation.visual_events : presentation.latest_events,
   );
   const scene = authorizedPresentationSceneView(presentation);
-  if (!latest || !scene) {
+  const researcherScene = authorizedPresentationResearcherSceneView(presentation);
+  if (!latest || !scene || !researcherScene) {
     return null;
   }
   const transitionId =
@@ -1653,6 +1743,19 @@ function buildAuthorizedPresentationChoreographyPlan(
     }
     sceneByKey.set(key, agent);
     scenePublicIds.add(publicId);
+  }
+  /** @type {Map<number, Record<string, any>>} */
+  const classMechanicsById = new Map();
+  // Ultimate help is researcher-space reference material. Resolve it from the
+  // authoritative researcher catalog, while all bodies, endpoints, and event
+  // admission continue to come exclusively from the fog-authorized scene.
+  for (const candidate of array(researcherScene.class_mechanics)) {
+    const mechanics = record(candidate);
+    const classId = integer(mechanics?.class_id);
+    if (mechanics === null || classId === null || classMechanicsById.has(classId)) {
+      return null;
+    }
+    classMechanicsById.set(classId, mechanics);
   }
   const causalVisualInventory =
     latest.summary_kind === "replay_incoming_inventory" ||
@@ -1702,6 +1805,7 @@ function buildAuthorizedPresentationChoreographyPlan(
     if (row.vocabulary === "recipient_cue") {
       const recipientKey = presentation.recipient_presentation_key;
       const recipientAgent = sceneByKey.get(recipientKey);
+      const recipientIdentity = authorizedIdentitySnapshot(recipientAgent);
       const recipientWorld = point(recipientAgent?.position);
       const healthBefore = finiteNumber(event.start_health);
       const healthAfter = finiteNumber(event.successor_health);
@@ -1740,6 +1844,7 @@ function buildAuthorizedPresentationChoreographyPlan(
             kind: "net_health",
             recipientPresentationKey: recipientKey,
             recipientPublicAgentId: presentation.recipient_public_agent_id,
+            recipientIdentity,
             recipient,
             netDelta: delta,
             healthBefore,
@@ -1809,6 +1914,7 @@ function buildAuthorizedPresentationChoreographyPlan(
         return null;
       }
       const sourceAgent = sourceKey === null ? null : sceneByKey.get(sourceKey);
+      const sourceIdentity = authorizedIdentitySnapshot(sourceAgent);
       const sourceClassId = agentVisualInventory
         ? integer(sourceTrajectory.agent_class_id)
         : integer(sourceAgent?.class_id);
@@ -1823,6 +1929,10 @@ function buildAuthorizedPresentationChoreographyPlan(
         return null;
       }
       const component = event.ability_component;
+      const authorizedClassMechanics =
+        component === "ultimate"
+          ? (classMechanicsById.get(sourceClassId) ?? null)
+          : null;
       const token =
         component === "ultimate"
           ? ultimateTokenFromClassId(sourceClassId, event)
@@ -1842,6 +1952,7 @@ function buildAuthorizedPresentationChoreographyPlan(
       const abilityEnabled = paintParts.ability === true;
       const semanticEnabled = paintParts.semantic === true;
       const targetAgent = targetKey === null ? null : sceneByKey.get(targetKey);
+      const targetIdentity = authorizedIdentitySnapshot(targetAgent);
       if (
         (targetKey === null) !== (targetTrajectory === null) ||
         (targetKey !== null &&
@@ -1898,11 +2009,27 @@ function buildAuthorizedPresentationChoreographyPlan(
           lane: component === "ultimate" ? 1 : 0,
           sourcePresentationKey: sourceKey,
           sourcePublicAgentId: sourceTrajectory.agent_public_agent_id,
+          sourceIdentity,
+          sourceDisclosure:
+            sourceIdentity !== null
+              ? "public"
+              : agentVisualInventory
+                ? "redacted"
+                : "unavailable",
           sourceClassId,
           sourceClass: classTokenFromId(sourceClassId),
+          authorizedClassMechanics,
           targetPresentationKey: targetKey,
           targetPublicAgentId: targetTrajectory?.agent_public_agent_id ?? null,
-          targetDisclosure: targetKey === null ? "target_none" : "public",
+          recipientIdentity: targetIdentity,
+          targetDisclosure:
+            targetKey === null
+              ? "target_none"
+              : targetIdentity !== null
+                ? "public"
+                : agentVisualInventory
+                  ? "redacted"
+                  : "unavailable",
           source,
           target,
           sourceEndpointPhase,
@@ -1940,6 +2067,9 @@ function buildAuthorizedPresentationChoreographyPlan(
       const before = finiteNumber(event.transition_start_health);
       const after = finiteNumber(event.health_after_combat_resolution);
       const delta = finiteNumber(event.realized_net_health_change);
+      const recipientAgent =
+        recipientKey === null ? null : sceneByKey.get(recipientKey);
+      const recipientIdentity = authorizedIdentitySnapshot(recipientAgent);
       const recipientWorld = authorizedWorldPoint(recipientTrajectory?.successor);
       if (
         recipientTrajectory === null ||
@@ -1975,6 +2105,7 @@ function buildAuthorizedPresentationChoreographyPlan(
           kind: "net_health",
           recipientPresentationKey: recipientKey,
           recipientPublicAgentId: recipientTrajectory.agent_public_agent_id,
+          recipientIdentity,
           recipient,
           netDelta: delta,
           healthBefore: before,
@@ -2055,47 +2186,19 @@ function buildAuthorizedPresentationChoreographyPlan(
     }
     if (row.kind === "action_rejected") {
       const actorAnchor = record(event.actor_anchor);
-      const actorTrajectory =
-        trajectories === null
-          ? null
-          : trajectoryForAuthorizedAnchor(
-              trajectories,
-              actorAnchor,
-              "transition_start",
-            );
-      const actorWorld = authorizedWorldPoint(actorAnchor);
-      if (actorWorld === null || (trajectories !== null && actorTrajectory === null)) {
-        return null;
-      }
-      const paintDecision = authorizedPaintDecision(
-        { kind: "rejected_action" },
-        visualFilters,
-      );
-      if (paintDecision === null) {
-        return null;
-      }
-      const actor = paintDecision.enabled ? project(actorWorld, surface) : null;
-      if (paintDecision.enabled && actor === null) {
-        return null;
-      }
       planned.push(
         Object.freeze({
           ...common,
-          kind: "rejected_action",
+          kind: "feed_only",
+          feedKind: "rejected_action",
           actorPresentationKey: actorAnchor?.presentation_key ?? null,
           actorPublicAgentId:
             actorAnchor?.public_agent_id ??
             event.actor_identity?.public_agent_id ??
             null,
-          actor,
-          target: null,
           component: event.rejection_component,
-          route: null,
-          paintParts: paintDecision.paintParts,
-          presentationSuppressed: !paintDecision.enabled,
-          spatial: paintDecision.enabled,
-          phaseStart: CHOREOGRAPHY_PHASES.v2RejectionStart,
-          phaseEnd: CHOREOGRAPHY_PHASES.v2AbilityStart,
+          presentationSuppressed: true,
+          spatial: false,
         }),
       );
       continue;
@@ -2110,7 +2213,24 @@ function buildAuthorizedPresentationChoreographyPlan(
         "successor",
       );
       const recipientWorld = authorizedWorldPoint(trajectory?.successor);
-      if (trajectory === null || recipientWorld === null) {
+      const recipientAgent =
+        trajectory === null ? null : sceneByKey.get(trajectory.agent_presentation_key);
+      const recipientIdentity = authorizedIdentitySnapshot(recipientAgent);
+      const maximumHealth = finiteNumber(recipientAgent?.maximum_health);
+      const regenerationFraction = finiteNumber(
+        recipientAgent?.out_of_combat_health_regeneration_fraction_per_step,
+      );
+      const regenerationPerTick =
+        maximumHealth === null || regenerationFraction === null
+          ? null
+          : maximumHealth * regenerationFraction;
+      if (
+        trajectory === null ||
+        recipientWorld === null ||
+        recipientIdentity === null ||
+        regenerationPerTick === null ||
+        !Number.isFinite(regenerationPerTick)
+      ) {
         return null;
       }
       const paintParts = authorizedPaintParts(
@@ -2137,6 +2257,8 @@ function buildAuthorizedPresentationChoreographyPlan(
           lifecycleToken: lifecycle,
           recipientPresentationKey: trajectory.agent_presentation_key,
           recipientPublicAgentId: trajectory.agent_public_agent_id,
+          recipientIdentity,
+          outOfCombatRegenerationPerTick: regenerationPerTick,
           recipient,
           sourcePresentationKey: null,
           sourcePublicAgentId: null,
@@ -2199,13 +2321,82 @@ function buildAuthorizedPresentationChoreographyPlan(
       );
       continue;
     }
+    if (row.kind === "spawn_shield_expired") {
+      let presentationAnchor = agentAnchor;
+      if (trajectories !== null) {
+        const trajectory = trajectoryForAuthorizedAnchor(
+          trajectories,
+          agentAnchor,
+          "successor",
+        );
+        if (trajectory === null) {
+          return null;
+        }
+        presentationAnchor = trajectory.successor;
+      }
+      const paintDecision = authorizedPaintDecision(
+        {
+          kind: "status_lifecycle",
+          lifecycle: "expired",
+          cueSemantic: row.kind,
+        },
+        visualFilters,
+      );
+      const recipientWorld = authorizedWorldPoint(presentationAnchor);
+      const recipientKey = identifier(presentationAnchor?.presentation_key);
+      const recipientAgent =
+        recipientKey === null ? null : sceneByKey.get(recipientKey);
+      const recipientIdentity = authorizedIdentitySnapshot(recipientAgent);
+      if (
+        paintDecision === null ||
+        recipientWorld === null ||
+        recipientIdentity === null
+      ) {
+        return null;
+      }
+      const recipient = paintDecision.enabled ? project(recipientWorld, surface) : null;
+      if (paintDecision.enabled && recipient === null) {
+        return null;
+      }
+      const lifecycle = resolveVisualToken("lifecycle", "expired", event);
+      planned.push(
+        Object.freeze({
+          ...common,
+          kind: "status_lifecycle",
+          cueSemantic: row.kind,
+          tokenId: SPAWN_SHIELD_STATUS_TOKEN.tokenId,
+          token: SPAWN_SHIELD_STATUS_TOKEN,
+          lifecycle: lifecycle.tokenId,
+          lifecycleToken: lifecycle,
+          recipientPresentationKey: presentationAnchor?.presentation_key ?? null,
+          recipientPublicAgentId: presentationAnchor?.public_agent_id ?? null,
+          recipientIdentity,
+          recipient,
+          sourcePresentationKey: null,
+          sourcePublicAgentId: null,
+          applicationSources: Object.freeze([]),
+          durationBefore: null,
+          durationAfter: 0,
+          lane: paintDecision.enabled ? 0 : null,
+          laneCount: paintDecision.enabled ? 1 : 0,
+          statusLayoutOrder: row.payload.ordinal,
+          atomicEventIds: Object.freeze([row.id]),
+          applicationEventIds: Object.freeze([]),
+          paintParts: paintDecision.paintParts,
+          presentationSuppressed: !paintDecision.enabled,
+          spatial: paintDecision.enabled,
+          phaseStart: CHOREOGRAPHY_PHASES.v2ShieldStart,
+          phaseEnd: CHOREOGRAPHY_PHASES.v2RespawnWaveStart,
+        }),
+      );
+      continue;
+    }
     if (
       [
         "health_regenerated",
         "cooldown_started",
         "cooldown_ready",
         "agent_died",
-        "spawn_shield_expired",
         "agent_respawned",
       ].includes(row.kind)
     ) {

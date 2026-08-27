@@ -53,6 +53,7 @@ import { classTokenFromId, resolveVisualToken, teamTokenFromId } from "./vocabul
  *   offline?: boolean,
  *   activationDisabled?: boolean,
  *   localInspectedPresentationKey?: string | null,
+ *   activatedAgentPublicId?: string | null,
  * }} PanelInteractionState
  */
 
@@ -189,11 +190,13 @@ function exactOwnerClassMechanics(owner, rawClassMechanics) {
  *
  * @param {unknown} presentation
  * @param {string | null | undefined} [localInspectedPresentationKey]
+ * @param {string | null | undefined} [activatedAgentPublicId]
  * @returns {Readonly<Record<string, any>> | null}
  */
 export function authorizedInspectorView(
   presentation,
   localInspectedPresentationKey = undefined,
+  activatedAgentPublicId = undefined,
 ) {
   if (!isAuthorizedPresentationFrame(presentation)) {
     return null;
@@ -215,9 +218,12 @@ export function authorizedInspectorView(
       ? selection.inspection_owner_presentation_key
       : null;
   const owner =
-    ownerKey === null
-      ? null
-      : (agents.find((agent) => agent.presentation_key === ownerKey) ?? null);
+    typeof activatedAgentPublicId === "string" && activatedAgentPublicId.length > 0
+      ? (agents.find((agent) => agent.public_agent_id === activatedAgentPublicId) ??
+        null)
+      : ownerKey === null
+        ? null
+        : (agents.find((agent) => agent.presentation_key === ownerKey) ?? null);
   const ownerMechanics =
     owner === null ? null : exactOwnerClassMechanics(owner, scene.class_mechanics);
   const ownerDescriptor =
@@ -678,12 +684,14 @@ export class DebuggerPanels {
           ? Object.freeze({
               command_type: "activate_replay_pov_agent",
               global_slot: identity.command_global_slot,
+              public_agent_id: publicId,
             })
           : identity.activation_kind === "live_pov_global" &&
               researcherInspectionState.state_kind === "live_editable"
             ? Object.freeze({
                 command_type: "activate_live_pov_agent",
                 global_slot: identity.command_global_slot,
+                public_agent_id: publicId,
               })
             : identity.activation_kind === "scene_agent"
               ? Object.freeze({
@@ -767,11 +775,17 @@ export class DebuggerPanels {
   /**
    * @param {Record<string, any>} presentation
    * @param {string | null | undefined} [localInspectedPresentationKey]
+   * @param {string | null | undefined} [activatedAgentPublicId]
    */
-  renderAuthorizedInspector(presentation, localInspectedPresentationKey = undefined) {
+  renderAuthorizedInspector(
+    presentation,
+    localInspectedPresentationKey = undefined,
+    activatedAgentPublicId = undefined,
+  ) {
     const inspector = authorizedInspectorView(
       presentation,
       localInspectedPresentationKey,
+      activatedAgentPublicId,
     );
     const inspectionState =
       authorizedPresentationResearcherInspectionState(presentation);
@@ -783,7 +797,15 @@ export class DebuggerPanels {
       ? []
       : authorizedPresentationPendingJointActionRows(presentation);
     this.selectionCard.replaceChildren();
-    if (inspector === null || inspector.owner_descriptor === null) {
+    if (activatedAgentPublicId === null) {
+      this.selectionCard.append(
+        htmlElement(
+          "p",
+          "empty-copy",
+          "Activate an agent to inspect its comprehensive class details.",
+        ),
+      );
+    } else if (inspector === null || inspector.owner_descriptor === null) {
       this.selectionCard.append(
         htmlElement("p", "empty-copy", "No authorized agent details are available."),
       );
@@ -958,6 +980,7 @@ export class DebuggerPanels {
       this.renderAuthorizedInspector(
         frame,
         interactionState.localInspectedPresentationKey,
+        interactionState.activatedAgentPublicId ?? null,
       );
       return;
     }

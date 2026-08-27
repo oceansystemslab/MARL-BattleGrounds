@@ -17,7 +17,7 @@ const FILTERS = Object.freeze([
   ["aura_modifier_badges", "Aura Modifier Badges"],
   ["duration_status_badges", "Duration Status Badges"],
   ["spawn_shield", "Spawn Shield"],
-  ["rejected_action_feedback", "Rejected Action Feedback"],
+  ["target_selection_visuals", "Target Selection Visuals"],
   ["basic_ability_effects", "Basic Ability Effects"],
   ["ultimate_ability_effects", "Ultimate Ability Effects"],
   ["regeneration_effects", "Regeneration Effects"],
@@ -44,6 +44,8 @@ let artifacts = null;
 let liveDebugger = null;
 /** @type {Awaited<ReturnType<typeof startReplayViewer>> | null} */
 let sharedReplay = null;
+/** @type {Awaited<ReturnType<typeof startReplayViewer>> | null} */
+let noSharedReplay = null;
 
 test.beforeAll(async () => {
   /** @type {import("node:child_process").ChildProcess[]} */
@@ -57,6 +59,11 @@ test.beforeAll(async () => {
       frameIndex: 1,
     });
     startedProcesses.push(sharedReplay.process);
+    noSharedReplay = await startReplayViewer({
+      replayPath: artifacts.complete,
+      frameIndex: 1,
+    });
+    startedProcesses.push(noSharedReplay.process);
   } catch (error) {
     const cleanupResults = await Promise.allSettled(
       startedProcesses.map((process) => stopDebugger(process)),
@@ -66,6 +73,7 @@ test.beforeAll(async () => {
     );
     liveDebugger = null;
     sharedReplay = null;
+    noSharedReplay = null;
     try {
       await removeReplayArtifacts(artifacts?.outputDirectory);
     } catch (cleanupError) {
@@ -83,9 +91,14 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
-  const processes = [liveDebugger?.process ?? null, sharedReplay?.process ?? null];
+  const processes = [
+    liveDebugger?.process ?? null,
+    sharedReplay?.process ?? null,
+    noSharedReplay?.process ?? null,
+  ];
   liveDebugger = null;
   sharedReplay = null;
+  noSharedReplay = null;
   const cleanupResults = await Promise.allSettled(
     processes.map((process) => stopDebugger(process)),
   );
@@ -253,8 +266,9 @@ async function openVisualFilters(page) {
 /**
  * @param {import("@playwright/test").Page} page
  * @param {string[]} disabledIds
+ * @param {boolean} rangesEnabled
  */
-async function expectFilterSurface(page, disabledIds = []) {
+async function expectFilterSurface(page, disabledIds = [], rangesEnabled = true) {
   const expectedDisabled = new Set(disabledIds);
   const rows = await page
     .locator(`#visual-filter-options ${FILTER_INPUT}`)
@@ -285,13 +299,13 @@ async function expectFilterSurface(page, disabledIds = []) {
       checked: !expectedDisabled.has(id),
     })),
   );
-  const enabledCount = FILTERS.length - expectedDisabled.size;
+  const enabledCount = FILTERS.length - expectedDisabled.size + (rangesEnabled ? 1 : 0);
   await expect(page.locator("#visual-filter-count")).toHaveText(
     `${enabledCount} enabled`,
   );
   const enableAll = page.locator("#enable-all-visual-filters-button");
   const disableAll = page.locator("#disable-all-visual-filters-button");
-  if (enabledCount === FILTERS.length) {
+  if (enabledCount === FILTERS.length + 1) {
     await expect(enableAll).toBeDisabled();
   } else {
     await expect(enableAll).toBeEnabled();
@@ -309,6 +323,8 @@ async function expectFilterSurface(page, disabledIds = []) {
       })),
     ),
   ).toEqual([
+    { id: "live-ranges-button", text: "Ranges" },
+    { id: "replay-ranges-button", text: "Ranges" },
     { id: "enable-all-visual-filters-button", text: "Enable All" },
     { id: "disable-all-visual-filters-button", text: "Disable All" },
   ]);
@@ -433,6 +449,73 @@ async function scientificSignature(page, replay) {
 }
 
 /**
+ * Remove one presentation source's service revision pair.
+ *
+ * @param {unknown} value
+ */
+function omitPresentationRevision(value) {
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    Reflect.deleteProperty(value, "source_revision");
+    Reflect.deleteProperty(value, "source_authority_epoch");
+  }
+}
+
+/**
+ * Normalize only the exact transport paths changed by the existing Ranges
+ * service command. No scientific scene, action, lifecycle, panel, or authority
+ * content is excluded.
+ *
+ * @param {string} path
+ * @param {string} serialized
+ * @returns {unknown}
+ */
+function rangeIndependentApiPayload(path, serialized) {
+  /** @type {Record<string, any>} */
+  const payload = JSON.parse(serialized);
+  if (path === "/api/frame") {
+    delete payload.revision;
+    delete payload.show_ranges;
+    if (payload.projection?.scene) {
+      delete payload.projection.scene.ranges;
+    }
+    if (Array.isArray(payload.hud?.diagnostics)) {
+      for (const fact of payload.hud.diagnostics) {
+        if (fact?.fact_id === "revision") {
+          fact.value = "<range-presentation revision>";
+        }
+      }
+    }
+    return payload;
+  }
+  if (path === "/api/presentation/frame") {
+    omitPresentationRevision(payload.source);
+    omitPresentationRevision(payload.live_inspection);
+    omitPresentationRevision(payload.researcher_space);
+  }
+  return payload;
+}
+
+/**
+ * Exact scientific, authority, and panel bytes with only the expected Ranges
+ * presentation toggle normalized away.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @param {boolean} replay
+ */
+async function rangeIndependentScientificSignature(page, replay) {
+  const signature = await scientificSignature(page, replay);
+  return {
+    api: Object.fromEntries(
+      Object.entries(signature.api).map(([path, payload]) => [
+        path,
+        rangeIndependentApiPayload(path, payload),
+      ]),
+    ),
+    dom: signature.dom,
+  };
+}
+
+/**
  * @param {import("@playwright/test").Page} page
  * @param {"#live-ranges-button" | "#replay-ranges-button"} buttonSelector
  */
@@ -451,6 +534,145 @@ async function rangeSignature(page, buttonSelector) {
       markup: layer.innerHTML,
     };
   }, buttonSelector);
+}
+
+/** @param {import("@playwright/test").Page} page */
+async function targetSelectionPaintSignature(page) {
+  return page.locator("#battlefield").evaluate((battlefield) => ({
+    visibleReticles: battlefield.querySelectorAll(".selected-reticle:not([hidden])")
+      .length,
+    legality: Array.from(
+      battlefield.querySelectorAll(".legality-pill"),
+      (node) => node.outerHTML,
+    ),
+    controlled: battlefield.querySelector(".controlled-halo:not([hidden])")?.outerHTML,
+    pendingRoute: battlefield.querySelector('[data-layer="pending-route"]')?.innerHTML,
+    actionRoutes: battlefield.querySelector(".combat-choreography-routes")?.innerHTML,
+    ranges: battlefield.querySelector('[data-layer="debug-range"]')?.innerHTML,
+    bodies: battlefield.querySelector('[data-layer="body"]')?.innerHTML,
+  }));
+}
+
+/**
+ * Exercise the target-selection paint boundary through one real Replay Agent
+ * authority. Replay selection changes the inspected POV, so hidden-target
+ * retention is intentionally proved only by the live draft path.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @param {{method: string, path: string}[]} apiRequests
+ * @param {{url: string}} replay
+ * @param {string} expectedPresentationKind
+ * @param {string} label
+ */
+async function expectReplayAgentTargetFilter(
+  page,
+  apiRequests,
+  replay,
+  expectedPresentationKind,
+  label,
+) {
+  await openInstalled(page, replay.url, {
+    viewerMode: "replay",
+    audience: "researcher",
+    presentationKind: "replay_oracle",
+  });
+  await expectReplayFrameIndex(page, 1);
+  const candidate = page
+    .locator('#roster .roster-primary-action:not([aria-pressed="true"])')
+    .first();
+  await expect(candidate).toBeEnabled();
+  await performCommand(page, "/api/replay/command", () => candidate.click());
+  await openVisualFilters(page);
+  await setFilter(
+    page,
+    apiRequests,
+    "target_selection_visuals",
+    true,
+    `${label} enable replay-default target visuals`,
+  );
+  const oracleScience = await scientificSignature(page, true);
+  const oraclePaint = await targetSelectionPaintSignature(page);
+  expect(oraclePaint.visibleReticles, `${label} Oracle enabled reticle`).toBe(1);
+  expect(oraclePaint.legality, `${label} Oracle enabled legality`).toHaveLength(2);
+  await setFilter(
+    page,
+    apiRequests,
+    "target_selection_visuals",
+    false,
+    `${label} Oracle target visuals off`,
+  );
+  const filteredOracle = await targetSelectionPaintSignature(page);
+  expect(filteredOracle.visibleReticles).toBe(0);
+  expect(filteredOracle.legality).toEqual([]);
+  expect(filteredOracle.controlled).toBe(oraclePaint.controlled);
+  expect(filteredOracle.pendingRoute).toBe(oraclePaint.pendingRoute);
+  expect(filteredOracle.actionRoutes).toBe(oraclePaint.actionRoutes);
+  expect(filteredOracle.ranges).toBe(oraclePaint.ranges);
+  expect(filteredOracle.bodies).toBe(oraclePaint.bodies);
+  expect(await scientificSignature(page, true)).toEqual(oracleScience);
+  await setFilter(
+    page,
+    apiRequests,
+    "target_selection_visuals",
+    true,
+    `${label} Oracle target visuals on`,
+  );
+  expect(await targetSelectionPaintSignature(page)).toEqual(oraclePaint);
+  await performCommand(page, "/api/replay/command", () =>
+    page.locator("#view-select").selectOption("pov"),
+  );
+  await expect(page.locator("html")).toHaveAttribute("data-audience", "agent_pov");
+  expect(
+    JSON.parse(await authenticatedText(page, "/api/presentation/frame"))
+      .presentation_kind,
+  ).toBe(expectedPresentationKind);
+  const input = page.locator(
+    `${FILTER_INPUT}[data-visual-filter-id="target_selection_visuals"]`,
+  );
+  if (!(await input.isChecked())) {
+    await setFilter(
+      page,
+      apiRequests,
+      "target_selection_visuals",
+      true,
+      `${label} target visuals initial restore`,
+    );
+  }
+  const science = await scientificSignature(page, true);
+  const paint = await targetSelectionPaintSignature(page);
+  expect(paint.visibleReticles, `${label} enabled reticle`).toBe(1);
+  expect(paint.legality, `${label} enabled legality`).toHaveLength(2);
+
+  await setFilter(
+    page,
+    apiRequests,
+    "target_selection_visuals",
+    false,
+    `${label} target visuals off`,
+  );
+  const filtered = await targetSelectionPaintSignature(page);
+  expect(filtered.visibleReticles).toBe(0);
+  expect(filtered.legality).toEqual([]);
+  expect(filtered.controlled).toBe(paint.controlled);
+  expect(filtered.pendingRoute).toBe(paint.pendingRoute);
+  expect(filtered.actionRoutes).toBe(paint.actionRoutes);
+  expect(filtered.ranges).toBe(paint.ranges);
+  expect(filtered.bodies).toBe(paint.bodies);
+  expect(await scientificSignature(page, true)).toEqual(science);
+
+  await setFilter(
+    page,
+    apiRequests,
+    "target_selection_visuals",
+    true,
+    `${label} target visuals on`,
+  );
+  expect(await targetSelectionPaintSignature(page)).toEqual(paint);
+  expect(await scientificSignature(page, true)).toEqual(science);
+  await performCommand(page, "/api/replay/command", () =>
+    page.locator("#view-select").selectOption("researcher"),
+  );
+  await page.goto("about:blank");
 }
 
 /**
@@ -510,7 +732,13 @@ async function ultimateInventory(page) {
         eventId: element.getAttribute("data-event-id"),
         eventType: element.getAttribute("data-event-type"),
         component: element.getAttribute("data-component"),
-        markup: element.outerHTML,
+        tokenId: element.getAttribute("data-token-id"),
+        sourceClass: element.getAttribute("data-source-class"),
+        ariaLabel: element.getAttribute("aria-label"),
+        ariaDescription: element.getAttribute("aria-description"),
+        icons: Array.from(element.querySelectorAll("[data-icon]"), (icon) =>
+          icon.getAttribute("data-icon"),
+        ),
       })),
     );
 }
@@ -536,14 +764,12 @@ async function expectUltimateAbsent(page, eventIds) {
 
 /**
  * @param {import("@playwright/test").Page} page
- * @param {{method: string, path: string}[]} apiRequests
  */
-async function disableAllFilters(page, apiRequests) {
-  await expectLocalOnly(
-    page,
-    apiRequests,
-    () => page.locator("#disable-all-visual-filters-button").click(),
-    { label: "Disable All" },
+async function disableAllFilters(page) {
+  const replay =
+    (await page.locator("html").getAttribute("data-viewer-mode")) === "replay";
+  await performCommand(page, replay ? "/api/replay/command" : "/api/command", () =>
+    page.locator("#disable-all-visual-filters-button").click(),
   );
 }
 
@@ -641,6 +867,125 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
   await expectFilterSurface(page);
   await ensureRangesOn(page, "live");
 
+  const liveBulkScience = await rangeIndependentScientificSignature(page, false);
+  const liveBulkRanges = await rangeSignature(page, "#live-ranges-button");
+  const liveBulkStep = await page.locator("#step-value").textContent();
+  const liveDisableMark = apiRequests.length;
+  await disableAllFilters(page);
+  expect(
+    apiRequests.slice(liveDisableMark).filter(({ method }) => method === "POST"),
+    "Live Disable All range request count",
+  ).toEqual([{ method: "POST", path: "/api/command" }]);
+  await expectFilterSurface(page, FILTER_IDS, false);
+  expect(await rangeIndependentScientificSignature(page, false)).toEqual(
+    liveBulkScience,
+  );
+  await expect(page.locator("#step-value")).toHaveText(liveBulkStep ?? "0");
+  await expectLocalOnly(
+    page,
+    apiRequests,
+    () =>
+      page.locator("#disable-all-visual-filters-button").evaluate((button) => {
+        if (!(button instanceof HTMLButtonElement)) {
+          throw new TypeError("Disable All is unavailable.");
+        }
+        button.click();
+      }),
+    { label: "live disabled Disable All idempotency" },
+  );
+
+  const liveEnableMark = apiRequests.length;
+  await performCommand(page, "/api/command", () =>
+    page.locator("#enable-all-visual-filters-button").click(),
+  );
+  expect(
+    apiRequests.slice(liveEnableMark).filter(({ method }) => method === "POST"),
+    "Live Enable All range request count",
+  ).toEqual([{ method: "POST", path: "/api/command" }]);
+  await expectFilterSurface(page);
+  expect(await rangeIndependentScientificSignature(page, false)).toEqual(
+    liveBulkScience,
+  );
+  expect(await rangeSignature(page, "#live-ranges-button")).toEqual(liveBulkRanges);
+  await expect(page.locator("#step-value")).toHaveText(liveBulkStep ?? "0");
+  await expectLocalOnly(
+    page,
+    apiRequests,
+    () =>
+      page.locator("#enable-all-visual-filters-button").evaluate((button) => {
+        if (!(button instanceof HTMLButtonElement)) {
+          throw new TypeError("Enable All is unavailable.");
+        }
+        button.click();
+      }),
+    { label: "live disabled Enable All idempotency" },
+  );
+
+  await performCommand(page, "/api/command", () =>
+    page
+      .getByRole("button", {
+        name: "Control and inspect Agent ID 4",
+        exact: true,
+      })
+      .click(),
+  );
+  await performCommand(page, "/api/command", () =>
+    page.locator('#command-deck button[data-key="d"]').click(),
+  );
+  const targetSelect = page.locator("#command-target-select");
+  const targetOption = targetSelect
+    .locator("option")
+    .filter({ hasText: "Agent ID 3 ·" });
+  await expect(targetOption).toHaveCount(1);
+  const targetValue = await targetOption.getAttribute("value");
+  if (targetValue === null) {
+    throw new Error("Live target-selection filter proof has no Priest ally target.");
+  }
+  await performCommand(page, "/api/command", () =>
+    targetSelect.selectOption(targetValue),
+  );
+  await performCommand(page, "/api/command", () =>
+    page.locator('#command-deck button[data-key="1"]').click(),
+  );
+  await expect(targetSelect).toHaveValue(targetValue);
+  const targetScience = await scientificSignature(page, false);
+  const targetPaint = await targetSelectionPaintSignature(page);
+  expect(targetPaint.visibleReticles).toBe(1);
+  expect(targetPaint.legality).toHaveLength(2);
+  expect(targetPaint.controlled).toBeDefined();
+  expect(targetPaint.pendingRoute).not.toBe("");
+
+  await setFilter(
+    page,
+    apiRequests,
+    "target_selection_visuals",
+    false,
+    "live target-selection visuals off",
+  );
+  const targetPaintHidden = await targetSelectionPaintSignature(page);
+  expect(targetPaintHidden.visibleReticles).toBe(0);
+  expect(targetPaintHidden.legality).toEqual([]);
+  expect(targetPaintHidden.controlled).toBe(targetPaint.controlled);
+  expect(targetPaintHidden.pendingRoute).toBe(targetPaint.pendingRoute);
+  expect(targetPaintHidden.actionRoutes).toBe(targetPaint.actionRoutes);
+  expect(targetPaintHidden.ranges).toBe(targetPaint.ranges);
+  expect(targetPaintHidden.bodies).toBe(targetPaint.bodies);
+  expect(await scientificSignature(page, false)).toEqual(targetScience);
+  await expect(targetSelect).toHaveValue(targetValue);
+  await expectTooltipCleared(page);
+
+  await setFilter(
+    page,
+    apiRequests,
+    "target_selection_visuals",
+    true,
+    "live target-selection visuals on",
+  );
+  expect(await targetSelectionPaintSignature(page)).toEqual(targetPaint);
+  expect(await scientificSignature(page, false)).toEqual(targetScience);
+  await performCommand(page, "/api/command", () => targetSelect.selectOption(""));
+  await expect(targetSelect).toHaveValue("");
+
   const liveScience = await scientificSignature(page, false);
   const liveRanges = await rangeSignature(page, "#live-ranges-button");
   const liveAuras = await auraMarkup(page);
@@ -688,6 +1033,101 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
   expect(livePov.presentation_kind).toBe("live_no_shared_obs_agent_pov");
   await expectFilterSurface(page, disabledPair);
 
+  const visiblePovTarget = targetSelect
+    .locator("option")
+    .filter({ hasText: "Agent ID 3 ·" });
+  const visiblePovTargetValue = await visiblePovTarget.getAttribute("value");
+  if (visiblePovTargetValue === null) {
+    throw new Error("Live Agent target-filter proof has no visible ally target.");
+  }
+  await performCommand(page, "/api/command", () =>
+    targetSelect.selectOption(visiblePovTargetValue),
+  );
+  await performCommand(page, "/api/command", () =>
+    page.locator('#command-deck button[data-key="1"]').click(),
+  );
+  const visiblePovScience = await scientificSignature(page, false);
+  const visiblePovPaint = await targetSelectionPaintSignature(page);
+  expect(visiblePovPaint.visibleReticles).toBe(1);
+  expect(visiblePovPaint.legality).toHaveLength(2);
+  expect(visiblePovPaint.pendingRoute).not.toBe("");
+  await setFilter(
+    page,
+    apiRequests,
+    "target_selection_visuals",
+    false,
+    "live Agent visible target visuals off",
+  );
+  const hiddenVisiblePovPaint = await targetSelectionPaintSignature(page);
+  expect(hiddenVisiblePovPaint.visibleReticles).toBe(0);
+  expect(hiddenVisiblePovPaint.legality).toEqual([]);
+  expect(hiddenVisiblePovPaint.controlled).toBe(visiblePovPaint.controlled);
+  expect(hiddenVisiblePovPaint.pendingRoute).toBe(visiblePovPaint.pendingRoute);
+  expect(hiddenVisiblePovPaint.actionRoutes).toBe(visiblePovPaint.actionRoutes);
+  expect(hiddenVisiblePovPaint.ranges).toBe(visiblePovPaint.ranges);
+  expect(hiddenVisiblePovPaint.bodies).toBe(visiblePovPaint.bodies);
+  expect(await scientificSignature(page, false)).toEqual(visiblePovScience);
+  await expect(targetSelect).toHaveValue(visiblePovTargetValue);
+  await setFilter(
+    page,
+    apiRequests,
+    "target_selection_visuals",
+    true,
+    "live Agent visible target visuals on",
+  );
+  expect(await targetSelectionPaintSignature(page)).toEqual(visiblePovPaint);
+
+  const fogHiddenTarget = targetSelect
+    .locator("option")
+    .filter({ hasText: "Agent ID 9 ·" });
+  const fogHiddenTargetValue = await fogHiddenTarget.getAttribute("value");
+  if (fogHiddenTargetValue === null) {
+    throw new Error("Live Agent target-filter proof has no fog-hidden target.");
+  }
+  await performCommand(page, "/api/command", () =>
+    targetSelect.selectOption(fogHiddenTargetValue),
+  );
+  const fogHiddenPresentation = JSON.parse(
+    await authenticatedText(page, "/api/presentation/frame"),
+  );
+  expect(
+    fogHiddenPresentation.current_endpoint.parts.scene.agents.some(
+      (/** @type {Record<string, any>} */ agent) => agent.public_agent_id === "9",
+    ),
+  ).toBe(false);
+  await expect(targetSelect).toHaveValue(fogHiddenTargetValue);
+  const fogHiddenScience = await scientificSignature(page, false);
+  const fogHiddenPaint = await targetSelectionPaintSignature(page);
+  expect(fogHiddenPaint.visibleReticles).toBe(0);
+  expect(fogHiddenPaint.legality).toHaveLength(2);
+  expect(fogHiddenPaint.pendingRoute).toBe("");
+  await setFilter(
+    page,
+    apiRequests,
+    "target_selection_visuals",
+    false,
+    "live Agent hidden target visuals off",
+  );
+  const filteredFogHiddenPaint = await targetSelectionPaintSignature(page);
+  expect(filteredFogHiddenPaint.visibleReticles).toBe(0);
+  expect(filteredFogHiddenPaint.legality).toEqual([]);
+  expect(filteredFogHiddenPaint.controlled).toBe(fogHiddenPaint.controlled);
+  expect(filteredFogHiddenPaint.pendingRoute).toBe(fogHiddenPaint.pendingRoute);
+  expect(filteredFogHiddenPaint.actionRoutes).toBe(fogHiddenPaint.actionRoutes);
+  expect(filteredFogHiddenPaint.ranges).toBe(fogHiddenPaint.ranges);
+  expect(filteredFogHiddenPaint.bodies).toBe(fogHiddenPaint.bodies);
+  expect(await scientificSignature(page, false)).toEqual(fogHiddenScience);
+  await expect(targetSelect).toHaveValue(fogHiddenTargetValue);
+  await setFilter(
+    page,
+    apiRequests,
+    "target_selection_visuals",
+    true,
+    "live Agent hidden target visuals on",
+  );
+  expect(await targetSelectionPaintSignature(page)).toEqual(fogHiddenPaint);
+  await performCommand(page, "/api/command", () => targetSelect.selectOption(""));
+
   await performCommand(page, "/api/command", () =>
     page.locator("#reset-button").click(),
   );
@@ -707,6 +1147,21 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
       .presentation_kind,
   ).toBe("live_no_shared_obs_agent_pov");
 
+  await expectReplayAgentTargetFilter(
+    page,
+    apiRequests,
+    requiredService(noSharedReplay, "NoShared replay viewer"),
+    "replay_no_shared_obs_agent_pov",
+    "Replay NoShared",
+  );
+  await expectReplayAgentTargetFilter(
+    page,
+    apiRequests,
+    requiredService(sharedReplay, "Shared replay viewer"),
+    "replay_shared_obs_agent_pov",
+    "Replay Shared",
+  );
+
   const replay = requiredService(sharedReplay, "Shared replay viewer");
   await openInstalled(page, replay.url, {
     viewerMode: "replay",
@@ -715,7 +1170,7 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
   });
   await expectReplayFrameIndex(page, 1);
   await openVisualFilters(page);
-  await expectFilterSurface(page);
+  await expectFilterSurface(page, ["target_selection_visuals"]);
   await ensureRangesOn(page, "replay");
 
   const replayScience = await scientificSignature(page, true);
@@ -827,7 +1282,8 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
     false,
     "replay transient persistence",
   );
-  await expectFilterSurface(page, disabledPair);
+  const replayDisabled = [...disabledPair, "target_selection_visuals"];
+  await expectFilterSurface(page, replayDisabled);
 
   await performCommand(page, "/api/replay/command", () =>
     page.locator("#view-select").selectOption("pov"),
@@ -837,18 +1293,38 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
     JSON.parse(await authenticatedText(page, "/api/presentation/frame"))
       .presentation_kind,
   ).toBe("replay_shared_obs_agent_pov");
-  await expectFilterSurface(page, disabledPair);
+  await expectFilterSurface(page, replayDisabled);
+
+  const replayAgentRangesButton = page.locator("#replay-ranges-button");
+  await expectLocalOnly(page, apiRequests, () => replayAgentRangesButton.click(), {
+    label: "Replay Agent ranges off before recipient switch",
+  });
+  await expect(replayAgentRangesButton).toHaveAttribute("aria-pressed", "false");
+  const recipientSwitchCursor = structuredClone(
+    JSON.parse(await authenticatedText(page, "/api/frame")).cursor,
+  );
+  const nextReplayRecipient = page
+    .locator('#roster .roster-primary-action:not([aria-pressed="true"])')
+    .first();
+  await expect(nextReplayRecipient).toBeEnabled();
+  await performCommand(page, "/api/replay/command", () => nextReplayRecipient.click());
+  expect(JSON.parse(await authenticatedText(page, "/api/frame")).cursor).toEqual(
+    recipientSwitchCursor,
+  );
+  await expect(replayAgentRangesButton).toHaveAttribute("aria-pressed", "false");
+  await expect(page.locator('[data-layer="debug-range"] .range-ring')).toHaveCount(0);
+  await expectFilterSurface(page, replayDisabled, false);
 
   await performCommand(page, "/api/replay/command", () =>
     page.locator("#replay-frame-slider").fill("2"),
   );
   await expectReplayFrameIndex(page, 2);
-  await expectFilterSurface(page, disabledPair);
+  await expectFilterSurface(page, replayDisabled, false);
   await performCommand(page, "/api/replay/command", () =>
     page.locator("#replay-frame-slider").fill("1"),
   );
   await expectReplayFrameIndex(page, 1);
-  await expectFilterSurface(page, disabledPair);
+  await expectFilterSurface(page, replayDisabled, false);
 
   await performCommand(page, "/api/replay/command", () =>
     page.locator("#view-select").selectOption("researcher"),
@@ -858,15 +1334,40 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
     JSON.parse(await authenticatedText(page, "/api/presentation/frame"))
       .presentation_kind,
   ).toBe("replay_oracle");
-  await expectFilterSurface(page, disabledPair);
+  await expectFilterSurface(page, replayDisabled);
 
-  const allOffScience = await scientificSignature(page, true);
+  await performCommand(page, "/api/replay/command", () =>
+    page.locator("#view-select").selectOption("pov"),
+  );
+  await expect(replayAgentRangesButton).toHaveAttribute("aria-pressed", "false");
+  await expectFilterSurface(page, replayDisabled, false);
+  await performCommand(page, "/api/replay/command", () =>
+    page.locator("#view-select").selectOption("researcher"),
+  );
+  await expect(replayAgentRangesButton).toHaveAttribute("aria-pressed", "true");
+  await expectFilterSurface(page, replayDisabled);
+
+  const bulkCursor = structuredClone(
+    JSON.parse(await authenticatedText(page, "/api/frame")).cursor,
+  );
+  const bulkScience = await rangeIndependentScientificSignature(page, true);
   const allOffRanges = await rangeSignature(page, "#replay-ranges-button");
-  await disableAllFilters(page, apiRequests);
-  await expectFilterSurface(page, FILTER_IDS);
+  const replayDisableMark = apiRequests.length;
+  await disableAllFilters(page);
+  expect(
+    apiRequests.slice(replayDisableMark).filter(({ method }) => method === "POST"),
+    "Replay Disable All range request count",
+  ).toEqual([{ method: "POST", path: "/api/replay/command" }]);
+  await expectFilterSurface(page, FILTER_IDS, false);
   await expectAllPaintAbsentWithoutDwell(page);
-  expect(await scientificSignature(page, true)).toEqual(allOffScience);
-  expect(await rangeSignature(page, "#replay-ranges-button")).toEqual(allOffRanges);
+  expect(JSON.parse(await authenticatedText(page, "/api/frame")).cursor).toEqual(
+    bulkCursor,
+  );
+  expect(await rangeIndependentScientificSignature(page, true)).toEqual(bulkScience);
+  await expect(page.locator("#replay-ranges-button")).toHaveAttribute(
+    "aria-pressed",
+    "false",
+  );
   await expectLocalOnly(
     page,
     apiRequests,
@@ -879,16 +1380,21 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
       }),
     { label: "disabled Disable All idempotency" },
   );
-  await expectFilterSurface(page, FILTER_IDS);
+  await expectFilterSurface(page, FILTER_IDS, false);
 
-  await expectLocalOnly(
-    page,
-    apiRequests,
-    () => page.locator("#enable-all-visual-filters-button").click(),
-    { label: "Enable All" },
+  const replayEnableMark = apiRequests.length;
+  await performCommand(page, "/api/replay/command", () =>
+    page.locator("#enable-all-visual-filters-button").click(),
   );
+  expect(
+    apiRequests.slice(replayEnableMark).filter(({ method }) => method === "POST"),
+    "Replay Enable All range request count",
+  ).toEqual([{ method: "POST", path: "/api/replay/command" }]);
   await expectFilterSurface(page);
-  expect(await scientificSignature(page, true)).toEqual(allOffScience);
+  expect(JSON.parse(await authenticatedText(page, "/api/frame")).cursor).toEqual(
+    bulkCursor,
+  );
+  expect(await rangeIndependentScientificSignature(page, true)).toEqual(bulkScience);
   expect(await rangeSignature(page, "#replay-ranges-button")).toEqual(allOffRanges);
   expect(await auraMarkup(page)).toBe(replayAuras);
   expect(await ultimateInventory(page)).toEqual(ultimateBefore);
@@ -918,11 +1424,314 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
   await expect(page.locator("#connection-status")).toHaveText("Online");
   await expectReplayFrameIndex(page, 1);
   await openVisualFilters(page);
-  await expectFilterSurface(page);
+  await expectFilterSurface(page, ["target_selection_visuals"]);
   expect(
     JSON.parse(await authenticatedText(page, "/api/presentation/frame"))
       .presentation_kind,
   ).toBe("replay_oracle");
 
+  expect(browserErrors).toEqual([]);
+});
+
+test("real maximum-status replay renders +2 without losing owner semantics", async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const replay = await startReplayViewer({
+    scenario: "max_status_stack",
+    includeStress: true,
+    frameIndex: 1,
+  });
+
+  try {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(replay.url);
+    await expect(page.locator("#connection-status")).toHaveText("Online", {
+      timeout: 30_000,
+    });
+    await expect(page.locator("html")).toHaveAttribute(
+      "data-presentation-authority",
+      "installed",
+    );
+
+    await expect(page.locator("#battlefield .modifier-overflow")).toHaveCount(0);
+    await expect(page.locator("#battlefield .modifier-cell__value")).toHaveText([
+      "×1.15",
+      "×0.85",
+    ]);
+
+    const presentation = JSON.parse(
+      await authenticatedText(page, "/api/presentation/frame"),
+    );
+    const ownerAgent = presentation.current_endpoint.scene.agents.find(
+      (/** @type {Record<string, any>} */ agent) => agent.public_agent_id === "0",
+    );
+    if (!ownerAgent) {
+      throw new Error("The maximum-status replay has no Agent ID 0 body.");
+    }
+    const ownerBody = page.locator(
+      `#battlefield .agent[data-presentation-key="${ownerAgent.presentation_key}"]`,
+    );
+    if ((await ownerBody.getAttribute("data-selected")) !== "true") {
+      await performCommand(page, "/api/replay/command", () =>
+        page
+          .locator(
+            `#roster .roster-primary-action[data-presentation-key="${ownerAgent.presentation_key}"]`,
+          )
+          .click(),
+      );
+    }
+    await expect(ownerBody).toHaveAttribute("data-selected", "true");
+
+    const overflow = page.locator("#battlefield .status-overflow").filter({
+      has: page.locator(".status-overflow__label", { hasText: /^\+2$/u }),
+    });
+    await expect(overflow).toHaveCount(1);
+    await expect(overflow.locator(".status-overflow__label")).toHaveText("+2");
+    expect(await overflow.locator(".status-overflow__label").innerHTML()).toBe("+2");
+
+    const owner = "Agent ID 0";
+    const fullOwner = "Agent ID 0 · Mage · Team A";
+    await expect(overflow).toHaveAttribute("data-zone", "status-overflow");
+    await expect(overflow).toHaveAttribute("data-hidden-count", "2");
+    await expect(overflow).toHaveAttribute("data-owner-label", owner);
+    await expect(overflow).toHaveAttribute("aria-label", new RegExp(owner, "u"));
+    await expect(overflow).toHaveAttribute("data-presentation-key", /^oracle_/u);
+
+    await overflow.dispatchEvent("focusin");
+    await expect(page.locator("#visual-tooltip")).toBeVisible();
+    await expect(page.locator("#visual-tooltip-title")).toHaveText("2 Hidden Statuses");
+    await expect(page.locator("#visual-tooltip")).toContainText(fullOwner);
+
+    await page.setViewportSize({ width: 480, height: 360 });
+    await page.evaluate(async () => {
+      await document.fonts.ready;
+      await new Promise((resolve) => {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            requestAnimationFrame(resolve);
+          });
+        });
+      });
+    });
+    const compactStatusOverflows = page.locator(
+      [
+        "#battlefield .status-overflow",
+        '#battlefield .required-dock-fallback[data-kind="status"]',
+      ].join(", "),
+    );
+    await expect(compactStatusOverflows).not.toHaveCount(0);
+    const compactRows = await compactStatusOverflows.evaluateAll((overflows) =>
+      overflows.map((overflow) => ({
+        visibleText: overflow.textContent,
+        value: overflow.querySelector(
+          ".status-overflow__label, .required-dock-fallback__value",
+        )?.textContent,
+        ownerNodes: overflow.querySelectorAll(
+          ".status-overflow__owner, .required-dock-fallback__owner",
+        ).length,
+        ownerLabel: overflow.getAttribute("data-owner-label"),
+        ariaLabel: overflow.getAttribute("aria-label"),
+        presentationKey: overflow.getAttribute("data-presentation-key"),
+      })),
+    );
+    for (const row of compactRows) {
+      expect(row.value).toMatch(/^\+\d+$/u);
+      expect(row.visibleText).toBe(row.value);
+      expect(row.ownerNodes).toBe(0);
+      expect(row.ownerLabel).toMatch(/^Agent ID /u);
+      expect(row.ariaLabel).toContain(row.ownerLabel);
+      expect(row.presentationKey).toMatch(/^oracle_/u);
+    }
+  } finally {
+    await stopDebugger(replay.process);
+  }
+});
+
+test("amended regular and stress scenarios retain Oracle-Agent presentation continuity", async ({
+  page,
+}) => {
+  test.setTimeout(600_000);
+  const browserErrors = captureBrowserErrors(page);
+  const scenarios = [
+    { name: "ultimate_showcase", includeStress: false },
+    { name: "max_status_stack", includeStress: true },
+    { name: "lifecycle_density", includeStress: true },
+  ];
+  const playingChoreography = [
+    "#battlefield .combat-choreography[data-state=playing]",
+    "#battlefield .combat-choreography-connectors[data-state=playing]",
+    "#battlefield .combat-choreography-routes[data-state=playing]",
+  ].join(", ");
+
+  /**
+   * Agent observation facts are serialized at their native binary32 precision.
+   * Normalize Oracle numbers to that same public wire precision before comparing
+   * the otherwise exact public structures.
+   *
+   * @param {any} value
+   * @returns {any}
+   */
+  const atAuthorizedWirePrecision = (value) => {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return Math.fround(value);
+    }
+    if (Array.isArray(value)) {
+      return value.map(atAuthorizedWirePrecision);
+    }
+    if (value !== null && typeof value === "object") {
+      return Object.fromEntries(
+        Object.entries(value).map(([key, item]) => [
+          key,
+          atAuthorizedWirePrecision(item),
+        ]),
+      );
+    }
+    return value;
+  };
+
+  /** @param {Record<string, any>} agent */
+  const publicAgentFacts = (agent) => {
+    const {
+      presentation_key: _presentationKey,
+      relation: _relation,
+      statuses,
+      ...facts
+    } = agent;
+    return atAuthorizedWirePrecision({
+      ...facts,
+      statuses: statuses.map((/** @type {Record<string, any>} */ status) => {
+        const { direct_sources: _directSources, ...publicStatus } = status;
+        return publicStatus;
+      }),
+    });
+  };
+
+  /**
+   * @param {"researcher" | "agent_pov"} audience
+   * @param {number} frameIndex
+   * @param {Record<string, any> | null} oracle
+   */
+  const inspectInstalledFrame = async (audience, frameIndex, oracle) => {
+    await expect(page.locator("#connection-status")).toHaveText("Online");
+    await expect(page.locator("html")).toHaveAttribute(
+      "data-presentation-authority",
+      "installed",
+    );
+    await expect(page.locator("html")).toHaveAttribute(
+      "data-submission-blocked",
+      "false",
+    );
+    await expect(page.locator("#battlefield-empty")).toBeHidden();
+    await expect(page.locator(playingChoreography)).toHaveCount(0, {
+      timeout: 15_000,
+    });
+    const presentation = JSON.parse(
+      await authenticatedText(page, "/api/presentation/frame"),
+    );
+    expect(presentation.source.source_frame_index).toBe(frameIndex);
+    expect(presentation.presentation_kind).toBe(
+      audience === "researcher" ? "replay_oracle" : "replay_no_shared_obs_agent_pov",
+    );
+    const scene =
+      audience === "researcher"
+        ? presentation.current_endpoint.scene
+        : presentation.current_endpoint.parts.scene;
+    const authorizedKeys = scene.agents
+      .map((/** @type {Record<string, any>} */ agent) => agent.presentation_key)
+      .sort();
+    const bodyKeys = await page
+      .locator("#battlefield .agent[data-presentation-key]")
+      .evaluateAll((agents) =>
+        agents.map((agent) => agent.getAttribute("data-presentation-key")).sort(),
+      );
+    expect(bodyKeys).toEqual(authorizedKeys);
+    await expect(
+      page.locator(
+        "#battlefield [data-global-slot], #battlefield [data-team-local-slot]",
+      ),
+    ).toHaveCount(0);
+    const notice = page.locator("#notice:not([hidden])");
+    if ((await notice.count()) > 0) {
+      expect(await notice.innerText()).not.toMatch(
+        /could not process|safe fault|reconnect|no authorized battlefield scene/iu,
+      );
+    }
+
+    if (audience === "agent_pov") {
+      if (oracle === null) {
+        throw new Error("Agent scenario smoke requires its Oracle frame.");
+      }
+      const oracleByPublicId = new Map(
+        oracle.current_endpoint.scene.agents.map(
+          (/** @type {Record<string, any>} */ agent) => [agent.public_agent_id, agent],
+        ),
+      );
+      for (const agent of scene.agents) {
+        const oracleAgent = oracleByPublicId.get(agent.public_agent_id);
+        expect(oracleAgent).toBeDefined();
+        expect(publicAgentFacts(agent)).toEqual(publicAgentFacts(oracleAgent));
+      }
+      const battlefieldMarkup = await page.locator("#battlefield").innerHTML();
+      for (const oracleAgent of oracle.current_endpoint.scene.agents) {
+        expect(battlefieldMarkup).not.toContain(oracleAgent.presentation_key);
+      }
+    }
+    return presentation;
+  };
+
+  for (const scenario of scenarios) {
+    const replay = await startReplayViewer({
+      scenario: scenario.name,
+      includeStress: scenario.includeStress,
+    });
+    try {
+      await openInstalled(page, replay.url, {
+        viewerMode: "replay",
+        audience: "researcher",
+        presentationKind: "replay_oracle",
+      });
+      await page.locator("#replay-playback-rate").selectOption("2");
+      const timeline = JSON.parse(
+        await authenticatedText(page, "/api/replay/timeline"),
+      );
+      const oracleFrames = [];
+      oracleFrames.push(await inspectInstalledFrame("researcher", 0, null));
+      for (
+        let frameIndex = 1;
+        frameIndex <= timeline.final_frame_index;
+        frameIndex += 1
+      ) {
+        await performCommand(page, "/api/replay/command", () =>
+          page.locator("#replay-next-button").click(),
+        );
+        await expectReplayFrameIndex(page, frameIndex);
+        oracleFrames.push(await inspectInstalledFrame("researcher", frameIndex, null));
+      }
+
+      await performCommand(page, "/api/replay/command", () =>
+        page.locator("#replay-frame-slider").fill("0"),
+      );
+      await expectReplayFrameIndex(page, 0);
+      await performCommand(page, "/api/replay/command", () =>
+        page.locator("#view-select").selectOption("pov"),
+      );
+      await inspectInstalledFrame("agent_pov", 0, oracleFrames[0]);
+      for (
+        let frameIndex = 1;
+        frameIndex <= timeline.final_frame_index;
+        frameIndex += 1
+      ) {
+        await performCommand(page, "/api/replay/command", () =>
+          page.locator("#replay-next-button").click(),
+        );
+        await expectReplayFrameIndex(page, frameIndex);
+        await inspectInstalledFrame("agent_pov", frameIndex, oracleFrames[frameIndex]);
+      }
+      await page.goto("about:blank");
+    } finally {
+      await stopDebugger(replay.process);
+    }
+  }
   expect(browserErrors).toEqual([]);
 });

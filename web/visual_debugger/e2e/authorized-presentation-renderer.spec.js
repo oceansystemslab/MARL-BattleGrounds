@@ -174,6 +174,187 @@ test("Agent DOM identity remains opaque and raw options cannot mint ranges", asy
   expect(visible.slotAttributes).toEqual([]);
 });
 
+test("Debugger unit grid is lowest, exact, click-transparent, and absent from replay", async ({
+  page,
+}) => {
+  await page.goto(origin);
+  const result = await page.evaluate(
+    async ({ liveRaw, replayRaw }) => {
+      const moduleRoot = "/src";
+      const { normalizeAuthorizedPresentationFrameV1 } = await import(
+        `${moduleRoot}/authorized-presentation-normalizer.js`
+      );
+      const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+      const battlefield = document.querySelector("#battlefield");
+      const empty = document.querySelector("#empty");
+      if (!(battlefield instanceof SVGSVGElement) || !(empty instanceof HTMLElement)) {
+        throw new Error("Grid test surface is unavailable.");
+      }
+      const renderer = new BattlefieldRenderer({ battlefield, empty });
+      const live = await normalizeAuthorizedPresentationFrameV1(liveRaw);
+      const replay = await normalizeAuthorizedPresentationFrameV1(replayRaw);
+      const liveRows = [];
+      for (const viewport of [
+        { width: 960, height: 600 },
+        { width: 1440, height: 900 },
+      ]) {
+        battlefield.style.width = `${viewport.width}px`;
+        battlefield.style.height = `${viewport.height}px`;
+        renderer.render(live, { showRanges: true });
+        const mapLayer = battlefield.querySelector('[data-layer="map"]');
+        const boundary = battlefield.querySelector(".map-boundary");
+        const firstVertical = battlefield.querySelector(".map-grid-line--vertical");
+        if (
+          !(mapLayer instanceof SVGGElement) ||
+          !(boundary instanceof SVGRectElement)
+        ) {
+          throw new Error("Debugger map layer is unavailable.");
+        }
+        liveRows.push({
+          viewport,
+          vertical: battlefield.querySelectorAll(".map-grid-line--vertical").length,
+          horizontal: battlefield.querySelectorAll(".map-grid-line--horizontal").length,
+          mapAriaHidden: mapLayer.getAttribute("aria-hidden"),
+          mapFirst: mapLayer === battlefield.querySelector("[data-layer]"),
+          pointerEvents:
+            firstVertical instanceof SVGLineElement
+              ? getComputedStyle(firstVertical).pointerEvents
+              : null,
+          boundary: {
+            x: boundary.getAttribute("x"),
+            y: boundary.getAttribute("y"),
+            width: boundary.getAttribute("width"),
+            height: boundary.getAttribute("height"),
+          },
+          firstVertical: firstVertical
+            ? {
+                x1: firstVertical.getAttribute("x1"),
+                y1: firstVertical.getAttribute("y1"),
+                x2: firstVertical.getAttribute("x2"),
+                y2: firstVertical.getAttribute("y2"),
+              }
+            : null,
+        });
+      }
+      renderer.render(replay, { showRanges: true });
+      return {
+        liveRows,
+        replayGridCount: battlefield.querySelectorAll(".map-grid-line").length,
+      };
+    },
+    {
+      liveRaw: fixture.pairs.live_oracle.presentation,
+      replayRaw: fixture.pairs.replay_oracle.presentation,
+    },
+  );
+  expect(result.liveRows).toHaveLength(2);
+  for (const row of result.liveRows) {
+    expect(row.vertical).toBe(29);
+    expect(row.horizontal).toBe(14);
+    expect(row.mapAriaHidden).toBe("true");
+    expect(row.mapFirst).toBe(true);
+    expect(row.pointerEvents).toBe("none");
+    expect(row.firstVertical).not.toBeNull();
+    expect(
+      [Number(row.firstVertical?.y1), Number(row.firstVertical?.y2)].sort(
+        (left, right) => left - right,
+      ),
+    ).toEqual([
+      Number(row.boundary.y),
+      Number(row.boundary.y) + Number(row.boundary.height),
+    ]);
+    expect(Number(row.firstVertical?.x1)).toBeGreaterThan(Number(row.boundary.x));
+    expect(row.firstVertical?.x1).toBe(row.firstVertical?.x2);
+  }
+  expect(result.replayGridCount).toBe(0);
+});
+
+test("Target Selection Visuals hides only reticle and legality paint", async ({
+  page,
+}) => {
+  await page.goto(origin);
+  const result = await page.evaluate(async (raw) => {
+    const moduleRoot = "/src";
+    const { normalizeAuthorizedPresentationFrameV1 } = await import(
+      `${moduleRoot}/authorized-presentation-normalizer.js`
+    );
+    const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+    const { DEFAULT_VISUAL_FILTER_STATE, setVisualFilterEnabled } = await import(
+      `${moduleRoot}/visual-filters.js`
+    );
+    const battlefield = document.querySelector("#battlefield");
+    const empty = document.querySelector("#empty");
+    if (!(battlefield instanceof SVGSVGElement) || !(empty instanceof HTMLElement)) {
+      throw new Error("Target-filter test surface is unavailable.");
+    }
+    const presentation = await normalizeAuthorizedPresentationFrameV1(raw);
+    const presentationBytes = JSON.stringify(presentation);
+    const renderer = new BattlefieldRenderer({ battlefield, empty });
+    /** @param {Record<string, boolean>} visualFilterState */
+    const paint = (visualFilterState) => {
+      renderer.render(presentation, {
+        showRanges: true,
+        visualFilterState,
+      });
+      return {
+        visibleReticles: battlefield.querySelectorAll(".selected-reticle:not([hidden])")
+          .length,
+        legality: battlefield.querySelectorAll(".legality-pill").length,
+        legalityTooltipOwners: battlefield.querySelectorAll(
+          ".legality-pill[data-tooltip-owner]",
+        ).length,
+        controlled: battlefield.querySelector(".controlled-halo:not([hidden])")
+          ?.outerHTML,
+        pendingRoute: battlefield.querySelector('[data-layer="pending-route"]')
+          ?.innerHTML,
+        ranges: battlefield.querySelector('[data-layer="debug-range"]')?.innerHTML,
+        agents: battlefield.querySelector('[data-layer="body"]')?.innerHTML,
+        legalityProtected: renderer
+          .choreographySurface()
+          .protectedRects.filter(
+            (/** @type {{protectedKind?: string}} */ region) =>
+              region.protectedKind === "legality",
+          ).length,
+        presentationBytes: JSON.stringify(presentation),
+      };
+    };
+    const enabled = paint(DEFAULT_VISUAL_FILTER_STATE);
+    const disabled = paint(
+      setVisualFilterEnabled(
+        DEFAULT_VISUAL_FILTER_STATE,
+        "target_selection_visuals",
+        false,
+      ),
+    );
+    const restored = paint(DEFAULT_VISUAL_FILTER_STATE);
+    return { enabled, disabled, restored, presentationBytes };
+  }, fixture.presentations.replay_oracle);
+  expect(result.enabled.visibleReticles).toBe(1);
+  expect(result.enabled.legality).toBe(2);
+  expect(result.enabled.legalityTooltipOwners).toBe(2);
+  expect(result.enabled.legalityProtected).toBeGreaterThan(0);
+  expect(result.disabled.visibleReticles).toBe(0);
+  expect(result.disabled.legality).toBe(0);
+  expect(result.disabled.legalityTooltipOwners).toBe(0);
+  expect(result.disabled.legalityProtected).toBe(0);
+  expect(result.disabled.controlled).toBe(result.enabled.controlled);
+  expect(result.restored.controlled).toBe(result.enabled.controlled);
+  expect(result.disabled.pendingRoute).toBe(result.enabled.pendingRoute);
+  expect(result.restored.pendingRoute).toBe(result.enabled.pendingRoute);
+  expect(result.disabled.ranges).toBe(result.enabled.ranges);
+  expect(result.restored.ranges).toBe(result.enabled.ranges);
+  expect(result.disabled.agents).toBe(result.enabled.agents);
+  expect(result.restored.agents).toBe(result.enabled.agents);
+  expect(result.restored.visibleReticles).toBe(result.enabled.visibleReticles);
+  expect(result.restored.legality).toBe(result.enabled.legality);
+  expect(result.restored.legalityTooltipOwners).toBe(
+    result.enabled.legalityTooltipOwners,
+  );
+  expect(result.enabled.presentationBytes).toBe(result.presentationBytes);
+  expect(result.disabled.presentationBytes).toBe(result.presentationBytes);
+  expect(result.restored.presentationBytes).toBe(result.presentationBytes);
+});
+
 test("raw and forged researcher-looking scenes render unavailable and clear accepted paint", async ({
   page,
 }) => {
@@ -2208,8 +2389,8 @@ test("authorized death, team waves, and resurrection retain outward settled geom
       agentOwnsBodyCenter: true,
       hitPointerEvents: "stroke",
       hitFill: "none",
-      ariaLabel: "Agent died",
-      tooltipTitle: "Agent died",
+      ariaLabel: "Agent Died",
+      tooltipTitle: "Agent Died",
       tooltipSummary: "This agent died on the incoming transition.",
     }),
     expect.objectContaining({
@@ -2225,8 +2406,8 @@ test("authorized death, team waves, and resurrection retain outward settled geom
       agentOwnsBodyCenter: true,
       hitPointerEvents: "stroke",
       hitFill: "none",
-      ariaLabel: "Agent respawned",
-      tooltipTitle: "Agent respawned",
+      ariaLabel: "Agent Respawned",
+      tooltipTitle: "Agent Respawned",
       tooltipSummary: "This agent respawned on the incoming transition.",
     }),
   ]);
@@ -2471,12 +2652,13 @@ test("authorized multi-application status paints one route-free lifecycle", asyn
   expect(result.domApplicationIds).toEqual(applicationIds);
   expect(result.sourcePublicAgentIds).toEqual(["agent-slot-0", "agent-slot-2"]);
   expect(result.sourceRecordKeys).toEqual([
-    ["eventId", "sourcePresentationKey", "sourcePublicAgentId"],
-    ["eventId", "sourcePresentationKey", "sourcePublicAgentId"],
+    ["eventId", "sourceIdentity", "sourcePresentationKey", "sourcePublicAgentId"],
+    ["eventId", "sourceIdentity", "sourcePresentationKey", "sourcePublicAgentId"],
   ]);
   expect(result.tooltipRows).toContainEqual({
-    label: "Application Sources",
-    value: "Agent ID agent-slot-0; Agent ID agent-slot-2",
+    label: "Sources",
+    value:
+      "Agent ID agent-slot-0 · Mage · Team A; Agent ID agent-slot-2 · Priest · Team A",
   });
 });
 

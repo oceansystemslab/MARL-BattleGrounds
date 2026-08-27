@@ -12,7 +12,7 @@
  *   | "aura_modifier_badges"
  *   | "duration_status_badges"
  *   | "spawn_shield"
- *   | "rejected_action_feedback"
+ *   | "target_selection_visuals"
  *   | "basic_ability_effects"
  *   | "ultimate_ability_effects"
  *   | "regeneration_effects"
@@ -41,7 +41,7 @@ export const VISUAL_FILTER_REGISTRY = Object.freeze(
     ["aura_modifier_badges", "Aura Modifier Badges"],
     ["duration_status_badges", "Duration Status Badges"],
     ["spawn_shield", "Spawn Shield"],
-    ["rejected_action_feedback", "Rejected Action Feedback"],
+    ["target_selection_visuals", "Target Selection Visuals"],
     ["basic_ability_effects", "Basic Ability Effects"],
     ["ultimate_ability_effects", "Ultimate Ability Effects"],
     ["regeneration_effects", "Regeneration Effects"],
@@ -103,8 +103,12 @@ export const VISUAL_PAINT_PART_REGISTRY = Object.freeze([
   paintPart({ surface: "durable", kind: "spawn_shield" }, "spawn_shield"),
   paintPart({ surface: "durable", kind: "cooldown_badge" }, "cooldown_effects"),
   paintPart(
-    { surface: "transient", kind: "rejected_action_feedback" },
-    "rejected_action_feedback",
+    { surface: "durable", kind: "selection_reticle" },
+    "target_selection_visuals",
+  ),
+  paintPart(
+    { surface: "durable", kind: "selected_pair_legality" },
+    "target_selection_visuals",
   ),
   paintPart(
     {
@@ -200,24 +204,6 @@ export const VISUAL_PAINT_PART_REGISTRY = Object.freeze([
     {
       surface: "transient",
       kind: "status_lifecycle",
-      lifecycle: "reapplied",
-      part: "effect",
-    },
-    "status_application",
-  ),
-  paintPart(
-    {
-      surface: "transient",
-      kind: "status_lifecycle",
-      lifecycle: "refreshed",
-      part: "effect",
-    },
-    "status_application",
-  ),
-  paintPart(
-    {
-      surface: "transient",
-      kind: "status_lifecycle",
       lifecycle: "expired",
       part: "effect",
     },
@@ -231,24 +217,6 @@ export const VISUAL_PAINT_PART_REGISTRY = Object.freeze([
       part: "effect",
     },
     "freezing_trap_break",
-  ),
-  paintPart(
-    {
-      surface: "transient",
-      kind: "status_lifecycle",
-      lifecycle: "trap_broken_and_reapplied",
-      part: "break",
-    },
-    "freezing_trap_break",
-  ),
-  paintPart(
-    {
-      surface: "transient",
-      kind: "status_lifecycle",
-      lifecycle: "trap_broken_and_reapplied",
-      part: "reapplication",
-    },
-    "status_application",
   ),
   paintPart(
     {

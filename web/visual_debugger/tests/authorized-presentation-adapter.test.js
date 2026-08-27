@@ -47,6 +47,19 @@ const fixture = JSON.parse(
   ),
 );
 
+const EXPECTED_CLASS_LABELS = new Map([
+  [1, "Mage"],
+  [2, "Warrior"],
+  [3, "Hunter"],
+  [4, "Rogue"],
+  [5, "Priest"],
+]);
+
+/** @param {Record<string, any>} identity */
+function expectedAuthorizedIdentityTitle(identity) {
+  return `Agent ID ${identity.public_agent_id} · ${EXPECTED_CLASS_LABELS.get(Number(identity.class_id))} · Team ${identity.team_id === 1 ? "A" : "B"}`;
+}
+
 /** @param {keyof typeof fixture.presentations} kind */
 async function normalized(kind) {
   return await normalizeAuthorizedPresentationFrameV1(fixture.presentations[kind]);
@@ -1259,10 +1272,10 @@ test("Agent visual events, local evidence, Submitted/Accepted, Technical Frame, 
     technical.map(({ id, label, value }) => [id, label, value]),
     [
       ["frame", "Frame", 1],
-      ["simulator_step", "Simulator step", 1],
+      ["simulator_step", "Simulator Step", 1],
       [
         "incoming_transition",
-        "Incoming transition",
+        "Incoming Transition",
         "episode-001:shared-obs-visual-union:agent-slot-0:transition:0",
       ],
     ],
@@ -1473,8 +1486,8 @@ test("Technical Frame projects the exact final five-leaf allowlist atomically", 
       [
         ["episode", "Episode", "episode-001"],
         ["frame", "Frame", 1],
-        ["simulator_step", "Simulator step", 1],
-        ["incoming_transition", "Incoming transition", "episode-001:transition:0"],
+        ["simulator_step", "Simulator Step", 1],
+        ["incoming_transition", "Incoming Transition", "episode-001:transition:0"],
       ],
     ],
     [
@@ -1482,28 +1495,28 @@ test("Technical Frame projects the exact final five-leaf allowlist atomically", 
       [
         ["episode", "Episode", "episode-001"],
         ["frame", "Frame", 1],
-        ["simulator_step", "Simulator step", 1],
-        ["incoming_transition", "Incoming transition", "episode-001:transition:0"],
+        ["simulator_step", "Simulator Step", 1],
+        ["incoming_transition", "Incoming Transition", "episode-001:transition:0"],
       ],
     ],
     [
       "replay_oracle",
       [
-        ["artifact_digest_prefix", "Artifact digest prefix", "cccccccccccc"],
+        ["artifact_digest_prefix", "Artifact Digest Prefix", "cccccccccccc"],
         ["frame", "Frame", 1],
-        ["simulator_step", "Simulator step", 1],
-        ["incoming_transition", "Incoming transition", "episode-001:transition:0"],
-        ["ordinary_movement_distance_scale", "Ordinary movement distance scale", 1],
+        ["simulator_step", "Simulator Step", 1],
+        ["incoming_transition", "Incoming Transition", "episode-001:transition:0"],
+        ["ordinary_movement_distance_scale", "Ordinary Movement Distance Scale", 1],
       ],
     ],
     [
       "replay_no_shared_obs_agent_pov",
       [
         ["frame", "Frame", 1],
-        ["simulator_step", "Simulator step", 1],
+        ["simulator_step", "Simulator Step", 1],
         [
           "incoming_transition",
-          "Incoming transition",
+          "Incoming Transition",
           "episode-001:actor-pov:agent-slot-0:transition:0",
         ],
       ],
@@ -1512,10 +1525,10 @@ test("Technical Frame projects the exact final five-leaf allowlist atomically", 
       "replay_shared_obs_agent_pov",
       [
         ["frame", "Frame", 1],
-        ["simulator_step", "Simulator step", 1],
+        ["simulator_step", "Simulator Step", 1],
         [
           "incoming_transition",
-          "Incoming transition",
+          "Incoming Transition",
           "episode-001:shared-obs-visual-union:agent-slot-0:transition:0",
         ],
       ],
@@ -1576,7 +1589,7 @@ test("Technical Frame projects the exact final five-leaf allowlist atomically", 
       [
         ["episode", "Episode", "episode-001"],
         ["frame", "Frame", 0],
-        ["simulator_step", "Simulator step", 0],
+        ["simulator_step", "Simulator Step", 0],
       ],
     ],
     [
@@ -1584,30 +1597,30 @@ test("Technical Frame projects the exact final five-leaf allowlist atomically", 
       [
         ["episode", "Episode", "episode-001"],
         ["frame", "Frame", 0],
-        ["simulator_step", "Simulator step", 0],
+        ["simulator_step", "Simulator Step", 0],
       ],
     ],
     [
       "replay_oracle_frame_zero",
       [
-        ["artifact_digest_prefix", "Artifact digest prefix", "cccccccccccc"],
+        ["artifact_digest_prefix", "Artifact Digest Prefix", "cccccccccccc"],
         ["frame", "Frame", 0],
-        ["simulator_step", "Simulator step", 0],
-        ["ordinary_movement_distance_scale", "Ordinary movement distance scale", 1],
+        ["simulator_step", "Simulator Step", 0],
+        ["ordinary_movement_distance_scale", "Ordinary Movement Distance Scale", 1],
       ],
     ],
     [
       "replay_no_shared_frame_zero",
       [
         ["frame", "Frame", 0],
-        ["simulator_step", "Simulator step", 0],
+        ["simulator_step", "Simulator Step", 0],
       ],
     ],
     [
       "replay_shared_frame_zero",
       [
         ["frame", "Frame", 0],
-        ["simulator_step", "Simulator step", 0],
+        ["simulator_step", "Simulator Step", 0],
       ],
     ],
   ];
@@ -1879,6 +1892,14 @@ test("Oracle choreography exact-joins moving trajectories and presents successor
       plannedEvent.sourcePublicAgentId,
       sourceTrajectory.agent_public_agent_id,
     );
+    const expectedClassMechanics = raw.current_endpoint.scene.class_mechanics.find(
+      (/** @type {Record<string, any>} */ mechanics) =>
+        mechanics.class_id === sourceClass,
+    );
+    assert.deepEqual(
+      plannedEvent.authorizedClassMechanics,
+      plannedEvent.component === "ultimate" ? expectedClassMechanics : null,
+    );
     assert.deepEqual(
       plannedEvent.source,
       projectedTrajectoryPoint(raw, sourceClass, "successor"),
@@ -2099,7 +2120,13 @@ test("moving Warrior Charge activation stays a direct transition-start underlay"
   assert.deepEqual(unobstructedActivation.route?.end, startTarget);
   assert.deepEqual(activation.source, startSource);
   assert.deepEqual(activation.target, startTarget);
-  assert.deepEqual(activation.route, unobstructedActivation.route);
+  const { markerProgresses: activationMarkerProgresses, ...activationRoute } =
+    activation.route;
+  const { markerProgresses: unobstructedMarkerProgresses, ...unobstructedRoute } =
+    unobstructedActivation.route;
+  assert.deepEqual(activationRoute, unobstructedRoute);
+  assert.deepEqual(unobstructedMarkerProgresses, [1 / 3, 2 / 3]);
+  assert.deepEqual(activationMarkerProgresses, [3 / 4]);
   assert.equal(activation.route?.kind, "curve");
   assert.equal(activation.route?.offset, 0);
   assert.equal(activation.route?.lane, 0);
@@ -2580,12 +2607,13 @@ test("Oracle lifecycle cues retain successor and strict team-anchor authority", 
   assert.equal(death.agentPublicAgentId, deathAnchor.public_agent_id);
 
   const shield = plan.events[1];
-  assert.equal(shield.kind, "semantic_pulse");
-  assert.equal(shield.cueSemantic, "spawn_shield_expired");
-  assert.equal(shield.persistent, false);
-  assert.deepEqual(shield.anchor, projectedTrajectoryPoint(raw, 1, "successor"));
-  assert.equal(shield.agentPresentationKey, shieldAnchor.presentation_key);
-  assert.equal(shield.agentPublicAgentId, shieldAnchor.public_agent_id);
+  assert.equal(shield.kind, "status_lifecycle");
+  assert.equal(shield.eventType, "spawn_shield_expired");
+  assert.equal(shield.tokenId, "spawn_shield");
+  assert.equal(shield.lifecycle, "expired");
+  assert.deepEqual(shield.recipient, projectedTrajectoryPoint(raw, 1, "successor"));
+  assert.equal(shield.recipientPresentationKey, shieldAnchor.presentation_key);
+  assert.equal(shield.recipientPublicAgentId, shieldAnchor.public_agent_id);
 
   const waves = plan.events.slice(2, 4);
   assert.deepEqual(
@@ -2653,7 +2681,7 @@ test("Oracle lifecycle cues retain successor and strict team-anchor authority", 
   );
   assert.deepEqual(
     lifecycleCopy.map(({ title }) => title),
-    ["Agent died", "EVENT: Team A Respawn", "EVENT: Team B Respawn", "Agent respawned"],
+    ["Agent Died", "EVENT: Team A Respawn", "EVENT: Team B Respawn", "Agent Respawned"],
   );
   assert.doesNotMatch(
     JSON.stringify(
@@ -2690,7 +2718,7 @@ test("NoShared and Shared authorized clocks never synthesize a respawn wave", as
   }
 });
 
-test("rejection stays at its serialized transition-start anchor", async () => {
+test("rejection remains serialized feed evidence without spatial choreography", async () => {
   const raw = structuredClone(fixture.state_cases.replay_oracle_final_selected);
   const rejection = raw.latest_events.events[0];
   const trajectory = raw.latest_events.agent_phase_trajectories.find(
@@ -2707,12 +2735,12 @@ test("rejection stays at its serialized transition-start anchor", async () => {
   assert.equal(JSON.stringify(frame), serializedBefore);
   assert.equal(plan.events.length, 1);
   assert.equal(plan.events[0].eventId, rejection.event_id);
-  assert.equal(plan.events[0].kind, "rejected_action");
-  assert.deepEqual(plan.events[0].actor, { x: 32, y: 31 });
-  assert.notDeepEqual(plan.events[0].actor, {
-    x: trajectory.successor.position[0] * 10,
-    y: trajectory.successor.position[1] * 10,
-  });
+  assert.equal(plan.events[0].kind, "feed_only");
+  assert.equal(plan.events[0].feedKind, "rejected_action");
+  assert.equal(plan.events[0].spatial, false);
+  assert.equal(plan.events[0].presentationSuppressed, true);
+  assert.equal(Object.hasOwn(plan.events[0], "actor"), false);
+  assert.equal(Object.hasOwn(plan.events[0], "route"), false);
 });
 
 test("missing, duplicate, phase-discordant, and identity-discordant trajectories fail closed", async () => {
@@ -2835,11 +2863,27 @@ test("Oracle status compositor applies exact precedence and preserves every atom
     const applicationRows = incomingRows.filter(
       ({ kind }) => kind === "status_applied",
     );
-    const expectedApplicationSources = applicationRows.map(({ id, payload }) => ({
-      eventId: id,
-      sourcePresentationKey: payload.source_anchor.presentation_key,
-      sourcePublicAgentId: payload.source_anchor.public_agent_id,
-    }));
+    const scene = authorizedPresentationSceneView(frame);
+    assert.ok(scene);
+    const expectedApplicationSources = applicationRows.map(({ id, payload }) => {
+      const sourceAgent = scene.agents.find(
+        (/** @type {Record<string, any>} */ agent) =>
+          agent.presentation_key === payload.source_anchor.presentation_key &&
+          agent.public_agent_id === payload.source_anchor.public_agent_id,
+      );
+      assert.ok(sourceAgent);
+      return {
+        eventId: id,
+        sourcePresentationKey: payload.source_anchor.presentation_key,
+        sourcePublicAgentId: payload.source_anchor.public_agent_id,
+        sourceIdentity: {
+          presentation_key: sourceAgent.presentation_key,
+          public_agent_id: sourceAgent.public_agent_id,
+          class_id: sourceAgent.class_id,
+          team_id: sourceAgent.team_id,
+        },
+      };
+    });
     assert.equal(plan.events.length, 1, expected.label);
     assert.equal(plan.bounds.nodes, 33, expected.label);
     const [lifecycle] = plan.events;
@@ -2868,6 +2912,7 @@ test("Oracle status compositor applies exact precedence and preserves every atom
         (/** @type {Record<string, any>} */ source) =>
           typeof source.sourcePresentationKey === "string" &&
           typeof source.sourcePublicAgentId === "string" &&
+          typeof source.sourceIdentity === "object" &&
           !Object.hasOwn(source, "source") &&
           !Object.hasOwn(source, "sourceSlot"),
       ),
@@ -2877,15 +2922,16 @@ test("Oracle status compositor applies exact precedence and preserves every atom
       const sourceRow = explainChoreographyEvent(lifecycle).rows.find(
         (/** @type {Record<string, any>} */ row) =>
           row.label ===
-          (expectedApplicationSources.length === 1 ? "Source" : "Application Sources"),
+          (expectedApplicationSources.length === 1 ? "Source" : "Sources"),
       );
       assert.deepEqual(
         sourceRow,
         {
-          label:
-            expectedApplicationSources.length === 1 ? "Source" : "Application Sources",
+          label: expectedApplicationSources.length === 1 ? "Source" : "Sources",
           value: expectedApplicationSources
-            .map(({ sourcePublicAgentId }) => `Agent ID ${sourcePublicAgentId}`)
+            .map(({ sourceIdentity }) =>
+              expectedAuthorizedIdentityTitle(sourceIdentity),
+            )
             .join("; "),
           metadata: { compact: true, full: true },
         },
@@ -3039,6 +3085,27 @@ test("canonical in-combat expiry paints one self-contained duration expiration",
   assert.deepEqual(expiration.recipient, projectedTrajectoryPoint(raw, 2, "successor"));
   assert.equal(expiration.recipientPresentationKey, agentAnchor.presentation_key);
   assert.equal(expiration.recipientPublicAgentId, agentAnchor.public_agent_id);
+  const recipientAgent = authorizedPresentationSceneView(frame)?.agents.find(
+    (/** @type {Record<string, any>} */ agent) =>
+      agent.presentation_key === agentAnchor.presentation_key &&
+      agent.public_agent_id === agentAnchor.public_agent_id,
+  );
+  assert.ok(recipientAgent);
+  assert.equal(
+    expiration.outOfCombatRegenerationPerTick,
+    recipientAgent.maximum_health *
+      recipientAgent.out_of_combat_health_regeneration_fraction_per_step,
+  );
+  const explanation = explainChoreographyEvent(expiration);
+  assert.equal(explanation.title, "Out of Combat");
+  assert.equal(
+    explanation.summary,
+    "This agent can regenerate up to 8 health per tick while it remains out of combat.",
+  );
+  assert.deepEqual(
+    explanation.rows.map(({ label, value }) => [label, value]),
+    [["Recipient", expectedAuthorizedIdentityTitle(recipientAgent)]],
+  );
 
   const resetRaw = movingOracleRaw();
   installOracleEvents(resetRaw, [

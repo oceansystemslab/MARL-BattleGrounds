@@ -1140,7 +1140,7 @@ export function renderReplayTimelineControls(elements, state) {
     cursor === null ? "Frame — / —" : `Frame ${frameIndex} / ${finalFrameIndex}`,
     tickText.visible,
     ...(typeof incomingTransition === "string" && incomingTransition.length > 0
-      ? [`Incoming transition ${incomingTransition}`]
+      ? [`Incoming Transition ${incomingTransition}`]
       : []),
     `${state.playbackRate.toFixed(2)}×`,
     state.transportState,

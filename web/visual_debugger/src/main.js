@@ -16,6 +16,7 @@ import {
   authorizedOracleCommandSlotForPresentationKey,
   authorizedOracleCommandSlotForPublicAgentId,
   authorizedPresentationAudience,
+  authorizedPresentationIdentityRows,
   authorizedPresentationInspectionState,
   authorizedPresentationLatestTransitionId,
   authorizedPresentationPreferenceKey,
@@ -49,7 +50,6 @@ import {
   authorizedInspectorView,
   DebuggerPanels,
   disclosurePanelInitiallyOpen,
-  renderSemanticInspector,
 } from "./panels.js";
 import {
   pendingPresentationSurfaceView,
@@ -76,6 +76,7 @@ import {
   DEFAULT_VISUAL_FILTER_STATE,
   isVisualFilterEnabled,
   reduceVisualFilterState,
+  setVisualFilterEnabled,
   VISUAL_FILTER_REGISTRY,
 } from "./visual-filters.js";
 
@@ -242,6 +243,10 @@ function installVisualFilterControls() {
  * changes until the document itself reloads.
  */
 let visualFilterState = DEFAULT_VISUAL_FILTER_STATE;
+let agentLocalRangesVisible = true;
+let agentLocalRangesInitialized = false;
+let confirmedResearcherRangesVisible = true;
+let visualFilterProductDefaultsApplied = false;
 installVisualFilterControls();
 
 /**
@@ -344,7 +349,6 @@ const scientificDisclosures = Object.freeze(
  *     publicAgentId: string,
  *   },
  *   localInspection: {owned: false} | {owned: true, presentationKey: string | null},
- *   localRanges: {owned: false} | {owned: true, visible: boolean},
  * } | null}
  */
 let activePresentationPreference = null;
@@ -417,6 +421,17 @@ function applyProductIdentity(rawIdentity) {
     schema_version: 1,
     product_kind: rawIdentity.product_kind,
   });
+  if (!visualFilterProductDefaultsApplied) {
+    visualFilterState =
+      productIdentity.product_kind === "replay_viewer"
+        ? setVisualFilterEnabled(
+            DEFAULT_VISUAL_FILTER_STATE,
+            "target_selection_visuals",
+            false,
+          )
+        : DEFAULT_VISUAL_FILTER_STATE;
+    visualFilterProductDefaultsApplied = true;
+  }
   const title = PRODUCT_TITLES[productIdentity.product_kind];
   document.title = title;
   elements.appTitle.textContent = title;
@@ -570,12 +585,12 @@ const CONTROL_HELP = Object.freeze([
   [
     "#enable-all-visual-filters-button",
     "Enable All",
-    "Turn on all 18 local visual filters. The separate Ranges control is unchanged.",
+    "Turn on all 18 local visual filters and the active Ranges overlay.",
   ],
   [
     "#disable-all-visual-filters-button",
     "Disable All",
-    "Turn off all 18 local visual filters. The separate Ranges control is unchanged.",
+    "Turn off all 18 local visual filters and the active Ranges overlay.",
   ],
   [
     ".diagnostics > summary",
@@ -718,8 +733,10 @@ const tooltipController = createTooltipController({
   tooltip: elements.visualTooltip,
   title: elements.visualTooltipTitle,
   details: elements.visualTooltipDetails,
-  onInspect: showSemanticInspector,
 });
+
+/** @type {string | null} */
+let activatedAgentPublicId = null;
 
 let lastBattlefieldSizeKey = "";
 /** @type {number | null} */
@@ -962,6 +979,19 @@ function installJoinedAuthority(joined) {
     throw new TypeError("Authorized presentation has no certified preference key.");
   }
   installActivePresentationPreference(joined.presentation, preferenceKey);
+  if (
+    authorizedPresentationAudience(joined.presentation) === "researcher" &&
+    typeof joined.transport.show_ranges === "boolean"
+  ) {
+    confirmedResearcherRangesVisible = joined.transport.show_ranges;
+  }
+  if (
+    !agentLocalRangesInitialized &&
+    typeof joined.transport.show_ranges === "boolean"
+  ) {
+    agentLocalRangesVisible = joined.transport.show_ranges;
+    agentLocalRangesInitialized = true;
+  }
   state.authority = joined;
   state.frame = joined.transport;
   state.presentation = joined.presentation;
@@ -1016,9 +1046,16 @@ const presentationInstallation = new PresentationInstallCoordinator({
 const AUTHORIZED_INSPECTOR_TITLE = "Comprehensive Agent Class Details";
 
 function applyAuthorizedInspectorChrome() {
+  if (activatedAgentPublicId === null) {
+    elements.selectionHeading.textContent = AUTHORIZED_INSPECTOR_TITLE;
+    elements.agentDetails.removeAttribute("data-tone");
+    elements.agentDetails.removeAttribute("data-accent");
+    return;
+  }
   const inspector = authorizedInspectorView(
     state.presentation,
     installedLocalInspectedPresentationKey(state.presentation),
+    activatedAgentPublicId,
   );
   elements.selectionHeading.textContent =
     inspector?.title ?? AUTHORIZED_INSPECTOR_TITLE;
@@ -1036,63 +1073,6 @@ function reloadForProductHandoff() {
   }
   productHandoffReloadRequested = true;
   window.location.reload();
-}
-
-/**
- * Recognize only an installed authorized compact agent activation owner. This
- * is the central authority fence behind each owner's non-inspectable tooltip
- * registration; other scientific owners retain generic full inspection.
- *
- * @param {Element} owner
- */
-function isAuthorizedCompactAgentOwner(owner) {
-  const presentation = state.presentation;
-  if (
-    !isAuthorizedPresentationFrame(presentation) ||
-    !installedAuthorityIsCoherent() ||
-    (!owner.matches(".agent[data-presentation-key]") &&
-      !owner.matches('[data-action="activate-agent"][data-presentation-key]'))
-  ) {
-    return false;
-  }
-  const presentationKey = owner.getAttribute("data-presentation-key");
-  return (
-    typeof presentationKey === "string" &&
-    authorizedAgentForPresentationKey(presentation, presentationKey) !== null
-  );
-}
-
-/**
- * @param {unknown} descriptor
- * @param {{owner: Element, trigger: Element | null}} context
- */
-function showSemanticInspector(descriptor, context) {
-  if (installedActivePresentationPreference(state.presentation) === null) {
-    return;
-  }
-  const normalized = createSemanticDescriptor(descriptor);
-  if (normalized.kind === "agent" && isAuthorizedCompactAgentOwner(context.owner)) {
-    return;
-  }
-  if (
-    isReplayMode() &&
-    authorizedPresentationAudience(state.presentation) !== "researcher" &&
-    normalized.kind === "agent"
-  ) {
-    const ownerKey = context.owner
-      .closest("[data-presentation-key]")
-      ?.getAttribute("data-presentation-key");
-    const scene = installedAuthorizedPresentationSceneView(state.presentation);
-    const inspectedKey = isRecord(scene?.selection)
-      ? scene.selection.inspection_owner_presentation_key
-      : null;
-    if (typeof ownerKey !== "string" || ownerKey !== inspectedKey) {
-      return;
-    }
-  }
-  renderSemanticInspector(elements.selectionCard, normalized);
-  applyAuthorizedInspectorChrome();
-  openAgentDetails();
 }
 
 function registerControlHelp() {
@@ -1318,9 +1298,6 @@ function defaultPresentationPreference(presentation, authorityKey) {
     localInspection: ownsLocalInspection
       ? { owned: true, presentationKey: inspectedPresentationKey }
       : { owned: false },
-    localRanges: ownsLocalInspection
-      ? { owned: true, visible: true }
-      : { owned: false },
   };
 }
 
@@ -1472,13 +1449,6 @@ function installActivePresentationPreference(presentation, authorityKey) {
       );
       activePresentationPreference.agentDetailsAutoOpenAllowed =
         previousPreference.agentDetailsAutoOpenAllowed;
-      if (
-        previousPreference.localRanges.owned &&
-        activePresentationPreference.localRanges.owned
-      ) {
-        activePresentationPreference.localRanges.visible =
-          previousPreference.localRanges.visible;
-      }
     }
     if (
       previousPrimaryFocus !== null &&
@@ -1749,10 +1719,13 @@ function renderVisualFilterControls(snapshot) {
     input.checked = enabled;
     enabledCount += enabled ? 1 : 0;
   }
-  elements.visualFilterCount.textContent = `${enabledCount} enabled`;
+  const rangesEnabled = installedPresentationRangesVisible(state.presentation);
+  const visibleControlCount = EXPECTED_VISUAL_FILTER_COUNT + 1;
+  const enabledControlCount = enabledCount + (rangesEnabled ? 1 : 0);
+  elements.visualFilterCount.textContent = `${enabledControlCount} enabled`;
   elements.enableAllVisualFiltersButton.disabled =
-    enabledCount === EXPECTED_VISUAL_FILTER_COUNT;
-  elements.disableAllVisualFiltersButton.disabled = enabledCount === 0;
+    enabledControlCount === visibleControlCount;
+  elements.disableAllVisualFiltersButton.disabled = enabledControlCount === 0;
 }
 
 /**
@@ -1775,6 +1748,54 @@ function applyVisualFilterAction(action) {
   }
   render();
   return true;
+}
+
+/**
+ * Set the one active Ranges control without changing its existing authority
+ * path. Agent POV remains page-local; Oracle View remains service-confirmed.
+ *
+ * @param {boolean} visible
+ * @returns {boolean} Whether a local change or one service request was started.
+ */
+function setActiveRangesVisible(visible) {
+  const presentation = state.presentation;
+  if (
+    typeof visible !== "boolean" ||
+    !isAuthorizedPresentationFrame(presentation) ||
+    state.busy ||
+    state.shuttingDown ||
+    state.resyncRequired ||
+    state.offline ||
+    installedPresentationRangesVisible(presentation) === visible
+  ) {
+    return false;
+  }
+  const audience = authorizedPresentationAudience(presentation);
+  if (audience === "agent_pov") {
+    if (!setAgentLocalRangesVisible(visible)) {
+      return false;
+    }
+    render();
+    return true;
+  }
+  if (audience !== "researcher") {
+    return false;
+  }
+  if (isReplayMode()) {
+    void dispatchReplayCommand({
+      command_type: "set_ranges",
+      show_ranges: visible,
+    });
+  } else {
+    void dispatchCommand(keyboardCommand("g"));
+  }
+  return true;
+}
+
+/** @param {boolean} enabled */
+function applyAllVisualControls(enabled) {
+  applyVisualFilterAction({ type: enabled ? "enable_all" : "disable_all" });
+  setActiveRangesVisible(enabled);
 }
 
 /**
@@ -1921,10 +1942,10 @@ function installedLocalPresentationPreference(presentation) {
     return null;
   }
   const preference = installedActivePresentationPreference(presentation);
-  return preference?.localInspection.owned && preference.localRanges.owned
+  return preference?.localInspection.owned
     ? Object.freeze({
         inspectedPresentationKey: preference.localInspection.presentationKey,
-        rangesVisible: preference.localRanges.visible,
+        rangesVisible: agentLocalRangesVisible,
       })
     : null;
 }
@@ -1972,29 +1993,38 @@ function setLocalInspectedPresentationKey(presentationKey) {
   return true;
 }
 
-/** @returns {boolean} */
-function toggleAgentLocalRanges() {
+/** @param {boolean} visible @returns {boolean} */
+function setAgentLocalRangesVisible(visible) {
   const preference = installedActivePresentationPreference(state.presentation);
-  if (preference === null || !preference.localRanges.owned) {
+  if (
+    preference === null ||
+    !preference.localInspection.owned ||
+    typeof visible !== "boolean" ||
+    agentLocalRangesVisible === visible
+  ) {
     return false;
   }
   invalidateReplayArtifactAction();
-  preference.localRanges.visible = !preference.localRanges.visible;
+  agentLocalRangesVisible = visible;
   return true;
+}
+
+/** @returns {boolean} */
+function toggleAgentLocalRanges() {
+  return setAgentLocalRangesVisible(!agentLocalRangesVisible);
 }
 
 /** @param {unknown} presentation */
 function installedPresentationRangesVisible(presentation) {
   if (
     !isAuthorizedPresentationFrame(presentation) ||
-    !installedAuthorityIsCoherent() ||
     state.presentation !== presentation
   ) {
     return false;
   }
   const localPreference = installedLocalPresentationPreference(presentation);
   return authorizedPresentationAudience(presentation) === "researcher"
-    ? state.frame?.show_ranges === true
+    ? confirmedResearcherRangesVisible
     : localPreference?.rangesVisible === true;
 }
 
@@ -3731,10 +3761,12 @@ function activateAuthorizedAgent(presentationKey, { pointerOriginated = false } 
     if (!setLocalInspectedPresentationKey(presentationKey)) {
       return false;
     }
+    activatedAgentPublicId = String(activation.agent.public_agent_id);
     render();
     openAgentDetails();
     return true;
   }
+  activatedAgentPublicId = String(activation.agent.public_agent_id);
   openAgentDetails();
   if (activation.effect === "replay_pov_switch") {
     void dispatchReplayCommand({
@@ -3825,6 +3857,7 @@ function render() {
       (!isReplayMode() && recordingScientificControlsFenced()),
     localInspectedPresentationKey:
       installedLocalInspectedPresentationKey(presentationFrame),
+    activatedAgentPublicId,
   });
   tooltipController.refresh();
   restorePresentationPreferenceAfterRender();
@@ -4155,8 +4188,15 @@ function dispatchPanelCommand(command, { pointerOriginated = false } = {}) {
     Number.isInteger(command.global_slot) &&
     Number(command.global_slot) >= 0 &&
     Number(command.global_slot) < 10 &&
+    typeof command.public_agent_id === "string" &&
+    authorizedPresentationIdentityRows(state.presentation).some(
+      (identity) =>
+        identity.public_agent_id === command.public_agent_id &&
+        identity.command_global_slot === command.global_slot,
+    ) &&
     isReplayMode()
   ) {
+    activatedAgentPublicId = command.public_agent_id;
     openAgentDetails();
     return dispatchReplayCommand({
       command_type: "set_pov_actor",
@@ -4168,9 +4208,16 @@ function dispatchPanelCommand(command, { pointerOriginated = false } = {}) {
     Number.isInteger(command.global_slot) &&
     Number(command.global_slot) >= 0 &&
     Number(command.global_slot) < 10 &&
+    typeof command.public_agent_id === "string" &&
+    authorizedPresentationIdentityRows(state.presentation).some(
+      (identity) =>
+        identity.public_agent_id === command.public_agent_id &&
+        identity.command_global_slot === command.global_slot,
+    ) &&
     !isReplayMode() &&
     authorizedPresentationAudience(state.presentation) === "agent_pov"
   ) {
+    activatedAgentPublicId = command.public_agent_id;
     openAgentDetails();
     const controlCommand = {
       command_type: "roster_selection",
@@ -4628,15 +4675,6 @@ bindBattlefieldControls({
   battlefield: elements.battlefield,
   toWorldPoint: (point) => battlefieldRenderer.toWorldPoint(point),
   onCommand: (command) => dispatchCommand(command),
-  onPointerCommand: (target, command) => {
-    if (
-      command.button === "primary" &&
-      target instanceof Element &&
-      target.closest(".agent[data-presentation-key]") !== null
-    ) {
-      openAgentDetails();
-    }
-  },
   onHelp: () => elements.helpDialog.showModal(),
   isInteractive: liveBattlefieldCommandsInteractive,
   onFencedCommand: retainFencedCommand,
@@ -4849,11 +4887,11 @@ const handleVisualFilterChange = (event) => {
 elements.visualFilterOptions.addEventListener("change", handleVisualFilterChange);
 
 elements.enableAllVisualFiltersButton.addEventListener("click", () => {
-  applyVisualFilterAction({ type: "enable_all" });
+  applyAllVisualControls(true);
 });
 
 elements.disableAllVisualFiltersButton.addEventListener("click", () => {
-  applyVisualFilterAction({ type: "disable_all" });
+  applyAllVisualControls(false);
 });
 
 elements.replayExportPngButton.addEventListener("click", () => {

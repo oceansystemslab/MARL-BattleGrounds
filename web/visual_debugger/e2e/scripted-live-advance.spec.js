@@ -204,12 +204,17 @@ test("scripted live Submit advances once, installs T0, and seals at completion",
   const pressedRowsBeforeFactInspection = await rosterActions.evaluateAll((buttons) =>
     buttons.map((button) => button.getAttribute("aria-pressed")),
   );
+  const classDetailsBeforeFactInspection = await page
+    .locator("#selection-card")
+    .textContent();
   await localFactChip.hover();
   await expect(page.locator("#visual-tooltip")).toBeVisible();
   await localFactChip.click();
   const factTitle = await page.locator("#visual-tooltip-title").textContent();
   expect(factTitle).not.toBeNull();
-  await expect(page.locator("#selection-card")).toContainText(String(factTitle));
+  expect(await page.locator("#selection-card").textContent()).toBe(
+    classDetailsBeforeFactInspection,
+  );
   expect(
     await page
       .locator('#battlefield .agent[data-selected="true"]')

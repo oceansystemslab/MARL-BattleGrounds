@@ -25,7 +25,7 @@ import {
   layoutRequiredDocks,
   layoutStatusDocks,
 } from "./layout.js";
-import { createRouteGeometry } from "./routes.js";
+import { createRouteGeometry, routeMarkerPose } from "./routes.js";
 import { registerTooltipOwner } from "./tooltip.js";
 import {
   DEFAULT_VISUAL_FILTER_STATE,
@@ -78,6 +78,14 @@ const DURABLE_VISUAL_PAINT_PARTS = Object.freeze({
     surface: "durable",
     kind: "cooldown_badge",
   }),
+  selectionReticle: Object.freeze({
+    surface: "durable",
+    kind: "selection_reticle",
+  }),
+  selectedPairLegality: Object.freeze({
+    surface: "durable",
+    kind: "selected_pair_legality",
+  }),
 });
 
 export const BATTLEFIELD_LAYER_ORDER = Object.freeze([
@@ -109,8 +117,8 @@ export const BATTLEFIELD_LAYER_ORDER = Object.freeze([
  *   classLetter: SVGElement,
  *   deadMark: SVGElement,
  *   shieldRoot: SVGElement | null,
- *   shieldShell: SVGElement | null,
  *   shieldChip: SVGElement | null,
+ *   shieldIcon: SVGSVGElement | null,
  *   shieldText: SVGElement | null,
  *   selectionRoot: SVGElement,
  *   controlledHalo: SVGElement,
@@ -165,6 +173,8 @@ export const BATTLEFIELD_LAYER_ORDER = Object.freeze([
  *   showPovDurationStatusBadges: boolean,
  *   showSpawnShield: boolean,
  *   showCooldownBadges: boolean,
+ *   showSelectionReticle: boolean,
+ *   showSelectedPairLegality: boolean,
  * }} DurableVisualPolicy
  */
 
@@ -251,6 +261,14 @@ function durableVisualPolicy(state) {
     showCooldownBadges: isVisualPaintPartEnabled(
       state,
       DURABLE_VISUAL_PAINT_PARTS.cooldownBadges,
+    ),
+    showSelectionReticle: isVisualPaintPartEnabled(
+      state,
+      DURABLE_VISUAL_PAINT_PARTS.selectionReticle,
+    ),
+    showSelectedPairLegality: isVisualPaintPartEnabled(
+      state,
+      DURABLE_VISUAL_PAINT_PARTS.selectedPairLegality,
     ),
   });
 }
@@ -715,7 +733,12 @@ export class BattlefieldRenderer {
     );
     this.empty.hidden = true;
 
-    this.#renderMap(transform.mapBounds);
+    this.#renderMap(
+      transform,
+      width,
+      height,
+      isRecord(frame) && frame.product_kind === "combat_debugger",
+    );
     const classByIdentity = new Map(
       asArray(scene.agents)
         .filter(
@@ -787,7 +810,7 @@ export class BattlefieldRenderer {
       visualPolicy.showPovDurationStatusBadges,
     );
     this.#renderStatusDocks(scene, projectedAgents, transform, {
-      showLegality: true,
+      showLegality: visualPolicy.showSelectedPairLegality,
       showModifiers: visualPolicy.showAuraModifierBadges,
       showStatuses: visualPolicy.showDurationStatusBadges,
       showCooldowns: visualPolicy.showCooldownBadges,
@@ -939,9 +962,42 @@ export class BattlefieldRenderer {
   }
 
   /**
-   * @param {Rectangle} bounds
+   * @param {ViewportTransform} transform
+   * @param {number} width
+   * @param {number} height
+   * @param {boolean} showUnitGrid
    */
-  #renderMap(bounds) {
+  #renderMap(transform, width, height, showUnitGrid) {
+    const bounds = transform.mapBounds;
+    const gridLines = [];
+    if (showUnitGrid && Number.isInteger(width) && Number.isInteger(height)) {
+      for (let x = 1; x < width; x += 1) {
+        const start = screenPoint([x, 0], transform);
+        const end = screenPoint([x, height], transform);
+        gridLines.push(
+          svgElement("line", {
+            class: "map-grid-line map-grid-line--vertical",
+            x1: start.x,
+            y1: start.y,
+            x2: end.x,
+            y2: end.y,
+          }),
+        );
+      }
+      for (let y = 1; y < height; y += 1) {
+        const start = screenPoint([0, y], transform);
+        const end = screenPoint([width, y], transform);
+        gridLines.push(
+          svgElement("line", {
+            class: "map-grid-line map-grid-line--horizontal",
+            x1: start.x,
+            y1: start.y,
+            x2: end.x,
+            y2: end.y,
+          }),
+        );
+      }
+    }
     this.layers.map.replaceChildren(
       svgElement("rect", {
         class: "map-boundary",
@@ -951,6 +1007,7 @@ export class BattlefieldRenderer {
         height: bounds.height,
         rx: 8,
       }),
+      ...gridLines,
     );
   }
 
@@ -988,6 +1045,13 @@ export class BattlefieldRenderer {
       role: "img",
       tabindex: "0",
     });
+    const marker = routeMarkerPose(geometry, 1);
+    const arrow = svgElement("path", {
+      class: "pending-route-arrow",
+      d: "M -6 -3 L 0 0 L -6 3 L -4 0 Z",
+      transform: `translate(${marker.x} ${marker.y}) rotate(${marker.degrees})`,
+      "aria-hidden": "true",
+    });
     path.dataset.lane = String(route.lane ?? 0);
     path.dataset.legal = String(Boolean(route.legal));
     path.dataset.sourceAgentId = String(route.source_public_agent_id ?? "");
@@ -1005,10 +1069,29 @@ export class BattlefieldRenderer {
       path.dataset.targetPresentationKey = route.target_presentation_key;
     }
     path.dataset.routeKind = geometry.kind;
-    const routeDescriptor = explainPendingRoute(route);
+    arrow.dataset.lane = String(route.lane ?? 0);
+    arrow.dataset.legal = String(Boolean(route.legal));
+    arrow.dataset.sourceAgentId = String(route.source_public_agent_id ?? "");
+    arrow.dataset.targetAgentId = String(route.target_public_agent_id ?? "");
+    const sourceAgent = asArray(scene.agents).find(
+      (agent) =>
+        isRecord(agent) &&
+        agent.presentation_key === route.source_presentation_key &&
+        agent.public_agent_id === route.source_public_agent_id,
+    );
+    const recipientAgent = asArray(scene.agents).find(
+      (agent) =>
+        isRecord(agent) &&
+        agent.presentation_key === route.target_presentation_key &&
+        agent.public_agent_id === route.target_public_agent_id,
+    );
+    const routeDescriptor = explainPendingRoute(route, {
+      sourceAgent,
+      recipientAgent,
+    });
     hitPath.setAttribute("aria-label", routeDescriptor.title);
     registerTooltipOwner(hitPath, routeDescriptor);
-    this.layers.pendingRoute.replaceChildren(path, hitPath);
+    this.layers.pendingRoute.replaceChildren(path, arrow, hitPath);
   }
 
   /**
@@ -1350,6 +1433,7 @@ export class BattlefieldRenderer {
         registerTooltipOwner(
           cell,
           explainPovStatus(status, {
+            presentation_key: body.presentation_key,
             public_agent_id: body.public_agent_id,
             class_id: body.class_id,
             team_id: body.team_id,
@@ -2049,7 +2133,7 @@ export class BattlefieldRenderer {
     if (explanation === null) {
       return svgElement("g", { "aria-hidden": "true" });
     }
-    const valueLabel = isCooldown ? `U${ticks ?? "?"}` : `S${placement.hiddenCount}`;
+    const valueLabel = isCooldown ? `U${ticks ?? "?"}` : `+${placement.hiddenCount}`;
     const group = svgElement("g", {
       class: "required-dock-fallback-dock",
       "data-zone": "required-dock-fallback-dock",
@@ -2104,7 +2188,7 @@ export class BattlefieldRenderer {
     const valueLine = svgElement("tspan", {
       class: "required-dock-fallback__value",
       x: placement.bounds.left + placement.bounds.width / 2,
-      dy: "0.9em",
+      dy: isCooldown ? "0.9em" : "0.35em",
     });
     valueLine.textContent = valueLabel;
     cell.append(
@@ -2118,7 +2202,11 @@ export class BattlefieldRenderer {
       }),
       labelText,
     );
-    labelText.append(ownerLine, valueLine);
+    if (isCooldown) {
+      labelText.append(ownerLine, valueLine);
+    } else {
+      labelText.append(valueLine);
+    }
     group.append(cell);
     return group;
   }
@@ -2428,23 +2516,7 @@ export class BattlefieldRenderer {
         x: x + dimensions.cellWidth / 2,
         y: y + dimensions.cellHeight / 2,
       });
-      if (kind === "status") {
-        const ownerLine = svgElement("tspan", {
-          class: "status-overflow__owner",
-          x: x + dimensions.cellWidth / 2,
-          dy: "-0.34em",
-        });
-        ownerLine.textContent = agentIdentity(ownerAgent);
-        const countLine = svgElement("tspan", {
-          class: "status-overflow__count",
-          x: x + dimensions.cellWidth / 2,
-          dy: "0.9em",
-        });
-        countLine.textContent = placement.overflowLabel;
-        overflowLabel.append(ownerLine, countLine);
-      } else {
-        overflowLabel.textContent = placement.overflowLabel;
-      }
+      overflowLabel.textContent = placement.overflowLabel;
       overflow.append(
         svgElement("rect", {
           class: `${kind}-cell__box`,
@@ -2465,8 +2537,8 @@ export class BattlefieldRenderer {
    * @param {JsonRecord} agent
    * @returns {{
    *   root: SVGElement,
-   *   shell: SVGElement,
    *   chip: SVGElement,
+   *   icon: SVGSVGElement,
    *   text: SVGElement,
    * }}
    */
@@ -2476,14 +2548,6 @@ export class BattlefieldRenderer {
       role: "img",
       "data-zone": "spawn-shield",
       ...displayIdentityAttributes(agent),
-    });
-    const shell = svgElement("circle", {
-      class: "agent-spawn-shield__shell",
-      fill: "none",
-      stroke: "#fff",
-      "stroke-width": "2.6",
-      "stroke-dasharray": "5 3",
-      "vector-effect": "non-scaling-stroke",
     });
     const chip = svgElement("rect", {
       class: "agent-spawn-shield__chip",
@@ -2495,6 +2559,9 @@ export class BattlefieldRenderer {
       "stroke-width": "1.5",
       "vector-effect": "non-scaling-stroke",
     });
+    const icon = createSvgIcon(this.battlefield.ownerDocument, "status-spawn-shield", {
+      className: "agent-spawn-shield__icon",
+    });
     const text = svgElement("text", {
       class: "agent-spawn-shield__ticks",
       fill: "#fff",
@@ -2504,8 +2571,8 @@ export class BattlefieldRenderer {
       "dominant-baseline": "central",
       "pointer-events": "none",
     });
-    root.append(shell, chip, text);
-    return { root, shell, chip, text };
+    root.append(chip, icon, text);
+    return { root, chip, icon, text };
   }
 
   /**
@@ -2588,8 +2655,8 @@ export class BattlefieldRenderer {
       classLetter,
       deadMark,
       shieldRoot: shieldNodes?.root ?? null,
-      shieldShell: shieldNodes?.shell ?? null,
       shieldChip: shieldNodes?.chip ?? null,
+      shieldIcon: shieldNodes?.icon ?? null,
       shieldText: shieldNodes?.text ?? null,
       selectionRoot,
       controlledHalo,
@@ -2622,8 +2689,8 @@ export class BattlefieldRenderer {
     if (visualPolicy.showSpawnShield && nodes.shieldRoot === null) {
       const shieldNodes = this.#createSpawnShieldNodes(agent);
       nodes.shieldRoot = shieldNodes.root;
-      nodes.shieldShell = shieldNodes.shell;
       nodes.shieldChip = shieldNodes.chip;
+      nodes.shieldIcon = shieldNodes.icon;
       nodes.shieldText = shieldNodes.text;
     }
     const healthRadius = Math.max(radius - 4, radius * 0.7);
@@ -2701,8 +2768,8 @@ export class BattlefieldRenderer {
     if (
       spawnShieldView !== null &&
       nodes.shieldRoot !== null &&
-      nodes.shieldShell !== null &&
       nodes.shieldChip !== null &&
+      nodes.shieldIcon !== null &&
       nodes.shieldText !== null
     ) {
       setAttributes(nodes.shieldRoot, {
@@ -2710,19 +2777,20 @@ export class BattlefieldRenderer {
         tabindex: spawnShieldView.active ? "0" : "-1",
         "aria-label": spawnShieldView.shieldAriaLabel,
       });
-      setAttributes(nodes.shieldShell, {
-        cx: center.x,
-        cy: center.y,
-        r: radius + 5,
-      });
       const shieldChipX = center.x + radius * 0.6;
       const shieldChipY = center.y - radius - 13;
       setAttributes(nodes.shieldChip, {
         x: shieldChipX,
         y: shieldChipY,
       });
+      setAttributes(nodes.shieldIcon, {
+        x: shieldChipX + 2.5,
+        y: shieldChipY + 2.5,
+        width: 11,
+        height: 11,
+      });
       setAttributes(nodes.shieldText, {
-        x: shieldChipX + 13.5,
+        x: shieldChipX + 20,
         y: shieldChipY + 8,
       });
       nodes.shieldText.textContent = spawnShieldView.badgeText;
@@ -2791,7 +2859,7 @@ export class BattlefieldRenderer {
     });
     setAttributes(nodes.selectedReticle, {
       d: targetReticlePath(center.x, center.y, radius + 12),
-      hidden: selected ? null : "",
+      hidden: selected && visualPolicy.showSelectionReticle ? null : "",
     });
   }
 }

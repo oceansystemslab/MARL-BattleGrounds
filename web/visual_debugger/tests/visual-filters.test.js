@@ -21,7 +21,7 @@ const EXPECTED_FILTERS = Object.freeze([
   ["aura_modifier_badges", "Aura Modifier Badges"],
   ["duration_status_badges", "Duration Status Badges"],
   ["spawn_shield", "Spawn Shield"],
-  ["rejected_action_feedback", "Rejected Action Feedback"],
+  ["target_selection_visuals", "Target Selection Visuals"],
   ["basic_ability_effects", "Basic Ability Effects"],
   ["ultimate_ability_effects", "Ultimate Ability Effects"],
   ["regeneration_effects", "Regeneration Effects"],
@@ -173,34 +173,23 @@ test("every registered paint part has one exact owner and every filter owns a pa
 });
 
 test("multipart effects retain coherent filter ownership", () => {
-  for (const lifecycle of ["refreshed", "reapplied"]) {
-    assert.equal(
-      classifyVisualPaintPart({
-        surface: "transient",
-        kind: "status_lifecycle",
-        lifecycle,
-        part: "effect",
-      }),
-      "status_application",
-    );
-  }
   assert.equal(
     classifyVisualPaintPart({
       surface: "transient",
       kind: "status_lifecycle",
-      lifecycle: "trap_broken_and_reapplied",
-      part: "break",
+      lifecycle: "applied",
+      part: "effect",
     }),
-    "freezing_trap_break",
+    "status_application",
   );
   assert.equal(
     classifyVisualPaintPart({
       surface: "transient",
       kind: "status_lifecycle",
-      lifecycle: "trap_broken_and_reapplied",
-      part: "reapplication",
+      lifecycle: "trap_broken",
+      part: "effect",
     }),
-    "status_application",
+    "freezing_trap_break",
   );
   assert.equal(
     classifyVisualPaintPart({
@@ -258,6 +247,13 @@ test("multipart effects retain coherent filter ownership", () => {
     }),
     "cooldown_effects",
   );
+  for (const kind of ["selection_reticle", "selected_pair_legality"]) {
+    assert.equal(
+      classifyVisualPaintPart({ surface: "durable", kind }),
+      "target_selection_visuals",
+    );
+  }
+  assert.equal(VISUAL_FILTER_IDS.includes("rejected_action_feedback"), false);
 });
 
 test("unknown and malformed future paint parts fail closed", () => {

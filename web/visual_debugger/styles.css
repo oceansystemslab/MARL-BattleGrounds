@@ -854,6 +854,13 @@ select {
   vector-effect: non-scaling-stroke;
 }
 
+.map-grid-line {
+  stroke: rgb(148 163 184 / 16%);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+
 .obstacle {
   fill: #334155;
   stroke: #94a3b8;
@@ -943,6 +950,22 @@ select {
   stroke: var(--danger);
 }
 
+.pending-route-arrow {
+  fill: var(--basic);
+  stroke: var(--battlefield);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+
+.pending-route-arrow[data-lane="1"] {
+  fill: var(--ultimate);
+}
+
+.pending-route-arrow[data-legal="false"] {
+  fill: var(--danger);
+}
+
 .combat-choreography,
 .combat-choreography-connectors,
 .combat-choreography-routes,
@@ -964,8 +987,7 @@ select {
   color: var(--ultimate);
 }
 
-.combat-connector-effect[data-outcome="damage"],
-.combat-connector-effect[data-event-type="action_rejected"] {
+.combat-connector-effect[data-outcome="damage"] {
   color: var(--danger);
 }
 
@@ -1079,11 +1101,6 @@ select {
   color: var(--class-rogue);
 }
 
-.combat-effect[data-event-type="action_rejected"],
-.combat-route-effect[data-event-type="action_rejected"] {
-  color: var(--danger);
-}
-
 .combat-effect[data-token-id="stun_warrior_charge"],
 .combat-effect[data-token-id="slow_warrior_charge"] {
   color: var(--class-warrior);
@@ -1104,8 +1121,7 @@ select {
   color: var(--class-priest);
 }
 
-.combat-route__path,
-.combat-rejection__route {
+.combat-route__path {
   fill: none;
   stroke: currentColor;
   stroke-linecap: round;
@@ -1136,8 +1152,7 @@ select {
 .combat-net__hit,
 .combat-regeneration__hit,
 .combat-lifecycle__hit,
-.combat-local__hit,
-.combat-rejection__hit {
+.combat-local__hit {
   fill: transparent;
   stroke: none;
   pointer-events: fill;
@@ -1236,9 +1251,7 @@ select {
 .combat-local__ring,
 .combat-lifecycle__ring,
 .combat-holy__pulse,
-.combat-burst__wave,
-.combat-lifecycle__reapply-ring,
-.combat-rejection__ring {
+.combat-burst__wave {
   fill: none;
   stroke: currentColor;
   stroke-width: 3;
@@ -1279,8 +1292,7 @@ select {
 .combat-local__icon,
 .combat-impact__icon,
 .combat-lifecycle__status-icon,
-.combat-lifecycle__change-icon,
-.combat-lifecycle__reapply-icon {
+.combat-lifecycle__change-icon {
   overflow: visible;
   color: currentColor;
 }
@@ -1425,12 +1437,6 @@ select {
   stroke-width: 2.2;
 }
 
-.combat-lifecycle__reapply-ring {
-  fill: rgb(8 13 24 / 72%);
-  stroke-width: 3;
-  stroke-dasharray: 2 3;
-}
-
 .combat-effect[data-lifecycle="trap_broken"] .combat-lifecycle__ring,
 .combat-effect[data-lifecycle="trap_broken_and_reapplied"] .combat-lifecycle__ring {
   stroke-width: 4;
@@ -1444,17 +1450,11 @@ select {
   vector-effect: non-scaling-stroke;
 }
 
-.combat-lifecycle__death-sweep-arc,
 .combat-lifecycle__death-sweep-cut {
   fill: none;
   stroke: currentColor;
   stroke-linecap: round;
   vector-effect: non-scaling-stroke;
-}
-
-.combat-lifecycle__death-sweep-arc {
-  stroke-width: 2;
-  stroke-dasharray: 3 3;
 }
 
 .combat-lifecycle__death-sweep-cut {
@@ -1469,22 +1469,16 @@ select {
   color: #fff;
 }
 
+.combat-effect[data-token-id="spawn_shield"] {
+  color: #fff;
+}
+
 .combat-effect[data-lifecycle="cleared_by_death"] {
   color: var(--danger);
 }
 
 .combat-effect[data-lifecycle="cleared_unclassified"] {
   color: var(--unavailable);
-}
-
-.combat-rejection__route {
-  stroke-width: 2;
-  stroke-dasharray: 3 5;
-}
-
-.combat-rejection__ring {
-  stroke-width: 4;
-  stroke-dasharray: 2 3;
 }
 
 .combat-semantic-pulse {
@@ -1528,10 +1522,6 @@ select {
 
 .combat-semantic-pulse--cooldown-ready {
   color: var(--success);
-}
-
-.combat-semantic-pulse--spawn-shield-expired {
-  color: #7dd3fc;
 }
 
 .combat-lifecycle-ring--death {
@@ -2057,15 +2047,6 @@ select {
 .modifier-overflow__label {
   font-size: 10px;
   text-anchor: middle;
-}
-
-.status-overflow__owner {
-  font-size: 7px;
-  letter-spacing: -0.02em;
-}
-
-.status-overflow__count {
-  font-size: 8px;
 }
 
 .command-deck {
@@ -2878,6 +2859,45 @@ select {
 .visual-filters__option input:focus-visible {
   outline: 3px solid rgb(34 211 238 / 62%);
   outline-offset: 2px;
+}
+
+.visual-filters__ranges {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  margin-top: 0.4rem;
+  padding: 0.48rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  color: var(--text);
+  background: rgb(8 13 24 / 42%);
+  font-size: 0.75rem;
+}
+
+.visual-filters__ranges > div {
+  display: grid;
+  gap: 0.12rem;
+  min-width: 0;
+}
+
+.visual-filters__ranges span {
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+
+.visual-filters__ranges button {
+  flex: none;
+  min-height: 1.9rem;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.72rem;
+}
+
+.visual-filters__ranges button[aria-pressed="true"] {
+  border-color: rgb(34 211 238 / 58%);
+  color: #a5f3fc;
+  background: rgb(34 211 238 / 12%);
 }
 
 .visual-filters__actions {

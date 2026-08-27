@@ -39,12 +39,12 @@ const TECHNICAL_FACT_HELP = Object.freeze({
     summary: "Identifies the authorized live episode represented by this frame.",
   }),
   artifact_digest_prefix: Object.freeze({
-    title: "Artifact digest prefix",
+    title: "Artifact Digest Prefix",
     summary:
       "These 12 hexadecimal characters locate the canonical Oracle replay without displaying its full hash.",
   }),
   incoming_transition: Object.freeze({
-    title: "Incoming transition",
+    title: "Incoming Transition",
     summary:
       "Identifies the authorized transition that produced this displayed frame. The initial frame has no incoming transition.",
   }),
@@ -63,11 +63,11 @@ const TECHNICAL_FACT_HELP = Object.freeze({
     summary: "The zero-based authorized frame index represented by this presentation.",
   }),
   simulator_step: Object.freeze({
-    title: "Simulator step",
+    title: "Simulator Step",
     summary: "The simulator decision step represented by this authorized frame.",
   }),
   ordinary_movement_distance_scale: Object.freeze({
-    title: "Ordinary movement distance scale",
+    title: "Ordinary Movement Distance Scale",
     summary:
       "The recorded multiplier applied to ordinary voluntary movement distance. Spawn Shield uses its separately authorized absolute movement speed.",
   }),
@@ -210,6 +210,18 @@ function humanize(value) {
 function publicAgentLabel(value) {
   const identity = text(value);
   return identity === null ? "Agent ID unavailable" : `Agent ID ${identity}`;
+}
+
+/** @param {unknown} value */
+function authorizedAgentIdentityTitle(value) {
+  return exactAuthorizedAgentIdentityV1(value)?.title ?? null;
+}
+
+/** @param {unknown} value */
+function sentence(value) {
+  const copy = text(value);
+  if (copy === null) return null;
+  return /[.!?]$/u.test(copy) ? copy : `${copy}.`;
 }
 
 /** @param {unknown} value */
@@ -441,19 +453,19 @@ export function explainAgent(rawAgent, selection = {}) {
         ? "Unavailable"
         : cooldown === 0
           ? "Ready"
-          : `On cooldown (${tickCount(cooldown)})`,
+          : `On Cooldown (${tickCount(cooldown)})`,
     ),
     row(
       "Combat Status",
       combatCountdown === null
         ? "Unavailable"
         : combatCountdown > 0
-          ? "In combat"
-          : "Out of combat",
+          ? "In Combat"
+          : "Out of Combat",
     ),
   ];
   if (combatCountdown !== null && combatCountdown > 0) {
-    currentRows.push(row("Steps until out of combat", tickCount(combatCountdown)));
+    currentRows.push(row("Steps Until Out of Combat", tickCount(combatCountdown)));
   }
   return descriptor(
     "agent",
@@ -509,8 +521,6 @@ const SPAWN_SHIELD_V2_KEYS = Object.freeze([
   "ordinary_application_mechanism",
 ]);
 const SPAWN_SHIELD_UNAVAILABLE_KEYS = Object.freeze(["availability_kind"]);
-const SPAWN_SHIELD_V2_SUMMARY =
-  "While the spawn shield is active, this agent is protected, concealed from opponents, untargetable, excluded from aura effects, and limited to movement. It phases through agents until body collision resumes at the endpoint of its expiring transition.";
 
 /**
  * @param {unknown} rawMechanics
@@ -596,9 +606,8 @@ export function createSpawnShieldView(rawAgent, rawMechanics) {
       remaining === null ? "Unavailable" : tickCount(remaining),
     ),
     row("Owner", owner),
-    row("Source", "Not recorded"),
   ];
-  let summary = null;
+  const summary = spawnShieldStatusSummary(rawMechanics);
   let rows = currentRows;
   if (mechanics.kind === "v1" && mechanics.values !== null) {
     rows = [
@@ -607,7 +616,6 @@ export function createSpawnShieldView(rawAgent, rawMechanics) {
       ...currentRows,
     ];
   } else if (mechanics.kind === "v2" && mechanics.values !== null) {
-    summary = SPAWN_SHIELD_V2_SUMMARY;
     rows = [
       row("Protection Effect", "Invulnerable"),
       row("Movement Speed", formatDisplayNumber(mechanics.values.movement_speed)),
@@ -615,16 +623,18 @@ export function createSpawnShieldView(rawAgent, rawMechanics) {
       row("Targetability Effect", "Untargetable"),
       row("Action Effect", "Movement only"),
       row("Aura Effect", "Excluded as emitter and beneficiary"),
-      row("Agent Collision Effect", "Phased until expiring endpoint rejoin"),
+      row(
+        "Agent Collision Effect",
+        "The agent can move through other agents while shielded; collision resumes at the end of the shield's final transition.",
+      ),
       row("Effect Duration", tickCount(mechanics.values.configured_duration_steps)),
       ...currentRows,
-      row("Ordinary Application", "End-of-transition respawn lifecycle"),
     ];
   }
   const explanation = descriptor(
     "status",
     `spawn-shield:${identity?.presentationKey ?? "unavailable"}`,
-    "Spawn Shield",
+    statusPresentation("spawn_shield").title,
     summary,
     rows,
     [],
@@ -632,7 +642,7 @@ export function createSpawnShieldView(rawAgent, rawMechanics) {
   );
   return Object.freeze({
     active,
-    badgeText: `S${remainingTicks}`,
+    badgeText: String(remainingTicks),
     descriptor: explanation,
     remainingTicks,
     rootAriaLabel: active
@@ -640,6 +650,22 @@ export function createSpawnShieldView(rawAgent, rawMechanics) {
       : null,
     shieldAriaLabel: explanation.title,
   });
+}
+
+/**
+ * Return Spawn Shield's categorical status copy only when the installed
+ * mechanics variant authorizes those semantics. Historical V1 presentations
+ * intentionally carry numeric/current facts only, so their durable badge and
+ * lifecycle effect both fail closed to a row-only explanation.
+ *
+ * @param {unknown} rawMechanics
+ * @returns {string | null}
+ */
+export function spawnShieldStatusSummary(rawMechanics) {
+  const mechanics = exactSpawnShieldMechanics(rawMechanics);
+  return mechanics.kind === "v2" && mechanics.values !== null
+    ? statusPresentation("spawn_shield").effect
+    : null;
 }
 
 /**
@@ -924,6 +950,54 @@ function classDocumentationValueMap(mechanics) {
 }
 
 /**
+ * Resolve the authored guide from one authorized V2 class-mechanics record.
+ * Both the persistent class card and transient Ultimate explanation use this
+ * exact path so their authored copy and core-derived values cannot drift.
+ *
+ * @param {JsonRecord} mechanics
+ */
+function resolvedAuthorizedClassDocumentationV1(mechanics) {
+  const classId = integer(mechanics.class_id);
+  const classToken = classTokenFromId(classId);
+  if (
+    mechanics.mechanics_version !== 2 ||
+    classToken.label === "Unknown" ||
+    text(mechanics.class_name) !== classToken.label
+  ) {
+    return null;
+  }
+  const requiredNames = requiredClassDocumentationValueNamesV1(
+    mechanics.documentation_profile,
+    classId,
+  );
+  if (requiredNames === null) return null;
+  const valueMap = classDocumentationValueMap(mechanics);
+  if (
+    valueMap === null ||
+    Object.keys(valueMap).length !== requiredNames.length ||
+    !requiredNames.every((name) => typeof valueMap[name] === "string")
+  ) {
+    return null;
+  }
+  return resolveClassDocumentationV1(
+    mechanics.documentation_profile,
+    classId,
+    Object.fromEntries(requiredNames.map((name) => [name, valueMap[name]])),
+  );
+}
+
+/**
+ * Return the exact Ultimate copy used by Comprehensive Agent Class Details.
+ *
+ * @param {unknown} rawClassMechanics
+ * @returns {Readonly<{name: string, description: string}> | null}
+ */
+export function authorizedUltimatePresentationV1(rawClassMechanics) {
+  if (!isRecord(rawClassMechanics)) return null;
+  return resolvedAuthorizedClassDocumentationV1(rawClassMechanics)?.ultimate ?? null;
+}
+
+/**
  * @param {JsonRecord} mechanics
  * @returns {Array<ReturnType<typeof row>> | null}
  */
@@ -987,9 +1061,9 @@ function documentationMechanicsRows(mechanics) {
     rows.push(row("Basic Raw Healing", basicHealing, FULL_ONLY));
   }
   rows.push(
-    row("Out-of-combat Delay", outOfCombatDelay, FULL_ONLY),
+    row("Out-of-Combat Delay", outOfCombatDelay, FULL_ONLY),
     row(
-      "Out-of-combat Regeneration",
+      "Out-of-Combat Regeneration",
       `${formatDisplayNumber(/** @type {number} */ (regeneration) * 100)}% of maximum health per Tick`,
       FULL_ONLY,
     ),
@@ -1028,27 +1102,7 @@ export function explainClassDocumentation(rawOwner, rawClassMechanics) {
   const mechanicsRows = documentationMechanicsRows(mechanics);
   if (mechanicsRows === null) return null;
 
-  let authored = null;
-  if (mechanics.mechanics_version === 2) {
-    const requiredNames = requiredClassDocumentationValueNamesV1(
-      mechanics.documentation_profile,
-      classId,
-    );
-    if (requiredNames !== null) {
-      const valueMap = classDocumentationValueMap(mechanics);
-      if (
-        valueMap !== null &&
-        Object.keys(valueMap).length === requiredNames.length &&
-        requiredNames.every((name) => typeof valueMap[name] === "string")
-      ) {
-        authored = resolveClassDocumentationV1(
-          mechanics.documentation_profile,
-          classId,
-          Object.fromEntries(requiredNames.map((name) => [name, valueMap[name]])),
-        );
-      }
-    }
-  }
+  const authored = resolvedAuthorizedClassDocumentationV1(mechanics);
 
   const completeMechanicsRows = [...mechanicsRows];
   if (authored !== null) {
@@ -1124,6 +1178,7 @@ export function explainClassDocumentation(rawOwner, rawClassMechanics) {
 function explainDurableStatus(rawStatus, rawRecipient, rawSourceAgents, audience) {
   const status = isRecord(rawStatus) ? rawStatus : {};
   const recipient = isRecord(rawRecipient) ? rawRecipient : {};
+  const recipientIdentity = exactAuthorizedAgentIdentityV1(recipient);
   const token = resolveVisualToken(
     "status",
     status.token_id ?? status.status_id,
@@ -1151,16 +1206,21 @@ function explainDurableStatus(rawStatus, rawRecipient, rawSourceAgents, audience
     ),
   );
   if (profile.positiveDamageBreak && status.breaks_on_positive_damage === true) {
-    rows.push(row("Break Rule", "Ends when this agent receives positive raw damage"));
+    rows.push(row("Break Rule", "Ends when this agent receives positive raw damage."));
   }
-  const source = authorizedSourceAttributionV1({
-    attribution_kind: "direct",
-    audience,
-    direct_sources: status.direct_sources,
-    authorized_agents: rawSourceAgents,
-  });
-  if (source !== null) {
-    rows.push(row(source.label, source.value));
+  if (token.tokenId !== "in_combat") {
+    const source = authorizedSourceAttributionV1({
+      attribution_kind: "direct",
+      audience,
+      direct_sources: status.direct_sources,
+      authorized_agents: rawSourceAgents,
+    });
+    if (source !== null) {
+      rows.push(row(source.label, source.value));
+    }
+  }
+  if (recipientIdentity !== null) {
+    rows.push(row("Recipient", recipientIdentity.title));
   }
   return descriptor(
     "status",
@@ -1576,19 +1636,24 @@ export function explainLegality(rawLegality, lane, rawOwner) {
   );
 }
 
-/** @param {unknown} rawRoute */
-export function explainPendingRoute(rawRoute) {
+/**
+ * @param {unknown} rawRoute
+ * @param {{sourceAgent?: unknown, recipientAgent?: unknown}} [context]
+ */
+export function explainPendingRoute(rawRoute, context = {}) {
   const route = isRecord(rawRoute) ? rawRoute : {};
   const lane = integer(route.lane);
   const laneName = lane === 0 ? "Basic" : lane === 1 ? "Ultimate" : "Action";
+  const source = authorizedAgentIdentityTitle(context.sourceAgent);
+  const recipient = authorizedAgentIdentityTitle(context.recipientAgent);
   return descriptor(
     "pending-route",
     `pending:${text(route.source_presentation_key) ?? text(route.source_public_agent_id) ?? "unknown"}:${text(route.target_presentation_key) ?? text(route.target_public_agent_id) ?? "unknown"}:${lane ?? "unknown"}`,
     `${laneName} Action Route`,
     "Authorized action route; no physical path is implied.",
     [
-      row("Source", publicAgentLabel(route.source_public_agent_id)),
-      row("Target", publicAgentLabel(route.target_public_agent_id)),
+      row("Source", source ?? "Unavailable in this view"),
+      row("Recipient", recipient ?? "Unavailable in this view"),
     ],
     [],
     { tone: "information", anchor: "pointer" },
@@ -1605,25 +1670,55 @@ export function explainActivation(rawEvent) {
   );
   const source = event.sourcePublicAgentId ?? event.source_public_agent_id;
   const target = event.targetPublicAgentId ?? event.target_public_agent_id;
+  const component = text(event.component ?? event.ability_component);
+  const sourceClassId = integer(event.sourceClassId ?? event.source_class_id);
+  const classMechanics = isRecord(
+    event.authorizedClassMechanics ?? event.authorized_class_mechanics,
+  )
+    ? (event.authorizedClassMechanics ?? event.authorized_class_mechanics)
+    : null;
+  const ultimate =
+    component === "ultimate" &&
+    sourceClassId !== null &&
+    integer(classMechanics?.class_id) === sourceClassId
+      ? authorizedUltimatePresentationV1(classMechanics)
+      : null;
+  const sourceClass = classTokenFromId(sourceClassId);
   const redacted =
     event.targetDisclosure === "redacted" || event.target_disclosure === "redacted";
+  const sourceRedacted =
+    event.sourceDisclosure === "redacted" || event.source_disclosure === "redacted";
+  const sourceIdentity = authorizedAgentIdentityTitle(
+    event.sourceIdentity ?? event.source_identity,
+  );
+  const recipientIdentity = authorizedAgentIdentityTitle(
+    event.recipientIdentity ?? event.recipient_identity,
+  );
+  const rows = [
+    row(
+      "Source",
+      sourceIdentity ??
+        (sourceRedacted ? "Not disclosed in Agent POV" : "Unavailable in this view"),
+    ),
+    row(
+      "Recipient",
+      recipientIdentity !== null
+        ? recipientIdentity
+        : redacted
+          ? "Not disclosed in Agent POV"
+          : text(target) === null && sourceIdentity !== null
+            ? sourceIdentity
+            : "Unavailable in this view",
+    ),
+  ];
   return descriptor(
     "activation",
     `activation:${token.tokenId}:${text(event.sourcePresentationKey ?? event.source_presentation_key) ?? text(source) ?? "source-unavailable"}:${text(event.targetPresentationKey ?? event.target_presentation_key) ?? text(target) ?? (redacted ? "target-redacted" : "source-local")}`,
-    token.label,
-    token.accessibleName,
-    [
-      row("Source", publicAgentLabel(source)),
-      row(
-        "Target",
-        text(target) !== null
-          ? publicAgentLabel(target)
-          : redacted
-            ? "Target endpoint not disclosed in this view"
-            : "Source-local activation",
-      ),
-      row("Health Attribution", "No per-source health amount is available"),
-    ],
+    ultimate === null || sourceClass.label === "Unknown"
+      ? token.label
+      : `${ultimate.name} (${sourceClass.label} Ultimate Ability)`,
+    sentence(ultimate?.description ?? token.accessibleName),
+    rows,
     [],
     { tone: "information", anchor: "pointer" },
   );
@@ -1633,18 +1728,16 @@ export function explainActivation(rawEvent) {
 export function explainNetHealth(rawEvent) {
   const event = isRecord(rawEvent) ? rawEvent : {};
   const delta = finiteNumber(event.netDelta ?? event.net_delta);
+  const recipientIdentity = authorizedAgentIdentityTitle(
+    event.recipientIdentity ?? event.recipient_identity,
+  );
   return descriptor(
     "impact",
     `net:${text(event.recipientPresentationKey ?? event.recipient_presentation_key) ?? text(event.recipientPublicAgentId ?? event.recipient_public_agent_id) ?? "recipient-unavailable"}:${text(event.outcome) ?? "outcome-unavailable"}`,
     `Recipient NET ${humanize(event.outcome)}`,
     "Recipient-level before/after outcome; not source attribution.",
     [
-      row(
-        "Recipient",
-        publicAgentLabel(
-          event.recipientPublicAgentId ?? event.recipient_public_agent_id,
-        ),
-      ),
+      row("Recipient", recipientIdentity ?? "Unavailable in this view"),
       row("NET", delta === null ? "Unavailable" : formatNetDelta(delta)),
     ],
     [],

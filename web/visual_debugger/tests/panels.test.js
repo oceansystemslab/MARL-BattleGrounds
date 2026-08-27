@@ -4,6 +4,8 @@ import test from "node:test";
 
 import { normalizeAuthorizedPresentationFrameV1 } from "../src/authorized-presentation-normalizer.js";
 import {
+  authorizedUltimatePresentationV1,
+  explainActivation,
   explainClassDocumentation,
   explainTechnicalFact,
 } from "../src/explanations.js";
@@ -13,6 +15,7 @@ import {
   disclosurePanelInitiallyOpen,
   rosterStatusDurationLabel,
 } from "../src/panels.js";
+import { ultimateTokenFromClassId } from "../src/vocabulary.js";
 
 const authorizedFixture = JSON.parse(
   await readFile(
@@ -259,13 +262,13 @@ test("authorized replay inspector keeps researcher selection separate from trans
     );
     assert.equal(
       semanticSection(inspector.owner_descriptor, "Class Overview").summary,
-      "The Mage is a fragile backline damage dealer that creates explosive ranged-damage windows with Burst and relies on allied protection to operate.",
+      "The Mage is a ranged damage dealer with the lowest canonical maximum health and highest canonical basic raw damage. Burst temporarily amplifies the Mage's outgoing damage.",
     );
     assert.deepEqual(
       semanticSection(inspector.owner_descriptor, "Authored Tactical Guide").rows.map(
         (/** @type {Record<string, any>} */ row) => row.label,
       ),
-      ["Role", "Primary Strength", "Primary Weakness", "Counters", "Countered By"],
+      ["Role", "Primary Strength", "Primary Weakness"],
     );
     assert.deepEqual(
       semanticSection(inspector.owner_descriptor, "Class Mechanics").rows.map(
@@ -279,8 +282,8 @@ test("authorized replay inspector keeps researcher selection separate from trans
         "Basic Target",
         "Basic Ability Radius",
         "Basic Raw Damage",
-        "Out-of-combat Delay",
-        "Out-of-combat Regeneration",
+        "Out-of-Combat Delay",
+        "Out-of-Combat Regeneration",
         "Ultimate Name",
         "Ultimate Description",
         "Ultimate Target",
@@ -292,7 +295,7 @@ test("authorized replay inspector keeps researcher selection separate from trans
     );
     assert.doesNotMatch(
       JSON.stringify(inspector.owner_descriptor),
-      /Current Health|Effective Speed|Ultimate Status|Combat Status|Steps until out of combat|Selection|Target legality|Transition/iu,
+      /Current Health|Effective Speed|Ultimate Status|Combat Status|Steps Until Out of Combat|Selection|Target legality|Transition/iu,
     );
     documentationBytes.add(JSON.stringify(inspector.owner_descriptor));
     assert.equal(inspector.owner_class_accent, "mage");
@@ -342,7 +345,7 @@ test("all five certified class cards use the exact documentation section contrac
       4,
       [
         "Crippling Poison applies 36 raw damage to an enemy target before source and recipient damage modifiers, a stun for 1 Tick, a 50% movement reduction (×0.5) for 5 Ticks, and a 50% reduction (×0.5) to incoming healing and out-of-combat regeneration for 4 Ticks.",
-        "This Rogue's base movement speed of 1.3 is the highest in the certified profile. After 3 Ticks without combat participation, it becomes eligible for the displayed Out-of-combat Regeneration on each transition tick.",
+        "This Rogue's base movement speed of 1.3 is the highest in the certified profile. After 3 Ticks without combat participation, it becomes eligible for the displayed Out-of-Combat Regeneration on each transition tick.",
       ],
     ],
     [
@@ -373,7 +376,7 @@ test("all five certified class cards use the exact documentation section contrac
       descriptor.sections.map((section) => section.title),
       ["Class Overview", "Authored Tactical Guide", "Class Mechanics"],
     );
-    assert.equal(semanticSection(descriptor, "Authored Tactical Guide").rows.length, 5);
+    assert.equal(semanticSection(descriptor, "Authored Tactical Guide").rows.length, 3);
     const mechanicsRows = semanticSection(descriptor, "Class Mechanics").rows;
     const mechanicsLabels = mechanicsRows.map(
       (/** @type {Record<string, any>} */ row) => row.label,
@@ -385,8 +388,8 @@ test("all five certified class cards use the exact documentation section contrac
       "Observation Radius",
       "Basic Target",
       "Basic Ability Radius",
-      "Out-of-combat Delay",
-      "Out-of-combat Regeneration",
+      "Out-of-Combat Delay",
+      "Out-of-Combat Regeneration",
       "Ultimate Name",
       "Ultimate Description",
       "Ultimate Target",
@@ -405,6 +408,27 @@ test("all five certified class cards use the exact documentation section contrac
           row.label === "Ultimate Description",
       )?.value,
       descriptions[0],
+    );
+    const ultimate = authorizedUltimatePresentationV1(mechanics);
+    assert.ok(ultimate);
+    assert.equal(ultimate.description, descriptions[0]);
+    const activation = explainActivation({
+      component: "ultimate",
+      tokenId: ultimateTokenFromClassId(classId).tokenId,
+      sourceClassId: classId,
+      authorizedClassMechanics: mechanics,
+      sourcePublicAgentId: owner.public_agent_id,
+      targetPublicAgentId: "target-for-tooltip-proof",
+    });
+    assert.equal(activation.title, `${ultimate.name} (${className} Ultimate Ability)`);
+    assert.equal(activation.summary, descriptions[0]);
+    assert.deepEqual(
+      activation.rows.map(({ label }) => label),
+      ["Source", "Recipient"],
+    );
+    assert.equal(
+      activation.rows.some(({ label }) => label === "Health Attribution"),
+      false,
     );
     assert.equal(
       mechanicsRows.find(
@@ -600,6 +624,26 @@ test("authorized replay inspector leaves final unselected details absent", async
     "owner_descriptor",
     "owner_class_accent",
   ]);
+});
+
+test("authorized inspector retains the last activated public agent across cleared selection", async () => {
+  const presentation = await normalizedStateCase("replay_oracle_final_unselected");
+  const activated = presentation.current_endpoint.scene.agents[1];
+  assert.ok(activated);
+  const inspector = authorizedInspectorView(
+    presentation,
+    undefined,
+    activated.public_agent_id,
+  );
+  assert.ok(inspector);
+  assert.equal(inspector.owner.public_agent_id, activated.public_agent_id);
+  assert.equal(inspector.owner.class_id, activated.class_id);
+  assert.ok(inspector.owner_descriptor);
+  assert.equal(
+    authorizedInspectorView(presentation, undefined, "not-authorized")
+      ?.owner_descriptor,
+    null,
+  );
 });
 
 test("authorized roster exposes one native key-only action with isolated fact owners", async () => {
@@ -861,6 +905,7 @@ test("authorized roster exposes one native key-only action with isolated fact ow
               agent.presentation_key === hiddenLiveRow.element.dataset.presentationKey,
           ).team_local_slot,
         ),
+      public_agent_id: hiddenLiveAgent.public_agent_id,
     });
 
     const replayAgent = await normalizedPresentation("replay_no_shared_obs_agent_pov");
@@ -949,9 +994,11 @@ test("authorized roster exposes one native key-only action with isolated fact ow
     assert.deepEqual(Object.keys(latestCommand).sort(), [
       "command_type",
       "global_slot",
+      "public_agent_id",
     ]);
     assert.equal(latestCommand.command_type, "activate_replay_pov_agent");
     assert.equal(latestCommand.global_slot, 0);
+    assert.equal(latestCommand.public_agent_id, "agent-slot-0");
     panels.renderAuthorizedRoster(replayAgent, true);
     assert.equal(
       agentRows.every((row) => row.primaryButton.disabled === true),
@@ -1081,6 +1128,10 @@ test("authorized roster exposes one native key-only action with isolated fact ow
 
     const frameZero = await normalizedStateCase("replay_oracle_frame_zero");
     panels.render(frameZero);
+    assert.match(
+      dom.textTree(selectionCard),
+      /Activate an agent to inspect its comprehensive class details\./u,
+    );
     assert.equal(acceptedCard.children.length, 0);
     assert.equal(acceptedAnnouncement.textContent, "");
 

@@ -41,7 +41,7 @@ const CP9_VISUAL_FILTER_IDS = Object.freeze([
   "aura_modifier_badges",
   "duration_status_badges",
   "spawn_shield",
-  "rejected_action_feedback",
+  "target_selection_visuals",
   "basic_ability_effects",
   "ultimate_ability_effects",
   "regeneration_effects",
@@ -1407,7 +1407,7 @@ test("canonical complete and partial artifacts join their frame-zero and capture
     "replay-last-button",
   ]);
   await expect(
-    page.locator("#battlefield-utilities > #replay-ranges-button"),
+    page.locator("#visual-filters .visual-filters__ranges > #replay-ranges-button"),
   ).toHaveCount(1);
   await expect(
     page.locator("#battlefield-utilities > #replay-clear-reference-button"),
@@ -1687,7 +1687,7 @@ test("one replay transport trajectory keeps static seeks, playback, rates, and r
   await expectReplayChoreographySettled(page);
   const frameOne = await currentReplayFrame(page);
   await expect(page.locator("#replay-transport-status")).toHaveText(
-    `Frame 1 / 5 · Tick 1 / 5 · Incoming transition ${frameOne.incoming_transition_id} · 1.00× · SETTLED`,
+    `Frame 1 / 5 · Tick 1 / 5 · Incoming Transition ${frameOne.incoming_transition_id} · 1.00× · SETTLED`,
   );
 
   const postsBeforePreview = replayPosts.length;
@@ -1735,7 +1735,7 @@ test("one replay transport trajectory keeps static seeks, playback, rates, and r
   await page.locator("#replay-playback-rate").selectOption("2");
   expect(replayPosts).toHaveLength(postsBeforeRate);
   await expect(page.locator("#replay-transport-status")).toHaveText(
-    `Frame 4 / 5 · Tick 4 / 5 · Incoming transition ${frameFour.incoming_transition_id} · 2.00× · SETTLED`,
+    `Frame 4 / 5 · Tick 4 / 5 · Incoming Transition ${frameFour.incoming_transition_id} · 2.00× · SETTLED`,
   );
 
   await page.locator("#battlefield").focus();
@@ -1764,7 +1764,7 @@ test("one replay transport trajectory keeps static seeks, playback, rates, and r
   const postsBeforePausedReplay = replayPosts.length;
   await page.locator("#replay-play-pause-button").click();
   await expect(page.locator("#replay-transport-status")).toHaveText(
-    `Frame 1 / 5 · Tick 1 / 5 · Incoming transition ${frameOne.incoming_transition_id} · 2.00× · PLAYING`,
+    `Frame 1 / 5 · Tick 1 / 5 · Incoming Transition ${frameOne.incoming_transition_id} · 2.00× · PLAYING`,
   );
   await page.locator("#replay-play-pause-button").click();
   expect(replayPosts).toHaveLength(postsBeforePausedReplay);
@@ -2535,12 +2535,12 @@ test("Actor POV keeps battlefield fog while exposing artifact-wide facts", async
     },
     {
       id: "simulator_step",
-      label: "Simulator step",
+      label: "Simulator Step",
       value: String(povFrame.simulator_step_count),
     },
     {
       id: "incoming_transition",
-      label: "Incoming transition",
+      label: "Incoming Transition",
       value: povFrame.incoming_pov_transition_id,
     },
   ]);

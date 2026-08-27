@@ -6068,7 +6068,7 @@
               }
             ]
           },
-          "authorized_endpoint_digest_sha256": "d66ed098bcaeb810ef268b0ced3e03a09fefe6fed0fbb094728b7ba2bb0def92",
+          "authorized_endpoint_digest_sha256": "ca11ee7d7d5717e6e0df4e3aab572efbe3ca25e61d9f62c449cc5295015a8edf",
           "endpoint_kind": "no_shared_obs_authorized_current",
           "parts": {
             "next_decision_action_mask": {
@@ -6177,7 +6177,7 @@
                   "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033,
                   "position": [
                     3.0,
-                    2.0
+                    1.0
                   ],
                   "presentation_key": "pov_3b73c1f8efdac8f9d6b10fa4bd4e82ae42cf17e703ae5f611d1dba7377b68163",
                   "public_agent_id": "0",
@@ -6214,7 +6214,7 @@
                   "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033,
                   "position": [
                     3.0,
-                    4.0
+                    3.0
                   ],
                   "presentation_key": "pov_8b82751312c549e69f3cc1ce57dbd8e6c039b4809e5099943e9687e94aaa3e64",
                   "public_agent_id": "1",
@@ -6247,7 +6247,7 @@
                   "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033,
                   "position": [
                     3.0,
-                    6.0
+                    5.0
                   ],
                   "presentation_key": "pov_76d46eff6431b65510e5ad09b53f51ce554ef0e18984470f2e03c5659bb3ad58",
                   "public_agent_id": "2",
@@ -6275,7 +6275,7 @@
                   "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033,
                   "position": [
                     3.0,
-                    8.0
+                    7.0
                   ],
                   "presentation_key": "pov_d9e309f410d04b2cd78e26ad0ea9a2b34efb2f8e5f8a3384c7f26ecafa7d980d",
                   "public_agent_id": "3",
@@ -6295,7 +6295,7 @@
                   "beneficiary_relation": "same_team",
                   "center": [
                     3.0,
-                    2.0
+                    1.0
                   ],
                   "clamp_kind": "ceiling",
                   "clamp_value": 1.3224999999999998,
@@ -6313,7 +6313,7 @@
                   "beneficiary_relation": "same_team",
                   "center": [
                     3.0,
-                    4.0
+                    3.0
                   ],
                   "clamp_kind": "floor",
                   "clamp_value": 0.7224999999999999,
@@ -6536,11 +6536,11 @@
                 }
               ],
               "map": {
-                "height": 12.0,
+                "height": 10.0,
                 "obstacles": [
                   {
                     "center": [
-                      9.0,
+                      10.0,
                       3.0
                     ],
                     "height": null,
@@ -6552,7 +6552,7 @@
                   },
                   {
                     "center": [
-                      9.0,
+                      10.0,
                       7.800000190734863
                     ],
                     "height": 0.5,
@@ -6563,7 +6563,7 @@
                     "width": 3.0
                   }
                 ],
-                "width": 18.0
+                "width": 20.0
               },
               "respawn_waves": [
                 {
@@ -6601,7 +6601,7 @@
                   "currently_alive": true,
                   "position": [
                     1.5,
-                    3.75
+                    3.25
                   ],
                   "spawn_shield_remaining": 0,
                   "team_id": 1,
@@ -6614,7 +6614,7 @@
                   "currently_alive": true,
                   "position": [
                     1.5,
-                    6.0
+                    5.0
                   ],
                   "spawn_shield_remaining": 0,
                   "team_id": 1,
@@ -6627,7 +6627,7 @@
                   "currently_alive": true,
                   "position": [
                     1.5,
-                    8.25
+                    6.75
                   ],
                   "spawn_shield_remaining": 0,
                   "team_id": 1,
@@ -6640,7 +6640,7 @@
                   "currently_alive": true,
                   "position": [
                     1.5,
-                    10.5
+                    8.5
                   ],
                   "spawn_shield_remaining": 0,
                   "team_id": 1,
@@ -6652,7 +6652,7 @@
                   "configured_active": true,
                   "currently_alive": true,
                   "position": [
-                    16.5,
+                    18.5,
                     1.5
                   ],
                   "spawn_shield_remaining": 0,
@@ -6665,8 +6665,8 @@
                   "configured_active": true,
                   "currently_alive": true,
                   "position": [
-                    16.5,
-                    3.75
+                    18.5,
+                    3.25
                   ],
                   "spawn_shield_remaining": 0,
                   "team_id": 2,
@@ -6678,8 +6678,8 @@
                   "configured_active": true,
                   "currently_alive": true,
                   "position": [
-                    16.5,
-                    6.0
+                    18.5,
+                    5.0
                   ],
                   "spawn_shield_remaining": 0,
                   "team_id": 2,
@@ -6691,8 +6691,8 @@
                   "configured_active": true,
                   "currently_alive": true,
                   "position": [
-                    16.5,
-                    8.25
+                    18.5,
+                    6.75
                   ],
                   "spawn_shield_remaining": 0,
                   "team_id": 2,
@@ -6704,8 +6704,8 @@
                   "configured_active": true,
                   "currently_alive": true,
                   "position": [
-                    16.5,
-                    10.5
+                    18.5,
+                    8.5
                   ],
                   "spawn_shield_remaining": 0,
                   "team_id": 2,
@@ -6725,9 +6725,9 @@
                 "visibility_effect": "concealed_from_opponents"
               }
             },
-            "source_episode_id": "debugger-episode:5b6184f9ff4549a1c36782a41d15553fdb28f2bb6b2d91bc767b1c473e57380d",
+            "source_episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
             "source_frame_index": 0,
-            "source_recipient_frame_id": "debugger-episode:5b6184f9ff4549a1c36782a41d15553fdb28f2bb6b2d91bc767b1c473e57380d:actor-pov:0:frame:0",
+            "source_recipient_frame_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906:actor-pov:0:frame:0",
             "source_simulator_step_count": 0
           }
         },
@@ -6735,12 +6735,12 @@
         "latest_transition": null,
         "live_inspection": {
           "envelope_kind": "live_no_shared_obs_source_bound_inspection",
-          "episode_id": "debugger-episode:5b6184f9ff4549a1c36782a41d15553fdb28f2bb6b2d91bc767b1c473e57380d",
+          "episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
           "inspection": {
             "draft": {
               "actor_anchor": [
                 3.0,
-                2.0
+                1.0
               ],
               "actor_presentation_key": "pov_3b73c1f8efdac8f9d6b10fa4bd4e82ae42cf17e703ae5f611d1dba7377b68163",
               "actor_public_agent_id": "0",
@@ -6795,7 +6795,7 @@
                     "target_action": 1,
                     "target_anchor": [
                       3.0,
-                      2.0
+                      1.0
                     ],
                     "target_kind": "visible_authorized_agent",
                     "target_presentation_key": "pov_3b73c1f8efdac8f9d6b10fa4bd4e82ae42cf17e703ae5f611d1dba7377b68163",
@@ -6806,7 +6806,7 @@
                     "target_action": 2,
                     "target_anchor": [
                       3.0,
-                      4.0
+                      3.0
                     ],
                     "target_kind": "visible_authorized_agent",
                     "target_presentation_key": "pov_8b82751312c549e69f3cc1ce57dbd8e6c039b4809e5099943e9687e94aaa3e64",
@@ -6817,7 +6817,7 @@
                     "target_action": 3,
                     "target_anchor": [
                       3.0,
-                      6.0
+                      5.0
                     ],
                     "target_kind": "visible_authorized_agent",
                     "target_presentation_key": "pov_76d46eff6431b65510e5ad09b53f51ce554ef0e18984470f2e03c5659bb3ad58",
@@ -6828,7 +6828,7 @@
                     "target_action": 4,
                     "target_anchor": [
                       3.0,
-                      8.0
+                      7.0
                     ],
                     "target_kind": "visible_authorized_agent",
                     "target_presentation_key": "pov_d9e309f410d04b2cd78e26ad0ea9a2b34efb2f8e5f8a3384c7f26ecafa7d980d",
@@ -6951,7 +6951,7 @@
           },
           "source_authority_epoch": 0,
           "source_frame_index": 0,
-          "source_recipient_frame_id": "debugger-episode:5b6184f9ff4549a1c36782a41d15553fdb28f2bb6b2d91bc767b1c473e57380d:actor-pov:0:frame:0",
+          "source_recipient_frame_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906:actor-pov:0:frame:0",
           "source_recipient_public_agent_id": "0",
           "source_revision": 0,
           "source_run_generation": 0,
@@ -7206,7 +7206,7 @@
               "ultimate_target_mode": "ally"
             }
           ],
-          "episode_id": "debugger-episode:5b6184f9ff4549a1c36782a41d15553fdb28f2bb6b2d91bc767b1c473e57380d",
+          "episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
           "frame_index": 0,
           "identity_directory": {
             "directory_kind": "oracle_public_identity_directory",
@@ -7813,7 +7813,7 @@
           "source_run_generation": 0,
           "source_session_id": "cp2-7-live-pov-fixture",
           "technical_frame": {
-            "episode_id": "debugger-episode:5b6184f9ff4549a1c36782a41d15553fdb28f2bb6b2d91bc767b1c473e57380d",
+            "episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
             "evaluation_frame_index": 0,
             "incoming_transition_id": null,
             "simulator_step_count": 0,
@@ -7822,12 +7822,12 @@
         },
         "schema_version": 1,
         "source": {
-          "episode_id": "debugger-episode:5b6184f9ff4549a1c36782a41d15553fdb28f2bb6b2d91bc767b1c473e57380d",
+          "episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
           "source_authority_epoch": 0,
-          "source_authorized_endpoint_digest_sha256": "d66ed098bcaeb810ef268b0ced3e03a09fefe6fed0fbb094728b7ba2bb0def92",
+          "source_authorized_endpoint_digest_sha256": "ca11ee7d7d5717e6e0df4e3aab572efbe3ca25e61d9f62c449cc5295015a8edf",
           "source_frame_index": 0,
           "source_kind": "live_no_shared_obs_frame",
-          "source_recipient_frame_id": "debugger-episode:5b6184f9ff4549a1c36782a41d15553fdb28f2bb6b2d91bc767b1c473e57380d:actor-pov:0:frame:0",
+          "source_recipient_frame_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906:actor-pov:0:frame:0",
           "source_recipient_public_agent_id": "0",
           "source_revision": 0,
           "source_run_generation": 0,
@@ -7836,7 +7836,7 @@
           "source_submission_scope": "joint_turn"
         },
         "technical_frame": {
-          "episode_id": "debugger-episode:5b6184f9ff4549a1c36782a41d15553fdb28f2bb6b2d91bc767b1c473e57380d",
+          "episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
           "incoming_recipient_transition_id": null,
           "recipient_frame_index": 0,
           "simulator_step_count": 0,
@@ -7845,8 +7845,8 @@
         "visual_events": null
       },
       "transport": {
-        "episode_id": "debugger-episode:5b6184f9ff4549a1c36782a41d15553fdb28f2bb6b2d91bc767b1c473e57380d",
-        "frame_id": "debugger-episode:5b6184f9ff4549a1c36782a41d15553fdb28f2bb6b2d91bc767b1c473e57380d:frame:0",
+        "episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
+        "frame_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906:frame:0",
         "frame_index": 0,
         "frame_kind": "actor_pov_live_debugger",
         "hud": {
@@ -8129,14 +8129,14 @@
           },
           "scene": {
             "audience_badge": "AGENT POV \u00b7 0",
-            "episode_id": "debugger-episode:5b6184f9ff4549a1c36782a41d15553fdb28f2bb6b2d91bc767b1c473e57380d",
+            "episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
             "frame_index": 0,
             "map": {
-              "height": 12.0,
+              "height": 10.0,
               "obstacles": [
                 {
                   "center": [
-                    9.0,
+                    10.0,
                     3.0
                   ],
                   "height": null,
@@ -8148,7 +8148,7 @@
                 },
                 {
                   "center": [
-                    9.0,
+                    10.0,
                     7.800000190734863
                   ],
                   "height": 0.5,
@@ -8159,10 +8159,10 @@
                   "width": 3.0
                 }
               ],
-              "width": 18.0
+              "width": 20.0
             },
             "observation_materialization": "exact_no_shared_obs_actor_input",
-            "pov_frame_id": "debugger-episode:5b6184f9ff4549a1c36782a41d15553fdb28f2bb6b2d91bc767b1c473e57380d:actor-pov:0:frame:0",
+            "pov_frame_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906:actor-pov:0:frame:0",
             "respawn_waves": [
               {
                 "actor_relative_team_index": 0,
@@ -8189,7 +8189,7 @@
               "max_health": 80.0,
               "position": [
                 3.0,
-                2.0
+                1.0
               ],
               "public_agent_id": "0",
               "radius": 0.5,
@@ -8216,7 +8216,7 @@
               "ultimate_cooldown_remaining": 0
             },
             "simulator_step_count": 0,
-            "source_frame_id": "debugger-episode:5b6184f9ff4549a1c36782a41d15553fdb28f2bb6b2d91bc767b1c473e57380d:frame:0",
+            "source_frame_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906:frame:0",
             "spawn_pads": [
               {
                 "actor_relative_team_index": 0,
@@ -8237,7 +8237,7 @@
                 "currently_alive": true,
                 "position": [
                   1.5,
-                  3.75
+                  3.25
                 ],
                 "spawn_shield_remaining": 0,
                 "team_label": "Own Team",
@@ -8250,7 +8250,7 @@
                 "currently_alive": true,
                 "position": [
                   1.5,
-                  6.0
+                  5.0
                 ],
                 "spawn_shield_remaining": 0,
                 "team_label": "Own Team",
@@ -8263,7 +8263,7 @@
                 "currently_alive": true,
                 "position": [
                   1.5,
-                  8.25
+                  6.75
                 ],
                 "spawn_shield_remaining": 0,
                 "team_label": "Own Team",
@@ -8276,7 +8276,7 @@
                 "currently_alive": true,
                 "position": [
                   1.5,
-                  10.5
+                  8.5
                 ],
                 "spawn_shield_remaining": 0,
                 "team_label": "Own Team",
@@ -8288,7 +8288,7 @@
                 "configured_active": true,
                 "currently_alive": true,
                 "position": [
-                  16.5,
+                  18.5,
                   1.5
                 ],
                 "spawn_shield_remaining": 0,
@@ -8301,8 +8301,8 @@
                 "configured_active": true,
                 "currently_alive": true,
                 "position": [
-                  16.5,
-                  3.75
+                  18.5,
+                  3.25
                 ],
                 "spawn_shield_remaining": 0,
                 "team_label": "Opponent Team",
@@ -8314,8 +8314,8 @@
                 "configured_active": true,
                 "currently_alive": true,
                 "position": [
-                  16.5,
-                  6.0
+                  18.5,
+                  5.0
                 ],
                 "spawn_shield_remaining": 0,
                 "team_label": "Opponent Team",
@@ -8327,8 +8327,8 @@
                 "configured_active": true,
                 "currently_alive": true,
                 "position": [
-                  16.5,
-                  8.25
+                  18.5,
+                  6.75
                 ],
                 "spawn_shield_remaining": 0,
                 "team_label": "Opponent Team",
@@ -8340,8 +8340,8 @@
                 "configured_active": true,
                 "currently_alive": true,
                 "position": [
-                  16.5,
-                  10.5
+                  18.5,
+                  8.5
                 ],
                 "spawn_shield_remaining": 0,
                 "team_label": "Opponent Team",
@@ -8359,7 +8359,7 @@
                 "observation_row": 0,
                 "position": [
                   3.0,
-                  2.0
+                  1.0
                 ],
                 "public_agent_id": "0",
                 "radius": 0.5,
@@ -8393,7 +8393,7 @@
                 "observation_row": 1,
                 "position": [
                   3.0,
-                  4.0
+                  3.0
                 ],
                 "public_agent_id": "1",
                 "radius": 0.5,
@@ -8427,7 +8427,7 @@
                 "observation_row": 2,
                 "position": [
                   3.0,
-                  6.0
+                  5.0
                 ],
                 "public_agent_id": "2",
                 "radius": 0.5,
@@ -8461,7 +8461,7 @@
                 "observation_row": 3,
                 "position": [
                   3.0,
-                  8.0
+                  7.0
                 ],
                 "public_agent_id": "3",
                 "radius": 0.5,
@@ -8644,10 +8644,10 @@
               }
             ]
           },
-          "authorized_endpoint_digest_sha256": "4fcb92a98c8388548b39f0c1f8a062b92d1d92662ea4d88cdbfe80ed2a59eacd",
+          "authorized_endpoint_digest_sha256": "bd78fb3b1380c2bbba6b294a3ced84e4f0d1f7e8239f42bb67217c7deaf4a02e",
           "endpoint_kind": "oracle_authorized_current",
-          "episode_id": "debugger-episode:5b6184f9ff4549a1c36782a41d15553fdb28f2bb6b2d91bc767b1c473e57380d",
-          "frame_id": "debugger-episode:5b6184f9ff4549a1c36782a41d15553fdb28f2bb6b2d91bc767b1c473e57380d:frame:0",
+          "episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
+          "frame_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906:frame:0",
           "frame_index": 0,
           "identity_directory": {
             "directory_kind": "oracle_public_identity_directory",
@@ -8760,7 +8760,7 @@
                 "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033,
                 "position": [
                   3.0,
-                  2.0
+                  1.0
                 ],
                 "presentation_key": "oracle_5a43fff5846d29ec5606671e43f1c974e4f498a36d926bdfb853e4564b8ff2a8",
                 "public_agent_id": "0",
@@ -8797,7 +8797,7 @@
                 "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033,
                 "position": [
                   3.0,
-                  4.0
+                  3.0
                 ],
                 "presentation_key": "oracle_b0173826f431a4a001f864009ea6111e9f428a06f54cf47835baff209c1aa9e7",
                 "public_agent_id": "1",
@@ -8830,7 +8830,7 @@
                 "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033,
                 "position": [
                   3.0,
-                  6.0
+                  5.0
                 ],
                 "presentation_key": "oracle_bc9360d429d87df909ffcaab4d2ec7b84a03c15ef5958a84a1e3c5a27f613ad2",
                 "public_agent_id": "2",
@@ -8858,7 +8858,7 @@
                 "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033,
                 "position": [
                   3.0,
-                  8.0
+                  7.0
                 ],
                 "presentation_key": "oracle_7c77db66031af98a64b61ca66e4f7eab414e983b083bfe99c810a35045f7f322",
                 "public_agent_id": "3",
@@ -8886,7 +8886,7 @@
                 "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033,
                 "position": [
                   3.0,
-                  10.0
+                  9.0
                 ],
                 "presentation_key": "oracle_a645aa503381aac2598ffb91ba5760875319a72fd2c4e51277c18a3d3b02fcdb",
                 "public_agent_id": "4",
@@ -8922,8 +8922,8 @@
                 "out_of_combat_delay_steps": 5,
                 "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033,
                 "position": [
-                  15.0,
-                  10.0
+                  17.0,
+                  1.0
                 ],
                 "presentation_key": "oracle_6e5e9a1ddba7d376c72223d53d6e40897863cb9a596fb19863d9749f03441a1e",
                 "public_agent_id": "5",
@@ -8959,8 +8959,8 @@
                 "out_of_combat_delay_steps": 5,
                 "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033,
                 "position": [
-                  15.0,
-                  8.0
+                  17.0,
+                  3.0
                 ],
                 "presentation_key": "oracle_2fb5dfce412d5a37668f71f10ba87839c7eaf4e46057d1b72bad60dce56ae0dc",
                 "public_agent_id": "6",
@@ -8992,8 +8992,8 @@
                 "out_of_combat_delay_steps": 5,
                 "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033,
                 "position": [
-                  15.0,
-                  6.0
+                  17.0,
+                  5.0
                 ],
                 "presentation_key": "oracle_1cd909acb86ab4228ab01396d3edfabaf2eb8bc87161aa5f852077d0ef812dc6",
                 "public_agent_id": "7",
@@ -9020,8 +9020,8 @@
                 "out_of_combat_delay_steps": 3,
                 "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033,
                 "position": [
-                  15.0,
-                  4.0
+                  17.0,
+                  7.0
                 ],
                 "presentation_key": "oracle_f662497ae7e80ca35026aeb777f1e814d98ffd42f3e689b73db1c58afde17367",
                 "public_agent_id": "8",
@@ -9048,8 +9048,8 @@
                 "out_of_combat_delay_steps": 5,
                 "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033,
                 "position": [
-                  15.0,
-                  2.0
+                  17.0,
+                  9.0
                 ],
                 "presentation_key": "oracle_a00cd6a9df4b007e5b900a69905c3f95612a9c50161a2abb4675e02d4516dc26",
                 "public_agent_id": "9",
@@ -9069,7 +9069,7 @@
                 "beneficiary_relation": "same_team",
                 "center": [
                   3.0,
-                  2.0
+                  1.0
                 ],
                 "clamp_kind": "ceiling",
                 "clamp_value": 1.3224999999999998,
@@ -9087,7 +9087,7 @@
                 "beneficiary_relation": "same_team",
                 "center": [
                   3.0,
-                  4.0
+                  3.0
                 ],
                 "clamp_kind": "floor",
                 "clamp_value": 0.7224999999999999,
@@ -9104,8 +9104,8 @@
                 "aura_id": "mage_damage_amplification",
                 "beneficiary_relation": "same_team",
                 "center": [
-                  15.0,
-                  10.0
+                  17.0,
+                  1.0
                 ],
                 "clamp_kind": "ceiling",
                 "clamp_value": 1.3224999999999998,
@@ -9122,8 +9122,8 @@
                 "aura_id": "warrior_damage_mitigation",
                 "beneficiary_relation": "same_team",
                 "center": [
-                  15.0,
-                  8.0
+                  17.0,
+                  3.0
                 ],
                 "clamp_kind": "floor",
                 "clamp_value": 0.7224999999999999,
@@ -9383,11 +9383,11 @@
               }
             ],
             "map": {
-              "height": 12.0,
+              "height": 10.0,
               "obstacles": [
                 {
                   "center": [
-                    9.0,
+                    10.0,
                     3.0
                   ],
                   "height": null,
@@ -9399,7 +9399,7 @@
                 },
                 {
                   "center": [
-                    9.0,
+                    10.0,
                     7.800000190734863
                   ],
                   "height": 0.5,
@@ -9410,7 +9410,7 @@
                   "width": 3.0
                 }
               ],
-              "width": 18.0
+              "width": 20.0
             },
             "respawn_waves": [
               {
@@ -9448,7 +9448,7 @@
                 "currently_alive": true,
                 "position": [
                   1.5,
-                  3.75
+                  3.25
                 ],
                 "spawn_shield_remaining": 0,
                 "team_id": 1,
@@ -9461,7 +9461,7 @@
                 "currently_alive": true,
                 "position": [
                   1.5,
-                  6.0
+                  5.0
                 ],
                 "spawn_shield_remaining": 0,
                 "team_id": 1,
@@ -9474,7 +9474,7 @@
                 "currently_alive": true,
                 "position": [
                   1.5,
-                  8.25
+                  6.75
                 ],
                 "spawn_shield_remaining": 0,
                 "team_id": 1,
@@ -9487,7 +9487,7 @@
                 "currently_alive": true,
                 "position": [
                   1.5,
-                  10.5
+                  8.5
                 ],
                 "spawn_shield_remaining": 0,
                 "team_id": 1,
@@ -9499,7 +9499,7 @@
                 "configured_active": true,
                 "currently_alive": true,
                 "position": [
-                  16.5,
+                  18.5,
                   1.5
                 ],
                 "spawn_shield_remaining": 0,
@@ -9512,8 +9512,8 @@
                 "configured_active": true,
                 "currently_alive": true,
                 "position": [
-                  16.5,
-                  3.75
+                  18.5,
+                  3.25
                 ],
                 "spawn_shield_remaining": 0,
                 "team_id": 2,
@@ -9525,8 +9525,8 @@
                 "configured_active": true,
                 "currently_alive": true,
                 "position": [
-                  16.5,
-                  6.0
+                  18.5,
+                  5.0
                 ],
                 "spawn_shield_remaining": 0,
                 "team_id": 2,
@@ -9538,8 +9538,8 @@
                 "configured_active": true,
                 "currently_alive": true,
                 "position": [
-                  16.5,
-                  8.25
+                  18.5,
+                  6.75
                 ],
                 "spawn_shield_remaining": 0,
                 "team_id": 2,
@@ -9551,8 +9551,8 @@
                 "configured_active": true,
                 "currently_alive": true,
                 "position": [
-                  16.5,
-                  10.5
+                  18.5,
+                  8.5
                 ],
                 "spawn_shield_remaining": 0,
                 "team_id": 2,
@@ -9578,12 +9578,12 @@
         "latest_transition": null,
         "live_inspection": {
           "envelope_kind": "live_oracle_source_bound_inspection",
-          "episode_id": "debugger-episode:5b6184f9ff4549a1c36782a41d15553fdb28f2bb6b2d91bc767b1c473e57380d",
+          "episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
           "inspection": {
             "draft": {
               "actor_anchor": [
                 3.0,
-                2.0
+                1.0
               ],
               "actor_presentation_key": "oracle_5a43fff5846d29ec5606671e43f1c974e4f498a36d926bdfb853e4564b8ff2a8",
               "actor_public_agent_id": "0",
@@ -9638,7 +9638,7 @@
                     "target_action": 1,
                     "target_anchor": [
                       3.0,
-                      2.0
+                      1.0
                     ],
                     "target_kind": "visible_authorized_agent",
                     "target_presentation_key": "oracle_5a43fff5846d29ec5606671e43f1c974e4f498a36d926bdfb853e4564b8ff2a8",
@@ -9649,7 +9649,7 @@
                     "target_action": 2,
                     "target_anchor": [
                       3.0,
-                      4.0
+                      3.0
                     ],
                     "target_kind": "visible_authorized_agent",
                     "target_presentation_key": "oracle_b0173826f431a4a001f864009ea6111e9f428a06f54cf47835baff209c1aa9e7",
@@ -9660,7 +9660,7 @@
                     "target_action": 3,
                     "target_anchor": [
                       3.0,
-                      6.0
+                      5.0
                     ],
                     "target_kind": "visible_authorized_agent",
                     "target_presentation_key": "oracle_bc9360d429d87df909ffcaab4d2ec7b84a03c15ef5958a84a1e3c5a27f613ad2",
@@ -9671,7 +9671,7 @@
                     "target_action": 4,
                     "target_anchor": [
                       3.0,
-                      8.0
+                      7.0
                     ],
                     "target_kind": "visible_authorized_agent",
                     "target_presentation_key": "oracle_7c77db66031af98a64b61ca66e4f7eab414e983b083bfe99c810a35045f7f322",
@@ -9682,7 +9682,7 @@
                     "target_action": 5,
                     "target_anchor": [
                       3.0,
-                      10.0
+                      9.0
                     ],
                     "target_kind": "visible_authorized_agent",
                     "target_presentation_key": "oracle_a645aa503381aac2598ffb91ba5760875319a72fd2c4e51277c18a3d3b02fcdb",
@@ -9692,8 +9692,8 @@
                     "display_name": "Enemy 0",
                     "target_action": 6,
                     "target_anchor": [
-                      15.0,
-                      10.0
+                      17.0,
+                      1.0
                     ],
                     "target_kind": "visible_authorized_agent",
                     "target_presentation_key": "oracle_6e5e9a1ddba7d376c72223d53d6e40897863cb9a596fb19863d9749f03441a1e",
@@ -9703,8 +9703,8 @@
                     "display_name": "Enemy 1",
                     "target_action": 7,
                     "target_anchor": [
-                      15.0,
-                      8.0
+                      17.0,
+                      3.0
                     ],
                     "target_kind": "visible_authorized_agent",
                     "target_presentation_key": "oracle_2fb5dfce412d5a37668f71f10ba87839c7eaf4e46057d1b72bad60dce56ae0dc",
@@ -9714,8 +9714,8 @@
                     "display_name": "Enemy 2",
                     "target_action": 8,
                     "target_anchor": [
-                      15.0,
-                      6.0
+                      17.0,
+                      5.0
                     ],
                     "target_kind": "visible_authorized_agent",
                     "target_presentation_key": "oracle_1cd909acb86ab4228ab01396d3edfabaf2eb8bc87161aa5f852077d0ef812dc6",
@@ -9725,8 +9725,8 @@
                     "display_name": "Enemy 3",
                     "target_action": 9,
                     "target_anchor": [
-                      15.0,
-                      4.0
+                      17.0,
+                      7.0
                     ],
                     "target_kind": "visible_authorized_agent",
                     "target_presentation_key": "oracle_f662497ae7e80ca35026aeb777f1e814d98ffd42f3e689b73db1c58afde17367",
@@ -9736,8 +9736,8 @@
                     "display_name": "Enemy 4",
                     "target_action": 10,
                     "target_anchor": [
-                      15.0,
-                      2.0
+                      17.0,
+                      9.0
                     ],
                     "target_kind": "visible_authorized_agent",
                     "target_presentation_key": "oracle_a00cd6a9df4b007e5b900a69905c3f95612a9c50161a2abb4675e02d4516dc26",
@@ -9823,7 +9823,7 @@
             "submission_scope": "joint_turn"
           },
           "source_authority_epoch": 0,
-          "source_frame_id": "debugger-episode:5b6184f9ff4549a1c36782a41d15553fdb28f2bb6b2d91bc767b1c473e57380d:frame:0",
+          "source_frame_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906:frame:0",
           "source_frame_index": 0,
           "source_revision": 0,
           "source_run_generation": 0,
@@ -9929,10 +9929,10 @@
         "product_kind": "combat_debugger",
         "schema_version": 1,
         "source": {
-          "episode_id": "debugger-episode:5b6184f9ff4549a1c36782a41d15553fdb28f2bb6b2d91bc767b1c473e57380d",
+          "episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
           "source_authority_epoch": 0,
-          "source_authorized_endpoint_digest_sha256": "4fcb92a98c8388548b39f0c1f8a062b92d1d92662ea4d88cdbfe80ed2a59eacd",
-          "source_frame_id": "debugger-episode:5b6184f9ff4549a1c36782a41d15553fdb28f2bb6b2d91bc767b1c473e57380d:frame:0",
+          "source_authorized_endpoint_digest_sha256": "bd78fb3b1380c2bbba6b294a3ced84e4f0d1f7e8239f42bb67217c7deaf4a02e",
+          "source_frame_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906:frame:0",
           "source_frame_index": 0,
           "source_kind": "live_oracle_frame",
           "source_revision": 0,
@@ -9942,7 +9942,7 @@
           "source_submission_scope": "joint_turn"
         },
         "technical_frame": {
-          "episode_id": "debugger-episode:5b6184f9ff4549a1c36782a41d15553fdb28f2bb6b2d91bc767b1c473e57380d",
+          "episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
           "evaluation_frame_index": 0,
           "incoming_transition_id": null,
           "simulator_step_count": 0,
@@ -10022,8 +10022,8 @@
             "title": "Recovery, refresh, and reapplication"
           }
         ],
-        "episode_id": "debugger-episode:5b6184f9ff4549a1c36782a41d15553fdb28f2bb6b2d91bc767b1c473e57380d",
-        "frame_id": "debugger-episode:5b6184f9ff4549a1c36782a41d15553fdb28f2bb6b2d91bc767b1c473e57380d:frame:0",
+        "episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
+        "frame_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906:frame:0",
         "frame_index": 0,
         "frame_kind": "researcher_live_debugger",
         "hud": {
@@ -10180,7 +10180,7 @@
               "fact_id": "episode_id",
               "label": "Evaluation episode",
               "technical": true,
-              "value": "debugger-episode:5b6184f9ff4549a1c36782a41d15553fdb28f2bb6b2d91bc767b1c473e57380d"
+              "value": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906"
             }
           ],
           "latest_transition": null,
@@ -10430,7 +10430,7 @@
                 "max_health": 80.0,
                 "position": [
                   3.0,
-                  2.0
+                  1.0
                 ],
                 "public_agent_id": "0",
                 "radius": 0.5,
@@ -10462,7 +10462,7 @@
                 "max_health": 200.0,
                 "position": [
                   3.0,
-                  4.0
+                  3.0
                 ],
                 "public_agent_id": "1",
                 "radius": 0.5,
@@ -10494,7 +10494,7 @@
                 "max_health": 100.0,
                 "position": [
                   3.0,
-                  6.0
+                  5.0
                 ],
                 "public_agent_id": "2",
                 "radius": 0.5,
@@ -10526,7 +10526,7 @@
                 "max_health": 100.0,
                 "position": [
                   3.0,
-                  8.0
+                  7.0
                 ],
                 "public_agent_id": "3",
                 "radius": 0.5,
@@ -10558,7 +10558,7 @@
                 "max_health": 100.0,
                 "position": [
                   3.0,
-                  10.0
+                  9.0
                 ],
                 "public_agent_id": "4",
                 "radius": 0.5,
@@ -10589,8 +10589,8 @@
                 "life_state": "alive",
                 "max_health": 80.0,
                 "position": [
-                  15.0,
-                  10.0
+                  17.0,
+                  1.0
                 ],
                 "public_agent_id": "5",
                 "radius": 0.5,
@@ -10621,8 +10621,8 @@
                 "life_state": "alive",
                 "max_health": 200.0,
                 "position": [
-                  15.0,
-                  8.0
+                  17.0,
+                  3.0
                 ],
                 "public_agent_id": "6",
                 "radius": 0.5,
@@ -10653,8 +10653,8 @@
                 "life_state": "alive",
                 "max_health": 100.0,
                 "position": [
-                  15.0,
-                  6.0
+                  17.0,
+                  5.0
                 ],
                 "public_agent_id": "7",
                 "radius": 0.5,
@@ -10685,8 +10685,8 @@
                 "life_state": "alive",
                 "max_health": 100.0,
                 "position": [
-                  15.0,
-                  4.0
+                  17.0,
+                  7.0
                 ],
                 "public_agent_id": "8",
                 "radius": 0.5,
@@ -10717,8 +10717,8 @@
                 "life_state": "alive",
                 "max_health": 100.0,
                 "position": [
-                  15.0,
-                  2.0
+                  17.0,
+                  9.0
                 ],
                 "public_agent_id": "9",
                 "radius": 0.5,
@@ -10740,7 +10740,7 @@
                 "beneficiary_relation": "same_team",
                 "center": [
                   3.0,
-                  2.0
+                  1.0
                 ],
                 "clamp_kind": "ceiling",
                 "clamp_value": 1.3224999999999998,
@@ -10758,7 +10758,7 @@
                 "beneficiary_relation": "same_team",
                 "center": [
                   3.0,
-                  4.0
+                  3.0
                 ],
                 "clamp_kind": "floor",
                 "clamp_value": 0.7224999999999999,
@@ -10775,8 +10775,8 @@
                 "aura_id": "mage_damage_amplification",
                 "beneficiary_relation": "same_team",
                 "center": [
-                  15.0,
-                  10.0
+                  17.0,
+                  1.0
                 ],
                 "clamp_kind": "ceiling",
                 "clamp_value": 1.3224999999999998,
@@ -10793,8 +10793,8 @@
                 "aura_id": "warrior_damage_mitigation",
                 "beneficiary_relation": "same_team",
                 "center": [
-                  15.0,
-                  8.0
+                  17.0,
+                  3.0
                 ],
                 "clamp_kind": "floor",
                 "clamp_value": 0.7224999999999999,
@@ -11028,17 +11028,17 @@
                 "ultimate_target_mode": "ally"
               }
             ],
-            "episode_id": "debugger-episode:5b6184f9ff4549a1c36782a41d15553fdb28f2bb6b2d91bc767b1c473e57380d",
-            "frame_id": "debugger-episode:5b6184f9ff4549a1c36782a41d15553fdb28f2bb6b2d91bc767b1c473e57380d:frame:0",
+            "episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
+            "frame_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906:frame:0",
             "frame_index": 0,
             "incoming_event_ids": [],
             "incoming_transition_id": null,
             "map": {
-              "height": 12.0,
+              "height": 10.0,
               "obstacles": [
                 {
                   "center": [
-                    9.0,
+                    10.0,
                     3.0
                   ],
                   "height": null,
@@ -11050,7 +11050,7 @@
                 },
                 {
                   "center": [
-                    9.0,
+                    10.0,
                     7.800000190734863
                   ],
                   "height": 0.5,
@@ -11061,7 +11061,7 @@
                   "width": 3.0
                 }
               ],
-              "width": 18.0
+              "width": 20.0
             },
             "next_decision_selected_legality": {
               "armed_lane": 0,
@@ -11128,7 +11128,7 @@
               {
                 "center": [
                   3.0,
-                  2.0
+                  1.0
                 ],
                 "global_slot": 0,
                 "kind": "observation",
@@ -11137,7 +11137,7 @@
               {
                 "center": [
                   3.0,
-                  2.0
+                  1.0
                 ],
                 "global_slot": 0,
                 "kind": "basic",
@@ -11146,7 +11146,7 @@
               {
                 "center": [
                   3.0,
-                  2.0
+                  1.0
                 ],
                 "global_slot": 0,
                 "kind": "ultimate",
@@ -11189,7 +11189,7 @@
                 "assigned_public_agent_id": "1",
                 "position": [
                   1.5,
-                  3.75
+                  3.25
                 ],
                 "team_id": 1,
                 "team_local_slot": 1
@@ -11199,7 +11199,7 @@
                 "assigned_public_agent_id": "2",
                 "position": [
                   1.5,
-                  6.0
+                  5.0
                 ],
                 "team_id": 1,
                 "team_local_slot": 2
@@ -11209,7 +11209,7 @@
                 "assigned_public_agent_id": "3",
                 "position": [
                   1.5,
-                  8.25
+                  6.75
                 ],
                 "team_id": 1,
                 "team_local_slot": 3
@@ -11219,7 +11219,7 @@
                 "assigned_public_agent_id": "4",
                 "position": [
                   1.5,
-                  10.5
+                  8.5
                 ],
                 "team_id": 1,
                 "team_local_slot": 4
@@ -11228,7 +11228,7 @@
                 "assigned_global_slot": 5,
                 "assigned_public_agent_id": "5",
                 "position": [
-                  16.5,
+                  18.5,
                   1.5
                 ],
                 "team_id": 2,
@@ -11238,8 +11238,8 @@
                 "assigned_global_slot": 6,
                 "assigned_public_agent_id": "6",
                 "position": [
-                  16.5,
-                  3.75
+                  18.5,
+                  3.25
                 ],
                 "team_id": 2,
                 "team_local_slot": 1
@@ -11248,8 +11248,8 @@
                 "assigned_global_slot": 7,
                 "assigned_public_agent_id": "7",
                 "position": [
-                  16.5,
-                  6.0
+                  18.5,
+                  5.0
                 ],
                 "team_id": 2,
                 "team_local_slot": 2
@@ -11258,8 +11258,8 @@
                 "assigned_global_slot": 8,
                 "assigned_public_agent_id": "8",
                 "position": [
-                  16.5,
-                  8.25
+                  18.5,
+                  6.75
                 ],
                 "team_id": 2,
                 "team_local_slot": 3
@@ -11268,8 +11268,8 @@
                 "assigned_global_slot": 9,
                 "assigned_public_agent_id": "9",
                 "position": [
-                  16.5,
-                  10.5
+                  18.5,
+                  8.5
                 ],
                 "team_id": 2,
                 "team_local_slot": 4
@@ -11279,8 +11279,8 @@
           "schema_version": 2,
           "status_source_evidence": {
             "active_statuses": [],
-            "episode_id": "debugger-episode:5b6184f9ff4549a1c36782a41d15553fdb28f2bb6b2d91bc767b1c473e57380d",
-            "frame_id": "debugger-episode:5b6184f9ff4549a1c36782a41d15553fdb28f2bb6b2d91bc767b1c473e57380d:frame:0",
+            "episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
+            "frame_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906:frame:0",
             "frame_index": 0,
             "schema_version": 2
           }

@@ -695,6 +695,98 @@ def _assert_exact_decision_mask(
     )
 
 
+@pytest.mark.parametrize("recipient_slot", (0, 5))
+def test_shared_scene_preserves_public_lifecycle_while_fog_hides_assignees(
+    inspection_cases: _InspectionCases,
+    recipient_slot: int,
+) -> None:
+    """Shared fog must not redact public o_t lifecycle or invent hidden bodies."""
+    current, recipient = _shared_current(
+        inspection_cases.shared,
+        recipient_slot=recipient_slot,
+        frame_index=0,
+        authority="shared-public-lifecycle",
+    )
+    scene = current.scene
+    lifecycle = recipient.base_sensor_frame.spawn_lifecycle
+    roster = inspection_cases.shared.context.roster[recipient_slot]
+    recipient_team_id = roster.configured_team_id
+    visible_ids = {row.public_agent_id for row in scene.agents}
+    pads_by_key = {(row.team_id, row.team_local_slot): row for row in scene.spawn_pads}
+
+    for actor_relative_team in range(2):
+        team_id = (
+            recipient_team_id if actor_relative_team == 0 else 3 - recipient_team_id
+        )
+        public_axis = (
+            recipient.axis_mapping.ally_observation_row_public_agent_id_by_id
+            if actor_relative_team == 0
+            else recipient.axis_mapping.enemy_observation_row_public_agent_id_by_id
+        )
+        for team_local_slot, expected_public_id in enumerate(public_axis):
+            pad = pads_by_key[(team_id, team_local_slot)]
+            assert (
+                pad.position,
+                pad.configured_active,
+                pad.currently_alive,
+                pad.spawn_shield_remaining,
+            ) == (
+                lifecycle.spawn_pad_positions_by_team[actor_relative_team][
+                    team_local_slot
+                ],
+                lifecycle.active_mask_by_team[actor_relative_team][team_local_slot],
+                lifecycle.alive_mask_by_team[actor_relative_team][team_local_slot],
+                lifecycle.spawn_shield_actual_durations_by_team[actor_relative_team][
+                    team_local_slot
+                ],
+            )
+            if expected_public_id in visible_ids and pad.configured_active:
+                assert pad.assigned_public_agent_id == expected_public_id
+                assert pad.assigned_presentation_key is not None
+            else:
+                assert pad.assigned_public_agent_id is None
+                assert pad.assigned_presentation_key is None
+
+    waves_by_team = {row.team_id: row for row in scene.respawn_waves}
+    for actor_relative_team in range(2):
+        team_id = (
+            recipient_team_id if actor_relative_team == 0 else 3 - recipient_team_id
+        )
+        wave = waves_by_team[team_id]
+        assert wave.team_index == team_id - 1
+        assert (
+            wave.period_steps,
+            wave.countdown_steps,
+        ) == (
+            lifecycle.respawn_wave_period_step_count_by_team[actor_relative_team],
+            lifecycle.respawn_wave_countdowns_by_team[actor_relative_team],
+        )
+
+    oracle = inspection_cases.oracle_scenes[0]
+    oracle_pads = {(row.team_id, row.team_local_slot): row for row in oracle.spawn_pads}
+    for key, oracle_pad in oracle_pads.items():
+        local_pad = pads_by_key[key]
+        assert (
+            local_pad.position,
+            local_pad.configured_active,
+            local_pad.currently_alive,
+            local_pad.spawn_shield_remaining,
+        ) == (
+            oracle_pad.position,
+            oracle_pad.configured_active,
+            oracle_pad.currently_alive,
+            oracle_pad.spawn_shield_remaining,
+        )
+    assert all(
+        not row.configured_active
+        and not row.currently_alive
+        and row.spawn_shield_remaining == 0
+        for key, row in pads_by_key.items()
+        if key not in oracle_pads
+    )
+    assert scene.respawn_waves == oracle.respawn_waves
+
+
 def _recursive_pairs(value: object) -> tuple[tuple[str, object], ...]:
     pairs: list[tuple[str, object]] = []
 

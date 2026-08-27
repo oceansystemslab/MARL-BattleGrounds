@@ -173,8 +173,8 @@ def _scenario(
 
 def _arena_5v5_scenario() -> tuple[EnvConfig, EnvState]:
     obstacles = _empty_obstacles()
-    obstacles = obstacles.at[0].set(_pillar(9.0, 3.0, 0.9))
-    obstacles = obstacles.at[1].set(_wall(9.0, 7.8, 3.0, 0.5, 0.45))
+    obstacles = obstacles.at[0].set(_pillar(10.0, 3.0, 0.9))
+    obstacles = obstacles.at[1].set(_wall(10.0, 7.8, 3.0, 0.5, 0.45))
     roster = (
         MAGE_CLASS_ID,
         WARRIOR_CLASS_ID,
@@ -188,20 +188,20 @@ def _arena_5v5_scenario() -> tuple[EnvConfig, EnvState]:
         PRIEST_CLASS_ID,
     )
     positions = {
-        0: (3.0, 2.0),
-        1: (3.0, 4.0),
-        2: (3.0, 6.0),
-        3: (3.0, 8.0),
-        4: (3.0, 10.0),
-        5: (15.0, 10.0),
-        6: (15.0, 8.0),
-        7: (15.0, 6.0),
-        8: (15.0, 4.0),
-        9: (15.0, 2.0),
+        0: (3.0, 1.0),
+        1: (3.0, 3.0),
+        2: (3.0, 5.0),
+        3: (3.0, 7.0),
+        4: (3.0, 9.0),
+        5: (17.0, 1.0),
+        6: (17.0, 3.0),
+        7: (17.0, 5.0),
+        8: (17.0, 7.0),
+        9: (17.0, 9.0),
     }
     return _scenario(
-        map_width=18.0,
-        map_height=12.0,
+        map_width=20.0,
+        map_height=10.0,
         team_sizes=(5, 5),
         class_ids=roster,
         active_positions=positions,
@@ -578,6 +578,51 @@ def _max_status_stack_scenario() -> tuple[EnvConfig, EnvState]:
     )
 
 
+def _lifecycle_density_scenario() -> tuple[EnvConfig, EnvState]:
+    """Start before concurrent recovery and a status-clearing lethal lifecycle."""
+    roster = (
+        MAGE_CLASS_ID,
+        HUNTER_CLASS_ID,
+        PRIEST_CLASS_ID,
+        NEUTRAL_CLASS_ID,
+        NEUTRAL_CLASS_ID,
+        ROGUE_CLASS_ID,
+        NEUTRAL_CLASS_ID,
+        NEUTRAL_CLASS_ID,
+        NEUTRAL_CLASS_ID,
+        NEUTRAL_CLASS_ID,
+    )
+    config, state = _scenario(
+        map_width=18.0,
+        map_height=12.0,
+        team_sizes=(3, 1),
+        class_ids=roster,
+        active_positions={
+            0: (13.0, 1.5),
+            1: (13.0, 3.0),
+            2: (3.0, 10.0),
+            5: (14.5, 2.25),
+        },
+    )
+    return config, state._replace(
+        current_health=(state.current_health.at[2].set(50.0).at[5].set(5.0)),
+        ultimate_cooldowns=state.ultimate_cooldowns.at[2].set(1),
+        steps_until_out_of_combat=state.steps_until_out_of_combat.at[2].set(0),
+        slow_durations=state.slow_durations.at[
+            5,
+            SLOW_CHANNEL_WARRIOR_CHARGE,
+        ].set(3),
+        stun_durations=state.stun_durations.at[
+            5,
+            STUN_CHANNEL_HUNTER_TRAP,
+        ].set(3),
+        rogue_poison_anti_heal_durations=(
+            state.rogue_poison_anti_heal_durations.at[5].set(3)
+        ),
+        team_respawn_wave_countdowns=jnp.asarray((4, 2), dtype=jnp.int32),
+    )
+
+
 def _death_respawn_cycle_scenario() -> tuple[EnvConfig, EnvState]:
     """Start immediately before a multi-source lethal and later shielded respawn."""
     roster = (
@@ -699,6 +744,26 @@ _ULTIMATE_SHOWCASE_FRAMES = (
         "Hunter Basic breaks the active Freezing Trap and applies its slow.",
         (ActorCommand(2, MOVE_STAY, 6, 0),),
     ),
+    ScenarioFrame(
+        "age-ultimate-statuses-one",
+        "A neutral transition ages every remaining Ultimate status.",
+        (),
+    ),
+    ScenarioFrame(
+        "age-ultimate-statuses-two",
+        "A second neutral transition continues the public durations.",
+        (),
+    ),
+    ScenarioFrame(
+        "age-ultimate-statuses-three",
+        "Shorter Ultimate statuses reach their natural expiry.",
+        (),
+    ),
+    ScenarioFrame(
+        "age-ultimate-statuses-four",
+        "The final long-duration Ultimate statuses age to zero.",
+        (),
+    ),
 )
 
 _AURA_CROSSFIRE_FRAMES = (
@@ -758,6 +823,15 @@ _STATUS_STACK_FRAMES = (
 
 
 _TEAM_FOCUS_CROSSFIRE_FRAMES = (
+    ScenarioFrame(
+        "balanced-warrior-priest-resolution",
+        "An opposing Warrior Basic and allied Priest Basic resolve to no net "
+        "health change at the health cap.",
+        (
+            ActorCommand(1, MOVE_STAY, 5, 0),
+            ActorCommand(6, MOVE_STAY, 5, 0),
+        ),
+    ),
     ScenarioFrame(
         "first-hunter-basic",
         "The Hunter opens repeated fire on the opposing Warrior.",
@@ -892,6 +966,15 @@ _MOVING_BASIC_CROSSFIRE_FRAMES = (
 
 _MOVING_FOCUS_CROSSFIRE_FRAMES = (
     ScenarioFrame(
+        "balanced-warrior-priest-resolution",
+        "An opposing Warrior Basic and allied Priest Basic resolve to no net "
+        "health change at the health cap.",
+        (
+            ActorCommand(1, MOVE_STAY, 5, 0),
+            ActorCommand(6, MOVE_STAY, 5, 0),
+        ),
+    ),
+    ScenarioFrame(
         "eastbound-focus-fire-and-healing",
         "Four attackers, three healers, and their shared recipient move east together.",
         (
@@ -964,6 +1047,73 @@ _MAX_STATUS_STACK_FRAMES = (
             ActorCommand(7, MOVE_STAY, 0, 0),
             ActorCommand(8, MOVE_STAY, 0, 1),
         ),
+    ),
+    ScenarioFrame(
+        "salvation-on-damaged-mage",
+        "The Priest uses Holy Word: Salvation on the damaged, fully statused Mage.",
+        (ActorCommand(1, MOVE_STAY, 0, 1),),
+    ),
+    ScenarioFrame(
+        "age-status-stack-one",
+        "A neutral transition ages the remaining status stack.",
+        (),
+    ),
+    ScenarioFrame(
+        "age-status-stack-two",
+        "A second neutral transition continues the public durations.",
+        (),
+    ),
+    ScenarioFrame(
+        "age-status-stack-three",
+        "The shorter remaining status tokens naturally expire.",
+        (),
+    ),
+    ScenarioFrame(
+        "age-status-stack-four",
+        "The longest status tokens naturally expire.",
+        (),
+    ),
+    ScenarioFrame(
+        "expired-status-stack",
+        "A final neutral transition proves the recipient remains clear.",
+        (),
+    ),
+)
+
+_LIFECYCLE_DENSITY_FRAMES = (
+    ScenarioFrame(
+        "lethal-recovery-and-readiness",
+        "Two sources kill a statused Rogue while a damaged Priest regenerates "
+        "and becomes Ultimate-ready.",
+        (
+            ActorCommand(0, MOVE_STAY, 5, 0),
+            ActorCommand(1, MOVE_STAY, 5, 0),
+        ),
+    ),
+    ScenarioFrame(
+        "corpse-awaits-respawn-wave",
+        "The cleared corpse remains out until the next Team B wave.",
+        (),
+    ),
+    ScenarioFrame(
+        "respawn-with-spawn-shield",
+        "The due Team B wave respawns the Rogue with Spawn Shield.",
+        (),
+    ),
+    ScenarioFrame(
+        "age-spawn-shield-one",
+        "A neutral transition ages the visible Spawn Shield.",
+        (),
+    ),
+    ScenarioFrame(
+        "age-spawn-shield-two",
+        "A second neutral transition leaves one protected tick.",
+        (),
+    ),
+    ScenarioFrame(
+        "expire-spawn-shield",
+        "The final neutral transition expires Spawn Shield.",
+        (),
     ),
 )
 
@@ -1120,6 +1270,11 @@ STRESS_SCENARIOS: dict[str, DebuggerScenario] = {
         "max_status_stack",
         build_scenario=_max_status_stack_scenario,
         frames=_MAX_STATUS_STACK_FRAMES,
+    ),
+    "lifecycle_density": _registered_scenario(
+        "lifecycle_density",
+        build_scenario=_lifecycle_density_scenario,
+        frames=_LIFECYCLE_DENSITY_FRAMES,
     ),
 }
 

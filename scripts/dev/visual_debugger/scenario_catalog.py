@@ -163,6 +163,17 @@ STRESS_SCENARIO_CATALOG: tuple[ScenarioCatalogEntry, ...] = (
         default_controlled_slot=0,
         audience="stress",
     ),
+    ScenarioCatalogEntry(
+        name="lifecycle_density",
+        title="Lifecycle density stress",
+        description=(
+            "Concurrent lethal clearing, recovery, readiness, respawn, and "
+            "Spawn Shield expiry."
+        ),
+        mode="scripted",
+        default_controlled_slot=5,
+        audience="stress",
+    ),
 )
 
 SCENARIO_CATALOG: tuple[ScenarioCatalogEntry, ...] = (

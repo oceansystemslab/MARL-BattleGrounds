@@ -58,7 +58,8 @@ const REDACTED = attribution(
  *
  * `aggregate_aura` always returns `null`: an aggregate multiplier has no
  * serialized emitter attribution. Spawn Shield is intentionally not an
- * accepted attribution kind; its separate card owns `Source: Not recorded`.
+ * accepted attribution kind; its separate card owns only its authorized Owner
+ * identity and never manufactures a Source row.
  *
  * @param {unknown} rawOptions
  * @returns {Readonly<SourceAttribution> | null}

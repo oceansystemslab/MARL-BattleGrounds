@@ -2022,6 +2022,175 @@ test("an accepted Exit cannot retain a scene after sidecar authorization fails",
   await page.unroute("**/api/presentation/frame");
 });
 
+test("class details change only through explicit agent activation", async ({
+  page,
+}) => {
+  /** @type {Record<string, any>[]} */
+  const commands = [];
+  await page.route("**/api/command", async (route) => {
+    commands.push(route.request().postDataJSON().command ?? {});
+    await route.continue();
+  });
+
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await expect(page.locator("html")).toHaveAttribute(
+    "data-presentation-authority",
+    "installed",
+  );
+  const details = page.locator("#selection-card");
+  const detailsText = () =>
+    details.evaluate((card) => card.textContent?.replace(/\s+/gu, " ").trim() ?? "");
+  await expect(details).toHaveText(
+    "Activate an agent to inspect its comprehensive class details.",
+  );
+  await expect(page.locator("#agent-details")).not.toHaveAttribute("open", "");
+  await expect(page.locator("#agent-details")).not.toHaveAttribute("data-accent");
+  const baseStep = await currentStep(page);
+
+  const obstacle = page.locator("#battlefield .obstacle[data-tooltip-owner]").first();
+  await expect(obstacle).toBeVisible();
+  await obstacle.hover();
+  await expect(page.locator("#visual-tooltip")).toBeVisible();
+  await obstacle.focus();
+  await expect(page.locator("#visual-tooltip")).toBeVisible();
+  await obstacle.click();
+  await expect(details).toHaveText(
+    "Activate an agent to inspect its comprehensive class details.",
+  );
+  expect(commands).toHaveLength(0);
+
+  const targetSelect = page.locator("#command-target-select");
+  const originalTargetValue = await targetSelect.inputValue();
+  const nextTargetValue = await targetSelect.evaluate((select, currentValue) => {
+    if (!(select instanceof HTMLSelectElement)) {
+      throw new TypeError("Target control is unavailable.");
+    }
+    const alternate = [...select.options].find(
+      (option) => option.value !== currentValue && option.value !== "",
+    );
+    return alternate?.value ?? (currentValue === "" ? null : "");
+  }, originalTargetValue);
+  if (nextTargetValue === null) {
+    throw new Error("Target control has no alternate authorized choice.");
+  }
+  await activateLiveCommand(page, () => targetSelect.selectOption(nextTargetValue));
+  expect(commands.at(-1)).toMatchObject({
+    command_type: "roster_selection",
+    role: "target",
+  });
+  await expect(details).toHaveText(
+    "Activate an agent to inspect its comprehensive class details.",
+  );
+  await expect(page.locator("#agent-details")).not.toHaveAttribute("open", "");
+
+  const initialRosterActor = page.locator(
+    '#roster .roster-primary-action[aria-pressed="true"]',
+  );
+  const initialRosterActorLabel = await initialRosterActor.getAttribute("aria-label");
+  const initialPublicId =
+    initialRosterActorLabel?.match(/Agent ID ([^,.]+)/u)?.[1] ?? null;
+  if (initialRosterActorLabel === null || initialPublicId === null) {
+    throw new Error("The initially controlled actor has no public identity.");
+  }
+  const rosterLabels = await page
+    .locator("#roster .roster-primary-action")
+    .evaluateAll((buttons) =>
+      buttons
+        .map((button) => button.getAttribute("aria-label"))
+        .filter((label) => typeof label === "string"),
+    );
+  const activationLabels = rosterLabels.filter(
+    (label) => label !== initialRosterActorLabel,
+  );
+  if (activationLabels.length < 3) {
+    throw new Error("The live roster has fewer than three alternate agents.");
+  }
+  const publicIdFromLabel = (/** @type {string} */ label) => {
+    const publicId = label.match(/Agent ID ([^,.]+)/u)?.[1];
+    if (publicId === undefined) {
+      throw new Error(`Could not parse a public identity from ${label}.`);
+    }
+    return publicId;
+  };
+  const [battlefieldLabel, rosterPointerLabel, rosterKeyboardLabel] = activationLabels;
+  const battlefieldPublicId = publicIdFromLabel(battlefieldLabel);
+  const rosterPointerPublicId = publicIdFromLabel(rosterPointerLabel);
+  const rosterKeyboardPublicId = publicIdFromLabel(rosterKeyboardLabel);
+
+  const battlefieldActor = page.locator(
+    `#battlefield .agent[aria-label^="Agent ID ${battlefieldPublicId}."]`,
+  );
+  await expect(battlefieldActor).toHaveCount(1);
+  await activateLiveCommand(page, () => battlefieldActor.click());
+  await expect(page.locator("#agent-details")).toHaveAttribute("open", "");
+  await expect(details).toContainText(`Agent ID ${battlefieldPublicId}`);
+  const battlefieldDetails = await detailsText();
+  expect(battlefieldDetails).not.toContain("Activate an agent");
+
+  const retainedObstacle = page
+    .locator("#battlefield .obstacle[data-tooltip-owner]")
+    .first();
+  await retainedObstacle.hover();
+  await retainedObstacle.focus();
+  await retainedObstacle.click();
+  await expect.poll(detailsText).toBe(battlefieldDetails);
+  const commandsAfterObstacle = commands.length;
+  const retainedTargetValue = await targetSelect.evaluate((select) => {
+    if (!(select instanceof HTMLSelectElement)) {
+      throw new TypeError("Target control is unavailable.");
+    }
+    const currentValue = select.value;
+    const alternate = [...select.options].find(
+      (option) => option.value !== "" && option.value !== currentValue,
+    );
+    return alternate?.value ?? null;
+  });
+  if (retainedTargetValue === null) {
+    throw new Error("Target control has no alternate nonzero choice.");
+  }
+  await activateLiveCommand(page, () => targetSelect.selectOption(retainedTargetValue));
+  expect(commands).toHaveLength(commandsAfterObstacle + 1);
+  expect(commands.at(-1)).toMatchObject({
+    command_type: "roster_selection",
+    role: "target",
+  });
+  await expect.poll(detailsText).toBe(battlefieldDetails);
+
+  await activateLiveCommand(page, () =>
+    page.getByRole("button", { name: rosterPointerLabel, exact: true }).click(),
+  );
+  await expect(details).toContainText(`Agent ID ${rosterPointerPublicId}`);
+  const rosterPointerDetails = await detailsText();
+  expect(rosterPointerDetails).not.toBe(battlefieldDetails);
+
+  await activateLiveCommand(page, () =>
+    page.getByRole("button", { name: rosterKeyboardLabel, exact: true }).press("Enter"),
+  );
+  await expect(details).toContainText(`Agent ID ${rosterKeyboardPublicId}`);
+  const rosterKeyboardDetails = await detailsText();
+  expect(rosterKeyboardDetails).not.toBe(rosterPointerDetails);
+
+  const finalObstacle = page
+    .locator("#battlefield .obstacle[data-tooltip-owner]")
+    .first();
+  await finalObstacle.focus();
+  await finalObstacle.click();
+  await expect.poll(detailsText).toBe(rosterKeyboardDetails);
+  await expect(page.locator("#step-value")).toHaveText(String(baseStep));
+
+  await activateLiveCommand(page, () =>
+    page.getByRole("button", { name: initialRosterActorLabel, exact: true }).click(),
+  );
+  if ((await targetSelect.inputValue()) !== originalTargetValue) {
+    await activateLiveCommand(page, () =>
+      targetSelect.selectOption(originalTargetValue),
+    );
+  }
+  await expect(page.locator("#step-value")).toHaveText(String(baseStep));
+  await page.unroute("**/api/command");
+});
+
 test("native panels preserve user state only within exact authority", async ({
   page,
 }) => {

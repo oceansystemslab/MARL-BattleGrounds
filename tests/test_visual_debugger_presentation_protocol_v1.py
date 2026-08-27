@@ -79,6 +79,7 @@ from tests.evaluation_fixtures import CapturedEvaluationTrajectory
 from tests.test_rendering_authorized_inspection import (
     _InspectionCases,
     _no_shared_current,
+    _oracle_scenes,
     _pov_index,
     _pov_slice,
     _shared_current,
@@ -90,12 +91,18 @@ from tests.test_visual_debugger_authorized_presentation import _build_raw_frames
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
 from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
-from marl_battlegrounds.evaluation.models import EvaluationEpisodeContextV1
+from marl_battlegrounds.evaluation.models import (
+    EvaluationEpisodeContextV1,
+    EvaluationFrameV1,
+    StaticMechanicsCatalogV1,
+    canonical_digest_sha256,
+)
 from marl_battlegrounds.evaluation.pov import (
     ActorPovAxisMappingV1,
     ActorPovTransitionV1,
     build_actor_pov_adjacent_transition_slice_v1,
 )
+from marl_battlegrounds.rendering import evaluation_wire_features as wire
 from marl_battlegrounds.rendering.authorized_incoming import (
     build_live_no_shared_obs_incoming_summary_v1,
     build_replay_no_shared_obs_incoming_summary_v1,
@@ -1050,6 +1057,14 @@ def five_frames(
         replay_no_shared=replay_no_shared,
         replay_shared=replay_shared,
     )
+
+
+def _five_frames_from_cases(cases: _InspectionCases) -> _FiveFrames:
+    fixture_body = cast(
+        Callable[[_InspectionCases], _FiveFrames],
+        five_frames.__wrapped__,  # pyright: ignore[reportAttributeAccessIssue]
+    )
+    return fixture_body(cases)
 
 
 def _replay_oracle_at(
@@ -2115,6 +2130,242 @@ def test_all_five_leaves_strictly_round_trip_and_result_revalidates(
             adapter.dump_json(cast(AuthorizedPresentationFrameV1, result.payload))
             == encoded
         )
+
+
+def test_supported_catalog_tuning_reaches_every_authority_leaf_without_stale_values(
+    five_frames: _FiveFrames,
+) -> None:
+    def build_tuned_catalog(
+        catalog: StaticMechanicsCatalogV1,
+    ) -> StaticMechanicsCatalogV1:
+        payload = catalog.model_dump(mode="python")
+        class_rows = list(
+            cast(tuple[dict[str, object], ...], payload["class_mechanics"])
+        )
+        for class_id in range(1, 6):
+            row = dict(class_rows[class_id])
+            row["ultimate_cooldown_steps"] = (
+                cast(int, row["ultimate_cooldown_steps"]) + 1
+            )
+            class_rows[class_id] = row
+        payload["class_mechanics"] = tuple(class_rows)
+
+        status_rows = list(
+            cast(tuple[dict[str, object], ...], payload["status_channels"])
+        )
+        for index, source in enumerate(status_rows):
+            row = dict(source)
+            row["duration_steps"] = cast(int, row["duration_steps"]) + 1
+            if row["magnitude"] is not None:
+                row["magnitude"] = cast(float, row["magnitude"]) + 0.01
+            status_rows[index] = row
+        payload["status_channels"] = tuple(status_rows)
+
+        aura_rows = list(cast(tuple[dict[str, object], ...], payload["aura_mechanics"]))
+        for index, source in enumerate(aura_rows):
+            row = dict(source)
+            row["radius"] = cast(float, row["radius"]) + 0.1
+            row["per_emitter_multiplier"] = (
+                cast(float, row["per_emitter_multiplier"]) + 0.01
+            )
+            aura_rows[index] = row
+        payload["aura_mechanics"] = tuple(aura_rows)
+        payload["canonical_digest_sha256"] = canonical_digest_sha256(
+            payload,
+            exclude={"canonical_digest_sha256"},
+        )
+        return StaticMechanicsCatalogV1.model_validate(payload)
+
+    def tuned_feature_row(
+        row: tuple[float, ...],
+        catalog: StaticMechanicsCatalogV1,
+    ) -> tuple[float, ...]:
+        values = list(row)
+        if values[wire.AGENT_FEATURE_ACTIVE_V1] != 1.0:
+            return row
+        class_id = int(values[wire.AGENT_FEATURE_CLASS_ID_V1])
+        class_mechanics = catalog.class_mechanics[class_id]
+        values[wire.AGENT_FEATURE_CAPABILITY_ULTIMATE_COOLDOWN_DURATION_V1] = float(
+            class_mechanics.ultimate_cooldown_steps
+        )
+        for channel, status in enumerate(catalog.status_channels):
+            active_duration_column = (
+                wire.AGENT_STATUS_REMAINING_DURATION_COLUMN_BY_CHANNEL_V1[channel]
+            )
+            active_magnitude_column = (
+                wire.AGENT_STATUS_ACTIVE_MAGNITUDE_COLUMN_BY_CHANNEL_V1[channel]
+            )
+            if (
+                values[active_duration_column] > 0.0
+                and active_magnitude_column is not None
+                and status.magnitude is not None
+            ):
+                values[active_magnitude_column] = status.magnitude
+            if status.source_class_id != class_id:
+                continue
+            values[
+                wire.AGENT_STATUS_CAPABILITY_DURATION_COLUMN_BY_CHANNEL_V1[channel]
+            ] = float(status.duration_steps)
+            magnitude_column = (
+                wire.AGENT_STATUS_CAPABILITY_MAGNITUDE_COLUMN_BY_CHANNEL_V1[channel]
+            )
+            if magnitude_column is not None and status.magnitude is not None:
+                values[magnitude_column] = status.magnitude
+        aura_columns = {
+            "mage_damage_amplification": (
+                wire.AGENT_FEATURE_CAPABILITY_DAMAGE_AMPLIFICATION_MAGE_AURA_RADIUS_V1,
+                wire.AGENT_FEATURE_CAPABILITY_DAMAGE_AMPLIFICATION_MAGE_AURA_MULTIPLIER_V1,
+                wire.AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_AURA_MULTIPLIER_V1,
+            ),
+            "warrior_damage_mitigation": (
+                wire.AGENT_FEATURE_CAPABILITY_DAMAGE_MITIGATION_WARRIOR_AURA_RADIUS_V1,
+                wire.AGENT_FEATURE_CAPABILITY_DAMAGE_MITIGATION_WARRIOR_AURA_MULTIPLIER_V1,
+                wire.AGENT_FEATURE_DAMAGE_MITIGATION_WARRIOR_AURA_MULTIPLIER_V1,
+            ),
+        }
+        for aura in catalog.aura_mechanics:
+            if aura.emitter_class_id != class_id:
+                continue
+            radius_column, capability_column, active_column = aura_columns[aura.aura_id]
+            values[radius_column] = aura.radius
+            values[capability_column] = aura.per_emitter_multiplier
+            if values[active_column] != 1.0:
+                values[active_column] = aura.per_emitter_multiplier
+        return tuple(values)
+
+    def with_tuned_catalog(
+        trajectory: CapturedEvaluationTrajectory,
+    ) -> CapturedEvaluationTrajectory:
+        catalog = build_tuned_catalog(trajectory.context.static_mechanics_catalog)
+        context_payload = trajectory.context.model_dump(mode="python")
+        context_payload["static_mechanics_catalog"] = catalog.model_dump(mode="python")
+        frames: list[EvaluationFrameV1] = []
+        for frame in trajectory.frames:
+            frame_payload = frame.model_dump(mode="python")
+            observation = frame.base_observation.model_dump(mode="python")
+            observation["self_features"] = tuple(
+                tuned_feature_row(row, catalog)
+                for row in frame.base_observation.self_features
+            )
+            observation["ally_unit_features"] = tuple(
+                tuple(tuned_feature_row(row, catalog) for row in recipient_rows)
+                for recipient_rows in frame.base_observation.ally_unit_features
+            )
+            observation["enemy_unit_features"] = tuple(
+                tuple(tuned_feature_row(row, catalog) for row in recipient_rows)
+                for recipient_rows in frame.base_observation.enemy_unit_features
+            )
+            frame_payload["base_observation"] = observation
+            frames.append(EvaluationFrameV1.model_validate(frame_payload))
+        return CapturedEvaluationTrajectory(
+            context=EvaluationEpisodeContextV1.model_validate(context_payload),
+            frames=tuple(frames),
+            transitions=trajectory.transitions,
+        )
+
+    tuned_no_shared = with_tuned_catalog(five_frames.cases.no_shared)
+    tuned_shared = with_tuned_catalog(five_frames.cases.shared)
+    tuned_cases = _InspectionCases(
+        no_shared=tuned_no_shared,
+        shared=tuned_shared,
+        oracle_scenes=_oracle_scenes(tuned_no_shared),
+    )
+    tuned_frames = _five_frames_from_cases(tuned_cases)
+    tuned_catalog = tuned_no_shared.context.static_mechanics_catalog
+    original_catalog = five_frames.cases.no_shared.context.static_mechanics_catalog
+
+    exposed_class_ids: set[int] = set()
+    exposed_status_ids: set[str] = set()
+    exposed_aura_ids: set[str] = set()
+    assert {frame.presentation_kind for frame in tuned_frames.rows} == {
+        "live_oracle",
+        "live_no_shared_obs_agent_pov",
+        "replay_oracle",
+        "replay_no_shared_obs_agent_pov",
+        "replay_shared_obs_agent_pov",
+    }
+    for frame in tuned_frames.rows:
+        endpoint = frame.current_endpoint
+        if isinstance(endpoint, OracleAuthorizedCurrentEndpointV1):
+            public_scene = endpoint.scene
+        else:
+            public_scene = endpoint.parts.scene
+        public_rows = public_scene.class_mechanics
+        assert public_rows
+        for public_row in public_rows:
+            exposed_class_ids.add(public_row.class_id)
+            expected_class = tuned_catalog.class_mechanics[public_row.class_id]
+            original_class = original_catalog.class_mechanics[public_row.class_id]
+            assert public_row.ultimate_cooldown_steps == (
+                expected_class.ultimate_cooldown_steps
+            )
+            assert public_row.ultimate_cooldown_steps != (
+                original_class.ultimate_cooldown_steps
+            )
+
+            expected_statuses = tuple(
+                row
+                for row in tuned_catalog.status_channels
+                if row.source_class_id == public_row.class_id
+            )
+            original_statuses = {
+                row.status_id: row
+                for row in original_catalog.status_channels
+                if row.source_class_id == public_row.class_id
+            }
+            assert tuple(
+                (row.status_id, row.duration_steps, row.magnitude)
+                for row in public_row.status_mechanics
+            ) == tuple(
+                (row.status_id, row.duration_steps, row.magnitude)
+                for row in expected_statuses
+            )
+            for status in public_row.status_mechanics:
+                exposed_status_ids.add(status.status_id)
+                assert (
+                    status.duration_steps
+                    != original_statuses[status.status_id].duration_steps
+                )
+
+            expected_auras = tuple(
+                row
+                for row in tuned_catalog.aura_mechanics
+                if row.emitter_class_id == public_row.class_id
+            )
+            original_auras = {
+                row.aura_id: row
+                for row in original_catalog.aura_mechanics
+                if row.emitter_class_id == public_row.class_id
+            }
+            assert tuple(
+                (
+                    row.aura_id,
+                    row.radius,
+                    row.per_emitter_multiplier,
+                    row.clamp_value,
+                )
+                for row in public_row.aura_mechanics
+            ) == tuple(
+                (
+                    row.aura_id,
+                    row.radius,
+                    row.per_emitter_multiplier,
+                    row.clamp_value,
+                )
+                for row in expected_auras
+            )
+            for aura in public_row.aura_mechanics:
+                exposed_aura_ids.add(aura.aura_id)
+                assert (
+                    aura.per_emitter_multiplier
+                    != original_auras[aura.aura_id].per_emitter_multiplier
+                )
+
+    assert exposed_class_ids == {1, 2, 3, 4, 5}
+    assert exposed_status_ids == {
+        row.status_id for row in tuned_catalog.status_channels
+    }
+    assert exposed_aura_ids == {row.aura_id for row in tuned_catalog.aura_mechanics}
 
 
 def test_replay_oracle_selected_axis_state_matrix(

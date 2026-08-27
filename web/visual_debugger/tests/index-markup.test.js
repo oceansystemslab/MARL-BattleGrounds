@@ -158,7 +158,7 @@ test("shared shell uses the requested details and visual-filter controls without
     /<button type="button" data-key="Tab">Next actor<\/button>[\s\S]*<button type="button" data-key="Tab" data-shift="true">/u,
   );
   assert.match(markup, /<summary>Visual Key<\/summary>/u);
-  assert.match(markup, /id="visual-filter-count"[^>]*>18 enabled</u);
+  assert.match(markup, /id="visual-filter-count"[^>]*>19 enabled</u);
   assert.match(
     markup,
     /id="enable-all-visual-filters-button"[^>]*disabled[^>]*>\s*Enable All\s*<\/button>/u,
@@ -377,14 +377,14 @@ test("battlefield support owns visible instructions, product controls, and minim
   assert.doesNotMatch(markup, /id="battlefield-instructions"[^>]*class="[^"]*sr-only/u);
 
   const utilities = elementBody(markup, "battlefield-utilities", "fieldset");
-  for (const id of [
-    "live-ranges-button",
-    "replay-ranges-button",
-    "replay-clear-reference-button",
-  ]) {
-    assert.match(utilities, new RegExp(`id="${id}"`, "u"));
+  const visualFilters = elementBody(markup, "visual-filters", "details");
+  for (const id of ["live-ranges-button", "replay-ranges-button"]) {
+    assert.doesNotMatch(utilities, new RegExp(`id="${id}"`, "u"));
+    assert.match(visualFilters, new RegExp(`id="${id}"`, "u"));
     assert.equal([...markup.matchAll(new RegExp(`id="${id}"`, "gu"))].length, 1);
   }
+  assert.match(utilities, /id="replay-clear-reference-button"/u);
+  assert.equal([...markup.matchAll(/id="replay-clear-reference-button"/gu)].length, 1);
   assert.match(utilities, />Clear Selection<\/button>/u);
   assert.doesNotMatch(markup, /Clear Reference/u);
 

@@ -536,9 +536,6 @@ test("main distinguishes delayed programmatic details toggles from user intent",
 
 test("main shares the Agent Details latch and rejects stale local keys and focus", async () => {
   const source = await readFile(mainUrl, "utf8");
-  const showStart = source.indexOf("function showSemanticInspector(");
-  const showEnd = source.indexOf("function registerControlHelp()", showStart);
-  const show = source.slice(showStart, showEnd);
   const openStart = source.indexOf("function openAgentDetails()");
   const openEnd = source.indexOf(
     "function closeAgentDetailsWithoutLatching()",
@@ -563,7 +560,14 @@ test("main shares the Agent Details latch and rejects stale local keys and focus
   );
   const restore = source.slice(restoreStart, restoreEnd);
 
-  assert.match(show, /openAgentDetails\(\);/u);
+  assert.match(source, /let activatedAgentPublicId = null;/u);
+  assert.doesNotMatch(source, /onInspect:\s*showSemanticInspector/u);
+  assert.doesNotMatch(source, /function showSemanticInspector\(/u);
+  assertSourceOrder(
+    activation,
+    "activatedAgentPublicId = String(activation.agent.public_agent_id);",
+    "openAgentDetails();",
+  );
   assert.match(activation, /openAgentDetails\(\);/u);
   assert.match(open, /!preference\.agentDetailsAutoOpenAllowed/u);
   assert.match(reconcile, /preference\.localInspection\.presentationKey = null;/u);
@@ -583,8 +587,23 @@ test("main shares the Agent Details latch and rejects stale local keys and focus
   );
   assert.match(
     source,
-    /retainLiveAgentPreferences[\s\S]*Object\.entries\(previousPreference\.disclosures\)[\s\S]*previousPreference\.localRanges\.visible/u,
+    /retainLiveAgentPreferences[\s\S]*Object\.entries\(previousPreference\.disclosures\)/u,
   );
+  assert.match(source, /let agentLocalRangesVisible = true;/u);
+  assert.match(source, /let agentLocalRangesInitialized = false;/u);
+  assert.match(
+    source,
+    /!agentLocalRangesInitialized[\s\S]*agentLocalRangesVisible = joined\.transport\.show_ranges;[\s\S]*agentLocalRangesInitialized = true;/u,
+  );
+  assert.match(
+    source,
+    /function installedLocalPresentationPreference\([\s\S]*rangesVisible: agentLocalRangesVisible/u,
+  );
+  assert.match(
+    source,
+    /function setAgentLocalRangesVisible\([\s\S]*agentLocalRangesVisible = visible;/u,
+  );
+  assert.doesNotMatch(source, /preference\.localRanges/u);
   assert.match(
     restore,
     /generation !== presentationPreferenceGeneration[\s\S]*sameAuthorizedPresentationPreferenceKey\(installed\.authorityKey, authorityKey\)/u,
@@ -757,9 +776,9 @@ test("only certified activation installs agent documentation while compact owner
     readFile(mainUrl, "utf8"),
     readFile(panelsUrl, "utf8"),
   ]);
-  const fenceStart = source.indexOf("function isAuthorizedCompactAgentOwner(");
-  const fenceEnd = source.indexOf("function registerControlHelp()", fenceStart);
-  const fence = source.slice(fenceStart, fenceEnd);
+  const tooltipStart = source.indexOf("const tooltipController");
+  const tooltipEnd = source.indexOf("let activatedAgentPublicId", tooltipStart);
+  const tooltip = source.slice(tooltipStart, tooltipEnd);
   const activationStart = source.indexOf("function activateAuthorizedAgent(");
   const activationEnd = source.indexOf("function render()", activationStart);
   const activation = source.slice(activationStart, activationEnd);
@@ -776,21 +795,19 @@ test("only certified activation installs agent documentation while compact owner
   );
   const roster = panelsSource.slice(rosterStart, rosterEnd);
 
-  assert.match(fence, /isAuthorizedPresentationFrame\(presentation\)/u);
-  assert.match(fence, /installedAuthorityIsCoherent\(\)/u);
-  assert.match(fence, /authorizedAgentForPresentationKey\(/u);
+  assert.doesNotMatch(tooltip, /onInspect/u);
   assert.match(
-    fence,
-    /normalized\.kind === "agent"[\s\S]*isAuthorizedCompactAgentOwner\(context\.owner\)[\s\S]*return;/u,
+    activation,
+    /activatedAgentPublicId = String\(activation\.agent\.public_agent_id\);/u,
   );
   assertSourceOrder(
-    fence,
-    "isAuthorizedCompactAgentOwner(context.owner)",
-    "renderSemanticInspector(",
+    activation,
+    "setLocalInspectedPresentationKey",
+    "activatedAgentPublicId = String(activation.agent.public_agent_id);",
   );
-  assertSourceOrder(activation, "setLocalInspectedPresentationKey", "render();");
   assert.match(render, /panels\.render\(presentationFrame,/u);
   assert.match(render, /localInspectedPresentationKey:/u);
+  assert.match(render, /activatedAgentPublicId,/u);
   assert.match(
     roster,
     /registerTooltipOwner\(\s*row\.primaryButton,[\s\S]*?\{ inspectable: false \},\s*\);/u,
@@ -1215,11 +1232,26 @@ test("main renders ranges and inspector chrome only from installed presentation 
   const inspectorSource = source.slice(inspectorStart, inspectorEnd);
   const replayReferenceSource = source.slice(replayReferenceStart, replayReferenceEnd);
   assert.match(visibilitySource, /isAuthorizedPresentationFrame\(presentation\)/u);
-  assert.match(visibilitySource, /installedAuthorityIsCoherent\(\)/u);
   assert.match(visibilitySource, /state\.presentation !== presentation/u);
   assert.match(
     visibilitySource,
-    /authorizedPresentationAudience\(presentation\) === "researcher"[\s\S]*state\.frame\?\.show_ranges === true[\s\S]*localPreference\?\.rangesVisible === true/u,
+    /authorizedPresentationAudience\(presentation\) === "researcher"[\s\S]*confirmedResearcherRangesVisible[\s\S]*localPreference\?\.rangesVisible === true/u,
+  );
+  assert.match(
+    source,
+    /authorizedPresentationAudience\(joined\.presentation\) === "researcher"[\s\S]*confirmedResearcherRangesVisible = joined\.transport\.show_ranges;/u,
+  );
+  assert.match(
+    source,
+    /productIdentity\.product_kind === "replay_viewer"[\s\S]*"target_selection_visuals",\s*false/u,
+  );
+  assert.match(
+    source,
+    /const visibleControlCount = EXPECTED_VISUAL_FILTER_COUNT \+ 1;[\s\S]*enabledControlCount/u,
+  );
+  assert.match(
+    source,
+    /function applyAllVisualControls\(enabled\)[\s\S]*applyVisualFilterAction\([\s\S]*setActiveRangesVisible\(enabled\)/u,
   );
   assert.equal(
     [
@@ -1231,14 +1263,12 @@ test("main renders ranges and inspector chrome only from installed presentation 
   );
   assert.match(
     inspectorSource,
-    /authorizedInspectorView\(\s*state\.presentation,\s*installedLocalInspectedPresentationKey\(state\.presentation\),\s*\)/u,
+    /authorizedInspectorView\(\s*state\.presentation,\s*installedLocalInspectedPresentationKey\(state\.presentation\),\s*activatedAgentPublicId,\s*\)/u,
   );
   assert.match(inspectorSource, /AUTHORIZED_INSPECTOR_TITLE/u);
   assert.match(inspectorSource, /inspector\.owner_class_accent/u);
-  assert.match(
-    source,
-    /renderSemanticInspector\(elements\.selectionCard, normalized\);\s*applyAuthorizedInspectorChrome\(\);/u,
-  );
+  assert.match(inspectorSource, /if \(activatedAgentPublicId === null\)/u);
+  assert.doesNotMatch(source, /onInspect:\s*showSemanticInspector/u);
   assert.doesNotMatch(source, /selectionHeading\.textContent = "Agent Details"/u);
   assert.match(replayReferenceSource, /if \(!isReplayMode\(\)\) \{\s*return;/u);
   assert.equal(

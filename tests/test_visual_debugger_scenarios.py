@@ -13,6 +13,11 @@ from scripts.dev.visual_debugger.model import (
     DebuggerScenario,
     DebuggerSession,
 )
+from scripts.dev.visual_debugger.presentation_protocol import (
+    LiveNoSharedObsAuthorizedPresentationFrameV1,
+    LiveOracleAuthorizedPresentationFrameV1,
+)
+from scripts.dev.visual_debugger.protocol import CommandRequestV1, KeyboardCommandV1
 from scripts.dev.visual_debugger.scenarios import (
     RESEARCHER_SCENARIOS,
     SCENARIOS,
@@ -22,6 +27,7 @@ from scripts.dev.visual_debugger.scenarios import (
     iter_scenario_summaries,
     list_scenarios,
 )
+from scripts.dev.visual_debugger.service import DebuggerService
 from scripts.dev.visual_debugger.targeting import global_slot_to_target_action
 from tests.visual_debugger_fixtures import (
     debugger_test_launch_specification,
@@ -68,6 +74,9 @@ from marl_battlegrounds.evaluation.models import (
     RecipientHealthResolutionEventV1,
     SourceDamageOutputEventV1,
     StatusLifecycleEventBaseV1,
+)
+from marl_battlegrounds.rendering.authorized_presentation import (
+    AuthorizedBattlefieldSceneV1,
 )
 from marl_battlegrounds.rendering.evaluation_adapter import (
     build_evaluation_battlefield_scene_v2,
@@ -146,6 +155,183 @@ def _researcher_scene(session: DebuggerSession) -> BattlefieldSceneV2:
         transition_view=session.incoming_evaluation_view,
         status_source_evidence_state=session.status_source_evidence_state,
     )
+
+
+def _authoritative_visual_tokens(
+    scenarios: tuple[DebuggerScenario, ...],
+) -> set[str]:
+    """Derive paintable evidence from transitions and authorized scene leaves."""
+    tokens: set[str] = set()
+
+    def record_scene(scene: AuthorizedBattlefieldSceneV1) -> None:
+        for field in scene.aura_fields:
+            if field.source_alive:
+                tokens.add(f"aura_field:{field.aura_id}")
+        for agent in scene.agents:
+            for modifier in agent.aura_modifiers:
+                if modifier.multiplier != 1.0:
+                    tokens.add(f"aura_modifier:{modifier.aura_id}")
+            for status in agent.statuses:
+                tokens.add(f"duration_status:{status.status_id}")
+            if agent.spawn_shield_remaining > 0:
+                tokens.add("spawn_shield")
+            if agent.ultimate_cooldown_remaining > 0:
+                tokens.add("cooldown_badge")
+            if agent.steps_until_out_of_combat > 0:
+                tokens.add("in_combat_badge")
+
+    def record_authorized_scenes(
+        oracle_service: DebuggerService,
+        agent_service: DebuggerService,
+    ) -> None:
+        oracle_result = oracle_service.current_presentation()
+        agent_result = agent_service.current_presentation()
+        assert oracle_result.outcome == agent_result.outcome == "response"
+        oracle = oracle_result.payload
+        agent = agent_result.payload
+        assert type(oracle) is LiveOracleAuthorizedPresentationFrameV1
+        assert type(agent) is LiveNoSharedObsAuthorizedPresentationFrameV1
+        record_scene(oracle.current_endpoint.scene)
+        record_scene(agent.current_endpoint.parts.scene)
+
+    for scenario in scenarios:
+        if not scenario.frames:
+            continue
+        _, session = _session(scenario.name)
+        oracle_service = DebuggerService(
+            session,
+            view_mode="researcher",
+            preset="analysis",
+            include_stress=True,
+            session_id=f"coverage-oracle-{session.scenario_name}",
+        )
+        agent_service = DebuggerService(
+            session,
+            view_mode="pov",
+            preset="analysis",
+            include_stress=True,
+            session_id=f"coverage-agent-{session.scenario_name}",
+        )
+        record_authorized_scenes(oracle_service, agent_service)
+        for frame_index, _ in enumerate(scenario.frames):
+            for audience, service in (
+                ("oracle", oracle_service),
+                ("agent", agent_service),
+            ):
+                result = service.apply_command(
+                    CommandRequestV1(
+                        client_id=f"coverage-{audience}",
+                        command_id=f"{scenario.name}-{frame_index}",
+                        base_revision=service.revision,
+                        command=KeyboardCommandV1(key="n"),
+                    )
+                )
+                assert result.outcome == "response"
+            session = oracle_service.session
+            assert (
+                agent_service.session.current_evaluation_frame
+                == session.current_evaluation_frame
+            )
+            assert agent_service.session.incoming_evaluation_view == (
+                session.incoming_evaluation_view
+            )
+            record_authorized_scenes(oracle_service, agent_service)
+            view = session.incoming_evaluation_view
+            assert view is not None
+            status_groups: dict[tuple[int, int, str], list[str]] = {}
+            for event in view.transition.events:
+                if isinstance(event, AbilityActivatedEventV1):
+                    source_class_id = session.evaluation_context.roster[
+                        event.source_global_slot
+                    ].class_id
+                    tokens.add(
+                        f"ability:{event.ability_component}:class_{source_class_id}"
+                    )
+                if isinstance(event, RecipientHealthResolutionEventV1):
+                    tokens.add("scrolling_battle_text")
+                    if event.realized_net_health_change < 0.0:
+                        tokens.add("scrolling_battle_text:damage")
+                    elif event.realized_net_health_change > 0.0:
+                        tokens.add("scrolling_battle_text:healing")
+                    else:
+                        tokens.add("scrolling_battle_text:unchanged")
+                if isinstance(event, StatusLifecycleEventBaseV1):
+                    status_groups.setdefault(
+                        (
+                            event.recipient_global_slot,
+                            event.status_channel,
+                            event.status_id,
+                        ),
+                        [],
+                    ).append(event.event_type)
+                if event.event_type == "agent_left_combat":
+                    tokens.add("status_expiry:in_combat")
+                tokens.update(
+                    {
+                        "health_regeneration"
+                        if event.event_type == "health_regenerated"
+                        else "",
+                        "cooldown_ready"
+                        if event.event_type == "cooldown_ready"
+                        else "",
+                        "death_effect" if event.event_type == "agent_died" else "",
+                        "respawn_wave"
+                        if event.event_type == "respawn_wave_occurred"
+                        else "",
+                        "resurrection_effect"
+                        if event.event_type == "agent_respawned"
+                        else "",
+                        "spawn_shield_expiry"
+                        if event.event_type == "spawn_shield_expired"
+                        else "",
+                    }
+                )
+            for (_, _, status_id), event_types in status_groups.items():
+                if "status_cleared_by_new_death" in event_types:
+                    tokens.add("status_clear_on_death")
+                elif any(
+                    event_type in ("status_applied", "status_refreshed_or_extended")
+                    for event_type in event_types
+                ):
+                    tokens.add(f"status_application:{status_id}")
+                elif "status_broken_by_damage" in event_types:
+                    tokens.add("freezing_trap_break")
+                elif "status_aged_to_zero" in event_types:
+                    tokens.add(f"status_expiry:{status_id}")
+    tokens.discard("")
+    return tokens
+
+
+def _required_authoritative_visual_tokens(session: DebuggerSession) -> set[str]:
+    """Return the catalog-derived mechanic tokens requiring paired scenarios."""
+    catalog = session.evaluation_context.static_mechanics_catalog
+    status_ids = tuple(row.status_id for row in catalog.status_channels)
+    aura_ids = tuple(row.aura_id for row in catalog.aura_mechanics)
+    return {
+        *(f"ability:basic:class_{class_id}" for class_id in range(1, 6)),
+        *(f"ability:ultimate:class_{class_id}" for class_id in range(1, 6)),
+        *(f"aura_field:{aura_id}" for aura_id in aura_ids),
+        *(f"aura_modifier:{aura_id}" for aura_id in aura_ids),
+        *(f"duration_status:{status_id}" for status_id in status_ids),
+        *(f"status_application:{status_id}" for status_id in status_ids),
+        *(f"status_expiry:{status_id}" for status_id in status_ids),
+        "spawn_shield",
+        "cooldown_badge",
+        "in_combat_badge",
+        "scrolling_battle_text",
+        "scrolling_battle_text:damage",
+        "scrolling_battle_text:healing",
+        "scrolling_battle_text:unchanged",
+        "status_expiry:in_combat",
+        "health_regeneration",
+        "cooldown_ready",
+        "freezing_trap_break",
+        "status_clear_on_death",
+        "death_effect",
+        "respawn_wave",
+        "resurrection_effect",
+        "spawn_shield_expiry",
+    }
 
 
 def _assert_health_matches_researcher_scene(
@@ -369,6 +555,7 @@ def test_all_scenario_configs_validate_and_initialize_authored_state() -> None:
         "charge_convergence",
         "trap_lifecycle",
         "max_status_stack",
+        "lifecycle_density",
     )
     assert tuple(RESEARCHER_SCENARIOS) == researcher_names
     assert tuple(STRESS_SCENARIOS) == stress_names
@@ -397,6 +584,7 @@ def test_all_scenario_configs_validate_and_initialize_authored_state() -> None:
         cycle_scenario_name("charge_convergence", 1, include_stress=True)
         == "trap_lifecycle"
     )
+    assert cycle_scenario_name("lifecycle_density", 1) == "arena_5v5"
 
     for scenario in list_scenarios(include_stress=True):
         config, authored_state = scenario.build_scenario()
@@ -427,6 +615,7 @@ def test_all_scenario_configs_validate_and_initialize_authored_state() -> None:
         if scenario.name not in {
             "death_respawn_cycle",
             "recovery_refresh_cycle",
+            "lifecycle_density",
         }:
             assert bool(
                 jnp.array_equal(
@@ -439,7 +628,7 @@ def test_all_scenario_configs_validate_and_initialize_authored_state() -> None:
 def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> None:
     expected_configs = {
         "arena_5v5": (
-            (18.0, 12.0),
+            (20.0, 10.0),
             tuple(range(10)),
             (
                 MAGE_CLASS_ID,
@@ -454,16 +643,16 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
                 PRIEST_CLASS_ID,
             ),
             (
-                (3.0, 2.0),
-                (3.0, 4.0),
-                (3.0, 6.0),
-                (3.0, 8.0),
-                (3.0, 10.0),
-                (15.0, 10.0),
-                (15.0, 8.0),
-                (15.0, 6.0),
-                (15.0, 4.0),
-                (15.0, 2.0),
+                (3.0, 1.0),
+                (3.0, 3.0),
+                (3.0, 5.0),
+                (3.0, 7.0),
+                (3.0, 9.0),
+                (17.0, 1.0),
+                (17.0, 3.0),
+                (17.0, 5.0),
+                (17.0, 7.0),
+                (17.0, 9.0),
             ),
             "interactive",
             0,
@@ -798,6 +987,19 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
             "scripted",
             0,
         ),
+        "lifecycle_density": (
+            (18.0, 12.0),
+            (0, 1, 2, 5),
+            (
+                MAGE_CLASS_ID,
+                HUNTER_CLASS_ID,
+                PRIEST_CLASS_ID,
+                ROGUE_CLASS_ID,
+            ),
+            ((13.0, 1.5), (13.0, 3.0), (3.0, 10.0), (14.5, 2.25)),
+            "scripted",
+            5,
+        ),
     }
     for name, (
         map_size,
@@ -851,6 +1053,10 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
                 (4, MOVE_STAY, 2, 1),
             ),
             ((2, MOVE_STAY, 6, 0),),
+            (),
+            (),
+            (),
+            (),
         ),
         "aura_crossfire": (((2, MOVE_STAY, 7, 0), (7, MOVE_STAY, 2, 0)),),
         "stacked_team_auras": (((4, MOVE_STAY, 9, 0), (9, MOVE_STAY, 4, 0)),),
@@ -870,6 +1076,7 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
             ((5, MOVE_EAST, None, 0),),
         ),
         "team_focus_crossfire": (
+            ((1, MOVE_STAY, 5, 0), (6, MOVE_STAY, 5, 0)),
             ((2, MOVE_STAY, 5, 0),),
             ((2, MOVE_STAY, 5, 0),),
             (
@@ -958,6 +1165,7 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
             ),
         ),
         "moving_focus_crossfire": (
+            ((1, MOVE_STAY, 5, 0), (6, MOVE_STAY, 5, 0)),
             (
                 (0, MOVE_EAST, 5, 0),
                 (1, MOVE_EAST, 5, 0),
@@ -997,6 +1205,20 @@ def test_scenario_registry_exact_maps_rosters_positions_modes_and_frames() -> No
                 (7, MOVE_STAY, 0, 0),
                 (8, MOVE_STAY, 0, 1),
             ),
+            ((1, MOVE_STAY, 0, 1),),
+            (),
+            (),
+            (),
+            (),
+            (),
+        ),
+        "lifecycle_density": (
+            ((0, MOVE_STAY, 5, 0), (1, MOVE_STAY, 5, 0)),
+            (),
+            (),
+            (),
+            (),
+            (),
         ),
     }
     for name, expected in expected_frames.items():
@@ -1197,6 +1419,19 @@ def test_researcher_scenarios_cover_every_canonical_event_kind() -> None:
     assert observed_event_kinds == canonical_event_kinds
 
 
+def test_every_authoritative_visual_mechanic_has_regular_and_stress_evidence() -> None:
+    """Enforce executable paired coverage without trusting scenario prose."""
+    _, reference = _session("basic_support")
+    required = _required_authoritative_visual_tokens(reference)
+    researcher_tokens = _authoritative_visual_tokens(
+        tuple(RESEARCHER_SCENARIOS.values())
+    )
+    stress_tokens = _authoritative_visual_tokens(tuple(STRESS_SCENARIOS.values()))
+
+    assert required <= researcher_tokens
+    assert required <= stress_tokens
+
+
 def test_death_respawn_cycle_reference_trajectory() -> None:
     _, session = _session("death_respawn_cycle")
 
@@ -1342,16 +1577,16 @@ def test_arena_5v5_exact_map_roster_positions_obstacles_and_initial_facts() -> N
     config = session.config
     expected_positions = np.asarray(
         (
-            (3, 2),
-            (3, 4),
-            (3, 6),
-            (3, 8),
-            (3, 10),
-            (15, 10),
-            (15, 8),
-            (15, 6),
-            (15, 4),
-            (15, 2),
+            (3, 1),
+            (3, 3),
+            (3, 5),
+            (3, 7),
+            (3, 9),
+            (17, 1),
+            (17, 3),
+            (17, 5),
+            (17, 7),
+            (17, 9),
         ),
         dtype=np.float32,
     )
@@ -1359,8 +1594,24 @@ def test_arena_5v5_exact_map_roster_positions_obstacles_and_initial_facts() -> N
     assert scenario.mode == "interactive"
     assert scenario.frames == ()
     assert scenario.default_controlled_slot == 0
-    assert (config.map_width, config.map_height) == (18.0, 12.0)
+    assert (config.map_width, config.map_height) == (20.0, 10.0)
     np.testing.assert_array_equal(session.state.agent_positions, expected_positions)
+    np.testing.assert_array_equal(
+        session.state.agent_positions[:5, 1],
+        session.state.agent_positions[5:, 1],
+    )
+    np.testing.assert_array_equal(
+        session.state.agent_positions[:5, 0] + session.state.agent_positions[5:, 0],
+        np.full((5,), config.map_width, dtype=np.float32),
+    )
+    np.testing.assert_array_equal(
+        config.team_spawn_pad_positions[:, :, 0],
+        np.asarray(((1.5,) * 5, (18.5,) * 5), dtype=np.float32),
+    )
+    np.testing.assert_allclose(
+        config.team_spawn_pad_positions[:, :, 1],
+        np.asarray(((1.5, 3.25, 5.0, 6.75, 8.5),) * 2, dtype=np.float32),
+    )
     catalog = session.evaluation_context.static_mechanics_catalog
     np.testing.assert_array_equal(
         session.state.current_health,
@@ -1371,12 +1622,12 @@ def test_arena_5v5_exact_map_roster_positions_obstacles_and_initial_facts() -> N
     )
     first, second = np.asarray(config.obstacles[:2])
     assert int(first[OBSTACLE_FEATURE_TYPE]) == OBSTACLE_TYPE_PILLAR
-    assert float(first[OBSTACLE_FEATURE_X]) == 9.0
+    assert float(first[OBSTACLE_FEATURE_X]) == 10.0
     assert float(first[OBSTACLE_FEATURE_Y]) == 3.0
     assert float(first[OBSTACLE_FEATURE_RADIUS]) == pytest.approx(0.9)
     assert float(first[OBSTACLE_FEATURE_ACTIVE]) == 1.0
     assert int(second[OBSTACLE_FEATURE_TYPE]) == OBSTACLE_TYPE_WALL
-    assert float(second[OBSTACLE_FEATURE_X]) == 9.0
+    assert float(second[OBSTACLE_FEATURE_X]) == 10.0
     assert float(second[OBSTACLE_FEATURE_Y]) == pytest.approx(7.8)
     assert float(second[OBSTACLE_FEATURE_WIDTH]) == 3.0
     assert float(second[OBSTACLE_FEATURE_HEIGHT]) == 0.5
@@ -1544,6 +1795,23 @@ def test_ultimate_showcase_reference_trajectory() -> None:
         )
         == expected_trap_event
     )
+
+    tracked_slots = (0, 5, 6, 7)
+    previous_by_slot = {
+        global_slot: _scene_status_durations(session, global_slot)
+        for global_slot in tracked_slots
+    }
+    for _ in range(4):
+        session = submit_next_script_frame(session)
+        for global_slot in tracked_slots:
+            expected = _expected_status_durations_after_transition(
+                session,
+                global_slot=global_slot,
+                previous=previous_by_slot[global_slot],
+            )
+            assert _scene_status_durations(session, global_slot) == expected
+            previous_by_slot[global_slot] = expected
+    assert all(not statuses for statuses in previous_by_slot.values())
 
 
 def test_aura_crossfire_reference_trajectory() -> None:
@@ -1815,6 +2083,22 @@ def test_team_focus_crossfire_reference_trajectory() -> None:
     _, session = _session("team_focus_crossfire")
 
     session = submit_next_script_frame(session)
+    balanced_view = session.incoming_evaluation_view
+    assert balanced_view is not None
+    assert _canonical_ability_signatures(session) == (
+        ("basic", 1, 5),
+        ("basic", 6, 5),
+    )
+    balanced = next(
+        event
+        for event in balanced_view.transition.events
+        if isinstance(event, RecipientHealthResolutionEventV1)
+        and event.recipient_global_slot == 5
+    )
+    assert balanced.realized_net_health_change == 0.0
+    assert balanced.transition_start_health == balanced.health_after_combat_resolution
+
+    session = submit_next_script_frame(session)
     first_view = session.incoming_evaluation_view
     assert first_view is not None
     assert _canonical_ability_signatures(session) == (("basic", 2, 5),)
@@ -1968,6 +2252,21 @@ def test_moving_basic_crossfire_reference_trajectory() -> None:
 def test_moving_focus_crossfire_reference_trajectory() -> None:
     _, session = _session("moving_focus_crossfire")
     involved_slots = (0, 1, 2, 3, 5, 6, 7, 8)
+    session = submit_next_script_frame(session)
+    balanced_view = session.incoming_evaluation_view
+    assert balanced_view is not None
+    assert _canonical_ability_signatures(session) == (
+        ("basic", 1, 5),
+        ("basic", 6, 5),
+    )
+    balanced = next(
+        event
+        for event in balanced_view.transition.events
+        if isinstance(event, RecipientHealthResolutionEventV1)
+        and event.recipient_global_slot == 5
+    )
+    assert balanced.realized_net_health_change == 0.0
+
     before = np.asarray(session.state.agent_positions).copy()
     session = submit_next_script_frame(session)
 
@@ -2112,3 +2411,155 @@ def test_max_status_stack_reference_trajectory() -> None:
         _catalog_status_duration(session, "mage_burst_damage_amplification")
     )
     assert int(session.state.stun_durations[0, STUN_CHANNEL_HUNTER_TRAP]) > 0
+
+    catalog_status_ids = {
+        row.status_id
+        for row in session.evaluation_context.static_mechanics_catalog.status_channels
+    }
+    previous = _scene_status_durations(session, 0)
+    assert set(previous) == catalog_status_ids
+    expired_status_ids: list[str] = []
+
+    session = submit_next_script_frame(session)
+    assert _canonical_ability_signatures(session) == (("ultimate", 1, 0),)
+    _assert_health_matches_researcher_scene(session, (0,))
+    expected = _expected_status_durations_after_transition(
+        session,
+        global_slot=0,
+        previous=previous,
+    )
+    assert _scene_status_durations(session, 0) == expected
+    previous = expected
+    view = session.incoming_evaluation_view
+    assert view is not None
+    expired_status_ids.extend(
+        event.status_id
+        for event in view.transition.events
+        if isinstance(event, StatusLifecycleEventBaseV1)
+        and event.recipient_global_slot == 0
+        and event.event_type == "status_aged_to_zero"
+    )
+
+    for _ in range(5):
+        session = submit_next_script_frame(session)
+        expected = _expected_status_durations_after_transition(
+            session,
+            global_slot=0,
+            previous=previous,
+        )
+        assert _scene_status_durations(session, 0) == expected
+        previous = expected
+        view = session.incoming_evaluation_view
+        assert view is not None
+        expired_status_ids.extend(
+            event.status_id
+            for event in view.transition.events
+            if isinstance(event, StatusLifecycleEventBaseV1)
+            and event.recipient_global_slot == 0
+            and event.event_type == "status_aged_to_zero"
+        )
+
+    assert previous == {}
+    assert len(expired_status_ids) == len(set(expired_status_ids))
+    assert set(expired_status_ids) == catalog_status_ids
+
+
+def test_lifecycle_density_reference_trajectory() -> None:
+    scenario, session = _session("lifecycle_density")
+    initial_priest_health = next(
+        row.current_health
+        for row in _researcher_scene(session).agents
+        if row.global_slot == 2
+    )
+    initial_rogue_status_ids = set(_scene_status_ids(session, 5))
+    assert initial_rogue_status_ids == {
+        "warrior_charge_slow",
+        "hunter_trap_stun",
+        "rogue_poison_anti_heal",
+    }
+
+    session = submit_next_script_frame(session)
+    first_view = session.incoming_evaluation_view
+    assert first_view is not None
+    assert (
+        sum(
+            event.event_type == "lethal_damage_contribution"
+            for event in first_view.transition.events
+        )
+        == 2
+    )
+    lifecycle_by_type = {
+        event_type: {
+            event.status_id
+            for event in first_view.transition.events
+            if isinstance(event, StatusLifecycleEventBaseV1)
+            and event.event_type == event_type
+        }
+        for event_type in (
+            "status_applied",
+            "status_broken_by_damage",
+            "status_cleared_by_new_death",
+        )
+    }
+    assert lifecycle_by_type == {
+        "status_applied": {"hunter_basic_slow"},
+        "status_broken_by_damage": {"hunter_trap_stun"},
+        "status_cleared_by_new_death": {
+            "warrior_charge_slow",
+            "hunter_basic_slow",
+            "rogue_poison_anti_heal",
+        },
+    }
+    assert (
+        initial_rogue_status_ids - lifecycle_by_type["status_broken_by_damage"]
+    ) <= lifecycle_by_type["status_cleared_by_new_death"]
+    assert {event.event_type for event in first_view.transition.events}.issuperset(
+        {"agent_died", "health_regenerated", "cooldown_ready"}
+    )
+    first_scene_by_slot = {
+        row.global_slot: row for row in _researcher_scene(session).agents
+    }
+    assert (
+        first_scene_by_slot[5].life_state,
+        first_scene_by_slot[5].current_health,
+        first_scene_by_slot[5].statuses,
+    ) == ("corpse", 0.0, ())
+    assert first_scene_by_slot[2].current_health > initial_priest_health
+    assert first_scene_by_slot[2].ultimate_cooldown_remaining == 0
+
+    session = submit_next_script_frame(session)
+    waiting = next(
+        row for row in _researcher_scene(session).agents if row.global_slot == 5
+    )
+    assert waiting.life_state == "corpse"
+
+    session = submit_next_script_frame(session)
+    respawn_view = session.incoming_evaluation_view
+    assert respawn_view is not None
+    assert {event.event_type for event in respawn_view.transition.events}.issuperset(
+        {"respawn_wave_occurred", "agent_respawned"}
+    )
+    respawned = next(
+        row for row in _researcher_scene(session).agents if row.global_slot == 5
+    )
+    shield_duration = session.config.spawn_shield_duration_steps
+    assert (
+        respawned.life_state,
+        respawned.current_health,
+        respawned.spawn_shield_remaining,
+    ) == ("alive", respawned.max_health, shield_duration)
+
+    for expected_remaining in range(shield_duration - 1, -1, -1):
+        session = submit_next_script_frame(session)
+        shielded = next(
+            row for row in _researcher_scene(session).agents if row.global_slot == 5
+        )
+        assert shielded.spawn_shield_remaining == expected_remaining
+        incoming = session.incoming_evaluation_view
+        assert incoming is not None
+        assert any(
+            event.event_type == "spawn_shield_expired"
+            for event in incoming.transition.events
+        ) == (expected_remaining == 0)
+
+    assert session.next_script_frame_index == len(scenario.frames)

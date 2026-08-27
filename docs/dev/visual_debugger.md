@@ -5,7 +5,7 @@ products with separate launchers and authority boundaries:
 
 | Product | Use it for | Canonical launcher |
 | --- | --- | --- |
-| [Combat Debugger](combat_debugger.md) | Manual live work and optional recording in the fixed 18×12 arena | `./scripts/dev/run_debug_renderer.sh` |
+| [Combat Debugger](combat_debugger.md) | Manual live work and optional recording in the fixed 20×10 arena | `./scripts/dev/run_debug_renderer.sh` |
 | [Replay Viewer](replay_viewer.md) | Existing replay artifacts, checked samples, and isolated scripted demonstrations | `./scripts/dev/run_replay_viewer.sh` |
 
 Both products use the fixed Analysis presentation and the same native browser

@@ -22,6 +22,7 @@ from tests.evaluation_fixtures import (
 
 from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
 from marl_battlegrounds.evaluation.models import (
+    EvaluationEpisodeContextV1,
     StaticMechanicsCatalogV1,
     canonical_digest_sha256,
 )
@@ -48,6 +49,10 @@ from marl_battlegrounds.rendering.authorized_presentation import (
     AuthorizedClassMechanicsV2,
     AuthorizedSpawnShieldMechanicsAvailableV2,
     authorized_class_documentation_profile_v1,
+    build_oracle_authorized_scene_v1,
+)
+from marl_battlegrounds.rendering.evaluation_adapter import (
+    build_evaluation_battlefield_scene_v2,
 )
 from marl_battlegrounds.rendering.pov_scene import (
     build_actor_pov_analyzer_projection_v1,
@@ -175,6 +180,70 @@ def _catalog_with_unrepresented_hunter_damage(
     payload = catalog.model_dump(mode="python")
     class_rows = list(cast(tuple[dict[str, object], ...], payload["class_mechanics"]))
     class_rows[3] = {**class_rows[3], "basic_raw_damage": value}
+    payload["class_mechanics"] = tuple(class_rows)
+    return _catalog_from_payload(payload)
+
+
+def _catalog_with_supported_documentation_tuning(
+    catalog: StaticMechanicsCatalogV1,
+) -> StaticMechanicsCatalogV1:
+    """Retune every documented mechanic while preserving authored claims."""
+    payload = catalog.model_dump(mode="python")
+    payload["global_slow_floor"] = 0.21
+
+    class_rows = list(cast(tuple[dict[str, object], ...], payload["class_mechanics"]))
+    basic_damage = (0.0, 14.0, 9.0, 7.0, 13.0, 0.0)
+    ultimate_damage = (0.0, 0.0, 21.0, 11.0, 37.0, 0.0)
+    basic_healing = (0.0, 0.0, 0.0, 0.0, 0.0, 9.0)
+    ultimate_healing = (0.0, 0.0, 0.0, 0.0, 0.0, 201.0)
+    for index in range(1, 6):
+        changed = dict(class_rows[index])
+        changed["ultimate_cooldown_steps"] = (
+            cast(int, changed["ultimate_cooldown_steps"]) + 1
+        )
+        changed["basic_raw_damage"] = basic_damage[index]
+        changed["ultimate_raw_damage"] = ultimate_damage[index]
+        changed["basic_raw_healing"] = basic_healing[index]
+        changed["ultimate_raw_healing"] = ultimate_healing[index]
+        class_rows[index] = changed
+    payload["class_mechanics"] = tuple(class_rows)
+
+    status_rows = list(cast(tuple[dict[str, object], ...], payload["status_channels"]))
+    for index, source in enumerate(status_rows):
+        changed = dict(source)
+        changed["duration_steps"] = cast(int, changed["duration_steps"]) + 1
+        magnitude = changed["magnitude"]
+        if magnitude is not None:
+            changed["magnitude"] = cast(float, magnitude) + 0.01
+        status_rows[index] = changed
+    payload["status_channels"] = tuple(status_rows)
+
+    aura_rows = list(cast(tuple[dict[str, object], ...], payload["aura_mechanics"]))
+    mage_aura = dict(aura_rows[0])
+    mage_aura.update(
+        radius=cast(float, mage_aura["radius"]) + 0.1,
+        per_emitter_multiplier=1.16,
+        clamp_value=1.34,
+    )
+    warrior_aura = dict(aura_rows[1])
+    warrior_aura.update(
+        radius=cast(float, warrior_aura["radius"]) + 0.1,
+        per_emitter_multiplier=0.84,
+        clamp_value=0.70,
+    )
+    payload["aura_mechanics"] = (mage_aura, warrior_aura)
+    return _catalog_from_payload(payload)
+
+
+def _catalog_with_class_mechanic_values(
+    catalog: StaticMechanicsCatalogV1,
+    *,
+    class_id: int,
+    values: dict[str, object],
+) -> StaticMechanicsCatalogV1:
+    payload = catalog.model_dump(mode="python")
+    class_rows = list(cast(tuple[dict[str, object], ...], payload["class_mechanics"]))
+    class_rows[class_id] = {**class_rows[class_id], **values}
     payload["class_mechanics"] = tuple(class_rows)
     return _catalog_from_payload(payload)
 
@@ -1404,7 +1473,7 @@ def test_visible_class_outside_v1_domain_raises_value_error_not_index_error(
         )
 
 
-def test_catalog_profile_certification_fails_closed_for_resealed_mutations(
+def test_catalog_profile_accepts_supported_tuning_and_fails_closed_for_semantic_drift(
     no_shared_trajectory: CapturedEvaluationTrajectory,
 ) -> None:
     catalog = no_shared_trajectory.context.static_mechanics_catalog
@@ -1414,16 +1483,116 @@ def test_catalog_profile_certification_fails_closed_for_resealed_mutations(
     available = authorized_class_documentation_profile_v1(catalog)
     assert type(available) is AuthorizedClassDocumentationProfileAvailableV1
 
-    mutation_labels: set[str] = set()
+    tuned_catalog = _catalog_with_supported_documentation_tuning(catalog)
+    assert tuned_catalog.canonical_digest_sha256 != (
+        AUTHORIZED_CLASS_DOCUMENTATION_CATALOG_FINGERPRINT_V1
+    )
+    assert type(authorized_class_documentation_profile_v1(tuned_catalog)) is (
+        AuthorizedClassDocumentationProfileAvailableV1
+    )
+
+    context_payload = no_shared_trajectory.context.model_dump(mode="python")
+    context_payload["static_mechanics_catalog"] = tuned_catalog.model_dump(
+        mode="python"
+    )
+    tuned_context = EvaluationEpisodeContextV1.model_validate(context_payload)
+    oracle_scene = build_evaluation_battlefield_scene_v2(
+        tuned_context,
+        no_shared_trajectory.frames[0],
+    )
+    tuned_scene = build_oracle_authorized_scene_v1(
+        tuned_context,
+        oracle_scene,
+        authority_session_id="supported-tuning",
+    )
+    assert {row.class_id for row in tuned_scene.class_mechanics} == {1, 2, 3, 4, 5}
+    for public_row in tuned_scene.class_mechanics:
+        catalog_row = tuned_catalog.class_mechanics[public_row.class_id]
+        assert type(public_row) is AuthorizedClassMechanicsV2
+        assert type(public_row.documentation_profile) is (
+            AuthorizedClassDocumentationProfileAvailableV1
+        )
+        assert (
+            public_row.maximum_health,
+            public_row.body_radius,
+            public_row.base_movement_speed,
+            public_row.observation_radius,
+            public_row.basic_interaction_radius,
+            public_row.basic_raw_damage,
+            public_row.basic_raw_healing,
+            public_row.ultimate_interaction_radius,
+            public_row.ultimate_cooldown_steps,
+            public_row.ultimate_raw_damage,
+            public_row.ultimate_raw_healing,
+            public_row.out_of_combat_delay_steps,
+            public_row.out_of_combat_health_regeneration_fraction_per_step,
+        ) == (
+            catalog_row.maximum_health,
+            catalog_row.body_radius,
+            catalog_row.base_movement_speed,
+            catalog_row.observation_radius,
+            catalog_row.basic_interaction_radius,
+            catalog_row.basic_raw_damage,
+            catalog_row.basic_raw_healing,
+            catalog_row.ultimate_interaction_radius,
+            catalog_row.ultimate_cooldown_steps,
+            catalog_row.ultimate_raw_damage,
+            catalog_row.ultimate_raw_healing,
+            catalog_row.out_of_combat_delay_steps,
+            catalog_row.out_of_combat_health_regeneration_fraction_per_step,
+        )
+        expected_statuses = tuple(
+            row
+            for row in tuned_catalog.status_channels
+            if row.source_class_id == public_row.class_id
+        )
+        assert tuple(
+            (row.status_id, row.duration_steps, row.magnitude)
+            for row in public_row.status_mechanics
+        ) == tuple(
+            (row.status_id, row.duration_steps, row.magnitude)
+            for row in expected_statuses
+        )
+        expected_auras = tuple(
+            row
+            for row in tuned_catalog.aura_mechanics
+            if row.emitter_class_id == public_row.class_id
+        )
+        assert tuple(
+            (row.aura_id, row.radius, row.per_emitter_multiplier, row.clamp_value)
+            for row in public_row.aura_mechanics
+        ) == tuple(
+            (row.aura_id, row.radius, row.per_emitter_multiplier, row.clamp_value)
+            for row in expected_auras
+        )
+    categorical_suffixes = (
+        ".class_name",
+        ".basic_target_mode",
+        ".ultimate_target_mode",
+        ".status_id",
+        ".family",
+        ".source_class_id",
+        ".source_action_component",
+        ".magnitude_kind",
+        ".breaks_on_positive_damage",
+        ".emitter_class_id",
+        ".clamp_kind",
+    )
+    categorical_labels: set[str] = set()
     for label, changed_catalog in _valid_documentation_catalog_leaf_mutations(catalog):
-        mutation_labels.add(label)
-        assert changed_catalog.canonical_digest_sha256 != (
-            AUTHORIZED_CLASS_DOCUMENTATION_CATALOG_FINGERPRINT_V1
-        ), label
-        assert type(authorized_class_documentation_profile_v1(changed_catalog)) is (
-            AuthorizedClassDocumentationProfileUnavailableV1
-        ), label
-    assert len(mutation_labels) == 1 + 6 * 16 + 9 * 8 + 2 * 5
+        if label.endswith(categorical_suffixes) and not label.startswith(
+            "class_mechanics[0]"
+        ):
+            categorical_labels.add(label)
+            assert type(authorized_class_documentation_profile_v1(changed_catalog)) is (
+                AuthorizedClassDocumentationProfileUnavailableV1
+            ), label
+    assert categorical_labels
+
+    qualitatively_invalid = _catalog_with_unrepresented_hunter_damage(catalog, 123.25)
+    assert type(authorized_class_documentation_profile_v1(qualitatively_invalid)) is (
+        AuthorizedClassDocumentationProfileUnavailableV1
+    )
 
     # These remaining documented leaves are exact Literals or fixed ordered
     # axes. They cannot form a valid historical catalog, so revalidation—not
@@ -1469,6 +1638,137 @@ def test_catalog_profile_certification_fails_closed_for_resealed_mutations(
     )
     assert type(original.scene.spawn_shield_mechanics) is (
         AuthorizedSpawnShieldMechanicsAvailableV2
+    )
+
+
+@pytest.mark.parametrize(
+    ("class_id", "values"),
+    (
+        (2, {"ultimate_interaction_radius": 0.0}),
+        (3, {"observation_radius": 0.01}),
+        (3, {"basic_interaction_radius": 0.01}),
+    ),
+)
+def test_catalog_profile_fails_closed_when_tuning_invalidates_authored_tactics(
+    no_shared_trajectory: CapturedEvaluationTrajectory,
+    class_id: int,
+    values: dict[str, object],
+) -> None:
+    catalog = _catalog_with_class_mechanic_values(
+        no_shared_trajectory.context.static_mechanics_catalog,
+        class_id=class_id,
+        values=values,
+    )
+
+    assert type(authorized_class_documentation_profile_v1(catalog)) is (
+        AuthorizedClassDocumentationProfileUnavailableV1
+    )
+
+
+def test_catalog_profile_accepts_tuning_that_crosses_unauthored_rankings(
+    no_shared_trajectory: CapturedEvaluationTrajectory,
+) -> None:
+    catalog = no_shared_trajectory.context.static_mechanics_catalog
+    payload = catalog.model_dump(mode="python")
+    class_rows = list(cast(tuple[dict[str, object], ...], payload["class_mechanics"]))
+    class_rows[2] = {**class_rows[2], "ultimate_raw_damage": 1_000.0}
+    class_rows[2] = {**class_rows[2], "ultimate_cooldown_steps": 0}
+    class_rows[3] = {
+        **class_rows[3],
+        "observation_radius": 3.25,
+    }
+    class_rows[4] = {
+        **class_rows[4],
+        "ultimate_raw_damage": 1_001.0,
+        "out_of_combat_delay_steps": 8,
+    }
+    class_rows[5] = {
+        **class_rows[5],
+        "basic_interaction_radius": 1.0,
+        "ultimate_raw_healing": 1.0,
+    }
+    payload["class_mechanics"] = tuple(class_rows)
+    status_rows = list(cast(tuple[dict[str, object], ...], payload["status_channels"]))
+    freedom_index = next(
+        index
+        for index, row in enumerate(status_rows)
+        if row["status_id"] == "priest_blessing_of_freedom_movement_floor"
+    )
+    status_rows[freedom_index] = {**status_rows[freedom_index], "magnitude": 0.6}
+    payload["status_channels"] = tuple(status_rows)
+    aura_rows = list(cast(tuple[dict[str, object], ...], payload["aura_mechanics"]))
+    aura_rows[0] = {
+        **aura_rows[0],
+        "radius": cast(float, class_rows[1]["observation_radius"]) + 1.0,
+    }
+    payload["aura_mechanics"] = tuple(aura_rows)
+    tuned = _catalog_from_payload(payload)
+
+    assert type(authorized_class_documentation_profile_v1(tuned)) is (
+        AuthorizedClassDocumentationProfileAvailableV1
+    )
+
+
+def test_catalog_profile_rejects_rogue_health_that_contradicts_authored_weakness(
+    no_shared_trajectory: CapturedEvaluationTrajectory,
+) -> None:
+    catalog = no_shared_trajectory.context.static_mechanics_catalog
+    tuned = _catalog_with_class_mechanic_values(
+        catalog,
+        class_id=4,
+        values={"maximum_health": catalog.class_mechanics[2].maximum_health},
+    )
+
+    assert type(authorized_class_documentation_profile_v1(tuned)) is (
+        AuthorizedClassDocumentationProfileUnavailableV1
+    )
+
+
+@pytest.mark.parametrize("class_id", (3, 4))
+def test_catalog_profile_rejects_basic_damage_ties_in_authored_rankings(
+    no_shared_trajectory: CapturedEvaluationTrajectory,
+    class_id: int,
+) -> None:
+    catalog = no_shared_trajectory.context.static_mechanics_catalog
+    tied_value = catalog.class_mechanics[3 if class_id == 3 else 2].basic_raw_damage
+    tuned = _catalog_with_class_mechanic_values(
+        catalog,
+        class_id=4,
+        values={"basic_raw_damage": tied_value},
+    )
+
+    assert type(authorized_class_documentation_profile_v1(tuned)) is (
+        AuthorizedClassDocumentationProfileUnavailableV1
+    )
+
+
+@pytest.mark.parametrize("source_class_id", (2, 4))
+def test_catalog_profile_rejects_stun_ties_in_authored_hunter_superlative(
+    no_shared_trajectory: CapturedEvaluationTrajectory,
+    source_class_id: int,
+) -> None:
+    catalog = no_shared_trajectory.context.static_mechanics_catalog
+    payload = catalog.model_dump(mode="python")
+    status_rows = list(cast(tuple[dict[str, object], ...], payload["status_channels"]))
+    hunter_duration = next(
+        row.duration_steps
+        for row in catalog.status_channels
+        if row.source_class_id == 3 and row.family == "stun"
+    )
+    row_index = next(
+        index
+        for index, row in enumerate(status_rows)
+        if row["source_class_id"] == source_class_id and row["family"] == "stun"
+    )
+    status_rows[row_index] = {
+        **status_rows[row_index],
+        "duration_steps": hunter_duration,
+    }
+    payload["status_channels"] = tuple(status_rows)
+    tuned = _catalog_from_payload(payload)
+
+    assert type(authorized_class_documentation_profile_v1(tuned)) is (
+        AuthorizedClassDocumentationProfileUnavailableV1
     )
 
 

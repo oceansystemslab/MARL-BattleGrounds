@@ -22,6 +22,7 @@ import {
   explainStatus,
   explainTechnicalFact,
   explainVisibility,
+  spawnShieldStatusSummary,
 } from "../src/explanations.js";
 import { createSemanticDescriptor, projectSemanticDescriptor } from "../src/tooltip.js";
 
@@ -99,11 +100,11 @@ test("all semantic descriptors and nested projections are recursively immutable"
       "Effective Speed",
       "Ultimate Status",
       "Combat Status",
-      "Steps until out of combat",
+      "Steps Until Out of Combat",
     ],
   );
   assert.equal(rowValue(descriptor, "Effective Speed"), "0.33");
-  assert.equal(rowValue(descriptor, "Combat Status"), "In combat");
+  assert.equal(rowValue(descriptor, "Combat Status"), "In Combat");
   assert.doesNotMatch(fullText(descriptor), /id_8|not a compact fact/u);
 });
 
@@ -114,11 +115,11 @@ test("Technical Frame and replay operational help use the exact finite vocabular
       "Identifies the authorized live episode represented by this frame.",
     ],
     artifact_digest_prefix: [
-      "Artifact digest prefix",
+      "Artifact Digest Prefix",
       "These 12 hexadecimal characters locate the canonical Oracle replay without displaying its full hash.",
     ],
     incoming_transition: [
-      "Incoming transition",
+      "Incoming Transition",
       "Identifies the authorized transition that produced this displayed frame. The initial frame has no incoming transition.",
     ],
     completion: [
@@ -134,11 +135,11 @@ test("Technical Frame and replay operational help use the exact finite vocabular
       "The zero-based authorized frame index represented by this presentation.",
     ],
     simulator_step: [
-      "Simulator step",
+      "Simulator Step",
       "The simulator decision step represented by this authorized frame.",
     ],
     ordinary_movement_distance_scale: [
-      "Ordinary movement distance scale",
+      "Ordinary Movement Distance Scale",
       "The recorded multiplier applied to ordinary voluntary movement distance. Spawn Shield uses its separately authorized absolute movement speed.",
     ],
   };
@@ -281,7 +282,7 @@ test("compact agent facts have one exact in-combat and out-of-combat allowlist",
               "Effective Speed",
               "Ultimate Status",
               "Combat Status",
-              "Steps until out of combat",
+              "Steps Until Out of Combat",
             ]
           : ["Health", "Effective Speed", "Ultimate Status", "Combat Status"],
       );
@@ -291,14 +292,14 @@ test("compact agent facts have one exact in-combat and out-of-combat allowlist",
         rowValue(descriptor, "Ultimate Status"),
         classId === 1
           ? "Ready"
-          : `On cooldown (${classId - 1} ${classId === 2 ? "Tick" : "Ticks"})`,
+          : `On Cooldown (${classId - 1} ${classId === 2 ? "Tick" : "Ticks"})`,
       );
       assert.equal(
         rowValue(descriptor, "Combat Status"),
-        inCombat ? "In combat" : "Out of combat",
+        inCombat ? "In Combat" : "Out of Combat",
       );
       if (inCombat) {
-        assert.equal(rowValue(descriptor, "Steps until out of combat"), "2 Ticks");
+        assert.equal(rowValue(descriptor, "Steps Until Out of Combat"), "2 Ticks");
       }
       assert.equal(descriptor.sections.length, 0);
       assert.equal(
@@ -434,11 +435,15 @@ function durableStatus(statusCase, overrides = {}) {
 test("all nine durable statuses preserve exact facts across audience and source states", () => {
   for (const statusCase of STATUS_CASES) {
     const status = durableStatus(statusCase);
-    const researcher = explainStatus(status, RECIPIENT, [SOURCE_A, SOURCE_B]);
-    const absent = explainStatus({ ...status, direct_sources: [] }, RECIPIENT, [
+    const researcher = explainStatus(status, AUTHORIZED_RECIPIENT, [
       SOURCE_A,
       SOURCE_B,
     ]);
+    const absent = explainStatus(
+      { ...status, direct_sources: [] },
+      AUTHORIZED_RECIPIENT,
+      [SOURCE_A, SOURCE_B],
+    );
     const pov = explainPovStatus(
       {
         ...status,
@@ -449,7 +454,7 @@ test("all nine durable statuses preserve exact facts across audience and source 
           },
         ],
       },
-      RECIPIENT,
+      AUTHORIZED_RECIPIENT,
     );
 
     assert.equal(researcher.title, statusCase.title);
@@ -488,8 +493,20 @@ test("all nine durable statuses preserve exact facts across audience and source 
       rowValue(researcher, "Source"),
       "Agent ID alpha/9001 · Hunter · Team A",
     );
+    assert.equal(
+      rowValue(researcher, "Recipient"),
+      "Agent ID recipient:<unsafe>&42 · Priest · Team B",
+    );
     assert.equal(rowValue(absent, "Source"), "Unavailable in this artifact");
     assert.equal(rowValue(pov, "Source"), "Not disclosed in Agent POV");
+    assert.equal(
+      rowValue(pov, "Recipient"),
+      "Agent ID recipient:<unsafe>&42 · Priest · Team B",
+    );
+    assert.deepEqual(
+      researcher.rows.slice(-2).map((row) => row.label),
+      ["Source", "Recipient"],
+    );
     assert.deepEqual(
       researcher.rows.filter((row) => row.label !== "Source"),
       pov.rows.filter((row) => row.label !== "Source"),
@@ -505,12 +522,12 @@ test("all nine durable statuses preserve exact facts across audience and source 
     if (hasBreak) {
       assert.equal(
         rowValue(researcher, "Break Rule"),
-        "Ends when this agent receives positive raw damage",
+        "Ends when this agent receives positive raw damage.",
       );
     } else {
       const forged = explainStatus(
         durableStatus(statusCase, { breaks_on_positive_damage: true }),
-        RECIPIENT,
+        AUTHORIZED_RECIPIENT,
         [SOURCE_A],
       );
       assert.equal(
@@ -521,12 +538,42 @@ test("all nine durable statuses preserve exact facts across audience and source 
   }
 });
 
+test("In Combat status omits Source while retaining its authorized recipient", () => {
+  const status = {
+    status_channel: 99,
+    token_id: "in_combat",
+    configured_duration_steps: 3,
+    remaining_duration: 2,
+    magnitude_kind: "none",
+    magnitude: null,
+    breaks_on_positive_damage: false,
+    direct_sources: [SOURCE_REFERENCE_A],
+  };
+  for (const descriptor of [
+    explainStatus(status, AUTHORIZED_RECIPIENT, [SOURCE_A]),
+    explainPovStatus(status, AUTHORIZED_RECIPIENT),
+  ]) {
+    assert.equal(descriptor.title, "In Combat");
+    assert.equal(
+      descriptor.rows.some((candidate) => candidate.label === "Source"),
+      false,
+    );
+    assert.equal(
+      rowValue(descriptor, "Recipient"),
+      "Agent ID recipient:<unsafe>&42 · Priest · Team B",
+    );
+    assert.equal(descriptor.rows.at(-1)?.label, "Recipient");
+  }
+});
+
 test("status source integration authorizes only exact presentation-key and public-ID joins", () => {
   const statusCase = STATUS_CASES.find(
     (candidate) => candidate.statusId === "hunter_basic_slow",
   );
   assert.ok(statusCase);
-  const exact = explainStatus(durableStatus(statusCase), RECIPIENT, [SOURCE_A]);
+  const exact = explainStatus(durableStatus(statusCase), AUTHORIZED_RECIPIENT, [
+    SOURCE_A,
+  ]);
   const wrongKey = explainStatus(
     durableStatus(statusCase, {
       direct_sources: [
@@ -536,7 +583,7 @@ test("status source integration authorizes only exact presentation-key and publi
         },
       ],
     }),
-    RECIPIENT,
+    AUTHORIZED_RECIPIENT,
     [SOURCE_A],
   );
   const slotFallback = explainStatus(
@@ -548,7 +595,7 @@ test("status source integration authorizes only exact presentation-key and publi
         },
       ],
     }),
-    RECIPIENT,
+    AUTHORIZED_RECIPIENT,
     [SOURCE_A],
   );
 
@@ -566,7 +613,7 @@ test("Freezing Trap refresh and reapplication preserve configured duration and e
   for (const remaining of [1, 2, 4]) {
     const descriptor = explainStatus(
       durableStatus(trap, { remaining_duration: remaining }),
-      RECIPIENT,
+      AUTHORIZED_RECIPIENT,
       [SOURCE_A],
     );
     assert.equal(rowValue(descriptor, "Effect Duration"), "4 Ticks");
@@ -576,12 +623,12 @@ test("Freezing Trap refresh and reapplication preserve configured duration and e
     );
     assert.equal(
       rowValue(descriptor, "Break Rule"),
-      "Ends when this agent receives positive raw damage",
+      "Ends when this agent receives positive raw damage.",
     );
   }
   const noBreak = explainStatus(
     durableStatus(trap, { breaks_on_positive_damage: false }),
-    RECIPIENT,
+    AUTHORIZED_RECIPIENT,
     [SOURCE_A],
   );
   assert.equal(
@@ -608,7 +655,7 @@ test("POV status preserves effect facts while leaving source payloads unread", (
   hiddenSources.length = 1;
   const descriptor = explainPovStatus(
     durableStatus(statusCase, { direct_sources: hiddenSources }),
-    RECIPIENT,
+    AUTHORIZED_RECIPIENT,
   );
 
   assert.equal(rowValue(descriptor, "Movement Effect"), "15% slower (×0.85)");
@@ -620,7 +667,9 @@ test("POV status preserves effect facts while leaving source payloads unread", (
 
 test("durable status cards exclude superseded, inferred, and forbidden copy", () => {
   const serialized = STATUS_CASES.map((statusCase) =>
-    fullText(explainStatus(durableStatus(statusCase), RECIPIENT, [SOURCE_A])),
+    fullText(
+      explainStatus(durableStatus(statusCase), AUTHORIZED_RECIPIENT, [SOURCE_A]),
+    ),
   ).join("\n");
   assert.doesNotMatch(
     serialized,
@@ -726,7 +775,7 @@ test("aggregate aura cards require one exact authorized recipient identity", () 
 
 test("spawn shield view is exact across V1/V2/unavailable and every audience", () => {
   const v2Summary =
-    "While the spawn shield is active, this agent is protected, concealed from opponents, untargetable, excluded from aura effects, and limited to movement. It phases through agents until body collision resumes at the endpoint of its expiring transition.";
+    "While the spawn shield is active, this agent is protected, concealed from opponents, untargetable, excluded from aura effects, and limited to movement. It can move through other agents while shielded; collision resumes at the end of the shield's final transition.";
   const v2Mechanics = {
     availability_kind: "available_v2",
     configured_duration_steps: 3,
@@ -752,12 +801,13 @@ test("spawn shield view is exact across V1/V2/unavailable and every audience", (
         ["Targetability Effect", "Untargetable"],
         ["Action Effect", "Movement only"],
         ["Aura Effect", "Excluded as emitter and beneficiary"],
-        ["Agent Collision Effect", "Phased until expiring endpoint rejoin"],
+        [
+          "Agent Collision Effect",
+          "The agent can move through other agents while shielded; collision resumes at the end of the shield's final transition.",
+        ],
         ["Effect Duration", "3 Ticks"],
         ["Duration Remaining", "3 Ticks"],
         ["Owner", owner],
-        ["Source", "Not recorded"],
-        ["Ordinary Application", "End-of-transition respawn lifecycle"],
       ],
     },
     {
@@ -773,7 +823,6 @@ test("spawn shield view is exact across V1/V2/unavailable and every audience", (
         ["Effect Duration", "3 Ticks"],
         ["Duration Remaining", "3 Ticks"],
         ["Owner", owner],
-        ["Source", "Not recorded"],
       ],
     },
     {
@@ -783,7 +832,6 @@ test("spawn shield view is exact across V1/V2/unavailable and every audience", (
       rows: /** @param {string} owner */ (owner) => [
         ["Duration Remaining", "3 Ticks"],
         ["Owner", owner],
-        ["Source", "Not recorded"],
       ],
     },
   ];
@@ -804,7 +852,7 @@ test("spawn shield view is exact across V1/V2/unavailable and every audience", (
       const descriptor = view.descriptor;
       assert.equal(Object.isFrozen(view), true, `${audience}/${variant.name}`);
       assert.equal(view.active, true, `${audience}/${variant.name}`);
-      assert.equal(view.badgeText, "S3", `${audience}/${variant.name}`);
+      assert.equal(view.badgeText, "3", `${audience}/${variant.name}`);
       assert.equal(view.remainingTicks, 3, `${audience}/${variant.name}`);
       assert.equal(
         view.rootAriaLabel,
@@ -815,6 +863,11 @@ test("spawn shield view is exact across V1/V2/unavailable and every audience", (
       assert.equal(descriptor.kind, "status");
       assert.equal(descriptor.title, "Spawn Shield");
       assert.equal(descriptor.summary, variant.summary, `${audience}/${variant.name}`);
+      assert.equal(
+        spawnShieldStatusSummary(variant.mechanics),
+        variant.summary,
+        `${audience}/${variant.name}`,
+      );
       assert.deepEqual(
         descriptor.rows.map(({ label, value }) => [label, value]),
         variant.rows(owner),
@@ -1443,13 +1496,13 @@ test("POV agent builder is byte-noninterfering with researcher-only extras", () 
       "Effective Speed",
       "Ultimate Status",
       "Combat Status",
-      "Steps until out of combat",
+      "Steps Until Out of Combat",
     ],
   );
   assert.equal(rowValue(descriptor, "Effective Speed"), "1.25");
-  assert.equal(rowValue(descriptor, "Ultimate Status"), "On cooldown (2 Ticks)");
-  assert.equal(rowValue(descriptor, "Combat Status"), "In combat");
-  assert.equal(rowValue(descriptor, "Steps until out of combat"), "2 Ticks");
+  assert.equal(rowValue(descriptor, "Ultimate Status"), "On Cooldown (2 Ticks)");
+  assert.equal(rowValue(descriptor, "Combat Status"), "In Combat");
+  assert.equal(rowValue(descriptor, "Steps Until Out of Combat"), "2 Ticks");
   assert.equal(descriptor.sections.length, 0);
   assert.doesNotMatch(
     fullText(descriptor),
@@ -1467,7 +1520,7 @@ test("POV status overflow is byte-noninterfering and discloses no source identit
   assert.ok(hunterSlow);
   assert.ok(rogueStun);
   const authorized = [durableStatus(hunterSlow), durableStatus(rogueStun)];
-  const baseline = explainPovOverflow(authorized, RECIPIENT);
+  const baseline = explainPovOverflow(authorized, AUTHORIZED_RECIPIENT);
   const injected = explainPovOverflow(
     authorized.map((status) => ({
       ...status,
@@ -1475,7 +1528,7 @@ test("POV status overflow is byte-noninterfering and discloses no source identit
       direct_sources: [{ event_id: "secret-overflow-event" }],
       accessible_name: "secret-overflow-accessible-name",
     })),
-    { ...RECIPIENT, global_slot: 999, life_state: "secret" },
+    { ...AUTHORIZED_RECIPIENT, global_slot: 999, life_state: "secret" },
   );
   assert.equal(JSON.stringify(injected), JSON.stringify(baseline));
   assert.equal(baseline.title, "2 Hidden Statuses");
@@ -1491,10 +1544,10 @@ test("researcher status explanation ignores an injected POV discriminator", () =
   const status = researcherStatus({
     direct_sources: [SOURCE_REFERENCE_A],
   });
-  const baseline = explainStatus(status, RECIPIENT, [SOURCE_A]);
+  const baseline = explainStatus(status, AUTHORIZED_RECIPIENT, [SOURCE_A]);
   const injected = explainStatus(
     { ...status, source_evidence: "effect_channel_only" },
-    RECIPIENT,
+    AUTHORIZED_RECIPIENT,
     [SOURCE_A],
   );
   assert.equal(JSON.stringify(injected), JSON.stringify(baseline));
@@ -1580,17 +1633,34 @@ test("legality is owner-bound, class-accented, and Status-only", () => {
   );
 });
 
-test("action route uses epoch-neutral copy and exact Source and Target public IDs", () => {
-  const descriptor = explainPendingRoute({
-    source_global_slot: 1,
-    target_global_slot: 7,
-    source_public_agent_id: "source::<x>",
-    target_public_agent_id: "target&y",
-    lane: 1,
-    legal: false,
-    source_anchor: [1, 2],
-    target_anchor: [8, 9],
-  });
+test("action route uses epoch-neutral copy and exact Source and Recipient identities", () => {
+  const source = {
+    presentation_key: "source:route",
+    public_agent_id: "source::<x>",
+    class_id: 2,
+    team_id: 1,
+  };
+  const recipient = {
+    presentation_key: "recipient:route",
+    public_agent_id: "target&y",
+    class_id: 4,
+    team_id: 2,
+  };
+  const descriptor = explainPendingRoute(
+    {
+      source_global_slot: 1,
+      target_global_slot: 7,
+      source_presentation_key: source.presentation_key,
+      target_presentation_key: recipient.presentation_key,
+      source_public_agent_id: "source::<x>",
+      target_public_agent_id: "target&y",
+      lane: 1,
+      legal: false,
+      source_anchor: [1, 2],
+      target_anchor: [8, 9],
+    },
+    { sourceAgent: source, recipientAgent: recipient },
+  );
   assert.equal(descriptor.title, "Ultimate Action Route");
   assert.equal(
     descriptor.summary,
@@ -1599,8 +1669,8 @@ test("action route uses epoch-neutral copy and exact Source and Target public ID
   assert.deepEqual(
     descriptor.rows.map(({ label, value }) => [label, value]),
     [
-      ["Source", "Agent ID source::<x>"],
-      ["Target", "Agent ID target&y"],
+      ["Source", "Agent ID source::<x> · Warrior · Team A"],
+      ["Recipient", "Agent ID target&y · Rogue · Team B"],
     ],
   );
   assert.doesNotMatch(fullText(descriptor), /currently selected|Selected Target/iu);
@@ -1629,12 +1699,14 @@ test("visibility and attribution builders never manufacture slot identities", ()
     sourceSlot: 3,
     targetSlot: 8,
     targetDisclosure: "redacted",
+    sourceIdentity: SOURCE_A,
     source: { x: 10, y: 10 },
   });
-  assert.equal(rowValue(activation, "Source"), "Agent ID unavailable");
-  assert.equal(
-    rowValue(activation, "Target"),
-    "Target endpoint not disclosed in this view",
+  assert.equal(rowValue(activation, "Source"), "Agent ID alpha/9001 · Hunter · Team A");
+  assert.equal(rowValue(activation, "Recipient"), "Not disclosed in Agent POV");
+  assert.deepEqual(
+    activation.rows.map(({ label }) => label),
+    ["Source", "Recipient"],
   );
   assert.doesNotMatch(
     JSON.stringify(activation),
@@ -1646,7 +1718,7 @@ test("visibility and attribution builders never manufacture slot identities", ()
     netDelta: -0.004,
   });
   assert.equal(rowValue(net, "NET"), "−<0.01");
-  assert.equal(rowValue(net, "Recipient"), "Agent ID unavailable");
+  assert.equal(rowValue(net, "Recipient"), "Unavailable in this view");
   assert.doesNotMatch(JSON.stringify(net), /secret-researcher-event-id/u);
 });
 
@@ -1665,7 +1737,7 @@ test("overflow projects every hidden semantic item without slot-derived identity
       durableStatus(trap, { direct_sources: [] }),
     ],
     "status",
-    RECIPIENT,
+    AUTHORIZED_RECIPIENT,
     [SOURCE_A],
   );
   assert.equal(descriptor.rows.length, 2);

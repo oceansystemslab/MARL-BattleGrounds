@@ -293,6 +293,7 @@ def test_stress_menu_is_explicitly_opt_in() -> None:
         "charge_convergence",
         "trap_lifecycle",
         "max_status_stack",
+        "lifecycle_density",
     )
 
 

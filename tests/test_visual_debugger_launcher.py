@@ -786,6 +786,8 @@ def test_debugger_help_is_live_only_and_hides_legacy_tokens() -> None:
     )
 
     assert result.returncode == 0
+    assert "manual 20x10" in result.stdout
+    assert "18x12" not in result.stdout
     for option in (
         "--record-replay",
         "--seed",
@@ -817,7 +819,7 @@ def test_debugger_help_is_live_only_and_hides_legacy_tokens() -> None:
     assert "Shift+left click      select the clicked active target" in result.stdout
     for inspector in (
         "SELECTED TARGET",
-        "PENDING AUTHORIZED DRAFT",
+        "PENDING JOINT ACTION",
         "TECHNICAL FRAME",
     ):
         assert inspector in result.stdout
@@ -861,6 +863,8 @@ def test_replay_help_is_read_only_and_hides_live_and_legacy_tokens() -> None:
     )
 
     assert result.returncode == 0
+    assert "manual 20x10 combat laboratory" in result.stdout
+    assert "manual 18x12 combat laboratory" not in result.stdout
     for option in (
         "--replay",
         "--sample-replay",

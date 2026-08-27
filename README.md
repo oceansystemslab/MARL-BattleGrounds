@@ -7,7 +7,7 @@ The project is currently under development.
 
 ## Combat Debugger
 
-Use the Combat Debugger for manual work in the live 18×12 `arena_5v5`
+Use the Combat Debugger for manual work in the live 20×10 `arena_5v5`
 laboratory:
 
 ```bash

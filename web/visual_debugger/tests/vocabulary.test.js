@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { iconDefinition, KNOWN_GLYPH_KEYS } from "../src/icons.js";
-import { statusPresentation } from "../src/semantic-vocabulary.js";
+import {
+  statusLifecyclePresentation,
+  statusPresentation,
+} from "../src/semantic-vocabulary.js";
 import {
   ACTIVATION_TOKEN_IDS,
   activationImpactSemantic,
@@ -111,12 +114,12 @@ test("durable in-combat status keeps the existing white crossed-swords identity"
   const definition = resolveVisualToken("status", "in_combat");
   const presentation = statusPresentation("in_combat");
   assert.equal(definition.tokenId, "in_combat");
-  assert.equal(definition.label, "In combat");
-  assert.equal(definition.accessibleName, "In combat");
+  assert.equal(definition.label, "In Combat");
+  assert.equal(definition.accessibleName, "In Combat");
   assert.equal(definition.glyphKey, "combat-in-progress");
   assert.equal(definition.cssKey, "in-combat");
   assert.equal(iconDefinition(definition.glyphKey).glyphKey, "combat-in-progress");
-  assert.equal(presentation.title, "In combat");
+  assert.equal(presentation.title, "In Combat");
   assert.match(
     presentation.effect,
     /transitions remain before this agent leaves combat/u,
@@ -125,12 +128,56 @@ test("durable in-combat status keeps the existing white crossed-swords identity"
   assert.equal(presentation.magnitudeKind, "none");
 });
 
+test("status lifecycle copy identifies the exact durable status and applies lifecycle-specific summaries", () => {
+  const lifecyclePrefixes = new Map([
+    ["applied", "Applied"],
+    ["refreshed", "Refreshed"],
+    ["decremented", "Aged"],
+    ["expired", "Expired"],
+    ["trap_broken", "Broken"],
+    ["cleared_by_death", "Cleared On Death"],
+    ["cleared_unclassified", "Ended"],
+    ["trap_broken_and_reapplied", "Broken, Then Reapplied"],
+    ["reapplied", "Reapplied"],
+  ]);
+  for (const statusTokenId of [...EXPECTED_STATUSES, "in_combat", "spawn_shield"]) {
+    const status = statusPresentation(statusTokenId);
+    const subject = status.title.replace("): ", ") ");
+    for (const [lifecycleTokenId, prefix] of lifecyclePrefixes) {
+      const lifecycle = statusLifecyclePresentation(statusTokenId, lifecycleTokenId);
+      const expectedTitle =
+        lifecycleTokenId === "cleared_by_death"
+          ? `Cleared ${subject} On Death`
+          : lifecycleTokenId === "expired" && statusTokenId === "in_combat"
+            ? "Out of Combat"
+            : `${prefix} ${subject}`;
+      const expectedSummary =
+        lifecycleTokenId === "expired" || lifecycleTokenId === "cleared_by_death"
+          ? null
+          : lifecycleTokenId === "trap_broken" && statusTokenId === "stun_hunter_trap"
+            ? "The Freezing Trap stun ended early because the recipient received damage."
+            : status.effect;
+      assert.deepEqual(lifecycle, {
+        title: expectedTitle,
+        summary: expectedSummary,
+      });
+      assert.equal(Object.isFrozen(lifecycle), true);
+    }
+  }
+  assert.deepEqual(statusLifecyclePresentation("slow_warrior_charge", "applied"), {
+    title: "Applied Warrior (Ultimate: Charge) Slow",
+    summary:
+      "A Warrior's concussive Charge slows this agent's movement for its duration.",
+  });
+  assert.equal(statusLifecyclePresentation("slow_warrior_charge", "unknown"), null);
+});
+
 test("death clear is distinct from natural expiry and damage break", () => {
   const deathClear = resolveVisualToken("lifecycle", "cleared_by_death");
   const expired = resolveVisualToken("lifecycle", "expired");
   const damageBreak = resolveVisualToken("lifecycle", "trap_broken");
 
-  assert.equal(deathClear.label, "Cleared on death");
+  assert.equal(deathClear.label, "Cleared On Death");
   assert.match(deathClear.accessibleName, /cleared.*recorded new death/u);
   assert.notEqual(deathClear.glyphKey, expired.glyphKey);
   assert.notEqual(deathClear.glyphKey, damageBreak.glyphKey);
@@ -142,11 +189,11 @@ test("status compositor outcomes use the exact locked lifecycle vocabulary", () 
   const labels = Object.freeze({
     applied: "Applied",
     refreshed: "Refreshed",
-    trap_broken_and_reapplied: "Broken, then reapplied",
+    trap_broken_and_reapplied: "Broken, Then Reapplied",
     reapplied: "Reapplied",
     trap_broken: "Broken",
     expired: "Expired",
-    cleared_by_death: "Cleared on death",
+    cleared_by_death: "Cleared On Death",
   });
   for (const [tokenId, label] of Object.entries(labels)) {
     assert.equal(resolveVisualToken("lifecycle", tokenId).label, label, tokenId);

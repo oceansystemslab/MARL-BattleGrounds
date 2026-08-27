@@ -78,6 +78,87 @@ async function responsiveSnapshot(page) {
 }
 
 /**
+ * Measure the unit grid installed by the actual Debugger service and perform a
+ * browser hit test at one line midpoint.
+ *
+ * @param {import("@playwright/test").Page} page
+ */
+async function debuggerGridSnapshot(page) {
+  return page.locator("#battlefield").evaluate((battlefield) => {
+    if (!(battlefield instanceof SVGSVGElement)) {
+      throw new Error("Debugger battlefield is unavailable.");
+    }
+    const mapLayer = battlefield.querySelector('[data-layer="map"]');
+    const obstacleLayer = battlefield.querySelector('[data-layer="obstacle"]');
+    const bodyLayer = battlefield.querySelector('[data-layer="body"]');
+    const boundary = battlefield.querySelector(".map-boundary");
+    const vertical = [...battlefield.querySelectorAll(".map-grid-line--vertical")];
+    const horizontal = [...battlefield.querySelectorAll(".map-grid-line--horizontal")];
+    if (
+      !(mapLayer instanceof SVGGElement) ||
+      !(obstacleLayer instanceof SVGGElement) ||
+      !(bodyLayer instanceof SVGGElement) ||
+      !(boundary instanceof SVGRectElement) ||
+      !(vertical[0] instanceof SVGLineElement)
+    ) {
+      throw new Error("Debugger grid layers are unavailable.");
+    }
+    /** @param {Element} element @param {string} name */
+    const numberAttribute = (element, name) => {
+      const value = Number(element.getAttribute(name));
+      if (!Number.isFinite(value)) {
+        throw new Error(`Grid ${name} is not finite.`);
+      }
+      return value;
+    };
+    const boundaryBox = {
+      x: numberAttribute(boundary, "x"),
+      y: numberAttribute(boundary, "y"),
+      width: numberAttribute(boundary, "width"),
+      height: numberAttribute(boundary, "height"),
+    };
+    const first = vertical[0];
+    const midpoint = battlefield.createSVGPoint();
+    midpoint.x = numberAttribute(first, "x1");
+    midpoint.y = (numberAttribute(first, "y1") + numberAttribute(first, "y2")) / 2;
+    const matrix = first.getScreenCTM();
+    if (matrix === null) {
+      throw new Error("Debugger grid has no screen transform.");
+    }
+    const screenMidpoint = midpoint.matrixTransform(matrix);
+    const hit = document.elementFromPoint(screenMidpoint.x, screenMidpoint.y);
+    /** @param {Element} layer */
+    const followsMap = (layer) =>
+      Boolean(
+        mapLayer.compareDocumentPosition(layer) & Node.DOCUMENT_POSITION_FOLLOWING,
+      );
+    return {
+      vertical: vertical.map((line) => ({
+        x: numberAttribute(line, "x1"),
+        y1: numberAttribute(line, "y1"),
+        y2: numberAttribute(line, "y2"),
+      })),
+      horizontal: horizontal.map((line) => ({
+        y: numberAttribute(line, "y1"),
+        x1: numberAttribute(line, "x1"),
+        x2: numberAttribute(line, "x2"),
+      })),
+      boundary: boundaryBox,
+      mapAriaHidden: mapLayer.getAttribute("aria-hidden"),
+      mapIsFirstLayer: mapLayer === battlefield.querySelector("[data-layer]"),
+      mapPrecedesObstacleAndBody: followsMap(obstacleLayer) && followsMap(bodyLayer),
+      lineAccessibility: [...vertical, ...horizontal].map((line) => ({
+        role: line.getAttribute("role"),
+        label: line.getAttribute("aria-label"),
+        tabindex: line.getAttribute("tabindex"),
+        pointerEvents: getComputedStyle(line).pointerEvents,
+      })),
+      hitIsGrid: hit?.closest(".map-grid-line") !== null,
+    };
+  });
+}
+
+/**
  * Prove that real disclosure bodies, rather than the shared HUD or document,
  * own vertical scrolling at one supported viewport.
  *
@@ -273,6 +354,75 @@ async function expectIndependentDisclosureLayout(page, viewport) {
     expect(bounds.bodyScrollWidth).toBeLessThanOrEqual(bounds.bodyClientWidth + 1);
   }
 }
+
+test("real Debugger grid is exact, lowest, and click-transparent", async ({ page }) => {
+  let commandRequests = 0;
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname === "/api/command"
+    ) {
+      commandRequests += 1;
+    }
+  });
+  await page.goto(debuggerUrl);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
+  await expect(page.locator("html")).toHaveAttribute(
+    "data-presentation-authority",
+    "installed",
+  );
+  const stepBefore = await page.locator("#step-value").textContent();
+  const transitionBefore = await page.locator("#transition-value").textContent();
+
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 960, height: 600 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await settleResponsiveLayout(page);
+    const snapshot = await debuggerGridSnapshot(page);
+    expect(snapshot.vertical).toHaveLength(19);
+    expect(snapshot.horizontal).toHaveLength(9);
+    expect(snapshot.mapAriaHidden).toBe("true");
+    expect(snapshot.mapIsFirstLayer).toBe(true);
+    expect(snapshot.mapPrecedesObstacleAndBody).toBe(true);
+    expect(snapshot.hitIsGrid).toBe(false);
+    expect(
+      snapshot.lineAccessibility.every(
+        ({ role, label, tabindex, pointerEvents }) =>
+          role === null &&
+          label === null &&
+          tabindex === null &&
+          pointerEvents === "none",
+      ),
+    ).toBe(true);
+    for (const [index, line] of snapshot.vertical.entries()) {
+      expect((line.x - snapshot.boundary.x) / snapshot.boundary.width).toBeCloseTo(
+        (index + 1) / 20,
+        8,
+      );
+      expect([line.y1, line.y2].sort((left, right) => left - right)).toEqual([
+        snapshot.boundary.y,
+        snapshot.boundary.y + snapshot.boundary.height,
+      ]);
+    }
+    for (const [index, line] of snapshot.horizontal
+      .sort((left, right) => left.y - right.y)
+      .entries()) {
+      expect((line.y - snapshot.boundary.y) / snapshot.boundary.height).toBeCloseTo(
+        (index + 1) / 10,
+        8,
+      );
+      expect([line.x1, line.x2].sort((left, right) => left - right)).toEqual([
+        snapshot.boundary.x,
+        snapshot.boundary.x + snapshot.boundary.width,
+      ]);
+    }
+  }
+  await expect(page.locator("#step-value")).toHaveText(stepBefore ?? "");
+  await expect(page.locator("#transition-value")).toHaveText(transitionBefore ?? "");
+  expect(commandRequests).toBe(0);
+});
 
 test("supported resize preserves real installed authority at 960px", async ({
   page,

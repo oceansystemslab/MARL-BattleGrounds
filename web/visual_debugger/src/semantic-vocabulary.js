@@ -7,8 +7,14 @@
  */
 
 const STATUS_PRESENTATION = Object.freeze({
+  spawn_shield: statusProfile(
+    "Spawn Shield",
+    "While the spawn shield is active, this agent is protected, concealed from opponents, untargetable, excluded from aura effects, and limited to movement. It can move through other agents while shielded; collision resumes at the end of the shield's final transition.",
+    "none",
+    "none",
+  ),
   in_combat: statusProfile(
-    "In combat",
+    "In Combat",
     "Shows how many transitions remain before this agent leaves combat. Participating in combat restarts the duration.",
     "none",
     "none",
@@ -96,6 +102,18 @@ const AURA_ID_ALIASES = Object.freeze({
   warrior_mitigation: "warrior_damage_mitigation",
 });
 
+const STATUS_LIFECYCLE_PREFIX = Object.freeze({
+  applied: "Applied",
+  refreshed: "Refreshed",
+  decremented: "Aged",
+  expired: "Expired",
+  trap_broken: "Broken",
+  cleared_by_death: "Cleared On Death",
+  cleared_unclassified: "Ended",
+  trap_broken_and_reapplied: "Broken, Then Reapplied",
+  reapplied: "Reapplied",
+});
+
 /**
  * @param {string} title
  * @param {string} effect
@@ -157,12 +175,47 @@ export function statusPresentation(tokenId) {
   return Object.hasOwn(STATUS_PRESENTATION, key)
     ? STATUS_PRESENTATION[/** @type {keyof typeof STATUS_PRESENTATION} */ (key)]
     : Object.freeze({
-        title: "Recorded status",
+        title: "Recorded Status",
         effect: "Represents an authorized status effect channel.",
         accent: "none",
         magnitudeKind: "none",
         positiveDamageBreak: false,
       });
+}
+
+/**
+ * Resolve one status lifecycle into status-specific explanatory copy. The
+ * Applications retain the exact durable-badge explanation. Expiry and death
+ * clearing are self-explanatory and therefore intentionally carry no summary.
+ *
+ * @param {unknown} statusTokenId
+ * @param {unknown} lifecycleTokenId
+ * @returns {Readonly<{title: string, summary: string | null}> | null}
+ */
+export function statusLifecyclePresentation(statusTokenId, lifecycleTokenId) {
+  const lifecycleKey =
+    typeof lifecycleTokenId === "string" ? lifecycleTokenId.trim() : "";
+  if (!Object.hasOwn(STATUS_LIFECYCLE_PREFIX, lifecycleKey)) {
+    return null;
+  }
+  const status = statusPresentation(statusTokenId);
+  const subject = status.title.replace("): ", ") ");
+  const title =
+    lifecycleKey === "cleared_by_death"
+      ? `Cleared ${subject} On Death`
+      : lifecycleKey === "expired" && statusTokenId === "in_combat"
+        ? "Out of Combat"
+        : `${STATUS_LIFECYCLE_PREFIX[/** @type {keyof typeof STATUS_LIFECYCLE_PREFIX} */ (lifecycleKey)]} ${subject}`;
+  const summary =
+    lifecycleKey === "expired" || lifecycleKey === "cleared_by_death"
+      ? null
+      : lifecycleKey === "trap_broken" && statusTokenId === "stun_hunter_trap"
+        ? "The Freezing Trap stun ended early because the recipient received damage."
+        : status.effect;
+  return Object.freeze({
+    title,
+    summary,
+  });
 }
 
 /**

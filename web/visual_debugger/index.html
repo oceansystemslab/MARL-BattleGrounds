@@ -286,20 +286,6 @@
           >
             <legend class="sr-only">Battlefield presentation controls</legend>
             <button
-              id="live-ranges-button"
-              type="button"
-              data-live-only
-              data-key="g"
-              aria-pressed="false"
-            >Ranges</button>
-            <button
-              id="replay-ranges-button"
-              type="button"
-              data-replay-only
-              aria-pressed="false"
-              hidden
-            >Ranges</button>
-            <button
               id="replay-clear-reference-button"
               type="button"
               data-replay-only
@@ -466,7 +452,7 @@
         <details id="visual-filters" class="hud-section visual-filters">
           <summary class="section-heading">
             <strong class="section-title">Visual Filters</strong>
-            <span id="visual-filter-count" class="count-badge">18 enabled</span>
+            <span id="visual-filter-count" class="count-badge">19 enabled</span>
           </summary>
           <div
             id="visual-filters-body"
@@ -474,12 +460,32 @@
             data-disclosure-body="visual-filters"
           >
             <p id="visual-filters-help" class="section-note">
-              These browser-local filters change battlefield presentation only.
-              Ranges and scientific data remain unchanged.
+              These controls change battlefield presentation only. Scientific data
+              remain unchanged.
             </p>
             <fieldset class="visual-filters__fieldset">
               <legend class="sr-only">Battlefield visual filters</legend>
               <div id="visual-filter-options" class="visual-filters__options"></div>
+              <div class="visual-filters__ranges">
+                <div>
+                  <strong>Ranges</strong>
+                  <span>Show or hide authorized range overlays.</span>
+                </div>
+                <button
+                  id="live-ranges-button"
+                  type="button"
+                  data-live-only
+                  data-key="g"
+                  aria-pressed="false"
+                >Ranges</button>
+                <button
+                  id="replay-ranges-button"
+                  type="button"
+                  data-replay-only
+                  aria-pressed="false"
+                  hidden
+                >Ranges</button>
+              </div>
             </fieldset>
             <div class="visual-filters__actions">
               <button id="enable-all-visual-filters-button" type="button" disabled>

@@ -27,7 +27,6 @@ const SPATIAL_HIT_SELECTOR = [
   ".combat-semantic-pulse__hit",
   ".combat-lifecycle-ring__hit",
   ".combat-respawn-wave__panel",
-  ".combat-rejection__hit",
 ].join(", ");
 const TRANSIENT_EVENT_FAMILIES = Object.freeze([
   [
@@ -39,11 +38,6 @@ const TRANSIENT_EVENT_FAMILIES = Object.freeze([
   [
     ".combat-effect--regeneration[data-tooltip-owner]",
     ".combat-regeneration__hit",
-    "event",
-  ],
-  [
-    ".combat-effect--semantic-pulse[data-tooltip-owner]",
-    ".combat-semantic-pulse__hit",
     "event",
   ],
   [
@@ -322,9 +316,7 @@ async function staticDomSignature(page) {
       ]
         .map((element) => {
           const route = element.matches(".combat-route-effect");
-          const path = route
-            ? element.querySelector(".combat-route__path, .combat-rejection__route")
-            : null;
+          const path = route ? element.querySelector(".combat-route__path") : null;
           return {
             key: element.getAttribute("data-layout-key"),
             className: element.getAttribute("class"),
@@ -533,16 +525,6 @@ async function spatialContractEvidence(page) {
             ),
           ];
         }
-        if (element.matches(".combat-rejection__ring")) {
-          const owner = element.closest(".combat-effect");
-          return owner
-            ? [
-                ...owner.querySelectorAll(
-                  ".combat-rejection__ring, .combat-rejection__hit:not(.combat-route__hit)",
-                ),
-              ]
-            : [element];
-        }
         return [element];
       };
       const layoutElements = [
@@ -689,9 +671,9 @@ async function spatialContractEvidence(page) {
       const routeGeometry = [...routeRoot.querySelectorAll(".combat-route-effect")].map(
         (route) => ({
           eventId: route.getAttribute("data-event-id"),
-          visiblePaths: [
-            ...route.querySelectorAll(".combat-route__path, .combat-rejection__route"),
-          ].map((path) => rectangle(path.getBoundingClientRect())),
+          visiblePaths: [...route.querySelectorAll(".combat-route__path")].map((path) =>
+            rectangle(path.getBoundingClientRect()),
+          ),
           markers: [...route.querySelectorAll(".combat-route__arrow")].map((marker) =>
             rectangle(marker.getBoundingClientRect()),
           ),
@@ -1031,6 +1013,14 @@ test("paused replay installs a complete deterministic static summary at both sup
   expect(allOnExpected.plannedIds).toEqual(allOnExpected.orderedIds);
   const science = await scientificSignature(page);
   await openVisualFilters(page);
+  await expect(
+    page.locator(`${FILTER_INPUT}[data-visual-filter-id="target_selection_visuals"]`),
+  ).not.toBeChecked();
+  await expect(page.locator("#replay-ranges-button")).toHaveAttribute(
+    "aria-pressed",
+    "false",
+  );
+  await expect(page.locator("#visual-filter-count")).toHaveText("17 enabled");
 
   /** @type {Awaited<ReturnType<typeof staticDomSignature>> | null} */
   let minimumSignature = null;
@@ -1076,65 +1066,6 @@ test("paused replay installs a complete deterministic static summary at both sup
 
     await setFilter(page, apiRequests, SELECTIVE_FILTER, true);
     expect(await staticDomSignature(page)).toEqual(allOn);
-    await expect(page.locator("#enable-all-visual-filters-button")).toBeDisabled();
-    await expect(page.locator("#disable-all-visual-filters-button")).toBeEnabled();
-
-    const allOffMark = apiRequests.length;
-    await page.locator("#disable-all-visual-filters-button").click();
-    await settleStaticSummary(page);
-    expect(apiRequests.slice(allOffMark), "Disable All caused an API request").toEqual(
-      [],
-    );
-    await expect(page.locator(FILTER_INPUT)).toHaveCount(VISUAL_FILTER_IDS.length);
-    await expect(page.locator(`${FILTER_INPUT}:checked`)).toHaveCount(0);
-    await expect(page.locator("#enable-all-visual-filters-button")).toBeEnabled();
-    await expect(page.locator("#disable-all-visual-filters-button")).toBeDisabled();
-    await expect(page.locator(`${CHOREOGRAPHY_ROOT} > *`)).toHaveCount(0);
-    await expect(page.locator(`${CHOREOGRAPHY_ROUTE_ROOT} > *`)).toHaveCount(0);
-    await expect(page.locator("#battlefield [data-layout-key]")).toHaveCount(0);
-    expect(await scientificSignature(page)).toEqual(science);
-    const disabledIdempotencyMark = apiRequests.length;
-    await page.locator("#disable-all-visual-filters-button").evaluate((button) => {
-      if (!(button instanceof HTMLButtonElement)) {
-        throw new TypeError("Disable All is unavailable.");
-      }
-      button.click();
-    });
-    await settleStaticSummary(page);
-    expect(
-      apiRequests.slice(disabledIdempotencyMark),
-      "disabled Disable All caused an API request",
-    ).toEqual([]);
-    await expect(page.locator(`${FILTER_INPUT}:checked`)).toHaveCount(0);
-
-    const enableMark = apiRequests.length;
-    await page.locator("#enable-all-visual-filters-button").click();
-    await settleStaticSummary(page);
-    expect(apiRequests.slice(enableMark), "Enable All caused an API request").toEqual(
-      [],
-    );
-    await expect(page.locator(`${FILTER_INPUT}:checked`)).toHaveCount(
-      VISUAL_FILTER_IDS.length,
-    );
-    await expect(page.locator("#enable-all-visual-filters-button")).toBeDisabled();
-    await expect(page.locator("#disable-all-visual-filters-button")).toBeEnabled();
-    expect(await staticDomSignature(page)).toEqual(allOn);
-    expect(await scientificSignature(page)).toEqual(science);
-    const enabledIdempotencyMark = apiRequests.length;
-    await page.locator("#enable-all-visual-filters-button").evaluate((button) => {
-      if (!(button instanceof HTMLButtonElement)) {
-        throw new TypeError("Enable All is unavailable.");
-      }
-      button.click();
-    });
-    await settleStaticSummary(page);
-    expect(
-      apiRequests.slice(enabledIdempotencyMark),
-      "disabled Enable All caused an API request",
-    ).toEqual([]);
-    await expect(page.locator(`${FILTER_INPUT}:checked`)).toHaveCount(
-      VISUAL_FILTER_IDS.length,
-    );
 
     if (viewport === MINIMUM_VIEWPORT) {
       minimumSignature = allOn;
@@ -1145,5 +1076,85 @@ test("paused replay installs a complete deterministic static summary at both sup
   await settleStaticSummary(page);
   expect(await staticDomSignature(page)).toEqual(minimumSignature);
   expect(await scientificSignature(page)).toEqual(science);
+
+  if (!minimumSignature) {
+    throw new Error("Minimum-viewport signature was not captured.");
+  }
+  await expect(page.locator("#enable-all-visual-filters-button")).toBeEnabled();
+  await expect(page.locator("#disable-all-visual-filters-button")).toBeEnabled();
+
+  const allOffMark = apiRequests.length;
+  await page.locator("#disable-all-visual-filters-button").click();
+  await settleStaticSummary(page);
+  expect(apiRequests.slice(allOffMark), "Disable All caused an API request").toEqual(
+    [],
+  );
+  await expect(page.locator(FILTER_INPUT)).toHaveCount(VISUAL_FILTER_IDS.length);
+  await expect(page.locator(`${FILTER_INPUT}:checked`)).toHaveCount(0);
+  await expect(page.locator("#enable-all-visual-filters-button")).toBeEnabled();
+  await expect(page.locator("#disable-all-visual-filters-button")).toBeDisabled();
+  await expect(page.locator(`${CHOREOGRAPHY_ROOT} > *`)).toHaveCount(0);
+  await expect(page.locator(`${CHOREOGRAPHY_ROUTE_ROOT} > *`)).toHaveCount(0);
+  await expect(page.locator("#battlefield [data-layout-key]")).toHaveCount(0);
+  expect(await scientificSignature(page)).toEqual(science);
+  const disabledIdempotencyMark = apiRequests.length;
+  await page.locator("#disable-all-visual-filters-button").evaluate((button) => {
+    if (!(button instanceof HTMLButtonElement)) {
+      throw new TypeError("Disable All is unavailable.");
+    }
+    button.click();
+  });
+  await settleStaticSummary(page);
+  expect(
+    apiRequests.slice(disabledIdempotencyMark),
+    "disabled Disable All caused an API request",
+  ).toEqual([]);
+  await expect(page.locator(`${FILTER_INPUT}:checked`)).toHaveCount(0);
+
+  const enableMark = apiRequests.length;
+  const enableResponse = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname === "/api/replay/command",
+  );
+  await page.locator("#enable-all-visual-filters-button").click();
+  expect((await enableResponse).status()).toBe(200);
+  await settleStaticSummary(page);
+  expect(
+    apiRequests.slice(enableMark).filter(({ method }) => method === "POST"),
+    "Enable All range request count",
+  ).toEqual([{ method: "POST", path: "/api/replay/command" }]);
+  await expect(page.locator(`${FILTER_INPUT}:checked`)).toHaveCount(
+    VISUAL_FILTER_IDS.length,
+  );
+  await expect(page.locator("#enable-all-visual-filters-button")).toBeDisabled();
+  await expect(page.locator("#disable-all-visual-filters-button")).toBeEnabled();
+  await expect(page.locator("#replay-ranges-button")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  const restored = await staticDomSignature(page);
+  expect(restored.atomicIds).toEqual(minimumSignature.atomicIds);
+  expect(restored.layoutKeys).toEqual(minimumSignature.layoutKeys);
+  expect(
+    restored.rootState.every(
+      ({ paintKey }) => paintKey === `visual-filters-v2:${"1".repeat(18)}`,
+    ),
+  ).toBe(true);
+  const enabledIdempotencyMark = apiRequests.length;
+  await page.locator("#enable-all-visual-filters-button").evaluate((button) => {
+    if (!(button instanceof HTMLButtonElement)) {
+      throw new TypeError("Enable All is unavailable.");
+    }
+    button.click();
+  });
+  await settleStaticSummary(page);
+  expect(
+    apiRequests.slice(enabledIdempotencyMark),
+    "disabled Enable All caused an API request",
+  ).toEqual([]);
+  await expect(page.locator(`${FILTER_INPUT}:checked`)).toHaveCount(
+    VISUAL_FILTER_IDS.length,
+  );
   expect(browserErrors).toEqual([]);
 });

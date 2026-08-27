@@ -1,8 +1,10 @@
+import { exactAuthorizedAgentIdentityV1 } from "./agent-identity.js";
 import { CHOREOGRAPHY_PAINT_FOOTPRINTS } from "./choreography-plan.js";
 import { formatCompactDisplayNumber, formatDisplayNumber } from "./display.js";
 import { explainActivation, explainNetHealth } from "./explanations.js";
 import { createSvgIcon } from "./icons.js";
 import { routeMarkerPose } from "./routes.js";
+import { statusLifecyclePresentation } from "./semantic-vocabulary.js";
 import { createSemanticDescriptor, registerTooltipOwner } from "./tooltip.js";
 import { resolveVisualToken } from "./vocabulary.js";
 
@@ -18,6 +20,11 @@ function formatAgentIdentity(publicAgentId) {
 }
 
 /** @param {unknown} value */
+function authorizedIdentityTitle(value) {
+  return exactAuthorizedAgentIdentityV1(value)?.title ?? null;
+}
+
+/** @param {unknown} value */
 function humanizeEventName(value) {
   return String(value ?? "event")
     .replaceAll("_", " ")
@@ -28,13 +35,13 @@ function humanizeEventName(value) {
 function semanticEventCopy(event) {
   if (event.cueSemantic === "agent_died") {
     return Object.freeze({
-      title: "Agent died",
+      title: "Agent Died",
       summary: "This agent died on the incoming transition.",
     });
   }
   if (event.cueSemantic === "agent_respawned") {
     return Object.freeze({
-      title: "Agent respawned",
+      title: "Agent Respawned",
       summary: "This agent respawned on the incoming transition.",
     });
   }
@@ -43,7 +50,7 @@ function semanticEventCopy(event) {
       title:
         typeof event.label === "string" && event.label.trim()
           ? event.label
-          : "Team respawn",
+          : "Team Respawn",
       summary: "This team respawn occurred on the incoming transition.",
     });
   }
@@ -63,8 +70,13 @@ function semanticEventCopy(event) {
 export function explainChoreographyEvent(event) {
   const visibleEvent = paintAwareExplanationEvent(event);
   const semanticCopy = semanticEventCopy(visibleEvent);
+  const lifecycleCopy =
+    visibleEvent.kind === "status_lifecycle"
+      ? statusLifecyclePresentation(visibleEvent.tokenId, visibleEvent.lifecycle)
+      : null;
   const title = String(
-    visibleEvent.lifecycleToken?.label ??
+    lifecycleCopy?.title ??
+      visibleEvent.lifecycleToken?.label ??
       visibleEvent.token?.label ??
       semanticCopy.title,
   );
@@ -72,22 +84,38 @@ export function explainChoreographyEvent(event) {
   const applicationSources = Array.isArray(visibleEvent.applicationSources)
     ? visibleEvent.applicationSources
     : [];
-  if (applicationSources.length > 0) {
+  const applicationSourceIdentities = applicationSources.map((source) =>
+    authorizedIdentityTitle(source?.sourceIdentity),
+  );
+  if (
+    applicationSourceIdentities.length > 0 &&
+    applicationSourceIdentities.every((identity) => identity !== null)
+  ) {
     rows.push({
-      label: applicationSources.length === 1 ? "Source" : "Application Sources",
-      value: applicationSources
-        .map((source) => formatAgentIdentity(source?.sourcePublicAgentId))
-        .join("; "),
+      label: applicationSources.length === 1 ? "Source" : "Sources",
+      value: applicationSourceIdentities.join("; "),
       metadata: { compact: true, full: true },
     });
   }
+  const directSourceIdentity =
+    applicationSources.length === 0
+      ? authorizedIdentityTitle(visibleEvent.sourceIdentity)
+      : null;
+  const recipientIdentity = authorizedIdentityTitle(visibleEvent.recipientIdentity);
+  for (const [label, value] of [
+    ["Source", directSourceIdentity],
+    ["Recipient", recipientIdentity],
+  ]) {
+    if (value !== null) {
+      rows.push({
+        label,
+        value,
+        metadata: { compact: true, full: true },
+      });
+    }
+  }
   for (const [label, value] of [
     ["Actor", visibleEvent.actorPublicAgentId],
-    [
-      "Source",
-      applicationSources.length === 0 ? visibleEvent.sourcePublicAgentId : null,
-    ],
-    ["Recipient", visibleEvent.recipientPublicAgentId],
     ["Agent", visibleEvent.agentPublicAgentId],
   ]) {
     if (typeof value === "string" && value.trim()) {
@@ -116,17 +144,27 @@ export function explainChoreographyEvent(event) {
   ]
     .filter((value) => typeof value === "string" && value.length > 0)
     .join(":");
+  const regenerationPerTick = Number(visibleEvent.outOfCombatRegenerationPerTick);
+  const summary =
+    visibleEvent.kind === "status_lifecycle" &&
+    visibleEvent.tokenId === "in_combat" &&
+    visibleEvent.lifecycle === "expired" &&
+    Number.isFinite(regenerationPerTick)
+      ? `This agent can regenerate up to ${formatDisplayNumber(regenerationPerTick)} health per tick while it remains out of combat.`
+      : lifecycleCopy !== null
+        ? lifecycleCopy.summary
+        : String(
+            visibleEvent.lifecycleToken?.accessibleName ??
+              visibleEvent.token?.accessibleName ??
+              semanticCopy.summary,
+          );
   return createSemanticDescriptor({
     kind: "event",
     id: `semantic-event:${semanticOwnerKey || "unclassified"}`,
     title,
-    tone: visibleEvent.kind === "rejected_action" ? "warning" : "information",
+    tone: "information",
     accent: "none",
-    summary: String(
-      visibleEvent.lifecycleToken?.accessibleName ??
-        visibleEvent.token?.accessibleName ??
-        semanticCopy.summary,
-    ),
+    summary,
     rows,
     sections: [],
     metadata: { compact: true, full: true },
@@ -512,17 +550,7 @@ export class SvgChoreographyPainter {
     } else if (event.kind === "regeneration") {
       this.#renderRegeneration(ownerDocument, group, connector, event);
     } else if (event.kind === "status_lifecycle") {
-      this.#renderLifecycle(
-        ownerDocument,
-        group,
-        connector,
-        event,
-        plan,
-        options,
-        animationSpecs,
-      );
-    } else if (event.kind === "rejected_action") {
-      this.#renderRejection(ownerDocument, group, connector, underlay, event);
+      this.#renderLifecycle(ownerDocument, group, connector, event);
     } else if (event.kind === "semantic_pulse") {
       this.#renderSemanticPulse(
         ownerDocument,
@@ -629,11 +657,19 @@ export class SvgChoreographyPainter {
         class: "combat-route__hit",
         d: event.route.path,
       });
-      const arrow = svgElement(ownerDocument, "path", {
-        class: "combat-route__arrow",
-        d: "M -11 -6 L 2 0 L -11 6 L -7 0 Z",
-      });
-      underlay.append(hitPath, path, arrow);
+      const markerCount =
+        event.tokenId === "warrior_charge" &&
+        Array.isArray(event.route.markerProgresses)
+          ? event.route.markerProgresses.length
+          : 1;
+      const arrows = Array.from({ length: markerCount }, (_, markerIndex) =>
+        svgElement(ownerDocument, "path", {
+          class: "combat-route__arrow",
+          d: "M -11 -6 L 2 0 L -11 6 L -7 0 Z",
+          "data-marker-index": markerIndex,
+        }),
+      );
+      underlay.append(hitPath, path, ...arrows);
       if (
         event.tokenId === "warrior_charge" &&
         ((Number.isInteger(event.sourceSlot) && Number.isInteger(event.targetSlot)) ||
@@ -1190,30 +1226,14 @@ export class SvgChoreographyPainter {
    * @param {SVGElement} group
    * @param {SVGElement} connector
    * @param {JsonRecord} event
-   * @param {JsonRecord} plan
-   * @param {PainterOptions} options
-   * @param {AnimationSpec[]} animationSpecs
    */
-  #renderLifecycle(
-    ownerDocument,
-    group,
-    connector,
-    event,
-    plan,
-    options,
-    animationSpecs,
-  ) {
+  #renderLifecycle(ownerDocument, group, connector, event) {
     if (!event.recipient) {
       return;
     }
-    const combinedLifecycle = event.lifecycle === "trap_broken_and_reapplied";
+    const visibleEvent = paintAwareExplanationEvent(event);
     const effectEnabled = paintPartEnabled(event, "effect");
-    const breakEnabled = combinedLifecycle
-      ? paintPartEnabled(event, "break")
-      : effectEnabled;
-    const reapplicationEnabled = combinedLifecycle
-      ? paintPartEnabled(event, "reapplication")
-      : effectEnabled && event.lifecycle === "reapplied";
+    const breakEnabled = effectEnabled;
     const lifecycle = svgElement(ownerDocument, "g", {
       class: "combat-lifecycle",
     });
@@ -1249,8 +1269,8 @@ export class SvgChoreographyPainter {
       setAttributes(statusIcon, { x: -10, y: -10, width: 20, height: 20 });
       lifecycle.append(statusIcon);
       if (
-        event.lifecycle !== "trap_broken" &&
-        event.lifecycle !== "trap_broken_and_reapplied"
+        visibleEvent.lifecycle !== "trap_broken" &&
+        visibleEvent.lifecycle !== "cleared_by_death"
       ) {
         const change = svgElement(ownerDocument, "g", {
           class: "combat-lifecycle__change",
@@ -1264,34 +1284,19 @@ export class SvgChoreographyPainter {
         );
         const changeIcon = createSvgIcon(
           ownerDocument,
-          event.lifecycleToken?.glyphKey ?? "unknown",
+          visibleEvent.lifecycleToken?.glyphKey ?? "unknown",
           { className: "combat-lifecycle__change-icon" },
         );
         setAttributes(changeIcon, { x: -6, y: -6, width: 12, height: 12 });
         change.append(changeIcon);
         lifecycle.append(change);
       }
-    } else if (reapplicationEnabled) {
-      const lifecycleHit = svgElement(ownerDocument, "circle", {
-        class: "combat-lifecycle__hit",
-        r: CHOREOGRAPHY_PAINT_FOOTPRINTS.lifecycleReapplication.width / 2,
-      });
-      lifecycleHit.addEventListener("pointerdown", (pointerEvent) => {
-        if (pointerEvent.button === 0) {
-          pointerEvent.stopPropagation();
-        }
-      });
-      lifecycle.append(lifecycleHit);
     }
-    if (breakEnabled && event.lifecycle === "cleared_by_death") {
+    if (breakEnabled && visibleEvent.lifecycle === "cleared_by_death") {
       const sweep = svgElement(ownerDocument, "g", {
         class: "combat-lifecycle__death-sweep",
       });
       sweep.append(
-        svgElement(ownerDocument, "path", {
-          class: "combat-lifecycle__death-sweep-arc",
-          d: "M -23 -8 C -8 -23 10 -23 23 -7",
-        }),
         svgElement(ownerDocument, "path", {
           class: "combat-lifecycle__death-sweep-cut",
           d: "M -22 10 L 22 -10",
@@ -1299,11 +1304,7 @@ export class SvgChoreographyPainter {
       );
       lifecycle.append(sweep);
     }
-    if (
-      breakEnabled &&
-      (event.lifecycle === "trap_broken" ||
-        event.lifecycle === "trap_broken_and_reapplied")
-    ) {
+    if (breakEnabled && visibleEvent.lifecycle === "trap_broken") {
       for (let index = 0; index < 6; index += 1) {
         const angle = (Math.PI * 2 * index) / 6;
         lifecycle.append(
@@ -1314,50 +1315,6 @@ export class SvgChoreographyPainter {
             x2: Math.cos(angle) * 23,
             y2: Math.sin(angle) * 23,
           }),
-        );
-      }
-    }
-    if (reapplicationEnabled) {
-      const reapply = svgElement(ownerDocument, "g", {
-        class: "combat-lifecycle__reapply",
-        opacity: options.settled || options.motionMode === "off" ? 1 : 0,
-      });
-      reapply.append(
-        svgElement(ownerDocument, "circle", {
-          class: "combat-lifecycle__reapply-ring",
-          r: CHOREOGRAPHY_PAINT_FOOTPRINTS.lifecycleReapplication.ringRadius,
-        }),
-      );
-      const reapplyIcon = createSvgIcon(
-        ownerDocument,
-        event.token?.glyphKey ?? "unknown",
-        { className: "combat-lifecycle__reapply-icon" },
-      );
-      setAttributes(reapplyIcon, { x: -9, y: -9, width: 18, height: 18 });
-      reapply.append(reapplyIcon);
-      lifecycle.append(reapply);
-      if (!options.settled && options.motionMode !== "off") {
-        const reduced = options.motionMode === "reduced";
-        const authoredDelay =
-          Number(event.phaseStart ?? plan.phases.outcomeStart ?? 420) + 150;
-        const authoredDuration = 320;
-        const reducedScale =
-          Number(plan.phases.reducedTotal ?? 220) /
-          Math.max(Number(plan.phases.total ?? 900), 1);
-        animationSpecs.push(
-          animationSpec(
-            reapply,
-            [{ opacity: 0 }, { opacity: 0, offset: 0.35 }, { opacity: 1 }],
-            {
-              delay: reduced ? authoredDelay * reducedScale : authoredDelay,
-              duration: reduced ? authoredDuration * reducedScale : authoredDuration,
-              easing: "ease-out",
-              fill: "both",
-            },
-            plan,
-            event,
-            "reapply",
-          ),
         );
       }
     }
@@ -1461,22 +1418,6 @@ export class SvgChoreographyPainter {
         svgElement(ownerDocument, "path", {
           class: "combat-semantic-pulse__mark",
           d: "M -7 0 L -2 6 L 8 -7",
-        }),
-      );
-    } else if (event.cueSemantic === "spawn_shield_expired") {
-      pulse.append(
-        svgElement(ownerDocument, "circle", {
-          class: "combat-semantic-pulse__shield-shell",
-          r: 24,
-          fill: "none",
-          stroke: "currentColor",
-          "stroke-width": 3,
-          "stroke-dasharray": "3 3",
-          "vector-effect": "non-scaling-stroke",
-        }),
-        svgElement(ownerDocument, "path", {
-          class: "combat-semantic-pulse__mark",
-          d: "M 0 -11 L 9 -7 V 1 C 9 7 5 10 0 13 C -5 10 -9 7 -9 1 V -7 Z M -3 -7 L 2 -1 L -2 3 L 4 9",
         }),
       );
     }
@@ -1611,63 +1552,6 @@ export class SvgChoreographyPainter {
   }
 
   /**
-   * @param {Document} ownerDocument
-   * @param {SVGElement} group
-   * @param {SVGElement} connector
-   * @param {SVGElement | null} underlay
-   * @param {JsonRecord} event
-   */
-  #renderRejection(ownerDocument, group, connector, underlay, event) {
-    if (!event.actor) {
-      return;
-    }
-    const cue = event.cue ?? event.actor;
-    const ring = svgElement(ownerDocument, "circle", {
-      class: "combat-rejection__ring",
-      cx: cue.x,
-      cy: cue.y,
-      r: CHOREOGRAPHY_PAINT_FOOTPRINTS.rejection.ringRadius,
-    });
-    assignLayoutPlacement(
-      ring,
-      event.cueLayoutKey,
-      event.cueBounds,
-      event.cueDisposition,
-      event.cueCollisionFree,
-    );
-    const hit = svgElement(ownerDocument, "circle", {
-      class: "combat-rejection__hit",
-      cx: cue.x,
-      cy: cue.y,
-      r: CHOREOGRAPHY_PAINT_FOOTPRINTS.rejection.width / 2,
-    });
-    hit.addEventListener("pointerdown", (pointerEvent) => {
-      if (pointerEvent.button === 0) {
-        pointerEvent.stopPropagation();
-      }
-    });
-    group.append(hit, ring);
-    appendAllocatedLeader(
-      ownerDocument,
-      connector,
-      "combat-cue__leader combat-cue__leader--rejection",
-      event.cueLeader,
-    );
-    if (event.route && underlay) {
-      underlay.append(
-        svgElement(ownerDocument, "path", {
-          class: "combat-route__hit combat-rejection__hit",
-          d: event.route.path,
-        }),
-        svgElement(ownerDocument, "path", {
-          class: "combat-rejection__route",
-          d: event.route.path,
-        }),
-      );
-    }
-  }
-
-  /**
    * Paint the later route over a small battlefield-coloured backplate at each
    * allocator-authored crossing. The transparent route hit path stays whole,
    * so bridge treatment never fragments semantic inspection.
@@ -1682,9 +1566,7 @@ export class SvgChoreographyPainter {
     for (const bridge of underlay.querySelectorAll(".combat-route__bridge-backplate")) {
       bridge.remove();
     }
-    const visibleRoute = underlay.querySelector(
-      ".combat-route__path, .combat-rejection__route",
-    );
+    const visibleRoute = underlay.querySelector(".combat-route__path");
     if (!(visibleRoute instanceof SVGElement) || !Array.isArray(route?.bridgeGaps)) {
       return;
     }
@@ -1761,28 +1643,6 @@ export class SvgChoreographyPainter {
         });
         this.#updateCueLeader(connector, event);
       }
-    } else if (event.kind === "rejected_action") {
-      const ring = group.querySelector(".combat-rejection__ring");
-      if (ring && event.actor) {
-        const cue = event.cue ?? event.actor;
-        setAttributes(ring, { cx: cue.x, cy: cue.y });
-        assignLayoutPlacement(
-          ring,
-          event.cueLayoutKey,
-          event.cueBounds,
-          event.cueDisposition,
-          event.cueCollisionFree,
-        );
-      }
-      const route = underlay?.querySelector(".combat-rejection__route");
-      const hitRoute = underlay?.querySelector(".combat-rejection__hit");
-      if (route && event.route) {
-        route.setAttribute("d", event.route.path);
-      }
-      if (hitRoute && event.route) {
-        hitRoute.setAttribute("d", event.route.path);
-      }
-      syncAllocatedLeader(connector, ".combat-cue__leader--rejection", event.cueLeader);
     } else if (event.kind === "semantic_pulse") {
       const pulse = group.querySelector(
         ".combat-semantic-pulse, .combat-lifecycle-ring, .combat-respawn-wave",
@@ -1824,7 +1684,6 @@ export class SvgChoreographyPainter {
   #updateActivationGeometry(group, connector, underlay, event) {
     const path = underlay?.querySelector(".combat-route__path");
     const hitPath = underlay?.querySelector(".combat-route__hit");
-    const arrow = underlay?.querySelector(".combat-route__arrow");
     const ownership = underlay?.querySelector(".combat-route__ownership");
     if (path && event.route) {
       path.setAttribute("d", event.route.path);
@@ -1832,16 +1691,45 @@ export class SvgChoreographyPainter {
     if (hitPath && event.route) {
       hitPath.setAttribute("d", event.route.path);
     }
-    if (arrow && event.route) {
-      const marker = routeMarkerPose(event.route);
+    if (underlay && event.route) {
+      const chargeMarkerProgresses =
+        event.tokenId === "warrior_charge" &&
+        Array.isArray(event.route.markerProgresses)
+          ? event.route.markerProgresses.filter(
+              (/** @type {unknown} */ progress) =>
+                typeof progress === "number" &&
+                Number.isFinite(progress) &&
+                progress >= 0 &&
+                progress <= 1,
+            )
+          : null;
+      const markerProgresses = chargeMarkerProgresses ?? [undefined];
+      const arrows = [...underlay.querySelectorAll(".combat-route__arrow")];
+      while (arrows.length > markerProgresses.length) {
+        arrows.pop()?.remove();
+      }
+      const insertionPoint = underlay.querySelector(
+        ".combat-route__ownership, .combat-route__particle",
+      );
+      while (arrows.length < markerProgresses.length) {
+        const arrow = svgElement(underlay.ownerDocument, "path", {
+          class: "combat-route__arrow",
+        });
+        underlay.insertBefore(arrow, insertionPoint);
+        arrows.push(arrow);
+      }
       const compact = event.route.markerVariant === "compact";
-      setAttributes(arrow, {
-        "data-marker-variant": compact ? "compact" : "full",
-        d: compact
-          ? "M -6 -3 L 2 0 L -6 3 L -4 0 Z"
-          : "M -11 -6 L 2 0 L -11 6 L -7 0 Z",
-        transform: `translate(${marker.x} ${marker.y}) rotate(${marker.degrees})`,
-      });
+      for (const [markerIndex, arrow] of arrows.entries()) {
+        const marker = routeMarkerPose(event.route, markerProgresses[markerIndex]);
+        setAttributes(arrow, {
+          "data-marker-index": markerIndex,
+          "data-marker-variant": compact ? "compact" : "full",
+          d: compact
+            ? "M -6 -3 L 2 0 L -6 3 L -4 0 Z"
+            : "M -11 -6 L 2 0 L -11 6 L -7 0 Z",
+          transform: `translate(${marker.x} ${marker.y}) rotate(${marker.degrees})`,
+        });
+      }
     }
     if (ownership && event.route) {
       this.#updateChargeOwnershipGeometry(ownership, event);
@@ -2455,30 +2343,13 @@ function paintAwareExplanationEvent(event) {
   }
   if (
     event.kind === "status_lifecycle" &&
-    event.lifecycle === "trap_broken_and_reapplied"
+    ["refreshed", "reapplied", "trap_broken_and_reapplied"].includes(event.lifecycle)
   ) {
-    const breakEnabled = paintPartEnabled(event, "break");
-    const reapplicationEnabled = paintPartEnabled(event, "reapplication");
-    const visibleLifecycle = breakEnabled
-      ? reapplicationEnabled
-        ? event.lifecycle
-        : "trap_broken"
-      : "reapplied";
-    if (breakEnabled && !reapplicationEnabled) {
-      return {
-        ...event,
-        eventType: "status_broken_by_damage",
-        lifecycle: visibleLifecycle,
-        lifecycleToken: resolveVisualToken("lifecycle", visibleLifecycle, event),
-        sourcePresentationKey: null,
-        sourcePublicAgentId: null,
-        applicationSources: Object.freeze([]),
-      };
-    }
     return {
       ...event,
-      lifecycle: visibleLifecycle,
-      lifecycleToken: resolveVisualToken("lifecycle", visibleLifecycle, event),
+      eventType: "status_applied",
+      lifecycle: "applied",
+      lifecycleToken: resolveVisualToken("lifecycle", "applied", event),
     };
   }
   return event;
@@ -2490,20 +2361,6 @@ function paintAwareExplanationEvent(event) {
  * @returns {Keyframe[]}
  */
 function eventKeyframes(event, motionMode) {
-  if (
-    event.kind === "semantic_pulse" &&
-    event.cueSemantic === "spawn_shield_expired" &&
-    motionMode === "normal"
-  ) {
-    return [
-      { opacity: 0 },
-      { opacity: 1, offset: 0.14 },
-      { opacity: 1, offset: 0.44 },
-      { opacity: 0.35, offset: 0.62 },
-      { opacity: 0.75, offset: 0.72 },
-      { opacity: 0 },
-    ];
-  }
   if (event.kind === "net_health" && motionMode === "normal") {
     return [
       { opacity: 0 },

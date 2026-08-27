@@ -34,16 +34,14 @@ function definition(value) {
 const CLASS_DOCUMENTATION = Object.freeze({
   1: definition({
     overview:
-      "The Mage is a fragile backline damage dealer that creates explosive ranged-damage windows with Burst and relies on allied protection to operate.",
+      "The Mage is a ranged damage dealer with the lowest canonical maximum health and highest canonical basic raw damage. Burst temporarily amplifies the Mage's outgoing damage.",
     tacticalGuideRows: [
-      tacticalRow("Role", "Explosive Ranged Damage · Team-fight MVP"),
+      tacticalRow("Role", "Ranged Damage · Damage Amplification"),
       tacticalRow(
         "Primary Strength",
         "Highest basic raw damage among canonical damage-dealing classes.",
       ),
       tacticalRow("Primary Weakness", "Lowest canonical maximum health; glass cannon."),
-      tacticalRow("Counters", "Priest."),
-      tacticalRow("Countered By", "Rogue."),
     ],
     ultimateName: "Burst",
     ultimateTemplate:
@@ -54,16 +52,14 @@ const CLASS_DOCUMENTATION = Object.freeze({
   }),
   2: definition({
     overview:
-      "The Warrior is a durable frontline unit whose Charge can initiate a team fight or come to the aid of an ally, but it relies on allied follow-up to secure kills.",
+      "The Warrior has the highest canonical maximum health. Charge moves the Warrior toward an enemy target and applies raw damage, stun, and slow.",
     tacticalGuideRows: [
-      tacticalRow("Role", "Guardian · Team-fight Initiator · Tank"),
+      tacticalRow("Role", "Frontline Damage · Stun · Slow · Damage Mitigation"),
       tacticalRow("Primary Strength", "Highest canonical maximum health."),
       tacticalRow(
         "Primary Weakness",
         "Second-lowest positive basic raw damage among canonical damage-dealing classes.",
       ),
-      tacticalRow("Counters", "Rogue."),
-      tacticalRow("Countered By", "Hunter."),
     ],
     ultimateName: "Charge",
     ultimateTemplate:
@@ -74,7 +70,7 @@ const CLASS_DOCUMENTATION = Object.freeze({
   }),
   3: definition({
     overview:
-      "The Hunter is a backline ranged disabler whose basic range, observation radius, and control effects create plays for allied follow-up.",
+      "The Hunter is a ranged damage dealer and disabler. Its basic applies a slow, and Freezing Trap applies raw damage and the longest canonical configured stun.",
     tacticalGuideRows: [
       tacticalRow("Role", "Disabler · Crowd Controller"),
       tacticalRow("Primary Strength", "Longest canonical configured stun duration."),
@@ -82,8 +78,6 @@ const CLASS_DOCUMENTATION = Object.freeze({
         "Primary Weakness",
         "Lowest positive basic raw damage among canonical damage-dealing classes.",
       ),
-      tacticalRow("Counters", "Warrior."),
-      tacticalRow("Countered By", "Priest."),
     ],
     ultimateName: "Freezing Trap",
     ultimateTemplate:
@@ -94,27 +88,25 @@ const CLASS_DOCUMENTATION = Object.freeze({
   }),
   4: definition({
     overview:
-      "The Rogue is a fast ambusher whose superior movement speed supports flanks against high-value backline targets, but poor team-relative positioning leaves it vulnerable.",
+      "The Rogue has the highest canonical base movement speed. Crippling Poison applies raw damage, stun, slow, and anti-heal.",
     tacticalGuideRows: [
-      tacticalRow("Role", "Ambusher · Flanker · Assassin"),
+      tacticalRow("Role", "Fast Damage · Stun · Slow · Anti-Heal"),
       tacticalRow("Primary Strength", "Highest canonical base movement speed."),
       tacticalRow(
         "Primary Weakness",
-        "Relies on favorable team positioning for ambushes and flanks.",
+        "No raw healing and lower maximum health than the Warrior.",
       ),
-      tacticalRow("Counters", "Mage, Priest."),
-      tacticalRow("Countered By", "Warrior."),
     ],
     ultimateName: "Crippling Poison",
     ultimateTemplate:
       "Crippling Poison applies {{ultimateRawDamage}} raw damage to an enemy target before source and recipient damage modifiers, a stun for {{poisonStunDuration}}, {{poisonSlowEffect}} for {{poisonSlowDuration}}, and {{poisonAntiHealEffect}} to incoming healing and out-of-combat regeneration for {{poisonAntiHealDuration}}.",
     passiveName: "Phantom's Quickness",
     passiveTemplate:
-      "This Rogue's {{baseMovementSpeed}} is the highest in the certified profile. After {{outOfCombatDelay}} without combat participation, it becomes eligible for the displayed Out-of-combat Regeneration on each transition tick.",
+      "This Rogue's {{baseMovementSpeed}} is the highest in the certified profile. After {{outOfCombatDelay}} without combat participation, it becomes eligible for the displayed Out-of-Combat Regeneration on each transition tick.",
   }),
   5: definition({
     overview:
-      "The Priest is a backline support unit focused on keeping allies alive and therefore depends on teammates for protection and damage.",
+      "The Priest is the only canonical class with positive raw healing and cannot deal raw damage. Its basic and Ultimate target same-team agents.",
     tacticalGuideRows: [
       tacticalRow("Role", "Healer · Medic"),
       tacticalRow(
@@ -122,8 +114,6 @@ const CLASS_DOCUMENTATION = Object.freeze({
         "Only canonical class with positive raw healing.",
       ),
       tacticalRow("Primary Weakness", "Cannot deal raw damage."),
-      tacticalRow("Counters", "Hunter."),
-      tacticalRow("Countered By", "Rogue."),
     ],
     ultimateName: "Holy Word: Salvation",
     ultimateTemplate:

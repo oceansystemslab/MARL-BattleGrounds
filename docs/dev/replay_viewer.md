@@ -83,6 +83,23 @@ metric-complete replay/sidecar pair, validates both through the public loader,
 and exits. Only that immutable loaded bundle crosses into the Replay Viewer.
 The read-only viewer process does not import or run simulator control.
 
+### Authoritative-battlefield visual coverage rule
+
+Every authoritative-battlefield visual mechanic must have executable semantic
+coverage in both one default researcher scenario and one opt-in stress
+scenario. A mechanic is not covered merely because a frame label or scenario
+description names it: the scenario tests must derive the corresponding fact
+from validated transition events or normalized Scene V2 data. Status mechanics
+must additionally prove their stable catalog token through natural expiry.
+
+Any change that adds a battlefield effect, durable badge, status, aura,
+ability-family presentation, or lifecycle presentation must extend the regular
+and stress trajectories—and the paired semantic coverage contract—in the same
+change. Prefer extending an existing coherent trajectory; add a new scenario
+only when doing so keeps the demonstration readable. Research-space panels and
+controls outside the authoritative battlefield snapshot are not governed by
+this scenario-pair rule.
+
 ## Checked sample replays
 
 The checked V1 bundle under `examples/replays/v1/` contains exactly three
@@ -201,14 +218,15 @@ Technical Frame expansion.
 
 ## Visual filters
 
-Visual Filters contains exactly 18 browser-local paint families, all enabled
-by default:
+Visual Filters contains 18 browser-local paint families plus the Ranges
+control. Target Selection Visuals starts disabled; the other 17 paint families
+and Ranges start enabled, so Replay initially reports `18 enabled`:
 
 1. Aura Fields
 2. Aura Modifier Badges
 3. Duration Status Badges
 4. Spawn Shield
-5. Rejected Action Feedback
+5. Target Selection Visuals
 6. Basic Ability Effects
 7. Ultimate Ability Effects
 8. Regeneration Effects
@@ -223,7 +241,7 @@ by default:
 17. Spawn-Shield Expiry
 18. Scrolling Battle Text
 
-Duration Status Badges includes the white crossed-swords **In combat** countdown.
+Duration Status Badges includes the white crossed-swords **In Combat** countdown.
 Basic Ability Effects and Ultimate Ability Effects each own their corresponding
 activation presentation and damage/healing impact glyphs. Scrolling Battle
 Text owns the complete net-health unit: outcome glyph, signed value, recipient
@@ -232,10 +250,10 @@ healing remain distinguished by their outcome sign and color rather than by
 separate filters.
 
 A filter change pauses playback and reinstalls the current settled summary
-after filtering, so disabled paint never consumes layout space. Filters do not
-change authorized data, authorized event data used by battlefield choreography,
-or the separate Ranges state. **Enable All** enables all 18; **Disable All**
-disables all 18.
+after filtering, so disabled paint never consumes layout space. Filters and
+Ranges do not change authorized data or authorized event data used by
+battlefield choreography. **Enable All** restores all 18 paint families plus
+Ranges; **Disable All** disables all 19 visible controls.
 
 ## PNG export and metrics
 
@@ -243,8 +261,8 @@ disables all 18.
 visible, settled, and free of pending replay/presentation work. It exports the
 battlefield alone—not the toolbar, timeline, or inspectors—at exactly twice
 its displayed pixel dimensions. The result uses the bundled fonts and locked
-battlefield background, reflects the current audience, selection, ranges, and
-18 filter states, and embeds one canonical
+battlefield background, reflects the current audience, selection, Ranges, and
+18 paint-filter states, and embeds one canonical
 `MARL-BattleGrounds Replay Provenance` iTXt record. Export does not navigate the
 replay or request another replay frame.
 

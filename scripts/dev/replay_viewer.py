@@ -73,7 +73,7 @@ read-only replay controls:
   Tick current / final  show the exact captured cursor and terminal tick
 
 The Replay Viewer is read-only and always uses fixed Analysis presentation.
-The manual 18x12 combat laboratory remains available through:
+The manual 20x10 combat laboratory remains available through:
   scripts/dev/run_debug_renderer.sh
 """
 
