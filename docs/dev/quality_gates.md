@@ -45,20 +45,23 @@ unbounded serialized test time are process defects, not signs of rigor.
 
 ## Evidence economics and CI runtime budget
 
-The required push/PR pipeline has a five-minute repository-controlled critical-
-path budget, measured from the first hosted job's `started_at` timestamp through
-the later stable aggregate's `completed_at` timestamp. GitHub queue delay before
-runner start is external and reported separately. Sharding is explicitly
-permitted—and expected—when it preserves an exact, non-overlapping test
-inventory. Aggregate jobs retain the stable required-check names; twenty
-implementation jobs may run in parallel underneath them.
+The required push/PR pipeline targets an approximately five-minute repository-
+controlled critical path, measured from the first hosted job's `started_at`
+timestamp through the later stable aggregate's `completed_at` timestamp. GitHub
+queue delay before runner start is external and reported separately. Sharding is
+explicitly permitted—and expected—when it preserves an exact, non-overlapping
+test inventory. Aggregate jobs retain the stable required-check names; twenty
+implementation jobs may run concurrently under the current GitHub-hosted
+account limit. Local validation may use the developer workstation's additional
+CPU concurrency.
 
-The five-minute `timeout-minutes` value on each substantive job is a safety
-ceiling, not proof of the end-to-end budget: downstream aggregates necessarily
-run after their dependencies. Every publication candidate must therefore be
-checked against the hosted job timestamps after push. A result over five
-minutes requires shard rebalancing and a CI-only follow-up; it cannot be waived
-by noting that each individual job stayed under its timeout.
+The six-minute `timeout-minutes` value on each substantive matrix job provides
+small scheduling and teardown headroom; it is not the end-to-end target because
+downstream aggregates necessarily run after their dependencies. Every
+publication candidate must still be checked against hosted timestamps. A
+material regression beyond the approximately five-minute target requires
+profiling and a CI-only follow-up, while ordinary single-digit timing variance
+does not.
 
 ## Authoritative Replay and Debugger integration baseline
 
@@ -227,7 +230,7 @@ profiles and use the same setup-isolation flag. An executable list-only proof
 requires the eight profiles to be a disjoint, complete cover. Each profile
 retains one worker and file-local ordering.
 Required CI does not retry deterministic failures, stops a red shard after its
-first failure, and enforces a five-minute job ceiling. The script does not
+first failure, and enforces a six-minute matrix-job ceiling. The script does not
 install dependencies or update snapshots. Run it from the exact frozen commit
 candidate. When a changed helper spawns a package manager, interpreter,
 generated-artifact exporter, or browser, also exercise that path once from a

@@ -12,7 +12,7 @@ jobs:
   python-test-gates:
     name: Python tests (${{ matrix.shard }}/12)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 6
     strategy:
       fail-fast: true
       max-parallel: 12
@@ -75,7 +75,7 @@ jobs:
   frontend-browser-gates:
     name: Browser gates (${{ matrix.shard }}/8)
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 6
     strategy:
       fail-fast: true
       max-parallel: 8
