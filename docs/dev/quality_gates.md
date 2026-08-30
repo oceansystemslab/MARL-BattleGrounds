@@ -61,7 +61,12 @@ downstream aggregates necessarily run after their dependencies. Every
 publication candidate must still be checked against hosted timestamps. A
 material regression beyond the approximately five-minute target requires
 profiling and a CI-only follow-up, while ordinary single-digit timing variance
-does not.
+does not. Rebalance intact work units within the current twelve-Python/eight-
+browser, twenty-job ceiling before increasing a timeout. If the slowest
+indivisible work unit physically cannot fit six minutes, raise the applicable
+timeout by exactly one minute at a time and stop at the first measured
+sufficient value. Never omit tests or weaken assertions to satisfy the timing
+target.
 
 ## Authoritative Replay and Debugger integration baseline
 
@@ -194,14 +199,17 @@ pytest's unparameterized `originalname`. Ordinary files remain single affinity
 units so file-local fixtures and compiled execution paths are not repeated
 across workers. A small, explicit runtime profile may extract a measured slow
 family from a declared hotspot file while keeping that parameterized family
-indivisible and all residual families together. All consumers of an expensive
-module-scoped fixture remain in one residual affinity unit; a separately
-measured family that does not consume that fixture may be extracted without
-repeating fixture setup. Collection resolves statically declared transitive
-fixture dependencies and fails closed if a split would share a module-scoped
-fixture across workers. Pytest's dynamic `request` fixture API is prohibited
-inside profiled split files; collection rejects a split if a test or any
-non-pytest fixture in its resolved chain declares `request`.
+indivisible and all residual families together. A measured whole-file hotspot
+may instead split at function-family boundaries only when every parameterized
+family remains indivisible. Module-scoped fixtures remain affinity barriers
+unless the runtime profile names one exact fixture as safe to reconstruct: that
+exception requires fixed inputs, deterministic output, immutable returned
+data leaves, read-only consumers, and no I/O, dynamic fixture selection, or
+global mutation. Collection
+rejects stale exceptions, same-name fixtures from another definition site, and
+every other shared module fixture. Pytest's dynamic `request` fixture API is
+prohibited inside profiled split files; collection rejects a split if a test or
+any non-pytest fixture in its resolved chain declares `request`.
 The hosted semantic-inventory and service-preflight
 families, plus the sample-replay fixture residual, have deliberately dominant
 scheduling weights so each intact proof receives a dedicated worker. Twelve
@@ -210,15 +218,16 @@ including reserved capacity for a static gate. Collection fails closed if a
 configured file or family disappears, moves, or would be assigned twice. The
 profile changes CI scheduling only; it never selects a smaller test inventory.
 
-The checked-in weights were measured against the authoritative Replay/Debugger
-tree before Milestone 7 integration. They remain the safe initial profile for
-the integrated collection, but their relative costs are provisional until the
-merged tree has completed all twelve local shard inventories and one hosted
-run. Reprofiling must use per-work-unit and hosted job timings, with particular
-attention to the new Team Deathmatch semantics, rollout, and scripted-policy
-files. A timing change may adjust only affinity weights or extract an intact
-measured family; it must not omit a test, split a parameterized family, repeat a
-module-scoped fixture, exceed twelve Python workers, or displace a static gate.
+The integrated profile was measured after the M7 merge. The scripted Team
+Deathmatch NoSharedObs file is split across its 73 intact function families;
+its fixed-key `class_rows` fixture is the sole repeatable module-fixture
+exception. That fixture is pure, deterministic, I/O-free, and returns fresh
+JAX-array values inside a read-only consumer contract. Every other module-
+scoped fixture retains ordinary affinity. Reprofiling must use per-work-unit
+and hosted job timings. A timing
+change may adjust only measured affinity weights or intact family membership;
+it must not omit a test, split a parameterized family, exceed twelve Python
+workers, or displace a static gate.
 
 After frontend changes have stopped, install the locked contributor toolchain
 and pinned Chromium, then run the complete frontend/browser gate once:
@@ -242,9 +251,11 @@ profiles and use the same setup-isolation flag. An executable list-only proof
 requires the eight profiles to be a disjoint, complete cover. Each profile
 retains one worker and file-local ordering.
 Required CI does not retry deterministic failures, stops a red shard after its
-first failure, and enforces a six-minute matrix-job ceiling. The script does not
-install dependencies or update snapshots. Run it from the exact frozen commit
-candidate. When a changed helper spawns a package manager, interpreter,
+first failure, and initially enforces a six-minute matrix-job ceiling. Apply the
+one-minute escalation rule above only after measured rebalancing cannot make an
+indivisible unit fit. The script does not install dependencies or update
+snapshots. Run it from the exact frozen commit candidate. When a changed helper
+spawns a package manager, interpreter,
 generated-artifact exporter, or browser, also exercise that path once from a
 clean worktree with cold local environment state; a warm developer
 environment can suppress first-run output and setup behavior that CI will

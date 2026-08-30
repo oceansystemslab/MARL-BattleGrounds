@@ -224,6 +224,45 @@ def test_split_fixture_affinity_rejects_every_shared_module_fixture_definition(
             profile,
         )
 
+    repeatable_profile = ShardCostProfile(
+        split_file_family_cost_floors={path: 10},
+        repeatable_module_fixtures=frozenset({module_fixture}),
+        strict=True,
+    )
+    validate_split_fixture_affinity(
+        {
+            extracted: fixture_keys,
+            residual: frozenset({module_fixture}),
+        },
+        repeatable_profile,
+    )
+    same_name_override = ("tests/parent.py", module_fixture[1])
+    with pytest.raises(
+        ValueError,
+        match="split test families cannot share module-scoped fixtures",
+    ):
+        validate_split_fixture_affinity(
+            {
+                extracted: frozenset({module_fixture, same_name_override}),
+                residual: frozenset({module_fixture, same_name_override}),
+            },
+            repeatable_profile,
+        )
+    with pytest.raises(ValueError, match="stale repeatable module fixture profile"):
+        validate_split_fixture_affinity(
+            {
+                extracted: fixture_keys,
+                residual: frozenset({module_fixture}),
+            },
+            ShardCostProfile(
+                split_file_family_cost_floors={path: 10},
+                repeatable_module_fixtures=frozenset(
+                    {(path, "renamed_module_fixture")}
+                ),
+                strict=True,
+            ),
+        )
+
     extracted_pair_profile = ShardCostProfile(
         extracted_family_costs={
             extracted[1]: 100,
@@ -336,6 +375,35 @@ def test_indivisible_measured_file_never_splits_between_shards() -> None:
     assert sum(first in shard and second in shard for shard in assignments) == 1
 
 
+def test_declared_hotspot_splits_only_at_atomic_family_boundaries() -> None:
+    path = "tests/test_hotspot.py"
+    parameterized = (path, f"{path}::test_parameterized")
+    first = (path, f"{path}::test_first")
+    second = (path, f"{path}::test_second")
+    profile = ShardCostProfile(
+        split_file_family_cost_floors={path: 20},
+        strict=True,
+    )
+    counts: dict[TestFamilyKey, int] = {
+        parameterized: 7,
+        first: 1,
+        second: 2,
+    }
+
+    units = build_test_work_units(counts, profile)
+    assignments = assign_test_families(counts, 3, cost_profile=profile)
+
+    assert {unit.identifier for unit in units} == {
+        f"family:{parameterized[1]}",
+        f"family:{first[1]}",
+        f"family:{second[1]}",
+    }
+    assert {unit.cost for unit in units} == {20}
+    assert all(len(unit.families) == 1 for unit in units)
+    assert sum(parameterized in shard for shard in assignments) == 1
+    assert set(family for shard in assignments for family in shard) == set(counts)
+
+
 def test_weighted_assignment_is_stable_and_reserves_static_gate_capacity() -> None:
     counts = {
         (f"tests/test_{index}.py", f"tests/test_{index}.py::test_value"): cost
@@ -391,6 +459,13 @@ def test_weighted_assignment_rejects_an_empty_reserved_shard() -> None:
         ),
         (
             ShardCostProfile(
+                split_file_family_cost_floors={"tests/test_missing.py": 10},
+                strict=True,
+            ),
+            "stale CI shard file cost profile",
+        ),
+        (
+            ShardCostProfile(
                 extracted_family_costs={
                     "tests/test_present.py::test_missing": 10,
                 },
@@ -425,6 +500,9 @@ def test_production_profile_names_and_weights_exactly_five_extracted_families() 
     assert CI_SHARD_COST_PROFILE.file_cost_overrides == {
         "tests/test_visual_debugger_replay_service.py": 400,
     }
+    assert CI_SHARD_COST_PROFILE.split_file_family_cost_floors == {
+        "tests/test_scripted_team_deathmatch_no_shared_obs.py": 20,
+    }
     assert CI_SHARD_COST_PROFILE.extracted_family_costs == {
         (
             "tests/test_visual_debugger_scenarios.py::"
@@ -454,6 +532,14 @@ def test_production_profile_names_and_weights_exactly_five_extracted_families() 
     }
     assert CI_SHARD_COST_PROFILE.reserved_costs_by_shard_count[12] == (
         (0,) * 11 + (50,)
+    )
+    assert CI_SHARD_COST_PROFILE.repeatable_module_fixtures == frozenset(
+        {
+            (
+                "tests/test_scripted_team_deathmatch_no_shared_obs.py",
+                "class_rows",
+            )
+        }
     )
 
 

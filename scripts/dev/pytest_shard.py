@@ -2,8 +2,9 @@
 
 Load this module with ``pytest -p scripts.dev.pytest_shard`` and pass an exact
 ``--ci-shard=N/M`` selector. Ordinary test files remain on one worker. A small,
-strictly validated cost profile may extract known slow function families while
-keeping every parameterized family indivisible.
+strictly validated cost profile may extract known slow function families or
+split a declared hotspot at function-family boundaries while keeping every
+parameterized family indivisible.
 """
 
 from __future__ import annotations
@@ -29,17 +30,27 @@ def _empty_reserved_costs() -> dict[int, tuple[int, ...]]:
     return {}
 
 
+def _empty_module_fixture_keys() -> frozenset[ModuleFixtureKey]:
+    return frozenset()
+
+
 @dataclass(frozen=True)
 class ShardCostProfile:
     """Declare measured CI costs without changing test ownership semantics."""
 
     file_cost_overrides: Mapping[str, int] = field(default_factory=_empty_string_costs)
+    split_file_family_cost_floors: Mapping[str, int] = field(
+        default_factory=_empty_string_costs
+    )
     extracted_family_costs: Mapping[str, int] = field(
         default_factory=_empty_string_costs
     )
     residual_file_costs: Mapping[str, int] = field(default_factory=_empty_string_costs)
     reserved_costs_by_shard_count: Mapping[int, tuple[int, ...]] = field(
         default_factory=_empty_reserved_costs
+    )
+    repeatable_module_fixtures: frozenset[ModuleFixtureKey] = field(
+        default_factory=_empty_module_fixture_keys
     )
     strict: bool = False
 
@@ -56,6 +67,9 @@ class TestWorkUnit:
 CI_SHARD_COST_PROFILE = ShardCostProfile(
     file_cost_overrides={
         "tests/test_visual_debugger_replay_service.py": 400,
+    },
+    split_file_family_cost_floors={
+        "tests/test_scripted_team_deathmatch_no_shared_obs.py": 20,
     },
     extracted_family_costs={
         (
@@ -85,6 +99,14 @@ CI_SHARD_COST_PROFILE = ShardCostProfile(
         "tests/test_visual_debugger_sample_replays.py": 500,
     },
     reserved_costs_by_shard_count={12: (0,) * 11 + (50,)},
+    repeatable_module_fixtures=frozenset(
+        {
+            (
+                "tests/test_scripted_team_deathmatch_no_shared_obs.py",
+                "class_rows",
+            )
+        }
+    ),
     strict=True,
 )
 
@@ -171,19 +193,35 @@ def validate_split_fixture_affinity(
     module_fixtures_by_family: Mapping[TestFamilyKey, frozenset[ModuleFixtureKey]],
     cost_profile: ShardCostProfile,
 ) -> None:
-    """Reject a split that would construct one module fixture on two workers."""
+    """Reject shared module fixtures unless an exact fixture is repeatable."""
     extracted_nodeids = set(cost_profile.extracted_family_costs)
+    split_files = set(cost_profile.split_file_family_cost_floors)
     extracted_paths = {
         nodeid.split("::", maxsplit=1)[0] for nodeid in extracted_nodeids
     }
-    for logical_path in sorted(extracted_paths):
+    split_paths = extracted_paths | split_files
+    discovered_module_fixtures = {
+        fixture_key
+        for family, fixture_keys in module_fixtures_by_family.items()
+        if logical_path_from_family(family) in split_paths
+        for fixture_key in fixture_keys
+    }
+    stale_repeatable_fixtures = (
+        cost_profile.repeatable_module_fixtures - discovered_module_fixtures
+    )
+    if cost_profile.strict and stale_repeatable_fixtures:
+        raise ValueError(
+            "stale repeatable module fixture profile: "
+            f"{sorted(stale_repeatable_fixtures)}"
+        )
+    for logical_path in sorted(split_paths):
         fixture_owners: dict[ModuleFixtureKey, set[str]] = {}
         for family, fixture_keys in module_fixtures_by_family.items():
             if logical_path_from_family(family) != logical_path:
                 continue
             work_unit = (
                 f"family:{family[1]}"
-                if family[1] in extracted_nodeids
+                if logical_path in split_files or family[1] in extracted_nodeids
                 else f"residual:{logical_path}"
             )
             for fixture_key in fixture_keys:
@@ -192,6 +230,7 @@ def validate_split_fixture_affinity(
             fixture_key: sorted(owners)
             for fixture_key, owners in fixture_owners.items()
             if len(owners) > 1
+            and fixture_key not in cost_profile.repeatable_module_fixtures
         }
         if shared_fixtures:
             labels = {
@@ -208,7 +247,7 @@ def validate_split_dynamic_fixture_requests(
     cost_profile: ShardCostProfile,
 ) -> None:
     """Reject dynamic fixture selection inside any profiled split test file."""
-    split_paths = {
+    split_paths = set(cost_profile.split_file_family_cost_floors) | {
         nodeid.split("::", maxsplit=1)[0]
         for nodeid in cost_profile.extracted_family_costs
     }
@@ -252,6 +291,10 @@ def build_test_work_units(
         raise ValueError("every test family must contain at least one item")
     profile = cost_profile or ShardCostProfile()
     _positive_costs(profile.file_cost_overrides, "file cost overrides")
+    _positive_costs(
+        profile.split_file_family_cost_floors,
+        "split-file family cost floors",
+    )
     _positive_costs(profile.extracted_family_costs, "family cost overrides")
     _positive_costs(profile.residual_file_costs, "residual file cost overrides")
 
@@ -266,13 +309,16 @@ def build_test_work_units(
         family_by_nodeid[nodeid] = family
 
     configured_files = set(profile.file_cost_overrides)
+    split_files = set(profile.split_file_family_cost_floors)
     residual_files = set(profile.residual_file_costs)
     extracted_nodeids = set(profile.extracted_family_costs)
     extracted_paths = {
         nodeid.split("::", maxsplit=1)[0] for nodeid in extracted_nodeids
     }
     if profile.strict:
-        missing_files = (configured_files | residual_files) - families_by_path.keys()
+        missing_files = (
+            configured_files | split_files | residual_files
+        ) - families_by_path.keys()
         if missing_files:
             raise ValueError(
                 f"stale CI shard file cost profile: {sorted(missing_files)}"
@@ -292,10 +338,29 @@ def build_test_work_units(
                 "indivisible file cost overrides cannot extract test families: "
                 f"{sorted(indivisible_conflicts)}"
             )
+        split_conflicts = split_files & (
+            configured_files | residual_files | extracted_paths
+        )
+        if split_conflicts:
+            raise ValueError(
+                "family-split files cannot use another file or family profile: "
+                f"{sorted(split_conflicts)}"
+            )
 
     units: list[TestWorkUnit] = []
     for logical_path, raw_families in sorted(families_by_path.items()):
         families = tuple(sorted(raw_families))
+        if logical_path in split_files:
+            cost_floor = profile.split_file_family_cost_floors[logical_path]
+            units.extend(
+                TestWorkUnit(
+                    identifier=f"family:{family[1]}",
+                    families=(family,),
+                    cost=max(item_counts[family], cost_floor),
+                )
+                for family in families
+            )
+            continue
         extracted = tuple(
             family for family in families if family[1] in extracted_nodeids
         )
