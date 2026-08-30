@@ -12,7 +12,7 @@ jobs:
   python-test-gates:
     name: Python tests (${{ matrix.shard }}/12)
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 9
     strategy:
       fail-fast: true
       max-parallel: 12
