@@ -599,13 +599,13 @@ export function createSpawnShieldView(rawAgent, rawMechanics) {
   const remainingTicks = remaining ?? 0;
   const active = remainingTicks > 0;
   const mechanics = exactSpawnShieldMechanics(rawMechanics);
-  const owner = identity?.title ?? "Unavailable";
+  const recipient = identity?.title ?? "Unavailable";
   const currentRows = [
     row(
       "Duration Remaining",
       remaining === null ? "Unavailable" : tickCount(remaining),
     ),
-    row("Owner", owner),
+    row("Recipient", recipient),
   ];
   const summary = spawnShieldStatusSummary(rawMechanics);
   let rows = currentRows;
@@ -1333,7 +1333,8 @@ export function explainOverflow(
 /**
  * Recipient-authorized overflow for POV status docks. Every hidden item passes
  * through the same reduced status projection as a visible POV status cell;
- * researcher attribution cannot alter either the descriptor bytes or copy.
+ * callers may add researcher-space attribution only after an exact public-fact
+ * join, while this source-free fallback remains fog-authorized.
  *
  * @param {ReadonlyArray<unknown>} rawItems
  * @param {unknown} [rawRecipient]
@@ -1359,7 +1360,7 @@ export function explainPovOverflow(rawItems, rawRecipient = {}) {
       ? `pov-status-overflow:${recipient.presentation_key}`
       : `pov-status-overflow:${text(recipient.public_agent_id) ?? "unknown"}`,
     `${items.length} Hidden ${items.length === 1 ? "Status" : "Statuses"}`,
-    "Every hidden status remains available in canonical display order. Source not disclosed in Agent POV.",
+    "Every hidden status remains available in canonical display order.",
     rows.length === 0 ? [row("Hidden Facts", "None")] : rows,
     [],
     { tone: "neutral" },
@@ -1401,7 +1402,7 @@ export function explainCooldown(rawRecord, rawOwner = null) {
       ticks === 0
         ? row("Ultimate Status", "Ready")
         : row("Remaining Cooldown", tickCount(ticks)),
-      row("Source", identity.title),
+      row("Recipient", identity.title),
     ],
     [],
     {
@@ -1438,34 +1439,24 @@ export function explainAura(rawField, rawSourceAgent = null, audience = "researc
   const token = resolveVisualToken("modifier", field.token_id ?? field.aura_id, field);
   const presentation = auraPresentation(field.aura_id ?? field.token_id);
   const sourceIdentity =
-    audience === "researcher"
-      ? exactJoinedAuthorizedIdentity(rawField, rawSourceAgent, "source_")
-      : null;
+    audience === "agent_pov" && rawSourceAgent === null
+      ? null
+      : exactJoinedAuthorizedIdentity(rawField, rawSourceAgent, "source_");
   const source =
-    audience === "researcher" &&
-    sourceIdentity !== null &&
-    sourceIdentity.accent === presentation.accent
+    sourceIdentity !== null && sourceIdentity.accent === presentation.accent
       ? rawSourceAgent
       : null;
-  const attribution =
-    audience === "agent_pov"
-      ? authorizedSourceAttributionV1({
-          attribution_kind: "direct",
-          audience: "agent_pov",
-          direct_sources: [rawField],
-          authorized_agents: [rawSourceAgent],
-        })
-      : authorizedSourceAttributionV1({
-          attribution_kind: "direct",
-          audience: "researcher",
-          direct_sources: [
-            {
-              source_presentation_key: sourceIdentity?.presentationKey ?? null,
-              source_public_agent_id: sourceIdentity?.publicAgentId ?? null,
-            },
-          ],
-          authorized_agents: source === null ? [] : [source],
-        });
+  const attribution = authorizedSourceAttributionV1({
+    attribution_kind: "direct",
+    audience: source === null ? audience : "researcher",
+    direct_sources: [
+      {
+        source_presentation_key: sourceIdentity?.presentationKey ?? null,
+        source_public_agent_id: sourceIdentity?.publicAgentId ?? null,
+      },
+    ],
+    authorized_agents: source === null ? [] : [source],
+  });
   const multiplier = finiteNumber(field.per_emitter_multiplier);
   const effect = auraEffectPresentation(presentation, multiplier, "field");
   return descriptor(
@@ -1478,10 +1469,7 @@ export function explainAura(rawField, rawSourceAgent = null, audience = "researc
     [
       row(presentation.fieldEffectLabel, effect),
       row("Effect Radius", exactNumber(field.radius)),
-      row(
-        attribution?.label ?? "Source",
-        attribution?.value ?? "Unavailable in this artifact",
-      ),
+      ...(attribution === null ? [] : [row(attribution.label, attribution.value)]),
     ],
     [],
     {
@@ -1526,12 +1514,7 @@ export function explainRange(rawRange, rawOwner = null) {
     `range:${identity.presentationKey}:${rangeKind}`,
     title,
     null,
-    [
-      row("Radius", formatDisplayNumber(radius)),
-      row("Owner ID", identity.publicIdentity),
-      row("Team", identity.teamLabel),
-      row("Class", identity.classLabel),
-    ],
+    [row("Radius", formatDisplayNumber(radius)), row("Source", identity.title)],
     [],
     {
       tone: "information",
@@ -1694,23 +1677,24 @@ export function explainActivation(rawEvent) {
   const recipientIdentity = authorizedAgentIdentityTitle(
     event.recipientIdentity ?? event.recipient_identity,
   );
-  const rows = [
-    row(
-      "Source",
-      sourceIdentity ??
-        (sourceRedacted ? "Not disclosed in Agent POV" : "Unavailable in this view"),
-    ),
-    row(
-      "Recipient",
-      recipientIdentity !== null
-        ? recipientIdentity
-        : redacted
-          ? "Not disclosed in Agent POV"
-          : text(target) === null && sourceIdentity !== null
-            ? sourceIdentity
-            : "Unavailable in this view",
-    ),
-  ];
+  const rows = [];
+  if (sourceIdentity !== null) {
+    rows.push(row("Source", sourceIdentity));
+  } else if (!sourceRedacted) {
+    rows.push(row("Source", "Unavailable in this view"));
+  }
+  if (recipientIdentity !== null) {
+    rows.push(row("Recipient", recipientIdentity));
+  } else if (!redacted) {
+    rows.push(
+      row(
+        "Recipient",
+        text(target) === null && sourceIdentity !== null
+          ? sourceIdentity
+          : "Unavailable in this view",
+      ),
+    );
+  }
   return descriptor(
     "activation",
     `activation:${token.tokenId}:${text(event.sourcePresentationKey ?? event.source_presentation_key) ?? text(source) ?? "source-unavailable"}:${text(event.targetPresentationKey ?? event.target_presentation_key) ?? text(target) ?? (redacted ? "target-redacted" : "source-local")}`,

@@ -964,6 +964,7 @@ export function replayKeyboardIntent(event) {
  * @param {{
  *   root: HTMLElement,
  *   keyboardTarget: EventTarget,
+ *   keyboardAuthorityInstalled: () => boolean,
  *   keyboardEnabled: () => boolean,
  *   clearSelection: () => void,
  *   firstButton: HTMLButtonElement,
@@ -1043,16 +1044,21 @@ export function bindReplayTimelineControls(elements, controller, clock = globalT
       !keyboardEvent.ctrlKey &&
       !keyboardEvent.altKey &&
       !keyboardEvent.metaKey;
-    if (ownsSpaceDefault) {
+    const ownsArrowDefault = intent === "previous" || intent === "next";
+    const state = controller.snapshot();
+    const ownsReplayKeyboardDefault =
+      elements.keyboardAuthorityInstalled() &&
+      state.connected &&
+      state.transportState !== REPLAY_TRANSPORT_STATES.OFFLINE &&
+      state.cursor !== null &&
+      !state.hidden;
+    // Space and replay arrows must never become page/disclosure scrolling,
+    // including while a coherent successor is pending and navigation is
+    // fenced. Escape has no scrolling default and remains inert while fenced.
+    if (ownsReplayKeyboardDefault && (ownsSpaceDefault || ownsArrowDefault)) {
       event.preventDefault();
     }
-    const state = controller.snapshot();
-    if (
-      !elements.keyboardEnabled() ||
-      state.transportState === REPLAY_TRANSPORT_STATES.OFFLINE ||
-      state.cursor === null ||
-      state.hidden
-    ) {
+    if (!ownsReplayKeyboardDefault || !elements.keyboardEnabled()) {
       return;
     }
     if (!intent) {

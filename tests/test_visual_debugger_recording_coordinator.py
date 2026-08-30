@@ -321,15 +321,18 @@ def test_recording_handoff_http_gets_use_actual_private_shared_roots(
         installed.binding.current_metric_report == shared_viewer.current_metric_report
     )
     assert frame_response.status == timeline_response.status == HTTPStatus.OK
-    assert metric_response.status == HTTPStatus.FORBIDDEN
-    assert json.loads(metric_body) == {
-        "schema_version": 1,
-        "error_code": "audience_unavailable",
-        "message": "Metric reports are available only in Oracle View.",
-        "latest_frame": None,
-    }
+    metric_result = shared_viewer.current_metric_report()
+    assert metric_result.outcome == "available"
+    assert metric_result.payload is not None
+    assert metric_result.filename is not None
+    assert metric_response.status == HTTPStatus.OK
+    assert metric_body == metric_result.payload
+    assert metric_response.getheader("Content-Disposition") == (
+        f'attachment; filename="{metric_result.filename}"'
+    )
     assert frame_response.getheader("Cache-Control") == "no-store"
     assert timeline_response.getheader("Cache-Control") == "no-store"
+    assert metric_response.getheader("Cache-Control") == "no-store"
 
     frame = SharedObsAgentPovReplayViewerFrameV1.model_validate_json(frame_body)
     timeline = SharedObsAgentPovReplayTimelineV1.model_validate_json(timeline_body)
@@ -343,11 +346,8 @@ def test_recording_handoff_http_gets_use_actual_private_shared_roots(
     serialized = frame_body + timeline_body
     for forbidden_key in (
         b'"global_slot"',
-        b'"metric_report_availability"',
         b'"observation_materialization"',
-        b'"processing"',
         b'"projection"',
-        b'"replay_reference"',
         b'"selected_global_slot"',
         b'"source_material_frame_id"',
     ):

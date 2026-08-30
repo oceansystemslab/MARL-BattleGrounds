@@ -511,22 +511,44 @@ Oracle state. The diagnostic `source_material_only` view described by A10 is
 not a product Agent-POV presentation root and must not be installed or labelled
 as one.
 
+One separate presentation-only exception is the
+`local_oracle_corpse_overlay`. Dead bodies are not actor-input observations, so
+the trusted Python presentation producer may project configured-active corpses
+from the same authoritative epoch when at least one authorized living sensor
+places the corpse within its recorded observation radius and static line of
+sight. NoSharedObs uses only the selected recipient; SharedObs uses the
+deduplicated union of authorized living allied sensors. This exception may add
+only Oracle-matching public corpse facts, the public sensor identities that
+authorized them, and same-epoch join fields already present in or derivable
+from the Agent source. It is consumed for corpse painting and inspection, plus
+one narrowly bound lifecycle presentation: paired prior/current projections
+may admit only an `agent_died` or `agent_respawned` cue and the phase endpoint
+owned by that cue. An overlay-only endpoint must not move an ability route or
+admit any other event. The overlay must not enter actor observations, masks,
+targeting, legality, accepted actions, simulator or recorded transition
+semantics, or hidden-geometry reconstruction in the browser. Dead sensors
+authorize no additional visibility.
+
 That exclusion governs the durable Agent scene and learner-facing material; it
 does not make visible battlefield actions disappear from replay or debugger
 playback.  The presentation layer may carry a separate, ephemeral visual-event
 projection derived from the canonical incoming transition.  Every agent and
-phase anchor in an emitted row must already be authorized by the recipient's
-fog-filtered start or successor scene. A payload fact that describes or derives
-from an endpoint requires that endpoint to be authorized even when its canonical
-coordinate anchor belongs to an earlier phase; for example, hidden successor
-health, regeneration, and cooldown outcomes cannot be disclosed through a
-transition-start anchor. Hidden sources, targets, aura emitters, inactive
-identities, and global-only pulses are omitted server-side. Surviving rows use a
-dense recipient-local identity axis, so canonical event IDs, hidden counts,
-ordering gaps, slots, and Oracle frame or transition identities never cross the
-Agent presentation boundary. This projection exists only to render the same
-visible action semantics as Oracle View under fog; it is not stored in or
-derived from the learner's actor-input artifact.
+phase anchor in an emitted ordinary row must already be authorized by the
+recipient's fog-filtered start or successor scene. The only exception is the
+death/respawn cue-owned corpse endpoint defined above. A payload fact that
+describes or derives from an endpoint requires that endpoint to be authorized
+even when its canonical coordinate anchor belongs to an earlier phase; for
+example, hidden successor health, regeneration, and cooldown outcomes cannot be
+disclosed through a transition-start anchor. Hidden sources, targets, aura
+emitters, inactive identities, and global-only pulses are omitted server-side.
+Surviving event rows use a dense recipient-local identity axis, so canonical
+event IDs, hidden counts, ordering gaps, slots, and Oracle transition identities
+never cross the Agent presentation boundary. The corpse-only exception may
+carry the canonical Oracle frame ID because it is exactly derivable from the
+already-disclosed episode and frame index; it carries no additional frame fact.
+The event projection exists only to render the same visible action semantics as
+Oracle View under fog; it is not stored in or derived from the learner's
+actor-input artifact.
 
 Neither representation is a materialized SharedObs learner input. Exact
 SharedObs actor-input export remains unavailable until the Milestone 12

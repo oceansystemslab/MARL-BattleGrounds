@@ -796,6 +796,41 @@ async function verifyAuthorizedEndpointDigest(frame) {
   }
 }
 
+/**
+ * This required V1 field is an atomic lockstep contract between the internal
+ * developer-tool producer and consumer; older Agent-V1 bytes are not accepted.
+ * The authenticated same-origin Python producer remains the authority root.
+ * Here the digest and redundant `oracle_public_facts` copy detect malformed,
+ * stale, or spliced content; they do not manufacture independent authenticity.
+ *
+ * @param {Record<string, any>} frame
+ */
+async function verifyLocalOracleCorpseOverlayDigest(frame) {
+  if (frame.authority.authority_kind !== "agent_pov") return;
+  const rootSchema = selectCanonicalSchema(
+    frame,
+    AUTHORIZED_PRESENTATION_SCHEMA_V1,
+    "Authorized presentation frame",
+  );
+  const overlaySchema = rootSchema.properties.local_oracle_corpse_overlay;
+  const overlay = frame.local_oracle_corpse_overlay;
+  const encoded = canonicalPythonJson(
+    overlay,
+    overlaySchema,
+    "Local-Oracle corpse overlay",
+    new Set(["authorized_overlay_digest_sha256"]),
+  );
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) invalid("Web Crypto is required for overlay-digest validation.");
+  const digest = await subtle.digest("SHA-256", new TextEncoder().encode(encoded));
+  const hex = [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+  if (hex !== overlay.authorized_overlay_digest_sha256) {
+    invalid("Local-Oracle corpse overlay digest does not match its content.");
+  }
+}
+
 /** @param {unknown} value @returns {any} */
 function deepFreeze(value) {
   if (value && typeof value === "object") {
@@ -1041,11 +1076,20 @@ function validateAgentPrivacy(root) {
    * @param {unknown} value
    * @param {string | null} field
    * @param {boolean} researcherSpace
+   * @param {boolean} localCorpseOverlay
    */
-  function visit(value, field = null, researcherSpace = false) {
+  function visit(
+    value,
+    field = null,
+    researcherSpace = false,
+    localCorpseOverlay = false,
+  ) {
     if (typeof value === "string") {
+      const allowedOverlaySourceFrame =
+        localCorpseOverlay && field === "source_frame_id";
       if (
         oracleIdentity.test(value) &&
+        !allowedOverlaySourceFrame &&
         !(researcherSpace && RESEARCHER_SPACE_RECORDED_ID_FIELDS.has(field ?? ""))
       ) {
         invalid("Agent presentation contains a forbidden Oracle/diagnostic value.");
@@ -1053,15 +1097,22 @@ function validateAgentPrivacy(root) {
       return;
     }
     if (Array.isArray(value)) {
-      for (const child of value) visit(child, field, researcherSpace);
+      for (const child of value) {
+        visit(child, field, researcherSpace, localCorpseOverlay);
+      }
       return;
     }
     if (!value || typeof value !== "object") return;
     for (const [key, child] of Object.entries(value)) {
-      if (AGENT_FORBIDDEN_KEYS.has(key)) {
+      const childIsOverlay =
+        localCorpseOverlay || key === "local_oracle_corpse_overlay";
+      if (
+        AGENT_FORBIDDEN_KEYS.has(key) &&
+        !(childIsOverlay && key === "source_frame_id")
+      ) {
         invalid(`Agent presentation contains forbidden key ${key}.`);
       }
-      visit(child, key, researcherSpace || key === "researcher_space");
+      visit(child, key, researcherSpace || key === "researcher_space", childIsOverlay);
     }
   }
   visit(root);
@@ -1102,16 +1153,26 @@ function validatePairedAgentPrivacy(transport, presentation) {
    * @param {unknown} value
    * @param {string | null} [field]
    * @param {boolean} [researcherSpace]
+   * @param {boolean} [localCorpseOverlay]
    */
-  function rejectReflections(value, field = null, researcherSpace = false) {
+  function rejectReflections(
+    value,
+    field = null,
+    researcherSpace = false,
+    localCorpseOverlay = false,
+  ) {
     if (typeof value === "string") {
       const allowedEndpointDigest =
         field === "authorized_endpoint_digest_sha256" ||
         field === "source_authorized_endpoint_digest_sha256";
+      const allowedOverlayValue =
+        localCorpseOverlay &&
+        (field === "source_frame_id" || field === "authorized_overlay_digest_sha256");
       const allowedRecordedIdentity =
         researcherSpace && RESEARCHER_SPACE_RECORDED_ID_FIELDS.has(field ?? "");
       if (
         !allowedEndpointDigest &&
+        !allowedOverlayValue &&
         !allowedRecordedIdentity &&
         forbiddenValues.has(value)
       ) {
@@ -1121,13 +1182,18 @@ function validatePairedAgentPrivacy(transport, presentation) {
     }
     if (Array.isArray(value)) {
       for (const child of value) {
-        rejectReflections(child, field, researcherSpace);
+        rejectReflections(child, field, researcherSpace, localCorpseOverlay);
       }
       return;
     }
     if (!value || typeof value !== "object") return;
     for (const [key, child] of Object.entries(value)) {
-      rejectReflections(child, key, researcherSpace || key === "researcher_space");
+      rejectReflections(
+        child,
+        key,
+        researcherSpace || key === "researcher_space",
+        localCorpseOverlay || key === "local_oracle_corpse_overlay",
+      );
     }
   }
   rejectReflections(presentation);
@@ -2887,8 +2953,16 @@ function validateIncomingStateMatrix(frame, source, endpoint, oracle, shared) {
  * @param {Record<string, any>} endpoint
  * @param {boolean} oracle
  * @param {boolean} shared
+ * @param {Record<string, any>} renderedScene
  */
-function validateAgentVisualStateMatrix(frame, source, endpoint, oracle, shared) {
+function validateAgentVisualStateMatrix(
+  frame,
+  source,
+  endpoint,
+  oracle,
+  shared,
+  renderedScene,
+) {
   const index = source.source_frame_index;
   if (oracle) {
     if (Object.hasOwn(frame, "visual_events")) {
@@ -2936,7 +3010,27 @@ function validateAgentVisualStateMatrix(frame, source, endpoint, oracle, shared)
     invalid("Agent visual events do not join their local incoming evidence.");
   }
   const trajectories = /** @type {any[]} */ (visual.agent_phase_trajectories);
-  const currentAgents = /** @type {any[]} */ (endpoint.parts.scene.agents);
+  const baseAgents = /** @type {any[]} */ (endpoint.parts.scene.agents);
+  const overlayAgents = /** @type {any[]} */ (
+    frame.local_oracle_corpse_overlay.corpse_observations
+  ).map((row) => row.corpse);
+  if (!structurallyEqual(renderedScene.agents, [...baseAgents, ...overlayAgents])) {
+    invalid("Agent rendered scene does not equal its base plus corpse overlay.");
+  }
+  const overlayByKey = new Map(overlayAgents.map((row) => [row.presentation_key, row]));
+  const deathOverlayKeys = new Set(
+    /** @type {any[]} */ (visual.events)
+      .filter(
+        (event) =>
+          event.event_kind === "agent_died" &&
+          overlayByKey.has(event.recipient_anchor.presentation_key),
+      )
+      .map((event) => event.recipient_anchor.presentation_key),
+  );
+  const currentAgents = [
+    ...baseAgents,
+    ...[...deathOverlayKeys].map((key) => overlayByKey.get(key)),
+  ];
   const currentByKey = new Map(currentAgents.map((row) => [row.presentation_key, row]));
   const currentByPublicId = new Map(
     currentAgents.map((row) => [row.public_agent_id, row]),
@@ -2964,7 +3058,30 @@ function validateAgentVisualStateMatrix(frame, source, endpoint, oracle, shared)
       );
     })
   ) {
-    invalid("Agent visual successors do not join their current scene.");
+    invalid(
+      "Agent visual successors do not join the actor-input scene plus death-owned corpse endpoints.",
+    );
+  }
+  const overlayOnlyKeys = new Set(overlayByKey.keys());
+  const afterStateEventKinds = new Set([
+    "recipient_health_resolution",
+    "health_regenerated",
+    "cooldown_started",
+    "cooldown_ready",
+  ]);
+  for (const event of /** @type {any[]} */ (visual.events)) {
+    if (event.event_kind === "agent_died") continue;
+    const anchors = oracleEventAnchors(event).map(({ anchor }) => anchor);
+    if (
+      anchors.some(
+        (anchor) =>
+          anchor.phase === "successor" && overlayOnlyKeys.has(anchor.presentation_key),
+      ) ||
+      (afterStateEventKinds.has(event.event_kind) &&
+        anchors.some((anchor) => overlayOnlyKeys.has(anchor.presentation_key)))
+    ) {
+      invalid("Only death choreography may consume a corpse-overlay endpoint.");
+    }
   }
   const actionRow = frame.latest_transition.action_rows[0];
   const rejectionEvents = /** @type {any[]} */ (visual.events).filter(
@@ -3187,6 +3304,61 @@ function validateReplayResearcherSpace(frame) {
     /** @type {any[]} */ (researcher.class_mechanics),
     "Replay researcher",
   );
+  const researcherClasses = new Map(
+    /** @type {any[]} */ (researcher.class_mechanics).map((row) => [row.class_id, row]),
+  );
+  for (const localClass of /** @type {any[]} */ (
+    frame.current_endpoint.parts.scene.class_mechanics
+  )) {
+    if (!structurallyEqual(researcherClasses.get(localClass.class_id), localClass)) {
+      invalid("Replay researcher class mechanics changed a fog-authorized class.");
+    }
+  }
+  const researcherRoster = new Map(roster.map((row) => [row.public_agent_id, row]));
+  for (const localActor of /** @type {any[]} */ (
+    frame.current_endpoint.parts.scene.agents
+  )) {
+    const globalActor = researcherRoster.get(localActor.public_agent_id);
+    const globalStatuses = /** @type {any[]} */ (globalActor?.statuses ?? []);
+    const localStatuses = /** @type {any[]} */ (localActor.statuses);
+    const globalAuras = /** @type {any[]} */ (globalActor?.aura_modifiers ?? []);
+    const localAuras = /** @type {any[]} */ (localActor.aura_modifiers);
+    if (
+      !globalActor ||
+      typeof globalActor !== "object" ||
+      globalActor.team_id !== localActor.team_id ||
+      globalActor.class_id !== localActor.class_id ||
+      globalActor.class_name !== localActor.class_name ||
+      globalActor.life_state !== localActor.life_state ||
+      !liveResearcherFloatMatches(
+        globalActor.current_health,
+        localActor.current_health,
+      ) ||
+      !liveResearcherFloatMatches(
+        globalActor.maximum_health,
+        localActor.maximum_health,
+      ) ||
+      !liveResearcherFloatMatches(
+        globalActor.effective_movement_speed,
+        localActor.effective_movement_speed,
+      ) ||
+      globalActor.ultimate_cooldown_remaining !==
+        localActor.ultimate_cooldown_remaining ||
+      globalActor.spawn_shield_remaining !== localActor.spawn_shield_remaining ||
+      globalActor.steps_until_out_of_combat !== localActor.steps_until_out_of_combat ||
+      globalActor.out_of_combat_delay_steps !== localActor.out_of_combat_delay_steps ||
+      globalStatuses.length !== localStatuses.length ||
+      globalStatuses.some(
+        (status, index) => !liveResearcherStatusMatches(status, localStatuses[index]),
+      ) ||
+      globalAuras.length !== localAuras.length ||
+      globalAuras.some(
+        (aura, index) => !liveResearcherAuraMatches(aura, localAuras[index]),
+      )
+    ) {
+      invalid("Replay researcher roster changed a fog-authorized actor fact.");
+    }
+  }
 
   /**
    * @param {Record<string, any> | null} transition
@@ -3305,6 +3477,264 @@ function liveResearcherAuraMatches(globalAura, localAura) {
     globalAura.aura_id === localAura.aura_id &&
     liveResearcherFloatMatches(globalAura.multiplier, localAura.multiplier)
   );
+}
+
+/**
+ * @param {Record<string, any>} corpse
+ * @param {Record<string, any>} facts
+ */
+function localOracleCorpseMatchesPublicFacts(corpse, facts) {
+  for (const field of [
+    "public_agent_id",
+    "team_id",
+    "class_id",
+    "class_name",
+    "life_state",
+    "ultimate_cooldown_remaining",
+    "spawn_shield_remaining",
+    "steps_until_out_of_combat",
+    "out_of_combat_delay_steps",
+  ]) {
+    if (!Object.is(corpse[field], facts[field])) return false;
+  }
+  if (
+    corpse.position.length !== facts.position.length ||
+    corpse.position.some(
+      (/** @type {number} */ value, /** @type {number} */ index) =>
+        !liveResearcherFloatMatches(value, facts.position[index]),
+    )
+  ) {
+    return false;
+  }
+  for (const field of [
+    "radius",
+    "current_health",
+    "maximum_health",
+    "base_movement_speed",
+    "effective_movement_speed",
+    "observation_radius",
+    "basic_interaction_radius",
+    "ultimate_interaction_radius",
+    "out_of_combat_health_regeneration_fraction_per_step",
+  ]) {
+    if (!liveResearcherFloatMatches(corpse[field], facts[field])) return false;
+  }
+  const corpseStatuses = /** @type {any[]} */ (corpse.statuses);
+  const factStatuses = /** @type {any[]} */ (facts.statuses);
+  if (
+    corpseStatuses.length !== factStatuses.length ||
+    corpseStatuses.some(
+      (status, index) =>
+        status.direct_sources.length !== 0 ||
+        factStatuses[index].direct_sources.length !== 0 ||
+        !liveResearcherStatusMatches(factStatuses[index], status),
+    )
+  ) {
+    return false;
+  }
+  const corpseAuras = /** @type {any[]} */ (corpse.aura_modifiers);
+  const factAuras = /** @type {any[]} */ (facts.aura_modifiers);
+  return (
+    corpseAuras.length === factAuras.length &&
+    corpseAuras.every((aura, index) =>
+      liveResearcherAuraMatches(factAuras[index], aura),
+    )
+  );
+}
+
+/**
+ * Validate and compose the presentation-only corpse projection. The returned
+ * scene is used for paint and inspection only; the original endpoint remains
+ * the sole decision, mask, and targeting authority.
+ *
+ * @param {Record<string, any>} frame
+ * @param {Record<string, any>} baseScene
+ * @param {boolean} shared
+ * @returns {Record<string, any>}
+ */
+function composeLocalOracleCorpseOverlay(frame, baseScene, shared) {
+  const overlay = frame.local_oracle_corpse_overlay;
+  const source = frame.source;
+  const parts = frame.current_endpoint.parts;
+  const recipientId = parts.recipient_public_agent_id;
+  if (
+    overlay.overlay_kind !== "local_oracle_corpse_overlay" ||
+    overlay.projection_basis !==
+      "same_epoch_living_sensor_radius_and_static_line_of_sight" ||
+    overlay.source_episode_id !== source.episode_id ||
+    overlay.source_frame_index !== source.source_frame_index ||
+    overlay.source_frame_id !==
+      `${source.episode_id}:frame:${source.source_frame_index}` ||
+    overlay.source_simulator_step_count !== source.source_simulator_step_count ||
+    overlay.source_authority_epoch !== source.source_authority_epoch ||
+    overlay.recipient_public_agent_id !== recipientId ||
+    overlay.recipient_presentation_key !== parts.recipient_presentation_key
+  ) {
+    invalid("Local-Oracle corpse overlay does not join its Agent epoch.");
+  }
+
+  const baseAgents = /** @type {any[]} */ (baseScene.agents);
+  const baseById = new Map(baseAgents.map((row) => [row.public_agent_id, row]));
+  const livingBaseIds = new Set(
+    baseAgents
+      .filter((row) => row.life_state === "alive")
+      .map((row) => row.public_agent_id),
+  );
+  const expectedSensors = /** @type {string[]} */ (
+    shared
+      ? /** @type {any[]} */ (parts.authorized_sensor_sources)
+          .map((row) => row.source_public_agent_id)
+          .filter((publicId) => livingBaseIds.has(publicId))
+      : livingBaseIds.has(recipientId)
+        ? [recipientId]
+        : []
+  );
+  if (!structurallyEqual(overlay.living_sensor_public_agent_ids, expectedSensors)) {
+    invalid("Local-Oracle corpse sensors changed their living authority set.");
+  }
+
+  const targetIds = /** @type {any[]} */ (
+    frame.current_endpoint.action_axis.target_actions
+  )
+    .slice(1)
+    .map((row) => row.target_public_agent_id);
+  const recipient = baseById.get(recipientId);
+  const researcherRoster = new Map(
+    /** @type {any[]} */ (frame.researcher_space.roster_agents).map((row) => [
+      row.public_agent_id,
+      row,
+    ]),
+  );
+  const mechanicsByClassId = new Map(
+    /** @type {any[]} */ (frame.researcher_space.class_mechanics).map((row) => [
+      row.class_id,
+      row,
+    ]),
+  );
+  const corpseRows = /** @type {any[]} */ (overlay.corpse_observations);
+  requireUnique(
+    corpseRows.map((row) => row.corpse.public_agent_id),
+    "Local-Oracle corpse identities",
+  );
+  requireUnique(
+    corpseRows.map((row) => row.corpse.presentation_key),
+    "Local-Oracle corpse presentation keys",
+  );
+  let previousTargetIndex = -1;
+  for (const observation of corpseRows) {
+    const corpse = observation.corpse;
+    const oraclePublicFacts = observation.oracle_public_facts;
+    const targetIndex = targetIds.indexOf(corpse.public_agent_id);
+    const globalActor = researcherRoster.get(corpse.public_agent_id);
+    const classMechanics = mechanicsByClassId.get(corpse.class_id);
+    const globalStatuses = /** @type {any[]} */ (globalActor?.statuses ?? []);
+    const localStatuses = /** @type {any[]} */ (corpse.statuses);
+    const globalAuras = /** @type {any[]} */ (globalActor?.aura_modifiers ?? []);
+    const localAuras = /** @type {any[]} */ (corpse.aura_modifiers);
+    const expectedRelation = targetIndex < 5 ? "ally" : "opponent";
+    const expectedTeam =
+      targetIndex < 5 ? recipient.team_id : recipient.team_id === 1 ? 2 : 1;
+    if (
+      targetIndex < 0 ||
+      targetIndex <= previousTargetIndex ||
+      corpse.public_agent_id === recipientId ||
+      baseById.has(corpse.public_agent_id) ||
+      corpse.life_state !== "corpse" ||
+      corpse.relation !== expectedRelation ||
+      corpse.team_id !== expectedTeam ||
+      observation.observing_sensor_public_agent_ids.length === 0 ||
+      !structurallyEqual(
+        observation.observing_sensor_public_agent_ids,
+        expectedSensors.filter((publicId) =>
+          observation.observing_sensor_public_agent_ids.includes(publicId),
+        ),
+      ) ||
+      observation.observing_sensor_public_agent_ids.some(
+        (/** @type {string} */ publicId) => !expectedSensors.includes(publicId),
+      ) ||
+      localStatuses.some((status) => status.direct_sources.length !== 0) ||
+      !localOracleCorpseMatchesPublicFacts(corpse, oraclePublicFacts) ||
+      !globalActor ||
+      !classMechanics ||
+      globalActor.life_state !== "corpse" ||
+      globalActor.team_id !== corpse.team_id ||
+      globalActor.class_id !== corpse.class_id ||
+      globalActor.class_name !== corpse.class_name ||
+      !liveResearcherFloatMatches(globalActor.current_health, corpse.current_health) ||
+      !liveResearcherFloatMatches(globalActor.maximum_health, corpse.maximum_health) ||
+      !liveResearcherFloatMatches(
+        globalActor.effective_movement_speed,
+        corpse.effective_movement_speed,
+      ) ||
+      globalActor.ultimate_cooldown_remaining !== corpse.ultimate_cooldown_remaining ||
+      globalActor.spawn_shield_remaining !== corpse.spawn_shield_remaining ||
+      globalActor.steps_until_out_of_combat !== corpse.steps_until_out_of_combat ||
+      globalActor.out_of_combat_delay_steps !== corpse.out_of_combat_delay_steps ||
+      classMechanics.class_name !== corpse.class_name ||
+      !liveResearcherFloatMatches(classMechanics.body_radius, corpse.radius) ||
+      !liveResearcherFloatMatches(
+        classMechanics.maximum_health,
+        corpse.maximum_health,
+      ) ||
+      !liveResearcherFloatMatches(
+        classMechanics.base_movement_speed,
+        corpse.base_movement_speed,
+      ) ||
+      !liveResearcherFloatMatches(
+        classMechanics.observation_radius,
+        corpse.observation_radius,
+      ) ||
+      !liveResearcherFloatMatches(
+        classMechanics.basic_interaction_radius,
+        corpse.basic_interaction_radius,
+      ) ||
+      !liveResearcherFloatMatches(
+        classMechanics.ultimate_interaction_radius,
+        corpse.ultimate_interaction_radius,
+      ) ||
+      classMechanics.out_of_combat_delay_steps !== corpse.out_of_combat_delay_steps ||
+      !liveResearcherFloatMatches(
+        classMechanics.out_of_combat_health_regeneration_fraction_per_step,
+        corpse.out_of_combat_health_regeneration_fraction_per_step,
+      ) ||
+      globalStatuses.length !== localStatuses.length ||
+      globalStatuses.some(
+        (status, index) => !liveResearcherStatusMatches(status, localStatuses[index]),
+      ) ||
+      globalAuras.length !== localAuras.length ||
+      globalAuras.some(
+        (aura, index) => !liveResearcherAuraMatches(aura, localAuras[index]),
+      )
+    ) {
+      invalid("Local-Oracle corpse facts changed from authorized Oracle truth.");
+    }
+    // Position is intentionally absent from researcher space. The trusted
+    // producer binds it to the same-epoch global snapshot before sealing this
+    // overlay; the browser never receives the hidden global geometry root.
+    previousTargetIndex = targetIndex;
+  }
+
+  const agents = [...baseAgents, ...corpseRows.map((row) => row.corpse)];
+  const representedClassIds = [...new Set(agents.map((row) => row.class_id))].sort(
+    (left, right) => left - right,
+  );
+  const researcherMechanics = new Map(
+    /** @type {any[]} */ (frame.researcher_space.class_mechanics).map((row) => [
+      row.class_id,
+      row,
+    ]),
+  );
+  const classMechanics = representedClassIds.map((classId) =>
+    researcherMechanics.get(classId),
+  );
+  if (classMechanics.some((row) => !row)) {
+    invalid("Local-Oracle corpse scene lacks authorized class mechanics.");
+  }
+  return {
+    ...baseScene,
+    agents,
+    class_mechanics: classMechanics,
+  };
 }
 
 /**
@@ -4226,8 +4656,16 @@ function validateSemanticFrame(frame) {
       ? validateLiveResearcherSpace(frame)
       : validateReplayResearcherSpace(frame);
   }
-  validateAuthorizedScene(scene);
-  const sceneAgents = /** @type {any[]} */ (scene.agents);
+  // The endpoint scene is immutable actor-input authority. The additive corpse
+  // projection may participate in painting and ordinary corpse inspection, but
+  // it must never turn an axis-only target into a visible decision target.
+  const actorInputScene = scene;
+  const renderedScene = oracle
+    ? actorInputScene
+    : composeLocalOracleCorpseOverlay(frame, actorInputScene, shared);
+  validateAuthorizedScene(actorInputScene);
+  if (renderedScene !== actorInputScene) validateAuthorizedScene(renderedScene);
+  const sceneAgents = /** @type {any[]} */ (renderedScene.agents);
   requireUnique(
     sceneAgents.map((row) => row.presentation_key),
     "Scene presentation keys",
@@ -4274,7 +4712,14 @@ function validateSemanticFrame(frame) {
     }
   }
   validateIncomingStateMatrix(frame, source, endpoint, oracle, shared);
-  validateAgentVisualStateMatrix(frame, source, endpoint, oracle, shared);
+  validateAgentVisualStateMatrix(
+    frame,
+    source,
+    endpoint,
+    oracle,
+    shared,
+    renderedScene,
+  );
   const technical = frame.technical_frame;
   const expectedIncomingId =
     source.source_frame_index === 0
@@ -4311,7 +4756,7 @@ function validateSemanticFrame(frame) {
     source,
     endpoint,
     actionAxis,
-    scene,
+    actorInputScene,
     live,
     oracle,
     shared,
@@ -4324,7 +4769,7 @@ function validateSemanticFrame(frame) {
     oracle,
     presentationKeyPairs,
     researcherPresentationKeyPairs,
-    scene,
+    scene: renderedScene,
   };
 }
 
@@ -4356,6 +4801,7 @@ export async function normalizeAuthorizedPresentationFrameV1(value) {
       semantic.researcherPresentationKeyPairs,
     ),
     verifyAuthorizedEndpointDigest(frame),
+    verifyLocalOracleCorpseOverlayDigest(frame),
   ]);
   const inspection = semantic.live
     ? frame.live_inspection.inspection

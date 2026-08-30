@@ -1,4 +1,4 @@
-"""Run one fixed scripted DebuggerService for browser-only causal testing."""
+"""Run one registered scripted DebuggerService for browser-only causal testing."""
 
 from __future__ import annotations
 
@@ -15,11 +15,12 @@ if str(_REPOSITORY_ROOT) not in sys.path:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--scenario", default="aura_crossfire")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Serve the one-frame Aura Crossfire script without public launcher hooks."""
+    """Serve a registered script without adding public launcher hooks."""
     options = _parser().parse_args(argv)
 
     from scripts.dev.visual_debugger.control import create_session
@@ -31,10 +32,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     session = create_session(
-        get_scenario("aura_crossfire"),
+        get_scenario(options.scenario),
         seed=0,
         evaluation_launch_specification=debugger_test_launch_specification(),
-        controlled_global_slot=None,
+        controlled_global_slot=(
+            0 if options.scenario == "death_respawn_cycle" else None
+        ),
         show_ranges=True,
         verbose_logging=False,
     )

@@ -80,6 +80,14 @@ It does not provide a materialized SharedObs learner tensor or authorize the
 browser to reconstruct geometry, visibility, masks, history, rewards, policy
 state, or hidden Oracle facts.
 
+Agent POV also accepts one separate Python-authorized corpse overlay so a dead
+body visible to an authorized living sensor remains visible exactly as it is in
+Oracle View. That overlay is same-epoch, paint-and-inspection-only evidence; it
+may additionally admit only a death/respawn presentation cue and that cue's
+owned endpoint. It cannot admit another event, move an ability route, or change
+policy input, masks, targeting, legality, accepted actions, or simulator
+transitions.
+
 ## Manual input and joint turns
 
 Click the battlefield before using live command keys. Inspector controls and

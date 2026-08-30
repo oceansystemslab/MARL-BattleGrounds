@@ -170,7 +170,7 @@ changes simulator ticks or artifact contents.
 
 Unmodified Left, Right, and Space are document-level shortcuts for previous,
 next, and play/pause. They do not require the battlefield or timeline to be
-active. The viewer deliberately does nothing when:
+active. The viewer deliberately issues no replay command when:
 
 - Shift, Control, Alt, or Meta is held;
 - Space is an auto-repeat event;
@@ -179,7 +179,12 @@ active. The viewer deliberately does nothing when:
   slider, textbox, combobox, spinbutton, or menu item; or
 - replay authority is absent, offline, hidden, or not yet installed.
 
-These exclusions preserve ordinary browser and assistive-technology behavior.
+Modified shortcuts, events from native controls, and absent, offline, hidden, or
+uninstalled replay authority preserve ordinary browser and assistive-technology
+behavior. When complete replay authority remains visibly installed, Space
+auto-repeat and Left, Right, or Space during a temporary in-flight fence are
+consumed without issuing another command. This prevents the document or an open
+disclosure from scrolling while the retained replay scene is still active.
 
 ## Audiences and recorded authority
 
@@ -199,6 +204,15 @@ sensor sources. It does not recompute geometry, visibility, line of sight,
 masks, mechanics, or state; include teammate masks/history, rewards, policy or
 critic state, transition facts, or hidden Oracle truth; or claim to be a
 materialized SharedObs learner input.
+
+A separate server-authorized corpse overlay keeps locally visible dead bodies
+consistent with Oracle View. Python admits a corpse only from the same epoch
+and only when an authorized living sensor has it within recorded observation
+radius and static line of sight. The overlay is used for corpse painting and
+inspection and may additionally admit only a death/respawn presentation cue
+and that cue's owned endpoint. It never admits another event, moves an ability
+route, or changes policy input, masks, targeting, actions, simulator or recorded
+transition semantics, or the replay artifact.
 
 ### Technical Frame
 

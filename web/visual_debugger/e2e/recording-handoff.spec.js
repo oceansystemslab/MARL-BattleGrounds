@@ -792,9 +792,18 @@ test("target race remains Online and fenced until Save As recovers cached artifa
     }
   };
   page.on("request", recordLocalActivation);
-  await agentCloseoutBodies.nth(1).click();
-  await expect(agentCloseoutBodies.nth(1)).toHaveAttribute("data-selected", "true");
+  const inspectedCloseoutBody = agentCloseoutBodies.nth(1);
+  const inspectedCloseoutLabel = await inspectedCloseoutBody.getAttribute("aria-label");
+  const inspectedCloseoutPublicId =
+    inspectedCloseoutLabel?.match(/Agent ID ([^.]+)/u)?.[1];
+  if (inspectedCloseoutPublicId === undefined) {
+    throw new Error("Agent closeout body lacks a public identity.");
+  }
+  await inspectedCloseoutBody.click();
   await expect(page.locator("#agent-details")).toHaveAttribute("open", "");
+  await expect(page.locator("#agent-details")).toContainText(
+    `Agent ID ${inspectedCloseoutPublicId}`,
+  );
   await page.evaluate(
     () =>
       new Promise((resolve) =>

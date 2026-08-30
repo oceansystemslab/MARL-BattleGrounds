@@ -244,6 +244,161 @@ function authorizedIdentitySnapshot(value) {
   });
 }
 
+/** @param {unknown} left @param {unknown} right */
+function sameRecordedPublicValue(left, right) {
+  if (Object.is(left, right)) return true;
+  return (
+    typeof left === "number" &&
+    Number.isFinite(left) &&
+    typeof right === "number" &&
+    Number.isFinite(right) &&
+    (left === Math.fround(right) || Math.fround(left) === right)
+  );
+}
+
+/**
+ * Compare the complete public durable-status fact carried by the accepted
+ * local and geometry-free researcher branches. Direct-source identity is the
+ * enrichment being joined, so it is deliberately checked separately.
+ *
+ * @param {unknown} rawLocal
+ * @param {unknown} rawResearcher
+ */
+function samePublicStatusFacts(rawLocal, rawResearcher) {
+  const local = record(rawLocal);
+  const researcher = record(rawResearcher);
+  if (!local || !researcher) return false;
+  return [
+    "status_channel",
+    "status_id",
+    "family",
+    "configured_duration_steps",
+    "remaining_duration",
+    "source_class_id",
+    "source_class_name",
+    "source_action_component",
+    "magnitude_kind",
+    "magnitude",
+    "breaks_on_positive_damage",
+  ].every((field) => sameRecordedPublicValue(local[field], researcher[field]));
+}
+
+/** @param {unknown} left @param {unknown} right */
+function samePublicAgentIdentity(left, right) {
+  const leftIdentity = authorizedIdentitySnapshot(left);
+  const rightIdentity = authorizedIdentitySnapshot(right);
+  return (
+    leftIdentity !== null &&
+    rightIdentity !== null &&
+    leftIdentity.public_agent_id === rightIdentity.public_agent_id &&
+    leftIdentity.class_id === rightIdentity.class_id &&
+    leftIdentity.team_id === rightIdentity.team_id
+  );
+}
+
+/**
+ * Retain the fog-authorized presentation key while taking canonical public
+ * identity facts from the exact researcher-space join. Researcher opaque keys
+ * therefore cannot enter cue identity, DOM metadata, or geometry.
+ *
+ * @param {unknown} rawResearcherAgent
+ * @param {unknown} rawLocalAgent
+ */
+function researcherIdentityForLocalAgent(rawResearcherAgent, rawLocalAgent) {
+  if (!samePublicAgentIdentity(rawResearcherAgent, rawLocalAgent)) return null;
+  const researcherIdentity = authorizedIdentitySnapshot(rawResearcherAgent);
+  const localIdentity = authorizedIdentitySnapshot(rawLocalAgent);
+  if (researcherIdentity === null || localIdentity === null) return null;
+  return Object.freeze({
+    ...researcherIdentity,
+    presentation_key: localIdentity.presentation_key,
+  });
+}
+
+/**
+ * Enrich only already-admitted Agent lifecycle applications. Event rows and
+ * local trajectories remain the sole authority for cue admission and spatial
+ * placement; researcher space may contribute display identity only after the
+ * recipient, current status, and direct source all agree exactly.
+ *
+ * @param {ReadonlyArray<Readonly<Record<string, any>>>} applicationSources
+ * @param {AuthorizedStatusGroup} group
+ * @param {number} statusChannel
+ * @param {string} statusId
+ * @param {Map<string, Record<string, any>>} sceneByKey
+ * @param {Map<string, Record<string, any>>} researcherAgentByPublicId
+ */
+function researcherApplicationSources(
+  applicationSources,
+  group,
+  statusChannel,
+  statusId,
+  sceneByKey,
+  researcherAgentByPublicId,
+) {
+  const withoutResearcherIdentity = () =>
+    Object.freeze(
+      applicationSources.map((source) =>
+        Object.freeze({ ...source, sourceIdentity: null }),
+      ),
+    );
+  if (applicationSources.length === 0) return Object.freeze([]);
+
+  const localRecipient = sceneByKey.get(group.recipientPresentationKey);
+  const researcherRecipient = researcherAgentByPublicId.get(
+    group.recipientPublicAgentId,
+  );
+  if (
+    !localRecipient ||
+    !researcherRecipient ||
+    !samePublicAgentIdentity(localRecipient, researcherRecipient)
+  ) {
+    return withoutResearcherIdentity();
+  }
+  const localStatuses = array(localRecipient.statuses).filter(
+    (status) =>
+      integer(record(status)?.status_channel) === statusChannel &&
+      identifier(record(status)?.status_id) === statusId,
+  );
+  if (localStatuses.length !== 1) return withoutResearcherIdentity();
+  const researcherStatuses = array(researcherRecipient.statuses).filter((status) =>
+    samePublicStatusFacts(localStatuses[0], status),
+  );
+  if (researcherStatuses.length !== 1) return withoutResearcherIdentity();
+  const researcherStatus = researcherStatuses[0];
+  const directSources = array(record(researcherStatus)?.direct_sources);
+
+  return Object.freeze(
+    applicationSources.map((source) => {
+      const localSource = sceneByKey.get(source.sourcePresentationKey);
+      const researcherSource = researcherAgentByPublicId.get(
+        source.sourcePublicAgentId,
+      );
+      const matchingDirectSources = directSources.filter(
+        (directSource) =>
+          identifier(record(directSource)?.source_public_agent_id) ===
+          source.sourcePublicAgentId,
+      );
+      const directSource = record(matchingDirectSources[0]);
+      const researcherIdentity = researcherIdentityForLocalAgent(
+        researcherSource,
+        localSource,
+      );
+      const sourceIdentity =
+        matchingDirectSources.length === 1 &&
+        directSource &&
+        identifier(directSource.source_presentation_key) ===
+          identifier(researcherSource?.presentation_key) &&
+        researcherIdentity !== null &&
+        researcherIdentity.class_id ===
+          integer(record(researcherStatus)?.source_class_id)
+          ? researcherIdentity
+          : null;
+      return Object.freeze({ ...source, sourceIdentity });
+    }),
+  );
+}
+
 /**
  * V2 scientific identities are canonical strings.
  *
@@ -529,13 +684,15 @@ function projectedAgentRadius(surface, sceneByKey, presentationKey) {
 }
 
 const CHARGE_DIRECTION_MARKER_CANDIDATES = Object.freeze([
-  Object.freeze([1 / 3, 1 / 4]),
-  Object.freeze([2 / 3, 3 / 4]),
+  Object.freeze([1 / 5, 1 / 6]),
+  Object.freeze([2 / 5, 1 / 3]),
+  Object.freeze([3 / 5, 2 / 3]),
+  Object.freeze([4 / 5, 5 / 6]),
 ]);
 
 /**
- * Choose the preferred thirds for Charge direction markers, moving only the
- * colliding marker outward to its paired quarter. These compact underlay
+ * Choose four evenly dispersed fifths for Charge direction markers, moving
+ * only a colliding marker to its paired fallback. These compact underlay
  * markers do not enter the foreground allocator; they only avoid the two
  * endpoint bodies, the route's Agent-ID ownership label, and the viewport.
  *
@@ -1250,9 +1407,16 @@ function sameAuthorizedPoint(left, right) {
  *
  * @param {Record<string, any>} latest
  * @param {Map<string, Record<string, any>>} sceneByKey
+ * @param {Set<string> | null} actorInputSuccessorKeys
+ * @param {Set<string>} deathOverlaySuccessorKeys
  * @returns {Map<string, Record<string, any>> | null}
  */
-function authorizedTrajectoryMap(latest, sceneByKey) {
+function authorizedTrajectoryMap(
+  latest,
+  sceneByKey,
+  actorInputSuccessorKeys,
+  deathOverlaySuccessorKeys,
+) {
   if (!Array.isArray(latest.agent_phase_trajectories)) {
     return null;
   }
@@ -1262,6 +1426,13 @@ function authorizedTrajectoryMap(latest, sceneByKey) {
     return null;
   }
   if (!agentVisual && trajectories.length !== sceneByKey.size) {
+    return null;
+  }
+  const expectedAgentSuccessorKeys =
+    agentVisual && actorInputSuccessorKeys instanceof Set
+      ? new Set([...actorInputSuccessorKeys, ...deathOverlaySuccessorKeys])
+      : null;
+  if (agentVisual && expectedAgentSuccessorKeys === null) {
     return null;
   }
   const sceneByPublicId = new Map(
@@ -1344,7 +1515,11 @@ function authorizedTrajectoryMap(latest, sceneByKey) {
     byKey.set(key, trajectory);
     publicIds.add(publicId);
   }
-  if (agentVisual && successorKeys.size !== sceneByKey.size) {
+  if (
+    agentVisual &&
+    (successorKeys.size !== expectedAgentSuccessorKeys?.size ||
+      [...successorKeys].some((key) => !expectedAgentSuccessorKeys.has(key)))
+  ) {
     return null;
   }
   return byKey;
@@ -1451,6 +1626,8 @@ function authorizedStatusSelection(group) {
  * }>>} rows
  * @param {string} transitionId
  * @param {Map<string, Record<string, any>>} sceneByKey
+ * @param {Map<string, Record<string, any>>} researcherAgentByPublicId
+ * @param {boolean} useResearcherStatusAttribution
  * @param {Map<string, Record<string, any>> | null} trajectories
  * @param {ProjectionSurface | null} surface
  * @param {Record<string, boolean>} visualFilters
@@ -1460,6 +1637,8 @@ function authorizedStatusCompositions(
   rows,
   transitionId,
   sceneByKey,
+  researcherAgentByPublicId,
+  useResearcherStatusAttribution,
   trajectories,
   surface,
   visualFilters,
@@ -1639,11 +1818,26 @@ function authorizedStatusCompositions(
     const enabled = presentation.enabled === true;
     const atomicEventIds = Object.freeze(group.atoms.map(({ row }) => row.id));
     const applicationEventIds = Object.freeze(applications.map(({ row }) => row.id));
-    const applicationSources = Object.freeze(
+    let applicationSources = Object.freeze(
       applications.map(({ applicationSource }) => applicationSource),
     );
     if (applicationSources.some((source) => source === null)) {
       return null;
+    }
+    if (useResearcherStatusAttribution && lifecycleId === "applied") {
+      const statusChannel = integer(primary.event.status_channel);
+      const statusId = identifier(primary.event.status_id);
+      if (statusChannel === null || statusId === null) return null;
+      applicationSources = researcherApplicationSources(
+        /** @type {ReadonlyArray<Readonly<Record<string, any>>>} */ (
+          applicationSources
+        ),
+        group,
+        statusChannel,
+        statusId,
+        sceneByKey,
+        researcherAgentByPublicId,
+      );
     }
     const lane = lanes.get(key) ?? { lane: 0, laneCount: 0 };
     const status = resolveVisualToken("status", primary.event.status_id, primary.event);
@@ -1744,6 +1938,21 @@ function buildAuthorizedPresentationChoreographyPlan(
     sceneByKey.set(key, agent);
     scenePublicIds.add(publicId);
   }
+  /** @type {Map<string, Record<string, any>>} */
+  const researcherAgentByPublicId = new Map();
+  for (const candidate of array(researcherScene.agents)) {
+    const agent = record(candidate);
+    const publicId = identifier(agent?.public_agent_id);
+    if (
+      !agent ||
+      publicId === null ||
+      authorizedIdentitySnapshot(agent) === null ||
+      researcherAgentByPublicId.has(publicId)
+    ) {
+      return null;
+    }
+    researcherAgentByPublicId.set(publicId, agent);
+  }
   /** @type {Map<number, Record<string, any>>} */
   const classMechanicsById = new Map();
   // Ultimate help is researcher-space reference material. Resolve it from the
@@ -1762,8 +1971,35 @@ function buildAuthorizedPresentationChoreographyPlan(
     latest.summary_kind === "agent_pov_fog_filtered_visual_events";
   const agentVisualInventory =
     latest.summary_kind === "agent_pov_fog_filtered_visual_events";
+  const actorInputSuccessorKeys = agentVisualInventory
+    ? new Set(
+        array(presentation.current_endpoint?.parts?.scene?.agents)
+          .map((agent) => identifier(record(agent)?.presentation_key))
+          .filter((key) => key !== null),
+      )
+    : null;
+  const deathOverlaySuccessorKeys = agentVisualInventory
+    ? new Set(
+        rows
+          .filter((row) => row.kind === "agent_died")
+          .map((row) =>
+            identifier(record(row.payload)?.recipient_anchor?.presentation_key),
+          )
+          .filter(
+            (key) =>
+              key !== null &&
+              actorInputSuccessorKeys instanceof Set &&
+              !actorInputSuccessorKeys.has(key),
+          ),
+      )
+    : new Set();
   const trajectories = causalVisualInventory
-    ? authorizedTrajectoryMap(latest, sceneByKey)
+    ? authorizedTrajectoryMap(
+        latest,
+        sceneByKey,
+        actorInputSuccessorKeys,
+        deathOverlaySuccessorKeys,
+      )
     : null;
   if (causalVisualInventory && trajectories === null) {
     return null;
@@ -1772,6 +2008,8 @@ function buildAuthorizedPresentationChoreographyPlan(
     rows,
     transitionId,
     sceneByKey,
+    researcherAgentByPublicId,
+    agentVisualInventory,
     trajectories,
     surface,
     visualFilters,
@@ -1965,14 +2203,20 @@ function buildAuthorizedPresentationChoreographyPlan(
       }
       const chargeEndpoints = token.tokenId === "warrior_charge";
       const sourceEndpointPhase =
-        chargeEndpoints || (agentVisualInventory && sourceTrajectory.successor == null)
+        chargeEndpoints ||
+        (agentVisualInventory &&
+          (sourceTrajectory.successor == null ||
+            !actorInputSuccessorKeys?.has(sourceKey)))
           ? "transition_start"
           : "successor";
       const targetEndpointPhase =
         targetTrajectory === null
           ? null
           : chargeEndpoints ||
-              (agentVisualInventory && targetTrajectory.successor == null)
+              (agentVisualInventory &&
+                (targetTrajectory.successor == null ||
+                  targetKey === null ||
+                  !actorInputSuccessorKeys?.has(targetKey)))
             ? "transition_start"
             : "successor";
       const authorizedSource = abilityEnabled
@@ -2443,7 +2687,14 @@ function buildAuthorizedPresentationChoreographyPlan(
       const projectedAnchor = paintDecision.enabled
         ? project(presentationWorld, surface)
         : null;
-      if (paintDecision.enabled && projectedAnchor === null) {
+      const presentationKey = identifier(presentationAnchor?.presentation_key);
+      const presentationAgent =
+        presentationKey === null ? null : sceneByKey.get(presentationKey);
+      const recipientIdentity = authorizedIdentitySnapshot(presentationAgent);
+      if (
+        recipientIdentity === null ||
+        (paintDecision.enabled && projectedAnchor === null)
+      ) {
         return null;
       }
       planned.push(
@@ -2455,6 +2706,9 @@ function buildAuthorizedPresentationChoreographyPlan(
           recipient: row.kind === "health_regenerated" ? projectedAnchor : null,
           agentPresentationKey: presentationAnchor?.presentation_key ?? null,
           agentPublicAgentId: presentationAnchor?.public_agent_id ?? null,
+          recipientPresentationKey: presentationAnchor?.presentation_key ?? null,
+          recipientPublicAgentId: presentationAnchor?.public_agent_id ?? null,
+          recipientIdentity,
           value:
             row.kind === "health_regenerated"
               ? finiteNumber(event.actual_health_regenerated)

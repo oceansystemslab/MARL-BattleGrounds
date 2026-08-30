@@ -495,6 +495,15 @@ class ReplayViewerService:
                     frame = build_replay_no_shared_obs_authorized_presentation_v1(
                         entry.projection_index,
                         raw_frame,
+                        global_context=self._context,
+                        current_global_frame=self._replay.frames[
+                            raw_frame.cursor.frame_index
+                        ],
+                        previous_global_frame=(
+                            None
+                            if raw_frame.cursor.frame_index == 0
+                            else self._replay.frames[raw_frame.cursor.frame_index - 1]
+                        ),
                         public_catalog=self._context.static_mechanics_catalog,
                         source_authority_epoch=raw_frame.revision,
                         incoming_visual_events=(
@@ -558,6 +567,13 @@ class ReplayViewerService:
                 )
                 frame = build_replay_shared_obs_authorized_presentation_v1(
                     raw_frame,
+                    global_context=self._context,
+                    current_global_frame=self._replay.frames[frame_index],
+                    previous_global_frame=(
+                        None
+                        if frame_index == 0
+                        else self._replay.frames[frame_index - 1]
+                    ),
                     public_catalog=self._context.static_mechanics_catalog,
                     source_authority_epoch=raw_frame.revision,
                     authorized_recipient_global_slot=self._pov_global_slot,

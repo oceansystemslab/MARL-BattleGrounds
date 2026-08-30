@@ -4154,17 +4154,62 @@ def _agent_pov_visual_event_is_authorized(
     return True
 
 
+def _agent_pov_corpse_choreography_agents_by_slot(
+    scene: AuthorizedBattlefieldSceneV1,
+    *,
+    base_agents_by_slot: dict[int, AuthorizedAgentV1],
+    scene_name: str,
+    phase: Literal["transition_start", "successor"],
+    recipient_public_agent_id: str,
+    slot_by_public_agent_id: dict[str, int],
+    trajectory_by_internal_slot: dict[int, VisualAgentPhaseTrajectoryV2],
+    configured_active_by_global_slot: tuple[bool, ...],
+) -> dict[int, AuthorizedAgentV1]:
+    """Validate a base-scene superset whose additions are corpses only."""
+    agents_by_slot = _agent_pov_visual_scene_agents_by_slot(
+        scene,
+        scene_name=scene_name,
+        phase=phase,
+        recipient_public_agent_id=recipient_public_agent_id,
+        slot_by_public_agent_id=slot_by_public_agent_id,
+        trajectory_by_internal_slot=trajectory_by_internal_slot,
+        configured_active_by_global_slot=configured_active_by_global_slot,
+    )
+    for slot, base_agent in base_agents_by_slot.items():
+        if agents_by_slot.get(slot) != base_agent:
+            raise ValueError(f"{scene_name} changed an actor-input scene agent.")
+    for slot, agent in agents_by_slot.items():
+        if slot in base_agents_by_slot:
+            continue
+        if (
+            agent.relation == "self"
+            or agent.life_state != "corpse"
+            or not isclose(
+                agent.current_health,
+                0.0,
+                rel_tol=0.0,
+                abs_tol=1e-8,
+            )
+        ):
+            raise ValueError(f"{scene_name} may add only zero-health corpse rows.")
+    return agents_by_slot
+
+
 def build_agent_pov_visual_incoming_summary_v1(
     incoming_events: VisualEventBatchV2,
     *,
     transition_start_scene: AuthorizedBattlefieldSceneV1,
     successor_scene: AuthorizedBattlefieldSceneV1,
+    transition_start_corpse_choreography_scene: (
+        AuthorizedBattlefieldSceneV1 | None
+    ) = None,
+    successor_corpse_choreography_scene: AuthorizedBattlefieldSceneV1 | None = None,
     recipient_public_agent_id: str,
     incoming_recipient_transition_id: str,
     incoming_start_recipient_frame_id: str,
     incoming_successor_recipient_frame_id: str,
 ) -> AgentPovVisualIncomingSummaryV1:
-    """Filter canonical visual facts through two adjacent Agent POV scenes."""
+    """Filter facts through actor-input scenes plus corpse lifecycle evidence."""
     if type(incoming_events) is not VisualEventBatchV2:
         raise ValueError("incoming_events must be an exact VisualEventBatchV2.")
     VisualEventBatchV2.__post_init__(incoming_events)
@@ -4212,6 +4257,42 @@ def build_agent_pov_visual_incoming_summary_v1(
             incoming_events.configured_active_by_global_slot
         ),
     )
+    if (transition_start_corpse_choreography_scene is None) != (
+        successor_corpse_choreography_scene is None
+    ):
+        raise ValueError(
+            "Agent POV corpse choreography scenes must be supplied as a pair."
+        )
+    if transition_start_corpse_choreography_scene is None:
+        corpse_start_agents_by_slot = transition_start_agents_by_slot
+        corpse_successor_agents_by_slot = successor_agents_by_slot
+    else:
+        if successor_corpse_choreography_scene is None:  # pragma: no cover - paired.
+            raise AssertionError("corpse choreography successor scene disappeared")
+        corpse_start_agents_by_slot = _agent_pov_corpse_choreography_agents_by_slot(
+            transition_start_corpse_choreography_scene,
+            base_agents_by_slot=transition_start_agents_by_slot,
+            scene_name="transition_start_corpse_choreography_scene",
+            phase="transition_start",
+            recipient_public_agent_id=recipient_public_agent_id,
+            slot_by_public_agent_id=slot_by_public_agent_id,
+            trajectory_by_internal_slot=trajectory_by_internal_slot,
+            configured_active_by_global_slot=(
+                incoming_events.configured_active_by_global_slot
+            ),
+        )
+        corpse_successor_agents_by_slot = _agent_pov_corpse_choreography_agents_by_slot(
+            successor_corpse_choreography_scene,
+            base_agents_by_slot=successor_agents_by_slot,
+            scene_name="successor_corpse_choreography_scene",
+            phase="successor",
+            recipient_public_agent_id=recipient_public_agent_id,
+            slot_by_public_agent_id=slot_by_public_agent_id,
+            trajectory_by_internal_slot=trajectory_by_internal_slot,
+            configured_active_by_global_slot=(
+                incoming_events.configured_active_by_global_slot
+            ),
+        )
     start_recipient = next(
         row for row in transition_start_scene.agents if row.relation == "self"
     )
@@ -4239,7 +4320,50 @@ def build_agent_pov_visual_incoming_summary_v1(
             raise ValueError(
                 "Agent POV visual class identity changed within one transition."
             )
-    union_slots = (
+    corpse_common_slots = (
+        corpse_start_agents_by_slot.keys() & corpse_successor_agents_by_slot.keys()
+    )
+    for slot in corpse_common_slots:
+        if (
+            corpse_start_agents_by_slot[slot].presentation_key
+            != corpse_successor_agents_by_slot[slot].presentation_key
+            or corpse_start_agents_by_slot[slot].class_id
+            != corpse_successor_agents_by_slot[slot].class_id
+        ):
+            raise ValueError(
+                "Agent POV corpse choreography identity changed within one transition."
+            )
+    authorized_source_events: list[VisualEventV2] = []
+    death_slots: set[int] = set()
+    respawn_slots: set[int] = set()
+    for source_event in incoming_events.events:
+        corpse_lifecycle = type(source_event) in (
+            AgentDiedEventV2,
+            AgentRespawnedEventV2,
+        )
+        if not _agent_pov_visual_event_is_authorized(
+            source_event,
+            recipient_global_slot=recipient_global_slot,
+            transition_start_agents_by_slot=(
+                corpse_start_agents_by_slot
+                if corpse_lifecycle
+                else transition_start_agents_by_slot
+            ),
+            successor_agents_by_slot=(
+                corpse_successor_agents_by_slot
+                if corpse_lifecycle
+                else successor_agents_by_slot
+            ),
+            trajectory_by_internal_slot=trajectory_by_internal_slot,
+        ):
+            continue
+        authorized_source_events.append(source_event)
+        if type(source_event) is AgentDiedEventV2:
+            death_slots.add(source_event.recipient_global_slot)
+        elif type(source_event) is AgentRespawnedEventV2:
+            respawn_slots.add(source_event.agent_global_slot)
+    corpse_lifecycle_slots = death_slots | respawn_slots
+    base_union_slots = (
         *transition_start_agents_by_slot,
         *(
             slot
@@ -4247,30 +4371,63 @@ def build_agent_pov_visual_incoming_summary_v1(
             if slot not in transition_start_agents_by_slot
         ),
     )
-    key_by_internal_slot = {
+    union_slots = (
+        *base_union_slots,
+        *(
+            trajectory.global_slot
+            for trajectory in incoming_events.agent_phase_trajectories
+            if trajectory.global_slot in corpse_lifecycle_slots
+            and trajectory.global_slot not in base_union_slots
+        ),
+    )
+    trajectory_start_agents_by_slot = {
         slot: (
-            transition_start_agents_by_slot[slot].presentation_key
-            if slot in transition_start_agents_by_slot
-            else successor_agents_by_slot[slot].presentation_key
+            transition_start_agents_by_slot.get(slot)
+            or (
+                corpse_start_agents_by_slot.get(slot) if slot in respawn_slots else None
+            )
         )
         for slot in union_slots
+    }
+    trajectory_successor_agents_by_slot = {
+        slot: (
+            successor_agents_by_slot.get(slot)
+            or (
+                corpse_successor_agents_by_slot.get(slot)
+                if slot in death_slots
+                else None
+            )
+        )
+        for slot in union_slots
+    }
+    if any(
+        trajectory_start_agents_by_slot[slot] is None
+        and trajectory_successor_agents_by_slot[slot] is None
+        for slot in union_slots
+    ):
+        raise AssertionError("authorized Agent trajectory lost both endpoints")
+    trajectory_agents_by_slot = {
+        slot: cast(
+            AuthorizedAgentV1,
+            (
+                trajectory_start_agents_by_slot[slot]
+                if trajectory_start_agents_by_slot[slot] is not None
+                else trajectory_successor_agents_by_slot[slot]
+            ),
+        )
+        for slot in union_slots
+    }
+    key_by_internal_slot = {
+        slot: trajectory_agents_by_slot[slot].presentation_key for slot in union_slots
     }
     trajectories = tuple(
         AgentPovVisualIncomingAgentPhaseTrajectoryV1(
             agent_presentation_key=key_by_internal_slot[slot],
-            agent_public_agent_id=(
-                transition_start_agents_by_slot[slot].public_agent_id
-                if slot in transition_start_agents_by_slot
-                else successor_agents_by_slot[slot].public_agent_id
-            ),
-            agent_class_id=(
-                transition_start_agents_by_slot[slot].class_id
-                if slot in transition_start_agents_by_slot
-                else successor_agents_by_slot[slot].class_id
-            ),
+            agent_public_agent_id=trajectory_agents_by_slot[slot].public_agent_id,
+            agent_class_id=trajectory_agents_by_slot[slot].class_id,
             transition_start=(
                 None
-                if slot not in transition_start_agents_by_slot
+                if trajectory_start_agents_by_slot[slot] is None
                 else _replay_incoming_anchor(
                     trajectory_by_internal_slot[slot].transition_start,
                     key_by_internal_slot=key_by_internal_slot,
@@ -4278,7 +4435,7 @@ def build_agent_pov_visual_incoming_summary_v1(
             ),
             successor=(
                 None
-                if slot not in successor_agents_by_slot
+                if trajectory_successor_agents_by_slot[slot] is None
                 else _replay_incoming_anchor(
                     trajectory_by_internal_slot[slot].successor,
                     key_by_internal_slot=key_by_internal_slot,
@@ -4288,15 +4445,7 @@ def build_agent_pov_visual_incoming_summary_v1(
         for slot in union_slots
     )
     events: list[AgentPovVisualIncomingEventV1] = []
-    for source_event in incoming_events.events:
-        if not _agent_pov_visual_event_is_authorized(
-            source_event,
-            recipient_global_slot=recipient_global_slot,
-            transition_start_agents_by_slot=transition_start_agents_by_slot,
-            successor_agents_by_slot=successor_agents_by_slot,
-            trajectory_by_internal_slot=trajectory_by_internal_slot,
-        ):
-            continue
+    for source_event in authorized_source_events:
         projected_event: (
             ReplayIncomingEventV1
             | AgentPovVisualIncomingRecipientHealthResolutionEventV1

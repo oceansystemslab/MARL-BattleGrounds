@@ -378,12 +378,21 @@ def build_replay_no_shared_obs_authorized_presentation_v1(
     source: ActorPovProjectionIndexV1,
     raw_frame: ActorPovReplayViewerFrameV1,
     *,
+    global_context: EvaluationEpisodeContextV1,
+    current_global_frame: EvaluationFrameV1,
+    previous_global_frame: EvaluationFrameV1 | None,
     public_catalog: StaticMechanicsCatalogV1,
     source_authority_epoch: int,
     incoming_visual_events: VisualEventBatchV2 | None,
     researcher_space: ReplayResearcherSpaceV1,
 ) -> ReplayNoSharedObsAuthorizedPresentationFrameV1:
     """Package one committed recipient-local NoSharedObs replay frame."""
+    from scripts.dev.visual_debugger.local_oracle_corpse_overlay import (
+        build_local_oracle_corpse_overlay_v1,
+        compose_local_oracle_corpse_scene_v1,
+        validate_local_oracle_corpse_overlay_against_source_v1,
+    )
+
     if type(source) is not ActorPovProjectionIndexV1:
         raise TypeError("source must use the exact POV projection index root.")
     if type(raw_frame) is not ActorPovReplayViewerFrameV1:
@@ -456,6 +465,30 @@ def build_replay_no_shared_obs_authorized_presentation_v1(
         parts=current,
         axis_mapping=content.axis_mapping,
     )
+    current_sensor_ids = (
+        (content.public_agent_id,)
+        if current_global_frame.snapshot.alive_mask[content.selected_global_slot]
+        else ()
+    )
+    corpse_overlay = build_local_oracle_corpse_overlay_v1(
+        global_context,
+        current_global_frame,
+        current.scene,
+        authority_session_id=raw_frame.viewer_session_id,
+        source_authority_epoch=source_authority_epoch,
+        recipient_public_agent_id=content.public_agent_id,
+        living_sensor_public_agent_ids=current_sensor_ids,
+    )
+    validate_local_oracle_corpse_overlay_against_source_v1(
+        corpse_overlay,
+        global_context,
+        current_global_frame,
+        current.scene,
+        authority_session_id=raw_frame.viewer_session_id,
+        source_authority_epoch=source_authority_epoch,
+        recipient_public_agent_id=content.public_agent_id,
+        living_sensor_public_agent_ids=current_sensor_ids,
+    )
     if frame_index == 0:
         if incoming_visual_events is not None:
             raise ValueError("NoSharedObs frame zero cannot carry visual events.")
@@ -471,11 +504,43 @@ def build_replay_no_shared_obs_authorized_presentation_v1(
             authority_session_id=raw_frame.viewer_session_id,
             frame_index=frame_index - 1,
         )
+        if type(previous_global_frame) is not EvaluationFrameV1:
+            raise TypeError(
+                "non-initial NoSharedObs replays require the exact prior global frame."
+            )
+        previous_sensor_ids = (
+            (content.public_agent_id,)
+            if previous_global_frame.snapshot.alive_mask[content.selected_global_slot]
+            else ()
+        )
+        previous_overlay = build_local_oracle_corpse_overlay_v1(
+            global_context,
+            previous_global_frame,
+            previous.scene,
+            authority_session_id=raw_frame.viewer_session_id,
+            source_authority_epoch=source_authority_epoch,
+            recipient_public_agent_id=content.public_agent_id,
+            living_sensor_public_agent_ids=previous_sensor_ids,
+        )
         transition = content.transitions[frame_index - 1]
         visual_events = build_agent_pov_visual_incoming_summary_v1(
             incoming_visual_events,
             transition_start_scene=previous.scene,
             successor_scene=current.scene,
+            transition_start_corpse_choreography_scene=(
+                compose_local_oracle_corpse_scene_v1(
+                    previous.scene,
+                    previous_overlay,
+                    researcher_class_mechanics=researcher_space.class_mechanics,
+                )
+            ),
+            successor_corpse_choreography_scene=(
+                compose_local_oracle_corpse_scene_v1(
+                    current.scene,
+                    corpse_overlay,
+                    researcher_class_mechanics=researcher_space.class_mechanics,
+                )
+            ),
             recipient_public_agent_id=current.recipient_public_agent_id,
             incoming_recipient_transition_id=transition.pov_transition_id,
             incoming_start_recipient_frame_id=transition.start_pov_frame_id,
@@ -527,6 +592,7 @@ def build_replay_no_shared_obs_authorized_presentation_v1(
         ),
         analysis_mode="analysis",
         current_endpoint=endpoint,
+        local_oracle_corpse_overlay=corpse_overlay,
         latest_events=latest_events,
         visual_events=visual_events,
         latest_transition=latest_transition,
@@ -667,6 +733,9 @@ def _shared_obs_latest_transition_v1(
 def build_replay_shared_obs_authorized_presentation_v1(
     raw_frame: SharedObsAgentPovReplayViewerFrameV1,
     *,
+    global_context: EvaluationEpisodeContextV1,
+    current_global_frame: EvaluationFrameV1,
+    previous_global_frame: EvaluationFrameV1 | None,
     public_catalog: StaticMechanicsCatalogV1,
     source_authority_epoch: int,
     authorized_recipient_global_slot: int,
@@ -684,6 +753,12 @@ def build_replay_shared_obs_authorized_presentation_v1(
     researcher_space: ReplayResearcherSpaceV1,
 ) -> ReplaySharedObsAuthorizedPresentationFrameV1:
     """Package one fixed-recipient SharedObs visual-union replay frame."""
+    from scripts.dev.visual_debugger.local_oracle_corpse_overlay import (
+        build_local_oracle_corpse_overlay_v1,
+        compose_local_oracle_corpse_scene_v1,
+        validate_local_oracle_corpse_overlay_against_source_v1,
+    )
+
     if type(raw_frame) is not SharedObsAgentPovReplayViewerFrameV1:
         raise TypeError("raw_frame must use the exact private SharedObs replay root.")
     if type(raw_frame.cursor) is not ReplayCursorV1:
@@ -757,6 +832,36 @@ def build_replay_shared_obs_authorized_presentation_v1(
         public_catalog=public_catalog,
         authority_session_id=raw_frame.viewer_session_id,
     )
+    current_living_ids = {
+        row.public_agent_id
+        for row in global_context.roster
+        if row.configured_active
+        and current_global_frame.snapshot.alive_mask[row.global_slot]
+    }
+    current_sensor_ids = tuple(
+        row.source_public_agent_id
+        for row in current.authorized_sensor_sources
+        if row.source_public_agent_id in current_living_ids
+    )
+    corpse_overlay = build_local_oracle_corpse_overlay_v1(
+        global_context,
+        current_global_frame,
+        current.scene,
+        authority_session_id=raw_frame.viewer_session_id,
+        source_authority_epoch=source_authority_epoch,
+        recipient_public_agent_id=current.recipient_public_agent_id,
+        living_sensor_public_agent_ids=current_sensor_ids,
+    )
+    validate_local_oracle_corpse_overlay_against_source_v1(
+        corpse_overlay,
+        global_context,
+        current_global_frame,
+        current.scene,
+        authority_session_id=raw_frame.viewer_session_id,
+        source_authority_epoch=source_authority_epoch,
+        recipient_public_agent_id=current.recipient_public_agent_id,
+        living_sensor_public_agent_ids=current_sensor_ids,
+    )
     summary = raw_frame.artifact_summary
     local_prefix = (
         f"{summary.episode_id}:shared-obs-visual-union:{summary.public_agent_id}"
@@ -810,10 +915,48 @@ def build_replay_shared_obs_authorized_presentation_v1(
     else:
         if type(incoming_visual_events) is not VisualEventBatchV2:
             raise TypeError("non-initial SharedObs frames require exact visual events.")
+        if type(previous_global_frame) is not EvaluationFrameV1:
+            raise TypeError(
+                "non-initial SharedObs replays require the exact prior global frame."
+            )
+        previous_living_ids = {
+            row.public_agent_id
+            for row in global_context.roster
+            if row.configured_active
+            and previous_global_frame.snapshot.alive_mask[row.global_slot]
+        }
+        previous_sensor_ids = tuple(
+            row.source_public_agent_id
+            for row in previous.authorized_sensor_sources
+            if row.source_public_agent_id in previous_living_ids
+        )
+        previous_overlay = build_local_oracle_corpse_overlay_v1(
+            global_context,
+            previous_global_frame,
+            previous.scene,
+            authority_session_id=raw_frame.viewer_session_id,
+            source_authority_epoch=source_authority_epoch,
+            recipient_public_agent_id=current.recipient_public_agent_id,
+            living_sensor_public_agent_ids=previous_sensor_ids,
+        )
         visual_events = build_agent_pov_visual_incoming_summary_v1(
             incoming_visual_events,
             transition_start_scene=previous.scene,
             successor_scene=current.scene,
+            transition_start_corpse_choreography_scene=(
+                compose_local_oracle_corpse_scene_v1(
+                    previous.scene,
+                    previous_overlay,
+                    researcher_class_mechanics=researcher_space.class_mechanics,
+                )
+            ),
+            successor_corpse_choreography_scene=(
+                compose_local_oracle_corpse_scene_v1(
+                    current.scene,
+                    corpse_overlay,
+                    researcher_class_mechanics=researcher_space.class_mechanics,
+                )
+            ),
             recipient_public_agent_id=current.recipient_public_agent_id,
             incoming_recipient_transition_id=cast(
                 str,
@@ -876,6 +1019,7 @@ def build_replay_shared_obs_authorized_presentation_v1(
         ),
         analysis_mode="analysis",
         current_endpoint=endpoint,
+        local_oracle_corpse_overlay=corpse_overlay,
         latest_events=latest_events,
         visual_events=visual_events,
         latest_transition=latest_transition,

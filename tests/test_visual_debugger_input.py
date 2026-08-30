@@ -876,13 +876,13 @@ def test_scene_hit_test_uses_only_authorized_agents_and_stable_tie_break() -> No
     assert hit_test_scene_agents((), *first.position) is None
 
 
-def test_pointer_hit_test_uses_plain_control_and_shift_target() -> None:
+def test_pointer_hit_test_uses_plain_control_shift_target_and_escape_clear() -> None:
     session = _session("arena_5v5")
     controlled = dispatch_command(
         session,
         BattlefieldPointerCommandV1(
             world_x=3.0,
-            world_y=6.0,
+            world_y=5.0,
             button="primary",
         ),
         view_mode="researcher",
@@ -892,8 +892,8 @@ def test_pointer_hit_test_uses_plain_control_and_shift_target() -> None:
     selected = dispatch_command(
         controlled.session,
         BattlefieldPointerCommandV1(
-            world_x=15.0,
-            world_y=10.0,
+            world_x=17.0,
+            world_y=1.0,
             button="primary",
             shift_key=True,
         ),
@@ -903,11 +903,7 @@ def test_pointer_hit_test_uses_plain_control_and_shift_target() -> None:
     )
     cleared = dispatch_command(
         selected.session,
-        BattlefieldPointerCommandV1(
-            world_x=0.0,
-            world_y=0.0,
-            button="secondary",
-        ),
+        KeyboardCommandV1(key="Escape"),
         view_mode="researcher",
         preset="analysis",
         include_stress=False,

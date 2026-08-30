@@ -65,6 +65,7 @@ import {
   replayTimelineSimulatorStep,
   validateReplayCommandOutcome,
 } from "./replay-controls.js";
+import { isReplayAgentRecipientRotation } from "./replay-recipient-rotation.js";
 import { captureReplayBattlefieldPngV1 } from "./replay-export.js";
 import { BattlefieldRenderer } from "./scene.js";
 import {
@@ -336,8 +337,9 @@ const scientificDisclosures = Object.freeze(
  * The only retained scientific preference record. This is deliberately one
  * active record rather than a cache keyed by authority: unrelated A -> B
  * crossings replace A, so a later B -> A boundary receives fresh defaults.
- * One live Agent recipient rotation retains only the current user-interface
- * preferences; local inspection is still rebuilt from the new authority.
+ * One certified Agent recipient rotation retains only the current
+ * user-interface preferences; local inspection is still rebuilt from the new
+ * authority.
  *
  * @type {{
  *   authorityKey: Readonly<{tuple: readonly unknown[], serialized: string}>,
@@ -352,6 +354,20 @@ const scientificDisclosures = Object.freeze(
  * } | null}
  */
 let activePresentationPreference = null;
+
+/**
+ * One Replay Agent activation is staged until its certified successor is
+ * installed. This keeps the previous Agent Details content stable while the
+ * retained battlefield is busy and carries no geometry or opaque authority
+ * data into the successor.
+ *
+ * @type {null | Readonly<{
+ *   sourcePreferenceGeneration: number,
+ *   recipientPublicAgentId: string,
+ *   autoOpenAgentDetails: boolean,
+ * }>}
+ */
+let pendingReplayRecipientActivation = null;
 
 let presentationPreferenceGeneration = 0;
 let presentationPreferenceNeedsContentRender = false;
@@ -631,6 +647,7 @@ const choreographer = new CombatChoreographer({
 const replayTimelineElements = {
   root: elements.replayTimeline,
   keyboardTarget: document,
+  keyboardAuthorityInstalled: () => installedPresentationAuthority() !== null,
   keyboardEnabled: () => installedPresentationAuthority() !== null && !state.busy,
   clearSelection: () => clearReplaySelection(),
   firstButton: elements.replayFirstButton,
@@ -978,7 +995,10 @@ function installJoinedAuthority(joined) {
   if (preferenceKey === null) {
     throw new TypeError("Authorized presentation has no certified preference key.");
   }
-  installActivePresentationPreference(joined.presentation, preferenceKey);
+  installActivePresentationPreference(joined.presentation, preferenceKey, {
+    previousAuthority: state.authority,
+    nextAuthority: joined,
+  });
   if (
     authorizedPresentationAudience(joined.presentation) === "researcher" &&
     typeof joined.transport.show_ranges === "boolean"
@@ -1419,8 +1439,16 @@ function isLiveAgentRecipientFocusRotation(previous, next, focus) {
 /**
  * @param {Readonly<Record<string, any>>} presentation
  * @param {Readonly<{tuple: readonly unknown[], serialized: string}>} authorityKey
+ * @param {{
+ *   previousAuthority?: Readonly<Record<string, any>> | null,
+ *   nextAuthority?: Readonly<Record<string, any>> | null,
+ * }} [options]
  */
-function installActivePresentationPreference(presentation, authorityKey) {
+function installActivePresentationPreference(
+  presentation,
+  authorityKey,
+  { previousAuthority = null, nextAuthority = null } = {},
+) {
   presentationPreferenceGeneration += 1;
   cancelPendingPresentationPreferenceRestore();
   if (
@@ -1436,11 +1464,17 @@ function installActivePresentationPreference(presentation, authorityKey) {
     const retainLiveAgentPreferences =
       previousPreference !== null &&
       isLiveAgentRecipientRotation(previousPreference.authorityKey, authorityKey);
+    const retainReplayAgentPreferences =
+      previousPreference !== null &&
+      isReplayAgentRecipientRotation(previousAuthority, nextAuthority);
     activePresentationPreference = defaultPresentationPreference(
       presentation,
       authorityKey,
     );
-    if (retainLiveAgentPreferences && previousPreference !== null) {
+    if (
+      (retainLiveAgentPreferences || retainReplayAgentPreferences) &&
+      previousPreference !== null
+    ) {
       activePresentationPreference.disclosures = Object.fromEntries(
         Object.entries(previousPreference.disclosures).map(([panelId, saved]) => [
           panelId,
@@ -1449,6 +1483,22 @@ function installActivePresentationPreference(presentation, authorityKey) {
       );
       activePresentationPreference.agentDetailsAutoOpenAllowed =
         previousPreference.agentDetailsAutoOpenAllowed;
+    }
+    if (
+      retainReplayAgentPreferences &&
+      pendingReplayRecipientActivation !== null &&
+      pendingReplayRecipientActivation.sourcePreferenceGeneration ===
+        presentationPreferenceGeneration - 1 &&
+      pendingReplayRecipientActivation.recipientPublicAgentId === authorityKey.tuple[7]
+    ) {
+      activatedAgentPublicId = pendingReplayRecipientActivation.recipientPublicAgentId;
+      if (
+        pendingReplayRecipientActivation.autoOpenAgentDetails &&
+        activePresentationPreference.agentDetailsAutoOpenAllowed
+      ) {
+        activePresentationPreference.disclosures["agent-details"].open = true;
+      }
+      pendingReplayRecipientActivation = null;
     }
     if (
       previousPrimaryFocus !== null &&
@@ -1686,6 +1736,34 @@ function openAgentDetails() {
   preference.disclosures["agent-details"].open = true;
   setProgrammaticDisclosureOpen(elements.agentDetails, true);
   return true;
+}
+
+/**
+ * Defer a Replay recipient's inspector identity until the new authority is
+ * installed. Activating the already-installed recipient remains an ordinary
+ * local inspector activation and needs no authority handoff.
+ *
+ * @param {string} publicAgentId
+ */
+function stageReplayRecipientActivation(publicAgentId) {
+  const preference = installedActivePresentationPreference(state.presentation);
+  if (preference === null) {
+    pendingReplayRecipientActivation = null;
+    return;
+  }
+  if (state.presentation?.authority?.recipient_public_agent_id === publicAgentId) {
+    pendingReplayRecipientActivation = null;
+    activatedAgentPublicId = publicAgentId;
+    openAgentDetails();
+    return;
+  }
+  pendingReplayRecipientActivation = Object.freeze({
+    sourcePreferenceGeneration: presentationPreferenceGeneration,
+    recipientPublicAgentId: publicAgentId,
+    autoOpenAgentDetails:
+      preference.agentDetailsAutoOpenAllowed &&
+      preference.disclosures["agent-details"].open !== true,
+  });
 }
 
 function closeAgentDetailsWithoutLatching() {
@@ -3595,6 +3673,14 @@ function authorizedAgentActivation(presentationKey) {
   const researcherInspectionState =
     authorizedPresentationResearcherInspectionState(presentation);
   const replayPovSwitch = isReplayMode() && audience === "agent_pov";
+  if (audience === "agent_pov" && agent.life_state === "corpse") {
+    return Object.freeze({
+      effect: "local_inspection",
+      presentationKey,
+      agent,
+      audience,
+    });
+  }
   if (isTerminal(state.frame) && !isReplayMode()) {
     return null;
   }
@@ -3675,7 +3761,10 @@ function authorizedAgentActivation(presentationKey) {
     : null;
 }
 
-/** @param {unknown} target */
+/**
+ * @param {unknown} target
+ * @returns {(NonNullable<ReturnType<typeof authorizedAgentActivation>> & {presentationKey: string, element: SVGElement}) | null}
+ */
 function authorizedAgentActivationFromTarget(target) {
   if (!(target instanceof Element)) {
     return null;
@@ -3758,7 +3847,8 @@ function activateAuthorizedAgent(presentationKey, { pointerOriginated = false } 
     return false;
   }
   if (activation.effect === "local_inspection") {
-    if (!setLocalInspectedPresentationKey(presentationKey)) {
+    const localSelectionInstalled = setLocalInspectedPresentationKey(presentationKey);
+    if (!localSelectionInstalled && activation.agent.life_state !== "corpse") {
       return false;
     }
     activatedAgentPublicId = String(activation.agent.public_agent_id);
@@ -3766,19 +3856,22 @@ function activateAuthorizedAgent(presentationKey, { pointerOriginated = false } 
     openAgentDetails();
     return true;
   }
-  activatedAgentPublicId = String(activation.agent.public_agent_id);
-  openAgentDetails();
   if (activation.effect === "replay_pov_switch") {
+    stageReplayRecipientActivation(String(activation.agent.public_agent_id));
     void dispatchReplayCommand({
       command_type: "set_pov_actor",
       presentation_key: activation.presentationKey,
     });
   } else if (activation.effect === "replay_select") {
+    activatedAgentPublicId = String(activation.agent.public_agent_id);
+    openAgentDetails();
     void dispatchReplayCommand({
       command_type: "select_agent",
       selected_global_slot: activation.commandSlot,
     });
   } else if (activation.effect === "live_control") {
+    activatedAgentPublicId = String(activation.agent.public_agent_id);
+    openAgentDetails();
     const controlCommand = {
       command_type: "roster_selection",
       role: "control",
@@ -4149,6 +4242,8 @@ async function dispatchReplayCommand(command) {
     renderConnection();
     return null;
   }
+  const stagedRecipientActivation =
+    command.command_type === "set_pov_actor" ? pendingReplayRecipientActivation : null;
   invalidateReplayArtifactAction();
   replayPlayback.pause("user_command");
   try {
@@ -4168,6 +4263,10 @@ async function dispatchReplayCommand(command) {
     return payload;
   } catch {
     return null;
+  } finally {
+    if (pendingReplayRecipientActivation === stagedRecipientActivation) {
+      pendingReplayRecipientActivation = null;
+    }
   }
 }
 
@@ -4196,8 +4295,7 @@ function dispatchPanelCommand(command, { pointerOriginated = false } = {}) {
     ) &&
     isReplayMode()
   ) {
-    activatedAgentPublicId = command.public_agent_id;
-    openAgentDetails();
+    stageReplayRecipientActivation(command.public_agent_id);
     return dispatchReplayCommand({
       command_type: "set_pov_actor",
       global_slot: command.global_slot,
@@ -4678,6 +4776,7 @@ bindBattlefieldControls({
   onHelp: () => elements.helpDialog.showModal(),
   isInteractive: liveBattlefieldCommandsInteractive,
   onFencedCommand: retainFencedCommand,
+  ownsFencedSpaceDefault: () => !isReplayMode(),
   onReleaseFocus: releaseBattlefieldFocus,
 });
 
@@ -4692,16 +4791,19 @@ elements.battlefield.addEventListener(
         return;
       }
     }
-    if (
-      event.button !== 0 ||
-      event.shiftKey ||
-      event.ctrlKey ||
-      event.metaKey ||
-      event.altKey
-    ) {
+    if (event.button !== 0) {
       return;
     }
     const activation = authorizedAgentActivationFromTarget(event.target);
+    const inspectionOnlyCorpse =
+      activation?.effect === "local_inspection" &&
+      activation.agent.life_state === "corpse";
+    if (
+      !inspectionOnlyCorpse &&
+      (event.shiftKey || event.ctrlKey || event.metaKey || event.altKey)
+    ) {
+      return;
+    }
     if (activation === null) {
       return;
     }

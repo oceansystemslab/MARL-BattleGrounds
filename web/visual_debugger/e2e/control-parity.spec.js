@@ -1005,11 +1005,13 @@ test("Agent keyboard battlefield activation rebinds focus to the authorized succ
     throw new Error("Visible Agent battlefield actor lacks its public identity.");
   }
   await setDisclosureOpen(page, "#technical-frame-details", true);
+  await setDisclosureOpen(page, "#visual-filters", true);
   const ranges = page.locator("#live-ranges-button");
   if ((await ranges.getAttribute("aria-pressed")) !== "false") {
     await ranges.click();
   }
   await expect(ranges).toHaveAttribute("aria-pressed", "false");
+  await setDisclosureOpen(page, "#visual-filters", false);
   await expect(page.locator("#agent-details")).not.toHaveAttribute("open", "");
   const baseStep = await currentStep(page);
   requests.length = 0;
@@ -1155,7 +1157,7 @@ test("post-Charge Agent history stays installable through a reciprocal Charge", 
     let stagedTurns = 0;
     /** @type {Awaited<ReturnType<typeof liveTargetOption>> | null} */
     let chargeTarget = null;
-    while (stagedTurns < 6) {
+    while (stagedTurns < 9) {
       await controlLiveAgent(page, 1);
       chargeTarget = await liveTargetOption(page, 6);
       if (chargeTarget.text.includes("U ✓")) {
@@ -1796,6 +1798,8 @@ test("a stale tab adopts the latest ranges state without replaying its command",
     "data-presentation-authority",
     "installed",
   );
+  await setDisclosureOpen(page, "#visual-filters", true);
+  await setDisclosureOpen(stalePage, "#visual-filters", true);
   const ranges = page.locator("#live-ranges-button");
   const staleRanges = stalePage.locator("#live-ranges-button");
   const initialRangesPressed = await ranges.getAttribute("aria-pressed");
@@ -1903,6 +1907,7 @@ test("a lost applied response requires GET resync and never replays submit", asy
   await expect.poll(() => interceptedCommands).toBe(1);
   await page.unroute("**/api/command");
 
+  await setDisclosureOpen(page, "#visual-filters", true);
   const ranges = page.locator("#live-ranges-button");
   const rangesBefore = await ranges.getAttribute("aria-pressed");
   await ranges.click();
@@ -2219,6 +2224,7 @@ test("native panels preserve user state only within exact authority", async ({
   await expect(page.locator("#agent-details")).toHaveAttribute("open", "");
 
   await setDisclosureOpen(page, "#agent-details", false);
+  await setDisclosureOpen(page, "#visual-filters", true);
   const ranges = page.locator("#live-ranges-button");
   if ((await ranges.getAttribute("aria-pressed")) !== "true") {
     await ranges.click();

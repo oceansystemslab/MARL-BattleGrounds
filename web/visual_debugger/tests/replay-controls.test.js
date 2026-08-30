@@ -112,6 +112,7 @@ function controlElements(
   return {
     root: new FakeElement(),
     keyboardTarget: new FakeElement(),
+    keyboardAuthorityInstalled: () => true,
     keyboardEnabled: () => true,
     clearSelection: () => {},
     firstButton: new FakeElement(),
@@ -374,6 +375,16 @@ test("replay-owned Space suppresses scroll without repeating toggles or stealing
     assert.equal(fencedSpace.defaultPrevented, true);
     assert.equal(controller.snapshot().playing, true);
 
+    elements.keyboardAuthorityInstalled = () => false;
+    const unownedSpace = elements.keyboardTarget.dispatch("keydown", {
+      key: " ",
+      repeat: false,
+      target: elements.root,
+    });
+    assert.equal(unownedSpace.defaultPrevented, false);
+    assert.equal(controller.snapshot().playing, true);
+    elements.keyboardAuthorityInstalled = () => true;
+
     elements.playPauseButton.interactive = true;
     const nativeSpace = elements.keyboardTarget.dispatch("keydown", {
       key: " ",
@@ -468,25 +479,44 @@ test("timeline binding previews slider input without a request and commits once"
     assert.deepEqual(commands.at(-1), replaySeekCommand(3));
     assert.equal(commands.length, 3);
     elements.root.hidden = true;
-    elements.keyboardTarget.dispatch("keydown", {
+    const hiddenRootArrow = elements.keyboardTarget.dispatch("keydown", {
       key: "ArrowRight",
       target: elements.root,
     });
     assert.equal(commands.length, 3);
+    assert.equal(hiddenRootArrow.defaultPrevented, false);
     elements.root.hidden = false;
     elements.keyboardEnabled = () => false;
-    elements.keyboardTarget.dispatch("keydown", {
+    const fencedArrow = elements.keyboardTarget.dispatch("keydown", {
       key: "ArrowLeft",
       target: elements.root,
     });
     assert.equal(commands.length, 3);
+    assert.equal(fencedArrow.defaultPrevented, true);
     elements.keyboardEnabled = () => true;
-    controller.setAuthorityPending("disconnect");
-    elements.keyboardTarget.dispatch("keydown", {
+    elements.keyboardAuthorityInstalled = () => false;
+    const unownedArrow = elements.keyboardTarget.dispatch("keydown", {
       key: "ArrowLeft",
       target: elements.root,
     });
     assert.equal(commands.length, 3);
+    assert.equal(unownedArrow.defaultPrevented, false);
+    elements.keyboardAuthorityInstalled = () => true;
+    controller.setHidden(true);
+    const hiddenControllerArrow = elements.keyboardTarget.dispatch("keydown", {
+      key: "ArrowLeft",
+      target: elements.root,
+    });
+    assert.equal(commands.length, 3);
+    assert.equal(hiddenControllerArrow.defaultPrevented, false);
+    controller.setHidden(false);
+    controller.setAuthorityPending("disconnect");
+    const pendingArrow = elements.keyboardTarget.dispatch("keydown", {
+      key: "ArrowLeft",
+      target: elements.root,
+    });
+    assert.equal(commands.length, 3);
+    assert.equal(pendingArrow.defaultPrevented, false);
   } finally {
     unbind();
     if (originalElement) {

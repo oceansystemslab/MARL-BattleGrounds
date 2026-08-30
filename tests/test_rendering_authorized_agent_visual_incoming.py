@@ -20,9 +20,11 @@ from marl_battlegrounds.rendering.authorized_presentation import (
     AgentPovVisualIncomingAgentRespawnedEventV1,
     AgentPovVisualIncomingRecipientHealthResolutionEventV1,
     AgentPovVisualIncomingSummaryV1,
+    AuthorizedAgentV1,
     AuthorizedBattlefieldSceneV1,
     ReplayIncomingAbilityActivatedEventV1,
     ReplayIncomingActionRejectedEventV1,
+    ReplayIncomingAgentDiedEventV1,
     ReplayIncomingStatusAppliedEventV1,
     build_agent_pov_visual_incoming_summary_v1,
 )
@@ -32,6 +34,7 @@ from marl_battlegrounds.rendering.evaluation_adapter import (
 from marl_battlegrounds.rendering.scene import (
     AbilityActivatedEventV2,
     ActionRejectedEventV2,
+    AgentDiedEventV2,
     AgentRespawnedEventV2,
     ChargePhaseDisplacementEventV2,
     CombatCountdownResetEventV2,
@@ -42,6 +45,7 @@ from marl_battlegrounds.rendering.scene import (
     SourceDamageOutputEventV2,
     SourceHealingOutputEventV2,
     StatusAppliedEventV2,
+    StatusClearedByNewDeathEventV2,
     VisualAgentPhaseTrajectoryV2,
     VisualEventBatchV2,
     VisualEventV2,
@@ -168,6 +172,35 @@ def _without_agent(
     )
 
 
+def _with_overlay_agent(
+    scene: AuthorizedBattlefieldSceneV1,
+    agent: AuthorizedAgentV1,
+    *,
+    mechanics_source: AuthorizedBattlefieldSceneV1,
+) -> AuthorizedBattlefieldSceneV1:
+    overlay_agent = next(
+        row
+        for row in mechanics_source.agents
+        if row.public_agent_id == agent.public_agent_id
+    )
+    if (
+        type(agent) is not AuthorizedAgentV1
+        or type(overlay_agent) is not AuthorizedAgentV1
+    ):
+        raise TypeError("overlay test agent must use the authorized agent root")
+    agents = (*scene.agents, agent)
+    represented = {row.class_id for row in agents}
+    return replace(
+        scene,
+        agents=agents,
+        class_mechanics=tuple(
+            row
+            for row in mechanics_source.class_mechanics
+            if row.class_id in represented
+        ),
+    )
+
+
 def _build(
     case: _AgentVisualCase,
     batch: VisualEventBatchV2,
@@ -175,6 +208,10 @@ def _build(
     namespace: str = "actor-pov",
     transition_start_scene: AuthorizedBattlefieldSceneV1 | None = None,
     successor_scene: AuthorizedBattlefieldSceneV1 | None = None,
+    transition_start_corpse_choreography_scene: (
+        AuthorizedBattlefieldSceneV1 | None
+    ) = None,
+    successor_corpse_choreography_scene: AuthorizedBattlefieldSceneV1 | None = None,
 ) -> AgentPovVisualIncomingSummaryV1:
     prefix = f"{batch.episode_id}:{namespace}:{case.recipient_public_agent_id}"
     return build_agent_pov_visual_incoming_summary_v1(
@@ -187,6 +224,10 @@ def _build(
         successor_scene=(
             case.successor_scene if successor_scene is None else successor_scene
         ),
+        transition_start_corpse_choreography_scene=(
+            transition_start_corpse_choreography_scene
+        ),
+        successor_corpse_choreography_scene=(successor_corpse_choreography_scene),
         recipient_public_agent_id=case.recipient_public_agent_id,
         incoming_recipient_transition_id=(
             f"{prefix}:transition:{batch.transition_index}"
@@ -770,6 +811,170 @@ def test_agent_visual_health_result_requires_authorized_successor(
     assert recipient_row.successor is None
     assert summary.events == ()
     assert summary.event_count == 0
+
+
+def test_corpse_choreography_admits_only_death_and_its_owned_endpoint(
+    agent_visual_case: _AgentVisualCase,
+) -> None:
+    batch = agent_visual_case.batch
+    source = _trajectory(batch, 1)
+    victim = _trajectory(batch, 2)
+    successor_without_victim = _without_agent(
+        agent_visual_case.successor_scene,
+        public_agent_id=victim.public_agent_id,
+    )
+    successor_victim = next(
+        row
+        for row in agent_visual_case.successor_scene.agents
+        if row.public_agent_id == victim.public_agent_id
+    )
+    corpse = replace(
+        successor_victim,
+        life_state="corpse",
+        current_health=0.0,
+        statuses=(),
+        aura_modifiers=(),
+    )
+    corpse_successor = _with_overlay_agent(
+        successor_without_victim,
+        corpse,
+        mechanics_source=agent_visual_case.successor_scene,
+    )
+    events: tuple[VisualEventV2, ...] = (
+        AbilityActivatedEventV2(
+            event_id=_event_id(batch, 0),
+            transition_id=batch.transition_id,
+            ordinal=0,
+            source_global_slot=source.global_slot,
+            ability_component="basic",
+            recipient_global_slot=victim.global_slot,
+            source_anchor=source.transition_start,
+            recipient_anchor=victim.transition_start,
+        ),
+        _recipient_health_event(batch, ordinal=1),
+        AgentDiedEventV2(
+            event_id=_event_id(batch, 2),
+            transition_id=batch.transition_id,
+            ordinal=2,
+            recipient_global_slot=victim.global_slot,
+            recipient_anchor=victim.successor,
+        ),
+        StatusClearedByNewDeathEventV2(
+            event_id=_event_id(batch, 3),
+            transition_id=batch.transition_id,
+            ordinal=3,
+            recipient_global_slot=victim.global_slot,
+            status_channel=1,
+            status_id="hunter_basic_slow",
+            recipient_anchor=victim.successor,
+        ),
+    )
+    event_batch = _with_events(batch, events)
+
+    base_only = _build(
+        agent_visual_case,
+        event_batch,
+        successor_scene=successor_without_victim,
+    )
+    lifecycle = _build(
+        agent_visual_case,
+        event_batch,
+        successor_scene=successor_without_victim,
+        transition_start_corpse_choreography_scene=(
+            agent_visual_case.transition_start_scene
+        ),
+        successor_corpse_choreography_scene=corpse_successor,
+    )
+
+    assert tuple(type(row) for row in base_only.events) == (
+        ReplayIncomingAbilityActivatedEventV1,
+    )
+    assert tuple(type(row) for row in lifecycle.events) == (
+        ReplayIncomingAbilityActivatedEventV1,
+        ReplayIncomingAgentDiedEventV1,
+    )
+    assert lifecycle.events[0] == base_only.events[0]
+    victim_trajectory = next(
+        row
+        for row in lifecycle.agent_phase_trajectories
+        if row.agent_public_agent_id == victim.public_agent_id
+    )
+    assert victim_trajectory.transition_start is not None
+    assert victim_trajectory.successor is not None
+    assert victim_trajectory.successor.position == corpse.position
+    death = lifecycle.events[1]
+    assert type(death) is ReplayIncomingAgentDiedEventV1
+    assert death.recipient_anchor == victim_trajectory.successor
+    assert "recipient_health_resolution" not in lifecycle.ordered_event_kinds
+    assert "status_cleared_by_new_death" not in lifecycle.ordered_event_kinds
+
+
+def test_persistent_corpse_overlay_does_not_create_causal_trajectory(
+    agent_visual_case: _AgentVisualCase,
+) -> None:
+    batch = _with_events(agent_visual_case.batch, ())
+    hidden = _trajectory(batch, 2)
+    start_without = _without_agent(
+        agent_visual_case.transition_start_scene,
+        public_agent_id=hidden.public_agent_id,
+    )
+    successor_without = _without_agent(
+        agent_visual_case.successor_scene,
+        public_agent_id=hidden.public_agent_id,
+    )
+    start_agent = next(
+        row
+        for row in agent_visual_case.transition_start_scene.agents
+        if row.public_agent_id == hidden.public_agent_id
+    )
+    successor_agent = next(
+        row
+        for row in agent_visual_case.successor_scene.agents
+        if row.public_agent_id == hidden.public_agent_id
+    )
+    lifecycle_start = _with_overlay_agent(
+        start_without,
+        replace(
+            start_agent,
+            life_state="corpse",
+            current_health=0.0,
+            statuses=(),
+            aura_modifiers=(),
+        ),
+        mechanics_source=agent_visual_case.transition_start_scene,
+    )
+    lifecycle_successor = _with_overlay_agent(
+        successor_without,
+        replace(
+            successor_agent,
+            life_state="corpse",
+            current_health=0.0,
+            statuses=(),
+            aura_modifiers=(),
+        ),
+        mechanics_source=agent_visual_case.successor_scene,
+    )
+
+    base = _build(
+        agent_visual_case,
+        batch,
+        transition_start_scene=start_without,
+        successor_scene=successor_without,
+    )
+    lifecycle = _build(
+        agent_visual_case,
+        batch,
+        transition_start_scene=start_without,
+        successor_scene=successor_without,
+        transition_start_corpse_choreography_scene=lifecycle_start,
+        successor_corpse_choreography_scene=lifecycle_successor,
+    )
+
+    assert lifecycle == base
+    assert all(
+        row.agent_public_agent_id != hidden.public_agent_id
+        for row in lifecycle.agent_phase_trajectories
+    )
 
 
 def test_agent_visual_rejects_visible_scene_trajectory_mismatch(

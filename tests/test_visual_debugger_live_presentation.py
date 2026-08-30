@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 from inspect import signature
 from pathlib import Path
@@ -143,7 +144,18 @@ def test_live_frame_zero_presentation_is_exact_and_repeatable(view_mode: str) ->
     else:
         assert type(payload) is LiveNoSharedObsAuthorizedPresentationFrameV1
         assert payload.technical_frame.incoming_recipient_transition_id is None
-        local_encoded = payload.model_dump_json(exclude={"researcher_space"})
+        local_payload = payload.model_dump(
+            mode="json",
+            exclude={"researcher_space"},
+        )
+        corpse_overlay = cast(
+            dict[str, object],
+            local_payload.pop("local_oracle_corpse_overlay"),
+        )
+        assert corpse_overlay["overlay_kind"] == "local_oracle_corpse_overlay"
+        assert corpse_overlay["source_frame_id"] == before_raw.frame_id
+        assert corpse_overlay["source_authority_epoch"] == before_revision
+        local_encoded = json.dumps(local_payload, sort_keys=True)
         assert ":frame:0" in local_encoded
         assert "oracle_" not in local_encoded
         researcher = payload.researcher_space
@@ -212,7 +224,15 @@ def test_live_nonzero_oracle_and_no_shared_enter_exact_same_transition() -> None
         pov.latest_transition.action_rows[0].actor_public_agent_id
         == pov.source.source_recipient_public_agent_id
     )
-    assert "oracle_" not in pov.model_dump_json(exclude={"researcher_space"})
+    local_payload = pov.model_dump(mode="json", exclude={"researcher_space"})
+    corpse_overlay = cast(
+        dict[str, object],
+        local_payload.pop("local_oracle_corpse_overlay"),
+    )
+    assert corpse_overlay["overlay_kind"] == "local_oracle_corpse_overlay"
+    assert corpse_overlay["source_frame_id"] == incoming.successor_frame.frame_id
+    assert corpse_overlay["source_authority_epoch"] == pov.source.source_authority_epoch
+    assert "oracle_" not in json.dumps(local_payload, sort_keys=True)
     assert pov.researcher_space.latest_transition == oracle.latest_transition
     assert pov.researcher_space.pending_joint_action == oracle.pending_joint_action
     assert (
@@ -889,6 +909,13 @@ def test_live_public_builders_derive_epoch_and_reject_cross_audience_inputs() ->
             current_slice,
             None,
             raw,  # pyright: ignore[reportArgumentType]
+            global_context=pov_session.evaluation_context,
+            current_global_frame=pov_session.current_evaluation_frame,
+            previous_global_frame=(
+                None
+                if pov_session.incoming_evaluation_view is None
+                else pov_session.incoming_evaluation_view.start_frame
+            ),
             public_catalog=pov_session.evaluation_context.static_mechanics_catalog,
             incoming_visual_events=None,
             researcher_space=build_live_researcher_space_v1(
@@ -925,6 +952,13 @@ def test_live_no_shared_builder_requires_exact_adjacent_carrier() -> None:
             current_slice,
             None,
             raw,
+            global_context=session.evaluation_context,
+            current_global_frame=session.current_evaluation_frame,
+            previous_global_frame=(
+                None
+                if session.incoming_evaluation_view is None
+                else session.incoming_evaluation_view.start_frame
+            ),
             public_catalog=session.evaluation_context.static_mechanics_catalog,
             incoming_visual_events=build_visual_event_batch_v2(
                 cast(
@@ -943,6 +977,9 @@ def test_live_no_shared_builder_requires_exact_adjacent_carrier() -> None:
         current_slice,
         carrier,
         raw,
+        global_context=session.evaluation_context,
+        current_global_frame=session.current_evaluation_frame,
+        previous_global_frame=session.incoming_evaluation_view.start_frame,
         public_catalog=session.evaluation_context.static_mechanics_catalog,
         incoming_visual_events=build_visual_event_batch_v2(
             session.incoming_evaluation_view

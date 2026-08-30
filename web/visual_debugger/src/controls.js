@@ -340,6 +340,7 @@ function pointInSvg(svg, event) {
  *   onReleaseFocus: () => void,
  *   isInteractive?: () => boolean,
  *   onFencedCommand?: (command: Record<string, unknown>) => boolean,
+ *   ownsFencedSpaceDefault?: () => boolean,
  * }} bindings
  */
 export function bindBattlefieldControls({
@@ -351,6 +352,7 @@ export function bindBattlefieldControls({
   onReleaseFocus,
   isInteractive = () => true,
   onFencedCommand = () => false,
+  ownsFencedSpaceDefault = () => true,
 }) {
   battlefield.addEventListener("keydown", async (event) => {
     if (event.target !== battlefield || !isDebuggerKey(event)) {
@@ -360,7 +362,7 @@ export function bindBattlefieldControls({
       if (onFencedCommand(keyboardCommandFromEvent(event))) {
         event.preventDefault();
         event.stopPropagation();
-      } else if (event.key === " ") {
+      } else if (event.key === " " && ownsFencedSpaceDefault()) {
         event.preventDefault();
       }
       return;

@@ -498,7 +498,10 @@ test("all nine durable statuses preserve exact facts across audience and source 
       "Agent ID recipient:<unsafe>&42 · Priest · Team B",
     );
     assert.equal(rowValue(absent, "Source"), "Unavailable in this artifact");
-    assert.equal(rowValue(pov, "Source"), "Not disclosed in Agent POV");
+    assert.equal(
+      pov.rows.some((row) => row.label === "Source"),
+      false,
+    );
     assert.equal(
       rowValue(pov, "Recipient"),
       "Agent ID recipient:<unsafe>&42 · Priest · Team B",
@@ -509,7 +512,7 @@ test("all nine durable statuses preserve exact facts across audience and source 
     );
     assert.deepEqual(
       researcher.rows.filter((row) => row.label !== "Source"),
-      pov.rows.filter((row) => row.label !== "Source"),
+      pov.rows,
     );
     assert.deepEqual(researcher.sections, []);
     assert.deepEqual(pov.sections, []);
@@ -661,7 +664,10 @@ test("POV status preserves effect facts while leaving source payloads unread", (
   assert.equal(rowValue(descriptor, "Movement Effect"), "15% slower (×0.85)");
   assert.equal(rowValue(descriptor, "Effect Duration"), "1 Tick");
   assert.equal(rowValue(descriptor, "Duration Remaining"), "1 Tick");
-  assert.equal(rowValue(descriptor, "Source"), "Not disclosed in Agent POV");
+  assert.equal(
+    descriptor.rows.some((row) => row.label === "Source"),
+    false,
+  );
   assert.equal(sourceReads, 0);
 });
 
@@ -807,7 +813,7 @@ test("spawn shield view is exact across V1/V2/unavailable and every audience", (
         ],
         ["Effect Duration", "3 Ticks"],
         ["Duration Remaining", "3 Ticks"],
-        ["Owner", owner],
+        ["Recipient", owner],
       ],
     },
     {
@@ -822,7 +828,7 @@ test("spawn shield view is exact across V1/V2/unavailable and every audience", (
         ["Movement Speed", "2"],
         ["Effect Duration", "3 Ticks"],
         ["Duration Remaining", "3 Ticks"],
-        ["Owner", owner],
+        ["Recipient", owner],
       ],
     },
     {
@@ -831,7 +837,7 @@ test("spawn shield view is exact across V1/V2/unavailable and every audience", (
       summary: null,
       rows: /** @param {string} owner */ (owner) => [
         ["Duration Remaining", "3 Ticks"],
-        ["Owner", owner],
+        ["Recipient", owner],
       ],
     },
   ];
@@ -973,11 +979,11 @@ test("five cooldown cards use canonical owners, Ultimate tokens, and exact rows"
       ticks === 0
         ? [
             ["Ultimate Status", "Ready"],
-            ["Source", canonical],
+            ["Recipient", canonical],
           ]
         : [
             ["Remaining Cooldown", `${ticks} ${ticks === 1 ? "Tick" : "Ticks"}`],
-            ["Source", canonical],
+            ["Recipient", canonical],
           ],
     );
   }
@@ -994,7 +1000,7 @@ test("five cooldown cards use canonical owners, Ultimate tokens, and exact rows"
   );
 });
 
-test("three range cards require exact owner joins and exact four-row copy", () => {
+test("three range cards require exact owner joins and one canonical Source", () => {
   for (const [kind, title] of [
     ["observation", "Observation Range"],
     [
@@ -1023,9 +1029,7 @@ test("three range cards require exact owner joins and exact four-row copy", () =
       descriptor.rows.map(({ label, value }) => [label, value]),
       [
         ["Radius", "3.14"],
-        ["Owner ID", `Agent ID ${AUTHORIZED_RECIPIENT.public_agent_id}`],
-        ["Team", "Team B"],
-        ["Class", "Priest"],
+        ["Source", "Agent ID recipient:<unsafe>&42 · Priest · Team B"],
       ],
     );
   }
@@ -1181,7 +1185,7 @@ test("aura fields use exact copy and key-plus-public-ID source joins only", () =
   }
 });
 
-test("Agent POV aura attribution is source-inert and redacts before hidden reads", () => {
+test("Agent POV aura attribution is source-inert and omits unavailable sources", () => {
   let hiddenSourceReads = 0;
   const rawField = new Proxy(
     {
@@ -1213,32 +1217,12 @@ test("Agent POV aura attribution is source-inert and redacts before hidden reads
       },
     },
   );
-  const hiddenSourceAgent = new Proxy(
-    {
-      presentation_key: "hidden:presentation:key",
-      public_agent_id: "hidden-public-id",
-      class_id: 1,
-      team_id: 1,
-    },
-    {
-      get() {
-        hiddenSourceReads += 1;
-        throw new Error("Agent POV must not read the hidden source agent");
-      },
-      getOwnPropertyDescriptor() {
-        hiddenSourceReads += 1;
-        throw new Error("Agent POV must not inspect the hidden source agent");
-      },
-      ownKeys() {
-        hiddenSourceReads += 1;
-        throw new Error("Agent POV must not enumerate the hidden source agent");
-      },
-    },
-  );
-
-  const descriptor = explainAura(rawField, hiddenSourceAgent, "agent_pov");
+  const descriptor = explainAura(rawField, null, "agent_pov");
   assert.ok(descriptor);
-  assert.equal(rowValue(descriptor, "Source"), "Not disclosed in Agent POV");
+  assert.equal(
+    descriptor.rows.some((row) => row.label === "Source"),
+    false,
+  );
   assert.equal(descriptor.id, "aura:agent-pov:mage_amplification");
   assert.doesNotMatch(
     fullText(descriptor),
@@ -1533,7 +1517,7 @@ test("POV status overflow is byte-noninterfering and discloses no source identit
   assert.equal(JSON.stringify(injected), JSON.stringify(baseline));
   assert.equal(baseline.title, "2 Hidden Statuses");
   assert.equal(baseline.rows.length, 2);
-  assert.match(fullText(baseline), /Source not disclosed in Agent POV\./u);
+  assert.doesNotMatch(fullText(baseline), /not disclosed/iu);
   assert.doesNotMatch(
     fullText(injected),
     /secret-overflow-source|secret-overflow-event|secret-overflow-accessible-name/iu,
@@ -1703,10 +1687,13 @@ test("visibility and attribution builders never manufacture slot identities", ()
     source: { x: 10, y: 10 },
   });
   assert.equal(rowValue(activation, "Source"), "Agent ID alpha/9001 · Hunter · Team A");
-  assert.equal(rowValue(activation, "Recipient"), "Not disclosed in Agent POV");
+  assert.equal(
+    activation.rows.some(({ label }) => label === "Recipient"),
+    false,
+  );
   assert.deepEqual(
     activation.rows.map(({ label }) => label),
-    ["Source", "Recipient"],
+    ["Source"],
   );
   assert.doesNotMatch(
     JSON.stringify(activation),

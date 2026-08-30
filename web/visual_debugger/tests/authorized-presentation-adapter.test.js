@@ -39,6 +39,7 @@ import {
   explainPovStatus,
   explainSpawnShield,
 } from "../src/explanations.js";
+import { resealEmptyLocalOracleCorpseOverlay } from "./authorized-presentation-test-support.js";
 
 const fixture = JSON.parse(
   readFileSync(
@@ -319,6 +320,7 @@ test("preference authority keys ignore revision, epoch, and replay cursor genera
       changed.live_inspection.source_authority_epoch =
         changed.source.source_authority_epoch;
     }
+    resealEmptyLocalOracleCorpseOverlay(changed);
     const after = await normalizeAuthorizedPresentationFrameV1(changed);
     assert.equal(
       sameAuthorizedPresentationPreferenceKey(
@@ -2125,8 +2127,8 @@ test("moving Warrior Charge activation stays a direct transition-start underlay"
   const { markerProgresses: unobstructedMarkerProgresses, ...unobstructedRoute } =
     unobstructedActivation.route;
   assert.deepEqual(activationRoute, unobstructedRoute);
-  assert.deepEqual(unobstructedMarkerProgresses, [1 / 3, 2 / 3]);
-  assert.deepEqual(activationMarkerProgresses, [3 / 4]);
+  assert.deepEqual(unobstructedMarkerProgresses, [1 / 5, 2 / 5, 3 / 5, 4 / 5]);
+  assert.deepEqual(activationMarkerProgresses, [4 / 5]);
   assert.equal(activation.route?.kind, "curve");
   assert.equal(activation.route?.offset, 0);
   assert.equal(activation.route?.lane, 0);
@@ -2918,7 +2920,7 @@ test("Oracle status compositor applies exact precedence and preserves every atom
       ),
       expected.label,
     );
-    if (expectedApplicationSources.length > 0) {
+    if (expectedApplicationSources.length > 0 && expected.lifecycle === "applied") {
       const sourceRow = explainChoreographyEvent(lifecycle).rows.find(
         (/** @type {Record<string, any>} */ row) =>
           row.label ===
@@ -2937,6 +2939,14 @@ test("Oracle status compositor applies exact precedence and preserves every atom
         },
         expected.label,
       );
+    } else if (expected.lifecycle !== "applied") {
+      const lifecycleRows = explainChoreographyEvent(lifecycle).rows;
+      assert.equal(
+        lifecycleRows.some(({ label }) => label === "Source" || label === "Sources"),
+        false,
+        expected.label,
+      );
+      assert.equal(lifecycleRows.at(-1)?.label, "Recipient", expected.label);
     }
     assertRecursivelyFrozen(lifecycle);
     if (expected.lifecycle === "applied") {
@@ -3179,6 +3189,173 @@ test("lifecycle metadata retains opaque keys without inventing source routes", a
       ...samePublicIdentity,
       recipientPresentationKey: secondIdentity.presentation_key,
     }).id,
+  );
+});
+
+test("Agent lifecycle attribution joins researcher facts without changing cue admission or geometry", async () => {
+  for (const kind of [
+    "live_no_shared_obs_agent_pov",
+    "replay_no_shared_obs_agent_pov",
+    "replay_shared_obs_agent_pov",
+  ]) {
+    const raw = structuredClone(fixture.presentations[kind]);
+    const applied = raw.visual_events.events.find(
+      (/** @type {Record<string, any>} */ event) =>
+        event.event_kind === "status_applied",
+    );
+    assert.ok(applied, kind);
+    const researcherRecipient = raw.researcher_space.roster_agents.find(
+      (/** @type {Record<string, any>} */ agent) =>
+        agent.public_agent_id === applied.recipient_anchor.public_agent_id,
+    );
+    const researcherStatus = researcherRecipient?.statuses.find(
+      (/** @type {Record<string, any>} */ status) =>
+        status.status_channel === applied.status_channel &&
+        status.status_id === applied.status_id,
+    );
+    const directSource = researcherStatus?.direct_sources.at(0);
+    const researcherSource = raw.researcher_space.roster_agents.find(
+      (/** @type {Record<string, any>} */ agent) =>
+        agent.public_agent_id === directSource?.source_public_agent_id,
+    );
+    assert.ok(researcherRecipient, kind);
+    assert.ok(researcherStatus, kind);
+    assert.ok(directSource, kind);
+    assert.ok(researcherSource, kind);
+
+    const frame = await normalizeAuthorizedPresentationFrameV1(raw);
+    const plan = buildChoreographyPlan(frame, surface);
+    const lifecycle = plan?.events.find(
+      (/** @type {Record<string, any>} */ event) => event.kind === "status_lifecycle",
+    );
+    assert.ok(lifecycle, kind);
+    assert.equal(lifecycle.lifecycle, "applied", kind);
+    assert.equal(lifecycle.applicationSources.length, 1, kind);
+    assert.equal(
+      lifecycle.applicationSources[0].sourceIdentity.presentation_key,
+      applied.source_anchor.presentation_key,
+      kind,
+    );
+    assert.equal(
+      expectedAuthorizedIdentityTitle(lifecycle.applicationSources[0].sourceIdentity),
+      expectedAuthorizedIdentityTitle(researcherSource),
+      kind,
+    );
+    assert.doesNotMatch(
+      JSON.stringify(lifecycle),
+      new RegExp(directSource.source_presentation_key, "u"),
+      kind,
+    );
+    assert.deepEqual(
+      explainChoreographyEvent(lifecycle).rows.map(({ label, value }) => [
+        label,
+        value,
+      ]),
+      [
+        ["Source", expectedAuthorizedIdentityTitle(researcherSource)],
+        ["Recipient", expectedAuthorizedIdentityTitle(researcherRecipient)],
+      ],
+      kind,
+    );
+
+    const poisonedRaw = structuredClone(raw);
+    const poisonedRecipient = poisonedRaw.researcher_space.roster_agents.find(
+      (/** @type {Record<string, any>} */ agent) =>
+        agent.public_agent_id === applied.recipient_anchor.public_agent_id,
+    );
+    const poisonedStatus = poisonedRecipient?.statuses.find(
+      (/** @type {Record<string, any>} */ status) =>
+        status.status_channel === applied.status_channel &&
+        status.status_id === applied.status_id,
+    );
+    assert.ok(poisonedStatus, kind);
+    poisonedStatus.direct_sources = [];
+    const poisonedFrame = await normalizeAuthorizedPresentationFrameV1(poisonedRaw);
+    const poisonedPlan = buildChoreographyPlan(poisonedFrame, surface);
+    const poisonedLifecycle = poisonedPlan?.events.find(
+      (/** @type {Record<string, any>} */ event) => event.kind === "status_lifecycle",
+    );
+    assert.ok(poisonedLifecycle, kind);
+    const { applicationSources: baselineSources, ...baselineCue } = lifecycle;
+    const { applicationSources: poisonedSources, ...poisonedCue } = poisonedLifecycle;
+    assert.deepEqual(poisonedCue, baselineCue, kind);
+    assert.equal(baselineSources.length, 1, kind);
+    assert.equal(poisonedSources.length, 1, kind);
+    assert.equal(poisonedSources[0].sourceIdentity, null, kind);
+    assert.deepEqual(
+      explainChoreographyEvent(poisonedLifecycle).rows.map(({ label, value }) => [
+        label,
+        value,
+      ]),
+      [["Recipient", expectedAuthorizedIdentityTitle(researcherRecipient)]],
+      kind,
+    );
+
+    const provenanceOnlyRaw = structuredClone(raw);
+    provenanceOnlyRaw.visual_events.events =
+      provenanceOnlyRaw.visual_events.events.filter(
+        (/** @type {Record<string, any>} */ event) =>
+          event.event_kind !== "status_applied",
+      );
+    provenanceOnlyRaw.visual_events.event_count =
+      provenanceOnlyRaw.visual_events.events.length;
+    provenanceOnlyRaw.visual_events.ordered_event_ids =
+      provenanceOnlyRaw.visual_events.events.map(
+        (/** @type {Record<string, any>} */ event) => event.event_id,
+      );
+    provenanceOnlyRaw.visual_events.ordered_event_kinds =
+      provenanceOnlyRaw.visual_events.events.map(
+        (/** @type {Record<string, any>} */ event) => event.event_kind,
+      );
+    const provenanceOnlyFrame =
+      await normalizeAuthorizedPresentationFrameV1(provenanceOnlyRaw);
+    const provenanceOnlyPlan = buildChoreographyPlan(provenanceOnlyFrame, surface);
+    assert.ok(provenanceOnlyPlan, kind);
+    assert.equal(
+      provenanceOnlyPlan.events.some(
+        (/** @type {Record<string, any>} */ event) => event.kind === "status_lifecycle",
+      ),
+      false,
+      kind,
+    );
+  }
+});
+
+test("same-transition Agent application and death clear stays recipient-only", async () => {
+  const raw = structuredClone(fixture.presentations.replay_no_shared_obs_agent_pov);
+  const applied = raw.visual_events.events.find(
+    (/** @type {Record<string, any>} */ event) => event.event_kind === "status_applied",
+  );
+  assert.ok(applied);
+  const ordinal = raw.visual_events.events.length;
+  const cleared = {
+    ...structuredClone(applied),
+    event_id: `${raw.visual_events.incoming_recipient_transition_id}:visual-event:${String(ordinal).padStart(4, "0")}`,
+    event_kind: "status_cleared_by_new_death",
+    ordinal,
+  };
+  delete cleared.source_anchor;
+  raw.visual_events.events.push(cleared);
+  raw.visual_events.event_count = raw.visual_events.events.length;
+  raw.visual_events.ordered_event_ids.push(cleared.event_id);
+  raw.visual_events.ordered_event_kinds.push(cleared.event_kind);
+
+  const frame = await normalizeAuthorizedPresentationFrameV1(raw);
+  const plan = buildChoreographyPlan(frame, surface);
+  const lifecycle = plan?.events.find(
+    (/** @type {Record<string, any>} */ event) => event.kind === "status_lifecycle",
+  );
+  assert.ok(lifecycle);
+  assert.equal(lifecycle.lifecycle, "cleared_by_death");
+  assert.deepEqual(lifecycle.atomicEventIds, [applied.event_id, cleared.event_id]);
+  const researcherRecipient = raw.researcher_space.roster_agents.find(
+    (/** @type {Record<string, any>} */ agent) =>
+      agent.public_agent_id === applied.recipient_anchor.public_agent_id,
+  );
+  assert.ok(researcherRecipient);
+  assert.deepEqual(
+    explainChoreographyEvent(lifecycle).rows.map(({ label, value }) => [label, value]),
+    [["Recipient", expectedAuthorizedIdentityTitle(researcherRecipient)]],
   );
 });
 

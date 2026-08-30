@@ -54,6 +54,12 @@ function semanticEventCopy(event) {
       summary: "This team respawn occurred on the incoming transition.",
     });
   }
+  if (event.cueSemantic === "health_regenerated" && Number.isFinite(event.value)) {
+    return Object.freeze({
+      title: "Health Regenerated",
+      summary: `The recipient regenerated ${formatDisplayNumber(event.value)} health while out of combat.`,
+    });
+  }
   return Object.freeze({
     title: humanizeEventName(event.eventType),
     summary: "This event occurred on the incoming transition.",
@@ -81,24 +87,27 @@ export function explainChoreographyEvent(event) {
       semanticCopy.title,
   );
   const rows = [];
-  const applicationSources = Array.isArray(visibleEvent.applicationSources)
-    ? visibleEvent.applicationSources
-    : [];
+  const applicationSources =
+    visibleEvent.lifecycle === "applied" &&
+    Array.isArray(visibleEvent.applicationSources)
+      ? visibleEvent.applicationSources
+      : [];
   const applicationSourceIdentities = applicationSources.map((source) =>
     authorizedIdentityTitle(source?.sourceIdentity),
   );
+  const distinctApplicationSourceIdentities = [...new Set(applicationSourceIdentities)];
   if (
-    applicationSourceIdentities.length > 0 &&
+    distinctApplicationSourceIdentities.length > 0 &&
     applicationSourceIdentities.every((identity) => identity !== null)
   ) {
     rows.push({
-      label: applicationSources.length === 1 ? "Source" : "Sources",
-      value: applicationSourceIdentities.join("; "),
+      label: distinctApplicationSourceIdentities.length === 1 ? "Source" : "Sources",
+      value: distinctApplicationSourceIdentities.join("; "),
       metadata: { compact: true, full: true },
     });
   }
   const directSourceIdentity =
-    applicationSources.length === 0
+    visibleEvent.kind === "activation" && applicationSources.length === 0
       ? authorizedIdentityTitle(visibleEvent.sourceIdentity)
       : null;
   const recipientIdentity = authorizedIdentityTitle(visibleEvent.recipientIdentity);
@@ -110,18 +119,6 @@ export function explainChoreographyEvent(event) {
       rows.push({
         label,
         value,
-        metadata: { compact: true, full: true },
-      });
-    }
-  }
-  for (const [label, value] of [
-    ["Actor", visibleEvent.actorPublicAgentId],
-    ["Agent", visibleEvent.agentPublicAgentId],
-  ]) {
-    if (typeof value === "string" && value.trim()) {
-      rows.push({
-        label,
-        value: formatAgentIdentity(value),
         metadata: { compact: true, full: true },
       });
     }

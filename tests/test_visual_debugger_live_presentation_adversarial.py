@@ -111,10 +111,22 @@ def test_live_no_shared_excludes_oracle_ids_and_diagnostics() -> None:
     )
     payload = result.payload.model_dump(mode="json")
     researcher_space = cast(dict[str, object], payload.pop("researcher_space"))
+    corpse_overlay = cast(
+        dict[str, object],
+        payload.pop("local_oracle_corpse_overlay"),
+    )
+    assert corpse_overlay["overlay_kind"] == "local_oracle_corpse_overlay"
+    assert corpse_overlay["source_frame_id"] == incoming.successor_frame.frame_id
+    assert corpse_overlay["source_authority_epoch"] == (
+        result.payload.source.source_authority_epoch
+    )
+    overlay_keys = _recursive_keys(corpse_overlay)
+    overlay_strings = _recursive_string_values(corpse_overlay)
     keys = _recursive_keys(payload)
     strings = _recursive_string_values(payload)
 
     assert not (strings & forbidden_values)
+    assert overlay_strings & forbidden_values == {incoming.successor_frame.frame_id}
     researcher_keys = _recursive_keys(researcher_space)
     assert not researcher_keys.intersection(
         {
@@ -151,6 +163,7 @@ def test_live_no_shared_excludes_oracle_ids_and_diagnostics() -> None:
         "successor_frame_id",
         "transition_id",
     }
+    assert not (overlay_keys & (forbidden_exact_keys - {"source_frame_id"}))
     for key in keys:
         assert key not in forbidden_exact_keys
         assert "global_slot" not in key
@@ -170,6 +183,20 @@ def test_live_no_shared_excludes_oracle_ids_and_diagnostics() -> None:
                 "authorized_endpoint_digest_sha256",
                 "source_authorized_endpoint_digest_sha256",
             }
+    for key in overlay_keys:
+        assert "global_slot" not in key
+        assert "artifact" not in key
+        assert "timeline" not in key
+        assert "metric" not in key
+        assert "completion" not in key
+        assert "processing" not in key
+        assert "canonical_" not in key
+        assert "diagnostic" not in key
+        assert "reward" not in key
+        assert "terminated" not in key
+        assert "truncated" not in key
+        if "digest" in key:
+            assert key == "authorized_overlay_digest_sha256"
 
 
 def _recipient_pair(
@@ -203,6 +230,13 @@ def test_live_no_shared_rejects_separately_valid_cross_swapped_pairs() -> None:
     _switch_to_pov(service)
     current_zero, carrier_zero, raw_zero = _recipient_pair(service)
     catalog = service.session.evaluation_context.static_mechanics_catalog
+    context_zero = service.session.evaluation_context
+    global_frame_zero = service.session.current_evaluation_frame
+    previous_global_frame_zero = (
+        None
+        if service.session.incoming_evaluation_view is None
+        else service.session.incoming_evaluation_view.start_frame
+    )
     zero_presentation = service.current_presentation()
     assert zero_presentation.outcome == "response"
     assert (
@@ -213,6 +247,9 @@ def test_live_no_shared_rejects_separately_valid_cross_swapped_pairs() -> None:
         current_zero,
         carrier_zero,
         raw_zero,
+        global_context=context_zero,
+        current_global_frame=global_frame_zero,
+        previous_global_frame=previous_global_frame_zero,
         public_catalog=catalog,
         incoming_visual_events=build_visual_event_batch_v2(
             cast(EvaluationTransitionViewV1, service.session.incoming_evaluation_view)
@@ -229,6 +266,13 @@ def test_live_no_shared_rejects_separately_valid_cross_swapped_pairs() -> None:
     )
     assert switched.outcome == "response"
     current_one, carrier_one, raw_one = _recipient_pair(service)
+    context_one = service.session.evaluation_context
+    global_frame_one = service.session.current_evaluation_frame
+    previous_global_frame_one = (
+        None
+        if service.session.incoming_evaluation_view is None
+        else service.session.incoming_evaluation_view.start_frame
+    )
     one_presentation = service.current_presentation()
     assert one_presentation.outcome == "response"
     assert (
@@ -239,6 +283,9 @@ def test_live_no_shared_rejects_separately_valid_cross_swapped_pairs() -> None:
         current_one,
         carrier_one,
         raw_one,
+        global_context=context_one,
+        current_global_frame=global_frame_one,
+        previous_global_frame=previous_global_frame_one,
         public_catalog=catalog,
         incoming_visual_events=build_visual_event_batch_v2(
             cast(EvaluationTransitionViewV1, service.session.incoming_evaluation_view)
@@ -257,6 +304,9 @@ def test_live_no_shared_rejects_separately_valid_cross_swapped_pairs() -> None:
             current_zero,
             carrier_one,
             raw_zero,
+            global_context=context_zero,
+            current_global_frame=global_frame_zero,
+            previous_global_frame=previous_global_frame_zero,
             public_catalog=catalog,
             incoming_visual_events=build_visual_event_batch_v2(
                 cast(
@@ -274,6 +324,9 @@ def test_live_no_shared_rejects_separately_valid_cross_swapped_pairs() -> None:
             current_one,
             carrier_zero,
             raw_one,
+            global_context=context_one,
+            current_global_frame=global_frame_one,
+            previous_global_frame=previous_global_frame_one,
             public_catalog=catalog,
             incoming_visual_events=build_visual_event_batch_v2(
                 cast(

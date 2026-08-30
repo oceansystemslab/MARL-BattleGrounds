@@ -476,6 +476,11 @@ class DebuggerService:
                 current_slice,
                 carrier,
                 raw_frame,
+                global_context=context,
+                current_global_frame=current,
+                previous_global_frame=(
+                    None if incoming is None else incoming.start_frame
+                ),
                 public_catalog=context.static_mechanics_catalog,
                 incoming_visual_events=(
                     None if incoming is None else build_visual_event_batch_v2(incoming)

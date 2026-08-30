@@ -1,4 +1,5 @@
 import {
+  authorizedPresentationResearcherSceneView,
   authorizedPresentationSceneView,
   isAuthorizedPresentationFrame,
 } from "./authorized-presentation-adapter.js";
@@ -226,6 +227,68 @@ function choreographyProtectedRegion(
  */
 function asArray(value) {
   return Array.isArray(value) ? value : [];
+}
+
+/** @param {unknown} value */
+function statusTokenId(value) {
+  const status = isRecord(value) ? value : {};
+  const candidate = status.token_id ?? status.status_id;
+  return typeof candidate === "string" && candidate.length > 0 ? candidate : null;
+}
+
+/** @param {unknown} value */
+function statusRemainingDuration(value) {
+  const status = isRecord(value) ? value : {};
+  const candidate = status.remaining_duration ?? status.duration;
+  return Number.isInteger(candidate) ? Number(candidate) : null;
+}
+
+/** @param {unknown} local @param {unknown} researcher */
+function sameRecordedPublicValue(local, researcher) {
+  if (Object.is(local, researcher)) return true;
+  return (
+    typeof local === "number" &&
+    Number.isFinite(local) &&
+    typeof researcher === "number" &&
+    Number.isFinite(researcher) &&
+    (local === Math.fround(researcher) || Math.fround(local) === researcher)
+  );
+}
+
+/**
+ * Require every locally disclosed public status fact to agree before using the
+ * geometry-free researcher copy for source attribution.
+ *
+ * @param {unknown} rawLocal
+ * @param {unknown} rawResearcher
+ */
+function samePublicStatusFacts(rawLocal, rawResearcher) {
+  const local = isRecord(rawLocal) ? rawLocal : null;
+  const researcher = isRecord(rawResearcher) ? rawResearcher : null;
+  if (
+    local === null ||
+    researcher === null ||
+    statusTokenId(local) !== statusTokenId(researcher) ||
+    statusRemainingDuration(local) !== statusRemainingDuration(researcher)
+  ) {
+    return false;
+  }
+  const aliases = [
+    ["status_channel", "status_channel"],
+    ["configured_duration_steps", "configured_duration_steps"],
+    ["family", "family"],
+    ["source_class_id", "source_class_id"],
+    ["source_class_name", "source_class_name"],
+    ["source_action_component", "source_action_component"],
+    ["mechanic_action_component", "source_action_component"],
+    ["magnitude_kind", "magnitude_kind"],
+    ["magnitude", "magnitude"],
+    ["breaks_on_positive_damage", "breaks_on_positive_damage"],
+  ];
+  return aliases.every(([localKey, researcherKey]) => {
+    if (local[localKey] === undefined) return true;
+    return sameRecordedPublicValue(local[localKey], researcher[researcherKey]);
+  });
 }
 
 /**
@@ -587,6 +650,8 @@ export class BattlefieldRenderer {
     this.agentByPresentationKey = new Map();
     /** @type {ReadonlyMap<number, JsonRecord>} */
     this.agentByLayoutSlot = new Map();
+    /** @type {ReadonlyMap<string, JsonRecord>} */
+    this.researcherAgentByPublicId = new Map();
 
     const map = createLayer("map", { "aria-hidden": "true" });
     const aura = createLayer("aura", { "aria-hidden": "true" });
@@ -674,6 +739,9 @@ export class BattlefieldRenderer {
         : options.visualFilterState;
     const visualPolicy = durableVisualPolicy(visualFilterState);
     const scene = frameScene(frame, options.localInspectedPresentationKey);
+    const researcherScene = isAuthorizedPresentationFrame(frame)
+      ? authorizedPresentationResearcherSceneView(frame)
+      : scene;
     const map = isRecord(scene?.map) ? scene.map : null;
     const width = finiteNumber(map?.width);
     const height = finiteNumber(map?.height);
@@ -699,6 +767,7 @@ export class BattlefieldRenderer {
         ? "The local debugger service is unavailable. Commands are not being retried."
         : "No authorized battlefield scene was returned.";
       this.transform = null;
+      this.researcherAgentByPublicId = new Map();
       return false;
     }
 
@@ -756,6 +825,11 @@ export class BattlefieldRenderer {
         )
         .map((agent) => [String(agent.presentation_key), agent]),
     );
+    this.researcherAgentByPublicId = new Map(
+      asArray(researcherScene?.agents)
+        .filter((agent) => isRecord(agent) && typeof agent.public_agent_id === "string")
+        .map((agent) => [String(agent.public_agent_id), agent]),
+    );
     renderCircleLayer(
       this.layers.aura,
       visualPolicy.showAuraFields
@@ -768,18 +842,23 @@ export class BattlefieldRenderer {
       transform,
       new Map(),
       (record) => {
-        let sourceAgent = null;
-        if (scene.audience === "researcher") {
-          const sourcePresentationKey = ownEnumerableDataValue(
-            record,
-            "source_presentation_key",
-          );
-          sourceAgent =
-            (typeof sourcePresentationKey === "string"
-              ? this.agentByPresentationKey.get(sourcePresentationKey)
-              : null) ?? null;
-        }
-        return explainAura(record, sourceAgent, scene.audience);
+        const sourcePublicAgentId = ownEnumerableDataValue(
+          record,
+          "source_public_agent_id",
+        );
+        const sourceAgent =
+          typeof sourcePublicAgentId === "string"
+            ? (this.researcherAgentByPublicId.get(sourcePublicAgentId) ?? null)
+            : null;
+        const explanationRecord =
+          sourceAgent === null
+            ? record
+            : {
+                ...record,
+                source_presentation_key: sourceAgent.presentation_key,
+                source_public_agent_id: sourceAgent.public_agent_id,
+              };
+        return explainAura(explanationRecord, sourceAgent, scene.audience);
       },
     );
     renderCircleLayer(
@@ -940,6 +1019,7 @@ export class BattlefieldRenderer {
     this.observedBodyNodes.clear();
     this.agentByPresentationKey = new Map();
     this.agentByLayoutSlot = new Map();
+    this.researcherAgentByPublicId = new Map();
     this.choreographyProtectedRects = Object.freeze([]);
     this.choreographyProtectedRectGroups = Object.freeze({
       base: Object.freeze([]),
@@ -1048,7 +1128,7 @@ export class BattlefieldRenderer {
     const marker = routeMarkerPose(geometry, 1);
     const arrow = svgElement("path", {
       class: "pending-route-arrow",
-      d: "M -6 -3 L 0 0 L -6 3 L -4 0 Z",
+      d: "M -13 -6 L 0 0 L -13 6 L -9 0 Z",
       transform: `translate(${marker.x} ${marker.y}) rotate(${marker.degrees})`,
       "aria-hidden": "true",
     });
@@ -1392,7 +1472,7 @@ export class BattlefieldRenderer {
           class: "pov-observed-status",
           transform: `translate(${x} ${y})`,
           role: "img",
-          "aria-label": `${token.accessibleName}, duration ${formatDisplayNumber(status.duration)} ticks; source agent identity is not disclosed`,
+          "aria-label": `${token.accessibleName}, duration ${formatDisplayNumber(status.duration)} ticks`,
           "data-token-id": token.tokenId,
           "data-duration": status.duration,
           "data-status-feature-index": status.status_feature_index,
@@ -1432,12 +1512,16 @@ export class BattlefieldRenderer {
         }
         registerTooltipOwner(
           cell,
-          explainPovStatus(status, {
-            presentation_key: body.presentation_key,
-            public_agent_id: body.public_agent_id,
-            class_id: body.class_id,
-            team_id: body.team_id,
-          }),
+          this.#explainStatus(
+            status,
+            {
+              presentation_key: body.presentation_key,
+              public_agent_id: body.public_agent_id,
+              class_id: body.class_id,
+              team_id: body.team_id,
+            },
+            "agent_pov",
+          ),
         );
         return cell;
       });
@@ -2126,7 +2210,7 @@ export class BattlefieldRenderer {
           ownerAgent,
         )
       : audience === "agent_pov"
-        ? explainPovOverflow(rawItems, ownerAgent)
+        ? this.#explainStatusOverflow(rawItems, ownerAgent, audience)
         : explainOverflow(rawItems, "status", ownerAgent, [
             ...this.agentByLayoutSlot.values(),
           ]);
@@ -2400,7 +2484,7 @@ export class BattlefieldRenderer {
       const cell = svgElement("g", {
         class: `${kind}-cell`,
         role: "img",
-        "aria-label": `${token.accessibleName}, ${accessibleValue}, ${agentIdentity(ownerAgent)}${audience === "agent_pov" && kind === "status" ? "; source agent identity is not disclosed" : ""}`,
+        "aria-label": `${token.accessibleName}, ${accessibleValue}, ${agentIdentity(ownerAgent)}`,
         "data-zone": `${kind}-cell`,
         ...displayIdentityAttributes(ownerAgent),
         "data-token": token.cssKey,
@@ -2467,7 +2551,7 @@ export class BattlefieldRenderer {
         cell,
         kind === "status"
           ? audience === "agent_pov"
-            ? explainPovStatus(item, ownerAgent)
+            ? this.#explainStatus(item, ownerAgent, audience)
             : explainStatus(item, ownerAgent, [...this.agentByLayoutSlot.values()])
           : explainModifier(item, ownerAgent),
       );
@@ -2497,7 +2581,7 @@ export class BattlefieldRenderer {
       const overflow = svgElement("g", {
         class: `${kind}-overflow`,
         role: "img",
-        "aria-label": `${placement.overflowLabel} hidden ${kind} cues for ${agentIdentity(ownerAgent)}: ${hiddenLabels.join("; ")}${audience === "agent_pov" && kind === "status" ? "; source agent identity is not disclosed" : ""}`,
+        "aria-label": `${placement.overflowLabel} hidden ${kind} cues for ${agentIdentity(ownerAgent)}: ${hiddenLabels.join("; ")}`,
         "data-zone": `${kind}-overflow`,
         ...displayIdentityAttributes(ownerAgent),
         "data-hidden-count": placement.hiddenCount,
@@ -2506,7 +2590,7 @@ export class BattlefieldRenderer {
       registerTooltipOwner(
         overflow,
         audience === "agent_pov" && kind === "status"
-          ? explainPovOverflow(placement.hiddenStatuses, ownerAgent)
+          ? this.#explainStatusOverflow(placement.hiddenStatuses, ownerAgent, audience)
           : explainOverflow(placement.hiddenStatuses, kind, ownerAgent, [
               ...this.agentByLayoutSlot.values(),
             ]),
@@ -2531,6 +2615,87 @@ export class BattlefieldRenderer {
       group.append(overflow);
     }
     return group;
+  }
+
+  /**
+   * Use researcher-space source provenance only after an exact public-fact
+   * join to a status already present in the fog-authorized scene.
+   *
+   * @param {unknown} rawStatus
+   * @param {JsonRecord} localRecipient
+   * @param {"researcher" | "agent_pov"} audience
+   */
+  #explainStatus(rawStatus, localRecipient, audience) {
+    if (audience !== "agent_pov") {
+      return explainStatus(rawStatus, localRecipient, [
+        ...this.agentByLayoutSlot.values(),
+      ]);
+    }
+    const publicAgentId =
+      typeof localRecipient.public_agent_id === "string"
+        ? localRecipient.public_agent_id
+        : null;
+    const researcherRecipient =
+      publicAgentId === null
+        ? null
+        : (this.researcherAgentByPublicId.get(publicAgentId) ?? null);
+    const matches = asArray(researcherRecipient?.statuses).filter((candidate) =>
+      samePublicStatusFacts(rawStatus, candidate),
+    );
+    const tooltipRecipient =
+      researcherRecipient !== null &&
+      typeof localRecipient.presentation_key === "string"
+        ? {
+            ...researcherRecipient,
+            presentation_key: localRecipient.presentation_key,
+          }
+        : null;
+    return tooltipRecipient !== null && matches.length === 1
+      ? explainStatus(matches[0], tooltipRecipient, [
+          ...this.researcherAgentByPublicId.values(),
+        ])
+      : explainPovStatus(rawStatus, localRecipient);
+  }
+
+  /**
+   * @param {ReadonlyArray<unknown>} rawStatuses
+   * @param {JsonRecord} localRecipient
+   * @param {"researcher" | "agent_pov"} audience
+   */
+  #explainStatusOverflow(rawStatuses, localRecipient, audience) {
+    if (audience !== "agent_pov") {
+      return explainOverflow(rawStatuses, "status", localRecipient, [
+        ...this.agentByLayoutSlot.values(),
+      ]);
+    }
+    const publicAgentId =
+      typeof localRecipient.public_agent_id === "string"
+        ? localRecipient.public_agent_id
+        : null;
+    const researcherRecipient =
+      publicAgentId === null
+        ? null
+        : (this.researcherAgentByPublicId.get(publicAgentId) ?? null);
+    const researcherStatuses = asArray(researcherRecipient?.statuses);
+    const joined = rawStatuses.map((status) => {
+      const matches = researcherStatuses.filter((candidate) =>
+        samePublicStatusFacts(status, candidate),
+      );
+      return matches.length === 1 ? matches[0] : null;
+    });
+    const tooltipRecipient =
+      researcherRecipient !== null &&
+      typeof localRecipient.presentation_key === "string"
+        ? {
+            ...researcherRecipient,
+            presentation_key: localRecipient.presentation_key,
+          }
+        : null;
+    return tooltipRecipient !== null && joined.every((status) => status !== null)
+      ? explainOverflow(joined, "status", tooltipRecipient, [
+          ...this.researcherAgentByPublicId.values(),
+        ])
+      : explainPovOverflow(rawStatuses, localRecipient);
   }
 
   /**

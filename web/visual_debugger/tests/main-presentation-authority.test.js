@@ -429,7 +429,7 @@ test("main scopes one non-caching preference record to the certified authority t
   assert.doesNotMatch(controller, /\bnew Map\s*\(/u);
   assert.match(
     install,
-    /authorizedPresentationPreferenceKey\(joined\.presentation\)[\s\S]*installActivePresentationPreference\(joined\.presentation, preferenceKey\)/u,
+    /authorizedPresentationPreferenceKey\(joined\.presentation\)[\s\S]*installActivePresentationPreference\(joined\.presentation, preferenceKey, \{[\s\S]*previousAuthority: state\.authority,[\s\S]*nextAuthority: joined/u,
   );
   assert.match(controller, /sameAuthorizedPresentationPreferenceKey\(/u);
   assert.match(
@@ -589,6 +589,14 @@ test("main shares the Agent Details latch and rejects stale local keys and focus
     source,
     /retainLiveAgentPreferences[\s\S]*Object\.entries\(previousPreference\.disclosures\)/u,
   );
+  assert.match(
+    source,
+    /retainReplayAgentPreferences[\s\S]*isReplayAgentRecipientRotation\(previousAuthority, nextAuthority\)[\s\S]*\(retainLiveAgentPreferences \|\| retainReplayAgentPreferences\)[\s\S]*agentDetailsAutoOpenAllowed/u,
+  );
+  assert.match(
+    source,
+    /function stageReplayRecipientActivation\([\s\S]*sourcePreferenceGeneration: presentationPreferenceGeneration[\s\S]*recipientPublicAgentId: publicAgentId[\s\S]*autoOpenAgentDetails/u,
+  );
   assert.match(source, /let agentLocalRangesVisible = true;/u);
   assert.match(source, /let agentLocalRangesInitialized = false;/u);
   assert.match(
@@ -679,6 +687,13 @@ test("main resolves one certified activation to Oracle, live-local, or Replay PO
   assert.match(resolver, /effect: "local_inspection"/u);
   assert.match(resolver, /effect: "replay_select"/u);
   assert.match(resolver, /effect: "live_control"/u);
+  assert.match(resolver, /audience === "agent_pov" && agent\.life_state === "corpse"/u);
+  const corpseInspection = resolver.indexOf('agent.life_state === "corpse"');
+  const replaySwitch = resolver.indexOf("if (replayPovSwitch)");
+  assert.notEqual(corpseInspection, -1);
+  assert.notEqual(replaySwitch, -1);
+  assert.ok(corpseInspection < replaySwitch);
+  assert.doesNotMatch(resolver, /isLocalOracleCorpsePresentationKey/u);
   assert.match(
     resolver,
     /audience === "agent_pov"[\s\S]*authorizedOracleCommandSlotForPublicAgentId\([\s\S]*researcherInspectionState\.state_kind === "live_editable"/u,
@@ -709,7 +724,15 @@ test("main resolves one certified activation to Oracle, live-local, or Replay PO
   );
   assert.match(
     source,
+    /activation\.effect === "local_inspection"[\s\S]*activation\.agent\.life_state !== "corpse"[\s\S]*return true;/u,
+  );
+  assert.match(
+    source,
     /"pointerdown"[\s\S]*authorizedAgentActivationFromTarget\(event\.target\)[\s\S]*stopImmediatePropagation\(\)[\s\S]*true,/u,
+  );
+  assert.match(
+    source,
+    /const inspectionOnlyCorpse =[\s\S]*activation\?\.effect === "local_inspection"[\s\S]*!inspectionOnlyCorpse[\s\S]*event\.shiftKey/u,
   );
   assert.match(
     source,
@@ -834,13 +857,14 @@ test("battlefield delegation leaves nested scientific owners and terminal frames
   );
   assert.match(
     controlsSource,
-    /if \(!isInteractive\(\)\) \{[\s\S]*?if \(event\.key === " "\) \{[\s\S]*?event\.preventDefault\(\);[\s\S]*?return;/u,
+    /if \(!isInteractive\(\)\) \{[\s\S]*?event\.key === " " && ownsFencedSpaceDefault\(\)[\s\S]*?event\.preventDefault\(\);[\s\S]*?return;/u,
   );
   assert.match(
     mainSource,
     /function liveBattlefieldCommandsInteractive\(\)[\s\S]*!isTerminal\(state\.frame\)/u,
   );
   assert.match(mainSource, /isInteractive: liveBattlefieldCommandsInteractive/u);
+  assert.match(mainSource, /ownsFencedSpaceDefault: \(\) => !isReplayMode\(\)/u);
   assert.match(
     mainSource,
     /const tooltipOwner = event\.target\.closest\("\[data-tooltip-owner\]"\);[\s\S]*tooltipOwner !== agent[\s\S]*stopImmediatePropagation\(\)/u,
@@ -1163,8 +1187,13 @@ test("playback controller owns the first installed-successor render", async () =
   );
   assert.match(
     source,
+    /keyboardAuthorityInstalled: \(\) => installedPresentationAuthority\(\) !== null/u,
+  );
+  assert.match(
+    source,
     /keyboardEnabled: \(\) => installedPresentationAuthority\(\) !== null && !state\.busy/u,
   );
+  assert.match(source, /ownsFencedSpaceDefault: \(\) => !isReplayMode\(\)/u);
   assert.match(
     source,
     /function replayTimelineRenderState\(playback\)[\s\S]*!state\.busy[\s\S]*REPLAY_TRANSPORT_STATES\.OFFLINE[\s\S]*transportState: REPLAY_TRANSPORT_STATES\.ADVANCING/u,

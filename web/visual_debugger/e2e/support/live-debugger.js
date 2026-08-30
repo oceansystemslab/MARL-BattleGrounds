@@ -76,11 +76,13 @@ export function startDebugger({ scenario, extraArgs = [] } = {}) {
 }
 
 /**
- * Start the fixed one-frame scripted DebuggerService used only by browser
- * causal tests. This bypasses neither the real HTTP server nor service logic,
- * and deliberately adds no scenario option to the public launcher.
+ * Start a registered scripted DebuggerService used only by browser causal
+ * tests. This bypasses neither the real HTTP server nor service logic, and
+ * deliberately adds no scenario option to the public launcher.
+ *
+ * @param {{scenario?: string}} options
  */
-export function startScriptedDebugger() {
+export function startScriptedDebugger({ scenario = "aura_crossfire" } = {}) {
   return startDebuggerProcess([
     "run",
     "python",
@@ -88,6 +90,8 @@ export function startScriptedDebugger() {
     SCRIPTED_DEBUGGER_HARNESS,
     "--port",
     "0",
+    "--scenario",
+    scenario,
   ]);
 }
 

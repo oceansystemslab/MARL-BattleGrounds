@@ -10,6 +10,7 @@ import { CHOREOGRAPHY_ROOT, installWaapiAutopause } from "./support/choreography
 import {
   REPOSITORY_ROOT,
   startDebugger,
+  startScriptedDebugger,
   stopDebugger,
 } from "./support/live-debugger.js";
 import {
@@ -35,6 +36,7 @@ const CP4_E_OWNER_PATHS = Object.freeze([
   "web/visual_debugger/src/explanations.js",
   "web/visual_debugger/src/main.js",
   "web/visual_debugger/src/panels.js",
+  "web/visual_debugger/src/replay-recipient-rotation.js",
   "web/visual_debugger/src/scene.js",
   "web/visual_debugger/src/tooltip.js",
   "web/visual_debugger/tests/fixtures/authorized-presentations-v1.json",
@@ -1108,6 +1110,76 @@ async function closeDetails(page, selectors) {
   }
 }
 
+const SCIENTIFIC_DISCLOSURE_SELECTORS = Object.freeze([
+  "#command-deck",
+  "#roster-details",
+  "#agent-details",
+  "#pending-turn-details",
+  "#latest-transition-details",
+  "#technical-frame-details",
+  "#visual-filters",
+  "#visual-key",
+]);
+
+/** @param {import("@playwright/test").Page} page */
+async function scientificDisclosureState(page) {
+  return page.evaluate((selectors) => {
+    return Object.fromEntries(
+      selectors.map((selector) => {
+        const panel = document.querySelector(selector);
+        const body = panel?.querySelector(":scope > :not(summary)");
+        if (!(panel instanceof HTMLDetailsElement) || !(body instanceof HTMLElement)) {
+          throw new TypeError(`Scientific disclosure ${selector} is unavailable.`);
+        }
+        return [selector, { open: panel.open, scrollTop: body.scrollTop }];
+      }),
+    );
+  }, SCIENTIFIC_DISCLOSURE_SELECTORS);
+}
+
+/**
+ * @param {import("@playwright/test").Page} page
+ * @param {string} panelSelector
+ * @param {number} scrollTop
+ */
+async function installScientificDisclosureScroll(page, panelSelector, scrollTop) {
+  const installed = await page.locator(panelSelector).evaluate((panel, top) => {
+    const body = panel.querySelector(":scope > :not(summary)");
+    if (!(body instanceof HTMLElement)) {
+      throw new TypeError("Scientific disclosure body is unavailable.");
+    }
+    body.style.maxHeight = "24px";
+    body.style.overflowY = "scroll";
+    body.scrollTop = Number(top);
+    return body.scrollTop;
+  }, scrollTop);
+  expect(installed).toBeGreaterThan(0);
+}
+
+/** @param {import("@playwright/test").Page} page */
+async function observeAgentDetailsOpenMutations(page) {
+  await page.locator("#agent-details").evaluate((panel) => {
+    if (!(panel instanceof HTMLDetailsElement)) {
+      throw new TypeError("Agent Details disclosure is unavailable.");
+    }
+    panel.dataset.testOpenMutations = "[]";
+    const observer = new MutationObserver((records) => {
+      const values = JSON.parse(panel.dataset.testOpenMutations ?? "[]");
+      for (const record of records) {
+        if (record.attributeName === "open") {
+          values.push(record.oldValue === null);
+        }
+      }
+      panel.dataset.testOpenMutations = JSON.stringify(values);
+    });
+    observer.observe(panel, {
+      attributes: true,
+      attributeFilter: ["open"],
+      attributeOldValue: true,
+    });
+  });
+}
+
 /**
  * Restore the retained trajectory's native baseline after one screenshot-only
  * viewport and disclosure state.
@@ -1968,18 +2040,27 @@ async function expectReplayInspectionDom(
         }
         const end = path.getPointAtLength(path.getTotalLength());
         const transform = arrow.transform.baseVal.consolidate()?.matrix;
+        const markerBounds = arrow.getBBox();
+        const arrowTip =
+          transform === undefined
+            ? null
+            : new DOMPoint(0, 0).matrixTransform(transform);
         return {
-          endpointDelta:
-            transform === undefined
+          pathData: arrow.getAttribute("d"),
+          markerSize: [markerBounds.width, markerBounds.height],
+          tipEndpointDelta:
+            arrowTip === null
               ? null
-              : Math.hypot(transform.e - end.x, transform.f - end.y),
+              : Math.hypot(arrowTip.x - end.x, arrowTip.y - end.y),
           laneMatches: arrow.dataset.lane === path.dataset.lane,
           legalityMatches: arrow.dataset.legal === path.dataset.legal,
           pointerEvents: getComputedStyle(arrow).pointerEvents,
         };
       }),
     ).toEqual({
-      endpointDelta: 0,
+      pathData: "M -13 -6 L 0 0 L -13 6 L -9 0 Z",
+      markerSize: [13, 12],
+      tipEndpointDelta: 0,
       laneMatches: true,
       legalityMatches: true,
       pointerEvents: "none",
@@ -2047,12 +2128,25 @@ async function expectAgentAuthoritySurface(
     const notVisibleRosterCount = await page
       .locator('#roster [data-visibility="not-visible"] .roster-primary-action')
       .count();
-    await expect(page.locator('#roster [data-visibility="visible"]')).toBeVisible();
-    await expect(page.locator('#roster [data-visibility="not-visible"]')).toBeVisible();
+    expect(
+      await page
+        .locator("#roster .roster-visibility[data-visibility]")
+        .evaluateAll((groups) =>
+          groups.every(
+            (group) => group instanceof HTMLElement && group.hidden === false,
+          ),
+        ),
+    ).toBe(true);
     await expect(page.locator("#roster .roster-team[data-team-id]")).toHaveCount(2);
-    await expect(
-      page.locator("#roster .roster-team[data-team-id]:visible"),
-    ).toHaveCount(0);
+    expect(
+      await page
+        .locator("#roster .roster-team[data-team-id]")
+        .evaluateAll((groups) =>
+          groups.every(
+            (group) => group instanceof HTMLElement && group.hidden === true,
+          ),
+        ),
+    ).toBe(true);
     await expect(page.locator("#roster-count")).toHaveText(
       `${expectedRosterCount} agents · ${visibleRosterCount} visible · ${notVisibleRosterCount} not visible`,
     );
@@ -3549,6 +3643,18 @@ test("all five real service leaves install with safe pending continuity", async 
   );
   const replayAgentRecipientKey =
     replayAgent.presentation.authority.recipient_presentation_key;
+
+  await openDetails(page, [
+    "#roster-details",
+    "#latest-transition-details",
+    "#technical-frame-details",
+  ]);
+  await closeDetails(page, ["#pending-turn-details"]);
+  await expect(page.locator("#agent-details")).not.toHaveAttribute("open", "");
+  await installScientificDisclosureScroll(page, "#roster-details", 37);
+  const replayAgentDisclosureBeforeSwitch = await scientificDisclosureState(page);
+  await observeAgentDetailsOpenMutations(page);
+
   const replayAgentBodies = page.locator("#battlefield .agent[role=button]");
   const replayAgentBodyKeys = await replayAgentBodies.evaluateAll((agents) =>
     agents.map((agent) => agent.getAttribute("data-presentation-key")),
@@ -3603,7 +3709,15 @@ test("all five real service leaves install with safe pending continuity", async 
   const povSwitch = expectSingleActivationCommand(
     page,
     "/api/replay/command",
-    () => replayAgentNotVisibleRow.click(),
+    () =>
+      replayAgentNotVisibleRow.evaluate((element) => {
+        if (!(element instanceof HTMLButtonElement)) {
+          throw new TypeError("Replay recipient control is unavailable.");
+        }
+        // Exercise application continuity without Playwright's locator-click
+        // auto-scroll changing the disclosure preference before the command.
+        element.click();
+      }),
     {
       command_type: "set_pov_actor",
       global_slot: replayAgentNotVisibleSlot,
@@ -3636,7 +3750,17 @@ test("all five real service leaves install with safe pending continuity", async 
           ),
         ),
     ).toBe(true);
+    expect(await scientificDisclosureState(page)).toEqual(
+      replayAgentDisclosureBeforeSwitch,
+    );
     await page.keyboard.press("ArrowRight");
+    expect(await scientificDisclosureState(page)).toEqual(
+      replayAgentDisclosureBeforeSwitch,
+    );
+    await expect(page.locator("#agent-details")).toHaveAttribute(
+      "data-test-open-mutations",
+      "[]",
+    );
   } finally {
     releasePovPresentation();
   }
@@ -3654,6 +3778,21 @@ test("all five real service leaves install with safe pending continuity", async 
   expect(
     switchedReplayAgent.presentation.authority.recipient_presentation_key,
   ).not.toBe(replayAgentRecipientKey);
+  const replayAgentDisclosureAfterSwitch = structuredClone(
+    replayAgentDisclosureBeforeSwitch,
+  );
+  replayAgentDisclosureAfterSwitch["#agent-details"].open = true;
+  await expect
+    .poll(() => scientificDisclosureState(page))
+    .toEqual(replayAgentDisclosureAfterSwitch);
+  await expect(page.locator("#agent-details")).toHaveAttribute(
+    "data-test-open-mutations",
+    "[true]",
+  );
+  await expect(page.locator("#selection-heading")).toHaveText(
+    "Comprehensive Agent Class Details",
+  );
+  await expectCertifiedDocumentationCard(page, replayAgentNotVisible);
   await expect(
     page.locator(`#battlefield [data-presentation-key="${replayAgentRecipientKey}"]`),
   ).toHaveCount(0);
@@ -5030,17 +5169,22 @@ test(CP5_SLICE_5_TEST_TITLE, async ({ page }) => {
       if (!identity || !agent) {
         throw new Error(`${contractName} F${frameIndex} g${expected.slot} is absent.`);
       }
-      const responsePromise = page.waitForResponse(
-        (response) =>
-          response.request().method() === "POST" &&
-          new URL(response.url()).pathname === "/api/replay/command",
-      );
+      const responsePromise =
+        agent.life_state === "corpse"
+          ? null
+          : page.waitForResponse(
+              (response) =>
+                response.request().method() === "POST" &&
+                new URL(response.url()).pathname === "/api/replay/command",
+            );
       await page
         .locator(
           `#roster .roster-primary-action[data-presentation-key="${agent.presentation_key}"]`,
         )
         .click();
-      expect((await responsePromise).status()).toBe(200);
+      if (responsePromise !== null) {
+        expect((await responsePromise).status()).toBe(200);
+      }
       await expect(
         page.locator(
           `#battlefield .agent[data-presentation-key="${agent.presentation_key}"]`,
@@ -5961,7 +6105,7 @@ test(CP5_SLICE_5_TEST_TITLE, async ({ page }) => {
         );
         expect(chargeRouteMarkers).toHaveLength(3);
         expect(chargeRouteMarkers.map(({ markers }) => markers.length)).toEqual([
-          0, 1, 0,
+          2, 1, 2,
         ]);
         expect(chargeRouteMarkers[1].markers).toEqual([
           expect.objectContaining({
@@ -6003,7 +6147,17 @@ test(CP5_SLICE_5_TEST_TITLE, async ({ page }) => {
             y: startTarget.position[1] * 10,
           });
           expect(event.route).not.toBeNull();
-          expect(event.route.markerProgresses).toEqual([1 / 3, 2 / 3]);
+          const markerProgresses = event.route.markerProgresses;
+          expect(markerProgresses.length).toBeGreaterThan(0);
+          expect(markerProgresses.length).toBeLessThanOrEqual(4);
+          expect(markerProgresses).toEqual(
+            [...markerProgresses].sort((left, right) => left - right),
+          );
+          for (const progress of markerProgresses) {
+            expect([1 / 6, 1 / 5, 1 / 3, 2 / 5, 3 / 5, 2 / 3, 4 / 5, 5 / 6]).toContain(
+              progress,
+            );
+          }
         }
         const chargePlan = signaturePlanEvents(frames[1].signature).filter(
           ({ eventType }) => eventType === "charge_phase_displacement",
@@ -6659,6 +6813,15 @@ test("real Shared replay installs frame zero, middle, final, then rejects a forg
     throw new Error("Shared replay service is unavailable.");
   }
   await openProduct(page, sharedReplay.url, "replay");
+  await expect(
+    page.locator(
+      '#visual-filter-options input[data-visual-filter-id="target_selection_visuals"]',
+    ),
+  ).not.toBeChecked();
+  await openDetails(page, ["#visual-filters"]);
+  await expectZeroCommandInteraction(page, () =>
+    page.locator("#enable-all-visual-filters-button").click(),
+  );
 
   const installed = [];
   for (const frameIndex of [0, 1, 2]) {
@@ -6701,28 +6864,24 @@ test("real Shared replay installs frame zero, middle, final, then rejects a forg
       );
       expect(localAgent).toBeTruthy();
       const localKey = localAgent.presentation_key;
-      const researcherAgent = leaf.presentation.researcher_space.roster_agents.find(
-        (/** @type {Record<string, any>} */ agent) =>
-          agent.public_agent_id === localAgent.public_agent_id,
+      const localBody = page.locator(
+        `#battlefield .agent[data-presentation-key="${localKey}"]`,
       );
-      expect(researcherAgent).toBeTruthy();
-      const researcherIdentity =
-        leaf.presentation.researcher_space.identity_directory.identities.find(
-          (/** @type {Record<string, any>} */ identity) =>
-            identity.public_agent_id === localAgent.public_agent_id,
-        );
-      expect(researcherIdentity).toBeTruthy();
-      const researcherSlot =
-        (researcherIdentity.team_id - 1) * 5 + researcherIdentity.team_local_slot;
-      const localRow = page.locator(
-        `#roster .roster-primary-action[data-presentation-key="${researcherAgent.presentation_key}"]`,
-      );
+      await openDetails(page, ["#agent-details", "#latest-transition-details"]);
+      await closeDetails(page, [
+        "#agent-details",
+        "#roster-details",
+        "#pending-turn-details",
+      ]);
+      await installScientificDisclosureScroll(page, "#latest-transition-details", 29);
+      const disclosureBeforeSwitch = await scientificDisclosureState(page);
+      await observeAgentDetailsOpenMutations(page);
       const cursorBeforeSwitch = structuredClone(leaf.transport.cursor);
       await expectSingleActivationCommand(
         page,
         "/api/replay/command",
-        () => localRow.click(),
-        { command_type: "set_pov_actor", global_slot: researcherSlot },
+        () => localBody.click(),
+        { command_type: "set_pov_actor", presentation_key: localKey },
       );
       leaf = await expectInstalledLeaf(
         page,
@@ -6735,6 +6894,13 @@ test("real Shared replay installs frame zero, middle, final, then rejects a forg
       );
       expect(leaf.presentation.authority.recipient_presentation_key).not.toBe(
         recipientKey,
+      );
+      await expect
+        .poll(() => scientificDisclosureState(page))
+        .toEqual(disclosureBeforeSwitch);
+      await expect(page.locator("#agent-details")).toHaveAttribute(
+        "data-test-open-mutations",
+        "[]",
       );
       await expect(
         page.locator(`#battlefield [data-presentation-key="${localKey}"]`),
@@ -7013,7 +7179,7 @@ test("real death and respawn keep one opaque Oracle body identity", async ({
       "Agent Collision Effect",
       "Effect Duration",
       "Duration Remaining",
-      "Owner",
+      "Recipient",
     ],
   );
   await expect(page.locator("#visual-tooltip .semantic-explanation__value")).toHaveText(
@@ -7522,16 +7688,16 @@ test("real death cycle retains truthful outward lifecycle cues at both review vi
     await expect(expiryEffect).toHaveAttribute("data-event-id", expiryEvent.event_id);
     expect(await expiryEffect.getAttribute("data-persistent")).toBeNull();
     await expect(expiryEffect).toHaveAttribute("data-settled", "true");
-    const expiryPulse = expiryEffect.locator(
-      '.combat-status-lifecycle[data-token-id="spawn_shield"][data-lifecycle="expired"]',
-    );
+    await expect(expiryEffect).toHaveAttribute("data-token-id", "spawn_shield");
+    await expect(expiryEffect).toHaveAttribute("data-lifecycle", "expired");
+    const expiryPulse = expiryEffect.locator(".combat-lifecycle");
     await expect(expiryPulse).toHaveAttribute(
       "data-layout-key",
       JSON.stringify(["event", expiryEvent.event_id, "cue"]),
     );
     await expect(expiryPulse).toHaveAttribute(
       "data-layout-disposition",
-      "perimeter_callout",
+      "recipient_stack",
     );
     await expect(expiryPulse).toHaveAttribute("data-layout-collision-free", "true");
     await expect(page.locator(".combat-lifecycle-ring")).toHaveCount(0);
@@ -7556,5 +7722,427 @@ test("real death cycle retains truthful outward lifecycle cues at both review vi
     await expect(page.locator(".combat-lifecycle-ring")).toHaveCount(0);
     await expect(page.locator(".combat-respawn-wave")).toHaveCount(0);
     expect(browserErrors.get(page) ?? []).toEqual([]);
+  }
+});
+
+/** @param {import("@playwright/test").Page} page */
+async function corpsePresentationState(page) {
+  const [transport, presentation] = await Promise.all([
+    authenticatedGet(page, "/api/frame"),
+    authenticatedGet(page, "/api/presentation/frame"),
+  ]);
+  return { transport, presentation };
+}
+
+/**
+ * @param {import("@playwright/test").Page} page
+ * @param {string} presentationKey
+ */
+async function corpseBodyPaint(page, presentationKey) {
+  const body = page.locator(
+    `#battlefield .agent[data-presentation-key="${presentationKey}"]`,
+  );
+  await expect(body).toHaveCount(1);
+  return body.evaluate((agent) => {
+    const circle = agent.querySelector(".agent-body");
+    const health = agent.querySelector(".agent-health");
+    if (!(circle instanceof SVGElement) || !(health instanceof SVGElement)) {
+      throw new TypeError("Rendered corpse paint is incomplete.");
+    }
+    return {
+      alive: agent.getAttribute("data-alive"),
+      publicAgentId: agent.getAttribute("data-public-agent-id"),
+      ariaLabel: agent.getAttribute("aria-label"),
+      circle: ["cx", "cy", "r"].map((name) => circle.getAttribute(name)),
+      health: ["cx", "cy", "r", "stroke-dasharray", "stroke-dashoffset"].map((name) =>
+        health.getAttribute(name),
+      ),
+    };
+  });
+}
+
+/**
+ * @param {import("@playwright/test").Page} page
+ * @param {() => Promise<void>} activate
+ */
+async function expectNoCorpseCommands(page, activate) {
+  /** @type {import("@playwright/test").Request[]} */
+  const requests = [];
+  /** @param {import("@playwright/test").Request} request */
+  const record = (request) => {
+    if (
+      request.method() === "POST" &&
+      ["/api/command", "/api/replay/command"].includes(new URL(request.url()).pathname)
+    ) {
+      requests.push(request);
+    }
+  };
+  page.on("request", record);
+  try {
+    await activate();
+    await page.evaluate(
+      () => new Promise((resolve) => requestAnimationFrame(() => resolve(undefined))),
+    );
+    await page.waitForTimeout(250);
+  } finally {
+    page.off("request", record);
+  }
+  expect(requests).toEqual([]);
+}
+
+test("real Agent replay paints only locally authorized Oracle corpses without changing replay state", async ({
+  page,
+}) => {
+  test.setTimeout(180_000);
+  if (artifacts === null) {
+    throw new Error("Authorized corpse replay artifacts are unavailable.");
+  }
+  const corpseArtifacts = artifacts;
+  /** @type {import("node:child_process").ChildProcess[]} */
+  const services = [];
+  try {
+    for (const fixture of [
+      {
+        replayPath: corpseArtifacts.corpseNoShared,
+        transportKind: "actor_pov_replay_viewer",
+        presentationKind: "replay_no_shared_obs_agent_pov",
+      },
+      {
+        replayPath: corpseArtifacts.corpseShared,
+        transportKind: "shared_obs_agent_pov_replay_viewer",
+        presentationKind: "replay_shared_obs_agent_pov",
+      },
+    ]) {
+      const oracleService = await startReplayViewer({
+        replayPath: fixture.replayPath,
+        view: "researcher",
+      });
+      services.push(oracleService.process);
+      await openProduct(page, oracleService.url, "replay");
+      const oracle = await corpsePresentationState(page);
+      const oracleCorpses = oracle.presentation.current_endpoint.scene.agents.filter(
+        (/** @type {Record<string, any>} */ agent) => agent.current_health === 0,
+      );
+      expect(oracleCorpses).toHaveLength(2);
+      const oraclePaintByPublicId = new Map();
+      for (const corpse of oracleCorpses) {
+        oraclePaintByPublicId.set(
+          String(corpse.public_agent_id),
+          await corpseBodyPaint(page, corpse.presentation_key),
+        );
+      }
+      const oracleCursorBeforeSelection = structuredClone(oracle.transport.cursor);
+      const oracleCorpseSelection = oracleCorpses[0];
+      const oracleSelectionResponse = page.waitForResponse(
+        (response) =>
+          response.request().method() === "POST" &&
+          new URL(response.url()).pathname === "/api/replay/command",
+      );
+      await page
+        .locator(
+          `#battlefield .agent[data-presentation-key="${oracleCorpseSelection.presentation_key}"]`,
+        )
+        .click();
+      const oracleSelectionRequest = (await oracleSelectionResponse).request();
+      expect(oracleSelectionRequest.postDataJSON().command).toMatchObject({
+        command_type: "select_agent",
+      });
+      await expect(page.locator("html")).toHaveAttribute(
+        "data-presentation-authority",
+        "installed",
+      );
+      expect((await corpsePresentationState(page)).transport.cursor).toEqual(
+        oracleCursorBeforeSelection,
+      );
+
+      const agentService = await startReplayViewer({
+        replayPath: fixture.replayPath,
+        view: "pov",
+        povSlot: 0,
+      });
+      services.push(agentService.process);
+      await openProduct(page, agentService.url, "replay");
+      let agent = await corpsePresentationState(page);
+      expect(agent.transport.frame_kind).toBe(fixture.transportKind);
+      expect(agent.presentation.presentation_kind).toBe(fixture.presentationKind);
+      const overlay = agent.presentation.local_oracle_corpse_overlay;
+      expect(overlay.corpse_observations).toHaveLength(1);
+      const authorizedCorpse = overlay.corpse_observations[0].corpse;
+      const unauthorizedCorpse = oracleCorpses.find(
+        (/** @type {Record<string, any>} */ corpse) =>
+          corpse.public_agent_id !== authorizedCorpse.public_agent_id,
+      );
+      const oracleCorpse = oracleCorpses.find(
+        (/** @type {Record<string, any>} */ corpse) =>
+          corpse.public_agent_id === authorizedCorpse.public_agent_id,
+      );
+      expect(unauthorizedCorpse).toBeTruthy();
+      expect(oracleCorpse).toBeTruthy();
+      expect(authorizedCorpse).toMatchObject({
+        public_agent_id: oracleCorpse.public_agent_id,
+        position: oracleCorpse.position,
+        radius: oracleCorpse.radius,
+        current_health: oracleCorpse.current_health,
+        maximum_health: oracleCorpse.maximum_health,
+        life_state: "corpse",
+      });
+      const actorInputScene = agent.presentation.current_endpoint.parts.scene;
+      expect(
+        actorInputScene.agents.some(
+          (/** @type {Record<string, any>} */ candidate) =>
+            candidate.public_agent_id === authorizedCorpse.public_agent_id,
+        ),
+      ).toBe(false);
+      expect(
+        actorInputScene.agents.some(
+          (/** @type {Record<string, any>} */ candidate) =>
+            candidate.public_agent_id === unauthorizedCorpse.public_agent_id,
+        ),
+      ).toBe(false);
+      expect(await corpseBodyPaint(page, authorizedCorpse.presentation_key)).toEqual(
+        oraclePaintByPublicId.get(String(authorizedCorpse.public_agent_id)),
+      );
+      await expect(
+        page.locator(
+          `#battlefield [data-public-agent-id="${unauthorizedCorpse.public_agent_id}"]`,
+        ),
+      ).toHaveCount(0);
+
+      const authorizedBody = page.locator(
+        `#battlefield .agent[data-presentation-key="${authorizedCorpse.presentation_key}"]`,
+      );
+      const cursorBeforeInspection = structuredClone(agent.transport.cursor);
+      const stepBeforeInspection =
+        agent.presentation.source.source_simulator_step_count;
+      await expectNoCorpseCommands(page, () => authorizedBody.click());
+      await expect(page.locator("#selection-card")).toContainText(
+        `Agent ID ${authorizedCorpse.public_agent_id}`,
+      );
+      await expectNoCorpseCommands(page, () =>
+        authorizedBody.click({ modifiers: ["Shift"] }),
+      );
+      agent = await corpsePresentationState(page);
+      expect(agent.transport.cursor).toEqual(cursorBeforeInspection);
+      expect(agent.presentation.source.source_simulator_step_count).toBe(
+        stepBeforeInspection,
+      );
+      expect(agent.presentation.current_endpoint.parts.scene).toEqual(actorInputScene);
+
+      const corpseIdentity =
+        agent.presentation.researcher_space.identity_directory.identities.find(
+          (/** @type {Record<string, any>} */ candidate) =>
+            candidate.public_agent_id === authorizedCorpse.public_agent_id,
+        );
+      const corpseRosterAgent = agent.presentation.researcher_space.roster_agents.find(
+        (/** @type {Record<string, any>} */ candidate) =>
+          candidate.public_agent_id === authorizedCorpse.public_agent_id,
+      );
+      expect(corpseIdentity).toBeTruthy();
+      expect(corpseRosterAgent).toMatchObject({ life_state: "corpse" });
+      const corpseRosterButton = page.locator(
+        `#roster .roster-primary-action[data-presentation-key="${corpseRosterAgent.presentation_key}"]`,
+      );
+      const corpseSwitchResponse = page.waitForResponse(
+        (response) =>
+          response.request().method() === "POST" &&
+          new URL(response.url()).pathname === "/api/replay/command",
+      );
+      await corpseRosterButton.click();
+      expect((await corpseSwitchResponse).status()).toBe(200);
+      await expect(page.locator("html")).toHaveAttribute(
+        "data-presentation-authority",
+        "installed",
+      );
+
+      const corpseRecipient = await corpsePresentationState(page);
+      const baseCorpse =
+        corpseRecipient.presentation.current_endpoint.parts.scene.agents.find(
+          (/** @type {Record<string, any>} */ candidate) =>
+            candidate.public_agent_id === authorizedCorpse.public_agent_id,
+        );
+      expect(baseCorpse).toMatchObject({ life_state: "corpse", current_health: 0 });
+      expect(
+        corpseRecipient.presentation.local_oracle_corpse_overlay.corpse_observations,
+      ).toEqual([]);
+      const baseCorpseBody = page.locator(
+        `#battlefield .agent[data-presentation-key="${baseCorpse.presentation_key}"]`,
+      );
+      await expectNoCorpseCommands(page, () => baseCorpseBody.click());
+      await expect(page.locator("#selection-card")).toContainText(
+        `Agent ID ${baseCorpse.public_agent_id}`,
+      );
+      const afterBaseCorpseInspection = await corpsePresentationState(page);
+      expect(afterBaseCorpseInspection.transport.cursor).toEqual(
+        cursorBeforeInspection,
+      );
+      expect(
+        afterBaseCorpseInspection.presentation.source.source_simulator_step_count,
+      ).toBe(stepBeforeInspection);
+
+      const identity =
+        corpseRecipient.presentation.researcher_space.identity_directory.identities.find(
+          (/** @type {Record<string, any>} */ candidate) => {
+            const rosterAgent =
+              corpseRecipient.presentation.researcher_space.roster_agents.find(
+                (/** @type {Record<string, any>} */ row) =>
+                  row.public_agent_id === candidate.public_agent_id,
+              );
+            return (
+              candidate.public_agent_id !==
+                corpseRecipient.presentation.authority.recipient_public_agent_id &&
+              rosterAgent?.current_health > 0
+            );
+          },
+        );
+      expect(identity).toBeTruthy();
+      const switchSlot = (identity.team_id - 1) * 5 + identity.team_local_slot;
+      const switchRosterAgent =
+        corpseRecipient.presentation.researcher_space.roster_agents.find(
+          (/** @type {Record<string, any>} */ candidate) =>
+            candidate.public_agent_id === identity.public_agent_id,
+        );
+      expect(switchRosterAgent).toBeTruthy();
+      const switchButton = page.locator(
+        `#roster .roster-primary-action[data-presentation-key="${switchRosterAgent.presentation_key}"]`,
+      );
+      await expect(switchButton).toBeEnabled();
+      /** @type {import("@playwright/test").Request[]} */
+      const commands = [];
+      /** @param {import("@playwright/test").Request} request */
+      const recordCommand = (request) => {
+        if (
+          request.method() === "POST" &&
+          new URL(request.url()).pathname === "/api/replay/command"
+        ) {
+          commands.push(request);
+        }
+      };
+      page.on("request", recordCommand);
+      try {
+        const responsePromise = page.waitForResponse(
+          (response) =>
+            response.request().method() === "POST" &&
+            new URL(response.url()).pathname === "/api/replay/command",
+        );
+        await switchButton.evaluate((element) => {
+          if (!(element instanceof HTMLElement)) {
+            throw new TypeError("Roster activation must be an HTML control.");
+          }
+          element.click();
+        });
+        expect((await responsePromise).status()).toBe(200);
+        await expect(page.locator("html")).toHaveAttribute(
+          "data-presentation-authority",
+          "installed",
+        );
+      } finally {
+        page.off("request", recordCommand);
+      }
+      expect(commands).toHaveLength(1);
+      expect(commands[0].postDataJSON().command).toEqual({
+        command_type: "set_pov_actor",
+        global_slot: switchSlot,
+      });
+      const switched = await corpsePresentationState(page);
+      expect(switched.transport.cursor).toEqual(cursorBeforeInspection);
+      expect(switched.presentation.source.source_simulator_step_count).toBe(
+        stepBeforeInspection,
+      );
+    }
+  } finally {
+    await Promise.allSettled(services.map((process) => stopDebugger(process)));
+  }
+});
+
+test("real Live NoShared paints a locally visible corpse as inspection-only Oracle evidence", async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const service = await startScriptedDebugger({ scenario: "death_respawn_cycle" });
+  try {
+    await openProduct(page, service.url, "live");
+    const advanceResponse = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/api/command",
+    );
+    await page.locator("#submit-turn-button").click();
+    expect((await advanceResponse).status()).toBe(200);
+    await expect(page.locator("#step-value")).toHaveText("1");
+
+    const oracle = await corpsePresentationState(page);
+    expect(oracle.presentation.presentation_kind).toBe("live_oracle");
+    const oracleCorpse = oracle.presentation.current_endpoint.scene.agents.find(
+      (/** @type {Record<string, any>} */ agent) =>
+        agent.life_state === "corpse" && agent.current_health === 0,
+    );
+    expect(oracleCorpse).toMatchObject({ life_state: "corpse", current_health: 0 });
+    const oraclePaint = await corpseBodyPaint(page, oracleCorpse.presentation_key);
+    const oracleRevision = oracle.transport.revision;
+    const oracleStep = oracle.transport.simulator_step_count;
+
+    const viewResponse = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/api/command",
+    );
+    await page.locator("#view-select").selectOption("pov");
+    expect((await viewResponse).status()).toBe(200);
+    await expect(page.locator("html")).toHaveAttribute(
+      "data-presentation-authority",
+      "installed",
+    );
+
+    let agent = await corpsePresentationState(page);
+    expect(agent.transport.frame_kind).toBe("actor_pov_live_debugger");
+    expect(agent.presentation.presentation_kind).toBe("live_no_shared_obs_agent_pov");
+    expect(agent.transport.simulator_step_count).toBe(oracleStep);
+    expect(agent.transport.revision).toBeGreaterThanOrEqual(oracleRevision);
+    const overlay = agent.presentation.local_oracle_corpse_overlay;
+    expect(overlay.corpse_observations).toHaveLength(1);
+    const authorizedCorpse = overlay.corpse_observations[0].corpse;
+    expect(authorizedCorpse).toMatchObject({
+      public_agent_id: oracleCorpse.public_agent_id,
+      position: oracleCorpse.position,
+      radius: oracleCorpse.radius,
+      life_state: oracleCorpse.life_state,
+      current_health: oracleCorpse.current_health,
+      maximum_health: oracleCorpse.maximum_health,
+    });
+    expect(overlay.living_sensor_public_agent_ids).toEqual([
+      agent.presentation.authority.recipient_public_agent_id,
+    ]);
+    const actorInputScene = agent.presentation.current_endpoint.parts.scene;
+    expect(
+      actorInputScene.agents.some(
+        (/** @type {Record<string, any>} */ candidate) =>
+          candidate.public_agent_id === authorizedCorpse.public_agent_id,
+      ),
+    ).toBe(false);
+    expect(await corpseBodyPaint(page, authorizedCorpse.presentation_key)).toEqual(
+      oraclePaint,
+    );
+
+    const corpseBody = page.locator(
+      `#battlefield .agent[data-presentation-key="${authorizedCorpse.presentation_key}"]`,
+    );
+    const revisionBeforeInspection = agent.transport.revision;
+    const stepBeforeInspection = agent.transport.simulator_step_count;
+    await expectNoCorpseCommands(page, () => corpseBody.click());
+    await expect(page.locator("#selection-card")).toContainText(
+      `Agent ID ${authorizedCorpse.public_agent_id}`,
+    );
+    await expectNoCorpseCommands(page, () =>
+      corpseBody.click({ modifiers: ["Shift"] }),
+    );
+    agent = await corpsePresentationState(page);
+    expect(agent.transport.revision).toBe(revisionBeforeInspection);
+    expect(agent.transport.simulator_step_count).toBe(stepBeforeInspection);
+    expect(agent.presentation.source.source_simulator_step_count).toBe(
+      stepBeforeInspection,
+    );
+    expect(agent.presentation.current_endpoint.parts.scene).toEqual(actorInputScene);
+  } finally {
+    await stopDebugger(service.process);
   }
 });

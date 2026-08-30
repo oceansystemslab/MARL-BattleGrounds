@@ -777,12 +777,17 @@ test("all registered transient families validate without constructing disabled g
   assert.equal(warriorActivation.presentationSuppressed, false);
   assert.ok(warriorActivation.route);
   assert.equal(warriorActivation.route.markerVariant, "compact");
-  assert.deepEqual(warriorActivation.route.markerProgresses, [1 / 3, 2 / 3]);
+  assert.deepEqual(warriorActivation.route.markerProgresses, [
+    1 / 5,
+    2 / 5,
+    3 / 5,
+    4 / 5,
+  ]);
   const chargeMarkers = warriorActivation.route.markerProgresses.map(
     (/** @type {number} */ progress) =>
       routeMarkerPose(warriorActivation.route, progress),
   );
-  assert.equal(chargeMarkers.length, 2);
+  assert.equal(chargeMarkers.length, 4);
   assert.ok(
     (chargeMarkers[1].x - chargeMarkers[0].x) *
       (warriorActivation.target.x - warriorActivation.source.x) +
@@ -790,7 +795,32 @@ test("all registered transient families validate without constructing disabled g
         (warriorActivation.target.y - warriorActivation.source.y) >
       0,
   );
-  const preferredFirst = routeMarkerPose(warriorActivation.route, 1 / 3);
+  /** @type {ProjectionSurface} */
+  const expandedSurface = {
+    ...surface,
+    worldToScreen: (
+      /** @type {readonly [number, number] | {x: number, y: number}} */ point,
+    ) => {
+      const x = "x" in point ? point.x : Number(point[0]);
+      const y = "y" in point ? point.y : Number(point[1]);
+      return { x: x * 100, y: 1200 - y * 100 };
+    },
+    worldLengthToScreen: (/** @type {number} */ length) => length * 100,
+    viewportBounds: {
+      left: 0,
+      top: 0,
+      right: 8000,
+      bottom: 6000,
+      width: 8000,
+      height: 6000,
+    },
+  };
+  const expandedPlan = buildChoreographyPlan(frame, expandedSurface);
+  const expandedCharge = expandedPlan?.events.find(
+    (event) => event.kind === "activation" && event.tokenId === "warrior_charge",
+  );
+  assert.ok(expandedCharge?.route);
+  const preferredFirst = routeMarkerPose(expandedCharge.route, 1 / 5);
   const markerBlocker = {
     left: preferredFirst.x - 1,
     top: preferredFirst.y - 1,
@@ -800,7 +830,7 @@ test("all registered transient families validate without constructing disabled g
     height: 2,
   };
   const fallbackPlan = buildChoreographyPlan(frame, {
-    ...surface,
+    ...expandedSurface,
     protectedRects: [
       {
         layoutKey: "charge-source-marker-blocker",
@@ -814,7 +844,32 @@ test("all registered transient families validate without constructing disabled g
     (event) => event.kind === "activation" && event.tokenId === "warrior_charge",
   );
   assert.ok(fallbackCharge?.route);
-  assert.deepEqual(fallbackCharge.route.markerProgresses, [1 / 4]);
+  assert.deepEqual(fallbackCharge.route.markerProgresses, [1 / 6, 2 / 5, 3 / 5, 4 / 5]);
+  const fallbackFirst = routeMarkerPose(expandedCharge.route, 1 / 6);
+  const bothPositionsBlocker = {
+    left: Math.min(preferredFirst.x, fallbackFirst.x) - 1,
+    top: Math.min(preferredFirst.y, fallbackFirst.y) - 1,
+    right: Math.max(preferredFirst.x, fallbackFirst.x) + 1,
+    bottom: Math.max(preferredFirst.y, fallbackFirst.y) + 1,
+    width: Math.abs(preferredFirst.x - fallbackFirst.x) + 2,
+    height: Math.abs(preferredFirst.y - fallbackFirst.y) + 2,
+  };
+  const suppressedPlan = buildChoreographyPlan(frame, {
+    ...expandedSurface,
+    protectedRects: [
+      {
+        layoutKey: "charge-source-marker-suppression-blocker",
+        protectedKind: "body",
+        ownerPresentationKey: expandedCharge.sourcePresentationKey,
+        bounds: bothPositionsBlocker,
+      },
+    ],
+  });
+  const suppressedCharge = suppressedPlan?.events.find(
+    (event) => event.kind === "activation" && event.tokenId === "warrior_charge",
+  );
+  assert.ok(suppressedCharge?.route);
+  assert.deepEqual(suppressedCharge.route.markerProgresses, [2 / 5, 3 / 5, 4 / 5]);
   assert.deepEqual(
     plan.events
       .filter((event) => event.kind === "status_lifecycle")
@@ -1342,7 +1397,10 @@ test("authorized regeneration owns a packed plus cue instead of the generic onio
   assert.match(painterSource, /combat-regeneration__plus/u);
   assert.match(painterSource, /combat-regeneration__value/u);
   assert.match(painterSource, /combat-choreography-connectors/u);
-  assert.doesNotMatch(painterSource, /event\.cueSemantic === "health_regenerated"/u);
+  assert.match(
+    painterSource,
+    /The recipient regenerated \$\{formatDisplayNumber\(event\.value\)\} health while out of combat\./u,
+  );
   assert.match(css, /\.combat-regeneration__pulse/u);
   assert.match(css, /\.combat-connector-effect/u);
   assert.doesNotMatch(css, /\.combat-regeneration__recipient-anchor/u);
@@ -1443,6 +1501,15 @@ test("NET cues follow scrolling battle text while regeneration retains useful gr
     assert.ok(regeneration);
     assert.deepEqual(regeneration.paintParts, expected);
     assert.equal(regeneration.presentationSuppressed, suppressed);
+    const explanation = explainChoreographyEvent(regeneration);
+    assert.equal(
+      explanation.summary,
+      "The recipient regenerated 3 health while out of combat.",
+    );
+    assert.deepEqual(
+      explanation.rows.map(({ label, value }) => [label, value]),
+      [["Recipient", "Agent ID agent-slot-0 · Mage · Team A"]],
+    );
     if (disabled.length === 0) {
       assert.deepEqual(
         {
@@ -1770,6 +1837,67 @@ test("status presentation preserves the valid five-source application maximum", 
   );
 });
 
+test("lifecycle source roles deduplicate canonical identities and preserve distinct sources", () => {
+  const sourceIdentity = Object.freeze({
+    presentation_key: "source:key:first",
+    public_agent_id: "source-public",
+    class_id: 3,
+    team_id: 1,
+  });
+  const duplicateCanonicalIdentity = Object.freeze({
+    ...sourceIdentity,
+    presentation_key: "source:key:second",
+  });
+  const distinctSourceIdentity = Object.freeze({
+    presentation_key: "other:key",
+    public_agent_id: "other-public",
+    class_id: 5,
+    team_id: 2,
+  });
+  const recipientIdentity = Object.freeze({
+    presentation_key: "recipient:key",
+    public_agent_id: "recipient-public",
+    class_id: 2,
+    team_id: 1,
+  });
+  const descriptor = (
+    /** @type {ReadonlyArray<{sourceIdentity: Record<string, any>}>} */ applicationSources,
+  ) =>
+    explainChoreographyEvent({
+      kind: "status_lifecycle",
+      eventType: "status_applied",
+      tokenId: "hunter_basic_slow",
+      lifecycle: "applied",
+      applicationSources,
+      recipientIdentity,
+    });
+
+  assert.deepEqual(
+    descriptor([
+      { sourceIdentity },
+      { sourceIdentity: duplicateCanonicalIdentity },
+    ]).rows.map(({ label, value }) => [label, value]),
+    [
+      ["Source", "Agent ID source-public · Hunter · Team A"],
+      ["Recipient", "Agent ID recipient-public · Warrior · Team A"],
+    ],
+  );
+  assert.deepEqual(
+    descriptor([
+      { sourceIdentity },
+      { sourceIdentity: duplicateCanonicalIdentity },
+      { sourceIdentity: distinctSourceIdentity },
+    ]).rows.map(({ label, value }) => [label, value]),
+    [
+      [
+        "Sources",
+        "Agent ID source-public · Hunter · Team A; Agent ID other-public · Priest · Team B",
+      ],
+      ["Recipient", "Agent ID recipient-public · Warrior · Team A"],
+    ],
+  );
+});
+
 test("authorized normalization rejects cross-transition status rows", async () => {
   const fixture = await authorizedFixture();
   const raw = structuredClone(fixture.presentations.replay_oracle);
@@ -1840,6 +1968,89 @@ test("standalone serialized status events keep exact presentation meanings", asy
     if (eventKind === "status_cleared_by_new_death") {
       assert.match(explanation.title, /^Cleared .+ On Death$/u);
       assert.equal(explanation.summary, null);
+    }
+  }
+});
+
+test("every lifecycle and recipient event uses only canonical Source and Recipient roles", () => {
+  const sourceIdentity = Object.freeze({
+    presentation_key: "source:key",
+    public_agent_id: "source-public",
+    class_id: 3,
+    team_id: 1,
+  });
+  const recipientIdentity = Object.freeze({
+    presentation_key: "recipient:key",
+    public_agent_id: "recipient-public",
+    class_id: 2,
+    team_id: 2,
+  });
+  const sourceTitle = "Agent ID source-public · Hunter · Team A";
+  const recipientTitle = "Agent ID recipient-public · Warrior · Team B";
+  const applied = explainChoreographyEvent({
+    kind: "status_lifecycle",
+    eventType: "status_applied",
+    tokenId: "hunter_basic_slow",
+    lifecycle: "applied",
+    applicationSources: [{ sourceIdentity }],
+    sourceIdentity,
+    recipientIdentity,
+  });
+  assert.deepEqual(
+    applied.rows.map(({ label, value }) => [label, value]),
+    [
+      ["Source", sourceTitle],
+      ["Recipient", recipientTitle],
+    ],
+  );
+
+  for (const [tokenId, lifecycle] of [
+    ["hunter_basic_slow", "expired"],
+    ["hunter_trap_stun", "trap_broken"],
+    ["hunter_basic_slow", "cleared_by_death"],
+    ["spawn_shield", "expired"],
+    ["in_combat", "expired"],
+  ]) {
+    const descriptor = explainChoreographyEvent({
+      kind: "status_lifecycle",
+      eventType: "status_aged_to_zero",
+      tokenId,
+      lifecycle,
+      applicationSources: [{ sourceIdentity }],
+      sourceIdentity,
+      recipientIdentity,
+      outOfCombatRegenerationPerTick: tokenId === "in_combat" ? 5 : null,
+    });
+    assert.deepEqual(
+      descriptor.rows.map(({ label, value }) => [label, value]),
+      [["Recipient", recipientTitle]],
+      `${tokenId}/${lifecycle}`,
+    );
+  }
+
+  for (const [kind, cueSemantic, value] of [
+    ["regeneration", "health_regenerated", 3.5],
+    ["semantic_pulse", "cooldown_ready", null],
+    ["semantic_pulse", "agent_died", null],
+    ["semantic_pulse", "agent_respawned", null],
+  ]) {
+    const descriptor = explainChoreographyEvent({
+      kind,
+      eventType: cueSemantic,
+      cueSemantic,
+      value,
+      sourceIdentity,
+      recipientIdentity,
+    });
+    assert.deepEqual(
+      descriptor.rows.map(({ label, value: rowValue }) => [label, rowValue]),
+      [["Recipient", recipientTitle]],
+    );
+    if (cueSemantic === "health_regenerated") {
+      assert.equal(
+        descriptor.summary,
+        "The recipient regenerated 3.5 health while out of combat.",
+      );
     }
   }
 });

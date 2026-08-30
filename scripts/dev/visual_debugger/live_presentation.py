@@ -610,11 +610,20 @@ def build_live_no_shared_obs_authorized_presentation_v1(
     incoming_carrier: ActorPovAdjacentTransitionSliceV1 | None,
     raw_frame: ActorPovLiveDebuggerFrameV2,
     *,
+    global_context: EvaluationEpisodeContextV1,
+    current_global_frame: EvaluationFrameV1,
+    previous_global_frame: EvaluationFrameV1 | None,
     public_catalog: StaticMechanicsCatalogV1,
     incoming_visual_events: VisualEventBatchV2 | None,
     researcher_space: LiveResearcherSpaceV1,
 ) -> LiveNoSharedObsAuthorizedPresentationFrameV1:
     """Package one committed live NoSharedObs battlefield and researcher UI."""
+    from scripts.dev.visual_debugger.local_oracle_corpse_overlay import (
+        build_local_oracle_corpse_overlay_v1,
+        compose_local_oracle_corpse_scene_v1,
+        validate_local_oracle_corpse_overlay_against_source_v1,
+    )
+
     _require_live_header(
         raw_frame,
         researcher=False,
@@ -674,6 +683,30 @@ def build_live_no_shared_obs_authorized_presentation_v1(
         parts=parts,
         axis_mapping=current_slice.axis_mapping,
     )
+    current_sensor_ids = (
+        (current_slice.public_agent_id,)
+        if current_global_frame.snapshot.alive_mask[current_slice.selected_global_slot]
+        else ()
+    )
+    corpse_overlay = build_local_oracle_corpse_overlay_v1(
+        global_context,
+        current_global_frame,
+        parts.scene,
+        authority_session_id=raw_frame.session_id,
+        source_authority_epoch=raw_frame.revision,
+        recipient_public_agent_id=current_slice.public_agent_id,
+        living_sensor_public_agent_ids=current_sensor_ids,
+    )
+    validate_local_oracle_corpse_overlay_against_source_v1(
+        corpse_overlay,
+        global_context,
+        current_global_frame,
+        parts.scene,
+        authority_session_id=raw_frame.session_id,
+        source_authority_epoch=raw_frame.revision,
+        recipient_public_agent_id=current_slice.public_agent_id,
+        living_sensor_public_agent_ids=current_sensor_ids,
+    )
     if carrier is None:
         if incoming_visual_events is not None:
             raise ValueError("live NoSharedObs frame zero cannot carry visual events.")
@@ -689,10 +722,45 @@ def build_live_no_shared_obs_authorized_presentation_v1(
             authority_session_id=raw_frame.session_id,
             frame_index=carrier.start_frame.frame_index,
         )
+        if type(previous_global_frame) is not EvaluationFrameV1:
+            raise TypeError(
+                "non-initial live NoSharedObs frames require the exact prior "
+                "global frame."
+            )
+        previous_sensor_ids = (
+            (current_slice.public_agent_id,)
+            if previous_global_frame.snapshot.alive_mask[
+                current_slice.selected_global_slot
+            ]
+            else ()
+        )
+        previous_overlay = build_local_oracle_corpse_overlay_v1(
+            global_context,
+            previous_global_frame,
+            previous.scene,
+            authority_session_id=raw_frame.session_id,
+            source_authority_epoch=raw_frame.revision,
+            recipient_public_agent_id=current_slice.public_agent_id,
+            living_sensor_public_agent_ids=previous_sensor_ids,
+        )
         visual_events = build_agent_pov_visual_incoming_summary_v1(
             incoming_visual_events,
             transition_start_scene=previous.scene,
             successor_scene=parts.scene,
+            transition_start_corpse_choreography_scene=(
+                compose_local_oracle_corpse_scene_v1(
+                    previous.scene,
+                    previous_overlay,
+                    researcher_class_mechanics=researcher_space.class_mechanics,
+                )
+            ),
+            successor_corpse_choreography_scene=(
+                compose_local_oracle_corpse_scene_v1(
+                    parts.scene,
+                    corpse_overlay,
+                    researcher_class_mechanics=researcher_space.class_mechanics,
+                )
+            ),
             recipient_public_agent_id=parts.recipient_public_agent_id,
             incoming_recipient_transition_id=carrier.transition.pov_transition_id,
             incoming_start_recipient_frame_id=carrier.transition.start_pov_frame_id,
@@ -771,6 +839,7 @@ def build_live_no_shared_obs_authorized_presentation_v1(
         ),
         analysis_mode="analysis",
         current_endpoint=endpoint,
+        local_oracle_corpse_overlay=corpse_overlay,
         latest_events=latest_events,
         visual_events=visual_events,
         latest_transition=latest_transition,

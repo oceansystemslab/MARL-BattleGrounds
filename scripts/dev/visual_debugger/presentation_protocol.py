@@ -337,6 +337,285 @@ class SharedObsPresentationAuthorityV1(_PresentationProtocolModel):
     exact_actor_input_export_available: Literal[False]
 
 
+class LocalOracleCorpsePublicFactsV1(_PresentationProtocolModel):
+    """Redundant wire-consistency copy for one authorized local corpse.
+
+    This row catches accidental/spliced disagreement with ``corpse``. It is not
+    an authenticity root: the same-origin Python producer separately validates
+    both copies against the hidden same-epoch evaluation frame before emission.
+    """
+
+    public_agent_id: _ScientificId
+    team_id: Annotated[int, Field(ge=1, le=2)]
+    class_id: Annotated[int, Field(ge=1, le=5)]
+    class_name: _DisplayText
+    position: tuple[float, float]
+    radius: Annotated[float, Field(gt=0.0)]
+    life_state: Literal["corpse"]
+    current_health: Annotated[float, Field(ge=0.0)]
+    maximum_health: Annotated[float, Field(gt=0.0)]
+    base_movement_speed: Annotated[float, Field(ge=0.0)]
+    effective_movement_speed: Annotated[float, Field(ge=0.0)]
+    observation_radius: Annotated[float, Field(ge=0.0)]
+    basic_interaction_radius: Annotated[float, Field(ge=0.0)]
+    ultimate_interaction_radius: Annotated[float, Field(ge=0.0)]
+    ultimate_cooldown_remaining: _NonNegativeInt
+    spawn_shield_remaining: _NonNegativeInt
+    steps_until_out_of_combat: _NonNegativeInt
+    out_of_combat_delay_steps: _NonNegativeInt
+    out_of_combat_health_regeneration_fraction_per_step: Annotated[
+        float, Field(ge=0.0, le=1.0)
+    ]
+    statuses: tuple[AuthorizedStatusV1, ...]
+    aura_modifiers: tuple[AuthorizedAuraModifierV1, ...]
+
+    @model_validator(mode="after")
+    def _validate_public_facts(self) -> Self:
+        if not all(isfinite(value) for value in self.position):
+            raise ValueError("local-Oracle corpse position must be finite.")
+        if self.current_health > self.maximum_health:
+            raise ValueError("local-Oracle corpse health exceeds its maximum.")
+        if self.steps_until_out_of_combat > self.out_of_combat_delay_steps:
+            raise ValueError("local-Oracle corpse combat duration exceeds its delay.")
+        if any(type(row) is not AuthorizedStatusV1 for row in self.statuses):
+            raise ValueError("local-Oracle corpse statuses require exact roots.")
+        if any(status.direct_sources for status in self.statuses):
+            raise ValueError(
+                "local-Oracle corpse public facts cannot disclose sources."
+            )
+        if any(
+            type(row) is not AuthorizedAuraModifierV1 for row in self.aura_modifiers
+        ):
+            raise ValueError("local-Oracle corpse modifiers require exact roots.")
+        return self
+
+
+def _corpse_matches_oracle_public_facts(
+    corpse: AuthorizedAgentV1,
+    facts: LocalOracleCorpsePublicFactsV1,
+) -> bool:
+    """Compare every public corpse fact except authority-local key/relation."""
+    return (
+        corpse.public_agent_id == facts.public_agent_id
+        and corpse.team_id == facts.team_id
+        and corpse.class_id == facts.class_id
+        and corpse.class_name == facts.class_name
+        and all(
+            isclose(left, right)
+            for left, right in zip(corpse.position, facts.position, strict=True)
+        )
+        and isclose(corpse.radius, facts.radius)
+        and corpse.life_state == facts.life_state
+        and isclose(corpse.current_health, facts.current_health)
+        and isclose(corpse.maximum_health, facts.maximum_health)
+        and isclose(corpse.base_movement_speed, facts.base_movement_speed)
+        and isclose(corpse.effective_movement_speed, facts.effective_movement_speed)
+        and isclose(corpse.observation_radius, facts.observation_radius)
+        and isclose(corpse.basic_interaction_radius, facts.basic_interaction_radius)
+        and isclose(
+            corpse.ultimate_interaction_radius,
+            facts.ultimate_interaction_radius,
+        )
+        and corpse.ultimate_cooldown_remaining == facts.ultimate_cooldown_remaining
+        and corpse.spawn_shield_remaining == facts.spawn_shield_remaining
+        and corpse.steps_until_out_of_combat == facts.steps_until_out_of_combat
+        and corpse.out_of_combat_delay_steps == facts.out_of_combat_delay_steps
+        and isclose(
+            corpse.out_of_combat_health_regeneration_fraction_per_step,
+            facts.out_of_combat_health_regeneration_fraction_per_step,
+        )
+        and corpse.statuses == facts.statuses
+        and corpse.aura_modifiers == facts.aura_modifiers
+    )
+
+
+class LocalOracleCorpseObservationV1(_PresentationProtocolModel):
+    """One locally authorized Oracle corpse and its living sensor evidence."""
+
+    corpse: AuthorizedAgentV1
+    oracle_public_facts: LocalOracleCorpsePublicFactsV1
+    observing_sensor_public_agent_ids: tuple[_ScientificId, ...]
+
+    @model_validator(mode="after")
+    def _validate_observation(self) -> Self:
+        _require_exact_type(self.corpse, AuthorizedAgentV1, name="corpse")
+        _require_exact_type(
+            self.oracle_public_facts,
+            LocalOracleCorpsePublicFactsV1,
+            name="oracle_public_facts",
+        )
+        if self.corpse.life_state != "corpse":
+            raise ValueError("local-Oracle corpse observations require a corpse row.")
+        if self.corpse.relation == "oracle":
+            raise ValueError("local-Oracle corpse rows must remain recipient-relative.")
+        if any(status.direct_sources for status in self.corpse.statuses):
+            raise ValueError("local-Oracle corpse statuses cannot disclose sources.")
+        if not _corpse_matches_oracle_public_facts(
+            self.corpse,
+            self.oracle_public_facts,
+        ):
+            raise ValueError(
+                "local-Oracle corpse changed from its authorized Oracle public facts."
+            )
+        if not self.observing_sensor_public_agent_ids:
+            raise ValueError("local-Oracle corpses require a living observing sensor.")
+        _require_ordered_unique(
+            self.observing_sensor_public_agent_ids,
+            name="local-Oracle corpse observing sensors",
+        )
+        return self
+
+
+class _LocalOracleCorpseOverlayContentV1(_PresentationProtocolModel):
+    """Paint-only local corpse projection carried by a trusted Python service.
+
+    The browser validates this content's digest, epoch joins, and structural
+    consistency. Those checks do not authenticate a malicious coordinated
+    reseal; authoritative geometry and LOS remain the source-aware producer's
+    responsibility because the browser intentionally lacks the global frame.
+    """
+
+    overlay_kind: Literal["local_oracle_corpse_overlay"]
+    projection_basis: Literal[
+        "same_epoch_living_sensor_radius_and_static_line_of_sight"
+    ]
+    source_episode_id: _ScientificId
+    source_frame_index: _NonNegativeInt
+    source_frame_id: _ScientificId
+    source_simulator_step_count: _NonNegativeInt
+    source_authority_epoch: _NonNegativeInt
+    recipient_public_agent_id: _ScientificId
+    recipient_presentation_key: _ScientificId
+    living_sensor_public_agent_ids: tuple[_ScientificId, ...]
+    corpse_observations: tuple[LocalOracleCorpseObservationV1, ...]
+
+    @model_validator(mode="after")
+    def _validate_overlay(self) -> Self:
+        if self.source_frame_id != (
+            f"{self.source_episode_id}:frame:{self.source_frame_index}"
+        ):
+            raise ValueError("local-Oracle corpse source frame ID is not canonical.")
+        _require_ordered_unique(
+            self.living_sensor_public_agent_ids,
+            name="local-Oracle living sensor identities",
+        )
+        if any(
+            type(row) is not LocalOracleCorpseObservationV1
+            for row in self.corpse_observations
+        ):
+            raise ValueError("local-Oracle corpse observations require exact roots.")
+        corpse_ids = tuple(
+            row.corpse.public_agent_id for row in self.corpse_observations
+        )
+        corpse_keys = tuple(
+            row.corpse.presentation_key for row in self.corpse_observations
+        )
+        _require_ordered_unique(corpse_ids, name="local-Oracle corpse identities")
+        _require_ordered_unique(corpse_keys, name="local-Oracle corpse keys")
+        if self.recipient_public_agent_id in corpse_ids:
+            raise ValueError("the recipient's own corpse belongs to the base scene.")
+        allowed_sensors = set(self.living_sensor_public_agent_ids)
+        for row in self.corpse_observations:
+            if not set(row.observing_sensor_public_agent_ids) <= allowed_sensors:
+                raise ValueError(
+                    "corpse observation provenance exceeds the living sensor set."
+                )
+            if (
+                tuple(
+                    sensor
+                    for sensor in self.living_sensor_public_agent_ids
+                    if sensor in row.observing_sensor_public_agent_ids
+                )
+                != row.observing_sensor_public_agent_ids
+            ):
+                raise ValueError(
+                    "corpse observation provenance changed canonical sensor order."
+                )
+        return self
+
+
+class LocalOracleCorpseOverlayV1(_LocalOracleCorpseOverlayContentV1):
+    authorized_overlay_digest_sha256: _Sha256Hex
+
+    @model_validator(mode="after")
+    def _validate_digest(self) -> Self:
+        if self.authorized_overlay_digest_sha256 != (
+            canonical_local_oracle_corpse_overlay_digest_sha256(self)
+        ):
+            raise ValueError("local-Oracle corpse overlay digest mismatch.")
+        return self
+
+
+def canonical_local_oracle_corpse_overlay_digest_sha256(
+    overlay: _LocalOracleCorpseOverlayContentV1 | LocalOracleCorpseOverlayV1,
+) -> str:
+    """Hash one exact local-Oracle overlay, excluding only its digest."""
+    if type(overlay) not in (
+        _LocalOracleCorpseOverlayContentV1,
+        LocalOracleCorpseOverlayV1,
+    ):
+        raise TypeError("corpse overlay digest requires one exact overlay root.")
+    _validate_recursive_exact_runtime_types(overlay)
+    content = _LocalOracleCorpseOverlayContentV1.model_construct(
+        **{
+            name: getattr(overlay, name)
+            for name in _LocalOracleCorpseOverlayContentV1.model_fields
+        }
+    )
+    validated = _LocalOracleCorpseOverlayContentV1.model_validate_json(
+        content.model_dump_json(warnings=False)
+    )
+    _validate_exact_runtime_tree_matches(
+        content,
+        validated,
+        path="local_oracle_corpse_overlay",
+    )
+    encoded = json.dumps(
+        validated.model_dump(mode="json"),
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def seal_local_oracle_corpse_overlay_v1(
+    *,
+    source_episode_id: str,
+    source_frame_index: int,
+    source_simulator_step_count: int,
+    source_authority_epoch: int,
+    recipient_public_agent_id: str,
+    recipient_presentation_key: str,
+    living_sensor_public_agent_ids: tuple[str, ...],
+    corpse_observations: tuple[LocalOracleCorpseObservationV1, ...],
+) -> LocalOracleCorpseOverlayV1:
+    """Seal a server-derived same-epoch corpse overlay."""
+    content = _LocalOracleCorpseOverlayContentV1(
+        overlay_kind="local_oracle_corpse_overlay",
+        projection_basis=("same_epoch_living_sensor_radius_and_static_line_of_sight"),
+        source_episode_id=source_episode_id,
+        source_frame_index=source_frame_index,
+        source_frame_id=f"{source_episode_id}:frame:{source_frame_index}",
+        source_simulator_step_count=source_simulator_step_count,
+        source_authority_epoch=source_authority_epoch,
+        recipient_public_agent_id=recipient_public_agent_id,
+        recipient_presentation_key=recipient_presentation_key,
+        living_sensor_public_agent_ids=living_sensor_public_agent_ids,
+        corpse_observations=corpse_observations,
+    )
+    return LocalOracleCorpseOverlayV1(
+        **{
+            name: getattr(content, name)
+            for name in _LocalOracleCorpseOverlayContentV1.model_fields
+        },
+        authorized_overlay_digest_sha256=(
+            canonical_local_oracle_corpse_overlay_digest_sha256(content)
+        ),
+    )
+
+
 class OraclePublicIdentityDirectoryRowV1(_PresentationProtocolModel):
     public_agent_id: _ScientificId
     configured_active: bool
@@ -2132,7 +2411,13 @@ def _validate_recursive_exact_runtime_types(root: object) -> None:
                         )
                     exact_type_by_definition_name[name] = candidate_type
                     exact_types.add(candidate_type)
-        exact_types.update((*_ENDPOINT_CONTENT_TYPES, PresentationApiErrorV1))
+        exact_types.update(
+            (
+                *_ENDPOINT_CONTENT_TYPES,
+                _LocalOracleCorpseOverlayContentV1,
+                PresentationApiErrorV1,
+            )
+        )
         _allowed_exact_runtime_types_cache = frozenset(exact_types)
     allowed_exact_types = _allowed_exact_runtime_types_cache
     visited: set[int] = set()
@@ -3383,6 +3668,7 @@ class LiveNoSharedObsAuthorizedPresentationFrameV1(_PresentationProtocolModel):
     authority: NoSharedObsPresentationAuthorityV1
     analysis_mode: Literal["analysis"]
     current_endpoint: NoSharedObsAuthorizedCurrentEndpointV1
+    local_oracle_corpse_overlay: LocalOracleCorpseOverlayV1
     latest_events: NoSharedObsIncomingSummaryV1 | None
     visual_events: AgentPovVisualIncomingSummaryV1 | None
     latest_transition: NoSharedObsLatestTransitionV1 | None
@@ -3499,6 +3785,7 @@ class ReplayNoSharedObsAuthorizedPresentationFrameV1(_PresentationProtocolModel)
     authority: NoSharedObsPresentationAuthorityV1
     analysis_mode: Literal["analysis"]
     current_endpoint: NoSharedObsAuthorizedCurrentEndpointV1
+    local_oracle_corpse_overlay: LocalOracleCorpseOverlayV1
     latest_events: NoSharedObsIncomingSummaryV1 | None
     visual_events: AgentPovVisualIncomingSummaryV1 | None
     latest_transition: NoSharedObsLatestTransitionV1 | None
@@ -3526,6 +3813,7 @@ class ReplaySharedObsAuthorizedPresentationFrameV1(_PresentationProtocolModel):
     authority: SharedObsPresentationAuthorityV1
     analysis_mode: Literal["analysis"]
     current_endpoint: SharedObsAuthorizedCurrentEndpointV1
+    local_oracle_corpse_overlay: LocalOracleCorpseOverlayV1
     latest_events: SharedObsIncomingSummaryV1 | None
     visual_events: AgentPovVisualIncomingSummaryV1 | None
     latest_transition: SharedObsLatestTransitionV1 | None
@@ -3644,9 +3932,27 @@ def _validate_agent_visual_events(
         raise ValueError(
             "Agent visual events do not join the existing recipient-local epoch."
         )
-    scene_rows = {
+    base_scene_rows = {
         row.presentation_key: (row.public_agent_id, row.class_id, row.position)
-        for row in endpoint.parts.scene.agents
+        for row in frame.current_endpoint.parts.scene.agents
+    }
+    overlay_scene_rows = {
+        row.corpse.presentation_key: (
+            row.corpse.public_agent_id,
+            row.corpse.class_id,
+            row.corpse.position,
+        )
+        for row in frame.local_oracle_corpse_overlay.corpse_observations
+    }
+    death_overlay_keys = {
+        event.recipient_anchor.presentation_key
+        for event in events.events
+        if event.event_kind == "agent_died"
+        and event.recipient_anchor.presentation_key in overlay_scene_rows
+    }
+    expected_successor_rows = {
+        **base_scene_rows,
+        **{key: overlay_scene_rows[key] for key in death_overlay_keys},
     }
     successor_rows = {
         row.agent_presentation_key: (
@@ -3657,10 +3963,43 @@ def _validate_agent_visual_events(
         for row in events.agent_phase_trajectories
         if row.successor is not None
     }
-    if successor_rows != scene_rows:
+    if successor_rows != expected_successor_rows:
         raise ValueError(
-            "Agent visual-event successors must equal the current authorized scene."
+            "Agent visual-event successors must equal the actor-input scene plus "
+            "death-owned corpse endpoints."
         )
+    overlay_only_keys = set(overlay_scene_rows)
+    after_state_event_kinds = {
+        "recipient_health_resolution",
+        "health_regenerated",
+        "cooldown_started",
+        "cooldown_ready",
+    }
+    for event in events.events:
+        if event.event_kind == "agent_died":
+            continue
+        anchors = tuple(
+            anchor
+            for field_name in (
+                "actor_anchor",
+                "source_anchor",
+                "recipient_anchor",
+                "agent_anchor",
+                "start_anchor",
+                "end_anchor",
+            )
+            if (anchor := getattr(event, field_name, None)) is not None
+        )
+        if any(
+            anchor.phase == "successor" and anchor.presentation_key in overlay_only_keys
+            for anchor in anchors
+        ) or (
+            event.event_kind in after_state_event_kinds
+            and any(anchor.presentation_key in overlay_only_keys for anchor in anchors)
+        ):
+            raise ValueError(
+                "Only death choreography may consume a corpse-overlay endpoint."
+            )
     action_row = latest_transition.action_rows[0]
     own_rejections = tuple(
         event
@@ -3721,6 +4060,7 @@ def _validate_agent_common(
         or authority.recipient_presentation_key != parts.recipient_presentation_key
     ):
         raise ValueError("Agent source, authority, and endpoint do not join.")
+    _validate_local_oracle_corpse_overlay(frame, shared=shared)
     _validate_agent_incoming(
         source=source,
         endpoint=endpoint,
@@ -3736,6 +4076,165 @@ def _validate_agent_common(
         recipient_public_agent_id=parts.recipient_public_agent_id,
         excluded_root_fields=frozenset({"researcher_space"}),
     )
+
+
+def _validate_local_oracle_corpse_overlay(
+    frame: LiveNoSharedObsAuthorizedPresentationFrameV1
+    | ReplayNoSharedObsAuthorizedPresentationFrameV1
+    | ReplaySharedObsAuthorizedPresentationFrameV1,
+    *,
+    shared: bool,
+) -> None:
+    overlay = frame.local_oracle_corpse_overlay
+    _require_exact_type(
+        overlay,
+        LocalOracleCorpseOverlayV1,
+        name="local_oracle_corpse_overlay",
+    )
+    source = frame.source
+    parts = frame.current_endpoint.parts
+    if (
+        overlay.source_episode_id != source.episode_id
+        or overlay.source_frame_index != source.source_frame_index
+        or overlay.source_frame_id
+        != f"{source.episode_id}:frame:{source.source_frame_index}"
+        or overlay.source_simulator_step_count != source.source_simulator_step_count
+        or overlay.source_authority_epoch != source.source_authority_epoch
+        or overlay.recipient_public_agent_id != source.source_recipient_public_agent_id
+        or overlay.recipient_public_agent_id != parts.recipient_public_agent_id
+        or overlay.recipient_presentation_key != parts.recipient_presentation_key
+    ):
+        raise ValueError("local-Oracle corpse overlay misses its source epoch.")
+    base_by_id = {row.public_agent_id: row for row in parts.scene.agents}
+    if set(base_by_id) & {
+        row.corpse.public_agent_id for row in overlay.corpse_observations
+    }:
+        raise ValueError("local-Oracle corpse overlay duplicates a base-scene body.")
+    living_base_ids = {
+        row.public_agent_id for row in parts.scene.agents if row.life_state == "alive"
+    }
+    if not set(overlay.living_sensor_public_agent_ids) <= living_base_ids:
+        raise ValueError("local-Oracle corpse sensors must be living base-scene rows.")
+    if shared:
+        shared_parts = cast(SharedObsPresentationEndpointPartsV1, parts)
+        expected_sensor_order = tuple(
+            source_row.source_public_agent_id
+            for source_row in shared_parts.authorized_sensor_sources
+            if source_row.source_public_agent_id in living_base_ids
+        )
+    else:
+        recipient = base_by_id[parts.recipient_public_agent_id]
+        expected_sensor_order = (
+            (parts.recipient_public_agent_id,)
+            if recipient.life_state == "alive"
+            else ()
+        )
+    if overlay.living_sensor_public_agent_ids != expected_sensor_order:
+        raise ValueError("local-Oracle corpse sensor authority changed.")
+    target_ids = tuple(
+        cast(TargetAgentActionDisplayRowV1, row).target_public_agent_id
+        for row in frame.current_endpoint.action_axis.target_actions[1:]
+    )
+    target_index_by_id = {
+        public_id: index for index, public_id in enumerate(target_ids)
+    }
+    recipient_team_id = base_by_id[parts.recipient_public_agent_id].team_id
+    for observation in overlay.corpse_observations:
+        corpse = observation.corpse
+        index = target_index_by_id.get(corpse.public_agent_id)
+        if index is None:
+            raise ValueError("local-Oracle corpse lies outside the recipient axis.")
+        expected_relation: Literal["ally", "opponent"] = (
+            "ally" if index < 5 else "opponent"
+        )
+        expected_team_id = recipient_team_id if index < 5 else 3 - recipient_team_id
+        if corpse.relation != expected_relation or corpse.team_id != expected_team_id:
+            raise ValueError("local-Oracle corpse relation/team changed.")
+    researcher_by_id = {
+        row.public_agent_id: row for row in frame.researcher_space.roster_agents
+    }
+    mechanics_by_class_id = {
+        row.class_id: row for row in frame.researcher_space.class_mechanics
+    }
+    for observation in overlay.corpse_observations:
+        corpse = observation.corpse
+        researcher = researcher_by_id.get(corpse.public_agent_id)
+        mechanics = mechanics_by_class_id.get(corpse.class_id)
+        if researcher is None or (
+            researcher.life_state != "corpse"
+            or researcher.team_id != corpse.team_id
+            or researcher.class_id != corpse.class_id
+            or researcher.class_name != corpse.class_name
+            or not isclose(researcher.current_health, corpse.current_health)
+            or not isclose(researcher.maximum_health, corpse.maximum_health)
+            or not isclose(
+                researcher.effective_movement_speed,
+                corpse.effective_movement_speed,
+            )
+            or researcher.ultimate_cooldown_remaining
+            != corpse.ultimate_cooldown_remaining
+            or researcher.spawn_shield_remaining != corpse.spawn_shield_remaining
+            or researcher.steps_until_out_of_combat != corpse.steps_until_out_of_combat
+            or len(researcher.statuses) != len(corpse.statuses)
+            or any(
+                not _status_semantics_match(global_status, local_status)
+                for global_status, local_status in zip(
+                    researcher.statuses,
+                    corpse.statuses,
+                    strict=True,
+                )
+            )
+            or len(researcher.aura_modifiers) != len(corpse.aura_modifiers)
+            or any(
+                not _aura_semantics_match(global_aura, local_aura)
+                for global_aura, local_aura in zip(
+                    researcher.aura_modifiers,
+                    corpse.aura_modifiers,
+                    strict=True,
+                )
+            )
+        ):
+            raise ValueError(
+                "local-Oracle corpse public facts changed from researcher truth."
+            )
+        if mechanics is None or (
+            mechanics.class_name != corpse.class_name
+            or not _researcher_catalog_float_joins(
+                corpse.radius,
+                mechanics.body_radius,
+            )
+            or not _researcher_catalog_float_joins(
+                corpse.maximum_health,
+                mechanics.maximum_health,
+            )
+            or not _researcher_catalog_float_joins(
+                corpse.base_movement_speed,
+                mechanics.base_movement_speed,
+            )
+            or not _researcher_catalog_float_joins(
+                corpse.observation_radius,
+                mechanics.observation_radius,
+            )
+            or not _researcher_catalog_float_joins(
+                corpse.basic_interaction_radius,
+                mechanics.basic_interaction_radius,
+            )
+            or not _researcher_catalog_float_joins(
+                corpse.ultimate_interaction_radius,
+                mechanics.ultimate_interaction_radius,
+            )
+            or corpse.out_of_combat_delay_steps != mechanics.out_of_combat_delay_steps
+            or not _researcher_catalog_float_joins(
+                corpse.out_of_combat_health_regeneration_fraction_per_step,
+                mechanics.out_of_combat_health_regeneration_fraction_per_step,
+            )
+        ):
+            raise ValueError(
+                "local-Oracle corpse public facts changed from class mechanics."
+            )
+        # Position is intentionally absent from researcher space: the trusted
+        # producer binds it to the same-epoch global snapshot before sealing the
+        # overlay, while the client receives no hidden global geometry root.
 
 
 def _status_semantics_match(
@@ -3971,6 +4470,68 @@ def _validate_replay_researcher_space(
         raise ValueError(
             "Replay researcher space does not join its Agent presentation epoch."
         )
+    researcher_classes = {row.class_id: row for row in researcher.class_mechanics}
+    for local_class in frame.current_endpoint.parts.scene.class_mechanics:
+        if researcher_classes.get(local_class.class_id) != local_class:
+            raise ValueError(
+                "Replay researcher class mechanics changed a fog-authorized class."
+            )
+    researcher_roster = {row.public_agent_id: row for row in researcher.roster_agents}
+    for local_actor in frame.current_endpoint.parts.scene.agents:
+        global_actor = researcher_roster.get(local_actor.public_agent_id)
+        if (
+            global_actor is None
+            or global_actor.team_id != local_actor.team_id
+            or global_actor.class_id != local_actor.class_id
+            or global_actor.class_name != local_actor.class_name
+            or global_actor.life_state != local_actor.life_state
+            or not isclose(
+                global_actor.current_health,
+                local_actor.current_health,
+                rel_tol=1e-6,
+                abs_tol=1e-8,
+            )
+            or not isclose(
+                global_actor.maximum_health,
+                local_actor.maximum_health,
+                rel_tol=1e-6,
+                abs_tol=1e-8,
+            )
+            or not isclose(
+                global_actor.effective_movement_speed,
+                local_actor.effective_movement_speed,
+                rel_tol=1e-6,
+                abs_tol=1e-8,
+            )
+            or global_actor.ultimate_cooldown_remaining
+            != local_actor.ultimate_cooldown_remaining
+            or global_actor.spawn_shield_remaining != local_actor.spawn_shield_remaining
+            or global_actor.steps_until_out_of_combat
+            != local_actor.steps_until_out_of_combat
+            or global_actor.out_of_combat_delay_steps
+            != local_actor.out_of_combat_delay_steps
+            or len(global_actor.statuses) != len(local_actor.statuses)
+            or not all(
+                _status_semantics_match(global_status, local_status)
+                for global_status, local_status in zip(
+                    global_actor.statuses,
+                    local_actor.statuses,
+                    strict=True,
+                )
+            )
+            or len(global_actor.aura_modifiers) != len(local_actor.aura_modifiers)
+            or not all(
+                _aura_semantics_match(global_aura, local_aura)
+                for global_aura, local_aura in zip(
+                    global_actor.aura_modifiers,
+                    local_actor.aura_modifiers,
+                    strict=True,
+                )
+            )
+        ):
+            raise ValueError(
+                "Replay researcher roster changed a fog-authorized actor fact."
+            )
     _validate_recursive_presentation_keys(
         researcher,
         source_session_id=source.source_session_id,
@@ -4408,6 +4969,9 @@ __all__ = [
     "LiveResearcherInputInspectionV1",
     "LiveResearcherSpaceV1",
     "LiveScriptedPlaybackInspectionV1",
+    "LocalOracleCorpseObservationV1",
+    "LocalOracleCorpseOverlayV1",
+    "LocalOracleCorpsePublicFactsV1",
     "MovementActionDisplayRowV1",
     "NoSharedObsAuthorizedCurrentEndpointV1",
     "NoSharedObsLatestTransitionV1",
@@ -4447,4 +5011,6 @@ __all__ = [
     "build_oracle_authorized_current_endpoint_v1",
     "build_shared_obs_authorized_current_endpoint_v1",
     "canonical_authorized_endpoint_digest_sha256",
+    "canonical_local_oracle_corpse_overlay_digest_sha256",
+    "seal_local_oracle_corpse_overlay_v1",
 ]

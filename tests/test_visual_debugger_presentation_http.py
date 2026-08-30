@@ -8,6 +8,7 @@ from http import HTTPStatus
 from http.client import HTTPConnection, HTTPResponse
 from pathlib import Path
 from threading import Thread
+from typing import cast
 
 import pytest
 from scripts.dev.visual_debugger.presentation_protocol import (
@@ -257,7 +258,14 @@ def test_live_no_shared_get_after_pov_switch_is_exact_strict_and_source_joined(
         presentation.current_endpoint.parts.source_recipient_frame_id
         == presentation.source.source_recipient_frame_id
     )
-    assert "oracle_" not in presentation_body.decode()
+    local_payload = presentation.model_dump(mode="json", exclude={"researcher_space"})
+    corpse_overlay = cast(
+        dict[str, object],
+        local_payload.pop("local_oracle_corpse_overlay"),
+    )
+    assert corpse_overlay["overlay_kind"] == "local_oracle_corpse_overlay"
+    assert corpse_overlay["source_frame_id"] == raw.frame_id
+    assert "oracle_" not in json.dumps(local_payload, sort_keys=True)
     _assert_json_security_headers(presentation_response, presentation_body)
 
 

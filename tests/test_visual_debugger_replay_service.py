@@ -71,6 +71,7 @@ from tests.evaluation_fixtures import (
     captured_evaluation_trajectory,
     evaluation_env_config,
 )
+from tests.export_visual_debugger_replay_artifacts import build_corpse_overlay_bundle
 
 import marl_battlegrounds.core.env as core_env_module
 import marl_battlegrounds.core.geometry as core_geometry_module
@@ -608,6 +609,11 @@ def _shared_presentation_for_raw(
     incoming_visual_events = _incoming_visual_events(case, frame_index=frame_index)
     return build_replay_shared_obs_authorized_presentation_v1(
         raw,
+        global_context=case.bundle.replay.header.context,
+        current_global_frame=case.bundle.replay.frames[frame_index],
+        previous_global_frame=(
+            None if frame_index == 0 else case.bundle.replay.frames[frame_index - 1]
+        ),
         public_catalog=case.bundle.replay.header.context.static_mechanics_catalog,
         source_authority_epoch=raw.revision,
         authorized_recipient_global_slot=recipient_global_slot,
@@ -1649,6 +1655,13 @@ def test_no_shared_packager_ignores_every_forbidden_raw_diagnostic_branch(
     baseline = build_replay_no_shared_obs_authorized_presentation_v1(
         index,
         raw,
+        global_context=service_cases.complete.bundle.replay.header.context,
+        current_global_frame=service_cases.complete.bundle.replay.frames[
+            raw.cursor.frame_index
+        ],
+        previous_global_frame=service_cases.complete.bundle.replay.frames[
+            raw.cursor.frame_index - 1
+        ],
         public_catalog=(
             service_cases.complete.bundle.replay.header.context.static_mechanics_catalog
         ),
@@ -1685,6 +1698,13 @@ def test_no_shared_packager_ignores_every_forbidden_raw_diagnostic_branch(
     mutated = build_replay_no_shared_obs_authorized_presentation_v1(
         index,
         diagnostic_raw,
+        global_context=service_cases.complete.bundle.replay.header.context,
+        current_global_frame=service_cases.complete.bundle.replay.frames[
+            raw.cursor.frame_index
+        ],
+        previous_global_frame=service_cases.complete.bundle.replay.frames[
+            raw.cursor.frame_index - 1
+        ],
         public_catalog=(
             service_cases.complete.bundle.replay.header.context.static_mechanics_catalog
         ),
@@ -1744,6 +1764,13 @@ def test_no_shared_packager_rejects_poisoned_used_raw_headers(
         build_replay_no_shared_obs_authorized_presentation_v1(
             index,
             poisoned,
+            global_context=service_cases.complete.bundle.replay.header.context,
+            current_global_frame=service_cases.complete.bundle.replay.frames[
+                raw.cursor.frame_index
+            ],
+            previous_global_frame=service_cases.complete.bundle.replay.frames[
+                raw.cursor.frame_index - 1
+            ],
             public_catalog=(
                 service_cases.complete.bundle.replay.header.context.static_mechanics_catalog
             ),
@@ -1813,6 +1840,13 @@ def test_no_shared_packager_rejects_cursor_and_projection_runtime_poisons(
             build_replay_no_shared_obs_authorized_presentation_v1(
                 index,
                 poisoned,
+                global_context=service_cases.complete.bundle.replay.header.context,
+                current_global_frame=service_cases.complete.bundle.replay.frames[
+                    raw.cursor.frame_index
+                ],
+                previous_global_frame=service_cases.complete.bundle.replay.frames[
+                    raw.cursor.frame_index - 1
+                ],
                 public_catalog=(
                     service_cases.complete.bundle.replay.header.context.static_mechanics_catalog
                 ),
@@ -2248,6 +2282,13 @@ def test_shared_packager_binds_private_raw_identity_to_authority_sources(
     with pytest.raises(ValueError, match="does not join authorized"):
         build_replay_shared_obs_authorized_presentation_v1(
             raw,
+            global_context=service_cases.shared.bundle.replay.header.context,
+            current_global_frame=service_cases.shared.bundle.replay.frames[
+                raw.cursor.frame_index
+            ],
+            previous_global_frame=service_cases.shared.bundle.replay.frames[
+                raw.cursor.frame_index - 1
+            ],
             public_catalog=(
                 service_cases.shared.bundle.replay.header.context.static_mechanics_catalog
             ),
@@ -2350,6 +2391,13 @@ def test_agent_packagers_reject_poisoned_cursor_schema_version(
         build_replay_no_shared_obs_authorized_presentation_v1(
             no_shared_index,
             no_shared_raw.model_copy(update={"cursor": no_shared_cursor}),
+            global_context=service_cases.complete.bundle.replay.header.context,
+            current_global_frame=service_cases.complete.bundle.replay.frames[
+                no_shared_raw.cursor.frame_index
+            ],
+            previous_global_frame=service_cases.complete.bundle.replay.frames[
+                no_shared_raw.cursor.frame_index - 1
+            ],
             public_catalog=(
                 service_cases.complete.bundle.replay.header.context.static_mechanics_catalog
             ),
@@ -2561,6 +2609,9 @@ def test_shared_packager_ignores_forbidden_transition_branches(
 
     baseline = build_replay_shared_obs_authorized_presentation_v1(
         raw,
+        global_context=case.bundle.replay.header.context,
+        current_global_frame=case.bundle.replay.frames[raw.cursor.frame_index],
+        previous_global_frame=case.bundle.replay.frames[raw.cursor.frame_index - 1],
         public_catalog=case.bundle.replay.header.context.static_mechanics_catalog,
         source_authority_epoch=raw.revision,
         authorized_recipient_global_slot=0,
@@ -2579,6 +2630,9 @@ def test_shared_packager_ignores_forbidden_transition_branches(
     )
     mutated = build_replay_shared_obs_authorized_presentation_v1(
         raw,
+        global_context=case.bundle.replay.header.context,
+        current_global_frame=case.bundle.replay.frames[raw.cursor.frame_index],
+        previous_global_frame=case.bundle.replay.frames[raw.cursor.frame_index - 1],
         public_catalog=case.bundle.replay.header.context.static_mechanics_catalog,
         source_authority_epoch=raw.revision,
         authorized_recipient_global_slot=0,
@@ -2672,6 +2726,9 @@ def test_shared_packager_ignores_contributor_non_authority_and_unavailable_paylo
 
     baseline = build_replay_shared_obs_authorized_presentation_v1(
         raw,
+        global_context=case.bundle.replay.header.context,
+        current_global_frame=case.bundle.replay.frames[raw.cursor.frame_index],
+        previous_global_frame=case.bundle.replay.frames[raw.cursor.frame_index - 1],
         public_catalog=case.bundle.replay.header.context.static_mechanics_catalog,
         source_authority_epoch=raw.revision,
         authorized_recipient_global_slot=0,
@@ -2690,6 +2747,9 @@ def test_shared_packager_ignores_contributor_non_authority_and_unavailable_paylo
     )
     mutated = build_replay_shared_obs_authorized_presentation_v1(
         raw,
+        global_context=case.bundle.replay.header.context,
+        current_global_frame=case.bundle.replay.frames[raw.cursor.frame_index],
+        previous_global_frame=case.bundle.replay.frames[raw.cursor.frame_index - 1],
         public_catalog=case.bundle.replay.header.context.static_mechanics_catalog,
         source_authority_epoch=raw.revision,
         authorized_recipient_global_slot=0,
@@ -2744,6 +2804,9 @@ def test_shared_packager_rejects_nonfixed_recipient_credentials(
     with pytest.raises(ValueError):
         build_replay_shared_obs_authorized_presentation_v1(
             raw,
+            global_context=case.bundle.replay.header.context,
+            current_global_frame=case.bundle.replay.frames[raw.cursor.frame_index],
+            previous_global_frame=case.bundle.replay.frames[raw.cursor.frame_index - 1],
             public_catalog=case.bundle.replay.header.context.static_mechanics_catalog,
             source_authority_epoch=raw.revision,
             authorized_recipient_global_slot=cast(int, wrong_credential),
@@ -2789,6 +2852,17 @@ def test_agent_presentations_exclude_privileged_fields_and_canonical_values(
     raw = service.current_frame()
     payload = service.current_presentation().payload.model_dump(mode="json")
     researcher_space = cast(dict[str, object], payload.pop("researcher_space"))
+    corpse_overlay = cast(
+        dict[str, object],
+        payload.pop("local_oracle_corpse_overlay"),
+    )
+    assert corpse_overlay["overlay_kind"] == "local_oracle_corpse_overlay"
+    assert corpse_overlay["source_frame_id"] == (
+        case.bundle.replay.frames[raw.cursor.frame_index].frame_id
+    )
+    assert corpse_overlay["source_authority_epoch"] == raw.revision
+    overlay_keys = _recursive_keys(corpse_overlay)
+    overlay_strings = _recursive_string_values(corpse_overlay)
     keys = _recursive_keys(payload)
     strings = _recursive_string_values(payload)
     researcher_keys = _recursive_keys(researcher_space)
@@ -2820,6 +2894,9 @@ def test_agent_presentations_exclude_privileged_fields_and_canonical_values(
     }
 
     assert not (strings & forbidden_values)
+    assert overlay_strings & forbidden_values == {
+        case.bundle.replay.frames[raw.cursor.frame_index].frame_id
+    }
     privileged_values = {
         replay.artifact_id,
         replay.canonical_digest_sha256,
@@ -2867,6 +2944,17 @@ def test_agent_presentations_exclude_privileged_fields_and_canonical_values(
                 "authorized_endpoint_digest_sha256",
                 "source_authorized_endpoint_digest_sha256",
             }
+    for key in overlay_keys:
+        assert "global_slot" not in key
+        assert "artifact" not in key
+        assert "timeline" not in key
+        assert "metric" not in key
+        assert "completion" not in key
+        assert "processing" not in key
+        assert "canonical_" not in key
+        assert key not in {"cursor_generation", "choreography_generation"}
+        if "digest" in key:
+            assert key == "authorized_overlay_digest_sha256"
 
 
 def test_shared_packager_rejects_source_tuple_and_epoch_swaps(
@@ -2912,6 +3000,9 @@ def test_shared_packager_rejects_source_tuple_and_epoch_swaps(
     ) -> ReplaySharedObsAuthorizedPresentationFrameV1:
         return build_replay_shared_obs_authorized_presentation_v1(
             raw,
+            global_context=case.bundle.replay.header.context,
+            current_global_frame=case.bundle.replay.frames[raw.cursor.frame_index],
+            previous_global_frame=case.bundle.replay.frames[raw.cursor.frame_index - 1],
             public_catalog=case.bundle.replay.header.context.static_mechanics_catalog,
             source_authority_epoch=source_authority_epoch,
             authorized_recipient_global_slot=0,
@@ -3013,6 +3104,9 @@ def test_shared_packager_changes_for_valid_recipient_authorized_mask_mutation(
     )
     mutated = build_replay_shared_obs_authorized_presentation_v1(
         raw,
+        global_context=case.bundle.replay.header.context,
+        current_global_frame=case.bundle.replay.frames[raw.cursor.frame_index],
+        previous_global_frame=case.bundle.replay.frames[raw.cursor.frame_index - 1],
         public_catalog=case.bundle.replay.header.context.static_mechanics_catalog,
         source_authority_epoch=raw.revision,
         authorized_recipient_global_slot=0,
@@ -4675,4 +4769,50 @@ print('isolated')
     )
 
     assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "isolated"
+
+
+def test_loaded_agent_presentation_with_corpse_overlay_never_loads_jax_or_core(
+    tmp_path: Path,
+) -> None:
+    replay_path = tmp_path / "corpse-overlay-runtime.marlbg-replay.json"
+    save_replay_bundle_v1(
+        build_corpse_overlay_bundle(execution_information_mode="no_shared_obs"),
+        replay_path,
+    )
+    code = """
+import sys
+from pathlib import Path
+from marl_battlegrounds.evaluation.replay_io import load_replay_bundle_v1
+from scripts.dev.visual_debugger.replay_service import ReplayViewerService
+
+loaded = load_replay_bundle_v1(Path(sys.argv[1]), require_metric_report=True)
+service = ReplayViewerService(
+    loaded,
+    initial_frame_index=0,
+    view_mode='pov',
+    pov_global_slot=0,
+    viewer_session_id='runtime-no-jax-corpse-overlay',
+)
+result = service.current_presentation()
+assert result.outcome == 'response'
+assert len(result.payload.local_oracle_corpse_overlay.corpse_observations) == 1
+banned = ('jax', 'jaxlib', 'marl_battlegrounds.core')
+loaded_banned = sorted(
+    name
+    for name in sys.modules
+    if any(name == prefix or name.startswith(prefix + '.') for prefix in banned)
+)
+assert loaded_banned == [], loaded_banned
+print('isolated')
+"""
+    result = subprocess.run(
+        (sys.executable, "-c", code, str(replay_path)),
+        cwd=_REPOSITORY_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
     assert result.stdout.strip() == "isolated"

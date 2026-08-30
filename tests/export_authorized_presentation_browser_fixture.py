@@ -4,14 +4,18 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import fields, replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Protocol, cast
 
 from scripts.dev.visual_debugger.control import create_session
 from scripts.dev.visual_debugger.presentation_protocol import (
+    LiveNoSharedObsAuthorizedPresentationFrameV1,
     LiveOracleAuthorizedPresentationFrameV1,
     LiveOraclePresentationSourceIdentityV1,
     ReplayNoSharedObsAuthorizedPresentationFrameV1,
@@ -20,6 +24,7 @@ from scripts.dev.visual_debugger.presentation_protocol import (
 from scripts.dev.visual_debugger.replay_service import ReplayViewerService
 from scripts.dev.visual_debugger.scenarios import get_scenario
 from scripts.dev.visual_debugger.service import DebuggerService
+from tests.export_visual_debugger_replay_artifacts import build_corpse_overlay_bundle
 from tests.test_rendering_authorized_inspection import (
     _InspectionCases,
     inspection_cases,
@@ -41,6 +46,13 @@ from tests.test_visual_debugger_replay_service import (
 from tests.test_visual_debugger_service import _service
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
+from marl_battlegrounds.core.env import initialize_scenario_state
+from marl_battlegrounds.evaluation.capture import capture_initial_evaluation_frame_v1
+from marl_battlegrounds.evaluation.replay_io import (
+    REPLAY_FILE_SUFFIX_V1,
+    load_replay_bundle_v1,
+    save_replay_bundle_v1,
+)
 from marl_battlegrounds.rendering.authorized_pov_scene import pov_presentation_key_v1
 from marl_battlegrounds.rendering.authorized_presentation import (
     AgentPovVisualIncomingAgentPhaseTrajectoryV1,
@@ -81,6 +93,55 @@ def _live_pov_service() -> DebuggerService:
     )
 
 
+def _live_corpse_overlay_frame() -> LiveNoSharedObsAuthorizedPresentationFrameV1:
+    """Build one editable live Agent frame with an authorized local corpse."""
+    session = create_session(
+        get_scenario("arena_5v5"),
+        seed=0,
+        evaluation_launch_specification=debugger_test_launch_specification(),
+        controlled_global_slot=0,
+        show_ranges=True,
+        verbose_logging=False,
+    )
+    authored_state = session.state._replace(
+        agent_positions=session.state.agent_positions.at[5].set((4.0, 1.0)),
+        alive_mask=session.state.alive_mask.at[5].set(False),
+        current_health=session.state.current_health.at[5].set(0.0),
+    )
+    state, observation, action_mask, _ = initialize_scenario_state(
+        authored_state,
+        session.config,
+    )
+    frame = capture_initial_evaluation_frame_v1(
+        session.evaluation_context,
+        state,
+        observation,
+        action_mask,
+    )
+    service = DebuggerService(
+        replace(
+            session,
+            state=state,
+            observation=observation,
+            action_mask=action_mask,
+            current_evaluation_frame=frame,
+            raw_continuation_identity=None,
+        ),
+        view_mode="pov",
+        preset="analysis",
+        include_stress=False,
+        session_id="browser-live-no-shared-corpse-overlay",
+    )
+    result = service.current_presentation()
+    if (
+        result.outcome != "response"
+        or type(result.payload) is not LiveNoSharedObsAuthorizedPresentationFrameV1
+        or len(result.payload.local_oracle_corpse_overlay.corpse_observations) != 1
+    ):
+        raise RuntimeError("live corpse-overlay fixture did not authorize one corpse")
+    return result.payload
+
+
 def _pair(service: DebuggerService | ReplayViewerService) -> dict[str, object]:
     raw = service.current_frame()
     result = service.current_presentation()
@@ -93,6 +154,140 @@ def _pair(service: DebuggerService | ReplayViewerService) -> dict[str, object]:
     if isinstance(service, ReplayViewerService):
         pair["timeline"] = service.current_timeline().model_dump(mode="json")
     return pair
+
+
+def _corpse_overlay_browser_cases() -> tuple[
+    ReplayNoSharedObsAuthorizedPresentationFrameV1,
+    ReplayNoSharedObsAuthorizedPresentationFrameV1,
+    dict[str, str],
+]:
+    """Return initial/persistent overlays plus digest-valid poison cases."""
+    bundle = build_corpse_overlay_bundle(execution_information_mode="no_shared_obs")
+    with TemporaryDirectory(prefix="marl-corpse-overlay-fixture-") as directory:
+        path = Path(directory) / f"corpse{REPLAY_FILE_SUFFIX_V1}"
+        save_replay_bundle_v1(bundle, path)
+        loaded = load_replay_bundle_v1(path, require_metric_report=True)
+        service = ReplayViewerService(
+            loaded,
+            initial_frame_index=0,
+            view_mode="pov",
+            pov_global_slot=0,
+            viewer_session_id="browser-replay-no-shared-corpse-overlay",
+        )
+        result = service.current_presentation()
+        persistent_service = ReplayViewerService(
+            loaded,
+            initial_frame_index=1,
+            view_mode="pov",
+            pov_global_slot=0,
+            viewer_session_id="browser-replay-no-shared-persistent-corpse-overlay",
+        )
+        persistent_result = persistent_service.current_presentation()
+    if (
+        result.outcome != "response"
+        or type(result.payload) is not ReplayNoSharedObsAuthorizedPresentationFrameV1
+    ):
+        raise RuntimeError(
+            "corpse-overlay fixture did not produce NoSharedObs Agent POV"
+        )
+    frame = result.payload
+    if len(frame.local_oracle_corpse_overlay.corpse_observations) != 1:
+        raise RuntimeError(
+            "corpse-overlay fixture requires exactly one projected corpse"
+        )
+    if (
+        persistent_result.outcome != "response"
+        or type(persistent_result.payload)
+        is not ReplayNoSharedObsAuthorizedPresentationFrameV1
+    ):
+        raise RuntimeError(
+            "persistent corpse-overlay fixture did not produce NoSharedObs Agent POV"
+        )
+    persistent_frame = persistent_result.payload
+    persistent_visual = persistent_frame.visual_events
+    persistent_corpses = (
+        persistent_frame.local_oracle_corpse_overlay.corpse_observations
+    )
+    if persistent_visual is None or len(persistent_corpses) != 1:
+        raise RuntimeError(
+            "persistent corpse-overlay fixture requires one projected corpse"
+        )
+    persistent_corpse_id = persistent_corpses[0].corpse.public_agent_id
+    if any(
+        row.agent_public_agent_id == persistent_corpse_id
+        for row in persistent_visual.agent_phase_trajectories
+    ):
+        raise RuntimeError(
+            "persistent corpse overlay entered the causal trajectory inventory"
+        )
+
+    def reseal(payload: dict[str, object]) -> None:
+        overlay = cast(dict[str, object], payload["local_oracle_corpse_overlay"])
+        content = {
+            key: value
+            for key, value in overlay.items()
+            if key != "authorized_overlay_digest_sha256"
+        }
+        overlay["authorized_overlay_digest_sha256"] = hashlib.sha256(
+            json.dumps(
+                content,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+
+    corpse_fact_mismatch = cast(
+        dict[str, object], deepcopy(frame.model_dump(mode="json"))
+    )
+    mismatch_overlay = cast(
+        dict[str, object], corpse_fact_mismatch["local_oracle_corpse_overlay"]
+    )
+    mismatch_observation = cast(
+        dict[str, object],
+        cast(list[object], mismatch_overlay["corpse_observations"])[0],
+    )
+    mismatch_corpse = cast(dict[str, object], mismatch_observation["corpse"])
+    mismatch_position = cast(list[float], mismatch_corpse["position"])
+    mismatch_position[0] += 0.25
+    reseal(corpse_fact_mismatch)
+
+    class_mechanics_mismatch = cast(
+        dict[str, object], deepcopy(frame.model_dump(mode="json"))
+    )
+    class_overlay = cast(
+        dict[str, object], class_mechanics_mismatch["local_oracle_corpse_overlay"]
+    )
+    class_observation = cast(
+        dict[str, object], cast(list[object], class_overlay["corpse_observations"])[0]
+    )
+    class_corpse = cast(dict[str, object], class_observation["corpse"])
+    class_facts = cast(dict[str, object], class_observation["oracle_public_facts"])
+    class_corpse["radius"] = cast(float, class_corpse["radius"]) + 0.125
+    class_facts["radius"] = cast(float, class_facts["radius"]) + 0.125
+    reseal(class_mechanics_mismatch)
+
+    return (
+        frame,
+        persistent_frame,
+        {
+            "resealed_corpse_public_facts_mismatch": cast(
+                str,
+                cast(
+                    dict[str, object],
+                    corpse_fact_mismatch["local_oracle_corpse_overlay"],
+                )["authorized_overlay_digest_sha256"],
+            ),
+            "resealed_corpse_class_mechanics_mismatch": cast(
+                str,
+                cast(
+                    dict[str, object],
+                    class_mechanics_mismatch["local_oracle_corpse_overlay"],
+                )["authorized_overlay_digest_sha256"],
+            ),
+        },
+    )
 
 
 def _legacy_v1_scene(
@@ -275,6 +470,11 @@ def render_fixture() -> str:
         "_WrappedFixture1[_InspectionCases, _FiveFrames]", five_frames
     ).__wrapped__(cases)
     replay_cases = cast("_WrappedFixture0[_ServiceCases]", service_cases).__wrapped__()
+    (
+        corpse_overlay_frame,
+        persistent_corpse_overlay_frame,
+        corpse_overlay_negative_digests,
+    ) = _corpse_overlay_browser_cases()
     pair_services = {
         "live_oracle": _service(),
         "live_no_shared_obs_agent_pov": _live_pov_service(),
@@ -334,6 +534,7 @@ def render_fixture() -> str:
             frame_index=0,
             session="cp2-7-live-no-shared-zero",
         ),
+        "live_no_shared_editable_corpse_overlay": _live_corpse_overlay_frame(),
         "replay_oracle_frame_zero": _replay_oracle_at(
             cases,
             frame_index=0,
@@ -368,6 +569,8 @@ def render_fixture() -> str:
             frame_index=shared_final_index,
             session="cp2-7-replay-shared-final",
         ),
+        "replay_no_shared_corpse_overlay": corpse_overlay_frame,
+        "replay_no_shared_persistent_corpse_overlay": (persistent_corpse_overlay_frame),
     }
     state_cases.update(_adjacent_fog_state_cases(replay_no_shared_final))
     payload = {
@@ -386,6 +589,7 @@ def render_fixture() -> str:
                 frames.live_oracle
             ).model_dump(mode="json")
         },
+        "corpse_overlay_negative_digests": corpse_overlay_negative_digests,
     }
     return json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True) + "\n"
 

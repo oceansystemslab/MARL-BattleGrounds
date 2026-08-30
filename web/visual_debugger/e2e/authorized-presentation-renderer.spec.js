@@ -249,8 +249,8 @@ test("Debugger unit grid is lowest, exact, click-transparent, and absent from re
   );
   expect(result.liveRows).toHaveLength(2);
   for (const row of result.liveRows) {
-    expect(row.vertical).toBe(29);
-    expect(row.horizontal).toBe(14);
+    expect(row.vertical).toBe(19);
+    expect(row.horizontal).toBe(9);
     expect(row.mapAriaHidden).toBe("true");
     expect(row.mapFirst).toBe(true);
     expect(row.pointerEvents).toBe("none");
@@ -845,7 +845,7 @@ test("selected Replay aura modifiers remain exact beside Mage Burst duration and
   }
 });
 
-test("all three normalized Agent POV leaves keep hidden aura sources byte-inert", async ({
+test("all three normalized Agent POV leaves use researcher-space aura attribution without geometry", async ({
   page,
 }) => {
   const leafNames = [
@@ -981,8 +981,8 @@ test("all three normalized Agent POV leaves keep hidden aura sources byte-inert"
     expect(installed.tooltipBytes).toHaveLength(2);
     for (const tooltipBytes of installed.tooltipBytes) {
       expect(tooltipBytes).toContain("Source");
-      expect(tooltipBytes).toContain("Not disclosed in Agent POV");
-      expect(tooltipBytes).not.toContain("agent-slot-");
+      expect(tooltipBytes).toMatch(/Agent ID .+ · (?:Mage|Warrior) · Team [AB]/u);
+      expect(tooltipBytes).not.toContain("Not disclosed");
     }
     expect(installed.expectedModifierRows).toHaveLength(2);
     expect(installed.modifierRows).toEqual(installed.expectedModifierRows);
@@ -1012,6 +1012,218 @@ test("all three normalized Agent POV leaves keep hidden aura sources byte-inert"
   expect(renderings[2].modifierTooltipBytes).toEqual(
     renderings[0].modifierTooltipBytes,
   );
+});
+
+test("all three Agent leaves enrich visible status tooltips from researcher space only", async ({
+  page,
+}) => {
+  for (const leafName of [
+    "live_no_shared_obs_agent_pov",
+    "replay_no_shared_obs_agent_pov",
+    "replay_shared_obs_agent_pov",
+  ]) {
+    const raw = fixture.presentations[leafName];
+    await page.goto(origin);
+    const result = await page.evaluate(async (rawPresentation) => {
+      const moduleRoot = "/src";
+      const { normalizeAuthorizedPresentationFrameV1 } = await import(
+        `${moduleRoot}/authorized-presentation-normalizer.js`
+      );
+      const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+      const { createTooltipController } = await import(`${moduleRoot}/tooltip.js`);
+      const presentation =
+        await normalizeAuthorizedPresentationFrameV1(rawPresentation);
+      const battlefield = document.querySelector("#battlefield");
+      const empty = document.querySelector("#empty");
+      const tooltip = document.querySelector("#visual-tooltip");
+      const title = document.querySelector("#visual-tooltip-title");
+      const details = document.querySelector("#visual-tooltip-details");
+      if (
+        !(battlefield instanceof SVGSVGElement) ||
+        !(empty instanceof HTMLElement) ||
+        !(tooltip instanceof HTMLElement) ||
+        !(title instanceof HTMLElement) ||
+        !(details instanceof HTMLElement)
+      ) {
+        throw new TypeError("Agent status tooltip surface is unavailable.");
+      }
+      const renderer = new BattlefieldRenderer({ battlefield, empty });
+      const controller = createTooltipController({
+        root: document.body,
+        tooltip,
+        title,
+        details,
+      });
+      const localAgents = /** @type {Record<string, any>[]} */ (
+        rawPresentation.current_endpoint.parts.scene.agents
+      );
+      const roster = /** @type {Record<string, any>[]} */ (
+        rawPresentation.researcher_space.roster_agents
+      );
+      const localStatusRecipient = localAgents.find(
+        (/** @type {Record<string, any>} */ agent) => agent.statuses.length > 0,
+      );
+      if (!localStatusRecipient) {
+        throw new TypeError("Agent status recipient is unavailable.");
+      }
+      const canonical = (/** @type {Record<string, any>} */ agent) =>
+        `Agent ID ${agent.public_agent_id} · ${agent.class_name} · Team ${agent.team_id === 1 ? "A" : "B"}`;
+      const producerSelectors = {
+        durable: ".status-cell[data-tooltip-owner]",
+        overflow: ".status-overflow[data-tooltip-owner]",
+        fallback: '.required-dock-fallback[data-kind="status"][data-tooltip-owner]',
+        povObserved: ".pov-observed-status[data-tooltip-owner]",
+      };
+      const capture = () => {
+        /** @type {Record<string, any>[]} */
+        const rows = [];
+        /** @type {Record<string, number>} */
+        const counts = {};
+        for (const [producer, selector] of Object.entries(producerSelectors)) {
+          const owners = Array.from(battlefield.querySelectorAll(selector));
+          counts[producer] = owners.length;
+          for (const owner of owners) {
+            if (!(owner instanceof SVGElement)) {
+              throw new TypeError("Agent status owner is not SVG.");
+            }
+            owner.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+            const ownerKey = owner.getAttribute("data-presentation-key");
+            const observedBody = owner.closest(".pov-observed-body");
+            const ownerPublicId =
+              localAgents.find(
+                (/** @type {Record<string, any>} */ agent) =>
+                  agent.presentation_key === ownerKey,
+              )?.public_agent_id ??
+              observedBody?.getAttribute("data-public-agent-id") ??
+              null;
+            const recipient = roster.find(
+              (/** @type {Record<string, any>} */ agent) =>
+                agent.public_agent_id === ownerPublicId,
+            );
+            if (!recipient) {
+              throw new TypeError("Status owner does not join the researcher roster.");
+            }
+            const tokenId = owner.getAttribute("data-token-id");
+            const duration = Number(owner.getAttribute("data-duration"));
+            const statusIndex = Number(owner.getAttribute("data-index"));
+            const candidateStatuses =
+              producer === "durable" &&
+              Number.isInteger(statusIndex) &&
+              recipient.statuses[statusIndex]
+                ? [recipient.statuses[statusIndex]]
+                : tokenId === null
+                  ? recipient.statuses
+                  : recipient.statuses.filter(
+                      (/** @type {Record<string, any>} */ status) =>
+                        status.status_id === tokenId &&
+                        status.remaining_duration === duration,
+                    );
+            const sourceReferences = candidateStatuses.flatMap(
+              (/** @type {Record<string, any>} */ status) => status.direct_sources,
+            );
+            const uniqueSourcePublicIds = [
+              ...new Set(
+                sourceReferences.map(
+                  (/** @type {Record<string, any>} */ source) =>
+                    source.source_public_agent_id,
+                ),
+              ),
+            ];
+            const expectedSources = uniqueSourcePublicIds.map((publicId) => {
+              const source = roster.find(
+                (/** @type {Record<string, any>} */ agent) =>
+                  agent.public_agent_id === publicId,
+              );
+              if (!source) {
+                throw new TypeError(
+                  "Status source does not join the researcher roster.",
+                );
+              }
+              return canonical(source);
+            });
+            rows.push({
+              producer,
+              labels: Array.from(
+                details.querySelectorAll(".semantic-explanation__label"),
+                (node) => node.textContent,
+              ),
+              detailsHtml: details.innerHTML,
+              detailsText: details.textContent ?? "",
+              ownerMarkup: owner.outerHTML,
+              expectedRecipient: canonical(recipient),
+              expectedSources,
+              researcherKeys: roster.map(
+                (/** @type {Record<string, any>} */ agent) => agent.presentation_key,
+              ),
+            });
+          }
+        }
+        return { counts, rows };
+      };
+
+      const render = () =>
+        renderer.render(presentation, {
+          showRanges: true,
+          localInspectedPresentationKey: localStatusRecipient.presentation_key,
+        });
+      render();
+      const standard = capture();
+      battlefield.style.width = "320px";
+      battlefield.style.height = "240px";
+      render();
+      const compact = capture();
+      controller.destroy();
+      return { standard, compact };
+    }, raw);
+    expect(result.standard.counts.durable, leafName).toBeGreaterThan(0);
+    expect(result.compact.counts.overflow, leafName).toBeGreaterThan(0);
+    // The branded five-leaf adapter currently has no observed-body collection.
+    // Each fixture's one status fits the compact overflow placement, so the
+    // impossible-placement fallback producer is not applicable here.
+    expect(result.standard.counts.fallback, leafName).toBe(0);
+    expect(result.compact.counts.fallback, leafName).toBe(0);
+    expect(result.standard.counts.povObserved, leafName).toBe(0);
+    expect(result.compact.counts.povObserved, leafName).toBe(0);
+    expect(result.standard.counts.overflow, leafName).toBe(0);
+    for (const row of [...result.standard.rows, ...result.compact.rows]) {
+      if (row.producer === "durable" || row.producer === "povObserved") {
+        expect(row.labels, `${leafName}/${row.producer}`).toContain("Recipient");
+      } else {
+        expect(row.detailsText, `${leafName}/${row.producer}`).toContain("Recipient");
+      }
+      expect(row.detailsText, `${leafName}/${row.producer}`).toContain(
+        row.expectedRecipient,
+      );
+      expect(row.detailsText, `${leafName}/${row.producer}`).not.toContain(
+        "Not disclosed",
+      );
+      for (const expectedSource of row.expectedSources) {
+        expect(row.detailsText, `${leafName}/${row.producer}`).toContain(
+          expectedSource,
+        );
+      }
+      if (
+        row.expectedSources.length > 0 &&
+        (row.producer === "durable" || row.producer === "povObserved")
+      ) {
+        expect(row.labels, `${leafName}/${row.producer}`).toContain(
+          row.expectedSources.length === 1 ? "Source" : "Sources",
+        );
+      }
+      if (row.expectedSources.length === 0) {
+        expect(row.labels, `${leafName}/${row.producer}`).not.toContain("Source");
+        expect(row.labels, `${leafName}/${row.producer}`).not.toContain("Sources");
+      }
+      for (const researcherKey of row.researcherKeys) {
+        expect(row.detailsHtml, `${leafName}/${row.producer}`).not.toContain(
+          researcherKey,
+        );
+        expect(row.ownerMarkup, `${leafName}/${row.producer}`).not.toContain(
+          researcherKey,
+        );
+      }
+    }
+  }
 });
 
 test("Oracle aura attribution remains exact in the tooltip and absent from aura DOM keys", async ({

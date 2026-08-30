@@ -22,7 +22,7 @@ const SOURCE_KEYS = Object.freeze([
 
 /** @typedef {"researcher" | "agent_pov"} SourceAudience */
 /** @typedef {"direct" | "aggregate_aura"} SourceAttributionKind */
-/** @typedef {"single" | "multiple" | "unavailable" | "redacted"} SourceAttributionState */
+/** @typedef {"single" | "multiple" | "unavailable"} SourceAttributionState */
 /**
  * @typedef {{
  *   state: SourceAttributionState,
@@ -46,20 +46,13 @@ const UNAVAILABLE = attribution(
   "Unavailable in this artifact",
   "Source unavailable in this artifact",
 );
-const REDACTED = attribution(
-  "redacted",
-  "Source",
-  "Not disclosed in Agent POV",
-  "Source not disclosed in Agent POV",
-);
-
 /**
  * Format direct-source attribution or deliberately omit aggregate-aura source.
  *
  * `aggregate_aura` always returns `null`: an aggregate multiplier has no
  * serialized emitter attribution. Spawn Shield is intentionally not an
- * accepted attribution kind; its separate card owns only its authorized Owner
- * identity and never manufactures a Source row.
+ * accepted attribution kind; its separate card owns only its authorized
+ * Recipient identity and never manufactures a Source row.
  *
  * @param {unknown} rawOptions
  * @returns {Readonly<SourceAttribution> | null}
@@ -80,9 +73,10 @@ export function authorizedSourceAttributionV1(rawOptions) {
   if (kind === "aggregate_aura") {
     return null;
   }
-  if (audience === "agent_pov") {
-    return REDACTED;
-  }
+  // Agent battlefield geometry never authorizes a hidden source identity on
+  // its own. Callers either supply the separately validated researcher-space
+  // status context or omit the unavailable row entirely.
+  if (audience === "agent_pov") return null;
   const directSources = snapshotDensePlainArray(options.direct_sources);
   const authorizedAgents = snapshotDensePlainArray(options.authorized_agents);
   if (directSources === null || authorizedAgents === null) {

@@ -1053,12 +1053,18 @@ async function exportAndInspectReplayPng(page, options) {
 
 /** @param {import("@playwright/test").Page} page */
 async function enableAllReplayVisualFilters(page) {
+  await page.locator("#visual-filters").evaluate((details) => {
+    if (!(details instanceof HTMLDetailsElement)) {
+      throw new TypeError("Replay visual-filter disclosure is unavailable.");
+    }
+    details.open = true;
+  });
   const enableAll = page.locator("#enable-all-visual-filters-button");
   if (await enableAll.isEnabled()) {
     await enableAll.click();
   }
   await expect(page.locator("#visual-filter-count")).toHaveText(
-    `${CP9_VISUAL_FILTER_IDS.length} enabled`,
+    `${CP9_VISUAL_FILTER_IDS.length + 1} enabled`,
   );
   await expect(enableAll).toBeDisabled();
   await expect(page.locator("#disable-all-visual-filters-button")).toBeEnabled();
@@ -1101,7 +1107,7 @@ async function installRepresentativeReplayPresentationState(page, options = {}) 
     await input.uncheck();
   }
   await expect(page.locator("#visual-filter-count")).toHaveText(
-    `${CP9_VISUAL_FILTER_IDS.length - REPRESENTATIVE_DISABLED_FILTERS.length} enabled`,
+    `${CP9_VISUAL_FILTER_IDS.length - REPRESENTATIVE_DISABLED_FILTERS.length + 1} enabled`,
   );
   if (options.proveVisibleUltimate === true) {
     await expect(ultimateEffects).toHaveCount(0);
@@ -1570,6 +1576,7 @@ test("replay reconnect rejects a valid live frame without crossing the viewer bo
 
   let frameRequestCount = 0;
   let timelineRequestCount = 0;
+  let replayPostCount = 0;
   /** @param {import("@playwright/test").Request} request */
   const recordTimelineRequest = (request) => {
     if (
@@ -1580,6 +1587,14 @@ test("replay reconnect rejects a valid live frame without crossing the viewer bo
     }
   };
   page.on("request", recordTimelineRequest);
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname === "/api/replay/command"
+    ) {
+      replayPostCount += 1;
+    }
+  });
   await page.route("**/api/frame", async (route) => {
     frameRequestCount += 1;
     await route.fulfill({ json: structuredClone(liveFrame), status: 200 });
@@ -1613,6 +1628,21 @@ test("replay reconnect rejects a valid live frame without crossing the viewer bo
     "Read-only live battlefield. Simulator and actor activation controls are unavailable.",
   );
   await expect(page.locator("#battlefield")).toHaveAttribute("tabindex", "-1");
+  const offlineDefaultsPrevented = await page
+    .locator("#battlefield")
+    .evaluate((element) =>
+      [" ", "ArrowLeft", "ArrowRight"].map((key) => {
+        const event = new KeyboardEvent("keydown", {
+          key,
+          bubbles: true,
+          cancelable: true,
+        });
+        element.dispatchEvent(event);
+        return event.defaultPrevented;
+      }),
+    );
+  expect(offlineDefaultsPrevented).toEqual([false, false, false]);
+  expect(replayPostCount).toBe(0);
   expect(frameRequestCount).toBe(2);
   expect(timelineRequestCount).toBe(0);
 
@@ -1821,8 +1851,20 @@ test("one replay transport trajectory keeps static seeks, playback, rates, and r
   const postsBeforeRace = replayPosts.length;
   const endResponsePromise = nextReplayResponse(page);
   await page.locator("#replay-last-button").click();
-  await page.locator("#battlefield").focus();
-  await page.keyboard.press("ArrowLeft");
+  const fencedDefaultsPrevented = await page
+    .locator("#battlefield")
+    .evaluate((element) =>
+      [" ", "ArrowLeft", "ArrowRight"].map((key) => {
+        const event = new KeyboardEvent("keydown", {
+          key,
+          bubbles: true,
+          cancelable: true,
+        });
+        element.dispatchEvent(event);
+        return event.defaultPrevented;
+      }),
+    );
+  expect(fencedDefaultsPrevented).toEqual([true, true, true]);
   expect((await endResponsePromise).status()).toBe(200);
   await page.unroute("**/api/replay/command");
   expect(replayPosts).toHaveLength(postsBeforeRace + 1);
@@ -2437,6 +2479,7 @@ test("Actor POV keeps battlefield fog while exposing artifact-wide facts", async
       normalText: document.body.innerText,
       visibleAttributes,
       descriptorText,
+      battlefield: snapshot(requiredRoot("#battlefield")),
       inspector: snapshot(requiredRoot("#agent-details")),
       technical: snapshot(technicalRoot),
       technicalFacts: [
@@ -2472,6 +2515,7 @@ test("Actor POV keeps battlefield fog while exposing artifact-wide facts", async
     surfaces,
     tooltipSnapshot,
   });
+  const battlefieldSurfaceBytes = JSON.stringify(surfaces.battlefield);
   const povWireBytes = JSON.stringify([povFrame, povTimeline]);
 
   for (const authorizedId of authorizedPublicIds) {
@@ -2479,9 +2523,13 @@ test("Actor POV keeps battlefield fog while exposing artifact-wide facts", async
       expect(completeSurfaceBytes).toContain(authorizedId);
     }
   }
+  for (const forbiddenValue of [...hiddenPublicIds, ...researcherEventIds]) {
+    if (typeof forbiddenValue === "string" && forbiddenValue.length > 0) {
+      expect(battlefieldSurfaceBytes).not.toContain(forbiddenValue);
+      expect(povWireBytes).not.toContain(forbiddenValue);
+    }
+  }
   for (const forbiddenValue of [
-    ...hiddenPublicIds,
-    ...researcherEventIds,
     artifactManifest.outputDirectory,
     artifactManifest.complete,
     artifactManifest.missingMetric,
@@ -2492,12 +2540,18 @@ test("Actor POV keeps battlefield fog while exposing artifact-wide facts", async
       expect(povWireBytes).not.toContain(forbiddenValue);
     }
   }
+  const battlefieldSemanticText = [
+    surfaces.battlefield.text,
+    ...surfaces.battlefield.attributes
+      .filter(({ name }) => name.startsWith("aria-") || name === "title")
+      .map(({ value }) => value),
+  ].join("\n");
   for (const slot of hiddenSlots) {
-    expect(semanticSurfaceText).not.toMatch(
+    expect(battlefieldSemanticText).not.toMatch(
       new RegExp(`\\b(?:global[ _-]?slot|slot|id_)\\s*[:#= -]?\\s*${slot}\\b`, "iu"),
     );
   }
-  const hiddenSlotAttributes = allAttributes.filter(
+  const hiddenSlotAttributes = surfaces.battlefield.attributes.filter(
     ({ name, value }) =>
       /slot/iu.test(name) && /^\d+$/u.test(value) && hiddenSlots.has(Number(value)),
   );

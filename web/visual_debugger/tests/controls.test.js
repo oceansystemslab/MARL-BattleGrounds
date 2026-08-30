@@ -124,6 +124,7 @@ test("battlefield-owned commands and accepted fenced input never become browser 
   const battlefield = new EventTarget();
   let interactive = false;
   let ownFencedCommand = true;
+  let ownFencedSpaceDefault = true;
   /** @type {Record<string, unknown>[]} */
   const commands = [];
   /** @type {Record<string, unknown>[]} */
@@ -141,6 +142,7 @@ test("battlefield-owned commands and accepted fenced input never become browser 
       fencedCommands.push(command);
       return ownFencedCommand;
     },
+    ownsFencedSpaceDefault: () => ownFencedSpaceDefault,
   });
 
   const fencedSpace = cancelableKeydown(" ", { repeat: true });
@@ -184,6 +186,14 @@ test("battlefield-owned commands and accepted fenced input never become browser 
   battlefield.dispatchEvent(nativeFencedEnter);
   assert.equal(nativeFencedEnter.defaultPrevented, false);
   assert.deepEqual(commands, []);
+
+  const ownedFencedSpace = cancelableKeydown(" ");
+  battlefield.dispatchEvent(ownedFencedSpace);
+  assert.equal(ownedFencedSpace.defaultPrevented, true);
+  ownFencedSpaceDefault = false;
+  const nativeFencedSpace = cancelableKeydown(" ");
+  battlefield.dispatchEvent(nativeFencedSpace);
+  assert.equal(nativeFencedSpace.defaultPrevented, false);
 
   interactive = true;
   const ownedSpace = cancelableKeydown(" ");

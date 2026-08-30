@@ -24,6 +24,9 @@ from scripts.dev.visual_debugger.live_presentation import (
     build_live_oracle_authorized_presentation_v1,
     build_live_researcher_space_v1,
 )
+from scripts.dev.visual_debugger.local_oracle_corpse_overlay import (
+    build_local_oracle_corpse_overlay_v1,
+)
 from scripts.dev.visual_debugger.presentation import (
     build_replay_oracle_authorized_presentation_v1,
     build_replay_researcher_space_v1,
@@ -72,6 +75,7 @@ from scripts.dev.visual_debugger.presentation_protocol import (
     build_oracle_authorized_current_endpoint_v1,
     build_shared_obs_authorized_current_endpoint_v1,
     canonical_authorized_endpoint_digest_sha256,
+    seal_local_oracle_corpse_overlay_v1,
 )
 from scripts.dev.visual_debugger.protocol import ResearcherLiveDebuggerFrameV2
 from scripts.dev.visual_debugger.scenarios import get_scenario
@@ -743,6 +747,16 @@ def five_frames(
         parts=no_shared_current,
         axis_mapping=no_shared_index.content.axis_mapping,
     )
+    no_shared_overlay = seal_local_oracle_corpse_overlay_v1(
+        source_episode_id=no_shared_current.source_episode_id,
+        source_frame_index=1,
+        source_simulator_step_count=no_shared_current.source_simulator_step_count,
+        source_authority_epoch=1,
+        recipient_public_agent_id=no_shared_current.recipient_public_agent_id,
+        recipient_presentation_key=no_shared_current.recipient_presentation_key,
+        living_sensor_public_agent_ids=(no_shared_current.recipient_public_agent_id,),
+        corpse_observations=(),
+    )
     no_shared_events = build_replay_no_shared_obs_incoming_summary_v1(
         no_shared_index,
         successor_frame_index=1,
@@ -803,6 +817,7 @@ def five_frames(
         ),
         analysis_mode="analysis",
         current_endpoint=no_shared_endpoint,
+        local_oracle_corpse_overlay=no_shared_overlay,
         latest_events=no_shared_events,
         visual_events=no_shared_visual_events,
         latest_transition=no_shared_transition,
@@ -855,6 +870,16 @@ def five_frames(
     live_endpoint = build_no_shared_obs_authorized_current_endpoint_v1(
         parts=live_current,
         axis_mapping=live_slice.axis_mapping,
+    )
+    live_overlay = seal_local_oracle_corpse_overlay_v1(
+        source_episode_id=live_current.source_episode_id,
+        source_frame_index=1,
+        source_simulator_step_count=live_current.source_simulator_step_count,
+        source_authority_epoch=1,
+        recipient_public_agent_id=live_current.recipient_public_agent_id,
+        recipient_presentation_key=live_current.recipient_presentation_key,
+        living_sensor_public_agent_ids=(live_current.recipient_public_agent_id,),
+        corpse_observations=(),
     )
     live_events = build_replay_no_shared_obs_incoming_summary_v1(
         no_shared_index,
@@ -912,6 +937,7 @@ def five_frames(
         ),
         analysis_mode="analysis",
         current_endpoint=live_endpoint,
+        local_oracle_corpse_overlay=live_overlay,
         latest_events=live_events,
         visual_events=live_visual_events,
         latest_transition=live_transition,
@@ -971,6 +997,25 @@ def five_frames(
         parts=shared_current,
         axis_mapping=shared_source.axis_mapping,
     )
+    shared_living_ids = {
+        row.public_agent_id
+        for row in shared_current.scene.agents
+        if row.life_state == "alive"
+    }
+    shared_overlay = seal_local_oracle_corpse_overlay_v1(
+        source_episode_id=shared_current.source_episode_id,
+        source_frame_index=1,
+        source_simulator_step_count=shared_current.source_simulator_step_count,
+        source_authority_epoch=1,
+        recipient_public_agent_id=shared_current.recipient_public_agent_id,
+        recipient_presentation_key=shared_current.recipient_presentation_key,
+        living_sensor_public_agent_ids=tuple(
+            row.source_public_agent_id
+            for row in shared_current.authorized_sensor_sources
+            if row.source_public_agent_id in shared_living_ids
+        ),
+        corpse_observations=(),
+    )
     shared_events = build_shared_obs_incoming_summary_v1(
         shared_start,
         shared_current,
@@ -1028,6 +1073,7 @@ def five_frames(
         ),
         analysis_mode="analysis",
         current_endpoint=shared_endpoint,
+        local_oracle_corpse_overlay=shared_overlay,
         latest_events=shared_events,
         visual_events=shared_visual_events,
         latest_transition=shared_transition,
@@ -1187,6 +1233,21 @@ def _replay_no_shared_at(
         ),
         analysis_mode="analysis",
         current_endpoint=endpoint,
+        local_oracle_corpse_overlay=build_local_oracle_corpse_overlay_v1(
+            trajectory.context,
+            trajectory.frames[frame_index],
+            current.scene,
+            authority_session_id=session,
+            source_authority_epoch=7,
+            recipient_public_agent_id=current.recipient_public_agent_id,
+            living_sensor_public_agent_ids=(
+                (current.recipient_public_agent_id,)
+                if trajectory.frames[frame_index].snapshot.alive_mask[
+                    index.content.selected_global_slot
+                ]
+                else ()
+            ),
+        ),
         latest_events=latest_events,
         visual_events=visual_events,
         latest_transition=latest_transition,
@@ -1308,6 +1369,23 @@ def _replay_shared_at(
         ),
         analysis_mode="analysis",
         current_endpoint=endpoint,
+        local_oracle_corpse_overlay=build_local_oracle_corpse_overlay_v1(
+            trajectory.context,
+            trajectory.frames[frame_index],
+            current.scene,
+            authority_session_id=session,
+            source_authority_epoch=7,
+            recipient_public_agent_id=current.recipient_public_agent_id,
+            living_sensor_public_agent_ids=tuple(
+                row.source_public_agent_id
+                for row in current.authorized_sensor_sources
+                if any(
+                    agent.public_agent_id == row.source_public_agent_id
+                    and agent.life_state == "alive"
+                    for agent in current.scene.agents
+                )
+            ),
+        ),
         latest_events=latest_events,
         visual_events=visual_events,
         latest_transition=latest_transition,
@@ -1531,6 +1609,21 @@ def _live_no_shared_at(
         ),
         analysis_mode="analysis",
         current_endpoint=endpoint,
+        local_oracle_corpse_overlay=build_local_oracle_corpse_overlay_v1(
+            trajectory.context,
+            trajectory.frames[frame_index],
+            current.scene,
+            authority_session_id=session,
+            source_authority_epoch=frame_index,
+            recipient_public_agent_id=current.recipient_public_agent_id,
+            living_sensor_public_agent_ids=(
+                (current.recipient_public_agent_id,)
+                if trajectory.frames[frame_index].snapshot.alive_mask[
+                    index.content.selected_global_slot
+                ]
+                else ()
+            ),
+        ),
         latest_events=latest_events,
         visual_events=visual_events,
         latest_transition=latest_transition,
@@ -1670,6 +1763,47 @@ def test_live_researcher_rejects_changed_fog_authorized_class_mechanics(
         LiveNoSharedObsAuthorizedPresentationFrameV1.model_validate_json(
             json.dumps(payload)
         )
+
+
+@pytest.mark.parametrize(
+    ("frame_attribute", "model"),
+    (
+        ("replay_no_shared", ReplayNoSharedObsAuthorizedPresentationFrameV1),
+        ("replay_shared", ReplaySharedObsAuthorizedPresentationFrameV1),
+    ),
+)
+def test_replay_researcher_rejects_changed_fog_authorized_actor_fact(
+    five_frames: _FiveFrames,
+    frame_attribute: str,
+    model: type[
+        ReplayNoSharedObsAuthorizedPresentationFrameV1
+        | ReplaySharedObsAuthorizedPresentationFrameV1
+    ],
+) -> None:
+    frame = getattr(five_frames, frame_attribute)
+    payload = json.loads(frame.model_dump_json())
+    local_public_id = payload["current_endpoint"]["parts"]["scene"]["agents"][0][
+        "public_agent_id"
+    ]
+    global_actor = next(
+        row
+        for row in payload["researcher_space"]["roster_agents"]
+        if row["public_agent_id"] == local_public_id
+    )
+    global_actor["current_health"] = (
+        global_actor["current_health"] - 0.25
+        if global_actor["current_health"] == global_actor["maximum_health"]
+        else min(
+            global_actor["maximum_health"],
+            global_actor["current_health"] + 0.25,
+        )
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match="Replay researcher roster changed a fog-authorized actor fact",
+    ):
+        model.model_validate_json(json.dumps(payload))
 
 
 def test_live_and_replay_researcher_spaces_reject_hidden_standalone_fact_poison(
@@ -3399,10 +3533,10 @@ def test_every_serialized_presentation_key_is_recomputed_for_its_authority(
     )
     expected_counts = {
         "live_oracle": 58,
-        "live_no_shared_obs_agent_pov": 62,
+        "live_no_shared_obs_agent_pov": 63,
         "replay_oracle": 58,
-        "replay_no_shared_obs_agent_pov": 62,
-        "replay_shared_obs_agent_pov": 77,
+        "replay_no_shared_obs_agent_pov": 63,
+        "replay_shared_obs_agent_pov": 78,
     }
     for frame in five_frames.rows:
         payload = frame.model_dump(mode="json")
@@ -3490,7 +3624,9 @@ def test_agent_sources_and_technical_frames_have_exact_privacy_allowlists(
         )
         payload = frame.model_dump(mode="json")
         researcher = payload.pop("researcher_space", None)
-        assert "oracle_" not in json.dumps(payload)
+        assert not any(
+            value.startswith("oracle_") for value in _serialized_string_values(payload)
+        )
         if researcher is not None:
             assert "oracle_" in json.dumps(researcher)
             researcher_keys = _nested_keys(researcher)
@@ -3535,6 +3671,14 @@ def test_agent_sources_and_technical_frames_have_exact_privacy_allowlists(
             continue
         payload = frame.model_dump(mode="json")
         payload.pop("researcher_space", None)
+        overlay_source_frame_id = payload["local_oracle_corpse_overlay"].pop(
+            "source_frame_id"
+        )
+        endpoint_parts = payload["current_endpoint"]["parts"]
+        assert overlay_source_frame_id == (
+            f"{endpoint_parts['source_episode_id']}:frame:"
+            f"{endpoint_parts['source_frame_index']}"
+        )
         serialized_values = _serialized_string_values(payload)
         assert serialized_values.isdisjoint(forbidden_oracle_values)
 
@@ -4047,6 +4191,15 @@ def test_real_death_successor_keeps_selected_recipient_corpse_authorized() -> No
         ),
         analysis_mode="analysis",
         current_endpoint=endpoint,
+        local_oracle_corpse_overlay=build_local_oracle_corpse_overlay_v1(
+            session.evaluation_context,
+            session.current_evaluation_frame,
+            parts.scene,
+            authority_session_id=authority,
+            source_authority_epoch=frame_index,
+            recipient_public_agent_id=parts.recipient_public_agent_id,
+            living_sensor_public_agent_ids=(),
+        ),
         latest_events=latest_events,
         visual_events=visual_events,
         latest_transition=latest_transition,
@@ -4404,6 +4557,21 @@ def test_live_inspection_envelope_rejects_stale_run_and_revision(
     stale["source"]["source_run_generation"] += 1
     stale["source"]["source_revision"] += 1
     stale["source"]["source_authority_epoch"] += 1
+    if frame_attribute == "live_no_shared":
+        overlay = cast(
+            LiveNoSharedObsAuthorizedPresentationFrameV1,
+            frame,
+        ).local_oracle_corpse_overlay
+        stale["local_oracle_corpse_overlay"] = seal_local_oracle_corpse_overlay_v1(
+            source_episode_id=overlay.source_episode_id,
+            source_frame_index=overlay.source_frame_index,
+            source_simulator_step_count=overlay.source_simulator_step_count,
+            source_authority_epoch=stale["source"]["source_authority_epoch"],
+            recipient_public_agent_id=overlay.recipient_public_agent_id,
+            recipient_presentation_key=overlay.recipient_presentation_key,
+            living_sensor_public_agent_ids=(overlay.living_sensor_public_agent_ids),
+            corpse_observations=overlay.corpse_observations,
+        ).model_dump(mode="json")
     with pytest.raises(ValidationError, match=r"inspection envelope.*source epoch"):
         frame_type.model_validate_json(json.dumps(stale))
 

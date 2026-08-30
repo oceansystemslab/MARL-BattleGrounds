@@ -215,7 +215,7 @@ test("every malformed agent fails closed, including valid-plus-malformed ambigui
   );
 });
 
-test("Agent POV is exactly redacted and hidden source mutations are byte-inert", () => {
+test("Agent POV omits unavailable sources and hidden mutations are byte-inert", () => {
   let nestedReads = 0;
   const hiddenSource = {};
   Object.defineProperty(hiddenSource, "source_presentation_key", {
@@ -234,12 +234,7 @@ test("Agent POV is exactly redacted and hidden source mutations are byte-inert",
     },
   });
 
-  const expected = {
-    state: "redacted",
-    label: "Source",
-    value: "Not disclosed in Agent POV",
-    text: "Source not disclosed in Agent POV",
-  };
+  const expected = null;
   assert.deepEqual(
     authorizedSourceAttributionV1(
       options({

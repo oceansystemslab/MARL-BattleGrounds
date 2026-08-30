@@ -15,6 +15,7 @@ import {
   validateReplayTransportContinuityV1,
 } from "../src/authorized-presentation-normalizer.js";
 import { AUTHORIZED_PRESENTATION_SCHEMA_V1 } from "../src/authorized-presentation-schema.js";
+import { resealEmptyLocalOracleCorpseOverlay } from "./authorized-presentation-test-support.js";
 
 const fixture = JSON.parse(
   readFileSync(
@@ -268,6 +269,173 @@ test("all five exact Python presentation leaves normalize repeatably and freeze"
   assertRecursivelyFrozen(AUTHORIZED_PRESENTATION_SCHEMA_V1);
 });
 
+test("Agent presentations require a digest-bound local-Oracle corpse overlay", async () => {
+  for (const kind of [
+    "live_no_shared_obs_agent_pov",
+    "replay_no_shared_obs_agent_pov",
+    "replay_shared_obs_agent_pov",
+  ]) {
+    const missing = clone(fixture.presentations[kind]);
+    delete missing.local_oracle_corpse_overlay;
+    await assert.rejects(normalizeAuthorizedPresentationFrameV1(missing), TypeError);
+
+    const forgedDigest = clone(fixture.presentations[kind]);
+    forgedDigest.local_oracle_corpse_overlay.authorized_overlay_digest_sha256 =
+      "0".repeat(64);
+    await assert.rejects(
+      normalizeAuthorizedPresentationFrameV1(forgedDigest),
+      /corpse overlay digest/u,
+    );
+  }
+});
+
+test("corpse overlay rejects digest-valid Oracle fact and class-mechanics forgeries", async () => {
+  const publicFactsMismatch = clone(
+    fixture.state_cases.replay_no_shared_corpse_overlay,
+  );
+  publicFactsMismatch.local_oracle_corpse_overlay.corpse_observations[0].corpse.position[0] += 0.25;
+  publicFactsMismatch.local_oracle_corpse_overlay.authorized_overlay_digest_sha256 =
+    fixture.corpse_overlay_negative_digests.resealed_corpse_public_facts_mismatch;
+  await assert.rejects(
+    normalizeAuthorizedPresentationFrameV1(publicFactsMismatch),
+    /corpse facts changed/u,
+  );
+
+  const classMechanicsMismatch = clone(
+    fixture.state_cases.replay_no_shared_corpse_overlay,
+  );
+  const classObservation =
+    classMechanicsMismatch.local_oracle_corpse_overlay.corpse_observations[0];
+  classObservation.corpse.radius += 0.125;
+  classObservation.oracle_public_facts.radius += 0.125;
+  classMechanicsMismatch.local_oracle_corpse_overlay.authorized_overlay_digest_sha256 =
+    fixture.corpse_overlay_negative_digests.resealed_corpse_class_mechanics_mismatch;
+  await assert.rejects(
+    normalizeAuthorizedPresentationFrameV1(classMechanicsMismatch),
+    /corpse facts changed/u,
+  );
+});
+
+test("corpse overlay composes paint state without mutating actor-input scene", async () => {
+  const source = fixture.state_cases.replay_no_shared_corpse_overlay;
+  const sourceBefore = JSON.stringify(source);
+  const endpointSceneBefore = clone(source.current_endpoint.parts.scene);
+  const projectedId =
+    source.local_oracle_corpse_overlay.corpse_observations[0].corpse.public_agent_id;
+
+  const normalized = await normalizeAuthorizedPresentationFrameV1(source);
+
+  assert.equal(JSON.stringify(source), sourceBefore);
+  assert.deepEqual(source.current_endpoint.parts.scene, endpointSceneBefore);
+  assert.deepEqual(normalized.current_endpoint.parts.scene, endpointSceneBefore);
+  assert.equal(
+    endpointSceneBefore.agents.some(
+      (/** @type {any} */ row) => row.public_agent_id === projectedId,
+    ),
+    false,
+  );
+  assert.equal(
+    normalized.scene.agents.some(
+      (/** @type {any} */ row) => row.public_agent_id === projectedId,
+    ),
+    true,
+  );
+});
+
+test("persistent corpse overlays stay paint-only and absent from causal evidence", async () => {
+  const source = fixture.state_cases.replay_no_shared_persistent_corpse_overlay;
+  assert.ok(source);
+  const corpse = source.local_oracle_corpse_overlay.corpse_observations[0].corpse;
+  assert.ok(corpse);
+  assert.equal(
+    source.current_endpoint.parts.scene.agents.some(
+      (/** @type {Record<string, any>} */ row) =>
+        row.public_agent_id === corpse.public_agent_id,
+    ),
+    false,
+  );
+  assert.equal(
+    source.visual_events.agent_phase_trajectories.some(
+      (/** @type {Record<string, any>} */ row) =>
+        row.agent_public_agent_id === corpse.public_agent_id,
+    ),
+    false,
+  );
+  assert.equal(
+    JSON.stringify(source.visual_events.events).includes(corpse.presentation_key),
+    false,
+  );
+
+  const normalized = await normalizeAuthorizedPresentationFrameV1(source);
+  assert.equal(
+    normalized.scene.agents.some(
+      (/** @type {Record<string, any>} */ row) =>
+        row.public_agent_id === corpse.public_agent_id,
+    ),
+    true,
+  );
+  assert.equal(
+    normalized.visual_events.agent_phase_trajectories.some(
+      (/** @type {Record<string, any>} */ row) =>
+        row.agent_public_agent_id === corpse.public_agent_id,
+    ),
+    false,
+  );
+});
+
+test("overlay corpses remain axis-only decision targets in live-editable and non-final replay frames", async () => {
+  for (const [label, source, inspection] of [
+    [
+      "live editable",
+      fixture.state_cases.live_no_shared_editable_corpse_overlay,
+      (/** @type {Record<string, any>} */ frame) =>
+        frame.live_inspection.inspection.draft,
+    ],
+    [
+      "non-final replay",
+      fixture.state_cases.replay_no_shared_corpse_overlay,
+      (/** @type {Record<string, any>} */ frame) => frame.replay_inspection,
+    ],
+  ]) {
+    assert.ok(source, label);
+    const corpse = source.local_oracle_corpse_overlay.corpse_observations[0].corpse;
+    const actorInputScene = source.current_endpoint.parts.scene;
+    const decisionTarget = inspection(source).decision_mask.target_actions.find(
+      (/** @type {Record<string, any>} */ row) =>
+        row.target_public_agent_id === corpse.public_agent_id,
+    );
+    assert.equal(
+      actorInputScene.agents.some(
+        (/** @type {Record<string, any>} */ row) =>
+          row.public_agent_id === corpse.public_agent_id,
+      ),
+      false,
+      label,
+    );
+    assert.deepEqual(
+      Object.keys(decisionTarget).sort(),
+      ["display_name", "target_action", "target_kind", "target_public_agent_id"],
+      label,
+    );
+    assert.equal(decisionTarget.target_kind, "axis_only_authorized_agent", label);
+
+    const normalized = await normalizeAuthorizedPresentationFrameV1(source);
+    assert.equal(
+      normalized.scene.agents.some(
+        (/** @type {Record<string, any>} */ row) =>
+          row.public_agent_id === corpse.public_agent_id,
+      ),
+      true,
+      label,
+    );
+    const normalizedTarget = inspection(normalized).decision_mask.target_actions.find(
+      (/** @type {Record<string, any>} */ row) =>
+        row.target_public_agent_id === corpse.public_agent_id,
+    );
+    assert.equal(normalizedTarget.target_kind, "axis_only_authorized_agent", label);
+  }
+});
+
 test("Agent rejection validation retains every independently rejected head group", async () => {
   /** @type {Array<[Record<string, number>, string[]]>} */
   const exactCases = [
@@ -485,6 +653,31 @@ test("live Agent keeps a fog-local battlefield beside one global researcher-spac
     normalizeAuthorizedPresentationFrameV1(visibleFact),
     /Live researcher roster changed a fog-authorized actor fact\./u,
   );
+
+  for (const replayKind of [
+    "replay_no_shared_obs_agent_pov",
+    "replay_shared_obs_agent_pov",
+  ]) {
+    const replayVisibleFact = clone(fixture.presentations[replayKind]);
+    const replayVisiblePublicId =
+      replayVisibleFact.current_endpoint.parts.scene.agents[0].public_agent_id;
+    const replayGlobalActor = replayVisibleFact.researcher_space.roster_agents.find(
+      (/** @type {Record<string, any>} */ row) =>
+        row.public_agent_id === replayVisiblePublicId,
+    );
+    replayGlobalActor.current_health =
+      replayGlobalActor.current_health === replayGlobalActor.maximum_health
+        ? replayGlobalActor.current_health - 0.25
+        : Math.min(
+            replayGlobalActor.maximum_health,
+            replayGlobalActor.current_health + 0.25,
+          );
+    await assert.rejects(
+      normalizeAuthorizedPresentationFrameV1(replayVisibleFact),
+      /Replay researcher roster changed a fog-authorized actor fact\./u,
+      replayKind,
+    );
+  }
 
   const visibleClass = clone(source);
   const visibleClassId =
@@ -767,7 +960,7 @@ test("Agent fog-filtered visual events retain local identity and exact trajector
     wrongClassTrajectory.agent_class_id === 1 ? 2 : 1;
   await assert.rejects(
     normalizeAuthorizedPresentationFrameV1(wrongSuccessorClass),
-    /current scene/u,
+    /actor-input scene plus death-owned corpse endpoints/u,
   );
 
   const missingRequiredStart = clone(source);
@@ -820,7 +1013,7 @@ test("Agent fog-filtered visual events retain local identity and exact trajector
   }
   await assert.rejects(
     normalizeAuthorizedPresentationFrameV1(successorDrift),
-    /current scene/u,
+    /actor-input scene plus death-owned corpse endpoints/u,
   );
 
   const wrongCurrentScene = clone(fixture.state_cases.replay_no_shared_final);
@@ -835,7 +1028,7 @@ test("Agent fog-filtered visual events retain local identity and exact trajector
   nonrecipientCurrentTrajectory.successor = null;
   await assert.rejects(
     normalizeAuthorizedPresentationFrameV1(wrongCurrentScene),
-    /current scene/u,
+    /actor-input scene plus death-owned corpse endpoints/u,
   );
 
   const missingRecipientStart = clone(fixture.state_cases.replay_no_shared_final);
@@ -2148,6 +2341,7 @@ test("replay continuity spans branded legacy, private, and audience-switch pairs
     }
     presentation.source.source_revision = revision;
     presentation.source.source_authority_epoch = revision;
+    resealEmptyLocalOracleCorpseOverlay(presentation);
     return joinTransportAndAuthorizedPresentationV1(transport, presentation);
   }
   const legacyApplied = await withRevision(legacyPair, 1);
@@ -2329,7 +2523,7 @@ test("Agent local branches stay private while live and Replay researcher facts r
       "metric_report",
       "canonical_digest_sha256",
       "trajectory_content_digest_sha256",
-      "oracle_",
+      '"relation":"oracle"',
     ]) {
       assert.equal(encoded.includes(forbidden), false, `${kind}: ${forbidden}`);
     }
