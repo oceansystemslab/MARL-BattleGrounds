@@ -77,11 +77,6 @@ _MAX_TEAM_DEATHMATCH_SCORE_THRESHOLD = _MAX_EXACT_FLOAT32_INTEGER - (
     MAX_AGENTS_PER_TEAM - 1
 )
 
-# Product entry points share one movement calibration. Generic ``EnvConfig``
-# construction deliberately retains the full validated ``(0.0, 1.0]`` domain
-# for explicit experiments and contract tests.
-CANONICAL_PRODUCT_MOVEMENT_SCALE: Final[float] = 1.0
-
 # Product sessions use one movement calibration so researchers cannot change
 # policy-relevant dynamics from a presentation surface. Generic ``EnvConfig``
 # construction deliberately retains the full validated ``(0.0, 1.0]`` domain

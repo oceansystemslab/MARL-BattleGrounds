@@ -2335,10 +2335,10 @@ test("Team Deathmatch facts remain researcher feed-only and non-spatial", async 
   }
 
   for (const mutate of [
-    (poisoned) => {
+    /** @param {any} poisoned */ (poisoned) => {
       poisoned.latest_events.events[0].successor_score += 1;
     },
-    (poisoned) => {
+    /** @param {any} poisoned */ (poisoned) => {
       poisoned.latest_events.events[0].team_anchor.team_index = 1;
       poisoned.latest_events.events[0].team_anchor.team_id = 2;
     },
