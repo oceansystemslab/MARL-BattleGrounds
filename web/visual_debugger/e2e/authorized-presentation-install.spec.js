@@ -59,8 +59,33 @@ const cp4C3ShieldOnly = process.env.MARL_CP4_C3_SHIELD_ONLY === "1";
 const CP5_C_SLICE_TEST_TITLE =
   "real moving crossfire and recovery replay expose durable IC and packed +4 regeneration";
 const cp5CSliceOnly = process.env.MARL_CP5_C_SLICE_ONLY === "1";
-const CP5_SLICE_5_TEST_TITLE =
-  "six real scientific trajectories preserve public causality and hidden-root privacy";
+const CP5_SLICE_5_PROOFS = Object.freeze([
+  Object.freeze({
+    title: "charge convergence preserves public causality and hidden-root privacy",
+    contractNames: Object.freeze(["charge_convergence"]),
+    includeSharedArtifactProof: false,
+  }),
+  Object.freeze({
+    title:
+      "moving, Ultimate, and trap trajectories preserve public causality and hidden-root privacy",
+    contractNames: Object.freeze([
+      "moving_basic_crossfire",
+      "mirrored_ultimates",
+      "trap_lifecycle",
+    ]),
+    includeSharedArtifactProof: false,
+  }),
+  Object.freeze({
+    title:
+      "recovery, death, and SharedObs trajectories preserve public causality and hidden-root privacy",
+    contractNames: Object.freeze(["recovery_refresh_cycle", "death_respawn_cycle"]),
+    includeSharedArtifactProof: true,
+  }),
+]);
+/** @type {readonly string[]} */
+const CP5_SLICE_5_TEST_TITLES = Object.freeze(
+  CP5_SLICE_5_PROOFS.map(({ title }) => title),
+);
 const cp5Slice5Only = process.env.MARL_CP5_SLICE_5_ONLY === "1";
 const isolatedCp5Proof = cp5CSliceOnly || cp5Slice5Only;
 const CP5_SLICE_5_CHECKED_SAMPLE_FILES = Object.freeze([
@@ -198,7 +223,7 @@ test.beforeEach(({ browserName: _browserName }, testInfo) => {
     "CP5 Slice C-only mode permits only its self-contained two-service proof.",
   );
   test.skip(
-    cp5Slice5Only && testInfo.title !== CP5_SLICE_5_TEST_TITLE,
+    cp5Slice5Only && !CP5_SLICE_5_TEST_TITLES.includes(testInfo.title),
     "CP5 Slice 5-only mode permits only its self-contained causal/privacy proof.",
   );
 });
@@ -4577,7 +4602,18 @@ test(CP5_C_SLICE_TEST_TITLE, async ({ page }) => {
   }
 });
 
-test(CP5_SLICE_5_TEST_TITLE, async ({ page }) => {
+/**
+ * Run one independently collected partition of the CP5 causal/privacy proof.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @param {readonly string[]} selectedContractNames
+ * @param {boolean} includeSharedArtifactProof
+ */
+async function runCp5Slice5Proof(
+  page,
+  selectedContractNames,
+  includeSharedArtifactProof,
+) {
   test.skip(
     cp4C3ShieldOnly || cp4ECaptureDirectory !== null,
     "CP5 Slice 5 causal/privacy proof is outside bounded CP4 capture modes.",
@@ -4964,6 +5000,23 @@ test(CP5_SLICE_5_TEST_TITLE, async ({ page }) => {
       ],
     },
   ];
+  const selectedContractNameSet = new Set(selectedContractNames);
+  const partitionedContractNames = CP5_SLICE_5_PROOFS.flatMap(
+    ({ contractNames }) => contractNames,
+  );
+  const allContractNames = contracts.map(({ name }) => name);
+  expect(partitionedContractNames).toHaveLength(allContractNames.length);
+  expect(new Set(partitionedContractNames).size).toBe(allContractNames.length);
+  expect([...partitionedContractNames].sort()).toEqual([...allContractNames].sort());
+  expect(
+    CP5_SLICE_5_PROOFS.filter(
+      ({ includeSharedArtifactProof: ownsSharedProof }) => ownsSharedProof,
+    ),
+  ).toHaveLength(1);
+  const selectedContracts = contracts.filter(({ name }) =>
+    selectedContractNameSet.has(name),
+  );
+  expect(selectedContracts.map(({ name }) => name)).toEqual(selectedContractNames);
 
   /** @param {Record<string, any>} presentation */
   const slotDirectory = (presentation) =>
@@ -5677,7 +5730,7 @@ test(CP5_SLICE_5_TEST_TITLE, async ({ page }) => {
   /** @type {unknown} */
   let testError = null;
   try {
-    for (const contract of contracts) {
+    for (const contract of selectedContracts) {
       activeReplay = await startReplayViewer({
         scenario: contract.name,
         includeStress: contract.includeStress === true,
@@ -6753,31 +6806,33 @@ test(CP5_SLICE_5_TEST_TITLE, async ({ page }) => {
       activeReplay = null;
     }
 
-    sliceArtifacts = await exportReplayArtifacts();
-    activeReplay = await startReplayViewer({
-      replayPath: sliceArtifacts.shared,
-      view: "pov",
-      povSlot: 0,
-    });
-    await page.goto("about:blank");
-    await openProduct(page, activeReplay.url, "replay");
-    await seekReplay(page, 1);
-    const shared = await authenticatedGet(page, "/api/presentation/frame");
-    expect(shared.presentation_kind).toBe("replay_shared_obs_agent_pov");
-    expect(
-      /** @type {Record<string, any>[]} */ (shared.latest_events.deltas).some(
-        ({ delta_kind }) => delta_kind === "respawn_wave_occurred",
-      ),
-    ).toBe(false);
-    await cp5Slice5AssertHiddenTransportNoninterference(
-      page,
-      activeReplay.url,
-      "replay_shared_obs_agent_pov",
-    );
-    await stopDebugger(activeReplay.process);
-    activeReplay = null;
-    await removeReplayArtifacts(sliceArtifacts.outputDirectory);
-    sliceArtifacts = null;
+    if (includeSharedArtifactProof) {
+      sliceArtifacts = await exportReplayArtifacts();
+      activeReplay = await startReplayViewer({
+        replayPath: sliceArtifacts.shared,
+        view: "pov",
+        povSlot: 0,
+      });
+      await page.goto("about:blank");
+      await openProduct(page, activeReplay.url, "replay");
+      await seekReplay(page, 1);
+      const shared = await authenticatedGet(page, "/api/presentation/frame");
+      expect(shared.presentation_kind).toBe("replay_shared_obs_agent_pov");
+      expect(
+        /** @type {Record<string, any>[]} */ (shared.latest_events.deltas).some(
+          ({ delta_kind }) => delta_kind === "respawn_wave_occurred",
+        ),
+      ).toBe(false);
+      await cp5Slice5AssertHiddenTransportNoninterference(
+        page,
+        activeReplay.url,
+        "replay_shared_obs_agent_pov",
+      );
+      await stopDebugger(activeReplay.process);
+      activeReplay = null;
+      await removeReplayArtifacts(sliceArtifacts.outputDirectory);
+      sliceArtifacts = null;
+    }
 
     const checkedSampleBytesAfter = await cp5Slice5CheckedSampleSnapshot();
     expect(Object.keys(checkedSampleBytesAfter)).toEqual(
@@ -6804,7 +6859,17 @@ test(CP5_SLICE_5_TEST_TITLE, async ({ page }) => {
       "CP5 Slice 5 public causal/privacy proof or cleanup failed.",
     );
   }
-});
+}
+
+for (const proof of CP5_SLICE_5_PROOFS) {
+  test(proof.title, async ({ page }) => {
+    await runCp5Slice5Proof(
+      page,
+      proof.contractNames,
+      proof.includeSharedArtifactProof,
+    );
+  });
+}
 
 test("real Shared replay installs frame zero, middle, final, then rejects a forged raw root", async ({
   page,

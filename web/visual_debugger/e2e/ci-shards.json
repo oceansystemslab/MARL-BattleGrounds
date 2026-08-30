@@ -6,6 +6,7 @@
       "test_titles": [
         "all five real service leaves install with safe pending continuity",
         "real moving crossfire and recovery replay expose durable IC and packed +4 regeneration",
+        "charge convergence preserves public causality and hidden-root privacy",
         "real death cycle retains truthful outward lifecycle cues at both review viewports",
         "real Agent replay paints only locally authorized Oracle corpses without changing replay state"
       ]
@@ -13,6 +14,7 @@
     {
       "files": ["authorized-presentation-install.spec.js"],
       "test_titles": [
+        "moving, Ultimate, and trap trajectories preserve public causality and hidden-root privacy",
         "real Shared replay installs frame zero, middle, final, then rejects a forged raw root",
         "real death and respawn keep one opaque Oracle body identity",
         "real Live NoShared paints a locally visible corpse as inspection-only Oracle evidence"
@@ -21,7 +23,7 @@
     {
       "files": ["authorized-presentation-install.spec.js"],
       "test_titles": [
-        "six real scientific trajectories preserve public causality and hidden-root privacy"
+        "recovery, death, and SharedObs trajectories preserve public causality and hidden-root privacy"
       ],
       "env": { "MARL_CP5_SLICE_5_ONLY": "1" }
     },
